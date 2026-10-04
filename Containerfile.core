@@ -1234,8 +1234,9 @@ RUN set -eux; \
 # target and cmake failed on the Qt private targets. Building where the desktop
 # stack already exists guarantees the versions are the ones actually shipping.
 #
-# Devel packages are installed and removed in the SAME layer, so ~1 GB of Qt
-# headers never reaches the image. Pinned to release tags, not main: this runs
+# Devel packages are installed and removed in the SAME layer, so the Qt
+# headers, cmake and the C++ compiler (~250 MB with what they pull in) never
+# reach the image. Pinned to release tags, not main: this runs
 # on every base rebuild including the weekly cron, and tracking upstream HEAD
 # would let an unrelated commit break everyone's build.
 ARG HYPR_QT_SUPPORT_TAG=v0.1.0
@@ -1283,8 +1284,26 @@ RUN set -eux; \
         | grep -q '_ZN15QGuiApplicationC1ERiPPci'; \
     rm -rf /b; \
     rm -f /tmp/quickshell-argc-shim.c; \
-    dnf5 -y remove cmake ninja-build gcc-c++ pkgconf \
-        'qt6-*-devel' 'hypr*-devel' || true; \
+    # The cleanup is asserted, because for its first life it never ran: it
+    # named `pkgconf`, which kmod requires (/usr/bin/pkg-config), so dnf refused
+    # the whole transaction and `|| true` hid it. Every image shipped the Qt
+    # headers, cmake and the C++ compiler, which Containerfile.base then came to
+    # rely on (its i18n module now builds in a discarded stage instead).
+    dnf5 -y remove cmake ninja-build gcc-c++ 'qt6-*-devel' 'hypr*-devel'; \
+    for p in cmake gcc-c++ qt6-qtbase-devel qt6-qtdeclarative-devel hyprutils-devel; do \
+        if rpm -q "$p" >/dev/null 2>&1; then \
+            echo "FATAL: $p survived the devel cleanup"; exit 1; \
+        fi; \
+    done; \
+    # What was built from source above must still link once the devel set and
+    # whatever it alone pulled in are gone.
+    for f in /usr/bin/hyprland-dialog /usr/bin/hyprland-donate-screen \
+             /usr/bin/hyprland-update-screen /usr/lib64/rime/librime-quickshell-argc.so \
+             $(find /usr/lib64/qt6/qml/org/hyprland -name '*.so'); do \
+        if ldd "$f" | grep 'not found'; then \
+            echo "FATAL: $f lost a shared library to the devel cleanup (above)"; exit 1; \
+        fi; \
+    done; \
     dnf5 -y copr disable sdegler/hyprland; \
     dnf5 clean all; \
     command -v hyprland-dialog; \
