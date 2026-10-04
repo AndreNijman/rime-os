@@ -89,8 +89,19 @@ scratch_made=0
 BUILD_CTX=""
 LOOP_IMG=""
 LOOP_DEV=""
+STUB_DIR=$(mktemp -d /tmp/rime-bootc-stub.XXXXXX)
+# The engine refuses to start without bootc (it installs with the live env's
+# own), and the GitHub runner this suite runs on has none. Every engine case
+# here is a dry run that stops before bootc would run, so a stub that is never
+# executed is all preflight needs; if one ever IS executed, it fails loudly
+# rather than pretending to have installed anything. RIME_BOOTC is the engine's
+# seam for exactly this, and sudo's env_reset means it is passed per call.
+BOOTC_STUB="$STUB_DIR/bootc-stub"
+printf '#!/bin/sh\necho "bootc stub executed by a dry run: $*" >&2\nexit 99\n' > "$BOOTC_STUB"
+chmod 755 "$BOOTC_STUB"
 cleanup() {
     rm -f "$ANS"
+    rm -rf "$STUB_DIR"
     # shellcheck disable=SC2033  # the real losetup; the stub further down is scoped to one case
     [ -n "$LOOP_DEV" ] && sudo -n losetup -d "$LOOP_DEV" 2>/dev/null || true
     [ -n "$LOOP_IMG" ] && rm -f "$LOOP_IMG"
@@ -137,7 +148,7 @@ check() {
         printf 'SKIP  %-30s no engine image\n' "$name"; return
     fi
     printf '%s\n' "$body" > "$ANS"
-    out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+    out=$(sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
 
     if grep -q 'Unexpected error on line' <<<"$out"; then
         printf 'FAIL  %-30s ERR TRAP FIRED\n' "$name"; fail=$((fail+1)); return
@@ -163,7 +174,7 @@ check() {
 BASE=$'mode=disk\ndisk=/dev/zzz-does-not-exist\npassword=pw\nhostname=rime\nencrypt=no'
 
 echo "── argument handling ──────────────────────────────────────────────────"
-out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" "$ENGINE" </dev/null 2>&1); rc=$?
+out=$(sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_IMAGE="$ENGINE_IMAGE" "$ENGINE" </dev/null 2>&1); rc=$?
 if [ "$ENGINE_RUNNABLE" != 1 ]; then
     printf 'SKIP  %-30s no engine image\n' "no arguments"
 elif [ "$rc" = 2 ] && grep -q 'not a user interface' <<<"$out"; then
@@ -218,7 +229,7 @@ fi
 echo "── final confirmation: binds the exact device before any write ───────"
 if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
    && LOOP_IMG=$(mktemp /var/tmp/rime-confirm-loop.XXXXXX); then
-    truncate -s 18G "$LOOP_IMG"
+    truncate -s 32G "$LOOP_IMG"
     # shellcheck disable=SC2033  # the real losetup, deliberately (see cleanup)
     LOOP_DEV=$(sudo -n losetup --find --show "$LOOP_IMG" 2>/dev/null || true)
     if [ -n "$LOOP_DEV" ]; then
@@ -231,7 +242,7 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
             "$base"$'\nconfirmed=ERASE\n'"confirm_target=$LOOP_DEV"$'\nconfirm_disk_id=changed'
         printf '%s\nconfirmed=ERASE\nconfirm_target=%s\nconfirm_disk_id=%s\n' \
             "$base" "$LOOP_DEV" "$fp" > "$ANS"
-        out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
+        out=$(sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
               "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
         if grep -q 'RIME-INSTALL-DRYRUN-OK' <<<"$out"; then
             printf 'PASS  %-30s\n' "exact device dry run"; pass=$((pass+1))
@@ -247,7 +258,7 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null \
         _rc=$(python3 -c 'import os, subprocess, sys
 r, w = os.pipe(); os.close(r)
 print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w))' \
-              sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS")
+              sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS")
         # ...and the relay must really be in place, stderr included: a merge
         # condition that can never be true once passed this check unnoticed.
         if [ "$_rc" = 0 ] && sudo -n grep -q 'RIME-DRY-RUN: validation complete' /var/log/rime-install.log \
@@ -265,12 +276,16 @@ print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w
         if [[ "$LOOP_DEV" == /dev/loop* ]] && command -v sgdisk >/dev/null \
            && command -v mkfs.vfat >/dev/null; then
             sudo -n sgdisk --zap-all "$LOOP_DEV" >/dev/null 2>&1
+            # p4 is under the engine's 10 GB partition floor; p2 and p3 are
+            # over it, so every other case below is refused for the reason it
+            # names and not for its size. Sparse, so the 32 GiB costs nothing.
             sudo -n sgdisk -n1:0:+300M -t1:ef00 -c1:"EFI system partition" \
                 -n2:0:+14G -t2:8300 -c2:rime-root \
+                -n4:0:+5G -t4:8300 -c4:too-small \
                 -n3:0:0 -t3:0700 -c3:"Basic data partition" "$LOOP_DEV" >/dev/null 2>&1
             sudo -n partprobe "$LOOP_DEV" >/dev/null 2>&1
             sudo -n udevadm settle --timeout=10 >/dev/null 2>&1
-            esp="${LOOP_DEV}p1"; target="${LOOP_DEV}p2"; kept="${LOOP_DEV}p3"
+            esp="${LOOP_DEV}p1"; target="${LOOP_DEV}p2"; kept="${LOOP_DEV}p3"; small="${LOOP_DEV}p4"
             if [ -b "$esp" ] && [ -b "$target" ] && [ -b "$kept" ]; then
                 sudo -n mkfs.vfat -F32 -n SYSTEM "$esp" >/dev/null 2>&1
                 disk_fp=$(lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE "$LOOP_DEV")
@@ -288,12 +303,20 @@ print(subprocess.call(sys.argv[1:], stdin=subprocess.DEVNULL, stdout=w, stderr=w
                 # in miniature, and must be refused on the name alone.
                 check "target swapped after confirm" "The confirmation was typed for" \
                     "${pbase/target=$target/target=$kept}"
+                # A partition too small for the install is refused while it is
+                # still intact, whatever was confirmed.
+                check "partition under the floor" "needs a partition of at least" \
+                    "${pbase/target=$target/target=$small}"
+                # ext4 has no transparent compression, so the same 14 GiB
+                # partition that takes a btrfs install is too small for it.
+                check "ext4 needs a bigger floor" "needs a partition of at least 16 GB" \
+                    "${pbase}"$'\n'"rootfs=ext4"
                 # …and a correct NAME carrying another partition's identity is
                 # refused on the identity, which is the case a name check misses.
                 check "identity of a kept partition" "is not the partition that was confirmed" \
                     "${pbase/confirm_target_id=$target_fp/confirm_target_id=$kept_fp}"
                 printf '%s\n' "$pbase" > "$ANS"
-                out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
+                out=$(sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
                       "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
                 if grep -q 'RIME-INSTALL-DRYRUN-OK' <<<"$out"; then
                     printf 'PASS  %-30s\n' "partition dry run"; pass=$((pass+1))
@@ -314,146 +337,173 @@ else
 fi
 
 echo
-echo "── netinstall staging: never RAM, never the disk being wiped ──────────"
-# A network install used to `podman pull` into the live environment's
-# containers-storage, which on a booted ISO is the RAM overlay: ~12 GB of
-# decompressed layers in RAM, plus several more when bootc re-tarred them into
-# /var/tmp. It staged to disk instead, and these guard the chooser that decides
-# WHERE. Two of them are the difference between a working install and a
-# destroyed one:
+echo "── the install source, the one bootc call site, the compressed root ───"
+# The engine used to stage a network install on disk — an OCI directory, then
+# the whole image decompressed again into a containers-storage so there was a
+# container to start bootc in — which is what made a single-disk install need
+# ~53 GB. It now runs the live environment's own bootc against
+# `--source-imgref registry:<digest>` and stages nothing (see "Where the OS
+# comes from" in the engine). These hold that shape open.
 #
-#   * a tmpfs must never be chosen — that IS the RAM overlay, the whole bug;
-#   * the disk about to be repartitioned must never be chosen — staging onto it
-#     means bootc wipes the image out from under itself mid-install.
-#
-# The functions are sourced out of the shipped engine rather than copied, so
+# Everything below is sourced out of the shipped engine rather than copied, so
 # this tests what installs, not a paraphrase of it.
-_fns=$(mktemp /tmp/rime-scratch-fns.XXXXXX)
-sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p;/^stage_budget_kb()/,/^}/p;/^stage_setup()/,/^}/p;/^stage_teardown()/,/^}/p' "$ENGINE" > "$_fns"
-if [ ! -s "$_fns" ]; then
-    printf 'FAIL  %-30s could not extract the chooser from %s\n' "scratch chooser" "$ENGINE"
+
+# 1. The staging machinery is gone, not merely unused. Comment lines are
+#    skipped: the engine explains what it replaced, and saying so is not code.
+_staging=$(grep -nE 'pick_scratch|scratch_fs_ok|stage_setup|stage_budget_kb|netinstall_fetch_into|NEED_SCRATCH_GB|STAGE_RESERVE_GB|PODMAN_STORE|SKOPEO_TMP' "$ENGINE" \
+           | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+if [ -n "$_staging" ]; then
+    printf 'FAIL  %-30s %s\n' "no staging left" "$(head -1 <<<"$_staging")"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "no staging left"; pass=$((pass+1))
+fi
+# …and nothing copies the image anywhere: no `skopeo copy`, no `podman pull`,
+# no `podman run` of the image. The engine's only image consumer is bootc.
+_copy=$(grep -nE '^\s*[^#]*\b(skopeo\s+(\S+\s+)*copy|podman\s+(\S+\s+)*(pull|run))\b' "$ENGINE" || true)
+if [ -n "$_copy" ]; then
+    printf 'FAIL  %-30s %s\n' "no image copy or container" "$(head -1 <<<"$_copy")"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "no image copy or container"; pass=$((pass+1))
+fi
+
+# 2. Exactly ONE executable line starts a bootc install, it is to-filesystem,
+#    and it is inside run_bootc_install. A second call site is a second place
+#    the NVRAM decision can be forgotten, which is how 2026-09-20 happened.
+_calls=$(grep -nE '\binstall (to-filesystem|to-disk|to-existing-root)\b' "$ENGINE" | grep -vE '^[0-9]+:[[:space:]]*#' || true)
+_ncalls=$(grep -c . <<<"$_calls" || true)
+_fnstart=$(grep -n '^run_bootc_install() {' "$ENGINE" | cut -d: -f1)
+_fnend=$(awk -v s="${_fnstart:-0}" 'NR>s && /^}/ {print NR; exit}' "$ENGINE")
+_callln=$(cut -d: -f1 <<<"$_calls" | head -1)
+if [ "$_ncalls" = 1 ] && [ -n "$_fnstart" ] && [ "$_callln" -gt "$_fnstart" ] && [ "$_callln" -lt "${_fnend:-0}" ] \
+   && grep -q 'install to-filesystem' <<<"$_calls"; then
+    printf 'PASS  %-30s\n' "one bootc call site"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "one bootc call site" "found $_ncalls: $(tr '\n' ' ' <<<"$_calls")"; fail=$((fail+1))
+fi
+
+_fns=$(mktemp /tmp/rime-source-fns.XXXXXX)
+sed -n '/^choose_source_imgref()/,/^}/p;/^disk_is_loopback()/,/^}/p;/^set_nvram_args_for()/,/^}/p;/^run_bootc_install()/,/^}/p;/^mount_new_root()/,/^}/p' "$ENGINE" > "$_fns"
+if [ "$(grep -c '^[a-z_]*() {' "$_fns")" != 5 ]; then
+    printf 'FAIL  %-30s could not extract the functions from %s\n' "source functions" "$ENGINE"
     fail=$((fail+1))
 else
 (
     set +u
-    NEED_SCRATCH_GB=32
-    DISK=/dev/sdz
     # shellcheck disable=SC1090
     . "$_fns"
+    log() { :; }; note() { :; }
     _p=0; _f=0
     _ck() {  # name, got, want
         if [ "$2" = "$3" ]; then printf 'PASS  %-30s\n' "$1"; _p=$((_p+1))
         else printf 'FAIL  %-30s want %s got %s\n' "$1" "$3" "$2"; _f=$((_f+1)); fi
     }
-    mkdir -p /dev/shm/rime-scratch-test
-    scratch_fs_ok /dev/shm/rime-scratch-test && r=yes || r=no
-    _ck "tmpfs refused"              "$r" no
-    scratch_fs_ok /var/tmp && r=yes || r=no
-    _ck "real filesystem accepted"   "$r" yes
-    # shellcheck disable=SC2034  # read by scratch_fs_ok, sourced above
-    ( NEED_SCRATCH_GB=999999; scratch_fs_ok /var/tmp ) && r=yes || r=no
-    _ck "too small refused"          "$r" no
-    scratch_fs_ok /no/such/dir && r=yes || r=no
-    _ck "missing directory refused"  "$r" no
-    # shellcheck disable=SC2034  # read by scratch_fs_ok, sourced above
-    ( DISK=$(df -P /var/tmp | awk 'NR==2{print $1}'); scratch_fs_ok /var/tmp ) && r=yes || r=no
-    _ck "target disk refused"        "$r" no
-    mkdir -p /var/tmp/rime-scratch-ovr
-    out=$(RIME_OCI_SCRATCH=/var/tmp/rime-scratch-ovr pick_scratch || true)
-    _ck "override honoured"          "$out" /var/tmp/rime-scratch-ovr
-    out=$(RIME_OCI_SCRATCH=/dev/shm/rime-scratch-test pick_scratch || true)
-    _ck "override onto tmpfs refused" "${out:-<empty>}" "<empty>"
+    _has() {  # name, haystack, needle
+        if grep -qF -- "$3" <<<"$2"; then printf 'PASS  %-30s\n' "$1"; _p=$((_p+1))
+        else printf 'FAIL  %-30s %s not in: %s\n' "$1" "$3" "$(tr '\n' ' ' <<<"$2")"; _f=$((_f+1)); fi
+    }
+    _lacks() {
+        if grep -qF -- "$3" <<<"$2"; then printf 'FAIL  %-30s %s present in: %s\n' "$1" "$3" "$(tr '\n' ' ' <<<"$2")"; _f=$((_f+1))
+        else printf 'PASS  %-30s\n' "$1"; _p=$((_p+1)); fi
+    }
+    _t=$(mktemp -d /tmp/rime-source-test.XXXXXX)
 
-    # ── The machine this installer will meet most often ────────────────────
-    # A laptop with ONE internal disk, booted from a plain single-partition
-    # USB. Nothing qualifies, by construction: the live session automounts
-    # nothing under /run/media because the stick has no second partition,
-    # /mnt and /media are empty, and /var/tmp IS the RAM overlay. Until the
-    # fallback existed the chooser answered with nothing and the install
-    # aborted, telling the user to get "the full offline ISO" — which has
-    # never been published. The candidate list is substituted here rather
-    # than simulated so the case is the real chooser's answer to the real
-    # shape of that machine.
-    out=$( RIME_SCRATCH_CANDIDATES="/dev/shm/rime-scratch-test /no/such/dir" \
-           pick_scratch || true )
-    _ck "single-disk USB falls back"  "${out:-<empty>}" "@target"
-    # …and the tmpfs in that list was refused on the way past, not chosen:
-    # falling back to RAM is the bug 63857891 fixed and this must not undo.
-    _ck "fallback is not the tmpfs"   "$(printf '%s' "$out" | grep -c '/dev/shm' || true)" 0
-    # A real scratch volume still wins — the fallback is a fallback.
-    out=$( RIME_SCRATCH_CANDIDATES="/dev/shm/rime-scratch-test /var/tmp" \
-           pick_scratch || true )
-    _ck "spare volume still preferred" "${out:-<empty>}" "/var/tmp/rime-install-scratch"
-    rmdir /dev/shm/rime-scratch-test /var/tmp/rime-scratch-ovr 2>/dev/null
+    # ── the source ───────────────────────────────────────────────────────────
+    # shellcheck disable=SC2034  # all read by choose_source_imgref, sourced above
+    { NET_SOURCE_IMAGE=ghcr.io/x/rime-os@sha256:abc; IMAGE=localhost/rime-os:rime; }
+    # shellcheck disable=SC2034  # read by the engine functions sourced above
+    NETINSTALL=1 OCI_DIR="$_t/nope"; choose_source_imgref
+    _ck "netinstall streams the pin" "$SOURCE_IMGREF" "registry:ghcr.io/x/rime-os@sha256:abc"
+    mkdir -p "$_t/oci"
+    # shellcheck disable=SC2034  # read by the engine functions sourced above
+    NETINSTALL=0 OCI_DIR="$_t/oci"; choose_source_imgref
+    _ck "offline reads the ISO's OCI" "$SOURCE_IMGREF" "oci:$_t/oci"
+    # shellcheck disable=SC2034  # read by the engine functions sourced above
+    NETINSTALL=0 OCI_DIR="$_t/nope"; choose_source_imgref
+    _ck "else containers-storage"     "$SOURCE_IMGREF" "containers-storage:localhost/rime-os:rime"
 
-    # ── How much of the target the download may take ───────────────────────
-    # The only part of staging-on-target that can be exercised without a block
-    # device, and the part that decides whether a disk is erased for nothing.
-    # STAGE_RESERVE_GB is what keeps room for the OS itself: the staged blobs
-    # and the installed system are on the same filesystem at the same time.
-    STAGE_RESERVE_GB=15
-    _gb() { echo $(( $1 * 1024 * 1024 )); }
-    out=$(stage_budget_kb "$(_gb 200)" || echo REFUSED)
-    _ck "200 GB target accepted"      "$out" "$(_gb 185)"
-    out=$(stage_budget_kb "$(_gb 47)" || echo REFUSED)
-    _ck "47 GB target accepted"       "$out" "$(_gb 32)"
-    out=$(stage_budget_kb "$(_gb 46)" || echo REFUSED)
-    _ck "46 GB target refused"        "$out" REFUSED
-    out=$(stage_budget_kb "$(_gb 20)" || echo REFUSED)
-    _ck "20 GB target refused"        "$out" REFUSED
-    out=$(stage_budget_kb "not-a-number" || echo REFUSED)
-    _ck "unreadable free space refused" "$out" REFUSED
+    # ── what bootc is handed, read off a recording stub ──────────────────────
+    cat > "$_t/bootc" <<STUB
+#!/bin/sh
+: > "$_t/argv"; for a in "\$@"; do printf '%s\n' "\$a" >> "$_t/argv"; done
+STUB
+    chmod +x "$_t/bootc"
+    # unshare is stubbed too: the mask needs root and a real efivarfs, and what
+    # is asserted is that the loop case goes through it at all. It records its
+    # own argv and then runs the command it was given, minus the mount script.
+    # Its argv is: --mount --propagation private -- sh -c SCRIPT NAME CMD...
+    unshare() { printf '%s\n' "$@" > "$_t/unshare"; shift 8; "$@"; }
+    # shellcheck disable=SC2034  # read by the engine functions sourced above
+    BOOTC="$_t/bootc"; TARGET_IMAGE=ghcr.io/x/rime-os:rime
+    SOURCE_IMGREF="registry:ghcr.io/x/rime-os@sha256:abc"
+    # A real disk: a name with no loop backing anywhere.
+    mkdir -p "$_t/sys"
+    rm -f "$_t/unshare"
+    run_bootc_install /dev/nvme9n9 /run/rime-target --karg rd.luks.uuid=U >/dev/null 2>&1
+    a=$(cat "$_t/argv" 2>/dev/null)
+    _ck "argv: install to-filesystem"  "$(sed -n 1,2p <<<"$a" | tr '\n' ' ')" "install to-filesystem "
+    _has "argv: the source"            "$a" "registry:ghcr.io/x/rime-os@sha256:abc"
+    _has "argv: the origin is the tag" "$a" "ghcr.io/x/rime-os:rime"
+    _has "argv: extra kargs pass"      "$a" "rd.luks.uuid=U"
+    # grub, named: left to choose, bootc picks systemd-boot in a live env with
+    # no bootupd and then refuses with the OS already deployed.
+    _ck "argv: --bootloader grub"      "$(grep -A1 -x -- '--bootloader' <<<"$a" | tail -1)" grub
+    # The last compression pass writes after bootc returns; finalize would have
+    # remounted the target read-only first.
+    _has "argv: --skip-finalize"       "$a" "--skip-finalize"
+    _ck "argv: the root is last"       "$(tail -1 <<<"$a")" "/run/rime-target"
+    _lacks "real disk: no --generic-image" "$a" "--generic-image"
+    _ck "real disk: no mask namespace" "$([ -e "$_t/unshare" ] && echo yes || echo no)" no
+    # A loop device, as the kernel would report it (the seam only ADDS loop-ness).
+    mkdir -p "$_t/sys/loop9/loop"; echo /var/x.img > "$_t/sys/loop9/loop/backing_file"
+    RIME_SYSFS_BLOCK="$_t/sys" run_bootc_install /dev/loop9 /run/rime-target >/dev/null 2>&1
+    a=$(cat "$_t/argv" 2>/dev/null)
+    _has "loop: bootc gets --generic-image" "$a" "--generic-image"
+    u=$(cat "$_t/unshare" 2>/dev/null)
+    _ck "loop: runs in a mount namespace" "$(sed -n 1p <<<"$u")" "--mount"
+    _has "loop: efivars masked there"  "$u" "/sys/firmware/efi/efivars"
 
-    # ── The staging image must leave the target root PRISTINE ──────────────
-    # `bootc install to-filesystem` refuses a target that is not empty — its
-    # own error says "Requiring directory contains only mount points" — so the
-    # backing file is created on the target, handed to a loop device and then
-    # UNLINKED. Nothing here opens a block device: losetup, mkfs.xfs and mount
-    # are stubbed, and the only real work is the sparse file, which the
-    # function under test is supposed to remove. If the unlink is ever
-    # simplified out, every staged install fails on hardware and nothing else
-    # in this suite would notice.
-    _st=$(mktemp -d /var/tmp/rime-stage-probe.XXXXXX)
-    (
-      # shellcheck disable=SC2034  # LOG and STAGE_DIR are read by stage_setup,
-      # which is sourced from the engine above, not defined here.
-      LOG=/dev/null
-      log() { :; }
-      losetup() { echo /dev/loop-probe; }
-      mkfs.xfs() { :; }
-      mount()    { :; }
-      df()       { command df "$@"; }
-      # shellcheck disable=SC2034
-      STAGE_DIR="$_st/mnt"
-      # Bound the sparse ceiling to just over the engine's own budget, whatever
-      # this machine has free. Tied to NEED_SCRATCH_GB rather than a number: a
-      # fixed 25 GB ceiling went stale the day the budget moved to 32 and this
-      # case reported SETUP-FAILED for a stage_setup that was fine.
-      _avail_gb=$(command df -PBG "$_st" | awk 'NR==2{gsub(/G/,"",$4); print $4+0}')
-      STAGE_RESERVE_GB=$(( _avail_gb - NEED_SCRATCH_GB - 3 ))
-      [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
-      mkdir -p "$_st/root"
-      stage_setup "$_st/root" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
-      [ -e "$_st/root/.rime-stage.img" ] && echo "LEFT-BEHIND" && exit 0
-      [ "$STAGE_TMPDIR" = "$_st/mnt/tmp" ] || { echo "TMPDIR=$STAGE_TMPDIR"; exit 0; }
-      printf '%s\n' "${STAGE_BOOTC_ARGS[*]}"
-    ) > "$_st/out" 2>&1
-    _ck "staging image is unlinked"   "$(cat "$_st/out")" "--skip-finalize"
-    rm -rf "$_st"
-    echo "$_p $_f" > /tmp/rime-scratch-counts
+    # ── the compressed root ──────────────────────────────────────────────────
+    mount() { printf 'mount %s\n' "$*" >> "$_t/calls"; }
+    btrfs() {
+        printf 'btrfs %s\n' "$*" >> "$_t/calls"
+        [ "$1 $2" = "property get" ] && echo "compression=${_prop_answer:-zstd}"
+        return 0
+    }
+    : > "$_t/calls"
+    # shellcheck disable=SC2034  # read by the engine functions sourced above
+    ROOTFS_TYPE=btrfs ROOT_ZSTD_LEVEL=3 LOG=/dev/null
+    mount_new_root /dev/x /run/rime-target && r=ok || r=refused
+    c=$(cat "$_t/calls")
+    _ck "btrfs root mounted"           "$r" ok
+    _has "btrfs: forced zstd at install" "$c" "mount -o compress-force=zstd:3 /dev/x /run/rime-target"
+    _has "btrfs: compression property"  "$c" "btrfs property set /run/rime-target compression zstd"
+    # A property that did not stick must be a refusal, not a silent 2x install.
+    : > "$_t/calls"; _prop_answer=lzo
+    mount_new_root /dev/x /run/rime-target && r=ok || r=refused
+    _ck "btrfs: property re-read"      "$r" refused
+    _prop_answer=zstd
+    : > "$_t/calls"
+    # shellcheck disable=SC2034  # read by the engine functions sourced above
+    ROOTFS_TYPE=ext4
+    mount_new_root /dev/x /run/rime-target && r=ok || r=refused
+    c=$(cat "$_t/calls")
+    _ck "ext4 root mounted"            "$r" ok
+    _lacks "ext4: no compression"      "$c" "compress"
+    rm -rf "$_t"
+    echo "$_p $_f" > /tmp/rime-source-counts
 )
-read -r _sp _sf < /tmp/rime-scratch-counts 2>/dev/null || { _sp=0; _sf=1; }
+read -r _sp _sf < /tmp/rime-source-counts 2>/dev/null || { _sp=0; _sf=1; }
 pass=$((pass + _sp)); fail=$((fail + _sf))
-rm -f "$_fns" /tmp/rime-scratch-counts
+rm -f /tmp/rime-source-counts
 fi
+rm -f "$_fns"
 
-# What the engine must and must not say about staging.
+# What the engine must and must not say.
 #
-# The refusal these three assertions used to guard — "There is nowhere to put
-# the download", with "the full offline ISO" named as the way out — was a dead
-# end: that ISO has never been published, and on the commonest machine this
-# installer meets there was no other way forward either. It is GONE, and its
-# absence is asserted, because reintroducing it would put the dead end back.
+# The refusal these used to guard — "There is nowhere to put the download",
+# with "the full offline ISO" named as the way out — was a dead end: that ISO
+# has never been published. Its absence is still asserted, because
+# reintroducing it would put the dead end back.
 for _gone in "There is nowhere to put the download" \
              "Use the full offline ISO. It carries the OS and needs no staging at all."; do
     if grep -qF "$_gone" "$ENGINE"; then
@@ -462,48 +512,20 @@ for _gone in "There is nowhere to put the download" \
         printf 'PASS  %-30s\n' "no dead end: ${_gone:0:18}"; pass=$((pass+1))
     fi
 done
-# And what must be there instead.
-#
-#   * the reassurance the external-scratch path can still honestly give;
-#   * the warning the fallback path must give in its place, because there the
-#     download and the destruction are the same step;
-#   * the reachability probe that is the last free check before the wipe;
-#   * --skip-finalize, without which a completely successful staged install
-#     reports as a failure (the loop device holds a writable fd, so bootc's
-#     closing remount-read-only fails with EBUSY).
+# And what must be there instead:
+#   * the reassurance every pre-erase refusal gives;
+#   * the warning a network install must give, because there the download and
+#     the destruction are the same step;
+#   * the reachability probe that is the last free check before the wipe.
 for _want in "Nothing has been erased" \
              "downloads onto it as it goes" \
-             "skopeo inspect --raw" \
-             "--skip-finalize"; do
+             "skopeo inspect --raw"; do
     if grep -qF -- "$_want" "$ENGINE"; then
         printf 'PASS  %-30s\n' "engine says: ${_want:0:22}"; pass=$((pass+1))
     else
         printf 'FAIL  %-30s missing from the engine\n' "engine says: ${_want:0:22}"; fail=$((fail+1))
     fi
 done
-
-# And the engine must not have quietly kept the old RAM-filling path.
-if grep -qE '^\s*if podman pull' "$ENGINE"; then
-    printf 'FAIL  %-30s engine still uses `podman pull` to fetch the OS\n' "no podman pull"; fail=$((fail+1))
-else
-    printf 'PASS  %-30s\n' "no podman pull"; pass=$((pass+1))
-fi
-
-# Every `skopeo copy` must name its temp dir. TMPDIR alone does not reach the
-# containers-storage destination: skopeo 1.22 takes that from containers.conf's
-# image_copy_tmp_dir (/var/tmp), which on a live ISO is the 5.3 GB overlay.
-# A VM install from the netinstall ISO filled it and died silently at
-# "Preparing the installer runtime"; a host run cannot see this, because the
-# host's /var/tmp is huge. So it is checked here, statically, on every line.
-_bare=$(grep -nE '^\s*(if\s+)?skopeo\s+copy' "$ENGINE" || true)
-_named=$(grep -cE '^\s*(if\s+)?skopeo\s+"\$\{SKOPEO_TMP\[@\]\}"\s+copy' "$ENGINE" || true)
-if [ -n "$_bare" ]; then
-    printf 'FAIL  %-30s %s\n' "skopeo copy names --tmpdir" "bare skopeo copy at line(s): $(cut -d: -f1 <<<"$_bare" | tr '\n' ' ')"; fail=$((fail+1))
-elif [ "${_named:-0}" -lt 2 ]; then
-    printf 'FAIL  %-30s %s\n' "skopeo copy names --tmpdir" "expected both netinstall copies to pass SKOPEO_TMP, found $_named"; fail=$((fail+1))
-else
-    printf 'PASS  %-30s\n' "skopeo copy names --tmpdir"; pass=$((pass+1))
-fi
 
 # A published netinstall ISO downloads a pinned DIGEST. Once :rime moves on,
 # that digest is untagged, and deleting untagged package versions would break
@@ -561,7 +583,7 @@ if [ "$ENGINE_RUNNABLE" = 1 ] && command -v flock >/dev/null; then
     sudo -n timeout 20 flock "$_L" sleep 20 & _holder=$!
     sleep 1
     printf 'mode=disk\ndisk=/dev/null\nusername=bob\npassword=pw\nhostname=rime\nencrypt=no\n' > "$ANS"
-    out=$(sudo -n RIME_INSTALL_LOCK="$_L" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null); _rc=$?
+    out=$(sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_INSTALL_LOCK="$_L" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 "$ENGINE" --headless "$ANS" 2>&1 </dev/null); _rc=$?
     kill "$_holder" 2>/dev/null; wait "$_holder" 2>/dev/null
     if [ "$_rc" = 1 ] && grep -q 'already running' <<<"$out" \
        && sudo -n grep -q 'log of the install that is running' /var/log/rime-install.log; then

@@ -65,8 +65,8 @@ fi
 # it from ~12 GB to something publishable (GitHub caps release assets at 2 GiB)
 # and downloadable by someone who just wants to try this.
 #
-# NETINSTALL=0 (default) is the fat offline ISO: the OS image is embedded twice —
-# as an OCI dir on the ISO and in the live env's container storage — so an
+# NETINSTALL=0 (default) is the fat offline ISO: the OS image is embedded once,
+# as an OCI dir on the ISO that the installer's bootc reads directly, so an
 # install needs no network whatsoever. That is the one to hand someone on a USB
 # stick, and the one to use where the network cannot be trusted.
 NETINSTALL="${NETINSTALL:-0}"
@@ -134,23 +134,63 @@ sudo podman rm "$cid" >/dev/null
 KVER=$(sudo ls "$WORK/rootfs/usr/lib/modules" | head -1)
 echo "kernel: $KVER"
 
-echo "== 3. embed the Rime image into the live env's container storage =="
-# Host-side (can't be a Containerfile RUN: overlay-on-overlay). The graphroot
-# lands inside the exported rootfs so the live session's default
-# /var/lib/containers/storage already holds localhost/rime-os:daily.
+echo "== 3. the installed image's own bootc inputs, carried into the live env =="
+# rime-install runs THIS live env's bootc (`bootc install to-filesystem
+# --source-imgref …`, see "Where the OS comes from" in it), not bootc inside a
+# container of the image. That is what removed the tens of GB a network
+# install used to stage, and it is also why the live env no longer needs the
+# image in its container storage at all: an offline ISO installs from the OCI
+# directory on the ISO (step 5b), a netinstall from the registry.
+#
+# bootc does take three things from the machine it runs on, so each one is
+# copied out of the EXACT image this ISO installs — never taken from Fedora:
+#   /etc/selinux                       bootc labels the deployment with the
+#                                      running machine's policy, not the
+#                                      image's (bootc-dev/bootc#1438)
+#   /usr/lib/ostree/prepare-root.conf  whether the deployment gets its composefs
+#                                      image (bootc-dev/bootc#1400)
+#   /usr/libexec/rime-luks-enroll      the recovery-key helper the encrypted
+#                                      install runs
 if [ "$NETINSTALL" = 1 ]; then
-  echo "  (netinstall: skipping the embed — the installer downloads the OS instead)"
+  SRC_IMAGE="$RELEASE_IMAGE"
   sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/rime-installer/netinstall"
   printf '%s\n' "$RELEASE_DIGEST" | sudo tee "$WORK/rootfs/usr/lib/rime-installer/image-digest" >/dev/null
   grep -qx "$RELEASE_DIGEST" "$WORK/rootfs/usr/lib/rime-installer/image-digest" \
     || { echo "FATAL: image digest stamp not written"; exit 1; }
   echo "image digest stamped: $RELEASE_DIGEST"
 else
-  sudo rm -rf "$WORK/cs-run"
-  sudo skopeo copy "oci-archive:$OCI" \
-    "containers-storage:[overlay@$WORK/rootfs/var/lib/containers/storage+$WORK/cs-run]localhost/rime-os:${EDITION}"
-  sudo rm -rf "$WORK/cs-run"
+  SRC_IMAGE="localhost/rime-os:${EDITION}"
 fi
+CARRIED="etc/selinux usr/lib/ostree/prepare-root.conf usr/libexec/rime-luks-enroll"
+cid=$(sudo podman create "$SRC_IMAGE")
+sudo rm -rf "$WORK/rootfs/etc/selinux"
+sudo mkdir -p "$WORK/rootfs/usr/lib/ostree" "$WORK/rootfs/usr/libexec"
+for f in $CARRIED; do
+  sudo podman cp "$cid:/$f" "$WORK/rootfs/$f"
+done
+sudo podman rm "$cid" >/dev/null
+# Read back from both sides rather than trusting `podman cp`'s exit status: a
+# policy that differs from the image's is a machine labelled wrongly, and it
+# would boot looking fine until enforcement denied something.
+# shellcheck disable=SC2086  # CARRIED is a list of fixed relative paths
+want=$(sudo podman run --rm "$SRC_IMAGE" sh -c "cd / && find $CARRIED -type f -print0 | sort -z | xargs -0 sha256sum" | sha256sum)
+# shellcheck disable=SC2086
+have=$(cd "$WORK/rootfs" && sudo find $CARRIED -type f -print0 | sort -z | sudo xargs -0 sha256sum | sha256sum)
+[ "$want" = "$have" ] || { echo "FATAL: the live env's copies of $CARRIED differ from $SRC_IMAGE" >&2; exit 1; }
+sudo test -s "$WORK/rootfs/etc/selinux/targeted/contexts/files/file_contexts" \
+  || { echo "FATAL: the policy carried from $SRC_IMAGE has no file_contexts" >&2; exit 1; }
+sudo test -x "$WORK/rootfs/usr/libexec/rime-luks-enroll" \
+  || { echo "FATAL: rime-luks-enroll is not executable in the live env" >&2; exit 1; }
+echo "carried from $SRC_IMAGE: $CARRIED (sha256 of the set matches the image)"
+# The live env's bootc must not be OLDER than the one the image ships: an
+# older bootc installing a newer image is the combination nobody has tested.
+img_bootc=$(sudo podman run --rm "$SRC_IMAGE" rpm -q --qf '%{VERSION}-%{RELEASE}' bootc)
+live_bootc=$(sudo podman run --rm "$IMG" rpm -q --qf '%{VERSION}-%{RELEASE}' bootc)
+[[ "$img_bootc" =~ ^[0-9] ]] && [[ "$live_bootc" =~ ^[0-9] ]] \
+  || { echo "FATAL: could not read bootc versions (image '$img_bootc', live env '$live_bootc')" >&2; exit 1; }
+[ "$(printf '%s\n%s\n' "$img_bootc" "$live_bootc" | sort -V | tail -1)" = "$live_bootc" ] \
+  || { echo "FATAL: the live env's bootc $live_bootc is older than the image's $img_bootc" >&2; exit 1; }
+echo "bootc: live env $live_bootc, image $img_bootc"
 
 # Stamp the edition so rime-install derives IMAGE and --target-imgref from it
 # rather than assuming daily. Asserted below, because a wrong or missing stamp
@@ -225,9 +265,8 @@ sudo cp "$WORK/initrd.img" "$ISOROOT/images/pxeboot/initrd.img"
 
 echo "== 5b. OCI dir on the ISO (bootc install source) =="
 # rime-install passes --source-imgref oci:… pointing here: the oci transport
-# streams blobs directly off the ISO. Installing from the embedded
-# containers-storage instead would re-tar every layer into /var/tmp (RAM-backed
-# in the live env) and OOM on 4G machines.
+# streams blobs directly off the ISO, so nothing is unpacked into the live
+# env's RAM-backed /var/tmp on the way to the disk.
 sudo rm -rf "$ISOROOT/container"
 if [ "$NETINSTALL" = 1 ]; then
   echo "  (netinstall: no OCI dir on the ISO)"
@@ -236,9 +275,12 @@ else
 fi
 
 echo "== 6. bootloader (UEFI grub2) =="
-# selinux=0: the live env ships no SELinux policy; without this the LSM is
-# active-but-policyless and bootc aborts with "Failed to enter install_t
-# (running as kernel)". Affects only the live session, not the installed OS.
+# selinux=0: the live session itself runs without SELinux. The policy files in
+# its /etc/selinux are the IMAGE's (step 3), present so bootc can label the
+# installed system with them; LOADING them into the live kernel would confine
+# a session that was never labelled for it, and bootc then aborts with "Failed
+# to enter install_t (running as kernel)". Affects only the live session, not
+# the installed OS.
 CMDLINE="root=live:CDLABEL=$LABEL rd.live.image selinux=0"
 # Menu config lives ON THE ISO (editable without regenerating BOOTX64.EFI).
 # serial+console terminals so headless QEMU (and real serial rigs) get the menu.

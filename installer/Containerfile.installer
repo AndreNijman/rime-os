@@ -64,7 +64,7 @@ RUN set -eux; \
         || { echo "FATAL: no Intel wifi firmware"; exit 1; }
 
 # Live-env + installer toolchain. kernel + dracut(+live) make it bootable as a
-# squashfs live image; podman/skopeo run the install; btrfs-progs/
+# squashfs live image; bootc/skopeo run the install; btrfs-progs/
 # dosfstools/util-linux for the target disk; shadow-utils for useradd/chpasswd
 # into the installed tree; device-mapper for the dmsquash-live snapshot root;
 # grub2-tools-extra/-efi-x64-modules so build-live-iso.sh can produce the ISO's
@@ -134,9 +134,24 @@ RUN set -eux; \
 # in the GUI depends on both, and a dependency that is only present by
 # accident is one packaging change away from vanishing silently. (dbus-daemon
 # is NOT needed and deliberately not listed — dbus-broker is already present.)
+#
+# bootc is the installer itself now: rime-install runs THIS environment's
+# `bootc install to-filesystem --source-imgref …` rather than starting bootc
+# inside a container of the image, which is what removed the tens of GB a
+# network install used to stage (see "Where the OS comes from" in
+# rime-install). skopeo stays: bootc fetches through `skopeo
+# experimental-image-proxy`, and the engine's reachability check calls it. The
+# things bootc reads from the machine it runs on — the SELinux policy,
+# prepare-root.conf — are the IMAGE's, copied in by build-live-iso.sh, which
+# also checks this bootc is not older than the image's own.
+#
+# tpm2-tools, because /usr/libexec/rime-luks-enroll (also copied out of the
+# image by build-live-iso.sh) runs here now and calls tpm2_getcap,
+# tpm2_pcrreset and tpm2_pcrextend; systemd-cryptenroll's TPM2 support needs
+# the tpm2-tss libraries that come with it.
 RUN dnf -y install --setopt=install_weak_deps=False \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
-        podman skopeo \
+        bootc podman skopeo tpm2-tools \
         ncurses util-linux coreutils bash shadow-utils \
         btrfs-progs dosfstools e2fsprogs xfsprogs gdisk parted \
         lvm2 cryptsetup mdadm \

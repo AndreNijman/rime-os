@@ -1987,6 +1987,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Every unencrypted whole-disk install partitions and formats the target
+      # itself now (installer/rime-install: install_plain_disk), and the engine
+      # refuses before erasing anything when a tool for that is missing. The
+      # dry-run cases have to reach the dry-run stop to assert anything, so the
+      # tools are installed rather than assumed to be on the runner image. One
+      # package at a time, for the reason the installer-ui job gives.
+      - name: Install the disk tools the engine checks for
+        run: |
+          sudo apt-get update -qq
+          for p in gdisk dosfstools btrfs-progs parted; do
+            sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
+          done
+          for b in sgdisk mkfs.vfat mkfs.btrfs btrfs partprobe; do
+            command -v "$b" >/dev/null && echo "have: $b" || echo "MISSING: $b"
+          done
+
       # This is intentionally the complete suite when installer code changes:
       # pre-write guards plus measured renders of every GUI page at both minimum
       # panel sizes. Its container setup is too expensive for unrelated PRs.
@@ -2024,16 +2040,15 @@ jobs:
           # a private accessibility bus, and gdbus to read the tree back. Without
           # them test-installer-a11y.sh SKIPs, and a skip there means the
           # criterion is unmeasured rather than met.
-          # xfsprogs is the disk-encryption suite's, not the keymap suite's:
-          # the netinstall staging fallback runs `mkfs.xfs` (ext4 fixes its
-          # inode count at mkfs time and the measured failure was "no space
-          # left on device" with 35 GB of free BLOCKS), and the engine refuses
-          # the whole path when mkfs.xfs is absent. Without it the encrypted
-          # staging assertions go red for a missing package rather than for a
-          # defect. It is installed here because this is the only apt step in
-          # this job and it runs before every suite below.
+          # gdisk, dosfstools and btrfs-progs are the disk-encryption suite's,
+          # not the keymap suite's: the engine refuses an encrypted install
+          # before erasing anything when sgdisk, mkfs.vfat or mkfs.btrfs is
+          # missing, and without them the encrypted dry-run assertions go red
+          # for a missing package rather than for a defect. They are installed
+          # here because this is the only apt step in this job and it runs
+          # before every suite below.
           for p in xvfb cage python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 \
-                   libxkbcommon0 xkb-data binutils xfsprogs \
+                   libxkbcommon0 xkb-data binutils gdisk dosfstools btrfs-progs \
                    xdotool at-spi2-core dbus-x11 libglib2.0-bin; do
             sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
           done
