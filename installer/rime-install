@@ -1467,7 +1467,12 @@ part_dev() {  # $1=disk  $2=partition number — prints the node, or nothing
 # It is NEVER written to the target's ESP or /boot. Those live on the machine
 # that is encrypted, unencrypted, and an attacker with the laptop has them.
 surface_recovery_key() {  # $1=the recovery key — SECRET
-  local key="$1" esp dst path saved=0 why=""
+  # Every local starts with a value: under `set -u` a bare `local dst` is UNSET,
+  # and on a machine not booted from a Rime USB stick (a DVD, Ventoy, a VM's
+  # ISO) nothing below assigns it, so `[ -n "$dst" ]` killed the engine — right
+  # after the recovery key was created, with no RIME-INSTALL-FAILED line and an
+  # encrypted, empty disk. Measured 2026-10-04 in a VM booting the ISO as a CD.
+  local key="$1" esp="" dst="" path="" saved=0 why=""
   RESULT_RECOVERY_KEY="$key"
   # 1. the screen.
   secret_line "RIME-INSTALL-RECOVERY-KEY: $key"

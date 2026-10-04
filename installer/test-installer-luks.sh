@@ -815,6 +815,51 @@ else
 fi
 rm -f "$MUT_NV"
 
+echo
+echo "── the recovery key on a machine not booted from a Rime USB stick ─────"
+# A DVD, Ventoy, a VM's ISO: no RIMEEFI partition to save the key to. Under
+# `set -u` a bare `local dst` in surface_recovery_key was unset on that path and
+# killed the engine right after the key was created — no RIME-INSTALL-FAILED, an
+# encrypted empty disk. Measured in a VM booting the ISO as a CD, 2026-10-04.
+# The shipped function runs here, with blkid stubbed to find nothing.
+RK="$WORK/recovery-fn.sh"
+sed -n '/^surface_recovery_key()/,/^}/p' "$ENGINE" > "$RK"
+rk_probe() {  # $1 = file holding the function
+    bash -c '
+        set -uo pipefail
+        LOG=/dev/null
+        log() { :; }; note() { printf "%s\n" "$*"; }; secret_line() { printf "%s\n" "$*"; }
+        blkid() { return 2; }
+        unset RIME_RECOVERY_DIR
+        . "$1"
+        surface_recovery_key test-key-0000 && echo "RETURNED-0"
+    ' _ "$1" 2>&1
+}
+if grep -q '^surface_recovery_key()' "$RK"; then
+    out=$(rk_probe "$RK")
+    if [[ "$out" == *"RIME-INSTALL-RECOVERY-UNSAVED: this installer is not running from a Rime USB stick"* ]] \
+       && [[ "$out" == *"RETURNED-0"* ]]; then
+        ok "no Rime stick: the key is shown, reported unsaved, and the install goes on"
+    else
+        bad "no Rime stick: the key is shown, reported unsaved, and the install goes on" \
+            "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+    fi
+    # MUTATION: the declaration as it was.
+    sed 's/^  local key="\$1" esp="" dst="" path="" saved=0 why=""$/  local key="$1" esp dst path saved=0 why=""/' "$RK" > "$RK.mut"
+    if cmp -s "$RK" "$RK.mut"; then
+        bad "mutant: the bare local dst" "the sed program matched no line"
+    else
+        out=$(rk_probe "$RK.mut")
+        if [[ "$out" == *"unbound variable"* ]] && [[ "$out" != *"RETURNED-0"* ]]; then
+            ok "mutant: the bare local dst" "dies on 'dst: unbound variable', as the shipped engine did"
+        else
+            bad "mutant: the bare local dst" "the old declaration did not fail here: $(printf '%s' "$out" | tail -1)"
+        fi
+    fi
+else
+    bad "the recovery-key function could be read out of the engine" "no surface_recovery_key()"
+fi
+
 # ── the keymap half, run where the data it reads actually exists ───────────
 # These assertions need Fedora's keymap tree (/usr/lib/kbd/keymaps), systemd's
 # kbd-model-map and xkeyboard-config's rules/base.lst. A GitHub ubuntu-24.04
