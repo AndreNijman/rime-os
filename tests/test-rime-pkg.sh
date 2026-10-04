@@ -670,7 +670,7 @@ cat > "$VS/root/id" <<'STUB'
 exec /usr/bin/id "$@"
 STUB
 chmod +x "$VS/root/id"
-out=$(PATH="$VS/root:$VS/bin:$PATH" SUDO_USER= call user_tool_run install 2>&1)
+out=$(PATH="$VS/root:$VS/bin:$PATH" SUDO_USER='' call user_tool_run install 2>&1)
 if grep -qF "installs for one user" <<<"$out"; then ok "root with no user behind sudo is refused"
 else bad "root with no user behind sudo is refused" "got: $(head -1 <<<"$out")"; fi
 
