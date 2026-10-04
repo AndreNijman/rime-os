@@ -72,6 +72,15 @@ finish() {
 }
 
 W="$(mktemp -d "${TMPDIR:-/tmp}/rime-inst-locale.XXXXXX")" || exit 2
+# The engine refuses to start without bootc (it installs with the live env's
+# own), and the GitHub runner this suite runs on has none. Every engine case
+# here is a dry run that stops before bootc would run, so a stub that is never
+# executed is all preflight needs; if one ever IS executed, it fails loudly
+# rather than pretending to have installed anything. RIME_BOOTC is the engine's
+# seam for exactly this, and sudo's env_reset means it is passed per call.
+BOOTC_STUB="$W/bootc-stub"
+printf '#!/bin/sh\necho "bootc stub executed by a dry run: $*" >&2\nexit 99\n' > "$BOOTC_STUB"
+chmod 755 "$BOOTC_STUB"
 cleanup() { rm -rf "$W"; }
 trap cleanup EXIT INT TERM
 
@@ -452,7 +461,7 @@ ensure_engine_image() {
 }
 
 engine() {   # engine <answers-file> -> the engine's combined output
-    sudo -n RIME_DRY_RUN=1 RIME_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$1" 2>&1 </dev/null
+    sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_DRY_RUN=1 RIME_IMAGE="$ENGINE_IMAGE" "$ENGINE" --headless "$1" 2>&1 </dev/null
 }
 
 section "a bad layout is refused before anything is erased"

@@ -51,10 +51,13 @@ readonly NEW=rime
 
 # Suffixes after the name, so each entry is the same on both sides:
 # "d.service" is apexd.service -> rimed.service.
+# -flatpak-preinstall.service left this list on 2026-10-04 with the unit itself
+# (Zen Browser installs on demand now). An old enablement link to the apex name
+# is left dangling, which systemd ignores.
 SYSTEM_UNITS=(
     d.service -boot-count.service -boot-health.service
     -boot-migrate-confirm.service -boot-notice.service -firewall.service
-    -flathub-setup.service -flatpak-preinstall.service -greet-publish.service
+    -flathub-setup.service -greet-publish.service
     -guest-session@.service -guest-wipe@.service -lid.service -secretd.service
     -switch-greeter@.service -sysext-rebuild.service
 )

@@ -73,16 +73,14 @@ splash update together with `sudo rime update` and roll back together with
 ## Installing
 
 You need a USB stick of **4 GB or more** (it will be erased), a machine with at
-least **16 GB** of disk, and **internet on that machine while installing**: the
-installer downloads Rime OS during the install.
+least **12 GB** of disk, and **internet on that machine while installing**: the
+installer downloads Rime OS during the install, straight onto the disk it
+installs to. Nothing is staged anywhere else.
 
-The installer stages the download on disk before it installs, and that needs
-room:
-
-- With a second drive or USB stick that has **32 GB free**, the installer stages
-  the download there and does not erase it.
-- With nothing else to stage on, it stages the download on the disk you install
-  to, and that disk needs **about 53 GB**.
+The installed system takes about **8 GB**. It is stored compressed, which is
+most of why it fits on a 12 GB disk. Updates download new files next to the
+running system, and your own files need room too, so give it **20 GB or more**
+if you can.
 
 Allow about 30 minutes start to finish, most of it waiting.
 
@@ -185,9 +183,8 @@ Windows for you. Do that from Windows first:
    power buttons do* → uncheck **Turn on fast startup**. Fast Startup leaves the
    Windows partition in a half-hibernated state that is unsafe to resize.
 3. **Shrink C:**: right-click Start → Disk Management → right-click `C:` →
-   *Shrink Volume*. Give Rime at least 53 GB: with no second drive plugged in,
-   the installer stages the download on this partition. With a second drive or
-   USB stick that has 32 GB free, 40 GB is enough.
+   *Shrink Volume*. Give Rime at least 10 GB, and 20 GB or more if you can
+   spare it: updates and your own files need room beside the system.
 4. **Create a partition in the free space**: right-click the unallocated space
    → *New Simple Volume* → accept the defaults. The installer needs a real
    partition to select; unallocated space will not appear.

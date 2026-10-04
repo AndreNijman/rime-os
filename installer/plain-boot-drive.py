@@ -147,7 +147,7 @@ def main():
            "-debugcon", "file:%s" % dbg, "-global", "isa-debugcon.iobase=0x402",
            "-serial", "file:%s" % serial,
            # ── A USER-MODE NIC, because a first-boot unit waits on the network ──
-           # Rime ships rime-flatpak-preinstall.service with
+           # Rime shipped rime-flatpak-preinstall.service (until 2026-10-04) with
            #     After=network-online.target / Wants=network-online.target
            #     WantedBy=multi-user.target
            # On a guest with NO network device at all, network-online.target can
