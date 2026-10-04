@@ -149,9 +149,17 @@ RUN set -eux; \
 # image by build-live-iso.sh) runs here now and calls tpm2_getcap,
 # tpm2_pcrreset and tpm2_pcrextend; systemd-cryptenroll's TPM2 support needs
 # the tpm2-tss libraries that come with it.
+#
+# policycoreutils, for setfiles. rime-install labels what it writes into the
+# installed system after bootc — the timezone, the keyboard layout, the
+# carried-over network connections — with `setfiles -r <deployment>` and the
+# IMAGE's file_contexts, guarded by `have setfiles`. This environment never
+# had setfiles, so every one of those was silently skipped and left
+# unlabeled_t. MEASURED 2026-10-04 on a VM install from this ISO: 444 AVC
+# denials in the first minute, Rime Shell refused /etc/localtime.
 RUN dnf -y install --setopt=install_weak_deps=False \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
-        bootc podman skopeo tpm2-tools \
+        bootc podman skopeo tpm2-tools policycoreutils \
         ncurses util-linux coreutils bash shadow-utils \
         btrfs-progs dosfstools e2fsprogs xfsprogs gdisk parted \
         lvm2 cryptsetup mdadm \
@@ -218,6 +226,11 @@ RUN set -eu; \
     bash -n /usr/bin/rime-install \
         || { echo "FATAL: rime-install has a bash syntax error"; exit 1; }; \
     echo "OK: rime-install parses"; \
+    command -v bootc >/dev/null \
+        || { echo "FATAL: bootc is missing — rime-install installs with this environment's own bootc"; exit 1; }; \
+    command -v setfiles >/dev/null \
+        || { echo "FATAL: setfiles is missing — the files rime-install writes after bootc would ship unlabeled"; exit 1; }; \
+    echo "OK: bootc and setfiles present"; \
     bash -n /usr/bin/rime-installer-launch \
         || { echo "FATAL: rime-installer-launch has a bash syntax error"; exit 1; }; \
     echo "OK: rime-installer-launch parses"; \

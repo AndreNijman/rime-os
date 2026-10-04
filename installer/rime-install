@@ -1616,7 +1616,7 @@ create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefi
   fi
   if true; then
     local paths=(/etc/hostname /var/home)
-    for f in passwd passwd- shadow shadow- group group- gshadow gshadow- subuid subgid .pwd.lock; do
+    for f in passwd passwd- shadow shadow- group group- gshadow gshadow- subuid subuid- subgid subgid- .pwd.lock; do
       [ -e "$deploy/etc/$f" ] && paths+=("/etc/$f")
     done
     chroot "$deploy" /usr/sbin/setfiles -F "$spec" "${paths[@]}" 2>&1 | tee -a "$LOG" \
