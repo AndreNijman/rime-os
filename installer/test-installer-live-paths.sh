@@ -5,22 +5,18 @@
 #
 #  ═══ WHY THIS EXISTS ═══
 #
-#  4bf1ecaa ("stage on the target disk when there is no scratch volume") ships
-#  with its own caveat in its own commit message: **NOT TESTED ON HARDWARE**.
-#  It is well unit-tested — installer/test-installer.sh is 58/0 — and every one
-#  of those 58 assertions is made against the SOURCE of `pick_scratch`,
-#  `stage_budget_kb` and the engine's argv. None of them partitions a disk,
-#  downloads an image onto it, or watches a machine start. That is the same
-#  gap the predecessor of this fix shipped with, and the predecessor was wrong:
-#  its `pick_scratch` refused the commonest laptop there is.
+#  installer/test-installer.sh asserts the engine's guards and the argv it
+#  would hand bootc, and every one of those assertions is made against the
+#  SOURCE. None of them partitions a disk, downloads an image onto it, or
+#  watches a machine start. The engine runs inside the installer's own
+#  live-environment image here (live-env-engine), because that is the machine
+#  it runs on in real life, and bootc on an ostree-booted developer laptop is
+#  not.
 #
 #  So this suite makes the two claims that a unit test cannot:
 #
 #    1. PARTITION MODE does not damage the other operating system on the disk.
-#       installer/rime-install:2320 asserts, in a comment, "Proven on a
-#       loopback multi-OS disk: the other partitions and the existing
-#       /EFI/Microsoft entry survive". That proof exists in no committed file.
-#       Here it is: a GPT with a Windows-shaped ESP (\EFI\Microsoft\Boot\
+#       Here is the proof: a GPT with a Windows-shaped ESP (\EFI\Microsoft\Boot\
 #       bootmgfw.efi, a BCD, a fallback loader), a data partition full of known
 #       bytes, and a free partition for Rime. The data partition is hashed RAW,
 #       the Microsoft tree is hashed file by file, and `sfdisk -d` is captured
@@ -30,16 +26,14 @@
 #       installed Rime has booted once, since the first boot is when Rime
 #       mounts that shared ESP read-write for the first time.
 #
-#    2. THE WHOLE-DISK STAGING FALLBACK installs and boots. Nothing qualifies
-#       as scratch (RIME_SCRATCH_CANDIDATES points at a path that does not
-#       exist, which is what the single-internal-disk USB-boot laptop looks
-#       like from inside `pick_scratch`), so the engine partitions the disk
-#       itself, formats it, creates the sparse staging image INSIDE the target
-#       root, unlinks it, downloads ~5.8 GB of real registry blobs onto it, and
-#       installs with `to-filesystem --skip-finalize`. The layout is compared
-#       against the one `bootc install to-disk` produces, and a sampler running
-#       throughout records `losetup -a` and every tmpfs's usage so that "the
-#       staging never lands in RAM" is a MEASUREMENT and not a design claim.
+#    2. A WHOLE-DISK NETWORK INSTALL fits on a 12 GiB disk and boots. Nothing
+#       is staged: the engine partitions the disk itself, formats it, and the
+#       live env's bootc streams ~6.9 GB of real registry blobs straight into
+#       the target while the engine compresses the store as it arrives. The
+#       layout is compared against the one `bootc install to-disk` produces,
+#       the space the installed system takes is measured, and a sampler running
+#       throughout records every tmpfs's usage so that "nothing lands in RAM"
+#       is a MEASUREMENT and not a design claim.
 #
 #  ═══ WHAT "BOOTS" MEANS ═══
 #
@@ -77,10 +71,11 @@
 #  ═══ WHAT IT NEEDS ═══
 #
 #  Passwordless root, podman, losetup, sgdisk, /dev/kvm, ~40 GB free on
-#  /var/lab-scratch (the disk path alone rigs a 40 GiB sparse image, which is
-#  the smallest the engine's own staging budget accepts), a Rime OS image in
-#  ROOT podman storage for the partition path, a working route to the registry
-#  for the disk path, and the rime-bootlab container image (built if absent).
+#  /var/lab-scratch, a Rime OS image in ROOT podman storage for the partition
+#  path, a working route to the registry for the disk path, the installer's
+#  live-environment image (RIME_LIVE_ENV_IMAGE, built from
+#  Containerfile.installer: the engine runs inside it, see live-env-engine),
+#  and the rime-bootlab container image (built if absent).
 #  A GitHub runner has none of these: this suite is in
 #  tests/suites-not-in-ci.txt.
 #
@@ -102,6 +97,9 @@ ENGINE=./rime-install
 IMAGE="${RIME_LIVE_PATHS_IMAGE:-localhost/rime-os:daily}"
 LAB="${RIME_BOOTLAB_IMAGE:-localhost/rime-bootlab}"
 NVGUARD="../tests/lab/nvram-guard"
+# The installer's live-environment image the engine runs inside (see
+# live-env-engine), built from Containerfile.installer.
+LIVE_ENV_IMAGE="${RIME_LIVE_ENV_IMAGE:-localhost/rime-installer:latest}"
 
 # The registry ref the DISK path downloads from. Left at the engine's own
 # default on purpose: the point of that path is the real netinstall, and
@@ -126,15 +124,13 @@ NETINSTALL_REF="${RIME_LIVE_PATHS_REF:-ghcr.io/andrenijman/rime-os:daily}"
 # "login:". Kernel messages still reach both consoles either way.
 BOOT_KARGS="console=tty1 console=ttyS0,115200 systemd.log_target=kmsg systemd.show_status=1 loglevel=7 rd.plymouth=0 plymouth.enable=0 rd.timeout=120"
 
-# 24 GiB is comfortably over the engine's 16 GB whole-disk floor and leaves
+# 24 GiB is comfortably over the engine's 12 GB whole-disk floor and leaves
 # ~21 GiB for Rime beside a 512 MiB ESP and a 2 GiB data partition.
 PART_DISK_SIZE=24G
-# 52 GiB clears the STAGING path's floor with a little room: stage_budget_kb
-# wants NEED_SCRATCH_GB (32) + STAGE_RESERVE_GB (15) GiB of free space, and the
-# call site subtracts a 2 GiB margin from the RAW device size before asking —
-# 49 GiB raw. At 40 GiB (the old floor, for a 22 GiB budget) the runner copy
-# filled the staging filesystem once its temp files moved there. Sparse.
-DISK_DISK_SIZE=52G
+# 12 GiB is the engine's own floor (12 GB, _min_gb) rounded to the nearest
+# size a person would buy: the point of this path is that a network install
+# fits on a disk that small, with nothing staged anywhere else. Sparse.
+DISK_DISK_SIZE=12G
 
 WANT_PATHS="both"
 # ── WHY THE DEFAULT FIXTURE CARRIES A BIOS BOOT PARTITION ────────────────────
@@ -378,7 +374,6 @@ start_sampler() {  # $1 = output file
       losetup -a 2>/dev/null | sed 's/^/loop: /'
       findmnt -t tmpfs,ramfs -no TARGET,SOURCE,USED,AVAIL 2>/dev/null | sed 's/^/tmpfs: /'
       free -m 2>/dev/null | sed -n '2p' | sed 's/^/mem: /'
-      findmnt -no TARGET,SOURCE /run/rime-stage 2>/dev/null | sed 's/^/stage: /'
       sleep 10
     done > '$1' 2>&1" &
   SAMPLER_PID=$!
@@ -412,7 +407,7 @@ run_engine() {  # $1 = label  $2 = answers file  $3 = stdout file  rest = env as
   local start; start=$(date +%s)
   # shellcheck disable=SC2024
   sudo -n "$NVGUARD" --label "live-paths-$label" --out "$WORK/nvram-$label" -- \
-    env "$@" "$ENGINE" --headless "$ans" > "$out" 2>&1 </dev/null
+    ./live-env-engine RIME_LIVE_ENV_IMAGE="$LIVE_ENV_IMAGE" "$@" -- "$ENGINE" --headless "$ans" > "$out" 2>&1 </dev/null
   ENGINE_RC=$?
   ENGINE_SECS=$(( $(date +%s) - start ))
   # shellcheck disable=SC2024
@@ -854,10 +849,10 @@ assert_neighbour_intact() {  # $1 = when
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  PATH 2 — unencrypted whole disk with NO scratch volume: the new fallback
+#  PATH 2 — unencrypted whole disk, network install, on the smallest disk
 # ═════════════════════════════════════════════════════════════════════════════
 run_disk_path() {
-  hdr "PATH 2 — whole disk, network install, nothing qualifies as scratch"
+  hdr "PATH 2 — whole disk, network install, ${DISK_DISK_SIZE} disk, nothing staged"
   IMG="$WORK/wholedisk.img"
   sudo -n truncate -s "$DISK_DISK_SIZE" "$IMG" || die "could not create $IMG"
   attach "$IMG"
@@ -878,18 +873,9 @@ EOF"
     "$LOOP" "$(fingerprint "$LOOP")" | sudo -n tee -a "$ans" >/dev/null
   sudo -n chmod 600 "$ans"
 
-  # RIME_SCRATCH_CANDIDATES is the engine's own documented test seam: it
-  # REPLACES the candidate list and cannot weaken scratch_fs_ok. Pointed at a
-  # path that does not exist, pick_scratch sees exactly what it sees on a
-  # single-internal-disk laptop booted from a plain USB — nothing — and answers
-  # with the @target sentinel. Without this, /var/tmp on THIS machine is a real
-  # filesystem with 180 GB free and would win, testing the path that already
-  # worked.
-  local NOSCRATCH=/nonexistent/rime-lab-no-scratch-volume
-
   hdr "PATH 2 — dry run (all guards, the reachability probe, no writes)"
   run_engine disk-dry "$ans" "$WORK/engine-disk-dry.txt" \
-    RIME_NETINSTALL=1 RIME_SCRATCH_CANDIDATES="$NOSCRATCH" RIME_DRY_RUN=1
+    RIME_IMAGE="$IMAGE" RIME_NETINSTALL=1 RIME_TARGET_IMAGE="$NETINSTALL_REF" RIME_DRY_RUN=1
   if grep -q '^RIME-INSTALL-DRYRUN-OK' "$WORK/engine-disk-dry.txt"; then
     ok "[disk] every guard passes against the real loop node" "RIME-INSTALL-DRYRUN-OK"
   else
@@ -897,55 +883,37 @@ EOF"
         "$(grep -v 'nvram-guard\[' "$WORK/engine-disk-dry.txt" | tail -3 | tr '\n' ' ')"
     return 1
   fi
-  if grep -q 'No spare drive or partition was found' "$WORK/engine-disk-dry.txt"; then
-    ok "[disk] the engine chose the on-target staging fallback" "pick_scratch answered @target"
+  if grep -q 'downloads onto it as it goes' "$WORK/engine-disk-dry.txt"; then
+    ok "[disk] the engine says the download and the wipe are one step"
   else
-    bad "[disk] the engine chose the on-target staging fallback" \
-        "it found a scratch volume — this run is testing the OTHER path"
-    return 1
+    bad "[disk] the engine says the download and the wipe are one step" "no such note"
   fi
 
-  hdr "PATH 2 — the real install: partition, format, download ~5.8 GB onto the target, install"
+  hdr "PATH 2 — the real install: partition, format, stream ~6.9 GB from the registry, compress"
   start_sampler "$WORK/sampler-disk.txt"
   run_engine disk "$ans" "$WORK/engine-disk.txt" \
-    RIME_NETINSTALL=1 RIME_SCRATCH_CANDIDATES="$NOSCRATCH"
+    RIME_IMAGE="$IMAGE" RIME_NETINSTALL=1 RIME_TARGET_IMAGE="$NETINSTALL_REF"
   stop_sampler
   engine_protocol_ok disk "$WORK/engine-disk.txt"
   sudo -n chmod 644 "$WORK/sampler-disk.txt" 2>/dev/null
 
-  # ── staging landed on the target disk and never in RAM ────────────────────
-  hdr "PATH 2 — where the staging actually lived"
-  local log="$WORK/engine-log-disk.txt"
-  if grep -q 'staging: no scratch volume qualified' "$log"; then
-    ok "[disk] the engine logged the fallback decision"
+  # ── what bootc was handed, from the engine's own log ──────────────────────
+  hdr "PATH 2 — how bootc was run"
+  local log="$WORK/engine-log-disk.txt" argv
+  argv=$(grep -m1 'bootc: .*install to-filesystem' "$log" || true)
+  for want in "--source-imgref registry:" "--bootloader grub" "--skip-finalize" "--generic-image"; do
+    case "$argv" in
+      *"$want"*) ok "[disk] bootc got $want" ;;
+      *) bad "[disk] bootc got $want" "${argv:-no bootc line in $log}" ;;
+    esac
+  done
+  if grep -q '^.* compressed: [0-9]* objects; target now uses [0-9]* MB' "$log"; then
+    ok "[disk] the store was compressed as it arrived" "$(grep -m1 -o 'compressed: .*' "$log")"
   else
-    bad "[disk] the engine logged the fallback decision" "no such line in $log"
-  fi
-  if grep -q 'staging: loop=/dev/loop' "$log"; then
-    ok "[disk] staging ran on a loop device" "$(grep -m1 'staging: loop=' "$log" | sed 's/.*staging: //')"
-  else
-    bad "[disk] staging ran on a loop device" "no 'staging: loop=' line"
-  fi
-  # The sampler is an INDEPENDENT observer: the engine's log is the engine's
-  # own account of itself, and this is a third party looking at the kernel.
-  if grep -q '\.rime-stage\.img (deleted)' "$WORK/sampler-disk.txt"; then
-    ok "[disk] a sampler saw the staging loop backed by a DELETED file on the target" \
-       "$(grep -m1 -o '/dev/loop[0-9]*:.*rime-stage[^ ]*' "$WORK/sampler-disk.txt" | head -c 90)"
-  elif grep -q 'rime-stage' "$WORK/sampler-disk.txt"; then
-    bad "[disk] a sampler saw the staging loop backed by a DELETED file on the target" \
-        "the backing file was still LINKED — to-filesystem's emptiness check would see it"
-  else
-    bad "[disk] a sampler saw the staging loop backed by a DELETED file on the target" \
-        "no rime-stage loop in any sample — see $WORK/sampler-disk.txt"
-  fi
-  if grep -q '^stage: /run/rime-stage */dev/loop' "$WORK/sampler-disk.txt"; then
-    ok "[disk] /run/rime-stage was the staging loop, not a tmpfs"
-  else
-    bad "[disk] /run/rime-stage was the staging loop, not a tmpfs" \
-        "$(grep -m1 '^stage:' "$WORK/sampler-disk.txt")"
+    bad "[disk] the store was compressed as it arrived" "no 'compressed:' line in $log"
   fi
   # No tmpfs grew. Baseline is the first sample; 300 MB of headroom covers the
-  # ordinary churn of a live machine without covering a 5.8 GB download.
+  # ordinary churn of a live machine without covering a 6.9 GB download.
   local grew
   grew=$(awk '
     /^tmpfs: /{
@@ -963,11 +931,6 @@ EOF"
        "$(grep -c '^=== ' "$WORK/sampler-disk.txt") samples"
   else
     bad "[disk] no tmpfs grew by more than 300 MB during the install" "$grew"
-  fi
-  if grep -q 'skip-finalize' "$log" || grep -q 'skip-finalize' "$WORK/engine-disk.txt"; then
-    ok "[disk] bootc was invoked with --skip-finalize" "the staging loop holds a writable fd on the target"
-  else
-    info "[disk] --skip-finalize does not appear in the captured output (bootc does not echo its own argv)"
   fi
 
   if [ "$ENGINE_RC" != 0 ]; then
@@ -1003,13 +966,27 @@ EOF"
   [ "$rootfs" = btrfs ] && ok "[disk] the root filesystem is btrfs" || bad "[disk] the root filesystem is btrfs" "'$rootfs'"
   [ "$espfs" = vfat ] && ok "[disk] the ESP is vfat" || bad "[disk] the ESP is vfat" "'$espfs'"
 
-  # Nothing of the staging may survive on the installed disk.
+  # How much of the disk the installed system takes. MEASURED 2026-10-04 at
+  # 8.1 GB for release 2026.09.30.3; 9.5 GB is that plus room for a release
+  # to grow a little, and well under what the uncompressed store took (14.95
+  # GB), so a store that stopped being compressed fails here.
   sudo -n mkdir -p "$MNT"
   if sudo -n mount "$p3" "$MNT" 2>/dev/null; then
-    if sudo -n test -e "$MNT/.rime-stage.img"; then
-      bad "[disk] the staging image left nothing behind on the target" "/.rime-stage.img still exists"
+    local used_mb
+    used_mb=$(sudo -n df -BM --output=used "$MNT" | tail -1 | tr -dc '0-9')
+    if [ -n "$used_mb" ] && [ "$used_mb" -le 9500 ]; then
+      ok "[disk] the installed system is compressed" "${used_mb} MB used on the root filesystem"
     else
-      ok "[disk] the staging image left nothing behind on the target"
+      bad "[disk] the installed system is compressed" "${used_mb:-?} MB used (want <= 9500)"
+    fi
+    # Every object still matches its name. A btrfs.compression xattr (what the
+    # `compression` property leaves on files created under it) changes a bare
+    # object's checksum, and fsck stops at the first one it meets.
+    local fsck_out
+    if fsck_out=$(sudo -n ostree fsck --repo="$MNT/ostree/repo" 2>&1); then
+      ok "[disk] ostree fsck: every object matches its checksum"
+    else
+      bad "[disk] ostree fsck: every object matches its checksum" "$(tail -1 <<<"$fsck_out")"
     fi
     sudo -n df -Pk "$MNT" | sed 's/^/    /'
     sudo -n umount -R "$MNT" 2>/dev/null

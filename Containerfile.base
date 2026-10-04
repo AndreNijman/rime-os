@@ -3357,42 +3357,35 @@ COPY files/system/units/rime-flathub-setup.service \
      /usr/lib/systemd/system/rime-flathub-setup.service
 
 # ── Zen Browser, shipped but not imposed ────────────────────────────────────
-# Zen is a Firefox fork with an opinionated interface. Every image gets it, and
-# it tracks latest stable for free: `rime update` already runs
-# `flatpak update --system`, so there is no Rime-specific updater to write.
+# ONE browser ships: Firefox. Zen Browser used to be installed on first boot as
+# a Flatpak, and with its runtimes that was ~2 GB on every new machine —
+# measured 2026-10-04 on a VM install: 7.8 GB after the install, 9.9 GB after
+# the first boot, which on a 12 GB disk is 91% full and the storage notice on
+# day one. It is an app, and apps install on demand now:
+# `sudo rime install app.zen_browser.zen`. Machines that already have it
+# keep it, and `rime update` keeps updating it.
 #
-# It cannot be installed at build time — `flatpak install` needs a running
-# system, the same constraint that makes the Flathub remote a first-boot unit —
-# so it is a first-boot oneshot that runs after the remote exists.
-#
-# FIREFOX REMAINS THE DEFAULT BROWSER. That is a decision, not an oversight:
-# someone who dislikes Zen should not have to undo a choice the image made for
-# them. The assertion below is the part that matters — a Flatpak's exported
-# .desktop can win the http/https handler depending on XDG data directory
-# ordering, which would make Zen the default by accident on every machine.
+# FIREFOX IS THE DEFAULT BROWSER, and the assertions below hold that in place: a
+# Flatpak's exported .desktop can win the http/https handler depending on XDG
+# data directory ordering, so a second browser installed later must not become
+# the default by accident.
 # SUPER+W opens the DEFAULT browser, not a named one. `$browser = firefox` in
 # hyprland.conf meant the keybind contradicted the user's own setting the moment
-# a second browser existed — which shipping Zen guarantees. The helper resolves
-# the http/https handler at press time, so it follows the user to any browser,
-# including ones Rime has never heard of.
+# a second browser existed. The helper resolves the http/https handler at press
+# time, so it follows the user to any browser, including ones Rime has never
+# heard of.
 COPY --chmod=0755 files/system/libexec/rime-open-browser \
      /usr/libexec/rime-open-browser
-COPY files/system/units/rime-flatpak-preinstall.service \
-     /usr/lib/systemd/system/rime-flatpak-preinstall.service
 RUN set -eux; \
-    systemctl enable rime-flatpak-preinstall.service; \
-    # The unit must name the app and must not run before the remote exists;
-    # both are the difference between installing Zen and failing quietly.
-    grep -q 'app.zen_browser.zen' /usr/lib/systemd/system/rime-flatpak-preinstall.service; \
-    grep -q 'After=.*rime-flathub-setup.service' /usr/lib/systemd/system/rime-flatpak-preinstall.service; \
-    grep -q 'Requires=rime-flathub-setup.service' /usr/lib/systemd/system/rime-flatpak-preinstall.service; \
-    # FIREFOX, NOT ZEN, owns the web handlers in the shipped defaults. If this
-    # ever fails, an image has silently changed every user's default browser —
-    # which is the one thing shipping a second browser must not do.
+    # No first-boot browser install. Its absence is asserted, not assumed: a
+    # unit file that comes back is 2 GB back on every new machine.
+    test ! -e /usr/lib/systemd/system/rime-flatpak-preinstall.service; \
+    # FIREFOX owns the web handlers in the shipped defaults. If this ever
+    # fails, an image has silently changed every user's default browser.
     grep -q '^x-scheme-handler/http=firefox.desktop$'  /etc/xdg/mimeapps.list; \
     grep -q '^x-scheme-handler/https=firefox.desktop$' /etc/xdg/mimeapps.list; \
-    # And Zen must not be shipped a second time as a system .desktop, which
-    # would put it in the handler race at build time rather than at install.
+    # And no second browser shipped as a system .desktop, which would put it in
+    # the handler race at build time.
     test ! -e /usr/share/applications/app.zen_browser.zen.desktop; \
     # The browser keybind must name no browser. A regression here is invisible
     # until someone changes their default and wonders why SUPER+W ignores it.
@@ -3402,7 +3395,7 @@ RUN set -eux; \
         /usr/share/rime/hypr/rime/keybindings.lua; \
     if grep -qE 'local browser *= *"(firefox|zen)' /usr/share/rime/hypr/rime/keybindings.lua \
         ; then echo "FATAL: the keybinding hard-codes a browser instead of the wrapper"; exit 1; fi; \
-    echo "zen: first-boot flatpak; firefox keeps the web handlers; SUPER+W follows the default"
+    echo "browser: firefox ships and keeps the web handlers; SUPER+W follows the default"
 
 # ── The window switcher's keybind side ───────────────────────────────────────
 # ALT+Tab opens the Rime Shell switcher and releasing ALT commits it. The

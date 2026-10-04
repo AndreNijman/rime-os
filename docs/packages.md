@@ -606,15 +606,23 @@ Flathub outage can never fail an OS update.
   survives a reboot and is not something only the person who typed the command
   knows.
 
-## Browsers: two shipped, one default
+## Browsers: one shipped, more on demand
 
-The image ships **Firefox** (RPM, in `core`) and **Zen Browser** (Flatpak,
-installed on first boot).
+The image ships **Firefox** (RPM, in `core`), and it is the default browser.
+**Zen Browser** installs on demand:
 
-**Firefox is the default and stays the default.** Zen is a Firefox fork with an
-opinionated interface (vertical tabs, workspaces, a compact chrome), and someone
-who dislikes it should not have to undo a choice the image made for them. Zen is
-therefore installed and discoverable in the launcher, and
+```sh
+sudo rime install app.zen_browser.zen
+```
+
+Zen used to be installed on every machine's first boot. With its Flatpak
+runtimes that was about 2 GB (measured 2026-10-04: a fresh install went from
+7.8 GB to 9.9 GB at first boot), which on the 12 GB minimum disk is 91% full and
+a storage warning on day one. Machines that already have it keep it, and
+`rime update` keeps updating it.
+
+**Firefox stays the default.** Zen is a Firefox fork with an opinionated
+interface (vertical tabs, workspaces, a compact chrome), and
 `files/desktop/xdg/mimeapps.list` keeps `x-scheme-handler/http` and `https`
 pointed at `firefox.desktop`.
 
@@ -638,13 +646,8 @@ As a Flatpak it needs none: `rime update` already runs
 `flatpak update --system` (`cmd_flatpak_upgrade` in `rime-pkg`), so Zen tracks
 latest stable through the update path that already exists.
 
-It installs at **first boot**, not at build time, for the same reason the
-Flathub remote does: `flatpak install` needs a running system, and bootc seeds
-`/var` once and never updates it. `rime-flatpak-preinstall.service` runs after
-`rime-flathub-setup.service`, is idempotent, and writes its stamp only on
-success. Boot does not wait for either unit: both retry in the background, once
-a minute for up to ten tries, and a machine that stays offline installs Zen on a
-later boot.
+It cannot be part of the image at all: `flatpak install` needs a running
+system, and bootc seeds `/var` once and never updates it.
 
 ### Making Zen your default, per machine
 

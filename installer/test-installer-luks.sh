@@ -48,21 +48,28 @@ cd "$(dirname "$0")" || exit 1
 
 ENGINE=./rime-install
 WORK=$(mktemp -d /tmp/rime-luks-suite.XXXXXX)
+# The engine refuses to start without bootc (it installs with the live env's
+# own), and the GitHub runner this suite runs on has none. Every engine case
+# here is a dry run that stops before bootc would run, so a stub that is never
+# executed is all preflight needs; if one ever IS executed, it fails loudly
+# rather than pretending to have installed anything. RIME_BOOTC is the engine's
+# seam for exactly this, and sudo's env_reset means it is passed per call.
+BOOTC_STUB="$WORK/bootc-stub"
+printf '#!/bin/sh\necho "bootc stub executed by a dry run: $*" >&2\nexit 99\n' > "$BOOTC_STUB"
+chmod 755 "$BOOTC_STUB"
 ANS="$WORK/answers"
 SCRATCH_IMAGE="localhost/rime-luks-probe:test"
 ENGINE_IMAGE=""
 scratch_made=0
 cleanup() {
-    # The netinstall section attaches loop devices and imports a throwaway
-    # image. Both are released on the happy path, but a run that dies in the
-    # middle would otherwise leave a loop device holding a 40 GiB file open and
-    # an image in root podman storage — and the next run would then pick a
-    # DIFFERENT loop number and leak again. Belt and braces, and harmless when
-    # the variables were never set.
-    [ -n "${LOOP_BIG:-}" ]   && sudo -n losetup -d "${LOOP_BIG}"   >/dev/null 2>&1
+    # The netinstall section attaches loop devices. They are released on the
+    # happy path, but a run that dies in the middle would otherwise leave a
+    # loop device holding a 32 GiB file open — and the next run would then pick
+    # a DIFFERENT loop number and leak again. Belt and braces, and harmless
+    # when the variables were never set.
+    [ -n "${LOOP_OK:-}" ]    && sudo -n losetup -d "${LOOP_OK}"    >/dev/null 2>&1
     [ -n "${LOOP_SMALL:-}" ] && sudo -n losetup -d "${LOOP_SMALL}" >/dev/null 2>&1
-    rm -f "${NETIMG_BIG:-}" "${NETIMG_SMALL:-}" 2>/dev/null
-    [ "${nohelper_made:-0}" = 1 ] && sudo -n podman rmi -f "${NOHELPER_IMAGE:-}" >/dev/null 2>&1
+    rm -f "${NETIMG_OK:-}" "${NETIMG_SMALL:-}" 2>/dev/null
     rm -rf "$WORK"
     [ "$scratch_made" = 1 ] && sudo -n podman rmi -f "$SCRATCH_IMAGE" >/dev/null 2>&1
     return 0
@@ -199,7 +206,7 @@ done
 run_engine() {  # $1=engine path  $2=answers body  [$3..]=extra env assignments
     local eng="$1" body="$2"; shift 2
     printf '%s\n' "$body" > "$ANS"
-    sudo -n RIME_DRY_RUN=1 RIME_IMAGE="$ENGINE_IMAGE" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
+    sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_DRY_RUN=1 RIME_IMAGE="$ENGINE_IMAGE" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
 }
 
 # $1 name, $2 expected substring, $3 answers body, $4.. extra env
@@ -312,7 +319,7 @@ if [ -n "$LOOPDEV" ]; then
 
     # dry_run <engine> <keymap-tree> <model-map> — the same run three ways.
     dry_run() {
-        sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL="$HELPER" \
+        sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL="$HELPER" \
                 RIME_KBD_KEYMAPS="$2" RIME_KBD_MODEL_MAP="$3" \
                 "$1" --headless "$ANS" 2>&1 </dev/null
     }
@@ -377,19 +384,26 @@ if [ -n "$LOOPDEV" ]; then
     # The run above passed WITH a helper. These two differ from it only in the
     # helper, so that pass cannot be an accident of something else letting it
     # through.
-    out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL=/nonexistent/x \
+    out=$(sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL=/nonexistent/x \
              "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
     if [[ "$out" == *"is not executable"* ]]; then ok "an unusable helper stops the same run"
     else bad "an unusable helper stops the same run" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
-    # With no override the engine asks the IMAGE, which today carries no such
-    # helper — whichever image was picked above. The refusal must name the path
-    # it looked for, because "encryption failed" with no path is unactionable.
-    out=$(sudo -n RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
-             "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
-    if [[ "$out" == *"/usr/libexec/rime-luks-enroll"* ]]; then
-        ok "an image without the helper is refused, by name"
+    # With no override the engine looks for the live environment's own copy at
+    # /usr/libexec/rime-luks-enroll. The refusal must name the path it looked
+    # for, because "encryption failed" with no path is unactionable. A Rime
+    # machine HAS that file — it is the installed image's — so the refusal can
+    # only be observed where it is absent (a CI runner); here it is reported as
+    # a skip with the reason, not passed.
+    if [ -e /usr/libexec/rime-luks-enroll ]; then
+        printf 'SKIP  %-46s this machine carries /usr/libexec/rime-luks-enroll\n' "a live env without the helper is refused"
     else
-        bad "an image without the helper is refused, by name" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+        out=$(sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_IMAGE="$ENGINE_IMAGE" RIME_DRY_RUN=1 \
+                 "$ENGINE" --headless "$ANS" 2>&1 </dev/null)
+        if [[ "$out" == *"/usr/libexec/rime-luks-enroll"* ]]; then
+            ok "a live env without the helper is refused, by name"
+        else
+            bad "a live env without the helper is refused, by name" "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+        fi
     fi
     sudo -n losetup -d "$LOOPDEV" 2>/dev/null || true
 else
@@ -397,47 +411,35 @@ else
 fi
 
 echo
-echo "── the ENCRYPTED NETWORK install, and the disk it stages onto ─────────"
-# ═══ WHY THIS SECTION EXISTS ═══
-#
-# `installer/rime-install:74` sets NETINSTALL=0 and only raises it when
+echo "── the ENCRYPTED NETWORK install ──────────────────────────────────────"
+# `installer/rime-install` sets NETINSTALL=0 and only raises it when
 # /usr/lib/rime-installer/netinstall exists, so on any developer machine or CI
-# runner every assertion above this line runs the OFFLINE engine. Until this
-# section landed, NO suite that touches encryption had ever set
-# RIME_NETINSTALL, which left two pieces of the engine with zero coverage of
-# any kind:
+# runner every assertion above this line runs the OFFLINE engine. This section
+# forces the network path on, with the encrypted layout, because that is where
+# the most is decided before the disk is touched: the network diagnosis, the
+# registry check, the helper, and the size of the target.
 #
-#   * the deferred enrolment-helper check (the `elif NETINSTALL=1 &&
-#     STAGE_ON_TARGET=1` arm). It exists because on that one path the image has
-#     not been downloaded yet, so asking `podman run "$IMAGE" test -x …` would
-#     refuse a perfectly good image. Nothing proved the deferral happened, and
-#     nothing proved the same answers are still REFUSED when the image really
-#     is there and really lacks the helper.
-#   * the encrypted branch's staging fallback: stage_setup inside the freshly
-#     created LUKS volume, the download into it, and the re-check that has to
-#     run after the wipe but before bootc writes a byte.
-#
-# installer/test-installer-live-paths.sh does set RIME_NETINSTALL, but only for
-# the two UNENCRYPTED paths, and it is in tests/suites-not-in-ci.txt.
+# A network install stages nothing any more (bootc streams from the registry,
+# see "Where the OS comes from" in the engine), so what a dry run can prove is
+# that every refusal still happens with the disk intact, that the registry is
+# asked exactly once and nothing is downloaded, and that the disk the dry run
+# validated was not written.
 #
 # ═══ HOW THIS IS MADE HERMETIC, AND WHY THAT IS NOT A DODGE ═══
 #
 # A network install's first act is net_diagnose() — `ip route show default`
-# then `getent hosts ghcr.io` — and its second, on the staging fallback, is
-# `skopeo inspect --raw docker://…`. Letting those reach the real world would
-# make this suite's verdict a property of the runner's network and of whether
-# a tag happens to be published, which is the same hermeticity defect the
-# keymap fixture above was written to remove.
+# then `getent hosts ghcr.io` — and its second is `skopeo inspect --raw
+# docker://…`. Letting those reach the real world would make this suite's
+# verdict a property of the runner's network and of whether a tag happens to
+# be published.
 #
 # So three commands are SHIMMED on PATH, and each shim is the narrowest thing
 # that will do: `ip` answers only `route show default` and execs the real
 # binary for anything else, `getent` answers only `hosts ghcr.io` and execs the
 # real binary for anything else, and `skopeo` answers `inspect` and REFUSES
-# every other subcommand with exit 99. That last one is the point: `skopeo
-# copy` is how the 5.8 GB download happens, so a dry run that ever reached it
-# would fail loudly here instead of quietly pulling an image. Every shim
-# appends its argv to a log, and the log is ASSERTED — one inspect, no copy —
-# so "the shim was consulted" is measured rather than assumed.
+# every other subcommand with exit 99. Every shim appends its argv to a log,
+# and the log is ASSERTED — one inspect, nothing else — so "the shim was
+# consulted" is measured rather than assumed.
 #
 # sudo has `Defaults secure_path` on this machine, so `sudo -n PATH=… engine`
 # does not work: PATH is replaced. `sudo -n env PATH=… engine` does — env is
@@ -448,23 +450,23 @@ mkdir -p "$NET_SHIM"
 : > "$SHIMLOG"
 REAL_IP=$(command -v ip 2>/dev/null || echo /usr/sbin/ip)
 REAL_GETENT=$(command -v getent 2>/dev/null || echo /usr/bin/getent)
-cat > "$NET_SHIM/ip" <<EOF
+cat > "$NET_SHIM/ip" <<SHIM
 #!/bin/sh
 echo "ip \$*" >> "$SHIMLOG"
 case "\$*" in
   "route show default") echo "default via 192.0.2.1 dev rime-test-shim proto static"; exit 0 ;;
 esac
 exec $REAL_IP "\$@"
-EOF
-cat > "$NET_SHIM/getent" <<EOF
+SHIM
+cat > "$NET_SHIM/getent" <<SHIM
 #!/bin/sh
 echo "getent \$*" >> "$SHIMLOG"
 case "\$*" in
   "hosts ghcr.io") echo "192.0.2.10 ghcr.io"; exit 0 ;;
 esac
 exec $REAL_GETENT "\$@"
-EOF
-cat > "$NET_SHIM/skopeo" <<EOF
+SHIM
+cat > "$NET_SHIM/skopeo" <<SHIM
 #!/bin/sh
 echo "skopeo \$*" >> "$SHIMLOG"
 case "\${1:-}" in
@@ -472,75 +474,42 @@ case "\${1:-}" in
 esac
 echo "SHIM-REFUSED \$*" >> "$SHIMLOG"
 exit 99
-EOF
+SHIM
 chmod 755 "$NET_SHIM/ip" "$NET_SHIM/getent" "$NET_SHIM/skopeo"
 
 # sudo's secure_path, verbatim, so the engine still finds every real tool.
 NET_PATH="$NET_SHIM:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 net_run() {   # $1 = engine, $2.. = env assignments. Reads $ANS.
     local eng="$1"; shift
-    sudo -n env "PATH=$NET_PATH" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
+    sudo -n env "PATH=$NET_PATH" RIME_BOOTC="$BOOTC_STUB" "$@" "$eng" --headless "$ANS" 2>&1 </dev/null
 }
-# The engine truncates its own log at every start, so this reads THIS run's.
-#
 # `grep -c` PRINTS 0 and RETURNS 1 when nothing matches, so the obvious
 # `grep -c … || echo 0` emits TWO lines and every `= 0` comparison against it
-# is false — which reads as "the shim was never called" on exactly the runs
-# where it was not supposed to be. head -1 keeps grep's own count and the
-# ${n:-0} covers a missing file.
-_count_lines() {  # $1 = pattern, $2 = file, $3 = 1 to read it as root
+# is false. head -1 keeps grep's own count and ${n:-0} covers a missing file.
+shim_count() {  # $1 = pattern
     local n
-    if [ "${3:-0}" = 1 ]; then n=$(sudo -n grep -c -- "$1" "$2" 2>/dev/null | head -1)
-    else                       n=$(grep -c -- "$1" "$2" 2>/dev/null | head -1); fi
+    n=$(grep -c -- "$1" "$SHIMLOG" 2>/dev/null | head -1)
     printf '%s' "${n:-0}"
 }
-net_log_has() { _count_lines "$1" /var/log/rime-install.log 1; }
-shim_count()  { _count_lines "$1" "$SHIMLOG" 0; }
 
-# ── an image that provably does NOT carry the enrolment helper ──────────────
-# ensure_engine_image() above prefers localhost/rime-os:daily when the machine
-# has one, and a real Rime OS image DOES contain /usr/libexec/rime-luks-enroll.
-# The two cases below turn on an image that does not, so they get their own
-# empty-tar image rather than inheriting a choice that would make them pass or
-# fail depending on what is in this machine's podman storage.
-NOHELPER_IMAGE="localhost/rime-luks-nohelper:test"
-nohelper_made=0
-if [ "$ENGINE_RUNNABLE" = 1 ]; then
-    _nh=$(mktemp "$WORK/empty-nh.XXXXXX.tar")
-    if tar -cf "$_nh" -T /dev/null 2>/dev/null \
-       && sudo -n podman import -q "$_nh" "$NOHELPER_IMAGE" >/dev/null 2>&1; then
-        nohelper_made=1
-    fi
-    rm -f "$_nh"
-fi
-
-# ── the two loop-backed targets ─────────────────────────────────────────────
+# ── the loop-backed targets ─────────────────────────────────────────────────
 # SPARSE FILES, and the dry run writes nothing to either — which is itself
-# asserted with blkid below, on both, after the runs.
-#
-# /var/lab-scratch is where this machine keeps lab images; /tmp is a 15 GB
-# tmpfs on 29 GB of RAM and a CI runner has no /var/lab-scratch at all, so the
-# location is chosen and not assumed.
+# asserted with blkid below, after the runs. One under the engine's minimum,
+# one comfortably over it.
 NETLOOPDIR="${RIME_LOOP_DIR:-/var/lab-scratch}"
 { [ -d "$NETLOOPDIR" ] && [ -w "$NETLOOPDIR" ]; } || NETLOOPDIR="$WORK"
-NOSCRATCH="$WORK/no-such-scratch-volume"   # deliberately never created
-LOOP_BIG=""; LOOP_SMALL=""; NETIMG_BIG=""; NETIMG_SMALL=""
+LOOP_OK=""; LOOP_SMALL=""; NETIMG_OK=""; NETIMG_SMALL=""
 net_release() {
-    [ -n "$LOOP_BIG" ]   && sudo -n losetup -d "$LOOP_BIG"   2>/dev/null
+    [ -n "$LOOP_OK" ]    && sudo -n losetup -d "$LOOP_OK"    2>/dev/null
     [ -n "$LOOP_SMALL" ] && sudo -n losetup -d "$LOOP_SMALL" 2>/dev/null
-    rm -f "$NETIMG_BIG" "$NETIMG_SMALL" 2>/dev/null
-    [ "$nohelper_made" = 1 ] && sudo -n podman rmi -f "$NOHELPER_IMAGE" >/dev/null 2>&1
+    rm -f "$NETIMG_OK" "$NETIMG_SMALL" 2>/dev/null
     return 0
 }
-if [ "$ENGINE_RUNNABLE" = 1 ] && [ "$nohelper_made" = 1 ] && command -v losetup >/dev/null 2>&1; then
-    # 52 GiB clears the engine's own staging budget: stage_budget_kb wants
-    # NEED_SCRATCH_GB (32) + STAGE_RESERVE_GB (15) after the 2 GiB margin the
-    # raw-size check subtracts (49 GiB raw). 20 GiB is comfortably under it,
-    # which is what makes the refusal case a refusal.
-    NETIMG_BIG=$(mktemp "$NETLOOPDIR/rime-luks-net-big.XXXXXX.img")
+if [ "$ENGINE_RUNNABLE" = 1 ] && command -v losetup >/dev/null 2>&1; then
+    NETIMG_OK=$(mktemp "$NETLOOPDIR/rime-luks-net-ok.XXXXXX.img")
     NETIMG_SMALL=$(mktemp "$NETLOOPDIR/rime-luks-net-small.XXXXXX.img")
-    truncate -s 52G "$NETIMG_BIG"   2>/dev/null && LOOP_BIG=$(sudo -n losetup -fP --show "$NETIMG_BIG" 2>/dev/null || true)
-    truncate -s 20G "$NETIMG_SMALL" 2>/dev/null && LOOP_SMALL=$(sudo -n losetup -fP --show "$NETIMG_SMALL" 2>/dev/null || true)
+    truncate -s 32G "$NETIMG_OK"   2>/dev/null && LOOP_OK=$(sudo -n losetup -fP --show "$NETIMG_OK" 2>/dev/null || true)
+    truncate -s 6G  "$NETIMG_SMALL" 2>/dev/null && LOOP_SMALL=$(sudo -n losetup -fP --show "$NETIMG_SMALL" 2>/dev/null || true)
 fi
 
 net_answers() {  # $1 = disk
@@ -551,470 +520,171 @@ net_answers() {  # $1 = disk
         "confirmed=ERASE" "confirm_target=$1" "confirm_disk_id=$disk_fp" > "$ANS"
 }
 
-if [ -n "$LOOP_BIG" ] && [ -n "$LOOP_SMALL" ]; then
-    # ── 1. too small for the fallback, and refused while intact ────────────
-    # The ONLY moment this can be said safely. On this path the download and
-    # the destruction are the same step, so a disk that cannot hold both has
-    # to be refused before the partition table goes — the shipped v1.0.0
-    # installer asked the same question inside stage_setup, i.e. after mkfs.
+if [ -n "$LOOP_OK" ] && [ -n "$LOOP_SMALL" ]; then
+    # ── 1. a disk under the minimum is refused, intact, before the network ──
     : > "$SHIMLOG"
     net_answers "$LOOP_SMALL"
-    out=$(net_run "$ENGINE" RIME_NETINSTALL=1 RIME_DRY_RUN=1 \
-                  RIME_TARGET_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
-    if [[ "$out" == *"too small to install Rime OS over the network"* ]]; then
-        ok "netinstall+encrypt: a target too small to stage onto is refused"
+    out=$(net_run "$ENGINE" RIME_NETINSTALL=1 RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL="$HELPER")
+    if [[ "$out" == *"Rime OS needs at least"* ]] && [[ "$out" == *"Nothing has been erased"* ]]; then
+        ok "netinstall+encrypt: a disk under the minimum is refused"
     else
-        bad "netinstall+encrypt: a target too small to stage onto is refused" \
+        bad "netinstall+encrypt: a disk under the minimum is refused" \
             "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
     fi
-    if [[ "$out" == *"Nothing has been erased"* ]] && [ "$(shim_count '^skopeo inspect')" = 0 ]; then
-        ok "…and it says so before the disk OR the registry is touched" "no skopeo call was made"
+    if [ "$(shim_count '^skopeo')" = 0 ]; then
+        ok "…before the registry is asked anything" "no skopeo call was made"
     else
-        bad "…and it says so before the disk OR the registry is touched" \
-            "erased-claim=$(printf '%s' "$out" | grep -c 'Nothing has been erased') skopeo=$(shim_count '^skopeo inspect')"
-    fi
-    if [ -z "$(sudo -n blkid -p "$LOOP_SMALL" 2>/dev/null || true)" ]; then
-        ok "…and the refused disk has nothing on it"
-    else
-        bad "…and the refused disk has nothing on it" "blkid sees something on $LOOP_SMALL"
+        bad "…before the registry is asked anything" "skopeo calls: $(shim_count '^skopeo')"
     fi
 
-    # MUTATION. Take the raw-size question away and the same 20 GiB disk must
-    # stop being refused — it then walks into the staging fallback, which is
-    # exactly the "erased for nothing" outcome the check exists to prevent.
+    # ── 2. a disk over it reaches the dry-run stop, having downloaded nothing
+    : > "$SHIMLOG"
+    net_answers "$LOOP_OK"
+    out=$(net_run "$ENGINE" RIME_NETINSTALL=1 RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL="$HELPER")
+    if [[ "$out" == *"RIME-INSTALL-DRYRUN-OK"* ]]; then
+        ok "netinstall+encrypt: a 32 GiB disk reaches the dry-run stop"
+    else
+        bad "netinstall+encrypt: a 32 GiB disk reaches the dry-run stop" \
+            "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
+    fi
+    # Printed only on a network install, because there the download and the
+    # destruction are the same step and the owner has to be told before it.
+    if [[ "$out" == *"downloads onto it as it goes"* ]]; then
+        ok "…and warns that the download and the wipe are one step"
+    else
+        bad "…and warns that the download and the wipe are one step" "no such note in the output"
+    fi
+    if [ "$(shim_count '^skopeo inspect')" = 1 ] && [ "$(shim_count '^skopeo')" = 1 ]; then
+        ok "…having asked the registry once and downloaded nothing" "1 inspect, nothing else"
+    else
+        bad "…having asked the registry once and downloaded nothing" \
+            "inspect=$(shim_count '^skopeo inspect') all=$(shim_count '^skopeo')"
+    fi
+    if [ "$(shim_count '^ip route show default')" != 0 ] && [ "$(shim_count '^getent hosts ghcr.io')" != 0 ]; then
+        ok "…and the network diagnosis ran through the shim" "so this case is hermetic"
+    else
+        bad "…and the network diagnosis ran through the shim" \
+            "ip=$(shim_count '^ip route show default') getent=$(shim_count '^getent hosts ghcr.io')"
+    fi
+    if [ -z "$(sudo -n blkid -p "$LOOP_OK" 2>/dev/null || true)" ]; then
+        ok "…and the dry run wrote nothing to the disk it validated"
+    else
+        bad "…and the dry run wrote nothing to the disk it validated" "blkid sees something on $LOOP_OK"
+    fi
+
+    # ── 3. the helper is asked before the network, on this path too ────────
+    # It is the live environment's own copy now, so there is no image to wait
+    # for and no reason to defer the question past anything.
+    : > "$SHIMLOG"
+    out=$(net_run "$ENGINE" RIME_NETINSTALL=1 RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL=/nonexistent/rime-luks-enroll)
+    if [[ "$out" == *"is not executable"* ]] && [ "$(shim_count '^skopeo')" = 0 ]; then
+        ok "netinstall+encrypt: no helper is refused before the registry is asked"
+    else
+        bad "netinstall+encrypt: no helper is refused before the registry is asked" \
+            "skopeo=$(shim_count '^skopeo') $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+    fi
+
+    # MUTATION. Take the minimum-size refusal away and the 6 GiB disk must stop
+    # being refused: that is what makes case 1 a test of the check and not of
+    # something else that happens to say "needs at least".
     NETMUT="$WORK/mutant-netsize"
     cp "$ENGINE" "$NETMUT"; chmod 755 "$NETMUT"
-    sed -i 's|if ! stage_budget_kb "\$_tsize_kb" >/dev/null; then|if false; then|' "$NETMUT"
+    sed -i 's|^  \*) \[ "\$_sz" -ge "\$_min_bytes" \] \\$|  *) true \\|' "$NETMUT"
     if cmp -s "$ENGINE" "$NETMUT"; then
-        bad "mutant: the pre-wipe size check" "the sed program matched no line"
+        bad "mutant: the minimum-size check" "the sed program matched no line"
     elif ! bash -n "$NETMUT" 2>/dev/null; then
-        bad "mutant: the pre-wipe size check" "the mutant does not parse"
+        bad "mutant: the minimum-size check" "the mutant does not parse"
     else
-        mout=$(net_run "$NETMUT" RIME_NETINSTALL=1 RIME_DRY_RUN=1 \
-                       RIME_TARGET_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
-        if [[ "$mout" == *"too small to install Rime OS over the network"* ]]; then
-            bad "mutant: the pre-wipe size check" "the refusal survived its own deletion"
+        net_answers "$LOOP_SMALL"
+        mout=$(net_run "$NETMUT" RIME_NETINSTALL=1 RIME_DRY_RUN=1 RIME_LUKS_ENROLL_LOCAL="$HELPER")
+        if [[ "$mout" == *"Rime OS needs at least"* ]]; then
+            bad "mutant: the minimum-size check" "the refusal survived its own deletion"
         else
-            ok "mutant: the pre-wipe size check" "removed -> a 20 GiB disk would be staged onto"
+            ok "mutant: the minimum-size check" "removed -> a 6 GiB disk would be erased"
         fi
     fi
     rm -f "$NETMUT"
 
-    # ── 2. the deferred enrolment-helper check ─────────────────────────────
-    # Same answers, same missing helper, a disk that IS big enough. The image
-    # has not arrived yet, so the question must be DEFERRED rather than asked
-    # against an empty store — and the run must reach the dry-run stop.
-    : > "$SHIMLOG"
-    net_answers "$LOOP_BIG"
-    out=$(net_run "$ENGINE" RIME_NETINSTALL=1 RIME_DRY_RUN=1 \
-                  RIME_TARGET_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
-    if [[ "$out" == *"RIME-INSTALL-DRYRUN-OK"* ]]; then
-        ok "netinstall+encrypt: no scratch volume reaches the dry-run stop"
-    else
-        bad "netinstall+encrypt: no scratch volume reaches the dry-run stop" \
-            "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"
-    fi
-    # The note the engine prints ONLY on the staging-on-target path. Without
-    # it the case above could be passing through the ordinary whole-disk path
-    # and proving nothing about the fallback.
-    if [[ "$out" == *"downloads onto it as it goes"* ]]; then
-        ok "…by the on-target staging fallback, which says so" "pick_scratch answered @target"
-    else
-        bad "…by the on-target staging fallback, which says so" "no staging note in the output"
-    fi
-    if [ "$(net_log_has 'enrolment-helper check deferred')" != 0 ]; then
-        ok "…and the helper check is deferred, not answered from an empty store"
-    else
-        bad "…and the helper check is deferred, not answered from an empty store" \
-            "no deferral line in /var/log/rime-install.log"
-    fi
-    if [ -z "$(sudo -n blkid -p "$LOOP_BIG" 2>/dev/null || true)" ]; then
-        ok "…and the dry run wrote nothing to the 40 GiB target"
-    else
-        bad "…and the dry run wrote nothing to the 40 GiB target" "blkid sees something on $LOOP_BIG"
-    fi
-    # The shim log is what turns all of the above from "it did not crash" into
-    # a measurement: the reachability probe really ran, and the 5.8 GB download
-    # really did not.
-    if [ "$(shim_count '^skopeo inspect')" = 1 ] && [ "$(shim_count '^skopeo copy')" = 0 ]; then
-        ok "…having checked the registry is reachable and downloaded nothing" \
-           "1 inspect, 0 copy"
-    else
-        bad "…having checked the registry is reachable and downloaded nothing" \
-            "inspect=$(shim_count '^skopeo inspect') copy=$(shim_count '^skopeo copy')"
-    fi
-    if [ "$(shim_count '^ip route show default')" != 0 ] && [ "$(shim_count '^getent hosts ghcr.io')" != 0 ]; then
-        ok "…and the network diagnosis ran through the shim, not this machine" \
-           "so this case is hermetic"
-    else
-        bad "…and the network diagnosis ran through the shim, not this machine" \
-            "ip=$(shim_count '^ip route show default') getent=$(shim_count '^getent hosts ghcr.io')"
-    fi
-
-    # ── 3. the control: the deferral is a DEFERRAL, not a free pass ────────
-    # Identical answers and the identical helper-less image, with the network
-    # install turned off. The image is present locally, so the question CAN be
-    # answered, and it must be answered `no` — by name.
-    out=$(net_run "$ENGINE" RIME_NETINSTALL=0 RIME_DRY_RUN=1 \
-                  RIME_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
-    # It must ALSO not print the staging note: that note is what the case above
-    # reads to prove the fallback was taken, and a note the engine prints on
-    # every path would prove nothing.
-    if [[ "$out" == *"/usr/libexec/rime-luks-enroll"* ]] && [[ "$out" != *"downloads onto it as it goes"* ]]; then
-        ok "the same image offline IS refused, by name" "the deferral is not a free pass"
-    else
-        bad "the same image offline IS refused, by name" \
-            "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
-    fi
-
-    # MUTATION. Delete the deferral arm and the netinstall run must behave like
-    # the offline one: `podman run` against a store that holds nothing, and a
-    # refusal naming the helper. That is what makes the case above a test of
-    # the arm and not of something else letting it through.
-    DEFMUT="$WORK/mutant-defer"
-    cp "$ENGINE" "$DEFMUT"; chmod 755 "$DEFMUT"
-    sed -i 's|elif \[ "\${NETINSTALL:-0}" = 1 \] && \[ "\${STAGE_ON_TARGET:-0}" = 1 \]; then|elif false; then|' "$DEFMUT"
-    if cmp -s "$ENGINE" "$DEFMUT"; then
-        bad "mutant: the deferred helper check" "the sed program matched no line"
-    elif ! bash -n "$DEFMUT" 2>/dev/null; then
-        bad "mutant: the deferred helper check" "the mutant does not parse"
-    else
-        net_answers "$LOOP_BIG"
-        mout=$(net_run "$DEFMUT" RIME_NETINSTALL=1 RIME_DRY_RUN=1 \
-                       RIME_TARGET_IMAGE="$NOHELPER_IMAGE" RIME_SCRATCH_CANDIDATES="$NOSCRATCH")
-        if [[ "$mout" == *"/usr/libexec/rime-luks-enroll"* ]]; then
-            ok "mutant: the deferred helper check" "arm removed -> the not-yet-downloaded image is refused"
-        else
-            bad "mutant: the deferred helper check" \
-                "$(printf '%s' "$mout" | tail -2 | tr '\n' ' ')"
-        fi
-    fi
-    rm -f "$DEFMUT"
-
-    # CONTROL for the two "wrote nothing" assertions. They are measurements
-    # only if blkid would have SAID something had there been something to say.
-    # The small loop is this suite's own sparse file and is finished with, so
-    # put a filesystem on it and require it to be reported.
+    # CONTROL for the "wrote nothing" assertion: it is a measurement only if
+    # blkid would have SAID something had there been something to say.
     sudo -n mkfs.ext4 -q -F "$LOOP_SMALL" >/dev/null 2>&1
     if [ -n "$(sudo -n blkid -p "$LOOP_SMALL" 2>/dev/null || true)" ]; then
         ok "…and blkid would have seen a write if there had been one" "control: mkfs is reported"
     else
         bad "…and blkid would have seen a write if there had been one" \
-            "blkid reported nothing even after mkfs — the two 'wrote nothing' cases prove nothing"
+            "blkid reported nothing even after mkfs — the 'wrote nothing' case proves nothing"
     fi
 elif [ "$ENGINE_RUNNABLE" != 1 ]; then
-    # The same reason check() and the dry-run block above skip: the engine half
-    # needs a Rime OS image in ROOT podman storage and passwordless sudo, and
-    # a machine with neither cannot run the engine at all. Everything else here
-    # is a FAIL, because it means the prerequisites WERE there and the rig did
-    # not come up.
     printf 'SKIP  %-46s no engine image\n' "netinstall+encrypt cases"
-    printf 'SKIP  %-46s no engine image\n' "the encrypted staging fallback"
 else
     bad "netinstall+encrypt cases could not run" \
-        "engine=$ENGINE_RUNNABLE nohelper=$nohelper_made loops='$LOOP_BIG' '$LOOP_SMALL'"
+        "engine=$ENGINE_RUNNABLE loops='$LOOP_OK' '$LOOP_SMALL'"
 fi
 net_release
 
 echo
-echo "── staging really lands on a real filesystem, and really lets go ──────"
-# installer/test-installer.sh already runs stage_setup with losetup, mkfs.xfs
-# and mount STUBBED OUT — which proves the sparse file is unlinked and nothing
-# else. The claim that matters on the encrypted path is the one the stubs make
-# unaskable: that what gets mounted is a REAL filesystem on a REAL loop device
-# and never the RAM overlay. So this runs the shipped stage_setup for real.
-#
-# It is a file under /var/lab-scratch (or $WORK), never a block device, and
-# stage_teardown is asserted to give the loop device back — a leaked one holds
-# a writable fd on the target filesystem and is what stops the NEXT install
-# unmounting it at all.
-STAGE_FNS="$WORK/stage-fns.sh"
-sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p;/^stage_budget_kb()/,/^}/p;/^stage_setup()/,/^}/p;/^stage_teardown()/,/^}/p' \
-    "$ENGINE" > "$STAGE_FNS"
-# stage_probe FNS-FILE OUT-FILE — run the shipped stage_setup/stage_teardown
-# for real against a loop-backed xfs on a file, and write what it built as
-# key=value lines. Factored out so the mutant below runs the IDENTICAL probe.
-stage_probe() {
-    local STAGEROOT="$NETLOOPDIR/rime-luks-stage-probe.$$"
-    sudo -n mkdir -p "$STAGEROOT" 2>/dev/null
-    # The redirect at the end of this command is THIS shell's, into $WORK, on
-    # purpose: the probe runs as root but its output has to be readable by the
-    # assertions below without another sudo.
-    # shellcheck disable=SC2024
-    sudo -n env "STAGE_FNS=$1" "STAGEROOT=$STAGEROOT" bash -c '
-        set -u
-        LOG=/dev/null
-        log() { :; }
-        NEED_SCRATCH_GB=1
-        # A 3 GB ceiling whatever this machine has free: the file is sparse and
-        # mkfs.xfs writes only metadata, so this costs a few MB on disk.
-        _avail_gb=$(df -PBG "$STAGEROOT" | awk "NR==2{gsub(/G/,\"\",\$4); print \$4+0}")
-        STAGE_RESERVE_GB=$(( _avail_gb - 3 ))
-        [ "$STAGE_RESERVE_GB" -ge 1 ] || STAGE_RESERVE_GB=1
-        STAGE_DIR=/run/rime-stage-probe-$$
-        . "$STAGE_FNS"
-        stage_setup "$STAGEROOT" >/dev/null 2>&1 || { echo "SETUP-FAILED"; exit 0; }
-        printf "fstype=%s\n" "$(findmnt -no FSTYPE "$STAGE_MNT" 2>/dev/null)"
-        printf "source=%s\n" "$(findmnt -no SOURCE "$STAGE_MNT" 2>/dev/null)"
-        printf "dfsrc=%s\n"  "$(df -PT "$STAGE_MNT" 2>/dev/null | awk "NR==2{print \$2}")"
-        printf "backing=%s\n" "$( [ -e "$STAGEROOT/.rime-stage.img" ] && echo present || echo unlinked )"
-        printf "tmpdir=%s\n" "$STAGE_TMPDIR"
-        printf "bootcargs=%s\n" "${STAGE_BOOTC_ARGS[*]}"
-        _loop="$STAGE_LOOP"
-        stage_teardown
-        printf "released=%s\n" "$( losetup -a 2>/dev/null | grep -c "^$_loop:" )"
-        printf "tmpdirunset=%s\n" "${TMPDIR-<unset>}"
-        rmdir "$STAGE_DIR" 2>/dev/null || true
-    ' > "$2" 2>&1
-    sudo -n rm -rf "$STAGEROOT" 2>/dev/null
-}
-if ! grep -q '^stage_setup()' "$STAGE_FNS"; then
-    bad "the staging functions could not be read out of the engine" "$ENGINE"
-elif ! sudo -n true 2>/dev/null || ! command -v mkfs.xfs >/dev/null 2>&1; then
-    # A FAIL and not a SKIP, deliberately. mkfs.xfs is not incidental to this
-    # measurement — it is what stage_setup runs, and xfsprogs is one apt line
-    # away (pr-validation.yml installs it for this suite). Skipping here would
-    # hide the only runtime proof that the staging store is a real filesystem
-    # on a real loop device, which is the thing this section exists for.
-    bad "staging could not be measured here" "needs passwordless sudo and mkfs.xfs (xfsprogs)"
-else
-    STAGE_OUT="$WORK/stage-real.txt"
-    stage_probe "$STAGE_FNS" "$STAGE_OUT"
-    _sv() { sed -n "s/^$1=//p" "$STAGE_OUT" | tail -1; }
-    if grep -q SETUP-FAILED "$STAGE_OUT"; then
-        bad "stage_setup builds a real staging filesystem" "$(tr '\n' ' ' < "$STAGE_OUT")"
-        bad "…on a loop device and not on a tmpfs" "stage_setup did not complete"
-        bad "…with TMPDIR redirected into it" "stage_setup did not complete"
-        bad "…and stage_teardown gives the loop device back" "stage_setup did not complete"
-    else
-        if [ "$(_sv fstype)" = xfs ] && [ "$(_sv backing)" = unlinked ]; then
-            ok "stage_setup builds a real staging filesystem" "xfs, backing file unlinked"
-        else
-            bad "stage_setup builds a real staging filesystem" \
-                "fstype=$(_sv fstype) backing=$(_sv backing)"
-        fi
-        case "$(_sv source):$(_sv dfsrc)" in
-            /dev/loop*:xfs) ok "…on a loop device and not on a tmpfs" "$(_sv source)" ;;
-            *) bad "…on a loop device and not on a tmpfs" "source=$(_sv source) df-type=$(_sv dfsrc)" ;;
-        esac
-        case "$(_sv tmpdir)" in
-            /run/rime-stage-probe-*/tmp)
-                if [ "$(_sv bootcargs)" = "--skip-finalize" ]; then
-                    ok "…with TMPDIR redirected into it" "and bootc gets --skip-finalize"
-                else
-                    bad "…with TMPDIR redirected into it" "bootcargs='$(_sv bootcargs)'"
-                fi ;;
-            *) bad "…with TMPDIR redirected into it" "TMPDIR=$(_sv tmpdir)" ;;
-        esac
-        if [ "$(_sv released)" = 0 ] && [ "$(_sv tmpdirunset)" = "<unset>" ]; then
-            ok "…and stage_teardown gives the loop device back" "and unsets TMPDIR"
-        else
-            bad "…and stage_teardown gives the loop device back" \
-                "still-attached=$(_sv released) TMPDIR=$(_sv tmpdirunset)"
-        fi
-    fi
-fi
-
-# MUTATION for the filesystem the store lands on. xfs is not decoration: ext4
-# fixes its inode count at mkfs time and the measured failure was `mkdir: no
-# space left on device` 5 GB in, with 35 GB of free BLOCKS. So the assertion
-# above has to be reading the REAL mounted type and not a string. Swap the mkfs
-# in a copy of the functions and the identical probe must report the other one.
-if grep -q '^stage_setup()' "$STAGE_FNS" && sudo -n true 2>/dev/null; then
-    STAGE_MUT="$WORK/stage-fns-mutant.sh"
-    sed 's/mkfs\.xfs -q -f/mkfs.ext4 -q -F/' "$STAGE_FNS" > "$STAGE_MUT"
-    if cmp -s "$STAGE_FNS" "$STAGE_MUT"; then
-        bad "mutant: the staging filesystem" "the sed program matched no line"
-    else
-        STAGE_MUT_OUT="$WORK/stage-mutant.txt"
-        stage_probe "$STAGE_MUT" "$STAGE_MUT_OUT"
-        _mv() { sed -n "s/^$1=//p" "$STAGE_MUT_OUT" | tail -1; }
-        if [ "$(_mv fstype)" = ext4 ]; then
-            ok "mutant: the staging filesystem" "mkfs swapped -> the probe reports ext4, not xfs"
-        else
-            bad "mutant: the staging filesystem" \
-                "got fstype='$(_mv fstype)' with mkfs.ext4 substituted — the xfs assertion reads nothing"
-        fi
-    fi
-    rm -f "$STAGE_MUT"
-else
-    bad "mutant: the staging filesystem" "the probe could not run"
-fi
-
-# MUTATION for the rule the whole staging design rests on. Delete the line that
-# refuses a RAM filesystem and pick_scratch must start choosing one — which is
-# the bug 63857891 fixed, reproduced on demand.
-TMPFSMUT="$WORK/mutant-tmpfs"
-sed 's/    tmpfs|ramfs|devtmpfs|overlay|squashfs|iso9660|"") return 1 ;;/    "") return 1 ;;/' \
-    "$ENGINE" > "$TMPFSMUT"
-if cmp -s "$ENGINE" "$TMPFSMUT"; then
-    bad "mutant: the RAM-filesystem refusal" "the sed program matched no line"
-else
-    _tm=$(mktemp "$WORK/tmpfs-fns.XXXXXX")
-    sed -n '/^scratch_fs_ok()/,/^}/p;/^pick_scratch()/,/^}/p' "$TMPFSMUT" > "$_tm"
-    mkdir -p /dev/shm/rime-luks-tmpfs-probe 2>/dev/null
-    mout=$(
-        set +u
-        # All three are read by scratch_fs_ok and pick_scratch, which are
-        # sourced out of the mutated engine just below.
-        # shellcheck disable=SC2034
-        NEED_SCRATCH_GB=1
-        # shellcheck disable=SC2034
-        STAGE_TARGET='@target'
-        # shellcheck disable=SC2034
-        DISK=/dev/sdz
-        # shellcheck disable=SC1090
-        . "$_tm"
-        RIME_SCRATCH_CANDIDATES="/dev/shm/rime-luks-tmpfs-probe" pick_scratch 2>/dev/null
-    )
-    rmdir /dev/shm/rime-luks-tmpfs-probe 2>/dev/null
-    rm -f "$_tm"
-    case "$mout" in
-        /dev/shm/*) ok "mutant: the RAM-filesystem refusal" "removed -> pick_scratch chose $mout" ;;
-        *)          bad "mutant: the RAM-filesystem refusal" "got '${mout:-<empty>}' with the refusal gone" ;;
-    esac
-fi
-rm -f "$TMPFSMUT"
-
-echo
 echo "── the order the encrypted path does things in ────────────────────────"
-# ═══ THE ASSERTION THAT CANNOT BE MADE ANY OTHER WAY ═══
-#
-# RIME_DRY_RUN stops the engine immediately before the first destructive
-# command, which is ~300 lines ABOVE everything the encrypted branch does. So
-# no dry run can reach stage_setup-inside-LUKS, the download into it, or the
-# deferred re-check — and the only two things that can are a real encrypted
-# install (installer/test-installer-luks-live.sh, not in CI, and it does not
-# run the netinstall path) and a reading of the source.
-#
-# This reads the source, the same way the privileged-call-site scan above does,
-# and asks one question a comment in the engine already answers for itself:
-# on the path where the image "downloads onto the target", does everything that
-# NEEDS the image happen after it arrives?
+# RIME_DRY_RUN stops the engine before the first destructive command, which is
+# above everything the encrypted branch does, so no dry run can reach the
+# order of its steps; a real encrypted install (test-installer-luks-live.sh,
+# not in CI) and a reading of the source can. This reads the source and asks
+# the question the branch exists to answer: is the recovery key created, and
+# proven to open the volume, BEFORE bootc downloads or writes anything?
 enc_scan() {   # $1 = engine file
     awk '
       /cryptsetup luksFormat "\$\{LUKS_FMT\[@\]\}"/ && !luksfmt { luksfmt = NR }
-      /"\$IMAGE" "\$LUKS_ENROLL_PATH"/ && !enrol { enrol = NR }
-      luksfmt && /netinstall_fetch_into "\$STAGE_MNT"/ && !fetch { fetch = NR }
-      /\[ "\$luks_helper_checked" = 0 \] && ! luks_helper_ok/ && !recheck { recheck = NR }
-      recheck && /bootc install to-filesystem/ && !bootc { bootc = NR }
-      END { printf "luksfmt=%d enrol=%d fetch=%d recheck=%d bootc=%d\n", luksfmt, enrol, fetch, recheck, bootc }
+      luksfmt && /"\$LUKS_ENROLL_PATH" \\$/ && !enrol { enrol = NR }
+      enrol && /recovery key does not open the encrypted volume/ && !proven { proven = NR }
+      proven && /run_bootc_install "\$DISK" "\$TROOT" "\$\{LUKS_KARGS\[@\]\}"/ && !bootc { bootc = NR }
+      END { printf "luksfmt=%d enrol=%d proven=%d bootc=%d\n", luksfmt, enrol, proven, bootc }
     ' "$1"
 }
 encline=$(enc_scan "$ENGINE")
-e_enrol=$(printf '%s\n' "$encline" | tr ' ' '\n' | sed -n 's/^enrol=//p')
-e_fetch=$(printf '%s\n' "$encline" | tr ' ' '\n' | sed -n 's/^fetch=//p')
-e_recheck=$(printf '%s\n' "$encline" | tr ' ' '\n' | sed -n 's/^recheck=//p')
 e_bootc=$(printf '%s\n' "$encline" | tr ' ' '\n' | sed -n 's/^bootc=//p')
-if [ "${e_enrol:-0}" = 0 ] || [ "${e_fetch:-0}" = 0 ] || [ "${e_recheck:-0}" = 0 ] || [ "${e_bootc:-0}" = 0 ]; then
-    bad "the encrypted branch's order could be read" "$encline"
-    bad "the enrolment helper runs only once the image exists" "could not read the order"
+if [ "${e_bootc:-0}" != 0 ]; then
+    ok "the recovery key is made and proven before bootc runs" "$encline"
 else
-    ok "the encrypted branch's order could be read" "$encline"
-    # This one holds today, and is the property the deferral was written for:
-    # the re-check sits between the download and the first byte bootc writes,
-    # so a bad image is caught with the volume still empty.
-    if [ "$e_fetch" -lt "$e_recheck" ] && [ "$e_recheck" -lt "$e_bootc" ]; then
-        ok "the deferred re-check sits between the download and the write" \
-           "fetch=$e_fetch recheck=$e_recheck bootc=$e_bootc"
-    else
-        bad "the deferred re-check sits between the download and the write" "$encline"
-    fi
-    # ═══ THE ASSERTION THIS SECTION WAS WRITTEN FOR ═══
-    # RED on roadmap/v2.2 @ 280b6cb35 when it was written; green since the
-    # engine was reordered. The account below is the record of the DEFECT, in
-    # the past tense, not a description of today's engine.
-    #
-    # On the encrypted staging fallback IMAGE is the REGISTRY ref and
-    # PODMAN_STORE is still empty — netinstall_fetch_into is what sets it — yet
-    # the enrolment helper was invoked as `podman run "$IMAGE"
-    # "$LUKS_ENROLL_PATH"` ~70 lines BEFORE that download. On a live ISO that
-    # podman run pulls ~15 GB into the default containers-storage, i.e. the RAM
-    # overlay the entire staging design exists to avoid, on the one machine
-    # shape the fallback was added for. The engine's own comment at the
-    # deferral said the check is "deferred to the encrypted branch, which asks
-    # the moment the image exists" — the check had moved, the enrolment call it
-    # depends on had not. It has now, on every encrypted path.
-    if [ "$e_enrol" -gt "$e_fetch" ]; then
-        ok "the enrolment helper runs only once the image exists" \
-           "enrol=$e_enrol fetch=$e_fetch"
-    else
-        bad "the enrolment helper runs only once the image exists" \
-            "enrol=$e_enrol runs BEFORE fetch=$e_fetch: on the netinstall fallback that podman run pulls the image into RAM-backed default storage. See the comment above this assertion."
-    fi
+    bad "the recovery key is made and proven before bootc runs" "$encline"
 fi
-
-# THE SCAN IS NOT A TAUTOLOGY, and that has to be SHOWN rather than claimed.
-# A copy of the engine with the enrolment block moved back ABOVE the staging
-# block — where it sat before the fix — must make the same scan say no. It is a
-# mutant built on a copy and never written back.
-#
-# THIS PROBE USED TO POINT THE OTHER WAY, and the flip is the whole point.
-# While the engine was red it moved the block DOWN and required a yes; the
-# moment the engine was fixed that probe could not be built at all, because the
-# block is already below the fetch — so a fix to the engine alone would have
-# left this suite at 89/1 with a DIFFERENT red. Same shape, same strength, one
-# case either way: a mutation check mutates AWAY from the state of the tree.
+# THE SCAN IS NOT A TAUTOLOGY: move the bootc call above the enrolment in a
+# copy, and the same scan must stop finding the order.
 ORDPROBE="$WORK/engine-reordered"
 cp "$ENGINE" "$ORDPROBE"
 if python3 - "$ORDPROBE" <<'PYMUT' 2>/dev/null
 import sys
 p = sys.argv[1]
 lines = open(p, encoding="utf-8").read().split("\n")
-try:
-    note = next(i for i, l in enumerate(lines) if l.strip() == 'note "Creating the recovery key …"')
-except StopIteration:
-    sys.exit(1)
-start = max(i for i in range(note) if lines[i] == '  if [ "${rc:-0}" = 0 ]; then')
-end = next(i for i in range(start + 1, len(lines)) if lines[i] == '  fi')
-# The encrypted branch's own staging block is the LAST one above the enrolment.
-# The two unencrypted paths open theirs with the same line, hence [-1] and not
-# a search from the top.
-stages = [i for i in range(start)
-          if lines[i] == '  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then']
-if not stages:
-    sys.exit(1)
-block = lines[start:end + 1]
-del lines[start:end + 1]
-lines[stages[-1]:stages[-1]] = block
+call = next(i for i, l in enumerate(lines)
+            if l.strip() == 'run_bootc_install "$DISK" "$TROOT" "${LUKS_KARGS[@]}" 2>&1 | tee -a "$LOG"')
+note = next(i for i, l in enumerate(lines) if l.strip() == 'note "Creating the recovery key …"')
+moved = lines.pop(call)
+lines.insert(note, moved)
 open(p, "w", encoding="utf-8").write("\n".join(lines))
-sys.exit(0)
 PYMUT
 then
     if cmp -s "$ENGINE" "$ORDPROBE"; then
         bad "the order scan can also say no" "the mutation changed nothing"
-    elif ! bash -n "$ORDPROBE" 2>/dev/null; then
-        bad "the order scan can also say no" "the reordered mutant does not parse"
     else
         probeline=$(enc_scan "$ORDPROBE")
-        p_enrol=$(printf '%s\n' "$probeline" | tr ' ' '\n' | sed -n 's/^enrol=//p')
-        p_fetch=$(printf '%s\n' "$probeline" | tr ' ' '\n' | sed -n 's/^fetch=//p')
-        if [ "${p_fetch:-0}" != 0 ] && [ "${p_enrol:-0}" != 0 ] \
-           && [ "${p_enrol:-0}" -lt "${p_fetch:-0}" ]; then
-            ok "the order scan can also say no" \
-               "enrolment moved back above the fetch -> $probeline"
-        else
-            bad "the order scan can also say no" "$probeline — the scan may be measuring nothing"
-        fi
+        case "$probeline" in
+            *"bootc=0"*) ok "the order scan can also say no" "bootc moved above the enrolment -> $probeline" ;;
+            *) bad "the order scan can also say no" "$probeline — the scan may be measuring nothing" ;;
+        esac
     fi
 else
     bad "the order scan can also say no" "could not build the reordered mutant"
 fi
 rm -f "$ORDPROBE"
 
-
-echo
 echo
 echo "── a loopback target must not be able to reach this machine's NVRAM ───"
-# WHY THIS IS IN THE ENCRYPTION SUITE. The encrypted path is the one that runs
-# `bootc install to-filesystem` inside a `--privileged --pid=host` container,
-# and the live half of this suite points that at a LOOPBACK FILE on a
-# developer's own machine. On 2026-09-20 exactly that shape of run — a
-# privileged loopback install with the host's efivarfs visible — deleted a
-# laptop's real `Rime OS` boot entry and recreated it against the loop device's
-# ESP. The laptop would not boot. BOOT-BREAKAGE-2026-09-20.md.
+# WHY THIS IS IN THE ENCRYPTION SUITE. The live half of this suite points a
+# real `bootc install to-filesystem` at a LOOPBACK FILE on a developer's own
+# machine. On 2026-09-20 exactly that shape of run — a loopback install with
+# the host's efivarfs visible — deleted a laptop's real `Rime OS` boot entry
+# and recreated it against the loop device's ESP. The laptop would not boot.
+# BOOT-BREAKAGE-2026-09-20.md.
 #
-# The engine now masks efivars when, and only when, the target is loop-backed.
 # These assertions run the REAL FUNCTIONS OUT OF THE SHIPPED ENGINE against a
 # fabricated sysfs tree, so they measure behaviour and not the presence of a
 # string in a file.
@@ -1023,8 +693,9 @@ FAKESYS="$WORK/sysblock"
 mkdir -p "$FAKESYS/loop9/loop"
 printf '/var/lab-scratch/pretend.img\n' > "$FAKESYS/loop9/loop/backing_file"
 
-# nvram_probe ENGINE DEVICE [RIME_SYSFS_BLOCK] — prints the NVRAM_ARGS the
-# named engine would use for that device, or `EXTRACT-FAILED`.
+# nvram_probe ENGINE DEVICE [RIME_SYSFS_BLOCK] — prints what the named engine
+# would hand bootc for that device, and whether it would mask efivars:
+# "<NVRAM_BOOTC_ARGS> mask=<0|1>", or `EXTRACT-FAILED`.
 nvram_probe() {
     local eng="$1" dev="$2" seam="${3:-}"
     sed -n '/^disk_is_loopback()/,/^}/p;/^set_nvram_args_for()/,/^}/p' "$eng" > "$NVFNS"
@@ -1034,17 +705,13 @@ nvram_probe() {
         note() { :; }
         . "$1"
         set_nvram_args_for "$2"
-        printf "%s %s\n" "${NVRAM_BOOTC_ARGS[*]-}" "${NVRAM_ARGS[*]-}"
+        printf "%s mask=%s\n" "${NVRAM_BOOTC_ARGS[*]-}" "${NVRAM_MASK:-unset}"
     ' _ "$NVFNS" "$dev" 2>/dev/null
 }
 
 got=$(nvram_probe "$ENGINE" /dev/loop9 "$FAKESYS")
-# THE PREVENTION, and it is the bootc flag and not the mount. MEASURED
-# 2026-09-20 22:12: a loopback install ran with the tmpfs mask applied and
-# logged, and STILL executed `efibootmgr --create --disk /dev/loop1` against
-# this machine. bootc needs --pid=host and re-enters the host mount namespace
-# for the bootloader step, so the container's own mounts are not where bootupd
-# looks. `bootc install --generic-image` skips the firmware step outright.
+# THE PREVENTION, and it is the bootc flag and not the mount: bootc's own help
+# for --generic-image is "Changes to the system firmware will be skipped."
 case "$got" in
     *"--generic-image"*)
         ok "a loop-backed target skips the firmware step" "$got" ;;
@@ -1052,123 +719,82 @@ case "$got" in
         bad "a loop-backed target skips the firmware step" "could not extract the functions from the engine" ;;
     *)  bad "a loop-backed target skips the firmware step" "got '${got:-<empty>}'" ;;
 esac
-# Defence in depth, kept and asserted, but never again mistaken for the guard.
+# Defence in depth, kept and asserted, but never mistaken for the guard.
 case "$got" in
-    *"--tmpfs /sys/firmware/efi/efivars"*)
-        ok "and still masks efivars in the container" "second layer, not the first" ;;
-    *)  bad "and still masks efivars in the container" "got '${got:-<empty>}'" ;;
+    *"mask=1"*) ok "and still masks efivars around bootc" "second layer, not the first" ;;
+    *)          bad "and still masks efivars around bootc" "got '${got:-<empty>}'" ;;
 esac
 
 # The inverse, and it is the one that must not regress: a REAL disk still gets
 # the firmware, because a real install has to create a boot entry or the
 # machine it just installed will not start.
 got=$(nvram_probe "$ENGINE" /dev/nvme0n1 "$FAKESYS")
-if [ -z "$(printf '%s' "$got" | tr -d '[:space:]')" ]; then
-    ok "a real block device still reaches the firmware" "no extra arguments added"
+if [ "$(printf '%s' "$got" | tr -d '[:space:]')" = "mask=0" ]; then
+    ok "a real block device still reaches the firmware" "no extra arguments, no mask"
 else
-    bad "a real block device still reaches the firmware" "engine would have added '$got'"
+    bad "a real block device still reaches the firmware" "engine would have used '$got'"
 fi
 
 # The seam only ever ADDS loop-ness: with the override unset, the fabricated
 # tree is invisible and /dev/loop9 (which does not exist here) is not loop.
-# A seam that could HIDE a loop device would be able to re-create the incident.
 got=$(nvram_probe "$ENGINE" /dev/loop9 "")
-if [ -z "$(printf '%s' "$got" | tr -d '[:space:]')" ]; then
+if [ "$(printf '%s' "$got" | tr -d '[:space:]')" = "mask=0" ]; then
     ok "the test seam cannot hide a real loop device" "unset override -> real sysfs only"
 else
     bad "the test seam cannot hide a real loop device" "got '$got' with the override unset"
 fi
 
-# STRUCTURAL: a fifth install call site added later without the mask would pass
+# STRUCTURAL: an install call site added later without the guard would pass
 # every behavioural assertion above and still brick a laptop. So the engine is
-# read as a whole: every privileged container is found, its full (backslash-
-# continued) command line is reassembled, and each one is classified.
-#
-# An install container — one whose command is `bootc install` — must be
-# immediately preceded by set_nvram_args_for AND must pass NVRAM_ARGS.
-#
-# There is exactly one privileged container that is NOT an install: the call to
-# the enrolment helper. It is named here rather than exempted by position,
-# because it deliberately keeps the host's efivarfs — /usr/libexec/rime-luks-
-# enroll decides whether to add a TPM keyslot by reading the SecureBoot EFI
-# variable, and masking that would silently turn every TPM enrolment off. It
-# runs no bootloader tool. Any OTHER privileged container appearing in this
-# engine is an unreviewed NVRAM risk and fails this assertion by name.
-nvscan=$(awk '
-  { l[NR] = $0 }
-  END {
-    for (i = 1; i <= NR; i++) {
-      if (l[i] !~ /run --rm --privileged/) continue
-      site++
-      cmd = l[i]; j = i
-      while (l[j] ~ /\\$/ && j < NR) { j++; cmd = cmd " " l[j] }
-      if (cmd ~ /bootc install/) {
-        inst++
-        if (l[i-1] ~ /set_nvram_args_for/ && cmd ~ /NVRAM_ARGS/ && cmd ~ /NVRAM_BOOTC_ARGS/) good++
-        else printf "UNGUARDED-INSTALL:%d ", i
-      } else if (cmd ~ /LUKS_ENROLL_PATH/) {
-        enrol++
-      } else {
-        printf "UNREVIEWED-PRIVILEGED:%d ", i
+# read as a whole: every executable line that starts a bootc install is found,
+# and each must be inside run_bootc_install, which must call set_nvram_args_for
+# on its disk before it and hand NVRAM_BOOTC_ARGS to bootc.
+nv_scan() {  # $1 = engine file
+    awk '
+      /^run_bootc_install\(\) \{/ { infn = 1; fnstart = NR }
+      infn && /^\}/ { infn = 0 }
+      infn && /set_nvram_args_for "\$disk"/ && !setl { setl = NR }
+      infn && /NVRAM_BOOTC_ARGS\[@\]/ && !argl { argl = NR }
+      /^[[:space:]]*#/ { next }
+      /install (to-filesystem|to-disk|to-existing-root)/ {
+        sites++
+        if (infn) inside++; else printf "OUTSIDE:%d ", NR
       }
-    }
-    printf "sites=%d install=%d guarded=%d enrol=%d\n", site, inst, good, enrol
-  }' "$ENGINE")
-nvsites=$(printf '%s' "$nvscan"  | sed -n 's/.*sites=\([0-9]*\).*/\1/p')
-nvinst=$(printf '%s' "$nvscan"   | sed -n 's/.*install=\([0-9]*\).*/\1/p')
-nvgood=$(printf '%s' "$nvscan"   | sed -n 's/.*guarded=\([0-9]*\).*/\1/p')
-nvenrol=$(printf '%s' "$nvscan"  | sed -n 's/.*enrol=\([0-9]*\).*/\1/p')
+      END { printf "sites=%d inside=%d set=%d args=%d\n", sites, inside, setl, argl }
+    ' "$1"
+}
+nvscan=$(nv_scan "$ENGINE")
 case "$nvscan" in
-    *UNGUARDED-INSTALL*|*UNREVIEWED-PRIVILEGED*)
-        bad "every privileged install call site is guarded" "$nvscan" ;;
-    *)
-        if [ "${nvinst:-0}" -ge 4 ] && [ "${nvinst:-0}" = "${nvgood:-0}" ] \
-           && [ "${nvenrol:-0}" = 1 ] \
-           && [ "$(( ${nvinst:-0} + ${nvenrol:-0} ))" = "${nvsites:-0}" ]; then
-            ok "every privileged install call site is guarded" "$nvscan"
-        else
-            bad "every privileged install call site is guarded" "$nvscan"
-        fi ;;
+    *OUTSIDE*) bad "the one bootc call site is guarded" "$nvscan" ;;
+    *"sites=1 inside=1 set=0 "*|*" args=0"*) bad "the one bootc call site is guarded" "$nvscan" ;;
+    *"sites=1 inside=1 "*) ok "the one bootc call site is guarded" "$nvscan" ;;
+    *) bad "the one bootc call site is guarded" "$nvscan" ;;
 esac
 
-# MUTATION for the structural scan itself: take the guard off ONE install call
-# site and the scan must name that site. Without this the scan could be a
-# tautology that passes whatever the engine looks like.
+# MUTATION for the scan itself: take the guard out of run_bootc_install and
+# the scan must say so.
 MUT_SITE="$WORK/mutant-site"
 cp "$ENGINE" "$MUT_SITE"
-python3 - "$MUT_SITE" <<'PY' 2>/dev/null || sed -i '0,/^  set_nvram_args_for "\$DISK"$/{/^  set_nvram_args_for "\$DISK"$/d}' "$MUT_SITE"
-import sys
-p = sys.argv[1]
-lines = open(p, encoding="utf-8").read().split("\n")
-for i, l in enumerate(lines):
-    if l.strip() == 'set_nvram_args_for "$DISK"':
-        del lines[i]
-        break
-else:
-    sys.exit(1)
-open(p, "w", encoding="utf-8").write("\n".join(lines))
-PY
+sed -i '/^run_bootc_install() {/,/^}/{/^  set_nvram_args_for "\$disk"$/d}' "$MUT_SITE"
 if cmp -s "$ENGINE" "$MUT_SITE"; then
-    bad "mutant: one call site loses its guard" "the mutation changed nothing"
+    bad "mutant: the call site loses its guard" "the mutation changed nothing"
 elif ! bash -n "$MUT_SITE" 2>/dev/null; then
-    bad "mutant: one call site loses its guard" "the mutant does not parse"
+    bad "mutant: the call site loses its guard" "the mutant does not parse"
 else
-    mutscan=$(awk '
-      { l[NR] = $0 }
-      END {
-        for (i = 1; i <= NR; i++) {
-          if (l[i] !~ /run --rm --privileged/) continue
-          cmd = l[i]; j = i
-          while (l[j] ~ /\\$/ && j < NR) { j++; cmd = cmd " " l[j] }
-          if (cmd ~ /bootc install/ && !(l[i-1] ~ /set_nvram_args_for/ && cmd ~ /NVRAM_ARGS/ && cmd ~ /NVRAM_BOOTC_ARGS/))
-            printf "UNGUARDED-INSTALL:%d ", i
-        }
-      }' "$MUT_SITE")
-    case "$mutscan" in
-        *UNGUARDED-INSTALL*) ok "mutant: one call site loses its guard" "scan named it: $mutscan" ;;
-        *) bad "mutant: one call site loses its guard" "the scan saw nothing wrong" ;;
+    case "$(nv_scan "$MUT_SITE")" in
+        *"set=0 "*) ok "mutant: the call site loses its guard" "the scan named it" ;;
+        *) bad "mutant: the call site loses its guard" "the scan saw nothing wrong: $(nv_scan "$MUT_SITE")" ;;
     esac
 fi
+# …and a second call site outside it must be named too.
+MUT_SITE2="$WORK/mutant-site2"
+cp "$ENGINE" "$MUT_SITE2"
+printf '\nbootc install to-filesystem /tmp/nowhere\n' >> "$MUT_SITE2"
+case "$(nv_scan "$MUT_SITE2")" in
+    *OUTSIDE*) ok "mutant: a second call site is named" ;;
+    *) bad "mutant: a second call site is named" "$(nv_scan "$MUT_SITE2")" ;;
+esac
+rm -f "$MUT_SITE" "$MUT_SITE2"
 
 # MUTATION. Remove the one line that adds --generic-image and the loop case
 # must stop skipping the firmware. One line, deleted by an exact match, so the
@@ -1186,6 +812,52 @@ else
         *"--generic-image"*) bad "mutant: the firmware-skip flag" "it survived its own deletion — the case proves nothing" ;;
         *)                   ok "mutant: the firmware-skip flag" "removed -> a loopback target would write NVRAM again" ;;
     esac
+fi
+rm -f "$MUT_NV"
+
+echo
+echo "── the recovery key on a machine not booted from a Rime USB stick ─────"
+# A DVD, Ventoy, a VM's ISO: no RIMEEFI partition to save the key to. Under
+# `set -u` a bare `local dst` in surface_recovery_key was unset on that path and
+# killed the engine right after the key was created — no RIME-INSTALL-FAILED, an
+# encrypted empty disk. Measured in a VM booting the ISO as a CD, 2026-10-04.
+# The shipped function runs here, with blkid stubbed to find nothing.
+RK="$WORK/recovery-fn.sh"
+sed -n '/^surface_recovery_key()/,/^}/p' "$ENGINE" > "$RK"
+rk_probe() {  # $1 = file holding the function
+    bash -c '
+        set -uo pipefail
+        LOG=/dev/null
+        log() { :; }; note() { printf "%s\n" "$*"; }; secret_line() { printf "%s\n" "$*"; }
+        blkid() { return 2; }
+        unset RIME_RECOVERY_DIR
+        . "$1"
+        surface_recovery_key test-key-0000 && echo "RETURNED-0"
+    ' _ "$1" 2>&1
+}
+if grep -q '^surface_recovery_key()' "$RK"; then
+    out=$(rk_probe "$RK")
+    if [[ "$out" == *"RIME-INSTALL-RECOVERY-UNSAVED: this installer is not running from a Rime USB stick"* ]] \
+       && [[ "$out" == *"RETURNED-0"* ]]; then
+        ok "no Rime stick: the key is shown, reported unsaved, and the install goes on"
+    else
+        bad "no Rime stick: the key is shown, reported unsaved, and the install goes on" \
+            "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"
+    fi
+    # MUTATION: the declaration as it was.
+    sed 's/^  local key="\$1" esp="" dst="" path="" saved=0 why=""$/  local key="$1" esp dst path saved=0 why=""/' "$RK" > "$RK.mut"
+    if cmp -s "$RK" "$RK.mut"; then
+        bad "mutant: the bare local dst" "the sed program matched no line"
+    else
+        out=$(rk_probe "$RK.mut")
+        if [[ "$out" == *"unbound variable"* ]] && [[ "$out" != *"RETURNED-0"* ]]; then
+            ok "mutant: the bare local dst" "dies on 'dst: unbound variable', as the shipped engine did"
+        else
+            bad "mutant: the bare local dst" "the old declaration did not fail here: $(printf '%s' "$out" | tail -1)"
+        fi
+    fi
+else
+    bad "the recovery-key function could be read out of the engine" "no surface_recovery_key()"
 fi
 
 # ── the keymap half, run where the data it reads actually exists ───────────
@@ -1285,7 +957,7 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # built: without it these six assertions read the tester's own kbd package
     # and were red on every CI runner this suite has ever run on.
     cp_check() {
-        printf '%s' "$2" | sudo -n RIME_KBD_KEYMAPS="$4" RIME_KBD_MODEL_MAP="$KBD_MODELMAP" \
+        printf '%s' "$2" | sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_KBD_KEYMAPS="$4" RIME_KBD_MODEL_MAP="$KBD_MODELMAP" \
             "$1" --check-passphrase "$3" "" 2>&1
     }
 
@@ -1357,7 +1029,7 @@ if sudo -n true 2>/dev/null && [ -x "$ENGINE" ]; then
     # typeable-but-inconvenient passphrase as "the engine crashed" and block an
     # install this same passphrase would succeed at today.
     printf '%s' "rime1zed" \
-        | sudo -n RIME_KBD_KEYMAPS="$KBD_TREE" RIME_KBD_MODEL_MAP="$KBD_MODELMAP" \
+        | sudo -n RIME_BOOTC="$BOOTC_STUB" RIME_KBD_KEYMAPS="$KBD_TREE" RIME_KBD_MODEL_MAP="$KBD_MODELMAP" \
             "$ENGINE" --check-passphrase vn "" >/dev/null 2>&1
     _cprc=$?
     if [ "$_cprc" = 0 ]; then ok "a 'no' verdict still exits 0 — advisory, never a gate"

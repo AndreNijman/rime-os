@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  live-env-engine — run installer/rime-install the way the live ISO runs it:
+#  inside the installer's own live-environment image, not on this host.
+#
+#    live-env-engine [VAR=value ...] -- ENGINE [ENGINE-ARGS...]
+#
+#  ═══ WHY THIS EXISTS ═══
+#
+#  The engine installs with the live environment's OWN bootc (see "Where the OS
+#  comes from" in rime-install). Run directly on a developer's Rime laptop that
+#  is the laptop's bootc on an ostree-booted host, which is not the machine the
+#  engine runs on in real life and does not behave like it: MEASURED
+#  2026-10-04, bootc 1.16.13 on a booted Rime host with two deployments stopped
+#  at "Creating source info from a given imageref: … Multiple commit objects
+#  found" before writing a byte. The live ISO is a plain fedora:43 userspace;
+#  so is the image this runs the engine in.
+#
+#  It reproduces what the ISO is, not what is convenient:
+#    * the live env image built from installer/Containerfile.installer
+#      (RIME_LIVE_ENV_IMAGE=… as an argument, since sudo strips it from the
+#      environment; default localhost/rime-installer:latest);
+#    * the three things build-live-iso.sh step 3 carries out of the image being
+#      installed — /etc/selinux, /usr/lib/ostree/prepare-root.conf,
+#      /usr/libexec/rime-luks-enroll — taken from RIME_IMAGE when the caller
+#      passes one, else from localhost/rime-os:rime;
+#    * SELinux disabled as the kernel sees it (the ISO boots selinux=0), and no
+#      /run/.containerenv, so bootc takes itself for a host rather than a
+#      container, as it does on the ISO.
+#
+#  NOT a place this tool decides anything about the disk. The caller wraps it in
+#  tests/lab/nvram-guard exactly as it wrapped the engine before, and every
+#  disk guard is still the engine's own.
+#
+#  Mounted at the same paths inside as outside, so the arguments a suite passes
+#  (answers file, helper, recovery dir, the engine itself) mean the same thing
+#  in both places: this repository, /var/lab-scratch, /tmp, /dev, the host's
+#  udev database (lsblk reads partition types from it) and root podman storage
+#  (the containers-storage source). /var/log is the host's, so a suite reads
+#  /var/log/rime-install.log where it always has.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+REPO="$(cd "$HERE/.." && pwd)"
+LIVE="${RIME_LIVE_ENV_IMAGE:-localhost/rime-installer:latest}"
+
+envs=()
+while [ $# -gt 0 ] && [ "$1" != -- ]; do
+  case "$1" in
+    # This one is for the runner, not the engine, and it travels as an argument
+    # because sudo's env_reset strips it from the environment.
+    RIME_LIVE_ENV_IMAGE=*) LIVE="${1#RIME_LIVE_ENV_IMAGE=}" ;;
+    *=*) envs+=("$1") ;;
+    *)   echo "live-env-engine: expected VAR=value or --, got '$1'" >&2; exit 2 ;;
+  esac
+  shift
+done
+[ "${1:-}" = -- ] || { echo "usage: live-env-engine [VAR=value ...] -- ENGINE [ARGS...]" >&2; exit 2; }
+shift
+[ $# -ge 1 ] || { echo "live-env-engine: no engine given" >&2; exit 2; }
+# The suites name the engine relative to installer/; inside the container the
+# working directory is /, so it is made absolute here, where it resolves.
+eng=$(realpath -e "$1") || { echo "live-env-engine: no engine at '$1'" >&2; exit 2; }
+shift; set -- "$eng" "$@"
+[ "$(id -u)" = 0 ] || { echo "live-env-engine: must run as root (the engine does)" >&2; exit 2; }
+
+src="localhost/rime-os:rime"
+for e in "${envs[@]}"; do
+  case "$e" in RIME_IMAGE=*) src="${e#RIME_IMAGE=}" ;; esac
+done
+podman image exists "$LIVE" || { echo "live-env-engine: the live env image $LIVE is not here (build it from installer/Containerfile.installer)" >&2; exit 2; }
+podman image exists "$src" || { echo "live-env-engine: $src is not in root podman storage" >&2; exit 2; }
+
+carried=$(mktemp -d /var/tmp/rime-live-env.XXXXXX) || exit 2
+trap 'rm -rf "$carried"' EXIT
+cid=$(podman create "$src") || exit 2
+ok=1
+podman cp "$cid:/etc/selinux" "$carried/selinux" || ok=0
+podman cp "$cid:/usr/lib/ostree/prepare-root.conf" "$carried/prepare-root.conf" || ok=0
+podman cp "$cid:/usr/libexec/rime-luks-enroll" "$carried/rime-luks-enroll" || ok=0
+podman rm "$cid" >/dev/null
+[ "$ok" = 1 ] || { echo "live-env-engine: could not carry the bootc inputs out of $src" >&2; exit 2; }
+
+binds=(-v /dev:/dev -v /run/udev:/rime-host-udev:ro -v /var/log:/var/log
+       -v /var/lib/containers:/var/lib/containers
+       -v "$REPO":"$REPO" -v /tmp:/tmp
+       -v "$carried/selinux":/etc/selinux:ro
+       -v "$carried/prepare-root.conf":/usr/lib/ostree/prepare-root.conf:ro
+       -v "$carried/rime-luks-enroll":/usr/libexec/rime-luks-enroll:ro)
+[ -d /var/lab-scratch ] && binds+=(-v /var/lab-scratch:/var/lab-scratch:rshared)
+
+# Not `exec`: the carried files must outlive the container and then go, which
+# the EXIT trap does only if this shell is still here to run it.
+# shellcheck disable=SC2016  # expanded inside the container, not here
+podman run --rm --privileged --security-opt label=disable --net=host \
+  "${binds[@]}" "$LIVE" bash -c '
+    # A fresh /run, as a booted live ISO has, with the host udev database bound
+    # back. Unmounting and deleting /run/.containerenv alone is not enough:
+    # with the host container storage bound in (the containers-storage
+    # source), the unlink fails EBUSY. MEASURED 2026-10-04.
+    mount -t tmpfs -o mode=0755 rime-live-run /run || exit 2
+    mkdir -p /run/udev /run/lock && mount --bind /rime-host-udev /run/udev || exit 2
+    [ ! -e /run/.containerenv ] || { echo "live-env-engine: /run/.containerenv is still there" >&2; exit 2; }
+    mount -t tmpfs -o size=1m rime-no-selinux /sys/fs/selinux || exit 2
+    exec env "$@"' live-env-engine "${envs[@]}" "$@"
+exit $?
