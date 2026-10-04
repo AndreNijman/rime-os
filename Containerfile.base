@@ -2095,6 +2095,26 @@ RUN set -eux; \
     systemctl enable rime-sysext-rebuild.service; \
     test -L /etc/systemd/system/multi-user.target.wants/rime-sysext-rebuild.service
 
+# ── The store compactor ─────────────────────────────────────────────────────
+# Keeps /sysroot/ostree/repo and /var/lib/flatpak/repo compressed after every
+# update, and compresses the whole store once on a machine installed before
+# the installer did it (2026-10-04). libostree preallocates what it writes and
+# btrfs never compresses a preallocated extent, so nothing else would; the
+# engine's header has the measurements.
+COPY --chmod=0755 files/system/libexec/rime-store-compact /usr/libexec/rime-store-compact
+COPY files/system/units/rime-store-compact.service \
+     files/system/units/rime-store-compact.timer \
+     /usr/lib/systemd/system/
+RUN set -eux; \
+    bash -n /usr/libexec/rime-store-compact; \
+    for t in btrfs filefrag unshare findmnt flock split comm xargs sync df; do \
+        command -v "$t" >/dev/null || { echo "FATAL: rime-store-compact needs $t"; exit 1; }; \
+    done; \
+    printf '%s\n' 'd /var/lib/rime/store-compact 0700 root root -' \
+        > /usr/lib/tmpfiles.d/rime-store-compact.conf; \
+    systemctl enable rime-store-compact.timer; \
+    test -L /etc/systemd/system/timers.target.wants/rime-store-compact.timer
+
 # ── Rime Capsules (§8) ──────────────────────────────────────────────────────
 # The other half of "how does software get onto this machine". The extension
 # engine above serves the system: one signed set of RPMs overlaid onto /usr,

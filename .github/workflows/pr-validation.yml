@@ -2145,6 +2145,18 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-pkg.sh
 
+      # The store compactor, for real: as root, against a throwaway btrfs on a
+      # loop device laid out like a Rime machine. It rewrites the objects of
+      # the OS and Flatpak stores, so the suite holds what that must not change
+      # (bytes, hardlinks, ostree metadata, objects already compressed) as well
+      # as what it must. RIME_COMPACT_REQUIRE turns a missing tool into a
+      # failure here rather than a skip.
+      - name: The store compactor shrinks the store and changes nothing else
+        if: ${{ !cancelled() }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq btrfs-progs attr
+          RIME_COMPACT_REQUIRE=1 ./tests/test-rime-store-compact.sh
+
       # The same engine on a machine whose user extension predates the rebrand
       # (/var/lib/extensions/apex-user.raw): it must be adopted as current, not  (rime-rename: keep)
       # rebuilt at first boot, and the next real rebuild must replace it rather
@@ -4299,6 +4311,8 @@ jobs:
           # expansion in a command that runs as root.
           shellcheck -S warning files/system/libexec/rime-pkg \
             tests/in-login-session.sh \
+            files/system/libexec/rime-store-compact \
+            tests/test-rime-store-compact.sh \
             files/system/libexec/rime-boot-migrate \
             tests/test-boot-migrate.sh \
             files/system/libexec/rime-env \

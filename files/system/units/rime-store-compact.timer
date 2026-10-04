@@ -1,0 +1,19 @@
+# Rime OS — when the store is recompressed.
+#
+# Fifteen minutes after boot, so the first boot into an update compresses what
+# that update wrote, then every six hours for what arrives in between (a
+# `rime update` that has not been rebooted into yet, a Flatpak installed from
+# the store). A run with nothing new lists the store and exits; the work is
+# proportional to what changed.
+
+[Unit]
+Description=Recompress the OS and Flatpak stores after updates
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+RandomizedDelaySec=10min
+Unit=rime-store-compact.service
+
+[Install]
+WantedBy=timers.target

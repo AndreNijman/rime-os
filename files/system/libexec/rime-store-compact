@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-store-compact — keep the OS store and the Flatpak store compressed.
+#
+#  ── Why this exists ─────────────────────────────────────────────────────────
+#  Since 2026-10-04 the installer stores Rime compressed: zstd:3 on btrfs takes
+#  /usr from 14.4 GB to 8.6 GB. Nothing kept it that way afterwards. libostree,
+#  which writes every OS update and every Flatpak, preallocates each object it
+#  writes, and btrfs never compresses a preallocated extent, whatever the mount
+#  options or the `compression` property say. So every update landed
+#  uncompressed, and every machine installed before that date never was.
+#
+#  This rewrites those objects compressed after they land, with the same
+#  command the installer runs while bootc writes: `btrfs filesystem defragment
+#  -czstd`. The bytes are identical, so object checksums, the hardlinks every
+#  deployment shares, and composefs are untouched. Only how btrfs stores the
+#  extents changes.
+#
+#  ── What it touches ─────────────────────────────────────────────────────────
+#  /sysroot/ostree/repo/objects and /var/lib/flatpak/repo/objects, and nothing
+#  else. /sysroot is read-only on a booted machine, so the OS store is reached
+#  in a private mount namespace with /sysroot remounted read-write, the way
+#  ostree reaches it itself. No other process sees that mount.
+#
+#  ── Once per object ─────────────────────────────────────────────────────────
+#  An object is content-addressed and never changes, so once it is compressed
+#  it is done for good. STATE/<store>.done lists the objects already handled,
+#  and each run handles only the ones not on it. A store with no list yet (a
+#  machine installed before this existed, or a fresh install whose installer
+#  already compressed everything) is classified once with filefrag: an object
+#  whose every extent is already `encoded` or `inline` goes onto the list
+#  without being rewritten.
+#
+#  ctime would be cheaper, and it is wrong: removing an old deployment unlinks
+#  its objects, which changes the ctime of every object it shared, and the next
+#  run would rewrite gigabytes that were already compressed.
+#
+#  An object zstd cannot shrink (an already-compressed image, firmware) stays
+#  plain and is listed anyway. Retrying it every run would rewrite it every run.
+#
+#  ── When it stops short ─────────────────────────────────────────────────────
+#  Not btrfs: nothing to do, because ext4 and xfs do not compress. A batch that
+#  fails (the disk full, an object pruned while this ran) stays off the list and
+#  is retried next run. Nothing ostree treats as metadata is written, so a run
+#  killed half-way leaves a store that is only less compressed than it could be.
+#
+#  Run from rime-store-compact.timer, idle-priority, on AC power only.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+SYSROOT="${RIME_COMPACT_SYSROOT:-/sysroot}"
+FLATPAK="${RIME_COMPACT_FLATPAK:-/var/lib/flatpak}"
+STATE="${RIME_COMPACT_STATE:-/var/lib/rime/store-compact}"
+BATCH="${RIME_COMPACT_BATCH:-256}"
+
+note() { printf 'rime-store-compact: %s\n' "$*"; }
+
+[ "$(id -u)" = 0 ] || { note "must run as root"; exit 1; }
+
+# The private namespace, entered once. The re-executed copy knows it is inside
+# from RIME_COMPACT_NAMESPACED; the suite sets it to stay out of unshare.
+if [ "${RIME_COMPACT_NAMESPACED:-0}" != 1 ]; then
+    exec unshare --mount --propagation private -- \
+        env RIME_COMPACT_NAMESPACED=1 "$0" "$@"
+fi
+
+mkdir -p "$STATE"
+chmod 0700 "$STATE"
+exec 9>"$STATE/lock"
+flock -n 9 || { note "another run holds $STATE/lock"; exit 0; }
+
+used_mb() { df -B1M --output=used "$1" | tail -n 1 | tr -d ' '; }
+
+# classify LIST PLAIN DONE: split LIST into objects that have never been
+# compressed and objects that have. btrfs compresses 128 KiB at a time and
+# keeps a chunk that will not shrink as it is, so a compressed binary still
+# shows plain extents beside its `encoded` ones: one encoded extent is the sign
+# it was compressed. Measured on a fresh install: 572 such objects, 6.3 GB, the
+# same plain share as a copy written to a compress-force mount. Anything
+# filefrag cannot place (`unknown_loc`, `delalloc`: data not on disk yet) counts
+# as plain, so it is looked at rather than assumed.
+classify() {
+    local list="$1" plain="$2" done="$3"
+    : > "$plain"; : > "$done"
+    [ -s "$list" ] || return 0
+    # filefrag exits non-zero when an object was pruned since the listing; the
+    # rest of its output is still good, so its status is not the run's.
+    { xargs -a "$list" -d '\n' filefrag -v 2>/dev/null || true; } | awk -v plain="$plain" -v done="$done" '
+        /^File size of / { f = $4; seen[f] = 1; next }
+        /^ *[0-9]+:/ && f != "" {
+            if ($0 ~ /unknown_loc|delalloc/) pending[f] = 1
+            else if ($0 ~ /encoded/) packed[f] = 1
+            else if ($0 !~ /inline/) loose[f] = 1
+            next
+        }
+        END { for (f in seen) print f > ((pending[f] || (loose[f] && !packed[f])) ? plain : done) }'
+    LC_ALL=C sort -o "$plain" "$plain"
+    LC_ALL=C sort -o "$done" "$done"
+}
+
+# compact NAME OBJECTS: compress the objects of one store that are not on its
+# list, a batch at a time, and keep the list to the objects that still exist.
+compact() {
+    local name="$1" obj="$2"
+    local list="$STATE/$name.done" cur="$STATE/$name.cur" todo="$STATE/$name.todo"
+    local add="$STATE/$name.add" known="$STATE/$name.known" fstype before after part
+    local n=0 failed=0
+
+    [ -d "$obj" ] || { note "$name: no store at $obj"; return 0; }
+    fstype="$(stat -f -c %T "$obj")"
+    if [ "$fstype" != btrfs ]; then
+        note "$name: $obj is on $fstype, which does not compress; nothing to do"
+        return 0
+    fi
+
+    # No `compression` property, here or anywhere. btrfs copies a directory's
+    # properties onto every inode created beneath it as a btrfs.compression
+    # xattr, and an ostree bare repo checksums xattrs: an object that inherited
+    # it no longer matches its name, and `ostree fsck` calls it corrupt
+    # (measured on the 2026-10-04 installer, which set it). Defragment writes
+    # no xattr.
+
+    # Everything in the store on disk first. libostree preallocates an object
+    # and writes into it; until writeback those pages are delalloc, and a
+    # defragment then lands them in the preallocated extent, uncompressed,
+    # which is exactly where they started (measured). `rime update` pulls with
+    # fsync off, so right after an update that is most of what is new.
+    sync -f "$obj"
+
+    # The same for find: a prune running alongside removes objects under it.
+    { find "$obj" -name '*.file' -type f -size +2k -print 2>/dev/null || true; } | LC_ALL=C sort > "$cur"
+    : > "$add"
+    if [ -f "$list" ]; then
+        LC_ALL=C comm -13 "$list" "$cur" > "$todo"
+    else
+        note "$name: first run, classifying $(wc -l < "$cur") objects"
+        classify "$cur" "$todo" "$add"
+        note "$name: $(wc -l < "$add") already compressed, $(wc -l < "$todo") to do"
+    fi
+
+    before="$(used_mb "$obj")"
+    rm -f "$STATE/$name.part."*
+    if [ -s "$todo" ]; then
+        split -l "$BATCH" "$todo" "$STATE/$name.part."
+        for part in "$STATE/$name.part."*; do
+            # No -L: zstd's default level is 3, the installer's, and older
+            # btrfs-progs do not have the option.
+            if xargs -a "$part" -d '\n' btrfs filesystem defragment -czstd >/dev/null; then
+                cat "$part" >> "$add"
+                n=$(( n + $(wc -l < "$part") ))
+            else
+                failed=$(( failed + 1 ))
+            fi
+            rm -f "$part"
+        done
+    fi
+    # The rewritten extents sit in delalloc until writeback; df counts them
+    # only once they are on disk.
+    sync -f "$obj"
+    after="$(used_mb "$obj")"
+
+    # The list after this run: what was there, plus what was handled now, less
+    # whatever ostree or flatpak pruned since.
+    { [ -f "$list" ] && cat "$list"; cat "$add"; } | LC_ALL=C sort -u > "$known"
+    LC_ALL=C comm -12 "$known" "$cur" > "$list.tmp"
+    mv "$list.tmp" "$list"
+    rm -f "$cur" "$todo" "$add" "$known"
+
+    note "$name: compressed $n new objects; ${before} MB -> ${after} MB used on the filesystem"
+    if [ "$failed" -gt 0 ]; then
+        note "$name: $failed batch(es) failed and stay off the list; retried next run"
+    fi
+}
+
+# /sysroot is read-only on a booted machine. Remounted only inside this
+# namespace, and only if it is read-only here.
+case ",$(findmnt -no OPTIONS --mountpoint "$SYSROOT" 2>/dev/null)," in
+    *,ro,*) mount -o remount,rw "$SYSROOT" ;;
+esac
+
+compact os "$SYSROOT/ostree/repo/objects"
+compact flatpak "$FLATPAK/repo/objects"
