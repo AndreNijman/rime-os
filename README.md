@@ -77,10 +77,11 @@ least **12 GB** of disk, and **internet on that machine while installing**: the
 installer downloads Rime OS during the install, straight onto the disk it
 installs to. Nothing is staged anywhere else.
 
-The installed system takes about **8 GB**. It is stored compressed, which is
-most of why it fits on a 12 GB disk. Updates download new files next to the
-running system, and your own files need room too, so give it **20 GB or more**
-if you can.
+The installed system takes about **5.4 GB**, stored compressed. **20 GB is
+recommended**: Rime keeps the previous version for rollback, and an update that
+replaces the whole system downloads about 5 GB before it can start. After one
+such update the system and its rollback copy take about 9 GB, so on a 12 GB disk
+the next one can stop with "Insufficient free space" until you free some.
 
 Allow about 30 minutes start to finish, most of it waiting.
 
@@ -183,8 +184,8 @@ Windows for you. Do that from Windows first:
    power buttons do* → uncheck **Turn on fast startup**. Fast Startup leaves the
    Windows partition in a half-hibernated state that is unsafe to resize.
 3. **Shrink C:**: right-click Start → Disk Management → right-click `C:` →
-   *Shrink Volume*. Give Rime at least 10 GB, and 20 GB or more if you can
-   spare it: updates and your own files need room beside the system.
+   *Shrink Volume*. Give Rime at least 10 GB; 18 GB leaves room for updates
+   beside the system, and your own files need more on top.
 4. **Create a partition in the free space**: right-click the unallocated space
    → *New Simple Volume* → accept the defaults. The installer needs a real
    partition to select; unallocated space will not appear.
