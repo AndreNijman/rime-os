@@ -464,11 +464,7 @@ STUB
 
     # ── the compressed root ──────────────────────────────────────────────────
     mount() { printf 'mount %s\n' "$*" >> "$_t/calls"; }
-    btrfs() {
-        printf 'btrfs %s\n' "$*" >> "$_t/calls"
-        [ "$1 $2" = "property get" ] && echo "compression=${_prop_answer:-zstd}"
-        return 0
-    }
+    btrfs() { printf 'btrfs %s\n' "$*" >> "$_t/calls"; return 0; }
     : > "$_t/calls"
     # shellcheck disable=SC2034  # read by the engine functions sourced above
     ROOTFS_TYPE=btrfs ROOT_ZSTD_LEVEL=3 LOG=/dev/null
@@ -476,12 +472,16 @@ STUB
     c=$(cat "$_t/calls")
     _ck "btrfs root mounted"           "$r" ok
     _has "btrfs: forced zstd at install" "$c" "mount -o compress-force=zstd:3 /dev/x /run/rime-target"
-    _has "btrfs: compression property"  "$c" "btrfs property set /run/rime-target compression zstd"
-    # A property that did not stick must be a refusal, not a silent 2x install.
-    : > "$_t/calls"; _prop_answer=lzo
-    mount_new_root /dev/x /run/rime-target && r=ok || r=refused
-    _ck "btrfs: property re-read"      "$r" refused
-    _prop_answer=zstd
+    # No compression PROPERTY: btrfs would copy it onto ostree's objects as a
+    # btrfs.compression xattr, and `ostree fsck` then reports them corrupt.
+    _lacks "btrfs: no compression property (it becomes an xattr on ostree objects)" "$c" "property set"
+    # The mutant: the old line put back, and the same check has to see it.
+    _orig=$(declare -f mount_new_root)
+    eval "$(sed '/compress-force=zstd/a btrfs property set "$2" compression zstd;' <<<"$_orig")"
+    : > "$_t/calls"
+    mount_new_root /dev/x /run/rime-target >/dev/null 2>&1
+    _has "  ...and the check sees a property set put back" "$(cat "$_t/calls")" "property set"
+    eval "$_orig"
     : > "$_t/calls"
     # shellcheck disable=SC2034  # read by the engine functions sourced above
     ROOTFS_TYPE=ext4

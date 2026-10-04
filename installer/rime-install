@@ -485,12 +485,19 @@ ESP_BACKUP_DIR=EFI/fedora/apex-backup  # rime-rename: keep (an ESP path earlier 
 # measurable, so the install writes at forced zstd:3; the higher levels cost
 # minutes of CPU on the machine being installed for a few hundred MB.
 #
-# The mount option lasts as long as this mount. What lasts is the `compression`
-# PROPERTY on the root directory: btrfs copies it to every file and directory
-# created beneath it, with nothing on the kernel command line and nothing in
-# fstab. It is the heuristic kind, not the forced kind, which is the right
-# default for the owner's own files under /var/home. It does NOT cover what
-# ostree writes — see compress_store_pass below.
+# The mount option lasts as long as this mount, and sets nothing on any file.
+# It does NOT cover what ostree writes either — see compress_store_pass below.
+#
+# NOT the `compression` PROPERTY, which this engine set until the VM gate ran
+# `ostree fsck` (2026-10-04). btrfs copies a directory's properties onto every
+# inode created beneath it AS AN XATTR, `btrfs.compression=zstd`, and an ostree
+# `bare` repo checksums a file object's xattrs: an object that inherited it no
+# longer matches its own name, and fsck reports it as corrupt. One object in
+# 165,290 had it on the first install (ostree mostly writes through O_TMPFILE,
+# which did not inherit), but the property sat on repo/ and repo/tmp/ for every
+# update to come, and on /var for every file the owner and their containers
+# would ever write. It never compressed the OS in the first place: ostree
+# preallocates, and btrfs never compresses a preallocated extent.
 #
 # btrfs only; ext4 and xfs (partition mode allows them) have no transparent
 # compression and are mounted as before.
@@ -498,11 +505,7 @@ ROOT_ZSTD_LEVEL="${RIME_ROOT_ZSTD_LEVEL:-3}"
 mount_new_root() {  # $1=freshly made root filesystem  $2=mount point
   if [ "$ROOTFS_TYPE" = btrfs ]; then
     mount -o "compress-force=zstd:$ROOT_ZSTD_LEVEL" "$1" "$2" >>"$LOG" 2>&1 || return 1
-    btrfs property set "$2" compression zstd >>"$LOG" 2>&1 || return 1
-    # Read it back: a property that did not stick is an install that is 2x
-    # bigger than it says, and nothing else would ever notice.
-    [ "$(btrfs property get "$2" compression 2>/dev/null)" = "compression=zstd" ] || return 1
-    log "root: $1 on $2, compress-force=zstd:$ROOT_ZSTD_LEVEL for the install, compression=zstd inherited from here on"
+    log "root: $1 on $2, compress-force=zstd:$ROOT_ZSTD_LEVEL for the install"
   else
     mount "$1" "$2" >>"$LOG" 2>&1 || return 1
     log "root: $1 on $2 ($ROOTFS_TYPE has no transparent compression)"

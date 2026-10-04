@@ -979,11 +979,14 @@ EOF"
     else
       bad "[disk] the installed system is compressed" "${used_mb:-?} MB used (want <= 9500)"
     fi
-    if [ "$(sudo -n btrfs property get "$MNT" compression 2>/dev/null)" = "compression=zstd" ]; then
-      ok "[disk] the root carries the compression property for later writes"
+    # Every object still matches its name. A btrfs.compression xattr (what the
+    # `compression` property leaves on files created under it) changes a bare
+    # object's checksum, and fsck stops at the first one it meets.
+    local fsck_out
+    if fsck_out=$(sudo -n ostree fsck --repo="$MNT/ostree/repo" 2>&1); then
+      ok "[disk] ostree fsck: every object matches its checksum"
     else
-      bad "[disk] the root carries the compression property for later writes" \
-          "$(sudo -n btrfs property get "$MNT" compression 2>&1)"
+      bad "[disk] ostree fsck: every object matches its checksum" "$(tail -1 <<<"$fsck_out")"
     fi
     sudo -n df -Pk "$MNT" | sed 's/^/    /'
     sudo -n umount -R "$MNT" 2>/dev/null
