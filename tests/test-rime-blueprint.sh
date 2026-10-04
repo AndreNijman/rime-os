@@ -540,11 +540,12 @@ fi
 rm -f "${H_LANG}/.local/share/rime/env/broken.json"
 
 # ── satisfied way 2: the toolchain is already on the host's PATH ─────────────
-# The Rime images ship a full dev stack — gcc, g++, python3, node, cargo,
-# golang, bash — so this is the COMMON case. Reading it as drift would
-# provision gigabytes of capsule to duplicate software the image already has,
-# which is the "reformats a machine the first time it runs" failure the
-# blueprint type is written to avoid. Proved with a fake `tsc` rather than by
+# The Rime images ship gcc, python3, node and bash, and a developer's own
+# toolchains (rustup, a Go tarball, an SDK in ~/.local) are on PATH too, so
+# this is the COMMON case. Reading it as drift would provision gigabytes of
+# capsule to duplicate software the machine already has, which is the
+# "reformats a machine the first time it runs" failure the blueprint type is
+# written to avoid. Proved with a fake `tsc` rather than by
 # hoping the runner has one.
 cat > "${BIN}/tsc" <<'FAKE'
 #!/bin/sh

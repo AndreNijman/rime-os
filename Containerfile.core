@@ -10,7 +10,7 @@
 #     → desktop + greeter stack (hyprland/quickshell/sway/…)  [own RUN]
 #     → sched-ext userspace (scx), Bazaar, RPMFusion + codecs [own RUNs]
 #     → baked userland apps, printing, input methods, fonts   [own RUNs]
-#     → dev toolchain, zsh/starship
+#     → node/gcc for Rime's own tools, zsh/starship
 #     → third-party Rust tools (awww / matugen / yazi)
 #     → OS branding, locale, timezone, hardening
 #
@@ -1813,27 +1813,26 @@ RUN set -eux; \
     fc-cache -f; \
     dnf5 clean all
 
-# ── Stage 5a-devstack: full development toolchain (rime-logs 35-dev-stack.md) ─
-# Both editions ship a complete dev environment out of the box: the C/C++
-# toolchain + build systems + debuggers, the language toolchains
-# (Python/Node/Rust/Go/Ruby/JDK), and the common CLI dev tools (gh, git-lfs,
-# ripgrep, fd, fzf, bat, buildah). Own transaction, `dnf5 clean all`.
+# ── Stage 5a-devstack: what Rime itself compiles and runs with ─────────────
+# rime-logs 35 shipped a complete dev environment in every image: clang/llvm,
+# Rust, Go, Ruby, a JDK, pip/pipx, gdb/strace/ltrace, cmake/meson/autotools,
+# gh, git-lfs and buildah. Since 2026-10-04 the install is kept as small as it
+# can be, so the image carries only what Rime needs on a booted machine, and a
+# project's toolchain comes from `rime env` (a capsule per project) or
+# `rime install`:
 #
-# nodejs/nodejs-npm and binutils are named for Rime's own sake, not the
-# developer's: `rime plugin` runs on node (files/system/libexec/rime-plugin),
-# and rime-pkg unpacks a .deb with binutils' `ar`. Both used to arrive only
-# transitively (node through neovim → tree-sitter-cli, ar through gcc), which
-# is one packaging change away from vanishing.
+#   nodejs/nodejs-npm  `rime plugin` runs on node (files/system/libexec/
+#                      rime-plugin), and `rime install claude-code` is npm.
+#   binutils           rime-pkg unpacks a .deb with `ar`.
+#   gcc, make          the rimed builder in Containerfile.base compiles C (the
+#                      ring crate) on top of this tier.
+#
+# Each is named rather than left to arrive transitively (node through neovim →
+# tree-sitter-cli, ar through gcc), which is one packaging change away from
+# vanishing. ripgrep, fd, fzf and bat are in the zsh stanza below.
 RUN set -eux; \
-    dnf5 -y install \
-        gcc gcc-c++ clang llvm lld \
-        make automake autoconf libtool pkgconf-pkg-config \
-        cmake meson ninja-build gdb strace ltrace \
-        python3-pip python3-devel pipx \
-        rust cargo golang ruby rubygems \
-        java-latest-openjdk-devel \
-        nodejs nodejs-npm binutils \
-        gh git-lfs ripgrep fd-find fzf bat buildah; \
+    dnf5 -y install --setopt=install_weak_deps=False \
+        nodejs nodejs-npm binutils gcc make; \
     dnf5 clean all
 
 # sing-box official static binary (not in Fedora). Shipped DISABLED (unit gates

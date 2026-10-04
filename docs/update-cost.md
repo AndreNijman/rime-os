@@ -50,7 +50,7 @@ kernel tier came later and has its own section below:
 | Tier | File | Contents | Rebuilds when |
 |------|------|----------|---------------|
 | **kernel** | `Containerfile.kernel` | the kernel itself, compiled from pinned source with a pinned `dwarves` | `kernel/**` changes, i.e. `kernel/kernel.pin` moves |
-| **core** | `Containerfile.core` | kernel *install* + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` differ from the revision the published `core` was built from · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
+| **core** | `Containerfile.core` | kernel *install* + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, node/gcc for Rime's own tools, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` differ from the revision the published `core` was built from · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
 | **base** | `Containerfile.base` | rimed + rime CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored Rime Shell (the rime-shell commit the run's "Pin rime-shell" step resolved: `main` on a `main` build) | every run: the path filter still computes a `base` output, but no job reads it |
 | **image** | `Containerfile.rime` | edition stamp, gaming-session files, Plymouth theme, final initramfs | every run |
 
