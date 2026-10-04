@@ -208,13 +208,15 @@ out=$(run)
 if grep -q 'os: compressed 1 new objects' <<<"$out" && encoded "$x"; then ok "the next run compresses it"; else bad "the next run compresses it"; fi
 
 section "a store that is not on btrfs"
+# Not btrfs: tmpfs on a Rime machine, ext4 on a CI runner (`stat -f` names
+# that "ext2/ext3", hence the pattern below).
 TF=$(mktemp -d /tmp/rime-compact-tmpfs.XXXXXX)
 mkdir -p "$TF/repo/objects"
 out=$($SUDO env RIME_COMPACT_NAMESPACED=1 RIME_COMPACT_SYSROOT="$M/sysroot" RIME_COMPACT_FLATPAK="$TF" \
         RIME_COMPACT_STATE="$ST" "$ENGINE" 2>&1); rc=$?
 rm -rf "$TF"
 is "it exits 0" 0 "$rc"
-if grep -qE 'flatpak: .* is on (tmpfs|[a-z0-9]+), which does not compress; nothing to do' <<<"$out"; then ok "  ...and leaves it alone, saying why"; else bad "  ...and leaves it alone, saying why"; fi
+if grep -qE 'flatpak: .* is on [^,]+, which does not compress; nothing to do' <<<"$out"; then ok "  ...and leaves it alone, saying why"; else bad "  ...and leaves it alone, saying why"; fi
 
 section "the read-only /sysroot, as on a booted machine"
 y=$(object "$OS" y text)
