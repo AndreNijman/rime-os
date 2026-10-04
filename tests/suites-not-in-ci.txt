@@ -24,8 +24,11 @@ tests/test-rime-firewall-ssh.sh      needs a SECOND machine, and refuses to targ
 # building the image inside the job would turn a five-minute check into a
 # ninety-minute one. Its fast half — every refusal, the XKB-to-console keymap
 # conversion and the character-level keyboard checks — is
-# installer/test-installer-luks.sh, which pr-validation.yml DOES run.
-installer/test-installer-luks-live.sh  needs root, a loop device and the 15 GB image
+# installer/test-installer-luks.sh, which pr-validation.yml DOES run. Like
+# luks-boot and live-paths below, it runs the engine inside the installer's
+# live-environment image (installer/live-env-engine), so that image must be
+# built here too.
+installer/test-installer-luks-live.sh  needs root, a loop device, the 15 GB image and the live-env image
 # The keymap boot suite boots FIVE real guests off the shipped initramfs and
 # types a passphrase on an emulated keyboard through QMP, to measure the one
 # property no file-content assertion can stand in for: that a passphrase
@@ -42,17 +45,17 @@ installer/test-installer-keymap-boot.sh  needs /dev/kvm, root podman and the 15 
 # actually boots through firmware, shim and GRUB into the real root. Needs
 # root, a loop device, /dev/kvm, root podman, the 15 GB image and the
 # rime-bootlab container; strictly more than either suite above.
-installer/test-installer-luks-boot.sh  needs root, a loop device, /dev/kvm and the 15 GB image
-# The live-paths suite is the UNENCRYPTED counterpart of luks-boot, and the
-# only place either of the two paths 4bf1ecaa touched is exercised end to end.
-# It rigs a GPT with a Windows-shaped ESP and a data partition, installs Rime
-# into the free one, and asserts the neighbour is byte-identical afterwards AND
-# after Rime has booted once; then it runs the whole-disk fallback with nothing
-# qualifying as scratch, which downloads ~6 GB from the registry onto the target
-# disk itself. Needs root, a loop device, /dev/kvm, root podman, the 15.5 GB
-# image, ~65 GB on /var/lab-scratch and a route to ghcr.io. Its fast half is
-# installer/test-installer.sh, which pr-validation.yml DOES run.
-installer/test-installer-live-paths.sh  needs root, a loop device, /dev/kvm, the 15 GB image and network
+installer/test-installer-luks-boot.sh  needs root, a loop device, /dev/kvm, the 15 GB image and the live-env image
+# The live-paths suite is the UNENCRYPTED counterpart of luks-boot. It rigs a
+# GPT with a Windows-shaped ESP and a data partition, installs Rime into the
+# free one, and asserts the neighbour is byte-identical afterwards AND after
+# Rime has booted once; then it runs a whole-disk network install onto a
+# 12 GiB disk, which streams ~6.9 GB from the registry straight onto it. Needs
+# root, a loop device, /dev/kvm, root podman, the 15.5 GB image, the
+# installer's live-env image, ~40 GB on /var/lab-scratch and a route to
+# ghcr.io. Its fast half is installer/test-installer.sh, which pr-validation.yml
+# DOES run.
+installer/test-installer-live-paths.sh  needs root, a loop device, /dev/kvm, the 15 GB image, the live-env image and network
 #
 # ── DEBT: these can run headless and simply were never wired in ─────────────
 # (none. 2026-09-13: the last eight were wired in or, for firewall-ssh, moved

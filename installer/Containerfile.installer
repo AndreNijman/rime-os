@@ -64,7 +64,7 @@ RUN set -eux; \
         || { echo "FATAL: no Intel wifi firmware"; exit 1; }
 
 # Live-env + installer toolchain. kernel + dracut(+live) make it bootable as a
-# squashfs live image; podman/skopeo run the install; btrfs-progs/
+# squashfs live image; bootc/skopeo run the install; btrfs-progs/
 # dosfstools/util-linux for the target disk; shadow-utils for useradd/chpasswd
 # into the installed tree; device-mapper for the dmsquash-live snapshot root;
 # grub2-tools-extra/-efi-x64-modules so build-live-iso.sh can produce the ISO's
@@ -134,9 +134,32 @@ RUN set -eux; \
 # in the GUI depends on both, and a dependency that is only present by
 # accident is one packaging change away from vanishing silently. (dbus-daemon
 # is NOT needed and deliberately not listed — dbus-broker is already present.)
+#
+# bootc is the installer itself now: rime-install runs THIS environment's
+# `bootc install to-filesystem --source-imgref …` rather than starting bootc
+# inside a container of the image, which is what removed the tens of GB a
+# network install used to stage (see "Where the OS comes from" in
+# rime-install). skopeo stays: bootc fetches through `skopeo
+# experimental-image-proxy`, and the engine's reachability check calls it. The
+# things bootc reads from the machine it runs on — the SELinux policy,
+# prepare-root.conf — are the IMAGE's, copied in by build-live-iso.sh, which
+# also checks this bootc is not older than the image's own.
+#
+# tpm2-tools, because /usr/libexec/rime-luks-enroll (also copied out of the
+# image by build-live-iso.sh) runs here now and calls tpm2_getcap,
+# tpm2_pcrreset and tpm2_pcrextend; systemd-cryptenroll's TPM2 support needs
+# the tpm2-tss libraries that come with it.
+#
+# policycoreutils, for setfiles. rime-install labels what it writes into the
+# installed system after bootc — the timezone, the keyboard layout, the
+# carried-over network connections — with `setfiles -r <deployment>` and the
+# IMAGE's file_contexts, guarded by `have setfiles`. This environment never
+# had setfiles, so every one of those was silently skipped and left
+# unlabeled_t. MEASURED 2026-10-04 on a VM install from this ISO: 444 AVC
+# denials in the first minute, Rime Shell refused /etc/localtime.
 RUN dnf -y install --setopt=install_weak_deps=False \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
-        podman skopeo \
+        bootc podman skopeo tpm2-tools policycoreutils \
         ncurses util-linux coreutils bash shadow-utils \
         btrfs-progs dosfstools e2fsprogs xfsprogs gdisk parted \
         lvm2 cryptsetup mdadm \
@@ -203,6 +226,11 @@ RUN set -eu; \
     bash -n /usr/bin/rime-install \
         || { echo "FATAL: rime-install has a bash syntax error"; exit 1; }; \
     echo "OK: rime-install parses"; \
+    command -v bootc >/dev/null \
+        || { echo "FATAL: bootc is missing — rime-install installs with this environment's own bootc"; exit 1; }; \
+    command -v setfiles >/dev/null \
+        || { echo "FATAL: setfiles is missing — the files rime-install writes after bootc would ship unlabeled"; exit 1; }; \
+    echo "OK: bootc and setfiles present"; \
     bash -n /usr/bin/rime-installer-launch \
         || { echo "FATAL: rime-installer-launch has a bash syntax error"; exit 1; }; \
     echo "OK: rime-installer-launch parses"; \

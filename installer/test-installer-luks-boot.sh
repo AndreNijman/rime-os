@@ -73,6 +73,9 @@ command -v cryptsetup>/dev/null || die "cryptsetup is not installed."
 [ -c /dev/kvm ]                 || die "/dev/kvm is absent; a TCG-only OVMF+GRUB boot is too slow to be useful here."
 
 NVGUARD="../tests/lab/nvram-guard"
+# The installer's live-environment image the engine runs inside (see
+# live-env-engine), built from Containerfile.installer.
+LIVE_ENV_IMAGE="${RIME_LIVE_ENV_IMAGE:-localhost/rime-installer:latest}"
 [ -x "$NVGUARD" ] || die "$NVGUARD is missing or not executable.
 This suite will not run a privileged loopback install without it — see
 BOOT-BREAKAGE-2026-09-20.md and AGENTS.md \"Touching a machine's boot path\"."
@@ -185,13 +188,14 @@ start=$(date +%s)
 EXTRA_KARGS="console=ttyS0,115200 console=tty1 systemd.log_target=kmsg systemd.show_status=1 loglevel=7 rd.plymouth=0 plymouth.enable=0 rd.timeout=120"
 # shellcheck disable=SC2024
 sudo -n "$NVGUARD" --label "luks-boot-install" --out "$WORK/nvram" -- \
-  env \
+  ./live-env-engine \
+    RIME_LIVE_ENV_IMAGE="$LIVE_ENV_IMAGE" \
     RIME_IMAGE="$IMAGE" \
     RIME_LUKS_ENROLL_LOCAL="$HELPER" \
     RIME_RECOVERY_DIR="$RECOVERY_DIR" \
     RIME_LUKS_PBKDF_MEMORY=65536 \
     RIME_LUKS_EXTRA_KARGS="$EXTRA_KARGS" \
-    "$ENGINE" --headless "$ANS" > "$OUT" 2>&1 </dev/null
+    -- "$ENGINE" --headless "$ANS" > "$OUT" 2>&1 </dev/null
 rc=$?
 echo "engine exit=$rc after $(( $(date +%s) - start ))s"
 

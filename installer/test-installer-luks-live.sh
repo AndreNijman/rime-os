@@ -91,6 +91,9 @@ command -v losetup   >/dev/null || die "losetup is not installed."
 # the file moved is how the incident happened in the first place: a discipline
 # followed most of the time.
 NVGUARD="../tests/lab/nvram-guard"
+# The installer's live-environment image the engine runs inside (see
+# live-env-engine), built from Containerfile.installer.
+LIVE_ENV_IMAGE="${RIME_LIVE_ENV_IMAGE:-localhost/rime-installer:latest}"
 [ -x "$NVGUARD" ] || die "$NVGUARD is missing or not executable.
 This suite will not run a privileged loopback install without it — see
 BOOT-BREAKAGE-2026-09-20.md and AGENTS.md \"Touching a machine's boot path\"."
@@ -227,12 +230,13 @@ start=$(date +%s)
 # needs privilege.
 # shellcheck disable=SC2024
 sudo -n "$NVGUARD" --label "luks-live-install" --out "$WORK/nvram" -- \
-  env \
+  ./live-env-engine \
+    RIME_LIVE_ENV_IMAGE="$LIVE_ENV_IMAGE" \
     RIME_IMAGE="$IMAGE" \
     RIME_LUKS_ENROLL_LOCAL="$HELPER" \
     RIME_RECOVERY_DIR="$RECOVERY_DIR" \
     RIME_LUKS_PBKDF_MEMORY=65536 \
-    "$ENGINE" --headless "$ANS" > "$OUT" 2>&1 </dev/null
+    -- "$ENGINE" --headless "$ANS" > "$OUT" 2>&1 </dev/null
 rc=$?
 echo "engine exit=$rc after $(( $(date +%s) - start ))s"
 sudo -n cp /var/log/rime-install.log "$LOGCOPY" 2>/dev/null || : > "$LOGCOPY"

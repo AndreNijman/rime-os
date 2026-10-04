@@ -3,10 +3,12 @@
 #  rime-install — the Rime OS install ENGINE
 #
 #  A deliberately small, transparent alternative to Anaconda. Runs in the live
-#  environment and installs the embedded Rime OS image to the disk the user
-#  chose, using `bootc install to-disk` (bootupd static bootloader — NOT
-#  grub2-mkconfig, which is what silently killed the Anaconda install; see
-#  rime-logs 40).
+#  environment and installs Rime OS to the disk the user chose: this engine
+#  partitions and formats the target itself, then runs the live environment's
+#  OWN `bootc install to-filesystem --source-imgref …` against it (bootupd
+#  static bootloader — NOT grub2-mkconfig, which is what silently killed the
+#  Anaconda install; see rime-logs 40). See "Where the OS comes from" below
+#  for why bootc runs here and not inside a container of the image.
 #
 #  This file is an ENGINE, not a user interface. It used to double as a
 #  whiptail text UI, reached as a fallback whenever the graphical installer
@@ -171,8 +173,9 @@ write_result() {  # $1=ok|failed  $2=message (first line kept)
 # the installed system as its `bootc upgrade` origin, so a stale tag here is a
 # machine that follows an alias instead of the canonical image forever.
 EDITION="${RIME_EDITION:-$(cat /usr/lib/rime-installer/edition 2>/dev/null || echo rime)}"
-# The image to install. The live env preloads it into podman storage as this ref
-# (see the ISO build); override with RIME_IMAGE=... for testing.
+# The image to install when there is no OCI directory and no network install:
+# a developer host or a suite with it in podman storage under this ref.
+# Override with RIME_IMAGE=... for testing.
 IMAGE="${RIME_IMAGE:-localhost/rime-os:${EDITION}}"
 # Update origin recorded in the INSTALLED system (so `bootc upgrade` works).
 TARGET_IMAGE="${RIME_TARGET_IMAGE:-ghcr.io/andrenijman/rime-os:${EDITION}}"
@@ -182,6 +185,11 @@ TARGET_IMAGE="${RIME_TARGET_IMAGE:-ghcr.io/andrenijman/rime-os:${EDITION}}"
 # and somebody's install cannot swap the payload under a tested ISO. The origin
 # recorded on the disk stays TARGET_IMAGE, the tag, or the machine never updates.
 NET_SOURCE_IMAGE="$TARGET_IMAGE"
+# The bootc that installs. A TEST SEAM in the same shape as RIME_IMAGE, and
+# environment-only like it: the suites that dry-run this engine run on machines
+# with no bootc at all (a GitHub ubuntu runner) and point this at a stub that
+# records its argv, which is also how they read what bootc would be handed.
+BOOTC="${RIME_BOOTC:-bootc}"
 ROOTFS_TYPE="${RIME_ROOTFS:-btrfs}"
 
 # NETWORK INSTALL. The full ISO embeds the OS image twice (an OCI dir on the ISO
@@ -198,231 +206,73 @@ NETINSTALL=0
 # ISO, and those guards run before anything is written.
 [ -n "${RIME_NETINSTALL:-}" ] && NETINSTALL="$RIME_NETINSTALL"
 
-# ── Where a network install stages the image, and why it is not RAM ──────────
+# ── Where the OS comes from, and why bootc runs HERE ────────────────────────
 #
-# `podman pull` writes into the live environment's containers-storage, which on
-# a booted ISO is the RAM-backed overlay. That is ~12 GB of decompressed layers
-# in RAM. bootc then re-tars every layer into the container's /var/tmp — also
-# the RAM overlay — for another several GB. A 16 GB laptop dies; an 8 GB one
-# never had a chance. The offline ISO never had this problem because it installs
-# straight from the OCI directory on the ISO (`--source-imgref oci:…`), which
-# streams COMPRESSED blobs and never decompresses to a temporary tree.
+# bootc runs in this live environment, not inside a container of the image it
+# installs. That one choice is what removed the disk space an install used to
+# spend on staging, and it is the shape Anaconda uses for its own bootc
+# installs (`bootc install to-filesystem --source-imgref …` from the installer
+# environment).
 #
-# So a network install now does the same thing: skopeo fetches the compressed
-# blobs into an OCI directory ON A REAL DISK, and bootc installs from that. The
-# only thing still needing containers-storage is the container bootc itself runs
-# in, and that store is pointed at the same disk.
+# What it replaced. bootc used to have to RUN out of the image it installed. On
+# a network install that meant skopeo fetched the compressed image into an OCI
+# directory (6.5 GB), then decompressed it all again into a containers-storage
+# just so there was a container to start bootc in (15.0 GB), with a transient
+# copy of every blob while it did so: a measured 27.4 GiB peak, sized at
+# 32 GiB, plus 15 GiB for the installed system beside it when the target disk
+# was the only one. A single-disk machine needed ~53 GB to install an OS that
+# occupies a fraction of that, and every staged byte was thrown away.
 #
-# Sizes, measured 2026-09-25 with the live env's own skopeo 1.22.2 against
-# ghcr.io/andrenijman/rime-os@sha256:a754443e… (123 layers): 6.5 GB for the OCI
-# directory, 15.0 GB for the runner's store, and — because the runner copy now
-# stages on this disk too (SKOPEO_TMP, below) — a transient copy of every
-# compressed blob while that store is written. Peak: 27.7 GB, 27.4 GiB.
-# The earlier figure of 22 was sized for a 5.8 GB / 12 GB image and had no
-# headroom left at all; 32 GiB is the measured peak plus ~17%. NEED_SCRATCH_GB
-# stays deliberately generous — running out halfway through leaves a
-# half-written disk, which is the worst outcome here.
-NEED_SCRATCH_GB="${RIME_NEED_SCRATCH_GB:-32}"
-
-# A filesystem that can hold the staged image: writable, real (not a RAM
-# overlay), big enough, and NOT on the disk we are about to repartition.
+# Now `--source-imgref registry:<digest>` streams the layers from the registry
+# straight into the target's ostree repository. MEASURED 2026-10-04 with bootc
+# 1.16.13 in a plain fedora:43 userspace (what this live env is), release
+# 2026.09.30.3, 125 layers / 6.9 GB: no OCI directory, no containers-storage,
+# nothing under /var/tmp or /tmp, TMPDIR peaking at 23 MB, skopeo's image
+# proxy ~40 MB, and bootc under 70 MB RSS while it downloads and 608 MB at its
+# peak, when it assembles the deployment. Nothing of the image lands in the
+# live environment's RAM overlay.
 #
-# `df -P` output is used rather than findmnt because the live env is minimal and
-# df is already a hard dependency of this script.
-scratch_fs_ok() {
-  local dir="$1" avail_gb src fstype
-  [ -d "$dir" ] || return 1
-  [ -w "$dir" ] || return 1
-  src="$(df -P "$dir" 2>/dev/null | awk 'NR==2{print $1}')"
-  fstype="$(df -PT "$dir" 2>/dev/null | awk 'NR==2{print $2}')"
-  case "$fstype" in
-    tmpfs|ramfs|devtmpfs|overlay|squashfs|iso9660|"") return 1 ;;
-  esac
-  # Never stage onto the disk that is about to be wiped.
-  case "$src" in "${DISK:-__none__}"*) return 1 ;; esac
-  avail_gb="$(df -PBG "$dir" 2>/dev/null | awk 'NR==2{gsub(/G/,"",$4); print $4+0}')"
-  [ "${avail_gb:-0}" -ge "$NEED_SCRATCH_GB" ]
-}
-
-# ── When there is no scratch volume at all: stage INSIDE the target root ─────
+# What bootc reads from the machine it RUNS on, and why each one here is the
+# installed image's own copy (build-live-iso.sh copies them out of the exact
+# image this ISO installs, and refuses to build if it cannot):
+#   * the SELinux policy. With --source-imgref, bootc labels the deployment
+#     with the policy of the machine running it, not the image's
+#     (bootc-dev/bootc#1438). Fedora's stock policy — or none — would mislabel
+#     everything Rime's own policy module (rime_sdboot) covers.
+#   * /usr/lib/ostree/prepare-root.conf, which decides whether the deployment
+#     gets its composefs image (bootc-dev/bootc#1400).
+#   * /usr/libexec/rime-luks-enroll — see LUKS_ENROLL_PATH.
+# The bootloader is NOT one of them: bootc runs `bootupctl` chrooted into the
+# freshly deployed tree, so the loader that boots the disk comes from the image
+# on the disk.
 #
-# The rules above are right about WHERE NOT to stage and wrong about what to do
-# when nothing qualifies. On the commonest machine this installer will ever meet
-# — a laptop with ONE internal disk, booted from a plain single-partition USB —
-# every candidate fails by construction: the live session automounts nothing
-# under /run/media because the stick has no second partition, /mnt and /media
-# are empty, and /var/tmp IS the RAM overlay this whole section exists to
-# refuse. The install then aborted, telling the user to fetch "the full offline
-# ISO" — which has never been published. That is a dead end, not a refusal.
+# THE TRADE, STATED RATHER THAN BURIED: with nothing staged, a network install
+# downloads inside bootc, after the disk has been prepared. A link that drops
+# halfway leaves an erased target and a failed install; starting again repairs
+# it. Everything that can be checked before the disk is touched is checked
+# then: a route, DNS, and the registry serving this ISO's exact digest (see
+# "Reachability" at the install step).
 #
-# There is in fact a disk with room on that machine: the one about to be
-# installed to. The v1.0.0 installer that shipped on the published ISO staged
-# there and installed successfully on real hardware. stage_setup() below is that
-# design; pick_scratch says when to use it by answering with the sentinel
-# STAGE_TARGET instead of a directory.
-#
-# This is a FALLBACK and not the new default. A separate volume is still chosen
-# first whenever one exists, because staging on the target means the target is
-# partitioned and formatted BEFORE the download — so a download that fails
-# leaves an erased disk, where the external-scratch path leaves it untouched.
-# Trading that guarantee away is worth it only when the alternative is refusing
-# to install at all.
-STAGE_TARGET='@target'
-
-# Keep this much of the target free for the OS being installed. The staged store
-# and the install live on the same filesystem at the same time: ~28 GB at peak
-# plus the deployed system, and the blobs only go away at stage_teardown.
-STAGE_RESERVE_GB="${RIME_STAGE_RESERVE_GB:-15}"
-
-# Returns a usable scratch DIRECTORY on stdout, or the sentinel STAGE_TARGET
-# when there is none and the target root must be used instead. Returns non-zero
-# ONLY when the user named a staging directory explicitly and it is unusable —
-# a bad override is an error to report, never a silent fallback.
-pick_scratch() {
-  local c
-  if [ -n "${RIME_OCI_SCRATCH:-}" ]; then
-    mkdir -p "$RIME_OCI_SCRATCH" 2>/dev/null || true
-    scratch_fs_ok "$RIME_OCI_SCRATCH" && { printf '%s\n' "$RIME_OCI_SCRATCH"; return 0; }
-    return 1
+# SOURCE_IMGREF is chosen once preflight has pinned NET_SOURCE_IMAGE:
+#   network install  registry:<repo>@<pinned digest>
+#   offline ISO      oci:<the OCI directory on the ISO>
+#   anything else    containers-storage:<IMAGE>  (developer hosts and suites)
+SOURCE_IMGREF=""
+# On the offline ISO the image is ALSO present as an OCI directory (ISO
+# /container, mounted at /run/initramfs/live/container): the oci transport
+# streams blobs straight off the read-only ISO.
+OCI_DIR="${RIME_OCI_DIR:-/run/initramfs/live/container}"
+choose_source_imgref() {
+  if [ "$NETINSTALL" = 1 ]; then
+    SOURCE_IMGREF="registry:$NET_SOURCE_IMAGE"
+  elif [ -d "$OCI_DIR" ]; then
+    SOURCE_IMGREF="oci:$OCI_DIR"
+  else
+    SOURCE_IMGREF="containers-storage:$IMAGE"
   fi
-  # Any mounted, writable, real filesystem with room. /run/media/* is where the
-  # live session automounts a second partition on the USB stick.
-  #
-  # RIME_SCRATCH_CANDIDATES is a TEST SEAM, in the same spirit as
-  # RIME_SYSFS_BLOCK above: it replaces the list of places to look, so a suite
-  # can present the single-disk USB-boot machine (nothing qualifies) and the
-  # machine with a spare drive (something does) without inventing filesystems.
-  # It cannot weaken scratch_fs_ok — every candidate still goes through it, so
-  # a tmpfs named here is refused exactly as /var/tmp on a live ISO is.
-  for c in ${RIME_SCRATCH_CANDIDATES:-/run/media/*/* /run/media/* /mnt/* /media/* /var/tmp}; do
-    [ -d "$c" ] || continue
-    if scratch_fs_ok "$c"; then printf '%s\n' "${c%/}/rime-install-scratch"; return 0; fi
-  done
-  printf '%s\n' "${STAGE_TARGET:-@target}"
-  return 0
+  log "source: $SOURCE_IMGREF (the origin recorded on the disk: $TARGET_IMAGE)"
 }
 
-# How big a staging image the target root can afford, in KB, or non-zero if it
-# cannot afford one at all. Split out from stage_setup because it is the ONLY
-# part of staging-on-target that can be exercised without a block device, and
-# because the same rule has to be applied twice: once against the raw device
-# size BEFORE the disk is touched (so a too-small disk is refused while it is
-# still intact), and once against the real free space after mkfs.
-#
-# The image is SPARSE, so this is a ceiling and not an allocation. The reserve
-# is what guarantees the OS still fits beside it.
-stage_budget_kb() {   # $1 = available KB on the target root
-  local avail_kb="${1:-0}" stage_kb
-  case "$avail_kb" in ''|*[!0-9]*) return 1 ;; esac
-  stage_kb=$(( avail_kb - STAGE_RESERVE_GB * 1024 * 1024 ))
-  [ "$stage_kb" -ge $(( NEED_SCRATCH_GB * 1024 * 1024 )) ] || return 1
-  printf '%s\n' "$stage_kb"
-}
-
-# ── Staging on the target root, as the shipped v1.0.0 installer did it ───────
-# Three details here are not obvious and each one cost a measured install to
-# find. They are recorded so nobody simplifies them back out.
-#
-# 1. The store must NOT be visible inside the target root. `bootc install
-#    to-filesystem` checks the target is empty, and its own error names the only
-#    exception: "Requiring directory contains only mount points". A plain
-#    directory of image layers fails that check. So the backing file is created
-#    on the target filesystem (the only place with room), handed to a loop
-#    device, and then UNLINKED — the inode stays alive for as long as the loop
-#    device holds it, the directory entry is gone, the target root is pristine,
-#    and the space is released automatically at losetup -d.
-#
-# 2. The staging filesystem is xfs, not ext4. The store is hundreds of thousands
-#    of small files and ext4 fixes its inode count at mkfs time: measured with
-#    `-T largefile4`, the pull died with "mkdir …: no space left on device" 5 GB
-#    in, with 35 GB of free BLOCKS. It had run out of inodes. xfs allocates them
-#    dynamically. (xfsprogs is in Containerfile.installer's package list.)
-#
-# 3. TMPDIR has to move too, and this is the one that made the first real test
-#    of the staging fix fail with the SAME out-of-space error it was written to
-#    remove — with 788 GB free in the store. containers/image does not download
-#    a blob straight into its destination; it writes each one to a scratch file
-#    in $TMPDIR, falling back to /var/tmp, which on the live ISO is the RAM
-#    overlay. Proven directly by pointing TMPDIR at a 200 MB tmpfs with a 100 GB
-#    store: `writing blob: storing blob to file "…/4": no space left on device`.
-#
-# The mount point is OUTSIDE $TROOT on purpose — see detail 1.
-STAGE_MNT=""; STAGE_LOOP=""; STAGE_TMPDIR=""
-STAGE_DIR=/run/rime-stage
-# Where the neighbour's \EFI\fedora boot files are backed up on a shared ESP.
-# It kept its APEX name through the rebrand, on purpose: an earlier APEX (rime-rename: keep)
-# install on that ESP already put the TRUE originals there, and the `cp -n`
-# that fills it is what keeps a later install from overwriting them with files
-# an install has already rewritten. A new name would start an empty directory
-# and "back up" the rewritten files as the originals.
-ESP_BACKUP_DIR=EFI/fedora/apex-backup  # rime-rename: keep (an ESP path earlier installs wrote)
-# --skip-finalize, and ONLY when staging on the target. bootc finishes a
-# to-filesystem install by remounting the target read-only, and the staging loop
-# device holds a WRITABLE fd on that same filesystem — so the remount fails with
-# EBUSY and a completely successful install reports as a failure. That is
-# measured, not deduced: it is what made the first three staged installs of the
-# v1.0.0 installer look broken. Skipping it costs nothing here (the engine
-# unmounts the target seconds later) and it also skips an fstrim that has no
-# business running mid-install. The paths that do not stage on the target keep
-# finalizing exactly as they do today.
-STAGE_BOOTC_ARGS=()
-stage_setup() {   # $1 = the already-mounted target root
-  local troot="$1" avail_kb stage_kb img
-  avail_kb=$(df -Pk "$troot" 2>/dev/null | awk 'NR==2{print $4}')
-  stage_kb=$(stage_budget_kb "${avail_kb:-0}") || {
-    echo "the target has only $(( ${avail_kb:-0} / 1024 / 1024 )) GB free; staging the download needs ${NEED_SCRATCH_GB} GB beside the ${STAGE_RESERVE_GB} GB the system itself needs" | tee -a "$LOG"
-    return 1; }
-  log "staging: ${stage_kb}KB sparse ceiling on the target (of ${avail_kb}KB free)"
-  img="$troot/.rime-stage.img"
-  truncate -s "${stage_kb}K" "$img" 2>>"$LOG" || return 1
-  STAGE_LOOP=$(losetup -f --show "$img" 2>>"$LOG") || return 1
-  # See detail 1: the directory entry goes, the inode stays.
-  rm -f "$img" 2>>"$LOG" || return 1
-  mkfs.xfs -q -f "$STAGE_LOOP" >>"$LOG" 2>&1 || return 1
-  mkdir -p "$STAGE_DIR" 2>>"$LOG" || return 1
-  # A staging filesystem left mounted here by a run that was killed outright
-  # would otherwise be silently stacked under this one, and then never released.
-  umount -R "$STAGE_DIR" 2>/dev/null || true
-  mount "$STAGE_LOOP" "$STAGE_DIR" >>"$LOG" 2>&1 || return 1
-  STAGE_MNT="$STAGE_DIR"
-  mkdir -p "$STAGE_MNT/tmp" 2>>"$LOG" || return 1
-  STAGE_TMPDIR="$STAGE_MNT/tmp"
-  STAGE_BOOTC_ARGS=(--skip-finalize)
-  # Logged because every out-of-space failure this design has had was about
-  # WHERE something was, and none of the logs said.
-  log "staging: loop=$STAGE_LOOP mnt=$STAGE_MNT tmpdir=$STAGE_TMPDIR"
-  log "staging: $(df -Pk "$STAGE_MNT" 2>/dev/null | awk 'NR==2{print $4" KB free on the staging fs"}'), $(df -Pk /var/tmp 2>/dev/null | awk 'NR==2{print $4" KB free on /var/tmp (unused: TMPDIR is redirected)"}')"
-  return 0
-}
-
-# Idempotent, and called from unmount_target as well as the success path: a loop
-# device still attached to a (deleted) file on the target filesystem keeps that
-# filesystem busy, so leaving one behind is what would stop the NEXT attempt
-# from being able to unmount the target at all.
-stage_teardown() {
-  [ -n "$STAGE_MNT$STAGE_LOOP" ] || return 0
-  # Lazy umount as a fallback: podman may still hold overlay mounts under the
-  # store at the moment a failure path runs.
-  [ -n "$STAGE_MNT" ] && { umount -R "$STAGE_MNT" 2>/dev/null || umount -l "$STAGE_MNT" 2>/dev/null || true; }
-  [ -n "$STAGE_LOOP" ] && { losetup -d "$STAGE_LOOP" 2>/dev/null || true; }
-  # netinstall_fetch_into exported TMPDIR into the staging filesystem, which has
-  # just gone away. Leaving it set makes the very next `mktemp -d` — the one the
-  # account step uses to mount the freshly installed root — fail with "No such
-  # file or directory", i.e. a perfect install with no account on it.
-  unset TMPDIR
-  STAGE_MNT=""; STAGE_LOOP=""; STAGE_TMPDIR=""; STAGE_BOOTC_ARGS=()
-  return 0
-}
-
-# ── The download itself, wherever it is going ────────────────────────────────
-# One function for both staging homes, so the external-scratch path and the
-# on-target fallback cannot drift apart. It sets OCI_SCRATCH, STORE_SCRATCH,
-# SRC_VOL, SRC_ARGS and PODMAN_STORE, and dies on failure.
-#
-# The only thing that differs between the two callers is what is TRUE about the
-# disk when it fails, and the messages say which — a "nothing has been erased"
-# on the path where the disk was erased first would be a lie in the frightening
-# direction.
 # The registry answered, and the answer was that this ISO's pinned build is not
 # there. Distinct from "unreachable": the network is fine, retrying will not
 # help, and the right advice is a newer ISO. Only meaningful for a pinned
@@ -442,129 +292,6 @@ was tested with has been removed, and retrying will not bring it back.
 Download the newest installer from the Rime OS releases page; it pins a
 build that is still published."
 }
-
-netinstall_fetch_into() {   # $1 = a directory on a real filesystem with room
-  local scratch="$1" attempt _wait pull_ok _state _tmp
-  if [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
-    _state="$TARGET has already been erased — on this machine the download and the
-install are the same step. Start the installer again to redo the whole install;
-a second run on the same disk is safe."
-  else
-    _state="Nothing has been erased — your disks are untouched."
-  fi
-  OCI_SCRATCH="$scratch/oci"
-  STORE_SCRATCH="$scratch/store"
-  _tmp="$scratch/tmp"
-  mkdir -p "$OCI_SCRATCH" "$STORE_SCRATCH" "$_tmp" \
-    || die "Could not create the staging directory at $scratch.
-
-$_state"
-  # TMPDIR, for the reason recorded at stage_setup detail 3: containers/image
-  # writes every blob to a scratch file under $TMPDIR before it reaches its
-  # destination, and the default /var/tmp is the RAM overlay on a live ISO. That
-  # is the same RAM write this whole section exists to remove, and it applies to
-  # BOTH staging homes — it is not specific to the on-target fallback.
-  export TMPDIR="$_tmp"
-  # …and TMPDIR alone is NOT enough for the containers-storage copy below.
-  # skopeo 1.22 takes that destination's big temporary files from
-  # containers.conf's image_copy_tmp_dir, which defaults to /var/tmp and wins
-  # over $TMPDIR. Measured in a VM booted from the netinstall ISO: the download
-  # stayed on the staging disk, then "Preparing the installer runtime" wrote
-  # /var/tmp/container_images_storage*/ into the 5.3 GB live overlay, filled it
-  # 40 s in, and died with no error in the log — the log lives on the same full
-  # filesystem. The host-side suites never saw it: this laptop's /var/tmp has
-  # hundreds of GB. So every skopeo copy here names its temp dir explicitly.
-  SKOPEO_TMP=(--tmpdir "$_tmp")
-  note "Staging to $scratch (needs ~${NEED_SCRATCH_GB} GB)."
-  log "scratch: $scratch ($(df -PBG "$scratch" 2>/dev/null | awk 'NR==2{print $4}') free, TMPDIR=$TMPDIR)"
-
-  note "Downloading Rime OS from $NET_SOURCE_IMAGE — this is the slow part."
-  if [ -f "$OCI_SCRATCH/index.json" ]; then
-    note "Already downloaded."
-    pull_ok=1
-  else
-    pull_ok=0
-    # skopeo, not `podman pull`: it writes the COMPRESSED blobs straight into an
-    # OCI directory and never decompresses them into containers-storage. That is
-    # the whole point — it is the difference between ~5.8 GB on disk and ~12 GB
-    # in RAM. It also fetches layers in parallel by default.
-    #
-    # Back off between attempts. The first version retried with NO delay at all,
-    # so all three attempts completed inside one second — which is one attempt
-    # wearing a disguise, and gives a flapping link or a slow DNS server no
-    # chance whatsoever to come good.
-    for attempt in 1 2 3; do
-      if [ "$attempt" != 1 ]; then
-        _wait=$(( attempt * 5 ))
-        note "Download failed — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
-        sleep "$_wait"
-      fi
-      if skopeo "${SKOPEO_TMP[@]}" copy --retry-times 3 \
-           "docker://$NET_SOURCE_IMAGE" "oci:$OCI_SCRATCH:rime" 2>&1 | tee -a "$LOG"; then
-        pull_ok=1; break
-      fi
-    done
-    if [ "$pull_ok" != 1 ] && pinned_image_gone; then
-      die "$(pinned_image_gone_msg "$_state")"
-    fi
-    [ "$pull_ok" = 1 ] || die "Could not download Rime OS from $NET_SOURCE_IMAGE after 3 attempts.
-
-$_state
-
-The network looked usable when this started, so the download itself failed:
-the connection may have dropped, or the registry may be unreachable from here.
-The exact error is above and in $LOG."
-  fi
-  note "Download complete."
-
-  # ── Install FROM the OCI directory, exactly as the offline ISO does ────────
-  # bootc reads compressed blobs straight out of this tree, so nothing is
-  # re-tarred into the container's /var/tmp — the second of the two RAM writes
-  # this path used to make.
-  SRC_VOL=(-v "$OCI_SCRATCH":/run/rime-oci:ro)
-  SRC_ARGS=(--source-imgref "oci:/run/rime-oci" --target-imgref "$TARGET_IMAGE")
-
-  # bootc still has to RUN from somewhere, and the netinstall live environment
-  # has no bootc of its own. Materialise the runner from the OCI directory we
-  # already have — a local decompress, no second download — into a store on the
-  # SAME scratch filesystem, so containers-storage never touches the RAM overlay.
-  note "Preparing the installer runtime…"
-  if ! podman --root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run" \
-         image exists "$TARGET_IMAGE" 2>/dev/null; then
-    skopeo "${SKOPEO_TMP[@]}" copy "oci:$OCI_SCRATCH:rime" \
-      "containers-storage:[overlay@$STORE_SCRATCH/graph+$STORE_SCRATCH/run]$TARGET_IMAGE" \
-      2>&1 | tee -a "$LOG" \
-      || die "Could not prepare the installer runtime from the downloaded image.
-
-$_state
-The exact error is above and in $LOG."
-  fi
-  # Every later `podman` call in this script must use that store, not the
-  # RAM-backed default one.
-  PODMAN_STORE=(--root "$STORE_SCRATCH/graph" --runroot "$STORE_SCRATCH/run")
-  return 0
-}
-
-# On the live ISO the image is ALSO present as an OCI directory (ISO /container,
-# mounted at /run/initramfs/live/container). Prefer it as the bootc install
-# source: the oci transport streams blobs straight off the read-only ISO,
-# whereas containers-storage re-tars every layer into the container's /var/tmp
-# — which lives in the RAM-backed live overlay and overflows on 4G machines.
-# Absent (e.g. plain-host testing) we fall back to the embedded storage image.
-OCI_DIR="${RIME_OCI_DIR:-/run/initramfs/live/container}"
-SRC_VOL=(); SRC_ARGS=()
-# Extra `podman` flags that redirect containers-storage onto the staging disk.
-# Empty everywhere except a network install — the offline ISO's store is on the
-# ISO itself and is already fine.
-PODMAN_STORE=()
-if [ -d "$OCI_DIR" ]; then
-  SRC_VOL=(-v "$OCI_DIR":/run/rime-oci:ro)
-  # --target-imgref is what the INSTALLED system records as its update origin.
-  # It must be the real registry, not the live env's local tag: with
-  # `localhost/rime-os:daily` baked in, `bootc upgrade` fails permanently on the
-  # installed machine (nothing to pull from).
-  SRC_ARGS=(--source-imgref "oci:/run/rime-oci" --target-imgref "$TARGET_IMAGE")
-fi
 
 # `|| true`: a full RAM disk (or an unwritable log) must never trip the ERR trap
 # and turn a fine install into a reported failure.
@@ -597,25 +324,23 @@ have() { command -v "$1" >/dev/null 2>&1; }
 #    machine it is built for; the firmware of the machine building it is not
 #    touched.
 #
-# 2. An empty tmpfs over /sys/firmware/efi/efivars in the container. This is
-#    defence in depth and NOTHING MORE, and saying so matters, because the
-#    first version of this code shipped the mask alone and believed it was the
-#    fix. MEASURED 2026-09-20, 22:12: with the mask applied and logged, a
-#    loopback `bootc install to-filesystem` still ran
+# 2. An empty tmpfs over /sys/firmware/efi/efivars, in a private mount
+#    namespace that bootc runs in. This is defence in depth and NOTHING MORE,
+#    and saying so matters, because the first version of this code shipped a
+#    mask alone and believed it was the fix. MEASURED 2026-09-20, 22:12: with a
+#    mask applied and logged INSIDE A CONTAINER, a loopback `bootc install
+#    to-filesystem` still ran
 #
 #        efibootmgr -b 0000 -B
 #        efibootmgr --create --disk /dev/loop1 --part 1 ...
 #
-#    against the host, and tests/lab/nvram-guard caught it. The reason is
-#    `--pid=host`, which bootc requires: it re-enters the host's MOUNT
-#    namespace for the bootloader step, so the container's own mounts are not
-#    where bootupd is looking. Checked rather than deduced — an unmasked
-#    privileged container on this machine shows ZERO entries under
-#    /sys/firmware/efi/efivars, so the write cannot have gone through the
-#    container's namespace at all.
-#
-#    The mask stays because it costs nothing and covers any future step that
-#    does stay inside the container. It is not the guard.
+#    against the host, and tests/lab/nvram-guard caught it. bootc then ran in a
+#    `--pid=host` container and re-entered the host's MOUNT namespace for the
+#    bootloader step, so the container's own mounts were not where bootupd was
+#    looking. bootc no longer runs in a container (see "Where the OS comes
+#    from"), and a namespace made with `unshare --mount` is inherited by bootc
+#    and by the bootupctl it chroots into, so the mask now covers the step that
+#    used to walk around it. It is still not the guard: --generic-image is.
 #
 # The test is the SYSFS BACKING FILE, never the device name. `/dev/loop1` can
 # be renamed or symlinked; `/sys/class/block/<name>/loop/backing_file` exists
@@ -628,7 +353,7 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # look real. That direction is deliberate: the failure mode of a wrong "yes" is
 # a disk image with no firmware entry, which the next boot of the machine that
 # owns the image fixes; the failure mode of a wrong "no" is the incident above.
-NVRAM_ARGS=()
+NVRAM_MASK=0
 NVRAM_BOOTC_ARGS=()
 disk_is_loopback() {  # $1=block device path — 0 if the kernel calls it a loop
   local d base
@@ -642,14 +367,14 @@ disk_is_loopback() {  # $1=block device path — 0 if the kernel calls it a loop
     && [ -e "$RIME_SYSFS_BLOCK/$base/loop/backing_file" ] && return 0
   return 1
 }
-# Sets NVRAM_ARGS for the install about to run. Call it immediately before the
-# podman invocation, with the TARGET DISK — not a partition of it.
+# Sets NVRAM_BOOTC_ARGS and NVRAM_MASK for the install about to run. Called by
+# run_bootc_install and nowhere else, with the TARGET DISK — not a partition.
 set_nvram_args_for() {  # $1=target block device
   local base backing
-  NVRAM_ARGS=()
+  NVRAM_MASK=0
   NVRAM_BOOTC_ARGS=()
   if disk_is_loopback "$1"; then
-    NVRAM_ARGS=(--tmpfs /sys/firmware/efi/efivars)
+    NVRAM_MASK=1
     NVRAM_BOOTC_ARGS=(--generic-image)
     base=$(basename "$(readlink -f "$1")")
     backing=$(cat "/sys/class/block/$base/loop/backing_file" 2>/dev/null \
@@ -659,6 +384,264 @@ set_nvram_args_for() {  # $1=target block device
     note "Loopback target: the firmware step is skipped and this machine's UEFI boot entries will not be touched."
   else
     log "nvram: $1 is a real block device — bootc writes a boot entry, as a real install must"
+  fi
+}
+
+# ── The ONE place this engine runs `bootc install` ──────────────────────────
+# Every install path — partition, whole disk, encrypted, unattended — comes
+# through here, so a new branch cannot skip the NVRAM decision and the suites
+# have exactly one call site to hold open. $1 is the TARGET DISK (what
+# set_nvram_args_for inspects), $2 the mounted target root, and anything after
+# that is extra bootc arguments: more --karg, --boot-mount-spec.
+#
+# --bootloader grub: bootc picks the bootloader from the machine it RUNS on,
+# and this live environment has no bootupd, so left alone it chooses systemd
+# and then refuses ("bootupd is required for ostree-based installs") with the
+# OS already deployed. Measured 2026-10-04; Anaconda passes the same flag for
+# the same reason. The loader itself still comes from the image: bootc runs
+# bootupctl chrooted into the deployment.
+#
+# --skip-fetch-check: the origin recorded on the disk is the TAG, and checking
+# it here would be a second registry round trip proving nothing the source
+# fetch does not.
+#
+# --skip-finalize: bootc finishes by remounting the target read-only, and the
+# last compression pass (see compress_store_pass) still has to write. Skipping
+# it costs nothing: the engine releases every mount under the target moments
+# later, and it also skips an fstrim that has no business running mid-install.
+run_bootc_install() {  # $1=target disk  $2=mounted target root  [$@=extra bootc args]
+  local disk="$1" root="$2" brc cpid="" list=""; shift 2
+  [ -n "$SOURCE_IMGREF" ] || { echo "run_bootc_install: no source chosen" | tee -a "$LOG"; return 64; }
+  set_nvram_args_for "$disk"
+  local cmd=("$BOOTC" install to-filesystem --bootloader grub
+             --source-imgref "$SOURCE_IMGREF" --target-imgref "$TARGET_IMAGE"
+             --skip-fetch-check --skip-finalize --acknowledge-destructive
+             ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"}
+             --karg quiet --karg splash "$@" "$root")
+  log "bootc: ${cmd[*]}"
+  if [ "$ROOTFS_TYPE" = btrfs ]; then
+    list=$(mktemp /run/rime-compressed.XXXXXX)
+    # Every sixth pass (about every 30 s) it also says how far the install has
+    # got. bootc prints nothing between "layers needed" and "Deploying" — the
+    # whole download — and the graphical front end shows the engine's last
+    # line as its status, so without this the screen does not move for as
+    # long as the download takes.
+    ( n=0
+      while [ ! -e "$list.stop" ]; do
+        compress_store_pass "$root" "$list"
+        n=$((n + 1))
+        [ $((n % 6)) = 0 ] && note "Installing Rime OS — $(df -BM --output=used "$root" 2>/dev/null | tail -1 | tr -dc '0-9') MB written so far…"
+        sleep 5
+      done ) &
+    cpid=$!
+  fi
+  if [ "$NVRAM_MASK" = 1 ]; then
+    # exit 97 rather than running unmasked: a mask that was asked for and could
+    # not be made is a refusal, not a warning.
+    unshare --mount --propagation private -- sh -c '
+      if [ -d /sys/firmware/efi/efivars ]; then
+        mount -t tmpfs -o size=64k,mode=0755 rime-efivars-mask /sys/firmware/efi/efivars || exit 97
+      fi
+      exec "$@"' rime-bootc "${cmd[@]}"
+  else
+    "${cmd[@]}"
+  fi
+  brc=$?
+  if [ -n "$cpid" ]; then
+    touch "$list.stop"; wait "$cpid"
+    # The last objects bootc wrote. A pass that fails here leaves a system that
+    # is installed and boots, only larger than it needs to be, so it is
+    # reported and not turned into a failed install.
+    if [ "$brc" = 0 ] && ! compress_store_pass "$root" "$list"; then
+      note "Rime OS is installed, but part of it could not be compressed (see $LOG); it uses more disk than it needs to."
+    fi
+    log "compressed: $(wc -l < "$list") objects; target now uses $(df -B1M --output=used "$root" 2>/dev/null | tail -1 | tr -d ' ') MB"
+    rm -f "$list" "$list.stop"
+  fi
+  return "$brc"
+}
+
+# Where the neighbour's \EFI\fedora boot files are backed up on a shared ESP.
+# It kept its APEX name through the rebrand, on purpose: an earlier APEX (rime-rename: keep)
+# install on that ESP already put the TRUE originals there, and the `cp -n`
+# that fills it is what keeps a later install from overwriting them with files
+# an install has already rewritten. A new name would start an empty directory
+# and "back up" the rewritten files as the originals.
+ESP_BACKUP_DIR=EFI/fedora/apex-backup  # rime-rename: keep (an ESP path earlier installs wrote)
+
+# ── The root filesystem is compressed ───────────────────────────────────────
+# Rime's /usr is 14.4 GB of files. MEASURED 2026-10-04 by copying the /usr of
+# release 2026.09.29 onto a fresh btrfs with each mount option:
+#
+#   (no compression)          14.4 GB
+#   compress=zstd:3            8.60 GB   39 s
+#   compress-force=zstd:3      7.27 GB   42 s
+#   compress-force=zstd:9      6.96 GB  111 s
+#   compress-force=zstd:15     6.68 GB  530 s   (16-thread Ryzen 7 PRO 250)
+#
+# `compress=` alone loses 1.3 GB because btrfs gives up on a whole file when
+# its first range does not compress (it sets NOCOMPRESS on the inode);
+# `compress-force` asks every range. Level 3 costs the install nothing
+# measurable, so the install writes at forced zstd:3; the higher levels cost
+# minutes of CPU on the machine being installed for a few hundred MB.
+#
+# The mount option lasts as long as this mount, and sets nothing on any file.
+# It does NOT cover what ostree writes either — see compress_store_pass below.
+#
+# NOT the `compression` PROPERTY, which this engine set until the VM gate ran
+# `ostree fsck` (2026-10-04). btrfs copies a directory's properties onto every
+# inode created beneath it AS AN XATTR, `btrfs.compression=zstd`, and an ostree
+# `bare` repo checksums a file object's xattrs: an object that inherited it no
+# longer matches its own name, and fsck reports it as corrupt. One object in
+# 165,290 had it on the first install (ostree mostly writes through O_TMPFILE,
+# which did not inherit), but the property sat on repo/ and repo/tmp/ for every
+# update to come, and on /var for every file the owner and their containers
+# would ever write. It never compressed the OS in the first place: ostree
+# preallocates, and btrfs never compresses a preallocated extent.
+#
+# btrfs only; ext4 and xfs (partition mode allows them) have no transparent
+# compression and are mounted as before.
+ROOT_ZSTD_LEVEL="${RIME_ROOT_ZSTD_LEVEL:-3}"
+mount_new_root() {  # $1=freshly made root filesystem  $2=mount point
+  if [ "$ROOTFS_TYPE" = btrfs ]; then
+    mount -o "compress-force=zstd:$ROOT_ZSTD_LEVEL" "$1" "$2" >>"$LOG" 2>&1 || return 1
+    log "root: $1 on $2, compress-force=zstd:$ROOT_ZSTD_LEVEL for the install"
+  else
+    mount "$1" "$2" >>"$LOG" 2>&1 || return 1
+    log "root: $1 on $2 ($ROOTFS_TYPE has no transparent compression)"
+  fi
+}
+
+# ── …and the OS store is compressed explicitly, as it arrives ──────────────
+# The mount option above does NOT reach the OS itself. libostree preallocates
+# every object it writes (fallocate), and btrfs never compresses into a
+# preallocated extent. MEASURED 2026-10-04 on release 2026.09.30.3 installed by
+# this live env's bootc onto a compress-force=zstd:3 target: 14.95 GB used, the
+# largest objects each one uncompressed extent. A `btrfs filesystem defragment
+# -czstd` over the store then took it to 8.34 GB in 63 s.
+#
+# So bootc is run with this beside it: every few seconds, every object that has
+# appeared since the last pass is rewritten compressed. An object is only in
+# objects/ once it is complete (ostree writes elsewhere and links it in), so a
+# pass never touches a file still being written; and doing it as the objects
+# arrive is what keeps the disk from ever having to hold the uncompressed
+# store, which is what lets a small disk take the install at all.
+#
+# Objects of 2 KiB and less are skipped: btrfs keeps those inline in metadata,
+# where there is nothing to rewrite.
+compress_store_pass() {  # $1=target root  $2=sorted list of objects already done
+  local objs="$1/ostree/repo/objects" now new rc=0
+  [ -d "$objs" ] || return 0
+  now=$(mktemp /run/rime-objs.XXXXXX); new=$(mktemp /run/rime-objs.XXXXXX)
+  find "$objs" -type f -name '*.file' -size +2k 2>/dev/null | sort > "$now"
+  comm -13 "$2" "$now" > "$new"
+  if [ -s "$new" ]; then
+    xargs -a "$new" -d '\n' btrfs filesystem defragment -czstd -L "$ROOT_ZSTD_LEVEL" -- >>"$LOG" 2>&1 || rc=1
+    sort -m -o "$2" "$2" "$new"
+  fi
+  rm -f "$now" "$new"
+  return "$rc"
+}
+
+# ── whole disk, unencrypted: partition it ourselves, then to-filesystem ──────
+# `bootc install to-disk` partitions a disk itself, but it formats and mounts
+# the root on its own terms, and the compression above has to be in place
+# before the first byte of the OS is written. So this engine builds the layout,
+# the same shape partition mode and the encrypted path already use.
+#
+# The layout is MIRRORED from a real `bootc install to-disk --filesystem
+# btrfs` run, read back with sfdisk rather than guessed:
+#   1  1 MiB    21686148-6449-6E6F-744E-656564454649  BIOS-BOOT
+#   2  512 MiB  C12A7328-F81F-11D2-BA4B-00A0C93EC93B  EFI-SYSTEM
+#   3  rest     4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709  root
+# The BIOS-boot partition is there because bootc makes one; leaving it out
+# would make this layout quietly different from to-disk's on exactly the
+# legacy-BIOS machines that took a whole log entry to support.
+#
+# Sets rc (0 or a code the caller's case statement explains), ESP_DEV and
+# TARGET. Used by the headless path and the unattended path alike.
+install_plain_disk() {
+  local _n _pt _parts=() _force
+  case "$ROOTFS_TYPE" in btrfs|xfs) _force=-f ;; *) _force=-F ;; esac
+  rc=0
+  WROTE_DISK=1   # the partition table goes now — everything on the disk with it
+  note "Preparing $DISK …"
+  mkdir -p "$TROOT"
+  wipefs -a "$DISK" >>"$LOG" 2>&1 || true
+  if ! sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 \
+    || ! sgdisk -n1:0:+1M   -t1:21686148-6449-6E6F-744E-656564454649 -c1:BIOS-BOOT \
+                -n2:0:+512M -t2:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c2:EFI-SYSTEM \
+                -n3:0:0     -t3:4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709 -c3:rime-root \
+                "$DISK" >>"$LOG" 2>&1; then
+    rc=70; echo "sgdisk could not write the partition table on $DISK" | tee -a "$LOG"
+  fi
+  if [ "$rc" = 0 ]; then
+    partprobe "$DISK" >>"$LOG" 2>&1 || true
+    udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+    # Resolve the device nodes by ASKING, never by pasting a number onto the
+    # disk name: that is /dev/sda1 on one machine and /dev/nvme0n1p1 on the next.
+    while read -r _n; do _parts+=("/dev/$_n"); done < <(
+      lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}')
+    if [ "${#_parts[@]}" != 3 ]; then
+      rc=70
+      echo "expected 3 partitions on $DISK after partitioning, found ${#_parts[@]}" | tee -a "$LOG"
+    else
+      # Assert what we just built rather than assuming it: a wrong ESP here
+      # would send the boot files to the root partition and produce a machine
+      # that installs perfectly and does not boot.
+      _pt=$(lsblk -dno PARTTYPE "${_parts[1]}" 2>/dev/null | tr 'A-Z' 'a-z' | tr -d ' ')
+      if [ "$_pt" != c12a7328-f81f-11d2-ba4b-00a0c93ec93b ]; then
+        rc=70; echo "${_parts[1]} is not an ESP (parttype '$_pt')" | tee -a "$LOG"
+      else
+        ESP_DEV="${_parts[1]}"
+        TARGET="${_parts[2]}"
+        log "partitioned $DISK: BIOS-BOOT=${_parts[0]} ESP=$ESP_DEV root=$TARGET"
+      fi
+    fi
+  fi
+  if [ "$rc" = 0 ]; then
+    mkfs.vfat -F32 -n EFI-SYSTEM "$ESP_DEV" >>"$LOG" 2>&1 \
+      || { rc=71; echo "mkfs.vfat failed on the EFI partition $ESP_DEV" | tee -a "$LOG"; }
+  fi
+  if [ "$rc" = 0 ]; then
+    mkfs."$ROOTFS_TYPE" $_force -L rime-root "$TARGET" >>"$LOG" 2>&1 \
+      || { rc=80; echo "mkfs.$ROOTFS_TYPE failed on $TARGET" | tee -a "$LOG"; }
+  fi
+  if [ "$rc" = 0 ]; then
+    mount_new_root "$TARGET" "$TROOT" || { rc=80; echo "mounting $TARGET failed" | tee -a "$LOG"; }
+  fi
+  if [ "$rc" = 0 ]; then
+    mkdir -p "$TROOT/boot/efi"
+    mount "$ESP_DEV" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
+      || { rc=80; echo "mounting the ESP $ESP_DEV failed" | tee -a "$LOG"; }
+  fi
+  if [ "$rc" = 0 ]; then
+    run_bootc_install "$DISK" "$TROOT" ${EXTRA_KARGS[@]+"${EXTRA_KARGS[@]}"} 2>&1 | tee -a "$LOG"
+    rc=${PIPESTATUS[0]}
+    { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
+  fi
+  release_target_mounts "whole-disk install"
+  return 0
+}
+
+# Every mount under $TROOT has to go, and it has to be CHECKED. A mount left
+# behind keeps the btrfs superblock in whatever state the last mount set —
+# `bootc install to-filesystem` FINALIZES by remounting the target read-only —
+# and the account step that mounts this volume again then fails with
+# `useradd: failure while writing changes to /etc/passwd` on a machine whose
+# install went perfectly. Measured on the loopback install, 2026-09-20.
+# A PREFIX match, not an exact one: bootc mounts things INSIDE the tree.
+release_target_mounts() {  # $1=label for the log
+  local _resid _m
+  umount -R "$TROOT/boot/efi" 2>/dev/null || true
+  umount -R "$TROOT/boot"     2>/dev/null || true
+  umount -R "$TROOT"          2>/dev/null || true
+  _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
+  if [ "${_resid:-0}" != 0 ]; then
+    log "$1: $_resid mount(s) still under $TROOT — releasing lazily"
+    findmnt -rno TARGET 2>/dev/null | grep "^$TROOT" | sort -r | while read -r _m; do
+      umount -Rl "$_m" 2>>"$LOG" || true
+    done
   fi
 }
 
@@ -696,10 +679,12 @@ ESP_PART=""       # the ESP this engine created (encrypted whole-disk mode)
 RECOVERY_FILE=""  # 0600 file under /run holding the recovery key. SECRET.
 RECOVERY_KEY=""   # the key itself, once read back. SECRET — never log()ged.
 LUKS_TPM_TOKEN=0  # 1 once a systemd-tpm2 token is OBSERVED in the header
-# Where the enrolment helper lives INSIDE the Rime OS image being installed.
-# It is not in the live environment: enrolment policy belongs to the system
-# being installed, so the helper ships with it and is run out of it.
-LUKS_ENROLL_PATH="/usr/libexec/rime-luks-enroll"
+# The enrolment helper. Enrolment policy belongs to the system being installed,
+# so this is THAT system's own file: build-live-iso.sh copies it out of the
+# exact image this ISO installs and refuses to build if it cannot. It used to
+# be run out of a container of the image, which on a network install meant
+# downloading the whole image first; a copy at the same path needs neither.
+LUKS_ENROLL_PATH="${RIME_LUKS_ENROLL_PATH:-/usr/libexec/rime-luks-enroll}"
 # The console (kbd) keymap the installed machine will load — NOT the XKB layout
 # name. See console_keymap_for() for why they are different things and why
 # confusing them is a stranding bug on an encrypted machine.
@@ -769,11 +754,6 @@ restore_console() {
 # disk with no way forward. Deepest mount first. Safe to call at any time.
 TROOT=/run/rime-target
 unmount_target() {
-  # FIRST, always: the staging loop device is backed by a deleted file on the
-  # target filesystem, so nothing under $TROOT can be released while it is still
-  # attached. A leftover loop is exactly the kind of debris that makes the next
-  # run refuse with "currently mounted" — the stranding this function prevents.
-  stage_teardown
   umount "$TROOT/boot/efi" 2>/dev/null || true
   umount "$TROOT"          2>/dev/null || true
   [ -n "${DEPLOY_MNT:-}" ] && { umount "$DEPLOY_MNT/proc" 2>/dev/null || true; umount "$DEPLOY_MNT/var" 2>/dev/null || true; }
@@ -898,7 +878,15 @@ quiet_console
 # Clear any mounts left behind by a previous aborted run, so a retry is not
 # blocked by its own leftovers ("currently mounted — refusing").
 unmount_target
-have podman || die "podman is missing from the live environment."
+# bootc installs from THIS environment (see "Where the OS comes from"), so its
+# absence is a refusal here and not a "command not found" after the disk is
+# prepared. --check-passphrase is exempt: it reads no image and no disk.
+if [ "${1:-}" != --check-passphrase ]; then
+  have "$BOOTC" || die "bootc is missing from the live environment, so Rime OS cannot be installed from it.
+
+Nothing has been erased — your disks are untouched.
+The ISO is damaged or was built incorrectly; download it again."
+fi
 if [ "$NETINSTALL" = 1 ]; then
   # Deliberately NOT a network check here. Preflight runs before the user has
   # even seen the Wi-Fi page, so failing now for being offline would refuse an
@@ -916,8 +904,10 @@ Nothing has been erased — your disks are untouched.
 The ISO is damaged or was built incorrectly; download it again."
     NET_SOURCE_IMAGE="${TARGET_IMAGE%:*}@$RELEASE_DIGEST"
   fi
-  # skopeo is what fetches the image now, so its absence must be a refusal here
-  # and not a "command not found" halfway through the download.
+  # bootc fetches through skopeo's image proxy (`skopeo experimental-image-proxy`
+  # is what it spawns), and the reachability check below calls skopeo directly,
+  # so its absence must be a refusal here and not a failure after the disk is
+  # prepared.
   have skopeo || die "skopeo is missing from the live environment, so a network install cannot fetch Rime OS.
 
 Nothing has been erased — your disks are untouched.
@@ -942,9 +932,10 @@ elif [ "${1:-}" = --check-passphrase ]; then
   # `Run installer disk-encryption suite` were this one refusal. Measured:
   # 62 passed / 0 failed here, 24 passed / 7 failed there, same commit.
   :
-elif ! podman image exists "$IMAGE" 2>/dev/null && [ ! -e /run/install/repo/container ]; then
-  die "The Rime OS image ($IMAGE) is not present in the live environment."
+elif [ ! -d "$OCI_DIR" ] && ! { have podman && podman image exists "$IMAGE" 2>/dev/null; }; then
+  die "The Rime OS image is not present in the live environment (no OCI directory at $OCI_DIR and no $IMAGE in its container storage)."
 fi
+[ "${1:-}" = --check-passphrase ] || choose_source_imgref
 
 # ── shared post-install: create the admin account inside the new system ──────
 # useradd/chpasswd via --root against the ostree deployment's /etc. The stateroot
@@ -1479,7 +1470,12 @@ part_dev() {  # $1=disk  $2=partition number — prints the node, or nothing
 # It is NEVER written to the target's ESP or /boot. Those live on the machine
 # that is encrypted, unencrypted, and an attacker with the laptop has them.
 surface_recovery_key() {  # $1=the recovery key — SECRET
-  local key="$1" esp dst path saved=0 why=""
+  # Every local starts with a value: under `set -u` a bare `local dst` is UNSET,
+  # and on a machine not booted from a Rime USB stick (a DVD, Ventoy, a VM's
+  # ISO) nothing below assigns it, so `[ -n "$dst" ]` killed the engine — right
+  # after the recovery key was created, with no RIME-INSTALL-FAILED line and an
+  # encrypted, empty disk. Measured 2026-10-04 in a VM booting the ISO as a CD.
+  local key="$1" esp="" dst="" path="" saved=0 why=""
   RESULT_RECOVERY_KEY="$key"
   # 1. the screen.
   secret_line "RIME-INSTALL-RECOVERY-KEY: $key"
@@ -1628,7 +1624,7 @@ create_user_in() {  # $1=deploy dir  $2=user  $3=pass  $4=hostname  $5=err-prefi
   fi
   if true; then
     local paths=(/etc/hostname /var/home)
-    for f in passwd passwd- shadow shadow- group group- gshadow gshadow- subuid subgid .pwd.lock; do
+    for f in passwd passwd- shadow shadow- group group- gshadow gshadow- subuid subuid- subgid subgid- .pwd.lock; do
       [ -e "$deploy/etc/$f" ] && paths+=("/etc/$f")
     done
     chroot "$deploy" /usr/sbin/setfiles -F "$spec" "${paths[@]}" 2>&1 | tee -a "$LOG" \
@@ -1670,27 +1666,16 @@ answers file carrying encrypt=yes and lukspass=." ;;
   [ -b "$DISK" ] || die "unattended: rime.disk=$DISK is not a block device."
   log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
   echo "Rime OS unattended install to $DISK …"
-  WROTE_DISK=1
   EXTRA_KARGS=()
   for k in $(kvall rime.karg); do EXTRA_KARGS+=(--karg "$k"); done
+  case "$ROOTFS_TYPE" in btrfs|ext4|ext3|xfs) : ;; *) die "unattended: unsupported root filesystem '$ROOTFS_TYPE'." ;; esac
   # Disarm the ERR trap around the install (it fires even under `set +e`, and a
-  # failing `podman … | tee` pipeline would pre-empt the rc check below).
+  # failing `bootc … | tee` pipeline would pre-empt the rc check below).
   trap - ERR
   set +e
-  # --net=host: no netavark needed in the live env; bootc install is offline.
-  set_nvram_args_for "$DISK"
-  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
-    -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
-    ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
-    ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
-    bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
-      ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
-      --karg quiet --karg splash ${EXTRA_KARGS[@]+"${EXTRA_KARGS[@]}"} \
-      ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
-      "$DISK" 2>&1 | tee -a "$LOG"
-  rc=${PIPESTATUS[0]}
+  install_plain_disk
   trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
-  [ "$rc" = 0 ] || die "unattended: bootc install exited $rc (see $LOG)."
+  [ "$rc" = 0 ] || die "unattended: the install exited $rc (see $LOG)."
   INSTALLED_OK=1
   MNT=$(mktemp -d)
   udevadm settle --timeout=30 2>>"$LOG" || true
@@ -2121,16 +2106,38 @@ if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then
   die "$DISK (or a partition of it) is currently mounted — refusing."
 fi
 
-# Refuse a target that cannot possibly hold the image, BEFORE erasing it. The
-# text UI warned below 16 GB; there was no check at all in headless mode, so a
-# too-small stick was wiped and the install then failed on space several minutes
-# later — destructive and pointless, when the size is knowable up front.
-_min_bytes=$((16 * 1000 * 1000 * 1000))
+# Refuse a target that cannot possibly hold the install, BEFORE erasing it.
+# There used to be no check at all in headless mode, so a too-small stick was
+# wiped and the install then failed on space several minutes later —
+# destructive and pointless, when the size is knowable up front.
+#
+# The number is measured, not chosen. MEASURED 2026-10-04: release
+# 2026.09.30.3 installed from the registry by this live env's bootc, with the
+# store compressed as it arrived (compress_store_pass), peaked at 8.0 GB on the
+# root filesystem and finished at 8.1 GB. The largest layout spends 2 GiB more
+# on the EFI and boot partitions (the encrypted one), and the rest is headroom
+# for a slower machine whose compressor falls further behind the download than
+# the 16-thread one this was measured on. That is the INSTALL; the system's own
+# updates and the owner's files need room on top, which the README says.
+#
+# That is btrfs. ext4 and xfs (partition mode, or `rootfs=` in an answers file)
+# have no transparent compression, and the same install took 14.95 GB on a
+# filesystem that did not compress it; their floor is 18 GB for the same
+# reasons.
+#
+# The disk is what is checked, in both modes. In partition mode the PARTITION
+# is checked too (below): it holds only the root filesystem, the ESP being one
+# that is already there, so its floor is the same number less the 2 GiB.
+case "$ROOTFS_TYPE" in
+  btrfs) _min_gb=12 ;;
+  *)     _min_gb=18 ;;
+esac
+_min_bytes=$((_min_gb * 1000 * 1000 * 1000))
 _sz=$(lsblk -bdno SIZE "$DISK" 2>/dev/null | tr -d ' ' || true)
 case "$_sz" in
   ''|*[!0-9]*) log "size check: could not read the size of $DISK — continuing" ;;
   *) [ "$_sz" -ge "$_min_bytes" ] \
-       || die "$DISK is only $((_sz / 1000000000)) GB. Rime OS needs at least 16 GB. Nothing has been erased." ;;
+       || die "$DISK is only $((_sz / 1000000000)) GB. Rime OS needs at least $_min_gb GB. Nothing has been erased." ;;
 esac
 
 # Validate the filesystem choice for BOTH modes, here, before the mode split.
@@ -2234,6 +2241,12 @@ originals are backed up to \\${ESP_BACKUP_DIR//\//\\}\\)."
   fi
   rmdir "$_probe" 2>/dev/null || true
 
+  _psz=$(lsblk -bdno SIZE "$TARGET" 2>/dev/null | tr -d ' ' || true)
+  case "$_psz" in
+    ''|*[!0-9]*) log "size check: could not read the size of $TARGET — continuing" ;;
+    *) [ "$_psz" -ge $(( (_min_gb - 2) * 1000 * 1000 * 1000 )) ] \
+         || die "$TARGET is only $((_psz / 1000000000)) GB. Rime OS needs a partition of at least $((_min_gb - 2)) GB. Nothing has been erased." ;;
+  esac
   TARGET_DESC="$TARGET (partition of $DISK)"
 else
   TARGET="$DISK"
@@ -2241,13 +2254,44 @@ else
 fi
 log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME"
 
-# ── 4. install (via the embedded image; stream to log) ───────────────────────
+# ── The encryption helper has to EXIST before the disk is destroyed ─────────
+# An encrypted disk whose recovery key was never created is the stranding case
+# this whole item exists to prevent, so a missing helper is a refusal, never a
+# "carry on without the recovery key". The helper is the installed image's own
+# copy (see LUKS_ENROLL_PATH), so this is answerable before anything is written
+# on every path — including a network install, whose image has not been
+# downloaded yet — and it is asked before the network is, because a broken
+# ISO should not need a working network to say so.
+luks_helper_ok() {
+  [ "$ENCRYPT" = yes ] || return 0
+  if [ -n "${RIME_LUKS_ENROLL_LOCAL:-}" ]; then
+    [ -x "$RIME_LUKS_ENROLL_LOCAL" ] || return 1
+    log "luks: using the test-only local enrolment helper $RIME_LUKS_ENROLL_LOCAL"
+    return 0
+  fi
+  [ -x "$LUKS_ENROLL_PATH" ]
+}
+if [ "$ENCRYPT" = yes ] && ! luks_helper_ok; then
+  if [ -n "${RIME_LUKS_ENROLL_LOCAL:-}" ]; then
+    die "RIME_LUKS_ENROLL_LOCAL=$RIME_LUKS_ENROLL_LOCAL is not executable. Nothing has been erased."
+  fi
+  die "This installer cannot set up an encrypted disk: it does not carry the
+enrolment helper ($LUKS_ENROLL_PATH) that creates the recovery key.
+
+Nothing has been erased — your disks are untouched.
+
+An encrypted disk with no recovery key is a disk you can be permanently locked
+out of, so the installer will not make one. Go back and turn encryption off to
+install Rime OS unencrypted, or use a newer ISO."
+fi
+
+# ── 4. install (bootc from this live env; stream to log) ─────────────────────
 note "Installing Rime OS to $TARGET_DESC … (full log: $LOG)"
-# ── Network install: fetch the OS BEFORE touching the disk ──────────────────
-# Ordering matters. If the download fails — no network, registry down, a typo in
-# the ref — the disk must still be untouched and the user must get a reason they
-# can act on. Doing this after the wipe would leave a machine with no OS and no
-# way back.
+# ── Network install: prove the OS can be fetched BEFORE touching the disk ───
+# Ordering matters. The download itself happens inside bootc, after the disk is
+# prepared, so everything that can fail early — no network, no DNS, registry
+# down, this ISO's build withdrawn — is asked here, while the disk is still
+# untouched and the user can be given a reason they can act on.
 if [ "$NETINSTALL" = 1 ]; then
   # ── Say WHY before saying "download failed" ───────────────────────────────
   # The first real install attempt failed here with three identical
@@ -2276,7 +2320,7 @@ if [ "$NETINSTALL" = 1 ]; then
   case "$(net_diagnose)" in
     no-route)
       die "This machine is not connected to any network, and this is the network
-installer — it has to download Rime OS (about 5 GB) to install it.
+installer — it has to download Rime OS (about 7 GB) to install it.
 
 Nothing has been erased — your disks are untouched.
 
@@ -2296,89 +2340,30 @@ school portal — which this installer cannot do. Try a different network, a pho
 hotspot, or use the full offline ISO, which needs no network at all." ;;
   esac
 
-  # ── Stage to disk, not to RAM ─────────────────────────────────────────────
-  # See NEED_SCRATCH_GB above for why, and the STAGE_TARGET comment for what
-  # happens on a machine that has no scratch volume at all.
+  # ── Reachability, checked while everything is still intact ────────────────
+  # The download happens inside bootc, AFTER the disk has been prepared (see
+  # "Where the OS comes from"), so this is the last moment anything can be
+  # verified for free. `skopeo inspect --raw` fetches the manifest only: in
+  # about a second it proves DNS resolves, the registry answers, the repository
+  # is readable without credentials, and this ISO's exact build is still there.
+  # Every one of those used to be discovered several minutes in, after the wipe.
   #
-  # Two orderings, and the difference is exactly the guarantee this step can
-  # make:
-  #
-  #   * a real scratch volume exists → download FIRST, disks untouched. A
-  #     failure here costs nothing.
-  #   * nothing qualifies → stage inside the target root, which means the
-  #     target is partitioned and formatted BEFORE the download. The disk is
-  #     committed at that point. This is the case the published v1.0.0
-  #     installer shipped and installed with on real hardware, and it is the
-  #     only thing that turns the single-disk USB-boot laptop from a refusal
-  #     into an install.
-  #
-  # Neither ordering stages into RAM, which is the rule 63857891 added and this
-  # does not relax: the fallback's store lives on a loop device backed by the
-  # TARGET DISK, with TMPDIR pointed at it too.
-  STAGE_ON_TARGET=0
-  SCRATCH="$(pick_scratch)" || die "The staging directory you asked for (RIME_OCI_SCRATCH=${RIME_OCI_SCRATCH:-})
-cannot be used: it is not a writable directory on a real filesystem with
-${NEED_SCRATCH_GB} GB free, or it is on the disk about to be erased.
-
-Nothing has been erased — your disks are untouched.
-
-Unset RIME_OCI_SCRATCH to let the installer choose for itself."
-  if [ "$SCRATCH" = "$STAGE_TARGET" ]; then
-    STAGE_ON_TARGET=1
-    SCRATCH=""
-    # ── Is the target big enough to hold the download AND the system? ───────
-    # Asked HERE, against the raw device, because here the disk is still
-    # intact. The shipped installer asked the same question inside its
-    # stage_setup — i.e. after mkfs — so a too-small disk was erased before
-    # being told no. The same rule is applied again after mkfs against real
-    # free space; this one is what makes the refusal survivable.
-    # A RAW device size is not free space, and the gap is not small: this path
-    # spends ~513 MiB of the disk on the BIOS-boot and EFI partitions before
-    # mkfs runs, and the filesystem then keeps its own metadata. Without a
-    # margin, a disk a couple of GB above the line passes HERE, gets
-    # partitioned, and fails the same rule again in stage_setup — which is the
-    # "erased for nothing" outcome this check exists to prevent.
-    _tsize=$(lsblk -bdno SIZE "$TARGET" 2>/dev/null | tr -dc '0-9')
-    _tsize_kb=$(( ${_tsize:-0} / 1024 - 2 * 1024 * 1024 ))
-    [ "$_tsize_kb" -ge 0 ] || _tsize_kb=0
-    if ! stage_budget_kb "$_tsize_kb" >/dev/null; then
-      die "$TARGET is too small to install Rime OS over the network.
-
-Nothing has been erased — your disks are untouched.
-
-There is no separate drive or spare partition to download onto, so Rime OS has
-to be staged on $TARGET itself: about ${NEED_SCRATCH_GB} GB while it installs,
-on top of the ${STAGE_RESERVE_GB} GB the installed system needs. $TARGET has
-about $(( _tsize_kb / 1024 / 1024 )) GB to give.
-
-Either install to a larger disk, or plug in a USB stick or drive with
-${NEED_SCRATCH_GB} GB free — it is used as scratch space only and is not
-erased — and try again."
+  # What it cannot prove is that a link working now still works in ten minutes.
+  # Nothing can, and the message after the install does not pretend otherwise.
+  note "Checking Rime OS can be downloaded from $NET_SOURCE_IMAGE …"
+  insp_ok=0
+  for attempt in 1 2 3; do
+    if [ "$attempt" != 1 ]; then
+      _wait=$(( attempt * 5 ))
+      note "Could not reach the registry — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
+      sleep "$_wait"
     fi
-    # ── Reachability, checked while everything is still intact ──────────────
-    # On this path the download happens AFTER the disk is erased, so this is
-    # the last moment anything can be verified for free. `skopeo inspect --raw`
-    # fetches the manifest only: in about a second it proves DNS resolves, the
-    # registry answers, the repository is readable without credentials, and the
-    # tag for THIS edition exists. Every one of those used to be discovered
-    # several minutes in, after the wipe.
-    #
-    # What it cannot prove is that a link working now still works in ten
-    # minutes. Nothing can, and the message below does not pretend otherwise.
-    note "Checking Rime OS can be downloaded from $NET_SOURCE_IMAGE …"
-    insp_ok=0
-    for attempt in 1 2 3; do
-      if [ "$attempt" != 1 ]; then
-        _wait=$(( attempt * 5 ))
-        note "Could not reach the registry — waiting ${_wait}s, then retrying (attempt $attempt of 3)…"
-        sleep "$_wait"
-      fi
-      if skopeo inspect --raw "docker://$NET_SOURCE_IMAGE" >>"$LOG" 2>&1; then insp_ok=1; break; fi
-    done
-    if [ "$insp_ok" != 1 ] && pinned_image_gone; then
-      die "$(pinned_image_gone_msg "Nothing has been erased — your disks are untouched.")"
-    fi
-    [ "$insp_ok" = 1 ] || die "Could not reach Rime OS at $NET_SOURCE_IMAGE after 3 attempts.
+    if skopeo inspect --raw "docker://$NET_SOURCE_IMAGE" >>"$LOG" 2>&1; then insp_ok=1; break; fi
+  done
+  if [ "$insp_ok" != 1 ] && pinned_image_gone; then
+    die "$(pinned_image_gone_msg "Nothing has been erased — your disks are untouched.")"
+  fi
+  [ "$insp_ok" = 1 ] || die "Could not reach Rime OS at $NET_SOURCE_IMAGE after 3 attempts.
 
 Nothing has been erased — your disks are untouched.
 
@@ -2386,84 +2371,26 @@ The network itself looked usable, so the problem is between here and the image
 registry: the connection may have dropped, the registry may be unreachable from
 this network, or this edition may not have been published. The exact error is at
 the end of $LOG."
-    # ── The fallback runs tools the normal whole-disk path never needs ─────
-    # Whole-disk mode hands the filesystem name to bootc, which brings its own
-    # mkfs; only partition mode checks for one. This path does its own
-    # partitioning, its own mkfs and its own loop device, so every tool it uses
-    # is checked HERE — before the disk is touched — rather than being
-    # discovered missing with the partition table already gone.
-    for _t in losetup truncate mkfs.xfs findmnt; do
-      have "$_t" || die "$_t is missing from this installer, so Rime OS cannot be staged on $TARGET.
-
-Nothing has been erased — your disks are untouched.
-
-Plug in a USB stick or drive with ${NEED_SCRATCH_GB} GB free — it is used as
-scratch space only and is not erased — and try again."
-    done
-    if [ "$INSTALL_MODE" = disk ] && [ "$ENCRYPT" != yes ]; then
-      for _t in sgdisk wipefs partprobe udevadm lsblk mkfs.vfat "mkfs.$ROOTFS_TYPE"; do
-        have "$_t" || die "$_t is missing from this installer, so $DISK cannot be prepared for a staged install.
-
-Nothing has been erased — your disks are untouched.
-
-Plug in a USB stick or drive with ${NEED_SCRATCH_GB} GB free — it is used as
-scratch space only and is not erased — and try again."
-      done
-    fi
-    log "staging: no scratch volume qualified — staging inside the target root on $TARGET"
-    note "No spare drive or partition was found, so Rime OS will be downloaded onto $TARGET itself as it installs."
-  else
-    netinstall_fetch_into "$SCRATCH"
-  fi
 fi
 
-# ── The encryption helper has to EXIST before the disk is destroyed ─────────
-# It lives in the image, which on a network install only arrived a moment ago,
-# so this is the first point at which the question can be answered — and it is
-# still before anything has been written. An encrypted disk whose recovery key
-# was never created is the stranding case this whole item exists to prevent, so
-# a missing helper is a refusal, never a "carry on without the recovery key".
-#
-# Split out so the answer is produced by ONE piece of code wherever it is asked.
-# It is asked here on every path that already has the image, and again from the
-# encrypted branch on the one path that does not — see luks_helper_checked.
-luks_helper_ok() {
-  [ "$ENCRYPT" = yes ] || return 0
-  if [ -n "${RIME_LUKS_ENROLL_LOCAL:-}" ]; then
-    [ -x "$RIME_LUKS_ENROLL_LOCAL" ] || return 1
-    log "luks: using the test-only local enrolment helper $RIME_LUKS_ENROLL_LOCAL"
-    return 0
-  fi
-  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm "$IMAGE" \
-    test -x "$LUKS_ENROLL_PATH" >>"$LOG" 2>&1
-}
-luks_helper_checked=0
-if [ "$ENCRYPT" = yes ]; then
-  if [ -n "${RIME_LUKS_ENROLL_LOCAL:-}" ]; then
-    [ -x "$RIME_LUKS_ENROLL_LOCAL" ] \
-      || die "RIME_LUKS_ENROLL_LOCAL=$RIME_LUKS_ENROLL_LOCAL is not executable. Nothing has been erased."
-    log "luks: using the test-only local enrolment helper $RIME_LUKS_ENROLL_LOCAL"
-    luks_helper_checked=1
-  elif [ "${NETINSTALL:-0}" = 1 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
-    # The image has NOT been downloaded yet on this path: the only place with
-    # room for it is the target disk, so it arrives after the disk is prepared.
-    # Asking now would run `podman run` against a store that holds nothing and
-    # refuse a perfectly good image. Deferred to the encrypted branch, which
-    # asks the moment the image exists — still before one byte of the system is
-    # written, and before any user data could be locked away.
-    log "luks: enrolment-helper check deferred — the image downloads onto the target"
-  elif ! luks_helper_ok; then
-    die "This Rime OS image cannot set up an encrypted disk: it does not contain
-the enrolment helper ($LUKS_ENROLL_PATH) that creates the recovery key.
+# ── The tools the chosen layout needs, checked before the disk is touched ───
+# Every path partitions and formats the target itself now (see
+# install_plain_disk), so a missing tool must be a refusal here, with the disk
+# intact, rather than a discovery with the partition table already gone. The
+# encrypted path checks its own longer list at the encryption step.
+if [ "$INSTALL_MODE" = disk ] && [ "$ENCRYPT" != yes ]; then
+  for _t in sgdisk wipefs partprobe udevadm lsblk mkfs.vfat "mkfs.$ROOTFS_TYPE" findmnt; do
+    have "$_t" || die "$_t is missing from this installer, so $DISK cannot be prepared.
 
 Nothing has been erased — your disks are untouched.
+The ISO is damaged or was built incorrectly; download it again."
+  done
+fi
+if [ "$ROOTFS_TYPE" = btrfs ]; then
+  have btrfs || die "btrfs (btrfs-progs) is missing from this installer, so the new root cannot be compressed.
 
-An encrypted disk with no recovery key is a disk you can be permanently locked
-out of, so the installer will not make one. Go back and turn encryption off to
-install Rime OS unencrypted, or use a newer ISO."
-  else
-    luks_helper_checked=1
-  fi
+Nothing has been erased — your disks are untouched.
+The ISO is damaged or was built incorrectly; download it again."
 fi
 
 # ── The typed ERASE is bound to the devices it was typed against ─────────────
@@ -2506,11 +2433,11 @@ Go back to the disk page and choose the partition again."
     || die "$ESP_DEV is no longer on the confirmed disk $DISK. Nothing has been erased."
 fi
 
-if [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
-  # Say plainly what is about to happen and in what order, because on this path
-  # the download and the destruction are the SAME step. Someone who reads "do
-  # not power off" and then watches a progress bar for twenty minutes deserves
-  # to know that pulling the plug now is not recoverable.
+if [ "$NETINSTALL" = 1 ]; then
+  # Say plainly what is about to happen and in what order, because on a network
+  # install the download and the destruction are the SAME step. Someone who
+  # reads "do not power off" and then watches a progress bar for twenty minutes
+  # deserves to know that pulling the plug now is not recoverable.
   note "Do not power off — $TARGET is being erased now, and Rime OS downloads onto it as it goes. This is the slow part."
 else
   note "Do not power off — $TARGET is being erased and rewritten from here on."
@@ -2544,7 +2471,7 @@ fi
 log "install start: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME FS=$ROOTFS_TYPE"
 
 # Disarm the ERR trap around the install: the trap fires even under `set +e`, and
-# with pipefail a failing `podman … | tee` pipeline would hit it BEFORE we can
+# with pipefail a failing `bootc … | tee` pipeline would hit it BEFORE we can
 # read rc — reporting a useless "unexpected error on line N" instead of the real
 # bootc error. We check rc explicitly and re-arm immediately after.
 trap - ERR
@@ -2575,7 +2502,7 @@ if [ "$INSTALL_MODE" = partition ]; then
       || { rc=90; echo "mkfs.$ROOTFS_TYPE failed on $TARGET" | tee -a "$LOG"; }
   fi
   if [ "${rc:-0}" = 0 ]; then
-    mount "$TARGET" "$TROOT" >>"$LOG" 2>&1 || { rc=91; echo "mounting $TARGET failed" | tee -a "$LOG"; }
+    mount_new_root "$TARGET" "$TROOT" || { rc=91; echo "mounting $TARGET failed" | tee -a "$LOG"; }
   fi
   if [ "${rc:-0}" = 0 ]; then
     mkdir -p "$TROOT/boot/efi"
@@ -2601,38 +2528,12 @@ if [ "$INSTALL_MODE" = partition ]; then
         ls -l "$TROOT/boot/efi/$ESP_BACKUP_DIR" 2>/dev/null; } >>"$LOG" 2>&1 || true
     fi
   fi
-  # ── Nowhere else to stage: the download goes onto the target we just made ──
-  # The target root is mounted at this point and is the only filesystem on this
-  # machine with room, which is what makes the fallback possible here and not
-  # earlier. See stage_setup.
-  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
-    if stage_setup "$TROOT"; then
-      netinstall_fetch_into "$STAGE_MNT"
-    else
-      rc=79
-    fi
-  fi
   if [ "${rc:-0}" = 0 ]; then
-    set_nvram_args_for "$DISK"
-    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
-      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
-      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
-      -v "$TROOT":"$TROOT":rshared \
-      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
-      bootc install to-filesystem \
-        --skip-fetch-check --acknowledge-destructive \
-        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
-        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
-        --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
-        "$TROOT" 2>&1 | tee -a "$LOG"
+    run_bootc_install "$DISK" "$TROOT" 2>&1 | tee -a "$LOG"
     rc=${PIPESTATUS[0]}
     { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
   fi
-  # Before the umounts: the staging loop device holds a writable fd on a deleted
-  # file on $TROOT's filesystem, so $TROOT cannot be released while it exists.
-  stage_teardown
-  umount -R "$TROOT/boot/efi" 2>/dev/null || umount -l "$TROOT/boot/efi" 2>/dev/null || true
-  umount -R "$TROOT" 2>/dev/null || umount -l "$TROOT" 2>/dev/null || true
+  release_target_mounts "partition install"
 elif [ "$ENCRYPT" = yes ]; then
   # ── encrypted whole disk: partition, LUKS2, then to-filesystem ────────────
   #
@@ -2762,7 +2663,7 @@ elif [ "$ENCRYPT" = yes ]; then
   fi
   if [ "${rc:-0}" = 0 ]; then
     mkdir -p "$TROOT"
-    mount "/dev/mapper/$LUKS_MAPPER" "$TROOT" >>"$LOG" 2>&1 \
+    mount_new_root "/dev/mapper/$LUKS_MAPPER" "$TROOT" \
       || { rc=77; echo "mounting the encrypted root failed" | tee -a "$LOG"; }
   fi
   if [ "${rc:-0}" = 0 ]; then
@@ -2775,29 +2676,6 @@ elif [ "$ENCRYPT" = yes ]; then
     mount "$ESP_PART" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
       || { rc=77; echo "mounting the EFI partition failed" | tee -a "$LOG"; }
   fi
-  # ── Nowhere else to stage: the download goes inside the encrypted root ────
-  # Every staged byte is encrypted on the way in, which is slower and correct.
-  # This is the first point on this path at which a filesystem with room exists.
-  # It is also, deliberately, the step BEFORE enrolment: the helper that makes
-  # the recovery key lives in the image, and on this path the image is not on
-  # this machine yet. See the enrolment block immediately below.
-  if [ "${rc:-0}" = 0 ] && [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
-    if stage_setup "$TROOT"; then
-      netinstall_fetch_into "$STAGE_MNT"
-      # The check that could not run before the wipe, run at the first instant
-      # the image exists — and still before bootc writes anything, so the
-      # encrypted volume holds no data and nothing is locked away. rc=74's
-      # message already describes exactly this state.
-      if [ "$luks_helper_checked" = 0 ] && ! luks_helper_ok; then
-        rc=74
-        echo "the downloaded Rime OS image does not contain $LUKS_ENROLL_PATH" | tee -a "$LOG"
-      else
-        luks_helper_checked=1
-      fi
-    else
-      rc=79
-    fi
-  fi
   # ── enrolment: the recovery key (always) and a TPM slot (only where safe) ──
   # Policy is NOT decided here. /usr/libexec/rime-luks-enroll, in the image being
   # installed, owns it; this engine's job is to call it, to check that a
@@ -2806,32 +2684,11 @@ elif [ "$ENCRYPT" = yes ]; then
   # own documented environment variable) and on stdin, because adding a keyslot
   # requires unlocking the volume key with a key that already exists.
   #
-  # ── WHY THIS RUNS HERE, AFTER THE STAGING FETCH, NOT BEFORE mkfs.btrfs ────
-  # The helper is INSIDE the image. On the encrypted whole-disk staging
-  # fallback — nothing qualified as scratch, so the download goes onto the
-  # target itself — $IMAGE is the REGISTRY ref and PODMAN_STORE is still empty
-  # until netinstall_fetch_into sets it. Run before that download, this
-  # `podman run` made podman pull ~15 GB into the DEFAULT containers-storage:
-  # on a live ISO that is the RAM overlay the entire staging design exists to
-  # avoid, on exactly the single-internal-disk USB-boot laptop the fallback was
-  # added for. The deferred luks_helper_ok check above had already been moved
-  # past the download for that reason; the enrolment call it defers FOR had not.
   #
-  # ONE order for every encrypted path, not a second one behind a
-  # STAGE_ON_TARGET guard. A second call site for a privileged container on a
-  # disk-erasing path is the worse trade, and on the path that does have
-  # scratch everything this moved past is mkfs.btrfs and three mounts — seconds,
-  # no download.
-  #
-  # THE TRADE, STATED RATHER THAN BURIED: on the staging fallback the recovery
-  # key is now created and shown AFTER the download instead of before it. That
-  # is accepted because for the whole of that window the volume holds nothing
-  # but blobs that can be downloaded again, the passphrase the owner just typed
-  # has already been PROVEN to open the volume (the `cryptsetup open` above
-  # succeeded with it, which is what a keyslot test is), and the key still
-  # reaches them before bootc writes the first byte of the system. Nothing of
-  # theirs is locked away at any point in it. Before this change that path
-  # could not complete at all.
+  # It runs out of this live environment, as the image's own copy (see
+  # LUKS_ENROLL_PATH), and BEFORE bootc: the recovery key is created, proven and
+  # shown before the first byte of the system is written — on a network install,
+  # before the first byte is even downloaded.
   if [ "${rc:-0}" = 0 ]; then
     note "Creating the recovery key …"
     mkdir -p /run/rime-luks 2>>"$LOG" || true
@@ -2843,12 +2700,8 @@ elif [ "$ENCRYPT" = yes ]; then
         --device "$LUKS_PART" --recovery-out "$RECOVERY_FILE" >>"$LOG" 2>&1 \
         || { rc=74; echo "the enrolment helper failed" | tee -a "$LOG"; }
     else
-      printf '%s' "$LUKSPASS" | PASSWORD="$LUKSPASS" \
-        podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host \
-          --security-opt label=disable -i -e PASSWORD \
-          -v /dev:/dev -v /run/rime-luks:/run/rime-luks \
-          "$IMAGE" "$LUKS_ENROLL_PATH" \
-            --device "$LUKS_PART" --recovery-out "$RECOVERY_FILE" >>"$LOG" 2>&1 \
+      printf '%s' "$LUKSPASS" | PASSWORD="$LUKSPASS" "$LUKS_ENROLL_PATH" \
+        --device "$LUKS_PART" --recovery-out "$RECOVERY_FILE" >>"$LOG" 2>&1 \
         || { rc=74; echo "the enrolment helper failed" | tee -a "$LOG"; }
     fi
   fi
@@ -2859,8 +2712,6 @@ elif [ "$ENCRYPT" = yes ]; then
   # This is the acceptance criterion in two commands. A recovery key that was
   # printed but does not open the volume is worse than none, and finding that
   # out after the install would mean finding it out on the user's machine.
-  # "Before the install" is bootc, not the download: on the staging fallback
-  # the download is already behind this point, and every byte of it is ours.
   # `grep`-free and `luksDump`-free: --test-passphrase asks the header itself.
   if [ "${rc:-0}" = 0 ]; then
     RECOVERY_KEY=$(tr -d '\r\n' < "$RECOVERY_FILE" 2>>"$LOG" || true)
@@ -2888,9 +2739,8 @@ elif [ "$ENCRYPT" = yes ]; then
     _dump=""
   fi
   # The key exists and is proven. Get it to the user NOW, not after the install:
-  # a failure in the next ten minutes must not be what loses it. On the staging
-  # fallback the download has already happened by the time we get here — see the
-  # enrolment block — and this is still ahead of every byte bootc writes.
+  # a failure in the next ten minutes must not be what loses it. This is still
+  # ahead of every byte bootc downloads or writes.
   if [ "${rc:-0}" = 0 ]; then
     surface_recovery_key "$RECOVERY_KEY"
     shred -u "$RECOVERY_FILE" 2>/dev/null || rm -f "$RECOVERY_FILE" 2>/dev/null || true
@@ -2938,19 +2788,7 @@ elif [ "$ENCRYPT" = yes ]; then
       log "luks: extra test-only kargs in use (RIME_LUKS_EXTRA_KARGS='$RIME_LUKS_EXTRA_KARGS')"
     fi
     log "luks kargs: ${LUKS_KARGS[*]}"
-    set_nvram_args_for "$DISK"
-    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
-      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
-      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
-      -v "$TROOT":"$TROOT":rshared \
-      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
-      bootc install to-filesystem \
-        --skip-fetch-check --acknowledge-destructive \
-        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
-        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
-        --karg quiet --karg splash "${LUKS_KARGS[@]}" \
-        ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
-        "$TROOT" 2>&1 | tee -a "$LOG"
+    run_bootc_install "$DISK" "$TROOT" "${LUKS_KARGS[@]}" 2>&1 | tee -a "$LOG"
     rc=${PIPESTATUS[0]}
     { echo "--- boot + ESP after install ---"; find "$TROOT/boot" -maxdepth 3; } >>"$LOG" 2>&1 || true
   fi
@@ -2993,37 +2831,11 @@ elif [ "$ENCRYPT" = yes ]; then
     fi
   fi
   # ── EVERY mount under $TROOT has to go, and it has to be CHECKED ─────────
-  # Two things put mounts here that a plain `umount $TROOT` does not remove.
-  # The podman run above shares this tree `rshared`, so mounts bootc makes
-  # inside the container appear on the HOST as well; and `bootc install
-  # to-filesystem` FINALIZES by remounting the target read-only (its own log
-  # says "Finalizing filesystem root").
-  #
-  # Leaving one behind is not cosmetic. btrfs shares one superblock per
-  # filesystem, so mounting the same volume a second time — which is exactly
-  # what the account step below does — inherits the read-only flag of the mount
-  # that is still there. The result is the account step failing with
-  # `useradd: failure while writing changes to /etc/passwd` on a machine whose
-  # install went perfectly. Measured on the loopback install, 2026-09-20.
-  # The staging loop device is backed by a deleted file INSIDE the encrypted
-  # root, so it has to go before anything under $TROOT can be released — and
-  # before `cryptsetup close` could ever succeed.
-  stage_teardown
-  umount -R "$TROOT/boot/efi" 2>/dev/null || true
-  umount -R "$TROOT/boot"     2>/dev/null || true
-  umount -R "$TROOT"          2>/dev/null || true
-  # A PREFIX match, not an exact one. bootc mounts things INSIDE the tree —
-  # /sysroot, the stateroot var, the boot binds — and with rshared those appear
-  # on the host too. Checking only that `$TROOT` itself is gone would declare
-  # success while `$TROOT/ostree/deploy/.../var` was still mounted, which is
-  # the mount that the account step then writes through.
-  _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
-  if [ "${_resid:-0}" != 0 ]; then
-    log "luks: $_resid mount(s) still under $TROOT after the install — releasing lazily"
-    findmnt -rno TARGET 2>/dev/null | grep "^$TROOT" | sort -r | while read -r _m; do
-      umount -Rl "$_m" 2>>"$LOG" || true
-    done
-  fi
+  # See release_target_mounts. On this path a mount left behind is worse than
+  # on the others: it also holds the LUKS mapper open, so `cryptsetup close`
+  # cannot succeed either, which is why a residue here is a failure (rc=78)
+  # rather than a lazy release and a log line.
+  release_target_mounts "luks"
   if [ "${rc:-0}" = 0 ]; then
     _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
     if [ "${_resid:-0}" != 0 ]; then
@@ -3031,130 +2843,11 @@ elif [ "$ENCRYPT" = yes ]; then
       rc=78; echo "could not release $TROOT after the install ($_resid mount(s) left)" | tee -a "$LOG"
     fi
   fi
-elif [ "${STAGE_ON_TARGET:-0}" = 1 ]; then
-  # ── whole disk, no scratch volume: partition it ourselves, then stage ─────
-  #
-  # `bootc install to-disk` partitions the disk itself and is the right thing to
-  # use whenever we can. This is the one case where we cannot: the image has to
-  # be on a filesystem BEFORE bootc runs, the only disk with room is the one
-  # being installed to, and to-disk would erase that staging area as its first
-  # act. So the layout is built here and the install is to-filesystem — the same
-  # shape partition mode and the encrypted path already use. This is what the
-  # published v1.0.0 installer did, and it is the installer that booted on real
-  # hardware.
-  #
-  # The layout is MIRRORED from a real `bootc install to-disk --filesystem
-  # btrfs` run, read back with sfdisk rather than guessed:
-  #   1  1 MiB    21686148-6449-6E6F-744E-656564454649  BIOS-BOOT
-  #   2  512 MiB  C12A7328-F81F-11D2-BA4B-00A0C93EC93B  EFI-SYSTEM
-  #   3  rest     4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709  root
-  # The BIOS-boot partition is there because bootc makes one; leaving it out
-  # would make this layout quietly different from to-disk's on exactly the
-  # legacy-BIOS machines that took a whole log entry to support.
-  WROTE_DISK=1   # the partition table goes now — everything on the disk with it
-  note "Preparing $DISK …"
-  mkdir -p "$TROOT"
-  wipefs -a "$DISK" >>"$LOG" 2>&1 || true
-  if ! sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 \
-    || ! sgdisk -n1:0:+1M   -t1:21686148-6449-6E6F-744E-656564454649 -c1:BIOS-BOOT \
-                -n2:0:+512M -t2:C12A7328-F81F-11D2-BA4B-00A0C93EC93B -c2:EFI-SYSTEM \
-                -n3:0:0     -t3:4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709 -c3:rime-root \
-                "$DISK" >>"$LOG" 2>&1; then
-    rc=70; echo "sgdisk could not write the partition table on $DISK" | tee -a "$LOG"
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    partprobe "$DISK" >>"$LOG" 2>&1 || true
-    udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
-    # Resolve the device nodes by ASKING, never by pasting a number onto the
-    # disk name: that is /dev/sda1 on one machine and /dev/nvme0n1p1 on the next.
-    _parts=()
-    while read -r _n; do _parts+=("/dev/$_n"); done < <(
-      lsblk -rno NAME,TYPE "$DISK" 2>/dev/null | awk '$2=="part"{print $1}')
-    if [ "${#_parts[@]}" != 3 ]; then
-      rc=70
-      echo "expected 3 partitions on $DISK after partitioning, found ${#_parts[@]}" | tee -a "$LOG"
-    else
-      # Assert what we just built rather than assuming it: a wrong ESP here
-      # would send the boot files to the root partition and produce a machine
-      # that installs perfectly and does not boot.
-      _pt=$(lsblk -dno PARTTYPE "${_parts[1]}" 2>/dev/null | tr 'A-Z' 'a-z' | tr -d ' ')
-      if [ "$_pt" != c12a7328-f81f-11d2-ba4b-00a0c93ec93b ]; then
-        rc=70; echo "${_parts[1]} is not an ESP (parttype '$_pt')" | tee -a "$LOG"
-      else
-        ESP_DEV="${_parts[1]}"
-        TARGET="${_parts[2]}"
-        log "partitioned $DISK: BIOS-BOOT=${_parts[0]} ESP=$ESP_DEV root=$TARGET"
-      fi
-    fi
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    mkfs.vfat -F32 -n EFI-SYSTEM "$ESP_DEV" >>"$LOG" 2>&1 \
-      || { rc=71; echo "mkfs.vfat failed on the EFI partition $ESP_DEV" | tee -a "$LOG"; }
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    mkfs."$ROOTFS_TYPE" $MKFS_FORCE -L rime-root "$TARGET" >>"$LOG" 2>&1 \
-      || { rc=80; echo "mkfs.$ROOTFS_TYPE failed on $TARGET" | tee -a "$LOG"; }
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    mount "$TARGET" "$TROOT" >>"$LOG" 2>&1 || { rc=80; echo "mounting $TARGET failed" | tee -a "$LOG"; }
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    mkdir -p "$TROOT/boot/efi"
-    mount "$ESP_DEV" "$TROOT/boot/efi" >>"$LOG" 2>&1 \
-      || { rc=80; echo "mounting the ESP $ESP_DEV failed" | tee -a "$LOG"; }
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    if stage_setup "$TROOT"; then
-      netinstall_fetch_into "$STAGE_MNT"
-    else
-      rc=79
-    fi
-  fi
-  if [ "${rc:-0}" = 0 ]; then
-    set_nvram_args_for "$DISK"
-    podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
-      -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
-      ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
-      -v "$TROOT":"$TROOT":rshared \
-      ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
-      bootc install to-filesystem \
-        --skip-fetch-check --acknowledge-destructive \
-        ${STAGE_BOOTC_ARGS[@]+"${STAGE_BOOTC_ARGS[@]}"} \
-        ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
-        --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
-        "$TROOT" 2>&1 | tee -a "$LOG"
-    rc=${PIPESTATUS[0]}
-    { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
-  fi
-  # Staging first, then a PREFIX-matched sweep: podman shares $TROOT rshared, so
-  # mounts bootc makes inside the container appear on the host too, and one left
-  # behind under $TROOT is what makes the account step below write through a
-  # read-only mount of the same btrfs superblock.
-  stage_teardown
-  umount -R "$TROOT/boot/efi" 2>/dev/null || true
-  umount -R "$TROOT"          2>/dev/null || true
-  _resid=$(findmnt -rno TARGET 2>/dev/null | grep -c "^$TROOT" || true)
-  if [ "${_resid:-0}" != 0 ]; then
-    log "staged install: $_resid mount(s) still under $TROOT — releasing lazily"
-    findmnt -rno TARGET 2>/dev/null | grep "^$TROOT" | sort -r | while read -r _m; do
-      umount -Rl "$_m" 2>>"$LOG" || true
-    done
-  fi
 else
-  # --net=host: no netavark needed in the live env; bootc install is offline.
-  # Set BEFORE the call: `--wipe` destroys the disk immediately, so a Ctrl+C one
-  # second later must NOT be reported as "nothing was written".
-  WROTE_DISK=1
-  set_nvram_args_for "$DISK"
-  podman ${PODMAN_STORE[@]+"${PODMAN_STORE[@]}"} run --rm --privileged --pid=host --net=host --security-opt label=disable \
-    -v /var/lib/containers:/var/lib/containers -v /dev:/dev \
-    ${NVRAM_ARGS[@]+"${NVRAM_ARGS[@]}"} \
-    ${SRC_VOL[@]+"${SRC_VOL[@]}"} "$IMAGE" \
-    bootc install to-disk --wipe --filesystem "$ROOTFS_TYPE" \
-      ${NVRAM_BOOTC_ARGS[@]+"${NVRAM_BOOTC_ARGS[@]}"} \
-      --karg quiet --karg splash ${SRC_ARGS[@]+"${SRC_ARGS[@]}"} \
-      "$DISK" 2>&1 | tee -a "$LOG"
-  rc=${PIPESTATUS[0]}
+  # ── whole disk, unencrypted ──────────────────────────────────────────────
+  # See install_plain_disk: it sets WROTE_DISK the moment the partition table
+  # goes, so a Ctrl+C one second later is not reported as "nothing was written".
+  install_plain_disk
 fi
 trap 'die "Unexpected error on line $LINENO (see log). This is a bug in the installer, not a silent failure."' ERR
 # Distinguish OUR pre-install preparation failures from a real bootc failure —
@@ -3206,15 +2899,6 @@ again to try again." ;;
 
 Do not reboot expecting to log in. Start the installer again — a second run on
 the same disk is safe, and it will redo the whole install." ;;
-  79) die "Rime OS could not be staged on ${TARGET_DESC:-$TARGET}, so the download had nowhere to go (see $LOG).
-
-${TARGET_DESC:-$TARGET} has been erased and NOTHING has been installed on it, so
-it will not boot. Your other disks were not touched.
-
-This machine has no spare drive or partition, so the installer stages the
-download on the disk it is installing to. Plug in a USB stick or drive with
-${NEED_SCRATCH_GB} GB free — it is used as scratch space only and is not erased
-— and start the installer again." ;;
   80) die "Could not create or mount the filesystems on $DISK (see $LOG).
 
 $DISK has been erased. Your other disks were not touched. Start the installer
@@ -3226,7 +2910,15 @@ again to try again — a second attempt on the same disk is safe." ;;
 
 Nothing was formatted — $TARGET and your other partitions are untouched.
 Free up space on the ESP (old distro directories under \\EFI\\ are the usual culprit) and try again." ;;
-  *)  die "bootc install exited $rc. The exact error is above and in $LOG (search for 'error:'). No boot config was left half-written by grub2-mkconfig — bootc uses bootupd." ;;
+  *)  if [ "$NETINSTALL" = 1 ]; then
+        die "bootc install exited $rc while downloading and installing Rime OS. The exact error is above and in $LOG (search for 'error:').
+
+${TARGET_DESC:-$DISK} has been erased and Rime OS is not on it. On a network
+install the download and the install are one step, so a connection that dropped
+part-way ends here too. Start the installer again — a second run on the same
+disk is safe."
+      fi
+      die "bootc install exited $rc. The exact error is above and in $LOG (search for 'error:'). No boot config was left half-written by grub2-mkconfig — bootc uses bootupd." ;;
 esac
 INSTALLED_OK=1   # the OS is on the disk; only account setup remains
 

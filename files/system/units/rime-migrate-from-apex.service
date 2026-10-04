@@ -35,7 +35,7 @@ RequiresMountsFor=/var/lib /var/usrlocal
 Before=sysinit.target systemd-tmpfiles-setup.service rime-firewall.service
 Before=rimed.service rime-secretd.service rime-lid.service greetd.service
 Before=rime-greet-publish.service rime-sysext-rebuild.service
-Before=rime-boot-migrate-confirm.service rime-flathub-setup.service rime-flatpak-preinstall.service
+Before=rime-boot-migrate-confirm.service rime-flathub-setup.service
 Before=shutdown.target
 Conflicts=shutdown.target
 
