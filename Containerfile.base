@@ -39,10 +39,13 @@
 ARG CORE=ghcr.io/andrenijman/rime-os:core
 
 # ═══ rimed builder ═══════════════════════════════════════════════════════
-# Built FROM the core image rather than a bare fedora-bootc, on purpose: core
-# already carries rust + cargo (the baked dev toolchain), so this stage installs
-# nothing and starts compiling immediately. It also guarantees the compiler that
-# builds rimed is exactly the one shipped to users.
+# Built FROM the core image rather than a bare fedora-bootc, so rimed links
+# against exactly the libraries the image ships. rust and cargo are installed
+# HERE, in a stage that is thrown away: the image no longer carries a Rust
+# toolchain (2026-10-04, developer toolchains install on demand), and a `dnf`
+# in a discarded stage costs the fleet nothing — the same reasoning as the
+# translation stage below. gcc, which the `ring` crate's build script needs,
+# is already in core: the kernel-devel and akmods tooling requires it.
 #
 # rimed + rime are the workspace under rimed/; they embed config/sysprofiles/*.toml
 # via include_str!, so config/ must sit at ../../../config relative to the crate —
@@ -51,6 +54,7 @@ FROM ${CORE} AS rime-builder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
 ENV CARGO_HOME=/build/.cargo
+RUN dnf5 -y install --setopt=install_weak_deps=False rust cargo
 COPY rimed/ /build/rimed/
 COPY config/ /build/config/
 RUN set -eux; cd /build/rimed; cargo build --release --locked; \

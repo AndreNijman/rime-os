@@ -891,8 +891,15 @@ jobs:
             || fail "zsh/starship missing"
           run 'command -v matugen >/dev/null' \
             || fail "matugen missing — the shell cannot theme without it"
-          run 'command -v cargo >/dev/null' \
-            || fail "cargo missing — Containerfile.base compiles rimed in a stage FROM this image"
+          # cargo is NOT asserted any more: Containerfile.base's rimed builder
+          # installs its own in a discarded stage, and the image ships no Rust
+          # toolchain. What Rime itself still runs on a booted machine is:
+          run 'command -v node >/dev/null && command -v npm >/dev/null' \
+            || fail "node/npm missing — rime plugin (files/system/libexec/rime-plugin) runs on node"
+          run 'command -v ar >/dev/null' \
+            || fail "ar missing — rime install unpacks a .deb with it (rime-pkg)"
+          run 'command -v gcc >/dev/null' \
+            || fail "gcc missing — the rimed builder's ring crate compiles C with it"
 
           # Secure Boot: if a signing key is configured, the published kernel
           # MUST actually carry the signature. Containerfile.core degrades to

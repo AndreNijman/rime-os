@@ -1868,9 +1868,14 @@ RUN set -eux; \
 # Both editions ship a complete dev environment out of the box: the C/C++
 # toolchain + build systems + debuggers, the language toolchains
 # (Python/Node/Rust/Go/Ruby/JDK), and the common CLI dev tools (gh, git-lfs,
-# ripgrep, fd, fzf, bat, buildah). rust/cargo exist in the builder stage but not
-# the final image, so add them here for users too. Zed (GUI editor) is installed
-# in stage 5a-zed above. Own transaction, `dnf5 clean all`.
+# ripgrep, fd, fzf, bat, buildah). Zed (GUI editor) is installed in stage
+# 5a-zed above. Own transaction, `dnf5 clean all`.
+#
+# nodejs/nodejs-npm and binutils are named for Rime's own sake, not the
+# developer's: `rime plugin` runs on node (files/system/libexec/rime-plugin),
+# and rime-pkg unpacks a .deb with binutils' `ar`. Both used to arrive only
+# transitively (node through neovim → tree-sitter-cli, ar through gcc), which
+# is one packaging change away from vanishing.
 RUN set -eux; \
     dnf5 -y install \
         gcc gcc-c++ clang llvm lld \
@@ -1879,7 +1884,7 @@ RUN set -eux; \
         python3-pip python3-devel pipx \
         rust cargo golang ruby rubygems \
         java-latest-openjdk-devel \
-        nodejs nodejs-npm \
+        nodejs nodejs-npm binutils \
         gh git-lfs ripgrep fd-find fzf bat buildah; \
     dnf5 clean all
 
