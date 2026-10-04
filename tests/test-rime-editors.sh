@@ -1,43 +1,34 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  test-rime-editors.sh — the editors Rime ships can actually be launched.
+#  test-rime-editors.sh — the editors Rime offers can actually be launched.
 #
 #  ── The failure this exists for ─────────────────────────────────────────────
 #  Zed shipped on every Rime image, ran fine from a shell, and was invisible in
-#  every launcher, menu and "Open With" list. Two mistakes compounded in the
-#  Containerfile:
+#  every launcher, menu and "Open With" list: the Containerfile installed the
+#  desktop entry from `zed.app/share/applications/zed.desktop`, a name the
+#  tarball has never shipped (upstream's file is `dev.zed.Zed.desktop`), and
+#  `2>/dev/null || true` on that install swallowed the failure. A binary on PATH
+#  with no launcher entry is, to the person using the machine, an editor that
+#  does not work.
 #
-#    1. the desktop entry was installed from `zed.app/share/applications/
-#       zed.desktop`, a name the tarball has never shipped — upstream's file is
-#       `dev.zed.Zed.desktop`;
-#    2. `2>/dev/null || true` on that install swallowed the failure.
+#  Since 2026-10-04 Zed is not in the image at all ("make the apps optional"):
+#  `rime install zed` installs its Flathub build, which ships and exports its
+#  own entry, and updates with every Zed release instead of every core rebuild.
+#  So the Zed half of this suite now holds that arrangement: no stage unpacks a
+#  Zed tarball into /usr again (where the entry bug lived), and rime-pkg routes
+#  the bare name to Flathub and says why.
 #
-#  A binary on PATH with no launcher entry is, to the person using the machine,
-#  an editor that does not work. Nothing in the build or the suites disagreed
-#  with them, which is the actual defect: the image asserted the fetch and never
-#  asserted the result.
-#
-#  ── What this suite checks, and why in two layers ───────────────────────────
-#  STRUCTURAL (always): the Containerfile installs the name the tarball really
-#  ships, does not swallow that install, installs an icon, and asserts the
-#  result. This layer runs in CI where there is no Zed and no /usr/lib/zed.app.
-#
-#  LIVE (only when the artefact is present): the shipped entry exists, its
-#  TryExec resolves on PATH, and its Icon resolves in the hicolor theme. The
-#  structural layer alone would pass on a build that installed a correct entry
-#  into the wrong prefix.
-#
-#  Neovim is checked in the same shape for a different reason, and it turned out
-#  to be a second live defect rather than a precaution. Its entry is correct and
-#  says `Terminal=true`, which is an instruction to the DESKTOP: supply a
-#  terminal. freedesktop's mechanism for that is `xdg-terminal-exec`, and no
-#  Rime machine had it — while /etc/xdg/xdg-terminals.list, which is that
-#  program's config file and names Alacritty.desktop, has shipped since
-#  rime-logs 31. The configuration was on every install and the program that
-#  reads it was never packaged. So nvim ran fine from a shell everywhere and
-#  could not be started from the desktop anywhere, and `rime install neovim`
-#  told the user it was already "provided by Rime OS" — which is true, and is
-#  rime-pkg refusing to shadow an image package, and is not the bug.
+#  Neovim still ships, and it turned out to be a second live defect of the same
+#  shape. Its entry is correct and says `Terminal=true`, which is an instruction
+#  to the DESKTOP: supply a terminal. freedesktop's mechanism for that is
+#  `xdg-terminal-exec`, and no Rime machine had it — while
+#  /etc/xdg/xdg-terminals.list, which is that program's config file and names
+#  Alacritty.desktop, has shipped since rime-logs 31. The configuration was on
+#  every install and the program that reads it was never packaged. So nvim ran
+#  fine from a shell everywhere and could not be started from the desktop
+#  anywhere, and `rime install neovim` told the user it was already "provided by
+#  Rime OS" — which is true, and is rime-pkg refusing to shadow an image
+#  package, and is not the bug.
 #
 #  The shell half of the repair (routing Terminal=true entries through the
 #  helper instead of calling DesktopEntry.execute(), which does not honour the
@@ -57,6 +48,7 @@ cd "$(dirname "$0")" || exit 2
 REPO=$(cd .. && pwd)
 CF="$REPO/Containerfile.core"
 CFB="$REPO/Containerfile.base"
+PKG="$REPO/files/system/libexec/rime-pkg"
 
 pass=0; fail=0; skip=0
 ok()   { printf 'PASS  %s\n' "$1"; pass=$((pass+1)); }
@@ -65,90 +57,36 @@ skp()  { printf 'SKIP  %s\n' "$1"; skip=$((skip+1)); }
 section() { printf '\n\033[1m── %s ──\033[0m\n' "$1"; }
 want() { local d="$1"; shift; if "$@"; then ok "$d"; else bad "$d"; fi; }
 
-# The zed stanza, isolated once into a file so every structural assertion reads
-# the same text and nothing below re-derives it. It ends at the next RUN, so a
-# later stage's mention of zed cannot satisfy an assertion about this one.
-#
-# COMMENTS ARE STRIPPED. The stanza's own comment block quotes the wrong
-# filename while explaining the bug, and the first version of this suite failed
-# on that quotation — a checker that cannot tell an explanation from an
-# instruction reports the documentation as the defect.
-STANZA=$(mktemp); trap 'rm -f "$STANZA"' EXIT
-awk '/^# ── Stage 5a-zed:/{f=1} f{print} f&&/rm -f \/tmp\/zed.tgz/{exit}' "$CF" > "$STANZA"
-CODE=$(mktemp); trap 'rm -f "$STANZA" "$CODE"' EXIT
-# Comments out, THEN backslash-continuations joined. The second half is not
-# tidiness: the install and its `|| true` live on different physical lines, so
-# the first version of the swallow assertion below grepped one line for a
-# pattern that was only ever on the next one, and passed against a mutant that
-# reintroduced the bug. An assertion that cannot fail is worse than none.
-grep -v '^[[:space:]]*#' "$STANZA" | sed -e :a -e '/\\$/N; s/\\\n[[:space:]]*//; ta' > "$CODE"
+# COMMENTS ARE STRIPPED, THEN backslash-continuations joined. The first version
+# of this suite failed on a comment that quoted the wrong filename while
+# explaining the bug, and a later one grepped one physical line for a pattern
+# that was only ever on the next: an assertion that cannot fail is worse than
+# none. Core's comments still explain where Zed went, and name it doing so.
+CODE=$(mktemp); trap 'rm -f "$CODE"' EXIT
+grep -v '^[[:space:]]*#' "$CF" | sed -e :a -e '/\\$/N; s/\\\n[[:space:]]*//; ta' > "$CODE"
 
-section "the Containerfile installs the file the tarball actually ships"
+section "Zed installs on demand, from the build that ships its own entry"
 
-want "the zed stage is still present and findable" \
-    test -s "$STANZA"
+want "the comment strip kept the build's stages" \
+    grep -qE '^FROM .* AS ' "$CODE"
 
-# The bug, stated as the assertion that would have caught it on the day.
-want "the desktop entry is installed from dev.zed.Zed.desktop" \
-    grep -q 'zed.app/share/applications/dev.zed.Zed.desktop' "$CODE"
-
-if grep -q 'share/applications/zed\.desktop' "$CODE"; then
-    bad "no install reads share/applications/zed.desktop (the name upstream never shipped)"
+if grep -qE 'zed\.dev|zed-linux|/usr/lib/zed\.app|/usr/bin/zed' "$CODE"; then
+    bad "no stage unpacks a Zed tarball into the image"
 else
-    ok "no install reads share/applications/zed.desktop (the name upstream never shipped)"
+    ok "no stage unpacks a Zed tarball into the image"
 fi
 
-# The swallow is the reason the wrong name survived, so it is asserted
-# separately: fixing the name while keeping `|| true` would leave the next
-# upstream rename just as silent.
-if grep -E 'install .*applications' "$CODE" | grep -q '|| true'; then
-    bad "the desktop-entry install is not swallowed by || true"
-else
-    ok "the desktop-entry install is not swallowed by || true"
-fi
-
-want "an icon is installed into the hicolor theme" \
-    grep -q 'share/icons/hicolor' "$CODE"
-
-want "the build fails if the entry does not arrive" \
-    grep -q 'FATAL: zed unpacked but shipped no desktop entry' "$CODE"
-
-want "the build fails if the entry names a binary that is not there" \
-    grep -q 'test -x /usr/bin/zed' "$CODE"
-
-want "the build fails if the icon does not arrive" \
-    grep -q 'FATAL: zed shipped no 512x512 icon' "$CODE"
-
-# The fetch must stay non-fatal: a build box with no network should still
-# produce an image. Asserting the assertions above without this one would invite
-# someone to make the whole stage fatal and break offline builds.
-want "the fetch itself stays non-fatal" \
-    grep -q 'zed: fetch FAILED' "$CODE"
-
-section "the shipped artefact, where there is one"
+# The bare name has to land on Flathub, not on the repository route: there is no
+# Zed rpm in any repository Rime enables, so `rime install zed` with no route
+# would end in "no package matches" — the "does not work" this suite is for.
+zed_route=$(bash -c 'e=$1; set --; source "$e" >/dev/null 2>&1; curated_source zed' _ "$PKG" 2>/dev/null)
+want "rime install zed is routed to Flathub" \
+    test "${zed_route%%|*}" = flatpak
+want "  ...and says why on the spot" \
+    test -n "${zed_route#*|}"
 
 if [ -d /usr/lib/zed.app ]; then
-    want "zed.app ships the entry this build installs" \
-        test -s /usr/lib/zed.app/share/applications/dev.zed.Zed.desktop
-    if [ -s /usr/share/applications/dev.zed.Zed.desktop ]; then
-        ok "a launcher entry for Zed is installed"
-        tryexec=$(sed -n 's/^TryExec=//p' /usr/share/applications/dev.zed.Zed.desktop | head -n1)
-        if [ -n "$tryexec" ] && command -v "$tryexec" >/dev/null 2>&1; then
-            ok "its TryExec ($tryexec) resolves on PATH"
-        else
-            bad "its TryExec (${tryexec:-none}) resolves on PATH"
-        fi
-        icon=$(sed -n 's/^Icon=//p' /usr/share/applications/dev.zed.Zed.desktop | head -n1)
-        if [ -n "$icon" ] && [ -n "$(find /usr/share/icons /usr/local/share/icons -name "${icon}.png" -o -name "${icon}.svg" 2>/dev/null | head -1)" ]; then
-            ok "its Icon ($icon) resolves in an installed theme"
-        else
-            bad "its Icon (${icon:-none}) resolves in an installed theme"
-        fi
-    else
-        bad "a launcher entry for Zed is installed"
-    fi
-else
-    skp "zed.app is not on this machine (structural layer above still ran)"
+    skp "this machine still has the image's Zed (an image from before 2026-10-04)"
 fi
 
 section "neovim ships an entry, and a terminal to honour it"
@@ -183,12 +121,12 @@ fi
 
 section "the image installs the program that makes Terminal=true mean something"
 
-# Same comment-strip-then-join pipeline as the zed stanza above, and for the
+# Same comment-strip-then-join pipeline as the Zed check above, and for the
 # same reason: the package name and the assertion that it arrived are on
 # different physical lines of one `\`-continued RUN, so a per-line grep can be
 # satisfied by text that is not in the command it claims to check.
 DESKTOP=$(mktemp); TERMBLK=$(mktemp)
-trap 'rm -f "$STANZA" "$CODE" "$DESKTOP" "$TERMBLK"' EXIT
+trap 'rm -f "$CODE" "$DESKTOP" "$TERMBLK"' EXIT
 awk '/^RUN set -eux; \\$/{buf=""; f=1} f{buf=buf $0 "\n"} f&&/dnf5 clean all|^$/{if (buf ~ /alacritty/) {printf "%s", buf; exit} f=0}' "$CF" \
     | grep -v '^[[:space:]]*#' | sed -e :a -e '/\\$/N; s/\\\n[[:space:]]*//; ta' > "$DESKTOP"
 # The Containerfile.base block that checks the three parts agree. It starts at

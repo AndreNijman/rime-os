@@ -39,10 +39,13 @@
 ARG CORE=ghcr.io/andrenijman/rime-os:core
 
 # ═══ rimed builder ═══════════════════════════════════════════════════════
-# Built FROM the core image rather than a bare fedora-bootc, on purpose: core
-# already carries rust + cargo (the baked dev toolchain), so this stage installs
-# nothing and starts compiling immediately. It also guarantees the compiler that
-# builds rimed is exactly the one shipped to users.
+# Built FROM the core image rather than a bare fedora-bootc, so rimed links
+# against exactly the libraries the image ships. rust and cargo are installed
+# HERE, in a stage that is thrown away: the image no longer carries a Rust
+# toolchain (2026-10-04, developer toolchains install on demand), and a `dnf`
+# in a discarded stage costs the fleet nothing — the same reasoning as the
+# translation stage below. gcc, which the `ring` crate's build script needs,
+# is in core: its devstack names gcc and make for exactly this.
 #
 # rimed + rime are the workspace under rimed/; they embed config/sysprofiles/*.toml
 # via include_str!, so config/ must sit at ../../../config relative to the crate —
@@ -51,6 +54,7 @@ FROM ${CORE} AS rime-builder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
 ENV CARGO_HOME=/build/.cargo
+RUN dnf5 -y install --setopt=install_weak_deps=False rust cargo
 COPY rimed/ /build/rimed/
 COPY config/ /build/config/
 RUN set -eux; cd /build/rimed; cargo build --release --locked; \
@@ -62,9 +66,20 @@ RUN set -eux; cd /build/rimed; cargo build --release --locked; \
     install -Dm755 target/release/rime-aid    /out/usr/bin/rime-aid
 
 
-# ═══ Rime.I18n catalogue builder ═════════════════════════════════════════
+# ═══ Rime.I18n builder: the catalogue AND the module ═════════════════════
 # Compiles rime-shell's translations/*.ts into the .qm files QTranslator can
-# actually load. This is a DISCARDED stage and that is the entire point.
+# actually load, and its tests/rime-i18n-plugin.cpp into the Rime.I18n QML
+# module that installs them (Stage 5b2a below explains why that module exists).
+# This is a DISCARDED stage and that is the entire point.
+#
+# The module was compiled in the base tier itself until 2026-10-04, off a C++
+# compiler and Qt headers that core only carried because its own cleanup never
+# ran (`dnf5 remove ... pkgconf ... || true`: kmod needs pkg-config, so dnf
+# refused the whole transaction and `|| true` hid it). Core removes them now,
+# so g++, moc, the Qt .pc files and the `qml` engine the proofs run in are
+# installed HERE, and only the proved bytes are copied out. The proofs are as
+# good here as in the image: this stage is FROM the same core, and base runs no
+# dnf, so the Qt the module loads into below is the Qt it loads into there.
 #
 # lrelease is not in the image (qt6-linguist: 1 MiB download, 4 MiB installed,
 # 3 packages — a sixth of the orca line in docs/update-cost.md). The package is
@@ -92,7 +107,8 @@ RUN set -eux; cd /build/rimed; cargo build --release --locked; \
 FROM ${CORE} AS rime-i18n-catalogue
 ARG RIME_SHELL_REF=main
 RUN set -eux; \
-    dnf5 -y install qt6-linguist; \
+    dnf5 -y install qt6-linguist gcc-c++ pkgconf-pkg-config \
+        qt6-qtbase-devel qt6-qtdeclarative-devel; \
     rm -rf /b; \
     # rime-rename: keep. The shell repository's old name resolves before the
     # GitHub rename and redirects after it; the new one resolves only after.
@@ -117,8 +133,92 @@ RUN set -eux; \
         n=$((n + 1)); \
     done; \
     printf '%s\n' "$n" > /out/COUNT; \
-    rm -rf /b; \
-    echo "catalogue: compiled $n catalogue(s) from rime-shell ${RIME_SHELL_REF}"
+    echo "catalogue: compiled $n catalogue(s) from rime-shell ${RIME_SHELL_REF}"; \
+    # ── the module ──────────────────────────────────────────────────────────
+    # /out/module always exists, so the COPY below never fails on a ref that
+    # predates the module; the base tier decides what an empty one means.
+    mkdir -p /out/module; \
+    PLUG=/b/tests/rime-i18n-plugin.cpp; QMLD=/b/tests/rime-i18n-qmldir; \
+    if [ -f "$PLUG" ] && [ -f "$QMLD" ]; then \
+        MOC="$(qmake6 -query QT_HOST_LIBEXECS)/moc"; \
+        test -x "$MOC"; \
+        D=/usr/lib64/rime-shell/qml/Rime/I18n; \
+        mkdir -p "$D" /tmp/rime-i18n-build; \
+        "$MOC" $(pkg-config --cflags-only-I Qt6Qml Qt6Core) "$PLUG" \
+            -o /tmp/rime-i18n-build/rime-i18n-plugin.moc; \
+        g++ -std=c++17 -fPIC -shared -O2 -Wl,-z,relro,-z,now \
+            -o "$D/librimei18n.so" "$PLUG" \
+            -I/tmp/rime-i18n-build \
+            $(pkg-config --cflags Qt6Qml Qt6Core) \
+            $(pkg-config --libs Qt6Qml Qt6Core); \
+        install -m0644 "$QMLD" "$D/qmldir"; \
+        rm -rf /tmp/rime-i18n-build; \
+        # An unresolved DT_NEEDED is a module that dlopens into nothing, and the
+        # engine reports that as "module is not installed" — the same words as a
+        # missing directory.
+        if ldd "$D/librimei18n.so" | grep 'not found'; then \
+            echo "FATAL: librimei18n.so has unresolved shared libraries (above)"; exit 1; \
+        fi; \
+        # THE LOAD PROOF, and it is not a file test. FOUND 35: a QML plugin can
+        # be dlopened, have its qmldir read, and register NOTHING — everything
+        # looks loaded and the import still fails. The only honest check is to
+        # resolve the import in a real QML engine, so this does.
+        #
+        # `qml` and not `quickshell`, measured rather than assumed: the real
+        # quickshell loads this module correctly and then does not exit, so it
+        # returns 124 under any timeout and the assertion could never pass. It
+        # is the trap check-containerfile-assertions.sh exists for.
+        mkdir -p /tmp/rime-i18n-probe /tmp/rime-i18n-xdg; \
+        chmod 700 /tmp/rime-i18n-xdg; \
+        printf '%s\n' 'import QtQml' 'import Rime.I18n' \
+            'QtObject { Component.onCompleted: Qt.exit(0) }' \
+            > /tmp/rime-i18n-probe/probe.qml; \
+        if ! QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
+             XDG_RUNTIME_DIR=/tmp/rime-i18n-xdg \
+             QML_IMPORT_PATH=/usr/lib64/rime-shell/qml \
+             timeout 120 /usr/lib64/qt6/bin/qml -platform offscreen \
+                /tmp/rime-i18n-probe/probe.qml > /tmp/rime-i18n-probe/out 2>&1; then \
+            echo "FATAL: a QML engine could not import Rime.I18n from the built module:"; \
+            sed 's/^/       /' /tmp/rime-i18n-probe/out; exit 1; \
+        fi; \
+        # The import resolving is not the same claim as the plugin having run.
+        # This is the line the plugin itself prints from registerTypes().
+        if ! grep -q 'RIMEI18N: registerTypes uri=Rime.I18n' /tmp/rime-i18n-probe/out; then \
+            echo "FATAL: Rime.I18n imported without its plugin registering anything:"; \
+            sed 's/^/       /' /tmp/rime-i18n-probe/out; exit 1; \
+        fi; \
+        # THE CATALOGUE IS PROVED TO LOAD, per language, through this module —
+        # not stat-ed. A .qm that lrelease wrote and QTranslator declines is
+        # indistinguishable from no .qm at all in everything except this line.
+        # RIME_SHELL_TRANSLATIONS points the plugin at the files compiled above,
+        # which are the files the base tier ships (it checks their bytes).
+        for qm in /out/rime-shell_*.qm; do \
+            [ -e "$qm" ] || continue; \
+            lang="$(basename "$qm" .qm)"; lang="${lang#rime-shell_}"; \
+            LANG="${lang}.UTF-8" LC_ALL="${lang}.UTF-8" \
+            RIME_SHELL_TRANSLATIONS=/out \
+            QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
+            XDG_RUNTIME_DIR=/tmp/rime-i18n-xdg \
+            QML_IMPORT_PATH=/usr/lib64/rime-shell/qml \
+            timeout 120 /usr/lib64/qt6/bin/qml -platform offscreen \
+                /tmp/rime-i18n-probe/probe.qml > /tmp/rime-i18n-probe/out 2>&1; \
+            if ! grep -q "RIMEI18N: installed .*rime-shell_${lang}.qm" /tmp/rime-i18n-probe/out; then \
+                echo "FATAL: rime-shell_${lang}.qm is not loaded by the module under LANG=${lang}:"; \
+                sed 's/^/       /' /tmp/rime-i18n-probe/out; exit 1; \
+            fi; \
+            echo "catalogue: rime-shell_${lang}.qm loads under LANG=${lang}"; \
+        done; \
+        rm -rf /tmp/rime-i18n-probe /tmp/rime-i18n-xdg; \
+        cp "$D/librimei18n.so" "$D/qmldir" /out/module/; \
+        sha256sum "$PLUG" | cut -d' ' -f1 > /out/module/plugin.cpp.sha256; \
+        sha256sum "$QMLD" | cut -d' ' -f1 > /out/module/qmldir.src.sha256; \
+        echo "module: Rime.I18n built and proved to load: $(stat -c%s "$D/librimei18n.so") bytes"; \
+    elif [ "$n" != 0 ]; then \
+        echo "FATAL: rime-shell ${RIME_SHELL_REF} carries $n catalogue(s) and no Rime.I18n"; \
+        echo "       module source to load them; nothing could ever install them."; \
+        exit 1; \
+    fi; \
+    rm -rf /b
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM ${CORE}
@@ -873,13 +973,10 @@ RUN set -eux; \
 # inside the real /usr/bin/quickshell.
 #
 # ── WHAT THIS COSTS, because that question gated the work ──────────────────
-# Nothing. Measured in this exact core image rather than reasoned about:
-# g++, pkg-config and qmake6 are on PATH, moc is at the path
-# `qmake6 -query QT_HOST_LIBEXECS` reports, and qt6-qtbase-devel and
-# qt6-qtdeclarative-devel are both installed here — the `dnf5 -y remove
-# 'qt6-*-devel'` in Containerfile.core does not survive the dev toolchain
-# stanza 600 lines later. So this adds NO package to any tier. The layer is
-# ~37 kB: a 29,776-byte .so and a qmldir.
+# ~37 kB: a 29,776-byte .so and a qmldir. It is compiled and proved to load in
+# the discarded rime-i18n-catalogue stage at the top of this file, which is
+# where the compiler and the Qt headers live; this stanza checks that the bytes
+# it was handed were built from the source vendored here, and installs them.
 #
 # There is deliberately no `dnf` here, and that is the expensive part of the
 # decision rather than a tidiness preference. Measured with podman history on
@@ -887,16 +984,16 @@ RUN set -eux; \
 # `dnf5 clean all`, all in ONE layer and net of zero shipped files, leaves a
 # **113 MB** layer — the rewritten sqlite rpmdb docs/update-cost.md describes.
 # That is 3,000x this artefact, on every machine, on every update, for ever.
-# Which is why the .qm catalogue is NOT compiled here: lrelease is not in the
-# image, and getting it through a base-tier dnf would cost more than everything
-# this stanza ships. It belongs in a discarded builder stage. Until it exists,
-# QTranslator::load() finds no catalogue and says so through qInfo() — which on
-# Fedora goes to the journal, so: journalctl --user -b | grep RIMEI18N.
+# Which is why neither the module nor the .qm catalogue is compiled here: both
+# come out of the discarded builder stage. A shell with no catalogue for the
+# session's language says so through qInfo() — which on Fedora goes to the
+# journal, so: journalctl --user -b | grep RIMEI18N.
 #
 # ── THE SOURCE IS THE SUITE'S SOURCE, one file, no copy ────────────────────
-# tests/rime-i18n-plugin.cpp inside the vendored tree is compiled here as it
-# stands. A path under tests/ is a strange place to build a shipped artefact
-# from, and the alternative is worse: a second copy in this repository that
+# tests/rime-i18n-plugin.cpp of the rime-shell ref is compiled as it stands,
+# and its sha256 must equal the vendored copy's (the builder clones the ref a
+# second time, exactly as it does for the catalogue). A path under tests/ is a
+# strange place to build a shipped artefact from, and the alternative is worse: a second copy in this repository that
 # drifts from the one rime-shell's suite builds and measures, silently, with
 # nothing comparing them. One file, proved by that suite on two distributions,
 # is the honest arrangement.
@@ -908,11 +1005,13 @@ RUN set -eux; \
 # does not carry is a broken shell tree and fails the build loudly, because
 # that combination ships a desktop that can never be translated and says
 # nothing about why.
+COPY --from=rime-i18n-catalogue /out/module/ /tmp/rime-i18n-mod/
 RUN set -eux; \
     S=/usr/share/rime-shell; \
     PLUG="$S/tests/rime-i18n-plugin.cpp"; \
     QMLD="$S/tests/rime-i18n-qmldir"; \
     BOOT="$S/src/i18n/I18nBootstrap.qml"; \
+    M=/tmp/rime-i18n-mod; \
     if [ ! -f "$PLUG" ] || [ ! -f "$QMLD" ]; then \
         if [ -f "$BOOT" ]; then \
             echo "FATAL: rime-shell ref ${RIME_SHELL_REF} loads src/i18n/I18nBootstrap.qml"; \
@@ -920,56 +1019,38 @@ RUN set -eux; \
             echo "       That ships a shell that imports a module nothing can provide."; \
             exit 1; \
         fi; \
+        if [ -e "$M/librimei18n.so" ]; then \
+            echo "FATAL: the builder stage built Rime.I18n from a rime-shell that has it,"; \
+            echo "       and the vendored tree does not — ${RIME_SHELL_REF} moved between the clones."; \
+            exit 1; \
+        fi; \
         echo "rime-shell ref ${RIME_SHELL_REF} predates the Rime.I18n module; skipping it"; \
     else \
-        MOC="$(qmake6 -query QT_HOST_LIBEXECS)/moc"; \
-        test -x "$MOC"; \
+        test -s "$M/librimei18n.so" \
+            || { echo "FATAL: the vendored shell has the Rime.I18n source and the builder produced no module"; exit 1; }; \
+        # THE TWO CLONES MUST AGREE: the module shipped here was compiled from
+        # the source shipped here, not from a ref that moved under the build.
+        for pair in "$PLUG:plugin.cpp.sha256" "$QMLD:qmldir.src.sha256"; do \
+            f="${pair%%:*}"; want="$(cat "$M/${pair#*:}")"; \
+            got="$(sha256sum "$f" | cut -d' ' -f1)"; \
+            if [ "$want" != "$got" ]; then \
+                echo "FATAL: Rime.I18n was built from a different $(basename "$f") than the one vendored."; \
+                echo "       builder saw $want, this tree has $got — the rime-shell ref"; \
+                echo "       ${RIME_SHELL_REF} moved between the two clones. Re-run the build,"; \
+                echo "       or pass RIME_SHELL_REF as a commit SHA to make it reproducible."; \
+                exit 1; \
+            fi; \
+        done; \
         D=/usr/lib64/rime-shell/qml/Rime/I18n; \
-        mkdir -p "$D" /tmp/rime-i18n-build; \
-        "$MOC" $(pkg-config --cflags-only-I Qt6Qml Qt6Core) "$PLUG" \
-            -o /tmp/rime-i18n-build/rime-i18n-plugin.moc; \
-        g++ -std=c++17 -fPIC -shared -O2 -Wl,-z,relro,-z,now \
-            -o "$D/librimei18n.so" "$PLUG" \
-            -I/tmp/rime-i18n-build \
-            $(pkg-config --cflags Qt6Qml Qt6Core) \
-            $(pkg-config --libs Qt6Qml Qt6Core); \
-        install -m0644 "$QMLD" "$D/qmldir"; \
-        rm -rf /tmp/rime-i18n-build; \
-        # An unresolved DT_NEEDED is a module that dlopens into nothing, and the
-        # engine reports that as "module is not installed" — the same words as a
-        # missing directory.
+        mkdir -p "$D"; \
+        install -m0755 "$M/librimei18n.so" "$D/librimei18n.so"; \
+        install -m0644 "$M/qmldir" "$D/qmldir"; \
+        # The load itself was proved in the builder (same core, same Qt). What
+        # can still differ here is the link: an unresolved DT_NEEDED is a module
+        # that dlopens into nothing.
         if ldd "$D/librimei18n.so" | grep 'not found'; then \
             echo "FATAL: librimei18n.so has unresolved shared libraries (above)"; exit 1; \
         fi; \
-        # THE LOAD PROOF, and it is not a file test. FOUND 35: a QML plugin can
-        # be dlopened, have its qmldir read, and register NOTHING — everything
-        # looks loaded and the import still fails. The only honest check is to
-        # resolve the import in a real QML engine, so this does.
-        #
-        # `qml` and not `quickshell`, measured rather than assumed: the real
-        # quickshell loads this module correctly and then does not exit, so it
-        # returns 124 under any timeout and the assertion could never pass. It
-        # is the trap check-containerfile-assertions.sh exists for.
-        mkdir -p /tmp/rime-i18n-probe /tmp/rime-i18n-xdg; \
-        chmod 700 /tmp/rime-i18n-xdg; \
-        printf '%s\n' 'import QtQml' 'import Rime.I18n' \
-            'QtObject { Component.onCompleted: Qt.exit(0) }' \
-            > /tmp/rime-i18n-probe/probe.qml; \
-        if ! QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
-             XDG_RUNTIME_DIR=/tmp/rime-i18n-xdg \
-             QML_IMPORT_PATH=/usr/lib64/rime-shell/qml \
-             timeout 120 /usr/lib64/qt6/bin/qml -platform offscreen \
-                /tmp/rime-i18n-probe/probe.qml > /tmp/rime-i18n-probe/out 2>&1; then \
-            echo "FATAL: a QML engine could not import Rime.I18n from the installed module:"; \
-            sed 's/^/       /' /tmp/rime-i18n-probe/out; exit 1; \
-        fi; \
-        # The import resolving is not the same claim as the plugin having run.
-        # This is the line the plugin itself prints from registerTypes().
-        if ! grep -q 'RIMEI18N: registerTypes uri=Rime.I18n' /tmp/rime-i18n-probe/out; then \
-            echo "FATAL: Rime.I18n imported without its plugin registering anything:"; \
-            sed 's/^/       /' /tmp/rime-i18n-probe/out; exit 1; \
-        fi; \
-        rm -rf /tmp/rime-i18n-probe /tmp/rime-i18n-xdg; \
         # The shell half. A module nothing imports translates nothing, and it
         # would be invisible: the image would be correct and the desktop still
         # English.
@@ -981,8 +1062,9 @@ RUN set -eux; \
         fi; \
         grep -q '^import Rime.I18n' "$BOOT"; \
         grep -q 'src/i18n/I18nBootstrap.qml' "$S/shell.qml"; \
-        echo "Rime.I18n built and proved to load: $(stat -c%s "$D/librimei18n.so") bytes"; \
+        echo "Rime.I18n installed, built and proved in the builder: $(stat -c%s "$D/librimei18n.so") bytes"; \
     fi; \
+    rm -rf "$M"; \
     # The launcher half of this — that something puts the module on the engine's
     # import path — is asserted where the launcher EXISTS, ~500 layers below.
     # It was written here first, and tests/test-containerfile-order.sh caught it
@@ -995,7 +1077,8 @@ RUN set -eux; \
 # finding nothing is a successful, silent no-op, so a shell with the plugin and
 # no .qm renders exactly like a shell with neither — which is the shape of
 # defect this repository keeps meeting. The .qm files come out of the discarded
-# rime-i18n-catalogue stage; nothing that built them is in this image.
+# rime-i18n-catalogue stage, already proved to load there; nothing that built or
+# proved them is in this image.
 COPY --from=rime-i18n-catalogue /out/ /tmp/rime-i18n-cat/
 RUN set -eux; \
     D=/usr/share/rime-shell/translations; \
@@ -1021,30 +1104,10 @@ RUN set -eux; \
             fi; \
             install -m0644 "/tmp/rime-i18n-cat/$b.qm" "$D/$b.qm"; \
         done; \
-        # THE CATALOGUE IS PROVED TO LOAD, per language, in a real QML engine
-        # with the module on the import path — not stat-ed. A .qm that lrelease
-        # wrote and QTranslator declines is indistinguishable from no .qm at all
-        # in everything except this line.
-        mkdir -p /tmp/rime-i18n-probe /tmp/rime-i18n-xdg; \
-        chmod 700 /tmp/rime-i18n-xdg; \
-        printf '%s\n' 'import QtQml' 'import Rime.I18n' \
-            'QtObject { Component.onCompleted: Qt.exit(0) }' \
-            > /tmp/rime-i18n-probe/probe.qml; \
-        for qm in "$D"/rime-shell_*.qm; do \
-            lang="$(basename "$qm" .qm)"; lang="${lang#rime-shell_}"; \
-            LANG="${lang}.UTF-8" LC_ALL="${lang}.UTF-8" \
-            QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
-            XDG_RUNTIME_DIR=/tmp/rime-i18n-xdg \
-            QML_IMPORT_PATH=/usr/lib64/rime-shell/qml \
-            timeout 120 /usr/lib64/qt6/bin/qml -platform offscreen \
-                /tmp/rime-i18n-probe/probe.qml > /tmp/rime-i18n-probe/out 2>&1; \
-            if ! grep -q "RIMEI18N: installed .*rime-shell_${lang}.qm" /tmp/rime-i18n-probe/out; then \
-                echo "FATAL: the shipped rime-shell_${lang}.qm is not loaded by the module under LANG=${lang}:"; \
-                sed 's/^/       /' /tmp/rime-i18n-probe/out; exit 1; \
-            fi; \
-            echo "catalogue: rime-shell_${lang}.qm loads under LANG=${lang}"; \
-        done; \
-        rm -rf /tmp/rime-i18n-probe /tmp/rime-i18n-xdg; \
+        # Each of these .qm files was proved to load through the Rime.I18n
+        # module, per language, in a real QML engine, in the builder stage that
+        # compiled it — the `qml` engine is a devel package and is not in this
+        # image. Copied byte for byte from there, so the proof carries.
     fi; \
     rm -rf /tmp/rime-i18n-cat
 

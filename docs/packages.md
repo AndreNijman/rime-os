@@ -167,8 +167,9 @@ Desktop forced this feature: Anthropic publishes an apt repository and no RPM
 at all (five `rpm`/`yum` prefixes under `downloads.claude.ai` answer 404), so
 before `.deb` support the only way to have it on Rime was to unpack the `.deb`
 into `/usr/local` by hand and run a per-application update timer beside the
-OS's own. The image now ships Claude Desktop itself (see *Desktop AI apps*
-below), but vendors package many Electron applications the same way.
+OS's own. Claude Desktop now has a verified route of its own,
+`rime install claude-desktop` (see *Desktop AI apps* below), but vendors package
+many Electron applications the same way.
 
 A `.deb` therefore goes through the **same** pipeline as everything else: the
 same system extension, the same cache under `/var/lib/rime/pkg`, the same
@@ -247,10 +248,10 @@ which key may sign what, so it does not treat one as verification either.
 `/var/lib/rime/pkg/deb`, as it does for an RPM, so `rime pkg list` and
 `rime pkg verify` keep saying which packages Rime never vouched for.
 
-(The image build does verify Claude Desktop, by reconstructing the whole apt
-chain with the signing-key fingerprint pinned in this repository. That takes a
-network fetch and twenty lines of `Containerfile.core`, and a file on your disk
-cannot be put back into that chain.)
+(`rime install claude-desktop` does verify Claude Desktop, by reconstructing
+the whole apt chain with the signing-key fingerprint pinned in `rime-pkg`. A
+file on your disk cannot be put back into that chain, so a `.deb` given by path
+is accepted, not verified.)
 
 ### Where the payload may land
 
@@ -275,11 +276,9 @@ A library under the package's **own** directory is fine, and is what most
 ### Ownership, for a format the rpmdb cannot see
 
 `rime-pkg` normally asks the rpmdb whether a path belongs to the OS. The rpmdb
-has no answer for a `.deb`, and none for Claude Desktop **as the image ships
-it** either, because the image installs it with `cp -a`, not from an RPM. The
-`.deb` route therefore asks the booted ostree deployment (the pristine image
-tree, files and all) instead of the running `/usr`, which is an overlay carrying
-the extension being rebuilt. `rime-pkg` writes what each `.deb` contributed to
+has no answer for a `.deb`, so the `.deb` route asks the booted ostree
+deployment (the pristine image tree, files and all) instead of the running
+`/usr`, which is an overlay carrying the extension being rebuilt. `rime-pkg` writes what each `.deb` contributed to
 `/var/lib/rime/pkg/deb/NAME.files`, the `rpm -qf` equivalent for those paths.
 
 ## Installing an AppImage
@@ -670,49 +669,62 @@ Copy the profile, then **delete `compatibility.ini` from the copy.** Zen
 regenerates it and runs its normal profile-upgrade path. Do not delete the
 databases, and do not do any of this while the source browser is running.
 
-## Desktop AI apps: shipped with the system
+## Desktop AI apps: installed on demand
 
-**ChatGPT** and **Claude Desktop** are part of Rime OS. Both are in the image
-(stage `5a-aiapps` in `Containerfile.core`), both are on a fresh install, and
-both arrive on an existing machine through a normal `sudo rime update`, with no
-separate install step and nothing to download by hand.
+**ChatGPT**, **Claude Desktop** and **Claude Code** are not in the image. Until
+2026-10-04 the first two shipped in it (stage `5a-aiapps` in
+`Containerfile.core`) along with Claude Code: about 2.3 GB on every machine, and
+a new version only with a core rebuild, the most expensive update Rime has.
+Install the ones you use:
 
-| | source | how it is installed | where it lands |
+```sh
+sudo rime install chatgpt
+sudo rime install claude-desktop
+rime install claude-code          # no sudo: it goes into your own ~/.local
+```
+
+| | source | verified against | updates |
 |---|---|---|---|
-| ChatGPT | OpenAI's rpm-md repo (`persistent.oaistatic.com`) | `dnf5` from the vendor rpm | `/usr/lib/chatgpt`, `/usr/bin/chatgpt` |
-| Claude Desktop | Anthropic's apt repo (`downloads.claude.ai`) | deb unpacked into `/usr` | `/usr/lib/claude-desktop`, `/usr/bin/claude-desktop` |
+| ChatGPT | OpenAI's rpm-md repo (`persistent.oaistatic.com`) | the OpenAI key pinned in `rime-pkg` | with `sudo rime update` |
+| Claude Desktop | Anthropic's apt repo (`downloads.claude.ai`) | the Anthropic key pinned in `rime-pkg` | with `sudo rime update` |
+| Claude Code | npm (`@anthropic-ai/claude-code`) | npm | by itself, per user |
 
-Anthropic publishes no rpm, so the build unpacks the deb instead of installing
-it, and unpacking also keeps its maintainer script from running. ChatGPT goes
-through `dnf` on purpose: `rime-pkg` asks the system rpmdb whether something is
-image-owned, so an rpm-installed ChatGPT makes `rime install chatgpt` refuse to
-shadow it. Unpacking it would have left that guard blind to 442 MB of
-application.
+Neither vendor publishes a bare signing-key URL; the key travels inside the
+package it signs, which proves nothing on its own. `rime-pkg` checks each
+package against a fingerprint pinned in this repository (the same fingerprints
+the image build used), refuses anything that does not verify, and installs what
+does into your system extension with a trust marker for those exact bytes.
+`rime install` with no network fails before it changes anything.
 
-### They do not update themselves
+Claude Code is a per-user tool. `rime install claude-code` runs
+`npm install -g` as you (or as the user behind `sudo`), and Fedora's npm prefix
+on Rime is `~/.local`, so it lands in `~/.local/bin/claude`, where its own
+updater can write. Run as root with no `sudo` user behind it, the command
+refuses rather than install a copy into root's home.
 
-**A version bump is an image rebuild.** Both vendors package for mutable
-distributions, where installing the app also subscribes the machine to the
-vendor's repository: OpenAI's rpm ships `/etc/yum.repos.d/chatgpt.repo` with
-`enabled=1`, and Anthropic's `postinst` writes an apt source and an
-unattended-upgrades snippet. The build removes the first, never runs the
-second, and asserts both.
+### No vendor update channel comes with them
 
-`/usr` is read-only, so neither updater could ever succeed. But `rime-pkg`
-builds user system extensions with `dnf` against the **host's** repo set, so an
-enabled vendor repo would turn `rime install chatgpt` into a newer build layered
-into an extension that shadows the image's own `/usr`: a self-update through a
-side channel, which shipping these apps in the image exists to prevent.
+Both vendors package for mutable distributions, where installing the app also
+subscribes the machine to the vendor's repository: OpenAI's rpm ships
+`/etc/yum.repos.d/chatgpt.repo` with `enabled=1`, and Anthropic's `postinst`
+writes an apt source and an unattended-upgrades snippet. `rime-pkg` writes
+neither: it fetches the package itself, never runs a maintainer script, and
+never imports a vendor key into the system rpmdb. `tests/test-rime-ai-apps.sh`
+holds all three.
+
+That matters more on Rime than on a mutable system: `rime-pkg` builds system
+extensions with `dnf` against the **host's** repo set, so an enabled vendor repo
+would let a vendor build in through a side channel. `sudo rime update` fetches
+the two desktop apps again and replaces them only when a newer build verifies
+the same way; offline, the installed build stays.
 
 If you find `/etc/yum.repos.d/chatgpt.repo` on a machine, a hand-install of the
-vendor rpm put it there, not a Rime image.
+vendor rpm put it there, not Rime.
 
 ### Scheme handlers, and the one surprise
 
 `claude://` opens Claude Desktop and `codex://` opens ChatGPT: ChatGPT's scheme
-is `codex`, not `chatgpt`. The build asserts both by reading them back out of
-`mimeinfo.cache`, because an entry on disk that never reached that cache is not
-a registered handler.
+is `codex`, not `chatgpt`. Both come from the apps' own desktop entries.
 
 ChatGPT's desktop entry also registers `x-scheme-handler/http` and `https` for
 itself, so it appears in the "Open With" list for any web link. It does **not**

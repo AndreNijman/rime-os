@@ -50,7 +50,7 @@ kernel tier came later and has its own section below:
 | Tier | File | Contents | Rebuilds when |
 |------|------|----------|---------------|
 | **kernel** | `Containerfile.kernel` | the kernel itself, compiled from pinned source with a pinned `dwarves` | `kernel/**` changes, i.e. `kernel/kernel.pin` moves |
-| **core** | `Containerfile.core` | kernel *install* + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, dev toolchain, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` differ from the revision the published `core` was built from · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
+| **core** | `Containerfile.core` | kernel *install* + MOK signing, firmware, desktop/greeter stack, scx, Bazaar, codecs, baked apps, printing, input methods, fonts, node/gcc for Rime's own tools, zsh/starship, awww/matugen/yazi, OS branding & locale | `Containerfile.core` or `kernel/**` differ from the revision the published `core` was built from · `force_core` · the weekly cron finds a **new** `fedora-bootc` digest |
 | **base** | `Containerfile.base` | rimed + rime CLI, sysprofiles, D-Bus/polkit/units, every `files/**` COPY, the vendored Rime Shell (the rime-shell commit the run's "Pin rime-shell" step resolved: `main` on a `main` build) | every run: the path filter still computes a `base` output, but no job reads it |
 | **image** | `Containerfile.rime` | edition stamp, gaming-session files, Plymouth theme, final initramfs | every run |
 
@@ -271,20 +271,25 @@ job's `sbverify` and `Containerfile.release`) and
 jobs' verification, `Containerfile.release` and the installer). Both are plain
 files under `/usr`, and CI asserts both.
 
-### What the AI apps added
+### What the AI apps cost, and why they left
 
-The two desktop AI apps (`docs/packages.md`) are third-party downloads, so by
-the rule above they belong in `core`, where they are the largest single addition
-the tier has taken. Measured in a scratch `fedora-bootc:43` container:
-**1.3 GB for `/usr/lib/chatgpt` and 548 MB for `/usr/lib/claude-desktop`**,
-~1.9 GB of payload before compression.
+From 2026-09-11 to 2026-10-04 the two desktop AI apps (`docs/packages.md`)
+shipped in `core`, as third-party downloads must by the rule above, and were the
+largest single addition the tier ever took. Measured in a scratch
+`fedora-bootc:43` container: **1.3 GB for `/usr/lib/chatgpt` and 548 MB for
+`/usr/lib/claude-desktop`**, ~1.9 GB of payload before compression, plus the
+Claude Code CLI beside them.
 
-The tension is real. The product decision says an app version bump is an image
-rebuild, and a core rebuild is a multi-gigabyte download for every machine on
-the fleet. These apps' versions therefore move when core moves, and not on the
-vendors' own release cadence. Moving them up a tier to make bumps cheaper is not
-an option: a `dnf` transaction above `core` puts an rpmdb-sized layer into every
-user's next update, which is the problem this whole document is about.
+That made every machine carry and download them whether or not anyone used
+them, and tied their versions to core rebuilds, the most expensive update the
+fleet takes. Moving them up a tier was never an option: a `dnf` transaction
+above `core` puts an rpmdb-sized layer into every user's next update. So they
+left the image instead. `rime install chatgpt` and `rime install
+claude-desktop` fetch them from their vendors, verified against the same pinned
+fingerprints, into the user's system extension, which `sudo rime update`
+refreshes on the vendors' own cadence; `rime install claude-code` puts the CLI
+in the user's `~/.local`, where it updates itself. The machines that use them
+pay for them, once.
 
 ### What the systemd-boot pivot added
 
@@ -342,8 +347,8 @@ and Qt, so the delta is the reader alone.
 
 The rule this illustrates: the tier argument is about DOWNLOAD SIZE PER UPDATE,
 and it says nothing about whether a thing is worth shipping. A 23 MiB addition
-to core costs the fleet nothing measurable; a 1.3 GB one is what makes the
-tension above worth writing down.
+to core costs the fleet nothing measurable; a 1.3 GB one is why the AI apps
+left it.
 
 ### The weekly rebuild
 

@@ -622,5 +622,143 @@ is "a newer build nothing satisfies is not" false \
    "$(PATH="$NS/no:$PATH" predicate newer_satisfied_by_image "$NS/rpms" libfoo)"
 
 echo
+echo "── apps that left the image: vendor routes, per-user tools, Flathub ───"
+# ChatGPT, Claude Desktop, Claude Code and Zed shipped in the image until
+# 2026-10-04 and install on demand since. Each name has exactly one route, and
+# these hold the routing table, the per-user tool, and the verification that
+# makes a vendor download "verified" rather than "accepted".
+is "chatgpt is a vendor rpm"         rpm   "$(call vendor_app chatgpt)"
+is "claude-desktop is a vendor deb"  deb   "$(call vendor_app claude-desktop)"
+is "htop is not a vendor app"        false "$(predicate vendor_app htop)"
+is "claude-code is a per-user tool"  true  "$(predicate user_tool claude-code)"
+is "a bare 'claude' is neither"      false "$(predicate user_tool claude)"
+is "zed is routed to Flathub"        flatpak "$(call curated_source zed | cut -d'|' -f1)"
+is "zen is routed to Flathub"        flatpak "$(call curated_source zen | cut -d'|' -f1)"
+# The repository locations are seams for this suite; the fingerprints must not
+# be, or a seam could install anything as verified.
+is "the ChatGPT fingerprint is not a seam" 3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4 \
+   "$(bash -c 'e=$1; set --; export CHATGPT_KEY_FPR=0000 RIME_PKG_CHATGPT_KEY_FPR=0000; source "$e" >/dev/null 2>&1; echo "$CHATGPT_KEY_FPR"' _ "$ENGINE")"
+is "the Claude fingerprint is not a seam"  31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE \
+   "$(bash -c 'e=$1; set --; export CLAUDE_KEY_FPR=0000 RIME_PKG_CLAUDE_KEY_FPR=0000; source "$e" >/dev/null 2>&1; echo "$CLAUDE_KEY_FPR"' _ "$ENGINE")"
+
+# Claude Code: npm as the user it is for, no root. npm is stubbed and records
+# what it was asked; a real npm would reach the network.
+VS="$WORK/vendor-stubs"; mkdir -p "$VS/bin" "$VS/root"
+cat > "$VS/bin/npm" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$VS/npm.argv"
+exit 0
+STUB
+chmod +x "$VS/bin/npm"
+if [ "$(id -u)" != 0 ]; then
+    : > "$VS/npm.argv"
+    out=$(PATH="$VS/bin:$PATH" bash "$ENGINE" install claude-code 2>&1 </dev/null); rc=$?
+    is "claude-code installs without root" 0 "$rc"
+    is "…as npm install -g @anthropic-ai/claude-code" "install -g @anthropic-ai/claude-code" "$(tail -1 "$VS/npm.argv")"
+    out=$(PATH="$VS/bin:$PATH" bash "$ENGINE" remove claude-code 2>&1 </dev/null); rc=$?
+    is "claude-code removes without root" 0 "$rc"
+    is "…as npm uninstall -g @anthropic-ai/claude-code" "uninstall -g @anthropic-ai/claude-code" "$(tail -1 "$VS/npm.argv")"
+    refuses "a vendor app still needs root" "this needs root" install chatgpt
+else
+    skipped "claude-code installs without root" "(running as root)"
+fi
+# Root with nobody behind sudo: an install into /root is not what anyone typing
+# this wants, so it is refused. `id` is stubbed to answer uid 0.
+cat > "$VS/root/id" <<'STUB'
+#!/bin/sh
+[ "$1" = -u ] && { echo 0; exit 0; }
+exec /usr/bin/id "$@"
+STUB
+chmod +x "$VS/root/id"
+out=$(PATH="$VS/root:$VS/bin:$PATH" SUDO_USER='' call user_tool_run install 2>&1)
+if grep -qF "installs for one user" <<<"$out"; then ok "root with no user behind sudo is refused"
+else bad "root with no user behind sudo is refused" "got: $(head -1 <<<"$out")"; fi
+
+# ── the vendor checks refuse what they must ──────────────────────────────────
+# Fixtures signed with a THROWAWAY key, served from file:// repositories. The
+# real vendors' keys cannot sign a fixture, which is exactly the point: a
+# package whose key is not the pinned one must be refused, however well-formed.
+if command -v gpg >/dev/null && command -v ar >/dev/null; then
+    G="$WORK/vendor-gpg"; mkdir -p "$G"; chmod 700 "$G"
+    gpg --homedir "$G" --batch --pinentry-mode loopback --passphrase '' \
+        --quick-gen-key 'Rime Test <rime-test@example.invalid>' ed25519 sign never >/dev/null 2>&1
+    gpg --homedir "$G" --armor --export > "$WORK/vendor-test.asc" 2>/dev/null
+    TFPR=$(gpg --homedir "$G" --show-keys --with-colons --with-fingerprint "$WORK/vendor-test.asc" 2>/dev/null | awk -F: '/^fpr:/{print $10; exit}')
+
+    # Claude Desktop: a .deb carrying the throwaway key in its postinst.
+    CR="$WORK/claude-repo"; mkdir -p "$CR/dists/stable/main/binary-amd64" "$CR/pool" "$WORK/cd/ctl" "$WORK/cd/data"
+    { echo '#!/bin/sh'; cat "$WORK/vendor-test.asc"; } > "$WORK/cd/ctl/postinst"
+    printf 'Package: claude-desktop\nVersion: 9.9.9\nArchitecture: amd64\n' > "$WORK/cd/ctl/control"
+    ( cd "$WORK/cd/ctl" && tar -czf ../control.tar.gz ./control ./postinst )
+    ( cd "$WORK/cd/data" && tar -cJf ../data.tar.xz . )
+    printf '2.0\n' > "$WORK/cd/debian-binary"
+    ( cd "$WORK/cd" && ar rc "$CR/pool/claude-desktop_9.9.9_amd64.deb" debian-binary control.tar.gz data.tar.xz )
+    debsum=$(sha256sum "$CR/pool/claude-desktop_9.9.9_amd64.deb" | cut -d' ' -f1)
+    mkcrepo() {  # $1 = Filename  $2 = SHA256
+        printf 'Package: claude-desktop\nVersion: 9.9.9\nFilename: %s\nSHA256: %s\n\n' "$1" "$2" \
+            > "$CR/dists/stable/main/binary-amd64/Packages"
+        printf 'SHA256:\n %s Packages\n' "$(sha256sum "$CR/dists/stable/main/binary-amd64/Packages" | cut -d' ' -f1)" \
+            > "$CR/dists/stable/InRelease"
+    }
+    vfetch() {  # $1 = app, rest = env
+        local app=$1; shift
+        local d; d=$(mktemp -d "$WORK/vf.XXXXXX")
+        env "$@" bash -c 'e=$1; a=$2; d=$3; set --; source "$e" >/dev/null 2>&1; set +e; vendor_fetch "$a" "$d"' _ "$ENGINE" "$app" "$d" 2>&1
+    }
+    mkcrepo pool/claude-desktop_9.9.9_amd64.deb "$debsum"
+    out=$(vfetch claude-desktop RIME_PKG_CLAUDE_REPO="file://$CR")
+    if grep -qF "its archive key is ${TFPR}, not the 31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE Rime pins" <<<"$out"; then
+        ok "claude-desktop with another key is refused"
+    else bad "claude-desktop with another key is refused" "got: $(tail -1 <<<"$out")"; fi
+    mkcrepo pool/claude-desktop_9.9.9_amd64.deb "$(printf '0%.0s' $(seq 64))"
+    out=$(vfetch claude-desktop RIME_PKG_CLAUDE_REPO="file://$CR")
+    if grep -qF "does not match the sha256 its index publishes" <<<"$out"; then ok "claude-desktop with the wrong sha256 is refused"
+    else bad "claude-desktop with the wrong sha256 is refused" "got: $(tail -1 <<<"$out")"; fi
+    mkcrepo ../../etc/passwd "$debsum"
+    out=$(vfetch claude-desktop RIME_PKG_CLAUDE_REPO="file://$CR")
+    if grep -qF "climbs out of the repository" <<<"$out"; then ok "a package path with .. is refused"
+    else bad "a package path with .. is refused" "got: $(tail -1 <<<"$out")"; fi
+
+    # ChatGPT: an rpm carrying the throwaway key under the PINNED key's file
+    # name. The name proves nothing; the fingerprint inside is what is checked.
+    if command -v rpmbuild >/dev/null; then
+        GR="$WORK/chatgpt-repo"; mkdir -p "$GR/repodata" "$WORK/cg/SOURCES"
+        cp "$WORK/vendor-test.asc" "$WORK/cg/SOURCES/key.asc"
+        cat > "$WORK/cg/chatgpt.spec" <<SPEC
+Name: chatgpt
+Version: 1.0
+Release: 1
+Summary: rime-pkg test fixture
+License: MIT
+BuildArch: noarch
+%description
+fixture
+%install
+install -Dm644 %{_sourcedir}/key.asc %{buildroot}/etc/pki/rpm-gpg/RPM-GPG-KEY-chatgpt-3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4.asc
+%files
+/etc/pki/rpm-gpg/RPM-GPG-KEY-chatgpt-3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4.asc
+SPEC
+        if rpmbuild -bb --define "_topdir $WORK/cg" --define "_sourcedir $WORK/cg/SOURCES" \
+               --define "_rpmdir $GR" --define '_build_name_fmt %%{NAME}-%%{VERSION}.rpm' \
+               "$WORK/cg/chatgpt.spec" >/dev/null 2>&1; then
+            printf '<metadata><package><location href="chatgpt-1.0.rpm"/></package></metadata>\n' \
+                | gzip > "$GR/repodata/0123abcd-primary.xml.gz"
+            printf '<repomd><data type="primary"><location href="repodata/0123abcd-primary.xml.gz"/></data></repomd>\n' \
+                > "$GR/repodata/repomd.xml"
+            out=$(vfetch chatgpt RIME_PKG_CHATGPT_REPO="file://$GR")
+            if grep -qF "its signing key is ${TFPR}, not the 3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4 Rime pins" <<<"$out"; then
+                ok "chatgpt with another key is refused"
+            else bad "chatgpt with another key is refused" "got: $(tail -1 <<<"$out")"; fi
+        else
+            skipped "chatgpt with another key is refused" "(rpmbuild could not build the fixture)"
+        fi
+    else
+        skipped "chatgpt with another key is refused" "(no rpmbuild)"
+    fi
+else
+    skipped "the vendor checks refuse what they must" "(no gpg or ar)"
+fi
+
+echo
 printf 'rime-pkg: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" = 0 ]

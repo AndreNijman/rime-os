@@ -33,10 +33,10 @@
 #
 #   4. IMAGE OWNERSHIP. rime-pkg decides whether a path belongs to the OS by
 #      asking the rpmdb. A .deb's files have no rpm owner — and neither does
-#      Claude Desktop AS THE IMAGE SHIPS IT, because Containerfile.core's
-#      5a-aiapps stage installs it with `cp -a`. A guard built on `rpm -qf`
-#      would wave a .deb straight over the image's own copy of the very
-#      application this route exists for.
+#      anything the image places with `cp -a`, as it placed Claude Desktop
+#      until 2026-10-04. A guard built on `rpm -qf` would have waved a .deb
+#      straight over the image's own copy of the very application this route
+#      exists for.
 #
 #   5. TRUST. A .deb carries no signature Rime can check, because Debian signs
 #      the apt index rather than the package. The engine must therefore refuse

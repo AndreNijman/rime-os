@@ -119,9 +119,10 @@ repository with real tags and a real remote.
 ## Why THIS app self-updates when the desktop AI apps must not
 
 On 2026-09-11 Andre ruled that the ChatGPT and Claude **desktop** apps must not
-self-update: they are baked into the image and `sudo rime update` already moves
-them, so a second updater would compete with a working one and the fleet would
-have two answers to "what version am I on".
+self-update: `sudo rime update` already moves them (they were baked into the
+image then; since 2026-10-04 `rime install` puts them in the system extension
+and every update fetches them again), so a second updater would compete with a
+working one and the fleet would have two answers to "what version am I on".
 
 **None of that reasoning reaches a phone, and this app breaks the rule on
 purpose.** The phone is not running Rime OS. The APK is in no image. `rime

@@ -1761,28 +1761,30 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-host.sh
 
-      # The editors Rime ships have to be launchable, not merely present. Zed
-      # shipped on every image with no desktop entry at all — the install read a
-      # filename the tarball has never used and `|| true` swallowed the failure —
-      # so the binary worked from a shell and the editor was invisible in every
-      # launcher. This runs the structural half here; the live half needs the
-      # unpacked zed.app and skips in CI.
-      - name: The shipped editors are launchable
+      # The editors Rime offers have to be launchable, not merely present. Zed
+      # once shipped on every image with no desktop entry at all — the install
+      # read a filename the tarball has never used and `|| true` swallowed the
+      # failure. Zed now installs on demand from Flathub (`rime install zed`),
+      # which ships its own entry; this holds that no stage unpacks it into the
+      # image again, and that Neovim's Terminal=true entry has a terminal to
+      # run in. The live half needs an installed system and skips in CI.
+      - name: The editors are launchable
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-editors.sh
 
-      # The desktop AI apps are part of the product, not add-ons: ChatGPT and
-      # Claude Desktop ship in the image, arrive with `rime update`, and must
-      # bring no updater of their own. Both vendors package for mutable
-      # distributions and therefore subscribe the machine to their own
+      # ChatGPT, Claude Desktop and Claude Code install on demand
+      # (`rime install`), not in the image. Both desktop apps are packaged for
+      # mutable distributions and subscribe the machine to their vendor's
       # repository on install — OpenAI's rpm ships an enabled
       # /etc/yum.repos.d/chatgpt.repo, Anthropic's deb writes an apt source
       # from its maintainer script. On Rime that is a live hazard rather than
       # dead weight, because rime-pkg builds user extensions with dnf against
-      # the host's repos. This runs the structural half here; the live half
-      # needs the installed apps and skips in CI.
-      - name: The desktop AI apps ship with the system and bring no updater
+      # the host's repos. This holds that none of the three comes back into
+      # the image, that rime-pkg writes no repo file, runs no maintainer script
+      # and imports no vendor key, and that the pinned fingerprints are the
+      # ones the image build used.
+      - name: The desktop AI apps install on demand and bring no updater
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-ai-apps.sh

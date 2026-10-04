@@ -290,9 +290,9 @@ requested_matches() {
 #
 # `dpkg-deb` is not in the image and is not wanted: it would bring dpkg's
 # database with it, and there is no world in which Rime maintains a second
-# package database. `ar` and `tar` are enough, and `ar` is already in the image
-# — Containerfile.core's 5a-aiapps stage unpacks the Claude Desktop .deb with it
-# and FATALs if binutils is absent, which is the same assertion made here.
+# package database. `ar` and `tar` are enough, and `ar` is in the image:
+# Containerfile.core's devstack installs binutils by name for this route, and
+# build-image.yml fails a build that ships without `ar`.
 deb_magic_ok() {
     local magic
     magic="$(head -c8 -- "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
@@ -712,9 +712,9 @@ inspect_local_deb() {
 # the package file: `Release`/`InRelease` is signed, it names the `Packages`
 # index by hash, and `Packages` names each .deb by sha256. Detach the file from
 # that chain — download it from a website, copy it off a USB stick — and every
-# link is gone. Containerfile.core's 5a-aiapps stage reconstructs the whole
-# chain for the image build, key fingerprint pinned in this repository, and it
-# takes twenty lines and a network fetch to do it.
+# link is gone. `rime install claude-desktop` (vendor_fetch_claude_desktop)
+# reconstructs the whole chain from Anthropic's repository, key fingerprint
+# pinned in this file, and a file on disk cannot be put back into it.
 #
 # `_gpgorigin` (debsigs) is not treated as verification either. Rime carries no
 # deb keyring and no policy file saying which keys may sign what, and a
@@ -1236,13 +1236,13 @@ extract_rpms() {
 # lowerdir=/run/systemd/sysext/meta/usr:/run/systemd/sysext/extensions/rime-user/usr:/usr`.
 #
 # NOT the rpmdb either, which is what image_owns() asks for RPM paths. The
-# rpmdb is BLIND to the one application this whole route exists for:
-# Containerfile.core's 5a-aiapps stage puts Claude Desktop into
-# /usr/lib/claude-desktop with `cp -a` (Anthropic publishes no rpm — five
-# rpm/yum prefixes under downloads.claude.ai all 404), so no package owns a
-# single one of its 1,190 files and `rpm -qf` answers "not owned" for every
-# one. A guard built on the rpmdb would wave a .deb straight over the image's
-# own copy of the app.
+# rpmdb is BLIND to anything the image places with `cp -a`. Until 2026-10-04
+# that was the one application this whole route exists for: the image put
+# Claude Desktop into /usr/lib/claude-desktop that way (Anthropic publishes no
+# rpm — five rpm/yum prefixes under downloads.claude.ai all 404), no package
+# owned a single one of its 1,190 files, and a guard built on the rpmdb would
+# have waved a .deb straight over the image's own copy of the app. Any tree a
+# future stage unpacks has the same blind spot.
 #
 # The booted ostree deployment is the pristine image, files and all, and the
 # kernel command line says which one it is. Failing CLOSED here is the same
@@ -2489,18 +2489,31 @@ write_state() {
     # Provenance, recorded so `rime pkg list` and `rime pkg verify` can say where
     # each package came from instead of presenting a vendor RPM as if a Fedora
     # mirror had signed it.
-    local locals unsigned n debfiles debdeps
+    local locals unsigned n debfiles debdeps vendors
     locals="$(load_requested | sed -n 's/^local://p' | sort | json_string_array)"
+    # Vendor applications were verified against a key Rime pins (vendor_fetch),
+    # so they are named as such and kept OUT of the unsigned list below: a
+    # verified package reported as "never verified" is the opposite lie.
+    vendors="$(load_requested | sed -n 's/^\(local\|deb\)://p' | while IFS= read -r n; do
+                   [ -n "$n" ] || continue
+                   vendor_app "$n" >/dev/null && printf '%s\n' "$n"
+                   true
+               done | sort | json_string_array)"
     debfiles="$(load_requested | sed -n 's/^deb://p' | sort | json_string_array)"
     # Every .deb is in this list by construction, not by a marker: there is no
     # such thing as a verified local .deb, so `rime pkg verify` must say so
     # about all of them. See deb_trust_refusal.
     unsigned="$( { load_requested | sed -n 's/^local://p' | while IFS= read -r n; do
                        [ -n "$n" ] || continue
+                       vendor_app "$n" >/dev/null && continue
                        [ -f "$(local_marker "$n")" ] && printf '%s\n' "$n"
                        true
                    done
-                   load_requested | sed -n 's/^deb://p'
+                   load_requested | sed -n 's/^deb://p' | while IFS= read -r n; do
+                       [ -n "$n" ] || continue
+                       vendor_app "$n" >/dev/null || printf '%s\n' "$n"
+                       true
+                   done
                  } | sort | json_string_array)"
     # What each .deb says it needs, recorded verbatim because Rime resolves none
     # of it: Debian dependency names are not Fedora package names and guessing a
@@ -2518,6 +2531,7 @@ write_state() {
         --argjson deb_files "$debfiles" \
         --argjson deb_depends "$debdeps" \
         --argjson unsigned "$unsigned" \
+        --argjson vendors "$vendors" \
         --arg os_id "$(os_id)" \
         --arg os_version "$(os_version)" \
         --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -2527,7 +2541,7 @@ write_state() {
         --argjson compat_level "$PKG_COMPAT_LEVEL" \
         '{requested:$requested, resolved:$resolved, local_files:$local_files,
           deb_files:$deb_files, deb_depends:$deb_depends,
-          unsigned_accepted:$unsigned, os_id:$os_id,
+          unsigned_accepted:$unsigned, vendor_verified:$vendors, os_id:$os_id,
           os_version_id:$os_version, built:$built, image:$image,
           image_sha256:$sha, image_bytes:($size|tonumber),
           pkg_compat_level:$compat_level}' > "${STATE}.tmp"
@@ -3551,6 +3565,25 @@ cmd_install() {
         fi
     fi
 
+    # Vendor applications and per-user tools have one route each, whatever the
+    # ranking would say, so they leave the bare names before it runs. A vendor
+    # application is an RPM or a .deb going into the extension, which --source
+    # flatpak or capsule contradicts; those keep it as a bare name and get the
+    # ordinary answer for it.
+    local -a vendors=() usertools=() others=()
+    for p in "${names[@]:-}"; do
+        [ -n "$p" ] || continue
+        if user_tool "$p"; then
+            usertools+=("$p")
+        elif { [ -z "$SOURCE" ] || [ "$SOURCE" = rpm ]; } && vendor_app "$p" >/dev/null; then
+            vendors+=("$p")
+        else
+            others+=("$p")
+        fi
+    done
+    names=("${others[@]:-}")
+    [ -n "${names[0]:-}" ] || names=()
+
     if [ "${#names[@]}" -gt 0 ]; then
         # Declared out here, not inside the arms. `local` in a case arm only
         # takes effect if that arm runs, so `id` assigned in the "" arm below
@@ -3641,7 +3674,44 @@ cmd_install() {
         msg "local file: ${LD_NAME}-${LD_VERSION}.${LD_ARCH} (.deb, ${LD_PATH})"
     done
 
+    # Per-user tools need no root and touch nothing system-wide, so they go
+    # first, and a request made of nothing else is finished here.
+    for p in "${usertools[@]:-}"; do
+        [ -n "$p" ] || continue
+        user_tool_run install
+        msg "${p}: installed for ${SUDO_USER:-$(id -un)} in ~/.local; it updates itself"
+    done
+    if [ "${#vendors[@]}" -eq 0 ] && [ "${#names[@]}" -eq 0 ] && [ "${#files[@]}" -eq 0 ] \
+       && [ "${#debs[@]}" -eq 0 ] && [ "${#flatpaks[@]}" -eq 0 ] && [ "${#appimages[@]}" -eq 0 ]; then
+        return 0
+    fi
+
     need_root install
+
+    # Vendor applications: fetched and verified here, as root, then handed to
+    # the local-file path exactly as if the user had named the file — except
+    # that `vendor_ok` lets them past the signature step without
+    # --allow-unsigned, because they verified against a key Rime pins.
+    local -A vendor_ok=()
+    local vwork got
+    for p in "${vendors[@]:-}"; do
+        [ -n "$p" ] || continue
+        install -d -m0700 "$WORK_ROOT"
+        vwork="$(mktemp -d "${WORK_ROOT}/vendor.XXXXXX")"
+        msg "${p}: fetching from the vendor and checking it against the key Rime pins"
+        got="$(vendor_fetch "$p" "$vwork")" || exit 1
+        if [ "$(vendor_app "$p")" = rpm ]; then
+            inspect_local_rpm "$got"
+            lpath+=("$LR_PATH"); lname+=("$LR_NAME")
+            msg "${p}: ${LR_NAME}-${LR_EVR}.${LR_ARCH} verified"
+            vendor_ok["$LR_PATH"]=1
+        else
+            inspect_local_deb "$got"
+            dpath+=("$LD_PATH"); dname+=("$LD_NAME"); ddeps+=("$LD_DEPENDS")
+            msg "${p}: ${LD_NAME}-${LD_VERSION}.${LD_ARCH} verified"
+            vendor_ok["$LD_PATH"]=1
+        fi
+    done
 
     if [ "${#flatpaks[@]}" -gt 0 ]; then
         flatpak_install "${flatpaks[@]}"
@@ -3677,7 +3747,9 @@ cmd_install() {
     local i f n
     for i in "${!lpath[@]}"; do
         f="${lpath[$i]}"
-        if rpm_signature_ok "$f"; then
+        if [ -n "${vendor_ok[$f]:-}" ]; then
+            unsigned+=(1)   # the marker records the verified bytes; see vendor_fetch
+        elif rpm_signature_ok "$f"; then
             unsigned+=(0)
         else
             [ "${ALLOW_UNSIGNED:-0}" = 1 ] || refuse_unsigned "$f"
@@ -3689,6 +3761,7 @@ cmd_install() {
     # the answer is the same for every one of them and the opt-in is the same
     # per-file, byte-exact marker the RPM path uses.
     for i in "${!dpath[@]}"; do
+        [ -z "${vendor_ok[${dpath[$i]}]:-}" ] || continue
         [ "${ALLOW_UNSIGNED:-0}" = 1 ] \
             || deb_trust_refusal "${dpath[$i]}" "${dname[$i]}" "${ddeps[$i]}"
         warn "accepting ${dpath[$i]} unverified because you passed --allow-unsigned: a .deb carries no signature Rime can check"
@@ -3729,10 +3802,24 @@ cmd_install() {
     done
     msg "provenance: $(provenance rpm)"
     rebuild_extension "${want[@]}"
+    rm -rf "${WORK_ROOT}"/vendor.* 2>/dev/null || true
 }
 
 cmd_remove() {
     [ "$#" -gt 0 ] || die "usage: rime remove <package>..."
+    # Per-user tools are removed from the user's own ~/.local, with no root.
+    local -a kept_args=()
+    local u
+    for u in "$@"; do
+        if user_tool "$u"; then
+            user_tool_run uninstall
+            msg "${u}: removed for ${SUDO_USER:-$(id -un)}"
+        else
+            kept_args+=("$u")
+        fi
+    done
+    [ "${#kept_args[@]}" -gt 0 ] || return 0
+    set -- "${kept_args[@]}"
     need_root remove
 
     # A package installed from a local file is removed by its package NAME.
@@ -3837,6 +3924,7 @@ cmd_upgrade() {
         msg "no packages installed"
         return 0
     fi
+    vendor_refresh
     msg "refreshing extension packages from the repositories"
     rebuild_extension "${want[@]}"
 }
@@ -3892,8 +3980,12 @@ cmd_list() {
         # user vouched for personally must not read like one Fedora signed.
         jq -r '
             ((.unsigned_accepted // []) | map({(.): true}) | add // {}) as $u
+            | ((.vendor_verified // []) | map({(.): true}) | add // {}) as $v
             | .requested[]
-            | if startswith("local:") then
+            | if ((startswith("local:") or startswith("deb:")) and $v[sub("^(local|deb):"; "")]) then
+                  sub("^(local|deb):"; "") as $n
+                  | "  \($n)  [from its vendor, verified against the key Rime pins for it]"
+              elif startswith("local:") then
                   ltrimstr("local:") as $n
                   | "  \($n)  [local file" + (if $u[$n] then ", signature not verified]" else "]" end)
               elif startswith("deb:") then
@@ -4222,8 +4314,201 @@ curated_source() {
         discord)
             printf 'flatpak|the RPM is the vendor tarball repackaged and refuses to start once it considers itself out of date, which on an image-based system it regularly does'
             ;;
+        zed)
+            printf 'flatpak|Zed publishes no RPM; its Flathub build is the one that tracks every release'
+            ;;
+        zen)
+            printf 'flatpak|Zen publishes no RPM; its Flathub build is the one that tracks every release'
+            ;;
         *) return 1 ;;
     esac
+}
+
+# ── Vendor applications: fetched from the vendor, verified against Rime ──────
+#
+# ChatGPT and Claude Desktop used to ship in the image (Containerfile.core stage
+# 5a-aiapps). Since 2026-10-04 they install on demand, like every other app:
+#
+#   sudo rime install chatgpt
+#   sudo rime install claude-desktop
+#
+# Neither is in a repository Rime trusts. OpenAI publishes an rpm-md repository
+# that keeps exactly one build; Anthropic publishes an apt repository only. And
+# neither publishes a bare signing-key URL — the key travels INSIDE the package
+# it signs, which proves nothing on its own. What makes these routes verified
+# rather than "trust the download" is the fingerprint pinned HERE, in Rime's
+# source, exactly as the image build pinned it:
+#
+#   ChatGPT  the rpm's own key must have the pinned fingerprint, and the rpm
+#            must verify against that one key — read as a one-file keyring. It
+#            is never imported into the system rpmdb or the COPR keyring: a key
+#            trusted there would be honoured by every later rpm/dnf call on
+#            behalf of a repository Rime does not otherwise use.
+#   Claude   the archive key carried in the deb must have the pinned
+#            fingerprint; InRelease must verify against it (gpgv); the Packages
+#            index must be named by a hash inside that verified InRelease; and
+#            the deb must match the sha256 that index publishes.
+#
+# A file that passes goes into the system extension through the local-file path
+# with the same per-file trust marker an `--allow-unsigned` file gets — the
+# checksum of the exact bytes — so a rebuild accepts those bytes and nothing
+# else. The difference is that these were verified, not merely accepted.
+# `rime update` fetches again (vendor_refresh) and replaces the cached file only
+# when a newer build verifies the same way; offline, the installed build stays.
+#
+# The repository locations are environment-overridable for the suite, which
+# points them at file:// fixtures. The fingerprints are not: a seam that could
+# swap the key would be a way to install anything as "verified".
+readonly CHATGPT_KEY_FPR=3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4
+readonly CLAUDE_KEY_FPR=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE
+CHATGPT_REPO="${RIME_PKG_CHATGPT_REPO:-https://persistent.oaistatic.com/codex-app-prod/linux/rpm/x86_64}"
+CLAUDE_REPO="${RIME_PKG_CLAUDE_REPO:-https://downloads.claude.ai/claude-desktop/apt/stable}"
+
+# vendor_app NAME — `rpm` or `deb` for a vendor application, non-zero otherwise.
+vendor_app() {
+    case "$1" in
+        chatgpt)        printf 'rpm' ;;
+        claude-desktop) printf 'deb' ;;
+        *) return 1 ;;
+    esac
+}
+
+# vendor_fetch NAME DIR — download NAME into DIR, verify it, print its path.
+# Every failure is a refusal that names what did not verify; nothing partial is
+# left for a caller to pick up.
+vendor_fetch() {
+    case "$1" in
+        chatgpt)        vendor_fetch_chatgpt "$2" ;;
+        claude-desktop) vendor_fetch_claude_desktop "$2" ;;
+        *) die "internal: ${1} is not a vendor application" ;;
+    esac
+}
+
+vendor_fetch_chatgpt() {
+    local dir="$1" repomd primary href key fpr
+    repomd="$(curl -fsSL --max-time 120 "$CHATGPT_REPO/repodata/repomd.xml")" \
+        || die "could not reach OpenAI's repository (${CHATGPT_REPO})"
+    primary="$(printf '%s' "$repomd" | grep -oE 'repodata/[0-9a-f]+-primary\.xml\.gz' | head -n1)"
+    [ -n "$primary" ] || die "OpenAI's repository metadata names no primary index"
+    curl -fsSL --max-time 300 "$CHATGPT_REPO/$primary" -o "$dir/primary.xml.gz" \
+        || die "could not download OpenAI's package index"
+    href="$(gzip -dc "$dir/primary.xml.gz" | grep -oE '<location href="[^"]+\.rpm"' | sed -e 's/.*href="//' -e 's/"$//' | head -n1)"
+    [ -n "$href" ] || die "OpenAI's package index lists no rpm"
+    case "$href" in */*|*..*) die "refusing OpenAI's index: the rpm location '${href}' is not a plain file name" ;; esac
+    curl -fsSL --max-time 1800 "$CHATGPT_REPO/$href" -o "$dir/chatgpt.rpm" \
+        || die "could not download ${href} from OpenAI's repository"
+    mkdir -p "$dir/key" "$dir/keys" "$dir/gpg"; chmod 700 "$dir/gpg"
+    ( cd "$dir/key" && rpm2cpio "$dir/chatgpt.rpm" | cpio -idmu --quiet './etc/pki/rpm-gpg/*' ) 2>/dev/null || true
+    key="$dir/key/etc/pki/rpm-gpg/RPM-GPG-KEY-chatgpt-${CHATGPT_KEY_FPR}.asc"
+    [ -s "$key" ] || die "refusing chatgpt: the package no longer carries the key Rime pins (${CHATGPT_KEY_FPR})"
+    fpr="$(gpg --homedir "$dir/gpg" --show-keys --with-colons --with-fingerprint "$key" 2>/dev/null | awk -F: '/^fpr:/{print $10; exit}')"
+    [ "$fpr" = "$CHATGPT_KEY_FPR" ] \
+        || die "refusing chatgpt: its signing key is ${fpr:-unreadable}, not the ${CHATGPT_KEY_FPR} Rime pins"
+    # A keyring of ONE file, read with rpm's `fs` keyring backend: no database
+    # is created, so nothing needs a lock — `rpm --initdb` into a scratch
+    # directory is denied its lock file under enforcing SELinux (measured
+    # 2026-10-04, rpm 6.0.2) — and the system keyring is never touched.
+    cp -f -- "$key" "$dir/keys/chatgpt.key"
+    rpmkeys --define '_keyring fs' --define "_keyringpath $dir/keys/" --checksig -- "$dir/chatgpt.rpm" 2>/dev/null \
+        | grep -q 'digests signatures OK' \
+        || die "refusing chatgpt: the package does not verify against the pinned key"
+    printf '%s\n' "$dir/chatgpt.rpm"
+}
+
+vendor_fetch_claude_desktop() {
+    local dir="$1" meta file sum psum fpr
+    curl -fsSL --max-time 300 "$CLAUDE_REPO/dists/stable/InRelease" -o "$dir/InRelease" \
+        || die "could not reach Anthropic's repository (${CLAUDE_REPO})"
+    curl -fsSL --max-time 300 "$CLAUDE_REPO/dists/stable/main/binary-amd64/Packages" -o "$dir/Packages" \
+        || die "could not download Anthropic's package index"
+    meta="$(awk -v RS='' 'substr($0,1,24)=="Package: claude-desktop\n"{
+              match($0,/Version: [0-9.]+/);     v=substr($0,RSTART+9,RLENGTH-9);
+              match($0,/Filename: [^ \n]+/);    f=substr($0,RSTART+10,RLENGTH-10);
+              match($0,/SHA256: [0-9a-f]{64}/); s=substr($0,RSTART+8,RLENGTH-8);
+              print v "\t" f "\t" s }' "$dir/Packages" | sort -V | tail -1)"
+    file="$(printf '%s' "$meta" | cut -f2)"; sum="$(printf '%s' "$meta" | cut -f3)"
+    [ -n "$file" ] && [ -n "$sum" ] || die "Anthropic's package index lists no claude-desktop"
+    case "$file" in *..*) die "refusing Anthropic's index: the package path '${file}' climbs out of the repository" ;; esac
+    curl -fsSL --max-time 1800 "$CLAUDE_REPO/$file" -o "$dir/claude-desktop.deb" \
+        || die "could not download ${file} from Anthropic's repository"
+    printf '%s  %s\n' "$sum" "$dir/claude-desktop.deb" | sha256sum -c - >/dev/null 2>&1 \
+        || die "refusing claude-desktop: the package does not match the sha256 its index publishes"
+    mkdir -p "$dir/deb" "$dir/ctl" "$dir/gpg"; chmod 700 "$dir/gpg"
+    ( cd "$dir/deb" && ar x "$dir/claude-desktop.deb" ) \
+        || die "refusing claude-desktop: the download is not a .deb archive"
+    tar -xf "$dir"/deb/control.tar.* -C "$dir/ctl" 2>/dev/null \
+        || die "refusing claude-desktop: its control archive does not unpack"
+    awk '/^-----BEGIN PGP PUBLIC KEY BLOCK-----$/,/^-----END PGP PUBLIC KEY BLOCK-----$/' \
+        "$dir/ctl/postinst" > "$dir/key.asc" 2>/dev/null || true
+    [ -s "$dir/key.asc" ] || die "refusing claude-desktop: the package no longer carries its archive signing key"
+    fpr="$(gpg --homedir "$dir/gpg" --show-keys --with-colons --with-fingerprint "$dir/key.asc" 2>/dev/null | awk -F: '/^fpr:/{print $10; exit}')"
+    [ "$fpr" = "$CLAUDE_KEY_FPR" ] \
+        || die "refusing claude-desktop: its archive key is ${fpr:-unreadable}, not the ${CLAUDE_KEY_FPR} Rime pins"
+    gpg --homedir "$dir/gpg" --quiet --import "$dir/key.asc" 2>/dev/null \
+        && gpg --homedir "$dir/gpg" --export > "$dir/key.gpg" 2>/dev/null \
+        || die "could not prepare a keyring to check claude-desktop against"
+    gpgv --keyring "$dir/key.gpg" "$dir/InRelease" >/dev/null 2>&1 \
+        || die "refusing claude-desktop: Anthropic's InRelease is not signed by the pinned key"
+    psum="$(sha256sum "$dir/Packages" | cut -d' ' -f1)"
+    grep -q "$psum" "$dir/InRelease" \
+        || die "refusing claude-desktop: its package index is not named by the signed InRelease"
+    printf '%s\n' "$dir/claude-desktop.deb"
+}
+
+# vendor_refresh — `rime update`'s half. For every vendor application in the
+# requested list, fetch the current build; if it verifies and differs from the
+# cached one, replace the cache (and its trust marker). A failure to fetch is a
+# warning, never a refusal: offline, the installed build is what keeps working.
+vendor_refresh() {
+    local -a req=()
+    mapfile -t req < <(load_requested)
+    local e n kind work got cached
+    for e in "${req[@]:-}"; do
+        case "$e" in
+            local:*) n="${e#local:}" ;;
+            deb:*)   n="${e#deb:}" ;;
+            *) continue ;;
+        esac
+        kind="$(vendor_app "$n")" || continue
+        install -d -m0700 "$WORK_ROOT"
+        work="$(mktemp -d "${WORK_ROOT}/vendor.XXXXXX")" || continue
+        if got="$( (vendor_fetch "$n" "$work") 2>"$work/err")"; then
+            if [ "$kind" = rpm ]; then cached="$(local_cache "$n")"; else cached="$(deb_cache "$n")"; fi
+            if [ "$(sha "$got")" != "$(sha "$cached" 2>/dev/null)" ]; then
+                if [ "$kind" = rpm ]; then cache_local_rpm "$got" "$n" 1; else cache_local_deb "$got" "$n"; fi
+                msg "${n}: a newer build verified against the pinned key; it goes in with this update"
+            fi
+        else
+            warn "${n}: could not fetch or verify a newer build, keeping the installed one ($(tail -1 "$work/err" 2>/dev/null))"
+        fi
+        rm -rf "$work"
+    done
+}
+
+# ── Claude Code: per user, and it updates itself ─────────────────────────────
+# Not an extension and not a Flatpak: Anthropic's CLI updates itself, and on
+# Rime it can, because the image points npm's global prefix at the user's own
+# ~/.local (Containerfile.core, "npm global prefix"), which is first on PATH. So
+# `rime install claude-code` is `npm install -g @anthropic-ai/claude-code` run as
+# the user it is for — the person behind sudo, or the caller when there is no
+# sudo — and needs no root at all. Root with no user behind it is refused: an
+# install into /root's home is not what anybody typing this wants.
+readonly CLAUDE_CODE_NPM=@anthropic-ai/claude-code
+user_tool() { [ "$1" = claude-code ]; }
+user_tool_run() {   # $1=install|uninstall
+    local user home
+    command -v npm >/dev/null 2>&1 || die "npm is missing, so claude-code cannot be installed"
+    if [ "$(id -u)" != 0 ]; then
+        npm "$1" -g "$CLAUDE_CODE_NPM" || die "npm ${1} ${CLAUDE_CODE_NPM} failed"
+        return 0
+    fi
+    user="${SUDO_USER:-}"
+    [ -n "$user" ] && [ "$user" != root ] \
+        || die "claude-code installs for one user, into their ~/.local. Run it as that user: rime install claude-code"
+    home="$(getent passwd "$user" | cut -d: -f6)"
+    [ -n "$home" ] && [ -d "$home" ] || die "cannot find the home directory of ${user}"
+    runuser -u "$user" -- env HOME="$home" npm "$1" -g "$CLAUDE_CODE_NPM" \
+        || die "npm ${1} ${CLAUDE_CODE_NPM} failed for ${user}"
 }
 
 # Does a Flathub result actually answer what was asked?
