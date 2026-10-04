@@ -1454,9 +1454,13 @@ RUN set -eux; \
 #
 # WebDAV needed nothing: gvfsd-dav is in the base `gvfs` package and was
 # already here. It was still unusable outside GTK for the gvfs-fuse reason.
+# nodejs arrives HERE (neovim → tree-sitter-cli), and with it, as weak
+# dependencies, nodejs-full-i18n (the ICU data that makes node's Intl format
+# anything but English; kept, and named in the devstack below) and nodejs-docs:
+# 98 MiB of HTML that nothing on the machine reads. Excluded.
 RUN set -eux; \
     dnf5 -y copr enable zeno/scrcpy; \
-    dnf5 -y install \
+    dnf5 -y install --exclude=nodejs-docs \
         firefox \
         Thunar thunar-volman thunar-archive-plugin \
         gvfs gvfs-fuse gvfs-mtp gvfs-smb gvfs-nfs gvfs-gphoto2 \
@@ -1842,6 +1846,9 @@ RUN set -eux; \
 #
 #   nodejs/nodejs-npm  `rime plugin` runs on node (files/system/libexec/
 #                      rime-plugin), and `rime install claude-code` is npm.
+#   nodejs-full-i18n   without it node's Intl formats every locale in English
+#                      (Fedora builds node with small-icu; measured: de-DE
+#                      "October" instead of "Oktober"). Only a weak dependency.
 #   binutils           rime-pkg unpacks a .deb with `ar`.
 #   gcc, make          the rimed builder in Containerfile.base compiles C (the
 #                      ring crate) on top of this tier.
@@ -1851,7 +1858,10 @@ RUN set -eux; \
 # vanishing. ripgrep, fd, fzf and bat are in the zsh stanza below.
 RUN set -eux; \
     dnf5 -y install --setopt=install_weak_deps=False \
-        nodejs nodejs-npm binutils gcc make; \
+        nodejs nodejs-npm nodejs-full-i18n binutils gcc make; \
+    if rpm -q nodejs-docs >/dev/null 2>&1; then \
+        echo "FATAL: nodejs-docs is installed (98 MiB of HTML; excluded above)"; exit 1; \
+    fi; \
     dnf5 clean all
 
 # sing-box official static binary (not in Fedora). Shipped DISABLED (unit gates
