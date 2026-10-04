@@ -17,8 +17,8 @@
 #  extents changes.
 #
 #  ── What it touches ─────────────────────────────────────────────────────────
-#  /sysroot/ostree/repo/objects and /var/lib/flatpak/repo/objects, and nothing
-#  else. /sysroot is read-only on a booted machine, so the OS store is reached
+#  /sysroot/ostree/repo/objects and /var/lib/flatpak/repo/objects, and the
+#  container images in the OS store that no deployment uses (prune_images). /sysroot is read-only on a booted machine, so the OS store is reached
 #  in a private mount namespace with /sysroot remounted read-write, the way
 #  ostree reaches it itself. No other process sees that mount.
 #
@@ -172,11 +172,37 @@ compact() {
     fi
 }
 
+# prune_images: drop the container images no deployment was deployed from.
+# `bootc switch` (the apex → rime rename, a channel change) leaves the image it
+# switched away from in the store, every layer of it, after both deployments
+# have moved on, and nothing in bootc removes it: the machine this was written
+# on still held apex-os:daily a week after the rename. ostree-ext's prune
+# removes each image no deployment (booted, rollback or staged) names, then the
+# layers only those images used, then the objects only those held. It takes the
+# sysroot lock bootc holds through a pull and a deploy, so it cannot land
+# between the two. Measured on a fresh install with a stray image pulled
+# beside it: the stray image and its layer went, the booted image's 121 layers
+# stayed, and ostree fsck was clean.
+#
+# Only against the machine's own /sysroot: pointed anywhere else (the suite) it
+# would still prune the running machine, because ostree takes the sysroot from
+# --sysroot /, not from where this script was told to look.
+prune_images() {
+    local out
+    [ "$SYSROOT" = /sysroot ] && [ -e /run/ostree-booted ] || return 0
+    if out="$(ostree container image prune-images --sysroot / --full 2>&1)"; then
+        note "os: $(printf '%s' "$out" | paste -sd ',' - | sed 's/,/, /g')"
+    else
+        note "os: pruning unused images failed, left for the next run: $(printf '%s\n' "$out" | tail -n 1)"
+    fi
+}
+
 # /sysroot is read-only on a booted machine. Remounted only inside this
 # namespace, and only if it is read-only here.
 case ",$(findmnt -no OPTIONS --mountpoint "$SYSROOT" 2>/dev/null)," in
     *,ro,*) mount -o remount,rw "$SYSROOT" ;;
 esac
 
+prune_images
 compact os "$SYSROOT/ostree/repo/objects"
 compact flatpak "$FLATPAK/repo/objects"

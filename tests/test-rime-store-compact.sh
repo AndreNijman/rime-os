@@ -43,6 +43,14 @@ if [ -x "$ENGINE" ]; then ok "the engine is executable (it re-executes itself un
 targets=$(grep -v '^[[:space:]]*#' "$ENGINE" | grep -oE '^compact [a-z]+ "[^"]+"' | sort | tr '\n' ' ')
 is "it compacts exactly the OS and Flatpak object stores" \
     'compact flatpak "$FLATPAK/repo/objects" compact os "$SYSROOT/ostree/repo/objects" ' "$targets"
+# Image pruning acts on the RUNNING machine (ostree takes --sysroot /), so it
+# must be gated on being pointed at the real /sysroot. Checked by reading, not
+# by a mutant: a mutant run by this suite on a Rime machine would prune it.
+if grep -v '^[[:space:]]*#' "$ENGINE" | grep -qF '[ "$SYSROOT" = /sysroot ] && [ -e /run/ostree-booted ] || return 0'; then
+    ok "image pruning runs only against the machine's own /sysroot"
+else
+    bad "image pruning runs only against the machine's own /sysroot"
+fi
 if grep -v '^[[:space:]]*#' "$ENGINE" | grep -q -- "-name '\*\.file'"; then
     ok "only content objects (*.file) are rewritten, never ostree metadata"
 else
@@ -131,6 +139,7 @@ if ! encoded "$a"; then ok "the fixture is the real case: a fallocated object la
 
 section "first run"
 out=$(run); rc=$?
+all_out="$out"
 is "it exits 0" 0 "$rc"
 printf '%s\n' "$out" | sed 's/^/      /'
 for f in "$a" "$b" "$c" "$f1"; do
@@ -228,6 +237,15 @@ section "after every run above"
 # them as a btrfs.compression xattr.
 is "no object carries a btrfs.compression xattr" "0" \
     "$($SUDO find "$OS" "$FP" -type f -exec getfattr --absolute-names -n btrfs.compression {} + 2>/dev/null | grep -c 'btrfs.compression=')"
+
+section "never the running machine's own store"
+# This suite points the engine at a loop device, and on a Rime machine the
+# engine would otherwise prune THAT machine's images: ostree takes --sysroot /.
+if grep -q 'Removed images\|pruning unused images' <<<"$all_out"; then
+    bad "no run above pruned images (the engine was pointed away from /sysroot)"
+else
+    ok "no run above pruned images (the engine was pointed away from /sysroot)"
+fi
 
 section "privilege"
 if [ "$(id -u)" != 0 ]; then
