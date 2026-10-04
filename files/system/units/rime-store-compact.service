@@ -1,0 +1,23 @@
+[Unit]
+Description=Keep the OS and Flatpak stores compressed
+Documentation=file:///usr/libexec/rime-store-compact
+# libostree preallocates every object an update or a Flatpak install writes,
+# and btrfs never compresses a preallocated extent, so each update lands
+# uncompressed. This rewrites the new objects compressed, once each; on a
+# machine installed before 2026-10-04 its first run compresses the whole store.
+# The engine's header explains the rest.
+ConditionPathExists=/run/ostree-booted
+# Rewriting a few GB on battery is a poor trade. The timer comes back.
+ConditionACPower=true
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-store-compact
+# Background maintenance, never the reason a desktop stutters.
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+# A first run on an existing machine rewrites the whole store; on a slow disk
+# that is longer than any default timeout, and stopping it half-way only means
+# the rest is done next time.
+TimeoutStartSec=infinity
