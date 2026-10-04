@@ -154,8 +154,8 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
 
     if pty::resolve_program(&program).is_none() {
         bail!(
-            "{program} is not installed or not on PATH.\n\
-             install it, or run a different agent with `rime agent run --agent <name>`"
+            "{program} is not installed or not on PATH.\n{}",
+            install_hint(&program)
         );
     }
 
@@ -2102,8 +2102,31 @@ pub(crate) fn write_response(writer: &mut UnixStream, response: &Response) -> Re
     Ok(())
 }
 
+/// What to tell someone whose agent CLI is missing. Claude Code is the default
+/// agent and left the image on 2026-10-04: it installs per user, and the one
+/// command that does it is worth naming rather than "install it".
+fn install_hint(program: &str) -> &'static str {
+    match program {
+        "claude" => {
+            "install it with `rime install claude-code`, \
+             or run a different agent with `rime agent run --agent <name>`"
+        }
+        _ => "install it, or run a different agent with `rime agent run --agent <name>`",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// The default agent left the image: a missing `claude` names the command
+    /// that installs it, and any other missing program keeps the generic text.
+    #[test]
+    fn a_missing_claude_names_rime_install_claude_code() {
+        use super::install_hint;
+        assert!(install_hint("claude").contains("rime install claude-code"));
+        assert!(!install_hint("codex").contains("claude-code"));
+        assert!(install_hint("codex").starts_with("install it"));
+    }
 
     /// Image paste: an unconfined session is told where the compositor is,
     /// and nothing else is. The first assertion is the regression — before

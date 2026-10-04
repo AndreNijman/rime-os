@@ -69,11 +69,13 @@ const TOOLCHAIN_RW: &[&str] = &[
 /// install under `~/.local` puts the package in `lib/node_modules/<pkg>` and
 /// leaves `bin/<name>` as a symlink into it, so binding the bin directory alone
 /// binds a link with nothing on the far side: `bwrap: execvp opencode: No such
-/// file or directory`, before the agent has run a line. `claude` escaped that
-/// only because the image ships a root-owned `/usr/bin/claude` that
-/// `--ro-bind / /` covers — which also meant a confined `claude` session ran
+/// file or directory`, before the agent has run a line. `claude` once escaped
+/// that only because the image shipped a root-owned `/usr/bin/claude` that
+/// `--ro-bind / /` covered — which also meant a confined `claude` session ran
 /// the image's copy rather than the user's, contradicting the promise that a
-/// user's own build wins.
+/// user's own build wins. Since 2026-10-04 the image ships none, and
+/// `rime install claude-code` puts it under `~/.local` like every other npm
+/// agent, so `claude` needs this binding exactly as `opencode` does.
 ///
 /// The module directory and not `.local/lib`, which on an ordinary machine also
 /// holds `python3.N/site-packages` and whatever else a user has installed

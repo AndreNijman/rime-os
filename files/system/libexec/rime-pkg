@@ -290,9 +290,9 @@ requested_matches() {
 #
 # `dpkg-deb` is not in the image and is not wanted: it would bring dpkg's
 # database with it, and there is no world in which Rime maintains a second
-# package database. `ar` and `tar` are enough, and `ar` is already in the image
-# — Containerfile.core's 5a-aiapps stage unpacks the Claude Desktop .deb with it
-# and FATALs if binutils is absent, which is the same assertion made here.
+# package database. `ar` and `tar` are enough, and `ar` is in the image:
+# Containerfile.core's devstack installs binutils by name for this route, and
+# build-image.yml fails a build that ships without `ar`.
 deb_magic_ok() {
     local magic
     magic="$(head -c8 -- "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
@@ -712,9 +712,9 @@ inspect_local_deb() {
 # the package file: `Release`/`InRelease` is signed, it names the `Packages`
 # index by hash, and `Packages` names each .deb by sha256. Detach the file from
 # that chain — download it from a website, copy it off a USB stick — and every
-# link is gone. Containerfile.core's 5a-aiapps stage reconstructs the whole
-# chain for the image build, key fingerprint pinned in this repository, and it
-# takes twenty lines and a network fetch to do it.
+# link is gone. `rime install claude-desktop` (vendor_fetch_claude_desktop)
+# reconstructs the whole chain from Anthropic's repository, key fingerprint
+# pinned in this file, and a file on disk cannot be put back into it.
 #
 # `_gpgorigin` (debsigs) is not treated as verification either. Rime carries no
 # deb keyring and no policy file saying which keys may sign what, and a
@@ -1236,13 +1236,13 @@ extract_rpms() {
 # lowerdir=/run/systemd/sysext/meta/usr:/run/systemd/sysext/extensions/rime-user/usr:/usr`.
 #
 # NOT the rpmdb either, which is what image_owns() asks for RPM paths. The
-# rpmdb is BLIND to the one application this whole route exists for:
-# Containerfile.core's 5a-aiapps stage puts Claude Desktop into
-# /usr/lib/claude-desktop with `cp -a` (Anthropic publishes no rpm — five
-# rpm/yum prefixes under downloads.claude.ai all 404), so no package owns a
-# single one of its 1,190 files and `rpm -qf` answers "not owned" for every
-# one. A guard built on the rpmdb would wave a .deb straight over the image's
-# own copy of the app.
+# rpmdb is BLIND to anything the image places with `cp -a`. Until 2026-10-04
+# that was the one application this whole route exists for: the image put
+# Claude Desktop into /usr/lib/claude-desktop that way (Anthropic publishes no
+# rpm — five rpm/yum prefixes under downloads.claude.ai all 404), no package
+# owned a single one of its 1,190 files, and a guard built on the rpmdb would
+# have waved a .deb straight over the image's own copy of the app. Any tree a
+# future stage unpacks has the same blind spot.
 #
 # The booted ostree deployment is the pristine image, files and all, and the
 # kernel command line says which one it is. Failing CLOSED here is the same

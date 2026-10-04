@@ -256,7 +256,7 @@ mutate_both M3 \
 #      goes red on this one, with a message about Electron; this is the suite
 #      that says what it costs.
 mutate M4 "$CF" \
-    "    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\nELECTRON_OZONE_PLATFORM_HINT=auto\n' >> /etc/environment; \\" \
+    "    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nELECTRON_OZONE_PLATFORM_HINT=auto\n' >> /etc/environment; \\" \
     "    true; \\" \
     "exactly one Containerfile assignment of QT_QPA_PLATFORMTHEME exists"
 

@@ -499,14 +499,19 @@ writable. [docs/agent-runtime.md](docs/agent-runtime.md) is the reference.
 
 ## The AI desktop apps
 
-The ChatGPT and Claude desktop applications are part of Rime OS. The image
-carries both, so they are there on a fresh install and reach an existing machine
-through the ordinary `sudo rime update`. Neither self-updates and neither runs
-an auto-update timer of its own: a new version is a new image. The Claude Code
-CLI ships alongside them.
+ChatGPT, Claude Desktop and Claude Code are one command away rather than in the
+image, so a machine that never uses them does not carry or download them:
 
-The build checks both packages' signatures against fingerprints pinned in this
-repository, never against a key taken from the package being installed.
+```sh
+sudo rime install chatgpt
+sudo rime install claude-desktop
+rime install claude-code          # per user, and it keeps itself up to date
+```
+
+The two desktop apps come from their vendors' own repositories and are checked
+against signing-key fingerprints pinned in this repository, never against a key
+taken from the package being installed. They update with `sudo rime update`,
+and neither brings a repository or an update timer of its own.
 
 ## Closing the lid without stopping the work
 

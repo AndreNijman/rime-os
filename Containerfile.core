@@ -10,7 +10,7 @@
 #     → desktop + greeter stack (hyprland/quickshell/sway/…)  [own RUN]
 #     → sched-ext userspace (scx), Bazaar, RPMFusion + codecs [own RUNs]
 #     → baked userland apps, printing, input methods, fonts   [own RUNs]
-#     → dev toolchain, Zed, Claude Code, zsh/starship
+#     → dev toolchain, zsh/starship
 #     → third-party Rust tools (awww / matugen / yazi)
 #     → OS branding, locale, timezone, hardening
 #
@@ -1403,7 +1403,7 @@ RUN set -eux; \
 # fresh boot is usable with zero Flatpak round-trips: Firefox (the default and
 # only baked browser), the Thunar + gvfs file-manager stack (yazi, the TUI
 # companion, is built in the builder stage), a PDF viewer, image viewer, mpv, the
-# archive tools, btop, a calculator, editors (neovim/nano — Zed is fetched below),
+# archive tools, btop, a calculator, editors (neovim/nano; Zed installs on demand),
 # PulseAudio volume control, the disk-management tools, Android mirroring/control,
 # and the Bluetooth stack.
 # Own transaction, `dnf5 clean all`. bluetooth.service is enabled so BT works on
@@ -1813,63 +1813,11 @@ RUN set -eux; \
     fc-cache -f; \
     dnf5 clean all
 
-# ── Stage 5a-zed: Zed editor (/usr, official tarball) ──────────────────────
-# Zed is not packaged for Fedora (upstream ships a Flatpak or a raw tarball, and
-# Flatpaks cannot be installed at bootc build time). Fetch the official Linux
-# tarball into /usr/lib and symlink the launcher onto PATH. The FETCH stays
-# non-fatal, same posture as sing-box: no network, no Zed, but the image still
-# builds and neovim/nano remain. The tarball unpacks to `zed.app/`.
-#
-# ── What is NOT non-fatal, and why this block is assertive now ──────────────
-# Everything after a successful unpack is checked, because the previous version
-# shipped a working Zed that no launcher could see, on every Rime image, and
-# nothing noticed. Two mistakes compounded:
-#
-#   1. It installed from `zed.app/share/applications/zed.desktop`. The tarball
-#      has never shipped that name — the file is `dev.zed.Zed.desktop`.
-#   2. `2>/dev/null || true` on the install swallowed the resulting failure.
-#
-# So `/usr/bin/zed` ran fine from a shell and Zed was absent from every menu,
-# every launcher and every "Open With" list. A user reasonably calls that "Zed
-# doesn't work". The fetch failing is a fact about the network; the tarball
-# unpacking and the entry not arriving is a bug, and the build now says so.
-#
-# The icons are installed for the same reason: `Icon=zed` in the entry resolves
-# through the hicolor theme, and an entry with an unresolvable icon is the same
-# invisible half-failure one step further along.
-RUN set -eux; \
-    if curl -fsSL "https://zed.dev/api/releases/stable/latest/zed-linux-x86_64.tar.gz" -o /tmp/zed.tgz \
-       && tar -xzf /tmp/zed.tgz -C /usr/lib; then \
-        ln -sf /usr/lib/zed.app/bin/zed /usr/bin/zed; \
-        install -Dm644 /usr/lib/zed.app/share/applications/dev.zed.Zed.desktop \
-            /usr/share/applications/dev.zed.Zed.desktop; \
-        for px in 512x512 1024x1024; do \
-            if [ -f "/usr/lib/zed.app/share/icons/hicolor/${px}/apps/zed.png" ]; then \
-                install -Dm644 "/usr/lib/zed.app/share/icons/hicolor/${px}/apps/zed.png" \
-                    "/usr/share/icons/hicolor/${px}/apps/zed.png"; \
-            fi; \
-        done; \
-        # The launcher entry has to exist, name a binary that is really on PATH,
-        # and carry an icon the theme can resolve. Asserted against the shipped
-        # files rather than trusted, because all three failed silently before.
-        test -s /usr/share/applications/dev.zed.Zed.desktop \
-            || { echo "FATAL: zed unpacked but shipped no desktop entry; it would be invisible in every launcher"; exit 1; }; \
-        grep -q '^TryExec=zed$' /usr/share/applications/dev.zed.Zed.desktop \
-            || { echo "FATAL: zed desktop entry has no TryExec=zed; upstream changed it and the launcher gate is now wrong"; exit 1; }; \
-        test -x /usr/bin/zed \
-            || { echo "FATAL: /usr/bin/zed is not executable; the entry names a binary that is not there"; exit 1; }; \
-        test -s /usr/share/icons/hicolor/512x512/apps/zed.png \
-            || { echo "FATAL: zed shipped no 512x512 icon; the entry's Icon=zed would not resolve"; exit 1; }; \
-        echo "zed: installed to /usr/lib/zed.app, entry + icon asserted"; \
-    else echo "zed: fetch FAILED (editor absent; non-fatal — neovim/nano remain)"; fi; \
-    rm -f /tmp/zed.tgz
-
 # ── Stage 5a-devstack: full development toolchain (rime-logs 35-dev-stack.md) ─
 # Both editions ship a complete dev environment out of the box: the C/C++
 # toolchain + build systems + debuggers, the language toolchains
 # (Python/Node/Rust/Go/Ruby/JDK), and the common CLI dev tools (gh, git-lfs,
-# ripgrep, fd, fzf, bat, buildah). Zed (GUI editor) is installed in stage
-# 5a-zed above. Own transaction, `dnf5 clean all`.
+# ripgrep, fd, fzf, bat, buildah). Own transaction, `dnf5 clean all`.
 #
 # nodejs/nodejs-npm and binutils are named for Rime's own sake, not the
 # developer's: `rime plugin` runs on node (files/system/libexec/rime-plugin),
@@ -1887,253 +1835,6 @@ RUN set -eux; \
         nodejs nodejs-npm binutils \
         gh git-lfs ripgrep fd-find fzf bat buildah; \
     dnf5 clean all
-
-# ── Stage 5a-claude: Claude Code CLI (rime-logs 35) ─────────────────────────
-# System-wide via npm global into /usr (NOT /usr/local — that becomes a symlink
-# to writable /var below) so every user gets `claude` on PATH. The autoupdater is
-# disabled fleet-wide via /etc/environment (DISABLE_AUTOUPDATER=1) because it
-# cannot write read-only /usr — updates ride the image rebuild. Non-fatal: a
-# registry hiccup leaves claude absent but never aborts the build.
-#
-# HOME=/tmp: in bootc images /root is a symlink to /var/roothome (absent at build
-# time), so npm's default cache ($HOME/.npm → /root/.npm) fails with ENOTDIR —
-# the same trap the builder stage documents for cargo. Point HOME at a writable
-# build dir. Verified: installs `claude` → /usr/bin/claude.
-RUN set -eux; \
-    export HOME=/tmp; \
-    if npm install -g --prefix /usr @anthropic-ai/claude-code; then \
-        echo "claude-code: installed ($(claude --version 2>/dev/null || echo present))"; \
-    else echo "claude-code: npm install FAILED (absent; non-fatal)"; fi; \
-    rm -rf /tmp/.npm /tmp/.node-compile-cache /root/.npm 2>/dev/null || true
-
-# ── Stage 5a-aiapps: the desktop AI apps, image-owned (ChatGPT + Claude) ────
-# The 2026-09-11 product decision: the ChatGPT desktop app and the Claude
-# desktop app are PART of Rime OS, not add-ons a user installs. They ship in
-# the image, existing machines pick them up with `sudo rime update`, and
-# neither app carries an update channel of its own. A version bump rides a
-# rebuild of this tier, like every other third-party payload in core.
-#
-# ── Both vendors ship an updater WITH the app, and both are removed here ────
-# This is the whole difficulty of the stage, and it is not hypothetical. Each
-# vendor packages for a mutable distribution, where "install the app" also
-# means "subscribe this machine to my repository":
-#
-#   - OpenAI's rpm ships /etc/yum.repos.d/chatgpt.repo with enabled=1.
-#   - Anthropic's deb writes an apt source, a keyring and an
-#     unattended-upgrades snippet from its maintainer script — "the VS Code /
-#     Chrome / 1Password model", in that script's own words — plus a GNOME
-#     Shell search provider nothing on Rime consumes.
-#
-# On Rime each is wrong twice over. /usr is read-only, so neither updater can
-# ever succeed. And `rime-pkg` builds user system extensions with dnf against
-# the HOST's repo set, so an enabled vendor repo means `rime install chatgpt`
-# layers a NEWER build into an extension that shadows the image's own /usr —
-# a self-update through a side channel, defeating the decision above. That is
-# not a worry about the future: /etc/yum.repos.d/chatgpt.repo and an extension
-# copy of the app are both live on the developer's laptop today, which is how
-# it was found.
-#
-# So the rpm's repo file is deleted after the install, and the deb is UNPACKED
-# rather than dpkg-installed — which is what stops its maintainer script from
-# running at all. The package-owned key files under /etc/pki/rpm-gpg stay: with
-# no repo referring to them they are inert, and deleting package-owned files
-# that do nothing buys nothing.
-#
-# ── Why ChatGPT goes through dnf and Claude does not ────────────────────────
-# A dnf transaction rewrites the ~200 MB sqlite rpmdb into this layer, so it is
-# never free and the default in this repository is to avoid one. It is bought
-# here deliberately: `rime-pkg` decides whether a package is image-owned by
-# asking the system rpmdb (`rpm -qf`), so an rpm-INSTALLED ChatGPT makes
-# `rime install chatgpt` refuse to shadow it, and an rpm merely UNPACKED into
-# /usr would leave that guard blind to 442 MB of application. Claude has no rpm
-# at all — Anthropic publishes an apt repo only (checked: five rpm/yum prefixes
-# under downloads.claude.ai, all 404) — so it is unpacked, and nothing in
-# Fedora's repos carries that name for the guard to have to refuse.
-#
-# ── Verification ───────────────────────────────────────────────────────────
-# Neither vendor publishes a bare signing-key URL (checked: seven candidate
-# paths, all 404; only repomd.xml.asc exists), so each package's key can only
-# be taken out of the package itself — which is worth nothing unless something
-# independent pins it. The fingerprints below ARE that independent thing: they
-# live in this repository, not in the download.
-#
-#   ChatGPT  3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4  "Codex Linux Repository"
-#   Claude   31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE  "Anthropic Claude Code
-#                                                        Release Signing"
-#
-# Every gpg call below passes --homedir at a build path. That is the same trap
-# stage 5a-claude documents for npm: /root is a symlink to /var/roothome, which
-# does not exist at build time, so gpg's default homedir makes it exit with
-# "can't create directory '/root/.gnupg'". Measured in a scratch fedora-bootc:43
-# container before this stanza was written, not guessed.
-#
-# ChatGPT: the key is checked against the constant, imported into a THROWAWAY
-# rpmdb, and used to verify the package signature there. The image's own trust
-# store is deliberately NOT widened — a key trusted in the real rpmdb would be
-# honoured by every later rpm/dnf call on the machine, including rime-pkg's
-# extension builds, on behalf of a repository this stage has just deleted.
-#
-# Claude: the deb's sha256 comes out of the apt index, and an index is worth
-# exactly its signature, so the chain is closed rather than assumed — the key
-# is checked against the constant, `gpgv` verifies InRelease with it, and the
-# Packages file the sha256 was read from must itself be named by a hash inside
-# that verified InRelease.
-#
-# ── The fetch is non-fatal; nothing after it is ────────────────────────────
-# Same posture as zed and sing-box: a build box with no network still produces
-# an image. But an app that unpacked and then shipped no launcher entry, no
-# resolvable icon or a dead binary is the Zed defect over again, so each of
-# those is a hard failure carrying its own message.
-#
-# ChatGPT's icon is the one real repackaging this stage does. Upstream ships it
-# ONLY at /usr/share/pixmaps/chatgpt.png and nothing under hicolor. That is
-# legal — pixmaps is still in the icon-theme search path — but it is one
-# lookup-path change away from the invisible-launcher bug, and Rime's own
-# launcher assertions look in /usr/share/icons. A 1024x1024 png belongs in the
-# 1024x1024 hicolor directory, so it is installed there as well.
-RUN set -eux; \
-    CHATGPT_REPO="https://persistent.oaistatic.com/codex-app-prod/linux/rpm/x86_64"; \
-    CHATGPT_KEY_FPR="3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4"; \
-    CLAUDE_REPO="https://downloads.claude.ai/claude-desktop/apt/stable"; \
-    CLAUDE_KEY_FPR="31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE"; \
-    # `ar` is the only tool this stage needs that fedora-bootc does not carry.
-    # It arrives with binutils, which gcc requires, which stage 5a-devstack
-    # above installs. Asserted rather than assumed: without it the deb silently
-    # does not unpack, and a silent non-unpack is how Zed shipped broken.
-    command -v ar >/dev/null 2>&1 \
-        || { echo "FATAL: ar is missing — stage 5a-devstack must install binutils before this stage"; exit 1; }; \
-    # Same shape, different reason: these two write the caches the desktop
-    # actually reads. They arrive transitively (desktop-file-utils with
-    # xdg-utils, gtk-update-icon-cache with the GTK stack) from the desktop
-    # package stanza far above, so they are asserted, not installed again. An
-    # entry whose scheme never reaches mimeinfo.cache is registered with
-    # nobody.
-    command -v update-desktop-database >/dev/null 2>&1 \
-        || { echo "FATAL: update-desktop-database is missing — desktop-file-utils must be installed before this stage or no scheme handler gets registered"; exit 1; }; \
-    command -v gtk-update-icon-cache >/dev/null 2>&1 \
-        || { echo "FATAL: gtk-update-icon-cache is missing — the GTK stack must be installed before this stage"; exit 1; }; \
-    \
-    # ── ChatGPT ────────────────────────────────────────────────────────────
-    # The repo keeps exactly ONE build (the current one), so there is no stable
-    # per-version URL to pin — resolve the filename out of the repo metadata at
-    # build time, the way sing-box resolves its tag.
-    if repomd="$(curl -fsSL --max-time 120 "$CHATGPT_REPO/repodata/repomd.xml")" \
-       && primary="$(printf '%s' "$repomd" | grep -oE 'repodata/[0-9a-f]+-primary\.xml\.gz' | head -n1)" \
-       && [ -n "$primary" ] \
-       && curl -fsSL --max-time 300 "$CHATGPT_REPO/$primary" -o /tmp/cg-primary.xml.gz \
-       && cgrpm="$(gzip -dc /tmp/cg-primary.xml.gz | grep -oE '<location href="[^"]+\.rpm"' | sed -e 's/.*href="//' -e 's/"$//' | head -n1)" \
-       && [ -n "$cgrpm" ] \
-       && curl -fsSL --max-time 1800 "$CHATGPT_REPO/$cgrpm" -o /tmp/chatgpt.rpm; then \
-        mkdir -p /tmp/cg-key /tmp/cg-rpmdb /tmp/cg-gpg; chmod 700 /tmp/cg-gpg; \
-        ( cd /tmp/cg-key && rpm2cpio /tmp/chatgpt.rpm | cpio -idmu --quiet './etc/pki/rpm-gpg/*' ); \
-        cgkey="/tmp/cg-key/etc/pki/rpm-gpg/RPM-GPG-KEY-chatgpt-${CHATGPT_KEY_FPR}.asc"; \
-        test -s "$cgkey" \
-            || { echo "FATAL: the chatgpt rpm no longer carries the key named by the pinned fingerprint ${CHATGPT_KEY_FPR}"; exit 1; }; \
-        cgfpr="$(gpg --homedir /tmp/cg-gpg --show-keys --with-colons --with-fingerprint "$cgkey" | awk -F: '/^fpr:/{print $10; exit}')"; \
-        test "$cgfpr" = "$CHATGPT_KEY_FPR" \
-            || { echo "FATAL: chatgpt signing key is ${cgfpr}, not the pinned ${CHATGPT_KEY_FPR}; refusing to install an unverified package"; exit 1; }; \
-        rpm --dbpath /tmp/cg-rpmdb --initdb; \
-        rpm --dbpath /tmp/cg-rpmdb --import "$cgkey"; \
-        rpm --dbpath /tmp/cg-rpmdb -K /tmp/chatgpt.rpm \
-            || { echo "FATAL: chatgpt rpm signature does not verify against the pinned key"; exit 1; }; \
-        dnf5 -y install /tmp/chatgpt.rpm; \
-        dnf5 clean all; \
-        rm -rf /tmp/cg-rpmdb /tmp/cg-key /tmp/cg-gpg /tmp/cg-primary.xml.gz /tmp/chatgpt.rpm; \
-        # The update channel the package brought with it. Deleting the file is
-        # the point of this line; see the header for why disabling it is not
-        # enough on a machine where rime-pkg builds extensions with dnf.
-        rm -f /etc/yum.repos.d/chatgpt.repo; \
-        install -Dm644 /usr/share/pixmaps/chatgpt.png \
-            /usr/share/icons/hicolor/1024x1024/apps/chatgpt.png; \
-        test -x /usr/bin/chatgpt \
-            || { echo "FATAL: chatgpt installed but /usr/bin/chatgpt is not executable; the launcher entry would name a binary that is not there"; exit 1; }; \
-        test -s /usr/share/applications/chatgpt.desktop \
-            || { echo "FATAL: chatgpt installed but shipped no desktop entry; it would be invisible in every launcher"; exit 1; }; \
-        test -s /usr/share/icons/hicolor/1024x1024/apps/chatgpt.png \
-            || { echo "FATAL: chatgpt shipped no hicolor icon; its entry's Icon=chatgpt would not resolve where Rime looks"; exit 1; }; \
-        test ! -e /etc/yum.repos.d/chatgpt.repo \
-            || { echo "FATAL: chatgpt.repo survived; the app would carry its own update channel, which the product decision forbids"; exit 1; }; \
-        echo "chatgpt: installed $(rpm -q --qf '%{VERSION}-%{RELEASE}' chatgpt), entry + hicolor icon asserted, vendor repo removed"; \
-    else echo "chatgpt: fetch FAILED (app absent; non-fatal — the image still builds)"; fi; \
-    \
-    # ── Claude Desktop ─────────────────────────────────────────────────────
-    if curl -fsSL --max-time 300 "$CLAUDE_REPO/dists/stable/InRelease" -o /tmp/cl-InRelease \
-       && curl -fsSL --max-time 300 "$CLAUDE_REPO/dists/stable/main/binary-amd64/Packages" -o /tmp/cl-Packages \
-       && clmeta="$(awk -v RS='' 'substr($0,1,24)=="Package: claude-desktop\n"{ \
-              match($0,/Version: [0-9.]+/);     v=substr($0,RSTART+9,RLENGTH-9); \
-              match($0,/Filename: [^ \n]+/);    f=substr($0,RSTART+10,RLENGTH-10); \
-              match($0,/SHA256: [0-9a-f]{64}/); s=substr($0,RSTART+8,RLENGTH-8); \
-              print v "\t" f "\t" s }' /tmp/cl-Packages | sort -V | tail -1)" \
-       && [ -n "$clmeta" ] \
-       && clver="$(printf '%s' "$clmeta" | cut -f1)" \
-       && clfile="$(printf '%s' "$clmeta" | cut -f2)" \
-       && clsha="$(printf '%s' "$clmeta" | cut -f3)" \
-       && [ -n "$clsha" ] \
-       && curl -fsSL --max-time 1800 "$CLAUDE_REPO/$clfile" -o /tmp/claude.deb; then \
-        echo "$clsha  /tmp/claude.deb" | sha256sum -c - \
-            || { echo "FATAL: claude-desktop deb does not match the sha256 the apt index publishes"; exit 1; }; \
-        mkdir -p /tmp/cl-deb /tmp/cl-ctl /tmp/cl-root /tmp/cl-gpg; \
-        ( cd /tmp/cl-deb && ar x /tmp/claude.deb ); \
-        tar -xf /tmp/cl-deb/control.tar.* -C /tmp/cl-ctl; \
-        awk '/^-----BEGIN PGP PUBLIC KEY BLOCK-----$/,/^-----END PGP PUBLIC KEY BLOCK-----$/' \
-            /tmp/cl-ctl/postinst > /tmp/cl-key.asc; \
-        test -s /tmp/cl-key.asc \
-            || { echo "FATAL: the claude-desktop deb no longer carries its archive signing key"; exit 1; }; \
-        chmod 700 /tmp/cl-gpg; \
-        clfpr="$(gpg --homedir /tmp/cl-gpg --show-keys --with-colons --with-fingerprint /tmp/cl-key.asc | awk -F: '/^fpr:/{print $10; exit}')"; \
-        test "$clfpr" = "$CLAUDE_KEY_FPR" \
-            || { echo "FATAL: claude-desktop signing key is ${clfpr}, not the pinned ${CLAUDE_KEY_FPR}; refusing to trust this apt index"; exit 1; }; \
-        gpg --homedir /tmp/cl-gpg --quiet --import /tmp/cl-key.asc; \
-        gpg --homedir /tmp/cl-gpg --export > /tmp/cl-key.gpg; \
-        gpgv --keyring /tmp/cl-key.gpg /tmp/cl-InRelease \
-            || { echo "FATAL: claude-desktop InRelease is not signed by the pinned key; the sha256 above would be unverified"; exit 1; }; \
-        clpsha="$(sha256sum /tmp/cl-Packages | cut -d' ' -f1)"; \
-        grep -q "$clpsha" /tmp/cl-InRelease \
-            || { echo "FATAL: the Packages index is not named by the signed InRelease; its sha256 for the deb proves nothing"; exit 1; }; \
-        tar -xJf /tmp/cl-deb/data.tar.xz -C /tmp/cl-root; \
-        cp -a /tmp/cl-root/usr/lib/claude-desktop /usr/lib/claude-desktop; \
-        # Chromium refuses to start when its setuid sandbox helper is present
-        # but not setuid root, so this is not optional hardening — it is the
-        # difference between an app that opens and one that exits on launch.
-        chmod 4755 /usr/lib/claude-desktop/chrome-sandbox; \
-        ln -sfn ../lib/claude-desktop/claude-desktop /usr/bin/claude-desktop; \
-        install -Dm644 /tmp/cl-root/usr/share/applications/com.anthropic.Claude.desktop \
-            /usr/share/applications/com.anthropic.Claude.desktop; \
-        for px in 16x16 32x32 48x48 128x128 256x256; do \
-            install -Dm644 "/tmp/cl-root/usr/share/icons/hicolor/$px/apps/claude-desktop.png" \
-                "/usr/share/icons/hicolor/$px/apps/claude-desktop.png"; \
-        done; \
-        rm -rf /tmp/cl-deb /tmp/cl-ctl /tmp/cl-root /tmp/cl-gpg /tmp/cl-key.asc /tmp/cl-key.gpg /tmp/claude.deb /tmp/cl-InRelease /tmp/cl-Packages; \
-        test -x /usr/bin/claude-desktop \
-            || { echo "FATAL: claude-desktop unpacked but /usr/bin/claude-desktop is not executable; the launcher entry would name a binary that is not there"; exit 1; }; \
-        test -s /usr/share/applications/com.anthropic.Claude.desktop \
-            || { echo "FATAL: claude-desktop unpacked but shipped no desktop entry; it would be invisible in every launcher"; exit 1; }; \
-        test -s /usr/share/icons/hicolor/256x256/apps/claude-desktop.png \
-            || { echo "FATAL: claude-desktop shipped no hicolor icon; its entry's Icon=claude-desktop would not resolve"; exit 1; }; \
-        test -u /usr/lib/claude-desktop/chrome-sandbox \
-            || { echo "FATAL: claude-desktop's chrome-sandbox is not setuid; Chromium exits at launch when it finds it unprivileged"; exit 1; }; \
-        test ! -e /etc/apt/sources.list.d/claude-desktop.list \
-            || { echo "FATAL: an apt source for claude-desktop exists; the deb's maintainer script must never run on Rime"; exit 1; }; \
-        echo "claude-desktop: installed ${clver}, entry + icons asserted, no maintainer script run"; \
-    else echo "claude-desktop: fetch FAILED (app absent; non-fatal — the image still builds)"; fi; \
-    \
-    # ── The caches the launchers actually read ─────────────────────────────
-    # Installing an entry is not the same as the desktop knowing about it, and
-    # a scheme handler that is not in mimeinfo.cache does not exist as far as
-    # xdg-open is concerned. Rebuild both caches, then assert the EFFECTIVE
-    # result rather than the file that was copied.
-    update-desktop-database /usr/share/applications; \
-    gtk-update-icon-cache -qf /usr/share/icons/hicolor 2>/dev/null || true; \
-    if [ -x /usr/bin/chatgpt ]; then \
-        grep -q '^x-scheme-handler/codex=.*chatgpt.desktop' /usr/share/applications/mimeinfo.cache \
-            || { echo "FATAL: codex:// is not registered to chatgpt.desktop; ChatGPT's own links would not open the app"; exit 1; }; \
-    fi; \
-    if [ -x /usr/bin/claude-desktop ]; then \
-        grep -q '^x-scheme-handler/claude=.*com.anthropic.Claude.desktop' /usr/share/applications/mimeinfo.cache \
-            || { echo "FATAL: claude:// is not registered to com.anthropic.Claude.desktop; every claude:// link would fail to open the app"; exit 1; }; \
-    fi; \
-    echo "ai-apps: desktop entries and scheme handlers registered"
-
 
 # sing-box official static binary (not in Fedora). Shipped DISABLED (unit gates
 # on the user's /etc/sing-box/config.json). Non-fatal: a fetch failure leaves the
@@ -2359,9 +2060,11 @@ RUN set -eux; \
 # and ~/.local/bin is already first on PATH via /etc/environment and the seeded
 # hyprland.conf, so `npm i -g <pkg>` then `<pkg>` just works with no sudo.
 #
-# This does NOT affect the image's own globals: the claude-code install above
-# passes --prefix /usr explicitly, which overrides npmrc. Anyone who genuinely
-# wants a system-wide install can still say `sudo npm i -g --prefix /usr/local`.
+# The image installs no npm globals of its own. `rime install claude-code`
+# depends on this prefix: it runs `npm install -g` as the user, which lands in
+# their ~/.local, where Claude Code can update itself (rime-pkg, user_tool_run).
+# Anyone who genuinely wants a system-wide install can still say
+# `sudo npm i -g --prefix /usr/local`.
 #
 # Both files are written because ostree keeps the package copy at /usr/etc and
 # derives /etc from it; a future nodejs update replaces /usr/etc/npmrc, and this
@@ -2514,11 +2217,13 @@ RUN set -eux; \
 #   - mask systemd-remount-fs: fails on the composefs/overlay root. (rime-logs 03)
 #   - /usr/local -> ../var/usrlocal: /usr is read-only on bootc, so redirect
 #     /usr/local to writable per-machine state + a tmpfiles dir. (rime-logs 08)
-#   - /etc/environment: session-wide theme + default terminal + Claude autoupdate
-#     off + the Electron platform hint, via pam_env so a greetd/Hyprland session
-#     (no uwsm) inherits them. ELECTRON_OZONE_PLATFORM_HINT=auto is what makes
-#     the shipped Electron apps (ChatGPT, Claude Desktop — stage 5a-aiapps) run
-#     as native Wayland clients instead of defaulting to XWayland.
+#   - /etc/environment: session-wide theme + default terminal + the Electron
+#     platform hint, via pam_env so a greetd/Hyprland session (no uwsm) inherits
+#     them. ELECTRON_OZONE_PLATFORM_HINT=auto is what makes Electron apps the
+#     owner installs (ChatGPT, Claude Desktop, Discord, …) run as native Wayland
+#     clients instead of defaulting to XWayland. DISABLE_AUTOUPDATER=1 is gone
+#     with the image's own Claude Code (2026-10-04): it is installed per user
+#     now, into ~/.local, where its updater works.
 #   - /etc/bashrc: fastfetch greeting on every interactive terminal, colour by
 #     scheme, once per shell session. (rime-logs 33) The greeting script itself
 #     is COPY'd in the base tier; the source line is guarded with `-r`, so it is
@@ -2562,7 +2267,7 @@ RUN set -eux; \
     systemctl mask systemd-remount-fs.service; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
     printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/rime-usrlocal.conf; \
-    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nDISABLE_AUTOUPDATER=1\nELECTRON_OZONE_PLATFORM_HINT=auto\n' >> /etc/environment; \
+    printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nELECTRON_OZONE_PLATFORM_HINT=auto\n' >> /etc/environment; \
     printf '\n# Rime OS fastfetch greeting. The logic lives in ONE file shared with zsh —\n# zsh is the default login shell, so a bash-only greeting was never seen by\n# real users (rime-logs 14). Guarded so a partial image cannot break bash.\n[ -r /usr/share/rime/shell/greeting.sh ] && . /usr/share/rime/shell/greeting.sh\n' >> /etc/bashrc
 
 # ── zsh becomes the default login shell for accounts created from here on ──
