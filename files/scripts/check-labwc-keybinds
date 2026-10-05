@@ -21,6 +21,7 @@ of a source checkout — which is what happens in `tests/test-rime-firstrun.sh`
 and in the image build.
 """
 
+import importlib.util
 import os
 import sys
 from importlib.machinery import SourceFileLoader
@@ -52,7 +53,14 @@ def main(argv):
               + " or ".join(CANDIDATES), file=sys.stderr)
         return 2
 
-    mod = SourceFileLoader("rime_labwc_keybinds", generator).load_module()
+    # spec + exec_module, not SourceFileLoader.load_module(): Python 3.15
+    # removed load_module (Fedora 45 ships 3.15), and the generator has no .py
+    # extension, so the loader is named explicitly.
+    loader = SourceFileLoader("rime_labwc_keybinds", generator)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[loader.name] = mod
+    loader.exec_module(mod)
     return mod.do_check(shell_dir, rc_xml, INSTALLED_SHELL)
 
 
