@@ -2079,7 +2079,8 @@ RUN set -eux; \
     python3 /usr/share/rime-os/selinux/verify-rime-sdboot.py
 
 # ── npm global prefix: per-user, not root-owned /usr/local (rime-logs 16) ────
-# Fedora's nodejs ships /etc/npmrc with `prefix=/usr/local`. On a bootc system
+# Fedora 43's nodejs shipped /etc/npmrc with `prefix=/usr/local` (Fedora 45's
+# ships none, and npm's default is the same /usr/local). On a bootc system
 # /usr/local is a symlink to ../var/usrlocal, created root-owned 0755 by the
 # tmpfiles rule below, so ANY `npm install -g` as a normal user dies with:
 #
@@ -2106,7 +2107,13 @@ RUN set -eux; \
 # Both files are written because ostree keeps the package copy at /usr/etc and
 # derives /etc from it; a future nodejs update replaces /usr/etc/npmrc, and this
 # RUN re-applies after every dnf install so the fix cannot silently regress.
+#
+# Fedora 45's nodejs-npm ships no npmrc at all (measured, nodejs-npm 10.9.8 on
+# fc45): npm still reads /etc/npmrc as its global config, and with none there
+# its prefix is /usr/local. So the file is written when the package does not
+# ship one, and npm itself is asked where a user's global installs now go.
 RUN set -eux; \
+    [ -f /etc/npmrc ] || printf 'prefix=${HOME}/.local\n' > /etc/npmrc; \
     for f in /etc/npmrc /usr/etc/npmrc; do \
         [ -f "$f" ] || continue; \
         sed -i 's|^prefix=/usr/local$|prefix=${HOME}/.local|' "$f"; \
@@ -2115,6 +2122,10 @@ RUN set -eux; \
             ; then echo "FATAL: the npm prefix still points at root-owned /usr/local"; exit 1; fi; \
     done; \
     grep -q '^prefix=\${HOME}/.local$' /etc/npmrc; \
+    got="$(HOME=/tmp/rime-npm-probe npm config get prefix)"; \
+    rm -rf /tmp/rime-npm-probe; \
+    [ "$got" = /tmp/rime-npm-probe/.local ] \
+        || { echo "FATAL: npm puts a user's global installs in '$got', not their ~/.local"; exit 1; }; \
     echo "npm global prefix -> \${HOME}/.local (was root-owned /usr/local)"
 
 # ── Third-party Rust tools from the builder stage ──────────────────────────
