@@ -119,10 +119,14 @@ fi
 # checked against a second source. Bodhi carries the status as the answer
 # rather than as a footnote.
 DW_NVR="dwarves-${DWARVES_NVR}"
+# The Fedora release the pin was built for, from its own dist tag
+# (1.32-1.fc45 -> F45), so this asks bodhi about the release the kernel is
+# actually built on rather than one written down here.
+DW_REL="F$(printf '%s' "${DWARVES_NVR}" | sed -n 's/.*\.fc\([0-9][0-9]*\).*/\1/p')"
 bodhi="$(fetch -H 'Accept: application/json' \
-    'https://bodhi.fedoraproject.org/updates/?packages=dwarves&releases=F43&rows_per_page=20')"
+    "https://bodhi.fedoraproject.org/updates/?packages=dwarves&releases=${DW_REL}&rows_per_page=20")"
 if [ -z "${bodhi}" ]; then
-    unknowable "could not ask bodhi about dwarves in F43"
+    unknowable "could not ask bodhi about dwarves in ${DW_REL}"
 else
     read -r dw_status dw_stable_nvr <<<"$(printf '%s' "${bodhi}" | DW_NVR="${DW_NVR}" python3 -c '
 import json, os, sys
@@ -145,7 +149,7 @@ for u in ups:
 print(status or "-", newest_stable or "-")
 ')"
     if [ -z "${dw_status}" ] || [ "${dw_status}" = "-" ]; then
-        unknowable "bodhi lists no F43 update called ${DW_NVR}; cannot tell whether it is still testing, or was withdrawn"
+        unknowable "bodhi lists no ${DW_REL} update called ${DW_NVR}; cannot tell whether it is still testing, or was withdrawn"
     else
         case "${dw_status}" in
             # Stable is CURRENT, not drift. This used to be reported as drift
@@ -156,11 +160,11 @@ print(status or "-", newest_stable or "-")
             # the answer to "does the pinned dwarves still exist in a sane
             # state" is yes, and the koji URL check below keeps asking.
             stable)
-                current "${DW_NVR} is in F43 stable; kept pinned by koji NVR + sha256 on purpose (content-addressed)" ;;
+                current "${DW_NVR} is in ${DW_REL} stable; kept pinned by koji NVR + sha256 on purpose (content-addressed)" ;;
             testing|pending)
-                current "${DW_NVR} is still '${dw_status}' in F43 (stable is ${dw_stable_nvr}); the koji NVR pin is still required" ;;
+                current "${DW_NVR} is still '${dw_status}' in ${DW_REL} (stable is ${dw_stable_nvr}); the koji NVR pin is still required" ;;
             unpushed|obsolete|revoked)
-                drifted "${DW_NVR} was ${dw_status} from F43 updates-testing."
+                drifted "${DW_NVR} was ${dw_status} from ${DW_REL} updates-testing."
                 echo "         Fedora withdrew it. The koji URL still resolves, so the build"
                 echo "         keeps working and NOTHING ELSE HERE WOULD NOTICE. Find out why"
                 echo "         it was withdrawn before the next kernel bump. The BTF gate is"

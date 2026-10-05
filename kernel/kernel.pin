@@ -55,19 +55,20 @@ KERNEL_PATCH_BORE_SHA256=1809a4d4d6508a2a3f92cd8b3b385640583f90bd6cee46584f4bf10
 # three times. Pinning it by NVR is the fix, and the build gate is what keeps
 # the pin honest.
 #
-# 1.32-1.fc43 was in Fedora 43 updates-testing when it was pinned, which is
-# why these are koji NVR URLs rather than a `dnf install dwarves`. Bodhi moved
-# it to F43 stable on 2026-09-25. The koji pin stays anyway: it is
+# 1.32-1.fc43 was in Fedora 43 updates-testing when it was first pinned, which
+# is why these are koji NVR URLs rather than a `dnf install dwarves`. Bodhi
+# moved it to F43 stable on 2026-09-25. With the move to Fedora 45 (2026-10-05)
+# the pin is the same dwarves 1.32 built for F45, 1.32-1.fc45. The koji pin stays anyway: it is
 # content-addressed, and `dnf install dwarves` takes whatever the live
 # repository holds on the day of the build, which is the unversioned input this
 # tier exists to remove. tests/check-kernel-drift.sh reports a pinned NVR that
 # is in stable as current. This is a BUILD input; nothing ships dwarves to a
 # user.
-DWARVES_NVR=1.32-1.fc43
-DWARVES_RPM_URL=https://kojipkgs.fedoraproject.org/packages/dwarves/1.32/1.fc43/x86_64/dwarves-1.32-1.fc43.x86_64.rpm
-DWARVES_RPM_SHA256=3f1392b9ce3ea7dadb19105bb40396d3b14afe0ca0db19c3909a20491cc0dbf4
-LIBDWARVES_RPM_URL=https://kojipkgs.fedoraproject.org/packages/dwarves/1.32/1.fc43/x86_64/libdwarves1-1.32-1.fc43.x86_64.rpm
-LIBDWARVES_RPM_SHA256=271c6d36bc4030ef883527abcf51a0468826f52e2b484f51a23ac15952ba7932
+DWARVES_NVR=1.32-1.fc45
+DWARVES_RPM_URL=https://kojipkgs.fedoraproject.org/packages/dwarves/1.32/1.fc45/x86_64/dwarves-1.32-1.fc45.x86_64.rpm
+DWARVES_RPM_SHA256=ae6e081f544e068ca6193f5f3e5fa4714600a0d5987a870598912cb299b0fb3f
+LIBDWARVES_RPM_URL=https://kojipkgs.fedoraproject.org/packages/dwarves/1.32/1.fc45/x86_64/libdwarves1-1.32-1.fc45.x86_64.rpm
+LIBDWARVES_RPM_SHA256=eef35fa2b607ebc7d1955dcec50f57b5574232c1a436cc635f9497fdddb44ed0
 
 # The numeric CONFIG_PAHOLE_VERSION the kernel's own Kconfig must end up with,
 # asserted against the built config. 1.32 -> 132. If dwarves is not actually
@@ -77,15 +78,17 @@ PAHOLE_VERSION_EXPECTED=132
 
 # ── Release identity ────────────────────────────────────────────────────────
 # `rpm -qa` must distinguish an APEX-built kernel from the COPR's. Upstream's
-# release is `cachyos1.fc43`; ours becomes `cachyos1.apex<N>.fc43`. Bump
+# release is `cachyos1.fc45`; ours becomes `cachyos1.apex<N>.fc45`. Bump
 # APEX_KERNEL_BUILD when a rebuild's inputs change but the kernel version does
 # not. The string still contains `cachyos`, which Containerfile.core's
 # `ls -d /usr/lib/modules/*cachyos*` kver glob depends on.
 APEX_KERNEL_BUILD=1
 
 # ── Builder base ────────────────────────────────────────────────────────────
-# Fedora 43, matching the buildroot the COPR uses, so GCC stays 15.3.x and the
-# only variable this tier changes against the upstream build is pahole.
+# Fedora 45, the release the image runs, so the kernel and the modules akmods
+# builds against it in core use one GCC (16.2.x). The COPR builds the same
+# kernel in an f45 buildroot, so the only variable this tier changes against
+# the upstream build is still pahole. (Fedora 43, GCC 15.3.x, until 2026-10-05.)
 #
 # BY DIGEST, NOT BY TAG, and this is not theoretical. `fedora:43` was a floating
 # tag here until 2026-09-20 and it moved under us THAT DAY: a build started at
@@ -112,4 +115,4 @@ APEX_KERNEL_BUILD=1
 # and asserted twice against the built kernel. `cc=` in
 # /manifest/kernel-build.txt records the compiler each build actually used, so
 # the drift is visible after the fact even though it is not prevented.
-BUILDER_BASE=registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003
+BUILDER_BASE=registry.fedoraproject.org/fedora@sha256:dbb22055c0c19f4eba2afbbb717667b0c76aa956c4283700041980ad3710bb73
