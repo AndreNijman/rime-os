@@ -26,7 +26,7 @@
 #    * removing every package removes the pre-rename extension too.
 #
 #  It runs in a throwaway container of the image's own base
-#  (quay.io/fedora/fedora-bootc:43, offline), because the engine's paths are
+#  (quay.io/fedora/fedora-bootc:45, offline), because the engine's paths are
 #  readonly constants under /var/lib and /usr/lib and the cases write there.
 #  systemd-sysext is a stub that merges by the same rule as the real one: an
 #  image is merged only when its file name matches the name inside it.
@@ -42,7 +42,7 @@ cd "$(dirname "$0")/.." || exit 2
 
 ENGINE=files/system/libexec/rime-pkg
 [ -f "$ENGINE" ] || { echo "cannot find $ENGINE"; exit 2; }
-IMAGE=${RIME_PKG_LEGACY_IMAGE:-quay.io/fedora/fedora-bootc:43}
+IMAGE=${RIME_PKG_LEGACY_IMAGE:-quay.io/fedora/fedora-bootc:45}
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/rime-pkg-legacy.XXXXXX") || exit 2
 trap 'rm -rf "$WORK"' EXIT

@@ -884,7 +884,7 @@ sed 's/^/PROBE_LOG2 /' /tmp/out2.log
 PROBE_EOF
     out=$(podman run --rm \
             -v "$REPO_ROOT":/repo:ro,Z -v "$PROBE":/probe.sh:ro,Z \
-            "${RIME_DEB_IMAGE:-registry.fedoraproject.org/fedora:43}" \
+            "${RIME_DEB_IMAGE:-registry.fedoraproject.org/fedora:45}" \
             bash /probe.sh 2>&1); prc=$?
     if [ "$prc" != 0 ] && ! grep -q PROBE_RC_GOOD <<<"$out"; then
         skipped "leg B: extract_debs end to end" \
