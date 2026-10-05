@@ -105,13 +105,13 @@
 # Building the kernel locally is unaffected: build-local.sh overrides this with
 # `--build-arg RIME_KERNEL_IMAGE=localhost/rime-kernel:local`. To refresh the
 # pin, re-run kernel-build.yml and paste the `ARG RIME_KERNEL_IMAGE=…` line its
-# run summary prints. The value below is from run 36690141590 (katana, on
-# fix/kernel-7.2.8 75918e3e0, BTF gate "usable"), immutable tag
-# `kernel-7.2.8-cachyos1.apex1.fc43.x86_64-75918e3`. (rime-rename: keep: the kernel's own release string)
+# run summary prints. The value below is from run 37251195615 (katana, on
+# update/kernel-7.2.9 2cb99a159, BTF gate "usable"), immutable tag
+# `kernel-7.2.9-cachyos1.apex1.fc43.x86_64-2cb99a1`. (rime-rename: keep: the kernel's own release string)
 # Exactly one space and no quotes: build-image.yml's resolve step parses this
 # line with a stricter regex than tests/check-kernel-image-pin.sh, which
 # enforces the rest.
-ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:3e187318c57f65ddcb2f753df25d0a0de80dc198087878359693986ef7f5f785
+ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:e052f2f162d0137ad6faead5a9f735bc0d03a0906ca57d4b731fd937a395dd9e
 
 FROM quay.io/fedora/fedora-bootc:43 AS toolbuilder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
