@@ -36,7 +36,7 @@
 #
 #  WHAT THIS BUILD CHANGES AGAINST THE COPR BUILD IT REPLACES — ONE VARIABLE
 #
-#  Same tree, same config, same spec, same Fedora 43 buildroot, same GCC. The
+#  Same tree, same config, same spec, same Fedora 45 buildroot, same GCC. The
 #  only deliberate difference is **pahole 1.32 instead of 1.30**, because that
 #  is the difference that fixes the defect
 #  (ROADMAP/evidence/kernel-build-20260920.md: 18 of 68 kfuncs untagged under
@@ -56,7 +56,7 @@
 # ── The gate, built from this repo's own reader ─────────────────────────────
 # rimed-core is the crate that owns kernelbtf.rs. Building only this one bin
 # keeps the stage to the four crates it needs rather than the whole workspace.
-FROM registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003 AS gate-builder
+FROM registry.fedoraproject.org/fedora@sha256:dbb22055c0c19f4eba2afbbb717667b0c76aa956c4283700041980ad3710bb73 AS gate-builder
 RUN dnf5 -y install cargo rust >/dev/null && dnf5 clean all
 ENV CARGO_HOME=/build/.cargo
 COPY rimed/ /build/rimed/
@@ -68,7 +68,7 @@ RUN set -eux; \
     /out/rime-kernel-btf-gate 2>&1 | head -1 || true
 
 # ── The kernel ──────────────────────────────────────────────────────────────
-FROM registry.fedoraproject.org/fedora@sha256:84325c671db8a23b0679e04fb863d4081d98c4fc4ae9c9d5bcd883b4cea4e003 AS kbuild
+FROM registry.fedoraproject.org/fedora@sha256:dbb22055c0c19f4eba2afbbb717667b0c76aa956c4283700041980ad3710bb73 AS kbuild
 
 COPY kernel/kernel.pin /build/kernel.pin
 COPY kernel/kernel-cachyos.spec /build/kernel-cachyos.spec
