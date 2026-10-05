@@ -2263,6 +2263,18 @@ RUN set -eux; \
 #     spawn a getty that restart-loops on hardware with no serial port; masking
 #     stops the loop while serial *console* output still works. (rime-logs 04)
 #   - mask systemd-remount-fs: fails on the composefs/overlay root. (rime-logs 03)
+#   - mask efi.automount and efi.mount. GRUB sets LoaderDevicePartUUID, and
+#     from systemd 262 (Fedora 45) systemd-gpt-auto-generator answers it with
+#     an automount for the ESP at /efi. The image has no /efi and / is
+#     read-only, so the mountpoint cannot be made and the automount failed on
+#     every boot, leaving the system "degraded" (measured on an F43 -> F45
+#     upgrade in a VM). systemd 258 generated no such unit, so masking it
+#     keeps what Fedora 43 did: the ESP is not mounted, and bootupd mounts it
+#     itself when it updates the bootloader. A mask in /etc outranks
+#     generator.late, where the generator writes both units.
+#   - the release number in VERSION, CPE_NAME, fedora-release and the CPE file
+#     is Fedora's own VERSION_ID, read rather than written in, so a rebase
+#     cannot leave the image calling itself the release it came from.
 #   - /usr/local -> ../var/usrlocal: /usr is read-only on bootc, so redirect
 #     /usr/local to writable per-machine state + a tmpfiles dir. (rime-logs 08)
 #   - /etc/environment: session-wide theme + default terminal + the Electron
@@ -2277,14 +2289,16 @@ RUN set -eux; \
 #     is COPY'd in the base tier; the source line is guarded with `-r`, so it is
 #     inert until that lands and correct afterwards.
 RUN set -eux; \
+    v="$(. /usr/lib/os-release; printf '%s' "$VERSION_ID")"; \
+    case "$v" in ''|*[!0-9]*) echo "FATAL: VERSION_ID '$v' is not a release number"; exit 1 ;; esac; \
     sed -i \
       -e 's|^NAME=.*|NAME="Rime OS"|' \
       -e 's|^PRETTY_NAME=.*|PRETTY_NAME="Rime OS"|' \
-      -e 's|^VERSION=.*|VERSION="43"|' \
+      -e "s|^VERSION=.*|VERSION=\"${v}\"|" \
       -e 's|^VERSION_CODENAME=.*|VERSION_CODENAME=""|' \
       -e 's|^ANSI_COLOR=.*|ANSI_COLOR="0;38;2;161;201;153"|' \
       -e 's|^LOGO=.*|LOGO=rime-os-logo|' \
-      -e 's|^CPE_NAME=.*|CPE_NAME="cpe:/o:rimeos:rime_os:43"|' \
+      -e "s|^CPE_NAME=.*|CPE_NAME=\"cpe:/o:rimeos:rime_os:${v}\"|" \
       -e 's|^HOME_URL=.*|HOME_URL="https://github.com/AndreNijman/rime-os"|' \
       -e 's|^DOCUMENTATION_URL=.*|DOCUMENTATION_URL="https://github.com/AndreNijman/rime-os#readme"|' \
       -e 's|^SUPPORT_URL=.*|SUPPORT_URL="https://github.com/AndreNijman/rime-os/discussions"|' \
@@ -2295,8 +2309,8 @@ RUN set -eux; \
     grep -q '^PRETTY_NAME="Rime OS"$' /usr/lib/os-release; \
     test "$(grep -ci fedora /usr/lib/os-release)" = 1; \
     grep -qx 'ID=fedora' /usr/lib/os-release; \
-    printf '%s\n' 'Rime OS release 43' > /usr/lib/fedora-release; \
-    printf '%s\n' 'cpe:/o:rimeos:rime_os:43' > /usr/lib/system-release-cpe; \
+    printf '%s\n' "Rime OS release ${v}" > /usr/lib/fedora-release; \
+    printf '%s\n' "cpe:/o:rimeos:rime_os:${v}" > /usr/lib/system-release-cpe; \
     printf '%s\n\n' '\S' > /usr/lib/issue; \
     printf '%s\n' '\S' > /usr/lib/issue.net; \
     ln -sfn ../usr/lib/os-release         /etc/os-release; \
@@ -2310,9 +2324,14 @@ RUN set -eux; \
     grep -q '^Rime OS release' /etc/redhat-release; \
     grep -q '^Rime OS release' /etc/fedora-release; \
     grep -q '^PRETTY_NAME="Rime OS"$' /etc/os-release; \
-    grep -qx 'cpe:/o:rimeos:rime_os:43' /etc/system-release-cpe; \
+    grep -qx "cpe:/o:rimeos:rime_os:${v}" /etc/system-release-cpe; \
+    grep -qx "VERSION=\"${v}\"" /etc/os-release; \
+    grep -qx "Rime OS release ${v}" /etc/fedora-release; \
     systemctl mask serial-getty@ttyS0.service; \
     systemctl mask systemd-remount-fs.service; \
+    systemctl mask efi.automount efi.mount; \
+    test "$(readlink /etc/systemd/system/efi.automount)" = /dev/null; \
+    test "$(readlink /etc/systemd/system/efi.mount)" = /dev/null; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
     printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/rime-usrlocal.conf; \
     printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nELECTRON_OZONE_PLATFORM_HINT=auto\n' >> /etc/environment; \
