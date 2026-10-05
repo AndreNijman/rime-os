@@ -3571,7 +3571,7 @@ RUN set -eux; \
     echo "login config: no auto-login, and not the kiosk recipe"
 
 # ── The login unlocks the keyring ──────────────────────────────────────────
-# Fedora's /etc/pam.d/greetd already asks for pam_gnome_keyring.so in its auth
+# Fedora's greetd PAM file already asks for pam_gnome_keyring.so in its auth
 # and session stacks, but with a leading `-`, which means "skip it if the
 # module is missing" — and it was missing: gnome-keyring (core) does not pull
 # in gnome-keyring-pam. So a password typed at the login screen never reached
@@ -3583,6 +3583,12 @@ RUN set -eux; \
 # Here and not beside gnome-keyring in Containerfile.core, so the fix does not
 # cost a core rebuild; dnf pins it to the installed gnome-keyring's version.
 # The login keyring still has to share the account's password to open this way.
+#
+# That file is /usr/lib/pam.d/greetd: since Fedora 45 (greetd 0.10.3-10) the
+# package ships its PAM files in /usr, and libpam reads /etc/pam.d/<service>
+# when there is one and the copy in /usr/lib/pam.d when there is not. So the
+# edits below are made there, and an /etc/pam.d/greetd is refused: it would
+# replace the whole file, and these lines would not be the ones PAM reads.
 RUN dnf5 -y install gnome-keyring-pam && dnf5 clean all && rm -rf /var/cache/libdnf5
 RUN set -eux; \
     test -f /usr/lib64/security/pam_gnome_keyring.so; \
@@ -3591,8 +3597,12 @@ RUN set -eux; \
     : 'The module is only useful where the login stack names it: the auth'; \
     : 'half takes the password, the session half starts and unlocks the'; \
     : 'daemon with it.'; \
-    grep -qE '^-?auth[[:space:]]+optional[[:space:]]+pam_gnome_keyring\.so' /etc/pam.d/greetd; \
-    grep -qE '^-?session[[:space:]]+optional[[:space:]]+pam_gnome_keyring\.so[[:space:]]+auto_start' /etc/pam.d/greetd; \
+    test -f /usr/lib/pam.d/greetd; \
+    grep -qa '/usr/lib/pam.d/%s' /usr/lib64/libpam.so.0; \
+    if [ -e /etc/pam.d/greetd ]; then \
+        echo "FATAL: /etc/pam.d/greetd would override greetd's PAM file in /usr/lib/pam.d"; exit 1; fi; \
+    grep -qE '^-?auth[[:space:]]+optional[[:space:]]+pam_gnome_keyring\.so' /usr/lib/pam.d/greetd; \
+    grep -qE '^-?session[[:space:]]+optional[[:space:]]+pam_gnome_keyring\.so[[:space:]]+auto_start' /usr/lib/pam.d/greetd; \
     echo "login: greetd hands the password to pam_gnome_keyring, so the keyring opens at login"
 
 # ── …and the keyring a machine already has becomes the login keyring ──────
@@ -3603,7 +3613,9 @@ RUN set -eux; \
 # with the typed password after system-auth has checked it and before
 # pam_gnome_keyring gets it, and renames the default keyring to `login` when
 # that password opens it (its header has the rules). Existing machines get
-# this line because ostree carries an unmodified /etc/pam.d/greetd forward.
+# this line with the image: their /etc/pam.d/greetd, an unmodified copy of the
+# Fedora 43 default, is dropped by ostree's /etc merge now that the image has
+# none, and libpam falls back to /usr/lib/pam.d/greetd.
 COPY --chmod=0755 files/system/libexec/rime-keyring-login /usr/libexec/rime-keyring-login
 RUN set -eux; \
     python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' /usr/libexec/rime-keyring-login; \
@@ -3617,15 +3629,15 @@ RUN set -eux; \
     : 'prompt in front of that login.'; \
     if grep -qE '^-?auth[[:space:]].*(pam_fprintd|pam_u2f|pam_sss|pam_pkcs11|pam_systemd_home|pam_howdy)' /etc/pam.d/system-auth; then \
         echo "FATAL: system-auth can succeed without a typed password; rime-keyring-login would prompt"; exit 1; fi; \
-    sed -i '/^auth[[:space:]]\+substack[[:space:]]\+system-auth$/a auth       optional    pam_exec.so quiet expose_authtok /usr/libexec/rime-keyring-login' /etc/pam.d/greetd; \
-    test "$(grep -c 'rime-keyring-login' /etc/pam.d/greetd)" = 1; \
+    sed -i '/^auth[[:space:]]\+substack[[:space:]]\+system-auth$/a auth       optional    pam_exec.so quiet expose_authtok /usr/libexec/rime-keyring-login' /usr/lib/pam.d/greetd; \
+    test "$(grep -c 'rime-keyring-login' /usr/lib/pam.d/greetd)" = 1; \
     : 'Directly after the password check, and before pam_gnome_keyring.'; \
     awk '/^auth[[:space:]]+substack[[:space:]]+system-auth/ {s = NR} \
          /rime-keyring-login/ {h = NR} \
          /^-?auth[[:space:]].*pam_gnome_keyring/ {g = NR} \
-         END {exit !(s && h == s + 1 && g > h)}' /etc/pam.d/greetd; \
+         END {exit !(s && h == s + 1 && g > h)}' /usr/lib/pam.d/greetd; \
     : 'Never stdout: pam_exec would hand it to the greeter as a message.'; \
-    if grep -qE 'pam_exec\.so[^#]*[[:space:]]stdout' /etc/pam.d/greetd; then \
+    if grep -qE 'pam_exec\.so[^#]*[[:space:]]stdout' /usr/lib/pam.d/greetd; then \
         echo "FATAL: a pam_exec line in greetd passes stdout to the greeter"; exit 1; fi; \
     echo "login: an existing default keyring becomes the login keyring when the login password opens it"
 
