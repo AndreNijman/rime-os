@@ -12,7 +12,7 @@
 #
 # Plain fedora base (not fedora-bootc) so the rootfs is a simple mutable tree.
 # Built into a live ISO by build-live-iso.sh.
-FROM registry.fedoraproject.org/fedora:43
+FROM registry.fedoraproject.org/fedora:45
 
 # ── Firmware: its OWN transaction, with weak deps ENABLED on purpose ─────────
 # The live env shipped with /lib/firmware absent entirely, so i915/amdgpu could

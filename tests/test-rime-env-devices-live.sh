@@ -125,7 +125,7 @@ ok "podman is installed"
 # An image that is already here. Pulling would make a test that needs the
 # network and a gigabyte, on a suite whose whole point is a device node.
 IMAGE=""
-for cand in registry.fedoraproject.org/fedora:43 registry.fedoraproject.org/fedora:latest \
+for cand in registry.fedoraproject.org/fedora:45 registry.fedoraproject.org/fedora:latest \
             docker.io/library/fedora:latest docker.io/library/debian:stable; do
     if podman image exists "$cand" 2>/dev/null; then IMAGE="$cand"; break; fi
 done

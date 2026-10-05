@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────
 # Rime OS — CORE image (heavy, slow-moving foundation)
 #
-#   fedora-bootc:43
+#   fedora-bootc:45
 #     → Rime's own kernel, from Containerfile.kernel + MOK    [own RUNs]
 #       (the COMPILE is its own tier; this installs and signs the RPMs)
 #     → out-of-tree modules (nvidia, xone, xpadneo) + MOK     [own RUNs]
@@ -59,11 +59,13 @@
 # rule, applied throughout this tree: keep every heavy dnf transaction in its
 # OWN `RUN … && dnf5 clean all` layer.
 #
-# ── Base tag: fedora-bootc:43 ──
-# Rime stays on Fedora 43 until the image's kernel, desktop, and installer stack
-# are deliberately migrated and tested together. The original solopasha
-# Hyprland COPR was retired after M0; sdegler's maintained fork follows Fedora
-# branching and currently publishes the complete stack for F43 and F44.
+# ── Base tag: fedora-bootc:45 ──
+# Moved from Fedora 43 on 2026-10-05, ahead of F43's end of life (2026-12-02):
+# Andre chose Fedora 45 while it was still in beta (final targeted 2026-10-20),
+# for its current Mesa, systemd and Qt. The kernel, desktop and installer stack
+# moved together. The original solopasha Hyprland COPR was retired after M0;
+# sdegler's maintained fork follows Fedora branching and publishes the complete
+# stack for F43, F44 and F45, as every other COPR this file enables does.
 # ─────────────────────────────────────────────────────────────────────────
 # ═══ Tool builder — third-party Rust programs, toolchain kept out of /usr ═══
 #   • awww + awww-daemon (the swww fork Rime Shell's WallpaperService drives;
@@ -105,15 +107,15 @@
 # Building the kernel locally is unaffected: build-local.sh overrides this with
 # `--build-arg RIME_KERNEL_IMAGE=localhost/rime-kernel:local`. To refresh the
 # pin, re-run kernel-build.yml and paste the `ARG RIME_KERNEL_IMAGE=…` line its
-# run summary prints. The value below is from run 37251195615 (katana, on
-# update/kernel-7.2.9 2cb99a159, BTF gate "usable"), immutable tag
-# `kernel-7.2.9-cachyos1.apex1.fc43.x86_64-2cb99a1`. (rime-rename: keep: the kernel's own release string)
+# run summary prints. The value below is from run 37290050291 (katana, on
+# kernel/fedora-45 aeb735f52, Fedora 45 builder, GCC 16.2.1, BTF gate
+# "usable"), immutable tag `kernel-7.2.9-cachyos1.apex1.fc45.x86_64-aeb735f`. (rime-rename: keep: the kernel's own release string)
 # Exactly one space and no quotes: build-image.yml's resolve step parses this
 # line with a stricter regex than tests/check-kernel-image-pin.sh, which
 # enforces the rest.
-ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:e052f2f162d0137ad6faead5a9f735bc0d03a0906ca57d4b731fd937a395dd9e
+ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:ad8cb244cb80fc21de235f06abf9ae62895e8c31a9aa3688be9d8fa5bfc29409
 
-FROM quay.io/fedora/fedora-bootc:43 AS toolbuilder
+FROM quay.io/fedora/fedora-bootc:45 AS toolbuilder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
 ENV CARGO_HOME=/build/.cargo
@@ -260,11 +262,11 @@ RUN set -eux; \
 FROM ${RIME_KERNEL_IMAGE} AS kernel-rpms
 
 # ─────────────────────────────────────────────────────────────────────────
-FROM quay.io/fedora/fedora-bootc:43
+FROM quay.io/fedora/fedora-bootc:45
 
 # OCI provenance. The git SHA is injected by CI (--build-arg RIME_REVISION=…).
 ARG RIME_REVISION=dev
-ARG RIME_VERSION=43
+ARG RIME_VERSION=45
 # The digest of the fedora-bootc image this core was actually built from. CI
 # resolves the live digest of the upstream tag and compares it with the label on
 # the published rime-os-core:latest; when they match, the weekly cron SKIPS the
@@ -274,7 +276,7 @@ ARG RIME_VERSION=43
 # reusable one.
 ARG FEDORA_BOOTC_DIGEST=unknown
 LABEL org.opencontainers.image.title="Rime OS core" \
-      org.opencontainers.image.description="Rime OS slow-moving foundation: fedora-bootc:43 + CachyOS kernel + Hyprland/quickshell + greetd host + scx + Bazaar + codecs + userland" \
+      org.opencontainers.image.description="Rime OS slow-moving foundation: fedora-bootc:45 + CachyOS kernel + Hyprland/quickshell + greetd host + scx + Bazaar + codecs + userland" \
       org.opencontainers.image.source="https://github.com/AndreNijman/rime-os" \
       org.opencontainers.image.revision="${RIME_REVISION}" \
       org.opencontainers.image.version="${RIME_VERSION}" \
@@ -2077,7 +2079,8 @@ RUN set -eux; \
     python3 /usr/share/rime-os/selinux/verify-rime-sdboot.py
 
 # ── npm global prefix: per-user, not root-owned /usr/local (rime-logs 16) ────
-# Fedora's nodejs ships /etc/npmrc with `prefix=/usr/local`. On a bootc system
+# Fedora 43's nodejs shipped /etc/npmrc with `prefix=/usr/local` (Fedora 45's
+# ships none, and npm's default is the same /usr/local). On a bootc system
 # /usr/local is a symlink to ../var/usrlocal, created root-owned 0755 by the
 # tmpfiles rule below, so ANY `npm install -g` as a normal user dies with:
 #
@@ -2104,7 +2107,13 @@ RUN set -eux; \
 # Both files are written because ostree keeps the package copy at /usr/etc and
 # derives /etc from it; a future nodejs update replaces /usr/etc/npmrc, and this
 # RUN re-applies after every dnf install so the fix cannot silently regress.
+#
+# Fedora 45's nodejs-npm ships no npmrc at all (measured, nodejs-npm 10.9.8 on
+# fc45): npm still reads /etc/npmrc as its global config, and with none there
+# its prefix is /usr/local. So the file is written when the package does not
+# ship one, and npm itself is asked where a user's global installs now go.
 RUN set -eux; \
+    [ -f /etc/npmrc ] || printf 'prefix=${HOME}/.local\n' > /etc/npmrc; \
     for f in /etc/npmrc /usr/etc/npmrc; do \
         [ -f "$f" ] || continue; \
         sed -i 's|^prefix=/usr/local$|prefix=${HOME}/.local|' "$f"; \
@@ -2113,6 +2122,10 @@ RUN set -eux; \
             ; then echo "FATAL: the npm prefix still points at root-owned /usr/local"; exit 1; fi; \
     done; \
     grep -q '^prefix=\${HOME}/.local$' /etc/npmrc; \
+    got="$(HOME=/tmp/rime-npm-probe npm config get prefix)"; \
+    rm -rf /tmp/rime-npm-probe; \
+    [ "$got" = /tmp/rime-npm-probe/.local ] \
+        || { echo "FATAL: npm puts a user's global installs in '$got', not their ~/.local"; exit 1; }; \
     echo "npm global prefix -> \${HOME}/.local (was root-owned /usr/local)"
 
 # ── Third-party Rust tools from the builder stage ──────────────────────────
@@ -2250,6 +2263,18 @@ RUN set -eux; \
 #     spawn a getty that restart-loops on hardware with no serial port; masking
 #     stops the loop while serial *console* output still works. (rime-logs 04)
 #   - mask systemd-remount-fs: fails on the composefs/overlay root. (rime-logs 03)
+#   - mask efi.automount and efi.mount. GRUB sets LoaderDevicePartUUID, and
+#     from systemd 262 (Fedora 45) systemd-gpt-auto-generator answers it with
+#     an automount for the ESP at /efi. The image has no /efi and / is
+#     read-only, so the mountpoint cannot be made and the automount failed on
+#     every boot, leaving the system "degraded" (measured on an F43 -> F45
+#     upgrade in a VM). systemd 258 generated no such unit, so masking it
+#     keeps what Fedora 43 did: the ESP is not mounted, and bootupd mounts it
+#     itself when it updates the bootloader. A mask in /etc outranks
+#     generator.late, where the generator writes both units.
+#   - the release number in VERSION, CPE_NAME, fedora-release and the CPE file
+#     is Fedora's own VERSION_ID, read rather than written in, so a rebase
+#     cannot leave the image calling itself the release it came from.
 #   - /usr/local -> ../var/usrlocal: /usr is read-only on bootc, so redirect
 #     /usr/local to writable per-machine state + a tmpfiles dir. (rime-logs 08)
 #   - /etc/environment: session-wide theme + default terminal + the Electron
@@ -2264,14 +2289,16 @@ RUN set -eux; \
 #     is COPY'd in the base tier; the source line is guarded with `-r`, so it is
 #     inert until that lands and correct afterwards.
 RUN set -eux; \
+    v="$(. /usr/lib/os-release; printf '%s' "$VERSION_ID")"; \
+    case "$v" in ''|*[!0-9]*) echo "FATAL: VERSION_ID '$v' is not a release number"; exit 1 ;; esac; \
     sed -i \
       -e 's|^NAME=.*|NAME="Rime OS"|' \
       -e 's|^PRETTY_NAME=.*|PRETTY_NAME="Rime OS"|' \
-      -e 's|^VERSION=.*|VERSION="43"|' \
+      -e "s|^VERSION=.*|VERSION=\"${v}\"|" \
       -e 's|^VERSION_CODENAME=.*|VERSION_CODENAME=""|' \
       -e 's|^ANSI_COLOR=.*|ANSI_COLOR="0;38;2;161;201;153"|' \
       -e 's|^LOGO=.*|LOGO=rime-os-logo|' \
-      -e 's|^CPE_NAME=.*|CPE_NAME="cpe:/o:rimeos:rime_os:43"|' \
+      -e "s|^CPE_NAME=.*|CPE_NAME=\"cpe:/o:rimeos:rime_os:${v}\"|" \
       -e 's|^HOME_URL=.*|HOME_URL="https://github.com/AndreNijman/rime-os"|' \
       -e 's|^DOCUMENTATION_URL=.*|DOCUMENTATION_URL="https://github.com/AndreNijman/rime-os#readme"|' \
       -e 's|^SUPPORT_URL=.*|SUPPORT_URL="https://github.com/AndreNijman/rime-os/discussions"|' \
@@ -2282,8 +2309,8 @@ RUN set -eux; \
     grep -q '^PRETTY_NAME="Rime OS"$' /usr/lib/os-release; \
     test "$(grep -ci fedora /usr/lib/os-release)" = 1; \
     grep -qx 'ID=fedora' /usr/lib/os-release; \
-    printf '%s\n' 'Rime OS release 43' > /usr/lib/fedora-release; \
-    printf '%s\n' 'cpe:/o:rimeos:rime_os:43' > /usr/lib/system-release-cpe; \
+    printf '%s\n' "Rime OS release ${v}" > /usr/lib/fedora-release; \
+    printf '%s\n' "cpe:/o:rimeos:rime_os:${v}" > /usr/lib/system-release-cpe; \
     printf '%s\n\n' '\S' > /usr/lib/issue; \
     printf '%s\n' '\S' > /usr/lib/issue.net; \
     ln -sfn ../usr/lib/os-release         /etc/os-release; \
@@ -2297,9 +2324,14 @@ RUN set -eux; \
     grep -q '^Rime OS release' /etc/redhat-release; \
     grep -q '^Rime OS release' /etc/fedora-release; \
     grep -q '^PRETTY_NAME="Rime OS"$' /etc/os-release; \
-    grep -qx 'cpe:/o:rimeos:rime_os:43' /etc/system-release-cpe; \
+    grep -qx "cpe:/o:rimeos:rime_os:${v}" /etc/system-release-cpe; \
+    grep -qx "VERSION=\"${v}\"" /etc/os-release; \
+    grep -qx "Rime OS release ${v}" /etc/fedora-release; \
     systemctl mask serial-getty@ttyS0.service; \
     systemctl mask systemd-remount-fs.service; \
+    systemctl mask efi.automount efi.mount; \
+    test "$(readlink /etc/systemd/system/efi.automount)" = /dev/null; \
+    test "$(readlink /etc/systemd/system/efi.mount)" = /dev/null; \
     rm -rf /usr/local && ln -s ../var/usrlocal /usr/local; \
     printf 'd /var/usrlocal 0755 root root -\n' > /usr/lib/tmpfiles.d/rime-usrlocal.conf; \
     printf 'QT_QPA_PLATFORMTHEME=qt6ct\nTERMINAL=alacritty\nELECTRON_OZONE_PLATFORM_HINT=auto\n' >> /etc/environment; \

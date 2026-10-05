@@ -9,7 +9,7 @@
 #  ~45 minutes into a build, and its `ls -d /usr/lib/modules/*cachyos*` kver
 #  glob fails even later, as an unset variable in a stage that looks unrelated.
 #
-#  So this installs the produced RPMs into a scratch fedora-bootc:43 and checks
+#  So this installs the produced RPMs into a scratch fedora-bootc:45 and checks
 #  each contract directly. Ten minutes instead of fifty, and it names which
 #  contract broke rather than leaving a stage to fail obliquely.
 #
@@ -44,7 +44,7 @@ ls "$RPMS"/*.rpm >/dev/null 2>&1 || { echo "FATAL: no rpms in $RPMS"; exit 1; }
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 
-podman run --rm -i -v "$RPMS":/krpms:z quay.io/fedora/fedora-bootc:43 /bin/bash -s 2>&1 <<'EOS' | tee "$LOG"
+podman run --rm -i -v "$RPMS":/krpms:z quay.io/fedora/fedora-bootc:45 /bin/bash -s 2>&1 <<'EOS' | tee "$LOG"
 echo "CONTRACT-TEST-BODY-RAN"
 set -uo pipefail
 fail=0

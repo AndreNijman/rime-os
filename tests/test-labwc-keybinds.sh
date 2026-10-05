@@ -156,12 +156,17 @@ n="$(printf '%s\n' "$block" | grep -c '<keybind key=')"
 # A count compared against a number derived from the model cannot drift the way
 # a hand-picked floor can.
 accounted="$(python3 - "$SHELL_TREE" "$INSTALLED" "$ROOT" <<'PYEOF'
+import importlib.util
 import sys
 from importlib.machinery import SourceFileLoader
 # $ROOT, not a relative path: run from tests/ and a relative load fails, the
 # three assertions built on it print blank counts ("sees  of 68 ids"), and the
 # suite reads like a broken product rather than a broken invocation.
-k = SourceFileLoader("k", sys.argv[3] + "/files/system/libexec/rime-labwc-keybinds").load_module()
+# spec + exec_module: Python 3.15 removed SourceFileLoader.load_module().
+_l = SourceFileLoader("k", sys.argv[3] + "/files/system/libexec/rime-labwc-keybinds")
+k = importlib.util.module_from_spec(importlib.util.spec_from_loader("k", _l))
+sys.modules["k"] = k
+_l.exec_module(k)
 defaults = k.shell_defaults(sys.argv[1], sys.argv[2])
 block, skipped = k.generate(defaults)
 generated = block.count("<keybind key=")

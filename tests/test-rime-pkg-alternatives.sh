@@ -104,7 +104,7 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 0
 fi
 
-IMAGE=${RIME_ALT_IMAGE:-registry.fedoraproject.org/fedora:43}
+IMAGE=${RIME_ALT_IMAGE:-registry.fedoraproject.org/fedora:45}
 SET=${RIME_ALT_SET:-wine-core wine-common iptables-nft nmap-ncat}
 
 PROBE=$(mktemp) || exit 2

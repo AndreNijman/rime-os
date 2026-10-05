@@ -195,7 +195,7 @@ env:
   # used to point at apex-os-core:latest, the name before the consolidation; (rime-rename: keep)
   # that migration ran long ago.)
   LEGACY_CORE: ghcr.io/andrenijman/apex-os:core  # rime-rename: keep (the published core predates the rename)
-  UPSTREAM_BASE: quay.io/fedora/fedora-bootc:43
+  UPSTREAM_BASE: quay.io/fedora/fedora-bootc:45
 
 jobs:
   # ── Job 0: what has to rebuild ────────────────────────────────────────────
