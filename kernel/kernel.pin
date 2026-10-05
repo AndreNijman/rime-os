@@ -19,26 +19,26 @@
 
 # ── The tree ────────────────────────────────────────────────────────────────
 # CachyOS's kernel tree. BORE + sched_ext + the CachyOS patch set.
-KERNEL_VERSION=7.2.8
-KERNEL_TAG=cachyos-7.2.8-1
+KERNEL_VERSION=7.2.9
+KERNEL_TAG=cachyos-7.2.9-2
 # git tag object for KERNEL_TAG, for provenance when someone goes looking:
 #   3fc6cfc8abd7b70a8d56b9de478204254445e571
 # Not a KEY= line: KERNEL_SRC_SHA256 is what actually pins the content, and
 # tests/check-kernel-pin.sh rejects a pin key nothing reads.
-KERNEL_SRC_URL=https://github.com/CachyOS/linux/archive/refs/tags/cachyos-7.2.8-1.tar.gz
-KERNEL_SRC_SHA256=9030fb2fe630d97be841ee2b7621c59c07709030fb8cee25c59df635c56067f7
+KERNEL_SRC_URL=https://github.com/CachyOS/linux/archive/refs/tags/cachyos-7.2.9-2.tar.gz
+KERNEL_SRC_SHA256=ec15368821f6f149ead4f057059c29ee57258c52043d8d3177fd4a83572fc0c1
 
 # ── The config ──────────────────────────────────────────────────────────────
 # Upstream fetches this from `master`, so it moves under them without the NVR
 # changing. Pinned to the commit that was current when this kernel was adopted.
-# Still the newest commit to touch linux-cachyos/config at cachyos-7.2.8-1
-# (checked 2026-09-30), so the 7.2.8 bump did not move it.
+# Still the newest commit to touch linux-cachyos/config at cachyos-7.2.9-2
+# (checked 2026-10-05), so the 7.2.8 and 7.2.9 bumps did not move it.
 KERNEL_CONFIG_URL=https://raw.githubusercontent.com/CachyOS/linux-cachyos/6676e72b85eb9e30d079a8c3dcdf93aedd1e8226/linux-cachyos/config
 KERNEL_CONFIG_SHA256=3df33112e3357feb6a899bbfc006f2ded15226d1b2eb741ac986d581b9ca7773
 
 # ── The BORE patch ──────────────────────────────────────────────────────────
 # Same problem, same fix: upstream's Patch0 is a `master` URL. No commit has
-# touched 7.2/sched/0001-bore-cachy.patch since this one (checked 2026-09-30).
+# touched 7.2/sched/0001-bore-cachy.patch since this one (checked 2026-10-05).
 KERNEL_PATCH_BORE_URL=https://raw.githubusercontent.com/CachyOS/kernel-patches/c9ed808e86cc1f5fafdbe208627533ee10499b5b/7.2/sched/0001-bore-cachy.patch
 KERNEL_PATCH_BORE_SHA256=1809a4d4d6508a2a3f92cd8b3b385640583f90bd6cee46584f4bf105affd24a0
 

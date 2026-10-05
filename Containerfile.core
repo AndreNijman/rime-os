@@ -105,13 +105,13 @@
 # Building the kernel locally is unaffected: build-local.sh overrides this with
 # `--build-arg RIME_KERNEL_IMAGE=localhost/rime-kernel:local`. To refresh the
 # pin, re-run kernel-build.yml and paste the `ARG RIME_KERNEL_IMAGE=…` line its
-# run summary prints. The value below is from run 36690141590 (katana, on
-# fix/kernel-7.2.8 75918e3e0, BTF gate "usable"), immutable tag
-# `kernel-7.2.8-cachyos1.apex1.fc43.x86_64-75918e3`. (rime-rename: keep: the kernel's own release string)
+# run summary prints. The value below is from run 37251195615 (katana, on
+# update/kernel-7.2.9 2cb99a159, BTF gate "usable"), immutable tag
+# `kernel-7.2.9-cachyos1.apex1.fc43.x86_64-2cb99a1`. (rime-rename: keep: the kernel's own release string)
 # Exactly one space and no quotes: build-image.yml's resolve step parses this
 # line with a stricter regex than tests/check-kernel-image-pin.sh, which
 # enforces the rest.
-ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:3e187318c57f65ddcb2f753df25d0a0de80dc198087878359693986ef7f5f785
+ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:e052f2f162d0137ad6faead5a9f735bc0d03a0906ca57d4b731fd937a395dd9e
 
 FROM quay.io/fedora/fedora-bootc:43 AS toolbuilder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
@@ -180,15 +180,15 @@ RUN set -eux; \
 # the pinned git WORKSPACE (same clone+build pattern as awww above). yazi-fm →
 # `yazi`, yazi-cli → `ya`. Non-fatal: a failure leaves the TUI FM absent (Thunar,
 # the GUI handler, remains) but never aborts the image.
-# Upstream ships a prebuilt musl tarball of the SAME v26.5.6 this used to build
+# Upstream ships a prebuilt musl tarball of each release this used to build
 # from the git workspace, so the workspace-layout problem described above is
 # moot: the release artifact is already linked. musl rather than gnu so the
 # binary cannot care what glibc the image happens to carry.
 #
 # Still non-fatal: a failure leaves the TUI file manager absent (Thunar, the GUI
 # handler, remains) but never aborts the image.
-ARG YAZI_VERSION=26.5.6
-ARG YAZI_SHA256=1031a02560d053301537195a6661d227c15cb4ce5c30481050b31e2b88681bff
+ARG YAZI_VERSION=26.9.1
+ARG YAZI_SHA256=9b9c39decccf8cb0ff53a7d637d38f8a79d93bbd0099f4ea9c619ef6bb392f5d
 RUN set -eux; \
     if curl -fsSL -o /tmp/yazi.zip \
          "https://github.com/sxyazi/yazi/releases/download/v${YAZI_VERSION}/yazi-x86_64-unknown-linux-musl.zip" \
@@ -329,10 +329,17 @@ COPY --from=kernel-rpms /manifest /tmp/rime-kernel-manifest
 # already in the core path filter, so this COPY costs nothing and buys the
 # check that makes that filter mean what it appears to mean.
 COPY kernel/kernel.pin /tmp/rime-kernel-pin-expected
+# Everything the base image ships is brought up to Fedora's current updates
+# here, once the stock kernel is gone (so no kernel is upgraded only to be
+# thrown away). Without it a base-image package moved only when Fedora rebuilt
+# fedora-bootc:43: on 2026-10-05 the release carried libsecret 0.21.7-7 while
+# F43 updates had 0.21.8.2-2. Inside this RUN, not a RUN of its own: every dnf
+# transaction writes the ~200 MB rpmdb into its layer, and this one already does.
 RUN set -eux; \
     dnf5 -y install dnf5-plugins; \
     dnf5 -y remove --no-autoremove \
         kernel kernel-core kernel-modules kernel-modules-core; \
+    dnf5 -y upgrade --refresh; \
     test -d /tmp/rime-kernel-rpms \
         || { echo "FATAL: no kernel RPMs in the build context."; \
              echo "       Containerfile.core consumes the kernel from Containerfile.kernel."; \
@@ -1314,7 +1321,7 @@ RUN set -eux; \
 # and its Nerd-Font glyphs (person / lock / caps-lock icons). Fedora packages
 # only plain JetBrains Mono (no Nerd glyphs), so fetch the patched family. ADD
 # downloads but does not auto-extract a tarball, so unpack in the RUN.
-ADD https://github.com/ryanoasis/nerd-fonts/releases/download/v3.4.0/JetBrainsMono.tar.xz \
+ADD https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/JetBrainsMono.tar.xz \
     /usr/share/fonts/jetbrains-mono-nerd/JetBrainsMono.tar.xz
 RUN set -eux; \
     cd /usr/share/fonts/jetbrains-mono-nerd; \

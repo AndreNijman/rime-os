@@ -11,13 +11,13 @@
 
 # Linux Kernel Versions
 %define _basekver 7.2
-%define _stablekver 8
+%define _stablekver 9
 %define _rpmver %{version}-%{release}
 %define _kver %{_rpmver}.%{_arch}
 
 %define _tarkver %{version}
 
-%define _tag cachyos-%{_tarkver}-1
+%define _tag cachyos-%{_tarkver}-2
 
 # Build a minimal a kernel via modprobed.db
 # file to reduce build times
@@ -127,10 +127,6 @@ Patch0:         %{_patch_src}/sched/0001-bore-cachy.patch
 
 %if %{_build_lto}
 Patch1:         %{_patch_src}/misc/dkms-clang.patch
-%endif
-
-%if ! %{_build_lto} && 0%{?rhel} == 9
-Patch2:         https://raw.githubusercontent.com/CachyOS/copr-linux-cachyos/refs/heads/master/sources/patches/kernel-el9-ar-thin.patch
 %endif
 
 %if %{_build_nv}
