@@ -1,7 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────
 # Rime OS — CORE image (heavy, slow-moving foundation)
 #
-#   fedora-bootc:43
+#   fedora-bootc:45
 #     → Rime's own kernel, from Containerfile.kernel + MOK    [own RUNs]
 #       (the COMPILE is its own tier; this installs and signs the RPMs)
 #     → out-of-tree modules (nvidia, xone, xpadneo) + MOK     [own RUNs]
@@ -59,11 +59,13 @@
 # rule, applied throughout this tree: keep every heavy dnf transaction in its
 # OWN `RUN … && dnf5 clean all` layer.
 #
-# ── Base tag: fedora-bootc:43 ──
-# Rime stays on Fedora 43 until the image's kernel, desktop, and installer stack
-# are deliberately migrated and tested together. The original solopasha
-# Hyprland COPR was retired after M0; sdegler's maintained fork follows Fedora
-# branching and currently publishes the complete stack for F43 and F44.
+# ── Base tag: fedora-bootc:45 ──
+# Moved from Fedora 43 on 2026-10-05, ahead of F43's end of life (2026-12-02):
+# Andre chose Fedora 45 while it was still in beta (final targeted 2026-10-20),
+# for its current Mesa, systemd and Qt. The kernel, desktop and installer stack
+# moved together. The original solopasha Hyprland COPR was retired after M0;
+# sdegler's maintained fork follows Fedora branching and publishes the complete
+# stack for F43, F44 and F45, as every other COPR this file enables does.
 # ─────────────────────────────────────────────────────────────────────────
 # ═══ Tool builder — third-party Rust programs, toolchain kept out of /usr ═══
 #   • awww + awww-daemon (the swww fork Rime Shell's WallpaperService drives;
@@ -113,7 +115,7 @@
 # enforces the rest.
 ARG RIME_KERNEL_IMAGE=ghcr.io/andrenijman/rime-os@sha256:e052f2f162d0137ad6faead5a9f735bc0d03a0906ca57d4b731fd937a395dd9e
 
-FROM quay.io/fedora/fedora-bootc:43 AS toolbuilder
+FROM quay.io/fedora/fedora-bootc:45 AS toolbuilder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
 ENV CARGO_HOME=/build/.cargo
@@ -260,11 +262,11 @@ RUN set -eux; \
 FROM ${RIME_KERNEL_IMAGE} AS kernel-rpms
 
 # ─────────────────────────────────────────────────────────────────────────
-FROM quay.io/fedora/fedora-bootc:43
+FROM quay.io/fedora/fedora-bootc:45
 
 # OCI provenance. The git SHA is injected by CI (--build-arg RIME_REVISION=…).
 ARG RIME_REVISION=dev
-ARG RIME_VERSION=43
+ARG RIME_VERSION=45
 # The digest of the fedora-bootc image this core was actually built from. CI
 # resolves the live digest of the upstream tag and compares it with the label on
 # the published rime-os-core:latest; when they match, the weekly cron SKIPS the
@@ -274,7 +276,7 @@ ARG RIME_VERSION=43
 # reusable one.
 ARG FEDORA_BOOTC_DIGEST=unknown
 LABEL org.opencontainers.image.title="Rime OS core" \
-      org.opencontainers.image.description="Rime OS slow-moving foundation: fedora-bootc:43 + CachyOS kernel + Hyprland/quickshell + greetd host + scx + Bazaar + codecs + userland" \
+      org.opencontainers.image.description="Rime OS slow-moving foundation: fedora-bootc:45 + CachyOS kernel + Hyprland/quickshell + greetd host + scx + Bazaar + codecs + userland" \
       org.opencontainers.image.source="https://github.com/AndreNijman/rime-os" \
       org.opencontainers.image.revision="${RIME_REVISION}" \
       org.opencontainers.image.version="${RIME_VERSION}" \

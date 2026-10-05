@@ -3229,7 +3229,7 @@ jobs:
       - name: Run greeter accessibility assertions
         if: ${{ !cancelled() }}
         run: |
-          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:45 bash -c '
                 dnf -y install --setopt=install_weak_deps=False \
                     qt6-qtdeclarative-devel >/dev/null 2>&1 || exit 97
                 ./tests/test-rime-greet-a11y.sh'; then
@@ -3284,7 +3284,7 @@ jobs:
       - name: Run greeter AT-SPI assertions
         if: ${{ !cancelled() }}
         run: |
-          if ! docker run --rm -v "$PWD":/w -w /w fedora:43 bash -c '
+          if ! docker run --rm -v "$PWD":/w -w /w fedora:45 bash -c '
                 dnf -y install --setopt=install_weak_deps=False \
                     qt6-qtdeclarative-devel qt6-qtwayland labwc \
                     xorg-x11-server-Xwayland mesa-dri-drivers \

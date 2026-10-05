@@ -4098,7 +4098,7 @@ RUN bootc container lint || true
 # Volatile provenance belongs last so a new git SHA does not invalidate every
 # otherwise-cacheable payload layer above it.
 ARG RIME_REVISION=dev
-ARG RIME_VERSION=43
+ARG RIME_VERSION=45
 LABEL org.opencontainers.image.title="Rime OS base" \
       org.opencontainers.image.description="Rime OS shared base: rime-os-core + rimed/rime + Rime Shell + greeter payload" \
       org.opencontainers.image.source="https://github.com/AndreNijman/rime-os" \
