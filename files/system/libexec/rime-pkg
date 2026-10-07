@@ -158,6 +158,9 @@ readonly COPR_KEYS="${PKG_ROOT}/copr-keys"
 readonly APPIMAGE_REG=/var/lib/rime/appimage
 readonly APPIMAGE_PREFIX=/usr/local
 readonly APPIMAGE_APPS="${APPIMAGE_PREFIX}/lib/rime-appimage"
+# The applications directory a running Shell watches that a /usr remount does
+# not replace; post_merge rings it (see ring_launcher).
+readonly LAUNCHER_DOORBELL="${APPIMAGE_PREFIX}/share/applications"
 
 # Staging lives under /var/lib, NOT /var/tmp: rpm cannot take its transaction
 # lock inside a tmp-labelled tree under SELinux, and the resulting "can't create
@@ -2397,6 +2400,38 @@ post_merge() {
         udevadm control --reload 2>/dev/null || true
         udevadm trigger --subsystem-match=usb 2>/dev/null || true
     fi
+    ring_launcher
+}
+
+# Make every running Shell re-read its applications, so an app installed or
+# removed mid-session shows up in (or leaves) the launcher without a re-login.
+#
+# systemd-sysext does not change /usr/share/applications: it mounts a new /usr
+# over the old one. The launcher's index (Quickshell's DesktopEntries) keeps
+# the inotify watch it took at login, on the OLD directory, and nothing ever
+# changes there. Measured on katana, 2026-10-07: after the Fedora 45 rebuild
+# merged Steam, the Shell's watch was still on the composefs /usr (sdev 0x26)
+# while the merged directory was on the overlay (0x4d), and Steam was missing
+# from the launcher until the Shell was restarted.
+#
+# Quickshell rescans EVERY applications directory, by path, when ANY directory
+# it watches changes (DesktopEntryMonitor, quickshell 0.3.1). /usr/local is a
+# symlink to /var/usrlocal, so its watch sits on /var and survives the remount:
+# creating and removing one file there is a doorbell, and the rescan reads
+# /usr/share/applications through the new overlay. Measured with quickshell
+# 0.3.1 under a bind mount on a quiet tmpfs: without the bell the new entry
+# never appeared; with it, 0.35 s later. Unrelated file churn in a watched
+# parent (/var, a home directory) sometimes rescans too, which is luck, not a
+# guarantee. The file is not a .desktop entry, so no scan ever lists it.
+#
+# The directory must exist when the Shell starts or nothing watches it, so
+# tmpfiles creates it at boot (Containerfile.base, rime-pkg.conf). Never fatal:
+# a launcher that is late to notice is no reason to fail an install.
+ring_launcher() {
+    local dir="${1:-$LAUNCHER_DOORBELL}" bell
+    install -d -m0755 "$dir" 2>/dev/null || return 0
+    bell="$(mktemp "${dir}/.rime-pkg-rescan.XXXXXX" 2>/dev/null)" || return 0
+    rm -f -- "$bell"
 }
 
 # The extension-release file exists ONLY inside the image, so seeing it at its
