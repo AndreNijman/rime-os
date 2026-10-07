@@ -49,6 +49,14 @@ check "it does not terminate-user (that would end SSH logins too)" '! grep -q "t
 check "it remembers where to come back to" '[ "$(cat "$T/state/last-desktop")" = hyprland ]'
 check "and preselects the target" '[ "$(cat "$T/state/last-session")" = rime-gaming ]'
 
+# 1b. First switch wins: a second request while the first is unspent (the
+#     Gaming Mode session's own way-out request) leaves it alone.
+sel hyprland --switch
+check "a switch already in flight is not overwritten" 'grep -q "rime-gaming-session" "$T/run/switch.toml" && grep -q "already in flight" "$T/out" && [ ! -s "$T/calls" ]'
+touch -d '-2 min' "$T/run/switch.toml"; sel hyprland --switch
+check "...but a stale one is" 'grep -q "start-hyprland" "$T/run/switch.toml"'
+rm -f "$T/run/switch.toml"; sel rime-gaming --switch --from hyprland
+
 # 2. Back out: --desktop names the remembered desktop.
 sel --desktop
 check "--desktop names the session the switch came from" '[ "$(cat "$T/out")" = hyprland ]'
@@ -98,6 +106,27 @@ check "a symlinked one-shot is refused" '[ -z "$(args)" ]'
 grep -q '^ExecStart=/usr/bin/greetd \$RIME_GREETD_ARGS$' ../files/system/units/50-rime-greetd-switch.conf \
     && ok "systemd execs greetd itself (its own SELinux domain), not a wrapper" \
     || bad "systemd execs greetd itself (its own SELinux domain), not a wrapper" ""
+
+# 5. steamos-session-select, which Steam's Gaming Mode "Switch to Desktop" runs.
+SSS=../files/system/bin/steamos-session-select
+mkdir -p "$T/sbin"
+cat > "$T/sbin/sudo" <<FAKE
+#!/bin/sh
+echo "sudo \$*" >> "$T/sss-calls"
+case " \$* " in *" --desktop "*) echo niri ;; esac
+exit 0
+FAKE
+chmod +x "$T/sbin/sudo"
+sss() { : > "$T/sss-calls"; PATH="$T/sbin:$PATH" RIME_SESSION_HELPER=/helper bash "$SSS" "$@" >/dev/null 2>&1; }
+sss plasma
+check "Switch to Desktop (plasma) goes back to the remembered desktop" 'grep -qx "sudo -n /helper niri --switch" "$T/sss-calls"' "$(cat "$T/sss-calls")"
+sss
+check "...as does no argument" 'grep -qx "sudo -n /helper niri --switch" "$T/sss-calls"'
+sss gamescope
+check "gamescope means Gaming Mode" 'grep -qx "sudo -n /helper rime-gaming --switch" "$T/sss-calls"'
+bash ../files/system/bin/steamos-update check >/dev/null 2>&1
+if [ $? = 7 ]; then ok "steamos-update answers SteamOS's 'no update' (7)"
+else bad "steamos-update answers SteamOS's 'no update' (7)" ""; fi
 
 echo
 echo "rime-session-toggle: $pass passed, $fail failed"

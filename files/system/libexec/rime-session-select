@@ -172,6 +172,17 @@ esac
 user="$(getent passwd "${uid}" | cut -d: -f1)"
 case "${user}" in '' | *[!A-Za-z0-9._-]*) die "uid ${uid} has no usable account name" ;; esac
 
+# First switch wins. A switch that ends a running Gaming Mode session makes
+# that session ask, on its way out, to go back to the desktop; without this it
+# overwrote the switch in flight and the user landed on the desktop instead
+# (measured on katana). A one-shot that greetd has not spent yet, and that is
+# still fresh, is left alone.
+if [ -f "${RUN_DIR}/switch.toml" ] \
+   && [ $(( $(date +%s) - $(stat -c %Y "${RUN_DIR}/switch.toml" 2>/dev/null || echo 0) )) -le 60 ]; then
+    say "a switch is already in flight; leaving it"
+    exit 0
+fi
+
 # Where to come back to: the desktop the switch into Gaming Mode came from.
 if [ "${want}" = "${GAMING_SESSION}" ] && [ "${3:-}" = "--from" ] && is_session "${4:-}" \
    && [ "${4}" != "${GAMING_SESSION}" ]; then

@@ -4365,6 +4365,8 @@ jobs:
             tests/test-rime-session-toggle.sh \
             files/system/libexec/rime-session-select \
             files/system/libexec/rime-greetd \
+            files/system/bin/steamos-session-select \
+            files/system/bin/steamos-update \
             files/system/libexec/rime-safe-graphics \
             files/system/libexec/rime-safe-graphics-terminal \
             tests/test-rime-chaos.sh tests/test-rime-vm.sh

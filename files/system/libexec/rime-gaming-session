@@ -241,11 +241,17 @@ fi
 # -gamepadui is Big Picture, the controller-first UI. NOT -steamdeck: that
 # switches Steam into Deck mode, which expects SteamOS-specific integration
 # (the steamos-* helpers, Deck hardware quirks) that Rime OS does not ship.
-# ONLY -gamepadui. That is the documented flag for Big Picture and the only one
-# confirmed to exist; anything else added from memory would be an unrecognised
-# argument at session start, on the one path that cannot be tested from here.
-# Extra flags belong in RIME_STEAM_ARGS once tried on real hardware.
-STEAM_ARGS=(-gamepadui)
+# Flags are added only once tried on real hardware (this used to be ONLY
+# -gamepadui for exactly that reason); RIME_STEAM_ARGS replaces the list.
+#
+# -steamos3 (2026-10-08, measured on katana): with -gamepadui alone, Steam's own
+# Power > "Switch to Desktop" showed "Switching to Desktop…" and hung, and "Exit
+# Big Picture" left a desktop Steam window stranded inside gamescope. With
+# -steamos3 the Power menu is SteamOS's and "Switch to Desktop" runs
+# `steamos-session-select plasma`, which Rime ships (files/system/bin) and which
+# switches straight back to the desktop. Steam may also ask `steamos-update`;
+# Rime's answers "no update" — Rime updates itself.
+STEAM_ARGS=(-gamepadui -steamos3)
 if [ -n "${RIME_STEAM_ARGS:-}" ]; then
     # shellcheck disable=SC2206 # intentional word-splitting of an override
     STEAM_ARGS=(${RIME_STEAM_ARGS})

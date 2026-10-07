@@ -114,6 +114,10 @@ COPY --chmod=0755 files/system/libexec/rime-session-select \
 # one-shot autologin rime-session-select leaves for a desktop <-> Gaming Mode
 # switch; greetd itself is still exec'd directly (see both files' headers).
 COPY --chmod=0755 files/system/libexec/rime-greetd /usr/libexec/rime-greetd
+# What Steam's Gaming Mode Power menu runs (-steamos3): "Switch to Desktop" and
+# the System > Software Updates check. See each file.
+COPY --chmod=0755 files/system/bin/steamos-session-select /usr/bin/steamos-session-select
+COPY --chmod=0755 files/system/bin/steamos-update /usr/bin/steamos-update
 COPY files/system/units/50-rime-greetd-switch.conf \
      /usr/lib/systemd/system/greetd.service.d/50-rime-greetd-switch.conf
 COPY files/system/sudoers/rime-session-select \
@@ -131,6 +135,7 @@ RUN set -eux; \
     bash -n /usr/libexec/rime-gaming-session; \
     bash -n /usr/libexec/rime-session-select; \
     bash -n /usr/libexec/rime-greetd; \
+    bash -n /usr/bin/steamos-session-select; bash -n /usr/bin/steamos-update; \
     grep -q '^ExecStart=/usr/bin/greetd \$RIME_GREETD_ARGS$' /usr/lib/systemd/system/greetd.service.d/50-rime-greetd-switch.conf; \
     test -x /usr/bin/greetd || { echo "FATAL: the greetd drop-in execs /usr/bin/greetd, which is missing"; exit 1; }; \
     # The gate that keeps the entry hidden until its packages exist. Without
