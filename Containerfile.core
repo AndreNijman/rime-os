@@ -660,6 +660,17 @@ RUN --mount=type=secret,id=rime_sb_key --mount=type=secret,id=rime_sb_crt \
 #   xpadneo   shdwchn10/xpadneo 0.10.2 — Bluetooth Xbox pads: rumble, battery
 #             reporting and correct axis mapping that in-kernel `hid-generic`
 #             does not provide.
+#   msi-ec    BeardOverflow/msi-ec, pinned by commit + sha256 (no akmod
+#             exists). MSI laptops: Cooler Boost, fan and shift modes, battery
+#             charge limits. The kernel's own msi-ec is only the battery part
+#             and knows 1 EC firmware of this family; this one knows ~200,
+#             including the Katana GF76 12UG's 17L3EMS1.109. It installs to
+#             updates/, which depmod prefers over the in-tree module, and
+#             autoloads through the DMI alias in 51-rime-msi.conf (it ships no
+#             alias of its own). Measured on that Katana: rimed's `max` fan
+#             mode turned Cooler Boost on (fans 7,900 / 6,000 RPM), and in a
+#             back-to-back Cyberpunk 2077 soak it held 107-110 fps where the
+#             same runs without it fell 111 -> 99 and the GPU-bound one 51 -> 42.
 # Containerfile.gaming claimed "no akmod source is currently published that
 # matches this kernel". That was wrong, and it is worth naming why: an akmod
 # source package is kernel-INDEPENDENT — `akmods` compiles it against whatever
@@ -674,6 +685,8 @@ RUN --mount=type=secret,id=rime_sb_key --mount=type=secret,id=rime_sb_crt \
 # Build and signing are ONE layer on purpose: signing rewrites every module, so
 # splitting them would commit the unsigned copies to a lower layer and ship both.
 ARG RIME_AKMODS="nvidia xone xpadneo"
+ARG MSI_EC_COMMIT=d7fbbd88e6831e56801b860e46475cbf8ddbc7c1
+ARG MSI_EC_SHA256=ef3396a4c870f74a3c21b6623fa6e31da1569c88d92171a7b987f8bcb3c18279
 RUN --mount=type=secret,id=rime_sb_key --mount=type=secret,id=rime_sb_crt \
     set -eux; \
     KVER="$(cat /usr/lib/rime-kver)"; \
@@ -685,7 +698,7 @@ RUN --mount=type=secret,id=rime_sb_key --mount=type=secret,id=rime_sb_crt \
         "https://mirrors.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-$(rpm -E %fedora).noarch.rpm"; \
     dnf5 -y copr enable ublue-os/akmods; \
     dnf5 -y copr enable shdwchn10/xpadneo; \
-    dnf5 -y install akmods kmodtool gcc make; \
+    dnf5 -y install akmods kmodtool gcc make curl zstd; \
     dnf5 -y install akmod-nvidia akmod-xone akmod-xpadneo; \
     for k in ${RIME_AKMODS}; do \
         echo "=== akmods: building ${k} for ${KVER} ==="; \
@@ -710,6 +723,16 @@ RUN --mount=type=secret,id=rime_sb_key --mount=type=secret,id=rime_sb_crt \
         echo "built: ${RPM}"; \
         dnf5 -y install "${RPM}"; \
     done; \
+    echo "=== msi-ec ${MSI_EC_COMMIT} for ${KVER} ==="; \
+    curl -fsSL --retry 3 -o /tmp/msi-ec.tar.gz \
+        "https://github.com/BeardOverflow/msi-ec/archive/${MSI_EC_COMMIT}.tar.gz"; \
+    echo "${MSI_EC_SHA256}  /tmp/msi-ec.tar.gz" | sha256sum -c -; \
+    mkdir /tmp/msi-ec; tar -xzf /tmp/msi-ec.tar.gz -C /tmp/msi-ec --strip-components=1; \
+    make -C "/usr/src/kernels/${KVER}" M=/tmp/msi-ec modules; \
+    install -D -m 0644 /tmp/msi-ec/msi-ec.ko \
+        "/usr/lib/modules/${KVER}/updates/drivers/platform/x86/msi-ec.ko"; \
+    zstd -q -19 --rm "/usr/lib/modules/${KVER}/updates/drivers/platform/x86/msi-ec.ko"; \
+    rm -rf /tmp/msi-ec /tmp/msi-ec.tar.gz; \
     dnf5 -y copr disable ublue-os/akmods; \
     dnf5 -y copr disable shdwchn10/xpadneo; \
     depmod -a "${KVER}"; \
@@ -782,7 +805,7 @@ RUN set -eux; \
     MODDIR="/usr/lib/modules/${KVER}"; \
     OOT=""; for d in extra updates; do [ -d "${MODDIR}/${d}" ] && OOT="${OOT} ${MODDIR}/${d}"; done; \
     test -n "${OOT}" || { echo "FATAL: no out-of-tree module directory"; exit 1; }; \
-    for pat in nvidia xone xpadneo; do \
+    for pat in nvidia xone xpadneo msi-ec; do \
         n="$(find ${OOT} -type f -name "*${pat}*.ko*" | wc -l)"; \
         test "${n}" -gt 0 \
             || { echo "FATAL: no ${pat} module under ${OOT}"; find ${OOT} -name '*.ko*'; exit 1; }; \
@@ -790,6 +813,10 @@ RUN set -eux; \
     done; \
     modinfo -k "${KVER}" nvidia >/dev/null \
         || { echo "FATAL: modinfo cannot resolve nvidia for ${KVER}"; exit 1; }; \
+    case "$(modinfo -k "${KVER}" -n msi-ec)" in \
+        "${MODDIR}/updates/"*) echo "msi-ec resolves to the updates/ build" ;; \
+        *) echo "FATAL: msi-ec resolves to $(modinfo -k "${KVER}" -n msi-ec), not updates/ (the in-tree one has no Cooler Boost)"; exit 1 ;; \
+    esac; \
     if [ "$(cat /usr/share/rime-os/secureboot/modules-signed)" = signed ]; then \
         SIGNER="$(cat /usr/share/rime-os/secureboot/module-signer)"; \
         N=0; \
@@ -1080,6 +1107,9 @@ RUN set -eux; \
     mkdir -p /usr/lib/modules-load.d /usr/lib/modprobe.d; \
     printf '%s\n' 'msi-wmi-platform' > /usr/lib/modules-load.d/rime-msi.conf; \
     printf '%s\n' 'options msi-wmi-platform force=1' \
+        '# msi-ec (updates/) has no alias of its own; the in-tree one is MSI-only by DMI too.' \
+        'alias dmi*:svn*Micro-StarInternational*: msi-ec' \
+        'alias dmi*:svn*MICRO-STARINT*: msi-ec' \
         > /usr/lib/modprobe.d/51-rime-msi.conf; \
     systemctl mask irqbalance.service; \
     printf '%s\n' \

@@ -28,36 +28,32 @@ epp = "balance_power"
 governor = "powersave"
 epp = "power"
 
-# The msi-ec 60/80 longevity window. No battery is named: this chassis presents
+# The msi-ec longevity window. No battery is named: this chassis presents
 # its pack as BAT1 rather than BAT0, which is exactly why the paths used to be
 # hard-coded here and exactly why they no longer are. rimed discovers the pack
 # and its threshold attributes at runtime.
 #
-# NOTE: those attributes come from the msi-ec driver. The in-tree msi-ec in the
-# shipped kernel carries a 25-entry EC-firmware allowlist that does NOT include
-# this machine's board (MS-17L3) and has no `force` parameter, so on the current
-# image the module does not bind, discovery finds no threshold attribute, and
-# the window is reported unsupported rather than failing. It becomes live the
-# moment msi-ec does bind — see the IMAGE TODO in docs/m6-notes.md.
+# Those attributes come from the out-of-tree msi-ec the image builds (the
+# kernel's own msi-ec does not know this EC firmware, 17L3EMS1.109). msi-ec
+# keeps both thresholds in ONE EC byte, so the start always reads stop - 10:
+# this machine holds 70/80, not 60/80. rimed writes the stop last so the
+# 80 % ceiling is the value that lands.
 [charge]
 start = 60
 stop = 80
 
 # ── Fans ─────────────────────────────────────────────────────────────────────
-# Reality check for this board (MS-17L3), as of the current image:
+# This board (MS-17L3), as shipped:
 #
-#   * msi-ec is the only driver that can *command* MSI fans (`fan_mode`
-#     auto/silent/basic/advanced plus `cooler_boost` on/off — it has no pwm),
-#     but the in-tree module's EC-firmware allowlist does not list this board
-#     and the build has no `force` parameter, so it does not bind.
-#   * msi-wmi-platform *does* bind (with `force=1`) and registers an hwmon
-#     device with four read-only `fanN_input` channels — RPM you can watch, but
-#     no pwm and no mode.
+#   * msi-ec (the out-of-tree build in the image) commands the fans: `fan_mode`
+#     auto/silent/advanced plus `cooler_boost` on/off. It has no pwm, so `max`
+#     is cooler boost with fan_mode advanced; `auto` hands both back.
+#     Measured: max = 7,900 / 6,000 RPM, auto ~4,000 / 3,600 under light load.
+#   * msi-wmi-platform binds too (with `force=1`) and registers an hwmon device
+#     with four read-only `fanN_input` channels: the RPM rimed shows.
 #
-# So on the shipped image rimed reports `Fan.Supported = false`, shows whatever
-# RPM msi-wmi-platform offers, and touches nothing. `backend = "auto"` probes in
-# order (hwmon pwm -> msi-wmi-platform -> msi-ec) and simply takes what exists;
-# the settings below become live the moment a controlling driver does bind.
+# `backend = "auto"` probes in order (hwmon pwm -> msi-wmi-platform -> msi-ec)
+# and takes what exists.
 [fan]
 backend = "auto"
 min_pwm = 90              # ~35%: floor for any pwm we ever command

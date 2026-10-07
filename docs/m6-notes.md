@@ -230,12 +230,13 @@ on purpose. In rough priority order:
    * `files/system/modprobe.d/rime-msi.conf` → `options msi-wmi-platform force=1`
    * Note: the parameter is `module_param_unsafe`, so loading it **taints the
      kernel**. Accept that or drop fan readings on this machine.
-2. **A `msi-ec` that binds on MS-17L3** (Katana, for fan *control* and for the
-   BAT1 charge thresholds, which are otherwise dead): ship the out-of-tree
-   BeardOverflow `msi-ec` as a kmod/akmod with an MS-17L3 configuration, signed
-   for Secure Boot like the other out-of-tree modules, plus a `modules-load.d`
-   entry. Without this the Katana has **no fan control and no charge limiting**,
-   and `rime doctor` will say so.
+2. ~~**A `msi-ec` that binds on MS-17L3**~~ **DONE (2026-10-08):**
+   `Containerfile.core` builds BeardOverflow `msi-ec` (pinned commit + sha256)
+   into `updates/`, signs it with the other out-of-tree modules, and autoloads
+   it on MSI hardware through a DMI alias in `51-rime-msi.conf`. Its
+   CONF_G2_1 lists 17L3EMS1.109. Verified on the Katana: `rime fan mode max`
+   turns Cooler Boost on and `auto` hands it back. The charge window lands as
+   70/80: msi-ec keeps start = stop - 10 in one EC byte.
 3. **`irqbalance` must not fight game mode.** It re-scatters interrupt affinity
    on its own cadence and will undo the steering within seconds.
    **Recommendation: mask it in the gaming image** (`systemctl mask
