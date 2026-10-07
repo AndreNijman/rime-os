@@ -26,14 +26,18 @@ epp = "performance"
 # The firmware's DPTF policy, applied by thermald --adaptive, holds this
 # i7-12700H to 38 W / 45 W. Intel rates it 45 W base / 115 W maximum turbo.
 # Measured 2026-10-08 (Cyberpunk 2077 built-in benchmark, CPU-bound
-# configuration, on a cooling pad, two runs each):
+# configuration, on a cooling pad, two or more runs each):
 #   thermald (38/45)  55-56 fps avg, 1 % low 25-26
 #   38/90             78-86 fps,     1 % low 25
-#   45/90             97 fps,        1 % low 64   <- chosen
-#   45/115, 60/115, 80/115: 97 fps, 1 % low 64-65 (no further gain)
-# The 45 W sustained limit is Intel's base power; the 90 W burst stays under
-# Intel's 115 W. Package peaked at 96-97 C (the CPU throttles itself at 100 C).
-cpu_power_limit_w = [45, 90]
+#   45/65             108-110 fps,   1 % low 73-75   <- chosen
+#   45/90, 45/115, 60/115, 80/115: no faster than 45/65
+# The burst stays at 65 W, not 90, for a measured reason: at 90 W, bursts on
+# top of the GPU's ~90 W sometimes took the package to 100 C, and the firmware
+# then locked it near 47 W with no burst at all — invisibly (MSR 0x610 and
+# powercap still read 45/90) — until the next reboot. Runs after that fell to
+# ~70 fps with a 1 % low of 10. A reactive guard (drop the burst at 95 C) was
+# tried and could not catch Cyberpunk's spikes. 45 W is Intel's base power.
+cpu_power_limit_w = [45, 65]
 
 [tiers.balanced]
 governor = "powersave"

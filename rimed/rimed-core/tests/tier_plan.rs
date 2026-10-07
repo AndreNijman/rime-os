@@ -162,7 +162,7 @@ fn msi_katana_omits_platform_profile() {
         vec![
             Action::Governor("performance".into()),
             Action::Epp("performance".into()),
-            Action::CpuPowerLimit { pl1_w: 45, pl2_w: 90 },
+            Action::CpuPowerLimit { pl1_w: 45, pl2_w: 65 },
         ]
     );
     // Its AC default is the top tier, which every machine can honour.

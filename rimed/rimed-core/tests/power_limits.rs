@@ -46,11 +46,11 @@ fn katana() -> Profile {
 }
 
 #[test]
-fn katana_holds_45_90_on_performance_and_hands_back_on_the_other_tiers() {
+fn katana_holds_45_65_on_performance_and_hands_back_on_the_other_tiers() {
     let p = katana();
     assert!(p
         .plan_tier(Tier::Performance)
-        .contains(&Action::CpuPowerLimit { pl1_w: 45, pl2_w: 90 }));
+        .contains(&Action::CpuPowerLimit { pl1_w: 45, pl2_w: 65 }));
     for t in [Tier::Balanced, Tier::PowerSaver] {
         let plan = p.plan_tier(t);
         assert!(plan.contains(&Action::CpuPowerFirmware), "{t}: {plan:?}");
