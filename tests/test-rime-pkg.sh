@@ -640,14 +640,22 @@ cat > "$PN/bin/dnf5" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$*" >> "$PIN_LOG"
 case " $* " in
-  *" repoquery "*) [ -n "${PIN_UPGRADES:-}" ] && printf '%s\n' $PIN_UPGRADES; exit 0 ;;
+  *" repoquery "*)
+    # Only the query the pin is built from gets the fixture: anything else is
+    # not what image_pin_excludes is supposed to ask.
+    case " $* " in *" --upgrades "*) ;; *) echo "stub: repoquery without --upgrades" >&2; exit 2 ;; esac
+    [ "${PIN_RQ:-}" = fail ] && { echo "Failed to download metadata" >&2; exit 1; }
+    [ -n "${PIN_UPGRADES:-}" ] && printf '%s\n' $PIN_UPGRADES; exit 0 ;;
+  *" download --resolve "*" blender ") ;;
+  *) echo "stub: not a resolving download of the requested spec: $*" >&2; exit 3 ;;
 esac
-dest=; pinned=0
+dest=; pinned=0; prev=
 for a in "$@"; do
     case "$prev" in --destdir) dest=$a ;; esac
     case "$a" in --exclude=*git-core-2.56.0-1.fc45.x86_64*) pinned=1 ;; esac
     prev=$a
 done
+[ -d "$dest" ] || { echo "stub: no --destdir" >&2; exit 3; }
 if [ "$pinned" = 1 ]; then
     [ "${PIN_MODE:-}" = fail ] && { echo "Problem: conflicting requests" >&2; exit 1; }
     : > "$dest/git-2.55.0-2.fc45.x86_64.rpm"
@@ -687,8 +695,25 @@ else bad "…and says why it fell back" "got: $(tail -1 <<<"$out")"; fi
 
 mkdir -p "$PN/c"; : > "$PIN_LOG"
 out=$(PATH="$PN/bin:$PATH" PIN_UPGRADES='' call download_rpms "$PN/c" blender 2>&1); rc=$?
-is "no upgrades: one plain pass, no exclude" "0 0" \
-   "$rc $(grep -c -- '--exclude' "$PIN_LOG")"
+is "no upgrades: one plain pass, no exclude" "0 1 0 git-2.56.0-1.fc45.x86_64.rpm git-core-2.56.0-1.fc45.x86_64.rpm" \
+   "$rc $(grep -c ' download ' "$PIN_LOG") $(grep -c -- '--exclude' "$PIN_LOG") $(ls "$PN/c" | paste -sd' ' -)"
+
+# A failed query (no metadata, a mirror down) must not end the install under
+# the engine's `set -e`: it resolves without the pin, as Rime did before it.
+# Called with the engine's own shell options, not through `call`, which turns
+# errexit off — and errexit is the whole failure being guarded against.
+mkdir -p "$PN/d"; : > "$PIN_LOG"
+out=$(PATH="$PN/bin:$PATH" PIN_UPGRADES='git-core-2.56.0-1.fc45.x86_64' PIN_RQ=fail bash -c '
+        e=$1; shift; a=("$@"); set --
+        source "$e" >/dev/null 2>&1
+        set -euo pipefail
+        download_rpms "${a[@]}"
+      ' _ "$ENGINE" "$PN/d" blender 2>&1); rc=$?
+is "a failed query falls back to one plain pass" "0 1 0 git-2.56.0-1.fc45.x86_64.rpm git-core-2.56.0-1.fc45.x86_64.rpm" \
+   "$rc $(grep -c ' download ' "$PIN_LOG") $(grep -c -- '--exclude' "$PIN_LOG") $(ls "$PN/d" | paste -sd' ' -)"
+if grep -qF "resolving without pinning to the image" <<<"$out"; then
+    ok "…and says so"
+else bad "…and says so" "got: $(tail -1 <<<"$out")"; fi
 
 echo
 echo "── apps that left the image: vendor routes, per-user tools, Flathub ───"

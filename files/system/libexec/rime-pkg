@@ -798,7 +798,13 @@ download_rpms() {
     # `No package "/path/to.rpm" available` (measured) — so local files are
     # staged separately, by stage_local_rpms, after this has run.
     local pin
-    pin="$(image_pin_excludes)"
+    # A failed query must not end the install under `set -e`: without the pin
+    # this is exactly the resolution Rime did before it, and the guard still
+    # stands behind it.
+    if ! pin="$(image_pin_excludes)"; then
+        warn "could not list the repositories' newer builds of image packages; resolving without pinning to the image"
+        pin=""
+    fi
     if [ -n "$pin" ]; then
         if dnf5 "${args[@]}" --exclude="$pin" "$@" >&2; then
             compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
