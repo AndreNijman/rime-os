@@ -105,7 +105,7 @@ fn katana_carries_the_real_m6_values() {
     let game = p.game_config();
     assert!(game.enabled);
     assert_eq!(game.tier, Tier::Performance);
-    assert_eq!(game.fan_mode.as_deref(), Some("max"));
+    assert_eq!(game.fan_mode.as_deref(), Some("auto"));
     assert_eq!(game.cpuset_policy(), CpusetPolicy::PCores);
     assert_eq!(game.irq_policy(), IrqPolicy::AwayFromGame);
     assert_eq!(game.irq_pin_to_game, vec!["nvidia".to_string()]);

@@ -85,7 +85,11 @@ pwm = 255
 [gamemode]
 enabled = true
 tier = "performance"
-fan_mode = "max"          # cooler boost for the duration of a session
+# The EC's own fan curve, NOT cooler boost: boost runs both fans at ~7,900 /
+# 6,000 RPM for the whole session, menus included. Measured, it only pays in
+# long heat-soaked play (Cyberpunk back to back: 110 -> 107 fps with it, 111 ->
+# 99 without; GPU-bound 51 vs 42). `fan_mode = "max"` turns it back on.
+fan_mode = "auto"
 cpuset = "p-cores"
 irq = "away-from-game"
 irq_pin_to_game = ["nvidia"]
