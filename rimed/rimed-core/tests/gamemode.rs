@@ -688,6 +688,17 @@ fn scx_keywords_resolve_against_the_cpu() {
     }
     assert_eq!(with("auto").scx_for(&h), None);
     assert_eq!(with("Auto").scx_for(&u), Some("scx_lavd".into()));
+    // A CPU whose topology could not be read is not known to be one kind.
+    let empty = Fixture::new("scx-kw-unknown");
+    let unknown = CoreTopology::detect_from(&empty.path().join("sys"));
+    assert_eq!(with("auto").scx_for(&unknown), None);
+    let plan = default_plan(&empty);
+    assert!(!plan.enter.iter().any(|a| matches!(a, Action::ScxSwitch { .. })));
+    assert!(
+        plan.notes.iter().any(|n| n.starts_with("sched-ext:") && n.contains("could not be read")),
+        "{:?}",
+        plan.notes
+    );
     // A named scheduler is a decision the profile made: it loads anywhere.
     assert_eq!(with("scx_lavd").scx_for(&h), Some("scx_lavd".into()));
     assert_eq!(with("scx_bpfland").scx_for(&u), Some("scx_bpfland".into()));

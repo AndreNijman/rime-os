@@ -696,19 +696,36 @@ impl Ctx {
             return Ok(());
         }
         let prior = game::read_pid_cgroup(Path::new("/proc"), CGROUP_ROOT, pid);
-        if let Err(e) = self.writer.apply(&Action::CgroupAttach {
+        // Only a write the kernel ACCEPTED confines the process. A refused or
+        // unconfirmed one leaves it outside the cpuset, so it is not recorded
+        // (a retry must still try) and nothing below acts as if it were in.
+        match self.writer.apply(&Action::CgroupAttach {
             path: cfg.cgroup.clone(),
             pid,
         }) {
-            bail!("attaching pid {pid}: {e:#}");
+            Ok(Outcome::Landed) => {}
+            Ok(Outcome::Refused(why)) | Ok(Outcome::Unknown(why)) => {
+                bail!("attaching pid {pid}: {why}")
+            }
+            Err(e) => bail!("attaching pid {pid}: {e:#}"),
         }
         // The first game into a session that started with an empty cpuset
         // (Gaming Mode always does) is when its interrupts move: the plan held
         // them back because, until now, the game ran on every CPU.
         if session.pids.is_empty() {
+            let waited = session.notes.len();
+            session
+                .notes
+                .retain(|n| !n.starts_with("IRQ steering waits for a game"));
+            let waited = session.notes.len() < waited;
             let topo = CoreTopology::detect_from(&self.sys_root);
             let entries = irq::enumerate(&self.proc_irq_root);
             let (steer, restore) = game::steer_on_attach(&cfg, &topo, &entries, &session.cpus);
+            if steer.is_empty() && waited {
+                session.notes.push(format!(
+                    "IRQ steering: no interrupt needed moving when pid {pid} was attached"
+                ));
+            }
             if !steer.is_empty() {
                 for a in &steer {
                     session.irqs.attempted += 1;
@@ -732,15 +749,21 @@ impl Ctx {
                     })
                     .unwrap_or(session.exit_actions.len());
                 session.exit_actions.splice(at..at, restore);
-                session
-                    .notes
-                    .retain(|n| !n.starts_with("IRQ steering waits for a game"));
                 session.notes.push(format!(
                     "IRQ steering: {} of {} interrupts moved off CPUs {} when pid {pid} was attached",
                     session.irqs.landed,
                     session.irqs.attempted,
                     session.cpu_list
                 ));
+                if let Some(why) = &session.irqs.first_refusal {
+                    session.notes.push(format!("IRQ steering: first refusal — {why}"));
+                }
+                // The same warning the enter plan gives, for the same reason.
+                if irq::irqbalance_running(&self.proc_root) {
+                    session.notes.push(
+                        "irqbalance is running and will re-scatter these interrupts — mask it, or ban the game CPUs in its config".into(),
+                    );
+                }
             }
         }
         // Restore this PID before the cgroup is torn down: the attach must land
@@ -944,6 +967,10 @@ mod tests {
         tier = "performance"
         cpuset = "off"
         irq = "off"
+        # Named, not `auto`: this fixture has no CPUs to read, and `auto` keeps
+        # the kernel's scheduler on a topology it cannot read. These tests are
+        # about what a session installs and releases, so they ask for lavd.
+        scx = "scx_lavd"
         [gamemode.nvidia]
         enabled = false
     "#;
@@ -1406,18 +1433,125 @@ mod tests {
         ctx.game_attach(1).await.unwrap();
         assert_eq!(irq_writes(&writer), 2);
 
-        // Exit puts both back, before the cgroup goes.
+        // The VALUES, not just the count: both interrupts went to the E-cores.
+        let affinity = |a: &Action| match a {
+            Action::IrqAffinity { path, cpus } => Some((
+                Path::new(path).parent().unwrap().to_path_buf(),
+                cpus.clone(),
+            )),
+            _ => None,
+        };
+        let mut moved: Vec<_> = writer.recorded().iter().filter_map(affinity).collect();
+        moved.sort();
+        assert_eq!(
+            moved,
+            vec![
+                (irq_root.join("16"), "12-19".to_string()),
+                (irq_root.join("24"), "12-19".to_string()),
+            ]
+        );
+
+        // Exit puts both back where they were, before the cgroup goes.
         writer.clear();
         ctx.game_exit().await.unwrap();
         let exit = writer.recorded();
-        let restored = exit
-            .iter()
-            .filter(|a| matches!(a, Action::IrqAffinity { .. }))
-            .count();
-        assert_eq!(restored, 2, "exit must restore what the attach moved: {exit:?}");
+        let mut restored: Vec<_> = exit.iter().filter_map(affinity).collect();
+        restored.sort();
+        assert_eq!(
+            restored,
+            vec![
+                (irq_root.join("16"), "0-19".to_string()),
+                (irq_root.join("24"), "0-19".to_string()),
+            ],
+            "exit must restore what the attach moved: {exit:?}"
+        );
         let last_irq = exit.iter().rposition(|a| matches!(a, Action::IrqAffinity { .. }));
         let remove = exit.iter().position(|a| matches!(a, Action::CgroupRemove { .. }));
         assert!(last_irq < remove, "interrupts come back before the cgroup goes: {exit:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn a_refused_attach_confines_nothing_and_moves_nothing() {
+        // The cgroup.procs write can be refused (the process exited, a
+        // permission). The process is then NOT in the cpuset, so it must not
+        // be recorded as if it were, and interrupts must not move for it.
+        #[derive(Default)]
+        struct RefusesAttach {
+            applied: Mutex<Vec<Action>>,
+        }
+        impl SysWriter for RefusesAttach {
+            fn apply(&self, action: &Action) -> anyhow::Result<Outcome> {
+                self.applied.lock().unwrap().push(action.clone());
+                Ok(match action {
+                    Action::CgroupAttach { .. } => {
+                        Outcome::Refused("cgroup.procs: No such process (os error 3)".into())
+                    }
+                    _ => Outcome::Landed,
+                })
+            }
+        }
+        let root = scratch("irq-refused-attach");
+        let irq_root = hybrid_machine(&root);
+        let writer = Arc::new(RefusesAttach::default());
+        let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, writer.clone());
+
+        ctx.game_enter(&[]).await.unwrap();
+        let err = ctx.game_attach(std::process::id()).await.unwrap_err();
+        assert!(format!("{err:#}").contains("No such process"), "{err:#}");
+        let status = ctx.game_status().await;
+        assert_eq!(u32_of(&status, "irqs_attempted"), 0);
+        assert!(
+            !writer
+                .applied
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|a| matches!(a, Action::IrqAffinity { .. })),
+            "no interrupt may move for a process that is not in the cpuset"
+        );
+        assert!(
+            notes_of(&status).iter().any(|n| n.starts_with("IRQ steering waits for a game")),
+            "still waiting: nothing entered the cpuset"
+        );
+        ctx.game_exit().await.unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn the_first_attach_clears_the_waiting_note_even_with_nothing_to_move() {
+        // Interrupts already on the E-cores: the attach has nothing to write,
+        // and status must stop saying it is waiting.
+        let root = scratch("irq-nothing-to-move");
+        let irq_root = hybrid_machine(&root);
+        for n in ["16", "24"] {
+            std::fs::write(irq_root.join(n).join("smp_affinity_list"), "12-19\n").unwrap();
+        }
+        let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, Arc::new(MockWriter::new()));
+        ctx.game_enter(&[]).await.unwrap();
+        ctx.game_attach(std::process::id()).await.unwrap();
+        let notes = notes_of(&ctx.game_status().await);
+        assert!(
+            !notes.iter().any(|n| n.starts_with("IRQ steering waits for a game")),
+            "{notes:?}"
+        );
+        assert!(notes.iter().any(|n| n.contains("no interrupt needed moving")), "{notes:?}");
+        ctx.game_exit().await.unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn an_attach_that_moves_interrupts_warns_about_a_running_irqbalance() {
+        let root = scratch("irq-attach-irqbalance");
+        let irq_root = hybrid_machine(&root);
+        std::fs::create_dir_all(root.join("proc/812")).unwrap();
+        std::fs::write(root.join("proc/812/comm"), "irqbalance\n").unwrap();
+        let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, Arc::new(MockWriter::new()));
+        ctx.game_enter(&[]).await.unwrap();
+        ctx.game_attach(std::process::id()).await.unwrap();
+        let notes = notes_of(&ctx.game_status().await);
+        assert!(notes.iter().any(|n| n.contains("irqbalance")), "{notes:?}");
+        ctx.game_exit().await.unwrap();
         std::fs::remove_dir_all(&root).ok();
     }
 

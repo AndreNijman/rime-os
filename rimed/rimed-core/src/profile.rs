@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::tier::{Action, Tier};
-use crate::topology::CoreTopology;
+use crate::topology::{CoreSource, CoreTopology};
 
 /// Where the profile classifies in the layered selection hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -351,13 +351,16 @@ impl GameModeConfig {
     /// On a CPU with one kind of core the split does not exist (lavd treats
     /// every thread as performance-critical there), so `auto` keeps lavd.
     /// "One kind" is [`CoreTopology::has_efficiency_cores`], not `is_hybrid`:
-    /// AMD's preferred-core ranking is not a second kind of core.
+    /// AMD's preferred-core ranking is not a second kind of core. A CPU whose
+    /// topology could not be read at all (`CoreSource::Unknown`) is not known
+    /// to be one kind, so it keeps the kernel's scheduler too.
     pub fn scx_for(&self, topo: &CoreTopology) -> Option<String> {
         match self.scx.trim() {
             "" => None,
             s if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("none") => None,
             s if s.eq_ignore_ascii_case("auto") => {
-                (!topo.has_efficiency_cores()).then(|| "scx_lavd".to_string())
+                let unread = topo.source == CoreSource::Unknown;
+                (!unread && !topo.has_efficiency_cores()).then(|| "scx_lavd".to_string())
             }
             s => Some(s.to_string()),
         }

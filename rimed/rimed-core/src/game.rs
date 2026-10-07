@@ -325,13 +325,20 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
     // thread onto E-cores. The reasoning is on `GameModeConfig::scx_for`.
     let scx = cfg.scx_for(inputs.topo);
     if scx.is_none() && cfg.scx.trim().eq_ignore_ascii_case("auto") {
-        notes.push(format!(
-            "sched-ext: none on this CPU (P-cores {}, E-cores {}). The game gets the \
-             kernel's own scheduler, the same as the desktop: scx_lavd puts a game's \
-             busiest thread on E-cores. Set `scx = \"scx_lavd\"` in the profile to load it anyway.",
-            inputs.topo.pcore_list(),
-            inputs.topo.ecore_list()
-        ));
+        notes.push(if inputs.topo.has_efficiency_cores() {
+            format!(
+                "sched-ext: none on this CPU (P-cores {}, E-cores {}). The game gets the \
+                 kernel's own scheduler, the same as the desktop: scx_lavd puts a game's \
+                 busiest thread on E-cores. Set `scx = \"scx_lavd\"` in the profile to load it anyway.",
+                inputs.topo.pcore_list(),
+                inputs.topo.ecore_list()
+            )
+        } else {
+            "sched-ext: none — the CPU's topology could not be read, so whether it has \
+             E-cores (where scx_lavd misplaces a game's busiest thread) is unknown. The game \
+             gets the kernel's own scheduler. Set `scx = \"scx_lavd\"` in the profile to load it anyway."
+                .to_string()
+        });
     }
     if let Some(sched) = &scx {
         enter.push(Action::ScxSwitch {
