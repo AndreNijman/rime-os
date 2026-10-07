@@ -69,23 +69,35 @@ check "no SUDO_UID, no switch" '[ ! -f "$T/run/switch.toml" ] && grep -q "SUDO_U
 UIDV=4242 sel rime-gaming --switch
 check "an account that does not exist is refused" '[ ! -f "$T/run/switch.toml" ]'
 sel --finish-switch 1000
-check "the finisher refuses to be run through sudo" 'grep -q "internal" "$T/out" && ! grep -q "systemctl restart" "$T/calls"'
+check "the finisher refuses to be run through sudo" 'grep -q "internal" "$T/out" && ! grep -q "systemctl" "$T/calls"'
+: > "$T/calls"
+RIME_SWITCH_TOOLS="$T/bin" bash "$SEL" --finish-switch 1000 >/dev/null 2>&1
+check "the finisher stops greetd before it ends the session, then starts it" \
+    '[ "$(grep -o "^systemctl [a-z]* greetd.service" "$T/calls" | tr "\n" "|")" = "systemctl stop greetd.service|systemctl start greetd.service|" ]' "$(cat "$T/calls")"
 
-# 4. rime-greetd spends the one-shot once, and refuses stale/unsafe ones.
-printf '#!/bin/sh\necho greetd "$@" > "%s/greetd"\n' "$T" > "$T/bin/greetd"; chmod +x "$T/bin/greetd"
-grt() { RIME_GREET_RUN_DIR="$T/run" RIME_GREETD_BIN="$T/bin/greetd" RIME_SWITCH_OWNER="$(id -u)" bash "$GRT" 2>/dev/null; }
+# 4. rime-greetd (greetd's ExecStartPre) spends the one-shot once, through the
+#    env file greetd's ExecStart reads, and refuses stale/unsafe ones.
+grt() { RIME_GREET_RUN_DIR="$T/run" RIME_GREETD_RUNFILE="$T/greetd.run" RIME_SWITCH_OWNER="$(id -u)" bash "$GRT" 2>/dev/null; }
+args() { sed -n 's/^RIME_GREETD_ARGS=//p' "$T/run/greetd.env" 2>/dev/null; }
 sel rime-gaming --switch --from hyprland
+: > "$T/greetd.run"   # the boot-time greeter already ran: greetd wrote its runfile
 grt
-check "greetd starts on the one-shot" 'grep -qx "greetd --config $T/run/switch.active.toml" "$T/greetd"' "$(cat "$T/greetd")"
-check "the one-shot is spent" '[ ! -e "$T/run/switch.toml" ]'
+check "greetd starts on the one-shot" '[ "$(args)" = "--config $T/run/switch.active.toml" ]' "$(cat "$T/run/greetd.env" 2>/dev/null)"
+check "the one-shot is spent" '[ ! -e "$T/run/switch.toml" ] && [ -f "$T/run/switch.active.toml" ]'
+check "greetd's runfile is cleared, or it would skip [initial_session]" '[ ! -e "$T/greetd.run" ]'
+: > "$T/greetd.run"
 grt
-check "the next greetd start is a normal one" 'grep -qx "greetd" "$T/greetd" && [ ! -e "$T/run/switch.active.toml" ]'
+check "the next greetd start is a stock one" '[ -z "$(args)" ] && [ ! -e "$T/run/switch.active.toml" ]'
+check "...and leaves the runfile alone" '[ -e "$T/greetd.run" ]'
 sel rime-gaming --switch --from hyprland; touch -d '-5 min' "$T/run/switch.toml"; grt
-check "a stale one-shot is refused and deleted" 'grep -qx "greetd" "$T/greetd" && [ ! -e "$T/run/switch.toml" ]'
+check "a stale one-shot is refused and deleted" '[ -z "$(args)" ] && [ ! -e "$T/run/switch.toml" ]'
 sel rime-gaming --switch --from hyprland; chmod 0644 "$T/run/switch.toml"; grt
-check "a world-readable one-shot is refused" 'grep -qx "greetd" "$T/greetd" && [ ! -e "$T/run/switch.toml" ]'
+check "a world-readable one-shot is refused" '[ -z "$(args)" ] && [ ! -e "$T/run/switch.toml" ]'
 sel rime-gaming --switch --from hyprland; mv "$T/run/switch.toml" "$T/real"; ln -s "$T/real" "$T/run/switch.toml"; grt
-check "a symlinked one-shot is refused" 'grep -qx "greetd" "$T/greetd"'
+check "a symlinked one-shot is refused" '[ -z "$(args)" ]'
+grep -q '^ExecStart=/usr/bin/greetd \$RIME_GREETD_ARGS$' ../files/system/units/50-rime-greetd-switch.conf \
+    && ok "systemd execs greetd itself (its own SELinux domain), not a wrapper" \
+    || bad "systemd execs greetd itself (its own SELinux domain), not a wrapper" ""
 
 echo
 echo "rime-session-toggle: $pass passed, $fail failed"

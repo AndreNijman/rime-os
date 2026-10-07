@@ -110,9 +110,9 @@ COPY --chmod=0755 files/system/libexec/rime-gaming-session \
      /usr/libexec/rime-gaming-session
 COPY --chmod=0755 files/system/libexec/rime-session-select \
      /usr/libexec/rime-session-select
-# Gaming Mode is a toggle: greetd starts through rime-greetd, which consumes the
+# Gaming Mode is a toggle: greetd's ExecStartPre (rime-greetd) spends the
 # one-shot autologin rime-session-select leaves for a desktop <-> Gaming Mode
-# switch (see both files' headers).
+# switch; greetd itself is still exec'd directly (see both files' headers).
 COPY --chmod=0755 files/system/libexec/rime-greetd /usr/libexec/rime-greetd
 COPY files/system/units/50-rime-greetd-switch.conf \
      /usr/lib/systemd/system/greetd.service.d/50-rime-greetd-switch.conf
@@ -131,8 +131,8 @@ RUN set -eux; \
     bash -n /usr/libexec/rime-gaming-session; \
     bash -n /usr/libexec/rime-session-select; \
     bash -n /usr/libexec/rime-greetd; \
-    grep -q '^ExecStart=/usr/libexec/rime-greetd$' /usr/lib/systemd/system/greetd.service.d/50-rime-greetd-switch.conf; \
-    command -v greetd >/dev/null || { echo "FATAL: rime-greetd execs greetd, which is not on PATH"; exit 1; }; \
+    grep -q '^ExecStart=/usr/bin/greetd \$RIME_GREETD_ARGS$' /usr/lib/systemd/system/greetd.service.d/50-rime-greetd-switch.conf; \
+    test -x /usr/bin/greetd || { echo "FATAL: the greetd drop-in execs /usr/bin/greetd, which is missing"; exit 1; }; \
     # The gate that keeps the entry hidden until its packages exist. Without
     # this line the session is offered on every machine and fails on almost all
     # of them, which is the regression this whole arrangement exists to avoid.

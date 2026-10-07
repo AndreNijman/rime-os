@@ -108,10 +108,16 @@ if [ "${1:-}" = "--finish-switch" ]; then
             printf '%s\n' "$sid"
         done
     }
+    # greetd is stopped FIRST. Ending the session while greetd runs makes it
+    # start the greeter at once, and stopping greetd mid-way through that
+    # start hung for its whole 30 s stop timeout on katana before systemd
+    # aborted it. Stopped, it starts nothing; started again afterwards, it
+    # spends the one-shot.
+    systemctl stop greetd.service
     for sid in $(seat_sessions); do loginctl terminate-session "$sid" 2>/dev/null; done
     for _ in $(seq 1 75); do [ -z "$(seat_sessions)" ] && break; sleep 0.2; done
-    say "restarting greetd for the switch"
-    exec systemctl restart greetd.service
+    say "starting greetd for the switch"
+    exec systemctl start greetd.service
 fi
 
 if [ "${1:-}" = "--desktop" ]; then

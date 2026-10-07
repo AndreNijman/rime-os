@@ -1,35 +1,49 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  Rime OS — greetd, plus the one-shot that makes Gaming Mode a toggle
+#  Rime OS — spend the one-shot that makes Gaming Mode a toggle
 #
-#  greetd.service runs this instead of `greetd` (drop-in 50-rime-switch.conf).
-#  Normally it is exactly `exec greetd`. When rime-session-select has just
-#  switched a user between the desktop and Gaming Mode, it left a one-shot
-#  config in /run/rime-greet/switch.toml: the normal config plus an
-#  [initial_session] for that user and session. This consumes it — moves it
-#  aside so a later greetd restart can never reuse it — and starts greetd on it,
-#  so the user lands in the session they asked for without the greeter.
+#  greetd.service runs this as ExecStartPre (drop-in 50-rime-greetd-switch.conf)
+#  and then starts greetd itself as `greetd $RIME_GREETD_ARGS`, reading that
+#  variable from /run/rime-greet/greetd.env. greetd is NOT wrapped: systemd must
+#  exec /usr/bin/greetd directly so it enters its own SELinux domain (xdm_t).
+#  Run through a script it lands in unconfined_service_t, and its session
+#  worker cannot exec a user's session (measured on katana: the worker
+#  panicked on the failed exec and greetd fell back to the greeter).
 #
-#  Refused, and greetd starts normally, when the file is not a plain root-owned
-#  0600 file or is more than 60 seconds old: the switch restarts greetd within
-#  seconds of writing it, so anything older is left over from something that
-#  went wrong, and is deleted.
+#  When rime-session-select has just switched a user between the desktop and
+#  Gaming Mode, it left /run/rime-greet/switch.toml: the normal config plus an
+#  [initial_session] for that user and session. This moves it aside (so a later
+#  greetd restart can never reuse it), deletes greetd's runfile (greetd runs
+#  [initial_session] only when the runfile is absent, and it writes one at every
+#  start), and points greetd at it for this one start.
+#
+#  Anything else — no one-shot, a stale (> 60 s) one, one not root-owned 0600,
+#  a symlink — leaves the env file empty, and greetd starts exactly as stock.
 # ─────────────────────────────────────────────────────────────────────────────
 set -u
 RUN_DIR="${RIME_GREET_RUN_DIR:-/run/rime-greet}"
 S="${RUN_DIR}/switch.toml"
 A="${RUN_DIR}/switch.active.toml"
-GREETD="${RIME_GREETD_BIN:-greetd}"
+ENVF="${RUN_DIR}/greetd.env"
 MAX_AGE="${RIME_SWITCH_MAX_AGE:-60}"
+RUNFILE="${RIME_GREETD_RUNFILE:-/run/greetd.run}"
 
-rm -f "${A}"
+rm -f "${ENVF}" "${A}"
 if [ -f "${S}" ] && [ ! -L "${S}" ] \
    && [ "$(stat -c '%u:%a' "${S}" 2>/dev/null)" = "${RIME_SWITCH_OWNER:-0}:600" ] \
    && [ $(( $(date +%s) - $(stat -c %Y "${S}") )) -le "${MAX_AGE}" ] \
    && mv -f "${S}" "${A}"; then
-    echo "rime-greetd: starting greetd on the session switch one-shot" >&2
-    exec "${GREETD}" --config "${A}"
+    rm -f "${RUNFILE}"
+    # greetd runs as xdm_t, which may read its own run files (xdm_var_run_t)
+    # and not a generic /run file (measured on katana: "Permission denied").
+    if command -v chcon >/dev/null 2>&1 && [ -e /sys/fs/selinux/enforce ]; then
+        chcon -t xdm_var_run_t "${A}" 2>/dev/null \
+            || echo "rime-greetd: could not label ${A} for greetd" >&2
+    fi
+    printf 'RIME_GREETD_ARGS=--config %s\n' "${A}" > "${ENVF}"
+    echo "rime-greetd: greetd starts on the session switch one-shot" >&2
+    exit 0
 fi
 [ -e "${S}" ] && echo "rime-greetd: ignoring a stale or unsafe ${S}" >&2
 rm -f "${S}"
-exec "${GREETD}"
+exit 0
