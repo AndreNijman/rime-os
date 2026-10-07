@@ -59,11 +59,19 @@ rm -f "$T/run/switch.toml"; sel rime-gaming --switch --from hyprland
 
 # 2. Back out: --desktop names the remembered desktop.
 sel --desktop
-check "--desktop names the session the switch came from" '[ "$(cat "$T/out")" = hyprland ]'
+check "--desktop names the session the switch came from" '[ "$(cat "$T/out")" = hyprland ]' "$(cat "$T/out")"
 echo rime-gaming > "$T/state/last-desktop"; sel --desktop
-check "--desktop never names Gaming Mode itself" '[ "$(cat "$T/out")" = hyprland ]'
+check "--desktop never names Gaming Mode itself" '[ "$(cat "$T/out")" = hyprland ]' "$(cat "$T/out")"
 echo '../etc' > "$T/state/last-desktop"; sel --desktop
 check "--desktop ignores a junk memory" '[ "$(cat "$T/out")" = hyprland ]'
+# GitHub's runners ignore SIGPIPE; leaving the session list early then made
+# basename print "write error: Broken pipe" into --desktop's answer.
+echo hyprland > "$T/state/last-desktop"
+for _ in 1 2 3 4 5; do
+    RIME_SWITCH_TOOLS="$T/bin" RIME_SESSION_DIR="$T/sessions" RIME_GREET_STATE_DIR="$T/state" \
+        bash -c "trap '' PIPE; exec bash '$SEL' --desktop" >>"$T/pipe" 2>&1
+done
+check "--desktop is clean where SIGPIPE is ignored" '[ "$(sort -u "$T/pipe")" = hyprland ]' "$(sort -u "$T/pipe")"
 
 # 3. Refusals.
 rm -f "$T/run/switch.toml"

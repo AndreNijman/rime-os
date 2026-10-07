@@ -88,10 +88,12 @@ valid_sessions() {
 is_session() {  # $1 = id; true when it is a plain id naming an installed session
     case "$1" in '' | *[!A-Za-z0-9._-]* | .* | *--*) return 1 ;; esac
     # A loop, not `| grep -q`: under pipefail an early-exiting grep kills the
-    # writer with SIGPIPE and a MATCH comes back as failure.
-    local s
-    while read -r s; do [ "$s" = "$1" ] && return 0; done < <(valid_sessions)
-    return 1
+    # writer with SIGPIPE and a MATCH comes back as failure. And the loop reads
+    # to the end: where SIGPIPE is ignored (GitHub's runners), leaving early
+    # makes basename print "write error: Broken pipe" into the answer.
+    local s hit=1
+    while read -r s; do [ "$s" = "$1" ] && hit=0; done < <(valid_sessions)
+    return "${hit}"
 }
 
 # ── The finisher, run as a transient root unit so it outlives the session it
@@ -144,7 +146,7 @@ esac
 # state file are names of real, shipped sessions.
 found=0
 while read -r s; do
-    [ "$s" = "${want}" ] && { found=1; break; }
+    [ "$s" = "${want}" ] && found=1
 done < <(valid_sessions)
 [ "${found}" = 1 ] || die "'${want}' is not an installed session (try --list)"
 
