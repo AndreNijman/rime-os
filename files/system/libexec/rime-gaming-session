@@ -436,10 +436,19 @@ log "gamescope exited with ${rc}"
 # header for why that is safe). Not while the machine is shutting down or
 # rebooting — Steam's own Power menu ends the session that way too — and not
 # when RIME_GAMING_NO_RETURN=1 (debugging, or a user who wants the greeter).
+#
+# And not when a switch is what ended this session (Steam's "Switch to
+# Desktop", or Gaming Mode started again from inside itself): logind already
+# reports the session `closing`, the switch has chosen where to go, and
+# answering it from here used to undo it. Measured on katana: Gaming Mode
+# restarted from inside itself landed on the desktop, because this hook ran
+# 0.2 s after the new session had already started.
 SESSION_HELPER="${RIME_SESSION_HELPER:-/usr/libexec/rime-session-select}"
 if [ "${RIME_GAMING_NO_RETURN:-0}" != "1" ] && [ -x "${SESSION_HELPER}" ]; then
-    case "$(systemctl is-system-running 2>/dev/null)" in
-        stopping) log "the system is shutting down; not switching back to the desktop" ;;
+    session_state="$(loginctl show-session "${XDG_SESSION_ID:-self}" -p State --value 2>/dev/null)"
+    case "$(systemctl is-system-running 2>/dev/null)/${session_state}" in
+        stopping/*) log "the system is shutting down; not switching back to the desktop" ;;
+        */closing) log "a switch is ending this session; it decides where to go" ;;
         *)
             desk="$(sudo -n "${SESSION_HELPER}" --desktop 2>/dev/null)"
             if [ -n "${desk}" ] && sudo -n "${SESSION_HELPER}" "${desk}" --switch; then

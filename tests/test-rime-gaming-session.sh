@@ -117,7 +117,12 @@ printf '%s\n' "\$*" > "${WORK}/argv-systemd-inhibit"
 while [ \$# -gt 0 ]; do case "\$1" in --*) shift ;; *) break ;; esac; done
 exec "\$@"
 FAKE
-chmod +x "${BIN}/sudo" "${BIN}/systemctl" "${BIN}/systemd-inhibit"
+# loginctl: only the session's State is asked; SESSION_STATE picks the answer.
+cat > "${BIN}/loginctl" <<FAKE
+#!/usr/bin/env bash
+echo "\${SESSION_STATE:-active}"
+FAKE
+chmod +x "${BIN}/sudo" "${BIN}/systemctl" "${BIN}/systemd-inhibit" "${BIN}/loginctl"
 # `rime` is a wrapper around the REAL binary so the selection rule under test
 # is the one that ships, while `rime game start` still cannot reach a bus.
 #
@@ -718,6 +723,14 @@ if ! grep -q -- "--switch" "${WORK}/sudo-calls" 2>/dev/null; then
     ok "...and not with RIME_GAMING_NO_RETURN=1"
 else
     bad "...and not with RIME_GAMING_NO_RETURN=1" "$(cat "${WORK}/sudo-calls")"
+fi
+
+rm -f "${WORK}/sudo-calls"
+rc="$(run_session "$KATANA" RIME_SESSION_HELPER="${WORK}/helper" SESSION_STATE=closing)"
+if ! grep -q -- "--switch" "${WORK}/sudo-calls" 2>/dev/null; then
+    ok "...and not when a switch is ending the session (it chose where to go)"
+else
+    bad "...and not when a switch is ending the session (it chose where to go)" "$(cat "${WORK}/sudo-calls")"
 fi
 
 printf '\nrime-gaming-session: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
