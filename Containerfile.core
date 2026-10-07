@@ -814,7 +814,7 @@ RUN set -eux; \
     modinfo -k "${KVER}" nvidia >/dev/null \
         || { echo "FATAL: modinfo cannot resolve nvidia for ${KVER}"; exit 1; }; \
     case "$(modinfo -k "${KVER}" -n msi-ec)" in \
-        "${MODDIR}/updates/"*) echo "msi-ec resolves to the updates/ build" ;; \
+        */lib/modules/"${KVER}"/updates/*) echo "msi-ec resolves to the updates/ build" ;; \
         *) echo "FATAL: msi-ec resolves to $(modinfo -k "${KVER}" -n msi-ec), not updates/ (the in-tree one has no Cooler Boost)"; exit 1 ;; \
     esac; \
     if [ "$(cat /usr/share/rime-os/secureboot/modules-signed)" = signed ]; then \
