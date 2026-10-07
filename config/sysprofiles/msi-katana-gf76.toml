@@ -19,6 +19,21 @@ battery = "balanced"
 [tiers.performance]
 governor = "performance"
 epp = "performance"
+# CPU package power limits [sustained PL1, burst PL2] in watts, held while on
+# this tier (rimed pauses thermald for the duration; any other tier hands the
+# limits back to the firmware and restarts it).
+#
+# The firmware's DPTF policy, applied by thermald --adaptive, holds this
+# i7-12700H to 38 W / 45 W. Intel rates it 45 W base / 115 W maximum turbo.
+# Measured 2026-10-08 (Cyberpunk 2077 built-in benchmark, CPU-bound
+# configuration, on a cooling pad, two runs each):
+#   thermald (38/45)  55-56 fps avg, 1 % low 25-26
+#   38/90             78-86 fps,     1 % low 25
+#   45/90             97 fps,        1 % low 64   <- chosen
+#   45/115, 60/115, 80/115: 97 fps, 1 % low 64-65 (no further gain)
+# The 45 W sustained limit is Intel's base power; the 90 W burst stays under
+# Intel's 115 W. Package peaked at 96-97 C (the CPU throttles itself at 100 C).
+cpu_power_limit_w = [45, 90]
 
 [tiers.balanced]
 governor = "powersave"
@@ -101,8 +116,11 @@ irq = "away-from-game"
 irq_pin_to_game = ["nvidia"]
 cgroup = "/sys/fs/cgroup/rime-game"
 
-# sched-ext: "auto", which on THIS CPU means none — the game gets the kernel's
-# own scheduler, the same one the desktop runs.
+# sched-ext: none — the game gets the kernel's own scheduler (BORE), the same
+# one the desktop runs. Measured best on this machine (2026-10-08): a CPU-bound
+# stand-in game ran 90-91 fps / 1 % low 85-87 under it, against 61-66 / 53 under
+# scx_lavd as Gaming Mode loaded it, 70-75 / 53-55 under lavd --performance,
+# 85 / 77 under bpfland -m performance and 68 / 56 under p2dq performance mode.
 #
 # This said scx_lavd until 2026-10-07, when Cyberpunk 2077 ran slower and
 # choppier in Gaming Mode than on the desktop. Measured in a live Gaming Mode
@@ -117,7 +135,7 @@ cgroup = "/sys/fs/cgroup/rime-game"
 #
 # Set it to "scx_lavd" to load lavd anyway: the patched build is still in the
 # image, and scxctl still drives it.
-scx = "auto"
+scx = ""
 
 # RTX 3070 Laptop (GA104, 8 GB GDDR6). No clock locks: the card boosts on its
 # own, exactly as it does on the desktop.

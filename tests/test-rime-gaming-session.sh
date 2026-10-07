@@ -94,6 +94,30 @@ make_fake mangoapp
 # getcap that reports no file capability: the shipped state of every Rime
 # machine today, and the state §6.2 measured.
 make_fake getcap
+# Nothing the session does on its way out may reach the real machine: `sudo`
+# here would switch the developer's own session. The fakes record argv.
+# `sudo -n … --desktop` answers "hyprland", as the real helper would after a
+# switch in from Hyprland; everything else is recorded and succeeds.
+cat > "${BIN}/sudo" <<FAKE
+#!/usr/bin/env bash
+printf 'sudo %s\n' "\$*" >> "${WORK}/sudo-calls"
+case " \$* " in *" --desktop "*) echo hyprland ;; esac
+exit 0
+FAKE
+# systemctl: only is-system-running is asked; SYSTEM_STATE picks the answer.
+cat > "${BIN}/systemctl" <<FAKE
+#!/usr/bin/env bash
+[ "\$1" = is-system-running ] && echo "\${SYSTEM_STATE:-running}"
+exit 0
+FAKE
+# systemd-inhibit: record the lock asked for, then run the command it wraps.
+cat > "${BIN}/systemd-inhibit" <<FAKE
+#!/usr/bin/env bash
+printf '%s\n' "\$*" > "${WORK}/argv-systemd-inhibit"
+while [ \$# -gt 0 ]; do case "\$1" in --*) shift ;; *) break ;; esac; done
+exec "\$@"
+FAKE
+chmod +x "${BIN}/sudo" "${BIN}/systemctl" "${BIN}/systemd-inhibit"
 # `rime` is a wrapper around the REAL binary so the selection rule under test
 # is the one that ships, while `rime game start` still cannot reach a bus.
 #
@@ -660,6 +684,40 @@ if [[ "$log" == *"does not accept a session owner"* ]]; then
 else
     bad "…and the fallback says the release now depends on a trap polkit can refuse" \
         "log: $(printf '%s' "$log" | tail -6)"
+fi
+
+# ── Gaming Mode is a toggle, and drops laptop behaviour ─────────────────────
+printf '#!/bin/sh\nexit 0\n' > "${WORK}/helper"; chmod +x "${WORK}/helper"
+rm -f "${WORK}/sudo-calls" "${WORK}/argv-systemd-inhibit"
+rc="$(run_session "$KATANA" RIME_SESSION_HELPER="${WORK}/helper")"
+inh="$(cat "${WORK}/argv-systemd-inhibit" 2>/dev/null)"
+if [[ "${inh}" == *"--what=handle-lid-switch:idle "* ]] && [[ "${inh}" == *" gamescope "* ]]; then
+    ok "gamescope runs under a lid-switch + idle inhibitor"
+else
+    bad "gamescope runs under a lid-switch + idle inhibitor" "inhibit argv: ${inh}"
+fi
+if [[ "${inh}" != *sleep* ]]; then ok "...which leaves sleep alone (Steam's Power > Sleep still works)"
+else bad "...which leaves sleep alone (Steam's Power > Sleep still works)" "${inh}"; fi
+if [ -n "$(gs_argv)" ]; then ok "gamescope still runs through the inhibitor"
+else bad "gamescope still runs through the inhibitor" "no gamescope argv"; fi
+if grep -qx "sudo -n ${WORK}/helper hyprland --switch" "${WORK}/sudo-calls" 2>/dev/null; then
+    ok "leaving Gaming Mode switches back to the desktop it came from"
+else
+    bad "leaving Gaming Mode switches back to the desktop it came from" "$(cat "${WORK}/sudo-calls" 2>/dev/null)"
+fi
+rm -f "${WORK}/sudo-calls"
+rc="$(run_session "$KATANA" RIME_SESSION_HELPER="${WORK}/helper" SYSTEM_STATE=stopping)"
+if ! grep -q -- "--switch" "${WORK}/sudo-calls" 2>/dev/null; then
+    ok "...but not while the machine is shutting down"
+else
+    bad "...but not while the machine is shutting down" "$(cat "${WORK}/sudo-calls")"
+fi
+rm -f "${WORK}/sudo-calls"
+rc="$(run_session "$KATANA" RIME_SESSION_HELPER="${WORK}/helper" RIME_GAMING_NO_RETURN=1)"
+if ! grep -q -- "--switch" "${WORK}/sudo-calls" 2>/dev/null; then
+    ok "...and not with RIME_GAMING_NO_RETURN=1"
+else
+    bad "...and not with RIME_GAMING_NO_RETURN=1" "$(cat "${WORK}/sudo-calls")"
 fi
 
 printf '\nrime-gaming-session: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"

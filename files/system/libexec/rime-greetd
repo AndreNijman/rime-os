@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rime OS — greetd, plus the one-shot that makes Gaming Mode a toggle
+#
+#  greetd.service runs this instead of `greetd` (drop-in 50-rime-switch.conf).
+#  Normally it is exactly `exec greetd`. When rime-session-select has just
+#  switched a user between the desktop and Gaming Mode, it left a one-shot
+#  config in /run/rime-greet/switch.toml: the normal config plus an
+#  [initial_session] for that user and session. This consumes it — moves it
+#  aside so a later greetd restart can never reuse it — and starts greetd on it,
+#  so the user lands in the session they asked for without the greeter.
+#
+#  Refused, and greetd starts normally, when the file is not a plain root-owned
+#  0600 file or is more than 60 seconds old: the switch restarts greetd within
+#  seconds of writing it, so anything older is left over from something that
+#  went wrong, and is deleted.
+# ─────────────────────────────────────────────────────────────────────────────
+set -u
+RUN_DIR="${RIME_GREET_RUN_DIR:-/run/rime-greet}"
+S="${RUN_DIR}/switch.toml"
+A="${RUN_DIR}/switch.active.toml"
+GREETD="${RIME_GREETD_BIN:-greetd}"
+MAX_AGE="${RIME_SWITCH_MAX_AGE:-60}"
+
+rm -f "${A}"
+if [ -f "${S}" ] && [ ! -L "${S}" ] \
+   && [ "$(stat -c '%u:%a' "${S}" 2>/dev/null)" = "${RIME_SWITCH_OWNER:-0}:600" ] \
+   && [ $(( $(date +%s) - $(stat -c %Y "${S}") )) -le "${MAX_AGE}" ] \
+   && mv -f "${S}" "${A}"; then
+    echo "rime-greetd: starting greetd on the session switch one-shot" >&2
+    exec "${GREETD}" --config "${A}"
+fi
+[ -e "${S}" ] && echo "rime-greetd: ignoring a stale or unsafe ${S}" >&2
+rm -f "${S}"
+exec "${GREETD}"

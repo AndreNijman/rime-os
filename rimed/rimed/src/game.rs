@@ -337,6 +337,7 @@ impl Ctx {
                 })
                 .collect();
 
+        let power_saving = game::read_power_saving(&self.sys_root);
         let plan = game::plan(&GameInputs {
             cfg: &cfg,
             topo: &topo,
@@ -346,6 +347,7 @@ impl Ctx {
             pids: &placements,
             mems,
             irqbalance: irq::irqbalance_running(Path::new("/proc")),
+            power_saving: &power_saving,
         });
 
         // ── prior state (0 -> 1 only) ────────────────────────────────────────

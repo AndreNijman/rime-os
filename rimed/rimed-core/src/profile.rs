@@ -30,6 +30,15 @@ pub struct TierSettings {
     pub governor: Option<String>,
     pub epp: Option<String>,
     pub platform_profile: Option<String>,
+    /// CPU package power limits held while this tier is active, as
+    /// `[sustained (PL1), burst (PL2)]` in watts. Omitted = the firmware's.
+    ///
+    /// For a DEVICE profile that knows its cooling. On a laptop the firmware's
+    /// limits come from the OEM's DPTF tables, which thermald's adaptive mode
+    /// applies, and they can sit well below what the CPU and its cooler can
+    /// sustain: katana's are 38 W / 45 W for an i7-12700H rated 45 W / 115 W,
+    /// and that alone halved a CPU-bound game's frame rate.
+    pub cpu_power_limit_w: Option<[u32; 2]>,
 }
 
 /// Default tier for AC and battery, used by the daemon's auto-switch.
@@ -305,12 +314,25 @@ pub struct GameModeConfig {
     /// shipped /usr/share/scx_loader/config.toml leaves `default_sched`
     /// commented out. A profile can still opt out explicitly with `scx = ""`.
     ///
-    /// The default is `auto`, not `scx_lavd`, since 2026-10-07: `auto` loads
-    /// scx_lavd on a CPU whose cores are all one kind and leaves the kernel's
-    /// scheduler alone on a P/E hybrid, the same scheduler the desktop runs.
-    /// See [`GameModeConfig::scx_for`] for why. Naming a scheduler still loads
-    /// it on any CPU.
+    /// The default is `""`, the kernel's own scheduler (BORE on Rime's
+    /// kernel), the one the desktop runs, since 2026-10-08. A game-shaped
+    /// CPU-bound load (one busy main thread, a job worker per CPU) measured
+    /// faster under it than under every sched-ext scheduler tried, on both
+    /// kinds of CPU:
+    ///
+    /// * i7-12700H (6P+8E): kernel 90-91 fps, 1 % low 85-87; scx_lavd as
+    ///   Gaming Mode loaded it 61-66 / 53; lavd `--performance` 70-75 / 53-55.
+    /// * Ryzen 7 PRO 250 (8 identical cores): kernel 97.4 / 79.5; lavd 94.8 /
+    ///   75; lavd `--performance` 94.6 / 74; bpfland `-m performance` 90.2 / 72.
+    ///
+    /// `auto` (scx_lavd only on a CPU with one kind of core, see
+    /// [`GameModeConfig::scx_for`]) and naming a scheduler remain available.
     pub scx: String,
+    /// `off` (the default): while game mode holds, laptop power saving is
+    /// switched off — USB runtime autosuspend (controllers, dongles, headsets)
+    /// and the audio codec's idle power-down — and put back on exit. `keep`
+    /// leaves both alone.
+    pub power_saving: String,
 }
 
 impl Default for GameModeConfig {
@@ -326,12 +348,18 @@ impl Default for GameModeConfig {
             irq_pin_to_game: Vec::new(),
             nvidia: NvidiaConfig::default(),
             gpu: SysfsGpuConfig::default(),
-            scx: "auto".to_string(),
+            scx: String::new(),
+            power_saving: "off".to_string(),
         }
     }
 }
 
 impl GameModeConfig {
+    /// Whether game mode switches laptop power saving off (`power_saving`).
+    pub fn power_saving_off(&self) -> bool {
+        !self.power_saving.trim().eq_ignore_ascii_case("keep")
+    }
+
     /// The sched-ext scheduler a session loads on this CPU, or `None` for the
     /// kernel's own scheduler.
     ///
@@ -414,6 +442,18 @@ impl Profile {
             if !p.tiers.contains_key(&tier) {
                 bail!("profile '{}' is missing tier '{}'", p.id, tier);
             }
+            // A typo here is written straight into the CPU's power limits, so
+            // it is refused at load, not discovered as a hot or slow machine.
+            if let Some([pl1, pl2]) = p.tiers[&tier].cpu_power_limit_w {
+                if !(5..=250).contains(&pl1) || !(5..=250).contains(&pl2) || pl1 > pl2 {
+                    bail!(
+                        "profile '{}' tier '{}': cpu_power_limit_w = [{pl1}, {pl2}] must be \
+                         [sustained, burst] watts, each 5-250, sustained <= burst",
+                        p.id,
+                        tier
+                    );
+                }
+            }
         }
         Ok(p)
     }
@@ -451,6 +491,15 @@ impl Profile {
         }
         if let Some(p) = &s.platform_profile {
             actions.push(Action::PlatformProfile(p.clone()));
+        }
+        // Only a profile that holds power limits in SOME tier hands them back
+        // in the others; every other profile's plans are unchanged.
+        match s.cpu_power_limit_w {
+            Some([pl1_w, pl2_w]) => actions.push(Action::CpuPowerLimit { pl1_w, pl2_w }),
+            None if self.tiers.values().any(|t| t.cpu_power_limit_w.is_some()) => {
+                actions.push(Action::CpuPowerFirmware)
+            }
+            None => {}
         }
         actions
     }

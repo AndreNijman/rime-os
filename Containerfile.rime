@@ -110,6 +110,12 @@ COPY --chmod=0755 files/system/libexec/rime-gaming-session \
      /usr/libexec/rime-gaming-session
 COPY --chmod=0755 files/system/libexec/rime-session-select \
      /usr/libexec/rime-session-select
+# Gaming Mode is a toggle: greetd starts through rime-greetd, which consumes the
+# one-shot autologin rime-session-select leaves for a desktop <-> Gaming Mode
+# switch (see both files' headers).
+COPY --chmod=0755 files/system/libexec/rime-greetd /usr/libexec/rime-greetd
+COPY files/system/units/50-rime-greetd-switch.conf \
+     /usr/lib/systemd/system/greetd.service.d/50-rime-greetd-switch.conf
 COPY files/system/sudoers/rime-session-select \
      /etc/sudoers.d/040-rime-session-select
 COPY files/system/limits/30-rime-gaming-rtprio.conf \
@@ -124,6 +130,9 @@ RUN set -eux; \
     visudo -cf /etc/sudoers.d/040-rime-session-select; \
     bash -n /usr/libexec/rime-gaming-session; \
     bash -n /usr/libexec/rime-session-select; \
+    bash -n /usr/libexec/rime-greetd; \
+    grep -q '^ExecStart=/usr/libexec/rime-greetd$' /usr/lib/systemd/system/greetd.service.d/50-rime-greetd-switch.conf; \
+    command -v greetd >/dev/null || { echo "FATAL: rime-greetd execs greetd, which is not on PATH"; exit 1; }; \
     # The gate that keeps the entry hidden until its packages exist. Without
     # this line the session is offered on every machine and fails on almost all
     # of them, which is the regression this whole arrangement exists to avoid.
@@ -204,6 +213,27 @@ RUN set -eux; \
     test -e /usr/lib64/libGLX_mesa.so.0; \
     test -s /usr/lib/modprobe.d/50-rime-nvidia.conf; \
     echo "gpu: nvidia + controller modules present, mesa intact"
+
+# ── NTSYNC: Windows synchronisation primitives in the kernel, for Proton ──
+# Proton 11 (and Wine 11) use /dev/ntsync whenever it exists and fall back to
+# fsync when it does not. The kernel builds the driver as a module, and
+# nothing loads it on demand: it registers a dynamic misc minor, so no udev or
+# open() autoload ever fires. Before this file, every Rime machine ran every
+# Windows game on the fallback. SteamOS, Bazzite and CachyOS ship the same
+# one-line modules-load.d entry. The device is created 0666 by the driver
+# (`.mode = 0666`), so no udev rule is needed; Proton opens it read-only.
+#
+# Measured on katana (i7-12700H, RTX 3070 Laptop, Proton Experimental 11.0,
+# 2026-10-08), Cyberpunk 2077's built-in benchmark in a CPU-bound
+# configuration: 51.4 -> 59.3 fps average, 1 % low 24.5 -> 28.0.
+RUN set -eux; \
+    KVER="$(cat /usr/lib/rime-kver)"; \
+    test -n "$(find "/usr/lib/modules/${KVER}" -name 'ntsync.ko*' | head -n1)" \
+        || { echo "FATAL: kernel ${KVER} has no ntsync module; /dev/ntsync would never exist"; exit 1; }; \
+    mkdir -p /usr/lib/modules-load.d; \
+    printf '%s\n' '# Proton/Wine NT synchronisation driver (/dev/ntsync). Rime OS.' 'ntsync' \
+        > /usr/lib/modules-load.d/rime-ntsync.conf; \
+    echo "ntsync: loaded at boot for Proton"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # M2 — branding (Plymouth). The shared M2 concerns (Rime Shell first-boot

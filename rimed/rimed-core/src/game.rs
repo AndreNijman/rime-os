@@ -12,6 +12,8 @@
 //! daemon's existing tier engine and fan controller, which have their own
 //! restore paths.
 
+use std::path::{Path, PathBuf};
+
 use crate::gpu::{self, GpuDevice, NvidiaGpu, SysfsGpuPrior};
 use crate::irq::{self, IrqEntry};
 use crate::profile::{CpusetPolicy, GameModeConfig, IrqPolicy};
@@ -207,6 +209,45 @@ pub struct GameInputs<'a> {
     /// Whether an `irqbalance` daemon is running; it will undo IRQ steering, so
     /// the plan says so out loud rather than pretending the pinning holds.
     pub irqbalance: bool,
+    /// The laptop power-saving controls on this machine and what they hold
+    /// now ([`read_power_saving`]); turned off for the session when the
+    /// profile's `power_saving` is `off`.
+    pub power_saving: &'a [PowerSavingKnob],
+}
+
+/// One power-saving control game mode switches off, and what it held before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerSavingKnob {
+    pub path: String,
+    pub prior: String,
+    pub want: String,
+    pub what: &'static str,
+}
+
+/// Read (never write) the laptop power-saving controls game mode turns off:
+///
+/// * every USB device's runtime PM (`power/control`): `auto` lets a
+///   controller, receiver or headset autosuspend after 2 s idle, and its
+///   first input after that pays the resume;
+/// * the HDA codec's `power_save` timeout (Fedora: 10 s), which powers the
+///   codec down in silence and pops or clips the next sound.
+pub fn read_power_saving(sys_root: &Path) -> Vec<PowerSavingKnob> {
+    let read = |p: &Path| std::fs::read_to_string(p).ok().map(|v| v.trim().to_string());
+    let mut out = Vec::new();
+    let hda = sys_root.join("module/snd_hda_intel/parameters/power_save");
+    if let Some(v) = read(&hda) {
+        out.push(PowerSavingKnob { path: hda.display().to_string(), prior: v, want: "0".into(), what: "audio power_save" });
+    }
+    if let Ok(entries) = std::fs::read_dir(sys_root.join("bus/usb/devices")) {
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("power/control")).collect();
+        paths.sort();
+        for p in paths {
+            if let Some(v) = read(&p) {
+                out.push(PowerSavingKnob { path: p.display().to_string(), prior: v, want: "on".into(), what: "usb runtime pm" });
+            }
+        }
+    }
+    out
 }
 
 /// The symmetric plan.
@@ -483,6 +524,23 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
              the knob at its default or this driver does not publish one",
             vendors.join(", ")
         ));
+    }
+
+    // ── 4. laptop power saving off (USB autosuspend, audio power-down) ──────
+    if cfg.power_saving_off() {
+        let mut restore = Vec::new();
+        for k in inputs.power_saving.iter().filter(|k| k.prior != k.want) {
+            enter.push(Action::PowerSaveAttr { path: k.path.clone(), value: k.want.clone(), what: k.what.into() });
+            restore.push(Action::PowerSaveAttr { path: k.path.clone(), value: k.prior.clone(), what: k.what.into() });
+        }
+        if !restore.is_empty() {
+            notes.push(format!(
+                "laptop power saving off for the session: {} control(s) (USB autosuspend, audio power-down)",
+                restore.len()
+            ));
+        }
+        restore.append(&mut exit);
+        exit = restore;
     }
 
     // ── exit: IRQs, then release the cgroup ──────────────────────────────────

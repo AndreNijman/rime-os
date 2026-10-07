@@ -408,7 +408,40 @@ log "starting: gamescope ${GS_ARGS[*]} -- steam ${STEAM_ARGS[*]}"
 # Not exec'd: the EXIT trap has to run so game mode is released when Steam
 # quits. gamescope exiting is the signal that Gaming Mode is over, and greetd
 # then brings the greeter back.
-gamescope "${GS_ARGS[@]}" -- steam "${STEAM_ARGS[@]}"
+# ── No laptop behaviour while Gaming Mode runs ──────────────────────────────
+# Closing the lid must not suspend a machine playing on an external screen,
+# and nothing idle-related should fire mid-game. `handle-lid-switch` and
+# `idle` only: `sleep` stays allowed, so Steam's own Power > Sleep still works.
+# The power side (full CPU power limits, USB and audio power saving off) is
+# rimed's game mode, engaged above. systemd-inhibit holds the lock exactly as
+# long as gamescope runs.
+INHIBIT=()
+if command -v systemd-inhibit >/dev/null 2>&1; then
+    INHIBIT=(systemd-inhibit --what=handle-lid-switch:idle --who="Rime Gaming Mode" \
+             --why="Gaming Mode is running" --mode=block)
+fi
+"${INHIBIT[@]}" gamescope "${GS_ARGS[@]}" -- steam "${STEAM_ARGS[@]}"
 rc=$?
 log "gamescope exited with ${rc}"
+
+# ── Leaving Gaming Mode lands on the desktop ────────────────────────────────
+# Gaming Mode is a toggle: rime-session-select switches straight back into the
+# desktop session the user came from, with no greeter in between (see its
+# header for why that is safe). Not while the machine is shutting down or
+# rebooting — Steam's own Power menu ends the session that way too — and not
+# when RIME_GAMING_NO_RETURN=1 (debugging, or a user who wants the greeter).
+SESSION_HELPER="${RIME_SESSION_HELPER:-/usr/libexec/rime-session-select}"
+if [ "${RIME_GAMING_NO_RETURN:-0}" != "1" ] && [ -x "${SESSION_HELPER}" ]; then
+    case "$(systemctl is-system-running 2>/dev/null)" in
+        stopping) log "the system is shutting down; not switching back to the desktop" ;;
+        *)
+            desk="$(sudo -n "${SESSION_HELPER}" --desktop 2>/dev/null)"
+            if [ -n "${desk}" ] && sudo -n "${SESSION_HELPER}" "${desk}" --switch; then
+                log "switching back to the desktop (${desk})"
+            else
+                log "could not switch back to the desktop; the greeter will come back"
+            fi
+            ;;
+    esac
+fi
 exit "${rc}"

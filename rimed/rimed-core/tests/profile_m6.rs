@@ -111,8 +111,8 @@ fn katana_carries_the_real_m6_values() {
     assert_eq!(game.irq_pin_to_game, vec!["nvidia".to_string()]);
     assert_eq!(game.cgroup, "/sys/fs/cgroup/rime-game");
 
-    // `auto`: the kernel's own scheduler on this P/E CPU (2026-10-07).
-    assert_eq!(game.scx, "auto");
+    // The kernel's own scheduler (measured best here, 2026-10-08).
+    assert_eq!(game.scx, "");
 
     let nv = &game.nvidia;
     assert!(nv.enabled && nv.persistence);
