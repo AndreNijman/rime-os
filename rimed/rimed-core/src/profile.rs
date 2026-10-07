@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::tier::{Action, Tier};
+use crate::topology::CoreTopology;
 
 /// Where the profile classifies in the layered selection hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -283,18 +284,19 @@ pub struct GameModeConfig {
     /// else, so a Rime machine with an AMD or Intel GPU — which is most of
     /// them — got cpuset pinning and IRQ steering and no GPU handling at all.
     pub gpu: SysfsGpuConfig,
-    /// sched-ext scheduler to load for the duration of a game session.
-    /// Empty string = leave the kernel's own scheduler alone.
+    /// sched-ext scheduler to load for the duration of a game session:
+    /// `auto` (the default), a scheduler name, or empty string = leave the
+    /// kernel's own scheduler alone.
     ///
     /// The image ships a CachyOS kernel with CONFIG_SCHED_CLASS_EXT=y and
     /// sixteen scx schedulers, and until now NOTHING selected one — the whole
     /// sched-ext capability that kernel was chosen for sat unused.
     ///
-    /// Defaults to `scx_lavd` (latency-aware virtual deadline: the scx
-    /// scheduler built for interactive/gaming latency, as opposed to
-    /// scx_rusty/scx_layered which target throughput). Defaulting it rather
-    /// than naming it per-profile is what makes Gaming Mode tuned on ANY
-    /// machine instead of only on the author's Katana.
+    /// `scx_lavd` is the scheduler meant (latency-aware virtual deadline: the
+    /// scx scheduler built for interactive/gaming latency, as opposed to
+    /// scx_rusty/scx_layered which target throughput). Defaulting rather than
+    /// naming it per-profile is what makes Gaming Mode tuned on ANY machine
+    /// instead of only on the author's Katana.
     ///
     /// Safe on a machine that never games, by construction rather than luck:
     /// `scxctl` is a D-Bus client for scx_loader, whose unit is `Type=dbus` and
@@ -302,6 +304,12 @@ pub struct GameModeConfig {
     /// scheduler daemon runs on a laptop that never enters game mode, and the
     /// shipped /usr/share/scx_loader/config.toml leaves `default_sched`
     /// commented out. A profile can still opt out explicitly with `scx = ""`.
+    ///
+    /// The default is `auto`, not `scx_lavd`, since 2026-10-07: `auto` loads
+    /// scx_lavd on a CPU whose cores are all one kind and leaves the kernel's
+    /// scheduler alone on a P/E hybrid, the same scheduler the desktop runs.
+    /// See [`GameModeConfig::scx_for`] for why. Naming a scheduler still loads
+    /// it on any CPU.
     pub scx: String,
 }
 
@@ -318,12 +326,43 @@ impl Default for GameModeConfig {
             irq_pin_to_game: Vec::new(),
             nvidia: NvidiaConfig::default(),
             gpu: SysfsGpuConfig::default(),
-            scx: "scx_lavd".to_string(),
+            scx: "auto".to_string(),
         }
     }
 }
 
 impl GameModeConfig {
+    /// The sched-ext scheduler a session loads on this CPU, or `None` for the
+    /// kernel's own scheduler.
+    ///
+    /// `auto` is `None` on a P/E hybrid, and that is a measurement, not
+    /// caution. scx_lavd (1.1.3) splits threads between P- and E-cores by
+    /// `perf_cri`, which is built from how often a thread sleeps and wakes
+    /// others (`lat_cri.bpf.c`), and it re-picks the CPU at every wake-up. A
+    /// game's bottleneck thread does the opposite: it runs flat out and rarely
+    /// sleeps, so nothing in that score keeps it on a P-core. On katana
+    /// (i7-12700H, 2026-10-07) Cyberpunk 2077's `GameThread` was 98 % busy,
+    /// the GPU idle half the time, and under scx_lavd the thread sat on an
+    /// E-core in 65 of 200 samples and visited all 20 CPUs in 5 s. The same
+    /// game on the desktop, under the kernel's scheduler, played smoothly.
+    /// `--performance` does not help: it turns off core compaction, not that
+    /// split, and 1.1.3 has no option that does.
+    ///
+    /// On a CPU with one kind of core the split does not exist (lavd treats
+    /// every thread as performance-critical there), so `auto` keeps lavd.
+    /// "One kind" is [`CoreTopology::has_efficiency_cores`], not `is_hybrid`:
+    /// AMD's preferred-core ranking is not a second kind of core.
+    pub fn scx_for(&self, topo: &CoreTopology) -> Option<String> {
+        match self.scx.trim() {
+            "" => None,
+            s if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("none") => None,
+            s if s.eq_ignore_ascii_case("auto") => {
+                (!topo.has_efficiency_cores()).then(|| "scx_lavd".to_string())
+            }
+            s => Some(s.to_string()),
+        }
+    }
+
     /// Parse the `cpuset` string into a policy.
     pub fn cpuset_policy(&self) -> CpusetPolicy {
         match self.cpuset.trim().to_ascii_lowercase().as_str() {

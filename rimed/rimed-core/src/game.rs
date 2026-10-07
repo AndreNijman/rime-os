@@ -286,6 +286,23 @@ pub fn resolve_cpus(cfg: &GameModeConfig, topo: &CoreTopology, notes: &mut Vec<S
     }
 }
 
+/// The IRQ steering `plan` leaves out of a session that starts with an empty
+/// cpuset, planned when the first game process is attached to it: the same
+/// rule as `plan`, `(steer, restore)`, both empty when the profile does not
+/// steer or `cpus` confines nothing.
+pub fn steer_on_attach(
+    cfg: &GameModeConfig,
+    topo: &CoreTopology,
+    irqs: &[IrqEntry],
+    cpus: &[u32],
+) -> (Vec<Action>, Vec<Action>) {
+    let pinning = !cpus.is_empty() && cpus.len() < topo.all.len().max(1);
+    if cfg.irq_policy() != IrqPolicy::AwayFromGame || !pinning {
+        return (Vec::new(), Vec::new());
+    }
+    irq::plan_steer(irqs, cpus, &topo.complement(cpus), &cfg.irq_pin_to_game)
+}
+
 /// Build the enter/exit plans.
 pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
     let cfg = inputs.cfg;
@@ -302,13 +319,23 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
     // cpuset (and undo it after the pinning is unwound), rather than shuffling
     // tasks that are mid-move.
     //
-    // Empty `scx` = leave the kernel scheduler alone, which is the default for
-    // every profile that does not ask. The Gaming profiles opt in to scx_lavd:
-    // it is the latency-first sched-ext scheduler, which is the one that helps a
-    // game rather than a build farm.
-    if !cfg.scx.trim().is_empty() {
+    // `scx_for` resolves the profile's `scx`: empty = the kernel scheduler,
+    // a name = that scheduler, `auto` (the default) = scx_lavd unless the CPU
+    // is a P/E hybrid, where lavd was measured moving a game's bottleneck
+    // thread onto E-cores. The reasoning is on `GameModeConfig::scx_for`.
+    let scx = cfg.scx_for(inputs.topo);
+    if scx.is_none() && cfg.scx.trim().eq_ignore_ascii_case("auto") {
+        notes.push(format!(
+            "sched-ext: none on this CPU (P-cores {}, E-cores {}). The game gets the \
+             kernel's own scheduler, the same as the desktop: scx_lavd puts a game's \
+             busiest thread on E-cores. Set `scx = \"scx_lavd\"` in the profile to load it anyway.",
+            inputs.topo.pcore_list(),
+            inputs.topo.ecore_list()
+        ));
+    }
+    if let Some(sched) = &scx {
         enter.push(Action::ScxSwitch {
-            sched: cfg.scx.trim().to_string(),
+            sched: sched.clone(),
         });
         // NOTE the exit half is appended at the very END of this function, not
         // here: pushing it now would make ScxStop the FIRST exit action, i.e.
@@ -332,7 +359,7 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
             "sched-ext: this profile ASKS for {} and stops it again on exit. \
              Whether it loaded is a separate fact, reported as `scx_state` once \
              a session is running.",
-            cfg.scx.trim()
+            sched
         ));
     }
 
@@ -359,11 +386,24 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
     let (mut steer, mut irq_restore) = match cfg.irq_policy() {
         IrqPolicy::Off => (Vec::new(), Vec::new()),
         IrqPolicy::AwayFromGame => {
-            if pinning {
-                irq::plan_steer(inputs.irqs, &cpus, &housekeeping, &cfg.irq_pin_to_game)
-            } else {
+            if !pinning {
                 notes.push("IRQ steering skipped — the game is not confined to a subset of CPUs".into());
                 (Vec::new(), Vec::new())
+            } else if inputs.pids.is_empty() {
+                // Gaming Mode starts this way: the session names no game, so the
+                // cpuset is empty and the game runs on every CPU. Moving every
+                // interrupt onto the "other" cores would then pile them onto
+                // cores the game is using too (katana: 47 IRQs on its E-cores,
+                // where Cyberpunk's threads also ran). `steer_on_attach` moves
+                // them when a game process actually enters the cpuset.
+                notes.push(
+                    "IRQ steering waits for a game: no process is in the cpuset yet, so \
+                     interrupts stay where they are until one is attached"
+                        .into(),
+                );
+                (Vec::new(), Vec::new())
+            } else {
+                irq::plan_steer(inputs.irqs, &cpus, &housekeeping, &cfg.irq_pin_to_game)
             }
         }
     };
@@ -456,7 +496,7 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
 
     // Hand scheduling back only after every cpuset/IRQ/clock action has been
     // unwound — the mirror of loading it first on enter.
-    if !cfg.scx.trim().is_empty() {
+    if scx.is_some() {
         exit.push(Action::ScxStop);
     }
 

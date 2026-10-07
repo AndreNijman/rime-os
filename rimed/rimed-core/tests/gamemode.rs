@@ -379,7 +379,10 @@ fn a_running_irqbalance_is_called_out() {
         nvidia: &[],
         gpus: &[],
         irqs: &irqs,
-        pids: &[],
+        pids: &[PidPlacement {
+            pid: 4242,
+            prior_cgroup: Some(f.abs("sys/fs/cgroup/user.slice")),
+        }],
         mems: "0".into(),
         irqbalance: true,
     });
@@ -587,12 +590,107 @@ fn scx_plan(scx: &str) -> (Fixture, game::GamePlan) {
 }
 
 #[test]
-fn scx_defaults_to_the_gaming_scheduler() {
-    // Every machine's game mode asks for scx_lavd, so Gaming Mode is tuned on
-    // hardware other than the author's. This is safe for Daily because
-    // scx_loader.service is only enabled in the Gaming image, which makes the
-    // switch a logged no-op there — see the field's docs.
-    assert_eq!(GameModeConfig::default().scx, "scx_lavd");
+fn scx_defaults_to_auto() {
+    // Every machine's game mode still asks for a scheduler by default, so
+    // Gaming Mode is tuned on hardware other than the author's; `auto` decides
+    // which one from the CPU (tests below).
+    assert_eq!(GameModeConfig::default().scx, "auto");
+}
+
+/// The same machine as `machine()`, minus the P/E split: 16 CPUs of one kind.
+/// `acpi_cppc/highest_perf` still differs per CPU, the way AMD ranks its
+/// preferred cores (values from a Ryzen 7 PRO 250), and `cpu_capacity` is 1024
+/// everywhere.
+fn uniform_machine(tag: &str) -> Fixture {
+    let f = Fixture::new(tag);
+    let ranks = [202, 202, 196, 196, 208, 208, 232, 232, 214, 214, 232, 232, 226, 226, 220, 220];
+    for (c, rank) in ranks.iter().enumerate() {
+        f.write(&format!("sys/devices/system/cpu/cpu{c}/cpu_capacity"), "1024\n");
+        f.write(&format!("sys/devices/system/cpu/cpu{c}/acpi_cppc/highest_perf"), &format!("{rank}\n"));
+    }
+    f.write("sys/devices/system/cpu/online", "0-15\n");
+    f.write("proc/irq/24/smp_affinity_list", "0-15\n");
+    fs::create_dir_all(f.path().join("proc/irq/24/xhci_hcd")).unwrap();
+    f.write("sys/fs/cgroup/cgroup.subtree_control", "memory pids");
+    f.write("sys/fs/cgroup/cpuset.mems.effective", "0\n");
+    f
+}
+
+fn default_plan(f: &Fixture) -> game::GamePlan {
+    let cfg = GameModeConfig {
+        cgroup: f.abs("sys/fs/cgroup/rime-game"),
+        ..GameModeConfig::default()
+    };
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        gpus: &[],
+        irqs: &irq::enumerate(&f.path().join("proc/irq")),
+        pids: &[],
+        mems: "0".into(),
+        irqbalance: false,
+    })
+}
+
+#[test]
+fn auto_gives_a_p_e_hybrid_the_kernels_own_scheduler() {
+    // katana, 2026-10-07: under scx_lavd Cyberpunk's 98 %-busy main thread sat
+    // on an E-core a third of the time, and the game ran slower than on the
+    // desktop, which runs the kernel's scheduler. On a P/E CPU `auto` is that
+    // scheduler: nothing to start, nothing to stop.
+    let f = machine("scx-auto-hybrid");
+    let plan = default_plan(&f);
+    assert!(
+        !plan.enter.iter().any(|a| matches!(a, Action::ScxSwitch { .. })),
+        "auto must not load a scheduler on a P/E CPU: {:?}",
+        plan.enter
+    );
+    assert!(!plan.exit.iter().any(|a| matches!(a, Action::ScxStop)));
+    let note = plan
+        .notes
+        .iter()
+        .find(|n| n.starts_with("sched-ext:"))
+        .unwrap_or_else(|| panic!("the choice must be explained: {:?}", plan.notes));
+    assert!(note.contains("0-11") && note.contains("12-19"), "name the cores: {note}");
+    assert!(note.contains("scx_lavd"), "say how to get lavd back: {note}");
+}
+
+#[test]
+fn auto_still_loads_lavd_on_one_kind_of_core_even_with_ranked_cores() {
+    // The negative control, and the trap it guards: AMD's preferred-core
+    // ranking makes `is_hybrid()` read 16 identical cores as 4 P + 12 E. That
+    // is not a second kind of core, and `auto` must not drop lavd for it.
+    let f = uniform_machine("scx-auto-uniform");
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    assert!(topo.is_hybrid(), "the fixture must reproduce the ranked-core split");
+    assert!(!topo.has_efficiency_cores());
+    let plan = default_plan(&f);
+    assert_eq!(
+        plan.enter.first(),
+        Some(&Action::ScxSwitch { sched: "scx_lavd".into() }),
+        "auto must load lavd on a CPU with one kind of core"
+    );
+    assert_eq!(plan.exit.last(), Some(&Action::ScxStop));
+}
+
+#[test]
+fn scx_keywords_resolve_against_the_cpu() {
+    let hybrid = machine("scx-kw-hybrid");
+    let uniform = uniform_machine("scx-kw-uniform");
+    let h = CoreTopology::detect_from(&hybrid.path().join("sys"));
+    let u = CoreTopology::detect_from(&uniform.path().join("sys"));
+    let with = |scx: &str| GameModeConfig { scx: scx.into(), ..GameModeConfig::default() };
+    for off in ["", "  ", "off", "none", "OFF"] {
+        assert_eq!(with(off).scx_for(&h), None, "{off:?} on hybrid");
+        assert_eq!(with(off).scx_for(&u), None, "{off:?} on uniform");
+    }
+    assert_eq!(with("auto").scx_for(&h), None);
+    assert_eq!(with("Auto").scx_for(&u), Some("scx_lavd".into()));
+    // A named scheduler is a decision the profile made: it loads anywhere.
+    assert_eq!(with("scx_lavd").scx_for(&h), Some("scx_lavd".into()));
+    assert_eq!(with("scx_bpfland").scx_for(&u), Some("scx_bpfland".into()));
 }
 
 #[test]
@@ -705,7 +803,8 @@ fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
     // default, `cpuset = "off"` plans the scheduler switch and NOTHING else. If
     // a future change starts planning cgroup work behind an off cpuset, this
     // fails rather than hiding behind "well, the plan is non-empty now".
-    let f = machine("cpuset-off-scx");
+    // On a CPU with one kind of core, where `auto` is lavd.
+    let f = uniform_machine("cpuset-off-scx");
     let cfg = GameModeConfig {
         cpuset: "off".into(),
         cgroup: f.abs("sys/fs/cgroup/rime-game"),
@@ -728,6 +827,79 @@ fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
         "cpuset off must plan the scheduler switch and nothing else"
     );
     assert_eq!(plan.exit, vec![Action::ScxStop]);
+}
+
+// ── interrupts move only when a game is actually in the cpuset ──────────────
+
+#[test]
+fn a_session_with_no_game_in_its_cpuset_moves_no_interrupts() {
+    // Gaming Mode's own call: `rime game start --owner-pid $$`, no game. On
+    // katana the plan still moved 47 interrupts onto the E-cores, which the
+    // game (running on all 20 CPUs, outside the empty cpuset) was using too.
+    let f = machine("irq-no-game");
+    let cfg = katana_cfg(&f);
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    let irqs = irq::enumerate(&f.path().join("proc/irq"));
+    let plan = game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        gpus: &[],
+        irqs: &irqs,
+        pids: &[],
+        mems: "0".into(),
+        irqbalance: false,
+    });
+    assert_eq!(plan.irqs_attempted, 0);
+    assert!(
+        !plan.enter.iter().any(|a| matches!(a, Action::IrqAffinity { .. })),
+        "no game in the cpuset, so no interrupt moves: {:?}",
+        plan.enter
+    );
+    assert!(
+        plan.notes.iter().any(|n| n.starts_with("IRQ steering waits for a game")),
+        "and status says so: {:?}",
+        plan.notes
+    );
+    // The cpuset itself is still made ready for a game to be attached to.
+    assert!(plan.enter.iter().any(|a| matches!(a, Action::CgroupEnsure { .. })));
+
+    // The control: the same plan WITH a game moves them, so the zero above is
+    // the rule and not a fixture with nothing to steer.
+    let with_game = game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        gpus: &[],
+        irqs: &irqs,
+        pids: &[PidPlacement { pid: 4242, prior_cgroup: None }],
+        mems: "0".into(),
+        irqbalance: false,
+    });
+    assert!(with_game.irqs_attempted > 0);
+}
+
+#[test]
+fn the_first_attach_moves_the_interrupts_the_plan_held_back() {
+    let f = machine("irq-on-attach");
+    let cfg = katana_cfg(&f);
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    let irqs = irq::enumerate(&f.path().join("proc/irq"));
+    let pcores: Vec<u32> = (0..=11).collect();
+
+    // Exactly what a plan with the game in it from the start would steer.
+    let (steer, restore) = game::steer_on_attach(&cfg, &topo, &irqs, &pcores);
+    let (want_steer, want_restore) =
+        irq::plan_steer(&irqs, &pcores, &topo.complement(&pcores), &cfg.irq_pin_to_game);
+    assert!(!steer.is_empty());
+    assert_eq!(steer, want_steer);
+    assert_eq!(restore, want_restore);
+
+    // Nothing when the profile does not steer, or the cpuset confines nothing.
+    let off = GameModeConfig { irq: "off".into(), ..katana_cfg(&f) };
+    assert_eq!(game::steer_on_attach(&off, &topo, &irqs, &pcores), (vec![], vec![]));
+    assert_eq!(game::steer_on_attach(&cfg, &topo, &irqs, &topo.all), (vec![], vec![]));
+    assert_eq!(game::steer_on_attach(&cfg, &topo, &irqs, &[]), (vec![], vec![]));
 }
 
 // ── the session owner: who the daemon watches so a torn-down session releases ─

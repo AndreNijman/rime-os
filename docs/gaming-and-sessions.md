@@ -632,6 +632,7 @@ binary shipped. The patched binary's embedded BPF line info carries the fix
 
 Gaming Mode keeps sched_ext: rimed still asks for `scx_lavd`
 (`rimed/rimed-core/src/profile.rs`), and the image now ships the fixed build.
+(Since 2026-10-07 it asks only on CPUs with one kind of core: see §5f.)
 
 `scx_loader` restarting lavd after every watchdog exit turned one bug into five
 freezes, and rimed reports "sched-ext loaded" once at entry and never looks
@@ -645,6 +646,65 @@ sched-ext off. The cause was Rime Shell's launcher ignoring Steam's
 starts such entries through `switcherooctl launch`
 (`src/scripts/desktop-launch.sh`), so Steam and the games it starts run on the
 discrete GPU.
+
+
+## 5f. Gaming Mode was slower than the desktop: lavd's E-cores, a capped GPU, and an empty cpuset (2026-10-07)
+
+Cyberpunk 2077 ran at a lower, choppier frame rate in Gaming Mode than on the
+desktop on katana (2026.10.07, F45). Read live from the running session, with
+nothing in it changed:
+
+- **CPU-bound.** GPU busy 48 % (`clocks_event_reasons` = idle). The game's
+  `GameThread` ran 4,895 ms of a 5 s window (98 %), from
+  `/proc/PID/task/*/schedstat` deltas.
+- **scx_lavd ran that thread on an E-core in 65 of 200 samples** (field 39 of
+  `/proc/PID/task/TID/stat` every 25 ms) and moved it across all 20 CPUs in 5 s.
+  The source says why (scx v1.1.3, `scheds/rust/scx_lavd/src/bpf/`). On a
+  hybrid CPU, `is_perf_cri()` sends a thread to a big core only when its
+  `perf_cri` is above a threshold that splits capacity between big and little.
+  `perf_cri` is `log2(wait_freq × wake_freq) + log2(runtime × run_freq)`
+  (`lat_cri.bpf.c`). It rewards threads that sleep and wake others often, and a
+  game's bottleneck thread rarely sleeps. The CPU is chosen again at every
+  wake-up. `--performance` only turns off core compaction
+  (`update_thr_perf_cri` still splits), and 1.1.3 has no option that turns the
+  split off.
+- **The P-core cpuset never held the game.** `rime-gaming-session` runs
+  `rime game start --owner-pid $$` with no `--pid`, and nothing calls
+  `AttachPid`. `rime game status` showed cpus 0-11 with no pids, and the game
+  sat in `session-N.scope` with Cpus_allowed 0-19. Even so, the plan moved 47
+  interrupts onto CPUs 12-19, the E-cores the game's threads were also using.
+- **The profile would cap the GPU.** katana's profile locked graphics to
+  `[1200, 1620]` MHz, taking 1620 MHz (the part's rated boost) for its ceiling,
+  while `clocks.max.graphics` is 2100 MHz. In this session the lock was not
+  applied (`gpus_lock_attempted: 0`), so it did not cause this slowdown. Why it
+  was not applied, the profile match or nvidia-smi's answer at enter, was not
+  read.
+
+The desktop runs the kernel's scheduler on all 20 CPUs, with no clock lock and
+no interrupt steering. lavd had never been benchmarked against that on katana.
+It was turned on because it is designed for gaming.
+
+**What changed:**
+
+- `scx` defaults to `auto`: scx_lavd on a CPU with one kind of core, where lavd
+  treats every thread as performance-critical, and the kernel's own scheduler on
+  a P/E hybrid. A profile that names a scheduler still gets it. katana's profile
+  says `auto` and records the measurement.
+- katana's `[gamemode.nvidia]` locks no clocks. The card boosts as it does on
+  the desktop. On this chassis the CPU and GPU share one cooler, so holding the
+  GPU's clocks up while a game waits on the CPU would cost the CPU its headroom.
+- Interrupts move only when a game is in the cpuset: at enter for
+  `rime game start --pid`, at the first attach otherwise
+  (`game::steer_on_attach`). A Gaming Mode session leaves them where they are.
+
+Gaming Mode does not confine the game to the P-cores. Cyberpunk starts 20
+worker threads, and 12 logical CPUs instead of 20 is a different machine for
+it. The sign of that change was never measured, so the knob stays and nothing
+in Gaming Mode uses it.
+
+Not Rime's to fix: Steam turned gamescope's HDR on (gamescope then composites
+every frame, 14-16 % of the GPU), and its frame limiter at 240 = refresh forces
+FIFO. Both are Steam settings, not Rime's.
 
 
 ## 6. The rows that need katana, and the exact commands
@@ -963,6 +1023,9 @@ sudo journalctl -u scx_loader -b -o cat | grep -m1 'func_proto'
 cat /sys/kernel/sched_ext/state          # expect: disabled
 rime game status | grep '^scx_'
 #    expect: scx_requested : scx_lavd / scx_state : not loaded
+#    (Since §5f katana's profile is `scx = "auto"`, which is the kernel's own
+#    scheduler on its P/E CPU: scx_requested is empty and nothing loads. Set
+#    `scx = "scx_lavd"` in a profile override to run this row.)
 
 sudo rime game start
 rime game status | grep '^scx_'

@@ -111,19 +111,28 @@ fn katana_carries_the_real_m6_values() {
     assert_eq!(game.irq_pin_to_game, vec!["nvidia".to_string()]);
     assert_eq!(game.cgroup, "/sys/fs/cgroup/rime-game");
 
+    // `auto`: the kernel's own scheduler on this P/E CPU (2026-10-07).
+    assert_eq!(game.scx, "auto");
+
     let nv = &game.nvidia;
     assert!(nv.enabled && nv.persistence);
-    assert_eq!(nv.graphics_clock, Some(ClockSpec::Range([1200, 1620])));
-    assert_eq!(nv.memory_clock, Some(ClockSpec::Keyword("max".into())));
-    // Resolution against what the GPU actually reports.
-    assert_eq!(nv.graphics_clock.as_ref().unwrap().resolve(1620), Some((1200, 1620)));
+    // No clock locks (2026-10-07). The old [1200, 1620] held the card at its
+    // rated boost, 480 MHz under the 2100 MHz nvidia-smi reports on katana and
+    // the desktop lets it reach.
+    assert_eq!(nv.graphics_clock, None);
+    assert_eq!(nv.memory_clock, None);
+    // The clamp a profile that does lock still gets, against what the GPU
+    // reports.
+    let range = ClockSpec::Range([1200, 1620]);
+    assert_eq!(range.resolve(1620), Some((1200, 1620)));
     assert_eq!(
-        nv.graphics_clock.as_ref().unwrap().resolve(1400),
+        range.resolve(1400),
         Some((1200, 1400)),
         "a ceiling above what the GPU supports is clamped down"
     );
-    assert_eq!(nv.memory_clock.as_ref().unwrap().resolve(6001), Some((6001, 6001)));
-    assert_eq!(nv.memory_clock.as_ref().unwrap().resolve(0), None);
+    let max = ClockSpec::Keyword("max".into());
+    assert_eq!(max.resolve(6001), Some((6001, 6001)));
+    assert_eq!(max.resolve(0), None);
 }
 
 #[test]

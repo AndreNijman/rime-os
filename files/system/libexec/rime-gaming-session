@@ -74,8 +74,11 @@ fi
 # ── Rime game mode: cpuset, IRQ steering, GPU clocks, tier, sched-ext ───────
 # One call does all of it. `rime game start` goes through rimed's D-Bus API,
 # whose polkit action (manage-power) is allow_active=yes, so the session user
-# authorises without a prompt. The profile's `scx` field is what loads
-# scx_lavd — see config/sysprofiles/msi-katana-gf76.toml.
+# authorises without a prompt. The profile's `scx` field picks the sched-ext
+# scheduler: the default `auto` loads scx_lavd only on a CPU without E-cores
+# and leaves a P/E hybrid on the kernel's own scheduler, as on the desktop —
+# see config/sysprofiles/msi-katana-gf76.toml. This call names no game, so
+# nothing enters the P-core cpuset and no interrupt is moved.
 #
 # Best-effort: on a machine whose profile disables game mode, or with rimed
 # down, gaming still works — it is just not tuned.

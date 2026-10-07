@@ -702,6 +702,47 @@ impl Ctx {
         }) {
             bail!("attaching pid {pid}: {e:#}");
         }
+        // The first game into a session that started with an empty cpuset
+        // (Gaming Mode always does) is when its interrupts move: the plan held
+        // them back because, until now, the game ran on every CPU.
+        if session.pids.is_empty() {
+            let topo = CoreTopology::detect_from(&self.sys_root);
+            let entries = irq::enumerate(&self.proc_irq_root);
+            let (steer, restore) = game::steer_on_attach(&cfg, &topo, &entries, &session.cpus);
+            if !steer.is_empty() {
+                for a in &steer {
+                    session.irqs.attempted += 1;
+                    match self.writer.apply(a) {
+                        Ok(Outcome::Landed) => session.irqs.landed += 1,
+                        Ok(Outcome::Refused(why)) | Ok(Outcome::Unknown(why)) => {
+                            session.irqs.first_refusal.get_or_insert(why);
+                        }
+                        Err(e) => {
+                            session.irqs.first_refusal.get_or_insert(format!("{e:#}"));
+                        }
+                    }
+                }
+                // Undone with the rest of the cpuset, as the plan orders it:
+                // interrupts back first, then the processes, then the cgroup.
+                let at = session
+                    .exit_actions
+                    .iter()
+                    .position(|a| {
+                        matches!(a, Action::CgroupAttach { .. } | Action::CgroupRemove { .. })
+                    })
+                    .unwrap_or(session.exit_actions.len());
+                session.exit_actions.splice(at..at, restore);
+                session
+                    .notes
+                    .retain(|n| !n.starts_with("IRQ steering waits for a game"));
+                session.notes.push(format!(
+                    "IRQ steering: {} of {} interrupts moved off CPUs {} when pid {pid} was attached",
+                    session.irqs.landed,
+                    session.irqs.attempted,
+                    session.cpu_list
+                ));
+            }
+        }
         // Restore this PID before the cgroup is torn down: the attach must land
         // ahead of the CgroupRemove that already sits at the end of the plan.
         if let Some(prior) = prior {
@@ -827,10 +868,14 @@ impl Ctx {
                 // too, rather than making somebody start a session to find out
                 // that no session can work.
                 let btf = scx_btf_support(&self.sys_root);
+                // What the profile would load on THIS CPU (`auto` resolves
+                // against the topology), so the idle answer matches what a
+                // session started now would ask for.
+                let topo = CoreTopology::detect_from(&self.sys_root);
                 insert(
                     &mut m,
                     "scx_requested",
-                    Value::from(cfg.scx.trim().to_string()),
+                    Value::from(cfg.scx_for(&topo).unwrap_or_default()),
                 );
                 insert(&mut m, "scx_state", Value::from(live.verdict().to_string()));
                 let detail = if btf.blocks_loading() {
@@ -1198,7 +1243,8 @@ mod tests {
         let writer = Arc::new(RefusesEveryIrqWrite::default());
         let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, writer.clone());
 
-        ctx.game_enter(&[]).await.unwrap();
+        // A game in the cpuset from the start: interrupts move at enter.
+        ctx.game_enter(&[std::process::id()]).await.unwrap();
         let status = ctx.game_status().await;
 
         // The negative control: the plan really did contain the writes, so a
@@ -1249,7 +1295,8 @@ mod tests {
         let irq_root = hybrid_machine(&root);
         let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, Arc::new(MockWriter::new()));
 
-        ctx.game_enter(&[]).await.unwrap();
+        // A game in the cpuset from the start: interrupts move at enter.
+        ctx.game_enter(&[std::process::id()]).await.unwrap();
         let status = ctx.game_status().await;
         assert_eq!(u32_of(&status, "irqs_attempted"), 2);
         assert_eq!(u32_of(&status, "irqs_steered"), 2);
@@ -1295,7 +1342,8 @@ mod tests {
             Arc::new(RefusesOneIrqWrite::default()),
         );
 
-        ctx.game_enter(&[]).await.unwrap();
+        // A game in the cpuset from the start: interrupts move at enter.
+        ctx.game_enter(&[std::process::id()]).await.unwrap();
         let status = ctx.game_status().await;
         assert_eq!(u32_of(&status, "irqs_attempted"), 2);
         assert_eq!(u32_of(&status, "irqs_steered"), 1);
@@ -1308,6 +1356,68 @@ mod tests {
         );
 
         ctx.game_exit().await.unwrap();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[tokio::test]
+    async fn gaming_mode_moves_interrupts_only_once_a_game_is_attached() {
+        // Gaming Mode's own shape: enter with no game (`--owner-pid` only).
+        // On katana that moved interrupts onto the E-cores while the game ran
+        // on all 20 CPUs. Now nothing moves until a game is in the cpuset, and
+        // then they move once, and come back at exit.
+        let root = scratch("irq-deferred");
+        let irq_root = hybrid_machine(&root);
+        let writer = Arc::new(MockWriter::new());
+        let ctx = build_ctx(&root, PROFILE_STEER, &irq_root, writer.clone());
+        let irq_writes = |w: &MockWriter| {
+            w.recorded()
+                .into_iter()
+                .filter(|a| matches!(a, Action::IrqAffinity { .. }))
+                .count()
+        };
+
+        ctx.game_enter(&[]).await.unwrap();
+        let status = ctx.game_status().await;
+        assert_eq!(u32_of(&status, "irqs_attempted"), 0);
+        assert_eq!(irq_writes(&writer), 0, "no game, no interrupt moved");
+        assert!(
+            notes_of(&status).iter().any(|n| n.starts_with("IRQ steering waits for a game")),
+            "status must say why nothing moved: {:?}",
+            notes_of(&status)
+        );
+
+        let pid = std::process::id();
+        ctx.game_attach(pid).await.unwrap();
+        let status = ctx.game_status().await;
+        assert_eq!(u32_of(&status, "irqs_attempted"), 2);
+        assert_eq!(u32_of(&status, "irqs_steered"), 2);
+        assert_eq!(irq_writes(&writer), 2);
+        let notes = notes_of(&status);
+        assert!(
+            !notes.iter().any(|n| n.starts_with("IRQ steering waits for a game")),
+            "the waiting note is stale once they moved: {notes:?}"
+        );
+        assert!(
+            notes.iter().any(|n| n.contains("2 of 2") && n.contains(&pid.to_string())),
+            "{notes:?}"
+        );
+
+        // A second attach moves nothing again.
+        ctx.game_attach(1).await.unwrap();
+        assert_eq!(irq_writes(&writer), 2);
+
+        // Exit puts both back, before the cgroup goes.
+        writer.clear();
+        ctx.game_exit().await.unwrap();
+        let exit = writer.recorded();
+        let restored = exit
+            .iter()
+            .filter(|a| matches!(a, Action::IrqAffinity { .. }))
+            .count();
+        assert_eq!(restored, 2, "exit must restore what the attach moved: {exit:?}");
+        let last_irq = exit.iter().rposition(|a| matches!(a, Action::IrqAffinity { .. }));
+        let remove = exit.iter().position(|a| matches!(a, Action::CgroupRemove { .. }));
+        assert!(last_irq < remove, "interrupts come back before the cgroup goes: {exit:?}");
         std::fs::remove_dir_all(&root).ok();
     }
 
