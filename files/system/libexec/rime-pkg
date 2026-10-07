@@ -797,8 +797,50 @@ download_rpms() {
     # not a package spec — `dnf5 download --resolve /path/to.rpm` answers
     # `No package "/path/to.rpm" available` (measured) — so local files are
     # staged separately, by stage_local_rpms, after this has run.
+    local pin
+    pin="$(image_pin_excludes)"
+    if [ -n "$pin" ]; then
+        if dnf5 "${args[@]}" --exclude="$pin" "$@" >&2; then
+            compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
+            return 0
+        fi
+        # Nothing in the repositories fits the image as it is. Resolve again
+        # against the newest builds, so guard_rpms can name the package that
+        # needs an OS update instead of the user reading a solver dump. A
+        # misspelt name fails both ways and dies below, exactly as before.
+        warn "no build of that set fits the image as it is; resolving against the newest builds to find what needs an OS update"
+        rm -f -- "$destdir"/*.rpm
+    fi
     dnf5 "${args[@]}" "$@" >&2 || die "dependency resolution failed for: $*"
     compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
+}
+
+# Every repository build that would REPLACE a package the image ships, as one
+# comma-separated --exclude list: the upgrades of installed packages, and on
+# x86_64 the 32-bit twin of each, because a multilib library has to be the
+# image's build too. Empty when the repositories carry nothing newer.
+#
+# WHY: `dnf5 download --resolve` takes the NEWEST build of every dependency the
+# image lacks, and that build can pin an image package to a newer release than
+# the image has. Measured on Fedora 45, 2026-10-07: blender → rocm-clang → git,
+# and git-2.56.0-1 requires git-core = 2.56.0-1 while the image shipped
+# 2.55.0-2. guard_rpms refused the overlay (correctly), so the rebuild after the
+# OS upgrade failed and the whole extension, Steam included, stayed unmerged —
+# although git-2.55.0-2, the build that matches the image, was in the
+# repositories all along. With the upgrades excluded the solver picks it.
+#
+# A package named on the command line is still taken at its newest build:
+# `dnf5 download` picks the version of each named spec before resolving, so
+# only DEPENDENCIES move to a build that fits. When the newest named build
+# needs a newer image, the pinned pass fails and the fallback above reports it.
+image_pin_excludes() {
+    local -a q=(-q repoquery --upgrades --qf '%{name}-%{evr}.%{arch}\n')
+    local repo
+    for repo in ${ENABLE_REPOS:-}; do q+=(--enable-repo "$repo"); done
+    dnf5 "${q[@]}" 2>/dev/null | awk -v native="$(uname -m)" '
+        NF { print
+             if (native == "x86_64" && sub(/\.x86_64$/, ".i686")) print }' \
+        | sort -u | paste -sd, -
 }
 
 # Does the machine, as it is right now, satisfy this requirement? Asked of
@@ -1210,8 +1252,9 @@ extract_rpms() {
             "${native[@]}" >&2 || die "extraction failed"
     fi
     if [ ${#foreign[@]} -gt 0 ]; then
-        # Next to $root, which under build_extension means inside $WORK, so the
-        # existing RETURN trap removes it on every `die` path too.
+        # Next to $root, which under build_extension means inside $WORK, so it
+        # goes with $WORK: the RETURN trap on success, the sweep at the start of
+        # the next build after a `die`.
         local scratch="${root}.multilib"
         rm -rf "$scratch"
         mkdir -p "$scratch"
@@ -2645,6 +2688,13 @@ rebuild_extension() {
         return 0
     fi
 
+    # A refusal exits the process outright, so the RETURN trap below never
+    # fires on a failed build and its download set stays behind: 3.1 GB per
+    # attempt on a gaming machine, five of them after one failed OS upgrade
+    # (measured on katana, 2026-10-07). Every caller holds the package lock,
+    # so no other build can be using one of these. Sweep before making a new one.
+    find "$PKG_ROOT" -maxdepth 1 -type d -name "$(basename "$WORK_ROOT").??????" \
+        -exec rm -rf {} + 2>/dev/null || true
     WORK="$(mktemp -d "${WORK_ROOT}.XXXXXX")"
     trap 'rm -rf "$WORK"' RETURN
     local rpms="${WORK}/rpms" root="${WORK}/root" etcroot="${WORK}/etc"
@@ -3965,7 +4015,7 @@ cmd_rebuild() {
     # packages simply get rebuilt on the next attempt.
     if [ "$if_needed" = 1 ]; then
         if ! ( rebuild_extension "${want[@]}" ); then
-            warn "rebuild failed (offline?); run 'sudo rime pkg rebuild' when convenient"
+            warn "your packages could not be rebuilt for this OS version (the reason is above) and stay unavailable until 'sudo rime pkg rebuild' succeeds"
         fi
         return 0
     fi

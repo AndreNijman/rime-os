@@ -621,6 +621,75 @@ is "a newer build the image already satisfies is omitted" true \
 is "a newer build nothing satisfies is not" false \
    "$(PATH="$NS/no:$PATH" predicate newer_satisfied_by_image "$NS/rpms" libfoo)"
 
+# 8. Dependencies resolve to builds that fit the IMAGE, not to the newest build.
+#    On Fedora 45 (2026-10-07) blender's chain reached git, the newest git
+#    required git-core = 2.56.0-1, the image shipped 2.55.0-2, and guard_rpms
+#    refused the whole rebuild after the OS upgrade: Steam and every other user
+#    package stayed unmerged, although git-2.55.0-2 was in the repositories.
+#    download_rpms now excludes every build that would replace an image package
+#    (and its 32-bit twin) and falls back to the newest builds only when nothing
+#    fits, so the guard can still name what needs an OS update.
+#
+#    The stub plays dnf5: `repoquery --upgrades` answers from $PIN_UPGRADES, and
+#    `download` writes the set the real solver chose in that measured case —
+#    the image's git when git-core's upgrade is excluded, the newer pair when it
+#    is not. PIN_MODE=fail makes the pinned pass find nothing.
+PN=$WORK/pin
+mkdir -p "$PN/bin"
+cat > "$PN/bin/dnf5" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$PIN_LOG"
+case " $* " in
+  *" repoquery "*) [ -n "${PIN_UPGRADES:-}" ] && printf '%s\n' $PIN_UPGRADES; exit 0 ;;
+esac
+dest=; pinned=0
+for a in "$@"; do
+    case "$prev" in --destdir) dest=$a ;; esac
+    case "$a" in --exclude=*git-core-2.56.0-1.fc45.x86_64*) pinned=1 ;; esac
+    prev=$a
+done
+if [ "$pinned" = 1 ]; then
+    [ "${PIN_MODE:-}" = fail ] && { echo "Problem: conflicting requests" >&2; exit 1; }
+    : > "$dest/git-2.55.0-2.fc45.x86_64.rpm"
+else
+    : > "$dest/git-2.56.0-1.fc45.x86_64.rpm"
+    : > "$dest/git-core-2.56.0-1.fc45.x86_64.rpm"
+fi
+exit 0
+STUB
+cat > "$PN/bin/uname" <<'STUB'
+#!/bin/sh
+[ "$1" = -m ] && { echo x86_64; exit 0; }
+exec /usr/bin/uname "$@"
+STUB
+chmod +x "$PN/bin/dnf5" "$PN/bin/uname"
+export PIN_LOG="$PN/argv"
+
+: > "$PIN_LOG"
+got=$(PATH="$PN/bin:$PATH" PIN_UPGRADES='git-core-2.56.0-1.fc45.x86_64 xorg-x11-drv-nvidia-libs-3:615.71.09-3.fc45.x86_64 tzdata-2026e-1.fc45.noarch' \
+      call image_pin_excludes | tr ',' '\n' | LC_ALL=C sort | paste -sd, -)
+is "the pin excludes every upgrade and its 32-bit twin" \
+   "git-core-2.56.0-1.fc45.i686,git-core-2.56.0-1.fc45.x86_64,tzdata-2026e-1.fc45.noarch,xorg-x11-drv-nvidia-libs-3:615.71.09-3.fc45.i686,xorg-x11-drv-nvidia-libs-3:615.71.09-3.fc45.x86_64" \
+   "$got"
+
+mkdir -p "$PN/a"; : > "$PIN_LOG"
+out=$(PATH="$PN/bin:$PATH" PIN_UPGRADES='git-core-2.56.0-1.fc45.x86_64' call download_rpms "$PN/a" blender 2>&1); rc=$?
+is "a dependency resolves to the image's build" "0 git-2.55.0-2.fc45.x86_64.rpm" \
+   "$rc $(ls "$PN/a" | paste -sd' ' -)"
+
+mkdir -p "$PN/b"; : > "$PIN_LOG"
+out=$(PATH="$PN/bin:$PATH" PIN_UPGRADES='git-core-2.56.0-1.fc45.x86_64' PIN_MODE=fail call download_rpms "$PN/b" blender 2>&1); rc=$?
+is "nothing fits: the newest builds go to the guard" "0 git-2.56.0-1.fc45.x86_64.rpm git-core-2.56.0-1.fc45.x86_64.rpm" \
+   "$rc $(ls "$PN/b" | paste -sd' ' -)"
+if grep -qF "resolving against the newest builds to find what needs an OS update" <<<"$out"; then
+    ok "…and says why it fell back"
+else bad "…and says why it fell back" "got: $(tail -1 <<<"$out")"; fi
+
+mkdir -p "$PN/c"; : > "$PIN_LOG"
+out=$(PATH="$PN/bin:$PATH" PIN_UPGRADES='' call download_rpms "$PN/c" blender 2>&1); rc=$?
+is "no upgrades: one plain pass, no exclude" "0 0" \
+   "$rc $(grep -c -- '--exclude' "$PIN_LOG")"
+
 echo
 echo "── apps that left the image: vendor routes, per-user tools, Flathub ───"
 # ChatGPT, Claude Desktop, Claude Code and Zed shipped in the image until
