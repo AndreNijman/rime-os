@@ -287,3 +287,47 @@ fn non_battery_supplies_are_ignored() {
     // of the test is that the Mains and USB supplies are not.
     assert_eq!(inv.names(), vec!["hidpp_battery_0"]);
 }
+
+// ── The writer ───────────────────────────────────────────────────────────────
+
+/// Plan the window for a fixture battery and apply it with the real writer.
+fn apply_window(s: &Sysfs, start: u8, stop: u8) {
+    use rimed_core::syswriter::{RealWriter, SysWriter};
+    let writer = RealWriter::new(false);
+    for a in s.discover().plan_thresholds(start, stop) {
+        writer.apply(&a).unwrap();
+    }
+}
+
+#[test]
+fn independent_thresholds_land_as_asked() {
+    let s = Sysfs::new("write-pair");
+    s.supply("BAT0", "Battery", &MODERN_THRESHOLDS);
+    apply_window(&s, 60, 80);
+    let dir = s.root.join("class/power_supply/BAT0");
+    let read = |f: &str| std::fs::read_to_string(dir.join(f)).unwrap();
+    assert_eq!(read("charge_control_start_threshold"), "60");
+    assert_eq!(read("charge_control_end_threshold"), "80");
+}
+
+/// msi-ec keeps both thresholds in ONE EC byte (start always reads stop - 10),
+/// so whichever attribute is written last decides. Stand that in with one
+/// file behind both names: the stop must be the last word.
+#[cfg(unix)]
+#[test]
+fn on_a_shared_register_the_stop_is_written_last() {
+    let s = Sysfs::new("write-shared");
+    s.supply("BAT1", "Battery", &[("charge_control_end_threshold", "100")]);
+    let dir = s.root.join("class/power_supply/BAT1");
+    std::os::unix::fs::symlink(
+        dir.join("charge_control_end_threshold"),
+        dir.join("charge_control_start_threshold"),
+    )
+    .unwrap();
+    apply_window(&s, 60, 80);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("charge_control_end_threshold")).unwrap(),
+        "80",
+        "a 60/80 window on msi-ec must keep the 80 % stop (it used to land as 60/70)"
+    );
+}
