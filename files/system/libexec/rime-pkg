@@ -2400,7 +2400,7 @@ post_merge() {
         udevadm control --reload 2>/dev/null || true
         udevadm trigger --subsystem-match=usb 2>/dev/null || true
     fi
-    ring_launcher
+    ring_launcher "$LAUNCHER_DOORBELL"
 }
 
 # Make every running Shell re-read its applications, so an app installed or
@@ -2428,7 +2428,7 @@ post_merge() {
 # tmpfiles creates it at boot (Containerfile.base, rime-pkg.conf). Never fatal:
 # a launcher that is late to notice is no reason to fail an install.
 ring_launcher() {
-    local dir="${1:-$LAUNCHER_DOORBELL}" bell
+    local dir="$1" bell
     install -d -m0755 "$dir" 2>/dev/null || return 0
     bell="$(mktemp "${dir}/.rime-pkg-rescan.XXXXXX" 2>/dev/null)" || return 0
     rm -f -- "$bell"
