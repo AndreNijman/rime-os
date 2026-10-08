@@ -331,3 +331,27 @@ fn on_a_shared_register_the_stop_is_written_last() {
         "a 60/80 window on msi-ec must keep the 80 % stop (it used to land as 60/70)"
     );
 }
+
+/// The start landing is not the window landing: if the stop is refused, the
+/// battery still charges to whatever it held, and the writer must say so.
+#[test]
+fn a_refused_stop_is_not_reported_as_landed() {
+    use rimed_core::syswriter::{RealWriter, SysWriter};
+    let s = Sysfs::new("write-refused-stop");
+    s.supply("BAT0", "Battery", &[("charge_control_start_threshold", "0")]);
+    let dir = s.root.join("class/power_supply/BAT0");
+    // A directory where the stop should be: it exists, and every write to it
+    // fails, root or not.
+    std::fs::create_dir(dir.join("charge_control_end_threshold")).unwrap();
+    let writer = RealWriter::new(false);
+    let actions = s.discover().plan_thresholds(60, 80);
+    assert!(!actions.is_empty());
+    for a in actions {
+        let out = writer.apply(&a).unwrap();
+        assert!(!out.landed(), "a refused stop reported {out:?}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join("charge_control_start_threshold")).unwrap(),
+        "60"
+    );
+}

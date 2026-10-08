@@ -1085,7 +1085,10 @@ impl SysWriter for RealWriter {
                         );
                     }
                 }
-                Ok(if landed { Outcome::Landed } else { last })
+                // The last write decides the answer as well as the window:
+                // where there is a stop, that is the stop. A start that landed
+                // under a refused stop is not a charge limit.
+                Ok(last)
             }
 
             // ── M6 ───────────────────────────────────────────────────────────
