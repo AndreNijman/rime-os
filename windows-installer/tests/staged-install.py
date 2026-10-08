@@ -97,6 +97,7 @@ def check(name, ok, detail=""):
 # Wake the shell and wait for it to answer. On --resume the shell may still
 # be busy with an engine started earlier: wait for it without typing ahead.
 if RESUME:
+    s.sendall(b"\n")  # an idle shell prints its prompt again; a busy one queues it
     end = time.time() + 3600
     while time.time() < end and "#" not in buf:
         pump()
@@ -176,7 +177,7 @@ out, _ = run(f"mount -o ro {win_esp} /mnt/w && find /mnt/w -maxdepth 3 | sort; u
 check("Windows' ESP holds no Rime boot files", "fedora" not in out.lower() and "rimeinst" not in out.lower(), out)
 out, _ = run("find /run/initramfs/live -maxdepth 3 | sort")
 check("Rime's ESP now holds Rime's bootloader", "/run/initramfs/live/EFI/fedora" in out, out)
-fsck, _ = run(f"findmnt -no OPTIONS /run/initramfs/live; fsck.fat -n {esp} 2>&1 | tail -n 4")
+fsck, _ = run(f"findmnt -no OPTIONS /run/initramfs/live; fsck.fat -n {esp} </dev/null 2>&1 | tail -n 4")
 check("Rime's ESP is back to read-only and its FAT is clean (no dirty flag)", fsck.lstrip().startswith("ro") and "Dirty bit" not in fsck, fsck)
 cl, _ = run(f"mount -o ro {target} /mnt/r && d=$(ls -d /mnt/r/ostree/deploy/*/deploy/*.0 | head -1) && cat $d/etc/systemd/system/rime-staged-cleanup.service && ls -l $d/etc/systemd/system/multi-user.target.wants/rime-staged-cleanup.service; umount /mnt/r")
 check("the installed system will remove the staged installer on its first boot", "ExecStart=/usr/bin/rm -rf /boot/efi/rimeinst /boot/efi/EFI/rimeinst" in cl and "-> ../rime-staged-cleanup.service" in cl, cl)

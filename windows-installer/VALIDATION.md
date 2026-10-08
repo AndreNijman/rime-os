@@ -21,10 +21,20 @@ Microsoft's keys, AHCI system disk made by Windows Setup (64 GiB).
 | 4 Rime | firmware BootOrder (Rime first), Rime's MOK cert added to db; Rime booted from its own ESP: `/boot/efi` = Rime's ESP (not the disk's first), `bootloader-update.service` Result=success, `bootupctl update` by hand rc 0, "Rime OS" entry -> Rime's ESP | 6/6 PASS |
 | host | Windows' ESP, listed from outside the guest before, after the install and after Rime's own bootloader update: no Rime file, same file list | PASS |
 
-Found by this run and fixed: Rime's ESP was left with the FAT dirty flag
-(the live medium is remounted read-write and never cleanly unmounted;
-Windows showed the volume as "Warning"). The engine now returns it to
-read-only as soon as it is done writing; `staged-install.py` checks the flag.
+Found by the first run and fixed: Rime's ESP was left with the FAT dirty
+flag (Windows showed the volume as "Warning"). The live medium is remounted
+read-write for the bootloader, and deleting the running squashfs then kept it
+from going back to read-only. The engine now returns it to read-only as soon
+as it is done writing and leaves the staged files for the installed system to
+delete on its first boot (`rime-staged-cleanup.service`). Re-run on the final
+build (`/var/lab-scratch/winlab/e2e-3`): every check above PASS, plus "FAT
+clean, read-only" in boot 2 and "first boot removed the staged installer" in
+boot 4; Windows lists RIME-EFI as Healthy.
+
+Also measured: the window itself, clicked through a complete install on a
+real desktop (`lab/jobs/gui-install`), from Install to its done page in 25 s
+(hash 2 GB, write it, read it back), firmware showing "Rime OS Setup" as the
+one-shot.
 
 ### Windows-shaped disk images: `tests/staged-boot.sh` + `tests/staged-install.py`
 
