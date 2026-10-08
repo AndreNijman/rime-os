@@ -1537,6 +1537,27 @@ RUN set -eux; \
     test ! -e /usr/lib/systemd/system/rime-storage-notice.service; \
     echo "rime-storage-notice enabled as a user timer"
 
+# ── an NVIDIA GPU the shipped driver cannot drive gets said out loud ────────
+# NVIDIA's driver after the 580 series drives Turing and newer only, and Rime
+# ships that driver alone (core stage 1d; the 580 legacy packages conflict with
+# it in RPM Fusion). A Maxwell, Pascal or Volta card therefore gets no driver,
+# silently. `rime doctor` explains it; this user timer says it once per
+# distinct state, the same way the storage notice does and for the same reason
+# (notify-send needs a session bus).
+COPY files/system/libexec/rime-gpu-notice /usr/libexec/rime-gpu-notice
+COPY files/system/units/rime-gpu-notice.service \
+     /usr/lib/systemd/user/rime-gpu-notice.service
+COPY files/system/units/rime-gpu-notice.timer \
+     /usr/lib/systemd/user/rime-gpu-notice.timer
+RUN set -eux; \
+    chmod 0755 /usr/libexec/rime-gpu-notice; \
+    bash -n /usr/libexec/rime-gpu-notice; \
+    command -v notify-send; \
+    systemctl --global enable rime-gpu-notice.timer; \
+    test -L /etc/systemd/user/timers.target.wants/rime-gpu-notice.timer; \
+    test ! -e /usr/lib/systemd/system/rime-gpu-notice.service; \
+    echo "rime-gpu-notice enabled as a user timer"
+
 # ── shared-machine recipes: guest disposability and kiosk (P2-016) ──────────
 #
 # Everything here ships INERT. No guest account is created, no kiosk config is

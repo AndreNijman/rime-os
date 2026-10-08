@@ -884,6 +884,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-storage.sh
 
+      # An NVIDIA GPU older than the shipped driver (Maxwell, Pascal, Volta)
+      # gets no driver on Rime. The notice says so once per state, never at
+      # every login, and never when doctor has nothing to say or failed.
+      - name: NVIDIA GPU too old for the shipped driver — the notice says it once
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-gpu-notice.sh
+
       # §P2-015's firmware readout, structural half. fwupdmgr's exit status
       # means "nothing to do" when non-zero and accompanies an explicit error
       # document when zero, so a caller that trusts it reads a current machine
@@ -4366,6 +4373,8 @@ jobs:
             files/system/libexec/rime-disposable \
             files/system/libexec/rime-vm \
             files/system/libexec/rime-screen-reader \
+            files/system/libexec/rime-gpu-notice \
+            tests/test-rime-gpu-notice.sh \
             tests/test-rime-recover.sh \
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \
             tests/test-rime-pkg.sh tests/test-rime-appimage.sh \

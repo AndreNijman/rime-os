@@ -1,0 +1,17 @@
+# Rime OS — say once that this machine's NVIDIA GPU has no driver (USER unit).
+#
+# A user service for the reason rime-storage-notice is one: notify-send needs a
+# session bus, and root has none. On a machine with no NVIDIA GPU, or with one
+# the shipped driver supports, it runs one `rime doctor` and says nothing.
+
+[Unit]
+Description=Rime OS NVIDIA GPU support notice
+Documentation=man:rime(1)
+# No PCI bus (a container) means no GPU to talk about.
+ConditionPathExists=/sys/bus/pci/devices
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-gpu-notice
+# It writes one digest file under $XDG_STATE_HOME and nothing else.
+NoNewPrivileges=yes

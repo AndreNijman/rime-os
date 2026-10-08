@@ -757,6 +757,50 @@ saysit "no default route is reported" "no default route" "$out"
 saysit "an extension built for another release names the rebuild" "pkg rebuild" "$out"
 saysit "…and says which release it was built for" "built for OS 42" "$out"
 
+sec "rime recover status — an NVIDIA GPU older than the shipped driver"
+# NVIDIA's driver after the 580 series drives Turing and newer only. On a
+# Maxwell/Pascal/Volta card no Rime image has a driver, so the GPU row must
+# explain that and must NOT recommend a rollback, which cannot help. A
+# current card with no module is still a regression and keeps the rollback.
+nvfixture() {   # dir  device-id  keep-amd(0/1)
+    local r=$1 dev=$2 amd=$3
+    mkfixture "$r" healthy
+    local d="$r/sys/bus/pci/devices/0000:01:00.0"
+    mkdir -p "$d"
+    printf '0x030000\n' > "$d/class"
+    printf '0x10de\n'   > "$d/vendor"
+    printf '%s\n' "$dev" > "$d/device"
+    [ "$amd" = 1 ] || rm -rf "$r/sys/bus/pci/devices/0000:03:00.0"
+}
+gpu_row() {   # json  -> "state|action|detail"
+    python3 -c "
+import json,sys
+r=[x for x in json.loads(sys.argv[1])['rows'] if x['id']=='gpu-driver'][0]
+print(r['state'], r.get('action'), r['detail'], sep='|')
+" "$1"
+}
+PASCAL="$WORK/fx-pascal";        nvfixture "$PASCAL" 0x1b80 0
+PASCAL_LAPTOP="$WORK/fx-pascal-l"; nvfixture "$PASCAL_LAPTOP" 0x1c8d 1
+AMPERE="$WORK/fx-ampere";        nvfixture "$AMPERE" 0x2520 0
+
+row=$(gpu_row "$(RIME_RECOVER_ROOT="$PASCAL" rime recover status --json)")
+has "a Pascal card is named as one the driver dropped" "Maxwell, Pascal or Volta" "$row"
+has "…and the card alone means no acceleration" "no graphics acceleration" "$row"
+has "…and the row offers no action" "attention|None|" "$row"
+hasnt "…in particular not a rollback" "rollback" "$row"
+hasnt "…and never claims nouveau, which Rime blacklists" "nouveau" "$row"
+
+row=$(gpu_row "$(RIME_RECOVER_ROOT="$PASCAL_LAPTOP" rime recover status --json)")
+has "beside a working GPU, the old card goes unused" "goes unused" "$row"
+has "…and the working GPU is named" "working: AMD via amdgpu" "$row"
+hasnt "…and no rollback is recommended" "rollback" "$row"
+
+row=$(gpu_row "$(RIME_RECOVER_ROOT="$AMPERE" rime recover status --json)")
+has "a current NVIDIA card with no module is still a missing driver" \
+    "no kernel module loaded for NVIDIA" "$row"
+has "…and still recommends the rollback" "sudo rime rollback" "$row"
+hasnt "…and is not called old" "Pascal" "$row"
+
 sec "rime recover status --json"
 out=$(RIME_RECOVER_ROOT="$HEALTHY" rime recover status --json)
 if python3 -c "
