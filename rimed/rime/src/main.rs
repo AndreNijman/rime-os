@@ -2340,7 +2340,14 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
                     // could not tell them their kernel refuses every
                     // scheduler. `scx_state` needs the daemon; this does not.
                     let btf = rimed_core::kernelbtf::scx_btf_support(Path::new("/sys"));
-                    println!("scx       : {}", cfg.scx);
+                    // Resolved against this CPU: `auto` is scx_lavd on one
+                    // kind of core and the kernel's scheduler on a P/E hybrid.
+                    println!(
+                        "scx       : {} (profile: {:?})",
+                        cfg.scx_for(&topo)
+                            .unwrap_or_else(|| "none, the kernel's own scheduler".into()),
+                        cfg.scx.trim()
+                    );
                     println!("scx_btf   : {}", btf.verdict());
                     if btf.blocks_loading() {
                         println!("            {}", btf.describe());

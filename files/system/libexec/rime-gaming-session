@@ -74,8 +74,11 @@ fi
 # ── Rime game mode: cpuset, IRQ steering, GPU clocks, tier, sched-ext ───────
 # One call does all of it. `rime game start` goes through rimed's D-Bus API,
 # whose polkit action (manage-power) is allow_active=yes, so the session user
-# authorises without a prompt. The profile's `scx` field is what loads
-# scx_lavd — see config/sysprofiles/msi-katana-gf76.toml.
+# authorises without a prompt. The profile's `scx` field picks the sched-ext
+# scheduler: the default `auto` loads scx_lavd only on a CPU without E-cores
+# and leaves a P/E hybrid on the kernel's own scheduler, as on the desktop —
+# see config/sysprofiles/msi-katana-gf76.toml. This call names no game, so
+# nothing enters the P-core cpuset and no interrupt is moved.
 #
 # Best-effort: on a machine whose profile disables game mode, or with rimed
 # down, gaming still works — it is just not tuned.
@@ -238,11 +241,17 @@ fi
 # -gamepadui is Big Picture, the controller-first UI. NOT -steamdeck: that
 # switches Steam into Deck mode, which expects SteamOS-specific integration
 # (the steamos-* helpers, Deck hardware quirks) that Rime OS does not ship.
-# ONLY -gamepadui. That is the documented flag for Big Picture and the only one
-# confirmed to exist; anything else added from memory would be an unrecognised
-# argument at session start, on the one path that cannot be tested from here.
-# Extra flags belong in RIME_STEAM_ARGS once tried on real hardware.
-STEAM_ARGS=(-gamepadui)
+# Flags are added only once tried on real hardware (this used to be ONLY
+# -gamepadui for exactly that reason); RIME_STEAM_ARGS replaces the list.
+#
+# -steamos3 (2026-10-08, measured on katana): with -gamepadui alone, Steam's own
+# Power > "Switch to Desktop" showed "Switching to Desktop…" and hung, and "Exit
+# Big Picture" left a desktop Steam window stranded inside gamescope. With
+# -steamos3 the Power menu is SteamOS's and "Switch to Desktop" runs
+# `steamos-session-select plasma`, which Rime ships (files/system/bin) and which
+# switches straight back to the desktop. Steam may also ask `steamos-update`;
+# Rime's answers "no update" — Rime updates itself.
+STEAM_ARGS=(-gamepadui -steamos3)
 if [ -n "${RIME_STEAM_ARGS:-}" ]; then
     # shellcheck disable=SC2206 # intentional word-splitting of an override
     STEAM_ARGS=(${RIME_STEAM_ARGS})
@@ -405,7 +414,49 @@ log "starting: gamescope ${GS_ARGS[*]} -- steam ${STEAM_ARGS[*]}"
 # Not exec'd: the EXIT trap has to run so game mode is released when Steam
 # quits. gamescope exiting is the signal that Gaming Mode is over, and greetd
 # then brings the greeter back.
-gamescope "${GS_ARGS[@]}" -- steam "${STEAM_ARGS[@]}"
+# ── No laptop behaviour while Gaming Mode runs ──────────────────────────────
+# Closing the lid must not suspend a machine playing on an external screen,
+# and nothing idle-related should fire mid-game. `handle-lid-switch` and
+# `idle` only: `sleep` stays allowed, so Steam's own Power > Sleep still works.
+# The power side (full CPU power limits, USB and audio power saving off) is
+# rimed's game mode, engaged above. systemd-inhibit holds the lock exactly as
+# long as gamescope runs.
+INHIBIT=()
+if command -v systemd-inhibit >/dev/null 2>&1; then
+    INHIBIT=(systemd-inhibit --what=handle-lid-switch:idle --who="Rime Gaming Mode" \
+             --why="Gaming Mode is running" --mode=block)
+fi
+"${INHIBIT[@]}" gamescope "${GS_ARGS[@]}" -- steam "${STEAM_ARGS[@]}"
 rc=$?
 log "gamescope exited with ${rc}"
+
+# ── Leaving Gaming Mode lands on the desktop ────────────────────────────────
+# Gaming Mode is a toggle: rime-session-select switches straight back into the
+# desktop session the user came from, with no greeter in between (see its
+# header for why that is safe). Not while the machine is shutting down or
+# rebooting — Steam's own Power menu ends the session that way too — and not
+# when RIME_GAMING_NO_RETURN=1 (debugging, or a user who wants the greeter).
+#
+# And not when a switch is what ended this session (Steam's "Switch to
+# Desktop", or Gaming Mode started again from inside itself): logind already
+# reports the session `closing`, the switch has chosen where to go, and
+# answering it from here used to undo it. Measured on katana: Gaming Mode
+# restarted from inside itself landed on the desktop, because this hook ran
+# 0.2 s after the new session had already started.
+SESSION_HELPER="${RIME_SESSION_HELPER:-/usr/libexec/rime-session-select}"
+if [ "${RIME_GAMING_NO_RETURN:-0}" != "1" ] && [ -x "${SESSION_HELPER}" ]; then
+    session_state="$(loginctl show-session "${XDG_SESSION_ID:-self}" -p State --value 2>/dev/null)"
+    case "$(systemctl is-system-running 2>/dev/null)/${session_state}" in
+        stopping/*) log "the system is shutting down; not switching back to the desktop" ;;
+        */closing) log "a switch is ending this session; it decides where to go" ;;
+        *)
+            desk="$(sudo -n "${SESSION_HELPER}" --desktop 2>/dev/null)"
+            if [ -n "${desk}" ] && sudo -n "${SESSION_HELPER}" "${desk}" --switch; then
+                log "switching back to the desktop (${desk})"
+            else
+                log "could not switch back to the desktop; the greeter will come back"
+            fi
+            ;;
+    esac
+fi
 exit "${rc}"

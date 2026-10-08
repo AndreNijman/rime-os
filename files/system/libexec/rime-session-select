@@ -14,16 +14,26 @@
 #  publisher hit, solved the same way: a narrow root helper behind a NOPASSWD
 #  rule, taking no caller-supplied paths.
 #
-#  WHY IT DOES NOT AUTO-LOGIN
-#  SteamOS and Bazzite hand you straight back into the new session because they
-#  configure display-manager autologin. Rime OS deliberately does not, and the
-#  reason is stated as it actually stands rather than as an end state: the
-#  installer now offers full-disk LUKS2 with the box ticked (see
-#  docs/disk-encryption.md), so a machine installed today is normally
-#  encrypted, while TPM auto-unlock is NOT on by default and is still gated on
-#  L-003. Either way, quietly adding a passwordless graphical login is a
-#  security change nobody asked for. Switching modes costs one password entry
-#  at the greeter.
+#  THE SWITCH IS A TOGGLE (2026-10-08)
+#  `--switch` used to end the session and leave the user at the greeter, to type
+#  their password again. Gaming Mode is now a toggle, the way SteamOS and Bazzite
+#  have it: the switch hands greetd a ONE-SHOT `[initial_session]` for the
+#  caller's own account and the requested session, and greetd logs them straight
+#  in. What makes that safe to offer:
+#
+#    * Only an already-authenticated session can ask: the grant is the existing
+#      NOPASSWD sudoers rule (%wheel), and the account is SUDO_UID's own, never a
+#      caller-chosen user. Nothing becomes reachable that the caller did not
+#      already have open in front of them.
+#    * It is spent on use. The config lives in /run (gone at reboot), root-owned
+#      0600, and /usr/libexec/rime-greetd consumes it the next time greetd starts
+#      and refuses it if it is more than 60 seconds old. /etc/greetd/config.toml
+#      never gains an [initial_session]; the image build still asserts that.
+#    * A locked desktop cannot ask (the power menu is behind the lock), and the
+#      one-shot is only ever written by this helper.
+#
+#  Leaving Gaming Mode lands on the desktop the user came from
+#  (/var/lib/rime-greet/last-desktop), through the same path.
 #
 #  SAFETY
 #  The requested session is validated against the .desktop files actually
@@ -40,14 +50,27 @@
 #  anyone driving this over SSH.
 #
 #  Usage:
-#    rime-session-select <session-id>          remember it, do NOT log out
-#    rime-session-select <session-id> --switch remember it, then end the session
-#    rime-session-select --list                print valid session ids
+#    rime-session-select <session-id>            remember it, do NOT log out
+#    rime-session-select <session-id> --switch [--from <session-id>]
+#                                                switch to it now: end this
+#                                                session and log straight in
+#    rime-session-select --list                  print valid session ids
+#    rime-session-select --desktop               print the desktop session to
+#                                                return to from Gaming Mode
+#
+#  Env overrides for tests/test-rime-session-toggle.sh only: RIME_SESSION_DIR,
+#  RIME_GREET_STATE_DIR, RIME_GREET_RUN_DIR, RIME_GREETD_CONFIG, and
+#  RIME_SWITCH_TOOLS (a directory of stand-ins for loginctl, systemctl,
+#  systemd-run and getent).
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-STATE_DIR=/var/lib/rime-greet
-SESSION_DIR=/usr/share/wayland-sessions
+STATE_DIR="${RIME_GREET_STATE_DIR:-/var/lib/rime-greet}"
+SESSION_DIR="${RIME_SESSION_DIR:-/usr/share/wayland-sessions}"
+RUN_DIR="${RIME_GREET_RUN_DIR:-/run/rime-greet}"
+GREETD_CONFIG="${RIME_GREETD_CONFIG:-/etc/greetd/config.toml}"
+GAMING_SESSION=rime-gaming
+[ -n "${RIME_SWITCH_TOOLS:-}" ] && PATH="${RIME_SWITCH_TOOLS}:${PATH}"
 
 say() { printf 'rime-session-select: %s\n' "$*" >&2; }
 die() { say "$*"; exit 1; }
@@ -59,7 +82,51 @@ valid_sessions() {
     done
 }
 
-[ "$(id -u)" -eq 0 ] || die "must run as root (via sudo -n /usr/libexec/rime-session-select)"
+[ "$(id -u)" -eq 0 ] || [ -n "${RIME_SWITCH_TOOLS:-}" ] \
+    || die "must run as root (via sudo -n /usr/libexec/rime-session-select)"
+
+is_session() {  # $1 = id; true when it is a plain id naming an installed session
+    case "$1" in '' | *[!A-Za-z0-9._-]* | .* | *--*) return 1 ;; esac
+    # A loop, not `| grep -q`: under pipefail an early-exiting grep kills the
+    # writer with SIGPIPE and a MATCH comes back as failure. And the loop reads
+    # to the end: where SIGPIPE is ignored (GitHub's runners), leaving early
+    # makes basename print "write error: Broken pipe" into the answer.
+    local s hit=1
+    while read -r s; do [ "$s" = "$1" ] && hit=0; done < <(valid_sessions)
+    return "${hit}"
+}
+
+# ── The finisher, run as a transient root unit so it outlives the session it
+#    ends. Never through sudo: SUDO_UID set means a caller typed it.
+if [ "${1:-}" = "--finish-switch" ]; then
+    [ -z "${SUDO_UID:-}" ] || die "--finish-switch is internal"
+    uid="${2:-}"
+    case "${uid}" in '' | *[!0-9]*) die "--finish-switch: bad uid" ;; esac
+    seat_sessions() {
+        for sid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $1}'); do
+            [ "$(loginctl show-session "$sid" -p User --value 2>/dev/null)" = "${uid}" ] || continue
+            [ "$(loginctl show-session "$sid" -p Seat --value 2>/dev/null)" = seat0 ] || continue
+            [ "$(loginctl show-session "$sid" -p State --value 2>/dev/null)" = closing ] && continue
+            printf '%s\n' "$sid"
+        done
+    }
+    # greetd is stopped FIRST. Ending the session while greetd runs makes it
+    # start the greeter at once, and stopping greetd mid-way through that
+    # start hung for its whole 30 s stop timeout on katana before systemd
+    # aborted it. Stopped, it starts nothing; started again afterwards, it
+    # spends the one-shot.
+    systemctl stop greetd.service
+    for sid in $(seat_sessions); do loginctl terminate-session "$sid" 2>/dev/null; done
+    for _ in $(seq 1 75); do [ -z "$(seat_sessions)" ] && break; sleep 0.2; done
+    say "starting greetd for the switch"
+    exec systemctl start greetd.service
+fi
+
+if [ "${1:-}" = "--desktop" ]; then
+    d="$(cat "${STATE_DIR}/last-desktop" 2>/dev/null)"
+    if is_session "$d" && [ "$d" != "${GAMING_SESSION}" ]; then printf '%s\n' "$d"; else printf 'hyprland\n'; fi
+    exit 0
+fi
 
 if [ "${1:-}" = "--list" ]; then
     valid_sessions
@@ -79,7 +146,7 @@ esac
 # state file are names of real, shipped sessions.
 found=0
 while read -r s; do
-    [ "$s" = "${want}" ] && { found=1; break; }
+    [ "$s" = "${want}" ] && found=1
 done < <(valid_sessions)
 [ "${found}" = 1 ] || die "'${want}' is not an installed session (try --list)"
 
@@ -98,14 +165,58 @@ say "next session: ${want}"
 
 [ "${2:-}" = "--switch" ] || exit 0
 
-# End the CALLER's session, not every session on the box. SUDO_UID is set by
-# sudo and cannot be forged by an unprivileged caller.
+# The CALLER's account, never a caller-chosen one. SUDO_UID is set by sudo and
+# cannot be forged by an unprivileged caller.
 uid="${SUDO_UID:-}"
 case "${uid}" in
-    '' | *[!0-9]*) die "no usable SUDO_UID; refusing to terminate anything" ;;
+    '' | *[!0-9]*) die "no usable SUDO_UID; refusing to switch anything" ;;
 esac
+user="$(getent passwd "${uid}" | cut -d: -f1)"
+case "${user}" in '' | *[!A-Za-z0-9._-]*) die "uid ${uid} has no usable account name" ;; esac
+
+# First switch wins. A switch that ends a running Gaming Mode session makes
+# that session ask, on its way out, to go back to the desktop; without this it
+# overwrote the switch in flight and the user landed on the desktop instead
+# (measured on katana). A one-shot that greetd has not spent yet, and that is
+# still fresh, is left alone.
+if [ -f "${RUN_DIR}/switch.toml" ] \
+   && [ $(( $(date +%s) - $(stat -c %Y "${RUN_DIR}/switch.toml" 2>/dev/null || echo 0) )) -le 60 ]; then
+    say "a switch is already in flight; leaving it"
+    exit 0
+fi
+
+# Where to come back to: the desktop the switch into Gaming Mode came from.
+if [ "${want}" = "${GAMING_SESSION}" ] && [ "${3:-}" = "--from" ] && is_session "${4:-}" \
+   && [ "${4}" != "${GAMING_SESSION}" ]; then
+    printf '%s' "$4" > "${STATE_DIR}/last-desktop"
+    chmod 0644 "${STATE_DIR}/last-desktop"
+fi
+
+# The one-shot. The session's own Exec line, run the way the greeter runs it
+# (`sh -lc`), and only when that line is plain enough to put in TOML verbatim;
+# anything else falls back to the greeter, which is the old behaviour.
+exec_line="$(sed -n 's/^Exec=//p' "${SESSION_DIR}/${want}.desktop" | head -n1)"
+autologin=0
+case "${exec_line}" in
+    '' | *[!A-Za-z0-9/._\ -]*) say "session ${want}: Exec line is not plain; the greeter will ask instead" ;;
+    *)
+        mkdir -p "${RUN_DIR}"; chmod 0700 "${RUN_DIR}"
+        tmp="$(mktemp "${RUN_DIR}/switch.XXXXXX")" || die "cannot write ${RUN_DIR}"
+        { grep -v '^[[:space:]]*\[initial_session\]' "${GREETD_CONFIG}"
+          printf '\n[initial_session]\ncommand = "sh -lc '"'"'exec %s'"'"'"\nuser = "%s"\n' "${exec_line}" "${user}"
+        } > "${tmp}"
+        chmod 0600 "${tmp}"
+        mv -f "${tmp}" "${RUN_DIR}/switch.toml"
+        autologin=1
+        ;;
+esac
+sync "${STATE_DIR}/last-session" 2>/dev/null || sync
+
+if [ "${autologin}" = 1 ]; then
+    say "switching ${user} to ${want}"
+    # Outlives this session: the finisher ends it, then restarts greetd.
+    exec systemd-run --quiet --collect --unit="rime-session-switch-$$" \
+        /usr/libexec/rime-session-select --finish-switch "${uid}"
+fi
 say "ending session for uid ${uid} — the greeter will come back with ${want} selected"
-# terminate-user is the reliable one: a graphical session may own several
-# logind sessions (the compositor plus a lingering tty), and terminating only
-# the "current" one can leave the display in a half-torn-down state.
 exec loginctl terminate-user "${uid}"

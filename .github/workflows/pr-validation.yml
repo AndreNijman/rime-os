@@ -1314,6 +1314,13 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-gaming-session.sh
 
+      # Gaming Mode is a toggle: the one-shot autologin rime-session-select
+      # hands greetd, and rime-greetd spending it exactly once.
+      - name: Run Gaming Mode toggle assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-rime-session-toggle.sh
+
       # §22's `rime boot status`, driven against fixture roots that stand in
       # for a GRUB machine and for a systemd-boot machine mid-rollback. The
       # sd-boot fixture's entry list is the document `bootctl list --json`
@@ -4363,6 +4370,11 @@ jobs:
             tests/test-rime-safe-graphics.sh \
             tests/test-rime-gaming-session.sh \
             files/system/libexec/rime-gaming-session \
+            tests/test-rime-session-toggle.sh \
+            files/system/libexec/rime-session-select \
+            files/system/libexec/rime-greetd \
+            files/system/bin/steamos-session-select \
+            files/system/bin/steamos-update \
             files/system/libexec/rime-safe-graphics \
             files/system/libexec/rime-safe-graphics-terminal \
             tests/test-rime-chaos.sh tests/test-rime-vm.sh

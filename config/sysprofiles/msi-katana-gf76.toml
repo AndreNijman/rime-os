@@ -19,6 +19,25 @@ battery = "balanced"
 [tiers.performance]
 governor = "performance"
 epp = "performance"
+# CPU package power limits [sustained PL1, burst PL2] in watts, held while on
+# this tier (rimed pauses thermald for the duration; any other tier hands the
+# limits back to the firmware and restarts it).
+#
+# The firmware's DPTF policy, applied by thermald --adaptive, holds this
+# i7-12700H to 38 W / 45 W. Intel rates it 45 W base / 115 W maximum turbo.
+# Measured 2026-10-08 (Cyberpunk 2077 built-in benchmark, CPU-bound
+# configuration, on a cooling pad, two or more runs each):
+#   thermald (38/45)  55-56 fps avg, 1 % low 25-26
+#   38/90             78-86 fps,     1 % low 25
+#   45/65             108-110 fps,   1 % low 73-75   <- chosen
+#   45/90, 45/115, 60/115, 80/115: no faster than 45/65
+# The burst stays at 65 W, not 90, for a measured reason: at 90 W, bursts on
+# top of the GPU's ~90 W sometimes took the package to 100 C, and the firmware
+# then locked it near 47 W with no burst at all — invisibly (MSR 0x610 and
+# powercap still read 45/90) — until the next reboot. Runs after that fell to
+# ~70 fps with a 1 % low of 10. A reactive guard (drop the burst at 95 C) was
+# tried and could not catch Cyberpunk's spikes. 45 W is Intel's base power.
+cpu_power_limit_w = [45, 65]
 
 [tiers.balanced]
 governor = "powersave"
@@ -84,8 +103,14 @@ pwm = 255
 # i7-12700H: 6 P-cores (12 threads, CPUs 0-11) + 8 E-cores (CPUs 12-19). The
 # cpuset is resolved at runtime from /sys/devices/cpu_core/cpus, never
 # hard-coded, so a BIOS with E-cores disabled degrades to "all CPUs".
-# IRQs are parked on the E-cores while a game runs, except the NVIDIA
-# interrupt, which belongs on the cores doing the rendering work.
+# IRQs are parked on the E-cores while a game is IN the cpuset, except the
+# NVIDIA interrupt, which belongs on the cores doing the rendering work.
+#
+# Gaming Mode does not put a game in it: rime-gaming-session names no game, so
+# the cpuset stays empty and the game runs on all 20 CPUs, as on the desktop.
+# Interrupts therefore stay put too (they used to be moved anyway, onto the
+# E-cores the game was also using). A game attached by hand (`rime game start
+# --pid`, `rime game attach`) is confined and its interrupts move then.
 [gamemode]
 enabled = true
 tier = "performance"
@@ -95,36 +120,40 @@ irq = "away-from-game"
 irq_pin_to_game = ["nvidia"]
 cgroup = "/sys/fs/cgroup/rime-game"
 
-# sched-ext scheduler held for the duration of a game session, then stopped.
+# sched-ext: none — the game gets the kernel's own scheduler (BORE), the same
+# one the desktop runs. Measured best on this machine (2026-10-08): a CPU-bound
+# stand-in game ran 90-91 fps / 1 % low 85-87 under it, against 61-66 / 53 under
+# scx_lavd as Gaming Mode loaded it, 70-75 / 53-55 under lavd --performance,
+# 85 / 77 under bpfland -m performance and 68 / 56 under p2dq performance mode.
 #
-# The image has shipped a CachyOS kernel with CONFIG_SCHED_CLASS_EXT=y and
-# sixteen scx schedulers since M1, and nothing ever selected one — the sched-ext
-# half of the reason that kernel was chosen was dead weight. This turns it on.
+# This said scx_lavd until 2026-10-07, when Cyberpunk 2077 ran slower and
+# choppier in Gaming Mode than on the desktop. Measured in a live Gaming Mode
+# session: CPU-bound (GPU busy 48 %), `GameThread` 98 % busy, and scx_lavd put
+# that thread on an E-core in 65 of 200 samples, moving it across all 20 CPUs
+# in 5 s. lavd sorts threads onto P- or E-cores by how often they sleep and
+# wake others, and a game's busiest thread rarely sleeps, so nothing keeps it on
+# a P-core. Its `--performance` mode does not change that sorting. lavd was
+# never benchmarked against the kernel's scheduler on this machine before it was
+# turned on; the desktop, which never loads it, is the comparison that exists.
+# The reasoning is on GameModeConfig::scx_for in rimed-core/src/profile.rs.
 #
-# scx_lavd ("latency-aware virtual deadline") is the one that helps a game: it
-# is built for interactive/gaming latency, which is what the Katana is for, as
-# opposed to scx_rusty/scx_layered (throughput and datacentre shaping). It is
-# restored to the kernel's own scheduler on exit, so it applies only while a
-# game session is actually held.
-#
-# Stated explicitly here even though it is now also the built-in default, so the
-# reference gaming machine documents its own scheduler rather than inheriting it
-# silently. Set it to "" to opt a machine out.
-#
-# This does nothing on the Daily edition: scxctl drives scx_loader over D-Bus,
-# and scx_loader.service is D-Bus activated rather than enabled at boot, so
-# rimed logs a skip and carries on.
-scx = "scx_lavd"
+# Set it to "scx_lavd" to load lavd anyway: the patched build is still in the
+# image, and scxctl still drives it.
+scx = ""
 
-# RTX 3070 Laptop (GA104, 8 GB GDDR6). Values are clamped at runtime against
-# `nvidia-smi --query-gpu=clocks.max.graphics,clocks.max.memory`, so an
-# over-ambitious number here can never reach the driver.
-#   graphics_clock = [floor, ceiling] in MHz — the floor stops the GPU dropping
-#   out of its boost bin mid-frame; 1620 MHz is the part's rated boost.
-#   memory_clock = "max" locks GDDR6 to its top supported bin (6001 MHz for the
-#   12 Gbps modules MSI ships in this chassis).
+# RTX 3070 Laptop (GA104, 8 GB GDDR6). No clock locks: the card boosts on its
+# own, exactly as it does on the desktop.
+#
+# This used to lock graphics to [1200, 1620] MHz and memory to "max". 1620 MHz
+# is the part's RATED boost, not its ceiling: nvidia-smi on katana reports
+# clocks.max.graphics 2100 MHz. Wherever the lock applied, Gaming Mode held the
+# GPU up to ~23 % below what the desktop lets it reach, a straight loss in any
+# scene the GPU limits. (In the 2026-10-07 session that prompted this, the lock
+# was NOT applied: `rime game status` read gpus_lock_attempted 0. It was not
+# that session's cause.) The floor and the memory lock went with it: on this
+# chassis the CPU and GPU share one cooler, and holding the GPU's clocks up
+# while a game waits on the CPU spends the CPU's thermal headroom. Nothing
+# measured either lock helping.
 [gamemode.nvidia]
 enabled = true
 persistence = true
-graphics_clock = [1200, 1620]
-memory_clock = "max"

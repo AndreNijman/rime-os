@@ -145,6 +145,7 @@ fn enter_then_exit_restores_the_filesystem_byte_for_byte() {
         pids: &placements,
         mems: "0".into(),
         irqbalance: false,
+        power_saving: &[],
     });
     assert_eq!(plan.cpu_list(), "0-11");
 
@@ -201,6 +202,7 @@ fn exit_is_idempotent() {
         pids: &[],
         mems: "0".into(),
         irqbalance: false,
+        power_saving: &[],
     });
     let writer = RealWriter::new(false);
     for a in &plan.enter {
@@ -241,6 +243,7 @@ fn a_uniform_machine_plans_no_pinning_and_no_steering() {
         pids: &[],
         mems: "0".into(),
         irqbalance: false,
+        power_saving: &[],
     });
     assert_eq!(plan.irqs_attempted, 0);
     assert!(!plan.enter.iter().any(|a| matches!(a, Action::IrqAffinity { .. })));
@@ -267,6 +270,7 @@ fn irq_policy_off_leaves_interrupts_alone() {
         pids: &[],
         mems: "0".into(),
         irqbalance: false,
+        power_saving: &[],
     });
     assert_eq!(plan.irqs_attempted, 0);
     assert!(plan.enter.iter().any(|a| matches!(a, Action::CgroupEnsure { .. })));
@@ -300,6 +304,7 @@ fn cpuset_off_plans_nothing_at_all() {
         pids: &[],
         mems: "0".into(),
         irqbalance: false,
+        power_saving: &[],
     });
     assert!(plan.enter.is_empty());
     assert!(plan.exit.is_empty());
@@ -379,9 +384,13 @@ fn a_running_irqbalance_is_called_out() {
         nvidia: &[],
         gpus: &[],
         irqs: &irqs,
-        pids: &[],
+        pids: &[PidPlacement {
+            pid: 4242,
+            prior_cgroup: Some(f.abs("sys/fs/cgroup/user.slice")),
+        }],
         mems: "0".into(),
         irqbalance: true,
+        power_saving: &[],
     });
     assert!(plan.irqs_attempted > 0);
     assert!(
@@ -513,6 +522,7 @@ fn a_session_with_a_gpu_locks_and_unlocks_it() {
         pids: &[],
         mems: "0".into(),
         irqbalance: false,
+        power_saving: &[],
     });
     assert_eq!(plan.gpus_locked, vec![0]);
     assert!(plan.enter.contains(&Action::NvidiaLockGraphics {
@@ -582,17 +592,139 @@ fn scx_plan(scx: &str) -> (Fixture, game::GamePlan) {
         pids: &placements,
         mems: "0".into(),
         irqbalance: false,
+        power_saving: &[],
     });
     (f, plan)
 }
 
 #[test]
-fn scx_defaults_to_the_gaming_scheduler() {
-    // Every machine's game mode asks for scx_lavd, so Gaming Mode is tuned on
-    // hardware other than the author's. This is safe for Daily because
-    // scx_loader.service is only enabled in the Gaming image, which makes the
-    // switch a logged no-op there — see the field's docs.
-    assert_eq!(GameModeConfig::default().scx, "scx_lavd");
+fn scx_defaults_to_the_kernel_scheduler_on_every_cpu() {
+    // Measured (2026-10-08): the kernel's own scheduler beat every sched-ext
+    // scheduler tried on a game-shaped load, on a P/E hybrid and on a CPU with
+    // one kind of core. So the default loads nothing, on either.
+    assert_eq!(GameModeConfig::default().scx, "");
+    for f in [machine("scx-default-hybrid"), uniform_machine("scx-default-uniform")] {
+        let plan = default_plan(&f);
+        assert!(
+            !plan.enter.iter().any(|a| matches!(a, Action::ScxSwitch { .. })),
+            "the default must not load a scheduler: {:?}",
+            plan.enter
+        );
+        assert!(!plan.exit.iter().any(|a| matches!(a, Action::ScxStop)));
+    }
+}
+
+/// The same machine as `machine()`, minus the P/E split: 16 CPUs of one kind.
+/// `acpi_cppc/highest_perf` still differs per CPU, the way AMD ranks its
+/// preferred cores (values from a Ryzen 7 PRO 250), and `cpu_capacity` is 1024
+/// everywhere.
+fn uniform_machine(tag: &str) -> Fixture {
+    let f = Fixture::new(tag);
+    let ranks = [202, 202, 196, 196, 208, 208, 232, 232, 214, 214, 232, 232, 226, 226, 220, 220];
+    for (c, rank) in ranks.iter().enumerate() {
+        f.write(&format!("sys/devices/system/cpu/cpu{c}/cpu_capacity"), "1024\n");
+        f.write(&format!("sys/devices/system/cpu/cpu{c}/acpi_cppc/highest_perf"), &format!("{rank}\n"));
+    }
+    f.write("sys/devices/system/cpu/online", "0-15\n");
+    f.write("proc/irq/24/smp_affinity_list", "0-15\n");
+    fs::create_dir_all(f.path().join("proc/irq/24/xhci_hcd")).unwrap();
+    f.write("sys/fs/cgroup/cgroup.subtree_control", "memory pids");
+    f.write("sys/fs/cgroup/cpuset.mems.effective", "0\n");
+    f
+}
+
+fn default_plan(f: &Fixture) -> game::GamePlan {
+    plan_with_scx(f, &GameModeConfig::default().scx)
+}
+
+fn plan_with_scx(f: &Fixture, scx: &str) -> game::GamePlan {
+    let cfg = GameModeConfig {
+        cgroup: f.abs("sys/fs/cgroup/rime-game"),
+        scx: scx.to_string(),
+        ..GameModeConfig::default()
+    };
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        gpus: &[],
+        irqs: &irq::enumerate(&f.path().join("proc/irq")),
+        pids: &[],
+        mems: "0".into(),
+        irqbalance: false,
+        power_saving: &[],
+    })
+}
+
+#[test]
+fn auto_gives_a_p_e_hybrid_the_kernels_own_scheduler() {
+    // katana, 2026-10-07: under scx_lavd Cyberpunk's 98 %-busy main thread sat
+    // on an E-core a third of the time, and the game ran slower than on the
+    // desktop, which runs the kernel's scheduler. On a P/E CPU `auto` is that
+    // scheduler: nothing to start, nothing to stop.
+    let f = machine("scx-auto-hybrid");
+    let plan = plan_with_scx(&f, "auto");
+    assert!(
+        !plan.enter.iter().any(|a| matches!(a, Action::ScxSwitch { .. })),
+        "auto must not load a scheduler on a P/E CPU: {:?}",
+        plan.enter
+    );
+    assert!(!plan.exit.iter().any(|a| matches!(a, Action::ScxStop)));
+    let note = plan
+        .notes
+        .iter()
+        .find(|n| n.starts_with("sched-ext:"))
+        .unwrap_or_else(|| panic!("the choice must be explained: {:?}", plan.notes));
+    assert!(note.contains("0-11") && note.contains("12-19"), "name the cores: {note}");
+    assert!(note.contains("scx_lavd"), "say how to get lavd back: {note}");
+}
+
+#[test]
+fn auto_still_loads_lavd_on_one_kind_of_core_even_with_ranked_cores() {
+    // The negative control, and the trap it guards: AMD's preferred-core
+    // ranking makes `is_hybrid()` read 16 identical cores as 4 P + 12 E. That
+    // is not a second kind of core, and `auto` must not drop lavd for it.
+    let f = uniform_machine("scx-auto-uniform");
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    assert!(topo.is_hybrid(), "the fixture must reproduce the ranked-core split");
+    assert!(!topo.has_efficiency_cores());
+    let plan = plan_with_scx(&f, "auto");
+    assert_eq!(
+        plan.enter.first(),
+        Some(&Action::ScxSwitch { sched: "scx_lavd".into() }),
+        "auto must load lavd on a CPU with one kind of core"
+    );
+    assert_eq!(plan.exit.last(), Some(&Action::ScxStop));
+}
+
+#[test]
+fn scx_keywords_resolve_against_the_cpu() {
+    let hybrid = machine("scx-kw-hybrid");
+    let uniform = uniform_machine("scx-kw-uniform");
+    let h = CoreTopology::detect_from(&hybrid.path().join("sys"));
+    let u = CoreTopology::detect_from(&uniform.path().join("sys"));
+    let with = |scx: &str| GameModeConfig { scx: scx.into(), ..GameModeConfig::default() };
+    for off in ["", "  ", "off", "none", "OFF"] {
+        assert_eq!(with(off).scx_for(&h), None, "{off:?} on hybrid");
+        assert_eq!(with(off).scx_for(&u), None, "{off:?} on uniform");
+    }
+    assert_eq!(with("auto").scx_for(&h), None);
+    assert_eq!(with("Auto").scx_for(&u), Some("scx_lavd".into()));
+    // A CPU whose topology could not be read is not known to be one kind.
+    let empty = Fixture::new("scx-kw-unknown");
+    let unknown = CoreTopology::detect_from(&empty.path().join("sys"));
+    assert_eq!(with("auto").scx_for(&unknown), None);
+    let plan = plan_with_scx(&empty, "auto");
+    assert!(!plan.enter.iter().any(|a| matches!(a, Action::ScxSwitch { .. })));
+    assert!(
+        plan.notes.iter().any(|n| n.starts_with("sched-ext:") && n.contains("could not be read")),
+        "{:?}",
+        plan.notes
+    );
+    // A named scheduler is a decision the profile made: it loads anywhere.
+    assert_eq!(with("scx_lavd").scx_for(&h), Some("scx_lavd".into()));
+    assert_eq!(with("scx_bpfland").scx_for(&u), Some("scx_bpfland".into()));
 }
 
 #[test]
@@ -705,10 +837,12 @@ fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
     // default, `cpuset = "off"` plans the scheduler switch and NOTHING else. If
     // a future change starts planning cgroup work behind an off cpuset, this
     // fails rather than hiding behind "well, the plan is non-empty now".
-    let f = machine("cpuset-off-scx");
+    // On a CPU with one kind of core, where `auto` is lavd.
+    let f = uniform_machine("cpuset-off-scx");
     let cfg = GameModeConfig {
         cpuset: "off".into(),
         cgroup: f.abs("sys/fs/cgroup/rime-game"),
+        scx: "auto".into(),
         ..GameModeConfig::default()
     };
     let topo = CoreTopology::detect_from(&f.path().join("sys"));
@@ -721,6 +855,7 @@ fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
         pids: &[],
         mems: "0".into(),
         irqbalance: false,
+        power_saving: &[],
     });
     assert_eq!(
         plan.enter,
@@ -728,6 +863,81 @@ fn the_default_scx_is_the_only_thing_planned_when_cpuset_is_off() {
         "cpuset off must plan the scheduler switch and nothing else"
     );
     assert_eq!(plan.exit, vec![Action::ScxStop]);
+}
+
+// ── interrupts move only when a game is actually in the cpuset ──────────────
+
+#[test]
+fn a_session_with_no_game_in_its_cpuset_moves_no_interrupts() {
+    // Gaming Mode's own call: `rime game start --owner-pid $$`, no game. On
+    // katana the plan still moved 47 interrupts onto the E-cores, which the
+    // game (running on all 20 CPUs, outside the empty cpuset) was using too.
+    let f = machine("irq-no-game");
+    let cfg = katana_cfg(&f);
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    let irqs = irq::enumerate(&f.path().join("proc/irq"));
+    let plan = game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        gpus: &[],
+        irqs: &irqs,
+        pids: &[],
+        mems: "0".into(),
+        irqbalance: false,
+        power_saving: &[],
+    });
+    assert_eq!(plan.irqs_attempted, 0);
+    assert!(
+        !plan.enter.iter().any(|a| matches!(a, Action::IrqAffinity { .. })),
+        "no game in the cpuset, so no interrupt moves: {:?}",
+        plan.enter
+    );
+    assert!(
+        plan.notes.iter().any(|n| n.starts_with("IRQ steering waits for a game")),
+        "and status says so: {:?}",
+        plan.notes
+    );
+    // The cpuset itself is still made ready for a game to be attached to.
+    assert!(plan.enter.iter().any(|a| matches!(a, Action::CgroupEnsure { .. })));
+
+    // The control: the same plan WITH a game moves them, so the zero above is
+    // the rule and not a fixture with nothing to steer.
+    let with_game = game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        gpus: &[],
+        irqs: &irqs,
+        pids: &[PidPlacement { pid: 4242, prior_cgroup: None }],
+        mems: "0".into(),
+        irqbalance: false,
+        power_saving: &[],
+    });
+    assert!(with_game.irqs_attempted > 0);
+}
+
+#[test]
+fn the_first_attach_moves_the_interrupts_the_plan_held_back() {
+    let f = machine("irq-on-attach");
+    let cfg = katana_cfg(&f);
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    let irqs = irq::enumerate(&f.path().join("proc/irq"));
+    let pcores: Vec<u32> = (0..=11).collect();
+
+    // Exactly what a plan with the game in it from the start would steer.
+    let (steer, restore) = game::steer_on_attach(&cfg, &topo, &irqs, &pcores);
+    let (want_steer, want_restore) =
+        irq::plan_steer(&irqs, &pcores, &topo.complement(&pcores), &cfg.irq_pin_to_game);
+    assert!(!steer.is_empty());
+    assert_eq!(steer, want_steer);
+    assert_eq!(restore, want_restore);
+
+    // Nothing when the profile does not steer, or the cpuset confines nothing.
+    let off = GameModeConfig { irq: "off".into(), ..katana_cfg(&f) };
+    assert_eq!(game::steer_on_attach(&off, &topo, &irqs, &pcores), (vec![], vec![]));
+    assert_eq!(game::steer_on_attach(&cfg, &topo, &irqs, &topo.all), (vec![], vec![]));
+    assert_eq!(game::steer_on_attach(&cfg, &topo, &irqs, &[]), (vec![], vec![]));
 }
 
 // ── the session owner: who the daemon watches so a torn-down session releases ─
@@ -866,4 +1076,76 @@ fn an_unreadable_proc_is_a_third_answer_and_never_a_release() {
 fn owner_for_pid_refuses_a_pid_that_does_not_exist() {
     let f = proc_fixture("owner-absent");
     assert_eq!(owner_for_pid(&f.path().join("proc"), 905), None);
+}
+
+// ── laptop power saving off for the session ─────────────────────────────────
+
+#[test]
+fn game_mode_switches_laptop_power_saving_off_and_puts_it_back() {
+    let f = machine("powersave");
+    f.write("sys/module/snd_hda_intel/parameters/power_save", "10\n");
+    f.write("sys/bus/usb/devices/1-1/power/control", "auto\n"); // a controller
+    f.write("sys/bus/usb/devices/1-2/power/control", "on\n"); // already awake
+    let knobs = game::read_power_saving(&f.path().join("sys"));
+    assert_eq!(knobs.len(), 3);
+    let cfg = katana_cfg(&f);
+    let topo = CoreTopology::detect_from(&f.path().join("sys"));
+    let irqs = irq::enumerate(&f.path().join("proc/irq"));
+    let plan = game::plan(&GameInputs {
+        cfg: &cfg,
+        topo: &topo,
+        nvidia: &[],
+        gpus: &[],
+        irqs: &irqs,
+        pids: &[],
+        mems: "0".into(),
+        irqbalance: false,
+        power_saving: &knobs,
+    });
+    let attrs = |v: &[Action]| -> Vec<(String, String)> {
+        v.iter()
+            .filter_map(|a| match a {
+                Action::PowerSaveAttr { path, value, .. } => Some((path.clone(), value.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let hda = f.abs("sys/module/snd_hda_intel/parameters/power_save");
+    let usb = f.abs("sys/bus/usb/devices/1-1/power/control");
+    let mut on = attrs(&plan.enter);
+    on.sort();
+    let mut want = vec![(hda.clone(), "0".to_string()), (usb.clone(), "on".to_string())];
+    want.sort();
+    assert_eq!(on, want, "exactly the two controls that save power, and nothing already awake");
+    let mut back = attrs(&plan.exit);
+    back.sort();
+    let mut prior = vec![(hda, "10".to_string()), (usb, "auto".to_string())];
+    prior.sort();
+    assert_eq!(back, prior, "exit puts back what was there");
+
+    // Applied through the real writer against the fixture: enter then exit
+    // leaves every control as it was found.
+    let before = f.snapshot();
+    let w = RealWriter::with_root(false, f.path().join("sys"));
+    for a in plan.enter.iter().chain(plan.exit.iter()) {
+        if matches!(a, Action::PowerSaveAttr { .. }) {
+            w.apply(a).unwrap();
+        }
+    }
+    assert_eq!(f.snapshot(), before);
+
+    // `power_saving = "keep"` leaves them alone.
+    let keep = GameModeConfig { power_saving: "keep".into(), ..katana_cfg(&f) };
+    let plan = game::plan(&GameInputs {
+        cfg: &keep,
+        topo: &topo,
+        nvidia: &[],
+        gpus: &[],
+        irqs: &irqs,
+        pids: &[],
+        mems: "0".into(),
+        irqbalance: false,
+        power_saving: &knobs,
+    });
+    assert!(attrs(&plan.enter).is_empty() && attrs(&plan.exit).is_empty());
 }

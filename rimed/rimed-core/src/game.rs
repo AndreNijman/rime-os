@@ -12,6 +12,8 @@
 //! daemon's existing tier engine and fan controller, which have their own
 //! restore paths.
 
+use std::path::{Path, PathBuf};
+
 use crate::gpu::{self, GpuDevice, NvidiaGpu, SysfsGpuPrior};
 use crate::irq::{self, IrqEntry};
 use crate::profile::{CpusetPolicy, GameModeConfig, IrqPolicy};
@@ -207,6 +209,45 @@ pub struct GameInputs<'a> {
     /// Whether an `irqbalance` daemon is running; it will undo IRQ steering, so
     /// the plan says so out loud rather than pretending the pinning holds.
     pub irqbalance: bool,
+    /// The laptop power-saving controls on this machine and what they hold
+    /// now ([`read_power_saving`]); turned off for the session when the
+    /// profile's `power_saving` is `off`.
+    pub power_saving: &'a [PowerSavingKnob],
+}
+
+/// One power-saving control game mode switches off, and what it held before.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PowerSavingKnob {
+    pub path: String,
+    pub prior: String,
+    pub want: String,
+    pub what: &'static str,
+}
+
+/// Read (never write) the laptop power-saving controls game mode turns off:
+///
+/// * every USB device's runtime PM (`power/control`): `auto` lets a
+///   controller, receiver or headset autosuspend after 2 s idle, and its
+///   first input after that pays the resume;
+/// * the HDA codec's `power_save` timeout (Fedora: 10 s), which powers the
+///   codec down in silence and pops or clips the next sound.
+pub fn read_power_saving(sys_root: &Path) -> Vec<PowerSavingKnob> {
+    let read = |p: &Path| std::fs::read_to_string(p).ok().map(|v| v.trim().to_string());
+    let mut out = Vec::new();
+    let hda = sys_root.join("module/snd_hda_intel/parameters/power_save");
+    if let Some(v) = read(&hda) {
+        out.push(PowerSavingKnob { path: hda.display().to_string(), prior: v, want: "0".into(), what: "audio power_save" });
+    }
+    if let Ok(entries) = std::fs::read_dir(sys_root.join("bus/usb/devices")) {
+        let mut paths: Vec<PathBuf> = entries.flatten().map(|e| e.path().join("power/control")).collect();
+        paths.sort();
+        for p in paths {
+            if let Some(v) = read(&p) {
+                out.push(PowerSavingKnob { path: p.display().to_string(), prior: v, want: "on".into(), what: "usb runtime pm" });
+            }
+        }
+    }
+    out
 }
 
 /// The symmetric plan.
@@ -286,6 +327,23 @@ pub fn resolve_cpus(cfg: &GameModeConfig, topo: &CoreTopology, notes: &mut Vec<S
     }
 }
 
+/// The IRQ steering `plan` leaves out of a session that starts with an empty
+/// cpuset, planned when the first game process is attached to it: the same
+/// rule as `plan`, `(steer, restore)`, both empty when the profile does not
+/// steer or `cpus` confines nothing.
+pub fn steer_on_attach(
+    cfg: &GameModeConfig,
+    topo: &CoreTopology,
+    irqs: &[IrqEntry],
+    cpus: &[u32],
+) -> (Vec<Action>, Vec<Action>) {
+    let pinning = !cpus.is_empty() && cpus.len() < topo.all.len().max(1);
+    if cfg.irq_policy() != IrqPolicy::AwayFromGame || !pinning {
+        return (Vec::new(), Vec::new());
+    }
+    irq::plan_steer(irqs, cpus, &topo.complement(cpus), &cfg.irq_pin_to_game)
+}
+
 /// Build the enter/exit plans.
 pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
     let cfg = inputs.cfg;
@@ -302,13 +360,30 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
     // cpuset (and undo it after the pinning is unwound), rather than shuffling
     // tasks that are mid-move.
     //
-    // Empty `scx` = leave the kernel scheduler alone, which is the default for
-    // every profile that does not ask. The Gaming profiles opt in to scx_lavd:
-    // it is the latency-first sched-ext scheduler, which is the one that helps a
-    // game rather than a build farm.
-    if !cfg.scx.trim().is_empty() {
+    // `scx_for` resolves the profile's `scx`: empty = the kernel scheduler,
+    // a name = that scheduler, `auto` (the default) = scx_lavd unless the CPU
+    // is a P/E hybrid, where lavd was measured moving a game's bottleneck
+    // thread onto E-cores. The reasoning is on `GameModeConfig::scx_for`.
+    let scx = cfg.scx_for(inputs.topo);
+    if scx.is_none() && cfg.scx.trim().eq_ignore_ascii_case("auto") {
+        notes.push(if inputs.topo.has_efficiency_cores() {
+            format!(
+                "sched-ext: none on this CPU (P-cores {}, E-cores {}). The game gets the \
+                 kernel's own scheduler, the same as the desktop: scx_lavd puts a game's \
+                 busiest thread on E-cores. Set `scx = \"scx_lavd\"` in the profile to load it anyway.",
+                inputs.topo.pcore_list(),
+                inputs.topo.ecore_list()
+            )
+        } else {
+            "sched-ext: none — the CPU's topology could not be read, so whether it has \
+             E-cores (where scx_lavd misplaces a game's busiest thread) is unknown. The game \
+             gets the kernel's own scheduler. Set `scx = \"scx_lavd\"` in the profile to load it anyway."
+                .to_string()
+        });
+    }
+    if let Some(sched) = &scx {
         enter.push(Action::ScxSwitch {
-            sched: cfg.scx.trim().to_string(),
+            sched: sched.clone(),
         });
         // NOTE the exit half is appended at the very END of this function, not
         // here: pushing it now would make ScxStop the FIRST exit action, i.e.
@@ -332,7 +407,7 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
             "sched-ext: this profile ASKS for {} and stops it again on exit. \
              Whether it loaded is a separate fact, reported as `scx_state` once \
              a session is running.",
-            cfg.scx.trim()
+            sched
         ));
     }
 
@@ -359,11 +434,24 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
     let (mut steer, mut irq_restore) = match cfg.irq_policy() {
         IrqPolicy::Off => (Vec::new(), Vec::new()),
         IrqPolicy::AwayFromGame => {
-            if pinning {
-                irq::plan_steer(inputs.irqs, &cpus, &housekeeping, &cfg.irq_pin_to_game)
-            } else {
+            if !pinning {
                 notes.push("IRQ steering skipped — the game is not confined to a subset of CPUs".into());
                 (Vec::new(), Vec::new())
+            } else if inputs.pids.is_empty() {
+                // Gaming Mode starts this way: the session names no game, so the
+                // cpuset is empty and the game runs on every CPU. Moving every
+                // interrupt onto the "other" cores would then pile them onto
+                // cores the game is using too (katana: 47 IRQs on its E-cores,
+                // where Cyberpunk's threads also ran). `steer_on_attach` moves
+                // them when a game process actually enters the cpuset.
+                notes.push(
+                    "IRQ steering waits for a game: no process is in the cpuset yet, so \
+                     interrupts stay where they are until one is attached"
+                        .into(),
+                );
+                (Vec::new(), Vec::new())
+            } else {
+                irq::plan_steer(inputs.irqs, &cpus, &housekeeping, &cfg.irq_pin_to_game)
             }
         }
     };
@@ -438,6 +526,23 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
         ));
     }
 
+    // ── 4. laptop power saving off (USB autosuspend, audio power-down) ──────
+    if cfg.power_saving_off() {
+        let mut restore = Vec::new();
+        for k in inputs.power_saving.iter().filter(|k| k.prior != k.want) {
+            enter.push(Action::PowerSaveAttr { path: k.path.clone(), value: k.want.clone(), what: k.what.into() });
+            restore.push(Action::PowerSaveAttr { path: k.path.clone(), value: k.prior.clone(), what: k.what.into() });
+        }
+        if !restore.is_empty() {
+            notes.push(format!(
+                "laptop power saving off for the session: {} control(s) (USB autosuspend, audio power-down)",
+                restore.len()
+            ));
+        }
+        restore.append(&mut exit);
+        exit = restore;
+    }
+
     // ── exit: IRQs, then release the cgroup ──────────────────────────────────
     exit.append(&mut irq_restore);
     if !cpus.is_empty() && cfg.cpuset_policy() != CpusetPolicy::Off {
@@ -456,7 +561,7 @@ pub fn plan(inputs: &GameInputs<'_>) -> GamePlan {
 
     // Hand scheduling back only after every cpuset/IRQ/clock action has been
     // unwound — the mirror of loading it first on enter.
-    if !cfg.scx.trim().is_empty() {
+    if scx.is_some() {
         exit.push(Action::ScxStop);
     }
 

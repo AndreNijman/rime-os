@@ -75,6 +75,24 @@ impl CoreTopology {
         !self.ecores.is_empty() && !self.pcores.is_empty()
     }
 
+    /// True when the CPU has genuinely different kinds of core, as the kernel
+    /// reports them: Intel's P/E split (the `cpu_core`/`cpu_atom` PMUs, or the
+    /// `types` directory) or differing `cpu_capacity` (Arm big.LITTLE).
+    ///
+    /// Stricter than [`is_hybrid`](Self::is_hybrid) on purpose. The CPPC and
+    /// max-frequency rungs also split CPUs that are all the same core and are
+    /// only ranked: AMD's preferred cores. Measured on a Ryzen 7 PRO 250 (eight
+    /// identical Zen 5 cores): `cpu_capacity` 1024 on every CPU, and
+    /// `acpi_cppc/highest_perf` 196-232, which `is_hybrid` reads as four
+    /// P-cores and twelve E-cores.
+    pub fn has_efficiency_cores(&self) -> bool {
+        self.is_hybrid()
+            && matches!(
+                self.source,
+                CoreSource::HybridPmu | CoreSource::CpuTypes | CoreSource::Capacity
+            )
+    }
+
     /// `0-11` style rendering of the performance cores.
     pub fn pcore_list(&self) -> String {
         format_cpu_list(&self.pcores)
