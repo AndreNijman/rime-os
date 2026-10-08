@@ -1,0 +1,17 @@
+# Rime OS — when the NVIDIA GPU support notice runs.
+#
+# Once per login session, two minutes in: late enough that the Shell's
+# notification server is up, early enough that the person is still looking.
+# No repeat — the GPU does not change while the machine is running, and the
+# script itself stays quiet after the first time it has said something.
+
+[Unit]
+Description=Check once per session whether the NVIDIA GPU has a driver
+Documentation=man:rime(1)
+
+[Timer]
+OnStartupSec=2min
+Unit=rime-gpu-notice.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-gpu-notice — tell the user once when their NVIDIA GPU has no driver.
+#
+#  NVIDIA's driver after the 580 series drives Turing (GeForce GTX 16 / RTX 20)
+#  and newer only. Rime ships that current driver, so on a Maxwell, Pascal or
+#  Volta card (GTX 750 to GTX 1080 Ti, MX110 to MX350, TITAN V) no driver binds
+#  at all: a laptop quietly runs everything on its other GPU, and a desktop
+#  with only that card runs on the firmware's basic display. `rime doctor`
+#  explains it; this is the half that reaches somebody who never runs it.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#
+#  * It never repeats itself. The GPU in a machine does not change between
+#    logins, and a notification at every login saying what the last one said
+#    is noise that gets muted. The text's digest is kept and a notification
+#    goes out only when it changes (a different card, a different state).
+#  * It never guesses. The sentence is `rime doctor`'s own line, so this and
+#    the doctor cannot disagree; when doctor has no such line it says nothing.
+#  * It never runs as root: notify-send needs the user's session bus.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+Rime="${RIME_BIN:-/usr/bin/rime}"
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/rime"
+SEEN="$STATE/gpu-notice.seen"
+
+log() { printf 'rime-gpu-notice: %s\n' "$*" >&2; }
+
+[[ -x "$Rime" ]] || { log "no rime binary at $Rime"; exit 0; }
+
+out="$("$Rime" doctor 2>/dev/null)"
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+    log "rime doctor exited $rc; saying nothing"
+    exit 0
+fi
+
+line="$(printf '%s\n' "$out" | grep -m1 '^\[WARN\] NVIDIA GPU ' || true)"
+if [[ -z "$line" ]]; then
+    # Nothing to say. Forget what was said, so the same state coming back
+    # (the card moved to another machine image, say) is announced again.
+    rm -f "$SEEN"
+    exit 0
+fi
+body="${line#\[WARN\] }"
+
+digest="$(printf '%s' "$body" | sha256sum | cut -d' ' -f1)"
+if [[ -f "$SEEN" && "$(cat "$SEEN")" == "$digest" ]]; then
+    exit 0
+fi
+mkdir -p "$STATE"
+printf '%s\n' "$digest" > "$SEEN"
+
+if command -v notify-send >/dev/null 2>&1; then
+    # Normal urgency: nothing is failing, this is a fact about the hardware.
+    notify-send --app-name='Rime OS' --urgency=normal --icon=video-display \
+        "This NVIDIA GPU has no driver on Rime OS" \
+        "$body" || log "notify-send failed"
+else
+    log "no notify-send; printing instead"
+fi
+printf '%s\n' "$body"
+exit 0
