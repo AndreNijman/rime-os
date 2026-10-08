@@ -110,6 +110,10 @@ COPY --chmod=0755 files/system/libexec/rime-gaming-session \
      /usr/libexec/rime-gaming-session
 COPY --chmod=0755 files/system/libexec/rime-gamescope-steam \
      /usr/libexec/rime-gamescope-steam
+# Steam's game environment, one list for Gaming Mode (the wrapper above runs
+# it) and the desktop (greetd sources /etc/profile before it execs a session).
+COPY --chmod=0755 files/system/libexec/rime-game-env /usr/libexec/rime-game-env
+COPY files/system/profile.d/rime-game-env.sh /etc/profile.d/rime-game-env.sh
 COPY --chmod=0755 files/system/libexec/rime-session-select \
      /usr/libexec/rime-session-select
 # Gaming Mode is a toggle: greetd's ExecStartPre (rime-greetd) spends the
@@ -136,6 +140,9 @@ RUN set -eux; \
     visudo -cf /etc/sudoers.d/040-rime-session-select; \
     bash -n /usr/libexec/rime-gaming-session; \
     bash -n /usr/libexec/rime-gamescope-steam; \
+    bash -n /usr/libexec/rime-game-env; \
+    sh -n /etc/profile.d/rime-game-env.sh; \
+    /usr/libexec/rime-game-env -v; \
     command -v xprop >/dev/null || { echo "FATAL: rime-gamescope-steam needs xprop (Gaming Mode would scan out garbage on NVIDIA)"; exit 1; }; \
     bash -n /usr/libexec/rime-session-select; \
     bash -n /usr/libexec/rime-greetd; \

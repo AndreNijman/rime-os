@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 #  rime-gamescope-steam — starts Steam inside Gaming Mode's gamescope, keeps
-#  gamescope compositing while HDR is off, and turns opacity micromaps off for
-#  Proton games on NVIDIA GPUs older than Ada.
+#  gamescope compositing while HDR is off, and gives Steam Rime's game
+#  environment (/usr/libexec/rime-game-env: the NVIDIA shader cache size, and
+#  opacity micromaps off for Proton games on NVIDIA GPUs older than Ada).
 #
 #  Usage (rime-gaming-session runs it as gamescope's command):
 #    gamescope … -- rime-gamescope-steam steam -gamepadui -steamos3
@@ -26,6 +27,8 @@
 #    RIME_GAMING_FORCE_COMPOSITE=0    leave composition to gamescope
 #    RIME_GAMING_OMM=on               keep opacity micromaps on an older NVIDIA GPU
 #    __GL_SHADER_DISK_CACHE_SIZE      NVIDIA shader cache size per game (12 GB)
+#  (those two are rime-game-env's; the desktop gets the same list from
+#  /etc/profile.d/rime-game-env.sh)
 #
 #  The guard is the property watcher only: if xprop is missing or the X
 #  server is gone, Steam still starts and nothing else changes.
@@ -36,18 +39,6 @@ log() { printf 'rime-gamescope-steam: %s\n' "$*" >&2; }
 
 HDR_POLICY="${RIME_GAMING_HDR:-off}"
 FORCE_COMPOSITE="${RIME_GAMING_FORCE_COMPOSITE:-1}"
-
-# ── NVIDIA shader cache size ────────────────────────────────────────────────
-# Steam gives every game its own NVIDIA cache directory and sets
-# __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1, but no size, so the driver's 1 GB
-# default applies; for Mesa it sets MESA_SHADER_CACHE_MAX_SIZE=5G. Once a
-# game's cache is over the limit, new shaders are not kept. Measured on katana
-# (RTX 3070 Laptop, 615.71.09) with THE FINALS, whose cache had reached 2.1 GB:
-# by default every launch preloaded its shaders from scratch (24 % and 26 % of
-# the preload after ~3.5 min, ~3,000-3,500 CPU-seconds each). With 12 GB the
-# preload finished inside 220 s and the next launch used 660 CPU-seconds. A
-# value the user already set is left alone. Ignored by every other driver.
-export __GL_SHADER_DISK_CACHE_SIZE="${__GL_SHADER_DISK_CACHE_SIZE:-12000000000}"
 
 set_root() { xprop -root -f "$1" 32c -set "$1" "$2" 2>/dev/null; }
 
@@ -93,32 +84,19 @@ guard() {
     kill "$spy" 2>/dev/null
 }
 
-# ── NVIDIA GPUs older than Ada: no opacity micromaps ────────────────────────
-# Measured on katana (RTX 3070 Laptop, GA104, NVIDIA 615.71.09): since
-# vkd3d-proton 6ef5e11e (in Proton Experimental from 2026-10-01) enables
-# VK_KHR_opacity_micromap whenever DXR is on, Cyberpunk 2077 with ray tracing
-# hangs the GPU while loading (Xid 109) and its watchdog kills it after 120 s.
-# With the extension disabled it runs the benchmark at RT Ultra. Ada (device
-# 0x2600) and later have the micromap hardware and are left alone. Upstream:
-# https://github.com/HansKristian-Work/vkd3d-proton/pull/3362 . Remove this once
-# Proton ships that or an NVIDIA driver fixes the hang.
-nvidia_before_ada() {
-    local dev class id
-    for dev in "${RIME_SYSFS:-/sys}"/bus/pci/devices/*; do
-        [ "$(cat "$dev/vendor" 2>/dev/null)" = 0x10de ] || continue
-        class="$(cat "$dev/class" 2>/dev/null)"
-        case "$class" in 0x03*) ;; *) continue ;; esac
-        id="$(cat "$dev/device" 2>/dev/null)"
-        [ -n "$id" ] && [ $(( id )) -lt $(( 0x2600 )) ] && return 0
-    done
-    return 1
-}
-if [ "${RIME_GAMING_OMM:-auto}" != on ] && nvidia_before_ada; then
-    case ",${VKD3D_DISABLE_EXTENSIONS:-}," in
-        *,VK_KHR_opacity_micromap,*) ;;
-        *) export VKD3D_DISABLE_EXTENSIONS="${VKD3D_DISABLE_EXTENSIONS:+${VKD3D_DISABLE_EXTENSIONS},}VK_KHR_opacity_micromap" ;;
-    esac
-    log "NVIDIA GPU older than Ada: opacity micromaps off for Proton games"
+# ── The game environment ────────────────────────────────────────────────────
+# One list for Gaming Mode and the desktop: rime-game-env prints what should
+# change as KEY=VALUE, and says why on stderr (this script's log; it has
+# written every line before its output ends, so none is lost to the exec). A Gaming
+# Mode session already read it through /etc/profile, so here it usually
+# changes nothing; it runs anyway so Steam gets it however this was started.
+GAME_ENV="${RIME_GAME_ENV_HELPER:-${BASH_SOURCE[0]%/*}/rime-game-env}"
+if [ -x "$GAME_ENV" ]; then
+    while IFS= read -r kv; do
+        case "$kv" in [A-Za-z_]*=*) export "${kv?}" ;; esac
+    done < <("$GAME_ENV" -v)
+else
+    log "no ${GAME_ENV}: Steam gets the session's environment as it is"
 fi
 
 if [ $# -eq 0 ]; then
