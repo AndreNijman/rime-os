@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use rimed_core::profile::ProfileSet;
-use rimed_core::syswriter::{MockWriter, RealWriter, SysWriter};
+use rimed_core::syswriter::{MockWriter, Outcome, RealWriter, SysWriter};
 use rimed_core::tier::{Action, Tier};
 
 fn set() -> ProfileSet {
@@ -154,7 +154,9 @@ fn a_transition_is_just_the_target_tier() {
 }
 
 #[test]
-fn msi_katana_omits_platform_profile() {
+fn msi_katana_plans_a_platform_profile_per_tier() {
+    // Its firmware has no ACPI platform_profile; the writer turns these into
+    // the MSI EC's shift_mode (see the msi-ec tests below).
     let s = set();
     let p = s.get("msi-katana-gf76").unwrap();
     assert_eq!(
@@ -162,9 +164,16 @@ fn msi_katana_omits_platform_profile() {
         vec![
             Action::Governor("performance".into()),
             Action::Epp("performance".into()),
+            Action::PlatformProfile("performance".into()),
             Action::CpuPowerLimit { pl1_w: 45, pl2_w: 65 },
         ]
     );
+    assert!(p
+        .plan_tier(Tier::Balanced)
+        .contains(&Action::PlatformProfile("balanced".into())));
+    assert!(p
+        .plan_tier(Tier::PowerSaver)
+        .contains(&Action::PlatformProfile("low-power".into())));
     // Its AC default is the top tier, which every machine can honour.
     assert_eq!(p.defaults.ac, Tier::Performance);
 }
@@ -359,12 +368,112 @@ fn platform_profile_maps_onto_the_firmwares_own_vocabulary() {
 
 #[test]
 fn an_absent_platform_profile_is_a_skip_not_a_failure() {
+    // Neither ACPI nor msi-ec: refused, as it always was, and nothing written.
     let f = Fixture::new("pp-absent");
-    assert!(f
-        .writer()
-        .apply(&Action::PlatformProfile("performance".into()))
-        .is_ok());
+    assert_eq!(
+        f.writer()
+            .apply(&Action::PlatformProfile("performance".into()))
+            .unwrap(),
+        Outcome::Refused("platform_profile: attribute absent".into())
+    );
     assert!(f.read("firmware/acpi/platform_profile").is_none());
+    assert!(f.read("devices/platform/msi-ec/shift_mode").is_none());
+}
+
+// ── msi-ec shift_mode: the platform profile of an MSI laptop ────────────────
+
+const SHIFT: &str = "devices/platform/msi-ec/shift_mode";
+
+/// An msi-ec tree as katana's EC presents it: three modes, one per line,
+/// starting in `comfort`.
+fn msi_ec(tag: &str) -> Fixture {
+    let f = Fixture::new(tag);
+    f.write("devices/platform/msi-ec/available_shift_modes", "turbo\neco\ncomfort\n");
+    f.write(SHIFT, "comfort");
+    f
+}
+
+#[test]
+fn acpi_platform_profile_is_preferred_over_msi_ec() {
+    let f = msi_ec("pp-both");
+    f.write("firmware/acpi/platform_profile_choices", "low-power balanced performance");
+    f.write("firmware/acpi/platform_profile", "balanced");
+    let w = f.writer();
+    assert_eq!(
+        w.apply(&Action::PlatformProfile("performance".into())).unwrap(),
+        Outcome::Landed
+    );
+    assert_eq!(f.read("firmware/acpi/platform_profile").as_deref(), Some("performance"));
+    assert_eq!(f.read(SHIFT).as_deref(), Some("comfort"), "msi-ec left alone");
+}
+
+#[test]
+fn msi_ec_shift_mode_stands_in_for_an_absent_platform_profile() {
+    let f = msi_ec("pp-msi");
+    let w = f.writer();
+    for (profile, mode) in [
+        ("performance", "turbo"),
+        ("balanced", "comfort"),
+        ("low-power", "eco"),
+        ("balanced-performance", "turbo"),
+        ("quiet", "eco"),
+        ("power-saver", "eco"),
+    ] {
+        assert_eq!(
+            w.apply(&Action::PlatformProfile(profile.into())).unwrap(),
+            Outcome::Landed,
+            "{profile}"
+        );
+        assert_eq!(f.read(SHIFT).as_deref(), Some(mode), "{profile} -> {mode}");
+    }
+    assert!(f.read("firmware/acpi/platform_profile").is_none());
+}
+
+#[test]
+fn msi_ec_without_a_list_is_trusted_with_the_three_known_modes() {
+    let f = Fixture::new("pp-msi-nolist");
+    f.write(SHIFT, "comfort");
+    let w = f.writer();
+    assert_eq!(
+        w.apply(&Action::PlatformProfile("performance".into())).unwrap(),
+        Outcome::Landed
+    );
+    assert_eq!(f.read(SHIFT).as_deref(), Some("turbo"));
+}
+
+#[test]
+fn a_shift_mode_the_ec_does_not_list_is_refused() {
+    // An EC configuration with no turbo: performance is refused, not
+    // written blind, and the current mode stays.
+    let f = Fixture::new("pp-msi-noturbo");
+    f.write("devices/platform/msi-ec/available_shift_modes", "eco\ncomfort\n");
+    f.write(SHIFT, "comfort");
+    let w = f.writer();
+    assert!(matches!(
+        w.apply(&Action::PlatformProfile("performance".into())).unwrap(),
+        Outcome::Refused(_)
+    ));
+    assert_eq!(f.read(SHIFT).as_deref(), Some("comfort"));
+}
+
+#[test]
+fn katana_game_mode_exit_puts_the_prior_shift_mode_back() {
+    // Game mode enters its tier and, on exit, re-applies the prior tier's
+    // plan (rimed/src/game.rs): no sysfs read is involved, so the prior tier's
+    // platform_profile is what restores the EC's mode.
+    let f = msi_ec("pp-msi-game");
+    let w = f.writer();
+    let s = set();
+    let p = s.get("msi-katana-gf76").unwrap();
+    let game_tier = p.game_config().tier;
+    assert_eq!(game_tier, Tier::Performance);
+
+    w.apply_all(&p.plan_tier(game_tier)).unwrap();
+    assert_eq!(f.read(SHIFT).as_deref(), Some("turbo"));
+    w.apply_all(&p.plan_tier(Tier::Balanced)).unwrap();
+    assert_eq!(f.read(SHIFT).as_deref(), Some("comfort"));
+    w.apply_all(&p.plan_tier(Tier::PowerSaver)).unwrap();
+    assert_eq!(f.read(SHIFT).as_deref(), Some("eco"));
 }
 
 #[test]

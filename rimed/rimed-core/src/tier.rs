@@ -109,7 +109,8 @@ pub enum Action {
     /// Write `energy_performance_preference` on every cpufreq policy (skipped
     /// by the real writer where the attribute is absent).
     Epp(String),
-    /// Write `/sys/firmware/acpi/platform_profile` (skipped where absent).
+    /// Write `/sys/firmware/acpi/platform_profile`; where that is absent, the
+    /// MSI EC's `shift_mode` when msi-ec is bound (skipped where neither is).
     PlatformProfile(String),
     /// Hold the CPU package to these power limits (watts): PL1 (sustained)
     /// and PL2 (burst). Where thermald runs, it is paused for as long as the

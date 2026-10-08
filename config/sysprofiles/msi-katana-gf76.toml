@@ -5,8 +5,13 @@
 # "Katana". Supersedes the intel-hybrid class profile on this machine.
 #
 # This is an always-on-AC gaming laptop, so the AC default is the top tier.
-# platform_profile is omitted because MSI's EC (msi-ec) does not reliably export
-# the ACPI platform_profile interface; the real SysWriter would skip it anyway.
+#
+# platform_profile: this firmware registers no ACPI platform_profile, so rimed
+# writes the MSI EC's shift_mode instead (msi-ec; this EC offers turbo, comfort
+# and eco): performance -> turbo, balanced -> comfort, low-power -> eco. The EC
+# comes up in comfort, which held the CPU near 43 W. Measured 2026-10-08
+# (Cyberpunk 2077 built-in benchmark, CPU-bound): comfort 70-74 fps, turbo
+# 103-107 fps with the CPU at ~51 W.
 
 id = "msi-katana-gf76"
 kind = "device"
@@ -19,6 +24,7 @@ battery = "balanced"
 [tiers.performance]
 governor = "performance"
 epp = "performance"
+platform_profile = "performance"
 # CPU package power limits [sustained PL1, burst PL2] in watts, held while on
 # this tier (rimed pauses thermald for the duration; any other tier hands the
 # limits back to the firmware and restarts it).
@@ -42,10 +48,12 @@ cpu_power_limit_w = [45, 65]
 [tiers.balanced]
 governor = "powersave"
 epp = "balance_power"
+platform_profile = "balanced"
 
 [tiers.power-saver]
 governor = "powersave"
 epp = "power"
+platform_profile = "low-power"
 
 # The msi-ec longevity window. No battery is named: this chassis presents
 # its pack as BAT1 rather than BAT0, which is exactly why the paths used to be
