@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  rime-gamescope-steam — starts Steam inside Gaming Mode's gamescope, and
-#  keeps gamescope compositing while HDR is off.
+#  rime-gamescope-steam — starts Steam inside Gaming Mode's gamescope, keeps
+#  gamescope compositing while HDR is off, and turns opacity micromaps off for
+#  Proton games on NVIDIA GPUs older than Ada.
 #
 #  Usage (rime-gaming-session runs it as gamescope's command):
 #    gamescope … -- rime-gamescope-steam steam -gamepadui -steamos3
@@ -23,6 +24,7 @@
 #  ── Knobs ───────────────────────────────────────────────────────────────────
 #    RIME_GAMING_HDR=steam            let Steam's HDR setting through
 #    RIME_GAMING_FORCE_COMPOSITE=0    leave composition to gamescope
+#    RIME_GAMING_OMM=on               keep opacity micromaps on an older NVIDIA GPU
 #
 #  The guard is the property watcher only: if xprop is missing or the X
 #  server is gone, Steam still starts and nothing else changes.
@@ -77,6 +79,34 @@ guard() {
     done
     kill "$spy" 2>/dev/null
 }
+
+# ── NVIDIA GPUs older than Ada: no opacity micromaps ────────────────────────
+# Measured on katana (RTX 3070 Laptop, GA104, NVIDIA 615.71.09): since
+# vkd3d-proton 6ef5e11e (in Proton Experimental from 2026-10-01) enables
+# VK_KHR_opacity_micromap whenever DXR is on, Cyberpunk 2077 with ray tracing
+# hangs the GPU while loading (Xid 109) and its watchdog kills it after 120 s.
+# With the extension disabled it runs the benchmark at RT Ultra. Ada (device
+# 0x2600) and later have the micromap hardware and are left alone. Upstream:
+# https://github.com/HansKristian-Work/vkd3d-proton/pull/3362 . Remove this once
+# Proton ships that or an NVIDIA driver fixes the hang.
+nvidia_before_ada() {
+    local dev class id
+    for dev in "${RIME_SYSFS:-/sys}"/bus/pci/devices/*; do
+        [ "$(cat "$dev/vendor" 2>/dev/null)" = 0x10de ] || continue
+        class="$(cat "$dev/class" 2>/dev/null)"
+        case "$class" in 0x03*) ;; *) continue ;; esac
+        id="$(cat "$dev/device" 2>/dev/null)"
+        [ -n "$id" ] && [ $(( id )) -lt $(( 0x2600 )) ] && return 0
+    done
+    return 1
+}
+if [ "${RIME_GAMING_OMM:-auto}" != on ] && nvidia_before_ada; then
+    case ",${VKD3D_DISABLE_EXTENSIONS:-}," in
+        *,VK_KHR_opacity_micromap,*) ;;
+        *) export VKD3D_DISABLE_EXTENSIONS="${VKD3D_DISABLE_EXTENSIONS:+${VKD3D_DISABLE_EXTENSIONS},}VK_KHR_opacity_micromap" ;;
+    esac
+    log "NVIDIA GPU older than Ada: opacity micromaps off for Proton games"
+fi
 
 if [ $# -eq 0 ]; then
     log "usage: rime-gamescope-steam COMMAND [ARGS…]"

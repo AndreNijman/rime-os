@@ -151,5 +151,36 @@ fi
 bash "$WRAP" 2>/dev/null; rc=$?
 [ "$rc" = 2 ] && ok "no command: usage error (2)" || bad "no command" "exit $rc"
 
+# ── NVIDIA GPUs older than Ada: VK_KHR_opacity_micromap off ────────────────
+# Fixture PCI trees. katana: Intel iGPU + RTX 3070 Laptop (GA104, 0x249d).
+pci() {  # root slot vendor device class
+    mkdir -p "$1/bus/pci/devices/$2"
+    printf '%s\n' "$3" > "$1/bus/pci/devices/$2/vendor"
+    printf '%s\n' "$4" > "$1/bus/pci/devices/$2/device"
+    printf '%s\n' "$5" > "$1/bus/pci/devices/$2/class"
+}
+KAT="${WORK}/sys-katana"; pci "$KAT" 0000:00:02.0 0x8086 0x46a6 0x030000; pci "$KAT" 0000:01:00.0 0x10de 0x249d 0x030200
+ADA="${WORK}/sys-ada";    pci "$ADA" 0000:01:00.0 0x10de 0x2820 0x030000; pci "$ADA" 0000:01:00.1 0x10de 0x22bd 0x040300
+AMD="${WORK}/sys-amd";    pci "$AMD" 0000:03:00.0 0x1002 0x73bf 0x030000
+# what the command (Steam) sees in VKD3D_DISABLE_EXTENSIONS; no DISPLAY, so the guard stays out of it
+seen() { env -u DISPLAY "$@" bash "$WRAP" bash -c 'printf %s "${VKD3D_DISABLE_EXTENSIONS-UNSET}"' 2>"${WORK}/log"; }
+
+[ "$(seen RIME_SYSFS="$KAT")" = VK_KHR_opacity_micromap ] && grep -q "older than Ada" "${WORK}/log" \
+    && ok "katana (GA104): opacity micromaps are disabled for Proton, and the log says why" \
+    || bad "katana (GA104)" "seen: $(seen RIME_SYSFS="$KAT"); log: $(cat "${WORK}/log")"
+[ "$(seen RIME_SYSFS="$ADA")" = UNSET ] \
+    && ok "Ada (and its audio function, an older device id): nothing is disabled" \
+    || bad "Ada" "seen: $(seen RIME_SYSFS="$ADA")"
+[ "$(seen RIME_SYSFS="$AMD")" = UNSET ] && ok "no NVIDIA GPU: nothing is disabled" \
+    || bad "AMD" "seen: $(seen RIME_SYSFS="$AMD")"
+[ "$(seen RIME_SYSFS="$KAT" VKD3D_DISABLE_EXTENSIONS=VK_EXT_mesh_shader)" = VK_EXT_mesh_shader,VK_KHR_opacity_micromap ] \
+    && ok "a list the user already set is kept and appended to" \
+    || bad "append" "seen: $(seen RIME_SYSFS="$KAT" VKD3D_DISABLE_EXTENSIONS=VK_EXT_mesh_shader)"
+[ "$(seen RIME_SYSFS="$KAT" VKD3D_DISABLE_EXTENSIONS=VK_KHR_opacity_micromap)" = VK_KHR_opacity_micromap ] \
+    && ok "already in the list: not added twice" \
+    || bad "no duplicate" "seen: $(seen RIME_SYSFS="$KAT" VKD3D_DISABLE_EXTENSIONS=VK_KHR_opacity_micromap)"
+[ "$(seen RIME_SYSFS="$KAT" RIME_GAMING_OMM=on)" = UNSET ] && ok "RIME_GAMING_OMM=on keeps micromaps on" \
+    || bad "RIME_GAMING_OMM=on" "seen: $(seen RIME_SYSFS="$KAT" RIME_GAMING_OMM=on)"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
