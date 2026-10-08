@@ -111,6 +111,18 @@ pub enum Action {
     Epp(String),
     /// Write `/sys/firmware/acpi/platform_profile` (skipped where absent).
     PlatformProfile(String),
+    /// Hold the CPU package to these power limits (watts): PL1 (sustained)
+    /// and PL2 (burst). Where thermald runs, it is paused for as long as the
+    /// limits are held, because its adaptive mode re-applies the firmware's
+    /// own limits within seconds. See `RealWriter::apply_cpu_power_limit`.
+    CpuPowerLimit { pl1_w: u32, pl2_w: u32 },
+    /// Hand the CPU package's power limits back to the firmware: undo a
+    /// [`Action::CpuPowerLimit`] (restart thermald where it was paused). A
+    /// no-op when nothing was held.
+    CpuPowerFirmware,
+    /// Write a power-saving control (absolute sysfs path) for game mode:
+    /// USB runtime PM, the HDA codec's power_save. `what` is a log label.
+    PowerSaveAttr { path: String, value: String, what: String },
     /// Write battery charge start/stop thresholds on one battery.
     ///
     /// Both paths are optional because charge-threshold support is ragged: many
@@ -210,6 +222,11 @@ impl Action {
             Action::Governor(g) => format!("scaling_governor = {g} (all policies)"),
             Action::Epp(e) => format!("energy_performance_preference = {e} (all policies)"),
             Action::PlatformProfile(p) => format!("platform_profile = {p}"),
+            Action::CpuPowerLimit { pl1_w, pl2_w } => {
+                format!("CPU package power limits = {pl1_w} W sustained, {pl2_w} W burst")
+            }
+            Action::CpuPowerFirmware => "CPU package power limits = the firmware's".to_string(),
+            Action::PowerSaveAttr { path, value, what } => format!("{what}: {path} <- {value}"),
             Action::ChargeThresholds {
                 start,
                 stop,

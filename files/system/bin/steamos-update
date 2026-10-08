@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Rime OS — Steam's System > Software Updates in Gaming Mode (-steamos3) asks
+# `steamos-update check`. Rime is updated by `rime update` (and the desktop's
+# update notice), not by Steam, so this answers SteamOS's "no update" (exit 7)
+# and never applies anything. See files/system/libexec/rime-gaming-session.
+echo "Rime OS is updated with 'rime update', not from Steam." >&2
+exit 7

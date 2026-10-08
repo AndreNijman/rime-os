@@ -82,9 +82,12 @@ fn there_are_exactly_three_tiers_and_they_are_universal() {
 }
 
 #[test]
-fn no_shipped_profile_can_emit_a_power_limit_action() {
-    // Every action a tier plans is one of the three portable knobs. Nothing may
-    // reintroduce a vendor power-limit tool through a profile.
+fn no_shipped_profile_can_emit_a_vendor_power_limit_action() {
+    // Every action a tier plans is one of the three portable knobs, or the
+    // kernel's own RAPL powercap limits (CpuPowerLimit / CpuPowerFirmware).
+    // Nothing may reintroduce a vendor power-limit tool (the removed RyzenAdj
+    // EC-defeat path) through a profile, and only a DEVICE profile may hold
+    // CPU power limits at all: only it knows the cooling they assume.
     for (id, _) in rimed_core::profile::BUILTIN_PROFILE_TOML {
         let s = set();
         let p = s.get(id).unwrap();
@@ -93,10 +96,21 @@ fn no_shipped_profile_can_emit_a_power_limit_action() {
                 assert!(
                     matches!(
                         a,
-                        Action::Governor(_) | Action::Epp(_) | Action::PlatformProfile(_)
+                        Action::Governor(_)
+                            | Action::Epp(_)
+                            | Action::PlatformProfile(_)
+                            | Action::CpuPowerLimit { .. }
+                            | Action::CpuPowerFirmware
                     ),
                     "{id}/{tier} planned a non-portable action: {a:?}"
                 );
+                if matches!(a, Action::CpuPowerLimit { .. }) {
+                    assert_eq!(
+                        p.kind,
+                        rimed_core::profile::ProfileKind::Device,
+                        "{id}/{tier}: only a device profile may hold CPU power limits"
+                    );
+                }
             }
         }
     }
@@ -148,6 +162,7 @@ fn msi_katana_omits_platform_profile() {
         vec![
             Action::Governor("performance".into()),
             Action::Epp("performance".into()),
+            Action::CpuPowerLimit { pl1_w: 45, pl2_w: 65 },
         ]
     );
     // Its AC default is the top tier, which every machine can honour.
