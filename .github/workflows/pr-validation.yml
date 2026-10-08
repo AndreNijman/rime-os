@@ -1335,6 +1335,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-gamescope-steam.sh
 
+      # The same game environment for Steam started from the desktop: the
+      # profile.d hook greetd's session shell sources, under every shell that
+      # sources profile.d, and the helper both paths share.
+      - name: Run game environment assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-rime-game-env.sh
+
       # §22's `rime boot status`, driven against fixture roots that stand in
       # for a GRUB machine and for a systemd-boot machine mid-rollback. The
       # sd-boot fixture's entry list is the document `bootctl list --json`
@@ -4388,6 +4396,9 @@ jobs:
             files/system/libexec/rime-gaming-session \
             tests/test-rime-gamescope-steam.sh \
             files/system/libexec/rime-gamescope-steam \
+            tests/test-rime-game-env.sh \
+            files/system/libexec/rime-game-env \
+            files/system/profile.d/rime-game-env.sh \
             tests/test-rime-session-toggle.sh \
             files/system/libexec/rime-session-select \
             files/system/libexec/rime-greetd \

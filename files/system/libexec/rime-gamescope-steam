@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  rime-gamescope-steam — starts Steam inside Gaming Mode's gamescope, and
-#  keeps gamescope compositing while HDR is off.
+#  rime-gamescope-steam — starts Steam inside Gaming Mode's gamescope, keeps
+#  gamescope compositing while HDR is off, and gives Steam Rime's game
+#  environment (/usr/libexec/rime-game-env: the NVIDIA shader cache size, and
+#  opacity micromaps off for Proton games on NVIDIA GPUs older than Ada).
 #
 #  Usage (rime-gaming-session runs it as gamescope's command):
 #    gamescope … -- rime-gamescope-steam steam -gamepadui -steamos3
@@ -23,6 +25,10 @@
 #  ── Knobs ───────────────────────────────────────────────────────────────────
 #    RIME_GAMING_HDR=steam            let Steam's HDR setting through
 #    RIME_GAMING_FORCE_COMPOSITE=0    leave composition to gamescope
+#    RIME_GAMING_OMM=on               keep opacity micromaps on an older NVIDIA GPU
+#    __GL_SHADER_DISK_CACHE_SIZE      NVIDIA shader cache size per game (12 GB)
+#  (those two are rime-game-env's; the desktop gets the same list from
+#  /etc/profile.d/rime-game-env.sh)
 #
 #  The guard is the property watcher only: if xprop is missing or the X
 #  server is gone, Steam still starts and nothing else changes.
@@ -77,6 +83,21 @@ guard() {
     done
     kill "$spy" 2>/dev/null
 }
+
+# ── The game environment ────────────────────────────────────────────────────
+# One list for Gaming Mode and the desktop: rime-game-env prints what should
+# change as KEY=VALUE, and says why on stderr (this script's log; it has
+# written every line before its output ends, so none is lost to the exec). A Gaming
+# Mode session already read it through /etc/profile, so here it usually
+# changes nothing; it runs anyway so Steam gets it however this was started.
+GAME_ENV="${RIME_GAME_ENV_HELPER:-${BASH_SOURCE[0]%/*}/rime-game-env}"
+if [ -x "$GAME_ENV" ]; then
+    while IFS= read -r kv; do
+        case "$kv" in [A-Za-z_]*=*) export "${kv?}" ;; esac
+    done < <("$GAME_ENV" -v)
+else
+    log "no ${GAME_ENV}: Steam gets the session's environment as it is"
+fi
 
 if [ $# -eq 0 ]; then
     log "usage: rime-gamescope-steam COMMAND [ARGS…]"
