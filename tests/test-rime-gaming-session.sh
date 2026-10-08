@@ -614,6 +614,30 @@ mv "${WORK}/mangoapp.hidden" "${BIN}/mangoapp"
 # `performance` tier and scx_lavd, with nothing able to undo it and NOTHING IN
 # ITS OWN LOG. These rows hold the two halves of the fix: the session hands
 # rimed an owner to watch, and the trap can no longer fail in silence.
+section "Steam starts through the HDR and composition guard"
+
+# Measured on katana: with HDR off, gamescope's direct scan-out on NVIDIA drew
+# the picture three times over until composition was forced. The guard has to
+# be gamescope's command (the properties live on gamescope's own X server),
+# and Steam's own arguments must still reach Steam after it.
+WRAP="${ROOT}/files/system/libexec/rime-gamescope-steam"
+rc="$(run_session "$KATANA" RIME_GAMESCOPE_STEAM="${WRAP}")"
+argv="$(gs_argv)"
+if [[ "$argv" == *" -- ${WRAP} steam -gamepadui -steamos3" ]]; then
+    ok "gamescope runs the guard, and the guard is handed steam with its arguments"
+else
+    bad "gamescope runs the guard, and the guard is handed steam with its arguments" "argv: ${argv}"
+fi
+# An image without the guard still starts Steam, and says what it gave up.
+rc="$(run_session "$KATANA" RIME_GAMESCOPE_STEAM="${WORK}/no-such-guard")"
+argv="$(gs_argv)"
+if [[ "$argv" == *" -- steam -gamepadui -steamos3" ]] && [[ "$(session_log)" == *"no ${WORK}/no-such-guard"* ]]; then
+    ok "without the guard Steam still starts directly, and the log says so"
+else
+    bad "without the guard Steam still starts directly, and the log says so" \
+        "argv: ${argv}; log: $(session_log | grep -i guard | tail -2)"
+fi
+
 section "a session that is torn down can still be released"
 
 rc="$(run_session_with_rimed "$KATANA")"

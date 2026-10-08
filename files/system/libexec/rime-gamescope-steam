@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-gamescope-steam — starts Steam inside Gaming Mode's gamescope, and
+#  keeps gamescope compositing while HDR is off.
+#
+#  Usage (rime-gaming-session runs it as gamescope's command):
+#    gamescope … -- rime-gamescope-steam steam -gamepadui -steamos3
+#
+#  ── Why ─────────────────────────────────────────────────────────────────────
+#  Measured on katana (RTX 3070 Laptop, NVIDIA 615.71.09, HDMI monitor,
+#  2026-10-08): with HDR on, gamescope composites every frame and the picture
+#  is right. With HDR off it scans Steam's buffer out directly, and the screen
+#  showed the image three times over, with lines, flicker and wrong colours.
+#  Setting gamescope's GAMESCOPE_COMPOSITE_FORCE root property to 1 fixed it
+#  on the spot. Steam writes that property itself (its developer "Force
+#  Composite" setting, 0 by default), so it is not set once: a guard watches
+#  it, and HDR, for as long as Steam runs.
+#
+#  HDR is kept OFF as well. Rime never passes --hdr-enabled, but Steam turns
+#  HDR on by itself on an HDR-capable display (GAMESCOPE_DISPLAY_HDR_ENABLED),
+#  and it costs 4-5 % of the frame rate there.
+#
+#  ── Knobs ───────────────────────────────────────────────────────────────────
+#    RIME_GAMING_HDR=steam            let Steam's HDR setting through
+#    RIME_GAMING_FORCE_COMPOSITE=0    leave composition to gamescope
+#
+#  The guard is the property watcher only: if xprop is missing or the X
+#  server is gone, Steam still starts and nothing else changes.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+log() { printf 'rime-gamescope-steam: %s\n' "$*" >&2; }
+
+HDR_POLICY="${RIME_GAMING_HDR:-off}"
+FORCE_COMPOSITE="${RIME_GAMING_FORCE_COMPOSITE:-1}"
+
+set_root() { xprop -root -f "$1" 32c -set "$1" "$2" 2>/dev/null; }
+
+# One `xprop -spy` line in, the properties put right. Only a value that
+# differs is written: every write comes back as another line. Nothing is
+# decided about a property before its first line arrives (an absent property
+# reads as an empty value, which is not `unread`).
+hdr=unread composite=unread
+enforce() {
+    local line="$1" value=""
+    case "$line" in *" = "*) value="${line##* = }" ;; esac
+    case "$line" in
+        GAMESCOPE_DISPLAY_HDR_ENABLED*) hdr="$value" ;;
+        GAMESCOPE_COMPOSITE_FORCE*)     composite="$value" ;;
+        *) return 0 ;;
+    esac
+    if [ "$HDR_POLICY" = off ] && [ "$hdr" = 1 ]; then
+        set_root GAMESCOPE_DISPLAY_HDR_ENABLED 0 && log "HDR turned off"
+        hdr=0
+    fi
+    if [ "$FORCE_COMPOSITE" = 1 ] && [ "$hdr" != 1 ] && [ "$hdr" != unread ] \
+       && [ "$composite" != 1 ] && [ "$composite" != unread ]; then
+        set_root GAMESCOPE_COMPOSITE_FORCE 1 && log "HDR is off: compositing forced"
+        composite=1
+    fi
+}
+
+# Runs until the process it was started for ($1, Steam) is gone, or the X
+# server closes the watch. It must not outlive Steam: gamescope's reaper may
+# wait for every process in the session before gamescope exits.
+guard() {
+    local owner="$1" line rc spy
+    exec 3< <(exec xprop -root -spy GAMESCOPE_DISPLAY_HDR_ENABLED GAMESCOPE_COMPOSITE_FORCE 2>/dev/null)
+    spy=$!
+    while kill -0 "$owner" 2>/dev/null; do
+        if IFS= read -r -t 2 line <&3; then
+            enforce "$line"
+        else
+            rc=$?
+            [ "$rc" -gt 128 ] || break   # not a timeout: the watch ended
+        fi
+    done
+    kill "$spy" 2>/dev/null
+}
+
+if [ $# -eq 0 ]; then
+    log "usage: rime-gamescope-steam COMMAND [ARGS…]"
+    exit 2
+fi
+
+if [ "$HDR_POLICY" = steam ] && [ "$FORCE_COMPOSITE" != 1 ]; then
+    : # nothing to guard
+elif ! command -v xprop >/dev/null 2>&1; then
+    log "no xprop: HDR and composition are left to Steam and gamescope"
+elif [ -z "${DISPLAY:-}" ]; then
+    log "no DISPLAY: HDR and composition are left to Steam and gamescope"
+else
+    guard "$$" &
+fi
+
+exec "$@"

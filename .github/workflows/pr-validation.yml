@@ -1321,6 +1321,13 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-session-toggle.sh
 
+      # Gaming Mode keeps HDR off and gamescope compositing while it is off
+      # (direct scan-out on NVIDIA drew the picture three times over).
+      - name: Run Gaming Mode HDR and composition guard assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-rime-gamescope-steam.sh
+
       # §22's `rime boot status`, driven against fixture roots that stand in
       # for a GRUB machine and for a systemd-boot machine mid-rollback. The
       # sd-boot fixture's entry list is the document `bootctl list --json`
@@ -4370,6 +4377,8 @@ jobs:
             tests/test-rime-safe-graphics.sh \
             tests/test-rime-gaming-session.sh \
             files/system/libexec/rime-gaming-session \
+            tests/test-rime-gamescope-steam.sh \
+            files/system/libexec/rime-gamescope-steam \
             tests/test-rime-session-toggle.sh \
             files/system/libexec/rime-session-select \
             files/system/libexec/rime-greetd \

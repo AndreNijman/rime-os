@@ -108,6 +108,8 @@ RUN set -eux; \
 # Steam's bwrap).
 COPY --chmod=0755 files/system/libexec/rime-gaming-session \
      /usr/libexec/rime-gaming-session
+COPY --chmod=0755 files/system/libexec/rime-gamescope-steam \
+     /usr/libexec/rime-gamescope-steam
 COPY --chmod=0755 files/system/libexec/rime-session-select \
      /usr/libexec/rime-session-select
 # Gaming Mode is a toggle: greetd's ExecStartPre (rime-greetd) spends the
@@ -133,6 +135,8 @@ RUN set -eux; \
     chmod 0440 /etc/sudoers.d/040-rime-session-select; \
     visudo -cf /etc/sudoers.d/040-rime-session-select; \
     bash -n /usr/libexec/rime-gaming-session; \
+    bash -n /usr/libexec/rime-gamescope-steam; \
+    command -v xprop >/dev/null || { echo "FATAL: rime-gamescope-steam needs xprop (Gaming Mode would scan out garbage on NVIDIA)"; exit 1; }; \
     bash -n /usr/libexec/rime-session-select; \
     bash -n /usr/libexec/rime-greetd; \
     bash -n /usr/bin/steamos-session-select; bash -n /usr/bin/steamos-update; \
