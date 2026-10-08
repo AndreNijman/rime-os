@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::tier::{Action, Tier};
+use crate::topology::{CoreSource, CoreTopology};
 
 /// Where the profile classifies in the layered selection hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -29,6 +30,15 @@ pub struct TierSettings {
     pub governor: Option<String>,
     pub epp: Option<String>,
     pub platform_profile: Option<String>,
+    /// CPU package power limits held while this tier is active, as
+    /// `[sustained (PL1), burst (PL2)]` in watts. Omitted = the firmware's.
+    ///
+    /// For a DEVICE profile that knows its cooling. On a laptop the firmware's
+    /// limits come from the OEM's DPTF tables, which thermald's adaptive mode
+    /// applies, and they can sit well below what the CPU and its cooler can
+    /// sustain: katana's are 38 W / 45 W for an i7-12700H rated 45 W / 115 W,
+    /// and that alone halved a CPU-bound game's frame rate.
+    pub cpu_power_limit_w: Option<[u32; 2]>,
 }
 
 /// Default tier for AC and battery, used by the daemon's auto-switch.
@@ -283,18 +293,19 @@ pub struct GameModeConfig {
     /// else, so a Rime machine with an AMD or Intel GPU — which is most of
     /// them — got cpuset pinning and IRQ steering and no GPU handling at all.
     pub gpu: SysfsGpuConfig,
-    /// sched-ext scheduler to load for the duration of a game session.
-    /// Empty string = leave the kernel's own scheduler alone.
+    /// sched-ext scheduler to load for the duration of a game session:
+    /// `auto` (the default), a scheduler name, or empty string = leave the
+    /// kernel's own scheduler alone.
     ///
     /// The image ships a CachyOS kernel with CONFIG_SCHED_CLASS_EXT=y and
     /// sixteen scx schedulers, and until now NOTHING selected one — the whole
     /// sched-ext capability that kernel was chosen for sat unused.
     ///
-    /// Defaults to `scx_lavd` (latency-aware virtual deadline: the scx
-    /// scheduler built for interactive/gaming latency, as opposed to
-    /// scx_rusty/scx_layered which target throughput). Defaulting it rather
-    /// than naming it per-profile is what makes Gaming Mode tuned on ANY
-    /// machine instead of only on the author's Katana.
+    /// `scx_lavd` is the scheduler meant (latency-aware virtual deadline: the
+    /// scx scheduler built for interactive/gaming latency, as opposed to
+    /// scx_rusty/scx_layered which target throughput). Defaulting rather than
+    /// naming it per-profile is what makes Gaming Mode tuned on ANY machine
+    /// instead of only on the author's Katana.
     ///
     /// Safe on a machine that never games, by construction rather than luck:
     /// `scxctl` is a D-Bus client for scx_loader, whose unit is `Type=dbus` and
@@ -302,7 +313,26 @@ pub struct GameModeConfig {
     /// scheduler daemon runs on a laptop that never enters game mode, and the
     /// shipped /usr/share/scx_loader/config.toml leaves `default_sched`
     /// commented out. A profile can still opt out explicitly with `scx = ""`.
+    ///
+    /// The default is `""`, the kernel's own scheduler (BORE on Rime's
+    /// kernel), the one the desktop runs, since 2026-10-08. A game-shaped
+    /// CPU-bound load (one busy main thread, a job worker per CPU) measured
+    /// faster under it than under every sched-ext scheduler tried, on both
+    /// kinds of CPU:
+    ///
+    /// * i7-12700H (6P+8E): kernel 90-91 fps, 1 % low 85-87; scx_lavd as
+    ///   Gaming Mode loaded it 61-66 / 53; lavd `--performance` 70-75 / 53-55.
+    /// * Ryzen 7 PRO 250 (8 identical cores): kernel 97.4 / 79.5; lavd 94.8 /
+    ///   75; lavd `--performance` 94.6 / 74; bpfland `-m performance` 90.2 / 72.
+    ///
+    /// `auto` (scx_lavd only on a CPU with one kind of core, see
+    /// [`GameModeConfig::scx_for`]) and naming a scheduler remain available.
     pub scx: String,
+    /// `off` (the default): while game mode holds, laptop power saving is
+    /// switched off — USB runtime autosuspend (controllers, dongles, headsets)
+    /// and the audio codec's idle power-down — and put back on exit. `keep`
+    /// leaves both alone.
+    pub power_saving: String,
 }
 
 impl Default for GameModeConfig {
@@ -318,12 +348,52 @@ impl Default for GameModeConfig {
             irq_pin_to_game: Vec::new(),
             nvidia: NvidiaConfig::default(),
             gpu: SysfsGpuConfig::default(),
-            scx: "scx_lavd".to_string(),
+            scx: String::new(),
+            power_saving: "off".to_string(),
         }
     }
 }
 
 impl GameModeConfig {
+    /// Whether game mode switches laptop power saving off (`power_saving`).
+    pub fn power_saving_off(&self) -> bool {
+        !self.power_saving.trim().eq_ignore_ascii_case("keep")
+    }
+
+    /// The sched-ext scheduler a session loads on this CPU, or `None` for the
+    /// kernel's own scheduler.
+    ///
+    /// `auto` is `None` on a P/E hybrid, and that is a measurement, not
+    /// caution. scx_lavd (1.1.3) splits threads between P- and E-cores by
+    /// `perf_cri`, which is built from how often a thread sleeps and wakes
+    /// others (`lat_cri.bpf.c`), and it re-picks the CPU at every wake-up. A
+    /// game's bottleneck thread does the opposite: it runs flat out and rarely
+    /// sleeps, so nothing in that score keeps it on a P-core. On katana
+    /// (i7-12700H, 2026-10-07) Cyberpunk 2077's `GameThread` was 98 % busy,
+    /// the GPU idle half the time, and under scx_lavd the thread sat on an
+    /// E-core in 65 of 200 samples and visited all 20 CPUs in 5 s. The same
+    /// game on the desktop, under the kernel's scheduler, played smoothly.
+    /// `--performance` does not help: it turns off core compaction, not that
+    /// split, and 1.1.3 has no option that does.
+    ///
+    /// On a CPU with one kind of core the split does not exist (lavd treats
+    /// every thread as performance-critical there), so `auto` keeps lavd.
+    /// "One kind" is [`CoreTopology::has_efficiency_cores`], not `is_hybrid`:
+    /// AMD's preferred-core ranking is not a second kind of core. A CPU whose
+    /// topology could not be read at all (`CoreSource::Unknown`) is not known
+    /// to be one kind, so it keeps the kernel's scheduler too.
+    pub fn scx_for(&self, topo: &CoreTopology) -> Option<String> {
+        match self.scx.trim() {
+            "" => None,
+            s if s.eq_ignore_ascii_case("off") || s.eq_ignore_ascii_case("none") => None,
+            s if s.eq_ignore_ascii_case("auto") => {
+                let unread = topo.source == CoreSource::Unknown;
+                (!unread && !topo.has_efficiency_cores()).then(|| "scx_lavd".to_string())
+            }
+            s => Some(s.to_string()),
+        }
+    }
+
     /// Parse the `cpuset` string into a policy.
     pub fn cpuset_policy(&self) -> CpusetPolicy {
         match self.cpuset.trim().to_ascii_lowercase().as_str() {
@@ -372,6 +442,18 @@ impl Profile {
             if !p.tiers.contains_key(&tier) {
                 bail!("profile '{}' is missing tier '{}'", p.id, tier);
             }
+            // A typo here is written straight into the CPU's power limits, so
+            // it is refused at load, not discovered as a hot or slow machine.
+            if let Some([pl1, pl2]) = p.tiers[&tier].cpu_power_limit_w {
+                if !(5..=250).contains(&pl1) || !(5..=250).contains(&pl2) || pl1 > pl2 {
+                    bail!(
+                        "profile '{}' tier '{}': cpu_power_limit_w = [{pl1}, {pl2}] must be \
+                         [sustained, burst] watts, each 5-250, sustained <= burst",
+                        p.id,
+                        tier
+                    );
+                }
+            }
         }
         Ok(p)
     }
@@ -409,6 +491,15 @@ impl Profile {
         }
         if let Some(p) = &s.platform_profile {
             actions.push(Action::PlatformProfile(p.clone()));
+        }
+        // Only a profile that holds power limits in SOME tier hands them back
+        // in the others; every other profile's plans are unchanged.
+        match s.cpu_power_limit_w {
+            Some([pl1_w, pl2_w]) => actions.push(Action::CpuPowerLimit { pl1_w, pl2_w }),
+            None if self.tiers.values().any(|t| t.cpu_power_limit_w.is_some()) => {
+                actions.push(Action::CpuPowerFirmware)
+            }
+            None => {}
         }
         actions
     }

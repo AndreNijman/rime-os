@@ -1314,6 +1314,13 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-gaming-session.sh
 
+      # Gaming Mode is a toggle: the one-shot autologin rime-session-select
+      # hands greetd, and rime-greetd spending it exactly once.
+      - name: Run Gaming Mode toggle assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-rime-session-toggle.sh
+
       # §22's `rime boot status`, driven against fixture roots that stand in
       # for a GRUB machine and for a systemd-boot machine mid-rollback. The
       # sd-boot fixture's entry list is the document `bootctl list --json`
@@ -2277,6 +2284,13 @@ jobs:
       - name: Run user-provisioner assertions
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-firstrun.sh
+
+      # The session launcher's "already running?" check, against real
+      # processes: one that merely mentions the shell must not stop the start
+      # (it left katana with no bar), one that is the shell must.
+      - name: Run shell-launcher assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-shell-autostart.sh
 
       - name: Run input-settings assertions
         if: ${{ !cancelled() }}
@@ -4341,6 +4355,7 @@ jobs:
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \
             tests/test-rime-pkg.sh tests/test-rime-appimage.sh \
             tests/test-rime-firstrun.sh \
+            tests/test-rime-shell-autostart.sh \
             tests/test-labwc-keybinds.sh tests/test-rime-env.sh \
             tests/test-rime-resolve.sh tests/test-rime-blueprint.sh \
             tests/test-rime-modes.sh tests/test-rime-plugin.sh \
@@ -4355,6 +4370,11 @@ jobs:
             tests/test-rime-safe-graphics.sh \
             tests/test-rime-gaming-session.sh \
             files/system/libexec/rime-gaming-session \
+            tests/test-rime-session-toggle.sh \
+            files/system/libexec/rime-session-select \
+            files/system/libexec/rime-greetd \
+            files/system/bin/steamos-session-select \
+            files/system/bin/steamos-update \
             files/system/libexec/rime-safe-graphics \
             files/system/libexec/rime-safe-graphics-terminal \
             tests/test-rime-chaos.sh tests/test-rime-vm.sh

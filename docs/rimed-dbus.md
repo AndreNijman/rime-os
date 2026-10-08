@@ -198,6 +198,11 @@ a reading of `/sys/kernel/btf/vmlinux` taken by `rimed` itself.
 * `not probed`: nothing asked for a scheduler, the same shape as
   `scx_requested` being empty.
 
+`scx_requested` is the scheduler the profile resolves to on this CPU, not the
+profile's text: the default `scx = "auto"` is `scx_lavd` on a CPU with one kind
+of core and empty (the kernel's own scheduler) on an Intel P/E hybrid
+(`GameModeConfig::scx_for`; `docs/gaming-and-sessions.md` §5f).
+
 When `scx_btf` blocks loading **and** the kernel did not end up with a
 scheduler attached, rimed appends its sentence to `scx_detail`. A session that
 reports `loaded` is not argued with, and a kernel with nothing wrong with it

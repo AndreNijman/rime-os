@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rime OS — the command Steam's "Switch to Desktop" runs in Gaming Mode
+#
+#  Steam in Gaming Mode (-gamepadui -steamos3) runs `steamos-session-select
+#  <target>` from its Power menu; SteamOS ships that command, Rime ships this
+#  one. It maps SteamOS's targets onto Rime's sessions and hands the switch to
+#  rime-session-select (see that file: a one-shot straight back into the
+#  session, no login screen):
+#
+#    plasma | plasma-wayland | plasma-wayland-persistent | desktop | (none)
+#        -> the desktop the user came into Gaming Mode from (--desktop)
+#    gamescope | gaming
+#        -> Gaming Mode
+#
+#  Measured on katana: Power > Switch to Desktop called this with `plasma`, and
+#  the desktop was back about 3 s later. Without -steamos3, Steam's own Switch
+#  to Desktop hung on "Switching to Desktop…" and never called anything.
+# ─────────────────────────────────────────────────────────────────────────────
+set -u
+HELPER="${RIME_SESSION_HELPER:-/usr/libexec/rime-session-select}"
+case "${1:-plasma}" in
+    gamescope | gaming) target=rime-gaming ;;
+    *) target="$(sudo -n "${HELPER}" --desktop 2>/dev/null)" ;;
+esac
+[ -n "${target}" ] || target=hyprland
+exec sudo -n "${HELPER}" "${target}" --switch

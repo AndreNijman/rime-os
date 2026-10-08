@@ -292,6 +292,10 @@ pub struct RealWriter {
     /// hardcoded so the tests for the refusal paths do not each burn this
     /// budget waiting for a state that is never coming.
     scx_settle: std::time::Duration,
+    /// RAPL limits this writer RAISED on a zone it does not own outright (the
+    /// MSR package zone), as (attribute path, value before), so handing the
+    /// limits back to the firmware puts exactly those values back.
+    rapl_raised: Mutex<Vec<(PathBuf, String)>>,
 }
 
 /// How long the daemon waits for a started sched-ext scheduler to attach.
@@ -320,6 +324,7 @@ impl RealWriter {
             host_commands: false,
             scxctl_bin: None,
             scx_settle: SCX_SETTLE,
+            rapl_raised: Mutex::new(Vec::new()),
         }
     }
 
@@ -336,6 +341,7 @@ impl RealWriter {
             host_commands: true,
             scxctl_bin: None,
             scx_settle: SCX_SETTLE,
+            rapl_raised: Mutex::new(Vec::new()),
         }
     }
 
@@ -348,6 +354,7 @@ impl RealWriter {
             host_commands: false,
             scxctl_bin: None,
             scx_settle: SCX_SETTLE,
+            rapl_raised: Mutex::new(Vec::new()),
         }
     }
 
@@ -371,6 +378,7 @@ impl RealWriter {
             host_commands: true,
             scxctl_bin: Some(scxctl_bin.into()),
             scx_settle,
+            rapl_raised: Mutex::new(Vec::new()),
         }
     }
 
@@ -381,6 +389,132 @@ impl RealWriter {
 
     pub fn is_dry_run(&self) -> bool {
         self.dry_run
+    }
+
+    /// The RAPL package zones CPU power limits are written to: the MMIO zone,
+    /// which is what the firmware and thermald program on recent Intel laptops
+    /// and the one that binds, and the MSR zone. `(dir, is_mmio)`.
+    fn rapl_package_zones(&self) -> Vec<(PathBuf, bool)> {
+        let base = self.sys_root.join("class/powercap");
+        [("intel-rapl-mmio:0", true), ("intel-rapl:0", false)]
+            .into_iter()
+            .map(|(name, mmio)| (base.join(name), mmio))
+            .filter(|(dir, _)| {
+                std::fs::read_to_string(dir.join("name"))
+                    .map(|n| n.trim() == "package-0")
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// Run `systemctl <args>` (host command), returning (success, stdout).
+    /// `None` when this writer may not run host commands.
+    fn systemctl(&self, args: &[&str]) -> Option<(bool, String)> {
+        if !self.host_commands {
+            eprintln!("rimed: skip (host commands not enabled for this writer) systemctl {}", args.join(" "));
+            return None;
+        }
+        match std::process::Command::new("systemctl").args(args).output() {
+            Ok(o) => Some((o.status.success(), String::from_utf8_lossy(&o.stdout).trim().to_string())),
+            Err(e) => {
+                eprintln!("rimed: cannot run systemctl {}: {e}", args.join(" "));
+                Some((false, String::new()))
+            }
+        }
+    }
+
+    /// Hold the CPU package to `pl1_w`/`pl2_w` watts.
+    ///
+    /// thermald's adaptive mode re-applies the firmware's limits within
+    /// seconds (measured on katana: a written PL1 of 55 W was back at 38 W in
+    /// under 20 s, and stayed at 55 W with thermald stopped), so a running
+    /// thermald is paused with a RUNTIME mask: it cannot be restarted behind
+    /// our back, and a reboot clears it whatever happens to this daemon.
+    /// [`RealWriter::apply_cpu_power_firmware`] lifts it again.
+    ///
+    /// The MMIO zone is set exactly. The MSR zone is only ever RAISED to the
+    /// requested values (the lower of the two zones binds, so a lower MSR
+    /// limit would silently cap the request), and what it held is remembered.
+    fn apply_cpu_power_limit(&self, pl1_w: u32, pl2_w: u32) -> Outcome {
+        let zones = self.rapl_package_zones();
+        if zones.is_empty() {
+            eprintln!("rimed: skip (no RAPL package zone) CPU power limits {pl1_w}/{pl2_w} W");
+            return Outcome::Refused("CPU power limits: no RAPL package zone on this machine".into());
+        }
+        if self.dry_run {
+            eprintln!("rimed: [dry-run] pause thermald; CPU power limits {pl1_w} W / {pl2_w} W");
+            return Outcome::Landed;
+        }
+        // Running OR due to run: at boot rimed can apply this tier before
+        // thermald has started, and a thermald that starts afterwards would
+        // overwrite the limits. A runtime mask stops a running one and fails
+        // a queued start.
+        let active = matches!(self.systemctl(&["is-active", "thermald.service"]), Some((_, s)) if s == "active");
+        let enabled = matches!(
+            self.systemctl(&["is-enabled", "thermald.service"]),
+            Some((_, s)) if matches!(s.as_str(), "enabled" | "enabled-runtime" | "static" | "indirect" | "alias" | "linked" | "linked-runtime")
+        );
+        if active || enabled {
+            match self.systemctl(&["mask", "--runtime", "--now", "thermald.service"]) {
+                Some((true, _)) => eprintln!("rimed: thermald paused (runtime mask) while CPU power limits are held"),
+                _ => {
+                    return Outcome::Refused(
+                        "CPU power limits: thermald could not be paused, and it would undo them".into(),
+                    )
+                }
+            }
+        }
+        let mut landed = false;
+        let mut last = Outcome::Refused("CPU power limits: nothing written".into());
+        for (dir, mmio) in zones {
+            for (attr, watts) in [("constraint_0_power_limit_uw", pl1_w), ("constraint_1_power_limit_uw", pl2_w)] {
+                let path = dir.join(attr);
+                let want = u64::from(watts) * 1_000_000;
+                let current = std::fs::read_to_string(&path).ok().and_then(|v| v.trim().parse::<u64>().ok());
+                if !mmio {
+                    match current {
+                        Some(c) if c >= want => continue,
+                        Some(c) => self.rapl_raised.lock().unwrap().push((path.clone(), c.to_string())),
+                        None => continue,
+                    }
+                }
+                last = self.write_tolerant(&path, &want.to_string(), "rapl");
+                landed |= last.landed();
+            }
+        }
+        if landed {
+            eprintln!("rimed: CPU power limits {pl1_w} W sustained / {pl2_w} W burst");
+            Outcome::Landed
+        } else {
+            last
+        }
+    }
+
+    /// Hand the CPU package's power limits back to the firmware: put back any
+    /// MSR-zone values [`RealWriter::apply_cpu_power_limit`] raised, and lift
+    /// thermald's runtime mask and start it (it re-applies the firmware's
+    /// limits itself). Nothing held is a no-op that landed.
+    fn apply_cpu_power_firmware(&self) -> Outcome {
+        if self.dry_run {
+            eprintln!("rimed: [dry-run] CPU power limits back to the firmware");
+            return Outcome::Landed;
+        }
+        let raised: Vec<(PathBuf, String)> = std::mem::take(&mut *self.rapl_raised.lock().unwrap());
+        for (path, value) in raised.iter().rev() {
+            self.write_tolerant(path, value, "rapl");
+        }
+        if let Some((_, state)) = self.systemctl(&["is-enabled", "thermald.service"]) {
+            // Only a runtime mask is ours: nothing else in Rime sets one, and
+            // a mask an administrator set persistently is left alone.
+            if state == "masked-runtime" {
+                self.systemctl(&["unmask", "--runtime", "thermald.service"]);
+                match self.systemctl(&["start", "thermald.service"]) {
+                    Some((true, _)) => eprintln!("rimed: thermald resumed; the firmware's CPU power limits apply"),
+                    _ => return Outcome::Refused("CPU power limits: thermald could not be restarted".into()),
+                }
+            }
+        }
+        Outcome::Landed
     }
 
     /// Write a value to an absolute path, treating both a missing attribute and
@@ -1034,6 +1168,11 @@ impl SysWriter for RealWriter {
                 epp_ladder(e),
             )),
             Action::PlatformProfile(p) => Ok(self.write_platform_profile(p)),
+            Action::CpuPowerLimit { pl1_w, pl2_w } => Ok(self.apply_cpu_power_limit(*pl1_w, *pl2_w)),
+            Action::CpuPowerFirmware => Ok(self.apply_cpu_power_firmware()),
+            Action::PowerSaveAttr { path, value, what } => {
+                Ok(self.write_tolerant(Path::new(path), value, what))
+            }
             Action::ChargeThresholds {
                 start,
                 stop,
