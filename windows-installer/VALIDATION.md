@@ -1,5 +1,17 @@
 # Validation
 
+## 2026-10-08: release v3.2.0, the published files
+
+- The draft's `rime-os-netinstall-x86_64.iso` and `rime-windows-installer.exe`
+  matched their `.sha256` files and `gh attestation verify`; the .exe carries
+  the ISO's SHA-256 and the v3.2.0 URL.
+- Those exact two files ran `lab/install-e2e` (four boots, Windows Server 2022,
+  Secure Boot on): every check PASS. Then the release was published.
+- After publishing, the released .exe on the Windows guest with a network
+  card (`RIME_WINLAB_NET=1 winlab run jobs/download`): `download` fetched the
+  1,969,137,664-byte ISO from GitHub through WinHTTP and verified it, 26 s.
+  That was the one path the earlier runs (which used `--iso`) never took.
+
 ## 2026-10-08: the write path, end to end
 
 Everything below ran on the build at the head of `feat/windows-installer`,
