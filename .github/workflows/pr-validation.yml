@@ -3042,7 +3042,7 @@ jobs:
       - name: Install gnome-keyring for the keyring-login suite
         if: ${{ !cancelled() }}
         run: |
-          for p in gnome-keyring libsecret-tools python3-gi gir1.2-glib-2.0 dbus-daemon; do
+          for p in gnome-keyring libsecret-tools python3-gi gir1.2-glib-2.0 dbus-daemon libglib2.0-bin; do
             sudo apt-get install -y -qq "$p" || echo "note: $p unavailable"
           done
 
@@ -3065,6 +3065,21 @@ jobs:
               echo "::error::only $passed keyring-login assertions ran; 40 is every section including the real-account run"
               exit 1
           }
+
+      # The login keyring stays unlocked for the session: pam_gnome_keyring's
+      # daemon quits ~2 minutes after login unless the session runs
+      # `gnome-keyring-daemon --start`, and rime-shell-autostart now does. A
+      # real daemon on a private bus with no service files: before the step
+      # nobody owns org.freedesktop.secrets, after the SHIPPED launcher the
+      # login daemon does, unlocked, and is still there past its timeout.
+      - name: Run keyring session-start assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="$(./tests/test-rime-keyring-session-start.sh 2>&1)" || true
+          printf '%s\n' "$out"
+          grep -qE '^keyring-session-start: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \
+            || { echo "::error::keyring-session-start must pass with nothing skipped"; exit 1; }
 
       # The image ships a screen reader, and nothing starts it. Reads
       # Containerfile.core by parsing its dnf5 invocations rather than grepping

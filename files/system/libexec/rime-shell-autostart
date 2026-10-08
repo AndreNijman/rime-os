@@ -82,6 +82,23 @@ while [ ! -f "${ENTRY}" ]; do
 done
 [ "${waited}" -gt 0 ] && log "checkout appeared after ${waited}s"
 
+# ── The login keyring stays unlocked ────────────────────────────────────────
+# pam_gnome_keyring starts a keyring daemon at login and unlocks the login
+# keyring with the password just typed. That daemon only waits: a session has
+# to run `gnome-keyring-daemon --start` to put it on the session bus. GNOME's
+# session does it from /etc/xdg/autostart; Hyprland and niri run no autostart,
+# so nothing did, and the daemon quit by itself about two minutes after login
+# (measured on gnome-keyring 48: control socket gone at ~120 s). The first app
+# that wanted a secret then D-Bus-activated a NEW daemon with the keyring
+# locked, and the user was asked for their password again (Helium, 2026-10-08;
+# every Rime boot since at least 2026-10-06 shows the same journal lines).
+# `--start` hands the session the daemon PAM unlocked. With no such daemon it
+# starts one, which is what D-Bus activation would have done anyway.
+if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    timeout 5 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 \
+        || log "gnome-keyring-daemon --start failed; apps may ask to unlock the keyring"
+fi
+
 # ── Publish this user's wallpaper to the greeter ────────────────────────────
 # Rime Shell's WallpaperService publishes on every wallpaper change, but that
 # only helps someone who changes it AFTER this feature shipped. Everyone already
