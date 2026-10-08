@@ -1,33 +1,130 @@
-//! Rime portable Windows installer — survey and inspection.
+//! Rime OS installer for Windows.
 //!
-//! Nothing in this binary writes to a disk or to a firmware variable. It opens
-//! handles for reading only; there is no code path from any of these commands
-//! to a write, and that is checked by `tests/test-windows-installer.sh` rather
-//! than asserted here.
+//! With no arguments it opens the installer window. The commands below are
+//! the same installer without the window: the lab drives them, and they are
+//! what a person reaching for a terminal gets. Every command that changes
+//! anything says so in its name (`install`, `undo`, `stage-image`); the rest
+//! only read.
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use rime_windows_installer::{Scan, enumerate, lab_policy, open_image, scan};
 use std::{env, io, path::Path, process::ExitCode};
 
 const USAGE: &str = "\
-rime-windows-installer -- Rime installer for Windows (survey stage)
+rime-windows-installer -- install Rime OS beside Windows
 
-  rime-windows-installer survey        every disk, its identity, its partitions
-  rime-windows-installer inspect GUID  one partition by its GPT GUID, including
-                                       reading every byte of it
-  rime-windows-installer lab FILE.img  the offline image laboratory
+  rime-windows-installer                 open the installer window
+  rime-windows-installer candidates      where Rime could go, and why not elsewhere
+  rime-windows-installer install ID [--iso FILE] [--yes] [--restart]
+                                         prepare the disk and start Rime's installer
+                                         on the next restart (ID from `candidates`)
+  rime-windows-installer undo [--yes]    remove what `install` added
+  rime-windows-installer download        fetch and check the installer image only
+  rime-windows-installer survey          every disk, its identity, its partitions
+                                         (read-only)
+  rime-windows-installer inspect GUID    one partition, every byte read (read-only)
+  rime-windows-installer lab FILE.img    the offline GPT laboratory (read-only)
+  rime-windows-installer stage-image FILE.img --iso FILE --space free:FIRST-LAST|part:GUID
+                                         [--bitlocker] [--bootnum HEX]
+                                         developer: the install's disk writes,
+                                         applied to a disk image file
 
-This build opens disks read-only: installation and firmware changes are disabled.
-No partition, no file and no firmware variable is written by any command above.";
+Nothing is written to a disk or a firmware variable except by install,
+undo and stage-image, and install changes nothing until you confirm.";
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> =
-        env::args().skip(1).collect();
+    let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("lab") if args.len() == 2 => lab(&args[1]),
         Some("survey") if args.len() == 1 => survey(),
         Some("inspect") if args.len() == 2 => inspect(&args[1]),
+        Some("stage-image") => stage_image(&args[1..]),
+        #[cfg(windows)]
+        Some("candidates") if args.len() == 1 => cli::candidates(),
+        #[cfg(windows)]
+        Some("install") => cli::install(&args[1..]),
+        #[cfg(windows)]
+        Some("undo") => cli::undo(&args[1..]),
+        #[cfg(windows)]
+        Some("download") if args.len() == 1 => cli::download(),
+        Some("--help" | "-h" | "help") => {
+            println!("{USAGE}");
+            Ok(())
+        }
         _ => Err(USAGE.into()),
     }
+}
+
+fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).map(String::as_str)
+}
+
+/// The install's disk writes, against a disk image. Exists so the whole
+/// staging path (plan, payload, read-back, partition table) runs on Linux
+/// against images that sfdisk, fsck.fat and a real UEFI boot can then judge.
+fn stage_image(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use rime_windows_installer::{bootentry, gptwrite, random_bytes, random_guid, stage};
+    let img = args.first().ok_or("stage-image needs an image file")?;
+    if !(img.ends_with(".img") || img.ends_with(".raw")) {
+        return Err("stage-image writes only to .img or .raw files".into());
+    }
+    let iso_path = flag(args, "--iso").ok_or("--iso FILE is required")?;
+    let space = match flag(args, "--space").ok_or("--space is required")? {
+        s if s.starts_with("free:") => {
+            let (a, b) = s[5..].split_once('-').ok_or("--space free:FIRST-LAST")?;
+            stage::Space::Free { first_lba: a.parse()?, last_lba: b.parse()? }
+        }
+        s if s.starts_with("part:") => stage::Space::Replace { partition_guid: s[5..].to_ascii_lowercase() },
+        _ => return Err("--space free:FIRST-LAST or part:GUID".into()),
+    };
+    let bootnum = u16::from_str_radix(flag(args, "--bootnum").unwrap_or("0009"), 16)?;
+    let meta = std::fs::symlink_metadata(img)?;
+    if !meta.file_type().is_file() {
+        return Err("stage-image writes only to a regular file".into());
+    }
+    let mut disk = std::fs::OpenOptions::new().read(true).write(true).open(img)?;
+    let before = gptwrite::GptSnapshot::read(&mut disk, meta.len())?;
+    let mut iso = std::fs::File::open(iso_path)?;
+    let payload = stage::locate_payload(&mut iso)?;
+    let id = random_bytes(4)?;
+    let esp_guid = random_guid()?;
+    let plan = stage::plan(&stage::Inputs {
+        before: &before,
+        space,
+        payload: &payload,
+        esp_guid: esp_guid.clone(),
+        root_guid: random_guid()?,
+        fat_volume_id: u32::from_le_bytes([id[0], id[1], id[2], id[3]]),
+        boot_number: bootnum,
+        windows_bitlocker: args.iter().any(|a| a == "--bitlocker"),
+        created: "stage-image".into(),
+        app_version: concat!("rime-windows-installer ", env!("CARGO_PKG_VERSION")),
+    })?;
+    let mut pr = |_: stage::Phase, _: u64, _: u64| {};
+    stage::table_unchanged(&plan, &mut disk)?;
+    let hashes = stage::write_payload(&plan, &mut disk, &mut iso, &mut pr)?;
+    stage::verify_payload(&plan, &mut disk, &hashes, &mut pr)?;
+    stage::table_unchanged(&plan, &mut disk)?;
+    stage::write_table(&plan, &mut disk, &mut pr)?;
+    stage::table_committed(&plan, &mut disk)?;
+    let opt = bootentry::encode(
+        bootentry::SETUP_DESCRIPTION,
+        &bootentry::HardDrive {
+            partition_number: plan.esp_slot,
+            start_lba: plan.esp.first_lba,
+            size_lba: plan.esp.last_lba - plan.esp.first_lba + 1,
+            guid: gptwrite::guid_bytes(&esp_guid)?,
+        },
+        bootentry::SETUP_LOADER,
+    )?;
+    println!("ESP_PARTUUID={}", plan.esp.unique_guid);
+    println!("ROOT_PARTUUID={}", plan.root.unique_guid);
+    println!("ESP_OFFSET={}", plan.esp_offset());
+    println!("ESP_SLOT={}", plan.esp_slot);
+    println!("BOOTNUM={bootnum:04X}");
+    println!("LOADOPTION={}", rime_windows_installer::payload::hex(&opt));
+    println!("STAGED-OK");
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -95,123 +192,11 @@ fn inspect(_: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(windows)]
 mod win {
-    use rime_windows_installer::plan::{self, Claim, DiskIdentity, PartitionFacts, Verdict};
+    use rime_windows_installer::plan::{self, DiskIdentity, Verdict};
     use rime_windows_installer::windows as w;
-    use rime_windows_installer::{Scan, enumerate_in, scan};
+    use rime_windows_installer::{Scan, scan};
 
-    /// One disk, with both readings of its partition table and everything
-    /// Windows is doing with it.
-    pub struct Surveyed {
-        pub identity: DiskIdentity,
-        pub path: String,
-        pub number: u32,
-        pub partitions: Vec<PartitionFacts>,
-        pub agreement: Result<(), String>,
-    }
-
-    /// Reading a disk fails for ordinary reasons — a card reader with no card,
-    /// a disk another process has exclusively. Those are REPORTED, never
-    /// dropped: a survey that silently loses a disk is a survey that can call
-    /// a machine safe when it is not.
-    pub fn surveyed() -> (Vec<Surveyed>, Volumes, Vec<String>) {
-        let (drives, mut problems) = w::drives();
-        let (vols, vproblems) = w::volumes();
-        problems.extend(vproblems);
-        let mut out = Vec::new();
-        for d in drives {
-            let number = match w::drive_number(&d.path) {
-                Some(n) => n,
-                None => {
-                    problems.push(format!("{}: cannot determine the disk number", d.path));
-                    continue;
-                }
-            };
-            let mut dev = match w::Device::open(&d.path) {
-                Ok(v) => v,
-                Err(e) => {
-                    problems.push(format!("{}: {e}", d.path));
-                    continue;
-                }
-            };
-            // Windows' own view.
-            let (win_disk_guid, win_parts) = match w::layout(&dev) {
-                Ok(v) => v,
-                Err(e) => {
-                    problems.push(format!("{}: {e}", d.path));
-                    continue;
-                }
-            };
-            // This crate's view, read from the bytes on the same handle. The
-            // length comes from IOCTL_DISK_GET_LENGTH_INFO because a device
-            // handle's metadata length is zero.
-            let agreement = match enumerate_in(&mut dev, d.length) {
-                Ok(gpt) => {
-                    if gpt.disk_id != win_disk_guid {
-                        Err(format!(
-                            "the disk GUID in the GPT is {} but Windows reports {win_disk_guid}",
-                            gpt.disk_id
-                        ))
-                    } else {
-                        plan::cross_check(
-                            &gpt.partitions
-                                .iter()
-                                .map(|p| PartitionFacts {
-                                    id: p.id.clone(),
-                                    type_guid: p.kind.clone(),
-                                    name: p.name.clone(),
-                                    offset: p.offset,
-                                    length: p.length,
-                                    attributes: p.attributes,
-                                })
-                                .collect::<Vec<_>>(),
-                            &facts(&win_parts),
-                        )
-                    }
-                }
-                Err(e) => Err(format!("the on-disk GPT could not be read independently: {e}")),
-            };
-            out.push(Surveyed {
-                identity: DiskIdentity {
-                    model: d.model.clone(),
-                    serial: d.serial.clone(),
-                    bus: d.bus.clone(),
-                    length: d.length,
-                    sector_size: d.bytes_per_sector,
-                    gpt_disk_guid: win_disk_guid,
-                },
-                path: d.path.clone(),
-                number,
-                partitions: facts(&win_parts),
-                agreement,
-            });
-        }
-        (out, Volumes(vols), problems)
-    }
-
-    pub struct Volumes(pub Vec<w::Volume>);
-
-    impl Volumes {
-        pub fn claims(&self, disk: u32, offset: u64, length: u64) -> Vec<Claim> {
-            self.0
-                .iter()
-                .filter(|v| v.overlaps(disk, offset, length))
-                .map(|v| Claim { what: v.describe_use() })
-                .collect()
-        }
-    }
-
-    fn facts(v: &[w::WinPartition]) -> Vec<PartitionFacts> {
-        v.iter()
-            .map(|p| PartitionFacts {
-                id: p.id.clone(),
-                type_guid: p.type_guid.clone(),
-                name: p.name.clone(),
-                offset: p.offset,
-                length: p.length,
-                attributes: p.attributes,
-            })
-            .collect()
-    }
+    use rime_windows_installer::winstall::{facts, surveyed};
 
     pub fn print_survey() -> Result<(), Box<dyn std::error::Error>> {
         let (disks, vols, problems) = surveyed();
@@ -408,7 +393,116 @@ fn inspect(guid: &str) -> Result<(), Box<dyn std::error::Error>> {
     win::print_inspect(guid)
 }
 
+#[cfg(windows)]
+mod cli {
+    use rime_windows_installer::plan;
+    use rime_windows_installer::winstall::{self, Event};
+    use std::io::Write;
+    use std::path::Path;
+
+    pub fn candidates() -> Result<(), Box<dyn std::error::Error>> {
+        let (c, problems) = winstall::candidates();
+        println!("needed: {}", plan::human(winstall::needed_bytes()));
+        for x in &c {
+            println!("CANDIDATE {}\n  {}\n  {}", x.id, x.what, plan::human(x.bytes));
+            match &x.refusal {
+                None => println!("  usable"),
+                Some(r) => println!("  REFUSED: {r}"),
+            }
+        }
+        for p in &problems {
+            println!("PROBLEM {p}");
+        }
+        if !c.iter().any(|x| x.refusal.is_none()) {
+            println!("{}", plan::NO_SPACE_HELP);
+        }
+        println!("candidates-complete");
+        Ok(())
+    }
+
+    fn print_event(e: Event) {
+        match e {
+            Event::Step(s) => println!("STEP {s}"),
+            Event::Note(s) => println!("NOTE {s}"),
+            Event::Progress { what, done, total } => {
+                // A line per 5 %, not per megabyte: this goes to a log.
+                thread_local!(static LAST: std::cell::Cell<(&'static str, u64)> = const { std::cell::Cell::new(("", u64::MAX)) });
+                let step = done.saturating_mul(20).checked_div(total).unwrap_or(20);
+                if LAST.with(|l| l.replace((what, step))) != (what, step) {
+                    println!("PROGRESS {what} {}%", step * 5);
+                }
+            }
+        }
+        let _ = std::io::stdout().flush();
+    }
+
+    pub fn install(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        let id = args.first().ok_or("install needs a candidate ID (see `candidates`)")?;
+        let (c, _) = winstall::candidates();
+        let pick = c.iter().find(|x| &x.id == id).ok_or("no such candidate; run `candidates` again")?;
+        if let Some(r) = &pick.refusal {
+            return Err(format!("that space cannot be used: {r}").into());
+        }
+        println!("{}", plan::install_confirmation(&pick.disk, &pick.what, pick.bytes));
+        if !args.iter().any(|a| a == "--yes") {
+            print!("Type INSTALL to continue: ");
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            if line.trim() != "INSTALL" {
+                return Err("not confirmed; nothing was changed".into());
+            }
+        }
+        let iso = super::flag(args, "--iso").map(Path::new);
+        let out = winstall::install(pick, iso, &mut print_event)?;
+        println!("BOOTNUM={:04X}", out.boot_number);
+        println!("ESP_PARTUUID={}", out.esp_guid);
+        println!("ROOT_PARTUUID={}", out.root_guid);
+        if out.bitlocker_suspended {
+            println!("NOTE BitLocker is suspended until Windows next starts.");
+        }
+        println!("INSTALL-STAGED-OK");
+        println!("Restart to continue: Rime OS's installer starts once, by itself.");
+        if args.iter().any(|a| a == "--restart") {
+            rime_windows_installer::winwrite::restart()?;
+        }
+        Ok(())
+    }
+
+    pub fn download() -> Result<(), Box<dyn std::error::Error>> {
+        let p = winstall::obtain_iso(None, &mut print_event)?;
+        println!("IMAGE {}", p.display());
+        println!("DOWNLOAD-OK");
+        Ok(())
+    }
+
+    pub fn undo(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+        println!("{}", winstall::undo_preview()?);
+        if !args.iter().any(|a| a == "--yes") {
+            print!("Type UNDO to continue: ");
+            std::io::stdout().flush()?;
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            if line.trim() != "UNDO" {
+                return Err("not confirmed; nothing was changed".into());
+            }
+        }
+        winstall::undo(&mut print_event)?;
+        println!("UNDO-OK");
+        Ok(())
+    }
+}
+
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    {
+        if env::args().len() == 1 {
+            return rime_windows_installer::gui::run();
+        }
+        // A GUI-subsystem program has no console of its own; borrow the one
+        // it was started from so the commands can print.
+        rime_windows_installer::gui::attach_parent_console();
+    }
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

@@ -53,6 +53,8 @@
 #                                writes reboot.txt on the transport and exits, and
 #                                the host powers the machine back on with the same
 #                                overlays. Up to N boots; the default is 1.
+#                                RIME_WINLAB_EXTRA=FILE (in the lab directory)
+#                                attaches FILE as one more disk (a copy: the guest may write).
 #      winlab status             what exists and what does not
 #
 #  $RIME_WINLAB_DIR defaults to /var/lab-scratch/winlab. It is not /tmp on
@@ -200,8 +202,9 @@ qemu_run() {
     rm -f "$MON"
     timeout "${QEMU_TIMEOUT:-2700}" qemu-system-x86_64 \
         -name rime-winlab \
-        -machine q35,accel=kvm -cpu host -smp 4 -m 4096 \
-        -drive "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.fd" \
+        -machine q35,accel=kvm,smm=on -cpu host -smp 4 -m 4096 \
+        -global driver=cfi.pflash01,property=secure,value=on \
+        -drive "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd" \
         -drive "if=pflash,format=raw,unit=1,file=$VARS" \
         -device ich9-ahci,id=ahci \
         -drive "id=sys,file=$SYSDISK,format=${SYSFMT:-raw},if=none,cache=unsafe" \
@@ -236,8 +239,8 @@ cmd_golden() {
     inlab "$(qemu_args)"'
         set -e
         export VARS=/w/golden-VARS.fd SYSDISK=/w/golden.raw MON=/w/mon.sock
-        cp /usr/share/edk2/ovmf/OVMF_VARS.fd "$VARS"
-        qemu-img create -f raw "$SYSDISK" 40G >/dev/null
+        cp /usr/share/edk2/ovmf/OVMF_VARS.secboot.fd "$VARS"
+        qemu-img create -f raw "$SYSDISK" 64G >/dev/null
 
         # The transport disk exists from phase 2 onward only. During phase 1
         # the system disk is the ONLY disk attached, so autounattend.xml`s
@@ -406,7 +409,7 @@ cmd_run() {
 
     podman run --rm --device /dev/kvm \
         -v "$DIR":/w:z -v "$HERE":/lab:ro,z -v "$rundir":/job:ro,z \
-        -e SWAP="$swap" -e BOOTS="$boots" \
+        -e SWAP="$swap" -e BOOTS="$boots" -e EXTRA="${RIME_WINLAB_EXTRA:-}" \
         "$IMAGE" bash -uo pipefail -c "$(qemu_args)"'
         set -e
         export VARS=/w/run-VARS.fd SYSDISK=/w/run.qcow2 SYSFMT=qcow2 \
@@ -488,7 +491,8 @@ cmd_run() {
                 -drive "id=fa,file=/w/run-fixture-a.qcow2,format=qcow2,if=none" \
                 -device "ide-hd,drive=fa,bus=ahci.$faport,model=RIME-FIXTURE-A,serial=FIXA00000001" \
                 -drive "id=fb,file=/w/run-fixture-b.qcow2,format=qcow2,if=none" \
-                -device "nvme,drive=fb,serial=FIXB00000002" || rc=$?
+                -device "nvme,drive=fb,serial=FIXB00000002" \
+                ${EXTRA:+-drive "id=ex,file=/w/$EXTRA,format=raw,if=none" -device "ide-hd,drive=ex,bus=ahci.3"} || rc=$?
             echo "qemu exited rc=$rc after boot $boot"
 
             # The firmware baseline after EVERY boot, not only the last one.

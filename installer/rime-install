@@ -461,6 +461,188 @@ run_bootc_install() {  # $1=target disk  $2=mounted target root  [$@=extra bootc
   return "$brc"
 }
 
+# ── A disk with more than one ESP ───────────────────────────────────────────
+#
+# bootupd does not install to "the ESP the caller chose". Read at bootupd
+# 0.3.2 / bootc-internal-blockdev 1.16.10: the file copy goes to whatever vfat
+# filesystem is MOUNTED at <root>/boot/efi (search_common_esp_mountpoints), but
+# the firmware entry it creates names `find_partition_of_esp()` — the FIRST
+# partition on the disk carrying the ESP type GUID, in partition-number order
+# (`efibootmgr --create --part <that number>`). On a Windows machine that is
+# Windows' ESP, which Windows Setup puts first. Left alone, a partition install
+# beside Windows writes Rime's loader into Rime's ESP and then points the new
+# "Rime OS" entry at Windows' ESP, where no such loader exists: the entry fails
+# and the firmware falls through to Windows, every boot.
+#
+# So for the duration of `bootc install` the other ESPs are removed from the
+# KERNEL's view of the disk (BLKPG, `partx -d`), and put back straight after.
+# Nothing is written to the disk: the partition table is not touched, only the
+# in-memory list the kernel built from it, and a reboot rebuilds that list
+# anyway. Then the only ESP bootupd can find is the one this install uses.
+#
+# The same rule bites again after install, on every boot: Rime runs
+# bootloader-update.service (`bootupctl update`), which re-discovers "the" ESP
+# the same way and would write the next shim/grub update into the first one.
+# configure_own_esp_in() below is what stops that.
+HIDDEN_ESPS=()
+other_esps() {  # ESP-typed partitions on DISK other than ESP_DEV, one per line
+  lsblk -rnpo NAME,PARTTYPE "$DISK" 2>/dev/null \
+    | awk -v esp="$ESP_DEV" 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" && $1 != esp { print $1 }'
+}
+hide_other_esps() {
+  local p n
+  HIDDEN_ESPS=()
+  for p in $(other_esps); do
+    if findmnt -rno SOURCE | grep -qx "$p"; then
+      echo "the other EFI System Partition $p is mounted; refusing to install beside it" | tee -a "$LOG"
+      return 1
+    fi
+    n=$(cat "/sys/class/block/$(basename "$p")/partition" 2>/dev/null || true)
+    case "$n" in ''|*[!0-9]*) echo "cannot read the partition number of $p" | tee -a "$LOG"; return 1 ;; esac
+    if partx -d --nr "$n" "$DISK" >>"$LOG" 2>&1; then
+      HIDDEN_ESPS+=("$n")
+      log "esp: hid $p (partition $n) from the kernel for the bootloader step"
+    else
+      echo "could not hide the other EFI System Partition $p from the bootloader installer" | tee -a "$LOG"
+      return 1
+    fi
+  done
+  udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+}
+restore_hidden_esps() {
+  local n
+  for n in ${HIDDEN_ESPS[@]+"${HIDDEN_ESPS[@]}"}; do
+    partx -a --nr "$n" "$DISK" >>"$LOG" 2>&1 \
+      || log "esp: could not re-add partition $n to the kernel's view (harmless: the next boot reads it from the disk again)"
+  done
+  HIDDEN_ESPS=()
+  udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+}
+
+# Make the installed system update ITS ESP and only that one. bootupd's update
+# path uses an ESP mounted at /boot/efi when there is one, and re-discovers
+# the first ESP on the disk when there is not; Rime does not mount /boot/efi.
+# So on a disk with another ESP: mount Rime's at /boot/efi by PARTUUID, and
+# make bootloader-update.service refuse to run unless it is mounted. Failing
+# closed costs a postponed bootloader update; failing open writes Rime's
+# loader into another operating system's boot partition.
+configure_own_esp_in() {  # $1 = deployment root
+  local d="$1" uuid
+  [ -n "$(other_esps)" ] || return 0
+  uuid=$(lsblk -dno PARTUUID "$ESP_DEV" 2>/dev/null | tr -d ' ')
+  [ -n "$uuid" ] || { note "Could not read the PARTUUID of $ESP_DEV; bootloader updates are switched off on this machine until /boot/efi is configured (see $LOG)."; uuid=""; }
+  if [ -n "$uuid" ]; then
+    printf '# Rime OS: this disk has more than one EFI System Partition, and this one is Rime'"'"'s.\nPARTUUID=%s /boot/efi vfat umask=0077,shortname=winnt,nofail,x-systemd.device-timeout=15s 0 2\n' \
+      "$uuid" >>"$d/etc/fstab"
+  fi
+  mkdir -p "$d/etc/systemd/system/bootloader-update.service.d"
+  cat >"$d/etc/systemd/system/bootloader-update.service.d/50-rime-own-esp.conf" <<'EOF'
+# Rime OS: another operating system's EFI System Partition is on this disk.
+# bootupctl update writes to the ESP mounted at /boot/efi, and otherwise to the
+# FIRST ESP on the disk, which is not Rime's. Never run without Rime's mounted.
+[Unit]
+RequiresMountsFor=/boot/efi
+[Service]
+ExecCondition=/usr/bin/mountpoint -q /boot/efi
+EOF
+  log "esp: /boot/efi -> PARTUUID=${uuid:-unknown}; bootloader-update.service requires it"
+}
+
+# Back to read-only, as soon as the writing is done. A FAT filesystem
+# mounted read-write carries a "dirty" flag until it is cleanly unmounted,
+# and the live medium is never unmounted cleanly: the running squashfs is
+# loop-mounted from it until power-off. Left read-write, every install would
+# leave Rime's ESP flagged, and Windows reports it as "Warning". Remounting
+# read-only writes everything back and clears the flag; the cleanup at the
+# end makes it writable for the few seconds it needs.
+live_esp_readonly() {
+  [ "$ESP_IS_LIVE" = 1 ] || return 0
+  sync -f /run/initramfs/live 2>/dev/null || sync
+  mount -o remount,ro /run/initramfs/live >>"$LOG" 2>&1 \
+    || log "live ESP: could not return /run/initramfs/live to read-only (its FAT dirty flag stays set until the next clean mount)"
+}
+
+# The live environment the Windows app staged on Rime's ESP (1.8 GB) is
+# deleted by the installed system on its first boot, once nothing runs from
+# it. A oneshot with a path condition: after it has run once it never runs
+# again, and on a machine that was not installed from Windows it never runs.
+install_staged_cleanup_in() {  # $1 = deployment root
+  local d="$1"
+  [ "$ESP_IS_LIVE" = 1 ] || return 0
+  mkdir -p "$d/etc/systemd/system/multi-user.target.wants"
+  cat >"$d/etc/systemd/system/rime-staged-cleanup.service" <<'UNIT'
+# Rime OS: written by the installer on a machine installed from Windows.
+[Unit]
+Description=Remove the installer Rime OS was set up from
+RequiresMountsFor=/boot/efi
+ConditionPathExists=/boot/efi/rimeinst/handoff.cfg
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rm -rf /boot/efi/rimeinst /boot/efi/EFI/rimeinst
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  ln -sf ../rime-staged-cleanup.service "$d/etc/systemd/system/multi-user.target.wants/rime-staged-cleanup.service"
+  log "handoff: the installed system removes the staged installer from its ESP on first boot"
+}
+
+# A boot menu entry for Windows. Rime's GRUB (bootupd's static config) sources
+# $prefix/custom.cfg, which lives on Rime's own root filesystem and is owned
+# by no package, so an update never rewrites it. Without it, a machine that
+# gained Rime from a Windows install boots straight into Rime and reaches
+# Windows only through the firmware's one-time boot menu. Windows' ESP is
+# mounted READ-ONLY here, to learn its filesystem UUID and to check that its
+# boot manager is really there; nothing on it is opened for writing.
+#
+# NOT on a machine where Windows uses BitLocker (including Windows 11's
+# "Device encryption"). Starting Windows through shim and GRUB measures a
+# different chain of Secure Boot authorities into the TPM's PCR 7 than the
+# firmware starting it directly, BitLocker's default profile binds PCR 7, and
+# every Windows start from this menu would end at the 48-digit recovery-key
+# prompt. The Windows app reads BitLocker's state and says so in the hand-off
+# file (windows_bitlocker=1); there, Windows is started from the firmware's
+# boot menu instead, which measures exactly what it always did.
+WINDOWS_ENTRY=0
+windows_bitlocker() {
+  [ "$ESP_IS_LIVE" = 1 ] && grep -qx 'windows_bitlocker=1' /run/initramfs/live/rimeinst/handoff.cfg 2>/dev/null
+}
+add_windows_entry() {  # $1 = mounted physical root of the new install
+  local root="$1" p probe uuid
+  [ -d "$root/boot/grub2" ] || return 0
+  if windows_bitlocker; then
+    log "grub: no Windows entry: Windows uses BitLocker, and a GRUB chainload would trip its recovery prompt"
+    return 0
+  fi
+  probe=$(mktemp -d)
+  for p in $(other_esps); do
+    uuid=$(blkid -s UUID -o value "$p" 2>/dev/null || true)
+    [ -n "$uuid" ] || continue
+    if mount -o ro "$p" "$probe" 2>/dev/null; then
+      if [ -f "$probe/EFI/Microsoft/Boot/bootmgfw.efi" ]; then
+        umount "$probe" 2>/dev/null || true
+        cat >"$root/boot/grub2/custom.cfg" <<EOF
+# Rime OS: Windows is installed beside Rime on this machine.
+menuentry 'Windows' --class windows --id windows {
+  insmod part_gpt
+  insmod fat
+  insmod chain
+  search --no-floppy --fs-uuid --set=root $uuid
+  chainloader /EFI/Microsoft/Boot/bootmgfw.efi
+}
+set timeout=5
+EOF
+        WINDOWS_ENTRY=1
+        log "grub: Windows entry added (ESP $p, fs uuid $uuid)"
+        break
+      fi
+      umount "$probe" 2>/dev/null || true
+    fi
+  done
+  rmdir "$probe" 2>/dev/null || true
+}
+
 # Where the neighbour's \EFI\fedora boot files are backed up on a shared ESP.
 # It kept its APEX name through the rebrand, on purpose: an earlier APEX (rime-rename: keep)
 # install on that ESP already put the TRUE originals there, and the `cp -n`
@@ -2102,8 +2284,24 @@ case "$_dtype" in
   disk|loop) : ;;
   *) die "$DISK is a '${_dtype:-unknown}', not a whole disk. Refusing — installing onto anything else produces a system that will not boot. Nothing has been erased." ;;
 esac
-if findmnt -rno SOURCE | grep -qE "^${DISK}([0-9p]|$)"; then
-  die "$DISK (or a partition of it) is currently mounted — refusing."
+# ONE mount on DISK is allowed, and only one: an install the Windows app
+# staged boots this live environment out of Rime's OWN new ESP on the target
+# disk (rime-windows-installer writes the live files there, because that is the
+# one partition the install never formats), and dracut keeps the live medium
+# mounted read-only at /run/initramfs/live for the whole session. So on that
+# path the ESP is mounted by construction. Every other mount still refuses:
+# the exception needs partition mode, the mounted device to BE the ESP named
+# in the answers, and it to be mounted exactly at the live medium's path.
+ESP_IS_LIVE=0
+_disk_mounts=$(findmnt -rno SOURCE,TARGET | awk -v d="$DISK" 'index($1, d) == 1 { s = substr($1, length(d) + 1); if (s == "" || s ~ /^p?[0-9]+$/) print }' | sort -u)
+if [ -n "$_disk_mounts" ]; then
+  if [ "$INSTALL_MODE" = partition ] && [ -n "$ESP_DEV" ] \
+     && [ "$_disk_mounts" = "$ESP_DEV /run/initramfs/live" ]; then
+    ESP_IS_LIVE=1
+    log "live medium: $ESP_DEV is this session's live medium and the ESP to install to (a staged Windows install)"
+  else
+    die "$DISK (or a partition of it) is currently mounted — refusing."
+  fi
 fi
 
 # Refuse a target that cannot possibly hold the install, BEFORE erasing it.
@@ -2497,12 +2695,23 @@ if [ "$INSTALL_MODE" = partition ]; then
     rc=92; echo "could not read the ESP $ESP_DEV" | tee -a "$LOG"
   fi
   if [ "${rc:-0}" = 0 ]; then
+    hide_other_esps || rc=94
+  fi
+  if [ "${rc:-0}" = 0 ]; then
     WROTE_DISK=1   # mkfs starts here — the target's contents are now going away
     mkfs."$ROOTFS_TYPE" $MKFS_FORCE -L rime-root "$TARGET" >>"$LOG" 2>&1 \
       || { rc=90; echo "mkfs.$ROOTFS_TYPE failed on $TARGET" | tee -a "$LOG"; }
   fi
   if [ "${rc:-0}" = 0 ]; then
     mount_new_root "$TARGET" "$TROOT" || { rc=91; echo "mounting $TARGET failed" | tee -a "$LOG"; }
+  fi
+  if [ "${rc:-0}" = 0 ] && [ "$ESP_IS_LIVE" = 1 ]; then
+    # The live medium holds the ESP read-only, and Linux will not mount one
+    # filesystem read-write and read-only at once ("would change RO state").
+    # Making the existing mount writable is what lets the bootloader be
+    # written beside the live files that are running this session.
+    mount -o remount,rw /run/initramfs/live >>"$LOG" 2>&1 \
+      || { rc=92; echo "could not make the live ESP $ESP_DEV writable" | tee -a "$LOG"; }
   fi
   if [ "${rc:-0}" = 0 ]; then
     mkdir -p "$TROOT/boot/efi"
@@ -2533,7 +2742,9 @@ if [ "$INSTALL_MODE" = partition ]; then
     rc=${PIPESTATUS[0]}
     { echo "--- ESP $ESP_DEV after install ---"; find "$TROOT/boot/efi" -maxdepth 3; } >>"$LOG" 2>&1 || true
   fi
+  restore_hidden_esps
   release_target_mounts "partition install"
+  live_esp_readonly
 elif [ "$ENCRYPT" = yes ]; then
   # ── encrypted whole disk: partition, LUKS2, then to-filesystem ────────────
   #
@@ -2906,6 +3117,7 @@ again to try again — a second attempt on the same disk is safe." ;;
   90) die "Could not format $TARGET as $ROOTFS_TYPE (mkfs failed — see $LOG). The partition was NOT changed; your other partitions are untouched." ;;
   91) die "Could not mount the freshly formatted $TARGET (see $LOG). $TARGET was reformatted and is now empty; your other partitions are untouched." ;;
   92) die "Could not read/mount the EFI System Partition $ESP_DEV (see $LOG). Nothing was formatted; $TARGET and your other partitions are untouched." ;;
+  94) die "Another EFI System Partition on $DISK could not be set aside for the bootloader step (see $LOG). Rime's boot entry would have pointed at it, so the install stopped before anything was formatted: $TARGET and your other partitions are untouched." ;;
   93) die "The EFI System Partition $ESP_DEV does not have enough free space (~40MB needed) for the Rime boot files.
 
 Nothing was formatted — $TARGET and your other partitions are untouched.
@@ -3003,6 +3215,11 @@ in. Start the installer again; a second run on the same disk is safe."
 fi
 rm -f "$deploy/etc/.rime-write-probe" 2>/dev/null || true
 create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
+if [ "$INSTALL_MODE" = partition ]; then
+  configure_own_esp_in "$deploy"
+  install_staged_cleanup_in "$deploy"
+  add_windows_entry "$MNT"
+fi
 copy_network_to "$deploy"
 set_locale_keymap_in "$deploy"
 write_crypttab_in "$deploy"
@@ -3147,7 +3364,17 @@ keyboard layout is wrong. Keep it somewhere that is not this laptop."
 else
   crypt_extra=""
 fi
-if [ "$INSTALL_MODE" = partition ]; then
+if [ "$ESP_IS_LIVE" = 1 ] && [ "$WINDOWS_ENTRY" = 1 ]; then
+  done_extra="Installed into $TARGET, beside Windows; Windows' own partitions were not touched.
+Restart, and Rime OS starts. To start Windows, choose Windows in the menu that
+shows for five seconds at power-on."
+elif [ "$ESP_IS_LIVE" = 1 ]; then
+  done_extra="Installed into $TARGET, beside Windows; Windows' own partitions were not touched.
+Restart, and Rime OS starts. To start Windows, open your computer's boot menu
+while it powers on (usually F12, F11, F9 or Esc) and choose Windows Boot
+Manager. Windows uses BitLocker, so it is started from there rather than from
+Rime's menu, which would make it ask for the recovery key."
+elif [ "$INSTALL_MODE" = partition ]; then
   done_extra="Installed into $TARGET; the other partitions on $DISK were not touched.
 
 Your firmware boot menu should now list Rime OS alongside your other OS.
@@ -3156,6 +3383,8 @@ Your previous OS entry is still there."
 else
   done_extra="Installed on $DISK (whole disk)."
 fi
+reboot_line="Remove the USB stick and reboot."
+[ "$ESP_IS_LIVE" = 1 ] && reboot_line="Restart when you are ready."
 note "Rime OS is installed.
 
 $done_extra$crypt_extra
@@ -3163,10 +3392,32 @@ $done_extra$crypt_extra
 Log in as: $USERNAME
 Hostname:  $HOSTNAME
 
-Remove the USB stick and reboot. On first login the shell finishes setting
+$reboot_line On first login the shell finishes setting
 itself up (needs network the first time).
 
 Full log: $LOG"
+# ── A staged Windows install cleans up after itself, and only on success ────
+# The Windows app left the live environment on Rime's ESP and a one-shot
+# "Rime OS Setup" firmware entry pointing at it. Both stay until this point, so
+# a failed install can be retried from the firmware boot menu. Once Rime is on
+# the disk they are dead weight (1.8 GB of the ESP), so they go. The entry is
+# removed only when it is provably the one the app made: its number comes from
+# the hand-off file, and its label and loader path must both match.
+if [ "$ESP_IS_LIVE" = 1 ] && [ -f /run/initramfs/live/rimeinst/handoff.cfg ]; then
+  _bn=$(sed -n 's/^bootnum=\([0-9A-Fa-f]\{4\}\)$/\1/p' /run/initramfs/live/rimeinst/handoff.cfg | head -1)
+  if [ -n "$_bn" ] && have efibootmgr \
+     && efibootmgr -v 2>/dev/null | grep -i "^Boot${_bn}\*\? Rime OS Setup" | grep -qi 'rimeinst'; then
+    efibootmgr -q -b "$_bn" -B >>"$LOG" 2>&1 \
+      && log "handoff: removed the one-shot setup entry Boot$_bn" \
+      || log "handoff: could not remove Boot$_bn (harmless: it is not in BootOrder)"
+  else
+    log "handoff: setup entry ${_bn:-?} not found or not ours; left alone"
+  fi
+  # The staged files themselves are NOT deleted here: this session runs from
+  # the squashfs among them, and a file deleted while open keeps the ESP from
+  # going back to read-only, which leaves its FAT marked dirty. The installed
+  # system deletes them on its first boot (install_staged_cleanup_in).
+fi
 log "install complete"
 write_result ok ""
 # The machine-readable success sentinel. It MUST be the very last line on

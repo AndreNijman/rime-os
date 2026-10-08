@@ -1,3 +1,78 @@
+# Validation
+
+## 2026-10-08: the write path, end to end
+
+Everything below ran on the build at the head of `feat/windows-installer`,
+with a test installer ISO built from the same branch
+(`installer/build-live-iso.sh`, PRODUCTION=1 NETINSTALL=1, pinned image
+`sha256:02a7c22e…`). Lab artefacts are in `/var/lab-scratch/` on the L16
+(not in git: disk images).
+
+### The real Windows guest: `lab/install-e2e` (four boots of one machine)
+
+Windows Server 2022 Standard Evaluation, OVMF with Secure Boot on and
+Microsoft's keys, AHCI system disk made by Windows Setup (64 GiB).
+
+| boot | what happened | result |
+|---|---|---|
+| 1 Windows | `Resize-Partition` shrank C: by 34 GB; `candidates` offered 36.5 GB of unallocated space (and listed the lab's other disks with reasons); `install --iso` staged Rime; Windows' `bcdedit /enum firmware` showed "Rime OS Setup", `\EFI\rimeinst\shimx64.efi`, as `bootsequence` (= BootNext); BootOrder unchanged (Windows Boot Manager first) | PASS |
+| 2 setup | the firmware ran BootNext: shim -> GRUB from Rime's ESP -> live kernel with `root=live:PARTUUID=<Rime's ESP>`; the live GUI's `read_handoff()` accepted the disk; the engine installed Rime with the GUI's own answers (5.4 GB from the registry) | 15/15 PASS |
+| 3 Windows | BootNext -> Windows Boot Manager; Windows started and ran its job; `chkdsk C: /scan` clean | PASS |
+| 4 Rime | firmware BootOrder (Rime first), Rime's MOK cert added to db; Rime booted from its own ESP: `/boot/efi` = Rime's ESP (not the disk's first), `bootloader-update.service` Result=success, `bootupctl update` by hand rc 0, "Rime OS" entry -> Rime's ESP | 6/6 PASS |
+| host | Windows' ESP, listed from outside the guest before, after the install and after Rime's own bootloader update: no Rime file, same file list | PASS |
+
+Found by the first run and fixed: Rime's ESP was left with the FAT dirty
+flag (Windows showed the volume as "Warning"). The live medium is remounted
+read-write for the bootloader, and deleting the running squashfs then kept it
+from going back to read-only. The engine now returns it to read-only as soon
+as it is done writing and leaves the staged files for the installed system to
+delete on its first boot (`rime-staged-cleanup.service`). Re-run on the final
+build (`/var/lab-scratch/winlab/e2e-3`): every check above PASS, plus "FAT
+clean, read-only" in boot 2 and "first boot removed the staged installer" in
+boot 4; Windows lists RIME-EFI as Healthy.
+
+Also measured: the window itself, clicked through a complete install on a
+real desktop (`lab/jobs/gui-install`), from Install to its done page in 25 s
+(hash 2 GB, write it, read it back), firmware showing "Rime OS Setup" as the
+one-shot.
+
+### Windows-shaped disk images: `tests/staged-boot.sh` + `tests/staged-install.py`
+
+Windows Setup's layout (first usable LBA 34, ESP, MSR, NTFS C:, recovery at
+the end) on a 64 GiB image, staged with `stage-image` (the .exe's own code),
+the firmware entry the .exe writes injected with virt-fw-vars, booted under
+OVMF Secure Boot:
+
+- every Windows partition byte-identical after staging and after the whole
+  install (sha256 per partition);
+- sgdisk: no problems; BootNext consumed; live system up;
+- the same 15 checks as boot 2 above, PASS;
+- with `--bitlocker` (hand-off says Windows uses BitLocker): no GRUB Windows
+  entry, and the installer's last page sends the user to the firmware boot
+  menu instead (PASS).
+
+### The window
+
+`lab/jobs/gui` (autologon, at-logon task, BM_CLICK): the window opens on a
+real Windows desktop, lists the shrunk space preselected and the lab's
+other disks with their reasons, and reaches the confirmation page (disk by
+model, serial and GPT GUID; Install enabled only with the box ticked).
+Bugs found this way and fixed: a panic on reentry (buttons send
+DM_GETDEFID while the window is being built) that made the window vanish
+without a word under `panic = abort`; Enter did nothing in a non-dialog
+window; a click on the hidden checkbox could enable Next.
+
+### Unit tests and the gate
+
+`cargo test`: 44 tests (GPT writer against sfdisk/sgdisk images, FAT32 writer
+against fsck.fat/7z/blkid, ISO reader against the real ISO, boot entry
+byte-identical to one real firmware booted, staging plan with a guard that
+refuses any write outside the plan's ranges). `tests/test-windows-installer.sh`
+section 0 mutation-tested: a `PK` write, `WriteFile` outside winwrite.rs,
+IOCTL 0x0007C054, and a renamed allowlisted IOCTL each fail it.
+
+---
+
 # Validation record, 2026-09-21
 
 Branch `task/windows-installer-2`, worktree from `origin/roadmap/v2.2` at

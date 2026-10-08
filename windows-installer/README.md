@@ -1,262 +1,113 @@
-> **⏸ PAUSED / ARCHIVED, 2026-09-21.** Andre stopped development of the
-> Windows app by decision; no blocker stopped it. Nothing here is broken or
-> half-finished. **Read `windows-installer/PAUSED.md` before resuming or
-> building on this**, and do not resume without Andre asking. Several findings
-> in it are facts about Windows and bootc that outlive this tool.
+# Rime OS installer for Windows
 
-# Portable Windows installer
+Puts Rime OS on a Windows computer beside Windows, without a USB stick.
 
-Status: **surveys real Windows disks; installs nothing.** It opens
-`\\.\PhysicalDriveN` read-only, reads the partition table twice (once through
-Windows and once off the disk itself), asks Windows what it is using, reads
-every byte of a candidate partition, and prints the confirmation a user would
-have to accept. There is no write path: the program opens no handle for
-writing, and `tests/test-windows-installer.sh` greps the source for every write
-API so that stays checked instead of asserted.
+**Status (2026-10-08): installs.** Proven end to end in the lab on a real
+Windows Server 2022 guest under OVMF with Secure Boot on (`lab/install-e2e`),
+and on Windows-shaped disk images (`tests/staged-boot.sh`). It has **not**
+been run on physical hardware yet; the first such run is a decision for the
+owner of the machine, not for a script.
 
-Read `ARCHITECTURE.md` first. It answers the question that decides the whole
-design (a Windows program cannot run `bootc install`, so what does "install
-Rime from Windows" mean?) and gives the measured facts that decided it.
+## What a person does
 
-**There is a Windows virtual machine, and it is part of the deliverable.**
-`lab/winlab` builds one from Microsoft's evaluation media: Windows Server 2022
-installs itself headlessly in about two and a half minutes onto a GPT disk with
-a 100 MB ESP, and the lab then points the installer at fixture disks carrying
-the partition layouts that matter. Everything below that says "measured" was
-measured there. Nothing in this program has ever touched a physical disk.
+1. Shrink C: in Disk Management (right-click Start > Disk Management >
+   right-click C: > Shrink Volume) by 30 GB or more, and leave the space
+   **Unallocated**. The installer never touches NTFS, so the shrink is done
+   by Windows' own tool, which knows how to move files out of the way.
+2. Run `rime-windows-installer.exe` (it asks for administrator rights).
+3. Choose the free space. Read the confirmation, which names the disk by
+   model, serial and size (never by "Disk 1": disk numbers change between
+   restarts). Install.
+4. Restart. Rime's installer starts once, by itself: keyboard, network,
+   account, confirm. It downloads Rime OS and installs it into the space.
 
-## Toolchain decision
+Afterwards the computer starts Rime OS. Windows is started from Rime's boot
+menu, or, where Windows uses BitLocker (including Windows 11's "Device
+encryption"), from the firmware's boot menu (F12/F11/F9/Esc), because starting
+it through GRUB would change the TPM's PCR 7 and trip BitLocker's recovery
+prompt every time.
 
-Rust, edition 2024; intended release target `x86_64-pc-windows-msvc`, static CRT.
-This produces a native portable executable without MSI, installer, .NET runtime,
-WebView runtime, or a system service. Rust makes bounded byte parsing and owned
-handles practical, and `src/windows.rs` keeps the unsafe Windows API boundary
-small. C# NativeAOT is plausible but brings an additional interop/AOT surface;
-C++ makes this parser and handle ownership harder to audit. The crate uses only
-std, so its content checks run offline on Linux and Windows. A native Windows
-front end can come after the safety backend is proven.
+## What it does to the machine, completely
 
-The executable is a single file; a future install still needs several GB of
-verified OS/staging payload and temporary workspace. "Portable" does not mean
-that Linux bootc runs natively under Windows or that the OS payload fits in RAM.
+Read `src/winwrite.rs`: every Windows call that changes anything is in that
+one file, and `tests/test-windows-installer.sh` section 0 fails the build if a
+write API, a write IOCTL or a firmware variable name appears anywhere else.
 
-Build/test on Linux:
+| what | where | how it is undone |
+|---|---|---|
+| downloads the installer ISO | `%ProgramData%\Rime\Installer\` | delete the folder |
+| writes Rime's own **ESP** (FAT32, ~2.25 GiB: shim, GRUB, the live kernel, initramfs and squashfs) | the start of the free space | `undo` |
+| zeroes 3 MiB of the new root partition (old signatures) | the rest of the free space | nothing to undo |
+| adds **two GPT entries**: Rime's ESP and an empty Linux root | the partition table, edited in place, primary header last | `undo` (and a byte copy of both tables is saved first) |
+| creates one firmware entry, **"Rime OS Setup"**, and sets **BootNext** to it | UEFI NVRAM; BootOrder untouched | the firmware consumes BootNext; Rime's installer removes the entry after a successful install; `undo` removes it otherwise |
+| suspends BitLocker for **one** restart, only if its TPM profile binds PCR 5 (the partition table) | C: | resumes by itself |
+
+It never writes Windows' ESP, Windows' BCD, C:, or any other partition, and
+never reorders boot entries.
+
+The ISO is **pinned**: its URL, size and SHA-256 are compiled into the .exe
+(`src/pin.rs`) by the workflow that publishes that ISO
+(`.github/workflows/build-installer-iso.yml`). A download, or a file the user
+already has, is used only if it hashes to the pin.
+
+## How it works
+
+`ARCHITECTURE.md` explains why a Windows program cannot simply run the Linux
+installer, and what it does instead (stage Rime's own live environment, let
+Linux install Linux). In order, `winstall::install`:
+
+1. obtains the pinned ISO and checks its SHA-256;
+2. reads the firmware's boot entries and picks a free number;
+3. re-surveys the chosen disk (identity must match what was confirmed; Windows'
+   partition list and the raw GPT must agree);
+4. plans every byte: two random partition GUIDs, the FAT32 layout with every
+   live file in contiguous clusters, the boot menu, the hand-off file;
+5. saves both GPT copies and a journal under `%ProgramData%`;
+6. writes the payload into space no partition describes yet, then reads all
+   of it back and compares hashes;
+7. re-reads the table, re-enumerates Windows' volumes, and commits the two GPT
+   entries; asks Windows to re-read the table and checks it sees them;
+8. writes "Rime OS Setup" and BootNext, reading both back.
+
+The Linux side (`installer/rime-install`, `installer/rime-installer-gui`) reads
+`\rimeinst\handoff.cfg` on the ESP it booted from: partition GUIDs, the disk
+GUID, the boot entry number, whether Windows uses BitLocker. No secrets: the
+account is created in Rime's installer, never on the Windows side. The GUI
+checks every identifier against the real disk, skips its disk pages, and the
+engine installs in partition mode onto Rime's ESP.
+
+## Build and test
 
 ```sh
 cd windows-installer
-cargo build --offline --locked
-cargo test --offline --locked
-cargo clippy --offline --locked --all-targets -- -D warnings
-python3 tests/image_lab.py
-cargo run --offline --locked -- lab /absolute/path/to/test-disk.img
+cargo test --offline --locked                 # 44 unit tests, Linux
+./build-windows.sh dist                       # the .exe, in a container
+../tests/test-windows-installer.sh            # gate + build + tests + wine
+tests/staged-boot.sh ISO WORK [KARGS]         # stage a Windows-shaped image, boot it
+lab/winlab image|media|golden|fixtures        # the Windows VM (Secure Boot on)
+lab/install-e2e ISO EXE WORK                  # the whole thing, four boots
 ```
 
-The command lists partitions and requests an exact GUID on stdin. It reports
-size, GPT name (escaped), type, attributes, extent and GPT disk identity. It
-reports model/serial as unavailable and the filesystem label as not probed; a
-GPT name is **not** a filesystem label. Unknown selections fail. The program
-makes no default selection. All-zero content is success for this diagnostic
-only; refusal returns exit code 1. It never offers to erase signatures to make
-a target pass.
+Set `RIME_ISO_URL`, `RIME_ISO_BYTES`, `RIME_ISO_SHA256` before
+`build-windows.sh` to pin an image; without them the .exe refuses to install.
 
-Intended Windows build, in a Windows x64 MSVC developer environment with Rust:
+Commands (`rime-windows-installer --help`): no arguments opens the window;
+`candidates`, `install ID [--iso FILE]`, `undo`, `download`, plus the
+read-only `survey`, `inspect` and `lab`, and the developer `stage-image`.
 
-```powershell
-$env:RUSTFLAGS = '-C target-feature=+crt-static'
-cargo build --release --locked --offline --target x86_64-pc-windows-msvc
-# target/x86_64-pc-windows-msvc/release/rime-windows-installer.exe
-```
+## Known limits, stated
 
-This MSVC command is a build recipe, **not a verified Windows artifact**: nobody
-has run it. The `.exe` that does exist comes from `build-windows.sh`, which
-cross-compiles the GNU target in a Fedora container; `tests/test-windows-installer.sh`
-runs it under wine and, with `RIME_WINLAB_GUEST=1`, on the Windows Server 2022
-guest (`VALIDATION.md` has the transcript). `tests/image_lab.py` runs the Linux
-debug binary. Executable imports, startup on a clean Windows install, and
-reparse-point guards still need validation. No release artifact or Authenticode
-signing exists.
+- Lab-proven only: OVMF + Windows Server 2022, and disk images. No physical
+  machine has run it.
+- The .exe is not Authenticode-signed, so SmartScreen warns on first run.
+  Signing needs a certificate; that is a purchasing decision.
+- 512-byte-sector GPT disks only (4Kn disks are refused, as before).
+- UEFI only; a Windows started in legacy BIOS mode is refused with the reason.
+- A release's .exe works only with that release's ISO, by design, and ISOs
+  older than this change ignore the hand-off: the first installer release
+  after this merge is the first one the .exe can use.
+- `rime-boot-migrate` (the move to systemd-boot) still picks the first ESP on
+  a disk; on a dual-boot disk it must refuse until it learns to use Rime's.
 
-## What "empty" means here
-
-1. Open a regular `.img` file read-only. Reject device/network/verbatim paths on
-   Windows, symlinks, reparse points and nonregular files. This lab guard is not
-   hardened against a hostile process replacing path components during open.
-2. Accept only conventional 512-byte-sector GPT: protective MBR (no hybrid),
-   revision 1, 92-byte headers, 128 entries of 128 bytes, both headers' CRC32,
-   both identical tables and table CRC32, matching disk identity and usable
-   bounds. Reject missing/duplicate partition identities, overlaps, invalid
-   bounds and residual bytes in unused entries. Unsupported geometry fails.
-3. Select one exact GUID. The lab permits only Linux filesystem GPT type with
-   zero attributes. Windows basic-data, ESP, recovery, MSR, RAID, LVM and unknown
-   types fail even if all their bytes are zero. This is deliberately more
-   restrictive than Windows Disk Management's normal basic-data partition.
-4. Read **every byte of the selected partition**, in 1 MiB chunks, stopping on
-   the first nonzero byte. Report actual bytes read and the first nonzero byte's
-   partition-relative and image-absolute offsets. Short reads, overflow, empty
-   ranges and I/O failures are errors, never evidence of emptiness.
-5. Re-read the GPT and image length after scanning; changes fail. This detects
-   layout changes but is NOT a content lock or atomic snapshot.
-
-The check is not a signature allowlist. NTFS/FAT headers, ext superblocks,
-btrfs backup superblocks, LUKS headers, RAID metadata, nested MBR/GPT, arbitrary
-old data, and backup signatures at the last byte all fail if any nonzero byte
-survives **inside the extent**. A quick format with no user files fails. Reading
-zeroes through a sparse-file hole succeeds; it says nothing about the storage
-medium's remanence or TRIM behavior. This tool makes no secure-erasure claim.
-
-The outer GPT is expected to exist: it defines the partition the user already
-created. A zeroed Linux-type extent behind a valid but historically stale active
-GPT entry will pass the lab content check. Bytes cannot establish why an entry
-exists or who owns it. A stale *unused* entry with residual fields fails; a
-protected type fails; a mismatched primary/backup table fails. The tool scans no
-other partition and no unallocated gap for content. Full Windows eligibility
-must also prove ownership, non-use, stable identity and exclusive access. Until
-then, **all installation is disabled**, even following an all-zero report.
-
-## Reference behavior and required adaptation
-
-Read `installer/rime-install` before this design. It validates the selected disk,
-parent/partition relationships, minimum capacity (16 decimal GB), mounted state,
-container membership, ESP type/parent, accounts and filesystem tooling. Partition
-mode formats only the target (btrfs default), mounts the root and existing ESP,
-checks for about 40 MiB of ESP free space, and calls privileged Linux
-`bootc install to-filesystem`. Post-install creates the account in the ostree
-deployment, sets hostname/locale/keymap, carries network settings, relabels with
-the target SELinux policy, and handles Secure Boot/MOK enrollment.
-
-Do not invoke that engine from Windows or copy its bootloader side effects:
-its `EFI/fedora` updates and possible `EFI/BOOT/BOOTX64.EFI` replacement conflict
-with this task's additive-only rule. Its whole-disk mounted guard also cannot
-apply to a Windows system disk as it stands. `installer/**` remains untouched.
-The Linux installer has since gained LUKS2 (on by default for whole-disk
-installs; a partition install cannot be encrypted), and deployment must be
-reconciled with it before anyone implements it. Existing LUKS headers are never
-overwritten. This prototype detects them as nonzero content.
-
-## Proposed deployment architecture (not implemented)
-
-Use an isolated Linux appliance to create a target-sized filesystem image with
-bootc and a **private synthetic ESP**. The appliance gets only scratch images,
-never a physical disk, host ESP, or host firmware variables. Use userspace VM
-emulation if an optional Windows hypervisor is unavailable; do not silently
-install WSL/Hyper-V/drivers. Appliance packaging/licensing, performance, image
-resizing and free-space budgets need a proof of concept before choosing a VM
-runtime. Alternatively a signed build-produced root image may reduce local work,
-but exact geometry and per-machine configuration still need proof.
-
-Resolve `ghcr.io/andrenijman/rime-os:rime` (there is one image; `:daily`,
-`:gaming-mesa` and `:gaming-nvidia` resolve to the same digest) to one immutable
-digest; validate the repository's cosign identity, source SHA, architecture and
-kernel/module signatures before any target writes. Per-SHA tags are
-traceability inputs, not substitutes for digest verification. Floating tags
-move only on main builds; never resolve them twice during a transaction.
-Preserve the `:rime` update origin so bootc upgrade/rollback stays image-based.
-No parallel Windows updater for image-owned components.
-
-Configure the staged deployment using the target's tools and SELinux policy:
-account/hostname, locale/keymap, signed kernel and expected MOK flow. Do not import
-Windows credentials or assume Linux NetworkManager profiles exist. Confirm bootc
-and ostree upgrades/rollback after transplanting the root image. Prove UUIDs,
-BLS/root arguments, initramfs and bootloader references address the selected
-partition without rewriting GPT. Encryption support must follow the Linux
-contract and get separate VM tests; no encryption implementation exists here.
-
-A future elevated writer accepts an immutable plan, not a drive number. It must:
-
-- Enumerate via Windows storage APIs; correlate volume extents and system,
-  boot, recovery, pagefile, crashdump, BitLocker, Storage Spaces/dynamic-disk and
-  mounted/in-use ownership. Unknown state refuses. Do not offline the whole
-  Windows disk or force-unlock anything. Prove exclusive target access for the
-  entire validation/write interval, including RAW partitions without a volume.
-  **Measured since this was written: an eligible target has no volume object at
-  all, so there is nothing to lock.** See `ARCHITECTURE.md`, "Exclusivity";
-  the mechanism is offset validation plus a volume re-enumeration immediately
-  before each write, not `FSCTL_LOCK_VOLUME`.
-- Bind selection to GPT disk GUID + unique partition GUID + offset/length +
-  physical sector geometry + device model/serial/storage ID. Refuse missing or
-  ambiguous identity, cloned GUIDs and duplicate IDs. Re-resolve after reboot or
-  enumeration changes; never persist PhysicalDrive indices as authority.
-- Show a plain-language review identifying size, filesystem label (verified
-  absent for all-zero content), GPT name, model, serial, GUID and extent. Include
-  an independently identified shared Windows ESP and an exact list of new files
-  and boot variables. Example: "Write the verified Rime OS filesystem to the
-  selected 100 GB partition, filesystem label: none, on MODEL / SERIAL. Add the
-  listed Rime boot files to this shared Windows ESP. Windows remains the default."
-  The real values, byte counts, digest and paths must replace every placeholder.
-- Require explicit final confirmation tied to the plan and a fresh all-zero scan
-  under the held handle/lock. A changed identity, layout or precondition
-  invalidates consent. No API accepts a reusable `is_empty=true` boolean.
-- Confine writes to that one verified root extent; validate every offset/length,
-  never rewrite GPT/MBR, flush and read back the deployed image. Report a
-  partial failure as incomplete; retries cannot bypass emptiness by assuming old
-  writes are ours. Recovery needs a separately reviewed transaction protocol.
-
-### Shared Windows ESP: separate, narrow exception
-
-The root emptiness rule never makes an ESP eligible as a root target. The only
-proposed exception to "do not touch other partitions" is the explicitly reviewed,
-additive boot-file transaction on the shared Windows ESP required by this task.
-No ESP formatting, shrinking, cleanup, fallback replacement, or Microsoft writes.
-
-Stage bootc output privately, then add only verified files in a fresh unique
-`EFI/APEX-<transaction-id>/` namespace using create-new semantics. The shim/GRUB
-chain must first be proven to work there under Secure Boot; do **not** assume
-that copying or renaming `EFI/fedora` is sufficient. If it cannot work there,
-implementation stops. Do not write `EFI/Microsoft`, `EFI/fedora`, `EFI/BOOT`,
-Windows BCD, or existing files even if their hashes match. Check FAT space and
-preserve hashes of every preexisting file. ESP absence/ambiguity, naming
-collisions or concurrent changes refuse. Never assume the ESP is on the root
-disk.
-
-Before mutation, persist a durable transaction journal in explicitly approved
-application storage, with exact ESP identity, new path/hash pairs, firmware
-variable names/attributes/bytes and preconditions. The journal must survive
-power loss; design crash recovery before enabling writes. The default is no
-NVRAM change until a separately reviewed boot-entry step. That step may create
-one unused Boot#### and append its ID at the end of BootOrder, preserving every
-existing ID's position and the Windows default. No BootNext change, no
-reordering, no replacing a prior Rime entry. Read back and verify all firmware
-state. If firmware unexpectedly reorders entries, do not claim success; recovery
-must be proven in VM firmware before this code can ship.
-
-Rollback deletes only journal-owned files/variables whose identities and hashes
-still match and removes only the appended ID when the expected BootOrder matches.
-Never restore an old entire ESP snapshot over later Windows changes. Preserve
-Windows bootability at every interrupted stage; the root partition may remain
-incomplete. Firmware writes are not atomic with FAT writes. That is a release
-blocker requiring fault-injection tests, and an "undo" button does not solve it.
-
-## Review gates before hardware support
-
-- [x] A Windows guest exists, and the binary runs on it. `lab/winlab golden`
-      builds it; `lab/winlab run lab/jobs/survey` points the installer at it.
-- [x] Windows enumeration and ownership, cross-checked against an independent
-      reading of the same GPT bytes, with the two required to agree.
-- [ ] Windows x86_64 static-CRT build and clean-VM execution; Authenticode and
-      supply-chain review; no installer, MSI, drivers or runtime installation.
-      (The build is currently the GNU target, not MSVC, and is unsigned.)
-- [ ] Stable-ID tests with controller order swaps and duplicate/missing serials.
-- [ ] VHDX/VM tests for Windows/system/recovery/ESP refusal, BitLocker, hibernation,
-      Storage Spaces, RAW volumes, 4Kn, short reads, hot unplug and lock failure.
-- [ ] Fuzz/corpus review of GPT parsing, huge/overflowing ranges and concurrent
-      modification; supported layouts expanded only with tests.
-- [ ] Verified all-byte scan and explicit consent immediately before bounded
-      writes; no disk-index authority or automatic "make empty" operation.
-- [ ] Signed immutable payload, geometry, capacity and SELinux/account setup;
-      bootc first boot, upgrade and rollback in a VM, on the one Rime OS image.
-- [ ] Secure Boot/MOK and isolated bootloader namespace proven; all preexisting
-      ESP bytes and Windows entry/order preserved through success and failures.
-- [ ] Durable journal, additive-only rollback, cancellation/power-loss recovery
-      and full Windows boot tests at every write boundary.
-- [ ] Independent human review before any future hardware deployment. All
-      development/testing remains VHDX, VM or regular image files only.
-
-## Primary API references
-
-- [bootc installation requires a Linux host kernel](https://bootc.dev/bootc/bootc-install.html)
-- [Externally prepared filesystem installation](https://bootc.dev/bootc/man/bootc-install-to-filesystem.8.html)
-- [Windows partition layout query](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-ioctl_disk_get_drive_layout_ex)
-- [Volume locking](https://learn.microsoft.com/en-us/windows/win32/api/winioctl/ni-winioctl-fsctl_lock_volume)
-- [Firmware variable writes and required privilege](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-setfirmwareenvironmentvariableexw)
-
-These establish available APIs, not proof that the proposed transaction is safe.
+History: `PAUSED.md` (why this stopped on 2026-09-21 and was resumed on
+2026-10-08), `VALIDATION.md` (what was measured, with transcripts).

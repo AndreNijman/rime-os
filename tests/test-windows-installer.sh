@@ -59,27 +59,36 @@ ok()     { printf 'PASS  %s\n' "$1"; pass=$((pass+1)); }
 bad()    { printf 'FAIL  %s\n' "$1"; fail=$((fail+1)); }
 nogo()   { printf 'COULD-NOT-RUN  %s\n' "$1"; cannot=$((cannot+1)); }
 
-# ── 0. the source may not contain a write API ────────────────────────────────
-#  "This build cannot write to a disk" is a claim worth making mechanically
-#  rather than in a comment.
-#
-#  Part one is a denylist of names. Part two exists because a denylist of names
-#  is not enough: `DeviceIoControl` takes an arbitrary u32, the control codes
-#  are hand-written hex, and `IOCTL_DISK_SET_DRIVE_LAYOUT_EX` is 0x0007C054 —
-#  a number, which no name-based grep will ever see. So part two is an
-#  ALLOWLIST: every IOCTL/FSCTL constant declared in the source must be one of
-#  the five read-side codes below, and none may be passed as a bare literal.
-#  It fails both ways — a new code, or a code that stops being declared.
+# ── 0. every write lives in ONE file, and only the writes it declares ───────
+#  "What can this program change?" must be answerable by reading one file.
+#  Part one: the Win32 write APIs may appear in src/winwrite.rs and nowhere
+#  else. Part two exists because names are not enough: `DeviceIoControl`
+#  takes an arbitrary u32, and IOCTL_DISK_SET_DRIVE_LAYOUT_EX is 0x0007C054,
+#  a number no name-based grep will ever see. So every IOCTL/FSCTL constant
+#  in the source must be on an ALLOWLIST (the five read-side codes, plus
+#  IOCTL_DISK_UPDATE_PROPERTIES in winwrite.rs only), and none may be passed
+#  as a bare literal. Part three does the same for firmware variables:
+#  SetFirmwareEnvironmentVariable takes any name, so the names it is given
+#  must be BootOrder, BootNext or a Boot#### made by option_name(), and
+#  nothing else. Each part fails both ways: a new code, name or file, or one
+#  that stops being declared.
+W=windows-installer/src
 writers=0
 for api in GENERIC_WRITE GENERIC_ALL FILE_WRITE_DATA WriteFile \
-           SetFirmwareEnvironmentVariable SetEndOfFile \
-           DeleteFile MoveFile CreateDirectory RemoveDirectory SetFileAttributes; do
-    if grep -rqn --include='*.rs' "\\b$api" windows-installer/src/; then
-        bad "the source contains $api — this build claims to write nothing"
+           SetFirmwareEnvironmentVariable SetEndOfFile FlushFileBuffers \
+           DeleteFile MoveFile SetFileAttributes ExitWindowsEx; do
+    hits="$(grep -rln --include='*.rs' "\\b$api" "$W" | grep -v "^$W/winwrite.rs$" || true)"
+    if [ -n "$hits" ]; then
+        bad "$api appears outside src/winwrite.rs: $hits"
         writers=$((writers+1))
     fi
 done
-[ "$writers" = 0 ] && ok "no disk, file or firmware WRITE API appears in the source by name"
+[ "$writers" = 0 ] && ok "every disk, firmware and restart write API is confined to src/winwrite.rs"
+if grep -q 'SetFirmwareEnvironmentVariableExW' "$W/winwrite.rs" && grep -q 'fn permitted' "$W/winwrite.rs"; then
+    ok "winwrite.rs still declares the firmware write and the disk writer's range check"
+else
+    bad "winwrite.rs lost the firmware write or the range check the gate reasons about"
+fi
 
 #  CTL_CODE(DeviceType, Function, Method, Access):
 #    0x00070000  IOCTL_DISK_GET_DRIVE_GEOMETRY
@@ -87,22 +96,50 @@ done
 #    0x0007405c  IOCTL_DISK_GET_LENGTH_INFO
 #    0x002d1400  IOCTL_STORAGE_QUERY_PROPERTY
 #    0x00560000  IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
-declared="$(grep -rhoE 'const (IOCTL|FSCTL)_[A-Z_0-9]+: u32 = 0x[0-9A-Fa-f_]+' \
-              windows-installer/src/ | sed 's/.*= //' | tr -d '_' |
-            tr '[:upper:]' '[:lower:]' | sort -u)"
-allowed="$(printf '0x00070000\n0x00070050\n0x0007405c\n0x002d1400\n0x00560000\n' | sort)"
+#    0x00070140  IOCTL_DISK_UPDATE_PROPERTIES   (winwrite.rs only)
+declared="$(grep -rhoE 'const (IOCTL|FSCTL)_[A-Z_0-9]+: u32 = 0x[0-9A-Fa-f_]+' "$W" |
+            sed 's/.*= //' | tr -d '_' | tr '[:upper:]' '[:lower:]' | sort -u)"
+allowed="$(printf '0x00070000\n0x00070050\n0x0007405c\n0x002d1400\n0x00560000\n0x00070140\n' | sort)"
 unexpected="$(comm -23 <(printf '%s\n' "$declared") <(printf '%s\n' "$allowed"))"
+missing="$(comm -13 <(printf '%s\n' "$declared") <(printf '%s\n' "$allowed"))"
 if [ -n "$unexpected" ]; then
-    bad "an IOCTL/FSCTL code outside the read-only allowlist is declared: $(echo $unexpected)"
-elif [ -z "$declared" ]; then
-    bad "no IOCTL constants found at all — the allowlist check is inspecting nothing"
+    bad "an IOCTL/FSCTL code outside the allowlist is declared: $(echo $unexpected)"
+elif [ -n "$missing" ]; then
+    bad "an allowlisted IOCTL is no longer declared ($(echo $missing)); update the allowlist deliberately"
 else
-    ok "every declared IOCTL code ($(printf '%s\n' "$declared" | wc -l)) is on the read-only allowlist"
+    ok "every declared IOCTL code ($(printf '%s\n' "$declared" | wc -l)) is on the allowlist"
 fi
-if grep -rqnE '\.ioctl\(\s*0x' windows-installer/src/; then
+if grep -rlE 'IOCTL_DISK_UPDATE_PROPERTIES' "$W" | grep -qv "^$W/winwrite.rs$"; then
+    bad "IOCTL_DISK_UPDATE_PROPERTIES appears outside winwrite.rs"
+else
+    ok "the one write-side IOCTL is confined to winwrite.rs"
+fi
+if grep -rqnE '\.ioctl\(\s*0x|DeviceIoControl\([^,]+,\s*0x' "$W"; then
     bad "an IOCTL code is passed as a bare numeric literal, bypassing the allowlist"
 else
     ok "no IOCTL code is passed as a bare numeric literal"
+fi
+vars="$(grep -oE 'pub const VAR_[A-Z_]+: &str = "[A-Za-z]+"' "$W/winwrite.rs" | sed 's/.*= "//; s/"//' | LC_ALL=C sort | tr '\n' ' ')"
+if [ "$vars" = "BootCurrent BootNext BootOrder " ]; then
+    ok "the firmware variable names winwrite.rs declares are exactly BootOrder, BootNext, BootCurrent"
+else
+    bad "firmware variable names changed: '$vars'"
+fi
+calls="$(grep -E 'set_var\(' "$W/winwrite.rs" | grep -v 'fn set_var' | grep -oE 'set_var\([^,]+' | sed 's/set_var(//' | LC_ALL=C sort -u | tr '\n' ' ')"
+if [ "$calls" = "&crate::bootentry::option_name(n) VAR_BOOT_NEXT VAR_BOOT_ORDER " ]; then
+    ok "firmware writes go only to BootOrder, BootNext and Boot#### from option_name()"
+else
+    bad "a firmware write names something else: '$calls'"
+fi
+if grep -rqnE '"(PK|KEK|db|dbx|SetupMode|SecureBoot|OsIndications|MokList[A-Za-z]*|Driver[0-9A-F]{4}|SysPrep[0-9A-F]{4})"' "$W"; then
+    bad "the source names a firmware variable outside the boot-entry allowlist"
+else
+    ok "no Secure Boot, OS-indication or vendor variable is named anywhere"
+fi
+
+if [ "${RIME_WIN_GATE_ONLY:-}" = 1 ]; then
+    printf '\nrime-windows-installer gate: %d passed, %d failed\n' "$pass" "$fail"
+    [ "$fail" -eq 0 ]; exit
 fi
 
 # ── 1. it cross-builds ───────────────────────────────────────────────────────
@@ -148,7 +185,8 @@ if podman run --rm -v "$PWD/windows-installer":/src:ro,z "$IMAGE" bash -euo pipe
         # validator to refuse it. Without mkfs.ext4 that case SKIPS, and a
         # skipped case is the one that would have caught a signature-based
         # shortcut creeping into the content scan.
-        dnf install -y -q --setopt=install_weak_deps=False rust cargo python3 e2fsprogs >/dev/null
+        dnf install -y -q --setopt=install_weak_deps=False rust cargo python3 e2fsprogs \
+            util-linux gdisk dosfstools 7zip >/dev/null
         cp -r /src /build && cd /build
         cargo test --offline --locked 2>&1
         cargo build --offline --locked 2>&1
@@ -191,7 +229,10 @@ podman run --rm -v "$OUT":/exe:ro,z "$IMAGE" bash -c '
     dnf install -y -q --setopt=install_weak_deps=False wine >/dev/null 2>&1 \
         || { echo "RIME_WINE_UNAVAILABLE"; exit 0; }
     export WINEDEBUG=-all WINEPREFIX=/tmp/wineprefix
-    wine /exe/rime-windows-installer.exe >/tmp/out 2>/tmp/err
+    # With no arguments the program opens its window, which a headless wine
+    # cannot show; an unknown command is the scriptable way to reach the
+    # same entry point and its words.
+    wine /exe/rime-windows-installer.exe no-such-command >/tmp/out 2>/tmp/err
     echo "RIME_RC=$?"
     echo "RIME_STDOUT_BEGIN"; cat /tmp/out
     echo "RIME_STDERR_BEGIN"; cat /tmp/err
@@ -205,9 +246,9 @@ if grep -q RIME_WINE_UNAVAILABLE "$run_out"; then
 else
     rc_line="$(grep -m1 '^RIME_RC=' "$run_out" | cut -d= -f2)"
     if [ "$rc_line" = 1 ]; then
-        ok "running it with no arguments exits 1"
+        ok "an unknown command exits 1"
     else
-        bad "expected exit 1 with no arguments, got '${rc_line:-none}'"
+        bad "expected exit 1 for an unknown command, got '${rc_line:-none}'"
     fi
 
     # The discriminator: our text, not wine's.
@@ -218,11 +259,11 @@ else
         sed -n '1,12p' "$run_out" | sed 's/^/        /'
     fi
 
-    # It must keep saying what it will not do.
-    if grep -q 'installation and firmware changes are disabled' "$run_out"; then
-        ok "it still declares that installation and firmware changes are disabled"
+    # It must keep saying which commands change anything.
+    if grep -q 'Nothing is written to a disk or a firmware variable except by install' "$run_out"; then
+        ok "it states which commands write, and that install waits for confirmation"
     else
-        bad "the read-only disclaimer is gone from the binary's output"
+        bad "the statement of what writes is gone from the binary's output"
     fi
 
     # The Windows-only code path is now compiled in, so `survey` reaches real

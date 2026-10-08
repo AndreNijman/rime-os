@@ -149,6 +149,51 @@ of the design:
    that is the first thing it needs. This project has measured PCR 0, 7 and 11
    in detail and has never looked at 5.
 
+### Measured 2026-10-08 (the Windows installer, resumed)
+
+Answers to the five items above, from `windows-installer/lab/install-e2e`
+(Windows Server 2022, OVMF with Secure Boot on and Microsoft's keys) and
+`windows-installer/tests/staged-boot.sh` (Windows-shaped disk images).
+Transcripts in `windows-installer/VALIDATION.md`.
+
+1. **Two ESPs on one GPT disk: yes.** The firmware started Rime's setup
+   loader from Rime's ESP (partition 4, after Windows' at 1) through an
+   explicit `Boot####` + `BootNext`, under Secure Boot, and later the
+   installed "Rime OS" entry from the same ESP.
+2. **Windows tolerates it:** Windows started again from its own boot manager
+   after Rime was installed and ran its job; `chkdsk C: /scan` clean. Windows
+   gives the second ESP a volume but no drive letter. (Feature updates,
+   repair installs and `bcdboot` are still unmeasured.)
+3. **bootupd does NOT stay on the mounted ESP**, for the firmware entry, and
+   re-discovers on every update. Read at bootupd 0.3.2 /
+   bootc-internal-blockdev 1.16.10: files go to whatever vfat is mounted at
+   `<root>/boot/efi`, but `update_firmware()` passes
+   `get_esp_partition_number()` (the first ESP-typed child of the disk) to
+   `efibootmgr --create`, and `run_update()` uses `find_colocated_esps()`
+   (the first per disk) unless an ESP is already mounted at /boot/efi.
+   `installer/rime-install` therefore removes other ESPs from the kernel's
+   partition list (BLKPG, not the disk) for the bootloader step, and writes
+   an fstab line mounting Rime's ESP at /boot/efi plus a
+   bootloader-update.service drop-in that refuses to run without it.
+4. **Windows' partitions byte-identical:** every Windows partition (ESP, MSR,
+   C:, recovery) hashed identical before staging, after staging and after the
+   whole Rime install, on the disk images; on the Windows guest, Windows' ESP
+   holds no Rime file afterwards (its BCD changes on every Windows boot, as
+   recorded above, so its bytes are not the test there).
+5. **PCR 5:** read, never assumed: `Win32_EncryptableVolume`'s
+   `GetKeyProtectorPlatformValidationProfile` for each TPM protector of C:.
+   Where it binds PCR 5 (or cannot be read), protection is suspended for one
+   restart before the table changes. Separately and more often relevant:
+   starting Windows through shim + GRUB changes **PCR 7**, which BitLocker's
+   default profile binds, so on BitLocker machines Rime's menu does not
+   offer Windows at all.
+
+The tension with the systemd-boot decision is unchanged and stated: the
+installer installs what `rime-install` installs today (GRUB via bootupd). The
+new ESP is sized with ~0.5 GiB to spare, which the 350 MiB systemd-boot
+layout fits; `rime-boot-migrate` still uses the first ESP on a disk and has
+to learn Rime's own before it may run on a dual-boot disk.
+
 ## Bounds that do not change
 
 - The Windows ESP is **read-only, always**. There is no flag that makes it

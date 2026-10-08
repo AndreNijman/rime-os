@@ -27,6 +27,10 @@
 #
 #      windows-installer/build-windows.sh [OUTDIR]
 #
+#  The installer image the .exe installs from is fixed at compile time
+#  (src/pin.rs). Set RIME_ISO_URL, RIME_ISO_BYTES and RIME_ISO_SHA256 to bake
+#  one in; without them the .exe builds and runs, and refuses to install.
+#
 #  Writes rime-windows-installer.exe into OUTDIR (default ./dist). Prints the
 #  produced file's type, because "the build exited 0" and "a PE32+ binary
 #  exists" are different claims and only the second one matters.
@@ -50,11 +54,13 @@ mkdir -p "$OUT"
 # read-only on purpose, so a stray `target/` cannot land in the work tree and
 # the host's own build artefacts cannot influence the result.
 podman run --rm \
+    -e RIME_ISO_URL="${RIME_ISO_URL:-}" -e RIME_ISO_BYTES="${RIME_ISO_BYTES:-}" \
+    -e RIME_ISO_SHA256="${RIME_ISO_SHA256:-}" \
     -v "$HERE":/src:ro,z \
     -v "$OUT":/out:z \
     "$IMAGE" bash -euo pipefail -c '
         dnf install -y -q --setopt=install_weak_deps=False \
-            rust cargo mingw64-gcc mingw64-winpthreads-static \
+            rust cargo mingw64-gcc mingw64-winpthreads-static mingw64-binutils \
             rust-std-static-x86_64-pc-windows-gnu >/dev/null
 
         echo "toolchain: $(rustc --version)"
@@ -65,7 +71,9 @@ podman run --rm \
 
         cp -r /src /build
         cd /build
-        cargo build --release --target x86_64-pc-windows-gnu
+        [ -n "$RIME_ISO_SHA256" ] && echo "pinned image: $RIME_ISO_URL ($RIME_ISO_BYTES bytes, sha256 $RIME_ISO_SHA256)" \
+            || echo "no image pinned: this .exe will refuse to install"
+        cargo build --release --locked --offline --target x86_64-pc-windows-gnu
 
         exe=target/x86_64-pc-windows-gnu/release/rime-windows-installer.exe
         test -s "$exe" || { echo "FATAL: no .exe produced" >&2; exit 1; }
