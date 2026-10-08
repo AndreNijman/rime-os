@@ -91,6 +91,9 @@ FAKE
 make_fake gamescope
 make_fake steam
 make_fake mangoapp
+# The session hands the login keyring to itself; the real daemon must never
+# start from a test, so this one only records.
+make_fake gnome-keyring-daemon
 # getcap that reports no file capability: the shipped state of every Rime
 # machine today, and the state §6.2 measured.
 make_fake getcap
@@ -755,6 +758,22 @@ if ! grep -q -- "--switch" "${WORK}/sudo-calls" 2>/dev/null; then
     ok "...and not when a switch is ending the session (it chose where to go)"
 else
     bad "...and not when a switch is ending the session (it chose where to go)" "$(cat "${WORK}/sudo-calls")"
+fi
+
+# ── the login keyring stays unlocked in Gaming Mode ────────────────────────
+section "the login keyring"
+rc="$(run_session "$KATANA")"
+if [ "$(cat "${WORK}/argv-gnome-keyring-daemon" 2>/dev/null)" = "--start --components=secrets" ]; then
+    ok "the session takes over the keyring PAM unlocked (gnome-keyring-daemon --start)"
+else
+    bad "the session takes over the keyring PAM unlocked (gnome-keyring-daemon --start)" \
+        "argv: $(cat "${WORK}/argv-gnome-keyring-daemon" 2>/dev/null)"
+fi
+first="$(grep -n -x -e gnome-keyring-daemon -e gamescope "$CALLS" | head -1)"
+if [ "${first#*:}" = "gnome-keyring-daemon" ]; then
+    ok "...before gamescope and Steam start"
+else
+    bad "...before gamescope and Steam start" "calls: $(tr '\n' ' ' < "$CALLS")"
 fi
 
 printf '\nrime-gaming-session: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
