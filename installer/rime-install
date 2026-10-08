@@ -562,6 +562,32 @@ live_esp_readonly() {
     || log "live ESP: could not return /run/initramfs/live to read-only (its FAT dirty flag stays set until the next clean mount)"
 }
 
+# The live environment the Windows app staged on Rime's ESP (1.8 GB) is
+# deleted by the installed system on its first boot, once nothing runs from
+# it. A oneshot with a path condition: after it has run once it never runs
+# again, and on a machine that was not installed from Windows it never runs.
+install_staged_cleanup_in() {  # $1 = deployment root
+  local d="$1"
+  [ "$ESP_IS_LIVE" = 1 ] || return 0
+  mkdir -p "$d/etc/systemd/system/multi-user.target.wants"
+  cat >"$d/etc/systemd/system/rime-staged-cleanup.service" <<'UNIT'
+# Rime OS: written by the installer on a machine installed from Windows.
+[Unit]
+Description=Remove the installer Rime OS was set up from
+RequiresMountsFor=/boot/efi
+ConditionPathExists=/boot/efi/rimeinst/handoff.cfg
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/rm -rf /boot/efi/rimeinst /boot/efi/EFI/rimeinst
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  ln -sf ../rime-staged-cleanup.service "$d/etc/systemd/system/multi-user.target.wants/rime-staged-cleanup.service"
+  log "handoff: the installed system removes the staged installer from its ESP on first boot"
+}
+
 # A boot menu entry for Windows. Rime's GRUB (bootupd's static config) sources
 # $prefix/custom.cfg, which lives on Rime's own root filesystem and is owned
 # by no package, so an update never rewrites it. Without it, a machine that
@@ -3191,6 +3217,7 @@ rm -f "$deploy/etc/.rime-write-probe" 2>/dev/null || true
 create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 if [ "$INSTALL_MODE" = partition ]; then
   configure_own_esp_in "$deploy"
+  install_staged_cleanup_in "$deploy"
   add_windows_entry "$MNT"
 fi
 copy_network_to "$deploy"
@@ -3386,13 +3413,10 @@ if [ "$ESP_IS_LIVE" = 1 ] && [ -f /run/initramfs/live/rimeinst/handoff.cfg ]; th
   else
     log "handoff: setup entry ${_bn:-?} not found or not ours; left alone"
   fi
-  # The squashfs is still loop-mounted; unlinking it is safe on Linux (the
-  # clusters are freed when the session ends).
-  mount -o remount,rw /run/initramfs/live >>"$LOG" 2>&1 || true
-  rm -rf /run/initramfs/live/rimeinst /run/initramfs/live/EFI/rimeinst >>"$LOG" 2>&1 \
-    && log "handoff: removed the staged live environment from $ESP_DEV" \
-    || log "handoff: could not remove the staged files from $ESP_DEV (they only take space)"
-  live_esp_readonly
+  # The staged files themselves are NOT deleted here: this session runs from
+  # the squashfs among them, and a file deleted while open keeps the ESP from
+  # going back to read-only, which leaves its FAT marked dirty. The installed
+  # system deletes them on its first boot (install_staged_cleanup_in).
 fi
 log "install complete"
 write_result ok ""
