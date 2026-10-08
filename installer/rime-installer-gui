@@ -189,6 +189,82 @@ def find_esp(disk):
     return ""
 
 
+# ── An install the Windows app staged ───────────────────────────────────────
+# rime-windows-installer creates two partitions in free space it was shown
+# (Rime's own ESP and an empty Linux root), copies this live environment onto
+# the ESP and boots it once. It leaves this file beside the live files, naming
+# both partitions by PARTUUID: names like /dev/nvme0n1p5 are not known on the
+# Windows side, and would not be stable if they were. The file carries no
+# secrets; the account is created on the pages below, never in Windows.
+#
+# Everything in it is CHECKED here, not trusted: a partition it names must
+# exist, both must be on one disk whose GPT disk GUID it also names, the ESP
+# must be the medium this session booted from, and the root must still be an
+# empty Linux-typed partition. The engine re-runs its own guards on top.
+HANDOFF = os.environ.get("RIME_HANDOFF_FILE", "/run/initramfs/live/rimeinst/handoff.cfg")
+LIVE_MOUNT = "/run/initramfs/live"
+GPT_LINUX = "0fc63daf-8483-4772-8e79-3d69d8477de4"
+GPT_ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+GUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def read_handoff():
+    """(handoff dict, "") when a staged install is valid; (None, reason) when a
+    hand-off file exists but cannot be used; (None, "") when there is none."""
+    if not os.path.exists(HANDOFF):
+        return None, ""
+    try:
+        with open(HANDOFF, encoding="ascii") as f:
+            text = f.read(8192)
+    except (OSError, UnicodeDecodeError) as e:
+        return None, f"the hand-off file could not be read ({e})"
+    kv = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        k, sep, v = line.partition("=")
+        if not sep:
+            return None, "the hand-off file has a malformed line"
+        kv[k.strip()] = v.strip().lower()
+    if kv.get("version") != "1":
+        return None, f"unsupported hand-off version {kv.get('version')!r}"
+    for key in ("esp_partuuid", "root_partuuid", "disk_guid"):
+        if not GUID_RE.fullmatch(kv.get(key, "")):
+            return None, f"the hand-off file has no valid {key}"
+    devs = {}
+    for key in ("esp_partuuid", "root_partuuid"):
+        link = f"/dev/disk/by-partuuid/{kv[key]}"
+        if not os.path.exists(link):
+            return None, f"no partition with PARTUUID {kv[key]} is visible"
+        dev = os.path.realpath(link)
+        rc, out = run(["lsblk", "-bdnP", "-o", "NAME,PKNAME,TYPE,PARTTYPE,PTUUID,FSTYPE,SIZE", dev])
+        f = dict(re.findall(r'([A-Z:]+)="([^"]*)"', out))
+        if rc != 0 or f.get("TYPE") != "part" or not f.get("PKNAME"):
+            return None, f"{dev} is not a partition"
+        devs[key] = (dev, f)
+    esp, ef = devs["esp_partuuid"]
+    root, rf = devs["root_partuuid"]
+    if ef["PKNAME"] != rf["PKNAME"]:
+        return None, "the two partitions are on different disks"
+    if ef.get("PTUUID", "").lower() != kv["disk_guid"]:
+        return None, "the disk's GUID is not the one the Windows app prepared"
+    if ef.get("PARTTYPE", "").lower() != GPT_ESP_TYPE:
+        return None, f"{esp} is not an EFI System Partition"
+    if rf.get("PARTTYPE", "").lower() != GPT_LINUX:
+        return None, f"{root} is not a Linux partition"
+    rc, src = run(["findmnt", "-rno", "SOURCE", LIVE_MOUNT])
+    if os.environ.get("RIME_HANDOFF_FILE") is None and src.strip() != esp:
+        return None, f"this session did not start from {esp}"
+    rc, mnt = run(["findmnt", "-rno", "TARGET", "-S", root])
+    if mnt.strip():
+        return None, f"{root} is mounted"
+    if rf.get("FSTYPE"):
+        return None, f"{root} already holds a {rf['FSTYPE']} filesystem"
+    return {"disk": f"/dev/{ef['PKNAME']}", "esp": esp, "target": root,
+            "size": int(rf.get("SIZE") or 0)}, ""
+
+
 CONTAINER_FS = {"LVM2_member", "crypto_LUKS", "linux_raid_member",
                 "ddf_raid_member", "isw_raid_member", "zfs_member", "bcache"}
 
@@ -671,6 +747,8 @@ class Installer(Adw.Application):
         self.disk = None
         self.target = None
         self.esp = ""
+        self.staged = None
+        self.staged_error = ""
         self.proc = None
         # None means "whatever GTK returns". Set to RESTART_RC by the keyboard
         # page to ask rime-installer-session for a new compositor; see there.
@@ -761,6 +839,12 @@ class Installer(Adw.Application):
                         else "welcome")
         start = os.environ.get("RIME_GUI_PAGE", default_page)
         self.attach = False
+        self.staged, self.staged_error = read_handoff()
+        if self.staged:
+            self.disk = self.staged["disk"]
+            self.target = self.staged["target"]
+            self.esp = self.staged["esp"]
+            self.answers["mode"] = "partition"
         if "RIME_GUI_PAGE" in os.environ:
             # Test affordance: the suites render a page directly and supply
             # the state an earlier page would have chosen.
@@ -793,6 +877,12 @@ class Installer(Adw.Application):
 
     def go(self, name):
         """Rebuild on entry — every page reflects state chosen on earlier pages."""
+        # On an install the Windows app staged, the disk, the mode and the
+        # partition were chosen in Windows, and a different choice here could
+        # only point at partitions the app did not prepare. The pages are
+        # skipped; the confirm page still shows the whole disk.
+        if self.staged and name in ("disk", "mode", "part"):
+            name = "account"
         page = self.builders[name]()
         old = self.stack.get_child_by_name(name)
         if old:
@@ -908,10 +998,13 @@ class Installer(Adw.Application):
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
         inner.set_margin_top(SP * 5); inner.set_margin_bottom(SP * 5)
         inner.set_margin_start(SP * 5); inner.set_margin_end(SP * 5)
+        where = ("The space was chosen in Windows; nothing else on the disk changes."
+                 if self.staged else
+                 "Choose a disk, or a single partition to install alongside another OS.")
         for line in (
             "Choose your keyboard, so the password you set is the one you typed.",
             "Connect to Wi-Fi so the installed system has network on first boot.",
-            "Choose a disk, or a single partition to install alongside another OS.",
+            where,
             "Create your account — no locked-out first boot.",
             "Review exactly what will be erased, then confirm.",
         ):
@@ -920,6 +1013,15 @@ class Installer(Adw.Application):
             r.append(lbl(line, "rime-dim"))
             inner.append(r)
         card.append(inner)
+        if self.staged:
+            body.append(lbl("Prepared in Windows: Rime OS goes into the space you chose "
+                            f"there ({self.staged['target']}). Windows is not touched.",
+                            "rime-accent"))
+        elif self.staged_error:
+            body.append(lbl("This installer was started from Windows, but the space "
+                            f"prepared there cannot be used: {self.staged_error}. "
+                            "Restart into Windows and run the Rime installer again.",
+                            "rime-danger"))
         body.append(card)
         body.append(lbl("Nothing on any disk is touched until the confirmation step.",
                         "rime-dim"))
@@ -1595,6 +1697,11 @@ class Installer(Adw.Application):
                 self.go("secureboot" if self.sb_offer() else "confirm")
 
         back = "part" if self.answers["mode"] == "partition" else "mode"
+        if self.staged:
+            back = "wifi"
+            if getattr(self, "_disk_error", ""):
+                body.prepend(lbl(self._disk_error, "rime-danger"))
+                self._disk_error = ""
         return self.frame("STEP 6 OF 7", "Create your account", None,
                           self.scrolled(body),
                           [(self.btn("Back", "rime-ghost", lambda *_: self.go(back)), False),
@@ -1958,7 +2065,7 @@ class Installer(Adw.Application):
             keep_esp = (mode == "partition" and p["dev"] == self.esp)
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP * 3)
             if keep_esp:
-                verdict, css = "SHARED", "rime-accent"
+                verdict, css = ("RIME ESP" if self.staged else "SHARED"), "rime-accent"
             elif dying:
                 verdict, css = "ERASED", "rime-danger"
             else:

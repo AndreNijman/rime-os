@@ -206,6 +206,59 @@ pub fn assess(p: &PartitionFacts, claims: &[Claim]) -> Verdict {
     Verdict::ContentCheckAllowed
 }
 
+/// Which filesystem, volume or container signature, if any, sits at the
+/// start, at 64 MiB, or at the end of a partition. `first` is its first MiB,
+/// `at64` the 64 KiB from 64 MiB on (empty when the partition is smaller),
+/// `last` its last MiB.
+///
+/// This is how "empty" is decided for a partition the user offers, and it is
+/// deliberately not "every byte is zero". A partition made by shrinking C:
+/// and creating a new one sits on clusters NTFS used a minute ago, so an
+/// all-zero rule refuses nearly every real partition a person would offer,
+/// and teaches them to wipe things. What must never be overwritten is a
+/// filesystem, an encrypted volume or a member of something larger, and each
+/// of those announces itself where blkid looks for it: these are its
+/// offsets for every type it knows that can live on a Windows machine.
+pub fn signature(first: &[u8], at64: &[u8], last: &[u8]) -> Option<&'static str> {
+    let at = |b: &[u8], o: usize, m: &[u8]| b.len() >= o + m.len() && &b[o..o + m.len()] == m;
+    let checks: [(&[u8], usize, &[u8], &'static str); 17] = [
+        (first, 3, b"NTFS    ", "NTFS"),
+        (first, 3, b"-FVE-FS-", "BitLocker"),
+        (first, 3, b"EXFAT   ", "exFAT"),
+        (first, 82, b"FAT32   ", "FAT32"),
+        (first, 54, b"FAT1", "FAT"),
+        (first, 3, b"ReFS", "ReFS"),
+        (first, 0, b"LUKS\xba\xbe", "LUKS"),
+        (first, 0, &[0xfc, 0x4e, 0x2b, 0xa9], "Linux RAID"),
+        (first, 1080, &[0x53, 0xef], "ext2/3/4"),
+        (first, 0, b"XFSB", "XFS"),
+        (first, 4086, b"SWAPSPACE2", "Linux swap"),
+        (first, 536, b"LVM2 001", "LVM"),
+        (first, 32769, b"CD001", "ISO 9660"),
+        (first, 512, b"EFI PART", "a nested GPT"),
+        (first, 1024, b"\x10\x20\xf5\xf2", "F2FS"),
+        (at64, 64, b"_BHRfS_M", "btrfs"),
+        (first, 4096, &[0xfc, 0x4e, 0x2b, 0xa9], "Linux RAID"),
+    ];
+    for (b, o, m, name) in checks {
+        if at(b, o, m) {
+            return Some(name);
+        }
+    }
+    // MD RAID 0.90/1.0 keep their superblock near the END.
+    // Superblocks are 4 KiB aligned there, so only those offsets are read: a
+    // match anywhere in a megabyte of old data would refuse partitions at
+    // random.
+    if last.chunks(4096).any(|c| c.starts_with(&[0xfc, 0x4e, 0x2b, 0xa9])) {
+        return Some("Linux RAID");
+    }
+    // An MBR boot signature with a partition table behind it.
+    if at(first, 510, &[0x55, 0xaa]) && first.len() >= 512 && first[446..510].iter().any(|v| *v != 0) {
+        return Some("a nested partition table");
+    }
+    None
+}
+
 /// The two enumerations must agree. One side is Windows'
 /// `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`; the other is this crate reading the GPT
 /// bytes off the same handle. They are produced by entirely different code
@@ -243,6 +296,44 @@ pub fn human(bytes: u64) -> String {
         u += 1;
     }
     if u == 0 { format!("{bytes} bytes") } else { format!("{v:.1} {}", UNITS[u]) }
+}
+
+/// What to do when there is nowhere to put Rime. Windows' own Disk
+/// Management shrinks a volume safely (it moves files, it knows NTFS); this
+/// program never touches NTFS, so the shrink is the user's, with Windows'
+/// tool, and the installer takes it from there.
+pub const NO_SPACE_HELP: &str = "\
+There is no free space for Rime OS yet. To make some:
+  1. Open Disk Management (right-click Start, then Disk Management).
+  2. Right-click your C: drive and choose Shrink Volume.
+  3. Shrink it by at least 30000 MB (more if you can) and click Shrink.
+  4. Leave the new space Unallocated. Do not create a volume in it.
+  5. Come back here and refresh.";
+
+/// The confirmation for installing into a chosen space. Names the disk by
+/// model, serial and size, never by number (see `confirmation_text`).
+pub fn install_confirmation(disk: &DiskIdentity, what: &str, bytes: u64) -> String {
+    format!(
+        "INSTALL RIME OS -- read this before continuing.\n\n\
+         Rime will be installed into:\n\
+         \x20   {what}\n\
+         \x20   size             {size}\n\
+         \x20   disk             {model}\n\
+         \x20   serial number    {serial}\n\
+         \x20   disk GUID        {dguid}\n\n\
+         This creates two partitions there: Rime's own boot partition and Rime's \
+         system partition. Anything in that space is overwritten. Windows, its \
+         partitions and its boot files are not changed.\n\n\
+         Then the computer starts Rime's installer ONCE, at the next restart, \
+         where you create your account. If you restart and do nothing, nothing \
+         else changes, and Windows starts as before the time after.\n\n\
+         If the disk above is not the one you meant, stop. Disk numbers change \
+         between restarts; the serial number does not.",
+        size = human(bytes),
+        model = if disk.model.is_empty() { "(the disk reports no model)" } else { &disk.model },
+        serial = if disk.serial.is_empty() { "(the disk reports no serial number)" } else { &disk.serial },
+        dguid = disk.gpt_disk_guid,
+    )
 }
 
 /// The words shown on the screen where the user commits.
@@ -488,6 +579,34 @@ mod tests {
                 panic!("non-ASCII {c:?} in text shown to a Windows console:\n{t}");
             }
         }
+    }
+
+    #[test]
+    fn signatures_are_found_where_blkid_looks_and_old_noise_is_not_one() {
+        let mib = || vec![0u8; 1 << 20];
+        assert_eq!(signature(&mib(), &[0; 65536], &mib()), None);
+        let mut f = mib();
+        f[3..11].copy_from_slice(b"NTFS    ");
+        assert_eq!(signature(&f, &[], &mib()), Some("NTFS"));
+        let mut f = mib();
+        f[3..11].copy_from_slice(b"-FVE-FS-");
+        assert_eq!(signature(&f, &[], &mib()), Some("BitLocker"));
+        let mut f = mib();
+        f[1080..1082].copy_from_slice(&[0x53, 0xef]);
+        assert_eq!(signature(&f, &[], &mib()), Some("ext2/3/4"));
+        let mut b = vec![0u8; 65536];
+        b[64..72].copy_from_slice(b"_BHRfS_M");
+        assert_eq!(signature(&mib(), &b, &mib()), Some("btrfs"));
+        let mut l = mib();
+        l[(1 << 20) - 65536..][..4].copy_from_slice(&[0xfc, 0x4e, 0x2b, 0xa9]);
+        assert_eq!(signature(&mib(), &[], &l), Some("Linux RAID"));
+        // The same bytes at an unaligned offset are noise, not a superblock.
+        let mut l = mib();
+        l[1234..1238].copy_from_slice(&[0xfc, 0x4e, 0x2b, 0xa9]);
+        assert_eq!(signature(&mib(), &[], &l), None);
+        let mut f = mib();
+        f[0..6].copy_from_slice(b"LUKS\xba\xbe");
+        assert_eq!(signature(&f, &[], &mib()), Some("LUKS"));
     }
 
     #[test]

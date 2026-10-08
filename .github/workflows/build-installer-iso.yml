@@ -206,9 +206,42 @@ jobs:
             out/*.log
             out/*.err
 
+  windows:
+    # The Windows app installs from exactly this ISO: its URL, size and
+    # SHA-256 are compiled into the .exe (windows-installer/src/pin.rs), so a
+    # release's app and ISO can only ever be used together.
+    name: Build the Windows app for this ISO
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Cross-build, pinned to the ISO
+        env:
+          RIME_ISO_URL: https://github.com/${{ github.repository }}/releases/download/${{ needs.build.outputs.release }}/rime-os-netinstall-x86_64.iso
+          RIME_ISO_BYTES: ${{ needs.build.outputs.bytes }}
+          RIME_ISO_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          windows-installer/build-windows.sh "$RUNNER_TEMP/win"
+          cd "$RUNNER_TEMP/win"
+          sha256sum rime-windows-installer.exe > rime-windows-installer.exe.sha256
+          strings -el rime-windows-installer.exe | grep -qF "$RIME_ISO_SHA256" \
+            || strings rime-windows-installer.exe | grep -qF "$RIME_ISO_SHA256" \
+            || { echo "::error::the .exe does not carry the ISO's SHA-256"; exit 1; }
+      - name: Upload the Windows app
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            ${{ runner.temp }}/win/rime-windows-installer.exe
+            ${{ runner.temp }}/win/rime-windows-installer.exe.sha256
+          if-no-files-found: error
+
   release:
     name: Attest and draft the release
-    needs: [build, boot]
+    needs: [build, boot, windows]
     if: inputs.draft_release && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -221,6 +254,10 @@ jobs:
         with:
           name: iso-production
           path: iso
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: iso
       - name: The digest must already be pinned
         env:
           RELEASE: ${{ needs.build.outputs.release }}
@@ -232,11 +269,13 @@ jobs:
             echo "::error::$IMAGE:netinstall-$RELEASE is '$got', not $DIGEST. Pin it first: gh workflow run pin-netinstall-image.yml -f digest=$DIGEST -f release=$RELEASE"
             exit 1
           fi
-          cd iso && sha256sum -c "$ISO.sha256"
-      - name: Build provenance for the ISO
+          cd iso && sha256sum -c "$ISO.sha256" && sha256sum -c rime-windows-installer.exe.sha256
+      - name: Build provenance for the ISO and the Windows app
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: iso/${{ env.ISO }}
+          subject-path: |
+            iso/${{ env.ISO }}
+            iso/rime-windows-installer.exe
       - name: Draft the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -269,8 +308,15 @@ jobs:
           \`\`\`
 
           The ISO installs image \`$DIGEST\`, pinned as \`netinstall-$RELEASE\`.
+
+          ## Install from Windows, without a USB stick
+
+          \`rime-windows-installer.exe\` puts Rime OS beside Windows: shrink C: in Disk
+          Management, run it, choose the free space, restart. It downloads this release's
+          ISO itself and refuses any file whose SHA-256 is not \`$SHA\`.
           EOF
           gh release create "$RELEASE" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
             --title "Rime OS $RELEASE" --notes-file notes.md \
-            "iso/$ISO" "iso/$ISO.sha256"
+            "iso/$ISO" "iso/$ISO.sha256" \
+            iso/rime-windows-installer.exe iso/rime-windows-installer.exe.sha256
           echo "::notice::draft release $RELEASE created; publish it by hand after reading it"

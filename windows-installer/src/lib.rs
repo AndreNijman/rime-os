@@ -5,9 +5,22 @@
 //! pointed at `\\.\PhysicalDriveN` and its answer is compared against what
 //! Windows itself reports through `IOCTL_DISK_GET_DRIVE_LAYOUT_EX`. Two
 //! independent sources that have to agree is worth more than either alone.
+pub mod bootentry;
+pub mod gptwrite;
+pub mod payload;
+pub mod pin;
 pub mod plan;
+pub mod stage;
+#[cfg(windows)]
+pub mod winwrite;
 #[cfg(windows)]
 pub mod windows;
+#[cfg(windows)]
+pub mod net;
+#[cfg(windows)]
+pub mod winstall;
+#[cfg(windows)]
+pub mod gui;
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -30,6 +43,31 @@ pub fn guid(b: &[u8]) -> String {
     format!("{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         u32le(b), u16::from_le_bytes([b[4],b[5]]), u16::from_le_bytes([b[6],b[7]]),
         b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15])
+}
+/// Bytes from the operating system's CSPRNG: BCryptGenRandom on Windows,
+/// /dev/urandom elsewhere. Partition GUIDs and the FAT volume id come from
+/// here; a predictable partition GUID is a collision waiting for a cloned
+/// disk.
+pub fn random_bytes(n: usize) -> io::Result<Vec<u8>> {
+    let mut b = vec![0u8; n];
+    #[cfg(windows)]
+    windows::random(&mut b)?;
+    #[cfg(not(windows))]
+    File::open("/dev/urandom")?.read_exact(&mut b)?;
+    if n >= 8 && b.iter().all(|v| *v == 0) {
+        return Err(refuse("the random number generator returned zeros"));
+    }
+    Ok(b)
+}
+/// A random (version 4) GUID in the lowercase text form the GPT code takes.
+pub fn random_guid() -> io::Result<String> {
+    let mut b = random_bytes(16)?;
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    Ok(format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    ))
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
@@ -103,7 +141,7 @@ pub fn enumerate(f: &mut File) -> io::Result<Layout> {
 /// the machine it was pointed at. On Windows the length comes from
 /// `IOCTL_DISK_GET_LENGTH_INFO` instead.
 pub fn enumerate_in<R: Read + Seek>(f: &mut R, len: u64) -> io::Result<Layout> {
-    if len < 68 * 512 || len % 512 != 0 { return Err(refuse("invalid image length")); }
+    if len < 68 * 512 || !len.is_multiple_of(512) { return Err(refuse("invalid image length")); }
     let last = len / 512 - 1;
     let mbr = at(f, 0, 512)?;
     // SizeInLBA. UEFI 2.10 table 5.3 says "the size of the disk minus one …

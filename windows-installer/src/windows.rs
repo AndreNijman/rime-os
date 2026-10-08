@@ -101,6 +101,20 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+#[link(name = "bcrypt")]
+unsafe extern "system" {
+    fn BCryptGenRandom(alg: Handle, buf: *mut u8, len: u32, flags: u32) -> i32;
+}
+
+/// BCRYPT_USE_SYSTEM_PREFERRED_RNG: the system's CSPRNG, no handle needed.
+pub fn random(buf: &mut [u8]) -> io::Result<()> {
+    let st = unsafe { BCryptGenRandom(std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32, 2) };
+    if st != 0 {
+        return Err(io::Error::other(format!("BCryptGenRandom failed ({st:#x})")));
+    }
+    Ok(())
+}
+
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
@@ -194,7 +208,7 @@ impl Read for Device {
         if buf.is_empty() {
             return Ok(0);
         }
-        if buf.len() % 512 != 0 {
+        if !buf.len().is_multiple_of(512) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "raw device reads must be a whole number of sectors",
@@ -419,7 +433,7 @@ pub fn layout(dev: &Device) -> io::Result<(String, Vec<WinPartition>)> {
         // real Windows disk, which is a plausible-looking string and exactly
         // the failure mode a byte-offset parser has.
         let name_u16: Vec<u16> =
-            e[72..144].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            e[72..144].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         out.push(WinPartition {
             number: u32at(e, 24),
             offset: u64at(e, 8),
