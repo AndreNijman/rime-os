@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-game-env — the environment Rime gives Steam and its games, in one place.
+#
+#  Usage:
+#    rime-game-env        print KEY=VALUE, one per line, for each variable that
+#                         should change; nothing when the environment is right
+#    rime-game-env -v     the same, plus one line on stderr per reason
+#
+#  It changes nothing itself. Two readers apply what it prints:
+#    /etc/profile.d/rime-game-env.sh   every desktop session. greetd starts a
+#        session as `/bin/sh -c '. /etc/profile; … exec <compositor>'`, so the
+#        compositor, Rime Shell's launcher (desktop-launch.sh), every terminal
+#        and the Steam any of them start inherit it.
+#    /usr/libexec/rime-gamescope-steam   Gaming Mode, which runs Steam itself.
+#  The output is plain KEY=VALUE rather than shell code, so each reader sets it
+#  with its own builtins and nothing is eval'd.
+#
+#  A value the user already set wins. Running it on an environment it already
+#  produced prints nothing, so every new shell can run it again.
+#
+#  ── Knobs ───────────────────────────────────────────────────────────────────
+#    RIME_GAMING_OMM=on               keep opacity micromaps on an older NVIDIA GPU
+#    __GL_SHADER_DISK_CACHE_SIZE      NVIDIA shader cache size per game (12 GB)
+#    RIME_SYSFS                       sysfs root (tests)
+#  RIME_GAMING_OMM is read when this runs: for the desktop that is the session's
+#  start, before ~/.profile, so set it in /etc/environment or with pam_env. For
+#  one game, a Steam launch option overrides either variable, e.g.
+#  `VKD3D_DISABLE_EXTENSIONS= %command%`.
+# ─────────────────────────────────────────────────────────────────────────────
+set -u
+
+verbose=0
+case "${1:-}" in
+    "") ;;
+    -v) verbose=1 ;;
+    *)  printf 'usage: rime-game-env [-v]\n' >&2; exit 2 ;;
+esac
+say() { [ "$verbose" = 1 ] && printf 'rime-game-env: %s\n' "$*" >&2; return 0; }
+
+# ── NVIDIA shader cache size ────────────────────────────────────────────────
+# Steam gives every game its own NVIDIA cache directory and sets
+# __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1, but no size, so the driver's 1 GB
+# default applies; for Mesa it sets MESA_SHADER_CACHE_MAX_SIZE=5G. Once a
+# game's cache is over the limit, new shaders are not kept. Measured on an
+# RTX 3070 Laptop (615.71.09) with THE FINALS, whose cache had reached 2.1 GB:
+# by default every launch preloaded its shaders from scratch (24 % and 26 % of
+# the preload after ~3.5 min, ~3,000-3,500 CPU-seconds each). With 12 GB the
+# preload finished inside 220 s and the next launch used 660 CPU-seconds.
+# Ignored by every other driver.
+if [ -z "${__GL_SHADER_DISK_CACHE_SIZE:-}" ]; then
+    printf '%s\n' "__GL_SHADER_DISK_CACHE_SIZE=12000000000"
+fi
+
+# ── NVIDIA GPUs older than Ada: no opacity micromaps ────────────────────────
+# Measured on an RTX 3070 Laptop (GA104, NVIDIA 615.71.09): since vkd3d-proton
+# 6ef5e11e (in Proton Experimental from 2026-10-01) enables
+# VK_KHR_opacity_micromap whenever DXR is on, Cyberpunk 2077 with ray tracing
+# hangs the GPU while loading (Xid 109) and its watchdog kills it after 120 s.
+# With the extension disabled it runs the benchmark at RT Ultra. Ada (device
+# 0x2600) and later have the micromap hardware and are left alone. Upstream:
+# https://github.com/HansKristian-Work/vkd3d-proton/pull/3362 . Remove this once
+# Proton ships that or an NVIDIA driver fixes the hang.
+#
+# Builtins only: every new shell runs this, so no `cat` per sysfs file.
+nvidia_before_ada() {
+    local dev vendor class id
+    for dev in "${RIME_SYSFS:-/sys}"/bus/pci/devices/*; do
+        read -r vendor 2>/dev/null < "$dev/vendor" || continue
+        [ "$vendor" = 0x10de ] || continue
+        read -r class 2>/dev/null < "$dev/class" || continue
+        case "$class" in 0x03*) ;; *) continue ;; esac
+        read -r id 2>/dev/null < "$dev/device" || continue
+        case "$id" in 0x[0-9a-fA-F]*) ;; *) continue ;; esac
+        [ $(( id )) -lt $(( 0x2600 )) ] && return 0
+    done
+    return 1
+}
+if [ "${RIME_GAMING_OMM:-auto}" != on ] && nvidia_before_ada; then
+    say "NVIDIA GPU older than Ada: opacity micromaps off for Proton games"
+    list="${VKD3D_DISABLE_EXTENSIONS:-}"
+    case ",${list}," in
+        *,VK_KHR_opacity_micromap,*) ;;
+        *$'\n'*) say "VKD3D_DISABLE_EXTENSIONS spans lines: left as it is" ;;
+        *) printf '%s\n' "VKD3D_DISABLE_EXTENSIONS=${list:+${list},}VK_KHR_opacity_micromap" ;;
+    esac
+fi
+exit 0
