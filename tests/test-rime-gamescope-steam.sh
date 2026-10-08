@@ -181,6 +181,14 @@ seen() { env -u DISPLAY "$@" bash "$WRAP" bash -c 'printf %s "${VKD3D_DISABLE_EX
     || bad "no duplicate" "seen: $(seen RIME_SYSFS="$KAT" VKD3D_DISABLE_EXTENSIONS=VK_KHR_opacity_micromap)"
 [ "$(seen RIME_SYSFS="$KAT" RIME_GAMING_OMM=on)" = UNSET ] && ok "RIME_GAMING_OMM=on keeps micromaps on" \
     || bad "RIME_GAMING_OMM=on" "seen: $(seen RIME_SYSFS="$KAT" RIME_GAMING_OMM=on)"
+# ── NVIDIA shader cache size ────────────────────────────────────────────────
+cache_seen() { env -u DISPLAY "$@" bash "$WRAP" bash -c 'printf %s "${__GL_SHADER_DISK_CACHE_SIZE-UNSET}"' 2>/dev/null; }
+[ "$(cache_seen -u __GL_SHADER_DISK_CACHE_SIZE)" = 12000000000 ] \
+    && ok "Steam gets a 12 GB NVIDIA shader cache size" \
+    || bad "NVIDIA shader cache size" "seen: $(cache_seen -u __GL_SHADER_DISK_CACHE_SIZE)"
+[ "$(cache_seen __GL_SHADER_DISK_CACHE_SIZE=3000000000)" = 3000000000 ] \
+    && ok "a size the user set is kept" \
+    || bad "user cache size" "seen: $(cache_seen __GL_SHADER_DISK_CACHE_SIZE=3000000000)"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

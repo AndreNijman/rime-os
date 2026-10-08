@@ -25,6 +25,7 @@
 #    RIME_GAMING_HDR=steam            let Steam's HDR setting through
 #    RIME_GAMING_FORCE_COMPOSITE=0    leave composition to gamescope
 #    RIME_GAMING_OMM=on               keep opacity micromaps on an older NVIDIA GPU
+#    __GL_SHADER_DISK_CACHE_SIZE      NVIDIA shader cache size per game (12 GB)
 #
 #  The guard is the property watcher only: if xprop is missing or the X
 #  server is gone, Steam still starts and nothing else changes.
@@ -35,6 +36,18 @@ log() { printf 'rime-gamescope-steam: %s\n' "$*" >&2; }
 
 HDR_POLICY="${RIME_GAMING_HDR:-off}"
 FORCE_COMPOSITE="${RIME_GAMING_FORCE_COMPOSITE:-1}"
+
+# ── NVIDIA shader cache size ────────────────────────────────────────────────
+# Steam gives every game its own NVIDIA cache directory and sets
+# __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1, but no size, so the driver's 1 GB
+# default applies; for Mesa it sets MESA_SHADER_CACHE_MAX_SIZE=5G. Once a
+# game's cache is over the limit, new shaders are not kept. Measured on katana
+# (RTX 3070 Laptop, 615.71.09) with THE FINALS, whose cache had reached 2.1 GB:
+# by default every launch preloaded its shaders from scratch (24 % and 26 % of
+# the preload after ~3.5 min, ~3,000-3,500 CPU-seconds each). With 12 GB the
+# preload finished inside 220 s and the next launch used 660 CPU-seconds. A
+# value the user already set is left alone. Ignored by every other driver.
+export __GL_SHADER_DISK_CACHE_SIZE="${__GL_SHADER_DISK_CACHE_SIZE:-12000000000}"
 
 set_root() { xprop -root -f "$1" 32c -set "$1" "$2" 2>/dev/null; }
 
