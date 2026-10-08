@@ -2144,12 +2144,16 @@ RUN set -eux; \
     fi; \
     # /var is machine-local and empty in the image; the engine's state and the
     # directory systemd scans for extensions have to be created on first boot.
+    # So does /usr/local/share/applications (= /var/usrlocal/...): it is the
+    # launcher's doorbell (rime-pkg ring_launcher), and a running Shell only
+    # watches the applications directories that existed when it started.
     printf '%s\n' \
         'd /var/lib/extensions 0755 root root -' \
         'd /var/lib/rime 0755 root root -' \
         'd /var/lib/rime/pkg 0700 root root -' \
         'd /var/lib/rime/pkg/local 0700 root root -' \
         'd /var/lib/rime/appimage 0755 root root -' \
+        'd /var/usrlocal/share/applications 0755 root root -' \
         > /usr/lib/tmpfiles.d/rime-pkg.conf; \
     # systemd-sysext.service is what merges the extension at boot. It is enabled
     # by preset today, which is exactly the kind of upstream default that can

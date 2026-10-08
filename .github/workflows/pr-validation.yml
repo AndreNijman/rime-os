@@ -2285,6 +2285,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-firstrun.sh
 
+      # The session launcher's "already running?" check, against real
+      # processes: one that merely mentions the shell must not stop the start
+      # (it left katana with no bar), one that is the shell must.
+      - name: Run shell-launcher assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-shell-autostart.sh
+
       - name: Run input-settings assertions
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-input.sh
@@ -4348,6 +4355,7 @@ jobs:
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \
             tests/test-rime-pkg.sh tests/test-rime-appimage.sh \
             tests/test-rime-firstrun.sh \
+            tests/test-rime-shell-autostart.sh \
             tests/test-labwc-keybinds.sh tests/test-rime-env.sh \
             tests/test-rime-resolve.sh tests/test-rime-blueprint.sh \
             tests/test-rime-modes.sh tests/test-rime-plugin.sh \

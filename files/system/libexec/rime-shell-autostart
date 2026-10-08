@@ -126,8 +126,14 @@ fi
 # `qs ipc -c <dir> call ...` on every popup, so a bare `pgrep -x quickshell`
 # would both miss a running copy started as `qs` and risk matching a transient
 # IPC invocation.
-if pgrep -f "quickshell -c ${SHELL_DIR}" >/dev/null 2>&1 \
-   || pgrep -f "qs -p ${SHELL_DIR}" >/dev/null 2>&1; then
+#
+# ANCHORED to the start of the command line. Unanchored, the pattern matched
+# any process whose arguments merely CONTAIN the text — a `zsh -c '…'` over ssh
+# that mentioned the shell's path, an editor, a grep — and this launcher then
+# skipped the start and left the desktop without a shell (katana, 2026-10-07:
+# about 30 s with no bar during a restart, until it was started again).
+SHELL_RE="^([^ ]*/)?(quickshell|qs) -(c|p) ${SHELL_DIR}/?( |$)"
+if pgrep -f "${SHELL_RE}" >/dev/null 2>&1; then
     log "Rime Shell already running — skipping"
     exit 0
 fi
