@@ -87,6 +87,9 @@ unsafe extern "system" {
     fn SetWindowPos(h: HWND, after: HWND, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
     fn GetSysColorBrush(i: i32) -> HANDLE;
     fn DestroyWindow(h: HWND) -> i32;
+    fn SetFocus(h: HWND) -> HWND;
+    fn IsWindowVisible(h: HWND) -> i32;
+    fn IsWindowEnabled(h: HWND) -> i32;
 }
 #[link(name = "gdi32")]
 unsafe extern "system" {
@@ -131,6 +134,7 @@ const WM_SETFONT: u32 = 0x30;
 const WM_COMMAND: u32 = 0x111;
 const WM_CTLCOLORSTATIC: u32 = 0x138;
 const WM_DPICHANGED: u32 = 0x2E0;
+const DM_GETDEFID: u32 = 0x400;
 const WM_APP_CANDIDATES: u32 = 0x8001;
 const WM_APP_PROGRESS: u32 = 0x8002;
 const WM_APP_DONE: u32 = 0x8003;
@@ -276,6 +280,12 @@ fn fonts(dpi: u32) -> (HANDLE, HANDLE, HANDLE) {
 }
 
 pub fn run() -> ExitCode {
+    // The release build aborts on panic. A window that vanishes without a word
+    // is the worst way for an installer to fail, so say what happened first.
+    std::panic::set_hook(Box::new(|info| {
+        let text = format!("The Rime OS installer hit an internal error and has to close:\n\n{info}\n\nNothing after the last step it reported was done.");
+        unsafe { MessageBoxW(std::ptr::null_mut(), wide(&crlf(&text)).as_ptr(), wide("Rime OS installer").as_ptr(), MB_ICONERROR) };
+    }));
     unsafe {
         let icc = INITCOMMONCONTROLSEX { size: 8, icc: 0x20 | 0x4000 }; // progress, standard
         InitCommonControlsEx(&icc);
@@ -383,6 +393,15 @@ fn preflight() -> Option<String> {
 
 fn with<R>(f: impl FnOnce(&mut Ui) -> R) -> R {
     UI.with(|u| f(u.borrow_mut().as_mut().expect("ui")))
+}
+
+/// For the window procedure, which Windows also calls from INSIDE other
+/// calls: buttons ask their parent for its default button (DM_GETDEFID) while
+/// the window is still being built, and an edit control reports EN_CHANGE
+/// synchronously while a page is filling it. Neither may touch the state
+/// then; `None` means "not now", and the message gets its default answer.
+fn try_with<R>(f: impl FnOnce(&mut Ui) -> R) -> Option<R> {
+    UI.with(|u| u.try_borrow_mut().ok().and_then(|mut g| g.as_mut().map(f)))
 }
 
 fn apply_fonts() {
@@ -534,6 +553,19 @@ fn goto(p: Page) {
             MoveWindow(u.close, r.right - s(24) - 2 * s(110) - s(8), r.bottom - s(24) - s(32), s(110), s(32), 1);
         });
     }
+    // Keyboard focus on the page's primary control, so Enter and Tab work
+    // from the moment a page appears, without reaching for the mouse.
+    with(|u| unsafe {
+        let order = match u.page {
+            Page::Choose => [u.list, u.next, u.back],
+            Page::Confirm => [u.check, u.next, u.back],
+            Page::Done => [u.next, u.close, u.close],
+            _ => [u.next, u.undo, u.close],
+        };
+        if let Some(h) = order.into_iter().find(|h| IsWindowVisible(*h) != 0 && IsWindowEnabled(*h) != 0) {
+            SetFocus(h);
+        }
+    });
     let _ = main;
 }
 
@@ -746,10 +778,10 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
         WM_COMMAND => {
             let id = (w & 0xffff) as u16;
             let code = ((w >> 16) & 0xffff) as u16;
-            let page = with(|u| u.page);
+            let Some(page) = try_with(|u| u.page) else { return 0 };
             match (id, code) {
                 (ID_LIST, LBN_SELCHANGE) => selection_changed(),
-                (ID_CHECK, _) => with(|u| unsafe {
+                (ID_CHECK, _) if page == Page::Confirm => with(|u| unsafe {
                     let on = SendMessageW(u.check, BM_GETCHECK, 0, 0) == 1;
                     enable(u.next, on);
                 }),
@@ -786,6 +818,16 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
             }
             0
         }
+        // IsDialogMessage asks a window for its default button when Enter
+        // is pressed; a plain window answers 0 and Enter does nothing.
+        DM_GETDEFID => {
+            let Some(next) = try_with(|u| u.next) else { return 0 };
+            if unsafe { IsWindowVisible(next) != 0 && IsWindowEnabled(next) != 0 } {
+                ((0x534B_isize) << 16) | ID_NEXT as isize
+            } else {
+                0
+            }
+        }
         WM_APP_CANDIDATES => {
             fill_candidates();
             0
@@ -808,6 +850,9 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
             unsafe {
                 SetWindowPos(h, std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, 0x4 | 0x10);
             }
+            if try_with(|_| ()).is_none() {
+                return 0;
+            }
             with(|u| {
                 unsafe {
                     DeleteObject(u.font);
@@ -825,7 +870,7 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
             0
         }
         WM_CLOSE => {
-            if with(|u| u.busy) {
+            if try_with(|u| u.busy).unwrap_or(false) {
                 message(h, "Please wait: the installer is writing to the disk. Closing now would leave the work half done.", MB_ICONWARNING);
                 return 0;
             }

@@ -151,6 +151,10 @@ out, rc = run("findmnt -rno SOURCE,TARGET /run/initramfs/live")
 check("the live medium is Rime's own ESP", out.split()[0] == esp if out.split() else False, out)
 
 print("installing (downloads Rime OS; this takes a while) ...")
+# A person reaches the install button minutes after boot; a script reaches it
+# in seconds, before NetworkManager has a route. Wait the way a person would.
+out, _ = run("for i in $(seq 1 90); do ip route | grep -q '^default' && break; sleep 2; done; ip route | head -2", timeout=240)
+check("the live session has a network route before the install starts", "default" in out, out)
 if not RESUME:
     run("(/usr/bin/rime-install --headless /run/rime-answers-staged > /run/engine.log 2>&1; echo ENGINE-RC=$? >> /run/engine.log) &")
 end = time.time() + 3600
@@ -172,6 +176,8 @@ out, _ = run(f"mount -o ro {win_esp} /mnt/w && find /mnt/w -maxdepth 3 | sort; u
 check("Windows' ESP holds no Rime boot files", "fedora" not in out.lower() and "rimeinst" not in out.lower(), out)
 out, _ = run("find /run/initramfs/live -maxdepth 3 | sort")
 check("Rime's ESP now holds Rime's bootloader", "/run/initramfs/live/EFI/fedora" in out, out)
+fsck, _ = run(f"findmnt -no OPTIONS /run/initramfs/live; fsck.fat -n {esp} 2>&1 | tail -n 4")
+check("Rime's ESP is back to read-only and its FAT is clean (no dirty flag)", fsck.lstrip().startswith("ro") and "Dirty bit" not in fsck, fsck)
 check("the staged live files were removed after the install", "/run/initramfs/live/rimeinst" not in out and "EFI/rimeinst" not in out, out)
 out, _ = run("efibootmgr -v")
 log.write("\n===== EFIBOOTMGR =====\n" + out)
@@ -184,7 +190,15 @@ out, _ = run(f"mount {target} /mnt/r && d=$(ls -d /mnt/r/ostree/deploy/*/deploy/
 log.write("\n===== INSTALLED CONFIG =====\n" + out)
 check("the installed system mounts Rime's ESP at /boot/efi", f"PARTUUID={espuuid.strip()} /boot/efi" in out, out)
 check("bootloader updates require Rime's ESP to be mounted", "ExecCondition=/usr/bin/mountpoint -q /boot/efi" in out, out)
-check("GRUB offers Windows", "chainloader /EFI/Microsoft/Boot/bootmgfw.efi" in out, out)
+if "--expect-bitlocker" in sys.argv:
+    # Windows uses BitLocker: a GRUB chainload would trip its recovery prompt,
+    # so there must be no Windows entry, and the done text must say where
+    # Windows is started from instead.
+    check("GRUB does NOT offer Windows (BitLocker)", "chainloader" not in out, out)
+    eng, _ = run("cat /run/engine.log")
+    check("the installer tells the user to start Windows from the firmware boot menu", "Windows Boot" in eng and "BitLocker" in eng, eng[-1500:])
+else:
+    check("GRUB offers Windows", "chainloader /EFI/Microsoft/Boot/bootmgfw.efi" in out, out)
 if "--save-mok" in sys.argv:
     # The installed system's Secure Boot key, for a host that wants to boot
     # it with Secure Boot on (enrolling it in db stands in for MokManager).
@@ -196,7 +210,12 @@ if "--save-mok" in sys.argv:
         print(f"saved the installed system's MOK certificate to {dest}")
     except Exception as e:
         print(f"could not save the MOK certificate: {e}")
-run("sync; systemctl poweroff --force --force &", timeout=10) if False else None
+if "--prep-firstboot" in sys.argv:
+    # TEST-ONLY, like the live debug shell: let the lab reach the installed
+    # system's console and a root shell on its first boot.
+    out, _ = run(f"mount {target} /mnt/r && for f in /mnt/r/boot/loader/entries/*.conf; do sed -i '/^options /s/$/ console=ttyS0,115200 systemd.debug_shell=ttyS1/' \"$f\"; done; grep -h '^options' /mnt/r/boot/loader/entries/*.conf; umount /mnt/r", timeout=60)
+    check("the installed system's boot entry was prepared for the lab", "debug_shell=ttyS1" in out, out)
+    print(f"ESP_PARTUUID={espuuid.strip()}")
 send("sync; echo o > /proc/sysrq-trigger\n")
 print(f"{fails} failure(s)")
 sys.exit(1 if fails else 0)

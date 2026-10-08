@@ -80,7 +80,7 @@ import json,sys
 t=json.load(sys.stdin)["partitiontable"]; ps=sorted(t["partitions"],key=lambda p:p["start"])
 a=ps[2]["start"]+ps[2]["size"]; b=ps[3]["start"]-1
 print(f"{a}-{b}")')
-"$BIN" stage-image "$DISK" --iso "$ISO" --space "free:$free" | tee "$WORK/stage.txt"
+"$BIN" stage-image "$DISK" --iso "$ISO" --space "free:$free" ${STAGE_FLAGS:-} | tee "$WORK/stage.txt"
 grep -q STAGED-OK "$WORK/stage.txt"
 BOOTNUM=$(sed -n 's/^BOOTNUM=//p' "$WORK/stage.txt")
 OPT=$(sed -n 's/^LOADOPTION=//p' "$WORK/stage.txt")

@@ -548,6 +548,20 @@ EOF
   log "esp: /boot/efi -> PARTUUID=${uuid:-unknown}; bootloader-update.service requires it"
 }
 
+# Back to read-only, as soon as the writing is done. A FAT filesystem
+# mounted read-write carries a "dirty" flag until it is cleanly unmounted,
+# and the live medium is never unmounted cleanly: the running squashfs is
+# loop-mounted from it until power-off. Left read-write, every install would
+# leave Rime's ESP flagged, and Windows reports it as "Warning". Remounting
+# read-only writes everything back and clears the flag; the cleanup at the
+# end makes it writable for the few seconds it needs.
+live_esp_readonly() {
+  [ "$ESP_IS_LIVE" = 1 ] || return 0
+  sync -f /run/initramfs/live 2>/dev/null || sync
+  mount -o remount,ro /run/initramfs/live >>"$LOG" 2>&1 \
+    || log "live ESP: could not return /run/initramfs/live to read-only (its FAT dirty flag stays set until the next clean mount)"
+}
+
 # A boot menu entry for Windows. Rime's GRUB (bootupd's static config) sources
 # $prefix/custom.cfg, which lives on Rime's own root filesystem and is owned
 # by no package, so an update never rewrites it. Without it, a machine that
@@ -555,9 +569,26 @@ EOF
 # Windows only through the firmware's one-time boot menu. Windows' ESP is
 # mounted READ-ONLY here, to learn its filesystem UUID and to check that its
 # boot manager is really there; nothing on it is opened for writing.
+#
+# NOT on a machine where Windows uses BitLocker (including Windows 11's
+# "Device encryption"). Starting Windows through shim and GRUB measures a
+# different chain of Secure Boot authorities into the TPM's PCR 7 than the
+# firmware starting it directly, BitLocker's default profile binds PCR 7, and
+# every Windows start from this menu would end at the 48-digit recovery-key
+# prompt. The Windows app reads BitLocker's state and says so in the hand-off
+# file (windows_bitlocker=1); there, Windows is started from the firmware's
+# boot menu instead, which measures exactly what it always did.
+WINDOWS_ENTRY=0
+windows_bitlocker() {
+  [ "$ESP_IS_LIVE" = 1 ] && grep -qx 'windows_bitlocker=1' /run/initramfs/live/rimeinst/handoff.cfg 2>/dev/null
+}
 add_windows_entry() {  # $1 = mounted physical root of the new install
   local root="$1" p probe uuid
   [ -d "$root/boot/grub2" ] || return 0
+  if windows_bitlocker; then
+    log "grub: no Windows entry: Windows uses BitLocker, and a GRUB chainload would trip its recovery prompt"
+    return 0
+  fi
   probe=$(mktemp -d)
   for p in $(other_esps); do
     uuid=$(blkid -s UUID -o value "$p" 2>/dev/null || true)
@@ -576,6 +607,7 @@ menuentry 'Windows' --class windows --id windows {
 }
 set timeout=5
 EOF
+        WINDOWS_ENTRY=1
         log "grub: Windows entry added (ESP $p, fs uuid $uuid)"
         break
       fi
@@ -2686,6 +2718,7 @@ if [ "$INSTALL_MODE" = partition ]; then
   fi
   restore_hidden_esps
   release_target_mounts "partition install"
+  live_esp_readonly
 elif [ "$ENCRYPT" = yes ]; then
   # ── encrypted whole disk: partition, LUKS2, then to-filesystem ────────────
   #
@@ -3304,10 +3337,16 @@ keyboard layout is wrong. Keep it somewhere that is not this laptop."
 else
   crypt_extra=""
 fi
-if [ "$ESP_IS_LIVE" = 1 ]; then
+if [ "$ESP_IS_LIVE" = 1 ] && [ "$WINDOWS_ENTRY" = 1 ]; then
   done_extra="Installed into $TARGET, beside Windows; Windows' own partitions were not touched.
 Restart, and Rime OS starts. To start Windows, choose Windows in the menu that
 shows for five seconds at power-on."
+elif [ "$ESP_IS_LIVE" = 1 ]; then
+  done_extra="Installed into $TARGET, beside Windows; Windows' own partitions were not touched.
+Restart, and Rime OS starts. To start Windows, open your computer's boot menu
+while it powers on (usually F12, F11, F9 or Esc) and choose Windows Boot
+Manager. Windows uses BitLocker, so it is started from there rather than from
+Rime's menu, which would make it ask for the recovery key."
 elif [ "$INSTALL_MODE" = partition ]; then
   done_extra="Installed into $TARGET; the other partitions on $DISK were not touched.
 
@@ -3349,10 +3388,11 @@ if [ "$ESP_IS_LIVE" = 1 ] && [ -f /run/initramfs/live/rimeinst/handoff.cfg ]; th
   fi
   # The squashfs is still loop-mounted; unlinking it is safe on Linux (the
   # clusters are freed when the session ends).
+  mount -o remount,rw /run/initramfs/live >>"$LOG" 2>&1 || true
   rm -rf /run/initramfs/live/rimeinst /run/initramfs/live/EFI/rimeinst >>"$LOG" 2>&1 \
     && log "handoff: removed the staged live environment from $ESP_DEV" \
     || log "handoff: could not remove the staged files from $ESP_DEV (they only take space)"
-  sync -f /run/initramfs/live 2>/dev/null || sync || true
+  live_esp_readonly
 fi
 log "install complete"
 write_result ok ""

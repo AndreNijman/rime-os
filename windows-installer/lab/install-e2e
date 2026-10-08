@@ -35,10 +35,14 @@ mkdir -p "$W"
 say() { printf '\n══ %s ══ %s\n' "$*" "$(date +%T)"; }
 lab() { podman run --rm --device /dev/kvm -v "$W":/w:z -v "$DIR":/g:ro,z -v "$HERE":/lab:ro,z "$@"; }
 
-say "prepare: overlay on the golden Windows, its firmware, the transport and the image disk"
+say "prepare: a copy of the golden Windows, its firmware, the transport and the image disk"
+# A reflinked raw copy rather than a qcow2 overlay: the host has to read
+# Windows' ESP between boots, and add the test-only kernel argument below to
+# the staged grub.cfg, and mtools reads and writes raw images only.
+rm -f "$W/sys.raw"
+cp --reflink=auto --sparse=always "$DIR/golden.raw" "$W/sys.raw"
 lab -v "$ISO":/iso:ro,z -v "$EXE":/x/rime-windows-installer.exe:ro,z "$IMAGE" bash -euo pipefail -c '
-  rm -f /w/sys.qcow2 /w/vars.fd /w/transport.raw /w/iso.raw
-  qemu-img create -q -f qcow2 -b /g/golden.raw -F raw /w/sys.qcow2
+  rm -f /w/vars.fd /w/transport.raw /w/iso.raw
   cp /g/golden-VARS.fd /w/vars.fd
   qemu-img create -q -f raw /w/transport.raw 256M
   printf "label: gpt\nsize=250MiB, type=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7, name=APEXLAB\n" | sfdisk -q /w/transport.raw
@@ -55,10 +59,8 @@ lab -v "$ISO":/iso:ro,z -v "$EXE":/x/rime-windows-installer.exe:ro,z "$IMAGE" ba
 
 esp_files() {  # the Windows ESP, listed from outside any guest
   lab "$IMAGE" bash -euo pipefail -c '
-    qemu-img convert -O raw /w/sys.qcow2 /w/.sys.raw
-    off=$(( $(sfdisk -J /w/.sys.raw | python3 -c "import json,sys; ps=json.load(sys.stdin)[\"partitiontable\"][\"partitions\"]; print([p for p in ps if p[\"type\"].upper()==\"C12A7328-F81F-11D2-BA4B-00A0C93EC93B\"][0][\"start\"])") * 512 ))
-    mdir -/ -b -i "/w/.sys.raw@@$off" :: | sort
-    rm -f /w/.sys.raw'
+    off=$(( $(sfdisk -J /w/sys.raw | python3 -c "import json,sys; ps=json.load(sys.stdin)[\"partitiontable\"][\"partitions\"]; print([p for p in ps if p[\"type\"].upper()==\"C12A7328-F81F-11D2-BA4B-00A0C93EC93B\"][0][\"start\"])") * 512 ))
+    mdir -/ -b -i "/w/sys.raw@@$off" :: | sort'
 }
 esp_files > "$W/winesp-before.txt"
 
@@ -69,7 +71,7 @@ qemu_cmd='
       -drive if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd \
       -drive if=pflash,format=raw,unit=1,file=/w/vars.fd \
       -device ich9-ahci,id=ahci \
-      -drive id=sys,file=/w/sys.qcow2,format=qcow2,if=none,cache=unsafe \
+      -drive id=sys,file=/w/sys.raw,format=raw,if=none,cache=unsafe \
       -device ide-hd,drive=sys,bus=ahci.0,bootindex=1,model=RIME-LAB-SYSTEM,serial=SYS0000000001 \
       "${@:2}" -display none -vga std -monitor unix:/w/mon.sock,server,nowait -no-reboot -rtc base=utc
   }'
@@ -90,43 +92,23 @@ grep -q '^BootNext' "$W/fw-1.txt" && echo "PASS  BootNext is set" || { echo "FAI
 esp_files > "$W/winesp-staged.txt"
 
 say "boot 2: the firmware starts Rime's installer; the install is driven over serial"
-rm -f "$W/serial0.sock" "$W/serial1.sock"
+# TEST-ONLY: a root shell on the second serial port, added to the staged
+# grub.cfg from the host. The Windows app never writes this; it is how the
+# lab drives the live session without a person at the keyboard.
+lab "$IMAGE" bash -euo pipefail -c '
+  off=$(( $(sfdisk -J /w/sys.raw | python3 -c "import json,sys; ps=json.load(sys.stdin)[\"partitiontable\"][\"partitions\"]; print([p for p in ps if p.get(\"name\")==\"Rime OS boot\"][0][\"start\"])") * 512 ))
+  mtype -i "/w/sys.raw@@$off" ::/EFI/rimeinst/grub.cfg > /tmp/g.cfg
+  sed -i "s|console=tty0|console=tty0 systemd.debug_shell=ttyS1|" /tmp/g.cfg
+  mcopy -o -i "/w/sys.raw@@$off" /tmp/g.cfg ::/EFI/rimeinst/grub.cfg
+  grep -c debug_shell /tmp/g.cfg'
+rm -f "$W/serial1.sock"
 lab "$IMAGE" bash -uo pipefail -c "$qemu_cmd"'
   qemu_run 5400 -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
-    -chardev socket,id=s0,path=/w/serial0.sock,server=on,wait=off,logfile=/w/serial-2.log -serial chardev:s0 \
-    -chardev socket,id=s1,path=/w/serial1.sock,server=on,wait=off -serial chardev:s1
+    -serial file:/w/serial-2.log -chardev socket,id=s1,path=/w/serial1.sock,server=on,wait=off -serial chardev:s1
   echo "qemu rc=$?"
   virt-fw-vars -i /w/vars.fd --print 2>/dev/null | grep -E "^(Boot[0-9A-F]{4}|BootOrder|BootNext)" | tee /w/fw-2.txt' &
 qpid=$!
-# GRUB draws Rime's setup menu on the first serial port. Open the entry's
-# editor, go to the end of its `linux` line, add the test-only debug shell
-# on the second port, and boot it. The disk is not touched.
-python3 - "$W/serial0.sock" <<'EOF'
-import socket, sys, time
-p = sys.argv[1]
-s = socket.socket(socket.AF_UNIX)
-for _ in range(300):
-    try:
-        s.connect(p); break
-    except OSError:
-        time.sleep(1)
-buf = b""; s.settimeout(1); end = time.time() + 600
-while time.time() < end and b"Install Rime OS" not in buf:
-    try: buf += s.recv(4096)
-    except socket.timeout: pass
-if b"Install Rime OS" not in buf:
-    print("FAIL  Rime's setup menu never appeared on serial"); sys.exit(1)
-print("PASS  the firmware started Rime's setup menu from Rime's ESP")
-# The editor opens on the entry's first line, `setparams`; the `linux` line
-# is the next one. Type slowly: GRUB redraws the screen after every key.
-for k in (b"e", b"\x0e", b"\x05"):
-    s.sendall(k); time.sleep(1.0)
-for ch in b" systemd.debug_shell=ttyS1":
-    s.sendall(bytes([ch])); time.sleep(0.15)
-time.sleep(1.0)
-s.sendall(b"\x18")
-EOF
-python3 "$HERE/../tests/staged-install.py" "$W/serial1.sock" "$W/shell-2.log" --save-mok "$W/rime-mok.der" | tee "$W/install-2.txt"
+python3 "$HERE/../tests/staged-install.py" "$W/serial1.sock" "$W/shell-2.log" --save-mok "$W/rime-mok.der" --prep-firstboot | tee "$W/install-2.txt"
 wait $qpid
 grep -q '^0 failure' "$W/install-2.txt" || echo "FAIL  the install inside the live session reported failures"
 esp_files > "$W/winesp-after.txt"
@@ -160,13 +142,23 @@ if [ -s "$W/rime-mok.der" ]; then
     virt-fw-vars -i /w/vars.fd -o /w/vars.fd --add-db 605dab50-e046-4300-abb6-3dd810dd8b23 /w/rime-mok.der >/dev/null 2>&1
     virt-fw-vars -i /w/vars.fd --print 2>/dev/null | grep -E "^(BootOrder|Boot[0-9A-F]{4})"'
 fi
+rm -f "$W/serial4.sock"
 lab "$IMAGE" bash -uo pipefail -c "$qemu_cmd"'
-  qemu_run 240 -serial file:/w/serial-4.log &
+  qemu_run 1800 -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+    -serial file:/w/serial-4.log -chardev socket,id=s1,path=/w/serial4.sock,server=on,wait=off -serial chardev:s1 &
   q=$!
-  for t in 4 9 60 120 200; do
-    sleep $(( t - ${prev:-0} )); prev=$t
-    printf "screendump /w/boot4-%03d.ppm\n" $t | socat - unix-connect:/w/mon.sock >/dev/null 2>&1 || true
-  done
-  wait $q'
-ls "$W"/boot4-*.ppm 2>/dev/null
+  sleep 3; printf "screendump /w/boot4-grub.ppm\n" | socat - unix-connect:/w/mon.sock >/dev/null 2>&1 || true
+  sleep 90; printf "screendump /w/boot4-rime.ppm\n" | socat - unix-connect:/w/mon.sock >/dev/null 2>&1 || true
+  wait $q
+  virt-fw-vars -i /w/vars.fd --print 2>/dev/null | grep -E "^(Boot[0-9A-F]{4}|BootOrder|BootNext)" > /w/fw-4.txt' &
+qpid=$!
+python3 "$HERE/../tests/installed-check.py" "$W/serial4.sock" "$W/shell-4.log" | tee "$W/check-4.txt"
+wait $qpid
+grep -q '^0 failure' "$W/check-4.txt" || echo "FAIL  the installed system's checks reported failures"
+esp_files > "$W/winesp-final.txt"
+if grep -iqE 'fedora|rimeinst' "$W/winesp-final.txt"; then
+  echo "FAIL  after Rime ran its own bootloader update, a Rime file is on Windows' ESP"
+else
+  echo "PASS  after Rime ran its own bootloader update, Windows' ESP still holds no Rime file"
+fi
 echo "DONE: $W"

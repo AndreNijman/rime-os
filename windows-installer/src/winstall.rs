@@ -125,10 +125,13 @@ pub fn surveyed() -> (Vec<Surveyed>, Volumes, Vec<String>) {
 }
 
 pub fn describe_disk(d: &DiskIdentity) -> String {
+    // NVMe controllers report fixed-width, space-padded strings.
+    let tidy = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let (model, serial) = (tidy(&d.model), tidy(&d.serial));
     format!(
         "{} (serial {}, {}, {})",
-        if d.model.is_empty() { "disk with no model name" } else { &d.model },
-        if d.serial.is_empty() { "not reported" } else { &d.serial },
+        if model.is_empty() { "disk with no model name" } else { &model },
+        if serial.is_empty() { "not reported" } else { &serial },
         d.bus,
         plan::human(d.length)
     )
@@ -323,12 +326,28 @@ pub fn sha256_file(path: &Path, progress: &mut dyn FnMut(u64, u64)) -> io::Resul
     Ok(crate::payload::hex(&h.finalize()))
 }
 
-/// The pinned installer image, from `given`, from the cache, or downloaded.
+fn pin_bytes() -> u64 {
+    pin::pin().map(|p| p.bytes).unwrap_or(u64::MAX)
+}
+
+/// The pinned installer image, from `given`, from beside the program, from
+/// the cache, or downloaded.
 /// Whatever its origin it is used only if it hashes to the pin.
 pub fn obtain_iso(given: Option<&Path>, ev: &mut dyn FnMut(Event)) -> io::Result<PathBuf> {
     let p = pin::pin().map_err(io::Error::other)?;
-    let path = match given {
-        Some(g) => g.to_path_buf(),
+    // An image already beside the program (downloaded separately, or carried
+    // on a stick to a machine without internet) is used when its size is
+    // right; like any other copy it is used only if it hashes to the pin.
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join(pin::ISO_FILE_NAME)))
+        .filter(|p| fs::metadata(p).map(|m| m.len() == pin_bytes()).unwrap_or(false));
+    // Only a file this program downloaded is ever deleted; a file the user
+    // supplied is theirs, wrong or not.
+    let supplied = given.map(Path::to_path_buf).or(beside);
+    let ours = supplied.is_none();
+    let path = match supplied {
+        Some(g) => g,
         None => {
             let dest = data_dir()?.join(pin::ISO_FILE_NAME);
             ev(Event::Step("Downloading the Rime OS installer".into()));
@@ -360,7 +379,7 @@ pub fn obtain_iso(given: Option<&Path>, ev: &mut dyn FnMut(Event)) -> io::Result
     }
     let got = sha256_file(&path, &mut |d, t| ev(Event::Progress { what: "verify image", done: d, total: t }))?;
     if got != p.sha256 {
-        if given.is_none() {
+        if ours {
             let _ = fs::remove_file(&path);
         }
         return Err(io::Error::other(format!(
@@ -571,41 +590,51 @@ pub fn install(c: &Candidate, iso: Option<&Path>, ev: &mut dyn FnMut(Event)) -> 
         false
     };
 
-    // 7. Payload into space nothing describes yet, then read it all back.
-    let mut wr = winwrite::DiskWriter::open(&disk.path, plan.write_windows())?;
-    stage::table_unchanged(&plan, &mut wr)?;
-    exclusive(&disk, &plan)?;
-    ev(Event::Step("Writing the Rime OS installer to its partition".into()));
-    let hashes = stage::write_payload(&plan, &mut wr, &mut iso, &mut pr_of(ev))?;
-    ev(Event::Step("Reading it back".into()));
-    stage::verify_payload(&plan, &mut wr, &hashes, &mut pr_of(ev))?;
+    let committed = (|| -> io::Result<()> {
+        // 7. Payload into space nothing describes yet, then read it all back.
+        let mut wr = winwrite::DiskWriter::open(&disk.path, plan.write_windows())?;
+        stage::table_unchanged(&plan, &mut wr)?;
+        exclusive(&disk, &plan)?;
+        ev(Event::Step("Writing the Rime OS installer to its partition".into()));
+        let hashes = stage::write_payload(&plan, &mut wr, &mut iso, &mut pr_of(ev))?;
+        ev(Event::Step("Reading it back".into()));
+        stage::verify_payload(&plan, &mut wr, &hashes, &mut pr_of(ev))?;
 
-    // 8. The commit: the partition table, after one more fresh comparison.
-    ev(Event::Step("Adding Rime's partitions to the partition table".into()));
-    stage::table_unchanged(&plan, &mut wr)?;
-    exclusive(&disk, &plan)?;
-    stage::write_table(&plan, &mut wr, &mut pr_of(ev))?;
-    stage::table_committed(&plan, &mut wr)?;
-    wr.update_properties()?;
-    drop(wr);
-    windows_sees(&disk, &plan)?;
-    fs::write(&journal, journal_text.replace("state=staging", "state=table-written"))?;
+        // 8. The commit: the partition table, after one more fresh comparison.
+        ev(Event::Step("Adding Rime's partitions to the partition table".into()));
+        stage::table_unchanged(&plan, &mut wr)?;
+        exclusive(&disk, &plan)?;
+        stage::write_table(&plan, &mut wr, &mut pr_of(ev))?;
+        stage::table_committed(&plan, &mut wr)?;
+        wr.update_properties()?;
+        drop(wr);
+        windows_sees(&disk, &plan)?;
+        fs::write(&journal, journal_text.replace("state=staging", "state=table-written"))?;
 
-    // 9. The firmware: one new entry, started once.
-    ev(Event::Step("Adding a one-time boot entry".into()));
-    let opt = bootentry::encode(
-        bootentry::SETUP_DESCRIPTION,
-        &HardDrive {
-            partition_number: plan.esp_slot,
-            start_lba: plan.esp.first_lba,
-            size_lba: plan.esp.last_lba - plan.esp.first_lba + 1,
-            guid: gptwrite::guid_bytes(&esp_guid)?,
-        },
-        bootentry::SETUP_LOADER,
-    )?;
-    winwrite::create_option(boot_number, &opt)?;
-    winwrite::set_boot_next(boot_number)?;
-    fs::write(&journal, journal_text.replace("state=staging", "state=ready"))?;
+        // 9. The firmware: one new entry, started once.
+        ev(Event::Step("Adding a one-time boot entry".into()));
+        let opt = bootentry::encode(
+            bootentry::SETUP_DESCRIPTION,
+            &HardDrive {
+                partition_number: plan.esp_slot,
+                start_lba: plan.esp.first_lba,
+                size_lba: plan.esp.last_lba - plan.esp.first_lba + 1,
+                guid: gptwrite::guid_bytes(&esp_guid)?,
+            },
+            bootentry::SETUP_LOADER,
+        )?;
+        winwrite::create_option(boot_number, &opt)?;
+        winwrite::set_boot_next(boot_number)?;
+        fs::write(&journal, journal_text.replace("state=staging", "state=ready"))?;
+        Ok(())
+    })();
+    if let Err(e) = committed {
+        return Err(if suspended {
+            io::Error::new(e.kind(), format!("{e}\n\nBitLocker on C: was suspended for this install and stays suspended until Windows next restarts; it then turns itself back on."))
+        } else {
+            e
+        });
+    }
     Ok(Outcome { boot_number, esp_guid, root_guid, disk_guid: disk.identity.gpt_disk_guid, journal, bitlocker_suspended: suspended })
 }
 

@@ -119,13 +119,13 @@ if grep -rqnE '\.ioctl\(\s*0x|DeviceIoControl\([^,]+,\s*0x' "$W"; then
 else
     ok "no IOCTL code is passed as a bare numeric literal"
 fi
-vars="$(grep -oE 'pub const VAR_[A-Z_]+: &str = "[A-Za-z]+"' "$W/winwrite.rs" | sed 's/.*= "//; s/"//' | sort | tr '\n' ' ')"
+vars="$(grep -oE 'pub const VAR_[A-Z_]+: &str = "[A-Za-z]+"' "$W/winwrite.rs" | sed 's/.*= "//; s/"//' | LC_ALL=C sort | tr '\n' ' ')"
 if [ "$vars" = "BootCurrent BootNext BootOrder " ]; then
     ok "the firmware variable names winwrite.rs declares are exactly BootOrder, BootNext, BootCurrent"
 else
     bad "firmware variable names changed: '$vars'"
 fi
-calls="$(grep -oE 'set_var\([^,]+' "$W/winwrite.rs" | grep -v 'fn set_var' | sed 's/set_var(//' | sort -u | tr '\n' ' ')"
+calls="$(grep -E 'set_var\(' "$W/winwrite.rs" | grep -v 'fn set_var' | grep -oE 'set_var\([^,]+' | sed 's/set_var(//' | LC_ALL=C sort -u | tr '\n' ' ')"
 if [ "$calls" = "&crate::bootentry::option_name(n) VAR_BOOT_NEXT VAR_BOOT_ORDER " ]; then
     ok "firmware writes go only to BootOrder, BootNext and Boot#### from option_name()"
 else
@@ -135,6 +135,11 @@ if grep -rqnE '"(PK|KEK|db|dbx|SetupMode|SecureBoot|OsIndications|MokList[A-Za-z
     bad "the source names a firmware variable outside the boot-entry allowlist"
 else
     ok "no Secure Boot, OS-indication or vendor variable is named anywhere"
+fi
+
+if [ "${RIME_WIN_GATE_ONLY:-}" = 1 ]; then
+    printf '\nrime-windows-installer gate: %d passed, %d failed\n' "$pass" "$fail"
+    [ "$fail" -eq 0 ]; exit
 fi
 
 # ── 1. it cross-builds ───────────────────────────────────────────────────────

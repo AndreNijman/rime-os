@@ -1,3 +1,43 @@
+# RESUMED, 2026-10-08
+
+**Andre:** *"continue the work on the RIME windows app, that installs rime on
+an empty partition FROM windows, completely finish the app and make sure its
+definitely fully working and secure and fast and no issues"*, and then:
+*"theres a similar project online, you can probably take a lot of the things
+from that project"*.
+
+That is the ask the pause below required. The project online is ULLI
+(codeberg.org/rltvty/ulli), GPL-3.0; Rime OS is MIT, so its mechanisms and
+lessons were studied and none of its code was taken. What was taken: stage a
+live environment onto the disk and boot it instead of a USB stick; generate the
+boot menu rather than patch the ISO's; warn about BitLocker and Secure Boot up
+front. What was not, and why: `bcdedit /set {fwbootmgr}` (it couples Rime's
+boot to Windows' BCD and moves Windows out of first place), writing into the
+first ESP it finds (Windows'), and shrinking NTFS from the tool.
+
+State now: the app installs. See README.md for what it does and its limits,
+VALIDATION.md for what was measured. The three product decisions of
+2026-09-21 stand and are implemented: Rime builds its own ESP, the tool edits
+GPT entries itself (in place, primary header last, both copies backed up
+first), firmware writes follow the BootNext discipline (one new entry,
+BootOrder untouched, one-shot start).
+
+Two findings of the resumed work outlive this tool:
+
+1. **bootupd does not use "the ESP the installer chose".** It copies files to
+   whatever is mounted at /boot/efi but names the FIRST ESP on the disk in the
+   firmware entry, and `bootupctl update` (bootloader-update.service, every
+   boot) writes to the first ESP it finds. On a Windows disk that is
+   Windows'. `installer/rime-install` now hides other ESPs from the kernel for
+   the bootloader step and makes the installed system mount its own ESP at
+   /boot/efi, with the update service refusing to run without it.
+2. **Starting Windows through GRUB trips BitLocker.** shim and GRUB put
+   different Secure Boot authorities into PCR 7 than the firmware starting
+   Windows directly. Where Windows uses BitLocker, Rime's boot menu does not
+   offer Windows; the firmware's boot menu does.
+
+---
+
 # PAUSED, 2026-09-21
 
 **Andre:** *"stop all development of windows app, push to repo and everything,

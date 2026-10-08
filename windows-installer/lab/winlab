@@ -53,6 +53,8 @@
 #                                writes reboot.txt on the transport and exits, and
 #                                the host powers the machine back on with the same
 #                                overlays. Up to N boots; the default is 1.
+#                                RIME_WINLAB_EXTRA=FILE (in the lab directory)
+#                                attaches FILE as one more disk (a copy: the guest may write).
 #      winlab status             what exists and what does not
 #
 #  $RIME_WINLAB_DIR defaults to /var/lab-scratch/winlab. It is not /tmp on
@@ -407,7 +409,7 @@ cmd_run() {
 
     podman run --rm --device /dev/kvm \
         -v "$DIR":/w:z -v "$HERE":/lab:ro,z -v "$rundir":/job:ro,z \
-        -e SWAP="$swap" -e BOOTS="$boots" \
+        -e SWAP="$swap" -e BOOTS="$boots" -e EXTRA="${RIME_WINLAB_EXTRA:-}" \
         "$IMAGE" bash -uo pipefail -c "$(qemu_args)"'
         set -e
         export VARS=/w/run-VARS.fd SYSDISK=/w/run.qcow2 SYSFMT=qcow2 \
@@ -489,7 +491,8 @@ cmd_run() {
                 -drive "id=fa,file=/w/run-fixture-a.qcow2,format=qcow2,if=none" \
                 -device "ide-hd,drive=fa,bus=ahci.$faport,model=RIME-FIXTURE-A,serial=FIXA00000001" \
                 -drive "id=fb,file=/w/run-fixture-b.qcow2,format=qcow2,if=none" \
-                -device "nvme,drive=fb,serial=FIXB00000002" || rc=$?
+                -device "nvme,drive=fb,serial=FIXB00000002" \
+                ${EXTRA:+-drive "id=ex,file=/w/$EXTRA,format=raw,if=none" -device "ide-hd,drive=ex,bus=ahci.3"} || rc=$?
             echo "qemu exited rc=$rc after boot $boot"
 
             # The firmware baseline after EVERY boot, not only the last one.
