@@ -2453,11 +2453,45 @@ jobs:
                 "are inside the inherited figure and are downloaded once, ever.")
           PY
 
+      # rimeos.com writes a release's page in its own deploy, which used to run
+      # only from a */15 schedule. GitHub ran that schedule every 4-7 HOURS
+      # (measured 2026-10-05..08), so an updated machine held its "what's new"
+      # for hours. The release now asks for the deploy itself, the moment it is
+      # published, and waits for its page. A repository can only start another
+      # repository's workflow with a token: RIMEOS_SITE_DISPATCH_TOKEN. Without
+      # it this warns and the schedule stays the fallback. Never fails a release.
+      - name: Publish the release page on rimeos.com
+        if: ${{ steps.push.outputs.digest != '' && github.ref == 'refs/heads/main' && needs.changes.outputs.release_id != 'dev' && needs.changes.outputs.release_id != '' }}
+        continue-on-error: true
+        env:
+          SITE_TOKEN: ${{ secrets.RIMEOS_SITE_DISPATCH_TOKEN }}
+          RELEASE_ID: ${{ needs.changes.outputs.release_id }}
+        run: |
+          if [ -z "$SITE_TOKEN" ]; then
+            echo "::warning::RIMEOS_SITE_DISPATCH_TOKEN is not set; rimeos.com will write the page for ${RELEASE_ID} on its own schedule."
+            exit 0
+          fi
+          code="$(curl -sS -o /tmp/dispatch.out -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer ${SITE_TOKEN}" -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/AndreNijman/rime-website/actions/workflows/deploy.yml/dispatches \
+            -d '{"ref":"main"}' || echo 000)"
+          if [ "$code" != 204 ]; then
+            echo "::warning::starting the rimeos.com deploy answered ${code}: $(head -c 300 /tmp/dispatch.out)"
+            exit 0
+          fi
+          echo "rimeos.com deploy started for ${RELEASE_ID}; waiting for its page"
+          url="https://rimeos.com/updates/${RELEASE_ID}"
+          for _ in $(seq 1 60); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$url" || echo 000)" = 200 ] && { echo "live: $url"; exit 0; }
+            sleep 15
+          done
+          echo "::warning::$url still not live 15 minutes after the deploy was started"
+
       # Rime Shell opens this release's page after the update, and holds it
       # until the page answers, so a missing page delays the "what's new" rather
-      # than breaking anything. Warn, do not fail: the site publishes on its own
-      # schedule (rimeos.com master spec §9.2 wants the page FIRST; this says
-      # when it is not).
+      # than breaking anything. Warn, do not fail: the step above asks the site
+      # to publish it (rimeos.com master spec §9.2 wants the page FIRST; this
+      # says when it is not).
       - name: The release page is live (warning only)
         if: ${{ steps.push.outputs.digest != '' && github.ref == 'refs/heads/main' && needs.changes.outputs.release_id != 'dev' && needs.changes.outputs.release_id != '' }}
         run: |
