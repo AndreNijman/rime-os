@@ -1179,21 +1179,55 @@ impl SysWriter for RealWriter {
                 start_path,
                 end_path,
             } => {
-                // Stop threshold last: some ECs reject a start >= stop, and
-                // writing stop first widens the window before narrowing.
+                // The stop threshold is written first AND last. First, because
+                // some ECs refuse a start at or above the current stop, so a
+                // window that moves up must widen before its start moves.
+                // Last, because on msi-ec both attributes are ONE EC byte (the
+                // start always reads stop - 10): whichever is written last
+                // decides, and the stop is the one that protects the battery.
+                // Written stop-then-start, a 60/80 window landed as 60/70 on
+                // an MSI Katana.
                 let mut last = Outcome::Refused(
                     "charge thresholds: this battery exposes neither attribute".into(),
                 );
                 let mut landed = false;
+                let stop_s = stop.to_string();
                 if let Some(end_path) = end_path {
-                    last = self.write_if_present(Path::new(end_path), &stop.to_string());
+                    last = self.write_if_present(Path::new(end_path), &stop_s);
                     landed |= last.landed();
                 }
                 if let Some(start_path) = start_path {
                     last = self.write_if_present(Path::new(start_path), &start.to_string());
                     landed |= last.landed();
+                    if let Some(end_path) = end_path {
+                        last = self.write_if_present(Path::new(end_path), &stop_s);
+                        landed |= last.landed();
+                    }
                 }
-                Ok(if landed { Outcome::Landed } else { last })
+                // Say what the battery actually holds when it is not what was
+                // asked for (msi-ec: 60/80 becomes 70/80).
+                if landed && !self.dry_run {
+                    let read = |p: &Option<String>| {
+                        p.as_deref()
+                            .and_then(|p| std::fs::read_to_string(p).ok())
+                            .map(|v| v.trim().to_string())
+                    };
+                    let (got_start, got_stop) = (read(start_path), read(end_path));
+                    let differs = got_stop.as_deref().is_some_and(|v| v != stop_s)
+                        || got_start.as_deref().is_some_and(|v| v != start.to_string());
+                    if differs {
+                        eprintln!(
+                            "rimed: charge thresholds: asked {start}/{stop}, the battery holds {}/{} \
+                             (this driver cannot hold that window)",
+                            got_start.as_deref().unwrap_or("-"),
+                            got_stop.as_deref().unwrap_or("-"),
+                        );
+                    }
+                }
+                // The last write decides the answer as well as the window:
+                // where there is a stop, that is the stop. A start that landed
+                // under a refused stop is not a charge limit.
+                Ok(last)
             }
 
             // ── M6 ───────────────────────────────────────────────────────────

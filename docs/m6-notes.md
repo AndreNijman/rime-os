@@ -111,18 +111,21 @@ reason.
 Concurrent hardware research on the target changed the picture, and the code
 and profile now reflect it:
 
-* **`msi-ec` will not bind on this board.** The in-tree module in the shipped
-  kernel carries a 25-entry EC-firmware allowlist with no `17L3` entry (the
-  Katana GF76 is board **MS-17L3**), and this build exposes no `force`
-  parameter. Consequences:
-  * no `fan_mode`, no `cooler_boost` → **rimed reports `Fan.Supported = false`
-    on the Katana as shipped** and touches nothing;
-  * `/sys/class/power_supply/BAT1/charge_control_*_threshold` do not exist
-    either, so the profile's `[charge] 60/80` block is a **silent no-op**. That
-    is a pre-existing M3 issue, not an M6 regression; the `SysWriter` skips
-    absent attributes instead of failing. The profile keeps the block (it is
-    correct the moment msi-ec binds), and the block now carries a comment
-    saying so.
+* **`msi-ec` binds since 2026-10-08** (IMAGE TODO item 2). The kernel's own
+  module (7.2.9) is only the battery-charge part, and its 25-entry EC-firmware
+  allowlist has no `17L3` entry (the Katana GF76 is board **MS-17L3**). The
+  image now ships the out-of-tree BeardOverflow driver instead, whose
+  CONF_G2_1 lists the Katana's 17L3EMS1.109. Measured on the Katana:
+  * `fan_mode` and `cooler_boost` are present, so rimed reports
+    `Fan.Supported = true`; `rime fan mode max` sets Cooler Boost on and
+    `fan_mode` advanced (both fans at ~7,900 / 6,000 RPM), `auto` hands the
+    fans back to the EC's own curve;
+  * `/sys/class/power_supply/BAT1/charge_control_*_threshold` exist, so the
+    profile's `[charge]` block takes effect. msi-ec keeps start = stop - 10
+    in one EC byte, so the profile's 60/80 lands as **70/80**.
+  * Before this, the in-tree module did not bind on this board: no fans, and
+    the `[charge]` block was a silent no-op (the `SysWriter` skips absent
+    attributes).
 * **`msi-wmi-platform` is the working lead for readings.** It has a `force`
   module parameter (`module_param_unsafe`, so it taints the kernel) and
   registers an hwmon device named `msi_wmi_platform` with four **read-only**
@@ -192,13 +195,13 @@ that rejects an affinity write is a logged skip, not a failed session.
 
 **Not verified (no access to the target machines):**
 
-1. **Everything on the Katana itself.** No MSI hardware was available. Three
-   things remain unconfirmed: whether `msi-wmi-platform` binds with `force=1`
-   on MS-17L3, what its four fan channels correspond to, and whether any driver
-   can command these fans at all.
-2. **msi-ec attribute semantics.** The `fan_mode`/`cooler_boost` values and the
-   `cpu|gpu/realtime_fan_speed` percentage come from the upstream driver's
-   README, not from a running machine.
+1. **`msi-wmi-platform` on the Katana.** Whether it binds with `force=1` on
+   MS-17L3, and what its four fan channels correspond to. (Whether a driver
+   can command these fans at all is answered: msi-ec can, see "The MSI Katana
+   reality".)
+2. **msi-ec's `realtime_fan_speed` percentage.** `fan_mode` and `cooler_boost`
+   were verified on the Katana on 2026-10-08; the speed percentage still comes
+   from the upstream driver's README.
 3. **`nvidia-smi` behaviour.** No NVIDIA GPU here: the exact `-lgc`/`-lmc`
    acceptance on an RTX 3070 Laptop, whether `-lmc` is supported on that part,
    and the real `clocks.max.*` values are unverified. The clamp means a wrong
@@ -230,12 +233,13 @@ on purpose. In rough priority order:
    * `files/system/modprobe.d/rime-msi.conf` → `options msi-wmi-platform force=1`
    * Note: the parameter is `module_param_unsafe`, so loading it **taints the
      kernel**. Accept that or drop fan readings on this machine.
-2. **A `msi-ec` that binds on MS-17L3** (Katana, for fan *control* and for the
-   BAT1 charge thresholds, which are otherwise dead): ship the out-of-tree
-   BeardOverflow `msi-ec` as a kmod/akmod with an MS-17L3 configuration, signed
-   for Secure Boot like the other out-of-tree modules, plus a `modules-load.d`
-   entry. Without this the Katana has **no fan control and no charge limiting**,
-   and `rime doctor` will say so.
+2. ~~**A `msi-ec` that binds on MS-17L3**~~ **DONE (2026-10-08):**
+   `Containerfile.core` builds BeardOverflow `msi-ec` (pinned commit + sha256)
+   into `updates/`, signs it with the other out-of-tree modules, and autoloads
+   it on MSI hardware through a DMI alias in `51-rime-msi.conf`. Its
+   CONF_G2_1 lists 17L3EMS1.109. Verified on the Katana: `rime fan mode max`
+   turns Cooler Boost on and `auto` hands it back. The charge window lands as
+   70/80: msi-ec keeps start = stop - 10 in one EC byte.
 3. **`irqbalance` must not fight game mode.** It re-scatters interrupt affinity
    on its own cadence and will undo the steering within seconds.
    **Recommendation: mask it in the gaming image** (`systemctl mask
