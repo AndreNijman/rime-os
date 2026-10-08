@@ -71,6 +71,18 @@ if [ -n "$missing" ]; then
     exit 1
 fi
 
+# ── The login keyring stays unlocked ────────────────────────────────────────
+# The keyring daemon PAM unlocked at login joins the session bus only when the
+# session runs `gnome-keyring-daemon --start`, and quits by itself about two
+# minutes after login otherwise. The desktop sessions do it in
+# rime-shell-autostart; this session never runs that, so here the first app to
+# want a secret (Steam's web views, a browser) met a fresh daemon with the
+# keyring LOCKED and asked for the password again. Same call, same reason.
+if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+    timeout 5 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 \
+        || log "gnome-keyring-daemon --start failed; apps may ask to unlock the keyring"
+fi
+
 # ── Rime game mode: cpuset, IRQ steering, GPU clocks, tier, sched-ext ───────
 # One call does all of it. `rime game start` goes through rimed's D-Bus API,
 # whose polkit action (manage-power) is allow_active=yes, so the session user
