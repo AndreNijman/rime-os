@@ -232,10 +232,23 @@ else
     log "  load is worse; nothing else is affected. See evidence §6.2."
 fi
 
-# ── HDR ─────────────────────────────────────────────────────────────────────
-# Left OFF on purpose. gamescope's HDR path needs the WSI layer and a display
-# that genuinely supports it, and getting it wrong washes out every colour on
-# screen. Opt in per-machine with RIME_GAMESCOPE_ARGS="--hdr-enabled".
+# ── HDR and composition ─────────────────────────────────────────────────────
+# Rime never passes --hdr-enabled, but that does not keep HDR off: Steam turns
+# it on by itself on an HDR-capable display, through gamescope's
+# GAMESCOPE_DISPLAY_HDR_ENABLED root property. Measured on katana: HDR cost
+# 4-5 % of the frame rate, and with it OFF, gamescope's direct scan-out on
+# NVIDIA showed the picture three times over with lines and wrong colours
+# until composition was forced. rime-gamescope-steam starts Steam and holds
+# both: HDR off, composition forced while HDR is off (RIME_GAMING_HDR=steam
+# and RIME_GAMING_FORCE_COMPOSITE=0 opt out). It has to run INSIDE gamescope:
+# the properties live on gamescope's own X server.
+STEAM_WRAP=()
+_wrap="${RIME_GAMESCOPE_STEAM:-/usr/libexec/rime-gamescope-steam}"
+if [ -x "${_wrap}" ]; then
+    STEAM_WRAP=("${_wrap}")
+else
+    log "no ${_wrap}: Steam decides HDR, and gamescope may scan out directly"
+fi
 
 # ── Steam ───────────────────────────────────────────────────────────────────
 # -gamepadui is Big Picture, the controller-first UI. NOT -steamdeck: that
@@ -409,7 +422,7 @@ if [ -n "${RIME_GAMESCOPE_ARGS:-}" ]; then
     GS_ARGS+=(${RIME_GAMESCOPE_ARGS})
 fi
 
-log "starting: gamescope ${GS_ARGS[*]} -- steam ${STEAM_ARGS[*]}"
+log "starting: gamescope ${GS_ARGS[*]} -- ${STEAM_WRAP[*]:+${STEAM_WRAP[*]} }steam ${STEAM_ARGS[*]}"
 
 # Not exec'd: the EXIT trap has to run so game mode is released when Steam
 # quits. gamescope exiting is the signal that Gaming Mode is over, and greetd
@@ -426,7 +439,7 @@ if command -v systemd-inhibit >/dev/null 2>&1; then
     INHIBIT=(systemd-inhibit --what=handle-lid-switch:idle --who="Rime Gaming Mode" \
              --why="Gaming Mode is running" --mode=block)
 fi
-"${INHIBIT[@]}" gamescope "${GS_ARGS[@]}" -- steam "${STEAM_ARGS[@]}"
+"${INHIBIT[@]}" gamescope "${GS_ARGS[@]}" -- "${STEAM_WRAP[@]}" steam "${STEAM_ARGS[@]}"
 rc=$?
 log "gamescope exited with ${rc}"
 
