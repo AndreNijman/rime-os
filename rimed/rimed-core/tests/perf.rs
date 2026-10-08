@@ -15,8 +15,8 @@ use std::path::PathBuf;
 use rimed_core::gpu::MockNvidiaSmi;
 use rimed_core::perf::{
     parse_pp_dpm, read_battery_watts, read_cpu_clocks, read_frame_time, read_game_cpuset,
-    read_gpu_busy, read_gpu_clock, read_policy_attr, read_power_sources, read_scheduler, read_temps,
-    snapshot,
+    read_gpu_busy, read_gpu_clock, read_platform_profile, read_policy_attr, read_power_sources,
+    read_scheduler, read_temps, snapshot,
 };
 use rimed_core::workload::Roots;
 
@@ -397,6 +397,25 @@ fn the_game_cpuset_is_reported_when_a_session_confines_something() {
     let s = read_game_cpuset(&idle.roots());
     assert!(!s.is_measured());
     assert!(s.reason().unwrap().contains("no game session"));
+}
+
+// ── platform profile ─────────────────────────────────────────────────────────
+
+#[test]
+fn the_platform_profile_falls_back_to_the_msi_ec_shift_mode() {
+    // No ACPI platform_profile, msi-ec bound: rimed drives shift_mode there,
+    // so that is what status reports, with its own path as the source.
+    let f = Fixture::new("pp-msi");
+    f.write("sys/devices/platform/msi-ec/shift_mode", "turbo\n");
+    let s = read_platform_profile(&f.sys());
+    assert_eq!(s.value().map(String::as_str), Some("turbo"));
+    assert!(s.source().ends_with("devices/platform/msi-ec/shift_mode"));
+
+    // Where both exist, ACPI is the answer.
+    f.write("sys/firmware/acpi/platform_profile", "balanced\n");
+    let s = read_platform_profile(&f.sys());
+    assert_eq!(s.value().map(String::as_str), Some("balanced"));
+    assert!(s.source().ends_with("firmware/acpi/platform_profile"));
 }
 
 // ── the whole snapshot ───────────────────────────────────────────────────────

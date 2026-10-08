@@ -709,9 +709,17 @@ impl RealWriter {
     /// performance performance` on the next, `cool quiet performance` on an
     /// older ThinkPad — so the requested value is matched through a ladder of
     /// synonyms rather than written blind.
+    ///
+    /// Where there is no ACPI interface but the MSI EC driver is bound, its
+    /// `shift_mode` stands in (see [`RealWriter::write_msi_shift_mode`]). The
+    /// ACPI interface is always preferred when both exist.
     fn write_platform_profile(&self, value: &str) -> Outcome {
         let path = self.sys_root.join("firmware/acpi/platform_profile");
         if !path.exists() {
+            let shift = self.sys_root.join(crate::fan::MSI_EC_REL).join("shift_mode");
+            if shift.exists() {
+                return self.write_msi_shift_mode(&shift, value);
+            }
             eprintln!("rimed: skip (absent) {} <- {value}", path.display());
             return Outcome::Refused("platform_profile: attribute absent".into());
         }
@@ -734,6 +742,36 @@ impl RealWriter {
                 );
                 Outcome::Refused(format!(
                     "platform_profile: firmware offers no '{value}' synonym"
+                ))
+            }
+        }
+    }
+
+    /// Write the MSI EC's `shift_mode`, the platform profile of an MSI laptop
+    /// whose firmware registers no ACPI `platform_profile` (msi-ec does not).
+    ///
+    /// The EC's mode is what actually bounds the CPU there. On an MSI Katana
+    /// GF76 (i7-12700H) the EC came up in `comfort`, which held the package
+    /// near 43 W: a CPU-bound Cyberpunk 2077 benchmark ran 70-74 fps in it and
+    /// 103-107 fps in `turbo` (~51 W). Only a mode the EC lists in
+    /// `available_shift_modes` is written; a driver that publishes no list is
+    /// trusted with `turbo`, `comfort` and `eco`, the three known modes.
+    fn write_msi_shift_mode(&self, path: &Path, value: &str) -> Outcome {
+        let mode = msi_shift_mode_for(value);
+        let available = read_tokens(&path.with_file_name("available_shift_modes"))
+            .unwrap_or_else(|| ["turbo", "comfort", "eco"].map(String::from).to_vec());
+        match pick_supported(mode, &[], &available) {
+            Some(m) => {
+                eprintln!("rimed: platform_profile absent; msi-ec shift_mode '{m}' for '{value}'");
+                self.write_tolerant(path, &m, "msi-ec shift_mode")
+            }
+            None => {
+                eprintln!(
+                    "rimed: skip (msi-ec offers no shift_mode '{mode}' for '{value}') {}",
+                    path.display()
+                );
+                Outcome::Refused(format!(
+                    "msi-ec shift_mode: EC offers no '{mode}' for '{value}'"
                 ))
             }
         }
@@ -1392,6 +1430,20 @@ fn platform_profile_ladder(value: &str) -> &'static [&'static str] {
         "quiet" => &["quiet", "low-power", "cool", "balanced"],
         "cool" => &["cool", "quiet", "low-power", "balanced"],
         _ => &["balanced"],
+    }
+}
+
+/// The msi-ec `shift_mode` for an ACPI `platform_profile` value.
+///
+/// msi-ec names its modes `turbo`, `sport`, `comfort` and `eco`, and each EC
+/// configuration offers a subset; nothing maps to `sport`. Every performance
+/// synonym asks for `turbo`, `balanced` for `comfort`, every frugal synonym
+/// (and the `power-saver` tier ID) for `eco`.
+fn msi_shift_mode_for(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "performance" | "balanced-performance" => "turbo",
+        "low-power" | "quiet" | "cool" | "power-saver" => "eco",
+        _ => "comfort",
     }
 }
 

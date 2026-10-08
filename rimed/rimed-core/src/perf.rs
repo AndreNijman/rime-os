@@ -248,13 +248,20 @@ pub fn read_policy_attr(sys: &Path, attr: &str) -> Signal<String> {
     }
 }
 
-/// The ACPI platform profile.
+/// The ACPI platform profile, or the MSI EC's `shift_mode` where the firmware
+/// has no ACPI interface and rimed drives that instead.
 pub fn read_platform_profile(sys: &Path) -> Signal<String> {
     let p = sys.join("firmware/acpi/platform_profile");
     let src = p.display().to_string();
     match read_trim(&p) {
         Some(v) if !v.is_empty() => Signal::measured(v, src),
-        _ => Signal::unavailable("this firmware exposes no ACPI platform profile", src),
+        _ => {
+            let shift = sys.join(crate::fan::MSI_EC_REL).join("shift_mode");
+            match read_trim(&shift) {
+                Some(v) if !v.is_empty() => Signal::measured(v, shift.display().to_string()),
+                _ => Signal::unavailable("this firmware exposes no ACPI platform profile", src),
+            }
+        }
     }
 }
 
