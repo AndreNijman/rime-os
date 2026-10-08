@@ -3008,6 +3008,15 @@ async fn cmd_doctor(json: bool) -> i32 {
         checks.push(recover::Check { ok, what });
     }
 
+    // An NVIDIA GPU older than the driver branch in the image (Maxwell,
+    // Pascal, Volta and earlier) gets no driver at all on Rime, and nothing
+    // else on the machine says so. A machine with no NVIDIA GPU gets no line.
+    if let Some((ok, what)) =
+        rimed_core::nvidia_support::scan(std::path::Path::new("/sys")).doctor_line()
+    {
+        checks.push(recover::Check { ok, what });
+    }
+
     print!("{}", recover::render_doctor(&checks, json));
     0
 }

@@ -800,6 +800,11 @@ fn probe(sys: &Sys) -> Surface {
                     .collect();
                 let mut missing: Vec<String> = Vec::new();
                 let mut present: Vec<String> = Vec::new();
+                // An NVIDIA GPU older than the image's driver branch has no
+                // driver on ANY Rime image, so it is not a regression and
+                // `sudo rime rollback` cannot fix it. It gets its own sentence
+                // and no action, instead of the rollback below.
+                let mut too_old = false;
                 for g in &fp.gpus {
                     let want = gpu_modules(&g.vendor);
                     if want.is_empty() {
@@ -807,6 +812,12 @@ fn probe(sys: &Sys) -> Surface {
                     }
                     match want.iter().find(|m| loaded.contains(m)) {
                         Some(m) => present.push(format!("{} via {}", g.vendor.as_str(), m)),
+                        None if g.vendor == rimed_core::GpuVendor::Nvidia
+                            && rimed_core::nvidia_support::Branch::for_device(g.pci_device)
+                                != rimed_core::nvidia_support::Branch::Current =>
+                        {
+                            too_old = true
+                        }
                         None => missing.push(format!(
                             "{} (wanted one of {})",
                             g.vendor.as_str(),
@@ -814,7 +825,22 @@ fn probe(sys: &Sys) -> Surface {
                         )),
                     }
                 }
-                if missing.is_empty() {
+                let old_gpu = too_old
+                    .then(|| rimed_core::nvidia_support::scan(&sys.path("/sys")).explain())
+                    .flatten();
+                if let (true, Some(why)) = (missing.is_empty(), &old_gpu) {
+                    Row {
+                        id: "gpu-driver",
+                        label: "GPU driver",
+                        state: Health::Attention,
+                        detail: if present.is_empty() {
+                            why.clone()
+                        } else {
+                            format!("working: {}. {why}", present.join(", "))
+                        },
+                        action: None,
+                    }
+                } else if missing.is_empty() {
                     Row {
                         id: "gpu-driver",
                         label: "GPU driver",
@@ -828,13 +854,14 @@ fn probe(sys: &Sys) -> Surface {
                         label: "GPU driver",
                         state: Health::Attention,
                         detail: format!(
-                            "no kernel module loaded for {}{}",
+                            "no kernel module loaded for {}{}{}",
                             missing.join(", "),
                             if present.is_empty() {
                                 String::new()
                             } else {
                                 format!("; working: {}", present.join(", "))
-                            }
+                            },
+                            old_gpu.as_deref().map(|w| format!(". {w}")).unwrap_or_default()
                         ),
                         action: Some("sudo rime rollback".to_string()),
                     }
