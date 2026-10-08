@@ -55,6 +55,8 @@
 #                                overlays. Up to N boots; the default is 1.
 #                                RIME_WINLAB_EXTRA=FILE (in the lab directory)
 #                                attaches FILE as one more disk (a copy: the guest may write).
+#                                RIME_WINLAB_NET=1 gives the guest a network card (e1000,
+#                                which Windows drives without a download) on qemu's NAT.
 #      winlab status             what exists and what does not
 #
 #  $RIME_WINLAB_DIR defaults to /var/lab-scratch/winlab. It is not /tmp on
@@ -409,7 +411,7 @@ cmd_run() {
 
     podman run --rm --device /dev/kvm \
         -v "$DIR":/w:z -v "$HERE":/lab:ro,z -v "$rundir":/job:ro,z \
-        -e SWAP="$swap" -e BOOTS="$boots" -e EXTRA="${RIME_WINLAB_EXTRA:-}" \
+        -e SWAP="$swap" -e BOOTS="$boots" -e EXTRA="${RIME_WINLAB_EXTRA:-}" -e NET="${RIME_WINLAB_NET:-}" \
         "$IMAGE" bash -uo pipefail -c "$(qemu_args)"'
         set -e
         export VARS=/w/run-VARS.fd SYSDISK=/w/run.qcow2 SYSFMT=qcow2 \
@@ -492,7 +494,8 @@ cmd_run() {
                 -device "ide-hd,drive=fa,bus=ahci.$faport,model=RIME-FIXTURE-A,serial=FIXA00000001" \
                 -drive "id=fb,file=/w/run-fixture-b.qcow2,format=qcow2,if=none" \
                 -device "nvme,drive=fb,serial=FIXB00000002" \
-                ${EXTRA:+-drive "id=ex,file=/w/$EXTRA,format=raw,if=none" -device "ide-hd,drive=ex,bus=ahci.3"} || rc=$?
+                ${EXTRA:+-drive "id=ex,file=/w/$EXTRA,format=raw,if=none" -device "ide-hd,drive=ex,bus=ahci.3"} \
+                ${NET:+-nic user,model=e1000} || rc=$?
             echo "qemu exited rc=$rc after boot $boot"
 
             # The firmware baseline after EVERY boot, not only the last one.
