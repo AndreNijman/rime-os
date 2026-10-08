@@ -715,6 +715,43 @@ if grep -qF "resolving without pinning to the image" <<<"$out"; then
     ok "…and says so"
 else bad "…and says so" "got: $(tail -1 <<<"$out")"; fi
 
+# 9. The launcher's doorbell. systemd-sysext mounts a new /usr over the old
+#    one, so a running Shell's watch on /usr/share/applications never fires and
+#    an app merged mid-session stayed out of the launcher (Steam on katana,
+#    2026-10-07). post_merge rings /usr/local/share/applications instead (it
+#    lives on /var): one file created and removed, which makes Quickshell
+#    rescan every applications directory by path.
+DB=$WORK/doorbell
+out=$(call ring_launcher "$DB/applications" 2>&1); rc=$?
+is "the doorbell creates its directory when missing" "0 yes" \
+   "$rc $([ -d "$DB/applications" ] && echo yes || echo no)"
+before=$(stat -c %.9Y "$DB/applications")
+sleep 0.05
+call ring_launcher "$DB/applications" >/dev/null 2>&1
+after=$(stat -c %.9Y "$DB/applications")
+if [ "$before" != "$after" ] && [ -z "$(ls -A "$DB/applications")" ]; then
+    ok "ringing changes the directory and leaves nothing in it"
+else bad "ringing changes the directory and leaves nothing in it" "mtime $before -> $after, left: $(ls -A "$DB/applications" | paste -sd' ' -)"; fi
+# Never fatal: an install must not fail because a launcher could not be told.
+out=$(call ring_launcher /proc/rime-no-such-dir/applications 2>&1); rc=$?
+is "an unusable doorbell is not an error" 0 "$rc"
+
+# …and every merge rings it. post_merge's system commands are stubbed (a real
+# daemon-reload from a test could raise a polkit prompt on a desktop), and the
+# shipped ring_launcher is swapped for a recorder after the engine is sourced.
+PM=$WORK/post-merge-stubs; mkdir -p "$PM"
+for c in ldconfig systemd-sysusers systemd-tmpfiles systemctl udevadm; do
+    printf '#!/bin/sh\nexit 0\n' > "$PM/$c"; chmod +x "$PM/$c"
+done
+got=$(PATH="$PM:$PATH" bash -c '
+        e=$1; set --
+        source "$e" >/dev/null 2>&1
+        set +e
+        ring_launcher() { echo RANG; }
+        post_merge
+      ' _ "$ENGINE" 2>/dev/null)
+is "every merge rings the launcher's doorbell" RANG "$got"
+
 echo
 echo "── apps that left the image: vendor routes, per-user tools, Flathub ───"
 # ChatGPT, Claude Desktop, Claude Code and Zed shipped in the image until
