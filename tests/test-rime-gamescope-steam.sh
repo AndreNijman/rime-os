@@ -151,5 +151,14 @@ fi
 bash "$WRAP" 2>/dev/null; rc=$?
 [ "$rc" = 2 ] && ok "no command: usage error (2)" || bad "no command" "exit $rc"
 
+# ── NVIDIA shader cache size ────────────────────────────────────────────────
+cache_seen() { env -u DISPLAY "$@" bash "$WRAP" bash -c 'printf %s "${__GL_SHADER_DISK_CACHE_SIZE-UNSET}"' 2>/dev/null; }
+[ "$(cache_seen -u __GL_SHADER_DISK_CACHE_SIZE)" = 12000000000 ] \
+    && ok "Steam gets a 12 GB NVIDIA shader cache size" \
+    || bad "NVIDIA shader cache size" "seen: $(cache_seen -u __GL_SHADER_DISK_CACHE_SIZE)"
+[ "$(cache_seen __GL_SHADER_DISK_CACHE_SIZE=3000000000)" = 3000000000 ] \
+    && ok "a size the user set is kept" \
+    || bad "user cache size" "seen: $(cache_seen __GL_SHADER_DISK_CACHE_SIZE=3000000000)"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
