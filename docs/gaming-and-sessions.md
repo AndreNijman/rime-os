@@ -707,6 +707,69 @@ every frame, 14-16 % of the GPU), and its frame limiter at 240 = refresh forces
 FIFO. Both are Steam settings, not Rime's.
 
 
+## 5g. Discord activity in Gaming Mode (Equibop's Rich Presence, 2026-10-09)
+
+Asked for: with Equibop installed and its Rich Presence on, what you play in
+Gaming Mode shows on your Discord profile, without the rest of Equibop.
+
+### What "only Rich Presence" can mean
+
+Equibop's Rich Presence is arRPC (`resources/arrpc/arrpc`, arRPC-Bun 1.4.0 in
+Equibop 3.3.1): the `discord-ipc-0` socket games talk to, plus a `/proc` scan
+that recognises known games, Proton ones included. arRPC has no account. It
+sends each activity over a local WebSocket to Equibop, and Equibop hands it to
+the signed-in Discord page (`src/main/arrpc/index.ts`:
+`mainWin.webContents.send(IpcEvents.ARRPC_ACTIVITY, …)`). Without that page
+nothing reaches Discord, and anything else that posted a presence would have to
+log in with the account's token, which Discord bans accounts for.
+
+So Gaming Mode starts Equibop itself, with nothing of it on screen or audible.
+
+### How it runs
+
+`/usr/libexec/rime-gaming-discord run --owner <Steam's pid>`, started by
+`rime-gamescope-steam` next to Steam:
+
+- the launcher the user has: the `equibop*.desktop` entry's `Exec` (so a
+  wrapper like katana's `~/.local/bin/equibop`, which sets `ARRPC_DATA_DIR`,
+  is kept), else `~/.local/bin/equibop` or `equibop` on PATH, or the Flathub
+  build `io.github.equicord.equibop` (its socket under
+  `$XDG_RUNTIME_DIR/app/<id>/` is linked to `$XDG_RUNTIME_DIR/discord-ipc-0`
+  when nothing is there);
+- `--start-minimized --ozone-platform=x11 --disable-gpu`; `SteamOS` and
+  `SteamGamepadUI` removed (with `XDG_CURRENT_DESKTOP=gamescope` they make
+  Equibop go full screen over Steam, `src/main/utils/steamOS.ts`);
+  `PULSE_SERVER` pointed nowhere (Flatpak: `--nosocket=pulseaudio`);
+- nice 10 with RLIMIT_NICE 10. With only a relative nice, Chromium put its
+  browser, GPU and arRPC processes back at nice −8 (measured in gamescope);
+- stopped (process group TERM, then KILL) within 2 s of Steam exiting, and by
+  `rime-gaming-session`'s cleanup, so the desktop's own Equibop starts
+  normally afterwards.
+
+It refuses, with the reason in the session log and in Settings → Gaming, when
+Equibop is missing, arRPC is off in Equibop (`settings.json` `arRPC`), Equibop
+was never opened (`state.json` has no `firstLaunch: false`: its first run opens
+a welcome window, and in a headless gamescope that window took the focus), or
+Equibop is already running (a live `SingletonLock`: a second launch only tells
+the first to show its window).
+
+The setting is `discord_presence` in `~/.config/rime/gaming.json`, off until
+turned on: `rime-gaming-discord set on|off`, or the switch in Settings → Gaming.
+
+### Measured (L16, Equibop 3.3.1 tarball, headless gamescope, signed-out profile)
+
+- `GAMESCOPE_FOCUSABLE_WINDOWS` empty for the whole run with first launch done;
+  arRPC up and `discord-ipc-0` created within ~10 s.
+- A test client's `SET_ACTIVITY` reached arRPC, the bridge, and Equibop's main
+  process (`[arRPC > debug] Received activity`).
+- `--ozone-platform=headless` is not usable: Equibop segfaults at start-up
+  (null call in the browser process), with or without `--disable-gpu`.
+- Not measured: the activity on a real profile (needs a signed-in Equibop:
+  katana), and memory/CPU while signed in. Equibop's updater window
+  (electron-updater) can open on installs it can update (RPM/AppImage); the
+  tarball install has no updater. Steam's base-layer focus should keep such a
+  window behind Steam, not verified.
+
 ## 6. The rows that need katana, and the exact commands
 
 A machine with one GPU and no external monitor cannot answer any of the rows

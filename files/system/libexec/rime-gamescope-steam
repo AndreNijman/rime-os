@@ -32,6 +32,13 @@
 #
 #  The guard is the property watcher only: if xprop is missing or the X
 #  server is gone, Steam still starts and nothing else changes.
+#
+#  ── Discord activity ────────────────────────────────────────────────────────
+#  With "Discord activity in Gaming Mode" on (Settings → Gaming, or
+#  `rime-gaming-discord set on`), rime-gaming-discord starts Equibop hidden and
+#  muted, for its Rich Presence only, and stops it when Steam exits. It does
+#  nothing when the setting is off, Equibop is missing, or arRPC is off in
+#  Equibop. See that file's header.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
@@ -112,6 +119,11 @@ elif [ -z "${DISPLAY:-}" ]; then
     log "no DISPLAY: HDR and composition are left to Steam and gamescope"
 else
     guard "$$" &
+fi
+
+DISCORD="${RIME_GAMING_DISCORD:-${BASH_SOURCE[0]%/*}/rime-gaming-discord}"
+if [ -x "$DISCORD" ]; then
+    "$DISCORD" run --owner "$$" &
 fi
 
 exec "$@"
