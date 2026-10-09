@@ -1335,6 +1335,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-gamescope-steam.sh
 
+      # Discord activity in Gaming Mode: Equibop started hidden and muted for
+      # its Rich Presence only, refused when it would show a window, and
+      # stopped with Steam.
+      - name: Run Gaming Mode Discord activity assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-rime-gaming-discord.sh
+
       # The same game environment for Steam started from the desktop: the
       # profile.d hook greetd's session shell sources, under every shell that
       # sources profile.d, and the helper both paths share.
@@ -4411,6 +4419,7 @@ jobs:
             files/system/libexec/rime-gaming-session \
             tests/test-rime-gamescope-steam.sh \
             files/system/libexec/rime-gamescope-steam \
+            tests/test-rime-gaming-discord.sh \
             tests/test-rime-game-env.sh \
             files/system/libexec/rime-game-env \
             files/system/profile.d/rime-game-env.sh \

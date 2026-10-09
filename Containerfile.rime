@@ -110,6 +110,10 @@ COPY --chmod=0755 files/system/libexec/rime-gaming-session \
      /usr/libexec/rime-gaming-session
 COPY --chmod=0755 files/system/libexec/rime-gamescope-steam \
      /usr/libexec/rime-gamescope-steam
+# Discord activity in Gaming Mode (Settings → Gaming): Equibop hidden and
+# muted for its Rich Presence only, while Steam runs. See its header.
+COPY --chmod=0755 files/system/libexec/rime-gaming-discord \
+     /usr/libexec/rime-gaming-discord
 # Steam's game environment, one list for Gaming Mode (the wrapper above runs
 # it) and the desktop (greetd sources /etc/profile before it execs a session).
 COPY --chmod=0755 files/system/libexec/rime-game-env /usr/libexec/rime-game-env
@@ -140,6 +144,8 @@ RUN set -eux; \
     visudo -cf /etc/sudoers.d/040-rime-session-select; \
     bash -n /usr/libexec/rime-gaming-session; \
     bash -n /usr/libexec/rime-gamescope-steam; \
+    python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' /usr/libexec/rime-gaming-discord; \
+    HOME=/nonexistent XDG_RUNTIME_DIR=/nonexistent /usr/libexec/rime-gaming-discord status --json >/dev/null; \
     bash -n /usr/libexec/rime-game-env; \
     sh -n /etc/profile.d/rime-game-env.sh; \
     /usr/libexec/rime-game-env -v; \

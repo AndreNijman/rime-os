@@ -134,6 +134,9 @@ fi
 # path printed absolutely nothing, and that silence is why a machine sat in a
 # gaming power profile for 75 minutes with no clue in its own log.
 cleanup() {
+    # Equibop, if it was started for Discord activity, stops with Steam; this
+    # is for a Steam that never exited cleanly (rime-gamescope-steam's header).
+    "${RIME_GAMING_DISCORD:-/usr/libexec/rime-gaming-discord}" stop >/dev/null 2>&1 || true
     if [ "${RIME_GAMING_NO_RIMED:-0}" != "1" ] && command -v rime >/dev/null 2>&1; then
         local out
         if out="$(rime game stop 2>&1)"; then

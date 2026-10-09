@@ -1,0 +1,522 @@
+#!/usr/bin/env python3
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-gaming-discord — Discord Rich Presence from Equibop in Gaming Mode
+#
+#    rime-gaming-discord status [--json]   is it on, and would it start
+#    rime-gaming-discord set on|off        the setting (Settings → Gaming)
+#    rime-gaming-discord run --owner PID   start it; stop it when PID exits
+#    rime-gaming-discord stop              stop a running one
+#
+#  WHAT "ONLY RICH PRESENCE" CAN MEAN
+#
+#  Equibop's Rich Presence is arRPC: a small server that games talk to (the
+#  discord-ipc-0 socket, plus a /proc scan that spots known games, Proton ones
+#  included). arRPC has no Discord account of its own. It hands each activity
+#  to Equibop over a local WebSocket, and the signed-in Discord page inside
+#  Equibop is what tells Discord (src/main/arrpc/index.ts in Equibop: the
+#  bridge's messages go to mainWin.webContents). Without that page nothing
+#  reaches your profile, and anything else that posted a presence would have
+#  to log in with your account token, which Discord bans accounts for.
+#
+#  So this starts Equibop itself, the way you installed it, with nothing of it
+#  on screen: --start-minimized (the window is created and never shown;
+#  measured in a headless gamescope: GAMESCOPE_FOCUSABLE_WINDOWS stayed empty
+#  while arRPC created discord-ipc-0), no sound (PULSE_SERVER points nowhere,
+#  or --nosocket=pulseaudio for the Flatpak), no GPU (--disable-gpu), at nice
+#  10 with RLIMIT_NICE holding it there. Its window size, which Equibop saves
+#  on quit, is put back afterwards. It runs only while Steam does and is stopped when Gaming Mode ends, so
+#  the desktop's own Equibop starts normally afterwards.
+#
+#  WHEN IT REFUSES, AND WHY
+#
+#    • Equibop is not installed, or Rich Presence (arRPC) is off in Equibop's
+#      own settings. The setting follows Equibop's: if you turned arRPC off
+#      there, Gaming Mode does not turn it back on.
+#    • Equibop has never been opened (state.json has no firstLaunch=false).
+#      Its first run opens a welcome window instead, and in a headless
+#      gamescope that window took the focus over everything else.
+#    • Equibop is already running (its SingletonLock points at a live pid).
+#      A second launch would only ask the first one to SHOW its window.
+#
+#  Steam and `-steamos3` put SteamOS=1 and SteamGamepadUI=1 in the session;
+#  with XDG_CURRENT_DESKTOP=gamescope those make Equibop go full screen over
+#  Steam (src/main/utils/steamOS.ts, isDeckGameMode). They are removed from its
+#  environment.
+# ─────────────────────────────────────────────────────────────────────────────
+import json
+import os
+import resource
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+
+FLATPAK_ID = "io.github.equicord.equibop"
+EXTRA_ARGS = ["--start-minimized", "--ozone-platform=x11", "--disable-gpu"]
+# Environment that makes Equibop believe it is in Steam Deck Game Mode.
+DECK_ENV = ("SteamOS", "SteamGamepadUI")
+MUTE_PULSE = "unix:/nonexistent/rime-gaming-discord"
+# Steam exiting is noticed within POLL_S: everything here descends from Steam,
+# and gamescope's reaper waits for all of it before Gaming Mode can end.
+POLL_S = float(os.environ.get("RIME_GAMING_DISCORD_POLL", "0.5"))
+STOP_GRACE_S = float(os.environ.get("RIME_GAMING_DISCORD_GRACE", "10"))
+SOCKET_WAIT_S = float(os.environ.get("RIME_GAMING_DISCORD_SOCKET_WAIT", "90"))
+
+HOME = os.environ.get("HOME") or os.path.expanduser("~")
+
+
+def xdg(var, default):
+    v = os.environ.get(var, "")
+    return v if v.startswith("/") else default
+
+
+CONFIG_HOME = xdg("XDG_CONFIG_HOME", os.path.join(HOME, ".config"))
+DATA_HOME = xdg("XDG_DATA_HOME", os.path.join(HOME, ".local/share"))
+CACHE_HOME = xdg("XDG_CACHE_HOME", os.path.join(HOME, ".cache"))
+RUNTIME_DIR = xdg("XDG_RUNTIME_DIR", "/run/user/%d" % os.getuid())
+SETTING_FILE = os.path.join(CONFIG_HOME, "rime", "gaming.json")
+SETTING_KEY = "discord_presence"
+PIDFILE = os.path.join(RUNTIME_DIR, "rime-gaming-discord.pid")
+LOGFILE = os.path.join(CACHE_HOME, "rime", "gaming-discord.log")
+
+
+def log(msg):
+    print("rime-gaming-discord: %s" % msg, file=sys.stderr, flush=True)
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+# ── the setting ──────────────────────────────────────────────────────────────
+
+def setting_on():
+    return (read_json(SETTING_FILE) or {}).get(SETTING_KEY) is True
+
+
+def set_setting(on):
+    data = read_json(SETTING_FILE) or {}
+    data[SETTING_KEY] = bool(on)
+    os.makedirs(os.path.dirname(SETTING_FILE), exist_ok=True)
+    tmp = SETTING_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, SETTING_FILE)
+
+
+# ── finding Equibop ──────────────────────────────────────────────────────────
+
+def data_dirs():
+    dirs = [DATA_HOME, os.path.join(DATA_HOME, "flatpak/exports/share")]
+    sys_dirs = os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    dirs += [d for d in sys_dirs.split(":") if d.startswith("/")]
+    dirs.append("/var/lib/flatpak/exports/share")
+    seen, out = set(), []
+    for d in dirs:
+        if d not in seen:
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def desktop_exec(path):
+    """The Exec= line of a desktop entry's [Desktop Entry] group, or None."""
+    group = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("["):
+                    group = line
+                elif group == "[Desktop Entry]" and line.startswith("Exec="):
+                    return line[len("Exec="):]
+    except OSError:
+        pass
+    return None
+
+
+def split_exec(value):
+    """Exec= as argv, without field codes (%U …) or Flatpak's @@ markers."""
+    try:
+        argv = shlex.split(value)
+    except ValueError:
+        return None
+    out = []
+    for a in argv:
+        if a in ("@@", "@@u") or (len(a) == 2 and a[0] == "%"):
+            continue
+        out.append(a.replace("%%", "%"))
+    return out or None
+
+
+def from_desktop_entries():
+    for d in data_dirs():
+        apps = os.path.join(d, "applications")
+        try:
+            names = sorted(os.listdir(apps))
+        except OSError:
+            continue
+        for name in names:
+            low = name.lower()
+            if not low.endswith(".desktop"):
+                continue
+            if not (low.startswith("equibop") or low == FLATPAK_ID + ".desktop"):
+                continue
+            value = desktop_exec(os.path.join(apps, name))
+            argv = split_exec(value) if value else None
+            if not argv:
+                continue
+            exe = shutil.which(argv[0]) if not argv[0].startswith("/") else argv[0]
+            if not exe or not os.access(exe, os.X_OK):
+                continue
+            kind = "flatpak" if FLATPAK_ID in argv and \
+                os.path.basename(argv[0]) == "flatpak" else "native"
+            return {"kind": kind, "argv": argv,
+                    "source": os.path.join(apps, name)}
+    return None
+
+
+def find_equibop():
+    override = os.environ.get("RIME_EQUIBOP", "")
+    if override:
+        argv = split_exec(override)
+        if argv:
+            return {"kind": "native", "argv": argv, "source": "RIME_EQUIBOP"}
+    found = from_desktop_entries()
+    if found:
+        return found
+    for cand in (os.path.join(HOME, ".local/bin/equibop"), shutil.which("equibop")):
+        if cand and os.access(cand, os.X_OK):
+            return {"kind": "native", "argv": [cand], "source": cand}
+    return None
+
+
+def config_dir(app):
+    if app["kind"] == "flatpak":
+        return os.path.join(HOME, ".var/app", FLATPAK_ID, "config/equibop")
+    return os.path.join(CONFIG_HOME, "equibop")
+
+
+def singleton_pid(cfg):
+    """The pid Equibop's SingletonLock names, if that process is alive."""
+    try:
+        target = os.readlink(os.path.join(cfg, "SingletonLock"))
+        pid = int(target.rsplit("-", 1)[1])
+    except (OSError, IndexError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    return pid
+
+
+# ── readiness ────────────────────────────────────────────────────────────────
+
+def report():
+    r = {"enabled": setting_on(), "installed": False, "kind": "",
+         "source": "", "rich_presence": False, "set_up": False,
+         "running": False, "ready": False, "reason": ""}
+    pid = running_helper()
+    r["running"] = pid is not None
+    app = find_equibop()
+    if app is None:
+        r["reason"] = "Equibop is not installed."
+        return r, None
+    r.update(installed=True, kind=app["kind"], source=app["source"])
+    cfg = config_dir(app)
+    settings = read_json(os.path.join(cfg, "settings.json")) or {}
+    state = read_json(os.path.join(cfg, "state.json")) or {}
+    r["rich_presence"] = settings.get("arRPC") is True and \
+        settings.get("arRPCDisabled") is not True
+    r["set_up"] = state.get("firstLaunch") is False
+    if not r["rich_presence"]:
+        r["reason"] = ("Rich Presence is off in Equibop. Turn on arRPC in "
+                       "Equibop's settings first.")
+    elif not r["set_up"]:
+        r["reason"] = ("Equibop has not been set up yet. Open it once on the "
+                       "desktop and sign in.")
+    else:
+        r["ready"] = True
+    return r, app
+
+
+def cmd_status(as_json):
+    r, _ = report()
+    if as_json:
+        print(json.dumps(r))
+        return 0
+    print("Discord activity in Gaming Mode: %s" % ("on" if r["enabled"] else "off"))
+    if r["installed"]:
+        print("Equibop: %s (%s)" % (r["source"], r["kind"]))
+    print("Would start: %s" % ("yes" if r["ready"] else "no, " + r["reason"]))
+    if r["running"]:
+        print("Running now.")
+    return 0
+
+
+# ── running it ───────────────────────────────────────────────────────────────
+
+def proc_start_time(pid):
+    try:
+        with open("/proc/%d/stat" % pid) as f:
+            return f.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def alive(pid, start):
+    st = proc_start_time(pid)
+    return st is not None and (start is None or st == start)
+
+
+def running_helper():
+    info = read_json(PIDFILE)
+    if not info:
+        return None
+    try:
+        pid = int(info.get("helper"))
+    except (TypeError, ValueError):
+        return None
+    return pid if alive(pid, info.get("helper_start")) else None
+
+
+def launch_argv(app):
+    argv = list(app["argv"])
+    if app["kind"] == "flatpak":
+        i = argv.index(FLATPAK_ID)
+        if "run" in argv[:i]:
+            r = argv.index("run")
+            argv[r + 1:r + 1] = ["--nosocket=pulseaudio", "--socket=x11"]
+    return argv + EXTRA_ARGS
+
+
+def launch_env():
+    env = dict(os.environ)
+    for k in DECK_ENV:
+        env.pop(k, None)
+    env.pop("WAYLAND_DISPLAY", None)
+    env["PULSE_SERVER"] = MUTE_PULSE
+    return env
+
+
+def lower_priority():
+    """nice 10, and no way back up: Chromium raises its own display-critical
+    threads to nice -8 when RLIMIT_NICE lets it (measured: Equibop's browser,
+    GPU and arRPC processes at -8 in gamescope with only a relative nice)."""
+    os.setpriority(os.PRIO_PROCESS, 0, 10)
+    # RLIMIT_NICE r lets a process go down to nice 20 - r, so a smaller r is
+    # stricter. Only ever lower it: an unprivileged process cannot raise its
+    # hard limit, and the kernel default (0: no raising at all) is stricter
+    # than 10 already.
+    _soft, hard = resource.getrlimit(resource.RLIMIT_NICE)
+    cap = 10 if hard == resource.RLIM_INFINITY else min(10, hard)
+    resource.setrlimit(resource.RLIMIT_NICE, (cap, cap))
+
+
+def stop_child(child, app):
+    if child.poll() is not None:
+        return
+    if app["kind"] == "flatpak" and shutil.which("flatpak"):
+        subprocess.run(["flatpak", "kill", FLATPAK_ID],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        os.killpg(child.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + STOP_GRACE_S
+    while time.monotonic() < deadline:
+        if child.poll() is not None:
+            break
+        time.sleep(0.2)
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    child.wait()
+
+
+# Equibop saves its window's size when it quits, and the hidden one's is
+# gamescope's screen (measured: windowBounds became 1279x719). Put back what the
+# desktop's Equibop had, and only those keys: anything else it wrote (an
+# updater snooze, a version) stays.
+WINDOW_KEYS = ("windowBounds", "maximized", "minimized")
+
+
+def window_state(path):
+    state = read_json(path) or {}
+    return {k: state[k] for k in WINDOW_KEYS if k in state}
+
+
+def restore_window_state(path, saved):
+    state = read_json(path)
+    if state is None:
+        return
+    changed = False
+    for k in WINDOW_KEYS:
+        if k in saved and state.get(k) != saved[k]:
+            state[k] = saved[k]
+            changed = True
+        elif k not in saved and k in state:
+            del state[k]
+            changed = True
+    if not changed:
+        return
+    tmp = path + ".rime-tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=4)
+        os.replace(tmp, path)
+    except OSError as e:
+        log("could not put Equibop's window size back: %s" % e)
+
+
+def link_flatpak_socket(linked):
+    """Games look for $XDG_RUNTIME_DIR/discord-ipc-0; the Flatpak's is under
+    app/<id>/. Link it, once, if nothing else is there."""
+    target = os.path.join(RUNTIME_DIR, "app", FLATPAK_ID, "discord-ipc-0")
+    link = os.path.join(RUNTIME_DIR, "discord-ipc-0")
+    if linked or not os.path.exists(target) or os.path.lexists(link):
+        return linked
+    try:
+        os.symlink(target, link)
+        log("linked %s -> %s" % (link, target))
+        return link
+    except OSError as e:
+        log("could not link the Flatpak's socket: %s" % e)
+        return linked
+
+
+def cmd_run(owner):
+    owner_start = proc_start_time(owner)
+    if owner_start is None:
+        log("owner pid %d is not running" % owner)
+        return 1
+    if not setting_on():
+        log("Discord activity in Gaming Mode is off (Settings → Gaming)")
+        return 0
+    if running_helper() is not None:
+        log("already running")
+        return 0
+    r, app = report()
+    if not r["ready"]:
+        log("not starting Equibop: %s" % r["reason"])
+        return 0
+    held = singleton_pid(config_dir(app))
+    if held is not None:
+        log("Equibop is already running (pid %d); games use its Rich Presence" % held)
+        return 0
+
+    state_path = os.path.join(config_dir(app), "state.json")
+    window = window_state(state_path)
+    argv = launch_argv(app)
+    os.makedirs(os.path.dirname(LOGFILE), exist_ok=True)
+    out = open(LOGFILE, "w")
+    try:
+        child = subprocess.Popen(argv, env=launch_env(), stdin=subprocess.DEVNULL,
+                                 stdout=out, stderr=out, start_new_session=True,
+                                 preexec_fn=lower_priority)
+    except (OSError, subprocess.SubprocessError) as e:
+        log("could not start Equibop: %s" % e)
+        return 1
+    finally:
+        out.close()
+    me = os.getpid()
+    tmp = PIDFILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({"helper": me, "helper_start": proc_start_time(me),
+                   "equibop": child.pid}, f)
+    os.replace(tmp, PIDFILE)
+    log("Equibop started for Rich Presence only (pid %d, hidden, muted): %s"
+        % (child.pid, " ".join(shlex.quote(a) for a in argv)))
+
+    stopping = []
+
+    def on_signal(signum, _frame):
+        stopping.append(signum)
+
+    for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(s, on_signal)
+
+    linked = None
+    started = time.monotonic()
+    why = "owner exited"
+    while True:
+        if stopping:
+            why = "asked to stop"
+            break
+        if not alive(owner, owner_start):
+            break
+        if child.poll() is not None:
+            why = "Equibop exited by itself (%s)" % child.returncode
+            break
+        if app["kind"] == "flatpak" and time.monotonic() - started < SOCKET_WAIT_S:
+            linked = link_flatpak_socket(linked)
+        time.sleep(POLL_S)
+
+    stop_child(child, app)
+    restore_window_state(state_path, window)
+    if linked and os.path.islink(linked):
+        try:
+            os.unlink(linked)
+        except OSError:
+            pass
+    try:
+        if (read_json(PIDFILE) or {}).get("helper") == me:
+            os.unlink(PIDFILE)
+    except OSError:
+        pass
+    log("Equibop stopped: %s" % why)
+    return 0
+
+
+def cmd_stop():
+    pid = running_helper()
+    if pid is None:
+        return 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return 0
+    deadline = time.monotonic() + STOP_GRACE_S + 5
+    while time.monotonic() < deadline and running_helper() is not None:
+        time.sleep(0.2)
+    return 0 if running_helper() is None else 1
+
+
+USAGE = """usage: rime-gaming-discord status [--json]
+       rime-gaming-discord set on|off
+       rime-gaming-discord run --owner PID
+       rime-gaming-discord stop"""
+
+
+def main(args):
+    if not args:
+        print(USAGE, file=sys.stderr)
+        return 2
+    cmd, rest = args[0], args[1:]
+    if cmd == "status" and rest in ([], ["--json"]):
+        return cmd_status(rest == ["--json"])
+    if cmd == "set" and len(rest) == 1 and rest[0] in ("on", "off"):
+        set_setting(rest[0] == "on")
+        return cmd_status(False)
+    if cmd == "run" and len(rest) == 2 and rest[0] == "--owner" and rest[1].isdigit():
+        return cmd_run(int(rest[1]))
+    if cmd == "stop" and not rest:
+        return cmd_stop()
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
