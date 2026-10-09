@@ -740,11 +740,16 @@ So Gaming Mode starts Equibop itself, with nothing of it on screen or audible.
   `SteamGamepadUI` removed (with `XDG_CURRENT_DESKTOP=gamescope` they make
   Equibop go full screen over Steam, `src/main/utils/steamOS.ts`);
   `PULSE_SERVER` pointed nowhere (Flatpak: `--nosocket=pulseaudio`);
-- nice 10 with RLIMIT_NICE 10. With only a relative nice, Chromium put its
-  browser, GPU and arRPC processes back at nice −8 (measured in gamescope);
-- stopped (process group TERM, then KILL) within 2 s of Steam exiting, and by
-  `rime-gaming-session`'s cleanup, so the desktop's own Equibop starts
-  normally afterwards.
+- nice 10 with RLIMIT_NICE at most 10 (only ever lowered: a hard limit of 0,
+  the kernel default, cannot be raised). With only a relative nice, Chromium
+  put its browser, GPU and arRPC processes back at nice −8 (measured in
+  gamescope);
+- stopped (process group TERM, then KILL) once Steam exits, polled every
+  0.5 s (measured: 1.6 s from Steam exiting to the last Equibop process gone),
+  and by `rime-gaming-session`'s cleanup, so the desktop's own Equibop starts
+  normally afterwards. Its saved window size (`state.json` `windowBounds`,
+  `maximized`, `minimized`) is put back: the hidden run would otherwise leave
+  gamescope's screen size there.
 
 It refuses, with the reason in the session log and in Settings → Gaming, when
 Equibop is missing, arRPC is off in Equibop (`settings.json` `arRPC`), Equibop

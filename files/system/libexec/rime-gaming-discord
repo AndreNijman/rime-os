@@ -23,7 +23,8 @@
 #  measured in a headless gamescope: GAMESCOPE_FOCUSABLE_WINDOWS stayed empty
 #  while arRPC created discord-ipc-0), no sound (PULSE_SERVER points nowhere,
 #  or --nosocket=pulseaudio for the Flatpak), no GPU (--disable-gpu), at nice
-#  10 with RLIMIT_NICE holding it there. It runs only while Steam does and is stopped when Gaming Mode ends, so
+#  10 with RLIMIT_NICE holding it there. Its window size, which Equibop saves
+#  on quit, is put back afterwards. It runs only while Steam does and is stopped when Gaming Mode ends, so
 #  the desktop's own Equibop starts normally afterwards.
 #
 #  WHEN IT REFUSES, AND WHY
@@ -57,7 +58,9 @@ EXTRA_ARGS = ["--start-minimized", "--ozone-platform=x11", "--disable-gpu"]
 # Environment that makes Equibop believe it is in Steam Deck Game Mode.
 DECK_ENV = ("SteamOS", "SteamGamepadUI")
 MUTE_PULSE = "unix:/nonexistent/rime-gaming-discord"
-POLL_S = float(os.environ.get("RIME_GAMING_DISCORD_POLL", "2"))
+# Steam exiting is noticed within POLL_S: everything here descends from Steam,
+# and gamescope's reaper waits for all of it before Gaming Mode can end.
+POLL_S = float(os.environ.get("RIME_GAMING_DISCORD_POLL", "0.5"))
 STOP_GRACE_S = float(os.environ.get("RIME_GAMING_DISCORD_GRACE", "10"))
 SOCKET_WAIT_S = float(os.environ.get("RIME_GAMING_DISCORD_SOCKET_WAIT", "90"))
 
@@ -312,7 +315,13 @@ def lower_priority():
     threads to nice -8 when RLIMIT_NICE lets it (measured: Equibop's browser,
     GPU and arRPC processes at -8 in gamescope with only a relative nice)."""
     os.setpriority(os.PRIO_PROCESS, 0, 10)
-    resource.setrlimit(resource.RLIMIT_NICE, (10, 10))
+    # RLIMIT_NICE r lets a process go down to nice 20 - r, so a smaller r is
+    # stricter. Only ever lower it: an unprivileged process cannot raise its
+    # hard limit, and the kernel default (0: no raising at all) is stricter
+    # than 10 already.
+    _soft, hard = resource.getrlimit(resource.RLIMIT_NICE)
+    cap = 10 if hard == resource.RLIM_INFINITY else min(10, hard)
+    resource.setrlimit(resource.RLIMIT_NICE, (cap, cap))
 
 
 def stop_child(child, app):
@@ -335,6 +344,41 @@ def stop_child(child, app):
     except ProcessLookupError:
         pass
     child.wait()
+
+
+# Equibop saves its window's size when it quits, and the hidden one's is
+# gamescope's screen (measured: windowBounds became 1279x719). Put back what the
+# desktop's Equibop had, and only those keys: anything else it wrote (an
+# updater snooze, a version) stays.
+WINDOW_KEYS = ("windowBounds", "maximized", "minimized")
+
+
+def window_state(path):
+    state = read_json(path) or {}
+    return {k: state[k] for k in WINDOW_KEYS if k in state}
+
+
+def restore_window_state(path, saved):
+    state = read_json(path)
+    if state is None:
+        return
+    changed = False
+    for k in WINDOW_KEYS:
+        if k in saved and state.get(k) != saved[k]:
+            state[k] = saved[k]
+            changed = True
+        elif k not in saved and k in state:
+            del state[k]
+            changed = True
+    if not changed:
+        return
+    tmp = path + ".rime-tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=4)
+        os.replace(tmp, path)
+    except OSError as e:
+        log("could not put Equibop's window size back: %s" % e)
 
 
 def link_flatpak_socket(linked):
@@ -373,6 +417,8 @@ def cmd_run(owner):
         log("Equibop is already running (pid %d); games use its Rich Presence" % held)
         return 0
 
+    state_path = os.path.join(config_dir(app), "state.json")
+    window = window_state(state_path)
     argv = launch_argv(app)
     os.makedirs(os.path.dirname(LOGFILE), exist_ok=True)
     out = open(LOGFILE, "w")
@@ -380,7 +426,7 @@ def cmd_run(owner):
         child = subprocess.Popen(argv, env=launch_env(), stdin=subprocess.DEVNULL,
                                  stdout=out, stderr=out, start_new_session=True,
                                  preexec_fn=lower_priority)
-    except OSError as e:
+    except (OSError, subprocess.SubprocessError) as e:
         log("could not start Equibop: %s" % e)
         return 1
     finally:
@@ -419,6 +465,7 @@ def cmd_run(owner):
         time.sleep(POLL_S)
 
     stop_child(child, app)
+    restore_window_state(state_path, window)
     if linked and os.path.islink(linked):
         try:
             os.unlink(linked)

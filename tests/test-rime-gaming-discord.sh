@@ -51,7 +51,8 @@ install_native() {
     cat > "${H}/bin/equibop-real" <<FAKE
 #!/usr/bin/env bash
 { printf 'ARGV'; printf ' %s' "\$@"; printf '\n'; env; } > "${REC}"
-trap 'echo stopped >> "${REC}.stopped"; exit 0' TERM
+st="${H}/.config/equibop/state.json"
+trap 'echo stopped >> "${REC}.stopped"; [ -f "\$st" ] && python3 -c "import json,sys; p=sys.argv[1]; d=json.load(open(p)); d.update(windowBounds={\"width\": 1279, \"height\": 719}, maximized=False, updater={\"snoozeUntil\": 5}); json.dump(d, open(p, \"w\"))" "\$st"; exit 0' TERM
 while :; do sleep 0.1; done
 FAKE
     chmod +x "${H}/bin/equibop-real"
@@ -69,7 +70,8 @@ EOF
     mkdir -p "${H}/.config/equibop"
     printf '{"arRPC": %s, "minimizeToTray": true}\n' "$arrpc" > "${H}/.config/equibop/settings.json"
     if [ "$first" = false ]; then
-        printf '{"firstLaunch": false}\n' > "${H}/.config/equibop/state.json"
+        printf '{"firstLaunch": false, "maximized": true, "windowBounds": {"width": 1920, "height": 1080}}\n' \
+            > "${H}/.config/equibop/state.json"
     else
         printf '{"lastElectronVersion": "43.7.1"}\n' > "${H}/.config/equibop/state.json"
     fi
@@ -180,7 +182,8 @@ check "…keeps DISPLAY (gamescope's Xwayland)" 'grep -qx "DISPLAY=:1" "$REC"'
 # shellcheck disable=SC2034
 epid="$(pgrep -f "${H}/bin/equibop-real" | head -1)"
 check "…at nice 10" '[ -n "$epid" ] && [ "$(ps -o ni= -p "$epid" | tr -d " ")" = 10 ]'
-check "…and cannot raise itself (RLIMIT_NICE 10)" '[ -n "$epid" ] && grep -E "^Max nice priority +10 +10" "/proc/${epid}/limits" >/dev/null'
+check "…and cannot raise itself (RLIMIT_NICE at most 10)" \
+    '[ -n "$epid" ] && awk "/^Max nice priority/ { exit !(\$4 <= 10 && \$5 <= 10) }" "/proc/${epid}/limits"'
 check "…in its own session (stopped as a group)" '[ -n "$epid" ] && [ "$(ps -o sid= -p "$epid" | tr -d " ")" = "$epid" ]'
 check "status reports it running" '[ "$(js "[\"running\"]")" = True ]'
 check "a second run while one is running starts nothing new" \
@@ -192,6 +195,21 @@ check "owner (Steam) exits: the helper exits" '! kill -0 "$HP" 2>/dev/null'
 check "…and Equibop was stopped" '[ -e "${REC}.stopped" ] && ! pgrep -f "${H}/bin/equibop-real" >/dev/null'
 check "…and the pidfile is gone" '[ ! -e "${RUN}/rime-gaming-discord.pid" ]'
 check "…and the log says why" 'grep -q "Equibop stopped: owner exited" "${H}/log"'
+sj() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))$1)" "${H}/.config/equibop/state.json"; }
+check "Equibop's window size is put back after the hidden run" \
+    '[ "$(sj "[\"windowBounds\"][\"width\"]")" = 1920 ] && [ "$(sj "[\"maximized\"]")" = True ]'
+check "…and only that: what else it wrote stays" '[ "$(sj "[\"updater\"][\"snoozeUntil\"]")" = 5 ]'
+
+printf '\n\033[1m── a session that may not raise priority at all ──\033[0m\n'
+# The kernel's default hard RLIMIT_NICE is 0. Raising a hard limit is refused
+# unprivileged, so the cap must only ever lower it.
+rm -f "$REC" "${REC}.stopped"
+start_owner
+hx prlimit --nice=0:0 python3 "$HELPER" run --owner "$OWNER" 2>"${H}/log" & HP=$!; PIDS+=("$HP")
+wait_for '[ -s "$REC" ]' 10
+check "hard RLIMIT_NICE 0: Equibop still starts" '[ -s "$REC" ]' "$(cat "${H}/log")"
+kill "$OWNER"
+wait_for '! kill -0 "$HP" 2>/dev/null' 10
 
 printf '\n\033[1m── stop ──\033[0m\n'
 rm -f "$REC" "${REC}.stopped"
