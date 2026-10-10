@@ -8,7 +8,7 @@ IDs never change.
 
 - **Bus name:** `org.rimeos.Rimed1`
 - **Object path:** `/org/rimeos/Rimed1`
-- All six interfaces live on that one object path.
+- All seven interfaces live on that one object path.
 
 ## Tier IDs (frozen)
 
@@ -214,6 +214,27 @@ and after a session, so quoting it as a release discriminator proved nothing,
 and the surface makes that visible instead of leaving a reader to infer it. It
 matters more for `scx_btf`: you can learn that no Gaming Mode session can carry
 a scheduler **without starting one**.
+
+## `org.rimeos.Rimed1.Mode` (2026-10-10)
+
+The mode the user chose, kept across restarts in `/var/lib/rimed/mode`
+(`StateDirectory=rimed`). At every start rimed plans the held mode against its
+own initial state (`rimed_core::mode::plan`) and applies it itself.
+
+| Member | Kind | Signature | Notes |
+|---|---|---|---|
+| `Held` | property (r) | `s` | Held mode id, `""` when nothing is held (Daily) |
+| `Hold(mode)` | method | `s` → `` | Hold a mode; `daily` or `""` releases. Moves no lever. InvalidArgs for an unknown id. polkit `manage-power` |
+
+`rime mode set` calls `Hold` before it moves any lever. While the held mode
+keeps game mode on (Gaming), two existing behaviours change, on purpose:
+
+- `GameMode.SetActive(false)` fails (`org.freedesktop.DBus.Error.Failed`, the
+  message names `rime mode set daily`) while game mode is active. Without this,
+  gamemode.ini's `end=` hook (every desktop game that quits) and Gaming Mode's
+  EXIT trap ended the mode the user had turned on.
+- `GameMode.StartOwnedBy` on the held session does not adopt the owner, so
+  Gaming Mode ending does not release it.
 
 ## Authorization
 

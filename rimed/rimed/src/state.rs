@@ -7,6 +7,7 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use rimed_core::battery::BatteryInventory;
 use rimed_core::gpu::NvidiaSmi;
+use rimed_core::mode::ModeId;
 use rimed_core::profile::Profile;
 use rimed_core::syswriter::SysWriter;
 use rimed_core::tier::Tier;
@@ -66,6 +67,12 @@ pub struct Ctx {
     /// M6: the active game session, if any.
     pub game: Mutex<Option<GameSession>>,
     pub state: Mutex<State>,
+    /// The mode the user chose, kept across restarts (see `hold.rs`). In
+    /// memory as well as on disk, so the guards read no file per call.
+    pub held: Mutex<Option<ModeId>>,
+    /// Where the held mode is written (`$STATE_DIRECTORY/mode`); a fixture
+    /// path in tests, so no suite can write the host's choice.
+    pub mode_file: PathBuf,
 }
 
 impl Ctx {
@@ -81,6 +88,7 @@ impl Ctx {
         proc_irq_root: impl Into<PathBuf>,
         proc_root: impl Into<PathBuf>,
         nvidia: Arc<dyn NvidiaSmi>,
+        mode_file: impl Into<PathBuf>,
     ) -> Arc<Ctx> {
         let sys_root = sys_root.into();
         let fan_cfg = set
@@ -103,6 +111,8 @@ impl Ctx {
             nvidia,
             game: Mutex::new(None),
             state: Mutex::new(initial),
+            held: Mutex::new(None),
+            mode_file: mode_file.into(),
         })
     }
 

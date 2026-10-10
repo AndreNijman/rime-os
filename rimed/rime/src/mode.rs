@@ -4,9 +4,15 @@
 //!
 //! Setting a mode is a short sequence of the frozen `org.rimeos.Rimed1` calls a
 //! user could type by hand: `Power.SetAutoSwitch`, `Power.SetTier`,
-//! `GameMode.SetActive`. There is no new D-Bus member, no daemon state and no
-//! mode file on disk — the active mode is *derived* from what the daemon
-//! reports, so it cannot go stale and `rime mode set` needs no root.
+//! `GameMode.SetActive`. The active mode is still *derived* from what the
+//! daemon reports, so it cannot go stale and `rime mode set` needs no root.
+//!
+//! One thing is kept (2026-10-10): the mode CHOSEN, through `Mode.Hold`, which
+//! rimed writes to `/var/lib/rimed/mode` and applies again at every start.
+//! Without it a reboot was Daily by construction, and Settings → Gaming's
+//! "Gaming" lasted until the next boot or the next game to quit. `Hold` is
+//! called before the levers move: holding Gaming makes `SetActive(false)`
+//! refuse, so leaving it has to release the hold first (rimed/src/hold.rs).
 //!
 //! The polkit action behind the tier calls (`manage-power`) is `allow_active=yes`,
 //! so an ordinary user on the seat authorises without a prompt. That matters
@@ -38,7 +44,7 @@ use rimed_core::tier::Tier;
 use rimed_core::workload::{self, Assessment, Roots, Signal};
 use clap::{Args, Subcommand};
 
-use crate::proxy::{connect, daemon_running, GameModeProxy, PowerProxy};
+use crate::proxy::{connect, daemon_running, GameModeProxy, ModeProxy, PowerProxy};
 
 /// The environment variable that makes `rime mode set` refuse to act.
 pub const NO_APPLY_ENV: &str = "RIME_MODE_NO_APPLY";
@@ -279,6 +285,18 @@ async fn cmd_status() -> i32 {
     kv("auto-switch", if state.auto_switch { "on" } else { "off" });
     kv("game mode", if state.game_active { "on" } else { "off" });
 
+    // What rimed puts back at its next start. Silent on an older rimed.
+    if let Some(conn) = connect().await {
+        if let Ok(p) = ModeProxy::new(&conn).await {
+            if let Ok(h) = p.held().await {
+                kv(
+                    "kept",
+                    if h.is_empty() { "daily (nothing held)" } else { h.as_str() },
+                );
+            }
+        }
+    }
+
     let m = mode::identify(&state);
     println!();
     if m.exact.is_empty() {
@@ -371,6 +389,15 @@ async fn cmd_set(name: Option<String>, auto: bool, dry_run: bool) -> i32 {
         }
     };
 
+    // Keep the choice across restarts, BEFORE any lever moves (see the module
+    // header). Also when the levers already match: "already in gaming" after a
+    // boot of an older image still has to be remembered from now on.
+    if !dry_run {
+        if let Err(code) = hold(id).await {
+            return code;
+        }
+    }
+
     let spec = id.spec();
     let steps = mode::plan(spec, &state);
     if steps.is_empty() {
@@ -402,6 +429,51 @@ async fn cmd_set(name: Option<String>, auto: bool, dry_run: bool) -> i32 {
     println!("rime: mode -> {id}");
     report_unapplied(spec);
     0
+}
+
+/// Tell rimed to keep `id` across restarts. An rimed without the `Mode`
+/// interface (an image older than 2026-10-10) is not an error: the mode is set
+/// as before and the user is told it will not survive a restart.
+async fn hold(id: ModeId) -> Result<(), i32> {
+    let Some(conn) = connect().await else {
+        eprintln!("rime: cannot reach the system bus.");
+        return Err(1);
+    };
+    let proxy = match ModeProxy::new(&conn).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("rime: cannot reach rimed's Mode interface: {e}");
+            return Err(1);
+        }
+    };
+    match proxy.hold(id.as_str()).await {
+        Ok(()) => Ok(()),
+        Err(zbus::Error::MethodError(name, _, _))
+            if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod"
+                || name.as_str() == "org.freedesktop.DBus.Error.UnknownInterface"
+                || name.as_str() == "org.freedesktop.DBus.Error.UnknownObject" =>
+        {
+            eprintln!(
+                "rime: this rimed cannot keep a mode across a restart (it predates\n\
+                 \x20     `Mode.Hold`); '{id}' lasts until the next boot."
+            );
+            Ok(())
+        }
+        Err(zbus::Error::FDO(e)) if matches!(*e, zbus::fdo::Error::UnknownMethod(_)
+            | zbus::fdo::Error::UnknownInterface(_)
+            | zbus::fdo::Error::UnknownObject(_)) =>
+        {
+            eprintln!(
+                "rime: this rimed cannot keep a mode across a restart (it predates\n\
+                 \x20     `Mode.Hold`); '{id}' lasts until the next boot."
+            );
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("rime: keeping '{id}' across restarts failed: {e}");
+            Err(1)
+        }
+    }
 }
 
 /// True when the apply guard is set to anything truthy.

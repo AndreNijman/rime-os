@@ -12,6 +12,7 @@
 mod dbus;
 mod fan;
 mod game;
+mod hold;
 mod metrics;
 mod polkit;
 mod state;
@@ -26,8 +27,8 @@ use rimed_core::syswriter::{RealWriter, SysWriter};
 use rimed_core::{select, Fingerprint, ProfileSet};
 
 use crate::dbus::{
-    BatteryIface, FanIface, GameModeIface, MetricsIface, PowerIface, ProfileIface, BUS_NAME,
-    OBJECT_PATH,
+    BatteryIface, FanIface, GameModeIface, MetricsIface, ModeIface, PowerIface, ProfileIface,
+    BUS_NAME, OBJECT_PATH,
 };
 use crate::state::{read_ac_online, Ctx, State};
 
@@ -87,6 +88,7 @@ async fn main() -> Result<()> {
         Path::new(rimed_core::irq::PROC_IRQ),
         Path::new("/proc"),
         nvidia,
+        mode_file(),
     );
 
     eprintln!("rimed: batteries: {}", ctx.batteries.summary());
@@ -101,7 +103,11 @@ async fn main() -> Result<()> {
     ctx.apply_tier(initial_tier).await.ok();
     ctx.fan.apply_default().await;
 
-    // Build the D-Bus service: six interfaces on one path.
+    // The mode the user chose, put back. Every start, not only boot: a daemon
+    // restart (an update, `Restart=on-failure`) is "anything happens" too.
+    ctx.restore_held().await;
+
+    // Build the D-Bus service: seven interfaces on one path.
     let conn = zbus::connection::Builder::system()
         .context("connecting to the system bus")?
         .name(BUS_NAME)
@@ -112,6 +118,7 @@ async fn main() -> Result<()> {
         .serve_at(OBJECT_PATH, MetricsIface { ctx: ctx.clone() })?
         .serve_at(OBJECT_PATH, FanIface { ctx: ctx.clone() })?
         .serve_at(OBJECT_PATH, GameModeIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, ModeIface { ctx: ctx.clone() })?
         .build()
         .await
         .context("building the D-Bus service")?;
@@ -142,6 +149,16 @@ async fn main() -> Result<()> {
     //    pinned to `performance` with nothing left to walk it back down.
     ctx.apply_tier(rimed_core::Tier::Balanced).await.ok();
     Ok(())
+}
+
+/// `$STATE_DIRECTORY/mode` (rimed.service sets `StateDirectory=rimed`), else
+/// `/var/lib/rimed/mode`.
+fn mode_file() -> std::path::PathBuf {
+    let dir = std::env::var_os("STATE_DIRECTORY")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| hold::DEFAULT_STATE_DIR.into());
+    dir.join(hold::MODE_FILE)
 }
 
 /// Poll AC state; on a transition, update state, emit the property change, and

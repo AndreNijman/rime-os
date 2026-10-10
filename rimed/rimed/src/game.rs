@@ -296,7 +296,11 @@ impl Ctx {
         {
             let mut existing = self.game.lock().await;
             if let Some(session) = existing.as_mut() {
-                if session.owner.is_none() {
+                // A session the user is holding on (`hold.rs`) is nobody's
+                // to end: adopting Gaming Mode's pid here would hand it to the
+                // owner watch, which releases it when Gaming Mode exits.
+                let held = self.held_keeps_game().await;
+                if session.owner.is_none() && !held {
                     if let Some(pid) = owner_pid {
                         session.owner = owner_for_pid(&self.proc_root, pid);
                     }
@@ -949,6 +953,7 @@ mod tests {
     use super::*;
     use crate::state::{Ctx, State};
     use rimed_core::tier::Tier;
+    use rimed_core::mode::ModeId;
 
     /// A profile whose game mode changes nothing outside the daemon: no
     /// cpuset, no IRQ steering, no NVIDIA. What is left is exactly the tier
@@ -1029,6 +1034,7 @@ mod tests {
             proc_irq_root,
             root.join("proc"),
             Arc::new(MockNvidiaSmi::default()),
+            root.join("state/mode"),
         )
     }
 
@@ -1069,6 +1075,7 @@ mod tests {
             proc_irq_root,
             root.join("proc"),
             smi,
+            root.join("state/mode"),
         )
     }
 
@@ -2364,5 +2371,100 @@ mod tests {
         a.iter()
             .map(|x| u32::try_from(x.try_clone().unwrap()).unwrap())
             .collect()
+    }
+
+    // ── a held mode: the daily/gaming switch survives restarts ─────────────
+    //
+    // katana, 2026-10-10: "Gaming" in Settings went back to Daily at every
+    // boot, because rimed kept nothing. These pin the three halves of the fix:
+    // the start-up restore, the refusal a stray `rime game stop` now meets, and
+    // the owner a held session must never adopt.
+
+    #[tokio::test]
+    async fn a_held_gaming_mode_is_back_after_a_restart() {
+        let (ctx, writer) = ctx_with_writer("held-restore");
+        std::fs::create_dir_all(ctx.mode_file.parent().unwrap()).unwrap();
+        std::fs::write(&ctx.mode_file, "gaming\n").unwrap();
+
+        // What main.rs does at start-up, after the profile defaults.
+        assert_eq!(ctx.restore_held().await, Some(ModeId::Gaming));
+        assert!(ctx.game_active().await, "game mode is on again");
+        {
+            let st = ctx.state.lock().await;
+            assert_eq!(st.tier, Tier::Performance, "the tier is pinned again");
+            assert!(!st.auto_switch, "auto-switch stays off, as Gaming wants it");
+        }
+        assert!(writer.recorded().contains(&Action::ScxSwitch { sched: "scx_lavd".into() }));
+        let game_active = ctx.game_active().await;
+        let (tier, auto_switch) = {
+            let st = ctx.state.lock().await;
+            (st.tier, st.auto_switch)
+        };
+        let state = rimed_core::mode::ModeState { tier, auto_switch, game_active };
+        assert!(
+            rimed_core::mode::identify(&state).exact.contains(&ModeId::Gaming),
+            "`rime mode status` must read Gaming, not custom"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_held_starts_exactly_as_before() {
+        let (ctx, writer) = ctx_with_writer("held-none");
+        assert_eq!(ctx.restore_held().await, None);
+        assert!(!ctx.game_active().await);
+        assert!(writer.recorded().is_empty(), "no file, no write: {:?}", writer.recorded());
+        // A file that names no mode is the same as none.
+        std::fs::create_dir_all(ctx.mode_file.parent().unwrap()).unwrap();
+        std::fs::write(&ctx.mode_file, "turbo").unwrap();
+        assert_eq!(ctx.restore_held().await, None);
+        assert!(!ctx.game_active().await);
+    }
+
+    #[tokio::test]
+    async fn a_stray_game_stop_cannot_end_a_held_gaming_mode() {
+        let (ctx, _w) = ctx_with_writer("held-refuse");
+        ctx.set_held(Some(ModeId::Gaming)).await.unwrap();
+        ctx.game_enter(&[]).await.unwrap();
+        let why = ctx
+            .game_stop_refusal()
+            .await
+            .expect("gamemode.ini's end= hook must be refused while Gaming is held");
+        assert!(why.contains("rime mode set daily"), "the refusal names the way out: {why}");
+
+        // Choosing Everyday releases the hold first; then the stop goes ahead.
+        ctx.set_held(Some(ModeId::Daily)).await.unwrap();
+        assert!(!ctx.mode_file.exists(), "Everyday leaves nothing on disk");
+        assert_eq!(ctx.game_stop_refusal().await, None);
+        ctx.game_exit().await.unwrap();
+        assert!(!ctx.game_active().await);
+
+        // A mode that does not keep game mode on refuses nothing.
+        ctx.set_held(Some(ModeId::Development)).await.unwrap();
+        ctx.game_enter(&[]).await.unwrap();
+        assert_eq!(ctx.game_stop_refusal().await, None);
+        assert_eq!(
+            std::fs::read_to_string(&ctx.mode_file).unwrap(),
+            "development\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn gaming_mode_ending_does_not_release_a_held_session() {
+        let (ctx, _w) = ctx_with_writer("held-owner");
+        std::fs::create_dir_all(ctx.mode_file.parent().unwrap()).unwrap();
+        std::fs::write(&ctx.mode_file, "gaming\n").unwrap();
+        ctx.restore_held().await;
+
+        // Gaming Mode starts on top: `rime game start --owner-pid $$`.
+        spawn_fake_owner(&ctx, 4250, 900_500);
+        ctx.game_enter_owned(&[], Some(4250)).await.unwrap();
+        assert_eq!(
+            u32_of(&ctx.game_status().await, "owner_pid"),
+            0,
+            "a held session is nobody's to end"
+        );
+        kill_fake_owner(&ctx, 4250);
+        assert_eq!(ctx.game_release_if_owner_gone().await.unwrap(), None);
+        assert!(ctx.game_active().await, "Gaming Mode exiting left Gaming on");
     }
 }

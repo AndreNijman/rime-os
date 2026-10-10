@@ -173,11 +173,14 @@ wait_for '[ -s "$REC" ]' 10
 check "Equibop started" '[ -s "$REC" ]' "$(cat "${H}/log")"
 check "…through the desktop entry's Exec (the user's own wrapper)" 'grep -qx "WRAPPED=1" "$REC"'
 check "…with its Exec arguments, field code dropped" 'head -1 "$REC" | grep -q "^ARGV --no-sandbox --start-minimized" && ! grep -q "%U" "$REC"'
-check "…hidden, on X11, without the GPU" 'head -1 "$REC" | grep -q -- "--start-minimized --ozone-platform=x11 --disable-gpu$"'
+check "…hidden, on X11, without the GPU, muted" 'head -1 "$REC" | grep -q -- "--start-minimized --ozone-platform=x11 --disable-gpu --mute-audio$"'
 check "…not the desktop action's Exec" '! grep -q wrong-one "$REC"'
 check "…without SteamOS / SteamGamepadUI (Equibop's Deck full screen)" '! grep -q "^SteamOS=" "$REC" && ! grep -q "^SteamGamepadUI=" "$REC"'
 check "…without WAYLAND_DISPLAY" '! grep -q "^WAYLAND_DISPLAY=" "$REC"'
 check "…muted (PULSE_SERVER points nowhere)" 'grep -qx "PULSE_SERVER=unix:/nonexistent/rime-gaming-discord" "$REC"'
+# PULSE_SERVER alone let Chromium fall back to ALSA -> PipeWire: notification
+# sounds played in Gaming Mode (2026-10-10).
+check "…and PIPEWIRE_REMOTE points nowhere (no ALSA fallback into PipeWire)" 'grep -qx "PIPEWIRE_REMOTE=/nonexistent/rime-gaming-discord" "$REC"'
 check "…keeps DISPLAY (gamescope's Xwayland)" 'grep -qx "DISPLAY=:1" "$REC"'
 # shellcheck disable=SC2034
 epid="$(pgrep -f "${H}/bin/equibop-real" | head -1)"
@@ -267,9 +270,9 @@ start_owner
 helper run --owner "$OWNER" 2>"${H}/log" & HP=$!; PIDS+=("$HP")
 wait_for '[ -L "${RUN}/discord-ipc-0" ]' 10
 check "flatpak run gets --nosocket=pulseaudio --socket=x11 before the app id" \
-    'head -1 "$REC" | grep -q "^ARGV run --nosocket=pulseaudio --socket=x11 --branch=stable"'
+    'head -1 "$REC" | grep -q "^ARGV run --nosocket=pulseaudio --socket=x11 --env=PIPEWIRE_REMOTE=/nonexistent/rime-gaming-discord --branch=stable"'
 check "…and the hidden flags after it, without @@ markers" \
-    'head -1 "$REC" | grep -q "${FPID} --start-minimized --ozone-platform=x11 --disable-gpu$" && ! grep -q "@@" "$REC"'
+    'head -1 "$REC" | grep -q "${FPID} --start-minimized --ozone-platform=x11 --disable-gpu --mute-audio$" && ! grep -q "@@" "$REC"'
 check "the Flatpak's socket is linked where games look" \
     '[ "$(readlink "${RUN}/discord-ipc-0")" = "${RUN}/app/${FPID}/discord-ipc-0" ]'
 kill "$OWNER"

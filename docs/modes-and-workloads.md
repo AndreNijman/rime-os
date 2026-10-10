@@ -16,8 +16,12 @@ the CLI could already do:
 | AC/battery auto-switch | `org.rimeos.Rimed1.Power.SetAutoSwitch` |
 | game mode (cpuset, IRQ steering, GPU clock locks, sched-ext) | `org.rimeos.Rimed1.GameMode.SetActive` |
 
-Modes added no D-Bus member, and the frozen `org.rimeos.Rimed1` surface did
-not change.
+Modes changed no frozen member's signature. Since 2026-10-10 the chosen mode
+is kept across restarts: `rime mode set` first calls the additive
+`org.rimeos.Rimed1.Mode.Hold`, rimed writes `/var/lib/rimed/mode`, and puts that
+mode back at every start (Daily = no file). While Gaming is held,
+`rime game stop` is refused until another mode is chosen (see
+[rimed-dbus.md](rimed-dbus.md)).
 
 ```
 rime mode list             # the eight modes and the policy each applies
