@@ -638,6 +638,7 @@ pub fn status_json(t: &Txn, booted_release: Option<&str>) -> Value {
             json!({"digest": t.target_digest, "release": t.target_release})
         },
         "staged_for_boot": t.staged_for_boot,
+        "verified": !t.verification_overridden && !t.target_digest.is_empty(),
         "components": comps,
         "remaining": req_name(remaining),
         "recommendation": plan::recommend(remaining, t.soft_reboot_capable),
@@ -1108,6 +1109,20 @@ pub fn render_plan(p: &Plan) -> String {
 /// Close out an unfinished transaction from an earlier run.
 fn recover(paths: &Paths) -> Result<(), String> {
     let Some(mut t) = load_txn(paths)? else { return Ok(()) };
+    // A soft reboot keeps the boot id but changes the deployment: a record
+    // made against another booted image is over, and a live layer built for
+    // it must not be merged over this one.
+    if !t.booted_digest.is_empty() && t.state.may_move_to(State::Superseded) {
+        if let Ok(BootcStatus { booted: Some(b), .. }) = bootc_status() {
+            if !b.digest.is_empty() && b.digest != t.booted_digest {
+                if paths.layer().exists() {
+                    fs::remove_dir_all(paths.layer()).map_err(|e| format!("removing a stale live layer: {e}"))?;
+                    sysext_refresh(paths)?;
+                }
+                return advance(paths, &mut t, State::Superseded, "the machine now runs another deployment");
+            }
+        }
+    }
     match txn::recover(&t, &boot_id(paths)) {
         Recovery::Nothing => Ok(()),
         // The record keeps the boot it was verified in: rewriting it here
@@ -1187,12 +1202,28 @@ pub fn update(opts: LiveOptions) -> i32 {
     };
 
     // The deployment that was really staged, verified by digest.
-    if let Err(code) = crate::ops::verify_staged(opts.allow_unverified, &staged.image, &staged.digest) {
-        let _ = advance(&paths, &mut t, State::Failed, "the staged image did not verify; it stays locked and will not boot");
-        eprintln!("rime: the staged deployment is download-only and will not be booted.");
-        return code;
-    }
-    if let Err(e) = advance(&paths, &mut t, State::Verified, format!("{} verified after staging", staged.digest)) {
+    let verified = match crate::ops::verify_staged(opts.allow_unverified, &staged.image, &staged.digest) {
+        Ok(v) => v,
+        Err(code) => {
+            if staged.download_only {
+                let _ = advance(&paths, &mut t, State::Failed, "the staged image did not verify; it stays download-only and will not boot");
+                eprintln!("rime: the staged deployment is download-only and will not be booted.");
+            } else {
+                // Queued by something other than this engine (a bare `bootc
+                // upgrade`) before it could be checked. Said, not hidden.
+                let _ = advance(&paths, &mut t, State::Failed, "the staged image did not verify, and it was already queued for boot outside `rime update`");
+                eprintln!("rime: that deployment was queued for the next boot outside `rime update` and did not verify; see `sudo bootc status`.");
+            }
+            return code;
+        }
+    };
+    t.verification_overridden = !verified;
+    let note = if verified {
+        format!("{} verified after staging", staged.digest)
+    } else {
+        format!("{} did NOT verify; continuing because --allow-unverified was given", staged.digest)
+    };
+    if let Err(e) = advance(&paths, &mut t, State::Verified, note) {
         return fail(&paths, &mut t, e);
     }
 
@@ -1288,10 +1319,13 @@ fn activate(paths: &Paths, t: &mut Txn, m: &Measured, p: &Plan) -> i32 {
         })
         .collect();
     type Evidence = Vec<(Component, String)>;
-    let result = (|| -> Result<Evidence, (String, Option<Component>)> {
-        let next = build_layer(paths, &m.sdir, &p.live_set, &keep).map_err(|e| (e, None))?;
-        swap_in(paths, &next).map_err(|e| (format!("merging the live layer: {e}"), None))?;
-        verify_files(paths, &m.sdir, &p.live_set).map_err(|e| (e, None))?;
+    // (what went wrong, the component it happened in, and the deferral when it
+    // is not a failure but a session that locked between planning and acting)
+    type Stop = (String, Option<Component>, Option<DeferReason>);
+    let result = (|| -> Result<Evidence, Stop> {
+        let next = build_layer(paths, &m.sdir, &p.live_set, &keep).map_err(|e| (e, None, None))?;
+        swap_in(paths, &next).map_err(|e| (format!("merging the live layer: {e}"), None, None))?;
+        verify_files(paths, &m.sdir, &p.live_set).map_err(|e| (e, None, None))?;
         let rev = shell_revision(&m.sdir);
         let mut results = Vec::new();
         for a in &p.actions {
@@ -1305,9 +1339,9 @@ fn activate(paths: &Paths, t: &mut Txn, m: &Measured, p: &Plan) -> i32 {
                 Ok(ActResult::Deferred(r)) => {
                     // A session locked between planning and acting: the shell
                     // must not keep new files under an old process.
-                    return Err((r.describe(), comps.into_iter().next()));
+                    return Err((r.describe(), comps.into_iter().next(), Some(r)));
                 }
-                Err(e) => return Err((e, comps.into_iter().next())),
+                Err(e) => return Err((e, comps.into_iter().next(), None)),
             }
         }
         Ok(results)
@@ -1335,8 +1369,12 @@ fn activate(paths: &Paths, t: &mut Txn, m: &Measured, p: &Plan) -> i32 {
             finish_message(t);
             0
         }
-        Err((err, culprit)) => {
-            eprintln!("rime: live activation failed: {err}; undoing it");
+        Err((err, culprit, deferral)) => {
+            if deferral.is_some() {
+                eprintln!("rime: {err}; withdrawing what was put in place");
+            } else {
+                eprintln!("rime: live activation failed: {err}; undoing it");
+            }
             let _ = advance(paths, t, State::RollingBack, err.clone());
             let undo = restore_prev(paths);
             // The previous shell may predate the `shell` IPC target: accept any
@@ -1350,10 +1388,10 @@ fn activate(paths: &Paths, t: &mut Txn, m: &Measured, p: &Plan) -> i32 {
                     }
                 }
             }
-            let locked = err.starts_with("deferred while the screen is locked");
+            let locked = deferral.is_some();
             for c in &activating {
-                let o = if locked {
-                    Outcome::Deferred { reason: DeferReason::Locked(err.clone()) }
+                let o = if let Some(r) = &deferral {
+                    Outcome::Deferred { reason: r.clone() }
                 } else if undo.is_err() || !undo_errors.is_empty() {
                     Outcome::Failed { error: err.clone() }
                 } else if Some(*c) == culprit || culprit.is_none() {
@@ -1535,6 +1573,7 @@ pub fn apply(only: &[String]) -> i32 {
     let verified = prev.as_ref().is_some_and(|t| {
         t.target_digest == staged.digest
             && t.state != State::Superseded
+            && !t.verification_overridden
             && t.history.iter().any(|s| s.state == State::Verified)
             && t.boot_id == boot_id(&paths)
     });
@@ -1589,6 +1628,94 @@ pub fn apply(only: &[String]) -> i32 {
 
 /// `rime live rollback`: remove the live layer and re-activate what the
 /// deployment itself ships.
+/// `rime live soft-reboot`: restart userspace into the staged deployment.
+///
+/// Only ever on request, never from `rime update`. It closes every
+/// application, so it refuses unless `--yes` was given, and it acts only on a
+/// deployment this engine verified in this boot and bootc reports as
+/// soft-reboot capable (same kernel and initramfs). It refuses while a game is
+/// running. The live layer is removed first: it was built for the booted
+/// deployment and must not be merged over the new one.
+pub fn soft_reboot(yes: bool) -> i32 {
+    let paths = Paths::from_env();
+    let _lock = match flock(&paths.state_dir().join("lock"), "live update", 0) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("rime: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = recover(&paths) {
+        eprintln!("rime: {e}");
+    }
+    let st = match bootc_status() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("rime: {e}");
+            return 1;
+        }
+    };
+    let Some(staged) = &st.staged else {
+        println!("rime: nothing is staged; run `sudo rime update`");
+        return 0;
+    };
+    let t = match load_txn(&paths) {
+        Ok(Some(t))
+            if t.target_digest == staged.digest
+                && t.state != State::Superseded
+                && !t.verification_overridden
+                && t.history.iter().any(|s| s.state == State::Verified)
+                && t.boot_id == boot_id(&paths) =>
+        {
+            t
+        }
+        _ => {
+            eprintln!("rime: the staged deployment was not verified by `rime update` in this boot; run `sudo rime update`");
+            return 1;
+        }
+    };
+    if !staged.soft_reboot_capable {
+        eprintln!("rime: bootc reports this update cannot be applied by a soft reboot (its kernel or initramfs changes); restart instead");
+        return 1;
+    }
+    if let Some(Some(why)) = machine_state(&paths).busy {
+        eprintln!("rime: not now: {why}");
+        return 1;
+    }
+    if !yes {
+        println!("rime: a soft reboot restarts all of userspace into {} without restarting the kernel.", t.target_release.as_deref().unwrap_or("the staged release"));
+        println!("rime: every application closes and every session logs out. Run again with --yes to do it.");
+        return 2;
+    }
+    let mut t = t;
+    let had_layer = paths.layer().exists();
+    if had_layer {
+        if let Err(e) = fs::remove_dir_all(paths.layer()).map_err(|e| e.to_string()).and_then(|_| sysext_refresh(&paths)) {
+            eprintln!("rime: could not remove the live layer first: {e}");
+            return 1;
+        }
+    }
+    if t.state.may_move_to(State::Superseded) {
+        let _ = advance(&paths, &mut t, State::Superseded, "soft reboot into the staged deployment, on request");
+    }
+    let mut args = vec!["upgrade"];
+    if staged.download_only {
+        args.push("--from-downloaded");
+    }
+    args.extend(["--apply", "--soft-reboot=required"]);
+    match status_code("bootc", &args) {
+        Ok(0) => 0,
+        Ok(c) => {
+            eprintln!("rime: bootc could not soft-reboot (exit {c}); nothing restarted. The update still applies at the next restart.");
+            c
+        }
+        Err(e) => {
+            eprintln!("rime: {e}");
+            1
+        }
+    }
+}
+
 pub fn rollback() -> i32 {
     let paths = Paths::from_env();
     let _lock = match flock(&paths.state_dir().join("lock"), "live update", 0) {

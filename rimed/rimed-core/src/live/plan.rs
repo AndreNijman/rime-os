@@ -390,11 +390,11 @@ pub fn recommend(remaining: Requirement, soft_reboot_capable: bool) -> String {
         }
         Requirement::AppRestart => "restart the applications listed above when convenient".into(),
         Requirement::DriverReload => {
-            "restart when convenient (the driver can also be reloaded while the GPU is idle: `sudo rime live apply --only nvidia`)".into()
+            "restart when convenient (`rime live doctor` says whether this GPU driver could be reloaded live)".into()
         }
         Requirement::CompositorHandover | Requirement::SessionRestart => "log out and back in".into(),
         Requirement::SoftReboot if soft_reboot_capable => {
-            "restart when convenient; a userspace restart is enough (`sudo rime live soft-reboot`, closes all applications)".into()
+            "restart when convenient; a userspace restart is enough (`sudo rime live soft-reboot --yes`, closes all applications)".into()
         }
         Requirement::SoftReboot | Requirement::KernelTransition | Requirement::Reboot => {
             "restart when convenient".into()

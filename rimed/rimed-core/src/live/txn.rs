@@ -118,6 +118,10 @@ pub struct Txn {
     pub staged_for_boot: bool,
     #[serde(default)]
     pub soft_reboot_capable: bool,
+    /// The staged image did NOT verify and `--allow-unverified` let it
+    /// through. `rime live apply` never acts on such a record.
+    #[serde(default)]
+    pub verification_overridden: bool,
 }
 
 impl Txn {
@@ -137,6 +141,7 @@ impl Txn {
             history: vec![Step { state: State::Discovered, at: now, note: String::new() }],
             staged_for_boot: false,
             soft_reboot_capable: false,
+            verification_overridden: false,
         }
     }
 

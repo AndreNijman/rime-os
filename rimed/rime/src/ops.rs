@@ -744,7 +744,9 @@ fn trust_gate(allow_unverified: bool, target: Option<&str>) -> Option<i32> {
 /// staged. `trust_gate` answered for the digest the registry would serve; a
 /// tag can move between that lookup and the pull, so the digest that will
 /// boot is verified by itself before anything queues or activates it.
-pub(crate) fn verify_staged(allow_unverified: bool, reference: &str, digest: &str) -> Result<(), i32> {
+/// Ok(true) verified; Ok(false) did not verify and `--allow-unverified` was
+/// given (the caller records that, so nothing later trusts it as verified).
+pub(crate) fn verify_staged(allow_unverified: bool, reference: &str, digest: &str) -> Result<bool, i32> {
     let roots = crate::trust::Roots::from_env();
     if roots.fixture.is_some() {
         println!("rime: this program will not deploy on fixture facts");
@@ -760,12 +762,12 @@ pub(crate) fn verify_staged(allow_unverified: bool, reference: &str, digest: &st
                     eprintln!("rime: {line}");
                 }
             }
-            Ok(())
+            Ok(true)
         }
         Some(why) if allow_unverified => {
             eprint!("{why}");
             eprintln!("rime: proceeding anyway because --allow-unverified was given.");
-            Ok(())
+            Ok(false)
         }
         Some(why) => {
             eprint!("{why}");

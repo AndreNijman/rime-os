@@ -253,7 +253,7 @@ impl DeferReason {
     pub fn describe(&self) -> String {
         match self {
             DeferReason::Busy(s) => format!("deferred while the machine is busy: {s}"),
-            DeferReason::Locked(s) => format!("deferred while the screen is locked: {s}"),
+            DeferReason::Locked(s) => format!("deferred until the session is known to be unlocked: {s}"),
             DeferReason::Unproven(s) => format!("deferred, compatibility not proven: {s}"),
             DeferReason::Grouped(s) => format!("deferred together with {s}"),
             DeferReason::NotRequested => "not activated live (not requested)".to_string(),

@@ -13,8 +13,11 @@
 #  from the booted tree plus the layer, honouring whiteouts, so the engine's
 #  own post-merge verification reads real files.
 #
-#  Runs inside `unshare -Ur` (uid 0 in a user namespace) so the builder can
-#  chown and create whiteouts. Nothing outside a temp directory is touched;
+#  Runs inside `unshare -Urm` (uid 0 in a user and mount namespace) so the
+#  builder can chown and create whiteouts, and so `rime update`'s absolute
+#  helpers (/usr/bin/skopeo, the boot-path migration engine) can be replaced
+#  by stubs for this process only: the image signature check then fails
+#  closed, never reaching a registry. Nothing outside a temp directory is touched;
 #  `RIME_LIVE_ROOT` prefixes every path the engine uses.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
@@ -29,11 +32,11 @@ if [ "${RIME_LIVE_IN_NS:-0}" != 1 ]; then
         ( cd "$REPO/rimed" && cargo build --locked --bin rime ) || { echo "FATAL: build failed"; exit 2; }
     fi
     command -v unshare >/dev/null || { echo "SKIP: no unshare"; exit 0; }
-    if ! unshare -Ur true 2>/dev/null; then
+    if ! unshare -Urm true 2>/dev/null; then
         echo "SKIP: user namespaces are not available here"
         exit 0
     fi
-    exec env RIME_LIVE_IN_NS=1 RIME_BIN="$RIME_BIN" unshare -Ur "$(pwd)/$(basename "$0")" "$@"
+    exec env RIME_LIVE_IN_NS=1 RIME_BIN="$RIME_BIN" unshare -Urm "$(pwd)/$(basename "$0")" "$@"
 fi
 
 T=$(mktemp -d /tmp/rime-live-test.XXXXXX)
@@ -52,8 +55,13 @@ mkdir -p "$T/bin"
 cat > "$T/bin/bootc" <<STUB
 #!/bin/sh
 echo "bootc \$*" >> "$T/calls"
+# The staged deployment is download-only until --from-downloaded unlocks it.
+case "\$*" in
+  *--download-only*) echo true > "$T/dlonly" ;;
+  *--from-downloaded*) echo false > "$T/dlonly" ;;
+esac
 case "\$1" in
-  status) cat "$T/bootc-status.json" ;;
+  status) sed "s/@DLONLY@/\$(cat "$T/dlonly" 2>/dev/null || echo false)/; s/@SOFT@/\$(cat "$T/soft" 2>/dev/null || echo true)/" "$T/bootc-status.json" ;;
 esac
 STUB
 cat > "$T/bin/ostree" <<STUB
@@ -109,7 +117,7 @@ export PATH="$T/bin:$PATH" RIME_LIVE_ROOT="$R"
 mkfile() { mkdir -p "$(dirname "$1")"; printf '%s' "$2" > "$1"; }
 
 setup() {
-    rm -rf "$R" "$T/calls" "$T/helper-rc" "$T/sysext.fail"
+    rm -rf "$R" "$T/calls" "$T/helper-rc" "$T/sysext.fail" "$T/dlonly" "$T/soft"
     mkdir -p "$R/proc/sys/kernel/random" "$R/proc/4242" "$R/var/lib/rime/pkg" "$R/run/extensions"
     echo "boot-1" > "$R/proc/sys/kernel/random/boot_id"
     for d in "$BD" "$SD"; do
@@ -141,7 +149,7 @@ M    /usr/share/rime/release.json
 EOF
     cat > "$T/bootc-status.json" <<EOF
 {"status":{"booted":{"image":{"image":{"image":"ghcr.io/andrenijman/rime-os:daily","transport":"registry"},"imageDigest":"sha256:$(printf b%.0s $(seq 64))"},"ostree":{"checksum":"$B","deploySerial":0,"stateroot":"default"},"downloadOnly":false,"softRebootCapable":true},
-"staged":{"image":{"image":{"image":"ghcr.io/andrenijman/rime-os:daily","transport":"registry"},"imageDigest":"sha256:$(printf c%.0s $(seq 64))"},"ostree":{"checksum":"$S","deploySerial":0,"stateroot":"default"},"downloadOnly":false,"softRebootCapable":true},"rollback":null}}
+"staged":{"image":{"image":{"image":"ghcr.io/andrenijman/rime-os:daily","transport":"registry"},"imageDigest":"sha256:$(printf c%.0s $(seq 64))"},"ostree":{"checksum":"$S","deploySerial":0,"stateroot":"default"},"downloadOnly":@DLONLY@,"softRebootCapable":@SOFT@},"rollback":null}}
 EOF
     # What `rime update` leaves after verifying the staged digest.
     mkdir -p "$R/var/lib/rime/live"
@@ -245,6 +253,78 @@ grep -q '"state":"rolled-back"' "$R/var/lib/rime/live/history.jsonl" && grep -q 
 
 # 12. status --json is the document, for anyone.
 "$RIME_BIN" live status --json | python3 -I -c 'import json,sys; d=json.load(sys.stdin); assert d["schema"]==1' && ok "rime live status --json" || bad "status json" ""
+
+# ── `rime update` itself ─────────────────────────────────────────────────────
+# Both absolute helpers it may run are replaced, for this namespace only.
+printf '#!/bin/sh\necho "skopeo stub: no registry in this test" >&2\nexit 1\n' > "$T/skopeo"
+printf '#!/bin/sh\nexit 10\n' > "$T/boot-migrate"
+chmod +x "$T/skopeo" "$T/boot-migrate"
+[ -e /usr/bin/skopeo ] && mount --bind "$T/skopeo" /usr/bin/skopeo
+[ -e /usr/libexec/rime-boot-migrate ] && mount --bind "$T/boot-migrate" /usr/libexec/rime-boot-migrate
+export HOME="$T/home"; mkdir -p "$HOME"
+upd() { "$RIME_BIN" update --force --fsync --skip-packages --skip-flatpak --skip-firmware "$@" > "$T/out" 2>&1; echo $?; }
+nolayer_setup() { setup; rm -f "$R/var/lib/rime/live/txn.json"; }
+bootc_seq() { grep '^bootc upgrade' "$T/calls" | sed 's/^bootc upgrade *//' | tr '\n' '|'; }
+
+# 13. No signature, no --allow-unverified: nothing is pulled.
+nolayer_setup
+rc=$(upd)
+[ "$rc" != 0 ] && ! grep -q '^bootc upgrade' "$T/calls" && [ ! -e "$L" ] && ok "update: unverifiable image refused before any pull" || bad "update refusal" "rc=$rc $(bootc_seq) $(tail -3 "$T/out")"
+
+# 14. --plan: downloads to measure, never queues, never activates.
+nolayer_setup
+rc=$(upd --plan --allow-unverified)
+[ "$rc" = 0 ] && [ "$(bootc_seq)" = "--download-only|" ] && [ ! -e "$L" ] && ! grep -q systemd-run "$T/calls" \
+    && ok "update --plan: download-only, nothing queued or activated" || bad "plan" "rc=$rc seq=$(bootc_seq) $(tail -3 "$T/out")"
+grep -q 'Rime Shell' "$T/out" && ok "update --plan prints the per-component plan" || bad "plan output" "$(cat "$T/out")"
+
+# 15. --no-live: verified and queued for boot, nothing live.
+nolayer_setup
+rc=$(upd --no-live --allow-unverified)
+[ "$rc" = 0 ] && [ "$(bootc_seq)" = "--download-only|--from-downloaded|" ] && [ ! -e "$L/usr/share/rime-shell" ] \
+    && [ "$(jq_ "d['staged_for_boot']")" = True ] && ok "update --no-live: queued for boot, no live layer" || bad "no-live" "rc=$rc seq=$(bootc_seq) $(tail -3 "$T/out")"
+
+# 16. --live-only: activates now, leaves the deployment download-only.
+nolayer_setup
+rc=$(upd --live-only --allow-unverified)
+[ "$rc" = 0 ] && [ "$(bootc_seq)" = "--download-only|" ] && [ "$(cat "$R/usr/share/rime-shell/shell.qml")" = "new shell" ] \
+    && [ "$(jq_ "d['staged_for_boot']")" = False ] && ok "update --live-only: live, not queued" || bad "live-only" "rc=$rc seq=$(bootc_seq) $(tail -3 "$T/out")"
+
+# 17. Default: download, verify, queue, then activate, in that order.
+nolayer_setup
+rc=$(upd --allow-unverified)
+order="$(grep -nE '^bootc upgrade|^systemd-run' "$T/calls" | sed 's/:.*rime-live-session shell.*/:helper/; s/:bootc upgrade /:/' | cut -d: -f2 | tr '\n' ' ')"
+[ "$rc" = 0 ] && [ "$order" = "--download-only --from-downloaded helper " ] && [ "$(comp_state shell)" = active ] \
+    && ok "update: download → verify → queue → activate" || bad "update order" "rc=$rc order=$order $(tail -3 "$T/out")"
+
+# 18. An overridden verification is recorded as such and never trusted later.
+[ "$(jq_ "d['verified']")" = False ] && grep -q 'did NOT verify' "$R/var/lib/rime/live/history.jsonl" \
+    && ok "--allow-unverified is recorded, not called verified" || bad "override record" "$(jq_ "d.get('verified')")"
+"$RIME_BIN" live rollback >/dev/null 2>&1
+rc=$(apply)
+[ "$rc" = 1 ] && [ ! -e "$L" ] && ok "live apply refuses a deployment that only --allow-unverified let through" || bad "override trusted" "rc=$rc $(cat "$T/out")"
+
+# 19. Soft reboot: only on request, only verified, only when bootc says it can.
+setup
+"$RIME_BIN" live soft-reboot > "$T/out" 2>&1; rc=$?
+[ "$rc" = 2 ] && ! grep -q -- '--apply' "$T/calls" 2>/dev/null && grep -q -- '--yes' "$T/out" && ok "soft-reboot without --yes explains and does nothing" || bad "soft-reboot confirm" "rc=$rc $(cat "$T/out")"
+setup; echo false > "$T/soft"
+"$RIME_BIN" live soft-reboot --yes > "$T/out" 2>&1; rc=$?
+[ "$rc" = 1 ] && ! grep -q -- '--apply' "$T/calls" 2>/dev/null && ok "soft-reboot refused when bootc says it cannot apply the update" || bad "soft-reboot capable" "rc=$rc $(cat "$T/out")"
+setup; echo "boot-2" > "$R/proc/sys/kernel/random/boot_id"
+"$RIME_BIN" live soft-reboot --yes > "$T/out" 2>&1; rc=$?
+[ "$rc" = 1 ] && ! grep -q -- '--apply' "$T/calls" 2>/dev/null && ok "soft-reboot refused for an unverified deployment" || bad "soft-reboot verify" "rc=$rc"
+setup; apply >/dev/null; : > "$T/calls"
+"$RIME_BIN" live soft-reboot --yes > "$T/out" 2>&1; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$L" ] && grep -qx 'bootc upgrade --apply --soft-reboot=required' "$T/calls" \
+    && ok "soft-reboot --yes: live layer removed, bootc applies the queued deployment" || bad "soft-reboot" "rc=$rc $(cat "$T/calls") $(cat "$T/out")"
+grep -q '"state":"superseded"' "$R/var/lib/rime/live/history.jsonl" && ok "soft-reboot closes the transaction" || bad "soft-reboot txn" ""
+
+# 20. After a soft reboot (same boot id, another deployment) a stale layer is dropped.
+setup; apply >/dev/null
+sed -i "s/\"checksum\":\"$B\"/\"checksum\":\"$S\"/; s/\"imageDigest\":\"sha256:b\{64\}\"/\"imageDigest\":\"sha256:$(printf e%.0s $(seq 64))\"/" "$T/bootc-status.json"
+"$RIME_BIN" live apply > "$T/out" 2>&1
+[ ! -e "$L" ] && grep -q 'another deployment' "$R/var/lib/rime/live/history.jsonl" && ok "a new deployment in the same boot supersedes the old layer" || bad "soft-reboot recovery" "$(cat "$T/out")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

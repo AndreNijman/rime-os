@@ -76,8 +76,11 @@ lock_state() {
     case "$state" in
         *'"locked":false'*|*'"locked": false'*) return 0 ;;
         *'"locked"'*) say "the shell reports the session locked"; return 3 ;;
-        'Target not found.'|'') return 0 ;;   # a shell from before the target existed
-        *) say "the shell's lock state is unreadable"; return 3 ;;
+        # A shell from before the `shell` target existed cannot say whether its
+        # lock screen is up, and LockedHint lags a lock by a D-Bus round trip
+        # (and goes stale if that call fails): unknown counts as locked. The
+        # first live replacement therefore waits for a shell that can answer.
+        *) say "the running shell cannot report its lock state"; return 3 ;;
     esac
 }
 
@@ -97,29 +100,33 @@ spawn_shell() {
             [ "$out" = "ok" ] || hyprctl dispatch exec "$AUTOSTART" >/dev/null 2>&1
             ;;
         niri) niri msg action spawn -- "$AUTOSTART" >/dev/null 2>&1 ;;
-        *) setsid -f "$AUTOSTART" >/dev/null 2>&1 </dev/null ;;
+        # Its own scope, so it outlives this helper's transient unit (whose
+        # cgroup is stopped when the helper exits).
+        *) systemd-run --user --scope --collect --quiet -- setsid -f "$AUTOSTART" >/dev/null 2>&1 </dev/null ;;
     esac
 }
 
 swap_shell() {
     local old="$1" new rev
-    # Second check, under the inhibitor: a lock that started after the first
-    # one stops the swap here, before the shell is touched.
-    lock_state || exit 3
-    kill -TERM "$old" 2>/dev/null || fail "could not stop the running shell (pid $old)"
-    for _ in $(seq 1 50); do
-        kill -0 "$old" 2>/dev/null || break
-        sleep 0.1
-    done
-    if kill -0 "$old" 2>/dev/null; then
-        kill -KILL "$old" 2>/dev/null
-        sleep 0.2
+    if [ -n "$old" ]; then
+        # Second check, under the inhibitor: a lock that started after the
+        # first one stops the swap here, before the shell is touched.
+        lock_state || exit 3
+        kill -TERM "$old" 2>/dev/null || fail "could not stop the running shell (pid $old)"
+        for _ in $(seq 1 50); do
+            kill -0 "$old" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 "$old" 2>/dev/null; then
+            kill -KILL "$old" 2>/dev/null
+            sleep 0.2
+        fi
     fi
     spawn_shell
     for _ in $(seq 1 $((WAIT * 4))); do
         sleep 0.25
         new="$(shell_pid)"
-        [ -n "$new" ] && [ "$new" != "$old" ] || continue
+        [ -n "$new" ] && [ "$new" != "${old:-}" ] || continue
         rev="$(ipc shell revision)"
         if [ "$expected" = "-" ]; then
             case "$rev" in
@@ -137,7 +144,14 @@ swap_shell() {
 case "$verb" in
     shell)
         old="$(shell_pid)"
-        [ -n "$old" ] || { say "no Rime Shell is running in this session"; exit 4; }
+        if [ -z "$old" ]; then
+            # Putting the previous shell back after a failed replacement: the
+            # new one may never have started, and a session with no shell has
+            # no lock screen at all, so start one from the restored files.
+            [ "$expected" = "-" ] || { say "no Rime Shell is running in this session"; exit 4; }
+            swap_shell ""
+            exit $?
+        fi
         if [ "${RIME_LIVE_INHIBITED:-0}" != 1 ]; then
             # First check: do not even take the inhibitor for a locked session.
             lock_state || exit 3

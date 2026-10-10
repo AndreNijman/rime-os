@@ -132,11 +132,12 @@ printf 'garbage' > "$T/state"
 rc=$(run shell new123 4)
 [ "$rc" = 3 ] && old_alive && ok "unreadable shell state: exit 3" || bad "garbage state" "rc=$rc"
 
-# 7. A shell from before the IPC target: LockedHint decides.
+# 7. A shell from before the IPC target cannot say whether its lock screen is
+#    up; LockedHint alone lags a lock, so this is "locked": deferred.
 reset
 printf 'Target not found.' > "$T/state"
 rc=$(run shell new123 4)
-[ "$rc" = 0 ] && ok "old shell without the target: LockedHint=no permits" || bad "old shell" "rc=$rc $(cat "$T/out")"
+[ "$rc" = 3 ] && old_alive && [ ! -f "$T/hyprctl.log" ] && ok "old shell without the target: deferred, untouched" || bad "old shell" "rc=$rc $(cat "$T/out")"
 
 # 8. Wrong revision from the new shell: failure, so the engine rolls back.
 reset
@@ -159,6 +160,12 @@ rc=$(run shell - 4)
 reset; kill "$(cat "$T/pid.cur")"; sleep 0.1
 rc=$(run shell new123 4)
 [ "$rc" = 4 ] && ok "no running shell: exit 4" || bad "no shell" "rc=$rc"
+
+# 11b. Putting the old shell back when the failed new one never started: a
+#     session with no shell has no lock screen, so one is started.
+reset; kill "$(cat "$T/pid.cur")"; sleep 0.1
+rc=$(run shell - 4)
+[ "$rc" = 0 ] && grep -q 'exec_cmd' "$T/hyprctl.log" && ok "rollback with no shell running starts one" || bad "rollback no shell" "rc=$rc $(cat "$T/out")"
 
 # 12. Session ids are validated.
 reset

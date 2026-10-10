@@ -1345,6 +1345,13 @@ enum LiveCmd {
         #[arg(value_name = "COMPONENT")]
         component: Option<String>,
     },
+    /// Restart userspace into the staged deployment without restarting the
+    /// kernel. Closes every application. Never run automatically. Requires root.
+    SoftReboot {
+        /// Confirm: every application closes and every session logs out.
+        #[arg(long)]
+        yes: bool,
+    },
     /// The live-update audit log.
     Logs {
         #[arg(long)]
@@ -1489,6 +1496,7 @@ fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Update(_) => Some("update"),
         Cmd::Live { cmd: LiveCmd::Apply { .. } } => Some("live apply"),
         Cmd::Live { cmd: LiveCmd::Rollback } => Some("live rollback"),
+        Cmd::Live { cmd: LiveCmd::SoftReboot { .. } } => Some("live soft-reboot"),
         Cmd::Rollback => Some("rollback"),
         Cmd::Pin => Some("pin"),
         // Only `set`. It is `bootc switch`, which rewrites the deployment
@@ -1690,6 +1698,7 @@ async fn main() {
             LiveCmd::Doctor { json } => live::doctor(json),
             LiveCmd::Explain { component } => live::explain(component.as_deref()),
             LiveCmd::Logs { json, lines } => live::logs(json, lines),
+            LiveCmd::SoftReboot { yes } => live::soft_reboot(yes),
         },
         Cmd::Metrics(args) => cmd_metrics(args).await,
         Cmd::Doctor { json } => cmd_doctor(json).await,
