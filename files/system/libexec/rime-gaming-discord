@@ -21,8 +21,9 @@
 #  So this starts Equibop itself, the way you installed it, with nothing of it
 #  on screen: --start-minimized (the window is created and never shown;
 #  measured in a headless gamescope: GAMESCOPE_FOCUSABLE_WINDOWS stayed empty
-#  while arRPC created discord-ipc-0), no sound (PULSE_SERVER points nowhere,
-#  or --nosocket=pulseaudio for the Flatpak), no GPU (--disable-gpu), at nice
+#  while arRPC created discord-ipc-0), no sound (--mute-audio, and both
+#  PULSE_SERVER and PIPEWIRE_REMOTE point nowhere; the Flatpak also gets
+#  --nosocket=pulseaudio), no GPU (--disable-gpu), at nice
 #  10 with RLIMIT_NICE holding it there. Its window size, which Equibop saves
 #  on quit, is put back afterwards. It runs only while Steam does and is stopped when Gaming Mode ends, so
 #  the desktop's own Equibop starts normally afterwards.
@@ -54,10 +55,17 @@ import sys
 import time
 
 FLATPAK_ID = "io.github.equicord.equibop"
-EXTRA_ARGS = ["--start-minimized", "--ozone-platform=x11", "--disable-gpu"]
+EXTRA_ARGS = ["--start-minimized", "--ozone-platform=x11", "--disable-gpu",
+              "--mute-audio"]
 # Environment that makes Equibop believe it is in Steam Deck Game Mode.
 DECK_ENV = ("SteamOS", "SteamGamepadUI")
+# Silence, three ways, because one was not enough: with PULSE_SERVER alone
+# Chromium falls back to ALSA, whose default device on Rime is PipeWire's, and
+# Discord's notification sounds played in Gaming Mode (2026-10-10; measured:
+# `aplay -D default` opens with PULSE_SERVER pointing nowhere, and fails "Host
+# is down" once PIPEWIRE_REMOTE does too). --mute-audio is Chromium's own.
 MUTE_PULSE = "unix:/nonexistent/rime-gaming-discord"
+MUTE_PIPEWIRE = "/nonexistent/rime-gaming-discord"
 # Steam exiting is noticed within POLL_S: everything here descends from Steam,
 # and gamescope's reaper waits for all of it before Gaming Mode can end.
 POLL_S = float(os.environ.get("RIME_GAMING_DISCORD_POLL", "0.5"))
@@ -297,7 +305,8 @@ def launch_argv(app):
         i = argv.index(FLATPAK_ID)
         if "run" in argv[:i]:
             r = argv.index("run")
-            argv[r + 1:r + 1] = ["--nosocket=pulseaudio", "--socket=x11"]
+            argv[r + 1:r + 1] = ["--nosocket=pulseaudio", "--socket=x11",
+                                 "--env=PIPEWIRE_REMOTE=" + MUTE_PIPEWIRE]
     return argv + EXTRA_ARGS
 
 
@@ -307,6 +316,7 @@ def launch_env():
         env.pop(k, None)
     env.pop("WAYLAND_DISPLAY", None)
     env["PULSE_SERVER"] = MUTE_PULSE
+    env["PIPEWIRE_REMOTE"] = MUTE_PIPEWIRE
     return env
 
 
