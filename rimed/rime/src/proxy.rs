@@ -113,6 +113,19 @@ pub trait GameMode {
     fn status(&self) -> zbus::Result<std::collections::HashMap<String, zvariant::OwnedValue>>;
 }
 
+/// `org.rimeos.Rimed1.Mode` (2026-10-10): the mode rimed keeps across
+/// restarts. Absent on an older rimed, which callers must tolerate.
+#[proxy(
+    interface = "org.rimeos.Rimed1.Mode",
+    default_service = "org.rimeos.Rimed1",
+    default_path = "/org/rimeos/Rimed1"
+)]
+pub trait Mode {
+    fn hold(&self, mode: &str) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn held(&self) -> zbus::Result<String>;
+}
+
 /// Connect to the system bus, returning None (never panicking) if the bus
 /// itself is unreachable.
 pub async fn connect() -> Option<zbus::Connection> {

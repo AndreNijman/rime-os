@@ -1,5 +1,7 @@
-//! The frozen `org.rimeos.Rimed1` D-Bus surface. Six interfaces share one
-//! object path (`/org/rimeos/Rimed1`); all state lives in [`Ctx`].
+//! The frozen `org.rimeos.Rimed1` D-Bus surface. Seven interfaces share one
+//! object path (`/org/rimeos/Rimed1`); all state lives in [`Ctx`]. The seventh,
+//! `org.rimeos.Rimed1.Mode` (2026-10-10), is additive: it changes no frozen
+//! member's signature.
 //!
 //! Tier IDs are the frozen strings from `rimed_core::Tier` and must never
 //! change — the rime-shell `PowerProfileService` and the `rime` CLI both depend
@@ -8,6 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rimed_core::mode::ModeId;
 use rimed_core::tier::Tier;
 use zbus::message::Header;
 use zbus::{interface, Connection, SignalContext};
@@ -233,6 +236,55 @@ fn read_battery_field(ctx: &Arc<Ctx>, field: &str) -> Option<String> {
     ctx.batteries.primary()?.read(field)
 }
 
+// ── Mode (2026-10-10) ────────────────────────────────────────────────────────
+
+/// `org.rimeos.Rimed1.Mode` — the mode kept across restarts.
+///
+/// `rime mode set` calls `Hold` FIRST and then moves the levers over the
+/// frozen members exactly as before. First, because holding a mode that keeps
+/// game mode on makes `GameMode.SetActive(false)` refuse — so leaving one has
+/// to release the hold before its plan turns game mode off. `Hold` changes no
+/// lever itself; rimed applies the held mode only when it starts.
+pub struct ModeIface {
+    pub ctx: Arc<Ctx>,
+}
+
+#[interface(name = "org.rimeos.Rimed1.Mode")]
+impl ModeIface {
+    /// The held mode id, or "" when nothing is held (Daily).
+    #[zbus(property)]
+    async fn held(&self) -> String {
+        self.ctx
+            .held_mode()
+            .await
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Hold `mode` across restarts; "daily" or "" releases the hold. polkit
+    /// `manage-power`, the action behind every lever a mode moves.
+    async fn hold(
+        &self,
+        mode: String,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        let id = if mode.trim().is_empty() {
+            None
+        } else {
+            Some(
+                mode.parse::<ModeId>()
+                    .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?,
+            )
+        };
+        self.ctx.set_held(id).await.map_err(to_fdo)?;
+        self.held_changed(&ctxt).await?;
+        Ok(())
+    }
+}
+
 // ── Profile ──────────────────────────────────────────────────────────────────
 
 /// `org.rimeos.Rimed1.Profile` — the resolved layered selection (read-only).
@@ -446,6 +498,15 @@ impl GameModeIface {
         #[zbus(header)] hdr: Header<'_>,
     ) -> zbus::fdo::Result<()> {
         authorize(conn, &hdr, ACTION_POWER).await?;
+        // A mode the user holds game mode on in is ended by choosing another
+        // mode, not by whatever calls `rime game stop` next: gamemode.ini's
+        // `end=` hook when a desktop game quits, Gaming Mode's EXIT trap. The
+        // one change to this frozen member's error behaviour (see hold.rs).
+        if !active {
+            if let Some(why) = self.ctx.game_stop_refusal().await {
+                return Err(zbus::fdo::Error::Failed(why));
+            }
+        }
         self.transition(active, &[], &ctxt, conn).await
     }
 

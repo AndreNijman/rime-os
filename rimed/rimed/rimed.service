@@ -20,6 +20,9 @@ RestartSec=2
 # /proc/irq/*/smp_affinity_list — so it runs as root and is only lightly
 # sandboxed. Set RIMED_DRY_RUN=1 here to make it plan without writing.
 Environment=RUST_BACKTRACE=1
+# /var/lib/rimed/mode: the mode the user chose (Settings → Gaming), put back at
+# every start. See rimed/rimed/src/hold.rs.
+StateDirectory=rimed
 ProtectHome=yes
 # NOT ProtectControlGroups: M6 game mode creates a cgroup-v2 cpuset
 # (/sys/fs/cgroup/rime-game) and moves the game's PIDs into it, which needs
