@@ -1,4 +1,5 @@
-# Rime OS — wake the update notice when the check's answer changes.
+# Rime OS — wake the update notice when the check's answer or a live
+# update's result changes.
 # inotify, not polling: this costs nothing while the file is quiet.
 
 [Unit]
@@ -6,6 +7,7 @@ Description=Watch for a Rime OS update announcement
 
 [Path]
 PathChanged=/run/rime-update/state
+PathChanged=/run/rime-live/status.json
 Unit=rime-update-notice.service
 
 [Install]

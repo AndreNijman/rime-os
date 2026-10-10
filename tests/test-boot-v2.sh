@@ -361,6 +361,21 @@ grep -q 'semodule -l | grep -qx rime_sdboot' "$BASECF" \
     && ok "Containerfile.base asserts across the tier boundary that it is there" \
     || bad "Containerfile.base does not check the core tier still ships the policy module"
 
+# /dev/liveupdate's own type (rime_liveupdate.cil): declared like Fedora's
+# device types, with no rule of its own, and installed + verified in core.
+LUOPOL="$REPO/files/system/selinux/rime_liveupdate.cil"
+grep -q '^(typeattributeset device_node (liveupdate_device_t))$' "$LUOPOL" \
+    && grep -q '^(filecon "/dev/liveupdate" char (system_u object_r liveupdate_device_t ((s0) (s0))))$' "$LUOPOL" \
+    && ok "/dev/liveupdate is a device_node of its own type" \
+    || bad "rime_liveupdate.cil does not label /dev/liveupdate as a device_node type"
+grep -Eq '^\((allow|typetransition|typeattributeset (domain|file_type)|roleattributeset)' "$LUOPOL" \
+    && bad "rime_liveupdate.cil grants something beyond the type and its label" \
+    || ok "rime_liveupdate.cil adds no rule of its own"
+grep -q 'semodule -N -i /usr/share/rime-os/selinux/rime_liveupdate.cil' "$REPO/Containerfile.core" \
+    && grep -q 'python3 /usr/share/rime-os/selinux/verify-rime-liveupdate.py' "$REPO/Containerfile.core" \
+    && ok "Containerfile.core installs and verifies rime_liveupdate" \
+    || bad "Containerfile.core does not install and verify rime_liveupdate"
+
 # ═════════════════════════════════════════════════════════════════════════════
 sec "nothing shipped into the image touches a real boot path"
 # AGENTS.md boot-path rule 1. The match is on EXECUTABLE lines only: both units

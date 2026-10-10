@@ -119,7 +119,9 @@ fi
 # The record is written BEFORE the pull. Written after a successful upgrade it
 # would be missing for exactly the update that crashed the machine.
 rec_line="$(grep -n 'channel::record_update' "$OPSRS" | head -1 | cut -d: -f1)"
-pull_line="$(grep -n '"bootc", &\["upgrade"\]' "$OPSRS" | head -1 | cut -d: -f1)"
+# The pull is `crate::live::update(`: `bootc upgrade --download-only`, then the
+# staged digest is verified again before it is queued for boot.
+pull_line="$(grep -n 'crate::live::update(' "$OPSRS" | head -1 | cut -d: -f1)"
 if [[ -n "$rec_line" && -n "$pull_line" && "$rec_line" -lt "$pull_line" ]]; then
     ok "the record is written before the pull (line $rec_line before $pull_line)"
 else

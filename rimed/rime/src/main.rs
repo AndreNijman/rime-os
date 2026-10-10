@@ -22,6 +22,7 @@ mod gaming;
 mod gitshim;
 mod host;
 mod lid;
+mod live;
 mod mcp;
 mod migrate;
 mod mode;
@@ -298,7 +299,16 @@ enum Cmd {
     /// Roll back to the previous deployment (bootc rollback). Requires root.
     Rollback,
     /// Update the OS image (bootc upgrade) and firmware (fwupdmgr). Requires root.
+    ///
+    /// Rime-owned parts of the new image (the shell, rime tools, Rime
+    /// services) are activated without a restart when that is safe; the rest
+    /// waits in the staged deployment. `--plan` shows which is which.
     Update(UpdateArgs),
+    /// The live-update engine: what is active, what waits and why.
+    Live {
+        #[command(subcommand)]
+        cmd: LiveCmd,
+    },
     /// Drive Rime Shell: open the launcher, dashboard, settings window, lock
     /// screen and the quick toggles.
     ///
@@ -1294,6 +1304,61 @@ struct UpdateArgs {
     /// durability if the machine loses power mid-update.
     #[arg(long)]
     fsync: bool,
+    /// Download and verify the update, print what would activate live and
+    /// what would wait, and change nothing.
+    #[arg(long, conflicts_with_all = ["check", "firmware_only", "live_only", "no_live"])]
+    plan: bool,
+    /// Activate what can be activated live, but do not queue the new image
+    /// for the next boot.
+    #[arg(long, conflicts_with_all = ["check", "firmware_only", "no_live"])]
+    live_only: bool,
+    /// Stage the update for the next boot and activate nothing live.
+    #[arg(long, conflicts_with_all = ["check", "firmware_only"])]
+    no_live: bool,
+}
+
+/// `rime live <verb>`.
+#[derive(Subcommand)]
+enum LiveCmd {
+    /// What the last live update did, per component.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Activate components the last update left deferred (the screen was
+    /// locked, a game was running). Requires root.
+    Apply {
+        /// Only these components (e.g. shell, rime-tools).
+        #[arg(long, value_name = "COMPONENT")]
+        only: Vec<String>,
+    },
+    /// Remove the live layer: run the booted deployment's versions again.
+    /// Requires root.
+    Rollback,
+    /// Check that live updates can work on this machine, and say what limits them.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Why each component activated, waited or needs a restart.
+    Explain {
+        #[arg(value_name = "COMPONENT")]
+        component: Option<String>,
+    },
+    /// Restart userspace into the staged deployment without restarting the
+    /// kernel. Closes every application. Never run automatically. Requires root.
+    SoftReboot {
+        /// Confirm: every application closes and every session logs out.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// The live-update audit log.
+    Logs {
+        #[arg(long)]
+        json: bool,
+        #[arg(long, short = 'n', default_value_t = 50)]
+        lines: usize,
+    },
 }
 
 /// `rime shell <verb>` — the surfaces Rime Shell exposes over IPC.
@@ -1429,6 +1494,9 @@ struct BatteryArgs {
 fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
     match cmd {
         Cmd::Update(_) => Some("update"),
+        Cmd::Live { cmd: LiveCmd::Apply { .. } } => Some("live apply"),
+        Cmd::Live { cmd: LiveCmd::Rollback } => Some("live rollback"),
+        Cmd::Live { cmd: LiveCmd::SoftReboot { .. } } => Some("live soft-reboot"),
         Cmd::Rollback => Some("rollback"),
         Cmd::Pin => Some("pin"),
         // Only `set`. It is `bootc switch`, which rewrites the deployment
@@ -1608,6 +1676,12 @@ async fn main() {
         Cmd::Rollback => ops::rollback(),
         Cmd::Update(args) => ops::update(ops::UpdateOptions {
             check: args.check,
+            live: live::LiveOptions {
+                plan_only: args.plan,
+                live_only: args.live_only,
+                no_live: args.no_live,
+                allow_unverified: args.allow_unverified,
+            },
             skip_firmware: args.skip_firmware,
             firmware_only: args.firmware_only,
             keep_fsync: args.fsync,
@@ -1617,6 +1691,15 @@ async fn main() {
             allow_unverified: args.allow_unverified,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
+        Cmd::Live { cmd } => match cmd {
+            LiveCmd::Status { json } => live::status(json),
+            LiveCmd::Apply { only } => live::apply(&only),
+            LiveCmd::Rollback => live::rollback(),
+            LiveCmd::Doctor { json } => live::doctor(json),
+            LiveCmd::Explain { component } => live::explain(component.as_deref()),
+            LiveCmd::Logs { json, lines } => live::logs(json, lines),
+            LiveCmd::SoftReboot { yes } => live::soft_reboot(yes),
+        },
         Cmd::Metrics(args) => cmd_metrics(args).await,
         Cmd::Doctor { json } => cmd_doctor(json).await,
         // Read-only and subprocess-free, so deliberately not in the privileged

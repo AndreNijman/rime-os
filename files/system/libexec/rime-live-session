@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rime OS — the user-side half of a live update.
+#  Installed to /usr/libexec/rime-live-session. Run by `rime update` (root) as
+#  the session's user, inside that user's service manager:
+#
+#     systemd-run --user --machine=USER@.host --wait --pipe --collect \
+#         /usr/libexec/rime-live-session VERB EXPECTED SESSION_ID
+#
+#  so it has the session's environment (WAYLAND_DISPLAY,
+#  HYPRLAND_INSTANCE_SIGNATURE) and nothing of root's.
+#
+#  VERBS
+#    shell EXPECTED SID  replace the running Rime Shell with the one now on disk
+#                        and check the new one answers with revision EXPECTED
+#                        ("-" = accept any answering shell: used to put the old
+#                        one back after a failure, when it may predate the
+#                        `shell` IPC target)
+#    hypr  EXPECTED SID  refresh the Rime Hyprland modules and reload Hyprland
+#
+#  EXIT  0 done (last line says what was measured)
+#        3 the session is locked or authenticating: nothing was touched
+#        4 nothing to do in this session (no shell running, not Hyprland)
+#        1 failed (last line says why); the engine rolls back
+#
+#  SECURITY. The shell is the lock screen. It is never replaced while the
+#  session is locked, while an unlock is in progress, or when the lock state
+#  cannot be read; the check is repeated immediately before the old shell is
+#  stopped, and sleep, idle and the lid are inhibited for the swap so the
+#  machine cannot suspend or lock with no shell to draw the lock. Nothing here
+#  unlocks anything or talks to PAM.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+# Overridable for tests/test-rime-live-session.sh only; this runs with the
+# session user's own privileges, so an override reaches nothing they could not.
+SHELL_DIR="${RIME_LIVE_SHELL_DIR:-/usr/share/rime-shell}"
+AUTOSTART="${RIME_LIVE_AUTOSTART:-/usr/libexec/rime-shell-autostart}"
+WAIT="${RIME_LIVE_SHELL_WAIT:-20}"
+
+say() { printf '%s\n' "$*"; }
+fail() { say "$*"; exit 1; }
+
+verb="${1:-}"
+expected="${2:-}"
+sid="${3:-}"
+case "$sid" in
+    ''|*[!A-Za-z0-9]*) fail "bad session id" ;;
+esac
+
+# The shell's own instance, by its config path (qs knows; no process-name
+# matching, which has matched the wrong process on this OS before).
+shell_pid() {
+    qs list -p "$SHELL_DIR" -j 2>/dev/null \
+        | python3 -I -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+d = d if isinstance(d, list) else d.get("instances", [d])
+for i in d:
+    p = i.get("pid") or i.get("processId") or i.get("process_id")
+    if p:
+        print(p); break' 2>/dev/null
+}
+
+ipc() { qs ipc -p "$SHELL_DIR" call "$@" 2>/dev/null; }
+
+# 0 unlocked, 3 locked or unknown. Both the session's LockedHint and, when the
+# running shell has it, the shell's own answer must say unlocked.
+lock_state() {
+    local hint state
+    hint="$(loginctl show-session "$sid" -p LockedHint --value 2>/dev/null)"
+    [ "$hint" = "no" ] || { say "session $sid is locked (LockedHint=${hint:-unreadable})"; return 3; }
+    state="$(ipc shell state)"
+    case "$state" in
+        *'"locked":false'*|*'"locked": false'*) return 0 ;;
+        *'"locked"'*) say "the shell reports the session locked"; return 3 ;;
+        # A shell from before the `shell` target existed cannot say whether its
+        # lock screen is up, and LockedHint lags a lock by a D-Bus round trip
+        # (and goes stale if that call fails): unknown counts as locked. The
+        # first live replacement therefore waits for a shell that can answer.
+        *) say "the running shell cannot report its lock state"; return 3 ;;
+    esac
+}
+
+compositor() {
+    if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then echo hyprland
+    elif [ -n "${NIRI_SOCKET:-}" ]; then echo niri
+    elif [ -n "${LABWC_PID:-}" ]; then echo labwc
+    else echo other
+    fi
+}
+
+spawn_shell() {
+    case "$(compositor)" in
+        hyprland)
+            # 0.56 takes Lua dispatch; older builds the hyprlang form.
+            out="$(hyprctl dispatch "hl.dsp.exec_cmd(\"${AUTOSTART}\")" 2>&1)"
+            [ "$out" = "ok" ] || hyprctl dispatch exec "$AUTOSTART" >/dev/null 2>&1
+            ;;
+        niri) niri msg action spawn -- "$AUTOSTART" >/dev/null 2>&1 ;;
+        # Its own scope, so it outlives this helper's transient unit (whose
+        # cgroup is stopped when the helper exits).
+        *) systemd-run --user --scope --collect --quiet -- setsid -f "$AUTOSTART" >/dev/null 2>&1 </dev/null ;;
+    esac
+}
+
+swap_shell() {
+    local old="$1" new rev
+    if [ -n "$old" ]; then
+        # Second check, under the inhibitor: a lock that started after the
+        # first one stops the swap here, before the shell is touched.
+        lock_state || exit 3
+        kill -TERM "$old" 2>/dev/null || fail "could not stop the running shell (pid $old)"
+        for _ in $(seq 1 50); do
+            kill -0 "$old" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 "$old" 2>/dev/null; then
+            kill -KILL "$old" 2>/dev/null
+            sleep 0.2
+        fi
+    fi
+    spawn_shell
+    for _ in $(seq 1 $((WAIT * 4))); do
+        sleep 0.25
+        new="$(shell_pid)"
+        [ -n "$new" ] && [ "$new" != "${old:-}" ] || continue
+        rev="$(ipc shell revision)"
+        if [ "$expected" = "-" ]; then
+            case "$rev" in
+                ''|'Target not found.') ipc caffeine state >/dev/null && { say "shell restarted (pid $new)"; return 0; } ;;
+                *) say "running shell revision $rev (pid $new)"; return 0 ;;
+            esac
+        elif [ -n "$rev" ] && [ "$rev" = "$expected" ]; then
+            say "running shell revision $rev (pid $new)"
+            return 0
+        fi
+    done
+    fail "the new shell did not answer with revision ${expected} within ${WAIT}s (pid ${new:-none}, said ${rev:-nothing})"
+}
+
+case "$verb" in
+    shell)
+        old="$(shell_pid)"
+        if [ -z "$old" ]; then
+            # Putting the previous shell back after a failed replacement: the
+            # new one may never have started, and a session with no shell has
+            # no lock screen at all, so start one from the restored files.
+            [ "$expected" = "-" ] || { say "no Rime Shell is running in this session"; exit 4; }
+            swap_shell ""
+            exit $?
+        fi
+        if [ "${RIME_LIVE_INHIBITED:-0}" != 1 ]; then
+            # First check: do not even take the inhibitor for a locked session.
+            lock_state || exit 3
+            RIME_LIVE_INHIBITED=1 exec systemd-inhibit --what=sleep:idle:handle-lid-switch \
+                --who="Rime update" --why="Replacing Rime Shell" --mode=block \
+                "$0" "$@"
+        fi
+        swap_shell "$old"
+        ;;
+    hypr)
+        [ "$(compositor)" = hyprland ] || { say "not a Hyprland session"; exit 4; }
+        # The per-login provisioner is what renders the modules from the image;
+        # running it again is exactly a login's refresh, nothing more.
+        systemctl --user start rime-shell-firstrun.service 2>/dev/null \
+            || fail "rime-shell-firstrun failed: $(systemctl --user status rime-shell-firstrun.service 2>&1 | tail -n 2 | tr '\n' ' ')"
+        hyprctl reload >/dev/null 2>&1 || fail "hyprctl reload failed"
+        errs="$(hyprctl configerrors 2>&1)"
+        [ -z "${errs//[[:space:]]/}" ] || fail "Hyprland reports config errors: $(printf '%s' "$errs" | head -n 3 | tr '\n' ' ')"
+        say "Hyprland reloaded the Rime modules with no config errors"
+        ;;
+    *) fail "usage: rime-live-session shell|hypr EXPECTED SESSION_ID" ;;
+esac

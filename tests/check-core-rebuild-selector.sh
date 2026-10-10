@@ -384,6 +384,41 @@ else
     echo "      | CORE_PATHS:  $(tr '\n' ' ' < "$WORK/core-paths")"
 fi
 
+# ── every file core COPYs is one of core's inputs ────────────────────────────
+# A COPY source outside the list changes core's content without rebuilding it:
+# the change ships only when something else happens to rebuild core.
+uncovered="$(python3 - "$WORK/filter-core" "${CONTAINERFILE:-Containerfile.core}" <<'PY2'
+import re, shlex, sys
+spec = [l.strip() for l in open(sys.argv[1]) if l.strip()]
+text = open(sys.argv[2], encoding='utf-8').read().replace('\\\n', ' ')
+srcs = []
+for line in text.splitlines():
+    m = re.match(r'^\s*(COPY|ADD)\s+(.*)$', line)
+    if not m:
+        continue
+    words = [w for w in shlex.split(m.group(2), comments=False)]
+    if any(w.startswith('--from') for w in words):
+        continue
+    args = [w for w in words if not w.startswith('--')]
+    for src in args[:-1]:
+        if '://' not in src:
+            srcs.append(src)
+if not srcs:
+    sys.exit("FATAL: found no COPY source in %s" % sys.argv[2])
+def covered(src):
+    return any(src == p or src + '/' == p or (p.endswith('/') and src.startswith(p)) for p in spec)
+print(' '.join(s for s in srcs if not covered(s)))
+PY2
+)"
+if [ $? -ne 0 ]; then
+    bad "every COPY source of Containerfile.core is a core input (could not parse it)"
+elif [ -z "$uncovered" ]; then
+    ok "every COPY source of Containerfile.core is a core input"
+else
+    bad "every COPY source of Containerfile.core is a core input"
+    echo "      | not in the core list: $uncovered"
+fi
+
 echo
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]

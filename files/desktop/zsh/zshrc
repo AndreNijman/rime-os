@@ -138,10 +138,11 @@ alias ..='cd ..'
 alias ...='cd ../..'
 
 # Rime OS is image-based: these are the commands people actually need and
-# usually have to look up.
-alias rime-update='sudo bootc upgrade'
-alias rime-status='bootc status'
-alias rime-rollback='sudo bootc rollback'
+# usually have to look up. They go through `rime`, never bootc directly: a
+# bare `bootc upgrade` skips the signature check and the live update.
+alias rime-update='sudo rime update'
+alias rime-status='rime live status'
+alias rime-rollback='sudo rime rollback'
 
 # ── tools ────────────────────────────────────────────────────────────────────
 # fzf here (it defines widgets, so it must come before syntax highlighting below).

@@ -1,0 +1,101 @@
+{
+  "apiVersion": "org.containers.bootc/v1",
+  "kind": "BootcHost",
+  "metadata": {
+    "name": "host"
+  },
+  "spec": {
+    "bootOrder": "default",
+    "image": {
+      "image": "ghcr.io/andrenijman/rime-os:daily",
+      "transport": "registry"
+    }
+  },
+  "status": {
+    "booted": {
+      "cachedUpdate": null,
+      "composefs": null,
+      "downloadOnly": false,
+      "image": {
+        "architecture": "amd64",
+        "image": {
+          "image": "ghcr.io/andrenijman/rime-os:daily",
+          "transport": "registry"
+        },
+        "imageDigest": "sha256:fbc6f7027014ae0a43865be79887785490736aff1eca20e3dcd9444ad8b87d4c",
+        "timestamp": "2026-10-10T03:15:59.131524407Z",
+        "version": "rime"
+      },
+      "incompatible": false,
+      "ostree": {
+        "checksum": "de6f772e9bf7123960681ed3775df6fa6c8b655dd31216909cfd99cbf05dfafd",
+        "deploySerial": 0,
+        "stateroot": "default"
+      },
+      "pinned": false,
+      "softRebootCapable": true,
+      "store": "ostreeContainer"
+    },
+    "readOnly": false,
+    "rollback": {
+      "cachedUpdate": {
+        "architecture": "amd64",
+        "image": {
+          "image": "ghcr.io/andrenijman/rime-os:daily",
+          "transport": "registry"
+        },
+        "imageDigest": "sha256:fbc6f7027014ae0a43865be79887785490736aff1eca20e3dcd9444ad8b87d4c",
+        "timestamp": "2026-10-10T03:15:59.131524407Z",
+        "version": "rime"
+      },
+      "composefs": null,
+      "downloadOnly": false,
+      "image": {
+        "architecture": "amd64",
+        "image": {
+          "image": "ghcr.io/andrenijman/rime-os:daily",
+          "transport": "registry"
+        },
+        "imageDigest": "sha256:ae989e519869be39f1730b8c1c1c653e1ebc0aa337f8bed12ff79c914251155f",
+        "timestamp": "2026-10-09T15:43:03.745340240Z",
+        "version": "rime"
+      },
+      "incompatible": false,
+      "ostree": {
+        "checksum": "5c6c05f1d7aaa9ba33346e712a6d8ca6c4a41bdc5ad60c3d12f089d103653b06",
+        "deploySerial": 0,
+        "stateroot": "default"
+      },
+      "pinned": false,
+      "softRebootCapable": true,
+      "store": "ostreeContainer"
+    },
+    "rollbackQueued": false,
+    "staged": {
+      "cachedUpdate": null,
+      "composefs": null,
+      "downloadOnly": true,
+      "image": {
+        "architecture": "amd64",
+        "image": {
+          "image": "ghcr.io/andrenijman/rime-os:daily",
+          "transport": "registry"
+        },
+        "imageDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "timestamp": "2026-10-10T03:15:59.131524407Z",
+        "version": "rime"
+      },
+      "incompatible": false,
+      "ostree": {
+        "checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "deploySerial": 0,
+        "stateroot": "default"
+      },
+      "pinned": false,
+      "softRebootCapable": true,
+      "store": "ostreeContainer"
+    },
+    "type": "bootcHost",
+    "usrOverlay": null
+  }
+}
