@@ -623,6 +623,14 @@ pub fn status_json(t: &Txn, booted_release: Option<&str>) -> Value {
             "{active} component(s) updated live; the rest needs: {}.",
             remaining.describe()
         ),
+        // RolledBack is also where a requested `rime live rollback` and a
+        // session that locked mid-activation end: neither is a failure.
+        State::RolledBack if t.history.last().is_some_and(|s| s.note == "live layer removed on request") => {
+            "The live layer was removed on request; the update applies at the next restart.".into()
+        }
+        State::RolledBack if t.outcomes.values().any(|o| matches!(o, Outcome::Deferred { reason: DeferReason::Locked(_) })) => {
+            "A session locked during the update, so it was withdrawn; it applies once unlocked or at the next restart.".into()
+        }
         State::RolledBack => "Live activation failed and was undone; the update applies at the next restart.".into(),
         State::Failed => "Live activation failed; see `rime live doctor`.".into(),
         State::Superseded => "Superseded by a restart or a newer update.".into(),
@@ -855,6 +863,36 @@ fn layer_entries(layer: &Path) -> Vec<String> {
     out
 }
 
+/// The activators that make running code match a set of layer paths, in the
+/// order the planner runs them.
+fn layer_actions(entries: &[String]) -> Vec<Activator> {
+    let mut actions: BTreeSet<(u8, Activator)> = BTreeSet::new();
+    for rel in entries {
+        match rimed_core::live::classify::classify_path(rel).activator {
+            Some(Activator::DaemonReload) => {
+                actions.insert((0, Activator::DaemonReload));
+            }
+            Some(Activator::RestartUnit(u)) => {
+                if rel.starts_with("/usr/lib/systemd/system/") {
+                    actions.insert((0, Activator::DaemonReload));
+                }
+                actions.insert((1, Activator::RestartUnit(u)));
+            }
+            Some(Activator::UserDaemonReload) => {
+                actions.insert((2, Activator::UserDaemonReload));
+            }
+            Some(Activator::Shell) => {
+                actions.insert((3, Activator::Shell));
+            }
+            Some(Activator::HyprlandConfig) => {
+                actions.insert((4, Activator::HyprlandConfig));
+            }
+            None => {}
+        }
+    }
+    actions.into_iter().map(|(_, a)| a).collect()
+}
+
 fn sysext_refresh(paths: &Paths) -> Result<(), String> {
     let _pkg = flock(&paths.at(PKG_LOCK), "rime package operation", 120)?;
     output("systemd-sysext", &["refresh"]).map(|_| ())
@@ -1071,7 +1109,9 @@ fn measure(paths: &Paths, st: &BootcStatus) -> Result<(Measured, Inputs), String
         elf: elf_res,
         running_units: running_units(),
         machine: machine.clone(),
-        soft_reboot_capable: booted.soft_reboot_capable,
+        // bootc answers this per deployment, and the one that matters is the
+        // deployment a soft reboot would enter: the staged one.
+        soft_reboot_capable: staged.soft_reboot_capable,
         no_live: false,
         only: None,
     };
@@ -1194,7 +1234,7 @@ pub fn update(opts: LiveOptions) -> i32 {
     let booted = st.booted.clone();
     let mut t = Txn::new(&new_txn_id(), &boot_id(&paths), booted.as_ref().map(|b| b.digest.as_str()).unwrap_or(""), now());
     t.target_digest = staged.digest.clone();
-    t.soft_reboot_capable = booted.as_ref().is_some_and(|b| b.soft_reboot_capable);
+    t.soft_reboot_capable = staged.soft_reboot_capable;
     let fail = |paths: &Paths, t: &mut Txn, msg: String| -> i32 {
         eprintln!("rime: {msg}");
         let _ = advance(paths, t, State::Failed, msg);
@@ -1609,7 +1649,7 @@ pub fn apply(only: &[String]) -> i32 {
     t.target_digest = staged.digest.clone();
     t.target_release = release_of(&m.sdir);
     t.staged_for_boot = !staged.download_only;
-    t.soft_reboot_capable = m.booted.soft_reboot_capable;
+    t.soft_reboot_capable = staged.soft_reboot_capable;
     for (s, note) in [
         (State::Verified, format!("verified by transaction {}", prev.id)),
         (State::Staged, "already staged".to_string()),
@@ -1729,16 +1769,38 @@ pub fn rollback() -> i32 {
         println!("rime: no live update to roll back");
         return 0;
     };
-    if t.state != State::Active || !paths.layer().exists() || t.boot_id != boot_id(&paths) {
+    // The layer lives in /run, so if it exists it is this boot's. It can
+    // outlive the transaction that made it: a later update that deferred
+    // (screen locked) or was undone keeps it, and its record is not Active.
+    if !paths.layer().exists() {
         println!("rime: nothing is active live in this boot (last transaction: {})", state_name(t.state));
         return 0;
     }
-    if let Err(e) = advance(&paths, &mut t, State::RollingBack, "requested") {
-        eprintln!("rime: {e}");
+    if t.state.live_layer_in_flux() {
+        eprintln!("rime: the last live update was interrupted; run `sudo rime update` to recover it first");
         return 1;
+    }
+    let owns_layer = t.state == State::Active && t.boot_id == boot_id(&paths);
+    if owns_layer {
+        if let Err(e) = advance(&paths, &mut t, State::RollingBack, "requested") {
+            eprintln!("rime: {e}");
+            return 1;
+        }
     }
     let mut errors = Vec::new();
     let cur = paths.layer();
+    // Whatever is in the layer is running now, whichever transaction put it
+    // there, so its activators run again once it is gone.
+    let mut actions = layer_actions(&layer_entries(&cur));
+    if owns_layer {
+        if let Some(p) = &t.plan {
+            for a in &p.actions {
+                if !actions.contains(a) {
+                    actions.push(a.clone());
+                }
+            }
+        }
+    }
     if let Err(e) = fs::remove_dir_all(&cur).map_err(|e| e.to_string()).and_then(|_| sysext_refresh(&paths)) {
         errors.push(e);
     }
@@ -1748,13 +1810,21 @@ pub fn rollback() -> i32 {
     // shell that answers.
     let rev = "-".to_string();
     if errors.is_empty() {
-        if let Some(p) = t.plan.clone() {
-            for a in &p.actions {
-                if let Err(e) = run_action(&paths, a, &sessions, &rev) {
-                    errors.push(format!("{a:?}: {e}"));
-                }
+        for a in &actions {
+            if let Err(e) = run_action(&paths, a, &sessions, &rev) {
+                errors.push(format!("{a:?}: {e}"));
             }
         }
+    }
+    if !owns_layer {
+        // The record belongs to a later update that did not activate; it
+        // still describes what the next restart brings, so it stays as it is.
+        if errors.is_empty() {
+            println!("rime: the live layer is removed; this machine runs its booted deployment again");
+            return 0;
+        }
+        eprintln!("rime: rollback incomplete: {}", errors.join("; "));
+        return 1;
     }
     let comps: Vec<Component> = t.outcomes.iter().filter(|(_, o)| matches!(o, Outcome::Active { .. } | Outcome::ActiveAtNextUse { .. })).map(|(c, _)| *c).collect();
     for c in comps {
@@ -1848,10 +1918,13 @@ pub fn doctor(json_out: bool) -> i32 {
             ));
             checks.push((
                 "soft reboot",
-                match &b {
-                    Some(d) if d.soft_reboot_capable => Verdict::Available { evidence: "bootc reports softRebootCapable; only ever run on request".into() },
-                    Some(_) => Verdict::Unavailable { why: "bootc reports this deployment cannot soft-reboot".into() },
-                    None => Verdict::Unknown { why: "no booted deployment".into() },
+                // Soft reboot enters the staged deployment, so its flag is the
+                // one that counts; the booted one's says nothing about an update.
+                match (&b, &st.staged) {
+                    (None, _) => Verdict::Unknown { why: "no booted deployment".into() },
+                    (Some(_), None) => Verdict::Unknown { why: "nothing is staged to soft-reboot into".into() },
+                    (Some(_), Some(s)) if s.soft_reboot_capable => Verdict::Available { evidence: "bootc reports the staged deployment softRebootCapable; only ever run on request".into() },
+                    (Some(_), Some(_)) => Verdict::Unavailable { why: "bootc reports the staged deployment cannot be entered by a soft reboot; a full restart is needed".into() },
                 },
             ));
             checks.push((

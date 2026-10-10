@@ -184,6 +184,18 @@ grep -q 'bootc upgrade' "$T/calls" && bad "apply must not stage or queue" "$(gre
 if [ "$rc" = 0 ] && [ ! -e "$L" ] && [ "$(cat "$R/usr/share/rime-shell/shell.qml")" = "old shell" ]; then ok "rime live rollback restores the booted files"; else bad "rollback" "rc=$rc $(cat "$T/out")"; fi
 grep -q 'rime-live-session shell - 4' "$T/calls" && ok "rollback restarts the old shell leniently" || bad "rollback helper" "$(grep systemd-run "$T/calls")"
 [ "$(jq_ "d['state']")" = rolled-back ] && ok "status.json: rolled-back" || bad "rollback status" ""
+jq_ "d['summary']" | grep -q 'removed on request' && ok "status.json: a requested rollback is not called a failure" || bad "rollback summary" "$(jq_ "d['summary']")"
+
+# 2b. A later update deferred (screen locked) and left the earlier layer in
+# place: rollback still removes it and restarts what it held, and the deferred
+# record stays as it is.
+setup; cp "$R/var/lib/rime/live/txn.json" "$T/txn-deferred.json"
+apply >/dev/null
+cp "$T/txn-deferred.json" "$R/var/lib/rime/live/txn.json"; : > "$T/calls"
+"$RIME_BIN" live rollback > "$T/out" 2>&1; rc=$?
+if [ "$rc" = 0 ] && [ ! -e "$L" ] && [ "$(cat "$R/usr/share/rime-shell/shell.qml")" = "old shell" ] \
+    && grep -q 'rime-live-session shell - 4' "$T/calls"; then ok "rollback removes a layer an earlier transaction left"; else bad "rollback after deferral" "rc=$rc $(cat "$T/out")"; fi
+grep -Eq '"state": ?"deferred","booted' "$R/var/lib/rime/live/txn.json" && ok "rollback leaves the later deferred record alone" || bad "deferred record" "$(head -c 300 "$R/var/lib/rime/live/txn.json")"
 
 # 3. Locked session: the shell is deferred, nothing is put in the layer.
 setup; echo yes > "$T/locked"
@@ -191,6 +203,11 @@ rc=$(apply)
 [ "$rc" = 0 ] && [ "$(comp_state shell)" = deferred ] && [ ! -e "$L/usr/share/rime-shell" ] && ! grep -q systemd-run "$T/calls" 2>/dev/null \
     && ok "locked: shell deferred, layer untouched, helper never run" || bad "locked" "rc=$rc $(cat "$T/out")"
 [ "$(cat "$R/usr/share/rime-shell/shell.qml")" = "old shell" ] && ok "locked: /usr still reads the booted shell" || bad "locked files" ""
+# 3b. bootc says the STAGED deployment cannot be soft-rebooted into (the
+# booted one still says it can): no soft reboot is recommended.
+setup; echo yes > "$T/locked"; echo false > "$T/soft"
+apply >/dev/null
+jq_ "d['recommendation']" | grep -q 'soft-reboot' && bad "soft reboot recommended for a staged deployment bootc cannot enter" "$(jq_ "d['recommendation']")" || ok "no soft reboot recommended when the staged deployment cannot take one"
 
 # 4. The helper fails: everything is undone.
 setup; echo 1 > "$T/helper-rc"
@@ -202,6 +219,7 @@ if [ "$rc" = 1 ] && [ ! -e "$L" ] && [ "$(cat "$R/usr/share/rime-shell/shell.qml
 setup; echo 3 > "$T/helper-rc"
 rc=$(apply)
 [ "$rc" = 0 ] && [ ! -e "$L/usr/share/rime-shell" ] && [ "$(comp_state shell)" = deferred ] && ok "late lock: deferred and the shell files withdrawn" || bad "late lock" "rc=$rc $(cat "$T/out")"
+jq_ "d['summary']" | grep -q 'session locked' && ok "status.json: a late lock is not called a failure" || bad "late lock summary" "$(jq_ "d['summary']")"
 
 # 6. The sysext merge fails: nothing claimed.
 setup; : > "$T/sysext.fail"

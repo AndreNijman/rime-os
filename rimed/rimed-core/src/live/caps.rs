@@ -94,9 +94,14 @@ pub fn luo_kho(config: Option<&str>, cmdline: &str, dev_liveupdate: bool) -> Ver
         (true, true) => Verdict::Available {
             evidence: "kho=on and /dev/liveupdate present (experimental; never used by rime update)".into(),
         },
-        (true, false) => Verdict::Unavailable { why: "kho=on but /dev/liveupdate is missing".into() },
+        // The orchestrator has its own switch: with kho=on alone the kernel
+        // sets up KHO but never creates /dev/liveupdate (measured, 7.2.6).
+        (true, false) if !cmdline.split_whitespace().any(|a| a == "liveupdate=on" || a == "liveupdate=1") => Verdict::Unavailable {
+            why: "kho=on, but /dev/liveupdate is missing: the orchestrator also needs liveupdate=on on the command line".into(),
+        },
+        (true, false) => Verdict::Unavailable { why: "kho=on and liveupdate=on, but /dev/liveupdate is missing".into() },
         (false, _) => Verdict::Unavailable {
-            why: "built in, but not enabled at boot (kho=on is not on the command line)".into(),
+            why: "built in, but not enabled at boot (needs kho=on and liveupdate=on on the command line)".into(),
         },
     }
 }
@@ -239,6 +244,8 @@ mod tests {
         assert!(matches!(luo_kho(Some(RIME_729), "quiet splash", false), Verdict::Unavailable { ref why } if why.contains("not enabled")));
         assert!(luo_kho(Some(RIME_729), "quiet kho=on", true).is_available());
         assert!(!luo_kho(Some("CONFIG_KEXEC_HANDOVER=y\n"), "kho=on", true).is_available());
+        assert!(matches!(luo_kho(Some(RIME_729), "kho=on", false), Verdict::Unavailable { ref why } if why.contains("liveupdate=on on the command line")));
+        assert!(matches!(luo_kho(Some(RIME_729), "kho=on liveupdate=on", false), Verdict::Unavailable { ref why } if !why.contains("needs")));
     }
 
     #[test]
