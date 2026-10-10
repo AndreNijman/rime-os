@@ -56,6 +56,9 @@ pub struct Spawned {
 /// with one transcript line and "killed by signal 9". rime-aid hit the same
 /// kernel rule and solved it the same way (`rime-aid/src/main.rs`,
 /// `Daemon::spawn`). `tests/spawner_thread.rs` pins it.
+// Sessions start through `spawn_held`; this is the run-it-now form the unit
+// tests use, so outside them nothing calls it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn spawn(
     argv: &[String],
     cwd: &Path,
@@ -64,8 +67,135 @@ pub fn spawn(
     no_new_privs: bool,
     size: WinSize,
 ) -> Result<Spawned> {
+    let (spawned, held) = spawn_held(argv, cwd, env, clear_env, no_new_privs, size)?;
+    if let Err(e) = held.release() {
+        // Safe: the master is ours and nothing else has seen it.
+        unsafe { libc::close(spawned.master) };
+        return Err(e);
+    }
+    Ok(spawned)
+}
+
+/// [`spawn`], stopped just before the program runs.
+///
+/// The child is forked, on its terminal, in its own process group and with
+/// every pre-exec step done, then waits for [`Held::release`] before it
+/// `execve`s. A session is started this way so the daemon can record it
+/// first: a connection is attributed to a session by walking its `/proc`
+/// ancestry to a pid the registry holds, and a program that ran before its
+/// pid was recorded had its first requests attributed to nobody, which
+/// `may_be_granted` then took for the human at the terminal. Dropping the
+/// [`Held`] without releasing it kills the child: a session that was never
+/// recorded never runs.
+pub fn spawn_held(
+    argv: &[String],
+    cwd: &Path,
+    env: &[(String, String)],
+    clear_env: bool,
+    no_new_privs: bool,
+    size: WinSize,
+) -> Result<(Spawned, Held)> {
     let (argv, cwd, env) = (argv.to_vec(), cwd.to_path_buf(), env.to_vec());
     on_spawner_thread(move || spawn_here(&argv, &cwd, &env, clear_env, no_new_privs, size))
+}
+
+/// A child parked before `execve`. See [`spawn_held`].
+#[derive(Debug)]
+pub struct Held {
+    pid: libc::pid_t,
+    /// Write end of the release pipe; one byte lets the child exec.
+    go: RawFd,
+    /// Read end of the exec sync pipe, for the exec-or-fail answer.
+    sync: RawFd,
+}
+
+impl Held {
+    /// Let the program run, and wait until it has exec'd or failed to.
+    ///
+    /// Releasing only moves the wait [`spawn`] has always done: on `Ok` the
+    /// program is running; on `Err` the child is reaped and nothing runs.
+    pub fn release(mut self) -> Result<()> {
+        let (pid, go, sync) = (self.pid, self.go, self.sync);
+        self.pid = -1;
+        let byte = 1u8;
+        // Safe: a one-byte write to, then a close of, a descriptor we own.
+        let wrote = unsafe {
+            let n = libc::write(go, &byte as *const u8 as *const libc::c_void, 1);
+            libc::close(go);
+            n
+        };
+        if wrote != 1 {
+            let err = std::io::Error::last_os_error();
+            reap(pid, true);
+            unsafe { libc::close(sync) };
+            return Err(err).context("releasing the agent process");
+        }
+        let outcome = read_sync(sync, EXEC_DEADLINE_MS);
+        unsafe { libc::close(sync) };
+        exec_outcome(pid, outcome)
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if self.pid > 0 {
+            reap(self.pid, true);
+            // Safe: closing descriptors we own; release() marks them spent.
+            unsafe {
+                libc::close(self.go);
+                libc::close(self.sync);
+            }
+        }
+    }
+}
+
+/// Wait for `pid` to exit, killing it first when `kill` is set.
+fn reap(pid: libc::pid_t, kill: bool) {
+    // Safe: signals and reaps our own child.
+    unsafe {
+        if kill {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        let mut status: libc::c_int = 0;
+        libc::waitpid(pid, &mut status, 0);
+    }
+}
+
+/// What a sync-pipe answer means for a child that was released.
+fn exec_outcome(pid: libc::pid_t, outcome: Exec) -> Result<()> {
+    match outcome {
+        Exec::Started => Ok(()),
+        Exec::Failed(stage, errno) => {
+            // Reap the child that is already on its way out, so it does not
+            // linger as a zombie for a session that never started.
+            reap(pid, false);
+            Err(std::io::Error::from_raw_os_error(errno)).context(stage_name(stage).to_string())
+        }
+        Exec::Stuck => {
+            // The child is wedged somewhere before exec and will never say so.
+            // Kill it: a child that never execs never runs FD_CLOEXEC, so for
+            // as long as it lives it holds open every descriptor it inherited
+            // at fork — this process's pipes, sockets and terminals included.
+            // Leaving it alive is what turns one stuck spawn into unrelated
+            // reads elsewhere in the program that never see end-of-file.
+            reap(pid, true);
+            bail!(
+                "the agent process was still not running {EXEC_DEADLINE_MS} ms \
+                 after it was forked, so it was killed; it never reached the \
+                 program, and nothing was started"
+            )
+        }
+    }
+}
+
+fn stage_name(stage: u8) -> &'static str {
+    match stage {
+        STAGE_LOGIN_TTY => "attaching the agent to its terminal",
+        STAGE_CHDIR => "entering the working directory",
+        STAGE_NO_NEW_PRIVS => "locking the session out of privilege escalation",
+        STAGE_HELD => "waiting to be released",
+        _ => "starting the agent program",
+    }
 }
 
 /// A unit of work for the spawner thread.
@@ -123,7 +253,7 @@ fn spawn_here(
     clear_env: bool,
     no_new_privs: bool,
     size: WinSize,
-) -> Result<Spawned> {
+) -> Result<(Spawned, Held)> {
     if argv.is_empty() {
         bail!("no program to run");
     }
@@ -198,6 +328,22 @@ fn spawn_here(
     }
     let (sync_read, sync_write) = (sync_fds[0], sync_fds[1]);
 
+    // Release pipe. The child parks on its read end just before execve and
+    // runs the program only when a byte arrives: see `spawn_held`. End-of-file
+    // instead (the parent dropped the `Held`, or died) means the session was
+    // never recorded, and the child exits without running anything.
+    let mut go_fds = [0 as RawFd; 2];
+    // Safe: pipe2 writes two descriptors into an array we own.
+    if unsafe { libc::pipe2(go_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        let err = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(sync_read);
+            libc::close(sync_write);
+        }
+        return Err(err).context("creating the release pipe");
+    }
+    let (go_read, go_write) = (go_fds[0], go_fds[1]);
+
     let mut master: RawFd = -1;
     let mut slave: RawFd = -1;
     // Safe: openpty writes two descriptors we own and reads the winsize we
@@ -216,6 +362,8 @@ fn spawn_here(
         unsafe {
             libc::close(sync_read);
             libc::close(sync_write);
+            libc::close(go_read);
+            libc::close(go_write);
         }
         return Err(err).context("allocating a pseudo-terminal");
     }
@@ -229,6 +377,8 @@ fn spawn_here(
             libc::close(slave);
             libc::close(sync_read);
             libc::close(sync_write);
+            libc::close(go_read);
+            libc::close(go_write);
         }
         return Err(err).context("forking the agent process");
     }
@@ -239,6 +389,7 @@ fn spawn_here(
         unsafe {
             libc::close(master);
             libc::close(sync_read);
+            libc::close(go_write);
 
             // Report a pre-exec failure to the parent and stop. The parent
             // distinguishes this from a successful exec by the pipe carrying
@@ -299,6 +450,25 @@ fn spawn_here(
             // cannot be killed or interrupted.
             libc::sigprocmask(libc::SIG_SETMASK, &empty_mask, std::ptr::null_mut());
 
+            // Parked: every step above is done (so the process group exists),
+            // and the program does not run until the daemon has recorded the
+            // session and sends one byte. write and read are async-signal-safe.
+            let held = [STAGE_HELD, 0u8, 0u8];
+            libc::write(sync_write, held.as_ptr() as *const libc::c_void, held.len());
+            let mut go = 0u8;
+            loop {
+                let n = libc::read(go_read, &mut go as *mut u8 as *mut libc::c_void, 1);
+                if n == 1 {
+                    break;
+                }
+                if n < 0 && *libc::__errno_location() == libc::EINTR {
+                    continue;
+                }
+                // Never released: the session was not recorded, so its
+                // program must not run.
+                libc::_exit(122);
+            }
+
             // The environment arrives as execve's third argument, and the PATH
             // search already happened in the parent. THIS IS THE WHOLE POINT OF
             // THE FILE'S SHAPE and it is not a style preference:
@@ -354,63 +524,58 @@ fn spawn_here(
     unsafe {
         libc::close(slave);
         libc::close(sync_write);
+        libc::close(go_read);
     }
 
-    // Block until the child has either exec'd or failed. This is what makes
-    // the returned `pgid` real: login_tty's setsid has definitely run by the
-    // time the pipe resolves, so a kill issued immediately after this returns
-    // cannot race the process group into existence.
-    let outcome = read_sync(sync_read, EXEC_DEADLINE_MS);
-    unsafe { libc::close(sync_read) };
-
-    match outcome {
-        Exec::Started => {}
-        Exec::Failed(stage, errno) => {
-            // Reap the child that is already on its way out, so it does not
-            // linger as a zombie for a session that never started.
-            let mut status: libc::c_int = 0;
-            unsafe { libc::waitpid(pid, &mut status, 0) };
+    // Block until the child has parked or failed. This is what makes the
+    // returned `pgid` real: login_tty's setsid has definitely run by the time
+    // the child parks, so a kill issued immediately after this returns cannot
+    // race the process group into existence. The exec itself is waited for
+    // by `Held::release`.
+    let held = Held {
+        pid,
+        go: go_write,
+        sync: sync_read,
+    };
+    match read_sync(sync_read, EXEC_DEADLINE_MS) {
+        Exec::Failed(STAGE_HELD, _) => {}
+        // End-of-file before parking cannot be an exec (the child execs only
+        // after it parks), so it is a child that died: say so, not "started".
+        Exec::Started => {
+            drop(held);
             unsafe { libc::close(master) };
-            let err = std::io::Error::from_raw_os_error(errno);
-            let what = match stage {
-                STAGE_LOGIN_TTY => "attaching the agent to its terminal",
-                STAGE_CHDIR => "entering the working directory",
-                STAGE_NO_NEW_PRIVS => "locking the session out of privilege escalation",
-                _ => "starting the agent program",
-            };
-            return Err(err).context(what.to_string());
+            bail!("the agent process exited before it was ready to run its program");
         }
-        Exec::Stuck => {
-            // The child is wedged somewhere before exec and will never say so.
-            // Kill it: a child that never execs never runs FD_CLOEXEC, so for
-            // as long as it lives it holds open every descriptor it inherited
-            // at fork — this process's pipes, sockets and terminals included.
-            // Leaving it alive is what turns one stuck spawn into unrelated
-            // reads elsewhere in the program that never see end-of-file.
+        outcome => {
+            // `exec_outcome` reaps the child; the descriptors are closed here.
+            let mut held = held;
+            held.pid = -1;
             unsafe {
-                libc::kill(pid, libc::SIGKILL);
-                let mut status: libc::c_int = 0;
-                libc::waitpid(pid, &mut status, 0);
+                libc::close(go_write);
+                libc::close(sync_read);
                 libc::close(master);
             }
-            bail!(
-                "the agent process was still not running {EXEC_DEADLINE_MS} ms \
-                 after it was forked, so it was killed; it never reached the \
-                 program, and nothing was started"
-            );
+            exec_outcome(pid, outcome)?;
+            unreachable!("exec_outcome is Ok only for Exec::Started");
         }
     }
 
-    set_nonblocking(master)?;
-    set_cloexec(master)?;
+    if let Err(e) = set_nonblocking(master).and_then(|()| set_cloexec(master)) {
+        drop(held);
+        unsafe { libc::close(master) };
+        return Err(e);
+    }
 
-    Ok(Spawned {
-        master,
-        pid,
-        // login_tty called setsid, so the child's group id is its own pid, and
-        // the read above proves it has already happened.
-        pgid: pid,
-    })
+    Ok((
+        Spawned {
+            master,
+            pid,
+            // login_tty called setsid, so the child's group id is its own pid,
+            // and the child parking proves it has already happened.
+            pgid: pid,
+        },
+        held,
+    ))
 }
 
 /// Stage markers written down the sync pipe when the child fails before exec.
@@ -418,6 +583,8 @@ const STAGE_LOGIN_TTY: u8 = 1;
 const STAGE_CHDIR: u8 = 2;
 const STAGE_EXEC: u8 = 3;
 const STAGE_NO_NEW_PRIVS: u8 = 4;
+/// Not a failure: the child is parked before exec, waiting for its release.
+const STAGE_HELD: u8 = 5;
 
 /// How long the parent waits for the child to reach `execve`.
 ///
@@ -1346,6 +1513,86 @@ mod tests {
     #[test]
     fn spawning_with_no_argv_is_an_error_not_a_panic() {
         assert!(spawn(&[], Path::new("/tmp"), &[], true, true, WinSize::FALLBACK).is_err());
+    }
+
+    /// A program started held must not run until it is released: that gap is
+    /// where the daemon records the session, so the program's first
+    /// connection is already attributable to it.
+    fn held_marker(tag: &str) -> (PathBuf, Vec<String>) {
+        let marker = std::env::temp_dir().join(format!(
+            "rime-agentd-held-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let argv = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("touch '{}'", marker.display()),
+        ];
+        (marker, argv)
+    }
+
+    fn appears(path: &Path, within: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + within;
+        while std::time::Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        path.exists()
+    }
+
+    #[test]
+    fn a_held_program_runs_only_once_released() {
+        let (marker, argv) = held_marker("release");
+        let (spawned, held) =
+            spawn_held(&argv, Path::new("/tmp"), &[], false, true, WinSize::FALLBACK)
+                .expect("spawn held");
+        assert!(
+            !appears(&marker, std::time::Duration::from_millis(300)),
+            "the program ran before it was released"
+        );
+        held.release().expect("release");
+        assert!(
+            appears(&marker, std::time::Duration::from_secs(5)),
+            "the program did not run after it was released"
+        );
+        unsafe {
+            let mut status: libc::c_int = 0;
+            libc::waitpid(spawned.pid, &mut status, 0);
+            libc::close(spawned.master);
+        }
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn a_held_program_that_is_never_released_never_runs() {
+        let (marker, argv) = held_marker("drop");
+        let (spawned, held) =
+            spawn_held(&argv, Path::new("/tmp"), &[], false, true, WinSize::FALLBACK)
+                .expect("spawn held");
+        drop(held);
+        // Reaped by the drop: the pid is no longer our child.
+        let gone = unsafe { libc::waitpid(spawned.pid, std::ptr::null_mut(), libc::WNOHANG) };
+        assert_eq!(gone, -1, "the dropped child was left running or unreaped");
+        assert!(
+            !appears(&marker, std::time::Duration::from_millis(300)),
+            "a program whose session was never recorded ran anyway"
+        );
+        unsafe { libc::close(spawned.master) };
+    }
+
+    #[test]
+    fn a_held_program_that_cannot_exec_fails_at_release() {
+        let argv = vec!["/nonexistent/rime-agentd-no-such-program".to_string()];
+        let (spawned, held) =
+            spawn_held(&argv, Path::new("/tmp"), &[], false, true, WinSize::FALLBACK)
+                .expect("spawn held");
+        let err = held.release().expect_err("exec of a missing program succeeded");
+        assert!(format!("{err:#}").contains("No such file"), "{err:#}");
+        unsafe { libc::close(spawned.master) };
     }
 
     /// Read `NoNewPrivs` from a spawned child's own `/proc` entry.
