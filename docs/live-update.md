@@ -174,7 +174,9 @@ Moves outside this graph are refused and change nothing. On the next run:
 | Interrupted while the layer was changing | the previous layer is put back and the activators re-run, then rolled-back |
 | Interrupted before activation | closed as failed; the deployment is either download-only or queued, both safe |
 
-Every step is appended to `/var/lib/rime/live/history.jsonl`. One lock
+Every step is appended to `/var/lib/rime/live/history.jsonl`. So is a
+`rime live rollback` of a layer an earlier transaction left behind (state
+`layer-removed`, with `ok`); that record's own steps stay as they were. One lock
 (`/var/lib/rime/live/lock`) serialises `update`, `apply`, `rollback` and
 `soft-reboot`.
 
@@ -187,6 +189,7 @@ Every step is appended to `/var/lib/rime/live/history.jsonl`. One lock
   "txn": "…",
   "state": "active",
   "booted": {"digest": "sha256:…", "release": "2026.10.10"},
+  "from": {"digest": "sha256:…"},
   "target": {"digest": "sha256:…", "release": "2026.10.11"},
   "staged_for_boot": true,
   "verified": true,
@@ -199,6 +202,11 @@ Every step is appended to `/var/lib/rime/live/history.jsonl`. One lock
   "summary": "1 component(s) updated live; the rest needs: …"
 }
 ```
+
+`booted` is the deployment the machine runs when the file is written, read from
+`bootc status` (`null` if bootc cannot answer). `from` is the deployment the
+transaction started on. They differ after a soft reboot or a restart has
+superseded the transaction.
 
 Field values:
 

@@ -35,6 +35,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rimed_core::live::classify::{classify, Activator, Classified};
@@ -544,16 +545,20 @@ fn save(paths: &Paths, t: &Txn) -> Result<(), String> {
     let text = serde_json::to_string_pretty(t).map_err(|e| e.to_string())?;
     write_atomic(&paths.txn_file(), text.as_bytes(), 0o600)?;
     if let Some(step) = t.history.last() {
-        let line = json!({"txn": t.id, "at": step.at, "state": step.state, "note": step.note,
-                          "booted": t.booted_digest, "target": t.target_digest});
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(paths.history_file())
-            .map_err(|e| format!("{}: {e}", paths.history_file().display()))?;
-        let _ = writeln!(f, "{line}");
+        append_history(paths, &json!({"txn": t.id, "at": step.at, "state": step.state, "note": step.note,
+                                      "booted": t.booted_digest, "target": t.target_digest}))?;
     }
     write_status(paths, t)
+}
+
+fn append_history(paths: &Paths, line: &Value) -> Result<(), String> {
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.history_file())
+        .map_err(|e| format!("{}: {e}", paths.history_file().display()))?;
+    let _ = writeln!(f, "{line}");
+    Ok(())
 }
 
 fn advance(paths: &Paths, t: &mut Txn, s: State, note: impl Into<String>) -> Result<(), String> {
@@ -596,7 +601,9 @@ fn req_name(r: Requirement) -> String {
 }
 
 /// The public document; its schema is in docs/live-update.md.
-pub fn status_json(t: &Txn, booted_release: Option<&str>) -> Value {
+/// `booted_digest` is what the machine runs now, measured, not the record's
+/// starting image (`from`): after a soft reboot or a restart they differ.
+pub fn status_json(t: &Txn, booted_digest: Option<&str>, booted_release: Option<&str>) -> Value {
     let comps: Vec<Value> = t
         .outcomes
         .iter()
@@ -641,7 +648,8 @@ pub fn status_json(t: &Txn, booted_release: Option<&str>) -> Value {
         "updated": t.history.last().map(|s| s.at).unwrap_or(0),
         "txn": t.id,
         "state": state_name(t.state),
-        "booted": {"digest": t.booted_digest, "release": booted_release},
+        "booted": {"digest": booted_digest, "release": booted_release},
+        "from": {"digest": t.booted_digest},
         "target": if t.target_digest.is_empty() { Value::Null } else {
             json!({"digest": t.target_digest, "release": t.target_release})
         },
@@ -687,8 +695,14 @@ fn boot_need(r: Requirement) -> Requirement {
 }
 
 fn write_status(paths: &Paths, t: &Txn) -> Result<(), String> {
+    // One process never outlives its boot's deployment (a soft reboot is the
+    // last thing it runs), so the measurement is taken once.
+    static BOOTED: OnceLock<Option<String>> = OnceLock::new();
+    let digest = BOOTED.get_or_init(|| {
+        bootc_status().ok().and_then(|s| s.booted).map(|b| b.digest).filter(|d| !d.is_empty())
+    });
     let booted = release_of(&paths.live_root());
-    let v = status_json(t, booted.as_deref());
+    let v = status_json(t, digest.as_deref(), booted.as_deref());
     let text = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
     write_atomic(&paths.status_file(), text.as_bytes(), 0o644)
 }
@@ -1791,7 +1805,9 @@ pub fn rollback() -> i32 {
     let cur = paths.layer();
     // Whatever is in the layer is running now, whichever transaction put it
     // there, so its activators run again once it is gone.
-    let mut actions = layer_actions(&layer_entries(&cur));
+    let entries = layer_entries(&cur);
+    let removed = entries.len();
+    let mut actions = layer_actions(&entries);
     if owns_layer {
         if let Some(p) = &t.plan {
             for a in &p.actions {
@@ -1819,7 +1835,19 @@ pub fn rollback() -> i32 {
     if !owns_layer {
         // The record belongs to a later update that did not activate; it
         // still describes what the next restart brings, so it stays as it is.
-        if errors.is_empty() {
+        // The removal is still audited, apart from that record's own steps.
+        let ok = errors.is_empty();
+        let note = if ok {
+            format!("live layer removed on request ({} file(s) an earlier update in this boot put there)", removed)
+        } else {
+            format!("live layer removal on request incomplete: {}", errors.join("; "))
+        };
+        if let Err(e) = append_history(&paths, &json!({"txn": t.id, "at": now(), "state": "layer-removed",
+                                                         "note": note, "ok": ok, "record_state": t.state}))
+        {
+            eprintln!("rime: {e}");
+        }
+        if ok {
             println!("rime: the live layer is removed; this machine runs its booted deployment again");
             return 0;
         }
@@ -2057,10 +2085,12 @@ mod tests {
         t.outcomes.insert(Component::Shell, Outcome::Active { how: Requirement::ServiceRestart, evidence: "rev x".into() });
         t.outcomes.insert(Component::Kernel, Outcome::Pending { requirement: Requirement::KernelTransition });
         t.outcomes.insert(Component::Metadata, Outcome::Pending { requirement: Requirement::Nothing });
-        let v = status_json(&t, Some("2026.10.10"));
+        let v = status_json(&t, Some("sha256:cc"), Some("2026.10.10"));
         assert_eq!(v["schema"], 1);
         assert_eq!(v["state"], "discovered");
         assert_eq!(v["booted"]["release"], "2026.10.10");
+        assert_eq!(v["booted"]["digest"], "sha256:cc", "booted is the measured deployment");
+        assert_eq!(v["from"]["digest"], "sha256:aa", "the record's starting image is reported apart");
         assert_eq!(v["target"]["digest"], "sha256:bb");
         let comps = v["components"].as_array().unwrap();
         assert_eq!(comps.len(), 2, "metadata is not a component users see");

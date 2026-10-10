@@ -196,6 +196,7 @@ cp "$T/txn-deferred.json" "$R/var/lib/rime/live/txn.json"; : > "$T/calls"
 if [ "$rc" = 0 ] && [ ! -e "$L" ] && [ "$(cat "$R/usr/share/rime-shell/shell.qml")" = "old shell" ] \
     && grep -q 'rime-live-session shell - 4' "$T/calls"; then ok "rollback removes a layer an earlier transaction left"; else bad "rollback after deferral" "rc=$rc $(cat "$T/out")"; fi
 grep -Eq '"state": ?"deferred","booted' "$R/var/lib/rime/live/txn.json" && ok "rollback leaves the later deferred record alone" || bad "deferred record" "$(head -c 300 "$R/var/lib/rime/live/txn.json")"
+grep '"state":"layer-removed"' "$R/var/lib/rime/live/history.jsonl" | grep -q '"ok":true' && ok "that rollback is written to the audit log" || bad "rollback not audited" "$(tail -n 2 "$R/var/lib/rime/live/history.jsonl")"
 
 # 3. Locked session: the shell is deferred, nothing is put in the layer.
 setup; echo yes > "$T/locked"
@@ -343,6 +344,9 @@ setup; apply >/dev/null
 sed -i "s/\"checksum\":\"$B\"/\"checksum\":\"$S\"/; s/\"imageDigest\":\"sha256:b\{64\}\"/\"imageDigest\":\"sha256:$(printf e%.0s $(seq 64))\"/" "$T/bootc-status.json"
 "$RIME_BIN" live apply > "$T/out" 2>&1
 [ ! -e "$L" ] && grep -q 'another deployment' "$R/var/lib/rime/live/history.jsonl" && ok "a new deployment in the same boot supersedes the old layer" || bad "soft-reboot recovery" "$(cat "$T/out")"
+E64="sha256:$(printf e%.0s $(seq 64))"; B64="sha256:$(printf b%.0s $(seq 64))"
+[ "$(jq_ "d['booted']['digest']")" = "$E64" ] && [ "$(jq_ "d['from']['digest']")" = "$B64" ] \
+    && ok "status.json: booted is the deployment running now, from is the record's" || bad "stale booted digest" "booted=$(jq_ "d['booted']['digest']") from=$(jq_ "d['from']['digest']")"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
