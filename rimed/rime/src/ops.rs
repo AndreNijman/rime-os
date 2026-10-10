@@ -293,6 +293,8 @@ impl Drop for FsyncGuard {
 pub struct UpdateOptions {
     /// Report what is available; download and stage nothing.
     pub check: bool,
+    /// The live-update engine's switches (`--plan`, `--live-only`, `--no-live`).
+    pub live: crate::live::LiveOptions,
     /// Skip the firmware (fwupd) pass entirely.
     pub skip_firmware: bool,
     /// Run only the firmware pass; leave the OS image alone.
@@ -738,6 +740,42 @@ fn trust_gate(allow_unverified: bool, target: Option<&str>) -> Option<i32> {
     }
 }
 
+/// The gate again, for the deployment `bootc upgrade --download-only` really
+/// staged. `trust_gate` answered for the digest the registry would serve; a
+/// tag can move between that lookup and the pull, so the digest that will
+/// boot is verified by itself before anything queues or activates it.
+/// Ok(true) verified; Ok(false) did not verify and `--allow-unverified` was
+/// given (the caller records that, so nothing later trusts it as verified).
+pub(crate) fn verify_staged(allow_unverified: bool, reference: &str, digest: &str) -> Result<bool, i32> {
+    let roots = crate::trust::Roots::from_env();
+    if roots.fixture.is_some() {
+        println!("rime: this program will not deploy on fixture facts");
+        return Err(1);
+    }
+    let enforcement = crate::verify::enforcement(&roots);
+    let verification = crate::verify::verify_image(&roots, reference, digest);
+    let decision = crate::verify::decide(&verification, &enforcement);
+    match crate::verify::refusal(&verification, &enforcement, &decision, "--allow-unverified") {
+        None => {
+            if let crate::verify::Decision::ProceedWithWarnings(w) = &decision {
+                for line in w {
+                    eprintln!("rime: {line}");
+                }
+            }
+            Ok(true)
+        }
+        Some(why) if allow_unverified => {
+            eprint!("{why}");
+            eprintln!("rime: proceeding anyway because --allow-unverified was given.");
+            Ok(false)
+        }
+        Some(why) => {
+            eprint!("{why}");
+            Err(1)
+        }
+    }
+}
+
 /// The in-place move from ostree + GRUB to composefs + systemd-boot.
 ///
 /// Returns true only when this machine actually migrated, in which case the
@@ -997,19 +1035,24 @@ pub fn update(opts: UpdateOptions) -> i32 {
         // no-ops when the booted image is current, and checking first would add
         // a second registry round-trip to the exact path we are trying to make
         // faster.
-        match run("bootc", &["upgrade"]) {
-            Ok(0) => {}
-            Ok(code) => {
-                // bootc's own wording for this case names rpm-ostree and offers
-                // `rpm-ostree reset`, which throws the user's software away.
-                // Rime can do strictly better: keep the packages, drop the layer.
+        //
+        // The live-update engine stages with `--download-only`, verifies the
+        // digest that was really staged, queues it, and activates what can be
+        // activated without a restart. See `crate::live`.
+        let live = crate::live::LiveOptions { allow_unverified: opts.allow_unverified, ..opts.live };
+        match crate::live::update(live) {
+            0 => {}
+            code => {
+                // bootc's own wording for a layered deployment names rpm-ostree
+                // and offers `rpm-ostree reset`, which throws the user's
+                // software away. Rime can do strictly better: keep the
+                // packages, drop the layer.
                 advise_on_layering();
                 worst = worst.max(code);
             }
-            Err(e) => {
-                eprintln!("rime: OS update failed: {e}");
-                worst = 1;
-            }
+        }
+        if opts.live.plan_only {
+            return worst;
         }
     }
 

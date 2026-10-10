@@ -86,5 +86,28 @@ grep -q '^PathChanged=/run/rime-update/state' "$U/rime-update-notice.path" && ok
 ! grep -qE '^(User|OnCalendar|OnUnitActiveSec)=' "$U/rime-update-notice.service" "$U/rime-update-notice.path" \
     && ok "notice units poll nothing" || bad "notice polls"
 
+sec "live update results"
+rm -f "$W/run/state" "$W/notified"
+run_live() { HOME="$W/home" XDG_STATE_HOME="$W/home/state" PATH="$W/bin:$PATH" RIME_UPDATE_STATE="$W/run/state" RIME_LIVE_STATUS="$W/run/live.json" bash "$NOTICE" >/dev/null 2>&1; }
+live_doc() { printf '{"schema":1,"txn":"%s","state":"%s","summary":"%s","components":[{"component":"shell","state":"%s"}]}' "$1" "$2" "$3" "${4:-active}" > "$W/run/live.json"; }
+sent_n() { [[ -f "$W/notified" ]] && wc -l < "$W/notified" || echo 0; }
+live_doc t1 planned "plan only"; run_live
+[[ "$(sent_n)" -eq 0 ]] && ok "a plan is not announced" || bad "plan announced"
+live_doc t1 deferred "everything waits for a restart"; run_live
+[[ "$(sent_n)" -eq 0 ]] && ok "a deferred update is not announced" || bad "deferred announced"
+live_doc t1 active "Up to date." pending; run_live
+[[ "$(sent_n)" -eq 0 ]] && ok "active with nothing activated is not announced" || bad "empty active announced"
+live_doc t2 active "Rime Shell is active now."; run_live
+[[ "$(sent_n)" -eq 1 ]] && grep -q 'Rime update applied' "$W/notified" && grep -q 'Rime Shell is active now.' "$W/notified" \
+    && ok "an applied update is announced in the engine's words" || bad "active" "$(cat "$W/notified" 2>/dev/null)"
+run_live
+[[ "$(sent_n)" -eq 1 ]] && ok "once per transaction" || bad "repeat"
+live_doc t3 failed "Live activation failed; see rime live doctor." failed; run_live
+[[ "$(sent_n)" -eq 2 ]] && grep -q 'rime live doctor' "$W/notified" && ok "a failure names rime live doctor" || bad "failed" "$(cat "$W/notified")"
+printf '{"schema":2,"txn":"t4","state":"active","summary":"x"}' > "$W/run/live.json"; run_live
+printf 'not json' > "$W/run/live.json"; run_live
+[[ "$(sent_n)" -eq 2 ]] && ok "unknown schema or garbage is ignored" || bad "garbage"
+grep -q '^PathChanged=/run/rime-live/status.json' "$U/rime-update-notice.path" && ok "notice is woken by a live result" || bad "live path"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]

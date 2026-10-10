@@ -713,7 +713,9 @@ body="$(sed -n '/^pub fn update(opts: UpdateOptions)/,/^}/p' "$REPO/rimed/rime/s
 # runs `bootc upgrade --check` first, and it stages nothing.
 body="$(printf '%s\n' "$body" | sed -n '/return worst;/,$p')"
 g="$(printf '%s\n' "$body" | grep -n 'trust_gate(' | head -1 | cut -d: -f1)"
-for after in 'record_update' 'FsyncGuard::disable' '"upgrade"'; do
+# The staging step is `live::update(`, which runs `bootc upgrade
+# --download-only` and then verifies the staged digest a second time.
+for after in 'record_update' 'FsyncGuard::disable' 'live::update('; do
     w="$(printf '%s\n' "$body" | grep -nF "$after" | head -1 | cut -d: -f1)"
     if [[ -n "$g" && -n "$w" && "$g" -lt "$w" ]]; then
         ok "the gate runs before $after (line $g vs $w)"
