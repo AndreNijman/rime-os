@@ -1566,6 +1566,9 @@ RUN set -eux; \
 # stages or installs anything: the user runs `sudo rime update`.
 COPY files/system/libexec/rime-update-check /usr/libexec/rime-update-check
 COPY files/system/libexec/rime-update-notice /usr/libexec/rime-update-notice
+# The user-side half of a live update: `rime update` runs it in each graphical
+# session to replace the Rime Shell (only while unlocked) and reload Hyprland.
+COPY files/system/libexec/rime-live-session /usr/libexec/rime-live-session
 COPY files/system/units/rime-update-check.service \
      files/system/units/rime-update-check.timer \
      /usr/lib/systemd/system/
@@ -1573,8 +1576,11 @@ COPY files/system/units/rime-update-notice.service \
      files/system/units/rime-update-notice.path \
      /usr/lib/systemd/user/
 RUN set -eux; \
-    chmod 0755 /usr/libexec/rime-update-check /usr/libexec/rime-update-notice; \
+    chmod 0755 /usr/libexec/rime-update-check /usr/libexec/rime-update-notice \
+        /usr/libexec/rime-live-session; \
     bash -n /usr/libexec/rime-update-check; \
+    bash -n /usr/libexec/rime-live-session; \
+    command -v systemd-run systemd-inhibit loginctl; \
     bash -n /usr/libexec/rime-update-notice; \
     command -v bootc notify-send; \
     systemctl enable rime-update-check.timer; \

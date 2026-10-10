@@ -34,6 +34,7 @@
 //! activation is an optimisation over a reboot that already works; it has to
 //! earn every component it touches.
 
+pub mod caps;
 pub mod classify;
 pub mod diff;
 pub mod elf;

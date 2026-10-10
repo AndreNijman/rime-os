@@ -113,6 +113,11 @@ pub struct Txn {
     pub previous_layer: Option<String>,
     pub outcomes: BTreeMap<Component, Outcome>,
     pub history: Vec<Step>,
+    /// The staged deployment is queued for the next boot (not download-only).
+    #[serde(default)]
+    pub staged_for_boot: bool,
+    #[serde(default)]
+    pub soft_reboot_capable: bool,
 }
 
 impl Txn {
@@ -130,6 +135,8 @@ impl Txn {
             previous_layer: None,
             outcomes: BTreeMap::new(),
             history: vec![Step { state: State::Discovered, at: now, note: String::new() }],
+            staged_for_boot: false,
+            soft_reboot_capable: false,
         }
     }
 
