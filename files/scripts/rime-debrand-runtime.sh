@@ -183,7 +183,7 @@ do_bls() {
     # Remount /boot rw only if it is a mountpoint AND currently ro.
     BOOT_MNT="$(findmnt -no TARGET --target "$BOOT_DIR" 2>/dev/null || true)"
     if [ "$APPLY" = 1 ] && [ -n "$BOOT_MNT" ] \
-       && findmnt -no OPTIONS --target "$BOOT_DIR" 2>/dev/null | tr ',' '\n' | grep -qx ro; then
+       && findmnt -no OPTIONS --target "$BOOT_DIR" 2>/dev/null | tr ',' '\n' | grep -x ro >/dev/null; then
         info "$BOOT_MNT is mounted read-only — remounting rw for the rewrite"
         mount -o remount,rw "$BOOT_MNT" || { err "could not remount $BOOT_MNT rw"; return; }
         BOOT_REMOUNTED=1
@@ -323,7 +323,7 @@ do_efi() {
     fi
 
     # Already branded?
-    if printf '%s\n' "$ours" | grep -qE "^Boot[0-9A-Fa-f]{4}\*?[[:space:]]+${BRAND}[[:space:]]"; then
+    if printf '%s\n' "$ours" | grep -E "^Boot[0-9A-Fa-f]{4}\*?[[:space:]]+${BRAND}[[:space:]]" >/dev/null; then
         ok "an NVRAM entry is already labelled '$BRAND' — nothing to do"
         printf '%s\n' "$ours" | sed 's/^/    /'
         say ""; return
@@ -371,7 +371,7 @@ do_efi() {
     for n in ${order//,/ }; do
         if [ "${n^^}" = "${first_stale^^}" ]; then
             new_order="${new_order:+$new_order,}$new_num"
-        elif printf '%s\n' "$stale_nums" | grep -qix "$n"; then
+        elif printf '%s\n' "$stale_nums" | grep -ix "$n" >/dev/null; then
             continue                       # drop the other stale ones
         elif [ "${n^^}" = "${new_num^^}" ]; then
             continue                       # efibootmgr already prepended it

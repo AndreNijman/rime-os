@@ -25,6 +25,10 @@
 #  Run from anywhere: ./tests/test-rime-lock-cmd-check.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 cd "$(dirname "$0")/.." || exit 2
 
@@ -108,7 +112,7 @@ fi
 
 # The function is used, and a failure fails the login's provisioning.
 if grep -qE '^if \[ -f "\$\{_idle_conf\}" \] && ! _lock_paths="\$\(lock_cmd_reaches_shell "\$\{_idle_conf\}"\)"; then$' "$FIRSTRUN" \
-   && grep -A1 -E '_lock_paths="\$\(lock_cmd_reaches_shell' "$FIRSTRUN" | grep -q 'fail_check "hypridle lock_cmd reaches no shell'; then
+   && grep -A1 -E '_lock_paths="\$\(lock_cmd_reaches_shell' "$FIRSTRUN" | pipe_has 'fail_check "hypridle lock_cmd reaches no shell'; then
     ok "firstrun runs it and fails provisioning when it says no"
 else
     bad "firstrun runs it and fails provisioning when it says no"

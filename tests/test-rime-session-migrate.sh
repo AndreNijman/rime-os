@@ -31,6 +31,10 @@
 # an unexpanded tilde (SC2088). Both are the shape of the harness, not defects.
 # shellcheck disable=SC2034,SC2088
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="${ROOT}/files/system/libexec/rime-session-migrate"
@@ -315,7 +319,7 @@ lua_report() { "$LUA" "${WORK}/harness.lua" "$1/.config/hypr" 2>&1; }
 lua_healthy() {
     local r; r="$(lua_report "$1")"
     for p in 1 2; do
-        printf '%s\n' "$r" | grep -qE "^pass${p} ok=true live=[5-9][0-9] dups=0 F12=1 F10=1 T=1 W=1$" \
+        printf '%s\n' "$r" | pipe_has -E "^pass${p} ok=true live=[5-9][0-9] dups=0 F12=1 F10=1 T=1 W=1$" \
             || return 1
     done
 }

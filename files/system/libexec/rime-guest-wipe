@@ -177,7 +177,7 @@ else
     # failure mode is deleting a live desktop.
     deny "loginctl is not available, so it cannot be established that '$account' is logged out"
 fi
-if printf '%s\n' "$live" | grep -qx -- "$account"; then
+if printf '%s\n' "$live" | grep -x -- "$account" >/dev/null; then
     # The detail before the refusal, because the refusal on its own has sent a
     # reader looking for a desktop that is not there. logind lists a session in
     # `State=closing` too, and its leader may already be gone; a STUCK one — a

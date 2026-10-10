@@ -30,6 +30,10 @@
 #      ./tests/test-privilege-requests.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` is deliberate and load-bearing. This suite COUNTS failures rather
 # than aborting on them, and several assertions run commands that exit non-zero
 # on purpose — a refusal, a guard firing, a bad argument. GitHub Actions invokes
@@ -174,22 +178,22 @@ esac
 section "the vocabulary is closed"
 for evil in exec sh bash sudo eval run; do
     out="$("$Rime" request ask "$evil" whoami --reason "trying it on" 2>&1)"
-    printf '%s' "$out" | grep -q "not a privileged operation" \
+    printf '%s' "$out" | pipe_has "not a privileged operation" \
         || { bad "'$evil' is refused"; continue; }
     ok "'$evil' is refused"
 done
 
 out="$("$Rime" request ask install 'clang; rm -rf /' --reason "smuggling" 2>&1)"
-printf '%s' "$out" | grep -q "not a valid package name" \
+printf '%s' "$out" | pipe_has "not a valid package name" \
     && ok "a shell metacharacter in a package name is refused" \
     || bad "a shell metacharacter in a package name is refused"
 
 out="$("$Rime" request ask install /etc/passwd --reason "path" 2>&1)"
-printf '%s' "$out" | grep -q "not a valid package name" \
+printf '%s' "$out" | pipe_has "not a valid package name" \
     && ok "a path is not a package name" || bad "a path is not a package name"
 
 out="$("$Rime" request ask install clang --reason "" 2>&1)"
-printf '%s' "$out" | grep -q "must not be empty" \
+printf '%s' "$out" | pipe_has "must not be empty" \
     && ok "a request with no reason is refused" || bad "a request with no reason is refused"
 
 # ── filing from an ordinary terminal ─────────────────────────────────────────
@@ -223,7 +227,7 @@ assert r['reason'] == 'Required to compile the project', r
 section "the approval prompt"
 prompt="$("$Rime" request show "$id" 2>&1)"
 for want in "rime install clang" "Reason" "Required to compile the project" "Effect"; do
-    printf '%s' "$prompt" | grep -qF "$want" \
+    printf '%s' "$prompt" | pipe_has -F "$want" \
         && ok "the prompt shows: ${want}" || bad "the prompt shows: ${want}"
 done
 
@@ -231,18 +235,18 @@ done
 # --no-run throughout: records the decision, performs nothing, needs no root.
 section "deciding"
 out="$(printf 'y\n' | "$Rime" request approve "$id" --no-run 2>&1)"
-printf '%s' "$out" | grep -qE "approved" \
+printf '%s' "$out" | pipe_has -E "approved" \
     && ok "an unsessioned peer may approve" || { bad "an unsessioned peer may approve"; printf '      %s\n' "$out"; }
 
 out="$(printf 'y\n' | "$Rime" request approve "$id" --no-run 2>&1)"
-printf '%s' "$out" | grep -q "already" \
+printf '%s' "$out" | pipe_has "already" \
     && ok "a decided request cannot be re-decided" || bad "a decided request cannot be re-decided"
 
 id2="$("$Rime" request ask pin --reason "pinning before an upgrade" --no-wait 2>/dev/null)"
 out="$("$Rime" request deny "$id2" 2>&1)"
-printf '%s' "$out" | grep -q "denied" && ok "a request can be denied" || bad "a request can be denied"
+printf '%s' "$out" | pipe_has "denied" && ok "a request can be denied" || bad "a request can be denied"
 out="$(printf 'y\n' | "$Rime" request approve "$id2" --no-run 2>&1)"
-printf '%s' "$out" | grep -q "already denied" \
+printf '%s' "$out" | pipe_has "already denied" \
     && ok "a denied request cannot be flipped to approved" \
     || { bad "a denied request cannot be flipped to approved"; printf '      %s\n' "$out"; }
 
@@ -272,7 +276,7 @@ fi
 
 # ── grants ───────────────────────────────────────────────────────────────────
 section "grants"
-"$Rime" request grants 2>&1 | grep -q "nothing is granted" \
+"$Rime" request grants 2>&1 | pipe_has "nothing is granted" \
     && ok "no grant is created by an allow-once" || bad "no grant is created by an allow-once"
 
 # ── the property the design rests on ─────────────────────────────────────────
@@ -332,13 +336,13 @@ else
     ok "a session started (id ${sid})"
     # Wait for the script to finish.
     for _ in $(seq 1 80); do
-        "$Rime" agent logs "$sid" 2>/dev/null | grep -q DONE && break
+        "$Rime" agent logs "$sid" 2>/dev/null | pipe_has DONE && break
         sleep 0.25
     done
     logs="$("$Rime" agent logs "$sid" 2>/dev/null)"
     printf '%s\n' "$logs" | sed 's/^/      | /'
 
-    printf '%s' "$logs" | grep -q "SESSION_ENV=${sid}" \
+    printf '%s' "$logs" | pipe_has "SESSION_ENV=${sid}" \
         && ok "the session sees its own id in the environment" \
         || bad "the session sees its own id in the environment"
 
@@ -359,10 +363,10 @@ assert r['project'] is not None, f'project not resolved: {r}'
         bad "the session filed a request"
     fi
 
-    printf '%s' "$logs" | grep -q "cannot decide its own privilege request" \
+    printf '%s' "$logs" | pipe_has "cannot decide its own privilege request" \
         && ok "the session's own approval was REFUSED" \
         || bad "the session's own approval was REFUSED"
-    printf '%s' "$logs" | grep -q "cannot change its own grants" \
+    printf '%s' "$logs" | pipe_has "cannot change its own grants" \
         && ok "the session cannot change its own grants" \
         || bad "the session cannot change its own grants"
 
@@ -403,11 +407,11 @@ fi
 section "allow for project"
 if [ -n "${inner:-}" ]; then
     out="$(printf 'y\n' | "$Rime" request approve "$inner" --for-project --no-run 2>&1)"
-    printf '%s' "$out" | grep -q "allow_for_project" \
+    printf '%s' "$out" | pipe_has "allow_for_project" \
         && ok "an approval can be scoped to the project" \
         || { bad "an approval can be scoped to the project"; printf '      %s\n' "$out"; }
 
-    "$Rime" request grants 2>/dev/null | grep -q "install:cmake" \
+    "$Rime" request grants 2>/dev/null | pipe_has "install:cmake" \
         && ok "the grant is recorded against the project and the exact package" \
         || bad "the grant is recorded against the project and the exact package"
 
@@ -428,7 +432,7 @@ assert r['decision'] == 'pending', \\
 
     # A DIFFERENT package in the same project must still prompt.
     "$Rime" request revoke "${PROJ}" >/dev/null 2>&1
-    "$Rime" request grants 2>/dev/null | grep -q "nothing is granted" \
+    "$Rime" request grants 2>/dev/null | pipe_has "nothing is granted" \
         && ok "a grant can be revoked" || bad "a grant can be revoked"
 fi
 

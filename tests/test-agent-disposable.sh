@@ -55,6 +55,10 @@
 #      ./tests/test-agent-disposable.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -520,14 +524,14 @@ fi
 out="$("$Rime" agent run --agent generic --sandbox strict --disposable \
         --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "different mechanisms"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "different mechanisms"; then
     ok "a confining sandbox with --disposable is refused, with the reason"
 else
     bad "a confining sandbox with --disposable is refused, with the reason"
     echo "      exit ${rc}" >&2
     printf '%s\n' "$out" | sed 's/^/      | /' >&2
 fi
-if printf '%s' "$out" | grep -q "not the agent"; then
+if printf '%s' "$out" | pipe_has "not the agent"; then
     ok "and the refusal says WHY the pair would deliver neither"
 else
     bad "and the refusal says WHY the pair would deliver neither"
@@ -562,7 +566,7 @@ fi
 out="$("$Rime" agent run --agent generic --sandbox unrestricted \
         --copy-out "$RESULTS" --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q -- "--disposable"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has -- "--disposable"; then
     ok "--copy-out without --disposable is refused at the CLI, naming the flag it needs"
 else
     bad "--copy-out without --disposable is refused at the CLI, naming the flag it needs"
@@ -578,7 +582,7 @@ WT_BEFORE="$(ls "${PROJ}/.rime/worktrees" 2>/dev/null | sort | tr '\n' ' ')"
 out="$("$Rime" agent run --agent generic --sandbox unrestricted --disposable \
         --worktree throwaway --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "left empty"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "left empty"; then
     ok "--worktree with --disposable is refused by the daemon, with the reason"
 else
     bad "--worktree with --disposable is refused by the daemon, with the reason"
@@ -604,7 +608,7 @@ fi
 out="$("$Rime" agent run --agent generic --sandbox unrestricted --disposable \
         --checkpoint --cwd "$PROJ" -d -- /bin/true 2>&1)"
 rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "never touched"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "never touched"; then
     ok "--checkpoint with --disposable is refused by the daemon, with the reason"
 else
     bad "--checkpoint with --disposable is refused by the daemon, with the reason"
@@ -635,13 +639,13 @@ SID3="$("$Rime" agent run --agent generic --sandbox unrestricted \
 wait_file "$OBS3"
 status="$("$Rime" agent status "$SID3" 2>&1)"
 printf '%s\n' "$status" | sed 's/^/      | /'
-if printf '%s' "$status" | grep -q "disp-agent${SID3}" \
-   && printf '%s' "$status" | grep -q "disposable"; then
+if printf '%s' "$status" | pipe_has "disp-agent${SID3}" \
+   && printf '%s' "$status" | pipe_has "disposable"; then
     ok "rime agent status names the disposable capsule"
 else
     bad "rime agent status names the disposable capsule"
 fi
-if printf '%s' "$status" | grep -qi "COPY"; then
+if printf '%s' "$status" | pipe_has -i "COPY"; then
     ok "and says the working tree is a copy that is deleted with the session"
 else
     bad "and says the working tree is a copy that is deleted with the session"

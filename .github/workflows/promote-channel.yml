@@ -156,11 +156,11 @@ jobs:
             *) echo "::error::digest must start with sha256:"; exit 1 ;;
           esac
           hex="${DIGEST#sha256:}"
-          if [ "${#hex}" -ne 64 ] || ! printf '%s' "$hex" | grep -qE '^[0-9a-f]{64}$'; then
+          if [ "${#hex}" -ne 64 ] || ! printf '%s' "$hex" | grep -E '^[0-9a-f]{64}$' >/dev/null; then
             echo "::error::'$DIGEST' is not a sha256 digest"
             exit 1
           fi
-          if ! printf '%s' "$PERCENT" | grep -qE '^(100|[0-9]{1,2})$'; then
+          if ! printf '%s' "$PERCENT" | grep -E '^(100|[0-9]{1,2})$' >/dev/null; then
             echo "::error::percent must be a whole number 0-100, got '$PERCENT'"
             exit 1
           fi

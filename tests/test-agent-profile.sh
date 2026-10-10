@@ -29,6 +29,10 @@
 #      ./tests/test-agent-profile.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # Deliberate, and the same reason test-privilege-requests.sh gives: this suite
 # counts failures rather than aborting, and several assertions run commands
 # that exit non-zero on purpose. Under `bash -e {0}`, which is how GitHub
@@ -159,7 +163,7 @@ SECRETS=(PRIVATE-TRANSCRIPT PRIVATE-SNAPSHOT PRIVATE-OAUTH PRIVATE-DAEMON-KEY
 # ── list and inspect ─────────────────────────────────────────────────────────
 section "list and inspect"
 out="$("$Rime" agent profile list 2>&1)"
-printf '%s' "$out" | grep -q '^claude' \
+printf '%s' "$out" | pipe_has '^claude' \
     && ok "list names the claude profile" || { bad "list names the claude profile"; echo "$out"; }
 
 "$Rime" agent profile inspect claude --json > "${WORK}/inspect.json" 2>"${WORK}/inspect.err"
@@ -191,19 +195,19 @@ section "doctor"
 out="$("$Rime" agent profile doctor claude 2>&1)"; rc=$?
 missing=""
 for want in config statusline hooks commands skills plugins mcp credentials; do
-    printf '%s' "$out" | grep -qx "$want" || missing="${missing} ${want}"
+    printf '%s' "$out" | pipe_has -x "$want" || missing="${missing} ${want}"
 done
 [ -z "$missing" ] && ok "doctor reports config, hooks, plugins, MCP and skills" \
     || { bad "doctor is missing sections:${missing}"; echo "$out"; }
 
-printf '%s' "$out" | grep -q '1 skills' \
+printf '%s' "$out" | pipe_has '1 skills' \
     && ok "doctor counts the skills" || { bad "doctor counts the skills"; echo "$out"; }
-printf '%s' "$out" | grep -q 'SessionStart' \
+printf '%s' "$out" | pipe_has 'SessionStart' \
     && ok "doctor names the hook events" || { bad "doctor names the hook events"; echo "$out"; }
-printf '%s' "$out" | grep -q 'vault.*needs Authorization' \
+printf '%s' "$out" | pipe_has 'vault.*needs Authorization' \
     && ok "doctor says an HTTP MCP server needs its header" \
     || { bad "doctor says an HTTP MCP server needs its header"; echo "$out"; }
-printf '%s' "$out" | grep -q '.credentials.json' && printf '%s' "$out" | grep -q 'excluded' \
+printf '%s' "$out" | pipe_has '.credentials.json' && printf '%s' "$out" | pipe_has 'excluded' \
     && ok "doctor names the credentials and says they are not exported" \
     || { bad "doctor names the credentials and says they are not exported"; echo "$out"; }
 [ "$rc" = 0 ] && ok "a healthy profile exits zero" || { bad "a healthy profile exits zero (got $rc)"; echo "$out"; }
@@ -211,13 +215,13 @@ printf '%s' "$out" | grep -q '.credentials.json' && printf '%s' "$out" | grep -q
 # A skill directory with no SKILL.md does not load, and nothing upstream says so.
 mkdir -p "${C}/skills/broken"
 out="$("$Rime" agent profile doctor claude 2>&1)"; rc=$?
-[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'broken' \
+[ "$rc" != 0 ] && printf '%s' "$out" | pipe_has 'broken' \
     && ok "a skill that will not load is a problem and a non-zero exit" \
     || { bad "a skill that will not load is a problem and a non-zero exit"; echo "$out"; }
 rmdir "${C}/skills/broken"
 
 out="$("$Rime" agent profile doctor codex 2>&1)"
-printf '%s' "$out" | grep -q 'no profile description' \
+printf '%s' "$out" | pipe_has 'no profile description' \
     && ok "an agent Rime has no profile for is refused by name" \
     || { bad "an agent Rime has no profile for is refused by name"; echo "$out"; }
 
@@ -272,7 +276,7 @@ grep -qx ok "${WORK}/manifest.out" \
     || { bad "the bundle keeps the names and drops the values"; cat "${WORK}/manifest.out"; }
 
 out="$("$Rime" agent profile export claude --to "$BUNDLE" 2>&1)"
-printf '%s' "$out" | grep -q 'pass --force' \
+printf '%s' "$out" | pipe_has 'pass --force' \
     && ok "export refuses to write over an occupied directory" \
     || { bad "export refuses to write over an occupied directory"; echo "$out"; }
 
@@ -284,7 +288,7 @@ printf '{"model":"sonnet","env":{"GITHUB_TOKEN":"ghp_THEIR-OWN-VALUE"}}\n' \
     > "${OTHER}/.claude/settings.json"
 
 out="$(HOME="$OTHER" "$Rime" agent profile sync claude --from "$BUNDLE" --dry-run 2>&1)"
-printf '%s' "$out" | grep -q 'would change' \
+printf '%s' "$out" | pipe_has 'would change' \
     && ok "a dry run says what it would do and does nothing" \
     || { bad "a dry run says what it would do and does nothing"; echo "$out"; }
 [ ! -e "${OTHER}/.claude/CLAUDE.md" ] \
@@ -307,12 +311,12 @@ PY
 grep -qx ok "${WORK}/sync.out" \
     && ok "the import merged and did not overwrite the local value with a blank" \
     || { bad "the import merged and did not overwrite the local value with a blank"; cat "${WORK}/sync.out"; }
-printf '%s' "$out" | grep -q 'GITHUB_TOKEN' \
+printf '%s' "$out" | pipe_has 'GITHUB_TOKEN' \
     && ok "the operator is told which values the bundle could not carry" \
     || { bad "the operator is told which values the bundle could not carry"; echo "$out"; }
 
 out="$(HOME="$OTHER" "$Rime" agent profile sync claude --from "$BUNDLE" 2>&1)"
-printf '%s' "$out" | grep -q 'nothing to change' \
+printf '%s' "$out" | pipe_has 'nothing to change' \
     && ok "a second sync of the same bundle changes nothing" \
     || { bad "a second sync of the same bundle changes nothing"; echo "$out"; }
 

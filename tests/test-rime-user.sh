@@ -38,6 +38,10 @@
 #      ./tests/test-rime-user.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # +e deliberately, like every other suite here: CI invokes a suite as
 # `bash -e {0}`, and under -e an assignment from a command that exits non-zero
 # ends the run silently, mid-section. This suite COUNTS failures.
@@ -179,12 +183,12 @@ section "criterion 1 — THE assertion: add makes a STANDARD account"
 # state the installer is in today.
 rc="$(run "$FIX/passwd" add alice)"
 [ "$rc" = 0 ] && ok "add succeeds" || bad "add succeeds" "rc=$rc  $(cat "$WORK/err")"
-if ran | grep -q '^useradd .*-G wheel'; then
+if ran | pipe_has '^useradd .*-G wheel'; then
     bad "a plain \`rime user add\` does NOT put the account in wheel" "$(ran)"
 else
     ok "a plain \`rime user add\` does NOT put the account in wheel"
 fi
-ran | grep -q '^useradd .* alice$' \
+ran | pipe_has '^useradd .* alice$' \
     && ok "and it does create the account" || bad "and it does create the account" "$(ran)"
 grep -qi 'STANDARD' "$WORK/err" \
     && ok "and it says out loud which kind it made" \
@@ -193,7 +197,7 @@ grep -qi 'STANDARD' "$WORK/err" \
 # The absence above means nothing unless the check can see a presence.
 rc="$(run "$FIX/passwd" add alice --admin)"
 [ "$rc" = 0 ] && ok "--admin succeeds" || bad "--admin succeeds" "rc=$rc"
-ran | grep -q '^useradd .*-G wheel' \
+ran | pipe_has '^useradd .*-G wheel' \
     && ok "and --admin IS the thing that adds wheel, so the check above can fail" \
     || bad "and --admin IS the thing that adds wheel, so the check above can fail" "$(ran)"
 grep -qi 'ADMINISTRATOR' "$WORK/err" \
@@ -202,10 +206,10 @@ grep -qi 'ADMINISTRATOR' "$WORK/err" \
 
 # The login shell is the installer's choice, for the installer's reason: an
 # account with a nonexistent login shell cannot log in at all.
-ran | grep -qE '^useradd .*-s (/bin/zsh|/bin/bash)' \
+ran | pipe_has -E '^useradd .*-s (/bin/zsh|/bin/bash)' \
     && ok "the account gets a login shell that exists" \
     || bad "the account gets a login shell that exists" "$(ran)"
-ran | grep -q '^useradd .*-m' \
+ran | pipe_has '^useradd .*-m' \
     && ok "and a home directory" || bad "and a home directory" "$(ran)"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,11 +266,11 @@ rc="$(CALLER=plain run "$FIX/passwd" rm owner)"
 [ "$rc" = 0 ] && ok "but an administrator IS removable while another one remains" \
               || bad "but an administrator IS removable while another one remains" \
                      "rc=$rc  $(cat "$WORK/err")"
-ran | grep -q '^userdel -r owner$' \
+ran | pipe_has '^userdel -r owner$' \
     && ok "and userdel takes the home with it by default" \
     || bad "and userdel takes the home with it by default" "$(ran)"
 rc="$(CALLER=plain run "$FIX/passwd" rm owner --keep-home)"
-ran | grep -q '^userdel owner$' \
+ran | pipe_has '^userdel owner$' \
     && ok "and --keep-home is the only way to keep it" \
     || bad "and --keep-home is the only way to keep it" "$(ran)"
 
@@ -315,7 +319,7 @@ grep -qx 'plain' "$FIX/allowlist" \
     || bad "and writes it to the allowlist the wipe engine reads" "$(cat "$FIX/allowlist")"
 # BY UID. The unit hangs off logind's per-user units and those are named by
 # uid; a name here would enable a unit instance that never fires.
-ran | grep -qx 'systemctl enable rime-guest-session@1002.service' \
+ran | pipe_has -x 'systemctl enable rime-guest-session@1002.service' \
     && ok "and enables the session hook BY UID, which is how logind names it" \
     || bad "and enables the session hook BY UID, which is how logind names it" "$(ran)"
 
@@ -334,7 +338,7 @@ grep -qx 'plain' "$FIX/allowlist" \
 grep -qx 'guest' "$FIX/allowlist" \
     && ok "and leaves the other guest alone" \
     || bad "and leaves the other guest alone" "$(cat "$FIX/allowlist")"
-ran | grep -qx 'systemctl disable rime-guest-session@1002.service' \
+ran | pipe_has -x 'systemctl disable rime-guest-session@1002.service' \
     && ok "and disables the unit" || bad "and disables the unit" "$(ran)"
 
 fresh_allowlist

@@ -59,6 +59,10 @@
 #  Run from anywhere: ./tests/test-rime-task.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` for the same reason as every other suite here: this one COUNTS
 # failures instead of aborting, and many assertions run commands that exit
 # non-zero on purpose. GitHub Actions invokes a script as `bash -e {0}`, and
@@ -180,19 +184,19 @@ fi
 # ── the empty state ─────────────────────────────────────────────────────────
 section "no tasks yet"
 out=$(rime task list); rc=$?
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "no tasks"; then
+if [ "$rc" = "0" ] && printf '%s' "$out" | pipe_has "no tasks"; then
     ok "no task file at all is an empty list, not an error"
 else
     bad "no task file at all is an empty list" "rc=$rc out=$out"
 fi
-if printf '%s' "$out" | grep -q "rime task new"; then
+if printf '%s' "$out" | pipe_has "rime task new"; then
     ok "the empty state says how to start one"
 else
     bad "the empty state says how to start one" "$out"
 fi
 
 out=$(rime task show nosuch); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "rime task new"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "rime task new"; then
     ok "an unknown task with no tasks at all says how to make one"
 else
     bad "an unknown task with no tasks at all says how to make one" "rc=$rc out=$out"
@@ -201,7 +205,7 @@ fi
 # ── new ─────────────────────────────────────────────────────────────────────
 section "rime task new"
 out=$(cd "$WORK" && rime task new outside-a-repo); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "git working tree"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "git working tree"; then
     ok "a directory that is not a git working tree is refused, with the reason"
 else
     bad "a directory that is not a git working tree is refused" "rc=$rc out=$out"
@@ -223,26 +227,26 @@ else
 fi
 # The two parts that do not exist yet must be reported as missing straight
 # away, so nobody discovers it at the first resume.
-if printf '%s' "$out" | grep -q "fedora-build  (GONE)"; then
+if printf '%s' "$out" | pipe_has "fedora-build  (GONE)"; then
     ok "a capsule that does not exist yet is reported as missing on creation"
 else
     bad "a capsule that does not exist yet is reported on creation" "$out"
 fi
 
 out=$(cd "$PROJ" && rime task new installer-bug); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "rime task set installer-bug"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "rime task set installer-bug"; then
     ok "a duplicate id is refused and names the verb that changes it"
 else
     bad "a duplicate id is refused and names the verb that changes it" "rc=$rc out=$out"
 fi
 
 out=$(cd "$PROJ" && rime task new bad-agent --agent nosuchagent); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "Known agents"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "Known agents"; then
     ok "an agent this runtime cannot launch is refused and the real ones listed"
 else
     bad "an agent this runtime cannot launch is refused" "rc=$rc out=$out"
 fi
-if printf '%s' "$out" | grep -q "claude"; then
+if printf '%s' "$out" | pipe_has "claude"; then
     ok "the refusal names a shipped adapter, so it is a real list"
 else
     bad "the refusal names a shipped adapter" "$out"
@@ -269,23 +273,23 @@ else
     bad "a task with missing parts exits non-zero" "rc=$rc"
 fi
 # The specific message, not merely the refusal.
-if printf '%s' "$out" | grep -q 'capsule "fedora-build" has no Rime record'; then
+if printf '%s' "$out" | pipe_has 'capsule "fedora-build" has no Rime record'; then
     ok "the refusal names the capsule that is gone"
 else
     bad "the refusal names the capsule that is gone" "$out"
 fi
-if printf '%s' "$out" | grep -q "rime env create fedora-build"; then
+if printf '%s' "$out" | pipe_has "rime env create fedora-build"; then
     ok "the capsule refusal carries the command that makes it again"
 else
     bad "the capsule refusal carries the command that makes it again" "$out"
 fi
-if printf '%s' "$out" | grep -q "rime agent run --worktree installer-bug"; then
+if printf '%s' "$out" | pipe_has "rime agent run --worktree installer-bug"; then
     ok "the worktree refusal carries the command that recreates it"
 else
     bad "the worktree refusal carries the command that recreates it" "$out"
 fi
 # The property the honesty rests on: a refusal prints no plan at all.
-if printf '%s' "$out" | grep -q "resume it with"; then
+if printf '%s' "$out" | pipe_has "resume it with"; then
     bad "a refusal prints no resume steps" "it printed a plan anyway"
 else
     ok "a refusal prints no resume steps, so it cannot be half-followed"
@@ -335,7 +339,7 @@ if [ "$last" = "rime env enter fedora-build" ]; then
 else
     bad "entering the capsule is the last step" "got [$last] from [$steps]"
 fi
-if printf '%s' "$out" | grep -q "not attaching: stdout is not a terminal"; then
+if printf '%s' "$out" | pipe_has "not attaching: stdout is not a terminal"; then
     ok "a resume without a terminal attaches to nothing and says why"
 else
     bad "a resume without a terminal attaches to nothing" "$out"
@@ -395,20 +399,20 @@ esac
 EOF
 chmod +x "$ADAPTER"
 out=$(cd "$WT" && RIME_WINDOW_ADAPTER="$ADAPTER" "$RIME_BIN" project layout save 2>&1)
-if printf '%s' "$out" | grep -q "saved 1 window"; then
+if printf '%s' "$out" | pipe_has "saved 1 window"; then
     ok "a layout is saved for the worktree through the shipped verb"
 else
     bad "a layout is saved for the worktree" "$out"
 fi
 
 out=$(cd "$PROJ" && rime task show installer-bug)
-if printf '%s' "$out" | grep -q "windows      1 in the saved layout for this root"; then
+if printf '%s' "$out" | pipe_has "windows      1 in the saved layout for this root"; then
     ok "the task reports the saved layout for its own root"
 else
     bad "the task reports the saved layout for its own root" "$out"
 fi
 out=$(cd "$PROJ" && rime task resume installer-bug)
-if printf '%s' "$out" | grep -qx "  rime project layout restore"; then
+if printf '%s' "$out" | pipe_has -x "  rime project layout restore"; then
     ok "resume names the one command that reopens windows"
 else
     bad "resume names the one command that reopens windows" "$out"
@@ -450,7 +454,7 @@ fi
 # ── checkpoints ─────────────────────────────────────────────────────────────
 section "the checkpoint binding"
 out=$(cd "$PROJ" && rime task checkpoint installer-bug "before changes"); rc=$?
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "before changes"; then
+if [ "$rc" = "0" ] && printf '%s' "$out" | pipe_has "before changes"; then
     ok "a checkpoint is captured and labelled"
 else
     bad "a checkpoint is captured and labelled" "rc=$rc out=$out"
@@ -478,7 +482,7 @@ else
     ok "no checkpoint id reaches the user-owned file"
 fi
 out=$(cd "$PROJ" && rime task show installer-bug)
-if printf '%s' "$out" | grep -q "checkpoint   $CPID  (present)"; then
+if printf '%s' "$out" | pipe_has "checkpoint   $CPID  (present)"; then
     ok "the checkpoint is found from the worktree, where it was taken"
 else
     bad "the checkpoint is found from the worktree" "$out"
@@ -488,18 +492,18 @@ fi
 # say so rather than resuming as though the safety net were there.
 git -C "$WT" update-ref -d "refs/apex/checkpoints/$CPID" >/dev/null 2>&1  # rime-rename: keep (REF_PREFIX)
 out=$(cd "$PROJ" && rime task resume installer-bug); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "the recorded checkpoint is no longer"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "the recorded checkpoint is no longer"; then
     ok "a pruned checkpoint refuses the resume and says what happened"
 else
     bad "a pruned checkpoint refuses the resume" "rc=$rc out=$out"
 fi
-if printf '%s' "$out" | grep -q "rime task checkpoint installer-bug --forget"; then
+if printf '%s' "$out" | pipe_has "rime task checkpoint installer-bug --forget"; then
     ok "the pruned-checkpoint refusal offers the way out"
 else
     bad "the pruned-checkpoint refusal offers the way out" "$out"
 fi
 out=$(cd "$PROJ" && rime task checkpoint installer-bug --forget); rc=$?
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "untouched"; then
+if [ "$rc" = "0" ] && printf '%s' "$out" | pipe_has "untouched"; then
     ok "--forget drops the reference and says the checkpoint itself is untouched"
 else
     bad "--forget drops the reference" "rc=$rc out=$out"
@@ -521,7 +525,7 @@ check_refusal() {
     local out; out=$(rime task list 2>&1)
     local rc=$?
     cp "$TASKS.bak" "$TASKS"
-    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "$want"; then
+    if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "$want"; then
         ok "$label"
     else
         bad "$label" "rc=$rc out=$out"
@@ -544,7 +548,7 @@ cp "$TASKS" "$TASKS.bak"
 printf '\n[task.typo]\nprojekt = "/tmp"\n' >> "$TASKS"
 out=$(rime task list 2>&1); rc=$?
 cp "$TASKS.bak" "$TASKS"
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "projekt"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "projekt"; then
     ok "an unknown key in the task file is refused and named, not ignored"
 else
     bad "an unknown key in the task file is refused and named" "rc=$rc out=$out"
@@ -578,7 +582,7 @@ cp "$TASKS.bak" "$TASKS"
 missing=
 [ "$rc" -ne 0 ] || missing="$missing rc=$rc"
 for part in 'version 99' 'reads version [0-9]+' 'rollback' 'Boot the newer deployment'; do
-    printf '%s' "$out" | grep -qE "$part" || missing="$missing [$part]"
+    printf '%s' "$out" | pipe_has -E "$part" || missing="$missing [$part]"
 done
 if [ -z "$missing" ]; then
     ok "a task file from a newer rime is refused, with both versions and the remedy"
@@ -593,7 +597,7 @@ cp "$TASKS" "$TASKS.bak"
 printf '\n[task.slugcheck]\nproject = "%s"\nworktree = "Issue-217"\n' "$PROJ" >> "$TASKS"
 out=$(rime task list 2>&1); rc=$?
 cp "$TASKS.bak" "$TASKS"
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "slug"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "slug"; then
     ok "a worktree name that is not its own slug is refused with the reason"
 else
     bad "a worktree name that is not its own slug is refused" "rc=$rc out=$out"
@@ -602,7 +606,7 @@ fi
 # ── set ─────────────────────────────────────────────────────────────────────
 section "rime task set"
 out=$(cd "$PROJ" && rime task set installer-bug); rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "nothing to change"; then
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "nothing to change"; then
     ok "a set that names no field is refused rather than silently doing nothing"
 else
     bad "a set that names no field is refused" "rc=$rc out=$out"
@@ -681,7 +685,7 @@ fi
 # ── rm ──────────────────────────────────────────────────────────────────────
 section "rime task rm"
 out=$(rime task rm installer-bug); rc=$?
-if [ "$rc" = "0" ] && printf '%s' "$out" | grep -q "nothing it referenced was touched"; then
+if [ "$rc" = "0" ] && printf '%s' "$out" | pipe_has "nothing it referenced was touched"; then
     ok "rm removes the task and says what it did not touch"
 else
     bad "rm removes the task and says what it did not touch" "rc=$rc out=$out"

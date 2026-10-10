@@ -84,14 +84,14 @@ jobs:
           DIGEST: ${{ inputs.digest }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$RELEASE" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! printf '%s' "$RELEASE" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' >/dev/null; then
             echo "::error::'$RELEASE' is not a release name like v3.0.0"; exit 1
           fi
           if [ -z "$DIGEST" ]; then
             DIGEST="$(skopeo inspect --retry-times 3 --no-creds --format '{{.Digest}}' "docker://$IMAGE:rime")"
             echo "::notice::no digest given; :rime is $DIGEST"
           fi
-          if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+          if ! printf '%s' "$DIGEST" | grep -E '^sha256:[0-9a-f]{64}$' >/dev/null; then
             echo "::error::'$DIGEST' is not a sha256 digest"; exit 1
           fi
           {
@@ -227,8 +227,8 @@ jobs:
           windows-installer/build-windows.sh "$RUNNER_TEMP/win"
           cd "$RUNNER_TEMP/win"
           sha256sum rime-windows-installer.exe > rime-windows-installer.exe.sha256
-          strings -el rime-windows-installer.exe | grep -qF "$RIME_ISO_SHA256" \
-            || strings rime-windows-installer.exe | grep -qF "$RIME_ISO_SHA256" \
+          strings -el rime-windows-installer.exe | grep -F "$RIME_ISO_SHA256" >/dev/null \
+            || strings rime-windows-installer.exe | grep -F "$RIME_ISO_SHA256" >/dev/null \
             || { echo "::error::the .exe does not carry the ISO's SHA-256"; exit 1; }
       - name: Upload the Windows app
         uses: actions/upload-artifact@v4

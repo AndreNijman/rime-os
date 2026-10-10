@@ -47,6 +47,10 @@
 #  Run from anywhere: ./tests/test-rime-a11y-stack.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 
 cd "$(dirname "$0")" || exit 2
@@ -128,13 +132,13 @@ else
     bad "the extractor takes exactly the packages a dnf5 install names" \
         "want [real-one real-three real-two] got [$FIXOUT]"
 fi
-if printf '%s\n' "$FIXOUT" | grep -q 'ghost-from-a-comment'; then
+if printf '%s\n' "$FIXOUT" | pipe_has 'ghost-from-a-comment'; then
     bad "a package named only in a comment is not extracted" \
         "the parser read a commented-out install line — this is the grep trap it exists to avoid"
 else
     ok "a package named only in a comment is not extracted"
 fi
-if printf '%s\n' "$FIXOUT" | grep -q 'ghost-after-a-hash'; then
+if printf '%s\n' "$FIXOUT" | pipe_has 'ghost-after-a-hash'; then
     bad "a word after a trailing # on a live install line is not extracted" \
         "got [$FIXOUT]"
 else
@@ -152,14 +156,14 @@ else
     finish; exit 1
 fi
 
-if printf '%s\n' "$PKGS" | grep -qx 'fcitx5'; then
+if printf '%s\n' "$PKGS" | pipe_has -x 'fcitx5'; then
     ok "and it finds a package this file really does install (fcitx5)"
 else
     bad "and it finds a package this file really does install (fcitx5)" \
         "fcitx5 is on a dnf5 install line here"
 fi
 
-if printf '%s\n' "$PKGS" | grep -qx 'orca'; then
+if printf '%s\n' "$PKGS" | pipe_has -x 'orca'; then
     ok "Containerfile.core installs orca — the image ships a screen reader"
 else
     bad "Containerfile.core installs orca — the image ships a screen reader" \

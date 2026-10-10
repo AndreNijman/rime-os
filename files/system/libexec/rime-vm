@@ -1037,7 +1037,7 @@ share_add() {
     # The shared-memory backing has to be on the domain or the device cannot
     # start. Checked against the DEFINED domain rather than the file this tool
     # wrote, because a user may have edited it with `virsh edit`.
-    if ! "$VIRSH" -c "$VM_URI" dumpxml "$name" 2>/dev/null | grep -q "access mode='shared'"; then
+    if ! "$VIRSH" -c "$VM_URI" dumpxml "$name" 2>/dev/null | grep "access mode='shared'" >/dev/null; then
         die "'$name' was created without a share and has no shared memory backing.
   A virtiofs device cannot map the guest's memory without it, so attaching one
   would define a domain that then fails to start. Recreate the VM with

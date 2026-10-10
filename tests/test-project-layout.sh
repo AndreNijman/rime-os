@@ -19,6 +19,10 @@
 #      ./tests/test-project-layout.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` is deliberate and load-bearing. This suite COUNTS failures rather
 # than aborting on them, and several assertions run commands that exit non-zero
 # on purpose — a refusal, a guard firing, a bad argument. GitHub Actions invokes
@@ -114,7 +118,7 @@ windows() { printf '%s' "$1" > "${WORK}/windows.json"; }
 section "an empty capture does not destroy a good layout"
 windows '[]'
 out="$(cd "$PROJ" && "$Rime" project layout save 2>&1)"
-printf '%s' "$out" | grep -q "nothing saved" \
+printf '%s' "$out" | pipe_has "nothing saved" \
     && ok "an empty window list saves nothing and says so" \
     || { bad "an empty window list saves nothing and says so"; printf '      %s\n' "$out"; }
 
@@ -129,10 +133,10 @@ windows "$(cat <<EOF
 EOF
 )"
 out="$(cd "$PROJ" && "$Rime" project layout save 2>&1)"
-printf '%s' "$out" | grep -q "saved 1 window" \
+printf '%s' "$out" | pipe_has "saved 1 window" \
     && ok "exactly one window is captured" \
     || { bad "exactly one window is captured"; printf '      %s\n' "$out"; }
-printf '%s' "$out" | grep -q "workspace(s) 2" \
+printf '%s' "$out" | pipe_has "workspace(s) 2" \
     && ok "the workspace is recorded" || bad "the workspace is recorded"
 
 json="$(cd "$PROJ" && "$Rime" project layout show --json 2>/dev/null)"
@@ -150,13 +154,13 @@ assert l['saved'] > 0, l
     || { bad "the entry records the project's own cwd"; sed 's/^/      /' "${WORK}/cap.err"; }
 
 # The property that makes a layout restorable at all.
-printf '%s' "$json" | grep -q "0xdeadbeef" \
+printf '%s' "$json" | pipe_has "0xdeadbeef" \
     && bad "no compositor window handle is stored" \
     || ok "no compositor window handle is stored"
 
 section "the other project's layout is its own"
 out="$(cd "$OTHER" && "$Rime" project layout save 2>&1)"
-printf '%s' "$out" | grep -q "saved 1 window" \
+printf '%s' "$out" | pipe_has "saved 1 window" \
     && ok "the other project captures its own window" || bad "the other project captures its own window"
 mine="$(cd "$PROJ" && "$Rime" project layout show --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["entries"][0]["cwd"])')"
 [ "$mine" = "$PROJ" ] \
@@ -184,25 +188,25 @@ if [ "$have_term" = yes ]; then
     # Whichever emulator is present, the working directory must be passed —
     # a terminal's stored argv does not carry it, so replaying it verbatim
     # opens a terminal in the wrong place.
-    printf '%s' "$out" | grep -qF "${PROJ}" \
+    printf '%s' "$out" | pipe_has -F "${PROJ}" \
         && ok "a terminal is restored with the project directory" \
         || bad "a terminal is restored with the project directory"
     if command -v foot >/dev/null 2>&1; then
-        printf '%s' "$out" | grep -q -- "--working-directory ${PROJ}" \
+        printf '%s' "$out" | pipe_has -- "--working-directory ${PROJ}" \
             && ok "\$TERMINAL wins and gets its own flag" \
             || bad "\$TERMINAL wins and gets its own flag"
     fi
 else
     # No emulator: the documented fallback is to replay the stored argv and
     # SAY so, rather than inventing a command that cannot run.
-    printf '%s' "$out" | grep -q "no terminal emulator found" \
+    printf '%s' "$out" | pipe_has "no terminal emulator found" \
         && ok "no emulator is reported rather than guessed at" \
         || { bad "no emulator is reported rather than guessed at"; }
-    printf '%s' "$out" | grep -q "would run (ws 2): sleep 600" \
+    printf '%s' "$out" | pipe_has "would run (ws 2): sleep 600" \
         && ok "the stored argv is replayed when there is no emulator" \
         || bad "the stored argv is replayed when there is no emulator"
 fi
-printf '%s' "$out" | grep -q "1 window(s) would be restored" \
+printf '%s' "$out" | pipe_has "1 window(s) would be restored" \
     && ok "the dry run reports what it would do" || bad "the dry run reports what it would do"
 
 section "a dry run starts nothing"
@@ -242,7 +246,7 @@ EOF
 )"
 (cd "$PROJ" && "$Rime" project layout save >/dev/null 2>&1)
 out="$(cd "$PROJ" && "$Rime" project layout restore --dry-run 2>&1)"
-printf '%s' "$out" | grep -q "would run (ws 3): sleep 600" \
+printf '%s' "$out" | pipe_has "would run (ws 3): sleep 600" \
     && ok "an application keeps its own argv" \
     || { bad "an application keeps its own argv"; printf '      %s\n' "$out"; }
 
@@ -274,7 +278,7 @@ EOF
 )"
 (cd "$PROJ" && "$Rime" project layout save >/dev/null 2>&1)
 out="$(cd "$PROJ" && "$Rime" project switch 2>&1)"
-printf '%s' "$out" | grep -q "workspace 7" \
+printf '%s' "$out" | pipe_has "workspace 7" \
     && ok "switch picks the workspace with the most windows" \
     || { bad "switch picks the workspace with the most windows"; printf '      %s\n' "$out"; }
 [ "$(tail -1 "$SWITCHLOG" 2>/dev/null)" = "7" ] \
@@ -283,18 +287,18 @@ printf '%s' "$out" | grep -q "workspace 7" \
 
 # By name, from outside the project — the point of switching BY PROJECT.
 out="$(cd "${WORK}" && "$Rime" project switch mine 2>&1)"
-printf '%s' "$out" | grep -q "workspace 7" \
+printf '%s' "$out" | pipe_has "workspace 7" \
     && ok "a project can be switched to by name from anywhere" \
     || { bad "a project can be switched to by name from anywhere"; printf '      %s\n' "$out"; }
 
 out="$(cd "${WORK}" && "$Rime" project switch no-such-project 2>&1)"
-printf '%s' "$out" | grep -q "no known project" \
+printf '%s' "$out" | pipe_has "no known project" \
     && ok "an unknown project name is refused" || bad "an unknown project name is refused"
 
 # No layout means no recorded workspace, and that is said plainly.
 (cd "$OTHER" && "$Rime" project layout forget >/dev/null 2>&1)
 out="$(cd "$OTHER" && "$Rime" project switch 2>&1)"
-printf '%s' "$out" | grep -q "no layout saved" \
+printf '%s' "$out" | pipe_has "no layout saved" \
     && ok "switching without a layout explains what is missing" \
     || { bad "switching without a layout explains what is missing"; printf '      %s\n' "$out"; }
 
@@ -306,20 +310,20 @@ section "forget"
 # had nothing to do with the behaviour being tested.
 (cd "$PROJ" && "$Rime" project layout forget >/dev/null 2>&1)
 out="$(cd "$PROJ" && "$Rime" project layout show 2>&1)"
-printf '%s' "$out" | grep -q "no layout saved" \
+printf '%s' "$out" | pipe_has "no layout saved" \
     && ok "a forgotten layout is gone" || bad "a forgotten layout is gone"
 
 # NOT --dry-run: with no layout there is nothing to start, and this asserts
 # that the real command says so rather than doing something odd.
 out="$(cd "$PROJ" && "$Rime" project layout restore 2>&1)"
-printf '%s' "$out" | grep -q "no layout saved" \
+printf '%s' "$out" | pipe_has "no layout saved" \
     && ok "restoring nothing says so instead of failing oddly" \
     || { bad "restoring nothing says so instead of failing oddly"; printf '      %s\n' "$out"; }
 
 section "outside a repository"
 mkdir -p "${WORK}/bare"
 out="$(cd "${WORK}/bare" && "$Rime" project layout save 2>&1)"
-printf '%s' "$out" | grep -q "not inside a git repository" \
+printf '%s' "$out" | pipe_has "not inside a git repository" \
     && ok "a directory that is not a project is refused clearly" \
     || { bad "a directory that is not a project is refused clearly"; printf '      %s\n' "$out"; }
 
@@ -328,7 +332,7 @@ BROKEN="${WORK}/broken-adapter"
 printf '#!/bin/sh\necho "no window query for labwc" >&2\nexit 1\n' > "$BROKEN"
 chmod +x "$BROKEN"
 out="$(cd "$PROJ" && RIME_WINDOW_ADAPTER="$BROKEN" "$Rime" project layout save 2>&1)"
-printf '%s' "$out" | grep -q "no window query" \
+printf '%s' "$out" | pipe_has "no window query" \
     && ok "a compositor with no window query is reported, not guessed around" \
     || { bad "a compositor with no window query is reported, not guessed around"; printf '      %s\n' "$out"; }
 

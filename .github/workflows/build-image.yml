@@ -875,7 +875,7 @@ jobs:
           done
           run 'test -d /usr/lib64/qt6/qml/org/hyprland/style' \
             || fail "hyprland QML style not installed"
-          run '! ldd /usr/bin/hyprland-dialog | grep -q "not found"' \
+          run '! ldd /usr/bin/hyprland-dialog | grep "not found" >/dev/null' \
             || fail "hyprland-dialog has unresolved libraries"
 
           # De-branding: ID=fedora is deliberate (dnf copr chroots derive from it);
@@ -924,7 +924,7 @@ jobs:
               || fail "kernel-signed=signed but rime-mok.der is missing — users would have nothing to enrol"
             sudo podman run --rm --entrypoint /bin/sh "$IMAGE:$TAG_CORE-${{ github.sha }}" -c \
               'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/rime-kver)/vmlinuz' \
-              | grep -qi 'signature certificates\|image signature issuers\|Rime' \
+              | grep -i 'signature certificates\|image signature issuers\|Rime' >/dev/null \
               || fail "sbverify found no signature on the shipped vmlinuz"
             echo "Secure Boot: verified — the published kernel is signed and rime-mok.der ships with it"
           else
@@ -1292,7 +1292,7 @@ jobs:
           # non-zero exit from failing to start a compositor is expected and
           # deliberately ignored; only config diagnostics are inspected.
           run 'out=$(labwc -C /usr/share/rime/labwc 2>&1 || true); \
-               ! printf "%s\n" "$out" | grep -qiE "invalid argument for action|invalid action|unexpected element"' \
+               ! printf "%s\n" "$out" | grep -iE "invalid argument for action|invalid action|unexpected element" >/dev/null' \
             || fail "labwc rejected something in rc.xml; that binding would be silently dropped"
 
           # ── portal backends, per session, BY NAME ──────────────────────
@@ -1348,7 +1348,7 @@ jobs:
           # dropping to a non-root uid — testing it as root would prove nothing.
           out=$(sudo podman run --rm --user 1000:1000 --entrypoint /bin/sh \
                   "$IMAGE:$TAG_BASE-${{ github.sha }}" -c 'rime update --check 2>&1' || true)
-          echo "$out" | grep -q 'sudo rime update --check' \
+          echo "$out" | grep 'sudo rime update --check' >/dev/null \
             || fail "rime update does not tell an unprivileged caller to use sudo (got: $out)"
           # …and the verbs the desktop drives as the session user must NOT be gated.
           run 'rime tier >/dev/null' \
@@ -1360,11 +1360,11 @@ jobs:
           # enforces it — the advertisement matters because a feature nobody can
           # discover is not shipped, and the refusal matters because it is the
           # step that runs before anything is copied into /var.
-          run 'rime install --help | grep -q "\.rpm"' \
+          run 'rime install --help | grep "\.rpm" >/dev/null' \
             || fail "rime install --help does not mention installing a local .rpm file"
-          run 'rime install --help | grep -q allow-unsigned' \
+          run 'rime install --help | grep allow-unsigned >/dev/null' \
             || fail "rime install --help does not offer the unverified-RPM opt-in"
-          run '/usr/libexec/rime-pkg --help | grep -q allow-unsigned' \
+          run '/usr/libexec/rime-pkg --help | grep allow-unsigned >/dev/null' \
             || fail "rime-pkg --help does not mention --allow-unsigned"
           # The container is root, so this reaches the engine's real argument
           # handling. It must refuse by name and exit non-zero without creating
@@ -1377,13 +1377,13 @@ jobs:
             || fail "rime-pkg exits 0 on a missing .rpm path (got: $out)"
           # A reverse-DNS id ending in .rpm is a FILE, not a Flatpak. Getting this
           # order wrong sends a file the user pointed at to Flathub.
-          run '/usr/libexec/rime-pkg install org.foo.Bar.rpm 2>&1 | grep -q "no such file"' \
+          run '/usr/libexec/rime-pkg install org.foo.Bar.rpm 2>&1 | grep "no such file" >/dev/null' \
             || fail "rime-pkg routes org.foo.Bar.rpm to Flatpak instead of treating it as a file"
           run 'test ! -e /var/lib/rime/pkg/requested' \
             || fail "a refused install wrote to the requested list"
           # The dependency resolution for a local file is the one thing that is
           # neither rpm nor a shell builtin; losing it would break only that path.
-          run 'dnf5 repoquery --installed --whatprovides bash --qf "%{name}\n" | grep -q bash' \
+          run 'dnf5 repoquery --installed --whatprovides bash --qf "%{name}\n" | grep bash >/dev/null' \
             || fail "dnf5 repoquery --installed --whatprovides is unavailable — local .rpm dependency resolution would fail"
 
           # Greeter wallpaper: the helper, its sudoers rule, and both ends of the
@@ -1570,7 +1570,7 @@ jobs:
           fi
           sudo podman run --rm --entrypoint /bin/sh "$IMAGE:rime" -c \
             'dnf5 -y install -q sbsigntools >/dev/null 2>&1; sbverify --list /usr/lib/modules/$(cat /usr/lib/rime-kver)/vmlinuz' \
-            | grep -qi 'signature certificates\|image signature issuers\|Rime' \
+            | grep -i 'signature certificates\|image signature issuers\|Rime' >/dev/null \
             || { echo "::error::sbverify found no signature on the shipped vmlinuz"; exit 1; }
           sudo podman run --rm --entrypoint /bin/sh "$IMAGE:rime" \
             -c 'test -s /usr/share/rime-os/secureboot/rime-mok.der' \

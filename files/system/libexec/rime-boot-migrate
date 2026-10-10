@@ -564,7 +564,7 @@ cmd_precheck() {
         command -v podman >/dev/null 2>&1 &&
         verdict OK "tools" "mkfs.vfat, rsync and podman are all in this image"
 
-    if bootc install to-existing-root --help 2>/dev/null | grep -q -- --composefs-backend; then
+    if bootc install to-existing-root --help 2>/dev/null | grep -- --composefs-backend >/dev/null; then
         verdict OK "bootc-new-enough" "install to-existing-root has --composefs-backend"
     else
         refuse "bootc-too-old" \
@@ -1311,7 +1311,7 @@ cmd_commit() {
     fi
     [ -n "$num" ] || fail "no-entry" "Could not create or find the systemd-boot entry."
     echo "$num" > "$STATE/bootnum"
-    efibootmgr -v | grep -q "^Boot$num" || fail "entry-missing" \
+    efibootmgr -v | grep "^Boot$num" >/dev/null || fail "entry-missing" \
         "efibootmgr reported Boot$num but it is not in the variable store."
 
     # ══ THE COMMIT ══ one SetVariable. Before it the old path; after it the

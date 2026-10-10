@@ -56,6 +56,10 @@
 #
 # Skips cleanly (status 0) when labwc, Hyprland or quickshell is missing.
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -449,7 +453,7 @@ echo "$switcher_binds" | sed 's/^/    /'
 
 want_one() {   # want_one DESC MODMASK KEY RELEASE NON_CONSUMING
     if printf '%s\n' "$switcher_binds" \
-        | grep -qiE "^$2\|$3\|$4\|$5\|"; then
+        | pipe_has -iE "^$2\|$3\|$4\|$5\|"; then
         ok "$1"
     else
         bad "$1"

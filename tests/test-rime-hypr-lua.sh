@@ -30,6 +30,10 @@
 #
 # Skips cleanly (status 0) when labwc or Hyprland is missing.
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -225,13 +229,13 @@ sec "the live-change path is hyprctl eval, because keyword is dead under Lua"
 # Asserted in BOTH directions. If a future Hyprland made keyword work again,
 # the second half fails and someone re-reads this instead of finding out from a
 # user whose gaps slider does nothing.
-if hc keyword general:border_size 7 | grep -qi 'non-legacy\|use eval'; then
+if hc keyword general:border_size 7 | pipe_has -i 'non-legacy\|use eval'; then
     ok "hyprctl keyword is refused under a Lua config (so nothing may rely on it)"
 else
     bad "hyprctl keyword is refused under a Lua config — it answered: $(hc keyword general:border_size 7 | head -1)"
 fi
 
-if hc eval 'hl.config({ general = { border_size = 7 } })' | grep -qi '^ok'; then
+if hc eval 'hl.config({ general = { border_size = 7 } })' | pipe_has -i '^ok'; then
     got="$(hc getoption general:border_size | sed -n 's/^int: //p' | tr -d '[:space:]')"
     if [ "$got" = "7" ]; then
         ok "hyprctl eval applies and reads back (border_size 2 -> 7)"
@@ -244,8 +248,8 @@ fi
 
 # The gradient form Rime Shell pushes on every wallpaper change.
 if hc eval 'hl.config({ general = { ["col.active_border"] = { colors = { "rgb(ff0000)" } } } })' \
-     | grep -qi '^ok'; then
-    hc getoption general:col.active_border | grep -qi 'ff0000' \
+     | pipe_has -i '^ok'; then
+    hc getoption general:col.active_border | pipe_has -i 'ff0000' \
         && ok "a gradient border re-tint applies through eval" \
         || bad "a gradient border re-tint applies through eval"
 else
@@ -254,7 +258,7 @@ fi
 
 # And the monitor rule rime-display-apply now sends live.
 hc eval 'hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.0 })' \
-    | grep -qi '^ok' \
+    | pipe_has -i '^ok' \
     && ok "a live hl.monitor rule is accepted through eval" \
     || bad "a live hl.monitor rule is accepted through eval"
 
@@ -301,7 +305,7 @@ sec "a broken generated module does not take the desktop with it"
 printf 'this is not lua(((\n' > "$H/.config/hypr/rime/monitors.lua"
 hc reload >/dev/null
 sleep 1
-if hc configerrors | grep -q 'monitors'; then
+if hc configerrors | pipe_has 'monitors'; then
     ok "the broken module is named in configerrors"
 else
     bad "the broken module is named in configerrors"

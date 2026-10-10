@@ -49,6 +49,10 @@
 #  is the failure mode this repository has shipped before.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -402,7 +406,7 @@ usb_leg() {
             # the device was taken.
             local key
             key="$(printf '%s' "$name" | awk '{print $1}')"
-            if wpctl status 2>/dev/null | grep -qiF "$key"; then
+            if wpctl status 2>/dev/null | pipe_has -iF "$key"; then
                 ok "$label: PipeWire enumerated card $idx, so applications can select it"
             else
                 bad "$label: PipeWire enumerated card $idx, so applications can select it"

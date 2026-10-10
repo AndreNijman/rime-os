@@ -319,7 +319,7 @@ jobs:
           # list also rots silently: a new helper is simply never checked.
           checked=0
           while IFS= read -r -d '' file; do
-            head -n1 -- "$file" | grep -qE '^#!.*(bash|/bin/sh)' || continue
+            head -n1 -- "$file" | grep -E '^#!.*(bash|/bin/sh)' >/dev/null || continue
             bash -n "$file"
             checked=$((checked + 1))
           done < <(find . -type f -not -path './.git/*' -not -path './rimed/target/*' -print0)
@@ -675,7 +675,7 @@ jobs:
           fi
           # And the daemon must still use it, or game mode has silently stopped
           # switching the scheduler — the failure mode of fixing this lazily.
-          printf '%s\n' "$found" | grep -q '^rimed/rimed/src/main\.rs:' \
+          printf '%s\n' "$found" | grep '^rimed/rimed/src/main\.rs:' >/dev/null \
             || { echo "FATAL: the daemon no longer opts in; game mode would never switch the scheduler" >&2; exit 1; }
           echo "host commands: only the daemon opts in"
 
@@ -785,7 +785,7 @@ jobs:
           # cmd_game connects to the system bus before it looks at the verb, so
           # routing through it would put a connection ahead of the guard.
           sed -n '/Cmd::Game { cmd } => match cmd {/,/^        },$/p' \
-              rimed/rime/src/main.rs | grep -q 'GameCmd::Profile { cmd } => gaming::profile_main' \
+              rimed/rime/src/main.rs | grep 'GameCmd::Profile { cmd } => gaming::profile_main' >/dev/null \
             || { echo "FATAL: \`game profile\` must be routed before cmd_game, which connects to the bus first" >&2; exit 1; }
           echo "§12: one shared guard, a pure planner, a read-only probe"
 
@@ -1238,7 +1238,7 @@ jobs:
                  a_non_local_caller_is_refused_a_grant_before_polkit_is_asked \
                  -- --exact --nocapture 2>&1)"
           printf '%s\n' "$out"
-          printf '%s' "$out" | grep -q '1 passed' || {
+          printf '%s' "$out" | grep '1 passed' >/dev/null || {
               echo "::error::a_non_local_caller_is_refused_a_grant_before_polkit_is_asked did not run; has it been renamed?"
               exit 1
           }
@@ -1438,7 +1438,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed trust-enforcement assertions failed"; exit 1; }
           [ "$passed" -ge 77 ] || { echo "::error::only $passed trust-enforcement assertions ran; 77 ran on 2026-09-13, so some no longer execute — the runner's openssl is the first thing to check, the suite drops assertions it cannot mint a certificate for"; exit 1; }
-          if printf '%s\n' "$out" | grep -qiE '^[[:space:]]*(SKIP|skipped)'; then
+          if printf '%s\n' "$out" | grep -iE '^[[:space:]]*(SKIP|skipped)' >/dev/null; then
               echo "::error::the trust-enforcement suite printed a SKIP; a could-not-run is not a pass"
               exit 1
           fi
@@ -1515,7 +1515,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed at-rest assertions failed"; exit 1; }
           [ "$passed" -ge 19 ] || { echo "::error::only $passed at-rest assertions ran; 19 ran on 2026-09-13, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the secret-at-rest suite printed a SKIP; it has no skip counter, so one appearing means an assertion stopped being made"
               exit 1
           fi
@@ -1564,7 +1564,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed lid assertions failed"; exit 1; }
           [ "$passed" -ge 60 ] || { echo "::error::only $passed lid assertions ran; 60 ran on 2026-09-13, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the lid suite printed a SKIP; it ships no skip helper, so one appearing means an assertion stopped being made"
               exit 1
           fi
@@ -2638,7 +2638,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed multilib decisions were wrong"; exit 1; }
           [ "$passed" -ge 3 ] || { echo "::error::only $passed multilib decisions were judged; 3 ran on 2026-09-13, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the multilib suite printed a SKIP; every one of its abstentions is now a failure by design, so a SKIP means a new one was added"
               exit 1
           fi
@@ -2716,7 +2716,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed extraction assertions failed"; exit 1; }
           [ "$passed" -ge 11 ] || { echo "::error::only $passed extraction assertions ran; 11 ran on 2026-09-19, so some no longer execute — and six of the eleven are the guards and controls that stop this suite passing for free"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the multilib extract suite printed a SKIP; its abstentions are failures by design, so a SKIP means a new one was added"
               exit 1
           fi
@@ -2777,7 +2777,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed /etc labelling assertions failed"; exit 1; }
           [ "$passed" -ge 9 ] || { echo "::error::only $passed labelling assertions ran; 9 is what coverage mode measured on 2026-09-20, and four of those nine exist purely to stop the other five passing over an empty population"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the etc-label suite printed a SKIP; that means podman, the repository or the SELinux policy rpm was unavailable, and none of the assertions ran"
               exit 1
           fi
@@ -2837,7 +2837,7 @@ jobs:
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed alternatives assertions failed"; exit 1; }
           [ "$passed" -ge 15 ] || { echo "::error::only $passed alternatives assertions ran; 15 is what the L16 measured on 2026-09-22, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the alternatives suite printed a SKIP; that means podman, the repository, util-linux or rpm-build was unavailable, and the assertions it guards did not run"
               exit 1
           fi
@@ -2901,7 +2901,7 @@ jobs:
           [ "$failed" = 0 ] || { echo "::error::$failed pkg-update assertions failed"; exit 1; }
           [ "$skipped" = 0 ] || { echo "::error::$skipped assertions could not run; leg B is the one that runs the service's real entrypoint, so a skip here is a green tick over the defect this suite exists for"; exit 1; }
           [ "$passed" -ge 17 ] || { echo "::error::only $passed pkg-update assertions ran; 17 ran on 2026-09-19, so some no longer execute — and the two mutants among them are what stop a bare PKG_COMPAT_LEVEL bump reading as a fix"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the pkg-update suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
               exit 1
           fi
@@ -3750,7 +3750,7 @@ jobs:
               exit 1
           }
           [ "$passed" -ge 18 ] || { echo "::error::only $passed labwc session assertions ran; 18 ran on 2026-09-13, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the labwc session suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
               exit 1
           fi
@@ -4304,7 +4304,7 @@ jobs:
           [ "$failed" = 0 ] || { echo "::error::$failed device assertions failed"; exit 1; }
           [ "$skipped" = 0 ] || { echo "::error::$skipped device assertions could not run on this runner; a could-not-run is not a pass"; exit 1; }
           [ "$passed" -ge 108 ] || { echo "::error::only $passed device assertions ran; 108 ran on 2026-09-18, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the devices suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
               exit 1
           fi
@@ -4348,7 +4348,7 @@ jobs:
               exit 1
           }
           [ "$passed" -ge 12 ] || { echo "::error::only $passed device-services assertions ran; 12 ran on 2026-09-13, so some no longer execute"; exit 1; }
-          if printf '%s\n' "$out" | grep -qE '^[[:space:]]*SKIP'; then
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the device-services netns suite printed a SKIP line; the counter above is the same signal, and this catches an echo that bypasses the helper"
               exit 1
           fi

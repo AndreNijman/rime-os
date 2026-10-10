@@ -50,6 +50,10 @@
 #  most at risk of.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -133,7 +137,7 @@ if [ "$SELFTEST" = 1 ]; then
             out="$("$0" --mutate-helper "$expr" 2>&1)"
         fi
         line="$(printf '%s' "$out" | tail -1)"
-        if printf '%s' "$out" | grep -qF "FAIL  $want"; then
+        if printf '%s' "$out" | pipe_has -F "FAIL  $want"; then
             printf '  %2d caught  %-58s %s\n' "$n" "$want" "$line"
             caught=$((caught + 1))
         else
@@ -248,8 +252,8 @@ build_topology() {
     # that touches IPv6 needs them, and a race here reads as "IPv6 is broken".
     local i=0
     while [ $i -lt 50 ]; do
-        ip -n "$NS_HOST" -6 addr show dev hn scope link 2>/dev/null | grep -q 'inet6.*fe80' &&
-        ip -n "$NS_NET"  -6 addr show dev nh scope link 2>/dev/null | grep -q 'inet6.*fe80' && break
+        ip -n "$NS_HOST" -6 addr show dev hn scope link 2>/dev/null | pipe_has 'inet6.*fe80' &&
+        ip -n "$NS_NET"  -6 addr show dev nh scope link 2>/dev/null | pipe_has 'inet6.*fe80' && break
         sleep 0.1; i=$((i + 1))
     done
     LL_HOST="$(ip -n "$NS_HOST" -6 addr show dev hn scope link | awk '/inet6/{print $2}' | cut -d/ -f1 | head -1)"
@@ -478,8 +482,8 @@ sec "path MTU discovery, which fails as slowness rather than as an error"
 pmtu_works() {
     h ip route flush cache 2>/dev/null
     local out; out="$(nsxt 8 "$NS_HOST" ping -M 'do' -s 1400 -c2 -W2 10.9.45.2 2>&1)"
-    printf '%s' "$out" | grep -qi 'frag.*needed\|mtu *= *1280' && return 0
-    h ip route get 10.9.45.2 2>/dev/null | grep -q 'mtu 1280'
+    printf '%s' "$out" | pipe_has -i 'frag.*needed\|mtu *= *1280' && return 0
+    h ip route get 10.9.45.2 2>/dev/null | pipe_has 'mtu 1280'
 }
 if pmtu_works; then
     ok "path MTU discovery still works"
@@ -637,8 +641,8 @@ else
     why=""
     policy_loaded || why="the table is gone"
     chain="$(h nft list chain inet rime input 2>/dev/null)"
-    printf '%s' "$chain" | grep -q 'policy drop'        || why="$why; the chain no longer drops by default"
-    printf '%s' "$chain" | grep -q 'tcp dport 22 accept' || why="$why; ssh is no longer accepted"
+    printf '%s' "$chain" | pipe_has 'policy drop'        || why="$why; the chain no longer drops by default"
+    printf '%s' "$chain" | pipe_has 'tcp dport 22 accept' || why="$why; ssh is no longer accepted"
     tcp_reach "$NS_NET" 10.9.44.2 9999 && why="$why; a closed port started answering"
     if [ -z "$why" ]; then
         ok "one malformed exception leaves the base policy standing"

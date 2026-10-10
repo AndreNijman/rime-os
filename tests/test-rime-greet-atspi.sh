@@ -55,6 +55,10 @@
 #  Run from anywhere: ./tests/test-rime-greet-atspi.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 
 cd "$(dirname "$0")" || exit 2
@@ -329,7 +333,7 @@ pw_text="$(python3 "$WALK" --get-text "Password. Press Enter to log in, Escape t
 
 # The one that would matter most. Checked FIRST and independently of the shape
 # of the reply: whatever the bus returns, it must not be the password.
-if printf '%s' "$pw_text" | grep -qF "$SECRET"; then
+if printf '%s' "$pw_text" | pipe_has -F "$SECRET"; then
     bad "the password never crosses the accessibility bus" \
         "GetText returned the typed password itself"
 else
@@ -338,7 +342,7 @@ fi
 
 if [ "$pw_text" = "NO-TEXT-INTERFACE" ]; then
     ok "the password field exposes no readable text on the bus at all"
-elif printf '%s' "$pw_text" | grep -qE '^[●*•]+$'; then
+elif printf '%s' "$pw_text" | pipe_has -E '^[●*•]+$'; then
     ok "the password field reads back MASKED on the bus, never its characters"
 else
     bad "the password field reads back MASKED on the bus, never its characters" \
@@ -376,7 +380,7 @@ done
 # shellcheck disable=SC2043  # one field today. The greeter grows a password
 # field and a session picker, and both belong in this list when they do.
 for n in "Username"; do
-    if printf '%s' "$(line_of "$n")" | grep -q 'focusable'; then
+    if printf '%s' "$(line_of "$n")" | pipe_has 'focusable'; then
         ok "'$n' is focusable, so a reader can reach it"
     else
         bad "'$n' is focusable, so a reader can reach it" "$(line_of "$n")"
@@ -387,7 +391,7 @@ done
 section "what a screen reader can operate"
 
 for n in "Previous session" "Next session" "$LAYOUT_NAME"; do
-    if printf '%s' "$(line_of "$n")" | grep -qi 'actions=.*Press'; then
+    if printf '%s' "$(line_of "$n")" | pipe_has -i 'actions=.*Press'; then
         ok "'$n' offers a Press action on the bus"
     else
         bad "'$n' offers a Press action on the bus" "$(line_of "$n")"

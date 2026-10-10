@@ -39,6 +39,10 @@
 #  Run from anywhere: ./tests/test-rime-greet-a11y.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # Deliberately +e, like every other suite in this directory: CI invokes a suite
 # as `bash -e {0}`, and under -e an assignment from a failing command ends the
 # run silently, mid-section.
@@ -113,7 +117,7 @@ printf '%s\n' "$out" | grep -E "^(PASS|FAIL!|SKIP|XFAIL|QWARN|Totals)" || true
 
 # A load failure produces zero assertions and a zero exit from some Qt
 # versions, which would read as a clean pass.
-if printf '%s\n' "$out" | grep -qE "is not a type|module .* is not installed|Cannot assign|Required property"; then
+if printf '%s\n' "$out" | pipe_has -E "is not a type|module .* is not installed|Cannot assign|Required property"; then
     printf '%s\n' "$out" | tail -25
     bad "the staged tree loads" "GreetSurface.qml did not build under qmltestrunner"
     finish; exit 1

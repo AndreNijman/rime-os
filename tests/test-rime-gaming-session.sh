@@ -40,6 +40,10 @@
 #  Run from anywhere:  ./tests/test-rime-gaming-session.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SESSION="${ROOT}/files/system/libexec/rime-gaming-session"
@@ -668,7 +672,7 @@ else
         "log: $(session_log | tail -5)"
 fi
 # The trap still runs on the clean path.
-if printf '%s\n' "$calls" | grep -q 'argv=game stop'; then
+if printf '%s\n' "$calls" | pipe_has 'argv=game stop'; then
     ok "the EXIT trap still calls game stop on the clean path"
 else
     bad "the EXIT trap still calls game stop on the clean path" "game calls: ${calls}"
@@ -705,7 +709,7 @@ fi
 rc="$(run_session_with_rimed "$KATANA" RIME_FAKE_NO_OWNER=1)"
 calls="$(game_calls)"
 log="$(session_log)"
-if printf '%s\n' "$calls" | grep -q 'argv=game start$'; then
+if printf '%s\n' "$calls" | pipe_has 'argv=game start$'; then
     ok "an rimed that refuses --owner-pid still gets a plain game start"
 else
     bad "an rimed that refuses --owner-pid still gets a plain game start" \

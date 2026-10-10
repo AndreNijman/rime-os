@@ -25,6 +25,10 @@
 #  SKIPS without gnome-keyring-daemon, dbus-daemon or busctl/gdbus.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")" || exit 2
 LAUNCHER=../files/system/libexec/rime-shell-autostart
 [ -f "$LAUNCHER" ] || { echo "cannot find $LAUNCHER"; exit 2; }
@@ -45,7 +49,7 @@ bus_pid=""; login_pid=""
 cleanup() {
     [ -n "$login_pid" ] && kill "$login_pid" 2>/dev/null
     for p in $(pgrep -u "$(id -u)" -x gnome-keyring-d 2>/dev/null); do
-        tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "XDG_RUNTIME_DIR=$T/run" && kill "$p" 2>/dev/null
+        tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | pipe_has -x "XDG_RUNTIME_DIR=$T/run" && kill "$p" 2>/dev/null
     done
     [ -n "$bus_pid" ] && kill "$bus_pid" 2>/dev/null
     rm -rf "$T"
@@ -80,7 +84,7 @@ printf 'rime-test-pw' | env -i HOME="$T/home" XDG_RUNTIME_DIR="$T/run" PATH=/usr
     gnome-keyring-daemon --daemonize --login >/dev/null 2>&1
 for _ in $(seq 1 30); do [ -S "$T/run/keyring/control" ] && break; sleep 0.1; done
 for p in $(pgrep -u "$(id -u)" -x gnome-keyring-d); do
-    tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | grep -qx "XDG_RUNTIME_DIR=$T/run" && login_pid=$p
+    tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null | pipe_has -x "XDG_RUNTIME_DIR=$T/run" && login_pid=$p
 done
 [ -n "$login_pid" ] || { bad "the login daemon started" "no daemon under $T/run"; finish; }
 

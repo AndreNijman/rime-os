@@ -1022,7 +1022,7 @@ cmd_provision() {
 
     # Already provided: nothing to do, and say so with the capsule's name so a
     # user reading `rime apply` output can go and use it.
-    if read_record_list "$capsule" languages 2>/dev/null | grep -qxF "$language"; then
+    if read_record_list "$capsule" languages 2>/dev/null | grep -xF "$language" >/dev/null; then
         msg "capsule '${capsule}' already provides ${language}:  rime env enter ${capsule}"
         return 0
     fi

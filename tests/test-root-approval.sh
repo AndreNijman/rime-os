@@ -50,6 +50,10 @@
 #      ./tests/test-root-approval.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # Counts failures rather than aborting on them: several assertions run commands
 # that exit non-zero on purpose. Under `-e` — which GitHub Actions applies by
 # invoking a script as `bash -e {0}` — a `x="$(cmd)"` assignment whose command
@@ -266,14 +270,14 @@ fi
 
 out="$(printf 'y\n' | "$Rime" request approve "$id" 2>&1)"
 rc=$?
-printf '%s' "$out" | grep -q "must run as root" \
+printf '%s' "$out" | pipe_has "must run as root" \
     && ok "approving without --no-run is refused" \
     || { bad "approving without --no-run is refused"; printf '      %s\n' "$out"; }
 [ "$rc" -ne 0 ] && ok "and it exits non-zero" || bad "and it exits non-zero"
-printf '%s' "$out" | grep -q "sudo rime request approve ${id}" \
+printf '%s' "$out" | pipe_has "sudo rime request approve ${id}" \
     && ok "the refusal names the exact command to run instead" \
     || { bad "the refusal names the exact command to run instead"; printf '      %s\n' "$out"; }
-printf '%s' "$out" | grep -q "wheel group is not enough" \
+printf '%s' "$out" | pipe_has "wheel group is not enough" \
     && ok "and says why being in wheel does not do it" \
     || bad "and says why being in wheel does not do it"
 
@@ -295,7 +299,7 @@ assert r['decision'] == 'pending', f'the daemon was asked anyway: {r}'
 # consistent with a CLI that simply cannot approve at all.
 id2="$("$Rime" request ask install cmake --reason "and a build system" --no-wait 2>/dev/null)"
 out="$(printf 'y\n' | "$Rime" request approve "$id2" --no-run 2>&1)"
-printf '%s' "$out" | grep -q "approved" \
+printf '%s' "$out" | pipe_has "approved" \
     && ok "the same user may approve with --no-run, so the gate is on the execution" \
     || { bad "the same user may approve with --no-run, so the gate is on the execution"; printf '      %s\n' "$out"; }
 
@@ -309,18 +313,18 @@ inner="$(unshare -r -m --propagation private "${BASH_SOURCE[0]}" "$id" 2>&1)"
 unset RIME_ROOT_APPROVAL_INNER
 printf '%s\n' "$inner" | sed 's/^/      /'
 
-printf '%s' "$inner" | grep -q "INNER-FATAL" && {
+printf '%s' "$inner" | pipe_has "INNER-FATAL" && {
     bad "the namespace came up with a stub engine bound over the real one"
 }
-printf '%s' "$inner" | grep -q "inner: euid 0, /proc/self/status says 0" \
+printf '%s' "$inner" | pipe_has "inner: euid 0, /proc/self/status says 0" \
     && ok "inside the namespace the kernel reports effective uid 0" \
     || bad "inside the namespace the kernel reports effective uid 0"
 
-printf '%s' "$inner" | grep -q "must run as root" \
+printf '%s' "$inner" | pipe_has "must run as root" \
     && bad "the root gate let a real uid 0 through" \
     || ok "the root gate let a real uid 0 through"
 
-printf '%s' "$inner" | grep -qE "rime request: running: .*install clang" \
+printf '%s' "$inner" | pipe_has -E "rime request: running: .*install clang" \
     && ok "and the approval went on to run the operation" \
     || bad "and the approval went on to run the operation"
 
@@ -359,7 +363,7 @@ n="$(grep -c '^ARGV=' "${WORK}/engine.log")"
 
 # ── and the decision cannot be taken twice ───────────────────────────────────
 out="$(printf 'y\n' | "$Rime" request approve "$id" --no-run 2>&1)"
-printf '%s' "$out" | grep -q "already" \
+printf '%s' "$out" | pipe_has "already" \
     && ok "an executed request cannot be approved again" \
     || { bad "an executed request cannot be approved again"; printf '      %s\n' "$out"; }
 

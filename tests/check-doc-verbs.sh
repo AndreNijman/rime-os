@@ -59,6 +59,10 @@
 #          Rime=/path/to/rime tests/check-doc-verbs.sh docs/*.md
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 2
 
 # THIS TREE's binary by default, falling back to whatever `rime` is on PATH.
@@ -170,7 +174,7 @@ forward() {
 
 allowed() {
     [ -f "$ALLOW" ] || return 1
-    grep -v '^[[:space:]]*#' "$ALLOW" | grep -qxF "$1"
+    grep -v '^[[:space:]]*#' "$ALLOW" | pipe_has -xF "$1"
 }
 
 # Every `rime …` a file names. One extraction, used by both directions, so
@@ -212,7 +216,7 @@ is_documented() {
 
 in_debt_list() {
     [ -f "$DEBT" ] || return 1
-    grep -v '^[[:space:]]*#' "$DEBT" | grep -qxF "$1"
+    grep -v '^[[:space:]]*#' "$DEBT" | pipe_has -xF "$1"
 }
 
 reverse() {

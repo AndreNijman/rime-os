@@ -32,6 +32,10 @@
 #  `git show 'HEAD~1:.github/workflows/pr-validation.yml'` — to show it red.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 1
 
 WORKFLOW="${1:-.github/workflows/pr-validation.yml}"
@@ -55,7 +59,7 @@ mapfile -t ids < <(
 )
 [ "${#ids[@]}" -ge 2 ] || { echo "FATAL: found ${#ids[@]} job ids; the anchors have moved"; exit 1; }
 
-printf '%s\n' "${ids[@]}" | grep -qx "$AGGREGATOR" \
+printf '%s\n' "${ids[@]}" | pipe_has -x "$AGGREGATOR" \
     || { echo "FATAL: no '$AGGREGATOR' job in $WORKFLOW"; exit 1; }
 
 # ── what the aggregator requires ─────────────────────────────────────────────
@@ -86,10 +90,10 @@ fi
 unaggregated=(); phantom=()
 for j in "${ids[@]}"; do
     [ "$j" = "$AGGREGATOR" ] && continue
-    printf '%s\n' "${needs[@]}" | grep -qx "$j" || unaggregated+=("$j")
+    printf '%s\n' "${needs[@]}" | pipe_has -x "$j" || unaggregated+=("$j")
 done
 for n in "${needs[@]}"; do
-    printf '%s\n' "${ids[@]}" | grep -qx "$n" || phantom+=("$n")
+    printf '%s\n' "${ids[@]}" | pipe_has -x "$n" || phantom+=("$n")
 done
 
 printf '\nCI aggregation: %d jobs, %d required by %s\n' \

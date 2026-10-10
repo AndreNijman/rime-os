@@ -598,7 +598,7 @@ HOOK
     assert_eq "gaming" "$got" ".rimeinf variant"
     # The .osrel section comes from the Rime image, which is what makes the
     # boot menu and `bootctl list` say Rime OS instead of Fedora.
-    if python3 "$HERE/pe-section.py" "$uki" .osrel | grep -qi 'Rime'; then
+    if python3 "$HERE/pe-section.py" "$uki" .osrel | grep -i 'Rime' >/dev/null; then
         ok ".osrel names Rime rather than the boot lab's own os-release"
     else
         bad ".osrel does not mention Rime — the wrong os-release was embedded"

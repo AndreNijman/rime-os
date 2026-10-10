@@ -51,6 +51,10 @@
 #                                   [--deadman SECONDS] [--keep]
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
@@ -192,7 +196,7 @@ tcp_open() { timeout 4 bash -c "</dev/tcp/$PROBE/$1" 2>/dev/null; }
 # pointing back here passes it, and this would then load a default-drop policy
 # on the machine running the test. Compare addresses instead, now that there
 # is one.
-if ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | grep -qxF "$PROBE"; then
+if ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | pipe_has -xF "$PROBE"; then
     printf 'refusing: %s is an address of this machine\n' "$PROBE" >&2
     exit 2
 fi
@@ -281,7 +285,7 @@ sec "the dead-man's switch, armed and verified before anything loads"
 # ═════════════════════════════════════════════════════════════════════════════
 on "sudo -n systemd-run --on-active=$DEADMAN --unit=rime-fw-deadman \
         /usr/sbin/nft delete table inet rime" >/dev/null 2>&1
-if on 'systemctl list-timers --all rime-fw-deadman.timer --no-legend' | grep -q rime-fw-deadman; then
+if on 'systemctl list-timers --all rime-fw-deadman.timer --no-legend' | pipe_has rime-fw-deadman; then
     ok "the target will un-firewall itself in ${DEADMAN}s if this run dies"
 else
     bad "the target will un-firewall itself in ${DEADMAN}s if this run dies" \
@@ -317,7 +321,7 @@ else
 fi
 
 out="$(on 'sudo -n systemctl start rime-firewall.service 2>&1'; echo "rc=$?")"
-if printf '%s' "$out" | grep -q 'rc=0'; then
+if printf '%s' "$out" | pipe_has 'rc=0'; then
     ok "the unit started ($UNIT_NOTE)"
 else
     bad "the unit started" "$out"
@@ -325,14 +329,14 @@ else
 fi
 
 # THE assertion. Same ControlMaster, same TCP connection, after the load.
-if on 'echo alive' 2>/dev/null | grep -q alive; then
+if on 'echo alive' 2>/dev/null | pipe_has alive; then
     ok "the ssh connection that loaded the policy is still carrying commands"
 else
     bad "the ssh connection that loaded the policy is still carrying commands" \
         "the policy just stranded its own operator"
     finish; exit $?
 fi
-if on 'sudo -n nft list chain inet rime input' 2>/dev/null | grep -q 'policy drop'; then
+if on 'sudo -n nft list chain inet rime input' 2>/dev/null | pipe_has 'policy drop'; then
     ok "and the policy really is enforcing while that connection lives"
 else
     bad "and the policy really is enforcing while that connection lives" \
@@ -406,7 +410,7 @@ reach() { tcp_open 22000; }
 
 LISTENER_PID="$(on 'setsid socat TCP4-LISTEN:22000,reuseaddr,fork PIPE >/dev/null 2>&1 & echo $!' 2>/dev/null | tr -dc "0-9")"
 sleep 0.6
-if on 'ss -tlnH "sport = :22000"' | grep -q 22000; then
+if on 'ss -tlnH "sport = :22000"' | pipe_has 22000; then
     reach && bad "a listener on 22000 is unreachable until it is allowed" "it answered without an exception" \
           || ok "a listener on 22000 is unreachable until it is allowed"
 
@@ -425,7 +429,7 @@ if on 'ss -tlnH "sport = :22000"' | grep -q 22000; then
     on "sudo -n $FW reload" >/dev/null 2>&1
     still_dropping=1
     [ "$HAVE_PROBE" = 1 ] && { tcp_open "$CLOSED_PORT" && still_dropping=0; }
-    if on 'sudo -n nft list chain inet rime input' 2>/dev/null | grep -q 'policy drop' \
+    if on 'sudo -n nft list chain inet rime input' 2>/dev/null | pipe_has 'policy drop' \
        && [ "$still_dropping" = 1 ]; then
         ok "a malformed exception leaves the base policy standing"
     else
@@ -461,10 +465,10 @@ else
 fi
 rm -f /tmp/rime-fw-verify.$$
 
-on 'systemctl show network-pre.target -p After' 2>/dev/null | grep -q 'rime-firewall.service' \
+on 'systemctl show network-pre.target -p After' 2>/dev/null | pipe_has 'rime-firewall.service' \
     && ok "network-pre.target waits for rime-firewall.service" \
     || bad "network-pre.target waits for rime-firewall.service" "the Before= edge did not register"
-on 'systemctl show NetworkManager.service -p After' 2>/dev/null | grep -q 'network-pre.target' \
+on 'systemctl show NetworkManager.service -p After' 2>/dev/null | pipe_has 'network-pre.target' \
     && ok "and NetworkManager waits for network-pre.target" \
     || skip "and NetworkManager waits for network-pre.target" "no NetworkManager on this machine"
 

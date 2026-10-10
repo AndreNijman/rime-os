@@ -59,6 +59,10 @@
 # Usage: tests/test-labwc-keybind-reload.sh
 
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` for the same reason as the other two labwc suites: CI invokes a
 # script as `bash -e {0}`, under which an assignment from a command that exits
 # non-zero kills the run part-way and reports the remaining assertions as
@@ -218,7 +222,7 @@ fi
 # socket both appear before the output is configured, and a key pressed then is
 # delivered to a seat with no focus. A flaky control is worse than no control.
 for _ in $(seq 1 40); do
-    wlr-randr 2>/dev/null | grep -q 'Enabled: yes' && break
+    wlr-randr 2>/dev/null | pipe_has 'Enabled: yes' && break
     sleep 0.1
 done
 

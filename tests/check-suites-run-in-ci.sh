@@ -22,6 +22,10 @@
 #  The second arm is what stops the exemption list becoming permanent.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 1
 
 EXEMPT=tests/suites-not-in-ci.txt
@@ -67,7 +71,7 @@ for s in tests/test-*.sh tests/check-*.sh installer/test-*.sh installer/check-*.
     # shipped that matched the comment explaining what it forbade. Lines whose
     # first non-blank character is `#` are dropped, which covers both YAML
     # comments and shell comments inside a `run:` block.
-    if grep -rhF "$base" "$WORKFLOWS"/ | grep -qvE '^[[:space:]]*#'; then
+    if grep -rhF "$base" "$WORKFLOWS"/ | pipe_has -vE '^[[:space:]]*#'; then
         run=$((run + 1))
         is_exempt "$s" && resurrected+=("$s")
     else

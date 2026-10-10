@@ -130,7 +130,7 @@ for conf in "${HYPR_LEGACY_CONF}" "${HOME}/.config/rime-shell/RimeShellKeybinds.
     # alone now, and one that was grown is collapsed back to a single one.
     if grep -qE 'pseudotile[[:space:]]*=|suppressevent maximize|nofocus,[[:space:]]*class:\^\$|(layoutmsg,[[:space:]]*){2,}togglesplit' "$conf" \
        || grep -E ',[[:space:]]*togglesplit([[:space:]]*$|[[:space:]]*#)' "$conf" \
-          | grep -qvE 'layoutmsg,[[:space:]]*togglesplit'; then
+          | grep -vE 'layoutmsg,[[:space:]]*togglesplit' >/dev/null; then
         # --follow-symlinks: rime-shell-migrate.sh leaves ApexShellKeybinds.conf
         # as a symlink to its new name, and a plain `sed -i` would replace that
         # link with a copy, which the shell's script then reports as a conflict.
@@ -496,7 +496,7 @@ migrate_legacy_paths() {
         # cloned per-user into /usr/share/rime-shell"). Comment markers: # for
         # hypr/hypridle, // for niri's KDL.
         if grep -vE '^[[:space:]]*(#|//)' "${f}" 2>/dev/null \
-           | grep -qE -- "(${LEGACY_SRC_DIR}|~/\.local/src/apex-shell)"; then  # rime-rename: keep — legacy clone path on disk
+           | grep -E -- "(${LEGACY_SRC_DIR}|~/\.local/src/apex-shell)" >/dev/null; then  # rime-rename: keep — legacy clone path on disk
             cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
             # Detection is live-lines-only (above) but the REWRITE is global, comments
             # included. Once a live line has proven this is a genuine legacy config,
@@ -525,7 +525,7 @@ migrate_legacy_paths() {
              "${HOME}/.config/niri/config.kdl"; do
         [ -f "${f}" ] || continue
         if grep -vE '^[[:space:]]*(#|//)' "${f}" 2>/dev/null \
-           | grep -q -- '\.local/bin/apex-shell-autostart'; then  # rime-rename: keep — the retired shim's name on disk
+           | grep -- '\.local/bin/apex-shell-autostart' >/dev/null; then  # rime-rename: keep — the retired shim's name on disk
             cp -a "${f}" "${f}.pre-vendor.bak" 2>/dev/null || true
             # Live-lines detection, global rewrite, suffix match — same reasoning as above.
             sed -i -e "s|[^[:space:]]*\.local/bin/apex-shell-autostart|/usr/libexec/rime-shell-autostart|g" \
@@ -1175,7 +1175,7 @@ fail_check() { PROVISION_OK=0; log "POSTCONDITION FAILED: $*"; }
 # guard no longer contains the substitution it is guarding.
 for _f in "${HYPR_CONF}" "${HOME}/.config/hypr/rime"/*.lua; do
     [ -f "${_f}" ] || continue
-    if grep -vE '^[[:space:]]*--' "${_f}" 2>/dev/null | grep -q '(unset)'; then
+    if grep -vE '^[[:space:]]*--' "${_f}" 2>/dev/null | grep '(unset)' >/dev/null; then
         fail_check "${_f} has an '(unset)' placeholder in a live setting"
     fi
 done

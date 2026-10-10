@@ -858,7 +858,7 @@ image_pin_excludes() {
 # "no package provides python3 >= 3.9" with python3-3.14.6 installed (measured).
 # --installed keeps it on the rpmdb, so it costs no network.
 installed_provides() {
-    dnf5 repoquery --installed --whatprovides "$1" --qf '%{name}\n' 2>/dev/null | grep -q .
+    dnf5 repoquery --installed --whatprovides "$1" --qf '%{name}\n' 2>/dev/null | grep . >/dev/null
 }
 
 # Write, one per line into $1, the dependencies of the local RPM files $2.. that
@@ -902,7 +902,7 @@ local_missing_requires() {
             case "$req" in rpmlib\(*) continue ;; esac
 
             cap="${req%% *}"
-            if printf '%s\n' "$provides" | grep -qxF -- "$cap"; then
+            if printf '%s\n' "$provides" | grep -xF -- "$cap" >/dev/null; then
                 continue
             fi
 
@@ -979,7 +979,7 @@ newer_satisfied_by_image() {
             # to omit. Same defect as probe_rpm's, same file, found with it.
             # installed_provides() above has always been spelled correctly;
             # this line is why they now look the same.
-            dnf5 repoquery --installed --whatprovides "$req" --qf '%{name}\n' 2>/dev/null | grep -q . || return 1
+            dnf5 repoquery --installed --whatprovides "$req" --qf '%{name}\n' 2>/dev/null | grep . >/dev/null || return 1
         done < <(rpm -qp --nosignature --requires -- "$other" 2>/dev/null)
     done
     return 0
@@ -2347,7 +2347,7 @@ install_etc() {
         local old
         while IFS= read -r old; do
             [ -n "$old" ] || continue
-            if printf '%s\n' "${kept[@]:-}" | grep -qxF "$old"; then
+            if printf '%s\n' "${kept[@]:-}" | grep -xF "$old" >/dev/null; then
                 continue
             fi
             local t="/etc/${old}" s="${ETC_SAVE}/${old}"
@@ -2840,7 +2840,7 @@ rebuild_extension() {
 flatpak_install() {
     have_flatpak || die "flatpak is not installed"
     local remote=""
-    if flatpak remotes --system --columns=name 2>/dev/null | grep -qx flathub; then
+    if flatpak remotes --system --columns=name 2>/dev/null | grep -x flathub >/dev/null; then
         remote=flathub
     fi
     msg "installing ${#} Flatpak app(s)"
@@ -2864,7 +2864,7 @@ cmd_flatpak_upgrade() {
     flatpak update --system -y --noninteractive >&2 || warn "system Flatpak update failed"
     local u="${SUDO_USER:-}"
     if [ -n "$u" ] && [ "$u" != root ]; then
-        if runuser -u "$u" -- flatpak --user remotes --columns=name 2>/dev/null | grep -q .; then
+        if runuser -u "$u" -- flatpak --user remotes --columns=name 2>/dev/null | grep . >/dev/null; then
             runuser -u "$u" -- flatpak update --user -y --noninteractive >&2 \
                 || warn "user Flatpak update failed for ${u}"
         fi
@@ -4501,7 +4501,7 @@ vendor_fetch_chatgpt() {
     # 2026-10-04, rpm 6.0.2) — and the system keyring is never touched.
     cp -f -- "$key" "$dir/keys/chatgpt.key"
     rpmkeys --define '_keyring fs' --define "_keyringpath $dir/keys/" --checksig -- "$dir/chatgpt.rpm" 2>/dev/null \
-        | grep -q 'digests signatures OK' \
+        | grep 'digests signatures OK' >/dev/null \
         || die "refusing chatgpt: the package does not verify against the pinned key"
     printf '%s\n' "$dir/chatgpt.rpm"
 }

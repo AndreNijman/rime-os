@@ -16,6 +16,10 @@
 #    4. the unit drifting into a system unit, where notify-send has no bus.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NOTICE="$REPO/files/system/libexec/rime-gpu-notice"
@@ -105,7 +109,7 @@ else
     bad "timer fires once per session, no repeat"
 fi
 if grep -q 'rime-gpu-notice.service.*/usr/lib/systemd/user/' "$REPO/Containerfile.base" \
-   || grep -A1 'files/system/units/rime-gpu-notice.service' "$REPO/Containerfile.base" | grep -q '/usr/lib/systemd/user/'; then
+   || grep -A1 'files/system/units/rime-gpu-notice.service' "$REPO/Containerfile.base" | pipe_has '/usr/lib/systemd/user/'; then
     ok "Containerfile.base installs it as a USER unit"
 else
     bad "Containerfile.base installs it as a USER unit"

@@ -760,7 +760,11 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
 
     // A confined session gets its environment from bwrap's --setenv, so the
     // process environment is only used for the unconfined path.
-    let spawned = pty::spawn(&argv, &workdir, &env, true, policy.no_new_privs(), size)
+    // Held before exec: the program runs only once the session below is in
+    // the registry, so its first connection already walks up to a recorded
+    // pid. Started any earlier, those requests were attributed to nobody, and
+    // nobody passes `may_be_granted` as the human at the terminal.
+    let (spawned, held) = pty::spawn_held(&argv, &workdir, &env, true, policy.no_new_privs(), size)
         .with_context(|| format!("starting {program}"))?;
 
     let info = SessionInfo {
@@ -833,6 +837,13 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
         // is what a phone opening it before anybody attached gives back.
         s.sizes
             .claim(crate::privilege::viewer(&who), size);
+    }
+    // Recorded, with its confinement: now the program may run.
+    if let Err(e) = held.release() {
+        daemon.registry.lock().expect("registry lock").remove(id);
+        // Safe: the registry entry that held the master is gone.
+        unsafe { libc::close(spawned.master) };
+        return Err(e).with_context(|| format!("starting {program}"));
     }
     registry::write_record(&info);
     // The session owns its record now, so the id stops being a reservation.

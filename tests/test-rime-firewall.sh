@@ -25,6 +25,10 @@
 #  Run from anywhere: ./tests/test-rime-firewall.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 2
 
 RULES=files/system/nftables/rime.nft
@@ -69,7 +73,7 @@ else
     fi
     if [ "$nft_rc" = 0 ]; then
         ok "the ruleset parses"
-    elif printf '%s' "$nft_out" | grep -q 'cache initialization failed'; then
+    elif printf '%s' "$nft_out" | pipe_has 'cache initialization failed'; then
         # Could-not-run, said as could-not-run. Not a pass and not a syntax error.
         skipped "the ruleset parses" "nft cannot reach netlink here, even in a private netns"
     else

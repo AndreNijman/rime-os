@@ -64,13 +64,13 @@ grep -q 'lock_cmd = qs -c /usr/share/rime-shell ipc call lockscreen lock' \
 # Compatibility for shell revisions predating the image-owned Windows helper.
 power="${dest}/src/scripts/PowerControl.sh"
 pre_probe=0
-if grep -vE '^[[:space:]]*#' "${power}" | grep -q 'caelestia-boot-windows'; then
+if grep -vE '^[[:space:]]*#' "${power}" | grep 'caelestia-boot-windows' >/dev/null; then
     pre_probe=1
 fi
 sed -i '/^[[:space:]]*#/!s|/usr/local/bin/caelestia-boot-windows|/usr/libexec/rime-boot-windows|g' "${power}"
 # The same defect: `! pipeline` is exempt from errexit too, so this line could
 # not fail a vendoring that had left the upstream path in place.
-if grep -vE '^[[:space:]]*#' "${power}" | grep -q 'caelestia-boot-windows'; then
+if grep -vE '^[[:space:]]*#' "${power}" | grep 'caelestia-boot-windows' >/dev/null; then
     echo "FATAL: ${power} still calls caelestia-boot-windows outside a comment" >&2
     exit 1
 fi

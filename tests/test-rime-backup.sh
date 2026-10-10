@@ -44,6 +44,10 @@
 #      ./tests/test-rime-backup.sh [--with-binary]
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # Counts failures rather than aborting: several assertions run commands that are
 # SUPPOSED to fail, and under `bash -e {0}` — which GitHub Actions uses — the
 # first of them would end the run and report the rest as failures.
@@ -96,7 +100,7 @@ export RIME_BACKUP_KEYS="${WORK}/keys"
 section "the five target kinds"
 targets="$("$Rime" backup targets 2>&1)"
 for kind in local nas ssh s3 r2; do
-    printf '%s' "$targets" | grep -qw "$kind" \
+    printf '%s' "$targets" | pipe_has -w "$kind" \
         && ok "\`backup targets\` names ${kind}" \
         || { bad "\`backup targets\` names ${kind}"; printf '      %s\n' "$targets"; }
 done
@@ -110,7 +114,7 @@ for kind in local nas ssh s3 r2; do
 done
 # And none of them still prints a refusal it does not mean, which would send an
 # operator away from a target that works.
-printf '%s' "$targets" | grep -q "REFUSED" \
+printf '%s' "$targets" | pipe_has "REFUSED" \
     && { bad "no kind still prints a refusal"; printf '%s\n' "$targets"; } \
     || ok "no kind still prints a refusal"
 
@@ -136,7 +140,7 @@ esac
 again="$("$Rime" backup key init 2>&1)"
 [ $? -ne 0 ] && ok "a second \`key init\` refuses rather than replacing the key" \
              || bad "a second \`key init\` refuses rather than replacing the key"
-printf '%s' "$again" | grep -q "unopenable" \
+printf '%s' "$again" | pipe_has "unopenable" \
     && ok "its refusal says what would have been lost" \
     || bad "its refusal says what would have been lost"
 
@@ -238,10 +242,10 @@ grep -qa -- "$(basename "$PROJ")" "$SNAPDIR/head.json" \
 # ── listing and verifying ────────────────────────────────────────────────────
 section "listing and verifying"
 list_out="$("$Rime" backup list --project "$PROJ" 2>&1)"
-printf '%s' "$list_out" | grep -q "$SNAP" \
+printf '%s' "$list_out" | pipe_has "$SNAP" \
     && ok "\`backup list\` shows the snapshot" \
     || { bad "\`backup list\` shows the snapshot"; printf '      %s\n' "$list_out"; }
-printf '%s' "$list_out" | grep -q "nightly" \
+printf '%s' "$list_out" | pipe_has "nightly" \
     && ok "the listing carries the label" || bad "the listing carries the label"
 
 # Presence without a key is a real answer. Contents without a key is not.
@@ -284,7 +288,7 @@ grep -q "$CANARY" "${INTO}/src/main.rs" 2>/dev/null \
 refused="$("$Rime" backup restore "$SNAP" --into "$INTO" --project "$PROJ" 2>&1)"
 [ $? -ne 0 ] && ok "a restore into a non-empty directory refuses" \
              || bad "a restore into a non-empty directory refuses"
-printf '%s' "$refused" | grep -q "is not empty" \
+printf '%s' "$refused" | pipe_has "is not empty" \
     && ok "its refusal says why" || bad "its refusal says why"
 "$Rime" backup restore "$SNAP" --into "$INTO" --project "$PROJ" --into-non-empty >/dev/null 2>&1
 [ $? -eq 0 ] && ok "and goes ahead when told to in as many words" \
@@ -358,7 +362,7 @@ else
     [ "$rc" -ne 0 ] && ok "listing an unreadable target fails rather than printing nothing" \
                     || { bad "listing an unreadable target fails rather than printing nothing"
                          printf '      %s\n' "$denied"; }
-    printf '%s' "$denied" | grep -qi "holds no snapshots" \
+    printf '%s' "$denied" | pipe_has -i "holds no snapshots" \
         && bad "an unreadable target is not reported as an empty one" \
         || ok "an unreadable target is not reported as an empty one"
 fi
@@ -380,10 +384,10 @@ TOML
 nas_out="$("$Rime" backup run --project "$NASPROJ" 2>&1)"
 [ $? -ne 0 ] && ok "a nas target that is not a mount point refuses" \
              || bad "a nas target that is not a mount point refuses"
-printf '%s' "$nas_out" | grep -q "not a mount point" \
+printf '%s' "$nas_out" | pipe_has "not a mount point" \
     && ok "its refusal names the cause" \
     || { bad "its refusal names the cause"; printf '      %s\n' "$nas_out"; }
-printf '%s' "$nas_out" | grep -q "gone with the machine" \
+printf '%s' "$nas_out" | pipe_has "gone with the machine" \
     && ok "and says what would have happened" || bad "and says what would have happened"
 
 # ── the recipient an agent could have written ────────────────────────────────
@@ -402,7 +406,7 @@ mv "${PROJ}/rime.toml.swapped" "${PROJ}/rime.toml"
 swapped="$("$Rime" backup run --project "$PROJ" 2>&1)"
 [ $? -ne 0 ] && ok "a swapped recipient refuses the run" \
              || bad "a swapped recipient refuses the run"
-printf '%s' "$swapped" | grep -q "a declaration and never an authority" \
+printf '%s' "$swapped" | pipe_has "a declaration and never an authority" \
     && ok "its refusal says why a file the project owns is not enough" \
     || { bad "its refusal says why a file the project owns is not enough"; printf '      %s\n' "$swapped"; }
 # And a typo is caught before anything is written, not at the restore that
@@ -465,7 +469,7 @@ else
     # And the refusal is reported as a refusal, never as "there is no key".
     denied="$(RIME_BACKUP_KEYS="${ROOT_KEYS}" "$Rime" backup restore latest \
         --into "${WORK}/nope" --project "$PROJ" 2>&1)"
-    printf '%s' "$denied" | grep -q "refusal and not an absence" \
+    printf '%s' "$denied" | pipe_has "refusal and not an absence" \
         && ok "a key the caller may not read is a refusal and not an absence" \
         || { bad "a key the caller may not read is a refusal and not an absence"
              printf '      %s\n' "$denied"; }

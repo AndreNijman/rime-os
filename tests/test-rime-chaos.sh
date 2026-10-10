@@ -31,6 +31,10 @@
 #  in the `rust` job where the toolchain is.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
@@ -381,12 +385,12 @@ case_observe() { echo observed; }
 case_judge()   { _chaos_fail "a staged case ran without being asked for"; }
 CASE
 listing="$(env RIME_BIN=/bin/true "$CHAOS/run-chaos" --cases-dir "$CASES" --list 2>&1)"
-if sed -n '/^staged/,$p' <<<"$listing" | grep -q 'stagedcase'; then
+if sed -n '/^staged/,$p' <<<"$listing" | pipe_has 'stagedcase'; then
     ok "--list puts it under staged"
 else
     bad "a CASE_STAGED=1 case is not listed as staged" "$listing"
 fi
-if sed -n '/^default:/,/^staged/p' <<<"$listing" | grep -q 'stagedcase'; then
+if sed -n '/^default:/,/^staged/p' <<<"$listing" | pipe_has 'stagedcase'; then
     bad "a staged case is also in the default list" "$listing"
 else
     ok "…and not in the default list"

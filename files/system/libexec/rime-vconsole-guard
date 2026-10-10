@@ -55,12 +55,12 @@ keymap_installed() {
     find "$KEYMAP_DIR" -type f \
         \( -name "${1}.map.gz" -o -name "${1}.map" \
            -o -name "${1}.kmap.gz" -o -name "${1}.kmap" \) \
-        -print -quit 2>/dev/null | grep -q .
+        -print -quit 2>/dev/null | grep . >/dev/null
 }
 
 font_installed() {
     [ -d "$FONT_DIR" ] || return 1
-    find "$FONT_DIR" -type f -name "${1}.*" -print -quit 2>/dev/null | grep -q .
+    find "$FONT_DIR" -type f -name "${1}.*" -print -quit 2>/dev/null | grep . >/dev/null
 }
 
 keymap="$(value_of KEYMAP)"

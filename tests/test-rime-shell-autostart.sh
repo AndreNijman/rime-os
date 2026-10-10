@@ -24,6 +24,10 @@
 #  Run from anywhere: ./tests/test-rime-shell-autostart.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 cd "$(dirname "$0")" || exit 2
 
@@ -67,7 +71,7 @@ launch() {
 wait_cmdline() {
     local pid=$1 want=$2 _
     for _ in $(seq 1 50); do
-        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- "$want" && return 0
+        tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | pipe_has -F -- "$want" && return 0
         sleep 0.1
     done
     return 1

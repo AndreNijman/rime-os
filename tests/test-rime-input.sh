@@ -41,6 +41,11 @@ trap 'rm -rf "$WORK"' EXIT
 pass=0; fail=0; skip=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf 'FAIL  %s\n' "$1"; fail=$((fail + 1)); }
+# `producer | grep -q` under pipefail fails at random: grep -q exits at the
+# first match, and a producer that still has output to write gets EPIPE
+# (GitHub's runners ignore SIGPIPE, so sed reports "couldn't flush stdout"
+# and exits 4) or dies of SIGPIPE (141). has reads its input to the end.
+has() { grep "$@" >/dev/null; }
 # Counted, and reported in the summary. An uncounted skip is how a suite ends up
 # reporting a clean pass for assertions that never ran — which is the same
 # failure mode as the bug this file's niri section exists to close.
@@ -78,7 +83,7 @@ python3 -c "import ast,sys; ast.parse(open('$GEN').read())" \
 # failure mode here is a mapping the compositor rejects.
 st="$(python3 "$GEN" --self-test 2>&1)"
 printf '%s\n' "$st" | sed 's/^/      /'
-printf '%s\n' "$st" | grep -q '^FAIL' \
+printf '%s\n' "$st" | has '^FAIL' \
     && bad "every installed compositor accepts the generated config" \
     || ok "every installed compositor accepts the generated config"
 
@@ -94,7 +99,7 @@ run_gen "$h" >/dev/null 2>&1
 for want in '<naturalScroll>yes</naturalScroll>' '<tap>yes</tap>' \
             '<tapAndDrag>yes</tapAndDrag>' '<accelProfile>adaptive</accelProfile>'; do
     sed -n '/<device category="touchpad"/,/<\/device>/p' "$h/.config/labwc/rc.xml" \
-        | grep -qF "$want" \
+        | has -F "$want" \
         && ok "default reproduces ${want}" || bad "default reproduces ${want}"
 done
 
@@ -165,7 +170,7 @@ added="$(diff <(sed '/<libinput>/,/<\/libinput>/d' "${WORK}/rc.orig") \
 
 # The header comment sits OUTSIDE the root element, where an ElementTree
 # round-trip cannot represent it. This is the assertion that caught that.
-head -8 "$h/.config/labwc/rc.xml" | grep -q 'Rime OS' \
+head -8 "$h/.config/labwc/rc.xml" | has 'Rime OS' \
     && ok "the file header comment survives" || bad "the file header comment survives"
 
 before="$(grep -c '<!--' "${WORK}/rc.orig")"
@@ -197,7 +202,7 @@ tp() { sed -n '/<device category="touchpad"/,/<\/device>/p' "$h/.config/labwc/rc
     && ok "labwc: clickMethod applied" || bad "labwc: clickMethod applied"
 [ "$(tp | sed -n 's|.*<tapButtonMap>\(.*\)</tapButtonMap>.*|\1|p')" = "lmr" ] \
     && ok "labwc: tapButtonMap applied" || bad "labwc: tapButtonMap applied"
-tp | grep -q threeFingerDrag \
+tp | has threeFingerDrag \
     && ok "labwc: threeFingerDrag emitted only when enabled" \
     || bad "labwc: threeFingerDrag emitted only when enabled"
 grep -q '<leftHanded>yes</leftHanded>' "$h/.config/labwc/rc.xml" \
@@ -274,20 +279,20 @@ ntp() { sed -n '/^    touchpad {/,/^    }/p' "$N"; }
 nms() { sed -n '/^    mouse {/,/^    }/p' "$N"; }
 
 # niri. Six options niri 26.04 accepts and the generator never wrote.
-ntp | grep -qE '^\s+left-handed$' \
+ntp | has -E '^\s+left-handed$' \
     && ok "niri: touchpad left-handed is written" || bad "niri: touchpad left-handed is written"
-ntp | grep -qE '^\s+drag false$' \
+ntp | has -E '^\s+drag false$' \
     && ok "niri: tap-and-drag off is written, not omitted" \
     || bad "niri: tap-and-drag off is written, not omitted"
-ntp | grep -qE '^\s+scroll-method "edge"$' \
+ntp | has -E '^\s+scroll-method "edge"$' \
     && ok "niri: touchpad scroll-method is written" || bad "niri: touchpad scroll-method is written"
-nms | grep -qE '^\s+left-handed$' \
+nms | has -E '^\s+left-handed$' \
     && ok "niri: mouse left-handed is written" || bad "niri: mouse left-handed is written"
-nms | grep -qE '^\s+middle-emulation$' \
+nms | has -E '^\s+middle-emulation$' \
     && ok "niri: mouse middle-emulation is written" || bad "niri: mouse middle-emulation is written"
 # drag-lock is a BARE flag in niri: `drag-lock false` is a parse error, so off
 # has to be absence. Asserted both ways below.
-ntp | grep -qE '^\s+drag-lock$' \
+ntp | has -E '^\s+drag-lock$' \
     && bad "niri: drag lock off is absent, not written false" \
     || ok "niri: drag lock off is absent, not written false"
 
@@ -302,7 +307,7 @@ grep -qF '<repeatRate>42</repeatRate>' "$RC" \
 grep -qF '<repeatDelay>275</repeatDelay>' "$RC" \
     && ok "labwc: repeat delay reaches <keyboard>" || bad "labwc: repeat delay reaches <keyboard>"
 # Inside the block labwc reads, not merely somewhere in the file.
-sed -n '/<keyboard[ >]/,/<\/keyboard>/p' "$RC" | grep -qF '<repeatRate>42</repeatRate>' \
+sed -n '/<keyboard[ >]/,/<\/keyboard>/p' "$RC" | has -F '<repeatRate>42</repeatRate>' \
     && ok "labwc: the repeat rate is inside <keyboard>" \
     || bad "labwc: the repeat rate is inside <keyboard>"
 # The keybind markers another generator writes between must survive the edit.
@@ -339,7 +344,7 @@ h="${WORK}/draglock"; mkhome "$h"
 echo '{"touchpad":{"drag_lock":true,"tap_and_drag":true}}' > "$h/.config/rime-shell/input.json"
 run_gen "$h" >/dev/null 2>&1
 sed -n '/^    touchpad {/,/^    }/p' "$h/.config/rime-shell/RimeShellInput.kdl" \
-    | grep -qE '^\s+drag-lock$' \
+    | has -E '^\s+drag-lock$' \
     && ok "niri: drag lock on is written as the bare flag" \
     || bad "niri: drag lock on is written as the bare flag"
 
@@ -414,22 +419,22 @@ H="$h/.config/hypr/rime/input.lua"
 RC="$h/.config/labwc/rc.xml"
 
 tpdev() { sed -n '/name = "fixture-touchpad"/,/^})/p' "$H"; }
-tpdev | grep -q 'sensitivity = 0.4' \
+tpdev | has 'sensitivity = 0.4' \
     && ok "hyprland: touchpad pointer speed reaches the touchpad, by name" \
     || bad "hyprland: touchpad pointer speed reaches the touchpad, by name"
-tpdev | grep -q 'accel_profile = "flat"' \
+tpdev | has 'accel_profile = "flat"' \
     && ok "hyprland: touchpad acceleration reaches the touchpad, by name" \
     || bad "hyprland: touchpad acceleration reaches the touchpad, by name"
-tpdev | grep -q 'left_handed = true' \
+tpdev | has 'left_handed = true' \
     && ok "hyprland: touchpad left-handed reaches the touchpad, by name" \
     || bad "hyprland: touchpad left-handed reaches the touchpad, by name"
 # The one spelling nothing else catches: --verify-config accepts any string for
 # scroll_method and the compositor then matches none of them, so the model's
 # own word would parse clean and do nothing.
-tpdev | grep -q 'scroll_method = "2fg"' \
+tpdev | has 'scroll_method = "2fg"' \
     && bad "hyprland: the touchpad scroll method is Hyprland's spelling" \
     || ok "hyprland: the touchpad scroll method is Hyprland's spelling"
-tpdev | grep -q 'scroll_method = "edge"' \
+tpdev | has 'scroll_method = "edge"' \
     && ok "hyprland: the touchpad scroll method reaches the touchpad, by name" \
     || bad "hyprland: the touchpad scroll method reaches the touchpad, by name"
 grep -q 'scroll_method *= *"twofinger"' "$H" \
@@ -438,23 +443,23 @@ grep -q 'scroll_method *= *"twofinger"' "$H" \
 
 # The mouse must NOT pick up the touchpad's pointer speed. That is exactly what
 # writing these four globally would do, and why they are routed per device.
-sed -n '/^    input = {/,/^        touchpad = {/p' "$H" | grep -q 'sensitivity    = -0.3' \
+sed -n '/^    input = {/,/^        touchpad = {/p' "$H" | has 'sensitivity    = -0.3' \
     && ok "hyprland: the global input block still carries the mouse's speed" \
     || bad "hyprland: the global input block still carries the mouse's speed"
 
 # Middle-click emulation has no global Hyprland option at all.
-sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | grep -q 'middle_button_emulation = true' \
+sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | has 'middle_button_emulation = true' \
     && ok "hyprland: mouse middle-click emulation reaches the mouse, by name" \
     || bad "hyprland: mouse middle-click emulation reaches the mouse, by name"
-sed -n '/name = "fixture-trackpoint"/,/^})/p' "$H" | grep -q 'middle_button_emulation = true' \
+sed -n '/name = "fixture-trackpoint"/,/^})/p' "$H" | has 'middle_button_emulation = true' \
     && ok "hyprland: a trackpoint counts as a pointer for middle-click emulation" \
     || bad "hyprland: a trackpoint counts as a pointer for middle-click emulation"
 
 # A per-device override beats the section-wide value routed to the same device.
-sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | grep -q 'sensitivity = 0.9' \
+sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | has 'sensitivity = 0.9' \
     && ok "hyprland: a per-device speed beats the section it belongs to" \
     || bad "hyprland: a per-device speed beats the section it belongs to"
-sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | grep -q 'natural_scroll = true' \
+sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | has 'natural_scroll = true' \
     && ok "hyprland: a per-device override is written by name" \
     || bad "hyprland: a per-device override is written by name"
 
@@ -463,7 +468,7 @@ sed -n '/name = "fixture-mouse"/,/^})/p' "$H" | grep -q 'natural_scroll = true' 
 grep -q '<device category="Fixture Mouse">' "$RC" \
     && ok "labwc: a per-device override becomes a named device profile" \
     || bad "labwc: a per-device override becomes a named device profile"
-sed -n '/<device category="Fixture Mouse">/,/<\/device>/p' "$RC" | grep -q '<pointerSpeed>0.9</pointerSpeed>' \
+sed -n '/<device category="Fixture Mouse">/,/<\/device>/p' "$RC" | has '<pointerSpeed>0.9</pointerSpeed>' \
     && ok "labwc: the named profile carries the value in labwc's own words" \
     || bad "labwc: the named profile carries the value in labwc's own words"
 # Order is the argument: a name profile has to come after the category ones.
@@ -472,13 +477,13 @@ sed -n '/<device category="Fixture Mouse">/,/<\/device>/p' "$RC" | grep -q '<poi
     || bad "labwc: named profiles are written after the category profiles"
 
 # A tap setting on a trackpoint is a category error, not a typo.
-printf '%s\n' "$notes" | grep -q 'a trackpoint has no such setting' \
+printf '%s\n' "$notes" | has 'a trackpoint has no such setting' \
     && ok "a touchpad-only setting on a trackpoint is refused and named" \
     || bad "a touchpad-only setting on a trackpoint is refused and named"
 
 # And the whole thing still has to be a config the compositors accept.
 st="$(RIME_INPUT_DEVICES="$DEVFIX" python3 "$GEN" --self-test 2>&1)"
-printf '%s\n' "$st" | grep -q '^FAIL' \
+printf '%s\n' "$st" | has '^FAIL' \
     && bad "the per-device output is accepted by every installed compositor" \
     || ok "the per-device output is accepted by every installed compositor"
 
@@ -588,9 +593,9 @@ cat > "$h/.config/rime-shell/input.json" <<'JSON'
   "nonsense": { "whatever": 1 } }
 JSON
 notes="$(run_gen "$h" 2>&1)"
-printf '%s\n' "$notes" | grep -q 'must be between -1.0 and 1.0' \
+printf '%s\n' "$notes" | has 'must be between -1.0 and 1.0' \
     && ok "an out-of-range speed is clamped and reported" || bad "an out-of-range speed is clamped and reported"
-printf '%s\n' "$notes" | grep -q "accel_profile" \
+printf '%s\n' "$notes" | has "accel_profile" \
     && ok "an unknown accel profile is corrected and reported" || bad "an unknown accel profile is corrected and reported"
 grep -q '<accelProfile>adaptive</accelProfile>' "$h/.config/labwc/rc.xml" \
     && ok "the corrected value is what gets written" || bad "the corrected value is what gets written"
@@ -611,7 +616,7 @@ chmod 0755 "${WORK}/vetobin/niri"
 echo '{"touchpad":{"tap":false}}' > "$h/.config/rime-shell/input.json"
 out="$(HOME="$h" RIME_INPUT_DEVICES="$NODEV" PATH="${WORK}/vetobin:$PATH" \
        python3 "$GEN" --no-reload 2>&1)"
-printf '%s\n' "$out" | grep -q 'niri config was rejected' \
+printf '%s\n' "$out" | has 'niri config was rejected' \
     && ok "it says the niri half was refused" || bad "it says the niri half was refused"
 grep -q '<tap>no</tap>' "$h/.config/labwc/rc.xml" \
     && ok "labwc is still written when niri refuses" \
@@ -630,7 +635,7 @@ h="${WORK}/broken"; mkhome "$h"
 printf '<?xml version="1.0"?>\n<labwc_config><core>\n' > "$h/.config/labwc/rc.xml"
 cp "$h/.config/labwc/rc.xml" "${WORK}/broken.orig"
 echo '{}' > "$h/.config/rime-shell/input.json"
-run_gen "$h" 2>&1 | grep -q 'refusing to touch it' \
+run_gen "$h" 2>&1 | has 'refusing to touch it' \
     && ok "it refuses and says so" || bad "it refuses and says so"
 cmp -s "$h/.config/labwc/rc.xml" "${WORK}/broken.orig" \
     && ok "the broken file is left exactly as it was" || bad "the broken file is left exactly as it was"
@@ -768,7 +773,7 @@ PY
 )"
 [ -n "$gen_out" ] \
     && ok "rime-input-apply declares NIRI_OUT" || bad "rime-input-apply declares NIRI_OUT"
-printf '%s\n' "$inc_paths" | grep -qxF "${gen_out#.config/rime-shell/}" \
+printf '%s\n' "$inc_paths" | has -xF "${gen_out#.config/rime-shell/}" \
     && ok "the include path is exactly the file rime-input-apply writes" \
     || bad "the include path is exactly the file rime-input-apply writes (${gen_out})"
 
@@ -786,7 +791,7 @@ else
     if [ -z "$kdl_name" ]; then
         bad "KeybindService declares _kdlPath"
     else
-        printf '%s\n' "$inc_paths" | grep -qxF "$kdl_name" \
+        printf '%s\n' "$inc_paths" | has -xF "$kdl_name" \
             && ok "the include path is exactly the file the shell writes (${kdl_name})" \
             || bad "the include path is exactly the file the shell writes (${kdl_name})"
     fi
@@ -855,7 +860,7 @@ printf '%s\n' "$out" | sed 's/^/      /'
 # under `set -u`, so anything the provisioner assigns OUTSIDE the extracted
 # range kills it before the append and turns one defect into seven red lines
 # that each look like a different bug. This names it in one.
-printf '%s\n' "$out" | grep -q 'unbound variable' \
+printf '%s\n' "$out" | has 'unbound variable' \
     && bad "the block ran with everything it needs (nothing it uses is assigned outside the extracted range)" \
     || ok "the block ran with everything it needs (nothing it uses is assigned outside the extracted range)"
 
@@ -891,7 +896,7 @@ rm -f "$h/.config/rime-shell/RimeShellInput.kdl"
 NC="$h/.config/niri/config.kdl"
 sum="$(sha256sum < "$NC" | cut -d' ' -f1)"
 out="$(run_inc "$h" "${STUBBIN}:${PATH}")"
-printf '%s\n' "$out" | grep -q 'include targets are missing' \
+printf '%s\n' "$out" | has 'include targets are missing' \
     && ok "it refuses and says which way it refused" || bad "it refuses and says which way it refused"
 [ "$(sha256sum < "$NC" | cut -d' ' -f1)" = "$sum" ] \
     && ok "the config is left exactly as it was" || bad "the config is left exactly as it was"
@@ -901,7 +906,7 @@ h="${WORK}/niri-broken"; mkniri "$h"
 NC="$h/.config/niri/config.kdl"
 sum="$(sha256sum < "$NC" | cut -d' ' -f1)"
 out="$(STUB_NIRI_EXIT=1 run_inc "$h" "${STUBBIN}:${PATH}")"
-printf '%s\n' "$out" | grep -q 'refusing to touch it' \
+printf '%s\n' "$out" | has 'refusing to touch it' \
     && ok "it refuses and says so" || bad "it refuses and says so"
 [ "$(sha256sum < "$NC" | cut -d' ' -f1)" = "$sum" ] \
     && ok "a pre-broken config is left exactly as it was" \
@@ -924,7 +929,7 @@ exit 0
 STUB
 chmod 0755 "${STUBBIN}/niri"
 out="$(STUB_NIRI_COUNT="${WORK}/niri-count" run_inc "$h" "${STUBBIN}:${PATH}")"
-printf '%s\n' "$out" | grep -q 'restored the backup' \
+printf '%s\n' "$out" | has 'restored the backup' \
     && ok "it restores and says so" || bad "it restores and says so"
 [ "$(sha256sum < "$NC" | cut -d' ' -f1)" = "$sum" ] \
     && ok "the restored config is byte-identical to the original" \

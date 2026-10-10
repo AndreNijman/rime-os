@@ -41,6 +41,10 @@
 #  Run from anywhere: ./tests/test-rime-ai.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e`: this suite COUNTS failures, and most cases run commands that exit
 # non-zero on purpose. Under `bash -e {0}`, which is how GitHub Actions invokes
 # a script, the first of those would end the run and report nothing.
@@ -142,7 +146,7 @@ fi
 # non-zero status even when grep matched — which made this case fail while both
 # halves of it were true.
 out=$(ai nosuchverb)
-if [ "$(rc_of nosuchverb)" != "0" ] && printf '%s' "$out" | grep -qiE "unrecognized|error"; then
+if [ "$(rc_of nosuchverb)" != "0" ] && printf '%s' "$out" | pipe_has -iE "unrecognized|error"; then
     ok "a verb that does not exist is an error (so the cases below mean something)"
 else
     bad "a nonexistent verb errors" "$out"
@@ -156,28 +160,28 @@ if [ "$(rc_of serve --listen 127.0.0.1:11434)" != "0" ]; then
 else
     bad "--listen exits non-zero" "exit 0"
 fi
-if printf '%s' "$out" | grep -q "peer credential"; then
+if printf '%s' "$out" | pipe_has "peer credential"; then
     ok "the refusal gives the reason: a TCP connection carries no peer credential"
 else
     bad "the refusal names peer credentials" "$out"
 fi
-if printf '%s' "$out" | grep -q "SO_PEERCRED"; then
+if printf '%s' "$out" | pipe_has "SO_PEERCRED"; then
     ok "the refusal names the mechanism that does work"
 else
     bad "the refusal names SO_PEERCRED" "$out"
 fi
-if printf '%s' "$out" | grep -q "rime host"; then
+if printf '%s' "$out" | pipe_has "rime host"; then
     ok "the refusal points at the transport that does cross machines"
 else
     bad "the refusal points at rime host" "$out"
 fi
 # The absence assertion: no verb may advertise a TCP endpoint anywhere.
-if ai serve | grep -qE "127\.0\.0\.1:[0-9]+|0\.0\.0\.0:[0-9]+|localhost:[0-9]+"; then
+if ai serve | pipe_has -E "127\.0\.0\.1:[0-9]+|0\.0\.0\.0:[0-9]+|localhost:[0-9]+"; then
     bad "no verb advertises a TCP endpoint" "$(ai serve | head -3)"
 else
     ok "no verb advertises a TCP endpoint"
 fi
-if ai status | grep -q "\.sock"; then
+if ai status | pipe_has "\.sock"; then
     ok "status names a socket path as the endpoint"
 else
     bad "status names a socket path" "$(ai status | head -4)"
@@ -197,12 +201,12 @@ if [ "$(rc_of pull https://evil.example/model.gguf)" != "0" ]; then
 else
     bad "a bare URL is refused" "exit 0"
 fi
-if printf '%s' "$out" | grep -q "same bytes twice"; then
+if printf '%s' "$out" | pipe_has "same bytes twice"; then
     ok "the refusal explains what a self-served digest would prove"
 else
     bad "the refusal explains the digest argument" "$out"
 fi
-if printf '%s' "$out" | grep -q "catalogue"; then
+if printf '%s' "$out" | pipe_has "catalogue"; then
     ok "the refusal points at the catalogue shipped in the signed image"
 else
     bad "the refusal points at the catalogue" "$out"
@@ -227,8 +231,8 @@ RULE2="Ids are 1-96 characters"
 for badid in "../../etc/passwd" "a/b" ".hidden" "" "$(printf 'x%.0s' $(seq 1 200))"; do
     got=$(ai pull "$badid")
     if [ "$(rc_of pull "$badid")" != "0" ] \
-       && printf '%s' "$got" | grep -qF "$RULE" \
-       && printf '%s' "$got" | grep -qF "$RULE2"; then
+       && printf '%s' "$got" | pipe_has -F "$RULE" \
+       && printf '%s' "$got" | pipe_has -F "$RULE2"; then
         ok "model id $(printf '%.20s' "${badid:-(empty)}") is refused AS MALFORMED"
     else
         bad "model id ${badid:-(empty)} is refused as malformed" "$(printf '%.90s' "$got")"
@@ -243,7 +247,7 @@ else
     bad "an id starting with a dash is refused" "accepted"
 fi
 out=$(ai pull "../../etc/passwd")
-if printf '%s' "$out" | grep -q "Ids are 1-96 characters"; then
+if printf '%s' "$out" | pipe_has "Ids are 1-96 characters"; then
     ok "the id refusal states the rule rather than just saying invalid"
 else
     bad "the id refusal states the rule" "$out"
@@ -256,7 +260,7 @@ if [ "$(rc_of pull totally-unknown-model)" != "0" ]; then
 else
     bad "an unknown catalogue id is refused" "exit 0"
 fi
-if ! printf '%s' "$out" | grep -q "must start with a letter"; then
+if ! printf '%s' "$out" | pipe_has "must start with a letter"; then
     ok "an unknown id does not reuse the malformed-id message"
 else
     bad "unknown and malformed ids give different messages" "$out"
@@ -277,7 +281,7 @@ if [ "$(rc_of models)" = "0" ]; then
 else
     bad "listing an empty store is not an error" "exit $(rc_of models)"
 fi
-if printf '%s' "$out" | grep -q "rime ai models --available" && printf '%s' "$out" | grep -q "pull"; then
+if printf '%s' "$out" | pipe_has "rime ai models --available" && printf '%s' "$out" | pipe_has "pull"; then
     ok "an empty store names the two commands that change that"
 else
     bad "an empty store names the next commands" "$out"
@@ -288,7 +292,7 @@ else
     bad "models --json is valid JSON" "$(ai models --json | head -3)"
 fi
 avail=$(ai models --available)
-if printf '%s' "$avail" | grep -qE "[a-z0-9]"; then
+if printf '%s' "$avail" | pipe_has -E "[a-z0-9]"; then
     ok "--available reports what the image's catalogue offers"
 else
     bad "--available reports the catalogue" "$avail"
@@ -326,18 +330,18 @@ if [ "$(rc_of status)" = "0" ]; then
 else
     bad "status with no service is not an error" "exit $(rc_of status)"
 fi
-if printf '%s' "$out" | grep -qi "not running"; then
+if printf '%s' "$out" | pipe_has -i "not running"; then
     ok "status says the service is not running rather than implying it is"
 else
     bad "status reports the service state" "$out"
 fi
 # The install hint must name a real Rime mechanism, not invent a third one.
-if printf '%s' "$out" | grep -qE "rime install|rime env"; then
+if printf '%s' "$out" | pipe_has -E "rime install|rime env"; then
     ok "the runtime hint uses rime install or rime env, not a new mechanism"
 else
     bad "the runtime hint uses an existing mechanism" "$out"
 fi
-if printf '%s' "$out" | grep -qE "cpu"; then
+if printf '%s' "$out" | pipe_has -E "cpu"; then
     ok "status reports at least the cpu backend as available"
 else
     bad "status reports available backends" "$out"
@@ -351,7 +355,7 @@ fi
 # nvidia-smi would be a claim.
 if command -v nvidia-smi >/dev/null 2>&1; then
     ok "this machine has nvidia-smi, so cuda may legitimately be listed"
-elif ai status | grep -q "available.*cuda"; then
+elif ai status | pipe_has "available.*cuda"; then
     bad "cuda is not claimed without nvidia-smi" "$(ai status | grep available)"
 else
     ok "cuda is not claimed on a machine without nvidia-smi"
@@ -365,7 +369,7 @@ if [ "$(rc_of run)" != "0" ]; then
 else
     bad "no prompt is refused" "exit 0"
 fi
-if printf '%s' "$out" | grep -q "pipe it in" || printf '%s' "$out" | grep -q "|"; then
+if printf '%s' "$out" | pipe_has "pipe it in" || printf '%s' "$out" | pipe_has "|"; then
     ok "the refusal names both ways to give a prompt"
 else
     bad "the refusal names both ways to give a prompt" "$out"
@@ -374,18 +378,18 @@ fi
 # --explain must plan and generate nothing. With no runtime installed it must
 # still say something useful rather than failing obscurely.
 out=$(ai run --explain "hello")
-if printf '%s' "$out" | grep -qE "endpoint|Request"; then
+if printf '%s' "$out" | pipe_has -E "endpoint|Request"; then
     ok "--explain prints a plan"
 else
     bad "--explain prints a plan" "$out"
 fi
-if printf '%s' "$out" | grep -q "\.sock"; then
+if printf '%s' "$out" | pipe_has "\.sock"; then
     ok "the plan names the socket it would use"
 else
     bad "the plan names the endpoint" "$out"
 fi
 # A plan is not a generation: nothing may be produced.
-if printf '%s' "$out" | grep -qiE "^(assistant|answer):"; then
+if printf '%s' "$out" | pipe_has -iE "^(assistant|answer):"; then
     bad "--explain generates nothing" "it produced output that looks like a reply"
 else
     ok "--explain generates nothing"
@@ -394,7 +398,7 @@ fi
 # A piped prompt is accepted — the reason stdin must be redirected everywhere
 # else in this file.
 out=$(printf 'from a pipe\n' | "$RIME_BIN" ai run --explain 2>&1)
-if printf '%s' "$out" | grep -qE "endpoint|Request"; then
+if printf '%s' "$out" | pipe_has -E "endpoint|Request"; then
     ok "a piped prompt is accepted"
 else
     bad "a piped prompt is accepted" "$out"
@@ -414,7 +418,7 @@ else
     bad "the shared store was not touched" "IT CHANGED — see $STORE"
 fi
 # And the store path must be under /var, never /usr, which is read-only.
-if ai status | grep -q "/var/"; then
+if ai status | pipe_has "/var/"; then
     ok "the store lives under /var, not the read-only /usr"
 else
     bad "the store lives under /var" "$(ai status | grep -i store)"

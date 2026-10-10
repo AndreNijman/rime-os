@@ -30,6 +30,10 @@
 #
 # Skips cleanly (status 0) when labwc or Hyprland is missing.
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -169,7 +173,7 @@ else
     missing=""
     while read -r path; do
         [ -z "$path" ] && continue
-        if hc getoption "$path" | grep -qi 'no such option'; then
+        if hc getoption "$path" | pipe_has -i 'no such option'; then
             missing="${missing} ${path}"
         fi
     done <<EOF
