@@ -61,10 +61,10 @@ jobs:
           RELEASE: ${{ inputs.release }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$DIGEST" | grep -qE '^sha256:[0-9a-f]{64}$'; then
+          if ! printf '%s' "$DIGEST" | grep -E '^sha256:[0-9a-f]{64}$' >/dev/null; then
             echo "::error::'$DIGEST' is not a sha256 digest"; exit 1
           fi
-          if ! printf '%s' "$RELEASE" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if ! printf '%s' "$RELEASE" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' >/dev/null; then
             echo "::error::'$RELEASE' is not a release name like v2.1.0"; exit 1
           fi
 

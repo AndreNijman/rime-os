@@ -160,7 +160,7 @@ else
     # then errors on the compressed remainder; the listing is what we want and
     # the error is expected, so the exit status is deliberately not consulted
     # here. The postcondition is the grep below, not cpio's rc.
-    if cpio -t --quiet < "$INITRD" 2>/dev/null | grep -q '^kernel/x86/microcode/'; then
+    if cpio -t --quiet < "$INITRD" 2>/dev/null | grep '^kernel/x86/microcode/' >/dev/null; then
         UCODE_STATE="embedded-in-initrd"
     elif (( ALLOW_NO_UCODE )); then
         UCODE_STATE="absent-allowed"

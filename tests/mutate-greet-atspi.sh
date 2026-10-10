@@ -20,6 +20,10 @@
 #  integrity check.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 2
 
 SURFACE="files/desktop/rime-greet/GreetSurface.qml"
@@ -73,7 +77,7 @@ PY
     applied=$((applied + 1))
 
     local out; out="$(run_suite)"
-    if printf '%s' "$out" | grep -q "^FAIL  .*$want"; then
+    if printf '%s' "$out" | pipe_has "^FAIL  .*$want"; then
         printf '%-5s CAUGHT    %s\n' "$id" "$want"
         caught=$((caught + 1))
     else
@@ -88,7 +92,7 @@ PY
 echo "── baseline: the suite must be green before any mutant means anything ──"
 base="$(run_suite)"
 printf '%s\n' "$base" | grep -E '^rime-greet-atspi'
-if ! printf '%s' "$base" | grep -qE '^rime-greet-atspi: [0-9]+ passed, 0 failed'; then
+if ! printf '%s' "$base" | pipe_has -E '^rime-greet-atspi: [0-9]+ passed, 0 failed'; then
     echo "ABORT: the suite is not green to begin with" >&2
     printf '%s\n' "$base" | grep -E '^(FAIL|SKIP)' >&2
     exit 3

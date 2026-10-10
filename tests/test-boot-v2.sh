@@ -25,6 +25,10 @@
 #  exactly what such a PR changes.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WITH_BINARY=0
@@ -806,7 +810,7 @@ else
         && ok "forward control: a real 'if cmp -s' line is found by the scan" \
         || bad "forward control: the cmp scan does not match 'if cmp -s' — it proves nothing"
     printf '#!/bin/bash\n# the two varstores differ, so do not cmp them\necho hi\n' > "$TMP/mentions-cmp"
-    if grep -nE "$DIFFUTILS_RE" "$TMP/mentions-cmp" | grep -v '^[0-9]*:[[:space:]]*#' | grep -q .; then
+    if grep -nE "$DIFFUTILS_RE" "$TMP/mentions-cmp" | grep -v '^[0-9]*:[[:space:]]*#' | pipe_has .; then
         bad "inverse control: a comment mentioning cmp trips the scan (false red)"
     else
         ok "inverse control: a comment mentioning cmp does not trip the scan"

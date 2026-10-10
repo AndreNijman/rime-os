@@ -40,6 +40,10 @@
 #  see the volume it was given, which reads as a rime-vm defect.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -49,7 +53,7 @@ REPO="$(cd "$HERE/../.." && pwd)"
 OUT="${1:?usage: mk-guest OUT.cpio.gz}"
 
 BB="$(command -v busybox)" || die "busybox not found"
-file -b "$BB" | grep -q 'statically linked' \
+file -b "$BB" | pipe_has 'statically linked' \
     || die "$BB is not statically linked; this initramfs assumes it is"
 
 KVER="$(cat /etc/rime-bootlab-kver 2>/dev/null || true)"

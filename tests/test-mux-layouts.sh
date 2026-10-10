@@ -22,6 +22,10 @@
 #      ./tests/test-mux-layouts.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # Counted failures, not `set -e`: several assertions run commands that exit
 # non-zero on purpose, and under `bash -e {0}` on CI an assignment from one of
 # them kills the whole script part-way through.
@@ -107,21 +111,21 @@ sections_run=$((sections_run + 1))
 sh -n "$MUX" && ok "rime-mux parses" || bad "rime-mux parses"
 
 out="$("$MUX" nonsense 2>&1)"; rc=$?
-[ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'usage:' \
+[ "$rc" -eq 2 ] && printf '%s' "$out" | pipe_has 'usage:' \
     && ok "an unknown verb is a usage error" || bad "an unknown verb is a usage error"
 
 out="$("$MUX" has screen sess 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'not a multiplexer' \
+[ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has 'not a multiplexer' \
     && ok "a multiplexer it does not drive is named as such" \
     || bad "a multiplexer it does not drive is named as such"
 
 out="$("$MUX" build tmux sess sideways "$PLAN" 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'not an arrangement' \
+[ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has 'not an arrangement' \
     && ok "an arrangement it does not know is refused" \
     || bad "an arrangement it does not know is refused"
 
 out="$("$MUX" build tmux sess tiled "${WORK}/no-such-plan" 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q 'cannot read the plan' \
+[ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has 'cannot read the plan' \
     && ok "a missing plan file is reported, not treated as empty" \
     || bad "a missing plan file is reported, not treated as empty"
 
@@ -169,7 +173,7 @@ else
 
     # A pane whose command finishes must not close: the layout's whole value is
     # that the shape stays where it was put.
-    tmux show-options -t "$S:0" remain-on-exit 2>/dev/null | grep -q 'on' \
+    tmux show-options -t "$S:0" remain-on-exit 2>/dev/null | pipe_has 'on' \
         && ok "a finished command leaves the pane in place" \
         || bad "a finished command leaves the pane in place"
 
@@ -177,7 +181,7 @@ else
     # describes the geometry, so this is checked against the geometry rather
     # than against the command that was issued.
     lay="$(tmux display-message -p -t "$S:0" '#{window_layout}')"
-    printf '%s' "$lay" | grep -q '\[' \
+    printf '%s' "$lay" | pipe_has '\[' \
         && ok "the arrangement really splits the window" \
         || { bad "the arrangement really splits the window"; printf '      %s\n' "$lay"; }
 
@@ -266,7 +270,7 @@ else
     }
 
     dump="$(zdump "$Z")"
-    printf '%s' "$dump" | grep -q 'tab name="rime"' \
+    printf '%s' "$dump" | pipe_has 'tab name="rime"' \
         && ok "the layout landed as a tab zellij can describe" \
         || { if [ "$zenv_bad" = 1 ]; then
                  skipped "the layout landed as a tab zellij can describe" \
@@ -316,14 +320,14 @@ else
     # before zellij ever tries to take over the tty.
     for arr in main-vertical tiled; do
         kdl="$("$MUX" kdl "$arr" "$PLAN")"
-        printf '%s' "$kdl" | grep -q 'tab name="rime"' \
+        printf '%s' "$kdl" | pipe_has 'tab name="rime"' \
             && ok "the ${arr} layout is generated" || bad "the ${arr} layout is generated"
         # Handed straight back to zellij's own parser. No terminal is needed:
         # zellij parses the layout before it tries to take over the tty, so a
         # bad one says "Failed to parse" and a good one gets as far as the
         # terminal it does not have.
         out="$(timeout 30 zellij --layout-string "$kdl" 2>&1 </dev/null)"
-        printf '%s' "$out" | grep -q 'Failed to parse' \
+        printf '%s' "$out" | pipe_has 'Failed to parse' \
             && { bad "zellij accepts the ${arr} layout"; printf '%s' "$out" | head -4 | sed 's/^/      /'; } \
             || ok "zellij accepts the ${arr} layout"
     done
@@ -343,23 +347,23 @@ else
 
     out="$(cd "$PROJ" && "$Rime" project layout templates 2>&1)"
     for t in dev review agents; do
-        printf '%s' "$out" | grep -q "^${t} " \
+        printf '%s' "$out" | pipe_has "^${t} " \
             && ok "the ${t} template is listed" || bad "the ${t} template is listed"
     done
 
     out="$(cd "$PROJ" && "$Rime" project layout open --mux tmux --dry-run 2>&1)"
-    printf '%s' "$out" | grep -q 'editor *rimeed' \
+    printf '%s' "$out" | pipe_has 'editor *rimeed' \
         && ok "dev opens the editor from \$VISUAL" \
         || { bad "dev opens the editor from \$VISUAL"; printf '      %s\n' "$out"; }
-    printf '%s' "$out" | grep -q 'agent *rime agent run' \
+    printf '%s' "$out" | pipe_has 'agent *rime agent run' \
         && ok "with no runtime reachable, the agent pane starts a session" \
         || bad "with no runtime reachable, the agent pane starts a session"
-    printf '%s' "$out" | grep -q 'terminal *<shell>' \
+    printf '%s' "$out" | pipe_has 'terminal *<shell>' \
         && ok "the terminal pane runs the shell rather than a named one" \
         || bad "the terminal pane runs the shell rather than a named one"
 
     out="$(cd "$PROJ" && "$Rime" project layout open review --mux tmux --dry-run 2>&1)"
-    printf '%s' "$out" | grep -q 'diff *rime agent diff' \
+    printf '%s' "$out" | pipe_has 'diff *rime agent diff' \
         && ok "review points its third pane at the diff" || bad "review points its third pane at the diff"
 
     out="$(cd "$PROJ" && "$Rime" project layout open agents --mux tmux --agents 3 --dry-run 2>&1)"
@@ -373,17 +377,17 @@ else
         || bad "the agent count is bounded rather than obeyed"
 
     out="$(cd "$PROJ" && "$Rime" project layout open nope --mux tmux --dry-run 2>&1)"
-    printf '%s' "$out" | grep -q 'no template called nope' \
+    printf '%s' "$out" | pipe_has 'no template called nope' \
         && ok "an unknown template names the command that lists them" \
         || bad "an unknown template names the command that lists them"
 
     out="$(cd "$PROJ" && "$Rime" project layout open --mux screen --dry-run 2>&1)"
-    printf '%s' "$out" | grep -q 'not a multiplexer' \
+    printf '%s' "$out" | pipe_has 'not a multiplexer' \
         && ok "a multiplexer Rime does not drive is refused" \
         || bad "a multiplexer Rime does not drive is refused"
 
     out="$(cd "${WORK}" && "$Rime" project layout open --dry-run 2>&1)"
-    printf '%s' "$out" | grep -q 'not inside a git repository' \
+    printf '%s' "$out" | pipe_has 'not inside a git repository' \
         && ok "outside a project it says so" || bad "outside a project it says so"
 
     # A dry run starts nothing at all.
@@ -411,19 +415,19 @@ else
         # The template is remembered on the project's ONE layout record, so
         # reopening needs no argument — and `layout show` reports it.
         out="$(cd "$PROJ" && "$Rime" project layout show 2>&1)"
-        printf '%s' "$out" | grep -q 'terminal template: dev in tmux' \
+        printf '%s' "$out" | pipe_has 'terminal template: dev in tmux' \
             && ok "the template is remembered on the project's layout record" \
             || { bad "the template is remembered on the project's layout record"; printf '      %s\n' "$out"; }
 
         out="$(cd "$PROJ" && "$Rime" project layout open </dev/null 2>&1)"
-        printf '%s' "$out" | grep -q 'is already open — attaching' \
+        printf '%s' "$out" | pipe_has 'is already open — attaching' \
             && ok "reopening attaches instead of rebuilding" \
             || { bad "reopening attaches instead of rebuilding"; printf '      %s\n' "$out"; }
 
         # A record with a template and no captured windows is not "restore
         # nothing and call it success".
         out="$(cd "$PROJ" && "$Rime" project layout restore --dry-run 2>&1)"
-        printf '%s' "$out" | grep -q 'no windows are saved' \
+        printf '%s' "$out" | pipe_has 'no windows are saved' \
             && ok "restoring a template-only record explains what is missing" \
             || { bad "restoring a template-only record explains what is missing"; printf '      %s\n' "$out"; }
 

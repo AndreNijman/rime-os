@@ -22,6 +22,10 @@
 #      ./tests/test-secret-migrate.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -212,28 +216,28 @@ ok "the old broker's store has one file credential, one keyring record and two g
 section "a dry run says what it would do and writes nothing"
 out="$(cd "$PROJ" && "$Rime" secret migrate --dry-run 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      | /'
-printf '%s' "$out" | grep -q "would  store github" \
+printf '%s' "$out" | pipe_has "would  store github" \
     && ok "the dry run found the PAT in settings.json" \
     || bad "the dry run found the PAT in settings.json"
-printf '%s' "$out" | grep -q "would  store fixture-memory" \
+printf '%s' "$out" | pipe_has "would  store fixture-memory" \
     && ok "the dry run found the MCP bearer token" \
     || bad "the dry run found the MCP bearer token"
-printf '%s' "$out" | grep -q "hands a credential to a program it spawns" \
+printf '%s' "$out" | pipe_has "hands a credential to a program it spawns" \
     && ok "the dry run named the stdio server it cannot help with" \
     || bad "the dry run named the stdio server it cannot help with"
-printf '%s' "$out" | grep -q "would  store legacy-git" \
+printf '%s' "$out" | pipe_has "would  store legacy-git" \
     && ok "the dry run found the old broker's file credential" \
     || bad "the dry run found the old broker's file credential"
-printf '%s' "$out" | grep -q "legacy-keyring.json holds no value" \
+printf '%s' "$out" | pipe_has "legacy-keyring.json holds no value" \
     && ok "the dry run named the keyring record it cannot read" \
     || bad "the dry run named the keyring record it cannot read"
-printf '%s' "$out" | grep -q "ACME_API_KEY .*nothing here knows which host" \
+printf '%s' "$out" | pipe_has "ACME_API_KEY .*nothing here knows which host" \
     && ok "a credential whose host nobody can work out is named, not guessed at" \
     || bad "a credential whose host nobody can work out is named, not guessed at"
 grep -q "$FAKE_PAT" "${HOME}/.claude/settings.json" \
     && ok "the dry run wrote nothing to settings.json" \
     || bad "the dry run changed settings.json"
-"$Rime" secret list --json 2>/dev/null | grep -q "fixture-memory" \
+"$Rime" secret list --json 2>/dev/null | pipe_has "fixture-memory" \
     && bad "the dry run stored something" \
     || ok "the dry run stored nothing"
 
@@ -245,11 +249,11 @@ printf '%s\n' "$out" | sed 's/^/      | /'
 # Both credentials are stored, whatever happened to the originals: store comes
 # first, and it is the step that must never be skipped.
 list="$("$Rime" secret list --json 2>/dev/null)"
-printf '%s' "$list" | grep -q '"fixture-memory"' \
+printf '%s' "$list" | pipe_has '"fixture-memory"' \
     && ok "the MCP credential is in the store" || bad "the MCP credential is in the store"
-printf '%s' "$list" | grep -q '"github"' \
+printf '%s' "$list" | pipe_has '"github"' \
     && ok "the GitHub credential is in the store" || bad "the GitHub credential is in the store"
-printf '%s' "$list" | grep -q "$FAKE_BEARER\|$FAKE_PAT" \
+printf '%s' "$list" | pipe_has "$FAKE_BEARER\|$FAKE_PAT" \
     && bad "rime secret list printed a credential" \
     || ok "rime secret list printed neither credential"
 
@@ -264,7 +268,7 @@ grep -q "$FAKE_BEARER" "${HOME}/.claude.json" \
 # store, and the fixture project's origin is the fixture server. So it is the
 # one credential here that goes all the way through store, verify and remove in
 # a single pass — which is what an upgraded machine's leftovers should do.
-printf '%s' "$out" | grep -q "grant(s) from the old broker" \
+printf '%s' "$out" | pipe_has "grant(s) from the old broker" \
     && ok "the old broker's grants were carried across" \
     || bad "the old broker's grants were carried across"
 # `git.ls-remote`, not the `git-ls-remote` the fixture above wrote. The old
@@ -272,7 +276,7 @@ printf '%s' "$out" | grep -q "grant(s) from the old broker" \
 # P1-001's registry canonicalises an old spelling as it goes in — so this
 # asserts the stronger thing the migration actually does: it arrives, and it
 # arrives spelled the one way the trail and the grant table use from now on.
-"$Rime" secret grants 2>/dev/null | grep -q "legacy-git:git.ls-remote" \
+"$Rime" secret grants 2>/dev/null | pipe_has "legacy-git:git.ls-remote" \
     && ok "and the secret service now holds them, under the canonical name" \
     || { bad "and the secret service now holds them, under the canonical name"; "$Rime" secret grants; }
 grep -q "Basic" "${WORK}/seen" \
@@ -330,7 +334,7 @@ grep -q "$FAKE_PAT" "${HOME}/.claude/settings.json" \
 # ── idempotence ──────────────────────────────────────────────────────────────
 section "running it again changes nothing"
 out="$(cd "$PROJ" && "$Rime" secret migrate 2>&1)"
-printf '%s' "$out" | grep -q "fixture-memory" \
+printf '%s' "$out" | pipe_has "fixture-memory" \
     && bad "a migrated credential was found again" \
     || ok "a migrated credential is not found a second time"
 python3 - "${HOME}/.claude.json" <<'PY' > "${WORK}/mcp2.out" 2>&1

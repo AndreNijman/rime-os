@@ -18,6 +18,10 @@
 #      ./tests/test-shell-agent.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` is deliberate. This suite COUNTS failures rather than aborting, and
 # several assertions run commands that exit non-zero on purpose — a guard
 # firing, a usage error, a completion with the runtime down. GitHub Actions
@@ -292,7 +296,7 @@ else
     out="$(fishrun "$PROJ" -- 'for f in a aa al ad aw ap
     functions -q $f; and echo "have $f"; or echo "MISSING $f"
 end')"
-    if ! printf '%s' "$out" | grep -q MISSING; then
+    if ! printf '%s' "$out" | pipe_has MISSING; then
         ok "fish defines all six shortcuts"
     else
         bad "fish defines all six shortcuts"; printf '      %s\n' "$out"
@@ -312,7 +316,7 @@ end')"
 
     : > "$CALLS"
     out="$(fishrun "$PROJ" -- 'aw')"
-    printf '%s' "$out" | grep -q 'usage: aw <worktree-name>' \
+    printf '%s' "$out" | pipe_has 'usage: aw <worktree-name>' \
         && ok "fish \`aw\` with no worktree explains itself" \
         || { bad "fish \`aw\` with no worktree explains itself"; printf '      %s\n' "$out"; }
 
@@ -351,25 +355,25 @@ end')"
     # ── the opt-out ──────────────────────────────────────────────────────────
     out="$(fishrun "$PROJ" RIME_NO_AGENT_ALIASES=1 -- 'functions -q a; and echo BAD; or echo gone
 functions -q rime_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
-    printf '%s' "$out" | grep -q '^gone$' && printf '%s' "$out" | grep -q 'prompt-kept' \
+    printf '%s' "$out" | pipe_has '^gone$' && printf '%s' "$out" | pipe_has 'prompt-kept' \
         && ok "RIME_NO_AGENT_ALIASES drops the shortcuts and keeps the prompt" \
         || { bad "RIME_NO_AGENT_ALIASES drops the shortcuts and keeps the prompt"; printf '      %s\n' "$out"; }
 
     # …and under its pre-rename name (rime-rename: keep — what users already set).
     out="$(fishrun "$PROJ" APEX_NO_AGENT_ALIASES=1 -- 'functions -q a; and echo BAD; or echo gone')"
-    printf '%s' "$out" | grep -q '^gone$' \
+    printf '%s' "$out" | pipe_has '^gone$' \
         && ok "APEX_NO_AGENT_ALIASES, the pre-rename name, drops them too" \
         || { bad "APEX_NO_AGENT_ALIASES, the pre-rename name, drops them too"; printf '      %s\n' "$out"; }
 
     out="$(fishrun "$PROJ" RIME_NO_AGENT_ALIASES=1 -- 'complete -C "rime agent attach "')"
-    printf '%s' "$out" | grep -q '^4' \
+    printf '%s' "$out" | pipe_has '^4' \
         && ok "completion survives the opt-out" || bad "completion survives the opt-out"
 
     # ── no rime installed ────────────────────────────────────────────────────
     out="$( (cd "$PROJ" && env -i PATH="$NORIME" HOME="${WORK}/home" XDG_DATA_HOME="$FD" \
         XDG_CONFIG_HOME="${WORK}/fishcfg" "${NORIME}/fish" -c \
         'functions -q a; and echo BAD; or echo none; echo alive' 2>&1) )"
-    printf '%s' "$out" | grep -q '^none$' && printf '%s' "$out" | grep -q '^alive$' \
+    printf '%s' "$out" | pipe_has '^none$' && printf '%s' "$out" | pipe_has '^alive$' \
         && ok "a machine with no rime gets no shortcuts and a working shell" \
         || { bad "a machine with no rime gets no shortcuts and a working shell"; printf '      %s\n' "$out"; }
 
@@ -377,7 +381,7 @@ functions -q rime_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
     # Both fish itself and a user who copied the file into ~/.config/fish/conf.d
     # can source it. The second must be a no-op, not a redefinition.
     out="$(fishrun "$PROJ" -- "source '${FISH_CONF}'; echo sourced-twice-ok; functions -q a; and echo still-have-a")"
-    printf '%s' "$out" | grep -q 'sourced-twice-ok' && printf '%s' "$out" | grep -q 'still-have-a' \
+    printf '%s' "$out" | pipe_has 'sourced-twice-ok' && printf '%s' "$out" | pipe_has 'still-have-a' \
         && ok "sourcing the fish file twice is harmless" \
         || { bad "sourcing the fish file twice is harmless"; printf '      %s\n' "$out"; }
 
@@ -422,54 +426,54 @@ functions -q rime_agent_prompt; and echo prompt-kept; or echo BAD-PROMPT')"
     # ── completion ───────────────────────────────────────────────────────────
     comp() { fishrun "$PROJ" -- "complete -C \"$1\""; }
 
-    printf '%s' "$(comp 'rime ')" | grep -q '^agent' \
+    printf '%s' "$(comp 'rime ')" | pipe_has '^agent' \
         && ok "completion offers the top-level verbs" || bad "completion offers the top-level verbs"
-    printf '%s' "$(comp 'rime agent ')" | grep -q '^attach' \
+    printf '%s' "$(comp 'rime agent ')" | pipe_has '^attach' \
         && ok "completion offers the agent verbs" || bad "completion offers the agent verbs"
     out="$(comp 'rime agent attach ')"
-    printf '%s' "$out" | grep -q '^4' && printf '%s' "$out" | grep -q '^7' \
+    printf '%s' "$out" | pipe_has '^4' && printf '%s' "$out" | pipe_has '^7' \
         && ok "completion offers session ids, exited ones included" \
         || { bad "completion offers session ids, exited ones included"; printf '      %s\n' "$out"; }
-    printf '%s' "$(comp 'rime agent default ')" | grep -q '^claude' \
+    printf '%s' "$(comp 'rime agent default ')" | pipe_has '^claude' \
         && ok "completion offers agent names with the default marker stripped" \
         || bad "completion offers agent names with the default marker stripped"
-    printf '%s' "$(comp 'rime request ask ')" | grep -q 'pkg.install' \
+    printf '%s' "$(comp 'rime request ask ')" | pipe_has 'pkg.install' \
         && ok "completion asks the CLI for the requestable verbs" \
         || bad "completion asks the CLI for the requestable verbs"
-    printf '%s' "$(comp 'rime secret grant ')" | grep -q '^github' \
+    printf '%s' "$(comp 'rime secret grant ')" | pipe_has '^github' \
         && ok "completion asks the CLI for the stored services" \
         || bad "completion asks the CLI for the stored services"
-    printf '%s' "$(comp 'rime secret grant github ')" | grep -q 'repo.read' \
+    printf '%s' "$(comp 'rime secret grant github ')" | pipe_has 'repo.read' \
         && ok "completion asks the CLI for the capability vocabulary" \
         || bad "completion asks the CLI for the capability vocabulary"
-    printf '%s' "$(comp 'rime project layout ')" | grep -q '^restore' \
+    printf '%s' "$(comp 'rime project layout ')" | pipe_has '^restore' \
         && ok "completion offers the layout verbs" || bad "completion offers the layout verbs"
-    printf '%s' "$(comp 'rime project layout ')" | grep -q '^templates' \
+    printf '%s' "$(comp 'rime project layout ')" | pipe_has '^templates' \
         && ok "completion offers the template verbs" || bad "completion offers the template verbs"
-    printf '%s' "$(comp 'rime project layout open ')" | grep -q '^dev' \
+    printf '%s' "$(comp 'rime project layout open ')" | pipe_has '^dev' \
         && ok "completion asks the CLI for the layout templates" \
         || bad "completion asks the CLI for the layout templates"
-    printf '%s' "$(comp 'aa ')" | grep -q '^4' \
+    printf '%s' "$(comp 'aa ')" | pipe_has '^4' \
         && ok "the aa shortcut completes session ids" || bad "the aa shortcut completes session ids"
-    printf '%s' "$(comp 'ad ')" | grep -q '^4' \
+    printf '%s' "$(comp 'ad ')" | pipe_has '^4' \
         && ok "the ad shortcut completes session ids" || bad "the ad shortcut completes session ids"
-    printf '%s' "$(comp 'a --agent ')" | grep -q '^claude' \
+    printf '%s' "$(comp 'a --agent ')" | pipe_has '^claude' \
         && ok "the a shortcut completes agent names" || bad "the a shortcut completes agent names"
-    printf '%s' "$(comp 'a -')" | grep -q -- '^--name' \
+    printf '%s' "$(comp 'a -')" | pipe_has -- '^--name' \
         && ok "the a shortcut offers --name" || bad "the a shortcut offers --name"
-    printf '%s' "$(comp 'rime agent ')" | grep -q '^rename' \
+    printf '%s' "$(comp 'rime agent ')" | pipe_has '^rename' \
         && ok "completion offers the rename verb" || bad "completion offers the rename verb"
-    printf '%s' "$(comp 'rime agent rename ')" | grep -q '^4' \
+    printf '%s' "$(comp 'rime agent rename ')" | pipe_has '^4' \
         && ok "rename completes session ids" || bad "rename completes session ids"
-    printf '%s' "$(comp 'rime agent rename 4 --')" | grep -q -- '^--clear' \
+    printf '%s' "$(comp 'rime agent rename 4 --')" | pipe_has -- '^--clear' \
         && ok "rename offers --clear" || bad "rename offers --clear"
-    printf '%s' "$(comp 'ap layout ')" | grep -q '^restore' \
+    printf '%s' "$(comp 'ap layout ')" | pipe_has '^restore' \
         && ok "the ap shortcut completes layout verbs" || bad "the ap shortcut completes layout verbs"
 
     # `list` is a verb under agent, project, request AND secret. A completion
     # that matched on "the word list was typed" would fire in all four.
     out="$(comp 'rime project ')"
-    printf '%s' "$out" | grep -q '^worktrees' && ! printf '%s' "$out" | grep -q '^adapters' \
+    printf '%s' "$out" | pipe_has '^worktrees' && ! printf '%s' "$out" | pipe_has '^adapters' \
         && ok "the project verbs do not leak the agent verbs" \
         || { bad "the project verbs do not leak the agent verbs"; printf '      %s\n' "$out"; }
 
@@ -522,7 +526,7 @@ $1" 2>&1)
     # the check that would pass on the day nushell changes it.
     out="$(env -i PATH="/usr/bin:/bin:${SHELLS}" HOME="${WORK}/home" nu -n -c \
         '$nu.vendor-autoload-dirs | to text' 2>&1)"
-    printf '%s' "$out" | grep -qx '/usr/share/nushell/vendor/autoload' \
+    printf '%s' "$out" | pipe_has -x '/usr/share/nushell/vendor/autoload' \
         && ok "nushell reads the directory the image installs into" \
         || { bad "nushell reads the directory the image installs into"; printf '      %s\n' "$out"; }
 
@@ -581,7 +585,7 @@ $1" 2>&1)
         || { bad "nushell's rename extern passes the name through"; sed 's/^/      /' "$CALLS"; }
 
     out="$(nurun "$PROJ" -- 'aw')"
-    printf '%s' "$out" | grep -q 'usage: aw <worktree-name>' \
+    printf '%s' "$out" | pipe_has 'usage: aw <worktree-name>' \
         && ok "nushell \`aw\` with no worktree explains itself" \
         || { bad "nushell \`aw\` with no worktree explains itself"; printf '      %s\n' "$out"; }
 
@@ -648,7 +652,7 @@ $1" 2>&1)
     [ "$(nucomp 'nu-complete rime templates')" = "dev agents" ] \
         && ok "nushell asks the CLI for the layout templates" \
         || bad "nushell asks the CLI for the layout templates (got '$(nucomp 'nu-complete rime templates')')"
-    printf '%s' "$(nucomp 'nu-complete rime layout')" | grep -q 'templates' \
+    printf '%s' "$(nucomp 'nu-complete rime layout')" | pipe_has 'templates' \
         && ok "nushell offers the new layout verbs" || bad "nushell offers the new layout verbs"
 
     # ── the runtime is down ──────────────────────────────────────────────────
@@ -709,9 +713,9 @@ PY
         XDG_DATA_HOME="$ND" XDG_CONFIG_HOME="${WORK}/nucfg" XDG_CACHE_HOME="${WORK}/nucache" \
         XDG_STATE_HOME="$STATE" TERM=xterm \
         python3 "${WORK}/replrun.py" nu --no-history 2>&1 | tr -d '\r') )"
-    if printf '%s' "$repl" | grep -q 'AUTOLOAD-string'; then
+    if printf '%s' "$repl" | pipe_has 'AUTOLOAD-string'; then
         ok "a real nushell REPL autoloads the file from the vendor directory"
-    elif printf '%s' "$repl" | grep -qi 'not found'; then
+    elif printf '%s' "$repl" | pipe_has -i 'not found'; then
         bad "a real nushell REPL autoloads the file from the vendor directory"
         printf '%s' "$repl" | tail -5 | sed 's/^/      /'
     else

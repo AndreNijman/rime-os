@@ -26,6 +26,10 @@
 #  Run from anywhere: ./tests/test-rime-multilib.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 2
 
 ENGINE=files/system/libexec/rime-pkg
@@ -79,7 +83,7 @@ out=$(podman run --rm --privileged \
         -v "$PWD":/repo:ro,Z -v "$PROBE":/probe.sh:ro,Z \
         "$IMAGE" bash /probe.sh 2>&1)
 
-if printf '%s\n' "$out" | grep -q PROBE_SKIP; then
+if printf '%s\n' "$out" | pipe_has PROBE_SKIP; then
     echo "SKIP  $(printf '%s\n' "$out" | grep PROBE_SKIP | sed 's/PROBE_SKIP //')"
     exit 0
 fi
@@ -95,9 +99,9 @@ printf '%s\n' "$decisions" | sed 's/^/      /' | head -8
 # The defect that made every 32-bit application uninstallable: REFUSE_RE
 # protects core names so an extension cannot shadow the image's copy, and a
 # 32-bit sibling shadows nothing, because the image ships no i686 at all.
-if printf '%s\n' "$decisions" | grep -q "allowing 'glibc-.*\.i686'"; then
+if printf '%s\n' "$decisions" | pipe_has "allowing 'glibc-.*\.i686'"; then
     ok "a 32-bit sibling of a protected package is allowed through"
-elif printf '%s\n' "$decisions" | grep -q "refusing 'glibc'"; then
+elif printf '%s\n' "$decisions" | pipe_has "refusing 'glibc'"; then
     bad "glibc.i686 refused as a core package, so no 32-bit application can install"
 else
     # Not a SKIP. `fontconfig` requires glibc and the download asked for i686,
@@ -110,7 +114,7 @@ fi
 # The defect that silently deleted the libraries: the installed-check asked
 # `rpm -q <name>` with no architecture, so on multilib it answered with the
 # x86_64 build and every i686 library was dropped as already present.
-if printf '%s\n' "$decisions" | grep -qE "skipping '[^']*\.i686'.*"; then
+if printf '%s\n' "$decisions" | pipe_has -E "skipping '[^']*\.i686'.*"; then
     bad "an i686 build was dropped as already provided by the image"
 else
     ok "no i686 build was mistaken for one the image already ships"
@@ -119,9 +123,9 @@ fi
 # The fix must not become "install everything": a native build the image
 # already ships at the same version must still be skipped, or the overlay
 # shadows the image from the other direction.
-if ! printf '%s\n' "$out" | grep -q 'PROBE_NATIVE ok'; then
+if ! printf '%s\n' "$out" | pipe_has 'PROBE_NATIVE ok'; then
     bad "the set could not be given a native build the image already has, so this decision was never exercised"
-elif printf '%s\n' "$decisions" | grep -qE "(skipping|omitting) '[^']*\.(x86_64|noarch)'"; then
+elif printf '%s\n' "$decisions" | pipe_has -E "(skipping|omitting) '[^']*\.(x86_64|noarch)'"; then
     ok "a native build the image already provides is still left out"
 else
     bad "a native build the image already ships was carried into the overlay, which shadows the image from the other direction"

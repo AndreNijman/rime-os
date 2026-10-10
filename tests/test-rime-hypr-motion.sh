@@ -36,6 +36,10 @@
 # Each half is mutated to prove it can fail. The verify half skips with status 0
 # where Hyprland is missing (CI); the static half runs everywhere.
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/.." && pwd)"
@@ -189,7 +193,7 @@ if old not in s: sys.exit(3)
 open(p, "w").write(s.replace(old, new, 1))
 PY
     then bad "self-test $1: the mutation did not apply"; return; fi
-    if static_verdicts "$MW/a.lua" | grep -q "^$4 FAIL"; then ok "self-test $1: caught"
+    if static_verdicts "$MW/a.lua" | pipe_has "^$4 FAIL"; then ok "self-test $1: caught"
     else bad "self-test $1: SURVIVED"; fi
 }
 mutant "a curve drifting from its token" '{ { 0.25, 0.2 }, { 0.15, 1.0 } }' '{ { 0.25, 0.2 }, { 0.2, 1.0 } }' CURVES

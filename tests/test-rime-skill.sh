@@ -45,6 +45,10 @@
 #  write over the real store of whoever ran it.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WITH_BINARY=0
@@ -147,7 +151,7 @@ for f in "$SKILLRS" "$PROVRS"; do
     fi
 done
 for f in "$SKILLRS" "$PROVRS" "$DIGESTRS"; do
-    if code "$f" | grep -qE 'read_dir\([^)]*\)[[:space:]]*\.ok\(\)|\.flatten\(\)'; then
+    if code "$f" | pipe_has -E 'read_dir\([^)]*\)[[:space:]]*\.ok\(\)|\.flatten\(\)'; then
         bad "$(basename "$f") drops a directory-read refusal (read_dir().ok() or .flatten())"
     else
         ok "$(basename "$f") keeps every directory-read refusal"

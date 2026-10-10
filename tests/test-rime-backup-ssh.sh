@@ -43,6 +43,10 @@
 #      ./tests/test-rime-backup-ssh.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -243,12 +247,12 @@ if [ $? -eq 0 ]; then
     bad "a host outside the bound group is refused"
 else
     ok "a host outside the bound group is refused"
-    printf '%s' "$out" | grep -q "localhost" \
+    printf '%s' "$out" | pipe_has "localhost" \
         && ok "the refusal names the host that was asked for" \
         || { bad "the refusal names the host that was asked for"; printf '      %s\n' "$out"; }
-    printf '%s' "$out" | grep -q "fixture" \
+    printf '%s' "$out" | pipe_has "fixture" \
         && ok "and the group the project binds" || bad "and the group the project binds"
-    printf '%s' "$out" | grep -q "rime.toml" \
+    printf '%s' "$out" | pipe_has "rime.toml" \
         && ok "and where to change it" || bad "and where to change it"
 fi
 # Nothing reached the far side: the refusal is at configuration time.
@@ -348,7 +352,7 @@ if [ "$restore_rc" -eq 0 ]; then
         # rime.toml and the key directory are not part of the compare in the
         # local suite either; show what differed so a real regression is
         # readable rather than a wall.
-        if grep -vE 'rime\.toml' "${WORK}/diff.txt" | grep -q .; then
+        if grep -vE 'rime\.toml' "${WORK}/diff.txt" | pipe_has .; then
             bad "the restored tree is identical to the original, byte for byte"
             head -20 "${WORK}/diff.txt"
         else
@@ -403,7 +407,7 @@ if [ $? -eq 0 ]; then
 else
     ok "a host key that is not the pinned one refuses"
     # And it is CouldNotRun — never "there are no backups".
-    printf '%s' "$out" | grep -qiE "could not|host key|verification" \
+    printf '%s' "$out" | pipe_has -iE "could not|host key|verification" \
         && ok "and says the far side was not reached, not that there are no backups" \
         || { bad "and says the far side was not reached, not that there are no backups"
              printf '      %s\n' "$out"; }
@@ -425,7 +429,7 @@ if [ $? -eq 0 ]; then
     printf '      %s\n' "$out"
 else
     ok "a listing with the far side down is never an empty history"
-    printf '%s' "$out" | grep -qi "did not reach" \
+    printf '%s' "$out" | pipe_has -i "did not reach" \
         && ok "and names the connection as the thing that failed" \
         || { bad "and names the connection as the thing that failed"
              printf '      %s\n' "$out"; }

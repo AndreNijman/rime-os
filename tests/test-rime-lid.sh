@@ -42,6 +42,10 @@
 #  not pass quietly.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # +e deliberately, as every suite here: under -e an assignment from a command
 # that exits non-zero ends the run silently, mid-section. This suite COUNTS.
 set +e
@@ -733,13 +737,13 @@ lid_stanza="$(awk '/^# ── Lid-closed continuous operation/,/^# ── What i
 # span) would produce that lie with no FAIL beside it.
 if [ -n "$lid_stanza" ]; then
     ok "the lid stanza was found in Containerfile.base"
-    if printf '%s' "$lid_stanza" | grep -q '^ *! *grep'; then
+    if printf '%s' "$lid_stanza" | pipe_has '^ *! *grep'; then
         bad "no refusal in the lid build stanza is written as '! grep'" \
             "$(printf '%s' "$lid_stanza" | grep -n '^ *! *grep' | head -3)"
     else
         ok "no refusal in the lid build stanza is written as '! grep'"
     fi
-    printf '%s' "$lid_stanza" | grep -q 'echo "FATAL' \
+    printf '%s' "$lid_stanza" | pipe_has 'echo "FATAL' \
         && ok "its refusals say FATAL and exit 1, which does fail a build" \
         || bad "its refusals say FATAL and exit 1, which does fail a build"
 else

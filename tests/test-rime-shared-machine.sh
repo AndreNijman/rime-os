@@ -40,6 +40,10 @@
 #      ./tests/test-rime-shared-machine.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # +e deliberately, like every other suite here: CI invokes a suite as
 # `bash -e {0}`, and under -e an assignment from a command that exits non-zero
 # ends the run silently, mid-section. This suite COUNTS failures.
@@ -159,7 +163,7 @@ fi
 
 # And it must not be installed over the login path by a Containerfile.
 if grep -rn "shared-machine/greetd-kiosk.toml" "$ROOT"/Containerfile* 2>/dev/null \
-        | grep -q "/etc/greetd/config.toml"; then
+        | pipe_has "/etc/greetd/config.toml"; then
     bad "no Containerfile installs the kiosk recipe as the live greetd config"
 else
     ok "no Containerfile installs the kiosk recipe as the live greetd config"
@@ -518,7 +522,7 @@ has_success_exit "$WIPE_UNIT" \
 # Inert like everything else here: enabling it is `systemctl enable
 # rime-guest-session@<uid>.service` and this repo does not do it.
 if grep -rn 'rime-guest-session@' "$ROOT"/Containerfile* 2>/dev/null \
-        | grep -qE 'systemctl enable|\.wants/'; then
+        | pipe_has -E 'systemctl enable|\.wants/'; then
     bad "no Containerfile enables the session hook"
 else
     ok "no Containerfile enables the session hook"

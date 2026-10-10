@@ -74,6 +74,10 @@
 #  Run from anywhere: ./tests/test-rime-permissions.sh [--with-binary]
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 2
 REPO="$PWD"
 WITH_BINARY=0
@@ -419,7 +423,7 @@ elif [ "$(id -u)" = 0 ]; then
 else
   acl=$(getfacl -p "$NODE" 2>/dev/null | sed -n "s/^user:$(id -un)://p")
   grp=$(stat -c %G "$NODE" 2>/dev/null)
-  if id -nG | tr ' ' '\n' | grep -qx "$grp"; then
+  if id -nG | tr ' ' '\n' | pipe_has -x "$grp"; then
     skipped "the ACL, not the group, is what grants the node" \
             "this user is in $grp"
   elif [ -n "$acl" ]; then
@@ -514,7 +518,7 @@ EOF
     out=$(cli "$@"); rc=$?
     if [ "$rc" -eq 0 ]; then
       bad "$label" "exited 0; a revoke it cannot perform must not report success"
-    elif printf '%s' "$out" | grep -qF "$want"; then
+    elif printf '%s' "$out" | pipe_has -F "$want"; then
       ok "$label"
     else
       bad "$label" "no '$want' in: $(printf '%s' "$out" | head -2 | tr '\n' ' ')"
@@ -532,24 +536,24 @@ EOF
   # suite where every case refuses would pass on a binary that refused
   # everything.
   out=$(cli revoke org.rime.Broker camera --dry-run)
-  if printf '%s' "$out" | grep -qF "flatpak permission-set devices camera org.rime.Broker no"; then
+  if printf '%s' "$out" | pipe_has -F "flatpak permission-set devices camera org.rime.Broker no"; then
     ok "a brokered camera revocation is a store write, named exactly"
   else
     bad "a brokered camera revocation is a store write, named exactly" "$out"
   fi
   out=$(cli revoke org.rime.Broker camera --forget --dry-run)
-  if printf '%s' "$out" | grep -qF "flatpak permission-remove devices camera org.rime.Broker"; then
+  if printf '%s' "$out" | pipe_has -F "flatpak permission-remove devices camera org.rime.Broker"; then
     ok "--forget removes the entry instead of writing a refusal"
   else
     bad "--forget removes the entry instead of writing a refusal" "$out"
   fi
   out=$(cli revoke org.rime.Broker network --dry-run)
-  if printf '%s' "$out" | grep -qF "flatpak override --user --unshare=network org.rime.Broker"; then
+  if printf '%s' "$out" | pipe_has -F "flatpak override --user --unshare=network org.rime.Broker"; then
     ok "a sandbox capability is an override, and says it applies next launch"
   else
     bad "a sandbox capability is an override, and says it applies next launch" "$out"
   fi
-  if printf '%s' "$out" | grep -qF "next time the app starts"; then
+  if printf '%s' "$out" | pipe_has -F "next time the app starts"; then
     ok "the override's timing is stated rather than implied"
   else
     bad "the override's timing is stated rather than implied" "$out"

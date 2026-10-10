@@ -34,6 +34,10 @@
 #         Rime=/path/to/rime tests/test-rime-trust-enforcement.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS=0 FAIL=0
@@ -571,14 +575,14 @@ OPSRS="$REPO/rimed/rime/src/ops.rs"
 MAINRS="$REPO/rimed/rime/src/main.rs"
 guard="$(sed -n '/^pub fn update(opts: UpdateOptions)/,/^}/p' "$OPSRS" \
     | grep -v '^[[:space:]]*//' | grep -B3 'trust_gate(')"
-if printf '%s' "$guard" | grep -q 'opts.force'; then
+if printf '%s' "$guard" | pipe_has 'opts.force'; then
     bad "the trust gate is guarded on opts.force — escaping §26's health stop would skip signature checking"
 else
     ok "the trust gate is not guarded on --force"
 fi
 # The second argument is the image the update moves to (the rename), so the
 # escape is matched as the FIRST argument rather than as the whole call.
-if printf '%s' "$guard" | grep -qE 'trust_gate\(opts\.allow_unverified[,)]'; then
+if printf '%s' "$guard" | pipe_has -E 'trust_gate\(opts\.allow_unverified[,)]'; then
     ok "it takes its own escape, --allow-unverified"
 else
     bad "the trust gate does not take opts.allow_unverified"
@@ -590,7 +594,7 @@ else
 fi
 # An escape hatch that also hides the reason is a way to not find out what was
 # wrong with the image you just deployed.
-if sed -n '/^fn trust_gate/,/^}/p' "$OPSRS" | grep -q 'proceeding anyway'; then
+if sed -n '/^fn trust_gate/,/^}/p' "$OPSRS" | pipe_has 'proceeding anyway'; then
     ok "--allow-unverified still prints the refusal it overrode"
 else
     bad "--allow-unverified suppresses the refusal instead of overriding it"
@@ -629,7 +633,7 @@ sec "this program never deploys on fixture facts"
 # It is a single condition, checked before anything else in the gate, and it
 # is what makes a suite like this one safe to run on a daily-driver laptop.
 tg="$(sed -n '/^fn trust_gate/,/^}/p' "$REPO/rimed/rime/src/ops.rs")"
-if printf '%s' "$tg" | grep -q 'roots.fixture.is_some()'; then
+if printf '%s' "$tg" | pipe_has 'roots.fixture.is_some()'; then
     ok "trust_gate returns on a fixture root before any decision is acted on"
 else
     bad "trust_gate does not special-case a fixture root — a test run could stage an image"
@@ -637,7 +641,7 @@ fi
 # And it returns unconditionally from that branch: a fall-through would reach
 # `bootc upgrade` on any fixture whose facts happened to verify.
 fx="$(printf '%s\n' "$tg" | sed -n '/roots.fixture.is_some()/,/^    }/p')"
-if printf '%s' "$fx" | grep -qE '^\s+return Some\('; then
+if printf '%s' "$fx" | pipe_has -E '^\s+return Some\('; then
     ok "and that branch returns unconditionally, so no fixture can fall through to bootc"
 else
     bad "the fixture branch can fall through — a verifying fixture would reach bootc upgrade"

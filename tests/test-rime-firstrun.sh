@@ -13,6 +13,10 @@
 #      ./tests/test-rime-firstrun.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="${ROOT}/files/system/libexec/rime-shell-firstrun"
@@ -498,10 +502,10 @@ else
     live_libinput() {
         sed -n '/<libinput>/,/<\/libinput>/p' "${TMPL}/rc.xml" | grep -vE '^\s*<!--|^\s*[a-zA-Z]'
     }
-    live_libinput | grep -q '<tapToClick>' \
+    live_libinput | pipe_has '<tapToClick>' \
         && bad "tap-to-click uses labwc's own element name" \
         || ok "tap-to-click uses labwc's own element name"
-    live_libinput | grep -q '<tap>yes</tap>' \
+    live_libinput | pipe_has '<tap>yes</tap>' \
         && ok "tap-to-click is enabled with <tap>" \
         || bad "tap-to-click is enabled with <tap>"
 fi

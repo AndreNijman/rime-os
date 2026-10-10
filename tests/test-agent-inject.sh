@@ -26,6 +26,10 @@
 #      ./tests/test-agent-inject.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` for the reason test-privilege-requests.sh documents: this suite
 # counts failures rather than aborting, and several assertions run commands
 # that exit non-zero on purpose.
@@ -283,7 +287,7 @@ case "$DEST" in
     *)  bad "the copy is inside that session's own scratch directory (${DEST})" ;;
 esac
 
-"$Rime" agent status "$A" 2>/dev/null | grep -q '^files sent   1$' \
+"$Rime" agent status "$A" 2>/dev/null | pipe_has '^files sent   1$' \
     && ok "the session records that a file was handed to it" \
     || bad "the session records that a file was handed to it"
 
@@ -327,7 +331,7 @@ NL_FILE="${SRCDIR}/$(printf 'break\nout.log')"
 printf 'x\n' > "$NL_FILE" 2>/dev/null
 if [ -f "$NL_FILE" ]; then
     out="$("$Rime" agent send "$A" "$NL_FILE" 2>&1)"
-    printf '%s' "$out" | grep -qi "control character" \
+    printf '%s' "$out" | pipe_has -i "control character" \
         && ok "a file name with a newline in it is refused by name" \
         || { bad "a file name with a newline in it is refused by name"; printf '%s\n' "$out" | sed 's/^/      | /'; }
     after="$(wc -c < "${WORK}/a.cap")"
@@ -341,17 +345,17 @@ fi
 
 section "what cannot be handed over"
 out="$("$Rime" agent send "$A" "${SRCDIR}/does-not-exist" 2>&1)"
-printf '%s' "$out" | grep -qi "cannot hand over" \
+printf '%s' "$out" | pipe_has -i "cannot hand over" \
     && ok "a file that is not there is refused before the daemon is asked" \
     || bad "a file that is not there is refused before the daemon is asked"
 
 out="$("$Rime" agent send "$A" "$SRCDIR" 2>&1)"
-printf '%s' "$out" | grep -qi "is a directory" \
+printf '%s' "$out" | pipe_has -i "is a directory" \
     && ok "a directory is refused, and told apart from a file" \
     || { bad "a directory is refused, and told apart from a file"; printf '%s\n' "$out" | sed 's/^/      | /'; }
 
 out="$("$Rime" agent send 999999 "$SRC" 2>&1)"
-printf '%s' "$out" | grep -qi "no session" \
+printf '%s' "$out" | pipe_has -i "no session" \
     && ok "a session that does not exist is refused" \
     || bad "a session that does not exist is refused"
 
@@ -377,7 +381,7 @@ section "the screenshot shortcut takes no picture"
 export RIME_SCREENSHOT_DIR="${WORK}/shots"
 mkdir -p "$RIME_SCREENSHOT_DIR"
 out="$("$Rime" agent send "$A" --last-screenshot 2>&1)"
-printf '%s' "$out" | grep -qi "holds no screenshots yet" \
+printf '%s' "$out" | pipe_has -i "holds no screenshots yet" \
     && ok "an empty screenshot directory says so instead of guessing" \
     || { bad "an empty screenshot directory says so instead of guessing"; printf '%s\n' "$out" | sed 's/^/      | /'; }
 
@@ -385,7 +389,7 @@ printf 'older\n' > "${RIME_SCREENSHOT_DIR}/Screenshot_old.png"
 sleep 1.1
 printf 'newest\n' > "${RIME_SCREENSHOT_DIR}/Screenshot_new.png"
 out="$("$Rime" agent send "$A" --last-screenshot 2>&1)"
-printf '%s' "$out" | grep -q "Screenshot_new.png -> session ${A}" \
+printf '%s' "$out" | pipe_has "Screenshot_new.png -> session ${A}" \
     && ok "the newest screenshot is the one handed over" \
     || { bad "the newest screenshot is the one handed over"; printf '%s\n' "$out" | sed 's/^/      | /'; }
 unset RIME_SCREENSHOT_DIR
@@ -449,19 +453,19 @@ if [ -z "$sid" ]; then
 else
     ok "a session started to try it from the inside (id ${sid})"
     for _ in $(seq 1 80); do
-        "$Rime" agent logs "$sid" 2>/dev/null | grep -q DONE && break
+        "$Rime" agent logs "$sid" 2>/dev/null | pipe_has DONE && break
         sleep 0.25
     done
     logs="$("$Rime" agent logs "$sid" 2>/dev/null)"
     printf '%s\n' "$logs" | sed 's/^/      | /'
 
-    printf '%s' "$logs" | grep -q "may not hand a file to a session" \
+    printf '%s' "$logs" | pipe_has "may not hand a file to a session" \
         && ok "the daemon refused a session naming another session" \
         || bad "the daemon refused a session naming another session"
-    printf '%s' "$logs" | grep -q "OTHER_EXIT=0" \
+    printf '%s' "$logs" | pipe_has "OTHER_EXIT=0" \
         && bad "the refusal is an error exit, not a quiet no-op" \
         || ok "the refusal is an error exit, not a quiet no-op"
-    printf '%s' "$logs" | grep -q "SELF_EXIT=0" \
+    printf '%s' "$logs" | pipe_has "SELF_EXIT=0" \
         && bad "a session naming ITSELF is refused too" \
         || ok "a session naming ITSELF is refused too"
 
@@ -567,7 +571,7 @@ sys.exit(0 if s['exit_code'] is not None or s['exit_signal'] is not None else 1)
     sleep 0.25
 done
 out="$("$Rime" agent send "$B" "$SRC" 2>&1)"
-printf '%s' "$out" | grep -qi "already exited" \
+printf '%s' "$out" | pipe_has -i "already exited" \
     && ok "an exited session is refused, and told apart from a missing one" \
     || { bad "an exited session is refused, and told apart from a missing one"; printf '%s\n' "$out" | sed 's/^/      | /'; }
 

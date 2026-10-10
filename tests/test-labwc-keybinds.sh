@@ -16,6 +16,10 @@
 #      ./tests/test-labwc-keybinds.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` is deliberate. This suite counts failures rather than aborting, and
 # several assertions run commands that exit non-zero on purpose. CI invokes a
 # script as `bash -e {0}`, under which a `x="$(cmd)"` assignment whose command
@@ -211,7 +215,7 @@ PYEOF
 # while reading as though it satisfied all of it. That is exactly the trap
 # voice-ptt's comment in KeybindService.qml records, and the only thing that
 # catches it is running this generator.
-if printf '%s\n' "$block" | grep -q 'rime-screen-reader'; then
+if printf '%s\n' "$block" | pipe_has 'rime-screen-reader'; then
     ok "the screen-reader binding survives the labwc generator"
 else
     # The provenance goes IN the failure, not only in the header. This is the
@@ -244,9 +248,9 @@ dupes="$(printf '%s\n' "$block" | grep -oE '<keybind key="[^"]+"' | sort | uniq 
     && ok "no shortcut is generated twice" \
     || bad "duplicate shortcuts generated: $dupes"
 
-printf '%s\n' "$block" | grep -q 'RIME-KEYBINDS-BEGIN' \
+printf '%s\n' "$block" | pipe_has 'RIME-KEYBINDS-BEGIN' \
     && ok "the block carries its begin marker" || bad "the block carries its begin marker"
-printf '%s\n' "$block" | grep -q 'RIME-KEYBINDS-END' \
+printf '%s\n' "$block" | pipe_has 'RIME-KEYBINDS-END' \
     && ok "the block carries its end marker" || bad "the block carries its end marker"
 
 # Deterministic: the splice compares against generated output, so an unstable
@@ -270,34 +274,34 @@ skips="$(g print 2>/dev/null | grep -c 'no labwc equivalent')"
     && ok "untranslatable bindings are reported ($skips)" \
     || bad "untranslatable bindings are reported"
 
-g print 2>/dev/null | grep -q 'no labwc equivalent: window-pseudo' \
+g print 2>/dev/null | pipe_has 'no labwc equivalent: window-pseudo' \
     && ok "pseudo-tiling is reported as unsupported" \
     || bad "pseudo-tiling is reported as unsupported"
 
 # Nothing may be emitted with an unresolved Hyprland variable in it: labwc runs
 # the command through execvp, so `$terminal` would be a literal argument.
-printf '%s\n' "$block" | grep -q 'command="\$' \
+printf '%s\n' "$block" | pipe_has 'command="\$' \
     && bad "no unresolved config variable reaches a command" \
     || ok "no unresolved config variable reaches a command"
 
 # The browser bind must name NO browser. It opens whatever the user has set as
 # default, so a hardcoded `firefox` or `zen` here would make the shortcut
 # contradict the user's own setting — which is exactly what it used to do.
-printf '%s\n' "$block" | grep -q 'command="/usr/libexec/rime-open-browser"' \
+printf '%s\n' "$block" | pipe_has 'command="/usr/libexec/rime-open-browser"' \
     && ok "the browser bind opens the default browser, not a named one" \
     || bad "the browser bind opens the default browser, not a named one"
 
-printf '%s\n' "$block" | grep -qE 'command="(firefox|zen|zen-browser|chromium|google-chrome)"' \
+printf '%s\n' "$block" | pipe_has -E 'command="(firefox|zen|zen-browser|chromium|google-chrome)"' \
     && bad "no generated bind hardcodes a browser" \
     || ok "no generated bind hardcodes a browser"
 
-printf '%s\n' "$block" | grep -q 'command="alacritty"' \
+printf '%s\n' "$block" | pipe_has 'command="alacritty"' \
     && ok "\$terminal is resolved to the installed terminal" \
     || bad "\$terminal is resolved to the installed terminal"
 
 # The screenshot bindings embed a path. It has to be the INSTALLED one, not
 # whatever tree the generator read the model out of.
-printf '%s\n' "$block" | grep -q "command=\"bash ${INSTALLED}/src/scripts/screenshot.sh" \
+printf '%s\n' "$block" | pipe_has "command=\"bash ${INSTALLED}/src/scripts/screenshot.sh" \
     && ok "generated paths name the installed shell, not the build tree" \
     || bad "generated paths name the installed shell, not the build tree"
 
@@ -307,11 +311,11 @@ mkdir -p "$WORK/ov"
 printf '{"dashboard-launcher": {"mods": "SUPER + SHIFT", "key": "P"}}' > "$WORK/ov/keybinds.json"
 ovblock="$(g print --overrides "$WORK/ov/keybinds.json" 2>/dev/null)"
 
-printf '%s\n' "$ovblock" | grep -A1 'key="W-S-p"' | grep -q 'rime shell launcher' \
+printf '%s\n' "$ovblock" | grep -A1 'key="W-S-p"' | pipe_has 'rime shell launcher' \
     && ok "a rebind reaches the generated config" \
     || bad "a rebind reaches the generated config"
 
-printf '%s\n' "$ovblock" | grep -q 'key="A-space"' \
+printf '%s\n' "$ovblock" | pipe_has 'key="A-space"' \
     && bad "the replaced default is gone" \
     || ok "the replaced default is gone"
 

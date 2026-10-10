@@ -54,9 +54,9 @@ fi
 
 out="$("$BOOTC" upgrade --check 2>&1)" || { log "bootc upgrade --check failed; keeping the last answer"; exit 0; }
 
-if printf '%s\n' "$out" | grep -q '^No changes in:'; then
+if printf '%s\n' "$out" | grep '^No changes in:' >/dev/null; then
     write_state none
-elif printf '%s\n' "$out" | grep -q '^Update available for:'; then
+elif printf '%s\n' "$out" | grep '^Update available for:' >/dev/null; then
     digest="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*Digest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -n1)"
     # bootc builds that omit the digest line: fall back to the text's own hash
     # so a later, different update still counts as new.

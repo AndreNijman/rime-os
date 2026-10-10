@@ -36,6 +36,10 @@
 #  Run from anywhere: ./tests/test-rime-dispatch.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e`: this suite COUNTS failures and many cases run commands that exit
 # non-zero on purpose. GitHub Actions runs a script as `bash -e {0}`, under
 # which the first such command would end the run and report nothing.
@@ -216,12 +220,12 @@ fi
 section "which directory on the far side is this project"
 resetssh
 out=$(SSH_SCENARIO=same rime build --on katana --dry-run)
-if printf '%s' "$out" | grep -q "building on katana at $PROJ"; then
+if printf '%s' "$out" | pipe_has "building on katana at $PROJ"; then
     ok "the same absolute path is used when the remote agrees it is the same repo"
 else
     bad "the same absolute path is used on agreement" "$out"
 fi
-if printf '%s' "$out" | grep -q "Makefile is here"; then
+if printf '%s' "$out" | pipe_has "Makefile is here"; then
     ok "the detected build command says which marker chose it"
 else
     bad "the detected build command names its marker" "$out"
@@ -229,17 +233,17 @@ fi
 
 resetssh
 out=$(SSH_SCENARIO=other rime build --on katana --dry-run)
-if printf '%s' "$out" | grep -q "different repository"; then
+if printf '%s' "$out" | pipe_has "different repository"; then
     ok "a different repository at the same path is refused"
 else
     bad "a different repository at the same path is refused" "$out"
 fi
-if printf '%s' "$out" | grep -q "rime-os" && printf '%s' "$out" | grep -q "unrelated"; then
+if printf '%s' "$out" | pipe_has "rime-os" && printf '%s' "$out" | pipe_has "unrelated"; then
     ok "the refusal prints both origins, so the user can see which is wrong"
 else
     bad "the refusal prints both origins" "$out"
 fi
-if printf '%s' "$out" | grep -q "nothing was run"; then
+if printf '%s' "$out" | pipe_has "nothing was run"; then
     ok "the refusal says nothing was run"
 else
     bad "the refusal says nothing was run" "$out"
@@ -256,7 +260,7 @@ fi
 for scenario in missing no_origin; do
     resetssh
     out=$(SSH_SCENARIO=$scenario rime build --on katana --dry-run)
-    if [ -n "$out" ] && ! printf '%s' "$out" | grep -q "building on"; then
+    if [ -n "$out" ] && ! printf '%s' "$out" | pipe_has "building on"; then
         ok "the remote answering $scenario refuses rather than dispatching"
     else
         bad "the remote answering $scenario refuses" "$out"
@@ -265,7 +269,7 @@ done
 
 resetssh
 out=$(SSH_SCENARIO=garbage rime build --on katana --dry-run)
-if printf '%s' "$out" | grep -q "unrecognised" && ! printf '%s' "$out" | grep -q "building on"; then
+if printf '%s' "$out" | pipe_has "unrecognised" && ! printf '%s' "$out" | pipe_has "building on"; then
     ok "an unrecognised probe answer refuses instead of being read as a state"
 else
     bad "an unrecognised probe answer refuses" "$out"
@@ -275,12 +279,12 @@ fi
 section "the explicit override"
 resetssh
 out=$(SSH_SCENARIO=other rime build --on katana --dry-run --remote-path /somewhere/else)
-if printf '%s' "$out" | grep -q "building on katana at /somewhere/else"; then
+if printf '%s' "$out" | pipe_has "building on katana at /somewhere/else"; then
     ok "--remote-path is obeyed even when the repo check would have failed"
 else
     bad "--remote-path is obeyed" "$out"
 fi
-if printf '%s' "$out" | grep -q "was not checked"; then
+if printf '%s' "$out" | pipe_has "was not checked"; then
     ok "--remote-path says out loud that the repository was not checked"
 else
     bad "--remote-path says the check was skipped" "$out"
@@ -291,7 +295,7 @@ else
     bad "--remote-path with --dry-run needs no round trip" "$(sshcount) invocations"
 fi
 out=$(rime build --on katana --dry-run --remote-path relative/path)
-if [ -n "$out" ] && printf '%s' "$out" | grep -q "absolute"; then
+if [ -n "$out" ] && printf '%s' "$out" | pipe_has "absolute"; then
     ok "a relative --remote-path is refused"
 else
     bad "a relative --remote-path is refused" "$out"
@@ -302,12 +306,12 @@ section "uncommitted changes"
 printf 'dirty\n' > "$PROJ/newfile"
 resetssh
 out=$(SSH_SCENARIO=same rime build --on katana --dry-run)
-if printf '%s' "$out" | grep -q "uncommitted change"; then
+if printf '%s' "$out" | pipe_has "uncommitted change"; then
     ok "a dirty worktree refuses by default"
 else
     bad "a dirty worktree refuses by default" "$out"
 fi
-if printf '%s' "$out" | grep -q "would NOT be included"; then
+if printf '%s' "$out" | pipe_has "would NOT be included"; then
     ok "the refusal explains that the remote builds its own committed state"
 else
     bad "the refusal explains what the remote would build" "$out"
@@ -318,7 +322,7 @@ else
     bad "the local check happens before any round trip" "$(sshcount) invocations"
 fi
 out=$(SSH_SCENARIO=same rime build --on katana --dry-run --allow-dirty)
-if printf '%s' "$out" | grep -q "building on katana"; then
+if printf '%s' "$out" | pipe_has "building on katana"; then
     ok "--allow-dirty proceeds"
 else
     bad "--allow-dirty proceeds" "$out"
@@ -339,35 +343,35 @@ argv=$(lastargv)
 # `sh -c '<inner>'`, so every quote inside <inner> is itself escaped for the
 # outer layer. `a target` therefore appears as '\''a target'\'' — one argument
 # at the inner level, which is what has to survive.
-if printf '%s' "$remote" | grep -qF "'\''a target'\''"; then
+if printf '%s' "$remote" | pipe_has -F "'\''a target'\''"; then
     ok "an argument with a space survives as ONE argument through both quoting layers"
 else
     bad "an argument with a space survives" "got [$remote]"
 fi
 # And it must not have become two arguments at the inner level.
-if printf '%s' "$remote" | grep -qF "'\''a'\'' '\''target'\''"; then
+if printf '%s' "$remote" | pipe_has -F "'\''a'\'' '\''target'\''"; then
     bad "the spaced argument did not split" "it split into two"
 else
     ok "the spaced argument did not split into two"
 fi
-if printf '%s' "$remote" | grep -q "cd '"; then
+if printf '%s' "$remote" | pipe_has "cd '"; then
     ok "the project directory is quoted in the remote command"
 else
     bad "the project directory is quoted" "got [$remote]"
 fi
-if printf '%s\n' "$argv" | grep -qx "BatchMode=yes"; then
+if printf '%s\n' "$argv" | pipe_has -x "BatchMode=yes"; then
     ok "a dispatch cannot block on a password prompt"
 else
     bad "a dispatch passes BatchMode=yes" "$(printf '%s' "$argv" | tr '\n' ' ')"
 fi
-if printf '%s\n' "$argv" | grep -q "StrictHostKeyChecking"; then
+if printf '%s\n' "$argv" | pipe_has "StrictHostKeyChecking"; then
     bad "a dispatch does not weaken host-key checking" "argv sets StrictHostKeyChecking"
 else
     ok "a dispatch does not weaken host-key checking"
 fi
 # Under a test harness stdin is not a tty, so no pty must be requested — the
 # thing that was printing "Pseudo-terminal will not be allocated".
-if printf '%s\n' "$argv" | grep -qx -- "-T"; then
+if printf '%s\n' "$argv" | pipe_has -x -- "-T"; then
     ok "no terminal is requested when there is none to forward"
 else
     bad "no terminal is requested when stdin is not a tty" "$(printf '%s' "$argv" | tr '\n' ' ')"
@@ -376,14 +380,14 @@ fi
 # ── rime build, locally ─────────────────────────────────────────────────────
 section "rime build without --on"
 out=$(rime build --dry-run)
-if printf '%s' "$out" | grep -q "building here" && printf '%s' "$out" | grep -q "make"; then
+if printf '%s' "$out" | pipe_has "building here" && printf '%s' "$out" | pipe_has "make"; then
     ok "without --on it builds here, with the same detected command"
 else
     bad "without --on it builds here" "$out"
 fi
 NOBUILD=$WORK/nobuild; mkdir -p "$NOBUILD"
 out=$( cd "$NOBUILD" && "$RIME_BIN" build --dry-run 2>&1 )
-if printf '%s' "$out" | grep -q "Looked for"; then
+if printf '%s' "$out" | pipe_has "Looked for"; then
     ok "a project with no recognised build system is a refusal that lists what it looked for"
 else
     bad "an unrecognised project lists what it looked for" "$out"
@@ -393,31 +397,31 @@ fi
 section "rime open"
 resetssh
 out=$(SSH_SESSION=ok SSH_LAUNCH=running rime open katana https://example.com)
-if printf '%s' "$out" | grep -q "opened on katana"; then
+if printf '%s' "$out" | pipe_has "opened on katana"; then
     ok "a launch that is still running is reported as opened"
 else
     bad "a running launch is reported as opened" "$out"
 fi
 resetssh
 out=$(SSH_SESSION=ok SSH_LAUNCH=failed rime open katana https://example.com)
-if [ -n "$out" ] && ! printf '%s' "$out" | grep -q "opened on"; then
+if [ -n "$out" ] && ! printf '%s' "$out" | pipe_has "opened on"; then
     ok "a launch that exited non-zero is NOT reported as opened"
 else
     bad "a failed launch is not reported as opened" "$out"
 fi
-if printf '%s' "$out" | grep -q "no method available"; then
+if printf '%s' "$out" | pipe_has "no method available"; then
     ok "the remote's own error is shown as the reason"
 else
     bad "the remote's error is shown" "$out"
 fi
 out=$(SSH_SESSION=greeter rime open katana https://example.com)
-if printf '%s' "$out" | grep -q "greeter"; then
+if printf '%s' "$out" | pipe_has "greeter"; then
     ok "a machine at its greeter is refused, not reported as opened"
 else
     bad "a machine at its greeter is refused" "$out"
 fi
 out=$(SSH_SESSION=no_bus rime open katana https://example.com)
-if printf '%s' "$out" | grep -qi "logged in"; then
+if printf '%s' "$out" | pipe_has -i "logged in"; then
     ok "a machine with nobody logged in says so"
 else
     bad "a machine with nobody logged in says so" "$out"
@@ -442,17 +446,17 @@ launch=$(lastargv)
 # satisfied by `kill -0 $pid 2>/dev/null` further down — so a mutant that
 # removed the child's stdout redirect passed 55/0. The assertion has to name
 # the shape it cares about.
-if printf '%s' "$launch" | grep -qF '>/dev/null 2>"$err" &'; then
+if printf '%s' "$launch" | pipe_has -F '>/dev/null 2>"$err" &'; then
     ok "the backgrounded child has BOTH streams redirected, so ssh can close"
 else
     bad "the child's stdout is redirected" "got [$launch]"
 fi
-if printf '%s' "$launch" | grep -q -- "--wait"; then
+if printf '%s' "$launch" | pipe_has -- "--wait"; then
     bad "the launch does not block on the program exiting" "argv contains --wait"
 else
     ok "the launch does not block on the program exiting"
 fi
-if printf '%s' "$launch" | grep -q "WAYLAND_DISPLAY"; then
+if printf '%s' "$launch" | pipe_has "WAYLAND_DISPLAY"; then
     ok "WAYLAND_DISPLAY is set, without which a GUI has no display to reach"
 else
     bad "WAYLAND_DISPLAY is set" "got [$launch]"
@@ -463,7 +467,7 @@ section "rime send"
 printf 'x\n' > "$WORK/thing.txt"
 resetssh
 out=$(SSH_TAR=ok "$RIME_BIN" send katana "$WORK/thing.txt" 2>&1)
-if printf '%s' "$out" | grep -q "sent 1 item"; then
+if printf '%s' "$out" | pipe_has "sent 1 item"; then
     ok "a file is sent and the destination is reported"
 else
     bad "a file is sent" "$out"
@@ -471,43 +475,43 @@ fi
 # tar must be given -C <parent> <basename>, so the sender's directory layout is
 # not recreated on the far side.
 argv=$(lastargv)
-if printf '%s\n' "$argv" | grep -q "tar -x"; then
+if printf '%s\n' "$argv" | pipe_has "tar -x"; then
     ok "the remote extracts with tar"
 else
     bad "the remote extracts with tar" "$(printf '%s' "$argv" | tr '\n' ' ')"
 fi
-if printf '%s\n' "$argv" | grep -q "keep-old-files"; then
+if printf '%s\n' "$argv" | pipe_has "keep-old-files"; then
     ok "the default refuses to overwrite (--keep-old-files)"
 else
     bad "the default refuses to overwrite" "$(printf '%s' "$argv" | tr '\n' ' ')"
 fi
 resetssh
 out=$(SSH_TAR=ok "$RIME_BIN" send katana --force "$WORK/thing.txt" 2>&1)
-if ! lastargv | grep -q "keep-old-files"; then
+if ! lastargv | pipe_has "keep-old-files"; then
     ok "--force drops the overwrite guard"
 else
     bad "--force drops the overwrite guard" "still present"
 fi
 resetssh
 out=$(SSH_TAR=exists "$RIME_BIN" send katana "$WORK/thing.txt" 2>&1)
-if printf '%s' "$out" | grep -q "Nothing was overwritten"; then
+if printf '%s' "$out" | pipe_has "Nothing was overwritten"; then
     ok "a conflict is reported as nothing overwritten"
 else
     bad "a conflict is reported" "$out"
 fi
-if printf '%s' "$out" | grep -q "Cannot open"; then
+if printf '%s' "$out" | pipe_has "Cannot open"; then
     ok "the remote tar's own message is folded in as the detail"
 else
     bad "the remote message is folded in" "$out"
 fi
 out=$("$RIME_BIN" send katana "$WORK/does-not-exist" 2>&1)
-if printf '%s' "$out" | grep -q "does not exist"; then
+if printf '%s' "$out" | pipe_has "does not exist"; then
     ok "a local file that does not exist is caught before any network use"
 else
     bad "a missing local file is caught locally" "$out"
 fi
 out=$("$RIME_BIN" send katana 2>&1)
-if printf '%s' "$out" | grep -q "clipboard" || printf '%s' "$out" | grep -qi "nothing to send"; then
+if printf '%s' "$out" | pipe_has "clipboard" || printf '%s' "$out" | pipe_has -i "nothing to send"; then
     ok "send with no paths and no --clipboard explains what is missing"
 else
     bad "send with nothing says what is missing" "$out"
@@ -518,12 +522,12 @@ section "agent verbs forwarded to a device"
 resetssh
 "$RIME_BIN" agent list --host katana --json >/dev/null 2>&1
 argv=$(lastargv)
-if printf '%s\n' "$argv" | tail -1 | grep -q "'rime' 'agent' 'list' '--json'"; then
+if printf '%s\n' "$argv" | tail -1 | pipe_has "'rime' 'agent' 'list' '--json'"; then
     ok "agent list --host forwards the whole verb to the remote's own rime"
 else
     bad "agent list --host forwards the verb" "$(printf '%s' "$argv" | tail -1)"
 fi
-if printf '%s\n' "$argv" | grep -qx -- "-T"; then
+if printf '%s\n' "$argv" | pipe_has -x -- "-T"; then
     ok "a forwarded listing asks for no terminal"
 else
     bad "a forwarded listing asks for no terminal" "$(printf '%s' "$argv" | tr '\n' ' ')"
@@ -531,12 +535,12 @@ fi
 resetssh
 "$RIME_BIN" agent attach --host katana 7 >/dev/null 2>&1
 argv=$(lastargv)
-if printf '%s\n' "$argv" | tail -1 | grep -q "'rime' 'agent' 'attach' '7'"; then
+if printf '%s\n' "$argv" | tail -1 | pipe_has "'rime' 'agent' 'attach' '7'"; then
     ok "agent attach --host forwards the remote's own session id"
 else
     bad "agent attach --host forwards the id" "$(printf '%s' "$argv" | tail -1)"
 fi
-if printf '%s\n' "$argv" | grep -qx -- "-t"; then
+if printf '%s\n' "$argv" | pipe_has -x -- "-t"; then
     ok "attaching asks for a terminal, because it is the interactive case"
 else
     bad "attaching asks for a terminal" "$(printf '%s' "$argv" | tr '\n' ' ')"
@@ -548,7 +552,7 @@ cat > "$XDG_STATE_HOME/rime/hosts/katana.json" <<'JSON'
 JSON
 resetssh
 out=$("$RIME_BIN" agent list --host katana 2>&1)
-if printf '%s' "$out" | grep -q "agent runtime"; then
+if printf '%s' "$out" | pipe_has "agent runtime"; then
     ok "a host known to lack the agent runtime is refused by name"
 else
     bad "a host lacking the agent runtime is refused" "$out"
@@ -573,7 +577,7 @@ section "unknown devices"
 for verb in "build --on nosuch --dry-run" "send nosuch $WORK/thing.txt" "open nosuch https://x"; do
     # shellcheck disable=SC2086
     out=$( cd "$PROJ" && "$RIME_BIN" $verb 2>&1 )
-    if printf '%s' "$out" | grep -q "katana"; then
+    if printf '%s' "$out" | pipe_has "katana"; then
         ok "'$verb' names the devices that do exist"
     else
         bad "'$verb' names known devices" "$out"

@@ -23,6 +23,10 @@
 #  it records is never paid.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 1
 
 KNOWN=tests/shellcheck-known-failing.txt
@@ -64,8 +68,8 @@ mapfile -t scripts < <(
     | while IFS= read -r f; do
         case "$f" in */__pycache__/*|*/.git/*) continue ;; esac
         if [ "${f##*.}" = sh ]; then printf '%s\n' "$f"; continue; fi
-        head -c2 "$f" 2>/dev/null | grep -q '^#!' || continue
-        head -n1 "$f" | grep -qE '\b(sh|bash|dash|ksh)\b' && printf '%s\n' "$f"
+        head -c2 "$f" 2>/dev/null | pipe_has '^#!' || continue
+        head -n1 "$f" | pipe_has -E '\b(sh|bash|dash|ksh)\b' && printf '%s\n' "$f"
       done | sort -u
 )
 

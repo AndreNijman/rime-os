@@ -43,6 +43,10 @@
 #  only binaries stubbed are put on a private PATH.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # Deliberately +e, like the other suites in this directory: CI invokes a suite
 # as `bash -e {0}`, and under -e an assignment from a failing command ends the
 # run silently, mid-section.
@@ -246,7 +250,7 @@ is "the ids behind those names are unchanged" "hyprland niri rime-labwc " "$ids"
 # The default session is named, not positional, and it is named by id.
 want_default="$(grep -oE 'defaultSession: "[^"]*"' "$GREETER" | head -n1 | cut -d'"' -f2)"
 is "the greeter still names its default session by id" "hyprland" "$want_default"
-if printf '%s\n' "$out" | awk -F'\t' '{ print $1 }' | grep -qx "$want_default"; then
+if printf '%s\n' "$out" | awk -F'\t' '{ print $1 }' | pipe_has -x "$want_default"; then
     ok "…and that id is one the enumeration actually offers"
 else
     bad "…and that id is one the enumeration actually offers" "$want_default not enumerated"
@@ -255,7 +259,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 section "§4 the gaming session, which is gated on a binary rather than a name"
 # ─────────────────────────────────────────────────────────────────────────────
-if printf '%s\n' "$out" | grep -q '^rime-gaming'; then
+if printf '%s\n' "$out" | pipe_has '^rime-gaming'; then
     bad "rime-gaming stays hidden while gamescope is absent" "it was offered"
 else
     ok "rime-gaming stays hidden while gamescope is absent"

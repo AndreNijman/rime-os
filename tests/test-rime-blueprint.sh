@@ -60,6 +60,10 @@
 #  Uses $RIME_BIN if set; otherwise builds the binary with cargo.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e`, for the same reason as every other suite here: this one COUNTS
 # failures instead of aborting, and many assertions run commands that exit
 # non-zero on purpose. GitHub Actions invokes a script as `bash -e {0}`, and
@@ -860,7 +864,7 @@ else bad "apply never rewrites the blueprint"; fi
 STATE="${H_DRY}/.local/state/rime/blueprint-state.toml"
 if [ -f "$STATE" ]; then ok "apply wrote its generated record"
 else bad "apply wrote its generated record"; fi
-if head -1 "$STATE" 2>/dev/null | grep -q "GENERATED"; then
+if head -1 "$STATE" 2>/dev/null | pipe_has "GENERATED"; then
     ok "the generated record says it is generated, on line 1"
 else
     bad "the generated record says it is generated, on line 1"

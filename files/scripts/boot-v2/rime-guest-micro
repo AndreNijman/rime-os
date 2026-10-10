@@ -29,7 +29,7 @@ OUT="${1:?usage: rime-guest-micro OUT.cpio.gz}"
 BB="$(command -v busybox)" || die "busybox not found"
 # A dynamically linked busybox would need a libc and a dynamic loader in the
 # cpio, and would fail at the point where the failure looks like a UKI problem.
-if ! file -b "$BB" | grep -q 'statically linked'; then
+if ! file -b "$BB" | grep 'statically linked' >/dev/null; then
     die "$BB is not statically linked; this initramfs assumes it is"
 fi
 

@@ -36,6 +36,10 @@
 #  the routes' behaviour, including fixtures signed with the wrong key.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")" || exit 1
 
 REPO=$(cd .. && pwd)
@@ -66,7 +70,7 @@ in_pkg()  { grep -qE "$1" "$PKGCODE"; }
 sees_mutant() {  # FILE PATTERN LINE...
     local file="$1" pat="$2"; shift 2
     cp "$file" "$SCRATCH/mutant"; printf '%s\n' "$@" >> "$SCRATCH/mutant"
-    strip_code "$SCRATCH/mutant" | grep -qE "$pat"
+    strip_code "$SCRATCH/mutant" | pipe_has -E "$pat"
 }
 
 section "the apps are not in the image"
@@ -118,7 +122,7 @@ want "  ...and the check sees one run"                  sees_mutant "$PKG" "$P_S
     '    sh "$dir/ctl/postinst" configure'
 # The ChatGPT check is `rpmkeys --define _keyring fs --import` into a one-file
 # keyring under the work dir; any OTHER import lands in the system rpmdb.
-imports_to_system() { grep -E "$P_IMPORT" "$1" | grep -qv "_keyring fs"; }
+imports_to_system() { grep -E "$P_IMPORT" "$1" | pipe_has -v "_keyring fs"; }
 wont "rime-pkg imports no vendor key into the system rpmdb" imports_to_system "$PKGCODE"
 want "  ...and the check sees one imported"             bash -c '
     cp "$1" "$2/mutant"; printf "%s\n" "    rpm --import \"\$dir/key.asc\"" >> "$2/mutant"

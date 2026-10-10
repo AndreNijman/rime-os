@@ -43,6 +43,10 @@
 #  Run from anywhere: ./tests/test-rime-editors.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 cd "$(dirname "$0")" || exit 2
 REPO=$(cd .. && pwd)
@@ -152,7 +156,7 @@ want "the desktop-package stanza was found in Containerfile.core" \
 pkgs=$(tr ';' '\n' < "$DESKTOP" \
         | sed -n 's/^[[:space:]]*dnf5 -y install //p' \
         | tr ' ' '\n' | grep -v '^-' | grep .)
-have_pkg() { printf '%s\n' "$pkgs" | grep -qx "$1"; }
+have_pkg() { printf '%s\n' "$pkgs" | pipe_has -x "$1"; }
 
 want "xdg-terminal-exec is in the package list, not merely mentioned nearby" \
     have_pkg xdg-terminal-exec

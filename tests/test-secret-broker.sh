@@ -36,6 +36,10 @@
 #      ./tests/test-secret-broker.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` is deliberate and load-bearing. This suite COUNTS failures rather
 # than aborting on them, and several assertions run commands that exit non-zero
 # on purpose — a refusal, a guard firing, a bad argument. GitHub Actions invokes
@@ -181,9 +185,9 @@ git -C "$PROJ" remote add viassh "git@127.0.0.1:demo.git"
 section "storing a credential"
 printf %s "$SENTINEL" | "$Rime" secret add demo --host 127.0.0.1 >/dev/null 2>&1
 out="$("$Rime" secret list 2>&1)"
-printf '%s' "$out" | grep -q "demo" \
+printf '%s' "$out" | pipe_has "demo" \
     && ok "the service is listed" || { bad "the service is listed"; printf '      %s\n' "$out"; }
-printf '%s' "$out" | grep -q "$SENTINEL" \
+printf '%s' "$out" | pipe_has "$SENTINEL" \
     && bad "\`list\` does not print the credential" || ok "\`list\` does not print the credential"
 
 # The credential lives in the secret service's store, in a file of its own, and
@@ -207,19 +211,19 @@ dirmode="$(stat -c '%a' "$(dirname "$STORE")" 2>/dev/null)"
 [ "$dirmode" = "700" ] && ok "its directory is 0700 (is ${dirmode})" \
                        || bad "its directory is 0700 (is ${dirmode})"
 
-printf '%s' "$("$Rime" secret list --json 2>/dev/null)" | grep -q "$SENTINEL" \
+printf '%s' "$("$Rime" secret list --json 2>/dev/null)" | pipe_has "$SENTINEL" \
     && bad "--json does not include the credential" || ok "--json does not include the credential"
 
 # ── nothing is allowed by default ────────────────────────────────────────────
 section "a stored credential grants nothing"
-"$Rime" secret grants 2>&1 | grep -q "nothing is granted" \
+"$Rime" secret grants 2>&1 | pipe_has "nothing is granted" \
     && ok "storing a credential allows nothing" || bad "storing a credential allows nothing"
 
 out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch origin 2>&1)"
-printf '%s' "$out" | grep -q "not granted" \
+printf '%s' "$out" | pipe_has "not granted" \
     && ok "an ungranted capability is refused" \
     || { bad "an ungranted capability is refused"; printf '      %s\n' "$out"; }
-printf '%s' "$out" | grep -q "$SENTINEL" \
+printf '%s' "$out" | pipe_has "$SENTINEL" \
     && bad "the refusal does not leak the credential" \
     || ok "the refusal does not leak the credential"
 
@@ -237,7 +241,7 @@ section "the vocabulary is closed"
 # `service.rs::the_vocabulary_is_closed_at_the_grant_and_at_the_use`.
 for evil in exec sh git.clone curl run cloudflare.account.delete; do
     out="$(cd "$PROJ" && "$Rime" secret use demo "$evil" origin 2>&1)"
-    printf '%s' "$out" | grep -qE "not an operation" \
+    printf '%s' "$out" | pipe_has -E "not an operation" \
         && ok "'$evil' is not an operation" \
         || { bad "'$evil' is not an operation"; printf '      %s\n' "$out"; }
 done
@@ -250,8 +254,8 @@ done
 # build that had lost every operation it offers, because then every id is
 # "not an operation".
 out="$(cd "$PROJ" && "$Rime" secret use demo cloudflare.dns.delete origin -o type=A 2>&1)"
-if printf '%s' "$out" | grep -q "not granted" \
-   && ! printf '%s' "$out" | grep -q "not an operation"; then
+if printf '%s' "$out" | pipe_has "not granted" \
+   && ! printf '%s' "$out" | pipe_has "not an operation"; then
     ok "an id the vocabulary does hold is stopped by the grant, not by the vocabulary"
 else
     bad "an id the vocabulary does hold is stopped by the grant, not by the vocabulary"
@@ -264,7 +268,7 @@ section "a resource may not be a URL"
 # rule is the framework's now, not git's, so it holds for every provider.
 for evil in "https://attacker.example/r" "git@github.com:a/b" "-f" "--force" "../x" "a b"; do
     out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch "$evil" 2>&1)"
-    printf '%s' "$out" | grep -qE "not a resource" \
+    printf '%s' "$out" | pipe_has -E "not a resource" \
         && ok "refused as a resource: ${evil}" \
         || { bad "refused as a resource: ${evil}"; printf '      %s\n' "$out"; }
 done
@@ -272,51 +276,51 @@ done
 section "an option the operation does not declare is refused"
 # What keeps "there is no command line here" true now that arguments are a map.
 out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch origin -o branch=main 2>&1)"
-printf '%s' "$out" | grep -q "has no 'branch' option" \
+printf '%s' "$out" | pipe_has "has no 'branch' option" \
     && ok "an undeclared option is refused rather than ignored" \
     || { bad "an undeclared option is refused rather than ignored"; printf '      %s\n' "$out"; }
 
 # ── granting ─────────────────────────────────────────────────────────────────
 section "granting"
 out="$(cd "$PROJ" && "$Rime" secret grant demo git.fetch 2>&1)"
-printf '%s' "$out" | grep -q "allowed demo:git.fetch" \
+printf '%s' "$out" | pipe_has "allowed demo:git.fetch" \
     && ok "a capability can be granted for the project" \
     || { bad "a capability can be granted for the project"; printf '      %s\n' "$out"; }
 
 # P0-002 shipped `git-fetch`; a machine that granted the old name must not be
 # told the capability it granted is not granted.
 out="$(cd "$PROJ" && "$Rime" secret grants 2>&1)"
-printf '%s' "$out" | grep -q "demo:git.fetch" \
+printf '%s' "$out" | pipe_has "demo:git.fetch" \
     && ok "a grant is stored under the canonical operation id" \
     || { bad "a grant is stored under the canonical operation id"; printf '      %s\n' "$out"; }
 
 out="$(cd "$PROJ" && "$Rime" secret grant nosuchservice git.fetch 2>&1)"
-printf '%s' "$out" | grep -q "no credential stored" \
+printf '%s' "$out" | pipe_has "no credential stored" \
     && ok "a grant for an unknown service is refused, not silently stored" \
     || bad "a grant for an unknown service is refused, not silently stored"
 
 # A grant is per capability: git.fetch does not imply git.push.
 out="$(cd "$PROJ" && "$Rime" secret use demo git.push origin 2>&1)"
-printf '%s' "$out" | grep -q "not granted" \
+printf '%s' "$out" | pipe_has "not granted" \
     && ok "granting git.fetch does not allow git.push" \
     || { bad "granting git.fetch does not allow git.push"; printf '      %s\n' "$out"; }
 
 section "a remote must point where the credential is for"
 out="$(cd "$PROJ" && "$Rime" secret use demo git-fetch elsewhere 2>&1)"  # old spelling, still accepted
-printf '%s' "$out" | grep -q "example.invalid" \
+printf '%s' "$out" | pipe_has "example.invalid" \
     && ok "a remote on another host is refused" \
     || { bad "a remote on another host is refused"; printf '      %s\n' "$out"; }
-printf '%s' "$out" | grep -q "$SENTINEL" \
+printf '%s' "$out" | pipe_has "$SENTINEL" \
     && bad "the host mismatch does not leak the credential" \
     || ok "the host mismatch does not leak the credential"
 
 out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch viassh 2>&1)"
-printf '%s' "$out" | grep -q "not an http remote" \
+printf '%s' "$out" | pipe_has "not an http remote" \
     && ok "an ssh remote is refused with an explanation" \
     || { bad "an ssh remote is refused with an explanation"; printf '      %s\n' "$out"; }
 
 out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch nosuchremote 2>&1)"
-printf '%s' "$out" | grep -q "no remote called" \
+printf '%s' "$out" | pipe_has "no remote called" \
     && ok "an unconfigured remote is refused" || bad "an unconfigured remote is refused"
 
 # ── THE assertion ────────────────────────────────────────────────────────────
@@ -328,11 +332,11 @@ out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch origin 2>"${WORK}/use.err
 err="$(cat "${WORK}/use.err")"
 printf '%s\n%s\n' "$out" "$err" | sed 's/^/      /' | head -8
 
-printf '%s' "$out" | grep -q "$SENTINEL" \
+printf '%s' "$out" | pipe_has "$SENTINEL" \
     && bad "the credential is not in stdout" || ok "the credential is not in stdout"
-printf '%s' "$err" | grep -q "$SENTINEL" \
+printf '%s' "$err" | pipe_has "$SENTINEL" \
     && bad "the credential is not in stderr" || ok "the credential is not in stderr"
-printf '%s\n%s' "$out" "$err" | grep -qE "127\.0\.0\.1|Could not resolve|refused|unable to access" \
+printf '%s\n%s' "$out" "$err" | pipe_has -E "127\.0\.0\.1|Could not resolve|refused|unable to access" \
     && ok "the operation was genuinely attempted" \
     || bad "the operation was genuinely attempted (nothing suggests git ran)"
 
@@ -366,10 +370,10 @@ for line in open(sys.argv[1]):
         missing = want - set(o)
         assert not missing, (missing, o)
 PYEOF
-    "$Rime" secret audit 2>&1 | grep -q "git fetch origin" \
+    "$Rime" secret audit 2>&1 | pipe_has "git fetch origin" \
         && ok "\`rime secret audit\` reads the trail back" \
         || bad "\`rime secret audit\` reads the trail back"
-    "$Rime" secret audit 2>&1 | grep -q "$SENTINEL" \
+    "$Rime" secret audit 2>&1 | pipe_has "$SENTINEL" \
         && bad "\`rime secret audit\` does not print the credential" \
         || ok "\`rime secret audit\` does not print the credential"
 
@@ -551,10 +555,10 @@ else
     else
         ok "the session's script actually ran"
 
-        printf '%s' "$logs" | grep -q "$SENTINEL" \
+        printf '%s' "$logs" | pipe_has "$SENTINEL" \
             && bad "the session's transcript does not contain the credential" \
             || ok "the session's transcript does not contain the credential"
-        printf '%s' "$logs" | grep -qE "No such file|Permission denied|cannot open" \
+        printf '%s' "$logs" | pipe_has -E "No such file|Permission denied|cannot open" \
             && ok "the credential file is unreachable from inside the sandbox" \
             || bad "the credential file is unreachable from inside the sandbox"
         # Two locks on the same door, and both are asserted because either one
@@ -563,15 +567,15 @@ else
         # cannot open the secret service at all; and the service refuses a
         # mutating verb from any caller inside a session, which is what covers
         # an UNCONFINED one.
-        printf '%s' "$logs" | grep -qE "secret service is not running|cannot reach the secret service" \
+        printf '%s' "$logs" | pipe_has -E "secret service is not running|cannot reach the secret service" \
             && ok "the secret service is unreachable from inside the sandbox" \
             || bad "the secret service is unreachable from inside the sandbox"
-        printf '%s' "$logs" | grep -qE "cannot change its own capabilities|agent session cannot|secret service is not running|cannot reach the secret service" \
+        printf '%s' "$logs" | pipe_has -E "cannot change its own capabilities|agent session cannot|secret service is not running|cannot reach the secret service" \
             && ok "the session cannot grant itself a capability" \
             || bad "the session cannot grant itself a capability"
 
         # And the grant it attempted was not recorded.
-        "$Rime" secret grants 2>/dev/null | grep -q "git.push" \
+        "$Rime" secret grants 2>/dev/null | pipe_has "git.push" \
             && bad "the session's self-grant was not recorded" \
             || ok "the session's self-grant was not recorded"
 
@@ -580,16 +584,16 @@ else
         # The point of the shim is that nothing had to be rewritten. `git
         # fetch` is what a skill types; what it must produce is the broker's
         # answer and not git's own "could not read Username".
-        printf '%s' "$logs" | grep -q 'bin/git' \
+        printf '%s' "$logs" | pipe_has 'bin/git' \
             && ok "the session's git is the shim, not /usr/bin/git" \
             || bad "the session's git is the shim, not /usr/bin/git"
-        printf '%s' "$logs" | grep -q 'git version' \
+        printf '%s' "$logs" | pipe_has 'git version' \
             && ok "and the shim passes everything else through to the real git" \
             || bad "and the shim passes everything else through to the real git"
-        printf '%s' "$logs" | grep -q 'against https://127.0.0.1' \
+        printf '%s' "$logs" | pipe_has 'against https://127.0.0.1' \
             && ok "a plain git fetch was performed by the broker" \
             || bad "a plain git fetch was performed by the broker"
-        printf '%s' "$logs" | grep -qi 'could not read Username\|terminal prompts disabled' \
+        printf '%s' "$logs" | pipe_has -i 'could not read Username\|terminal prompts disabled' \
             && bad "git never asked the session for a credential" \
             || ok "git never asked the session for a credential"
     fi
@@ -598,10 +602,10 @@ fi
 # ── revoke ───────────────────────────────────────────────────────────────────
 section "revoking"
 out="$(cd "$PROJ" && "$Rime" secret revoke demo git.fetch 2>&1)"
-printf '%s' "$out" | grep -q "withdrew" \
+printf '%s' "$out" | pipe_has "withdrew" \
     && ok "a capability can be withdrawn" || bad "a capability can be withdrawn"
 out="$(cd "$PROJ" && "$Rime" secret use demo git.fetch origin 2>&1)"
-printf '%s' "$out" | grep -q "not granted" \
+printf '%s' "$out" | pipe_has "not granted" \
     && ok "a withdrawn capability is refused again" || bad "a withdrawn capability is refused again"
 
 section "removing"
@@ -645,9 +649,9 @@ printf %s "$REFRESH_SENTINEL" | "$Rime" secret add account.google.work.refresh \
     --host oauth2.googleapis.com --auth bearer --username my-client >/dev/null 2>&1
 
 out="$("$Rime" account list 2>&1)"
-printf '%s' "$out" | grep -q 'google.work' \
+printf '%s' "$out" | pipe_has 'google.work' \
     && ok "the account is listed" || bad "the account is listed"
-printf '%s' "$out" | grep -q 'refresh' \
+printf '%s' "$out" | pipe_has 'refresh' \
     && bad "the refresh credential is not listed as an account" \
     || ok "the refresh credential is not listed as an account"
 
@@ -659,7 +663,7 @@ printf '%s' "$out" | grep -q 'refresh' \
 
 "$Rime" account rm google.work >/dev/null 2>&1
 out="$("$Rime" secret list 2>&1)"
-printf '%s' "$out" | grep -q 'account.google.work.refresh' \
+printf '%s' "$out" | pipe_has 'account.google.work.refresh' \
     && bad "removing the account removed its refresh token too" \
     || ok "removing the account removed its refresh token too"
 # Anchored so it cannot match the refresh line. Unanchored it did, and the
@@ -697,10 +701,10 @@ printf %s "$PLAIN_SENTINEL" | "$Rime" secret add account.nextcloud.home \
 out="$("$Rime" account rm nextcloud.home 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "removing an account that has no refresh token succeeds" \
                 || bad "removing an account that has no refresh token succeeds (rc=${rc})"
-printf '%s' "$out" | grep -q 'still stored' \
+printf '%s' "$out" | pipe_has 'still stored' \
     && bad "and says nothing about a refresh token that never existed" \
     || ok "and says nothing about a refresh token that never existed"
-printf '%s' "$("$Rime" secret list 2>&1)" | grep -q 'account.nextcloud.home' \
+printf '%s' "$("$Rime" secret list 2>&1)" | pipe_has 'account.nextcloud.home' \
     && bad "and the credential is gone" || ok "and the credential is gone"
 
 # ── a Google account's one grantable scope, through the real daemon ──────────

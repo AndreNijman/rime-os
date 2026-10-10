@@ -35,6 +35,10 @@
 #      ./tests/test-agent-worktrees.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` for the reason test-agent-inject.sh documents: this suite counts
 # failures rather than aborting, and several assertions run commands that exit
 # non-zero on purpose.
@@ -189,7 +193,7 @@ git_q -C "$WT_ALIEN" commit -qm "an unrelated history"
 section "the fixture is genuinely conflicted"
 probe="$(git_q -C "$PROJ" merge-tree --write-tree --name-only main agent/clash 2>&1)"
 probe_rc=$?
-if [ "$probe_rc" -eq 1 ] && printf '%s' "$probe" | grep -qx 'f.txt'; then
+if [ "$probe_rc" -eq 1 ] && printf '%s' "$probe" | pipe_has -x 'f.txt'; then
     ok "git itself says main and agent/clash conflict in f.txt"
 else
     bad "git itself says main and agent/clash conflict in f.txt"
@@ -423,7 +427,7 @@ fi
 # reads as "ready" and costs somebody a broken merge.
 state="$(jq_get "${WORK}/status.json" alien 'w["conflicts"]["state"]')"
 reason="$(jq_get "${WORK}/status.json" alien 'w["conflicts"].get("reason","")')"
-if [ "$state" = "unknown" ] && printf '%s' "$reason" | grep -qi "unrelated histories"; then
+if [ "$state" = "unknown" ] && printf '%s' "$reason" | pipe_has -i "unrelated histories"; then
     ok "an unmergeable history is 'unknown' and carries git's reason (${reason})"
 else
     bad "an unmergeable history is 'unknown' and carries git's reason"
@@ -431,7 +435,7 @@ else
 fi
 ready="$(jq_get "${WORK}/status.json" alien 'w["ready"]["ready_to_propose"]')"
 blockers="$(jq_get "${WORK}/status.json" alien '" | ".join(w["ready"]["blockers"])')"
-if [ "$ready" = "False" ] && printf '%s' "$blockers" | grep -q "conflict state unknown"; then
+if [ "$ready" = "False" ] && printf '%s' "$blockers" | pipe_has "conflict state unknown"; then
     ok "an unknown conflict state is never treated as ready"
 else
     bad "an unknown conflict state is never treated as ready"
@@ -486,7 +490,7 @@ fi
 
 ready="$(jq_get "${WORK}/status.json" clash 'w["ready"]["ready_to_propose"]')"
 blockers="$(jq_get "${WORK}/status.json" clash '" | ".join(w["ready"]["blockers"])')"
-if [ "$ready" = "False" ] && printf '%s' "$blockers" | grep -q "conflict in 1 file"; then
+if [ "$ready" = "False" ] && printf '%s' "$blockers" | pipe_has "conflict in 1 file"; then
     ok "the conflicted worktree is not ready, and says why (${blockers})"
 else
     bad "the conflicted worktree is not ready, and says why"
@@ -562,7 +566,7 @@ else
     echo "      state='${tests}'" >&2
 fi
 blockers="$(jq_get "${WORK}/failed.json" clash '" | ".join(w["ready"]["blockers"])')"
-if printf '%s' "$blockers" | grep -q "the last test run Rime observed failed"; then
+if printf '%s' "$blockers" | pipe_has "the last test run Rime observed failed"; then
     ok "an observed failure blocks readiness, in those words"
 else
     bad "an observed failure blocks readiness, in those words"
@@ -630,7 +634,7 @@ fi
 # answering with a second copy of the repository.
 wt_slug="$(ls "$PROJECTS" | sed -n 's/\.json$//p' | grep -v "^${SLUG}$" | head -1)"
 out="$("$Rime" agent worktrees --project "$wt_slug" --json 2>&1)"
-if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "linked git worktree"; then
+if [ $? -ne 0 ] && printf '%s' "$out" | pipe_has "linked git worktree"; then
     ok "asking for a linked worktree by slug is refused with the reason"
 else
     bad "asking for a linked worktree by slug is refused with the reason"
@@ -761,7 +765,7 @@ fi
 # A slug that IS a slug but names nothing is a different refusal, and it must
 # still be a refusal rather than a silent empty listing.
 out="$("$Rime" agent worktrees --project no-such-project --json 2>&1)"
-if [ $? -ne 0 ] && printf '%s' "$out" | grep -q "no remembered project"; then
+if [ $? -ne 0 ] && printf '%s' "$out" | pipe_has "no remembered project"; then
     ok "an unknown slug is refused by name, not answered with an empty list"
 else
     bad "an unknown slug is refused by name, not answered with an empty list"
@@ -770,7 +774,7 @@ fi
 
 # ...and the real slug still works, so the guard did not simply break the verb.
 out="$("$Rime" agent worktrees --project "$SLUG" --json 2>&1)"
-if [ $? -eq 0 ] && printf '%s' "$out" | grep -q '"name": "clash"'; then
+if [ $? -eq 0 ] && printf '%s' "$out" | pipe_has '"name": "clash"'; then
     ok "the fixture's own slug still answers"
 else
     bad "the fixture's own slug still answers"
@@ -781,7 +785,7 @@ fi
 section "the table a person reads"
 out="$("$Rime" agent worktrees 2>&1)"
 printf '%s\n' "$out" | sed 's/^/      | /'
-if printf '%s' "$out" | grep -q "WORKTREE" && printf '%s' "$out" | grep -q "clash"; then
+if printf '%s' "$out" | pipe_has "WORKTREE" && printf '%s' "$out" | pipe_has "clash"; then
     ok "the table lists the worktrees under a header"
 else
     bad "the table lists the worktrees under a header"
@@ -789,7 +793,7 @@ fi
 # The claim this feature must never make. "TESTS" in a column heading invites
 # "the tests pass"; the footer is where that is corrected, so its absence is a
 # failure and not a cosmetic one.
-if printf '%s' "$out" | grep -q "last run Rime observed"; then
+if printf '%s' "$out" | pipe_has "last run Rime observed"; then
     ok "the table says the test column is the last run Rime observed, not a fresh result"
 else
     bad "the table says the test column is the last run Rime observed, not a fresh result"

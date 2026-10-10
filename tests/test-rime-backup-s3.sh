@@ -38,6 +38,10 @@
 #      ./tests/test-rime-backup-s3.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 set +e
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -190,7 +194,7 @@ git -C "$PROJECT" init -q 2>/dev/null
 (cd "$PROJECT" && "$Rime" secret grant aws s3.object.read) >/dev/null 2>&1
 (cd "$PROJECT" && "$Rime" secret grant aws s3.object.write) >/dev/null 2>&1
 granted="$("$Rime" secret grants 2>&1)"
-printf '%s' "$granted" | grep -q "s3.object.write" \
+printf '%s' "$granted" | pipe_has "s3.object.write" \
     && ok "the two S3 capabilities are granted for this project" \
     || { bad "the two S3 capabilities are granted for this project"
          printf '      %s\n' "$granted"; finish; }
@@ -204,7 +208,7 @@ if [ $? -eq 0 ]; then
     bad "a bucket the project did not declare is refused"
 else
     ok "a bucket the project did not declare is refused"
-    printf '%s' "$out" | grep -q "somebody-elses-bucket" \
+    printf '%s' "$out" | pipe_has "somebody-elses-bucket" \
         && ok "the refusal names the bucket that was asked for" \
         || { bad "the refusal names the bucket that was asked for"
              printf '      %s\n' "$out"; }
@@ -375,11 +379,11 @@ else
     # The mechanism, not the wording: the refusal has to say the transfer did
     # not finish and name curl's exit code, so this still means something if
     # curl renumbers or rewords "Maximum file size exceeded".
-    printf '%s' "$out" | grep -q "did not finish" \
+    printf '%s' "$out" | pipe_has "did not finish" \
         && ok "and the refusal says the transfer did not finish" \
         || { bad "and the refusal says the transfer did not finish"
              printf '      %s\n' "$out"; }
-    printf '%s' "$out" | grep -q "curl exited 63" \
+    printf '%s' "$out" | pipe_has "curl exited 63" \
         && ok "and names the exit code, so the abort was before the body" \
         || { bad "and names the exit code, so the abort was before the body"
              printf '      %s\n' "$out"; }
@@ -394,7 +398,7 @@ grep -q "overpromising for ${BUCKET}/${OVERSIZE_KEY}" "${WORK}/double.log" \
 
 # Nothing partial came back. The double sent four kilobytes of `x` before it
 # was cut off, and none of them may reach the caller as an object.
-printf '%s' "$out" | grep -q "xxxxxxxxxxxxxxxx" \
+printf '%s' "$out" | pipe_has "xxxxxxxxxxxxxxxx" \
     && bad "no part of the truncated object came back" \
     || ok "no part of the truncated object came back"
 
@@ -416,7 +420,7 @@ out="$("$Rime" backup list --project "$PROJECT" 2>&1)"
 after="$(grep -c REFUSED "${WORK}/double.log")"
 if [ "$after" -gt "$before" ]; then
     ok "the double refused a request signed with the wrong secret"
-    grep "REFUSED" "${WORK}/double.log" | tail -1 | grep -q "signature" \
+    grep "REFUSED" "${WORK}/double.log" | tail -1 | pipe_has "signature" \
         && ok "and refused it on the signature, not on something incidental" \
         || bad "and refused it on the signature, not on something incidental"
 else

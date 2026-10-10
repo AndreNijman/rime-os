@@ -39,6 +39,10 @@
 #  Run from anywhere: ./tests/test-windows-installer.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 2
 
 BUILDER=windows-installer/build-windows.sh
@@ -109,7 +113,7 @@ elif [ -n "$missing" ]; then
 else
     ok "every declared IOCTL code ($(printf '%s\n' "$declared" | wc -l)) is on the allowlist"
 fi
-if grep -rlE 'IOCTL_DISK_UPDATE_PROPERTIES' "$W" | grep -qv "^$W/winwrite.rs$"; then
+if grep -rlE 'IOCTL_DISK_UPDATE_PROPERTIES' "$W" | pipe_has -v "^$W/winwrite.rs$"; then
     bad "IOCTL_DISK_UPDATE_PROPERTIES appears outside winwrite.rs"
 else
     ok "the one write-side IOCTL is confined to winwrite.rs"
@@ -380,7 +384,7 @@ else
 
     if grep -q 'ERASE AND INSTALL' "$guest_log" &&
        sed -n '/ERASE AND INSTALL/,/Disk numbers change/p' "$guest_log" |
-           grep -q 'PhysicalDrive'; then
+           pipe_has 'PhysicalDrive'; then
         bad "guest: the confirmation text named a device index"
     else
         ok "guest: the confirmation text contains no device index"

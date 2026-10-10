@@ -10,6 +10,10 @@
 #      ./tests/test-rime-display.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` is deliberate and load-bearing. This suite COUNTS failures rather
 # than aborting on them, and several assertions run commands that exit non-zero
 # on purpose — a refusal, a guard firing, a bad argument. GitHub Actions invokes
@@ -38,7 +42,7 @@ python3 -c "import ast; ast.parse(open('$GEN').read())" \
 
 st="$(python3 "$GEN" --self-test 2>&1)"
 printf '%s\n' "$st" | sed 's/^/      /'
-printf '%s\n' "$st" | grep -q '^FAIL' \
+printf '%s\n' "$st" | pipe_has '^FAIL' \
     && bad "the generator self-test passes" || ok "the generator self-test passes"
 
 # Fake compositor tools, each recording its invocation. Two jobs:
@@ -86,11 +90,11 @@ JSON
 # The validation notes are printed before the action branch is reached, so they
 # are readable even though the guard then refuses this `apply`.
 notes="$(run_gen "$H" apply --dry-run 2>&1)"
-printf '%s\n' "$notes" | grep -q 'scale 99' \
+printf '%s\n' "$notes" | pipe_has 'scale 99' \
     && ok "an out-of-range scale is corrected and reported" || bad "an out-of-range scale is corrected and reported"
-printf '%s\n' "$notes" | grep -q "unknown transform" \
+printf '%s\n' "$notes" | pipe_has "unknown transform" \
     && ok "an unknown transform is corrected and reported" || bad "an unknown transform is corrected and reported"
-printf '%s\n' "$notes" | grep -q 'no name' \
+printf '%s\n' "$notes" | pipe_has 'no name' \
     && ok "an entry with no output name is skipped and reported" || bad "an entry with no output name is skipped and reported"
 
 section "persistence is written for both backends"
@@ -171,7 +175,7 @@ cp "$H2/.config/rime-shell/display.json" "$H6/.config/rime-shell/display.json"
 out="$(env -u HYPRLAND_INSTANCE_SIGNATURE -u NIRI_SOCKET -u XDG_CURRENT_DESKTOP \
         -u WAYLAND_DISPLAY PATH="$FAKE" HOME="$H6" RIME_DISPLAY_NO_LIVE=1 \
         "$PY" "$GEN" save 2>&1)"
-printf '%s' "$out" | grep -qE "Traceback|FileNotFoundError" \
+printf '%s' "$out" | pipe_has -E "Traceback|FileNotFoundError" \
     && { bad "no traceback when a helper is missing"; printf '      %s\n' "$out" | head -3; } \
     || ok "no traceback when a helper is missing"
 [ -s "$H6/.config/kanshi/config" ] \
@@ -181,7 +185,7 @@ printf '%s' "$out" | grep -qE "Traceback|FileNotFoundError" \
 section "an empty model does nothing"
 H3="${WORK}/home3"; mkdir -p "$H3/.config/rime-shell"
 echo '{"outputs":[]}' > "$H3/.config/rime-shell/display.json"
-run_gen "$H3" save 2>&1 | grep -q 'nothing to do' \
+run_gen "$H3" save 2>&1 | pipe_has 'nothing to do' \
     && ok "an empty model is a no-op and says so" || bad "an empty model is a no-op and says so"
 [ ! -e "$H3/.config/kanshi/config" ] \
     && ok "an empty model writes no persistence" || bad "an empty model writes no persistence"
@@ -189,7 +193,7 @@ run_gen "$H3" save 2>&1 | grep -q 'nothing to do' \
 section "a corrupt model is refused, not guessed at"
 H4="${WORK}/home4"; mkdir -p "$H4/.config/rime-shell"
 printf '{ not json' > "$H4/.config/rime-shell/display.json"
-run_gen "$H4" save 2>&1 | grep -q 'not usable' \
+run_gen "$H4" save 2>&1 | pipe_has 'not usable' \
     && ok "a corrupt model is reported" || bad "a corrupt model is reported"
 
 section "a test can never reach the live compositor"
@@ -217,7 +221,7 @@ fi
 
 rm -f "${WORK}/called"
 out="$(PATH="$FAKE" HOME="$H5" RIME_DISPLAY_NO_LIVE=1 "$PY" "$GEN" apply 2>&1)"
-printf '%s' "$out" | grep -q 'refusing to touch the live compositor' \
+printf '%s' "$out" | pipe_has 'refusing to touch the live compositor' \
     && ok "apply refuses when RIME_DISPLAY_NO_LIVE is set" \
     || bad "apply refuses when RIME_DISPLAY_NO_LIVE is set"
 mutating \
@@ -331,7 +335,7 @@ fi
 # model, so it is refused by name.
 S1="$(np_home np-save)"
 out="$(np_run "$S1" save --no-persist)"; rc=$?
-{ [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q -- '--no-persist applies to `apply`'; } \
+{ [ "$rc" -eq 2 ] && printf '%s' "$out" | pipe_has -- '--no-persist applies to `apply`'; } \
     && ok "save --no-persist is refused, not silently ignored" \
     || bad "save --no-persist is refused, not silently ignored (rc=${rc})"
 [ -e "$S1/.config/kanshi/config" ] \
@@ -341,7 +345,7 @@ out="$(np_run "$S1" save --no-persist)"; rc=$?
 # Rime Shell and the OS image land independently, so the shell must be able to
 # ask whether the engine it found understands the flag before passing it. --help
 # is that answer; an engine without the flag exits 2 on the flag itself.
-PATH="$NPBIN" HOME="$NP" "$PY" "$GEN" --help 2>&1 | grep -q -- '--no-persist' \
+PATH="$NPBIN" HOME="$NP" "$PY" "$GEN" --help 2>&1 | pipe_has -- '--no-persist' \
     && ok "--no-persist is discoverable in --help (the shell probes for it)" \
     || bad "--no-persist is discoverable in --help (the shell probes for it)"
 
@@ -615,10 +619,10 @@ rm -f "$CROOT/bin/xcalib"
 
 # ── colord absent is a state, not a crash ───────────────────────────────────
 nc="$(colour_nocolord Hyprland color 2>/dev/null)"
-printf '%s' "$nc" | jqp 'd["colord"]["available"]' | grep -qx False \
+printf '%s' "$nc" | jqp 'd["colord"]["available"]' | pipe_has -x False \
     && ok "with no colormgr on PATH, colord is reported unavailable" \
     || bad "with no colormgr on PATH, colord is reported unavailable"
-printf '%s' "$nc" | jqp 'len(d["outputs"])' | grep -qx 3 \
+printf '%s' "$nc" | jqp 'len(d["outputs"])' | pipe_has -x 3 \
     && ok "the outputs and their EDID verdicts survive colord being absent" \
     || bad "the outputs and their EDID verdicts survive colord being absent"
 
@@ -641,11 +645,11 @@ grep -q "device-make-profile-default apex-display-APX-PANEL-SDR-SN0001 icc-with"
 
 after="$(colour Hyprland color 2>/dev/null)"
 printf '%s' "$after" | jqp '[o["profile"]["title"] for o in d["outputs"] if o["name"]=="eDP-1"][0]' \
-    | grep -qx "Fixture With Curve" \
+    | pipe_has -x "Fixture With Curve" \
     && ok "the assignment is read back by the same verb the page uses" \
     || bad "the assignment is read back by the same verb the page uses"
 printf '%s' "$after" | jqp '[o["profile"] for o in d["outputs"] if o["name"]=="DP-2"][0]' \
-    | grep -qx "None" \
+    | pipe_has -x "None" \
     && ok "an output with no assignment says so rather than inheriting one" \
     || bad "an output with no assignment says so rather than inheriting one"
 
@@ -658,7 +662,7 @@ out2="$(colour Hyprland color-assign eDP-1 icc-none 2>&1)"; rc2=$?
 grep -q "create-device" "${CM_STATE}.calls" \
     && bad "the second assign does not try to create the device again" \
     || ok "the second assign does not try to create the device again"
-printf '%s' "$out2" | grep -q "carries no vcgt" \
+printf '%s' "$out2" | pipe_has "carries no vcgt" \
     && ok "assigning a profile with no curve says there is no curve to load" \
     || bad "assigning a profile with no curve says there is no curve to load"
 
@@ -674,10 +678,10 @@ mod="$CROOT/home/.config/hypr/rime/monitors.lua"
 grep -qF "icc = \"$CROOT/icc/no-curve.icc\"" "$mod" 2>/dev/null \
     && ok "a Hyprland assignment writes the profile into the output's monitor rule" \
     || bad "a Hyprland assignment writes the profile into the output's monitor rule"
-grep -F 'output = "eDP-1"' "$mod" 2>/dev/null | grep -qF 'scale = 1.5' \
+grep -F 'output = "eDP-1"' "$mod" 2>/dev/null | pipe_has -F 'scale = 1.5' \
     && ok "the rule keeps the saved layout around the profile" \
     || bad "the rule keeps the saved layout around the profile"
-colour labwc color-assign eDP-1 icc-with 2>&1 | grep -q "nothing applies an ICC profile" \
+colour labwc color-assign eDP-1 icc-with 2>&1 | pipe_has "nothing applies an ICC profile" \
     && ok "off Hyprland the page is told the profile does not reach the screen" \
     || bad "off Hyprland the page is told the profile does not reach the screen"
 rm -f "$CROOT/home/.config/rime-shell/display.json" "$mod"
@@ -693,16 +697,16 @@ kinds="$(printf '%s' "$state" | jqp 'sorted(p["id"] for p in d["profiles"])')"
     && ok "a named-colour profile is not offered as a monitor profile" \
     || bad "a named-colour profile is not offered as a monitor profile (got $kinds)"
 out6="$(colour Hyprland color-assign DP-2 icc-spot 2>&1)"; rc6=$?
-{ [ "$rc6" -eq 1 ] && printf '%s' "$out6" | grep -q "no colord profile matches"; } \
+{ [ "$rc6" -eq 1 ] && printf '%s' "$out6" | pipe_has "no colord profile matches"; } \
     && ok "assigning a named-colour profile to a display is refused" \
     || bad "assigning a named-colour profile to a display is refused (rc=$rc6)"
 
 out3="$(colour Hyprland color-assign eDP-1 nonsuch 2>&1)"; rc3=$?
-{ [ "$rc3" -eq 1 ] && printf '%s' "$out3" | grep -q "no colord profile matches"; } \
+{ [ "$rc3" -eq 1 ] && printf '%s' "$out3" | pipe_has "no colord profile matches"; } \
     && ok "an unknown profile is refused and named" \
     || bad "an unknown profile is refused and named (rc=$rc3)"
 out4="$(colour_nocolord Hyprland color-assign eDP-1 icc-with 2>&1)"; rc4=$?
-{ [ "$rc4" -eq 1 ] && printf '%s' "$out4" | grep -q "colord is not answering"; } \
+{ [ "$rc4" -eq 1 ] && printf '%s' "$out4" | pipe_has "colord is not answering"; } \
     && ok "assignment without colord fails loudly" \
     || bad "assignment without colord fails loudly (rc=$rc4)"
 # shellcheck disable=SC2034  # unlike out1..out4 this one is never grepped: the

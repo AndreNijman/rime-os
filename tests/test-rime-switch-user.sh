@@ -34,6 +34,10 @@
 #      ./tests/test-rime-switch-user.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # +e deliberately, like every other suite here: CI invokes a suite as
 # `bash -e {0}`, and under -e an assignment from a command that exits non-zero
 # ends the run silently, mid-section. This suite COUNTS failures.
@@ -303,22 +307,22 @@ section "switch list"
 fix_standard list
 out="$(run_engine list 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "list exits 0" || bad "list exits 0" "rc=$rc: $out"
-printf '%s\n' "$out" | grep -q 'andre (this session)' \
+printf '%s\n' "$out" | pipe_has 'andre (this session)' \
     && ok "list marks the caller's own session" \
     || bad "list marks the caller's own session" "$out"
-printf '%s\n' "$out" | grep -qE '^bob +session +7 +2 ' \
+printf '%s\n' "$out" | pipe_has -E '^bob +session +7 +2 ' \
     && ok "list shows another account's session on this seat, with its VT" \
     || bad "list shows another account's session on this seat, with its VT" "$out"
-printf '%s\n' "$out" | grep -qE '^alice +account' \
+printf '%s\n' "$out" | pipe_has -E '^alice +account' \
     && ok "list shows an account with no session as an account" \
     || bad "list shows an account with no session as an account" "$out"
-printf '%s\n' "$out" | grep -q 'locked-out' \
+printf '%s\n' "$out" | pipe_has 'locked-out' \
     && bad "list hides an account that cannot start a session" "$out" \
     || ok "list hides an account that cannot start a session"
-printf '%s\n' "$out" | grep -q 'greetd' \
+printf '%s\n' "$out" | pipe_has 'greetd' \
     && bad "list hides system accounts" "$out" \
     || ok "list hides system accounts"
-printf '%s\n' "$out" | grep -qE 'manager' \
+printf '%s\n' "$out" | pipe_has -E 'manager' \
     && bad "list hides the user-manager sessions logind keeps per account" "$out" \
     || ok "list hides the user-manager sessions logind keeps per account"
 
@@ -327,7 +331,7 @@ fix_standard list-otherseat
 fix_session 9 alice 1002 seat1 3 user online no
 fix_seat 4
 out="$(run_engine list 2>&1)"
-printf '%s\n' "$out" | grep -qE '^alice +session' \
+printf '%s\n' "$out" | pipe_has -E '^alice +session' \
     && bad "list does not offer a session on another seat as a session" "$out" \
     || ok "list does not offer a session on another seat as a session"
 
@@ -357,14 +361,14 @@ if [ -n "$lock_line" ] && [ -n "$act_line" ] && [ "$lock_line" -lt "$act_line" ]
 else
     bad "this session is locked BEFORE the seat moves" "lock at line ${lock_line:-none}, activate at line ${act_line:-none}"
 fi
-printf '%s\n' "$out" | grep -q 'VT 2' \
+printf '%s\n' "$out" | pipe_has 'VT 2' \
     && ok "it says which VT the target is on" \
     || bad "it says which VT the target is on" "$out"
 
 fix_standard to-bob-plan
 out="$(run_engine to bob --plan 2>&1)"; rc=$?
 [ "$rc" -eq 0 ] && ok "--plan exits 0" || bad "--plan exits 0" "rc=$rc: $out"
-printf '%s\n' "$out" | grep -q 'would run:.*loginctl activate 7' \
+printf '%s\n' "$out" | pipe_has 'would run:.*loginctl activate 7' \
     && ok "--plan prints the activate it would run" \
     || bad "--plan prints the activate it would run" "$out"
 # Reads are allowed under --plan and are in the log too: a plan that could not
@@ -388,7 +392,7 @@ out="$(run_engine to bob 2>&1)"; rc=$?
 grep -q 'loginctl activate' "$FIX/state/actions" \
     && bad "a session that will not lock does not move the seat" "$(actions)" \
     || ok "a session that will not lock does not move the seat"
-printf '%s\n' "$out" | grep -q 'LockedHint' \
+printf '%s\n' "$out" | pipe_has 'LockedHint' \
     && ok "the refusal names the hint it waited on" \
     || bad "the refusal names the hint it waited on" "$out"
 
@@ -399,7 +403,7 @@ out="$(run_engine to bob --no-lock 2>&1)"; rc=$?
 grep -q 'loginctl lock-session' "$FIX/state/actions" \
     && bad "--no-lock does not even ask for the lock" "$(actions)" \
     || ok "--no-lock does not even ask for the lock"
-printf '%s\n' "$out" | grep -qi 'unlocked' \
+printf '%s\n' "$out" | pipe_has -i 'unlocked' \
     && ok "--no-lock says what it is leaving behind" \
     || bad "--no-lock says what it is leaving behind" "$out"
 
@@ -425,14 +429,14 @@ out="$(run_engine to greetd 2>&1)"; rc=$?
 fix_standard deny-nologin
 out="$(run_engine to locked-out 2>&1)"; rc=$?
 [ "$rc" -eq 2 ] && ok "an account with a nologin shell is refused" || bad "an account with a nologin shell is refused" "rc=$rc: $out"
-printf '%s\n' "$out" | grep -q 'nologin' \
+printf '%s\n' "$out" | pipe_has 'nologin' \
     && ok "the nologin refusal says which shell" || bad "the nologin refusal says which shell" "$out"
 
 fix_standard deny-otherseat
 fix_session 9 alice 1002 seat1 3 user online no
 out="$(run_engine to alice 2>&1)"; rc=$?
 [ "$rc" -eq 2 ] && ok "a target on another seat is refused" || bad "a target on another seat is refused" "rc=$rc: $out"
-printf '%s\n' "$out" | grep -q 'seat-local' \
+printf '%s\n' "$out" | pipe_has 'seat-local' \
     && ok "the other-seat refusal says why" || bad "the other-seat refusal says why" "$out"
 grep -q 'sudo' "$FIX/state/actions" \
     && bad "a target on another seat does not fall through to a login screen" "$(actions)" \
@@ -463,7 +467,7 @@ user = "bob"
 K
 out="$(run_engine to alice 2>&1)"; rc=$?
 [ "$rc" -eq 2 ] && ok "a kiosk config refuses the switch" || bad "a kiosk config refuses the switch" "rc=$rc: $out"
-printf '%s\n' "$out" | grep -qi 'kiosk' \
+printf '%s\n' "$out" | pipe_has -i 'kiosk' \
     && ok "the kiosk refusal says so" || bad "the kiosk refusal says so" "$out"
 grep -qE 'activate|sudo' "$FIX/state/actions" \
     && bad "a kiosk config runs nothing" "$(actions)" \
@@ -595,7 +599,7 @@ out="$(HELPER_SUDO_UID=1001 run_helper 2>&1)"; rc=$?
 [ "$rc" -eq 2 ] && ok "a caller who does not hold the seat is refused" || bad "a caller who does not hold the seat is refused" "rc=$rc: $out"
 grep -q 'systemctl start' "$FIX/state/actions" \
     && bad "a refused caller starts nothing" "$(actions)" || ok "a refused caller starts nothing"
-printf '%s\n' "$out" | grep -q 'at the keyboard' \
+printf '%s\n' "$out" | pipe_has 'at the keyboard' \
     && ok "the refusal says what the rule is" || bad "the refusal says what the rule is" "$out"
 
 fix_standard helper-atseat
@@ -610,7 +614,7 @@ out="$(run_helper 2>&1)"; rc=$?
 fix_standard helper-reuse
 fix_session 12 greetd 987 seat0 7 greeter online no
 out="$(run_helper 2>&1)"; rc=$?
-printf '%s\n' "$out" | grep -qx 'vt=7' && ok "the helper reuses an open greeter" || bad "the helper reuses an open greeter" "$out"
+printf '%s\n' "$out" | pipe_has -x 'vt=7' && ok "the helper reuses an open greeter" || bad "the helper reuses an open greeter" "$out"
 grep -q 'systemctl start' "$FIX/state/actions" \
     && bad "reusing an open greeter starts no second greetd" "$(actions)" || ok "reusing an open greeter starts no second greetd"
 
@@ -627,7 +631,7 @@ vt="$(printf '%s\n' "$out" | sed -n 's/^vt=//p')"
 fix_standard helper-unitreuse
 printf 'rime-switch-greeter@9.service loaded active running Rime fast-user-switch login screen on VT 9\n' > "$FIX/state/units"
 out="$(run_helper 2>&1)"
-printf '%s\n' "$out" | grep -qx 'vt=9' \
+printf '%s\n' "$out" | pipe_has -x 'vt=9' \
     && ok "a unit that is up but has no session yet is reused" || bad "a unit that is up but has no session yet is reused" "$out"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -651,7 +655,7 @@ printf 'stub-engine got:%s\n' "$(printf ' %s' "$@")"
 STUB
 chmod 0755 "$FIX/stub-engine"
 out="$(RIME_SWITCH_ENGINE="$FIX/stub-engine" bash "$USER_ENGINE" switch to bob --plan 2>&1)"; rc=$?
-[ "$rc" -eq 0 ] && printf '%s\n' "$out" | grep -qx 'stub-engine got: to bob --plan' \
+[ "$rc" -eq 0 ] && printf '%s\n' "$out" | pipe_has -x 'stub-engine got: to bob --plan' \
     && ok "rime user switch execs the switch engine with the argv unchanged" \
     || bad "rime user switch execs the switch engine with the argv unchanged" "rc=$rc: $out"
 usage_out="$(bash "$USER_ENGINE" 2>&1)"

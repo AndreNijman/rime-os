@@ -46,6 +46,10 @@
 #  Usage: tests/check-core-rebuild-selector.sh [path/to/build-image.yml]
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 1
 
 WORKFLOW="${1:-.github/workflows/build-image.yml}"
@@ -299,7 +303,7 @@ PY
 # decision, so a case cannot pass on a different arm than the one it is for.
 expect() {
     local what="$1" want="$2" got="$3" reason="${4:-}"
-    if [ -n "$reason" ] && ! grep '^core rebuild:' "$WORK/log" | grep -qF -- "$reason"; then
+    if [ -n "$reason" ] && ! grep '^core rebuild:' "$WORK/log" | pipe_has -F -- "$reason"; then
         got="$got reason=[$(grep -m1 '^core rebuild:' "$WORK/log" | sed 's/^core rebuild: //')]"
         want="$want reason~[$reason]"
     fi

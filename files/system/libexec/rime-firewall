@@ -117,7 +117,7 @@ ruleset_state() {
     out="$(nft list table $TABLE 2>&1)"; rc=$?
     if [ "$rc" -eq 0 ]; then
         printf 'loaded\n'
-    elif printf '%s' "$out" | grep -qiE 'permission denied|operation not permitted'; then
+    elif printf '%s' "$out" | grep -iE 'permission denied|operation not permitted' >/dev/null; then
         printf 'unreadable\n'
     else
         printf 'notloaded\n'

@@ -43,6 +43,10 @@
 #      ./tests/test-secret-at-rest.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 # Counts failures rather than aborting: several assertions run commands that
 # are SUPPOSED to fail (that is the whole point of an EACCES test), and under
 # `bash -e {0}` — which GitHub Actions uses — the first of them would end the
@@ -173,13 +177,13 @@ daemon_uid="$(ps -o uid= -p "$SECRETD_PID" 2>/dev/null | tr -d ' ')"
 # And it says so on the wire, which is what stops a test instance from looking
 # like a boundary. `warn_if_unprotected` prints only when protected is false.
 warn="$("$Rime" secret list 2>&1 >/dev/null)"
-printf '%s' "$warn" | grep -q "not running as root" \
+printf '%s' "$warn" | pipe_has "not running as root" \
     && bad "the service reports itself protected" \
     || ok "the service reports itself protected"
 
 section "storing a credential as the owner"
 printf %s "$SENTINEL" | "$Rime" secret add demo --host 127.0.0.1 >/dev/null 2>&1
-"$Rime" secret list 2>/dev/null | grep -q demo \
+"$Rime" secret list 2>/dev/null | pipe_has demo \
     && ok "the credential was stored through the socket" \
     || { bad "the credential was stored through the socket"
          sed 's/^/      /' "${WORK}/secretd.log"; }
@@ -217,7 +221,7 @@ section "at rest: the owner's own uid is refused by the kernel"
 
 err="$(cat "$secret_file" 2>&1 >/dev/null)"
 rc=$?
-[ "$rc" != 0 ] && printf '%s' "$err" | grep -qi "permission denied" \
+[ "$rc" != 0 ] && printf '%s' "$err" | pipe_has -i "permission denied" \
     && ok "opening the value file as uid ${ME} is denied" \
     || bad "opening the value file as uid ${ME} is denied (rc=${rc}, said '${err}')"
 
@@ -226,7 +230,7 @@ rc=$?
 # the check above and still leak the list.
 err="$(ls "$userdir" 2>&1 >/dev/null)"
 rc=$?
-[ "$rc" != 0 ] && printf '%s' "$err" | grep -qi "permission denied" \
+[ "$rc" != 0 ] && printf '%s' "$err" | pipe_has -i "permission denied" \
     && ok "listing the owner's store directory as uid ${ME} is denied" \
     || bad "listing the owner's store directory as uid ${ME} is denied (rc=${rc})"
 

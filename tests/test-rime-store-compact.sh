@@ -24,6 +24,10 @@
 #  RIME_COMPACT_REQUIRE=1 (set in CI) turns that skip into a failure.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")" || exit 1
 REPO=$(cd .. && pwd)
 ENGINE="$REPO/files/system/libexec/rime-store-compact"
@@ -46,12 +50,12 @@ is "it compacts exactly the OS and Flatpak object stores" \
 # Image pruning acts on the RUNNING machine (ostree takes --sysroot /), so it
 # must be gated on being pointed at the real /sysroot. Checked by reading, not
 # by a mutant: a mutant run by this suite on a Rime machine would prune it.
-if grep -v '^[[:space:]]*#' "$ENGINE" | grep -qF '[ "$SYSROOT" = /sysroot ] && [ -e /run/ostree-booted ] || return 0'; then
+if grep -v '^[[:space:]]*#' "$ENGINE" | pipe_has -F '[ "$SYSROOT" = /sysroot ] && [ -e /run/ostree-booted ] || return 0'; then
     ok "image pruning runs only against the machine's own /sysroot"
 else
     bad "image pruning runs only against the machine's own /sysroot"
 fi
-if grep -v '^[[:space:]]*#' "$ENGINE" | grep -q -- "-name '\*\.file'"; then
+if grep -v '^[[:space:]]*#' "$ENGINE" | pipe_has -- "-name '\*\.file'"; then
     ok "only content objects (*.file) are rewritten, never ostree metadata"
 else
     bad "only content objects (*.file) are rewritten, never ostree metadata"
@@ -130,7 +134,7 @@ sync
 declare -A sum
 for f in "$a" "$b" "$c" "$r" "$t" "$pre" "$mix" "$f1" "$meta"; do sum[$f]=$(digest "$f"); done
 pre_at=$(physical "$pre"); mix_at=$(physical "$mix"); meta_at=$(physical "$meta")
-if $SUDO filefrag -v "$mix" | grep -q encoded && $SUDO filefrag -v "$mix" | grep -E '^ *[0-9]+:' | grep -qv encoded; then
+if $SUDO filefrag -v "$mix" | pipe_has encoded && $SUDO filefrag -v "$mix" | grep -E '^ *[0-9]+:' | pipe_has -v encoded; then
     ok "the fixture has a mixed object: encoded extents beside plain ones"
 else
     bad "the fixture has a mixed object: encoded extents beside plain ones"

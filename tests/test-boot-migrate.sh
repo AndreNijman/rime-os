@@ -20,6 +20,10 @@
 #  line it guards is changed.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIG="$REPO/files/system/libexec/rime-boot-migrate"
@@ -78,12 +82,12 @@ fi
 stage_body() {
     awk '/^cmd_stage\(\) \{/{inside=1} inside{print} inside && /^\}/{exit}' "$CODE"
 }
-if stage_body | grep -q 'efibootmgr'; then
+if stage_body | pipe_has 'efibootmgr'; then
     bad "cmd_stage calls efibootmgr — the stage must change no boot variable"
 else
     ok "cmd_stage calls efibootmgr nowhere"
 fi
-if stage_body | grep -qE 'bootctl[[:space:]]+(install|update)|bootupctl|grub2-install'; then
+if stage_body | pipe_has -E 'bootctl[[:space:]]+(install|update)|bootupctl|grub2-install'; then
     bad "cmd_stage installs a bootloader with a tool that writes a live boot path"
 else
     ok "cmd_stage installs no bootloader of its own"
@@ -93,12 +97,12 @@ fi
 confirm_body() {
     awk '/^cmd_confirm\(\) \{/{inside=1} inside{print} inside && /^\}/{exit}' "$CODE"
 }
-if confirm_body | grep -q 'efibootmgr --bootorder'; then
+if confirm_body | pipe_has 'efibootmgr --bootorder'; then
     ok "BootOrder is written by cmd_confirm"
 else
     bad "cmd_confirm does not write BootOrder"
 fi
-if grep -c 'efibootmgr --bootorder' "$CODE" | grep -qx 1; then
+if grep -c 'efibootmgr --bootorder' "$CODE" | pipe_has -x 1; then
     ok "BootOrder is written in exactly one place"
 else
     bad "BootOrder is written in more than one place"
@@ -481,7 +485,7 @@ fi
 commit_body() {
     awk '/^cmd_commit\(\) \{/{inside=1} inside{print} inside && /^\}/{exit}' "$CODE"
 }
-if commit_body | grep -q 'committed-boot'; then
+if commit_body | pipe_has 'committed-boot'; then
     ok "the commit records which boot it happened in"
 else
     bad "nothing records the committing boot, so a second update cannot tell"
@@ -587,7 +591,7 @@ fi
 # to mount an ESP — a machine that is refusing no-esp should still refuse
 # root-too-small first if it is ALSO too small, so a fix to one refusal is not
 # mistaken for a fix to both. Order it ahead of with_esp in the source.
-if awk '/^cmd_precheck\(\) \{/{p=1} p && /root_need=\$\(\(/{print "root"; exit} p && /with_esp \|\| refuse "no-esp"/{print "esp"; exit}' "$CODE" | grep -qx root; then
+if awk '/^cmd_precheck\(\) \{/{p=1} p && /root_need=\$\(\(/{print "root"; exit} p && /with_esp \|\| refuse "no-esp"/{print "esp"; exit}' "$CODE" | pipe_has -x root; then
     ok "the root-space check runs before the ESP is even mounted"
 else
     bad "the root-space check runs after with_esp — reorder so it does not depend on ESP state"
@@ -668,7 +672,7 @@ fi
 # — the argument that made BitLocker a note. The remedy has to be stated.
 if grep -q 'esp-is-windows' "$CODE" && \
    awk '/refuse "esp-is-windows"/{p=1} p{print} p && /^        fi/{exit}' "$CODE" \
-     | grep -q 'ESP of its OWN'; then
+     | pipe_has 'ESP of its OWN'; then
     ok "the esp-is-windows refusal names its remedy (an ESP of Rime's own)"
 else
     bad "the refusal states no remedy, so a user cannot act on it"
@@ -745,7 +749,7 @@ else
 fi
 # A refusal nobody can act on strands the machine, which is the whole complaint
 # against the message this replaces.
-if grep -A 20 'refuse "partial-install"' "$CODE" | grep -q 'by hand'; then
+if grep -A 20 'refuse "partial-install"' "$CODE" | pipe_has 'by hand'; then
     ok "the partial-install refusal says what to do about it"
 else
     bad "partial-install states no remedy, so a user is stuck exactly as before"

@@ -175,7 +175,7 @@ ovmf_code_alt() {
 ovmf_vars_template() {
     local v
     if v="$(_ovmf_raw VARS)"; then
-        if virt-fw-vars --input "$v" --print 2>/dev/null | grep -qE '^name=(PK|db)\b'; then
+        if virt-fw-vars --input "$v" --print 2>/dev/null | grep -E '^name=(PK|db)\b' >/dev/null; then
             die "$v is not pristine — it already has PK/db enrolled"
         fi
         printf '%s\n' "$v"; return 0
@@ -183,7 +183,7 @@ ovmf_vars_template() {
     # shellcheck disable=SC2043  # a one-entry search path; see ovmf_code_secboot.
     for v in /usr/share/edk2/x64/OVMF_VARS.4m.fd; do
         [[ -f "$v" ]] || continue
-        virt-fw-vars --input "$v" --print 2>/dev/null | grep -qE '^name=(PK|db)\b' && continue
+        virt-fw-vars --input "$v" --print 2>/dev/null | grep -E '^name=(PK|db)\b' >/dev/null && continue
         printf '%s\n' "$v"; return 0
     done
     die "no PRISTINE (key-free) 4 MB OVMF variable-store template found"
@@ -224,7 +224,7 @@ esp_disk_create() {
     # Verify the partition really is an ESP: `set 1 esp on` silently doing
     # nothing would produce a disk that boots but on which bless-boot cannot
     # find the ESP, which is exactly the failure this layout exists to avoid.
-    parted -s "$disk" print 2>/dev/null | grep -q 'esp' \
+    parted -s "$disk" print 2>/dev/null | grep 'esp' >/dev/null \
         || die "GPT partition 1 in $disk is not flagged esp"
 }
 

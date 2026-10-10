@@ -35,6 +35,10 @@
 #  Run from anywhere: ./tests/mutate-platform-theme.sh
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
+# grep -q exits at its first match; under pipefail a producer that is still
+# writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
+# at random. pipe_has reads its input to the end.
+pipe_has() { grep "$@" >/dev/null; }
 cd "$(dirname "$0")/.." || exit 2
 
 CF="Containerfile.core"
@@ -82,7 +86,7 @@ suite_failures() {
 # classify <suite output> <expected FAIL substring> -> CAUGHT | MISSCORED | SURVIVED
 classify() {
     local out="$1" want="$2"
-    if printf '%s' "$out" | grep -q "^FAIL  .*$want"; then
+    if printf '%s' "$out" | pipe_has "^FAIL  .*$want"; then
         echo CAUGHT
     elif [ "$(suite_failures "$out")" -gt 0 ]; then
         echo MISSCORED
@@ -200,7 +204,7 @@ hold() {
     applied=$((applied + 1))
     local out; out="$(run_suite)"
     if [ "$(suite_failures "$out")" -eq 0 ] \
-       && printf '%s' "$out" | grep -q '^rime-platform-theme: [0-9]* passed, 0 failed'; then
+       && printf '%s' "$out" | pipe_has '^rime-platform-theme: [0-9]* passed, 0 failed'; then
         printf '%-5s HELD      %s\n' "$id" "$why"
         held=$((held + 1))
     else
@@ -216,7 +220,7 @@ echo
 echo "── baseline: green, or nothing below means anything ──"
 base="$(run_suite)"
 printf '%s\n' "$base" | grep -E '^rime-platform-theme'
-if ! printf '%s' "$base" | grep -qE '^rime-platform-theme: [0-9]+ passed, 0 failed'; then
+if ! printf '%s' "$base" | pipe_has -E '^rime-platform-theme: [0-9]+ passed, 0 failed'; then
     echo "ABORT: the suite is not green to begin with" >&2
     printf '%s\n' "$base" | grep -E '^(FAIL|SKIP)' >&2
     exit 3
