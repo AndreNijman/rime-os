@@ -2108,6 +2108,24 @@ RUN set -eux; \
     : '-- enforces. `semodule -l` only proves a module is installed.'; \
     python3 /usr/share/rime-os/selinux/verify-rime-sdboot.py
 
+# ── /dev/liveupdate gets its own type, not the generic device_t ──────────
+#
+# With `kho=on liveupdate=on` the kernel creates /dev/liveupdate, which
+# Fedora's policy does not know, so udev leaves it device_t, the fallback that
+# rules for unlabelled devices reach (init_t and qdiskd_t may open it). The
+# module declares liveupdate_device_t like Fedora's own device types:
+# device_node and no rule of its own. Measured in the VM lab, enforcing: the
+# node comes up liveupdate_device_t at boot, with no AVCs. Compiled in this
+# tier for the same reason as rime_sdboot above (policy.35 is rewritten whole).
+# CIL, so it needs no checkmodule.
+COPY files/system/selinux/rime_liveupdate.cil /usr/share/rime-os/selinux/rime_liveupdate.cil
+COPY files/system/selinux/verify-rime-liveupdate.py \
+     /usr/share/rime-os/selinux/verify-rime-liveupdate.py
+RUN set -eux; \
+    semodule -N -i /usr/share/rime-os/selinux/rime_liveupdate.cil; \
+    semodule -l | grep -qx rime_liveupdate; \
+    python3 /usr/share/rime-os/selinux/verify-rime-liveupdate.py
+
 # ── npm global prefix: per-user, not root-owned /usr/local (rime-logs 16) ────
 # Fedora 43's nodejs shipped /etc/npmrc with `prefix=/usr/local` (Fedora 45's
 # ships none, and npm's default is the same /usr/local). On a bootc system

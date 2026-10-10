@@ -1,0 +1,26 @@
+; rime_liveupdate -- give the Live Update Orchestrator's device its own type.
+;
+; With `kho=on liveupdate=on` on the kernel command line the kernel creates
+; /dev/liveupdate (char 10:261, root-only). Fedora's policy has no entry for
+; it, so udev leaves it as the generic device_t. Measured in the Rime VM:
+;
+;   crw-------. root root system_u:object_r:device_t:s0 10,261 /dev/liveupdate
+;
+; device_t is the type of /dev itself and the fallback for any node policy
+; does not know, so rules written for "a device nobody labelled" reach it:
+; init_t and qdiskd_t may open device_t character devices directly. A device
+; that carries kernel state across a kexec should not be one of those.
+;
+; This declares liveupdate_device_t exactly the way Fedora declares its own
+; device types (vfio_device_t, kvm_device_t): the device_node attribute and
+; nothing else. That is what lets udev relabel the node, lets the node live on
+; devtmpfs, and keeps it reachable by the domains Fedora already trusts with
+; every device (unconfined root, the kernel). No allow rule is added.
+;
+; Nothing in Rime opens /dev/liveupdate; `rime live doctor` only checks that it
+; exists. The type is here so the node is never generically labelled, and so
+; any future rule for it can name it.
+(type liveupdate_device_t)
+(roletype object_r liveupdate_device_t)
+(typeattributeset device_node (liveupdate_device_t))
+(filecon "/dev/liveupdate" char (system_u object_r liveupdate_device_t ((s0) (s0))))
