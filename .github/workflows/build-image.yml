@@ -360,6 +360,15 @@ jobs:
             core:
               - 'Containerfile.core'
               - 'kernel/**'
+              # Every file Containerfile.core COPYs. A change to one of these
+              # alone changes core's content; without them it shipped nothing
+              # until something else rebuilt core. tests/check-core-rebuild-
+              # selector.sh fails when a COPY source is missing from this list.
+              - 'files/dracut/rime-unlock-hint/**'
+              - 'files/system/libexec/rime-screen-reader'
+              - 'files/system/selinux/**'
+              - 'files/system/src/quickshell-argc-shim.c'
+              - 'files/system/src/scx/**'
               # DELIBERATELY NOT build-image.yml. It was here at first, and the
               # very next CI-only commit — adding a push retry — triggered a
               # 55-minute core rebuild and reissued the whole ~5 GB image to
@@ -423,7 +432,7 @@ jobs:
           # Core's content inputs. MUST equal the `core:` list of the path
           # filter above (tests/check-core-rebuild-selector.sh asserts it), and
           # deliberately excludes build-image.yml for the reason given there.
-          CORE_PATHS="Containerfile.core kernel/"
+          CORE_PATHS="Containerfile.core kernel/ files/dracut/rime-unlock-hint/ files/system/libexec/rime-screen-reader files/system/selinux/ files/system/src/quickshell-argc-shim.c files/system/src/scx/"
 
           [ "$FORCE_CORE" = "true" ] && decide true "force_core requested"
           [ "$FILTER_CORE" = "true" ] && decide true "core sources changed in this push"
