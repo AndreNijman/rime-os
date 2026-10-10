@@ -71,6 +71,10 @@ pub mod kernelbtf;
 // going to sleep in someone's bag and the only machine that could exercise it
 // for real is one a person is using.
 pub mod lid;
+// The live-update engine's pure half: classify a staged release's file diff
+// into components, plan what can activate without a reboot on THIS machine,
+// and the transaction rules. The `rime` CLI measures and acts.
+pub mod live;
 // §25's persistent-state migration framework. It resolves no paths and spawns
 // nothing: callers hand it a document or a `&Path`, which is what lets the
 // suite run entirely inside a temp directory rather than near a real

@@ -1890,6 +1890,17 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-ai.sh
 
+      # The live-update engine end to end: the built `rime` against a fake
+      # sysroot (layer build, whiteouts, lock deferral, rollback, recovery,
+      # the boot-scoped verification gate), and the per-session helper that
+      # replaces the shell only while the session is unlocked.
+      - name: Run live update assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          ./tests/test-rime-live.sh
+          ./tests/test-rime-live-session.sh
+
       # §21's Task. It belongs in this job rather than `engine` because it
       # drives the built `rime` binary, and this is the only job with a Rust
       # toolchain and a warm cargo cache.
@@ -4406,6 +4417,8 @@ jobs:
             tests/test-rime-gpu-notice.sh \
             files/system/libexec/rime-update-check \
             files/system/libexec/rime-update-notice \
+            files/system/libexec/rime-live-session \
+            tests/test-rime-live.sh tests/test-rime-live-session.sh \
             tests/test-rime-update-notice.sh \
             tests/test-rime-recover.sh \
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \

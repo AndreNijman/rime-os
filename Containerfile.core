@@ -1224,10 +1224,20 @@ RUN set -eux; \
 # what makes it true. mksquashfs reaching the image only as a weak dependency
 # of dracut-squash is the same class, already on record in rime-pkg.
 # Own transaction, `dnf5 clean all` at the end.
+#
+# `nodejs` is named here because on Fedora 45 this transaction already needs a
+# node: mpv-mpris → mpv → yt-dlp → python3-yt-dlp-ejs requires /usr/bin/node,
+# which nodejs22-bin, nodejs24-bin and nodejs26-bin all provide. Left unnamed,
+# dnf picks the newest (Node 26, plus its 72 MiB of docs as a weak dependency),
+# and the devstack's `nodejs` (Fedora's default, 22) then conflicts with it and
+# fails the core build. Naming it makes the default node the one provider.
+# The docs are excluded by glob: on Fedora 45 they are nodejs22-docs, not
+# nodejs-docs.
 RUN set -eux; \
     dnf5 -y copr enable sdegler/hyprland; \
     dnf5 -y copr enable errornointernet/quickshell; \
-    dnf5 -y install \
+    dnf5 -y install --exclude='nodejs*-docs' \
+        nodejs \
         hyprland quickshell-git greetd sway labwc cage xwayland-satellite foot \
         jetbrains-mono-fonts fontconfig flatpak distrobox git-core niri \
         hyprlock hypridle hyprsunset hyprshot grimblast mate-polkit \
@@ -1493,13 +1503,14 @@ RUN set -eux; \
 #
 # WebDAV needed nothing: gvfsd-dav is in the base `gvfs` package and was
 # already here. It was still unusable outside GTK for the gvfs-fuse reason.
-# nodejs arrives HERE (neovim → tree-sitter-cli), and with it, as weak
+# nodejs is already here (the desktop stack's transaction names it; see there),
+# and neovim → tree-sitter-cli needs it too. With it come, as weak
 # dependencies, nodejs-full-i18n (the ICU data that makes node's Intl format
 # anything but English; kept, and named in the devstack below) and nodejs-docs:
 # 98 MiB of HTML that nothing on the machine reads. Excluded.
 RUN set -eux; \
     dnf5 -y copr enable zeno/scrcpy; \
-    dnf5 -y install --exclude=nodejs-docs \
+    dnf5 -y install --exclude='nodejs*-docs' \
         firefox \
         Thunar thunar-volman thunar-archive-plugin \
         gvfs gvfs-fuse gvfs-mtp gvfs-smb gvfs-nfs gvfs-gphoto2 \
@@ -1898,9 +1909,16 @@ RUN set -eux; \
 RUN set -eux; \
     dnf5 -y install --setopt=install_weak_deps=False \
         nodejs nodejs-npm nodejs-full-i18n binutils gcc make; \
-    if rpm -q nodejs-docs >/dev/null 2>&1; then \
-        echo "FATAL: nodejs-docs is installed (98 MiB of HTML; excluded above)"; exit 1; \
+    : 'Fedora 45 names the docs per version (nodejs22-docs), so ask by glob.'; \
+    if docs="$(rpm -qa 'nodejs*-docs')" && [ -n "$docs" ]; then \
+        echo "FATAL: $docs is installed (node's HTML docs; excluded above)"; exit 1; \
     fi; \
+    : 'One node, the default one: a second major would mean the conflict above.'; \
+    major="$(rpm -q --qf '%{VERSION}' nodejs | cut -d. -f1)"; \
+    if extra="$(rpm -qa 'nodejs[0-9][0-9]-bin' 'nodejs[0-9][0-9]-libs' | grep -v "^nodejs${major}-")" && [ -n "$extra" ]; then \
+        echo "FATAL: another node major is installed: $extra"; exit 1; \
+    fi; \
+    node --version; \
     dnf5 clean all
 
 # sing-box official static binary (not in Fedora). Shipped DISABLED (unit gates
@@ -2107,6 +2125,24 @@ RUN set -eux; \
     : '-- and the rule reached the BINARY policy, which is what the kernel'; \
     : '-- enforces. `semodule -l` only proves a module is installed.'; \
     python3 /usr/share/rime-os/selinux/verify-rime-sdboot.py
+
+# ── /dev/liveupdate gets its own type, not the generic device_t ──────────
+#
+# With `kho=on liveupdate=on` the kernel creates /dev/liveupdate, which
+# Fedora's policy does not know, so udev leaves it device_t, the fallback that
+# rules for unlabelled devices reach (init_t and qdiskd_t may open it). The
+# module declares liveupdate_device_t like Fedora's own device types:
+# device_node and no rule of its own. Measured in the VM lab, enforcing: the
+# node comes up liveupdate_device_t at boot, with no AVCs. Compiled in this
+# tier for the same reason as rime_sdboot above (policy.35 is rewritten whole).
+# CIL, so it needs no checkmodule.
+COPY files/system/selinux/rime_liveupdate.cil /usr/share/rime-os/selinux/rime_liveupdate.cil
+COPY files/system/selinux/verify-rime-liveupdate.py \
+     /usr/share/rime-os/selinux/verify-rime-liveupdate.py
+RUN set -eux; \
+    semodule -N -i /usr/share/rime-os/selinux/rime_liveupdate.cil; \
+    semodule -l | grep -qx rime_liveupdate; \
+    python3 /usr/share/rime-os/selinux/verify-rime-liveupdate.py
 
 # ── npm global prefix: per-user, not root-owned /usr/local (rime-logs 16) ────
 # Fedora 43's nodejs shipped /etc/npmrc with `prefix=/usr/local` (Fedora 45's
