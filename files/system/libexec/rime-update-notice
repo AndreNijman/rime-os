@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-update-notice — tell the user, once per release, that a Rime update is
+#  available and what to run.
+#
+#  A USER unit (notify-send needs the session bus). It does no work of its own:
+#  rime-update-check (root) decides, this only reads /run/rime-update/state. It
+#  runs when that file changes (rime-update-notice.path, inotify, no polling)
+#  and once at login, and exits in milliseconds.
+#
+#  Once per digest: a notification that repeats at every login gets muted. A
+#  newer release after the user ignored one is a new digest and is announced.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+STATE="${RIME_UPDATE_STATE:-/run/rime-update/state}"
+SEEN_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rime"
+SEEN="$SEEN_DIR/update-notice.seen"
+
+log() { printf 'rime-update-notice: %s\n' "$*" >&2; }
+
+[[ -r "$STATE" ]] || exit 0
+
+state="" digest=""
+while IFS='=' read -r k v; do
+    case "$k" in
+        state)  state="$v" ;;
+        digest) digest="$v" ;;
+    esac
+done < "$STATE"
+
+# Partial write or nothing to say: the next change wakes us again.
+[[ "$state" == "available" && -n "$digest" ]] || exit 0
+
+if [[ -f "$SEEN" && "$(cat "$SEEN")" == "$digest" ]]; then
+    exit 0
+fi
+
+if command -v notify-send >/dev/null 2>&1; then
+    notify-send --app-name='Rime OS' --urgency=normal --icon=system-software-update \
+        "A new Rime update is available" \
+        "Run: sudo rime update" || { log "notify-send failed"; exit 0; }
+else
+    log "no notify-send; printing instead"
+fi
+mkdir -p "$SEEN_DIR"
+printf '%s\n' "$digest" > "$SEEN"
+printf 'A new Rime update is available. Run: sudo rime update\n'
+exit 0

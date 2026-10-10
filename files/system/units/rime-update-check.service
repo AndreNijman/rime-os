@@ -1,0 +1,23 @@
+# Rime OS — ask the registry whether a newer image exists (SYSTEM unit, root).
+#
+# `bootc upgrade --check` needs root. It reads one manifest and writes one
+# small file under /run; it downloads nothing and stages nothing.
+
+[Unit]
+Description=Check whether a Rime OS update is available
+Documentation=file:///usr/libexec/rime-update-check
+ConditionPathExists=/run/ostree-booted
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-update-check
+# Never the reason a game or a build stutters: idle CPU, idle I/O.
+Nice=19
+CPUSchedulingPolicy=idle
+IOSchedulingClass=idle
+# /run/rime-update is world-readable (the user unit reads it) and wiped at boot.
+RuntimeDirectory=rime-update
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+# A hung registry must not leave a unit sitting there.
+TimeoutStartSec=2min

@@ -1558,6 +1558,32 @@ RUN set -eux; \
     test ! -e /usr/lib/systemd/system/rime-gpu-notice.service; \
     echo "rime-gpu-notice enabled as a user timer"
 
+# ── "a new Rime update is available" ────────────────────────────────────────
+# A root timer asks the registry for one manifest every 6 hours (idle CPU and
+# I/O, no layers downloaded) and writes the answer to /run/rime-update/state.
+# A user .path unit wakes the notice when that file changes, so nothing polls
+# on the desktop side; the notice says it once per published digest. It never
+# stages or installs anything: the user runs `sudo rime update`.
+COPY files/system/libexec/rime-update-check /usr/libexec/rime-update-check
+COPY files/system/libexec/rime-update-notice /usr/libexec/rime-update-notice
+COPY files/system/units/rime-update-check.service \
+     files/system/units/rime-update-check.timer \
+     /usr/lib/systemd/system/
+COPY files/system/units/rime-update-notice.service \
+     files/system/units/rime-update-notice.path \
+     /usr/lib/systemd/user/
+RUN set -eux; \
+    chmod 0755 /usr/libexec/rime-update-check /usr/libexec/rime-update-notice; \
+    bash -n /usr/libexec/rime-update-check; \
+    bash -n /usr/libexec/rime-update-notice; \
+    command -v bootc notify-send; \
+    systemctl enable rime-update-check.timer; \
+    test -L /etc/systemd/system/timers.target.wants/rime-update-check.timer; \
+    systemctl --global enable rime-update-notice.path rime-update-notice.service; \
+    test -L /etc/systemd/user/paths.target.wants/rime-update-notice.path; \
+    test -L /etc/systemd/user/default.target.wants/rime-update-notice.service; \
+    echo "rime-update-check + rime-update-notice enabled"
+
 # ── shared-machine recipes: guest disposability and kiosk (P2-016) ──────────
 #
 # Everything here ships INERT. No guest account is created, no kiosk config is
