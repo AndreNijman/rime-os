@@ -1,0 +1,12 @@
+# Rime OS — wake the update notice when the check's answer changes.
+# inotify, not polling: this costs nothing while the file is quiet.
+
+[Unit]
+Description=Watch for a Rime OS update announcement
+
+[Path]
+PathChanged=/run/rime-update/state
+Unit=rime-update-notice.service
+
+[Install]
+WantedBy=paths.target

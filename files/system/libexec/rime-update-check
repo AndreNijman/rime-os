@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-update-check — find out, cheaply, whether a newer Rime OS is published.
+#
+#  Runs as root from rime-update-check.timer because `bootc upgrade --check`
+#  needs root to open the image store. It fetches ONE registry manifest and
+#  pulls no layers, so a check is a few KB of network and a few milliseconds of
+#  CPU; the unit runs at idle CPU and idle I/O priority on top of that.
+#
+#  It writes the answer to /run/rime-update/state (world-readable, wiped every
+#  boot so it can never describe a previous boot's image):
+#
+#      state=available|none
+#      digest=sha256:…          (the published image; empty when unknown)
+#
+#  The user-side half (rime-update-notice) is woken by a systemd .path unit
+#  when this file changes — nothing polls — and says it once per digest.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#  * It never downloads or stages an update. That is `sudo rime update`.
+#  * It never reports "available" on a guess. An unreachable registry, a bootc
+#    failure or output it does not recognise leaves the previous answer alone.
+#  * It reports "none" while an update is already staged: the user has done
+#    their part and needs a reboot, not a reminder to update.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+BOOTC="${RIME_BOOTC_BIN:-/usr/bin/bootc}"
+DIR="${RIME_UPDATE_DIR:-/run/rime-update}"
+STATE="$DIR/state"
+
+log() { printf 'rime-update-check: %s\n' "$*" >&2; }
+
+[[ -x "$BOOTC" ]] || { log "no bootc at $BOOTC"; exit 0; }
+
+write_state() {
+    local body
+    body="$(printf 'state=%s\ndigest=%s\n' "$1" "${2:-}")"
+    mkdir -p "$DIR"
+    # Rewrite only on a change: the notice unit wakes on every write.
+    if [[ -f "$STATE" && "$(cat "$STATE")" == "$body" ]]; then
+        return 0
+    fi
+    # In place, not rename: the path unit fires on close-after-write.
+    printf '%s\n' "$body" > "$STATE"
+    chmod 0644 "$STATE"
+}
+
+status="$("$BOOTC" status --format=json 2>/dev/null)" || status=""
+if printf '%s' "$status" | grep -Eq '"staged"[[:space:]]*:[[:space:]]*\{'; then
+    write_state none
+    exit 0
+fi
+
+out="$("$BOOTC" upgrade --check 2>&1)" || { log "bootc upgrade --check failed; keeping the last answer"; exit 0; }
+
+if printf '%s\n' "$out" | grep -q '^No changes in:'; then
+    write_state none
+elif printf '%s\n' "$out" | grep -q '^Update available for:'; then
+    digest="$(printf '%s\n' "$out" | sed -n 's/^[[:space:]]*Digest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\).*/\1/p' | head -n1)"
+    # bootc builds that omit the digest line: fall back to the text's own hash
+    # so a later, different update still counts as new.
+    [[ -n "$digest" ]] || digest="text:$(printf '%s' "$out" | sha256sum | cut -d' ' -f1)"
+    write_state available "$digest"
+else
+    log "unrecognised bootc output; keeping the last answer"
+fi
+exit 0

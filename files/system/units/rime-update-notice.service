@@ -1,0 +1,18 @@
+# Rime OS — say once that a Rime update is available (USER unit).
+#
+# A user service because notify-send needs a session bus. Triggered by
+# rime-update-notice.path when the root check changes its answer, and once at
+# login for a check that finished before anyone was logged in.
+
+[Unit]
+Description=Rime OS update notice
+Documentation=file:///usr/libexec/rime-update-notice
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-update-notice
+Nice=19
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

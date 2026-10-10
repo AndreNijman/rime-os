@@ -1,0 +1,20 @@
+# Rime OS — when to ask whether an update exists.
+#
+# Two minutes after boot (so a fresh boot learns quickly, and nothing competes
+# with the login), then every 6 hours. A new release reaches an already-booted
+# machine within the next check. The jitter spreads the fleet's registry
+# requests, and AccuracySec lets systemd batch the wakeup with others so an
+# idle laptop is not woken for this alone.
+
+[Unit]
+Description=Check for Rime OS updates
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=6h
+RandomizedDelaySec=20min
+AccuracySec=5min
+Unit=rime-update-check.service
+
+[Install]
+WantedBy=timers.target

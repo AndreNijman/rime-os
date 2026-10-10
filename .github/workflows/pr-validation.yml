@@ -891,6 +891,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-gpu-notice.sh
 
+      # "A new Rime update is available": the root check's parsing and the
+      # user notice's once-per-digest rule, plus the unit shapes.
+      - name: Update notice — says it once per release, costs nothing
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-update-notice.sh
+
       # §P2-015's firmware readout, structural half. fwupdmgr's exit status
       # means "nothing to do" when non-zero and accompanies an explicit error
       # document when zero, so a caller that trusts it reads a current machine
@@ -4398,6 +4404,9 @@ jobs:
             files/system/libexec/rime-screen-reader \
             files/system/libexec/rime-gpu-notice \
             tests/test-rime-gpu-notice.sh \
+            files/system/libexec/rime-update-check \
+            files/system/libexec/rime-update-notice \
+            tests/test-rime-update-notice.sh \
             tests/test-rime-recover.sh \
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \
             tests/test-rime-pkg.sh tests/test-rime-appimage.sh \
