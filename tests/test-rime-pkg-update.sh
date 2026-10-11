@@ -113,17 +113,29 @@ SET=(alpha-1.0-1.fc43.x86_64 beta-2.0-1.fc43.x86_64 gamma-3.0-1.fc43.i686)
 NEWSET="$(printf '%s\n' "${SET[@]}" | LC_ALL=C sort)"
 OTHERSET="$(printf '%s\n' "${SET[@]}" beta-2.0-2.fc43.x86_64 | LC_ALL=C sort)"
 
+# The image's x86_64 twin of SET's one i686 package, as the engine records it
+# (`image_twins`). REC_TWINS is what a state.json holds; NOW_TWINS is what the
+# running image answers. Held equal everywhere except the cases about them.
+TWIN_OLD="gamma-3.0-1.fc43"
+TWIN_NEW="gamma-3.1-1.fc43"
+REC_TWINS="$TWIN_OLD"
+
 # $1 = output path, $2 = level ("none" omits the key), $3 = os_version_id,
-# rest = the resolved NEVRAs.
+# rest = the resolved NEVRAs. $REC_TWINS = recorded twins ("none" omits the key).
 mkstate() {
     local out=$1 lvl=$2 osv=$3; shift 3
-    local resolved; resolved="$(printf '%s\n' "$@" | jq -R -s 'split("\n")|map(select(length>0))')"
+    local resolved twins
+    resolved="$(printf '%s\n' "$@" | jq -R -s 'split("\n")|map(select(length>0))')"
+    twins="$(printf '%s\n' "$REC_TWINS" | jq -R -s 'split("\n")|map(select(length>0))')"
     if [ "$lvl" = none ]; then
         jq -n --argjson r "$resolved" --arg v "$osv" \
            '{requested:["alpha","beta"],resolved:$r,os_id:"fedora",os_version_id:$v}' > "$out"
     else
         jq -n --argjson r "$resolved" --arg v "$osv" --argjson l "$lvl" \
            '{requested:["alpha","beta"],resolved:$r,os_id:"fedora",os_version_id:$v,pkg_compat_level:$l}' > "$out"
+    fi
+    if [ "$REC_TWINS" != none ]; then
+        jq --argjson t "$twins" '. + {image_twins:$t}' "$out" > "$out.t" && mv -f "$out.t" "$out"
     fi
 }
 
@@ -135,7 +147,7 @@ mkstate() {
 #   $6 optional: `mutant` to delete the level clause from the function body.
 judge() {
     local state=$1 newset=$2 mrc=$3 payload=$4 osv=$5 mode=${6:-real}
-    MERGED_RC="$mrc" PAYLOAD="$payload" OSVER="$osv" MODE="$mode" \
+    MERGED_RC="$mrc" PAYLOAD="$payload" OSVER="$osv" MODE="$mode" TWINS="${NOW_TWINS-$TWIN_OLD}" \
     bash -c '
         e=$1; st=$2; ns=$3; set --
         source "$e" >/dev/null 2>&1
@@ -143,6 +155,11 @@ judge() {
         merged() { return "$MERGED_RC"; }
         current_payload() { printf "%s" "$PAYLOAD"; }
         os_version() { printf "%s" "$OSVER"; }
+        image_twins() { printf "%s\n" "$TWINS"; }
+        if [ "$MODE" = twins-mutant ]; then
+            body="$(declare -f ext_up_to_date | grep -v twins_unchanged)"
+            eval "$body"
+        fi
         if [ "$MODE" = mutant ]; then
             # The pre-fix function, reconstructed from the shipped one rather
             # than copied: delete the only line that mentions the level.
@@ -231,6 +248,37 @@ else
         "so the assertions above are not measuring that clause and this suite proves nothing"
 fi
 
+# ── the image's own 32-bit twins moved (a driver bump) ───────────────────────
+# katana, 2026-10-11: image xorg-x11-drv-nvidia-libs 615.71.09 -> 615.78.08, the
+# extension's i686 copy stayed at 615.71.09, Steam died with "NVRM: API
+# mismatch". OS version, level, merge state and the resolved set were ALL
+# unchanged. Only the image's x86_64 twin differs.
+NOW_TWINS="$TWIN_NEW" expect "image twin moved, everything else equal — must rebuild" 1 \
+       "$WORK/a-match.json" "$NEWSET" 0 "$MERGED_PAYLOAD" 43
+NOW_TWINS="$TWIN_OLD" expect "control: image twin unchanged — is up to date" 0 \
+       "$WORK/a-match.json" "$NEWSET" 0 "$MERGED_PAYLOAD" 43
+REC_TWINS=none
+mkstate "$WORK/a-notwins.json" "$LEVEL" 43 "${SET[@]}"
+REC_TWINS="$TWIN_OLD"
+expect "state.json without image_twins (pre-fix machine) — must rebuild" 1 \
+       "$WORK/a-notwins.json" "$NEWSET" 0 "$MERGED_PAYLOAD" 43
+# A set with no 32-bit package has no twins to track: nothing recorded, nothing
+# reported, and that must read as a match rather than a permanent rebuild.
+REC_TWINS=""
+mkstate "$WORK/a-native.json" "$LEVEL" 43 alpha-1.0-1.fc43.x86_64
+NOW_TWINS="" expect "no i686 package at all: empty twins on both sides — is up to date" 0 \
+       "$WORK/a-native.json" "$(printf 'alpha-1.0-1.fc43.x86_64')" 0 "$MERGED_PAYLOAD" 43
+REC_TWINS="$TWIN_OLD"
+
+NOW_TWINS="$TWIN_NEW" judge "$WORK/a-match.json" "$NEWSET" 0 "$MERGED_PAYLOAD" 43 twins-mutant
+mrc=$?
+if [ "$mrc" = 0 ]; then
+    ok "mutant: with the twins clause deleted, a moved driver reads as up to date"
+else
+    bad "mutant: with the twins clause deleted, a moved driver still returned $mrc" \
+        "so the twin cases above are not measuring that clause"
+fi
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  LEG B — rime-sysext-rebuild.service's exact ExecStart, end to end
 # ═════════════════════════════════════════════════════════════════════════════
@@ -275,8 +323,12 @@ REAL_UP_TO_DATE="$(declare -f ext_up_to_date)"
 # dropped from the requested list. `rpm -qp` reads the NEVRA back out of the
 # file name download_rpms wrote, which is how the computed set is made equal to
 # the stored one by construction.
+# `-qa` answers what the image installs: the x86_64 twin of gamma, whose build the
+# probe moves to model a driver bump. Nothing else is installed.
+IMAGE_GAMMA=3.0-1.fc43
 rpm() {
     case "${1:-}" in
+        -qa) printf 'gamma x86_64 %s\n' "$IMAGE_GAMMA" ;;
         -q)  return 1 ;;
         -qp) local f="${!#}" b; b="${f##*/}"; printf '%s\n' "${b%.rpm}" ;;
         *)   return 1 ;;
@@ -300,14 +352,15 @@ gc_local_cache() { :; }
 # how a rebuild is detected below.
 activate_payload() { mv -f "$1" "$EXT_IMAGE"; }
 
+REC_TWIN=gamma-3.0-1.fc43   # what a state.json recorded the image to hold
 mkstate() {   # $1 = level, $2 = the resolved set to store
     local lvl=$1 set_text=$2 resolved
     resolved="$(printf '%s\n' $set_text | jq -R -s 'split("\n")|map(select(length>0))')"
-    jq -n --argjson r "$resolved" --arg v "$OSVER" --argjson l "$lvl" \
+    jq -n --argjson r "$resolved" --arg v "$OSVER" --argjson l "$lvl" --arg t "$REC_TWIN" \
        '{requested:["alpha","beta","gamma"],resolved:$r,local_files:[],unsigned_accepted:[],
          os_id:"fedora",os_version_id:$v,built:"2026-09-19T01:43:06Z",
          image:"/var/lib/extensions/rime-user.raw",image_sha256:"stale",image_bytes:0,
-         pkg_compat_level:$l}' > /var/lib/rime/pkg/state.json
+         pkg_compat_level:$l,image_twins:[$t]}' > /var/lib/rime/pkg/state.json
     printf 'alpha\nbeta\ngamma\n' > /var/lib/rime/pkg/requested
 }
 
@@ -333,7 +386,7 @@ run_case() {  # $1 label, $2 level to store, $3 argv, $4 optional set to STORE
     [[ "$out" == *"already up to date"* ]] && uptodate=yes
     [[ "$out" == *"extension compatibility changed"* ]] && announced=yes
     [ "$before" != "$after" ] && changed=yes
-    echo "PROBE_CASE ${label} rc=${rc} extracted=${extracted} uptodate=${uptodate} announced=${announced} payload_changed=${changed} state_level=$(jq -r '.pkg_compat_level // 0' /var/lib/rime/pkg/state.json)"
+    echo "PROBE_CASE ${label} rc=${rc} extracted=${extracted} uptodate=${uptodate} announced=${announced} payload_changed=${changed} state_level=$(jq -r '.pkg_compat_level // 0' /var/lib/rime/pkg/state.json) state_twin=$(jq -r '.image_twins[0] // "none"' /var/lib/rime/pkg/state.json)"
 }
 
 # ── the set really is constant: stored vs computed, both printed ────────────
@@ -369,6 +422,24 @@ CURRENT_SET="$SET"
 eval "$(printf '%s\n' "$REAL_UP_TO_DATE" | grep -v pkg_compat_level)"
 run_case mutant "$BEHIND" if-needed
 eval "$REAL_UP_TO_DATE"
+
+# 6. THE DRIVER BUMP (katana, 2026-10-11): level, OS version, merge state and the
+#    resolved set all match; only the image's x86_64 twin moved. The extension
+#    must be rebuilt and the NEW twin recorded.
+IMAGE_GAMMA=3.1-1.fc43
+run_case driver-bump "$LEVEL" if-needed
+# 7. ...and having recorded it, the next boot costs nothing. run_case writes the
+#    state itself, so this one is stored as the bumped machine would hold it.
+IMAGE_GAMMA=3.1-1.fc43; REC_TWIN=gamma-3.1-1.fc43
+run_case twin-recorded "$LEVEL" if-needed
+
+# 8. THE MUTANT: no twins clause anywhere. The driver bump must then rebuild
+#    nothing and announce nothing: the defect, reproduced.
+IMAGE_GAMMA=3.1-1.fc43; REC_TWIN=gamma-3.0-1.fc43
+REAL_TWINS="$(declare -f twins_unchanged)"
+twins_unchanged() { return 0; }
+run_case twins-mutant "$LEVEL" if-needed
+eval "$REAL_TWINS"
 PROBE_EOF
 
 if ! command -v podman >/dev/null 2>&1; then
@@ -433,6 +504,32 @@ else
         else
             bad "control: a changed package set did NOT rebuild" \
                 "extracted=$(field bare-newset extracted) uptodate=$(field bare-newset uptodate)"
+        fi
+
+        # 6. The driver bump: same level, same set, only the image's twin moved.
+        if [ "$(field driver-bump extracted)" = yes ] && [ "$(field driver-bump payload_changed)" = yes ] \
+           && [ "$(field driver-bump announced)" = yes ] \
+           && [ "$(field driver-bump state_twin)" = gamma-3.1-1.fc43 ]; then
+            ok "driver bump: --if-needed rebuilt and recorded the image's new 32-bit twin"
+        else
+            bad "driver bump: --if-needed did not rebuild when the image's twin moved" \
+                "extracted=$(field driver-bump extracted) announced=$(field driver-bump announced) state_twin=$(field driver-bump state_twin)"
+        fi
+        # 7. Once recorded, the next boot rebuilds nothing.
+        if [ "$(field twin-recorded extracted)" = no ] && [ "$(field twin-recorded payload_changed)" = no ] \
+           && [ "$(field twin-recorded announced)" = no ]; then
+            ok "driver bump: with the new twin recorded, the next boot rebuilds nothing"
+        else
+            bad "driver bump: a recorded twin still triggered a rebuild" \
+                "extracted=$(field twin-recorded extracted) announced=$(field twin-recorded announced) — that would rebuild on every boot"
+        fi
+        # 8. The mutant.
+        if [ "$(field twins-mutant extracted)" = no ] && [ "$(field twins-mutant payload_changed)" = no ] \
+           && [ "$(field twins-mutant announced)" = no ]; then
+            ok "mutant: without the twins clause a driver bump rebuilds nothing"
+        else
+            bad "mutant: the engine without the twins clause still rebuilt" \
+                "so the driver-bump case is not measuring that clause"
         fi
 
         # 5. The mutant must reproduce §0.2 exactly, including the stamped level.
