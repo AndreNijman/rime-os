@@ -75,25 +75,54 @@ STEAM_APPID=769   # Steam's own windows (Big Picture, the overlay) in GAMESCOPE_
 
 set_root() { xprop -root -f "$1" 32c -set "$1" "$2" 2>/dev/null; }
 
-# wm_normal WINDOW — set WM_STATE to NormalState, typed WM_STATE as ICCCM has it.
+# wm_normal WINDOW — set WM_STATE to NormalState, typed WM_STATE as ICCCM has it,
+# only while gamescope still has WINDOW focused and the focused app is not
+# Steam. That check and the write happen with the X server grabbed, so the
+# overlay cannot take focus between them (exit 2 = focus moved, nothing written).
 wm_normal() {
     if [ -n "${RIME_GAMING_WM_NORMAL:-}" ]; then "${RIME_GAMING_WM_NORMAL}" "$1"; return; fi
-    python3 - "$1" <<'PY'
+    python3 - "$1" "$STEAM_APPID" <<'PY'
 import ctypes, ctypes.util, sys
 x = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
-x.XOpenDisplay.restype = ctypes.c_void_p
-x.XInternAtom.restype = ctypes.c_ulong
-x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
-x.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
-                              ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
-x.XCloseDisplay.argtypes = [ctypes.c_void_p]
+vp, ul = ctypes.c_void_p, ctypes.c_ulong
+x.XOpenDisplay.restype = vp
+x.XDefaultRootWindow.restype = ul
+x.XDefaultRootWindow.argtypes = [vp]
+x.XInternAtom.restype = ul
+x.XInternAtom.argtypes = [vp, ctypes.c_char_p, ctypes.c_int]
+x.XGetWindowProperty.argtypes = [vp, ul, ul, ctypes.c_long, ctypes.c_long, ctypes.c_int, ul,
+                                 ctypes.POINTER(ul), ctypes.POINTER(ctypes.c_int),
+                                 ctypes.POINTER(ul), ctypes.POINTER(ul), ctypes.POINTER(vp)]
+x.XChangeProperty.argtypes = [vp, ul, ul, ul, ctypes.c_int, ctypes.c_int, vp, ctypes.c_int]
+for f in ("XGrabServer", "XUngrabServer", "XCloseDisplay"):
+    getattr(x, f).argtypes = [vp]
+x.XSync.argtypes = [vp, ctypes.c_int]
+x.XFree.argtypes = [vp]
+win, steam = int(sys.argv[1], 0), int(sys.argv[2])
 d = x.XOpenDisplay(None)
 if not d:
     sys.exit(1)
+root = x.XDefaultRootWindow(d)
+def cardinal(name):
+    t, fmt, n, rest, data = ul(), ctypes.c_int(), ul(), ul(), vp()
+    if x.XGetWindowProperty(d, root, x.XInternAtom(d, name, 0), 0, 1, 0, 6,  # XA_CARDINAL
+                            ctypes.byref(t), ctypes.byref(fmt), ctypes.byref(n),
+                            ctypes.byref(rest), ctypes.byref(data)) != 0 or not data:
+        return None
+    v = ctypes.cast(data, ctypes.POINTER(ctypes.c_long))[0] & 0xFFFFFFFF if n.value else None
+    x.XFree(data)
+    return v
 atom = x.XInternAtom(d, b"WM_STATE", 0)
-state = (ctypes.c_long * 2)(1, 0)   # NormalState, no icon window
-x.XChangeProperty(d, int(sys.argv[1], 0), atom, atom, 32, 0, state, 2)
+x.XGrabServer(d)
+app, focused = cardinal(b"GAMESCOPE_FOCUSED_APP"), cardinal(b"GAMESCOPE_FOCUSED_WINDOW")
+ok = focused == win and app not in (None, 0, steam)
+if ok:
+    state = (ctypes.c_long * 2)(1, 0)   # NormalState, no icon window
+    x.XChangeProperty(d, win, atom, atom, 32, 0, state, 2)
+x.XUngrabServer(d)
+x.XSync(d, 0)
 x.XCloseDisplay(d)
+sys.exit(0 if ok else 2)
 PY
 }
 

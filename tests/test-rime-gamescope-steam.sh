@@ -244,6 +244,83 @@ run_case 2 RIME_GAMING_WM_NORMAL="${BIN}/wm-normal" RIME_GAMING_HDR=steam RIME_G
 [ "$(normals)" = "100663297;" ] && ok "HDR and composition both left to Steam: the focus watch still runs" \
     || bad "watch with no HDR/composite guard" "normals: $(normals)"
 
+# ── the real setter, on a real X server (Xvfb) ─────────────────────────────
+# Everything above uses a stub setter; this runs the shipped one: the typed
+# WM_STATE write, and its refusal when focus moved before it could write.
+# CI installs Xvfb and x11-utils and sets RIME_TEST_REQUIRE_X=1, so a missing
+# server is a failure there rather than a quiet skip.
+REAL_XPROP="$(PATH="${PATH//${BIN}:/}" command -v xprop || true)"
+if command -v Xvfb >/dev/null && [ -n "$REAL_XPROP" ]; then
+    XDISP=$((90 + RANDOM % 400))
+    Xvfb ":${XDISP}" -nolisten tcp -noreset >/dev/null 2>&1 &
+    XVFB=$!
+    for _ in $(seq 50); do [ -e "/tmp/.X11-unix/X${XDISP}" ] && break; sleep 0.1; done
+    cat > "${WORK}/xwin.py" <<'PY'
+import ctypes, ctypes.util, sys
+x = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+vp, ul = ctypes.c_void_p, ctypes.c_ulong
+x.XOpenDisplay.restype = vp
+x.XDefaultRootWindow.restype = ul; x.XDefaultRootWindow.argtypes = [vp]
+x.XCreateSimpleWindow.restype = ul
+x.XCreateSimpleWindow.argtypes = [vp, ul, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
+                                  ctypes.c_uint, ul, ul]
+x.XInternAtom.restype = ul; x.XInternAtom.argtypes = [vp, ctypes.c_char_p, ctypes.c_int]
+x.XChangeProperty.argtypes = [vp, ul, ul, ul, ctypes.c_int, ctypes.c_int, vp, ctypes.c_int]
+x.XSetCloseDownMode.argtypes = [vp, ctypes.c_int]
+x.XCloseDisplay.argtypes = [vp]
+d = x.XOpenDisplay(None)
+w = x.XCreateSimpleWindow(d, x.XDefaultRootWindow(d), 0, 0, 160, 31, 0, 0, 0)
+a = x.XInternAtom(d, b"WM_STATE", 0)
+x.XChangeProperty(d, w, a, a, 32, 0, (ctypes.c_long * 2)(3, 0), 2)   # IconicState
+x.XSetCloseDownMode(d, 1)   # RetainPermanent: the window outlives this client
+x.XCloseDisplay(d)
+print(w)
+PY
+    xwin()  { DISPLAY=":${XDISP}" python3 "${WORK}/xwin.py"; }
+    xroot() { DISPLAY=":${XDISP}" "$REAL_XPROP" -root -f "$1" 32c -set "$1" "$2"; }
+    xstate() { DISPLAY=":${XDISP}" "$REAL_XPROP" -id "$1" WM_STATE; }
+    # the shipped wm_normal, as the wrapper defines it
+    setter() {
+        ( eval "$(sed -n '/^STEAM_APPID=/p; /^wm_normal() {/,/^}/p' "$WRAP")"
+          DISPLAY=":${XDISP}" wm_normal "$1" )
+    }
+
+    W="$(xwin)"
+    xroot GAMESCOPE_FOCUSED_WINDOW "$W"; xroot GAMESCOPE_FOCUSED_APP 769
+    setter "$W"; rc=$?
+    [ "$rc" = 2 ] && xstate "$W" | grep -q "window state: Iconic" \
+        && ok "real X: the setter writes nothing while the overlay (app 769) has focus" \
+        || bad "real X refusal under the overlay" "rc=$rc; $(xstate "$W" | tr '\n' ' ')"
+    xroot GAMESCOPE_FOCUSED_APP 1091500; xroot GAMESCOPE_FOCUSED_WINDOW 4242
+    setter "$W"; rc=$?
+    [ "$rc" = 2 ] && xstate "$W" | grep -q "window state: Iconic" \
+        && ok "real X: the setter writes nothing once another window has focus" \
+        || bad "real X refusal for another window" "rc=$rc; $(xstate "$W" | tr '\n' ' ')"
+    xroot GAMESCOPE_FOCUSED_WINDOW "$W"
+    setter "$W"; rc=$?
+    st="$(xstate "$W")"
+    [ "$rc" = 0 ] && printf '%s' "$st" | grep -q '^WM_STATE(WM_STATE):' \
+        && printf '%s' "$st" | grep -q "window state: Normal" \
+        && ok "real X: the setter writes WM_STATE Normal, typed WM_STATE" \
+        || bad "real X typed write" "rc=$rc; $(printf '%s' "$st" | tr '\n' ' ')"
+
+    # End to end: the wrapper's own watch, real xprop -spy, real setter.
+    W2="$(xwin)"
+    xroot GAMESCOPE_FOCUSED_WINDOW "$W2"; xroot GAMESCOPE_FOCUSED_APP 769
+    env -u RIME_GAMING_WM_NORMAL DISPLAY=":${XDISP}" bash "$WRAP" sleep 3 2>"${WORK}/xlog" &
+    XW=$!
+    sleep 1; xroot GAMESCOPE_FOCUSED_APP 1091500
+    wait "$XW"
+    xstate "$W2" | grep -q "window state: Normal" \
+        && ok "real X: the wrapper restores the game when focus comes back from the overlay" \
+        || bad "real X end to end" "$(xstate "$W2" | tr '\n' ' '); log: $(tr '\n' ' ' < "${WORK}/xlog")"
+    kill "$XVFB" 2>/dev/null; wait "$XVFB" 2>/dev/null
+elif [ "${RIME_TEST_REQUIRE_X:-0}" = 1 ]; then
+    bad "real X setter" "Xvfb or xprop missing and RIME_TEST_REQUIRE_X=1"
+else
+    printf 'SKIP  real X setter (no Xvfb or xprop here)\n'
+fi
+
 # ── volume keys: Steam acts on them only with its handler on ───────────────
 vol_seen() { env -u DISPLAY "$@" bash "$WRAP" bash -c 'printf %s "${STEAM_ENABLE_VOLUME_HANDLER-UNSET}"' 2>/dev/null; }
 [ "$(vol_seen -u STEAM_ENABLE_VOLUME_HANDLER)" = 1 ] \
