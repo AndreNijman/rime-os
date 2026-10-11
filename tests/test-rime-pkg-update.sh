@@ -270,6 +270,19 @@ NOW_TWINS="" expect "no i686 package at all: empty twins on both sides — is up
        "$WORK/a-native.json" "$(printf 'alpha-1.0-1.fc43.x86_64')" 0 "$MERGED_PAYLOAD" 43
 REC_TWINS="$TWIN_OLD"
 
+# An EPOCH bump with the same version-release is a different build. The engine
+# must ask rpm for EVR, not VERSION-RELEASE; the stub fails if it does not, and
+# answers with an epoch the way rpm does.
+epoch_out="$(bash -c '
+    e=$1; set --; source "$e" >/dev/null 2>&1; set +e
+    rpm() { case "$*" in *"%{EVR}"*) printf "gamma x86_64 1:3.0-1.fc43\n" ;; *) printf "gamma x86_64 3.0-1.fc43\n" ;; esac; }
+    image_twins gamma-3.0-1.fc43.i686' _ "$ENGINE")"
+if [ "$epoch_out" = "gamma-1:3.0-1.fc43" ]; then
+    ok "image twins carry the RPM epoch (EVR), so an epoch bump is seen"
+else
+    bad "image twins dropped the RPM epoch" "got '${epoch_out}'"
+fi
+
 NOW_TWINS="$TWIN_NEW" judge "$WORK/a-match.json" "$NEWSET" 0 "$MERGED_PAYLOAD" 43 twins-mutant
 mrc=$?
 if [ "$mrc" = 0 ]; then

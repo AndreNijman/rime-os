@@ -2636,7 +2636,7 @@ write_state() {
 }
 
 # The IMAGE's side of every 32-bit package in an extension: stdin-less, $1 = the
-# resolved NEVRAs, one per line. Prints "name-version-release" of the installed
+# resolved NEVRAs, one per line. Prints "name-[epoch:]version-release" of the installed
 # x86_64 twin of each i686 package in it, sorted. A twin the image does not
 # install prints nothing.
 #
@@ -2657,7 +2657,7 @@ image_twins() {
     names="$(printf '%s\n' "$resolved" | sed -n -E 's/\.i686$//p' \
              | sed -E 's/-[^-]+-[^-]+$//' | LC_ALL=C sort -u)"
     [ -n "$names" ] || return 0
-    rpm -qa --qf '%{NAME} %{ARCH} %{VERSION}-%{RELEASE}\n' 2>/dev/null \
+    rpm -qa --qf '%{NAME} %{ARCH} %{EVR}\n' 2>/dev/null \
         | awk -v n="$names" 'BEGIN { c = split(n, a, "\n"); for (i = 1; i <= c; i++) w[a[i]] = 1 }
                              $2 == "x86_64" && ($1 in w) { print $1 "-" $3 }' \
         | LC_ALL=C sort
@@ -2731,14 +2731,14 @@ warn_twin_mismatch() {
     command -v rpm >/dev/null 2>&1 || return 0
     while read -r name ver; do
         [ -n "$name" ] && twin["$name"]="$ver"
-    done < <(rpm -qa --qf '%{NAME} %{ARCH} %{VERSION}-%{RELEASE}\n' 2>/dev/null | awk '$2 == "x86_64" { print $1, $3 }')
+    done < <(rpm -qa --qf '%{NAME} %{ARCH} %{EVR}\n' 2>/dev/null | awk '$2 == "x86_64" { print $1, $3 }')
     for f in "$destdir"/*.rpm; do
         [ -e "$f" ] || continue
         [ "$(rpm -qp --nosignature --qf '%{ARCH}' "$f" 2>/dev/null)" = i686 ] || continue
         name="$(rpm -qp --nosignature --qf '%{NAME}' "$f" 2>/dev/null)" || continue
         want="${twin[$name]:-}"
         [ -n "$want" ] || continue
-        ver="$(rpm -qp --nosignature --qf '%{VERSION}-%{RELEASE}' "$f" 2>/dev/null)"
+        ver="$(rpm -qp --nosignature --qf '%{EVR}' "$f" 2>/dev/null)"
         [ "$ver" = "$want" ] || warn "${name}.i686 ${ver} does not match the image's ${name}.x86_64 ${want}; 32-bit programs using it may fail until the repositories carry the matching build"
     done
 }
