@@ -41,10 +41,25 @@ case " \$* " in
         name="\$6" value="\$7"
         printf '%s %s\n' "\$name" "\$value" >> "${SETS}"
         printf '%s(CARDINAL) = %s\n' "\$name" "\$value" >> "${EV}" ;;
+    *" -root GAMESCOPE_FOCUSED_APP "*)
+        grep '^GAMESCOPE_FOCUSED_APP(' "${EV}" | tail -n 1 ;;
+    *" -root GAMESCOPE_FOCUSED_WINDOW "*)
+        printf 'GAMESCOPE_FOCUSED_WINDOW(CARDINAL) = %s\n' "\$(cat "${WORK}/focwin" 2>/dev/null)" ;;
+    *" -id "*" WM_STATE "*)
+        printf 'WM_STATE(WM_STATE):\n\t\twindow state: %s\n\t\ticon window: 0x0\n' "\$(cat "${WORK}/wmstate" 2>/dev/null)" ;;
 esac
 exit 0
 FAKE
 chmod +x "${BIN}/xprop"
+# What the wrapper uses to set WM_STATE Normal: recorded, and the window then
+# reads Normal, as Wine's restore makes it.
+NORMALS="${WORK}/normals"
+cat > "${BIN}/wm-normal" <<FAKE
+#!/usr/bin/env bash
+printf '%s\n' "\$1" >> "${NORMALS}"
+echo Normal > "${WORK}/wmstate"
+FAKE
+chmod +x "${BIN}/wm-normal"
 
 HDR=GAMESCOPE_DISPLAY_HDR_ENABLED
 COMP=GAMESCOPE_COMPOSITE_FORCE
@@ -66,7 +81,8 @@ fresh() {
         { [ -z "$old" ] || ! kill -0 "$old" 2>/dev/null; } && break
         sleep 0.1
     done
-    : > "$EV"; : > "$SETS"; rm -f "${WORK}/spypid"
+    : > "$EV"; : > "$SETS"; : > "$NORMALS"; rm -f "${WORK}/spypid"
+    echo 100663297 > "${WORK}/focwin"; echo Normal > "${WORK}/wmstate"
 }
 sets() { tr '\n' ';' < "$SETS"; }
 
@@ -189,6 +205,130 @@ cache_seen() { env -u DISPLAY "$@" bash "$WRAP" bash -c 'printf %s "${__GL_SHADE
 [ "$(cache_seen __GL_SHADER_DISK_CACHE_SIZE=3000000000)" = 3000000000 ] \
     && ok "a size the user set is kept" \
     || bad "user cache size" "seen: $(cache_seen __GL_SHADER_DISK_CACHE_SIZE=3000000000)"
+
+# ── a game the overlay minimised is restored when focus comes back ─────────
+# katana, Cyberpunk 2077 (2026-10-11): Shift+Tab moves GAMESCOPE_FOCUSED_APP to
+# Steam (769) and the game marks its window Iconic; back on the game, nothing
+# took it out of Iconic and it stayed a 160x31 picture in the top-left corner.
+FA=GAMESCOPE_FOCUSED_APP
+normals() { tr '\n' ';' < "$NORMALS"; }
+fresh; prop $HDR 0; prop $COMP 1; prop $FA 1091500
+run_case 4 RIME_GAMING_WM_NORMAL="${BIN}/wm-normal"; sleep 0.6
+[ ! -s "$NORMALS" ] && ok "a game in focus and not minimised: nothing is touched" \
+    || bad "game focused, Normal" "normals: $(normals)"
+echo Iconic > "${WORK}/wmstate"; prop $FA 769; sleep 0.6
+[ ! -s "$NORMALS" ] && ok "Steam's overlay in focus, the game minimised: left alone (it would only minimise again)" \
+    || bad "overlay focused" "normals: $(normals)"
+prop $FA 1091500; sleep 0.6
+[ "$(normals)" = "100663297;" ] && ok "focus back on the game, its window still minimised: set Normal again, once" \
+    || bad "focus back, Iconic" "normals: $(normals)"
+sleep 1.2
+[ "$(normals)" = "100663297;" ] && ok "the second look a moment later finds it Normal and writes nothing" \
+    || bad "second look" "normals: $(normals)"
+# a quick Shift+Tab: the game minimises only after focus is already back
+echo Normal > "${WORK}/wmstate"; prop $FA 769; prop $FA 1091500; sleep 0.3
+echo Iconic > "${WORK}/wmstate"; sleep 1.5
+[ "$(normals)" = "100663297;100663297;" ] && ok "a game that minimises just after focus is back is restored by the second look" \
+    || bad "late minimise" "normals: $(normals)"
+wait "$WPID"
+[ ! -s "$SETS" ] && ok "watching focus writes none of gamescope's root properties" \
+    || bad "focus watch wrote root properties" "sets: $(sets)"
+
+fresh; prop $HDR 0; prop $COMP 1; echo Iconic > "${WORK}/wmstate"; prop $FA 1091500
+run_case 2 RIME_GAMING_WM_NORMAL="${BIN}/wm-normal" RIME_GAMING_RESTORE_MINIMIZED=0; wait "$WPID"
+[ ! -s "$NORMALS" ] && ok "RIME_GAMING_RESTORE_MINIMIZED=0: a minimised game is left as it is" \
+    || bad "RIME_GAMING_RESTORE_MINIMIZED=0" "normals: $(normals)"
+
+fresh; echo Iconic > "${WORK}/wmstate"; prop $FA 1091500
+run_case 2 RIME_GAMING_WM_NORMAL="${BIN}/wm-normal" RIME_GAMING_HDR=steam RIME_GAMING_FORCE_COMPOSITE=0; wait "$WPID"
+[ "$(normals)" = "100663297;" ] && ok "HDR and composition both left to Steam: the focus watch still runs" \
+    || bad "watch with no HDR/composite guard" "normals: $(normals)"
+
+# ── the real setter, on a real X server (Xvfb) ─────────────────────────────
+# Everything above uses a stub setter; this runs the shipped one: the typed
+# WM_STATE write, and its refusal when focus moved before it could write.
+# CI installs Xvfb and x11-utils and sets RIME_TEST_REQUIRE_X=1, so a missing
+# server is a failure there rather than a quiet skip.
+REAL_XPROP="$(PATH="${PATH//${BIN}:/}" command -v xprop || true)"
+if command -v Xvfb >/dev/null && [ -n "$REAL_XPROP" ]; then
+    XDISP=$((90 + RANDOM % 400))
+    Xvfb ":${XDISP}" -nolisten tcp -noreset >/dev/null 2>&1 &
+    XVFB=$!
+    for _ in $(seq 50); do [ -e "/tmp/.X11-unix/X${XDISP}" ] && break; sleep 0.1; done
+    cat > "${WORK}/xwin.py" <<'PY'
+import ctypes, ctypes.util, sys
+x = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+vp, ul = ctypes.c_void_p, ctypes.c_ulong
+x.XOpenDisplay.restype = vp
+x.XDefaultRootWindow.restype = ul; x.XDefaultRootWindow.argtypes = [vp]
+x.XCreateSimpleWindow.restype = ul
+x.XCreateSimpleWindow.argtypes = [vp, ul, ctypes.c_int, ctypes.c_int, ctypes.c_uint, ctypes.c_uint,
+                                  ctypes.c_uint, ul, ul]
+x.XInternAtom.restype = ul; x.XInternAtom.argtypes = [vp, ctypes.c_char_p, ctypes.c_int]
+x.XChangeProperty.argtypes = [vp, ul, ul, ul, ctypes.c_int, ctypes.c_int, vp, ctypes.c_int]
+x.XSetCloseDownMode.argtypes = [vp, ctypes.c_int]
+x.XCloseDisplay.argtypes = [vp]
+d = x.XOpenDisplay(None)
+w = x.XCreateSimpleWindow(d, x.XDefaultRootWindow(d), 0, 0, 160, 31, 0, 0, 0)
+a = x.XInternAtom(d, b"WM_STATE", 0)
+x.XChangeProperty(d, w, a, a, 32, 0, (ctypes.c_long * 2)(3, 0), 2)   # IconicState
+x.XSetCloseDownMode(d, 1)   # RetainPermanent: the window outlives this client
+x.XCloseDisplay(d)
+print(w)
+PY
+    xwin()  { DISPLAY=":${XDISP}" python3 "${WORK}/xwin.py"; }
+    xroot() { DISPLAY=":${XDISP}" "$REAL_XPROP" -root -f "$1" 32c -set "$1" "$2"; }
+    xstate() { DISPLAY=":${XDISP}" "$REAL_XPROP" -id "$1" WM_STATE; }
+    # the shipped wm_normal, as the wrapper defines it
+    setter() {
+        ( eval "$(sed -n '/^STEAM_APPID=/p; /^wm_normal() {/,/^}/p' "$WRAP")"
+          DISPLAY=":${XDISP}" wm_normal "$1" )
+    }
+
+    W="$(xwin)"
+    xroot GAMESCOPE_FOCUSED_WINDOW "$W"; xroot GAMESCOPE_FOCUSED_APP 769
+    setter "$W"; rc=$?
+    [ "$rc" = 2 ] && xstate "$W" | grep -q "window state: Iconic" \
+        && ok "real X: the setter writes nothing while the overlay (app 769) has focus" \
+        || bad "real X refusal under the overlay" "rc=$rc; $(xstate "$W" | tr '\n' ' ')"
+    xroot GAMESCOPE_FOCUSED_APP 1091500; xroot GAMESCOPE_FOCUSED_WINDOW 4242
+    setter "$W"; rc=$?
+    [ "$rc" = 2 ] && xstate "$W" | grep -q "window state: Iconic" \
+        && ok "real X: the setter writes nothing once another window has focus" \
+        || bad "real X refusal for another window" "rc=$rc; $(xstate "$W" | tr '\n' ' ')"
+    xroot GAMESCOPE_FOCUSED_WINDOW "$W"
+    setter "$W"; rc=$?
+    st="$(xstate "$W")"
+    [ "$rc" = 0 ] && printf '%s' "$st" | grep -q '^WM_STATE(WM_STATE):' \
+        && printf '%s' "$st" | grep -q "window state: Normal" \
+        && ok "real X: the setter writes WM_STATE Normal, typed WM_STATE" \
+        || bad "real X typed write" "rc=$rc; $(printf '%s' "$st" | tr '\n' ' ')"
+
+    # End to end: the wrapper's own watch, real xprop -spy, real setter.
+    W2="$(xwin)"
+    xroot GAMESCOPE_FOCUSED_WINDOW "$W2"; xroot GAMESCOPE_FOCUSED_APP 769
+    env -u RIME_GAMING_WM_NORMAL DISPLAY=":${XDISP}" bash "$WRAP" sleep 3 2>"${WORK}/xlog" &
+    XW=$!
+    sleep 1; xroot GAMESCOPE_FOCUSED_APP 1091500
+    wait "$XW"
+    xstate "$W2" | grep -q "window state: Normal" \
+        && ok "real X: the wrapper restores the game when focus comes back from the overlay" \
+        || bad "real X end to end" "$(xstate "$W2" | tr '\n' ' '); log: $(tr '\n' ' ' < "${WORK}/xlog")"
+    kill "$XVFB" 2>/dev/null; wait "$XVFB" 2>/dev/null
+elif [ "${RIME_TEST_REQUIRE_X:-0}" = 1 ]; then
+    bad "real X setter" "Xvfb or xprop missing and RIME_TEST_REQUIRE_X=1"
+else
+    printf 'SKIP  real X setter (no Xvfb or xprop here)\n'
+fi
+
+# ── volume keys: Steam acts on them only with its handler on ───────────────
+vol_seen() { env -u DISPLAY "$@" bash "$WRAP" bash -c 'printf %s "${STEAM_ENABLE_VOLUME_HANDLER-UNSET}"' 2>/dev/null; }
+[ "$(vol_seen -u STEAM_ENABLE_VOLUME_HANDLER)" = 1 ] \
+    && ok "Steam gets STEAM_ENABLE_VOLUME_HANDLER=1, so the volume keys change the volume" \
+    || bad "volume handler" "seen: $(vol_seen -u STEAM_ENABLE_VOLUME_HANDLER)"
+[ "$(vol_seen STEAM_ENABLE_VOLUME_HANDLER=0)" = 0 ] \
+    && ok "a STEAM_ENABLE_VOLUME_HANDLER the user set is kept" \
+    || bad "user volume handler" "seen: $(vol_seen STEAM_ENABLE_VOLUME_HANDLER=0)"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

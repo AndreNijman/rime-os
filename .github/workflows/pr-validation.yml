@@ -1336,10 +1336,17 @@ jobs:
 
       # Gaming Mode keeps HDR off and gamescope compositing while it is off
       # (direct scan-out on NVIDIA drew the picture three times over).
+      # The minimised-game restore is also run against a real X server (Xvfb),
+      # so the shipped WM_STATE setter is measured, not only its stub.
       - name: Run Gaming Mode HDR and composition guard assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
-        run: ./tests/test-rime-gamescope-steam.sh
+        env:
+          RIME_TEST_REQUIRE_X: "1"
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq xvfb x11-utils
+          ./tests/test-rime-gamescope-steam.sh
 
       # Discord activity in Gaming Mode: Equibop started hidden and muted for
       # its Rich Presence only, refused when it would show a window, and
