@@ -25,10 +25,34 @@
 #  ── Knobs ───────────────────────────────────────────────────────────────────
 #    RIME_GAMING_HDR=steam            let Steam's HDR setting through
 #    RIME_GAMING_FORCE_COMPOSITE=0    leave composition to gamescope
+#    RIME_GAMING_RESTORE_MINIMIZED=0  leave a game the overlay minimised minimised
 #    RIME_GAMING_OMM=on               keep opacity micromaps on an older NVIDIA GPU
 #    __GL_SHADER_DISK_CACHE_SIZE      NVIDIA shader cache size per game (12 GB)
 #  (those two are rime-game-env's; the desktop gets the same list from
 #  /etc/profile.d/rime-game-env.sh)
+#
+#  ── A game minimised by the overlay comes back ───────────────────────────
+#  Measured on katana (Cyberpunk 2077, Proton Experimental, exclusive
+#  Fullscreen, 2026-10-11): Shift+Tab hands focus to Steam
+#  (GAMESCOPE_FOCUSED_APP 769), and the game minimises itself the way a
+#  Windows fullscreen game does when it loses focus. Wine marks its X window
+#  Iconic (WM_STATE) and shrinks the window it draws into to 160x31, the size
+#  of a minimised window on Windows. On resume gamescope gives the game focus
+#  again but never takes the window out of Iconic, so Wine never restores it:
+#  the game stayed a 160x31 picture in the top-left corner until it was quit.
+#  Setting WM_STATE back to Normal is how a window manager restores a window,
+#  and Wine answers it at once (full size again, measured). So when focus moves
+#  to anything but Steam itself, a focused window left Iconic is set Normal.
+#  The property's TYPE has to be WM_STATE (Wine ignores a CARDINAL one, and
+#  xprop can only write those), hence the few lines of python.
+#
+#  ── Volume keys ─────────────────────────────────────────────────────────────
+#  gamescope gives the volume keys to Steam alone, and Steam only acts on them
+#  when STEAM_ENABLE_VOLUME_HANDLER is set (SteamOS's session sets it). Without
+#  it, measured on katana: Steam logged every press ("OnVolumeButtonPressed",
+#  "CSystemAudioController handle volume keys: 0") and the volume never moved.
+#  With it set, each press moved the default output by 5 %. A value already
+#  in the environment is kept.
 #
 #  The guard is the property watcher only: if xprop is missing or the X
 #  server is gone, Steam still starts and nothing else changes.
@@ -46,8 +70,50 @@ log() { printf 'rime-gamescope-steam: %s\n' "$*" >&2; }
 
 HDR_POLICY="${RIME_GAMING_HDR:-off}"
 FORCE_COMPOSITE="${RIME_GAMING_FORCE_COMPOSITE:-1}"
+RESTORE_MINIMIZED="${RIME_GAMING_RESTORE_MINIMIZED:-1}"
+STEAM_APPID=769   # Steam's own windows (Big Picture, the overlay) in GAMESCOPE_FOCUSED_APP
 
 set_root() { xprop -root -f "$1" 32c -set "$1" "$2" 2>/dev/null; }
+
+# wm_normal WINDOW — set WM_STATE to NormalState, typed WM_STATE as ICCCM has it.
+wm_normal() {
+    if [ -n "${RIME_GAMING_WM_NORMAL:-}" ]; then "${RIME_GAMING_WM_NORMAL}" "$1"; return; fi
+    python3 - "$1" <<'PY'
+import ctypes, ctypes.util, sys
+x = ctypes.CDLL(ctypes.util.find_library("X11") or "libX11.so.6")
+x.XOpenDisplay.restype = ctypes.c_void_p
+x.XInternAtom.restype = ctypes.c_ulong
+x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+x.XChangeProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong,
+                              ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+x.XCloseDisplay.argtypes = [ctypes.c_void_p]
+d = x.XOpenDisplay(None)
+if not d:
+    sys.exit(1)
+atom = x.XInternAtom(d, b"WM_STATE", 0)
+state = (ctypes.c_long * 2)(1, 0)   # NormalState, no icon window
+x.XChangeProperty(d, int(sys.argv[1], 0), atom, atom, 32, 0, state, 2)
+x.XCloseDisplay(d)
+PY
+}
+
+# root_value NAME — a CARDINAL root property as gamescope has it NOW.
+root_value() { local line; line="$(xprop -root "$1" 2>/dev/null)"; printf '%s' "${line##* = }"; }
+
+# restore_focused — the focused window is minimised although focus is on it.
+# Focus is read when it runs, never taken from the event: the second look
+# must not restore a game under an overlay that opened in the meantime.
+restore_focused() {
+    local app win
+    app="$(root_value GAMESCOPE_FOCUSED_APP)"
+    case "$app" in ''|0|"$STEAM_APPID"|*[!0-9]*) return 0 ;; esac
+    win="$(root_value GAMESCOPE_FOCUSED_WINDOW)"
+    case "$win" in ''|0|*[!0-9]*) return 0 ;; esac
+    case "$(xprop -id "$win" WM_STATE 2>/dev/null)" in
+        *"window state: Iconic"*)
+            wm_normal "$win" && log "app ${app}: its window was left minimised when focus came back — restored" ;;
+    esac
+}
 
 # One `xprop -spy` line in, the properties put right. Only a value that
 # differs is written: every write comes back as another line. Nothing is
@@ -60,6 +126,14 @@ enforce() {
     case "$line" in
         GAMESCOPE_DISPLAY_HDR_ENABLED*) hdr="$value" ;;
         GAMESCOPE_COMPOSITE_FORCE*)     composite="$value" ;;
+        GAMESCOPE_FOCUSED_APP\(*)
+            if [ "$RESTORE_MINIMIZED" = 1 ]; then
+                restore_focused
+                # the game may minimise only after focus is back (a quick
+                # Shift+Tab): look once more a moment later
+                ( sleep 1; restore_focused ) &
+            fi
+            return 0 ;;
         *) return 0 ;;
     esac
     if [ "$HDR_POLICY" = off ] && [ "$hdr" = 1 ]; then
@@ -78,7 +152,8 @@ enforce() {
 # wait for every process in the session before gamescope exits.
 guard() {
     local owner="$1" line rc spy
-    exec 3< <(exec xprop -root -spy GAMESCOPE_DISPLAY_HDR_ENABLED GAMESCOPE_COMPOSITE_FORCE 2>/dev/null)
+    exec 3< <(exec xprop -root -spy GAMESCOPE_DISPLAY_HDR_ENABLED GAMESCOPE_COMPOSITE_FORCE \
+                                    GAMESCOPE_FOCUSED_APP 2>/dev/null)
     spy=$!
     while kill -0 "$owner" 2>/dev/null; do
         if IFS= read -r -t 2 line <&3; then
@@ -111,12 +186,14 @@ if [ $# -eq 0 ]; then
     exit 2
 fi
 
-if [ "$HDR_POLICY" = steam ] && [ "$FORCE_COMPOSITE" != 1 ]; then
+export STEAM_ENABLE_VOLUME_HANDLER="${STEAM_ENABLE_VOLUME_HANDLER:-1}"
+
+if [ "$HDR_POLICY" = steam ] && [ "$FORCE_COMPOSITE" != 1 ] && [ "$RESTORE_MINIMIZED" != 1 ]; then
     : # nothing to guard
 elif ! command -v xprop >/dev/null 2>&1; then
-    log "no xprop: HDR and composition are left to Steam and gamescope"
+    log "no xprop: HDR, composition and minimised games are left to Steam and gamescope"
 elif [ -z "${DISPLAY:-}" ]; then
-    log "no DISPLAY: HDR and composition are left to Steam and gamescope"
+    log "no DISPLAY: HDR, composition and minimised games are left to Steam and gamescope"
 else
     guard "$$" &
 fi
