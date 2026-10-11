@@ -342,7 +342,11 @@ IMAGE_GAMMA=3.0-1.fc43
 rpm() {
     case "${1:-}" in
         -qa) printf 'gamma x86_64 %s\n' "$IMAGE_GAMMA" ;;
-        -q)  return 1 ;;
+        # The image installs gamma's x86_64 build, so a REQUESTED gamma would be
+        # dropped as "already part of Rime OS" exactly as on a real machine.
+        # gamma therefore reaches the extension the way the NVIDIA libs do: as a
+        # dependency of what was requested, in the resolved set as an i686.
+        -q)  case "${2:-}" in gamma|gamma.x86_64) return 0 ;; *) return 1 ;; esac ;;
         -qp) local f="${!#}" b; b="${f##*/}"; printf '%s\n' "${b%.rpm}" ;;
         *)   return 1 ;;
     esac
@@ -370,11 +374,11 @@ mkstate() {   # $1 = level, $2 = the resolved set to store
     local lvl=$1 set_text=$2 resolved
     resolved="$(printf '%s\n' $set_text | jq -R -s 'split("\n")|map(select(length>0))')"
     jq -n --argjson r "$resolved" --arg v "$OSVER" --argjson l "$lvl" --arg t "$REC_TWIN" \
-       '{requested:["alpha","beta","gamma"],resolved:$r,local_files:[],unsigned_accepted:[],
+       '{requested:["alpha","beta"],resolved:$r,local_files:[],unsigned_accepted:[],
          os_id:"fedora",os_version_id:$v,built:"2026-09-19T01:43:06Z",
          image:"/var/lib/extensions/rime-user.raw",image_sha256:"stale",image_bytes:0,
          pkg_compat_level:$l,image_twins:[$t]}' > /var/lib/rime/pkg/state.json
-    printf 'alpha\nbeta\ngamma\n' > /var/lib/rime/pkg/requested
+    printf 'alpha\nbeta\n' > /var/lib/rime/pkg/requested
 }
 
 run_case() {  # $1 label, $2 level to store, $3 argv, $4 optional set to STORE
@@ -399,7 +403,7 @@ run_case() {  # $1 label, $2 level to store, $3 argv, $4 optional set to STORE
     [[ "$out" == *"already up to date"* ]] && uptodate=yes
     [[ "$out" == *"extension compatibility changed"* ]] && announced=yes
     [ "$before" != "$after" ] && changed=yes
-    echo "PROBE_CASE ${label} rc=${rc} extracted=${extracted} uptodate=${uptodate} announced=${announced} payload_changed=${changed} state_level=$(jq -r '.pkg_compat_level // 0' /var/lib/rime/pkg/state.json) state_twin=$(jq -r '.image_twins[0] // "none"' /var/lib/rime/pkg/state.json)"
+    echo "PROBE_CASE ${label} rc=${rc} extracted=${extracted} uptodate=${uptodate} announced=${announced} payload_changed=${changed} state_level=$(jq -r '.pkg_compat_level // 0' /var/lib/rime/pkg/state.json) state_twin=$(jq -r '.image_twins[0] // "none"' /var/lib/rime/pkg/state.json) kept_i686=$(jq -r '[.resolved[]|select(endswith(".i686"))]|length' /var/lib/rime/pkg/state.json) requested_kept=$(jq -r '.requested|join(",")' /var/lib/rime/pkg/state.json)"
 }
 
 # ── the set really is constant: stored vs computed, both printed ────────────
@@ -522,7 +526,8 @@ else
         # 6. The driver bump: same level, same set, only the image's twin moved.
         if [ "$(field driver-bump extracted)" = yes ] && [ "$(field driver-bump payload_changed)" = yes ] \
            && [ "$(field driver-bump announced)" = yes ] \
-           && [ "$(field driver-bump state_twin)" = gamma-3.1-1.fc43 ]; then
+           && [ "$(field driver-bump state_twin)" = gamma-3.1-1.fc43 ] \
+           && [ "$(field driver-bump kept_i686)" = 1 ] && [ "$(field driver-bump requested_kept)" = alpha,beta ]; then
             ok "driver bump: --if-needed rebuilt and recorded the image's new 32-bit twin"
         else
             bad "driver bump: --if-needed did not rebuild when the image's twin moved" \
