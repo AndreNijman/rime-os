@@ -2608,9 +2608,12 @@ write_state() {
                done | jq -R -s 'split("\n") | map(select(length > 0)) | map(split("\t"))
                                 | map({(.[0]): (.[1] // "")}) | add // {}')"
     local payload; payload="$(current_payload)"
+    local twins
+    twins="$(image_twins "$(jq -r '.[]' <<<"$resolved")" | json_string_array)"
     jq -n \
         --argjson requested "$requested" \
         --argjson resolved "$resolved" \
+        --argjson image_twins "$twins" \
         --argjson local_files "$locals" \
         --argjson deb_files "$debfiles" \
         --argjson deb_depends "$debdeps" \
@@ -2628,8 +2631,48 @@ write_state() {
           unsigned_accepted:$unsigned, vendor_verified:$vendors, os_id:$os_id,
           os_version_id:$os_version, built:$built, image:$image,
           image_sha256:$sha, image_bytes:($size|tonumber),
-          pkg_compat_level:$compat_level}' > "${STATE}.tmp"
+          pkg_compat_level:$compat_level, image_twins:$image_twins}' > "${STATE}.tmp"
     mv -f "${STATE}.tmp" "$STATE"
+}
+
+# The IMAGE's side of every 32-bit package in an extension: stdin-less, $1 = the
+# resolved NEVRAs, one per line. Prints "name-[epoch:]version-release" of the installed
+# x86_64 twin of each i686 package in it, sorted. A twin the image does not
+# install prints nothing.
+#
+# WHY: a 32-bit library has to be the SAME build as its 64-bit twin whenever the
+# pair is one driver. Measured on katana on 2026-10-11: the image moved
+# xorg-x11-drv-nvidia-libs to 615.78.08 (kernel module 615.78.08) while the
+# extension, built a day earlier, still held the i686 libs at 615.71.09. Steam is
+# a 32-bit process, so it loaded the old libGLX_nvidia and the kernel answered
+# "NVRM: API mismatch" and killed it with SIGSEGV; Gaming Mode's gamescope lost
+# its only client and the session fell back to the desktop. rime-sysext-rebuild
+# reported success in under a second, because OS version, compat level and merge
+# state had not moved and the resolved set is computed from the repositories,
+# which still offered the old build. Nothing a rebuild decision read described
+# what the image provides, so this is the record that does.
+image_twins() {
+    local resolved="$1" names
+    command -v rpm >/dev/null 2>&1 || return 0
+    names="$(printf '%s\n' "$resolved" | sed -n -E 's/\.i686$//p' \
+             | sed -E 's/-[^-]+-[^-]+$//' | LC_ALL=C sort -u)"
+    [ -n "$names" ] || return 0
+    rpm -qa --qf '%{NAME} %{ARCH} %{EVR}\n' 2>/dev/null \
+        | awk -v n="$names" 'BEGIN { c = split(n, a, "\n"); for (i = 1; i <= c; i++) w[a[i]] = 1 }
+                             $2 == "x86_64" && ($1 in w) { print $1 "-" $3 }' \
+        | LC_ALL=C sort
+}
+
+# Does the extension's recorded image side still match the running image?
+# $1 = the state file. A state.json written before the field existed records
+# nothing, which reads as "no twins": it matches only when the image has none to
+# report for this set either, so every machine with a 32-bit package gets the one
+# rebuild that heals one already stranded the way katana was, and a machine with
+# none is left alone.
+twins_unchanged() {
+    local state=$1
+    [ "$(jq -r '.image_twins[]?' "$state" | LC_ALL=C sort)" \
+      = "$(image_twins "$(jq -r '.resolved[]?' "$state")")" ]
 }
 
 # Is the extension on disk already exactly what this transaction would build?
@@ -2670,9 +2713,34 @@ ext_up_to_date() {
     # `// 0` on purpose: a state.json written before the field existed must read
     # as "older than anything this engine ships" and rebuild, not as a match.
     [ "$(jq -r '.pkg_compat_level // 0' "$state")" = "$PKG_COMPAT_LEVEL" ] || return 1
+    # The image's own 32-bit twins moved (a driver bump): same set of names,
+    # different builds underneath. See image_twins.
+    twins_unchanged "$state" || return 1
     local old_set
     old_set="$(jq -r '.resolved[]?' "$state" | sort)"
     [ "$new_set" = "$old_set" ]
+}
+
+# A 32-bit package whose 64-bit twin the image ships at a DIFFERENT build is the
+# defect image_twins describes. The pinned download normally prevents it; when
+# the repositories hold no matching build the extension is still built (the
+# alternative is no applications at all), but the machine is told, by name.
+warn_twin_mismatch() {
+    local destdir="$1" f name ver want
+    local -A twin=()
+    command -v rpm >/dev/null 2>&1 || return 0
+    while read -r name ver; do
+        [ -n "$name" ] && twin["$name"]="$ver"
+    done < <(rpm -qa --qf '%{NAME} %{ARCH} %{EVR}\n' 2>/dev/null | awk '$2 == "x86_64" { print $1, $3 }')
+    for f in "$destdir"/*.rpm; do
+        [ -e "$f" ] || continue
+        [ "$(rpm -qp --nosignature --qf '%{ARCH}' "$f" 2>/dev/null)" = i686 ] || continue
+        name="$(rpm -qp --nosignature --qf '%{NAME}' "$f" 2>/dev/null)" || continue
+        want="${twin[$name]:-}"
+        [ -n "$want" ] || continue
+        ver="$(rpm -qp --nosignature --qf '%{EVR}' "$f" 2>/dev/null)"
+        [ "$ver" = "$want" ] || warn "${name}.i686 ${ver} does not match the image's ${name}.x86_64 ${want}; 32-bit programs using it may fail until the repositories carry the matching build"
+    done
 }
 
 # Build the one extension from the requested list. Every mutation funnels here,
@@ -2790,6 +2858,7 @@ rebuild_extension() {
     compgen -G "${rpms}/*.rpm" >/dev/null && have_rpms=1
     if [ "$have_rpms" = 1 ]; then
         guard_rpms "$rpms"
+        warn_twin_mismatch "$rpms"
     elif [ "${#debcached[@]}" -eq 0 ]; then
         die "every requested package is already part of Rime OS — nothing to install"
     fi
@@ -4038,10 +4107,11 @@ cmd_rebuild() {
         built_for="$(jq -r '.os_version_id // empty' "$STATE")"
         built_level="$(jq -r '.pkg_compat_level // 0' "$STATE")"
         if [ "$built_for" = "$(os_version)" ] \
-           && [ "$built_level" = "$PKG_COMPAT_LEVEL" ] && merged; then
+           && [ "$built_level" = "$PKG_COMPAT_LEVEL" ] && merged \
+           && twins_unchanged "$STATE"; then
             return 0
         fi
-        msg "extension compatibility changed (OS ${built_for}, level ${built_level} -> OS $(os_version), level ${PKG_COMPAT_LEVEL}) — rebuilding"
+        msg "extension compatibility changed (OS ${built_for}, level ${built_level} -> OS $(os_version), level ${PKG_COMPAT_LEVEL}, or the image's 32-bit libraries moved) — rebuilding"
     fi
 
     local -a want=()
