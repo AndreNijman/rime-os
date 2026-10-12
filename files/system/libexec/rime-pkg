@@ -51,7 +51,10 @@
 # copied into ${PKG_ROOT}/local at install time and every later rebuild reads the
 # COPY, because `rime update` and the post-OS-upgrade rebuild must still work
 # when the USB stick the file came from is long gone. Its dependencies still come
-# from the repositories.
+# from the repositories. `github:OWNER/REPO` reaches the same pipeline with the
+# .rpm attached to a repository's latest release, and `rime update` follows that
+# repository; see the GitHub releases section for what that does and does not
+# verify.
 #
 # Every RPM is signature-checked before extraction and an unverifiable one is
 # refused. A local file that no trusted key covers can be installed only by
@@ -2607,6 +2610,16 @@ write_state() {
                    printf '%s\t%s\n' "$n" "$(cat "${DEB_DIR}/${n}.depends" 2>/dev/null || true)"
                done | jq -R -s 'split("\n") | map(select(length > 0)) | map(split("\t"))
                                 | map({(.[0]): (.[1] // "")}) | add // {}')"
+    # Which local packages follow a GitHub repository's releases. They are in
+    # the unsigned list above as well, by their trust marker: following a
+    # repository is a standing acceptance, not a verification.
+    local ghsrc
+    ghsrc="$(load_requested | sed -n 's/^local://p' | sort | while IFS= read -r n; do
+                 [ -n "$n" ] || continue
+                 r="$(github_source "$n")" && printf '%s\t%s\n' "$n" "$r"
+                 true
+             done | jq -R -s 'split("\n") | map(select(length > 0)) | map(split("\t"))
+                              | map({(.[0]): .[1]}) | add // {}')"
     local payload; payload="$(current_payload)"
     local twins
     twins="$(image_twins "$(jq -r '.[]' <<<"$resolved")" | json_string_array)"
@@ -2619,6 +2632,7 @@ write_state() {
         --argjson deb_depends "$debdeps" \
         --argjson unsigned "$unsigned" \
         --argjson vendors "$vendors" \
+        --argjson github "$ghsrc" \
         --arg os_id "$(os_id)" \
         --arg os_version "$(os_version)" \
         --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -2628,7 +2642,8 @@ write_state() {
         --argjson compat_level "$PKG_COMPAT_LEVEL" \
         '{requested:$requested, resolved:$resolved, local_files:$local_files,
           deb_files:$deb_files, deb_depends:$deb_depends,
-          unsigned_accepted:$unsigned, vendor_verified:$vendors, os_id:$os_id,
+          unsigned_accepted:$unsigned, vendor_verified:$vendors,
+          github_sources:$github, os_id:$os_id,
           os_version_id:$os_version, built:$built, image:$image,
           image_sha256:$sha, image_bytes:($size|tonumber),
           pkg_compat_level:$compat_level, image_twins:$image_twins}' > "${STATE}.tmp"
@@ -3680,14 +3695,18 @@ cmd_install() {
     # round trip instead of before one costs the user a second attempt for
     # nothing. Nothing here writes; the root gate still comes before every
     # mutation below.
-    local -a appimages=() files=() debs=() flatpaks=() names=() p
+    local -a appimages=() files=() debs=() flatpaks=() names=() githubs=() p
     for p in "$@"; do
         # AppImage and .deb are both tested BEFORE the RPM test, never after:
         # is_local_rpm_arg answers true for ANY argument containing a slash, so
         # `rime install ./Thing.AppImage` or `./x.deb` would otherwise be
         # refused as "not an RPM package". AppImage goes first of the two
         # because is_flatpak_id also matches `org.foo.Bar.AppImage`.
-        if is_appimage_arg "$p"; then
+        # `github:OWNER/REPO` goes first of all: it contains a slash, and
+        # is_local_rpm_arg calls anything with a slash a path.
+        if is_github_arg "$p"; then
+            githubs+=("${p#github:}")
+        elif is_appimage_arg "$p"; then
             appimages+=("$p")
         elif is_local_deb_arg "$p"; then
             debs+=("$p")
@@ -3714,6 +3733,9 @@ cmd_install() {
         fi
         if [ "${#flatpaks[@]}" -gt 0 ] && [ "$SOURCE" != flatpak ]; then
             die "--source ${SOURCE} contradicts the Flatpak id you named; an application id is always installed as a Flatpak"
+        fi
+        if [ "${#githubs[@]}" -gt 0 ] && [ "$SOURCE" != rpm ]; then
+            die "--source ${SOURCE} contradicts the GitHub repository you named; its release rpm always goes into the system extension"
         fi
         # There is deliberately no `--source appimage`, and `rime resolve` has
         # no AppImage route either. --source ranks the ways a BARE NAME could be
@@ -3824,6 +3846,15 @@ cmd_install() {
         msg "local file: ${LR_NAME}-${LR_EVR}.${LR_ARCH} (${LR_PATH})"
     done
 
+    # Validated, and the trust question answered, before the root gate and
+    # before anything is downloaded.
+    for p in "${githubs[@]:-}"; do
+        [ -n "$p" ] || continue
+        valid_github_repo "$p" \
+            || die "'github:${p}' does not name a GitHub repository; use github:OWNER/REPO"
+        [ "${ALLOW_UNSIGNED:-0}" = 1 ] || refuse_unsigned_github "$p"
+    done
+
     local -a dpath=() dname=() ddeps=()
     for p in "${debs[@]:-}"; do
         [ -n "$p" ] || continue
@@ -3842,7 +3873,8 @@ cmd_install() {
         msg "${p}: installed for ${SUDO_USER:-$(id -un)} in ~/.local; it updates itself"
     done
     if [ "${#vendors[@]}" -eq 0 ] && [ "${#names[@]}" -eq 0 ] && [ "${#files[@]}" -eq 0 ] \
-       && [ "${#debs[@]}" -eq 0 ] && [ "${#flatpaks[@]}" -eq 0 ] && [ "${#appimages[@]}" -eq 0 ]; then
+       && [ "${#debs[@]}" -eq 0 ] && [ "${#flatpaks[@]}" -eq 0 ] && [ "${#appimages[@]}" -eq 0 ] \
+       && [ "${#githubs[@]}" -eq 0 ]; then
         return 0
     fi
 
@@ -3871,6 +3903,23 @@ cmd_install() {
             msg "${p}: ${LD_NAME}-${LD_VERSION}.${LD_ARCH} verified"
             vendor_ok["$LD_PATH"]=1
         fi
+    done
+
+    # GitHub releases: fetched here, as root, and handed to the local-file path
+    # like a file the user named. The signature step below still runs on each
+    # one; --allow-unsigned, already required above, is what lets an unsigned
+    # one through. `gh_repo` remembers which package follows which repository.
+    local -A gh_repo=()
+    for p in "${githubs[@]:-}"; do
+        [ -n "$p" ] || continue
+        install -d -m0700 "$WORK_ROOT"
+        vwork="$(mktemp -d "${WORK_ROOT}/github.XXXXXX")"
+        msg "github:${p}: fetching the rpm of its latest release"
+        got="$(github_fetch "$p" "$vwork")" || exit 1
+        inspect_local_rpm "$got"
+        lpath+=("$LR_PATH"); lname+=("$LR_NAME")
+        gh_repo["$LR_NAME"]="$p"
+        msg "github:${p}: ${LR_NAME}-${LR_EVR}.${LR_ARCH} (${got##*/})"
     done
 
     if [ "${#flatpaks[@]}" -gt 0 ]; then
@@ -3929,6 +3978,15 @@ cmd_install() {
     for i in "${!lpath[@]}"; do
         f="${lpath[$i]}"; n="${lname[$i]}"
         cache_local_rpm "$f" "$n" "${unsigned[$i]}"
+        # The side file is what makes `rime update` follow a repository, so a
+        # package installed from a plain file must not inherit one left by an
+        # earlier `github:` install of the same name.
+        if [ -n "${gh_repo[$n]:-}" ]; then
+            printf '%s\n' "${gh_repo[$n]}" > "$(github_record "$n").tmp"
+            mv -f "$(github_record "$n").tmp" "$(github_record "$n")"
+        else
+            rm -f "$(github_record "$n")"
+        fi
         want+=("$(local_id "$n")")
     done
     for i in "${!dpath[@]}"; do
@@ -4017,6 +4075,21 @@ cmd_remove() {
     local -a rpms=() flatpaks=()
     local q
     for q in "$@"; do
+        # `rime remove github:OWNER/REPO` means the package installed from it;
+        # the requested list knows it only by its rpm name.
+        if is_github_arg "$q"; then
+            n=""
+            local rec
+            for rec in "$LOCAL_DIR"/*.github; do
+                [ -f "$rec" ] || continue
+                if [ "$(head -n1 "$rec" 2>/dev/null)" = "${q#github:}" ]; then
+                    n="$(basename "$rec" .github)"
+                fi
+            done
+            [ -n "$n" ] || die "no installed package follows ${q}"
+            rpms+=("$n")
+            continue
+        fi
         if is_local_deb_arg "$q" && [ -f "$q" ] && deb_magic_ok "$q"; then
             n="$(deb_name_of "$q")" || n=""
             if [ -n "$n" ] && valid_deb_name "$n"; then
@@ -4085,6 +4158,7 @@ cmd_upgrade() {
         return 0
     fi
     vendor_refresh
+    github_refresh
     msg "refreshing extension packages from the repositories"
     rebuild_extension "${want[@]}"
 }
@@ -4142,10 +4216,14 @@ cmd_list() {
         jq -r '
             ((.unsigned_accepted // []) | map({(.): true}) | add // {}) as $u
             | ((.vendor_verified // []) | map({(.): true}) | add // {}) as $v
+            | (.github_sources // {}) as $g
             | .requested[]
             | if ((startswith("local:") or startswith("deb:")) and $v[sub("^(local|deb):"; "")]) then
                   sub("^(local|deb):"; "") as $n
                   | "  \($n)  [from its vendor, verified against the key Rime pins for it]"
+              elif (startswith("local:") and $g[ltrimstr("local:")]) then
+                  ltrimstr("local:") as $n
+                  | "  \($n)  [GitHub releases of \($g[$n]), signature not verified; you accepted that repository, and rime update follows it]"
               elif startswith("local:") then
                   ltrimstr("local:") as $n
                   | "  \($n)  [local file" + (if $u[$n] then ", signature not verified]" else "]" end)
@@ -4364,6 +4442,12 @@ cmd_verify() {
     if [ -n "$unverified" ]; then
         warn "contains package(s) you accepted with --allow-unsigned; their signatures were never verified:"
         printf '%s\n' "$unverified" | sed 's/^/  /' >&2
+    fi
+    local followed
+    followed="$(jq -r '(.github_sources // {}) | to_entries[] | "\(.key) <- github:\(.value)"' "$STATE" 2>/dev/null || true)"
+    if [ -n "$followed" ]; then
+        warn "follows GitHub releases you accepted; 'rime update' installs whatever those repositories publish next:"
+        printf '%s\n' "$followed" | sed 's/^/  /' >&2
     fi
     msg "extension intact"
     return "$ai_rc"
@@ -4646,6 +4730,188 @@ vendor_refresh() {
     done
 }
 
+# ── GitHub releases: a repository you accept, not a key Rime pins ────────────
+#
+#   sudo rime install --allow-unsigned github:OWNER/REPO
+#
+# Plenty of desktop software is published only as assets on a GitHub release:
+# an .rpm beside an AppImage, a .deb and a tarball, and no repository at all.
+# Installed as a local file, such an rpm is pinned — `rime update` re-resolves
+# its dependencies and never the file — so the machine reports itself current
+# while the application falls further behind every week. This route keeps the
+# repository it came from and follows that repository's latest release.
+#
+# What it is NOT is verified, and it is not presented as verified. Release
+# assets carry no signature Rime can check (an rpm built in CI is normally not
+# signed at all), and the checksums GitHub and the project publish beside the
+# file come from the same place as the file: they prove the download is the
+# asset the release lists, not who built it. So the decision the user makes is
+# wider than the per-file one `--allow-unsigned` records for a local file: it
+# is "I accept whatever OWNER/REPO publishes as a release", now and on every
+# later `rime update`. That is why the flag is still required, why the refusal
+# says it in those words, and why `rime pkg list` and `rime pkg verify` repeat
+# it for as long as the package is installed.
+#
+# The state is one side file beside the cached rpm, `local/<NAME>.github`,
+# holding OWNER/REPO, with NAME read from the downloaded rpm's header and never
+# from the repository name (they differ more often than not). The package is an
+# ordinary `local:<NAME>` everywhere else, so the cache, the per-file trust
+# marker, garbage collection and rollback all carry the side file with the rpm,
+# and an engine that predates this route sees a pinned local rpm and nothing
+# it misreads.
+#
+# The API and download locations are environment-overridable for the suite,
+# which serves file:// fixtures.
+GITHUB_API="${RIME_PKG_GITHUB_API:-https://api.github.com}"
+GITHUB_WEB="${RIME_PKG_GITHUB_WEB:-https://github.com}"
+
+is_github_arg() { case "$1" in github:*) return 0 ;; esac; return 1; }
+
+# GitHub's own limits: an owner is 1-39 alphanumerics and inner hyphens, a
+# repository name is letters, digits, '.', '-' and '_'. Tighter than strictly
+# needed on purpose — the value goes into a URL and a path, as root.
+valid_github_repo() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$ ]] || return 1
+    case "${1#*/}" in .|..) return 1 ;; esac
+    return 0
+}
+
+github_record() { printf '%s/%s.github' "$LOCAL_DIR" "$1"; }
+
+# github_source NAME — the OWNER/REPO a local package follows, or non-zero. A
+# record that does not hold a valid repository is treated as absent: it is
+# never passed on to curl.
+github_source() {
+    local rec repo
+    rec="$(github_record "$1")"
+    [ -f "$rec" ] || return 1
+    repo="$(head -n1 "$rec" 2>/dev/null)"
+    valid_github_repo "$repo" || return 1
+    printf '%s' "$repo"
+}
+
+# github_fetch REPO DIR [SHA] — download the rpm asset of REPO's latest release
+# into DIR and print its path. When SHA is given and the release publishes a
+# digest equal to it, print `unchanged` instead and download nothing: these
+# assets are tens of megabytes each, and `rime update` asks every time.
+#
+# Exactly one rpm built for this machine (or noarch) must be attached; none or
+# several is a refusal, because picking one would be Rime guessing on the
+# project's behalf. Every refusal names what did not check out.
+github_fetch() {
+    local repo="$1" dir="$2" have="${3:-}" arch tag asset url digest sum line
+    valid_github_repo "$repo" || die "'${repo}' is not a GitHub OWNER/REPO"
+    arch="$(uname -m)"
+    curl -fsSL --max-time 120 -H 'Accept: application/vnd.github+json' \
+         "${GITHUB_API}/repos/${repo}/releases/latest" -o "$dir/release.json" \
+        || die "could not read the latest release of ${repo} from GitHub"
+    jq -e 'type == "object" and (.draft | not) and (.prerelease | not)' "$dir/release.json" >/dev/null 2>&1 \
+        || die "${repo} has no published, non-prerelease release"
+    tag="$(jq -r '.tag_name // ""' "$dir/release.json")"
+    jq -r --arg arch "$arch" '.assets[]?
+            | select(.name | endswith(".rpm"))
+            | select(.name | endswith(".src.rpm") | not)
+            | select(.name | test("(^|[-_.])(" + $arch + "|noarch)[-_.]"))
+            | [.name, .browser_download_url, (.digest // "")] | @tsv' \
+        "$dir/release.json" > "$dir/candidates"
+    case "$(wc -l < "$dir/candidates")" in
+        1) ;;
+        0) die "the latest release of ${repo} (${tag:-untagged}) has no .rpm for ${arch}" ;;
+        *) die "the latest release of ${repo} (${tag:-untagged}) has more than one .rpm for ${arch}: $(cut -f1 "$dir/candidates" | tr '\n' ' ')" ;;
+    esac
+    IFS=$'\t' read -r asset url digest < "$dir/candidates"
+    [[ "$asset" =~ ^[A-Za-z0-9][A-Za-z0-9._+~-]*\.rpm$ ]] \
+        || die "refusing ${repo}: the asset name '${asset}' is not a plain file name"
+    # The download has to come from this repository's own release, whatever
+    # the API answered. Compared without case: GitHub answers with the
+    # canonical spelling of OWNER/REPO, which need not be what was typed.
+    case "${url,,}" in
+        "${GITHUB_WEB,,}/${repo,,}/releases/download/"*) ;;
+        *) die "refusing ${repo}: the asset URL '${url}' is not a download from that repository's releases" ;;
+    esac
+    digest="${digest#sha256:}"
+    if [ -n "$have" ] && [ "$digest" = "$have" ]; then
+        printf 'unchanged\n'
+        return 0
+    fi
+    curl -fsSL --max-time 1800 "$url" -o "$dir/$asset" \
+        || die "could not download ${asset} from ${repo}"
+    sum="$(sha "$dir/$asset")"
+    if [ -n "$digest" ] && [ "$digest" != "$sum" ]; then
+        die "refusing ${asset}: it does not match the sha256 GitHub publishes for it"
+    fi
+    # The project's own SHA256SUMS, when it attaches one. Same origin as the
+    # asset, so a second integrity check and nothing more — see above.
+    line="$(jq -r '.assets[]? | select(.name | test("^(SHA256SUMS|sha256sums)(\\.txt)?$")) | .browser_download_url' \
+              "$dir/release.json" | head -n1)"
+    if [ -n "$line" ]; then
+        case "${line,,}" in
+            "${GITHUB_WEB,,}/${repo,,}/releases/download/"*) ;;
+            *) die "refusing ${repo}: the checksum list URL '${line}' is not a download from that repository's releases" ;;
+        esac
+        curl -fsSL --max-time 120 "$line" -o "$dir/SHA256SUMS" \
+            || die "could not download the checksum list of ${repo}'s release"
+        line="$(awk -v f="$asset" '$2 == f || $2 == "*" f { print $1; exit }' "$dir/SHA256SUMS")"
+        [ -n "$line" ] || die "refusing ${asset}: the release's SHA256SUMS does not list it"
+        [ "$line" = "$sum" ] || die "refusing ${asset}: it does not match the release's SHA256SUMS"
+    elif [ -z "$digest" ]; then
+        warn "${repo} publishes no checksum for ${asset}; nothing but TLS stands behind this download"
+    fi
+    printf '%s\n' "$dir/$asset"
+}
+
+# The refusal for `github:` without --allow-unsigned. Reached before the root
+# gate and before any download: nothing is fetched on behalf of a decision the
+# user has not made.
+refuse_unsigned_github() {
+    local repo="$1"
+    printf 'rime-pkg: error: %s\n' \
+        "cannot verify releases of ${repo}" \
+        "" \
+        "A GitHub release asset carries no signature Rime can check, and the" \
+        "checksums published beside it come from the same place as the file." \
+        "Installing from a repository's releases means trusting whoever can" \
+        "publish a release there — now, and every time 'rime update' takes a" \
+        "newer one." \
+        "" \
+        "If that is the project's own repository and you accept that:" \
+        "  sudo rime install --allow-unsigned github:${repo}" >&2
+    exit 1
+}
+
+# github_refresh — `rime update`'s half for this route, beside vendor_refresh
+# and with its rules: a newer build replaces the cached file, an unchanged one
+# costs one API request, and any failure — offline, rate-limited, a release
+# that no longer checks out — is a warning that keeps the installed build.
+github_refresh() {
+    local -a req=()
+    mapfile -t req < <(load_requested)
+    local e n repo work got name u
+    for e in "${req[@]:-}"; do
+        case "$e" in local:*) n="${e#local:}" ;; *) continue ;; esac
+        repo="$(github_source "$n")" || continue
+        install -d -m0700 "$WORK_ROOT"
+        work="$(mktemp -d "${WORK_ROOT}/github.XXXXXX")" || continue
+        if got="$( (github_fetch "$repo" "$work" "$(sha "$(local_cache "$n")")") 2>"$work/err")"; then
+            if [ "$got" = unchanged ]; then
+                msg "${n}: the latest release of ${repo} is the installed build"
+            elif name="$( (inspect_local_rpm "$got" >/dev/null && printf '%s' "$LR_NAME") 2>"$work/err")" \
+                 && [ "$name" = "$n" ]; then
+                if rpm_signature_ok "$got"; then u=0; else u=1; fi
+                cache_local_rpm "$got" "$n" "$u"
+                msg "${n}: a newer release of ${repo} goes in with this update ($(basename "$got"))"
+            elif [ -n "${name:-}" ]; then
+                warn "${n}: the latest release of ${repo} now ships '${name}', not '${n}'; keeping the installed build. Install github:${repo} again to switch"
+            else
+                warn "${n}: the latest release of ${repo} was refused, keeping the installed build ($(tail -1 "$work/err" 2>/dev/null))"
+            fi
+        else
+            warn "${n}: could not fetch or check a newer release of ${repo}, keeping the installed build ($(tail -1 "$work/err" 2>/dev/null))"
+        fi
+        rm -rf "$work"
+    done
+}
+
 # ── Claude Code: per user, and it updates itself ─────────────────────────────
 # Not an extension and not a Flatpak: Anthropic's CLI updates itself, and on
 # Rime it can, because the image points npm's global prefix at the user's own
@@ -4879,7 +5145,19 @@ cmd_resolve() {
     [ "$#" -ge 1 ] || die "usage: rime resolve <name>"
     local name="$1"
 
-    # The two syntactic forms decide themselves and there is nothing to rank.
+    # The syntactic forms decide themselves and there is nothing to rank.
+    # github: first: it contains a slash, which is_local_rpm_arg reads as a path.
+    if is_github_arg "$name"; then
+        valid_github_repo "${name#github:}" \
+            || die "'${name}' does not name a GitHub repository; use github:OWNER/REPO"
+        printf 'rime: %s\n' \
+            "'${name}' names a GitHub repository, so there is nothing to choose." \
+            "Rime installs the .rpm attached to its latest release into the system" \
+            "extension, and 'rime update' follows that repository's later releases." \
+            "  sudo rime install --allow-unsigned ${name}" \
+            "  provenance: unsigned; whoever can publish a release of ${name#github:}"
+        return 0
+    fi
     if is_local_rpm_arg "$name"; then
         printf 'rime: %s\n' \
             "'${name}' is a local RPM file, so there is nothing to choose." \
@@ -5075,7 +5353,7 @@ usage() {
     cat <<'EOF'
 usage: rime-pkg <command> [args]
 
-  install <pkg|file.rpm|file.deb|App.AppImage>...
+  install <pkg|file.rpm|file.deb|App.AppImage|github:OWNER/REPO>...
                        add packages. A reverse-DNS id (org.gimp.GIMP) is a
                        Flatpak; a path ending in .AppImage is an AppImage,
                        unpacked once into /usr/local and PINNED — `rime update`
@@ -5095,6 +5373,11 @@ usage: rime-pkg <command> [args]
                        key covers; the decision is recorded per file. Every
                        .deb needs it: Debian signs the apt index, not the
                        package.
+                       github:OWNER/REPO installs the .rpm attached to that
+                       repository's latest release, and `rime update` follows
+                       its later releases. Release assets are not signed, so
+                       it needs --allow-unsigned, and that accepts the
+                       repository, not one file.
                        --source rpm|flatpak|capsule picks the source for a bare
                        name instead of letting Rime rank them; --env NAME says
                        which capsule --source capsule installs into.

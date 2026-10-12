@@ -342,7 +342,8 @@ enum Cmd {
     /// Show the booted image and its changelog labels.
     Changelog,
     /// Install packages from the enabled repositories, Flathub, a capsule, a
-    /// local .rpm file, or an AppImage. Requires root, except `--source capsule`.
+    /// local .rpm file, an AppImage, or a GitHub repository's releases.
+    /// Requires root, except `--source capsule`.
     ///
     /// Each argument is a package name from Fedora/RPM Fusion/an enabled COPR, a
     /// reverse-DNS Flatpak id (org.gimp.GIMP), or a path to an .rpm file. A local
@@ -358,9 +359,15 @@ enum Cmd {
     /// move it and it cannot update itself; a newer version means running this
     /// command again with the newer file. Every AppImage needs
     /// --allow-unsigned, because none of them carries a signature Rime can
-    /// check. See docs/packages.md.
+    /// check.
+    ///
+    /// `github:OWNER/REPO` installs the .rpm attached to that repository's
+    /// latest release into the extension, and `rime update` follows its later
+    /// releases. Release assets carry no signature Rime can check, so it
+    /// needs --allow-unsigned, and what that accepts is the repository: every
+    /// release it publishes from then on. See docs/packages.md.
     Install {
-        #[arg(required = true, value_name = "PACKAGE|FILE.rpm|FILE.AppImage")]
+        #[arg(required = true, value_name = "PACKAGE|FILE.rpm|FILE.AppImage|github:OWNER/REPO")]
         packages: Vec<String>,
         /// Skip weak dependencies (smaller install, fewer optional features).
         #[arg(long)]
@@ -372,7 +379,9 @@ enum Cmd {
         /// AppImage (no AppImage is ever verifiable, so all of them need it).
         /// Applies only to the files named on this command line, never to
         /// repository packages, and the decision is recorded per file so
-        /// `rime pkg list` and `rime pkg verify` keep reporting it.
+        /// `rime pkg list` and `rime pkg verify` keep reporting it. For
+        /// `github:OWNER/REPO` it accepts that repository's releases, and
+        /// `rime update` installs each newer one without asking again.
         #[arg(long)]
         allow_unsigned: bool,
         /// Pick the source yourself instead of letting Rime rank them:

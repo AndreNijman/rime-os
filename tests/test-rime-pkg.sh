@@ -890,6 +890,179 @@ else
     skipped "the vendor checks refuse what they must" "(no gpg or ar)"
 fi
 
+echo "── GitHub releases: an accepted repository, followed by rime update ───"
+# github:OWNER/REPO installs the .rpm attached to a repository's latest release
+# and `rime update` follows it. Nothing about it is verified, so the cases
+# below hold the three things that keep that honest: the flag is required
+# before anything is downloaded, the download is checked against what the
+# release publishes, and a refresh never replaces the installed build with
+# something that did not check out.
+is "github:a/b is a GitHub argument"      true  "$(predicate is_github_arg github:a/b)"
+is "a plain name is not"                  false "$(predicate is_github_arg wordcraft)"
+is "OWNER/REPO is a valid repository"     true  "$(predicate valid_github_repo storytold/word.craft_2)"
+for badrepo in '../etc' 'a/..' 'a/.' 'a/b/c' '-a/b' 'a b/c' 'a/' '/b' "a/b\$(id)" 'a/b;id'; do
+    is "repository '${badrepo}' is refused" false "$(predicate valid_github_repo "$badrepo")"
+done
+refuses "github: needs --allow-unsigned, before root" "cannot verify releases of storytold/wordcraft" \
+        install github:storytold/wordcraft
+refuses "…and says it accepts the repository" "every time 'rime update' takes a" \
+        install github:storytold/wordcraft
+refuses "a malformed github: is refused" "does not name a GitHub repository" \
+        install --allow-unsigned github:../../etc
+refuses "github: is not routed as a local file" "does not name a GitHub repository" \
+        install --allow-unsigned github:a/b/c
+refuses "--source flatpak contradicts github:" "contradicts the GitHub repository" \
+        install --source flatpak --allow-unsigned github:a/b
+out=$(bash "$ENGINE" resolve github:storytold/wordcraft 2>&1); rc=$?
+if [ "$rc" = 0 ] && grep -qF -- "--allow-unsigned github:storytold/wordcraft" <<<"$out"; then
+    ok "resolve answers github: without ranking"
+else bad "resolve answers github: without ranking" "rc=$rc: $(head -1 <<<"$out")"; fi
+
+# Release fixtures served from file://. API = $GA/repos/O/R/releases/latest,
+# downloads = $GW/O/R/releases/download/TAG/NAME, as on github.com.
+GA="$WORK/gh-api"; GW="$WORK/gh-web"
+ARCH=$(uname -m)
+# mkrel REPO TAG [prerelease] -- then one "NAME|FILE|DIGEST" per asset, where
+# DIGEST is `auto` (the file's sha256), `none`, or a literal value, and a NAME
+# of SHA256SUMS takes FILE as its contents verbatim.
+mkrel() {
+    local repo=$1 tag=$2 pre=${3:-false}; shift 3
+    local spec name file dig assets='[]' url
+    mkdir -p "$GA/repos/$repo/releases" "$GW/$repo/releases/download/$tag"
+    for spec in "$@"; do
+        IFS='|' read -r name file dig <<<"$spec"
+        url="file://$GW/$repo/releases/download/$tag/$name"
+        case "$file" in
+            http*|file:*) url=$file ;;
+            *) [ -f "$file" ] && cp "$file" "$GW/$repo/releases/download/$tag/$name" ;;
+        esac
+        [ "$dig" = auto ] && dig="sha256:$(sha256sum "$GW/$repo/releases/download/$tag/$name" | cut -d' ' -f1)"
+        [ "$dig" = none ] && dig=""
+        assets=$(jq -c --arg n "$name" --arg u "$url" --arg d "$dig" \
+                 '. + [{name:$n, browser_download_url:$u} + (if $d == "" then {} else {digest:$d} end)]' <<<"$assets")
+    done
+    jq -n --arg t "$tag" --argjson p "$pre" --argjson a "$assets" \
+       '{tag_name:$t, draft:false, prerelease:$p, assets:$a}' > "$GA/repos/$repo/releases/latest"
+}
+ghfetch() {  # $1 = repo, $2 = cached sha (optional)
+    local d; d=$(mktemp -d "$WORK/gf.XXXXXX")
+    RIME_PKG_GITHUB_API="file://$GA" RIME_PKG_GITHUB_WEB="file://$GW" \
+        bash -c 'e=$1; r=$2; d=$3; h=$4; set --; source "$e" >/dev/null 2>&1; set +e; github_fetch "$r" "$d" "$h"' \
+        _ "$ENGINE" "$1" "$d" "${2:-}" 2>&1
+}
+printf 'payload one\n' > "$WORK/one.rpm"; printf 'payload two\n' > "$WORK/two.rpm"
+s1=$(sha256sum "$WORK/one.rpm" | cut -d' ' -f1)
+
+mkrel t/ok v1 false "app-1-linux-${ARCH}.rpm|$WORK/one.rpm|auto" "app-1-linux-${ARCH}.AppImage|$WORK/two.rpm|auto"
+printf '%s  app-1-linux-%s.rpm\n' "$s1" "$ARCH" > "$WORK/sums"; mkrel t/ok v1 false \
+    "app-1-linux-${ARCH}.rpm|$WORK/one.rpm|auto" "SHA256SUMS.txt|$WORK/sums|auto"
+out=$(ghfetch t/ok)
+if [ -f "$(tail -1 <<<"$out")" ] && [ "$(sha256sum "$(tail -1 <<<"$out")" | cut -d' ' -f1)" = "$s1" ]; then
+    ok "the release's rpm is downloaded and checked"
+else bad "the release's rpm is downloaded and checked" "got: $(tail -1 <<<"$out")"; fi
+rm -f "$GW/t/ok/releases/download/v1/app-1-linux-${ARCH}.rpm"
+is "an unchanged digest downloads nothing" unchanged "$(ghfetch t/ok "$s1" | tail -1)"
+
+mkrel t/dig v1 false "app-1-linux-${ARCH}.rpm|$WORK/one.rpm|sha256:$(printf '0%.0s' $(seq 64))"
+out=$(ghfetch t/dig)
+if grep -qF "does not match the sha256 GitHub publishes" <<<"$out"; then ok "a digest mismatch is refused"
+else bad "a digest mismatch is refused" "got: $(tail -1 <<<"$out")"; fi
+
+printf '%s  app-1-linux-%s.rpm\n' "$(printf 'f%.0s' $(seq 64))" "$ARCH" > "$WORK/badsums"
+mkrel t/sums v1 false "app-1-linux-${ARCH}.rpm|$WORK/one.rpm|none" "SHA256SUMS.txt|$WORK/badsums|none"
+out=$(ghfetch t/sums)
+if grep -qF "does not match the release's SHA256SUMS" <<<"$out"; then ok "a SHA256SUMS mismatch is refused"
+else bad "a SHA256SUMS mismatch is refused" "got: $(tail -1 <<<"$out")"; fi
+printf '%s  something-else.rpm\n' "$s1" > "$WORK/othersums"
+mkrel t/sums v1 false "app-1-linux-${ARCH}.rpm|$WORK/one.rpm|none" "SHA256SUMS.txt|$WORK/othersums|none"
+out=$(ghfetch t/sums)
+if grep -qF "SHA256SUMS does not list it" <<<"$out"; then ok "an asset SHA256SUMS omits is refused"
+else bad "an asset SHA256SUMS omits is refused" "got: $(tail -1 <<<"$out")"; fi
+
+mkrel t/none v1 false "app-1-linux-riscv64.rpm|$WORK/one.rpm|auto" "app-1.src.rpm|$WORK/one.rpm|auto"
+out=$(ghfetch t/none)
+if grep -qF "has no .rpm for ${ARCH}" <<<"$out"; then ok "no rpm for this machine is refused"
+else bad "no rpm for this machine is refused" "got: $(tail -1 <<<"$out")"; fi
+mkrel t/two v1 false "a-1-${ARCH}.rpm|$WORK/one.rpm|auto" "b-1-${ARCH}.rpm|$WORK/two.rpm|auto"
+out=$(ghfetch t/two)
+if grep -qF "has more than one .rpm for ${ARCH}" <<<"$out"; then ok "two candidate rpms are refused, not guessed"
+else bad "two candidate rpms are refused, not guessed" "got: $(tail -1 <<<"$out")"; fi
+mkrel t/elsewhere v1 false "app-1-${ARCH}.rpm|file://$GW/evil/repo/releases/download/v1/app-1-${ARCH}.rpm|none"
+out=$(ghfetch t/elsewhere)
+if grep -qF "is not a download from that repository's releases" <<<"$out"; then ok "an asset from another repository is refused"
+else bad "an asset from another repository is refused" "got: $(tail -1 <<<"$out")"; fi
+mkrel t/pre v1 true "app-1-${ARCH}.rpm|$WORK/one.rpm|auto"
+out=$(ghfetch t/pre)
+if grep -qF "no published, non-prerelease release" <<<"$out"; then ok "a prerelease is never followed"
+else bad "a prerelease is never followed" "got: $(tail -1 <<<"$out")"; fi
+out=$(ghfetch t/absent)
+if grep -qF "could not read the latest release of t/absent" <<<"$out"; then ok "an unreachable release is a refusal"
+else bad "an unreachable release is a refusal" "got: $(tail -1 <<<"$out")"; fi
+
+# github_refresh against the real state layout, in a user+mount namespace with
+# a temp directory over /var/lib, so PKG_ROOT (a readonly constant) is ours.
+# Needs rpmbuild for real headers: the refresh reads the NAME out of the new
+# rpm and keeps the installed build if it changed.
+if command -v rpmbuild >/dev/null && unshare -Urm true 2>/dev/null; then
+    mkfix() {  # $1 = name  $2 = version  -> prints the rpm path
+        local top="$WORK/rb-$1-$2"; mkdir -p "$top"
+        cat > "$top/f.spec" <<SPEC
+Name: $1
+Version: $2
+Release: 1
+Summary: rime-pkg github fixture
+License: MIT
+BuildArch: noarch
+%description
+fixture
+%install
+install -Dm644 /dev/null %{buildroot}/usr/share/$1/v$2
+%files
+/usr/share/$1/v$2
+SPEC
+        rpmbuild -bb --define "_topdir $top" --define "_rpmdir $top/out" \
+            --define '_build_name_fmt %%{NAME}-%%{VERSION}.rpm' "$top/f.spec" >/dev/null 2>&1 \
+            && printf '%s' "$top/out/$1-$2.rpm"
+    }
+    r1=$(mkfix rimeghfixture 1.0); r2=$(mkfix rimeghfixture 2.0); rx=$(mkfix rimeghother 3.0)
+    if [ -f "$r1" ] && [ -f "$r2" ] && [ -f "$rx" ]; then
+        VL="$WORK/varlib"; mkdir -p "$VL/rime/pkg/local"
+        cp "$r1" "$VL/rime/pkg/local/rimeghfixture.rpm"
+        sha256sum "$r1" | cut -d' ' -f1 > "$VL/rime/pkg/local/rimeghfixture.trust"
+        echo t/app > "$VL/rime/pkg/local/rimeghfixture.github"
+        echo local:rimeghfixture > "$VL/rime/pkg/requested"
+        ghrefresh() {
+            unshare -Urm bash -c 'mount --bind "$1" /var/lib && e=$2; set --;
+                RIME_PKG_GITHUB_API="file://'"$GA"'" RIME_PKG_GITHUB_WEB="file://'"$GW"'"
+                source "$e" >/dev/null 2>&1; set +e; github_refresh' _ "$VL" "$ENGINE" 2>&1
+        }
+        cached() { sha256sum "$VL/rime/pkg/local/rimeghfixture.rpm" | cut -d' ' -f1; }
+        mkrel t/app v1 false "rimeghfixture-1.0-${ARCH}.rpm|$r1|auto"
+        out=$(ghrefresh)
+        is "refresh: the same release changes nothing" "$(sha256sum "$r1" | cut -d' ' -f1)" "$(cached)"
+        if grep -qF "is the installed build" <<<"$out"; then ok "…and says so"
+        else bad "…and says so" "got: $(tail -1 <<<"$out")"; fi
+        mkrel t/app v2 false "rimeghfixture-2.0-${ARCH}.rpm|$r2|auto"
+        out=$(ghrefresh)
+        is "refresh: a newer release replaces the cache" "$(sha256sum "$r2" | cut -d' ' -f1)" "$(cached)"
+        is "…with a trust marker for the new bytes" "$(sha256sum "$r2" | cut -d' ' -f1)" \
+           "$(cat "$VL/rime/pkg/local/rimeghfixture.trust")"
+        is "…and the repository is still followed" t/app "$(cat "$VL/rime/pkg/local/rimeghfixture.github")"
+        mkrel t/app v3 false "rimeghother-3.0-${ARCH}.rpm|$rx|auto"
+        out=$(ghrefresh)
+        is "refresh: a release of another package is kept out" "$(sha256sum "$r2" | cut -d' ' -f1)" "$(cached)"
+        if grep -qF "now ships 'rimeghother'" <<<"$out"; then ok "…and named"
+        else bad "…and named" "got: $(tail -1 <<<"$out")"; fi
+        rm -f "$GA/repos/t/app/releases/latest"
+        out=$(ghrefresh); rc=$?
+        is "refresh: offline keeps the build and does not fail" "0 $(sha256sum "$r2" | cut -d' ' -f1)" "$rc $(cached)"
+    else
+        skipped "github_refresh" "(rpmbuild could not build the fixtures)"
+    fi
+else
+    skipped "github_refresh" "(no rpmbuild, or no user namespaces)"
+fi
+
 echo
 printf 'rime-pkg: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" = 0 ]
