@@ -19,11 +19,18 @@
 [Unit]
 Description=Clear the disposable guest account %i
 Documentation=man:apex(1)
-# The wipe must not race the session it is cleaning up after. The engine asks
-# logind and refuses while the account still has a session, so an accidental
-# early start is loud rather than destructive — but ordering it after the slice
-# is what makes that the unlikely path rather than the usual one.
-After=user-%i.slice
+# THERE IS NO `After=user-%i.slice`, and the reason is worth writing down
+# because a draft of this file had one. `%i` is the account NAME; logind's
+# slices are named by UID — `user-1500.slice`, not `user-apex-guest.slice` — and
+# a template unit cannot derive a uid from a name. systemd accepts an ordering
+# against a unit that does not exist as a silent no-op, so that line ordered
+# nothing at all while reading as though it did.
+#
+# What actually protects the live-session case is the engine's fourth fence: it
+# asks logind who is logged in and refuses while the account still has a
+# session. That is a runtime check on the real answer rather than an ordering
+# against a guess at a unit name, and it is the one exercised by
+# tests/test-apex-shared-machine.sh.
 
 [Service]
 Type=oneshot
@@ -47,6 +54,17 @@ LockPersonality=yes
 PrivateNetwork=yes
 
 [Install]
-# Deliberately no WantedBy. Enabling this is a per-machine decision:
+# WantedBy names where the symlink GOES when somebody runs `systemctl enable`.
+# It does not enable anything by itself — nothing in this repo runs `enable` for
+# this unit, and Containerfile.base asserts the absence of the symlink, which is
+# what "not enabled by default" actually means.
+#
+# An earlier draft left this empty, reasoning that no WantedBy meant not
+# enabled. Measured with `systemctl --root=… enable`: an empty [Install] makes
+# systemd refuse outright — "The unit files have no installation config … This
+# means they are not meant to be enabled or disabled using systemctl" — so the
+# README's own enable step could not work. Inert and enableable are different
+# properties and this file needs both.
+#
 #   systemctl enable apex-guest-wipe@apex-guest.service
-WantedBy=
+WantedBy=multi-user.target

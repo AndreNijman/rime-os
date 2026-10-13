@@ -76,13 +76,26 @@ argument here is unrecoverable.
 
 ### What is not done yet
 
-The unit is ordered `After=user-%i.slice`, which orders it but does not *fire*
-it when the slice stops. Wiring the wipe to logind's session end — a
-`BindsTo=` + `ExecStop=` pair on the slice, or a `pam_exec` line at
-`session close` — needs a machine with a real second account to verify on, and
-is **untested**. Until it is, the safe deployment is the boot-time instance,
-which clears whatever the previous day left behind. The engine itself is
-exercised end to end by `tests/test-apex-shared-machine.sh`, fences included.
+**Nothing fires the wipe when the guest logs out.** `systemctl enable` puts it
+in `multi-user.target`, so it runs at boot and clears whatever the previous
+session left behind — that is the safe deployment and it is what the enable
+step above gives you.
+
+A draft of the unit carried `After=user-%i.slice`, which looked like the
+missing piece and was not. `%i` is the account *name*; logind names its slices
+by **uid** — `user-1500.slice`, never `user-apex-guest.slice` — and a template
+unit cannot derive one from the other. systemd treats an ordering against a
+unit that does not exist as a silent no-op, so that line ordered nothing at all.
+It is gone, and `tests/test-apex-shared-machine.sh` fails if it comes back.
+
+Wiring the wipe to logind's session end properly — a `BindsTo=` + `ExecStop=`
+pair against the real `user-<uid>.slice`, or a `pam_exec` line at
+`session close` — needs a machine with a real second account to verify on and
+is **untested**. What protects the live-session case meanwhile is the engine's
+fourth fence: it asks logind who is logged in and refuses while the account
+still has a session, so an early run is a refusal rather than a wiped desktop.
+The engine itself is exercised end to end by
+`tests/test-apex-shared-machine.sh`, fences included.
 
 ## Kiosk
 

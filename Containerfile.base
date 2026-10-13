@@ -956,17 +956,22 @@ RUN set -eux; \
     test -f /usr/lib/systemd/system/apex-guest-wipe@.service; \
     test ! -e /etc/systemd/system/multi-user.target.wants/apex-guest-wipe@.service; \
     grep -q '^SuccessExitStatus=0 2$' /usr/lib/systemd/system/apex-guest-wipe@.service; \
-    : '── the kiosk config is a recipe, and lands where recipes land ──'; \
-    : 'greetd reads exactly one file, /etc/greetd/config.toml, and that file'; \
-    : 'is installed by Containerfile.apex -- it does not exist in this stage.'; \
-    : 'So the assertion that it carries no auto-login is NOT made here: a'; \
-    : 'grep against a path that does not exist yet passes vacuously, which'; \
-    : 'is the exact defect check-containerfile-assertions.sh was written for'; \
-    : 'after four of them shipped. tests/test-apex-shared-machine.sh asserts'; \
-    : 'it against the source file instead, and watches it go red.'; \
+    : '── the kiosk config is a recipe, never the live greetd config ──'; \
+    : 'greetd reads exactly one file, /etc/greetd/config.toml. It EXISTS in'; \
+    : 'this stage -- the greetd rpm ships it (rpm -ql greetd lists it, and'; \
+    : 'Containerfile.base is FROM core, which installs greetd) -- so this'; \
+    : 'comparison has two real files and cannot pass vacuously. An earlier'; \
+    : 'draft asserted `test ! -e` on that path and would have failed the'; \
+    : 'base build 50 minutes in; check-containerfile-assertions.sh resolves'; \
+    : 'greps and silently skips `test`, so it did not catch it.'; \
+    : 'Containerfile.apex replaces this file with the apex-greet config'; \
+    : 'later; the claim that the LIVE login config carries no auto-login is'; \
+    : 'asserted against its source by tests/test-apex-shared-machine.sh,'; \
+    : 'which watches the check go red against a config that has one.'; \
     test -f /usr/share/apex/shared-machine/greetd-kiosk.toml; \
     test -f /usr/share/apex/shared-machine/sway-kiosk.conf; \
-    test ! -e /etc/greetd/config.toml; \
+    test -f /etc/greetd/config.toml; \
+    ! cmp -s /usr/share/apex/shared-machine/greetd-kiosk.toml /etc/greetd/config.toml; \
     : 'The recipe must at least be a kiosk: a default_session greetd will'; \
     : 'restart, not an initial_session that fires once per boot.'; \
     grep -qE '^[[:space:]]*\[default_session\]' /usr/share/apex/shared-machine/greetd-kiosk.toml; \

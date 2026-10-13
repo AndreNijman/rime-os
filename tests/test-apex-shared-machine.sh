@@ -156,11 +156,31 @@ else
 fi
 
 # And it must not be installed over the login path by a Containerfile.
-if grep -rn "shared-machine/greetd-kiosk.toml" "$ROOT"/Containerfile* 2>/dev/null \
-        | grep -q "/etc/greetd/config.toml"; then
+#
+# COPY lines only, with backslash continuations joined first — a COPY source and
+# destination are routinely on two lines. Restricting to COPY matters: a RUN
+# line legitimately names both paths to assert they DIFFER, and an earlier draft
+# of this check read that assertion as the thing it was asserting against.
+copy_lines="$(sed -e ':a' -e '/\\$/{N;s/\\\n//;ba' -e '}' "$ROOT"/Containerfile* 2>/dev/null \
+    | grep -E '^[[:space:]]*COPY[[:space:]]')"
+if printf '%s\n' "$copy_lines" \
+        | grep -E 'shared-machine/greetd-kiosk\.toml' \
+        | grep -q '/etc/greetd/config\.toml'; then
     bad "no Containerfile installs the kiosk recipe as the live greetd config"
 else
     ok "no Containerfile installs the kiosk recipe as the live greetd config"
+fi
+
+# ...and the check can see one, so its silence means something. A COPY line of
+# exactly the shape that would turn the login screen off.
+probe="$WORK/probe-Containerfile"
+printf 'COPY files/system/shared-machine/greetd-kiosk.toml /etc/greetd/config.toml\n' > "$probe"
+if grep -E '^[[:space:]]*COPY[[:space:]]' "$probe" \
+        | grep -E 'shared-machine/greetd-kiosk\.toml' \
+        | grep -q '/etc/greetd/config\.toml'; then
+    ok "and that check would notice such a COPY if one appeared"
+else
+    bad "and that check would notice such a COPY if one appeared"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -379,9 +399,34 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 section "the unit ships inert"
 # ─────────────────────────────────────────────────────────────────────────────
-grep -Eq '^WantedBy=$' "$WIPE_UNIT" \
-    && ok "apex-guest-wipe@.service has no WantedBy target (not enabled by default)" \
-    || bad "apex-guest-wipe@.service has no WantedBy target (not enabled by default)"
+# "Inert" and "enableable" are different properties and the unit needs both.
+# An earlier draft left [Install] empty, reasoning that no WantedBy meant not
+# enabled. Measured with `systemctl --root=... enable`: systemd then refuses
+# outright — "the unit files have no installation config ... not meant to be
+# enabled or disabled using systemctl" — so the README's own enable step could
+# not have worked. WantedBy says where the symlink GOES when somebody enables
+# it; NOT being enabled is the absence of that symlink, which Containerfile.base
+# asserts in the image.
+grep -Eq '^WantedBy=multi-user\.target$' "$WIPE_UNIT" \
+    && ok "apex-guest-wipe@.service can actually be enabled (it has an [Install] target)" \
+    || bad "apex-guest-wipe@.service can actually be enabled (it has an [Install] target)" \
+           "an empty WantedBy= makes systemctl enable refuse"
+
+grep -q 'multi-user.target.wants/apex-guest-wipe@.service' "$ROOT/Containerfile.base" \
+    && ok "and the image asserts the enable symlink is absent, which is what 'not enabled' means" \
+    || bad "and the image asserts the enable symlink is absent, which is what 'not enabled' means"
+
+# `%i` is the account NAME; logind's slices are named by UID. A template unit
+# cannot derive one from the other, and systemd treats an ordering against a
+# unit that does not exist as a silent no-op — so `After=user-%i.slice` ordered
+# nothing while reading as though it did. The live-session case is the engine's
+# fourth fence, which is tested above.
+if grep -q "^After=user-%i\\.slice" "$WIPE_UNIT"; then
+    bad "the unit does not order against a slice name that can never exist" \
+        "After=user-%i.slice names user-<name>.slice; logind names slices by uid"
+else
+    ok "the unit does not order against a slice name that can never exist"
+fi
 # Exit 2 is a fence holding, not a failure. Without this a machine with no
 # guest configured would show a failed unit at every boot.
 grep -q 'SuccessExitStatus=.*2' "$WIPE_UNIT" \
