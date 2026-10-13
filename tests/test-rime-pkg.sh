@@ -1056,6 +1056,34 @@ SPEC
         rm -f "$GA/repos/t/app/releases/latest"
         out=$(ghrefresh); rc=$?
         is "refresh: offline keeps the build and does not fail" "0 $(sha256sum "$r2" | cut -d' ' -f1)" "$rc $(cached)"
+        # Same namespace, any engine function: $1 is bash run after sourcing it.
+        ghrun() {
+            unshare -Urm bash -c 'mount --bind "$1" /var/lib && e=$2; c=$3; set --;
+                source "$e" >/dev/null 2>&1; set +e; eval "$c"' _ "$VL" "$ENGINE" "$1" 2>&1
+        }
+        D="$WORK/resolved"; mkdir -p "$D"; cp "$r2" "$rx" "$D/"
+        out=$(ghrun "resolved_set '$D'")
+        is "resolved set: a cached local rpm carries its digest" \
+           "rimeghfixture-2.0-1.noarch+$(sha256sum "$r2" | cut -c1-12)" "$(grep '^rimeghfixture' <<<"$out")"
+        is "…and an rpm with no local cache is its NEVRA alone" "rimeghother-3.0-1.noarch" "$(grep '^rimeghother' <<<"$out")"
+        cp "$r1" "$D/rimeghfixture-2.0.rpm"
+        if [ "$(ghrun "resolved_set '$D'" | grep '^rimeghfixture')" != "$(grep '^rimeghfixture' <<<"$out")" ]; then
+            ok "…so new bytes under an unchanged name are a different set"
+        else bad "…so new bytes under an unchanged name are a different set" "same line"; fi
+        jq -n '{requested:["local:chatgpt"], resolved:[], vendor_verified:["chatgpt"],
+                unsigned_accepted:["chatgpt"], github_sources:{chatgpt:"t/app"}}' > "$VL/rime/pkg/state.json"
+        out=$(ghrun "cmd_list")
+        if grep -qF "chatgpt  [GitHub releases of t/app" <<<"$out" && ! grep -qF "verified against the key" <<<"$out"; then
+            ok "list: a GitHub build named like a vendor app is not called verified"
+        else bad "list: a GitHub build named like a vendor app is not called verified" "got: $out"; fi
+        cp "$r1" "$VL/rime/pkg/local/chatgpt.rpm"; echo t/app > "$VL/rime/pkg/local/chatgpt.github"
+        printf 'local:chatgpt\n' > "$VL/rime/pkg/requested"
+        before=$(sha256sum "$VL/rime/pkg/local/chatgpt.rpm")
+        out=$(ghrun "vendor_refresh")
+        is "vendor refresh leaves a GitHub-followed package alone" "$before" "$(sha256sum "$VL/rime/pkg/local/chatgpt.rpm")"
+        is "…without even trying to fetch it" "" "$out"
+        rm -f "$VL/rime/pkg/local/chatgpt."* "$VL/rime/pkg/state.json"
+        echo local:rimeghfixture > "$VL/rime/pkg/requested"
     else
         skipped "github_refresh" "(rpmbuild could not build the fixtures)"
     fi
