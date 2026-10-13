@@ -364,6 +364,16 @@ pub fn doctor_checks(v: &LocalView, daemon_running: bool) -> Vec<Check> {
         Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
         "cgroup v2 present (needed for game-mode cpuset pinning)".to_string(),
     );
+    if let Some(hidden) = extensions_hidden(&Sys::from_env()) {
+        line(
+            !hidden,
+            if hidden {
+                format!("package extension: {EXTENSIONS_HIDDEN}")
+            } else {
+                "package extension is merged and visible on /usr".to_string()
+            },
+        );
+    }
     out
 }
 
@@ -539,6 +549,48 @@ fn usr_readonly(mounts: &str) -> (Option<bool>, Option<String>) {
         None => (None, None),
     }
 }
+
+/// Is something other than the extension merge sitting on top of `/usr`?
+///
+/// `rpm-ostree install --apply-live`, `rpm-ostree usroverlay` and `ostree admin
+/// unlock` all put a writable overlay over `/usr`. When one is mounted AFTER
+/// systemd-sysext merged, it lies above the merge and shadows it: `/usr/bin/steam`
+/// and every other `rime install`ed program vanishes, `systemd-sysext status`
+/// reports `/usr -`, and nothing says why. A reboot drops the overlay and the
+/// extension merges again. (A real machine lost Steam this way on 2026-10-12.)
+///
+/// systemd-sysext's own mount has the source `sysext`; the ostree unlock mount
+/// has the source `overlay`. `/proc/mounts` lists mounts in the order they were
+/// made, so the LAST `/usr` line is the one that is visible. `usr_readonly`
+/// above takes the first, which is the right answer to a different question.
+fn usr_overlay_hides_extensions(mounts: &str) -> bool {
+    let top = mounts
+        .lines()
+        .rev()
+        .find_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            (f.len() >= 3 && f[1] == "/usr").then(|| (f[0].to_string(), f[2].to_string()))
+        });
+    matches!(top, Some((src, fs)) if fs == "overlay" && src != "sysext")
+}
+
+/// `Some(hidden)` when this machine has a Rime package extension, `None` when
+/// it has none and the question does not arise.
+///
+/// Presence is read from the extension store, which is world-readable, rather
+/// than from `state.json`, which is 0700 root — a desktop session must be able
+/// to be told its packages are hidden.
+fn extensions_hidden(sys: &Sys) -> Option<bool> {
+    let present = ["rime-user", "apex-user"].iter().any(|n| {
+        sys.exists(&format!("/var/lib/extensions/{n}.raw"))
+            || sys.exists(&format!("/var/lib/extensions/{n}"))
+    });
+    present.then(|| usr_overlay_hides_extensions(&sys.read("/proc/mounts").unwrap_or_default()))
+}
+
+const EXTENSIONS_HIDDEN: &str = "a live overlay on /usr (rpm-ostree --apply-live or \
+    ostree admin unlock) is hiding the user-package extension, so every program \
+    installed with `rime install` is missing until the next restart";
 
 /// Does the machine have a default route? Read, never probed.
 ///
@@ -1158,6 +1210,20 @@ fn package_row(sys: &Sys, running_version: &str) -> Row {
     const STATE: &str = "/var/lib/rime/pkg/state.json";
     let id = "package-extensions";
     let label = "Package extensions";
+    // Before the state file is read: that file is root-only, and this is the
+    // one fact here a non-root session can establish and must be told.
+    if extensions_hidden(sys) == Some(true) {
+        return Row {
+            id,
+            label,
+            state: Health::Attention,
+            detail: EXTENSIONS_HIDDEN.to_string(),
+            // No action: re-merging `/usr` under a running desktop is exactly
+            // what the live-update notes warn against, and a restart is the
+            // user's call. `rime pkg adopt` is the fix for the layering itself.
+            action: None,
+        };
+    }
     let text = match sys.read_result(STATE) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -2121,6 +2187,56 @@ mod tests {
         // The header alone, and an empty file.
         assert!(!has_default_route("Iface\tDestination\tGateway\n"));
         assert!(!has_default_route(""));
+    }
+
+    #[test]
+    fn an_unlock_overlay_above_the_sysext_merge_hides_the_extension() {
+        // The mount table of the machine that lost Steam, in mount order.
+        let masked = "\
+sysext /usr overlay ro,nodev,relatime,seclabel,lowerdir=/run/systemd/sysext/meta/usr:/run/systemd/sysext/extensions/rime-user/usr:/usr,index=off 0 0
+overlay /usr overlay ro,relatime,seclabel,lowerdir=usr,upperdir=/proc/self/fd/12/upper 0 0
+";
+        assert!(usr_overlay_hides_extensions(masked));
+        // The healthy state: the merge is the visible mount.
+        let healthy = "sysext /usr overlay ro,nodev,relatime,lowerdir=/run/systemd/sysext/meta/usr:/usr 0 0\n";
+        assert!(!usr_overlay_hides_extensions(healthy));
+        // Unlock FIRST, merge after: the merge sits on top and sees through it.
+        let merged_over_unlock = "\
+overlay /usr overlay ro,relatime,lowerdir=usr,upperdir=/u 0 0
+sysext /usr overlay ro,nodev,relatime,lowerdir=/run/systemd/sysext/meta/usr:/usr 0 0
+";
+        assert!(!usr_overlay_hides_extensions(merged_over_unlock));
+        // No /usr mount at all (covered by the root mount), or a plain ostree one.
+        assert!(!usr_overlay_hides_extensions("composefs / overlay ro 0 0\n"));
+        assert!(!usr_overlay_hides_extensions("/dev/nvme0n1p3 /usr ext4 ro 0 0\n"));
+        assert!(!usr_overlay_hides_extensions(""));
+    }
+
+    #[test]
+    fn a_hidden_extension_is_reported_even_when_state_is_unreadable() {
+        let dir = std::env::temp_dir().join(format!("rime-recover-hidden-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("var/lib/extensions")).unwrap();
+        std::fs::create_dir_all(dir.join("proc")).unwrap();
+        std::fs::write(dir.join("var/lib/extensions/rime-user.raw"), "").unwrap();
+        std::fs::write(
+            dir.join("proc/mounts"),
+            "sysext /usr overlay ro 0 0\noverlay /usr overlay ro,upperdir=/u 0 0\n",
+        )
+        .unwrap();
+        let sys = Sys { fixture: Some(dir.clone()) };
+        assert_eq!(extensions_hidden(&sys), Some(true));
+        // No state.json in the fixture: the row must still say so.
+        let row = package_row(&sys, "43");
+        assert_eq!(row.state, Health::Attention);
+        assert!(row.detail.contains("hiding the user-package extension"), "{}", row.detail);
+
+        // The same extension with the merge visible is not reported.
+        std::fs::write(dir.join("proc/mounts"), "sysext /usr overlay ro 0 0\n").unwrap();
+        assert_eq!(extensions_hidden(&sys), Some(false));
+        // And a machine with no extension has no question to answer.
+        std::fs::remove_file(dir.join("var/lib/extensions/rime-user.raw")).unwrap();
+        assert_eq!(extensions_hidden(&sys), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
