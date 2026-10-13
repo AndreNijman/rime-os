@@ -146,8 +146,6 @@ class ClientTranscriptTest {
         // The QR code's whole purpose, exercised through the client rather than
         // through the handshake: a man in the middle replies with a handshake
         // message of its own and the device refuses it.
-        val impostor = InMemoryStaticKey.generate()
-        val responder = Noise.pairingResponder(impostor, version)
         // The impostor cannot even read message 1 — it was encrypted to the
         // real desktop's key — so it can only guess at a reply.
         val garbage = framed(ByteArray(80) { it.toByte() })
@@ -164,7 +162,6 @@ class ClientTranscriptTest {
             )
         }
         assertTrue(e.error is PairingError.BadDevice, "${e.error}")
-        val _unused = responder
     }
 
     @Test
@@ -235,5 +232,80 @@ class ClientTranscriptTest {
             rejoined.write(f.bytes)
         }
         assertArrayEquals(ByteArray(Frame.MAX_PAYLOAD + 1) { 0x41 }, rejoined.toByteArray())
+    }
+
+    /** A live desktop half, sharing the vectors' fixed keys. */
+    private fun desktopHalf(): Pair<Handshake, ByteArray> {
+        val desktop = Noise.sessionResponder(
+            InMemoryStaticKey(Vectors.hex("desktop_secret_hex")),
+            version,
+            EphemeralSource.fixedForTestingOnly(Vectors.hex("responder_ephemeral_hex")),
+        )
+        desktop.read(Vectors.patternHex("ik", "m1_hex"))
+        return desktop to desktop.write("l16".toByteArray())
+    }
+
+    @Test
+    fun `the keepalive is answered without the caller ever seeing it`() {
+        // `apex-remoted` sends a Ping every fifteen seconds and measures the
+        // round trip from the Pong. A client that ignored them would leave the
+        // desktop reporting an unknown connection quality forever, and one that
+        // surfaced them would make every caller handle a frame that is not
+        // theirs. Neither happens: the ping is answered and the control frame
+        // behind it is what `receive` returns.
+        val (desktop, m2) = desktopHalf()
+        val desktopChannel = desktop.intoTransport()
+        val inbound = ByteArrayOutputStream()
+        inbound.write(framed(m2))
+        inbound.write(framed(desktopChannel.seal(Frame.Ping(0x0102030405060708L).encode())))
+        inbound.write(framed(desktopChannel.seal(Frame.Control("""{"ok":true}""".toByteArray()).encode())))
+
+        val output = ByteArrayOutputStream()
+        val session = Client.openSession(
+            input = ByteArrayInputStream(inbound.toByteArray()),
+            output = output,
+            identity = InMemoryStaticKey(deviceSecret),
+            desktopPublic = desktopPublic,
+            version = version,
+            ephemerals = initiatorEphemeral,
+        )
+        val handshakeBytes = output.size()
+        val frame = session.receive()
+        assertEquals(Frame.Control("""{"ok":true}""".toByteArray()), frame)
+
+        // And the Pong really went out, with the desktop's own token.
+        val sent = ByteArrayInputStream(output.toByteArray().copyOfRange(handshakeBytes, output.size()))
+        val pong = Frame.decode(desktopChannel.open(Transport.readMessage(sent)))
+        assertEquals(Frame.Pong(0x0102030405060708L), pong)
+    }
+
+    @Test
+    fun `this end measures its own round trip and ignores a token it never sent`() {
+        // The other half of P1-052's "quality visible at both ends". A peer that
+        // echoed a number of its own choosing could otherwise report any
+        // quality it liked, including a good one for a connection that is
+        // unusable — so an unrecognised token changes nothing.
+        val (desktop, m2) = desktopHalf()
+        val desktopChannel = desktop.intoTransport()
+        val inbound = ByteArrayOutputStream()
+        inbound.write(framed(m2))
+        inbound.write(framed(desktopChannel.seal(Frame.Pong(9999L).encode())))
+        inbound.write(framed(desktopChannel.seal(Frame.Pong(1L).encode())))
+        inbound.write(framed(desktopChannel.seal(Frame.Control("""{"ok":true}""".toByteArray()).encode())))
+
+        val session = Client.openSession(
+            input = ByteArrayInputStream(inbound.toByteArray()),
+            output = ByteArrayOutputStream(),
+            identity = InMemoryStaticKey(deviceSecret),
+            desktopPublic = desktopPublic,
+            version = version,
+            ephemerals = initiatorEphemeral,
+        )
+        assertEquals(null, session.roundTripMs, "a round trip was reported before one was measured")
+        session.ping()
+        session.receive()
+        // Token 9999 was never sent and must not have been timed; token 1 was.
+        assertTrue(session.roundTripMs != null, "the round trip this end asked for was not measured")
+        assertTrue(session.roundTripMs!! >= 0)
     }
 }

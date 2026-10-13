@@ -112,6 +112,16 @@ object Client {
                 "this machine does not accept this device: it is not paired, or it has been revoked",
                 e,
             )
+        } catch (e: java.net.SocketException) {
+            // The same refusal, arriving as a reset rather than as a clean
+            // close. Which of the two a phone sees depends on the network in
+            // between, not on what the desktop decided, so they must mean the
+            // same thing here — otherwise a revoked device reports "not paired"
+            // on Wi-Fi and "connection reset" on mobile data.
+            throw SessionRefused(
+                "this machine does not accept this device: it is not paired, or it has been revoked",
+                e,
+            )
         }
         return Session(machine, handshake.intoTransport(), input, output)
     }
@@ -136,6 +146,21 @@ class Session internal constructor(
     private val output: OutputStream,
 ) {
     private val writeLock = Any()
+    private val outstanding = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+    private val nextToken = java.util.concurrent.atomic.AtomicLong(0)
+
+    /**
+     * The last measured round trip, in milliseconds, or `null` before the first
+     * [ping] comes back.
+     *
+     * P1-052 asks for the connection path and its quality to be visible at
+     * *both* ends. This is this end's half, and it is measured on a frame that
+     * crosses the same path as everything else — a ping to the relay's front
+     * door would report the health of a machine nobody is talking to.
+     */
+    @Volatile
+    var roundTripMs: Long? = null
+        private set
 
     /** Send one frame. Safe to call from several threads; serialised here. */
     fun send(frame: Frame) {
@@ -150,11 +175,49 @@ class Session internal constructor(
         for (frame in Frame.dataFrames(channelId, bytes)) send(frame)
     }
 
+    /** Measure the connection. The answer lands in [roundTripMs]. */
+    fun ping() {
+        val token = nextToken.incrementAndGet()
+        outstanding[token] = System.nanoTime()
+        send(Frame.Ping(token))
+    }
+
     /**
-     * Read one frame. One reader only: the receiving nonce is a counter too,
-     * and two readers would each advance it past the other's message.
+     * Read one frame, answering keepalives on the way.
+     *
+     * `apex-remoted` sends a `Ping` every fifteen seconds — it is the only
+     * traffic an idle session has, and an idle session with no traffic is one a
+     * NAT eventually forgets — and it measures the round trip from the `Pong`
+     * that comes back. A client that handed those frames to its caller would
+     * make every caller handle them, and a client that ignored them would leave
+     * the desktop reporting an unknown connection quality forever. So they are
+     * answered here and never surface: exactly what the desktop's own frame
+     * loop does with the mirror image of this.
+     *
+     * One reader only. The receiving nonce is a counter too, and two readers
+     * would each advance it past the other's message.
      */
-    fun receive(): Frame = Frame.decode(channel.open(Transport.readMessage(input)))
+    fun receive(): Frame {
+        while (true) {
+            val frame = Frame.decode(channel.open(Transport.readMessage(input)))
+            when (frame) {
+                is Frame.Ping -> send(Frame.Pong(frame.token))
+                is Frame.Pong -> {
+                    // A token this end never sent is ignored rather than timed.
+                    // The desktop applies the same rule in the other direction
+                    // and for the same reason: a peer that echoed a number of
+                    // its own choosing could otherwise report any quality it
+                    // liked, including a good one for a connection that is
+                    // unusable.
+                    val sent = outstanding.remove(frame.token)
+                    if (sent != null) {
+                        roundTripMs = (System.nanoTime() - sent) / 1_000_000
+                    }
+                }
+                else -> return frame
+            }
+        }
+    }
 }
 
 /**
