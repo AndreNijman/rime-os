@@ -2024,7 +2024,12 @@ scenario_luks_pcr7() {
     local recovery=""
     recovery="$(luks_serial_field "$ser" recovery-key)"
     if [[ -n "$recovery" && "$recovery" != "<not"* ]]; then
-        printf '%s\n' "$recovery" > "$WORK/luks-pcr7-recovery.key"
+        # NO trailing newline: libcryptsetup reads a key FILE literally, byte
+        # for byte, and `luks_hook`'s own recovery file (written by the lab
+        # tool's `tail -1`) has none either. A newline here would make boot
+        # C's recovery-unlock fail for a reason that reads exactly like a real
+        # defect and is not one.
+        printf '%s' "$recovery" > "$WORK/luks-pcr7-recovery.key"
         ok "captured the recovery key the guest generated"
     else
         bad "no recovery key came back from the enrolment boot — boot C's refusal arm has no fallback to test"
