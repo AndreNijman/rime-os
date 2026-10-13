@@ -1,0 +1,210 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  tests/vmlab/guest — build the initramfs the P2-008/P2-009 flows boot.
+#
+#  A sibling of files/scripts/boot-v2/apex-guest-micro, not a copy of it. That
+#  one exists to prove a UKI was verified and the command line survived; this
+#  one has to answer a different set of questions, and each of them is an
+#  OBSERVATION MADE BY THE GUEST rather than by the host that launched it:
+#
+#    secureboot=  the SecureBoot EFI variable, read from efivarfs. This is the
+#                 independent proof that P2-008's Secure Boot flow works.
+#                 "qemu started and the guest booted" is not that claim: a
+#                 firmware in setup mode boots the same image and reports 0
+#                 here, which is exactly the defect the engine's first
+#                 firmware selection would have shipped.
+#    tpm=         /sys/class/tpm/tpm0, which exists only if the guest kernel
+#                 bound a TPM. tpm_crb is built in on the lab kernel, so no
+#                 module is needed and an absent tpm0 means an absent device.
+#    virtiofs=    a host directory mounted by tag inside the guest, and the
+#                 name of a file the host put there. Reading back a file the
+#                 host wrote is what makes it a share rather than a mount.
+#    egress       P2-009. The task writes the nominated file AND a file nobody
+#                 nominated, and tries to write to the read-only copy-in
+#                 volume. All three are deliberate: the interesting question
+#                 is not whether the nominated file arrives, it is whether the
+#                 other two can.
+#
+#  busybox is Fedora's statically linked build, so this is one 800 KB binary
+#  plus a script. The four filesystem modules it needs are .ko.xz on Fedora and
+#  busybox's insmod cannot read xz, so they are decompressed at build time and
+#  loaded by path. nls_cp437 — vfat's default codepage — is built in, which is
+#  why it is not in that list.
+# ─────────────────────────────────────────────────────────────────────────────
+set -euo pipefail
+
+OUT="${1:?usage: tests/vmlab/guest OUT.cpio.gz}"
+
+die() { printf '!!! %s\n' "$*" >&2; exit 1; }
+
+BB="$(command -v busybox)" || die "busybox not found"
+file -b "$BB" | grep -q 'statically linked' \
+    || die "$BB is not statically linked; this initramfs assumes it is"
+
+KVER="$(cat /etc/apex-bootlab-kver 2>/dev/null)" || die "not in the boot lab"
+MODDIR="/lib/modules/$KVER"
+
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+chmod 0755 "$WORK"
+mkdir -p "$WORK"/{bin,dev,proc,sys,mnt,lib/modules}
+install -m 0755 "$BB" "$WORK/bin/busybox"
+for l in sh mount umount echo cat poweroff sleep ls grep printf insmod \
+         mkdir cp tr tail head dd sync stat find md5sum cut od; do
+    ln -sf busybox "$WORK/bin/$l"
+done
+
+# The modules, decompressed. Order matters and is spelled out rather than
+# resolved: fat before vfat, fuse before virtiofs. A missing one is a hard
+# failure here rather than a guest that silently cannot mount anything, which
+# would read as a broken share flow.
+for m in fat vfat fuse virtiofs; do
+    src="$(find "$MODDIR" -name "$m.ko.xz" -o -name "$m.ko.zst" -o -name "$m.ko" | head -1)"
+    [ -n "$src" ] || die "no $m module in $MODDIR"
+    case "$src" in
+        *.xz)  xz -dc  "$src" > "$WORK/lib/modules/$m.ko" ;;
+        *.zst) zstd -dc "$src" > "$WORK/lib/modules/$m.ko" ;;
+        *)     cp "$src" "$WORK/lib/modules/$m.ko" ;;
+    esac
+    [ -s "$WORK/lib/modules/$m.ko" ] || die "$m.ko came out empty"
+done
+
+cat > "$WORK/init" <<'INIT'
+#!/bin/busybox sh
+# APEX vmlab guest. Everything it prints is prefixed APEX-VMLAB so the
+# host-side assertions key on a string only this file emits into the serial
+# log. A marker found anywhere else in the work directory came from the host.
+export PATH=/bin
+APEXIN_WRITE=not-attempted
+/bin/busybox mount -t proc     proc     /proc
+/bin/busybox mount -t sysfs    sysfs    /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null
+
+echo "APEX-VMLAB: userspace-reached"
+
+for m in fat vfat fuse virtiofs; do
+    insmod "/lib/modules/$m.ko" 2>/dev/null || echo "APEX-VMLAB: module-failed=$m"
+done
+
+# ── Secure Boot, as the firmware reports it ─────────────────────────────────
+# The EFI variable is 4 bytes of attributes then one byte of value, so the
+# LAST byte is the answer. Printed as a number rather than a word, because
+# "absent" and "0" are different facts: absent means the guest could not read
+# efivarfs at all, which must never be mistaken for "Secure Boot is off".
+SB_GUID=8be4df61-93ca-11d2-aa0d-00e098032b8c
+if mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null; then
+    V="/sys/firmware/efi/efivars/SecureBoot-$SB_GUID"
+    if [ -f "$V" ]; then
+        echo "APEX-VMLAB: secureboot=$(dd if="$V" bs=1 skip=4 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')"
+    else
+        echo "APEX-VMLAB: secureboot=absent"
+    fi
+    S="/sys/firmware/efi/efivars/SetupMode-$SB_GUID"
+    if [ -f "$S" ]; then
+        echo "APEX-VMLAB: setupmode=$(dd if="$S" bs=1 skip=4 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')"
+    fi
+else
+    echo "APEX-VMLAB: secureboot=unreadable"
+fi
+
+# ── TPM ─────────────────────────────────────────────────────────────────────
+if [ -d /sys/class/tpm/tpm0 ]; then
+    echo "APEX-VMLAB: tpm=present"
+    if [ -f /sys/class/tpm/tpm0/tpm_version_major ]; then
+        echo "APEX-VMLAB: tpm-version=$(cat /sys/class/tpm/tpm0/tpm_version_major)"
+    fi
+    # The PCR bank, which is what a TPM is for. Reading one proves the device
+    # answers rather than merely being bound by the driver.
+    if [ -f /sys/class/tpm/tpm0/pcr-sha256/0 ]; then
+        echo "APEX-VMLAB: tpm-pcr0=$(cat /sys/class/tpm/tpm0/pcr-sha256/0)"
+    fi
+else
+    echo "APEX-VMLAB: tpm=absent"
+fi
+
+# ── virtiofs share ──────────────────────────────────────────────────────────
+# The tag is fixed because the lab creates the VM with it. Reading back a file
+# the HOST wrote is the assertion; mounting successfully is not.
+if mount -t virtiofs vmlabshare /mnt 2>/dev/null; then
+    echo "APEX-VMLAB: virtiofs=mounted"
+    if [ -f /mnt/from-host.txt ]; then
+        echo "APEX-VMLAB: virtiofs-read=$(cat /mnt/from-host.txt)"
+    else
+        echo "APEX-VMLAB: virtiofs-read=absent"
+    fi
+    # And write back, so the host can tell a read-only share from a read-write
+    # one by looking rather than by trusting the flag.
+    if echo "from-guest" > /mnt/from-guest.txt 2>/dev/null; then
+        echo "APEX-VMLAB: virtiofs-write=ok"
+    else
+        echo "APEX-VMLAB: virtiofs-write=refused"
+    fi
+else
+    echo "APEX-VMLAB: virtiofs=unmounted"
+fi
+
+# ── the disposable-run volumes (P2-009) ─────────────────────────────────────
+# vdb is APEXIN, read-only. vdc is APEXOUT. Both are plain FAT, which is what
+# lets the host read the result back with mcopy and no mount at all.
+if [ -b /dev/vdb ] && mount -t vfat -o ro /dev/vdb /mnt 2>/dev/null; then
+    echo "APEX-VMLAB: apexin=mounted"
+    # A write attempt against the read-only copy-in volume. The host separately
+    # checks the image's sha256, because "the guest could not write" and "the
+    # guest's write did not reach the host" are different claims and only the
+    # second one is a boundary.
+    if echo x > /mnt/tamper.txt 2>/dev/null; then
+        APEXIN_WRITE=ACCEPTED
+    else
+        APEXIN_WRITE=refused
+    fi
+    echo "APEX-VMLAB: apexin-write=$APEXIN_WRITE"
+    [ -f /mnt/task.sh ] && cp /mnt/task.sh /task.sh
+    umount /mnt 2>/dev/null
+fi
+
+if [ -b /dev/vdc ] && mount -t vfat /dev/vdc /mnt 2>/dev/null; then
+    echo "APEX-VMLAB: apexout=mounted"
+    export APEX_OUT=/mnt
+    # The guest's own observations, written to the EGRESS volume rather than
+    # only to the serial console. `apex vm run` deletes the VM and both volumes
+    # on teardown, so the console log is gone by the time the host could read
+    # it — and what the guest saw of the read-only copy-in volume is exactly
+    # what the host needs in order to judge the boundary. Sending it out
+    # through the sanctioned channel is also the control: a file only arrives
+    # if the host nominates it.
+    {
+        echo "apexin-write=$APEXIN_WRITE"
+        echo "apexin-task-sha=$(md5sum /task.sh 2>/dev/null | cut -d' ' -f1)"
+    } > /mnt/guest-report.txt 2>/dev/null
+    if [ -f /task.sh ]; then
+        echo "APEX-VMLAB: task-start"
+        sh /task.sh
+        echo "APEX-VMLAB: task-exit=$?"
+    fi
+    sync
+    echo "APEX-VMLAB: apexout-contents=$(ls /mnt | tr '\n' ' ')"
+    umount /mnt 2>/dev/null
+fi
+
+echo "APEX-VMLAB: clean-poweroff"
+sync
+/bin/busybox poweroff -f
+# poweroff -f should never return. If it does, spin rather than falling off the
+# end of init, which the kernel treats as a panic and which would look like a
+# boot failure in the serial log.
+while : ; do /bin/busybox sleep 60; done
+INIT
+chmod 0755 "$WORK/init"
+
+mkdir -p "$(dirname "$OUT")"
+( cd "$WORK" && find . -print0 | cpio --null -o -H newc --quiet ) | gzip -9 > "$OUT"
+
+[ -s "$OUT" ] || die "produced no initramfs at $OUT"
+# Postcondition: /init must be in the archive AND be executable. A cpio whose
+# init is mode 0644 boots to "Failed to execute /init" — a kernel panic that
+# reads like a broken UKI.
+LISTING="$(zcat "$OUT" | cpio -itv --quiet 2>/dev/null)"
+grep -qE '^-rwxr-xr-x .* (\./)?init$' <<<"$LISTING" \
+    || die "./init is missing or not executable in $OUT"
+grep -q 'lib/modules/virtiofs.ko' <<<"$LISTING" \
+    || die "the virtiofs module did not make it into $OUT"
+printf '    vmlab guest: %s bytes\n' "$(stat -c %s "$OUT")" >&2

@@ -1,0 +1,535 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  tests/vmlab/run-vmlab — P2-008 and P2-009's flows, exercised LIVE through
+#  the shipped engine against a real libvirt.
+#
+#  ═══ WHY THIS EXISTS SEPARATELY FROM tests/test-apex-vm.sh ═══
+#
+#  That suite pins the domain XML and the argv with libvirt faked, which is the
+#  only way to check the elements a KVM-less runner could never observe. It
+#  cannot answer the question P2-008 actually asks, which is whether the flows
+#  WORK. So this one runs `apex vm create`, `start`, `snapshot` and `run`
+#  against a real `virtqemud`, boots real guests, and reads what the GUEST said
+#  on its serial console.
+#
+#  ═══ THE VERDICT, AND THE ARM THAT MAKES IT HONEST ═══
+#
+#  Three states, never a boolean, mirroring `apexd/apex/src/verify.rs`'s
+#  `Verdict` and the rule tests/chaos/lib.sh states at length:
+#
+#      verified       the flow was exercised through the shipped engine and an
+#                     observation INDEPENDENT of the engine confirmed it.
+#      failed         it was exercised and the observation contradicts it.
+#      could-not-run  it could not be exercised here. Never a pass. Never a
+#                     failure. The reason is recorded verbatim.
+#
+#  This machine has /dev/kvm; GitHub's runners mostly do not. A flow that
+#  reports "verified" on a runner with no KVM would be a lie, and a flow that
+#  reports "failed" there would be noise that gets muted. `chaos_prereq` from
+#  tests/chaos/lib.sh answers both prerequisites and supplies the sentence.
+#
+#  ═══ WHAT COUNTS AS AN INDEPENDENT OBSERVATION HERE ═══
+#
+#  Not "virsh exited 0", and not "the VM booted". For each flow:
+#
+#    Secure Boot   the GUEST reads the SecureBoot EFI variable out of efivarfs
+#                  and prints it. A firmware in setup mode boots the same image
+#                  and prints 0, which is precisely the defect the engine's
+#                  first firmware selection would have shipped — so "it booted"
+#                  proves nothing and this does.
+#                  Plus the negative arm: a UKI identical except for its
+#                  signature must NOT reach userspace at all.
+#    TPM           the guest finds /sys/class/tpm/tpm0 and reads PCR 0.
+#    share         the guest reads back a file the HOST wrote into the shared
+#                  directory, by tag.
+#    snapshot      libvirt's own snapshot-list, after the fact, and a revert
+#                  that restores a file written between the two.
+#    egress        the host reads the egress volume with mcopy afterwards. The
+#                  question asked is NOT whether the nominated file arrived; it
+#                  is whether the file nobody nominated could, and whether the
+#                  read-only copy-in volume is byte-identical after the guest
+#                  tried to write to it.
+#
+#  ═══ WHY IT RUNS IN A CONTAINER, AS AN ORDINARY USER ═══
+#
+#  AGENTS.md: qemu and virt-install are build-time tooling, never host
+#  software. The boot lab (bootlab/Containerfile) carries them, and P1-062
+#  already boots Secure-Boot-enforcing guests in it.
+#
+#  The container runs UNPRIVILEGED — `--userns=keep-id --user $(id -u)` — and
+#  that is not tidiness. libvirt resolves `qemu:///session` differently for uid
+#  0: it lands on /var/run/libvirt/virtqemud-sock, the PRIVILEGED socket, with
+#  a daemon that chowns the variable store to `qemu` and expects a system
+#  virtlogd. Running the lab as root would therefore have tested a path no
+#  user's `apex vm start` ever takes, while appearing to test session mode.
+#  As an ordinary user, `virsh -c qemu:///session` autospawns virtqemud AND
+#  virtlogd into $XDG_RUNTIME_DIR exactly as it does on a real desktop.
+#
+#  Nothing touches the host's boot path, the host's libvirt, or the host's
+#  network: there is no libvirt on the host at all, every guest has
+#  `--network none`, and every artifact is under the bind-mounted work
+#  directory.
+#
+#  ═══ USAGE ═══
+#
+#      tests/vmlab/run-vmlab                  every flow
+#      tests/vmlab/run-vmlab secure-boot      one flow
+#      VMLAB_OUT=/tmp/out tests/vmlab/run-vmlab
+#
+#  Exit 0 if no flow FAILED. A could-not-run is not a failure; the summary
+#  prints how many there were and why, and every verdict is on disk.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+
+VMLAB_IMAGE="${VMLAB_IMAGE:-localhost/apex-bootlab}"
+VMLAB_OUT="${VMLAB_OUT:-${TMPDIR:-/tmp}/apex-vmlab}"
+
+log()  { printf '\n>>> %s\n' "$*" >&2; }
+info() { printf '    %s\n' "$*" >&2; }
+die()  { printf '!!! %s\n' "$*" >&2; exit 2; }
+
+# ── outside the lab: check prerequisites, then re-exec inside it ────────────
+#
+# The marker is a file only the lab image has. Testing for it rather than for
+# an environment variable means a stray VMLAB_INSIDE=1 cannot make this script
+# try to drive qemu on somebody's laptop.
+if [ ! -f /etc/apex-bootlab-kver ]; then
+    # shellcheck source=tests/chaos/lib.sh
+    . "$REPO/tests/chaos/lib.sh"
+
+    reason=""
+    for p in podman bootlab kvm; do
+        if ! r="$(chaos_prereq "$p")"; then reason="$r"; break; fi
+    done
+    if [ -n "$reason" ]; then
+        mkdir -p "$VMLAB_OUT"
+        for flow in create secure-boot secure-boot-negative tpm snapshot share usb egress; do
+            mkdir -p "$VMLAB_OUT/$flow"
+            printf '{"flow":"%s","state":"could-not-run","reason":"%s"}\n' \
+                "$flow" "$reason" > "$VMLAB_OUT/$flow/verdict.json"
+        done
+        log "every flow: could-not-run — $reason"
+        info "verdicts under $VMLAB_OUT"
+        exit 0
+    fi
+
+    mkdir -p "$VMLAB_OUT"
+    log "entering the boot lab as uid $(id -u) (session mode, not root)"
+    exec podman run --rm \
+        --userns=keep-id --user "$(id -u):$(id -g)" \
+        -e HOME=/tmp/labhome -e XDG_RUNTIME_DIR=/tmp/labrun \
+        -e "VMLAB_OUT=/out" \
+        --device /dev/kvm \
+        -v "$REPO:/work:z" -v "$VMLAB_OUT:/out:z" \
+        --entrypoint /bin/bash \
+        "$VMLAB_IMAGE" -c '/work/tests/vmlab/run-vmlab "$@"' -- "$@"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  From here on we are INSIDE the lab, as an ordinary user.
+# ─────────────────────────────────────────────────────────────────────────────
+mkdir -p "$HOME" "$XDG_RUNTIME_DIR" 2>/dev/null
+chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null
+
+ENGINE="$REPO/files/system/libexec/apex-vm"
+[ -x "$ENGINE" ] || [ -f "$ENGINE" ] || die "no engine at $ENGINE"
+
+WORK="${WORK:-/tmp/vmlab-work}"
+mkdir -p "$WORK"
+export APEX_VM_HOME="$WORK/vms"
+mkdir -p "$APEX_VM_HOME"
+
+# shellcheck source=files/scripts/boot-v2/lib.sh
+. "$REPO/files/scripts/boot-v2/lib.sh"
+
+KEYS="$WORK/keys"
+LAB_KERNEL="/lib/modules/$(cat /etc/apex-bootlab-kver)/vmlinuz"
+CMDLINE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 rw"
+
+vm() { bash "$ENGINE" "$@"; }
+
+verdict() {
+    local flow="$1" state="$2" reason="$3"
+    mkdir -p "$VMLAB_OUT/$flow"
+    # The reason is JSON string data, so the two characters that would break
+    # the document are escaped rather than stripped: a truncated reason is a
+    # verdict nobody can act on.
+    reason="${reason//\\/\\\\}"; reason="${reason//\"/\\\"}"; reason="${reason//$'\n'/ }"
+    printf '{"flow":"%s","state":"%s","reason":"%s","libvirt":"%s","kernel":"%s"}\n' \
+        "$flow" "$state" "$reason" \
+        "$(virsh --version 2>/dev/null)" "$(uname -r)" \
+        > "$VMLAB_OUT/$flow/verdict.json"
+    case "$state" in
+        verified)      printf '  VERIFIED       %-22s %s\n' "$flow" "$reason" >&2; N_OK=$((N_OK+1)) ;;
+        failed)        printf '  FAILED         %-22s %s\n' "$flow" "$reason" >&2; N_BAD=$((N_BAD+1)) ;;
+        could-not-run) printf '  could-not-run  %-22s %s\n' "$flow" "$reason" >&2; N_CNR=$((N_CNR+1)) ;;
+    esac
+}
+N_OK=0; N_BAD=0; N_CNR=0
+
+# ── fixtures ────────────────────────────────────────────────────────────────
+#
+# Reused from boot-v2 rather than rebuilt: apex-sb-keys makes an ephemeral CA,
+# apex-sb-vars authors an OVMF variable store with ONLY that certificate as
+# PK/KEK/db, and apex-mkuki signs a UKI with it. That varstore is stricter than
+# any shipping machine — no Microsoft CA — which is what makes "the guest
+# booted" mean "the firmware verified it against THIS chain" rather than
+# "some vendor CA happened to cover it".
+fixtures() {
+    [ -d "$KEYS" ] && return 0
+    log "fixtures: ephemeral Secure Boot keys, variable store, guest, UKIs"
+    "$REPO/files/scripts/boot-v2/apex-sb-keys" "$KEYS" >/dev/null || die "apex-sb-keys failed"
+    "$REPO/files/scripts/boot-v2/apex-sb-vars" \
+        --cert "$KEYS/sb/cert.der" --output "$WORK/vars-apex.fd" >/dev/null \
+        || die "apex-sb-vars failed"
+    bash "$HERE/guest" "$WORK/guest.cpio.gz" || die "guest initramfs failed"
+
+    mkuki "$WORK/good.efi" "$KEYS/sb/key.pem"      "$KEYS/sb/cert.pem"
+    mkuki "$WORK/evil.efi" "$KEYS/foreign/key.pem" "$KEYS/foreign/cert.pem"
+
+    esp_disk "$WORK/good.img" "$WORK/good.efi"
+    esp_disk "$WORK/evil.img" "$WORK/evil.efi"
+}
+
+mkuki() {
+    local out="$1" key="$2" cert="$3"
+    "$REPO/files/scripts/boot-v2/apex-mkuki" \
+        --output "$out" --kernel "$LAB_KERNEL" --initrd "$WORK/guest.cpio.gz" \
+        --allow-no-ucode --cmdline "$CMDLINE" \
+        --deployment vmlab --variant vmlab \
+        --sb-key "$key" --sb-cert "$cert" >/dev/null \
+        || die "apex-mkuki failed for $out"
+}
+
+# A GPT disk with one ESP holding the UKI as the removable-media fallback path.
+# BOOTX64.EFI rather than a systemd-boot entry: the firmware loads it with no
+# BootOrder, no loader configuration and no second signed binary in the chain,
+# so a boot that does not happen is the firmware refusing THIS image.
+esp_disk() {
+    local disk="$1" uki="$2"
+    esp_disk_create "$disk" 64
+    esp_mkdir_p "$disk.esp" /EFI/BOOT
+    mcopy -i "$disk.esp" "$uki" ::/EFI/BOOT/BOOTX64.EFI || die "cannot stage $uki"
+    esp_disk_flush "$disk"
+}
+
+# ── running a VM through the engine and waiting for it ──────────────────────
+#
+# The console log is the single source of truth for what the guest said. It is
+# read from the path the ENGINE chose, not from one this script picked, so a
+# change to the engine's layout breaks this loudly instead of silently reading
+# a stale file.
+boot_and_wait() {
+    local name="$1" timeout="${2:-120}" waited=0 state
+    vm start "$name" >/dev/null 2>&1 || return 1
+    while [ "$waited" -lt "$timeout" ]; do
+        state="$(virsh -c qemu:///session domstate "$name" 2>/dev/null | head -1)"
+        [ "$state" = "shut off" ] && return 0
+        sleep 2; waited=$((waited + 2))
+    done
+    virsh -c qemu:///session destroy "$name" >/dev/null 2>&1
+    return 1
+}
+
+# The serial console is a TTY, so every line the guest printed arrives with a
+# CR before its LF. Stripping it here rather than in each assertion is not
+# cosmetic: `secureboot=1\r` is not equal to `1`, and the first run of this lab
+# reported "the guest reported SecureBoot=1" as a FAILURE for exactly that
+# reason — a verdict that was wrong in the safe direction, which is the kind
+# that gets muted rather than fixed.
+console() { tr -d '\r' < "$APEX_VM_HOME/$1/console.log" 2>/dev/null; }
+
+cleanup_vm() { vm rm "$1" >/dev/null 2>&1; }
+
+# ═══ flows ══════════════════════════════════════════════════════════════════
+
+flow_create_sb_tpm() {
+    # create, Secure Boot and TPM share one guest, because the product
+    # configuration is all three at once and a flow proven on a different VM
+    # from the others has not been proven to compose.
+    log "create + secure-boot + tpm: one guest, all three"
+    cleanup_vm sbgood
+    local out
+    out="$(vm create sbgood --import "$WORK/good.img" --uefi-vars "$WORK/vars-apex.fd" \
+             --memory 1024 --cpus 1 --network none 2>&1)"
+    if [ $? -ne 0 ]; then
+        verdict create failed "apex vm create refused: $out"
+        verdict secure-boot could-not-run "the VM could not be created"
+        verdict tpm could-not-run "the VM could not be created"
+        return
+    fi
+    if ! boot_and_wait sbgood 180; then
+        verdict create failed "the guest never powered off; console: $(console sbgood | tail -3 | tr '\n' ' ')"
+        verdict secure-boot could-not-run "the guest did not complete a boot"
+        verdict tpm could-not-run "the guest did not complete a boot"
+        return
+    fi
+    local log_; log_="$(console sbgood)"
+    printf '%s\n' "$log_" > "$VMLAB_OUT/console-sbgood.log"
+
+    if grep -q 'APEX-VMLAB: userspace-reached' <<<"$log_"; then
+        verdict create verified "the guest booted through apex vm create/start and reached userspace"
+    else
+        verdict create failed "no userspace marker on the serial console"
+    fi
+
+    local sb; sb="$(sed -n 's/^APEX-VMLAB: secureboot=//p' <<<"$log_" | head -1)"
+    case "$sb" in
+        1) verdict secure-boot verified "the guest read SecureBoot=1 from efivarfs, and its UKI is signed by the only certificate in db" ;;
+        0) verdict secure-boot failed "the firmware came up with SecureBoot=0 — it is not enforcing" ;;
+        "") verdict secure-boot failed "the guest printed no SecureBoot value" ;;
+        *) verdict secure-boot failed "the guest reported SecureBoot=$sb" ;;
+    esac
+
+    local tpm; tpm="$(sed -n 's/^APEX-VMLAB: tpm=//p' <<<"$log_" | head -1)"
+    local pcr; pcr="$(sed -n 's/^APEX-VMLAB: tpm-pcr0=//p' <<<"$log_" | head -1)"
+    if [ "$tpm" = present ] && [ -n "$pcr" ]; then
+        verdict tpm verified "the guest bound a TPM and read PCR 0 from it ($pcr)"
+    elif [ "$tpm" = present ]; then
+        verdict tpm failed "a TPM device exists but no PCR could be read from it"
+    else
+        verdict tpm failed "the guest found no TPM (tpm=$tpm)"
+    fi
+}
+
+flow_secure_boot_negative() {
+    # The arm that makes the positive one mean something. Byte-identical UKI
+    # apart from the signature: same kernel, same initramfs, same command line,
+    # signed with a key that is not in db. The firmware must refuse it.
+    log "secure-boot negative: the same guest, signed by a key db does not carry"
+    cleanup_vm sbevil
+    local out
+    out="$(vm create sbevil --import "$WORK/evil.img" --uefi-vars "$WORK/vars-apex.fd" \
+             --memory 1024 --cpus 1 --network none 2>&1)"
+    if [ $? -ne 0 ]; then
+        verdict secure-boot-negative could-not-run "apex vm create refused: $out"
+        return
+    fi
+    # A short timeout on purpose: the expected outcome is a firmware that
+    # refuses to boot anything and then sits there, so waiting the full 180s
+    # would only make the run slower.
+    boot_and_wait sbevil 45
+    local log_; log_="$(console sbevil)"
+    printf '%s\n' "$log_" > "$VMLAB_OUT/console-sbevil.log"
+    if grep -q 'APEX-VMLAB: userspace-reached' <<<"$log_"; then
+        verdict secure-boot-negative failed \
+            "a UKI signed by a foreign key REACHED USERSPACE — the firmware is not enforcing"
+    elif [ -z "$log_" ]; then
+        verdict secure-boot-negative failed \
+            "the guest wrote nothing at all, so this cannot be told apart from a VM that never started"
+    else
+        verdict secure-boot-negative verified \
+            "the foreign-signed UKI never reached userspace; firmware said: $(tr -d '\r' <<<"$log_" | grep -iE 'access denied|security violation|verif' | head -1 | cut -c1-120)"
+    fi
+}
+
+flow_snapshot() {
+    # On the SB+TPM guest, not a plain one: libvirt's rules about internal
+    # snapshots depend on the nvram format and on whether there is a TPM, so a
+    # snapshot proven on a BIOS guest with no variable store proves nothing
+    # about the VM this engine actually creates.
+    log "snapshot: on the Secure-Boot + TPM guest, disk and variable store together"
+    if ! virsh -c qemu:///session dominfo sbgood >/dev/null 2>&1; then
+        verdict snapshot could-not-run "the SB+TPM guest does not exist; the create flow did not get that far"
+        return
+    fi
+    local out rc
+    out="$(vm snapshot create sbgood before 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        verdict snapshot failed "libvirt refused a snapshot of the VM this engine creates: $(tr '\n' ' ' <<<"$out" | cut -c1-200)"
+        return
+    fi
+    local list; list="$(vm snapshot list sbgood 2>&1)"
+    if ! grep -q 'before' <<<"$list"; then
+        verdict snapshot failed "snapshot-create reported success and snapshot-list does not show it"
+        return
+    fi
+    # Revert, and then ask libvirt again rather than trusting the revert's exit
+    # status. `virsh snapshot-revert` exits 0 on a domain it did nothing to.
+    local rev; rev="$(vm snapshot revert sbgood before 2>&1)"; rc=$?
+    if [ "$rc" -ne 0 ]; then
+        verdict snapshot failed "the snapshot was taken but could not be reverted to: $(tr '\n' ' ' <<<"$rev" | cut -c1-200)"
+        return
+    fi
+    local cur; cur="$(virsh -c qemu:///session snapshot-current --name sbgood 2>/dev/null)"
+    if [ "$cur" = "before" ]; then
+        verdict snapshot verified "snapshot taken and reverted to on a Secure-Boot + TPM guest; libvirt reports 'before' as current"
+    else
+        verdict snapshot failed "reverted, but libvirt reports the current snapshot as '$cur'"
+    fi
+    vm snapshot delete sbgood before >/dev/null 2>&1
+}
+
+# Whether virtiofsd can enter its sandbox HERE, asked before a VM is created.
+#
+# libvirt starts virtiofsd with its default `namespace` sandbox, which unshares
+# a mount namespace and mounts /proc inside it. Inside an unprivileged podman
+# container that mount is refused, virtiofsd exits, and qemu then fails to
+# connect to a socket that was never created — an error about a chardev path,
+# for a flow about a shared directory. Probing directly turns that into
+# virtiofsd's own sentence, which is the difference between a could-not-run
+# somebody can act on and one they have to reproduce first.
+#
+# This is a property of the LAB, not of the engine: on a real APEX host the
+# same user's virtiofsd has an unprivileged user namespace to unshare into.
+virtiofsd_sandbox_error() {
+    local sock="$WORK/probe-vfs.sock" err
+    rm -f "$sock"
+    err="$(timeout 10 /usr/libexec/virtiofsd --socket-path="$sock" \
+             --shared-dir="$WORK" --sandbox=namespace 2>&1 &
+           for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "$sock" ] && break; sleep 0.5; done
+           wait 2>/dev/null)"
+    if [ -S "$sock" ]; then rm -f "$sock"; return 1; fi
+    printf '%s' "$(grep -F 'ERROR' <<<"$err" | head -1 | cut -c1-200)"
+    return 0
+}
+
+flow_share() {
+    log "share: a host directory in the guest, over virtiofs"
+    local sberr
+    if sberr="$(virtiofsd_sandbox_error)"; then
+        verdict share could-not-run \
+            "virtiofsd cannot enter its sandbox inside this unprivileged container, so libvirt would start a domain whose vhost-user socket never appears. Its words: ${sberr:-<no ERROR line>}. This is a property of the lab, not of the engine: on a real host the same user has a user namespace to unshare into. The domain XML — virtiofs driver, explicit binary path, and the memfd/shared memory backing without which the device cannot start — is pinned in tests/test-apex-vm.sh."
+        return
+    fi
+    local src="$WORK/share"
+    mkdir -p "$src"
+    printf 'hello-from-the-host\n' > "$src/from-host.txt"
+    cleanup_vm sharevm
+    local out
+    out="$(vm create sharevm --import "$WORK/good.img" --uefi-vars "$WORK/vars-apex.fd" \
+             --memory 1024 --cpus 1 --network none --share "$src:vmlabshare" 2>&1)"
+    if [ $? -ne 0 ]; then
+        verdict share could-not-run "apex vm create refused the share: $(tr '\n' ' ' <<<"$out" | cut -c1-200)"
+        return
+    fi
+    if ! boot_and_wait sharevm 180; then
+        # virtiofsd's own sandbox needs a nested user namespace, which is the
+        # most likely thing to be unavailable inside an unprivileged container.
+        # That is a property of the lab, not of the engine, so it is a
+        # could-not-run with the reason rather than a failure — and the reason
+        # is libvirt's own words, not a guess: an empty console means the
+        # domain never started, and `virsh start` said why.
+        local why; why="$(vm start sharevm 2>&1 | tr '\n' ' ' | cut -c1-300)"
+        verdict share could-not-run \
+            "the guest did not power off. libvirt: ${why:-<no error>}. console: $(console sharevm | tail -2 | tr '\n' ' ')"
+        return
+    fi
+    local log_; log_="$(console sharevm)"
+    printf '%s\n' "$log_" > "$VMLAB_OUT/console-share.log"
+    local read_; read_="$(sed -n 's/^APEX-VMLAB: virtiofs-read=//p' <<<"$log_" | head -1)"
+    if [ "$read_" = "hello-from-the-host" ]; then
+        verdict share verified "the guest mounted the share by tag and read back a file the host wrote"
+    elif grep -q 'APEX-VMLAB: virtiofs=unmounted' <<<"$log_"; then
+        verdict share failed "the domain started but the guest could not mount tag 'vmlabshare'"
+    else
+        verdict share failed "the guest mounted the share and read '$read_' instead of the host's content"
+    fi
+}
+
+flow_usb() {
+    # Stated rather than attempted, and the reason is recorded in the verdict
+    # so it is not something a reader has to go and find.
+    log "usb: host passthrough"
+    verdict usb could-not-run \
+"host USB passthrough is not exercised: it would detach a device from the developer's laptop for the life of a guest, and session-mode passthrough additionally needs the device's /dev/bus/usb node readable by the user. The domain XML, managed='yes', the xHCI controller and the lsusb guard are pinned in tests/test-apex-vm.sh instead."
+}
+
+flow_egress() {
+    # P2-009, tested hostilely and with a control.
+    #
+    # The hostile question is not whether report.json arrives; it is whether
+    # stolen.txt can. But "stolen.txt is absent on the host" is only evidence
+    # if stolen.txt EXISTED in the guest's egress volume — otherwise a task
+    # that silently did nothing would look like a boundary working perfectly.
+    #
+    # So the same task runs twice against the same guest image. Run A nominates
+    # one file; run B nominates all three. B is what makes A's absence a
+    # refusal rather than a non-event, and B also carries out the guest's own
+    # report on the read-only copy-in volume — which cannot be read from the
+    # serial console, because teardown deletes it along with everything else.
+    log "egress: what a disposable VM can and cannot hand back"
+    local dest_a="$WORK/egress-a" dest_b="$WORK/egress-b"
+    rm -rf "$dest_a" "$dest_b"; mkdir -p "$dest_a" "$dest_b"
+    local task='echo nominated > $APEX_OUT/report.json; echo secret > $APEX_OUT/stolen.txt'
+    local out_a out_b
+
+    out_a="$(vm run --image "$WORK/good.img" --name run-hostile \
+             --memory 1024 --cpus 1 --timeout 180 \
+             --egress report.json --egress-to "$dest_a" -- sh -c "$task" 2>&1)"
+    out_b="$(vm run --image "$WORK/good.img" --name run-control \
+             --memory 1024 --cpus 1 --timeout 180 \
+             --egress report.json --egress stolen.txt --egress guest-report.txt \
+             --egress-to "$dest_b" -- sh -c "$task" 2>&1)"
+    { printf 'A: %s\nB: %s\n' "$out_a" "$out_b"; } > "$VMLAB_OUT/egress.log"
+    cp -f "$dest_b/guest-report.txt" "$VMLAB_OUT/guest-report.txt" 2>/dev/null
+
+    # The control first: without it nothing below means anything.
+    if [ ! -f "$dest_b/stolen.txt" ] || [ ! -f "$dest_b/report.json" ]; then
+        verdict egress could-not-run \
+            "the control run did not produce both files, so the hostile run proves nothing about egress. Engine said: $(tr '\n' ' ' <<<"$out_b" | cut -c1-200)"
+        return
+    fi
+
+    local problems=""
+    [ -f "$dest_a/report.json" ] || problems="the nominated file did not arrive"
+    if [ -e "$dest_a/stolen.txt" ]; then
+        problems="${problems:+$problems; }A FILE THE TASK DID NOT NOMINATE LEFT THE VM"
+    fi
+    # A disposable VM that survives its run is not disposable, and its egress
+    # volume still holds everything the guest wrote.
+    for n in run-hostile run-control; do
+        [ -e "$APEX_VM_HOME/$n" ] && problems="${problems:+$problems; }$n's directory survived teardown"
+    done
+    # The read-only copy-in volume, as the GUEST saw it. Read out of the
+    # control run's egress because the console is deleted with the VM.
+    local inw; inw="$(sed -n 's/^apexin-write=//p' "$dest_b/guest-report.txt" 2>/dev/null | tr -d '\r')"
+    [ "$inw" = refused ] || problems="${problems:+$problems; }the guest reported apexin-write=$inw on the read-only copy-in volume"
+
+    if [ -n "$problems" ]; then
+        verdict egress failed "$problems"
+        return
+    fi
+    verdict egress verified \
+        "the guest wrote report.json AND stolen.txt (proven: the control run, nominating both, got both). The hostile run nominated only report.json and stolen.txt did not leave. The guest's write to the read-only copy-in volume was refused, and both VMs and their volumes are gone."
+}
+
+# ═══ driver ═════════════════════════════════════════════════════════════════
+
+FLOWS=("$@")
+[ "${#FLOWS[@]}" -eq 0 ] && FLOWS=(create secure-boot-negative snapshot share usb egress)
+
+mkdir -p "$VMLAB_OUT"
+log "libvirt $(virsh --version 2>/dev/null), qemu $(qemu-system-x86_64 --version 2>/dev/null | head -1), uid $(id -u)"
+
+# The session daemon, asked rather than assumed. Everything below fails in a
+# confusing way if this does not answer, so it is one clear refusal instead.
+if ! virsh -c qemu:///session version >/dev/null 2>&1; then
+    for flow in "${FLOWS[@]}"; do
+        verdict "$flow" could-not-run "qemu:///session does not answer inside the lab: $(virsh -c qemu:///session version 2>&1 | tail -1)"
+    done
+    exit 0
+fi
+
+fixtures
+
+for f in "${FLOWS[@]}"; do
+    case "$f" in
+        create|secure-boot|tpm) flow_create_sb_tpm ;;
+        secure-boot-negative)   flow_secure_boot_negative ;;
+        snapshot)               flow_snapshot ;;
+        share)                  flow_share ;;
+        usb)                    flow_usb ;;
+        egress)                 flow_egress ;;
+        *) die "unknown flow '$f'" ;;
+    esac
+done
+
+cleanup_vm sbgood; cleanup_vm sbevil; cleanup_vm sharevm
+
+log "vmlab: $N_OK verified, $N_BAD failed, $N_CNR could-not-run"
+info "verdicts and consoles under $VMLAB_OUT"
+[ "$N_BAD" -eq 0 ]
