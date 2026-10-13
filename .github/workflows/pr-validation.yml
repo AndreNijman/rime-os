@@ -1586,6 +1586,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/check-kernel-image-pin.sh
 
+      # The build CONTEXT is an input to every image, and .containerignore can
+      # remove source from it without failing any COPY. `**/target/` once hid
+      # apexd/apex-backup-core/src/target/, a real module, and `base` died on
+      # E0583 minutes later naming neither the context nor .containerignore
+      # (run 35582968952). Milliseconds, and it reads git rather than building.
+      - name: .containerignore does not hide tracked source
+        run: ./tests/check-containerignore-keeps-sources.sh
+
       - name: Run trusted-device assertions
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}

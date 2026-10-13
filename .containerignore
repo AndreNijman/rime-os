@@ -7,7 +7,26 @@
 # seeding a container build. CI never noticed because a fresh checkout has no
 # target/; a local build is where it bites, and "works in CI, wrong locally" is
 # the harder direction to debug.
+#
+# ANCHORED, and this is not a style preference. `**/target/` matches a directory
+# named `target` at ANY depth, including `apexd/apex-backup-core/src/target/` —
+# a SOURCE module holding the backup backends (fs, ssh, bucket). Excluding it
+# from the build context does not fail the COPY; it fails the compile, much
+# later, with a message that names neither the context nor this file:
+#
+#     error[E0583]: file not found for module `target`
+#       --> apex-backup-core/src/lib.rs:45:1
+#
+# That is run 35582968952's `base` job, exit 101, which skipped `image` and
+# `qcow2` behind it. `.gitignore` made this EXACT mistake with a bare `target/`
+# for the life of the repo and carries its own note about it — the same trap,
+# one file over. List the real Cargo build directories explicitly; when a new
+# crate gains one, add it here rather than reaching for a wildcard.
 apexd/target/
-**/target/
+apexd/target-clippy/
+installer/target/
+windows-installer/target/
+/target/
+/target-clippy/
 
 .git/
