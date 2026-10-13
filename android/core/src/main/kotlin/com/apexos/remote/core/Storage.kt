@@ -1,5 +1,6 @@
 package com.apexos.remote.core
 
+import com.apexos.remote.core.term.AccessoryKey
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -111,6 +112,33 @@ data class Settings(
      * root. So it is offered, and it is not what ships.
      */
     @SerialName("dynamic_colour") val dynamicColour: Boolean = false,
+
+    /**
+     * The accessory row above the keyboard, which P1-055 asks to be
+     * configurable.
+     *
+     * Here and not in a `SharedPreferences` file, and that is the whole reason
+     * this field exists on [Settings] rather than anywhere more convenient:
+     * `AppStorage` is the single writer to app storage, `InsecureStorageTest`
+     * proves what reaches the disk by walking every file in the directory, and
+     * a scan is only evidence about the bytes it can see.
+     * `tools/no-second-write-path.sh` fails the build if a second writer
+     * appears.
+     *
+     * Empty means "the shipped row", which is `AccessoryKeys.DEFAULT`. Storing
+     * the default explicitly would freeze it: a later build that improved the
+     * row would leave every existing phone on the old one.
+     */
+    @SerialName("accessory_row") val accessoryRow: List<AccessoryKey> = emptyList(),
+
+    /**
+     * Terminal text size in scaled pixels.
+     *
+     * Small, because eighty columns on a phone is the point: a terminal that
+     * reflowed to forty columns would make every TUI redraw itself into a
+     * shape none of them are designed for.
+     */
+    @SerialName("terminal_sp") val terminalSp: Int = 11,
 )
 
 /** Every machine this device knows, and how to put one back together. */
