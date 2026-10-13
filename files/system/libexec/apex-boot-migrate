@@ -330,10 +330,23 @@ cmd_precheck() {
     command -v podman >/dev/null 2>&1 || refuse "no-podman" \
         "podman is not in this image; the install has to run as a container of the image."
 
-    bootc install to-existing-root --help 2>/dev/null | grep -q -- --composefs-backend ||
-        refuse "bootc-too-old" \
-            "This machine's bootc has no --composefs-backend on install to-existing-root." \
-            "The migration needs it. Take an OS update first."
+    # NOT `bootc … --help | grep -q -- --composefs-backend`. Under `pipefail`,
+    # which is set at the top of this file, `grep -q` exits on the first match
+    # and the writer upstream of it takes SIGPIPE — so the PIPELINE returns 141
+    # on a match and this refuses `bootc-too-old` on a machine whose bootc is
+    # fine. Whether it fires depends on whether the help text fits the 64 KiB
+    # pipe buffer before grep closes: measured five times on the L16 at 5874
+    # bytes, rc=0 every time, so it is latent rather than live. It is still the
+    # exact shape that mis-seeded five of sixty-three suites in this repo once.
+    # Capture first, match on the string.
+    local bootc_help
+    bootc_help="$(bootc install to-existing-root --help 2>/dev/null || true)"
+    case "$bootc_help" in
+        *--composefs-backend*) ;;
+        *) refuse "bootc-too-old" \
+               "This machine's bootc has no --composefs-backend on install to-existing-root." \
+               "The migration needs it. Take an OS update first." ;;
+    esac
 
     # Secure Boot. systemd-boot-unsigned is exactly what its name says, and
     # Fedora's shim does not vouch for it. Committing a machine to a loader its

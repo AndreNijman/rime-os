@@ -331,6 +331,68 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+sec "the bootc version gate does not die on its own SIGPIPE"
+# `bootc --help | grep -q -- --composefs-backend` under `pipefail` returns 141
+# when grep MATCHES, because grep exits first and bootc takes SIGPIPE. Whether
+# it fires depends on whether the help fits the 64 KiB pipe buffer, so it is
+# position-dependent -- the same trap that mis-seeded five of sixty-three
+# suites in this repo. The gate must not be a pipeline into `grep -q`.
+if grep -qE -- '--help[^|]*\| *grep -q' "$CODE"; then
+    bad "a --help pipeline into grep -q survives — under pipefail a MATCH returns 141"
+else
+    ok "no --help is piped into grep -q"
+fi
+
+# Both ways, for real: the gate lifted out of cmd_precheck and run against a
+# fake bootc whose help is larger than a pipe buffer. A grep -q pipeline fails
+# this; a string match passes it.
+GATE="$TMP/gate.sh"
+{
+    echo 'refuse() { printf "REFUSED[%s]\n" "$1"; exit 10; }'
+    echo 'set -uo pipefail'
+    # Start at the capture, stop after `esac`. No second exit rule: the refuse
+    # line sits INSIDE the case, so exiting on it truncates the block and the
+    # gate becomes a syntax error that reads like a failing assertion.
+    awk '/bootc install to-existing-root --help/{on=1}
+         on{print}
+         on && /^    esac$/{exit}' "$CODE"
+    echo 'echo GATE-PASSED'
+} > "$GATE"
+grep -q 'composefs-backend' "$GATE" || { echo "FATAL: gate not extracted" >&2; exit 1; }
+bash -n "$GATE" || { echo "FATAL: extracted gate is not valid shell" >&2; exit 1; }
+
+cat > "$FAKEBIN/bootc" <<'FAKE'
+#!/usr/bin/env bash
+# 200 KiB of help, far past a 64 KiB pipe buffer, WITH the flag present.
+printf 'Usage: bootc install to-existing-root [OPTIONS] [TARGET]\n'
+printf '      --composefs-backend   If true, composefs backend is used\n'
+for i in $(seq 1 4000); do
+    printf '      --filler-%04d          padding so this help cannot fit a pipe buffer\n' "$i"
+done
+FAKE
+chmod +x "$FAKEBIN/bootc"
+got="$( { PATH="$FAKEBIN:$PATH" bash "$GATE" 2>&1 || true; } | tail -1)"
+if [[ "$got" == GATE-PASSED ]]; then
+    ok "the gate accepts a bootc with the flag even when its help is 200 KiB"
+else
+    bad "the gate refused a bootc that HAS --composefs-backend: $got"
+fi
+
+cat > "$FAKEBIN/bootc" <<'FAKE'
+#!/usr/bin/env bash
+printf 'Usage: bootc install to-existing-root [OPTIONS] [TARGET]\n'
+printf '      --root-ssh-authorized-keys <PATH>\n'
+FAKE
+chmod +x "$FAKEBIN/bootc"
+got="$( { PATH="$FAKEBIN:$PATH" bash "$GATE" 2>&1 || true; } | tail -1)"
+if [[ "$got" == 'REFUSED[bootc-too-old]' ]]; then
+    ok "the gate still refuses a bootc without --composefs-backend"
+else
+    bad "a bootc with no --composefs-backend was accepted: $got"
+fi
+rm -f "$FAKEBIN/bootc"
+
+# ═════════════════════════════════════════════════════════════════════════════
 sec "the state machine"
 rm -rf "$TMP/state"; mkdir -p "$TMP/state" "$TMP/esp" "$TMP/sysroot"
 
