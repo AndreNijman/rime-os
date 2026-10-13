@@ -76,6 +76,22 @@
 # almost every commit, so they are compiled in Containerfile.base instead —
 # keeping this stage, and everything downstream of it, off the hot path.
 
+# APEX_KERNEL_IMAGE MUST be declared HERE, before the first FROM in the file,
+# not down at its point of use next to `FROM ${APEX_KERNEL_IMAGE} AS
+# kernel-rpms`. Buildah/Docker only makes an ARG visible to a *stage's FROM
+# line* if it was declared before the FIRST FROM in the whole file — an ARG
+# declared inside an earlier stage (as this one originally was, right above
+# the kernel-rpms FROM) is scoped to that stage and invisible to any FROM,
+# including its own. Measured, not theoretical: with the ARG in its old spot,
+# `FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms` evaluated to an empty image name
+# and podman failed the whole build with "determining starting point for
+# build: no FROM statement found" — even when build-local.sh passed the
+# correct value with `--build-arg APEX_KERNEL_IMAGE=…`, because the override
+# has nothing to attach to before this point in the file. This is the first
+# time `core` was ever built against the real kernel tier, so the defect had
+# never been exercised. See ROADMAP/evidence/kernel-build-20260921.md.
+ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local
+
 FROM quay.io/fedora/fedora-bootc:43 AS toolbuilder
 # /root is special in bootc images (symlink → /var/roothome), so cargo's default
 # $HOME/.cargo fails ("File exists" on mkdir). Point CARGO_HOME at the build tree.
@@ -181,7 +197,8 @@ RUN set -eux; \
 #
 # A NAMED STAGE, not `COPY --from=${ARG}`: an ARG-substituted --from resolves
 # inconsistently across builders and fails in ways that read as a missing file.
-ARG APEX_KERNEL_IMAGE=localhost/apex-kernel:local
+# APEX_KERNEL_IMAGE itself is declared at the top of this file, before the
+# first FROM — see the comment there for why it cannot be declared here.
 FROM ${APEX_KERNEL_IMAGE} AS kernel-rpms
 
 # ─────────────────────────────────────────────────────────────────────────
