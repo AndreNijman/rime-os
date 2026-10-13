@@ -29,6 +29,15 @@ Layer one CLI tool and the machine stops receiving OS updates without telling
 you. Packages applied with `--apply-live` were worse: they also disappeared on
 the next reboot, so you lost both the software and the update path.
 
+`--apply-live` (and `rpm-ostree usroverlay`, `ostree admin unlock`) has a second
+cost for anyone who already uses `rime install`: the writable overlay it mounts
+on `/usr` lands **above** the extension merge and hides it. Every program you
+installed with `rime install` disappears from `/usr/bin` until the next restart
+(`systemd-sysext status` shows `/usr -`), although the extension is intact.
+`rime doctor` and `rime recover status` report this as "a live overlay on /usr
+is hiding the user-package extension". Restart to get your packages back, and
+use `rime install` instead of layering.
+
 `rime install` builds a **systemd system extension** instead: a squashfs image in
 `/var/lib/extensions` that systemd overlays onto `/usr` at boot.
 
