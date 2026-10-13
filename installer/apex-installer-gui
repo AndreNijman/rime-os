@@ -629,6 +629,10 @@ class Installer(Adw.Application):
         self.target = None
         self.esp = ""
         self.proc = None
+        # (layout, variant, passphrase) the encrypt page has already warned
+        # about via apex-install --check-passphrase — see p_encrypt(). None
+        # until the first check runs.
+        self._luks_typeable_warned_for = None
         # None means "whatever GTK returns". Set to RESTART_RC by the keyboard
         # page to ask apex-installer-session for a new compositor; see there.
         self.exit_code = None
@@ -1634,6 +1638,48 @@ class Installer(Adw.Application):
             if p1 != p2:
                 self.luks_err.set_text("The two passphrases do not match.")
                 return
+            # Ask the engine, right now, whether the layout in use can even
+            # TYPE this passphrase at the unlock prompt — the same check the
+            # real install runs during validation, asked for directly instead
+            # of finding out on the PROGRESS page, after the confirm step,
+            # when changing course means starting this page over. See
+            # apex-install's own --check-passphrase and its header comment:
+            # one line on stdout, always exit 0 — this is advice for a form
+            # field, never a gate, so a check that could not run (missing
+            # engine, timeout, unexpected output) must fail OPEN and let the
+            # install proceed rather than block it over a check that did not
+            # complete.
+            #
+            # Memoised on (layout, variant, passphrase): once shown for this
+            # exact combination, a second Continue click proceeds — the
+            # recovery key exists and the install is not unsafe, only
+            # inconvenient at one screen, so this is a warning to act on, not
+            # an error blocking every click the way the four checks above it
+            # are.
+            key = (layout, variant, p1)
+            if key != self._luks_typeable_warned_for:
+                try:
+                    r = subprocess.run(
+                        [ENGINE, "--check-passphrase", layout, variant],
+                        input=p1, capture_output=True, text=True, timeout=5)
+                    out = r.stdout.strip()
+                except (subprocess.SubprocessError, OSError, ValueError):
+                    out = ""
+                if out.startswith("typeable: no "):
+                    chars = ""
+                    for tok in out.split():
+                        if tok.startswith("chars="):
+                            chars = tok[len("chars="):]
+                    self._luks_typeable_warned_for = key
+                    self.luks_err.set_text(
+                        f"Your keyboard layout ({layout}) has no key for: {chars} "
+                        "— at the disk-unlock screen only, before anything else "
+                        "has loaded. That ONE prompt will use the US layout "
+                        "instead, so every character you just typed has a key "
+                        "there; your login screen and desktop keep your own "
+                        "layout. Click Continue again to proceed, or change the "
+                        "passphrase.")
+                    return
             self.answers["encrypt"] = "yes"
             self.answers["lukspass"] = p1
             self.go(nxt_page)
