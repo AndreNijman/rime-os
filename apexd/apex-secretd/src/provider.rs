@@ -409,6 +409,46 @@ pub trait Provider: Send + Sync {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    /// Whether this outcome is the far side refusing the **credential**,
+    /// rather than answering about the operation.
+    ///
+    /// Only the provider can tell: a 401 in a JSON envelope, a `403` line from
+    /// a tool, an exit code a program reserves for it. The framework sees an
+    /// exit code and a string it must not parse.
+    ///
+    /// ## Why the framework asks at all
+    ///
+    /// Measured against `api.cloudflare.com` on 2026-09-12, which is the only
+    /// reason this method exists: a token Cloudflare had just issued was
+    /// accepted immediately by the account and Workers endpoints and refused
+    /// by D1's, four attempts out of four, with the same operation succeeding
+    /// on the stored credential. A short-lived credential is not usable
+    /// everywhere the instant it is issued, and §13.4 says *prefer* one — a
+    /// preference that turns a working operation into an authentication
+    /// failure is not a preference, it is a regression with a policy name.
+    ///
+    /// So when an operation runs on a minted credential and the provider says
+    /// the far side refused that credential, the framework tries the same
+    /// operation again on the same credential rather than handing the refusal
+    /// back as the answer. Retrying is safe for exactly the reason this is
+    /// about a credential and not an operation: a request that was not
+    /// authenticated did not happen, so a write cannot have half-happened.
+    ///
+    /// ## What it must not say yes to
+    ///
+    /// *"You are not allowed to do that"* is an answer about the operation and
+    /// waiting will not change it. A provider that returns `true` for one
+    /// turns every genuine permission failure into the same failure several
+    /// seconds later. Say `true` only for the far side not recognising the
+    /// credential at all.
+    ///
+    /// The default is `false`, which is the answer for a provider that has no
+    /// minted credential to be refused — and for one that cannot tell, since
+    /// "I do not know" must not be spelled the same as "yes".
+    fn credential_refused(&self, _performed: &Performed) -> bool {
+        false
+    }
 }
 
 /// What a provider can do about §13.4's short-lived credential, and the four

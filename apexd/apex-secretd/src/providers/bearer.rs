@@ -238,6 +238,17 @@ impl Provider for BearerProvider {
             created: None,
         })
     }
+
+    /// The far side not recognising the credential, which here is a 401.
+    ///
+    /// The real one this stands in for is Cloudflare, where a token seconds
+    /// old is refused by some products' APIs and accepted by others' — see
+    /// [`crate::provider::Provider::credential_refused`]. A 403 would be the
+    /// far side recognising the credential and refusing the *operation*, and
+    /// this deliberately does not claim one.
+    fn credential_refused(&self, performed: &Performed) -> bool {
+        performed.code != 0 && performed.output.starts_with("401 ")
+    }
 }
 
 /// One HTTP/1.1 request, hand-rolled.
@@ -304,15 +315,26 @@ mod tests {
     }
 
     impl Api {
-        fn start() -> Api {
+        /// An API that answers `401` to the first `times`
+        /// requests carrying `token`.
+        ///
+        /// A stand-in for what Cloudflare actually did on 2026-09-12: a token
+        /// it had just issued was refused by one product's API and accepted by
+        /// another's, until a few seconds had passed. The count is per token
+        /// and not per request so that a test can refuse the MINTED credential
+        /// while leaving the stored one alone — which is the difference
+        /// between the two cases the framework has to tell apart.
+        fn start_refusing(token: &str, times: u32) -> Api {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
             let port = listener.local_addr().expect("addr").port();
             let seen = Arc::new(Mutex::new(Vec::new()));
+            let refuse = Arc::new(Mutex::new((format!("Bearer {token}"), times)));
             let recorder = Arc::clone(&seen);
             std::thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
                     let recorder = Arc::clone(&recorder);
-                    std::thread::spawn(move || serve(stream, &recorder));
+                    let refuse = Arc::clone(&refuse);
+                    std::thread::spawn(move || serve(stream, &recorder, &refuse));
                 }
             });
             Api { port, seen }
@@ -323,7 +345,11 @@ mod tests {
         }
     }
 
-    fn serve(mut stream: TcpStream, recorder: &Arc<Mutex<Vec<String>>>) {
+    fn serve(
+        mut stream: TcpStream,
+        recorder: &Arc<Mutex<Vec<String>>>,
+        refuse: &Arc<Mutex<(String, u32)>>,
+    ) {
         let mut reader = BufReader::new(stream.try_clone().expect("clone"));
         let mut first = String::new();
         if reader.read_line(&mut first).is_err() {
@@ -348,7 +374,19 @@ mod tests {
             let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
             return;
         };
+        // Recorded BEFORE the refusal branch, so a test counting attempts
+        // counts the refused ones too. A retry that was not made and a retry
+        // that was made and refused must not look the same from here.
         recorder.lock().expect("lock").push(authorization.clone());
+        {
+            let mut refuse = refuse.lock().expect("lock");
+            if refuse.1 > 0 && authorization == refuse.0 {
+                refuse.1 -= 1;
+                let _ =
+                    stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+                return;
+            }
+        }
         // Echoing the credential back is what a badly written API does, and the
         // framework's scrub is what makes it not matter.
         let body = format!("ok, you sent {authorization}");
@@ -401,7 +439,31 @@ mod tests {
         revoke_fails: bool,
         granted: &str,
     ) -> Fixture {
-        let api = Api::start();
+        fixture_all(name, mints, fails_with_token, revoke_fails, granted, "", 0)
+    }
+
+    /// A fixture whose API refuses `token` the first `times` it is presented.
+    fn fixture_refusing(
+        name: &str,
+        mints: Minting,
+        granted: &str,
+        token: &str,
+        times: u32,
+    ) -> Fixture {
+        fixture_all(name, mints, false, false, granted, token, times)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fixture_all(
+        name: &str,
+        mints: Minting,
+        fails_with_token: bool,
+        revoke_fails: bool,
+        granted: &str,
+        refused_token: &str,
+        refused_times: u32,
+    ) -> Fixture {
+        let api = Api::start_refusing(refused_token, refused_times);
         let dir = std::env::temp_dir().join(format!(
             "apex-bearer-{name}-{}-{}",
             std::process::id(),
@@ -420,7 +482,11 @@ mod tests {
                 revoke_fails,
             }))
             .expect("register");
-        let service = Service::new(Store::new(dir.clone()), false, registry);
+        // Milliseconds rather than the shipped three seconds: the loop under
+        // test is the one that ships, and only the wait inside it is shortened
+        // — skipping the sleep by skipping the code would measure nothing.
+        let service = Service::new(Store::new(dir.clone()), false, registry)
+            .with_refusal_pause(std::time::Duration::from_millis(10));
 
         let peer = me();
         // `http` is allowed for a loopback host: the credential does not cross
@@ -585,6 +651,142 @@ mod tests {
         assert_eq!(word("w-none", Minting::None), "no-narrower-form");
         assert_eq!(word("w-denied", Minting::Denied), "denied");
         assert_eq!(word("w-couldnot", Minting::CouldNotRun), "could-not-run");
+    }
+
+    /// The `used` line this fixture's last operation wrote.
+    fn used_line(f: &Fixture) -> serde_json::Value {
+        let trail =
+            std::fs::read_to_string(Store::new(f.dir.clone()).audit_path()).expect("the trail");
+        serde_json::from_str(
+            trail
+                .lines()
+                .rfind(|l| l.contains("\"used\""))
+                .expect("a used line"),
+        )
+        .expect("json")
+    }
+
+    /// A credential minted seconds ago is not usable everywhere yet, and the
+    /// operation must not be told that it failed.
+    ///
+    /// Measured against `api.cloudflare.com` on 2026-09-12 and not imagined:
+    /// a token Cloudflare had just issued was accepted immediately by the
+    /// account and Workers endpoints and refused by D1's — HTTP 401, four
+    /// attempts out of four — while the same operation on the stored
+    /// credential succeeded. §13.4 says *prefer* a short-lived credential, and
+    /// a preference that turns a working operation into an authentication
+    /// failure is a regression with a policy name.
+    #[test]
+    fn a_minted_credential_refused_while_it_is_new_is_tried_again_and_not_reported_as_the_answer() {
+        let f = fixture_refusing("retry-clears", Minting::Narrowed, "demo.object.read", MINTED, 1);
+        let reply =
+            f.service
+                .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
+        let Response::Performed {
+            exit_code, output, ..
+        } = &reply
+        else {
+            panic!("refused: {reply:?}");
+        };
+        assert_eq!(*exit_code, 0, "the refusal was handed back as the answer: {output}");
+
+        // Twice, and both times on the MINTED credential. The second half of
+        // that matters as much as the first: a retry that quietly reached for
+        // the stored token would look like a success and would have undone the
+        // narrowing.
+        assert_eq!(
+            f.api.authorizations(),
+            vec![format!("Bearer {MINTED}"), format!("Bearer {MINTED}")],
+        );
+
+        let line = used_line(&f);
+        assert_eq!(line["narrowing"], "narrowed");
+        let detail = line["narrowing_detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("attempt 2"), "the trail does not say it happened: {detail}");
+    }
+
+    /// A refusal that never clears is still not a reason to spend the stored
+    /// credential.
+    ///
+    /// The operation fails, and it fails saying which of the two things
+    /// happened — otherwise a project that asked for narrow credentials would
+    /// be run on the broad one by a code path it never agreed to.
+    #[test]
+    fn a_minted_credential_the_far_side_never_accepts_is_not_replaced_by_the_stored_one() {
+        let f = fixture_refusing("retry-never", Minting::Narrowed, "demo.object.read", MINTED, 99);
+        let reply =
+            f.service
+                .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
+        let Response::Performed { exit_code, .. } = &reply else {
+            panic!("refused: {reply:?}");
+        };
+        assert_eq!(*exit_code, 1, "a refused credential was reported as a success");
+
+        let seen = f.api.authorizations();
+        assert_eq!(
+            seen.len() as u32,
+            1 + crate::service::NARROWED_REFUSAL_RETRIES,
+            "attempts: {seen:?}"
+        );
+        assert!(
+            seen.iter().all(|a| a == &format!("Bearer {MINTED}")),
+            "the stored credential was spent behind the project's back: {seen:?}"
+        );
+
+        let detail = used_line(&f)["narrowing_detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(detail.contains("all 3 attempts"), "{detail}");
+        assert!(detail.contains("temporary_credentials"), "{detail}");
+    }
+
+    /// The retry is keyed on the credential having been MINTED, not on the
+    /// status.
+    ///
+    /// Without that condition every genuine 401 — a token the owner revoked, a
+    /// password that changed — would cost nine seconds and three requests to
+    /// arrive at the same answer, and the owner's own answer would be asked
+    /// for three times.
+    #[test]
+    fn a_stored_credential_the_far_side_refuses_is_answered_once() {
+        let f = fixture_refusing("retry-stored", Minting::None, "demo.object.read", STORED, 99);
+        let reply =
+            f.service
+                .use_capability(me(), record("demo.object.read", "bucket/key"), Vec::new());
+        let Response::Performed { exit_code, .. } = &reply else {
+            panic!("refused: {reply:?}");
+        };
+        assert_eq!(*exit_code, 1);
+        assert_eq!(
+            f.api.authorizations(),
+            vec![format!("Bearer {STORED}")],
+            "the owner's own refusal was asked for more than once"
+        );
+        let detail = used_line(&f)["narrowing_detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !detail.contains("attempt"),
+            "a run that minted nothing reported attempts at a minted credential: {detail}"
+        );
+    }
+
+    /// The pause is a measurement, and a build that drops it to nothing goes
+    /// back to the defect it was measured against.
+    ///
+    /// Three seconds was the shortest delay that made D1 accept a freshly
+    /// minted token on 2026-09-12 (three, five and twenty each worked twice
+    /// out of two; no delay failed four times out of four). This is the one
+    /// place that number is checked, because every test shortens it.
+    #[test]
+    fn the_wait_between_attempts_is_not_shorter_than_the_delay_it_was_measured_against() {
+        assert!(
+            crate::service::NARROWED_REFUSAL_PAUSE >= std::time::Duration::from_secs(3),
+            "a minted token needed three seconds to become usable against D1"
+        );
+        assert!(crate::service::NARROWED_REFUSAL_RETRIES >= 1);
     }
 
     /// §13.4 says *prefer*, so three of the four arms fall back to the stored

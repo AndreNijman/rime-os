@@ -58,6 +58,22 @@ pub const APPROVAL_REQUIRED: &str = "approval-required";
 /// §11's `approval_policy` on a request the owner approved, once.
 pub const OWNER: &str = "owner";
 
+/// How many extra attempts an operation gets when the far side refuses the
+/// **minted** credential it is running on.
+///
+/// Measured, not chosen: against `api.cloudflare.com` on 2026-09-12 a token
+/// seconds old was refused by D1's API on every attempt at no delay and
+/// accepted after a three-second pause on every attempt at three, five and
+/// twenty. Two retries at [`NARROWED_REFUSAL_PAUSE`] and twice that give a
+/// token nine seconds to become real — three times the window that was
+/// actually needed — and cost nothing at all on the ordinary path, because an
+/// operation whose credential was accepted never enters the loop.
+pub const NARROWED_REFUSAL_RETRIES: u32 = 2;
+
+/// How long to wait before trying a refused minted credential again. The
+/// second retry waits twice this.
+pub const NARROWED_REFUSAL_PAUSE: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// The daemon's state.
 pub struct Service {
     store: Store,
@@ -71,6 +87,14 @@ pub struct Service {
     /// it can actually perform.
     registry: Registry,
     audit_counter: AtomicU64,
+    /// How long to wait before trying a refused minted credential again.
+    ///
+    /// A field rather than [`NARROWED_REFUSAL_PAUSE`] read directly, for the
+    /// same reason the device flow's `floor` is one: a test has to exercise
+    /// the branch without spending nine real seconds in a sleep, and a test
+    /// that skipped the sleep by skipping the code would be measuring
+    /// something else.
+    refusal_pause: std::time::Duration,
     /// Held across the read-check-write of one account's approvals file.
     ///
     /// `main.rs` serves one thread per connection, so every store file this
@@ -165,9 +189,20 @@ impl Service {
             protected,
             registry,
             audit_counter: AtomicU64::new(0),
+            refusal_pause: NARROWED_REFUSAL_PAUSE,
             approvals: Mutex::new(()),
             reservations: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Shorten the wait between retries of a refused minted credential.
+    ///
+    /// Tests only, and it takes a duration rather than switching the sleep off
+    /// so that the loop a test measures is the loop that ships.
+    #[cfg(test)]
+    pub fn with_refusal_pause(mut self, pause: std::time::Duration) -> Service {
+        self.refusal_pause = pause;
+        self
     }
 
     fn next_audit_id(&self) -> String {
@@ -1147,7 +1182,59 @@ impl Service {
             | provider::Minted::CouldNotRun(_) => (&stored, None),
         };
 
-        let performed = backend.perform(&req, &bound, presented);
+        let mut performed = backend.perform(&req, &bound, presented);
+
+        // §13.4 says *prefer* a short-lived credential. A preference that
+        // turns a working operation into an authentication failure is not one,
+        // and that is exactly what this was doing.
+        //
+        // Measured against `api.cloudflare.com` on 2026-09-12: a token
+        // Cloudflare had just issued was accepted immediately by the account
+        // and Workers endpoints and refused by D1's — HTTP 401, four attempts
+        // out of four — while the same operation on the stored credential
+        // succeeded. A minted credential is not usable everywhere the instant
+        // it is issued, and nothing here had allowed for that.
+        //
+        // Three things about this loop are deliberate:
+        //
+        // * **It runs only when the credential was minted.** A 401 on the
+        //   stored credential is the owner's answer and repeating the question
+        //   does not change it. `lease.is_some()` is the whole condition.
+        // * **It retries the MINTED credential, and never falls back to the
+        //   stored one.** Widening silently would undo the narrowing at the
+        //   first hiccup, and a project that set `temporary_credentials =
+        //   "require"` would be run on the broad token by a code path it never
+        //   agreed to. The escape hatch is a line in the project's own file.
+        // * **Only the provider decides what a refusal of the credential
+        //   looks like**, because only it can read its own far side. The
+        //   framework must not parse an output string it did not compose.
+        let mut attempt = 1;
+        if lease.is_some() {
+            while attempt <= NARROWED_REFUSAL_RETRIES
+                && matches!(&performed, Ok(out) if backend.credential_refused(out))
+            {
+                std::thread::sleep(self.refusal_pause * attempt);
+                performed = backend.perform(&req, &bound, presented);
+                attempt += 1;
+            }
+            if matches!(&performed, Ok(out) if backend.credential_refused(out)) {
+                narrowing_detail = Some(format!(
+                    "the short-lived credential was minted and the far side \
+                     refused it on all {attempt} attempts. What this operation \
+                     reports is that refusal and not an answer about the \
+                     operation itself. A project that would rather spend the \
+                     stored credential says so in its own file, with \
+                     `temporary_credentials = \"off\"` for this provider"
+                ));
+            } else if attempt > 1 {
+                narrowing_detail = Some(format!(
+                    "the short-lived credential was refused while it was \
+                     seconds old and accepted on attempt {attempt}: a minted \
+                     credential is not usable everywhere the instant it is \
+                     issued"
+                ));
+            }
+        }
 
         // The lease ends here, and it ends on BOTH paths out of `perform`.
         //

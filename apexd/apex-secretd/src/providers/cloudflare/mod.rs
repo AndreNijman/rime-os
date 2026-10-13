@@ -3824,7 +3824,7 @@ impl Provider for CloudflareProvider {
         } else if reply.status == 0 {
             format!("apex: the api could not be reached\n{body}")
         } else {
-            format!("apex: cloudflare answered HTTP {}\n{body}", reply.status)
+            format!("{}\n{body}", answered_http(reply.status))
         };
         // §13.10, the half that needs the value: the secret goes to the
         // framework, which stores it under the name `bind` declared. What the
@@ -3958,6 +3958,34 @@ impl Provider for CloudflareProvider {
             .map_err(|answer| answer.reason().unwrap_or("no account").to_string())?;
         temporary::revoke(&self.api, &account, lease, stored, req.owner)
     }
+
+    /// A 401, and deliberately not a 403.
+    ///
+    /// Cloudflare answers **401 with code 10000** when it does not recognise
+    /// the credential — which is what a token it issued moments ago looks like
+    /// to an API that has not seen it yet — and **403** when it recognises the
+    /// credential and will not let it do this. The first is worth asking again
+    /// and the second never will be: retrying a 403 would add nine seconds to
+    /// every genuine permission failure and change none of them.
+    ///
+    /// Read off the line [`answered_http`] wrote, which is the only reason
+    /// that line is a function: a build where the sentence and the reader
+    /// drifted apart would go back to reporting a propagation delay as the
+    /// operation's answer, silently.
+    fn credential_refused(&self, performed: &Performed) -> bool {
+        performed.output.lines().next() == Some(answered_http(401).as_str())
+    }
+}
+
+/// The line [`Provider::perform`] writes when Cloudflare answered a status
+/// this build treats as a failure.
+///
+/// One function because two places need the same sentence and they are 400
+/// lines apart: the one that composes it and
+/// [`CloudflareProvider::credential_refused`], which decides from it whether
+/// the far side refused the credential itself.
+pub fn answered_http(status: u16) -> String {
+    format!("apex: cloudflare answered HTTP {status}")
 }
 
 #[cfg(test)]

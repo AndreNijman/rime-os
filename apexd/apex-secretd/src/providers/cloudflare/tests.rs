@@ -1304,6 +1304,23 @@ fn an_api_that_echoes_the_credential_back_does_not_get_to_hand_it_over() {
     assert!(!f.trail().contains(TOKEN), "the trail holds the credential");
     // It really was sent, so the echo really was of the real thing.
     assert_eq!(f.fake.authorizations(), vec![format!("Bearer {TOKEN}")]);
+
+    // The line this real path composed is the line `credential_refused` reads
+    // — the two are four hundred lines apart and only `answered_http` holds
+    // them together. `only_a_401_is_the_far_side_refusing_the_credential_itself`
+    // builds its own input and so cannot see them drift; this one cannot miss
+    // it, because the string here came out of `perform`. A build where they
+    // drifted would go back to reporting a minted token that has not
+    // propagated yet as the operation's own answer, which is the live defect
+    // of 2026-09-12.
+    assert!(
+        CloudflareProvider::at(1).credential_refused(&Performed {
+            code: *exit_code,
+            output: output.clone(),
+            created: None,
+        }),
+        "perform's own 401 line is not the one credential_refused reads: {output}"
+    );
 }
 
 #[test]
@@ -5531,4 +5548,52 @@ fn approving_records_a_line_of_its_own_in_the_trail() {
         AuditEvent::Granted.as_str(),
         "an approval and a grant must not read the same in the trail"
     );
+}
+
+/// The sentence `perform` writes for a failure and the sentence
+/// `credential_refused` reads are the same sentence.
+///
+/// They are four hundred lines apart, and a build where they drifted would go
+/// back to reporting a token that had not propagated yet as the operation's
+/// own answer — silently, because nothing else in the suite can tell a
+/// re-tried operation from one that was never re-tried.
+///
+/// The 401/403 split is the other half. Cloudflare answers **401** when it
+/// does not recognise the credential, which is what a token it issued moments
+/// ago looks like to an API that has not seen it yet, and **403** when it
+/// recognises the credential and will not let it do this. Waiting changes the
+/// first and never changes the second.
+#[test]
+fn only_a_401_is_the_far_side_refusing_the_credential_itself() {
+    let provider = CloudflareProvider::at(1);
+    let outcome = |status: u16| Performed {
+        code: 1,
+        output: format!("{}\n{{\"success\":false}}", super::answered_http(status)),
+        created: None,
+    };
+
+    assert!(
+        provider.credential_refused(&outcome(401)),
+        "a 401 is what a minted token that has not propagated looks like"
+    );
+    for status in [403, 404, 429, 500] {
+        assert!(
+            !provider.credential_refused(&outcome(status)),
+            "HTTP {status} was read as the credential being refused, so every \
+             one of them would be asked three times"
+        );
+    }
+
+    // A success carries no such line at all, and neither does a transport
+    // failure — `perform` writes a different sentence for that one.
+    assert!(!provider.credential_refused(&Performed {
+        code: 0,
+        output: "{\"success\":true}".to_string(),
+        created: None,
+    }));
+    assert!(!provider.credential_refused(&Performed {
+        code: 1,
+        output: "apex: the api could not be reached\n".to_string(),
+        created: None,
+    }));
 }
