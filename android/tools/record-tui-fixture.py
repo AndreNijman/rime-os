@@ -15,6 +15,15 @@ import fcntl, os, pty, re, select, signal, struct, sys, termios, time
 
 prog, out, secs, home = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
 
+# The fifth argument is what makes the PAIR of recordings reproducible. Every
+# `*-queries.bin` in `core/src/test/resources/tui/` was taken against a terminal
+# that answered nothing, and this script could not produce one: it always
+# answered, so re-recording the quiet half meant editing the script by hand and
+# the committed fixtures could not be regenerated as committed.
+mode = sys.argv[5] if len(sys.argv) > 5 else "answer"
+if mode not in ("answer", "quiet"):
+    sys.exit(f"mode is 'answer' or 'quiet', not {mode!r}")
+
 pid, fd = pty.fork()
 if pid == 0:
     env = {"HOME": home, "TERM": "xterm-256color", "PATH": os.environ["PATH"],
@@ -78,7 +87,7 @@ while time.time() < deadline:
         if not chunk:
             break
         buf += chunk
-        reply = answers(chunk)
+        reply = answers(chunk) if mode == "answer" else b""
         if reply:
             os.write(fd, reply)
         if len(buf) > 600000:
@@ -90,4 +99,4 @@ except ProcessLookupError:
 os.waitpid(pid, 0)
 os.close(fd)
 open(out, "wb").write(bytes(buf))
-print(f"{prog}: {len(buf)} bytes -> {out}")
+print(f"{prog} ({mode}): {len(buf)} bytes -> {out}")
