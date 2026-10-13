@@ -55,6 +55,7 @@
 //! send contains one.
 
 pub mod audit;
+pub mod budget;
 pub mod capability;
 pub mod client;
 pub mod identity;
@@ -66,6 +67,7 @@ pub mod store;
 pub mod value;
 
 pub use audit::{AuditEvent, AuditLine};
+pub use budget::{Budget, BudgetError, Spend, Usage};
 pub use capability::{CapabilityRecord, EndpointError};
 pub use operation::{
     Effect, OperationId, OperationInfo, OperationSpec, ParamInfo, ParamSpec, Params, ProviderSpec,

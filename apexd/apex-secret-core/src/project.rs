@@ -60,6 +60,16 @@ pub const PROJECT_FILE: &str = "apex.toml";
 /// Largest project file this will read, in bytes.
 pub const MAX_PROJECT_FILE: u64 = 64 * 1024;
 
+/// Millionths of a unit of money, which is how [`ProjectConfig::money`] keeps
+/// an amount once it has been read.
+///
+/// §13.14's budgets are written as decimals in the file and must not stay
+/// floats afterwards: a running total in `f64` drifts, and a budget that drifts
+/// refuses one operation early or lets one too many through. Millionths rather
+/// than hundredths because Workers AI is priced per neuron, in fractions of a
+/// cent, and a cap in cents could not tell any two AI operations apart.
+pub const MICROS: u64 = 1_000_000;
+
 /// Largest payload file a provider may read out of a project, in bytes.
 ///
 /// A Worker bundle; Cloudflare's own limit for a script upload is 10 MB on the
@@ -479,6 +489,55 @@ impl ProjectConfig {
         }
     }
 
+    /// A non-negative whole number at a dotted key, or nothing.
+    ///
+    /// TOML integers only, and never a float that happens to be whole: §13.14's
+    /// budgets put counts and money in the same table, and a reader that
+    /// accepted `3.0` as a count would accept `3.5` as one too and have to
+    /// decide what it meant. A negative is refused here rather than clamped to
+    /// zero — a cap of minus one is somebody getting it wrong, and zero is a
+    /// cap that refuses everything.
+    pub fn count(&self, keys: &[&str]) -> Result<Option<u64>, ProjectError> {
+        match self.at(keys) {
+            None => Ok(None),
+            Some(toml::Value::Integer(n)) if *n >= 0 => Ok(Some(*n as u64)),
+            Some(_) => Err(self.bad(keys, "a whole number that is not negative")),
+        }
+    }
+
+    /// An amount of money at a dotted key, in millionths of a unit.
+    ///
+    /// §13.14 writes budgets as `cloudflare_daily = 5.00`, so the file carries
+    /// a TOML float — and a float is exactly what a running total of money must
+    /// not be kept in. So it is converted once, here, to an integer number of
+    /// millionths and never touched as a float again: a thousand additions of
+    /// `0.011` in `f64` does not equal `11.0`, and a budget that drifts is a
+    /// budget that stops one operation early or lets one too many through.
+    ///
+    /// A whole number is accepted too — `cloudflare_daily = 5` is what somebody
+    /// writes when the amount is round, and refusing it would be pedantry with
+    /// a refusal attached.
+    ///
+    /// Millionths and not hundredths because Workers AI is priced per neuron,
+    /// in fractions of a cent. A cap expressed in cents could not distinguish
+    /// any two AI operations.
+    pub fn money(&self, keys: &[&str]) -> Result<Option<u64>, ProjectError> {
+        let want = "an amount of money, like 5.00, that is not negative";
+        let raw = match self.at(keys) {
+            None => return Ok(None),
+            Some(toml::Value::Float(f)) => *f,
+            Some(toml::Value::Integer(n)) if *n >= 0 => *n as f64,
+            Some(_) => return Err(self.bad(keys, want)),
+        };
+        // Rejected rather than saturated. An amount this build cannot represent
+        // is somebody who meant something, and the largest number it can hold
+        // is not it.
+        if !raw.is_finite() || raw < 0.0 || raw > (u64::MAX / MICROS) as f64 {
+            return Err(self.bad(keys, want));
+        }
+        Ok(Some((raw * MICROS as f64).round() as u64))
+    }
+
     /// A list of strings at a dotted key, or nothing.
     pub fn strings(&self, keys: &[&str]) -> Result<Vec<String>, ProjectError> {
         match self.at(keys) {
@@ -532,6 +591,30 @@ impl ProjectConfig {
             }
         }
         Ok(out)
+    }
+
+    /// The names of the keys of a table that are NOT sub-tables.
+    ///
+    /// The counterpart to [`ProjectConfig::sections`], and it exists because
+    /// §13.14's budget is the first table here whose key *names* are open —
+    /// `cloudflare_daily`, `github_daily`, and whatever a provider written
+    /// later calls itself. Everything before it read keys it already knew the
+    /// names of. A reader that could only ask about known names could not tell
+    /// an unknown budget key from an absent one, and §13.14's whole argument is
+    /// that an unknown cap has to be refused rather than ignored.
+    ///
+    /// Sorted, so a refusal names the same key twice running.
+    pub fn scalar_keys(&self, keys: &[&str]) -> Vec<String> {
+        let Some(toml::Value::Table(t)) = self.at(keys) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = t
+            .iter()
+            .filter(|(_, v)| !v.is_table())
+            .map(|(k, _)| k.clone())
+            .collect();
+        names.sort();
+        names
     }
 
     /// The names of the sub-tables of a table — `preview` and `production` for
