@@ -281,6 +281,54 @@ deployment (the pristine image tree, files and all) instead of the running
 `/usr`, which is an overlay carrying the extension being rebuilt. `rime-pkg` writes what each `.deb` contributed to
 `/var/lib/rime/pkg/deb/NAME.files`, the `rpm -qf` equivalent for those paths.
 
+## Following a GitHub repository's releases
+
+A lot of desktop software is published only as files attached to a GitHub
+release: an `.rpm` next to an AppImage, a `.deb` and a tarball, with no
+repository behind any of them. Installed as a local file, that `.rpm` is pinned,
+because there is nothing for `rime update` to ask. Name the repository instead
+and Rime follows it:
+
+```bash
+sudo rime install --allow-unsigned github:OWNER/REPO
+```
+
+Rime reads the repository's latest release (drafts and prereleases are never
+used), takes the one `.rpm` built for this machine (or `noarch`), and installs
+it into the system extension like any local file. Its dependencies come from
+the repositories. If the release has no such `.rpm`, or more than one, the
+install is refused. Rime does not pick one for the project.
+
+The package is known by the name in its rpm header, which need not match the
+repository name. `rime remove NAME` removes it, and so does
+`rime remove github:OWNER/REPO`.
+
+### `rime update` follows it
+
+On every `rime update`, Rime asks GitHub for the repository's latest release.
+If the sha256 GitHub publishes for the `.rpm` is the one already installed,
+nothing is downloaded. If it differs, the new file is downloaded, checked, and
+built into the extension with the rest of the update. A failed check, a rate
+limit, or no network is a warning, and the installed build stays. A release
+whose `.rpm` now carries a different package name is not installed. Rime says
+so, and you can install `github:OWNER/REPO` again to switch.
+
+### Signatures: none, and it says so
+
+Release assets are not signed with anything Rime can check, and an `.rpm`
+built in CI is normally not signed at all. Before installing, Rime checks the
+download against the sha256 GitHub publishes for it and against the
+release's `SHA256SUMS` when the project attaches one. Both come from the same
+release as the file, so they prove the download is the asset the release
+lists. They do not prove who built it.
+
+So `--allow-unsigned` is required. For a local file it accepts one file. Here
+it accepts the repository: whatever its owner publishes as the next release
+goes in with the next `rime update` without asking again. `rime pkg list`
+names the repository beside the package, and `rime pkg verify` lists every
+repository the machine follows. If the software is also in a COPR or on
+Flathub, use that instead, and signature checking stays on.
+
 ## Installing an AppImage
 
 ```bash
@@ -530,8 +578,9 @@ belongs in the image; open an issue.
 | `rime install PKG…` | add packages (`--no-weak-deps`, `--enable-repo=REPO`) |
 | `rime install FILE.rpm` | add a local RPM file (`--allow-unsigned` if no trusted key covers it) |
 | `rime install FILE.deb` | add a local Debian package (`--allow-unsigned` always; see above) |
+| `rime install github:OWNER/REPO` | add the `.rpm` of that repository's latest release, and follow its releases on `rime update` (`--allow-unsigned` always; it accepts the repository) |
 | `rime install FILE.AppImage` | unpack an AppImage into `/usr/local` (`--allow-unsigned` always). Pinned: `rime update` never moves it |
-| `rime remove PKG…` | remove packages (a local one by its package name, an AppImage by its command name or its file) |
+| `rime remove PKG…` | remove packages (a local one by its package name, a GitHub one by its package name or `github:OWNER/REPO`, an AppImage by its command name or its file) |
 | `rime search TERM…` | search the repositories |
 | `rime repo list` | list enabled and disabled RPM repositories |
 | `rime repo enable-copr OWNER/PROJECT` | opt into a Fedora COPR for search/install/upgrade |
