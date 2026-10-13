@@ -215,32 +215,20 @@ impl<'a> Runner<'a> {
 ///    lid whose position nobody could read — `Unreadable`, never `Open`. If
 ///    none exists, there is genuinely no lid.
 pub fn read_lid(roots: &Roots, runner: &Runner) -> LidState {
-    let dir = roots.path("/proc/acpi/button/lid");
-    let mut acpi_err: Option<String> = None;
-    match std::fs::read_dir(&dir) {
-        Ok(entries) => {
-            for e in entries.flatten() {
-                let p = e.path().join("state");
-                match std::fs::read_to_string(&p) {
-                    Ok(s) => {
-                        let lower = s.to_ascii_lowercase();
-                        if lower.contains("closed") {
-                            return LidState::Closed;
-                        }
-                        if lower.contains("open") {
-                            return LidState::Open;
-                        }
-                        acpi_err = Some(format!("{} said {:?}", p.display(), s.trim()));
-                    }
-                    Err(err) => acpi_err = Some(format!("{}: {err}", p.display())),
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => acpi_err = Some(format!("{}: {e}", dir.display())),
-    }
-
-    // UPower, second.
+    // ── UPower first, and this order is load bearing ────────────────────────
+    //
+    // logind's view of "the lid" is the AGGREGATE of every input device tagged
+    // `power-switch`: any one of them reporting SW_LID closed makes logind act.
+    // UPower computes the same aggregate. `/proc/acpi/button/lid/*/state`
+    // reports only the one firmware button.
+    //
+    // On a machine with exactly one lid the two agree. They diverge precisely
+    // where this driver is tested — a virtual SW_LID device injected by
+    // `tests/test-apex-lid-live.sh` makes logind and UPower say "closed" while
+    // the ACPI node still says "open" — and they would diverge the same way on
+    // a docking station or any second switch. The driver must agree with the
+    // thing that would actually suspend the machine, or it sits in its open
+    // arm while logind is one inhibitor away from sleeping.
     let up = runner.probe(
         "busctl",
         &[
@@ -267,7 +255,33 @@ pub fn read_lid(roots: &Roots, runner: &Runner) -> LidState {
         }
     }
 
-    // Third: does a lid switch exist at all?
+    // ── ACPI second: the firmware button, for machines with no UPower ───────
+    let dir = roots.path("/proc/acpi/button/lid");
+    let mut acpi_err: Option<String> = None;
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for e in entries.flatten() {
+                let p = e.path().join("state");
+                match std::fs::read_to_string(&p) {
+                    Ok(s) => {
+                        let lower = s.to_ascii_lowercase();
+                        if lower.contains("closed") {
+                            return LidState::Closed;
+                        }
+                        if lower.contains("open") {
+                            return LidState::Open;
+                        }
+                        acpi_err = Some(format!("{} said {:?}", p.display(), s.trim()));
+                    }
+                    Err(err) => acpi_err = Some(format!("{}: {err}", p.display())),
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => acpi_err = Some(format!("{}: {e}", dir.display())),
+    }
+
+    // ── Third: does a lid switch exist at all? ──────────────────────────────
     match lid_switch_devices(roots) {
         Ok(devs) if devs.is_empty() => LidState::NoLid,
         Ok(devs) => LidState::Unreadable {
@@ -411,6 +425,35 @@ fn live_sessions(roots: &Roots) -> Vec<apex_agent_core::protocol::SessionInfo> {
 /// point of sampling this is to catch a tunnel that went away, and a failed
 /// probe that reads as "there was never one" would hide exactly that.
 pub fn read_vpn(runner: &Runner) -> (Option<String>, VpnState) {
+    // Under a fixture root there is no NetworkManager to ask, and a criterion
+    // with no coverage is a criterion nobody has tested. `/var/lib/apex/lid/vpn`
+    // stands in: `up <name>`, `down`, `none`, or anything else for the
+    // unreadable case. `tests/test-apex-lid.sh` drives Up then Down across two
+    // polls and watches the report turn from "the VPN held" into "the VPN
+    // DROPPED" — which is the load-bearing half of this whole item.
+    if runner.roots.is_fixture() {
+        return match runner.roots.read_optional("/var/lib/apex/lid/vpn") {
+            Ok(Some(text)) => {
+                let t = text.trim();
+                match t.split_once(' ') {
+                    Some(("up", name)) => (Some(name.to_string()), VpnState::Up),
+                    _ if t == "up" => (Some("fixture".to_string()), VpnState::Up),
+                    _ if t == "down" => (None, VpnState::Down),
+                    _ if t == "none" => (None, VpnState::None),
+                    _ => (
+                        None,
+                        VpnState::Unreadable { why: format!("fixture said {t:?}") },
+                    ),
+                }
+            }
+            _ => (
+                None,
+                VpnState::Unreadable {
+                    why: "NetworkManager was not queried (fixture root)".to_string(),
+                },
+            ),
+        };
+    }
     let nm = runner.probe("nmcli", &["-t", "-f", "TYPE,NAME", "con", "show", "--active"]);
     match &nm {
         Ran::Ok(text) => {
@@ -762,9 +805,9 @@ pub fn apply(roots: &Roots, runner: &Runner, plan: &PowerPlan) -> Vec<String> {
     let mut out = Vec::new();
     for a in &plan.actions {
         out.push(match a {
-            PowerAction::Display { on } => apply_display(roots, *on),
+            PowerAction::Display { on } => apply_display(roots, runner, *on),
             PowerAction::KeyboardBacklight { path, value, .. } => {
-                apply_sysfs(roots, path, &value.to_string())
+                apply_sysfs(roots, runner, path, &value.to_string())
             }
             PowerAction::Bluetooth { blocked } => {
                 let verb = if *blocked { "block" } else { "unblock" };
@@ -805,7 +848,7 @@ fn short(r: &Ran) -> String {
 /// `bl_power` is the FB blanking level (4 = powerdown); brightness is set to 0
 /// alongside it because a handful of drivers ignore `bl_power`. The prior
 /// brightness is saved next to the record so the restore is exact.
-fn apply_display(roots: &Roots, on: bool) -> String {
+fn apply_display(roots: &Roots, runner: &Runner, on: bool) -> String {
     let Ok(bls) = backlights(roots) else {
         return "display: /sys/class/backlight could not be listed".to_string();
     };
@@ -822,18 +865,17 @@ fn apply_display(roots: &Roots, on: bool) -> String {
             notes.push(format!(
                 "{name}: bl_power=0 {}",
                 match saved {
-                    Some(v) => write_abs(&brightness, v.trim()),
+                    Some(v) => write_gated(runner, &brightness, v.trim()),
                     None => "brightness left as found (no saved value)".to_string(),
                 }
             ));
-            let _ = write_abs(&bl_power, "0");
+            let _ = write_gated(runner, &bl_power, "0");
         } else {
             if let Ok(cur) = std::fs::read_to_string(&brightness) {
-                let _ = roots
-                    .write(&format!("/var/lib/apex/lid/backlight-{name}"), cur.trim());
+                remember(roots, &format!("/var/lib/apex/lid/backlight-{name}"), cur.trim());
             }
-            let a = write_abs(&bl_power, "4");
-            let b = write_abs(&brightness, "0");
+            let a = write_gated(runner, &bl_power, "4");
+            let b = write_gated(runner, &brightness, "0");
             notes.push(format!("{name}: bl_power {a}; brightness {b}"));
         }
     }
@@ -843,11 +885,23 @@ fn apply_display(roots: &Roots, on: bool) -> String {
     format!("display: {}", notes.join("; "))
 }
 
-fn apply_sysfs(roots: &Roots, path: &str, value: &str) -> String {
-    format!("{path} <- {value}: {}", write_abs(&roots.path(path), value))
+fn apply_sysfs(roots: &Roots, runner: &Runner, path: &str, value: &str) -> String {
+    format!("{path} <- {value}: {}", write_gated(runner, &roots.path(path), value))
 }
 
-fn write_abs(path: &Path, value: &str) -> String {
+/// A sysfs write that `--dry-run` can actually stop.
+///
+/// This existed as an ungated `write_abs` for one commit and it was a real
+/// hazard: `apex lid watch --once --dry-run` on the live machine would have put
+/// `bl_power=4` and `brightness=0` into the real `amdgpu_bl1` and blanked the
+/// owner's screen, because `--dry-run` was consulted only by the subprocess
+/// path. Every write the driver makes to the machine now goes through here, and
+/// under a fixture root or `--dry-run` the intent is logged instead.
+fn write_gated(runner: &Runner, path: &Path, value: &str) -> String {
+    if !runner.executes() {
+        let _ = runner.append_log(&format!("write {} <- {value}", path.display()));
+        return "not written (dry run or fixture root)".to_string();
+    }
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -857,6 +911,16 @@ fn write_abs(path: &Path, value: &str) -> String {
         // reported with the reason, never counted as a thing that happened.
         Err(e) => format!("FAILED — {e}"),
     }
+}
+
+/// A write the driver makes to its OWN state under `/var/lib/apex/lid`.
+///
+/// Deliberately not gated: remembering the brightness it is about to replace,
+/// or the plan that will undo the close, is bookkeeping rather than a change to
+/// the machine, and a `--dry-run` that skipped it would leave the next real run
+/// unable to restore.
+fn remember(roots: &Roots, rel: &str, value: &str) {
+    let _ = roots.write(rel, value);
 }
 
 // ── the record ───────────────────────────────────────────────────────────────
@@ -1091,22 +1155,20 @@ fn pin(roots: &Roots, state: Option<String>) -> i32 {
         Some(x) => PathBuf::from(x),
         None => user_config_path(),
     };
-    let mut policy = loaded.policy;
-    policy.pin = p;
-    let text = match toml::to_string_pretty(&policy) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("apex: could not serialise the lid policy: {e}");
-            return 1;
-        }
-    };
+    // Only the `pin` key is rewritten, and the rest of the file is kept
+    // verbatim. Serialising the whole resolved policy here would freeze today's
+    // `thermal_headroom_c`, battery floor and unit list into the owner's file
+    // forever: a later release that raised the headroom would never reach a
+    // machine whose owner had once toggled the tile.
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let text = set_pin_key(&existing, p);
     if let Some(dir) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(dir) {
             eprintln!("apex: {}: {e}", dir.display());
             return 1;
         }
     }
-    if let Err(e) = std::fs::write(&path, format!("# apex lid policy — see `apex lid status`\n{text}")) {
+    if let Err(e) = std::fs::write(&path, &text) {
         eprintln!("apex: {}: {e}", path.display());
         return 1;
     }
@@ -1120,6 +1182,45 @@ fn pin(roots: &Roots, state: Option<String>) -> i32 {
         Pin::Auto => println!("keep-working now follows live agent sessions"),
     }
     0
+}
+
+/// Replace (or add) the top-level `pin` key, leaving every other line as it was.
+///
+/// Deliberately line-based rather than a TOML round trip. `toml::to_string` on a
+/// parsed document discards comments and reorders keys, and this file is one an
+/// owner edits by hand.
+fn set_pin_key(existing: &str, pin: Pin) -> String {
+    let line = format!("pin = \"{}\"", pin.as_str());
+    let mut out: Vec<String> = Vec::new();
+    let mut replaced = false;
+    // Only the top-level table: a `pin` inside `[powerdown]` is somebody else's
+    // key and must not be rewritten.
+    let mut in_table = false;
+    for l in existing.lines() {
+        let t = l.trim_start();
+        if t.starts_with('[') {
+            in_table = true;
+        }
+        if !in_table && !replaced && t.starts_with("pin") && t.split('=').next().map(|k| k.trim()) == Some("pin") {
+            out.push(line.clone());
+            replaced = true;
+            continue;
+        }
+        out.push(l.to_string());
+    }
+    if !replaced {
+        if out.is_empty() {
+            out.push("# apex lid policy — see `apex lid status`".to_string());
+        }
+        // Before the first table header, or at the end when there is none.
+        match out.iter().position(|l| l.trim_start().starts_with('[')) {
+            Some(i) => out.insert(i, line),
+            None => out.push(line),
+        }
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
 }
 
 fn report(roots: &Roots, as_json: bool) -> i32 {
@@ -1193,72 +1294,43 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
     let runner = Runner::new(roots, dry_run);
     let loaded = load_policy(roots);
     if let Some(e) = &loaded.error {
-        eprintln!("apex lid: the policy file could not be read ({e}); using built-in defaults");
+        eprintln!("apex lid: a candidate policy file could not be read ({e})");
     }
     let every = interval.unwrap_or(loaded.policy.poll_secs).max(1);
     let mut held: Option<InhibitorHandle> = None;
+    let mut holding = false;
     let mut period: Option<ClosedPeriod> = load_period(roots, STATE);
 
     loop {
         let inputs = measure(roots, &runner);
         let decision = loaded.policy.decide(&inputs);
         let closed = inputs.lid.treat_as_closed() && !inputs.lid.is_absent();
+        let was_holding = holding;
 
         // ── the inhibitor ───────────────────────────────────────────────────
         if decision.holds_inhibitor() {
-            if held.is_none() {
+            if !holding {
                 held = InhibitorHandle::take(&runner, decision.why());
-                if held.is_none() && !runner.executes() {
-                    // Recorded rather than taken. Not a failure.
-                } else if held.is_none() {
+                holding = true;
+                if held.is_none() && runner.executes() {
+                    holding = false;
                     eprintln!(
                         "apex lid: the handle-lid-switch inhibitor could not be taken; the \
                          lid will suspend as it does on a stock install"
                     );
                 }
             }
-        } else if let Some(h) = held.take() {
-            h.release();
+        } else if holding {
+            if let Some(h) = held.take() {
+                h.release();
+            }
+            holding = false;
         }
 
         // ── the closed period ───────────────────────────────────────────────
         if closed && decision.holds_inhibitor() {
-            let (vpn_name, vpn) = read_vpn(&runner);
-            let p = period.get_or_insert_with(|| {
-                let mut p = ClosedPeriod {
-                    closed_at: now(),
-                    last_seen: now(),
-                    opened_at: None,
-                    sessions_at_close: inputs.work.live_count(),
-                    why: decision.why().to_string(),
-                    ended_by: None,
-                    charge_at_close: inputs.charge.percent(),
-                    charge_last: inputs.charge.percent(),
-                    peak_c: inputs.thermal.celsius(),
-                    powered_down: Vec::new(),
-                    skipped: Vec::new(),
-                    vpn: Vec::new(),
-                };
-                // The power-down happens once, at the moment the lid shuts.
-                let plan = plan_powerdown(roots, &loaded.policy.powerdown, &runner);
-                p.skipped = plan.skipped.clone();
-                p.powered_down = plan.actions.iter().map(PowerAction::describe).collect();
-                for line in apply(roots, &runner, &plan) {
-                    eprintln!("apex lid: {line}");
-                }
-                let _ = roots.write(
-                    "/var/lib/apex/lid/restore.json",
-                    &serde_json::to_string_pretty(&plan.restore()).unwrap_or_default(),
-                );
-                p
-            });
-            p.last_seen = now();
-            p.charge_last = inputs.charge.percent();
-            if let Some(c) = inputs.thermal.celsius() {
-                p.peak_c = Some(p.peak_c.map_or(c, |b: f64| b.max(c)));
-            }
-            p.vpn.push(VpnSample { at: now(), name: vpn_name, state: vpn });
-            let _ = save_period(roots, STATE, p);
+            let p = open_period(roots, &runner, &loaded.policy.powerdown, &inputs, &decision, &mut period);
+            sample(roots, &runner, p, &inputs);
         } else if !closed {
             if let Some(mut p) = period.take() {
                 p.opened_at = Some(now());
@@ -1272,11 +1344,16 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
 
         // ── a guard ─────────────────────────────────────────────────────────
         if let Some(guard) = decision.guard() {
-            if let Some(p) = period.as_mut() {
-                p.ended_by = Some(guard);
-                p.last_seen = now();
-                let _ = save_period(roots, LAST, p);
-            }
+            // The period record is CREATED here when a guard fires on the very
+            // first closed poll. Without this, `apex lid report` had nothing to
+            // read back on exactly the case the owner most wants explained —
+            // "why did my laptop go to sleep in my bag" — and criterion 5 would
+            // have failed on the one path it exists for.
+            let p = open_period(roots, &runner, &loaded.policy.powerdown, &inputs, &decision, &mut period);
+            sample(roots, &runner, p, &inputs);
+            p.ended_by = Some(guard);
+            p.opened_at = None;
+            let _ = save_period(roots, LAST, p);
             eprintln!("apex lid: the {guard} guard fired — {}", decision.why());
             if guard.checkpoint_first() {
                 for line in checkpoint_live_work(roots, &runner, guard) {
@@ -1287,10 +1364,41 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
             if let Some(h) = held.take() {
                 h.release();
             }
+            holding = false;
             let r = runner.run("systemctl", &["suspend"]);
             eprintln!("apex lid: suspend: {}", short(&r));
             period = None;
             let _ = roots.write(STATE, "");
+            if once {
+                return if r.ok() { 0 } else { 1 };
+            }
+        } else if was_holding && closed && !decision.holds_inhibitor() {
+            // ── work finished while the lid was shut ────────────────────────
+            //
+            // The inhibitor has just been dropped with the lid still down.
+            // Whether logind re-examines a closed lid when the last
+            // `handle-lid-switch` lock goes away is not a thing to assert from
+            // memory, and the only way to observe it on this machine is to
+            // suspend it — which is the one act this unit may not perform. So
+            // the driver does not depend on the answer: it finishes the record,
+            // puts the machine back, and asks for the suspend itself. If logind
+            // also re-checks, the second request is a no-op.
+            if let Some(mut p) = period.take() {
+                p.last_seen = now();
+                p.opened_at = None;
+                restore(roots, &runner);
+                let _ = save_period(roots, LAST, &p);
+                let _ = roots.write(STATE, "");
+                println!("{}", p.summary());
+            } else {
+                restore(roots, &runner);
+            }
+            eprintln!(
+                "apex lid: nothing is running any more and the lid is still shut — {}",
+                decision.why()
+            );
+            let r = runner.run("systemctl", &["suspend"]);
+            eprintln!("apex lid: suspend: {}", short(&r));
             if once {
                 return if r.ok() { 0 } else { 1 };
             }
@@ -1305,6 +1413,64 @@ fn watch(roots: &Roots, once: bool, dry_run: bool, interval: Option<u64>) -> i32
         }
         std::thread::sleep(std::time::Duration::from_secs(every));
     }
+}
+
+/// Start the closed-period record if it is not already open, applying the
+/// power-down once, at the moment the lid shuts.
+fn open_period<'p>(
+    roots: &Roots,
+    runner: &Runner,
+    pd: &PowerDown,
+    inputs: &LidInputs,
+    decision: &apexd_core::lid::LidDecision,
+    slot: &'p mut Option<ClosedPeriod>,
+) -> &'p mut ClosedPeriod {
+    if slot.is_none() {
+        let mut p = ClosedPeriod {
+            closed_at: now(),
+            last_seen: now(),
+            opened_at: None,
+            sessions_at_close: inputs.work.live_count(),
+            why: decision.why().to_string(),
+            ended_by: None,
+            charge_at_close: inputs.charge.percent(),
+            charge_last: inputs.charge.percent(),
+            peak_c: inputs.thermal.celsius(),
+            powered_down: Vec::new(),
+            skipped: Vec::new(),
+            vpn: Vec::new(),
+        };
+        // Only a keep-working close powers anything down. A guard that fires on
+        // the first poll has nothing to switch off — the machine is going to
+        // sleep, which switches off rather more.
+        if decision.holds_inhibitor() {
+            let plan = plan_powerdown(roots, pd, runner);
+            p.skipped = plan.skipped.clone();
+            p.powered_down = plan.actions.iter().map(PowerAction::describe).collect();
+            for line in apply(roots, runner, &plan) {
+                eprintln!("apex lid: {line}");
+            }
+            remember(
+                roots,
+                "/var/lib/apex/lid/restore.json",
+                &serde_json::to_string_pretty(&plan.restore()).unwrap_or_default(),
+            );
+        }
+        *slot = Some(p);
+    }
+    slot.as_mut().expect("just inserted")
+}
+
+/// One poll's worth of observation appended to the open period.
+fn sample(roots: &Roots, runner: &Runner, p: &mut ClosedPeriod, inputs: &LidInputs) {
+    let (vpn_name, vpn) = read_vpn(runner);
+    p.last_seen = now();
+    p.charge_last = inputs.charge.percent();
+    if let Some(c) = inputs.thermal.celsius() {
+        p.peak_c = Some(p.peak_c.map_or(c, |b: f64| b.max(c)));
+    }
+    p.vpn.push(VpnSample { at: now(), name: vpn_name, state: vpn });
+    let _ = save_period(roots, STATE, p);
 }
 
 /// Put back everything the power-down changed, from the plan that was written
