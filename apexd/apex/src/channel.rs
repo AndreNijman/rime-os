@@ -222,9 +222,30 @@ fn health() -> (Verdict, Option<String>) {
 
 // ── the record `apex update` leaves ──────────────────────────────────────────
 
-fn read_record() -> Option<LastUpdate> {
-    let text = std::fs::read_to_string(record_path()).ok()?;
-    serde_json::from_str(&text).ok()
+/// The record, if there is one, or the reason there is no answer.
+///
+/// Three states, not two, and the third is the point. `Ok(None)` means the
+/// file is not there — a machine that has never updated, which is a real and
+/// normal state. `Err` means the file IS there and nobody can say what it
+/// says: unreadable, or not JSON.
+///
+/// It used to be `Option`, collapsed with two `.ok()?`, and the cost was a
+/// sentence the machine was not entitled to say. `tests/chaos/cases/
+/// power-loss-during-update.sh` tears this file the way a power loss during
+/// [`record_update`]'s write tears it, and the surface answered "nothing
+/// recorded yet — `apex update` writes this" for a machine that had just
+/// updated. That is this repository's "permission denied is not absence",
+/// printed on the screen somebody reads while their machine is misbehaving.
+fn read_record() -> Result<Option<LastUpdate>, String> {
+    let path = record_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    serde_json::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Note what the machine was running before an update runs.
@@ -257,13 +278,38 @@ pub fn record_update(tag: &str) {
             return;
         }
     }
-    match serde_json::to_string_pretty(&record) {
-        Ok(text) => {
-            if let Err(e) = std::fs::write(&path, text + "\n") {
-                eprintln!("apex: the update health gate is not armed: {}: {e}", path.display());
-            }
+    // Written to a sibling temp file and renamed, rather than straight over
+    // the record. `rename(2)` within a directory is atomic, so a crash during
+    // this leaves either the previous record or the new one and never a
+    // half-written file — and a half-written file here is not a lost record,
+    // it is a record that reads as a LIE about whether an update ran.
+    //
+    // The pid is in the temp name because there is no lock on this path and a
+    // fixed `.tmp` suffix lets two writers interleave: A writes its temp, B
+    // truncates the same temp, A renames B's partial content into place. That
+    // is the same defect one level down. (`apex/src/host.rs` and `task.rs`
+    // already use the pid-suffixed form; most of this tree does not.)
+    //
+    // What this still does not survive is power loss: neither the file nor the
+    // containing directory is fsynced, so the rename can be in the page cache
+    // when the power goes. `tests/chaos/cases/power-loss-during-update.sh`
+    // therefore injects the state a tear leaves and asserts the READER reports
+    // it, which is the half that is worth having either way.
+    let text = match serde_json::to_string_pretty(&record) {
+        Ok(t) => t + "\n",
+        Err(e) => {
+            eprintln!("apex: the update health gate is not armed: {e}");
+            return;
         }
-        Err(e) => eprintln!("apex: the update health gate is not armed: {e}"),
+    };
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, &text) {
+        eprintln!("apex: the update health gate is not armed: {}: {e}", tmp.display());
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        eprintln!("apex: the update health gate is not armed: {}: {e}", path.display());
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -277,7 +323,13 @@ pub fn record_update(tag: &str) {
 /// would refuse the update that fixes a machine, on a machine whose only
 /// problem was an unreadable file.
 pub fn halt_reason() -> Option<String> {
-    let record = read_record()?;
+    // An unreadable record permits the update, exactly as an absent one does,
+    // and for the reason in the doc comment above: a gate that failed closed
+    // here would refuse the update that fixes a machine whose only problem is
+    // a damaged file. `status` is where the damage is REPORTED; this is where
+    // it is forgiven. Both halves are needed — forgiving it silently is what
+    // the chaos case caught.
+    let record = read_record().ok()??;
     let booted = crate::trust::booted_digest(&roots()).ok()?;
     if !channel::rebooted_into_new(&record, &booted) {
         // Still running what we were before the last update: either it has not
@@ -405,7 +457,13 @@ fn status(as_json: bool) -> i32 {
                 "reasons": verdict.reasons,
                 "partial": systemctl_error,
             },
-            "lastUpdate": record,
+            // Two fields, because `null` has to keep meaning one thing. A
+            // `lastUpdate` of null with no error is "no update has run here";
+            // a null with an error beside it is "one ran and the note about it
+            // is damaged". APEX Settings reads this document, and collapsing
+            // the two would put the wrong sentence on the screen.
+            "lastUpdate": record.as_ref().ok().and_then(|r| r.clone()),
+            "lastUpdateError": record.as_ref().err(),
             "held": halt_reason().is_some(),
             "telemetry": {
                 "optedIn": consent().report,
@@ -456,8 +514,16 @@ fn status(as_json: bool) -> i32 {
 
     println!("\nAfter the last update");
     match &record {
-        None => println!("  nothing recorded yet — `apex update` writes this"),
-        Some(r) => {
+        Err(e) => {
+            // The state a power loss during `record_update`'s write leaves.
+            // Saying "nothing recorded yet" here would be a claim about the
+            // machine made out of a read nobody completed.
+            println!("  unknown — the record exists and could not be read ({e})");
+            println!("  An update may well have run. The health gate that reads this note is");
+            println!("  therefore not armed; `sudo apex update` still works and is not held by it.");
+        }
+        Ok(None) => println!("  nothing recorded yet — `apex update` writes this"),
+        Ok(Some(r)) => {
             println!("  ran at       : {}", stamp(r.at));
             println!("  came from    : {}", short(&r.from_digest));
             let rebooted = digest
