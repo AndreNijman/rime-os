@@ -1902,13 +1902,17 @@ RUN set -eux; \
 #   binutils           rime-pkg unpacks a .deb with `ar`.
 #   gcc, make          the rimed builder in Containerfile.base compiles C (the
 #                      ring crate) on top of this tier.
+#   gh                 Andre's call (2026-10-14): the GitHub CLI stays on every
+#                      machine. As a `rime install` target it vanished whenever
+#                      the user extension was rebuilt or refused (F45 git-core
+#                      skew), leaving git push with no credential helper.
 #
 # Each is named rather than left to arrive transitively (node through neovim →
 # tree-sitter-cli, ar through gcc), which is one packaging change away from
 # vanishing. ripgrep, fd, fzf and bat are in the zsh stanza below.
 RUN set -eux; \
     dnf5 -y install --setopt=install_weak_deps=False \
-        nodejs nodejs-npm nodejs-full-i18n binutils gcc make; \
+        nodejs nodejs-npm nodejs-full-i18n binutils gcc make gh; \
     : 'Fedora 45 names the docs per version (nodejs22-docs), so ask by glob.'; \
     if docs="$(rpm -qa 'nodejs*-docs')" && [ -n "$docs" ]; then \
         echo "FATAL: $docs is installed (node's HTML docs; excluded above)"; exit 1; \
@@ -1919,6 +1923,7 @@ RUN set -eux; \
         echo "FATAL: another node major is installed: $extra"; exit 1; \
     fi; \
     node --version; \
+    gh --version; \
     dnf5 clean all
 
 # sing-box official static binary (not in Fedora). Shipped DISABLED (unit gates
