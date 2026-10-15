@@ -1841,7 +1841,16 @@ RUN set -eux; \
     command -v wg-quick; \
     test -e /usr/lib/NetworkManager/VPN/nm-openvpn-service.name; \
     test -e /usr/lib/NetworkManager/VPN/nm-openconnect-service.name; \
-    test -e /usr/lib/NetworkManager/VPN/nm-vpnc-service.name; \
+    # NetworkManager 1.58.1-3 (updates-testing) obsoletes NetworkManager-vpnc
+    # < 1:1.4.0-8 and the replacement is not published yet, so dnf5 drops the
+    # request WITHOUT an error (strict does not catch an obsoleted name). Fail
+    # only if the package is present but its plugin file is not; otherwise say
+    # so loudly and carry on until a repo ships it again.
+    if rpm -q NetworkManager-vpnc >/dev/null 2>&1; then \
+        test -e /usr/lib/NetworkManager/VPN/nm-vpnc-service.name; \
+    else \
+        echo "WARNING: NetworkManager-vpnc is not installable in the current F45 repos (obsoleted by NetworkManager); the vpnc VPN plugin is absent from this image"; \
+    fi; \
     # NetworkManager spawns its own dnsmasq for a shared connection, with its
     # own arguments and its own lifetime. Enabling dnsmasq.service would put a
     # second resolver on port 53 that fights the first one.
