@@ -58,6 +58,18 @@ take it. The suites therefore assert that the release binding is *registered*
 (`release: true` in `hyprctl binds`), and a person holding `ALT` confirms it
 works.
 
+## Changing the switcher's key
+
+Rime Settings → Keybinds → Window Switcher. The Hyprland and niri sessions follow
+it (labwc keeps its own). The combo must hold exactly one of `ALT`, `SUPER` or
+`CTRL` (no `SHIFT`: that is the reverse direction), plus a key. Letting go of that
+modifier switches, so the shell moves the release binds, `Escape` and `Return`
+with it. A release on a modifier other than `ALT` cannot be driven by a synthetic
+keyboard, so only a person holding it confirms it.
+
+Rime Settings → Gaming → *Hide games from Alt+Tab* leaves Steam, its games and
+Sober out of the switcher, so it never switches to them.
+
 ## The Alt-Tab switcher
 
 `rime shell switcher next | prev | commit | cancel`
