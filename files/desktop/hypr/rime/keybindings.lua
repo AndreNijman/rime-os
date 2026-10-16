@@ -180,12 +180,14 @@ end
 -- are, and with `transparent = true` plus rime-switcher's flag test it costs a
 -- closed switcher one `[ -e ]` and still reaches the application underneath.
 --
--- ── Why this is not in the shell's keybind model ─────────────────────────────
--- That model has no concept of a key RELEASE, so a rebind made in Rime Settings
--- would move the "next" bind and leave the commit on Alt — a switcher you can
--- open and cannot close. Until the model can express a release, the combination
--- stays fixed and stays here. The Keybinds page says so rather than offering a
--- control that would half-work.
+-- ── The shell can move all of this ───────────────────────────────────────────
+-- The shell's keybind model carries the switcher as ONE action ("window-switcher",
+-- default ALT+Tab) and generates the whole set below from it: next, previous,
+-- cancel, commit, and the release of whichever modifier the user chose. It
+-- switches these defaults off with `disable()` before binding its own, so a
+-- user who rebinds the switcher in Rime Settings does not get two. This block
+-- stays as the shell-less default: a session without the shell's generated
+-- module still has a working ALT+Tab.
 --
 -- ── The cost of the release bind, stated ─────────────────────────────────────
 -- It fires on EVERY Alt release, all day, not only while the switcher is open.
