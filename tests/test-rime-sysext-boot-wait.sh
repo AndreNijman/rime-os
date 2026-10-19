@@ -3,7 +3,7 @@
 # path: no network-online.target ordering in the unit, and rime-pkg waits for
 # the network itself only when a rebuild really has to download.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 UNIT=files/system/units/rime-sysext-rebuild.service
 ENGINE=files/system/libexec/rime-pkg
 pass=0 fail=0
