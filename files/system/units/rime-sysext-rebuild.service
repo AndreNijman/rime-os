@@ -11,8 +11,15 @@ Documentation=man:systemd-sysext(8)
 # Nothing here runs on a normal boot: `rebuild --if-needed` exits immediately
 # when the extension already matches and is merged.
 ConditionPathExists=/var/lib/rime/pkg/state.json
-After=network-online.target systemd-sysext.service
-Wants=network-online.target
+#
+# NOT ordered after network-online.target. That ordering put
+# NetworkManager-wait-online (8 s on a laptop whose Wi-Fi profile waits for the
+# keyring) on the critical path of multi-user.target and graphical.target on
+# EVERY boot, to guard a rebuild that almost no boot needs. `rime-pkg rebuild
+# --if-needed` now decides first and waits for the network itself, only when it
+# has something to download. A boot that needs a rebuild still waits for it
+# before the desktop starts, as before.
+After=systemd-sysext.service
 
 [Service]
 Type=oneshot
