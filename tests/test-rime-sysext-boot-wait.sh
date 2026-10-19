@@ -33,13 +33,14 @@ fi
 # Behaviour of the function itself, with systemctl/timeout stubbed.
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 mkdir "$tmp/bin"
-printf '#!/bin/sh\nshift; exec "$@"\n' > "$tmp/bin/timeout"
+printf '#!/bin/sh\necho "timeout $1" >> "%s/calls"\nshift; exec "$@"\n' "$tmp" > "$tmp/bin/timeout"
 printf '#!/bin/sh\necho "$*" >> "%s/calls"\n' "$tmp" > "$tmp/bin/systemctl"
 chmod +x "$tmp/bin/"*
 body="$(sed -n '/^wait_for_boot_network() {/,/^}/p' "$ENGINE")"
 run() { : > "$tmp/calls"; ( msg() { :; }; eval "$body"; export PATH="$tmp/bin:$PATH"; "$@"; wait_for_boot_network ) ; cat "$tmp/calls"; }
 out="$(INVOCATION_ID=x run true)"
-if [ "$out" = "start network-online.target" ]; then ok "inside a service it starts network-online.target"; else bad "inside a service it starts network-online.target" "got: $out"; fi
+want="$(printf 'timeout 90\nstart network-online.target')"
+if [ "$out" = "$want" ]; then ok "inside a service it starts network-online.target, bounded at 90 s"; else bad "inside a service it starts network-online.target, bounded at 90 s" "got: $out"; fi
 out="$(env -u INVOCATION_ID bash -c "$(declare -f run); tmp=$tmp; body=$(printf %q "$body"); run true")"
 if [ -z "$out" ]; then ok "outside a service it starts nothing"; else bad "outside a service it starts nothing" "got: $out"; fi
 
