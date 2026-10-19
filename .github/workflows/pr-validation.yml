@@ -2243,6 +2243,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-pkg-legacy-ext.sh
 
+      # The boot must not wait for the network to decide that nothing needs
+      # rebuilding: the unit carries no network-online.target ordering and the
+      # engine waits for the network itself only when it has to download.
+      - name: Run boot-time network-wait assertions for the sysext rebuild unit
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-sysext-boot-wait.sh
+
       # The rest of the first boot of a Rime OS image on an APEX machine: the (rime-rename: keep)
       # system-state migration, the session-side one, the boot splash's accent
       # from the ESP credential APEX wrote, and the apex command, units and (rime-rename: keep)

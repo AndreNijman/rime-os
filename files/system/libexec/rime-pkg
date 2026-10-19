@@ -4184,6 +4184,19 @@ cmd_upgrade() {
     rebuild_extension "${want[@]}"
 }
 
+# rime-sysext-rebuild.service is not ordered after network-online.target (that
+# cost every boot the whole NetworkManager-wait-online delay), so a boot that
+# DOES have to download waits for the network here instead. Only inside a
+# systemd service (INVOCATION_ID) so a manual `rime pkg rebuild --if-needed` and
+# the test suites never start a target. Bounded: offline, the rebuild is
+# attempted anyway and fails as it always did.
+wait_for_boot_network() {
+    [ -n "${INVOCATION_ID:-}" ] || return 0
+    command -v systemctl >/dev/null 2>&1 || return 0
+    msg "waiting for the network before rebuilding"
+    timeout 90 systemctl start network-online.target >/dev/null 2>&1 || true
+}
+
 cmd_rebuild() {
     local if_needed=0
     if [ "${1:-}" = "--if-needed" ]; then
@@ -4213,6 +4226,10 @@ cmd_rebuild() {
     mapfile -t want < <(load_requested)
     if [ "${#want[@]}" -eq 0 ]; then
         return 0
+    fi
+
+    if [ "$if_needed" = 1 ]; then
+        wait_for_boot_network
     fi
 
     # In a SUBSHELL on purpose: this runs from rime-sysext-rebuild.service at
