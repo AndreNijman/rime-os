@@ -113,6 +113,124 @@ pub struct ScxReport {
     ///
     /// `None` only when the probe was not run.
     pub btf: Option<ScxBtf>,
+    /// What the daemon did when the scheduler failed to load, or was ejected
+    /// later in the session. `None` = no failure has been seen. Set at most
+    /// once per session: there is no retry loop.
+    pub fallback: Option<ScxFallback>,
+    /// Why this session never tried the switch at all: the same profile's
+    /// scheduler already failed earlier this boot (see [`ScxGaveUp`]).
+    pub held_back: Option<String>,
+    /// The kernel log's newest record when the switch was applied, so a
+    /// failure reports a disable that happened in THIS session and not an
+    /// earlier one's ordinary stop.
+    pub kmsg_mark: Option<u64>,
+}
+
+/// What the daemon did about a sched-ext scheduler that failed.
+///
+/// A scheduler that does not load, or that the kernel ejects mid-game (the
+/// watchdog ejected unpatched scx_lavd five times in one session on katana,
+/// 2026-09-26), leaves the machine on the kernel's own class by itself. What it
+/// does NOT do by itself is tell anyone, or put `scx_loader` back in step:
+/// the loader still believes its scheduler runs. So the daemon stops it once,
+/// reads the kernel back, and records what it saw.
+#[derive(Debug, Clone)]
+pub struct ScxFallback {
+    /// `at entry` or `mid-session`.
+    pub when: &'static str,
+    /// What was read that made this a failure.
+    pub trigger: String,
+    /// The kernel log's own reason, when one was logged after the switch.
+    pub kernel_reason: Option<String>,
+    /// What the fallback stop returned, in the writer's words.
+    pub stop: Outcome,
+    /// What the kernel reported after the stop. Authoritative.
+    pub after: ScxState,
+}
+
+impl ScxFallback {
+    /// Verified means the kernel READ `disabled` after the stop: the kernel's
+    /// own class is in charge. Nothing else counts, not even a `Landed` stop.
+    pub fn verified(&self) -> bool {
+        matches!(self.after, ScxState::Disabled)
+    }
+
+    /// `verified` or `unverified`.
+    pub fn word(&self) -> &'static str {
+        if self.verified() {
+            "verified"
+        } else {
+            "unverified"
+        }
+    }
+
+    /// One sentence for the journal and `scx_fallback_detail`.
+    pub fn describe(&self) -> String {
+        let kernel = self
+            .kernel_reason
+            .as_deref()
+            .map(|r| format!("; kernel log: {r}"))
+            .unwrap_or_else(|| "; the kernel log gave no reason".into());
+        let result = if self.verified() {
+            "fell back to the kernel's own scheduler (verified: sched_ext/state reads disabled)"
+                .to_string()
+        } else {
+            let said = match &self.stop {
+                Outcome::Landed => "scxctl stop reported success".to_string(),
+                Outcome::Refused(w) | Outcome::Unknown(w) => w.clone(),
+            };
+            format!(
+                "fallback UNVERIFIED: {said}; {} — not retried",
+                self.after.describe()
+            )
+        };
+        format!("failed {}: {}{kernel}; {result}", self.when, self.trigger)
+    }
+}
+
+/// A scheduler that failed this boot, so the next session asking for the same
+/// one under the same profile does not try again.
+///
+/// One attempt per boot per profile is the rule. A scheduler the kernel
+/// ejects is one it will eject again, and retrying it every time Gaming Mode
+/// starts is a loop with a game in the middle of it. Changing the profile
+/// (its name or its `scx` setting) is a new question and gets one new try.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScxGaveUp {
+    pub profile: String,
+    pub setting: String,
+    pub sched: String,
+    pub why: String,
+}
+
+/// What makes a definite reading a failure for `want`. `None` for a healthy
+/// reading AND for one that answers nothing (mid-transition, unreadable, no
+/// sched_ext at all): the daemon acts only on what the kernel definitely said.
+pub fn scx_failure(state: &ScxState, want: &str) -> Option<String> {
+    match state {
+        ScxState::Disabled => Some(format!(
+            "{want} is not attached ({})",
+            state.describe()
+        )),
+        ScxState::Enabled { ops: Some(o) } if !rimed_core::syswriter::scx_ops_matches(o, want) => {
+            Some(format!("root/ops reads '{o}', which is not {want}"))
+        }
+        _ => None,
+    }
+}
+
+/// The scheduler actually in charge, by a kernel reading: the scheduler's
+/// name, `kernel` for the kernel's own class, or `unknown`.
+pub fn scx_effective(state: &ScxState, requested: Option<&str>) -> String {
+    match state {
+        ScxState::Disabled | ScxState::Unsupported => "kernel".into(),
+        ScxState::Enabled { ops: Some(o) } => match requested {
+            Some(want) if rimed_core::syswriter::scx_ops_matches(o, want) => want.to_string(),
+            _ => o.clone(),
+        },
+        ScxState::Enabled { ops: None } => requested.unwrap_or("unknown").to_string(),
+        ScxState::InFlux(_) | ScxState::Unreadable(_) => "unknown".into(),
+    }
 }
 
 impl ScxReport {
@@ -143,11 +261,12 @@ impl ScxReport {
         let Some(want) = &self.requested else {
             return "this profile asks for no sched-ext scheduler".to_string();
         };
-        let said = match &self.applied {
-            Some(Outcome::Landed) => "scxctl reported success".to_string(),
-            Some(Outcome::Refused(why)) => format!("scxctl refused: {why}"),
-            Some(Outcome::Unknown(why)) => format!("scxctl could not be confirmed: {why}"),
-            None => "the switch was never applied".to_string(),
+        let said = match (&self.applied, &self.held_back) {
+            (_, Some(why)) => format!("not tried this session: {why}"),
+            (Some(Outcome::Landed), _) => "scxctl reported success".to_string(),
+            (Some(Outcome::Refused(why)), _) => format!("scxctl refused: {why}"),
+            (Some(Outcome::Unknown(why)), _) => format!("scxctl could not be confirmed: {why}"),
+            (None, None) => "the switch was never applied".to_string(),
         };
         let seen = match &self.observed {
             Some(st) => st.describe(),
@@ -180,7 +299,21 @@ impl ScxReport {
             }
             _ => String::new(),
         };
-        format!("asked for {want}; {said}; {seen}{mismatch}{kernel}")
+        let fallback = match &self.fallback {
+            Some(f) => format!(" — {}", f.describe()),
+            None => String::new(),
+        };
+        format!("asked for {want}; {said}; {seen}{mismatch}{fallback}{kernel}")
+    }
+
+    /// `none`, `verified`, `unverified` or `held-back`: the status key
+    /// `scx_fallback`.
+    pub fn fallback_word(&self) -> &'static str {
+        match (&self.fallback, &self.held_back) {
+            (Some(f), _) => f.word(),
+            (None, Some(_)) => "held-back",
+            (None, None) => "none",
+        }
     }
 
     /// The single note the session carries, or `None` when nothing was asked.
@@ -342,7 +475,7 @@ impl Ctx {
                 .collect();
 
         let power_saving = game::read_power_saving(&self.sys_root);
-        let plan = game::plan(&GameInputs {
+        let mut plan = game::plan(&GameInputs {
             cfg: &cfg,
             topo: &topo,
             nvidia: &nvidia,
@@ -417,6 +550,21 @@ impl Ctx {
             }),
             ..Default::default()
         };
+        // One attempt per boot per profile. A scheduler that already failed
+        // under this same profile is not switched to again: the session keeps
+        // the kernel's own scheduler and says why. Its stop goes too, so a
+        // session that started nothing stops nothing it did not start.
+        if let Some(want) = &scx.requested {
+            if let Some(why) = self.scx_held_back(&cfg.scx, want) {
+                plan.enter
+                    .retain(|a| !matches!(a, Action::ScxSwitch { .. }));
+                plan.exit.retain(|a| !matches!(a, Action::ScxStop));
+                eprintln!("rimed: game: not loading {want} this session — {why}");
+                scx.held_back = Some(why);
+            } else {
+                scx.kmsg_mark = self.writer.kmsg_mark();
+            }
+        }
         for a in &plan.enter {
             let is_irq = matches!(a, Action::IrqAffinity { .. });
             if is_irq {
@@ -497,6 +645,22 @@ impl Ctx {
             }
             scx.btf = Some(btf);
         }
+        // A definite failure at entry falls back now, once. An unanswerable
+        // reading (mid-transition, unreadable) is left to the session watch,
+        // which acts the moment the kernel gives a definite answer.
+        if scx.held_back.is_none() {
+            if let (Some(want), Some(seen)) = (scx.requested.clone(), scx.observed.clone()) {
+                if let Some(trigger) = scx_failure(&seen, &want) {
+                    let trigger = match &scx.applied {
+                        Some(Outcome::Refused(why)) | Some(Outcome::Unknown(why)) => {
+                            format!("{trigger}; scxctl: {why}")
+                        }
+                        _ => trigger,
+                    };
+                    self.scx_fall_back(&mut scx, &cfg.scx, "at entry", trigger);
+                }
+            }
+        }
 
         let mut notes = plan.notes.clone();
         if irqs.refused() > 0 {
@@ -571,6 +735,99 @@ impl Ctx {
         }
         *self.game.lock().await = Some(session);
         Ok(())
+    }
+
+    /// Whether `want` under the profile's `scx` setting already failed this
+    /// boot, and if so why.
+    fn scx_held_back(&self, setting: &str, want: &str) -> Option<String> {
+        let gave_up = self.scx_gave_up.lock().unwrap_or_else(|e| e.into_inner());
+        let g = gave_up.as_ref()?;
+        (g.profile == self.selection.active && g.setting == setting.trim() && g.sched == want)
+            .then(|| {
+                format!(
+                    "{want} already failed this boot under profile '{}' ({}); the kernel's \
+                     own scheduler runs instead. Change the profile's `scx` or reboot to try \
+                     it again",
+                    g.profile, g.why
+                )
+            })
+    }
+
+    /// Fall back to the kernel's own scheduler: one `scxctl stop`, a kernel
+    /// read-back, a journal line with the kernel's reason, and the failure
+    /// remembered so no later session under this profile retries it.
+    ///
+    /// Synchronous and called with the session lock held (or before the
+    /// session exists), so two callers can never both fall back.
+    fn scx_fall_back(&self, scx: &mut ScxReport, setting: &str, when: &'static str, trigger: String) {
+        let Some(want) = scx.requested.clone() else {
+            return;
+        };
+        if scx.fallback.is_some() {
+            return; // once per session, whatever happens next
+        }
+        // The reason is read BEFORE the stop: after an ejection the kernel's
+        // record is already there, and the stop may add an ordinary
+        // "unregistered from user space" on top of it.
+        let kernel_reason = self.writer.scx_kernel_reason(scx.kmsg_mark);
+        let stop = match self.writer.apply(&Action::ScxFallback) {
+            Ok(o) => o,
+            Err(e) => Outcome::Refused(format!("{e:#}")),
+        };
+        let after = self.writer.scx_state();
+        let fb = ScxFallback {
+            when,
+            trigger,
+            kernel_reason,
+            stop,
+            after: after.clone(),
+        };
+        eprintln!("rimed: game: sched-ext {want} {}", fb.describe());
+        *self.scx_gave_up.lock().unwrap_or_else(|e| e.into_inner()) = Some(ScxGaveUp {
+            profile: self.selection.active.clone(),
+            setting: setting.trim().to_string(),
+            sched: want,
+            why: format!("failed {}: {}", fb.when, fb.trigger),
+        });
+        scx.observed = Some(after);
+        scx.fallback = Some(fb);
+    }
+
+    /// One tick of the sched-ext watch: if the session's scheduler has been
+    /// ejected (or never came up), fall back once.
+    ///
+    /// Acts only on a definite reading. `InFlux` and `Unreadable` are not
+    /// failures, they are no answer, and are left for the next tick. Returns
+    /// the fallback when this tick performed one.
+    pub async fn game_scx_check(self: &Arc<Self>) -> Option<ScxFallback> {
+        let setting = self.profile().game_config().scx;
+        let mut guard = self.game.lock().await;
+        let session = guard.as_mut()?;
+        let want = session.scx.requested.clone()?;
+        if session.scx.fallback.is_some() || session.scx.held_back.is_some() {
+            return None;
+        }
+        let now = self.writer.scx_state();
+        let Some(trigger) = scx_failure(&now, &want) else {
+            // Healthy, or no answer. A definite healthy reading refreshes what
+            // status reports; no answer leaves the last definite one.
+            if matches!(now, ScxState::Enabled { .. }) {
+                session.scx.observed = Some(now);
+            }
+            return None;
+        };
+        // "Never loaded" and "ejected" are different events; a session whose
+        // entry reading was healthy and is now not was ejected.
+        let when = match &session.scx.observed {
+            Some(ScxState::Enabled { .. }) => "mid-session (ejected)",
+            _ => "mid-session (never came up)",
+        };
+        self.scx_fall_back(&mut session.scx, &setting, when, trigger);
+        if let Some(n) = session.scx.note() {
+            session.notes.retain(|e| !e.starts_with("sched-ext:"));
+            session.notes.push(n);
+        }
+        session.scx.fallback.clone()
     }
 
     /// Leave game mode (idempotent). Every recorded value is put back.
@@ -859,6 +1116,33 @@ impl Ctx {
                             .to_string(),
                     ),
                 );
+                // ── the fallback, and who is actually scheduling ─────────
+                //
+                // `scx_fallback` is `none`, `verified` (the kernel READ
+                // disabled after the daemon stopped a failed scheduler),
+                // `unverified` (it did not, and the daemon did not retry), or
+                // `held-back` (this profile's scheduler failed earlier this
+                // boot, so this session never tried it). `scx_effective` is the
+                // scheduler in charge by the latest kernel reading: a name,
+                // `kernel`, or `unknown`.
+                insert(&mut m, "scx_fallback", Value::from(s.scx.fallback_word().to_string()));
+                insert(
+                    &mut m,
+                    "scx_fallback_detail",
+                    Value::from(match (&s.scx.fallback, &s.scx.held_back) {
+                        (Some(f), _) => f.describe(),
+                        (None, Some(why)) => why.clone(),
+                        (None, None) => String::new(),
+                    }),
+                );
+                insert(
+                    &mut m,
+                    "scx_effective",
+                    Value::from(match &s.scx.observed {
+                        Some(st) => scx_effective(st, s.scx.requested.as_deref()),
+                        None => scx_effective(&self.writer.scx_state(), s.scx.requested.as_deref()),
+                    }),
+                );
                 insert(&mut m, "pids", Value::from(s.pids.clone()));
                 insert(&mut m, "notes", Value::from(s.notes.clone()));
                 // `owner_pid` is 0 when nothing is watching this session. It is
@@ -914,6 +1198,18 @@ impl Ctx {
                 };
                 insert(&mut m, "scx_detail", Value::from(detail));
                 insert(&mut m, "scx_btf", Value::from(btf.verdict().to_string()));
+                // A failure earlier this boot decides what the NEXT session
+                // does, so the idle surface says so before anyone starts one.
+                let held = cfg
+                    .scx_for(&topo)
+                    .and_then(|want| self.scx_held_back(&cfg.scx, &want));
+                insert(
+                    &mut m,
+                    "scx_fallback",
+                    Value::from(if held.is_some() { "held-back" } else { "none" }),
+                );
+                insert(&mut m, "scx_fallback_detail", Value::from(held.unwrap_or_default()));
+                insert(&mut m, "scx_effective", Value::from(scx_effective(&live, None)));
             }
         }
         m
@@ -1809,21 +2105,221 @@ mod tests {
     /// A writer whose `scxctl` returns `outcome` and whose kernel reads
     /// `state`. The two are set INDEPENDENTLY on purpose: that is what lets a
     /// test present a command that succeeded over a machine that did not move.
+    ///
+    /// The fallback is set apart from the switch for the same reason: its
+    /// outcome (`fallback`) and the state it leaves the kernel in
+    /// (`after_fallback`, `None` = the kernel does not move) are independent
+    /// of what it said, and the state can be moved mid-session to stage an
+    /// ejection. Every action is recorded so a test can count retries.
     struct ScxWriter {
         outcome: Outcome,
-        state: ScxState,
+        fallback: Outcome,
+        state: std::sync::Mutex<ScxState>,
+        after_fallback: Option<ScxState>,
+        reason: Option<String>,
+        log: std::sync::Mutex<Vec<Action>>,
     }
+
+    impl ScxWriter {
+        /// A fallback that works: it lands and the kernel reads disabled.
+        fn new(outcome: Outcome, state: ScxState) -> ScxWriter {
+            ScxWriter {
+                outcome,
+                fallback: Outcome::Landed,
+                state: std::sync::Mutex::new(state),
+                after_fallback: Some(ScxState::Disabled),
+                reason: None,
+                log: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+        fn count(&self, pred: fn(&Action) -> bool) -> usize {
+            self.log.lock().unwrap().iter().filter(|a| pred(a)).count()
+        }
+        fn set_state(&self, st: ScxState) {
+            *self.state.lock().unwrap() = st;
+        }
+    }
+
+    /// The kernel log mark the mock hands out; `scx_kernel_reason` refuses to
+    /// answer for any other, so a test proves the mark is threaded through.
+    const MARK: u64 = 4242;
 
     impl SysWriter for ScxWriter {
         fn apply(&self, action: &Action) -> anyhow::Result<Outcome> {
+            self.log.lock().unwrap().push(action.clone());
             Ok(match action {
                 Action::ScxSwitch { .. } | Action::ScxStop => self.outcome.clone(),
+                Action::ScxFallback => {
+                    if let Some(st) = &self.after_fallback {
+                        self.set_state(st.clone());
+                    }
+                    self.fallback.clone()
+                }
                 _ => Outcome::Landed,
             })
         }
         fn scx_state(&self) -> ScxState {
-            self.state.clone()
+            self.state.lock().unwrap().clone()
         }
+        fn kmsg_mark(&self) -> Option<u64> {
+            Some(MARK)
+        }
+        fn scx_kernel_reason(&self, since: Option<u64>) -> Option<String> {
+            (since == Some(MARK)).then(|| self.reason.clone()).flatten()
+        }
+    }
+
+    fn is_fallback(a: &Action) -> bool {
+        matches!(a, Action::ScxFallback)
+    }
+    fn is_switch(a: &Action) -> bool {
+        matches!(a, Action::ScxSwitch { .. })
+    }
+
+    /// A session under PROFILE_SCX over `w`, entered.
+    async fn scx_session(tag: &str, w: Arc<ScxWriter>) -> Arc<Ctx> {
+        let root = scratch(tag);
+        let irq_root = hybrid_machine(&root);
+        let ctx = build_ctx(&root, PROFILE_SCX, &irq_root, w);
+        ctx.game_enter(&[]).await.unwrap();
+        ctx
+    }
+
+    // ── the fallback: a failed scheduler is stopped once, read back, and
+    //    never retried ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_scheduler_that_fails_to_start_falls_back_and_the_kernel_confirms_it() {
+        let mut w = ScxWriter::new(
+            Outcome::Refused(
+                "scxctl start -s scx_lavd: Error: failed to load BPF program".into(),
+            ),
+            ScxState::Disabled,
+        );
+        w.reason = Some(
+            "sched_ext: BPF scheduler \"lavd_1.1.3\" disabled (scx_bpf_error)".into(),
+        );
+        let w = Arc::new(w);
+        let ctx = scx_session("scx-fb-start", w.clone()).await;
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_fallback"), "verified");
+        assert_eq!(str_of(&st, "scx_effective"), "kernel");
+        assert_eq!(str_of(&st, "scx_state"), "not loaded");
+        let detail = str_of(&st, "scx_fallback_detail");
+        assert!(detail.contains("failed at entry"), "{detail}");
+        assert!(detail.contains("failed to load BPF program"), "{detail}");
+        assert!(detail.contains("disabled (scx_bpf_error)"), "the kernel's reason: {detail}");
+        assert!(detail.contains("verified"), "{detail}");
+        assert_eq!(w.count(is_fallback), 1, "one stop at entry");
+        // The watch must not stop it again, however often it looks.
+        for _ in 0..5 {
+            assert!(ctx.game_scx_check().await.is_none());
+        }
+        assert_eq!(w.count(is_fallback), 1, "no retry loop");
+        assert_eq!(w.count(is_switch), 1, "and no second start");
+    }
+
+    #[tokio::test]
+    async fn a_scheduler_ejected_mid_session_falls_back_once_and_the_next_session_keeps_the_kernel() {
+        let mut w = ScxWriter::new(
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("lavd_1.1.3_x86_64_unknown_linux_gnu".into()),
+            },
+        );
+        w.reason = Some(
+            "sched_ext: BPF scheduler \"lavd_1.1.3_x86_64_unknown_linux_gnu\" disabled \
+             (runnable task stall)"
+                .into(),
+        );
+        let w = Arc::new(w);
+        let ctx = scx_session("scx-fb-eject", w.clone()).await;
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_state"), "loaded");
+        assert_eq!(str_of(&st, "scx_fallback"), "none");
+        assert_eq!(str_of(&st, "scx_effective"), "scx_lavd");
+        assert!(ctx.game_scx_check().await.is_none(), "a healthy scheduler is left alone");
+        assert_eq!(w.count(is_fallback), 0);
+
+        // The watchdog ejects it.
+        w.set_state(ScxState::Disabled);
+        let fb = ctx.game_scx_check().await.expect("an ejection must be acted on");
+        assert!(fb.verified());
+        assert_eq!(fb.when, "mid-session (ejected)");
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_fallback"), "verified");
+        assert_eq!(str_of(&st, "scx_effective"), "kernel");
+        assert_eq!(str_of(&st, "scx_state"), "not loaded");
+        let detail = str_of(&st, "scx_fallback_detail");
+        assert!(detail.contains("runnable task stall"), "{detail}");
+        assert!(
+            notes_of(&st).iter().any(|n| n.starts_with("sched-ext: not loaded")),
+            "the session's note follows the kernel: {:?}",
+            notes_of(&st)
+        );
+        assert!(ctx.game_scx_check().await.is_none());
+        assert_eq!(w.count(is_fallback), 1);
+
+        // The next session under the same profile does not try again.
+        ctx.game_exit().await.unwrap();
+        let idle = ctx.game_status().await;
+        assert_eq!(str_of(&idle, "scx_fallback"), "held-back");
+        ctx.game_enter(&[]).await.unwrap();
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_fallback"), "held-back");
+        assert_eq!(str_of(&st, "scx_effective"), "kernel");
+        assert!(
+            str_of(&st, "scx_detail").contains("not tried this session"),
+            "{}",
+            str_of(&st, "scx_detail")
+        );
+        assert_eq!(w.count(is_switch), 1, "one attempt per boot per profile");
+        assert_eq!(w.count(is_fallback), 1);
+        assert!(ctx.game_scx_check().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_fallback_whose_stop_does_not_take_is_reported_unverified_and_not_retried() {
+        // A scheduler that is not the one asked for, and a stop polkit refuses.
+        let mut w = ScxWriter::new(
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("rusty".into()),
+            },
+        );
+        w.fallback = Outcome::Refused("scxctl stop: Error: not authorized".into());
+        w.after_fallback = None;
+        let w = Arc::new(w);
+        let ctx = scx_session("scx-fb-unverified", w.clone()).await;
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_fallback"), "unverified");
+        assert_eq!(str_of(&st, "scx_effective"), "rusty");
+        let detail = str_of(&st, "scx_fallback_detail");
+        assert!(detail.contains("UNVERIFIED"), "{detail}");
+        assert!(detail.contains("not authorized"), "{detail}");
+        assert!(detail.contains("not retried"), "{detail}");
+        for _ in 0..5 {
+            assert!(ctx.game_scx_check().await.is_none());
+        }
+        assert_eq!(w.count(is_fallback), 1, "unverified is reported, not looped on");
+    }
+
+    #[tokio::test]
+    async fn no_answer_from_the_kernel_is_not_a_failure_to_act_on() {
+        let w = Arc::new(ScxWriter::new(
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("lavd".into()),
+            },
+        ));
+        let ctx = scx_session("scx-fb-influx", w.clone()).await;
+        w.set_state(ScxState::InFlux("disabling".into()));
+        assert!(ctx.game_scx_check().await.is_none());
+        w.set_state(ScxState::Unreadable("EACCES".into()));
+        assert!(ctx.game_scx_check().await.is_none());
+        assert_eq!(w.count(is_fallback), 0);
+        // And the last definite reading stands.
+        assert_eq!(str_of(&ctx.game_status().await, "scx_state"), "loaded");
     }
 
     fn str_of(m: &HashMap<String, OwnedValue>, key: &str) -> String {
@@ -1847,7 +2343,7 @@ mod tests {
             &root,
             PROFILE_SCX,
             &irq_root,
-            Arc::new(ScxWriter { outcome, state }),
+            Arc::new(ScxWriter::new(outcome, state)),
         );
         ctx.game_enter(&[]).await.unwrap();
         ctx.game_status().await
@@ -1986,7 +2482,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_scheduler_that_is_not_the_one_asked_for_is_loaded_and_says_so() {
+    async fn a_scheduler_that_is_not_the_one_asked_for_is_stopped_and_says_so() {
+        // Before the fallback this was reported and left running. A scheduler
+        // the profile did not ask for is not the one this session was for, so
+        // it is now treated like any other failure: stopped once, read back.
         let st = scx_status(
             "scx-wrong",
             Outcome::Landed,
@@ -1995,14 +2494,12 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(
-            str_of(&st, "scx_state"),
-            "loaded",
-            "something IS attached — that is a different problem from nothing being attached"
-        );
+        assert_eq!(str_of(&st, "scx_state"), "not loaded");
+        assert_eq!(str_of(&st, "scx_fallback"), "verified");
         assert!(
-            str_of(&st, "scx_detail").contains("not the scheduler that was asked for"),
-            "but the disagreement has to be visible"
+            str_of(&st, "scx_detail").contains("root/ops reads 'rusty'"),
+            "the disagreement has to stay visible: {}",
+            str_of(&st, "scx_detail")
         );
     }
 
@@ -2112,7 +2609,7 @@ mod tests {
             &root,
             PROFILE_SCX,
             &irq_root,
-            Arc::new(ScxWriter { outcome, state }),
+            Arc::new(ScxWriter::new(outcome, state)),
         );
         ctx.game_enter(&[]).await.unwrap();
         ctx.game_status().await
