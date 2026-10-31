@@ -548,7 +548,8 @@ section "the fail-safe"
 : > "$CALLS"
 rm -f "${BIN}/gamescope"
 rc="$(env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" RIME_ROOT="$KATANA" \
-      RIME_GAMING_NO_RIMED=1 bash "$SESSION" >/dev/null 2>"${WORK}/log"; printf '%s' "$?")"
+      RIME_GAMING_NO_RIMED=1 RIME_SECRETS_START="${ROOT}/files/system/libexec/rime-secrets-start" \
+      bash "$SESSION" >/dev/null 2>"${WORK}/log"; printf '%s' "$?")"
 if [ "$rc" != "0" ]; then
     ok "a missing gamescope exits non-zero, so greetd re-displays the greeter"
 else
