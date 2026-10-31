@@ -262,6 +262,54 @@ grep -q 'syslog.syslog(syslog.LOG_WARNING, "stopped without changing anything: %
 grep -q 'signal.alarm(DEADLINE_SECS)' "$HELPER" && ok "a hard deadline stops a helper that hangs" \
     || bad "a hard deadline stops a helper that hangs"
 
+# ── §5b only when gnome-keyring is the provider ─────────────────────────────
+# Fedora 45 moved its desktops to oo7-daemon. This helper renames
+# gnome-keyring's files, so where gnome-keyring is not the image's provider, or
+# not installed, it must do nothing, say so, and still exit 0.
+echo "── §5b gnome-keyring is the provider, or nothing happens"
+cat >"$W/gate.py" <<EOF
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("rkl", "$HELPER")
+spec = importlib.util.spec_from_loader("rkl", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+logged = []
+m.syslog.syslog = lambda *a: logged.append(a[-1])
+m.PROVIDER_FILE = sys.argv[2]
+if sys.argv[1] == "no-daemon":
+    m.GNOME_KEYRING_DAEMON = "/nonexistent/gnome-keyring-daemon"
+reached = []
+m._password_is_the_accounts = lambda u, p: reached.append(1) or False
+rc = m.main()
+print("rc=%d reached=%d log=%s" % (rc, len(reached), " | ".join(logged)))
+EOF
+printf '# test\nprovider=oo7\nportal=oo7-portal\n' >"$W/prov-oo7"
+printf 'provider=gnome-keyring\nportal=gnome-keyring\n' >"$W/prov-gk"
+gate() { printf 'login-pw\0' | env PAM_TYPE=auth PAM_USER="$(id -un)" python3 "$W/gate.py" "$@" 2>&1; }
+r="$(gate provider "$W/prov-oo7")"
+[[ "$r" == "rc=0 reached=0 log=skipped: the Secret Service provider is oo7, not gnome-keyring; nothing moved" ]] \
+    && ok "provider oo7: exit 0, nothing checked or moved, and the journal says why" || bad "provider oo7: exit 0, nothing checked or moved, and the journal says why" "$r"
+r="$(gate no-daemon "$W/prov-gk")"
+[[ "$r" == "rc=0 reached=0 log=skipped: gnome-keyring is not installed; nothing moved" ]] \
+    && ok "gnome-keyring not installed: exit 0 and a logged skip" || bad "gnome-keyring not installed: exit 0 and a logged skip" "$r"
+r="$(gate provider "$W/prov-gk")"
+[[ "$r" == "rc=0 reached=1 "* ]] && ok "provider gnome-keyring: it goes on to check the password" \
+    || bad "provider gnome-keyring: it goes on to check the password" "$r"
+r="$(gate provider "$W/no-such-provider-file")"
+[[ "$r" == "rc=0 reached=1 "* ]] && ok "no provider file (every release before it): gnome-keyring, as before" \
+    || bad "no provider file (every release before it): gnome-keyring, as before" "$r"
+grep -q 'login-pw' <<<"$r" && bad "…and the password never reaches the log"
+
+# A store in oo7's format: the same header, version 1.0 (the first 24 bytes are
+# what oo7-daemon 0.7.0 wrote to keyrings/v1/login.keyring on Fedora 45).
+K="$W/p5b/.local/share/keyrings"; mkdir -p "$K"
+printf 'GnomeKeyring\n\r\0\n\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' >"$K/Default_keyring.keyring"
+printf 'Default_keyring' >"$K/default"
+s0="$(sums "$K")"
+r="$(adopt "$K" login-pw)"
+if [[ "$r" == "kept | the default keyring 'Default_keyring' is not in gnome-keyring's file format (version 1.0); left alone" ]] \
+    && [ "$(sums "$K")" = "$s0" ]; then ok "an oo7-format store is left alone, and the verdict says it is another format"
+else bad "an oo7-format store is left alone, and the verdict says it is another format" "$r"; fi
+
 # ── §6 the real program, as pam_exec runs it (root) ─────────────────────────
 echo "── §6 as root, for a real account, through unix_chkpwd"
 if [ "$(id -u)" -ne 0 ] || [ "${RIME_KEYRING_TEST_ACCOUNT:-}" != 1 ]; then

@@ -30,7 +30,11 @@
 # root on the user's files (it drops to the user first), replace a login
 # keyring that holds anything, touch the files under a running keyring daemon,
 # write the password anywhere, or ever fail a login: every path exits 0, and a
-# hard alarm stops it if anything hangs. The verdict goes to the journal:
+# hard alarm stops it if anything hangs. It also does nothing at all unless
+# gnome-keyring is the image's Secret Service provider
+# (/usr/share/rime/secrets-provider, and the daemon installed): the files it
+# renames are gnome-keyring's, and a store in any other format (oo7 writes
+# version 1 of the same header) is left alone. The verdict goes to the journal:
 #
 #   journalctl -t rime-keyring-login
 import ctypes
@@ -49,6 +53,8 @@ MAGIC = b"GnomeKeyring\n\r\0\n"
 MAX_PASSWORD = 512           # PAM_MAX_RESP_SIZE: all pam_exec will ever send
 CHKPWD = "/usr/sbin/unix_chkpwd"
 DEADLINE_SECS = 5            # pam_exec waits for us; a login must not
+PROVIDER_FILE = "/usr/share/rime/secrets-provider"
+GNOME_KEYRING_DAEMON = "/usr/bin/gnome-keyring-daemon"
 
 
 class Keyring:
@@ -57,10 +63,13 @@ class Keyring:
 
     def __init__(self, data):
         self.ok = False
+        self.why = "not an encrypted keyring file"
         if not data.startswith(MAGIC) or len(data) < len(MAGIC) + 4:
             return  # not a binary keyring (a textual one is stored unlocked)
         off = len(MAGIC)
         if data[off:off + 4] != b"\0\0\0\0":  # version 0.0, AES, MD5
+            # oo7 writes the same header with major version 1.
+            self.why = "not in gnome-keyring's file format (version %d.%d)" % (data[off], data[off + 1])
             return
         off += 4
         try:
@@ -206,7 +215,8 @@ def adopt(keyrings, password, now=None):
     target_path = os.path.join(keyrings, default + ".keyring")
     target = _read_keyring(target_path)
     if target is None or not target.ok:
-        return False, "the default keyring '%s' is not an encrypted keyring file; left alone" % default
+        why = target.why if target is not None else "not an encrypted keyring file"
+        return False, "the default keyring '%s' is %s; left alone" % (default, why)
     if not target.opens_with(password):
         return False, ("the default keyring '%s' has a different password; it asks once more, and "
                        "ticking 'Automatically unlock' then lets the login open it" % default)
@@ -247,6 +257,30 @@ def _password_is_the_accounts(user, password):
     return r.returncode == 0
 
 
+def _provider():
+    """The Secret Service provider the image names; gnome-keyring when the
+    file is absent, as it is on every release before the file existed."""
+    provider = None
+    try:
+        with open(PROVIDER_FILE, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("provider="):
+                    provider = line[len("provider="):].strip()
+    except OSError:
+        pass
+    return provider or "gnome-keyring"
+
+
+def _not_ours():
+    """Why this helper must not act on this machine, or None."""
+    provider = _provider()
+    if provider != "gnome-keyring":
+        return "the Secret Service provider is %s, not gnome-keyring; nothing moved" % provider
+    if not os.path.exists(GNOME_KEYRING_DAEMON):
+        return "gnome-keyring is not installed; nothing moved"
+    return None
+
+
 def _daemon_running(uid):
     for pid in os.listdir("/proc"):
         if not pid.isdigit():
@@ -271,6 +305,11 @@ def main():
             return 0
         user = os.environ.get("PAM_USER") or ""
         password = sys.stdin.buffer.read(MAX_PASSWORD + 1).split(b"\0", 1)[0]
+        skip = _not_ours()
+        if skip:
+            # No user name: a mistyped one can be somebody's password.
+            syslog.syslog(syslog.LOG_INFO, "skipped: %s" % skip)
+            return 0
         try:
             pw = pwd.getpwnam(user)
         except KeyError:
