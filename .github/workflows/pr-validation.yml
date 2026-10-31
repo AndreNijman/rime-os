@@ -3100,8 +3100,11 @@ jobs:
               echo "::error::$skipped keyring-login assertions could not run ($summary); a could-not-run is not a pass"
               exit 1
           }
-          [ "$passed" -ge 40 ] || {
-              echo "::error::only $passed keyring-login assertions ran; 40 is every section including the real-account run"
+          # 45 = every section including the real-account run: 40 without
+          # §6 (measured as a user) + §6's 5 (measured as root in a
+          # container). A run that drops §5b or §6 falls below it.
+          [ "$passed" -ge 45 ] || {
+              echo "::error::only $passed keyring-login assertions ran; 45 is every section including the real-account run"
               exit 1
           }
 
@@ -3125,23 +3128,31 @@ jobs:
       # gnome-keyring leaves apps with NO Secret Service at all. The same suite,
       # on Fedora 45 with only oo7-daemon installed, against the shipped
       # launcher: oo7 must end up owning org.freedesktop.secrets and the log
-      # must name it. oo7-daemon refuses to run as root in a container, so the
-      # suite runs as a throwaway user. exit 97 = dnf could not resolve the
-      # packages: reported as "did not run", the greeter a11y steps' trade.
+      # must name it. A guarded Rime image cannot be this machine (the build
+      # refuses oo7-daemon): this proves the helper's fallback against the
+      # real daemon. oo7-daemon refuses to run as root in a container, so the
+      # suite runs as a throwaway user. exit 97 = dnf could not install the
+      # packages (after its own retries): reported as a WARNING that the
+      # suite did not run, the greeter a11y steps' trade. Any other failure,
+      # including useradd's (98), is red.
       - name: Run keyring session-start assertions (Fedora 45, oo7 only)
         if: ${{ !cancelled() }}
         run: |
           rc=0
           out="$(docker run --rm -v "$PWD":/w -w /w fedora:45 bash -c '
-                dnf -y install --setopt=install_weak_deps=False \
+                dnf -y install --setopt=install_weak_deps=False --setopt=retries=5 \
                     oo7-daemon dbus-daemon glib2 procps-ng util-linux shadow-utils \
                     >/dev/null 2>&1 || exit 97
-                useradd -m rimetest || exit 97
+                useradd -m rimetest || exit 98
                 runuser -u rimetest -- env RIME_SECRETS_PROVIDER=oo7 ./tests/test-rime-keyring-session-start.sh' 2>&1)" || rc=$?
           printf '%s\n' "$out"
           if [ "$rc" -eq 97 ]; then
-              echo "could not install oo7-daemon in the container; the oo7 session-start suite did not run"
+              echo "::warning::could not install oo7-daemon in the container; the oo7 session-start suite did not run"
               exit 0
+          fi
+          if [ "$rc" -eq 98 ]; then
+              echo "::error::could not create the throwaway user in the container"
+              exit 1
           fi
           grep -qE '^keyring-session-start: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \
             || { echo "::error::keyring-session-start (oo7) must pass with nothing skipped"; exit 1; }
@@ -3164,17 +3175,20 @@ jobs:
       # gnome-keyring: it passes as shipped, and refuses each way a second
       # provider can arrive, including oo7-portal installed from the real
       # repositories (it requires oo7-daemon), naming what pulled it in.
+      # exit 97 = dnf could not install gnome-keyring: a WARNING, as above.
+      # The suite's own oo7-portal install SKIPS when dnf fails, and a skip
+      # is red here.
       - name: Run Secret Service build-guard assertions (Fedora 45)
         if: ${{ !cancelled() }}
         run: |
           rc=0
           out="$(docker run --rm -v "$PWD":/w -w /w fedora:45 bash -c '
-                dnf -y install --setopt=install_weak_deps=False \
+                dnf -y install --setopt=install_weak_deps=False --setopt=retries=5 \
                     gnome-keyring glib2 >/dev/null 2>&1 || exit 97
                 ./tests/test-rime-secrets-guard.sh' 2>&1)" || rc=$?
           printf '%s\n' "$out"
           if [ "$rc" -eq 97 ]; then
-              echo "could not install gnome-keyring in the container; the build-guard suite did not run"
+              echo "::warning::could not install gnome-keyring in the container; the build-guard suite did not run"
               exit 0
           fi
           grep -qE '^secrets-guard: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \

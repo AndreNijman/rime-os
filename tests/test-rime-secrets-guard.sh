@@ -105,7 +105,7 @@ refuses "a second Secret portal backend is refused" "rime-test.portal"
 rm -f /usr/share/xdg-desktop-portal/portals/rime-test.portal
 
 # 7. The real drift: a package that requires oo7-daemon.
-if dnf -y -q install --setopt=install_weak_deps=False oo7-portal >/dev/null 2>&1; then
+if dnf -y -q install --setopt=install_weak_deps=False --setopt=retries=5 oo7-portal >/dev/null 2>&1; then
     refuses "oo7-daemon in the image is refused" "oo7-daemon-"
     if grep -E 'required by:.*oo7-portal' "$W/log" >/dev/null; then ok "...and the message names what pulled it in (oo7-portal)"
     else bad "...and the message names what pulled it in (oo7-portal)" "$(grep -A1 FATAL "$W/log" | tr '\n' ' ')"; fi
