@@ -3089,8 +3089,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
-          out="$(sudo RIME_KEYRING_TEST_ACCOUNT=1 ./tests/test-rime-keyring-login.sh 2>&1)"
+          # Keep the output when the suite fails: set -e would end the step at the
+          # assignment and hide which assertion failed.
+          rc=0
+          out="$(sudo RIME_KEYRING_TEST_ACCOUNT=1 ./tests/test-rime-keyring-login.sh 2>&1)" || rc=$?
           printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the keyring-login suite exited $rc"; exit 1; }
           summary="$(printf '%s' "$out" | grep -E '^keyring-login: ' || true)"
           [ -n "$summary" ] || { echo "::error::the keyring-login suite printed no summary line"; exit 1; }
           read -r passed _ failed _ skipped _ <<<"$(printf '%s' "$summary" | sed 's/^keyring-login: //')"

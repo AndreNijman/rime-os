@@ -274,6 +274,10 @@ spec = importlib.util.spec_from_loader("rkl", loader)
 m = importlib.util.module_from_spec(spec); loader.exec_module(m)
 logged = []
 m.syslog.syslog = lambda *a: logged.append(a[-1])
+# An ordinary account, whoever runs the suite: main() leaves uid < 1000 alone,
+# so under sudo (CI's root run) the real PAM_USER, root, never reached the gate.
+_pw = type("pw", (), {"pw_uid": 4242, "pw_gid": 4242, "pw_dir": "/nonexistent"})
+m.pwd.getpwnam = lambda u: _pw
 m.PROVIDER_FILE = sys.argv[2]
 if sys.argv[1] == "no-daemon":
     m.GNOME_KEYRING_DAEMON = "/nonexistent/gnome-keyring-daemon"
@@ -284,7 +288,7 @@ print("rc=%d reached=%d log=%s" % (rc, len(reached), " | ".join(logged)))
 EOF
 printf '# test\nprovider=oo7\nportal=oo7-portal\n' >"$W/prov-oo7"
 printf 'provider=gnome-keyring\nportal=gnome-keyring\n' >"$W/prov-gk"
-gate() { printf 'login-pw\0' | env PAM_TYPE=auth PAM_USER="$(id -un)" python3 "$W/gate.py" "$@" 2>&1; }
+gate() { printf 'login-pw\0' | env PAM_TYPE=auth PAM_USER=rkl-gate-user python3 "$W/gate.py" "$@" 2>&1; }
 r="$(gate provider "$W/prov-oo7")"
 [[ "$r" == "rc=0 reached=0 log=skipped: the Secret Service provider is oo7, not gnome-keyring; nothing moved" ]] \
     && ok "provider oo7: exit 0, nothing checked or moved, and the journal says why" || bad "provider oo7: exit 0, nothing checked or moved, and the journal says why" "$r"
