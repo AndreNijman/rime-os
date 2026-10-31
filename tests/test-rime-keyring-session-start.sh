@@ -24,10 +24,13 @@
 #           (RIME_KEYRING_QUICK=1 skips this one wait).
 #
 #    oo7  Fedora 45's provider, on a machine with NO gnome-keyring (CI runs it
-#      in a fedora:45 container with only oo7-daemon installed). Nothing starts
-#      oo7 at login in Rime, and oo7-daemon ships no D-Bus service file, so a
-#      session that only knows gnome-keyring leaves apps with no Secret Service
-#      at all:
+#      in a fedora:45 container with only oo7-daemon installed). A guarded Rime
+#      image cannot be this machine (the build refuses oo7-daemon); this is the
+#      helper's fallback, proved against the real daemon. Nothing starts oo7 at
+#      login in Rime, and oo7-daemon ships no D-Bus service file, so a session
+#      that only knows gnome-keyring leaves apps with no Secret Service at all:
+#        0. no D-Bus service file on this system claims org.freedesktop.secrets
+#           (so on a real session bus, too, nothing would activate one);
 #        1. before the session step nobody owns org.freedesktop.secrets;
 #        2. after the launcher, oo7-daemon owns it;
 #        3. it answers as a Secret Service (it has a login collection);
@@ -47,9 +50,11 @@ set -uo pipefail
 # writing then fails (EPIPE, or 141 from SIGPIPE) and so does the pipeline,
 # at random. pipe_has reads its input to the end.
 pipe_has() { grep "$@" >/dev/null; }
-cd "$(dirname "$0")" || exit 2
-LAUNCHER="${RIME_TEST_LAUNCHER:-../files/system/libexec/rime-shell-autostart}"
+# RIME_TEST_LAUNCHER is read against the caller's directory, before the cd.
+LAUNCHER="${RIME_TEST_LAUNCHER:-$(dirname "$0")/../files/system/libexec/rime-shell-autostart}"
 [ -f "$LAUNCHER" ] || { echo "cannot find $LAUNCHER"; exit 2; }
+LAUNCHER="$(realpath -- "$LAUNCHER")"
+cd "$(dirname "$0")" || exit 2
 HELPER="$(pwd)/../files/system/libexec/rime-secrets-start"
 PROVIDER_FILE="$(pwd)/../files/system/rime-secrets-provider"
 [ -x "$HELPER" ] || { echo "cannot find $HELPER"; exit 2; }
@@ -125,8 +130,20 @@ launch() {
 }
 
 if [ "$PROVIDER" = oo7 ]; then
+    # 0. The installed system's activation files (the private bus below has
+    #    no service directory, so step 1 alone could not show this).
+    claims=""
+    for d in /usr/share/dbus-1/services /usr/local/share/dbus-1/services; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*.service; do
+            [ -f "$f" ] && pipe_has -x 'Name=org.freedesktop.secrets' "$f" && claims="$claims $f"
+        done
+    done
+    if [ -z "$claims" ]; then ok "no D-Bus service file claims org.freedesktop.secrets (oo7-daemon ships none)"
+    else bad "no D-Bus service file claims org.freedesktop.secrets" "claimed by:$claims"; fi
+
     # 1. Before the session step.
-    if [ -z "$(owner_pid)" ]; then ok "without the session step nobody serves secrets (oo7 has no D-Bus activation file)"
+    if [ -z "$(owner_pid)" ]; then ok "without the session step nobody serves secrets"
     else bad "without the session step nobody serves secrets" "owned by pid $(owner_pid)"; fi
 
     # 2. The launcher.
