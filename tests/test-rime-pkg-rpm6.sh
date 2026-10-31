@@ -78,6 +78,7 @@ lvl=$(rpm --eval '%{_pkgverify_level}')
 # ── throwaway keys and four tiny packages ───────────────────────────────────
 #   rimesys      signed by a key imported into the SYSTEM rpmdb
 #   rimecopr     signed by a key only the COPR keyring will hold
+#   rimecopr2    signed by a second COPR's key
 #   rimeother    signed by a key imported nowhere
 #   rimeunsigned not signed at all
 K=/keys; B=/build; R=/rpms; mkdir -p "$K" "$B" "$R"
@@ -88,7 +89,7 @@ mkkey() {
     gpg --homedir "$K/$1" --armor --export > "$K/$1.asc" 2>/dev/null
 }
 fpr() { gpg --homedir "$K/$1" --with-colons --fingerprint 2>/dev/null | awk -F: '/^fpr:/{print $10; exit}'; }
-mkkey sys; mkkey copr; mkkey other
+mkkey sys; mkkey copr; mkkey copr2; mkkey other
 cat > "$B/p.spec" <<'SPEC'
 Name: %{pname}
 Version: 1.0
@@ -116,10 +117,11 @@ sign() {  # $1 key, $2 rpm
         "$2" >/dev/null 2>&1
 }
 echo marker > "$B/marker"
-for n in rimesys rimecopr rimeother rimeunsigned; do
+for n in rimesys rimecopr rimecopr2 rimeother rimeunsigned; do
     mkrpm "$n" "/usr/share/$n/marker" "$B/marker" "$R" || bad "fixture $n builds" "rpmbuild failed"
 done
-sign sys "$R/rimesys-1.0.rpm" && sign copr "$R/rimecopr-1.0.rpm" && sign other "$R/rimeother-1.0.rpm" \
+sign sys "$R/rimesys-1.0.rpm" && sign copr "$R/rimecopr-1.0.rpm" && sign copr2 "$R/rimecopr2-1.0.rpm" \
+    && sign other "$R/rimeother-1.0.rpm" \
     && ok "fixtures signed with rpmsign ($(rpm --eval '%{_openpgp_sign}'))" \
     || bad "fixtures signed with rpmsign" "rpmsign failed"
 rpmkeys --import "$K/sys.asc" && ok "the system key imports into the system rpmdb" \
@@ -146,9 +148,37 @@ if [ -n "$db" ] && [ "$init" = 1 ]; then
     echo "error: can't create transaction lock on ${db}/.rpm.lock (Permission denied)" >&2
     exit 255
 fi
+# An rpm that imports fine but keeps its keys somewhere other than
+# rpmdb.sqlite: what refresh_copr_keyring's database check is there for.
+if [ -n "$db" ] && [ "${RPM_WRAP_NODB:-0}" = 1 ]; then
+    /usr/bin/rpm "$@" || exit
+    rm -f -- "$db/rpmdb.sqlite"
+    exit 0
+fi
 exec /usr/bin/rpm "$@"
 WRAP
 chmod +x /wrap/rpm
+# Every mv the keyring code makes, so the swap's mechanism is asserted rather
+# than inferred from a changed inode (a remove-then-rename changes it too).
+cat > /wrap/mv <<'WRAP'
+#!/bin/bash
+printf '%s\n' "$*" >> /tmp/mv.log
+exec /usr/bin/mv "$@"
+WRAP
+# `rime repo enable-copr/disable-copr` call `dnf5 copr …` (no repository is
+# touched here) and curl for the key, which this serves from $CURL_KEY.
+cat > /wrap/dnf5 <<'WRAP'
+#!/bin/bash
+[ "$2" = copr ] && exit 0
+exec /usr/bin/dnf5 "$@"
+WRAP
+cat > /wrap/curl <<'WRAP'
+#!/bin/bash
+out=""; prev=""
+for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
+cp -- "$CURL_KEY" "$out"
+WRAP
+chmod +x /wrap/mv /wrap/dnf5 /wrap/curl
 /wrap/rpm --dbpath /tmp/probe-db --initdb 2>/dev/null
 [ "$?" = 255 ] && /wrap/rpm --root /tmp/probe-root --initdb \
     && ok "control: the wrapper refuses only a --dbpath initdb" \
@@ -163,7 +193,7 @@ sig() {  # $1 rpm -> "rc|status"
     rpm_signature_ok "$1"; local rc=$?
     printf '%s|%s' "$rc" "${RPM_SIGSTATUS:-}"
 }
-f_sys=$R/rimesys-1.0.rpm f_copr=$R/rimecopr-1.0.rpm f_other=$R/rimeother-1.0.rpm f_uns=$R/rimeunsigned-1.0.rpm
+f_sys=$R/rimesys-1.0.rpm f_copr=$R/rimecopr-1.0.rpm f_copr2=$R/rimecopr2-1.0.rpm f_other=$R/rimeother-1.0.rpm f_uns=$R/rimeunsigned-1.0.rpm
 
 # ── rpm_signature_ok against the system keyring ─────────────────────────────
 rm -rf "$COPR_KEY_DB" "$COPR_KEYS"
@@ -215,10 +245,24 @@ leftover=$(find "$(dirname "$COPR_KEY_DB")" -maxdepth 1 -name 'copr-keyring.*' |
 
 # A second refresh replaces the keyring with a new directory.
 ino=$(stat -c %i "$COPR_KEY_DB")
+: > /tmp/mv.log
 PATH=/wrap:$PATH refresh_copr_keyring 2>"$E"; rc=$?
 [ "$rc" = 0 ] && [ "$(stat -c %i "$COPR_KEY_DB")" != "$ino" ] && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] \
     && ok "a refresh swaps in a new keyring that still verifies" \
     || bad "a refresh swaps in a new keyring that still verifies" "rc=$rc stderr: $(one "$E")"
+# …in ONE rename (renameat2 RENAME_EXCHANGE): no moment without a keyring.
+mvs=$(cat /tmp/mv.log)
+[ "$(wc -l < /tmp/mv.log)" = 1 ] && [[ "$mvs" == "--exchange -T -- $COPR_KEY_DB.new."*" $COPR_KEY_DB" ]] \
+    && ok "…with one mv --exchange, never a remove and a rename" \
+    || bad "…with one mv --exchange, never a remove and a rename" "mv calls: $(one /tmp/mv.log)"
+
+# An rpm that imports but writes no rpmdb.sqlite: refused, old keyring kept.
+ino=$(stat -c %i "$COPR_KEY_DB")
+RPM_WRAP_NODB=1 PATH=/wrap:$PATH refresh_copr_keyring 2>"$E"; rc=$?
+[ "$rc" != 0 ] && grep -F "wrote no" "$E" >/dev/null && [ "$(stat -c %i "$COPR_KEY_DB")" = "$ino" ] \
+    && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] \
+    && ok "a keyring built without rpmdb.sqlite is refused; the old one stays" \
+    || bad "a keyring built without rpmdb.sqlite is refused; the old one stays" "rc=$rc stderr: $(one "$E")"
 
 # One unreadable key among good ones: a refusal that names it and quotes rpm.
 echo 'not a key' > /tmp/broken
@@ -242,6 +286,42 @@ got=$(sig "$f_copr")
 [ "$rc" != 0 ] && [[ "$got" == "0|"* ]] \
     && ok "a corrupted key file does not cost the working keyring" \
     || bad "a corrupted key file does not cost the working keyring" "rc=$rc, $(basename "$f_copr") now: ${got#*|}"
+install -Dm0600 "$K/copr.asc" "$COPR_KEYS/owner/project.gpg"
+PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
+
+# ── revoking a COPR while another stored key is unreadable ──────────────────
+# The old engine ignored a failed import, so a machine may carry a key file
+# that never imported. A refresh then fails as a whole and keeps the previous
+# keyring, which still trusts the key `disable-copr` just removed: the
+# disabled COPR's packages would keep verifying. Disabling must fail closed.
+install -Dm0600 "$K/copr2.asc" "$COPR_KEYS/owner2/project2.gpg"
+PATH=/wrap:$PATH refresh_copr_keyring 2>"$E"; rc=$?
+[ "$rc" = 0 ] && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] && [ "$(sig "$f_copr2" | cut -d'|' -f1)" = 0 ] \
+    && ok "control: two COPR keys, both verify" \
+    || bad "control: two COPR keys, both verify" "rc=$rc stderr: $(one "$E")"
+install -Dm0600 /tmp/broken "$COPR_KEYS/aaa/broken.gpg"
+( PATH=/wrap:$PATH cmd_repo_disable_copr owner/project ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 1 ] && [ ! -e "$COPR_KEYS/owner/project.gpg" ] \
+    && ok "disable-copr with an unreadable key elsewhere: the disabled key is refused" \
+    || bad "disable-copr with an unreadable key elsewhere: the disabled key is refused" "rc=$rc rimecopr: $(sig "$f_copr") stderr: $(one "$E")"
+[ ! -e "$COPR_KEY_DB" ] && [ "$(sig "$f_copr2" | cut -d'|' -f1)" = 1 ] \
+    && ok "…by removing the keyring: every COPR package refused (fail closed)" \
+    || bad "…by removing the keyring: every COPR package refused (fail closed)" "keyring $([ -e "$COPR_KEY_DB" ] && echo present || echo absent)"
+grep -F "$COPR_KEYS/aaa/broken.gpg" "$E" | grep -F "disable-copr aaa/broken" >/dev/null \
+    && ok "…naming the key file and how to clear it" || bad "…naming the key file and how to clear it" "stderr: $(one "$E")"
+# Enabling another COPR blames the stored key that failed, not the new COPR.
+( CURL_KEY="$K/other.asc" PATH=/wrap:$PATH cmd_repo_enable_copr newowner/newproj ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && grep -F "the signing key stored for COPR 'aaa/broken'" "$E" >/dev/null \
+    && ! grep -F "could not import the signing key for COPR 'newowner/newproj'" "$E" >/dev/null \
+    && [ ! -e "$COPR_KEYS/newowner/newproj.gpg" ] \
+    && ok "enable-copr names the stored key that failed, not the new COPR" \
+    || bad "enable-copr names the stored key that failed, not the new COPR" "rc=$rc stderr: $(one "$E")"
+# Clearing the bad key is the way out it named.
+( PATH=/wrap:$PATH cmd_repo_disable_copr aaa/broken ) 2>"$E"; rc=$?
+[ "$rc" = 0 ] && [ "$(sig "$f_copr2" | cut -d'|' -f1)" = 0 ] && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 1 ] \
+    && ok "…and disabling that COPR rebuilds the keyring without either removed key" \
+    || bad "…and disabling that COPR rebuilds the keyring without either removed key" "rc=$rc stderr: $(one "$E")"
+rm -rf "$COPR_KEYS/owner2"
 install -Dm0600 "$K/copr.asc" "$COPR_KEYS/owner/project.gpg"
 PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
 
@@ -312,6 +392,9 @@ if ! declare -F rpm_cache_keep >/dev/null || [ -z "${RPM_CACHE:-}" ]; then
     echo PROBE_DONE
     exit 0
 fi
+# The disk is roomy here whatever the runner's is: the free-space bound has its
+# own cases in test-rime-pkg.sh, and these are about dnf5.
+rpm_cache_fs_space() { echo "1000000000000 500000000000"; }
 cachedl() {  # $1 destdir -> stderr of a download + guard + keep, in a subshell
     rm -rf "$1"; mkdir -p "$1"
     ( download_rpms "$1" htop && guard_rpms "$1" && rpm_cache_keep "$1" ) 2>&1

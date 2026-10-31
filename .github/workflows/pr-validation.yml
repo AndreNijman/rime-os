@@ -2752,7 +2752,10 @@ jobs:
       # before the new keys were imported. It asserts: rpm_signature_ok
       # accepts system- and COPR-keyring signatures and refuses unsigned and
       # unknown-key packages quoting rpmkeys; the COPR keyring builds without
-      # initdb, silently, and an import failure leaves the old one verifying;
+      # initdb, silently, swaps it in with one `mv --exchange`, and an import
+      # failure (or no rpmdb.sqlite) leaves the old one verifying; disabling a
+      # COPR while another stored key is unreadable fails closed (no keyring)
+      # and names that key, as enabling one does;
       # extract_rpms (with --nosignature, after guard_rpms) unpacks into an
       # empty root under %_pkgverify_level all; the ChatGPT `_keyring fs` check
       # accepts and refuses; and the rpm cache against the real dnf5 (a second
@@ -2774,7 +2777,7 @@ jobs:
           failed="$(printf '%s' "$counts" | awk '{print $3}')"
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed rpm6 assertions failed"; exit 1; }
-          [ "$passed" -ge 34 ] || { echo "::error::only $passed rpm6 assertions ran; 34 ran when the suite was added, so some no longer execute"; exit 1; }
+          [ "$passed" -ge 42 ] || { echo "::error::only $passed rpm6 assertions ran; 42 ran on 2026-10-31, so some no longer execute"; exit 1; }
           if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the rpm6 suite printed a SKIP: podman, the repository or rpm-build was unavailable, and the assertions it guards did not run"
               exit 1
