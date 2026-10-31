@@ -527,6 +527,15 @@ offline boot leaves it for the next boot, or for the next `rime update`.
 fixes instead of staying pinned at whatever was current on install day. If
 nothing changed it stops early and does not re-merge `/usr`.
 
+A rebuild downloads only what changed. The repository RPMs of the last
+successful build are kept in `/var/lib/rime/pkg/rpm-cache` under their exact
+file names, and a rebuild reuses each one whose checksum still matches the
+repository's metadata (`dnf5` checks it and fetches a fresh copy otherwise).
+Every reused file is signature-checked again, exactly like a download. After
+each successful build the cache holds that build's set and nothing else, so it
+costs about as much disk as the packages themselves; removing every user
+package empties it.
+
 ## Coming from a layered system
 
 If a machine already has rpm-ostree layered packages, `rime update` says so and

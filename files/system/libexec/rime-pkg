@@ -170,6 +170,15 @@ readonly LAUNCHER_DOORBELL="${APPIMAGE_PREFIX}/share/applications"
 # transaction lock" error would be printed on every single install.
 readonly WORK_ROOT="${PKG_ROOT}/work"
 readonly LOCK="${PKG_ROOT}/.lock"
+# Repository RPMs of the last successful build, kept by exact file name so the
+# next build fetches only what changed (see download_set). Never trusted: dnf5
+# checks every cached file against the repository's checksum before keeping it,
+# and guard_rpms verifies its signature on every build like any download. An
+# empty value turns the cache off; the variable exists so a test can point it
+# at a temp directory (RIME_PKG_RPM_CACHE), as RIME_PKG_GITHUB_API does.
+RPM_CACHE="${RIME_PKG_RPM_CACHE-${PKG_ROOT}/rpm-cache}"
+# The file names dnf5 resolved in this run, set by download_set.
+RPM_FETCHED=()
 # Increment whenever a newly baked image package may overlap existing user
 # extensions, or whenever the on-disk layout under PKG_ROOT changes. A mismatch
 # triggers one rebuild even within the same VERSION_ID — which is the whole
@@ -203,6 +212,10 @@ readonly LOCK="${PKG_ROOT}/.lock"
 #           requested list — there is no such thing as an extension built
 #           before this that holds a .deb. Bumping would re-download every rpm
 #           on every machine in the fleet to rebuild a byte-identical image.
+#   3 -> NOT BUMPED for the rpm cache (${PKG_ROOT}/rpm-cache), deliberately and
+#           for the same reason: it changes where a build gets its rpms from,
+#           never what an extension contains. A bump would re-download every
+#           rpm on every machine to produce byte-identical extensions.
 readonly PKG_COMPAT_LEVEL=3
 
 # Packages that must never come from an extension. The first group needs an
@@ -828,8 +841,11 @@ download_rpms() {
         warn "could not list the repositories' newer builds of image packages; resolving without pinning to the image"
         pin=""
     fi
+    local cache=""
+    rpm_cache_open && cache="$RPM_CACHE"
+    RPM_FETCHED=()
     if [ -n "$pin" ]; then
-        if dnf5 "${args[@]}" --exclude="$pin" "$@" >&2; then
+        if download_set "$destdir" "$cache" "${args[@]}" --exclude="$pin" "$@"; then
             compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
             return 0
         fi
@@ -840,8 +856,120 @@ download_rpms() {
         warn "no build of that set fits the image as it is; resolving against the newest builds to find what needs an OS update"
         rm -f -- "$destdir"/*.rpm
     fi
-    dnf5 "${args[@]}" "$@" >&2 || die "dependency resolution failed for: $*"
+    download_set "$destdir" "$cache" "${args[@]}" "$@" || die "dependency resolution failed for: $*"
     compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
+}
+
+# ── the rpm cache ────────────────────────────────────────────────────────────
+# WHY: every build downloads into a fresh mktemp directory that is deleted
+# afterwards, and `--setopt=keepcache=True` does nothing for `dnf5 download`
+# (measured on Fedora 45, dnf5 5.4.6: no packages/ directory is ever written
+# under /var/cache/libdnf5). So every build fetched the user's WHOLE package set
+# again: after every image update (rime-sysext-rebuild), and on every
+# `rime update` even when nothing had changed, because the up-to-date check
+# compares the resolved set only after the download. 3.1 GB on a gaming machine.
+#
+# HOW: `dnf5 download` skips a file already in --destdir whose checksum matches
+# the repository metadata ("Already downloaded"), and fetches it again when it
+# does not, including a same-size corruption (both measured). So the set is
+# resolved once with --url, each file the cache has under that exact name is
+# copied into the build's directory, and the real download fetches the rest.
+# Copied with --reflink=auto, never hard-linked: dnf5 rewrites a mismatching
+# file IN PLACE (same inode, measured), which would rewrite the cache too.
+#
+# The cache is never trusted: every file still has to match the repository's
+# checksum for dnf5 to keep it, and guard_rpms verifies its signature on every
+# build exactly as it does a fresh download. Bounded: after the build's guard
+# passes, the cache is made to hold that verified set and nothing else.
+
+# Can the cache be used? Creates it (0700, root's like the rest of PKG_ROOT).
+rpm_cache_open() {
+    [ -n "${RPM_CACHE:-}" ] || return 1
+    if ! install -d -m0700 -- "$RPM_CACHE" 2>/dev/null || [ ! -w "$RPM_CACHE" ]; then
+        warn "cannot use the package cache ${RPM_CACHE}; downloading every package"
+        return 1
+    fi
+    return 0
+}
+
+# A file name dnf5 resolved, safe to join to a directory.
+rpm_file_name_ok() {
+    case "$1" in
+        ''|.*|*/*) return 1 ;;
+        *.rpm) return 0 ;;
+    esac
+    return 1
+}
+
+# One resolving download. $1 = destdir, $2 = cache directory or "" for none,
+# rest = dnf5's argv. Sets RPM_FETCHED to the file names dnf5 resolved.
+download_set() {
+    local destdir="$1" cache="$2"; shift 2
+    if [ -z "$cache" ]; then
+        dnf5 "$@" >&2
+        return
+    fi
+    local listing url name reused=0
+    local -a names=()
+    # The same resolution, printed instead of fetched. Its errors (a solver
+    # problem, an unknown name) reach the user exactly as the download's would.
+    listing="$(dnf5 -q "$@" --url)" || return 1
+    while IFS= read -r url; do
+        case "$url" in *://*) ;; *) continue ;; esac
+        name="${url##*/}"
+        rpm_file_name_ok "$name" || { warn "dnf5 resolved a file name Rime will not use: '${name}'"; return 1; }
+        names+=("$name")
+        if [ -f "${cache}/${name}" ] \
+           && cp --reflink=auto -- "${cache}/${name}" "${destdir}/${name}" 2>/dev/null; then
+            reused=$((reused + 1))
+        fi
+    done <<<"$listing"
+    [ "$reused" -gt 0 ] && msg "reusing ${reused} of ${#names[@]} package(s) from the last build; dnf5 checks each against the repository"
+    dnf5 "$@" >&2 || return 1
+    # Both passes read the same metadata, so they resolve the same set. If a
+    # repository changed between them anyway, a file outside the listing would
+    # be in this build without being in RPM_FETCHED; say so instead of
+    # building from a set nobody resolved.
+    local f known n
+    for f in "$destdir"/*.rpm; do
+        [ -e "$f" ] || continue
+        known=0
+        for n in ${names[@]+"${names[@]}"}; do
+            [ "$n" = "${f##*/}" ] && { known=1; break; }
+        done
+        [ "$known" = 1 ] || { warn "the repositories changed during the download (${f##*/} was not in the resolved set); run the command again"; return 1; }
+    done
+    RPM_FETCHED=(${names[@]+"${names[@]}"})
+}
+
+# After guard_rpms passed: make the cache hold exactly the repository rpms this
+# build verified, and nothing else. $1 = the build's rpm directory. Never fatal:
+# a cache that cannot be written costs a download next time, not this build.
+rpm_cache_keep() {
+    local destdir="$1"
+    [ -n "${RPM_CACHE:-}" ] && [ -d "$RPM_CACHE" ] || return 0
+    local name f
+    local -A verified=()
+    for name in ${RPM_FETCHED[@]+"${RPM_FETCHED[@]}"}; do
+        # guard_rpms deletes what it omits or refuses; only what it kept counts.
+        [ -f "${destdir}/${name}" ] || continue
+        verified["$name"]=1
+        # Replaced, not compared: when dnf5 found the cached copy stale it has
+        # downloaded the right one. Same filesystem, so a link costs nothing;
+        # nothing writes to a build's rpms after the download.
+        if ln -f -- "${destdir}/${name}" "${RPM_CACHE}/.${name}.new" 2>/dev/null \
+           || cp --reflink=auto -- "${destdir}/${name}" "${RPM_CACHE}/.${name}.new" 2>/dev/null; then
+            mv -f -- "${RPM_CACHE}/.${name}.new" "${RPM_CACHE}/${name}" 2>/dev/null \
+                || rm -f -- "${RPM_CACHE}/.${name}.new"
+        fi
+    done
+    for f in "$RPM_CACHE"/* "$RPM_CACHE"/.[!.]*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        name="${f##*/}"
+        [ -n "${verified[$name]:-}" ] && [ -f "$f" ] && [ ! -L "$f" ] && continue
+        rm -rf -- "$f"
+    done
+    return 0
 }
 
 # Every repository build that would REPLACE a package the image ships, as one
@@ -2826,6 +2954,7 @@ rebuild_extension() {
         rm -f "$STATE"
         save_requested
         gc_local_cache
+        [ -z "${RPM_CACHE:-}" ] || rm -rf -- "$RPM_CACHE"
         post_merge
         return 0
     fi
@@ -2895,6 +3024,9 @@ rebuild_extension() {
     elif [ "${#debcached[@]}" -eq 0 ]; then
         die "every requested package is already part of Rime OS — nothing to install"
     fi
+    # Only after the guard: the cache holds verified files or none. Before the
+    # up-to-date check below, so a `rime update` with nothing new keeps it warm.
+    rpm_cache_keep "$rpms"
 
     # `rime update` calls this on every run. Rebuilding an identical extension
     # would burn minutes and, worse, re-merge /usr underneath a running desktop
