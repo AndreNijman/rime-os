@@ -299,8 +299,11 @@ r="$(gate provider "$W/no-such-provider-file")"
     || bad "no provider file (every release before it): gnome-keyring, as before" "$r"
 grep -q 'login-pw' <<<"$r" && bad "…and the password never reaches the log"
 
-# A store in oo7's format: the same header, version 1.0 (the first 24 bytes are
-# what oo7-daemon 0.7.0 wrote to keyrings/v1/login.keyring on Fedora 45).
+# A store in another format: the same header, version 1.0. The magic and the
+# version (the first 18 bytes) are what oo7-daemon 0.7.0 wrote to
+# keyrings/v1/login.keyring on Fedora 45 once an item was stored (--login
+# alone writes no file); the rest is zeros. oo7 never writes it HERE, where
+# this helper reads: this checks the verdict, the skip itself predates it.
 K="$W/p5b/.local/share/keyrings"; mkdir -p "$K"
 printf 'GnomeKeyring\n\r\0\n\1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0' >"$K/Default_keyring.keyring"
 printf 'Default_keyring' >"$K/default"

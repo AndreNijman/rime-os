@@ -33,8 +33,10 @@
 # hard alarm stops it if anything hangs. It also does nothing at all unless
 # gnome-keyring is the image's Secret Service provider
 # (/usr/share/rime/secrets-provider, and the daemon installed): the files it
-# renames are gnome-keyring's, and a store in any other format (oo7 writes
-# version 1 of the same header) is left alone. The verdict goes to the journal:
+# renames are gnome-keyring's. A store in any other format was always left
+# alone; the verdict now says which version it found. (oo7 writes version 1.0
+# of the same header, but under keyrings/v1/, which this never reads.) The
+# verdict goes to the journal:
 #
 #   journalctl -t rime-keyring-login
 import ctypes
@@ -68,7 +70,8 @@ class Keyring:
             return  # not a binary keyring (a textual one is stored unlocked)
         off = len(MAGIC)
         if data[off:off + 4] != b"\0\0\0\0":  # version 0.0, AES, MD5
-            # oo7 writes the same header with major version 1.
+            # Another version of the header: oo7-daemon 0.7.0 writes 1.0
+            # (measured), though in keyrings/v1/, not here.
             self.why = "not in gnome-keyring's file format (version %d.%d)" % (data[off], data[off + 1])
             return
         off += 4
