@@ -118,12 +118,14 @@ else
     ok "rime-installer.service does not name autovt@tty1 (it would unmask getty@tty1)"
 fi
 
-# The live env's enable/mask block, exactly as the image runs it: from the
-# RUN that refuses kmscon (and then sets the default target) to the first line
-# without a continuation.
+# The live env's enable/mask block, exactly as the image runs it: the whole
+# RUN instruction (first line to the first line without a continuation) that
+# sets the default target.
 RUNBLOCK="$W/units.sh"
-awk '/^RUN if rpm -q kmscon/ { on = 1 }
-     on { print; if ($0 !~ /\\$/) exit }' "$CF" | sed '1s/^RUN //' > "$RUNBLOCK"
+awk '/^RUN / { blk = ""; on = 1 }
+     on { blk = blk $0 "\n"; if ($0 !~ /\\$/) { on = 0
+          if (blk ~ /systemctl set-default multi-user\.target/) { printf "%s", blk; exit } } }' \
+    "$CF" | sed '1s/^RUN //' > "$RUNBLOCK"
 n=$(wc -l < "$RUNBLOCK")
 if [ "$n" -lt 5 ]; then
     bad "the live env's unit block is extracted from Containerfile.installer" "only $n lines"
