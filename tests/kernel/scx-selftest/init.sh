@@ -16,8 +16,9 @@
 #       error line in /dev/kmsg during the window;
 #    4. stops it with SIGINT and asserts state returns to disabled, with the
 #       kernel naming "unregistered from user space" as the reason.
-#  Then one scheduler is killed with SIGKILL, to prove the kernel itself hands
-#  every task back to the fair class when the userspace half vanishes.
+#  Then one scheduler is killed with SIGKILL while a busy task runs on it, to
+#  prove the kernel itself hands that task back to its own class when the
+#  userspace half vanishes (/proc/<busy>/sched ext.enabled 1 -> 0).
 #
 #  Output contract (parsed by run-scx-selftest.sh, one line each, on the
 #  serial console):
@@ -235,42 +236,55 @@ test_one() {
 
 # SIGKILL the userspace half: the kernel must disable the BPF scheduler by
 # itself and every task must be back on the fair class.
+# ext.enabled from /proc/<pid>/sched: 1 while the task is on the sched_ext
+# class, 0 on the kernel's own; empty when the kernel does not publish it.
+ext_enabled() {
+    grep -E '^ext\.enabled' "/proc/$1/sched" 2>/dev/null | tr -d ' ' | cut -d: -f2
+}
+
 test_kill9() {
-    local name="$1" bin="/usr/bin/$1" args pid fail="" o
+    local name="$1" bin="/usr/bin/$1" args pid busy fail="" o
     args="$(args_for "$name")"
     wait_for "$SETTLE" is_disabled || true
+    # A task that is RUNNING through the whole case: the class it is on before
+    # and after the SIGKILL is the proof, not a task started afterwards (a new
+    # task lands on the fair class by construction once sched_ext is off).
+    ( while :; do :; done ) &
+    busy=$!
     # shellcheck disable=SC2086
     "$bin" $args > "/tmp/${name}.kill9.out" 2>&1 &
     pid=$!
     if ! wait_for "$SETTLE" is_enabled; then
-        kill -KILL "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+        kill -KILL "$pid" "$busy" 2>/dev/null; wait "$pid" "$busy" 2>/dev/null
         say "kill9=${name} result=FAIL reason=not_enabled_within_${SETTLE}s"
         return 1
     fi
     o="$(ops)"
-    # A task started while the BPF scheduler is attached runs on it (switch_all
-    # is the default for every shipped scheduler); /proc/<pid>/sched says so.
-    local on_ext=""
-    on_ext="$(grep -E '^ext\.enabled' /proc/self/sched 2>/dev/null | tr -d ' ' | cut -d: -f2)"
+    # Every shipped scheduler switches all tasks (switch_all), so the busy task
+    # is on the ext class now; /proc/<pid>/sched says so.
+    local on_ext="" after=""
+    sleep 0.2
+    on_ext="$(ext_enabled "$busy")"
     kill -KILL "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
     if ! wait_for "$SETTLE" is_disabled; then
         fail="state_not_disabled_after_SIGKILL_($(state))"
     else
-        local after=""
-        after="$(grep -E '^ext\.enabled' /proc/self/sched 2>/dev/null | tr -d ' ' | cut -d: -f2)"
-        if [ -n "$after" ] && [ "$after" != 0 ]; then
-            fail="task_still_on_ext_class_after_disable"
+        after="$(ext_enabled "$busy")"
+        if [ "$on_ext" != 1 ]; then
+            fail="busy_task_not_on_ext_class_while_attached_(${on_ext:-unpublished})"
+        elif [ "$after" != 0 ]; then
+            fail="busy_task_not_back_on_the_kernel_class_after_SIGKILL_(${after:-unpublished})"
         fi
         # And the machine still schedules: a one-second load on the fair class
         # must finish (a wedged runqueue would hang here until the outer timeout).
         run_load 1
-        [ -z "$on_ext" ] && on_ext="unpublished"
-        [ -z "$after" ] && after="unpublished"
-        if [ -z "$fail" ]; then
-            say "kill9=${name} result=PASS ops=${o} ext_enabled_before=${on_ext} ext_enabled_after=${after} state=$(state)"
-            return 0
-        fi
+    fi
+    kill -KILL "$busy" 2>/dev/null
+    wait "$busy" 2>/dev/null
+    if [ -z "$fail" ]; then
+        say "kill9=${name} result=PASS ops=${o} busy_ext_enabled_before=${on_ext} busy_ext_enabled_after=${after} state=$(state)"
+        return 0
     fi
     say "kill9=${name} result=FAIL reason=$(clean "$fail") ops=${o}"
     return 1

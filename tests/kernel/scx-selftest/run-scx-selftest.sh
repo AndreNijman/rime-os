@@ -14,10 +14,11 @@
 #  runs this, so the pair is proven together before either reaches a user.
 #
 #  A compile is not this proof. The BPF in each scheduler is compiled against
-#  the shipped kernel's own BTF (scx-builder does that), but the kfunc
-#  prototypes are deliberately not taken from it (BPF_NO_KFUNC_PROTOTYPES in
-#  scx's common.bpf.h) and the verifier only runs at load. Only loading it on
-#  the kernel finds out.
+#  the vmlinux.h header pinned with the scx release, NOT against the shipped
+#  kernel's BTF; scx-builder only checks that header against the kernel's
+#  sched_ext_ops BTF. The kfunc prototypes come from neither
+#  (BPF_NO_KFUNC_PROTOTYPES in scx's common.bpf.h), and the verifier only runs
+#  at load. Only loading each scheduler on the shipped kernel finds out.
 #
 #  ═══ HOW ═══
 #
@@ -110,10 +111,16 @@ parse_log() {
     got="$(grep -E '^SCX-SELFTEST kill9=' <<<"$lines" || true)"
     if [ -z "$got" ]; then
         echo "FAIL: kill -9 fallback: no result line"; rc=1
-    elif grep -E ' result=PASS( |$)' <<<"$got" >/dev/null; then
-        echo "PASS: ${got#SCX-SELFTEST }"
-    else
+    elif ! grep -E ' result=PASS( |$)' <<<"$got" >/dev/null; then
         echo "FAIL: ${got#SCX-SELFTEST }"; rc=1
+    # The evidence, checked here as well as in the guest: a busy task was on
+    # sched_ext while the scheduler ran (1) and off it after the kill (0). A
+    # PASS without both says nothing about any task being handed back.
+    elif ! grep -E ' busy_ext_enabled_before=1( |$)' <<<"$got" >/dev/null \
+        || ! grep -E ' busy_ext_enabled_after=0( |$)' <<<"$got" >/dev/null; then
+        echo "FAIL: kill -9 fallback: PASS without a busy task seen on sched_ext before (1) and off it after (0): ${got#SCX-SELFTEST }"; rc=1
+    else
+        echo "PASS: ${got#SCX-SELFTEST }"
     fi
     verdict="$(grep -E '^SCX-SELFTEST verdict=' <<<"$lines" | tail -n 1 || true)"
     if [ -z "$verdict" ]; then

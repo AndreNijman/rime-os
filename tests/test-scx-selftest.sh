@@ -8,7 +8,8 @@
 #  that turns a serial console into PASS or FAIL. A parser that let a missing
 #  scheduler, a FAIL line or a guest that never finished through would make the
 #  gate pass on a broken kernel, so this feeds it the REAL serial log of a
-#  passing run (the published 7.2.9 image, 16 schedulers + kill -9) and that
+#  passing run (7.2.9 with the source-built scx 1.1.4 set, 16 schedulers +
+#  kill -9 of a scheduler with a busy task on it) and that
 #  log broken one way at a time, and asserts each break fails.
 #
 #  It also pins the guest's ops_matches (init.sh) to rimed's scx_ops_matches
@@ -86,6 +87,19 @@ expect_fail "a failed kill -9 fallback fails" "$T/kill9-fail.log" "kill9=scx_lav
 mutate kill9-missing '/kill9=/d'
 expect_fail "a missing kill -9 result fails" "$T/kill9-missing.log" "kill -9 fallback: no result line"
 
+# The kill -9 PASS must carry its evidence: a busy task on sched_ext while the
+# scheduler ran, and off it after the kill. A guest that stopped measuring (or
+# measured nothing, as the first version did with no task on the scheduler)
+# must not pass.
+mutate kill9-never-on 's/busy_ext_enabled_before=1/busy_ext_enabled_before=0/'
+expect_fail "a kill -9 PASS whose busy task was never on sched_ext fails" "$T/kill9-never-on.log" "PASS without a busy task"
+mutate kill9-still-on 's/busy_ext_enabled_after=0/busy_ext_enabled_after=1/'
+expect_fail "a kill -9 PASS whose busy task stayed on sched_ext fails" "$T/kill9-still-on.log" "PASS without a busy task"
+mutate kill9-no-evidence 's/ busy_ext_enabled_before=[0-9]+ busy_ext_enabled_after=[0-9]+//'
+expect_fail "a kill -9 PASS with no busy-task evidence fails" "$T/kill9-no-evidence.log" "PASS without a busy task"
+mutate kill9-unread 's/busy_ext_enabled_after=0/busy_ext_enabled_after=/'
+expect_fail "a kill -9 PASS whose after-reading is empty fails" "$T/kill9-unread.log" "PASS without a busy task"
+
 grep -v '^scx_tickless$' "$LIST" > "$T/short.txt"
 expect_fail "a scheduler the image does not list fails" "$LOG" "guest tested scx_tickless, which is not in the expected list" "$T/short.txt"
 
@@ -107,7 +121,7 @@ check_ops() {
 }
 check_ops lavd scx_lavd yes
 check_ops scx_lavd scx_lavd yes
-check_ops lavd_1.1.3_x86_64_unknown_linux_gnu scx_lavd yes
+check_ops lavd_1.1.4_x86_64_unknown_linux_gnu scx_lavd yes
 check_ops scx_flow_3.1.2_x86_64_unknown_linux_gnu scx_flow yes
 check_ops rusty scx_lavd no
 check_ops lavdx scx_lavd no

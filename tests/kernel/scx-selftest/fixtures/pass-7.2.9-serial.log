@@ -1,22 +1,22 @@
 SCX-SELFTEST boot kernel=7.2.9-cachyos1.apex1.fc45.x86_64 cpus=8 load_s=5 settle_s=10
-SCX-SELFTEST schedulers=16 list=scx_beerland,scx_bpfland,scx_cake,scx_chaos,scx_cosmos,scx_flash,scx_flow,scx_forge,scx_lavd,scx_layered,scx_mlfq,scx_p2dq,scx_pandemonium,scx_rustland,scx_rusty,scx_tickless
-SCX-SELFTEST sched=scx_beerland result=PASS ops=beerland_1.1.3_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST sched=scx_bpfland result=PASS ops=bpfland_1.1.3_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST sched=scx_cake result=PASS ops=cake_1.2.1_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST sched=scx_chaos result=PASS ops=chaos_1.1.3_x86_64_unknown_linux_gnu attach_ms=205 load_s=5
-SCX-SELFTEST sched=scx_cosmos result=PASS ops=cosmos_1.1.6_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST sched=scx_flash result=PASS ops=flash_1.1.3_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST sched=scx_flow result=PASS ops=scx_flow_3.1.2_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST sched=scx_forge result=PASS ops=forge_1.1.2_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST sched=scx_lavd result=PASS ops=lavd_1.1.3_x86_64_unknown_linux_gnu attach_ms=1122 load_s=5
-SCX-SELFTEST sched=scx_layered result=PASS ops=layered_1.1.3_x86_64_unknown_linux_gnu attach_ms=614 load_s=5
-SCX-SELFTEST sched=scx_mlfq result=PASS ops=mlfq_1.0.1_x86_64_unknown_linux_gnu attach_ms=104 load_s=5
-SCX-SELFTEST sched=scx_p2dq result=PASS ops=p2dq_1.1.3_x86_64_unknown_linux_gnu attach_ms=205 load_s=5
-SCX-SELFTEST sched=scx_pandemonium result=PASS ops=pandemonium_5.19.0_x86_64_unknown_linux_gnu attach_ms=409 load_s=5
-SCX-SELFTEST sched=scx_rustland result=PASS ops=rustland_1.1.3_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST sched=scx_rusty result=PASS ops=rusty_1.1.3_x86_64_unknown_linux_gnu attach_ms=205 load_s=5
-SCX-SELFTEST sched=scx_tickless result=PASS ops=tickless_1.1.3_x86_64_unknown_linux_gnu attach_ms=103 load_s=5
-SCX-SELFTEST kill9=scx_lavd result=PASS ops=lavd_1.1.3_x86_64_unknown_linux_gnu ext_enabled_before=1 ext_enabled_after=0 state=disabled
+SCX-SELFTEST schedulers=16 list=scx_beerland,scx_bpfland,scx_cake,scx_chaos,scx_cosmos,scx_eevdf,scx_flash,scx_flow,scx_forge,scx_lavd,scx_layered,scx_p2dq,scx_pandemonium,scx_rustland,scx_rusty,scx_tickless
+SCX-SELFTEST sched=scx_beerland result=PASS ops=beerland_1.1.4_x86_64_unknown_linux_gnu attach_ms=108 load_s=5
+SCX-SELFTEST sched=scx_bpfland result=PASS ops=bpfland_1.1.4_x86_64_unknown_linux_gnu attach_ms=105 load_s=5
+SCX-SELFTEST sched=scx_cake result=PASS ops=cake_1.2.2_x86_64_unknown_linux_gnu attach_ms=207 load_s=5
+SCX-SELFTEST sched=scx_chaos result=PASS ops=chaos_1.1.4_x86_64_unknown_linux_gnu attach_ms=208 load_s=5
+SCX-SELFTEST sched=scx_cosmos result=PASS ops=cosmos_1.1.7_x86_64_unknown_linux_gnu attach_ms=109 load_s=5
+SCX-SELFTEST sched=scx_eevdf result=PASS ops=eevdf_1.1.4_x86_64_unknown_linux_gnu attach_ms=2752 load_s=5
+SCX-SELFTEST sched=scx_flash result=PASS ops=flash_1.1.4_x86_64_unknown_linux_gnu attach_ms=108 load_s=5
+SCX-SELFTEST sched=scx_flow result=PASS ops=flow_4.8.15_x86_64_unknown_linux_gnu attach_ms=1533 load_s=5
+SCX-SELFTEST sched=scx_forge result=PASS ops=forge_1.1.3_x86_64_unknown_linux_gnu attach_ms=106 load_s=5
+SCX-SELFTEST sched=scx_lavd result=PASS ops=lavd_1.1.4_x86_64_unknown_linux_gnu attach_ms=1327 load_s=5
+SCX-SELFTEST sched=scx_layered result=PASS ops=layered_1.1.4_x86_64_unknown_linux_gnu attach_ms=613 load_s=5
+SCX-SELFTEST sched=scx_p2dq result=PASS ops=p2dq_1.1.4_x86_64_unknown_linux_gnu attach_ms=208 load_s=5
+SCX-SELFTEST sched=scx_pandemonium result=PASS ops=pandemonium_5.23.1_x86_64_unknown_linux_gnu attach_ms=309 load_s=5
+SCX-SELFTEST sched=scx_rustland result=PASS ops=rustland_1.1.4_x86_64_unknown_linux_gnu attach_ms=107 load_s=5
+SCX-SELFTEST sched=scx_rusty result=PASS ops=rusty_1.1.4_x86_64_unknown_linux_gnu attach_ms=102 load_s=5
+SCX-SELFTEST sched=scx_tickless result=PASS ops=tickless_1.1.4_x86_64_unknown_linux_gnu attach_ms=107 load_s=5
+SCX-SELFTEST kill9=scx_lavd result=PASS ops=lavd_1.1.4_x86_64_unknown_linux_gnu busy_ext_enabled_before=1 busy_ext_enabled_after=0 state=disabled
 SCX-SELFTEST verdict=PASS passed=17 failed=0 total=17
-[   91.736788] sysrq: Power Off
-[   91.737846] reboot: Power down
+[   96.699829] sysrq: Power Off
+[   96.703686] reboot: Power down
