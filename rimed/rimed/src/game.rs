@@ -228,7 +228,9 @@ pub fn scx_effective(state: &ScxState, requested: Option<&str>) -> String {
             Some(want) if rimed_core::syswriter::scx_ops_matches(o, want) => want.to_string(),
             _ => o.clone(),
         },
-        ScxState::Enabled { ops: None } => requested.unwrap_or("unknown").to_string(),
+        // Something is attached but its name cannot be read: naming the one
+        // asked for would claim a match nobody checked.
+        ScxState::Enabled { ops: None } => "unknown".into(),
         ScxState::InFlux(_) | ScxState::Unreadable(_) => "unknown".into(),
     }
 }
@@ -1373,6 +1375,19 @@ mod tests {
             smi,
             root.join("state/mode"),
         )
+    }
+
+    #[test]
+    fn the_effective_scheduler_never_claims_a_match_it_did_not_read() {
+        use rimed_core::syswriter::ScxState;
+        let req = Some("scx_lavd");
+        assert_eq!(scx_effective(&ScxState::Disabled, req), "kernel");
+        assert_eq!(scx_effective(&ScxState::Unsupported, req), "kernel");
+        let lavd = ScxState::Enabled { ops: Some("lavd_1.1.3_x86_64_unknown_linux_gnu".into()) };
+        assert_eq!(scx_effective(&lavd, req), "scx_lavd");
+        let rusty = ScxState::Enabled { ops: Some("rusty".into()) };
+        assert_eq!(scx_effective(&rusty, req), "rusty");
+        assert_eq!(scx_effective(&ScxState::Enabled { ops: None }, req), "unknown");
     }
 
     #[tokio::test]

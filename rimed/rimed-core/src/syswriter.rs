@@ -286,7 +286,7 @@ fn kmsg_records(raw: &str) -> Vec<(Option<u64>, String)> {
             Some((head, text))
                 if head
                     .chars()
-                    .all(|c| c.is_ascii_digit() || c == ',' || c == '-' || c == 'c') =>
+                    .all(|c| c.is_ascii_digit() || c == ',' || c == '-' || c == 'c' || c == '+') =>
             {
                 let seq = head.split(',').nth(1).and_then(|n| n.parse::<u64>().ok());
                 out.push((seq, text.to_string()));
@@ -2481,6 +2481,17 @@ exit 0
         assert!(why.contains("runnable task stall"), "{why}");
         // Marked before both: still the newest.
         assert!(scx_disable_reason(KMSG, Some(1000)).unwrap().contains("stall"));
+    }
+
+    #[test]
+    fn a_record_with_the_continuation_flag_keeps_its_sequence_number() {
+        // The flags field is `-`, `c` (continued) or `+` (continuation of an
+        // earlier fragment); any of them must still read as a record, or the
+        // mark would treat it as unsequenced and a stale disable could pass.
+        let raw = "6,2001,1,-;start\n3,2002,2,+;sched_ext: BPF scheduler \"x\" disabled (stall)\n";
+        assert_eq!(kmsg_last_seq(raw), Some(2002));
+        assert_eq!(scx_disable_reason(raw, Some(2002)), None);
+        assert!(scx_disable_reason(raw, Some(2001)).unwrap().contains("stall"));
     }
 
     #[test]
