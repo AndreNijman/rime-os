@@ -2219,9 +2219,17 @@ jobs:
       # nothing built or merged — every case is reached before the engine's root
       # gate or is a pure function. Cases needing `rpm` skip out loud here and
       # run for real in the image smoke test in build-image.yml.
+      #
+      # Its rebuild_extension cases (the rpm cache wired into a real build) run
+      # in `unshare -Urm` with a temp directory over /var/lib, which needs an
+      # unprivileged user namespace; ubuntu-24.04 gates those behind AppArmor,
+      # so the knob is cleared first (the runner is ephemeral). Under
+      # GITHUB_ACTIONS the suite FAILS rather than skips when it is refused.
       - name: Run package-engine assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-rime-pkg.sh
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          ./tests/test-rime-pkg.sh
 
       # The store compactor, for real: as root, against a throwaway btrfs on a
       # loop device laid out like a Rime machine. It rewrites the objects of
