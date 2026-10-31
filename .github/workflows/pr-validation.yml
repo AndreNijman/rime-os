@@ -3120,6 +3120,66 @@ jobs:
           grep -qE '^keyring-session-start: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \
             || { echo "::error::keyring-session-start must pass with nothing skipped"; exit 1; }
 
+      # Fedora 45 moved its desktops from gnome-keyring to oo7-daemon, which
+      # ships no D-Bus activation file: a session that only knows how to start
+      # gnome-keyring leaves apps with NO Secret Service at all. The same suite,
+      # on Fedora 45 with only oo7-daemon installed, against the shipped
+      # launcher: oo7 must end up owning org.freedesktop.secrets and the log
+      # must name it. oo7-daemon refuses to run as root in a container, so the
+      # suite runs as a throwaway user. exit 97 = dnf could not resolve the
+      # packages: reported as "did not run", the greeter a11y steps' trade.
+      - name: Run keyring session-start assertions (Fedora 45, oo7 only)
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0
+          out="$(docker run --rm -v "$PWD":/w -w /w fedora:45 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    oo7-daemon dbus-daemon glib2 procps-ng util-linux shadow-utils \
+                    >/dev/null 2>&1 || exit 97
+                useradd -m rimetest || exit 97
+                runuser -u rimetest -- env RIME_SECRETS_PROVIDER=oo7 ./tests/test-rime-keyring-session-start.sh' 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 97 ]; then
+              echo "could not install oo7-daemon in the container; the oo7 session-start suite did not run"
+              exit 0
+          fi
+          grep -qE '^keyring-session-start: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \
+            || { echo "::error::keyring-session-start (oo7) must pass with nothing skipped"; exit 1; }
+
+      # rime-secrets-start's choices that one machine cannot show with real
+      # daemons: the configured provider, the fallback, the systemd and direct
+      # starts of oo7, a name owned by the wrong provider, no bus, no gdbus.
+      # Fake daemons and a fake bus only; nothing of the runner is touched.
+      - name: Run secrets-start assertions
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          out="$(./tests/test-rime-secrets-start.sh 2>&1)" || true
+          printf '%s\n' "$out"
+          grep -qE '^secrets-start: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \
+            || { echo "::error::secrets-start must pass with nothing skipped"; exit 1; }
+
+      # The image build refuses a second Secret Service provider. The guard
+      # RUN block of Containerfile.base, run verbatim in Fedora 45 with
+      # gnome-keyring: it passes as shipped, and refuses each way a second
+      # provider can arrive, including oo7-portal installed from the real
+      # repositories (it requires oo7-daemon), naming what pulled it in.
+      - name: Run Secret Service build-guard assertions (Fedora 45)
+        if: ${{ !cancelled() }}
+        run: |
+          rc=0
+          out="$(docker run --rm -v "$PWD":/w -w /w fedora:45 bash -c '
+                dnf -y install --setopt=install_weak_deps=False \
+                    gnome-keyring glib2 >/dev/null 2>&1 || exit 97
+                ./tests/test-rime-secrets-guard.sh' 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          if [ "$rc" -eq 97 ]; then
+              echo "could not install gnome-keyring in the container; the build-guard suite did not run"
+              exit 0
+          fi
+          grep -qE '^secrets-guard: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \
+            || { echo "::error::secrets-guard must pass with nothing skipped"; exit 1; }
+
       # The image ships a screen reader, and nothing starts it. Reads
       # Containerfile.core by parsing its dnf5 invocations rather than grepping
       # for the word -- "orca" is in that stanza's prose as well as its install
