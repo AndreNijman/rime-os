@@ -244,6 +244,21 @@ jobs:
           if [ "$n" -eq 0 ]; then echo "FATAL: no rpms came out of the image"; exit 1; fi
           RPMS="$rpms" ./tests/check-kernel-contract.sh
 
+      # ═══ WHERE THE SCHEDULERS ARE PROVEN AGAINST THIS KERNEL ═══
+      #
+      # Not here. A kernel published by this workflow reaches nobody until a
+      # PR moves Containerfile.core's RIME_KERNEL_IMAGE pin to it, and that
+      # rebuilds core, whose job in build-image.yml boots THIS kernel in QEMU
+      # with every scheduler the image ships and refuses to push on any
+      # failure (tests/kernel/scx-selftest/). That is the gate, and it tests
+      # the exact pair users get. Running it here as well would need qemu on
+      # katana (the host has none; this runner is rootless and unprivileged)
+      # and a pull of the published core image on every kernel build, to prove
+      # something the core gate proves again before it matters. To try a new
+      # kernel early, by hand, against the schedulers in an existing image:
+      #   tests/kernel/scx-selftest/run-scx-selftest.sh \
+      #     --image ghcr.io/andrenijman/rime-os:core --kernel-rpm-dir <dir of this build's rpms>
+      #
       # ═══ THE PUBLISH — this workflow's reason for existing ═══
       #
       # Until this step, `kernel-build.yml` was a proof and not the producer:
