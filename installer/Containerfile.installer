@@ -297,9 +297,11 @@ RUN if [ "$ALLOW_UNATTENDED" = 1 ]; then \
 #    loaded as autovt@tty1 is the live getty@.service template with getty@tty1
 #    merged in as a second name, the getty@tty1 mask ignored (measured in a
 #    booted fedora:45 container: Id=autovt@tty1.service, LoadState=loaded,
-#    when a unit named autovt@tty1 in its Conflicts=). logind starting
-#    autovt@tty1 would take the same path. Masked, every name is LoadState=
-#    masked; test-installer-console.sh checks that in a booted container.
+#    when a unit named autovt@tty1 in its Conflicts=). Loaded by the alias
+#    name alone (e.g. logind starting it), it ended in LoadState=error: not a
+#    live getty, but not a clean mask either. With autovt@tty1 masked, every
+#    name is LoadState=masked whatever loads first; test-installer-console.sh
+#    checks that in a booted container.
 #
 # kmscon (Fedora 45's default console) is NOT supported here, and the build
 # refuses it rather than half-coping: its %post preset makes autovt@ an alias
