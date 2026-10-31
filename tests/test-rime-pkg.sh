@@ -47,6 +47,9 @@ cd "$(dirname "$0")" || exit 2
 
 ENGINE=../files/system/libexec/rime-pkg
 [ -f "$ENGINE" ] || { echo "cannot find $ENGINE"; exit 2; }
+# The engine keeps verified rpms under /var/lib/rime/pkg/rpm-cache. No test
+# here may write there, even when run as root: the cache tests name their own.
+export RIME_PKG_RPM_CACHE=''
 
 WORK=$(mktemp -d /tmp/rime-pkg-test.XXXXXX)
 trap 'rm -rf "$WORK"' EXIT
@@ -714,6 +717,131 @@ is "a failed query falls back to one plain pass" "0 1 0 git-2.56.0-1.fc45.x86_64
 if grep -qF "resolving without pinning to the image" <<<"$out"; then
     ok "…and says so"
 else bad "…and says so" "got: $(tail -1 <<<"$out")"; fi
+
+# 8b. A rebuild downloads only what changed. Every build used to download into
+#    a fresh temp directory that was then deleted, and keepcache does nothing
+#    for `dnf5 download`, so an image update or a `rime update` with nothing
+#    new fetched the user's whole package set again. download_rpms now asks
+#    dnf5 for the set with --url, copies what the cache holds under each exact
+#    name into the build, and lets dnf5 fetch the rest; rpm_cache_keep then
+#    makes the cache hold exactly the set the guard verified.
+#
+#    The stub plays dnf5: --url prints $CS_SET as mirror URLs, a download
+#    writes each file of $CS_SET (plus $CS_SURPRISE) unless --destdir already
+#    holds it with the right content (what the real dnf5 calls "Already
+#    downloaded"), and logs a WROTE line per file it had to fetch.
+CS=$WORK/cache-stub
+mkdir -p "$CS/bin"
+cat > "$CS/bin/dnf5" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >> "$CS_LOG"
+case " $* " in *" repoquery "*) exit 0 ;; esac
+url=0; dest=; prev=
+for a in "$@"; do
+    case "$prev" in --destdir) dest=$a ;; esac
+    [ "$a" = --url ] && url=1
+    prev=$a
+done
+if [ "$url" = 1 ]; then
+    for n in $CS_SET; do echo "https://mirror.example/fedora/Packages/$n"; done
+    exit 0
+fi
+[ -d "$dest" ] || { echo "stub: no --destdir" >&2; exit 3; }
+for n in $CS_SET ${CS_SURPRISE:-}; do
+    if [ -f "$dest/$n" ] && [ "$(cat "$dest/$n")" = "content-of-$n" ]; then
+        echo " $n >>> Already downloaded" >&2; continue
+    fi
+    printf 'content-of-%s' "$n" > "$dest/$n"
+    echo "WROTE $n" >> "$CS_LOG"
+done
+STUB
+chmod +x "$CS/bin/dnf5"
+export CS_LOG="$CS/log"
+# $1 = shell run after sourcing the engine, with the cache at $CS/cache.
+cachecall() {
+    PATH="$CS/bin:$PATH" RIME_PKG_RPM_CACHE="$CS/cache" bash -c '
+        e=$1; c=$2; set --
+        source "$e" >/dev/null 2>&1
+        set +e
+        eval "$c"
+    ' _ "$ENGINE" "$1" 2>&1
+}
+wrote() { grep -c '^WROTE ' "$CS_LOG"; }
+lsd()   { ls -A "$1" 2>/dev/null | paste -sd' ' -; }
+
+: > "$CS_LOG"; rm -rf "$CS/cache"; mkdir -p "$CS/d1"
+out=$(CS_SET='foo-1.0-1.x86_64.rpm libbar-2.0-1.x86_64.rpm' \
+      cachecall "download_rpms '$CS/d1' foo && rpm_cache_keep '$CS/d1'"); rc=$?
+is "cache: a first build fetches the set and keeps it" \
+   "0 2 foo-1.0-1.x86_64.rpm libbar-2.0-1.x86_64.rpm|foo-1.0-1.x86_64.rpm libbar-2.0-1.x86_64.rpm" \
+   "$rc $(wrote) $(lsd "$CS/d1")|$(lsd "$CS/cache")"
+is "…in a private directory" 700 "$(stat -c %a "$CS/cache")"
+
+: > "$CS_LOG"; mkdir -p "$CS/d2"
+out=$(CS_SET='foo-1.0-1.x86_64.rpm libbar-2.0-1.x86_64.rpm' \
+      cachecall "download_rpms '$CS/d2' foo && stat -c %i '$CS/d2/foo-1.0-1.x86_64.rpm' '$CS/cache/foo-1.0-1.x86_64.rpm' > '$CS/ino' && rpm_cache_keep '$CS/d2'"); rc=$?
+is "cache: an unchanged set downloads nothing" \
+   "0 0 foo-1.0-1.x86_64.rpm libbar-2.0-1.x86_64.rpm" "$rc $(wrote) $(lsd "$CS/d2")"
+if grep -qF "reusing 2 of 2 package(s) from the last build" <<<"$out"; then ok "…and says so"
+else bad "…and says so" "got: $(tail -1 <<<"$out")"; fi
+# The build gets a COPY: dnf5 rewrites a stale file in place, and a hard link
+# would carry that write into the cache.
+if [ "$(sort -u "$CS/ino" | wc -l)" = 2 ]; then
+    ok "…and the build's copy is not the cache's inode"
+else bad "…and the build's copy is not the cache's inode" "inodes: $(paste -sd' ' "$CS/ino" 2>/dev/null)"; fi
+
+: > "$CS_LOG"; mkdir -p "$CS/d3"
+out=$(CS_SET='foo-1.1-1.x86_64.rpm libbar-2.0-1.x86_64.rpm' \
+      cachecall "download_rpms '$CS/d3' foo && rpm_cache_keep '$CS/d3'"); rc=$?
+is "cache: an update fetches only the package that changed" \
+   "0 1 foo-1.1-1.x86_64.rpm" "$rc $(wrote) $(grep '^WROTE' "$CS_LOG" | cut -d' ' -f2)"
+is "…and the cache drops the build it replaced" \
+   "foo-1.1-1.x86_64.rpm libbar-2.0-1.x86_64.rpm" "$(lsd "$CS/cache")"
+
+# A stale copy (the real dnf5 checks the repository checksum) is fetched again
+# and the cache ends up holding the right bytes.
+printf 'tampered' > "$CS/cache/libbar-2.0-1.x86_64.rpm"
+: > "$CS_LOG"; mkdir -p "$CS/d4"
+out=$(CS_SET='foo-1.1-1.x86_64.rpm libbar-2.0-1.x86_64.rpm' \
+      cachecall "download_rpms '$CS/d4' foo && rpm_cache_keep '$CS/d4'"); rc=$?
+is "cache: a stale copy is fetched again and the cache healed" \
+   "0 1 content-of-libbar-2.0-1.x86_64.rpm" "$rc $(wrote) $(cat "$CS/cache/libbar-2.0-1.x86_64.rpm")"
+
+# A file dnf5 wrote that its own listing did not name means the repositories
+# moved between the two passes: refused, not built from a set nobody resolved.
+: > "$CS_LOG"; mkdir -p "$CS/d5"
+out=$(CS_SET='foo-1.1-1.x86_64.rpm' CS_SURPRISE='evil-1-1.x86_64.rpm' \
+      cachecall "download_rpms '$CS/d5' foo"); rc=$?
+if [ "$rc" != 0 ] && grep -qF "the repositories changed during the download (evil-1-1.x86_64.rpm" <<<"$out"; then
+    ok "cache: a file outside the resolved set is refused"
+else bad "cache: a file outside the resolved set is refused" "rc=$rc $(tail -2 <<<"$out" | tr '\n' ' ')"; fi
+
+# rpm_cache_keep alone: only what the GUARD kept (still in the build), only
+# names dnf5 resolved (never a staged local file), nothing else survives.
+rm -rf "$CS/cache" "$CS/k"; mkdir -p "$CS/cache/junkdir" "$CS/k"
+for n in a-1-1.noarch.rpm b-1-1.noarch.rpm c-1-1.noarch.rpm; do printf old > "$CS/cache/$n"; done
+printf x > "$CS/cache/.a-1-1.noarch.rpm.new"
+printf new > "$CS/k/a-1-1.noarch.rpm"          # verified, resolved
+printf loc > "$CS/k/mylocal.rpm"               # a staged local file
+# c was resolved but the guard deleted it from the build (the image ships it
+# now): its old cached copy goes too.
+out=$(cachecall "RPM_FETCHED=(a-1-1.noarch.rpm c-1-1.noarch.rpm); rpm_cache_keep '$CS/k'; echo rc=\$?")
+is "prune: the cache becomes the verified, resolved set" "rc=0|a-1-1.noarch.rpm|new" \
+   "$(tail -1 <<<"$out")|$(lsd "$CS/cache")|$(cat "$CS/cache/a-1-1.noarch.rpm")"
+out=$(cachecall "RPM_FETCHED=(); rpm_cache_keep '$CS/k'; echo rc=\$?")
+is "prune: a build with nothing from the repositories empties it" "rc=0|" "$(tail -1 <<<"$out")|$(lsd "$CS/cache")"
+
+is "a resolved file name is a plain .rpm name" true  "$(predicate rpm_file_name_ok foo-1.0-1.fc45.x86_64.rpm)"
+is "…not a hidden one"                          false "$(predicate rpm_file_name_ok .foo.rpm)"
+is "…not a path"                                false "$(predicate rpm_file_name_ok ../foo.rpm)"
+is "…not something else"                        false "$(predicate rpm_file_name_ok foo.sh)"
+
+# An empty RIME_PKG_RPM_CACHE is the old engine exactly: no --url pass.
+: > "$CS_LOG"; mkdir -p "$CS/d6"
+out=$(PATH="$CS/bin:$PATH" RIME_PKG_RPM_CACHE='' CS_SET='foo-1.1-1.x86_64.rpm' \
+      call download_rpms "$CS/d6" foo 2>&1); rc=$?
+is "no cache: one download, no listing" "0 1 0" \
+   "$rc $(grep -c ' download ' "$CS_LOG") $(grep -c -- '--url' "$CS_LOG")"
 
 # 9. The launcher's doorbell. systemd-sysext mounts a new /usr over the old
 #    one, so a running Shell's watch on /usr/share/applications never fires and
