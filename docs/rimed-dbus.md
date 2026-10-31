@@ -187,7 +187,7 @@ had refused every call since the feature landed.
   it). At most one fallback per session; `held-back` lasts until rimed
   restarts or the machine reboots (profiles are read when rimed starts, so a
   changed profile arrives the same way). While a scheduler that has not
-  attached yet is still inside its 10 s grace, `scx_fallback` stays `none` and
+  attached yet is still inside its 20 s grace, `scx_fallback` stays `none` and
   `scx_detail` says it is still waiting.
 * **`scx_fallback_detail`** says when it failed (`at entry`, `mid-session
   (ejected)`, `mid-session (ejected and reloaded)`, `mid-session (never came
