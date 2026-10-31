@@ -268,6 +268,27 @@ pub trait SysWriter: Send + Sync {
         let _ = since;
         None
     }
+
+    /// How many times the kernel has attached a sched-ext scheduler since boot
+    /// (`/sys/kernel/sched_ext/enable_seq`). A scheduler that reads healthy
+    /// with a HIGHER count than when it was last seen healthy was ejected and
+    /// loaded again in between — `scx_loader` restarts one after a watchdog
+    /// exit within seconds, faster than a poll sees the `disabled` state.
+    ///
+    /// `None` = not readable by this writer (the default, and old kernels).
+    fn scx_enable_seq(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// `/sys/kernel/sched_ext/enable_seq` under a sysfs root, when it is there and
+/// is a number.
+pub fn read_scx_enable_seq(sys_root: &Path) -> Option<u64> {
+    std::fs::read_to_string(sys_root.join("kernel/sched_ext/enable_seq"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// One `/dev/kmsg` record: its sequence number when the record carried one, and
@@ -1548,6 +1569,10 @@ impl SysWriter for RealWriter {
     fn scx_kernel_reason(&self, since: Option<u64>) -> Option<String> {
         scx_disable_reason(&read_kmsg(self.kmsg_path.as_deref()?)?, since)
     }
+
+    fn scx_enable_seq(&self) -> Option<u64> {
+        read_scx_enable_seq(&self.sys_root)
+    }
 }
 
 // ── capability probing: what does this kernel actually accept? ───────────────
@@ -2481,6 +2506,18 @@ exit 0
         assert!(why.contains("runnable task stall"), "{why}");
         // Marked before both: still the newest.
         assert!(scx_disable_reason(KMSG, Some(1000)).unwrap().contains("stall"));
+    }
+
+    #[test]
+    fn the_enable_count_is_read_from_the_writers_own_sysfs() {
+        let lab = Lab::new("enable-seq");
+        lab.with_sched_ext("enabled");
+        let w = RealWriter::with_root(false, lab.sys());
+        assert_eq!(w.scx_enable_seq(), None, "no enable_seq file: no answer");
+        std::fs::write(lab.sys().join("kernel/sched_ext/enable_seq"), "7\n").unwrap();
+        assert_eq!(w.scx_enable_seq(), Some(7));
+        std::fs::write(lab.sys().join("kernel/sched_ext/enable_seq"), "x\n").unwrap();
+        assert_eq!(w.scx_enable_seq(), None, "not a number: no answer");
     }
 
     #[test]

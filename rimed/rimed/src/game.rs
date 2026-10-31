@@ -124,6 +124,10 @@ pub struct ScxReport {
     /// failure reports a disable that happened in THIS session and not an
     /// earlier one's ordinary stop.
     pub kmsg_mark: Option<u64>,
+    /// The kernel's sched-ext enable count when the scheduler was last read
+    /// healthy. A later healthy reading with a higher count means it was
+    /// ejected and something (scx_loader's restart) loaded it again.
+    pub enable_seq: Option<u64>,
 }
 
 /// What the daemon did about a sched-ext scheduler that failed.
@@ -633,6 +637,7 @@ impl Ctx {
         // changes nothing — the exact shape of the defect on katana.
         if scx.requested.is_some() {
             scx.observed = Some(self.writer.scx_state());
+            scx.enable_seq = self.writer.scx_enable_seq();
             // And the question `scx_state` cannot answer: whether a scheduler
             // could EVER have attached to this kernel. Read from the same
             // `sys_root` as everything else, so a fixture answers it too.
@@ -810,19 +815,40 @@ impl Ctx {
             return None;
         }
         let now = self.writer.scx_state();
-        let Some(trigger) = scx_failure(&now, &want) else {
-            // Healthy, or no answer. A definite healthy reading refreshes what
-            // status reports; no answer leaves the last definite one.
-            if matches!(now, ScxState::Enabled { .. }) {
-                session.scx.observed = Some(now);
+        let (when, trigger) = match scx_failure(&now, &want) {
+            // "Never loaded" and "ejected" are different events; a session
+            // whose entry reading was healthy and is now not was ejected.
+            Some(trigger) => match &session.scx.observed {
+                Some(ScxState::Enabled { .. }) => ("mid-session (ejected)", trigger),
+                _ => ("mid-session (never came up)", trigger),
+            },
+            None if matches!(now, ScxState::Enabled { .. }) => {
+                // Healthy now. But the kernel's enable count says whether it
+                // stayed attached since the last healthy reading: scx_loader
+                // reloads an ejected scheduler within seconds, so the
+                // `disabled` state in between is easily never seen, and the
+                // same stall comes back (five freezes in 16 minutes on
+                // katana, 2026-09-26).
+                let seq = self.writer.scx_enable_seq();
+                match (session.scx.enable_seq, seq) {
+                    (Some(old), Some(new)) if new != old => (
+                        "mid-session (ejected and reloaded)",
+                        format!(
+                            "the kernel attached a scheduler again since it was last read \
+                             healthy (enable_seq {old} -> {new})"
+                        ),
+                    ),
+                    _ => {
+                        if session.scx.enable_seq.is_none() {
+                            session.scx.enable_seq = seq;
+                        }
+                        session.scx.observed = Some(now);
+                        return None;
+                    }
+                }
             }
-            return None;
-        };
-        // "Never loaded" and "ejected" are different events; a session whose
-        // entry reading was healthy and is now not was ejected.
-        let when = match &session.scx.observed {
-            Some(ScxState::Enabled { .. }) => "mid-session (ejected)",
-            _ => "mid-session (never came up)",
+            // No answer (mid-transition, unreadable): leave the last definite one.
+            None => return None,
         };
         self.scx_fall_back(&mut session.scx, &setting, when, trigger);
         if let Some(n) = session.scx.note() {
@@ -2133,6 +2159,7 @@ mod tests {
         after_fallback: Option<ScxState>,
         reason: Option<String>,
         log: std::sync::Mutex<Vec<Action>>,
+        seq: std::sync::Mutex<Option<u64>>,
     }
 
     impl ScxWriter {
@@ -2145,7 +2172,11 @@ mod tests {
                 after_fallback: Some(ScxState::Disabled),
                 reason: None,
                 log: std::sync::Mutex::new(Vec::new()),
+                seq: std::sync::Mutex::new(None),
             }
+        }
+        fn set_seq(&self, n: u64) {
+            *self.seq.lock().unwrap() = Some(n);
         }
         fn count(&self, pred: fn(&Action) -> bool) -> usize {
             self.log.lock().unwrap().iter().filter(|a| pred(a)).count()
@@ -2181,6 +2212,9 @@ mod tests {
         }
         fn scx_kernel_reason(&self, since: Option<u64>) -> Option<String> {
             (since == Some(MARK)).then(|| self.reason.clone()).flatten()
+        }
+        fn scx_enable_seq(&self) -> Option<u64> {
+            *self.seq.lock().unwrap()
         }
     }
 
@@ -2232,6 +2266,33 @@ mod tests {
         }
         assert_eq!(w.count(is_fallback), 1, "no retry loop");
         assert_eq!(w.count(is_switch), 1, "and no second start");
+    }
+
+    #[tokio::test]
+    async fn a_scheduler_ejected_and_reloaded_between_two_readings_still_falls_back() {
+        let lavd = ScxState::Enabled {
+            ops: Some("lavd_1.1.3_x86_64_unknown_linux_gnu".into()),
+        };
+        let w = ScxWriter::new(Outcome::Landed, lavd);
+        w.set_seq(3);
+        let w = Arc::new(w);
+        let ctx = scx_session("scx-fb-reload", w.clone()).await;
+        assert!(ctx.game_scx_check().await.is_none(), "same count: still the one we loaded");
+        assert_eq!(w.count(is_fallback), 0);
+
+        // The watchdog ejects it and scx_loader loads it again before the
+        // next reading: the state never reads disabled, only the count moves.
+        w.set_seq(4);
+        let fb = ctx.game_scx_check().await.expect("a reload is an ejection");
+        assert_eq!(fb.when, "mid-session (ejected and reloaded)");
+        assert!(fb.trigger.contains("enable_seq 3 -> 4"), "{}", fb.trigger);
+        assert!(fb.verified());
+        assert_eq!(w.count(is_fallback), 1);
+        assert_eq!(str_of(&ctx.game_status().await, "scx_effective"), "kernel");
+        // Once per session: no second fallback, whatever the count does.
+        w.set_seq(9);
+        assert!(ctx.game_scx_check().await.is_none());
+        assert_eq!(w.count(is_fallback), 1);
     }
 
     #[tokio::test]
