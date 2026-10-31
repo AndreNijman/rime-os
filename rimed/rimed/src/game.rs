@@ -39,7 +39,7 @@ use rimed_core::game::{
 };
 use rimed_core::irq;
 use rimed_core::kernelbtf::{scx_btf_support, ScxBtf};
-use rimed_core::syswriter::{Outcome, ScxState};
+use rimed_core::syswriter::{scx_reason_names, scx_refusal_is_settle_timeout, Outcome, ScxState};
 use rimed_core::tier::{Action, Tier};
 use rimed_core::topology::CoreTopology;
 use zvariant::{OwnedValue, Value};
@@ -117,8 +117,9 @@ pub struct ScxReport {
     /// later in the session. `None` = no failure has been seen. Set at most
     /// once per session: there is no retry loop.
     pub fallback: Option<ScxFallback>,
-    /// Why this session never tried the switch at all: the same profile's
-    /// scheduler already failed earlier this boot (see [`ScxGaveUp`]).
+    /// Why this session never tried the switch at all: the same scheduler
+    /// already failed earlier in this rimed run, in practice this boot (see
+    /// [`ScxGaveUp`]).
     pub held_back: Option<String>,
     /// The kernel log's newest record when the switch was applied, so a
     /// failure reports a disable that happened in THIS session and not an
@@ -128,7 +129,29 @@ pub struct ScxReport {
     /// healthy. A later healthy reading with a higher count means it was
     /// ejected and something (scx_loader's restart) loaded it again.
     pub enable_seq: Option<u64>,
+    /// Whether the requested scheduler has been read attached at least once
+    /// this session. Until it has, a `disabled` (or other-scheduler) reading
+    /// may be a scheduler still loading, not one that failed.
+    pub attached: bool,
+    /// Until when a scheduler that has not attached yet is given the benefit
+    /// of the doubt (entry + [`SCX_ATTACH_GRACE`]). `None` = no switch issued.
+    pub attach_deadline: Option<std::time::Instant>,
 }
+
+/// How long after game entry a requested scheduler may take to attach before
+/// the session watch calls it "never came up" and falls back.
+///
+/// REASONED, like rimed-core's `SCX_SETTLE`, not measured on hardware: the
+/// QEMU selftest (an idle 8-vCPU KVM guest, no game starting) timed attach at
+/// 0.1-1.2 s for most schedulers and up to 2.8 s for scx_layered, which
+/// already outlasts the 2 s settle the switch waits. A cold `scx_loader`
+/// D-Bus activation and a game loading at the same time only add to that.
+/// Ten seconds is five watch ticks. A scheduler that FAILED leaves no reading
+/// that says so by itself (a verifier refusal logs nothing in the kernel and
+/// leaves the state `disabled`), so time is what separates the two; a kernel
+/// disable record naming the scheduler, or scxctl refusing outright, ends the
+/// wait early.
+pub const SCX_ATTACH_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// What the daemon did about a sched-ext scheduler that failed.
 ///
@@ -192,13 +215,16 @@ impl ScxFallback {
     }
 }
 
-/// A scheduler that failed this boot, so the next session asking for the same
-/// one under the same profile does not try again.
+/// A scheduler that failed while this rimed has been running, so the next
+/// session asking for the same one does not try again.
 ///
-/// One attempt per boot per profile is the rule. A scheduler the kernel
-/// ejects is one it will eject again, and retrying it every time Gaming Mode
-/// starts is a loop with a game in the middle of it. Changing the profile
-/// (its name or its `scx` setting) is a new question and gets one new try.
+/// One attempt per rimed run is the rule (in practice per boot: rimed runs
+/// from boot to shutdown). A scheduler the kernel ejects is one it will eject
+/// again, and retrying it every time Gaming Mode starts is a loop with a game
+/// in the middle of it. Profiles are read when rimed starts, so a changed
+/// profile or `scx` setting arrives with a rimed restart, which starts with
+/// nothing held back and gets one new try. The profile and setting are kept
+/// here only to say, in the message, which configuration failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScxGaveUp {
     pub profile: String,
@@ -307,9 +333,24 @@ impl ScxReport {
         };
         let fallback = match &self.fallback {
             Some(f) => format!(" — {}", f.describe()),
+            None if self.waiting_to_attach() => format!(
+                " — still waiting for it to attach; the kernel's own scheduler is used if it \
+                 has not within {}s of entry",
+                SCX_ATTACH_GRACE.as_secs()
+            ),
             None => String::new(),
         };
         format!("asked for {want}; {said}; {seen}{mismatch}{fallback}{kernel}")
+    }
+
+    /// A switch was issued, nothing has failed definitely, and the scheduler
+    /// has not been read attached yet: it may still be loading.
+    pub fn waiting_to_attach(&self) -> bool {
+        self.requested.is_some()
+            && self.fallback.is_none()
+            && self.held_back.is_none()
+            && !self.attached
+            && self.attach_deadline.is_some()
     }
 
     /// `none`, `verified`, `unverified` or `held-back`: the status key
@@ -561,7 +602,7 @@ impl Ctx {
         // the kernel's own scheduler and says why. Its stop goes too, so a
         // session that started nothing stops nothing it did not start.
         if let Some(want) = &scx.requested {
-            if let Some(why) = self.scx_held_back(&cfg.scx, want) {
+            if let Some(why) = self.scx_held_back(want) {
                 plan.enter
                     .retain(|a| !matches!(a, Action::ScxSwitch { .. }));
                 plan.exit.retain(|a| !matches!(a, Action::ScxStop));
@@ -569,6 +610,7 @@ impl Ctx {
                 scx.held_back = Some(why);
             } else {
                 scx.kmsg_mark = self.writer.kmsg_mark();
+                scx.attach_deadline = Some(std::time::Instant::now() + SCX_ATTACH_GRACE);
             }
         }
         for a in &plan.enter {
@@ -644,6 +686,7 @@ impl Ctx {
             if let (Some(want), Some(seen)) = (scx.requested.as_deref(), scx.observed.as_ref()) {
                 if matches!(seen, ScxState::Enabled { .. }) && scx_failure(seen, want).is_none() {
                     scx.enable_seq = self.writer.scx_enable_seq();
+                    scx.attached = true;
                 }
             }
             // And the question `scx_state` cannot answer: whether a scheduler
@@ -660,12 +703,28 @@ impl Ctx {
             }
             scx.btf = Some(btf);
         }
-        // A definite failure at entry falls back now, once. An unanswerable
-        // reading (mid-transition, unreadable) is left to the session watch,
-        // which acts the moment the kernel gives a definite answer.
+        // A definite failure at entry falls back now, once. "Definite" needs
+        // more than a `disabled` or other-scheduler reading: a scheduler still
+        // loading reads `disabled` until struct_ops attach, and a `switch`
+        // reads the OLD scheduler until the swap. So entry acts only when
+        // scxctl refused outright (not the settle budget running out) or the
+        // kernel logged a disable for this very scheduler since the switch.
+        // Everything else is left to the session watch, which waits up to
+        // SCX_ATTACH_GRACE from entry and acts on the first definite answer.
         if scx.held_back.is_none() {
             if let (Some(want), Some(seen)) = (scx.requested.clone(), scx.observed.clone()) {
-                if let Some(trigger) = scx_failure(&seen, &want) {
+                let refused_outright = matches!(
+                    &scx.applied,
+                    Some(Outcome::Refused(why)) if !scx_refusal_is_settle_timeout(why)
+                );
+                let kernel_said = scx_failure(&seen, &want).is_some()
+                    && self
+                        .writer
+                        .scx_kernel_reason(scx.kmsg_mark)
+                        .is_some_and(|r| scx_reason_names(&r, &want));
+                if let Some(trigger) = scx_failure(&seen, &want)
+                    .filter(|_| refused_outright || kernel_said)
+                {
                     let trigger = match &scx.applied {
                         Some(Outcome::Refused(why)) | Some(Outcome::Unknown(why)) => {
                             format!("{trigger}; scxctl: {why}")
@@ -752,25 +811,30 @@ impl Ctx {
         Ok(())
     }
 
-    /// Whether `want` under the profile's `scx` setting already failed this
-    /// boot, and if so why.
-    fn scx_held_back(&self, setting: &str, want: &str) -> Option<String> {
+    /// Whether `want` already failed while this rimed has been running, and
+    /// if so why.
+    ///
+    /// Keyed on the scheduler alone. The profile and its `scx` setting are
+    /// read once, when rimed starts, so within one run they cannot change; a
+    /// changed profile takes effect through a rimed restart, and that restart
+    /// starts with nothing held back. Comparing them here would be a check
+    /// that can never fail.
+    fn scx_held_back(&self, want: &str) -> Option<String> {
         let gave_up = self.scx_gave_up.lock().unwrap_or_else(|e| e.into_inner());
         let g = gave_up.as_ref()?;
-        (g.profile == self.selection.active && g.setting == setting.trim() && g.sched == want)
-            .then(|| {
-                format!(
-                    "{want} already failed this boot under profile '{}' ({}); the kernel's \
-                     own scheduler runs instead. Change the profile's `scx` or reboot to try \
-                     it again",
-                    g.profile, g.why
-                )
-            })
+        (g.sched == want).then(|| {
+            format!(
+                "{want} already failed since rimed started (profile '{}', scx = \"{}\": {}); \
+                 the kernel's own scheduler runs instead. Restart rimed or reboot to try it \
+                 again (a changed profile takes effect the same way)",
+                g.profile, g.setting, g.why
+            )
+        })
     }
 
     /// Fall back to the kernel's own scheduler: one `scxctl stop`, a kernel
     /// read-back, a journal line with the kernel's reason, and the failure
-    /// remembered so no later session under this profile retries it.
+    /// remembered so no later session in this rimed run retries it.
     ///
     /// Synchronous and called with the session lock held (or before the
     /// session exists), so two callers can never both fall back.
@@ -824,12 +888,35 @@ impl Ctx {
         }
         let now = self.writer.scx_state();
         let (when, trigger) = match scx_failure(&now, &want) {
-            // "Never loaded" and "ejected" are different events; a session
-            // whose entry reading was healthy and is now not was ejected.
-            Some(trigger) => match &session.scx.observed {
-                Some(ScxState::Enabled { .. }) => ("mid-session (ejected)", trigger),
-                _ => ("mid-session (never came up)", trigger),
-            },
+            // "Never loaded" and "ejected" are different events; a scheduler
+            // read attached earlier this session and not now was ejected.
+            Some(trigger) if session.scx.attached => ("mid-session (ejected)", trigger),
+            // Never read attached. It may still be loading, so the watch waits
+            // until the grace runs out, unless the kernel has already logged a
+            // disable for this scheduler.
+            Some(trigger) => {
+                let kernel_said = self
+                    .writer
+                    .scx_kernel_reason(session.scx.kmsg_mark)
+                    .is_some_and(|r| scx_reason_names(&r, &want));
+                let waited = session
+                    .scx
+                    .attach_deadline
+                    .map_or(true, |d| std::time::Instant::now() >= d);
+                if !kernel_said && !waited {
+                    session.scx.observed = Some(now);
+                    return None;
+                }
+                let trigger = if kernel_said {
+                    trigger
+                } else {
+                    format!(
+                        "{trigger}, {}s after entry",
+                        SCX_ATTACH_GRACE.as_secs()
+                    )
+                };
+                ("mid-session (never came up)", trigger)
+            }
             None if matches!(now, ScxState::Enabled { .. }) => {
                 // Healthy now. But the kernel's enable count says whether it
                 // stayed attached since the last healthy reading: scx_loader
@@ -850,7 +937,16 @@ impl Ctx {
                         if session.scx.enable_seq.is_none() {
                             session.scx.enable_seq = seq;
                         }
+                        let first = !session.scx.attached;
+                        session.scx.attached = true;
                         session.scx.observed = Some(now);
+                        // The entry note may have said "not loaded" for a
+                        // scheduler that was still loading; it follows the
+                        // kernel from the first healthy reading.
+                        if let (true, Some(n)) = (first, session.scx.note()) {
+                            session.notes.retain(|e| !e.starts_with("sched-ext:"));
+                            session.notes.push(n);
+                        }
                         return None;
                     }
                 }
@@ -1157,8 +1253,8 @@ impl Ctx {
                 // `scx_fallback` is `none`, `verified` (the kernel READ
                 // disabled after the daemon stopped a failed scheduler),
                 // `unverified` (it did not, and the daemon did not retry), or
-                // `held-back` (this profile's scheduler failed earlier this
-                // boot, so this session never tried it). `scx_effective` is the
+                // `held-back` (this scheduler failed earlier in this rimed
+                // run, so this session never tried it). `scx_effective` is the
                 // scheduler in charge by the latest kernel reading: a name,
                 // `kernel`, or `unknown`.
                 insert(&mut m, "scx_fallback", Value::from(s.scx.fallback_word().to_string()));
@@ -1238,7 +1334,7 @@ impl Ctx {
                 // does, so the idle surface says so before anyone starts one.
                 let held = cfg
                     .scx_for(&topo)
-                    .and_then(|want| self.scx_held_back(&cfg.scx, &want));
+                    .and_then(|want| self.scx_held_back(&want));
                 insert(
                     &mut m,
                     "scx_fallback",
@@ -2233,6 +2329,156 @@ mod tests {
         matches!(a, Action::ScxSwitch { .. })
     }
 
+    /// End the attach grace now, as SCX_ATTACH_GRACE passing would.
+    async fn expire_attach_grace(ctx: &Arc<Ctx>) {
+        let mut g = ctx.game.lock().await;
+        let s = g.as_mut().expect("a session");
+        assert!(s.scx.attach_deadline.is_some(), "a switch sets the deadline");
+        s.scx.attach_deadline = Some(std::time::Instant::now());
+    }
+
+    /// What `scx_load` returns when scxctl said yes and the kernel still read
+    /// `disabled` when the settle budget ran out.
+    fn settle_timeout() -> Outcome {
+        Outcome::Refused(format!(
+            "scxctl start -s scx_lavd reported success, but sched_ext/state is still disabled \
+             after 2s — {}",
+            rimed_core::syswriter::SCX_NOT_ATTACHED_YET
+        ))
+    }
+
+    fn lavd_1_1_4() -> ScxState {
+        ScxState::Enabled {
+            ops: Some("lavd_1.1.4_x86_64_unknown_linux_gnu".into()),
+        }
+    }
+
+    // ── a scheduler still loading is not a failure ───────────────────────────
+
+    #[tokio::test]
+    async fn a_scheduler_slower_than_the_settle_budget_is_waited_for_and_not_stopped() {
+        // The state reads `disabled` until struct_ops attach, after start-up
+        // and the BPF verifier. The QEMU selftest timed scx_layered at 2.8 s:
+        // longer than the 2 s settle. Entry must not stop it.
+        let w = Arc::new(ScxWriter::new(settle_timeout(), ScxState::Disabled));
+        w.set_seq(3);
+        let ctx = scx_session("scx-slow", w.clone()).await;
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_fallback"), "none");
+        assert!(
+            str_of(&st, "scx_detail").contains("still waiting for it to attach"),
+            "{}",
+            str_of(&st, "scx_detail")
+        );
+        assert_eq!(w.count(is_fallback), 0, "a slow attach is not a failure");
+        // It attaches before the next tick.
+        w.set_state(lavd_1_1_4());
+        w.set_seq(4);
+        assert!(ctx.game_scx_check().await.is_none());
+        assert_eq!(w.count(is_fallback), 0);
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_state"), "loaded");
+        assert_eq!(str_of(&st, "scx_fallback"), "none");
+        assert_eq!(str_of(&st, "scx_effective"), "scx_lavd");
+        assert!(
+            notes_of(&st).iter().any(|n| n.starts_with("sched-ext: loaded")),
+            "the note follows the kernel: {:?}",
+            notes_of(&st)
+        );
+        // Its first healthy count is the anchor, not a reload; a later move is.
+        assert!(ctx.game_scx_check().await.is_none());
+        // And nothing is held back for the next session.
+        ctx.game_exit().await.unwrap();
+        ctx.game_enter(&[]).await.unwrap();
+        assert_eq!(str_of(&ctx.game_status().await, "scx_fallback"), "none");
+        assert_eq!(w.count(is_switch), 2, "the next session tries it again");
+    }
+
+    #[tokio::test]
+    async fn a_scheduler_that_attached_late_and_is_then_ejected_falls_back_at_once() {
+        // Once the watch has read it attached, a `disabled` reading is an
+        // ejection, and the attach grace no longer applies.
+        let w = Arc::new(ScxWriter::new(settle_timeout(), ScxState::Disabled));
+        let ctx = scx_session("scx-late-eject", w.clone()).await;
+        w.set_state(lavd_1_1_4());
+        assert!(ctx.game_scx_check().await.is_none());
+        w.set_state(ScxState::Disabled);
+        let fb = ctx.game_scx_check().await.expect("an ejection, inside the grace or not");
+        assert_eq!(fb.when, "mid-session (ejected)");
+        assert_eq!(w.count(is_fallback), 1);
+    }
+
+    #[tokio::test]
+    async fn a_scheduler_that_never_attaches_falls_back_when_the_grace_runs_out() {
+        // A verifier refusal logs nothing in the kernel and leaves the state
+        // `disabled`: only time tells it from a slow attach.
+        let w = Arc::new(ScxWriter::new(settle_timeout(), ScxState::Disabled));
+        let ctx = scx_session("scx-never", w.clone()).await;
+        for _ in 0..3 {
+            assert!(ctx.game_scx_check().await.is_none(), "inside the grace");
+        }
+        assert_eq!(w.count(is_fallback), 0);
+        expire_attach_grace(&ctx).await;
+        let fb = ctx.game_scx_check().await.expect("the grace ran out");
+        assert_eq!(fb.when, "mid-session (never came up)");
+        assert!(
+            fb.trigger.contains(&format!("{}s after entry", SCX_ATTACH_GRACE.as_secs())),
+            "{}",
+            fb.trigger
+        );
+        assert!(fb.verified());
+        assert_eq!(w.count(is_fallback), 1);
+        assert!(ctx.game_scx_check().await.is_none(), "once");
+        assert_eq!(w.count(is_fallback), 1);
+        // And it is held back from the next session.
+        ctx.game_exit().await.unwrap();
+        ctx.game_enter(&[]).await.unwrap();
+        assert_eq!(str_of(&ctx.game_status().await, "scx_fallback"), "held-back");
+        assert_eq!(w.count(is_switch), 1);
+    }
+
+    #[tokio::test]
+    async fn a_kernel_disable_for_the_requested_scheduler_ends_the_wait_at_entry() {
+        let mut w = ScxWriter::new(settle_timeout(), ScxState::Disabled);
+        w.reason = Some(
+            "sched_ext: BPF scheduler \"lavd_1.1.4_x86_64_unknown_linux_gnu\" disabled \
+             (scx_bpf_error)"
+                .into(),
+        );
+        let w = Arc::new(w);
+        let ctx = scx_session("scx-kernel-said", w.clone()).await;
+        let st = ctx.game_status().await;
+        assert_eq!(str_of(&st, "scx_fallback"), "verified");
+        assert!(str_of(&st, "scx_fallback_detail").contains("failed at entry"));
+        assert_eq!(w.count(is_fallback), 1);
+    }
+
+    #[tokio::test]
+    async fn a_switch_still_showing_the_old_scheduler_is_not_stopped() {
+        // `switch` from rusty: the OLD scheduler logs an ordinary stop after
+        // the mark, and root/ops reads rusty until the swap lands. Neither is
+        // this scheduler failing.
+        let mut w = ScxWriter::new(
+            Outcome::Landed,
+            ScxState::Enabled {
+                ops: Some("rusty_1.1.4_x86_64_unknown_linux_gnu".into()),
+            },
+        );
+        w.reason = Some(
+            "sched_ext: BPF scheduler \"rusty_1.1.4_x86_64_unknown_linux_gnu\" disabled \
+             (unregistered from user space)"
+                .into(),
+        );
+        let w = Arc::new(w);
+        let ctx = scx_session("scx-switching", w.clone()).await;
+        assert_eq!(w.count(is_fallback), 0, "not at entry");
+        assert!(ctx.game_scx_check().await.is_none(), "nor on the next tick");
+        w.set_state(lavd_1_1_4());
+        assert!(ctx.game_scx_check().await.is_none());
+        assert_eq!(w.count(is_fallback), 0);
+        assert_eq!(str_of(&ctx.game_status().await, "scx_effective"), "scx_lavd");
+    }
+
     /// A session under PROFILE_SCX over `w`, entered.
     async fn scx_session(tag: &str, w: Arc<ScxWriter>) -> Arc<Ctx> {
         let root = scratch(tag);
@@ -2397,6 +2643,12 @@ mod tests {
         w.after_fallback = None;
         let w = Arc::new(w);
         let ctx = scx_session("scx-fb-unverified", w.clone()).await;
+        // Another scheduler at entry may be a switch still in flight; the
+        // watch acts once the grace has run out.
+        assert_eq!(w.count(is_fallback), 0, "a mismatch at entry is waited out");
+        expire_attach_grace(&ctx).await;
+        let fb = ctx.game_scx_check().await.expect("the grace ran out");
+        assert_eq!(fb.when, "mid-session (never came up)");
         let st = ctx.game_status().await;
         assert_eq!(str_of(&st, "scx_fallback"), "unverified");
         assert_eq!(str_of(&st, "scx_effective"), "rusty");
@@ -2592,14 +2844,20 @@ mod tests {
         // Before the fallback this was reported and left running. A scheduler
         // the profile did not ask for is not the one this session was for, so
         // it is now treated like any other failure: stopped once, read back.
-        let st = scx_status(
-            "scx-wrong",
+        // Not at entry, though: a `switch` reads the old scheduler until the
+        // swap lands, so entry leaves it to the watch and its grace.
+        let w = Arc::new(ScxWriter::new(
             Outcome::Landed,
             ScxState::Enabled {
                 ops: Some("rusty".into()),
             },
-        )
-        .await;
+        ));
+        let ctx = scx_session("scx-wrong", w.clone()).await;
+        assert!(ctx.game_scx_check().await.is_none(), "still inside the grace");
+        assert_eq!(w.count(is_fallback), 0);
+        expire_attach_grace(&ctx).await;
+        assert!(ctx.game_scx_check().await.is_some());
+        let st = ctx.game_status().await;
         assert_eq!(str_of(&st, "scx_state"), "not loaded");
         assert_eq!(str_of(&st, "scx_fallback"), "verified");
         assert!(

@@ -349,6 +349,19 @@ pub fn scx_disable_reason(raw: &str, since: Option<u64>) -> Option<String> {
     Some(parts.join(" | "))
 }
 
+/// Whether a kernel disable record (from [`scx_disable_reason`]) is about
+/// `sched`: the name in `BPF scheduler "<name>"` matches it by
+/// [`scx_ops_matches`]. A `switch` makes the OLD scheduler log an ordinary
+/// "disabled (unregistered from user space)" after the mark, and that record
+/// says nothing about the scheduler being loaded.
+pub fn scx_reason_names(reason: &str, sched: &str) -> bool {
+    reason
+        .split("BPF scheduler \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .is_some_and(|name| scx_ops_matches(name, sched))
+}
+
 /// Read every record `/dev/kmsg` (or a fixture file) holds right now, without
 /// blocking.
 ///
@@ -452,7 +465,27 @@ pub struct RealWriter {
 /// be too short (a status of `unknown` over a `state` of `enabling`), and says
 /// to record the number rather than re-run until it passes. Writing "measured"
 /// here would be this unit's own defect, one file over.
+///
+/// Later evidence, still not hardware: the QEMU selftest
+/// (tests/kernel/scx-selftest, an idle 8-vCPU KVM guest, no game loading)
+/// timed attach at 0.1-1.2 s for most schedulers and up to 2.8 s for
+/// scx_layered. So a healthy scheduler CAN outlast this budget, and the daemon
+/// does not act on a timeout here alone: `rimed`'s game entry leaves a
+/// `disabled` reading after this wait to the session watch, which allows a
+/// longer grace before calling it a failure.
 const SCX_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The words [`RealWriter::scx_load`]'s refusal ends with when `scxctl` said
+/// yes and the kernel had not attached a scheduler within [`SCX_SETTLE`]. That
+/// is "not attached YET", not "failed", and the daemon must be able to tell.
+pub const SCX_NOT_ATTACHED_YET: &str = "no scheduler attached yet";
+
+/// Whether a refusal from the sched-ext switch is only the settle budget
+/// running out (the scheduler may still be loading), as opposed to `scxctl`
+/// or the machine refusing outright, which is final.
+pub fn scx_refusal_is_settle_timeout(why: &str) -> bool {
+    why.contains(SCX_NOT_ATTACHED_YET)
+}
 
 impl RealWriter {
     /// A writer rooted at real `/sys` that will NOT run host commands.
@@ -997,7 +1030,7 @@ impl RealWriter {
     /// Poll `state` until it reaches `want`, or the settle budget runs out.
     /// Returns whatever it last read, so the caller reports an observation and
     /// never an assumption.
-    fn scx_settle_until(&self, want: fn(&ScxState) -> bool) -> ScxState {
+    fn scx_settle_until(&self, want: &dyn Fn(&ScxState) -> bool) -> ScxState {
         let deadline = std::time::Instant::now() + self.scx_settle;
         loop {
             let st = read_scx_state(&self.sys_root);
@@ -1089,8 +1122,17 @@ impl RealWriter {
             return Outcome::Refused(format!("scxctl {verb} -s {sched}: {stderr}"));
         }
 
-        // It said yes. Now ask the kernel.
-        match self.scx_settle_until(|s| matches!(s, ScxState::Enabled { .. })) {
+        // It said yes. Now ask the kernel, and wait for THE REQUESTED scheduler:
+        // a `switch` finds the old one still attached, so "any scheduler is
+        // enabled" is true at once and would end the wait before the swap.
+        // A scheduler that publishes no name cannot be told apart, so it ends
+        // the wait too (and is reported as unconfirmed by the daemon).
+        let attached = |s: &ScxState| match s {
+            ScxState::Enabled { ops: Some(o) } => scx_ops_matches(o, sched),
+            ScxState::Enabled { ops: None } => true,
+            _ => false,
+        };
+        match self.scx_settle_until(&attached) {
             ScxState::Enabled { ops } => {
                 match &ops {
                     Some(o) if !scx_ops_matches(o, sched) => eprintln!(
@@ -1103,9 +1145,15 @@ impl RealWriter {
             }
             // The exact defect this function exists for, in its general form:
             // the command reported success and the machine did not move.
+            //
+            // It is also what a scheduler that is merely SLOW looks like: the
+            // state reads `disabled` until struct_ops attach, after userspace
+            // start-up and the BPF verifier. So the words carry
+            // SCX_NOT_ATTACHED_YET, and the daemon does not treat this refusal
+            // as final (see `scx_refusal_is_settle_timeout`).
             ScxState::Disabled => Outcome::Refused(format!(
                 "scxctl {verb} -s {sched} reported success, but sched_ext/state is still \
-                 disabled after {:?} — no scheduler attached",
+                 disabled after {:?} — {SCX_NOT_ATTACHED_YET}",
                 self.scx_settle
             )),
             // Neither a yes nor a no. Saying either would be the lie.
@@ -1145,7 +1193,7 @@ impl RealWriter {
         if !ok {
             return Outcome::Refused(format!("scxctl stop: {stderr}"));
         }
-        match self.scx_settle_until(|s| matches!(s, ScxState::Disabled)) {
+        match self.scx_settle_until(&|s| matches!(s, ScxState::Disabled)) {
             ScxState::Disabled => Outcome::Landed,
             ScxState::Enabled { ops } => Outcome::Refused(format!(
                 "scxctl stop reported success, but a scheduler is still attached ({}) \
@@ -1189,7 +1237,7 @@ impl RealWriter {
             Err(Outcome::Refused(why)) | Err(Outcome::Unknown(why)) => Some(why),
             Err(Outcome::Landed) => None,
         };
-        match self.scx_settle_until(|s| matches!(s, ScxState::Disabled)) {
+        match self.scx_settle_until(&|s| matches!(s, ScxState::Disabled)) {
             ScxState::Disabled => {
                 if let Some(why) = &said {
                     eprintln!(
@@ -2199,6 +2247,67 @@ exit 0
         );
     }
 
+    #[test]
+    fn only_the_settle_timeout_is_a_refusal_the_daemon_may_wait_out() {
+        let _serial = serial();
+        // A scheduler that is still loading reads `disabled` until it attaches,
+        // so this refusal is "not yet", and the daemon must be able to tell it
+        // from scxctl saying no.
+        let lab = Lab::new("settle-timeout");
+        lab.with_sched_ext("disabled");
+        let w = lab.writer(&lab.scxctl("exit 0"));
+        let out = w
+            .apply(&Action::ScxSwitch {
+                sched: "scx_lavd".into(),
+            })
+            .unwrap();
+        let Outcome::Refused(why) = out else {
+            panic!("expected Refused, got {out:?}");
+        };
+        assert!(scx_refusal_is_settle_timeout(&why), "{why}");
+        // scxctl itself refusing is final.
+        let lab = Lab::new("settle-final");
+        lab.with_sched_ext("disabled");
+        let w = lab.writer(&lab.scxctl("echo 'Error: scheduler not found' >&2; exit 1"));
+        let Outcome::Refused(why) = w
+            .apply(&Action::ScxSwitch {
+                sched: "scx_lavd".into(),
+            })
+            .unwrap()
+        else {
+            panic!("expected Refused");
+        };
+        assert!(!scx_refusal_is_settle_timeout(&why), "{why}");
+    }
+
+    #[test]
+    fn a_switch_waits_for_the_requested_scheduler_not_for_the_one_it_replaces() {
+        let _serial = serial();
+        // `switch` from rusty to lavd: the kernel reads `enabled` throughout,
+        // with rusty's ops until the swap lands. Waiting for "any scheduler"
+        // returns before the swap, and the daemon then reads rusty.
+        let lab = Lab::new("switch-wait");
+        lab.with_sched_ext("enabled").with_ops("rusty_1.1.4_x86_64_unknown_linux_gnu");
+        let ops = lab.scx_dir().join("root/ops");
+        let bin = lab.scxctl(&format!(
+            "( sleep 0.3; echo lavd_1.1.4_x86_64_unknown_linux_gnu > '{}' ) >/dev/null 2>&1 &\nexit 0\n",
+            ops.display()
+        ));
+        let w = RealWriter::for_scx_test(lab.sys(), &bin, Duration::from_secs(3));
+        let out = w
+            .apply(&Action::ScxSwitch {
+                sched: "scx_lavd".into(),
+            })
+            .unwrap();
+        assert_eq!(out, Outcome::Landed);
+        match read_scx_state(&lab.sys()) {
+            ScxState::Enabled { ops: Some(o) } => {
+                assert!(scx_ops_matches(&o, "scx_lavd"), "returned before the swap: {o}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     // ── case 4: cannot tell ─────────────────────────────────────────────────
 
     #[test]
@@ -2506,6 +2615,19 @@ exit 0
         assert!(why.contains("runnable task stall"), "{why}");
         // Marked before both: still the newest.
         assert!(scx_disable_reason(KMSG, Some(1000)).unwrap().contains("stall"));
+    }
+
+    #[test]
+    fn a_disable_record_is_about_the_scheduler_it_names() {
+        let why = scx_disable_reason(KMSG, None).unwrap();
+        assert!(scx_reason_names(&why, "scx_lavd"), "{why}");
+        assert!(!scx_reason_names(&why, "scx_rusty"), "{why}");
+        // The old scheduler's ordinary stop during a switch is not the new one's.
+        let old = "sched_ext: BPF scheduler \"rusty_1.1.4_x86_64_unknown_linux_gnu\" disabled \
+                   (unregistered from user space)";
+        assert!(!scx_reason_names(old, "scx_lavd"));
+        assert!(scx_reason_names(old, "scx_rusty"));
+        assert!(!scx_reason_names("sched_ext: something disabled", "scx_lavd"), "no name, no claim");
     }
 
     #[test]

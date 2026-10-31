@@ -812,9 +812,22 @@ for did not attach, or the kernel ejected it later (the state reads
 reads `sched_ext/state` until it says `disabled`, and reports it: `scx_fallback`,
 `scx_fallback_detail` (with the kernel's reason from `/dev/kmsg`) and
 `scx_effective` (`docs/rimed-dbus.md`), plus one journal line. One attempt per
-session; a profile whose scheduler failed is not tried again this boot until
-the profile changes. A stop that does not get the kernel back is reported
+session; a scheduler that failed is not tried again until rimed restarts or
+the machine reboots (profiles are read when rimed starts, so a changed profile
+arrives the same way). A stop that does not get the kernel back is reported
 `unverified` and not retried.
+
+**A slow attach is not a failure.** `sched_ext/state` reads `disabled` until
+the scheduler's struct_ops attach, after its userspace start-up and the BPF
+verifier, and the switch waits only 2 s (`SCX_SETTLE`). The QEMU gate timed
+scx_layered at up to 2.8 s on an idle guest. So game entry falls back at once
+only on definite evidence: `scxctl` refusing outright, or a kernel disable
+record naming the requested scheduler since the switch. A bare `disabled` (or
+the old scheduler still attached while a `switch` lands) is left to the 2 s
+session watch, which gives it until 10 s after entry (`SCX_ATTACH_GRACE`)
+before calling it "never came up". Once it has been read attached, a later
+`disabled` is an ejection and is acted on at once. Neither budget has been
+measured on hardware.
 
 ## 6. The rows that need katana, and the exact commands
 

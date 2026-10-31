@@ -183,9 +183,12 @@ had refused every call since the feature landed.
   ejected later in the session, and after rimed stopped it `sched_ext/state`
   read `disabled`), `unverified` (the stop did not get the kernel back to its
   own scheduler; rimed reports it and does not retry), or `held-back` (this
-  profile's scheduler already failed earlier this boot, so this session never
-  tried it). At most one fallback per session; only a profile change clears
-  `held-back`.
+  scheduler already failed since rimed started, so this session never tried
+  it). At most one fallback per session; `held-back` lasts until rimed
+  restarts or the machine reboots (profiles are read when rimed starts, so a
+  changed profile arrives the same way). While a scheduler that has not
+  attached yet is still inside its 10 s grace, `scx_fallback` stays `none` and
+  `scx_detail` says it is still waiting.
 * **`scx_fallback_detail`** says when it failed (`at entry`, `mid-session
   (ejected)`, `mid-session (ejected and reloaded)`, `mid-session (never came
   up)`), the trigger, the kernel's own words from `/dev/kmsg`
