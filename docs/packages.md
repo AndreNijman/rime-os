@@ -536,6 +536,14 @@ each successful build the cache holds that build's set and nothing else, so it
 costs about as much disk as the packages themselves; removing every user
 package empties it.
 
+The cache is kept only while the disk has room for an OS update with it on:
+6 GiB free plus the 3% `ostree` keeps for itself (`rime update` downloads the
+new image before it rebuilds packages, and the image download refuses to start
+without that space). On a disk short of that, including the 12 GB minimum,
+there is no cache and every rebuild downloads the whole set, as before. A cache
+kept earlier on a disk that has since filled up is dropped at the next build.
+Deleting `/var/lib/rime/pkg/rpm-cache` by hand is always safe.
+
 ## Coming from a layered system
 
 If a machine already has rpm-ostree layered packages, `rime update` says so and
@@ -631,6 +639,12 @@ Enabling stores that COPR's signing key in Rime's writable keyring under
 downloaded RPM against a trusted key and still refuses kernel and core-system
 replacements in an extension. Disabling the COPR also removes its key from the
 Rime keyring.
+
+If a stored COPR key cannot be read, the keyring cannot be rebuilt, and both
+commands say which key and which COPR it belongs to. Enabling another COPR then
+fails, and disabling one removes the whole COPR keyring, so that the disabled
+COPR's key is not left trusted; until the named COPR is disabled too, packages
+from every COPR are refused.
 
 ## Flatpak
 
