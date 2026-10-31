@@ -3159,7 +3159,9 @@ jobs:
 
       # rime-secrets-start's choices that one machine cannot show with real
       # daemons: the configured provider, the fallback, the systemd and direct
-      # starts of oo7, a name owned by the wrong provider, no bus, no gdbus.
+      # starts of oo7 (and the direct start when systemd fails), a name owned
+      # by the wrong provider, no bus, no gdbus, and the wall-clock bounds on
+      # a slow or silent bus (counted in questions asked, with timing slack).
       # Fake daemons and a fake bus only; nothing of the runner is touched.
       - name: Run secrets-start assertions
         if: ${{ !cancelled() }}
