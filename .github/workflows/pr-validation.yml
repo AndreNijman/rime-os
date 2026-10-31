@@ -2735,6 +2735,43 @@ jobs:
               exit 1
           fi
 
+      # tests/test-rime-pkg-rpm6.sh — the trust chain against a REAL rpm 6
+      # (Fedora 45) with real OpenPGP signatures made by throwaway keys. Every
+      # other suite fakes rpmkeys or signs nothing, so nothing caught that
+      # `rpm --dbpath <dir> --initdb` is refused on Fedora 45 under enforcing
+      # SELinux ("can't create transaction lock"), which refresh_copr_keyring
+      # ran on every `rime repo enable-copr`, or that the keyring was deleted
+      # before the new keys were imported. It asserts: rpm_signature_ok
+      # accepts system- and COPR-keyring signatures and refuses unsigned and
+      # unknown-key packages quoting rpmkeys; the COPR keyring builds without
+      # initdb, silently, and an import failure leaves the old one verifying;
+      # extract_rpms (with --nosignature, after guard_rpms) unpacks into an
+      # empty root under %_pkgverify_level all; the ChatGPT `_keyring fs` check
+      # accepts and refuses; and the rpm cache against the real dnf5 (a second
+      # build downloads nothing, a corrupted cache file is fetched again).
+      # Same containment as above: podman run --rm, repository read-only.
+      - name: P1 packages — signatures and keyrings on a real rpm 6
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; the rpm6 suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
+          rc=0; out="$(./tests/test-rime-pkg-rpm6.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the rpm6 suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^rime-pkg-rpm6: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the rpm6 suite printed no summary line, which is what it does when podman is absent or no repository was reachable"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^rime-pkg-rpm6: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed rpm6 assertions failed"; exit 1; }
+          [ "$passed" -ge 34 ] || { echo "::error::only $passed rpm6 assertions ran; 34 ran when the suite was added, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
+              echo "::error::the rpm6 suite printed a SKIP: podman, the repository or rpm-build was unavailable, and the assertions it guards did not run"
+              exit 1
+          fi
+
       # tests/test-rime-pkg-etc-label.sh — what LABEL the engine puts on the
       # files it writes into /etc. install_etc copies with `cp -a`, which
       # preserves the SOURCE label, and the source is an rpm extraction tree
@@ -4436,6 +4473,7 @@ jobs:
             tests/test-rime-update-notice.sh \
             tests/test-rime-recover.sh \
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \
+            tests/test-rime-pkg-rpm6.sh \
             tests/test-rime-pkg.sh tests/test-rime-appimage.sh \
             tests/test-rime-firstrun.sh \
             tests/test-rime-shell-autostart.sh \
