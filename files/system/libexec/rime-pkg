@@ -436,7 +436,13 @@ rpm_signature_ok() {
        && [[ "$RPM_SIGSTATUS" = *"digests signatures OK"* ]]; then
         return 0
     fi
-    if [ -d "$COPR_KEY_DB" ]; then
+    # Only when the keyring HAS a database. With no COPR enabled there is none
+    # (refresh_copr_keyring removes it), and asking rpmkeys about a directory
+    # without one is not a no-op on rpm 6.1: it creates an empty rpmdb.sqlite
+    # there as a side effect and answers NOT OK (measured on Fedora 45). The
+    # answer would be the same refusal, so skip it and keep the system
+    # keyring's words in RPM_SIGSTATUS.
+    if [ -s "${COPR_KEY_DB}/rpmdb.sqlite" ]; then
         local copr
         if copr="$(rpmkeys --dbpath "$COPR_KEY_DB" --checksig -- "$rpmfile" 2>&1)" \
            && [[ "$copr" = *"digests signatures OK"* ]]; then
@@ -4691,10 +4697,17 @@ vendor_fetch_chatgpt() {
     # is created, so nothing needs a lock — `rpm --initdb` into a scratch
     # directory is denied its lock file under enforcing SELinux (measured
     # 2026-10-04, rpm 6.0.2) — and the system keyring is never touched.
+    # rpm 6.1 still reads this backend (tests/test-rime-pkg-rpm6.sh signs a
+    # fixture and checks it both ways). rpmkeys' own answer is kept and quoted:
+    # "does not verify" alone does not say whether the signature is wrong, the
+    # key is unreadable or rpm itself failed.
     cp -f -- "$key" "$dir/keys/chatgpt.key"
-    rpmkeys --define '_keyring fs' --define "_keyringpath $dir/keys/" --checksig -- "$dir/chatgpt.rpm" 2>/dev/null \
-        | grep 'digests signatures OK' >/dev/null \
-        || die "refusing chatgpt: the package does not verify against the pinned key"
+    local sigstatus
+    if ! sigstatus="$(rpmkeys --define '_keyring fs' --define "_keyringpath $dir/keys/" \
+                          --checksig -- "$dir/chatgpt.rpm" 2>&1)" \
+       || [[ "$sigstatus" != *"digests signatures OK"* ]]; then
+        die "refusing chatgpt: the package does not verify against the pinned key (rpmkeys says: ${sigstatus:-nothing})"
+    fi
     printf '%s\n' "$dir/chatgpt.rpm"
 }
 
@@ -5334,18 +5347,80 @@ valid_copr_project() {
     [[ "$1" =~ ^@?[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]
 }
 
+# Rebuild the COPR keyring from every key under COPR_KEYS. Returns non-zero,
+# having said which key and quoting rpm, when one cannot be imported; the
+# keyring that was there before is then left exactly as it was.
+#
+# NO `rpm --initdb`. On rpm 6.1 (Fedora 45) `rpm --dbpath <dir> --initdb` is
+# refused under enforcing SELinux in /var/lib and /var/tmp alike ("can't create
+# transaction lock on <dir>/.rpm.lock (Permission denied)", exit 255, as root
+# too), while `rpm --dbpath <dir> --import` creates the database itself and
+# works. The old code survived only because its callers run it under `if !`,
+# which switches errexit off, so the refused initdb printed a scary error and
+# was ignored.
+#
+# Built in a fresh directory beside the target and swapped in with ONE rename
+# (`mv --exchange`, renameat2 RENAME_EXCHANGE), so a reader never sees a
+# half-imported keyring and a failed import never costs the working one. The
+# old code removed the keyring first: one unreadable key and every COPR package
+# on the machine stopped verifying.
 refresh_copr_keyring() {
-    rm -rf "$COPR_KEY_DB"
-    install -d -m0700 "$COPR_KEY_DB"
-    rpm --dbpath "$COPR_KEY_DB" --initdb
-    [ -d "$COPR_KEYS" ] || return 0
+    local parent new old key out
+    parent="$(dirname -- "$COPR_KEY_DB")"
+    install -d -m0700 -- "$parent" || return 1
+    # Leftovers of an interrupted refresh. Never a keyring anything reads.
+    find "$parent" -maxdepth 1 -type d \( -name "$(basename -- "$COPR_KEY_DB").new.*" \
+        -o -name "$(basename -- "$COPR_KEY_DB").old.*" \) -exec rm -rf {} + 2>/dev/null || true
 
     local -a keys=()
-    local key
-    mapfile -d '' -t keys < <(find "$COPR_KEYS" -type f -name '*.gpg' -print0 | sort -z)
+    if [ -d "$COPR_KEYS" ]; then
+        mapfile -d '' -t keys < <(find "$COPR_KEYS" -type f -name '*.gpg' -print0 | sort -z)
+    fi
+    if [ "${#keys[@]}" -eq 0 ]; then
+        # No COPR enabled: no keyring at all, which rpm_signature_ok reads as
+        # "nothing to try" rather than asking rpm about an empty directory.
+        rm -rf -- "$COPR_KEY_DB" || return 1
+        return 0
+    fi
+
+    new="$(mktemp -d "${COPR_KEY_DB}.new.XXXXXX")" || {
+        warn "cannot create a directory for the new COPR keyring beside ${COPR_KEY_DB}"
+        return 1
+    }
+    chmod 0700 -- "$new"
     for key in "${keys[@]}"; do
-        rpm --dbpath "$COPR_KEY_DB" --import "$key"
+        if ! out="$(rpm --dbpath "$new" --import "$key" 2>&1)"; then
+            rm -rf -- "$new"
+            warn "cannot import the COPR signing key ${key}: ${out:-rpm gave no reason}"
+            warn "the COPR keyring was left as it was"
+            return 1
+        fi
     done
+    # The database rpm_signature_ok looks for. An rpm that ever stores keys
+    # elsewhere must fail here, loudly, instead of every COPR package failing
+    # verification later with nobody told why.
+    if [ ! -s "${new}/rpmdb.sqlite" ]; then
+        rm -rf -- "$new"
+        warn "rpm imported the COPR keys but wrote no ${new}/rpmdb.sqlite; the COPR keyring was left as it was"
+        return 1
+    fi
+
+    if [ -d "$COPR_KEY_DB" ] && [ ! -L "$COPR_KEY_DB" ]; then
+        if ! mv --exchange -T -- "$new" "$COPR_KEY_DB" 2>/dev/null; then
+            # An mv without --exchange: two renames. Between them there is no
+            # keyring and a COPR package is refused, which fails closed.
+            old="${COPR_KEY_DB}.old.$$"
+            mv -T -- "$COPR_KEY_DB" "$old" || { rm -rf -- "$new"; return 1; }
+            mv -T -- "$new" "$COPR_KEY_DB" || { mv -T -- "$old" "$COPR_KEY_DB"; return 1; }
+            new="$old"
+        fi
+        # After the exchange, $new holds the previous keyring.
+        rm -rf -- "$new"
+    else
+        rm -rf -- "$COPR_KEY_DB"
+        mv -T -- "$new" "$COPR_KEY_DB" || { rm -rf -- "$new"; return 1; }
+    fi
+    return 0
 }
 
 cmd_repo_list() {
