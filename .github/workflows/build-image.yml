@@ -2123,11 +2123,38 @@ jobs:
           syft --version
 
           REF="$IMAGE@${{ steps.push.outputs.digest }}"
+          DIGEST="${{ steps.push.outputs.digest }}"
+          LOCAL="$IMAGE:rime-${{ github.sha }}"
 
-          echo "── before prune ──"; df -h / /mnt 2>/dev/null || true; free -m || true
-          sudo podman image prune -af  >/dev/null 2>&1 || true
-          sudo podman system prune -af >/dev/null 2>&1 || true
-          echo "── after prune ──";  df -h / /mnt 2>/dev/null || true; free -m || true
+          # ── SCAN THE PUSHED TREE FROM LOCAL STORAGE, NOT FROM THE REGISTRY ──
+          # `syft registry:` re-downloads the image and holds it layer by layer;
+          # on the rechunked image (129 layers) that peaked at 18.8 GB RSS and
+          # was OOM-killed on a 16 GB runner. The image just pushed is still in
+          # local storage, so syft reads its mounted tree instead: measured on
+          # the same rechunked image (9d1c9ca5) with syft 1.52.0, peak RSS
+          # 2.1 GB, and the package set identical to a registry scan.
+          #
+          # `--override-default-catalogers image`: a dir: source otherwise uses
+          # syft's directory catalogers (lockfiles, workflow files) and misses
+          # installed npm modules; with the image set it finds what a registry
+          # scan finds. `/sysroot` is excluded: it holds the ostree repo, a
+          # content-addressed second copy of /usr, which listed the same Go
+          # modules twice (661 duplicates on the previous layout).
+          #
+          # Same bytes as the published digest: the pushed manifest's config
+          # digest must be this local image's id. The config carries the
+          # uncompressed layer diff_ids, so equal config = equal tree; the
+          # manifest digest differs only by the zstd:chunked compression.
+          pushed_cfg=$(sudo skopeo inspect --authfile /run/containers/0/auth.json --raw "docker://$REF" | jq -r '.config.digest')
+          local_cfg="sha256:$(sudo podman image inspect --format '{{.Id}}' "$LOCAL")"
+          if [ "$pushed_cfg" != "$local_cfg" ]; then
+            echo "::error::local $LOCAL ($local_cfg) is not the pushed image $DIGEST (config $pushed_cfg)"
+            exit 1
+          fi
+          ROOTFS=$(sudo podman image mount "$LOCAL")
+          trap 'sudo podman image unmount "$LOCAL" >/dev/null 2>&1 || true' EXIT
+          echo "scanning $LOCAL = $IMAGE@$DIGEST, mounted at $ROOTFS"
+          free -m || true
 
           _oom0="$(awk '/oom_kill/{print $2}' /proc/vmstat 2>/dev/null || echo 0)"
           ( while true; do
@@ -2140,10 +2167,14 @@ jobs:
           # 10GiB and `registry:` are inlined deliberately: these are the exact
           # values the probe measured, and a variable that can drift from what
           # was measured is how this step ends up "fixed" and still dying.
-          timeout 2700 "${_timer[@]}" env SYFT_PARALLELISM=4 GOMEMLIMIT=10GiB \
+          timeout 2700 sudo "${_timer[@]}" env SYFT_PARALLELISM=4 GOMEMLIMIT=10GiB \
             SYFT_FILE_METADATA_SELECTION=none \
             SYFT_RELATIONSHIPS_PACKAGE_FILE_OWNERSHIP=false \
-            syft "registry:$REF" -o spdx-json > /tmp/sbom.spdx.json || {
+            syft scan "dir:$ROOTFS" \
+              --override-default-catalogers image \
+              --exclude './sysroot/**' \
+              --source-name "$IMAGE" --source-version "$DIGEST" \
+              -o spdx-json > /tmp/sbom.spdx.json || {
             rc=$?
             _el=$(( $(date +%s) - _t0 ))
             kill $_sampler 2>/dev/null || true
