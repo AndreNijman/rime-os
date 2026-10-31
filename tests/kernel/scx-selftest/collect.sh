@@ -38,8 +38,10 @@ trap 'rm -rf "$ROOT"' EXIT
 # ── the kernel ───────────────────────────────────────────────────────────────
 if [ -n "$KRPM" ]; then
     x="$(mktemp -d)"
-    (cd "$x" && rpm2cpio "$KRPM" | cpio -idm --quiet './usr/lib/modules/*/vmlinuz')
-    mapfile -t vz < <(find "$x/usr/lib/modules" -mindepth 2 -maxdepth 2 -name vmlinuz)
+    # The kernel RPM puts it under /lib/modules (Fedora's /lib is /usr/lib,
+    # so the installed path is /usr/lib/modules); accept either spelling.
+    (cd "$x" && rpm2cpio "$KRPM" | cpio -idm --quiet './lib/modules/*/vmlinuz' './usr/lib/modules/*/vmlinuz')
+    mapfile -t vz < <(find "$x" -path '*/lib/modules/*/vmlinuz' -type f)
 else
     mapfile -t vz < <(find /usr/lib/modules -mindepth 2 -maxdepth 2 -name vmlinuz)
 fi
