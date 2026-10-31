@@ -176,6 +176,26 @@ had refused every call since the feature landed.
   kernel's `root/ops` publishes the **struct_ops** name, which drops the
   prefix: `scx_lavd` reads as `lavd`.
 
+`scx_fallback`, `scx_fallback_detail` and `scx_effective` were added
+2026-10-31, with the fallback they report (`docs/gaming-and-sessions.md` §5h):
+
+* **`scx_fallback`** is `none`, `verified` (a scheduler failed to load, or was
+  ejected later in the session, and after rimed stopped it `sched_ext/state`
+  read `disabled`), `unverified` (the stop did not get the kernel back to its
+  own scheduler; rimed reports it and does not retry), or `held-back` (this
+  profile's scheduler already failed earlier this boot, so this session never
+  tried it). At most one fallback per session; only a profile change clears
+  `held-back`.
+* **`scx_fallback_detail`** says when it failed (`at entry`, `mid-session
+  (ejected)`, `mid-session (ejected and reloaded)`, `mid-session (never came
+  up)`), the trigger, the kernel's own words from `/dev/kmsg`
+  (`sched_ext: BPF scheduler "…" disabled (runnable task stall)` and the lines
+  after it), and the result of the stop. Empty when there was none.
+* **`scx_effective`** is who schedules now by the latest kernel reading: the
+  requested name, another attached scheduler's struct_ops name, `kernel`, or
+  `unknown`. It never names the requested scheduler without having read it in
+  `root/ops`.
+
 `scx_btf` is the **fourth** key, added 2026-09-20. It answers the question
 `scx_state` cannot: whether a scheduler could EVER attach to this kernel. It is
 a reading of `/sys/kernel/btf/vmlinux` taken by `rimed` itself.

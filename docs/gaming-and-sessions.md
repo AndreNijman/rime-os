@@ -635,8 +635,10 @@ Gaming Mode keeps sched_ext: rimed still asks for `scx_lavd`
 (Since 2026-10-07 it asks only on CPUs with one kind of core: see §5f.)
 
 `scx_loader` restarting lavd after every watchdog exit turned one bug into five
-freezes, and rimed reports "sched-ext loaded" once at entry and never looks
-again. Both are still true, and each needs its own fix.
+freezes, and rimed reported "sched-ext loaded" once at entry and never looked
+again. Since 2026-10-31 rimed watches the whole session and stops a scheduler
+that failed or was ejected, once (§5h). The binary-swap described above was
+replaced the same day by building the whole scheduler set from source (§5h).
 
 The Hyprland crash the same day is a different defect. It was an i915 GPU hang
 in the game's own context (`ecode 12:1:84dffffb`, rcs0), which reset Hyprland's
@@ -774,6 +776,46 @@ turned on: `rime-gaming-discord set on|off`, or the switch in Settings → Gamin
   (electron-updater) can open on installs it can update (RPM/AppImage); the
   tarball install has no updater. Steam's base-layer focus should keep such a
   window behind Steam, not verified.
+
+## 5h. The kernel and the schedulers are built, proven and failed over together (2026-10-31)
+
+Rime builds its own kernel, but until now took its sched-ext schedulers from
+the CachyOS COPR (`scx-scheds`, `scx-tools`), built against nobody's kernel in
+particular, with `scx_lavd` swapped for Rime's patched build (§5e). sched_ext's
+BPF interface is not stable across kernel versions, so a kernel bump could
+ship schedulers that no longer load, and nothing would say so before a user
+opened Gaming Mode.
+
+**Built together.** `Containerfile.core`'s `scx-builder` stage builds every
+scheduler, `scxctl`, `scx_loader` and `scxtop` from ONE pinned scx release
+(tarball sha256 pinned; the lavd patch still applied) and COPYs the kernel
+tier's own BTF in, so a kernel bump rebuilds the stage. The BPF is compiled
+against the header scx ships, not one dumped from Rime's kernel: that was
+tried and does not compile (scx 1.1.3 reads v7.3 `sched_ext_ops` fields and
+drops them at load on an older kernel). Upstream's contract is a header at
+least as new as the kernel, so the build checks exactly that:
+`files/system/src/scx/check-sched-ext-ops.sh` fails the build if the kernel's
+`sched_ext_ops` has a member the header lacks. `/usr/lib/rime-scx-versions`
+records the release, the header, the check's result and the kernel.
+
+**Proven together.** `tests/kernel/scx-selftest/` boots the image's own
+kernel in QEMU with an initramfs holding the image's own schedulers and their
+libraries, loads each one under load, checks it attached under the struct_ops
+name rimed expects and survived, then `kill -9`s `scx_lavd` and checks the
+kernel took its tasks back. build-image.yml runs it before core is pushed.
+On 7.2.9 with the source-built set: 16 schedulers + kill -9, PASS, 93 s under
+KVM.
+
+**Failed over on the machine.** When the scheduler a Gaming Mode session asked
+for did not attach, or the kernel ejected it later (the state reads
+`disabled`, a different scheduler is attached, or `enable_seq` moved because
+`scx_loader` reloaded it between two readings), rimed runs `scxctl stop`,
+reads `sched_ext/state` until it says `disabled`, and reports it: `scx_fallback`,
+`scx_fallback_detail` (with the kernel's reason from `/dev/kmsg`) and
+`scx_effective` (`docs/rimed-dbus.md`), plus one journal line. One attempt per
+session; a profile whose scheduler failed is not tried again this boot until
+the profile changes. A stop that does not get the kernel back is reported
+`unverified` and not retried.
 
 ## 6. The rows that need katana, and the exact commands
 
