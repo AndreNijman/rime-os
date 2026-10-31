@@ -144,14 +144,18 @@ pub struct ScxReport {
 /// REASONED, like rimed-core's `SCX_SETTLE`, not measured on hardware: the
 /// QEMU selftest (an idle 8-vCPU KVM guest, no game starting) timed attach at
 /// 0.1-1.2 s for most schedulers and up to 2.8 s for scx_layered, which
-/// already outlasts the 2 s settle the switch waits. A cold `scx_loader`
-/// D-Bus activation and a game loading at the same time only add to that.
-/// Ten seconds is five watch ticks. A scheduler that FAILED leaves no reading
+/// already outlasts the 2 s settle the switch waits; with the host busy
+/// compiling, scx_eevdf took 6.5 s. A cold `scx_loader` D-Bus activation and a
+/// game loading at the same time only add to that. Waiting is cheap: while
+/// the state reads `disabled` the kernel's own scheduler is running the game,
+/// so a long grace delays only the report and the `scxctl stop`, never the
+/// game. Twenty seconds is ten watch ticks, three times the slowest attach
+/// measured. A scheduler that FAILED leaves no reading
 /// that says so by itself (a verifier refusal logs nothing in the kernel and
 /// leaves the state `disabled`), so time is what separates the two; a kernel
 /// disable record naming the scheduler, or scxctl refusing outright, ends the
 /// wait early.
-pub const SCX_ATTACH_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+pub const SCX_ATTACH_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// What the daemon did about a sched-ext scheduler that failed.
 ///

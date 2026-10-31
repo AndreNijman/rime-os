@@ -469,7 +469,8 @@ pub struct RealWriter {
 /// Later evidence, still not hardware: the QEMU selftest
 /// (tests/kernel/scx-selftest, an idle 8-vCPU KVM guest, no game loading)
 /// timed attach at 0.1-1.2 s for most schedulers and up to 2.8 s for
-/// scx_layered. So a healthy scheduler CAN outlast this budget, and the daemon
+/// scx_layered; with the host busy compiling, up to 6.5 s (scx_eevdf, scx 1.1.4)
+/// and 2.8 s for scx_lavd. So a healthy scheduler CAN outlast this budget, and the daemon
 /// does not act on a timeout here alone: `rimed`'s game entry leaves a
 /// `disabled` reading after this wait to the session watch, which allows a
 /// longer grace before calling it a failure.
