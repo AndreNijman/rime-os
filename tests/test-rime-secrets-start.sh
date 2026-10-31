@@ -12,11 +12,15 @@
 #  busctl answer GetConnectionUnixProcessID from it and record every call.
 #
 #  tests/test-rime-keyring-session-start.sh is the real-daemon proof; this one
-#  covers the choices that suite cannot reach on one machine.
+#  covers the choices that suite cannot reach on one machine, and the bounds on
+#  how long the helper can hold a session when the bus is slow or never answers
+#  (each fake can be told to be slow, to fail, or to never own the name).
+#
+#  RIME_TEST_HELPER runs another copy of the helper (an older one, or a mutant).
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HELPER="$here/../files/system/libexec/rime-secrets-start"
+HELPER="${RIME_TEST_HELPER:-$here/../files/system/libexec/rime-secrets-start}"
 [ -x "$HELPER" ] || { echo "cannot find $HELPER"; exit 2; }
 
 pass=0 fail=0 skip=0
@@ -55,16 +59,23 @@ case "$1" in
 esac
 exit 0'
 OO7_BODY='echo "oo7-daemon $*" >> "$T/calls"
+[ -z "${FAKE_OO7_NOSERVE:-}" ] || exit 0
 '"$SERVE"
+# FAKE_BUS_DELAY: the bus takes that long to answer (a slow or wedged bus).
 GDBUS_BODY='echo "gdbus $*" >> "$T/bus-calls"
+[ -z "${FAKE_BUS_DELAY:-}" ] || sleep "$FAKE_BUS_DELAY" >/dev/null
 p="$(cat "$T/owner" 2>/dev/null)"
 if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "(uint32 $p,)"; exit 0; fi
 echo "Error: NameHasNoOwner" >&2; exit 1'
 BUSCTL_BODY='echo "busctl $*" >> "$T/bus-calls"
+[ -z "${FAKE_BUS_DELAY:-}" ] || sleep "$FAKE_BUS_DELAY" >/dev/null
 p="$(cat "$T/owner" 2>/dev/null)"
 if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then echo "u $p"; exit 0; fi
 echo "Call failed: no such name" >&2; exit 1'
+# FAKE_SYSTEMCTL=fail: the start fails (unit masked, not loaded, timed out);
+# FAKE_SYSTEMCTL=noop: it "succeeds" and starts nothing.
 SYSTEMCTL_BODY='echo "systemctl $*" >> "$T/calls"
+case "${FAKE_SYSTEMCTL:-}" in fail) exit 1 ;; noop) exit 0 ;; esac
 [ "$*" = "--user start oo7-daemon.service" ] && setsid -f "$OO7" </dev/null >/dev/null 2>&1
 exit 0'
 
@@ -138,6 +149,16 @@ python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])'
 run "$T/gdbus:$T/systemctl" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7"
 check "with a user service manager: systemctl --user start oo7-daemon.service, not a stray daemon" \
     eval '[ "$(rc)" = 0 ] && [ "$(calls | head -1)" = "systemctl --user start oo7-daemon.service" ] && [ "$(calls | wc -l)" = 2 ]'
+
+run "$T/gdbus:$T/systemctl" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7" FAKE_SYSTEMCTL=fail
+check "the systemd start fails: the daemon itself is started, detached, and oo7 serves" \
+    eval '[ "$(rc)" = 0 ] && [ "$(calls | tr "\n" ";")" = "systemctl --user start oo7-daemon.service;oo7-daemon ;" ] && [ "$(owner_comm)" = oo7-daemon ]'
+check "...and the log says the systemd start failed" \
+    logged "systemctl --user start oo7-daemon.service failed; starting $T/libexec/oo7-daemon directly"
+
+run "$T/gdbus:$T/systemctl" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7" FAKE_SYSTEMCTL=noop
+check "the systemd start succeeds but nobody owns the name: the daemon itself, and oo7 serves" \
+    eval '[ "$(rc)" = 0 ] && [ "$(calls | tail -1)" = "oo7-daemon " ] && [ "$(owner_comm)" = oo7-daemon ]'
 rm -f "$T/run/systemd/private"
 
 run "$T/gdbus" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7"
@@ -155,20 +176,48 @@ env -i PATH="$T/gdbus:$T/sys" XDG_RUNTIME_DIR="$T/run" DBUS_SESSION_BUS_ADDRESS=
 check "name already owned by another provider: no second daemon, exit 1, and the log names both" \
     eval '[ "$(rc)" = 1 ] && [ -z "$(calls)" ] && logged "served by gnome-keyring (pid $(cat "$T/owner")), not by oo7"'
 
-echo "── what it confirms"
+echo "── what it confirms, and for how long"
+# Wall-time checks carry seconds of slack for loaded CI runners; the counts of
+# questions asked are the exact part.
+asks() { wc -l < "$T/bus-calls" 2>/dev/null || echo 0; }
+since() { echo $(( ($(date +%s%N) - t0) / 1000000 )); }
+
 t0=$(date +%s%N)
-run "$T/gk:$T/gdbus" FAKE_GK_NOSERVE=1 RIME_SECRETS_CONFIRM_SECS=1
-ms=$(( ($(date +%s%N) - t0) / 1000000 ))
-check "the provider starts but nobody owns the name: exit 1 and the log says so" \
-    eval '[ "$(rc)" = 1 ] && logged "nothing owns org.freedesktop.secrets after 1s (started gnome-keyring)"'
-check "...within the confirm bound (${ms} ms for a 1 s bound)" test "$ms" -lt 3000
+run "$T/gk:$T/gdbus" FAKE_GK_NOSERVE=1
+ms=$(since)
+check "gnome-keyring starts but nobody owns the name: exit 1 and the log says so, with the time spent" \
+    eval '[ "$(rc)" = 1 ] && grep -E "nothing owns org.freedesktop.secrets [0-9]+ ms after starting gnome-keyring; apps cannot reach saved passwords" "$T/log" >/dev/null'
+check "...after ONE question: --start returns with the name owned, so there is nothing to wait for" \
+    test "$(asks)" = 1
+check "...so the session is not held (${ms} ms)" test "$ms" -lt 2000
+
+t0=$(date +%s%N)
+run "$T/gk:$T/gdbus" FAKE_GK_NOSERVE=1 FAKE_BUS_DELAY=30
+ms=$(since)
+check "a bus that never answers: one question, cut off at 1 s, exit 1 (${ms} ms)" \
+    eval '[ "$(rc)" = 1 ] && [ "$(asks)" = 1 ] && [ "$ms" -lt 3000 ]'
+
+t0=$(date +%s%N)
+run "$T/gdbus" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7" FAKE_OO7_NOSERVE=1 RIME_SECRETS_CONFIRM_SECS=2
+ms=$(since)
+check "detached oo7 start that never owns the name: it keeps asking, then exit 1 and the log says so" \
+    eval '[ "$(rc)" = 1 ] && [ "$(asks)" -ge 5 ] && grep -E "nothing owns org.freedesktop.secrets [0-9]+ ms after starting oo7" "$T/log" >/dev/null'
+check "...and stops at the 2 s deadline (${ms} ms, $(asks) questions)" test "$ms" -lt 5000
+
+t0=$(date +%s%N)
+run "$T/gdbus" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7" FAKE_OO7_NOSERVE=1 RIME_SECRETS_CONFIRM_SECS=2 FAKE_BUS_DELAY=2
+ms=$(since)
+check "the same on a bus that takes 2 s per answer: each question is cut off, the deadline holds (${ms} ms)" \
+    eval '[ "$(rc)" = 1 ] && [ "$ms" -lt 6000 ]'
+check "...and the log gives the real time spent, not the bound" \
+    eval 'spent=$(sed -n "s/.*nothing owns org.freedesktop.secrets \([0-9]*\) ms after.*/\1/p" "$T/log"); [ -n "$spent" ] && [ "$spent" -ge 1500 ]'
 
 t0=$(date +%s%N)
 run "$T/gk:$T/gdbus" DBUS_SESSION_BUS_ADDRESS= XDG_RUNTIME_DIR=
-ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+ms=$(since)
 check "no session bus: the provider is still started, exit 1, logged, no bus call" \
     eval '[ "$(rc)" = 1 ] && [ "$(calls)" = "gnome-keyring-daemon --start --components=secrets" ] && [ ! -s "$T/bus-calls" ] && logged "no session bus to confirm on"'
-check "...and nothing waits (${ms} ms)" test "$ms" -lt 1000
+check "...and nothing waits (${ms} ms)" test "$ms" -lt 2000
 
 run "$T/gk:$T/gdbus"
 check "it asks the bus, never the name itself (a call to the name would activate a locked daemon)" \
