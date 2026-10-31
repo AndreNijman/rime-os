@@ -1,0 +1,176 @@
+#!/usr/bin/bash
+# rechunk-image --from IMAGE --output IMAGE [--previous REF --previous-plan REF]
+#               [--max-layers N] [--authfile FILE]
+#
+# Re-lays a built Rime image into content-based layers so an update downloads
+# only what changed. Run as root (rootful containers-storage, like CI's
+# `sudo podman`).
+#
+#   1. tag hand-installed payloads with layer components
+#      (rechunk/Containerfile.components → rechunk/assign-components)
+#   2. rpm-ostree compose build-chunked-oci, run from the image ITSELF (so the
+#      packer is the rpm-ostree that ships in the release), with
+#      --previous-build = the layer plan of the release machines run today, so
+#      a package that did not change keeps a byte-identical layer and is never
+#      downloaded again
+#   3. refuse the result unless it holds exactly the same files as IMAGE
+#      (rechunk/verify-lossless) and passes `bootc container lint`
+#   4. write the new plan as a tiny image, OUTPUT-plan, for the next build
+#
+# WHY A SEPARATE PLAN IMAGE. rpm-ostree reads the previous plan from per-layer
+# `ostree.components` annotations in the previous image's manifest. Pushing
+# with zstd:chunked (or zstd, or gzip) from containers-storage rewrites every
+# layer descriptor and drops those annotations, so the published image cannot
+# serve as its own plan. OUTPUT-plan holds the annotated manifest and config
+# exactly as rpm-ostree wrote them (layer digests uncompressed); the next build
+# lays them out as a blob-less OCI directory, which rpm-ostree accepts as
+# --previous-build because it reads only the manifest.
+#
+# --previous is the release machines run (registry ref, no transport, e.g.
+# ghcr.io/andrenijman/rime-os:rime); --previous-plan is the plan pushed with it
+# (e.g. ghcr.io/andrenijman/rime-os:rechunk-plan). The plan is used only if its
+# layers are the first layers of --previous (a Shell-only release built on top
+# adds layers, it does not replace them). Otherwise the layout starts fresh:
+# one full download for every machine, once.
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd)
+from="" out="" previous="" previous_plan="" max_layers=128 authfile=""
+while [ $# -gt 0 ]; do
+    case $1 in
+        --from) from=$2; shift 2 ;;
+        --output) out=$2; shift 2 ;;
+        --previous) previous=$2; shift 2 ;;
+        --previous-plan) previous_plan=$2; shift 2 ;;
+        --max-layers) max_layers=$2; shift 2 ;;
+        --authfile) authfile=$2; shift 2 ;;
+        *) echo "rechunk-image: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+[ -n "$from" ] && [ -n "$out" ] || { echo "rechunk-image: --from and --output are required" >&2; exit 2; }
+case $max_layers in ''|*[!0-9]*) echo "rechunk-image: --max-layers must be a number" >&2; exit 2 ;; esac
+
+PODMAN=${PODMAN:-podman}
+SKOPEO=${SKOPEO:-skopeo}
+components="$out-components"
+work=$(mktemp -d)
+
+log() { printf '[rechunk] %s\n' "$*"; }
+cleanup() {
+    $PODMAN rmi -f "$components" >/dev/null 2>&1 || true
+    rm -rf "$work"
+}
+trap cleanup EXIT
+
+log "tagging hand-installed payloads with layer components"
+$PODMAN build --isolation=chroot --layers=false \
+    --build-arg BASE="$from" \
+    -f "$here/Containerfile.components" -t "$components" "$here"
+
+auth_args=()
+if [ -n "$authfile" ]; then
+    auth_args=(--authfile "$authfile")
+fi
+
+# A bare reference is a registry one; an explicit transport (containers-storage:,
+# oci:, docker://) is passed through, for local runs.
+ref() { case $1 in *://*|containers-storage:*|oci:*|dir:*) printf '%s' "$1" ;; *) printf 'docker://%s' "$1" ;; esac; }
+
+# load_plan PLAN_REF PUBLISHED_REF -> fills $work/prev as an OCI layout, or fails
+load_plan() {
+    local plan=$1 published=$2 blob
+    rm -rf "$work/planimg" "$work/plan" "$work/prev"
+    $SKOPEO copy -q "${auth_args[@]}" "$(ref "$plan")" "dir:$work/planimg" || {
+        log "previous plan: $plan not found"; return 1; }
+    mkdir -p "$work/plan"
+    for blob in $(jq -r '.layers[].digest | sub("^sha256:"; "")' "$work/planimg/manifest.json"); do
+        tar -xf "$work/planimg/$blob" -C "$work/plan"
+    done
+    [ -s "$work/plan/rechunk-plan/manifest.json" ] && [ -s "$work/plan/rechunk-plan/config.json" ] || {
+        log "previous plan: $plan holds no rechunk-plan/manifest.json + config.json"; return 1; }
+    jq -e '.layers | map(select(.annotations["ostree.components"] != null)) | length > 0' \
+        "$work/plan/rechunk-plan/manifest.json" >/dev/null || {
+        log "previous plan: $plan has no ostree.components annotations"; return 1; }
+    # The plan must describe the layers machines actually have: its layers are
+    # the FIRST layers of the published image (equal, or a prefix of a Shell-only
+    # release built on top).
+    local have want
+    have=$($SKOPEO inspect "${auth_args[@]}" --config --raw "$(ref "$published")" | jq -c '.rootfs.diff_ids') || {
+        log "previous plan: cannot read $published"; return 1; }
+    want=$(jq -c '.rootfs.diff_ids' "$work/plan/rechunk-plan/config.json")
+    if ! jq -n -e --argjson have "$have" --argjson want "$want" \
+            '($want | length) > 0 and ($want | length) <= ($have | length) and $have[0:($want | length)] == $want' >/dev/null; then
+        log "previous plan: $plan does not describe the layers of $published"
+        return 1
+    fi
+    # Blob-less OCI layout: index -> manifest -> config. No layer blobs.
+    local md cfg ms
+    mkdir -p "$work/prev/blobs/sha256"
+    cfg=$(sha256sum "$work/plan/rechunk-plan/config.json" | cut -d' ' -f1)
+    [ "sha256:$cfg" = "$(jq -r '.config.digest' "$work/plan/rechunk-plan/manifest.json")" ] || {
+        log "previous plan: config.json does not match the manifest's config digest"; return 1; }
+    cp "$work/plan/rechunk-plan/config.json" "$work/prev/blobs/sha256/$cfg"
+    md=$(sha256sum "$work/plan/rechunk-plan/manifest.json" | cut -d' ' -f1)
+    ms=$(stat -c %s "$work/plan/rechunk-plan/manifest.json")
+    cp "$work/plan/rechunk-plan/manifest.json" "$work/prev/blobs/sha256/$md"
+    printf '{"imageLayoutVersion":"1.0.0"}\n' > "$work/prev/oci-layout"
+    jq -n --arg d "sha256:$md" --argjson s "$ms" \
+        '{schemaVersion: 2, manifests: [{mediaType: "application/vnd.oci.image.manifest.v1+json",
+          digest: $d, size: $s, annotations: {"org.opencontainers.image.ref.name": "plan"}}]}' \
+        > "$work/prev/index.json"
+}
+
+prev_args=()
+prev_mount=()
+if [ -n "$previous" ] && [ -n "$previous_plan" ]; then
+    if load_plan "$previous_plan" "$previous"; then
+        log "previous plan: $previous_plan matches $previous — keeping its layer plan"
+        prev_args=(--previous-build oci:/run/rechunk-prev:plan)
+        prev_mount=(-v "$work/prev:/run/rechunk-prev:ro")
+    else
+        log "no usable previous plan — this release starts a fresh layer plan (one full download, once)"
+    fi
+fi
+
+# rpm-ostree reads --from and writes --output through the HOST's storage, so it
+# must open that storage the way the host does: same graph root, same driver.
+# The Fedora image's own storage.conf may say otherwise (a CI runner's podman
+# can use a different driver or root), and a mismatch is refused or, worse,
+# opens an empty store.
+graphroot=$($PODMAN info --format '{{.Store.GraphRoot}}')
+driver=$($PODMAN info --format '{{.Store.GraphDriverName}}')
+log "host storage: $driver at $graphroot"
+
+log "rpm-ostree compose build-chunked-oci (max $max_layers layers)"
+$PODMAN run --rm --privileged --security-opt label=disable --network=none \
+    -v "$graphroot:/var/lib/containers/storage" \
+    -e STORAGE_DRIVER="$driver" \
+    "${prev_mount[@]}" \
+    --entrypoint /usr/bin/rpm-ostree "$from" \
+    compose build-chunked-oci --bootc --format-version=2 \
+        --max-layers "$max_layers" \
+        --from "$components" \
+        "${prev_args[@]}" \
+        --output "containers-storage:$out"
+
+log "verifying the rechunked image holds exactly the same files"
+PODMAN="$PODMAN" "$here/verify-lossless" "$from" "$out"
+
+log "bootc container lint"
+$PODMAN run --rm --network=none --entrypoint /usr/bin/bootc "$out" container lint
+
+log "writing the layer plan for the next build: $out-plan"
+mkdir -p "$work/newplan/rechunk-plan"
+$SKOPEO inspect --raw "containers-storage:$out" > "$work/newplan/rechunk-plan/manifest.json"
+$SKOPEO inspect --config --raw "containers-storage:$out" > "$work/newplan/rechunk-plan/config.json"
+jq -e '.layers | map(select(.annotations["ostree.components"] != null)) | length > 0' \
+    "$work/newplan/rechunk-plan/manifest.json" >/dev/null || {
+    echo "rechunk-image: rpm-ostree wrote no ostree.components annotations; the next build could not keep this plan" >&2
+    exit 1; }
+printf 'FROM scratch\nCOPY rechunk-plan /rechunk-plan\n' > "$work/newplan/Containerfile"
+$PODMAN build --network=none --layers=false \
+    --label org.rimeos.rechunk.plan-for="$($PODMAN image inspect --format '{{.Id}}' "$out")" \
+    -f "$work/newplan/Containerfile" -t "$out-plan" "$work/newplan"
+
+layers=$($PODMAN image inspect --format '{{len .RootFS.Layers}}' "$out")
+log "done: $out has $layers layers"

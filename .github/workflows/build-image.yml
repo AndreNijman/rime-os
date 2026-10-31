@@ -1625,6 +1625,55 @@ jobs:
             echo "payload split OK: drivers in, gaming userspace out, glvnd intact"
           '
 
+      # ── Rechunk: lay the image out by CONTENT, not by Containerfile step ───
+      # A podman build makes one layer per RUN/COPY. Every time core rebuilds
+      # (it does whenever quay.io/fedora/fedora-bootc moves, i.e. most days
+      # before Fedora 45 ships), all of core's step layers get new bytes and
+      # every machine re-downloads them, whatever actually changed. Measured
+      # 2026-10-31 on the published images (zstd:chunked, compressed bytes a
+      # machine downloads):
+      #
+      #   core rebuild   daily-e5ff68d1 -> daily-b61d46c1   84 of 125 layers   4.83 GB
+      #   same, rechunked (rpm-ostree, plan of the previous)   49 of 129 layers  1.74 GB
+      #   full image, fresh install                          5.31 GB -> 4.20 GB
+      #
+      # rechunk/rechunk-image re-lays the built image by package (one layer per
+      # package group, kept stable across releases by --previous-build), with
+      # Rime's hand-installed payloads (Shell, daemons, modules, initramfs,
+      # fonts, Rust tools, rpmdb) on layers of their own (rechunk/components.conf),
+      # then REFUSES the result unless every file is byte-identical to the image
+      # the checks above just verified, and `bootc container lint` passes.
+      # The plan it is kept stable against is the one published with the
+      # release machines run now (`:rime`): rechunk-plan-<that release's rev>.
+      - name: Rechunk into content-based layers
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+          auth=/run/containers/0/auth.json   # where rootful `podman login` above wrote it
+          # The plan of the release machines run today. Its rev label names
+          # the build that wrote it; the floating tag is the fallback (e.g.
+          # :rime is a Shell-only release built on top of that build).
+          rev=$(sudo skopeo inspect --authfile "$auth" --config --raw "docker://$IMAGE:rime" 2>/dev/null \
+                  | jq -r '.config.Labels["org.opencontainers.image.revision"] // ""' || true)
+          plan="$IMAGE:rechunk-plan"
+          if [ -n "$rev" ] && sudo skopeo inspect --authfile "$auth" --raw "docker://$IMAGE:rechunk-plan-$rev" >/dev/null 2>&1; then
+            plan="$IMAGE:rechunk-plan-$rev"
+          fi
+          echo "previous release: $IMAGE:rime (rev ${rev:-unknown}); plan: $plan"
+          df -h / | tail -1
+          sudo rechunk/rechunk-image \
+            --from "$IMAGE:rime" \
+            --output "$IMAGE:rime-rechunked" \
+            --previous "$IMAGE:rime" \
+            --previous-plan "$plan" \
+            --authfile "$auth" \
+            --max-layers 128
+          # From here on the rechunked image IS the build: the push below
+          # sends rime-<sha>, so point that tag at it.
+          sudo podman tag "$IMAGE:rime-rechunked" "$IMAGE:rime-${{ github.sha }}"
+          sudo podman rmi "$IMAGE:rime-rechunked" >/dev/null
+          df -h / | tail -1
+
       # ── Push once, then tag in-registry ──────────────────────────────────
       # Two problems this solves, both measured on run 30775672845.
       #
@@ -1670,6 +1719,20 @@ jobs:
         if: ${{ steps.push.outputs.digest != '' }}
         run: |
           cosign sign --yes "$IMAGE@${{ steps.push.outputs.digest }}"
+
+      # The layer plan the NEXT build keeps stable against (see "Rechunk into
+      # content-based layers"). Pushed per build; the floating :rechunk-plan
+      # moves with the published tags below. Tiny (~150 KB).
+      - name: Push the rechunk plan
+        if: ${{ steps.push.outputs.digest != '' }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            sudo podman push --compression-format gzip \
+              "$IMAGE:rime-rechunked-plan" "docker://$IMAGE:rechunk-plan-${{ github.sha }}" && break
+            [ "$attempt" = 3 ] && { echo "::error::plan push failed after 3 attempts"; exit 1; }
+            sleep $(( attempt * 15 ))
+          done
 
       # ── SBOM, and why only on this image ────────────────────────────────────
       # A signature says the bytes came from this pipeline. It says nothing
@@ -2247,6 +2310,10 @@ jobs:
             promote "platform-$f-${{ github.sha }}"
             promote "platform-$f"
           done
+          # The rechunk plan first: if a flavor move then fails, the next build
+          # still finds the plan of whatever :rime resolves to by its rev.
+          skopeo copy --retry-times 3 --src-creds "$creds" --dest-creds "$creds" \
+            "docker://$IMAGE:rechunk-plan-${{ github.sha }}" "docker://$IMAGE:rechunk-plan"
           for f in $FLAVORS; do
             promote "$f"
           done
