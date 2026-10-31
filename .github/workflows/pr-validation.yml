@@ -2132,12 +2132,17 @@ jobs:
         run: ./test-installer-keymap.sh
 
       # Fedora 45 made kmscon the text console. Two installer claims ride on
-      # it: Ctrl+Alt+F2 in the live env still opens a login (F45's systemd
-      # ships no autovt@ link, so the live env must create it), and the layout
-      # picked on the keyboard page reaches kmscon, which asks systemd-localed
-      # rather than reading vconsole.conf. The second is measured against a
-      # real Fedora 45 localed in `podman run --rm`; a SKIP there means none of
-      # it ran, so it fails the step like the other podman suites do.
+      # it: Ctrl+Alt+F2 in the live env still opens a login while tty1 stays
+      # cage's (F45's systemd ships no autovt@ link, so the live env creates
+      # it, and every name for a console on tty1 must load as masked, which a
+      # fedora:45 container booted with systemd checks), and the layout picked
+      # on the keyboard page is what both systemd-localed and Rime's
+      # 50-rime-keymap generator report (kmscon starts from the generator's
+      # XKB_DEFAULT_* and follows localed live; the suite does not run kmscon).
+      # Measured against real Fedora 45 packages in podman; a SKIP there means
+      # none of it ran, so it fails the step like the other podman suites do.
+      # The legs install packages with dnf, so a Fedora mirror outage fails
+      # this step; that is accepted (a skipped proof is not a pass).
       # Rootless podman needs user namespaces, which Ubuntu 24.04 restricts by
       # default (see the same step in the package shards). Ephemeral runner.
       - name: Allow unprivileged user namespaces for the console suite

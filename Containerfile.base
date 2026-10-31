@@ -2894,14 +2894,22 @@ RUN set -eux; \
 #    tty1 (kmsconvt@tty1 is WantedBy=getty.target); if that line ever went, a
 #    kmscon would fight the greeter for VT 1 at every boot.
 #  * the console keyboard follows the installer's choice. kmscon does not read
-#    /etc/vconsole.conf (no loadkeys, no setfont): it asks systemd-localed over
-#    D-Bus for X11Layout/X11Variant/X11Options/X11Model and follows changes to
-#    them live. localed answers from /etc/vconsole.conf's XKB* keys and, when
-#    those are unset, from /etc/X11/xorg.conf.d/00-keyboard.conf, which is the
-#    file rime-install writes the operator's layout and variant into. kmscon
-#    SKIPS localed entirely as soon as any xkb-* option is configured, so a
-#    kmscon.conf carrying one would pin every console to that layout and stop
-#    `localectl set-x11-keymap` reaching it. None may ship.
+#    /etc/vconsole.conf (no loadkeys, no setfont). At start it takes the layout
+#    from XKB_DEFAULT_* in its environment if any is set, and only otherwise
+#    asks systemd-localed (locale1) for X11Layout/X11Variant/X11Options/
+#    X11Model (kmscon 10, src/misc/dbus.c). On this image the environment
+#    wins whenever a layout was installed: 50-rime-keymap (above) exports
+#    XKB_DEFAULT_* from /etc/X11/xorg.conf.d/00-keyboard.conf into the manager
+#    environment, and kmsconvt@ inherits it. With no such file it exports
+#    nothing and kmscon asks localed (unset there = xkbcommon's default, us).
+#    Both read the file rime-install writes, so they agree (the installer's
+#    console suite checks the generator against a real localed for each
+#    layout). After start, kmscon follows locale1 changes live unless
+#    kmscon.conf sets an xkb-model/layout/variant/options/keymap option: any
+#    of those switches the live listener off and overrides that field, which
+#    would pin every console and stop `localectl set-x11-keymap` reaching it.
+#    None may ship. (xkb-repeat-*, xkb-compose-file do not touch the layout.)
+#    The locale1 grep below is a premise check on Fedora's binary, not on Rime.
 #
 # Console font: Rime sets no FONT= (and the vconsole guard drops a broken
 # one). kmscon ignores FONT= anyway and sizes its own font from the monitor's
@@ -2915,13 +2923,13 @@ RUN set -eux; \
         || { echo "FATAL: greetd.service no longer conflicts with kmsconvt@tty1: kmscon would fight the greeter for VT 1"; exit 1; }; \
     if rpm -q kmscon >/dev/null 2>&1; then \
         for f in /etc/kmscon/*.conf; do \
-            if [ -f "$f" ] && grep -qE '^[[:space:]]*xkb-' "$f"; then \
-                echo "FATAL: $f sets xkb-*: kmscon would stop following localectl and the installer's layout"; exit 1; \
+            if [ -f "$f" ] && grep -qE '^[[:space:]]*xkb-(model|layout|variant|options|keymap)[[:space:]]*=' "$f"; then \
+                echo "FATAL: $f sets an xkb layout option: kmscon would stop following localectl and the installer's layout"; exit 1; \
             fi; \
         done; \
         grep -aq 'org.freedesktop.locale1' /usr/bin/kmscon \
             || { echo "FATAL: this kmscon has no locale1 support: the console would ignore the installer's keyboard layout"; exit 1; }; \
-        echo "kmscon $(rpm -q --qf '%{VERSION}' kmscon) takes its layout from systemd-localed"; \
+        echo "kmscon $(rpm -q --qf '%{VERSION}' kmscon): layout from 50-rime-keymap's XKB_DEFAULT_* or localed, live changes from localed"; \
     else \
         echo "kmscon not installed: autovt@ is agetty, which loads KEYMAP= via systemd-vconsole-setup"; \
     fi
