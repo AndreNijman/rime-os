@@ -9,8 +9,8 @@
 #  vmlinux.tar.zst) and adapts to the RUNNING kernel at load time: CO-RE
 #  relocations, plus compat checks that zero any sched_ext_ops field the kernel
 #  lacks. That only works in one direction. A header NEWER than the kernel is
-#  the supported case (scx 1.1.3's header carries v7.3 fields that 7.2 lacks,
-#  and its loader drops them). A kernel newer than the header is not: a member
+#  the supported case (scx 1.1.4's v7.3-rc5 header carries 8 sched_ext_ops
+#  members the 7.2.9 kernel lacks, and its loader drops them). A kernel newer than the header is not: a member
 #  the header has never heard of is a member no scheduler fills in, and nothing
 #  at build time says so.
 #

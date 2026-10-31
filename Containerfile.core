@@ -8,7 +8,7 @@
 #       module signing, NVIDIA userspace, nouveau/KMS config
 #     → hardware-enablement firmware                          [own RUN]
 #     → desktop + greeter stack (hyprland/quickshell/sway/…)  [own RUN]
-#     → sched-ext scx set (built here against the kernel), Bazaar, RPMFusion + codecs
+#     → sched-ext scx set (built at one pin, checked against the kernel's BTF), Bazaar, RPMFusion + codecs
 #     → baked userland apps, printing, input methods, fonts   [own RUNs]
 #     → node/gcc for Rime's own tools, zsh/starship
 #     → third-party Rust tools (awww / matugen / yazi)
@@ -234,23 +234,28 @@ FROM ${RIME_KERNEL_IMAGE} AS kernel-rpms
 # kernel developers say so. Rime builds its own kernel, so a kernel bump and the
 # scheduler set must move together and be proven together. This used to be
 # `dnf5 install scx-scheds scx-tools` from the CachyOS addons COPR, UNVERSIONED:
-# the set changed whenever COPR did (1.1.3-3 shipped while COPR was already at
-# 1.1.4 on 2026-10-31), and nothing loaded any of it on Rime's kernel before it
-# shipped.
+# the set changed whenever COPR did (images built 2026-10-15/16 carry 1.1.3-3,
+# the 2026-10-26 image 1.1.4-1), and nothing loaded any of it on Rime's kernel
+# before it shipped.
+#
+# THE PIN. scx 1.1.4, the release main's last COPR image already shipped, so
+# moving to the source build changes nobody's scheduler version. scx-loader
+# (scx_loader, scxctl, scxtui) stays at 1.1.3 for the same reason: COPR's
+# scx-tools was 1.1.3 in that image.
 #
 # HOW THE KERNEL IS AN INPUT. The stage COPYs the kernel tier's own BTF
 # (/manifest/vmlinux.btf, dumped from the vmlinux the kernel build linked, the
 # same blob its BTF gate passed). A kernel bump changes the pinned digest, so
 # this COPY's content changes, so this stage rebuilds.
 #
-# WHY THE BPF IS NOT COMPILED AGAINST THAT BTF. It was tried (2026-10-31): a
-# vmlinux.h generated from 7.2.9's BTF does not compile scx 1.1.3, because
+# WHY THE BPF IS NOT COMPILED AGAINST THAT BTF. It was tried (2026-10-31, scx
+# 1.1.3): a vmlinux.h generated from 7.2.9's BTF does not compile, because
 # every Rust scheduler's scx_ops_load! reads sched_ext_ops fields from v7.3
 # (rescue_bandwidth_ppt, rescue_quantum_us) and zeroes them at load time when
 # the running kernel lacks them. Upstream's contract is a header at least as
 # new as the kernel, with CO-RE and those load-time checks adapting to an
-# older one, so the BPF compiles against the header scx ships (7.2-rc6 from
-# the sched_ext tree). What the BTF IS used for is the check that contract
+# older one, so the BPF compiles against the header pinned with scx (1.1.4
+# bundles v7.3-rc5). What the BTF IS used for is the check that contract
 # needs: every member of the shipped kernel's sched_ext_ops must exist in that
 # header (files/system/src/scx/check-sched-ext-ops.sh). A kernel that outruns
 # the scx pin fails the build here, at kernel-bump time.
@@ -261,20 +266,38 @@ FROM ${RIME_KERNEL_IMAGE} AS kernel-rpms
 # tests/kernel/scx-selftest, which boots this kernel in QEMU and loads every
 # scheduler built here before core may be pushed (build-image.yml).
 #
-# THE SET. Everything scx-scheds shipped (16 schedulers + scxtop +
-# scx-forge-agent: the COPR spec's `--workspace` minus the same excludes), so
-# any name a profile's `[gamemode] scx` can name still exists. scx_lavd keeps
-# Rime's vendored stall fix (upstream scx commit 6d31ddd89), which
-# 1.1.3 lacks: katana's watchdog ejected unpatched lavd five times in one
-# session on 2026-09-26 (docs/gaming-and-sessions.md).
+# THE SET. What scx-scheds 1.1.4 shipped (the COPR spec's `--workspace` minus
+# the same excludes, which its 1.1.4 spec did not change) MINUS the three
+# schedulers that cannot attach to the kernel this image ships. 16 schedulers
+# + scxtop + scx-forge-agent. Left out, each measured by the QEMU selftest on
+# 7.2.9 with BOTH this build and the COPR 1.1.4 build main shipped (same
+# result for both):
+#   scx_mavd     needs the cid form of sched_ext ops (its README); the kernel
+#                refuses it, "Operation not supported" (EOPNOTSUPP).
+#   scx_nitosis  needs ops.sub_cid_sched_updated() (its README: sched_ext
+#                for-7.4), one of the header-only members the BTF check
+#                below reports for 7.2.9. Even with --cell-parent-cgroup /
+#                the kernel refuses its BPF program: EOPNOTSUPP.
+#   scx_mlfq     1.3.12 (in scx 1.1.4) is disabled by the kernel within
+#                seconds, "runtime error (non-existent DSQ 0x1000)"; 1.0.1
+#                (scx 1.1.3) loaded on this kernel; --no-webui changes
+#                nothing. Cause not established.
+# No Rime profile, setting or doc names any of the three; a user config that
+# does gets the kernel's own scheduler (rimed's fallback). Re-add one when a
+# pin loads on the shipped kernel: the selftest discovers every
+# /usr/bin/scx_* and will prove it. scx_lavd's stall fix (upstream scx
+# commit 6d31ddd89, which Rime used to patch into 1.1.3 after katana's watchdog
+# ejected unpatched lavd five times in one session on 2026-09-26,
+# docs/gaming-and-sessions.md) is part of 1.1.4; the build asserts it is there,
+# so a pin moved back to a release without it fails.
 #
 # Its own stage, FROM the same base as toolbuilder rather than FROM toolbuilder,
 # so neither invalidates the other's cache and `podman build --target
 # scx-builder` builds only this and the kernel tier.
 FROM quay.io/fedora/fedora-bootc:45 AS scx-builder
 ENV CARGO_HOME=/build/.cargo
-ARG SCX_VERSION=1.1.3
-ARG SCX_SHA256=4dd6dd77ce1cdb9213f14339b17b9ba284e76055f866f6aede53f2488d838979
+ARG SCX_VERSION=1.1.4
+ARG SCX_SHA256=efce300f7816c2ef14028acee58150c792dadf4ebe4950aff263b54771adb2f4
 # scx_loader + scxctl live in their own repository since scx 1.0.18. Same tag
 # and the same tarball the COPR scx-tools-1.1.3 was built from (sha identical).
 ARG SCX_LOADER_VERSION=1.1.3
@@ -289,7 +312,6 @@ RUN set -eux; \
     dnf5 clean all
 COPY --from=kernel-rpms /manifest/vmlinux.btf /build/kernel/vmlinux.btf
 COPY --from=kernel-rpms /manifest/kernel-build.txt /build/kernel/kernel-build.txt
-COPY files/system/src/scx/lavd-6d31ddd89-reenq-cpus-ptr.patch /build/scx-lavd-6d31ddd89.patch
 COPY files/system/src/scx/check-sched-ext-ops.sh /build/check-sched-ext-ops.sh
 RUN set -eux; \
     KVER="$(sed -n 's/^kver=//p' /build/kernel/kernel-build.txt)"; \
@@ -299,15 +321,15 @@ RUN set -eux; \
     echo "${SCX_SHA256}  /tmp/scx.tar.gz" | sha256sum -c -; \
     tar xzf /tmp/scx.tar.gz -C /build; \
     cd "/build/scx-${SCX_VERSION}"; \
-    git apply --check /build/scx-lavd-6d31ddd89.patch; \
-    git apply /build/scx-lavd-6d31ddd89.patch; \
-    grep -q 'suggested_cpu_id may be stale' scheds/rust/scx_lavd/src/bpf/main.bpf.c; \
+    # scx_lavd's runnable-task stall fix (upstream 6d31ddd89) must be in the pin.
+    grep 'suggested_cpu_id may be stale' scheds/rust/scx_lavd/src/bpf/main.bpf.c >/dev/null \
+        || { echo "FATAL: scx ${SCX_VERSION} lacks scx_lavd's stall fix (upstream 6d31ddd89)"; exit 1; }; \
     # ── the kernel coupling: header >= kernel, checked against the shipped BTF ──
     # The BPF compiles against the header this scx release ships (upstream's
     # supported configuration: CO-RE + load-time compat checks adapt it to an
-    # OLDER kernel). A header generated from 7.2.9's BTF does not compile: the
-    # scx_ops_load! macro of every Rust scheduler reads v7.3 sched_ext_ops
-    # fields (rescue_*) that 7.2 lacks and drops them at load time. What CAN
+    # OLDER kernel). A header generated from 7.2.9's BTF did not compile scx
+    # 1.1.3: the scx_ops_load! macro of every Rust scheduler reads v7.3
+    # sched_ext_ops fields (rescue_*) that 7.2 lacks and drops them at load time. What CAN
     # go wrong is the other direction, a kernel bump that outruns the scx pin,
     # and that is what this refuses. Whether each scheduler then really
     # attaches to THIS kernel is proven by booting it (tests/kernel/scx-selftest).
@@ -320,18 +342,20 @@ RUN set -eux; \
         > /build/ops-check.txt || { cat /build/ops-check.txt; exit 1; }; \
     cat /build/ops-check.txt; \
     HDRONLY="$(sed -n 's/^header-only: //p' /build/ops-check.txt | tr '\n' ' ' | sed 's/ $//')"; \
-    # ── the set ── (the COPR spec's excludes: test/dev tools, not schedulers)
+    # ── the set ── (the COPR spec's excludes: test/dev tools, not schedulers;
+    # then the three that cannot attach to this kernel, see THE SET above)
     cargo build --release --locked -j "$(nproc)" --workspace \
         --exclude scx_rlfifo --exclude scx_mitosis --exclude xtask \
         --exclude scx_characterize --exclude vmlinux_docify \
-        --exclude scx_arena_selftests --exclude scx_arena_libarena_selftests; \
+        --exclude scx_arena_selftests --exclude scx_arena_libarena_selftests \
+        --exclude scx_mavd --exclude scx_nitosis --exclude scx_mlfq; \
     mkdir -p /out/scx/usr/bin; \
     find target/release -maxdepth 1 -type f -executable ! -name '*.so' \
         -exec install -m755 -t /out/scx/usr/bin {} +; \
     ls -l /out/scx/usr/bin; \
     /out/scx/usr/bin/scx_lavd --version; \
     { echo "scx=${SCX_VERSION} (source tag v${SCX_VERSION}, sha256 ${SCX_SHA256})"; \
-      echo "scx_lavd: ${SCX_VERSION} + upstream 6d31ddd89 (REENQ cpus_ptr fix), built by Rime"; \
+      echo "scx_lavd: ${SCX_VERSION} as tagged (upstream 6d31ddd89 REENQ cpus_ptr fix included, asserted)"; \
       echo "bpf_vmlinux_h=${HDR} (bundled with scx ${SCX_VERSION})"; \
       echo "kernel_btf_check=${KVER}: every sched_ext_ops member is in the header (kernel BTF sha256 $(sha256sum /build/kernel/vmlinux.btf | cut -d' ' -f1)); header-only, dropped at load: ${HDRONLY:-none}"; \
       echo "toolchain=$(rustc --version) / $(clang --version | head -n 1)"; \
@@ -428,7 +452,8 @@ RUN sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf
 # to build.
 #
 # sched-ext USERSPACE no longer comes from a COPR either: the scx-builder stage
-# builds it from source against this same kernel tier's BTF.
+# builds it from source at one scx pin and checks it against this same kernel
+# tier's BTF.
 COPY --from=kernel-rpms /rpms     /tmp/rime-kernel-rpms
 COPY --from=kernel-rpms /manifest /tmp/rime-kernel-manifest
 # The pin as THIS commit has it, so the two can be compared. `kernel/**` is
@@ -1476,8 +1501,9 @@ RUN set -eux; \
     fc-cache -f /usr/share/fonts/jetbrains-mono-nerd
 
 # ── Stage 4: sched-ext userspace (scx) — runtime libraries only ────────────
-# The schedulers and scx_loader/scxctl are BUILT in the scx-builder stage,
-# against this image's own kernel, and installed further down. What they link
+# The schedulers and scx_loader/scxctl are BUILT in the scx-builder stage (at
+# one scx pin, checked against this image's own kernel BTF) and installed
+# further down. What they link
 # against at run time comes from Fedora here: the COPR scx-scheds/scx-tools
 # that used to provide all of this are gone (see scx-builder for why), and with
 # them the `Requires:` that pulled these in. jq: scx-scheds' spec requires it
@@ -2316,26 +2342,36 @@ RUN set -eux; \
 # the volatile pair and are added by Containerfile.base.
 COPY --from=toolbuilder /out/usr/bin/ /usr/bin/
 
-# sched-ext: every scheduler + scx_loader/scxctl/scxtop, built by scx-builder
-# at one scx pin and checked against THIS image's kernel BTF (see that stage).
-# Asserted, not trusted: each binary links here, every scheduler the old COPR
-# set shipped is present, and the header check ran against the kernel this
-# image installs. Whether each one LOADS on it is the QEMU selftest's job
+# sched-ext: every scheduler + scx_loader/scxctl/scxtui/scxtop, built by
+# scx-builder at one scx pin against the header pinned with it, and that header
+# checked against THIS image's kernel BTF (see that stage).
+# Asserted, not trusted: each binary links here, every scheduler the last COPR
+# set shipped that loads on this kernel (scx-scheds 1.1.4 minus mavd, nitosis
+# and mlfq: 16 schedulers) and every scx-tools binary is present, none of the
+# three left out is, and the header check ran against the kernel this image installs. Whether each one LOADS on it is the QEMU selftest's job
 # (tests/kernel/scx-selftest, run by build-image.yml before the push).
 COPY --from=scx-builder /out/scx/ /tmp/rime-scx/
 RUN set -eux; \
     cp -a /tmp/rime-scx/usr/. /usr/; \
-    for s in scx_beerland scx_bpfland scx_cake scx_chaos scx_cosmos scx_flash scx_flow \
-             scx_forge scx_lavd scx_layered scx_mlfq scx_p2dq scx_pandemonium \
-             scx_rustland scx_rusty scx_tickless scxtop scx-forge-agent scx_loader scxctl; do \
+    for s in scx_beerland scx_bpfland scx_cake scx_chaos scx_cosmos scx_eevdf scx_flash \
+             scx_flow scx_forge scx_lavd scx_layered scx_p2dq \
+             scx_pandemonium scx_rustland scx_rusty scx_tickless \
+             scxtop scx-forge-agent scx_loader scxctl scxtui; do \
         test -x "/usr/bin/$s" || { echo "FATAL: /usr/bin/$s missing — the shipped scx set shrank"; exit 1; }; \
         if ldd "/usr/bin/$s" | grep 'not found'; then echo "FATAL: /usr/bin/$s has unresolved libraries"; exit 1; fi; \
+    done; \
+    for s in scx_mavd scx_nitosis scx_mlfq; do \
+        test ! -e "/usr/bin/$s" || { echo "FATAL: /usr/bin/$s is shipped but cannot attach to this kernel (see scx-builder)"; exit 1; }; \
     done; \
     KVER="$(ls -d /usr/lib/modules/*cachyos* | xargs -n1 basename)"; \
     grep -q "^kernel_btf_check=${KVER}: " /tmp/rime-scx/versions \
         || { echo "FATAL: the scx set was checked against '$(sed -n 's/^kernel_btf_check=\([^:]*\):.*/\1/p' /tmp/rime-scx/versions)', this image ships ${KVER}"; exit 1; }; \
-    ! rpm -q scx-scheds scx-tools >/dev/null 2>&1 \
-        || { echo "FATAL: a COPR scx package is installed alongside the Rime-built set"; exit 1; }; \
+    # One package per query: `rpm -q a b` fails when EITHER is missing, so a
+    # joint query would pass with one of them installed.
+    for p in scx-scheds scx-tools; do \
+        ! rpm -q "$p" >/dev/null 2>&1 \
+            || { echo "FATAL: the COPR package $p is installed alongside the Rime-built set"; exit 1; }; \
+    done; \
     { cat /tmp/rime-scx/versions; echo "kernel=${KVER}"; } > /usr/lib/rime-scx-versions; \
     /usr/bin/scx_lavd --version; \
     /usr/bin/scxctl --version; \
