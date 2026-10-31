@@ -637,7 +637,15 @@ impl Ctx {
         // changes nothing — the exact shape of the defect on katana.
         if scx.requested.is_some() {
             scx.observed = Some(self.writer.scx_state());
-            scx.enable_seq = self.writer.scx_enable_seq();
+            // The enable count is anchored to a HEALTHY reading only. Read
+            // mid-attach it would be the count from before the attach, and
+            // the first healthy reading would then look like a reload. With
+            // no anchor, the session watch takes it on that first reading.
+            if let (Some(want), Some(seen)) = (scx.requested.as_deref(), scx.observed.as_ref()) {
+                if matches!(seen, ScxState::Enabled { .. }) && scx_failure(seen, want).is_none() {
+                    scx.enable_seq = self.writer.scx_enable_seq();
+                }
+            }
             // And the question `scx_state` cannot answer: whether a scheduler
             // could EVER have attached to this kernel. Read from the same
             // `sys_root` as everything else, so a fixture answers it too.
@@ -2292,6 +2300,28 @@ mod tests {
         // Once per session: no second fallback, whatever the count does.
         w.set_seq(9);
         assert!(ctx.game_scx_check().await.is_none());
+        assert_eq!(w.count(is_fallback), 1);
+    }
+
+    #[tokio::test]
+    async fn a_scheduler_still_attaching_at_entry_is_not_taken_for_a_reload() {
+        // Entry reads mid-transition, with the count from BEFORE the attach
+        // completed. The first healthy reading then has count+1: that is the
+        // attach finishing, not an ejection, and must not be stopped.
+        let w = ScxWriter::new(Outcome::Landed, ScxState::InFlux("enabling".into()));
+        w.set_seq(3);
+        let w = Arc::new(w);
+        let ctx = scx_session("scx-fb-attaching", w.clone()).await;
+        w.set_state(ScxState::Enabled {
+            ops: Some("lavd_1.1.3_x86_64_unknown_linux_gnu".into()),
+        });
+        w.set_seq(4);
+        assert!(ctx.game_scx_check().await.is_none(), "finishing the attach is not a reload");
+        assert_eq!(w.count(is_fallback), 0);
+        // From that healthy reading on, a moved count IS a reload.
+        w.set_seq(5);
+        let fb = ctx.game_scx_check().await.expect("a later reload is an ejection");
+        assert_eq!(fb.when, "mid-session (ejected and reloaded)");
         assert_eq!(w.count(is_fallback), 1);
     }
 
