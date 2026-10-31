@@ -354,6 +354,13 @@ RUN set -eux; \
     test -f /out/scx/usr/lib/systemd/system/scx_loader.service; \
     test -f /out/scx/usr/share/dbus-1/system-services/org.scx.Loader.service; \
     echo "scx_loader=${SCX_LOADER_VERSION} (source tag v${SCX_LOADER_VERSION}, sha256 ${SCX_LOADER_SHA256})" >> /out/scx/versions; \
+    # Symbols out, as the COPR rpms ship them: scx's release profile strips
+    # only debuginfo, which left 183 MB of binaries against COPR's 134 MB
+    # (measured 2026-10-31). The BPF objects are data in .rodata and are not
+    # touched; the QEMU selftest loads the stripped binaries.
+    strip --strip-all /out/scx/usr/bin/*; \
+    /out/scx/usr/bin/scx_lavd --version; /out/scx/usr/bin/scxctl --help >/dev/null; \
+    du -cb /out/scx/usr/bin/* | tail -n 1; \
     cat /out/scx/versions; \
     cd /; rm -rf "/build/scx-loader-${SCX_LOADER_VERSION}" /tmp/scx-loader.tar.gz /build/.cargo
 
@@ -2310,9 +2317,11 @@ RUN set -eux; \
 COPY --from=toolbuilder /out/usr/bin/ /usr/bin/
 
 # sched-ext: every scheduler + scx_loader/scxctl/scxtop, built by scx-builder
-# against THIS image's kernel (see that stage). Asserted, not trusted: each
-# binary links here, every scheduler the old COPR set shipped is present, and
-# the BPF was compiled against the kernel this image installs.
+# at one scx pin and checked against THIS image's kernel BTF (see that stage).
+# Asserted, not trusted: each binary links here, every scheduler the old COPR
+# set shipped is present, and the header check ran against the kernel this
+# image installs. Whether each one LOADS on it is the QEMU selftest's job
+# (tests/kernel/scx-selftest, run by build-image.yml before the push).
 COPY --from=scx-builder /out/scx/ /tmp/rime-scx/
 RUN set -eux; \
     cp -a /tmp/rime-scx/usr/. /usr/; \
