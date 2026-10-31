@@ -558,19 +558,25 @@ for u in rime-installer.service seatd.service; do
 done
 sudo test -L "$WORK/rootfs/etc/systemd/system/getty@tty1.service" \
   || { echo "BUILD ASSERT FAILED: getty@tty1 is not masked — it would fight cage for tty1"; exit 1; }
-# Fedora 45's default console is kmscon; its tty1 instance would fight cage the
-# same way if a dependency ever brought it in. Masked = a link to /dev/null.
+# autovt@tty1 must be masked too: systemd 262 loads a unit referenced as
+# autovt@tty1 through the alias, as the live getty@ template, and the getty@tty1
+# mask above is then ignored (see Containerfile.installer). Masked = /dev/null.
+[ "$(sudo readlink "$WORK/rootfs/etc/systemd/system/autovt@tty1.service")" = /dev/null ] \
+  || { echo "BUILD ASSERT FAILED: autovt@tty1 is not masked — a getty could reach tty1 through the alias"; exit 1; }
+# kmscon is refused in the live env (Containerfile.installer); its tty1
+# instance is masked anyway as defence in depth.
 [ "$(sudo readlink "$WORK/rootfs/etc/systemd/system/kmsconvt@tty1.service")" = /dev/null ] \
   || { echo "BUILD ASSERT FAILED: kmsconvt@tty1 is not masked — kmscon would fight cage for tty1"; exit 1; }
 # The rescue path the installer prints ("Ctrl+Alt+F2, login root/rime") is
 # logind starting autovt@tty2. Fedora 45's systemd no longer ships autovt@ as a
 # static link, so without the enable in Containerfile.installer it resolves to
-# nothing and VT 2 is a dead screen. readlink, not -e: the target is absolute
-# inside the rootfs (see the -L note above).
+# nothing and VT 2 is a dead screen. Only getty@ is accepted: kmscon is not
+# supported in the live env. readlink, not -e: the target is absolute inside
+# the rootfs (see the -L note above).
 _autovt=$(sudo readlink "$WORK/rootfs/etc/systemd/system/autovt@.service" || true)
 case "${_autovt##*/}" in
-  getty@.service|kmsconvt@.service) ;;
-  *) echo "BUILD ASSERT FAILED: autovt@.service is '${_autovt:-missing}' — Ctrl+Alt+F2 would have no login"; exit 1 ;;
+  getty@.service) ;;
+  *) echo "BUILD ASSERT FAILED: autovt@.service is '${_autovt:-missing}', not getty@ — Ctrl+Alt+F2 would have no login"; exit 1 ;;
 esac
 echo "asserts OK: GUI stack present, importable, and enabled"
 

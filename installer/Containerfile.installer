@@ -282,32 +282,53 @@ RUN if [ "$ALLOW_UNATTENDED" = 1 ]; then \
 # static link to getty@.service (measured). Fedora 45's systemd ships no link:
 # autovt@ only exists as the [Install] Alias= of getty@ or kmsconvt@, and
 # Fedora 45's preset disables getty@ in favour of kmscon. This environment has
-# no kmscon (nothing here pulls it in) and runs no preset, so on Fedora 45
-# autovt@tty2 resolved to NOTHING and Ctrl+Alt+F2 showed a dead screen.
-# Measured in a fedora:45 container booted with systemd: autovt@tty2.service
-# LoadState=not-found. Enabling getty@.service creates the alias (agetty, as
-# before); it must come BEFORE the tty1 mask, because enable refuses once
-# getty@tty1 is masked. The mask still wins for tty1.
+# no kmscon and runs no preset, so on Fedora 45 autovt@tty2 resolved to NOTHING
+# and Ctrl+Alt+F2 showed a dead screen. Measured in a fedora:45 container
+# booted with systemd: autovt@tty2.service LoadState=not-found. Enabling
+# getty@.service creates the alias (agetty, as before); it must come BEFORE the
+# tty1 mask, because enable refuses once getty@tty1 is masked.
 #
-# kmsconvt@tty1 is masked too. kmscon is not installed here today, but it is
-# Fedora 45's default console, and if a dependency ever brings it in, its
-# kmsconvt@tty1 would fight cage for tty1 exactly as a getty would.
+# tty1 is cage's, under every name a console could reach it by:
+#  * the enable also plants getty.target.wants/getty@tty1.service (getty@'s
+#    DefaultInstance=tty1). It is removed: nothing here should want a console
+#    on tty1, masked or not.
+#  * getty@tty1 is masked, and so is autovt@tty1. The second is not cosmetic:
+#    systemd 262 loads an alias instance through its OWN name, and a unit
+#    loaded as autovt@tty1 is the live getty@.service template with getty@tty1
+#    merged in as a second name, the getty@tty1 mask ignored (measured in a
+#    booted fedora:45 container: Id=autovt@tty1.service, LoadState=loaded,
+#    when a unit named autovt@tty1 in its Conflicts=). logind starting
+#    autovt@tty1 would take the same path. Masked, every name is LoadState=
+#    masked; test-installer-console.sh checks that in a booted container.
+#
+# kmscon (Fedora 45's default console) is NOT supported here, and the build
+# refuses it rather than half-coping: its %post preset makes autovt@ an alias
+# of kmsconvt@, which the getty@ enable below cannot overwrite, and the live
+# env is meant to give agetty on VT 2-6 (it never contends with cage for DRM).
+# kmsconvt@tty1 is masked anyway as defence in depth, not as coverage.
 COPY rime-installer.service /usr/lib/systemd/system/rime-installer.service
-RUN systemctl set-default multi-user.target \
+RUN if rpm -q kmscon >/dev/null 2>&1; then \
+        echo "FATAL: kmscon entered the live env (a dependency pulled it in): it is unsupported here, VT 2-6 must be agetty (see the comment above)"; exit 1; \
+    fi \
+    && systemctl set-default multi-user.target \
     && systemctl enable rime-installer.service \
     && systemctl enable NetworkManager.service \
     && systemctl enable seatd.service \
     && systemctl enable getty@.service \
+    && rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service \
     && systemctl mask getty@tty1.service \
+    && systemctl mask autovt@tty1.service \
     && systemctl mask kmsconvt@tty1.service \
     && systemctl mask serial-getty@ttyS0.service \
     && systemctl mask NetworkManager-wait-online.service \
     && _a="$(readlink /etc/systemd/system/autovt@.service)" \
     && { [ "${_a##*/}" = getty@.service ] \
          || { echo "FATAL: autovt@ is '${_a:-missing}', not getty@: no login on Ctrl+Alt+F2"; exit 1; }; } \
+    && [ ! -L /etc/systemd/system/getty.target.wants/getty@tty1.service ] \
     && [ "$(readlink /etc/systemd/system/getty@tty1.service)" = /dev/null ] \
+    && [ "$(readlink /etc/systemd/system/autovt@tty1.service)" = /dev/null ] \
     && [ "$(readlink /etc/systemd/system/kmsconvt@tty1.service)" = /dev/null ] \
-    && echo "OK: VT 2-6 get agetty via autovt@; tty1 is cage's alone (getty@tty1 and kmsconvt@tty1 masked)"
+    && echo "OK: VT 2-6 get agetty via autovt@; tty1 is cage's alone (getty@tty1, autovt@tty1, kmsconvt@tty1 masked)"
 
 # Live-env-only root login (tty2 / serial) for rescue & debugging. This is the
 # throwaway live session, not the installed system.
