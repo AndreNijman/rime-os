@@ -1900,6 +1900,24 @@ COPY files/system/units/rime-session-migrate.service /usr/lib/systemd/user/rime-
 COPY --chmod=0755 files/system/libexec/rime-shell-autostart \
      /usr/libexec/rime-shell-autostart
 
+# The session's Secret Service. rime-shell-autostart and rime-gaming-session
+# both run rime-secrets-start: it starts the provider named in
+# /usr/share/rime/secrets-provider (gnome-keyring: `--start` hands the session
+# the daemon PAM unlocked at login), and logs who owns org.freedesktop.secrets
+# on the session bus. The provider file is the one place the provider's name is
+# written; the portal and package assertions below read it.
+COPY --chmod=0755 files/system/libexec/rime-secrets-start \
+     /usr/libexec/rime-secrets-start
+COPY --chmod=0644 files/system/rime-secrets-provider \
+     /usr/share/rime/secrets-provider
+RUN set -eux; \
+    bash -n /usr/libexec/rime-secrets-start; \
+    grep -q '/usr/libexec/rime-secrets-start' /usr/libexec/rime-shell-autostart; \
+    test "$(sed -n 's/^provider=//p' /usr/share/rime/secrets-provider | wc -l)" = 1; \
+    test "$(sed -n 's/^portal=//p' /usr/share/rime/secrets-provider | wc -l)" = 1; \
+    command -v gdbus >/dev/null || command -v busctl >/dev/null; \
+    echo "secrets: sessions start $(sed -n 's/^provider=//p' /usr/share/rime/secrets-provider) through rime-secrets-start"
+
 # Desktop context-menu helpers. The menu itself is one QML surface shared by all
 # three sessions; these three scripts are where the per-compositor differences
 # live, so the QML never has to know which compositor it is running under.
@@ -3173,6 +3191,9 @@ COPY files/system/xdg-desktop-portal/niri-portals.conf \
      /etc/xdg-desktop-portal/niri-portals.conf
 RUN set -eux; \
     test -s /etc/xdg-desktop-portal/niri-portals.conf; \
+    : 'The Secret backend comes from the one file that names the provider.'; \
+    sp="$(sed -n 's/^portal=//p' /usr/share/rime/secrets-provider)"; \
+    test -n "$sp"; \
     # The session this config is named for must exist, and must still announce
     # the desktop name the filename depends on. A rename on either side makes
     # this file silently inert — xdg-desktop-portal would fall back to the
@@ -3185,14 +3206,14 @@ RUN set -eux; \
     # a niri session has no screen sharing at all.
     test -f /usr/share/xdg-desktop-portal/portals/gnome.portal; \
     test -f /usr/share/xdg-desktop-portal/portals/gtk.portal; \
-    test -f /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal; \
+    test -f "/usr/share/xdg-desktop-portal/portals/${sp}.portal"; \
     test -x /usr/libexec/xdg-desktop-portal-gnome; \
     test -x /usr/libexec/xdg-desktop-portal-gtk; \
     # ...and each named backend genuinely implements what it is pointed at.
     grep -q 'org.freedesktop.impl.portal.ScreenCast' /usr/share/xdg-desktop-portal/portals/gnome.portal; \
     grep -q 'org.freedesktop.impl.portal.Screenshot' /usr/share/xdg-desktop-portal/portals/gnome.portal; \
     grep -q 'org.freedesktop.impl.portal.FileChooser' /usr/share/xdg-desktop-portal/portals/gtk.portal; \
-    grep -q 'org.freedesktop.impl.portal.Secret' /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal; \
+    grep -q 'org.freedesktop.impl.portal.Secret' "/usr/share/xdg-desktop-portal/portals/${sp}.portal"; \
     # No wildcard, and gtk leads the default list — that ordering IS the fix, so
     # a regression back to `default=gnome;gtk` must fail the build.
     if grep -qE '^\s*default=.*\*' /etc/xdg-desktop-portal/niri-portals.conf \
@@ -3200,7 +3221,7 @@ RUN set -eux; \
     grep -qE '^default=gtk;gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.ScreenCast=gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.Screenshot=gnome$' /etc/xdg-desktop-portal/niri-portals.conf; \
-    grep -qE '^org\.freedesktop\.impl\.portal\.Secret=gnome-keyring$' /etc/xdg-desktop-portal/niri-portals.conf; \
+    grep -qxF "org.freedesktop.impl.portal.Secret=${sp}" /etc/xdg-desktop-portal/niri-portals.conf; \
     # ── Every desktop session this image offers, BY NAME ────────────────────
     # Enumerated, never counted: niri went three releases with no Rime portal
     # configuration at all while labwc's was build-verified, and no assertion
@@ -3247,6 +3268,9 @@ COPY files/system/xdg-desktop-portal/hyprland-portals.conf \
      /etc/xdg-desktop-portal/hyprland-portals.conf
 RUN set -eux; \
     test -s /etc/xdg-desktop-portal/hyprland-portals.conf; \
+    : 'The Secret backend comes from the one file that names the provider.'; \
+    sp="$(sed -n 's/^portal=//p' /usr/share/rime/secrets-provider)"; \
+    test -n "$sp"; \
     # The session this config is named for must exist and must still announce
     # the desktop name the filename depends on — portals.conf(5) resolves
     # <desktop>-portals.conf from XDG_CURRENT_DESKTOP, lower-cased. A rename on
@@ -3256,7 +3280,7 @@ RUN set -eux; \
     # The backends it names must be installed...
     test -f /usr/share/xdg-desktop-portal/portals/hyprland.portal; \
     test -f /usr/share/xdg-desktop-portal/portals/gtk.portal; \
-    test -f /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal; \
+    test -f "/usr/share/xdg-desktop-portal/portals/${sp}.portal"; \
     test -x /usr/libexec/xdg-desktop-portal-hyprland; \
     test -x /usr/libexec/xdg-desktop-portal-gtk; \
     # ...and must genuinely implement what they are pointed at. The Secret line
@@ -3265,7 +3289,7 @@ RUN set -eux; \
     grep -q 'org.freedesktop.impl.portal.ScreenCast' /usr/share/xdg-desktop-portal/portals/hyprland.portal; \
     grep -q 'org.freedesktop.impl.portal.Screenshot' /usr/share/xdg-desktop-portal/portals/hyprland.portal; \
     grep -q 'org.freedesktop.impl.portal.FileChooser' /usr/share/xdg-desktop-portal/portals/gtk.portal; \
-    grep -q 'org.freedesktop.impl.portal.Secret' /usr/share/xdg-desktop-portal/portals/gnome-keyring.portal; \
+    grep -q 'org.freedesktop.impl.portal.Secret' "/usr/share/xdg-desktop-portal/portals/${sp}.portal"; \
     # Neither of the two backends in `default` implements Secret. If either ever
     # does, this pin becomes redundant rather than wrong — but the assertion
     # says WHY the pin is here, so a future reader is not left guessing.
@@ -3279,16 +3303,16 @@ RUN set -eux; \
     grep -qE '^default=hyprland;gtk$' /etc/xdg-desktop-portal/hyprland-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.ScreenCast=hyprland$' /etc/xdg-desktop-portal/hyprland-portals.conf; \
     grep -qE '^org\.freedesktop\.impl\.portal\.Screenshot=hyprland$' /etc/xdg-desktop-portal/hyprland-portals.conf; \
-    grep -qE '^org\.freedesktop\.impl\.portal\.Secret=gnome-keyring$' /etc/xdg-desktop-portal/hyprland-portals.conf; \
+    grep -qxF "org.freedesktop.impl.portal.Secret=${sp}" /etc/xdg-desktop-portal/hyprland-portals.conf; \
     # All three desktop sessions now pin Secret, which is the parity this
     # closes. Enumerated rather than counted, for the reason the block above
     # gives: a count passes with one of them missing.
     for d in hyprland niri labwc; do \
-        grep -qE '^org\.freedesktop\.impl\.portal\.Secret=gnome-keyring$' \
+        grep -qxF "org.freedesktop.impl.portal.Secret=${sp}" \
             "/etc/xdg-desktop-portal/${d}-portals.conf" \
             || { echo "FATAL: ${d} has no Secret portal backend"; exit 1; }; \
     done; \
-    echo "portals: hyprland pinned to its own capture + gtk desktop interfaces + gnome-keyring secrets"
+    echo "portals: hyprland pinned to its own capture + gtk desktop interfaces + ${sp} secrets"
 
 COPY files/desktop/wayland-sessions/rime-labwc.desktop \
      /usr/share/wayland-sessions/rime-labwc.desktop

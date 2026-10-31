@@ -95,8 +95,10 @@ FAKE
 make_fake gamescope
 make_fake steam
 make_fake mangoapp
-# The session hands the login keyring to itself; the real daemon must never
-# start from a test, so this one only records.
+# The session hands the login keyring to itself (through the repo's
+# rime-secrets-start, which finds this fake first on PATH); the real daemon
+# must never start from a test, so this one only records. The session's env
+# has no bus, so the helper confirms nothing and returns at once.
 make_fake gnome-keyring-daemon
 # getcap that reports no file capability: the shipped state of every Rime
 # machine today, and the state §6.2 measured.
@@ -225,6 +227,7 @@ run_session() {  # <fixture-root> [extra env assignments...]
         HOME="${WORK}/home" \
         RIME_ROOT="$1" \
         RIME_GAMING_NO_RIMED=1 \
+        RIME_SECRETS_START="${ROOT}/files/system/libexec/rime-secrets-start" \
         "${@:2}" \
         bash "$SESSION" > "${WORK}/out" 2> "${WORK}/log"
     printf '%s' "$?"
@@ -241,6 +244,7 @@ run_session_with_rimed() {  # <fixture-root> [extra env assignments...]
         HOME="${WORK}/home" \
         RIME_ROOT="$1" \
         RIME_GAMING_NO_RIMED=0 \
+        RIME_SECRETS_START="${ROOT}/files/system/libexec/rime-secrets-start" \
         "${@:2}" \
         bash "$SESSION" > "${WORK}/out" 2> "${WORK}/log"
     printf '%s' "$?"
