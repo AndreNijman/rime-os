@@ -4499,6 +4499,10 @@ jobs:
             tests/test-rime-pkg.sh tests/test-rime-appimage.sh \
             tests/test-rime-firstrun.sh \
             tests/test-rime-shell-autostart.sh \
+            files/system/libexec/rime-shell-autostart \
+            files/system/libexec/rime-secrets-start \
+            tests/test-rime-secrets-start.sh tests/test-rime-secrets-guard.sh \
+            tests/test-rime-keyring-session-start.sh \
             tests/test-labwc-keybinds.sh tests/test-rime-env.sh \
             tests/test-rime-resolve.sh tests/test-rime-blueprint.sh \
             tests/test-rime-modes.sh tests/test-rime-plugin.sh \

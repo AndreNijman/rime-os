@@ -15,8 +15,6 @@
 #  covers the choices that suite cannot reach on one machine.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
-# The fakes' bodies and the checks are code written for later expansion.
-# shellcheck disable=SC2016
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$here/../files/system/libexec/rime-secrets-start"
 [ -x "$HELPER" ] || { echo "cannot find $HELPER"; exit 2; }
