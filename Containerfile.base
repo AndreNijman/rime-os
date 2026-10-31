@@ -2005,6 +2005,7 @@ RUN set -eux; \
     # belt-and-braces: there is no compositor in a build container, but `apply`
     # must never be reachable from a build even by accident.
     RIME_DISPLAY_NO_LIVE=1 /usr/libexec/rime-display-apply --self-test; \
+    test ! -e /.socket2.sock; \
     # Every verb the helpers dispatch to has to exist in the image.
     command -v labwc >/dev/null; \
     command -v niri >/dev/null; \
@@ -2998,9 +2999,18 @@ RUN set -eux; \
     done; \
     if grep -rq '@KB_LAYOUT@' "$cfg" \
         ; then echo "FATAL: the provisioner left @KB_LAYOUT@ unsubstituted"; exit 1; fi; \
-    XDG_RUNTIME_DIR="$runtime" Hyprland --i-am-really-stupid \
-        --verify-config --config "$cfg/hyprland.lua" | grep -q 'config ok'; \
-    rm -rf "$cfg" "$runtime"
+    # As nobody, not root: Hyprland 0.57.0's --verify-config binds its event
+    # socket at /.socket2.sock and segfaults when the bind succeeds, which only
+    # root can make it do (the first root check in a fresh build crashes every
+    # time; any other user passes). The same rule is in the three generators.
+    chmod 0755 "$cfg"; chown 65534:65534 "$runtime"; \
+    XDG_RUNTIME_DIR="$runtime" HOME="$runtime" \
+        setpriv --reuid=65534 --regid=65534 --clear-groups -- \
+        Hyprland --verify-config --config "$cfg/hyprland.lua" > "$runtime.out" 2>&1 || true; \
+    if ! grep 'config ok' "$runtime.out" >/dev/null \
+        ; then cat "$runtime.out"; echo "FATAL: Hyprland rejected the seeded config"; exit 1; fi; \
+    test ! -e /.socket2.sock; \
+    rm -rf "$cfg" "$runtime" "$runtime.out"
 
 # SUPER+drag move/resize, asserted because it is silent when wrong. This stanza
 # used to REQUIRE `{ drag = true }` and forbid `{ mouse = true }`, and had it
