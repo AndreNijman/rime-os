@@ -25,6 +25,14 @@
 #      `--define '_keyring fs'`, which nothing exercised past the fingerprint
 #      check.
 #
+#  The keyring is also held to its mechanism, not just its result: an mv
+#  wrapper requires the swap to be exactly one `mv --exchange` (a remove then a
+#  rename also changes the inode), an rpm that imports without writing
+#  rpmdb.sqlite is refused with the old keyring kept, and `rime repo
+#  disable-copr` with another stored key unreadable must fail closed (the
+#  disabled COPR's key is no longer trusted, the bad key is named) while
+#  `enable-copr` in that state names the bad key, not the new COPR.
+#
 #  And the rpm cache: dnf5 must really skip a cached file whose checksum
 #  matches ("Already downloaded") and really re-fetch a corrupt one, and the
 #  --url listing the engine parses must really name the files dnf5 writes.
