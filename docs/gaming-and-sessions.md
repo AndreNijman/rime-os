@@ -621,13 +621,12 @@ fixes it: lavd_enqueue's REENQ path now checks the cached CPU against
 `cpus_ptr`. Arch shipped that as `scx-scheds 1.1.3-2`. COPR's `1.1.3-3` is the
 v1.1.3 tag plus hotfixes for scx_cake and scx_pandemonium, and lacks this one.
 
-**What Rime does:** `Containerfile.core`'s toolbuilder builds scx_lavd from
+**What Rime did (until 2026-10-31, see §5h):** `Containerfile.core`'s toolbuilder built scx_lavd from
 the same v1.1.3 tag with the vendored patch
 (`files/system/src/scx/lavd-6d31ddd89-reenq-cpus-ptr.patch`), and the final
-stage installs it over COPR's binary only while COPR is still at 1.1.3. Any
-later scx release already contains the fix, so a newer COPR is kept and the
-log says to drop the rebuild. `/usr/lib/rime-scx-versions` records which
-binary shipped. The patched binary's embedded BPF line info carries the fix
+stage installed it over COPR's binary only while COPR was still at 1.1.3. Any
+later scx release already contains the fix, so a newer COPR would have been
+kept. `/usr/lib/rime-scx-versions` recorded which binary shipped. The patched binary's embedded BPF line info carries the fix
 (one more `bpf_cpumask_first(p->cpus_ptr)` than COPR's: 4 against 3).
 
 Gaming Mode keeps sched_ext: rimed still asks for `scx_lavd`
@@ -803,8 +802,8 @@ kernel in QEMU with an initramfs holding the image's own schedulers and their
 libraries, loads each one under load, checks it attached under the struct_ops
 name rimed expects and survived, then `kill -9`s `scx_lavd` and checks the
 kernel took its tasks back. build-image.yml runs it before core is pushed.
-On 7.2.9 with the source-built set: 16 schedulers + kill -9, PASS, 93 s under
-KVM.
+On 7.2.9 with the source-built (stripped) set: 16 schedulers + kill -9, PASS,
+96 s under KVM. CI requires KVM for this step; without it core is not pushed.
 
 **Failed over on the machine.** When the scheduler a Gaming Mode session asked
 for did not attach, or the kernel ejected it later (the state reads

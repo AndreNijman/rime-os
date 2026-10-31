@@ -951,18 +951,26 @@ jobs:
           set -euo pipefail
           command -v qemu-system-x86_64 >/dev/null \
             || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends qemu-system-x86; }
+          # KVM or nothing. Under TCG the guest needs ~1 h (the script's own
+          # budget is 120 s + 60 s settles per scheduler), which would run
+          # into this job's 120-minute limit after a ~40-minute core build, so
+          # the gate would die mid-guest instead of giving a verdict. A gate
+          # that cannot run must not pass: re-run the job on a runner with KVM.
           if [[ -e /dev/kvm ]]; then
             # As boot-v2.yml: the runner user is in the kvm group, but make
             # sure the node is usable whoever runs qemu.
             sudo chmod 0666 /dev/kvm
             echo "::notice::/dev/kvm is present; the selftest guest runs accelerated"
           else
-            echo "::warning::/dev/kvm is absent; the selftest guest falls back to TCG (slow, same verdict)"
+            echo "::error::/dev/kvm is absent on this runner; the sched-ext selftest cannot run, so core is not pushed. Re-run the job."
+            exit 1
           fi
           ./tests/kernel/scx-selftest/run-scx-selftest.sh \
             --image "$IMAGE:$TAG_CORE-${{ github.sha }}" \
             --podman "sudo podman" \
             --workdir "$RUNNER_TEMP/scx-selftest"
+        env:
+          SCX_SELFTEST_ACCEL: kvm
 
       # ── Push once, then tag in-registry ──────────────────────────────────
       # Two problems this solves, both measured on run 30775672845.
