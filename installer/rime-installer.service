@@ -21,10 +21,13 @@ Description=Rime OS guided installer
 Requires=seatd.service
 After=seatd.service
 After=systemd-user-sessions.service plymouth-quit-wait.service
-After=getty@tty1.service
-# cage must own the VT alone; a getty on the same tty would fight it for input
-# and hang the terminal up underneath the compositor.
-Conflicts=getty@tty1.service
+# cage must own the VT alone; a text console on the same tty would fight it
+# for input and hang the terminal up underneath the compositor. Fedora 45's
+# console is kmscon (kmsconvt@, WantedBy=getty.target with DefaultInstance=
+# tty1), not agetty, and autovt@ is the name logind starts on a VT: all three
+# are named, like Fedora's own greetd.service names the first two.
+After=getty@tty1.service kmsconvt@tty1.service autovt@tty1.service
+Conflicts=getty@tty1.service kmsconvt@tty1.service autovt@tty1.service
 ConditionPathExists=/usr/bin/rime-installer-launch
 
 [Service]
@@ -54,8 +57,8 @@ TTYPath=/dev/tty1
 # TTYReset stays: restore sane termios at service start so the diagnostic and
 # rescue-shell text is legible even if a previous occupant left the tty raw.
 TTYReset=yes
-# TTYVHangup stays: hang up anything still attached to tty1 (e.g. a getty that
-# lost the Conflicts= race) before we start, so cage gets the VT exclusively.
+# TTYVHangup stays: hang up anything still attached to tty1 (e.g. a console
+# that lost the Conflicts= race) before we start, so cage gets the VT exclusively.
 TTYVHangup=yes
 # If the installer exits (finished, cancelled, or crashed past the launcher's
 # own diagnostic-and-shell path), drop to a shell so the user isn't stuck.

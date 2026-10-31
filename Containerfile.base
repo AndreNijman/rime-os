@@ -1736,6 +1736,23 @@ RUN set -eux; \
         /usr/lib/systemd/system/rime-switch-greeter@.service; \
     grep -qE '^Conflicts=getty@tty%i\.service$' \
         /usr/lib/systemd/system/rime-switch-greeter@.service; \
+    grep -qE '^Conflicts=kmsconvt@tty%i\.service$' \
+        /usr/lib/systemd/system/rime-switch-greeter@.service; \
+    grep -qE '^Conflicts=autovt@tty%i\.service$' \
+        /usr/lib/systemd/system/rime-switch-greeter@.service; \
+    : 'and with whatever logind actually starts on a VT in THIS image. Fedora'; \
+    : '45 moved autovt@ from getty@ to kmsconvt@; a unit that conflicted only'; \
+    : 'with the old one would guard nothing. Read the alias, do not assume it.'; \
+    _autovt="$(readlink /etc/systemd/system/autovt@.service \
+               || readlink /usr/lib/systemd/system/autovt@.service || true)"; \
+    _impl="${_autovt##*/}"; _impl="${_impl%@.service}"; \
+    case "$_impl" in kmsconvt|getty) ;; \
+        *) echo "FATAL: autovt@.service resolves to '${_autovt:-nothing}': logind would start no console on VT 2-6"; exit 1 ;; \
+    esac; \
+    grep -qE "^Conflicts=${_impl}@tty%i\\.service\$" \
+        /usr/lib/systemd/system/rime-switch-greeter@.service \
+        || { echo "FATAL: the switch greeter does not conflict with ${_impl}@, which is this image's autovt@"; exit 1; }; \
+    echo "switch greeter conflicts with this image's autovt@ (${_impl}@)"; \
     grep -qE '^Restart=no$' /usr/lib/systemd/system/rime-switch-greeter@.service; \
     : 'greetd is what the unit execs, and this is the image that has to have'; \
     : 'it. A unit pointing at an absent binary would fail at the one moment'; \
@@ -2867,6 +2884,47 @@ RUN set -eux; \
     cp /tmp/vconsole.orig /etc/vconsole.conf; \
     rm -f /tmp/vconsole.orig; \
     echo "vconsole guard verified (bad config repaired, good config untouched)"
+
+# ── Text consoles are kmscon on Fedora 45 ───────────────────────────────────
+# Fedora 45's preset makes kmsconvt@.service the implementation of autovt@ and
+# disables getty@, so Ctrl+Alt+F2..F6 open kmscon, not agetty. Two premises the
+# rest of the image leans on are checked here rather than assumed:
+#
+#  * greetd owns VT 1. Fedora's greetd.service conflicts with BOTH consoles on
+#    tty1 (kmsconvt@tty1 is WantedBy=getty.target); if that line ever went, a
+#    kmscon would fight the greeter for VT 1 at every boot.
+#  * the console keyboard follows the installer's choice. kmscon does not read
+#    /etc/vconsole.conf (no loadkeys, no setfont): it asks systemd-localed over
+#    D-Bus for X11Layout/X11Variant/X11Options/X11Model and follows changes to
+#    them live. localed answers from /etc/vconsole.conf's XKB* keys and, when
+#    those are unset, from /etc/X11/xorg.conf.d/00-keyboard.conf, which is the
+#    file rime-install writes the operator's layout and variant into. kmscon
+#    SKIPS localed entirely as soon as any xkb-* option is configured, so a
+#    kmscon.conf carrying one would pin every console to that layout and stop
+#    `localectl set-x11-keymap` reaching it. None may ship.
+#
+# Console font: Rime sets no FONT= (and the vconsole guard drops a broken
+# one). kmscon ignores FONT= anyway and sizes its own font from the monitor's
+# resolution (font-size=0, the default), so HiDPI needs nothing from the image.
+# The initramfs (LUKS unlock prompt) runs before kmscon exists and still uses
+# KEYMAP= / the vconsole.keymap= karg exactly as before.
+RUN set -eux; \
+    grep -qE '^Conflicts=([^#]* )?getty@tty1\.service( |$)' /usr/lib/systemd/system/greetd.service \
+        || { echo "FATAL: greetd.service no longer conflicts with getty@tty1"; exit 1; }; \
+    grep -qE '^Conflicts=([^#]* )?kmsconvt@tty1\.service( |$)' /usr/lib/systemd/system/greetd.service \
+        || { echo "FATAL: greetd.service no longer conflicts with kmsconvt@tty1: kmscon would fight the greeter for VT 1"; exit 1; }; \
+    if rpm -q kmscon >/dev/null 2>&1; then \
+        for f in /etc/kmscon/*.conf; do \
+            if [ -f "$f" ] && grep -qE '^[[:space:]]*xkb-' "$f"; then \
+                echo "FATAL: $f sets xkb-*: kmscon would stop following localectl and the installer's layout"; exit 1; \
+            fi; \
+        done; \
+        grep -aq 'org.freedesktop.locale1' /usr/bin/kmscon \
+            || { echo "FATAL: this kmscon has no locale1 support: the console would ignore the installer's keyboard layout"; exit 1; }; \
+        echo "kmscon $(rpm -q --qf '%{VERSION}' kmscon) takes its layout from systemd-localed"; \
+    else \
+        echo "kmscon not installed: autovt@ is agetty, which loads KEYMAP= via systemd-vconsole-setup"; \
+    fi
 
 # ── A crash loop must not be able to fill /var ─────────────────────────────
 # MEASURED ON KATANA 2026-09-19 (evidence §3.4): one crashing process respawned

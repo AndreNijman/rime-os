@@ -275,14 +275,39 @@ RUN if [ "$ALLOW_UNATTENDED" = 1 ]; then \
 # 5 seconds in which a user with no feedback concludes the installer has hung.
 # Observed in the QEMU boot test: "Starting NetworkManager Wait Online" sat on
 # the console with nothing after it.
+#
+# Text consoles on VT 2-6 (the "Ctrl+Alt+F2, login root/rime" rescue path the
+# installer prints) are whatever autovt@ names; logind starts autovt@ttyN when
+# someone switches to VT N. Fedora 43's systemd shipped autovt@.service as a
+# static link to getty@.service (measured). Fedora 45's systemd ships no link:
+# autovt@ only exists as the [Install] Alias= of getty@ or kmsconvt@, and
+# Fedora 45's preset disables getty@ in favour of kmscon. This environment has
+# no kmscon (nothing here pulls it in) and runs no preset, so on Fedora 45
+# autovt@tty2 resolved to NOTHING and Ctrl+Alt+F2 showed a dead screen.
+# Measured in a fedora:45 container booted with systemd: autovt@tty2.service
+# LoadState=not-found. Enabling getty@.service creates the alias (agetty, as
+# before); it must come BEFORE the tty1 mask, because enable refuses once
+# getty@tty1 is masked. The mask still wins for tty1.
+#
+# kmsconvt@tty1 is masked too. kmscon is not installed here today, but it is
+# Fedora 45's default console, and if a dependency ever brings it in, its
+# kmsconvt@tty1 would fight cage for tty1 exactly as a getty would.
 COPY rime-installer.service /usr/lib/systemd/system/rime-installer.service
 RUN systemctl set-default multi-user.target \
     && systemctl enable rime-installer.service \
     && systemctl enable NetworkManager.service \
     && systemctl enable seatd.service \
+    && systemctl enable getty@.service \
     && systemctl mask getty@tty1.service \
+    && systemctl mask kmsconvt@tty1.service \
     && systemctl mask serial-getty@ttyS0.service \
-    && systemctl mask NetworkManager-wait-online.service
+    && systemctl mask NetworkManager-wait-online.service \
+    && _a="$(readlink /etc/systemd/system/autovt@.service)" \
+    && { [ "${_a##*/}" = getty@.service ] \
+         || { echo "FATAL: autovt@ is '${_a:-missing}', not getty@: no login on Ctrl+Alt+F2"; exit 1; }; } \
+    && [ "$(readlink /etc/systemd/system/getty@tty1.service)" = /dev/null ] \
+    && [ "$(readlink /etc/systemd/system/kmsconvt@tty1.service)" = /dev/null ] \
+    && echo "OK: VT 2-6 get agetty via autovt@; tty1 is cage's alone (getty@tty1 and kmsconvt@tty1 masked)"
 
 # Live-env-only root login (tty2 / serial) for rescue & debugging. This is the
 # throwaway live session, not the installed system.

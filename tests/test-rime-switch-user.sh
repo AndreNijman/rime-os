@@ -278,6 +278,19 @@ grep -qE '^ConditionPathExists=/run/rime-switch-greeter/%i\.toml$' "$UNIT" \
 grep -qE '^Conflicts=getty@tty%i\.service$' "$UNIT" \
     && ok "the unit conflicts with the getty on its own VT" \
     || bad "the unit conflicts with the getty on its own VT"
+# Fedora 45 made kmscon the text console: logind's autovt@ttyN is an alias of
+# kmsconvt@ttyN there, and getty@ is disabled. Conflicting with getty@ alone
+# guards a unit that never runs. autovt@ is the name logind actually starts, so
+# it is conflicted with too, whatever an admin aliases it to.
+for _impl in kmsconvt autovt; do
+    if grep -qE "^Conflicts=${_impl}@tty%i\.service\$" "$UNIT" \
+       && grep -qE "^After=${_impl}@tty%i\.service\$" "$UNIT"; then
+        ok "the unit conflicts with (and orders after) ${_impl}@ on its own VT"
+    else
+        bad "the unit conflicts with (and orders after) ${_impl}@ on its own VT" \
+            "$(grep -E '^(Conflicts|After)=' "$UNIT" | tr '\n' ' ')"
+    fi
+done
 grep -qE '^Restart=no$' "$UNIT" \
     && ok "the switch greeter does not respawn for ever" \
     || bad "the switch greeter does not respawn for ever"

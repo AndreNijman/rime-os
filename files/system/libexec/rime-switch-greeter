@@ -50,7 +50,8 @@
 #     account rather than the greeter system user. Summoning a login screen on
 #     a kiosk is escaping the kiosk.
 #  3. VT 1..(NAutoVTs, ReserveVT, 6 — whichever is highest). VT 1 is greetd's
-#     own and 2..6 are where logind spawns gettys on demand; a greeter there
+#     own and 2..6 are where logind spawns a text console on demand (autovt@,
+#     which is kmscon on Fedora 45 and agetty before it); a greeter there
 #     races autovt@ttyN for the VT. The floor is read off logind's
 #     configuration rather than assumed.
 #
@@ -161,9 +162,15 @@ active_session_uid() {
 # ── the VT floor, read rather than assumed ───────────────────────────────────
 #
 # logind spawns autovt@ttyN for N up to NAutoVTs when a VT is switched to, and
-# keeps ReserveVT for a getty permanently. A greeter below that floor races the
-# getty for the VT. Both default to 6, and both are commented out in the shipped
-# logind.conf, so an unset value means the default and not zero.
+# keeps ReserveVT for one permanently. A greeter below that floor races that
+# console for the VT. Both default to 6, and both are commented out in the
+# shipped logind.conf, so an unset value means the default and not zero.
+#
+# Fedora 45 changed WHAT autovt@ is (kmsconvt@, kmscon, instead of getty@), not
+# WHEN logind starts it: the same two settings bound it, kmscon runs with
+# --vt=%I --no-switchvt and so never takes a second VT of its own, and its
+# extra terminals (Ctrl+Logo+Return) are sessions inside that one VT. The floor
+# is unchanged; the unit's Conflicts= names kmsconvt@ as well as getty@.
 
 logind_num() {  # $1 = key, $2 = default
     local v=""
