@@ -121,7 +121,9 @@ wait_for() {
     done
     "$@"
 }
+# shellcheck disable=SC2329  # both are called through wait_for
 is_enabled() { [ "$(state)" = enabled ]; }
+# shellcheck disable=SC2329
 is_disabled() { [ "$(state)" = disabled ]; }
 
 # One CPU hog per CPU plus two fork loops, for $1 seconds. Shell only: the
