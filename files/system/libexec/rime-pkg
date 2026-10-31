@@ -177,8 +177,18 @@ readonly LOCK="${PKG_ROOT}/.lock"
 # empty value turns the cache off; the variable exists so a test can point it
 # at a temp directory (RIME_PKG_RPM_CACHE), as RIME_PKG_GITHUB_API does.
 RPM_CACHE="${RIME_PKG_RPM_CACHE-${PKG_ROOT}/rpm-cache}"
+# Free space the cache must never take from an OS update, on top of the 3% of
+# the filesystem ostree keeps free for itself (min-free-space-percent). bootc
+# refuses an update unless the space it needs is free: "available 5.7 GB,
+# required 6.2 GB" for a core update (measured 2026-10-04, 12 GiB VM). 6 GiB is
+# 6.44 GB. See rpm_cache_room.
+readonly RPM_CACHE_HEADROOM=$((6 * 1024 * 1024 * 1024))
 # The file names dnf5 resolved in this run, set by download_set.
 RPM_FETCHED=()
+# Why download_set refused a resolved set (it returned 2); download_rpms dies with it.
+RPM_SET_REFUSED=""
+# Why rpm_cache_room said no, for the warning that drops the cache.
+RPM_CACHE_SHORT=""
 # Increment whenever a newly baked image package may overlap existing user
 # extensions, or whenever the on-disk layout under PKG_ROOT changes. A mismatch
 # triggers one rebuild even within the same VERSION_ID — which is the whole
@@ -841,14 +851,21 @@ download_rpms() {
         warn "could not list the repositories' newer builds of image packages; resolving without pinning to the image"
         pin=""
     fi
-    local cache=""
+    local cache="" rc
     rpm_cache_open && cache="$RPM_CACHE"
     RPM_FETCHED=()
     if [ -n "$pin" ]; then
-        if download_set "$destdir" "$cache" "${args[@]}" --exclude="$pin" "$@"; then
+        rc=0
+        download_set "$destdir" "$cache" "${args[@]}" --exclude="$pin" "$@" || rc=$?
+        if [ "$rc" = 0 ]; then
             compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
             return 0
         fi
+        # A set that changed under the download, or a file name Rime will not
+        # use, is not "nothing fits the image": resolving again unpinned would
+        # pull newer builds of image packages and end in a guard refusal that
+        # blames the image for a passing mirror change.
+        [ "$rc" = 2 ] && die "$RPM_SET_REFUSED"
         # Nothing in the repositories fits the image as it is. Resolve again
         # against the newest builds, so guard_rpms can name the package that
         # needs an OS update instead of the user reading a solver dump. A
@@ -856,7 +873,10 @@ download_rpms() {
         warn "no build of that set fits the image as it is; resolving against the newest builds to find what needs an OS update"
         rm -f -- "$destdir"/*.rpm
     fi
-    download_set "$destdir" "$cache" "${args[@]}" "$@" || die "dependency resolution failed for: $*"
+    rc=0
+    download_set "$destdir" "$cache" "${args[@]}" "$@" || rc=$?
+    [ "$rc" = 2 ] && die "$RPM_SET_REFUSED"
+    [ "$rc" = 0 ] || die "dependency resolution failed for: $*"
     compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
 }
 
@@ -879,12 +899,56 @@ download_rpms() {
 #
 # The cache is never trusted: every file still has to match the repository's
 # checksum for dnf5 to keep it, and guard_rpms verifies its signature on every
-# build exactly as it does a fresh download. Bounded: after the build's guard
-# passes, the cache is made to hold that verified set and nothing else.
+# build exactly as it does a fresh download. Bounded twice: after the build's
+# guard passes, the cache is made to hold that verified set and nothing else,
+# and it is kept only while the disk keeps room for an OS update with it on
+# (rpm_cache_room); otherwise there is no cache and every build downloads.
+
+# Prints "<size> <available>" in bytes for the filesystem that holds $1, or
+# would hold it: the nearest existing directory above a path not yet created.
+# Its own function so a test can play a full or an empty disk.
+rpm_cache_fs_space() {
+    local p="$1"
+    while [ ! -e "$p" ] && [ "$p" != / ] && [ "$p" != . ]; do p="$(dirname -- "$p")"; done
+    df -B1 --output=size,avail -- "$p" 2>/dev/null | awk 'NR == 2 { print $1, $2 }'
+}
+
+# Is there room for the cache? The cache is a convenience and must never be
+# what stops an OS update: `rime update` runs `bootc upgrade` BEFORE the package
+# rebuild, while the last build's cache is on disk, and bootc refuses an update
+# that does not fit ("Insufficient free space"). So the filesystem has to keep
+# RPM_CACHE_HEADROOM plus ostree's own 3% free WITH the cache on it. On the
+# 12 GB minimum disk that is never true and the cache is never kept, which is
+# exactly the engine before the cache existed. Not measurable = no room.
+rpm_cache_room() {
+    local size="" avail="" floor
+    read -r size avail <<<"$(rpm_cache_fs_space "$RPM_CACHE")" || true
+    case "${size:-x} ${avail:-x}" in
+        *[!0-9\ ]*)
+            RPM_CACHE_SHORT="the free space on its filesystem could not be measured"
+            return 1 ;;
+    esac
+    floor=$(( RPM_CACHE_HEADROOM + size * 3 / 100 ))
+    if [ "$avail" -lt "$floor" ]; then
+        RPM_CACHE_SHORT="$(awk -v a="$avail" -v f="$floor" 'BEGIN { printf "%.1f GB free, and %.1f GB stays free for OS updates", a / 1e9, f / 1e9 }')"
+        return 1
+    fi
+    return 0
+}
 
 # Can the cache be used? Creates it (0700, root's like the rest of PKG_ROOT).
+# A disk short of room drops the cache instead: it is measured WITH the cache on
+# it, and a cache kept by an earlier build on a disk that has since filled up
+# must not stand between this machine and its next OS update.
 rpm_cache_open() {
     [ -n "${RPM_CACHE:-}" ] || return 1
+    if ! rpm_cache_room; then
+        if [ -e "$RPM_CACHE" ] || [ -L "$RPM_CACHE" ]; then
+            warn "dropping the package cache ${RPM_CACHE}: ${RPM_CACHE_SHORT}"
+            rm -rf -- "$RPM_CACHE"
+        fi
+        return 1
+    fi
     if ! install -d -m0700 -- "$RPM_CACHE" 2>/dev/null || [ ! -w "$RPM_CACHE" ]; then
         warn "cannot use the package cache ${RPM_CACHE}; downloading every package"
         return 1
@@ -903,11 +967,16 @@ rpm_file_name_ok() {
 
 # One resolving download. $1 = destdir, $2 = cache directory or "" for none,
 # rest = dnf5's argv. Sets RPM_FETCHED to the file names dnf5 resolved.
+# Returns 1 when dnf5 fails (nothing resolves), 2 when the set it resolved is
+# refused (RPM_SET_REFUSED says why): retrying with another resolution would
+# not be the same question.
 download_set() {
     local destdir="$1" cache="$2"; shift 2
     if [ -z "$cache" ]; then
-        dnf5 "$@" >&2
-        return
+        # 1, never dnf5's own code: 2 means "refused" to download_rpms, and
+        # dnf5 exits 2 on an argument error.
+        dnf5 "$@" >&2 || return 1
+        return 0
     fi
     local listing url name reused=0
     local -a names=()
@@ -917,7 +986,7 @@ download_set() {
     while IFS= read -r url; do
         case "$url" in *://*) ;; *) continue ;; esac
         name="${url##*/}"
-        rpm_file_name_ok "$name" || { warn "dnf5 resolved a file name Rime will not use: '${name}'"; return 1; }
+        rpm_file_name_ok "$name" || { RPM_SET_REFUSED="dnf5 resolved a file name Rime will not use: '${name}'"; return 2; }
         names+=("$name")
         if [ -f "${cache}/${name}" ] \
            && cp --reflink=auto -- "${cache}/${name}" "${destdir}/${name}" 2>/dev/null; then
@@ -937,14 +1006,16 @@ download_set() {
         for n in ${names[@]+"${names[@]}"}; do
             [ "$n" = "${f##*/}" ] && { known=1; break; }
         done
-        [ "$known" = 1 ] || { warn "the repositories changed during the download (${f##*/} was not in the resolved set); run the command again"; return 1; }
+        [ "$known" = 1 ] || { RPM_SET_REFUSED="the repositories changed during the download (${f##*/} was not in the resolved set); run the command again"; return 2; }
     done
     RPM_FETCHED=(${names[@]+"${names[@]}"})
 }
 
 # After guard_rpms passed: make the cache hold exactly the repository rpms this
-# build verified, and nothing else. $1 = the build's rpm directory. Never fatal:
-# a cache that cannot be written costs a download next time, not this build.
+# build verified, and nothing else, or no cache at all when keeping it would
+# leave too little free space (rpm_cache_room). $1 = the build's rpm directory.
+# Never fatal: a cache that cannot be written costs a download next time, not
+# this build.
 rpm_cache_keep() {
     local destdir="$1"
     [ -n "${RPM_CACHE:-}" ] && [ -d "$RPM_CACHE" ] || return 0
@@ -969,6 +1040,12 @@ rpm_cache_keep() {
         [ -n "${verified[$name]:-}" ] && [ -f "$f" ] && [ ! -L "$f" ] && continue
         rm -rf -- "$f"
     done
+    # Measured now, with the links made: they share the build's blocks, so
+    # what is free now is what stays free once the build directory is gone.
+    if ! rpm_cache_room; then
+        warn "not keeping the package cache: ${RPM_CACHE_SHORT}; the next build downloads every package again"
+        rm -rf -- "$RPM_CACHE"
+    fi
     return 0
 }
 
