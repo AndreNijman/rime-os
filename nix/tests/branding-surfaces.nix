@@ -14,7 +14,8 @@
 #   prompt with three bullets), then rime-plymouth-accent writes the owner's accent to a real ESP and the NEXT boot's
 #   initrd starts plymouth-accent.png in rime-os-accent-00. os-release, the icons, the Plymouth logo and the initrd's
 #   theme set are checked on the running system. A second machine with the desktop shows the greeter in Rime Blue
-#   (greeter-default.png) and in a user's published accent (greeter-accent.png).
+#   (greeter-default.png) and in a user's published accent (greeter-accent.png). Every one of these screenshots is read
+#   back (plane3()): plane 3 must be on screen in the colour named, next to the neutral planes.
 { pkgs, self }:
 
 let
@@ -117,6 +118,8 @@ in
     name = "rime-branding-surfaces";
 
     node.pkgsReadOnly = false;
+    # Reads the screenshots back: each one must show plane 3 in the colour it claims (plane3() below).
+    extraPythonPackages = p: [ p.pillow ];
 
     nodes = {
       # The splash on its own: no desktop, so nothing takes the display from plymouthd.
@@ -186,9 +189,29 @@ in
     testScript =
       { nodes, ... }:
       ''
+      import os
+      from PIL import Image
+
       def shot(m, name):
           m.screenshot(name)
           print("screenshot:", name + ".png")
+
+      # The pixels, not only the journal: in the logo's box of screenshot `name` (1280x800), plane 3 is `want` (at least
+      # 150 px within 20 of it; the proof screenshots measure 278 in the greeter, 504-513 on the splash, and 0 for any
+      # other accent) and the neutral planes and wordmark are there (at least 500 near-white px; measured 1091-1659).
+      GREETER_LOGO = (550, 372, 640, 440)  # above the username field, whose ring is also the accent
+      SPLASH_LOGO = (520, 325, 630, 410)   # above the progress dots, one of which is also the accent
+
+      def plane3(m, name, box, want):
+          img = Image.open(os.path.join(m.out_dir, name + ".png")).convert("RGB").crop(box)
+          w = tuple(int(want[i:i + 2], 16) for i in (1, 3, 5))
+          raw = img.tobytes()  # RGB, three bytes a pixel
+          px = [tuple(raw[i:i + 3]) for i in range(0, len(raw), 3)]
+          accent = sum(1 for p in px if sum((a - b) ** 2 for a, b in zip(p, w)) <= 400)
+          white = sum(1 for p in px if min(p) >= 235)
+          print(f"{name}: {accent} px of plane 3 in {want}, {white} px of the neutral planes")
+          assert accent >= 150, f"{name}: plane 3 is not {want} ({accent} px)"
+          assert white >= 500, f"{name}: the neutral planes are missing ({white} px)"
 
       # ── the splash ────────────────────────────────────────────────────────────────────────────────
       splash.start()
@@ -228,6 +251,7 @@ in
           splash.succeed("grep -qx 'Theme=rime-os' /etc/plymouth/plymouthd.conf")
           splash.sleep(3)
           shot(splash, "plymouth-default")
+          plane3(splash, "plymouth-default", SPLASH_LOGO, "#91C2DC")  # Rime Blue
 
       with subtest("the passphrase prompt, with three bullets"):
           splash.execute("plymouth ask-for-password --prompt='Enter passphrase for root' >/tmp/pw 2>&1 &")
@@ -257,6 +281,7 @@ in
           splash.succeed("plymouth --ping")
           splash.sleep(3)
           shot(splash, "plymouth-accent")
+          plane3(splash, "plymouth-accent", SPLASH_LOGO, "#DC9191")  # accents.json slot 00
 
       # ── the greeter ───────────────────────────────────────────────────────────────────────────────
       desktop.start()
@@ -266,10 +291,8 @@ in
       with subtest("the greeter shows the ridge in Rime Blue"):
           desktop.sleep(10)
           shot(desktop, "greeter-default")
-          glog = desktop.succeed("journalctl -b -u greetd --no-pager")
-          print(glog[-4000:])
-          for bad in ["Cannot open", "is not a type", "module \"QtQuick.Shapes\" is not installed"]:
-              assert bad not in glog, f"greeter error: {bad}"
+          # greetd's journal never carries the greeter's QML output, so a QML error shows here as missing pixels.
+          plane3(desktop, "greeter-default", GREETER_LOGO, "#91C2DC")  # Rime Blue
 
       with subtest("the greeter follows the user's published accent"):
           desktop.succeed("install -d /var/lib/rime-greet/accents && printf rime > /var/lib/rime-greet/last-user"
@@ -278,6 +301,7 @@ in
           desktop.wait_until_succeeds("pgrep -u greetd -f 'qs -p .*/rime-greet/shell.qml'")
           desktop.sleep(10)
           shot(desktop, "greeter-accent")
+          plane3(desktop, "greeter-accent", GREETER_LOGO, "#FA98A0")  # the published accent itself
     '';
   };
 }
