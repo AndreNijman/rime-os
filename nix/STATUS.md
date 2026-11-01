@@ -1,4 +1,32 @@
-# Rime on NixOS: integration status (feat/nixos, 2026-11-01)
+# Rime on NixOS: integration status (feat/nixos, 2026-11-02)
+
+## Wave 1 (2026-11-02): merged, all 30 checks pass
+
+The eleven wave-1 branches (`nix/ci`, `nix/size`, `nix/ledger`, `nix/kernsign`, `nix/boothook`, `nix/catalogue`,
+`nix/hostlayer`, `nix/polish`, `nix/update-e2e` with `nix/release` and `nix/client` inside it) are merged into
+`feat/nixos` with `--no-ff`; rime-shell's `nix/polish` is merged into rime-shell `feat/nixos` (89325393, local). The
+full record, the fixes the merge needed and the P1 gate line by line are in `docs/nixos/p1-exit.md` ("Wave-1
+integration"); evidence in `/var/lab/rime-nix/artifacts/integrate-wave1/`.
+
+- **30 of 30 flake checks built** at 53210926a (`nix eval` of every `checks.x86_64-linux.<name>.outPath`, each valid in
+  the store: `proof-final.txt`), with `--override-input rime-shell path:/work/shell` until rime-shell is pushed and
+  flake.lock relocked. `update-client` and `update-e2e` needed one retry each (a nixpkgs virtiofsd race, p1-exit.md).
+- `hostlayer-katana` passed against katana's real sanitised state (six subtests, snapshot digest unchanged).
+- cargo: 3740 passed, 57 self-skipped, 0 failed, 3 ignored, 35 skipped by name.
+- Closure (rime-vm toplevel): **2079 paths, 10,556,067,672 B NAR** (`checks.size`, budget 11,274,289,152 B). The 1.51 GB
+  of cuts (`docs/nixos/closure.md` §3) are in; linux-firmware (+825 MiB) came with fedora-parity (§9). Fresh-install
+  download (`plain`, zstd -19) **3.46 GB**, bootc 4.20 GB.
+- Ported in wave 1, each with its own check: package catalogue (`catalogue`, `catalogue-data`), trust and update
+  path, D6 client and release side (`update-client`, `update-e2e`, `release-unit`, `release-standin`,
+  `release-github`), kernel MOK signing (`kernel-sign`, `kernel-sign-workflow`; secrets not created), the boot hook for
+  Fedora shim and GRUB (`boot-hook-unit`, `boot-hook-vm`), the host layer and /etc carry (`hostlayer`,
+  `hostlayer-katana`), Fedora defaults (`fedora-parity`), polish (`polish`), the CI workflow and plan (`ci`,
+  `ci-userns`), the size guard (`size`).
+- Not done: hosted CI has never run; the Rime binary cache, kernel-signing secrets and `katana-nix` runners do not
+  exist; `docs/nixos/subsystem-owners.md` §6 still lists unowned rows.
+
+The sections below are the wave-0 record (seven area branches, 2026-11-01). Rows in "Stubbed" that wave 1 closed say so.
+
 
 The seven area branches (`nix/rimed`, `nix/libexec`, `nix/desktop`, `nix/shell`, `nix/kernel`, `nix/gaming`,
 `nix/security`) are merged into `feat/nixos` with `--no-ff`, and the branches and their worktrees are deleted.
@@ -15,11 +43,11 @@ sudo -n podman exec -w /work/os rime-nix nix flake check path:. -L --keep-going 
 
 `nixosConfigurations.rime-vm.config.system.build.toplevel` (every area on, nixpkgs' kernel, as `nix/hosts/vm.nix`
 has it) = `/nix/store/883q7lvj…-nixos-system-rime-vm-26.11.20261030.1c89083`.
-`nix path-info -Sh` gives **10.3 GiB**, in 1,995 store paths. That figure is uncompressed and includes the whole
+`nix path-info -Sh` gave **10.3 GiB**, in 1,995 store paths (wave 0; see Wave 1 above for today's figure). That figure is uncompressed and includes the whole
 closure, so it does not compare directly with bootc's compressed image sizes. CLAUDE.md records 5.06 GB after #83 and
 4.20 GB for a fresh install after the #123 rechunk; neither was measured here.
 
-These are the largest paths, which a size pass should look at first (not acted on here):
+These were the largest paths; `nix/size` cut the first four and the registry source (closure.md §3):
 
 - **mbrola-voices, 644 MiB.** speech-dispatcher pulls it in through `/etc`.
 - **Two llvm-21 libs (538 + 550 MiB) and two Mesa builds.** These are the 64-bit and 32-bit stacks
@@ -112,31 +140,31 @@ The screenshots are in `/var/lab/rime-nix/artifacts/`:
 
 | item | where | what is missing |
 |---|---|---|
-| Package catalogue | `nix/modules/packages-catalogue.nix` | The option exists and its config is empty. `rime install` has no Nix catalogue (D5). This includes mapping `rime install steam` to `rime.gaming.enable`. |
-| Trust and update path (§4.4) | — | `rime update` and `rime trust` still speak bootc. The D6 client replaces rime-update-check/notice and the live engine. |
-| Kernel MOK signing job | `nix/pkgs/kernel/README.md` | `rime.kernel.signing.imageSignature` has nothing to feed it yet. The CI job (sbsign with the `APEX_SB_*` secrets, names unchanged) does not exist. The boot chain (shim+MOK or Lanzaboote) is D3's decision. |
+| Package catalogue | `nix/modules/packages-catalogue.nix`, `nix/catalogue/` | **Ported in wave 1** (`catalogue`, `catalogue-data`). Open: the D5 translator, `recover.rs` still calls rime-pkg, vendor apps. |
+| Trust and update path (§4.4) | `rimed/rime/src/nixos/`, `nix/modules/update.nix`, `nix/release/` | **Ported in wave 1** (`update-client`, `update-e2e`, `release-*`). Open: the cache bucket, Pages and DNS; real keys; a real-network run. |
+| Kernel MOK signing job | `nix/pkgs/kernel/`, `.github/workflows/nix-kernel-sign.yml` | **Ported in wave 1** (`kernel-sign`, `kernel-sign-workflow`). Open: the signing secrets do not exist and the workflow has never run; no host sets `require = true`. |
 | kernel-boot-budget target | `nix/tests/kernel.nix:101` | It measures a stand-in laptop config. It must point at the shipped host configs, with the real target (ESP or btrfs /boot). |
-| Plymouth accent | `nix/modules/desktop.nix:132` | Every machine shows chartreuse. `rime-plymouth-accent` writes a file NixOS generates. The boot chain has to hand the accent to the initrd. |
-| kmscon console | desktop | Not ported (bootc #125 is not merged either). |
-| Guest sessions | `nix/modules/base.nix:142` | `rime-user` enables `rime-guest-session@<uid>` with `systemctl enable`, which NixOS refuses. It needs a runtime add-wants or a declarative guest list. |
+| Plymouth accent | `nix/modules/desktop.nix` | **Partly done in wave 1** (polish: the splash follows the owner's accent; with no accent themes it falls back). Open: the accent inside the initrd. |
+| kmscon console | desktop | **Done in wave 1** (polish: Ctrl+Alt+F2 is kmscon; its mutant fails). It owns tty2, so VM tests that read a tty through `/dev/vcs` must turn it off (hostlayer does). |
+| Guest sessions | `nix/modules/hostlayer.nix` | **Done in wave 1**: `hostlayer`'s "rime-user makes a disposable guest on NixOS, and its logout wipes it" passes. |
 | rime-aid sandbox | `nix/pkgs/rimed.nix:110` | The backend sandbox binds only /usr and /etc, so a backend cannot start until it binds `/nix/store` and `/run/opengl-driver`. |
-| Agent sessions and system PATH | rimed / security | The confined session masks `/run` (the security test saw `/run/current-system absent`, `/run/wrappers absent`), so a confined agent session has no system PATH. The sandbox needs NixOS-shaped binds. |
-| `rime agent enable` | rimed | It symlinks a store path into the user's units. That path is garbage-collected after an upgrade; it should point at the profile. |
+| Agent sessions and system PATH | rimed / security | **Done in wave 1** (9f72789c3): `security`'s "PATH: a confined session runs a system binary by name" passes. |
+| `rime agent enable` | rimed | **Done in wave 1** (27dcc332b): the enable link stays valid across updates. |
 | G2 message | rimed sandbox.rs | MissingBwrap still says `/usr/bin/bwrap`, even when the compiled path is a store path. |
-| RTL / qttranslations | shell | Qt's own translations and the RTL check are not wired. |
-| D1 / D2 | libexec | The `apex` aliases (D1) and the hypr-migrate and wallpaper tables (D2 bridge) are not verified on NixOS. |
+| RTL / qttranslations | shell | **Done in wave 1** (72900bf2c): RTL is measured inside the Shell's own quickshell. |
+| D1 / D2 | libexec | **Done in wave 1** (polish): the apex unit aliases (mutants fail without them) and the migrated wallpaper path and hypr-migrate are checked. |
 | Steam Remote Play ports | gaming / security | Not opened through `programs.steam.remotePlay.openFirewall`, because that option feeds NixOS's own firewall, which G8 keeps off. Whether rime.nft must allow them is the gaming owner's call. |
-| Hotspot firewall dispatcher | security | `50-rime-hotspot-firewall` is installed but no test runs it. |
+| Hotspot firewall dispatcher | security | **Done in wave 1** (polish: the dispatcher opens and closes the set; its mutant fails). |
 | NVIDIA suspend | kernel | `hardware.nvidia.powerManagement` and the suspend/resume path are not verified (no GPU in QEMU). |
 | LSM / IMA parity | kernel | NixOS passes `lsm=landlock,yama,bpf`, so lockdown and IMA are not active at boot, unlike bootc (kernel README, "Known differences"). |
 | Hardware-only items | kernel / gaming | msi-ec shift mode, Cooler Boost, charge window, real NVIDIA rendering, gamescope on hardware. All need katana-class hardware, and no VM can prove them. |
 | CI builders | rimed | rimed's checkPhase needs user namespaces (bwrap tests) on the builder. |
 | Flaky test skips | rimed | `a_stale_socket_from_a_dead_daemon_is_replaced` and one remoted record test are `--skip`ped in the Nix build. |
 | Hyprland and UWSM | desktop | `programs.hyprland.withUWSM = true` keeps Hyprland a binary-cache hit. Rime Tiling execs start-hyprland directly. CI cost if the cache misses: a full Hyprland build. |
-| flake.lock | flake | rime-shell is locked to `path:/work/shell`. Every command needs `--override-input`. Relock to GitHub after rime-shell `feat/nixos` is pushed. |
+| flake.lock | flake | Locked to GitHub rime-shell 8c111744. The polish merge (89325393) is local: push rime-shell `feat/nixos` and relock; until then every command needs `--override-input`. |
 | rime-shell | rime-shell feat/nixos | The PR needs a `## Release note`. a88d0340 must also be cherry-picked to main. |
-| Wallpaper first paint | desktop | The desktop screenshot shows a spinner and no wallpaper eight seconds in. Nothing checks for the painted wallpaper. |
-| thermald | services | `thermald.service` exits 1 in QEMU (no thermal hardware). It is expected in a VM and not checked on hardware. |
+| Wallpaper first paint | desktop | **Done in wave 1** (polish: "the first login paints the wallpaper"). |
+| thermald | services | **Done in wave 1** (polish: kept out of a VM by a condition; its mutant fails). Not checked on hardware. |
 
 ## Dropped as bootc-only
 

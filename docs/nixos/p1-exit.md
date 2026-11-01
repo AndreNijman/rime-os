@@ -24,7 +24,7 @@ in `nix/ci/checks-not-in-ci.txt`, so a check added to the flake runs in CI the d
 a name listed twice, or a name that is not a flake check fails the plan. Every workflow step is a `run-checks.sh` call, so
 a local run is the same command (`nix/ci/README.md`).
 
-Local plan, this branch:
+Local plan, `nix/ci` branch before the wave-1 merges (the plan after them is in "Wave-1 integration" below):
 
 ```
 plan: 14 checks, 10 run by CI, 4 skipped
@@ -38,10 +38,12 @@ SKIPPED kernel-boot-budget: needs the Rime binary cache (TODO(handover) R2): it 
 The workflow prints each skip as `SKIPPED <check>: <reason>` in the plan job, the summary job and the run summary, so
 a skip never reads as a pass.
 
-### Why those four are skipped
+### Why those five are skipped
 
 `nix build --dry-run` against an empty store (what a hosted runner starts with) shows `linux-rime-7.2.9.drv` in exactly
-four checks: `vm-boot`, `kernel-gate`, `kernel-vm`, `kernel-boot-budget`. A full kernel build on a 4-vCPU hosted runner
+four checks: `vm-boot`, `kernel-gate`, `kernel-vm`, `kernel-boot-budget`. The wave-1 merge of `nix/kernsign` added a
+fifth, `kernel-sign` (it signs and relinks the real Rime kernel image; `nix-store -qR` on each check's derivation names
+`linux-rime` in exactly these five). A full kernel build on a 4-vCPU hosted runner
 does not fit the hour, and there is no Rime binary cache to substitute it from yet (TODO(handover) R2).
 `kernel-config-fresh` only fetches the CachyOS source and config (no compile), so it runs.
 
@@ -113,7 +115,7 @@ flake checks: 10 run by .github/workflows/nix.yml, 4 skipped with a reason; 0 su
 ### Validation done
 
 The workflow has not run on GitHub (no push from this worktree). Its commands were run as written in the `rime-nix`
-container (`/var/lab/rime-nix/scratch/ci/jobs.sh`, under `nix shell` for gawk/grep/sed, which the container lacks and a
+container (`/var/lab/rime-nix/artifacts/ci/jobs.sh`, under `nix shell` for gawk/grep/sed, which the container lacks and a
 runner has):
 
 - `nix flake check path:. --no-build`: rc 0, "all checks passed!".
@@ -149,7 +151,7 @@ runner has):
 
 ### Handover
 
-- TODO(handover) R2: the Rime binary cache. With it, the four kernel checks substitute the kernel and can move off the
+- TODO(handover) R2: the Rime binary cache. With it, the five kernel checks substitute the kernel and can move off the
   skip list (delete their lines in `nix/ci/checks-not-in-ci.txt`; the plan picks them up).
 - TODO(handover): the per-job ephemeral runners in `ci/runner/` (label `katana-nix`) become the primary for the heavy
   legs once installed on katana, with this hosted workflow as the fallback. Any job moved there needs the fork guard
@@ -271,7 +273,7 @@ check where `cargo test` runs inside a logged-in user session.
   test: it bound the socket in-process and dropped the listener, but a concurrent test's fork could still hold the fd
   until exec, so the "dead" socket sometimes still accepted a connection. The dead daemon is now a child process (the
   test binary re-run with `RIME_SECRETD_TEST_BIND_AND_EXIT`) that binds and exits, so no fd outlives it. Measured in the
-  container (`cargo test -p rime-secretd`, debug, `/var/lab/rime-nix/scratch/ci/secretd.sh`): the whole crate in
+  container (`cargo test -p rime-secretd`, debug, `/var/lab/rime-nix/artifacts/ci/secretd.sh`): the whole crate in
   parallel 20/20 runs green, the test alone 50/50. Mutant (what a concurrent fork does): after the child exits, bind the
   path again in-process and hold a `try_clone()` of the listener: 5/5 runs fail with "connecting to a socket whose
   daemon has exited SUCCEEDED". (The loop skipped one other test, `peer::tests::a_handle_for_a_dead_process_...`, only
@@ -289,3 +291,80 @@ counted as selfskip, not passed), the lower-case `skipped: <why>` spelling (refu
 `selfSkipOk` name that did not skip itself (refused), and a target with no header.
 Mutants: counting a self-skip as passed (dropping `c["passed"] -= 1`) fails the check on the two row assertions; the
 first version's pattern (`^SKIP|^skipping`, which missed `skipped:`) fails it on the lower-case fixture.
+
+## Wave-1 integration (2026-11-02)
+
+The eleven wave-1 branches (`nix/ci`, `size`, `ledger`, `kernsign`, `boothook`, `catalogue`, `hostlayer`, `polish`,
+`update-e2e` with `release` and `client` inside it) merged into `feat/nixos`, and rime-shell's `nix/polish` into
+rime-shell `feat/nixos` (local; the flake.lock still pins the older rime-shell until that is pushed and relocked, so every
+command below ran with `--override-input rime-shell path:/work/shell`). Evidence files are in
+`/var/lab/rime-nix/artifacts/integrate-wave1/`.
+
+### What the merge broke, and the fixes
+
+- `checks.release-standin` failed: `rime trust --gate refused the published manifest`, `rime: /etc/rime/update.toml: No
+  such file or directory`. The client's NixOS dispatch took over a `RIME_TRUST_ROOT` fixture run, which must stay on the
+  bootc verifier. `rimed/rime/src/trust.rs` now asks `nixos_gate()` (no fixture root, and the machine is NixOS), with a
+  unit test; the failing run on the tree before the fix is its mutant.
+- `checks.hostlayer` timed out at 900 s in "rime-user makes a disposable guest on NixOS": polish gave tty2 to kmscon,
+  which draws on DRM, so `wait_until_tty_matches("2", "login: ")` (it reads `/dev/vcs2`) never matched. The hostlayer
+  test node turns kmscon off and logs in through getty.
+- `checks.size` failed on the budget: linux-firmware (fedora-parity) joined the closure. Budget raised once to 10.5 GiB;
+  `closure.md` §9 says what grew and re-measures `plain`.
+- `kernel-sign` builds the Rime kernel, so it joined the CI skip list (above).
+
+### Results on `feat/nixos` 53210926a
+
+- `nix flake check path:. --no-build`: "all checks passed!".
+- Every one of the 30 flake checks built in the `rime-nix` container: `nix eval` of each check's `outPath`, then `nix
+  path-info` of it, prints 30 valid paths (`proof-final.txt`). Retries, stated: `update-client` failed once and
+  `update-e2e` hung once (the virtiofsd race below); each passed when built alone (`update-rerun.log`).
+- `hostlayer-katana` with the real snapshot (`RIME_KATANA_STATE=/var/lab/rime-nix/artifacts/katana-state`, private
+  TMPDIR, in the container): all six subtests pass, andre logs in through greetd, snapshot digest `fe7aab3c…` the same
+  before and after (`hostlayer-katana.log`). In `nix flake check` it skips by design.
+- `size` mutants, all nine still fail with the new budget (alsa32-dropped, docs-back, manual-back, mbrola-back,
+  niri-doc-unlinked, registry-store-path, registry-unlocked, second-nerd-font, webkit-back).
+- CI plan: `plan: 30 checks, 25 run by CI, 5 skipped`; suite coverage: `148 suites, 140 run by CI, 8 exempt, 0 unrun
+  and undeclared`; `flake checks: 25 run by .github/workflows/nix.yml, 5 skipped with a reason`.
+- cargo total (`share/doc/rimed/cargo-tests.txt` of `/nix/store/crzca63q0qsvk8jha0f6h6rp0njddwia-rimed-0.1.0`):
+
+```
+crate                targets  passed selfskip  failed  ignored  skipped
+rime                       5     704        8       0        1        7
+rime-agent-core           11     810        3       0        0        0
+rime-agentd               16     272       29       0        0       27
+rime-aid                   1      24        0       0        0        0
+rime-backup-core           2     167        0       0        0        0
+rime-paths                 4       5        0       0        0        0
+rime-perm-core             2      22        0       0        0        0
+rime-remote-core           3     116        0       0        2        0
+rime-remoted               5      89       17       0        0        0
+rime-secret-core           2     151        0       0        0        1
+rime-secretd               3     390        0       0        0        0
+rimed                      1      55        0       0        0        0
+rimed-core                15     935        0       0        0        0
+TOTAL                     70    3740       57       0        3       35
+```
+
+### The update-client / update-e2e hang (a nixpkgs race, not Rime code)
+
+Seen four times in seven runs of the two checks under load (flake check 1: update-e2e; flake check 2: both; the first lone update-client retry). The generated `run-client-vm` (nixpkgs `1c89083e`, `qemu-vm.nix`) starts its
+virtiofsd daemons with `&` and then `exec`s QEMU without waiting for their sockets. When QEMU wins, it exits 1:
+`-chardev socket,id=shared,path=…/shared: Failed to connect to '…/shared': No such file or directory`. The test driver's
+error path then calls `self.process.stdout.read()`, which never returns, because the two orphaned virtiofsd inherited
+that pipe and wait for a connection forever. So a one-line failure becomes a hang until the 3600 s global timeout. To see
+the real error, kill the client's two orphaned virtiofsd by PID; the driver then prints `QEMU process exited with code 1
+before connecting to monitor socket` with QEMU's output. The client is the node with no nix-store virtiofsd (it boots a
+disk image), so its two daemons have the least head start. TODO(handover): a wait for each socket before `exec` (an
+overlay of the run script, or upstream), or retry the check once.
+
+### P1 exit gate, line by line (PLAN §6.1)
+
+| gate item | state |
+|---|---|
+| Toplevel builds from the rime-os flake on the katana runner and on the hosted fallback | **not met**: builds in the `rime-nix` container only. The hosted workflow has never run (the branch is not pushed); the `katana-nix` runners (`ci/runner/`) are not installed |
+| `cargo test --workspace --no-fail-fast` passes, total recorded | **met**: 3740 passed, 57 self-skipped, 0 failed, 3 ignored, 35 skipped by name (above) |
+| Security gates G1-G9 pass in VM tests | **met in the container**: `checks.security` (G1-G9 named in `nix/tests/security.nix`) passes on the merged tree; not yet on a hosted run |
+| The real closure is measured; P5 figure and A11 floor set from it | **met, re-measured**: `closure.md` §9, P5 = 3.46 GB (bootc 4.20 GB), A11 = 19 GB as designed / 14 GB physical / 7 GB install-only. The gaming figures are pre-firmware and stale |
+| The §4.12 table is complete with an owner per row | **not met**: `subsystem-owners.md` §6 still lists unowned rows. It was written before the other wave-1 branches merged; kmscon (polish) and guest sessions on NixOS (hostlayer's `rime-user` guest subtest) are done since, the rest is open |
+| Runner isolation steps 1-3 done (D8 gates) | **not met**: step 1 exists as code (`ci/runner/`, its own tests); not installed on katana; steps 2 and 3 not started |
