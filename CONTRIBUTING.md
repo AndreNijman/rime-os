@@ -3,8 +3,9 @@
 Thanks for helping. This file covers how a change gets into Rime OS. For
 the rules a change has to meet, read [AGENTS.md](AGENTS.md). It is written as
 the contract for coding agents, and it binds people just as much: the tiered
-image build, what may live in which tier, Secure Boot, SELinux, and what counts
-as a test.
+image build, what may live in which tier, Secure Boot, SELinux (on the bootc
+images; the NixOS side replaces it with the security gates in
+`nix/tests/security.nix`), and what counts as a test.
 
 ## Where a change belongs
 
