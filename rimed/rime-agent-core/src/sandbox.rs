@@ -176,7 +176,18 @@ const NEVER_WRITABLE: &[&str] = &[
     "/sysroot",
     "/var/lib/rime",
     "/var/lib/apex",  // rime-rename: keep (the pre-rename state directory)
+    "/nix",
 ];
+
+/// Absolute paths that may never be bound writable, and neither may anything
+/// below them.
+///
+/// `/nix` is a whole tree rather than one path. The store itself is mounted
+/// read-only, but `/nix/var/nix` is not: it holds the per-user profiles and GC
+/// roots (owned by the user, so a writable bind would let a session change what
+/// the user's next shell runs) and the daemon's state. Nothing under it is a
+/// project, so the rule is the tree. Absent on bootc, where it refuses nothing.
+const NEVER_WRITABLE_TREES: &[&str] = &["/nix"];
 
 /// The runtime directory masked for every confined session.
 const RUN_DIR: &str = "/run";
@@ -712,6 +723,15 @@ fn check_writable(path: &Path, home: &Path) -> Result<(), SandboxError> {
 
     for forbidden in NEVER_WRITABLE {
         if normalised == *forbidden {
+            return Err(SandboxError::ForbiddenWritable(path.to_path_buf()));
+        }
+    }
+    for tree in NEVER_WRITABLE_TREES {
+        if normalised == *tree
+            || normalised
+                .strip_prefix(tree)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
             return Err(SandboxError::ForbiddenWritable(path.to_path_buf()));
         }
     }
@@ -1594,6 +1614,29 @@ mod tests {
                 "{bad} was accepted as writable: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn nothing_under_nix_may_be_writable() {
+        for bad in [
+            "/nix",
+            "/nix/",
+            "/nix/store",
+            "/nix/var/nix/profiles/per-user/tester",
+            "/nix/var/nix/daemon-socket",
+        ] {
+            let mut s = spec();
+            s.rw = vec![PathBuf::from(bad)];
+            let err = build_argv(&s, "claude", &[]).unwrap_err();
+            assert!(
+                matches!(err, SandboxError::ForbiddenWritable(_)),
+                "{bad} was accepted as writable: {err:?}"
+            );
+        }
+        // A sibling that only shares the prefix is not under /nix.
+        let mut s = spec();
+        s.rw = vec![PathBuf::from("/nixos-config")];
+        assert!(build_argv(&s, "claude", &[]).is_ok());
     }
 
     #[test]
