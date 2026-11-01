@@ -1559,7 +1559,10 @@ RUN set -eux; \
 # file:///etc/pki/rpm-gpg/RPM-GPG-KEY-terra$releasever, and any later depsolve
 # against that enabled repo (bootc-image-builder's ISO build, or an `rime
 # install`) fails to read the key and aborts — which is exactly what broke the
-# first installer-ISO build. Falls back to Fedora-stable mesa + RPMFusion
+# first installer-ISO build. On Fedora 45 terra-release puts that repo file in
+# /usr/share/dnf5/repos.d, not /etc/yum.repos.d, so the package itself is
+# removed on BOTH paths (the sync can fail after terra-release installed) and
+# the guard looks in both directories. Falls back to Fedora-stable mesa + RPMFusion
 # freeworld VA if Terra is unavailable at build time; codecs work either way.
 #
 # Swap ffmpeg-free → full ffmpeg with --allowerasing (they conflict), then the
@@ -1583,13 +1586,16 @@ RUN set -eux; \
         echo "mesa: Terra latest-stable (codec-enabled; repo removed post-bake)" > /usr/lib/rime-mesa-leg; \
     else \
         echo "Terra unavailable — Fedora-stable mesa + RPMFusion freeworld VA"; \
+        if rpm -q terra-release >/dev/null; then dnf5 -y remove terra-release; fi; \
         dnf5 -y install --allowerasing \
             mesa-va-drivers-freeworld mesa-vdpau-drivers-freeworld; \
         echo "mesa: Fedora-stable + freeworld VA (Terra fallback)" > /usr/lib/rime-mesa-leg; \
     fi; \
-    rm -f /etc/yum.repos.d/terra*.repo /etc/yum.repos.d/*terra*.repo; \
+    rm -f /etc/yum.repos.d/*terra*.repo /usr/share/dnf5/repos.d/*terra*.repo; \
     cat /usr/lib/rime-mesa-leg; \
-    test -z "$(ls /etc/yum.repos.d/ | grep -i terra || true)" \
+    ! rpm -q terra-release >/dev/null \
+        || { echo "FATAL: terra-release is still installed — its repo would come back"; exit 1; }; \
+    test -z "$(ls /etc/yum.repos.d/ /usr/share/dnf5/repos.d/ 2>/dev/null | grep -i terra || true)" \
         || { echo "FATAL: a Terra repo file survived — every later depsolve would abort on its missing gpgkey"; exit 1; }; \
     test -e /usr/lib64/libGLX_mesa.so.0; \
     test -e /usr/lib64/libGLX_nvidia.so.0; \

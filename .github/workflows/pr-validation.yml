@@ -2272,9 +2272,17 @@ jobs:
       # nothing built or merged — every case is reached before the engine's root
       # gate or is a pure function. Cases needing `rpm` skip out loud here and
       # run for real in the image smoke test in build-image.yml.
+      #
+      # Its rebuild_extension cases (the rpm cache wired into a real build) run
+      # in `unshare -Urm` with a temp directory over /var/lib, which needs an
+      # unprivileged user namespace; ubuntu-24.04 gates those behind AppArmor,
+      # so the knob is cleared first (the runner is ephemeral). Under
+      # GITHUB_ACTIONS the suite FAILS rather than skips when it is refused.
       - name: Run package-engine assertions
         if: ${{ !cancelled() }}
-        run: ./tests/test-rime-pkg.sh
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          ./tests/test-rime-pkg.sh
 
       # The store compactor, for real: as root, against a throwaway btrfs on a
       # loop device laid out like a Rime machine. It rewrites the objects of
@@ -2785,6 +2793,46 @@ jobs:
           [ "$passed" -ge 11 ] || { echo "::error::only $passed extraction assertions ran; 11 ran on 2026-09-19, so some no longer execute — and six of the eleven are the guards and controls that stop this suite passing for free"; exit 1; }
           if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the multilib extract suite printed a SKIP; its abstentions are failures by design, so a SKIP means a new one was added"
+              exit 1
+          fi
+
+      # tests/test-rime-pkg-rpm6.sh — the trust chain against a REAL rpm 6
+      # (Fedora 45) with real OpenPGP signatures made by throwaway keys. Every
+      # other suite fakes rpmkeys or signs nothing, so nothing caught that
+      # `rpm --dbpath <dir> --initdb` is refused on Fedora 45 under enforcing
+      # SELinux ("can't create transaction lock"), which refresh_copr_keyring
+      # ran on every `rime repo enable-copr`, or that the keyring was deleted
+      # before the new keys were imported. It asserts: rpm_signature_ok
+      # accepts system- and COPR-keyring signatures and refuses unsigned and
+      # unknown-key packages quoting rpmkeys; the COPR keyring builds without
+      # initdb, silently, swaps it in with one `mv --exchange`, and an import
+      # failure (or no rpmdb.sqlite) leaves the old one verifying; disabling a
+      # COPR while another stored key is unreadable fails closed (no keyring)
+      # and names that key, as enabling one does;
+      # extract_rpms (with --nosignature, after guard_rpms) unpacks into an
+      # empty root under %_pkgverify_level all; the ChatGPT `_keyring fs` check
+      # accepts and refuses; and the rpm cache against the real dnf5 (a second
+      # build downloads nothing, a corrupted cache file is fetched again).
+      # Same containment as above: podman run --rm, repository read-only.
+      - name: P1 packages — signatures and keyrings on a real rpm 6
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; the rpm6 suite would SKIP and exit 0, and a could-not-run is not a pass"; exit 1; }
+          rc=0; out="$(./tests/test-rime-pkg-rpm6.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the rpm6 suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^rime-pkg-rpm6: [0-9]+ passed, [0-9]+ failed$' || true)"
+          [ -n "$summary" ] || { echo "::error::the rpm6 suite printed no summary line, which is what it does when podman is absent or no repository was reachable"; exit 1; }
+          [ "$(printf '%s\n' "$summary" | wc -l)" = 1 ] || { echo "::error::more than one line looked like the summary"; exit 1; }
+          counts="$(printf '%s' "$summary" | sed 's/^rime-pkg-rpm6: //')"
+          passed="$(printf '%s' "$counts" | awk '{print $1}')"
+          failed="$(printf '%s' "$counts" | awk '{print $3}')"
+          echo "measured: passed=$passed failed=$failed"
+          [ "$failed" = 0 ] || { echo "::error::$failed rpm6 assertions failed"; exit 1; }
+          [ "$passed" -ge 47 ] || { echo "::error::only $passed rpm6 assertions ran; 47 ran on 2026-11-01, so some no longer execute"; exit 1; }
+          if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
+              echo "::error::the rpm6 suite printed a SKIP: podman, the repository or rpm-build was unavailable, and the assertions it guards did not run"
               exit 1
           fi
 
@@ -4569,6 +4617,7 @@ jobs:
             tests/test-rime-update-notice.sh \
             tests/test-rime-recover.sh \
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \
+            tests/test-rime-pkg-rpm6.sh \
             tests/test-rime-pkg.sh tests/test-rime-appimage.sh \
             tests/test-rime-firstrun.sh \
             tests/test-rime-shell-autostart.sh \

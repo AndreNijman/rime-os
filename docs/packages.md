@@ -527,6 +527,25 @@ offline boot leaves it for the next boot, or for the next `rime update`.
 fixes instead of staying pinned at whatever was current on install day. If
 nothing changed it stops early and does not re-merge `/usr`.
 
+A rebuild downloads only what changed. The repository RPMs of the last build
+whose set passed the signature check are kept in `/var/lib/rime/pkg/rpm-cache`
+under their exact file names, and a rebuild reuses each one whose checksum
+still matches the repository's metadata (`dnf5` checks it and fetches a fresh
+copy otherwise). Every reused file is signature-checked again, exactly like a
+download. The cache is updated as soon as a build's set passes that check,
+before the extension is built (so a `rime update` that finds nothing new keeps
+it), which means a build that fails later still leaves its verified set there.
+It holds that one set and nothing else, so it costs about as much disk as the
+packages themselves; removing every user package empties it.
+
+The cache is kept only while the disk has room for an OS update with it on:
+6 GiB free plus the 3% `ostree` keeps for itself (`rime update` downloads the
+new image before it rebuilds packages, and the image download refuses to start
+without that space). On a disk short of that, including the 12 GB minimum,
+there is no cache and every rebuild downloads the whole set, as before. A cache
+kept earlier on a disk that has since filled up is dropped at the next build.
+Deleting `/var/lib/rime/pkg/rpm-cache` by hand is always safe.
+
 ## Coming from a layered system
 
 If a machine already has rpm-ostree layered packages, `rime update` says so and
@@ -622,6 +641,12 @@ Enabling stores that COPR's signing key in Rime's writable keyring under
 downloaded RPM against a trusted key and still refuses kernel and core-system
 replacements in an extension. Disabling the COPR also removes its key from the
 Rime keyring.
+
+If a stored COPR key cannot be read, the keyring cannot be rebuilt, and both
+commands say which key and which COPR it belongs to. Enabling another COPR then
+fails, and disabling one removes the whole COPR keyring, so that the disabled
+COPR's key is not left trusted; until the named COPR is disabled too, packages
+from every COPR are refused.
 
 ## Flatpak
 
