@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Effects
+import QtQuick.Shapes
 
 // ─────────────────────────────────────────────────────────────
 // GreetSurface — the per-output visual.
@@ -162,29 +163,39 @@ Item {
         spacing: 14
         transform: Translate { x: root.shakeOffset }
 
-        // Spark logo, centred above the username. Tinted to the user's accent
-        // when one is published; drawn as-is (the edition spark) otherwise.
-        // Wrapped in an Item because the Column positions its children and
-        // MultiEffect must overlay the Image rather than sit below it.
+        // The layered-ridge lockup, centred above the username: the neutral
+        // planes and wordmark as an image, plane 3 as a polygon in the accent
+        // (the user's published accent, or the edition's). The polygon is the
+        // template's own plane 3 (files/branding/ridge/templates, viewBox
+        // 553.16 x 175, the symbol at scale 1), scaled with the image.
         Item {
+            id: logoBox
             anchors.horizontalCenter: parent.horizontalCenter
-            width:  logo.implicitWidth
-            height: logo.implicitHeight
+            readonly property real unit: height / 175
+            height: 56
+            width:  Math.round(553.16 * unit)
             Image {
                 id: logo
+                anchors.fill:      parent
                 source:            root.theme.logoSource
-                sourceSize.height: 84
                 fillMode:          Image.PreserveAspectFit
                 smooth:            true
+                mipmap:            true
                 asynchronous:      true
-                visible:           !root.theme.tintLogo
             }
-            MultiEffect {
-                anchors.fill:      logo
-                source:            logo
-                visible:           root.theme.tintLogo && logo.status === Image.Ready
-                colorization:      1.0
-                colorizationColor: root.theme.active
+            Shape {
+                anchors.fill: parent
+                visible:      logo.status === Image.Ready
+                antialiasing: true
+                ShapePath {
+                    strokeWidth: -1
+                    fillColor:   root.theme.active
+                    startX: 47.5 * logoBox.unit; startY: 136 * logoBox.unit
+                    PathLine { x: 149   * logoBox.unit; y: 75 * logoBox.unit }
+                    PathLine { x: 231   * logoBox.unit; y: 45 * logoBox.unit }
+                    PathLine { x: 217.5 * logoBox.unit; y: 76 * logoBox.unit }
+                    PathLine { x: 47.5  * logoBox.unit; y: 136 * logoBox.unit }
+                }
             }
         }
 

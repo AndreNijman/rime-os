@@ -213,8 +213,8 @@ def terminal_argv():
     """
     candidates = [
         (os.environ.get("TERMINAL") or "", "-e"),
-        ("alacritty", "-e"),
         ("ghostty", "-e"),
+        ("alacritty", "-e"),
         ("foot", "-e"),
         ("kitty", "-e"),
         ("wezterm", "start"),

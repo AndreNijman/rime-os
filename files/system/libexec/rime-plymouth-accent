@@ -28,7 +28,10 @@ set -u
 GREET="${RIME_GREET_VAR:-/var/lib/rime-greet}"
 CONF="${RIME_PLYMOUTH_CONF:-/etc/plymouth/plymouthd.conf}"
 THEMES="${RIME_PLYMOUTH_THEMES:-/usr/share/plymouth/themes}"
+# The default splash: the layered ridge (rime-os, plane 3 in Rime Blue) where it is installed (Rime on NixOS),
+# else the spark in chartreuse (the bootc image). The accent themes are rime-os-accent-NN in both.
 DEFAULT_THEME=rime-os-chartreuse
+[ -f "$THEMES/rime-os/rime-os.plymouth" ] && DEFAULT_THEME=rime-os
 
 bucket=""
 user="$(head -c 64 "$GREET/last-user" 2>/dev/null)"

@@ -1,0 +1,10 @@
+[general]
+import = ["../themes/dark-extra.toml"]
+
+[[keyboard.bindings]]
+key = "C"
+mods = "Control|Shift"
+action = "Copy"
+
+[font]
+size = 15

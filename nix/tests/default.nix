@@ -19,6 +19,11 @@
   release-github = import ./release-github.nix { inherit pkgs self; };
   update-client = import ./update-client.nix { inherit pkgs self; };
   update-e2e = import ./update-e2e.nix { inherit pkgs self; };
+  branding = import ./branding.nix { inherit pkgs self; };
+  greeting = import ./greeting.nix { inherit pkgs self; };
+  greeting-vm = import ./greeting-vm.nix { inherit pkgs self; };
+  terminal-migrate = import ./terminal-migrate.nix { inherit pkgs self; };
+  terminal-look = import ./terminal-look.nix { inherit pkgs self; };
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
@@ -30,3 +35,5 @@
 // import ./boot.nix { inherit pkgs self; }
 # catalogue, catalogue-data
 // import ./catalogue.nix { inherit pkgs self; }
+# branding-surfaces-static, branding-surfaces (the ridge on os-release, the splash and the greeter)
+// import ./branding-surfaces.nix { inherit pkgs self; }

@@ -1,0 +1,16 @@
+keybind = shift+enter=text:\x1b\r
+----
+Rime: Alacritty settings carried over to Ghostty
+
+
+Carried over:
+  keyboard.bindings[0] key='Return' mods='Shift' chars='\x1b\r'
+    -> keybind = shift+enter=text:\x1b\r
+
+Same as Rime's default, so not copied:
+  (nothing)
+
+Not carried over:
+  (nothing)
+
+Alacritty is still installed and its files were not changed.

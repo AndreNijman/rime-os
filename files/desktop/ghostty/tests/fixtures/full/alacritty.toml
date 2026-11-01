@@ -1,0 +1,82 @@
+# Synthetic: every mapped option of the 0.14+ schema, at a non-default value, plus a few
+# values equal to Alacritty's defaults (which Rime's theme already gives: not copied).
+[general]
+working_directory = "/srv/work"
+live_config_reload = false
+
+[env]
+TERM = "xterm-256color"
+EDITOR = "nvim"
+
+[window]
+dimensions = { columns = 120, lines = 34 }
+padding = { x = 10, y = 6 }
+dynamic_padding = true
+decorations = "None"
+opacity = 0.92
+blur = true
+startup_mode = "Maximized"
+title = "Terminal"
+dynamic_title = false
+class = { instance = "work", general = "work" }
+decorations_theme_variant = "Dark"
+
+[scrolling]
+history = 50000
+multiplier = 5
+
+[font]
+size = 13.0
+offset = { x = 1, y = 2 }
+glyph_offset = { x = 0, y = 1 }
+normal = { family = "JetBrainsMono Nerd Font", style = "Regular" }
+bold = { family = "JetBrainsMono Nerd Font", style = "Bold" }
+italic = { style = "Italic" }
+
+[colors]
+draw_bold_text_with_bright_colors = true
+primary = { background = "0x1e1e2e", foreground = "#CDD6F4", dim_foreground = "#7f849c" }
+cursor = { text = "CellBackground", cursor = "#f5e0dc" }
+selection = { text = "CellForeground", background = "#45475a" }
+normal = { black = "#181818", red = "#f38ba8", green = "#a6e3a1", yellow = "#f9e2af", blue = "#89b4fa", magenta = "#f5c2e7", cyan = "#94e2d5", white = "#bac2de" }
+bright = { black = "#585b70", red = "#f38ba8", green = "#a6e3a1", yellow = "#f9e2af", blue = "#89b4fa", magenta = "#f5c2e7", cyan = "#94e2d5", white = "#f8f8f8" }
+dim = { black = "#45475a" }
+indexed_colors = [{ index = 16, color = "#fab387" }]
+
+[bell]
+duration = 100
+command = { program = "paplay", args = ["/usr/share/sounds/bell.oga"] }
+
+[selection]
+save_to_clipboard = true
+semantic_escape_chars = ",│`|:\"' ()[]{}<>\t"
+
+[cursor]
+style = { shape = "Beam", blinking = "On" }
+vi_mode_style = { shape = "Block", blinking = "Off" }
+unfocused_hollow = false
+
+[terminal]
+shell = { program = "/run/current-system/sw/bin/fish", args = ["--login", "-C", "echo 'hi there'"] }
+osc52 = "CopyPaste"
+
+[mouse]
+hide_when_typing = true
+bindings = [{ mouse = "Middle", action = "PasteSelection" }]
+
+[keyboard]
+bindings = [
+  { key = "Return", mods = "Shift", chars = "\u001B\r" },
+  { key = "V", mods = "Control|Shift", action = "Paste" },
+  { key = "Equals", mods = "Control", action = "IncreaseFontSize" },
+  { key = "Plus", mods = "Control|Shift", action = "IncreaseFontSize" },
+  { key = "Key0", mods = "Control", action = "ResetFontSize" },
+  { key = "PageUp", mods = "Shift", mode = "~Alt", action = "ScrollPageUp" },
+  { key = "ArrowUp", mods = "Shift", mode = "~Vi|~Search", action = "ScrollLineUp" },
+  { key = "N", mods = "Super", action = "CreateNewWindow" },
+  { key = "F11", action = "ToggleFullscreen" },
+  { key = "Space", mods = "Shift|Control", action = "ToggleViMode" },
+  { key = "K", mods = "Control|Shift", command = { program = "notify-send", args = ["hi"] } },
+  { key = "Tab", mods = "Control", chars = "\t\"\\" },
+  { key = "T", mods = "Control|Shift", action = "None" },
+]

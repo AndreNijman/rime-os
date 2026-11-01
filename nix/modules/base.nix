@@ -260,7 +260,7 @@ in
       };
     };
 
-    # files/system/xdg/xdg-terminals.list is the desktop area's: xdg.terminal-exec (desktop.nix) writes the same
-    # /etc/xdg/xdg-terminals.list (Alacritty.desktop).
+    # files/system/xdg/xdg-terminals.list is bootc's (Alacritty only: Fedora ships no Ghostty). On NixOS
+    # xdg.terminal-exec (terminal.nix) writes /etc/xdg/xdg-terminals.list: Ghostty, then Alacritty.
   };
 }

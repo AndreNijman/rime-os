@@ -1,0 +1,12 @@
+# Synthetic: Alacritty 0.13's schema (shell, import and working_directory at the top level).
+import = ["colors.toml"]
+working_directory = "None"
+shell = "/run/current-system/sw/bin/zsh"
+live_config_reload = true
+
+[font]
+size = 11.25
+normal = { family = "monospace" }
+
+[cursor]
+style = "Underline"

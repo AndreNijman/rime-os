@@ -1,0 +1,40 @@
+{
+  "_comment": "Plane-3 colours. Slot n = hue n*15 deg at Rime Blue's HLS lightness and saturation; the same 24 buckets rime-plymouth-accent picks from the owner's matugen accent.",
+  "base": "#91C2DC",
+  "base_hue_deg": 200.8,
+  "base_slot": 13,
+  "named": {
+    "rime-blue": "#91C2DC",
+    "teal": "#0A7661",
+    "emerald": "#38A12B",
+    "amber": "#D69E1A",
+    "violet": "#A664D9",
+    "rose": "#E4708B"
+  },
+  "slots": {
+    "00": "#DC9191",
+    "01": "#DCA491",
+    "02": "#DCB691",
+    "03": "#DCC991",
+    "04": "#DCDC91",
+    "05": "#C9DC91",
+    "06": "#B7DC91",
+    "07": "#A4DC91",
+    "08": "#91DC91",
+    "09": "#91DCA4",
+    "10": "#91DCB7",
+    "11": "#91DCC9",
+    "12": "#91DCDC",
+    "13": "#91C9DC",
+    "14": "#91B6DC",
+    "15": "#91A4DC",
+    "16": "#9191DC",
+    "17": "#A491DC",
+    "18": "#B691DC",
+    "19": "#C991DC",
+    "20": "#DC91DC",
+    "21": "#DC91C9",
+    "22": "#DC91B7",
+    "23": "#DC91A4"
+  }
+}

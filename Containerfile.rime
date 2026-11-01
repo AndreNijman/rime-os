@@ -64,7 +64,7 @@ FROM ${BASE}
 # this image is what `:gaming-nvidia` resolves to as well.
 #
 # /etc/os-release is a symlink into /usr/lib/os-release, so append there. (The
-# base deliberately leaves this unset.) rime-greet maps `rime` to the chartreuse
+# base deliberately leaves this unset.) rime-greet maps `rime` to the Rime Blue
 # accent; /etc/rime-greet/edition still overrides it per machine.
 RUN set -eux; \
     printf 'VARIANT="Rime"\nVARIANT_ID=rime\n' >> /usr/lib/os-release; \
