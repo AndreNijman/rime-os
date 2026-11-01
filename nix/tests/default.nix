@@ -18,3 +18,5 @@
 // import ./ci.nix { inherit pkgs self; }
 # kernel-sign, kernel-sign-workflow
 // import ./kernel-sign.nix { inherit pkgs self; }
+# boot-hook-unit, boot-hook-vm
+// import ./boot.nix { inherit pkgs self; }
