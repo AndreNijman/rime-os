@@ -322,4 +322,3 @@ as §6: partitions 537,919,488 + installed 5,450,555,392 + one rebuild + 1,000,0
 
 The ESP check in §6 is unchanged (3 × 52.4 MB). Not re-measured: `rime-vm`, the `*-no32` variants and `plain-gaming`,
 so the gaming floor and the `rime install steam` delta in §1 are pre-firmware figures.
-
