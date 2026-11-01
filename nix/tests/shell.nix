@@ -42,6 +42,9 @@ pkgs.testers.runNixOSTest {
     };
     hardware.graphics.enable = true;
 
+    # Test only: drives the lock screen's PAM service the way PamContext does (as the user, through unix_chkpwd).
+    environment.systemPackages = [ pkgs.pamtester ];
+
     users.users.${user} = {
       isNormalUser = true;
       uid = 1000;
@@ -114,6 +117,19 @@ pkgs.testers.runNixOSTest {
             machine.sleep(5)
             print(machine.succeed(as_user("hyprctl -i 0 layers")))
             machine.screenshot("rime-shell")
+
+        with subtest("what the module links for the shell exists in the system profile"):
+            # The colour-filter picker's system shaders (QuickSettings.qml shaderPaths, rewritten to the profile).
+            machine.succeed("ls /run/current-system/sw/share/hyprshade/shaders/*.glsl")
+            # The Rime.I18n module under the path the rewritten tree and rime-shell-autostart name.
+            machine.succeed("test -f /run/current-system/sw/lib/qt-6/qml/Rime/I18n/qmldir")
+            # Config -> Agents runs pkcheck against this action; polkitd must know it.
+            machine.succeed("pkaction --action-id org.rimeos.shell.agent.set-always-unrestricted --verbose")
+
+        with subtest("the lock screen's PAM service accepts the user's password"):
+            # Lockscreen.qml: PamContext { config: "system-auth" }, run inside the user's quickshell. NixOS has no
+            # system-auth of its own; an unknown service falls through to "other", which denies everything.
+            machine.succeed("sudo -u ${user} sh -c 'echo rime-test | pamtester system-auth ${user} authenticate'")
 
         with subtest("no QML load errors"):
             import re

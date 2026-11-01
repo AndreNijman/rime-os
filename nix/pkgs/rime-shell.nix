@@ -23,6 +23,7 @@
   lib,
   stdenv,
   makeWrapper,
+  libxml2,
   pkg-config,
   quickshell,
   qt6,
@@ -242,13 +243,34 @@ stdenv.mkDerivation (finalAttrs: {
   # qmldir read and register nothing. A real QML engine imports Rime.I18n from $out, the plugin must print its
   # registerTypes line, and every catalogue must be installed by it under its own locale.
   doInstallCheck = true;
-  nativeInstallCheckInputs = [ qt6.qtdeclarative ];
+  nativeInstallCheckInputs = [
+    qt6.qtdeclarative
+    libxml2 # xmllint
+  ];
   installCheckPhase = ''
     runHook preInstallCheck
 
     test -s $out/share/rime-shell/shell.qml
     test -f $out/share/rime-shell/src/services/plugins/manifest.js
     test -x ${quickshell}/bin/qs # hypridle's lock_cmd calls `qs`
+
+    # hypridle runs its commands through /bin/sh by path: each shell script it names must be executable here.
+    scripts=$(grep -oE '${shellDir}/[^ ]+\.sh' $out/share/rime-shell/src/config/hypridle.conf | sort -u)
+    test -n "$scripts"
+    for s in $scripts; do
+      f=$out/share/rime-shell/''${s#${shellDir}/}
+      test -x "$f" || { echo "hypridle.conf runs $s, which is not executable in the package"; exit 1; }
+    done
+
+    # The shell's polkit action, held to the same rules Containerfile.base holds it to: well-formed, declares the
+    # action AgentPolicyService.qml asks pkcheck about, and never grants an inactive or remote session.
+    policy=$out/share/polkit-1/actions/org.rimeos.shell.agent.policy
+    xmllint --noout --nonet $policy
+    grep 'id="org.rimeos.shell.agent.set-always-unrestricted"' $policy \
+      || { echo "the shell's policy no longer declares the action AgentPolicyService.qml names"; exit 1; }
+    if grep -E '<allow_(any|inactive)>(yes|auth_self_keep|auth_admin_keep)' $policy; then
+      echo "the shell's policy grants an inactive or remote session"; exit 1
+    fi
 
     probe=$(mktemp -d)
     export XDG_RUNTIME_DIR=$probe/xdg HOME=$probe/home

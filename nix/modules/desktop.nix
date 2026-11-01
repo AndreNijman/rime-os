@@ -83,9 +83,12 @@ in
 
       # The path contract (nix/pkgs/rime-shell.nix): /run/current-system/sw/share/rime-shell must exist and
       # /run/current-system/sw/libexec must hold rime-os's helpers.
+      # /share/hyprshade: the colour-filter picker lists /usr/share/hyprshade/shaders (rewritten to the profile;
+      # QuickSettings.qml shaderPaths). Nothing else links it, so without this the system shaders vanish silently.
       environment.pathsToLink = [
         "/share/rime-shell"
         "/libexec"
+        "/share/hyprshade"
       ];
 
       # `rime shell` (rimed/rime/src/main.rs) and the launcher read it; sessions that bypass the wrapper still agree.
