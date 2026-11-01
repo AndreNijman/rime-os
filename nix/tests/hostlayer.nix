@@ -36,6 +36,10 @@ pkgs.testers.runNixOSTest {
           '';
         })
       ];
+      # The guest logs in on tty2 through getty, whose screen the test driver reads from /dev/vcs2. Rime's
+      # kmscon console (desktop.nix, checks.polish proves it) draws on DRM and leaves vcs2 empty, so this node
+      # keeps the stock getty on the other VTs.
+      services.kmscon.enable = lib.mkForce false;
       # A test-only grant, so rimed's Switch can be shown to work for someone polkit allows (and only them).
       security.polkit.extraConfig = ''
         polkit.addRule(function (action, subject) {
