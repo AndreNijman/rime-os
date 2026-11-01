@@ -64,7 +64,6 @@
   tpm2-tools,
   cryptsetup,
   networkmanager,
-  nftables,
   iproute2,
   iputils,
   kmod,
@@ -92,6 +91,20 @@ let
     "rime-vconsole-guard"
   ];
 
+  # Shipped by another Rime module, which owns the one copy on the system profile (buildEnv picks a winner
+  # silently on a collision, so a second copy here could shadow the tested one):
+  #   rime-firewall                       security.nix (rime.security.firewall.package; rime-firewall.service)
+  #   rime-session-select, rime-gaming-*, rime-gamescope-steam, rime-game-env, bin/steamos-*
+  #                                       gaming.nix (the switch tools carry the --finish-switch re-exec fix)
+  ownedElsewhere = [
+    "rime-firewall"
+    "rime-session-select"
+    "rime-gaming-session"
+    "rime-gaming-discord"
+    "rime-gamescope-steam"
+    "rime-game-env"
+  ];
+
   # Every script gets these; they are in every NixOS system closure anyway.
   common = [ coreutils gnugrep gnused gawk findutils ];
 
@@ -109,11 +122,6 @@ let
     rime-display-apply = [ procps util-linux ];
     rime-disposable = [ ];
     rime-env = [ jq ];
-    rime-firewall = [ nftables networkmanager ];
-    rime-game-env = [ ];
-    rime-gamescope-steam = [ python3 xprop ];
-    rime-gaming-discord = [ ];
-    rime-gaming-session = [ libcap systemd ];
     rime-gpu-notice = [ libnotify ];
     rime-greet-publish-all = [ getent ];
     rime-greet-session = [ dbus glib ];
@@ -135,7 +143,6 @@ let
     rime-screen-reader = [ procps util-linux systemd ];
     rime-secrets-start = [ systemd glib util-linux ];
     rime-session-logout = [ procps systemd ];
-    rime-session-select = [ getent systemd ];
     rime-session-watchdog = [ ];
     rime-shell-autostart = [ procps ];
     rime-shell-firstrun = [ python3 util-linux systemd diffutils ];
@@ -149,8 +156,6 @@ let
     rime-wifi-resume = [ iproute2 util-linux kmod networkmanager iputils systemd ];
     # bin/
     apex = [ ];
-    steamos-session-select = [ ];
-    steamos-update = [ ];
   };
 
   # Scripts that run as root (sudo targets, system units, pam_exec, the installer): their PATH never includes the
@@ -158,7 +163,6 @@ let
   closed = [
     "rime-boot-health"
     "rime-boot-windows"
-    "rime-firewall"
     "rime-greet-publish-all"
     "rime-greet-wallpaper"
     "rime-greetd"
@@ -166,7 +170,6 @@ let
     "rime-keyring-login"
     "rime-luks-enroll"
     "rime-plymouth-accent"
-    "rime-session-select"
     "rime-switch-greeter"
     "rime-wifi-resume"
   ];
@@ -237,11 +240,7 @@ stdenvNoCC.mkDerivation {
       (root + "/files/system/compat")
       (root + "/files/system/system-sleep")
       (root + "/files/system/profile.d")
-      (root + "/files/system/nftables")
-      (root + "/files/system/firewall")
-      (root + "/files/system/rime-secrets-provider")
       (root + "/files/system/shared-machine")
-      (root + "/files/system/xdg")
       (root + "/files/system/flatpak")
       (root + "/files/desktop")
     ];
@@ -255,9 +254,7 @@ stdenvNoCC.mkDerivation {
   doInstallCheck = true;
 
   passthru = {
-    inherit dropped runtime;
-    # services.displayManager.sessionPackages wants this (desktop worker).
-    providedSessions = [ "niri" "rime-gaming" "rime-labwc" "rime-safe-graphics" ];
+    inherit dropped ownedElsewhere runtime;
   };
 
   installPhase = ''
@@ -268,49 +265,39 @@ stdenvNoCC.mkDerivation {
     mkdir -p $out/libexec/rime/tools $out/bin
     for f in $S/libexec/*; do
       n=''${f##*/}
-      case " ${lib.concatStringsSep " " dropped} " in *" $n "*) continue ;; esac
+      case " ${lib.concatStringsSep " " (dropped ++ ownedElsewhere)} " in *" $n "*) continue ;; esac
       install -m0755 "$f" "$out/libexec/$n"
     done
     install -m0644 $S/libexec/rime-plugin-verdict.js $out/libexec/rime-plugin-verdict.js
     install -m0755 $S/system-sleep/rime-wifi-resume $out/libexec/rime-wifi-resume
     install -m0755 $S/compat/apex $out/bin/apex
-    install -m0755 $S/bin/steamos-session-select $S/bin/steamos-update $out/bin/
     # the agent-session shims: the broker reads which tool it is from its own name
     ln -s ../../rime-tool-broker $out/libexec/rime/tools/wrangler
     ln -s ../../rime-tool-broker $out/libexec/rime/tools/terraform
 
     # ── data the scripts and sessions read (bootc: /usr/share/rime*, /etc) ──
-    mkdir -p $out/share/rime/nftables $out/share/rime/shell $out/share/rime/zsh $out/share/rime/starship \
-      $out/share/rime/shared-machine $out/share/wayland-sessions $out/share/fish/vendor_conf.d \
-      $out/share/fish/vendor_completions.d $out/share/nushell/vendor/autoload $out/etc/profile.d $out/share/rime/xdg \
+    mkdir -p $out/share/rime/shell $out/share/rime/zsh $out/share/rime/starship \
+      $out/share/rime/shared-machine $out/share/fish/vendor_conf.d \
+      $out/share/fish/vendor_completions.d $out/share/nushell/vendor/autoload $out/etc/profile.d \
       $out/etc/mpv $out/etc/flatpak
-    cp $S/nftables/rime.nft $out/share/rime/nftables/
-    cp -r $S/firewall/services $out/share/rime/firewall-services
-    mkdir -p $out/share/rime/firewall && mv $out/share/rime/firewall-services $out/share/rime/firewall/services
-    cp $S/rime-secrets-provider $out/share/rime/secrets-provider
     cp $S/shared-machine/* $out/share/rime/shared-machine/
     cp $S/profile.d/*.sh $out/etc/profile.d/
     # NOT $out/etc/xdg or $out/share/polkit-1: system-path links /etc/xdg and polkit links /share/polkit-1 for
     # every system package (polkit's datadir is /run/current-system/sw/share), so files there would be live on
-    # every machine, desktop or not. The xdg files are data here; base.nix installs xdg-terminals.list when the
-    # desktop is on, and mimeapps.list is the desktop area's (xdg.mime). The sing-box polkit rule is the security
-    # area's (security.polkit.extraConfig).
-    cp $S/xdg/xdg-terminals.list $out/share/rime/xdg/
+    # every machine, desktop or not. xdg-terminals.list and mimeapps.list are the desktop area's
+    # (xdg.terminal-exec, xdg.mime); the sing-box polkit rule is the security area's (security.polkit.extraConfig).
+    # Also the desktop area's, NOT copied here (one copy on the profile): share/rime/{hypr,labwc,safe-graphics},
+    # share/rime/secrets-provider, share/rime-greet, share/wayland-sessions (desktop.nix rimeDesktopData,
+    # rimeGreet, the display manager's sessions). The firewall's nftables and services are security.nix's.
     cp $S/flatpak/flathub.flatpakrepo $out/etc/flatpak/
-    cp -r $D/hypr $out/share/rime/hypr
-    cp -r $D/labwc $out/share/rime/labwc
-    cp -r $D/safe-graphics $out/share/rime/safe-graphics
-    cp -r $D/rime-greet $out/share/rime-greet
     cp $D/zsh/zshrc $out/share/rime/zsh/zshrc
     cp $D/starship/starship.toml $out/share/rime/starship/
     cp $D/shell/rime-greeting.sh $out/share/rime/shell/greeting.sh
     cp $D/shell/agent.sh $out/share/rime/shell/agent.sh
     cp $D/bash/rime-starship.sh $D/zsh/rime-zsh-highlight.sh $out/etc/profile.d/
-    cp $D/wayland-sessions/*.desktop $out/share/wayland-sessions/
     cp $D/fish/rime-agent.fish $out/share/fish/vendor_conf.d/
     cp $D/fish/completions/*.fish $out/share/fish/vendor_completions.d/
     cp $D/nushell/rime.nu $out/share/nushell/vendor/autoload/
-    cp $D/xdg/mimeapps.list $out/share/rime/xdg/
     cp $D/mpv/mpv.conf $out/etc/mpv/
 
     # ── 1. interpreters ───────────────────────────────────────────────────
@@ -329,7 +316,7 @@ stdenvNoCC.mkDerivation {
 
     # ── 3. each script's PATH ────────────────────────────────────────────
     ${lib.concatMapStrings (name: let
-        file = if lib.elem name [ "apex" "steamos-session-select" "steamos-update" ] then "$out/bin/${name}" else "$out/libexec/${name}";
+        file = if name == "apex" then "$out/bin/${name}" else "$out/libexec/${name}";
       in ''
         ${python3}/bin/python3 ${./rime-libexec-audit.py} inject "${file}" "${pathFor name}" ${if lib.elem name closed then "closed" else "open"}
       '') (lib.attrNames deps)}

@@ -163,7 +163,7 @@ pkgs.testers.runNixOSTest {
     client.wait_for_unit("multi-user.target")
 
     with subtest("baseline: what the protected machine runs"):
-        print(rime.succeed("cat /proc/cmdline; cat /sys/kernel/security/lsm; echo; ls -l /nix/var/nix/daemon-socket/ /usr/bin/bwrap"))
+        print(rime.succeed("cat /proc/cmdline; cat /sys/kernel/security/lsm; echo; ls -l /nix/var/nix/daemon-socket/"))
         print(rime.succeed("for k in dev.tty.legacy_tiocsti kernel.kptr_restrict kernel.dmesg_restrict kernel.yama.ptrace_scope kernel.unprivileged_bpf_disabled fs.protected_hardlinks fs.protected_symlinks fs.protected_regular fs.protected_fifos fs.suid_dumpable kernel.sysrq kernel.perf_event_paranoid kernel.randomize_va_space net.ipv4.conf.all.rp_filter net.ipv4.conf.default.rp_filter net.ipv4.conf.all.accept_redirects net.ipv4.conf.all.secure_redirects net.ipv4.conf.all.send_redirects net.ipv4.conf.all.accept_source_route net.ipv6.conf.all.accept_redirects net.ipv4.tcp_syncookies net.ipv4.icmp_echo_ignore_broadcasts user.max_user_namespaces vm.unprivileged_userfaultfd kernel.io_uring_disabled; do echo \"$k = $(sysctl -n $k 2>&1)\"; done"))
 
     # ── G1 ──────────────────────────────────────────────────────────────────────────────────

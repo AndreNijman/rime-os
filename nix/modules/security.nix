@@ -210,7 +210,10 @@ in
         }
       ];
 
-      environment.systemPackages = [ pkgs.nftables ];
+      # `firewall` is the one rime-firewall on the system profile: /run/current-system/sw/libexec/rime-firewall is
+      # what `rime firewall` runs (rimed RIME_FIREWALL) and share/rime/nftables/rime.nft what rime-devices reports.
+      # rime-libexec deliberately does not ship a second copy (buildEnv would pick one silently).
+      environment.systemPackages = [ pkgs.nftables firewall ];
 
       # The unit is files/system/units/rime-firewall.service with store paths.
       systemd.services.rime-firewall = {
@@ -286,14 +289,15 @@ in
 
     # ── G2: the sandbox's bwrap is where the sandbox looks, and nowhere else ──────────────────
     # rime-agent-core resolves bwrap at a fixed path, never through PATH (sandbox.rs bwrap_path), and
-    # refuses every confined session when it is missing. On NixOS nothing is at that path, so every
-    # confined session would be refused (fail closed, but useless). Until rimed's build-time path
-    # module compiles the store path in (PLAN.md PR 8), the fixed path is a root-owned link to the
-    # store's bwrap. bwrap stays unprivileged (no setuid wrapper): the sandbox uses user namespaces.
-    # TODO(handover): drop this link once rimed's bwrap_path() is a store path; the G2 VM test then
-    # needs its mutant moved to the package (a rimed built without bubblewrap must refuse).
-    (lib.mkIf (!weak "g2-bwrap") {
-      systemd.tmpfiles.rules = [ "L+ /usr/bin/bwrap - - - - ${pkgs.bubblewrap}/bin/bwrap" ];
+    # refuses every confined session when it is missing. rimed's build-time path module compiles that
+    # path in as bubblewrap's store path (nix/pkgs/rimed.nix BWRAP), so nothing is linked under /usr.
+    # bwrap stays unprivileged (no setuid wrapper): the sandbox uses user namespaces.
+    # The G2 mutant is a rimed whose compiled path names nothing (tests skipped: only the path changes).
+    (lib.mkIf (weak "g2-bwrap") {
+      rime.services.rimed.package = pkgs.rime.rimed.overrideAttrs (old: {
+        env = old.env // { RIME_PATH_BWRAP = "/nonexistent/bwrap"; };
+        doCheck = false;
+      });
     })
 
     # ── G5 and kernel parameters ───────────────────────────────────────────────────────────────

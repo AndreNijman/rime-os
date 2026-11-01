@@ -204,6 +204,9 @@ let
     lib.optionalString (vars != { }) ("${pkgs.coreutils}/bin/env "
       + lib.concatStrings (lib.mapAttrsToList (k: v: "${k}=${lib.escapeShellArg v} ") vars));
 
+  # greetd's config exactly as the greetd module generates it (same derivation, same store path).
+  greetdToml = (pkgs.formats.toml { }).generate "greetd.toml" config.services.greetd.settings;
+
   # Firefox defaults: files/system/firefox/policies.json (dark UI, about:home) + rime-default-prefs.js.
   firefoxPolicies = (lib.importJSON (files + "/system/firefox/policies.json")).policies;
 
@@ -327,6 +330,19 @@ in
             + " -c ${rimeGreet}/share/rime-greet/sway-greet.conf";
         };
       };
+      # ── The desktop <-> Gaming Mode one-shot (bootc files/system/units/50-rime-greetd-switch.conf) ─────
+      # rime-session-select leaves /run/rime-greet/switch.toml (greetd's config + an [initial_session] for the
+      # switching user); rime-greetd spends it at the next greetd start and writes RIME_GREETD_ARGS=--config <it>
+      # to greetd.env. With no one-shot the variable is empty and greetd reads /etc/greetd/config.toml, which is
+      # the module's own generated toml (bootc reads the same path). Without this the switch ends the session
+      # and greetd shows the greeter again instead of starting the chosen session.
+      environment.etc."greetd/config.toml".source = greetdToml;
+      systemd.services.greetd.serviceConfig = {
+        EnvironmentFile = "-/run/rime-greet/greetd.env";
+        ExecStartPre = "-${pkgs.rime.rime-libexec}/libexec/rime-greetd";
+        ExecStart = lib.mkForce "${lib.getExe config.services.greetd.package} $RIME_GREETD_ARGS";
+      };
+
       users.users.${cfg.greeterUser} = {
         isSystemUser = true;
         group = cfg.greeterUser;
@@ -668,6 +684,7 @@ in
         # Icons the shell resolves through Quickshell.iconPath (app icons fall back to hicolor/Adwaita).
         pkgs.adwaita-icon-theme
         pkgs.hicolor-icon-theme
+        pkgs.qt6.qtimageformats # see QT_PLUGIN_PATH below
       ]
       ++ shellPkg.runtimeDeps;
 
@@ -683,6 +700,10 @@ in
 
       # `rime shell` (rimed/rime/src/main.rs) and the launcher read it; sessions that bypass the wrapper still agree.
       environment.sessionVariables.RIME_SHELL_DIR = shellPkg.shellDir;
+      # The product sessions (session.lua, the labwc autostart, niri) exec the profile's libexec/rime-shell-autostart,
+      # not the `autostart` wrapper above, so the wrapper's QT_PLUGIN_PATH (qtimageformats: webp/tiff wallpapers) has
+      # to reach them through the session environment: the profile's Qt plugin dir, with qtimageformats linked in.
+      environment.profileRelativeSessionVariables.QT_PLUGIN_PATH = [ "/${pkgs.qt6.qtbase.qtPluginPrefix}" ];
 
       # The shell's text uses both family names: "JetBrains Mono" and "JetBrainsMono Nerd Font" (icon glyphs).
       fonts.packages = [

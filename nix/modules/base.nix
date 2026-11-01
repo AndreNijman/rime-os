@@ -241,9 +241,7 @@ in
       };
     };
 
-    # libexec: files/desktop xdg-terminals.list (which terminal xdg-terminal-exec opens).
-    environment.etc."xdg/xdg-terminals.list" = lib.mkIf desktop {
-      source = "${libexec}/share/rime/xdg/xdg-terminals.list";
-    };
+    # files/system/xdg/xdg-terminals.list is the desktop area's: xdg.terminal-exec (desktop.nix) writes the same
+    # /etc/xdg/xdg-terminals.list (Alacritty.desktop).
   };
 }

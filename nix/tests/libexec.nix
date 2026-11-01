@@ -9,9 +9,14 @@ let
   resolveCheck = pkgs.writeShellScript "rime-libexec-resolve-check" ''
     set -u
     sw=/run/current-system/sw
+    pkg=${pkgs.rime.rime-libexec}
     fail=0
     n=0
-    for f in "$sw"/libexec/rime-* "$sw"/libexec/rime/tools/* "$sw"/bin/apex "$sw"/bin/steamos-session-select "$sw"/bin/steamos-update; do
+    # rime-libexec's own scripts, as the system profile shows them (other modules' helpers in sw/libexec, e.g.
+    # gaming's wrapped rime-session-select or security's rime-firewall, carry no injected PATH line).
+    for p in "$pkg"/libexec/rime-* "$pkg"/libexec/rime/tools/* "$pkg"/bin/apex; do
+      f="$sw''${p#$pkg}"
+      [ "$(readlink -f "$f")" = "$(readlink -f "$p")" ] || { echo "FAIL $f: not rime-libexec's copy"; fail=1; continue; }
       [ -f "$f" ] || continue
       n=$((n + 1))
       first=$(head -n1 "$f")
@@ -42,16 +47,13 @@ pkgs.testers.runNixOSTest {
 
   nodes.machine = { pkgs, ... }: {
     imports = [ self.nixosModules.default ];
-    # The desktop area is still a skeleton on this branch; turning it on adds the desktop-gated libexec units.
+    # Turning the desktop on adds the desktop-gated libexec units (and the session list, greetd, the switcher).
     rime.desktop.enable = true;
     # rime-switch-greeter@ needs greetd's binary; the stock agreety greeter is enough for the unit to load.
     services.greetd.enable = true;
     users.users.rime = { isNormalUser = true; extraGroups = [ "wheel" ]; };
     users.users.guest = { isNormalUser = true; };
     programs.zsh.enable = true; # so the zsh half of the profile snippets is exercised too
-    # The session set is the desktop area's (/etc/rime/wayland-sessions = the display manager's sessions); the
-    # skeleton desktop on this branch has none, so the test supplies Rime's own entries there.
-    environment.etc."rime/wayland-sessions".source = "${pkgs.rime.rime-libexec}/share/wayland-sessions";
     virtualisation.memorySize = 2048;
   };
 
@@ -73,9 +75,9 @@ pkgs.testers.runNixOSTest {
     # Only scripts whose own parser handles the flag (read off each script), so nothing here acts on the VM.
     probes = [
         "rime-browser --help", "rime-devices --help", "rime-disposable --help", "rime-env --help",
-        "rime-firewall --help", "rime-plugin --help", "rime-safe-graphics --help",
+        "rime-plugin --help", "rime-safe-graphics --help",
         "rime-screen-reader --help", "rime-session-watchdog --help", "rime-switch-user --help",
-        "rime-user --help", "rime-vm --help", "rime-luks-enroll --help", "rime-game-env", "rime-display-apply --self-test", "rime-hypr-migrate --self-test",
+        "rime-user --help", "rime-vm --help", "rime-luks-enroll --help", "rime-display-apply --self-test", "rime-hypr-migrate --self-test",
         "rime-input-apply --self-test",
     ]
     with subtest("scripts run their --help / --self-test without a missing command"):

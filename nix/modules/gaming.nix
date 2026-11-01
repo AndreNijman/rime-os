@@ -277,7 +277,37 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkMerge [
+  # ── The session switch (rime-session-select): every desktop, gaming on or off ─────────────────────────────────
+  # The Shell's Power menu switches between the desktop sessions (Hyprland, niri, labwc) with the same privileged
+  # switcher Gaming Mode uses, so it is not gated on gaming. switchTools needs nothing from Steam.
+  (lib.mkIf (cfg.enable || config.rime.desktop.enable) {
+    # bootc files/system/sudoers/rime-session-select: the switch records the next session as root. Only when this
+    # module's own switcher is in use. Both names the switcher has: sudo does not match a store-path rule through
+    # the /run/current-system/sw link (measured in nix/tests/libexec.nix), and callers use either.
+    security.sudo.extraRules = lib.mkIf (cfg.sessionSelect == null) [
+      {
+        groups = [ "wheel" ];
+        runAs = "root"; # bootc: %wheel ALL=(root) NOPASSWD
+        commands = map (path: { command = "${path} *"; options = [ "NOPASSWD" ]; }) [
+          sessionSelect
+          "/run/current-system/sw/libexec/rime-session-select"
+        ];
+      }
+    ];
+
+    environment.systemPackages = [ switchTools ];
+
+    # What the Shell reads to offer and run the session switch (PowerMenu.qml's gaming row probe, PowerControl.sh
+    # gamingmode/desktopmode). Their defaults are bootc's /usr/libexec and /usr/share/wayland-sessions, which do not
+    # exist here. mkDefault: a desktop module that owns another switcher sets its own.
+    environment.sessionVariables = {
+      RIME_SESSION_HELPER = lib.mkDefault sessionSelect;
+      RIME_SESSION_DIR = lib.mkDefault sessionDir;
+    };
+  })
+
+  (lib.mkIf cfg.enable {
     programs.steam = {
       enable = true;
       # Steam's Gaming Mode Power menu (-steamos3) looks these up on its own PATH, inside the FHS environment.
@@ -326,45 +356,25 @@ in
       { domain = "@wheel"; type = "-"; item = "nice"; value = "-19"; }
     ];
 
-    # bootc files/system/sudoers/rime-session-select: the switch into and out of Gaming Mode records the next
-    # session as root. Only when this module's own switcher is in use.
-    security.sudo.extraRules = lib.mkIf (cfg.sessionSelect == null) [
-      {
-        groups = [ "wheel" ];
-        runAs = "root"; # bootc: %wheel ALL=(root) NOPASSWD
-        commands = [
-          {
-            command = "${sessionSelect} *";
-            options = [ "NOPASSWD" ];
-          }
-        ];
-      }
-    ];
-
     # sessionData (the session list a greeter reads) exists only with the shared display-manager integration on.
     # greetd turns it on too (mkDefault); on its own it only collects sessions and adds them to XDG_DATA_DIRS.
     services.displayManager.enable = lib.mkDefault true;
     services.displayManager.sessionPackages = [ gamingSession ];
+    # Rime's desktop replaces the session list with its own (mkForce) and takes more entries from extraSessions.
+    rime.desktop.extraSessions = [ gamingSession ];
     environment.etc."rime/wayland-sessions".source =
       lib.mkDefault "${config.services.displayManager.sessionData.desktops}/share/wayland-sessions";
 
     environment.systemPackages = [ rimeGamingWrapped pkgs.xprop ];
 
-    # What the Shell reads to offer and run the desktop <-> Gaming Mode switch (PowerMenu.qml's gaming row probe,
-    # PowerControl.sh gamingmode/desktopmode) and Settings > Gaming's Discord switch (GamingService.qml). Their
-    # defaults are bootc's /usr/libexec and /usr/share/wayland-sessions, which do not exist here: without these the
-    # Power menu has no Gaming Mode row and the Discord switch errors. mkDefault: a desktop module that owns the
-    # switcher for every session (gaming off too) sets its own.
-    environment.sessionVariables = {
-      RIME_SESSION_HELPER = lib.mkDefault sessionSelect;
-      RIME_SESSION_DIR = lib.mkDefault sessionDir;
-      RIME_GAMING_DISCORD = lib.mkDefault "${rimeGamingWrapped}/libexec/rime-gaming-discord";
-    };
+    # Settings > Gaming's Discord switch (GamingService.qml); its default is bootc's /usr/libexec.
+    environment.sessionVariables.RIME_GAMING_DISCORD = lib.mkDefault "${rimeGamingWrapped}/libexec/rime-gaming-discord";
 
     # bootc /etc/profile.d/rime-game-env.sh. NixOS sources no /etc/profile.d, so the same file is sourced from the
     # bash and zsh login init (greetd's `sh -c '. /etc/profile; …'` is bash on NixOS). Not environment.*ShellInit:
     # fish translates those with babelfish, and this file is POSIX sh. Fish shells inherit it from the session.
     programs.bash.loginShellInit = gameEnvInit;
     programs.zsh.loginShellInit = gameEnvInit;
-  };
+  })
+  ];
 }
