@@ -6,6 +6,8 @@
   rimed = callPackage ./rimed.nix { };
   rime-shell = callPackage ./rime-shell.nix { src = rime-shell-src; };
   rime-libexec = callPackage ./rime-libexec.nix { };
+  # The layered-ridge identity: masters, exports, hicolor icons (files/branding/ridge).
+  rime-branding = callPackage ./rime-branding.nix { };
   # Not callPackage: that would wrap the kernel's own .override, which NixOS's boot.kernelPackages calls
   # (linuxPackagesFor -> kernel.override { features, randstructSeed, ... }).
   rime-kernel = import ./kernel { inherit pkgs; };

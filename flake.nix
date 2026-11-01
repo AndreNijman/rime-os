@@ -32,7 +32,7 @@
       };
 
       packages.${system} = {
-        inherit (pkgs.rime) rimed rime-shell rime-libexec rime-kernel rime-kernel-config rime-scx;
+        inherit (pkgs.rime) rimed rime-shell rime-libexec rime-kernel rime-kernel-config rime-scx rime-branding;
       };
 
       nixosModules = {

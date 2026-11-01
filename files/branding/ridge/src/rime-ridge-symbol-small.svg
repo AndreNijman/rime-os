@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 175" width="240" height="175">
+  <title>Rime layered ridge, small-size master (32 px and below)</title>
+  <!-- Same four planes, same order, same tips. Each plane is 20 % thinner (plane 1 about the baseline, plane 4
+       about the peak, planes 2 and 3 about their centres) so the gaps survive at 16-32 px. Grid: 0.5 units. -->
+  <polygon id="plane-1" data-role="base" fill="#212224" points="11,175 162.5,147 220,162 235.5,175"/>
+  <polygon id="plane-2" data-role="structure" fill="#212224" points="0,165.5 153,112 212,99 194.5,137 160.5,128"/>
+  <polygon id="plane-3" data-role="accent" fill="#91C2DC" points="47.5,125.5 149,76.5 231,52.5 217.5,77.5"/>
+  <polygon id="plane-4" data-role="peak" fill="#212224" points="91.5,80 129.5,46.5 240,0 222,29 142.5,53.5"/>
+</svg>
