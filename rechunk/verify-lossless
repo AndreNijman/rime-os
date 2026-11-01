@@ -36,7 +36,16 @@ find / -xdev $prune -prune -o \( -type d -printf 'd %m %U %G - %p\n' \) \
 # shellcheck disable=SC2086
 find / -xdev $prune -prune -o -type f -print0 2>/dev/null \
     | xargs -0 -r -n 256 -P "$(nproc)" sha256sum | sort -k2 > /out/sums
-getcap -r / 2>/dev/null | grep -v '^/\(proc\|sys\|sysroot\)/' | sort > /out/caps || true
+# File capabilities. getcap answers 0 even for a file it could not read (the
+# error goes to stderr only), so a missing getcap or any message on stderr
+# means the inventory is incomplete: refuse rather than compare a partial list.
+command -v getcap >/dev/null || { echo "verify-lossless: no getcap in this image, file capabilities cannot be compared" >&2; exit 1; }
+getcap -r / 2>/out/caps.err | grep -v '^/\(proc\|sys\|sysroot\)/' | sort > /out/caps
+if [ -s /out/caps.err ]; then
+    echo "verify-lossless: getcap -r / reported errors, the capability inventory is incomplete:" >&2
+    head -n 20 /out/caps.err >&2
+    exit 1
+fi
 EOF
 chmod 0755 "$work/inventory"
 
@@ -66,6 +75,12 @@ for f in meta sums caps config; do
 done
 [ "$(wc -l < "$work/a/sums")" -gt 1000 ] || {
     echo "verify-lossless: only $(wc -l < "$work/a/sums") files inventoried in $orig — refusing a vacuous pass" >&2
+    fail=1
+}
+# Every Fedora bootc image carries file capabilities (newuidmap, newgidmap,
+# arping...): an empty list is a broken inventory, not a match.
+[ "$(wc -l < "$work/a/caps")" -gt 0 ] || {
+    echo "verify-lossless: no file capabilities inventoried in $orig — refusing a vacuous pass" >&2
     fail=1
 }
 [ "$fail" = 0 ] || exit 1
