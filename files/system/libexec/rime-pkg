@@ -179,6 +179,16 @@ readonly LOCK="${PKG_ROOT}/.lock"
 # test can point it at a temp directory (RIME_PKG_RPM_CACHE), as
 # RIME_PKG_GITHUB_API does.
 RPM_CACHE="${RIME_PKG_RPM_CACHE-${PKG_ROOT}/rpm-cache}"
+# What the last `rebuild --if-needed` that failed left for the desktop:
+# rime-pkg-notice (a user timer, two minutes into a session) reads it and says
+# once per boot that the user's packages are missing and why. Under /run, so a
+# boot that rebuilds cleanly starts with nothing to say; every successful build
+# removes it. The variable exists so a test can point it at a temp file.
+REBUILD_NOTICE="${RIME_PKG_REBUILD_NOTICE-/run/rime-pkg/rebuild}"
+# Set by cmd_rebuild for the boot rebuild only (rime-sysext-rebuild.service):
+# a set that does not fit the image stops at once instead of downloading again
+# to say which package is in the way. See download_rpms.
+BOOT_FAST_FAIL=0
 # Free space the cache must never take from an OS update, on top of the 3% of
 # the filesystem ostree keeps free for itself (min-free-space-percent). bootc
 # refuses an update unless the space it needs is free: "available 5.7 GB,
@@ -868,6 +878,16 @@ download_rpms() {
         # pull newer builds of image packages and end in a guard refusal that
         # blames the image for a passing mirror change.
         [ "$rc" = 2 ] && die "$RPM_SET_REFUSED"
+        # At boot nobody reads the diagnosis below, and getting it costs a
+        # second download of the whole set at the newest builds plus a guard
+        # pass over every one of them, all while the desktop waits: 11 of the
+        # 12.5 minutes one refused boot rebuild took (measured 2026-11-01:
+        # pinned pass failed at 114 s, the refusal came at 773 s). The boot
+        # rebuild stops here; `sudo rime pkg rebuild`, run by a person, still
+        # takes the long way and names the package.
+        if [ "${BOOT_FAST_FAIL:-0}" = 1 ]; then
+            die "no build of your packages fits this OS from what the repositories offer right now (or the download failed); run 'sudo rime pkg rebuild' to see which package is in the way"
+        fi
         # Nothing in the repositories fits the image as it is. Resolve again
         # against the newest builds, so guard_rpms can name the package that
         # needs an OS update instead of the user reading a solver dump. A
@@ -3035,6 +3055,7 @@ rebuild_extension() {
         gc_local_cache
         [ -z "${RPM_CACHE:-}" ] || rm -rf -- "$RPM_CACHE"
         post_merge
+        rebuild_notice_clear
         return 0
     fi
 
@@ -3117,6 +3138,7 @@ rebuild_extension() {
         save_requested "${want[@]}"
         gc_local_cache
         write_state "$rpms" ${debcached[@]+"${debcached[@]}"}
+        rebuild_notice_clear
         return 0
     fi
 
@@ -3143,6 +3165,7 @@ rebuild_extension() {
     save_requested "${want[@]}"
     gc_local_cache
     write_state "$rpms" ${debcached[@]+"${debcached[@]}"}
+    rebuild_notice_clear
 
     msg "done — $(jq -r '.resolved | length' "$STATE") package(s), $(numfmt --to=iec "$(jq -r .image_bytes "$STATE")")B extension"
 }
@@ -4405,13 +4428,52 @@ cmd_upgrade() {
 # cost every boot the whole NetworkManager-wait-online delay), so a boot that
 # DOES have to download waits for the network here instead. Only inside a
 # systemd service (INVOCATION_ID) so a manual `rime pkg rebuild --if-needed` and
-# the test suites never start a target. Bounded: offline, the rebuild is
-# attempted anyway and fails as it always did.
+# the test suites never start a target. Bounded at 90 s.
+#
+# Returns 1 when the machine is offline after the wait, and the caller stops
+# there instead of handing dnf5 a rebuild it cannot download while the desktop
+# waits. "Offline" is measured, not inferred from the start job: the target is
+# reached even when NetworkManager-wait-online gives up (it is only wanted), so
+# the question asked afterwards is whether any default route exists at all.
 wait_for_boot_network() {
     [ -n "${INVOCATION_ID:-}" ] || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     msg "waiting for the network before rebuilding"
     timeout 90 systemctl start network-online.target >/dev/null 2>&1 || true
+    boot_network_up
+}
+
+# Any default route, IPv4 or IPv6. No route = nothing to download from. Not a
+# reachability probe: a route to a captive portal still counts as up, and the
+# download's own failure ends that case (download_rpms, BOOT_FAST_FAIL).
+boot_network_up() {
+    command -v ip >/dev/null 2>&1 || return 0
+    [ -n "$(ip -4 route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)" ]
+}
+
+# Leave the desktop a note that the boot rebuild failed and why (offline or
+# refused); rime-pkg-notice says it once per boot. Written whole and renamed,
+# world-readable: it holds one word of reason and the boot id, nothing else.
+# Never fatal: a note that cannot be written costs the notice, not the boot.
+rebuild_notice_set() {
+    local reason="$1" dir boot=""
+    dir="$(dirname -- "$REBUILD_NOTICE")"
+    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    if install -d -m 0755 -- "$dir" 2>/dev/null \
+       && printf 'state=failed\nreason=%s\nboot=%s\n' "$reason" "$boot" > "${REBUILD_NOTICE}.tmp" 2>/dev/null \
+       && chmod 0644 -- "${REBUILD_NOTICE}.tmp" 2>/dev/null \
+       && mv -f -- "${REBUILD_NOTICE}.tmp" "$REBUILD_NOTICE" 2>/dev/null; then
+        return 0
+    fi
+    rm -f -- "${REBUILD_NOTICE}.tmp" 2>/dev/null || true
+    warn "could not leave the desktop a note at ${REBUILD_NOTICE}"
+    return 0
+}
+
+# Every build that succeeds takes the note back, so the notice never says the
+# packages are missing after `sudo rime pkg rebuild` brought them back.
+rebuild_notice_clear() {
+    rm -f -- "$REBUILD_NOTICE" 2>/dev/null || true
 }
 
 cmd_rebuild() {
@@ -4434,6 +4496,10 @@ cmd_rebuild() {
         if [ "$built_for" = "$(os_version)" ] \
            && [ "$built_level" = "$PKG_COMPAT_LEVEL" ] && merged \
            && twins_unchanged "$STATE"; then
+            # Nothing to rebuild, so nothing for the desktop to be told. /run
+            # survives a soft-reboot, and a note from before one must not
+            # outlive the problem it described.
+            rebuild_notice_clear
             return 0
         fi
         msg "extension compatibility changed (OS ${built_for}, level ${built_level} -> OS $(os_version), level ${PKG_COMPAT_LEVEL}, or the image's 32-bit libraries moved) — rebuilding"
@@ -4445,17 +4511,32 @@ cmd_rebuild() {
         return 0
     fi
 
+    # A boot that NEEDS a rebuild still holds the desktop until it is done
+    # (rime-sysext-rebuild.service is wanted by multi-user.target): the
+    # packages are the user's applications, and a desktop without them is the
+    # thing this unit exists to prevent. A rebuild that CANNOT happen is
+    # different: holding the desktop for it buys nothing. So offline and
+    # refused end at once, non-zero (the unit shows failed, not "Finished"),
+    # with a note the desktop turns into a notice (rime-pkg-notice). The next
+    # boot, `rime update` or `sudo rime pkg rebuild` tries again.
     if [ "$if_needed" = 1 ]; then
-        wait_for_boot_network
-    fi
-
-    # In a SUBSHELL on purpose: this runs from rime-sysext-rebuild.service at
-    # boot, and `die` would otherwise exit straight out of the script and mark
-    # the unit failed. An unreachable mirror is not a boot failure — the
-    # packages simply get rebuilt on the next attempt.
-    if [ "$if_needed" = 1 ]; then
+        if ! wait_for_boot_network; then
+            warn "this machine is offline, so your packages cannot be rebuilt for this OS version now; they stay unavailable until 'sudo rime pkg rebuild' succeeds"
+            rebuild_notice_set offline
+            return 1
+        fi
+        # Only inside the boot service, like the network wait: a person who
+        # runs `rime pkg rebuild --if-needed` (or `rime recover repair`) is
+        # reading, and gets the long diagnosis.
+        if [ -n "${INVOCATION_ID:-}" ]; then
+            BOOT_FAST_FAIL=1
+        fi
+        # In a SUBSHELL so that a `die` inside the build returns here, where
+        # the note for the desktop is written, instead of ending the script.
         if ! ( rebuild_extension "${want[@]}" ); then
             warn "your packages could not be rebuilt for this OS version (the reason is above) and stay unavailable until 'sudo rime pkg rebuild' succeeds"
+            rebuild_notice_set refused
+            return 1
         fi
         return 0
     fi

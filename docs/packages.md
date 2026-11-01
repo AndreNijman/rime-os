@@ -498,8 +498,18 @@ atomic updates: systemd never overlays a Fedora 43 build onto Fedora 44.
 
 `rime-sysext-rebuild.service` covers the rest: on the first boot after an OS
 version change it rebuilds the extension against the new OS. It does nothing on
-a normal boot, and if the machine is offline it says so and leaves the rebuild
-for later instead of failing the boot.
+a normal boot. A boot that needs a rebuild waits for it before the desktop
+starts, because the desktop without your packages is what it exists to prevent.
+
+A rebuild that cannot happen does not hold the desktop. If the machine is still
+offline after the network wait, or no build of your packages in the
+repositories fits this OS yet (they have moved ahead of the image), the unit
+stops at once, shows as failed, and your session says so two minutes after you
+log in, once per boot, with the command to run (`sudo rime pkg rebuild`). That
+command still takes the long way and names the package that is in the way. The
+next boot, the next `rime update` or that command tries again, and the update
+health gate does not hold an update over this unit's failure, because the next
+image is usually what fixes a refusal.
 
 Rime also records a package compatibility level. When an image starts baking a
 package that users may already have in their extension, the level changes and
@@ -521,7 +531,8 @@ journalctl -u rime-sysext-rebuild -b
 A boot that rebuilt logs `extension compatibility changed … — rebuilding`, and
 the unit takes minutes instead of finishing in the second it started. A state
 file still holding the older level means the rebuild has not run yet: an
-offline boot leaves it for the next boot, or for the next `rime update`.
+offline or refused boot leaves it for the next boot, or for the next
+`rime update`, and `systemctl status rime-sysext-rebuild` shows it failed.
 
 `rime update` also re-resolves user packages, so they receive Fedora security
 fixes instead of staying pinned at whatever was current on install day. If
