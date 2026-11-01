@@ -8,3 +8,5 @@
   desktop = import ./desktop.nix { inherit pkgs self; };
   shell = import ./shell.nix { inherit pkgs self; };
 }
+# kernel-config-fresh, kernel-gate, kernel-vm
+// import ./kernel.nix { inherit pkgs self; }
