@@ -6,4 +6,5 @@
   rimed = import ./rimed.nix { inherit pkgs self; };
   libexec = import ./libexec.nix { inherit pkgs self; };
   desktop = import ./desktop.nix { inherit pkgs self; };
+  shell = import ./shell.nix { inherit pkgs self; };
 }

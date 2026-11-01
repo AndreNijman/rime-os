@@ -183,7 +183,7 @@ fi
 # Nothing here fails if the module is missing: the shell loads it through
 # Qt.createComponent() and reports a missing module by name, so an OS older
 # than the shell gives an English desktop rather than no desktop.
-RIME_QML_DIR=/usr/lib64/rime-shell/qml
+RIME_QML_DIR="${RIME_QML_DIR:-/usr/lib64/rime-shell/qml}"  # NixOS: the session wrapper points this at the package
 if [ -d "${RIME_QML_DIR}" ]; then
     export QML_IMPORT_PATH="${RIME_QML_DIR}${QML_IMPORT_PATH:+:${QML_IMPORT_PATH}}"
     export QML2_IMPORT_PATH="${RIME_QML_DIR}${QML2_IMPORT_PATH:+:${QML2_IMPORT_PATH}}"
