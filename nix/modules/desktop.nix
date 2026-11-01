@@ -446,7 +446,7 @@ in
       services.pipewire = {
         enable = true;
         alsa.enable = true;
-        # size: 32-bit ALSA (pkgsi686Linux.pipewire) is gaming.nix's; bootc got it with Steam (docs/nixos/closure.md).
+        # size: 32-bit ALSA (pkgsi686Linux.pipewire) is gaming.nix's; bootc's image had no i686 audio (docs/nixos/closure.md).
         pulse.enable = true;
         wireplumber.enable = true;
       };

@@ -75,7 +75,7 @@ Bytes are unpacked NAR bytes of the paths that left the rime-vm closure, from `n
 | nixpkgs source | `<hash>-source` (the nixpkgs tree) | `etc-nix-registry.json`: `nixpkgs.flake.setFlakeRegistry` (default on for flake systems) writes `registry.nixpkgs.to = { type = "path"; path = <store path>; }`, which makes the whole source a runtime dependency | **217,222,584 B** | bootc has no Nix at all; there is no evaluation on the device (D5) | `base.nix`: `setFlakeRegistry = false`, `setNixPath = false`, and the registry names the same nixpkgs as `github:NixOS/nixpkgs/<config.system.nixos.revision>` (locked rev). `nixPath` is unchanged (`nixpkgs=flake:nixpkgs`). `nix run nixpkgs#x` still resolves to the system's nixpkgs, fetched from GitHub on first use |
 | webkitgtk 4.1 | `webkitgtk-2.54.1+abi=4.1` | `networking.networkmanager.plugins` → `networkmanager-openconnect` (built `withGnome = true`) → its GNOME auth dialog, the only 4.1 user | **184,121,472 B** | Fedora's `NetworkManager-openconnect` on bootc is installed without `-gnome` (no webkit2gtk4.1). webkitgtk 6.0 stays: Bazaar uses it and bootc ships it | `desktop.nix`: `networkmanager-openconnect.override { withGnome = false; }` (its configure uses webkit only for `--with-gnome`) |
 | Documentation | 32 `-doc` outputs and the NixOS manual: python3 doc 59.9 MB, pipewire-doc 34.7 MB, nixos-manual-html 30.8 MB, nix-manual 24.4 MB, wireplumber-doc 15.0 MB, imagemagick-doc 9.9 MB, sane-doc 5.0 MB, nixos-help's w3m/gpm/boehm-gc, the configuration-reference man page, and 20 small ones | `documentation.doc.enable` (default on) adds `doc` to `extraOutputsToInstall` and `/share/doc` to `pathsToLink`; `documentation.nixos.enable` adds the manual and `nixos-help` | **191,641,672 B** | bootc installs no `-doc` subpackages (no python3-docs, no pipewire-doc). Man pages stay on both | `base.nix`: `documentation.doc.enable = false; documentation.nixos.enable = false;` |
-| 32-bit ALSA | `pkgsi686Linux.pipewire` ALSA plugin, moved, not removed | `services.pipewire.alsa.support32Bit` in `desktop.nix` | 0 on rime-vm (gaming on); part of the gaming delta on `plain` | bootc got the i686 PipeWire ALSA plugin with Steam | moved to `gaming.nix`, next to `enable32Bit` |
+| 32-bit ALSA | `pkgsi686Linux.pipewire` ALSA plugin, moved, not removed | `services.pipewire.alsa.support32Bit` in `desktop.nix` | 0 on rime-vm (gaming on); part of the gaming delta on `plain` | bootc's image has no i686 audio; its Steam set (`rime install`) brings i686 `alsa-lib` but not the PipeWire ALSA plugin (katana, 2026-11-01: `/usr/lib/libasound.so.2` present, `/usr/lib/alsa-lib/` absent), so the gaming toplevel keeps more than bootc here | moved to `gaming.nix`, next to `enable32Bit` |
 
 Rebuilt paths: 40 store paths changed hash because their inputs changed (speech-dispatcher, espeak-ng,
 NetworkManager-openconnect, X11-fonts, fc-cache, hwdb.bin, both Steam FHS rootfs, system-path, etc and the units).
@@ -161,7 +161,7 @@ What opt-in costs, given D5 (no evaluation on the device) and D9 (prebuilt gener
 serves a second toplevel per release, `plain-gaming`. The two share every path except the delta, so the extra build
 and storage is the delta, not a second system. `rime install steam` is then a `rime update` to the gaming toplevel:
 the same download path, signature and gates. A machine that turns gaming off again goes back to `plain` and GC frees
-the delta. `rime.gaming.enable`'s option text in `gaming.nix` still quotes an older measurement (handover).
+the delta. `rime.gaming.enable`'s option text in `gaming.nix` quotes these numbers.
 
 ## 6. A11: the disk floor and the P5 fresh-install figure
 
@@ -212,7 +212,9 @@ the guard.
 `nix/tests/size.nix` reads the rime-vm toplevel's closure (`closureInfo`) and fails when a cut comes back: any
 `mbrola-voices`, more or fewer than one JetBrainsMono Nerd Font, `webkitgtk-*+abi=4.1`, the nixpkgs source (or a
 module's re-import of it), `/etc/nix/registry.json` naming a store path or not locking nixpkgs to this flake's rev
-(`self.inputs.nixpkgs.rev`, `1c89083e451e…` today), the large `-doc` outputs or the NixOS manual,
+(`self.inputs.nixpkgs.rev`, `1c89083e451e…` today), the large `-doc` outputs or the NixOS manual, either share/doc
+file the scripts read (`niri/default-config.kdl`, `labwc/rc.xml.all`) missing, the 32-bit PipeWire ALSA plugin missing
+while gaming is on,
 or a closure above the budget (10,200,547,328 B = 9.5 GiB; 9,530,593,800 B measured, so ~640 MiB for the P2 ports
 still landing). Raising the budget is a deliberate edit with an entry here saying what grew and why.
 
@@ -229,7 +231,16 @@ Seen:
 - The shipped registry (`<rime-vm toplevel>/etc/nix/registry.json`): `{"from":{"id":"nixpkgs","type":"indirect"},
   "to":{"owner":"NixOS","repo":"nixpkgs","rev":"1c89083e451e891152365b799595cf7790a43325","type":"github"}}`.
 - `checks.vm-boot`, `checks.desktop` and `checks.gaming` pass with the cuts (firstrun seeds niri and labwc from the two
-  kept doc files; `fc-list` finds the JetBrainsMono Nerd Font; the gaming session still gets 32-bit ALSA).
+  kept doc files; `fc-list` finds the JetBrainsMono Nerd Font). 32-bit ALSA is asserted by the guard, not by a VM
+  test: rime-vm's `/etc/alsa/conf.d/49-pipewire-modules.conf` names `libs.32Bit`; `rime-vm-no-gaming`'s does not.
+- Mutants added in review, each seen to fail: `mbrola-back` (stock `pkgs.speechd`: mbrola-voices in the closure and
+  the budget passed, 10,206,762,856 B), `webkit-back` (stock `networkmanager-openconnect`: webkitgtk 4.1),
+  `docs-back` (`documentation.doc` on: python3, pipewire and wireplumber `-doc`), `manual-back` (`documentation.doc`
+  and `documentation.nixos` on: also `nixos-manual-html`), `niri-doc-unlinked` (`/share/doc/niri` dropped from
+  `pathsToLink`: `default-config.kdl is missing`), `alsa32-dropped` (`alsa.support32Bit = false` with gaming on).
+- `documentation.nixos.enable = false` on its own saves only the 1.5 MB `configuration.nix` man page: nixpkgs installs
+  the HTML manual and `nixos-help` only when `documentation.doc` is also on (an earlier `manual-back` with only
+  `documentation.nixos` on passed the guard, which is how this was found).
 
 ## 8. Handover
 
@@ -238,8 +249,6 @@ Seen:
   2.51 GB (zstd -19; bootc 4.20 GB).
 - **D6 §11.5:** count estimated on-disk bytes, not unpacked NAR bytes, in the free-space gate; that drops the floor to
   12 GB (§6).
-- **`gaming.nix`:** the `rime.gaming.enable` description quotes an older measurement (+2.95 GB NAR); the measured delta
-  is in §5.
 - **Installer and catalogue:** refuse by name below the floor, and refuse `rime install steam` below the gaming floor.
 - **CI builders:** speech-dispatcher, espeak-ng and NetworkManager-openconnect are now built by Rime (overrides are
   cache misses on cache.nixos.org); together a few minutes per mass rebuild.

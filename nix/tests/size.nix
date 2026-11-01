@@ -7,6 +7,8 @@
 #   - the nixpkgs source tree (/etc/nix/registry.json pointing at a store path instead of a locked GitHub rev),
 #     and a registry that does not lock nixpkgs to this flake's rev;
 #   - the big -doc outputs and the NixOS manual (documentation.doc / documentation.nixos);
+#   - niri's default-config.kdl or labwc's rc.xml.all missing from sw/share/doc (the scripts read them);
+#   - the 32-bit PipeWire ALSA plugin missing (rime-vm has gaming on; gaming.nix owns alsa.support32Bit);
 # and when the closure's NAR total passes the budget below. The toplevel is the same one `nix build
 # path:.#nixosConfigurations.rime-vm.config.system.build.toplevel` builds, so the check costs one closureInfo.
 #
@@ -92,6 +94,13 @@ let
       fi
       grep -F '"rev":"${self.inputs.nixpkgs.rev}"' ${toplevel}/etc/nix/registry.json >/dev/null ||
         no "/etc/nix/registry.json does not lock nixpkgs to ${self.inputs.nixpkgs.rev}: $(cat ${toplevel}/etc/nix/registry.json)"
+      # The two share/doc files rime-shell-firstrun and rime-input-apply read (desktop.nix keeps them linked).
+      for f in niri/default-config.kdl labwc/rc.xml.all; do
+        [ -f ${toplevel}/sw/share/doc/$f ] || no "/run/current-system/sw/share/doc/$f is missing (desktop.nix: <pkg>.doc + pathsToLink)"
+      done
+      # rime-vm has gaming on, so its ALSA config names the 32-bit PipeWire plugin (gaming.nix owns support32Bit).
+      grep -F 'libs.32Bit' ${toplevel}/etc/alsa/conf.d/49-pipewire-modules.conf >/dev/null ||
+        no "gaming is on but /etc/alsa/conf.d/49-pipewire-modules.conf has no 32-bit plugin (gaming.nix alsa.support32Bit)"
       for d in python3[.0-9]*-[.0-9]*-doc pipewire-[.0-9]*-doc wireplumber-[.0-9]*-doc nixos-manual-html; do
         [ "$(count "^/nix/store/[a-z0-9]{32}-$d\$")" = 0 ] || no "$d is in the closure (documentation.doc/nixos)"
       done
@@ -137,6 +146,32 @@ guard "rime-vm" rimeVm
         };
       })
     ]);
+    # speech-dispatcher's stock espeak-ng (mbrolaSupport on): mbrola-voices comes back.
+    mbrola-back = guard "mutant-mbrola-back" (variant [
+      ({ lib, pkgs, ... }: { services.speechd.package = lib.mkForce pkgs.speechd; })
+    ]);
+    # NetworkManager-openconnect with its GNOME auth dialog: webkitgtk 4.1 comes back.
+    webkit-back = guard "mutant-webkit-back" (variant [
+      ({ lib, pkgs, ... }: {
+        networking.networkmanager.plugins = lib.mkForce [ pkgs.networkmanager-openvpn pkgs.networkmanager-openconnect ];
+      })
+    ]);
+    # documentation.doc back on: the -doc outputs come back.
+    docs-back = guard "mutant-docs-back" (variant [ { documentation.doc.enable = lib.mkForce true; } ]);
+    # Both back on: the NixOS manual comes back (nixpkgs installs manualHTML only when doc.enable is on too; with
+    # documentation.nixos alone the closure gains only the 1.5 MB configuration.nix man page).
+    manual-back = guard "mutant-manual-back" (variant [
+      {
+        documentation.doc.enable = lib.mkForce true;
+        documentation.nixos.enable = lib.mkForce true;
+      }
+    ]);
+    # desktop.nix's /share/doc/niri link dropped: rime-shell-firstrun would find no default-config.kdl.
+    niri-doc-unlinked = guard "mutant-niri-doc-unlinked" (variant [
+      { environment.pathsToLink = lib.mkForce (lib.filter (p: p != "/share/doc/niri") vm.config.environment.pathsToLink); }
+    ]);
+    # 32-bit ALSA dropped while gaming is on.
+    alsa32-dropped = guard "mutant-alsa32-dropped" (variant [ { services.pipewire.alsa.support32Bit = lib.mkForce false; } ]);
     # The registry on GitHub nixpkgs without a locked rev: `nix run nixpkgs#x` would follow master, not the system.
     registry-unlocked = guard "mutant-registry-unlocked" (variant [
       ({ lib, ... }: {
