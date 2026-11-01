@@ -8,6 +8,8 @@
   rime-libexec = callPackage ./rime-libexec.nix { };
   # The layered-ridge identity: masters, exports, hicolor icons (files/branding/ridge).
   rime-branding = callPackage ./rime-branding.nix { };
+  # The terminal greeting's helpers: image protocol detection and the wallpaper-recoloured logo.
+  rime-greeting = callPackage ./rime-greeting.nix { rime-branding = pkgs.rime.rime-branding; };
   # Not callPackage: that would wrap the kernel's own .override, which NixOS's boot.kernelPackages calls
   # (linuxPackagesFor -> kernel.override { features, randstructSeed, ... }).
   rime-kernel = import ./kernel { inherit pkgs; };

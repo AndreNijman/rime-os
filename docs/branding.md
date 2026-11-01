@@ -153,6 +153,48 @@ plane 3, on wrong sizes, opaque backgrounds, an @2x that is not twice the @1x, o
 it also shellchecks the wrapper and checks the package's hicolor names. To change a wordmark's typeface or
 tracking, run `src/outline-wordmarks.py` first (`src/FONTS.md`).
 
+## Terminal greeting
+
+Every new interactive terminal opens with fastfetch and the ridge symbol (`files/desktop/shell/rime-greeting.sh`,
+installed as `share/rime/shell/greeting.sh`; NixOS module `nix/modules/greeting.nix`, option `rime.greeting.enable`,
+on with the desktop). zsh reaches it from the seeded `~/.zshrc`, bash from `/etc/bashrc`. Opt out with
+`RIME_NO_GREETING=1`.
+
+**The logo is the real symbol or a label, never ASCII art.** `libexec/rime-term-graphics` (C, so it costs nothing
+before the first prompt) decides how to draw it:
+
+| Terminal | Answer |
+|---|---|
+| local Ghostty or kitty | `kitty-direct` (no query; the image is read from the file) |
+| local WezTerm | `iterm` (WezTerm's kitty graphics are off by default) |
+| Alacritty, the Linux console, kmscon, `TERM` dumb/unset, no `/dev/tty` | `none` |
+| GNU screen; tmux without `allow-passthrough`, or not inside Ghostty/kitty | `none` |
+| anything else (SSH, foot, xterm, unknown) | ONE query: kitty graphics + DA1 (+ `CSI 14 t` when the pty has no pixel size), at most 35 ms (`RIME_TERM_GRAPHICS_TIMEOUT_MS`) |
+
+kitty or sixel need the cell size in pixels (from the pty or `CSI 14 t`); without it fastfetch would fall back to
+its built-in ASCII logo, so the answer is `none`. The terminal's modes are restored on every path, Ctrl-C
+included, and a reply that arrives after the deadline is flushed. The answer is exported as
+`RIME_TERM_GRAPHICS=<proto>@<tty,TERM,SSH_TTY>`, so a nested shell in the same terminal does not ask again;
+`RIME_TERM_GRAPHICS_FORCE=<proto>` overrides it. The logo is 8 rows tall, its width in cells is derived from
+the cell size and the PNG's aspect; a window too narrow for logo and text gets the label.
+
+With `none`, fastfetch prints a bold **RIME OS** label in the accent (Rime Blue `#91C2DC` before any
+wallpaper), from `/etc/fastfetch/config.jsonc`.
+
+**Recoloured from the wallpaper.** Rime Shell's matugen config (`rime-shell src/config/matugen.toml.in`,
+`[templates.rime_logo]`) writes `~/.cache/rime/logo/colors` on every wallpaper change: `primary` and
+`on_surface` for the dark and the light scheme. Its post_hook runs `libexec/rime-logo-render`, which fills the
+adaptive template (`templates/rime-symbol.svg.in`: plane 3 = accent, the other planes = foreground) and renders
+`rime-symbol-{dark,light}.png` (512 px, resvg) next to it, each written under a temporary name and renamed into
+place. The greeting shows the light or dark one by the desktop's colour scheme (dark over SSH), and the shipped
+`png/symbol/rime-symbol-{dark,light}-512.png` until the Shell has rendered one. An existing user gets the logo at
+the next Shell start: the Shell re-runs matugen when any of its outputs is missing.
+
+Checks: `checks.x86_64-linux.greeting` (`nix/tests/greeting.nix`: the helper on a fake terminal, the greeting's
+choices in bash/zsh/dash, the built Shell's matugen config on two wallpapers, three mutants) and
+`checks.x86_64-linux.greeting-vm` (`nix/tests/greeting-vm.nix`: Ghostty draws the recoloured symbol, Alacritty
+the label, a new wallpaper recolours the next greeting).
+
 ## Legacy: the spark (bootc image)
 
 Everything below in this section describes the bootc-based Rime OS image, which still ships the spark. Keep it

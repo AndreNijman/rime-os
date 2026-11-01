@@ -1,0 +1,82 @@
+#!/bin/sh
+# rime-logo-render — recolour the Rime symbol from the wallpaper's palette.
+#
+#   rime-logo-render [DIR [TEMPLATE]]
+#
+# Rime Shell's matugen config (rime-shell src/config/matugen.toml.in, [templates.rime_logo]) writes four
+# colours to DIR/colors on every wallpaper change and then runs this as its post_hook:
+#
+#   accent_dark=#RRGGBB    plane 3 on a dark background   (matugen primary, dark scheme)
+#   fg_dark=#RRGGBB        planes 1, 2 and 4               (matugen on_surface, dark scheme)
+#   accent_light=#RRGGBB   plane 3 on a light background  (matugen primary, light scheme)
+#   fg_light=#RRGGBB       planes 1, 2 and 4               (matugen on_surface, light scheme)
+#
+# Each pair is substituted into the shipped adaptive symbol (TEMPLATE, default the rime-branding
+# templates/rime-symbol.svg.in: {{accent}} is plane 3 only, {{fg}} the other three, so the layer order and the
+# shape never change) and rendered to DIR/rime-symbol-dark.png and DIR/rime-symbol-light.png, 512 px wide,
+# beside the recoloured SVGs. Every file is written to a temporary name in DIR and renamed over the old one,
+# so a terminal opening mid-render reads either the old logo or the new one, never half a file.
+#
+# DIR defaults to ${XDG_CACHE_HOME:-~/.cache}/rime/logo. The greeting (files/desktop/shell/rime-greeting.sh)
+# uses these PNGs when they exist and the shipped Rime Blue ones otherwise.
+set -eu
+
+dir=${1:-${XDG_CACHE_HOME:-$HOME/.cache}/rime/logo}
+template=${2:-/usr/share/rime/branding/templates/rime-symbol.svg.in}
+resvg=resvg
+size=512
+
+die() {
+    echo "rime-logo-render: $*" >&2
+    exit 1
+}
+
+[ -r "$dir/colors" ] || die "no colours at $dir/colors (matugen writes them)"
+[ -r "$template" ] || die "no template at $template"
+
+accent_dark='' fg_dark='' accent_light='' fg_light=''
+while IFS='=' read -r key value; do
+    case $key in
+        accent_dark | fg_dark | accent_light | fg_light) ;;
+        *) continue ;;
+    esac
+    # Only #RRGGBB reaches sed: the file is rewritten under running terminals and must never carry a
+    # sed expression or a truncated value into the SVG.
+    case $value in
+        \#[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]) ;;
+        *) die "$key is not #RRGGBB: '$value'" ;;
+    esac
+    case $key in
+        accent_dark) accent_dark=$value ;;
+        fg_dark) fg_dark=$value ;;
+        accent_light) accent_light=$value ;;
+        fg_light) fg_light=$value ;;
+    esac
+done <"$dir/colors"
+
+[ -n "$accent_dark" ] && [ -n "$fg_dark" ] && [ -n "$accent_light" ] && [ -n "$fg_light" ] ||
+    die "$dir/colors needs accent_dark, fg_dark, accent_light and fg_light"
+
+tmp_svg='' tmp_png=''
+cleanup() { rm -f "$tmp_svg" "$tmp_png"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+# render VARIANT ACCENT FG
+render() {
+    tmp_svg=$(mktemp "$dir/.rime-symbol-$1.svg.XXXXXX")
+    tmp_png=$(mktemp "$dir/.rime-symbol-$1.png.XXXXXX")
+    sed -e "s/{{accent}}/$2/g" -e "s/{{fg}}/$3/g" "$template" >"$tmp_svg"
+    if grep -F '{{' "$tmp_svg" >/dev/null; then
+        die "$template has a token other than {{accent}} and {{fg}}"
+    fi
+    "$resvg" -w "$size" "$tmp_svg" "$tmp_png"
+    chmod 0644 "$tmp_svg" "$tmp_png"
+    mv -f "$tmp_png" "$dir/rime-symbol-$1.png"
+    mv -f "$tmp_svg" "$dir/rime-symbol-$1.svg"
+    tmp_svg='' tmp_png=''
+}
+
+render dark "$accent_dark" "$fg_dark"
+render light "$accent_light" "$fg_light"
