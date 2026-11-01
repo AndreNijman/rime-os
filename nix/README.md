@@ -10,7 +10,7 @@ nix/pkgs/default.nix         the pkgs.rime.* set (overlays.default); add a line 
 nix/pkgs/rimed.nix           the rimed Cargo workspace (rimed, rime, rime-agentd, rime-aid, rime-secretd, rime-remoted)
 nix/pkgs/rime-shell.nix      Rime Shell from the rime-shell input (flake = false)
 nix/pkgs/rime-libexec.nix    files/system/libexec as store paths (bootc: /usr/libexec)
-nix/pkgs/kernel/default.nix  Rime's kernel (stub: nixpkgs linuxPackages_latest until the kernel work lands)
+nix/pkgs/kernel/default.nix  Rime's kernel: CachyOS 7.2.9 + BORE via linuxManualConfig (nix/pkgs/kernel/README.md)
 nix/modules/default.nix      nixosModules.default: imports every module + sets nixpkgs.overlays
 nix/modules/base.nix         rime.base      stateVersion, nix settings, NetworkManager, locale, mutable users
 nix/modules/desktop.nix      rime.desktop   sessions, Shell, portals, fonts, audio
@@ -21,12 +21,12 @@ nix/modules/security.nix     rime.security  firewall, sudo, PAM/keyring, sshd, S
 nix/modules/packages-catalogue.nix  rime.catalogue  `rime install` catalogue and the default package set
 nix/hosts/vm.nix             nixosConfigurations.rime-vm (QEMU; test user rime/rime lives ONLY here)
 nix/tests/default.nix        checks.x86_64-linux.<name>, one file per test
-nix/tests/vm-boot.nix        boots nixosModules.default, waits for multi-user.target
+nix/tests/vm-boot.nix        the full system test: rime-vm + Rime's kernel, greeter login, Shell, rimed, sshd, firewall
 ```
 
 Outputs: `packages.x86_64-linux.{rimed,rime-shell,rime-libexec,rime-kernel}`, `overlays.default`,
 `nixosModules.{default,base,desktop,services,kernel,gaming,security,packages-catalogue}`,
-`nixosConfigurations.rime-vm`, `checks.x86_64-linux.{eval,vm-boot}`.
+`nixosConfigurations.rime-vm`, `checks.x86_64-linux.{eval,vm-boot,rimed,libexec,desktop,shell,gaming,security,kernel-*}`.
 
 Rules for the per-area modules:
 
@@ -34,9 +34,8 @@ Rules for the per-area modules:
 - Modules reach Rime packages as `pkgs.rime.<name>`. Only `nixosModules.default` sets the overlay, so import
   `default`, not an area module on its own.
 - Tests import `self.nixosModules.default` and set `node.pkgsReadOnly = false` (the module sets
-  `nixpkgs.overlays`, which a read-only test pkgs refuses). The `vm-boot` node leaves every `rime.<area>.enable`
-  at its default (off); `checks.eval` covers `rime-vm`, where they are on. An area that wants to be booted
-  enables itself in its own test.
+  `nixpkgs.overlays`, which a read-only test pkgs refuses). The `vm-boot` node imports `nix/hosts/vm.nix` (every
+  area on) and adds Rime's kernel; an area's own test enables only what it needs.
 - `nixpkgs.config.allowUnfree = true` is set once in `base.nix` and once in the flake's own `pkgs`; do not add it
   elsewhere.
 

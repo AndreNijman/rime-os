@@ -23,6 +23,9 @@ let
   # /proc/<pid>/exe is .rime-agentd-wrapped). The unit rename that completes G7's mutant is below.
   rimedWeak = pkgs.rime.rimed.overrideAttrs (old: {
     pname = "rimed-weakened";
+    # The mutation is deliberate, and rimed's own unit test (sandbox::tests::nothing_under_nix_may_be_writable)
+    # refuses it at build time. That test passes in the real rimed; here the VM test is the one that must see it.
+    doCheck = false;
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.makeWrapper ];
     postPatch = (old.postPatch or "") + ''
       substituteInPlace rimed/rime-agent-core/src/sandbox.rs \
@@ -40,7 +43,8 @@ let
   # because rime.services belongs to another area; the unit name is part of G7.
   agentRuntime = { weakened ? false }: { config, ... }:
     let
-      rimed = if weakened then rimedWeak else pkgs.rime.rimed;
+      # rime.services.rimed.package, not pkgs.rime.rimed: the module's G2 mutant swaps the package there.
+      rimed = if weakened then rimedWeak else config.rime.services.rimed.package;
       unit = if weakened then "rime-agent-runtime" else "rime-agentd";
     in
     {
