@@ -140,7 +140,11 @@ let
   '';
 
   # ── rime-keyring-login: the login password becomes the keyring's (Containerfile.base:3864-3905) ─
-  # Run by pam_exec in greetd's auth stack. Python, with four FHS paths made explicit.
+  # Run by pam_exec in greetd's auth stack. Python, with four FHS paths made explicit, and one name:
+  # the "a daemon is already running, move nothing" guard matches /proc/PID/comm, and on NixOS the
+  # daemon is a wrapGAppsHook wrapper's target, so its comm is ".gnome-keyring-" (".gnome-keyring-daemon-
+  # wrapped", cut to 15 bytes), never "gnome-keyring-d". Unpatched, the guard never fires and the helper
+  # renames keyring files under a live daemon. checks.desktop asserts the comm and the guard.
   keyringLogin = pkgs.runCommand "rime-keyring-login" { } ''
     mkdir -p $out/libexec
     cp ${files}/system/libexec/rime-keyring-login $out/libexec/rime-keyring-login
@@ -152,7 +156,8 @@ let
                      'PROVIDER_FILE = "${rimeDesktopData}/share/rime/secrets-provider"' \
       --replace-fail 'GNOME_KEYRING_DAEMON = "/usr/bin/gnome-keyring-daemon"' \
                      'GNOME_KEYRING_DAEMON = "${pkgs.gnome-keyring}/bin/gnome-keyring-daemon"' \
-      --replace-fail 'ctypes.CDLL("libcrypto.so.3")' 'ctypes.CDLL("${lib.getLib pkgs.openssl}/lib/libcrypto.so.3")'
+      --replace-fail 'ctypes.CDLL("libcrypto.so.3")' 'ctypes.CDLL("${lib.getLib pkgs.openssl}/lib/libcrypto.so.3")' \
+      --replace-fail 'if comm != "gnome-keyring-d":' 'if comm not in ("gnome-keyring-d", ".gnome-keyring-"):'
     ${pkgs.python3}/bin/python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' \
       $out/libexec/rime-keyring-login
   '';
@@ -174,6 +179,30 @@ let
       hash = "sha256-BNXo+QNpP53RPhb4Z+mUg05oHrPHLA0zencNzaCQEM8=";
     };
   });
+
+  # PAM auth lines (login, which greetd substacks, and greetd itself) that can succeed without the
+  # typed password rime-keyring-login reads. Containerfile.base:3880 refuses the same modules.
+  passwordlessAuthLines = lib.filter
+    (l: lib.hasPrefix "auth " l && lib.any (m: lib.hasInfix "/${m}.so" l) [
+      "pam_fprintd" "pam_u2f" "pam_p11" "pam_pkcs11" "pam_sss" "pam_systemd_home" "pam_howdy"
+      "pam_ssh_agent_auth" "pam_rssh" "pam_ussh" "pam_kanidm"
+    ])
+    (lib.concatMap (svc: lib.splitString "\n" config.security.pam.services.${svc}.text) [ "login" "greetd" ]);
+
+  # The system keymap as the greeter host reads it (sway/labwc: XKB_DEFAULT_*), the same variables and
+  # source file values rime-keymap-env writes; empty ones are left out, as that script does.
+  greeterXkbEnv =
+    let
+      xkb = config.services.xserver.xkb;
+      vars = lib.filterAttrs (_: v: v != "") {
+        XKB_DEFAULT_LAYOUT = xkb.layout;
+        XKB_DEFAULT_VARIANT = xkb.variant;
+        XKB_DEFAULT_MODEL = xkb.model;
+        XKB_DEFAULT_OPTIONS = xkb.options;
+      };
+    in
+    lib.optionalString (vars != { }) ("${pkgs.coreutils}/bin/env "
+      + lib.concatStrings (lib.mapAttrsToList (k: v: "${k}=${lib.escapeShellArg v} ") vars));
 
   # Firefox defaults: files/system/firefox/policies.json (dark UI, about:home) + rime-default-prefs.js.
   firefoxPolicies = (lib.importJSON (files + "/system/firefox/policies.json")).policies;
@@ -222,10 +251,14 @@ in
           message = "rime.desktop: Hyprland ${hyprland.version} cannot read Rime's Lua config (needs >= 0.57).";
         }
         {
-          # The keyring-login hook needs a password in the stack. fprintd adds pam_fprintd to every
-          # service by default and would let auth succeed without one (Containerfile.base:3880).
-          assertion = !config.services.fprintd.enable || !config.security.pam.services.login.fprintAuth;
-          message = "rime.desktop: fprintd may not authenticate the login stack (rime-keyring-login needs a typed password).";
+          # The keyring-login hook needs a typed password in the stack: pam_exec expose_authtok PROMPTS
+          # when there is none, so a module that can succeed without one (fingerprint, token, homed,
+          # sssd, ssh agent) would put a second password prompt in front of the login. bootc refuses the
+          # same list in system-auth (Containerfile.base:3880). Read from the generated PAM text, so any
+          # option that adds such a module (fprintd, u2f, p11, sssd, homed, howdy, ...) is caught.
+          assertion = passwordlessAuthLines == [ ];
+          message = "rime.desktop: the login stack can succeed without a typed password, so rime-keyring-login "
+            + "would prompt for one: ${lib.concatStringsSep "; " passwordlessAuthLines}";
         }
       ];
 
@@ -236,7 +269,11 @@ in
           user = cfg.greeterUser;
           # rime-greet-session gives the greeter a session bus + accessibility bus, then execs sway.
           # --unsupported-gpu: sway exits on any machine where nvidia-drm binds without it (rime-logs 46).
-          command = "${sw}/libexec/rime-greet-session ${lib.getExe pkgs.sway} --unsupported-gpu"
+          # The XKB_DEFAULT_* prefix: greetd does not pass the manager environment (where 50-rime-keymap
+          # puts the keymap) to the greeter, measured in checks.desktop: show-environment had the keymap,
+          # the greeter's sway did not. On NixOS the keymap is configuration (services.xserver.xkb), so
+          # it is handed to the greeter host directly.
+          command = "${greeterXkbEnv}${sw}/libexec/rime-greet-session ${lib.getExe pkgs.sway} --unsupported-gpu"
             + " -c ${rimeGreet}/share/rime-greet/sway-greet.conf";
         };
       };
@@ -252,6 +289,11 @@ in
         # came from bootc carries it owned by Fedora's greetd uid, which NixOS numbers differently.
         "d /var/lib/rime-greet 0755 ${cfg.greeterUser} ${cfg.greeterUser} -"
         "Z /var/lib/rime-greet - ${cfg.greeterUser} ${cfg.greeterUser} -"
+        # ...except wallpapers/, which root's rime-greet-wallpaper publishes into and the greeter only
+        # reads (bootc tmpfiles: root:root). Without this the recursive Z above hands every published
+        # wallpaper and accent to the greeter account at each boot. Parents are processed first, so
+        # this runs after the Z above. (The directory itself is created by the libexec area.)
+        "Z /var/lib/rime-greet/wallpapers - root root -"
       ];
       # VARIANT_ID picks the greeter's edition accent (GreetContext.qml:313-320).
       system.nixos.variant_id = lib.mkDefault "rime";
@@ -487,8 +529,12 @@ in
         ELECTRON_OZONE_PLATFORM_HINT = "auto";
       };
       environment.etc = {
-        "gtk-3.0/settings.ini".source = files + "/system/gtk/gtk-3.0-settings.ini";
-        "gtk-4.0/settings.ini".source = files + "/system/gtk/gtk-4.0-settings.ini";
+        # bootc: /etc/gtk-{3,4}.0/settings.ini. nixpkgs' GTK is built with sysconfdir = its own store
+        # path, so /etc/gtk-N.0 is never read; GTK also reads $XDG_CONFIG_DIRS/gtk-N.0, and NixOS sets
+        # XDG_CONFIG_DIRS=/etc/xdg. Under Hyprland there is no settings daemon, so this is what makes
+        # GTK apps dark by default.
+        "xdg/gtk-3.0/settings.ini".source = files + "/system/gtk/gtk-3.0-settings.ini";
+        "xdg/gtk-4.0/settings.ini".source = files + "/system/gtk/gtk-4.0-settings.ini";
         "xdg/qt6ct/qt6ct.conf".source = files + "/system/qt6ct/qt6ct.conf";
         "mpv/mpv.conf".source = files + "/desktop/mpv/mpv.conf";
       };

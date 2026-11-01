@@ -3,6 +3,29 @@
 # wiring, the session list and the portal/audio services the sessions rely on.
 { pkgs, self }:
 
+let
+  # A gnome-keyring binary keyring with no items whose password is "rime" (the test account's), in the
+  # format rime-keyring-login reads (gkm-secret-binary.c: header, salt, iterated SHA-256 -> AES-128-CBC,
+  # MD5 of the plaintext up front). Seeded as the user's DEFAULT keyring so the login has to move it.
+  keyringFixture = pkgs.runCommand "rime-test-keyring" { nativeBuildInputs = [ pkgs.python3 pkgs.openssl ]; } ''
+    python3 - "$out" <<'PY'
+    import hashlib, struct, subprocess, sys
+    password, salt, iterations = b"rime", bytes(range(1, 9)), 1953
+    def string(b): return struct.pack(">I", len(b)) + b
+    plain = bytearray(16)                      # MD5 placeholder, then the items' data (none)
+    plain[:16] = hashlib.md5(bytes(plain[16:])).digest()
+    digest = hashlib.sha256(password + salt).digest()
+    for _ in range(iterations - 1):
+        digest = hashlib.sha256(digest).digest()
+    blob = subprocess.run(["openssl", "enc", "-aes-128-cbc", "-nopad", "-K", digest[:16].hex(),
+                           "-iv", digest[16:32].hex()], input=bytes(plain), capture_output=True, check=True).stdout
+    data = (b"GnomeKeyring\n\r\0\n" + b"\0\0\0\0" + string(b"Default keyring") + bytes(16)
+            + struct.pack(">II", 0, 0) + struct.pack(">I", iterations) + salt + bytes(16)
+            + struct.pack(">I", 0) + struct.pack(">I", len(blob)) + blob)
+    open(sys.argv[1], "wb").write(data)
+    PY
+  '';
+in
 pkgs.testers.runNixOSTest {
   name = "rime-desktop";
 
@@ -70,6 +93,23 @@ pkgs.testers.runNixOSTest {
         machine.fail("grep -r '@KB_' /home/rime/.config/hypr")
         machine.succeed("chown -R rime:users /home/rime/.config/hypr")
 
+    with subtest("greeter state: the greeter owns its memory, root owns the published wallpapers"):
+        machine.succeed("install -d -o root -g root /var/lib/rime-greet/wallpapers")
+        machine.succeed("touch /var/lib/rime-greet/wallpapers/1000.jpg /var/lib/rime-greet/rime-test-state")
+        machine.succeed("chown 4242:4242 /var/lib/rime-greet/rime-test-state")  # a bootc machine's greetd uid
+        machine.succeed("systemd-tmpfiles --create --prefix=/var/lib/rime-greet")
+        machine.succeed("test \"$(stat -c %U /var/lib/rime-greet/rime-test-state)\" = greetd")
+        machine.succeed("test \"$(stat -c %U:%G /var/lib/rime-greet/wallpapers/1000.jpg)\" = root:root")
+        machine.succeed("test \"$(stat -c %U:%G /var/lib/rime-greet/wallpapers)\" = root:root")
+        machine.succeed("rm -f /var/lib/rime-greet/wallpapers/1000.jpg /var/lib/rime-greet/rime-test-state")
+
+    with subtest("the user's default keyring opens with the login password (rime-keyring-login moves it)"):
+        kr = "/home/rime/.local/share/keyrings"
+        machine.succeed(f"install -d -m 700 -o rime -g users /home/rime/.local /home/rime/.local/share {kr}")
+        machine.succeed(f"install -m 600 -o rime -g users ${keyringFixture} {kr}/Default_keyring.keyring")
+        machine.succeed(f"printf Default_keyring > {kr}/default && chown rime:users {kr}/default")
+        machine.fail(f"test -e {kr}/login.keyring")
+
     with subtest("boots to rime-greet on VT 1"):
         machine.wait_for_unit("greetd.service")
         machine.wait_until_succeeds("pgrep -u greetd -x sway")
@@ -79,6 +119,16 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(
             "loginctl list-sessions --no-legend | awk '$3==\"greetd\"{print $1}' | head -n1 | "
             "xargs -r -I{} loginctl show-session {} -p VTNr -p Class | tr '\\n' ' ' | grep 'VTNr=1' | grep 'Class=greeter'"
+        )
+        # 50-rime-keymap: the system keymap (services.xserver.xkb -> 00-keyboard.conf) reaches the
+        # manager environment and from there the greeter's sway (NixOS default options, not sway's)
+        machine.succeed("systemctl show-environment | grep -x XKB_DEFAULT_LAYOUT=us")
+        machine.succeed("systemctl show-environment | grep -x XKB_DEFAULT_OPTIONS=terminate:ctrl_alt_bksp")
+        print("greetd's own XKB environment:", machine.succeed(
+            "tr '\\0' '\\n' < /proc/$(pgrep -u root -x greetd | head -n1)/environ | grep XKB_ || true"))
+        machine.succeed(
+            "tr '\\0' '\\n' < /proc/$(pgrep -u greetd -x sway | head -n1)/environ "
+            "| grep -x XKB_DEFAULT_OPTIONS=terminate:ctrl_alt_bksp"
         )
         machine.sleep(8)  # let the greeter paint before the screenshot
         machine.screenshot("greeter")
@@ -112,6 +162,26 @@ pkgs.testers.runNixOSTest {
         # the daemon is a nix-wrapped binary (comm ".gnome-keyring-"), so match its path
         machine.wait_until_succeeds("pgrep -u rime -f '/bin/gnome-keyring-daemon .*--login'", timeout=60)
         machine.wait_until_succeeds("test -s /home/rime/.local/share/keyrings/login.keyring", timeout=60)
+        # the seeded default keyring became the login keyring, so the login password opens it
+        machine.succeed(f"test ! -e {kr}/Default_keyring.keyring")
+        machine.succeed(f"test \"$(cat {kr}/default)\" = login")
+        print(machine.succeed("journalctl -b -t rime-keyring-login --no-pager"))
+        machine.succeed("journalctl -b -t rime-keyring-login --no-pager | grep \"'Default_keyring' keyring is now the login keyring\"")
+
+    with subtest("rime-keyring-login moves nothing while the user's keyring daemon runs"):
+        pid = machine.succeed("pgrep -u rime -f '/bin/gnome-keyring-daemon .*--login' | head -n1").strip()
+        comm = machine.succeed(f"cat /proc/{pid}/comm").strip()
+        print("keyring daemon comm:", comm, machine.succeed(f"stat -c %U /proc/{pid}").strip())
+        # the comm the helper's guard is patched to know (nix/modules/desktop.nix keyringLogin)
+        assert comm == ".gnome-keyring-", comm
+        hook = machine.succeed("grep -o '/nix/store/[^ ]*/libexec/rime-keyring-login' /etc/pam.d/greetd").strip()
+        machine.succeed(f"install -m 600 -o rime -g users ${keyringFixture} {kr}/Other.keyring")
+        machine.succeed(f"printf Other > {kr}/default && chown rime:users {kr}/default")
+        # what pam_exec does at the next login: the password on stdin, as root
+        machine.succeed(f"printf 'rime\\0' | env PAM_TYPE=auth PAM_USER=rime {hook}")
+        machine.succeed(f"test -e {kr}/Other.keyring")
+        machine.succeed(f"test \"$(cat {kr}/default)\" = Other")
+        machine.succeed("journalctl -b -t rime-keyring-login --no-pager | grep 'a keyring daemon is already running'")
 
     with subtest("the session's user services"):
         machine.wait_until_succeeds(as_rime("systemctl --user is-active pipewire.socket"))
@@ -119,5 +189,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -e /etc/xdg/xdg-desktop-portal/hyprland-portals.conf")
         machine.succeed("grep -x 'org.freedesktop.impl.portal.Secret=gnome-keyring' /etc/xdg/xdg-desktop-portal/hyprland-portals.conf")
         machine.succeed("fc-list | grep 'JetBrainsMono Nerd Font'")
+        # GTK reads settings.ini from $XDG_CONFIG_DIRS (its sysconfdir is a store path)
+        machine.succeed(as_rime("test -n \"$XDG_CONFIG_DIRS\" && for d in $(echo $XDG_CONFIG_DIRS | tr : ' '); do "
+                                "grep -x gtk-application-prefer-dark-theme=1 $d/gtk-3.0/settings.ini && exit 0; done; exit 1"))
   '';
 }
