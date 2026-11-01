@@ -146,9 +146,11 @@ enum Cmd {
     },
     /// What verified this boot, and what the boot counter believes (§22).
     ///
-    /// Read-only. Rime is moving every machine to systemd-boot, and `rime
-    /// update` migrates one in place when it can be done safely; a machine
-    /// still on GRUB is reported as the normal state rather than as a fault.
+    /// `status` is read-only. `migrate` moves a machine from GRUB to
+    /// systemd-boot in place, only when asked, only when the machine is
+    /// healthy, and only when it can be done safely; `rime update` no longer
+    /// does it on its own. A machine still on GRUB is reported as the normal
+    /// state rather than as a fault.
     /// Boot counting, signed UKIs and TPM-bound unlock all live on the
     /// systemd-boot path, and this is the command that says which of them is
     /// actually in effect on this machine.
@@ -1324,6 +1326,13 @@ struct UpdateArgs {
     /// Stage the update for the next boot and activate nothing live.
     #[arg(long, conflicts_with_all = ["check", "firmware_only"])]
     no_live: bool,
+    /// Move this machine from GRUB to systemd-boot in place, instead of
+    /// updating the image this time, if it is healthy and can be moved safely.
+    ///
+    /// The same as `rime boot migrate`. Without it, an update never touches
+    /// the boot path. A refusal is printed and the update goes ahead.
+    #[arg(long, conflicts_with_all = ["check", "plan", "firmware_only"])]
+    migrate_boot: bool,
 }
 
 /// `rime live <verb>`.
@@ -1515,6 +1524,9 @@ fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
         // password in front of "which channel am I on", which is the question
         // somebody asks when they are already in trouble.
         Cmd::Channel { cmd: channel::ChannelCmd::Set { .. } } => Some("channel set"),
+        // Only `migrate`: it stages a bootloader on the ESP and writes
+        // BootNext. `status` stays root-free (see the dispatch below).
+        Cmd::Boot { cmd: boot::BootCmd::Migrate } => Some("boot migrate"),
         // `--source capsule` writes nothing the system owns: it installs into
         // a rootless per-user container. Demanding root for it would be worse
         // than pointless — root has no capsules, so `sudo rime install
@@ -1640,11 +1652,11 @@ async fn main() {
         // Read-only, like `perf` and `workload`, and for the same reason it is
         // not in the privileged set: it measures and reports.
         Cmd::Gaming(args) => gaming::gaming_main(args),
-        // Also read-only, and deliberately not in the privileged set even
-        // though the boot chain is the most privileged thing on the machine.
-        // Reading the ESP does need root, and `status` reports that as
-        // "unavailable, and why" rather than demanding a password to answer
-        // "what verified my boot".
+        // `status` is read-only, and deliberately not in the privileged set
+        // even though the boot chain is the most privileged thing on the
+        // machine. Reading the ESP does need root, and `status` reports that
+        // as "unavailable, and why" rather than demanding a password to answer
+        // "what verified my boot". `migrate` writes, and is in the set.
         Cmd::Boot { cmd } => boot::boot_main(cmd),
         Cmd::Lid { cmd } => lid::main(cmd),
         Cmd::Permissions { cmd } => permissions::main(cmd),
@@ -1697,6 +1709,7 @@ async fn main() {
             skip_packages: args.skip_packages,
             skip_flatpak: args.skip_flatpak,
             force: args.force,
+            migrate_boot: args.migrate_boot,
             allow_unverified: args.allow_unverified,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
@@ -3819,6 +3832,30 @@ mod tests {
         );
         assert_eq!(privilege(&["rime", "remove", "htop"]), Some("remove"));
         assert_eq!(privilege(&["rime", "pkg", "upgrade"]), Some("pkg upgrade"));
+    }
+
+    #[test]
+    fn boot_migrate_needs_root_and_boot_status_does_not() {
+        assert_eq!(privilege(&["rime", "boot", "migrate"]), Some("boot migrate"));
+        assert_eq!(privilege(&["rime", "boot", "status"]), None);
+        assert_eq!(privilege(&["rime", "boot", "status", "--json"]), None);
+    }
+
+    #[test]
+    fn update_migrates_the_boot_path_only_when_asked() {
+        let opts = |argv: &[&str]| match Cli::try_parse_from(argv).expect("parses").command {
+            Cmd::Update(a) => a.migrate_boot,
+            _ => panic!("not an update"),
+        };
+        assert!(!opts(&["rime", "update"]), "a bare update must not migrate the boot path");
+        assert!(opts(&["rime", "update", "--migrate-boot"]));
+        // Asking to migrate and asking to change nothing contradict each other.
+        for bad in [
+            ["rime", "update", "--migrate-boot", "--check"],
+            ["rime", "update", "--migrate-boot", "--plan"],
+        ] {
+            assert!(Cli::try_parse_from(bad).is_err(), "{bad:?} must not parse");
+        }
     }
 
     #[test]

@@ -308,6 +308,11 @@ pub struct UpdateOptions {
     pub skip_flatpak: bool,
     /// Ignore §26's rollout stop and update anyway.
     pub force: bool,
+    /// Move this machine from ostree + GRUB to composefs + systemd-boot first,
+    /// if it is healthy and the engine's precheck passes. Never implied: an
+    /// update without it leaves the boot path alone (2026-11-01, see the
+    /// comment at the call in `update`).
+    pub migrate_boot: bool,
     /// Deploy an image whose signature §27's gate refused.
     ///
     /// Separate from `force` because the two gates answer different
@@ -776,44 +781,253 @@ pub(crate) fn verify_staged(allow_unverified: bool, reference: &str, digest: &st
     }
 }
 
+/// Where `rime-boot-migrate` keeps its state (`STATE=` in the engine).
+///
+/// On a machine that came from APEX, `/var/lib/apex` is a symlink to
+/// `/var/lib/rime` (`rime-migrate-from-apex`), so notes that say
+/// `/var/lib/apex/boot-migrate/phase` name this same file.
+const BOOT_MIGRATE_STATE: &str = "/var/lib/rime/boot-migrate";
+
+/// The engine's phase file: `Ok(None)` when no migration was ever started.
+///
+/// `$RIME_MIGRATE_STATE` moves the directory, exactly as it moves the
+/// engine's own (`rime-boot-migrate`'s test hook), so a test can put both on
+/// one fixture. Only a path moves; the engine is still a fixed absolute path.
+fn read_migration_phase() -> Result<Option<String>, String> {
+    let dir = std::env::var_os("RIME_MIGRATE_STATE")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(BOOT_MIGRATE_STATE));
+    let p = dir.join("phase");
+    match std::fs::read_to_string(&p) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{}: {e}", p.display())),
+    }
+}
+
+/// What the boot-path migration gate decided, before the engine is run.
+///
+/// Decided by [`migration_gate`], which runs nothing. The decision and the
+/// engine are kept apart so the decision can be tested exhaustively, and so a
+/// change that runs the engine without asking is a change to this enum's one
+/// `Run` arm, which the tests below pin.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MigrationGate {
+    /// Nobody asked. The boot path is left exactly as it is.
+    NotAsked,
+    /// Nobody asked, and an earlier attempt's trial boot did not come up. The
+    /// boot path is still left alone, but the machine says so, by name, on
+    /// every update until somebody acts: it is otherwise indistinguishable
+    /// from a machine that never tried.
+    NotAskedLastFailed,
+    /// Nobody asked, and a complete stage is waiting (a run that stopped
+    /// between stage and commit). Left alone, but said once per update: every
+    /// image update makes that stage older than what this machine runs.
+    NotAskedStaged,
+    /// Asked, and refused before the engine ran. `name` is stable, in the
+    /// same `REFUSED [name]` shape the engine uses for its own refusals.
+    Refused { name: &'static str, lines: Vec<String> },
+    /// Asked, and every check passed: run the engine.
+    Run,
+}
+
+/// The gate in front of the in-place move to systemd-boot.
+///
+/// Two conditions, both required. The user asked for it (`rime boot migrate`,
+/// or `rime update --migrate-boot`), and the machine is healthy right now.
+/// One exception, which starts nothing: a migration already COMMITTED is
+/// always handed to the engine (see the first check below).
+///
+/// Health is the same verdict §26's rollout stop uses (`channel::health`): the
+/// recovery surface's regression rows plus `systemctl --failed`. A machine
+/// that is already failing is the wrong one to move: the first boot on the new
+/// path would be judged against a baseline that was broken before the move,
+/// and a migration that "failed" there teaches nobody anything. Unlike the
+/// rollout stop, a health reading that could not be TAKEN refuses here: that
+/// stop must never strand a machine on the release that broke it, but nothing
+/// is stranded by not moving a boot path that works.
+///
+/// `phase=failed` is checked before health and named on its own, because the
+/// engine will not re-arm it either (`rime-boot-migrate retry` does), and a
+/// user told only "refused" would ask again and get the same answer.
+///
+/// `health` is called only when the answer depends on it, so an update nobody
+/// asked to migrate never pays for the probe.
+pub(crate) fn migration_gate(
+    asked: bool,
+    phase: Result<Option<String>, String>,
+    health: impl FnOnce() -> (rimed_core::channel::Verdict, Option<String>),
+) -> MigrationGate {
+    let phase = phase.map(|p| p.map(|s| s.trim().to_string()));
+    // Committed: BootNext is already set. This goes to the engine whether or
+    // not anyone asked, because the engine is what stops an image update
+    // from being staged on top of it — in the same boot it answers "reboot
+    // to finish" (exit 0, so `update` returns before `bootc upgrade`), and
+    // after a boot that did not come up it records `failed` and refuses. On
+    // `committed` it installs nothing either way, so this is not a migration
+    // nobody asked for: it is the one state where skipping the engine would
+    // give one shutdown two finalize paths.
+    if matches!(&phase, Ok(Some(p)) if p == "committed") {
+        return MigrationGate::Run;
+    }
+    if !asked {
+        return match phase {
+            Ok(Some(p)) if p == "failed" => MigrationGate::NotAskedLastFailed,
+            Ok(Some(p)) if p == "staged" => MigrationGate::NotAskedStaged,
+            _ => MigrationGate::NotAsked,
+        };
+    }
+    let phase = match phase {
+        Ok(p) => p,
+        Err(e) => {
+            return MigrationGate::Refused {
+                name: "state-unreadable",
+                lines: vec![
+                    format!("the migration's state could not be read: {e}"),
+                    "Without it nobody can say whether a migration is already in flight.".into(),
+                ],
+            }
+        }
+    };
+    match phase.as_deref() {
+        Some("failed") => {
+            return MigrationGate::Refused {
+                name: "last-attempt-failed",
+                lines: vec![
+                    "The last migration was committed and its trial boot did not come up.".into(),
+                    "This machine is on GRUB and working. To try once more, run".into(),
+                    "`sudo rime-boot-migrate retry` first, then ask again.".into(),
+                ],
+            }
+        }
+        // Already moved. The engine says "nothing to do" (exit 3) without
+        // touching anything, and a failed unit on a migrated machine is not a
+        // reason to answer "refused" to a question that has no work in it.
+        Some("confirmed") => return MigrationGate::Run,
+        _ => {}
+    }
+    let (verdict, unread) = health();
+    if let Some(why) = unread {
+        return MigrationGate::Refused {
+            name: "health-unchecked",
+            lines: vec![
+                format!("this machine's health could not be checked: {why}"),
+                "The boot path is moved only on a machine that is known to be healthy.".into(),
+            ],
+        };
+    }
+    if !verdict.healthy {
+        let mut lines = vec!["This machine has a problem right now:".to_string()];
+        lines.extend(verdict.reasons.iter().map(|r| format!("  {r}")));
+        lines.push(
+            "The boot path is moved only on a healthy machine, so the first boot on the".into(),
+        );
+        lines.push("new path is judged against one that worked. Fix it, then ask again.".into());
+        return MigrationGate::Refused { name: "unhealthy", lines };
+    }
+    MigrationGate::Run
+}
+
+/// `rime-boot-migrate`'s answer when nothing was done because nothing was
+/// asked, or because there is nothing to do. Shared with the engine's exit 3.
+pub(crate) const MIGRATION_NOTHING_DONE: i32 = 3;
+/// A refusal: the machine keeps its boot path, and the reason was printed.
+/// Shared with the engine's exit 10.
+pub(crate) const MIGRATION_REFUSED: i32 = 10;
+
+/// The boot-path step: the gate, then the engine if the gate says so.
+///
+/// Returns the engine's own vocabulary: 0 migrated (the caller must NOT also
+/// run `bootc upgrade` in the same invocation), [`MIGRATION_NOTHING_DONE`],
+/// [`MIGRATION_REFUSED`], anything else failed. None of them is fatal to
+/// `rime update`: the machine is on GRUB and GRUB works.
+pub(crate) fn boot_migration(asked: bool) -> i32 {
+    match migration_gate(asked, read_migration_phase(), crate::channel::health) {
+        MigrationGate::NotAsked => MIGRATION_NOTHING_DONE,
+        MigrationGate::NotAskedLastFailed => {
+            eprintln!(
+                "rime: boot-path migration [last-attempt-failed]: an earlier move to systemd-boot\n\
+                 rime: did not come up on its trial boot. This machine is on GRUB and working,\n\
+                 rime: and nothing retries on its own. To try once more:\n\
+                 rime:   sudo rime-boot-migrate retry && sudo rime boot migrate"
+            );
+            MIGRATION_NOTHING_DONE
+        }
+        MigrationGate::NotAskedStaged => {
+            eprintln!(
+                "rime: boot-path migration [staged]: a staged move to systemd-boot is waiting and
+                 rime: was not committed. It is older than the system this update installs:
+                 rime: `sudo rime-boot-migrate abort` discards it, and `sudo rime boot migrate`
+                 rime: then stages a fresh one when you want it."
+            );
+            MIGRATION_NOTHING_DONE
+        }
+        MigrationGate::Refused { name, lines } => {
+            eprintln!("rime: boot-path migration REFUSED [{name}]");
+            for l in lines {
+                eprintln!("rime: {l}");
+            }
+            eprintln!("rime: this machine keeps booting the way it does now.");
+            MIGRATION_REFUSED
+        }
+        MigrationGate::Run => run_migration_engine(),
+    }
+}
+
 /// The in-place move from ostree + GRUB to composefs + systemd-boot.
 ///
-/// Returns true only when this machine actually migrated, in which case the
-/// caller must NOT also run `bootc upgrade` in the same invocation.
-///
-/// Exit codes are the engine's: 0 migrated, 10 refused (and it said why, at
-/// length, on stderr), anything else failed (likewise). Neither of the last
-/// two is fatal to `rime update`: the machine is on GRUB and GRUB works.
-fn migrate_boot_path() -> bool {
+/// Reached only through [`boot_migration`]'s gate. Exit codes are the
+/// engine's: 0 migrated, 3 nothing to do, 10 refused (and it said why, at
+/// length, on stderr), anything else failed (likewise).
+fn run_migration_engine() -> i32 {
     const ENGINE: &str = "/usr/libexec/rime-boot-migrate";
     if !Path::new(ENGINE).exists() {
-        return false;
+        eprintln!("rime: this image has no boot-path migration engine ({ENGINE})");
+        return 1;
     }
     match run(ENGINE, &["auto"]) {
-        Ok(0) => true,
+        Ok(0) => 0,
         // 3 is "there is nothing to do here" — this machine has already
-        // migrated, or is booted on the new path. Silent on purpose: a
-        // migrated machine printing four lines about staying on GRUB on every
-        // single update would be worse than saying nothing.
-        Ok(3) => false,
+        // migrated, or is booted on the new path.
+        Ok(3) => MIGRATION_NOTHING_DONE,
         Ok(10) => {
             eprintln!(
                 "rime: this machine stays on GRUB for now — see the reason above, and\n\
                  rime: `rime-boot-migrate precheck` to re-check it at any time."
             );
-            false
+            MIGRATION_REFUSED
         }
         Ok(code) => {
             eprintln!(
                 "rime: the boot-path migration did not complete (exit {code}). Nothing was\n\
                  rime: committed: this machine still boots the way it did."
             );
-            false
+            code
         }
         Err(e) => {
             eprintln!("rime: could not run the boot-path migration: {e}");
-            false
+            1
         }
+    }
+}
+
+/// `rime boot migrate`: the boot-path move, asked for, on its own.
+///
+/// No image update rides along, for the same reason `rime update
+/// --migrate-boot` returns early after migrating: one invocation, one change
+/// to what the next boot runs.
+pub(crate) fn boot_migrate_command() -> i32 {
+    match boot_migration(true) {
+        0 => 0,
+        MIGRATION_NOTHING_DONE => {
+            println!(
+                "rime: nothing to do: this machine is not on the ostree + GRUB boot path\n\
+                 rime: (it has already moved, or was installed on the new one)."
+            );
+            0
+        }
+        code => code,
     }
 }
 
@@ -979,10 +1193,25 @@ pub fn update(opts: UpdateOptions) -> i32 {
             Some(FsyncGuard::disable())
         };
         // §22's boot-path migration, and it runs INSTEAD of the image update
-        // when it does anything at all. Andre, 2026-09-20: "active machines
-        // should automatically migrate with sudo rime install, not this
-        // dumbass reinstall shit." This is where that happens — the normal
-        // update path, no flag, nothing for the user to choose.
+        // when it does anything at all.
+        //
+        // History, kept because it is the rule this replaces. Andre,
+        // 2026-09-20: "active machines should automatically migrate with sudo
+        // rime install, not this dumbass reinstall shit." Until 2026-11-01 this
+        // was where that happened: the normal update path, no flag, nothing
+        // for the user to choose.
+        //
+        // RESTATED 2026-11-01 (NixOS pivot plan, decisions A5 and A9): the
+        // automatic run is paused. It migrated a real machine whose trial boot
+        // did not come up (phase=failed, the /var join reversed by hand), and
+        // the pivot does not build on this chain. The migration now runs only
+        // when the user asked for it — `rime boot migrate`, or this command
+        // with `--migrate-boot` — AND the machine is healthy right now; see
+        // `migration_gate`. (A migration already committed still goes to the
+        // engine, which then only says "reboot", so no image is staged on
+        // top of a set BootNext.) The other half of the 2026-09-20 rule stands: a
+        // failed, cancelled or power-cut migration must not break the boot,
+        // and the engine still commits at one BootNext write.
         //
         // Instead of, not as well as: the migration deploys the digest this
         // machine is ALREADY running, so it changes the boot path and nothing
@@ -992,10 +1221,9 @@ pub fn update(opts: UpdateOptions) -> i32 {
         //
         // A refusal is not a failure. A machine that must not migrate — Secure
         // Boot with an unsigned loader, an ESP too small to hold two
-        // deployments — keeps booting GRUB and takes its update normally. The
-        // engine prints why, in full, and that is deliberate: it is the reason
-        // the machine is not getting a feature it was promised.
-        if migrate_boot_path() {
+        // deployments, a failed unit right now — keeps booting GRUB and takes
+        // its update normally. The reason is printed in full.
+        if boot_migration(opts.migrate_boot) == 0 {
             println!(
                 "rime: the boot path was migrated. Reboot when you like; this update did not\n\
                  rime: change the OS image, and the next one will come through the new path."
@@ -1436,5 +1664,122 @@ mod tests {
         assert!(fwupd_idle(FWUPD_NOT_FOUND));
         assert!(!fwupd_idle(0));
         assert!(!fwupd_idle(1));
+    }
+
+    // ── the boot-path migration gate (2026-11-01: asked for, and healthy) ──
+
+    use rimed_core::channel::Verdict;
+
+    fn healthy() -> (Verdict, Option<String>) {
+        (Verdict { healthy: true, reasons: vec![] }, None)
+    }
+
+    fn never_probed() -> (Verdict, Option<String>) {
+        panic!("the health probe ran for an update nobody asked to migrate")
+    }
+
+    fn phase(p: &str) -> Result<Option<String>, String> {
+        Ok(Some(format!("{p}\n")))
+    }
+
+    #[test]
+    fn an_update_nobody_asked_to_migrate_never_runs_the_engine() {
+        // The 2026-09-20 behaviour was exactly this case returning Run. Every
+        // phase the engine can leave behind, and no phase at all, must leave
+        // the boot path alone, and must not even pay for the health probe.
+        for p in [None, Some("confirmed"), Some("weird")] {
+            let ph = Ok(p.map(|s| s.to_string()));
+            assert_eq!(migration_gate(false, ph, never_probed), MigrationGate::NotAsked, "{p:?}");
+        }
+        // A waiting stage is left alone too, and said.
+        assert_eq!(
+            migration_gate(false, phase("staged"), never_probed),
+            MigrationGate::NotAskedStaged
+        );
+        assert_eq!(
+            migration_gate(false, Err("EACCES".into()), never_probed),
+            MigrationGate::NotAsked
+        );
+    }
+
+    #[test]
+    fn a_failed_attempt_is_named_whether_or_not_anyone_asked() {
+        assert_eq!(
+            migration_gate(false, phase("failed"), never_probed),
+            MigrationGate::NotAskedLastFailed
+        );
+        match migration_gate(true, phase("failed"), healthy) {
+            MigrationGate::Refused { name, lines } => {
+                assert_eq!(name, "last-attempt-failed");
+                assert!(lines.iter().any(|l| l.contains("rime-boot-migrate retry")), "{lines:?}");
+            }
+            other => panic!("a failed attempt was not refused by name: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn asked_and_healthy_is_the_only_way_to_run() {
+        assert_eq!(migration_gate(true, Ok(None), healthy), MigrationGate::Run);
+        // A stage a power cut left behind commits only when asked, and healthy.
+        assert_eq!(migration_gate(true, phase("staged"), healthy), MigrationGate::Run);
+        // A partial verdict (rows that could not be measured) is still healthy:
+        // the same reading §26's stop takes.
+        let partial = || {
+            (Verdict { healthy: true, reasons: vec!["gpu-driver: could not be checked".into()] }, None)
+        };
+        assert_eq!(migration_gate(true, Ok(None), partial), MigrationGate::Run);
+    }
+
+    #[test]
+    fn an_unhealthy_machine_is_refused_and_told_why() {
+        let sick = || {
+            (
+                Verdict { healthy: false, reasons: vec!["systemd unit failed: foo.service".into()] },
+                None,
+            )
+        };
+        match migration_gate(true, Ok(None), sick) {
+            MigrationGate::Refused { name, lines } => {
+                assert_eq!(name, "unhealthy");
+                assert!(lines.iter().any(|l| l.contains("foo.service")), "{lines:?}");
+            }
+            other => panic!("an unhealthy machine was migrated: {other:?}"),
+        }
+        // A staged migration does not get past the health check either.
+        assert!(matches!(
+            migration_gate(true, phase("staged"), sick),
+            MigrationGate::Refused { name: "unhealthy", .. }
+        ));
+    }
+
+    #[test]
+    fn a_health_reading_that_was_not_taken_refuses() {
+        let unread = || {
+            (Verdict { healthy: true, reasons: vec![] }, Some("could not run systemctl".to_string()))
+        };
+        assert!(matches!(
+            migration_gate(true, Ok(None), unread),
+            MigrationGate::Refused { name: "health-unchecked", .. }
+        ));
+        assert!(matches!(
+            migration_gate(true, Err("EIO".into()), healthy),
+            MigrationGate::Refused { name: "state-unreadable", .. }
+        ));
+    }
+
+    #[test]
+    fn a_committed_migration_always_reaches_the_engine() {
+        // BootNext is set. Skipping the engine here would let the update stage
+        // an ostree deployment on top of it; the engine installs nothing on
+        // `committed`, it only says "reboot" or records the failure.
+        assert_eq!(migration_gate(false, phase("committed"), never_probed), MigrationGate::Run);
+        assert_eq!(migration_gate(true, phase("committed"), never_probed), MigrationGate::Run);
+    }
+
+    #[test]
+    fn a_migrated_machine_is_asked_nothing_about_its_health() {
+        // The engine answers "nothing to do" for it; a failed unit there is
+        // not a reason to call a no-op "refused".
+        assert_eq!(migration_gate(true, phase("confirmed"), never_probed), MigrationGate::Run);
     }
 }
