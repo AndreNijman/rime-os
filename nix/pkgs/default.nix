@@ -10,6 +10,8 @@
   rime-branding = callPackage ./rime-branding.nix { };
   # The boot splash built from it: rime-os + 24 accent themes (files/branding/plymouth/ridge).
   rime-plymouth = callPackage ./rime-plymouth.nix { inherit (pkgs.rime) rime-branding; };
+  # The terminal greeting's helpers: image protocol detection and the wallpaper-recoloured logo.
+  rime-greeting = callPackage ./rime-greeting.nix { rime-branding = pkgs.rime.rime-branding; };
   # Not callPackage: that would wrap the kernel's own .override, which NixOS's boot.kernelPackages calls
   # (linuxPackagesFor -> kernel.override { features, randstructSeed, ... }).
   rime-kernel = import ./kernel { inherit pkgs; };
