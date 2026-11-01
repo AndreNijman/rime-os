@@ -453,6 +453,16 @@ else
     [ "$rc" = 0 ] && ! ran && grep -q 'boot-path migration \[staged\]' "$T/out" \
         && [ "$(bootc_seq)" = "--download-only|--from-downloaded|" ] \
         && ok "update: a waiting stage is named, not committed" || bad "staged+unasked" "rc=$rc $(tail -5 "$T/out")"
+    # Each line of a notice starts with "rime:" at the margin. A Rust string
+    # continued without a trailing backslash keeps the source indentation.
+    grep -E '^[[:space:]]+rime: ' "$T/out" >/dev/null \
+        && bad "staged notice layout" "$(grep -E '^[[:space:]]+rime: ' "$T/out")" \
+        || ok "update: the staged notice is not indented by the source"
+    mig_setup failed ""
+    mupd >/dev/null
+    grep -E '^[[:space:]]+rime: ' "$T/out" >/dev/null \
+        && bad "failed notice layout" "$(grep -E '^[[:space:]]+rime: ' "$T/out")" \
+        || ok "update: the last-attempt-failed notice is not indented by the source"
 
     # 27. `rime boot migrate`: the same gate, its own exit codes.
     mig_setup "" ""; echo 0 > "$T/migrate-rc"

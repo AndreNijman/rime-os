@@ -956,9 +956,9 @@ pub(crate) fn boot_migration(asked: bool) -> i32 {
         }
         MigrationGate::NotAskedStaged => {
             eprintln!(
-                "rime: boot-path migration [staged]: a staged move to systemd-boot is waiting and
-                 rime: was not committed. It is older than the system this update installs:
-                 rime: `sudo rime-boot-migrate abort` discards it, and `sudo rime boot migrate`
+                "rime: boot-path migration [staged]: a staged move to systemd-boot is waiting and\n\
+                 rime: was not committed. It is older than the system this update installs:\n\
+                 rime: `sudo rime-boot-migrate abort` discards it, and `sudo rime boot migrate`\n\
                  rime: then stages a fresh one when you want it."
             );
             MIGRATION_NOTHING_DONE
