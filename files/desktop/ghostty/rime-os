@@ -4,8 +4,8 @@
 # rime-static-begin
 font-family = monospace
 font-size = 11.25
-# Alacritty rounds the line height up, Ghostty to the nearest pixel: 17 px cells instead of Alacritty's 18 with
-# DejaVu Sans Mono at 15 px (measured, nix/tests/terminal-look.nix). The block cursor fills the cell, as it does there.
+# Measured with DejaVu Sans Mono at 15 px (NixOS's monospace; nix/tests/terminal-look.nix): Ghostty's cells were 17 px
+# tall, Alacritty's 18, and the block cursor fills the cell there. Re-measure if the monospace default changes.
 adjust-cell-height = 1
 adjust-cursor-height = 1
 window-padding-x = 0
