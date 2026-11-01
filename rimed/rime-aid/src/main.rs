@@ -94,6 +94,9 @@ type BackendReply = Sender<Result<std::path::PathBuf, String>>;
 /// Everything the threads share.
 struct Daemon {
     endpoints: Endpoints,
+    /// Proof that the backend sandbox works, obtained before any socket
+    /// existed. Every backend start needs it; see `runtime::Confinement`.
+    confinement: runtime::Confinement,
     store: Store,
     roots: Roots,
     /// Bumped on every API connection and every relayed byte count, so the
@@ -174,6 +177,13 @@ fn run() -> Result<()> {
         }
     }
 
+    // FAIL CLOSED, and FIRST. The backend runs only inside bwrap, and when the
+    // sandbox cannot be applied the daemon does not start at all: before this
+    // it ran the backend unconfined and noted it in `rime ai status`. Checked
+    // before the runtime directory or either socket exists, so a refusal
+    // leaves nothing behind that a client could mistake for a service.
+    let confinement = runtime::require_confinement()?;
+
     let endpoints = Endpoints::new(&paths::runtime_dir());
     paths::ensure_private_dir(endpoints.dir())?;
 
@@ -184,6 +194,7 @@ fn run() -> Result<()> {
     let (spawn_tx, spawn_rx) = mpsc::channel::<BackendReply>();
     let daemon = Arc::new(Daemon {
         endpoints: endpoints.clone(),
+        confinement,
         store: store.clone(),
         roots,
         open: AtomicU32::new(0),
@@ -204,15 +215,10 @@ fn run() -> Result<()> {
     spawn_supervisor(Arc::clone(&daemon), spawn_rx)?;
 
     eprintln!(
-        "rime-aid: api {} control {} store {}{}",
+        "rime-aid: api {} control {} store {} (backends confined with bwrap)",
         endpoints.api().display(),
         endpoints.control().display(),
         store.root().display(),
-        if runtime::confinement_available() {
-            ""
-        } else {
-            " (bwrap absent: the backend will run unconfined)"
-        }
     );
 
     // The control listener runs on its own thread; this one serves the API.
@@ -449,20 +455,18 @@ fn ensure_backend(daemon: &Arc<Daemon>) -> Result<std::path::PathBuf> {
         socket_dir: daemon.endpoints.dir(),
         devices,
     };
-    let confine = runtime::confinement_available();
     let running = runtime::start(
+        &daemon.confinement,
         &plan.launch,
         &plan.model_id,
         &socket,
         &exposed,
-        confine,
     )?;
     eprintln!(
-        "rime-aid: {} loaded on {} ({}), {}",
+        "rime-aid: {} loaded on {} ({}), confined",
         plan.model_id,
         plan.choice.backend,
         plan.launch.describe(),
-        if confine { "confined" } else { "UNCONFINED (bwrap absent)" }
     );
     state.running = Some(running);
     state.last_activity = Instant::now();
@@ -651,12 +655,8 @@ fn status(daemon: &Arc<Daemon>) -> Status {
         st.runtime_path = Some(r.plan.program.clone());
         st.notes.extend(r.plan.notes.iter().cloned());
         st.notes.push(format!(
-            "the backend is {} and has been up for {}s",
-            if r.confined {
-                "confined with bwrap --unshare-net, so it has no network at all"
-            } else {
-                "UNCONFINED because /usr/bin/bwrap is absent"
-            },
+            "the backend is confined with bwrap --unshare-net, so it has no network at all, \
+             and has been up for {}s",
             r.uptime().as_secs()
         ));
     }
