@@ -58,7 +58,10 @@ it names is there; 1 = not (an interrupted update); 2 = error; 3 = refused.
 ## Recovery from a bad generation (v1): manual, through the menu
 
 The menu is always shown (`timeout_style=menu`, `rime.boot.timeout` = 5 s; bootupd's static config shows it for 1 s)
-and lists every kept generation as `Rime (generation N, <date>)`, the default first. A user whose new generation does
+and lists every kept generation as `Rime (generation N, <date>)`: in `custom-cfg` the default first, then newest
+first; in `bls` in blscfg's order (by the entry's `version`, which is the generation number: newest first), with
+the default chosen by its id (`set default=rime-generation-N`), so after a rollback it is not the first line. A user
+whose new generation does
 not boot restarts and picks the previous one; `rime rollback` (or `nix-env --switch-generation` + `rime-boot install`)
 then makes it the default. Proven in OVMF for both layouts, Secure Boot on and off (`nix/probe/ovmf/boothook/`).
 
