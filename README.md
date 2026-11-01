@@ -1,5 +1,10 @@
 # Rime OS
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="files/branding/ridge/png/lockups/rime-lockup-horizontal-dark@2x.png">
+  <img alt="rime" src="files/branding/ridge/png/lockups/rime-lockup-horizontal-light@2x.png" height="96">
+</picture>
+
 Rime OS is an atomic Linux distribution built on **Fedora bootc** (OCI-native,
 image-based, transactional updates with rollback). Its desktop is
 [Rime Shell](https://github.com/AndreNijman/apex-shell) on Hyprland. The image <!-- rime-rename: keep: GitHub redirects the old repository name -->
@@ -33,8 +38,10 @@ merge keep updating and their owners have nothing to do. Every build is also
 published under the pre-rebrand name, `ghcr.io/andrenijman/apex-os`, with the <!-- rime-rename: keep -->
 same tags, for machines that have not moved to the new name yet.
 
-The "spark" logo is the mark, in chartreuse, with mono (black/white) variants
-for neutral contexts. See [docs/branding.md](docs/branding.md).
+The mark is the **layered ridge**: four planes rising to a peak, the third in
+the accent colour (Rime Blue, `#91C2DC`, unless the owner's wallpaper picks
+another). The bootc image still ships the older "spark" mark. See
+[docs/branding.md](docs/branding.md).
 
 ## The desktop
 
@@ -59,8 +66,10 @@ You log in to Hyprland running Rime Shell. The login screen also offers niri
   closing window shrinks away over 200 ms. SUPER + left-drag moves a window and
   SUPER + right-drag resizes it. The settings live in
   `files/desktop/hypr/rime/appearance.lua`.
-- **Boot splash.** On a black screen the Rime spark comes into focus out of its
-  own glow and the wordmark fades in. On an encrypted disk the passphrase prompt
+- **Boot splash.** On the NixOS-based Rime the ridge lockup rises onto a
+  charcoal screen above a row of progress dots, its third plane in the owner's
+  accent. On the bootc image the Rime spark comes into focus out of its own
+  glow on a black screen and the wordmark fades in. On an encrypted disk the passphrase prompt
   appears on the splash, with a dot for each character you type and the
   keyboard layout in use.
 

@@ -133,7 +133,7 @@ Sizes: 16, 24, 32, 48, 64, 128, 256, 512, 1024. Accents get only SVG + 256/512 P
 in the overlay) installs the tree to `$out/share/rime/branding/` and the dark app tile as the hicolor icon
 `rime-os` (16..512 PNG, `scalable` SVG, `symbolic/apps/rime-os-symbolic.svg` in one ink), with
 `distributor-logo`, `start-here` and `rime-os-logo` as aliases at every size, so `LOGO=rime-os-logo` in
-os-release and desktop "start here" icons resolve to the ridge. No NixOS module uses it yet.
+os-release and desktop "start here" icons resolve to the ridge. `nix/modules/branding.nix` installs it (below).
 
 ### Regenerating
 
@@ -152,6 +152,25 @@ one (PNGs by pixels), on a master that is not four polygons, on a template or ac
 plane 3, on wrong sizes, opaque backgrounds, an @2x that is not twice the @1x, or a favicon.ico without 16/32/48;
 it also shellchecks the wrapper and checks the package's hicolor names. To change a wordmark's typeface or
 tracking, run `src/outline-wordmarks.py` first (`src/FONTS.md`).
+
+### Where the ridge shows (NixOS)
+
+`nix/modules/branding.nix` (imported by `nix/modules/desktop.nix`, option `rime.branding.enable`, on by default)
+puts the ridge on every OS surface Rime owns outside Rime Shell and the terminal greeting:
+
+| Surface | What | Where |
+|---|---|---|
+| os-release | `NAME`/`PRETTY_NAME` `Rime OS`, `ID=rime` + `ID_LIKE=nixos`, `VARIANT=Rime`, `LOGO=rime-os`, `ANSI_COLOR` Rime Blue, rimeos.com / rime-os URLs | `system.nixos.*` (all `mkDefault`) |
+| icons | hicolor `rime-os` (+ `distributor-logo`, `start-here`, `rime-os-logo`) and `share/pixmaps/rime-os*.png`, `distributor-logo.png` | `pkgs.rime.rime-branding` + a pixmaps derivation |
+| boot splash | `rime-os`: the horizontal lockup centred on charcoal `#212224`, six progress dots below with a travelling Rime Blue pulse (brand pack page 2); passphrase prompt with bullets on an encrypted disk | `pkgs.rime.rime-plymouth`, built from `templates/rime-lockup-horizontal.svg.in` by `files/branding/plymouth/ridge/make-ridge-themes.py`; script `files/branding/plymouth/ridge/rime-os.script` |
+| splash accent | `rime-os-accent-00..23`: identical except plane 3, the bright dot and the bullets, in `accents.json` slot NN | shutdown/reboot: `rime-plymouth-accent` rewrites `/etc/plymouth/plymouthd.conf` (a real file on NixOS); boot: the initrd unit `rime-plymouth-theme` reads `loader/credentials/rime.accent.cred` from the ESP before plymouthd starts |
+| Plymouth logo | `/etc/plymouth/logo.png` (spinner/bgrt fallback) is the dark ridge symbol, not the NixOS snowflake | `boot.plymouth.logo` |
+| greeter | the lockup above the username, plane 3 in the owner's published accent, else Rime Blue | `files/desktop/rime-greet` (`assets/ridge-lockup-base.png` from `make-logo-assets.sh`; plane 3 is a `Shape`) |
+| boot menu | entries are titled `Rime (generation N, <date>)` | the boot hook (nix/boothook), not this module |
+
+The accent themes recolour only plane 3: an accent theme's neutral images are symlinks into `rime-os`, so a stray
+recolour of plane 1, 2, 4 or the wordmark cannot hide in one theme. `checks.x86_64-linux.branding-surfaces`
+(`nix/tests/branding-surfaces.nix`) proves this, the greeter asset, os-release and the splash in a VM (screenshots).
 
 ## Legacy: the spark (bootc image)
 
@@ -172,16 +191,18 @@ wordmark is the letterspaced "Rime OS".
 | **Mono (black)** | n/a | neutral | Light backgrounds, print, single-color contexts |
 | **Mono (white)** | n/a | neutral | Dark backgrounds, single-color contexts |
 
-Rime publishes ONE image, so chartreuse is the colour of the product: the
-default for the boot splash and the greeter. Both follow the owner's own accent
-once one is known. The greeter reads it from `/var/lib/rime-greet/accents/<user>`,
-and the initramfs starts the splash in the matching one of 24 accent themes
+Rime publishes ONE image, so chartreuse is the colour of the bootc product's
+boot splash. It follows the owner's own accent once one is known: the initramfs starts the splash in the matching one of 24 accent themes
 derived from chartreuse (`files/dracut/rime-plymouth-accent`). There is no
 edition left for gold to denote.
 
 Gold survives for one reason: a machine still booting a pre-merge image reports
-`VARIANT_ID=gaming`, and rime-greet maps that to the gold accent and
-`spark-gold.png` so the machine keeps its identity until it updates. New artwork
+`VARIANT_ID=gaming`, and rime-greet maps that to a gold accent so the machine
+keeps its identity until it updates.
+
+The greeter is shared by both images and no longer draws the spark: it shows the
+layered ridge with plane 3 in the owner's accent, else Rime Blue (see "Where the
+ridge shows" above). New artwork
 should not use gold to mean anything.
 
 The mono variants exist for any context that needs a neutral, single-color mark.
