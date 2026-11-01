@@ -27,7 +27,16 @@
       "required": ["url_hint", "keys"],
       "properties": {
         "url_hint": { "type": "string" },
-        "keys": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[A-Za-z0-9+/]{43}=$" } }
+        "keys": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[A-Za-z0-9+/]{43}=$" } },
+        "upstream": {
+          "description": "GitHub backend: paths with origin upstream come from this cache (cache.nixos.org), signed by these keys (also listed in cache.keys).",
+          "type": "object",
+          "required": ["url_hint", "keys"],
+          "properties": {
+            "url_hint": { "type": "string" },
+            "keys": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[A-Za-z0-9+/]{43}=$" } }
+          }
+        }
       }
     },
     "variants": {
@@ -76,7 +85,8 @@
           "nar_hash": { "type": "string", "pattern": "^sha256-[A-Za-z0-9+/]{43}=$" },
           "nar_size": { "type": "integer", "minimum": 1 },
           "file_size": { "type": "integer", "minimum": 1 },
-          "references": { "type": "array", "items": { "$ref": "#/$defs/index" } }
+          "references": { "type": "array", "items": { "$ref": "#/$defs/index" } },
+          "origin": { "enum": ["rime", "upstream"] }
         }
       }
     },

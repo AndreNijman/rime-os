@@ -469,6 +469,159 @@ class S3Signing(unittest.TestCase):
                 self.assertEqual(f.read(), "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n")
 
 
+def upstream_manifest(**kw):
+    clo, plan, sizes, x = synthetic()
+    up = {"url_hint": "https://cache.nixos.org", "keys": [UPKEY], "paths": {x["glibc"]}}
+    args = dict(release="2026.11.01", previous=None, issued=1796260000,
+                source={"rime_os": SHA_A, "rime_shell": SHA_B, "nixpkgs": SHA_N},
+                cache_url_hint="https://cache.rimeos.com", cache_keys=[KEY], upstream=up)
+    args.update(kw)
+    return r.build_manifest(clo, plan, sizes, **args), x
+
+
+UPKEY = "cache.nixos.org-1:" + base64.b64encode(b"u" * 32).decode()
+NAR = "1" * 52 + ".nar.zst"
+NAR2 = "2" * 52 + ".nar.zst"
+NAR3 = "3" * 52 + ".nar.zst"
+
+
+class Narinfo(unittest.TestCase):
+    TEXT = ("StorePath: /nix/store/" + "a" * 32 + "-x\nURL: nar/" + NAR + "\nCompression: zstd\n"
+            "FileHash: sha256:" + "1" * 52 + "\nFileSize: 10\nNarHash: {nh}\nNarSize: 1000\n"
+            "References: " + "b" * 32 + "-y\nSig: k:abc\n")
+
+    def test_nix32_encoding_round_trips(self):
+        for seed in ("a", "b", "glibc"):
+            h = nh(seed)
+            n32 = r.nar_hash_nix32(h)
+            self.assertTrue(n32.startswith("sha256:") and len(n32) == 7 + 52, n32)
+            self.assertEqual(r.sri(n32), h)
+        # Nix's own value for sha256("") (nix hash convert --to nix32): 0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73
+        self.assertEqual(r.nar_hash_nix32("sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU="),
+                         "sha256:0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73")
+
+    def test_url_rewrite_keeps_every_other_byte(self):
+        t = self.TEXT.format(nh=nh("x"))
+        out = r.narinfo_with_url(t, "https://github.com/o/n/releases/download/2026.11.01/" + NAR)
+        self.assertEqual([l for l in out.splitlines() if not l.startswith("URL: ")],
+                         [l for l in t.splitlines() if not l.startswith("URL: ")])
+        self.assertIn("URL: https://github.com/o/n/releases/download/2026.11.01/" + NAR + "\n", out)
+        with self.assertRaises(r.Refused):
+            r.narinfo_with_url("StorePath: x\n", "u")
+
+    def test_binding(self):
+        p = "/nix/store/" + "a" * 32 + "-x"
+        want = {"nar_hash": nh("x"), "nar_size": 1000, "references": ["/nix/store/" + "b" * 32 + "-y"]}
+        ni = r.parse_narinfo(self.TEXT.format(nh=r.nar_hash_nix32(nh("x"))))
+        self.assertEqual(ni["Sig"], ["k:abc"])
+        self.assertIsNone(r.narinfo_binds(ni, p, want))
+        self.assertIn("NarHash", r.narinfo_binds(ni, p, dict(want, nar_hash=nh("other"))))
+        self.assertIn("NarSize", r.narinfo_binds(ni, p, dict(want, nar_size=1)))
+        self.assertIn("References", r.narinfo_binds(ni, p, dict(want, references=[])))
+        self.assertIn("StorePath", r.narinfo_binds(ni, p + "z", want))
+
+
+class UpstreamManifest(unittest.TestCase):
+    def test_origin_and_keys(self):
+        m, x = upstream_manifest()
+        self.assertEqual(r.validate(m), [])
+        self.assertEqual(m["cache"]["keys"], [KEY, UPKEY])
+        self.assertEqual(m["cache"]["upstream"], {"url_hint": "https://cache.nixos.org", "keys": [UPKEY]})
+        origin = {e["path"]: e["origin"] for e in m["paths"]}
+        self.assertEqual(origin.pop(x["glibc"]), "upstream")
+        self.assertEqual(set(origin.values()), {"rime"})
+
+    def test_refusals(self):
+        m, _ = upstream_manifest()
+        bad = copy.deepcopy(m)
+        bad["cache"]["keys"] = [KEY]
+        self.assertTrue(any("not all in cache.keys" in e for e in r.validate(bad)))
+        bad = copy.deepcopy(m)
+        bad["paths"][0]["origin"] = "elsewhere"
+        self.assertTrue(any("origin" in e for e in r.validate(bad)))
+        plain = manifest()
+        plain["paths"][0]["origin"] = "rime"
+        self.assertTrue(any("origin without cache.upstream" in e for e in r.validate(plain)))
+
+
+class GitHubAssets(unittest.TestCase):
+    """The asset uploader against fake_github.py (the same server the stand-in runs)."""
+
+    def setUp(self):
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import fake_github
+        self.fg = fake_github
+        self.tmp = tempfile.TemporaryDirectory()
+        d = self.tmp.name
+        self.state = fake_github.State(os.path.join(d, "gh"), "o/n", "TOKEN")
+        self.srv = [fake_github.serve(self.state, role, "127.0.0.1:0", "") for role in ("api", "download", "objects")]
+        api, dl, objs = (f"http://127.0.0.1:{s.server_address[1]}" for s in self.srv)
+        self.srv[1].RequestHandlerClass = fake_github.handler(self.state, "download", objs)
+        self.api, self.dl = api, dl
+        self.files = {}
+        for name, body in ((NAR, b"one"), (NAR2, b"two!"), (NAR3, b"three")):
+            p = os.path.join(d, name)
+            open(p, "wb").write(body)
+            self.files[name] = p
+
+    def tearDown(self):
+        for s in self.srv:
+            s.shutdown()
+            s.server_close()
+        self.tmp.cleanup()
+
+    def gh(self, token="TOKEN", max_assets=1000):
+        return r.GitHub("o/n", token, api=self.api, uploads=self.api, download=self.dl, max_assets=max_assets)
+
+    def test_upload_then_idempotent(self):
+        urls, n = self.gh().put_assets("2026.11.01", self.files)
+        self.assertEqual(n, 3)
+        self.assertEqual(urls[NAR], f"{self.dl}/o/n/releases/download/2026.11.01/{NAR}")
+        import urllib.request
+        with urllib.request.urlopen(urls[NAR2]) as resp:  # 302 to the objects origin, followed
+            self.assertEqual(resp.read(), b"two!")
+            self.assertNotEqual(resp.geturl(), urls[NAR2])
+        self.assertEqual(r.http_reachable(urls[NAR3]), 200)
+        urls2, n2 = self.gh().put_assets("2026.11.01", self.files)
+        self.assertEqual((urls2, n2), (urls, 0))
+
+    def test_broken_asset_is_replaced(self):
+        self.gh().put_assets("2026.11.01", {NAR: self.files[NAR]})
+        self.state.data["releases"][0]["assets"][0]["state"] = "starter"
+        urls, n = self.gh().put_assets("2026.11.01", {NAR: self.files[NAR]})
+        self.assertEqual(n, 1)
+        self.assertEqual([a["state"] for a in self.state.data["releases"][0]["assets"]], ["uploaded"])
+
+    def test_parts_when_a_release_is_full(self):
+        urls, n = self.gh(max_assets=2).put_assets("2026.11.01", self.files)
+        self.assertEqual(n, 3)
+        tags = sorted(x["tag_name"] for x in self.state.data["releases"])
+        self.assertEqual(tags, ["2026.11.01", "2026.11.01-part2"])
+        self.assertTrue(urls[NAR3].endswith("/2026.11.01-part2/" + NAR3), urls)
+        self.assertEqual(self.gh(max_assets=2).put_assets("2026.11.01", self.files)[1], 0)
+
+    def test_refusals(self):
+        with self.assertRaises(r.Refused):
+            self.gh(token="WRONG").put_assets("2026.11.01", self.files)  # 401 on create
+        with self.assertRaises(r.Refused):
+            self.gh().put_assets("2026.11.01", {"../evil": self.files[NAR]})
+        with self.assertRaises(r.Refused):
+            r.GitHub("not a repo", "t")
+        self.assertEqual(r.http_reachable(f"{self.dl}/o/n/releases/download/2026.11.01/{NAR}"), 404)
+
+    def test_a_nar_over_the_asset_limit_is_refused_before_any_upload(self):
+        old = r.GH_MAX_ASSET
+        r.GH_MAX_ASSET = 4  # "three" is 5 bytes: over the (scaled-down) 2 GiB limit
+        try:
+            with self.assertRaises(r.Refused) as cm:
+                self.gh().put_assets("2026.11.01", self.files)
+            self.assertIn("under 2 GiB", str(cm.exception))
+        finally:
+            r.GH_MAX_ASSET = old
+        self.assertEqual(self.state.data["releases"], [])  # nothing was created or uploaded
+
+
 class Schema(unittest.TestCase):
     """The JSON Schema files describe what the tool writes."""
 

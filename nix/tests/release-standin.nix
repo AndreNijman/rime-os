@@ -120,7 +120,7 @@ pkgs.testers.runNixOSTest {
     def publish(os_sha, shell, signing="/root/sign-good", artifact="/root/artifact"):
         out = f"/root/out-{os_sha[:3]}-{shell[:3]}-{os.path.basename(signing)}-{os.path.basename(artifact)}"
         rc, log = server.execute(
-            f"{AWS} rime-nix-release publish --artifact {artifact} --plan /etc/rime-standin/plan.json"
+            f"{AWS} rime-nix-release publish --backend s3 --artifact {artifact} --plan /etc/rime-standin/plan.json"
             f" --cache '{S3}' --secret-key-file /root/cache.sec --upstream {UPSTREAM} --upstream-key \"$(cat /root/up.pub)\""
             f" --public {PUBLIC} --cache-pubkey \"$(cat /root/cache.pub)\" --cache-url-hint {PUBLIC}"
             f" --repo {REPO} --plain-http --fulcio-root /root/sign-good/fulcio-root.pem"

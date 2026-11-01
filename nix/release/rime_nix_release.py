@@ -5,7 +5,8 @@ One tool, every step of the pipeline, so CI and the local stand-in run the same 
 
   closure      build host: closure.json for the variant toplevels (narHash, references, bootspec)
   split        build host: which paths the upstream cache already serves with the same narHash
-  export       build host: Rime's own paths as a `nix-store --export` stream, the artifact
+  export       build host (S3 fallback): Rime's own paths as a `nix-store --export` stream, the artifact
+  stage        build host (GitHub backend): Rime's own paths as an unsigned file:// binary cache, the artifact
   fill         publish job: verify + copy upstream paths, import + bind the artifact, copy to the
                cache, sign every narinfo (idempotent: only missing paths are uploaded)
   check-public publish job: read the closure back from the PUBLIC cache URL, anonymously
@@ -13,7 +14,9 @@ One tool, every step of the pipeline, so CI and the local stand-in run the same 
   validate     §3.2, on any manifest file
   verify       the self-check: verify a pushed object the way rime trust does (verify.rs port)
   channels     write the next channel document (set / refresh), check a live one
-  publish      the whole publish job in the fixed order of §3.3 and §6.3
+  check-public-github  the same for the GitHub backend (Pages narinfos, release-asset NARs, upstream paths)
+  publish      the whole publish job in the fixed order of §3.3 and §6.3 (--backend github, the production
+               cache: narinfos on GitHub Pages, NARs as release assets; or --backend s3, the fallback)
   consume      a reference consumer: what a client does with a published release
 
 Python standard library only; external programs: nix, nix-store, skopeo, cosign, openssl.
@@ -570,10 +573,502 @@ def check_public(closure, public, keys, report=None):
     return sizes
 
 
+# ── the GitHub backend: narinfos on GitHub Pages, NARs as release assets (production, Andre 2026-11-01) ───────────
+#
+# cache.rimeos.com is GitHub Pages of AndreNijman/rime-cache (main branch root): nix-cache-info and the signed
+# .narinfo files. The NARs are release assets of the same repository, one release per Rime release ID, and each
+# narinfo's URL: is ABSOLUTE (https://github.com/AndreNijman/rime-cache/releases/download/<tag>/<nar>). Only paths
+# cache.nixos.org does not serve are published; clients use both caches.
+#
+# The narinfo signature does not cover URL: Nix signs ValidPathInfo::fingerprint, which is
+# "1;<store path>;<narHash nix32>;<narSize>;<references>" (src/libstore/path-info.cc, Nix 2.35.3), so URL,
+# Compression, FileHash and FileSize may be rewritten after signing. Nix's HTTP binary cache resolves URL: with
+# parseURLRelative against the cache URI, so an absolute URL is fetched as-is (src/libstore/http-binary-cache-store.cc
+# HttpBinaryCacheStore::makeRequest).
+
+GH_CACHE_INFO = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 50\n"
+GH_MAX_ASSETS = 1000              # assets per release (GitHub's limit)
+GH_MAX_ASSET = 2 * 1024 ** 3 - 1  # bytes per asset (GitHub: under 2 GiB)
+GH_PART_RE = re.compile(r"^(.*?)(?:-part([2-9]|[1-9][0-9]+))?$")
+GH_BOT = ("github-actions[bot]", "41898282+github-actions[bot]@users.noreply.github.com")
+
+
+def parse_narinfo(text):
+    """{field: value} of a .narinfo; Sig may repeat (list). ValueError on a malformed line."""
+    out = {"Sig": []}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        k, sep, v = line.partition(": ")
+        if not sep:
+            raise ValueError(f"malformed narinfo line {line!r}")
+        if k == "Sig":
+            out["Sig"].append(v)
+        else:
+            out[k] = v
+    return out
+
+
+def narinfo_with_url(text, url):
+    """The same narinfo with URL: replaced (every other byte kept, so the Sig lines stay valid)."""
+    lines, n = [], 0
+    for line in text.splitlines():
+        if line.startswith("URL: "):
+            line, n = "URL: " + url, n + 1
+        lines.append(line)
+    if n != 1:
+        raise Refused(f"a narinfo has {n} URL lines")
+    return "\n".join(lines) + "\n"
+
+
+def narinfo_binds(ni, path, want):
+    """None if narinfo fields `ni` describe exactly closure.json's entry for `path`, else the reason."""
+    if ni.get("StorePath") != path:
+        return f"StorePath {ni.get('StorePath')!r} is not {path}"
+    try:
+        if sri(ni.get("NarHash", "")) != sri(want["nar_hash"]):
+            return f"NarHash {ni.get('NarHash')} is not closure.json's {want['nar_hash']}"
+    except ValueError as e:
+        return str(e)
+    if int(ni.get("NarSize", "-1")) != int(want["nar_size"]):
+        return f"NarSize {ni.get('NarSize')} is not {want['nar_size']}"
+    refs = sorted(f"{STORE_DIR}/{r}" for r in ni.get("References", "").split())
+    if refs != sorted(want["references"]):
+        return "References differ from closure.json"
+    return None
+
+
+def nar_hash_nix32(h):
+    """SRI or sha256:<nix32> to the sha256:<nix32> form a narinfo carries."""
+    raw = base64.b64decode(sri(h)[7:])
+    out = []
+    for n in range(51, -1, -1):
+        b = n * 5
+        i, j = divmod(b, 8)
+        c = raw[i] >> j
+        if i + 1 < 32:
+            c |= raw[i + 1] << (8 - j)
+        out.append(NIX32[c & 0x1F])
+    return "sha256:" + "".join(out)
+
+
+def cmd_stage(a):
+    """Build job, GitHub backend: a file:// binary cache holding ONLY the Rime-built paths, zstd, unsigned.
+
+    A binary cache refuses a path whose references it does not hold (BinaryCacheStore::addToStoreCommon), and it
+    counts a path as held when its .narinfo exists (isValidPathUncached). So the upstream references get placeholder
+    narinfos written from closure.json, the Rime paths are copied --no-recursive, and the placeholders are deleted:
+    no upstream path is ever compressed, uploaded or published."""
+    clo = load_json(a.closure)
+    split = load_json(a.split)
+    out = a.out
+    cache = os.path.join(out, "cache")
+    if os.path.exists(cache):
+        raise Refused(f"{cache} exists; stage writes a fresh one")
+    os.makedirs(os.path.join(cache, "nar"))
+    open(os.path.join(cache, "nix-cache-info"), "w").write(GH_CACHE_INFO)
+    rime = split["rime"]
+    rime_set = set(rime)
+    placeholders = []
+    for p in split["upstream"]:
+        i = clo["paths"][p]
+        f = os.path.join(cache, os.path.basename(p)[:32] + ".narinfo")
+        open(f, "w").write(
+            f"StorePath: {p}\nURL: nar/rime-placeholder.nar\nCompression: none\n"
+            f"NarHash: {nar_hash_nix32(i['nar_hash'])}\nNarSize: {i['nar_size']}\n"
+            f"References: {' '.join(os.path.basename(r) for r in i['references'])}\n")
+        placeholders.append(f)
+    refs = {p: i["references"] for p, i in clo["paths"].items()}
+    order = topo_order(rime, refs)
+    if order:
+        run(NIX + ["copy", "--no-recursive", "--to", store_url("file://" + os.path.abspath(cache),
+                                                               compression="zstd")] + FRESH + order)
+    for f in placeholders:
+        if "rime-placeholder" not in open(f).read():
+            raise Refused(f"{f} was overwritten by the copy")
+        os.remove(f)
+    names = {n[:-8] for n in os.listdir(cache) if n.endswith(".narinfo")}
+    want = {os.path.basename(p)[:32] for p in rime_set}
+    if names != want:
+        raise Refused(f"the stage holds {len(names)} narinfos for {len(want)} Rime paths")
+    shutil.copy(a.closure, os.path.join(out, "closure.json"))
+    shutil.copy(a.split, os.path.join(out, "split.json"))
+    log(f"stage: {len(order)} Rime paths in {cache} ({len(placeholders)} upstream references not staged)")
+
+
+def load_stage(artifact):
+    """closure.json, split.json and {path: (narinfo text, fields)} of the stage, bound to closure.json."""
+    clo, split = load_artifact(artifact)
+    cache = os.path.join(artifact, "cache")
+    if not os.path.isdir(cache):
+        raise Refused(f"{artifact} has no stage (cache/): the build job ran `export`, not `stage`")
+    by_hash = {os.path.basename(p)[:32]: p for p in split["rime"]}
+    staged = {}
+    for n in sorted(os.listdir(cache)):
+        if not n.endswith(".narinfo"):
+            continue
+        p = by_hash.get(n[:-8])
+        if p is None:
+            raise Refused(f"the stage holds {n}, which is not a Rime-built path of this release")
+        text = open(os.path.join(cache, n)).read()
+        try:
+            ni = parse_narinfo(text)
+        except ValueError as e:
+            raise Refused(f"stage {n}: {e}")
+        why = narinfo_binds(ni, p, clo["paths"][p])
+        if why:
+            raise Refused(f"stage {n}: {why}")
+        url = ni.get("URL", "")
+        if not re.match(r"^nar/[0-9a-z]{52}\.nar(\.[a-z0-9]+)?$", url):
+            raise Refused(f"stage {n}: URL {url!r} is not a staged NAR")
+        staged[p] = (text, ni)
+    lacking = [p for p in split["rime"] if p not in staged]
+    if lacking:
+        raise Refused(f"the stage lacks {len(lacking)} Rime paths, e.g. {lacking[0]}")
+    return clo, split, staged
+
+
+class GitHub:
+    """The few REST calls the publisher needs (the same ones `gh release create/upload` makes). The base URLs are
+    parameters so the stand-in can serve them; production is api.github.com / uploads.github.com / github.com."""
+
+    def __init__(self, repo, token, api="https://api.github.com", uploads="https://uploads.github.com",
+                 download="https://github.com", max_assets=GH_MAX_ASSETS):
+        if not re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", repo or ""):
+            raise Refused(f"--gh-repo {repo!r} is not owner/name")
+        self.repo, self.token = repo, token
+        self.api, self.uploads, self.download = api.rstrip("/"), uploads.rstrip("/"), download.rstrip("/")
+        self.max_assets = max_assets
+
+    def _req(self, method, url, body=None, headers=None, ok=(200, 201, 204), length=None):
+        import urllib.request
+        import urllib.error
+        h = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
+             "User-Agent": "rime-nix-release"}
+        if self.token:
+            h["Authorization"] = "Bearer " + self.token
+        h.update(headers or {})
+        data = body
+        if isinstance(body, (dict, list)):
+            data = json.dumps(body).encode()
+            h["Content-Type"] = "application/json"
+        if length is not None:
+            h["Content-Length"] = str(length)
+        for attempt in range(4):
+            if hasattr(data, "seek"):
+                data.seek(0)
+            req = urllib.request.Request(url, data=data, method=method, headers=h)
+            try:
+                with urllib.request.urlopen(req, timeout=600) as r:
+                    raw = r.read()
+                    return r.status, (json.loads(raw) if raw.strip() else None)
+            except urllib.error.HTTPError as e:
+                raw = e.read()
+                if e.code in ok:
+                    return e.code, None
+                if e.code >= 500 and attempt < 3:
+                    time.sleep(2 ** attempt)
+                    continue
+                return e.code, raw[:500]
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                if attempt < 3:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise Refused(f"{method} {url}: {e}")
+        raise Refused(f"{method} {url}: no answer")
+
+    def release(self, tag, create=False):
+        code, body = self._req("GET", f"{self.api}/repos/{self.repo}/releases/tags/{tag}")
+        if code == 200:
+            return body
+        if code != 404:
+            raise Refused(f"reading release {tag} of {self.repo} answered {code}: {body!r}")
+        if not create:
+            return None
+        code, body = self._req("POST", f"{self.api}/repos/{self.repo}/releases", {
+            "tag_name": tag, "name": tag, "target_commitish": "main", "draft": False, "prerelease": False,
+            "make_latest": "false",
+            "body": f"NAR files of Rime OS release {tag.split('-part')[0]} (narinfos: the main branch)."})
+        if code != 201:
+            raise Refused(f"creating release {tag} of {self.repo} answered {code}: {body!r}")
+        log(f"github: created release {tag}")
+        return body
+
+    def assets(self, rel):
+        out, page = [], 1
+        while True:
+            code, body = self._req("GET", f"{self.api}/repos/{self.repo}/releases/{rel['id']}/assets"
+                                          f"?per_page=100&page={page}")
+            if code != 200:
+                raise Refused(f"listing the assets of {rel.get('tag_name')} answered {code}: {body!r}")
+            out += body
+            if len(body) < 100:
+                return out
+            page += 1
+
+    def delete_asset(self, asset):
+        code, body = self._req("DELETE", f"{self.api}/repos/{self.repo}/releases/assets/{asset['id']}")
+        if code not in (204, 404):
+            raise Refused(f"deleting the broken asset {asset.get('name')} answered {code}: {body!r}")
+
+    def upload(self, rel, name, path):
+        size = os.path.getsize(path)
+        with open(path, "rb") as f:
+            code, body = self._req("POST", f"{self.uploads}/repos/{self.repo}/releases/{rel['id']}/assets"
+                                           f"?name={name}", f, {"Content-Type": "application/octet-stream"},
+                                   length=size)
+        if code != 201 or not isinstance(body, dict) or body.get("size") != size:
+            raise Refused(f"uploading {name} to {rel.get('tag_name')} answered {code}: {body!r}")
+        return body
+
+    def url(self, tag, name):
+        return f"{self.download}/{self.repo}/releases/download/{tag}/{name}"
+
+    def put_assets(self, release_id, files):
+        """files: {asset name: local path}. Uploads what is not already an uploaded asset of the same size in the
+        release `release_id` or its parts (<id>-part2, ...), skipping the rest; returns ({name: url}, uploaded)."""
+        for name, path in files.items():
+            if not re.match(r"^[0-9a-z]{52}\.nar(\.[a-z0-9]+)?$", name):
+                raise Refused(f"{name} is not a NAR file name")
+            if os.path.getsize(path) > GH_MAX_ASSET:
+                raise Refused(f"{name} is {os.path.getsize(path)} bytes; a release asset must be under 2 GiB "
+                              "(TODO(handover): split large NARs or host them elsewhere)")
+        parts, n = [], 1
+        while True:
+            tag = release_id if n == 1 else f"{release_id}-part{n}"
+            rel = self.release(tag)
+            if rel is None:
+                break
+            parts.append([tag, rel, {x["name"]: x for x in self.assets(rel)}])
+            n += 1
+        urls, uploaded = {}, 0
+        for name, path in sorted(files.items()):
+            size = os.path.getsize(path)
+            where = next((p for p in parts if name in p[2]), None)
+            if where is not None:
+                x = where[2][name]
+                if x.get("state") == "uploaded" and x.get("size") == size:
+                    urls[name] = self.url(where[0], name)
+                    continue
+                # A failed upload leaves the name taken (state "starter"/"new") or a wrong size: replace it.
+                log(f"github: replacing the broken asset {name} in {where[0]} ({x.get('state')}, {x.get('size')} B)")
+                self.delete_asset(x)
+                del where[2][name]
+            else:
+                where = next((p for p in parts if len(p[2]) < self.max_assets), None)
+                if where is None:
+                    n = len(parts) + 1
+                    tag = release_id if n == 1 else f"{release_id}-part{n}"
+                    where = [tag, self.release(tag, create=True), {}]
+                    parts.append(where)
+            where[2][name] = self.upload(where[1], name, path)
+            urls[name] = self.url(where[0], name)
+            uploaded += 1
+        return urls, uploaded
+
+
+def git(args, cwd=None, env=None, check=True):
+    return run(["git"] + args, check=check, env=env, quiet=True, stdout=subprocess.PIPE) if cwd is None else \
+        run(["git", "-C", cwd] + args, check=check, env=env, quiet=True, stdout=subprocess.PIPE)
+
+
+def git_env(remote, token):
+    """The token travels as an http.extraheader for the remote (actions/checkout's way): never in the URL, never on
+    a command line (environment only)."""
+    env = dict(os.environ)
+    env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_AUTHOR_NAME": GH_BOT[0], "GIT_AUTHOR_EMAIL": GH_BOT[1],
+                "GIT_COMMITTER_NAME": GH_BOT[0], "GIT_COMMITTER_EMAIL": GH_BOT[1]})
+    if token and remote.startswith("https://"):
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"http.{remote}.extraheader",
+                    "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"})
+    return env
+
+
+def gh_fill(artifact, gh, remote, secret_key_file, release_id, workdir, report=None, before_push=None):
+    """§6.3 for the GitHub backend. Order: bind + sign the stage, NARs up as release assets FIRST, then the
+    narinfos (URL rewritten to the asset) committed and pushed to main. Idempotent: a path whose narinfo is on main
+    is published already; an asset already uploaded is not sent again. Never force-pushes, never deletes."""
+    clo, split, staged = load_stage(artifact)
+    stage = os.path.join(artifact, "cache")
+    rime = sorted(staged)
+    pub = run(NIX + ["key", "convert-secret-to-public"], data=open(secret_key_file, "rb").read(),
+              quiet=True).stdout.decode().strip()
+    if rime:
+        stage_url = "file://" + os.path.abspath(stage)
+        run(NIX + ["store", "sign", "--store", stage_url, "--key-file", secret_key_file] + FRESH + rime)
+        # Contents too (no --no-contents): every staged NAR is unpacked and hashed against its signed narHash.
+        run(NIX + ["store", "verify", "--store", stage_url, "--sigs-needed", "1",
+                   "--trusted-public-keys", pub] + FRESH + rime)
+        for p in rime:  # re-read: the narinfos now carry the Sig line
+            text = open(os.path.join(stage, os.path.basename(p)[:32] + ".narinfo")).read()
+            staged[p] = (text, parse_narinfo(text))
+    env = git_env(remote, gh.token)
+    co = os.path.join(workdir, "rime-cache")
+    shutil.rmtree(co, ignore_errors=True)
+    git(["clone", "--quiet", "--depth", "1", "--branch", "main", remote, co], env=env)
+
+    def plan():
+        done, todo = [], []
+        for p in rime:
+            f = os.path.join(co, os.path.basename(p)[:32] + ".narinfo")
+            if os.path.exists(f):
+                why = narinfo_binds(parse_narinfo(open(f).read()), p, clo["paths"][p])
+                if why:
+                    raise Refused(f"{p} is published already with another content ({why}); the build host must "
+                                  "substitute published paths from cache.rimeos.com, never rebuild them (§6.3)")
+                done.append(p)
+            else:
+                todo.append(p)
+        return done, todo
+
+    done, todo = plan()
+    files = {}
+    for p in todo:
+        url = staged[p][1]["URL"]
+        files[os.path.basename(url)] = os.path.join(stage, url)
+    urls, uploaded = gh.put_assets(release_id, files) if files else ({}, 0)
+    log(f"github: {len(todo)} paths to publish, {len(done)} published already, {uploaded} NARs uploaded")
+
+    commit = None
+    for attempt in range(6):
+        done, todo = plan() if attempt else (done, todo)
+        for p in todo:
+            text, ni = staged[p]
+            open(os.path.join(co, os.path.basename(p)[:32] + ".narinfo"), "w").write(
+                narinfo_with_url(text, urls[os.path.basename(ni["URL"])]))
+        info = os.path.join(co, "nix-cache-info")
+        if not os.path.exists(info) or open(info).read() != GH_CACHE_INFO:
+            open(info, "w").write(GH_CACHE_INFO)
+        git(["add", "-A"], cwd=co)
+        status = git(["diff", "--cached", "--name-status"], cwd=co).stdout.decode().split("\n")
+        allowed_new = {os.path.basename(p)[:32] + ".narinfo" for p in todo}
+        for line in filter(None, status):
+            st, name = line.split("\t", 1)
+            if st == "A" and name in allowed_new or st in ("A", "M") and name == "nix-cache-info":
+                continue
+            raise Refused(f"refusing to commit {st} {name} to rime-cache: a publish only ADDS narinfos")
+        if not any(status):
+            log("github: rime-cache main already holds every narinfo; nothing to commit")
+            break
+        git(["commit", "--quiet", "-m", f"release {release_id}: {len(todo)} narinfos"], cwd=co, env=env)
+        if before_push and attempt == 0:
+            run(["sh", "-c", before_push])  # TEST ONLY: the stand-in moves main under this run here
+        p = git(["push", "--quiet", "origin", "HEAD:refs/heads/main"], cwd=co, env=env, check=False)
+        if p.returncode == 0:
+            commit = git(["rev-parse", "HEAD"], cwd=co).stdout.decode().strip()
+            log(f"github: pushed {commit} to rime-cache main ({len(todo)} narinfos)")
+            break
+        log(f"github: push refused ({p.stderr.decode(errors='replace').strip()[-200:]}); fetching main again")
+        git(["fetch", "--quiet", "--depth", "1", "origin", "main"], cwd=co, env=env)
+        git(["reset", "--quiet", "--hard", "FETCH_HEAD"], cwd=co)
+    else:
+        raise Refused("rime-cache main kept moving; gave up after 6 pushes")
+    result = {"uploaded": len(todo), "already": len(done), "assets_uploaded": uploaded, "commit": commit,
+              "upstream": len(split["upstream"])}
+    if report:
+        write_json(report, result)
+    return result
+
+
+def http_reachable(url):
+    """A NAR URL answers: HEAD (redirects followed), else a one-byte ranged GET (HEAD is not promised on every hop)."""
+    import urllib.request
+    import urllib.error
+    if http_status(url) == 200:
+        return 200
+    req = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return 200 if r.status in (200, 206) else r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+    except urllib.error.URLError as e:
+        return str(e.reason)
+
+
+def check_public_github(closure, split, public, keys, upstream, upstream_keys, report=None, wait=0):
+    """The GitHub-backend public check, with no credentials: Rime paths from the Pages origin (narinfo bound to
+    closure.json, Rime signature, ABSOLUTE URL on another origin that answers), upstream paths from the upstream
+    cache with its key. Pages deploys a push after a delay: the Rime side is retried for up to `wait` seconds."""
+    import urllib.parse
+    clo = closure if isinstance(closure, dict) else load_json(closure)
+    split = split if isinstance(split, dict) else load_json(split)
+    rime, up = sorted(split["rime"]), sorted(split["upstream"])
+    base = public.split("?", 1)[0].rstrip("/")
+    origin = urllib.parse.urlparse(base).netloc
+    deadline = time.time() + wait
+    while True:
+        try:
+            info = http_get(f"{base}/nix-cache-info")
+            if info is None or info.decode(errors="replace") != GH_CACHE_INFO:
+                raise Refused(f"public check: {base}/nix-cache-info is {info!r}, not {GH_CACHE_INFO!r}")
+            pub = nix_path_info(rime, store=public)
+            problems = []
+            for p in rime:
+                i = pub.get(p)
+                if i is None:
+                    problems.append(f"{p}: no narinfo at {public}")
+                elif i["nar_hash"] != clo["paths"][p]["nar_hash"] or i["nar_size"] != clo["paths"][p]["nar_size"] \
+                        or sorted(i["references"]) != sorted(clo["paths"][p]["references"]):
+                    problems.append(f"{p}: the public narinfo does not match closure.json")
+                elif not i.get("file_size"):
+                    problems.append(f"{p}: the public narinfo has no FileSize")
+            if problems:
+                raise Refused("public check: " + "; ".join(problems[:10]))
+            break
+        except Refused:
+            if time.time() >= deadline:
+                raise
+            log("public check: Pages does not serve the pushed narinfos yet; retrying in 20 s")
+            time.sleep(20)
+    if rime:
+        p = run(NIX + ["store", "verify", "--store", public, "--no-contents", "--sigs-needed", "1",
+                       "--trusted-public-keys", " ".join(keys)] + FRESH + rime, check=False)
+        if p.returncode != 0:
+            raise Refused("public check: narinfo signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+    gone = []
+    for path in rime:
+        url = pub[path].get("url") or ""
+        u = urllib.parse.urlparse(url)
+        if u.scheme not in ("http", "https") or not u.netloc:
+            gone.append(f"{path}: URL {url!r} is not absolute (the NARs are release assets, not on Pages)")
+            continue
+        if u.netloc == origin:
+            gone.append(f"{path}: URL {url} is on the Pages origin itself")
+            continue
+        code = http_reachable(url)
+        if code != 200:
+            gone.append(f"{path}: {url} answered {code}")
+    if gone:
+        raise Refused("public check: " + "; ".join(gone[:10]))
+    sizes = {p: pub[p]["file_size"] for p in rime}
+    if up:
+        if not upstream or not upstream_keys:
+            raise Refused("the closure has upstream paths but no upstream cache or key was given")
+        upi = nix_path_info(up, store=upstream)
+        for p in up:
+            i = upi.get(p)
+            if i is None or i["nar_hash"] != clo["paths"][p]["nar_hash"] or not i.get("file_size"):
+                raise Refused(f"public check: {upstream} no longer serves {p} as closure.json names it")
+            sizes[p] = i["file_size"]
+        p = run(NIX + ["store", "verify", "--store", upstream, "--no-contents", "--sigs-needed", "1",
+                       "--trusted-public-keys", " ".join(upstream_keys)] + FRESH + up, check=False)
+        if p.returncode != 0:
+            raise Refused("public check: upstream signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+    if report:
+        write_json(report, sizes)
+    log(f"public check: {len(rime)} Rime paths at {public} (NARs on another origin), {len(up)} at {upstream}")
+    return sizes
+
+
 # ── the manifest ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 def build_manifest(clo, plan, sizes, *, release, previous, issued, source, cache_url_hint, cache_keys,
-                   previous_manifest=None, security=(), mass_rebuild=False):
+                   previous_manifest=None, security=(), mass_rebuild=False, upstream=None):
+    """upstream: None (one cache holds the whole closure: the S3 fallback) or {"url_hint", "keys", "paths"} (the
+    GitHub backend: those paths come from cache.nixos.org; cache.keys then lists its keys too, and each such path
+    carries origin "upstream")."""
     refs = {p: i["references"] for p, i in clo["paths"].items()}
     table = sorted(clo["paths"])
     idx = {p: n for n, p in enumerate(table)}
@@ -612,8 +1107,11 @@ def build_manifest(clo, plan, sizes, *, release, previous, issued, source, cache
         fs = sizes.get(p)
         if not fs:
             raise Refused(f"{p}: no public file size")
-        paths.append({"path": p, "nar_hash": sri(i["nar_hash"]), "nar_size": i["nar_size"], "file_size": fs,
-                      "references": sorted(idx[r] for r in i["references"])})
+        entry = {"path": p, "nar_hash": sri(i["nar_hash"]), "nar_size": i["nar_size"], "file_size": fs,
+                 "references": sorted(idx[r] for r in i["references"])}
+        if upstream is not None:
+            entry["origin"] = "upstream" if p in upstream["paths"] else "rime"
+        paths.append(entry)
     delta = None
     nixpkgs_moved = False
     if previous_manifest:
@@ -623,6 +1121,10 @@ def build_manifest(clo, plan, sizes, *, release, previous, issued, source, cache
             new = [p for p in closure_of(clo["variants"]["plain"]["toplevel"], refs) if p not in prev_paths]
             delta = {"from": previous_manifest["release"], "variant": "plain", "paths": len(new),
                      "file_size": sum(sizes[p] for p in new)}
+    cache = {"url_hint": cache_url_hint, "keys": list(cache_keys)}
+    if upstream is not None:
+        cache["keys"] = list(dict.fromkeys(list(cache_keys) + list(upstream["keys"])))
+        cache["upstream"] = {"url_hint": upstream["url_hint"], "keys": list(upstream["keys"])}
     return {
         "schema": 1,
         "kind": "rime-nixos-release",
@@ -632,7 +1134,7 @@ def build_manifest(clo, plan, sizes, *, release, previous, issued, source, cache
         "system": "x86_64-linux",
         "store_dir": STORE_DIR,
         "source": source,
-        "cache": {"url_hint": cache_url_hint, "keys": list(cache_keys)},
+        "cache": cache,
         "variants": variants,
         "catalogue": catalogue,
         "paths": paths,
@@ -671,6 +1173,13 @@ def validate(m):
         for k in keys:
             if not valid_key(k):
                 errs.append(f"cache.keys: {k!r} is not <name>:<base64 of 32 bytes>")
+    upstream = (m.get("cache") or {}).get("upstream")
+    if upstream is not None:
+        ukeys = upstream.get("keys") if isinstance(upstream, dict) else None
+        if not isinstance(ukeys, list) or not ukeys or not all(valid_key(k) for k in ukeys):
+            errs.append("cache.upstream.keys is empty or malformed")
+        elif not set(ukeys) <= set(keys or []):
+            errs.append("cache.upstream.keys are not all in cache.keys")
     paths = m.get("paths")
     if not isinstance(paths, list) or not paths:
         return errs + ["paths is empty"]
@@ -702,6 +1211,11 @@ def validate(m):
             v = e.get(k)
             if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
                 errs.append(f"paths[{i}]: {k} {v!r} is not a positive integer")
+        origin = e.get("origin")
+        if upstream is None and origin is not None:
+            errs.append(f"paths[{i}]: origin without cache.upstream")
+        elif upstream is not None and origin not in ("rime", "upstream"):
+            errs.append(f"paths[{i}]: origin {origin!r} is not rime or upstream")
         r = e.get("references")
         if not isinstance(r, list) or not all(ok_index(x) for x in r):
             errs.append(f"paths[{i}]: a reference is out of range")
@@ -1151,10 +1665,6 @@ def cmd_publish(a):
             raise Refused(f"variant {name} is not publishable ({v.get('note', 'test configuration')})")
 
     keys = a.cache_pubkey
-    fill(a.artifact, a.cache, a.secret_key_file, a.upstream, a.upstream_key, report=os.path.join(out, "fill.json"))
-    clo, _ = load_artifact(a.artifact)
-    sizes = check_public(clo, a.public, keys, report=os.path.join(out, "public.json"))
-
     # What the channels offer now: read and VERIFIED, never trusted on its face.
     signers = a.signer or [NIX_SIGNER]
     cur_doc, offered, entry_releases = None, {}, {}
@@ -1174,11 +1684,31 @@ def cmd_publish(a):
         candidates.append({"id": offered["edge"]["release"], "os": offered["edge"]["source"]["rime_os"],
                            "shell": offered["edge"]["source"]["rime_shell"]})
     release = a.release or next_release_id(a.next_release_id, a.today, a.rime_os, a.rime_shell, candidates)
+    # The release ID is known BEFORE the fill: the GitHub backend names the NAR release after it. A run that stops
+    # after uploading gets the same ID next time (same day, same edge), so its assets are found, not sent again.
+    upstream = None
+    if a.backend == "github":
+        token = os.environ.get("RIME_CACHE_TOKEN", "")
+        gh = GitHub(a.gh_repo, token, a.gh_api, a.gh_uploads, a.gh_download, max_assets=a.gh_max_assets)
+        with tempfile.TemporaryDirectory() as w:
+            gh_fill(a.artifact, gh, a.gh_remote, a.secret_key_file, release, w,
+                    report=os.path.join(out, "fill.json"), before_push=os.environ.get("RIME_TEST_BEFORE_PUSH"))
+        clo, split = load_artifact(a.artifact)
+        sizes = check_public_github(clo, split, a.public, keys, a.upstream, a.upstream_key,
+                                    report=os.path.join(out, "public.json"), wait=a.public_wait)
+        upstream = {"url_hint": a.upstream, "keys": a.upstream_key, "paths": set(split["upstream"])}
+    else:
+        if not a.cache:
+            raise Refused("--backend s3 needs --cache s3://...")
+        fill(a.artifact, a.cache, a.secret_key_file, a.upstream, a.upstream_key, report=os.path.join(out, "fill.json"))
+        clo, _ = load_artifact(a.artifact)
+        sizes = check_public(clo, a.public, keys, report=os.path.join(out, "public.json"))
 
     m = build_manifest(clo, plan, sizes, release=release,
                        previous=prev_manifest["release"] if prev_manifest else None, issued=a.issued or time.time(),
                        source={"rime_os": a.rime_os, "rime_shell": a.rime_shell, "nixpkgs": a.nixpkgs},
-                       cache_url_hint=a.cache_url_hint, cache_keys=keys, previous_manifest=prev_manifest)
+                       cache_url_hint=a.cache_url_hint, cache_keys=keys, previous_manifest=prev_manifest,
+                       upstream=upstream)
     errs = validate(m)
     if errs:
         raise Refused("the manifest does not validate: " + "; ".join(errs[:10]))
@@ -1288,9 +1818,16 @@ def cmd_consume(a):
     v = m["variants"][a.variant]
     top = m["paths"][v["toplevel"]]["path"]
     keys = " ".join(m["cache"]["keys"])  # exactly the keys the verified manifest announces (§6.4)
-    dest = ["--to", a.store] if a.store else []
-    run(NIX + ["copy", "--from", a.cache] + dest + ["--option", "require-sigs", "true", "--option",
-               "trusted-public-keys", keys, "--option", "substituters", "", "--option", "max-jobs", "0"] + FRESH + [top])
+    trust = ["--option", "require-sigs", "true", "--option", "trusted-public-keys", keys, "--option", "max-jobs", "0"]
+    if len(a.cache) == 1:
+        dest = ["--to", a.store] if a.store else []
+        run(NIX + ["copy", "--from", a.cache[0]] + dest + trust + ["--option", "substituters", ""] + FRESH + [top])
+    else:
+        # Several caches (the GitHub backend: Rime's paths on cache.rimeos.com, the rest on cache.nixos.org): one
+        # `nix copy --from` reads one store, so substitute instead, with exactly these caches and nothing to build.
+        store = ["--store", a.store] if a.store else []
+        run(NIX + ["build", "--no-link"] + store + trust + ["--option", "substituters", " ".join(a.cache),
+                                                           "--option", "fallback", "false"] + FRESH + [top])
     refs = {i: e["references"] for i, e in enumerate(m["paths"])}
     clo = sorted(closure_of(v["toplevel"], refs))
     local = nix_path_info([m["paths"][i]["path"] for i in clo], store=a.store)
@@ -1346,12 +1883,19 @@ def main(argv=None):
     p.add_argument("--out", required=True)
     p.set_defaults(fn=cmd_export)
 
-    def fill_args(p):
+    def fill_args(p, cache_required=True):
         p.add_argument("--artifact", required=True)
-        p.add_argument("--cache", required=True, help="s3://rime-cache?endpoint=...&region=auto&compression=zstd")
+        p.add_argument("--cache", required=cache_required,
+                       help="S3 backend: s3://rime-cache?endpoint=...&region=auto&compression=zstd")
         p.add_argument("--secret-key-file", required=True)
         p.add_argument("--upstream", default="https://cache.nixos.org")
         p.add_argument("--upstream-key", action="append", default=[])
+
+    p = sub.add_parser("stage")
+    p.add_argument("--closure", required=True)
+    p.add_argument("--split", required=True)
+    p.add_argument("--out", required=True)
+    p.set_defaults(fn=cmd_stage)
 
     p = sub.add_parser("fill")
     fill_args(p)
@@ -1364,6 +1908,17 @@ def main(argv=None):
     p.add_argument("--key", action="append", required=True)
     p.add_argument("--report")
     p.set_defaults(fn=lambda a: check_public(a.closure, a.public, a.key, a.report) and 0)
+
+    p = sub.add_parser("check-public-github")
+    p.add_argument("--artifact", required=True)
+    p.add_argument("--public", required=True)
+    p.add_argument("--key", action="append", required=True)
+    p.add_argument("--upstream", default="https://cache.nixos.org")
+    p.add_argument("--upstream-key", action="append", default=[])
+    p.add_argument("--wait", type=int, default=0)
+    p.add_argument("--report")
+    p.set_defaults(fn=lambda a: check_public_github(*load_artifact(a.artifact), a.public, a.key, a.upstream,
+                                                    a.upstream_key, a.report, a.wait) and 0)
 
     p = sub.add_parser("manifest")
     for k in ("closure", "plan", "public", "release", "rime-os", "rime-shell", "nixpkgs", "out"):
@@ -1404,8 +1959,19 @@ def main(argv=None):
     p.set_defaults(fn=cmd_channels)
 
     p = sub.add_parser("publish")
-    fill_args(p)
+    fill_args(p, cache_required=False)
     registry_args(p)
+    p.add_argument("--backend", choices=("github", "s3"), default="github",
+                   help="github (production): narinfos on Pages, NARs as release assets; s3: the fallback")
+    p.add_argument("--gh-repo", default="AndreNijman/rime-cache")
+    p.add_argument("--gh-remote", default="https://github.com/AndreNijman/rime-cache.git",
+                   help="git remote of the narinfo repository (token: RIME_CACHE_TOKEN)")
+    p.add_argument("--gh-api", default="https://api.github.com")
+    p.add_argument("--gh-uploads", default="https://uploads.github.com")
+    p.add_argument("--gh-download", default="https://github.com")
+    p.add_argument("--gh-max-assets", type=int, default=GH_MAX_ASSETS)
+    p.add_argument("--public-wait", type=int, default=0,
+                   help="seconds to wait for Pages to serve the pushed narinfos (GitHub backend)")
     p.add_argument("--plan", required=True)
     p.add_argument("--public", required=True, help="the cache's public, anonymous URL")
     p.add_argument("--cache-pubkey", action="append", required=True)
@@ -1444,7 +2010,9 @@ def main(argv=None):
     registry_args(p)
     p.add_argument("--channel", default="edge", choices=CHANNELS)
     p.add_argument("--variant", default="plain")
-    p.add_argument("--cache", required=True)
+    p.add_argument("--cache", action="append", required=True,
+                   help="a binary cache to substitute from; repeat it (GitHub backend: cache.rimeos.com, then "
+                        "cache.nixos.org)")
     p.add_argument("--store", help="the Nix store to download into (default: this machine's)")
     p.set_defaults(fn=cmd_consume)
 

@@ -44,10 +44,13 @@ These are the decisions this document implements. They are restated here so the 
   `nix-release.yml@refs/heads/main` identity, verified on the machine by the existing `verify.rs` path (skopeo and
   openssl against the pinned Fulcio root, no transparency log, as today). It lists every closure path with its
   narHash, and it carries the class 2 package catalogue and the rime-shell commit.
-- **R2 holds the full closure and is the only source clients use.** CI copies the cache.nixos.org paths into R2 and
-  uploads Rime's own builds. Machines never contact cache.nixos.org. The narinfo signing key and the R2 write token
-  live only in GitHub-hosted job secrets. The self-hosted build host builds, and never holds a key or a bucket
-  credential. Until an R2 bucket and token exist, everything is built and tested against an S3 stand-in (versitygw, §18).
+- **Rime's cache holds only what Rime builds; cache.nixos.org serves the rest (decision of 2026-11-01, §18).** The
+  production cache is `https://cache.rimeos.com`: signed narinfos on GitHub Pages of `AndreNijman/rime-cache`, NARs as
+  release assets of the same repository. Clients use two substituters, Rime's and cache.nixos.org, and trust exactly
+  the keys the verified manifest announces for each. The narinfo signing key and the `rime-cache` write token live
+  only in GitHub-hosted job secrets; the self-hosted build host builds, and never holds a key or a write credential.
+  *Superseded design (kept as the documented fallback, `--backend s3`):* an R2 bucket holding the full closure as the
+  only source clients use. Where the sections below say "R2", read §18 for what the GitHub backend does instead.
 - **The rime-shell input moves automatically.** The release job resolves rime-shell `main` at build time and records
   the commit in the manifest, as `build-image.yml` does for the bootc image.
 - **Mass rebuilds are batched; security fixes are not.** A whole-system rebuild (a `stdenv` change, about 4 GB to
@@ -83,7 +86,9 @@ rime-shell change 12 paths, 0.012 GB.
 |---|---|---|---|---|
 | Release manifest | GHCR `ghcr.io/andrenijman/rime-os:nix-<os-sha>-<shell-sha>` | never moved once pushed | `nix-release.yml@refs/heads/main` | the client, the installer, the bridge, rimeos.com |
 | Channel document | GHCR `ghcr.io/andrenijman/rime-os:nix-channels` | yes, every release, promotion, halt and daily refresh | `nix-release.yml@refs/heads/main` | the client |
-| Store paths (NARs + narinfos) | R2 bucket served at `https://cache.rimeos.com` | append-only (see GC in §6.6) | narinfo key `rime-cache-1` | Nix on the client |
+| Narinfos (Rime-built paths) | `AndreNijman/rime-cache` branch `main`, GitHub Pages at `https://cache.rimeos.com` | append-only, never force-pushed | narinfo key `rime-cache-1` | Nix on the client |
+| NARs (Rime-built paths) | release assets of `AndreNijman/rime-cache`, one release per Rime release ID | append-only | (bound by the narinfo's signed NarHash) | Nix on the client, via the narinfo's absolute `URL:` |
+| Every other store path | `https://cache.nixos.org` | not Rime's | `cache.nixos.org-1` | Nix on the client |
 | Closure SBOM attestation | GHCR `.att` for the manifest digest | no | `nix-release.yml` | the client (`provenance=warn`) |
 
 **Tag namespace.** Every Nix object's tag starts with `nix-`. bootc never writes a `nix-` tag and the Nix pipeline never
@@ -162,7 +167,7 @@ bytes. Media type `application/vnd.rimeos.nix-release.v1+json`.
 - **`nar_hash`** is the SRI form Nix 2.35 prints (`sha256-<base64>`, **(checked)**: `nix path-info --json --json-format 1
   --store https://cache.nixos.org` prints exactly this). The client also accepts the older `sha256:<nix32>` form when
   it reads Nix's own output and normalises both before comparing.
-- **`file_size`** is the compressed NAR size in R2 (narinfo `FileSize`, `downloadSize` in Nix's JSON). It is what a
+- **`file_size`** is the compressed NAR size in the cache that serves the path (narinfo `FileSize`, `downloadSize` in Nix's JSON). It is what a
   machine downloads, so the client can say how big an update is from the manifest alone.
 - **`variants`.** The installer ships two generic toplevels, `plain` and `luks`; everything per-machine comes from the
   host layer (`/var/lib/rime/host.toml`). The machine picks its variant from `host.toml`'s `variant` key. A variant
@@ -211,7 +216,7 @@ config: skopeo refuses to inspect the latter, §18.) The manifest also carries a
 `org.rimeos.release.id`, `org.opencontainers.image.revision` (rime-os), `org.rimeos.rime-shell.ref` and
 `org.rimeos.product=nixos`. Then `cosign sign --yes "$IMAGE@$digest"`.
 
-Order is fixed: every store path is in R2 and verified from the public URL (§7) **before** the manifest is pushed, and
+Order is fixed: every store path is in its cache (Rime's or, GitHub backend, cache.nixos.org) and verified from the public URL (§7) **before** the manifest is pushed, and
 the manifest is signed **before** the channel document names it. A machine can therefore never see a release whose
 paths are not downloadable.
 
@@ -356,7 +361,12 @@ fails before any machine sees it, instead of every machine refusing it.
 
 ## 6. The binary cache
 
-### 6.1 Layout
+> **As built (2026-11-01): the production backend is GitHub (Pages + release assets), and it holds only Rime-built
+> paths.** §18.1 is what the code does. §6.1 to §6.4 below describe the S3/R2 backend, which
+> is kept as the documented fallback (`rime-nix-release publish --backend s3`, `RIME_NIX_CACHE_BACKEND=s3`) and is
+> still tested (`checks.release-standin`).
+
+### 6.1 Layout (S3 fallback)
 
 A standard Nix HTTP binary cache in one R2 bucket:
 
@@ -380,14 +390,19 @@ R2 holds **the full closure**: cache.nixos.org paths and Rime's own builds alike
 Rime controls; nothing depends on cache.nixos.org's retention; and a later delta transport (G2, §17) can cover every
 path, not just Rime's.
 
-### 6.2 What clients are allowed to do
+### 6.2 What clients are allowed to do (GitHub backend: two substituters, §18)
 
 The NixOS module sets, for the system Nix:
 
 ```nix
 nix.settings = {
-  substituters = lib.mkForce [ "https://cache.rimeos.com" ];
-  trusted-public-keys = lib.mkForce [ "rime-cache-1:<base64>" ];
+  # GitHub backend (§18): Rime's cache first (Priority 50 in its nix-cache-info), then cache.nixos.org (Priority 40,
+  # so Nix asks cache.nixos.org first for paths both could serve; only Rime's own paths are on cache.rimeos.com).
+  substituters = lib.mkForce [ "https://cache.rimeos.com" "https://cache.nixos.org" ];
+  trusted-public-keys = lib.mkForce [
+    "rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k="
+    "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+  ];
   require-sigs = true;
   fallback = false;          # a missing path is a refusal, never a local build
   max-jobs = 0;              # nothing is built on a user machine
@@ -405,7 +420,7 @@ nix.optimise.automatic = false;
 local store directly (`--store local`), not through `nix-daemon`, so the `--option` values are the ones enforced and
 not the daemon's `nix.conf`.
 
-### 6.3 How CI fills it
+### 6.3 How CI fills it (S3 fallback; the GitHub fill is in §18)
 
 1. **Build (self-hosted, isolated, no secrets).** The build job builds both variant toplevels and the catalogue, runs
    the flake checks including the update VM tests (§15), and writes `closure.json`: every path with narHash and
@@ -458,14 +473,18 @@ not the daemon's `nix.conf`.
 
 ### 6.4 Keys
 
-- **Narinfo key.** `nix key generate-secret --key-name rime-cache-1`. It is generated once on a machine that is not a
-  CI runner, stored as the secret `RIME_NIX_CACHE_KEY` in the GitHub environment `nix-release` (deployment branch:
-  `main` only), and the local copy deleted. The public half is committed at `nix/keys/rime-cache-1.pub` and compiled
-  into the NixOS module. It never reaches a self-hosted runner: the only job that names the environment runs on
+- **Narinfo key.** `nix key generate-secret --key-name rime-cache-1`. Generated once on a machine that is not a CI
+  runner and stored as the secret `RIME_NIX_CACHE_KEY` in the GitHub environment `nix-release` (deployment branch:
+  `main` only; set 2026-11-01). The public half is
+  `rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=`, in `nix-release.yml` (`RIME_CACHE_PUBKEY`; the publish
+  job refuses a secret whose public half differs) and compiled into the NixOS module (D7). It never reaches a self-hosted runner: the only job that names the environment runs on
   `ubuntu-24.04`, and a check in `tests/` refuses any workflow where a job with `runs-on: [self-hosted, …]` references
   the environment, the key or the R2 secrets.
-- **R2 token.** An R2 API token scoped to object read/write on the one bucket, stored as `RIME_R2_ACCESS_KEY_ID`,
-  `RIME_R2_SECRET_ACCESS_KEY` and `RIME_R2_ENDPOINT` in the same environment.
+- **Cache write token (GitHub backend).** `RIME_CACHE_TOKEN` in the same environment: a fine-grained token for the
+  `rime-cache` repository only, Contents read/write (release assets and pushes to `main`). It is passed to git through
+  `GIT_CONFIG_*` environment variables as an `http.extraheader`, never written to a remote URL or a config file.
+- **R2 token (S3 fallback only).** An R2 API token scoped to object read/write on the one bucket, stored as
+  `RIME_R2_ACCESS_KEY_ID`, `RIME_R2_SECRET_ACCESS_KEY` and `RIME_R2_ENDPOINT`. Not set.
 - **Why a leaked narinfo key alone does little harm.** The client binds every path it downloads to the narHash in the
   cosign-signed manifest (§8.5 checks the narinfos before any NAR is fetched; §8.6 checks what was actually imported).
   A forged narinfo, even with a valid `rime-cache-1` signature, does not reach a generation unless it matches a
@@ -511,7 +530,7 @@ NAR means no client ever sees a narinfo whose NAR is gone.
 |---|---|---|---|
 | `changes` | hosted | none | path filter: `nix/**`, `flake.nix`, `flake.lock`, `rimed/**`, `files/**`, `config/**`; resolves rime-shell `main` |
 | `build` | self-hosted (isolated, ephemeral, fork-PR guard), hosted fallback through a dispatcher job | `GITHUB_TOKEN` read | builds variants and catalogue, runs flake checks and VM tests, writes `closure.json`, exports Rime's paths |
-| `publish` | `ubuntu-24.04`, environment `nix-release`, `if: github.ref == 'refs/heads/main'` | narinfo key, R2 token; `id-token: write`, `packages: write` | §6.3 step 2, manifest, channel document, self-checks, site dispatch |
+| `publish` | `ubuntu-24.04`, environment `nix-release`, `if: github.ref == 'refs/heads/main'` | narinfo key, `RIME_CACHE_TOKEN` (R2 token only with the S3 fallback); `id-token: write`, `packages: write` | §18 GitHub fill (or §6.3 step 2), manifest, channel document, self-checks, site dispatch |
 | `refresh` | hosted, daily schedule, environment `nix-release`, `main` only | `id-token`, `packages` | re-signs the channel document (`serial + 1`, new `expires`); fails loudly when the live document has under 7 days left (§4) |
 | `promote` | hosted, `workflow_dispatch` (channel, release, percent, halt, reason), environment `nix-release`, `main` only | `id-token`, `packages` | edits one channel entry, carries every other entry forward, refuses a release older than the one the channel offers (§4), re-signs |
 
@@ -641,6 +660,13 @@ A mass rebuild adds one line before the download: `rime: this release rebuilds t
 it is downloaded again.` A release with security fixes adds `rime: includes security fixes: CVE-…`.
 
 ### 8.5 Bind before import, then download
+
+*GitHub backend (§18):* the client reads each path's narinfo from the substituter the manifest's `paths[].origin`
+names (`rime` → `cache.rimeos.com`, `upstream` → `cache.upstream.url_hint`, cache.nixos.org), binds it exactly as
+below, and passes both substituters to `nix copy` with exactly `cache.keys` (Rime's keys and `cache.nixos.org-1`). A
+Rime narinfo's `URL:` is an absolute `https://github.com/AndreNijman/rime-cache/releases/download/<tag>/<nar>`, which
+Nix follows (it redirects to `objects.githubusercontent.com`); the URL is not covered by the narinfo signature, which
+is why the bind and §8.6 hold the guarantee and not the URL (§18).
 
 1. For the missing paths, `nix path-info --store <cache> --json --json-format 1 <paths>` reads the narinfos over HTTP
    **(checked: for a binary cache this JSON carries `narHash`, `narSize`, `references`, `signatures`, `downloadSize`,
@@ -1095,7 +1121,7 @@ The test network has no route to the internet, so passing tests also prove the c
 
 - `actionlint` on `nix-release.yml`, `nix-bump.yml`;
 - a repo test that every self-hosted job carries the fork-PR guard and none references the `nix-release` environment,
-  `RIME_NIX_CACHE_KEY` or the R2 secrets;
+  `RIME_NIX_CACHE_KEY`, `RIME_CACHE_TOKEN` or the R2 secrets;
 - a repo test that every job in `nix-release.yml` with `id-token: write` runs on a hosted runner, only on `main`, in
   the `nix-release` environment, that every `uses:` is pinned by a 40-character SHA, and that no `run:` step contains
   `${{ inputs.` or `${{ github.event.`;
@@ -1157,11 +1183,16 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
 
 ## 17. Handover and open items
 
-- **TODO(handover): the real R2 bucket.** Create bucket `rime-cache`, the custom domain `cache.rimeos.com` on the
-  rimeos.com zone, a cache rule so `*.narinfo` and `nix-cache-info` bypass the edge cache (§6.1), an API token scoped
-  to that bucket, the GitHub environment `nix-release` (deployment branch `main`) with `RIME_R2_ACCESS_KEY_ID`,
-  `RIME_R2_SECRET_ACCESS_KEY`, `RIME_R2_ENDPOINT`, and a $20/month billing alert. Until then every test uses the S3 stand-in (versitygw, §18).
-  R2's S3 compatibility with Nix's S3 store is not verified.
+- **TODO(handover): bootstrap the real `AndreNijman/rime-cache`.** Public repository; `main` holds `nix-cache-info`
+  (`StoreDir: /nix/store`, `WantMassQuery: 1`, `Priority: 50`), `CNAME` (`cache.rimeos.com`), `.nojekyll` and a
+  README; GitHub Pages from `main` / root with the custom domain and "Enforce HTTPS"; the DNS record for
+  `cache.rimeos.com` on the rimeos.com zone (CNAME to `andrenijman.github.io`, DNS only, not proxied, or Pages cannot
+  issue its certificate). Branch protection on `main` must allow the token's pushes and forbid force pushes. The
+  publish job writes `nix-cache-info` itself when it is missing, but never the rest.
+- **Secrets (set by Andre 2026-11-01, not verified from here):** `RIME_NIX_CACHE_KEY` and `RIME_CACHE_TOKEN` in the
+  environment `nix-release`. The first real publish proves them.
+- **S3 fallback only:** an R2 bucket, custom domain, edge-cache bypass for narinfos, token and billing alert, as the
+  original design (§6.1); R2's S3 compatibility with Nix's S3 store is not verified.
 - **TODO(handover): someone receives the refresh alarm.** The daily `refresh` fails loudly when the live channel
   document has under 7 days left (§4); a failed scheduled run must reach a person (GitHub's failed-workflow email to
   the repository owner is the minimum).
@@ -1193,8 +1224,9 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
 
 ## 18. As built: the release side (D6 release)
 
-The release side (manifest, signing, cache fill, `nix-release.yml`, the local stand-in) is built in `nix/release/`
-and `.github/workflows/nix-release.yml`, tested by `checks.release-unit` and `checks.release-standin`. Where it differs
+The release side (manifest, signing, cache fill, `nix-release.yml`, the local stand-ins) is built in `nix/release/`
+and `.github/workflows/nix-release.yml`, tested by `checks.release-unit`, `checks.release-github` (the production
+GitHub backend, §18.1) and `checks.release-standin` (the S3 fallback). Where it differs
 from the sections above, this list is what the code does, and why. The sections above keep the design as reviewed;
 read them with this list.
 
@@ -1220,7 +1252,8 @@ read them with this list.
   plain `skopeo inspect` refuse an object whose config is `application/vnd.oci.empty.v1+json`, and `verify.rs` and
   `crosscheck-rime-trust` resolve tags that way. `artifactType` and the layer media type are as designed. The same
   latent problem is in today's `promote-channel.yml` rollout document (TODO(handover): check the bootc reader there).
-- **The Rime-built paths travel as `nix-store --export`, not a `file://` cache (§6.3).** The build job writes
+- **S3 fallback only: the Rime-built paths travel as `nix-store --export`, not a `file://` cache (§6.3).** (The
+  GitHub backend stages a `file://` cache instead, §18.1.) The build job writes
   `rime.export` (Rime's paths in reference order) plus `closure.json` and `split.json`; the publish job imports it
   into its own store and binds every path's narHash, narSize and references to `closure.json` before anything is
   uploaded. Reasons: a binary cache refuses a path whose references it does not hold, so Rime's paths cannot be
@@ -1271,14 +1304,117 @@ read them with this list.
 - **Variants.** Until D9's installer configurations exist, the only variant is `rime-vm` as `plain`, marked
   `publishable = false` (it carries the test account), so `publish` refuses the real pipeline by design; only the
   stand-in passes `--allow-test-variants`.
+- **S3 stand-in anomaly (not resolved).** Run directly in the `rime-nix` container (not in a VM), the S3 stand-in
+  failed at the bind step after importing the upstream paths ("path … libidn2-2.3.8 is not valid") while `fill` run by
+  hand on the same artifact passed; `checks.release-standin` (VMs) passes. Suspected environmental (the shared
+  container store); the S3 path is the fallback only.
 - **Not built here (TODO(handover)).** The closure SBOM attestation (§2, `.att`); the unfree-redistribution upload
   allowlist (§6.3 step 3, `nix/redistributable.nix`); the VM tests in the build job (§7, they need the D8 runners'
-  KVM); `nix-bump.yml` (§13.1); the R2 bucket, keys, environment and variables (§17).
+  KVM); `nix-bump.yml` (§13.1); the `rime-cache` repository bootstrap and Pages (§17); NARs of 2 GiB or more
+  (split or host elsewhere); a narinfo re-sign command for key rotation (§18.1).
 
-### 18.1 The local stand-in, and how to consume what it publishes
+### 18.1 The GitHub cache backend (production, decision of 2026-11-01)
+
+Andre's decision: no R2. `https://cache.rimeos.com` is GitHub Pages of the public repository `AndreNijman/rime-cache`,
+and it serves **only the paths Rime builds**; every other path comes from cache.nixos.org. `rime-nix-release publish
+--backend github` (the default) is the implementation; `--backend s3` keeps everything in §6 and above.
+
+- **Layout.** `rime-cache` branch `main`, root: `nix-cache-info` (`StoreDir: /nix/store`, `WantMassQuery: 1`,
+  `Priority: 50`), `CNAME`, `.nojekyll`, `README`, and one `<hash>.narinfo` per published Rime path, signed with
+  `rime-cache-1`. The NARs are **release assets** of the same repository: one GitHub release per Rime release ID (tag
+  = the release ID), each NAR an asset named by its file hash (`<filehash>.nar.zst`). Each narinfo's `URL:` is the
+  absolute asset URL, `https://github.com/AndreNijman/rime-cache/releases/download/<release id>/<filehash>.nar.zst`,
+  which GitHub answers with a redirect to `objects.githubusercontent.com`.
+- **Why an absolute URL in a signed narinfo is sound.** The narinfo signature does not cover `URL:`. Nix's
+  fingerprint is `1;<store path>;<narHash>;<narSize>;<references>` (Nix 2.35.3 `src/libstore/path-info.cc:49-56`,
+  `ValidPathInfo::fingerprint`); `URL`, `Compression`, `FileHash` and `FileSize` are not in it, so rewriting `URL:` after
+  signing keeps the signature valid, and a substituter fetches an absolute URL as given
+  (`src/libstore/http-binary-cache-store.cc:228-240`, `makeRequest` resolves the URL with `parseURLRelative` against the
+  cache's base, which leaves an absolute URL unchanged). The content guarantee is the signed narHash: Nix hashes the
+  unpacked NAR against it, and the client binds narHash, narSize, references and FileSize to the cosign-signed
+  manifest (§8.5, §8.6). Whoever controls the asset can only make a download fail.
+- **The build job stages, it does not export.** `rime-nix-release stage` writes an unsigned `file://` binary cache
+  holding only the Rime-built paths (zstd). A binary cache refuses a path whose references it does not hold
+  (`binary-cache-store.cc`, `addToStoreCommon`: "cannot add … because the reference … is not valid") and counts a path
+  as held when its `.narinfo` file exists (`isValidPathUncached`, `binary-cache-store.cc:532-538`). So `stage` writes
+  placeholder narinfos for the upstream references from `closure.json`, copies the Rime paths `--no-recursive` in
+  reference order, then deletes the placeholders and checks that exactly the Rime paths remain. No upstream path is
+  compressed, uploaded or held on the publish runner, which retires the S3 route's "the whole closure on the hosted
+  runner's disk" item for this backend: the artifact is Rime's paths only (about 0.71 GB compressed in the probe).
+- **The publish job's order** (`gh_fill`, then `check-public-github`, then the manifest; nothing is tagged before the
+  public check passes):
+  1. bind every staged narinfo to `closure.json` (a foreign or changed narinfo is refused before anything leaves the
+     runner), sign them in place with `rime-cache-1`, and `nix store verify` the stage **with contents** against the
+     derived public key: every staged NAR is unpacked and hashed;
+  2. shallow-clone `rime-cache` `main`. A path whose narinfo is already there is published already; if that narinfo
+     names another narHash the release is refused (the build host must substitute published paths, never rebuild them);
+  3. **NARs first**: upload the missing ones as assets of the release `<release id>` (created if missing). An asset
+     already there with state `uploaded` and the same size is not sent again; a broken one (failed upload, wrong size)
+     is deleted and uploaded again. A release holds at most 1,000 assets; beyond that the tool opens `<release
+     id>-part2`, `-part3`, … A NAR of 2 GiB or more is refused (TODO(handover) below);
+  4. **then the narinfos**: write each with the rewritten absolute `URL:`, write `nix-cache-info` if it is missing or
+     differs, and commit as `github-actions[bot]`. The commit may only **add** narinfos (and add or fix
+     `nix-cache-info`); any other change is refused. Push without force; when the push is refused because `main`
+     moved, fetch it, plan again and retry (6 attempts). Nothing is ever deleted or rewritten on `main`;
+  5. **public check, without credentials**: poll `https://cache.rimeos.com` (every 20 s, `--public-wait 1800` in the
+     workflow) until `nix-cache-info` is exactly the content above and every Rime narinfo is served and matches
+     `closure.json`; then `nix store verify --no-contents` with the Rime keys; every `URL:` must be absolute, on
+     another origin than Pages, and answer (HEAD, else a one-byte ranged GET); every upstream path must still be on
+     cache.nixos.org with the narHash `closure.json` names and verify with `cache.nixos.org-1`. FileSize comes from
+     each path's own cache.
+- **The manifest records where each path comes from.** `cache.upstream = {url_hint: "https://cache.nixos.org", keys:
+  ["cache.nixos.org-1:…"]}`; `cache.keys` = Rime's keys plus the upstream keys; each `paths[]` entry carries `origin`
+  (`rime` or `upstream`). `validate` and the schema (`nix-release.v1.schema.json`) check both. The S3 fallback writes
+  no `cache.upstream` and no `origin` (one cache holds everything). D7's client must use two substituters and trust
+  exactly `cache.keys` (§6.2, §8.5).
+- **Secrets.** `RIME_NIX_CACHE_KEY` and `RIME_CACHE_TOKEN` in the environment `nix-release`. The token reaches git
+  only as an `http.<remote>.extraheader` through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` (never in a
+  URL or a file) and the REST calls as `Authorization: Bearer`. The workflow refuses to start the fill when the secret
+  key's public half is not `rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=`. `check_workflow.py` refuses a
+  self-hosted job that names `RIME_CACHE_TOKEN`, as it does for the key and the R2 secrets.
+- **What GitHub Pages changes, and what stays a risk.**
+  - *Deploy lag and caching.* A push to `main` reaches Pages after a build (usually under a minute, sometimes
+    several); Pages' CDN sends `Cache-Control: max-age=600`, and there is no cache rule to bypass it as §6.1 wanted for
+    R2. This is safe because narinfos are append-only here: a narinfo is written once and never rewritten, so the only
+    staleness is "not there yet" (a cached 404 for up to 10 minutes), which the publish job waits out before it tags
+    anything, and which a client never sees for a path of a published manifest.
+  - *Key rotation* (§6.4) needs a new kind of commit: adding `rime-cache-2` signatures rewrites published narinfos,
+    which `gh_fill` refuses by design. TODO(handover): a separate, reviewed `re-sign` command when rotation is needed;
+    clients would see the new signatures up to 10 minutes late.
+  - *Upstream retention.* Rime no longer copies cache.nixos.org's paths. If cache.nixos.org ever drops a path an old
+    release needs, that release stops installing (the publish-time check only covers the release being published).
+    Accepted with the decision; the S3 fallback is the answer if it happens.
+  - *GitHub limits:* 1,000 assets per release (handled with `-partN`), under 2 GiB per asset (refused), Pages sites
+    should stay under 1 GB (narinfos are about 1 KB each: about a million paths) and 10 builds an hour (one push per
+    release), release assets have no documented total cap. Not measured against the real repository.
+- **Tests.** `checks.release-github` (three VMs: builder, server, client) runs the whole pipeline with throwaway
+  keys against a bare git repository whose `post-receive` hook deploys `main` to a Pages-like HTTP origin, a TEST
+  fake of GitHub's REST/upload API with a download origin that redirects to a separate objects origin
+  (`nix/release/fake_github.py`, writes need the token), and a TEST upstream cache signed by `upstream-test-1`. It
+  checks: an artifact changed in transit is refused with nothing uploaded, committed or tagged; NARs are release
+  assets and narinfos on `main` carry absolute URLs on the other origin; the same pair publishes nothing again and a
+  new shell pair uploads only what changed; a deleted asset is caught from the public side; a second publisher's
+  concurrent commit is kept (push refused, refetched, nothing forced); the client cannot complete the closure from
+  Rime's cache alone and completes it with both caches and exactly the manifest's keys. `checks.release-unit` covers
+  narinfo parsing, URL rewriting and binding, the asset idempotence and part logic against the fake in-process, and
+  mutants of each.
+
+### 18.2 The local stand-in, and how to consume what it publishes
 
 `nix run path:.#rime-release-standin -- WORKDIR` (as root, inside the `rime-nix` container) runs the whole publish
-pipeline on one machine with throwaway keys and writes `WORKDIR/published.json`:
+pipeline on one machine with throwaway keys and writes `WORKDIR/published.json`. The default is the GitHub backend:
+
+| | Value |
+|---|---|
+| Narinfo origin (Pages stand-in) | `http://127.0.0.1:18090`, deployed from `WORKDIR/rime-cache.git` `main` by a `post-receive` hook |
+| NAR origin (github.com stand-in) | `http://127.0.0.1:18082/AndreNijman/rime-cache/releases/download/<release id>/<nar>`, 302 to the objects origin `http://127.0.0.1:18083` |
+| REST + uploads (api/uploads.github.com stand-in) | `http://127.0.0.1:18081`, token `rime-test-cache-token` (TEST) |
+| Upstream cache | the real `https://cache.nixos.org`, key `cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=` |
+| Registry, manifest, channel document, signing trust | as in the S3 table below |
+
+Consume it with `rime-nix-release consume --repo 127.0.0.1:15000/andrenijman/rime-os --plain-http --fulcio-root
+WORKDIR/signing/fulcio-root.pem --cache http://127.0.0.1:18090 --cache https://cache.nixos.org` (the exact line is
+`published.json`'s `consume`). `--backend s3` runs the fallback instead:
 
 | | Value |
 |---|---|

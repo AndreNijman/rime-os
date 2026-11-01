@@ -22,7 +22,7 @@ let
     version = "1";
     src = lib.fileset.toSource {
       root = ./.;
-      fileset = lib.fileset.unions [ ./rime_nix_release.py ./crosscheck-rime-trust.sh ./mint-test-signing.sh ];
+      fileset = lib.fileset.unions [ ./rime_nix_release.py ./crosscheck-rime-trust.sh ./mint-test-signing.sh ./fake_github.py ];
     };
     nativeBuildInputs = [ pkgs.makeWrapper ];
     buildInputs = [ pkgs.bash ];
@@ -33,11 +33,14 @@ let
       install -Dm755 ${../../files/scripts/next-release-id} $out/libexec/rime-nix-release/next-release-id
       install -Dm755 crosscheck-rime-trust.sh $out/bin/crosscheck-rime-trust
       install -Dm755 mint-test-signing.sh $out/bin/mint-test-signing
+      # TEST stand-in for GitHub's release API (stand-in and VM tests only; production talks to api.github.com).
+      install -Dm644 fake_github.py $out/lib/rime-nix-release/fake_github.py
+      makeWrapper ${pkgs.python3}/bin/python3 $out/bin/fake-github --add-flags $out/lib/rime-nix-release/fake_github.py
       patchShebangs $out/libexec $out/bin
       # nix itself is NOT wrapped in: the tool drives the Nix the machine runs (CI's installer, a VM's nix.package).
       makeWrapper ${pkgs.python3}/bin/python3 $out/bin/rime-nix-release \
         --add-flags $out/lib/rime-nix-release/rime_nix_release.py \
-        --prefix PATH : ${lib.makeBinPath [ pkgs.openssl pkgs.skopeo cosign pkgs.coreutils ]} \
+        --prefix PATH : ${lib.makeBinPath [ pkgs.openssl pkgs.skopeo cosign pkgs.coreutils pkgs.git ]} \
         --set-default RIME_NEXT_RELEASE_ID $out/libexec/rime-nix-release/next-release-id \
         --set-default RIME_COSIGN ${cosign}/bin/cosign
       for s in crosscheck-rime-trust mint-test-signing; do
@@ -77,7 +80,7 @@ let
   rime-release-standin = pkgs.writeShellApplication {
     name = "rime-release-standin";
     runtimeInputs = [ rime-nix-release cosign pkgs.versitygw pkgs.distribution pkgs.awscli2 pkgs.openssl
-                      pkgs.skopeo pkgs.curl pkgs.coreutils pkgs.gnugrep pkgs.python3 ];
+                      pkgs.skopeo pkgs.curl pkgs.coreutils pkgs.gnugrep pkgs.python3 pkgs.git ];
     text = builtins.readFile ./standin.sh;
     runtimeEnv = {
       STANDIN_PLAN = fixtures.plan;

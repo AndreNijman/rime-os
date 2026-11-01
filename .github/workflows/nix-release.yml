@@ -1,12 +1,17 @@
 # nix-release: Rime OS releases on NixOS (docs/nixos/updates-and-release.md §7, D6).
 #
 #   build    builds every variant toplevel (nix/release/variants.nix) with rime-shell at its branch head (A15),
-#            writes closure.json, splits off what cache.nixos.org serves, exports Rime's own paths as an artifact.
-#            Holds no secret and no write token.
-#   publish  main only, environment nix-release: verifies + copies the upstream paths and the artifact into the
-#            binary cache (R2), signs every narinfo with rime-cache-1, reads the whole closure back from the PUBLIC
-#            URL, then pushes the release manifest (nix-<os sha>-<shell sha>), cosign-signs it, self-checks it,
-#            updates the channel document (nix-channels), signs and self-checks that. Fixed order (§3.3).
+#            writes closure.json, splits off what cache.nixos.org serves, and stages Rime's own paths (only those)
+#            as an unsigned file:// binary cache, the artifact. Holds no secret and no write token.
+#   publish  main only, environment nix-release: binds the stage to closure.json and signs every narinfo with
+#            rime-cache-1, uploads the NARs as release assets of AndreNijman/rime-cache (one release per Rime
+#            release ID) FIRST, then pushes the narinfos (URL: rewritten to the absolute asset URL) to rime-cache
+#            main, which GitHub Pages serves as https://cache.rimeos.com. Waits for Pages, reads every Rime path back
+#            from the PUBLIC URL (and every upstream path from cache.nixos.org), then pushes the release manifest
+#            (nix-<os sha>-<shell sha>), cosign-signs it, self-checks it, updates the channel document
+#            (nix-channels), signs and self-checks that. Fixed order (§3.3, §6.3, §18).
+#            The repository variable RIME_NIX_CACHE_BACKEND=s3 selects the fallback (an S3 bucket holding the
+#            whole closure, docs §6); unset or github is production.
 #   refresh  daily: re-signs the channel document (serial + 1, 14-day expiry); fails loudly under 7 days left.
 #   promote  by hand: points one channel at a release; never at an older one.
 #
@@ -15,10 +20,10 @@
 # nix/release/check_workflow.py (checks.release-unit) enforces the security shape of this file: hosted runners for
 # every signer, main only, environment nix-release, every action pinned by SHA, no ${{ inputs.* }} in a script.
 #
-# TODO(handover): the GitHub environment `nix-release` (deployment branch: main) with RIME_NIX_CACHE_KEY (the
-# `rime-cache-1` secret key) and RIME_R2_ACCESS_KEY_ID / RIME_R2_SECRET_ACCESS_KEY / RIME_R2_ENDPOINT; the
-# repository variables RIME_NIX_CACHE_PUBKEY (rime-cache-1:<base64>) and RIME_NIX_CACHE_URL
-# (https://cache.rimeos.com, the bucket's public custom domain). None exist yet (docs §17), so publish cannot run.
+# The GitHub environment `nix-release` (deployment branch: main) holds RIME_NIX_CACHE_KEY (the `rime-cache-1`
+# narinfo secret key; its public half is RIME_CACHE_PUBKEY below) and RIME_CACHE_TOKEN (a fine-grained PAT: the
+# rime-cache repository only, Contents read/write: release assets and pushes to main). Andre set both 2026-11-01.
+# The S3 fallback would also need RIME_R2_ACCESS_KEY_ID / RIME_R2_SECRET_ACCESS_KEY / RIME_R2_ENDPOINT (unset).
 # TODO(handover): D9's publishable plain/luks configurations; until they exist the only variant is rime-vm, which
 # is marked publishable = false, so publish refuses by design.
 # TODO(handover): when this lands on main, build-image.yml's path filter gains !nix/** and
@@ -85,6 +90,10 @@ env:
   NIX_VERSION: "2.35.3"
   NIX_TARBALL_SHA256: 6ce3ce3703fdc241b560cba401c5d338042122fe5b1a81e07bf1a623f259eba0
   UPSTREAM_CACHE: https://cache.nixos.org
+  # The production binary cache (§6, §18): narinfos on GitHub Pages of rime-cache, NARs as its release assets.
+  CACHE_URL: https://cache.rimeos.com
+  CACHE_REPO: AndreNijman/rime-cache
+  RIME_CACHE_PUBKEY: "rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k="
   UPSTREAM_KEY: "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
   # rime-nix-release's own default; repeated here so the expected identity is visible in the workflow it names.
   NIX_SIGNER: https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main
@@ -197,7 +206,9 @@ jobs:
           nix build -L .#checks.x86_64-linux.release-unit
           # TODO(handover): the VM tests (nix flake check) run here once the katana-nix runners have KVM to spare.
 
-      - name: closure.json, the upstream split and the export
+      - name: closure.json, the upstream split and the stage (or the S3 fallback's export)
+        env:
+          BACKEND: ${{ vars.RIME_NIX_CACHE_BACKEND || 'github' }}
         run: |
           set -euo pipefail
           t="$RUNNER_TEMP"
@@ -205,8 +216,12 @@ jobs:
           for v in "$t"/toplevels/*; do args+=(--variant "$(basename "$v")=$(readlink -f "$v")"); done
           "$t/tool/bin/rime-nix-release" closure "${args[@]}" --out "$t/closure.json"
           "$t/tool/bin/rime-nix-release" split --closure "$t/closure.json" --upstream "$UPSTREAM_CACHE" --out "$t/split.json"
-          "$t/tool/bin/rime-nix-release" export --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact"
-          ls -l "$t/artifact"
+          case "$BACKEND" in
+            github) "$t/tool/bin/rime-nix-release" stage --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact" ;;
+            s3) "$t/tool/bin/rime-nix-release" export --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact" ;;
+            *) echo "::error::RIME_NIX_CACHE_BACKEND must be github or s3"; exit 1 ;;
+          esac
+          du -sh "$t/artifact"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -288,27 +303,37 @@ jobs:
           BOOTC_ID: ${{ steps.bootc.outputs.id }}
           BOOTC_REV: ${{ steps.bootc.outputs.rev }}
           BOOTC_SHELL: ${{ steps.bootc.outputs.shell }}
+          BACKEND: ${{ vars.RIME_NIX_CACHE_BACKEND || 'github' }}
           CACHE_KEY: ${{ secrets.RIME_NIX_CACHE_KEY }}
+          RIME_CACHE_TOKEN: ${{ secrets.RIME_CACHE_TOKEN }}
           AWS_ACCESS_KEY_ID: ${{ secrets.RIME_R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.RIME_R2_SECRET_ACCESS_KEY }}
           R2_ENDPOINT: ${{ secrets.RIME_R2_ENDPOINT }}
-          CACHE_PUBKEY: ${{ vars.RIME_NIX_CACHE_PUBKEY }}
-          CACHE_URL: ${{ vars.RIME_NIX_CACHE_URL }}
         run: |
           set -euo pipefail
           t="$RUNNER_TEMP"
-          for v in CACHE_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY R2_ENDPOINT CACHE_PUBKEY CACHE_URL; do
-            [ -n "${!v}" ] || { echo "::error::$v is not set (docs §17 handover: the R2 bucket and the narinfo key)"; exit 1; }
+          need=(CACHE_KEY RIME_CACHE_TOKEN)
+          [ "$BACKEND" = s3 ] && need=(CACHE_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY R2_ENDPOINT)
+          for v in "${need[@]}"; do
+            [ -n "${!v}" ] || { echo "::error::$v is not set in the nix-release environment"; exit 1; }
           done
           umask 077
           printf '%s' "$CACHE_KEY" > "$t/rime-cache.sec"
           trap 'shred -u "$t/rime-cache.sec" 2>/dev/null || rm -f "$t/rime-cache.sec"' EXIT
-          "$t/tool/bin/rime-nix-release" publish \
+          # The secret must be the half of the public key clients trust; a wrong secret stops here, before upload.
+          [ "$(nix key convert-secret-to-public < "$t/rime-cache.sec")" = "$RIME_CACHE_PUBKEY" ] \
+            || { echo "::error::RIME_NIX_CACHE_KEY is not the secret half of $RIME_CACHE_PUBKEY"; exit 1; }
+          if [ "$BACKEND" = s3 ]; then
+            cache=(--backend s3 --cache "s3://rime-cache?endpoint=$R2_ENDPOINT&region=auto&compression=zstd")
+          else
+            cache=(--backend github --gh-repo "$CACHE_REPO" --gh-remote "https://github.com/$CACHE_REPO.git"
+                   --public-wait 1800)
+          fi
+          "$t/tool/bin/rime-nix-release" publish "${cache[@]}" \
             --artifact "$t/artifact" --plan "$t/plan" \
-            --cache "s3://rime-cache?endpoint=$R2_ENDPOINT&region=auto&compression=zstd" \
             --secret-key-file "$t/rime-cache.sec" \
             --upstream "$UPSTREAM_CACHE" --upstream-key "$UPSTREAM_KEY" \
-            --public "$CACHE_URL" --cache-pubkey "$CACHE_PUBKEY" --cache-url-hint "$CACHE_URL" \
+            --public "$CACHE_URL" --cache-pubkey "$RIME_CACHE_PUBKEY" --cache-url-hint "$CACHE_URL" \
             --repo "$IMAGE_REPO" --fulcio-root files/system/trust/fulcio-root.pem --signer "$NIX_SIGNER" \
             --rime-os "$OS_SHA" --rime-shell "$SHELL_SHA" --nixpkgs "$(cat "$t/nixpkgs-rev")" \
             --today "$(TZ=Australia/Perth date +%Y.%m.%d)" \

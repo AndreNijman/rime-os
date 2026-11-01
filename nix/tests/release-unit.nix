@@ -53,6 +53,16 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
     'if recursive or not absent or not absent <= set(chunk):' 'if True:'
   mutant "SigV4 signing key without its terminator" \
     'for part in (date, region, service, "aws4_request"):' 'for part in (date, region, service):'
+  # the GitHub backend
+  mutant "an uploaded asset is sent again" 'if x.get("state") == "uploaded" and x.get("size") == size:' 'if False:'
+  mutant "a broken asset is kept" 'if x.get("state") == "uploaded" and x.get("size") == size:' 'if True:'
+  mutant "a full release takes more assets" 'if len(p[2]) < self.max_assets), None)' 'if True), None)'
+  mutant "the narinfo URL is not rewritten" 'line, n = "URL: " + url, n + 1' 'n = n + 1'
+  mutant "a narinfo with another NarHash binds" \
+    'if sri(ni.get("NarHash", "")) != sri(want["nar_hash"]):' 'if False:'
+  mutant "a NAR of 2 GiB is uploaded" 'if os.path.getsize(path) > GH_MAX_ASSET:' 'if False:'
+  mutant "upstream paths marked as Rime's" \
+    'entry["origin"] = "upstream" if p in upstream["paths"] else "rime"' 'entry["origin"] = "rime"'
 
   echo "== the workflow's security shape"
   cp -r ${workflows} wf
@@ -87,6 +97,14 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
   wmutant "an input expanded into a script" '          case "$CHANNEL" in' '          echo "''${{ inputs.reason }}"
           case "$CHANNEL" in'
   wmutant "a run cancelled by the next" "cancel-in-progress: false" "cancel-in-progress: true"
+  # the build job keeps its fork-PR guard here, so only the token can trip the check
+  wmutant "the cache token on a self-hosted build job" '    runs-on: ubuntu-24.04
+    if: >-
+      always() && needs.changes.result' '    runs-on: [self-hosted, katana]
+    env:
+      LEAK: ''${{ secrets.RIME_CACHE_TOKEN }}
+    if: >-
+      always() && needs.changes.result'
 
   echo "== actionlint"
   mkdir -p repo/.github/workflows

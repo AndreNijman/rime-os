@@ -8,8 +8,8 @@ Refuses, for every workflow given:
   - a `run:` script containing ${{ inputs.* }} or ${{ github.event.* }} (inputs reach scripts only through env:);
   - a job with `id-token: write` (a signer: the client cannot tell signers apart) that is not on a GitHub-hosted
     runner, not restricted to refs/heads/main, or not in the nix-release environment;
-  - a self-hosted job that lacks the fork-PR guard, or names the nix-release environment, RIME_NIX_CACHE_KEY or
-    the R2 secrets;
+  - a self-hosted job that lacks the fork-PR guard, or names the nix-release environment, RIME_NIX_CACHE_KEY,
+    RIME_CACHE_TOKEN or the R2 secrets;
   - any job outside the nix-release environment naming those secrets;
   - pull_request_target, a workflow-level permission grant, a concurrency group other than nix-release (for
     nix-release.yml) or one that cancels in progress, and the stand-in's --test-signing.
@@ -22,7 +22,8 @@ import sys
 import yaml
 
 SHA_PIN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
-SECRETS = ("RIME_NIX_CACHE_KEY", "RIME_R2_ACCESS_KEY_ID", "RIME_R2_SECRET_ACCESS_KEY", "RIME_R2_ENDPOINT")
+SECRETS = ("RIME_NIX_CACHE_KEY", "RIME_CACHE_TOKEN", "RIME_R2_ACCESS_KEY_ID", "RIME_R2_SECRET_ACCESS_KEY",
+           "RIME_R2_ENDPOINT")
 FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
 
 
