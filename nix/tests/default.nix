@@ -13,3 +13,5 @@
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
+# branding-surfaces-static, branding-surfaces (the ridge on os-release, the splash and the greeter)
+// import ./branding-surfaces.nix { inherit pkgs self; }

@@ -116,7 +116,7 @@ The screenshots are in `/var/lab/rime-nix/artifacts/`:
 | Trust and update path (§4.4) | — | `rime update` and `rime trust` still speak bootc. The D6 client replaces rime-update-check/notice and the live engine. |
 | Kernel MOK signing job | `nix/pkgs/kernel/README.md` | `rime.kernel.signing.imageSignature` has nothing to feed it yet. The CI job (sbsign with the `APEX_SB_*` secrets, names unchanged) does not exist. The boot chain (shim+MOK or Lanzaboote) is D3's decision. |
 | kernel-boot-budget target | `nix/tests/kernel.nix:101` | It measures a stand-in laptop config. It must point at the shipped host configs, with the real target (ESP or btrfs /boot). |
-| Plymouth accent | `nix/modules/desktop.nix:132` | Every machine shows chartreuse. `rime-plymouth-accent` writes a file NixOS generates. The boot chain has to hand the accent to the initrd. |
+| Plymouth accent | `nix/modules/branding.nix` | Closed on `rb/surfaces`: the ridge splash (`rime-os`, plane 3 Rime Blue) and 24 `rime-os-accent-NN` themes; `plymouthd.conf` is a real file `rime-plymouth-accent` may rewrite; an initrd unit reads the ESP credential before plymouthd. Proved by `checks.branding-surfaces`. |
 | kmscon console | desktop | Not ported (bootc #125 is not merged either). |
 | Guest sessions | `nix/modules/base.nix:142` | `rime-user` enables `rime-guest-session@<uid>` with `systemctl enable`, which NixOS refuses. It needs a runtime add-wants or a declarative guest list. |
 | rime-aid sandbox | `nix/pkgs/rimed.nix:110` | The backend sandbox binds only /usr and /etc, so a backend cannot start until it binds `/nix/store` and `/run/opengl-driver`. |
@@ -153,7 +153,6 @@ These rime-libexec scripts are not shipped (`passthru.dropped`):
 These are shipped but not wired, and their owners decide:
 
 - rime-boot-health (D3)
-- rime-plymouth-accent
 - rime-luks-enroll (installer, D9)
 - rime-vm (libvirtd and its RPM install hint)
 

@@ -127,18 +127,6 @@ let
     grep -q 'bindsym --to-code Mod4+Mod1+s exec ${sw}/libexec/rime-screen-reader toggle' $g/sway-greet.conf
   '';
 
-  # ── Plymouth: one splash, chartreuse (Containerfile.rime:265-312) ────────────────────────────────
-  # The 24 per-user accent themes need the boot chain to hand the accent to the initrd (ESP credential):
-  # TODO(handover): boot subsystem decides; until then every machine shows chartreuse.
-  plymouthTheme = pkgs.runCommand "rime-plymouth-theme" { } ''
-    t=$out/share/plymouth/themes/rime-os-chartreuse
-    mkdir -p $(dirname $t)
-    cp -r ${files}/branding/plymouth/rime-os-chartreuse $t
-    chmod -R u+w $t
-    substituteInPlace $t/rime-os-chartreuse.plymouth \
-      --replace-fail /usr/share/plymouth/themes/rime-os-chartreuse $t
-  '';
-
   # ── rime-keyring-login: the login password becomes the keyring's (Containerfile.base:3864-3905) ─
   # Run by pam_exec in greetd's auth stack. Python, with four FHS paths made explicit, and one name:
   # the "a daemon is already running, move nothing" guard matches /proc/PID/comm, and on NixOS the
@@ -233,6 +221,9 @@ let
   '';
 in
 {
+  # The layered-ridge identity: os-release, icons, the boot splash artwork and its per-owner accent.
+  imports = [ ./branding.nix ];
+
   options.rime.desktop = {
     enable = lib.mkEnableOption "Rime's desktop (sessions, Shell, portals)";
 
@@ -532,11 +523,8 @@ in
       services.speechd.enable = true;
 
       # ── Boot splash (Containerfile.rime:265-312; bootc kargs.d `quiet splash`) ────────────────────
-      boot.plymouth = {
-        enable = true;
-        themePackages = [ plymouthTheme ];
-        theme = "rime-os-chartreuse";
-      };
+      # The theme (the layered ridge and its accents) is chosen in branding.nix.
+      boot.plymouth.enable = true;
       boot.kernelParams = [ "quiet" "splash" ];
       boot.consoleLogLevel = lib.mkDefault 3;
 

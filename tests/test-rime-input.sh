@@ -60,7 +60,7 @@ mkhome() {
     local h="$1"
     mkdir -p "$h/.config/labwc" "$h/.config/rime-shell" "$h/.config/hypr"
     cp "${TMPL}/rc.xml" "${TMPL}/menu.xml" "$h/.config/labwc/"
-    sed 's/@ACCENT@/#D9F99D/g' "${TMPL}/themerc-override" > "$h/.config/labwc/themerc-override"
+    sed 's/@ACCENT@/#91C2DC/g' "${TMPL}/themerc-override" > "$h/.config/labwc/themerc-override"
 }
 
 # Every generator run in this suite gets a FIXTURED device list, because the
@@ -986,7 +986,7 @@ else
     # rime-input-apply arrive through the include the provisioner added.
     mkdir -p "$h/.config/labwc" "$h/.config/hypr"
     cp "${TMPL}/rc.xml" "${TMPL}/menu.xml" "$h/.config/labwc/"
-    sed 's/@ACCENT@/#D9F99D/g' "${TMPL}/themerc-override" > "$h/.config/labwc/themerc-override"
+    sed 's/@ACCENT@/#91C2DC/g' "${TMPL}/themerc-override" > "$h/.config/labwc/themerc-override"
     printf '{"keyboard":{"repeat_rate":42}}\n' > "$h/.config/rime-shell/input.json"
     run_gen "$h" >/dev/null 2>&1
     # The include line is part of the condition on purpose: `niri validate` +
