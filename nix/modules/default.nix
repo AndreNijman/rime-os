@@ -14,6 +14,7 @@
     ./fedora-parity.nix
     ./boot.nix
     ./hostlayer.nix
+    ./rename-compat.nix
   ];
 
   nixpkgs.overlays = [ overlay ];

@@ -34,8 +34,9 @@
 #   rime-migrate-from-apex APEX-OS -> Rime state renames on a bootc /var; a NixOS machine arrives from Rime (D2 bridge)
 #   rime-session-migrate   the per-user half of the same rename (firstrun calls it only when it is installed: -x test)
 #   rime-vconsole-guard    repairs a hand-edited /etc/vconsole.conf; NixOS generates that file from console.*
-# Shipped but NOT wired (their owner decides): rime-boot-health (boot chain, D3), rime-plymouth-accent (writes
-# /etc/plymouth/plymouthd.conf, which NixOS generates: TODO(handover) boot worker), rime-luks-enroll (installer, D9),
+# rime-plymouth-accent runs from rime-greet-wallpaper / rime-greet-publish-all; desktop.nix makes plymouthd.conf a
+# real file and links the accent themes (the initrd half is TODO(handover) D3, see plymouthTheme there).
+# Shipped but NOT wired (their owner decides): rime-boot-health (boot chain, D3), rime-luks-enroll (installer, D9),
 # rime-vm (needs virtualisation.libvirtd; its install hint still names RPMs: TODO(handover) catalogue worker).
 {
   lib,

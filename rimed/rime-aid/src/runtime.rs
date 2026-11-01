@@ -129,6 +129,15 @@ pub fn device_nodes(backend: Backend) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The NixOS system trees the backend sandbox binds read-only beside /usr and
+/// /etc (see [`confine_argv`]).
+pub const NIX_SYSTEM_TREES: &[&str] = &[
+    "/nix/store",
+    "/run/current-system",
+    "/run/opengl-driver",
+    "/run/opengl-driver-32",
+];
+
 /// Build the `bwrap` argv that runs `plan` confined.
 ///
 /// Pure, so every flag can be asserted without a sandbox. The order matters and
@@ -155,8 +164,10 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
             // the system-extension merge is already applied, so a
             // sysext-installed llama-server and its dependencies are both
             // inside it. /etc carries ld.so.cache, without which nothing
-            // dynamically linked starts.
-            "--ro-bind",
+            // dynamically linked starts. `-try` for /usr: a NixOS build
+            // sandbox has none (a NixOS system keeps only /usr/bin/env there),
+            // and binding nothing can only show the backend less.
+            "--ro-bind-try",
             "/usr",
             "/usr",
             "--ro-bind",
@@ -170,6 +181,16 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
         a.push("--symlink".into());
         a.push(format!("usr/{link}"));
         a.push(format!("/{link}"));
+    }
+    // NixOS keeps the system outside /usr: every program and library is under
+    // /nix/store, the system's PATH is /run/current-system/sw/bin, and the GPU
+    // userspace (libcuda, the Vulkan ICDs) is /run/opengl-driver. All
+    // READ-ONLY, and `-try` so a Fedora machine, which has none of them, is
+    // unchanged. /run itself is not bound: only these trees, never its sockets.
+    for dir in NIX_SYSTEM_TREES {
+        a.push("--ro-bind-try".into());
+        a.push(dir.to_string());
+        a.push(dir.to_string());
     }
     a.extend(
         ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
@@ -218,7 +239,8 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
 ///
 /// Refuses to bind anything that would widen the sandbox meaningfully:
 ///
-/// * a program under `/usr` needs nothing — `--ro-bind /usr /usr` covers it;
+/// * a program under `/usr` needs nothing — `--ro-bind-try /usr /usr` covers it,
+///   and neither does one under a [`NIX_SYSTEM_TREES`] entry;
 /// * a bare name (no `/`) is resolved by the sandbox's own `PATH`, which is
 ///   `/usr/bin:/usr/sbin`, so it is also covered;
 /// * `/`, `/home`, `/var` and the other broad roots are refused, because
@@ -230,7 +252,11 @@ fn program_dir_to_bind(program: &str) -> Option<String> {
     if !path.is_absolute() {
         return None;
     }
-    if program.starts_with("/usr/") {
+    if program.starts_with("/usr/")
+        || NIX_SYSTEM_TREES
+            .iter()
+            .any(|t| program.starts_with(&format!("{t}/")))
+    {
         return None;
     }
     let dir = path.parent()?;
@@ -579,7 +605,7 @@ mod tests {
     fn the_system_is_read_only_and_home_is_never_bound() {
         let plan = a_plan();
         let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
-        assert!(argv.windows(3).any(|w| w == ["--ro-bind", "/usr", "/usr"]), "{argv:?}");
+        assert!(argv.windows(3).any(|w| w == ["--ro-bind-try", "/usr", "/usr"]), "{argv:?}");
         assert!(argv.windows(3).any(|w| w == ["--ro-bind", "/etc", "/etc"]), "{argv:?}");
         // The backend has no business in the user's home. It gets one model
         // file and one socket directory.
@@ -609,7 +635,7 @@ mod tests {
     #[test]
     fn a_runtime_under_usr_needs_no_extra_bind() {
         // The shipped case: `sudo rime install llama-cpp` lands at /usr/bin,
-        // which `--ro-bind /usr /usr` already covers. An extra bind here would
+        // which `--ro-bind-try /usr /usr` already covers. An extra bind here would
         // be noise in every real launch.
         assert_eq!(program_dir_to_bind("/usr/bin/llama-server"), None);
         assert_eq!(program_dir_to_bind("/usr/local/bin/llama-server"), None);
@@ -665,6 +691,80 @@ mod tests {
         ] {
             assert_eq!(program_dir_to_bind(p), None, "{p} was bound");
         }
+    }
+
+    #[test]
+    fn the_nixos_system_trees_are_bound_read_only_and_never_writable() {
+        // On NixOS every program and library is under /nix/store and the GPU
+        // userspace is /run/opengl-driver: without these the backend cannot
+        // even be exec'd. `-try`, so a Fedora machine without them is unchanged.
+        let plan = a_plan();
+        let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        for t in NIX_SYSTEM_TREES {
+            assert!(
+                argv.windows(3).any(|w| w == ["--ro-bind-try", t, t]),
+                "{t} is not bound read-only: {argv:?}"
+            );
+            assert!(
+                !argv.windows(2).any(|w| (w[0] == "--bind" || w[0] == "--bind-try") && w[1] == *t),
+                "{t} was bound writable: {argv:?}"
+            );
+        }
+        // /run itself never: its sockets (the nix-daemon, the system bus) stay out.
+        assert!(!argv.iter().any(|a| a == "/run"), "{argv:?}");
+        // A runtime in the store or the system profile needs no extra bind.
+        assert_eq!(program_dir_to_bind("/nix/store/abc-llama-cpp/bin/llama-server"), None);
+        assert_eq!(program_dir_to_bind("/run/current-system/sw/bin/llama-server"), None);
+    }
+
+    /// LIVE: a program that lives in /nix/store starts inside the confinement.
+    /// Skipped (with a line saying so) where there is no store or bwrap cannot
+    /// make its namespaces, which is a fact about the build host and not the code.
+    #[test]
+    fn a_store_program_runs_inside_the_real_sandbox() {
+        let Some(program) = std::env::var_os("PATH").and_then(|p| {
+            std::env::split_paths(&p)
+                .map(|d| d.join("true"))
+                .find(|c| c.is_file())
+        }) else {
+            eprintln!("skipped: no `true` on PATH");
+            return;
+        };
+        if !program.starts_with("/nix/store/") {
+            eprintln!("skipped: {} is not a store path", program.display());
+            return;
+        }
+        let probe = Command::new(BWRAP)
+            .args(["--ro-bind", "/", "/", "--unshare-net", "--", "/bin/sh", "-c", "exit 0"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if !matches!(probe, Ok(s) if s.success()) {
+            eprintln!("skipped: {BWRAP} cannot create a sandbox on this host ({probe:?})");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("rime-aid-live-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plan = LaunchPlan {
+            program: program.display().to_string(),
+            argv: vec![],
+            env: vec![],
+            listen: Listen::Unix(dir.join("b.sock")),
+            notes: vec![],
+        };
+        let model = dir.join("m.gguf");
+        std::fs::write(&model, b"GGUF").unwrap();
+        let e = Exposed { model: &model, socket_dir: &dir, devices: vec![] };
+        let argv = confine_argv(&plan, &e);
+        let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.status.success(),
+            "{} did not run confined: {:?}\n{}",
+            program.display(),
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

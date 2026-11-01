@@ -110,8 +110,8 @@ let
     # need not have git installed, then the system.
     SAFE_PATH = "${lib.getBin git}/bin:${coreutils}/bin:/run/wrappers/bin:${systemBinDir}";
     MINIMAL_PATH = "/run/wrappers/bin:${systemBinDir}";
-    # TODO(handover): the rime-aid backend sandbox binds only /usr and /etc (rime-aid/src/runtime.rs), so on NixOS a
-    # backend cannot start inside it until the sandbox binds /nix/store and /run/opengl-driver. PLAN.md 4.3.
+    # The rime-aid backend sandbox binds /nix/store, /run/current-system and /run/opengl-driver read-only
+    # (rime-aid/src/runtime.rs NIX_SYSTEM_TREES), so this PATH resolves inside it.
     AID_SANDBOX_PATH = systemBinDir;
   };
 
@@ -419,6 +419,9 @@ rustPlatform.buildRustPackage {
       exit 1
     fi
   '';
+
+  # The PATH the shipped rime-agentd unit hands every agent session (a test that runs its own unit reuses it).
+  passthru = { inherit agentdPath; };
 
   meta = {
     description = "Rime system daemon, CLI and helper daemons";

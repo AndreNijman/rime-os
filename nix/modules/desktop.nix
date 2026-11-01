@@ -127,16 +127,23 @@ let
     grep -q 'bindsym --to-code Mod4+Mod1+s exec ${sw}/libexec/rime-screen-reader toggle' $g/sway-greet.conf
   '';
 
-  # ── Plymouth: one splash, chartreuse (Containerfile.rime:265-312) ────────────────────────────────
-  # The 24 per-user accent themes need the boot chain to hand the accent to the initrd (ESP credential):
-  # TODO(handover): boot subsystem decides; until then every machine shows chartreuse.
+  # ── Plymouth: chartreuse plus the 24 accent themes (Containerfile.rime:265-312) ─────────────────
+  # rime-plymouth-accent (run by rime-greet-publish-all at boot and rime-greet-wallpaper on a change) picks the
+  # theme nearest the owner's accent and writes it to /etc/plymouth/plymouthd.conf, which the shutdown and reboot
+  # splash read. It looks for the themes under the system profile's share/plymouth/themes, so they are linked there.
+  # The BOOT splash starts in the initrd, which carries only boot.plymouth.theme:
+  # TODO(handover): the boot chain (D3) hands the accent to the initrd (ESP credential rime.accent.cred, which the
+  # script already writes); until then the boot splash is chartreuse and shutdown/reboot follow the accent.
   plymouthTheme = pkgs.runCommand "rime-plymouth-theme" { } ''
-    t=$out/share/plymouth/themes/rime-os-chartreuse
-    mkdir -p $(dirname $t)
-    cp -r ${files}/branding/plymouth/rime-os-chartreuse $t
-    chmod -R u+w $t
-    substituteInPlace $t/rime-os-chartreuse.plymouth \
-      --replace-fail /usr/share/plymouth/themes/rime-os-chartreuse $t
+    for src in ${files}/branding/plymouth/rime-os-chartreuse ${files}/branding/plymouth/rime-os-accent-*; do
+      n=$(basename $src)
+      t=$out/share/plymouth/themes/$n
+      mkdir -p $(dirname $t)
+      cp -r $src $t
+      chmod -R u+w $t
+      substituteInPlace $t/$n.plymouth --replace-fail /usr/share/plymouth/themes/$n $t
+    done
+    test $(ls -d $out/share/plymouth/themes/rime-os-accent-* | wc -l) -eq 24
   '';
 
   # ── rime-keyring-login: the login password becomes the keyring's (Containerfile.base:3864-3905) ─
@@ -389,6 +396,7 @@ in
         # size: documentation.doc is off (base.nix), so share/doc is not linked; these two are (see niri.doc below).
         "/share/doc/niri"
         "/share/doc/labwc"
+        "/share/plymouth/themes" # rime-plymouth-accent's theme lookup (plymouthTheme)
       ];
 
       # ── Keyring: the password typed at the login screen opens it (Containerfile.base:3767-3905) ───
@@ -521,6 +529,9 @@ in
       # thermald is Intel-only and restarts on failure: skip it cleanly elsewhere (10-rime-intel-only.conf).
       systemd.services.thermald.serviceConfig.ExecCondition =
         "${pkgs.bash}/bin/sh -c '${pkgs.gnugrep}/bin/grep -q GenuineIntel /proc/cpuinfo'";
+      # A virtual machine exposes the host's GenuineIntel but no thermal sensors, and thermald exits 1 ("No thermal
+      # sensors found") there: real hardware only, skipped rather than failed.
+      systemd.services.thermald.unitConfig.ConditionVirtualization = "no";
       services.upower.enable = true;
       services.udisks2.enable = true;
       services.gvfs.enable = true;
@@ -538,12 +549,28 @@ in
       # size: espeak-ng without MBROLA, as bootc ships it (no mbrola voices on Fedora); mbrola-voices is 645 MiB.
       services.speechd.package = pkgs.speechd.override { espeak = pkgs.espeak-ng.override { mbrolaSupport = false; }; };
 
+      # ── Text consoles are kmscon (Containerfile.base "Text consoles are kmscon on Fedora 45", rime-os #125) ──
+      # Fedora 45's preset makes kmsconvt@ the autovt@, so Ctrl+Alt+F2..F6 open kmscon; the NixOS module does the
+      # same (autovt@ alias, getty@ suppressed). The keyboard follows the configured layout: on NixOS that is
+      # services.xserver.xkb (what the installer writes), handed to kmscon with useXkbConfig, the declarative
+      # counterpart of bootc's 50-rime-keymap XKB_DEFAULT_* and localed. greetd owns VT 1: the NixOS greetd unit
+      # conflicts with getty@tty1 only, so it is made to conflict with kmscon's tty1 instance too (bootc checks
+      # Fedora's greetd.service for both).
+      services.kmscon = {
+        enable = true;
+        useXkbConfig = true;
+      };
+      systemd.services.greetd.conflicts = lib.mkIf config.services.greetd.enable [ "kmsconvt@tty1.service" ];
+
       # ── Boot splash (Containerfile.rime:265-312; bootc kargs.d `quiet splash`) ────────────────────
       boot.plymouth = {
         enable = true;
         themePackages = [ plymouthTheme ];
         theme = "rime-os-chartreuse";
       };
+      # The accent half (see plymouthTheme): a real file rime-plymouth-accent may rewrite (activation restores
+      # chartreuse; the next rime-greet-publish puts the accent back), and the themes where the script looks.
+      environment.etc."plymouth/plymouthd.conf".mode = "0644";
       boot.kernelParams = [ "quiet" "splash" ];
       boot.consoleLogLevel = lib.mkDefault 3;
 
@@ -619,6 +646,7 @@ in
       environment.systemPackages = with pkgs; [
         rimeDesktopData
         rimeGreet
+        plymouthTheme # the accent themes, for rime-plymouth-accent (see plymouthTheme)
         pkgs.rime.rime-libexec # the session helpers, at ${sw}/libexec (see the header)
         # size: documentation.doc is off (base.nix), but the scripts read these two files from share/doc:
         # rime-shell-firstrun seeds niri's default-config.kdl, rime-input-apply reads labwc's rc.xml.all.
