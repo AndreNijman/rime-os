@@ -273,8 +273,9 @@ Measured on 2026-11-02 on `feat/nixos` after the eleven wave-1 branches merged (
 `feat/nixos` with the polish merge, `--override-input rime-shell path:/work/shell`).
 
 **`checks.size` failed on the merged tree:** `closure: 2079 paths, 10556067672 bytes NAR (budget 10200547328)`,
-`FAIL: closure NAR size 10556067672 > budget 10200547328`. (The first integration run, before the `rime trust` fix
-rebuilt rimed, printed 10,556,067,944 B: the 272 B are rimed's binary.)
+`FAIL: closure NAR size 10556067672 > budget 10200547328`. (The first integration run, on the tree before the
+`rime trust` fix commit, printed 10,556,067,944 B; that commit rebuilt rimed, which is the likely source of the 272 B
+difference, not measured.)
 
 What grew, rime-vm toplevel, by store name (`nix path-info -r --json` of the size branch's toplevel `1kzkv1dp…` against
 the merged tree's `mxgwq8km…`, NAR bytes summed per name): 9,530,593,800 B over 1676 names → 10,556,067,944 B over

@@ -10,7 +10,7 @@ integration"); evidence in `/var/lab/rime-nix/artifacts/integrate-wave1/`.
 
 - **30 of 30 flake checks built** at 53210926a (`nix eval` of every `checks.x86_64-linux.<name>.outPath`, each valid in
   the store: `proof-final.txt`), with `--override-input rime-shell path:/work/shell` until rime-shell is pushed and
-  flake.lock relocked. `update-client` and `update-e2e` needed one retry each (a nixpkgs virtiofsd race, p1-exit.md).
+  flake.lock relocked. `update-client` and `update-e2e` each failed twice before passing alone (a nixpkgs virtiofsd race, p1-exit.md).
 - `hostlayer-katana` passed against katana's real sanitised state (six subtests, snapshot digest unchanged).
 - cargo: 3740 passed, 57 self-skipped, 0 failed, 3 ignored, 35 skipped by name.
 - Closure (rime-vm toplevel): **2079 paths, 10,556,067,672 B NAR** (`checks.size`, budget 11,274,289,152 B). The 1.51 GB

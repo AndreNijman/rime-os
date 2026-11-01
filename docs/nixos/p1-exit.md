@@ -317,8 +317,9 @@ command below ran with `--override-input rime-shell path:/work/shell`). Evidence
 
 - `nix flake check path:. --no-build`: "all checks passed!".
 - Every one of the 30 flake checks built in the `rime-nix` container: `nix eval` of each check's `outPath`, then `nix
-  path-info` of it, prints 30 valid paths (`proof-final.txt`). Retries, stated: `update-client` failed once and
-  `update-e2e` hung once (the virtiofsd race below); each passed when built alone (`update-rerun.log`).
+  path-info` of it, prints 30 valid paths (`proof-final.txt`). Retries, stated: `update-client` failed twice (hung
+  in flake check 2, failed on the first lone build) and `update-e2e` hung twice (flake checks 1 and 2), all from the
+  virtiofsd race below; each passed on its last lone build (`update-rerun.log`).
 - `hostlayer-katana` with the real snapshot (`RIME_KATANA_STATE=/var/lab/rime-nix/artifacts/katana-state`, private
   TMPDIR, in the container): all six subtests pass, andre logs in through greetd, snapshot digest `fe7aab3c…` the same
   before and after (`hostlayer-katana.log`). In `nix flake check` it skips by design.
