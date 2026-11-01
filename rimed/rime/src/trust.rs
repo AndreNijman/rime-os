@@ -95,7 +95,7 @@ pub const EXPECTED_ISSUER: &str = "https://token.actions.githubusercontent.com";
 /// rebuilds Rime under its own workflow has a different signer and every other
 /// word in this report stays true, so the identity is the one thing worth
 /// making a file.
-const SIGNER_OVERRIDE: &str = "/usr/share/rime-os/trust/expected-signer";
+const SIGNER_OVERRIDE: &str = rime_paths::TRUST_EXPECTED_SIGNER;
 
 /// The workflow file in [`EXPECTED_SIGNER`], and the one that replaces it for a
 /// rollout document.
@@ -107,7 +107,7 @@ const BUILD_WORKFLOW: &str = "build-image.yml";
 const ROLLOUT_WORKFLOW: &str = "promote-channel.yml";
 
 /// An image-owned file that replaces the derived rollout identity.
-const ROLLOUT_SIGNER_OVERRIDE: &str = "/usr/share/rime-os/trust/expected-rollout-signer";
+const ROLLOUT_SIGNER_OVERRIDE: &str = rime_paths::TRUST_EXPECTED_ROLLOUT_SIGNER;
 
 /// Where the containers signature policy lives, and what `bootc upgrade` reads.
 const POLICY_PATH: &str = "/etc/containers/policy.json";
@@ -539,7 +539,7 @@ pub fn booted_digest(roots: &Roots) -> Result<String, String> {
         let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
         serde_json::from_str(&text).map_err(|e| format!("{}: {e}", p.display()))?
     } else {
-        let out = Command::new("/usr/bin/rpm-ostree")
+        let out = Command::new(rime_paths::RPM_OSTREE)
             .args(["status", "--json"])
             .output()
             .map_err(|e| format!("could not run rpm-ostree: {e}"))?;
@@ -1278,7 +1278,9 @@ mod tests {
 
         // A downstream that overrides the image signer is followed.
         let dir = std::env::temp_dir().join(format!("rime-rollout-signer-{}", std::process::id()));
-        let trust = dir.join("usr/share/rime-os/trust");
+        let trust = dir.join(
+            std::path::Path::new(rime_paths::TRUST_EXPECTED_SIGNER.trim_start_matches('/')).parent().unwrap(),
+        );
         std::fs::create_dir_all(&trust).unwrap();
         std::fs::write(
             trust.join("expected-signer"),

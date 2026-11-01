@@ -55,7 +55,7 @@ use rime_agent_core::config::Config;
 /// prefix is prepended to an agent's argv, so a `PATH` lookup would let
 /// anything earlier on the daemon's `PATH` become the program every budgeted
 /// session actually execs.
-pub const SYSTEMD_RUN: &str = "/usr/bin/systemd-run";
+pub const SYSTEMD_RUN: &str = rime_paths::SYSTEMD_RUN;
 
 /// The prefix every scope this module creates carries.
 ///
@@ -1027,7 +1027,7 @@ mod tests {
         assert_eq!(
             plan.prefix,
             vec![
-                "/usr/bin/systemd-run",
+                rime_paths::SYSTEMD_RUN,
                 "--user",
                 "--scope",
                 "-q",

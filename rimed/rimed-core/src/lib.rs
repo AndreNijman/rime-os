@@ -148,7 +148,7 @@ pub use workload::{Assessment, Signal, Signals, Vram, Workload};
 
 /// The default on-disk override directory for profiles. If present it wins
 /// over the embedded set.
-pub const PROFILE_DIR: &str = "/usr/share/rimeos/sysprofiles";
+pub const PROFILE_DIR: &str = rime_paths::SYSPROFILES_DIR;
 
 /// True when dry-run is forced via the environment (`RIMED_DRY_RUN=1`). The
 /// daemon also exposes a `--dry-run` flag; either turns every real write off.

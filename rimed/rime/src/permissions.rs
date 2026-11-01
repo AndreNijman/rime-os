@@ -184,7 +184,7 @@ fn compositor_binary() -> Option<PathBuf> {
     };
     candidates
         .iter()
-        .map(|c| PathBuf::from("/usr/bin").join(c))
+        .map(|c| PathBuf::from(rime_paths::SYSTEM_BIN_DIR).join(c))
         .find(|p| p.exists())
 }
 

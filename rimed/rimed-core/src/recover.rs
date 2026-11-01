@@ -199,7 +199,7 @@ pub const REPAIRS: &[RepairStep] = &[
     RepairStep {
         id: "reprovision-desktop",
         domain: Domain::User,
-        argv: &["/usr/libexec/rime-shell-firstrun"],
+        argv: &[rime_paths::RIME_SHELL_FIRSTRUN],
         what: "re-seed the per-user Rime Shell configuration",
         why_safe: "the provisioner is idempotent by design, runs at every login \
                    already, needs no network, and only creates files that are \
@@ -208,7 +208,7 @@ pub const REPAIRS: &[RepairStep] = &[
     RepairStep {
         id: "rebuild-package-extension",
         domain: Domain::System,
-        argv: &["/usr/libexec/rime-pkg", "rebuild", "--if-needed"],
+        argv: &[rime_paths::RIME_PKG, "rebuild", "--if-needed"],
         what: "rebuild the user package extension against the booted OS",
         why_safe: "--if-needed makes the engine decide, and a rebuild resolves \
                    the same requested package list again; the previous \

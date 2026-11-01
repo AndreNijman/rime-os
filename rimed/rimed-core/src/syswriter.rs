@@ -975,7 +975,7 @@ impl RealWriter {
         if let Some(p) = &self.scxctl_bin {
             return p.exists().then(|| p.clone());
         }
-        ["/usr/sbin/scxctl", "/usr/bin/scxctl"]
+        [rime_paths::SCXCTL, rime_paths::SCXCTL_ALT]
             .into_iter()
             .map(PathBuf::from)
             .find(|p| p.exists())

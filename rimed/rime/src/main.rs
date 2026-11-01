@@ -2530,7 +2530,7 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
 }
 
 /// Where the shell is vendored inside the image.
-const SHELL_DIR_DEFAULT: &str = "/usr/share/rime-shell";
+const SHELL_DIR_DEFAULT: &str = rime_paths::SHELL_DIR;
 
 /// The shell config directory to address over IPC.
 ///
@@ -3480,7 +3480,7 @@ mod tests {
     fn shell_dir_is_overridable_for_development() {
         // Not asserting the env var here (tests share a process); asserting the
         // default, which is the contract keybinds rely on.
-        assert_eq!(SHELL_DIR_DEFAULT, "/usr/share/rime-shell");
+        assert_eq!(SHELL_DIR_DEFAULT, rime_paths::SHELL_DIR);
     }
 
     fn metrics(argv: &[&str]) -> MetricsArgs {

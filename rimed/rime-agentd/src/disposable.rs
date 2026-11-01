@@ -466,7 +466,7 @@ mod tests {
         // image pull.
         assert_eq!(
             PathBuf::from(paths::DISPOSABLE_ENGINE),
-            PathBuf::from("/usr/libexec/rime-disposable")
+            PathBuf::from(rime_paths::RIME_DISPOSABLE)
         );
         assert_eq!(paths::DISPOSABLE_ENGINE_ENV, "RIME_DISPOSABLE_ENGINE");
     }

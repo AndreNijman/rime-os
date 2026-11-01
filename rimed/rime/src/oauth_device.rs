@@ -467,7 +467,7 @@ fn post(url: &str, body: &str) -> Result<Reply, String> {
          write-out = \"\\n%{{http_code}}\"\n"
     );
 
-    let mut child = Command::new("/usr/bin/curl")
+    let mut child = Command::new(rime_paths::CURL)
         .arg("-q")
         .arg("-K")
         .arg("-")

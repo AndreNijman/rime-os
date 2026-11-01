@@ -319,7 +319,7 @@ pub struct UpdateOptions {
 /// The system-extension package engine behind `rime install`/`remove`/`pkg`.
 /// A constant so the CLI, `rime update` and rime-sysext-rebuild.service can
 /// never disagree about where it lives.
-pub const PKG_ENGINE: &str = "/usr/libexec/rime-pkg";
+pub const PKG_ENGINE: &str = rime_paths::RIME_PKG;
 
 /// State file written by the engine. Its absence means "this machine has no
 /// user packages", which is the common case and must cost nothing.
@@ -337,7 +337,7 @@ const PKG_APPIMAGE_DIR: &str = "/var/lib/rime/appimage";
 /// The capsule engine behind `rime env` (§8). Same shape as `PKG_ENGINE`: the
 /// policy lives in one shipped program so the CLI, the resolver and anything
 /// the shell drives cannot disagree about what a capsule is.
-pub const ENV_ENGINE: &str = "/usr/libexec/rime-env";
+pub const ENV_ENGINE: &str = rime_paths::RIME_ENV;
 
 /// The disposable-capsule engine behind `rime disposable` (§19).
 ///
@@ -347,7 +347,7 @@ pub const ENV_ENGINE: &str = "/usr/libexec/rime-env";
 /// of the same mechanism*: every environment it makes is an ordinary capsule
 /// created through `rime-env`, so `rime env list` sees it and `podman ps` sees
 /// it, and Rime has not grown a second container runtime.
-pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/rime-disposable";
+pub const DISPOSABLE_ENGINE: &str = rime_paths::RIME_DISPOSABLE;
 
 /// The account engine behind `rime user` (P2-016).
 ///
@@ -355,7 +355,7 @@ pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/rime-disposable";
 /// it runs `useradd`, `userdel` and `systemctl enable` as root, so a
 /// caller-controlled variable naming it would be a way to have `sudo rime
 /// user` execute somebody else's program.
-pub const USER_ENGINE: &str = "/usr/libexec/rime-user";
+pub const USER_ENGINE: &str = rime_paths::RIME_USER;
 
 /// The virtualization engine behind `rime vm` (P2-008).
 ///
@@ -363,10 +363,10 @@ pub const USER_ENGINE: &str = "/usr/libexec/rime-user";
 /// caller-controlled variable naming a program is a hole. This one defines
 /// libvirt domains and deletes disk images, so it is the last one that should
 /// be reachable through the environment.
-pub const VM_ENGINE: &str = "/usr/libexec/rime-vm";
+pub const VM_ENGINE: &str = rime_paths::RIME_VM;
 
 /// P2-012's browser capsule engine.
-pub const BROWSER_ENGINE: &str = "/usr/libexec/rime-browser";
+pub const BROWSER_ENGINE: &str = rime_paths::RIME_BROWSER;
 
 /// The plugin CLI behind `rime plugin` (§16).
 ///
@@ -374,7 +374,7 @@ pub const BROWSER_ENGINE: &str = "/usr/libexec/rime-browser";
 /// and [`ENV_ENGINE`]. Unlike `rime apply`'s capsule step there is no test that
 /// needs to redirect this one: `tests/test-rime-plugin.sh` drives the shipped
 /// script directly, the way the capsule and package suites do.
-pub const PLUGIN_ENGINE: &str = "/usr/libexec/rime-plugin";
+pub const PLUGIN_ENGINE: &str = rime_paths::RIME_PLUGIN;
 
 /// `rime plugin …`.
 ///
@@ -390,7 +390,7 @@ pub const PLUGIN_ENGINE: &str = "/usr/libexec/rime-plugin";
 /// whatever the program does. The default-drop policy itself is a shipped
 /// nftables file this helper does not edit — it manages the exception list in
 /// front of it, so a malformed exception cannot take the base policy with it.
-pub const FIREWALL_ENGINE: &str = "/usr/libexec/rime-firewall";
+pub const FIREWALL_ENGINE: &str = rime_paths::RIME_FIREWALL;
 
 /// The device enumeration behind `rime devices`.
 ///
@@ -398,7 +398,7 @@ pub const FIREWALL_ENGINE: &str = "/usr/libexec/rime-firewall";
 /// This one is never run under sudo — it reads, and every verb it has is
 /// unprivileged — but a caller-controlled variable naming a program is a hole
 /// whatever the program does, and the rule is worth more than the exception.
-pub const DEVICES_ENGINE: &str = "/usr/libexec/rime-devices";
+pub const DEVICES_ENGINE: &str = rime_paths::RIME_DEVICES;
 
 /// `rime devices …`.
 ///
@@ -785,7 +785,7 @@ pub(crate) fn verify_staged(allow_unverified: bool, reference: &str, digest: &st
 /// length, on stderr), anything else failed (likewise). Neither of the last
 /// two is fatal to `rime update`: the machine is on GRUB and GRUB works.
 fn migrate_boot_path() -> bool {
-    const ENGINE: &str = "/usr/libexec/rime-boot-migrate";
+    const ENGINE: &str = rime_paths::RIME_BOOT_MIGRATE;
     if !Path::new(ENGINE).exists() {
         return false;
     }
@@ -1068,7 +1068,7 @@ pub fn update(opts: UpdateOptions) -> i32 {
 ///
 /// Never fatal: a flatpak that cannot reach Flathub must not fail an OS update.
 fn flatpak_pass() -> i32 {
-    if !Path::new("/usr/bin/flatpak").exists() {
+    if !Path::new(rime_paths::FLATPAK).exists() {
         return 0;
     }
     match run(PKG_ENGINE, &["flatpak-upgrade"]) {

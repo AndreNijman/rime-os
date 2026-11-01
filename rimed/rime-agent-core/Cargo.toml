@@ -22,6 +22,7 @@ path = "src/lib.rs"
 test-support = []
 
 [dependencies]
+rime-paths = { path = "../rime-paths" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

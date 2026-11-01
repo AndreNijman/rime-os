@@ -49,7 +49,7 @@ use rime_agent_core::protocol::{Request as AgentRequest, Response as AgentRespon
 /// Never a `PATH` lookup: this program is itself on the `PATH` as `git`, so a
 /// lookup would find it again and recurse until the session runs out of
 /// processes.
-const REAL_GIT: &str = "/usr/bin/git";
+const REAL_GIT: &str = rime_paths::GIT;
 
 /// The git subcommands the broker has a capability for.
 ///

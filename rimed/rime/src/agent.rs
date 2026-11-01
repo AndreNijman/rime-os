@@ -3923,7 +3923,7 @@ pub fn project_cmd(cmd: ProjectCmd) -> i32 {
 /// Where the compositor adapter lives. A fixed path, like the sandbox's bwrap:
 /// resolving it through `PATH` would let a shadowing script decide what "the
 /// windows of this project" means.
-const WINDOW_ADAPTER: &str = "/usr/libexec/rime-project-windows";
+const WINDOW_ADAPTER: &str = rime_paths::RIME_PROJECT_WINDOWS;
 
 fn window_adapter() -> String {
     // Overridable for development only, and named so it is obvious in a process
@@ -4191,7 +4191,7 @@ fn layout_forget() -> Result<i32> {
 /// Where the multiplexer adapter lives. A fixed path, like the window adapter
 /// and the sandbox's bwrap: resolving it through `PATH` would let a shadowing
 /// script decide what "open my project layout" runs.
-const MUX_ADAPTER: &str = "/usr/libexec/rime-mux";
+const MUX_ADAPTER: &str = rime_paths::RIME_MUX;
 
 fn mux_adapter() -> String {
     std::env::var("RIME_MUX_ADAPTER").unwrap_or_else(|_| MUX_ADAPTER.to_string())

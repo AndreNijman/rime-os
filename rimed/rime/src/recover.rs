@@ -208,7 +208,7 @@ impl Sys {
 
 /// The per-user provisioner. Re-seeds everything a reset removes, is idempotent
 /// by design, runs at every login already, and needs no network.
-const PROVISIONER: &str = "/usr/libexec/rime-shell-firstrun";
+const PROVISIONER: &str = rime_paths::RIME_SHELL_FIRSTRUN;
 
 // ── doctor, made machine-readable ────────────────────────────────────────────
 
@@ -505,7 +505,7 @@ fn booted_deployment(cmdline: &str) -> Option<String> {
 fn os_release(sys: &Sys) -> BTreeMap<String, String> {
     let text = sys
         .read("/etc/os-release")
-        .or_else(|| sys.read("/usr/lib/os-release"))
+        .or_else(|| sys.read(rime_paths::OS_RELEASE_FALLBACK))
         .unwrap_or_default();
     let mut map = BTreeMap::new();
     for l in text.lines() {
@@ -934,7 +934,7 @@ fn probe(sys: &Sys) -> Surface {
     // an error nobody looked at. On a stock image `/usr/share/rime-shell` is
     // 0755 and the home is the caller's own, so this is the shape of the defect
     // rather than a refusal users are hitting today.
-    let shell_qml = sys.path("/usr/share/rime-shell/shell.qml");
+    let shell_qml = sys.path(rime_paths::SHELL_QML);
     let shipped = match std::fs::metadata(&shell_qml) {
         Ok(m) => Ok(m.len() > 0),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -996,11 +996,13 @@ fn probe(sys: &Sys) -> Surface {
             id: "rime-shell",
             label: "Rime Shell",
             state: Health::Unavailable,
-            detail: "/usr/share/rime-shell/shell.qml is missing or empty — the \
-                     image did not ship Rime Shell. That is an image-build \
-                     defect, not something a reset or a repair can fix; roll \
-                     back to the previous deployment."
-                .to_string(),
+            detail: format!(
+                "{} is missing or empty — the \
+                 image did not ship Rime Shell. That is an image-build \
+                 defect, not something a reset or a repair can fix; roll \
+                 back to the previous deployment.",
+                rime_paths::SHELL_QML
+            ),
             action: Some("sudo rime rollback".to_string()),
         },
     });
@@ -1070,7 +1072,7 @@ fn probe(sys: &Sys) -> Surface {
     // uniformly would be a false claim there, so the condition is the UKI, not
     // the loader's name: systemd-boot booting a type #1 entry still has an
     // editable command line.
-    let rescue_present = sys.exists("/usr/lib/systemd/system/rescue.target");
+    let rescue_present = sys.exists(rime_paths::RESCUE_TARGET_UNIT);
     // Whether the command line is editable needs `booted_from_uki` only on the
     // systemd-boot path — GRUB's menu is editable regardless of what booted.
     // A refused StubInfo read only matters there, so it is the one case that
@@ -1162,7 +1164,7 @@ fn probe(sys: &Sys) -> Surface {
     });
     routes.push(Route {
         id: "disposable-environment",
-        available: Some(sys.exists("/usr/libexec/rime-disposable")),
+        available: Some(sys.exists(rime_paths::RIME_DISPOSABLE)),
         how: "`rime disposable run` gives you a throwaway userspace on a machine \
               that still boots — a whole environment that is deleted when you \
               close it. It is not a repair environment for a machine that will \
@@ -2354,7 +2356,7 @@ sysext /usr overlay ro,nodev,relatime,lowerdir=/run/systemd/sysext/meta/usr:/usr
                 "Iface\tDestination\tGateway\nwlan0\t00000000\t0101A8C0\t0003\n",
             );
             w("etc/os-release", "NAME=\"Rime OS\"\nVERSION_ID=43\nVARIANT_ID=gaming\n");
-            w("usr/share/rime-shell/shell.qml", "shell\n");
+            w(rime_paths::SHELL_QML.trim_start_matches('/'), "shell\n");
             // An AMD display controller, so the GPU row has something to check.
             w("sys/bus/pci/devices/0000:03:00.0/class", "0x030000\n");
             w("sys/bus/pci/devices/0000:03:00.0/vendor", "0x1002\n");
@@ -2832,7 +2834,7 @@ sysext /usr overlay ro,nodev,relatime,lowerdir=/run/systemd/sysext/meta/usr:/usr
         let m = Machine::new("shell-eacces");
         // The parent, not the file: a 0000 file still stats, and `shipped` is
         // a stat.
-        if !seal(&m.0, "usr/share/rime-shell", stat("usr/share/rime-shell/shell.qml")) {
+        if !seal(&m.0, rime_paths::SHELL_DIR.trim_start_matches('/'), stat(rime_paths::SHELL_QML.trim_start_matches('/'))) {
             return;
         }
         let row = m.row("rime-shell");
@@ -2848,7 +2850,7 @@ sysext /usr overlay ro,nodev,relatime,lowerdir=/run/systemd/sysext/meta/usr:/usr
     #[test]
     fn a_shell_that_is_really_missing_is_still_an_image_build_defect() {
         let m = Machine::new("shell-enoent");
-        std::fs::remove_file(m.0.join("usr/share/rime-shell/shell.qml")).unwrap();
+        std::fs::remove_file(m.0.join(rime_paths::SHELL_QML.trim_start_matches('/'))).unwrap();
         let row = m.row("rime-shell");
         assert_eq!(row.state, Health::Unavailable);
         assert!(row.detail.contains("did not ship Rime Shell"), "{}", row.detail);
