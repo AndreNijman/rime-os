@@ -225,6 +225,17 @@ check "...and nothing waits, even on a daemon that would block (${ms} ms)" test 
 run "$T/gdbus" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7" DBUS_SESSION_BUS_ADDRESS= XDG_RUNTIME_DIR=
 check "no session bus: oo7 is not started either" \
     eval '[ "$(rc)" = 1 ] && [ -z "$(calls)" ] && logged "not starting oo7"'
+# No bus yet, but PAM's login daemon is there: --start reaches it over its
+# control socket and keeps it from quitting, so it is still run.
+mkdir -p "$T/run/keyring"
+python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$T/run/keyring/control"
+run "$T/gk:$T/gdbus" DBUS_SESSION_BUS_ADDRESS=
+check "no session bus but PAM's daemon is there: gnome-keyring --start still hands it over, exit 1, no bus call" \
+    eval '[ "$(rc)" = 1 ] && [ "$(calls)" = "gnome-keyring-daemon --start --components=secrets" ] && [ ! -s "$T/bus-calls" ] && logged "handed the session gnome-keyring'"'"'s login daemon"'
+run "$T/gdbus" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7" DBUS_SESSION_BUS_ADDRESS=
+check "...which is gnome-keyring's own: oo7 is still not started without a bus" \
+    eval '[ "$(rc)" = 1 ] && [ -z "$(calls)" ] && logged "not starting oo7"'
+rm -rf "$T/run/keyring"
 
 run "$T/gk:$T/gdbus"
 check "it asks the bus, never the name itself (a call to the name would activate a locked daemon)" \
