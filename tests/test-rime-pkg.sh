@@ -1341,6 +1341,310 @@ else
     skipped "github_refresh" "(no rpmbuild, or no user namespaces)"
 fi
 
+# 8c. A 32-bit twin no repository carries comes from Fedora's build system.
+#    Fedora's `updates` keeps only the newest build of a package, so an image a
+#    few weeks old ships x86_64 builds whose i686 twin is in no repository: on
+#    the 2026-10-04 Fedora 43 image, libheif-1.23.5-3 against 1.20.2-6 and
+#    1.23.7-1 in the repositories, and `rime install steam` failed. The engine
+#    now takes the image's exact build from Koji, verified against the Fedora
+#    release key the image ships and nothing else, or names what it could not
+#    get.
+#
+#    Fixtures are real rpms signed by throwaway keys: `release` stands in for
+#    the Fedora release key of this OS, `other` for another release's key in
+#    the same directory. The package is libtwin, built from source twinsrc, so
+#    Koji's path must name the source. A stub curl serves a Koji tree from disk
+#    (404 for what is not there, a connection failure with KOJI_STUB=down) and
+#    refuses any call without https-only; a stub rpm answers `-qa` with the
+#    image's rpmdb and passes everything else to the real rpm; a stub dnf5
+#    plays the repositories (KOJI_FLOW).
+kt_tools=1
+for t in rpm rpmbuild rpmsign rpmkeys gpg python3 gzip; do
+    command -v "$t" >/dev/null 2>&1 || { kt_tools=0; kt_missing=$t; }
+done
+if [ "$kt_tools" = 0 ]; then
+    if [ -n "${GITHUB_ACTIONS:-}" ]; then
+        bad "koji twins: fixtures" "$kt_missing is not on this runner; the Koji twin cases did not run"
+    else
+        skipped "koji twins" "($kt_missing is not installed)"
+    fi
+else
+KT=$WORK/koji
+mkdir -p "$KT/bin" "$KT/keys" "$KT/gpg" "$KT/build" "$KT/rpms" "$KT/root/check"
+REAL_RPM=$(command -v rpm)
+ktkey() {  # $1 = name -> armored public key at $KT/gpg/$1.asc
+    mkdir -p "$KT/gpg/$1"; chmod 700 "$KT/gpg/$1"
+    gpg --homedir "$KT/gpg/$1" --batch --pinentry-mode loopback --passphrase '' \
+        --quick-gen-key "Rime test $1 <$1@example.invalid>" ed25519 sign never >/dev/null 2>&1
+    gpg --homedir "$KT/gpg/$1" --armor --export > "$KT/gpg/$1.asc" 2>/dev/null
+}
+ktkey release; ktkey other
+KT_KID=$(gpg --homedir "$KT/gpg/release" --with-colons --fingerprint 2>/dev/null \
+         | awk -F: '/^fpr:/ { print tolower(substr($10, length($10) - 7)); exit }')
+# This OS is "43" (os_version is overridden below): its key, and another
+# release's key in the same directory, which must not be trusted for it.
+cp "$KT/gpg/release.asc" "$KT/keys/RPM-GPG-KEY-fedora-43-primary"
+cp "$KT/gpg/other.asc" "$KT/keys/RPM-GPG-KEY-fedora-44-primary"
+cat > "$KT/build/t.spec" <<'SPEC'
+Name: twinsrc
+Version: 1.0
+Release: %{rel}
+%{?ep:Epoch: %{ep}}
+Summary: rime-pkg koji twin fixture
+License: MIT
+%description
+fixture
+%package -n libtwin
+Summary: rime-pkg koji twin fixture
+%description -n libtwin
+fixture
+%install
+mkdir -p %{buildroot}/usr/share/libtwin
+echo %{rel} > %{buildroot}/usr/share/libtwin/marker
+%files -n libtwin
+/usr/share/libtwin/marker
+SPEC
+ktbuild() {  # $1 = release, $2 = epoch or "" -> $KT/rpms/<tag>/libtwin-1.0-$1.i686.rpm
+    local tag="$1${2:+-e$2}"
+    rpmbuild -bb --target i686 --define "_topdir $KT/build/$tag" --define "_rpmdir $KT/rpms/$tag" \
+        --define "rel $1" ${2:+--define "ep $2"} --define 'debug_package %{nil}' \
+        --define '_build_id_links none' \
+        --define '_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm' \
+        "$KT/build/t.spec" >/dev/null 2>&1
+}
+ktsign() {  # $1 = key, $2 = rpm
+    # %__gpg names gpg2 on Debian's rpm, which ships no gpg2.
+    rpmsign --addsign --define "__gpg $(command -v gpg)" \
+        --define "_gpg_path $KT/gpg/$1" --define "_gpg_name $1@example.invalid" \
+        --define '_gpg_sign_cmd_extra_args --batch --pinentry-mode loopback --passphrase ""' \
+        "$2" >/dev/null 2>&1
+}
+ktbuild 3.fc43 ""; ktbuild 2.fc43 ""; ktbuild 3.fc43 1
+F=libtwin-1.0-3.fc43.i686.rpm
+U="$KT/rpms/3.fc43/$F"                 # unsigned, as Koji's plain copy
+S="$KT/rpms/signed-$F"; O="$KT/rpms/other-$F"; E="$KT/rpms/epoch-$F"
+cp "$U" "$S"; cp "$U" "$O"; cp "$KT/rpms/3.fc43-e1/$F" "$E"
+if [ -n "$KT_KID" ] && [ -f "$U" ] && [ -f "$KT/rpms/2.fc43/libtwin-1.0-2.fc43.i686.rpm" ] \
+   && ktsign release "$S" && ktsign other "$O" && ktsign release "$E" \
+   && rpmkeys --dbpath "$KT/root/check" --import "$KT/gpg/release.asc" >/dev/null 2>&1 \
+   && rpmkeys --dbpath "$KT/root/check" --checksig "$S" 2>&1 | grep -F "digests signatures OK" >/dev/null \
+   && ! rpmkeys --dbpath "$KT/root/check" --checksig "$U" 2>&1 | grep -F "signatures OK" >/dev/null; then
+    ok "koji twins: signed and unsigned fixtures"
+    # The signature header of the signed fixture, as Koji's sigcache keeps it:
+    # the bytes after the 96-byte lead, up to the main header (8-aligned).
+    python3 -I - "$S" "$KT/rpms/$F.sig" <<'PY'
+import struct, sys
+b = open(sys.argv[1], 'rb').read()
+il, dl = struct.unpack('>II', b[104:112])
+n = 16 + 16 * il + dl
+n = (n + 7) // 8 * 8
+open(sys.argv[2], 'wb').write(b[96:96 + n])
+PY
+
+    # A Koji tree: $1 = layout. signed = the signed copy; splice = only the
+    # plain copy and the sigcache header; unsigned = the plain copy served as
+    # the signed one; other = signed with another release's key; epoch = the
+    # right name and version at another epoch; none = nothing.
+    ktree() {
+        local base="$KT/tree/twinsrc/1.0/3.fc43"
+        rm -rf "$KT/tree"; mkdir -p "$base/data/signed/$KT_KID/i686" "$base/i686" "$base/data/sigcache/$KT_KID/i686"
+        case "$1" in
+            signed)   cp "$S" "$base/data/signed/$KT_KID/i686/$F" ;;
+            splice)   cp "$U" "$base/i686/$F"; cp "$KT/rpms/$F.sig" "$base/data/sigcache/$KT_KID/i686/$F.sig" ;;
+            unsigned) cp "$U" "$base/data/signed/$KT_KID/i686/$F"; cp "$U" "$base/i686/$F" ;;
+            other)    cp "$O" "$base/data/signed/$KT_KID/i686/$F" ;;
+            epoch)    cp "$E" "$base/data/signed/$KT_KID/i686/$F" ;;
+            none)     ;;
+        esac
+    }
+    cat > "$KT/bin/curl" <<'STUB'
+#!/bin/bash
+out=""; url=""; prev=""; proto=0; redir=0
+for a in "$@"; do
+    [ "$prev" = -o ] && out=$a
+    [ "$prev" = --proto ] && [ "$a" = '=https' ] && proto=1
+    [ "$prev" = --proto-redir ] && [ "$a" = '=https' ] && redir=1
+    prev=$a; url=$a
+done
+printf '%s\n' "$url" >> "$KOJI_LOG"
+[ "$proto$redir" = 11 ] || { echo "curl: (1) stub: not restricted to https" >&2; exit 1; }
+[ "${KOJI_STUB:-}" = down ] && { echo "curl: (7) Failed to connect to kojipkgs.fedoraproject.org port 443" >&2; exit 7; }
+case "$url" in
+    https://kojipkgs.fedoraproject.org/packages/*) f="$KOJI_TREE/${url#https://kojipkgs.fedoraproject.org/packages/}" ;;
+    *) echo "curl: (6) stub: not Koji: $url" >&2; exit 6 ;;
+esac
+[ -f "$f" ] || { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
+cp -- "$f" "$out"
+STUB
+    cat > "$KT/bin/rpm" <<STUB
+#!/bin/bash
+if [ "\$1" = -qa ]; then
+    printf 'libtwin\tx86_64\t1.0-3.fc43\t1.0\t3.fc43\ttwinsrc-1.0-3.fc43.src.rpm\tFedora Project\n'
+    printf 'bash\tx86_64\t5.3-1.fc43\t5.3\t1.fc43\tbash-5.3-1.fc43.src.rpm\tFedora Project\n'
+    exit 0
+fi
+exec "$REAL_RPM" "\$@"
+STUB
+    # The repositories: libtwin 1.0-1 (the release's GA build) and 1.0-4
+    # (newer than the image) in both arches,
+    # and NO i686 build at the image's 1.0-3 unless KOJI_REPO_HAS_TWIN=1.
+    cat > "$KT/bin/dnf5" <<'STUB'
+#!/bin/bash
+printf '%s\n' "$*" >> "$KOJI_DNF_LOG"
+has() { local x=$1; shift; case " $* " in *" $x "*) return 0 ;; esac; return 1; }
+argv=" $* "; tw=""; dest=""; prev=""
+for a in "$@"; do
+    case "$a" in --repofrompath=rime-image-twins,*) tw=${a#*,} ;; esac
+    [ "$prev" = --destdir ] && dest=$a
+    prev=$a
+done
+m=https://mirror.example/fedora/Packages
+case "$argv" in
+    *" repoquery "*)
+        case "$argv" in
+            *" --upgrades "*) echo libtwin-1.0-4.fc43.x86_64 ;;
+            *" --arch=i686 "*)
+                echo libtwin-1.0-4.fc43.i686
+                [ "${KOJI_REPO_HAS_TWIN:-0}" = 1 ] && echo libtwin-1.0-3.fc43.i686 ;;
+            *) printf 'libtwin %s %s\n' 1.0-1.fc43 i686 1.0-1.fc43 x86_64 1.0-4.fc43 i686 1.0-4.fc43 x86_64 ;;
+        esac
+        exit 0 ;;
+esac
+if [ -n "$tw" ]; then
+    if [ "${KOJI_SOLVE:-ok}" != ok ]; then echo "Problem: conflicting requests" >&2; exit 1; fi
+    if has --url "$@"; then
+        echo "$m/s/steam-1.0-1.x86_64.rpm"
+        for f in "$tw"/*.rpm; do echo "file://$f"; done
+        exit 0
+    fi
+    : > "$dest/steam-1.0-1.x86_64.rpm"; cp "$tw"/*.rpm "$dest/"; exit 0
+fi
+if has --url "$@"; then
+    has --alldeps "$@" || { echo "stub: an unexpected listing" >&2; exit 3; }
+    echo "$m/s/steam-1.0-1.x86_64.rpm"; echo "$m/l/libtwin-1.0-4.fc43.i686.rpm"; exit 0
+fi
+[ -d "$dest" ] || { echo "stub: no --destdir" >&2; exit 3; }
+case "${KOJI_FLOW:-}" in
+    plain) : > "$dest/steam-1.0-1.x86_64.rpm" ;;
+    repo-twin) : > "$dest/steam-1.0-1.x86_64.rpm"; cp "$KOJI_I686_2" "$dest/" ;;
+    *) echo "Problem: cannot install both libtwin-1.0-4.fc43.i686 and libtwin-1.0-3.fc43.x86_64" >&2; exit 1 ;;
+esac
+STUB
+    cp "$PN/bin/uname" "$KT/bin/uname"
+    chmod +x "$KT/bin/curl" "$KT/bin/rpm" "$KT/bin/dnf5" "$KT/bin/uname"
+    export KOJI_LOG="$KT/curl.log" KOJI_DNF_LOG="$KT/dnf.log" KOJI_TREE="$KT/tree"
+    export KOJI_I686_2="$KT/rpms/2.fc43/libtwin-1.0-2.fc43.i686.rpm"
+    TWIN_LINE=$'libtwin\t1.0-3.fc43\t1.0\t3.fc43\ttwinsrc-1.0-3.fc43.src.rpm\tFedora Project'
+    # $1 = shell run after sourcing the engine, with this OS's keys being
+    # $KT/keys and its version 43. Prints its output, then "rc=N".
+    ktcall() {
+        : > "$KOJI_LOG"; : > "$KOJI_DNF_LOG"
+        PATH="$KT/bin:$PATH" bash -c 'e=$1; k=$2; c=$3; set --
+            source "$e" >/dev/null 2>&1; set +e
+            RELEASE_KEY_DIRS=("$k"); os_version() { printf 43; }
+            eval "$c"; echo "rc=$?"' _ "$ENGINE" "$KT/keys" "$1" 2>&1
+    }
+    # twin_fetch into a fresh directory; $1 = tree layout.
+    ktfetch() {
+        ktree "$1"; rm -rf "$KT/out"; mkdir -p "$KT/out"
+        ktcall "twin_fetch '$KT/out' '' <<<\"\$TWIN_LINE\"; r=\$?; printf 'MISSING %s\n' \"\${TWIN_MISSING[@]}\"; (exit \$r)"
+    }
+    export TWIN_LINE
+
+    out=$(ktfetch signed)
+    if grep -qx 'rc=0' <<<"$out" && cmp -s "$S" "$KT/out/$F"; then
+        ok "koji twin: the signed copy is fetched as is"
+    else bad "koji twin: the signed copy is fetched as is" "got: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; fi
+    if [ "$(head -1 "$KOJI_LOG")" = "https://kojipkgs.fedoraproject.org/packages/twinsrc/1.0/3.fc43/data/signed/$KT_KID/i686/$F" ]; then
+        ok "…from the SOURCE's directory, over https, under the release key's id"
+    else bad "…from the SOURCE's directory, over https, under the release key's id" "asked for: $(head -1 "$KOJI_LOG")"; fi
+
+    out=$(ktfetch splice)
+    if grep -qx 'rc=0' <<<"$out" && rpmkeys --dbpath "$KT/root/check" --checksig "$KT/out/$F" 2>&1 | grep -F "digests signatures OK" >/dev/null \
+       && cmp -s "$S" "$KT/out/$F"; then
+        ok "koji twin: no signed copy: the plain copy + the sigcache header verify"
+    else bad "koji twin: no signed copy: the plain copy + the sigcache header verify" "got: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; fi
+
+    out=$(ktfetch unsigned)
+    if grep -qx 'rc=1' <<<"$out" && [ ! -e "$KT/out/$F" ] && grep -F "MISSING libtwin.i686 1.0-3.fc43 (rpmkeys says:" <<<"$out" >/dev/null; then
+        ok "koji twin: an unsigned rpm is refused (digests OK is not enough)"
+    else bad "koji twin: an unsigned rpm is refused (digests OK is not enough)" "got: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; fi
+
+    out=$(ktfetch other)
+    if grep -qx 'rc=1' <<<"$out" && [ ! -e "$KT/out/$F" ] && grep -F "MISSING libtwin.i686 1.0-3.fc43 (rpmkeys says:" <<<"$out" >/dev/null; then
+        ok "koji twin: signed by another release's key is refused"
+    else bad "koji twin: signed by another release's key is refused" "got: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; fi
+
+    out=$(ktfetch epoch)
+    if grep -qx 'rc=1' <<<"$out" && [ ! -e "$KT/out/$F" ] && grep -F "served a different package" <<<"$out" >/dev/null; then
+        ok "koji twin: the image's exact EVR, epoch included"
+    else bad "koji twin: the image's exact EVR, epoch included" "got: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; fi
+
+    out=$(ktfetch none)
+    if grep -qx 'rc=1' <<<"$out" && grep -F "MISSING libtwin.i686 1.0-3.fc43 (Fedora's build system does not have $F)" <<<"$out" >/dev/null; then
+        ok "koji twin: a build Koji does not have is named as such"
+    else bad "koji twin: a build Koji does not have is named as such" "got: $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; fi
+
+    # Two twins while Koji is down: one connection attempt, both named.
+    ktree signed; rm -rf "$KT/out"; mkdir -p "$KT/out"
+    out=$(KOJI_STUB=down ktcall "twin_fetch '$KT/out' '' <<<\"\$TWIN_LINE\"\$'\n'\"\${TWIN_LINE//libtwin/libtwin2}\"; r=\$?; printf 'MISSING %s\n' \"\${TWIN_MISSING[@]}\"; (exit \$r)")
+    if grep -qx 'rc=1' <<<"$out" && [ "$(wc -l < "$KOJI_LOG")" = 1 ] \
+       && [ "$(grep -c "^MISSING libtwin2\{0,1\}\.i686 1.0-3.fc43 (Fedora's build system could not be reached (curl: (7)" <<<"$out")" = 2 ]; then
+        ok "koji twin: an outage costs one attempt and names every twin"
+    else bad "koji twin: an outage costs one attempt and names every twin" "$(wc -l < "$KOJI_LOG") call(s): $(tr '\n' ' ' <<<"$out" | cut -c1-300)"; fi
+
+    # The whole download: the pinned pass finds nothing (the repositories have
+    # no libtwin.i686 at the image's build), the twin comes from Koji, and the
+    # set is resolved again with it.
+    ktree signed; rm -rf "$KT/dl"; mkdir -p "$KT/dl"
+    out=$(ktcall "( download_rpms '$KT/dl' steam )")
+    if grep -qx 'rc=0' <<<"$out" && cmp -s "$S" "$KT/dl/$F" && [ -e "$KT/dl/steam-1.0-1.x86_64.rpm" ] \
+       && [ "$(ls "$KT/dl" | wc -l)" = 2 ] && grep -F "resolved with the image's own build of 1 32-bit package(s)" <<<"$out" >/dev/null; then
+        ok "download: a twin no repository has comes from Koji into the set"
+    else bad "download: a twin no repository has comes from Koji into the set" "got: $(ls "$KT/dl" | tr '\n' ' ') $(tr '\n' ' ' <<<"$out" | tail -c 300)"; fi
+    if grep -E -- "--repofrompath=rime-image-twins,.* --exclude=[^ ]*libtwin-1\.0-1\.fc43\.i686[^ ]*libtwin-1\.0-4\.fc43\.i686" "$KOJI_DNF_LOG" | grep -- ' download ' | grep -v -- ' --url' >/dev/null; then
+        ok "…resolved with the twin in reach and the repositories' other builds out"
+    else bad "…resolved with the twin in reach and the repositories' other builds out" "dnf5 was asked: $(tail -1 "$KOJI_DNF_LOG")"; fi
+
+    ktree none; rm -rf "$KT/dl"; mkdir -p "$KT/dl"
+    out=$(ktcall "( download_rpms '$KT/dl' steam )")
+    if grep -qx 'rc=1' <<<"$out" \
+       && grep -F "error: this needs the image's own build of 32-bit package(s) that no enabled repository carries any more and that could not be taken from Fedora's build system: libtwin.i686 1.0-3.fc43 (Fedora's build system does not have $F)" <<<"$out" >/dev/null; then
+        ok "download: Koji does not have it either: a named error"
+    else bad "download: Koji does not have it either: a named error" "got: $(grep -F error: <<<"$out" | tail -1)"; fi
+
+    ktree unsigned; rm -rf "$KT/dl"; mkdir -p "$KT/dl"
+    out=$(ktcall "( download_rpms '$KT/dl' steam )")
+    if grep -qx 'rc=1' <<<"$out" && [ ! -e "$KT/dl/$F" ] \
+       && grep -F "error: this needs the image's own build" <<<"$out" | grep -F "libtwin.i686 1.0-3.fc43 (rpmkeys says:" >/dev/null; then
+        ok "download: an unsigned twin from Koji ends in the named error"
+    else bad "download: an unsigned twin from Koji ends in the named error" "got: $(grep -F error: <<<"$out" | tail -1)"; fi
+
+    # The normal paths: nothing is asked of Koji and the set is the solver's.
+    ktree signed; rm -rf "$KT/dl"; mkdir -p "$KT/dl"
+    out=$(KOJI_FLOW=plain ktcall "( download_rpms '$KT/dl' steam )")
+    if grep -qx 'rc=0' <<<"$out" && [ ! -s "$KOJI_LOG" ] && ! grep -F -- --repofrompath "$KOJI_DNF_LOG" >/dev/null \
+       && [ "$(ls "$KT/dl")" = steam-1.0-1.x86_64.rpm ]; then
+        ok "normal path: a set that fits is left alone, Koji untouched"
+    else bad "normal path: a set that fits is left alone, Koji untouched" "curl: $(wc -l < "$KOJI_LOG"), got: $(ls "$KT/dl" | tr '\n' ' ')"; fi
+
+    rm -rf "$KT/dl"; mkdir -p "$KT/dl"
+    out=$(KOJI_FLOW=repo-twin KOJI_REPO_HAS_TWIN=1 ktcall "( download_rpms '$KT/dl' steam )")
+    if grep -qx 'rc=0' <<<"$out" && [ ! -s "$KOJI_LOG" ] \
+       && [ "$(ls "$KT/dl" | paste -sd' ' -)" = "libtwin-1.0-2.fc43.i686.rpm steam-1.0-1.x86_64.rpm" ]; then
+        ok "normal path: a twin the repositories carry is never fetched from Koji"
+    else bad "normal path: a twin the repositories carry is never fetched from Koji" "curl: $(wc -l < "$KOJI_LOG"), got: $(ls "$KT/dl" | tr '\n' ' ')"; fi
+
+    # Static: Koji's address is fixed, https, and not taken from the
+    # environment (the stub curl above refuses any fetch not limited to https).
+    if grep -E '^readonly KOJI_PACKAGES=https://kojipkgs\.fedoraproject\.org/packages$' "$ENGINE" >/dev/null; then
+        ok "koji: a fixed https address"
+    else bad "koji: a fixed https address" "see KOJI_PACKAGES in the engine"; fi
+else
+    bad "koji twins: fixtures" "could not build or sign the fixtures (rpmbuild/rpmsign/rpmkeys)"
+fi
+fi
+
 echo
 printf 'rime-pkg: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" = 0 ]
