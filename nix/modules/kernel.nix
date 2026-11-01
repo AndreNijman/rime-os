@@ -166,10 +166,19 @@ in
         # NixOS skips system.requiredKernelConfig for kernels that carry `features` (every linuxManualConfig
         # kernel does: "nixpkgs kernels are assumed to have all required features"). Rime's config is not
         # nixpkgs', so check it here, at evaluation time, against the committed config.
-        assertions = map (a: {
-          assertion = a.assertion kernel.config;
-          message = "Rime kernel (nix/pkgs/kernel/config): ${a.message}";
-        }) config.system.requiredKernelConfig;
+        assertions =
+          map (a: {
+            assertion = a.assertion kernel.config;
+            message = "Rime kernel (nix/pkgs/kernel/config): ${a.message}";
+          }) config.system.requiredKernelConfig
+          ++ [
+            {
+              # The signed image is attached only on the insertModuleCertificates path; without it the
+              # signature would be silently ignored and the machine would boot an unsigned kernel.
+              assertion = cfg.signing.imageSignature != null -> cfg.signing.insertModuleCertificates;
+              message = "rime.kernel.signing.imageSignature is set but insertModuleCertificates is false: the signature would never be attached.";
+            }
+          ];
 
         # The unsigned image (with module certificates) the hosted signing job signs.
         system.build.rimeKernelImage = imageWithCerts;
@@ -195,9 +204,15 @@ in
         # bootc: blacklist + `install nouveau /bin/false` + rd.driver.blacklist/modprobe.blacklist kargs.
         # nixpkgs' NVIDIA module blacklists nouveau, nova_core and nvidiafb; the karg covers both initrd and root.
         boot.kernelParams = [ "modprobe.blacklist=nouveau" ];
-        boot.extraModprobeConfig = lib.concatMapStrings (m: ''
-          install ${m} ${nvidiaGate} ${m} $CMDLINE_OPTS
-        '') nvidiaGatedModules;
+        # A blacklist only stops alias autoloading; bootc's 50-rime-nvidia.conf also refuses an explicit
+        # `modprobe nouveau` (or a softdep pulling it in), so nouveau can never race nvidia for the dGPU.
+        boot.extraModprobeConfig =
+          ''
+            install nouveau ${pkgs.coreutils}/bin/false
+          ''
+          + lib.concatMapStrings (m: ''
+            install ${m} ${nvidiaGate} ${m} $CMDLINE_OPTS
+          '') nvidiaGatedModules;
         systemd.services.nvidia-powerd.unitConfig.ConditionPathExists = "/sys/module/nvidia";
       })
 

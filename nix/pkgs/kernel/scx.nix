@@ -39,6 +39,13 @@ let
 in
 assert lib.assertMsg (missing == [ ])
   "rime-scx: nixpkgs scx ${base.version} no longer builds ${lib.concatStringsSep ", " missing}";
+# The same bytes bootc built from: this is the NAR hash of the unpacked v1.1.4 tarball whose file sha256 is
+# Containerfile.core's SCX_SHA256 (efce300f…), checked with `nix store prefetch-file [--unpack]`; nixpkgs applies no
+# patches to it.
+assert lib.assertMsg (base.src.outputHash == "sha256-V+YokID74tDLR1urSeinsX3HePLBP9HFeo/NYMolH1A=")
+  "rime-scx: nixpkgs' scx source is no longer the v1.1.4 tarball bootc pinned (SCX_SHA256 efce300f…)";
+assert lib.assertMsg (base.src.patches or [ ] == [ ] && base.patches or [ ] == [ ])
+  "rime-scx: nixpkgs now patches scx; review the patches against Rime's proven set";
 assert lib.assertMsg (base.version == "1.1.4")
   "rime-scx: nixpkgs scx is ${base.version}; Rime's set was proven on 1.1.4. Re-run checks.kernel-scx and update this assert.";
 runCommand "rime-scx-${base.version}"
@@ -52,6 +59,9 @@ runCommand "rime-scx-${base.version}"
     };
   }
   ''
+    # bootc scx-builder: scx_lavd's runnable-task stall fix (upstream 6d31ddd89) must be in the pin.
+    grep 'suggested_cpu_id may be stale' ${base.src}/scheds/rust/scx_lavd/src/bpf/main.bpf.c >/dev/null \
+      || { echo "rime-scx: scx ${base.version} lacks scx_lavd's stall fix (upstream 6d31ddd89)"; exit 1; }
     mkdir -p $out/bin
     for b in ${lib.concatStringsSep " " (schedulers ++ tools)}; do
       test -x ${base}/bin/$b || { echo "rime-scx: ${base}/bin/$b missing"; exit 1; }

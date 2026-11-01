@@ -5,7 +5,10 @@
 #   3. CONFIG_MODULE_ALLOW_BTF_MISMATCH is NOT set;
 #   4. the .config the kernel was built with is the committed ./config (no silent oldconfig drift);
 #   5. the kfunc BTF defect is absent, read twice by independent readers that must agree:
-#      kernel/btf-xcheck.sh (bpftool, root cause) and rime-kernel-btf-gate (rimed's kernelbtf.rs, symptom).
+#      kernel/btf-xcheck.sh (bpftool, root cause) and rime-kernel-btf-gate (rimed's kernelbtf.rs, symptom);
+#   6. the scx release's bundled BPF header knows every member of this kernel's struct sched_ext_ops
+#      (Containerfile.core scx-builder: files/system/src/scx/check-sched-ext-ops.sh). A kernel bump that outruns
+#      the scx pin fails here, at build time, instead of only in kernel-vm's attach test.
 # Output: the verdict text plus the .BTF blob it read.
 {
   lib,
@@ -13,9 +16,12 @@
   bpftools,
   binutils,
   diffutils,
+  zstd,
   kernel,
   rimed,
   pin,
+  # The scx source tree the shipped schedulers were built from (pkgs.rime.rime-scx.base.src).
+  scxSrc,
 }:
 
 let
@@ -40,6 +46,7 @@ runCommand "rime-kernel-gate-${mdv}"
       bpftools
       binutils
       diffutils
+      zstd
     ];
   }
   ''
@@ -84,6 +91,15 @@ runCommand "rime-kernel-gate-${mdv}"
       1) echo "FATAL: the two readers disagree (bpftool says a bpf_kfunc tag is missing)"; exit 1 ;;
       *) echo "FATAL: only one reader ran (btf-xcheck exited $XRC = could not read the BTF)"; exit 1 ;;
     esac
+
+    echo "=== scx pin vs this kernel: sched_ext_ops members ==="
+    mkdir -p scx-vmlinux
+    tar --zstd -xf ${scxSrc}/rust/scx_utils/vmlinux.tar.zst -C scx-vmlinux
+    hdr="$(readlink scx-vmlinux/vmlinux/arch/x86/vmlinux.h)"
+    test -n "$hdr" || { echo "FATAL: scx's vmlinux.tar.zst has no arch/x86/vmlinux.h link"; exit 1; }
+    bpftool btf dump file $out/vmlinux.btf format c > kernel-vmlinux.h
+    bash ${../../../files/system/src/scx/check-sched-ext-ops.sh} "scx-vmlinux/vmlinux/arch/x86/$hdr" kernel-vmlinux.h \
+      || { echo "FATAL: the scx pin's BPF header is older than this kernel's sched_ext_ops"; exit 1; }
     echo "GATE: PASS"
     } 2>&1 | tee $out/verdict.txt
   ''

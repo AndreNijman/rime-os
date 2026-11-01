@@ -64,8 +64,72 @@ let
     pkgs.gnugrep
     pkgs.gnused
   ];
+  # A laptop-shaped system with Rime's kernel (not the test VM: qemu-vm adds virtio_gpu and friends to its initrd).
+  # Only the initrd and the boot image are built from it, never the whole system.
+  laptop =
+    (self.inputs.nixpkgs.lib.nixosSystem {
+      modules = [
+        self.nixosModules.default
+        {
+          nixpkgs.hostPlatform = "x86_64-linux";
+          rime.kernel.enable = true;
+          boot.loader.grub.enable = false;
+          fileSystems."/" = {
+            device = "/dev/mapper/root";
+            fsType = "btrfs";
+          };
+          boot.initrd.luks.devices.root.device = "/dev/disk/by-partlabel/root";
+          boot.initrd.availableKernelModules = [
+            "nvme"
+            "xhci_pci"
+            "thunderbolt"
+            "usb_storage"
+            "usbhid"
+            "sd_mod"
+            "rtsx_pci_sdmmc"
+          ];
+          system.stateVersion = "26.05";
+        }
+      ];
+    }).config;
 in
 {
+  # bootc's initramfs budget (files/scripts/check-initramfs-budget.sh, Containerfile.core stage 1f), on what NixOS
+  # builds: (1) boot image + initrd fit the per-deployment ceiling (130 MiB; bootc measured 114.6), and (2) no
+  # firmware-bearing KMS driver and no GPU firmware is in the initrd. Plymouth and the LUKS prompt run on the
+  # built-in simpledrm; a GPU driver in the initrd evicts simpledrm and drags in 100+ MiB of GSP firmware.
+  # TODO(handover): the boot worker points this at the shipped host configuration(s) once they exist, and
+  # decides the real target (ESP or btrfs /boot, D3).
+  kernel-boot-budget =
+    let
+      initrd = "${laptop.system.build.initialRamdisk}/${laptop.system.boot.loader.initrdFile}";
+      image = "${laptop.system.build.rimeKernelImage}/${laptop.boot.kernelPackages.kernel.target}";
+    in
+    assert laptop.boot.initrd.compressor == "zstd";
+    pkgs.runCommand "rime-kernel-boot-budget"
+      {
+        nativeBuildInputs = [
+          pkgs.zstd
+          pkgs.cpio
+        ];
+      }
+      ''
+        set -euo pipefail
+        budget=$(( 130 * 1048576 ))
+        ib=$(stat -L -c %s ${image}); rb=$(stat -L -c %s ${initrd})
+        per=$(( ib + rb ))
+        echo "boot image $(( ib / 1048576 )) MiB + initrd $(( rb / 1048576 )) MiB = $(( per / 1048576 )) MiB per generation (ceiling 130 MiB)"
+        test "$per" -le "$budget" || { echo "FAIL: over the per-generation budget"; exit 1; }
+        zstd -dc ${initrd} | cpio -it --quiet > list
+        echo "initrd: $(wc -l < list) entries, $(grep -c '\.ko' list || true) modules"
+        bad="$(grep -E '/(nvidia[^/]*|nouveau|amdgpu|i915|xe|radeon|amdkfd)\.ko|/firmware/(nvidia|amdgpu|i915|xe|radeon)/' list || true)"
+        if [ -n "$bad" ]; then
+          echo "FAIL: firmware-bearing KMS driver or GPU firmware in the initrd:"; echo "$bad"; exit 1
+        fi
+        grep -E '/(nvme|dm-crypt)\.ko' list >/dev/null || { echo "FAIL: the listing does not see the initrd's storage modules (check reads nothing)"; exit 1; }
+        echo "PASS: no GPU driver or GPU firmware in the initrd" | tee $out
+      '';
+
   kernel-config-fresh = pkgs.runCommand "rime-kernel-config-fresh" { nativeBuildInputs = [ pkgs.diffutils ]; } ''
     if ! diff -u ${../pkgs/kernel/config} ${rime.rime-kernel-config}; then
       echo "nix/pkgs/kernel/config is stale: copy ${rime.rime-kernel-config} over it (see nix/pkgs/kernel/README.md)"
@@ -78,6 +142,7 @@ in
     kernel = rime.rime-kernel;
     inherit (rime) rimed;
     inherit pin;
+    scxSrc = rime.rime-scx.base.src;
   };
 
   kernel-vm = pkgs.testers.runNixOSTest {
@@ -145,6 +210,24 @@ in
           machine.fail("lsmod | grep -w '^nvidia'")
           machine.succeed("modprobe nvidia_uvm")
           machine.fail("lsmod | grep -w '^nvidia_uvm'")
+
+      with subtest("nouveau can never load (bootc: blacklist + install /bin/false)"):
+          machine.succeed("modinfo -n nouveau")
+          machine.fail("modprobe nouveau")
+          machine.fail("test -d /sys/module/nouveau")
+
+      with subtest("modules that need hardware still pass signature verification"):
+          # nvidia and msi-ec refuse to initialise without their hardware (-ENODEV), but the kernel checks the
+          # signature BEFORE init, and a failed check taints the KERNEL (bit 13, E) even though the module is
+          # gone again. So: force the load past the hardware gate, then read the kernel-wide taint.
+          for m in ["nvidia", "msi-ec"]:
+              rc, out = machine.execute(f"modprobe --ignore-install {m} 2>&1")
+              print(f"forced load of {m}: rc={rc} {out.strip()!r}")
+          machine.execute("modprobe -r nvidia_uvm nvidia_drm nvidia_modeset nvidia msi-ec 2>/dev/null")
+          tainted = int(machine.succeed("cat /proc/sys/kernel/tainted").strip())
+          print(f"kernel taint mask {tainted}")
+          assert not (tainted >> 13) & 1, f"kernel tainted E (unsigned/unverified module loaded): {tainted}"
+          machine.fail("journalctl -k --no-pager --grep 'module verification failed'")
 
       with subtest("scx_loader drives a scheduler over D-Bus"):
           # Not started at boot (as on bootc): the scxctl call D-Bus-activates it.

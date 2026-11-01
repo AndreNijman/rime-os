@@ -14,7 +14,19 @@ tier builds (`Containerfile.kernel`, `kernel/`), built with nixpkgs' `linuxManua
 | `scx.nix` | `pkgs.rime.rime-scx`: the 16 schedulers bootc ships, from nixpkgs scx 1.1.4 |
 | `gate.nix` | the bootc kernel-tier gate as a check (`checks.kernel-gate`) |
 
-Checks (`nix/tests/kernel.nix`): `kernel-config-fresh`, `kernel-gate`, `kernel-vm`.
+Checks (`nix/tests/kernel.nix`): `kernel-config-fresh`, `kernel-gate`, `kernel-vm`, `kernel-boot-budget`.
+
+- `kernel-gate` also runs bootc's `files/system/src/scx/check-sched-ext-ops.sh`: every member of this kernel's
+  `struct sched_ext_ops` must exist in the scx pin's bundled BPF header (7.2.9: 45 kernel members, 53 in the
+  header, 8 header-only). `rime-scx` asserts the scx source is the tarball bootc pinned (SCX_SHA256 efce300f…)
+  and that scx_lavd carries the stall fix (upstream 6d31ddd89).
+- `kernel-boot-budget` ports bootc's initramfs budget (`files/scripts/check-initramfs-budget.sh`): on a
+  laptop-shaped system with `rime.kernel`, boot image + initrd stay under 130 MiB per generation (measured
+  16 + 27 MiB) and the initrd holds no firmware-bearing KMS driver (nvidia*, nouveau, amdgpu, i915, xe, radeon)
+  and no GPU firmware. The shipped host configuration replaces that stand-in once it exists.
+- `kernel-vm` also proves `modprobe nouveau` is refused (bootc's `install nouveau /bin/false`), and that
+  nvidia and msi-ec, which cannot initialise without their hardware, still pass signature verification: a
+  forced load fails with ENODEV after the signature check, and the kernel's E taint bit stays clear.
 
 ## Bumping the kernel
 
