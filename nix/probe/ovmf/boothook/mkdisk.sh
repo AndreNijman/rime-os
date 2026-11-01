@@ -46,6 +46,7 @@ verify_store() {   # IMG MOUNT_OPTS: the copied generations are on the image, re
 }
 attach() {   # attach IMG: one loop device, its node made if the container's /dev lacks it
   LOOP=$(losetup -f)
+  LOOP=${LOOP%% *}   # losetup prints "/dev/loopN (lost)" when the container's /dev has no node for it
   [[ -b $LOOP ]] || mknod "$LOOP" b 7 "${LOOP#/dev/loop}"
   losetup "$LOOP" "$1"
   say "attached $1 at $LOOP"
