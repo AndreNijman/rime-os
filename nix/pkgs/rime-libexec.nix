@@ -321,6 +321,15 @@ stdenvNoCC.mkDerivation {
         ${python3}/bin/python3 ${./rime-libexec-audit.py} inject "${file}" "${pathFor name}" ${if lib.elem name closed then "closed" else "open"}
       '') (lib.attrNames deps)}
 
+    # ── 4. what firstrun copies out of the store stays the user's to change ──
+    # Store files are 0444 and cp keeps the mode, where the image's /usr files were 0644. firstrun seeds files
+    # from the store and then appends to or replaces them (niri's config.kdl: "Permission denied", and the unit
+    # failed on the first login). A cp whose arguments name the store or the profile gets the default mode;
+    # every other cp in the script is unchanged.
+    sed -i '/# rime-libexec$/a cp() { local a; for a in "$@"; do case "$a" in /nix/store/*|/run/current-system/*) command cp "$@" --no-preserve=mode; return; esac; done; command cp "$@"; }' \
+      $out/libexec/rime-shell-firstrun
+    grep -q '^cp() { local a;' $out/libexec/rime-shell-firstrun
+
     runHook postInstall
   '';
 

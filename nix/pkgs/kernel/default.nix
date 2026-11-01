@@ -15,6 +15,7 @@
 let
   inherit (pkgs) lib;
   sources = import ./sources.nix { inherit (pkgs) lib fetchurl; };
+  configHas = line: lib.elem line (lib.splitString "\n" (builtins.readFile ./config));
 in
 pkgs.linuxManualConfig {
   pname = "linux-rime";
@@ -30,6 +31,15 @@ pkgs.linuxManualConfig {
 
   # A path, so linuxManualConfig reads it at eval time (kernel.config.isYes …) without import-from-derivation.
   configfile = ./config;
+
+  # What NixOS modules ask of a kernel by attribute (hardware.graphics.enable32Bit asserts ia32Emulation, which
+  # Steam's 32-bit graphics need). buildLinux sets these defaults itself; linuxManualConfig does not, so they
+  # are read from ./config here. Passthru only: the kernel derivation does not change.
+  features = {
+    ia32Emulation = configHas "CONFIG_IA32_EMULATION=y";
+    efiBootStub = configHas "CONFIG_EFI_STUB=y";
+    netfilterRPFilter = configHas "CONFIG_IP6_NF_MATCH_RPFILTER=m" || configHas "CONFIG_IP6_NF_MATCH_RPFILTER=y";
+  };
 
   extraMeta = {
     branch = lib.versions.majorMinor sources.pin.version;
