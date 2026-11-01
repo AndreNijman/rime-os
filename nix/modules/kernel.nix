@@ -76,17 +76,44 @@ let
       (old: {
         buildFlags = old.buildFlags ++ [ "CONFIG_X86_DECODER_SELFTEST=" ];
       });
+  # The image's identity for signing: the store hash of the unsigned image. It changes with the kernel, every
+  # module in the tree and the nixpkgs revision, so one signature serves exactly one kernel stack (D7).
+  imageHash = builtins.substring 0 32 (
+    builtins.baseNameOf (builtins.unsafeDiscardStringContext imageWithCerts.outPath)
+  );
+  # A path given as a store path (a derivation output, e.g. a test key) is used as is; any other path (a file in
+  # the repo, or an absolute path in an --impure evaluation) is copied into the store on its own.
+  storeFile =
+    name: p:
+    if builtins.hasContext (toString p) then
+      p
+    else
+      builtins.path {
+        path = p;
+        inherit name;
+      };
+  # A committed signature for this image, if there is one (D6: committed to rime-os, like kernel.pin). Only the
+  # signature file (and the public certificate) is copied into the store.
+  committedSignature =
+    let
+      f = "${toString cfg.signing.signatureDir}/${imageHash}.sig";
+    in
+    if cfg.signing.signatureDir != null && builtins.pathExists f then
+      storeFile "rime-kernel-${imageHash}.sig" f
+    else
+      null;
+  signImage = pkgs.callPackage ../pkgs/kernel/sign.nix { };
   finalImage =
     if cfg.signing.imageSignature == null then
       imageWithCerts
     else
-      pkgs.runCommand "linux-image-${kernel.version}-signed" { nativeBuildInputs = [ pkgs.sbsigntool ]; } ''
-        mkdir -p $out
-        cp ${imageWithCerts}/${kernelTarget} $out/${kernelTarget}
-        chmod u+w $out/${kernelTarget}
-        sbattach --attach ${cfg.signing.imageSignature} $out/${kernelTarget}
-        sbverify --list $out/${kernelTarget}
-      '';
+      signImage {
+        name = "linux-image-${kernel.version}-signed";
+        image = imageWithCerts;
+        target = kernelTarget;
+        signature = cfg.signing.imageSignature;
+        certificate = storeFile "rime-kernel-mok-cert" cfg.signing.certificate;
+      };
 in
 {
   options.rime.kernel = {
@@ -146,13 +173,47 @@ in
         '';
       };
 
+      certificate = lib.mkOption {
+        type = lib.types.path;
+        default = ../pkgs/kernel/signing/rime-mok.pem;
+        defaultText = lib.literalExpression "./nix/pkgs/kernel/signing/rime-mok.pem";
+        description = ''
+          Public certificate (PEM or DER) the kernel image signature must verify against. Default: the Rime MOK
+          that bootc images ship as /usr/share/rime-os/secureboot/rime-mok.der and users enrol with mokutil.
+          The build of a signed image fails unless `sbverify --cert` accepts it. Tests set a throwaway one.
+        '';
+      };
+
+      signatureDir = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = ../pkgs/kernel/signing/signatures;
+        defaultText = lib.literalExpression "./nix/pkgs/kernel/signing/signatures";
+        description = ''
+          Directory of committed detached signatures, one per image, named `<store hash of
+          system.build.rimeKernelImage>.sig` (nix-kernel-sign.yml produces them). `imageSignature` defaults to
+          this image's file when it exists.
+        '';
+      };
+
       imageSignature = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
-        default = null;
+        default = committedSignature;
+        defaultText = lib.literalMD "`<signatureDir>/<image hash>.sig` when that file exists, else null";
         description = ''
           Detached PE/Authenticode signature (sbsign --detached) of `system.build.rimeKernelImage`, made by the
           hosted signing job with the Rime MOK. The private key never enters the Nix store or a user's machine;
-          only this signature does. null = boot the image unsigned.
+          only this signature does. The system boots the image with it attached, and the build fails unless the
+          result verifies against `certificate`. null = boot the image unsigned.
+        '';
+      };
+
+      require = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Refuse to evaluate the system unless the kernel image is signed. Shipped host configurations set this,
+          so a release can never carry an unsigned kernel because a signature was not committed yet; the error
+          names the image hash and the file to commit.
         '';
       };
     };
@@ -178,10 +239,29 @@ in
               assertion = cfg.signing.imageSignature != null -> cfg.signing.insertModuleCertificates;
               message = "rime.kernel.signing.imageSignature is set but insertModuleCertificates is false: the signature would never be attached.";
             }
+            {
+              assertion = cfg.signing.require -> cfg.signing.imageSignature != null;
+              message = ''
+                rime.kernel.signing.require is set but the kernel image ${builtins.unsafeDiscardStringContext imageWithCerts.outPath} has no MOK signature.
+                Run .github/workflows/nix-kernel-sign.yml for this configuration and commit its output as
+                nix/pkgs/kernel/signing/signatures/${imageHash}.sig.
+              '';
+            }
           ];
 
         # The unsigned image (with module certificates) the hosted signing job signs.
         system.build.rimeKernelImage = imageWithCerts;
+        # The image the system boots: rimeKernelImage with the MOK signature attached when there is one.
+        system.build.rimeKernelBootImage = finalImage;
+        # What nix-kernel-sign.yml reads (nix eval --json): the image, its hash and where its signature goes.
+        system.build.rimeKernelSigning = {
+          image = imageWithCerts;
+          inherit imageHash;
+          inherit (kernel) version modDirVersion;
+          target = kernelTarget;
+          signatureFile = "nix/pkgs/kernel/signing/signatures/${imageHash}.sig";
+          signed = cfg.signing.imageSignature != null;
+        };
       }
 
       (lib.mkIf cfg.signing.insertModuleCertificates {

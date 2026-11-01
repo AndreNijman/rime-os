@@ -12,3 +12,5 @@
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
+# kernel-sign, kernel-sign-workflow
+// import ./kernel-sign.nix { inherit pkgs self; }
