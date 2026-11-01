@@ -1018,9 +1018,16 @@ fn gate_main(roots: &Roots, json: bool) -> i32 {
     i32::from(g.decision.refuses())
 }
 
+/// The NixOS gate reads the live machine (`/run/current-system`, `/etc/rime/update.toml`); a fixture root
+/// (`$RIME_TRUST_ROOT`) describes a bootc deployment and is always read by the bootc gate, even on a NixOS host
+/// (nix/release/crosscheck-rime-trust.sh runs the bootc verifier inside a NixOS test VM).
+fn nixos_gate(roots: &Roots) -> bool {
+    roots.fixture.is_none() && crate::nixos::is_nixos()
+}
+
 pub fn main(args: TrustArgs) -> i32 {
     let roots = Roots::from_env();
-    if args.gate && crate::nixos::is_nixos() {
+    if args.gate && nixos_gate(&roots) {
         return crate::nixos::trust::gate(args.json);
     }
     if args.gate {
@@ -1053,6 +1060,12 @@ pub fn main(args: TrustArgs) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fixture_root_is_never_read_by_the_nixos_gate() {
+        let fixture = Roots { fixture: Some(PathBuf::from("/nonexistent-rime-trust-fixture")) };
+        assert!(!nixos_gate(&fixture), "a fixture root must reach the bootc gate, NixOS host or not");
+    }
 
     #[test]
     fn the_four_ostree_verification_prefixes_are_told_apart() {
