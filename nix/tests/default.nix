@@ -3,4 +3,5 @@
 
 {
   vm-boot = import ./vm-boot.nix { inherit pkgs self; };
+  libexec = import ./libexec.nix { inherit pkgs self; };
 }
