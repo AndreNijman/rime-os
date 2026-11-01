@@ -111,18 +111,25 @@ Built and tested (`kernel-vm`):
   kernel build ("Decoded and checked 7611306 instructions"); the re-link skips it (`nix/modules/kernel.nix`).
 - Enforcement stays off (decision A12, = bootc).
 
-The hook, not yet fed:
-- `system.build.rimeKernelImage` is the unsigned image (certificates inserted) that must be MOK-signed.
-- `rime.kernel.signing.imageSignature` takes a **detached** PE signature of exactly that image; the system then
-  boots `sbattach --attach <sig> <image>` (built inside a derivation, `sbverify --list` checked). Not exercised
-  by a test: there is no signature to feed it yet.
-- TODO(handover): the hosted signing job. In CI, after the release closure is built: build
-  `nixosConfigurations.<host>.config.system.build.rimeKernelImage`, `sbsign --key <MOK key> --cert <MOK cert>
-  --detached --output bzImage.sig` with the key from the CI secret (`APEX_SB_*`, names unchanged), publish
-  the `.sig` and set `imageSignature` to it. The key never enters the Nix store, a binary cache or a user
-  machine; only the signature does. The image depends on the system's module tree, so the signature is per
-  host configuration and the job runs per release. Which boot chain consumes the signed image (shim+MOK or
-  Lanzaboote) is the boot worker's decision (D3).
+Kernel image signing (MOK, D3 + D7; `signing/README.md`):
+- `system.build.rimeKernelImage` is the unsigned image (certificates inserted). `nix-kernel-sign.yml` (GitHub-hosted
+  only, environment `kernel-signing`, secrets `APEX_SB_KEY_B64` / `APEX_SB_CRT_B64`) realises it, signs it detached
+  with `sign-detached.sh` (refuses a certificate that is not `signing/rime-mok.pem`, the public MOK bootc ships)
+  and uploads `<image store hash>.sig` + `.json`. They are committed to `signing/signatures/` (D6).
+- `rime.kernel.signing.imageSignature` defaults to `signatureDir/<hash>.sig` when it exists; `sign.nix` attaches it
+  (`sbattach`) and **fails the build unless `sbverify --cert <certificate>` accepts the result**, so a signature for
+  another image or by another key never reaches a toplevel. `system.build.rimeKernelBootImage` is what boots;
+  `system.build.rimeKernelSigning` is what the workflow reads. `rime.kernel.signing.require` refuses to evaluate a
+  system whose image is unsigned (for the shipped host configurations, which do not exist yet).
+- The key never enters the Nix store, a binary cache, a builder or a user machine; only the signature does. The
+  image hash covers the kernel, every module and the nixpkgs revision: any of them changing needs a new signature.
+- Checks: `kernel-sign` (the real image, throwaway keys made in the check: sign-detached.sh -> sign.nix -> toplevel,
+  plus five refusals), `kernel-sign-workflow` (the workflow's shape). The OVMF rig (`nix/probe/ovmf`, `KERNEL=rime`)
+  boots this image through Fedora's shim and GRUB with Secure Boot on.
+- TODO(handover): the `kernel-signing` environment (reviewers, branches) holding the secrets; the first real
+  signature (needs the secrets, so a hosted run); `require = true` on shipped hosts; the release workflow calling
+  `nix-kernel-sign.yml` before it builds; timing a hosted kernel build (`source=build`) or the Rime cache for
+  `source=cache`.
 
 ## Known differences at boot
 

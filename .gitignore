@@ -48,6 +48,10 @@ installer/target/
 # stopped every machine in the fleet from updating. Negated by exact path
 # rather than by directory, so the next .pem to land here is a decision.
 !files/system/trust/fulcio-root.pem
+# Same for the PUBLIC half of the Rime MOK, which the NixOS kernel image signature
+# must verify against (nix/pkgs/kernel/signing/README.md). It is pinned by
+# fingerprint in checks.kernel-sign; there is no private half here.
+!nix/pkgs/kernel/signing/rime-mok.pem
 
 # OS cruft
 .DS_Store

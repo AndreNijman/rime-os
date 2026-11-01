@@ -16,3 +16,5 @@
 // import ./kernel.nix { inherit pkgs self; }
 # ci, ci-userns
 // import ./ci.nix { inherit pkgs self; }
+# kernel-sign, kernel-sign-workflow
+// import ./kernel-sign.nix { inherit pkgs self; }
