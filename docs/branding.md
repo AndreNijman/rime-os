@@ -1,11 +1,169 @@
 # Rime OS Branding
 
-## The mark: "spark"
+## The mark: the layered ridge
+
+Rime's mark is the **layered ridge**: four flat planes stacked into a rising ridge, with the third plane in the
+accent colour. The wordmark is a lowercase `rime`; the product lockup sets `RIME OS` in wide capitals. This is the
+identity of the NixOS-based Rime (`feat/nixos`). The **spark** mark and its chartreuse/gold colourways are
+**legacy**: they belong to the bootc image and are described at the end of this section ("Legacy: the spark").
+
+**Reconstructed, not drawn from source files.** The brand pack in `docs/brand-pack/page1..page5.png` is five
+raster mockups; no vector source exists. Every vector here was rebuilt from those pages: the symbol traced plane
+by plane and refitted as straight-edged polygons on a 0.5-unit grid, the colours sampled, and the wordmarks matched
+to the closest open-licence typeface and outlined. Where the pages disagree with each other (they do, by a few
+per cent of plane thickness), page 1's primary symbol wins.
+
+### The symbol
+
+`files/branding/ridge/src/rime-ridge-symbol.svg`, viewBox `0 0 240 175`, exactly four `<polygon>`s, drawn
+bottom to top:
+
+| Plane | Points | Colour |
+|---|---|---|
+| `plane-1` (base) | `11,175 162.5,140 220,159 235.5,175` | ink (`{{fg}}`) |
+| `plane-2` | `0,175 153,108 212,91.5 194.5,139 160.5,128` | ink (`{{fg}}`) |
+| `plane-3` | `47.5,136 149,75 231,45 217.5,76` | **accent** (`{{accent}}`) |
+| `plane-4` (peak) | `91.5,100 129.5,58 240,0 222,36 142.5,67` | ink (`{{fg}}`) |
+
+The left tips of planes 2, 3 and 4 lie on one line (within 0.07 unit), as on the page.
+
+**Small-size master** (`rime-ridge-symbol-small.svg`): the same planes, each 20 % thinner (plane 1 about the
+baseline, plane 4 about the peak, planes 2 and 3 about their centres), so the three gaps stay open. Every export
+at **32 px or smaller** uses it; above 32 px the regular master.
+
+**Fit to the pages** (IoU per plane 1/2/3/4, the vector against the page's own render, aligned by bounding box):
+
+| Page render | IoU | Best two renders of the same mark agree to |
+|---|---|---|
+| page 1 primary symbol | 0.950 / 0.907 / 0.917 / 0.970 | page 1 symbol vs page 1 lockup: 0.968 / 0.925 / 0.883 / 0.888 |
+| page 1 lockup symbol | 0.955 / 0.899 / 0.871 / 0.896 | page 1 symbol vs page 4 hero: 0.894 / 0.814 / 0.930 / 0.869 |
+| page 4 hero | 0.907 / 0.790 / 0.890 / 0.870 | page 1 lockup vs page 4 hero: 0.887 / 0.823 / 0.877 / 0.784 |
+| page 5 symbol | 0.889 / 0.793 / 0.821 / 0.828 | |
+| page 5 lockup symbol | 0.895 / 0.807 / 0.898 / 0.838 | |
+
+The right-hand column is the ceiling: the pages' own renders of one mark disagree about as much as the vector
+disagrees with any of them, so a closer fit to one page would be a worse fit to another. Plane 2 is the thin plane
+where antialiasing moves the most pixels. The whole horizontal lockup against page 1's
+lockup: ink IoU 0.815 (most of the miss is the wordmark's antialiased edge). The overlays are in the review
+sheet `/var/lab/rime-nix/artifacts/brand/review/assets-sheet.png` on the build host (not in the repo).
+
+### Colours
+
+`files/branding/ridge/src/palette.json` holds these; the generator reads nothing else. Samples are medians over
+flat interiors (no antialiased edges) of the page pixels.
+
+| Name | Hex | Where it was sampled (n = pixels) | Spread across the pages |
+|---|---|---|---|
+| **Charcoal** (ink on light) | `#212224` | page 1 lockup symbol, n = 4309 | page 1 symbol-only `#202123`, page 1 wordmark `#181A1C`, page 4 hero `#151516`, page 5 `#1F2328`/`#17181A`; one ink is used for symbol and wordmark |
+| **Rime Blue** (plane 3) | `#91C2DC` | page 1 lockup | page 1 symbol `#8FC2DB`, swatch `#92C3DC`; page 4 hero `#83AECB`, page 5 `#6DAACD`/`#6EAACC`, page 4 small accent `#77A4C2` (later pages are shaded renders; page 1 is canonical) |
+| **Off-white** (ink on dark) | `#FAFAFA` | page 1 mark on the dark tile | page backgrounds `#F9F8F8` to `#FDFDFE` |
+| **Dark tile** | `#1F2327` | page 2 app icon | avatar `#1F2328`, page 1 dark tile `#1D2022` |
+| **Light tile** | `#FAFAFB`, border `#E2E4E6` | page 2 app icon | |
+| **Mono black / mono white** | `#000000` / `#FFFFFF` | page 1 mono marks | the page's mono-black sample was `#090909` with plane 3 in grey `#54585C`; mono is one ink here, so it survives a one-colour print or a stencil |
+
+**Named accents** (page 4's accent row; small slivers, so the most saturated half of each was taken; antialiasing
+pulls these slightly dark): Teal `#0A7661`, Emerald `#38A12B`, Amber `#D69E1A`, Violet `#A664D9`, Rose `#E4708B`,
+plus Rime Blue `#91C2DC`.
+
+**Per-owner slots**: 24 accents, slot *n* = hue *n* x 15 deg at Rime Blue's HLS lightness and saturation
+(`00` `#DC9191` ... `13` `#91C9DC` ... `23` `#DC91A4`). Rime Blue's hue is 200.8 deg, nearest slot `13`. The table
+is `accents/accents.json` (`base`, `base_slot`, `named`, `slots`). They play the part of the spark's 24
+Plymouth accent themes, but those are chartreuse rotated by *n* x 15 deg, so the same index is not the same hue:
+map an owner's stored accent by hue, not by index.
+
+### The adaptive rule
+
+**Plane 3 is the only part that ever takes an accent. Every other plane, and the wordmark, is the foreground ink.**
+`templates/*.svg.in` carry exactly two tokens: `{{accent}}` on plane 3 and `{{fg}}` everywhere else; no literal
+colour. A consumer substitutes the owner's accent (or Rime Blue) and the ink for its background (Charcoal on light,
+Off-white on dark), e.g. `sed -e 's/{{accent}}/#91C2DC/' -e 's/{{fg}}/#FAFAFA/' rime-symbol.svg.in`. Mono variants
+put the ink on plane 3 too. `checks.x86_64-linux.branding` fails if a template or an accent export breaks this.
+
+Variant names describe the background they are for: `light` = charcoal ink + Rime Blue for light backgrounds,
+`dark` = off-white ink + Rime Blue for dark ones, `mono-black`, `mono-white`.
+
+### Wordmarks and lockups
+
+Both wordmarks are outlined paths: no font is needed at runtime or to regenerate anything.
+
+- `rime`: **Golos Text**, wght 600, tracking -0.025 em (IoU with page 1's wordmark 0.894; Onest 650 scored 0.893,
+  Hanken Grotesk 700 0.910 but has a square dot on the i).
+- `RIME OS`: **Archivo**, wdth 125 (expanded), wght 700, tracking +0.045 em, word space -0.16 em (per-glyph IoU
+  0.866 mean, glyph widths within 1-7 % of the page).
+
+Both are SIL OFL 1.1 (nixpkgs `google-fonts`); `src/FONTS.md` has the source and the licence texts sit beside the
+outlines. Proportions measured on the pages and built into the generator:
+
+| Lockup | Rule |
+|---|---|
+| horizontal | wordmark x-height = 0.46 x symbol height; gap = 0.22 x-height; wordmark centred on the symbol |
+| stacked | symbol width = 0.87 x wordmark width, centred; gap from symbol to the dot of the i = 0.20 x-height |
+| RIME OS | cap height = 0.46 x symbol height; gap = 0.45 cap height; caps centred 0.08 symbol height below the symbol's centre |
+| wordmark only | at the horizontal lockup's scale |
+
+**Clear space** = the wordmark's x-height on every side (cap height for the RIME OS lockup; for the bare symbol,
+0.46 x its height). The `clearspace/` exports carry it as transparent padding.
+
+**Minimum sizes** (chosen, by eye on the review sheet): lockups 24 px high, the symbol 16 px. The symbol switches
+to the small-size master at 32 px and below. Don't recolour planes 1, 2 or 4, outline, rotate, add effects or set the
+wordmark live in another font.
+
+### Asset inventory: `files/branding/ridge/`
+
+| Path | What |
+|---|---|
+| `src/rime-ridge-symbol.svg`, `src/rime-ridge-symbol-small.svg` | the two symbol masters (four polygons each) |
+| `src/rime-wordmark.svg`, `src/rime-os-wordmark.svg` | outlined wordmarks; `src/outline-wordmarks.py` made them |
+| `src/palette.json`, `src/FONTS.md`, `src/OFL-*.txt` | colours, font sources, licences |
+| `svg/rime-{symbol,symbol-small,wordmark,lockup-horizontal,lockup-stacked,lockup-os}-<variant>.svg` | tight vector exports, 4 variants each |
+| `svg/clearspace/*-clearspace.svg` | the same with clear space |
+| `svg/square/rime-symbol-square[-small]-<variant>.svg` | the symbol centred on a square canvas (icon use) |
+| `svg/rime-app-icon-{dark,light}[-small].svg` | app icon tiles: dark tile with off-white ink, light tile with charcoal ink and a hairline border; radius 0.17 x side, mark 0.74 x side, centred at 0.46 height |
+| `templates/rime-*.svg.in` | adaptive templates (`{{fg}}`, `{{accent}}`) for symbol, small symbol, square symbol, wordmark and the three lockups |
+| `png/symbol/rime-symbol-<variant>-{16..1024}.png` | square, transparent; 16/24/32 from the small master |
+| `png/lockups[/clearspace]/rime-<lockup>-<variant>@{1,2}x.png` | 1x heights: horizontal 96, stacked 192, wordmark 96, RIME OS 64 px; transparent |
+| `icons/app/rime-app-icon-{dark,light}-{16..1024}.png` | opaque tiles, transparent rounded corners |
+| `favicon/favicon-{16,32,48}.png`, `favicon.ico`, `favicon.svg` | the .ico holds PNG entries 16/32/48; the SVG switches ink with `prefers-color-scheme` |
+| `accents/named/`, `accents/slots/`, `accents/accents.json` | the symbol per named accent and per slot: SVG light/dark + 256 and 512 px PNG |
+
+Sizes: 16, 24, 32, 48, 64, 128, 256, 512, 1024. Accents get only SVG + 256/512 PNG to keep the repo small
+(the whole tree is about 2.8 MB); render any other size from the SVG.
+
+**Package**: `nix/pkgs/rime-branding.nix`, flake attr `packages.x86_64-linux.rime-branding` (`pkgs.rime.rime-branding`
+in the overlay) installs the tree to `$out/share/rime/branding/` and the dark app tile as the hicolor icon
+`rime-os` (16..512 PNG, `scalable` SVG, `symbolic/apps/rime-os-symbolic.svg` in one ink), with
+`distributor-logo`, `start-here` and `rime-os-logo` as aliases at every size, so `LOGO=rime-os-logo` in
+os-release and desktop "start here" icons resolve to the ridge. No NixOS module uses it yet.
+
+### Regenerating
+
+Change a master (`src/*.svg`, `src/palette.json`) or a constant in `make-ridge-assets.py`, then from
+`files/branding/ridge/`:
+
+```sh
+nix shell github:NixOS/nixpkgs/<rev in flake.lock>#resvg github:NixOS/nixpkgs/<rev>#python3 \
+  --command ./make-ridge-assets.sh
+```
+
+and commit every changed export. The generator deletes and rewrites `svg/ templates/ png/ icons/ favicon/
+accents/`, needs only resvg and the Python standard library, and is deterministic. `checks.x86_64-linux.branding`
+(`nix/tests/branding.nix`) regenerates into a scratch tree and fails on any export that differs from the committed
+one (PNGs by pixels), on a master that is not four polygons, on a template or accent that colours anything but
+plane 3, on wrong sizes, opaque backgrounds, an @2x that is not twice the @1x, or a favicon.ico without 16/32/48;
+it also shellchecks the wrapper and checks the package's hicolor names. To change a wordmark's typeface or
+tracking, run `src/outline-wordmarks.py` first (`src/FONTS.md`).
+
+## Legacy: the spark (bootc image)
+
+Everything below in this section describes the bootc-based Rime OS image, which still ships the spark. Keep it
+working while that image is the product; do not use the spark, chartreuse or gold for new NixOS-side artwork.
+
+### The mark: "spark"
 
 Rime OS uses a single logomark, the **spark**, drawn in several colorways. The
 wordmark is the letterspaced "Rime OS".
 
-## Color semantics
+### Color semantics
 
 | Colorway | Hex (highlight) | Used for | Represents |
 |----------|-----------------|----------|------------|
@@ -28,11 +186,11 @@ should not use gold to mean anything.
 
 The mono variants exist for any context that needs a neutral, single-color mark.
 
-## Asset inventory
+### Asset inventory
 
 All assets live under `files/branding/`.
 
-### Logos: `files/branding/logos/<colorway>/`
+#### Logos: `files/branding/logos/<colorway>/`
 
 Colorways: `gold/`, `chartreuse/`, `mono-black/`, `mono-white/`.
 
@@ -44,7 +202,7 @@ Each colorway provides:
 
 (Mono files use the suffix `black` / `white`, e.g. `rime-spark-black-256.png`.)
 
-### Plymouth boot themes: `files/branding/plymouth/`
+#### Plymouth boot themes: `files/branding/plymouth/`
 
 **One splash ships, in 25 themes.** `Containerfile.rime` copies
 `rime-os-chartreuse` and the 24 `rime-os-accent-NN` themes (one per 15° of hue),
@@ -98,7 +256,7 @@ initramfs at build time. Kernel args need `quiet splash`, which the image sets
 in `/usr/lib/bootc/kargs.d/20-rime-plymouth.toml`. See
 `files/branding/plymouth/README.md` for install and test details.
 
-### Previews
+#### Previews
 
 `files/branding/plymouth/previews/preview-gold.gif` and
 `preview-chartreuse.gif`. Regenerate with:
@@ -114,7 +272,7 @@ cd files/branding/plymouth
 MP4, a contact sheet and per-frame metrics. It needs python3 with numpy and
 Pillow, and ffmpeg.
 
-### Wallpaper: `files/branding/wallpapers/`
+#### Wallpaper: `files/branding/wallpapers/`
 
 `rime-wallpaper-default.jpg`: the default desktop wallpaper (3258×2160).
 

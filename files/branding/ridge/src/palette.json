@@ -1,0 +1,19 @@
+{
+  "_comment": "Sampled from the raster brand pack (docs/brand-pack/); medians over flat interiors. docs/branding.md has every sample.",
+  "charcoal": "#212224",
+  "rime_blue": "#91C2DC",
+  "off_white": "#FAFAFA",
+  "tile_dark": "#1F2327",
+  "tile_light": "#FAFAFB",
+  "tile_light_border": "#E2E4E6",
+  "mono_black": "#000000",
+  "mono_white": "#FFFFFF",
+  "accents": {
+    "rime-blue": "#91C2DC",
+    "teal": "#0A7661",
+    "emerald": "#38A12B",
+    "amber": "#D69E1A",
+    "violet": "#A664D9",
+    "rose": "#E4708B"
+  }
+}
