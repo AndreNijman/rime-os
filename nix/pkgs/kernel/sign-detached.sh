@@ -32,7 +32,13 @@ for v in image hash key cert pinned out; do [[ -n ${!v} ]] || die "--$v is requi
 [[ -f $image ]] || die "no image at $image"
 
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
-to_pem() { openssl x509 -in "$1" -noout 2>/dev/null && openssl x509 -in "$1" -out "$2" || openssl x509 -inform DER -in "$1" -out "$2"; }
+to_pem() {
+  if openssl x509 -in "$1" -noout 2>/dev/null; then
+    openssl x509 -in "$1" -out "$2"
+  else
+    openssl x509 -inform DER -in "$1" -out "$2"
+  fi
+}
 to_pem "$cert" "$tmp/cert.pem" || die "$cert is not an X.509 certificate"
 to_pem "$pinned" "$tmp/pinned.pem" || die "$pinned is not an X.509 certificate"
 
