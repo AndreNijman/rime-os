@@ -4,3 +4,5 @@
 {
   vm-boot = import ./vm-boot.nix { inherit pkgs self; };
 }
+# kernel-config-fresh, kernel-gate, kernel-vm
+// import ./kernel.nix { inherit pkgs self; }
