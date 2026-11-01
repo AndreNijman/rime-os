@@ -1,0 +1,31 @@
+# The OVMF Secure Boot probe's firmware lab (PLAN.md PR 5, D3).
+#
+# Fedora 45 because the chain under test is Fedora 45's: its edk2 OVMF (Secure
+# Boot build, Microsoft keys enrolled in the shipped varstore), and the shim-x64
+# and grub2-efi-x64 RPMs that run-all.sh downloads and checks at run time (not
+# installed here, so the image never hides which build was tested).
+#
+# Build:  sudo podman build -t rime-ovmf-probe nix/probe/ovmf
+# The image never sees the host's ESP: everything is a file under /work.
+FROM registry.fedoraproject.org/fedora:45
+
+RUN dnf -y install --setopt=install_weak_deps=False \
+        qemu-system-x86-core qemu-img \
+        edk2-ovmf python3-virt-firmware \
+        sbsigntools openssl \
+        dosfstools mtools btrfs-progs e2fsprogs util-linux \
+        rpm cpio dnf5-plugins \
+        jq file findutils procps-ng \
+    && dnf clean all
+
+# Asserted, not assumed: the 4 MB Secure Boot OVMF and its pre-enrolled varstore
+# are what the repo's other SB rigs use (files/scripts/boot-v2/lib.sh).
+RUN set -eux; \
+    command -v qemu-system-x86_64 virt-fw-vars sbsign sbverify mcopy mkfs.btrfs sfdisk rpm2cpio; \
+    ls /usr/share/edk2/ovmf/ | grep -E '4M' ; \
+    test -f /usr/share/edk2/ovmf/OVMF_CODE_4M.secboot.qcow2; \
+    test -f /usr/share/edk2/ovmf/OVMF_VARS_4M.secboot.qcow2; \
+    test -f /usr/share/edk2/ovmf/OVMF_VARS_4M.qcow2
+
+WORKDIR /work
+ENTRYPOINT ["/bin/bash"]
