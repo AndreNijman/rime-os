@@ -11,6 +11,7 @@
     ./gaming.nix
     ./security.nix
     ./packages-catalogue.nix
+    ./rename-compat.nix
   ];
 
   nixpkgs.overlays = [ overlay ];
