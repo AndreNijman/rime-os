@@ -162,6 +162,21 @@ fn differs(a: Option<&ByComponent>, b: &ByComponent, c: Component) -> Option<boo
     a.map(|a| a.get(&c).unwrap_or(&empty) != b.get(&c).unwrap_or(&empty))
 }
 
+/// The dbus and dbus-broker builds in a closure (`dbus-1.16.2`, `dbus-1.16.2-lib`, `dbus-broker-37`), not the
+/// `dbus-1` config dir and not unrelated `dbus-*` libraries (`dbus-glib-…`).
+fn bus_daemon(m: &ByComponent) -> BTreeSet<&str> {
+    let versioned = |rest: &str| rest.chars().next().is_some_and(|c| c.is_ascii_digit());
+    m.values()
+        .flatten()
+        .map(String::as_str)
+        .filter(|p| {
+            let n = super::classify::store_name(p);
+            n.strip_prefix("dbus-broker-").is_some_and(versioned)
+                || n.strip_prefix("dbus-").is_some_and(|r| versioned(r) && r.contains('.'))
+        })
+        .collect()
+}
+
 /// §9, rules 1-6, plus the kept `(HyprlandConfig, Compositor)` pairing of §10.1.
 pub fn activation(i: &Inputs) -> Activation {
     let mut reasons = Vec::new();
@@ -245,6 +260,16 @@ pub fn activation(i: &Inputs) -> Activation {
     for c in BOOT_ONLY {
         if changed.contains(c) {
             reasons.push(format!("{} changes", c.label()));
+        }
+    }
+
+    // The message bus daemon. nixpkgs only RELOADS dbus-broker when its unit changes (`reloadIfChanged = true`), so a
+    // new dbus or dbus-broker build would pass rule 3 as a reload while the daemon started at boot keeps running: it is
+    // compared with the BOOTED generation, the one whose daemon runs. Its config dir (`dbus-1`, rebuilt from
+    // system.path by every Rime-only release) is not the daemon and is not matched.
+    if let Some(b) = i.booted {
+        if bus_daemon(b) != bus_daemon(i.target) {
+            reasons.push("the D-Bus daemon (dbus or dbus-broker) changes from the booted generation's".into());
         }
     }
 
@@ -450,6 +475,30 @@ mod tests {
         c.dry = DryActivate::NotYet;
         let a = c.run();
         assert!(a.needs_dry_run && a.kind == Kind::Switch);
+    }
+
+    #[test]
+    fn a_new_bus_daemon_waits_for_a_restart_but_its_config_dir_does_not() {
+        let with = |extra: &[&'static str]| closure(&[A, extra].concat());
+        let mut c = Case::shell_only();
+        c.booted = Some(with(&["dbus-1.16.2", "dbus-1.16.2-lib", "dbus-broker-37", "dbus-1", "dbus-glib-0.112"]));
+        c.current = c.booted.clone();
+        // A Rime-only release: only the config dir (built from system.path) and an unrelated dbus library move.
+        let mut t: Vec<&str> = B_SHELL.to_vec();
+        t.extend(["dbus-1.16.2", "dbus-1.16.2-lib", "dbus-broker-37"]);
+        let mut cfg_only = closure(&t);
+        cfg_only.entry(Component::OtherSystem).or_default().insert(format!("/nix/store/{}-dbus-1", "b".repeat(32)));
+        cfg_only.entry(Component::OtherSystem).or_default().insert(format!("/nix/store/{}-dbus-glib-0.114", "b".repeat(32)));
+        c.target = cfg_only;
+        let a = c.run();
+        assert_eq!(a.kind, Kind::Switch, "{:?}", a.reasons);
+        // A new dbus-broker: a reload would keep the old daemon running, so it waits for a restart.
+        c.target = closure(&[B_SHELL, &["dbus-1.16.2", "dbus-1.16.2-lib", "dbus-broker-38", "dbus-1"]].concat());
+        let a = c.run();
+        assert!(a.kind == Kind::Boot && has(&a, "D-Bus daemon"), "{:?}", a.reasons);
+        // A new dbus (the library and dbus-daemon tools dbus-broker links).
+        c.target = closure(&[B_SHELL, &["dbus-1.16.4", "dbus-1.16.4-lib", "dbus-broker-37", "dbus-1"]].concat());
+        assert!(has(&c.run(), "D-Bus daemon"));
     }
 
     #[test]
