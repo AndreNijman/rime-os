@@ -464,6 +464,27 @@ def gen_hypr(model, icc=None):
     return "\n".join(lines)
 
 
+def _hyprland_unprivileged(cmd, env, config_dir):
+    """Run Hyprland's config check as nobody when we are root.
+
+    Hyprland 0.57.0's --verify-config binds its event socket at /.socket2.sock
+    (an empty instance path) and segfaults whenever that bind succeeds, which
+    only root can make it do: a build step, or a self-test under sudo. Measured
+    in the image: the first root check in a fresh container crashes every time,
+    a check as any other user passes. Hyprland also warns against running as
+    root at all. So as root, the check runs as nobody, in a runtime directory
+    nobody owns. Returns (cmd, env, scratch dir to remove or None).
+    """
+    if os.geteuid() != 0 or not shutil.which("setpriv"):
+        return cmd, env, None
+    os.chmod(config_dir, 0o755)  # TemporaryDirectory is 0700
+    runtime = tempfile.mkdtemp()
+    os.chown(runtime, 65534, 65534)
+    env = dict(env, XDG_RUNTIME_DIR=runtime, HOME=runtime)
+    return (["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--"] + cmd,
+            env, runtime)
+
+
 def validate_hyprland(text):
     """Parse the generated Lua the way Hyprland will actually load it.
 
@@ -489,8 +510,13 @@ def validate_hyprland(text):
         wrapper = os.path.join(d, "hyprland.lua")
         with open(wrapper, "w", encoding="utf-8") as fh:
             fh.write('require("rime.monitors")\n')
-        res = run(["Hyprland", "--i-am-really-stupid", "--verify-config",
-                   "--config", wrapper], env=env)
+        cmd, env, scratch = _hyprland_unprivileged(
+            ["Hyprland", "--i-am-really-stupid", "--verify-config", "--config", wrapper], env, d)
+        try:
+            res = run(cmd, env=env)
+        finally:
+            if scratch:
+                shutil.rmtree(scratch, ignore_errors=True)
         # Everything Hyprland has to say lands under "Config parsing result:",
         # and only a clean config prints "config ok" there.
         return "config ok" in (res.stdout + res.stderr)
