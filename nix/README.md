@@ -47,11 +47,11 @@ The host has no Nix. Everything runs in the rootful podman container `rime-nix`,
 **Use `path:.`, not `.`.** The worktree's `.git` is a file pointing at a git dir under `/var/home/andre`, which is
 not mounted in the container, so `nix build .#x` fails with "opening Git repository ... failed to resolve path".
 
-**Pass `--override-input rime-shell path:/work/shell`** until the rime-shell `feat/nixos` branch is pushed (see
-below). Without it the locked narHash of `/work/shell` stops matching as soon as that worktree changes.
+`flake.lock` pins rime-shell to the pushed `github:AndreNijman/rime-shell/feat/nixos`. Build against the lock.
+Pass `--override-input rime-shell path:/work/shell` only while deliberately testing uncommitted Shell changes.
 
 ```
-O='--override-input rime-shell path:/work/shell'
+O=''   # or: O='--override-input rime-shell path:/work/shell' for local Shell changes
 sudo -n podman exec -w /work/os rime-nix nix flake check path:. --no-build $O
 sudo -n podman exec -w /work/os rime-nix nix build path:.#rimed -L --print-out-paths $O
 sudo -n podman exec -w /work/os rime-nix nix build path:.#checks.x86_64-linux.vm-boot -L --print-out-paths $O
@@ -63,9 +63,8 @@ Files the container writes are root-owned: `sudo -n chown -R andre:andre /var/la
 
 ## The rime-shell lock
 
-`flake.lock` currently records the `rime-shell` input as `path:/work/shell` (locked with
-`--override-input rime-shell path:/work/shell`), because `github:AndreNijman/rime-shell/feat/nixos` did not exist
-on GitHub yet. That lock evaluates only inside this container. Once the branch is pushed, relock it:
+`flake.lock` records `rime-shell` as `github:AndreNijman/rime-shell/feat/nixos` at a fixed commit. After pushing a
+Shell change to that branch, relock and commit `flake.lock`:
 
 ```
 sudo -n podman exec -w /work/os rime-nix nix flake update rime-shell --flake path:.
