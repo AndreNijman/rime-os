@@ -148,6 +148,14 @@ def render_host_toml(host):
         out.append(f"freq = {int(m.get('freq', 0))}")
         out.append(f"passno = {int(m.get('passno', 0))}")
         out.append("")
+    boot = host.get("boot", {})
+    if boot:
+        out.append("[boot]")
+        if boot.get("layout"):
+            out.append(f"layout = {toml_str(boot['layout'])}")
+        if boot.get("kernel_params"):
+            out.append("kernel_params = [" + ", ".join(toml_str(x) for x in boot["kernel_params"]) + "]")
+        out.append("")
     for v in host.get("luks", []):
         out.append("[[luks]]")
         for k in ("name", "device", "keyfile", "options"):
@@ -163,10 +171,24 @@ def validate_host(host):
     errs = []
     if host.get("schema", 1) != 1:
         errs.append(f"schema {host.get('schema')!r} is not 1")
-    known = {"schema", "host", "locale", "keyboard", "mount", "luks"}
+    known = {"schema", "host", "locale", "keyboard", "mount", "luks", "boot"}
     for k in host:
         if k not in known:
             errs.append(f"unknown key {k!r}")
+    # [boot] is the Rime boot hook's (nix/pkgs/rime-boot): the bridge writes layout = "custom-cfg" on a migrated
+    # machine. Validated here too, so `apply` never refuses a host.toml the hook accepts.
+    boot = host.get("boot", {})
+    if not isinstance(boot, dict):
+        errs.append("[boot] is not a table")
+        boot = {}
+    for k, v in boot.items():
+        if k == "layout" and v not in ("bls", "custom-cfg"):
+            errs.append(f"boot.layout {v!r} is not bls or custom-cfg")
+        elif k == "kernel_params" and not (isinstance(v, list) and all(
+                isinstance(x, str) and matches("options", x) for x in v)):
+            errs.append("boot.kernel_params is not a list of kernel parameters")
+        elif k not in ("layout", "kernel_params"):
+            errs.append(f"unknown key boot.{k}")
     h = host.get("host", {})
     if not isinstance(h, dict):
         errs.append("[host] is not a table")

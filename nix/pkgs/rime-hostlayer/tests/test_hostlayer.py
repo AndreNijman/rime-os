@@ -260,6 +260,18 @@ class HostTomlTest(unittest.TestCase):
                 r = run("host", "validate", "--file", f"{t}/h.toml")
                 self.assertEqual(r.returncode, 1, bad)
 
+    def test_the_boot_hooks_table_is_valid(self):
+        # The bridge writes [boot] layout = "custom-cfg" for the Rime boot hook; apply must not refuse that file.
+        with tempfile.TemporaryDirectory() as t:
+            write(f"{t}/h.toml", 'schema = 1\n[boot]\nlayout = "custom-cfg"\nkernel_params = ["quiet"]\n')
+            r = run("host", "validate", "--file", f"{t}/h.toml")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            r = run("host", "show", "--file", f"{t}/h.toml")
+            self.assertIn('[boot]\nlayout = "custom-cfg"\nkernel_params = ["quiet"]', r.stdout)
+            for bad in ('[boot]\nlayout = "grub"\n', '[boot]\nkernel_params = "quiet"\n', '[boot]\nentry = 1\n'):
+                write(f"{t}/h.toml", bad)
+                self.assertEqual(run("host", "validate", "--file", f"{t}/h.toml").returncode, 1, bad)
+
 
 class GeneratorTest(unittest.TestCase):
     def generate(self, toml):

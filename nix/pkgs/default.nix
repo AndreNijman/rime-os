@@ -15,4 +15,5 @@
   rime-scx = callPackage ./kernel/scx.nix { };
   rime-boot = callPackage ./rime-boot { };
   rime-hostlayer = callPackage ./rime-hostlayer { };
+  rime-bridge = callPackage ./rime-bridge { };
 }
