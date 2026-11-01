@@ -9,6 +9,7 @@
   shell = import ./shell.nix { inherit pkgs self; };
   gaming = import ./gaming.nix { inherit pkgs self; };
   security = import ./security.nix { inherit pkgs self; };
+  polish = import ./polish.nix { inherit pkgs self; };
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
