@@ -170,12 +170,14 @@ readonly LAUNCHER_DOORBELL="${APPIMAGE_PREFIX}/share/applications"
 # transaction lock" error would be printed on every single install.
 readonly WORK_ROOT="${PKG_ROOT}/work"
 readonly LOCK="${PKG_ROOT}/.lock"
-# Repository RPMs of the last successful build, kept by exact file name so the
-# next build fetches only what changed (see download_set). Never trusted: dnf5
-# checks every cached file against the repository's checksum before keeping it,
-# and guard_rpms verifies its signature on every build like any download. An
-# empty value turns the cache off; the variable exists so a test can point it
-# at a temp directory (RIME_PKG_RPM_CACHE), as RIME_PKG_GITHUB_API does.
+# Repository RPMs of the last build whose set passed guard_rpms (kept before
+# the extension is built, so a later failure still leaves them), by exact file
+# name so the next build fetches only what changed (see download_set). Never
+# trusted: dnf5 checks every cached file against the repository's checksum
+# before keeping it, and guard_rpms verifies its signature on every build like
+# any download. An empty value turns the cache off; the variable exists so a
+# test can point it at a temp directory (RIME_PKG_RPM_CACHE), as
+# RIME_PKG_GITHUB_API does.
 RPM_CACHE="${RIME_PKG_RPM_CACHE-${PKG_ROOT}/rpm-cache}"
 # Free space the cache must never take from an OS update, on top of the 3% of
 # the filesystem ostree keeps free for itself (min-free-space-percent). bootc
@@ -5651,6 +5653,11 @@ cmd_repo_enable_copr() {
     [ "$#" = 1 ] || die "usage: rime repo enable-copr OWNER/PROJECT"
     need_root repo
     valid_copr_project "$1" || die "COPR project must be OWNER/PROJECT"
+    # One key change at a time, and never while a build reads the keyring: two
+    # refreshes at once delete each other's build directory (the leftover
+    # sweep in refresh_copr_keyring) or swap in a keyring built from a key set
+    # that another command has since changed.
+    take_lock
     dnf5 -y copr enable "$1" >&2 || die "could not enable COPR '$1'"
     local owner="${1%%/*}" project="${1#*/}" keyfile
     local key="https://download.copr.fedorainfracloud.org/results/${owner}/${project}/pubkey.gpg"
@@ -5661,14 +5668,31 @@ cmd_repo_enable_copr() {
         rm -f "$keyfile"
         die "could not download the signing key for COPR '$1'; repository disabled"
     fi
-    local mine="${COPR_KEYS}/${owner}/${project}.gpg" failed
+    local mine="${COPR_KEYS}/${owner}/${project}.gpg" failed prior=""
+    # Enabling a COPR that is already enabled replaces its key. If the new one
+    # cannot be imported, the COPR stays as it was (its previous key, still
+    # enabled) rather than losing the key it had.
+    if [ -f "$mine" ]; then
+        prior="$(mktemp)"
+        cp -p -- "$mine" "$prior"
+    fi
     install -Dm0600 "$keyfile" "$mine"
     if ! refresh_copr_keyring; then
         failed="${COPR_KEY_FAILED:-}"
+        rm -f "$keyfile"
+        if [ -n "$prior" ]; then
+            # The failed refresh left the keyring as it was, built with this
+            # key: putting the file back is all that is needed.
+            install -Dm0600 "$prior" "$mine"
+            rm -f "$prior"
+            if [ -n "$failed" ] && [ "$failed" != "$mine" ]; then
+                die "could not update COPR '$1': the signing key stored for COPR '$(copr_of_keyfile "$failed")' (${failed}) cannot be imported, so the COPR keyring cannot be rebuilt; fix it with: sudo rime repo disable-copr $(copr_of_keyfile "$failed"). COPR '$1' keeps its previous key"
+            fi
+            die "could not import the new signing key for COPR '$1'; it keeps its previous key and stays enabled"
+        fi
         dnf5 -y copr disable "$1" >&2 || true
         rm -f "$mine"
         refresh_copr_keyring || true
-        rm -f "$keyfile"
         # The new key is not always the one that failed: one unreadable key
         # left by an earlier COPR fails every refresh, and blaming the new
         # COPR would send the user after the wrong file.
@@ -5677,7 +5701,7 @@ cmd_repo_enable_copr() {
         fi
         die "could not import the signing key for COPR '$1'; repository disabled"
     fi
-    rm -f "$keyfile"
+    rm -f "$keyfile" ${prior:+"$prior"}
     msg "enabled COPR '$1'; rime search/install will now use it"
 }
 
@@ -5685,15 +5709,20 @@ cmd_repo_disable_copr() {
     [ "$#" = 1 ] || die "usage: rime repo disable-copr OWNER/PROJECT"
     need_root repo
     valid_copr_project "$1" || die "COPR project must be OWNER/PROJECT"
+    take_lock  # see cmd_repo_enable_copr
     dnf5 -y copr disable "$1" >&2 || die "could not disable COPR '$1'"
     local owner="${1%%/*}" project="${1#*/}"
+    # Fail closed, also across a kill or a power cut: the keyring goes BEFORE
+    # the key file. The keyring still trusts the key being removed, so removing
+    # the file first and stopping there would leave the disabled COPR's
+    # packages verifying. Until the refresh below swaps a new keyring in,
+    # there is none, and every COPR package is refused.
+    rm -rf -- "$COPR_KEY_DB" || die "could not remove the COPR keyring ${COPR_KEY_DB}; COPR '$1' is disabled but its key is still trusted"
     rm -f "${COPR_KEYS}/${owner}/${project}.gpg"
     find "$COPR_KEYS" -depth -type d -empty -delete 2>/dev/null || true
     if ! refresh_copr_keyring; then
-        # Fail closed. A failed refresh leaves the previous keyring in place,
-        # and that keyring still trusts the key just removed: a package signed
-        # by the disabled COPR (a local `rime install ./x.rpm`) would keep
-        # verifying. Without a keyring, every COPR package is refused.
+        # Still no keyring (it was removed above): a refresh that fails leaves
+        # what was there, which is nothing. Every COPR package is refused.
         rm -rf -- "$COPR_KEY_DB"
         if [ -n "${COPR_KEY_FAILED:-}" ]; then
             die "disabled COPR '$1' and removed its key, but the signing key stored for COPR '$(copr_of_keyfile "$COPR_KEY_FAILED")' (${COPR_KEY_FAILED}) cannot be imported, so the COPR keyring could not be rebuilt. Rime now refuses packages from every COPR until that is fixed: sudo rime repo disable-copr $(copr_of_keyfile "$COPR_KEY_FAILED")"

@@ -31,7 +31,10 @@
 #  rpmdb.sqlite is refused with the old keyring kept, and `rime repo
 #  disable-copr` with another stored key unreadable must fail closed (the
 #  disabled COPR's key is no longer trusted, the bad key is named) while
-#  `enable-copr` in that state names the bad key, not the new COPR.
+#  `enable-copr` in that state names the bad key, not the new COPR. Both
+#  commands take the engine's lock (a held lock refuses them, nothing changed),
+#  a disable killed before its refresh already refuses the disabled key, and
+#  re-enabling a COPR whose new key will not import keeps its previous key.
 #
 #  And the rpm cache: dnf5 must really skip a cached file whose checksum
 #  matches ("Already downloaded") and really re-fetch a corrupt one, and the
@@ -177,7 +180,7 @@ WRAP
 # touched here) and curl for the key, which this serves from $CURL_KEY.
 cat > /wrap/dnf5 <<'WRAP'
 #!/bin/bash
-[ "$2" = copr ] && exit 0
+[ "$2" = copr ] && { printf '%s\n' "$*" >> /tmp/dnf5.log; exit 0; }
 exec /usr/bin/dnf5 "$@"
 WRAP
 cat > /wrap/curl <<'WRAP'
@@ -332,6 +335,63 @@ grep -F "$COPR_KEYS/aaa/broken.gpg" "$E" | grep -F "disable-copr aaa/broken" >/d
 rm -rf "$COPR_KEYS/owner2"
 install -Dm0600 "$K/copr.asc" "$COPR_KEYS/owner/project.gpg"
 PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
+
+# ── one key change at a time ────────────────────────────────────────────────
+# Two refreshes at once delete each other's build directory or swap in a
+# keyring built from a key set another command has since changed (a disable
+# that finishes with the removed key still trusted). Both commands take the
+# engine's lock; held elsewhere (fd 8 is its own open file, so the command's
+# fresh `exec 9>` is refused even though it inherits fd 8), they refuse and
+# change nothing.
+mkdir -p "$PKG_ROOT"; exec 8>"$LOCK"; flock 8
+ino=$(stat -c %i "$COPR_KEY_DB")
+( PATH=/wrap:$PATH cmd_repo_disable_copr owner/project ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && grep -F "another rime package operation is in progress" "$E" >/dev/null \
+    && [ -e "$COPR_KEYS/owner/project.gpg" ] && [ "$(stat -c %i "$COPR_KEY_DB")" = "$ino" ] \
+    && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] \
+    && ok "disable-copr waits its turn: refused while the lock is held, nothing changed" \
+    || bad "disable-copr waits its turn: refused while the lock is held, nothing changed" "rc=$rc stderr: $(one "$E")"
+( CURL_KEY="$K/copr2.asc" PATH=/wrap:$PATH cmd_repo_enable_copr owner2/project2 ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && grep -F "another rime package operation is in progress" "$E" >/dev/null \
+    && [ ! -e "$COPR_KEYS/owner2/project2.gpg" ] && [ "$(stat -c %i "$COPR_KEY_DB")" = "$ino" ] \
+    && ok "enable-copr waits its turn: refused while the lock is held, nothing changed" \
+    || bad "enable-copr waits its turn: refused while the lock is held, nothing changed" "rc=$rc stderr: $(one "$E")"
+flock -u 8; exec 8>&-
+rm -rf "$COPR_KEYS/owner2"
+
+# ── a disable killed before the keyring is rebuilt ──────────────────────────
+# A kill or a power cut between removing the key file and swapping in a new
+# keyring must not leave the old keyring trusting the disabled COPR's key.
+# Trusted before, or the case proves nothing.
+before=$(sig "$f_copr" | cut -d'|' -f1)
+( refresh_copr_keyring() { kill -KILL "$BASHPID"; }
+  PATH=/wrap:$PATH cmd_repo_disable_copr owner/project ) 2>"$E"; rc=$?
+[ "$before" = 0 ] && [ "$rc" = 137 ] && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 1 ] \
+    && ok "disable-copr killed before the refresh: the disabled key is already refused" \
+    || bad "disable-copr killed before the refresh: the disabled key is already refused" "before=$before rc=$rc keyring $([ -e "$COPR_KEY_DB" ] && echo present || echo absent), rimecopr: $(sig "$f_copr")"
+install -Dm0600 "$K/copr.asc" "$COPR_KEYS/owner/project.gpg"
+PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
+
+# ── re-enabling a COPR whose new key cannot be imported ─────────────────────
+# The COPR keeps the key it had and stays enabled: the failed command changes
+# nothing, and the next refresh still trusts the previous key.
+: > /tmp/dnf5.log
+( CURL_KEY=/tmp/broken PATH=/wrap:$PATH cmd_repo_enable_copr owner/project ) 2>"$E"; rc=$?
+PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
+[ "$rc" != 0 ] && cmp -s "$COPR_KEYS/owner/project.gpg" "$K/copr.asc" \
+    && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] && ! grep -F "copr disable" /tmp/dnf5.log >/dev/null \
+    && grep -F "keeps its previous key" "$E" >/dev/null \
+    && ok "re-enable-copr with an unreadable new key keeps the previous key, enabled" \
+    || bad "re-enable-copr with an unreadable new key keeps the previous key, enabled" "rc=$rc key $(cmp -s "$COPR_KEYS/owner/project.gpg" "$K/copr.asc" && echo kept || echo lost), rimecopr: $(sig "$f_copr" | cut -d'|' -f1), dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
+# Control: a COPR enabled for the first time with an unreadable key is still
+# disabled again and leaves no key behind.
+: > /tmp/dnf5.log
+( CURL_KEY=/tmp/broken PATH=/wrap:$PATH cmd_repo_enable_copr fresh/one ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && [ ! -e "$COPR_KEYS/fresh/one.gpg" ] && grep -Fx -- "-y copr disable fresh/one" /tmp/dnf5.log >/dev/null \
+    && grep -F "could not import the signing key for COPR 'fresh/one'; repository disabled" "$E" >/dev/null \
+    && ok "control: a first enable with an unreadable key is disabled again, no key kept" \
+    || bad "control: a first enable with an unreadable key is disabled again, no key kept" "rc=$rc dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
+[ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] || PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
 
 # ── guard_rpms, then extract_rpms, under %_pkgverify_level all ──────────────
 D=/dl; mkdir -p "$D"; cp "$f_sys" "$f_copr" "$D/"

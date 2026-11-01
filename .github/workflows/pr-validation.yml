@@ -2790,7 +2790,7 @@ jobs:
           failed="$(printf '%s' "$counts" | awk '{print $3}')"
           echo "measured: passed=$passed failed=$failed"
           [ "$failed" = 0 ] || { echo "::error::$failed rpm6 assertions failed"; exit 1; }
-          [ "$passed" -ge 42 ] || { echo "::error::only $passed rpm6 assertions ran; 42 ran on 2026-10-31, so some no longer execute"; exit 1; }
+          [ "$passed" -ge 47 ] || { echo "::error::only $passed rpm6 assertions ran; 47 ran on 2026-11-01, so some no longer execute"; exit 1; }
           if printf '%s\n' "$out" | grep -E '^[[:space:]]*SKIP' >/dev/null; then
               echo "::error::the rpm6 suite printed a SKIP: podman, the repository or rpm-build was unavailable, and the assertions it guards did not run"
               exit 1
