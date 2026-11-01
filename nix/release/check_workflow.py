@@ -12,7 +12,8 @@ Refuses, for every workflow given:
     RIME_CACHE_TOKEN or the R2 secrets;
   - any job outside the nix-release environment naming those secrets;
   - pull_request_target, a workflow-level permission grant, a concurrency group other than nix-release (for
-    nix-release.yml) or one that cancels in progress, and the stand-in's --test-signing.
+    nix-release.yml) or one that cancels in progress, and the stand-in's test-only switches (--test-signing,
+    --allow-test-variants, RIME_TEST_BEFORE_PUSH).
 Exit status 1 with one line per finding.
 """
 
@@ -24,6 +25,8 @@ import yaml
 SHA_PIN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 SECRETS = ("RIME_NIX_CACHE_KEY", "RIME_CACHE_TOKEN", "RIME_R2_ACCESS_KEY_ID", "RIME_R2_SECRET_ACCESS_KEY",
            "RIME_R2_ENDPOINT")
+# a test key, a test configuration (rime-vm's test account) and a shell hook from the environment
+TEST_ONLY = ("--test-signing", "--allow-test-variants", "RIME_TEST_BEFORE_PUSH")
 FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
 
 
@@ -42,8 +45,9 @@ def check(path):
         bad.append("pull_request_target is never used")
     if wf.get("permissions") not in ({}, None, "read-all") or isinstance(wf.get("permissions"), dict) and wf["permissions"]:
         bad.append("workflow-level permissions must grant nothing (permissions: {})")
-    if "--test-signing" in text:
-        bad.append("--test-signing is the stand-in's; it never appears in a workflow")
+    for t in TEST_ONLY:
+        if t in text:
+            bad.append(f"{t} is the stand-in's; it never appears in a workflow")
     if path.endswith("nix-release.yml"):
         c = wf.get("concurrency") or {}
         if c.get("group") != "nix-release" or c.get("cancel-in-progress") is not False:

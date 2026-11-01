@@ -63,6 +63,12 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "a NAR of 2 GiB is uploaded" 'if os.path.getsize(path) > GH_MAX_ASSET:' 'if False:'
   mutant "upstream paths marked as Rime's" \
     'entry["origin"] = "upstream" if p in upstream["paths"] else "rime"' 'entry["origin"] = "rime"'
+  mutant "a test variant is published" \
+    'if not v.get("publishable") and not allow_test_variants:' 'if False:'
+  mutant "the push hook runs in a real publish" \
+    'return os.environ.get("RIME_TEST_BEFORE_PUSH") if a.test_signing else None' \
+    'return os.environ.get("RIME_TEST_BEFORE_PUSH")'
+  mutant "a NAR URL on the Pages origin passes" 'if u.netloc == origin:' 'if False:'
 
   echo "== the workflow's security shape"
   cp -r ${workflows} wf
@@ -97,6 +103,10 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
   wmutant "an input expanded into a script" '          case "$CHANNEL" in' '          echo "''${{ inputs.reason }}"
           case "$CHANNEL" in'
   wmutant "a run cancelled by the next" "cancel-in-progress: false" "cancel-in-progress: true"
+  wmutant "a test variant published" '            --out "$t/out"' '            --allow-test-variants --out "$t/out"'
+  wmutant "the stand-in's push hook in a workflow" '          RIME_CACHE_TOKEN: ''${{ secrets.RIME_CACHE_TOKEN }}' \
+    '          RIME_CACHE_TOKEN: ''${{ secrets.RIME_CACHE_TOKEN }}
+          RIME_TEST_BEFORE_PUSH: "true"'
   # the build job keeps its fork-PR guard here, so only the token can trip the check
   wmutant "the cache token on a self-hosted build job" '    runs-on: ubuntu-24.04
     if: >-

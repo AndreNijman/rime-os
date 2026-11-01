@@ -521,6 +521,40 @@ class Narinfo(unittest.TestCase):
         self.assertIn("StorePath", r.narinfo_binds(ni, p + "z", want))
 
 
+class PublishGuards(unittest.TestCase):
+    def test_a_test_variant_is_never_published(self):
+        _, plan, _, _ = synthetic()
+        r.refuse_unpublishable(plan, False)
+        plan["variants"]["plain"]["publishable"] = False
+        plan["variants"]["plain"]["note"] = "rime-vm has a test account"
+        with self.assertRaisesRegex(r.Refused, "plain is not publishable .rime-vm has a test account."):
+            r.refuse_unpublishable(plan, False)
+        del plan["variants"]["plain"]["publishable"]
+        with self.assertRaisesRegex(r.Refused, "not publishable"):
+            r.refuse_unpublishable(plan, False)
+        r.refuse_unpublishable(plan, True)  # the stand-in only
+
+    def test_the_push_hook_needs_a_test_signed_run(self):
+        import types
+        old = os.environ.get("RIME_TEST_BEFORE_PUSH")
+        os.environ["RIME_TEST_BEFORE_PUSH"] = "touch /tmp/pwned"
+        try:
+            self.assertIsNone(r.before_push_hook(types.SimpleNamespace(test_signing=None)))
+            self.assertEqual(r.before_push_hook(types.SimpleNamespace(test_signing="/root/sign")), "touch /tmp/pwned")
+        finally:
+            if old is None:
+                del os.environ["RIME_TEST_BEFORE_PUSH"]
+            else:
+                os.environ["RIME_TEST_BEFORE_PUSH"] = old
+
+    def test_nar_urls_are_absolute_and_off_the_pages_origin(self):
+        o = "cache.rimeos.com"
+        self.assertIsNone(r.nar_url_problem("https://github.com/o/n/releases/download/2026.11.01/" + NAR, o))
+        self.assertIn("not absolute", r.nar_url_problem("nar/" + NAR, o))
+        self.assertIn("not absolute", r.nar_url_problem("file:///nix/" + NAR, o))
+        self.assertIn("Pages origin", r.nar_url_problem("https://cache.rimeos.com/nar/" + NAR, o))
+
+
 class UpstreamManifest(unittest.TestCase):
     def test_origin_and_keys(self):
         m, x = upstream_manifest()

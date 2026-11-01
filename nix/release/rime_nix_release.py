@@ -971,6 +971,17 @@ def gh_fill(artifact, gh, remote, secret_key_file, release_id, workdir, report=N
     return result
 
 
+def nar_url_problem(url, origin):
+    """None if a published narinfo's URL is absolute and on another origin than the Pages one, else the reason."""
+    import urllib.parse
+    u = urllib.parse.urlparse(url)
+    if u.scheme not in ("http", "https") or not u.netloc:
+        return f"URL {url!r} is not absolute (the NARs are release assets, not on Pages)"
+    if u.netloc == origin:
+        return f"URL {url} is on the Pages origin itself"
+    return None
+
+
 def http_reachable(url):
     """A NAR URL answers: HEAD (redirects followed), else a one-byte ranged GET (HEAD is not promised on every hop)."""
     import urllib.request
@@ -1030,12 +1041,9 @@ def check_public_github(closure, split, public, keys, upstream, upstream_keys, r
     gone = []
     for path in rime:
         url = pub[path].get("url") or ""
-        u = urllib.parse.urlparse(url)
-        if u.scheme not in ("http", "https") or not u.netloc:
-            gone.append(f"{path}: URL {url!r} is not absolute (the NARs are release assets, not on Pages)")
-            continue
-        if u.netloc == origin:
-            gone.append(f"{path}: URL {url} is on the Pages origin itself")
+        why = nar_url_problem(url, origin)
+        if why:
+            gone.append(f"{path}: {why}")
             continue
         code = http_reachable(url)
         if code != 200:
@@ -1642,6 +1650,20 @@ def next_release_id(script, today, os_rev, shell_rev, candidates):
 
 # ── the publish job ────────────────────────────────────────────────────────────────────────────────────────────────
 
+def before_push_hook(a):
+    """RIME_TEST_BEFORE_PUSH (a shell command the VM test uses to move rime-cache main mid-publish) is honoured only
+    in a run signed with a TEST key (--test-signing): a real publish never executes a command from its environment."""
+    return os.environ.get("RIME_TEST_BEFORE_PUSH") if a.test_signing else None
+
+
+def refuse_unpublishable(plan, allow_test_variants):
+    """A variant marked publishable = false (a test configuration, e.g. rime-vm's test account) never ships, unless
+    the stand-in passes --allow-test-variants."""
+    for name, v in sorted(plan["variants"].items()):
+        if not v.get("publishable") and not allow_test_variants:
+            raise Refused(f"variant {name} is not publishable ({v.get('note', 'test configuration')})")
+
+
 def cmd_publish(a):
     for k in ("rime_os", "rime_shell", "nixpkgs"):
         if not SHA40_RE.match(getattr(a, k)):
@@ -1660,9 +1682,7 @@ def cmd_publish(a):
         return 0
 
     plan = load_json(a.plan)
-    for name, v in plan["variants"].items():
-        if not v.get("publishable") and not a.allow_test_variants:
-            raise Refused(f"variant {name} is not publishable ({v.get('note', 'test configuration')})")
+    refuse_unpublishable(plan, a.allow_test_variants)
 
     keys = a.cache_pubkey
     # What the channels offer now: read and VERIFIED, never trusted on its face.
@@ -1692,7 +1712,7 @@ def cmd_publish(a):
         gh = GitHub(a.gh_repo, token, a.gh_api, a.gh_uploads, a.gh_download, max_assets=a.gh_max_assets)
         with tempfile.TemporaryDirectory() as w:
             gh_fill(a.artifact, gh, a.gh_remote, a.secret_key_file, release, w,
-                    report=os.path.join(out, "fill.json"), before_push=os.environ.get("RIME_TEST_BEFORE_PUSH"))
+                    report=os.path.join(out, "fill.json"), before_push=before_push_hook(a))
         clo, split = load_artifact(a.artifact)
         sizes = check_public_github(clo, split, a.public, keys, a.upstream, a.upstream_key,
                                     report=os.path.join(out, "public.json"), wait=a.public_wait)
