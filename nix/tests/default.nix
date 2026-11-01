@@ -10,6 +10,8 @@
   gaming = import ./gaming.nix { inherit pkgs self; };
   security = import ./security.nix { inherit pkgs self; };
   branding = import ./branding.nix { inherit pkgs self; };
+  terminal-migrate = import ./terminal-migrate.nix { inherit pkgs self; };
+  terminal-look = import ./terminal-look.nix { inherit pkgs self; };
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
