@@ -123,6 +123,16 @@ if grep -E '^PASS unreadable: /var/home/andre/.ssh/id_ed25519' "$DRY/mutant.log"
 	ok "even when mounted, a uid-1000 0600 file stays unreadable to the job (unmapped owner + SELinux)"
 fi
 
+# ── 4b. benchmark freeze: rime-runner-ctl pause --freeze uses podman pause ──
+if podman pause rime-runner-builder >/dev/null 2>&1 &&
+	[ "$(podman inspect rime-runner-builder --format '{{.State.Status}}')" = paused ] &&
+	podman unpause rime-runner-builder >/dev/null 2>&1 &&
+	[ "$(podman inspect rime-runner-builder --format '{{.State.Status}}')" = running ]; then
+	ok "freeze/thaw (podman pause/unpause) works on a runner container"
+else
+	bad "podman pause/unpause did not work"
+fi
+
 # ── 5. firewall rules parse (check mode, nothing applied) ──────────────────
 rendered=$DRY/nftables.conf
 sed -e "s#@SUBNET@#$RIME_RUNNER_SUBNET#g" -e "s#@GATEWAY@#$RIME_RUNNER_GATEWAY#g" \

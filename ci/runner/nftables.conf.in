@@ -25,7 +25,6 @@ table inet rime_runner {
         type filter hook forward priority filter - 1; policy accept;
         ip saddr @SUBNET@ ip daddr @SUBNET@ accept
         ip saddr @SUBNET@ ip daddr @lan4 counter reject with icmp type admin-prohibited
-        ip saddr @SUBNET@ meta nfproto ipv6 counter reject
     }
 
     # Containers -> katana itself: DNS on the network's gateway (aardvark-dns)

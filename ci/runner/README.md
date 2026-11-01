@@ -93,8 +93,9 @@ shared store).
 - **Benchmarks** (P3: "the runner is paused during every benchmark run"):
   `sudo rime-runner-ctl pause --freeze`, run the benchmark, `sudo rime-runner-ctl resume`.
   `pause` alone takes no new job and lets the running one finish; `--freeze` also
-  stops the running job in place with the cgroup freezer (no CPU, IO or GPU use)
-  and resume continues it. A frozen job misses GitHub's heartbeat, so keep a
+  stops the running job and the builder in place with `podman pause` (the cgroup
+  freezer per container: no CPU, IO or GPU use) and resume continues them.
+  `systemctl freeze` is not used: katana's systemd 262 reports `CanFreeze=no` for slices. A frozen job misses GitHub's heartbeat, so keep a
   freeze to minutes; a job GitHub declares lost has to be re-run.
 - Wiring Gaming Mode (rimed's hold) to `gaming on` automatically is step 2/3.
 

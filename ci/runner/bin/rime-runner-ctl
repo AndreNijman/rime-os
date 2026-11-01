@@ -10,7 +10,9 @@
 #
 # Benchmarks (PLAN.md §6, "the runner is paused during every benchmark run"):
 #   sudo rime-runner-ctl pause --freeze && <benchmark> ; sudo rime-runner-ctl resume
-# --freeze uses the cgroup freezer on rime-runner.slice: the job's processes stop
+# --freeze pauses every runner container (podman pause = the cgroup freezer on
+# each container; systemd reports CanFreeze=no for slices on katana's systemd
+# 262, so the slice itself cannot be frozen): the job and the builder stop
 # using CPU, IO and the GPU at once and continue where they were on resume. A
 # frozen runner cannot answer GitHub's heartbeat; keep freezes to minutes (a job
 # GitHub considers lost is failed and must be re-run).
@@ -29,8 +31,12 @@ shift || true
 case $cmd in
 status)
 	if [ -e "$PAUSE_FLAG" ] || [ -e /etc/rime-runner/paused ]; then echo "paused: yes"; else echo "paused: no"; fi
-	systemctl show "$SLICE" -p CPUWeight -p IOWeight -p MemoryHigh -p FreezerState 2>/dev/null || true
+	systemctl show "$SLICE" -p CPUWeight -p IOWeight -p MemoryHigh 2>/dev/null || true
 	systemctl list-units --no-legend 'rime-runner*' 2>/dev/null || true
+	if [ "$(id -u)" = 0 ]; then
+		rr_podman_env
+		rr_podman ps --format '{{.Names}} {{.Status}}' || true
+	fi
 	;;
 pause)
 	need_root
@@ -38,15 +44,19 @@ pause)
 	date -Is >"$PAUSE_FLAG"
 	echo "paused: no new job will be taken"
 	if [ "${1:-}" = --freeze ]; then
-		systemctl freeze "$SLICE"
-		echo "frozen: running job stopped in place (resume to continue)"
+		rr_podman_env
+		for c in $(rr_podman ps --filter status=running --format '{{.Names}}'); do
+			rr_podman pause "$c" >/dev/null && echo "frozen: $c"
+		done
+		echo "frozen: running work stopped in place (resume to continue)"
 	fi
 	;;
 resume)
 	need_root
-	if [ "$(systemctl show "$SLICE" -p FreezerState --value 2>/dev/null)" != running ]; then
-		systemctl thaw "$SLICE" || true
-	fi
+	rr_podman_env
+	for c in $(rr_podman ps --filter status=paused --format '{{.Names}}'); do
+		rr_podman unpause "$c" >/dev/null && echo "thawed: $c"
+	done
 	rm -f "$PAUSE_FLAG"
 	echo "resumed"
 	;;
