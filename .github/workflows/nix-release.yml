@@ -1,8 +1,13 @@
 # nix-release: Rime OS releases on NixOS (docs/nixos/updates-and-release.md §7, D6).
 #
-#   build    builds every variant toplevel (nix/release/variants.nix) with rime-shell at its branch head (A15),
-#            writes closure.json, splits off what cache.nixos.org serves, and stages Rime's own paths (only those)
-#            as an unsigned file:// binary cache, the artifact. Holds no secret and no write token.
+#   build    on main: builds every variant toplevel (nix/release/variants.nix) with rime-shell at its branch head
+#            (A15), writes closure.json, splits off what cache.nixos.org serves, and stages Rime's own paths (only
+#            those) as an unsigned file:// binary cache, the artifact. Holds no secret and no write token.
+#            On any other ref (feat/nixos during the pivot) it is a DRY-RUN proof only: when the release toplevels'
+#            derivations differ from the pushed-over commit's, it checks the flake and runs `nix build --dry-run` of
+#            them; when they do not (a test, CI or docs change), it says so and builds nothing. It never builds a
+#            toplevel, stages or uploads there: nothing off main is published, so a full build would prove nothing
+#            the dry run does not, at hours of runner time per push.
 #   publish  main only, environment nix-release: binds the stage to closure.json and signs every narinfo with
 #            rime-cache-1, uploads the NARs as release assets of AndreNijman/rime-cache (one release per Rime
 #            release ID) FIRST, then pushes the narinfos (URL: rewritten to the absolute asset URL) to rime-cache
@@ -80,10 +85,11 @@ on:
 
 permissions: {}
 
-# One group, never shared with build-image.yml, and a running release is never cancelled (§7).
+# Never shared with build-image.yml. On main one group, and a running release is never cancelled (§7); every other
+# ref has its own group, and the next push there cancels the dry-run proof still running.
 concurrency:
-  group: nix-release
-  cancel-in-progress: false
+  group: ${{ github.ref == 'refs/heads/main' && 'nix-release' || format('nix-release-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   IMAGE_REPO: ghcr.io/andrenijman/rime-os
@@ -109,6 +115,7 @@ jobs:
       os: ${{ steps.what.outputs.os }}
       shell: ${{ steps.what.outputs.shell }}
       shell_branch: ${{ steps.what.outputs.shell_branch }}
+      build: ${{ steps.what.outputs.build }}
     steps:
       - name: What this run does, and the rime-shell head it builds (A15)
         id: what
@@ -125,6 +132,9 @@ jobs:
           # During the pivot the NixOS Shell lives on rime-shell's feat/nixos; from main, rime-shell main (A15).
           branch=feat/nixos
           [ "$REF" = refs/heads/main ] && branch=main
+          # Off main the build job is a dry-run proof (header).
+          build=dry-run
+          [ "$REF" = refs/heads/main ] && build=full
           shell="$(git ls-remote https://github.com/AndreNijman/rime-shell "refs/heads/$branch" | cut -f1)"
           [[ "$shell" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve rime-shell $branch"; exit 1; }
           {
@@ -132,8 +142,9 @@ jobs:
             echo "os=$SHA"
             echo "shell=$shell"
             echo "shell_branch=$branch"
+            echo "build=$build"
           } >> "$GITHUB_OUTPUT"
-          echo "action=$action rime-os=$SHA rime-shell=$shell ($branch)"
+          echo "action=$action build=$build rime-os=$SHA rime-shell=$shell ($branch)"
 
   # The kernel's MOK signature (D7). Optional: runs only when the repository variable RIME_NIX_KERNEL_HOST names a
   # nixosConfiguration with rime.kernel.enable. The called job holds the APEX_SB_* secrets in its own environment
@@ -180,6 +191,7 @@ jobs:
           fi
 
       - name: Free disk for the closure
+        if: needs.changes.outputs.build == 'full'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
 
       - name: Install Nix (pinned, hash-checked)
@@ -193,7 +205,40 @@ jobs:
             --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nmax-jobs = auto\n')
           echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
 
+      - name: Off main, the dry-run proof (only when the release toplevels moved)
+        if: needs.changes.outputs.build == 'dry-run'
+        env:
+          SHELL_SHA: ${{ needs.changes.outputs.shell }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
+          now="$(nix eval --raw "${o[@]}" .#rime-release-toplevels.drvPath)"
+          was=
+          # The commit this push replaced, with the SAME rime-shell, so only a rime-os change can move it.
+          if [[ "${BEFORE:-}" =~ ^[0-9a-f]{40}$ ]] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
+            && git fetch --quiet --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY" "$BEFORE" \
+            && git worktree add --quiet --detach "$RUNNER_TEMP/before" "$BEFORE"; then
+            was="$(cd "$RUNNER_TEMP/before" && nix eval --raw "${o[@]}" .#rime-release-toplevels.drvPath)" || was=
+          fi
+          if [ -n "$was" ] && [ "$was" = "$now" ]; then
+            echo "The release toplevels did not move ($now): nothing to prove." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "The release toplevels moved (${was:-no comparable earlier commit} -> $now): dry run." | tee -a "$GITHUB_STEP_SUMMARY"
+          nix flake check --no-build "${o[@]}"
+          nix build --dry-run "${o[@]}" .#rime-release-toplevels .#rime-nix-release .#rime-release-plan 2>&1 | tee "$RUNNER_TEMP/dry-run.txt"
+          {
+            echo
+            echo "Dry run, nothing built or published:"
+            echo
+            echo '~~~'
+            head -n 60 "$RUNNER_TEMP/dry-run.txt"
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Build the variant toplevels and the release tool
+        if: needs.changes.outputs.build == 'full'
         env:
           SHELL_SHA: ${{ needs.changes.outputs.shell }}
         run: |
@@ -207,6 +252,7 @@ jobs:
           # TODO(handover): the VM tests (nix flake check) run here once the katana-nix runners have KVM to spare.
 
       - name: closure.json, the upstream split and the stage (or the S3 fallback's export)
+        if: needs.changes.outputs.build == 'full'
         env:
           BACKEND: ${{ vars.RIME_NIX_CACHE_BACKEND || 'github' }}
         run: |
@@ -224,6 +270,7 @@ jobs:
           du -sh "$t/artifact"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: needs.changes.outputs.build == 'full'
         with:
           name: nix-release-${{ needs.changes.outputs.os }}-${{ needs.changes.outputs.shell }}
           path: ${{ runner.temp }}/artifact
