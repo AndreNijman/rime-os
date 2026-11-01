@@ -52,7 +52,9 @@ fake() {
 # A daemon that "owns the name": records its pid as the owner, then waits.
 SERVE='echo $$ >> "$T/pids"; [ -s "$T/owner" ] || echo $$ > "$T/owner"; while :; do sleep 1; done'
 
+# FAKE_GK_BLOCK: --start waits (as a daemon looking for a bus that is not there would).
 GK_BODY='[ "$1" = --serve ] || echo "gnome-keyring-daemon $*" >> "$T/calls"
+[ "$1" != --start ] || [ -z "${FAKE_GK_BLOCK:-}" ] || sleep 30 >/dev/null
 case "$1" in
     --serve) '"$SERVE"' ;;
     --start) [ -n "${FAKE_GK_NOSERVE:-}" ] || setsid -f "$0" --serve </dev/null >/dev/null 2>&1 ;;
@@ -212,12 +214,17 @@ check "the same on a bus that takes 2 s per answer: each question is cut off, th
 check "...and the log gives the real time spent, not the bound" \
     eval 'spent=$(sed -n "s/.*nothing owns org.freedesktop.secrets \([0-9]*\) ms after.*/\1/p" "$T/log"); [ -n "$spent" ] && [ "$spent" -ge 1500 ]'
 
+# No bus: nothing could own the name, so nothing is started, and a daemon
+# that would sit waiting for a bus cannot hold the session.
 t0=$(date +%s%N)
-run "$T/gk:$T/gdbus" DBUS_SESSION_BUS_ADDRESS= XDG_RUNTIME_DIR=
+run "$T/gk:$T/gdbus" DBUS_SESSION_BUS_ADDRESS= XDG_RUNTIME_DIR= FAKE_GK_BLOCK=1
 ms=$(since)
-check "no session bus: the provider is still started, exit 1, logged, no bus call" \
-    eval '[ "$(rc)" = 1 ] && [ "$(calls)" = "gnome-keyring-daemon --start --components=secrets" ] && [ ! -s "$T/bus-calls" ] && logged "no session bus to confirm on"'
-check "...and nothing waits (${ms} ms)" test "$ms" -lt 2000
+check "no session bus: gnome-keyring is not started, exit 1, logged, no bus call" \
+    eval '[ "$(rc)" = 1 ] && [ -z "$(calls)" ] && [ ! -s "$T/bus-calls" ] && logged "no session bus (no DBUS_SESSION_BUS_ADDRESS, no \$XDG_RUNTIME_DIR/bus); not starting gnome-keyring"'
+check "...and nothing waits, even on a daemon that would block (${ms} ms)" test "$ms" -lt 2000
+run "$T/gdbus" RIME_SECRETS_PROVIDER_FILE="$T/prov-oo7" DBUS_SESSION_BUS_ADDRESS= XDG_RUNTIME_DIR=
+check "no session bus: oo7 is not started either" \
+    eval '[ "$(rc)" = 1 ] && [ -z "$(calls)" ] && logged "not starting oo7"'
 
 run "$T/gk:$T/gdbus"
 check "it asks the bus, never the name itself (a call to the name would activate a locked daemon)" \
