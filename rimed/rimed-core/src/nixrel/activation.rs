@@ -188,7 +188,7 @@ pub fn activation(i: &Inputs) -> Activation {
                 ("kernel parameters", b.kernel_params == t.kernel_params),
             ] {
                 if !same {
-                    reasons.push(format!("rule 1: the {what} differ from the running kernel's"));
+                    reasons.push(format!("rule 1: the {what} changed from the booted generation's"));
                 }
             }
         }
@@ -398,7 +398,7 @@ mod tests {
         c.target_boot = boot("linux-6.12.42");
         let a = c.run();
         assert_eq!(a.kind, Kind::Boot);
-        assert!(has(&a, "rule 1: the kernel differ"), "{:?}", a.reasons);
+        assert!(has(&a, "rule 1: the kernel changed from the booted"), "{:?}", a.reasons);
     }
 
     #[test]
