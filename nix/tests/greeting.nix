@@ -3,8 +3,8 @@
 #  1. term_graphics_test.py   rime-term-graphics on a pty acting as the terminal: which protocol for a local
 #                             Ghostty/kitty, Alacritty, WezTerm, SSH, tmux (passthrough on/off), GNU screen, the
 #                             console, a kitty/sixel/silent answerer; the cache; the logo's width from the cell size;
-#                             the terminal's modes restored after a timeout and after Ctrl-C; a silent terminal costs
-#                             <= 50 ms.
+#                             the terminal's modes restored after a timeout and after Ctrl-C; a silent local terminal
+#                             costs <= 50 ms; over SSH a reply at a 120 ms round trip is read, none left for the shell.
 #  2. greeting_table_test.py  greeting.sh sourced by interactive bash, zsh and dash: which image (recoloured cache,
 #                             shipped, light/dark, SSH), which fastfetch arguments (image: width AND height; label:
 #                             "RIME OS" in the accent or Rime Blue, never ASCII art), quiet when it must be, the
@@ -14,7 +14,8 @@
 #  4. POSIX and lint: greeting.sh parses in sh/bash/zsh/dash and has no bash-only test brackets (Containerfile.base
 #     asserts the same); shellcheck on greeting.sh and rime-logo-render.
 #  5. Mutants, each must make its test FAIL: rime-term-graphics that never restores the terminal; greeting.sh without
-#     --logo-height (fastfetch then clears the screen and the scrollback); rime-logo-render with the colours swapped.
+#     --logo-height (fastfetch then clears the screen and the scrollback); rime-logo-render with the colours swapped;
+#     rime-term-graphics with the local 35 ms deadline over SSH too (a late reply then reaches the prompt).
 { pkgs, self }:
 
 let
@@ -76,6 +77,12 @@ pkgs.runCommandCC "rime-greeting-check"
     python3 ${tests}/logo_render_test.py ${pkgs.matugen}/bin/matugen "$PWD/m3" ${pkgs.resvg}/bin/resvg \
       "$template" ${shellDir} --expect-fail
 
-    echo "rime-greeting: all checks passed, 3 mutants caught"
+    # rime-term-graphics: the LAN-sized deadline over SSH as well.
+    sed 's/return is_remote() ? 300 : 35;/return 35;/' rime-term-graphics.c > m4.c
+    if cmp -s rime-term-graphics.c m4.c; then echo "mutant 4 did not apply"; exit 1; fi
+    $CC -std=c11 -O2 -o m4 m4.c
+    python3 ${tests}/term_graphics_test.py ./m4 --expect-fail
+
+    echo "rime-greeting: all checks passed, 4 mutants caught"
     touch $out
   ''

@@ -33,8 +33,12 @@
  *                                              cell size in pixels (fastfetch scales with it and, without it,
  *                                              falls back to an ASCII logo), so without one they are none.
  *
- * The query waits at most RIME_TERM_GRAPHICS_TIMEOUT_MS (default 35) from the start of this process. A
- * terminal that answers later than that gets the label; raise the timeout for a slow SSH link. The tty's
+ * The query waits at most RIME_TERM_GRAPHICS_TIMEOUT_MS from the start of this process: by default 35 ms for
+ * a local terminal and 300 ms over SSH. The wait ends as soon as DA1 arrives, which almost every terminal
+ * sends, so a terminal that answers pays its round trip and only a silent one pays the whole deadline. Over
+ * SSH the deadline has to cover the link's round trip: a reply that lands after this process has exited
+ * cannot be flushed, and the shell would read it as typed input ("62;22c" at the first prompt). A terminal
+ * that answers later than the deadline gets the label; raise the timeout for a link slower than that. The tty's
  * settings are restored on every path: normal exit, timeout, and SIGINT/SIGTERM/SIGHUP/SIGQUIT (the signal
  * is then re-raised, so Ctrl-C still interrupts the caller). Ctrl-Z is ignored during the wait.
  *
@@ -227,11 +231,15 @@ static int timeout_ms(void) {
             return (int) ms;
         }
     }
-    return 35;
+    /* Local terminals answer in well under a millisecond. Over SSH the reply needs a full round trip, and one that
+     * misses the deadline is left in the input queue for the shell (see the header), so the remote default
+     * covers ordinary internet links, not just a LAN. */
+    return is_remote() ? 300 : 35;
 }
 
 /* One write, one bounded read. The reply must never reach the shell: echo is off while waiting, and what
- * arrived but was not read (a reply cut off by the deadline) is flushed before the settings come back. */
+ * arrived but was not read (a reply cut off by the deadline) is flushed before the settings come back. What
+ * arrives after this process exits cannot be flushed; the deadline (timeout_ms) is what keeps that rare. */
 static void query(int ask_pixels, struct reply *r) {
     static const char kitty_q[] = "\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\033\\";
     char q[96];

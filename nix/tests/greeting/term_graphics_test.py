@@ -9,8 +9,10 @@ it records every byte the helper writes and, when the helper's query arrives, an
 
 Per case it checks the printed protocol, whether a query was sent at all, that the tty's settings are exactly
 what they were before (also after Ctrl-C), that no reply is left in the tty's input queue for the shell to read,
-and the time. "Fast" is <= 50 ms wall from fork to exit for a terminal that never answers (the median of 5
-runs, so one scheduling hiccup on a loaded builder does not fail the build; every run is printed).
+and the time. "Fast" is <= 50 ms wall from fork to exit for a LOCAL terminal that never answers, and the 300 ms
+SSH deadline (+ 50 ms) for a silent remote one (the median of 5 runs, so one scheduling hiccup on a loaded builder
+does not fail the build; every run is printed). Over SSH a reply at a typical internet round trip must be read and
+nothing may be left for the shell: a reply that lands after the helper exits is typed into the first prompt.
 
 --expect-fail inverts the exit status: the check runs it against deliberately broken builds (mutants).
 """
@@ -102,7 +104,16 @@ def run(env, answer=None, delay=0.0, pixels=(0, 0), size=(30, 120), args=(), ctt
     if delay and answered:
         time.sleep(0.01)  # let a late reply land, to see whether it is left for the shell
     after = termios.tcgetattr(slave)
+    # What the shell would read next. FIONREAD in canonical mode counts only complete LINES, and a terminal reply
+    # has no newline, so it read 0 for a leaked reply; count with the line discipline in non-canonical mode (as
+    # readline/zle run it), then put the settings back.
+    probe = termios.tcgetattr(slave)
+    probe[3] &= ~(termios.ICANON | termios.ECHO)
+    probe[6][termios.VMIN] = 0
+    probe[6][termios.VTIME] = 0
+    termios.tcsetattr(slave, termios.TCSANOW, probe)
     pending = struct.unpack("i", fcntl.ioctl(slave, termios.FIONREAD, b"\0\0\0\0"))[0]
+    termios.tcsetattr(slave, termios.TCSANOW, after)
     if pair is None:
         os.close(master)
         os.close(slave)
@@ -192,12 +203,20 @@ def main():
           run({"TERM": "xterm-256color", "LC_TERMINAL": "iTerm2", **REMOTE}, answer=answers(), pixels=PIX),
           "iterm", queried=True)
     check("SSH from Alacritty", run({"TERM": "alacritty", **REMOTE}, answer=answers(sixel=True)), "none", queried=False)
-    check("SSH, terminal answers after the deadline -> none, input flushed",
+    # A 120 ms round trip (an ordinary internet link): the reply is read, kitty is chosen, and nothing is left in
+    # the input queue. With a LAN-sized deadline this reply landed after the helper exited and reached the prompt.
+    check("SSH, terminal answers at 120 ms -> kitty, nothing left for the shell",
           run({"TERM": "xterm-ghostty", **REMOTE}, answer=answers(kitty=True), delay=0.12, pixels=PIX),
-          "none", queried=True, pending_ok=True)
+          "kitty", queried=True)
     check("SSH, slow link with a raised timeout",
-          run({"TERM": "xterm-ghostty", "RIME_TERM_GRAPHICS_TIMEOUT_MS": "400", **REMOTE},
-              answer=answers(kitty=True), delay=0.12, pixels=PIX), "kitty", queried=True)
+          run({"TERM": "xterm-ghostty", "RIME_TERM_GRAPHICS_TIMEOUT_MS": "800", **REMOTE},
+              answer=answers(kitty=True), delay=0.45, pixels=PIX), "kitty", queried=True)
+    # Known limitation, printed, not a pass condition on the queue: a reply later than the deadline cannot be
+    # flushed by a process that has already exited. The answer must still be the label.
+    r = run({"TERM": "xterm-ghostty", **REMOTE}, answer=answers(kitty=True), delay=0.45, pixels=PIX)
+    check("SSH, terminal answers at 450 ms (past the 300 ms deadline) -> none", r, "none", queried=True,
+          pending_ok=True)
+    print(f"     known limitation: {r['pending']} reply bytes reach the shell when the link is slower than the deadline")
 
     # ── local terminals not known by name: same query ──
     check("local kmscon-like (DA1 without sixel)", run({"TERM": "xterm-256color"}, answer=answers()), "none", queried=True)
@@ -205,16 +224,18 @@ def main():
           "sixel", queried=True)
 
     # ── a terminal that never answers: none, fast ──
-    times = []
-    for i in range(5):
-        r = run({"TERM": "xterm-256color", **REMOTE}, answer=None)
-        check(f"SSH, silent terminal (run {i + 1})", r, "none", queried=True)
-        times.append(r["elapsed"])
-    med = statistics.median(times)
-    print(f"silent terminal: {', '.join(f'{t:.1f}' for t in times)} ms; median {med:.1f} ms (limit 50)")
-    if med > 50:
-        failures.append(f"silent terminal median {med:.1f} ms > 50 ms")
-        print(f"FAIL silent terminal median {med:.1f} ms > 50 ms")
+    for label, extra, low, limit in (("local", {}, 0, 50), ("SSH", REMOTE, 300, 350)):
+        times = []
+        for i in range(5):
+            r = run({"TERM": "xterm-256color", **extra}, answer=None)
+            check(f"{label}, silent terminal (run {i + 1})", r, "none", queried=True)
+            times.append(r["elapsed"])
+        med = statistics.median(times)
+        print(f"{label} silent terminal: {', '.join(f'{t:.1f}' for t in times)} ms; median {med:.1f} ms "
+              f"(limit {limit})")
+        if not low <= med <= limit:
+            failures.append(f"{label} silent terminal median {med:.1f} ms outside {low}-{limit} ms")
+            print(f"FAIL {label} silent terminal median {med:.1f} ms outside {low}-{limit} ms")
     times = [run({"TERM": "xterm-ghostty"})["elapsed"] for _ in range(5)]
     print(f"local Ghostty (no query): {', '.join(f'{t:.1f}' for t in times)} ms; median {statistics.median(times):.1f} ms")
 

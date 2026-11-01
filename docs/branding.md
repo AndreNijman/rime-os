@@ -169,11 +169,15 @@ before the first prompt) decides how to draw it:
 | local WezTerm | `iterm` (WezTerm's kitty graphics are off by default) |
 | Alacritty, the Linux console, kmscon, `TERM` dumb/unset, no `/dev/tty` | `none` |
 | GNU screen; tmux without `allow-passthrough`, or not inside Ghostty/kitty | `none` |
-| anything else (SSH, foot, xterm, unknown) | ONE query: kitty graphics + DA1 (+ `CSI 14 t` when the pty has no pixel size), at most 35 ms (`RIME_TERM_GRAPHICS_TIMEOUT_MS`) |
+| anything else (SSH, foot, xterm, unknown) | ONE query: kitty graphics + DA1 (+ `CSI 14 t` when the pty has no pixel size), at most 35 ms locally and 300 ms over SSH (`RIME_TERM_GRAPHICS_TIMEOUT_MS`); the DA1 reply ends the wait |
 
 kitty or sixel need the cell size in pixels (from the pty or `CSI 14 t`); without it fastfetch would fall back to
 its built-in ASCII logo, so the answer is `none`. The terminal's modes are restored on every path, Ctrl-C
-included, and a reply that arrives after the deadline is flushed. The answer is exported as
+included. A reply cut off by the deadline is flushed, but one that arrives after the helper has exited cannot
+be: the shell would read it as typed input. That is why the SSH deadline covers an ordinary internet round
+trip (a terminal that answers costs its round trip; only a silent one costs the full 300 ms); on a link slower
+than that the reply can still reach the first prompt, so raise `RIME_TERM_GRAPHICS_TIMEOUT_MS` there, or set
+`RIME_TERM_GRAPHICS_FORCE`. The answer is exported as
 `RIME_TERM_GRAPHICS=<proto>@<tty,TERM,SSH_TTY>`, so a nested shell in the same terminal does not ask again;
 `RIME_TERM_GRAPHICS_FORCE=<proto>` overrides it. The logo is 8 rows tall, its width in cells is derived from
 the cell size and the PNG's aspect; a window too narrow for logo and text gets the label.
