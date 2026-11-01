@@ -75,8 +75,12 @@ fn root_required_message(verb: &str, argv: &[String]) -> String {
         || verb.starts_with("remove")
         || verb.starts_with("pkg")
     {
-        "it writes the system extension under /var/lib and asks systemd to \
-         re-merge /usr"
+        if crate::nixos::is_nixos() {
+            crate::nixos::pkg::ROOT_WHY
+        } else {
+            "it writes the system extension under /var/lib and asks systemd to \
+             re-merge /usr"
+        }
     } else {
         "bootc writes to /ostree and /boot"
     };

@@ -15,7 +15,8 @@ let
 
   # A Flatpak repository with one runtime and one application, built without network (flatpak build-export needs a
   # runtime with usr/ and files/, an app with files/ and export/, and both metadata files).
-  flatpakRepo = pkgs.runCommand "rime-test-flatpak-repo" { nativeBuildInputs = [ pkgs.flatpak pkgs.ostree ]; } ''
+  # `greeting` is what the app prints: a second repo with another greeting is a newer commit of the same app.
+  mkFlatpakRepo = suffix: greeting: pkgs.runCommand "rime-test-flatpak-repo${suffix}" { nativeBuildInputs = [ pkgs.flatpak pkgs.ostree ]; } ''
     set -eu
     export HOME=$TMPDIR
     rt=$TMPDIR/runtime app=$TMPDIR/app
@@ -23,7 +24,7 @@ let
     cp ${pkgs.pkgsStatic.busybox}/bin/busybox $rt/usr/bin/busybox
     ln -s busybox $rt/usr/bin/sh
     printf '[Runtime]\nname=org.rime.TestPlatform\nruntime=org.rime.TestPlatform/x86_64/1\nsdk=org.rime.TestPlatform/x86_64/1\n' > $rt/metadata
-    printf '#!/bin/sh\necho hello from the rime test flatpak\n' > $app/files/bin/rime-test-hello
+    printf '#!/bin/sh\necho ${greeting}\n' > $app/files/bin/rime-test-hello
     chmod +x $app/files/bin/rime-test-hello
     printf '[Application]\nname=org.rime.TestHello\nruntime=org.rime.TestPlatform/x86_64/1\nsdk=org.rime.TestPlatform/x86_64/1\ncommand=rime-test-hello\n' > $app/metadata
     flatpak build-export --runtime --disable-fsync --no-update-summary $out $rt 1
@@ -31,6 +32,8 @@ let
     flatpak build-update-repo $out
     ostree --repo=$out refs
   '';
+  flatpakRepo = mkFlatpakRepo "" "hello from the rime test flatpak";
+  flatpakRepo2 = mkFlatpakRepo "-2" "hello from the second build";
 
   # A program built the way a vendor tarball's is: interpreter /lib64/ld-linux-x86-64.so.2, no RUNPATH, and a library
   # (libexpat) that is in Rime's nix-ld set but not in nix-ld's own defaults.
@@ -99,7 +102,7 @@ let
 
       virtualisation = {
         memorySize = 2048;
-        additionalPaths = [ flatpakRepo foreign testApp ];
+        additionalPaths = [ flatpakRepo flatpakRepo2 foreign testApp ];
       };
     };
 
@@ -197,6 +200,36 @@ let
           machine.fail("su - alice -c 'command -v hello'")
           machine.succeed("rime pkg rollback 2>&1")
           has(machine.succeed("su - alice -c hello"), "Hello, world!")
+
+      with subtest("an ordinary user is told why install needs root, in NixOS terms"):
+          out = machine.fail("su - alice -c 'rime install hello' 2>&1")
+          has(out, "it changes what is installed for every user")
+          assert "system extension" not in out, out
+
+      with subtest("a requested list carried over from bootc is read through the catalogue's names"):
+          # bootc wrote the name as it was typed; the catalogue maps the spelling (here: case) to its entry.
+          carried = "printf 'HELLO\\nsteam\\n' > /var/lib/rime/pkg/requested"
+          machine.succeed(carried)
+          has(machine.succeed("rime pkg list 2>&1"), "app, as hello")
+          machine.succeed("rime remove hello 2>&1")
+          machine.fail("grep -ix hello /var/lib/rime/pkg/requested")
+          machine.succeed("grep -x steam /var/lib/rime/pkg/requested")
+          machine.fail("su - alice -c 'command -v hello'")
+          machine.succeed(carried)
+          machine.succeed("rime pkg upgrade 2>&1")
+          has(machine.succeed("su - alice -c hello"), "Hello, world!")
+          machine.succeed("rm /var/lib/rime/pkg/requested")
+
+      with subtest("pkg upgrade also updates the invoking user's own Flatpaks (rime-pkg cmd_flatpak_upgrade)"):
+          machine.succeed("su - alice -c 'flatpak --user remote-add --no-gpg-verify userrepo file://${flatpakRepo}'")
+          machine.succeed("su - alice -c 'flatpak --user install -y --noninteractive userrepo org.rime.TestHello' 2>&1")
+          before = machine.succeed("su - alice -c 'flatpak --user info --show-commit org.rime.TestHello'").strip()
+          machine.succeed("su - alice -c 'flatpak --user remote-modify --url=file://${flatpakRepo2} userrepo'")
+          # The environment sudo gives root (HOME=/root): `--user` must still mean alice's installation.
+          machine.succeed("HOME=/root SUDO_USER=alice rime pkg upgrade 2>&1")
+          after = machine.succeed("su - alice -c 'flatpak --user info --show-commit org.rime.TestHello'").strip()
+          assert before != after, f"alice's Flatpak stayed at {before}"
+          machine.succeed("su - alice -c 'flatpak --user uninstall -y --noninteractive org.rime.TestHello' 2>&1")
 
       with subtest("nix-ld runs a foreign dynamically linked binary"):
           has(machine.succeed("su - alice -c ${foreign}/bin/rime-foreign"), "foreign binary ran with expat_")

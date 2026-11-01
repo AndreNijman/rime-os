@@ -369,6 +369,32 @@ pub fn edit_list(list: &[String], add: &[String], remove: &[String]) -> Vec<Stri
     out
 }
 
+/// The class 2 apps a requested list names, by catalogue name and each once, in list order. A line written on bootc
+/// may use another spelling of the same app (`golang`, `java-latest-openjdk-devel`, `helium-bin`), which the
+/// catalogue's aliases map; a list carried over from bootc keeps those lines.
+pub fn requested_apps(cat: &Catalogue, list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for n in list {
+        // An app this release does not build (chatgpt, still pending) has no store path to put in the profile; it
+        // stays in the list and `rime pkg list` shows it, but it must not stop every other app's install.
+        if let Some((canon, Entry::Nix { buildable: true, .. })) = cat.entry(n) {
+            if !out.contains(&canon) {
+                out.push(canon);
+            }
+        }
+    }
+    out
+}
+
+/// The lines of a requested list that mean catalogue entry `canon`, whatever spelling they were written with.
+pub fn lines_naming(cat: &Catalogue, list: &[String], canon: &str) -> Vec<String> {
+    list.iter().filter(|n| cat.canonical(n) == canon).cloned().collect()
+}
+
+/// Why `rime install`, `remove` and the writing `pkg` verbs need root on NixOS (ops::root_required_message).
+pub const ROOT_WHY: &str = "it changes what is installed for every user: /var/lib/rime, the system Flatpak \
+     installation and the rime-apps profile";
+
 /// The class 2 builds this machine's release names: `{"apps": {"<name>": "/nix/store/..."}}`.
 pub fn parse_outs(text: &str) -> Result<BTreeMap<String, String>, String> {
     #[derive(Deserialize)]
@@ -659,10 +685,7 @@ fn deselect_feature(cat: &Catalogue, name: &str, feature: &str) -> Result<(), St
 /// Rewrite the rime-apps profile to exactly the class 2 apps in `requested`: fetch each one's store path from the
 /// cache, then one new profile generation.
 fn set_apps_profile(cat: &Catalogue, requested: &[String]) -> Result<(), String> {
-    let apps: Vec<&String> = requested
-        .iter()
-        .filter(|n| matches!(cat.entries.get(*n), Some(Entry::Nix { .. })))
-        .collect();
+    let apps = requested_apps(cat, requested);
     let profile = cat.apps_profile.as_str();
     if apps.is_empty() {
         if Path::new(profile).exists() {
@@ -680,7 +703,7 @@ fn set_apps_profile(cat: &Catalogue, requested: &[String]) -> Result<(), String>
     let outs = parse_outs(&text)?;
     let mut paths = vec![];
     for name in &apps {
-        let p = outs.get(*name).ok_or_else(|| {
+        let p = outs.get(name).ok_or_else(|| {
             format!("{name}: this machine's release ({}) names no build of it; `sudo rime update` first", cat.outs_file)
         })?;
         paths.push(p.as_str());
@@ -789,6 +812,7 @@ fn remove(cat: &Catalogue, names: &[String]) -> i32 {
     let mut rc = 0;
     let mut requested = read_list(Path::new(REQUESTED));
     let mut nix_removed = vec![];
+    let mut nix_lines = vec![];
     let mut flatpak_ids = vec![];
     for name in names {
         if is_app_id(name) {
@@ -798,18 +822,20 @@ fn remove(cat: &Catalogue, names: &[String]) -> i32 {
         match cat.entry(name) {
             Some((_, Entry::Flatpak { id, .. })) => flatpak_ids.push(id.clone()),
             Some((canon, Entry::Toggle { feature, .. })) => match deselect_feature(cat, &canon, feature) {
-                Ok(()) => requested = edit_list(&requested, &[], &[canon]),
+                Ok(()) => requested = edit_list(&requested, &[], &lines_naming(cat, &requested, &canon)),
                 Err(e) => rc = fail(format!("{name}: {e}")),
             },
             Some((canon, Entry::Nix { .. })) => {
-                if requested.contains(&canon) {
+                let lines = lines_naming(cat, &requested, &canon);
+                if !lines.is_empty() {
+                    nix_lines.extend(lines);
                     nix_removed.push(canon);
                 } else {
                     rc = fail(format!("{name} was not installed with rime install"));
                 }
             }
             Some((canon, Entry::UserNpm { package, npm, .. })) => match npm_as_user(npm, "uninstall", package) {
-                Ok(()) => requested = edit_list(&requested, &[], &[canon]),
+                Ok(()) => requested = edit_list(&requested, &[], &lines_naming(cat, &requested, &canon)),
                 Err(e) => rc = fail(format!("{name}: {e}")),
             },
             Some((_, Entry::Refuse { reason })) => rc = fail(format!("{name}: {reason}")),
@@ -817,7 +843,7 @@ fn remove(cat: &Catalogue, names: &[String]) -> i32 {
         }
     }
     if !nix_removed.is_empty() {
-        let wanted = edit_list(&requested, &[], &nix_removed);
+        let wanted = edit_list(&requested, &[], &nix_lines);
         match set_apps_profile(cat, &wanted) {
             Ok(()) => {
                 requested = wanted;
@@ -956,17 +982,25 @@ fn list(cat: &Catalogue) -> i32 {
         println!("  (nothing)");
     }
     for name in &requested {
-        let what = match cat.entries.get(name) {
-            Some(Entry::Toggle { feature, .. }) => {
-                let f = cat.features.get(feature);
-                let on = f.map(|f| f.in_system).unwrap_or(false);
-                format!(
-                    "feature {feature} ({})",
-                    if on { "in this system" } else { "selected; comes with the next update" }
-                )
+        let what = match cat.entry(name) {
+            Some((canon, e)) => {
+                let kind = match e {
+                    Entry::Toggle { feature, .. } => {
+                        let on = cat.features.get(feature).map(|f| f.in_system).unwrap_or(false);
+                        format!(
+                            "feature {feature} ({})",
+                            if on { "in this system" } else { "selected; comes with the next update" }
+                        )
+                    }
+                    e => e.kind().to_string(),
+                };
+                if canon == *name {
+                    kind
+                } else {
+                    format!("{kind}, as {canon}")
+                }
             }
-            Some(e) => e.kind().to_string(),
-            None => "no longer in the catalogue".to_string(),
+            None => format!("not in Rime's catalogue (rime resolve {name})"),
         };
         println!("  {name:<20} {what}");
     }
@@ -994,7 +1028,7 @@ fn list(cat: &Catalogue) -> i32 {
 fn upgrade(cat: &Catalogue) -> i32 {
     let mut rc = 0;
     let requested = read_list(Path::new(REQUESTED));
-    if requested.iter().any(|n| matches!(cat.entries.get(n), Some(Entry::Nix { .. }))) {
+    if !requested_apps(cat, &requested).is_empty() {
         match set_apps_profile(cat, &requested) {
             Ok(()) => say("catalogue apps: at the builds this release names"),
             Err(e) => rc = fail(e),
@@ -1010,10 +1044,27 @@ fn flatpak_upgrade() -> i32 {
     if !Path::new(flatpak()).exists() {
         return 0;
     }
-    match status(flatpak(), &["update", "--system", "--noninteractive"]) {
+    let rc = match status(flatpak(), &["update", "--system", "--noninteractive"]) {
         Ok(()) => 0,
         Err(e) => fail(e),
+    };
+    // Then the invoking user's own installation, as rime-pkg cmd_flatpak_upgrade did on bootc: `flatpak install
+    // --user` is what many app stores do, and updating only one installation leaves the other stale. A failure here
+    // is a warning, as it was there.
+    // runuser (like su) sets HOME to the user's own, so `--user` is their installation even under sudo's HOME=/root.
+    let user = std::env::var("SUDO_USER").unwrap_or_default();
+    if unsafe { libc::geteuid() } == 0 && !user.is_empty() && user != "root" {
+        let runuser = sys("runuser");
+        let has_remote = output(&runuser, &["-u", &user, "--", flatpak(), "--user", "remotes", "--columns=name"])
+            .map(|o| !o.trim().is_empty())
+            .unwrap_or(false);
+        if has_remote {
+            if let Err(e) = status(&runuser, &["-u", &user, "--", flatpak(), "update", "--user", "--noninteractive"]) {
+                say(format!("warning: {user}'s own Flatpak update failed: {e}"));
+            }
+        }
     }
+    rc
 }
 
 fn verify(cat: &Catalogue) -> i32 {
@@ -1260,6 +1311,17 @@ mod tests {
         assert_eq!(names("blend"), vec!["blender"]);
         assert_eq!(names("golang"), vec!["go"]);
         assert!(names("claude").contains(&"claude-code".to_string()));
+    }
+
+    #[test]
+    fn a_requested_list_carried_over_from_bootc_is_read_through_the_aliases() {
+        let c = fixture();
+        let list: Vec<String> = ["golang", "steam", "go", "chatgpt", "something-else"].map(String::from).into();
+        // golang and go are one app; steam is a feature, chatgpt an unbuilt app, something-else unknown.
+        assert_eq!(requested_apps(&c, &list), vec!["go".to_string()]);
+        assert_eq!(lines_naming(&c, &list, "go"), vec!["golang".to_string(), "go".to_string()]);
+        assert_eq!(lines_naming(&c, &list, "steam"), vec!["steam".to_string()]);
+        assert!(lines_naming(&c, &list, "blender").is_empty());
     }
 
     #[test]
