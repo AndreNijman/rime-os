@@ -243,7 +243,7 @@ in
 
     # libexec: files/desktop xdg-terminals.list (which terminal xdg-terminal-exec opens).
     environment.etc."xdg/xdg-terminals.list" = lib.mkIf desktop {
-      source = "${libexec}/etc/xdg/xdg-terminals.list";
+      source = "${libexec}/share/rime/xdg/xdg-terminals.list";
     };
   };
 }

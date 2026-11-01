@@ -49,6 +49,9 @@ pkgs.testers.runNixOSTest {
     users.users.rime = { isNormalUser = true; extraGroups = [ "wheel" ]; };
     users.users.guest = { isNormalUser = true; };
     programs.zsh.enable = true; # so the zsh half of the profile snippets is exercised too
+    # The session set is the desktop area's (/etc/rime/wayland-sessions = the display manager's sessions); the
+    # skeleton desktop on this branch has none, so the test supplies Rime's own entries there.
+    environment.etc."rime/wayland-sessions".source = "${pkgs.rime.rime-libexec}/share/wayland-sessions";
     virtualisation.memorySize = 2048;
   };
 
@@ -78,13 +81,23 @@ pkgs.testers.runNixOSTest {
     with subtest("scripts run their --help / --self-test without a missing command"):
         bad = []
         # (user, probe): rime-session-select refuses to run as anyone but root (it is a sudo target)
+        # these exit non-zero by design when they print their usage
+        usage_exits = {"rime-switch-user --help": 2, "rime-user --help": 2, "rime-luks-enroll --help": 1}
+        outputs = {}
         for user, p in [("rime", p) for p in probes] + [("root", "rime-session-select --list")]:
             status, out = run_as(user, f"{sw}/libexec/{p}")
+            outputs[p] = out
             print(f"--- {p}: exit {status}\n{out[-1500:]}")
+            if status != usage_exits.get(p, 0):
+                bad.append(f"{p}: exit {status}, expected {usage_exits.get(p, 0)}")
             for l in out.splitlines():
                 if missing.search(l):
                     bad.append(f"{p}: {l}")
-        assert not bad, "missing commands:\n" + "\n".join(bad)
+        assert not bad, "missing commands or wrong exits:\n" + "\n".join(bad)
+        # the session list is read from /etc/rime/wayland-sessions (bootc: /usr/share/wayland-sessions)
+        listed = outputs["rime-session-select --list"].split()
+        for sid in ["niri", "rime-labwc", "rime-safe-graphics"]:
+            assert sid in listed, f"rime-session-select --list does not name {sid}: {listed}"
 
     with subtest("sudo -l -U rime lists the libexec rules"):
         out = machine.succeed("sudo -l -U rime")
@@ -143,6 +156,11 @@ pkgs.testers.runNixOSTest {
             print(f"--- verify {unit}\n{out}")
             assert "is not executable" not in out and "No such file" not in out, out
         print(machine.succeed("systemctl status rime-greet-publish.service 2>&1 || true"))
+        assert machine.succeed("systemctl show -P Result rime-greet-publish.service").strip() == "success"
+        machine.succeed("journalctl -b -u rime-greet-publish.service | grep -F 'published for'")
+        # nothing of rime-libexec is live through a directory NixOS links for every package
+        machine.fail(f"test -e {sw}/share/polkit-1/rules.d/49-rime-singbox.rules")
+        machine.fail(f"test -e {sw}/etc/xdg/mimeapps.list")
 
     with subtest("interactive bash and zsh start cleanly with the profile snippets"):
         for sh in ["bash", "zsh"]:

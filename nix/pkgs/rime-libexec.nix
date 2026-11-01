@@ -6,7 +6,10 @@
 #  2. One substitution table (`fhsRules` below) maps the bootc FHS paths. Rime's OWN files go to the system profile,
 #     /run/current-system/sw/{libexec,share,bin}, never to this store path: those strings are also written into
 #     users' configs (Hyprland/labwc/niri autostart, keybinds) and must survive a garbage collection. base.nix links
-#     /libexec, /share/rime, /share/rime-shell, /share/rime-greet and /share/wayland-sessions into the profile.
+#     /libexec and /share/rime into the profile; /share/rime-shell, /share/rime-greet and /share/backgrounds are
+#     linked by the desktop area. The session list is /etc/rime/wayland-sessions (desktop's display-manager session
+#     set, not a profile path), and the Rime.I18n QML module is under /run/current-system/sw/lib/qt-6/qml (the
+#     rime-shell package's layout).
 #     A tool whose absolute path is load-bearing (read as root, or a security check) gets its own store path.
 #  3. A PATH line, marked "# rime-libexec", is written into each script after its shebang (after the docstring for
 #     python): the store directories of that script's dependencies, then /run/wrappers/bin (sudo, su, unix_chkpwd)
@@ -16,7 +19,8 @@
 #     reads its name from $0; rime-gamescope-steam finds its siblings through BASH_SOURCE).
 #  4. installCheck proves it: rime-libexec-audit.py parses every shell script with shfmt and checks that each command
 #     resolves (builtin, own function, the injected store PATH, or the RUNTIME list below); python/node argv lists are
-#     scanned the same way. Then a grep gate fails the build on any /usr/{bin,sbin,libexec,lib,lib64,share} left in
+#     scanned the same way. A command passed as an ARGUMENT to a script's own helper (rime-safe-graphics'
+#     `collect graphics.txt lspci -k`) is not seen; the VM test's probes are the backstop for those. Then a grep gate fails the build on any /usr/{bin,sbin,libexec,lib,lib64,share} left in
 #     the output; /usr/local/* is allowed (search-list entries that simply do not exist on NixOS).
 #
 # Scripts NOT shipped here (bootc-only; the update and package workers of a later phase replace them):
@@ -69,6 +73,7 @@
   dosfstools,
   xkeyboard_config,
   at-spi2-core,
+  pciutils,
 }:
 
 let
@@ -125,7 +130,7 @@ let
     rime-plugin = [ jq nodejs-slim ];
     rime-plymouth-accent = [ util-linux bash ];
     rime-project-windows = [ ];
-    rime-safe-graphics = [ gnutar ];
+    rime-safe-graphics = [ gnutar pciutils ]; # pciutils: `collect graphics.txt lspci -k` (the audit cannot see it)
     rime-safe-graphics-terminal = [ ];
     rime-screen-reader = [ procps util-linux systemd ];
     rime-secrets-start = [ systemd glib util-linux ];
@@ -197,6 +202,10 @@ let
     [ "/usr/lib/NetworkManager/dispatcher.d" "/etc/NetworkManager/dispatcher.d" ]
     [ "/usr/lib64/NetworkManager" "${networkmanager}/lib/NetworkManager" ]
     [ "/usr/libexec/virtiofsd" "/run/current-system/sw/bin/virtiofsd" ]
+    # Paths another area defines: the session set (desktop: the display manager's sessions, not a profile path)
+    # and the Rime.I18n module root (rime-shell package: lib/qt-6/qml, linked through the default /lib).
+    [ "/usr/share/wayland-sessions" "/etc/rime/wayland-sessions" ]
+    [ "/usr/lib64/rime-shell/qml" "/run/current-system/sw/lib/qt-6/qml" ]
     [ "/usr/bin/qemu-system-x86_64" "/run/libvirt/nix-emulators/qemu-system-x86_64" ]
     # Everything else of the system: the system profile.
     [ "/usr/libexec/" "/run/current-system/sw/libexec/" ]
@@ -234,7 +243,6 @@ stdenvNoCC.mkDerivation {
       (root + "/files/system/shared-machine")
       (root + "/files/system/xdg")
       (root + "/files/system/flatpak")
-      (root + "/files/system/polkit-1/rules.d")
       (root + "/files/desktop")
     ];
   };
@@ -274,17 +282,21 @@ stdenvNoCC.mkDerivation {
     # ── data the scripts and sessions read (bootc: /usr/share/rime*, /etc) ──
     mkdir -p $out/share/rime/nftables $out/share/rime/shell $out/share/rime/zsh $out/share/rime/starship \
       $out/share/rime/shared-machine $out/share/wayland-sessions $out/share/fish/vendor_conf.d \
-      $out/share/fish/vendor_completions.d $out/share/nushell/vendor/autoload $out/etc/profile.d $out/etc/xdg \
-      $out/etc/mpv $out/etc/flatpak $out/share/polkit-1/rules.d
+      $out/share/fish/vendor_completions.d $out/share/nushell/vendor/autoload $out/etc/profile.d $out/share/rime/xdg \
+      $out/etc/mpv $out/etc/flatpak
     cp $S/nftables/rime.nft $out/share/rime/nftables/
     cp -r $S/firewall/services $out/share/rime/firewall-services
     mkdir -p $out/share/rime/firewall && mv $out/share/rime/firewall-services $out/share/rime/firewall/services
     cp $S/rime-secrets-provider $out/share/rime/secrets-provider
     cp $S/shared-machine/* $out/share/rime/shared-machine/
     cp $S/profile.d/*.sh $out/etc/profile.d/
-    cp $S/xdg/xdg-terminals.list $out/etc/xdg/
+    # NOT $out/etc/xdg or $out/share/polkit-1: system-path links /etc/xdg and polkit links /share/polkit-1 for
+    # every system package (polkit's datadir is /run/current-system/sw/share), so files there would be live on
+    # every machine, desktop or not. The xdg files are data here; base.nix installs xdg-terminals.list when the
+    # desktop is on, and mimeapps.list is the desktop area's (xdg.mime). The sing-box polkit rule is the security
+    # area's (security.polkit.extraConfig).
+    cp $S/xdg/xdg-terminals.list $out/share/rime/xdg/
     cp $S/flatpak/flathub.flatpakrepo $out/etc/flatpak/
-    cp $S/polkit-1/rules.d/49-rime-singbox.rules $out/share/polkit-1/rules.d/
     cp -r $D/hypr $out/share/rime/hypr
     cp -r $D/labwc $out/share/rime/labwc
     cp -r $D/safe-graphics $out/share/rime/safe-graphics
@@ -298,7 +310,7 @@ stdenvNoCC.mkDerivation {
     cp $D/fish/rime-agent.fish $out/share/fish/vendor_conf.d/
     cp $D/fish/completions/*.fish $out/share/fish/vendor_completions.d/
     cp $D/nushell/rime.nu $out/share/nushell/vendor/autoload/
-    cp $D/xdg/mimeapps.list $out/etc/xdg/
+    cp $D/xdg/mimeapps.list $out/share/rime/xdg/
     cp $D/mpv/mpv.conf $out/etc/mpv/
 
     # ── 1. interpreters ───────────────────────────────────────────────────
@@ -355,6 +367,10 @@ stdenvNoCC.mkDerivation {
       echo "FAIL: FHS paths left in the output:"; echo "$left"; exit 1
     fi
     test "$(readlink -f $out/libexec/rime/tools/wrangler)" = "$(readlink -f $out/libexec/rime-tool-broker)"
+    # nothing under a directory NixOS links and reads for every system package (see the data section)
+    for d in etc/xdg share/polkit-1; do
+      if [ -e "$out/$d" ]; then echo "FAIL: $out/$d would be live on every machine"; exit 1; fi
+    done
     runHook postInstallCheck
   '';
 
