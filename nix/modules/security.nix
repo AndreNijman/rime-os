@@ -303,9 +303,14 @@ in
       # session while it is on (sandbox.rs preflight). Kernel default since 6.2 is 0; pinned here.
       boot.kernel.sysctl."dev.tty.legacy_tiocsti" = if weak "g5-tiocsti" then 1 else 0;
 
-      # G12: NixOS writes `lsm=` on the command line, which overrides CONFIG_LSM and would boot
-      # without lockdown (katana today: capability,lockdown,yama,selinux,bpf,landlock,ima, lockdown
-      # [none]). Keep the LSM loaded so its state stays readable (`rime live doctor` reads it).
+      # G12: NixOS writes `lsm=` on the command line (landlock,yama,bpf), which overrides CONFIG_LSM.
+      # Whether that drops lockdown depends on the kernel. nixpkgs' default kernel sets
+      # SECURITY_LOCKDOWN_LSM_EARLY, so lockdown initialises whatever `lsm=` says (measured: a VM
+      # with no Rime module and `lsm=landlock,yama,bpf` still lists lockdown first). Rime's kernel
+      # (nix/pkgs/kernel/config, as on katana) does not set it, so there lockdown loads only if `lsm=`
+      # names it (katana today: capability,lockdown,yama,selinux,bpf,landlock,ima, lockdown [none]).
+      # Keep the LSM loaded so its state stays readable (`rime live doctor` reads it). The security
+      # test checks the command line, since its VMs run nixpkgs' kernel.
       security.lsm = lib.mkBefore [ "lockdown" ];
     }
 

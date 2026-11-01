@@ -175,7 +175,12 @@ pkgs.testers.runNixOSTest {
         print(session(m, "g1", probe_g1))
         out = wait_file(m, "/home/alice/proj/g1.out")
         print(m.name + " G1 in-session connect: " + out)
-        return "rc=0" in out
+        if "rc=0" in out:
+            return True
+        # Refused, and for the reason under test: the path is not there in the session (not, say, a
+        # missing socat or an unreadable store, which would make this check pass for nothing).
+        assert "No such file or directory" in out, m.name + " G1: refused, but not for the reason under test: " + out
+        return False
 
     with subtest("G1: the nix-daemon socket is unreachable from an agent session"):
         # The host side still works through the link (positive control).
@@ -189,6 +194,11 @@ pkgs.testers.runNixOSTest {
         rime.succeed("rm -f /home/alice/proj/g2.out")
         print(session(rime, "g2", "test -e /run/dbus/system_bus_socket && echo bus-visible > ./g2.out || echo confined > ./g2.out"))
         assert wait_file(rime, "/home/alice/proj/g2.out").strip() == "confined", "G2 FAILED: the session was not confined"
+        # Observation, not a gate: a confined session's /run is an empty tmpfs, so on NixOS it also loses
+        # /run/current-system (the system PATH) and /run/wrappers. Printed for the services/rimed owners.
+        rime.succeed("rm -f /home/alice/proj/g2-run.out")
+        session(rime, "g2run", "for p in /run/current-system /run/wrappers /etc/static; do test -e $p && echo $p present || echo $p absent; done > ./g2-run.out")
+        print("rime confined session sees: " + wait_file(rime, "/home/alice/proj/g2-run.out"))
         rc, out = session(nobwrap, "g2", "echo ran > ./g2.out")
         print("nobwrap: rc=%d %s" % (rc, out))
         assert rc != 0 and "bubblewrap" in out, "G2 mutant: without bwrap the session must be refused, naming bubblewrap"
@@ -318,6 +328,20 @@ pkgs.testers.runNixOSTest {
         assert ssh_password("weak"), "G9 mutant: with password login on, the same login succeeds (the gate's check must see this)"
 
     with subtest("G12 (in passing): lockdown stays in the LSM list"):
+        # These VMs run nixpkgs' kernel, which initialises lockdown early whatever `lsm=` says, so the
+        # runtime list below cannot tell the module's setting apart from its absence (the client,
+        # with no Rime module, lists lockdown too). Rime's kernel does not (LOCKDOWN_LSM_EARLY unset),
+        # so the setting that matters there is the `lsm=` the system writes: checked on the command
+        # line, against the client as the machine without it.
+        def lsm_param(m):
+            for word in m.succeed("cat /proc/cmdline").split():
+                if word.startswith("lsm="):
+                    return word[len("lsm="):].split(",")
+            return []
+        rime_lsm, client_lsm = lsm_param(rime), lsm_param(client)
+        print("lsm= on rime: %s; on client: %s" % (rime_lsm, client_lsm))
+        assert "lockdown" in rime_lsm, "G12 FAILED: the command line's lsm= drops lockdown on a kernel without LOCKDOWN_LSM_EARLY"
+        assert client_lsm and "lockdown" not in client_lsm, "G12 mutant: NixOS's own lsm= (no Rime module) leaves lockdown out (the gate's check must see this)"
         lsm = rime.succeed("cat /sys/kernel/security/lsm")
         assert "lockdown" in lsm, lsm
         print(rime.succeed("cat /sys/kernel/security/lockdown"))
