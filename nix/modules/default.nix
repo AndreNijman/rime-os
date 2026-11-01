@@ -11,6 +11,7 @@
     ./gaming.nix
     ./security.nix
     ./packages-catalogue.nix
+    ./fedora-parity.nix
   ];
 
   nixpkgs.overlays = [ overlay ];
