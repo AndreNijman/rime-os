@@ -12,3 +12,5 @@
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
+# ci, ci-userns
+// import ./ci.nix { inherit pkgs self; }
