@@ -982,6 +982,7 @@ dependencies = [
  "libc",
  "rime-agent-core",
  "rime-backup-core",
+ "rime-paths",
  "rime-perm-core",
  "rime-remote-core",
  "rime-secret-core",
@@ -1000,6 +1001,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "rime-paths",
  "serde",
  "serde_json",
 ]
@@ -1011,6 +1013,7 @@ dependencies = [
  "anyhow",
  "libc",
  "rime-agent-core",
+ "rime-paths",
  "rime-remote-core",
  "rime-secret-core",
  "rustls",
@@ -1026,6 +1029,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "rime-paths",
  "rimed-core",
  "serde",
  "serde_json",
@@ -1040,6 +1044,7 @@ dependencies = [
  "data-encoding",
  "getrandom 0.2.17",
  "libc",
+ "rime-paths",
  "rime-secret-core",
  "serde",
  "serde_json",
@@ -1049,6 +1054,10 @@ dependencies = [
  "x25519-dalek",
  "zeroize",
 ]
+
+[[package]]
+name = "rime-paths"
+version = "0.1.0"
 
 [[package]]
 name = "rime-perm-core"
@@ -1111,6 +1120,7 @@ dependencies = [
  "anyhow",
  "hmac",
  "libc",
+ "rime-paths",
  "rime-secret-core",
  "rustls",
  "rustls-native-certs",
@@ -1138,6 +1148,7 @@ name = "rimed-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "rime-paths",
  "serde",
  "serde_json",
  "toml",

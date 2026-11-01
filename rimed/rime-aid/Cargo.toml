@@ -16,6 +16,7 @@ name = "rime-aid"
 path = "src/main.rs"
 
 [dependencies]
+rime-paths = { path = "../rime-paths" }
 # Deliberately NOT rime-agent-core, even though it has the three path helpers
 # this daemon reproduces in src/paths.rs. Depending on it would make the
 # inference service link the agent runtime's sandbox policy, git checkpointing

@@ -3,4 +3,5 @@
 
 {
   vm-boot = import ./vm-boot.nix { inherit pkgs self; };
+  rimed = import ./rimed.nix { inherit pkgs self; };
 }

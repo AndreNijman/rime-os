@@ -967,7 +967,7 @@ fn install_session_bin(scratch: &Path, rime: &Path, tools: &Path) -> Option<Path
 /// A directory rather than the script, because what goes in a session's `bin`
 /// is one symlink per tool: the shim reads `argv[0]` to decide which tool it is
 /// standing in for.
-pub const TOOL_SHIM_DIR: &str = "/usr/libexec/rime/tools";
+pub const TOOL_SHIM_DIR: &str = rime_paths::RIME_TOOLS_DIR;
 
 /// §13.4's tool half, put where a session's own `wrangler` will find it.
 ///
@@ -1186,7 +1186,7 @@ fn rime_program() -> Option<PathBuf> {
     if sibling.is_some() {
         return sibling;
     }
-    let installed = PathBuf::from("/usr/bin/rime");
+    let installed = PathBuf::from(rime_paths::RIME);
     if installed.is_file() {
         return Some(installed);
     }
@@ -1209,7 +1209,7 @@ fn rime_program() -> Option<PathBuf> {
 /// tool an agent runs from `~/.local/bin` resolves too. The sandbox decides
 /// separately whether those directories are actually visible.
 fn inherited_path() -> String {
-    std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string())
+    std::env::var("PATH").unwrap_or_else(|_| rime_paths::SAFE_PATH.to_string())
 }
 
 /// The `WAYLAND_DISPLAY` a session should start with, if it should have one.
@@ -2691,7 +2691,7 @@ mod tests {
     /// the same string, and the Containerfile is the other half of it.
     #[test]
     fn the_tool_shim_directory_is_the_one_the_image_writes() {
-        assert_eq!(TOOL_SHIM_DIR, "/usr/libexec/rime/tools");
+        assert_eq!(TOOL_SHIM_DIR, rime_paths::RIME_TOOLS_DIR);
         assert!(Path::new(TOOL_SHIM_DIR).is_absolute());
     }
 

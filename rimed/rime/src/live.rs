@@ -49,7 +49,7 @@ use rimed_core::live::{elf, Component, DeferReason, MachineState, Outcome, Requi
 use serde_json::{json, Value};
 
 pub const LAYER_NAME: &str = "rime-live";
-const SESSION_HELPER: &str = "/usr/libexec/rime-live-session";
+const SESSION_HELPER: &str = rime_paths::RIME_LIVE_SESSION;
 const PKG_LOCK: &str = "/var/lib/rime/pkg/.lock";
 
 // ── paths ────────────────────────────────────────────────────────────────────

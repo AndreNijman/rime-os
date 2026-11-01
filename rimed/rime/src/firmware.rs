@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 /// fwupdmgr, by absolute path. `rime update` already spawns it from `PATH`;
 /// this path is read-only and unprivileged, but a firmware tool is the last
 /// place to start trusting `PATH`.
-const FWUPDMGR: &str = "/usr/bin/fwupdmgr";
+const FWUPDMGR: &str = rime_paths::FWUPDMGR;
 
 /// Where the readout gets its documents.
 pub struct Roots {

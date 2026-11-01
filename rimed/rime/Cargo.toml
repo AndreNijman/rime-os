@@ -13,6 +13,7 @@ name = "rime"
 path = "src/main.rs"
 
 [dependencies]
+rime-paths = { path = "../rime-paths" }
 rime-secret-core = { path = "../rime-secret-core" }
 rime-backup-core = { path = "../rime-backup-core" }
 rime-perm-core = { path = "../rime-perm-core" }

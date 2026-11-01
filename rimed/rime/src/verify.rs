@@ -92,7 +92,7 @@ use crate::trust::{classify_skopeo_failure, cosign_tag, san_uri, Artifact, Roots
 /// file was taken from `sigstore/root-signing` and matches, fingerprint for
 /// fingerprint, the root the real ghcr.io signature carries — which is the
 /// check that makes pinning it safe rather than merely different.
-pub const FULCIO_ROOT: &str = "/usr/share/rime-os/trust/fulcio-root.pem";
+pub const FULCIO_ROOT: &str = rime_paths::TRUST_FULCIO_ROOT;
 
 /// An image-owned file that replaces [`crate::trust::EXPECTED_ISSUER`].
 ///
@@ -101,10 +101,10 @@ pub const FULCIO_ROOT: &str = "/usr/share/rime-os/trust/fulcio-root.pem";
 /// own identity, and a suite that could not say which issuer to expect would
 /// have to skip the identity check — which is one of the two arms that make
 /// this verification mean anything.
-const ISSUER_OVERRIDE: &str = "/usr/share/rime-os/trust/expected-issuer";
+const ISSUER_OVERRIDE: &str = rime_paths::TRUST_EXPECTED_ISSUER;
 
 /// Where the image ships its enforcement defaults.
-const DEFAULTS_PATH: &str = "/usr/share/rime-os/trust/enforcement.conf";
+const DEFAULTS_PATH: &str = rime_paths::TRUST_ENFORCEMENT;
 
 /// Where an administrator overrides them, per key.
 const OVERRIDE_PATH: &str = "/etc/rime/trust.conf";
@@ -695,7 +695,7 @@ pub fn fetch(roots: &Roots, repo: &str, tag: &str) -> Result<Fetched, Artifact> 
     }
 
     let tmp = TempDir::new(tag).map_err(Artifact::Unavailable)?;
-    let out = Command::new("/usr/bin/skopeo")
+    let out = Command::new(rime_paths::SKOPEO)
         .args(["copy", "--quiet", &format!("docker://{repo}:{tag}")])
         .arg(format!("dir:{}", tmp.path().display()))
         .output()
@@ -757,7 +757,7 @@ pub fn artifact_layer_at(
 /// The sha256 of a file, lower-case hex, through the openssl this program
 /// already depends on rather than a second hashing crate.
 fn sha256_of(path: &Path) -> Result<String, String> {
-    let out = Command::new("/usr/bin/openssl")
+    let out = Command::new(rime_paths::OPENSSL)
         .args(["dgst", "-sha256", "-r"])
         .arg(path)
         .output()
@@ -827,7 +827,7 @@ pub fn resolve(roots: &Roots, reference: &str) -> Result<String, String> {
         }
         return Err("this fixture root resolves no tag".to_string());
     }
-    let out = Command::new("/usr/bin/skopeo")
+    let out = Command::new(rime_paths::SKOPEO)
         .args(["inspect", "--format", "{{.Digest}}", &format!("docker://{reference}")])
         .output()
         .map_err(|e| format!("could not run skopeo: {e}"))?;
@@ -854,7 +854,7 @@ struct Openssl {
 }
 
 fn openssl(args: &[&str], paths: &[&Path]) -> Openssl {
-    let mut cmd = Command::new("/usr/bin/openssl");
+    let mut cmd = Command::new(rime_paths::OPENSSL);
     cmd.args(args);
     for p in paths {
         cmd.arg(p);
@@ -1143,7 +1143,7 @@ fn blob(fetched: &Fetched, layer: &Value) -> Result<Vec<u8>, String> {
     // `skopeo copy` already validates this on the way in, but the fixture path
     // does not go through skopeo, and a check that only runs in production is a
     // check nobody has ever seen run.
-    let out = Command::new("/usr/bin/openssl")
+    let out = Command::new(rime_paths::OPENSSL)
         .args(["dgst", "-sha256", "-r"])
         .arg(&path)
         .output()

@@ -340,7 +340,7 @@ fn a_budget_with_no_user_manager_refuses_and_names_the_path() {
     // both are refusals; asserting the wrong one of the two would make this a
     // test of the runner's package list. So the specific sentence is claimed
     // only where the earlier check cannot have fired.
-    if Path::new("/usr/bin/systemd-run").exists() {
+    if Path::new(rime_paths::SYSTEMD_RUN).exists() {
         assert!(
             why.contains("systemd/private"),
             "the refusal must name what was looked for: {why}"

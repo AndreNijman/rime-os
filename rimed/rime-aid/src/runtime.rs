@@ -77,7 +77,7 @@ const READY_POLL: Duration = Duration::from_millis(100);
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// `bubblewrap`. The same path the agent runtime asserts in `Containerfile.base`.
-const BWRAP: &str = "/usr/bin/bwrap";
+const BWRAP: &str = rime_paths::BWRAP;
 
 /// Whether the backend will be confined.
 pub fn confinement_available() -> bool {
@@ -321,7 +321,7 @@ pub fn start(
     // silently override the plan, and would hand the backend every token and
     // API key in the shell.
     cmd.env_clear();
-    cmd.env("PATH", "/usr/bin:/usr/sbin");
+    cmd.env("PATH", rime_paths::AID_SANDBOX_PATH);
     // A locale-independent child, so log parsing and number formatting cannot
     // depend on the user's settings.
     cmd.env("LC_ALL", "C");

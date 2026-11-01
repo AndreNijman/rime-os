@@ -383,7 +383,7 @@ pub fn preflight(policy: SandboxPolicy) -> Result<(), SandboxError> {
 /// boundary and resolving it through a user-controlled `PATH` would let a
 /// shadowing binary decide what "confined" means.
 pub fn bwrap_path() -> PathBuf {
-    PathBuf::from("/usr/bin/bwrap")
+    PathBuf::from(rime_paths::BWRAP)
 }
 
 /// Resolve a mount target to a real, symlink-free path.
@@ -793,7 +793,7 @@ mod tests {
     #[test]
     fn confined_argv_starts_with_the_absolute_bwrap_path() {
         let a = argv(&spec());
-        assert_eq!(a[0], "/usr/bin/bwrap");
+        assert_eq!(a[0], rime_paths::BWRAP);
     }
 
     #[test]
@@ -1025,7 +1025,8 @@ mod tests {
         }
         let mut s = live_spec();
         s.policy.sandbox = SandboxPolicy::Strict;
-        let argv = build_argv(&s, "/usr/bin/true", &[]).expect("build");
+        // /bin/sh, not /usr/bin/true: the one program path both the bootc image and NixOS have.
+        let argv = build_argv(&s, "/bin/sh", &["-c".to_string(), "exit 0".to_string()]).expect("build");
         let out = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .output()

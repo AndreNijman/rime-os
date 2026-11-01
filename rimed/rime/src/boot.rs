@@ -214,10 +214,10 @@ fn boot_entries(roots: &Roots) -> (Option<Vec<Value>>, Option<String>) {
             Err(e) => (None, Some(format!("{}: {e}", p.display()))),
         };
     }
-    if !Path::new("/usr/bin/bootctl").exists() {
+    if !Path::new(rime_paths::BOOTCTL).exists() {
         return (None, Some("bootctl is not installed".into()));
     }
-    let out = match Command::new("/usr/bin/bootctl")
+    let out = match Command::new(rime_paths::BOOTCTL)
         .args(["list", "--json=short"])
         .output()
     {

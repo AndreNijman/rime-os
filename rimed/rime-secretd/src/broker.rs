@@ -342,7 +342,7 @@ fn run_git(
     cmd.arg(GIT_TIMEOUT_SECS.to_string()).arg("git").args(args);
 
     cmd.env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("PATH", rime_paths::SAFE_PATH)
         .env("HOME", &owner.home)
         .env("USER", &owner.name)
         .env("LOGNAME", &owner.name)
@@ -489,7 +489,7 @@ pub fn run_tool(tool: &Tool<'_>, owner: &Owner) -> Result<Output, String> {
         .args(tool.args);
 
     cmd.env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("PATH", rime_paths::SAFE_PATH)
         .env("HOME", &owner.home)
         .env("USER", &owner.name)
         .env("LOGNAME", &owner.name)
@@ -550,7 +550,7 @@ pub fn run_tool(tool: &Tool<'_>, owner: &Owner) -> Result<Output, String> {
 pub const HTTP_MAX_BYTES: usize = 3 * 1024 * 1024;
 
 /// The curl this build runs, by absolute path.
-pub const CURL: &str = "/usr/bin/curl";
+pub const CURL: &str = rime_paths::CURL;
 
 /// The `Mcp-Session-Id` a server issued, if it issued one.
 pub struct HttpOutput {
@@ -832,7 +832,7 @@ pub(crate) fn run_curl(config: &str, owner: &Owner) -> Result<CurlOutput, String
     let mut cmd = Command::new(CURL);
     cmd.arg("-q").arg("--config").arg("-");
     cmd.env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+        .env("PATH", rime_paths::SAFE_PATH)
         .env("HOME", &owner.home)
         .env("USER", &owner.name)
         .env("LOGNAME", &owner.name)

@@ -361,7 +361,7 @@ pub fn build(
         ("HOME".to_string(), server_home.to_string_lossy().into_owned()),
         (
             "PATH".to_string(),
-            std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string()),
+            std::env::var("PATH").unwrap_or_else(|_| rime_paths::MINIMAL_PATH.to_string()),
         ),
         // Pointed inside the private home, so a toolchain that writes to an
         // XDG directory writes to one that exists and is the server's own.
