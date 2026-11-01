@@ -156,12 +156,16 @@ pkgs.testers.runNixOSTest {
         # Log out: end the tty2 session, as `exit` would (typing it races zsh's first start against
         # rime-shell-firstrun seeding ~/.zshrc). Not terminate-user: that stops user@ with no UserStopDelaySec
         # while the session is still closing, and the wipe's live-session fence then refuses (as designed).
+        # A terminate sent while login(1) is still opening the session (pam, the keyring) can be lost, so wait
+        # for kid's shell on tty2 first, and ask again until logind has removed the session.
+        machine.wait_until_succeeds("pgrep -u kid -t tty2 >/dev/null", timeout=60)
         print(machine.succeed("loginctl list-sessions --no-legend"))
-        ended = machine.succeed(
-            "for s in $(loginctl list-sessions --no-legend | awk '$3==\"kid\"{print $1}'); do "
-            "if [ \"$(loginctl show-session $s -p Class --value)\" = user ]; then "
-            "loginctl terminate-session $s && echo $s; fi; done").split()
-        assert ended, "no login session of kid's to end"
+        user_sessions = ("loginctl list-sessions --no-legend | awk '$3==\"kid\"{print $1}' | while read -r s; do "
+                         "if [ \"$(loginctl show-session $s -p Class --value)\" = user ]; then echo $s; fi; done")
+        assert machine.succeed(user_sessions).split(), "no login session of kid's to end"
+        machine.wait_until_succeeds(
+            f"for s in $({user_sessions}); do loginctl terminate-session $s; done; "
+            f"sleep 2; test -z \"$({user_sessions})\"", timeout=60)
         machine.wait_until_succeeds(f"! systemctl is-active {unit}", timeout=120)
         machine.wait_until_succeeds(f"test ! -e {home}/note.txt", timeout=30)
         journal = machine.succeed(f"journalctl -b -u {unit} --no-pager")
