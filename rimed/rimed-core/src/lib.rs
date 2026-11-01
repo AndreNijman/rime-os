@@ -81,6 +81,8 @@ pub mod live;
 // `$XDG_STATE_HOME`.
 pub mod migrate;
 pub mod mode;
+// The NixOS release client's pure half (docs/nixos/updates-and-release.md, D6).
+pub mod nixrel;
 // Whether the NVIDIA driver branch in the image can drive this machine's
 // NVIDIA GPU (Maxwell/Pascal/Volta need the 580 legacy branch Rime does not ship).
 pub mod nvidia_support;

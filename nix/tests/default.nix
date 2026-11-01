@@ -14,6 +14,11 @@
   hostlayer = import ./hostlayer.nix { inherit pkgs self; };
   hostlayer-katana = import ./hostlayer-katana.nix { inherit pkgs self; };
   polish = import ./polish.nix { inherit pkgs self; };
+  release-unit = import ./release-unit.nix { inherit pkgs self; };
+  release-standin = import ./release-standin.nix { inherit pkgs self; };
+  release-github = import ./release-github.nix { inherit pkgs self; };
+  update-client = import ./update-client.nix { inherit pkgs self; };
+  update-e2e = import ./update-e2e.nix { inherit pkgs self; };
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }

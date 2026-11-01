@@ -1020,6 +1020,9 @@ fn gate_main(roots: &Roots, json: bool) -> i32 {
 
 pub fn main(args: TrustArgs) -> i32 {
     let roots = Roots::from_env();
+    if args.gate && crate::nixos::is_nixos() {
+        return crate::nixos::trust::gate(args.json);
+    }
     if args.gate {
         return gate_main(&roots, args.json);
     }

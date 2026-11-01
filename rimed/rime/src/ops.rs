@@ -131,6 +131,9 @@ fn capture(program: &str, args: &[&str]) -> Option<String> {
 /// `rime pin` -> pin the current (booted) deployment so an update can't garbage
 /// collect the rollback target.
 pub fn pin() -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::generations::pin(None);
+    }
     match run("ostree", &["admin", "pin", "0"]) {
         Ok(code) => code,
         Err(e) => {
@@ -142,6 +145,9 @@ pub fn pin() -> i32 {
 
 /// `rime rollback` -> boot the previous deployment next reboot.
 pub fn rollback() -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::generations::rollback();
+    }
     match run("bootc", &["rollback"]) {
         Ok(code) => code,
         Err(e) => {
@@ -896,6 +902,9 @@ fn rename_target() -> Option<String> {
 }
 
 pub fn update(opts: UpdateOptions) -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::update::update(opts);
+    }
     let started = Instant::now();
     let mut worst = 0;
 
@@ -1116,7 +1125,7 @@ fn advise_on_layering() {
 
 /// The firmware half of `rime update`. Best-effort throughout: a machine may
 /// have no fwupd, no LVFS-covered devices, or no network.
-fn firmware_pass() -> i32 {
+pub(crate) fn firmware_pass() -> i32 {
     // No `--force`. fwupd refreshes its metadata at most once every 24h by
     // design and reports "nothing to do" (2) inside that window; forcing it
     // re-downloaded the whole index on every invocation for no benefit.
