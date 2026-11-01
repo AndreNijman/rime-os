@@ -15,12 +15,12 @@ this measurement.
 | rime-vm closure before the cuts | 1995 paths, 11,039,742,336 B unpacked (11.04 GB) | |
 | rime-vm closure after the cuts | 1957 paths, 9,530,593,800 B unpacked (9.53 GB) | |
 | saved by the cuts (unpacked) | **1,509,148,536 B (1.51 GB)**, 38 paths | |
-| **P5 fresh-install download** (`plain`, zstd -19) | **2.51 GB** (xz: 2.31 GB) | bootc 4.20 GB |
-| on disk after install (`plain`, btrfs zstd:3, optimised) | 4.30 GB | bootc 5.4 GB (2026.10.04.2, 12 GiB VM) |
-| `rime install steam` on top of `plain` | **+0.53 GB** download, +2.46 GB unpacked, +0.99 GB on disk | |
+| **P5 fresh-install download** (`plain`, zstd -19), re-measured at the wave-1 integration (§9) | **3.46 GB** (xz: 3.25 GB); 2.51 GB before linux-firmware | bootc 4.20 GB |
+| on disk after install (`plain`, btrfs zstd:3, optimised), re-measured (§9) | 5.45 GB; 4.30 GB before linux-firmware | bootc 5.4 GB (2026.10.04.2, 12 GiB VM) |
+| `rime install steam` on top of `plain` (measured before linux-firmware, not re-measured) | **+0.53 GB** download, +2.46 GB unpacked, +0.99 GB on disk | |
 | **A4** | **gaming is opt-in** (`rime.gaming.enable` stays `false`; installs ship `plain`) | 10-04 decision kept |
-| **A11 disk floor** (install + one mass rebuild + boot) | **16 GB** as `rime update` is designed (§11.5 gate counts unpacked bytes); **12 GB** physically, and once the gate counts on-disk bytes | bootc 12 GB, which holds its 5.4 GB install plus one core update, barely (§6) |
-| A11 install-only minimum (no update headroom) | 6 GB | no bootc counterpart published |
+| **A11 disk floor** (install + one mass rebuild + boot), recomputed at the wave-1 integration (§9) | **19 GB** as `rime update` is designed (§11.5 gate counts unpacked bytes); **14 GB** physically, and once the gate counts on-disk bytes (16 GB and 12 GB before linux-firmware) | bootc 12 GB, which holds its 5.4 GB install plus one core update, barely (§6) |
+| A11 install-only minimum (no update headroom), recomputed (§9) | 7 GB (6 GB before linux-firmware) | no bootc counterpart published |
 
 `plain` is the shape a fresh install ships (D9's generic rime-plain toplevel): every Rime area on, Rime's kernel with
 NVIDIA 615, no gaming, no test account. `rime-vm` is `nixosConfigurations.rime-vm` (gaming on, nixpkgs' kernel, no
@@ -167,6 +167,10 @@ the delta. `rime.gaming.enable`'s option text in `gaming.nix` quotes these numbe
 
 ### The P5 fresh-install figure
 
+> **Superseded at the wave-1 integration (§9):** linux-firmware joined the closure. The current figures are a P5
+> download of **3,458,585,216 B (3.46 GB)** and a floor of **19 GB as designed, 14 GB physical, 7 GB install-only**.
+> The text below is the first measurement, kept because §9 is computed the same way.
+
 **2,513,265,034 B (2.51 GB)**, the zstd -19 download of `plain`, set here as the P5 gate. That is
 1.69 GB less than bootc's 4.20 GB fresh install. With xz (Nix's default compression) it would be 2.31 GB. The P2 ports
 that are still landing add to it; under PLAN §6, a P5 figure above this one goes to Andre.
@@ -215,8 +219,9 @@ module's re-import of it), `/etc/nix/registry.json` naming a store path or not l
 (`self.inputs.nixpkgs.rev`, `1c89083e451e…` today), the large `-doc` outputs or the NixOS manual, either share/doc
 file the scripts read (`niri/default-config.kdl`, `labwc/rc.xml.all`) missing, the 32-bit PipeWire ALSA plugin missing
 while gaming is on,
-or a closure above the budget (10,200,547,328 B = 9.5 GiB; 9,530,593,800 B measured, so ~640 MiB for the P2 ports
-still landing). Raising the budget is a deliberate edit with an entry here saying what grew and why.
+or a closure above the budget (11,274,289,152 B = 10.5 GiB since the wave-1 integration, §9; it was 10,200,547,328 B =
+9.5 GiB over 9,530,593,800 B measured). Raising the budget is a deliberate edit with an entry here saying what grew and
+why.
 
 Seen:
 
@@ -244,9 +249,11 @@ Seen:
 
 ## 8. Handover
 
-- **STATE.md A4 and A11** (the integrator's file): A4 = gaming opt-in (§5); A11 floor = 16 GB as designed
-  (12 GB physical, = bootc's 12 GB, once D6 §11.5 counts on-disk bytes), install-only 6 GB, gaming 20 GB; P5 figure =
-  2.51 GB (zstd -19; bootc 4.20 GB).
+- **STATE.md A4 and A11** (the integrator's file): A4 = gaming opt-in (§5); A11 floor = 19 GB as designed
+  (14 GB physical, once D6 §11.5 counts on-disk bytes), install-only 7 GB; P5 figure = 3.46 GB (zstd -19; bootc
+  4.20 GB). These are the §9 figures, after linux-firmware joined the closure. The gaming floor (20 GB) and the
+  `rime install steam` delta were measured before linux-firmware and are stale: re-run `size-measure.sh` for
+  `plain-gaming`.
 - **D6 §11.5:** count estimated on-disk bytes, not unpacked NAR bytes, in the free-space gate; that drops the floor to
   12 GB (§6).
 - **Installer and catalogue:** refuse by name below the floor, and refuse `rime install steam` below the gaming floor.
@@ -259,3 +266,60 @@ Seen:
 - **Measured on a laptop-shaped stand-in.** `plain` is built from `nixosModules.default` with the areas on
   (`nix/tests/size.nix`), not from D9's real rime-plain toplevel, which does not exist yet. Re-run
   `size-measure.sh` against it when it lands.
+
+## 9. Wave-1 integration: what grew, and the budget raised once
+
+Measured on 2026-11-02 on `feat/nixos` after the eleven wave-1 branches merged (rime-shell overridden to the local
+`feat/nixos` with the polish merge, `--override-input rime-shell path:/work/shell`).
+
+**`checks.size` failed on the merged tree:** `closure: 2079 paths, 10556067672 bytes NAR (budget 10200547328)`,
+`FAIL: closure NAR size 10556067672 > budget 10200547328`. (The first integration run, before the `rime trust` fix
+rebuilt rimed, printed 10,556,067,944 B: the 272 B are rimed's binary.)
+
+What grew, rime-vm toplevel, by store name (`nix path-info -r --json` of the size branch's toplevel `1kzkv1dp…` against
+the merged tree's `mxgwq8km…`, NAR bytes summed per name): 9,530,593,800 B over 1676 names → 10,556,067,944 B over
+1793 names. 1,038,712,400 B added, 18,068,616 B removed (17.2 MiB of it is rime-shell under its old name, back under
+the local name).
+
+| added | MiB | brought by |
+|---|---|---|
+| `linux-firmware-20261019-zstd` | 825.2 | `fedora-parity.nix`: `hardware.enableRedistributableFirmware` (Fedora installs linux-firmware; without it Wi-Fi, GPUs and Bluetooth on real hardware have no firmware) |
+| `skopeo-1.24.1` | 32.4 | `update.nix`: the update client fetches the signed documents with skopeo |
+| `nodejs-slim-24.21.0-npm` | 12.2 | `packages-catalogue.nix`: `/etc/rime/catalogue.json` names `${nodejs}/bin/npm` for the `user-npm` route (claude-code), so npm is in the system closure by design (`rime.catalogue.npm.package`) |
+| `sof-firmware`, `libreelec-dvb-firmware`, `alsa-firmware` | 12.1 + 9.4 + 4.4 | the same firmware switch |
+| `inotify-tools` | 11.7 | kmscon's runtime dependency (polish: kmscon owns the text consoles) |
+| `timidity`, `appimage-run` FHS env | 9.7 + 6.9 | `packages-catalogue.nix`: appimage-run (with binfmt) and its FHS environment |
+| `zsh` (+ info) | 7.4 + 1.7 | `fedora-parity.nix` and `hostlayer.nix`: zsh is the default login shell, as on bootc |
+| `ipp-usb` | 7.3 | `fedora-parity.nix`: driverless USB printers and scanners, as Fedora installs |
+| `kmscon`, `zram-generator` | 2.0 + 1.0 | polish (consoles) and `fedora-parity.nix` (zram swap) |
+
+linux-firmware is 80 % of the growth and is not a cut candidate: it is what makes real hardware work. It is already
+zstd-compressed, so it costs nearly its full size in the download as well.
+
+**Budget raised once**, in `nix/tests/size.nix`: 10,200,547,328 B (9.5 GiB) → **11,274,289,152 B (10.5 GiB)**, which
+leaves ~690 MiB over 10,556,067,672 B for P2. `checks.size` passes with it; every cut in §3 still holds (the guard's
+other assertions did not change).
+
+**`plain` re-measured** (`PHASES="download disk" size-measure.sh <dir> plain`, same tools as §2; the run used the
+committed flake.lock, whose rime-shell differs from the override only by the polish merge):
+
+| `plain` | before (§4) | now |
+|---|---|---|
+| paths | 1674 | 1807 |
+| unpacked (NAR) | 9,098,365,168 B | 10,382,099,736 B |
+| download, zstd -19 | 2,513,265,034 B | **3,458,585,216 B (3.46 GB)** |
+| download, xz | 2,314,174,960 B | 3,246,717,716 B |
+| on disk, `df` used, optimised | 4,296,024,064 B | **5,450,555,392 B (5.45 GB)** |
+| on disk per unpacked byte | 0.47 | 0.52 |
+| kernel + initrd | 52,439,626 B | 52,435,933 B |
+
+The P5 fresh-install figure is now **3.46 GB**, still 0.74 GB under bootc's 4.20 GB. Recomputed A11 floor, same parts
+as §6: partitions 537,919,488 + installed 5,450,555,392 + one rebuild + 1,000,000,000 for home and logs:
+
+- **as designed** (rebuild room = unpacked 10,382,099,736 + 1 GB reserve): 18,370,574,616 B → **19 GB**;
+- **physical** (rebuild room = a second install on disk + 1 GB): 13,439,030,272 B → **14 GB**;
+- **install-only**: 6,988,474,880 B → **7 GB**.
+
+The ESP check in §6 is unchanged (3 × 52.4 MB). Not re-measured: `rime-vm`, the `*-no32` variants and `plain-gaming`,
+so the gaming floor and the `rime install steam` delta in §1 are pre-firmware figures.
+

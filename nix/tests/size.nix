@@ -58,8 +58,9 @@ let
 
   # The NAR total the guard allows, in bytes. Measured after the cuts: 9,530,593,800 bytes = 8.88 GiB (closure.md
   # table 1). The budget leaves ~640 MiB for the P2 ports still landing; raising it is a deliberate edit with a
-  # closure.md entry saying what grew and why.
-  budget = 10200547328; # 9.5 GiB
+  # closure.md entry saying what grew and why. Raised once, at the wave-1 integration (closure.md section 9):
+  # linux-firmware (fedora-parity, +825 MiB) took the room; 10,556,067,672 B measured, ~690 MiB left.
+  budget = 11274289152; # 10.5 GiB
 
   # The nixpkgs source this flake evaluates. In the closure only through a path-type registry entry.
   nixpkgsSource = builtins.unsafeDiscardStringContext (toString pkgs.path);
