@@ -15,7 +15,7 @@ use rimed_core::{ProfileSet, Selection};
 use tokio::sync::Mutex;
 
 use crate::fan::FanController;
-use crate::game::GameSession;
+use crate::game::{GameSession, ScxGaveUp};
 
 /// Mutable daemon state (behind an async mutex).
 #[derive(Debug, Clone)]
@@ -66,6 +66,11 @@ pub struct Ctx {
     pub nvidia: Arc<dyn NvidiaSmi>,
     /// M6: the active game session, if any.
     pub game: Mutex<Option<GameSession>>,
+    /// The sched-ext scheduler that failed this boot, if one did, so the next
+    /// session under the same profile keeps the kernel's own scheduler
+    /// instead of trying again (see [`ScxGaveUp`]). In memory only: a reboot,
+    /// which may bring a new kernel or a new scheduler set, is a new try.
+    pub scx_gave_up: std::sync::Mutex<Option<ScxGaveUp>>,
     pub state: Mutex<State>,
     /// The mode the user chose, kept across restarts (see `hold.rs`). In
     /// memory as well as on disk, so the guards read no file per call.
@@ -110,6 +115,7 @@ impl Ctx {
             fan,
             nvidia,
             game: Mutex::new(None),
+            scx_gave_up: std::sync::Mutex::new(None),
             state: Mutex::new(initial),
             held: Mutex::new(None),
             mode_file: mode_file.into(),

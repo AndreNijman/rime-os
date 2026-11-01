@@ -212,6 +212,10 @@ async fn ac_event_loop(ctx: Arc<Ctx>, conn: zbus::Connection) {
 /// deserve an event mechanism, and a poll cannot miss an edge the way a dropped
 /// signal subscription can.
 ///
+/// The tick also runs the sched-ext watch: a scheduler the kernel ejects
+/// mid-session is noticed within two seconds, stopped once, and the fallback
+/// to the kernel's own scheduler read back.
+///
 /// An UNREADABLE `/proc` is not a release. Releasing on it would let an I/O
 /// error change the machine's power state; it is logged once per run of
 /// failures and the session is left alone.
@@ -220,6 +224,12 @@ async fn game_owner_watch(ctx: Arc<Ctx>, conn: zbus::Connection) {
     let mut complained = false;
     loop {
         ticker.tick().await;
+        // The same tick watches the session's sched-ext scheduler: one the
+        // kernel ejected mid-game is stopped once and the fallback to the
+        // kernel's own scheduler is read back (see `Ctx::game_scx_check`). The
+        // function logs; there is nothing for the bus to announce, since the
+        // session itself stays on.
+        let _ = ctx.game_scx_check().await;
         match ctx.game_release_if_owner_gone().await {
             Ok(None) => complained = false,
             Ok(Some(_why)) => {
