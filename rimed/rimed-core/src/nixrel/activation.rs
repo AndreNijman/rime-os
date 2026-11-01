@@ -53,6 +53,9 @@ pub fn parse_dry_activate(text: &str) -> DryRun {
         if line.is_empty()
             || line == "would activate the configuration..."
             || line.starts_with("WARN: restarting or reloading systemd units from the activation script is deprecated")
+            // switchable-system.nix's pre-switch check skips the switch inhibitors on dry-activate (a real `test`
+            // checks them, and refuses, before activating anything).
+            || line == "Not checking switch inhibitors (action = dry-activate)"
         {
             continue;
         }
@@ -403,6 +406,10 @@ mod tests {
         assert!(has(&a, "dbus.service") && !has(&a, "rimed.service"), "{:?}", a.reasons);
         c.dry = DryActivate::Ran(parse_dry_activate("would restart the following units: rimed.service\nwould start the following units: new.service\nwould NOT stop the following changed units: greetd.service\n"));
         assert_eq!(c.run().kind, Kind::Switch);
+        // The display manager, if it were ever restarted by a switch (restartIfChanged = true): every session ends.
+        c.dry = DryActivate::Ran(parse_dry_activate("would restart the following units: greetd.service\n"));
+        let a = c.run();
+        assert!(a.kind == Kind::Boot && has(&a, "greetd.service"), "{:?}", a.reasons);
         c.dry = DryActivate::Ran(parse_dry_activate("would stop swap device: /dev/vda2\n"));
         assert!(has(&c.run(), "not understood"));
         c.dry = DryActivate::Failed("exit 1".into());
@@ -473,7 +480,8 @@ mod tests {
     #[test]
     fn the_parser_reads_the_pinned_switch_to_configuration_output() {
         let d = parse_dry_activate(
-            "would stop the following units: a.service\nwould NOT stop the following changed units: greetd.service\n\
+            "Not checking switch inhibitors (action = dry-activate)\n\
+             would stop the following units: a.service\nwould NOT stop the following changed units: greetd.service\n\
              would activate the configuration...\nwould restart systemd\nwould reload the following units: b.service\n\
              would restart the following units: c.service, d.service\nwould start the following units: e.service\n\
              would restart the following user units: f.service\n",

@@ -103,6 +103,10 @@ pkgs.testers.runNixOSTest {
 
       # A real boot menu on a real disk: the store is the disk's, not the host's (useBootLoader).
       virtualisation.useBootLoader = true;
+      # The disk image is made just big enough for A; the 12 GiB overlay only becomes room for B-E once the
+      # partition (growpart, stage 2) and then the file system (resize2fs in the test script: fileSystems.autoResize
+      # runs in the initrd, before the partition has grown) grow into it. rime update refuses without headroom.
+      boot.growPartition = true;
       virtualisation.useEFIBoot = true;
       boot.loader.systemd-boot.enable = true;
       boot.loader.efi.canTouchEfiVariables = true;
@@ -200,6 +204,9 @@ pkgs.testers.runNixOSTest {
       client.wait_for_unit("multi-user.target")
       client.wait_for_unit("greetd.service")
       assert link("/run/current-system") == A
+      client.wait_for_unit("growpart.service")
+      client.succeed("resize2fs /dev/disk/by-label/nixos")
+      print(client.succeed("df -h /nix/store"))
 
       with subtest("greetd is not restarted by a switch (restartIfChanged = false)"):
           client.succeed("grep -x 'X-RestartIfChanged=false' /etc/systemd/system/greetd.service")
@@ -259,7 +266,6 @@ pkgs.testers.runNixOSTest {
       with subtest("release C (Shell only): busy defers it, then it applies live with no reboot"):
           c = release("2026.11.03", C)
           channel(c, "2026.11.03")
-          print(client.succeed(f"{C}/bin/switch-to-configuration dry-activate 2>&1"))
           # Gaming Mode: a process in the game cgroup holds the live part back.
           client.succeed("mkdir -p /sys/fs/cgroup/rime-game && (sleep 600 >/dev/null 2>&1 & echo $! > /sys/fs/cgroup/rime-game/cgroup.procs)")
           code, out = update("--plan")

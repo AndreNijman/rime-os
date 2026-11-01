@@ -50,6 +50,14 @@ not change. Dispatch is one `if is_nixos()` at the top of `ops::update`, `ops::p
     `test` on the old generation, and the update stays installed for the next boot.
 12. Then come the Flatpak pass (system remotes) and the fwupd pass (shared with bootc: `ops::firmware_pass`).
 
+**The update notice.** `rime-update-check.timer` (two minutes after boot, then every six hours, as on bootc) runs
+`rime update --check`: steps 2-4 without recording the serial, nothing downloaded. As root it writes
+`/run/rime-update/state` (`state=available|none`, `digest=<manifest digest>`), the file Settings -> Updates reads.
+
+The channel document's digest is the sha256 of the manifest the registry serves for `nix-channels`, read with
+`skopeo copy`, not `skopeo inspect`: inspect parses the config as an image's and refuses an OCI artifact with an empty
+config ("unsupported image-specific operation on artifact"), which is how §3.3 publishes it.
+
 `/run/rime-live/status.json` keeps the shape the Shell already reads on bootc, with `product: "nixos"` added. The
 states are `staged`, `deferred`, `activating`, `active` and `rolled-back`.
 
