@@ -145,7 +145,11 @@ pkgs.testers.runNixOSTest {
     except Exception:
         dump_logs()
         machine.execute("mkdir -p /tmp/look")
-        machine.copy_from_machine("/tmp/look", "")
+        try:
+            # already copied when a measured assertion failed; a second copy must not hide that failure
+            machine.copy_from_machine("/tmp/look", "")
+        except FileExistsError:
+            pass
         raise
   '';
 }
