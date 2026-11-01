@@ -7,6 +7,11 @@
 set -euo pipefail
 ART=${ART:-/var/lab/rime-nix/artifacts/ovmf}
 HERE=$(cd "$(dirname "$0")" && pwd)
+# ART ends in a recursive sudo chown: refuse anything but a dedicated, absolute,
+# at-least-three-levels-deep directory (ART=/ or ART=$HOME would be a disaster).
+ART=$(realpath -m -- "$ART")
+[[ $ART == /*/*/* && $ART != "$HOME" && $ART != /var/home/* && $ART != /home/* && $ART != /root* ]] \
+  || { echo "run-all.sh: refusing ART=$ART (use a dedicated scratch dir such as /var/lab/rime-nix/artifacts/ovmf)" >&2; exit 2; }
 mkdir -p "$ART/bootc-ref"
 
 sudo -n podman build -q -t rime-ovmf-probe "$HERE" >/dev/null
@@ -19,6 +24,7 @@ sudo -n podman run --rm --entrypoint /bin/sh -v "$ART/bootc-ref:/o:z" quay.io/fe
 
 rc=0
 sudo -n podman run --rm --device /dev/kvm -e ART=/art \
+  -e BOOT_TIMEOUT="${BOOT_TIMEOUT:-300}" -e REFUSE_TIMEOUT="${REFUSE_TIMEOUT:-60}" \
   -v "$ART:/art:z" -v "$HERE:/rig:ro,z" rime-ovmf-probe /rig/lab.sh "${@:-all}" || rc=$?
 
 # Leave the evidence readable and removable by the invoking user.

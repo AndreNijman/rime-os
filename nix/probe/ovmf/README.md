@@ -3,14 +3,19 @@
 PLAN.md PR 5, the P0 gate of D3 ("a NixOS kernel and initrd boot in OVMF with Secure Boot on and the MOK enrolled,
 through Fedora's shim and GRUB, from a BLS entry and from a `custom.cfg` entry").
 
-**Result (2026-11-01): the v1 chain works. 7 of 7 cases PASS.** Fedora 45's Microsoft-signed shim and Fedora-signed
+**Result (2026-11-01): the v1 chain works. 10 of 10 cases PASS** (7 original cases, reproduced unchanged by an
+adversarial re-run, plus 3 added by that review: a tampered signed kernel, and a no-shim disk with Secure Boot on and off). Fedora 45's Microsoft-signed shim and Fedora-signed
 GRUB boot a NixOS kernel signed with a test MOK, plus its NixOS (systemd) initrd, all the way to the NixOS stage-2
 system, with Secure Boot on, both from a BLS entry on the ESP and from a `custom.cfg` entry on a bootc-shaped btrfs
 `/boot`. An unsigned kernel is refused with Secure Boot on. A MOK-signed kernel is refused when the MOK is not
-enrolled, so it is the MOK that admits it, not firmware `db`. With Secure Boot off an unsigned kernel boots.
+enrolled, so it is the MOK that admits it, not firmware `db`. A MOK-signed kernel with one byte flipped after signing
+is refused (shim checks the image hash, not just that a signature is present). The firmware itself refuses the
+MOK-signed kernel when it is put straight in `EFI/BOOT/BOOTX64.EFI` (no shim), and starts it when Secure Boot is off,
+so OVMF really enforces `db` and the chain cannot be entered by skipping shim. With Secure Boot off an unsigned kernel
+boots.
 
 Nothing here touched a host's ESP, NVRAM, GRUB or MOK: every disk and varstore is a file, the key is a throwaway
-generated per run, and QEMU runs in a container.
+(generated on the first run into `$ART/keys/`, reused while that directory exists), and QEMU runs in a container.
 
 ## What was tested
 
@@ -60,8 +65,10 @@ the boot chain does not depend on where the root is.
 
 ## Results
 
-`/var/lab/rime-nix/artifacts/ovmf/logs/results.tsv` (run of 2026-11-01 09:50-09:57 UTC; boot times are slow because
-the host load average was ~40 from another workflow's builds; an idle run took 18-30 s per boot):
+`/var/lab/rime-nix/artifacts/ovmf/logs/results.tsv` (review run of 2026-11-01 10:28-10:39 UTC, 10/10 PASS, rc 0, at a
+host load average of ~88 from other workflows' builds, so boots took 29-146 s; an idle run took 18-30 s per boot. The
+original 7-case run, 09:50-09:57 UTC, is kept in `logs-claim-0951Z/`, and its first full re-run, 10:05-10:11 UTC, in
+`logs-rerun-1011Z/`, both 7/7 PASS):
 
 | Case | Disk | Firmware | Expect | Got | Kernel saw |
 |---|---|---|---|---|---|
@@ -72,10 +79,23 @@ the host load average was ~40 from another workflow's builds; an idle run took 1
 | a-bls-sbon-nomok-signed | (a) BLS, MOK-signed kernel | SB on, no MOK | refused | **refused** (`Binary is not authorized`) | never ran |
 | a-bls-sboff-unsigned | (a) BLS, unsigned kernel | SB off (Setup Mode) | boots | **boots** to stage 2 | `SecureBoot disabled` |
 | b-custom-sboff-unsigned | (b) custom.cfg, unsigned | SB off (Setup Mode) | boots | **boots** to stage 2 | `SecureBoot disabled` |
+| a-bls-sbon-mok-tampered | (a) BLS, MOK-signed kernel with byte size/2 flipped after signing (`sbverify`: "Image fails hash check") | SB on + test MOK | refused | **refused** (`Binary is not authorized`, `bad shim signature`) | never ran |
+| c-fw-sbon-mok-mokkernel | (c) ESP holding only `EFI/BOOT/BOOTX64.EFI` = the MOK-signed kernel (no shim, no GRUB) | SB on + test MOK | fw-refused | **fw-refused** (`Access Denied -- rejected probably by Secure Boot`) | never ran |
+| c-fw-sboff-mokkernel | (c), the control | SB off (Setup Mode) | fw-starts | **fw-starts** (`BdsDxe: starting Boot0002`) | (bare kernel, no initrd: not followed) |
 
-"boots" = the NixOS stage-2 service printed `RIME-OVMF-PROBE: DONE` (and, with SB on, the kernel reported Secure Boot
-enabled and loaded the test MOK from MokListRT). "refused" = GRUB's shim_lock verifier refused the kernel and no
-kernel output appears; a timeout alone counts as neither.
+"boots" = the NixOS stage-2 service printed `RIME-OVMF-PROBE: DONE`, its `uname -r` and `/run/current-system` equal
+`entry.json`'s kernel version and toplevel, and `BOOT_IMAGE` names this build's `<hash>-linux-7.3-bzImage.efi`
+(and, with SB on, the kernel reported Secure Boot enabled and loaded the test MOK from MokListRT). "refused" = GRUB's
+shim_lock verifier refused the kernel and no kernel output appears. "fw-refused" = BdsDxe `failed to load … Access
+Denied` on the console plus `DxeImageVerificationLib: Image is signed but signature is not allowed by DB` and
+`The image doesn't pass verification: …\EFI\BOOT\BOOTX64.EFI` in the OVMF debug log, and no shim line. "fw-starts" =
+BdsDxe `starting Boot…` with no image-verification failure. A timeout alone is never a PASS.
+
+The kernel under test is the pinned build: a clean re-run rebuilt the same store paths
+(`gzdqqppva27kwqkk9dfrcda8a6jcyzl8-linux-7.3`, `wvpdhcxfi262j179v2ycjfj2a247b1kw-initrd-linux-7.3`,
+`lbbka71ys79l2r6vrmqsk279k9hsgwls-nixos-system-rime-ovmf-probe-26.11pre-git`) and the same unsigned `bzImage`
+(sha256 `2272d497…4238`, equal to the store file). `bzImage.signed` differs per signing run (the signature carries a
+timestamp).
 
 ### Log excerpts
 
@@ -127,6 +147,20 @@ error: ../../grub-core/kern/efi/sb.c:shim_lock_verifier_write:192:bad shim signa
 SB off: `RIME-OVMF-PROBE: mokutil --sb-state: SecureBoot disabled Platform is in Setup Mode`, `Secure boot disabled`,
 `DONE`.
 
+Tampered MOK-signed kernel, SB on + MOK (the signature is intact, the hash is not):
+```
+verify.c:660:verify_buffer_authenticode() Binary is not authorized
+SSL Error: verify.c:664 verify_buffer_authenticode(): Security Policy Violation
+error: ../../grub-core/kern/efi/sb.c:shim_lock_verifier_write:192:bad shim signature.
+```
+No shim, MOK-signed kernel as `BOOTX64.EFI`, SB on + MOK (console, then `c-fw-sbon-mok-mokkernel.ovmf.log`):
+```
+BdsDxe: failed to load Boot0002 "UEFI Misc Device" from PciRoot(0x0)/Pci(0x2,0x0): Access Denied -- rejected probably by Secure Boot
+DxeImageVerificationLib: Image is signed but signature is not allowed by DB and SHA256 hash of image is not found in DB/DBX.
+The image doesn't pass verification: PciRoot(0x0)/Pci(0x2,0x0)/HD(1,GPT,…)/\EFI\BOOT\BOOTX64.EFI
+```
+The same disk with SB off: `BdsDxe: starting Boot0002 "UEFI Misc Device"`.
+
 ## Findings for the plan
 
 1. **D3 v1 chain: proven in OVMF** for plain disks, both entry styles. The P0 OVMF gate is met.
@@ -142,7 +176,12 @@ SB off: `RIME-OVMF-PROBE: mokutil --sb-state: SecureBoot disabled Platform is in
    Fedora's). Consistent with D3's `LOCK_DOWN_FORCE_NONE`; worth a line in the release note's security section.
 6. **Fedora's signed `grubx64.efi` has no `serial` terminal** (`terminal 'serial' isn't found`). GRUB output reaches
    a serial console only through the firmware console. P2 VM rigs should not rely on `console.cfg`.
-7. **Fedora 45 moved the EFI binaries** to `/usr/lib/efi/{shim/16.1-7,grub2/1:2.12-83.fc45}/EFI/fedora/` in the RPMs
+7. **Only the kernel is verified.** shim_lock covers the file GRUB loads with `linux`; the initrd, the BLS entry /
+   `rime-nixos.cfg` (so `init=` and every kernel parameter) and the root filesystem are not signed or measured here,
+   and GRUB's menu editor (`e`) is open. Same posture as Fedora's own chain, so not a probe defect, but it means
+   Secure Boot alone does not protect the NixOS system from someone who can write the ESP or `/boot`. Closing it is a
+   later design question (UKI, signed initrd, GRUB password, TPM-sealed LUKS), not v1.
+8. **Fedora 45 moved the EFI binaries** to `/usr/lib/efi/{shim/16.1-7,grub2/1:2.12-83.fc45}/EFI/fedora/` in the RPMs
    (no `/boot/efi` payload). The hook that updates shim and GRUB (D3 risk: SBAT revocations) must read them there.
 
 ## Not tested here (P2 gates)
@@ -158,10 +197,15 @@ fallback.
 From a rime-os checkout on this branch, on a host with rootful podman, `/dev/kvm` and the `rime-nix` container
 (STATE.md, Infrastructure):
 ```sh
-nix/probe/ovmf/run-all.sh                  # build NixOS bits + all 7 cases; exit 0 = every case PASS
+nix/probe/ovmf/run-all.sh                  # build NixOS bits + all 10 cases; exit 0 = every case PASS
 SKIP_NIX=1 nix/probe/ovmf/run-all.sh       # reuse $ART/in
 SKIP_NIX=1 nix/probe/ovmf/run-all.sh case a-bls-sbon-mok-signed   # one case (after a full run)
+BOOT_TIMEOUT=300 REFUSE_TIMEOUT=120 …      # a loaded host: a timeout is reported FAIL (got=unknown), never PASS
 ```
+(`run-all.sh` passes both into the lab container. Defaults: 300 s per boot, 60 s per refusal. At load average ~88
+one SB-off boot took 146 s, so the old 150 s boot limit was too tight.)
+`run-all.sh` refuses an `ART` that is not an absolute
+directory three levels deep or that lies under a home directory, since it ends in a recursive `chown`.
 - `build-nixos.sh`: `nix-build system.nix --arg nixpkgs 'builtins.fetchTarball "…/1c89083e….tar.gz"' -A kernel -A
   initrd -A toplevel -A rootfs -A entry` in `rime-nix`, then copies `bzImage`, `initrd`, `rootfs.img`, `entry.json`
   (the bootspec fields the hook needs) to `$ART/in`.

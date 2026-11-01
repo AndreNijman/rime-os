@@ -9,7 +9,9 @@
 #   (a) from a BLS entry on the ESP (what a fresh install writes, D9), and
 #   (b) from a custom.cfg menu entry on a bootc-shaped btrfs /boot (what a
 #       migrated machine gets, D3),
-# and that an unsigned kernel is refused with Secure Boot on.
+# and that with Secure Boot on an unsigned kernel, a tampered signed kernel and
+# a kernel signed by a key outside MokList are refused, and (c) that the
+# firmware itself refuses the MOK-signed kernel when shim is skipped.
 #
 # Inputs ($ART/in, made by build-nixos.sh): bzImage, initrd, rootfs.img, entry.json
 # Outputs: $ART/{fedora-rpms,keys,work,logs}; verdicts in $ART/logs/results.tsv
@@ -108,9 +110,16 @@ step_sign() {
   cd "$W"
   cp "$IN/bzImage" bzImage.unsigned
   sbsign --key "$KEYS/test-mok.key" --cert "$KEYS/test-mok.crt" --output bzImage.signed bzImage.unsigned
+  # tampered: the signed kernel with one byte of its payload flipped AFTER signing.
+  # The signature block is intact, so only shim's Authenticode hash check can refuse it.
+  cp bzImage.signed bzImage.tampered
+  local off; off=$(( $(stat -c %s bzImage.signed) / 2 ))
+  python3 -I -c 'import sys; f=open(sys.argv[1],"r+b"); o=int(sys.argv[2]); f.seek(o); b=f.read(1)[0]; f.seek(o); f.write(bytes([b^0xff]))' bzImage.tampered "$off"
   { echo "--- sbverify --cert test-mok.crt bzImage.signed"; sbverify --cert "$KEYS/test-mok.crt" bzImage.signed 2>&1
     echo "--- sbverify --list bzImage.unsigned"; sbverify --list bzImage.unsigned 2>&1 || true
-    sha256sum bzImage.unsigned bzImage.signed "$IN/initrd" "$IN/rootfs.img"
+    echo "--- bzImage.tampered = bzImage.signed with byte $off flipped; sbverify --cert test-mok.crt bzImage.tampered (must fail)"
+    if sbverify --cert "$KEYS/test-mok.crt" bzImage.tampered 2>&1; then die "sbverify accepted the tampered kernel"; fi
+    sha256sum bzImage.unsigned bzImage.signed bzImage.tampered "$IN/initrd" "$IN/rootfs.img"
   } | tee "$LOGS/sign.txt"
 }
 
@@ -242,10 +251,24 @@ EOF
     echo "--- sfdisk"; sfdisk -d "$W/disk-custom-$k.img"; } | tee "$LOGS/disk-custom-$k.txt"
 }
 
+# (c) no shim: the MOK-signed kernel's EFI stub IS EFI/BOOT/BOOTX64.EFI. The
+#     firmware itself must refuse it (the MOK is in MokList, not in db): proves
+#     OVMF enforces db, so the chain cannot be entered by skipping shim.
+make_disk_fw() {
+  local d=$W/esp-fw
+  rm -rf "$d"; mkdir -p "$d/EFI/BOOT"
+  cp "$W/bzImage.signed" "$d/EFI/BOOT/BOOTX64.EFI"
+  mkfat "$d" "$W/esp-fw.fat" 64
+  gpt "$W/disk-fw-mokkernel.img" "$W/esp-fw.fat" "$ESP_TYPE" "EFI System Partition"
+  { echo "===== disk-fw-mokkernel: ESP tree"; (cd "$d" && find . -type f | sort)
+    echo "--- sfdisk"; sfdisk -d "$W/disk-fw-mokkernel.img"; } | tee "$LOGS/disk-fw-mokkernel.txt"
+}
+
 step_disks() {
   [[ -d $STATIC/configs.d ]] || die "missing $STATIC (run-all.sh copies it from fedora-bootc:45)"
-  make_disk_bls signed; make_disk_bls unsigned
+  make_disk_bls signed; make_disk_bls unsigned; make_disk_bls tampered
   make_disk_custom signed; make_disk_custom unsigned
+  make_disk_fw
 }
 
 # ── 6. Boot cases ────────────────────────────────────────────────────────────
@@ -256,6 +279,9 @@ CASES=(
   "a-bls-sbon-mok-unsigned    disk-bls-unsigned.img    vars-sb-mok.fd    refused"
   "b-custom-sbon-mok-unsigned disk-custom-unsigned.img vars-sb-mok.fd    refused"
   "a-bls-sbon-nomok-signed    disk-bls-signed.img      vars-sb-nomok.fd  refused"
+  "a-bls-sbon-mok-tampered    disk-bls-tampered.img    vars-sb-mok.fd    refused"
+  "c-fw-sbon-mok-mokkernel    disk-fw-mokkernel.img    vars-sb-mok.fd    fw-refused"
+  "c-fw-sboff-mokkernel       disk-fw-mokkernel.img    vars-sb-off.fd    fw-starts"
   "a-bls-sboff-unsigned       disk-bls-unsigned.img    vars-sb-off.fd    boots"
   "b-custom-sboff-unsigned    disk-custom-unsigned.img vars-sb-off.fd    boots"
 )
@@ -268,7 +294,8 @@ run_case() {   # run_case NAME DISK VARS EXPECT
   cp "$vars" "run-$name.vars.fd"
   rm -f "run-$name.root.qcow2"
   qemu-img create -q -f qcow2 -b "$IN/rootfs.img" -F raw "run-$name.root.qcow2"
-  t=150; [[ $expect == refused ]] && t=60
+  # BOOT_TIMEOUT / REFUSE_TIMEOUT: raise them on a loaded host (a timeout is never a PASS).
+  t=${BOOT_TIMEOUT:-300}; [[ $expect == *refused || $expect == fw-starts ]] && t=${REFUSE_TIMEOUT:-60}
   : > "$serial"
   say "case $name: $disk + $vars, expect $expect (timeout ${t}s)"
   local start=$SECONDS rc=0
@@ -290,9 +317,22 @@ run_case() {   # run_case NAME DISK VARS EXPECT
   #           kernel ran (no initrd banner, no marker). A timeout alone is neither.
   local s=$LOGS/$name.serial.txt got sb=- want_sb=enabled
   [[ $vars == vars-sb-off.fd ]] && want_sb=disabled
+  # fw-refused = OVMF's image verifier refused the boot option itself (strings as
+  #   Fedora 45's edk2 prints them: BdsDxe on the console, DxeImageVerificationLib in
+  #   the debug log): shim never ran (no shim.c line) and nothing of the kernel ran.
+  local o=$LOGS/$name.ovmf.log
   if grep -a 'RIME-OVMF-PROBE: DONE' "$s" >/dev/null; then got=boots
   elif grep -a 'bad shim signature' "$s" >/dev/null \
        && ! grep -a -E 'Booting initrd of NixOS|RIME-OVMF-PROBE' "$s" >/dev/null; then got=refused
+  elif grep -a -E 'BdsDxe: failed to load Boot[0-9A-F]+ .*Access Denied' "$s" >/dev/null \
+       && grep -a 'DxeImageVerificationLib: Image is signed but signature is not allowed by DB' "$o" >/dev/null \
+       && grep -a -F "The image doesn't pass verification: " "$o" | grep -a -F '\EFI\BOOT\BOOTX64.EFI' >/dev/null \
+       && ! grep -a -E 'shim\.c:|Booting initrd of NixOS|RIME-OVMF-PROBE|Linux version' "$s" >/dev/null; then got=fw-refused
+  # fw-starts = the control for fw-refused: the same disk with SB off, and the
+  #   firmware starts its BOOTX64.EFI (the bare kernel, which then has no root).
+  elif grep -a -E 'BdsDxe: starting Boot[0-9A-F]+ ' "$s" >/dev/null \
+       && ! grep -a -E 'BdsDxe: failed to load|shim\.c:' "$s" >/dev/null \
+       && ! grep -a 'DxeImageVerificationLib: ' "$o" >/dev/null; then got=fw-starts
   else got=unknown; fi
   if grep -a 'mokutil --sb-state: SecureBoot enabled' "$s" >/dev/null; then sb=enabled
   elif grep -a 'mokutil --sb-state: SecureBoot disabled' "$s" >/dev/null; then sb=disabled; fi
@@ -303,6 +343,10 @@ run_case() {   # run_case NAME DISK VARS EXPECT
     if [[ $got == boots ]]; then
       [[ $sb == "$want_sb" ]] || verdict=FAIL
       if [[ $want_sb == enabled ]] && ! grep -a "Loaded X.509 cert 'Rime OVMF probe TEST MOK" "$s" >/dev/null; then verdict=FAIL; fi
+      # ...and that what ran is THIS build: the kernel version and toplevel from
+      # entry.json, and the kernel file this disk's entry names.
+      grep -a -F "RIME-OVMF-PROBE: stage-2 reached: $(entry .kernelVersion) system=$(dirname "$(entry .init)")" "$s" >/dev/null || verdict=FAIL
+      grep -a -E "RIME-OVMF-PROBE: cmdline: BOOT_IMAGE=[^ ]*/rime/nixos/$(kname)-bzImage\.efi " "$s" >/dev/null || verdict=FAIL
     fi
   fi
   printf '%s\t%s\t%s\t%s\t%s\texpect=%s\tgot=%s\tsb=%s\tqemu_rc=%s\t%ss\n' \
@@ -312,12 +356,14 @@ run_case() {   # run_case NAME DISK VARS EXPECT
 
 # The lines that carry each verdict, de-duplicated (shim's verbose log repeats).
 excerpts() {
-  local pat='load_image\(\) attempting|AuthenticodeVerify\(\) succeeded|No .sbat section|Binary is not authorized|No signatures found|Security Policy Violation|bad shim signature|you need to load the kernel|Booting initrd of NixOS|RIME-OVMF-PROBE'
+  local pat='load_image\(\) attempting|AuthenticodeVerify\(\) succeeded|No .sbat section|Binary is not authorized|No signatures found|Security Policy Violation|bad shim signature|you need to load the kernel|Booting initrd of NixOS|RIME-OVMF-PROBE|BdsDxe: failed to load|BdsDxe: starting'
   for c in "${CASES[@]}"; do
     local n=${c%% *}
     echo "######## $n"
     grep -a -E "$pat" "$LOGS/$n.serial.txt" | sed 's/^.*RIME-OVMF-PROBE/RIME-OVMF-PROBE/; s/^.*Booting initrd/Booting initrd/' \
-      | awk '!seen[$0]++' | cut -c1-260
+      | awk '!seen[$0]++' | cut -c1-260 || true
+    grep -a -E "DxeImageVerificationLib: |The image doesn't pass verification" "$LOGS/$n.ovmf.log" \
+      | awk '!seen[$0]++' | sed 's/^/[ovmf.log] /' | cut -c1-260 || true
   done > "$LOGS/excerpts.txt"
 }
 
