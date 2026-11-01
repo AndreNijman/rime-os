@@ -149,5 +149,10 @@ pkgs.testers.runNixOSTest {
             status, out = run_as("rime", f"{sh} -ic true")
             print(f"--- {sh} -ic true: exit {status}\n{out}")
             assert status == 0 and not missing.search(out), out
+            # an agent session (RIME_AGENT_SESSION) gets the tool broker first on PATH, login or interactive
+            for flags in ["-lc", "-ic"]:
+                out = machine.succeed(f"su -s /bin/sh rime -c 'RIME_AGENT_SESSION=1 {sh} {flags} \"echo \\$PATH\"' 2>/dev/null")
+                print(f"--- agent {sh} {flags}: {out.strip()}")
+                assert out.strip().split(":")[0] == f"{sw}/libexec/rime/tools", out
   '';
 }

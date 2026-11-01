@@ -94,6 +94,10 @@ in
     # libexec: /etc/profile.d/rime-{tool-broker,starship,zsh-highlight}.sh. NixOS reads no /etc/profile.d.
     # Each file checks its own shell and session, so the same lines go to bash and zsh. rime-game-env.sh is
     # the gaming area's (gaming.nix).
+    # The broker line also goes to login shells (greetd's `sh -c '. /etc/profile; …'`, agent sessions started as
+    # login shells): bootc reached both through /etc/profile.d. It is idempotent (it checks PATH first).
+    programs.bash.loginShellInit = ". ${libexec}/etc/profile.d/rime-tool-broker.sh";
+    programs.zsh.loginShellInit = ". ${libexec}/etc/profile.d/rime-tool-broker.sh";
     programs.bash.interactiveShellInit = ''
       . ${libexec}/etc/profile.d/rime-tool-broker.sh
       . ${libexec}/etc/profile.d/rime-starship.sh
