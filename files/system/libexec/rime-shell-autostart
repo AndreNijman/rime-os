@@ -94,9 +94,17 @@ done
 # every Rime boot since at least 2026-10-06 shows the same journal lines).
 # `--start` hands the session the daemon PAM unlocked. With no such daemon it
 # starts one, which is what D-Bus activation would have done anyway.
-if command -v gnome-keyring-daemon >/dev/null 2>&1; then
-    timeout 5 gnome-keyring-daemon --start --components=secrets >/dev/null 2>&1 \
-        || log "gnome-keyring-daemon --start failed; apps may ask to unlock the keyring"
+#
+# rime-secrets-start runs that same `--start`, and the Gaming Mode session
+# shares it. It also starts oo7-daemon where gnome-keyring is gone (Fedora 45
+# moved its desktops to oo7), then checks that org.freedesktop.secrets really
+# has an owner and logs which one. RIME_SECRETS_START is for tests.
+SECRETS_START="${RIME_SECRETS_START:-/usr/libexec/rime-secrets-start}"
+if [ -x "${SECRETS_START}" ]; then
+    RIME_SECRETS_TAG=rime-shell-autostart "${SECRETS_START}" \
+        || log "no confirmed Secret Service on the session bus; apps may ask to unlock the keyring"
+else
+    log "${SECRETS_START} is missing; the login keyring is not handed to this session"
 fi
 
 # ── Publish this user's wallpaper to the greeter ────────────────────────────

@@ -95,8 +95,12 @@ FAKE
 make_fake gamescope
 make_fake steam
 make_fake mangoapp
-# The session hands the login keyring to itself; the real daemon must never
-# start from a test, so this one only records.
+# The session hands the login keyring to itself (through the repo's
+# rime-secrets-start, which finds this fake first on PATH); the real daemon
+# must never start from a test, so this one only records. The session's env
+# has no bus, so the helper starts nothing and returns at once; the keyring
+# section below hands it a bus address nothing listens on, so it starts the
+# fake and its one question to the bus fails at once.
 make_fake gnome-keyring-daemon
 # getcap that reports no file capability: the shipped state of every Rime
 # machine today, and the state §6.2 measured.
@@ -225,6 +229,7 @@ run_session() {  # <fixture-root> [extra env assignments...]
         HOME="${WORK}/home" \
         RIME_ROOT="$1" \
         RIME_GAMING_NO_RIMED=1 \
+        RIME_SECRETS_START="${ROOT}/files/system/libexec/rime-secrets-start" \
         "${@:2}" \
         bash "$SESSION" > "${WORK}/out" 2> "${WORK}/log"
     printf '%s' "$?"
@@ -241,6 +246,7 @@ run_session_with_rimed() {  # <fixture-root> [extra env assignments...]
         HOME="${WORK}/home" \
         RIME_ROOT="$1" \
         RIME_GAMING_NO_RIMED=0 \
+        RIME_SECRETS_START="${ROOT}/files/system/libexec/rime-secrets-start" \
         "${@:2}" \
         bash "$SESSION" > "${WORK}/out" 2> "${WORK}/log"
     printf '%s' "$?"
@@ -544,7 +550,8 @@ section "the fail-safe"
 : > "$CALLS"
 rm -f "${BIN}/gamescope"
 rc="$(env -i PATH="${BIN}:/usr/bin:/bin" HOME="${WORK}/home" RIME_ROOT="$KATANA" \
-      RIME_GAMING_NO_RIMED=1 bash "$SESSION" >/dev/null 2>"${WORK}/log"; printf '%s' "$?")"
+      RIME_GAMING_NO_RIMED=1 RIME_SECRETS_START="${ROOT}/files/system/libexec/rime-secrets-start" \
+      bash "$SESSION" >/dev/null 2>"${WORK}/log"; printf '%s' "$?")"
 if [ "$rc" != "0" ]; then
     ok "a missing gamescope exits non-zero, so greetd re-displays the greeter"
 else
@@ -766,7 +773,7 @@ fi
 
 # ── the login keyring stays unlocked in Gaming Mode ────────────────────────
 section "the login keyring"
-rc="$(run_session "$KATANA")"
+rc="$(run_session "$KATANA" DBUS_SESSION_BUS_ADDRESS="unix:path=${WORK}/no-bus-here")"
 if [ "$(cat "${WORK}/argv-gnome-keyring-daemon" 2>/dev/null)" = "--start --components=secrets" ]; then
     ok "the session takes over the keyring PAM unlocked (gnome-keyring-daemon --start)"
 else

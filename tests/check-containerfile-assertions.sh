@@ -266,6 +266,9 @@ for path in sys.argv[1:]:
         i = j + 1
 
         env = {}
+        # Values the stanza reads out of a KEY=value file the image COPYs; see
+        # the VAR="$(sed -n 's/^KEY=//p' ...)" shape below.
+        kv = {}
         # `for m in hyprland niri labwc; do ... grep "^rime(\"${m}\")" ...` --
         # a pattern built from a loop variable is not a literal and cannot be
         # checked from here. It is UNRESOLVED, not a failure: reporting it as a
@@ -398,6 +401,24 @@ for path in sys.argv[1:]:
                 env[m.group(1)] = m.group(3)
                 continue
 
+            # VAR="$(sed -n 's/^KEY=//p' /usr/...)": a value read from a
+            # KEY=value file the image COPYs. /usr/share/rime/secrets-provider
+            # names the Secret Service provider once for every assertion that
+            # needs it, and a grep built from it is still a literal once the
+            # repo file that becomes it is read. Exactly one KEY= line, or it
+            # stays unresolved (sed -n would print every one).
+            m = re.match(r'''^([A-Za-z_][A-Za-z0-9_]*)="\$\(sed -n 's/\^([A-Za-z_][A-Za-z0-9_]*)=//p' (/(?:usr|etc)/[^\s)"]+)\)"$''', s)
+            if m:
+                vals = []
+                for r in (to_repo(m.group(3)) or []):
+                    if os.path.isfile(r):
+                        with open(r) as fh:
+                            vals += [ln.rstrip('\n').split('=', 1)[1] for ln in fh
+                                     if ln.startswith(m.group(2) + '=')]
+                if len(vals) == 1:
+                    kv[m.group(1)] = vals[0]
+                continue
+
             # Three shapes carry a grep assertion, and the `if` one is the
             # house form for a REFUSAL: rewriting `! grep` to
             # `if grep ...; then echo FATAL; exit 1; fi` is what makes it fail a
@@ -436,6 +457,9 @@ for path in sys.argv[1:]:
                     f"{path}:{lineno} grep {what!r} reads a pipe -- only the build can check it")
                 continue
             pattern, target = rest[0], rest[-1].rstrip(';')
+            for v, val in kv.items():
+                pattern = re.sub(r'\$\{' + re.escape(v) + r'\}|\$' + re.escape(v) + r'\b', lambda _: val, pattern)
+                target = re.sub(r'\$\{' + re.escape(v) + r'\}|\$' + re.escape(v) + r'\b', lambda _: val, target)
 
             # Resolve the target: a literal image path, or a variable the
             # stanza set to one.
