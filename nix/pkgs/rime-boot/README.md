@@ -49,7 +49,8 @@ reads it), or set with `rime.boot.grubPath`.
    unreferenced files in `/boot/rime/nixos/`.
 
 Kernel parameters with characters GRUB would expand or split (`$`, quotes, `\`, `;`, braces, `|`, `&`, `<`, `>`,
-whitespace) are refused by name, not escaped.
+whitespace, the wildcards `*` and `?`, a `#`) are refused by name, not escaped. `host.toml` `kernel_params` must be
+a list of strings.
 
 `rime-boot check` (read-only, D6 8.2 step 5) prints JSON: `default_generation`, `default_toplevel`,
 `profile_generation`, `missing`, `up_to_date`. Exit 0 = the menu boots the profile's current generation and every file

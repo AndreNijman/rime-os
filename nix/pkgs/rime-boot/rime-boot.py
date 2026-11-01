@@ -65,8 +65,9 @@ INCLUDE_BLOCK = (
 )
 LAYOUTS = ("bls", "custom-cfg")
 # Kernel parameters are written into GRUB script (custom-cfg) and BLS `options` lines that blscfg expands like GRUB
-# script. Anything that GRUB would expand, quote or split is refused by name instead of escaped.
-SAFE_PARAM = re.compile(r"^[A-Za-z0-9_./:=,+@%~^\-\[\]#!*?]+$")
+# script. Anything that GRUB would expand, quote or split is refused by name instead of escaped: that includes `*` and
+# `?` (GRUB's wildcard translator globs them against devices and files) and `#` (a word starting with it is a comment).
+SAFE_PARAM = re.compile(r"^[A-Za-z0-9_./:=,+@%~^\-\[\]!]+$")
 
 
 class Refusal(Exception):
@@ -412,7 +413,7 @@ def check_params(params, where):
         if not SAFE_PARAM.match(p):
             raise Refusal(
                 f"kernel parameter {p!r} from {where} has a character GRUB would expand, quote or split "
-                "($, quotes, backslash, ;, braces, |, &, <, >, whitespace); refusing to write it"
+                "($, quotes, backslash, ;, braces, |, &, <, >, *, ?, #, whitespace); refusing to write it"
             )
 
 
@@ -484,7 +485,11 @@ def install(cfg, toplevel_arg):
         )
     host_boot = read_host_boot(cfg)
     layout, why = resolve_layout(cfg, host_boot)
-    host_params = list(host_boot.get("kernel_params", []))
+    host_params = host_boot.get("kernel_params", [])
+    if not isinstance(host_params, list) or not all(isinstance(p, str) for p in host_params):
+        # A bare string would otherwise be split into one "parameter" per character.
+        raise Refusal(f"{cfg['hostToml']}: [boot] kernel_params must be a list of strings, "
+                      f"e.g. [\"rd.luks.uuid=...\"], not {host_params!r}")
     check_params(host_params, cfg["hostToml"])
     gens, default = plan_generations(cfg, toplevel_arg)
     for g in gens:

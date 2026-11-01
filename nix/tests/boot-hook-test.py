@@ -368,6 +368,30 @@ class HookTest(unittest.TestCase):
             self.assertEqual(tree(g.boot), before)
         finally:
             g.cleanup()
+        # GRUB globs `*` and `?` and treats a word starting with `#` as a comment: refused too.
+        for bad in ("foo=*", "foo=a?b", "#x"):
+            g = Fixture(self)
+            try:
+                g.generation(1, params=("console=ttyS0", bad))
+                before = tree(g.boot)
+                self.assertEqual(g.run("install"), 3, bad)
+                self.assertIn(repr(bad), g.stderr)
+                self.assertEqual(tree(g.boot), before)
+            finally:
+                g.cleanup()
+        # host.toml kernel_params must be a list of strings: a bare string is not split into characters.
+        for toml in ('kernel_params = "rd.luks.uuid=0b1c"', "kernel_params = [1]"):
+            g = Fixture(self)
+            try:
+                g.generation(1)
+                with open(g.host, "w") as h:
+                    h.write("[boot]\n" + toml + "\n")
+                before = tree(g.boot)
+                self.assertEqual(g.run("install"), 3, toml)
+                self.assertIn("kernel_params must be a list of strings", g.stderr)
+                self.assertEqual(tree(g.boot), before)
+            finally:
+                g.cleanup()
 
     def test_refuses_without_grub(self):
         f = self.f
