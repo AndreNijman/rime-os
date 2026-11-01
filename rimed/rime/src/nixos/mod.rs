@@ -68,7 +68,7 @@ fn three() -> usize {
 impl Config {
     pub fn load() -> Result<Config, String> {
         let text = fs::read_to_string(CONFIG).map_err(|e| format!("{CONFIG}: {e}"))?;
-        let mut c: Config = toml::from_str(&text).map_err(|e| format!("{CONFIG}: {e}"))?;
+        let mut c = Config::parse(&text)?;
         // `rime channel set` on NixOS writes this file (§12); the module's value is the default.
         if let Ok(ch) = fs::read_to_string(Path::new(STATE_DIR).join("channel")) {
             let ch = ch.trim();
@@ -77,6 +77,12 @@ impl Config {
             }
         }
         Ok(c)
+    }
+
+    /// The file's text; every key but `fulcio_root` and `keep_generations` is required, so a module that stops
+    /// writing one fails here rather than updating with a default.
+    pub fn parse(text: &str) -> Result<Config, String> {
+        toml::from_str(text).map_err(|e| format!("{CONFIG}: {e}"))
     }
 
     pub fn expect(&self) -> crate::verify::Expect {
@@ -313,4 +319,74 @@ pub fn release_of(toplevel: &str) -> Option<AppliedRelease> {
 
 pub fn resolve_link(p: &str) -> Option<String> {
     fs::canonicalize(p).ok().map(|p| p.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The keys nix/modules/update.nix writes, in its spelling.
+    const MODULE_TOML: &str = r#"
+cache_keys = []
+cache_url = "https://cache.rimeos.com"
+channel = "edge"
+issuer = "https://token.actions.githubusercontent.com"
+keep_generations = 3
+nix = "/nix/store/x-nix/bin/nix"
+nix_env = "/nix/store/x-nix/bin/nix-env"
+nix_store = "/nix/store/x-nix/bin/nix-store"
+repository = "ghcr.io/andrenijman/rime-os"
+signers = ["https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main"]
+variant = "plain"
+"#;
+
+    #[test]
+    fn the_modules_configuration_parses_and_the_trust_comes_only_from_it() {
+        let c = Config::parse(MODULE_TOML).unwrap();
+        assert_eq!(c.cache_url, "https://cache.rimeos.com");
+        assert_eq!(c.keep_generations, 3);
+        let e = c.expect();
+        assert_eq!(e.signers, c.signers);
+        assert_eq!(e.issuer, "https://token.actions.githubusercontent.com");
+        assert_eq!(e.fulcio_root, None, "no root in the file = the root pinned in rimed");
+        let with_root = format!("{MODULE_TOML}fulcio_root = \"/nix/store/k-TEST/ca.pem\"\n");
+        assert_eq!(Config::parse(&with_root).unwrap().expect().fulcio_root.as_deref(), Some("/nix/store/k-TEST/ca.pem"));
+    }
+
+    #[test]
+    fn a_configuration_missing_a_trust_key_is_refused_not_defaulted() {
+        for key in ["signers", "issuer", "repository", "cache_url", "nix"] {
+            let text: String = MODULE_TOML.lines().filter(|l| !l.starts_with(&format!("{key} "))).map(|l| format!("{l}\n")).collect();
+            assert!(Config::parse(&text).is_err(), "{key} missing was accepted");
+        }
+    }
+
+    fn rel(r: &str, top: &str) -> AppliedRelease {
+        AppliedRelease { release: r.into(), digest: format!("sha256:{r}"), toplevel: top.into(), generation: None, at: 0 }
+    }
+
+    #[test]
+    fn the_downgrade_bar_is_the_newest_release_installed_and_a_record_replaces_its_twin() {
+        let mut a = Applied::default();
+        assert_eq!(a.high_water(), None);
+        a.record(rel("2026.11.02", "/nix/store/b"));
+        a.record(rel("2026.11.10", "/nix/store/c"));
+        a.record(rel("2026.11.03", "/nix/store/d"));
+        assert_eq!(a.high_water().as_deref(), Some("2026.11.10"));
+        a.record(rel("2026.11.02", "/nix/store/b"));
+        assert_eq!(a.releases.len(), 3, "the same release and toplevel twice is one record");
+        assert_eq!(a.releases.last().unwrap().release, "2026.11.02");
+        assert_eq!(a.by_toplevel("/nix/store/c").unwrap().release, "2026.11.10");
+        assert!(a.by_toplevel("/nix/store/zzz").is_none());
+        a.high_water = Some("2026.11.01".into());
+        assert_eq!(a.high_water().as_deref(), Some("2026.11.01"), "a consent reset wins over the records");
+    }
+
+    #[test]
+    fn a_failed_programs_reason_is_its_last_lines() {
+        let r = Ran { ok: false, code: 3, stdout: String::new(), stderr: "a\n\nb\nc\nd\n".into() };
+        assert_eq!(r.why(), "b; c; d");
+        let r = Ran { ok: false, code: 3, stdout: String::new(), stderr: String::new() };
+        assert_eq!(r.why(), "exit 3");
+    }
 }

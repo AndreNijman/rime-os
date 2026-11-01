@@ -151,6 +151,10 @@ pkgs.testers.runNixOSTest {
           serial += 1
           return publish(f"channel --serial {serial if at is None else at} --entry edge={digest}={rid} " + " ".join(extra))
 
+      def checker():
+          client.succeed("systemctl start rime-update-check.service")
+          return client.succeed("cat /run/rime-update/state")
+
       def update(*args):
           code, out = client.execute("rime update --skip-firmware " + " ".join(args) + " 2>&1")
           print(out)
@@ -217,9 +221,14 @@ pkgs.testers.runNixOSTest {
           code, out = update()
           assert code == 0 and "up to date" in out, out
           client.succeed("rime trust --gate")
+          # The update notice the Shell reads: nothing newer.
+          assert "state=none" in checker()
 
       with subtest("release B (kernel): installs for the next boot, nothing live; reboot into it"):
-          channel(release("2026.11.02", B), "2026.11.02")
+          b = release("2026.11.02", B)
+          channel(b, "2026.11.02")
+          st = checker()
+          assert "state=available" in st and f"digest={b}" in st, st
           code, out = update("--plan")
           assert code == 0 and "applies at the next restart" in out, out
           assert profile() == before

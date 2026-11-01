@@ -9,6 +9,7 @@ use rimed_core::nixrel::gc::{gc_plan, GcInputs};
 
 use super::{lock, resolve_link, Applied, Config, Pins, GCROOTS, PROFILE};
 
+#[derive(Debug)]
 pub struct Generations {
     /// number → toplevel
     pub all: BTreeMap<u32, String>,
@@ -29,8 +30,13 @@ impl Generations {
 
 /// Read the profile directly: `system` → `system-<n>-link` → toplevel.
 pub fn list() -> Result<Generations, String> {
-    let dir = Path::new(PROFILE).parent().ok_or("profile has no directory")?;
-    let base = Path::new(PROFILE).file_name().and_then(|n| n.to_str()).ok_or("bad profile")?;
+    list_at(Path::new(PROFILE), resolve_link("/run/booted-system").as_deref())
+}
+
+/// [`list`] for any profile and booted toplevel (tests use a temporary directory).
+pub fn list_at(profile: &Path, booted_top: Option<&str>) -> Result<Generations, String> {
+    let dir = profile.parent().ok_or("profile has no directory")?;
+    let base = profile.file_name().and_then(|n| n.to_str()).ok_or("bad profile")?;
     let mut all = BTreeMap::new();
     for e in fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
@@ -41,7 +47,7 @@ pub fn list() -> Result<Generations, String> {
             all.insert(n, t.display().to_string());
         }
     }
-    let cur_link = fs::read_link(PROFILE).map_err(|e| format!("{PROFILE}: {e}"))?;
+    let cur_link = fs::read_link(profile).map_err(|e| format!("{}: {e}", profile.display()))?;
     let current = cur_link
         .to_string_lossy()
         .rsplit('/')
@@ -49,12 +55,11 @@ pub fn list() -> Result<Generations, String> {
         .and_then(|n| n.strip_prefix(&format!("{base}-")))
         .and_then(|r| r.strip_suffix("-link"))
         .and_then(|n| n.parse().ok())
-        .ok_or_else(|| format!("{PROFILE} points at {}, not a generation", cur_link.display()))?;
-    let booted_top = resolve_link("/run/booted-system");
+        .ok_or_else(|| format!("{} points at {}, not a generation", profile.display(), cur_link.display()))?;
     let mut g = Generations { all, current, booted: None };
     // The booted generation: the one whose toplevel /run/booted-system is; when several share it, the newest that
     // is not newer than the current one.
-    g.booted = booted_top.as_deref().and_then(|t| {
+    g.booted = booted_top.and_then(|t| {
         g.all.iter().rev().filter(|(n, _)| **n <= g.current).find(|(_, top)| top.as_str() == t).map(|(n, _)| *n)
             .or_else(|| g.number_of(t))
     });
@@ -340,4 +345,50 @@ pub fn pending_closure(cfg: &Config) -> Option<Vec<String>> {
     let refs: Vec<&str> = all.iter().map(String::as_str).collect();
     let invalid = super::store::invalid(cfg, &refs).ok()?;
     Some(all.into_iter().filter(|p| !invalid.contains(p)).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile_dir(name: &str, links: &[(u32, &str)], current: u32) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("rime-nixos-gen-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        for (n, top) in links {
+            std::os::unix::fs::symlink(top, d.join(format!("system-{n}-link"))).unwrap();
+        }
+        std::os::unix::fs::symlink(format!("system-{current}-link"), d.join("system")).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_booted_generation_is_the_newest_with_its_toplevel_not_newer_than_the_current_one() {
+        let (a, b) = ("/nix/store/aaaa-nixos-system-a", "/nix/store/bbbb-nixos-system-b");
+        // 1 = A, 2 = B, 3 = A again (an update back to the same toplevel); the profile is at 3.
+        let d = profile_dir("dup", &[(1, a), (2, b), (3, a)], 3);
+        let g = list_at(&d.join("system"), Some(a)).unwrap();
+        assert_eq!(g.current, 3);
+        assert_eq!(g.booted, Some(3));
+        assert_eq!(g.previous(), Some(2));
+        assert_eq!(g.number_of(a), Some(3));
+        // After a rollback to 1 the profile is at 1: the booted A is generation 1, not the newer 3.
+        let d = profile_dir("rolled", &[(1, a), (2, b), (3, a)], 1);
+        let g = list_at(&d.join("system"), Some(a)).unwrap();
+        assert_eq!((g.current, g.booted, g.previous()), (1, Some(1), None));
+        // A booted system that is no generation of the profile: unknown, which gc refuses on.
+        let g = list_at(&d.join("system"), Some("/nix/store/cccc-other")).unwrap();
+        assert_eq!(g.booted, None);
+        assert_eq!(list_at(&d.join("system"), None).unwrap().booted, None);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_profile_that_is_not_a_generation_link_is_an_error() {
+        let d = profile_dir("bad", &[(1, "/nix/store/aaaa-x")], 1);
+        fs::remove_file(d.join("system")).unwrap();
+        std::os::unix::fs::symlink("/nix/store/aaaa-x", d.join("system")).unwrap();
+        assert!(list_at(&d.join("system"), None).unwrap_err().contains("not a generation"));
+        let _ = fs::remove_dir_all(&d);
+    }
 }

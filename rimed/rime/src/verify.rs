@@ -757,7 +757,7 @@ pub fn artifact_layer_at(
 
 /// The sha256 of a file, lower-case hex, through the openssl this program
 /// already depends on rather than a second hashing crate.
-fn sha256_of(path: &Path) -> Result<String, String> {
+pub(crate) fn sha256_of(path: &Path) -> Result<String, String> {
     let out = Command::new(rime_paths::OPENSSL)
         .args(["dgst", "-sha256", "-r"])
         .arg(path)

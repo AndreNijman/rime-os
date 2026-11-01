@@ -159,3 +159,31 @@ pub fn collect_garbage(cfg: &Config) -> Result<String, String> {
         Err(format!("nix-store --gc: {}", r.why()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boot_facts_name_store_paths_the_way_the_manifest_does() {
+        let d = std::env::temp_dir().join(format!("rime-nixos-bootfacts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(
+            d.join("boot.json"),
+            r#"{"org.nixos.bootspec.v1":{"kernel":"/nix/store/kkkk-linux-6.12/bzImage","initrd":"/nix/store/iiii-initrd-linux/initrd","kernelParams":["quiet","loglevel=4"],"init":"/nix/store/x/init","label":"l","system":"x86_64-linux","toplevel":"/nix/store/t"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("/nix/store/mmmm-linux-6.12-modules-shrunk/lib", d.join("kernel-modules")).unwrap();
+        let b = boot_facts(&d).unwrap();
+        assert_eq!(b.kernel, "/nix/store/kkkk-linux-6.12");
+        assert_eq!(b.initrd, "/nix/store/iiii-initrd-linux");
+        assert_eq!(b.kernel_modules.as_deref(), Some("/nix/store/mmmm-linux-6.12-modules-shrunk"));
+        assert_eq!(b.kernel_params, ["quiet", "loglevel=4"]);
+        std::fs::remove_file(d.join("kernel-modules")).unwrap();
+        assert_eq!(boot_facts(&d).unwrap().kernel_modules, None);
+        std::fs::write(d.join("boot.json"), "{}").unwrap();
+        assert!(boot_facts(&d).unwrap_err().contains("bootspec"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

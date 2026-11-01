@@ -103,6 +103,33 @@ in
     # sets this too; stated here so the guarantee does not rest on an upstream default (VM-tested).
     systemd.services.greetd.restartIfChanged = false;
 
+    # The update notice (bootc's rime-update-check, D6 §8.3): `rime update --check` verifies the channel document and
+    # the manifest it names, downloads nothing, and as root writes /run/rime-update/state (`state=available|none`,
+    # `digest=…`), which Rime Shell's Settings -> Updates reads.
+    systemd.services.rime-update-check = {
+      description = "Check whether a Rime OS update is available";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${config.rime.services.rimed.package}/bin/rime update --check";
+        Nice = 19;
+        CPUSchedulingPolicy = "idle";
+        IOSchedulingClass = "idle";
+        RuntimeDirectory = "rime-update";
+        RuntimeDirectoryMode = "0755";
+        RuntimeDirectoryPreserve = "yes";
+        TimeoutStartSec = "2min";
+      };
+    };
+    systemd.timers.rime-update-check = {
+      wantedBy = [ "timers.target" ];
+      timerConfig = {
+        OnBootSec = "2min";
+        OnUnitActiveSec = "6h";
+        RandomizedDelaySec = "20min";
+        AccuracySec = "5min";
+      };
+    };
+
     # §11.3: the daily gc.
     systemd.services.rime-gc = {
       description = "Remove old Rime system generations";

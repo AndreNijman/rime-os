@@ -62,13 +62,25 @@ pub enum Pointer {
 
 fn fetch_channel_doc(cfg: &Config, roots: &Roots, allow_unverified: bool) -> Result<(ChannelDoc, bool), Stop> {
     let what = format!("{}:{NIX_CHANNELS_TAG}", cfg.repository);
-    let digest = verify::resolve(roots, &what)
+    let digest = resolve_artifact(roots, &cfg.repository, NIX_CHANNELS_TAG)
         .map_err(|e| stop(format!("rime: could not reach the release server ({e}); nothing was changed.")))?;
     let verified = check_signature(cfg, roots, &digest, &what, allow_unverified)?;
     let bytes = verify::artifact_layer_at(roots, &cfg.repository, NIX_CHANNELS_TAG, &digest, NIX_CHANNELS_MEDIA_TYPE)
         .map_err(|e| stop(format!("rime: could not read {what} ({e}); nothing was changed.")))?;
     let doc = channel::parse(&bytes).map_err(|e| stop(format!("rime: {e}; nothing was changed.")))?;
     Ok((doc, verified))
+}
+
+/// The digest a tag names, as the sha256 of the manifest the registry serves for it. Not `skopeo inspect`
+/// (`verify::resolve`): that parses the config as an image's, and the channel document is an OCI artifact with an
+/// empty config (§3.3), which skopeo refuses ("unsupported image-specific operation on artifact").
+fn resolve_artifact(roots: &Roots, repo: &str, tag: &str) -> Result<String, String> {
+    let fetched = match verify::fetch(roots, repo, tag) {
+        Ok(f) => f,
+        Err(crate::trust::Artifact::Absent) => return Err(format!("{repo}:{tag} does not exist")),
+        Err(crate::trust::Artifact::Unavailable(why)) => return Err(why),
+    };
+    verify::sha256_of(&fetched.blobs.join("manifest.json")).map(|h| format!("sha256:{h}"))
 }
 
 /// §8.2 step 3. `record` = remember the accepted serial (not under `--check`, never for an unverified document).
