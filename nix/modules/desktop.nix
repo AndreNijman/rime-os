@@ -386,6 +386,9 @@ in
         "/share/rime-greet"
         "/share/rime-shell"
         "/share/backgrounds"
+        # size: documentation.doc is off (base.nix), so share/doc is not linked; these two are (see niri.doc below).
+        "/share/doc/niri"
+        "/share/doc/labwc"
       ];
 
       # ── Keyring: the password typed at the login screen opens it (Containerfile.base:3767-3905) ───
@@ -443,7 +446,7 @@ in
       services.pipewire = {
         enable = true;
         alsa.enable = true;
-        alsa.support32Bit = true;
+        # size: 32-bit ALSA (pkgsi686Linux.pipewire) is gaming.nix's; bootc got it with Steam (docs/nixos/closure.md).
         pulse.enable = true;
         wireplumber.enable = true;
       };
@@ -486,7 +489,9 @@ in
       networking.networkmanager = {
         enable = true;
         # vpnc: removed from nixpkgs as insecure (on bootc F45 obsoleted it too, Containerfile.core:1979).
-        plugins = with pkgs; [ networkmanager-openvpn networkmanager-openconnect ];
+        # size: openconnect without the GNOME auth dialog, as Fedora's NetworkManager-openconnect (no -gnome subpackage
+        # on bootc); the dialog is the only webkitgtk 4.1 user, 176 MiB (docs/nixos/closure.md).
+        plugins = with pkgs; [ networkmanager-openvpn (networkmanager-openconnect.override { withGnome = false; }) ];
       };
       hardware.bluetooth.enable = true;
       services.blueman.enable = true;
@@ -530,6 +535,8 @@ in
       services.gnome.at-spi2-core.enable = true;
       services.orca.enable = true;
       services.speechd.enable = true;
+      # size: espeak-ng without MBROLA, as bootc ships it (no mbrola voices on Fedora); mbrola-voices is 645 MiB.
+      services.speechd.package = pkgs.speechd.override { espeak = pkgs.espeak-ng.override { mbrolaSupport = false; }; };
 
       # ── Boot splash (Containerfile.rime:265-312; bootc kargs.d `quiet splash`) ────────────────────
       boot.plymouth = {
@@ -613,6 +620,10 @@ in
         rimeDesktopData
         rimeGreet
         pkgs.rime.rime-libexec # the session helpers, at ${sw}/libexec (see the header)
+        # size: documentation.doc is off (base.nix), but the scripts read these two files from share/doc:
+        # rime-shell-firstrun seeds niri's default-config.kdl, rime-input-apply reads labwc's rc.xml.all.
+        niri.doc
+        labwc.doc
         mate-polkit # polkit agent: ${sw}/libexec/polkit-mate-authentication-agent-1 (session.lua:43)
         at-spi2-core # at-spi-bus-launcher / at-spi2-registryd for rime-greet-session
 
@@ -708,7 +719,7 @@ in
       # The shell's text uses both family names: "JetBrains Mono" and "JetBrainsMono Nerd Font" (icon glyphs).
       fonts.packages = [
         pkgs.jetbrains-mono
-        pkgs.nerd-fonts.jetbrains-mono
+        nerdFontJetBrainsMono # size: the 3.5.1 pin above, not nixpkgs' 3.5.0 (one Nerd Font, 229 MiB saved)
       ];
 
       # The lock screen authenticates with PamContext { config: "system-auth" } (src/windows/Lockscreen.qml).

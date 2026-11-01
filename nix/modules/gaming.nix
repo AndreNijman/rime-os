@@ -344,6 +344,8 @@ in
       enable = true;
       enable32Bit = true;
     };
+    # size: 32-bit ALSA for 32-bit games, moved here from desktop.nix (docs/nixos/closure.md).
+    services.pipewire.alsa.support32Bit = true;
 
     # NTSYNC (bootc Containerfile.rime :243-262): Proton/Wine use /dev/ntsync when it exists. The driver registers a
     # dynamic misc minor, so nothing autoloads it; the device is 0666 from the driver. 51.4 -> 59.3 fps measured on
