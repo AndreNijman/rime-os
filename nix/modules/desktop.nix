@@ -27,7 +27,8 @@ let
     export RIME_SECRETS_START="''${RIME_SECRETS_START:-${pkgs.rime.rime-libexec}/libexec/rime-secrets-start}"
     export QT_PLUGIN_PATH="${shellPkg.qtPluginPath}''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
     export PATH="${lib.makeBinPath shellPkg.runtimeDeps}:/run/wrappers/bin:/run/current-system/sw/bin''${PATH:+:$PATH}"
-    exec ${pkgs.rime.rime-libexec}/libexec/rime-shell-autostart "$@"
+    # Run by bash, not executed: the file is 0644 in git (the image installs it with COPY --chmod=0755).
+    exec ${pkgs.bash}/bin/bash ${pkgs.rime.rime-libexec}/libexec/rime-shell-autostart "$@"
   '';
 in
 {
