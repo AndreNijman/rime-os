@@ -226,6 +226,28 @@ expect 'no usable range selects every suite and does not exit 128' \
     'rc=0 jobs=[android,engine,installer,rust]' \
     "$(classify "$ORPHAN" push '' '' '' 'task/selector-fixture' "$(git -C "$ORPHAN" rev-parse HEAD)")"
 
+# A file OUTSIDE installer/ that an installer suite reads must still select the
+# installer jobs. installer/test-installer-console.sh runs the 50-rime-keymap
+# generator, and that suite runs only in installer-ui: a PR changing only the
+# generator lit rust+engine (files/) and skipped it.
+KEYGEN="$WORK/keygen"
+{
+    git init -q -b main "$KEYGEN" &&
+    git -C "$KEYGEN" config user.email 'ci@rime.test' &&
+    git -C "$KEYGEN" config user.name 'rime ci' &&
+    git -C "$KEYGEN" config commit.gpgsign false &&
+    echo base > "$KEYGEN/README-base" &&
+    git -C "$KEYGEN" add -A && git -C "$KEYGEN" commit -qm 'base' &&
+    git -C "$KEYGEN" checkout -q -b 'task/keymap-generator' &&
+    mkdir -p "$KEYGEN/files/system/systemd" &&
+    echo x > "$KEYGEN/files/system/systemd/rime-keymap-env" &&
+    git -C "$KEYGEN" add -A && git -C "$KEYGEN" commit -qm 'generator only'
+} >/dev/null 2>&1 || { echo "FATAL: fixture build failed"; exit 1; }
+expect 'a PR touching only the keymap generator selects the installer jobs' \
+    'rc=0 jobs=[engine,installer,rust]' \
+    "$(classify "$KEYGEN" pull_request "$(git -C "$KEYGEN" rev-parse main)" \
+        "$(git -C "$KEYGEN" rev-parse HEAD)" '' 'task/keymap-generator' "$(git -C "$KEYGEN" rev-parse HEAD)")"
+
 # ── the trigger and the in-step list must agree ──────────────────────────────
 if diff -q "$WORK/push-branches" "$WORK/integration-branches" >/dev/null 2>&1; then
     ok "on.push.branches equals the step's INTEGRATION_BRANCHES ($(tr '\n' ' ' < "$WORK/push-branches"))"

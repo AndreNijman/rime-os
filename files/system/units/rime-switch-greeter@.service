@@ -13,16 +13,26 @@
 # removes the config again, so a stopped instance stays stopped until the
 # helper decides otherwise.
 #
-# Conflicts covers the other user of a VT: logind spawns autovt@ttyN (an alias
-# of getty@ttyN) when a VT it manages is activated. The helper picks a VT above
-# NAutoVTs so that should never fire, and this is the belt to that braces.
+# Conflicts covers the other user of a VT: logind spawns autovt@ttyN when a VT
+# it manages is activated. autovt@ is an ALIAS, and what it names changed under
+# us: up to Fedora 44 it was getty@ (agetty); Fedora 45's preset makes it
+# kmsconvt@ (kmscon), and getty@ is disabled. So the unit conflicts with all
+# three names: kmsconvt@ and getty@ by name, and autovt@ for whatever an admin
+# points it at next (systemd resolves the alias, so Conflicts=autovt@tty7
+# lands on kmsconvt@tty7 on a stock F45 machine; a name with no unit behind it
+# is a harmless stub). The helper picks a VT above NAutoVTs so none of this
+# should ever fire, and this is the belt to that braces.
 
 [Unit]
 Description=Rime fast-user-switch login screen on VT %i
 Documentation=man:greetd(1) file:/usr/share/doc/rime/multi-user.md
 After=systemd-user-sessions.service
 After=getty@tty%i.service
+After=kmsconvt@tty%i.service
+After=autovt@tty%i.service
 Conflicts=getty@tty%i.service
+Conflicts=kmsconvt@tty%i.service
+Conflicts=autovt@tty%i.service
 ConditionPathExists=/run/rime-switch-greeter/%i.toml
 
 [Service]

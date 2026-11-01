@@ -241,7 +241,13 @@ jobs:
           # produces, and hand-editing it is precisely how the Kotlin suite
           # stops being evidence about the protocol the desktop speaks.
           grep -Eq '^(rimed/|config/|Containerfile|docs/|README\.md|tests/|files/|android/core/src/test/resources/)' <<<"$files" && rust=true
-          grep -Eq '^installer/' <<<"$files" && installer=true
+          # `files/system/systemd/rime-keymap-env` is in the INSTALLER selector:
+          # installer/test-installer-console.sh runs that generator against a
+          # real Fedora systemd-localed, and the suite runs only in installer-ui.
+          # A PR changing only the generator set rust+engine, not installer, and
+          # skipped the one suite that checks it. The file an assertion is ABOUT
+          # has to select the job that runs it.
+          grep -Eq '^(installer/|files/system/systemd/rime-keymap-env$)' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
           # run nothing but a syntax check that did not even reach it.
@@ -2143,6 +2149,40 @@ jobs:
       - name: Run installer keyboard suite
         working-directory: installer
         run: ./test-installer-keymap.sh
+
+      # Fedora 45 made kmscon the text console. Two installer claims ride on
+      # it: Ctrl+Alt+F2 in the live env still opens a login while tty1 stays
+      # cage's (F45's systemd ships no autovt@ link, so the live env creates
+      # it, and every name for a console on tty1 must load as masked, which a
+      # fedora:45 container booted with systemd checks), and the layout picked
+      # on the keyboard page is what both systemd-localed and Rime's
+      # 50-rime-keymap generator report (kmscon starts from the generator's
+      # XKB_DEFAULT_* and follows localed live; the suite does not run kmscon).
+      # Measured against real Fedora 45 packages in podman; a SKIP there means
+      # none of it ran, so it fails the step like the other podman suites do.
+      # The legs install packages with dnf, so a Fedora mirror outage fails
+      # this step; that is accepted (a skipped proof is not a pass).
+      # Rootless podman needs user namespaces, which Ubuntu 24.04 restricts by
+      # default (see the same step in the package shards). Ephemeral runner.
+      - name: Allow unprivileged user namespaces for the console suite
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+
+      - name: Run installer text-console suite (kmscon, Fedora 45)
+        working-directory: installer
+        run: |
+          set -euo pipefail
+          command -v podman >/dev/null || { echo "::error::podman is not on this runner; the console suite would SKIP its Fedora 45 legs and exit 0"; exit 1; }
+          rc=0; out="$(./test-installer-console.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::the console suite exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^installer-console: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::the console suite printed no summary line"; exit 1; }
+          if printf '%s\n' "$out" | grep -E '^SKIP' >/dev/null; then
+              echo "::error::the console suite printed a SKIP; the Fedora 45 container legs did not run"
+              exit 1
+          fi
 
       # L-002's encryption path. This is the FAST half — every refusal, the
       # XKB-to-console keymap conversion, and the character-level check that
