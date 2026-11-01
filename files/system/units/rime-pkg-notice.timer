@@ -1,0 +1,17 @@
+# Rime OS — when the package-rebuild notice runs.
+#
+# Once per login session, two minutes in, as rime-gpu-notice.timer: late enough
+# that the Shell's notification server is up (a run at login would beat it and
+# the notice would be lost), early enough that the person is still looking.
+# The boot rebuild it reports on finished before the desktop started.
+
+[Unit]
+Description=Check once per session whether installed packages could not be rebuilt
+Documentation=file:///usr/libexec/rime-pkg-notice
+
+[Timer]
+OnStartupSec=2min
+Unit=rime-pkg-notice.service
+
+[Install]
+WantedBy=timers.target

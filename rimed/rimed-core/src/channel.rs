@@ -635,7 +635,7 @@ pub fn verdict(rows: &[(String, Health, String)], failed_units: &[String]) -> Ve
     // LoaderBootCountPath and every published image boots GRUB, so it never
     // runs and its verdict file does not exist.
     for unit in failed_units {
-        if is_splash_unit(unit) {
+        if is_splash_unit(unit) || is_package_rebuild_unit(unit) {
             continue;
         }
         healthy = false;
@@ -661,6 +661,21 @@ pub fn verdict(rows: &[(String, Health, String)], failed_units: &[String]) -> Ve
 /// rollback would not stop it.
 fn is_splash_unit(unit: &str) -> bool {
     unit.starts_with("plymouth-") && unit.ends_with(".service")
+}
+
+/// The boot rebuild of the user's package extension failing is not evidence
+/// an update broke the machine, and holding the next update over it would
+/// strand the machine on the release that refused it.
+///
+/// `rime-sysext-rebuild.service` fails on purpose when its rebuild cannot
+/// happen: offline at boot, or no build of the user's package set in the
+/// repositories fits this image (the repositories have moved ahead of it). The
+/// cure for the second is the NEXT image, which ships the newer libraries, so
+/// counting the failure here would hold exactly the update that fixes it. What
+/// the failure costs the user is measured where it belongs: the
+/// `package-extensions` row, and the notice the session shows.
+fn is_package_rebuild_unit(unit: &str) -> bool {
+    unit == "rime-sysext-rebuild.service"
 }
 
 fn first_line(s: &str) -> String {
@@ -903,6 +918,34 @@ mod tests {
         assert!(!v.healthy);
         assert_eq!(v.reasons, vec!["systemd unit failed: rime-shell.service"]);
         assert!(!is_splash_unit("rime-plymouth-theme.service"));
+    }
+
+    #[test]
+    fn a_refused_package_rebuild_does_not_hold_the_update_that_fixes_it() {
+        // A boot rebuild that cannot happen (offline, or the repositories need
+        // a newer image) fails its unit on purpose. The next image is what
+        // fixes the second case, so it must not be held.
+        let v = verdict(&[], &["rime-sysext-rebuild.service".to_string()]);
+        assert!(v.healthy, "{:?}", v.reasons);
+        assert!(v.reasons.is_empty(), "{:?}", v.reasons);
+        // ...while a real failure alongside it still holds.
+        let v = verdict(
+            &[],
+            &["rime-sysext-rebuild.service".to_string(), "rimed.service".to_string()],
+        );
+        assert!(!v.healthy);
+        assert_eq!(v.reasons, vec!["systemd unit failed: rimed.service"]);
+        // ...and the user's packages missing for another OS release still
+        // counts, through its own row.
+        let rows = vec![(
+            "package-extensions".to_string(),
+            Health::Attention,
+            "12 packages, built for OS 44 but this machine runs OS 45".to_string(),
+        )];
+        let v = verdict(&rows, &["rime-sysext-rebuild.service".to_string()]);
+        assert!(!v.healthy);
+        assert_eq!(v.reasons.len(), 1, "{:?}", v.reasons);
+        assert!(!is_package_rebuild_unit("rime-sysext-rebuild-other.service"));
     }
 
     #[test]

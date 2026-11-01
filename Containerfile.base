@@ -1558,6 +1558,25 @@ RUN set -eux; \
     test ! -e /usr/lib/systemd/system/rime-gpu-notice.service; \
     echo "rime-gpu-notice enabled as a user timer"
 
+# ── a boot rebuild of the user's packages that could not happen gets said ───
+# rime-sysext-rebuild.service no longer holds the desktop for a rebuild that is
+# offline or refused: it stops at once and leaves /run/rime-pkg/rebuild. This
+# user timer turns that into one notice per boot, two minutes into the session
+# (notify-send needs a session bus, and the Shell's notification server).
+COPY files/system/libexec/rime-pkg-notice /usr/libexec/rime-pkg-notice
+COPY files/system/units/rime-pkg-notice.service \
+     /usr/lib/systemd/user/rime-pkg-notice.service
+COPY files/system/units/rime-pkg-notice.timer \
+     /usr/lib/systemd/user/rime-pkg-notice.timer
+RUN set -eux; \
+    chmod 0755 /usr/libexec/rime-pkg-notice; \
+    bash -n /usr/libexec/rime-pkg-notice; \
+    command -v notify-send; \
+    systemctl --global enable rime-pkg-notice.timer; \
+    test -L /etc/systemd/user/timers.target.wants/rime-pkg-notice.timer; \
+    test ! -e /usr/lib/systemd/system/rime-pkg-notice.service; \
+    echo "rime-pkg-notice enabled as a user timer"
+
 # ── "a new Rime update is available" ────────────────────────────────────────
 # A root timer asks the registry for one manifest every 6 hours (idle CPU and
 # I/O, no layers downloaded) and writes the answer to /run/rime-update/state.

@@ -2325,7 +2325,10 @@ jobs:
       # The boot must not wait for the network to decide that nothing needs
       # rebuilding: the unit carries no network-online.target ordering and the
       # engine waits for the network itself only when it has to download.
-      - name: Run boot-time network-wait assertions for the sysext rebuild unit
+      # And a rebuild that cannot happen (offline, or refused) must not hold
+      # the desktop: it ends at once, non-zero, with a note the session turns
+      # into a notice. Three broken engines are run and must be caught.
+      - name: Run boot-time network-wait and refusal assertions for the sysext rebuild unit
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-sysext-boot-wait.sh
 
@@ -4631,6 +4634,8 @@ jobs:
             files/system/libexec/rime-screen-reader \
             files/system/libexec/rime-gpu-notice \
             tests/test-rime-gpu-notice.sh \
+            files/system/libexec/rime-pkg-notice \
+            tests/test-rime-sysext-boot-wait.sh \
             files/system/libexec/rime-update-check \
             files/system/libexec/rime-update-notice \
             files/system/libexec/rime-live-session \

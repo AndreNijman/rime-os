@@ -19,6 +19,16 @@ ConditionPathExists=/var/lib/rime/pkg/state.json
 # --if-needed` now decides first and waits for the network itself, only when it
 # has something to download. A boot that needs a rebuild still waits for it
 # before the desktop starts, as before.
+#
+# A rebuild that CANNOT happen does not hold the desktop. Offline after the
+# network wait, or a package set that does not fit this image, ends the unit
+# at once with a non-zero status (it shows as failed, never "Finished") and a
+# note in /run/rime-pkg that the user's session turns into a notice
+# (rime-pkg-notice). A refused rebuild once held a desktop for 12.5 minutes
+# downloading the whole set a second time only to name the package in the way;
+# the boot path no longer does that, `sudo rime pkg rebuild` still does.
+# `rime update`'s health gate does not count this unit's failure as a
+# regression (rimed-core channel.rs): the next update is what fixes a refusal.
 After=systemd-sysext.service
 
 [Service]
@@ -28,6 +38,12 @@ ExecStart=/usr/libexec/rime-pkg rebuild --if-needed
 # Rebuilding means re-downloading and re-extracting every user package, which on
 # a slow link can take a while; it must never race a boot timeout into failure.
 TimeoutStartSec=infinity
+# Where the note for the desktop goes (rime-pkg REBUILD_NOTICE). World-readable
+# because a user unit reads it; kept after the unit stops, because a failed
+# oneshot is exactly when it has something to say. /run is empty every boot.
+RuntimeDirectory=rime-pkg
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 # This is background maintenance competing with a desktop that is starting up.
 Nice=10
 IOSchedulingClass=idle

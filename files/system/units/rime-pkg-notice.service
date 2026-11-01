@@ -1,0 +1,18 @@
+# Rime OS — say once per boot that the user's packages could not be rebuilt
+# for this OS (USER unit).
+#
+# A user service for the reason rime-gpu-notice is one: notify-send needs a
+# session bus, and root has none. rime-sysext-rebuild.service writes the file
+# below only when its rebuild failed, so on every other boot this unit does not
+# even start.
+
+[Unit]
+Description=Rime OS notice: installed packages could not be rebuilt
+Documentation=file:///usr/libexec/rime-pkg-notice
+ConditionPathExists=/run/rime-pkg/rebuild
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-pkg-notice
+# It writes one marker file under $XDG_STATE_HOME and nothing else.
+NoNewPrivileges=yes
