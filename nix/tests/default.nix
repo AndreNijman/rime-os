@@ -19,6 +19,8 @@
   release-github = import ./release-github.nix { inherit pkgs self; };
   update-client = import ./update-client.nix { inherit pkgs self; };
   update-e2e = import ./update-e2e.nix { inherit pkgs self; };
+  unit-docs = import ./unit-docs.nix { inherit pkgs self; };
+  rimed-session = import ./rimed-session.nix { inherit pkgs self; };
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
@@ -30,3 +32,5 @@
 // import ./boot.nix { inherit pkgs self; }
 # catalogue, catalogue-data
 // import ./catalogue.nix { inherit pkgs self; }
+# vm-harness, vm-harness-vm
+// import ./vm-harness.nix { inherit pkgs self; }

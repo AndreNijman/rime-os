@@ -25,6 +25,7 @@
   coreutils,
   curl,
   git,
+  help2man,
   libxml2,
   openssh,
   openssl,
@@ -133,7 +134,7 @@ let
   skips = {
     # rime-agentd decides who a client is from the cgroup in /proc/<pid>/cgroup, and refuses one that is in neither
     # a login session nor a user service. Every process in a build sandbox is in "/", so these sessions are refused
-    # before the behaviour under test. They run on a real login (bootc CI, the NixOS VM test exercises the daemon).
+    # before the behaviour under test. checks.rimed-session runs them inside a logged-in VM session.
     needsLoginSessionCgroup = [
       "an_unconfined_session_is_refused_rather_than_given_a_field_that_does_nothing"
       "a_pem_carrying_a_private_key_starts_no_session_at_all"
@@ -194,8 +195,8 @@ let
   selfSkipOk = {
     # The same cause as needsLoginSessionCgroup above: rime-agentd (and rime-remoted's pairing, which asks it) refuses
     # a client whose /proc/<pid>/cgroup is "/" ("neither a login session nor a user service"), and these tests catch
-    # that refusal, print SKIP and return. A NixOS VM test with a real login session is where they can run
-    # (TODO(handover): a nix/tests check that runs `cargo test` for rime-agentd inside a logged-in VM session).
+    # that refusal, print SKIP and return. checks.rimed-session runs them (and needsLoginSessionCgroup) from the same
+    # test binaries inside a logged-in VM session, where each must pass without a SKIP line.
     noLoginSessionCgroup = [
       "a_channel_onto_a_session_that_does_not_exist_is_refused_with_the_daemons_own_words"
       "a_confined_session_is_judged_against_the_confinement_it_actually_has"
@@ -311,8 +312,8 @@ rustPlatform.buildRustPackage {
   checkFlags = lib.concatMap (t: [ "--skip" t ]) (lib.concatLists (lib.attrValues skips)) ++ [ "--show-output" ];
   # Programs the tests run: by the store paths above (curl, git, bwrap, openssl) or through PATH.
   nativeCheckInputs = [ bubblewrap cacert curl git openssh openssl python3 util-linux ];
-  # xmllint, for the polkit checks in postInstall.
-  nativeBuildInputs = [ libxml2 ];
+  # xmllint, for the polkit checks in postInstall; help2man, for rime(1).
+  nativeBuildInputs = [ libxml2 help2man ];
   preCheck = ''
     # The sandbox's HOME is /homeless-shelter (absent) and there is no XDG_RUNTIME_DIR, so code that falls back to
     # /run/user/<uid> would try a directory that does not exist here.
@@ -371,6 +372,12 @@ rustPlatform.buildRustPackage {
     install -Dm644 $src/config/ai/catalogue.toml $share/rimeos/ai/catalogue.toml
     install -Dm644 -t $share/rime-os/trust $src/files/system/trust/fulcio-root.pem $src/files/system/trust/enforcement.conf
 
+    # rime(1): the page every Rime unit's Documentation=man:rime(1) names (files/system/units, base.nix), made from
+    # the CLI's own --help so it cannot fall behind it. Without it those links lead nowhere (nix/tests/unit-docs.nix).
+    mkdir -p $out/share/man/man1
+    help2man --no-info --no-discard-stderr --name 'Rime OS control CLI' --output $out/share/man/man1/rime.1 $out/bin/rime
+    grep -F 'Run and supervise coding agents' $out/share/man/man1/rime.1 >/dev/null
+
     # D-Bus: the bus policy as shipped, the activation file pointed at this rimed.
     install -Dm644 $src/files/system/dbus-1/system.d/org.rimeos.Rimed1.conf $share/dbus-1/system.d/org.rimeos.Rimed1.conf
     install -Dm644 $src/files/system/dbus-1/system-services/org.rimeos.Rimed1.service \
@@ -421,7 +428,11 @@ rustPlatform.buildRustPackage {
   '';
 
   # The PATH the shipped rime-agentd unit hands every agent session (a test that runs its own unit reuses it).
-  passthru = { inherit agentdPath; };
+  passthru = {
+    inherit agentdPath;
+    # The 76 tests nix/tests/rimed-session.nix runs in a logged-in VM session (the two cgroup groups above).
+    sessionTests = skips.needsLoginSessionCgroup ++ selfSkipOk.noLoginSessionCgroup;
+  };
 
   meta = {
     description = "Rime system daemon, CLI and helper daemons";

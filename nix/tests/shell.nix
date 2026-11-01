@@ -33,6 +33,9 @@ pkgs.testers.runNixOSTest {
     # Only the shell part of the desktop module: the session plumbing is the desktop port's and is tested there.
     rime.desktop.shell.enable = true;
     programs.hyprland.enable = true;
+    # As desktop.nix: false is another Hyprland derivation, which cache.nixos.org does not have, so hosted CI would
+    # build Hyprland from source. The test execs start-hyprland itself and never goes through UWSM.
+    programs.hyprland.withUWSM = true;
 
     virtualisation = {
       memorySize = 4096;

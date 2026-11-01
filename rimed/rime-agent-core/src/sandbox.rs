@@ -1772,6 +1772,15 @@ mod tests {
     }
 
     #[test]
+    fn the_missing_bwrap_message_names_the_path_this_build_runs() {
+        // The path is chosen at build time (rime-paths: /usr/bin/bwrap on bootc, a store path on NixOS), so
+        // the message must name that path and never a hard-coded one the machine does not use.
+        let msg = SandboxError::MissingBwrap.to_string();
+        assert!(msg.contains(&format!("({})", rime_paths::BWRAP)), "{msg}");
+        assert_eq!(bwrap_path(), PathBuf::from(rime_paths::BWRAP));
+    }
+
+    #[test]
     fn sandbox_errors_name_the_escape_hatch() {
         // A user who hits this needs to know what to do next, not just that
         // something failed.

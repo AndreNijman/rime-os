@@ -212,6 +212,8 @@ pkgs.testers.runNixOSTest {
         rc, out = session(nobwrap, "g2", "echo ran > ./g2.out")
         print("nobwrap: rc=%d %s" % (rc, out))
         assert rc != 0 and "bubblewrap" in out, "G2 mutant: without bwrap the session must be refused, naming bubblewrap"
+        # The refusal names the bwrap path this rimed was built with (rime-paths), not bootc's /usr/bin/bwrap.
+        assert "bubblewrap (/nonexistent/bwrap) is not installed" in out and "/usr/bin/bwrap" not in out, out
         nobwrap.sleep(3)
         nobwrap.fail("test -e /home/alice/proj/g2.out")
 
