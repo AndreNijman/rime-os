@@ -12,3 +12,5 @@
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
+# boot-hook-unit, boot-hook-vm
+// import ./boot.nix { inherit pkgs self; }
