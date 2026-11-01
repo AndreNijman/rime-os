@@ -3753,12 +3753,15 @@ RUN set -eux; \
             exit 1; fi; \
     done; \
     : 'D-Bus activation: exactly one session service file names the bus name.'; \
+    : 'dbus-daemon and systemd both skip blanks around = (systemd also at the'; \
+    : 'end of a line): match the name the way they read it, not byte for byte.'; \
+    nm='^[[:space:]]*Name[[:space:]]*=[[:space:]]*org\.freedesktop\.secrets[[:space:]]*$'; \
     n=0; svc=""; \
     for d in /usr/share/dbus-1/services /usr/local/share/dbus-1/services; do \
         [ -d "$d" ] || continue; \
         for f in "$d"/*.service; do \
             [ -f "$f" ] || continue; \
-            if grep -qx 'Name=org.freedesktop.secrets' "$f"; then \
+            if grep -qE "$nm" "$f"; then \
                 n=$((n + 1)); svc="$f"; echo "secrets: D-Bus activation $f"; fi; \
         done; \
     done; \
@@ -3769,13 +3772,16 @@ RUN set -eux; \
     : 'systemd user activation: the dbus-org.freedesktop.secrets.service alias'; \
     : 'is how a Type=dbus provider claims the name (oo7 ships one, gnome-keyring'; \
     : 'none), and no other user unit may name the bus.'; \
+    bn='^[[:space:]]*BusName[[:space:]]*=[[:space:]]*org\.freedesktop\.secrets[[:space:]]*$'; \
     for d in /usr/lib/systemd/user /etc/systemd/user /usr/local/lib/systemd/user; do \
         if [ -e "$d/dbus-org.freedesktop.secrets.service" ] || [ -L "$d/dbus-org.freedesktop.secrets.service" ]; then \
             echo "FATAL: $d/dbus-org.freedesktop.secrets.service -> $(readlink "$d/dbus-org.freedesktop.secrets.service")"; \
             echo "       from: $(rpm -qf "$d/dbus-org.freedesktop.secrets.service" 2>&1)"; \
             exit 1; fi; \
-        if [ -d "$d" ] && grep -rlx 'BusName=org.freedesktop.secrets' "$d" >/dev/null 2>&1; then \
-            echo "FATAL: a user unit claims org.freedesktop.secrets: $(grep -rlx 'BusName=org.freedesktop.secrets' "$d" | tr '\n' ' ')"; \
+        [ -d "$d" ] || continue; \
+        hits="$(grep -rlE "$bn" "$d" 2>/dev/null || true)"; \
+        if [ -n "$hits" ]; then \
+            echo "FATAL: a user unit claims org.freedesktop.secrets: $(printf '%s\n' "$hits" | tr '\n' ' ')"; \
             exit 1; fi; \
     done; \
     : 'One Secret portal backend, and it is the one the session configs pin.'; \

@@ -10,13 +10,16 @@
 #
 #    1. gnome-keyring alone, as the image ships it: the guard passes;
 #    2. the provider file names another provider: refused;
-#    3. a second D-Bus activation file for org.freedesktop.secrets: refused;
+#    3. a second D-Bus activation file for org.freedesktop.secrets: refused,
+#       also when it writes `Name = org.freedesktop.secrets`;
 #    4. a systemd user dbus-org.freedesktop.secrets.service alias: refused;
-#    5. a user unit with BusName=org.freedesktop.secrets: refused;
+#    5. a user unit with BusName=org.freedesktop.secrets: refused, also with
+#       blanks around `=` and after the value (systemd reads that the same);
 #    6. a second Secret portal backend: refused;
 #    7. oo7-portal installed from the Fedora 45 repositories (it pulls in
-#       oo7-daemon): refused, and the message names oo7-portal as what
-#       required it;
+#       oo7-daemon): refused BY THE PACKAGE CHECK (one FATAL, and no later
+#       check ran: oo7's own files would refuse the image too), and the
+#       message names oo7-portal as what required it;
 #    8. oo7 removed again: passes again.
 #
 #  RIME_TEST_CONTAINERFILE runs the block from another file (a mutant).
@@ -43,8 +46,10 @@ rpm -q gnome-keyring >/dev/null || { skp "the build guard" "gnome-keyring is not
 W="$(mktemp -d)"
 cleanup() {
     rm -f /usr/local/share/dbus-1/services/rime-test-secrets.service \
+          /usr/local/share/dbus-1/services/rime-test-secrets-spaced.service \
           /etc/systemd/user/dbus-org.freedesktop.secrets.service \
           /etc/systemd/user/rime-test-secrets.service \
+          /etc/systemd/user/rime-test-secrets-spaced.service \
           /usr/share/xdg-desktop-portal/portals/rime-test.portal
     rm -rf "$W"
 }
@@ -84,6 +89,10 @@ printf '[D-BUS Service]\nName=org.freedesktop.secrets\nExec=/bin/false\n' \
     > /usr/local/share/dbus-1/services/rime-test-secrets.service
 refuses "a second D-Bus activation file is refused" "2 session D-Bus service files"
 rm -f /usr/local/share/dbus-1/services/rime-test-secrets.service
+printf '[D-BUS Service]\nName = org.freedesktop.secrets\nExec=/bin/false\n' \
+    > /usr/local/share/dbus-1/services/rime-test-secrets-spaced.service
+refuses "...also written 'Name = org.freedesktop.secrets'" "2 session D-Bus service files"
+rm -f /usr/local/share/dbus-1/services/rime-test-secrets-spaced.service
 
 # 4. A systemd user activation alias.
 mkdir -p /etc/systemd/user
@@ -96,6 +105,10 @@ printf '[Service]\nType=dbus\nBusName=org.freedesktop.secrets\nExecStart=/bin/fa
     > /etc/systemd/user/rime-test-secrets.service
 refuses "a user unit with BusName=org.freedesktop.secrets is refused" "rime-test-secrets.service"
 rm -f /etc/systemd/user/rime-test-secrets.service
+printf '[Service]\nType=dbus\n  BusName = org.freedesktop.secrets \nExecStart=/bin/false\n' \
+    > /etc/systemd/user/rime-test-secrets-spaced.service
+refuses "...also written '  BusName = org.freedesktop.secrets ' (systemd strips the blanks)" "rime-test-secrets-spaced.service"
+rm -f /etc/systemd/user/rime-test-secrets-spaced.service
 
 # 6. A second Secret portal backend.
 mkdir -p /usr/share/xdg-desktop-portal/portals
@@ -107,6 +120,17 @@ rm -f /usr/share/xdg-desktop-portal/portals/rime-test.portal
 # 7. The real drift: a package that requires oo7-daemon.
 if dnf -y -q install --setopt=install_weak_deps=False --setopt=retries=5 oo7-portal >/dev/null 2>&1; then
     refuses "oo7-daemon in the image is refused" "oo7-daemon-"
+    # oo7's activation file and alias would refuse the image as well, and their
+    # messages also name oo7-daemon-<version>: only the package check may have
+    # run. Lines that START with the word (set -x traces start with +).
+    fatals="$(grep -c '^FATAL' "$W/log")"
+    if [ "$fatals" = 1 ] && grep -E '^FATAL: oo7-daemon-' "$W/log" >/dev/null \
+        && ! grep -E '^secrets: D-Bus activation' "$W/log" >/dev/null; then
+        ok "...by the package check itself: one FATAL, and no later check ran"
+    else
+        bad "...by the package check itself: one FATAL, and no later check ran" \
+            "$fatals FATAL lines: $(grep -E '^(FATAL|secrets:)' "$W/log" | tr '\n' ' ')"
+    fi
     if grep -E 'required by:.*oo7-portal' "$W/log" >/dev/null; then ok "...and the message names what pulled it in (oo7-portal)"
     else bad "...and the message names what pulled it in (oo7-portal)" "$(grep -A1 FATAL "$W/log" | tr '\n' ' ')"; fi
     dnf -y -q remove oo7-portal oo7-daemon >/dev/null 2>&1
