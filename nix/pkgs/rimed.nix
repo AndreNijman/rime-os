@@ -218,8 +218,6 @@ rustPlatform.buildRustPackage {
   cargoRoot = "rimed";
   buildAndTestSubdir = "rimed";
   cargoLock.lockFile = root + "/rimed/Cargo.lock";
-  # Package verbs through the NixOS catalogue (rimed/rime/src/nixos/pkg.rs); tests build with it too.
-  buildFeatures = [ "rime/nixos" ];
 
   env = lib.mapAttrs' (name: value: lib.nameValuePair "RIME_PATH_${name}" value) paths // {
     RIME_PATHS_EXPECT_ALL_SET = "1";

@@ -567,13 +567,10 @@ pub fn vm(args: &[String]) -> i32 {
 /// Deliberately a thin pass-through: the engine owns dependency resolution,
 /// signature checking and the extension lifecycle, and duplicating any of that
 /// here would just create two implementations to keep in sync.
-#[cfg(feature = "nixos")]
 pub fn pkg(args: &[String]) -> i32 {
-    crate::nixos::pkg::run(args)
-}
-
-#[cfg(not(feature = "nixos"))]
-pub fn pkg(args: &[String]) -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::pkg::run(args);
+    }
     // No "rime: running: …" banner here, unlike the bootc/fwupd verbs: the
     // engine narrates its own work, and echoing the invocation on top of that
     // made read-only verbs like `rime pkg list` print noise before their output.

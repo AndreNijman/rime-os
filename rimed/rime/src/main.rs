@@ -26,7 +26,6 @@ mod live;
 mod mcp;
 mod migrate;
 mod mode;
-#[cfg(feature = "nixos")]
 mod nixos;
 mod oauth_device;
 mod ops;

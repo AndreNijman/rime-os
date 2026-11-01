@@ -9,7 +9,7 @@
 //! Five kinds of entry (the data file explains each):
 //! * `flatpak`  — `flatpak install --system <remote> <id>`.
 //! * `toggle`   — a class 1 package that belongs to a prebuilt system feature (Steam → gaming). Installing it writes
-//!   the feature's switch file (`/var/lib/rime/switch/<feature>`, one requesting name per line). A system built with
+//!   the feature's switch file (`/var/lib/rime/switch/rime-feature@<feature>.target.on`, one requesting name per line). A system built with
 //!   the feature starts `rime-feature@<feature>.target` at once; a system without it gets it from the update client,
 //!   which reads the switch directory to pick the system to install (the contract handed to the D6 update client).
 //! * `nix`      — a class 2 app: its store path comes from the release record the update client writes
@@ -45,7 +45,6 @@ fn sys(name: &str) -> String {
 pub struct Catalogue {
     pub schema: u32,
     pub flathub_remote: String,
-    pub switch_dir: String,
     pub apps_profile: String,
     pub outs_file: String,
     #[serde(default)]
@@ -64,6 +63,8 @@ pub struct Feature {
     pub offered: bool,
     pub in_system: bool,
     pub unit: String,
+    /// The D2 runtime switch the unit's ConditionPathExists names (`<unit>.on`), written by the module.
+    pub switch: String,
     #[serde(default)]
     pub summary: String,
     #[serde(default)]
@@ -383,8 +384,8 @@ pub fn parse_outs(text: &str) -> Result<BTreeMap<String, String>, String> {
     Ok(o.apps)
 }
 
-fn switch_path(cat: &Catalogue, feature: &str) -> PathBuf {
-    Path::new(&cat.switch_dir).join(feature)
+fn switch_path(f: &Feature) -> PathBuf {
+    PathBuf::from(&f.switch)
 }
 
 // ── running things ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -610,7 +611,7 @@ fn select_feature(cat: &Catalogue, name: &str, feature: &str) -> Result<(), Stri
         .features
         .get(feature)
         .ok_or_else(|| format!("the catalogue describes no feature '{feature}'"))?;
-    let path = switch_path(cat, feature);
+    let path = switch_path(f);
     let wanted = edit_list(&read_list(&path), &[name.to_string()], &[]);
     write_list(&path, &wanted, false)?;
     if f.in_system {
@@ -622,7 +623,8 @@ fn select_feature(cat: &Catalogue, name: &str, feature: &str) -> Result<(), Stri
             f.title
         ));
         say(format!(
-            "selected for this machine ({}): the next `sudo rime update` installs the system that carries it",
+            "selected for this machine ({}): `sudo rime update` installs the system that carries it as soon as \
+             Rime's release offers one for this machine",
             path.display()
         ));
     }
@@ -635,7 +637,7 @@ fn deselect_feature(cat: &Catalogue, name: &str, feature: &str) -> Result<(), St
         .features
         .get(feature)
         .ok_or_else(|| format!("the catalogue describes no feature '{feature}'"))?;
-    let path = switch_path(cat, feature);
+    let path = switch_path(f);
     let left = edit_list(&read_list(&path), &[], &[name.to_string()]);
     write_list(&path, &left, true)?;
     if !left.is_empty() {
@@ -644,11 +646,13 @@ fn deselect_feature(cat: &Catalogue, name: &str, feature: &str) -> Result<(), St
     }
     if f.in_system {
         status(rime_paths::SYSTEMCTL, &["stop", &f.unit])?;
+        say(format!(
+            "{name}: {} is switched off for this machine; the next `sudo rime update` installs the system without it",
+            f.title
+        ));
+    } else {
+        say(format!("{name}: {} is switched off for this machine", f.title));
     }
-    say(format!(
-        "{name}: {} is switched off for this machine; the next `sudo rime update` installs the system without it",
-        f.title
-    ));
     Ok(())
 }
 
@@ -969,7 +973,7 @@ fn list(cat: &Catalogue) -> i32 {
     println!("Features selected for this machine:");
     let mut any = false;
     for (name, f) in &cat.features {
-        if switch_path(cat, name).exists() {
+        if switch_path(f).exists() {
             any = true;
             let on = if f.in_system { "in this system" } else { "not in this system yet" };
             println!("  {name:<20} {} ({on})", f.title);
@@ -1082,9 +1086,11 @@ mod tests {
               "apps_profile": "/nix/var/nix/profiles/rime-apps", "outs_file": "/var/lib/rime/nix/catalogue-outs.json",
               "features": {
                 "gaming": {"title": "Gaming", "offered": true, "in_system": false, "unit": "rime-feature@gaming.target",
-                           "summary": "Steam"},
+                           "switch": "/var/lib/rime/switch/rime-feature@gaming.target.on", "summary": "Steam"},
                 "virtualization": {"title": "Virtual machines", "offered": false, "in_system": false,
-                                   "unit": "rime-feature@virtualization.target", "reason": "no system carries it yet"}
+                                   "unit": "rime-feature@virtualization.target",
+                                   "switch": "/var/lib/rime/switch/rime-feature@virtualization.target.on",
+                                   "reason": "no system carries it yet"}
               },
               "entries": {
                 "steam": {"kind": "toggle", "feature": "gaming", "summary": "Steam"},

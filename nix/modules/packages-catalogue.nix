@@ -6,9 +6,10 @@
 # to carry them out:
 #
 #   - the catalogue itself, plus `in_system` per feature (whether THIS system was built with it);
-#   - the runtime switches for class 1 features: /var/lib/rime/switch/<feature> (the D2 host-layer switch directory)
-#     and rime-feature@<feature>.target, which starts only while the switch exists. `rime install steam` writes the
-#     switch; units of a feature can be WantedBy its target;
+#   - the runtime switches for class 1 features: rime-feature@<feature>.target starts only while its switch
+#     /var/lib/rime/switch/rime-feature@<feature>.target.on exists (the D2 host-layer convention: <unit>.on for a
+#     unit that is off unless switched on). `rime install steam` writes the switch; units of a feature can be
+#     WantedBy its target;
 #   - the rime-apps profile (/nix/var/nix/profiles/rime-apps) on every login's PATH and XDG_DATA_DIRS, which class 2
 #     apps are installed into from the cache;
 #   - nix-ld with a library set wide enough for the dynamic ELF programs people already have in ~/.local (claude-code,
@@ -65,6 +66,7 @@ let
     // {
       in_system = lib.attrByPath f.option false config;
       unit = "rime-feature@${name}.target";
+      switch = "${switchDir}/rime-feature@${name}.target.on";
     };
 
   catalogueJson = {
@@ -119,7 +121,7 @@ in
     # Class 1 runtime switches.
     systemd.targets."rime-feature@" = {
       description = "Rime system feature %i";
-      unitConfig.ConditionPathExists = "${switchDir}/%i";
+      unitConfig.ConditionPathExists = "${switchDir}/%n.on";
     };
     systemd.services.rime-features = {
       description = "Start the Rime system features this machine has switched on";
@@ -129,9 +131,10 @@ in
         RemainAfterExit = true;
       };
       script = ''
-        for f in ${switchDir}/*; do
+        for f in ${switchDir}/rime-feature@*.target.on; do
           [ -f "$f" ] || continue
-          ${config.systemd.package}/bin/systemctl start --no-block "rime-feature@''${f##*/}.target"
+          f=''${f##*/}
+          ${config.systemd.package}/bin/systemctl start --no-block "''${f%.on}"
         done
       '';
     };

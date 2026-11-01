@@ -8,7 +8,7 @@
 #   flatpak   install this Flathub application (`flatpak install --system`). `remote` defaults to flathub.
 #   toggle    a class 1 package: it needs system configuration (units, udev rules, 32-bit graphics, setuid wrappers),
 #             so it is part of a prebuilt system FEATURE (see `features`). Installing it selects that feature for
-#             this machine (/var/lib/rime/switch/<feature>). A system that already carries the feature turns it on at
+#             this machine (/var/lib/rime/switch/rime-feature@<feature>.target.on). A system that already carries the feature turns it on at
 #             once; one that does not gets it from the update that brings the feature's system (D2 host layer, D6).
 #   nix       a class 2 leaf app: CI builds `attrs` into one closure, publishes it in the release (manifest
 #             `catalogue[]`), and the machine fetches it from the cache into the rime-apps profile. An entry with no
