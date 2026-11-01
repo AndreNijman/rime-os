@@ -59,6 +59,15 @@ in
 
     systemd.packages = [ rimed ];
 
+    # The lid policy is rime-lid's inhibitor, never a static logind setting (Containerfile.base refuses a shipped
+    # HandleLidSwitch= for the same reason): `ignore` keeps a machine with nothing running awake in a closed bag as
+    # readily as one mid-build, and rime-lid's guards (thermal, battery floor) never get a say.
+    assertions = map (key: {
+      assertion = (config.services.logind.settings.Login.${key} or null) != "ignore";
+      message = "rime.services: services.logind.settings.Login.${key} = \"ignore\" defeats rime-lid; the lid stays "
+        + "awake only while rime-lid holds its handle-lid-switch inhibitor (live work). Set ${key} to anything but \"ignore\".";
+    }) [ "HandleLidSwitch" "HandleLidSwitchExternalPower" ];
+
     # ── system units (bootc: systemctl enable) ───────────────────────────────
     systemd.services.rimed = {
       wantedBy = [ "multi-user.target" ];

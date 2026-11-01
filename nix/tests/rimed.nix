@@ -36,6 +36,12 @@ pkgs.testers.runNixOSTest {
         # An unprivileged caller may talk to it (the bus policy's default context).
         user("busctl --system introspect org.rimeos.Rimed1 /org/rimeos/Rimed1 >/dev/null")
 
+    with subtest("a call to org.rimeos.Rimed1 starts rimed through the activation file"):
+        machine.succeed("systemctl stop rimed.service")
+        machine.fail("systemctl is-active rimed.service")
+        user("busctl --system introspect org.rimeos.Rimed1 /org/rimeos/Rimed1 >/dev/null")
+        assert machine.succeed("systemctl is-active rimed.service").strip() == "active"
+
     with subtest("the rime CLI"):
         print(machine.succeed("rime --version"))
         print(machine.succeed("rime status"))
@@ -53,12 +59,20 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl is-enabled rime-lid.service")
         machine.wait_until_succeeds("test \"$(systemctl show -P SubState rime-lid.service)\" != start", timeout=60)
         machine.sleep(2)
-        state = machine.succeed("systemctl show -P ActiveState,Result,SubState rime-lid.service")
+        # Exactly one clean run. A driver that crashes sits in activating/auto-restart (Restart=on-failure) for most
+        # of a minute before it reads "failed", so "not failed" alone would pass a crash loop.
+        state = machine.succeed("systemctl show -p ActiveState -p Result -p NRestarts rime-lid.service").split()
         print(state)
-        assert "failed" not in state, state
+        assert sorted(state) == ["ActiveState=inactive", "NRestarts=0", "Result=success"], state
 
     with subtest("polkit actions are installed"):
-        machine.succeed("pkaction --action-id org.rimeos.rimed.manage-power")
+        # The four ids the daemon and the agent runtime name (Containerfile.base asserts the same four).
+        for action in ("org.rimeos.rimed.manage-power", "org.rimeos.rimed.manage-battery",
+                       "org.rimeos.agent.system-access", "org.rimeos.agent.break-glass"):
+            machine.succeed(f"pkaction --action-id {action}")
+
+    with subtest("the rescue target rime recover looks for is where the NixOS build looks"):
+        machine.succeed("test -e /etc/systemd/system/rescue.target")
 
     with subtest("the AI model store (tmpfiles)"):
         assert machine.succeed("stat -c %a /var/lib/rime/ai/staging").strip() == "700"

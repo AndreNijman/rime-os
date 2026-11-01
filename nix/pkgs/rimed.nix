@@ -23,6 +23,7 @@
   coreutils,
   curl,
   git,
+  libxml2,
   openssh,
   openssl,
   smartmontools,
@@ -228,6 +229,8 @@ rustPlatform.buildRustPackage {
   checkFlags = lib.concatMap (t: [ "--skip" t ]) (lib.concatLists (lib.attrValues skips));
   # Programs the tests run: by the store paths above (curl, git, bwrap, openssl) or through PATH.
   nativeCheckInputs = [ bubblewrap cacert curl git openssh openssl util-linux ];
+  # xmllint, for the polkit checks in postInstall.
+  nativeBuildInputs = [ libxml2 ];
   preCheck = ''
     # The sandbox's HOME is /homeless-shelter (absent) and there is no XDG_RUNTIME_DIR, so code that falls back to
     # /run/user/<uid> would try a directory that does not exist here.
@@ -277,6 +280,24 @@ rustPlatform.buildRustPackage {
 
     # polkit actions (no exec.path annotations: nothing in them names a binary).
     install -Dm644 -t $share/polkit-1/actions $src/files/system/polkit-1/actions/*.policy
+    # Containerfile.base's checks, carried over: polkitd silently skips an action file it cannot parse (pkcheck then
+    # exits 127 for that action for ever), a renamed action authorises nothing, and the agent elevation actions
+    # (§3.3) may never be reachable without a human or cache a yes.
+    for f in $share/polkit-1/actions/org.rimeos.*.policy; do xmllint --noout --nonet "$f"; done
+    grep -q 'id="org.rimeos.rimed.manage-power"' $share/polkit-1/actions/org.rimeos.rimed.policy
+    grep -q 'id="org.rimeos.rimed.manage-battery"' $share/polkit-1/actions/org.rimeos.rimed.policy
+    grep -q 'id="org.rimeos.agent.system-access"' $share/polkit-1/actions/org.rimeos.agent.policy
+    grep -q 'id="org.rimeos.agent.break-glass"' $share/polkit-1/actions/org.rimeos.agent.policy
+    agentPolicy=$share/polkit-1/actions/org.rimeos.agent.policy
+    if grep -qE '<allow_[a-z]+>[a-z_]*_keep' $agentPolicy; then
+      echo "rimed: a _keep authorisation caches a yes nobody was asked for" >&2; exit 1
+    fi
+    if grep -q '<allow_any>yes' $agentPolicy; then
+      echo "rimed: <allow_any>yes hands the elevation action to any caller" >&2; exit 1
+    fi
+    if grep -q '<allow_inactive>yes' $agentPolicy; then
+      echo "rimed: <allow_inactive>yes hands the elevation action to an inactive session" >&2; exit 1
+    fi
 
     # systemd units, byte for byte the bootc ones (hardening included) apart from the program paths. They keep their
     # [Install] sections, which NixOS units do not have, so `systemctl --user enable rime-agentd` (what
