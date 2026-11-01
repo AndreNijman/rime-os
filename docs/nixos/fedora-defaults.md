@@ -38,6 +38,10 @@ host or a later area can choose differently without a priority fight.
 | mpris-proxy | bluez's user unit, globally enabled, active in katana's session: headset buttons reach the Shell's media controls | the unit exists but nothing wants it | `systemd.user.services.mpris-proxy.wantedBy = [ "default.target" ]` (when Bluetooth is on) | subtest "mpris-proxy" |
 
 Mutant: the same test with `rime.fedoraParity.enable = false` on the node fails (first at "firmware is installed").
+Two more mutants show the later subtests can fail too (2026-11-01, logs in the rime-nix scratch dir `verify-ledger/`):
+`fonts.fontconfig.defaultFonts.sansSerif = lib.mkForce [ "DejaVu Sans" ]` on the node fails "fontconfig picks Noto"
+(`fc-match sans-serif = 'DejaVu Sans'`), and `systemd.user.services.mpris-proxy.wantedBy = lib.mkForce [ ]` fails
+"mpris-proxy starts in every user session", the last assertion, after every earlier subtest passed.
 
 ## Same
 
@@ -52,7 +56,7 @@ Mutant: the same test with `rime.fedoraParity.enable = false` on the node fails 
 | PAM faillock | not in katana's `system-auth` / `password-auth` stacks | not in NixOS's stacks. Neither locks an account after wrong passwords |
 | ModemManager, Bluetooth, CUPS (socket), Avahi + `nss-mdns`, fwupd, power-profiles-daemon, thermald, udisks2, upower, rtkit, systemd-pstore | enabled by presets | enabled by NixOS modules (desktop.nix, NetworkManager's ModemManager default); `systemd-pstore` enabled (the `fedora-parity` VM prints it) |
 | Firewall | firewalld not installed; Rime's nftables ruleset (`rime-firewall`) | `rime-firewall` only, `networking.firewall.enable = false` (G8) |
-| xdg-user-dirs | user unit inactive on katana: its `graphical-session-pre.target` is never reached under Rime's sessions; no `~/.config/user-dirs.dirs` | not installed. Same visible behaviour (none). If folders are ever wanted, both sides need the Shell or firstrun to run it |
+| xdg-user-dirs | user unit inactive on katana: its `graphical-session-pre.target` is never reached under Rime's sessions; no `~/.config/user-dirs.dirs` | installed (desktop.nix:646) but nothing runs it: no user unit or autostart entry in the rime-vm toplevel. Same visible behaviour (none). If folders are ever wanted, both sides need the Shell or firstrun to run it |
 | irqbalance | masked | not enabled (rimed steers IRQs) |
 | Unattended updates | `bootc-fetch-apply-updates.timer` masked (Containerfile.core:2593) | `system.autoUpgrade.enable = false` |
 | Locale, keymap | `en_US.UTF-8`, `us` | base.nix `en_US.UTF-8`, `console.keyMap = "us"` |
