@@ -16,6 +16,7 @@
     ./hostlayer.nix
     ./rename-compat.nix
     ./update.nix
+    ./virtualization.nix
   ];
 
   nixpkgs.overlays = [ overlay ];
