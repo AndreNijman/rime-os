@@ -154,13 +154,14 @@ fn confinement_at(bwrap: &Path) -> Result<Confinement> {
     // unprivileged user namespaces leaves a perfectly good `bwrap` that cannot
     // build a sandbox, so it is RUN, with the namespace flags a backend gets.
     let confinement = Confinement { bwrap: bwrap.to_path_buf() };
-    probe(&confinement).map_err(|e| refuse(format!("{e:#}")))?;
+    probe(&confinement, PROBE_TIMEOUT).map_err(|e| refuse(format!("{e:#}")))?;
     Ok(confinement)
 }
 
 /// Run `true` inside the sandbox a backend would get, minus the backend's own
-/// paths and devices.
-fn probe(c: &Confinement) -> Result<()> {
+/// paths and devices. A probe still running after `timeout` is killed and
+/// counts as a refusal.
+fn probe(c: &Confinement, timeout: Duration) -> Result<()> {
     let mut argv = sandbox_argv(c);
     argv.push("--".into());
     argv.push("/usr/bin/true".into());
@@ -177,7 +178,7 @@ fn probe(c: &Confinement) -> Result<()> {
         .spawn()
         .with_context(|| format!("cannot run {}", c.bwrap.display()))?;
 
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait().context("waiting for the sandbox probe")? {
             break status;
@@ -186,9 +187,8 @@ fn probe(c: &Confinement) -> Result<()> {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "{} did not finish building a test sandbox within {}s",
+                "{} did not finish building a test sandbox within {timeout:?}",
                 c.bwrap.display(),
-                PROBE_TIMEOUT.as_secs()
             );
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -908,6 +908,25 @@ mod tests {
         let msg = format!("{:#}", confinement_at(&b).expect_err("accepted a broken bwrap"));
         assert!(msg.contains("could not build a test sandbox"), "{msg}");
         assert!(msg.contains("No permissions to create new namespace"), "{msg}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_bwrap_that_hangs_is_killed_and_refused() {
+        let _serial = serial();
+        // A wedged bwrap must not wedge the daemon's start: the probe is
+        // bounded, the hung process is killed, and the answer is a refusal,
+        // never a pass. The fake sleeps for 5 s, so without the bound it would
+        // "succeed" when the sleep ends.
+        let d = scratch("hang");
+        let b = d.join("bwrap");
+        script(&b, "exec sleep 5", 0o755);
+        let c = Confinement { bwrap: b.clone() };
+        let began = Instant::now();
+        let err = probe(&c, Duration::from_millis(300)).expect_err("a hung bwrap was accepted");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("did not finish building a test sandbox within 300ms"), "{msg}");
+        assert!(began.elapsed() < Duration::from_secs(3), "the probe waited {:?}", began.elapsed());
         std::fs::remove_dir_all(&d).ok();
     }
 
