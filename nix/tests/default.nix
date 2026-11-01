@@ -30,3 +30,11 @@
 // import ./boot.nix { inherit pkgs self; }
 # catalogue, catalogue-data
 // import ./catalogue.nix { inherit pkgs self; }
+# pkg-translate (+ .katana)
+// import ./pkg-translate.nix { inherit pkgs self; }
+# equibop
+// { equibop = import ./equibop.nix { inherit pkgs self; }; }
+# virtualization
+// { virtualization = import ./virtualization.nix { inherit pkgs self; }; }
+# vendor-verify, vendor-fetch-refuses
+// import ./vendor-verify.nix { inherit pkgs self; }
