@@ -1,0 +1,341 @@
+# Rime OS boot splash -- the layered ridge ("Rise")
+#
+# The ridge lockup (symbol + "rime") rises out of the charcoal: the three
+# neutral planes and the wordmark first, the accent plane (plane 3) a beat
+# later, then a row of six progress dots in which one dot of light travels
+# while the machine boots (brand pack page 2, "Boot splash"). Shutdown, reboot
+# and update modes show the settled splash from the first frame.
+#
+# The engine is the one the spark splash ("Focus") was rebuilt around, for the
+# same measured reasons (files/branding/plymouth/README.md): plymouth has no
+# vsync, truncates sprite positions to whole pixels, re-samples an image on
+# every Image.Scale/Rotate and redraws a sprite only when its opacity moves by
+# more than 0.01. So every image is scaled ONCE, below, nothing moves, and each
+# refresh (60 Hz) only changes opacities on curves of real elapsed time that
+# start and end at rest. The travelling light is opacity too: each dot has a
+# lit twin over it whose opacity follows a smooth pulse.
+#
+# Per-owner accent: only plane 3 changes colour (brand pack page 4). Each
+# rime-os-accent-NN theme is this script with its own HI_ line, its own
+# lockup-accent / dot-on / bullet images, and the neutral images shared with
+# rime-os (nix/pkgs/rime-plymouth.nix builds all 25).
+#
+# The background is one flat charcoal: equal top and bottom colours take
+# plymouth's plain fill path, not its dithered gradient.
+
+HI_R = 0.569; HI_G = 0.761; HI_B = 0.863;   # #91C2DC (Rime Blue, plane 3)
+
+RATE = 60;
+Plymouth.SetRefreshRate(RATE);
+
+Window.SetBackgroundTopColor(0.129, 0.133, 0.141);      # #212224 charcoal
+Window.SetBackgroundBottomColor(0.129, 0.133, 0.141);
+
+mode = Plymouth.GetMode();
+intro = 0;
+if (mode == "boot") { intro = 1; }
+
+# ── helpers ────────────────────────────────────────────────────────────────
+fun clamp01 (x) {
+  if (x < 0) return 0;
+  if (x > 1) return 1;
+  return x;
+}
+
+fun absv (x) {
+  if (x < 0) return -x;
+  return x;
+}
+
+# smootherstep: 0 -> 1 with zero velocity AND acceleration at both ends
+fun smooth (x) {
+  local.u = clamp01(x);
+  return local.u * local.u * local.u * (local.u * (local.u * 6 - 15) + 10);
+}
+
+# e^-x for x >= 0 (the script library has no exp): (1 - x/1024)^1024
+fun expn (x) {
+  if (x <= 0) return 1;
+  if (x > 40) return 0;
+  local.y = 1 - x / 1024;
+  local.k = 0;
+  while (local.k < 10) { local.y = local.y * local.y; local.k++; }
+  return local.y;
+}
+
+# the fractional part of x >= 0
+fun frac (x) {
+  return x - Math.Int(x);
+}
+
+# ── layout ─────────────────────────────────────────────────────────────────
+w = Window.GetWidth();
+h = Window.GetHeight();
+hd = 0;
+if (h > 1500) { hd = 1; }
+
+cx = Math.Int(w / 2);
+cy = Math.Int(h * 0.46);
+
+# Fixed-size masters are drawn 1:1 on a 1200-line (hd: 2400-line) screen and
+# scaled once to the screen's height otherwise.
+fun fit (img, ref) {
+  local.k = h / ref;
+  local.nw = Math.Int(img.GetWidth() * local.k + 0.5);
+  local.nh = Math.Int(img.GetHeight() * local.k + 0.5);
+  if (local.nw == img.GetWidth() && local.nh == img.GetHeight()) return img;
+  if (local.nw < 1) local.nw = 1;
+  if (local.nh < 1) local.nh = 1;
+  return img.Scale(local.nw, local.nh);
+}
+
+if (hd) {
+  base_img = fit(Image("lockup-base-hd.png"), 2400);
+  accent_img = fit(Image("lockup-accent-hd.png"), 2400);
+  dot_off_img = fit(Image("dot-off-hd.png"), 2400);
+  dot_on_img = fit(Image("dot-on-hd.png"), 2400);
+  bullet_img = fit(Image("bullet-hd.png"), 2400);
+  prompt_fallback = fit(Image("prompt-hd.png"), 2400);
+} else {
+  base_img = fit(Image("lockup-base.png"), 1200);
+  accent_img = fit(Image("lockup-accent.png"), 1200);
+  dot_off_img = fit(Image("dot-off.png"), 1200);
+  dot_on_img = fit(Image("dot-on.png"), 1200);
+  bullet_img = fit(Image("bullet.png"), 1200);
+  prompt_fallback = fit(Image("prompt.png"), 1200);
+}
+
+LW = base_img.GetWidth();
+LH = base_img.GetHeight();
+lx = cx - Math.Int(LW / 2);
+ly = cy - Math.Int(LH / 2);
+
+# ── sprites (z: lockup < accent plane < dots < prompt) ────────────────────
+base = Sprite(base_img);
+base.SetPosition(lx, ly, 1);
+base.SetOpacity(0);
+
+accent = Sprite(accent_img);          # the same canvas as the base: same position
+accent.SetPosition(lx, ly, 2);
+accent.SetOpacity(0);
+
+NDOTS = 6;
+DS = dot_off_img.GetWidth();
+DP = Math.Int(DS * 2.6);               # dot pitch
+dots_y = ly + LH + Math.Int(h * 0.075);
+dot_x0 = cx - Math.Int(((NDOTS - 1) * DP + DS) / 2);
+dot_off[0] = NULL;                     # declared here so they are global
+dot_on[0] = NULL;
+i = 0;
+while (i < NDOTS) {
+  dot_off[i] = Sprite(dot_off_img);
+  dot_off[i].SetPosition(dot_x0 + i * DP, dots_y, 10);
+  dot_off[i].SetOpacity(0);
+  dot_on[i] = Sprite(dot_on_img);
+  dot_on[i].SetPosition(dot_x0 + i * DP, dots_y, 11);
+  dot_on[i].SetOpacity(0);
+  i++;
+}
+
+# ── password prompt (LUKS) ────────────────────────────────────────────────
+# The prompt takes the dots' place, the bullets sit under it and any message
+# (keyboard layout, "use your recovery key") under them. Nothing the user
+# types is ever drawn: display_password() is only told how many.
+prompt_y = ly + LH + Math.Int(h * 0.06);
+prompt_sprite = Sprite();
+prompt_sprite.SetOpacity(0);
+prompt_text = "";
+prompt_ready = 0;
+BS = bullet_img.GetWidth();            # bullet size
+SP = Math.Int(BS * 1.9);               # bullet pitch
+MAXB = 40;                             # a longer passphrase keeps a full row
+bullets_y = prompt_y + Math.Int(h * 0.045);
+msg_y = bullets_y + Math.Int(h * 0.05);
+bullets_n = 0;                         # how many the user has typed
+bullets_made = 0;                      # sprites created so far
+bullet_spr[0] = NULL;
+bullet_a[0] = 0;
+row_off = 0;                           # animated offset of bullet 0 from cx
+bullet_text = Sprite();                # only if bullet.png failed to load
+bullet_text.SetOpacity(0);
+
+message_sprite = Sprite();
+message_sprite.SetOpacity(0);
+message_text = "";
+
+# Prompt and message text grow with the screen (the label plugin's default is
+# 12 pt on every screen). label-freetype honours only the size in "Family Size".
+tsize = Math.Int(12 * h / 1200 + 0.5);
+if (tsize < 12) { tsize = 12; }
+if (tsize > 28) { tsize = 28; }
+text_font = "Sans " + tsize;
+
+pw_target = 0; pw_p = 0;               # 0 = splash, 1 = password prompt
+msg_target = 0; msg_p = 0;             # progress of each transition, 0..1
+
+# ── the clock ─────────────────────────────────────────────────────────────
+# Animation time advances by 1/RATE per refresh and is steered toward real
+# elapsed time, which plymouth only hands a script through the boot-progress
+# callback. A slow frame does not stretch the timeline (it catches up), and if
+# progress stops arriving the animation keeps running on the refresh alone.
+# It never runs backwards.
+clock = 0;
+last_clock = 0;
+prog_new = -1;
+prog_last = -1;
+sync_off = -1;
+
+fun on_progress (duration, progress) {
+  if (duration > global.prog_last) {   # a paused progress repeats itself: ignore it
+    global.prog_last = duration;
+    global.prog_new = duration;
+  }
+}
+
+fun advance_clock () {
+  local.dt = 1 / RATE;
+  global.clock = global.clock + local.dt;
+  if (global.prog_new >= 0) {
+    if (global.sync_off < 0) { global.sync_off = global.prog_new - global.clock; }
+    local.err = (global.prog_new - global.sync_off) - global.clock + local.dt / 2;
+    if (local.err < -0.25) {
+      global.sync_off = global.prog_new - global.clock;   # progress was paused: re-align
+    } else if (local.err > 0.25) {
+      global.clock = global.clock + local.err;            # a long stall: jump to real time
+    } else if (local.err > 0) {
+      global.clock = global.clock + local.err * 0.5;      # behind: catch up within ~3 samples
+    } else {
+      global.clock = global.clock + Math.Max(local.err * 0.1, -local.dt / 2);   # ahead: ease off
+    }
+    global.prog_new = -1;
+  }
+}
+
+T0 = 0.12;                             # a beat of charcoal after the firmware hands over
+DOT_PERIOD = 1.8;                      # one pass of the light along the row, seconds
+
+# ── the frame ─────────────────────────────────────────────────────────────
+fun refresh () {
+  advance_clock();
+  local.fdt = global.clock - global.last_clock;
+  global.last_clock = global.clock;
+
+  if (intro) { local.t = global.clock - T0; } else { local.t = global.clock + 10; }
+
+  # the ridge rises: neutral planes + wordmark, then the accent plane
+  local.a_base = smooth(local.t / 0.7);
+  local.a_accent = smooth((local.t - 0.3) / 0.7);
+  local.a_dots = smooth((local.t - 0.9) / 0.5);
+
+  # password prompt, over 0.4 s either way: the splash dims, the dots go in
+  # the first half and the prompt comes in the second (they share a line)
+  if (global.pw_target) { global.pw_p = Math.Min(global.pw_p + local.fdt / 0.4, 1); }
+  else { global.pw_p = Math.Max(global.pw_p - local.fdt / 0.4, 0); }
+  if (global.msg_target) { global.msg_p = Math.Min(global.msg_p + local.fdt / 0.3, 1); }
+  else { global.msg_p = Math.Max(global.msg_p - local.fdt / 0.3, 0); }
+  local.pw = smooth(global.pw_p);
+  local.g = 1 - 0.3 * local.pw;
+
+  base.SetOpacity(local.a_base * local.g);
+  accent.SetOpacity(local.a_accent * local.g);
+
+  # the travelling light: position p runs from just before dot 0 to just past
+  # the last dot, and each lit twin follows a smooth pulse around p
+  local.dv = local.a_dots * (1 - smooth(global.pw_p / 0.5));
+  local.p = frac(Math.Max(local.t - 1.1, 0) / DOT_PERIOD) * (NDOTS + 1) - 1;
+  local.k = 0;
+  while (local.k < NDOTS) {
+    dot_off[local.k].SetOpacity(local.dv);
+    dot_on[local.k].SetOpacity(local.dv * smooth(1 - absv(local.p - local.k)));
+    local.k++;
+  }
+
+  prompt_sprite.SetOpacity(smooth((global.pw_p - 0.4) / 0.6));
+  message_sprite.SetOpacity(smooth(global.msg_p));
+
+  if (global.pw_p > 0 || global.bullets_made > 0) { draw_bullets(local.fdt, local.pw); }
+}
+
+fun draw_bullets (fdt, pw) {
+  local.n = global.bullets_n;
+  if (local.n > MAXB) local.n = MAXB;
+  if (BS < 1) {                        # no bullet image: text bullets in the accent
+    bullet_text.SetOpacity(pw);
+    return;
+  }
+  while (global.bullets_made < local.n) {
+    bullet_spr[global.bullets_made] = Sprite(bullet_img);
+    bullet_spr[global.bullets_made].SetOpacity(0);
+    bullet_a[global.bullets_made] = 0;
+    global.bullets_made++;
+  }
+  # the row re-centres on a quick spring as bullets come and go
+  local.target = -(local.n - 1) * SP / 2;
+  if (local.n < 1) local.target = global.row_off;
+  global.row_off = global.row_off + (local.target - global.row_off) * (1 - expn(fdt / 0.07));
+  local.kb = 1 - expn(fdt / 0.06);
+  local.i = 0;
+  while (local.i < global.bullets_made) {
+    local.want = 0;
+    if (local.i < local.n) local.want = 1;
+    bullet_a[local.i] = bullet_a[local.i] + (local.want - bullet_a[local.i]) * local.kb;
+    local.x = cx + global.row_off + local.i * SP - (BS - 1) / 2;
+    bullet_spr[local.i].SetPosition(Math.Int(local.x), bullets_y, 21);
+    bullet_spr[local.i].SetOpacity(bullet_a[local.i] * pw);
+    local.i++;
+  }
+}
+
+fun display_password (prompt, bullets) {
+  global.pw_target = 1;
+  if (!global.prompt_ready || prompt != global.prompt_text) {
+    global.prompt_ready = 1;
+    global.prompt_text = prompt;
+    local.pimg = Image.Text(prompt, 0.980, 0.980, 0.980, 1, text_font);
+    # No label plugin draws a 0x0 image; say something rather than nothing.
+    if (!local.pimg || local.pimg.GetWidth() < 1) { local.pimg = prompt_fallback; }
+    prompt_sprite.SetImage(local.pimg);
+    prompt_sprite.SetPosition(cx - Math.Int(local.pimg.GetWidth() / 2), prompt_y, 20);
+  }
+  global.bullets_n = bullets;
+  if (BS < 1) {
+    local.btxt = "";
+    local.i = 0;
+    while (local.i < bullets && local.i < MAXB) { local.btxt = local.btxt + "* "; local.i++; }
+    local.bimg = Image.Text(local.btxt, HI_R, HI_G, HI_B);
+    bullet_text.SetImage(local.bimg);
+    bullet_text.SetPosition(cx - Math.Int(local.bimg.GetWidth() / 2), bullets_y, 21);
+  }
+}
+
+fun display_normal () {
+  global.pw_target = 0;
+}
+
+# --- messages ---
+# Not an empty function: an empty message() is plymouth accepting
+# `plymouth message --text=...` and dropping it. At the passphrase prompt this
+# is the only place that can say which keyboard layout is live or that a
+# recovery key is wanted. Drawn UNDER the bullets; an empty text clears it.
+fun message (text) {
+  if (text == "") {
+    global.msg_target = 0;
+    return;
+  }
+  global.message_text = text;
+  local.mimg = Image.Text(text, 0.62, 0.66, 0.72, 1, text_font);
+  message_sprite.SetImage(local.mimg);
+  message_sprite.SetPosition(cx - Math.Int(local.mimg.GetWidth() / 2), msg_y, 22);
+  global.msg_target = 1;
+}
+
+fun hide_message (text) {
+  if (text == global.message_text) { global.msg_target = 0; }
+}
+
+Plymouth.SetRefreshFunction(refresh);
+Plymouth.SetBootProgressFunction(on_progress);
+Plymouth.SetDisplayPasswordFunction(display_password);
+Plymouth.SetDisplayNormalFunction(display_normal);
+Plymouth.SetMessageFunction(message);
+Plymouth.SetHideMessageFunction(hide_message);
