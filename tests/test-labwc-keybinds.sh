@@ -295,9 +295,13 @@ printf '%s\n' "$block" | pipe_has -E 'command="(firefox|zen|zen-browser|chromium
     && bad "no generated bind hardcodes a browser" \
     || ok "no generated bind hardcodes a browser"
 
-printf '%s\n' "$block" | pipe_has 'command="ghostty"' \
-    && ok "\$terminal is resolved to the installed terminal" \
-    || bad "\$terminal is resolved to the installed terminal"
+printf '%s\n' "$block" | pipe_has 'command="xdg-terminal-exec"' \
+    && ok "\$terminal opens the user's default terminal" \
+    || bad "\$terminal opens the user's default terminal"
+
+printf '%s\n' "$block" | pipe_has -E 'command="(ghostty|alacritty|foot|kitty)( |")' \
+    && bad "no generated bind hardcodes a terminal" \
+    || ok "no generated bind hardcodes a terminal"
 
 # The screenshot bindings embed a path. It has to be the INSTALLED one, not
 # whatever tree the generator read the model out of.

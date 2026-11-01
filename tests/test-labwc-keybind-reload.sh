@@ -151,16 +151,16 @@ export HOME="${WORK}/home"
 mkdir -p "${XDG_CONFIG_HOME}/labwc" "$HOME" "${WORK}/bin"
 
 # The generated keybind commands are PATH-resolved program names — the shipped
-# model binds SUPER+T to the terminal, which generates `ghostty`. Stubbing it
+# model binds SUPER+T to the terminal, which generates `xdg-terminal-exec`. Stubbing it
 # is what makes a keypress OBSERVABLE: the real question is not whether labwc
 # accepted the XML, it is whether pressing the key runs the command. The stub
 # records every invocation; the assertions read that log.
 FIRED="${WORK}/fired.log"
-cat > "${WORK}/bin/ghostty" <<STUB
+cat > "${WORK}/bin/xdg-terminal-exec" <<STUB
 #!/bin/sh
 echo "fired" >> "${FIRED}"
 STUB
-chmod +x "${WORK}/bin/ghostty"
+chmod +x "${WORK}/bin/xdg-terminal-exec"
 export PATH="${WORK}/bin:${PATH}"
 
 cp "$RC_TMPL" "${XDG_CONFIG_HOME}/labwc/rc.xml"

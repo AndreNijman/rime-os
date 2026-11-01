@@ -15,7 +15,7 @@
 <openbox_menu>
   <menu id="root-menu" label="Rime">
     <item label="Terminal">
-      <action name="Execute" command="ghostty"/>
+      <action name="Execute" command="xdg-terminal-exec"/>
     </item>
     <item label="App launcher">
       <action name="Execute" command="rime shell launcher"/>
