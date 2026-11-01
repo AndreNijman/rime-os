@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Rime OS</vendor>
+  <vendor_url>https://github.com/AndreNijman/rime-os</vendor_url>
+
+  <!-- Runtime switches (rimed org.rimeos.Rimed1.Switch.Set): turn a unit that bootc enabled at run time on or
+       off, e.g. a disposable guest's wipe unit or rime-firewall. They change what the machine does at every
+       boot and login, so even the active local user needs an administrator. -->
+  <action id="org.rimeos.rimed.manage-switches">
+    <description>Change Rime OS runtime switches</description>
+    <message>Authentication is required to change what Rime OS starts</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+</policyconfig>

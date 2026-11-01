@@ -13,4 +13,5 @@
   rime-kernel-config = callPackage ./kernel/config.nix { };
   # Rime's shipped sched-ext schedulers (bootc: Containerfile.core scx-builder).
   rime-scx = callPackage ./kernel/scx.nix { };
+  rime-hostlayer = callPackage ./rime-hostlayer { };
 }

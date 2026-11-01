@@ -11,6 +11,7 @@
     ./gaming.nix
     ./security.nix
     ./packages-catalogue.nix
+    ./hostlayer.nix
   ];
 
   nixpkgs.overlays = [ overlay ];

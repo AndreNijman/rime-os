@@ -25,8 +25,8 @@ let
     NoNewPrivileges = true;
     ProtectSystem = "strict";
     # "-": a path that does not exist on this machine is skipped instead of failing the unit. /var/home is
-    # bootc's home; NixOS homes are under /home.
-    ReadWritePaths = [ "-/var/lib/rime-secretd" "-/var/lib/rime-greet" "-/home" ];
+    # bootc's home, and a migrated machine's (PLAN.md D2: @home at /var/home); new NixOS homes are under /home.
+    ReadWritePaths = [ "-/var/lib/rime-secretd" "-/var/lib/rime-greet" "-/home" "-/var/home" ];
     ProtectKernelTunables = true;
     ProtectKernelModules = true;
     ProtectControlGroups = true;
@@ -114,10 +114,11 @@ in
     powerManagement.resumeCommands = "${helper "rime-wifi-resume"} post";
 
     # libexec: files/system/shared-machine/guest-accounts. Ships empty: the guest engine refuses every
-    # account it does not name. C = copied once, then the machine's own file.
+    # account it does not name. C = copied once, then the machine's own file. Under /var/lib/rime, not bootc's
+    # /etc/rime (PLAN.md D2; rime-libexec's FHS table moves the readers, hostlayer.nix links the old path).
     systemd.tmpfiles.rules = [
       "d /etc/rime 0755 root root -"
-      "C /etc/rime/guest-accounts 0644 root root - ${libexec}/share/rime/shared-machine/guest-accounts"
+      "C /var/lib/rime/guest-accounts 0644 root root - ${libexec}/share/rime/shared-machine/guest-accounts"
     ] ++ lib.optionals desktop [
       # rime-greet-wallpaper writes here as root; the greeter only reads (bootc /usr/lib/tmpfiles.d/rime-greet.conf).
       "d /var/lib/rime-greet/wallpapers 0755 root root -"
@@ -139,10 +140,9 @@ in
       documentation = [ "man:rime(1)" ];
       bindsTo = [ "user-runtime-dir@%i.service" ];
       before = [ "user-runtime-dir@%i.service" ];
-      # Installed, NOT enabled (as on bootc): only a configured guest's uid gets it. TODO(handover): rime-user
-      # enables it with `systemctl enable rime-guest-session@<uid>`, which NixOS refuses (read-only
-      # /etc/systemd/system, no [Install] section). Needs a boot-time `systemctl add-wants --runtime` from
-      # /etc/rime/guest-accounts, or a declarative guest list.
+      # Installed, NOT enabled (as on bootc): only a configured guest's uid gets it. bootc's `systemctl enable`
+      # is a runtime switch on NixOS (hostlayer.nix: user-runtime-dir@ wants it, a condition on
+      # /var/lib/rime/switch/<unit>.on runs it; `rime-user guest enable` sets that).
       serviceConfig = guestHardening // {
         Type = "oneshot";
         ExecStart = "${pkgs.coreutils}/bin/true";
@@ -189,10 +189,11 @@ in
       documentation = [ "https://sing-box.sagernet.org" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
-      unitConfig.ConditionPathExists = "/etc/sing-box/config.json";
+      # The user's config, under /var/lib/rime (PLAN.md D2); hostlayer.nix links /etc/sing-box there.
+      unitConfig.ConditionPathExists = "/var/lib/rime/sing-box/config.json";
       serviceConfig = {
         Type = "simple";
-        ExecStart = "${pkgs.sing-box}/bin/sing-box run -c /etc/sing-box/config.json";
+        ExecStart = "${pkgs.sing-box}/bin/sing-box run -c /var/lib/rime/sing-box/config.json";
         Restart = "on-failure";
         RestartSec = 2;
         CapabilityBoundingSet = [ "CAP_NET_ADMIN" "CAP_NET_RAW" "CAP_NET_BIND_SERVICE" ];
