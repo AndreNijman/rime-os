@@ -16,3 +16,8 @@ Flow: `nix-kernel-sign.yml` (GitHub-hosted, never katana) builds `rimeKernelImag
 `<hash>.sig` + `<hash>.json`. They are committed to `signatures/`. `nix/modules/kernel.nix` then boots
 `sign.nix`'s output: the same image with the signature attached, verified against this certificate at build
 time. Rotating the MOK means replacing this file in the same PR as the new signatures.
+
+Reproducibility (measured 2026-11-01 on katana): `nix build --rebuild` of a `rimeKernelImage` (the certificate
+insertion and `make bzImage` relink) gives the same bytes. A from-source rebuild of the kernel and modules was not
+compared. If a hosted `source=build` image ever differs from the release builder's, `sign.nix` fails the release
+build (fail closed). `source=cache` avoids that once the Rime cache exists.
