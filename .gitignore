@@ -64,3 +64,7 @@ __pycache__/
 # tests/run-clippy.sh builds here so it never shares a target dir with cargo test
 /target-clippy/
 rimed/target-clippy/
+
+# Nix out-links
+result
+result-*
