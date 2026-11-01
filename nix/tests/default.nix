@@ -5,4 +5,5 @@
   vm-boot = import ./vm-boot.nix { inherit pkgs self; };
   rimed = import ./rimed.nix { inherit pkgs self; };
   libexec = import ./libexec.nix { inherit pkgs self; };
+  desktop = import ./desktop.nix { inherit pkgs self; };
 }
