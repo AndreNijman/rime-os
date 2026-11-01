@@ -29,9 +29,9 @@ ShellRoot {
     // ── Inlined palette (ThemeGreet) ──────────────────────────────
     // Values lifted verbatim from Brain_Shell's colours.json fallbacks
     // (src/theme/ColorLoader.qml) — the same defaults the Lockscreen
-    // paints with before any live theme is loaded. `active` and the
-    // spark logo are edition-derived so gaming / daily / dev each get
-    // their own accent.
+    // paints with before any live theme is loaded. `active` (the logo's
+    // plane 3 and the focus rings) is edition-derived so gaming / daily /
+    // dev each get their own accent.
     QtObject {
         id: greetTheme
         readonly property string fontFamily: "JetBrainsMono Nerd Font"
@@ -41,31 +41,25 @@ ShellRoot {
         readonly property color border:     "#ffffff"
         readonly property color errorColor: "#ff5c5c"
 
-        // Edition accent: rime (the one published image) and the legacy
-        // daily → chartreuse, legacy gaming → gold, anything else (dev box
-        // / VARIANT_ID unset) → the Brain_Shell blue so the greeter is
-        // pixel-identical to the Lockscreen off-target.
-        // The user's own accent when Rime Shell has published one, so the
-        // login screen matches the desktop; the edition colour otherwise.
+        // Accent: the user's own when Rime Shell has published one, so the
+        // login screen matches the desktop; otherwise Rime Blue (the layered
+        // ridge's plane 3) on rime / daily, gold on a legacy gaming machine,
+        // and the Brain_Shell blue off-target (dev box / VARIANT_ID unset) so
+        // the greeter is pixel-identical to the Lockscreen there.
         readonly property color active:
             greetCtx.accent !== ""        ? greetCtx.accent
           : greetCtx.edition === "gaming" ? "#fde047"
-          : greetCtx.edition === "rime"   ? "#d9f99d"
-          : greetCtx.edition === "daily"  ? "#d9f99d"
+          : greetCtx.edition === "rime"   ? "#91c2dc"
+          : greetCtx.edition === "daily"  ? "#91c2dc"
           : "#a6d0f7"
 
-        // Assets ship alongside this file, so Qt.resolvedUrl works both
-        // in-tree (dev) and installed at /usr/share/rime-greet/.
-        // With a published accent the WHITE spark is used and tinted to it in
-        // GreetSurface — white keeps full luminance, so the tint is the accent
-        // itself rather than a darkened version of it.
-        readonly property bool tintLogo: greetCtx.accent !== ""
-        readonly property url logoSource:
-            greetCtx.accent !== ""        ? Qt.resolvedUrl("assets/spark-white.png")
-          : greetCtx.edition === "gaming" ? Qt.resolvedUrl("assets/spark-gold.png")
-          : greetCtx.edition === "rime"   ? Qt.resolvedUrl("assets/spark-chartreuse.png")
-          : greetCtx.edition === "daily"  ? Qt.resolvedUrl("assets/spark-chartreuse.png")
-          : Qt.resolvedUrl("assets/spark-white.png")
+        // The layered-ridge lockup. Planes 1, 2, 4 and the wordmark are this
+        // off-white image (make-logo-assets.sh); GreetSurface draws plane 3
+        // over it as a polygon in `active`, so only plane 3 takes the accent
+        // (brand pack page 4) and no shader is needed for the tint. The asset
+        // ships alongside this file, so Qt.resolvedUrl works in-tree and
+        // installed.
+        readonly property url logoSource: Qt.resolvedUrl("assets/ridge-lockup-base.png")
     }
 
     // ── Shared greeter state + auth backend ───────────────────────
