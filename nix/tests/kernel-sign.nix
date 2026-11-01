@@ -189,6 +189,14 @@ assert !(mkSystem { }).system.build.rimeKernelSigning.signed;
     echo "image ${image} (hash ${info.imageHash}, ${info.modDirVersion})"
     cat ${sigA}/${info.imageHash}.json
 
+    echo "--- the committed Rime MOK certificate is the one bootc ships (rime-mok.der), byte for byte"
+    # Reading the file here makes a checkout without it (e.g. swallowed by .gitignore's *.pem) fail evaluation.
+    test "$(openssl x509 -in ${../pkgs/kernel/signing/rime-mok.pem} -outform DER | sha256sum | cut -d' ' -f1)" \
+      = 2fdd2f55e18d6d56ca97094bb9ffa116d9ad962c8cb5591484ee1e2a6958bcbb
+    if openssl pkey -in ${../pkgs/kernel/signing/rime-mok.pem} -noout 2>/dev/null; then
+      echo "FAIL: rime-mok.pem holds a private key"; exit 1
+    fi
+
     echo "--- the booted image verifies against the pinned (test) certificate"
     sbverify --cert ${keyA}/cert.pem "$img"
     echo "--- and not against another key"
