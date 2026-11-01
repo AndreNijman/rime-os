@@ -20,3 +20,5 @@
 // import ./kernel-sign.nix { inherit pkgs self; }
 # boot-hook-unit, boot-hook-vm
 // import ./boot.nix { inherit pkgs self; }
+# catalogue, catalogue-data
+// import ./catalogue.nix { inherit pkgs self; }

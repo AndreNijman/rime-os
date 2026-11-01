@@ -26,6 +26,7 @@ mod live;
 mod mcp;
 mod migrate;
 mod mode;
+mod nixos;
 mod oauth_device;
 mod ops;
 mod permissions;

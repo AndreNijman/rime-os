@@ -75,8 +75,12 @@ fn root_required_message(verb: &str, argv: &[String]) -> String {
         || verb.starts_with("remove")
         || verb.starts_with("pkg")
     {
-        "it writes the system extension under /var/lib and asks systemd to \
-         re-merge /usr"
+        if crate::nixos::is_nixos() {
+            crate::nixos::pkg::ROOT_WHY
+        } else {
+            "it writes the system extension under /var/lib and asks systemd to \
+             re-merge /usr"
+        }
     } else {
         "bootc writes to /ostree and /boot"
     };
@@ -568,6 +572,9 @@ pub fn vm(args: &[String]) -> i32 {
 /// signature checking and the extension lifecycle, and duplicating any of that
 /// here would just create two implementations to keep in sync.
 pub fn pkg(args: &[String]) -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::pkg::run(args);
+    }
     // No "rime: running: …" banner here, unlike the bootc/fwupd verbs: the
     // engine narrates its own work, and echoing the invocation on top of that
     // made read-only verbs like `rime pkg list` print noise before their output.

@@ -105,11 +105,11 @@ data class PrivilegeRequest(
     /** The operation in words, including its arguments. */
     val effect: String
         get() = when (verb) {
-            "install" -> "add ${packages.joinToString(", ")} to the system extension"
-            "remove" -> "remove ${packages.joinToString(", ")} from the system extension"
-            "pkg_upgrade" -> "re-resolve every installed package against the repositories"
-            "pkg_rebuild" -> "rebuild the system extension for the running OS version"
-            "pkg_rollback" -> "restore the previous system extension"
+            "install" -> "install ${packages.joinToString(", ")} on this machine"
+            "remove" -> "remove ${packages.joinToString(", ")} from this machine"
+            "pkg_upgrade" -> "bring every installed package up to date"
+            "pkg_rebuild" -> "rebuild the installed packages for the running system"
+            "pkg_rollback" -> "go back to the previous set of installed packages"
             "pin" -> "pin the current deployment so an update cannot collect it"
             "rollback" -> "boot the previous deployment on the next restart"
             "update" -> "update the OS image and firmware"

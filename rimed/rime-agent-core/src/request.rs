@@ -246,11 +246,11 @@ impl Verb {
     /// the set of verbs that exists.
     pub fn kind_summary(&self) -> &'static str {
         match self {
-            Verb::Install { .. } => "add packages to the system extension",
-            Verb::Remove { .. } => "remove packages from the system extension",
-            Verb::PkgUpgrade => "re-resolve every installed package against the repositories",
-            Verb::PkgRebuild => "rebuild the system extension for the running OS version",
-            Verb::PkgRollback => "restore the previous system extension",
+            Verb::Install { .. } => "install packages on this machine",
+            Verb::Remove { .. } => "remove packages from this machine",
+            Verb::PkgUpgrade => "bring every installed package up to date",
+            Verb::PkgRebuild => "rebuild the installed packages for the running system",
+            Verb::PkgRollback => "go back to the previous set of installed packages",
             Verb::Pin => "pin the current deployment so an update cannot garbage-collect it",
             Verb::Rollback => "boot the previous deployment on the next restart",
             Verb::Update => "update the OS image and firmware",
@@ -262,18 +262,18 @@ impl Verb {
     pub fn effect(&self) -> String {
         match self {
             Verb::Install { packages } => format!(
-                "add {} to the system extension ({})",
+                "install {} on this machine ({})",
                 plural(packages.len(), "package"),
                 packages.join(", ")
             ),
             Verb::Remove { packages } => format!(
-                "remove {} from the system extension ({})",
+                "remove {} from this machine ({})",
                 plural(packages.len(), "package"),
                 packages.join(", ")
             ),
-            Verb::PkgUpgrade => "re-resolve every installed package against the repositories".into(),
-            Verb::PkgRebuild => "rebuild the system extension for the running OS version".into(),
-            Verb::PkgRollback => "restore the previous system extension".into(),
+            Verb::PkgUpgrade => "bring every installed package up to date".into(),
+            Verb::PkgRebuild => "rebuild the installed packages for the running system".into(),
+            Verb::PkgRollback => "go back to the previous set of installed packages".into(),
             Verb::Pin => "pin the current deployment so an update cannot garbage-collect it".into(),
             Verb::Rollback => "boot the previous deployment on the next restart".into(),
             Verb::Update => "update the OS image and firmware".into(),
