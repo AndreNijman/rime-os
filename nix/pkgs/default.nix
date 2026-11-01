@@ -12,6 +12,8 @@
   rime-plymouth = callPackage ./rime-plymouth.nix { inherit (pkgs.rime) rime-branding; };
   # The terminal greeting's helpers: image protocol detection and the wallpaper-recoloured logo.
   rime-greeting = callPackage ./rime-greeting.nix { rime-branding = pkgs.rime.rime-branding; };
+  # Ghostty's Rime theme and the one-time Alacritty -> Ghostty carry-over (files/desktop/ghostty).
+  rime-terminal = callPackage ./rime-terminal.nix { inherit rime-shell-src; };
   # Not callPackage: that would wrap the kernel's own .override, which NixOS's boot.kernelPackages calls
   # (linuxPackagesFor -> kernel.override { features, randstructSeed, ... }).
   rime-kernel = import ./kernel { inherit pkgs; };

@@ -32,7 +32,7 @@
       };
 
       packages.${system} = {
-        inherit (pkgs.rime) rimed rime-shell rime-libexec rime-kernel rime-kernel-config rime-scx rime-branding rime-plymouth rime-greeting;
+        inherit (pkgs.rime) rimed rime-shell rime-libexec rime-kernel rime-kernel-config rime-scx rime-branding rime-plymouth rime-greeting rime-terminal;
       };
 
       nixosModules = {
@@ -45,6 +45,7 @@
         security = ./nix/modules/security.nix;
         packages-catalogue = ./nix/modules/packages-catalogue.nix;
         greeting = ./nix/modules/greeting.nix;
+        terminal = ./nix/modules/terminal.nix;
       };
 
       nixosConfigurations.rime-vm = lib.nixosSystem {

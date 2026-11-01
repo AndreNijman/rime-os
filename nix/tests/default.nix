@@ -12,6 +12,8 @@
   branding = import ./branding.nix { inherit pkgs self; };
   greeting = import ./greeting.nix { inherit pkgs self; };
   greeting-vm = import ./greeting-vm.nix { inherit pkgs self; };
+  terminal-migrate = import ./terminal-migrate.nix { inherit pkgs self; };
+  terminal-look = import ./terminal-look.nix { inherit pkgs self; };
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }

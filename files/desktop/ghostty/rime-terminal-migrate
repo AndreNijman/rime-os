@@ -1,0 +1,909 @@
+#!/usr/bin/env python3
+"""Carry a user's Alacritty setup over to Ghostty, once, at their first graphical login.
+
+Rime's default terminal is Ghostty; Alacritty stays installed. This runs at every graphical login (a user oneshot)
+and does two things:
+
+  1. Seeds Rime's Ghostty theme, ~/.config/ghostty/themes/rime-os, when it is missing. The theme is what makes
+     Ghostty look like Rime's Alacritty: same font, size, colours, padding and cursor. Rime Shell replaces this
+     file with wallpaper colours (its matugen template); a seeded copy starts with FALLBACK_MARK so the Shell knows
+     it may render over it, and so this script may refresh it when Rime's shipped copy changes. A theme without
+     that mark is the Shell's (or the user's) and is never touched.
+  2. Once per user (stamp: ~/.local/state/rime/terminal-migrated), writes ~/.config/ghostty/config.ghostty:
+     `theme = rime-os` plus every Alacritty setting that differs from Alacritty's defaults and has a Ghostty
+     equivalent. A report of what was carried over and what was not goes to
+     ~/.local/state/rime/terminal-migration.txt.
+
+What it never does: edit or replace a Ghostty config that already has settings (it says so in the report and
+stops), change any Alacritty file, or fail the login (every error is logged and the exit status is 0).
+
+`--convert FILE` prints the Ghostty lines and the report for one Alacritty file without writing anything (tests).
+"""
+
+import argparse
+import os
+import re
+import shlex
+import sys
+import tempfile
+import tomllib
+
+FALLBACK_MARK = "# rime-os fallback"
+THEME_NAME = "rime-os"
+STAMP_NAME = "terminal-migrated"
+REPORT_NAME = "terminal-migration.txt"
+IMPORT_DEPTH = 5  # Alacritty's own recursion limit
+
+# Alacritty 0.17's defaults (alacritty(5)), as normalised dotted paths. A user value equal to one of these is what
+# Rime's theme already gives them, so it is not copied (the theme reproduces Alacritty's stock look).
+DEFAULTS = {
+    "font.normal.family": "monospace",
+    "font.size": 11.25,
+    "font.offset.x": 0,
+    "font.offset.y": 0,
+    "font.glyph_offset.x": 0,
+    "font.glyph_offset.y": 0,
+    "font.builtin_box_drawing": True,
+    "colors.primary.background": "#181818",
+    "colors.primary.foreground": "#d8d8d8",
+    "colors.cursor.text": "cell-background",
+    "colors.cursor.cursor": "cell-foreground",
+    "colors.selection.text": "cell-background",
+    "colors.selection.background": "cell-foreground",
+    "colors.normal.black": "#181818",
+    "colors.normal.red": "#ac4242",
+    "colors.normal.green": "#90a959",
+    "colors.normal.yellow": "#f4bf75",
+    "colors.normal.blue": "#6a9fb5",
+    "colors.normal.magenta": "#aa759f",
+    "colors.normal.cyan": "#75b5aa",
+    "colors.normal.white": "#d8d8d8",
+    "colors.bright.black": "#6b6b6b",
+    "colors.bright.red": "#c55555",
+    "colors.bright.green": "#aac474",
+    "colors.bright.yellow": "#feca88",
+    "colors.bright.blue": "#82b8c8",
+    "colors.bright.magenta": "#c28cb8",
+    "colors.bright.cyan": "#93d3c3",
+    "colors.bright.white": "#f8f8f8",
+    "colors.draw_bold_text_with_bright_colors": False,
+    "colors.transparent_background_colors": False,
+    "window.padding.x": 0,
+    "window.padding.y": 0,
+    "window.dynamic_padding": False,
+    "window.decorations": "full",
+    "window.opacity": 1.0,
+    "window.blur": False,
+    "window.startup_mode": "windowed",
+    "window.dimensions.columns": 0,
+    "window.dimensions.lines": 0,
+    "window.title": "Alacritty",
+    "window.dynamic_title": True,
+    "window.decorations_theme_variant": "none",
+    "window.resize_increments": False,
+    "window.option_as_alt": "none",
+    "window.level": "normal",
+    "window.position": "none",
+    "window.class.general": "Alacritty",
+    "window.class.instance": "Alacritty",
+    "scrolling.history": 10000,
+    "scrolling.multiplier": 3,
+    "cursor.style.shape": "block",
+    "cursor.style.blinking": "off",
+    "cursor.vi_mode_style": "none",
+    "cursor.blink_interval": 750,
+    "cursor.blink_timeout": 5,
+    "cursor.unfocused_hollow": True,
+    "cursor.thickness": 0.15,
+    "selection.save_to_clipboard": False,
+    "selection.semantic_escape_chars": ",│`|:\"' ()[]{}<>\t",
+    "mouse.hide_when_typing": False,
+    "bell.duration": 0,
+    "bell.animation": "linear",
+    "bell.color": "#ffffff",
+    "bell.command": "none",
+    "terminal.osc52": "onlycopy",
+    "general.live_config_reload": True,
+    "general.ipc_socket": True,
+    "general.working_directory": "none",
+    "env": {},
+}
+
+PALETTE = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"]
+
+# Alacritty action -> Ghostty action (Ghostty 1.4 names; the package's checkPhase runs +validate-config on them).
+ACTIONS = {
+    "paste": "paste_from_clipboard",
+    "copy": "copy_to_clipboard",
+    "copyselection": "copy_to_clipboard",
+    "pasteselection": "paste_from_selection",
+    "increasefontsize": "increase_font_size:1",
+    "decreasefontsize": "decrease_font_size:1",
+    "resetfontsize": "reset_font_size",
+    "scrollpageup": "scroll_page_up",
+    "scrollpagedown": "scroll_page_down",
+    "scrollhalfpageup": "scroll_page_fractional:-0.5",
+    "scrollhalfpagedown": "scroll_page_fractional:0.5",
+    "scrolllineup": "scroll_page_lines:-1",
+    "scrolllinedown": "scroll_page_lines:1",
+    "scrolltotop": "scroll_to_top",
+    "scrolltobottom": "scroll_to_bottom",
+    "clearhistory": "clear_screen",
+    "spawnnewinstance": "new_window",
+    "createnewwindow": "new_window",
+    "togglefullscreen": "toggle_fullscreen",
+    "togglemaximized": "toggle_maximize",
+    "quit": "quit",
+    "searchforward": "start_search",
+    "searchbackward": "start_search",
+    "none": "unbind",
+    "receivechar": "unbind",
+}
+
+# Alacritty key names (winit NamedKey, plus the pre-0.13 names it still accepts) -> Ghostty key names.
+KEY_ALIASES = {
+    "return": "enter",
+    "back": "backspace",
+    "up": "arrow_up",
+    "down": "arrow_down",
+    "left": "arrow_left",
+    "right": "arrow_right",
+    "equals": "equal",
+    "=": "equal",
+    "plus": "plus",
+    "+": "plus",
+    "minus": "minus",
+    "space": "space",
+    " ": "space",
+    "escape": "escape",
+    "esc": "escape",
+    "pageup": "page_up",
+    "pagedown": "page_down",
+    "numpadenter": "numpad_enter",
+    "numpadadd": "numpad_add",
+    "numpadsubtract": "numpad_subtract",
+    "numpadmultiply": "numpad_multiply",
+    "numpaddivide": "numpad_divide",
+    "numpaddecimal": "numpad_decimal",
+    "numpadcomma": "numpad_comma",
+    "numpadequals": "numpad_equal",
+    "numpadequal": "numpad_equal",
+    "capital": "caps_lock",
+    "capslock": "caps_lock",
+}
+GHOSTTY_NAMED = {
+    "enter", "tab", "backspace", "escape", "space", "insert", "delete", "home", "end", "page_up", "page_down",
+    "arrow_up", "arrow_down", "arrow_left", "arrow_right", "caps_lock", "num_lock", "scroll_lock", "print_screen",
+    "pause", "context_menu", "equal", "minus", "plus", "backquote", "backslash", "bracket_left", "bracket_right",
+    "comma", "period", "quote", "semicolon", "slash",
+} | {f"f{i}" for i in range(1, 26)} | {f"numpad_{i}" for i in range(10)} | {
+    "numpad_enter", "numpad_add", "numpad_subtract", "numpad_multiply", "numpad_divide", "numpad_decimal",
+    "numpad_comma", "numpad_equal",
+}
+MODS = {"shift": "shift", "control": "ctrl", "ctrl": "ctrl", "alt": "alt", "option": "alt", "super": "super",
+        "command": "super", "none": None}
+
+
+class Unmapped(Exception):
+    """A value that has no Ghostty equivalent; the message is the reason the report gives."""
+
+
+# ── reading Alacritty ─────────────────────────────────────────────────────────────────────────────────────────
+
+
+def expand(path, base_dir, home):
+    if path.startswith("~/"):
+        return os.path.join(home, path[2:])
+    if os.path.isabs(path):
+        return path
+    return os.path.join(base_dir, path)
+
+
+def parse_file(path):
+    with open(path, "rb") as f:
+        data = f.read()
+    if path.endswith((".yml", ".yaml")):
+        import yaml  # only legacy configs need it
+
+        doc = yaml.safe_load(data.decode("utf-8")) or {}
+        if not isinstance(doc, dict):
+            raise ValueError("not a mapping")
+        return normalise_schema(doc)
+    return normalise_schema(tomllib.loads(data.decode("utf-8")))
+
+
+def normalise_schema(doc):
+    """Move every pre-0.14 location to where Alacritty 0.14+ keeps it, so one mapper reads every generation."""
+    doc = dict(doc)
+    general = dict(doc.get("general") or {})
+    for key in ("import", "working_directory", "live_config_reload", "ipc_socket"):
+        if key in doc:
+            general.setdefault(key, doc.pop(key))
+    if general:
+        doc["general"] = general
+    if "shell" in doc:
+        terminal = dict(doc.get("terminal") or {})
+        terminal.setdefault("shell", doc.pop("shell"))
+        doc["terminal"] = terminal
+    if "key_bindings" in doc:
+        keyboard = dict(doc.get("keyboard") or {})
+        keyboard["bindings"] = list(doc.pop("key_bindings") or []) + list(keyboard.get("bindings") or [])
+        doc["keyboard"] = keyboard
+    if "mouse_bindings" in doc:
+        mouse = dict(doc.get("mouse") or {})
+        mouse["bindings"] = list(doc.pop("mouse_bindings") or []) + list(mouse.get("bindings") or [])
+        doc["mouse"] = mouse
+    if "background_opacity" in doc:
+        window = dict(doc.get("window") or {})
+        window.setdefault("opacity", doc.pop("background_opacity"))
+        doc["window"] = window
+    if "draw_bold_text_with_bright_colors" in doc:
+        colors = dict(doc.get("colors") or {})
+        colors.setdefault("draw_bold_text_with_bright_colors", doc.pop("draw_bold_text_with_bright_colors"))
+        doc["colors"] = colors
+    cursor = doc.get("cursor")
+    if isinstance(cursor, dict) and isinstance(cursor.get("style"), str):
+        cursor = dict(cursor)
+        cursor["style"] = {"shape": cursor["style"]}
+        doc["cursor"] = cursor
+    return doc
+
+
+def merge(base, over):
+    """Alacritty's merge: tables recurse, arrays append, everything else is replaced."""
+    out = dict(base)
+    for k, v in over.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = merge(out[k], v)
+        elif k in out and isinstance(out[k], list) and isinstance(v, list):
+            out[k] = out[k] + v
+        else:
+            out[k] = v
+    return out
+
+
+def load(path, home, problems, seen, depth=0):
+    """The config Alacritty would build from `path`: its imports in order, then the file itself."""
+    doc = parse_file(path)
+    imports = (doc.get("general") or {}).get("import") or []
+    if isinstance(imports, str):
+        imports = [imports]
+    merged = {}
+    for item in imports:
+        target = expand(str(item), os.path.dirname(path), home)
+        if depth + 1 > IMPORT_DEPTH:
+            problems.append((f"general.import {item}", "more than 5 levels of imports (Alacritty stops there too)"))
+            continue
+        if not os.path.isfile(target):
+            continue  # Alacritty skips a missing import silently
+        try:
+            merged = merge(merged, load(target, home, problems, seen, depth + 1))
+            seen.append(target)
+        except Exception as exc:  # noqa: BLE001 - a broken import is reported, never fatal
+            problems.append((f"general.import {item}", f"could not be read ({exc.__class__.__name__}: {exc})"))
+    if "general" in doc:
+        doc["general"] = {k: v for k, v in doc["general"].items() if k != "import"}
+        if not doc["general"]:
+            del doc["general"]
+    return merge(merged, doc)
+
+
+def find_alacritty(home, xdg_config):
+    """Alacritty's own search order (alacritty(5) LOCATION); a legacy .yml only when no .toml exists."""
+    toml_candidates = [
+        os.path.join(xdg_config, "alacritty", "alacritty.toml"),
+        os.path.join(xdg_config, "alacritty.toml"),
+        os.path.join(home, ".config", "alacritty", "alacritty.toml"),
+        os.path.join(home, ".alacritty.toml"),
+    ]
+    yml_candidates = [p[: -len(".toml")] + ".yml" for p in toml_candidates]
+    for p in toml_candidates + yml_candidates:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+# ── mapping ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def flatten(doc, prefix=""):
+    """Dotted paths for every scalar; arrays and the env table stay whole (they are mapped as units)."""
+    out = {}
+    for k, v in doc.items():
+        path = f"{prefix}{k}"
+        if path in ("env", "keyboard.bindings", "mouse.bindings", "hints.enabled", "colors.indexed_colors",
+                    "terminal.shell", "bell.command", "font.normal", "font.bold", "font.italic", "font.bold_italic"):
+            out[path] = v
+        elif isinstance(v, dict):
+            out.update(flatten(v, path + "."))
+        else:
+            out[path] = v
+    # font.<face> is a table; its family/style are split out here so a default family is recognised.
+    for face in ("normal", "bold", "italic", "bold_italic"):
+        table = out.pop(f"font.{face}", None)
+        if isinstance(table, dict):
+            for k, v in table.items():
+                out[f"font.{face}.{k}"] = v
+        elif table is not None:
+            out[f"font.{face}"] = table
+    return out
+
+
+def colour(value, allow_cell=False):
+    v = str(value).strip()
+    low = v.lower()
+    if allow_cell and low in ("cellforeground", "cellbackground"):
+        return "cell-foreground" if low == "cellforeground" else "cell-background"
+    m = re.fullmatch(r"(?:#|0x)([0-9a-f]{6})", low)
+    if m:
+        return "#" + m.group(1)
+    m = re.fullmatch(r"(?:#|0x)([0-9a-f]{3})", low)
+    if m:
+        return "#" + "".join(c * 2 for c in m.group(1))
+    raise Unmapped(f"not a colour Rime can read: {v!r}")
+
+
+def norm(path, value):
+    """The comparable form of a value (for the defaults check)."""
+    if path.startswith("colors.") and isinstance(value, str) and not path.endswith(("draw_bold_text_with_bright_colors",)):
+        try:
+            return colour(value, allow_cell=True)
+        except Unmapped:
+            return value
+    if isinstance(value, str):
+        return value.strip().lower() if path != "font.normal.family" and path != "window.title" else value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return value
+
+
+def is_default(path, value):
+    if path not in DEFAULTS:
+        return False
+    d = DEFAULTS[path]
+    if isinstance(d, dict) or isinstance(value, dict):
+        return d == value
+    return norm(path, value) == norm(path, d)
+
+
+def num(value):
+    """A number as Ghostty prints it: 11.0 -> 11, 11.5 -> 11.5."""
+    f = float(value)
+    return str(int(f)) if f == int(f) else repr(f)
+
+
+def text_escape(s):
+    """Ghostty's text: action takes a Zig string literal body."""
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif o < 0x20 or o == 0x7F:
+            out.append({"\n": "\\n", "\r": "\\r", "\t": "\\t"}.get(ch, f"\\x{o:02x}"))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def ghostty_key(name):
+    raw = str(name)
+    low = raw.lower()
+    if low in KEY_ALIASES:
+        return KEY_ALIASES[low]
+    m = re.fullmatch(r"key([0-9])", low)
+    if m:
+        return m.group(1)
+    m = re.fullmatch(r"numpad([0-9])", low)
+    if m:
+        return f"numpad_{m.group(1)}"
+    if len(raw) == 1:
+        return low
+    # CamelCase NamedKey -> snake_case (ArrowUp -> arrow_up, PageDown -> page_down, F12 -> f12)
+    snake = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", raw).lower()
+    if snake in GHOSTTY_NAMED:
+        return snake
+    raise Unmapped(f"key {raw!r} has no Ghostty name Rime knows")
+
+
+def ghostty_mods(mods):
+    if mods is None or str(mods).strip() == "":
+        return []
+    out = []
+    for part in str(mods).split("|"):
+        p = part.strip().lower()
+        if p not in MODS:
+            raise Unmapped(f"modifier {part.strip()!r} has no Ghostty equivalent")
+        if MODS[p] and MODS[p] not in out:
+            out.append(MODS[p])
+    order = ["ctrl", "alt", "shift", "super"]
+    return sorted(out, key=order.index)
+
+
+def binding(b):
+    if not isinstance(b, dict):
+        raise Unmapped("not a binding table")
+    if "mouse" in b:
+        raise Unmapped("mouse bindings have no Ghostty equivalent")
+    mode = str(b.get("mode") or "").strip()
+    if mode:
+        parts = [p.strip().lower() for p in mode.split("|")]
+        if any(p not in ("~vi", "~search") for p in parts):
+            raise Unmapped(f"mode {mode!r}: Ghostty bindings cannot be limited to a terminal mode")
+    if "key" not in b:
+        raise Unmapped("binding without a key")
+    trigger = "+".join(ghostty_mods(b.get("mods")) + [ghostty_key(b["key"])])
+    if "chars" in b:
+        action = "text:" + text_escape(str(b["chars"]))
+    elif "command" in b:
+        raise Unmapped("bindings that run a program have no Ghostty equivalent")
+    elif "action" in b:
+        a = str(b["action"]).strip().lower()
+        if a not in ACTIONS:
+            raise Unmapped(f"action {b['action']!r} has no Ghostty equivalent")
+        action = ACTIONS[a]
+    else:
+        raise Unmapped("binding with neither chars nor action")
+    return f"keybind = {trigger}={action}"
+
+
+def describe_binding(b):
+    if not isinstance(b, dict):
+        return repr(b)
+    bits = [f"{k}={b[k]!r}" for k in ("key", "mouse", "mods", "mode", "action", "chars", "command") if k in b]
+    return " ".join(bits)
+
+
+def command_line(shell):
+    if isinstance(shell, str):
+        program, args = shell, []
+    elif isinstance(shell, dict) and "program" in shell:
+        program, args = str(shell["program"]), [str(a) for a in shell.get("args") or []]
+    else:
+        raise Unmapped("shell is neither a program nor {program, args}")
+    argv = [program] + args
+    if all(re.fullmatch(r"[A-Za-z0-9_@%+=:,./-]+", a) for a in argv):
+        return "command = direct:" + " ".join(argv)
+    return "command = shell:" + shlex.join(argv)
+
+
+def convert(doc):
+    """(ghostty lines, carried [(alacritty, ghostty)], defaults [alacritty], unmapped [(alacritty, reason)])."""
+    lines, carried, defaults, unmapped = [], [], [], []
+    flat = flatten(doc)
+
+    def put(src, line):
+        lines.append(line)
+        carried.append((src, line))
+
+    def skip(src, reason):
+        unmapped.append((src, reason))
+
+    def value_text(path):
+        v = flat[path]
+        return f"{path} = {v!r}" if not isinstance(v, str) else f'{path} = "{v}"'
+
+    # one pass, in a fixed order, so the output is deterministic whatever order the file used
+    handlers = []
+
+    def simple(path, fn):
+        handlers.append((path, fn))
+
+    face_keys = {"normal": "", "bold": "-bold", "italic": "-italic", "bold_italic": "-bold-italic"}
+    for face, suffix in face_keys.items():
+        simple(f"font.{face}.family", lambda v, s=suffix: f"font-family{s} = {v}")
+        simple(f"font.{face}.style", lambda v, s=suffix: f"font-style{s} = {v}")
+    simple("font.size", lambda v: f"font-size = {num(v)}")
+    simple("font.offset.x", lambda v: f"adjust-cell-width = {int(v)}")
+    simple("font.offset.y", lambda v: f"adjust-cell-height = {int(v)}")
+    simple("colors.primary.background", lambda v: f"background = {colour(v)}")
+    simple("colors.primary.foreground", lambda v: f"foreground = {colour(v)}")
+    simple("colors.cursor.cursor", lambda v: f"cursor-color = {colour(v, True)}")
+    simple("colors.cursor.text", lambda v: f"cursor-text = {colour(v, True)}")
+    simple("colors.selection.background", lambda v: f"selection-background = {colour(v, True)}")
+    simple("colors.selection.text", lambda v: f"selection-foreground = {colour(v, True)}")
+    for i, name in enumerate(PALETTE):
+        simple(f"colors.normal.{name}", lambda v, i=i: f"palette = {i}={colour(v)}")
+    for i, name in enumerate(PALETTE):
+        simple(f"colors.bright.{name}", lambda v, i=i: f"palette = {i + 8}={colour(v)}")
+    simple("colors.draw_bold_text_with_bright_colors", lambda v: "bold-color = bright" if v else None)
+
+    def padding(v):
+        px = int(v)
+        if px < 0:
+            raise Unmapped("negative padding")
+        return int(px * 0.75 + 0.5)  # points (Ghostty) from pixels at 96 dpi (Alacritty); half rounds up
+
+    simple("window.padding.x", lambda v: f"window-padding-x = {padding(v)}")
+    simple("window.padding.y", lambda v: f"window-padding-y = {padding(v)}")
+    simple("window.dynamic_padding", lambda v: f"window-padding-balance = {'true' if v else 'false'}")
+    simple("window.opacity", lambda v: f"background-opacity = {num(v)}")
+    simple("window.blur", lambda v: f"background-blur = {'true' if v else 'false'}")
+
+    def decorations(v):
+        d = str(v).lower()
+        if d == "none":
+            return "window-decoration = none"
+        if d == "full":
+            return "window-decoration = auto"
+        raise Unmapped(f"decorations {v!r} is macOS only")
+
+    simple("window.decorations", decorations)
+
+    def startup(v):
+        m = str(v).lower()
+        if m == "maximized":
+            return "maximize = true"
+        if m == "fullscreen":
+            return "fullscreen = true"
+        if m == "windowed":
+            return None
+        raise Unmapped(f"startup_mode {v!r} is macOS only")
+
+    simple("window.startup_mode", startup)
+    simple("window.dimensions.columns", lambda v: f"window-width = {int(v)}" if int(v) else None)
+    simple("window.dimensions.lines", lambda v: f"window-height = {int(v)}" if int(v) else None)
+    simple("window.title", lambda v: f"title = {v}")
+
+    def theme_variant(v):
+        t = str(v).lower()
+        if t in ("dark", "light"):
+            return f"window-theme = {t}"
+        return None
+
+    simple("window.decorations_theme_variant", theme_variant)
+    simple("scrolling.history", lambda v: f"scrollback-limit-lines = {int(v)}")
+    simple("scrolling.multiplier", lambda v: f"mouse-scroll-multiplier = discrete:{num(v)}")
+
+    def shape(v):
+        s = str(v).lower()
+        mapping = {"block": "block", "underline": "underline", "beam": "bar"}
+        if s not in mapping:
+            raise Unmapped(f"cursor shape {v!r}")
+        return f"cursor-style = {mapping[s]}"
+
+    def blinking(v):
+        s = str(v).lower()
+        if s in ("never", "off"):
+            return "cursor-style-blink = false"
+        if s in ("on", "always"):
+            return "cursor-style-blink = true"
+        raise Unmapped(f"cursor blinking {v!r}")
+
+    simple("cursor.style.shape", shape)
+    simple("cursor.style.blinking", blinking)
+    simple("mouse.hide_when_typing", lambda v: f"mouse-hide-while-typing = {'true' if v else 'false'}")
+    simple("selection.save_to_clipboard", lambda v: "copy-on-select = both" if v else None)
+    simple("general.working_directory",
+           lambda v: None if str(v).lower() == "none" else f"working-directory = {v}")
+
+    def osc52(v):
+        s = str(v).lower()
+        table = {
+            "disabled": ["clipboard-write = deny", "clipboard-read = deny"],
+            "onlycopy": [],
+            "onlypaste": ["clipboard-write = deny", "clipboard-read = allow"],
+            "copypaste": ["clipboard-read = allow"],
+        }
+        if s not in table:
+            raise Unmapped(f"osc52 {v!r}")
+        return table[s]
+
+    simple("terminal.osc52", osc52)
+
+    def bell_duration(v):
+        # one bell-features line replaces the whole set, so Rime's no-title is repeated
+        return "bell-features = no-title,border" if int(v) > 0 else None
+
+    simple("bell.duration", bell_duration)
+
+    handled = {p for p, _ in handlers}
+
+    for path, fn in handlers:
+        if path not in flat:
+            continue
+        v = flat[path]
+        src = value_text(path)
+        if is_default(path, v):
+            defaults.append(src)
+            continue
+        try:
+            out = fn(v)
+        except Unmapped as exc:
+            skip(src, str(exc))
+            continue
+        except (TypeError, ValueError) as exc:
+            skip(src, f"unreadable value ({exc})")
+            continue
+        if out is None:
+            defaults.append(src)
+            continue
+        for line in out if isinstance(out, list) else [out]:
+            put(src, line)
+
+    # indexed colours: 16-255 have no default in either terminal
+    for i, entry in enumerate(flat.get("colors.indexed_colors") or []):
+        src = f"colors.indexed_colors[{i}] = {entry!r}"
+        try:
+            put(src, f"palette = {int(entry['index'])}={colour(entry['color'])}")
+        except (Unmapped, KeyError, TypeError, ValueError) as exc:
+            skip(src, str(exc) or "unreadable entry")
+    handled.add("colors.indexed_colors")
+
+    shell = flat.get("terminal.shell")
+    if shell is not None:
+        src = f"terminal.shell = {shell!r}"
+        try:
+            put(src, command_line(shell))
+        except Unmapped as exc:
+            skip(src, str(exc))
+    handled.add("terminal.shell")
+
+    env = flat.get("env") or {}
+    if isinstance(env, dict):
+        for k in sorted(env):
+            src = f'env.{k} = "{env[k]}"'
+            if k == "TERM":
+                put(src, f"term = {env[k]}")
+            else:
+                put(src, f"env = {k}={env[k]}")
+    handled.add("env")
+
+    for i, b in enumerate(flat.get("keyboard.bindings") or []):
+        src = f"keyboard.bindings[{i}] {describe_binding(b)}"
+        try:
+            put(src, binding(b))
+        except Unmapped as exc:
+            skip(src, str(exc))
+    handled.add("keyboard.bindings")
+
+    for i, b in enumerate(flat.get("mouse.bindings") or []):
+        skip(f"mouse.bindings[{i}] {describe_binding(b)}", "mouse bindings have no Ghostty equivalent")
+    handled.add("mouse.bindings")
+
+    for i, h in enumerate(flat.get("hints.enabled") or []):
+        what = h.get("command") or h.get("action") if isinstance(h, dict) else h
+        skip(f"hints.enabled[{i}] ({what!r})",
+             "Ghostty has no hints; it finds URLs itself and opens one on Ctrl+click")
+    handled.add("hints.enabled")
+
+    reasons = {
+        "colors.dim": "Ghostty has no dim palette; it dims faint text itself",
+        "colors.primary.dim_foreground": "Ghostty has no dim foreground",
+        "colors.primary.bright_foreground": "Ghostty has no bright foreground",
+        "colors.vi_mode_cursor": "Ghostty has no vi mode",
+        "cursor.vi_mode_style": "Ghostty has no vi mode",
+        "colors.search": "Ghostty's search colours are set separately (search-*-color)",
+        "colors.hints": "Ghostty has no hints",
+        "colors.footer_bar": "Ghostty has no footer bar",
+        "colors.line_indicator": "Ghostty has no line indicator",
+        "colors.transparent_background_colors": "no Ghostty equivalent",
+        "window.class": "Ghostty's class is its Wayland app id, which window rules match: not copied",
+        "window.dynamic_title": "no Ghostty equivalent (set title to fix the title)",
+        "window.position": "no effect on Wayland",
+        "window.resize_increments": "no Ghostty equivalent on Linux",
+        "window.option_as_alt": "macOS only",
+        "window.level": "no Ghostty equivalent on Linux",
+        "font.glyph_offset": "no exact Ghostty equivalent (adjust-font-baseline moves the baseline only)",
+        "font.builtin_box_drawing": "Ghostty always draws box characters itself",
+        "cursor.blink_interval": "Ghostty's blink rate is fixed",
+        "cursor.blink_timeout": "Ghostty's blink never times out",
+        "cursor.unfocused_hollow": "Ghostty always draws an unfocused cursor hollow",
+        "cursor.thickness": "no exact Ghostty equivalent (adjust-cursor-thickness is in pixels)",
+        "selection.semantic_escape_chars": "not copied: Ghostty's selection-word-chars uses a different syntax",
+        "bell.animation": "Ghostty has no bell animation",
+        "bell.color": "Ghostty has no bell colour",
+        "bell.command": "Ghostty cannot run a program on the bell",
+        "general.live_config_reload": "Ghostty reloads with ctrl+shift+comma",
+        "general.ipc_socket": "Ghostty has no alacritty msg socket",
+        "debug": "debug settings are not carried over",
+        "alt_send_esc": "Ghostty sends Esc for Alt on Linux",
+        "keyboard": "unknown keyboard setting",
+        "mouse": "unknown mouse setting",
+    }
+    for path in sorted(flat):
+        if path in handled:
+            continue
+        v = flat[path]
+        src = value_text(path)
+        if is_default(path, v):
+            defaults.append(src)
+            continue
+        reason = next((r for p, r in reasons.items() if path == p or path.startswith(p + ".")), None)
+        skip(src, reason or "no Ghostty equivalent Rime knows")
+
+    return lines, carried, defaults, unmapped
+
+
+# ── writing ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+def tilde(path, home):
+    return "~/" + os.path.relpath(path, home) if path.startswith(home.rstrip("/") + "/") else path
+
+
+def config_text(lines, source_label):
+    head = [
+        "# Ghostty settings. Rime wrote this file once, at your first login with Ghostty as the",
+        "# default terminal, and will never change it: it is yours to edit.",
+        "# Rime's look (font, colours, padding) comes from the theme; every line below it wins.",
+        "# What was carried over from Alacritty, and what was not: ~/.local/state/rime/terminal-migration.txt",
+        f"theme = {THEME_NAME}",
+    ]
+    if lines:
+        head += ["", f"# From Alacritty ({source_label})"] + lines
+    return "\n".join(head) + "\n"
+
+
+def report_text(status, source_label, imports, target_label, carried, defaults, unmapped, problems):
+    out = ["Rime: Alacritty settings carried over to Ghostty", ""]
+    if status:
+        out.append(status)
+    if source_label:
+        out.append(f"Alacritty config: {source_label}")
+        for imp in imports:
+            out.append(f"  imported: {imp}")
+    if target_label:
+        out.append(f"Ghostty config:   {target_label}")
+    out += ["", "Carried over:"]
+    out += [f"  {src}\n    -> {line}" for src, line in carried] or ["  (nothing)"]
+    out += ["", "Same as Rime's default, so not copied:"]
+    out += [f"  {src}" for src in defaults] or ["  (nothing)"]
+    out += ["", "Not carried over:"]
+    out += [f"  {src}\n    {reason}" for src, reason in problems + unmapped] or ["  (nothing)"]
+    out += ["", "Alacritty is still installed and its files were not changed."]
+    return "\n".join(out) + "\n"
+
+
+def write_new(path, text):
+    """Create `path` with `text` atomically; never replaces a file that appeared meanwhile."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".rime-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp, 0o644)
+        os.link(tmp, path)  # fails with FileExistsError instead of replacing
+    finally:
+        os.unlink(tmp)
+
+
+def replace(path, text):
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".rime-")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+
+
+def has_settings(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return any(ln.strip() and not ln.lstrip().startswith("#") for ln in f)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # unreadable: treat as the user's, never write over it
+
+
+def seed_theme(theme_dir, shipped):
+    """Rime's theme: create it when missing; refresh a seeded (marked) copy when Rime's shipped one changed."""
+    target = os.path.join(theme_dir, THEME_NAME)
+    with open(shipped, encoding="utf-8") as f:
+        want = f.read()
+    if os.path.islink(target):
+        return "kept (a link: the user's)"
+    try:
+        with open(target, encoding="utf-8", errors="replace") as f:
+            have = f.read()
+    except FileNotFoundError:
+        try:
+            write_new(target, want)
+            return "seeded"
+        except FileExistsError:
+            return "kept (appeared meanwhile)"
+    if have == want:
+        return "current"
+    if have.startswith(FALLBACK_MARK):
+        replace(target, want)
+        return "refreshed"
+    return "kept (the Shell's or the user's)"
+
+
+def migrate(home, xdg_config, xdg_state, shipped_theme, log):
+    ghostty_dir = os.path.join(xdg_config, "ghostty")
+    state_dir = os.path.join(xdg_state, "rime")
+    log(f"theme: {seed_theme(os.path.join(ghostty_dir, 'themes'), shipped_theme)}")
+
+    stamp = os.path.join(state_dir, STAMP_NAME)
+    if os.path.exists(stamp):
+        log("already migrated (stamp present); nothing else to do")
+        return
+    report_path = os.path.join(state_dir, REPORT_NAME)
+    os.makedirs(state_dir, exist_ok=True)
+
+    names = ["config.ghostty", "config"]
+    existing = [n for n in names if os.path.exists(os.path.join(ghostty_dir, n))]
+    with_settings = [n for n in existing if has_settings(os.path.join(ghostty_dir, n))]
+    # Ghostty writes a comment-only config.ghostty the first time it starts with none. It is left alone (Rime
+    # never edits a Ghostty file), and the settings go into the other name Ghostty reads (both are loaded).
+    free = [n for n in names if n not in existing]
+    if with_settings or not free:
+        label = tilde(os.path.join(ghostty_dir, (with_settings or existing)[0]), home)
+        why = "already has settings" if with_settings else "and ~/.config/ghostty/config both exist already"
+        replace(report_path, report_text(
+            f"NOT migrated: {label} {why}, and Rime never changes a Ghostty config it did not "
+            f"write.\nTo get Rime's look, add this line to it:  theme = {THEME_NAME}",
+            None, [], None, [], [], [], []))
+        log(f"skipped: {label} {why} (see {tilde(report_path, home)})")
+        write_new_or_keep(stamp)
+        return
+    target = os.path.join(ghostty_dir, free[0])
+
+    source = find_alacritty(home, xdg_config)
+    lines, carried, defaults, unmapped, problems, imports = [], [], [], [], [], []
+    if source:
+        try:
+            doc = load(source, home, problems, imports)
+            lines, carried, defaults, unmapped = convert(doc)
+        except Exception as exc:  # noqa: BLE001 - an unreadable Alacritty config still gets Rime's look
+            problems.append((tilde(source, home), f"could not be read ({exc.__class__.__name__}: {exc})"))
+    src_label = tilde(source, home) if source else None
+    try:
+        write_new(target, config_text(lines, src_label))
+    except FileExistsError:
+        log(f"skipped: {tilde(target, home)} appeared while migrating")
+        return
+    status = (f"Migrated: {len(carried)} setting(s) carried over, {len(unmapped) + len(problems)} not."
+              if source else "No Alacritty config found: Ghostty starts with Rime's look only.")
+    replace(report_path, report_text(status, src_label, [tilde(i, home) for i in imports],
+                                     tilde(target, home), carried, defaults, unmapped, problems))
+    write_new_or_keep(stamp)
+    log(f"wrote {tilde(target, home)}; report {tilde(report_path, home)}")
+
+
+def write_new_or_keep(path):
+    try:
+        write_new(path, "1\n")
+    except FileExistsError:
+        pass
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--convert", metavar="FILE", help="print the Ghostty lines and report for FILE; write nothing")
+    ap.add_argument("--theme", default="/run/current-system/sw/share/rime/ghostty/rime-os",
+                    help="Rime's shipped Ghostty theme (seeded into ~/.config/ghostty/themes)")
+    args = ap.parse_args(argv)
+
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    if args.convert:
+        problems, imports = [], []
+        doc = load(os.path.abspath(args.convert), home, problems, imports)
+        lines, carried, defaults, unmapped = convert(doc)
+        sys.stdout.write("\n".join(lines) + ("\n" if lines else ""))
+        sys.stdout.write("----\n")
+        sys.stdout.write(report_text("", None, [tilde(i, home) for i in imports], None,
+                                     carried, defaults, unmapped, problems))
+        return 0
+
+    xdg_config = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    xdg_state = os.environ.get("XDG_STATE_HOME") or os.path.join(home, ".local", "state")
+
+    def log(msg):
+        print(f"rime-terminal-migrate: {msg}", file=sys.stderr, flush=True)
+
+    try:
+        migrate(home, xdg_config, xdg_state, args.theme, log)
+    except Exception as exc:  # noqa: BLE001 - never fail a login
+        log(f"error: {exc.__class__.__name__}: {exc}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

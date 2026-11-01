@@ -228,7 +228,7 @@ Andre's decision rather than a side effect of fixing a bar.
 | line | what it does | why it is worth a decision |
 |---|---|---|
 | `hotkey-overlay { // skip-at-startup }` | the "Important Hotkeys" pop-up on every niri start | Rime Shell has its own keybind UI; Hyprland and labwc sessions show nothing equivalent |
-| `Mod+T { spawn "alacritty"; }` | terminal | Rime's own terminal choice is foot-first (see `rime-safe-graphics`) |
+| `Mod+T { spawn "alacritty"; }` | terminal | Rime's default terminal is Ghostty (Alacritty stays installed, so this still opens one); Safe Graphics is foot-first (see `rime-safe-graphics`) |
 | `Mod+D { spawn "fuzzel"; }` | launcher | Rime Shell has a launcher |
 | `Super+Alt+L { spawn "swaylock"; }` | lock | Rime's lock is compositor-enforced (§5.3); swaylock may not be installed, so this is a bind that does nothing |
 | `Super+Alt+S { spawn-sh "pkill orca \|\| exec orca"; }` | screen reader | Rime ships `rime-screen-reader` |

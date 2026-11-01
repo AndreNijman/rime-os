@@ -810,7 +810,7 @@ if [ ! -f "${HYPR_CONF}" ]; then
 -- Extend freely — this only guarantees a usable session with a terminal.
 hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.0 })
 hl.env("XCURSOR_SIZE", "24")
-hl.bind("SUPER + Return", hl.dsp.exec_cmd("alacritty"))
+hl.bind("SUPER + Return", hl.dsp.exec_cmd("ghostty"))
 hl.bind("SUPER + Q", hl.dsp.window.close())
 hl.bind("SUPER + SHIFT + E", hl.dsp.exit())
 HYPRDEF

@@ -12,6 +12,7 @@
     ./security.nix
     ./packages-catalogue.nix
     ./greeting.nix
+    ./terminal.nix
   ];
 
   nixpkgs.overlays = [ overlay ];
