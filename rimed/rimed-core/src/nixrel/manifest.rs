@@ -22,6 +22,26 @@ pub struct Cache {
     #[serde(default)]
     pub url_hint: String,
     pub keys: Vec<String>,
+    /// GitHub backend (§18.1): the paths marked `origin: upstream` come from the upstream cache (cache.nixos.org),
+    /// signed by these keys. Absent on the S3 fallback, where one cache holds the whole closure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<UpstreamCache>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamCache {
+    /// Informational, like `cache.url_hint`: the client reads the upstream URL from its own configuration (§8.1).
+    #[serde(default)]
+    pub url_hint: String,
+    pub keys: Vec<String>,
+}
+
+/// Which cache serves a path (§18.1): Rime's own (cache.rimeos.com) or the upstream one (cache.nixos.org).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    Rime,
+    Upstream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +80,15 @@ pub struct PathEntry {
     pub file_size: u64,
     #[serde(default)]
     pub references: Vec<usize>,
+    /// Present exactly when `cache.upstream` is (GitHub backend); absent = Rime's cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
+}
+
+impl PathEntry {
+    pub fn origin(&self) -> Origin {
+        self.origin.unwrap_or(Origin::Rime)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +253,26 @@ impl Manifest {
         if let Some(k) = self.cache.keys.iter().find(|k| !is_cache_key(k)) {
             return Err(format!("cache key {k:?} is not <name>:<base64 ed25519 key>"));
         }
+        // §18.1: `origin` on every path exactly when the manifest names an upstream cache, and the upstream keys are
+        // among `cache.keys` (the only keys a download is checked against).
+        match &self.cache.upstream {
+            None => {
+                if let Some(p) = self.paths.iter().find(|p| p.origin.is_some()) {
+                    return Err(format!("{} has an origin, and the manifest names no upstream cache", p.path));
+                }
+            }
+            Some(up) => {
+                if up.keys.is_empty() {
+                    return Err("it names an upstream cache with no keys".into());
+                }
+                if let Some(k) = up.keys.iter().find(|k| !self.cache.keys.contains(k)) {
+                    return Err(format!("upstream cache key {k:?} is not one of cache.keys"));
+                }
+                if let Some(p) = self.paths.iter().find(|p| p.origin.is_none()) {
+                    return Err(format!("{} has no origin, and the manifest names an upstream cache", p.path));
+                }
+            }
+        }
         if self.variants.is_empty() {
             return Err("it has no variants".into());
         }
@@ -278,6 +327,19 @@ impl Manifest {
 
     pub fn path(&self, i: usize) -> &str {
         &self.paths[i].path
+    }
+
+    /// `paths` grouped by the cache that serves each (§8.5, GitHub backend). A path the manifest does not list is
+    /// left out (the bind refuses it).
+    pub fn by_origin<'a>(&self, paths: &[&'a str]) -> BTreeMap<Origin, Vec<&'a str>> {
+        let index: BTreeMap<&str, &PathEntry> = self.paths.iter().map(|p| (p.path.as_str(), p)).collect();
+        let mut out: BTreeMap<Origin, Vec<&'a str>> = BTreeMap::new();
+        for p in paths {
+            if let Some(e) = index.get(p) {
+                out.entry(e.origin()).or_default().push(p);
+            }
+        }
+        out
     }
 
     /// The closure of a variant's toplevel, as path → entry.
@@ -456,6 +518,51 @@ pub(crate) mod tests {
         ];
         for (want, f) in cases {
             let mut v = good();
+            f(&mut v);
+            let r = reason(&v);
+            assert!(r.contains(want), "{want}: {r}");
+        }
+    }
+
+    const UP_KEY: &str = "upstream-test-1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+    /// `good()` as the GitHub backend publishes it (§18.1): glibc comes from the upstream cache.
+    fn good_github() -> serde_json::Value {
+        let mut v = good();
+        v["cache"]["keys"] = serde_json::json!([KEY, UP_KEY]);
+        v["cache"]["upstream"] = serde_json::json!({"url_hint": "https://cache.nixos.org", "keys": [UP_KEY]});
+        for (i, o) in ["rime", "rime", "rime", "rime", "upstream"].iter().enumerate() {
+            v["paths"][i]["origin"] = (*o).into();
+        }
+        v
+    }
+
+    #[test]
+    fn a_github_backend_manifest_names_the_cache_of_every_path() {
+        let m = parse_v(&good_github()).unwrap();
+        let glibc = sp('4', "glibc-2.42");
+        let shell = sp('3', "rime-shell-1");
+        let g = m.by_origin(&[shell.as_str(), glibc.as_str(), "/nix/store/not-listed"]);
+        assert_eq!(g[&Origin::Rime], vec![shell.as_str()]);
+        assert_eq!(g[&Origin::Upstream], vec![glibc.as_str()]);
+        assert_eq!(g.values().map(Vec::len).sum::<usize>(), 2);
+        // The S3 shape (no upstream, no origins): everything is Rime's.
+        let s3 = parse_v(&good()).unwrap();
+        assert_eq!(s3.by_origin(&[shell.as_str(), glibc.as_str()]).keys().copied().collect::<Vec<_>>(), vec![Origin::Rime]);
+    }
+
+    #[test]
+    fn origins_and_the_upstream_cache_are_checked_together() {
+        type Mutate = Box<dyn Fn(&mut serde_json::Value)>;
+        let cases: Vec<(&str, Mutate)> = vec![
+            ("names an upstream cache", Box::new(|v| { v["paths"][4].as_object_mut().unwrap().remove("origin"); })),
+            ("not one of cache.keys", Box::new(|v| v["cache"]["keys"] = serde_json::json!([KEY]))),
+            ("upstream cache with no keys", Box::new(|v| v["cache"]["upstream"]["keys"] = serde_json::json!([]))),
+            ("names no upstream cache", Box::new(|v| { v["cache"].as_object_mut().unwrap().remove("upstream"); })),
+            ("does not parse", Box::new(|v| v["paths"][4]["origin"] = "mirror".into())),
+        ];
+        for (want, f) in cases {
+            let mut v = good_github();
             f(&mut v);
             let r = reason(&v);
             assert!(r.contains(want), "{want}: {r}");

@@ -56,12 +56,12 @@ pub fn path_info(cfg: &Config, store: Option<&str>, paths: &[&str], recursive: b
     Ok(out)
 }
 
-/// §8.5 step 3: exactly `paths`, checked against exactly `keys`.
-pub fn copy_from_cache(cfg: &Config, paths: &[&str], keys: &[String], keep_fsync: bool) -> Result<(), String> {
+/// §8.5 step 3: exactly `paths` from the cache `from`, checked against exactly `keys`.
+pub fn copy_from_cache(cfg: &Config, from: &str, paths: &[&str], keys: &[String], keep_fsync: bool) -> Result<(), String> {
     let keys = keys.join(" ");
     let mut args: Vec<&str> = NIX_COMMAND.to_vec();
     args.extend([
-        "copy", "--from", cfg.cache_url.as_str(), "--no-recursive", "--stdin",
+        "copy", "--from", from, "--no-recursive", "--stdin",
         "--option", "require-sigs", "true",
         "--option", "trusted-public-keys", keys.as_str(),
         "--option", "substituters", "",

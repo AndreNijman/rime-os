@@ -16,13 +16,15 @@ let
     variant = cfg.variant;
     cache_url = cfg.cacheUrl;
     cache_keys = cfg.cacheKeys;
+    upstream_cache_keys = cfg.upstreamCacheKeys;
     signers = cfg.signers;
     issuer = cfg.issuer;
     nix = "${nix}/bin/nix";
     nix_env = "${nix}/bin/nix-env";
     nix_store = "${nix}/bin/nix-store";
     keep_generations = cfg.keepGenerations;
-  } // lib.optionalAttrs (cfg.fulcioRoot != null) { fulcio_root = "${cfg.fulcioRoot}"; };
+  } // lib.optionalAttrs (cfg.fulcioRoot != null) { fulcio_root = "${cfg.fulcioRoot}"; }
+    // lib.optionalAttrs (cfg.upstreamCacheUrl != null) { upstream_cache_url = cfg.upstreamCacheUrl; };
 in
 {
   options.rime.update = {
@@ -46,16 +48,29 @@ in
     cacheUrl = lib.mkOption {
       type = lib.types.str;
       default = "https://cache.rimeos.com";
-      description = "The binary cache the client downloads from (§6). The only substituter.";
+      description = "Rime's binary cache (§6, §18.1): the Rime-built paths of a release (all of them on the S3 fallback).";
     };
     cacheKeys = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      # TODO(handover): the real `rime-cache-1:<base64>` public key (§6.4) is minted when Andre creates the cache key.
-      default = [ ];
+      # The public half nix-release.yml checks RIME_NIX_CACHE_KEY against (§6.2, §18.1).
+      default = [ "rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=" ];
       description = ''
         Narinfo public keys compiled into the system. A normal update checks downloads against the keys the VERIFIED
         manifest announces; these are used only under `--allow-unverified` (§6.4).
       '';
+    };
+    upstreamCacheUrl = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "https://cache.nixos.org";
+      description = ''
+        The upstream binary cache: a release published with the GitHub backend (§18.1) holds only Rime-built paths and
+        marks every other path `origin: upstream`, downloaded from here. null refuses such a release.
+      '';
+    };
+    upstreamCacheKeys = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=" ];
+      description = "The upstream cache's narinfo keys compiled into the system; like cacheKeys, used only under `--allow-unverified`.";
     };
     signers = lib.mkOption {
       type = lib.types.listOf lib.types.str;
@@ -86,11 +101,11 @@ in
     environment.systemPackages = [ pkgs.skopeo ];
     virtualisation.containers.enable = lib.mkDefault true;
 
-    # §6.2: the Rime cache is the only substituter, a store path is accepted only with a valid signature, and a
-    # missing path is an error, never a local build.
+    # §6.2: the Rime cache and the upstream cache are the only substituters, a store path is accepted only with a
+    # valid signature, and a missing path is an error, never a local build.
     nix.settings = {
-      substituters = lib.mkForce [ cfg.cacheUrl ];
-      trusted-public-keys = lib.mkForce cfg.cacheKeys;
+      substituters = lib.mkForce ([ cfg.cacheUrl ] ++ lib.optional (cfg.upstreamCacheUrl != null) cfg.upstreamCacheUrl);
+      trusted-public-keys = lib.mkForce (cfg.cacheKeys ++ lib.optionals (cfg.upstreamCacheUrl != null) cfg.upstreamCacheKeys);
       require-sigs = true;
       fallback = false;
       builders = lib.mkForce "";

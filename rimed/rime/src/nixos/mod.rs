@@ -50,6 +50,13 @@ pub struct Config {
     /// The compiled-in narinfo keys: used only under `--allow-unverified` (§6.4); otherwise the verified
     /// manifest's `cache.keys` are the only keys a download is checked against.
     pub cache_keys: Vec<String>,
+    /// The upstream cache (cache.nixos.org) for the paths a GitHub-backend manifest marks `origin: upstream`
+    /// (§6.2, §18.1). `None`: such a release is refused by name.
+    #[serde(default)]
+    pub upstream_cache_url: Option<String>,
+    /// Its compiled-in keys, used only under `--allow-unverified`, as `cache_keys` are.
+    #[serde(default)]
+    pub upstream_cache_keys: Vec<String>,
     pub signers: Vec<String>,
     pub issuer: String,
     #[serde(default)]
@@ -83,6 +90,14 @@ impl Config {
     /// writing one fails here rather than updating with a default.
     pub fn parse(text: &str) -> Result<Config, String> {
         toml::from_str(text).map_err(|e| format!("{CONFIG}: {e}"))
+    }
+
+    /// The substituter that serves paths of `origin`.
+    pub fn cache_for(&self, origin: rimed_core::nixrel::manifest::Origin) -> Option<&str> {
+        match origin {
+            rimed_core::nixrel::manifest::Origin::Rime => Some(self.cache_url.as_str()),
+            rimed_core::nixrel::manifest::Origin::Upstream => self.upstream_cache_url.as_deref(),
+        }
     }
 
     pub fn expect(&self) -> crate::verify::Expect {
@@ -348,6 +363,8 @@ nix_env = "/nix/store/x-nix/bin/nix-env"
 nix_store = "/nix/store/x-nix/bin/nix-store"
 repository = "ghcr.io/andrenijman/rime-os"
 signers = ["https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main"]
+upstream_cache_keys = ["cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="]
+upstream_cache_url = "https://cache.nixos.org"
 variant = "plain"
 "#;
 
@@ -362,6 +379,12 @@ variant = "plain"
         assert_eq!(e.fulcio_root, None, "no root in the file = the root pinned in rimed");
         let with_root = format!("{MODULE_TOML}fulcio_root = \"/nix/store/k-TEST/ca.pem\"\n");
         assert_eq!(Config::parse(&with_root).unwrap().expect().fulcio_root.as_deref(), Some("/nix/store/k-TEST/ca.pem"));
+        use rimed_core::nixrel::manifest::Origin;
+        assert_eq!(c.cache_for(Origin::Rime), Some("https://cache.rimeos.com"));
+        assert_eq!(c.cache_for(Origin::Upstream), Some("https://cache.nixos.org"));
+        assert_eq!(c.upstream_cache_keys, ["cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="]);
+        let no_upstream: String = MODULE_TOML.lines().filter(|l| !l.starts_with("upstream_cache_url ")).map(|l| format!("{l}\n")).collect();
+        assert_eq!(Config::parse(&no_upstream).unwrap().cache_for(Origin::Upstream), None);
     }
 
     #[test]

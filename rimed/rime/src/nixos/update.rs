@@ -16,7 +16,7 @@ use crate::ops::UpdateOptions;
 use crate::trust::Roots;
 
 use super::fetch::{self, Pointer, Release, Stop};
-use super::{generations, lock, now, resolve_link, state, store, write_atomic, write_json, write_status, Applied, AppliedRelease, Config, Pins, Status, CHECK_STATE, GCROOTS};
+use super::{generations, lock, now, resolve_link, state, store, write_atomic, write_json, write_status, Applied, AppliedRelease, Config, Pins, Status, CHECK_STATE, CONFIG, GCROOTS};
 
 const GB: f64 = 1_000_000_000.0;
 /// §11.5: the reserve on top of the unpacked size.
@@ -305,11 +305,32 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     }
 
     // 10. bind, then download.
-    let keys: Vec<String> = if rel.verified { m.cache.keys.clone() } else { cfg.cache_keys.clone() };
+    // GitHub backend (§8.5, §18.1): each path from the cache its `origin` names, Rime's or the upstream one, every
+    // one checked against exactly the verified manifest's `cache.keys` (Rime's keys and the upstream's).
+    let keys: Vec<String> = if rel.verified {
+        m.cache.keys.clone()
+    } else {
+        cfg.cache_keys.iter().chain(cfg.upstream_cache_keys.iter()).cloned().collect()
+    };
     if !missing.is_empty() {
         let want: Vec<&str> = missing.iter().map(String::as_str).collect();
-        let infos = store::path_info(cfg, Some(&cfg.cache_url), &want, false)
-            .map_err(|e| stop(format!("rime: could not reach the release server ({e}); nothing was changed.")))?;
+        let groups = m.by_origin(&want);
+        let mut infos = std::collections::BTreeMap::new();
+        let mut copies: Vec<(&str, &Vec<&str>)> = Vec::new();
+        for (origin, paths) in &groups {
+            let Some(from) = cfg.cache_for(*origin) else {
+                return Err(stop(format!(
+                    "rime: release {} takes {} store paths from the upstream cache, and {CONFIG} names none. Nothing was changed.",
+                    m.release,
+                    paths.len()
+                )));
+            };
+            infos.extend(
+                store::path_info(cfg, Some(from), paths, false)
+                    .map_err(|e| stop(format!("rime: could not reach the release server ({e}); nothing was changed.")))?,
+            );
+            copies.push((from, paths));
+        }
         match bind(m, &want, &infos) {
             Ok(()) => {}
             Err(BindError::Missing(p)) => {
@@ -320,9 +341,13 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
             }
         }
         let _ = write_json(&state("pending.json"), &json!({"release": m.release, "variant": cfg.variant, "manifest": serde_json::from_slice::<Value>(&rel.bytes).unwrap_or(Value::Null)}), 0o644);
-        store::copy_from_cache(cfg, &want, &keys, opts.keep_fsync).map_err(|e| {
-            stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
-        })?;
+        // Upstream first: an upstream path never refers to a Rime one, so a Rime path's references are valid by the
+        // time it arrives (Origin orders Rime before Upstream, hence the reverse).
+        for (from, paths) in copies.iter().rev() {
+            store::copy_from_cache(cfg, from, paths, &keys, opts.keep_fsync).map_err(|e| {
+                stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
+            })?;
+        }
     }
 
     // 11. verify what arrived.
