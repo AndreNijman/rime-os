@@ -13,6 +13,7 @@
     ./packages-catalogue.nix
     ./fedora-parity.nix
     ./boot.nix
+    ./luks.nix
     ./hostlayer.nix
     ./rename-compat.nix
     ./update.nix

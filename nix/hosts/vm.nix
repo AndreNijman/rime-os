@@ -3,20 +3,18 @@
 { lib, modulesPath, ... }:
 
 {
-  imports = [ (modulesPath + "/virtualisation/qemu-vm.nix") ];
+  imports = [
+    (modulesPath + "/virtualisation/qemu-vm.nix")
+    ./profile.nix
+  ];
 
   nixpkgs.hostPlatform = "x86_64-linux";
 
   networking.hostName = "rime-vm";
 
-  rime = {
-    desktop.enable = true;
-    services.enable = true;
-    gaming.enable = true;
-    security.enable = true;
-    catalogue.enable = true;
-    # rime.kernel stays off: the VM boots nixpkgs' cached kernel.
-  };
+  # Every Rime area and the boot hook come from the shipped profile (./profile.nix). rime.kernel stays off: the VM
+  # boots nixpkgs' cached kernel. qemu-vm boots the kernel directly, so the boot hook only runs if a test calls
+  # switch-to-configuration boot; no test of rime-vm needs NixOS's own GRUB installer (it is off).
 
   virtualisation = {
     memorySize = 4096;
