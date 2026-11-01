@@ -75,6 +75,10 @@ in
         inherit (config.environment.etc."X11/xorg.conf.d/00-keyboard.conf") source;
       };
     systemd.generators.rime-hostlayer-mounts = "${pkg}/lib/systemd/system-generators/rime-hostlayer-mounts";
+    # A carried [[mount]] can be a network share (bootc shipped nfs-utils and cifs-utils): the generator hangs it
+    # from remote-fs.target after network-online.target, and these give mount(8) its mount.nfs/mount.cifs. nixpkgs'
+    # nfs support also turns rpcbind on (NFSv3 locking); rime-firewall drops inbound to it like everything else.
+    boot.supportedFilesystems = { nfs = true; cifs = true; };
 
     system.activationScripts.rimeHostlayerApply = lib.stringAfter [ "etc" "users" ] "${hl} apply";
 
@@ -114,6 +118,9 @@ in
       "L /etc/sing-box - - - - /var/lib/rime/sing-box"
       "L /etc/rime/guest-accounts - - - - /var/lib/rime/guest-accounts"
     ] ++ lib.optionals firewall [
+      # The target too: `rime-firewall allow` on a fresh machine writes through the link (mkdir -p cannot
+      # create a directory through a dangling link).
+      "d /var/lib/rime/firewall.d 0755 root root -"
       "L /etc/rime/firewall.d - - - - /var/lib/rime/firewall.d"
     ];
   };

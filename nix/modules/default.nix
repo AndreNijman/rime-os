@@ -14,6 +14,7 @@
     ./fedora-parity.nix
     ./boot.nix
     ./hostlayer.nix
+    ./tuning.nix
     ./rename-compat.nix
     ./update.nix
   ];

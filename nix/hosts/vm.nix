@@ -7,7 +7,8 @@
 
   nixpkgs.hostPlatform = "x86_64-linux";
 
-  networking.hostName = "rime-vm";
+  # No networking.hostName: the host layer names the machine from host.toml at activation ("rime" when
+  # nothing names it), the same as on real hardware.
 
   rime = {
     desktop.enable = true;
