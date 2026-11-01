@@ -1,6 +1,6 @@
 #!/usr/sbin/nft -f
 # Isolated katana runners: keep job and builder containers off Andre's LAN and
-# off katana's own services. Rendered by install.sh (@SUBNET@, @GATEWAY@) into
+# off katana's own services. Rendered by install.sh (@SUBNET@, @BRIDGE@) into
 # /etc/rime-runner/nftables.conf and loaded by rime-runner-firewall.service.
 #
 # Today's runner is filtered by `meta skuid ghrunner` (/etc/apex-runner/nftables.conf).
@@ -8,6 +8,12 @@
 # container's network namespace and has no local socket owner. These rules match
 # the runner network's subnet instead. A separate table, so apex-firewall and
 # netavark can rebuild theirs without dropping this one.
+#
+# IPv6: the network is IPv4-only, yet every veth and the bridge carry an fe80::
+# address, and a container reached the host's sshd over it (2026-11-01). The
+# containers switch IPv6 off on eth0 (lib/common.sh); the rules below are the
+# second lock and match the bridge by name, since a link-local source address
+# says nothing about where it came from.
 #
 # Idempotent: declare, delete, declare again.
 table inet rime_runner
@@ -25,17 +31,18 @@ table inet rime_runner {
         type filter hook forward priority filter - 1; policy accept;
         ip saddr @SUBNET@ ip daddr @SUBNET@ accept
         ip saddr @SUBNET@ ip daddr @lan4 counter reject with icmp type admin-prohibited
+        iifname "@BRIDGE@" meta nfproto ipv6 counter reject
     }
 
-    # Containers -> katana itself: DNS on the network's gateway (aardvark-dns)
-    # only. Nothing else katana listens on (local LLM servers, ssh, rimed's
-    # relay, the dev registry) is reachable from a job.
+    # Containers -> katana itself: nothing. DNS goes to public resolvers through
+    # the forward path (the network has no aardvark-dns; runner.conf says why).
+    # Nothing katana listens on (ssh, local LLM servers, rimed's relay, the dev
+    # registry) is reachable from a job.
     chain input {
         type filter hook input priority filter - 1; policy accept;
         iifname "lo" accept
-        ip saddr @SUBNET@ ip daddr @GATEWAY@ udp dport 53 accept
-        ip saddr @SUBNET@ ip daddr @GATEWAY@ tcp dport 53 accept
         ip saddr @SUBNET@ ct state established,related accept
         ip saddr @SUBNET@ counter reject with icmp type admin-prohibited
+        iifname "@BRIDGE@" meta nfproto ipv6 counter reject
     }
 }

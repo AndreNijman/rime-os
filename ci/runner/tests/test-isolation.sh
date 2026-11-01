@@ -136,7 +136,7 @@ fi
 # ── 5. firewall rules parse (check mode, nothing applied) ──────────────────
 rendered=$DRY/nftables.conf
 sed -e "s#@SUBNET@#$RIME_RUNNER_SUBNET#g" -e "s#@GATEWAY@#$RIME_RUNNER_GATEWAY#g" \
-	"$HERE/nftables.conf.in" >"$rendered"
+	-e "s#@BRIDGE@#$RIME_RUNNER_BRIDGE#g" "$HERE/nftables.conf.in" >"$rendered"
 if nft -c -f "$rendered"; then ok "nftables rules parse (nft -c, not loaded)"; else bad "nftables rules do not parse"; fi
 if nft list tables 2>/dev/null | grep -E 'rime_runner' >/dev/null; then bad "rime_runner table is LOADED on the host (should not be)"; else ok "rime_runner table not loaded on the host"; fi
 

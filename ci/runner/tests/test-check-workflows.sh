@@ -29,6 +29,12 @@ expect signing        check nonzero "signing/key material .*'sbsign'"
 expect idtoken        check nonzero 'id-token: write'
 expect hosted-signing check 0       ''
 expect expr-label     check nonzero '^FAIL R2 wf.yml:matrix'
+expect linux-label     check nonzero '^FAIL R2 wf.yml:nix'
+expect upper-label     check nonzero '^FAIL R2 wf.yml:nix'
+expect reusable-callee check nonzero '^FAIL R2 wf.yml:nix'
+expect reusable-callee sim   nonzero 'WOULD schedule it on katana'
+expect reusable-prt    check nonzero '^FAIL R1 caller.yml:call: pull_request_target workflow calls'
+expect reusable-prt-hosted check 0 ''
 # The repository's own workflows must pass both.
 expect ../../../../.github/workflows check 0 'checked [0-9]+ workflow file'
 expect ../../../../.github/workflows sim   0 'fork-PR dry run: 0 self-hosted'

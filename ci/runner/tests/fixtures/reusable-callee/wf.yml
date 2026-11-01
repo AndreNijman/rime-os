@@ -1,0 +1,9 @@
+# A reusable workflow with no guard: a pull_request caller would put a fork's
+# code on katana.
+on:
+  workflow_call:
+jobs:
+  nix:
+    runs-on: [self-hosted, katana-nix]
+    steps:
+      - run: nix build .#rimed

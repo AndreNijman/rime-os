@@ -89,6 +89,7 @@ fi
 say "rendering $ETC/nftables.conf for $RIME_RUNNER_SUBNET"
 if [ "$plan" = 0 ]; then
 	sed -e "s#@SUBNET@#$RIME_RUNNER_SUBNET#g" -e "s#@GATEWAY@#$RIME_RUNNER_GATEWAY#g" \
+		-e "s#@BRIDGE@#$RIME_RUNNER_BRIDGE#g" \
 		"$SRC/nftables.conf.in" >"$ETC/nftables.conf"
 	chmod 0600 "$ETC/nftables.conf"
 	nft -c -f "$ETC/nftables.conf"
@@ -118,7 +119,15 @@ if command -v semanage >/dev/null && [ "$(getenforce 2>/dev/null || echo Disable
 fi
 if ! podman network exists "$RIME_RUNNER_NETWORK" 2>/dev/null; then
 	say "creating podman network $RIME_RUNNER_NETWORK ($RIME_RUNNER_SUBNET)"
-	run podman network create --subnet "$RIME_RUNNER_SUBNET" --gateway "$RIME_RUNNER_GATEWAY" "$RIME_RUNNER_NETWORK"
+	run podman network create --subnet "$RIME_RUNNER_SUBNET" --gateway "$RIME_RUNNER_GATEWAY" \
+		--interface-name "$RIME_RUNNER_BRIDGE" --disable-dns "$RIME_RUNNER_NETWORK"
+fi
+# The firewall's IPv6 rules match the bridge by name, and DNS must not point at
+# the gateway (runner.conf RIME_RUNNER_DNS): refuse a network made otherwise.
+if [ "$plan" = 0 ]; then
+	have=$(podman network inspect "$RIME_RUNNER_NETWORK" --format '{{.NetworkInterface}} {{.DNSEnabled}}')
+	[ "$have" = "$RIME_RUNNER_BRIDGE false" ] ||
+		{ echo "podman network $RIME_RUNNER_NETWORK is '$have', want '$RIME_RUNNER_BRIDGE false': podman network rm it and re-run" >&2; exit 1; }
 fi
 say "building images (job image: dnf + the sha256-pinned runner tarball)"
 run "$PREFIX/bin/rime-runner-ctl" build-images

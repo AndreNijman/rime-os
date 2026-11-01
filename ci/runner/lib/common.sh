@@ -52,6 +52,28 @@ rr_uid_base() {
 	echo $((RIME_RUNNER_UID_BASE + block * RIME_RUNNER_UID_BLOCK))
 }
 
+# IPv6 off on the container's network interface. The runner network is
+# IPv4-only, but the kernel still gives every veth an fe80:: address, and the
+# host's bridge has one too: measured 2026-11-01, a job-image container on a
+# podman bridge (no capabilities, uid 1000) opened the host's sshd at
+# [fe80::<bridge>%eth0]:22, which no `ip saddr` rule sees.
+# `all` (which also sets `default`) switches it off on eth0 whenever eth0
+# appears; `lo` back on keeps ::1 for test servers on localhost. Not
+# `eth0.disable_ipv6` directly: with --uidmap, crun writes sysctls before
+# netavark has moved eth0 in ("No such file or directory").
+rr_no_ipv6_args() {
+	NO_IPV6_ARGS=(--sysctl net.ipv6.conf.all.disable_ipv6=1 --sysctl net.ipv6.conf.lo.disable_ipv6=0)
+}
+
+# Resolvers for a container on the runner network (runner.conf RIME_RUNNER_DNS
+# says why not the gateway). None with --network none.
+rr_dns_args() {
+	local net=$1 d
+	DNS_ARGS=()
+	[ "$net" = none ] && return 0
+	for d in ${RIME_RUNNER_DNS:-}; do DNS_ARGS+=(--dns "$d"); done
+}
+
 # ── the builder: the only writer of the shared Nix store ────────────────────
 # Runs nix-daemon with a REAL build sandbox. Measured on katana (2026-11-01,
 # podman 6.1.3, SELinux enforcing): inside a user namespace Nix's sandbox needs
@@ -63,10 +85,17 @@ rr_uid_base() {
 # builders, which Nix's own sandbox confines (no network except fixed-output,
 # private mount/pid/ipc/uts namespaces, nixbld uids).
 #
+# --read-only root: nix-daemon still needs ~/.cache/nix for its narinfo cache.
+# Without it every substitution fails with "there is no substituter that can
+# build it" (measured 2026-11-01, tests/test-network.sh step E), and every path
+# would be built from source.
+#
 # $1: network name, or "none" (the dry run).
 builder_args() {
 	local net=${1:-$RIME_RUNNER_NETWORK} base
 	base=$(rr_uid_base 0)
+	rr_no_ipv6_args
+	rr_dns_args "$net"
 	# shellcheck disable=SC2054 # commas belong to --tmpfs options
 	BUILDER_ARGS=(
 		--name rime-runner-builder --replace --rm
@@ -77,8 +106,9 @@ builder_args() {
 		--security-opt no-new-privileges
 		--device /dev/kvm
 		--read-only --tmpfs /tmp:rw,mode=1777,size=1g
+		--tmpfs /root/.cache:rw,mode=0700,size=1g
 		--pids-limit 65536
-		--network "$net"
+		--network "$net" "${NO_IPV6_ARGS[@]}" "${DNS_ARGS[@]}"
 		-v "$RIME_RUNNER_NIX:/nix"
 		-v "$RIME_RUNNER_HOME/builder/nix.conf:/etc/nix/nix.conf:ro"
 	)
@@ -98,13 +128,15 @@ builder_args() {
 job_args() {
 	local slot=$1 net=${2:-$RIME_RUNNER_NETWORK} base
 	base=$(rr_uid_base $((slot + 1)))
+	rr_no_ipv6_args
+	rr_dns_args "$net"
 	JOB_ARGS=(
 		--name "rime-runner-job-$slot" --replace --rm -i
 		--uidmap "0:$base:$RIME_RUNNER_UID_BLOCK" --gidmap "0:$base:$RIME_RUNNER_UID_BLOCK"
 		--cap-drop all
 		--security-opt no-new-privileges
 		--pids-limit 32768
-		--network "$net"
+		--network "$net" "${NO_IPV6_ARGS[@]}" "${DNS_ARGS[@]}"
 		-v "$RIME_RUNNER_NIX/store:/nix/store:ro"
 		-v "$RIME_RUNNER_NIX/var/nix/profiles:/nix/var/nix/profiles:ro"
 		-v "$RIME_RUNNER_NIX/var/nix/daemon-socket:/nix/var/nix/daemon-socket:ro"

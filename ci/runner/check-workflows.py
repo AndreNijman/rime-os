@@ -3,8 +3,10 @@
 
     python3 ci/runner/check-workflows.py [.github/workflows]
 
-A job is SELF-HOSTED when its runs-on names `self-hosted` or any label starting
-with `katana` (today's `katana`, the isolated `katana-nix`). For each such job:
+A job is SELF-HOSTED unless every label in its runs-on is a GitHub-hosted image
+label (ubuntu-*, windows-*, macos-*). Labels are case-insensitive to GitHub, and
+a self-hosted runner also answers `self-hosted`, `Linux` and `X64`, so
+`runs-on: linux` lands on katana as surely as `katana-nix` does. For each such job:
 
   R1  the workflow has no `pull_request_target` trigger (it would hand the base
       repository's secrets and a write token to a fork's code) and no
@@ -24,8 +26,13 @@ with `katana` (today's `katana`, the isolated `katana-nix`). For each such job:
 With --simulate-fork-pr: evaluate every self-hosted job's `if:` in a fork
 pull_request context and fail for each one that could be scheduled.
 
-Exit status = number of violations. Reusable-workflow calls (`uses:` at job
-level) are reported as unchecked when they could run on katana.
+Reusable workflows: a called file's jobs are checked like any other (R2 holds
+there, since `github.event_name` is the caller's event), and the dry run counts
+a `workflow_call` file as reachable from a pull request. R1 also fails a
+pull_request_target/workflow_run workflow that calls a reusable workflow from
+another repository, or a local one with a self-hosted job.
+
+Exit status = number of violations.
 """
 import os
 import re
@@ -66,14 +73,42 @@ def labels_of(runs_on):
     return [str(runs_on)]
 
 
+HOSTED = re.compile(r"^(ubuntu|windows|macos)-[a-z0-9.\-]+$")
+
+
 def self_hosted(labels):
+    """False only for a job whose every label is a GitHub-hosted image label.
+    No runs-on at all (a reusable-workflow call) is not a job of its own."""
+    if not labels:
+        return False
     for l in labels:
-        l = l.strip()
-        if l == "self-hosted" or l.startswith("katana") or l.startswith("group:"):
-            return True
+        l = l.strip().lower()
         if "${{" in l:   # a matrix/expression label could be anything: treat as katana
             return True
+        if not HOSTED.match(l):
+            return True
     return False
+
+
+def local_callee(uses, root):
+    """Path of a reusable workflow in this repository, or None."""
+    uses = str(uses).strip()
+    if not uses.startswith("./"):
+        return None
+    root = os.path.abspath(root)
+    if root.endswith(os.path.join(".github", "workflows")):
+        return os.path.normpath(os.path.join(root, "..", "..", uses))
+    return os.path.join(root, os.path.basename(uses))   # fixtures: callee next to caller
+
+
+def has_self_hosted_job(path):
+    try:
+        with open(path) as f:
+            doc = yaml.safe_load(f) or {}
+    except OSError:
+        return True   # cannot see it: assume the worst
+    return any(self_hosted(labels_of(j.get("runs-on"))) for j in (doc.get("jobs") or {}).values()
+               if isinstance(j, dict))
 
 
 def triggers(doc):
@@ -93,7 +128,7 @@ def id_token_write(perms):
     return isinstance(perms, dict) and str(perms.get("id-token", "")).strip() == "write"
 
 
-def check_file(path):
+def check_file(path, root):
     problems, report = [], []
     with open(path) as f:
         doc = yaml.safe_load(f) or {}
@@ -103,7 +138,12 @@ def check_file(path):
     for name, job in (doc.get("jobs") or {}).items():
         where = f"{os.path.basename(path)}:{name}"
         if "uses" in job and "runs-on" not in job:
-            report.append(f"note {where}: reusable workflow call, runs-on not visible here")
+            callee = local_callee(job["uses"], root)
+            report.append(f"note {where}: reusable workflow call {job['uses']}")
+            bad_trig = [t for t in FORBIDDEN_TRIGGERS if t in trig]
+            if bad_trig and (callee is None or has_self_hosted_job(callee)):
+                problems.append(f"R1 {where}: {bad_trig[0]} workflow calls {job['uses']}, "
+                                "which can run on katana")
             continue
         labels = labels_of(job.get("runs-on"))
         if not self_hosted(labels):
@@ -173,7 +213,8 @@ def simulate(files, ctx):
     for p in files:
         with open(p) as f:
             doc = yaml.safe_load(f) or {}
-        pr_triggered = bool({"pull_request", "pull_request_target"} & triggers(doc))
+        # A reusable workflow runs under its caller's event, a pull request included.
+        pr_triggered = bool({"pull_request", "pull_request_target", "workflow_call"} & triggers(doc))
         for name, job in (doc.get("jobs") or {}).items():
             if not self_hosted(labels_of(job.get("runs-on"))):
                 continue
@@ -201,7 +242,7 @@ def main():
         return min(simulate(files, FORK_PR), 125)
     problems = []
     for p in files:
-        pr, rep = check_file(p)
+        pr, rep = check_file(p, root)
         for line in rep:
             print(line)
         problems += pr

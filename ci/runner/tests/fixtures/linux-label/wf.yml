@@ -1,0 +1,8 @@
+# No `self-hosted`, no `katana`: but every self-hosted runner answers `Linux`.
+on:
+  pull_request:
+jobs:
+  nix:
+    runs-on: [Linux, X64]
+    steps:
+      - run: nix build .#rimed

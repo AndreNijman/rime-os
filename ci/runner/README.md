@@ -54,9 +54,22 @@ GitHub ── JIT config (one job) ──> rime-runner@N.service (root, host)
 | No host credentials | `/etc/rime-runner/gh-token` and `/etc/apex-runner` exist only on the host side | probes |
 | No privilege | `--cap-drop all`, `no-new-privileges`, no sudo in the image, no engine socket, no block/GPU/TPM/kvm devices | probes |
 | Own uid range per role | builder 2000000000, slot N 2000000000+(N+1)·65536; outside login.defs `SUB_UID_MAX` (600100000), andre (524288) and ghrunner (1000000) | probe `user namespace maps…` |
-| Off the LAN | podman network `rime-runner` 10.89.77.0/24 + nft table `inet rime_runner`: RFC1918, CGNAT (Tailscale), link-local rejected in `forward`; to katana itself only DNS on the gateway | `nft -c` parses it (not loaded by the test) |
+| Off the LAN | podman network `rime-runner` 10.89.77.0/24 (bridge `rime-runner0`, no aardvark-dns) + nft table `inet rime_runner`: RFC1918, CGNAT (Tailscale), link-local rejected in `forward`; katana itself closed in `input`; IPv6 from the bridge rejected; IPv6 off on every container's eth0 (`::1` kept); DNS = public resolvers (`RIME_RUNNER_DNS`) | `test-network.sh`: a throwaway network + table, real traffic from the production `job_args`/`builder_args` |
 | Caches on /var/lab | storage root + store under `/var/lab/rime-runner` | test layout |
 | Builds sandboxed | builder runs nix-daemon with `sandbox = true`, `sandbox-fallback = false` | probe builds a derivation through the socket: pid 1 in its own namespace, nixbld uid |
+
+**IPv6 and DNS (found 2026-11-01).** An IPv4-only podman network still gives every
+veth and the bridge an `fe80::` address: a job-image container (no capabilities,
+uid 1000) opened katana's sshd at `[fe80::<bridge>%eth0]:22`, which no `ip saddr`
+rule sees. Two locks now: the containers switch IPv6 off on eth0
+(`net.ipv6.conf.all.disable_ipv6=1`, `lo` back on; `eth0.disable_ipv6` directly fails
+under `--uidmap`), and the table rejects IPv6 from the bridge by name. Separately,
+katana's own firewall (`inet rime`, input policy drop) drops port 53 from container
+networks, so aardvark-dns on the gateway answered nothing: the network is created
+with `--disable-dns` and containers get `--dns` public resolvers through the forward
+path. And the builder's root is read-only: nix-daemon needs `~/.cache/nix` for its
+narinfo cache, or every substitution fails with "no substituter can build it"
+(a tmpfs now).
 
 Today's runner is filtered with `meta skuid ghrunner`. That match cannot see rootful
 container traffic (it is forwarded from the container's namespace and has no local
@@ -107,10 +120,15 @@ python3 ci/runner/check-workflows.py --simulate-fork-pr .github/workflows  # dry
 bash ci/runner/tests/test-check-workflows.sh                               # fixtures
 ```
 
-Every job whose `runs-on` names `self-hosted` or a `katana*` label (or an expression
-that could resolve to one) must:
+Every job whose `runs-on` is not made only of GitHub-hosted image labels
+(`ubuntu-*`, `windows-*`, `macos-*`; case-insensitive, as GitHub matches them) counts
+as a katana job, because a self-hosted runner also answers `self-hosted`, `Linux` and
+`X64`: `runs-on: linux` lands on katana too. An expression label counts as katana.
+Every such job must:
 
-- R1: live in a workflow without `pull_request_target` or `workflow_run` triggers;
+- R1: live in a workflow without `pull_request_target` or `workflow_run` triggers,
+  and such a workflow may not call a reusable workflow from another repository or a
+  local one with a katana job (the guard below passes under `pull_request_target`);
 - R2: carry the fork guard that kernel-build.yml and katana-probe.yml already use
 
   ```yaml
@@ -122,8 +140,8 @@ that could resolve to one) must:
 - R3: use no secret but `GITHUB_TOKEN`, no `id-token: write` (keyless signing),
   no cosign, sbsign, `APEX_SB_*`, `APEX_KEY*`, narinfo signing.
 
-`--simulate-fork-pr` evaluates every self-hosted job's `if:` in a fork
-`pull_request` context and fails for each job that would be scheduled. The `if:`
+`--simulate-fork-pr` evaluates every self-hosted job's `if:` (in `pull_request` and
+`workflow_call` workflows) in a fork `pull_request` context and fails for each job that would be scheduled. The `if:`
 is the belt: a fork PR runs its own copy of the workflow file. The control is the
 repository setting "Require approval for all external contributors", which stays on.
 
@@ -181,6 +199,19 @@ job container with the **same `builder_args`/`job_args` production uses**
 that no container is left and Andre's own podman storage has none of ours. It starts
 no unit and touches no host config.
 
+```
+sudo ci/runner/tests/test-network.sh   # after test-isolation.sh; ~1 min
+```
+
+The live half: a throwaway podman network (`rime-runner-nettest`, 10.89.78.0/24,
+bridge `rr-nettest0`) and the template loaded as its own table
+(`inet rime_runner_nettest`), both removed by an EXIT trap. From job containers it
+dials katana's sshd over IPv4 and over the bridge's `fe80::`, katana's LAN address,
+the router, a CGNAT address, then public DNS and HTTPS, in four set-ups (no table +
+IPv6 on, which must find the holes; table only; production; production args
+without the table), then starts the builder with `builder_args` and has a job
+substitute a path from cache.nixos.org through it.
+
 ## Files
 
 | Path | What |
@@ -195,7 +226,7 @@ no unit and touches no host config.
 | `systemd/` | slice, builder, `rime-runner@.service`, firewall |
 | `nftables.conf.in` | `inet rime_runner` table |
 | `check-workflows.py` | fork-PR + key guard, `--simulate-fork-pr` |
-| `tests/` | `test-isolation.sh` (root), `test-check-workflows.sh` + fixtures |
+| `tests/` | `test-isolation.sh`, `test-network.sh` (root), `test-check-workflows.sh` + fixtures |
 
 ## Upkeep
 
@@ -206,6 +237,10 @@ no unit and touches no host config.
 - **Store size.** nix-daemon collects garbage below 50 GB free on /var/lab, up to
   100 GB free. A job's `result` link is not a GC root in the daemon's view, so copy
   what must outlive the job (`nix copy`, upload) inside the job.
+- **Any job can collect garbage.** Nix lets an untrusted client run `nix-store --gc`
+  (measured: 2 dead paths deleted from a job). It cannot delete live paths, but it
+  can empty the shared cache of everything dead: a denial of service, not an escape.
+  Nix has no setting to refuse it.
 
 ## Not in step 1
 
@@ -218,4 +253,5 @@ no unit and touches no host config.
 - P3: the runner rebuilt as NixOS configuration on katana.
 - Not run on katana: the systemd units, the JIT mint (`generate-jitconfig`, including
   whether GitHub adds `self-hosted`/`Linux`/`X64` to the custom labels itself), the
-  network + nft table under a real job, `install.sh` outside `--plan`.
+  production `rime-runner` network + table under a real job (`test-network.sh` runs
+  the same template and args on a throwaway network), `install.sh` outside `--plan`.

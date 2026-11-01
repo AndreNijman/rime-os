@@ -140,6 +140,14 @@ else
 fi
 
 # ── 6. network (dry run uses --network none) ────────────────────────────────
+# IPv6 off on every interface but lo: an fe80:: address on eth0 reaches the
+# host's services past the IPv4-only firewall rules (tests/test-network.sh).
+if [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null)" = 1 ] &&
+	! awk '$6 != "lo"' /proc/net/if_inet6 2>/dev/null | grep . >/dev/null; then
+	pass "IPv6 off outside lo (no link-local path to the host)"
+else
+	fail "IPv6 on: all.disable_ipv6=$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6 2>/dev/null), addresses: $(awk '$6 != "lo" {print $6}' /proc/net/if_inet6 2>/dev/null | tr '\n' ' ')"
+fi
 if getent hosts github.com >/dev/null 2>&1; then info "network: github.com resolves"; else info "network: none (dry run)"; fi
 
 echo "RESULT failures=$fails"
