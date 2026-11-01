@@ -339,6 +339,8 @@ pub fn build(
     if policy.network {
         spec.run_ro = sandbox::resolv_binds();
     }
+    // The system's own programs (NixOS: /run/current-system), network or not.
+    spec.run_ro.extend(sandbox::system_run_binds());
     // The way into the broker is the agent runtime's control socket, under
     // `$XDG_RUNTIME_DIR`, which `build_argv` masks with a tmpfs. Binding it
     // back is the whole of the `broker` dimension: `rime secret use` and

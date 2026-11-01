@@ -5,7 +5,7 @@
 #
 # Nodes:
 #   rime     every protection on
-#   weak     G1, G4, G6, G7, G8, G9 removed (none of them stops the others' checks from running)
+#   weak     G1, G4, G6, G7, G8, G9 and the session system PATH removed (none stops the others' checks)
 #   tiocsti  G5 removed (on its own: it makes rime-agentd refuse every confined session)
 #   nobwrap  G2 removed (on its own, for the same reason)
 #   client   another machine on the LAN, for the firewall and ssh gates
@@ -19,8 +19,9 @@ let
   keys = import (pkgs.path + "/nixos/tests/ssh-keys.nix") pkgs;
   password = "correct horse battery staple";
 
-  # G4 + G7 mutant: rimed with /nix writable in sessions and rime-agentd behind a wrapper (so
-  # /proc/<pid>/exe is .rime-agentd-wrapped). The unit rename that completes G7's mutant is below.
+  # G4 + G7 + PATH mutant: rimed with /nix writable in sessions, no system trees bound back into the masked /run,
+  # and rime-agentd behind a wrapper (so /proc/<pid>/exe is .rime-agentd-wrapped). The unit rename that completes
+  # G7's mutant is below.
   rimedWeak = pkgs.rime.rimed.overrideAttrs (old: {
     pname = "rimed-weakened";
     # The mutation is deliberate, and rimed's own unit test (sandbox::tests::nothing_under_nix_may_be_writable)
@@ -32,7 +33,9 @@ let
         --replace-fail 'const NEVER_WRITABLE_TREES: &[&str] = &["/nix"];' \
                        'const NEVER_WRITABLE_TREES: &[&str] = &[];' \
         --replace-fail '    "/nix",
-];' '];'
+];' '];' \
+        --replace-fail 'pub const SYSTEM_RUN_TREES: &[&str] = &[' \
+                       'pub const SYSTEM_RUN_TREES: &[&str] = &[]; pub const SYSTEM_RUN_TREES_MUTANT: &[&str] = &['
     '';
     postInstall = (old.postInstall or "") + ''
       wrapProgram $out/bin/rime-agentd --set RIME_TEST_WRAPPED 1
@@ -53,6 +56,9 @@ let
         description = "Rime agent runtime (test)";
         wantedBy = [ "default.target" ];
         serviceConfig.ExecStart = "${rimed}/bin/rime-agentd";
+        # The shipped unit's PATH (nix/pkgs/rimed.nix agentdPath), which every session inherits, rather than the
+        # NixOS default for a declared service: the PATH check below is about what a user's sessions get.
+        environment.PATH = lib.mkForce rimed.agentdPath;
       };
       systemd.services.rime-secretd = {
         description = "Rime secret service (test)";
@@ -198,16 +204,45 @@ pkgs.testers.runNixOSTest {
         rime.succeed("rm -f /home/alice/proj/g2.out")
         print(session(rime, "g2", "test -e /run/dbus/system_bus_socket && echo bus-visible > ./g2.out || echo confined > ./g2.out"))
         assert wait_file(rime, "/home/alice/proj/g2.out").strip() == "confined", "G2 FAILED: the session was not confined"
-        # Observation, not a gate: a confined session's /run is an empty tmpfs, so on NixOS it also loses
-        # /run/current-system (the system PATH) and /run/wrappers. Printed for the services/rimed owners.
+        # The masked /run takes the NixOS system PATH (/run/current-system/sw/bin) with it unless the session
+        # binds it back (rime-agent-core sandbox::run_binds): what a session sees of /run, recorded.
         rime.succeed("rm -f /home/alice/proj/g2-run.out")
-        session(rime, "g2run", "for p in /run/current-system /run/wrappers /etc/static; do test -e $p && echo $p present || echo $p absent; done > ./g2-run.out")
+        session(rime, "g2run", "for p in /run/current-system /run/opengl-driver /run/wrappers /run/nix /run/dbus /etc/static; do test -e $p && echo $p present || echo $p absent; done > ./g2-run.out")
         print("rime confined session sees: " + wait_file(rime, "/home/alice/proj/g2-run.out"))
         rc, out = session(nobwrap, "g2", "echo ran > ./g2.out")
         print("nobwrap: rc=%d %s" % (rc, out))
         assert rc != 0 and "bubblewrap" in out, "G2 mutant: without bwrap the session must be refused, naming bubblewrap"
         nobwrap.sleep(3)
         nobwrap.fail("test -e /home/alice/proj/g2.out")
+
+    # ── The system PATH inside a confined session (polish item 1) ────────────────────────────
+    # A confined session runs a system program by its bare name, from the PATH the unit hands it, and the
+    # store stays read-only and the nix-daemon socket stays out of reach while it does. socat is a system
+    # package here (/run/current-system/sw/bin), so `command -v` resolving it is the PATH, not a store path.
+    path_probe = (
+        "{ command -v socat; socat -V >/dev/null 2>&1 && echo socat-ran;"
+        " touch /nix/store/.rime-probe 2>/dev/null && echo store-writable || echo store-read-only;"
+        " test -e /nix/var/nix/daemon-socket/socket && echo socket-visible || echo socket-absent;"
+        " socat -u /dev/null UNIX-CONNECT:/nix/var/nix/daemon-socket/socket 2>/dev/null && echo daemon-reached || echo daemon-refused;"
+        " test -e /run/dbus/system_bus_socket && echo bus-visible || echo bus-absent;"
+        " test -e /run/wrappers && echo wrappers-visible || echo wrappers-absent; } > ./path.out 2>&1")
+
+    def system_path(m):
+        m.succeed("rm -f /home/alice/proj/path.out")
+        session(m, "path", path_probe)
+        out = wait_file(m, "/home/alice/proj/path.out").split()
+        print(m.name + " session PATH probe: " + " ".join(out))
+        return out
+
+    with subtest("PATH: a confined session runs a system binary by name, and still cannot write the store or reach the daemon"):
+        out = system_path(rime)
+        assert out[0] == "/run/current-system/sw/bin/socat", "a confined session does not resolve a system binary from PATH: %s" % out
+        assert "socat-ran" in out, "a confined session found socat but could not run it: %s" % out
+        for want in ("store-read-only", "socket-absent", "daemon-refused", "bus-absent", "wrappers-absent"):
+            assert want in out, "PATH binding widened the sandbox (%s missing): %s" % (want, out)
+        out = system_path(weak)
+        assert "socat-ran" not in out and "/run/current-system/sw/bin/socat" not in out, \
+            "PATH mutant: without the system trees bound back a session must NOT find socat: %s" % out
 
     # ── G4 ──────────────────────────────────────────────────────────────────────────────────
     nixdir = "/nix/var/nix/profiles/per-user/alice"

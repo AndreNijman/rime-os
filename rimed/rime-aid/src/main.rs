@@ -653,9 +653,9 @@ fn status(daemon: &Arc<Daemon>) -> Status {
         st.notes.push(format!(
             "the backend is {} and has been up for {}s",
             if r.confined {
-                "confined with bwrap --unshare-net, so it has no network at all"
+                "confined with bwrap --unshare-net, so it has no network at all".to_string()
             } else {
-                "UNCONFINED because /usr/bin/bwrap is absent"
+                format!("UNCONFINED because {} is absent", rime_paths::BWRAP)
             },
             r.uptime().as_secs()
         ));

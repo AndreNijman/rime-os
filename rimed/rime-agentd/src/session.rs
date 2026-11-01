@@ -460,8 +460,9 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
     // Build the sandbox.
     let mut spec = SandboxSpec::new(policy, paths::home(), paths::runtime_dir());
     // /run is masked, which takes the resolv.conf symlink target with it. Bind
-    // the target back or the session has no DNS at all.
-    spec.run_ro = sandbox::resolv_binds();
+    // the target back or the session has no DNS at all; and on NixOS the
+    // system's programs (/run/current-system), or it has no system PATH.
+    spec.run_ro = sandbox::run_binds();
     spec.control_socket = paths::control_socket();
     spec.scratch = scratch.clone();
     spec.cwd = workdir.clone();
