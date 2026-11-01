@@ -59,7 +59,15 @@ The channel document's digest is the sha256 of the manifest the registry serves 
 config ("unsupported image-specific operation on artifact"), which is how §3.3 publishes it.
 
 `/run/rime-live/status.json` keeps the shape the Shell already reads on bootc, with `product: "nixos"` added. The
-states are `staged`, `deferred`, `activating`, `active` and `rolled-back`.
+states are `staged` (transitional only), `deferred`, `activating`, `active` and `rolled-back`. An update that ends with
+nothing live ends as `active` with `remaining: "reboot"`, as bootc's engine ends it, so Settings -> Updates says
+"Restart recommended"; the Shell reads `staged` as still applying. A live update whose new Shell waits for a re-login
+(no `rime-live-session` on NixOS yet) ends with `remaining: "session-restart"`.
+
+A release held back by rules 5 or 6 is installed for the next boot. Running `sudo rime update` again (the Shell's
+"Update now") re-plans it once nothing holds it: nothing is downloaded or installed, the closure is verified again,
+and it goes live if the rules allow. `rime live apply` and `rime live rollback` need bootc and refuse on NixOS, naming
+what to run instead (TODO(handover): §10.3's NixOS versions).
 
 ## The boot/switch rule (§9)
 
@@ -86,8 +94,15 @@ line.
    (`restartTriggers = [ config.system.path ]`). With the lists as the contract started them, a Shell-only release
    printed `would reload dbus-broker.service` and `would stop/start polkit.service` and was boot-class, so no
    Rime-only release could ever go live (the contract's §9 expects the opposite). The test proves the reload keeps
-   dbus-broker's PID and the switch lands. Not proven: that the Shell's polkit authentication agent registers again
-   after polkit restarts (the test has no graphical session).
+   dbus-broker's PID and the switch lands. The polkit authentication agent (mate-polkit) registers through
+   libpolkit-agent-1's `polkit_agent_listener_register`, whose listener re-registers when polkitd's bus name comes back
+   (`on_notify_authority_owner`, src/polkitagent/polkitagentlistener.c at the pinned polkit). Read in the source, not
+   proven in a VM with a graphical session. Temporary authorizations ("remember for a while") end with the restart.
+
+   **The bus daemon itself is never changed live.** Because nixpkgs only reloads dbus-broker, a new `dbus` or
+   `dbus-broker` build would pass this rule as a reload while the daemon started at boot keeps running. So any change
+   of those builds against the booted generation is boot-class (`bus_daemon` in activation.rs); the `dbus-1` config
+   dir is not one of them.
 4. glibc or linux-pam differ from the running or the booted generation.
 5. **Gaming Mode / busy.** A game is running (a non-empty `/sys/fs/cgroup/rime-game/cgroup.procs`, or a known game
    process), or this could not be told. The update installs for the next boot and the live part is **deferred**.
@@ -157,12 +172,13 @@ The test checks the following.
 - **Kernel diff (B):**
   - the plan says it applies at the next restart;
   - the update leaves `current-system` and the boot id unchanged and sets the profile;
-  - `status.json` shows `staged`;
+  - `status.json` shows `active` with `remaining: "reboot"`;
   - after a reboot the client runs B's kernel and `trust --gate` passes.
 - `rime rollback` returns the profile to A, and after a reboot the client runs A's kernel again.
 - **Shell-only diff (C):**
-  - while a fake game sits in the rime-game cgroup, the plan names rule 5;
-  - without it, the update goes live: no reboot, same boot id, same greetd PID, the new Shell's marker in the running
+  - while a fake game sits in the rime-game cgroup, the plan names rule 5, and the update installs C for the next boot,
+    activates nothing and leaves `status.json` `deferred`;
+  - once the game is gone, `rime update` again goes live without downloading anything: no reboot, same boot id, same greetd PID, the new Shell's marker in the running
     system, and `status.json` shows `active`.
 - **Refusals:** each refused update leaves the profile unchanged.
   - a tampered manifest (`does not verify`);
