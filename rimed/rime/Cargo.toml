@@ -8,6 +8,10 @@ authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# Rime on NixOS: package verbs go through the catalogue (src/nixos/pkg.rs) instead of rime-pkg.
+nixos = []
+
 [[bin]]
 name = "rime"
 path = "src/main.rs"
