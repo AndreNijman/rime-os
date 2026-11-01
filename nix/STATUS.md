@@ -16,7 +16,8 @@ sudo -n podman exec -w /work/os rime-nix nix flake check path:. -L --keep-going 
 `nixosConfigurations.rime-vm.config.system.build.toplevel` (every area on, nixpkgs' kernel, as `nix/hosts/vm.nix`
 has it) = `/nix/store/883q7lvj…-nixos-system-rime-vm-26.11.20261030.1c89083`.
 `nix path-info -Sh` gives **10.3 GiB**, in 1,995 store paths. That figure is uncompressed and includes the whole
-closure, so it does not compare directly with bootc's 6.86 GB compressed image.
+closure, so it does not compare directly with bootc's compressed image sizes. CLAUDE.md records 5.06 GB after #83 and
+4.20 GB for a fresh install after the #123 rechunk; neither was measured here.
 
 These are the largest paths, which a size pass should look at first (not acted on here):
 
@@ -30,9 +31,16 @@ These are the largest paths, which a size pass should look at first (not acted o
 
 ## Ported and proven
 
-`nix flake check -L --keep-going` (run `flakecheck2`, then `flakecheck3` after the security fix) printed
-"running 21 flake checks...", and the last run printed "all checks passed!" (rc 0). Each check's output path
-then exists in the store (`nix path-info`):
+These are the runs, with logs in `/var/lab/rime-nix/integrate/`:
+
+1. `flakecheck2` (`nix flake check -L --keep-going`, "running 21 flake checks...") built every check except
+   `security`, whose G2 mutant did not reach the test's agent runtime.
+2. After that fix, `security` was rebuilt on its own: rc 0, `k88wj5lc…`.
+3. `flakecheck3` then printed "running 0 flake checks... all checks passed!" (rc 0). Every result was already
+   built, so nothing ran again.
+
+The proof is that each `checks.x86_64-linux.<name>.outPath`, evaluated from HEAD, exists in the store
+(`nix path-info`):
 
 | check | result | what it proves |
 |---|---|---|
