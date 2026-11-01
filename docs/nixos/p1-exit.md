@@ -112,10 +112,21 @@ flake checks: 10 run by .github/workflows/nix.yml, 4 skipped with a reason; 0 su
 
 ### Validation done
 
-- `actionlint .github/workflows/nix.yml`: rc 0.
-- The plan job's commands, run in the container: plan rc 0, check-suites rc 0 (output above).
-- `nix flake check path:. --no-build`: passes.
-- Built: `checks.x86_64-linux.ci` ("ci: all passed"), `checks.x86_64-linux.ci-userns`, `rimed` (with the report).
+The workflow has not run on GitHub (no push from this worktree). Its commands were run as written in the `rime-nix`
+container (`/var/lab/rime-nix/scratch/ci/jobs.sh`, under `nix shell` for gawk/grep/sed, which the container lacks and a
+runner has):
+
+- `nix flake check path:. --no-build`: rc 0, "all checks passed!".
+- `nix/ci/run-checks.sh plan`: rc 0, the plan above; `run.json` = the 10 checks that run.
+- `RIME_FLAKE_CHECKS_FILE=... tests/check-suites-run-in-ci.sh`: rc 0 (output above).
+- `nix build ...#checks.x86_64-linux.ci-userns`: rc 0. `rimed`, `rime-shell`, `rime-libexec` build (all three already in
+  the store for this tree; `rimed`'s build ran the checkPhase and wrote the report below).
+- `run-checks.sh build` for the `ci`, `ci-userns` and `eval` legs: all `pass`. `run-checks.sh summary` with only those
+  three results: rc 1, the other seven planned checks reported as **NO RESULT**, the four kernel checks as SKIPPED.
+- `actionlint .github/workflows/nix.yml` (nixpkgs pin's actionlint): rc 0. Also run inside `checks.x86_64-linux.ci`.
+- Every pinned action SHA resolves to its tag (GitHub API, 2026-11-01). install-nix-action v31.11.3 installs Nix 2.35.4
+  and its `enable_kvm` writes the udev rule `KERNEL=="kvm", GROUP="kvm", MODE="0666"` (read from the pinned
+  `install-nix.sh`).
 
 ### Not proven (first hosted run)
 
@@ -124,9 +135,17 @@ flake checks: 10 run by .github/workflows/nix.yml, 4 skipped with a reason; 0 su
 - Wall time against the 60-minute budget. katana's load average was 60-127 from parallel agents during this work, so
   local timings say nothing about a 4-vCPU runner. The heaviest legs are `desktop` and `libexec` (about 430 local
   derivations each) and `packages` (rimed's checkPhase). A hosted run gives the real numbers.
-- `rime-shell`'s check builds Hyprland locally: `nix/pkgs/shell.nix` (or the test) does not set `withUWSM = true`, so
-  the derivation misses cache.nixos.org. TODO(handover): the shell owner should match nixpkgs' default Hyprland so it
-  substitutes.
+- Every check leg starts from an empty store. The `rimed`, `gaming` and `security` checks have rimed in their build closure
+  (`nix-store -qR` on the check's drv), so those legs compile the rimed workspace before their VM test (11 min on 20
+  threads in the container; expect several times that on 4 vCPU), as does the packages job with its checkPhase on top.
+  `desktop`, `libexec`, `shell`, `eval` and `kernel-config-fresh` do not. This is the main risk to the 60-minute budget,
+  and the binary cache (R2) is what removes it.
+- The `shell` and `gaming` checks compile Hyprland: their VMs use `programs.hyprland` without `withUWSM = true`, and the
+  NixOS module's override then gives `/nix/store/a6gqc16mwivb1pf7xpf6sgcnjvggprx4-hyprland-0.57.0`, which is 404 on
+  cache.nixos.org. `desktop` and `libexec` (whose module sets `withUWSM = true`) get
+  `dmxlm63flzqqmm1wxfgmq057g2df2pmx-hyprland-0.57.0` = `pkgs.hyprland`, 200 on the cache. TODO(handover): the owners of
+  `nix/tests/shell.nix` and `nix/tests/gaming.nix` set `programs.hyprland.withUWSM = true` (as the desktop module does)
+  so their Hyprland substitutes.
 
 ### Handover
 
@@ -248,9 +267,12 @@ check where `cargo test` runs inside a logged-in user session.
 - **rime-secretd `tests::a_stale_socket_from_a_dead_daemon_is_replaced`** was skipped as flaky. The cause was in the
   test: it bound the socket in-process and dropped the listener, but a concurrent test's fork could still hold the fd
   until exec, so the "dead" socket sometimes still accepted a connection. The dead daemon is now a child process (the
-  test binary re-run with `RIME_SECRETD_TEST_BIND_AND_EXIT`) that binds and exits, so no fd outlives it. Mutant: putting
-  the in-process bind back with a cloned fd held open fails the test every run ("connecting to a socket whose daemon
-  has exited SUCCEEDED").
+  test binary re-run with `RIME_SECRETD_TEST_BIND_AND_EXIT`) that binds and exits, so no fd outlives it. Measured in the
+  container (`cargo test -p rime-secretd`, debug, `/var/lab/rime-nix/scratch/ci/secretd.sh`): the whole crate in
+  parallel 20/20 runs green, the test alone 50/50. Mutant (what a concurrent fork does): after the child exits, bind the
+  path again in-process and hold a `try_clone()` of the listener: 5/5 runs fail with "connecting to a socket whose
+  daemon has exited SUCCEEDED". (The loop skipped one other test, `peer::tests::a_handle_for_a_dead_process_...`, only
+  because it execs `/bin/true`, which the container lacks; it runs and passes in the Nix build.)
 - **rime-remoted `the_record_names_this_machine_this_port_and_nothing_that_identifies_it` and
   `the_record_goes_away_when_the_daemon_is_killed_outright`** were skipped as "needs avahi". They publish through a
   stub; the stub's `#!/usr/bin/env bash` needed `/usr/bin/env`, which NixOS has and the bwrap test root now provides.
