@@ -1,0 +1,15 @@
+# Flake checks the GitHub-hosted Nix workflow (.github/workflows/nix.yml) does NOT run, and why. One check name,
+# then the reason, on one line.
+#
+# The workflow runs every check in `nix flake check`'s list EXCEPT these (nix/ci/run-checks.sh plan), so a new
+# check runs in CI the day it lands without anybody adding it anywhere. run-checks.sh refuses an entry naming a
+# check that no longer exists, and tests/check-suites-run-in-ci.sh refuses one with no reason, so this list can only
+# say what is true.
+#
+# Each of these builds the Rime kernel (linux-rime-7.2.9, measured with `nix build --dry-run` against an empty
+# store: the derivation is in the plan of exactly these four). Nothing Rime-built is in a binary cache yet, and a
+# kernel plus its module set on a 4-vCPU hosted runner is hours, not minutes.
+vm-boot             needs the Rime binary cache (TODO(handover) R2): the system test boots the Rime kernel
+kernel-gate         needs the Rime binary cache (TODO(handover) R2): it reads the built Rime vmlinux
+kernel-vm           needs the Rime binary cache (TODO(handover) R2): it boots the Rime kernel and its signed modules
+kernel-boot-budget  needs the Rime binary cache (TODO(handover) R2): it measures the Rime kernel image and initrd

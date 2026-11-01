@@ -13,7 +13,9 @@
 #     still never a PATH lookup.
 #
 # Tests. checkPhase runs `cargo test --workspace --no-fail-fast`. The tests that cannot pass in the Nix build sandbox
-# are skipped BY NAME in `skips` below, each group with its reason; everything else must pass.
+# are skipped BY NAME in `skips` below, each group with its reason; everything else must pass. postCheck writes the
+# total per crate to $out/share/doc/rimed/cargo-tests.{txt,json} (rimed-test-report.py) and refuses a total that
+# cannot be trusted: a skip name that matches no test, a test that passed by skipping itself, a lost test binary.
 {
   lib,
   rustPlatform,
@@ -26,6 +28,7 @@
   libxml2,
   openssh,
   openssl,
+  python3,
   smartmontools,
   systemd,
   util-linux,
@@ -172,21 +175,99 @@ let
       "the_broker_dimension_opens_the_runtime_socket_and_only_when_asked"
       "the_shipped_command_runs_a_stdio_mcp_server_and_its_handshake_still_completes"
     ];
-    # A known race in the test, not in the daemon (its own comment records one failure on a GitHub runner): another
-    # test thread's fork can hold the dropped listener's fd until its exec, so the stale socket still accepts. It
-    # passed in two of three sandboxed runs here and failed once while a kernel build loaded the machine.
-    flaky = [ "tests::a_stale_socket_from_a_dead_daemon_is_replaced" ];
     # The negative control starts a child WITHOUT no_new_privs and checks the flag is clear. The build sandbox (and
     # bwrap) set no_new_privs on everything, so the control cannot exist here.
     needsPrivsUnset = [ "pty::tests::no_new_privs_reaches_the_session_and_the_negative_control_proves_it" ];
-    # rime-remoted publishes over mDNS through a running avahi-daemon; the sandbox has no system bus and no network.
-    needsAvahi = [
-      "the_record_names_this_machine_this_port_and_nothing_that_identifies_it"
-      "the_record_goes_away_when_the_daemon_is_killed_outright"
-    ];
     # Needs a file owned by another user at /etc/hostname (root on any real machine); the sandbox has none and
     # cannot make one.
     needsForeignOwnedFile = [ "project::tests::a_file_the_owner_does_not_own_is_refused" ];
+  };
+  # Not skipped any more, so not listed above: tests::a_stale_socket_from_a_dead_daemon_is_replaced (rime-secretd) was
+  # a race in the test (another thread's fork held the dropped listener's fd); its dead daemon is now a process that
+  # exits. rime-remoted's two discovery tests never needed avahi (they publish through a stub); the stub's
+  # `#!/usr/bin/env bash` needed /usr/bin/env, which NixOS has and the test root below now has too.
+
+  # Tests that cargo reports as PASSED but that returned early because their environment is missing (they print a
+  # SKIP line), by the reason. The report counts them as "selfskip", not as passed, and refuses the build for a
+  # self-skip not named here or a name here that no longer skips itself. Found 2026-11-01: before the report
+  # existed, these 57 read as passes.
+  selfSkipOk = {
+    # The same cause as needsLoginSessionCgroup above: rime-agentd (and rime-remoted's pairing, which asks it) refuses
+    # a client whose /proc/<pid>/cgroup is "/" ("neither a login session nor a user service"), and these tests catch
+    # that refusal, print SKIP and return. A NixOS VM test with a real login session is where they can run
+    # (TODO(handover): a nix/tests check that runs `cargo test` for rime-agentd inside a logged-in VM session).
+    noLoginSessionCgroup = [
+      "a_channel_onto_a_session_that_does_not_exist_is_refused_with_the_daemons_own_words"
+      "a_confined_session_is_judged_against_the_confinement_it_actually_has"
+      "a_confined_session_is_told_where_its_runtime_directory_is"
+      "a_declared_remote_origin_reaches_both_verbs"
+      "a_device_pairs_over_the_real_socket_and_lands_in_the_real_store"
+      "a_device_reaches_the_desktop_through_a_relay_neither_of_them_listens_on"
+      "a_file_from_the_phone_crosses_in_frames_and_its_path_is_typed_into_the_session"
+      "a_killed_session_has_nothing_still_running_under_it"
+      "a_launch_that_fails_says_so_and_leaves_the_packet_behind"
+      "a_name_given_at_run_is_on_the_session_the_list_and_the_record"
+      "a_narrowed_session_runs_under_its_own_allowlist_and_not_the_runtimes"
+      "a_network_change_costs_the_session_and_costs_nothing_else"
+      "a_paired_device_reaches_the_agent_runtime_through_the_proxy"
+      "a_payload_with_quotes_and_backslashes_arrives_unchanged"
+      "a_phone_registers_for_push_over_the_real_session_and_the_key_lands_in_its_own_file"
+      "a_phone_that_leaves_gives_the_desktop_its_size_back"
+      "a_project_grant_is_reported_as_inherited_and_a_session_grant_is_not"
+      "a_push_endpoint_the_machine_cannot_use_is_refused_and_nothing_is_stored"
+      "a_relayed_session_is_recorded_as_relayed_and_a_direct_one_is_not"
+      "a_request_from_a_phone_is_remote_and_cannot_approve_root"
+      "a_second_device_cannot_reuse_the_first_ones_code"
+      "a_session_cannot_ask_for_a_grant_or_renew_one_however_it_asks"
+      "a_session_may_not_read_this_machines_clipboard"
+      "a_session_reports_a_graph_even_when_it_has_delegated_nothing"
+      "a_session_that_narrows_nothing_still_gets_the_whole_runtime_allowlist"
+      "a_status_line_with_nothing_to_report_publishes_nothing"
+      "a_subagent_start_and_stop_become_one_finished_child"
+      "a_task_with_two_sessions_is_refused_and_both_ids_are_named"
+      "a_terminal_streams_both_ways_over_one_channel"
+      "a_user_with_no_status_line_gets_no_status_line"
+      "an_agents_terminal_title_reaches_the_session_and_the_record"
+      "an_empty_payload_is_accepted_and_writes_nothing"
+      "an_unknown_target_is_refused_before_anything_is_written"
+      "an_upload_is_refused_before_a_byte_of_it_is_sent"
+      "changed_files_name_the_base_they_were_measured_against"
+      "only_the_outgoing_sessions_system_grants_are_listed"
+      "peek_reads_the_tail_without_attaching_or_resizing"
+      "rename_names_a_live_session_clears_it_and_refuses_what_it_should"
+      "revoking_a_device_also_stops_it_being_woken"
+      "revoking_a_device_ends_the_connection_it_is_already_holding"
+      "submit_turns_text_into_a_line_the_program_acts_on"
+      "text_reaches_a_live_session_and_a_terminator_makes_it_a_line"
+      "the_desktop_measures_the_connection_and_a_device_cannot_invent_the_answer"
+      "the_end_of_a_turn_closes_a_subagent_whose_stop_never_arrived"
+      "the_packet_is_written_into_the_project_and_stdout_is_its_path"
+      "the_processes_a_session_forked_are_in_its_graph"
+      "the_proxy_enforces_the_narrowed_list_and_not_the_runtimes"
+      "the_relay_carries_the_session_and_can_read_none_of_it"
+      "the_status_line_prints_the_users_own_and_publishes_what_it_read"
+      "the_task_spelling_from_section_sixteen_writes_the_packet_for_the_tasks_session"
+    ];
+    # Opt-in by design (RIME_BUDGET_LIVE=1): they start a transient systemd scope through the user manager and
+    # write real cgroup limits. The build sandbox has no user manager.
+    liveBudgetOptIn = [
+      "a_budgeted_session_runs_in_its_own_scope_with_the_limits_really_written"
+      "a_wall_clock_budget_really_ends_the_session"
+    ];
+    # browser_ca::install refuses to run without /etc/firefox/policies/policies.json to copy (the bootc image ships
+    # one); the build sandbox has no /etc/firefox.
+    noFirefoxPolicy = [
+      "a_session_that_asked_for_no_ca_sees_the_machines_own_file"
+      "the_capsule_sees_the_merged_policy_and_can_open_the_ca_it_names"
+    ];
+    # rime-agent-core probes that need host tools and services the build sandbox lacks: `getent` at
+    # /usr/bin/getent, busctl with a running system bus, and loginctl on PATH with a running logind (the lock
+    # contract test asks logind about this user; with loginctl but no logind it would fail, not skip).
+    noHostTools = [
+      "sandbox::tests::a_confined_session_can_still_resolve_names"
+      "sandbox::tests::the_masked_run_really_does_block_the_system_bus"
+      "lock::tests::the_loginctl_contract_this_parser_relies_on_is_still_true"
+    ];
   };
 in
 rustPlatform.buildRustPackage {
@@ -226,9 +307,10 @@ rustPlatform.buildRustPackage {
   # The whole workspace, every test binary even after one fails, so the log has every total.
   doCheck = true;
   cargoTestFlags = [ "--workspace" "--no-fail-fast" ];
-  checkFlags = lib.concatMap (t: [ "--skip" t ]) (lib.concatLists (lib.attrValues skips));
+  # --show-output puts a passing test's captured output in the log, so the report can see a test that skipped itself.
+  checkFlags = lib.concatMap (t: [ "--skip" t ]) (lib.concatLists (lib.attrValues skips)) ++ [ "--show-output" ];
   # Programs the tests run: by the store paths above (curl, git, bwrap, openssl) or through PATH.
-  nativeCheckInputs = [ bubblewrap cacert curl git openssh openssl util-linux ];
+  nativeCheckInputs = [ bubblewrap cacert curl git openssh openssl python3 util-linux ];
   # xmllint, for the polkit checks in postInstall.
   nativeBuildInputs = [ libxml2 ];
   preCheck = ''
@@ -244,29 +326,47 @@ rustPlatform.buildRustPackage {
     # The tests assume a root shaped like a running machine, which the build sandbox is not: their fixtures go under
     # /var/tmp (the project's rule for anything a suite creates), the agent sandbox puts a tmpfs over /run, and a few
     # fixtures exec /bin/true or look for setpriv in /bin. So `cargo test` runs under bwrap in a root that has
-    # those, with every top-level directory of the build sandbox bound in unchanged. No /usr is provided: code that
-    # still assumed one would fail here, as it would on NixOS.
+    # those, with every top-level directory of the build sandbox bound in unchanged. /usr holds only /usr/bin/env,
+    # as on NixOS (environment.usrbinenv): code that assumed anything else under /usr would fail here, as it would
+    # on NixOS, and a `#!/usr/bin/env bash` script (rime-remoted's publisher stub) runs as it does there.
     testRoot=$(mktemp -d)
-    mkdir -p "$testRoot/var-tmp" "$testRoot/bin" "$testRoot/shim"
+    mkdir -p "$testRoot/var-tmp" "$testRoot/bin" "$testRoot/usr-bin" "$testRoot/shim"
     ln -s ${runtimeShell} "$testRoot/bin/sh"
     ln -s ${coreutils}/bin/true "$testRoot/bin/true"
     ln -s ${lib.getBin util-linux}/bin/setpriv "$testRoot/bin/setpriv"
+    ln -s ${coreutils}/bin/env "$testRoot/usr-bin/env"
     bwrapArgs=(--dev-bind /dev /dev --bind /proc /proc --tmpfs /run --bind "$testRoot/bin" /bin
+               --dir /usr --bind "$testRoot/usr-bin" /usr/bin
                --dir /var --bind "$testRoot/var-tmp" /var/tmp)
     for entry in /*; do
-      case "$entry" in /bin|/dev|/proc|/run|/var) ;; *) bwrapArgs+=(--bind "$entry" "$entry") ;; esac
+      case "$entry" in /bin|/dev|/proc|/run|/usr|/var) ;; *) bwrapArgs+=(--bind "$entry" "$entry") ;; esac
     done
+    # `cargo test` also copies everything it prints into $NIX_BUILD_TOP/cargo-test.log for the report (postCheck).
     {
       echo "#!${runtimeShell}"
-      printf 'exec %q' ${bubblewrap}/bin/bwrap; printf ' %q' "''${bwrapArgs[@]}"
-      printf ' --chdir "$PWD" -- %q "$@"\n' "$(command -v cargo)"
+      echo 'set -o pipefail'
+      printf 'run() { %q' ${bubblewrap}/bin/bwrap; printf ' %q' "''${bwrapArgs[@]}"
+      printf ' --chdir "$PWD" -- %q "$@"; }\n' "$(command -v cargo)"
+      echo 'if [ "''${1:-}" = test ]; then run "$@" 2>&1 | tee -a "$NIX_BUILD_TOP/cargo-test.log"; else run "$@"; fi'
     } > "$testRoot/shim/cargo"
     chmod +x "$testRoot/shim/cargo"
     export PATH="$testRoot/shim:$PATH"
+    rm -f "$NIX_BUILD_TOP/cargo-test.log"
+  '';
+
+  postCheck = ''
+    cargo metadata --offline --no-deps --format-version 1 --manifest-path rimed/Cargo.toml > "$NIX_BUILD_TOP/cargo-metadata.json"
+    python3 ${./rimed-test-report.py} "$NIX_BUILD_TOP/cargo-test.log" "$NIX_BUILD_TOP/cargo-metadata.json" \
+      ${builtins.toFile "rimed-test-skips.json" (builtins.toJSON { skip = skips; inherit selfSkipOk; })} \
+      "$NIX_BUILD_TOP/cargo-tests.txt" "$NIX_BUILD_TOP/cargo-tests.json"
   '';
 
   postInstall = ''
     share=$out/share
+    # The test report (postCheck); absent only from a build that overrides doCheck off (security.nix's mutant).
+    if [ -e "$NIX_BUILD_TOP/cargo-tests.txt" ]; then
+      install -Dm644 -t $share/doc/rimed "$NIX_BUILD_TOP/cargo-tests.txt" "$NIX_BUILD_TOP/cargo-tests.json"
+    fi
     install -Dm644 -t $share/rimeos/sysprofiles $src/config/sysprofiles/*.toml
     install -Dm644 $src/config/ai/catalogue.toml $share/rimeos/ai/catalogue.toml
     install -Dm644 -t $share/rime-os/trust $src/files/system/trust/fulcio-root.pem $src/files/system/trust/enforcement.conf

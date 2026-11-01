@@ -1,0 +1,192 @@
+name: Nix
+
+# The NixOS pivot's CI (feat/nixos and its nix/* branches): evaluate the flake, build Rime's packages, and run
+# every flake check that can finish on a GitHub-hosted runner without a Rime binary cache.
+#
+# Which checks run is not written here. nix/ci/run-checks.sh plan takes every check in the flake and removes the
+# ones in nix/ci/checks-not-in-ci.txt (each with its reason), so a new check runs the day it lands. The skipped ones
+# are printed as "SKIPPED <check>: <reason>" and listed in the run summary next to the ones that ran: a skip never
+# reads as a pass. Every command below is a run-checks.sh call, so a local run is the same command (nix/ci/README.md).
+#
+# Runners: GitHub-hosted ubuntu-24.04 ONLY. Never the self-hosted `katana` runner (Andre's laptop; it also builds
+# the bootc kernel). This workflow runs fork pull requests, takes no secrets and reads the repository only.
+# TODO(handover): once the per-job ephemeral runners in ci/runner/ are installed on katana (label `katana-nix`,
+# ci/runner/runner.conf), they become the primary for the heavy legs (the kernel checks skipped below need them or
+# the binary cache), with this hosted workflow kept as the fallback. Any job moved there must carry the fork guard
+# ci/runner/check-workflows.py enforces.
+#
+# No /nix cache between runs: the GitHub Actions cache is capped at 10 GB per repository and the legs below need
+# 5-13 GB of store each, so hit rates would be poor and evictions constant. Measure before adding one. The real
+# answer is the Rime binary cache (TODO(handover) R2, docs/nixos/updates-and-release.md).
+
+on:
+  push:
+    branches: [feat/nixos, 'nix/**']
+  pull_request:
+    branches: [feat/nixos]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+env:
+  # The same flake reference a local run uses (a worktree whose .git points outside the tree needs path:).
+  FLAKE: path:.
+
+jobs:
+  plan:
+    name: Evaluate and plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # Nix 2.35.4, the same as the build container the checks were proven in. It authenticates GitHub fetches
+      # (the nixpkgs pin) with the job's own read-only github.token, for the rate limit; no other credential.
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - name: nix flake check --no-build
+        # Evaluates every check, the skipped kernel ones included, so a broken expression fails here in minutes.
+        run: nix flake check "$FLAKE" --no-build
+      - name: Plan the checks
+        id: plan
+        run: |
+          nix/ci/run-checks.sh plan "$RUNNER_TEMP/plan"
+          echo "run=$(cat "$RUNNER_TEMP/plan/run.json")" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Flake checks this run skips"
+            echo
+            while IFS=$'\t' read -r name reason; do echo "- SKIPPED \`$name\`: $reason"; done < "$RUNNER_TEMP/plan/skipped.tsv"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Every suite and flake check has a CI home
+        run: RIME_FLAKE_CHECKS_FILE="$RUNNER_TEMP/plan/checks.txt" ./tests/check-suites-run-in-ci.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan
+          retention-days: 7
+
+  packages:
+    name: Packages (rimed, rime-shell, rime-libexec)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/free-disk-space
+        with:
+          required-gb: "40"
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor. rimed's checkPhase runs its tests under
+      # bubblewrap INSIDE the Nix build sandbox (nix/pkgs/rimed.nix), which needs one. This is a throwaway hosted VM.
+      - name: Allow user namespaces (bubblewrap in rimed's tests)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - name: Prove bubblewrap works inside the build sandbox
+        # Seconds, and a named failure, instead of a mystery twenty minutes into rimed's checkPhase.
+        run: nix build "$FLAKE#checks.x86_64-linux.ci-userns" -L --no-link
+      - name: Build rimed (and run its cargo tests), rime-shell, rime-libexec
+        run: nix build "$FLAKE#rimed" "$FLAKE#rime-shell" "$FLAKE#rime-libexec" -L --print-out-paths --out-link "$RUNNER_TEMP/pkg"
+      - name: cargo test total
+        if: ${{ !cancelled() }}
+        run: |
+          report="$RUNNER_TEMP/pkg/share/doc/rimed/cargo-tests.txt"
+          if [ -f "$report" ]; then
+            { echo '### rimed: cargo test --workspace --no-fail-fast'; echo; echo '```'; cat "$report"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            cat "$report"
+          else
+            echo "::error::no cargo test report: rimed did not build"
+            exit 1
+          fi
+
+  check:
+    name: Check ${{ matrix.check }}
+    needs: plan
+    if: ${{ needs.plan.outputs.run != '[]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.plan.outputs.run) }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: ./.github/actions/free-disk-space
+        with:
+          required-gb: "40"
+      - name: Allow user namespaces (bubblewrap in rimed's tests)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # enable_kvm (the default) installs a udev rule that opens /dev/kvm to the runner user before the daemon
+      # starts, and Nix then offers the `kvm` system feature the NixOS tests require.
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          enable_kvm: true
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: Prove KVM
+        # A NixOS test without KVM fails with "a system with features {kvm, nixos-test} is required"; this names it
+        # first, and refuses to let a VM test fall back to emulation.
+        run: |
+          ls -l /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm || { echo "::error::/dev/kvm is not usable by the runner"; exit 1; }
+          features=$(nix config show system-features)
+          echo "system-features: $features"
+          for f in kvm nixos-test; do
+            case " $features " in *" $f "*) ;; *) echo "::error::Nix does not offer the $f system feature"; exit 1 ;; esac
+          done
+      - name: Build ${{ matrix.check }}
+        run: nix/ci/run-checks.sh build "${{ matrix.check }}" "$RUNNER_TEMP/results"
+      - name: Record the result
+        if: ${{ !cancelled() }}
+        run: |
+          if [ ! -f "$RUNNER_TEMP/results/${{ matrix.check }}.result" ]; then
+            mkdir -p "$RUNNER_TEMP/results"
+            printf 'fail\t0\n' > "$RUNNER_TEMP/results/${{ matrix.check }}.result"
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        with:
+          name: result-${{ matrix.check }}
+          path: ${{ runner.temp }}/results/${{ matrix.check }}.result
+          retention-days: 7
+
+  summary:
+    name: Nix summary
+    needs: [plan, packages, check]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/results
+      - name: Every flake check, RAN or SKIPPED
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PACKAGES_RESULT: ${{ needs.packages.result }}
+        run: |
+          set +e
+          table=$(nix/ci/run-checks.sh summary "$RUNNER_TEMP/plan" "$RUNNER_TEMP/results")
+          rc=$?
+          set -e
+          {
+            echo "### Nix: every flake check"
+            echo
+            echo "$table"
+            echo
+            echo "Packages job: **$PACKAGES_RESULT**. Plan job: **$PLAN_RESULT**."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$table"
+          while IFS=$'\t' read -r name reason; do echo "SKIPPED $name: $reason"; done < "$RUNNER_TEMP/plan/skipped.tsv"
+          [ "$PLAN_RESULT" = success ] || { echo "::error::the plan job did not succeed"; rc=1; }
+          [ "$PACKAGES_RESULT" = success ] || { echo "::error::the packages job did not succeed"; rc=1; }
+          exit "$rc"
