@@ -26,6 +26,7 @@ mod live;
 mod mcp;
 mod migrate;
 mod mode;
+mod nixos;
 mod oauth_device;
 mod ops;
 mod permissions;
@@ -298,6 +299,8 @@ enum Cmd {
     Pin,
     /// Roll back to the previous deployment (bootc rollback). Requires root.
     Rollback,
+    /// NixOS: remove old system generations, keeping the current, booted, previous and pinned ones. Requires root.
+    Gc,
     /// Update the OS image (bootc upgrade) and firmware (fwupdmgr). Requires root.
     ///
     /// Rime-owned parts of the new image (the shell, rime tools, Rime
@@ -1324,6 +1327,12 @@ struct UpdateArgs {
     /// Stage the update for the next boot and activate nothing live.
     #[arg(long, conflicts_with_all = ["check", "firmware_only"])]
     no_live: bool,
+    /// NixOS: hold this machine on an installed release (`--unpin` releases it).
+    #[arg(long, value_name = "RELEASE", conflicts_with_all = ["check", "plan", "live_only", "no_live", "unpin"])]
+    pin: Option<String>,
+    /// NixOS: release a hold set with `--pin`.
+    #[arg(long)]
+    unpin: bool,
 }
 
 /// `rime live <verb>`.
@@ -1507,6 +1516,7 @@ fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Live { cmd: LiveCmd::Rollback } => Some("live rollback"),
         Cmd::Live { cmd: LiveCmd::SoftReboot { .. } } => Some("live soft-reboot"),
         Cmd::Rollback => Some("rollback"),
+        Cmd::Gc => Some("gc"),
         Cmd::Pin => Some("pin"),
         // Only `set`. It is `bootc switch`, which rewrites the deployment
         // origin, and on the backwards direction `ostree admin pin` as well.
@@ -1683,6 +1693,19 @@ async fn main() {
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
+        Cmd::Gc if nixos::is_nixos() => nixos::generations::gc(),
+        Cmd::Gc => {
+            eprintln!("rime: gc is for NixOS systems; on this system bootc and ostree clean up after themselves");
+            1
+        }
+        Cmd::Update(args) if args.pin.is_some() || args.unpin => {
+            if nixos::is_nixos() {
+                nixos::generations::hold(args.pin.as_deref())
+            } else {
+                eprintln!("rime: update --pin/--unpin are for NixOS systems; `rime pin` keeps a deployment here");
+                1
+            }
+        }
         Cmd::Update(args) => ops::update(ops::UpdateOptions {
             check: args.check,
             live: live::LiveOptions {
@@ -1702,6 +1725,7 @@ async fn main() {
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Live { cmd } => match cmd {
             LiveCmd::Status { json } => live::status(json),
+            LiveCmd::Apply { .. } | LiveCmd::Rollback if nixos::is_nixos() => nixos::live_refusal(),
             LiveCmd::Apply { only } => live::apply(&only),
             LiveCmd::Rollback => live::rollback(),
             LiveCmd::Doctor { json } => live::doctor(json),

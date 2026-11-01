@@ -461,7 +461,7 @@ fn compositor_process(uid: u32) -> Option<String> {
     None
 }
 
-fn machine_state(paths: &Paths) -> MachineState {
+pub(crate) fn machine_state(paths: &Paths) -> MachineState {
     use rimed_core::workload;
     let roots = workload::Roots::live();
     let game = workload::read_game_session(&roots);
@@ -973,7 +973,7 @@ fn verify_files(paths: &Paths, staged: &Path, set: &[Change]) -> Result<(), Stri
 
 /// What one activator achieved, per component it served.
 #[derive(Debug)]
-enum ActResult {
+pub(crate) enum ActResult {
     Done(String),
     /// Did not run, for a reason that is not a failure (a session locked
     /// between planning and acting).
@@ -1000,7 +1000,7 @@ fn restart_unit(paths: &Paths, unit: &str) -> Result<ActResult, String> {
 }
 
 /// Run the per-session helper as `user` in their own service manager.
-fn session_helper(sess: &SessionState, verb: &str, arg: &str) -> Result<ActResult, String> {
+pub(crate) fn session_helper(sess: &SessionState, verb: &str, arg: &str) -> Result<ActResult, String> {
     if sess.user.is_empty() || !sess.user.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
         return Err(format!("implausible user name for session {}", sess.session_id));
     }
@@ -1021,7 +1021,7 @@ fn session_helper(sess: &SessionState, verb: &str, arg: &str) -> Result<ActResul
     }
 }
 
-fn graphical(sessions: &[SessionState]) -> Vec<&SessionState> {
+pub(crate) fn graphical(sessions: &[SessionState]) -> Vec<&SessionState> {
     let mut seen = HashSet::new();
     sessions
         .iter()
