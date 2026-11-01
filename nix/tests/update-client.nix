@@ -251,6 +251,9 @@ pkgs.testers.runNixOSTest {
           st = json.loads(client.succeed("cat /run/rime-live/status.json"))
           print(st)
           assert st["product"] == "nixos" and st["target"]["toplevel"] == B and st["staged_for_boot"], st
+          # bootc's end state for an update with nothing live: Rime Shell shows "Restart recommended" ("staged" would
+          # read as still applying, forever).
+          assert st["state"] == "active" and st["remaining"] == "reboot", st
           reboot()
           assert link("/run/booted-system") == B
           assert "6.12" in client.succeed("uname -r")
@@ -266,19 +269,28 @@ pkgs.testers.runNixOSTest {
           assert link("/run/booted-system") == A
           assert "6.12" not in client.succeed("uname -r")
 
-      with subtest("release C (Shell only): busy defers it, then it applies live with no reboot"):
+      with subtest("release C (Shell only): busy defers it, then rime update applies it live with no reboot"):
           c = release("2026.11.03", C)
           channel(c, "2026.11.03")
           # Gaming Mode: a process in the game cgroup holds the live part back.
           client.succeed("mkdir -p /sys/fs/cgroup/rime-game && (sleep 600 >/dev/null 2>&1 & echo $! > /sys/fs/cgroup/rime-game/cgroup.procs)")
           code, out = update("--plan")
           assert code == 0 and "a game is running" in out, out
+          # The real update while the game runs: installed for the next boot, deferred, nothing activated.
+          bid = boot_id()
+          code, out = update()
+          assert code == 0 and "a game is running" in out and "sudo rime update` again" in out, out
+          assert link("/nix/var/nix/profiles/system") == C and link("/run/current-system") == A and boot_id() == bid
+          st = json.loads(client.succeed("cat /run/rime-live/status.json"))
+          assert st["state"] == "deferred" and st["target"]["toplevel"] == C, st
           client.succeed("kill $(cat /sys/fs/cgroup/rime-game/cgroup.procs) && sleep 1 && rmdir /sys/fs/cgroup/rime-game")
           bid, pid = boot_id(), greetd_pid()
           # system.path moved, so nixpkgs reloads dbus-broker and restarts polkit: rule 3 allows exactly that.
           bus, pk = main_pid("dbus-broker.service"), main_pid("polkit.service")
+          # Running it again once the game is gone activates the installed release: nothing downloaded or installed.
           code, out = update()
-          assert code == 0 and "is active now" in out, out
+          assert code == 0 and "is installed; checking" in out and "is active now" in out, out
+          assert "copying" not in out, out
           assert main_pid("dbus-broker.service") == bus, "dbus-broker was restarted, not reloaded"
           assert main_pid("polkit.service") not in ("0", pk), "polkit was not restarted (the dry run said it would be)"
           assert link("/run/current-system") == C

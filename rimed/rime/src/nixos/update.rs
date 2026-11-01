@@ -159,8 +159,13 @@ fn components_json(a: &Activation, live: bool, overrides: &[(Component, &str, St
             } else {
                 ("pending".to_string(), "applies at the next restart".to_string())
             };
+            let requirement = match (live, state.as_str()) {
+                (true, "pending") => "session-restart",
+                (true, _) => "nothing",
+                (false, _) => "reboot",
+            };
             json!({"component": c.slug(), "label": c.label(), "state": state,
-                   "requirement": if live { "nothing" } else { "reboot" }, "detail": detail, "versions": []})
+                   "requirement": requirement, "detail": detail, "versions": []})
         })
         .collect()
 }
@@ -205,17 +210,20 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
 
     // 5. up to date.
     // TODO(handover): also ask the D3 boot hook's `--check` which generation the menu boots (an interrupted step 12).
-    if current_gen_top == target && !opts.live.live_only {
+    // `installed`: the profile already boots the target. If it is not running yet (deferred because a game ran or a
+    // session was locked, or boot-class), the steps below run again without downloading or installing anything, so
+    // running `sudo rime update` again is how a deferred release goes live (bootc: `rime live apply`, §10.3).
+    let installed = current_gen_top == target;
+    if installed && !opts.live.live_only {
         if applied.by_toplevel(&target).is_none() {
             applied.record(AppliedRelease { release: m.release.clone(), digest: digest.clone(), toplevel: target.clone(), generation: Some(gens.current), at: now() });
             let _ = applied.save();
         }
         if booted == target || running == target {
             println!("rime: the OS is up to date ({})", m.release);
-        } else {
-            println!("rime: the OS update {} is installed and applies at the next restart", m.release);
+            return Ok(0);
         }
-        return Ok(0);
+        println!("rime: the OS update {} is installed; checking whether it can be activated now", m.release);
     }
 
     // 6. downgrade.
@@ -286,7 +294,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     // 9. headroom.
     let need = unpacked + RESERVE;
     match free_bytes("/nix/store") {
-        Some(free) if free < need => {
+        Some(free) if free < need && !missing.is_empty() => {
             return Err(stop(format!(
                 "rime: this update needs {:.2} GB free on /nix and {:.2} GB is free. Nothing was changed. (`sudo rime gc` removes old generations.)",
                 need as f64 / GB,
@@ -349,7 +357,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     };
 
     // 12. install for the next boot.
-    if !opts.live.live_only {
+    if !opts.live.live_only && !installed {
         let _ = write_json(&state("last-update.json"), &json!({"schema": 1, "from": running, "toplevel": target, "kind": "boot", "release": m.release, "at": now()}), 0o644);
         let _ = std::fs::create_dir_all(GCROOTS);
         let pending_root = Path::new(GCROOTS).join("pending");
@@ -384,6 +392,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
 
     // 13. live.
     if opts.live.no_live {
+        status("active", true, components_json(&plan, false, &[]), "reboot", "restart when convenient", format!("{} applies at the next restart.", m.release));
         println!("rime: {} installs at the next restart (--no-live)", m.release);
         return Ok(0);
     }
@@ -408,7 +417,12 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
         } else {
             println!("rime: this update installs for the next restart.");
         }
-        status(if locked_or_busy { "deferred" } else { "staged" }, !opts.live.live_only, components_json(&a, false, &[]), "reboot", "restart when convenient",
+        if locked_or_busy {
+            println!("rime: run `sudo rime update` again once that is over to activate it without a restart");
+        }
+        // The final state, as bootc's engine ends an update with nothing live: `active` with a restart owed (Rime
+        // Shell: "Restart recommended"), or `deferred`. Never `staged`, which the Shell shows as still applying.
+        status(if locked_or_busy { "deferred" } else { "active" }, !opts.live.live_only, components_json(&a, false, &[]), "reboot", "restart when convenient",
                format!("{} applies at the next restart.", m.release));
         return Ok(0);
     }
@@ -460,8 +474,15 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
         }
     }
     let _ = write_json(&state("last-update.json"), &json!({"schema": 1, "from": running, "toplevel": target, "kind": "switch", "release": m.release, "at": now()}), 0o644);
-    status("active", !opts.live.live_only, components_json(&a, true, &overrides), "nothing", "nothing: everything in this release is active",
-           format!("{} component(s) updated live; nothing else to do.", a.changed.iter().filter(|c| **c != Component::Metadata).count()));
+    let relogin = overrides.iter().any(|(_, s, _)| *s == "pending");
+    let n = a.changed.iter().filter(|c| **c != Component::Metadata).count();
+    if relogin {
+        status("active", !opts.live.live_only, components_json(&a, true, &overrides), "session-restart", "log out and back in",
+               format!("{n} component(s) updated live; log out and back in to start the new Shell."));
+    } else {
+        status("active", !opts.live.live_only, components_json(&a, true, &overrides), "nothing", "nothing: everything in this release is active",
+               format!("{n} component(s) updated live; nothing else to do."));
+    }
     println!("rime: {} is active now{}", m.release, if opts.live.live_only { " (until the next restart: --live-only)" } else { "" });
     Ok(0)
 }

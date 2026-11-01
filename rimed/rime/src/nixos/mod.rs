@@ -317,6 +317,17 @@ pub fn release_of(toplevel: &str) -> Option<AppliedRelease> {
     Applied::load().by_toplevel(toplevel).cloned()
 }
 
+/// `rime live apply` / `rime live rollback` on NixOS. The bootc engine behind them reads `bootc status`, which a NixOS
+/// machine does not have. TODO(handover): §10.3's NixOS `live rollback` (`/run/booted-system/bin/switch-to-configuration
+/// test`) and `live apply --only`.
+pub fn live_refusal() -> i32 {
+    eprintln!(
+        "rime: on NixOS, `sudo rime update` activates an installed release that was held back (a game running, a locked \
+         screen) once nothing holds it, and `sudo rime rollback` returns to the previous generation at the next restart"
+    );
+    2
+}
+
 pub fn resolve_link(p: &str) -> Option<String> {
     fs::canonicalize(p).ok().map(|p| p.display().to_string())
 }

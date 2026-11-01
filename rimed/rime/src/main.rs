@@ -1725,6 +1725,7 @@ async fn main() {
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Live { cmd } => match cmd {
             LiveCmd::Status { json } => live::status(json),
+            LiveCmd::Apply { .. } | LiveCmd::Rollback if nixos::is_nixos() => nixos::live_refusal(),
             LiveCmd::Apply { only } => live::apply(&only),
             LiveCmd::Rollback => live::rollback(),
             LiveCmd::Doctor { json } => live::doctor(json),
