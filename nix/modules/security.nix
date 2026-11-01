@@ -54,7 +54,8 @@ let
       install -Dm755 ${../../files/system/NetworkManager/dispatcher.d/50-rime-hotspot-firewall} \
         $out/libexec/rime-hotspot-firewall
       substituteInPlace $out/libexec/rime-firewall \
-        --replace-fail /usr/share/rime/firewall/services $out/share/rime/firewall/services
+        --replace-fail /usr/share/rime/firewall/services $out/share/rime/firewall/services \
+        --replace-fail 'readonly CONF_DIR=/etc/rime/firewall.d' 'readonly CONF_DIR=/var/lib/rime/firewall.d'
       substituteInPlace $out/libexec/rime-hotspot-firewall \
         --replace-fail /usr/libexec/rime-firewall $out/libexec/rime-firewall
       patchShebangs --host $out/libexec
@@ -246,8 +247,9 @@ in
         };
       };
 
-      # User decisions (`rime firewall allow`), imperative on purpose: never managed by environment.etc.
-      systemd.tmpfiles.rules = [ "d /etc/rime/firewall.d 0755 root root - -" ];
+      # User decisions (`rime firewall allow`), imperative on purpose: never managed by environment.etc. Under
+      # /var/lib/rime, not bootc's /etc/rime (PLAN.md D2); hostlayer.nix links the old path for its readers.
+      systemd.tmpfiles.rules = [ "d /var/lib/rime/firewall.d 0755 root root - -" ];
 
       networking.networkmanager.dispatcherScripts = lib.mkIf config.networking.networkmanager.enable [
         {

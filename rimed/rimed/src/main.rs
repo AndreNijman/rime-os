@@ -16,6 +16,7 @@ mod hold;
 mod metrics;
 mod polkit;
 mod state;
+mod switch;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -119,6 +120,7 @@ async fn main() -> Result<()> {
         .serve_at(OBJECT_PATH, FanIface { ctx: ctx.clone() })?
         .serve_at(OBJECT_PATH, GameModeIface { ctx: ctx.clone() })?
         .serve_at(OBJECT_PATH, ModeIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, switch::SwitchIface::system())?
         .build()
         .await
         .context("building the D-Bus service")?;

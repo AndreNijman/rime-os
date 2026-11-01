@@ -181,6 +181,8 @@ let
     "gamescope" "mangoapp" "steam" "equibop" "flatpak" "orca" "lswt" "zellij" "tmux" "virsh" "qemu-img" "lsusb"
     "swtpm" "swtpm_setup" "wlr-randr" "colormgr" "podman" "rpm" "gtk-launch" "firefox" "greetd" "nmtui"
     "wrangler" "terraform" "node"
+    # the host layer's switch tool (nix/modules/hostlayer.nix puts it on the system profile)
+    "rime-hostlayer"
     # desktop-only tools with large closures (gcr/gtk3, perl Net-DBus): the desktop module installs them
     "gnome-keyring-daemon" "xdg-mime" "xdg-settings"
   ];
@@ -189,6 +191,9 @@ let
   fhsRules = [
     # Session PATH strings (hypr session.lua, labwc autostart): the NixOS equivalents of /usr/local/bin:/usr/bin.
     [ "/usr/local/bin:/usr/bin:/usr/local/sbin" "/run/wrappers/bin:/run/current-system/sw/bin" ]
+    # Rime state bootc kept under /etc lives under /var/lib/rime on NixOS (PLAN.md D2, nix/modules/hostlayer.nix).
+    [ "/etc/rime/guest-accounts" "/var/lib/rime/guest-accounts" ]
+    [ "/etc/rime/firewall.d" "/var/lib/rime/firewall.d" ]
     # Absolute paths that are load-bearing (root reads, security checks): pinned.
     [ "/usr/bin/head" "${coreutils}/bin/head" ]
     [ "/usr/bin/bootctl" "${systemd}/bin/bootctl" ]
@@ -309,6 +314,14 @@ stdenvNoCC.mkDerivation {
     RIME_SED
     # rime-user names a login shell; /bin/zsh does not exist on NixOS, /run/current-system/sw/bin/zsh does.
     sed -E -i 's#(^|[ "=])/bin/(zsh|bash)\b#\1/run/current-system/sw/bin/\2#g' $out/libexec/rime-user
+    # A guest's wipe unit is a runtime switch on NixOS (hostlayer.nix): `systemctl enable` of a unit with no
+    # [Install] into a read-only /etc/systemd/system is refused there.
+    sed -i -e 's#tool systemctl enable "$(guest_unit "$uid")"#tool rime-hostlayer switch on "$(guest_unit "$uid")"#' \
+      -e 's#tool systemctl disable "$(guest_unit "$uid")"#tool rime-hostlayer switch off "$(guest_unit "$uid")"#' \
+      $out/libexec/rime-user
+    test "$(grep -c 'tool rime-hostlayer switch o[nf]f* "$(guest_unit "$uid")"' $out/libexec/rime-user)" = 2 ||
+      { echo "rime-user: the guest unit is not switched through rime-hostlayer" >&2; exit 1; }
+    if grep -n 'systemctl \(enable\|disable\)' $out/libexec/rime-user; then echo "rime-user still enables a unit" >&2; exit 1; fi
     grep -rIl . $out | while IFS= read -r f; do
       [ -L "$f" ] && continue
       sed -i -f fhs.sed "$f"
