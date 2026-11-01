@@ -68,7 +68,10 @@ pub fn update(opts: UpdateOptions) -> i32 {
     if !opts.skip_firmware {
         worst = worst.max(crate::ops::firmware_pass());
     }
-    // TODO(handover): the catalogue pass (§8.2 step 15, replaces rime-pkg) belongs to the catalogue PR.
+    // §8.2 step 15 (bootc: rime-pkg upgrade): the catalogue apps follow the release record step 14 wrote.
+    if !opts.skip_packages && !opts.firmware_only && !opts.check {
+        worst = worst.max(super::pkg::catalogue_pass());
+    }
     println!("rime: update finished in {:.1}s", started.elapsed().as_secs_f64());
     worst
 }
@@ -219,6 +222,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
             applied.record(AppliedRelease { release: m.release.clone(), digest: digest.clone(), toplevel: target.clone(), generation: Some(gens.current), at: now() });
             let _ = applied.save();
         }
+        save_outs(m);
         if booted == target || running == target {
             println!("rime: the OS is up to date ({})", m.release);
             return Ok(0);
@@ -517,4 +521,23 @@ fn save_release(rel: &Release) {
     let dir = state("releases").join(&rel.manifest.release);
     let _ = write_atomic(&dir.join("manifest.json"), &rel.bytes, 0o644);
     let _ = write_atomic(&dir.join("digest"), rel.digest.as_bytes(), 0o644);
+    save_outs(&rel.manifest);
+}
+
+/// The class 2 builds this release names (manifest `catalogue[]`), where `rime install` reads them
+/// (the catalogue's `outs_file`). A system built without the catalogue has nowhere to put them and skips this.
+fn save_outs(m: &Manifest) {
+    let Ok(cat) = super::pkg::Catalogue::load() else {
+        return;
+    };
+    let apps: Vec<(String, String)> = catalogue_outs(m);
+    let doc = super::pkg::outs_document(&m.release, &apps);
+    if let Err(e) = write_atomic(Path::new(&cat.outs_file), format!("{doc}\n").as_bytes(), 0o644) {
+        eprintln!("rime: the catalogue apps' release record was not written: {e}");
+    }
+}
+
+/// Manifest `catalogue[]` as (name, store path); `check_local` has already refused an index outside the table.
+pub fn catalogue_outs(m: &Manifest) -> Vec<(String, String)> {
+    m.catalogue.iter().filter(|c| c.class == 2 && c.out < m.paths.len()).map(|c| (c.name.clone(), m.path(c.out).to_string())).collect()
 }

@@ -54,6 +54,19 @@ let
     patchelf --print-needed $out/bin/rime-foreign | grep -x libexpat.so.1 >/dev/null
   '';
 
+  # claude-code's own release binary, exactly as Anthropic's installer puts it in ~/.local/bin: nixpkgs' pinned
+  # download (sha256 from Anthropic's release manifest), decompressed and NOT patched, so its interpreter is the FHS
+  # /lib64/ld-linux-x86-64.so.2 that only nix-ld serves on NixOS (p2-gates P3).
+  claudeNative = pkgs.runCommand "claude-code-native-${pkgs.claude-code.version}" {
+    nativeBuildInputs = [ pkgs.zstd pkgs.patchelf ];
+  } ''
+    mkdir -p $out
+    unzstd -q ${pkgs.claude-code.src} -o $out/claude
+    chmod 755 $out/claude
+    test "$(patchelf --print-interpreter $out/claude)" = /lib64/ld-linux-x86-64.so.2
+    if [ -n "$(patchelf --print-rpath $out/claude)" ]; then echo "has an rpath"; exit 1; fi
+  '';
+
   # The class 2 app the VM installs: in the VM's store already (additionalPaths), as the cache would provide it.
   testApp = pkgs.hello;
 
@@ -102,7 +115,7 @@ let
 
       virtualisation = {
         memorySize = 2048;
-        additionalPaths = [ flatpakRepo flatpakRepo2 foreign testApp ];
+        additionalPaths = [ flatpakRepo flatpakRepo2 foreign testApp claudeNative ];
       };
     };
 
@@ -176,7 +189,6 @@ let
               ("Thing.AppImage", "AppImages run directly on Rime"),
               ("waydroid", "Waydroid needs system configuration"),
               ("libgcc.i686", "Steam's come with the gaming system: rime install steam"),
-              ("qemu-kvm", "no Rime system on NixOS carries them yet"),
               ("chatgpt", "ChatGPT needs a Rime build that checks OpenAI's signing key"),
           ]:
               out = machine.fail(f"rime install {name} 2>&1")
@@ -190,6 +202,12 @@ let
           has(machine.fail("rime repo enable-copr a/b 2>&1"), "COPR repositories do not exist on Rime on NixOS")
           machine.fail("test -e /var/lib/rime/switch/rime-feature@virtualization.target.on")
 
+      with subtest("qemu-kvm (bootc's name) selects the virtual machines feature"):
+          has(machine.succeed("rime install qemu-kvm 2>&1"), "comes with Rime's Virtual machines system")
+          machine.succeed("test \"$(cat /var/lib/rime/switch/rime-feature@virtualization.target.on)\" = qemu")
+          has(machine.succeed("rime remove qemu 2>&1"), "Virtual machines is switched off for this machine")
+          machine.fail("test -e /var/lib/rime/switch/rime-feature@virtualization.target.on")
+
       with subtest("a class 2 app comes from the release record into the rime-apps profile"):
           has(machine.fail("rime install hello 2>&1"), "no release record naming the builds of Rime's catalogue apps")
           machine.succeed("echo '{\"apps\": {\"hello\": \"${testApp}\"}}' > /var/lib/rime/nix/catalogue-outs.json")
@@ -198,8 +216,15 @@ let
           has(machine.succeed("su - alice -c hello"), "Hello, world!")
           machine.succeed("rime remove hello 2>&1")
           machine.fail("su - alice -c 'command -v hello'")
+          machine.fail("grep -x hello /var/lib/rime/pkg/requested")
           machine.succeed("rime pkg rollback 2>&1")
           has(machine.succeed("su - alice -c hello"), "Hello, world!")
+          # The requested list moves back with the profile: `rime pkg list` and the next upgrade agree with it.
+          machine.succeed("grep -x hello /var/lib/rime/pkg/requested")
+          has(machine.succeed("rime pkg list 2>&1"), "hello")
+          machine.succeed("rime pkg upgrade 2>&1")
+          has(machine.succeed("su - alice -c hello"), "Hello, world!")
+          machine.succeed("rime remove hello 2>&1")
 
       with subtest("an ordinary user is told why install needs root, in NixOS terms"):
           out = machine.fail("su - alice -c 'rime install hello' 2>&1")
@@ -230,6 +255,15 @@ let
           after = machine.succeed("su - alice -c 'flatpak --user info --show-commit org.rime.TestHello'").strip()
           assert before != after, f"alice's Flatpak stayed at {before}"
           machine.succeed("su - alice -c 'flatpak --user uninstall -y --noninteractive org.rime.TestHello' 2>&1")
+
+      with subtest("claude-code's release binary in ~/.local/bin runs under nix-ld (P3)"):
+          machine.succeed("su - alice -c 'mkdir -p ~/.local/bin && cp ${claudeNative}/claude ~/.local/bin/claude'")
+          where = machine.succeed("su - alice -c 'command -v claude'").strip()
+          assert where == "/home/alice/.local/bin/claude", where
+          has(machine.succeed("su - alice -c 'claude --version' 2>&1"), "${pkgs.claude-code.version}")
+          # The file that ran is the unpatched release binary, whose interpreter is the path only nix-ld serves.
+          machine.succeed("cmp ${claudeNative}/claude /home/alice/.local/bin/claude")
+          machine.succeed("test -e /lib64/ld-linux-x86-64.so.2")
 
       with subtest("nix-ld runs a foreign dynamically linked binary"):
           has(machine.succeed("su - alice -c ${foreign}/bin/rime-foreign"), "foreign binary ran with expat_")
@@ -274,6 +308,7 @@ let
     claude-desktop = "nix";
     helium-bin = "nix";
     claude-code = "user-npm";
+    equibop = "nix";
     "libgcc.i686" = "refuse";
     "libSM.i686" = "refuse";
     waydroid = "refuse";
@@ -304,7 +339,8 @@ let
     # Flathub ids are application ids, and the in_system flag is the system's own option.
     jq -e '[.entries[] | select(.kind == "flatpak") | .id | test("^[A-Za-z][A-Za-z0-9_-]*(\\.[A-Za-z0-9_-]+){2,}$")] | all' "$cataloguePath"
     test "$(jq -r .features.gaming.in_system "$cataloguePath")" = "$gamingInVm"
-    test "$(jq -r .features.virtualization.offered "$cataloguePath")" = false
+    test "$(jq -r .features.virtualization.offered "$cataloguePath")" = true
+    test "$(jq -r .features.virtualization.in_system "$cataloguePath")" = false
     touch $out
   '';
 in
