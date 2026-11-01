@@ -312,6 +312,10 @@ class ApplyTest(unittest.TestCase):
             self.assertEqual(os.readlink(f"{r}/etc/locale.conf"), "/etc/static/locale.conf")
             self.assertEqual(open(f"{r}/etc/vconsole.conf").read(), "KEYMAP=uk\n")
             self.assertIn('Option "XkbLayout" "gb"', open(f"{r}/etc/X11/xorg.conf.d/00-keyboard.conf").read())
+            # a locale.conf that no configuration manages is the machine's: written from host.toml
+            os.unlink(f"{r}/etc/locale.conf")
+            run("apply", "--root", r, check=0)
+            self.assertEqual(open(f"{r}/etc/locale.conf").read(), "LANG=en_US.UTF-8\n")
             # without xkb_* the file it wrote goes; a file it did not write stays
             write(f"{r}/var/lib/rime/host.toml", '[host]\nhostname = "apex"\n')
             run("apply", "--root", r, check=0)
