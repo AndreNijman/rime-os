@@ -3,4 +3,5 @@
 
 {
   vm-boot = import ./vm-boot.nix { inherit pkgs self; };
+  security = import ./security.nix { inherit pkgs self; };
 }
