@@ -1,0 +1,64 @@
+font-family = Fira Code
+font-size = 12.5
+background = #002b36
+foreground = #839496
+palette = 1=#dc322f
+bold-color = bright
+window-padding-x = 3
+window-padding-y = 3
+background-opacity = 0.85
+cursor-style = underline
+cursor-style-blink = true
+working-directory = /home/alex/src
+command = direct:/run/current-system/sw/bin/bash --login
+keybind = shift+enter=text:\x1b\r
+keybind = alt+backspace=text:\x1b\x7f
+keybind = ctrl+1=copy_to_clipboard
+----
+Rime: Alacritty settings carried over to Ghostty
+
+
+Carried over:
+  font.normal.family = "Fira Code"
+    -> font-family = Fira Code
+  font.size = 12.5
+    -> font-size = 12.5
+  colors.primary.background = "0x002b36"
+    -> background = #002b36
+  colors.primary.foreground = "0x839496"
+    -> foreground = #839496
+  colors.normal.red = "0xdc322f"
+    -> palette = 1=#dc322f
+  colors.draw_bold_text_with_bright_colors = True
+    -> bold-color = bright
+  window.padding.x = 4
+    -> window-padding-x = 3
+  window.padding.y = 4
+    -> window-padding-y = 3
+  window.opacity = 0.85
+    -> background-opacity = 0.85
+  cursor.style.shape = "Underline"
+    -> cursor-style = underline
+  cursor.style.blinking = "Always"
+    -> cursor-style-blink = true
+  general.working_directory = "/home/alex/src"
+    -> working-directory = /home/alex/src
+  terminal.shell = {'program': '/run/current-system/sw/bin/bash', 'args': ['--login']}
+    -> command = direct:/run/current-system/sw/bin/bash --login
+  keyboard.bindings[0] key='Return' mods='Shift' chars='\x1b\r'
+    -> keybind = shift+enter=text:\x1b\r
+  keyboard.bindings[1] key='Back' mods='Alt' chars='\x1b\x7f'
+    -> keybind = alt+backspace=text:\x1b\x7f
+  keyboard.bindings[2] key='Key1' mods='Control' action='Copy'
+    -> keybind = ctrl+1=copy_to_clipboard
+
+Same as Rime's default, so not copied:
+  colors.normal.black = "0x181818"
+
+Not carried over:
+  mouse.bindings[0] mouse='Right' action='PasteSelection'
+    mouse bindings have no Ghostty equivalent
+  alt_send_esc = False
+    Ghostty sends Esc for Alt on Linux
+
+Alacritty is still installed and its files were not changed.

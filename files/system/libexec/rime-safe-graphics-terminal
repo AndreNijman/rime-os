@@ -7,6 +7,7 @@
 #
 #      foot       foot <command> [args]        — no -e, the command is positional
 #      alacritty  alacritty -e <command> …
+#      ghostty    ghostty -e <command> …
 #      xterm      xterm -e <command> …
 #
 #  A menu that hardcoded either spelling would silently open an empty terminal
@@ -20,7 +21,7 @@ set -uo pipefail
 
 term="${RIME_SAFE_GRAPHICS_TERMINAL:-}"
 if [ -z "$term" ]; then
-    for candidate in foot alacritty xterm; do
+    for candidate in foot alacritty ghostty xterm; do
         if command -v "$candidate" >/dev/null 2>&1; then
             term="$candidate"
             break

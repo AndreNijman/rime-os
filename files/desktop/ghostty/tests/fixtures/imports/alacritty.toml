@@ -1,0 +1,11 @@
+# Synthetic: imports. Loaded in order, then this file; arrays append, scalars replace.
+[general]
+import = ["themes/dark.toml", "~/.config/alacritty/missing.toml", "more/keys.toml"]
+
+[colors.primary]
+foreground = "#eeeeee"
+
+[[keyboard.bindings]]
+key = "Return"
+mods = "Shift"
+chars = "\u001B\r"

@@ -585,12 +585,8 @@ in
           "application/xhtml+xml" = "firefox.desktop";
         };
       };
-      xdg.terminal-exec = {
-        enable = true;
-        settings.default = [ "Alacritty.desktop" ];
-      };
+      # The terminal (Ghostty, Alacritty, xdg-terminal-exec, $TERMINAL) is nix/modules/terminal.nix.
       environment.sessionVariables = {
-        TERMINAL = "alacritty";
         QT_QPA_PLATFORMTHEME = "qt6ct";
         ELECTRON_OZONE_PLATFORM_HINT = "auto";
       };
@@ -619,8 +615,7 @@ in
         quickshell
         sway # the greeter host only; not offered as a session
         xwayland-satellite
-        foot
-        alacritty
+        foot # Safe Graphics' terminal (software rendering); Ghostty and Alacritty are terminal.nix's
         hyprlock
         hypridle
         hyprsunset

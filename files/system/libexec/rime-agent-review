@@ -57,7 +57,7 @@ EOF
 # Terminal candidates in preference order, each with its own exec flag. Getting
 # the flag wrong opens an empty terminal, which looks like the action did
 # nothing.
-for entry in "${TERMINAL:-}:-e" alacritty:-e ghostty:-e foot:-e kitty:-e wezterm:start xterm:-e; do
+for entry in "${TERMINAL:-}:-e" ghostty:-e alacritty:-e foot:-e kitty:-e wezterm:start xterm:-e; do
     bin="${entry%%:*}"
     flag="${entry##*:}"
     [ -n "$bin" ] || continue

@@ -183,7 +183,7 @@ pick_terminal() {
         return 0
     fi
     local candidate
-    for candidate in foot alacritty xterm; do
+    for candidate in foot alacritty ghostty xterm; do
         if command -v "$candidate" >/dev/null 2>&1; then
             printf '%s' "$candidate"
             return 0

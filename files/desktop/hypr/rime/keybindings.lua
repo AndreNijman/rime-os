@@ -83,7 +83,7 @@ local function bind(mods, key, dispatcher, opts)
 end
 
 local mod         = "SUPER"
-local terminal    = "alacritty"
+local terminal    = "ghostty"
 -- Not a browser name. `rime-open-browser` opens whatever the user has set as
 -- their default, so installing another browser and making it default changes
 -- this key too. It used to say `firefox`, which meant SUPER+W contradicted the

@@ -295,7 +295,7 @@ printf '%s\n' "$block" | pipe_has -E 'command="(firefox|zen|zen-browser|chromium
     && bad "no generated bind hardcodes a browser" \
     || ok "no generated bind hardcodes a browser"
 
-printf '%s\n' "$block" | pipe_has 'command="alacritty"' \
+printf '%s\n' "$block" | pipe_has 'command="ghostty"' \
     && ok "\$terminal is resolved to the installed terminal" \
     || bad "\$terminal is resolved to the installed terminal"
 

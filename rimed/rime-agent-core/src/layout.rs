@@ -304,11 +304,18 @@ fn now_secs() -> u64 {
 /// outcome of "restore my project".
 ///
 /// `terminal_argv` is the emulator and its working-directory flag, e.g.
-/// `["alacritty", "--working-directory"]`.
+/// `["ghostty", "--working-directory="]` or `["foot", "--working-directory"]`.
+/// A flag that ends in `=` takes the directory in the same argument: Ghostty
+/// reads only `--key=value`, and `--working-directory /dir` is refused.
 pub fn restore_argv(entry: &LayoutEntry, terminal_argv: &[String]) -> Vec<String> {
     if entry.terminal && terminal_argv.len() >= 2 {
         let mut argv = terminal_argv.to_vec();
-        argv.push(entry.cwd.clone());
+        let flag = argv.last_mut().expect("len >= 2");
+        if flag.ends_with('=') {
+            flag.push_str(&entry.cwd);
+        } else {
+            argv.push(entry.cwd.clone());
+        }
         return argv;
     }
     entry.argv.clone()
@@ -320,9 +327,12 @@ pub fn restore_argv(entry: &LayoutEntry, terminal_argv: &[String]) -> Vec<String
 /// The flag differs per emulator and getting it wrong is not a syntax error —
 /// most of them treat an unknown flag as a command to run, so the terminal
 /// opens, fails, and closes again.
+///
+/// Ghostty is first: it is Rime's default terminal (Alacritty stays installed
+/// as the alternative).
 pub const TERMINAL_CANDIDATES: &[(&str, &str)] = &[
+    ("ghostty", "--working-directory="),
     ("alacritty", "--working-directory"),
-    ("ghostty", "--working-directory"),
     ("foot", "--working-directory"),
     ("kitty", "--directory"),
     ("wezterm", "--cwd"),
@@ -574,6 +584,47 @@ mod tests {
         assert_eq!(
             restore_argv(&e, &term),
             vec!["foot", "--working-directory", "/home/t/Projects/demo"]
+        );
+    }
+
+    #[test]
+    fn ghostty_gets_its_directory_in_the_same_argument() {
+        // Ghostty's CLI takes only --key=value; `--working-directory /dir`
+        // makes it refuse to start ("invalid field").
+        let e = LayoutEntry {
+            argv: vec!["ghostty".into()],
+            cwd: "/home/t/Projects/my demo".into(),
+            workspace: "2".into(),
+            app_id: "com.mitchellh.ghostty".into(),
+            terminal: true,
+        };
+        let term = choose_terminal(None, |n| n == "ghostty" || n == "alacritty").unwrap();
+        assert_eq!(
+            restore_argv(&e, &term),
+            vec!["ghostty", "--working-directory=/home/t/Projects/my demo"]
+        );
+        let term = choose_terminal(Some("alacritty"), |n| n == "ghostty" || n == "alacritty").unwrap();
+        assert_eq!(
+            restore_argv(&e, &term),
+            vec!["alacritty", "--working-directory", "/home/t/Projects/my demo"]
+        );
+    }
+
+    #[test]
+    fn ghostty_is_preferred_when_terminal_is_unset() {
+        let both = |n: &str| n == "ghostty" || n == "alacritty" || n == "foot";
+        assert_eq!(
+            choose_terminal(None, both),
+            Some(vec!["ghostty".to_string(), "--working-directory=".to_string()])
+        );
+        assert_eq!(
+            choose_terminal(Some("ghostty"), both),
+            Some(vec!["ghostty".to_string(), "--working-directory=".to_string()])
+        );
+        // Ghostty not installed: Alacritty, the alternative, is next.
+        assert_eq!(
+            choose_terminal(None, |n| n == "alacritty" || n == "foot"),
+            Some(vec!["alacritty".to_string(), "--working-directory".to_string()])
         );
     }
 

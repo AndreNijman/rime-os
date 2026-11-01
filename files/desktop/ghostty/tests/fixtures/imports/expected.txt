@@ -1,0 +1,31 @@
+font-size = 15
+background = #101010
+foreground = #eeeeee
+palette = 1=#ff0000
+keybind = ctrl+shift+c=copy_to_clipboard
+keybind = shift+enter=text:\x1b\r
+----
+Rime: Alacritty settings carried over to Ghostty
+
+
+Carried over:
+  font.size = 15
+    -> font-size = 15
+  colors.primary.background = "#101010"
+    -> background = #101010
+  colors.primary.foreground = "#eeeeee"
+    -> foreground = #eeeeee
+  colors.normal.red = "#ff0000"
+    -> palette = 1=#ff0000
+  keyboard.bindings[0] key='C' mods='Control|Shift' action='Copy'
+    -> keybind = ctrl+shift+c=copy_to_clipboard
+  keyboard.bindings[1] key='Return' mods='Shift' chars='\x1b\r'
+    -> keybind = shift+enter=text:\x1b\r
+
+Same as Rime's default, so not copied:
+  (nothing)
+
+Not carried over:
+  (nothing)
+
+Alacritty is still installed and its files were not changed.

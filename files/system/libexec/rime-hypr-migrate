@@ -66,7 +66,7 @@ BANNER = "Converted from hyprlang by rime-hypr-migrate"
 
 # Values that have stood in for these variables across image generations.
 RIME_VARS = {
-    "terminal":    {"alacritty"},
+    "terminal":    {"alacritty", "ghostty"},
     "browser":     {"/usr/libexec/rime-open-browser", "firefox", "zen",
                     "/usr/libexec/apex-open-browser"},  # rime-rename: keep — the APEX-era value on disk
     "fileManager": {"thunar"},
@@ -81,6 +81,7 @@ RIME_VARS = {
 # takes none. exec args are matched after variable expansion.
 RIME_DEFAULT_BINDS = {
     ("SUPER", "T", "exec", "alacritty"),
+    ("SUPER", "T", "exec", "ghostty"),
     ("SUPER", "Q", "killactive", None),
     ("SUPER", "W", "exec", "/usr/libexec/rime-open-browser"),
     ("SUPER", "W", "exec", "firefox"),
