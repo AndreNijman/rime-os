@@ -1,0 +1,42 @@
+#!/usr/sbin/nft -f
+# Isolated katana runners: keep job and builder containers off Andre's LAN and
+# off katana's own services. Rendered by install.sh (@SUBNET@, @GATEWAY@) into
+# /etc/rime-runner/nftables.conf and loaded by rime-runner-firewall.service.
+#
+# Today's runner is filtered by `meta skuid ghrunner` (/etc/apex-runner/nftables.conf).
+# That match cannot see rootful container traffic: it is FORWARDED from the
+# container's network namespace and has no local socket owner. These rules match
+# the runner network's subnet instead. A separate table, so apex-firewall and
+# netavark can rebuild theirs without dropping this one.
+#
+# Idempotent: declare, delete, declare again.
+table inet rime_runner
+delete table inet rime_runner
+table inet rime_runner {
+    set lan4 {
+        type ipv4_addr; flags interval;
+        elements = { 10.0.0.0/8, 100.64.0.0/10, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16 }
+    }
+
+    # Containers -> anything not on this host: public internet yes (sources,
+    # cache.nixos.org, GitHub), private ranges no (NAS, Orange Pi memory vault,
+    # router admin, Tailscale CGNAT, link-local).
+    chain forward {
+        type filter hook forward priority filter - 1; policy accept;
+        ip saddr @SUBNET@ ip daddr @SUBNET@ accept
+        ip saddr @SUBNET@ ip daddr @lan4 counter reject with icmp type admin-prohibited
+        ip saddr @SUBNET@ meta nfproto ipv6 counter reject
+    }
+
+    # Containers -> katana itself: DNS on the network's gateway (aardvark-dns)
+    # only. Nothing else katana listens on (local LLM servers, ssh, rimed's
+    # relay, the dev registry) is reachable from a job.
+    chain input {
+        type filter hook input priority filter - 1; policy accept;
+        iifname "lo" accept
+        ip saddr @SUBNET@ ip daddr @GATEWAY@ udp dport 53 accept
+        ip saddr @SUBNET@ ip daddr @GATEWAY@ tcp dport 53 accept
+        ip saddr @SUBNET@ ct state established,related accept
+        ip saddr @SUBNET@ counter reject with icmp type admin-prohibited
+    }
+}

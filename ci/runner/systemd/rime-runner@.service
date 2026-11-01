@@ -1,0 +1,26 @@
+# One concurrent CI job slot. Each start = one fresh container = one GitHub job.
+[Unit]
+Description=Rime isolated CI runner, slot %i (one job per start)
+Documentation=file:///usr/local/libexec/rime-runner/README.md
+After=network-online.target rime-runner-builder.service rime-runner-firewall.service
+Wants=network-online.target
+Requires=rime-runner-builder.service rime-runner-firewall.service
+RequiresMountsFor=/var/lab
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Slice=rime-runner.slice
+ExecStart=/usr/local/libexec/rime-runner/bin/rime-runner-job %i
+ExecStop=/usr/bin/env CONTAINERS_STORAGE_CONF=/var/lab/rime-runner/podman/storage.conf CONTAINERS_CONF_OVERRIDE=/var/lab/rime-runner/podman/containers.conf podman stop -t 60 rime-runner-job-%i
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+KillMode=mixed
+# The host side holds the token; keep it away from everything else.
+UMask=0077
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

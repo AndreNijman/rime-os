@@ -1,0 +1,82 @@
+#!/bin/bash
+# rime-runner-ctl: operate the isolated katana runners. Run as root.
+#
+#   rime-runner-ctl status
+#   rime-runner-ctl pause [--freeze]   take no new job; --freeze also stops the running one in place
+#   rime-runner-ctl resume             thaw and take jobs again
+#   rime-runner-ctl gaming on|off      CPUWeight=idle / IOWeight=1 for the runner slice, or back to runner.conf
+#   rime-runner-ctl build-images       pull the pinned builder image, build the job image
+#   rime-runner-ctl seed               create the shared Nix store from the builder image (first install)
+#
+# Benchmarks (PLAN.md §6, "the runner is paused during every benchmark run"):
+#   sudo rime-runner-ctl pause --freeze && <benchmark> ; sudo rime-runner-ctl resume
+# --freeze uses the cgroup freezer on rime-runner.slice: the job's processes stop
+# using CPU, IO and the GPU at once and continue where they were on resume. A
+# frozen runner cannot answer GitHub's heartbeat; keep freezes to minutes (a job
+# GitHub considers lost is failed and must be re-run).
+set -euo pipefail
+RIME_RUNNER_HOME=${RIME_RUNNER_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+# shellcheck source=../lib/common.sh
+. "$RIME_RUNNER_HOME/lib/common.sh"
+
+PAUSE_FLAG=/run/rime-runner/paused
+SLICE=rime-runner.slice
+
+need_root() { [ "$(id -u)" = 0 ] || rr_die "run as root"; }
+
+cmd=${1:-status}
+shift || true
+case $cmd in
+status)
+	if [ -e "$PAUSE_FLAG" ] || [ -e /etc/rime-runner/paused ]; then echo "paused: yes"; else echo "paused: no"; fi
+	systemctl show "$SLICE" -p CPUWeight -p IOWeight -p MemoryHigh -p FreezerState 2>/dev/null || true
+	systemctl list-units --no-legend 'rime-runner*' 2>/dev/null || true
+	;;
+pause)
+	need_root
+	mkdir -p "$(dirname "$PAUSE_FLAG")"
+	date -Is >"$PAUSE_FLAG"
+	echo "paused: no new job will be taken"
+	if [ "${1:-}" = --freeze ]; then
+		systemctl freeze "$SLICE"
+		echo "frozen: running job stopped in place (resume to continue)"
+	fi
+	;;
+resume)
+	need_root
+	if [ "$(systemctl show "$SLICE" -p FreezerState --value 2>/dev/null)" != running ]; then
+		systemctl thaw "$SLICE" || true
+	fi
+	rm -f "$PAUSE_FLAG"
+	echo "resumed"
+	;;
+gaming)
+	need_root
+	case ${1:-} in
+	on) systemctl set-property --runtime "$SLICE" CPUWeight=idle IOWeight=1 ;;
+	off) systemctl set-property --runtime "$SLICE" "CPUWeight=$RIME_RUNNER_CPU_WEIGHT" "IOWeight=$RIME_RUNNER_IO_WEIGHT" ;;
+	*) rr_die "usage: rime-runner-ctl gaming on|off" ;;
+	esac
+	systemctl show "$SLICE" -p CPUWeight -p IOWeight
+	;;
+build-images)
+	need_root
+	rr_podman_env
+	rr_podman pull "$RIME_RUNNER_BUILDER_IMAGE"
+	# --network host only for the build (dnf + the runner tarball, sha256-checked);
+	# jobs never get it.
+	rr_podman build --pull=missing --network host \
+		-t "$RIME_RUNNER_JOB_IMAGE" -f "$RIME_RUNNER_HOME/images/job/Containerfile" \
+		"$RIME_RUNNER_HOME/images/job"
+	;;
+seed)
+	need_root
+	rr_podman_env
+	rr_seed_store
+	rr_label_store
+	;;
+*)
+	sed -n '2,20p' "$0" >&2
+	exit 64
+	;;
+esac

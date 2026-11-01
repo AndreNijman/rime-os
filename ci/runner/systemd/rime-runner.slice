@@ -1,0 +1,16 @@
+# All isolated CI work on katana: the builder (nix-daemon) and every job.
+# Weights, not quotas: an idle katana gives CI all 20 threads; when Andre plays
+# or works, his session (weight 100) wins 5:1 on CPU and IO. `rime-runner-ctl
+# gaming on` drops the slice to CPUWeight=idle; `pause --freeze` stops it.
+# install.sh rewrites the numbers from /etc/rime-runner/runner.conf.
+[Unit]
+Description=Rime isolated CI runners (builder and jobs)
+Before=slices.target
+
+[Slice]
+CPUWeight=@CPU_WEIGHT@
+IOWeight=@IO_WEIGHT@
+MemoryHigh=@MEMORY_HIGH@
+MemoryMax=@MEMORY_MAX@
+ManagedOOMMemoryPressure=kill
+ManagedOOMMemoryPressureLimit=80%
