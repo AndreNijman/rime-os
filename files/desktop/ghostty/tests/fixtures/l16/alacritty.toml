@@ -5,7 +5,7 @@ mods = "Shift"
 chars = "\u001B\r"
 
 # Clickable URLs: click opens in the default browser (hold Shift if an app grabs the mouse,
-# e.g. Claude Code fullscreen). Ctrl+Shift+O = keyboard hint mode.
+# e.g. a full-screen TUI). Ctrl+Shift+O = keyboard hint mode.
 [[hints.enabled]]
 command = "xdg-open"
 hyperlinks = true

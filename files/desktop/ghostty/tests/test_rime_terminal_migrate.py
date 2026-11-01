@@ -188,6 +188,23 @@ class Migrate(unittest.TestCase):
         self.assertEqual(snapshot(self.ghostty)[tmpl], before)
         self.assertTrue(read(os.path.join(self.ghostty, "config")).startswith(HEADER))
 
+    def test_both_names_comment_only_are_left_reported_and_stamped(self):
+        # Nothing to write into without editing a Ghostty file: skip, say so, and do not retry every login.
+        self.alacritty("katana")
+        os.makedirs(self.ghostty)
+        for n in ("config.ghostty", "config"):
+            with open(os.path.join(self.ghostty, n), "w") as f:
+                f.write("# This is the configuration file for Ghostty.\n")
+        before = snapshot(self.ghostty)
+        r = run(self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("error:", r.stderr)
+        self.assertEqual({k: v for k, v in snapshot(self.ghostty).items() if "/themes/" not in k}, before)
+        report = read(os.path.join(self.state, "terminal-migration.txt"))
+        self.assertIn("NOT migrated: ~/.config/ghostty/config.ghostty and ~/.config/ghostty/config both exist", report)
+        self.assertIn("theme = rime-os", report)
+        self.assertTrue(os.path.exists(os.path.join(self.state, "terminal-migrated")))
+
     def test_xdg_config_home(self):
         alt = os.path.join(self.home, "elsewhere")
         os.makedirs(os.path.join(alt, "alacritty"))

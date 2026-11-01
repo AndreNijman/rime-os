@@ -830,19 +830,20 @@ def migrate(home, xdg_config, xdg_state, shipped_theme, log):
     names = ["config.ghostty", "config"]
     existing = [n for n in names if os.path.exists(os.path.join(ghostty_dir, n))]
     with_settings = [n for n in existing if has_settings(os.path.join(ghostty_dir, n))]
-    if with_settings:
-        label = tilde(os.path.join(ghostty_dir, with_settings[0]), home)
-        replace(report_path, report_text(
-            f"NOT migrated: {label} already has settings, and Rime never changes a Ghostty config it did not "
-            f"write.\nTo get Rime's look, add this line to it:  theme = {THEME_NAME}",
-            None, [], None, [], [], [], []))
-        log(f"skipped: {label} already has settings (see {tilde(report_path, home)})")
-        write_new_or_keep(stamp)
-        return
     # Ghostty writes a comment-only config.ghostty the first time it starts with none. It is left alone (Rime
     # never edits a Ghostty file), and the settings go into the other name Ghostty reads (both are loaded).
-    target_name = next(n for n in names if n not in existing)
-    target = os.path.join(ghostty_dir, target_name)
+    free = [n for n in names if n not in existing]
+    if with_settings or not free:
+        label = tilde(os.path.join(ghostty_dir, (with_settings or existing)[0]), home)
+        why = "already has settings" if with_settings else "and ~/.config/ghostty/config both exist already"
+        replace(report_path, report_text(
+            f"NOT migrated: {label} {why}, and Rime never changes a Ghostty config it did not "
+            f"write.\nTo get Rime's look, add this line to it:  theme = {THEME_NAME}",
+            None, [], None, [], [], [], []))
+        log(f"skipped: {label} {why} (see {tilde(report_path, home)})")
+        write_new_or_keep(stamp)
+        return
+    target = os.path.join(ghostty_dir, free[0])
 
     source = find_alacritty(home, xdg_config)
     lines, carried, defaults, unmapped, problems, imports = [], [], [], [], [], []
