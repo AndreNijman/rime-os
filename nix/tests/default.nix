@@ -13,6 +13,7 @@
   fedora-parity = import ./fedora-parity.nix { inherit pkgs self; };
   hostlayer = import ./hostlayer.nix { inherit pkgs self; };
   hostlayer-katana = import ./hostlayer-katana.nix { inherit pkgs self; };
+  activation = import ./activation.nix { inherit pkgs self; };
   polish = import ./polish.nix { inherit pkgs self; };
   release-unit = import ./release-unit.nix { inherit pkgs self; };
   release-standin = import ./release-standin.nix { inherit pkgs self; };
@@ -30,3 +31,5 @@
 // import ./boot.nix { inherit pkgs self; }
 # catalogue, catalogue-data
 // import ./catalogue.nix { inherit pkgs self; }
+# hostgates-net, hostgates-disks
+// import ./hostgates.nix { inherit pkgs self; }
