@@ -247,6 +247,156 @@ pub trait SysWriter: Send + Sync {
     fn scx_state(&self) -> ScxState {
         ScxState::Unreadable("this writer cannot read sched-ext".into())
     }
+
+    /// Where the kernel log stands now: the sequence number of its newest
+    /// record. Taken before a scheduler is started, so that
+    /// [`SysWriter::scx_kernel_reason`] reports only a disable that happened
+    /// AFTER it and never an earlier session's ordinary stop.
+    ///
+    /// `None` = no kernel log readable by this writer (the default, and every
+    /// fixture writer).
+    fn kmsg_mark(&self) -> Option<u64> {
+        None
+    }
+
+    /// The kernel's own words for why sched-ext last disabled a scheduler
+    /// (`sched_ext: BPF scheduler "lavd_…" disabled (runnable task stall)` and
+    /// the lines that follow it), when such a record exists after `since`.
+    ///
+    /// `None` when there is none, or no kernel log can be read. Never a guess.
+    fn scx_kernel_reason(&self, since: Option<u64>) -> Option<String> {
+        let _ = since;
+        None
+    }
+
+    /// How many times the kernel has attached a sched-ext scheduler since boot
+    /// (`/sys/kernel/sched_ext/enable_seq`). A scheduler that reads healthy
+    /// with a HIGHER count than when it was last seen healthy was ejected and
+    /// loaded again in between — `scx_loader` restarts one after a watchdog
+    /// exit within seconds, faster than a poll sees the `disabled` state.
+    ///
+    /// `None` = not readable by this writer (the default, and old kernels).
+    fn scx_enable_seq(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// `/sys/kernel/sched_ext/enable_seq` under a sysfs root, when it is there and
+/// is a number.
+pub fn read_scx_enable_seq(sys_root: &Path) -> Option<u64> {
+    std::fs::read_to_string(sys_root.join("kernel/sched_ext/enable_seq"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// One `/dev/kmsg` record: its sequence number when the record carried one, and
+/// its message text.
+fn kmsg_records(raw: &str) -> Vec<(Option<u64>, String)> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        // Continuation lines (` SUBSYSTEM=…`, ` DEVICE=…`) are dictionary
+        // metadata, not message text.
+        if line.starts_with(' ') || line.trim().is_empty() {
+            continue;
+        }
+        // `<prio>,<seq>,<usec>,<flags>[,…];<text>`. A line without that prefix
+        // is taken whole, with no sequence number (a fixture, or `dmesg`).
+        match line.split_once(';') {
+            Some((head, text))
+                if head
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == ',' || c == '-' || c == 'c' || c == '+') =>
+            {
+                let seq = head.split(',').nth(1).and_then(|n| n.parse::<u64>().ok());
+                out.push((seq, text.to_string()));
+            }
+            _ => out.push((None, line.to_string())),
+        }
+    }
+    out
+}
+
+/// The newest sequence number in a kernel log.
+pub fn kmsg_last_seq(raw: &str) -> Option<u64> {
+    kmsg_records(raw).iter().filter_map(|(seq, _)| *seq).max()
+}
+
+/// The last sched-ext disable in a kernel log, newer than `since`, with up to
+/// two `sched_ext:` lines that follow it (the kernel prints the scheduler's
+/// own exit message there: the stalled task, the BPF error).
+///
+/// Pure, so the parse is tested on the kernel's real wording without a kernel.
+pub fn scx_disable_reason(raw: &str, since: Option<u64>) -> Option<String> {
+    let recs = kmsg_records(raw);
+    let newer = |seq: &Option<u64>| match (since, seq) {
+        (Some(mark), Some(n)) => *n > mark,
+        // No mark, or a record with no number: nothing to compare, so it counts.
+        _ => true,
+    };
+    let at = recs.iter().rposition(|(seq, text)| {
+        newer(seq) && text.contains("sched_ext:") && text.contains(" disabled")
+    })?;
+    let mut parts = vec![recs[at].1.trim().to_string()];
+    for (_, text) in recs.iter().skip(at + 1).take(2) {
+        if text.contains("sched_ext:") && !text.contains(" enabled") {
+            parts.push(text.trim().to_string());
+        } else {
+            break;
+        }
+    }
+    Some(parts.join(" | "))
+}
+
+/// Whether a kernel disable record (from [`scx_disable_reason`]) is about
+/// `sched`: the name in `BPF scheduler "<name>"` matches it by
+/// [`scx_ops_matches`]. A `switch` makes the OLD scheduler log an ordinary
+/// "disabled (unregistered from user space)" after the mark, and that record
+/// says nothing about the scheduler being loaded.
+pub fn scx_reason_names(reason: &str, sched: &str) -> bool {
+    reason
+        .split("BPF scheduler \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .is_some_and(|name| scx_ops_matches(name, sched))
+}
+
+/// Read every record `/dev/kmsg` (or a fixture file) holds right now, without
+/// blocking.
+///
+/// `/dev/kmsg` returns one record per `read` and never reaches end-of-file: a
+/// reader at the end gets `EAGAIN` under `O_NONBLOCK` and blocks without it.
+/// `EPIPE` means records were overwritten while reading; the next read carries
+/// on from the oldest one left, so it is skipped rather than treated as the end.
+fn read_kmsg(path: &Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NONBLOCK on every Linux architecture Rime builds for (x86_64, aarch64).
+    const O_NONBLOCK: i32 = 0o4000;
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NONBLOCK)
+        .open(path)
+        .ok()?;
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 16 * 1024];
+    // A bound on the loop, not on the log: the ring buffer is at most a few
+    // MiB, and a record is at least a few bytes.
+    for _ in 0..1_000_000 {
+        match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.extend_from_slice(&buf[..n]);
+                if out.last() != Some(&b'\n') {
+                    out.push(b'\n');
+                }
+            }
+            Err(e) if e.raw_os_error() == Some(32) => continue, // EPIPE
+            Err(_) => break, // EAGAIN at the end, or anything else
+        }
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Writes real sysfs and runs `nvidia-smi`. When `dry_run` is set, it logs the
@@ -292,6 +442,10 @@ pub struct RealWriter {
     /// hardcoded so the tests for the refusal paths do not each burn this
     /// budget waiting for a state that is never coming.
     scx_settle: std::time::Duration,
+    /// The kernel log [`SysWriter::scx_kernel_reason`] reads. `/dev/kmsg` for
+    /// the daemon and the CLI; `None` for a fixture writer, which must never
+    /// report the HOST's kernel log as the fixture's.
+    kmsg_path: Option<PathBuf>,
     /// RAPL limits this writer RAISED on a zone it does not own outright (the
     /// MSR package zone), as (attribute path, value before), so handing the
     /// limits back to the firmware puts exactly those values back.
@@ -311,7 +465,28 @@ pub struct RealWriter {
 /// be too short (a status of `unknown` over a `state` of `enabling`), and says
 /// to record the number rather than re-run until it passes. Writing "measured"
 /// here would be this unit's own defect, one file over.
+///
+/// Later evidence, still not hardware: the QEMU selftest
+/// (tests/kernel/scx-selftest, an idle 8-vCPU KVM guest, no game loading)
+/// timed attach at 0.1-1.2 s for most schedulers and up to 2.8 s for
+/// scx_layered; with the host busy compiling, up to 6.5 s (scx_eevdf, scx 1.1.4)
+/// and 2.8 s for scx_lavd. So a healthy scheduler CAN outlast this budget, and the daemon
+/// does not act on a timeout here alone: `rimed`'s game entry leaves a
+/// `disabled` reading after this wait to the session watch, which allows a
+/// longer grace before calling it a failure.
 const SCX_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The words [`RealWriter::scx_load`]'s refusal ends with when `scxctl` said
+/// yes and the kernel had not attached a scheduler within [`SCX_SETTLE`]. That
+/// is "not attached YET", not "failed", and the daemon must be able to tell.
+pub const SCX_NOT_ATTACHED_YET: &str = "no scheduler attached yet";
+
+/// Whether a refusal from the sched-ext switch is only the settle budget
+/// running out (the scheduler may still be loading), as opposed to `scxctl`
+/// or the machine refusing outright, which is final.
+pub fn scx_refusal_is_settle_timeout(why: &str) -> bool {
+    why.contains(SCX_NOT_ATTACHED_YET)
+}
 
 impl RealWriter {
     /// A writer rooted at real `/sys` that will NOT run host commands.
@@ -324,6 +499,7 @@ impl RealWriter {
             host_commands: false,
             scxctl_bin: None,
             scx_settle: SCX_SETTLE,
+            kmsg_path: Some(PathBuf::from("/dev/kmsg")),
             rapl_raised: Mutex::new(Vec::new()),
         }
     }
@@ -341,6 +517,7 @@ impl RealWriter {
             host_commands: true,
             scxctl_bin: None,
             scx_settle: SCX_SETTLE,
+            kmsg_path: Some(PathBuf::from("/dev/kmsg")),
             rapl_raised: Mutex::new(Vec::new()),
         }
     }
@@ -354,6 +531,7 @@ impl RealWriter {
             host_commands: false,
             scxctl_bin: None,
             scx_settle: SCX_SETTLE,
+            kmsg_path: None,
             rapl_raised: Mutex::new(Vec::new()),
         }
     }
@@ -378,8 +556,16 @@ impl RealWriter {
             host_commands: true,
             scxctl_bin: Some(scxctl_bin.into()),
             scx_settle,
+            kmsg_path: None,
             rapl_raised: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Read the kernel log from `path` instead (a fixture file).
+    #[cfg(test)]
+    fn with_kmsg(mut self, path: impl Into<PathBuf>) -> RealWriter {
+        self.kmsg_path = Some(path.into());
+        self
     }
 
     /// Whether this writer may run host commands.
@@ -845,7 +1031,7 @@ impl RealWriter {
     /// Poll `state` until it reaches `want`, or the settle budget runs out.
     /// Returns whatever it last read, so the caller reports an observation and
     /// never an assumption.
-    fn scx_settle_until(&self, want: fn(&ScxState) -> bool) -> ScxState {
+    fn scx_settle_until(&self, want: &dyn Fn(&ScxState) -> bool) -> ScxState {
         let deadline = std::time::Instant::now() + self.scx_settle;
         loop {
             let st = read_scx_state(&self.sys_root);
@@ -937,8 +1123,17 @@ impl RealWriter {
             return Outcome::Refused(format!("scxctl {verb} -s {sched}: {stderr}"));
         }
 
-        // It said yes. Now ask the kernel.
-        match self.scx_settle_until(|s| matches!(s, ScxState::Enabled { .. })) {
+        // It said yes. Now ask the kernel, and wait for THE REQUESTED scheduler:
+        // a `switch` finds the old one still attached, so "any scheduler is
+        // enabled" is true at once and would end the wait before the swap.
+        // A scheduler that publishes no name cannot be told apart, so it ends
+        // the wait too (and is reported as unconfirmed by the daemon).
+        let attached = |s: &ScxState| match s {
+            ScxState::Enabled { ops: Some(o) } => scx_ops_matches(o, sched),
+            ScxState::Enabled { ops: None } => true,
+            _ => false,
+        };
+        match self.scx_settle_until(&attached) {
             ScxState::Enabled { ops } => {
                 match &ops {
                     Some(o) if !scx_ops_matches(o, sched) => eprintln!(
@@ -951,9 +1146,15 @@ impl RealWriter {
             }
             // The exact defect this function exists for, in its general form:
             // the command reported success and the machine did not move.
+            //
+            // It is also what a scheduler that is merely SLOW looks like: the
+            // state reads `disabled` until struct_ops attach, after userspace
+            // start-up and the BPF verifier. So the words carry
+            // SCX_NOT_ATTACHED_YET, and the daemon does not treat this refusal
+            // as final (see `scx_refusal_is_settle_timeout`).
             ScxState::Disabled => Outcome::Refused(format!(
                 "scxctl {verb} -s {sched} reported success, but sched_ext/state is still \
-                 disabled after {:?} — no scheduler attached",
+                 disabled after {:?} — {SCX_NOT_ATTACHED_YET}",
                 self.scx_settle
             )),
             // Neither a yes nor a no. Saying either would be the lie.
@@ -993,7 +1194,7 @@ impl RealWriter {
         if !ok {
             return Outcome::Refused(format!("scxctl stop: {stderr}"));
         }
-        match self.scx_settle_until(|s| matches!(s, ScxState::Disabled)) {
+        match self.scx_settle_until(&|s| matches!(s, ScxState::Disabled)) {
             ScxState::Disabled => Outcome::Landed,
             ScxState::Enabled { ops } => Outcome::Refused(format!(
                 "scxctl stop reported success, but a scheduler is still attached ({}) \
@@ -1003,6 +1204,59 @@ impl RealWriter {
             )),
             other => Outcome::Unknown(format!(
                 "scxctl stop reported success and the result could not be confirmed: {}",
+                other.describe()
+            )),
+        }
+    }
+
+    /// Put the machine back on the kernel's own scheduler after a sched-ext
+    /// scheduler failed to load or was ejected, and READ BACK that it is.
+    ///
+    /// Unlike [`RealWriter::scx_stop`] this always runs `scxctl stop`: after
+    /// an ejection the kernel reads `disabled` while `scx_loader` still thinks
+    /// its scheduler runs, and only a stop puts the two back in step. The
+    /// loader's "no scx scheduler running" is therefore an answer, not a
+    /// refusal. Called at most once per failure, by the daemon; it never
+    /// retries and never starts anything.
+    ///
+    /// The kernel decides the outcome: `Landed` only when `state` reads
+    /// `disabled` afterwards, whatever `scxctl` said.
+    fn scx_fallback(&self) -> Outcome {
+        if self.dry_run {
+            eprintln!("rimed: [dry-run] scxctl stop (sched-ext fallback)");
+            return Outcome::Landed;
+        }
+        let said = match self.scx_preflight("stop (fallback)") {
+            Ok(bin) => match self.scxctl_once(&bin, &["stop"]) {
+                Ok((true, _)) => None,
+                Ok((false, stderr)) if stderr.contains("no scx scheduler running") => None,
+                Ok((false, stderr)) => Some(format!("scxctl stop: {stderr}")),
+                Err(e) => Some(e),
+            },
+            // No scxctl to run. The kernel may still be on its own class (an
+            // ejection puts it there by itself), so read it before refusing.
+            Err(Outcome::Refused(why)) | Err(Outcome::Unknown(why)) => Some(why),
+            Err(Outcome::Landed) => None,
+        };
+        match self.scx_settle_until(&|s| matches!(s, ScxState::Disabled)) {
+            ScxState::Disabled => {
+                if let Some(why) = &said {
+                    eprintln!(
+                        "rimed: scx fallback: {why} — but the kernel reads disabled, so its \
+                         own scheduler is in charge"
+                    );
+                }
+                Outcome::Landed
+            }
+            ScxState::Enabled { ops } => Outcome::Refused(format!(
+                "{}a scheduler is still attached ({}) after {:?}",
+                said.map(|w| format!("{w}; ")).unwrap_or_default(),
+                ops.unwrap_or_else(|| "name not published".into()),
+                self.scx_settle
+            )),
+            other => Outcome::Unknown(format!(
+                "{}the result could not be confirmed: {}",
+                said.map(|w| format!("{w}; ")).unwrap_or_default(),
                 other.describe()
             )),
         }
@@ -1345,6 +1599,7 @@ impl SysWriter for RealWriter {
             Action::CgroupRemove { path } => self.cgroup_remove(path),
             Action::ScxSwitch { sched } => Ok(self.scx_load(sched)),
             Action::ScxStop => Ok(self.scx_stop()),
+            Action::ScxFallback => Ok(self.scx_fallback()),
         }
     }
 
@@ -1354,6 +1609,18 @@ impl SysWriter for RealWriter {
 
     fn scx_state(&self) -> ScxState {
         read_scx_state(&self.sys_root)
+    }
+
+    fn kmsg_mark(&self) -> Option<u64> {
+        kmsg_last_seq(&read_kmsg(self.kmsg_path.as_deref()?)?)
+    }
+
+    fn scx_kernel_reason(&self, since: Option<u64>) -> Option<String> {
+        scx_disable_reason(&read_kmsg(self.kmsg_path.as_deref()?)?, since)
+    }
+
+    fn scx_enable_seq(&self) -> Option<u64> {
+        read_scx_enable_seq(&self.sys_root)
     }
 }
 
@@ -1981,6 +2248,67 @@ exit 0
         );
     }
 
+    #[test]
+    fn only_the_settle_timeout_is_a_refusal_the_daemon_may_wait_out() {
+        let _serial = serial();
+        // A scheduler that is still loading reads `disabled` until it attaches,
+        // so this refusal is "not yet", and the daemon must be able to tell it
+        // from scxctl saying no.
+        let lab = Lab::new("settle-timeout");
+        lab.with_sched_ext("disabled");
+        let w = lab.writer(&lab.scxctl("exit 0"));
+        let out = w
+            .apply(&Action::ScxSwitch {
+                sched: "scx_lavd".into(),
+            })
+            .unwrap();
+        let Outcome::Refused(why) = out else {
+            panic!("expected Refused, got {out:?}");
+        };
+        assert!(scx_refusal_is_settle_timeout(&why), "{why}");
+        // scxctl itself refusing is final.
+        let lab = Lab::new("settle-final");
+        lab.with_sched_ext("disabled");
+        let w = lab.writer(&lab.scxctl("echo 'Error: scheduler not found' >&2; exit 1"));
+        let Outcome::Refused(why) = w
+            .apply(&Action::ScxSwitch {
+                sched: "scx_lavd".into(),
+            })
+            .unwrap()
+        else {
+            panic!("expected Refused");
+        };
+        assert!(!scx_refusal_is_settle_timeout(&why), "{why}");
+    }
+
+    #[test]
+    fn a_switch_waits_for_the_requested_scheduler_not_for_the_one_it_replaces() {
+        let _serial = serial();
+        // `switch` from rusty to lavd: the kernel reads `enabled` throughout,
+        // with rusty's ops until the swap lands. Waiting for "any scheduler"
+        // returns before the swap, and the daemon then reads rusty.
+        let lab = Lab::new("switch-wait");
+        lab.with_sched_ext("enabled").with_ops("rusty_1.1.4_x86_64_unknown_linux_gnu");
+        let ops = lab.scx_dir().join("root/ops");
+        let bin = lab.scxctl(&format!(
+            "( sleep 0.3; echo lavd_1.1.4_x86_64_unknown_linux_gnu > '{}' ) >/dev/null 2>&1 &\nexit 0\n",
+            ops.display()
+        ));
+        let w = RealWriter::for_scx_test(lab.sys(), &bin, Duration::from_secs(3));
+        let out = w
+            .apply(&Action::ScxSwitch {
+                sched: "scx_lavd".into(),
+            })
+            .unwrap();
+        assert_eq!(out, Outcome::Landed);
+        match read_scx_state(&lab.sys()) {
+            ScxState::Enabled { ops: Some(o) } => {
+                assert!(scx_ops_matches(&o, "scx_lavd"), "returned before the swap: {o}")
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
     // ── case 4: cannot tell ─────────────────────────────────────────────────
 
     #[test]
@@ -2197,5 +2525,146 @@ exit 0
             Outcome::Landed
         );
         assert!(!log.exists(), "dry-run must not run the command");
+    }
+
+    // ── the fallback: always stop, and the kernel decides ───────────────────
+
+    #[test]
+    fn the_fallback_stops_the_loader_even_when_the_kernel_already_reads_disabled() {
+        let _serial = serial();
+        // An ejection: the watchdog took the scheduler away, so `state` reads
+        // disabled while scx_loader still thinks it runs one. ScxStop skips
+        // the call in this state; the fallback must not, or the next start is
+        // refused with "already running".
+        let lab = Lab::new("fallback-ejected");
+        lab.with_sched_ext("disabled");
+        let log = lab.root.join("argv");
+        let w = lab.writer(&lab.scxctl(&format!(
+            "echo \"$@\" >> '{}'\necho \"error: no scx scheduler running\" >&2\nexit 1",
+            log.display()
+        )));
+        assert_eq!(w.apply(&Action::ScxFallback).unwrap(), Outcome::Landed);
+        let argv = std::fs::read_to_string(&log).expect("the fallback must run scxctl");
+        assert_eq!(argv.trim(), "stop", "one stop and nothing else: {argv}");
+    }
+
+    #[test]
+    fn the_fallback_lands_when_the_scheduler_really_goes_away() {
+        let _serial = serial();
+        let lab = Lab::new("fallback-honest");
+        lab.with_sched_ext("enabled");
+        lab.with_ops("rusty");
+        let w = lab.writer(&honest(&lab));
+        assert_eq!(w.apply(&Action::ScxFallback).unwrap(), Outcome::Landed);
+        assert_eq!(w.scx_state(), ScxState::Disabled);
+    }
+
+    #[test]
+    fn a_fallback_that_leaves_a_scheduler_attached_is_refused_whatever_scxctl_said() {
+        let _serial = serial();
+        let lab = Lab::new("fallback-stuck");
+        lab.with_sched_ext("enabled");
+        lab.with_ops("lavd_1.1.3_x86_64_unknown_linux_gnu");
+        let w = lab.writer(&lab.scxctl("exit 0"));
+        let out = w.apply(&Action::ScxFallback).unwrap();
+        let Outcome::Refused(why) = out else {
+            panic!("an exit code is not a kernel reading: {out:?}");
+        };
+        assert!(why.contains("still attached"), "{why}");
+    }
+
+    #[test]
+    fn a_fallback_with_no_scxctl_still_lands_when_the_kernel_is_on_its_own_class() {
+        let _serial = serial();
+        let lab = Lab::new("fallback-noscxctl");
+        lab.with_sched_ext("disabled");
+        let w = lab.writer(&lab.root.join("no-such-scxctl"));
+        assert_eq!(w.apply(&Action::ScxFallback).unwrap(), Outcome::Landed);
+    }
+
+    // ── the kernel's reason ──────────────────────────────────────────────────
+
+    /// The kernel's wording, as /dev/kmsg hands it out (one record per line,
+    /// `prio,seq,usec,flags;text`, dictionary lines indented).
+    const KMSG: &str = "\
+6,1001,5000000,-;sched_ext: BPF scheduler \"lavd_1.1.3_x86_64_unknown_linux_gnu\" enabled
+6,1002,9000000,-;sched_ext: BPF scheduler \"lavd_1.1.3_x86_64_unknown_linux_gnu\" disabled (unregistered from user space)
+6,1003,20000000,-;sched_ext: BPF scheduler \"lavd_1.1.3_x86_64_unknown_linux_gnu\" enabled
+3,1004,62000000,-;sched_ext: BPF scheduler \"lavd_1.1.3_x86_64_unknown_linux_gnu\" disabled (runnable task stall)
+ SUBSYSTEM=cpu
+3,1005,62000001,c;sched_ext: lavd_1.1.3_x86_64_unknown_linux_gnu: kworker/u64:3[812] failed to run for 30.512s
+6,1006,62000100,-;usb 3-1: new device
+";
+
+    #[test]
+    fn the_reason_is_the_last_disable_and_the_kernel_lines_that_explain_it() {
+        let why = scx_disable_reason(KMSG, None).unwrap();
+        assert!(why.contains("disabled (runnable task stall)"), "{why}");
+        assert!(why.contains("failed to run for 30.512s"), "{why}");
+        assert!(!why.contains("unregistered"), "an older disable is not this one: {why}");
+        assert!(!why.contains("SUBSYSTEM"), "dictionary lines are not text: {why}");
+        assert!(!why.contains("usb"), "{why}");
+    }
+
+    #[test]
+    fn a_disable_from_before_the_mark_is_never_reported_as_this_one() {
+        assert_eq!(kmsg_last_seq(KMSG), Some(1006));
+        // Marked after the stall: nothing newer disabled anything.
+        assert_eq!(scx_disable_reason(KMSG, Some(1004)), None);
+        // Marked between the two: only the stall counts.
+        let why = scx_disable_reason(KMSG, Some(1002)).unwrap();
+        assert!(why.contains("runnable task stall"), "{why}");
+        // Marked before both: still the newest.
+        assert!(scx_disable_reason(KMSG, Some(1000)).unwrap().contains("stall"));
+    }
+
+    #[test]
+    fn a_disable_record_is_about_the_scheduler_it_names() {
+        let why = scx_disable_reason(KMSG, None).unwrap();
+        assert!(scx_reason_names(&why, "scx_lavd"), "{why}");
+        assert!(!scx_reason_names(&why, "scx_rusty"), "{why}");
+        // The old scheduler's ordinary stop during a switch is not the new one's.
+        let old = "sched_ext: BPF scheduler \"rusty_1.1.4_x86_64_unknown_linux_gnu\" disabled \
+                   (unregistered from user space)";
+        assert!(!scx_reason_names(old, "scx_lavd"));
+        assert!(scx_reason_names(old, "scx_rusty"));
+        assert!(!scx_reason_names("sched_ext: something disabled", "scx_lavd"), "no name, no claim");
+    }
+
+    #[test]
+    fn the_enable_count_is_read_from_the_writers_own_sysfs() {
+        let lab = Lab::new("enable-seq");
+        lab.with_sched_ext("enabled");
+        let w = RealWriter::with_root(false, lab.sys());
+        assert_eq!(w.scx_enable_seq(), None, "no enable_seq file: no answer");
+        std::fs::write(lab.sys().join("kernel/sched_ext/enable_seq"), "7\n").unwrap();
+        assert_eq!(w.scx_enable_seq(), Some(7));
+        std::fs::write(lab.sys().join("kernel/sched_ext/enable_seq"), "x\n").unwrap();
+        assert_eq!(w.scx_enable_seq(), None, "not a number: no answer");
+    }
+
+    #[test]
+    fn a_record_with_the_continuation_flag_keeps_its_sequence_number() {
+        // The flags field is `-`, `c` (continued) or `+` (continuation of an
+        // earlier fragment); any of them must still read as a record, or the
+        // mark would treat it as unsequenced and a stale disable could pass.
+        let raw = "6,2001,1,-;start\n3,2002,2,+;sched_ext: BPF scheduler \"x\" disabled (stall)\n";
+        assert_eq!(kmsg_last_seq(raw), Some(2002));
+        assert_eq!(scx_disable_reason(raw, Some(2002)), None);
+        assert!(scx_disable_reason(raw, Some(2001)).unwrap().contains("stall"));
+    }
+
+    #[test]
+    fn the_writer_reads_its_own_kernel_log_and_a_fixture_writer_reads_none() {
+        let lab = Lab::new("kmsg");
+        let log = lab.root.join("kmsg");
+        std::fs::write(&log, KMSG).unwrap();
+        let w = lab.writer(&lab.root.join("scxctl")).with_kmsg(&log);
+        assert_eq!(w.kmsg_mark(), Some(1006));
+        assert!(w.scx_kernel_reason(Some(1003)).unwrap().contains("stall"));
+        // A fixture writer must never report the HOST's kernel log.
+        let bare = RealWriter::with_root(false, lab.sys());
+        assert_eq!(bare.kmsg_mark(), None);
+        assert_eq!(bare.scx_kernel_reason(None), None);
     }
 }

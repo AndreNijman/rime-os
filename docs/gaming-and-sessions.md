@@ -621,13 +621,12 @@ fixes it: lavd_enqueue's REENQ path now checks the cached CPU against
 `cpus_ptr`. Arch shipped that as `scx-scheds 1.1.3-2`. COPR's `1.1.3-3` is the
 v1.1.3 tag plus hotfixes for scx_cake and scx_pandemonium, and lacks this one.
 
-**What Rime does:** `Containerfile.core`'s toolbuilder builds scx_lavd from
-the same v1.1.3 tag with the vendored patch
-(`files/system/src/scx/lavd-6d31ddd89-reenq-cpus-ptr.patch`), and the final
-stage installs it over COPR's binary only while COPR is still at 1.1.3. Any
-later scx release already contains the fix, so a newer COPR is kept and the
-log says to drop the rebuild. `/usr/lib/rime-scx-versions` records which
-binary shipped. The patched binary's embedded BPF line info carries the fix
+**What Rime did (until 2026-10-31, see §5h):** `Containerfile.core`'s toolbuilder built scx_lavd from
+the same v1.1.3 tag with a vendored copy of that commit (the patch file was
+removed on 2026-10-31: scx 1.1.4, the pin since then, contains it), and the final
+stage installed it over COPR's binary only while COPR was still at 1.1.3. Any
+later scx release already contains the fix, so a newer COPR would have been
+kept. `/usr/lib/rime-scx-versions` recorded which binary shipped. The patched binary's embedded BPF line info carries the fix
 (one more `bpf_cpumask_first(p->cpus_ptr)` than COPR's: 4 against 3).
 
 Gaming Mode keeps sched_ext: rimed still asks for `scx_lavd`
@@ -635,8 +634,11 @@ Gaming Mode keeps sched_ext: rimed still asks for `scx_lavd`
 (Since 2026-10-07 it asks only on CPUs with one kind of core: see §5f.)
 
 `scx_loader` restarting lavd after every watchdog exit turned one bug into five
-freezes, and rimed reports "sched-ext loaded" once at entry and never looks
-again. Both are still true, and each needs its own fix.
+freezes, and rimed reported "sched-ext loaded" once at entry and never looked
+again. Since 2026-10-31 rimed watches the whole session and stops a scheduler
+that failed or was ejected, once (§5h). The binary-swap described above was
+replaced the same day by building the whole scheduler set from source at scx
+1.1.4, which contains the fix (the build asserts it, §5h).
 
 The Hyprland crash the same day is a different defect. It was an i915 GPU hang
 in the game's own context (`ecode 12:1:84dffffb`, rcs0), which reset Hyprland's
@@ -774,6 +776,75 @@ turned on: `rime-gaming-discord set on|off`, or the switch in Settings → Gamin
   (electron-updater) can open on installs it can update (RPM/AppImage); the
   tarball install has no updater. Steam's base-layer focus should keep such a
   window behind Steam, not verified.
+
+## 5h. The kernel and the schedulers are built, proven and failed over together (2026-10-31)
+
+Rime builds its own kernel, but until now took its sched-ext schedulers from
+the CachyOS COPR (`scx-scheds`, `scx-tools`), built against nobody's kernel in
+particular, with `scx_lavd` swapped for Rime's patched build (§5e). sched_ext's
+BPF interface is not stable across kernel versions, so a kernel bump could
+ship schedulers that no longer load, and nothing would say so before a user
+opened Gaming Mode.
+
+**Built together.** `Containerfile.core`'s `scx-builder` stage builds the
+schedulers and `scxtop` from ONE pinned scx release, 1.1.4 (tarball sha256
+pinned; the version main's last COPR image shipped, and it contains the lavd
+fix of §5e, which the build asserts), plus `scx_loader`, `scxctl` and `scxtui`
+from scx-loader 1.1.3 (COPR's scx-tools was 1.1.3 too), and COPYs the kernel
+tier's own BTF in, so a kernel bump rebuilds the stage. The BPF is compiled
+against the header scx ships (1.1.4: v7.3-rc5), not one dumped from Rime's
+kernel: that was tried with scx 1.1.3 and does not compile (it reads v7.3
+`sched_ext_ops` fields and drops them at load on an older kernel). Upstream's contract is a header at
+least as new as the kernel, so the build checks exactly that:
+`files/system/src/scx/check-sched-ext-ops.sh` fails the build if the kernel's
+`sched_ext_ops` has a member the header lacks. `/usr/lib/rime-scx-versions`
+records the release, the header, the check's result and the kernel.
+
+Three schedulers COPR's 1.1.4 shipped are left out because they cannot attach
+to 7.2.9, measured with the gate below on both the source build and main's
+published COPR image (same result): `scx_mavd` and `scx_nitosis` need the
+"cid" form of `sched_ext_ops` (sched_ext for-7.4, per their READMEs; the
+kernel answers EOPNOTSUPP), and `scx_mlfq` 1.3.12 is disabled by the kernel
+within seconds ("non-existent DSQ 0x1000"; the 1.0.1 in scx 1.1.3 loaded;
+cause not established). No profile or doc names them; a setting that does
+gets the kernel's scheduler through the fallback below.
+
+**Proven together.** `tests/kernel/scx-selftest/` boots the image's own
+kernel in QEMU with an initramfs holding the image's own schedulers and their
+libraries, loads each one under load, checks it attached under the struct_ops
+name rimed expects and survived, then `kill -9`s `scx_lavd` with a busy task
+on it and checks that task's `ext.enabled` went from 1 to 0 (the kernel took
+it back). build-image.yml runs it before core is pushed. On 7.2.9 with the
+source-built 1.1.4 set (local QEMU/KVM, 8 vCPUs): 16 schedulers + kill -9,
+PASS, guest 97 s. CI requires KVM for this step; without it core is not
+pushed. The step has not yet run on a GitHub runner.
+
+**Failed over on the machine.** When the scheduler a Gaming Mode session asked
+for did not attach, or the kernel ejected it later (the state reads
+`disabled`, a different scheduler is attached, or `enable_seq` moved because
+`scx_loader` reloaded it between two readings), rimed runs `scxctl stop`,
+reads `sched_ext/state` until it says `disabled`, and reports it: `scx_fallback`,
+`scx_fallback_detail` (with the kernel's reason from `/dev/kmsg`) and
+`scx_effective` (`docs/rimed-dbus.md`), plus one journal line. One attempt per
+session; a scheduler that failed is not tried again until rimed restarts or
+the machine reboots (profiles are read when rimed starts, so a changed profile
+arrives the same way). A stop that does not get the kernel back is reported
+`unverified` and not retried.
+
+**A slow attach is not a failure.** `sched_ext/state` reads `disabled` until
+the scheduler's struct_ops attach, after its userspace start-up and the BPF
+verifier, and the switch waits only 2 s (`SCX_SETTLE`). The QEMU gate timed
+attaches from 0.1 s to 2.8 s on an idle guest, and up to 6.5 s (scx_eevdf;
+scx_lavd 2.8 s) on a guest sharing the host with a compile. So game entry falls back at once
+only on definite evidence: `scxctl` refusing outright, or a kernel disable
+record naming the requested scheduler since the switch. A bare `disabled` (or
+the old scheduler still attached while a `switch` lands) is left to the 2 s
+session watch, which gives it until 20 s after entry (`SCX_ATTACH_GRACE`)
+before calling it "never came up" (while the state reads `disabled` the
+kernel's own scheduler is running the game, so the wait delays only the
+report and the stop). Once it has been read attached, a later
+`disabled` is an ejection and is acted on at once. Neither budget has been
+measured on hardware.
 
 ## 6. The rows that need katana, and the exact commands
 

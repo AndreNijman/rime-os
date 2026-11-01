@@ -213,6 +213,16 @@ pub enum Action {
     ScxSwitch { sched: String },
     /// `scxctl stop` — hand scheduling back to the kernel's own class (EEVDF).
     ScxStop,
+    /// The fallback after a scheduler failed to load or was ejected: `scxctl
+    /// stop` UNCONDITIONALLY, then a read-back that the kernel's own class is
+    /// in charge.
+    ///
+    /// Not [`Action::ScxStop`], whose writer skips the call when the kernel
+    /// already reads `disabled`. After an ejection the kernel does read
+    /// `disabled` while `scx_loader` still believes its scheduler is running,
+    /// and the next `scxctl start` would be refused with "already running".
+    /// The fallback is what puts the loader back in step with the kernel.
+    ScxFallback,
 }
 
 impl Action {
@@ -274,6 +284,10 @@ impl Action {
             }
             Action::ScxSwitch { sched } => format!("sched-ext scheduler = {sched}"),
             Action::ScxStop => "sched-ext stopped (back to the kernel scheduler)".to_string(),
+            Action::ScxFallback => {
+                "sched-ext fallback: stop the scheduler and verify the kernel's own class runs"
+                    .to_string()
+            }
             Action::NvidiaLockGraphics {
                 gpu,
                 min_mhz,
