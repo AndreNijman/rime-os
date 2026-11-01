@@ -933,6 +933,45 @@ jobs:
 
           echo "core image verified"
 
+      # ── sched-ext selftest: the shipped kernel x the shipped schedulers ──
+      # The kernel (Containerfile.kernel, pinned by digest in Containerfile.core)
+      # and the scheduler set (Containerfile.core's scx-builder stage) only meet
+      # on a user's machine. Every kernel bump moves core's kernel pin, which
+      # rebuilds core, which runs this before anything is pushed: QEMU boots the
+      # image's own vmlinuz with an initramfs holding the image's own
+      # /usr/bin/scx_* and their libraries, loads each one under load, checks it
+      # attached under the struct_ops name rimed expects and survived, then
+      # kill -9s Gaming Mode's scheduler and checks the kernel fell back to its
+      # own class. Any failure, missing scheduler or hang fails the job, and the
+      # push below never runs. Nothing is loaded on the runner's own kernel.
+      # (The parser is tested on its own by tests/test-scx-selftest.sh.)
+      - name: sched-ext selftest (QEMU, shipped kernel + every shipped scheduler)
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          command -v qemu-system-x86_64 >/dev/null \
+            || { sudo apt-get update -qq && sudo apt-get install -y -qq --no-install-recommends qemu-system-x86; }
+          # KVM or nothing. Under TCG the guest needs ~1 h (the script's own
+          # budget is 120 s + 60 s settles per scheduler), which would run
+          # into this job's 120-minute limit after a ~40-minute core build, so
+          # the gate would die mid-guest instead of giving a verdict. A gate
+          # that cannot run must not pass: re-run the job on a runner with KVM.
+          if [[ -e /dev/kvm ]]; then
+            # As boot-v2.yml: the runner user is in the kvm group, but make
+            # sure the node is usable whoever runs qemu.
+            sudo chmod 0666 /dev/kvm
+            echo "::notice::/dev/kvm is present; the selftest guest runs accelerated"
+          else
+            echo "::error::/dev/kvm is absent on this runner; the sched-ext selftest cannot run, so core is not pushed. Re-run the job."
+            exit 1
+          fi
+          ./tests/kernel/scx-selftest/run-scx-selftest.sh \
+            --image "$IMAGE:$TAG_CORE-${{ github.sha }}" \
+            --podman "sudo podman" \
+            --workdir "$RUNNER_TEMP/scx-selftest"
+        env:
+          SCX_SELFTEST_ACCEL: kvm
+
       # ── Push once, then tag in-registry ──────────────────────────────────
       # Two problems this solves, both measured on run 30775672845.
       #
@@ -2612,8 +2651,8 @@ jobs:
 
   # ── Job 5: qcow2 (stretch, dispatch-gated, non-blocking) ─────────────────
   # Proves bootc-image-builder produces a bootable disk from the published image.
-  # GitHub runners have NO /dev/kvm, so the disk is NOT booted here — producing
-  # the qcow2 is the check. Gated on manual dispatch (build_qcow2=true) and
+  # The disk is NOT booted here — producing the qcow2 is the check (the core
+  # job's sched-ext selftest and boot-v2.yml are what boot guests under KVM). Gated on manual dispatch (build_qcow2=true) and
   # continue-on-error so bib flakiness never fails the image pipeline.
   qcow2:
     needs: image

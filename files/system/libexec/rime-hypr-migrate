@@ -690,6 +690,27 @@ def atomic_write(path, text):
     os.replace(tmp, path)
 
 
+def _hyprland_unprivileged(cmd, env, config_dir):
+    """Run Hyprland's config check as nobody when we are root.
+
+    Hyprland 0.57.0's --verify-config binds its event socket at /.socket2.sock
+    (an empty instance path) and segfaults whenever that bind succeeds, which
+    only root can make it do: a build step, or a self-test under sudo. Measured
+    in the image: the first root check in a fresh container crashes every time,
+    a check as any other user passes. Hyprland also warns against running as
+    root at all. So as root, the check runs as nobody, in a runtime directory
+    nobody owns. Returns (cmd, env, scratch dir to remove or None).
+    """
+    if os.geteuid() != 0 or not shutil.which("setpriv"):
+        return cmd, env, None
+    os.chmod(config_dir, 0o755)  # TemporaryDirectory is 0700
+    runtime = tempfile.mkdtemp()
+    os.chown(runtime, 65534, 65534)
+    env = dict(env, XDG_RUNTIME_DIR=runtime, HOME=runtime)
+    return (["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--"] + cmd,
+            env, runtime)
+
+
 def validate_lua(module, text):
     """Run one generated module through the Hyprland in this image."""
     if not shutil.which("Hyprland"):
@@ -712,12 +733,15 @@ def validate_lua(module, text):
         wrapper = os.path.join(d, "hyprland.lua")
         with open(wrapper, "w", encoding="utf-8") as fh:
             fh.write(f'require("rime.{module}")\n')
+        cmd, env, scratch = _hyprland_unprivileged(
+            ["Hyprland", "--i-am-really-stupid", "--verify-config", "--config", wrapper], env, d)
         try:
-            res = subprocess.run(
-                ["Hyprland", "--i-am-really-stupid", "--verify-config", "--config", wrapper],
-                capture_output=True, text=True, env=env, timeout=60)
+            res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=60)
         except (OSError, subprocess.SubprocessError):
             return None
+        finally:
+            if scratch:
+                shutil.rmtree(scratch, ignore_errors=True)
         return "config ok" in (res.stdout + res.stderr)
 
 

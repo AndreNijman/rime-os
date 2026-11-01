@@ -1364,6 +1364,19 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: ./tests/test-rime-gaming-discord.sh
 
+      # sched-ext and the kernel: the verdict parser of the QEMU selftest that
+      # build-image.yml runs before a core image is pushed (fed the real serial
+      # log of a passing 7.2.9 run, then that log broken one way at a time),
+      # the guest's struct_ops name check against rimed's cases, and the
+      # build-time check that scx's BPF header is at least as new as the kernel.
+      - name: Run sched-ext selftest parser and header-check assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          ./tests/test-scx-selftest.sh
+          ./tests/test-scx-sched-ext-ops-check.sh
+
       # The same game environment for Steam started from the desktop: the
       # profile.d hook greetd's session shell sources, under every shell that
       # sources profile.d, and the helper both paths share.
@@ -4477,6 +4490,10 @@ jobs:
             tests/test-rime-gamescope-steam.sh \
             files/system/libexec/rime-gamescope-steam \
             tests/test-rime-gaming-discord.sh \
+            tests/test-scx-selftest.sh tests/test-scx-sched-ext-ops-check.sh \
+            tests/kernel/scx-selftest/run-scx-selftest.sh \
+            tests/kernel/scx-selftest/collect.sh tests/kernel/scx-selftest/init.sh \
+            files/system/src/scx/check-sched-ext-ops.sh \
             tests/test-rime-game-env.sh \
             files/system/libexec/rime-game-env \
             files/system/profile.d/rime-game-env.sh \
