@@ -17,8 +17,8 @@ A GitHub runner has them.)
 - **Which checks run.** Every flake check except the ones in `checks-not-in-ci.txt`, which carries one line per
   skipped check with its reason. A new check runs in CI the day it lands. A skip entry naming a check that does not
   exist, or with no reason, fails both `plan` and `tests/check-suites-run-in-ci.sh`.
-- **What is skipped today.** The four checks that build the Rime kernel (`vm-boot`, `kernel-gate`, `kernel-vm`,
-  `kernel-boot-budget`): there is no Rime binary cache yet (TODO(handover) R2), and a kernel build on a 4-vCPU hosted
+- **What is skipped today.** The five checks that build the Rime kernel (`vm-boot`, `kernel-gate`, `kernel-vm`,
+  `kernel-boot-budget`, `kernel-sign`): there is no Rime binary cache yet (TODO(handover) R2), and a kernel build on a 4-vCPU hosted
   runner does not fit the hour.
 - **The summary.** The last job lists every flake check as RAN (pass/fail, seconds) or SKIPPED (reason) in the run
   summary, and fails unless every planned check passed and the plan and packages jobs succeeded.
