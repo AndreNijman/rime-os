@@ -188,7 +188,7 @@ The same disk with SB off: `BdsDxe: starting Boot0002 "UEFI Misc Device"`.
 
 LUKS; TPM and PCR 7; MokManager enrolment from `mokutil --import`; recovery through the GRUB menu from a bad
 generation; the real `boot.loader.external` hook (the rig writes the entries itself, from bootspec); a root on btrfs;
-the CachyOS kernel; real hardware. The ESP uses the removable path (`EFI/BOOT/BOOTX64.EFI` = shim, with `grubx64.efi`
+real hardware (the CachyOS kernel is covered by `KERNEL=rime` below). The ESP uses the removable path (`EFI/BOOT/BOOTX64.EFI` = shim, with `grubx64.efi`
 beside it) instead of an NVRAM entry for `\EFI\fedora\shimx64.efi`; `fbx64.efi` is left out so shim does not run
 fallback.
 
