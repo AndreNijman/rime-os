@@ -17,6 +17,7 @@
     ./rename-compat.nix
     ./update.nix
     ./keymap.nix
+    ./luks-tpm.nix
   ];
 
   nixpkgs.overlays = [ overlay ];

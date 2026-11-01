@@ -1,0 +1,25 @@
+# The TPM lab's image (README.md here): the OVMF probe image (../Containerfile: Fedora 45's Secure Boot OVMF, QEMU,
+# virt-firmware, sbsigntools) plus a software TPM and the tools that read it, and Fedora 45's own signed kernel.
+#
+# Build:  sudo podman build -t rime-ovmf-tpm nix/probe/ovmf/tpm     (after rime-ovmf-probe exists)
+#
+# kernel-core is DOWNLOADED, not installed: its vmlinuz is the Fedora-signed kernel of the "before" probe boot
+# (shim -> GRUB -> a kernel GRUB verifies through shim's built-in Fedora certificate), and the same file re-signed
+# with the lab's TEST MOK is the bootc-Rime-shaped boot (a kernel verified through MokList). The RPM's NEVRA and
+# sha256 are printed by run.sh into the evidence.
+FROM localhost/rime-ovmf-probe:latest
+
+RUN dnf -y install --setopt=install_weak_deps=False \
+        swtpm swtpm-tools tpm2-tools busybox cryptsetup systemd-udev systemd \
+        python3 cpio gzip \
+    && mkdir -p /opt/fedora-kernel \
+    && dnf download --destdir /opt/fedora-kernel kernel-core \
+    && dnf clean all
+
+RUN set -eux; \
+    command -v swtpm swtpm_setup tpm2_pcrread tpm2_eventlog cryptsetup systemd-cryptenroll busybox; \
+    file -L "$(command -v busybox)" | grep -E 'statically linked|static-pie linked'; \
+    ls /opt/fedora-kernel/kernel-core-*.rpm
+
+WORKDIR /work
+ENTRYPOINT ["/bin/bash"]

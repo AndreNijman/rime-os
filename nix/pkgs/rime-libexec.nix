@@ -36,7 +36,9 @@
 #   rime-vconsole-guard    repairs a hand-edited /etc/vconsole.conf; NixOS generates that file from console.*
 # rime-plymouth-accent runs from rime-greet-wallpaper / rime-greet-publish-all; desktop.nix makes plymouthd.conf a
 # real file and links the accent themes (the initrd half is TODO(handover) D3, see plymouthTheme there).
-# Shipped but NOT wired (their owner decides): rime-boot-health (boot chain, D3), rime-luks-enroll (installer, D9),
+# rime-luks-enroll: its --tpm-only path is wired by nix/modules/luks-tpm.nix (rime-luks-tpm-reenrol@); the installer
+# path (D9) is its owner's.
+# Shipped but NOT wired (their owner decides): rime-boot-health (boot chain, D3),
 # rime-vm (needs virtualisation.libvirtd; its install hint still names RPMs: TODO(handover) catalogue worker).
 {
   lib,
