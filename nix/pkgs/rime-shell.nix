@@ -153,7 +153,8 @@ stdenv.mkDerivation (finalAttrs: {
   dontWrapQtApps = true;
 
   postPatch = ''
-    rm -rf flake.nix flake.lock .github
+    # A path: override carries the checkout's .git (the github: input does not); older revisions carry a flake.
+    rm -rf .git flake.nix flake.lock .github
 
     # Build-time path indirection (see the header). Text files only; binaries (images) are left alone.
     # Order matters: the shell's own directory first, then the generic prefixes. /usr/bin/env stays: NixOS has it.
