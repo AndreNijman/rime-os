@@ -468,6 +468,21 @@ def with_include_block(old):
 
 # ── install ────────────────────────────────────────────────────────────────────
 
+def windows_boot_manager(boot):
+    """The path of Windows Boot Manager under boot (EFI/Microsoft/Boot/bootmgfw.efi, any case: FAT), or None."""
+    d = boot
+    for part in ("efi", "microsoft", "boot", "bootmgfw.efi"):
+        try:
+            names = os.listdir(d)
+        except (NotADirectoryError, FileNotFoundError):
+            return None
+        match = [n for n in names if n.lower() == part]
+        if not match:
+            return None
+        d = os.path.join(d, match[0])
+    return d if os.path.isfile(d) else None
+
+
 def free_bytes(path):
     st = os.statvfs(path)
     return st.f_bavail * st.f_frsize
@@ -482,6 +497,15 @@ def install(cfg, toplevel_arg):
         raise Refusal(
             f"{grub2} does not exist: Fedora's GRUB (bootupd's static config) is not installed on this boot "
             "filesystem, so nothing would read the menu. rime-boot never installs GRUB"
+        )
+    windows = windows_boot_manager(boot)
+    if windows:
+        # D3 ESP rules (R20): Rime writes only its own ESP or bootc's /boot, never Windows' ESP (a shared disk,
+        # topologies B and D; katana's nvme0n1p1). A fresh install mounts Rime's own ESP at /boot.
+        raise Refusal(
+            f"{boot} holds Windows Boot Manager ({windows}): this is a Windows EFI system partition, and Rime "
+            "writes its menu and kernels only to its own ESP. Nothing was written; mount Rime's ESP at "
+            f"{boot} and run the hook again"
         )
     host_boot = read_host_boot(cfg)
     layout, why = resolve_layout(cfg, host_boot)

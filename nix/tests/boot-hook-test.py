@@ -393,6 +393,29 @@ class HookTest(unittest.TestCase):
             finally:
                 g.cleanup()
 
+    # D3 ESP rules (R20): Windows' ESP is refused by name, any letter case (FAT), with nothing written
+    def test_refuses_a_windows_esp(self):
+        f = self.f
+        f.generation(1)
+        for parts in (("EFI", "Microsoft", "Boot"), ("efi", "MICROSOFT", "boot")):
+            g = Fixture(self)
+            try:
+                g.generation(1)
+                d = os.path.join(g.boot, *parts)
+                os.makedirs(d)
+                with open(os.path.join(d, "bootmgfw.efi" if parts[0] == "EFI" else "BOOTMGFW.EFI"), "wb") as fh:
+                    fh.write(b"MZ windows")
+                before = tree(g.boot)
+                self.assertEqual(g.run("install"), 3, parts)
+                self.assertIn("this is a Windows EFI system partition", g.stderr)
+                self.assertIn("Nothing was written", g.stderr)
+                self.assertEqual(tree(g.boot), before)
+            finally:
+                g.cleanup()
+        # The bootc installer's custom.cfg Windows ENTRY (a chainloader line) is not Windows' ESP: still written.
+        f.make_ostree_boot()
+        self.assertEqual(f.run("install"), 0, f.stderr)
+
     def test_refuses_without_grub(self):
         f = self.f
         f.generation(1)
