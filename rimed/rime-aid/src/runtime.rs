@@ -661,6 +661,18 @@ mod tests {
         Confinement { bwrap: PathBuf::from(BWRAP) }
     }
 
+    /// Serialises the tests that write a fake program and then run one.
+    ///
+    /// Without it they fail at random with ETXTBSY ("Text file busy"): while
+    /// one test holds its new script open for writing, another test forks,
+    /// and the child carries a copy of that write descriptor until its own
+    /// exec; executing the script in that window is refused. Measured: one
+    /// run in three in a parallel `cargo test`.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A scratch directory unique to one test.
     fn scratch(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
@@ -850,6 +862,7 @@ mod tests {
 
     #[test]
     fn a_missing_bwrap_refuses_to_start() {
+        let _serial = serial();
         let d = scratch("missing");
         let err = confinement_at(&d.join("bwrap")).expect_err("a missing bwrap was accepted");
         let msg = format!("{err:#}");
@@ -861,6 +874,7 @@ mod tests {
 
     #[test]
     fn a_bwrap_that_is_not_executable_refuses_to_start() {
+        let _serial = serial();
         // What a bind-mounted empty file, a half-written package or a stray
         // chmod leaves. `is_file()` alone said yes to this.
         let d = scratch("noexec");
@@ -873,6 +887,7 @@ mod tests {
 
     #[test]
     fn a_directory_where_bwrap_should_be_refuses_to_start() {
+        let _serial = serial();
         let d = scratch("dir");
         let b = d.join("bwrap");
         std::fs::create_dir(&b).unwrap();
@@ -883,6 +898,7 @@ mod tests {
 
     #[test]
     fn a_bwrap_that_cannot_build_the_sandbox_refuses_to_start() {
+        let _serial = serial();
         // Present and executable is not working: a kernel that refuses
         // unprivileged user namespaces leaves exactly this. bwrap's own reason
         // must reach the message, because it is the actionable part.
@@ -897,6 +913,7 @@ mod tests {
 
     #[test]
     fn the_probe_builds_the_same_namespaces_a_backend_gets() {
+        let _serial = serial();
         // The probe is only evidence if it asks for what a launch asks for. A
         // fake bwrap records its arguments and succeeds.
         let d = scratch("probe");
@@ -920,6 +937,7 @@ mod tests {
 
     #[test]
     fn start_runs_the_backend_only_through_bwrap() {
+        let _serial = serial();
         // End to end through `start`: the fake bwrap records that IT was run
         // and then fails, the way a sandbox that cannot be built does. The
         // backend writes a marker if it is ever exec'd directly. It must not
