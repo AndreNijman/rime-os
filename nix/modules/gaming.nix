@@ -218,12 +218,12 @@ in
       default = false;
       description = ''
         Rime's gaming stack: Steam, Rime Gaming Mode (a gamescope session in the greeter), gamemode, NTSYNC and
-        the game environment. Off by default (decision A4, measured 2026-11-01 with `nix path-info -S` on
-        nix/tests/gaming.nix's `measure` toplevels, rime-vm config): it takes the closure from 2.87 GB NAR to
-        5.82 GB NAR (+2.95 GB; 32-bit graphics, which programs.steam forces on, is 1.05 GB of that; about
-        1.24 GB downloaded from cache.nixos.org plus 0.10 GB built locally). That reverses "install as small as
-        possible" (2026-10-04), and bootc never shipped Steam or gamescope in the image either: they came from
-        `rime install`. A machine that wants gaming sets this to true; `rime install steam` must do that.
+        the game environment. Off by default (decision A4, docs/nixos/closure.md section 5, measured 2026-11-01 on
+        the laptop-shaped `plain` toplevels in nix/tests/size.nix): it adds 0.53 GB of download (zstd -19,
+        2.51 -> 3.04 GB), 2.46 GB unpacked and 0.99 GB on disk (btrfs zstd:3). Shipping it in every install
+        would reverse "install as small as possible" (2026-10-04), and bootc never shipped Steam or gamescope in
+        the image either: they came from `rime install`. A machine that wants gaming sets this to true;
+        `rime install steam` must do that.
       '';
     };
 
@@ -344,6 +344,9 @@ in
       enable = true;
       enable32Bit = true;
     };
+    # size: 32-bit ALSA (the i686 PipeWire plugin) for 32-bit games, moved here from desktop.nix
+    # (docs/nixos/closure.md). bootc's Steam set brought i686 alsa-lib but not this plugin; it is kept here anyway.
+    services.pipewire.alsa.support32Bit = true;
 
     # NTSYNC (bootc Containerfile.rime :243-262): Proton/Wine use /dev/ntsync when it exists. The driver registers a
     # dynamic misc minor, so nothing autoloads it; the device is 0666 from the driver. 51.4 -> 59.3 fps measured on

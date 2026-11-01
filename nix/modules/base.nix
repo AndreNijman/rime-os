@@ -68,6 +68,24 @@ in
       auto-optimise-store = true;
     };
 
+    # size (docs/nixos/closure.md): no nixpkgs source in the closure (207 MiB). There is no on-device evaluation (D5),
+    # so the registry names the same nixpkgs by locked GitHub rev instead of by store path; `nix run nixpkgs#x`
+    # still resolves to the system's nixpkgs, fetched on first use.
+    nixpkgs.flake.setFlakeRegistry = false;
+    nixpkgs.flake.setNixPath = false;
+    nix.registry.nixpkgs.to = {
+      type = "github";
+      owner = "NixOS";
+      repo = "nixpkgs";
+      rev = config.system.nixos.revision;
+    };
+    # The nixPath setNixPath would have written (nixos/modules/misc/nixpkgs-flake.nix), through this registry.
+    nix.nixPath =
+      [ "nixpkgs=flake:nixpkgs" ] ++ lib.optional config.nix.channel.enable "/nix/var/nix/profiles/per-user/root/channels";
+    # size: no -doc outputs or NixOS manual (171 MiB), as bootc installs no -doc subpackages; man pages stay.
+    documentation.doc.enable = false;
+    documentation.nixos.enable = false;
+
     # ── libexec ──────────────────────────────────────────────────────────────────────────────────────────
     # bootc /usr/libexec/rime-*, /usr/share/rime, /usr/bin/{apex,steamos-*}. Linked into the system profile
     # so every Fedora path the scripts and rime-shell name has one NixOS twin under /run/current-system/sw.
