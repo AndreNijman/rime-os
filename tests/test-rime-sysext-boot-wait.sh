@@ -80,8 +80,10 @@ if grep -x 'RuntimeDirectory=rime-pkg' "$UNIT" >/dev/null && grep -x 'RuntimeDir
 else
     bad "the note's directory is world-readable and outlives the failed unit" "RuntimeDirectory=rime-pkg, Mode=0755, Preserve=yes"
 fi
-# Every successful exit of the one build function takes the note back.
-clears="$(sed -n '/^rebuild_extension() {/,/^}/p' "$ENGINE" | grep -c 'rebuild_notice_clear')"
+# Every successful exit of the one build function takes the note back. Only a
+# line that IS the call counts: `: rebuild_notice_clear` or a comment naming it
+# clears nothing.
+clears="$(sed -n '/^rebuild_extension() {/,/^}/p' "$ENGINE" | grep -cx '[[:space:]]*rebuild_notice_clear')"
 if [ "$clears" -ge 3 ]; then
     ok "every successful build removes the note ($clears exits)"
 else
@@ -138,6 +140,9 @@ printf '#!/bin/sh\necho "$*" >> "%s/systemctl"\n' "$w" > "$w/bin/systemctl"
 printf '#!/bin/sh\nshift; exec "$@"\n' > "$w/bin/timeout"
 if [ "$case" = offline ]; then
     printf '#!/bin/sh\nexit 0\n' > "$w/bin/ip"
+elif [ "$case" = v6 ]; then
+    # An IPv6-only network: no IPv4 default route at all.
+    printf '#!/bin/sh\n[ "$*" = "-6 route show default" ] && echo "default via fe80::1 dev wlan0 proto ra"\nexit 0\n' > "$w/bin/ip"
 else
     printf '#!/bin/sh\n[ "$*" = "-4 route show default" ] && echo "default via 192.0.2.1 dev wlan0"\nexit 0\n' > "$w/bin/ip"
 fi
@@ -176,6 +181,11 @@ judge() {  # $1 engine; prints one "ok|bad <name> <why>" line per assertion
     [ "$(field "$r" rc)" != 0 ] && echo "ok offline-nonzero" || echo "bad offline-nonzero $r"
     [ "$(field "$r" rebuilt)" = no ] && [ "$(field "$r" calls)" = none ] && echo "ok offline-downloads-nothing" || echo "bad offline-downloads-nothing $r"
     [ "$(field "$r" note)" = offline ] && echo "ok offline-note" || echo "bad offline-note $r"
+    # Only an IPv6 default route is still online: the build starts (and is
+    # refused by the stub), it is not reported as offline.
+    r="$(one "$e" v6)"
+    [ "$(field "$r" calls)" = pinned ] && [ "$(field "$r" note)" = refused ] \
+        && echo "ok ipv6-only-is-online" || echo "bad ipv6-only-is-online $r"
     r="$(one "$e" ok)"
     [ "$(field "$r" rc)" = 0 ] && [ "$(field "$r" rebuilt)" = yes ] && echo "ok needed-rebuild-succeeds" || echo "bad needed-rebuild-succeeds $r"
     [ "$(field "$r" waited)" = yes ] && echo "ok needed-rebuild-waits-for-network" || echo "bad needed-rebuild-waits-for-network $r"
@@ -199,6 +209,7 @@ declare -A what=(
     [offline-nonzero]="an offline boot rebuild exits non-zero"
     [offline-downloads-nothing]="an offline boot rebuild never starts the build"
     [offline-note]="an offline boot rebuild leaves the note reason=offline"
+    [ipv6-only-is-online]="an IPv6-only default route counts as online (the build starts)"
     [needed-rebuild-succeeds]="a needed rebuild that works exits 0"
     [needed-rebuild-waits-for-network]="a needed rebuild that works waited for the network first"
     [needed-rebuild-no-note]="a needed rebuild that works leaves no note"
@@ -231,6 +242,8 @@ mutant stall refused-at-once 's/if \[ "\${BOOT_FAST_FAIL:-0}" = 1 \]; then/if fa
 mutant finished refused-nonzero '/rebuild_notice_set refused/{n;s/return 1/return 0/}'
 # Offline is not measured: the wait returns success and the build starts.
 mutant offline-builds offline-downloads-nothing 's/^    boot_network_up$/    true/'
+# Only IPv4 routes are looked at: an IPv6-only network is called offline.
+mutant ipv4-only ipv6-only-is-online 's/\$(ip -6 route show default 2>\/dev\/null)//'
 
 # ── the notice: once per boot, in the session, never for a rebuild that worked
 nb="$tmp/notice"; mkdir -p "$nb/bin" "$nb/home"
@@ -273,6 +286,17 @@ if grep -F 'rebuild' "$ENGINE" >/dev/null && grep -F 'RIME_PKG_REBUILD_NOTICE-/r
     ok "notice and engine agree on the note's path"
 else
     bad "notice and engine agree on the note's path" "rime-pkg's REBUILD_NOTICE default moved"
+fi
+
+# A success exit that no longer takes the note back must fail the count above.
+m="$tmp/mutant.no-clear"
+sed -e '0,/^    rebuild_notice_clear$/s//    : rebuild_notice_clear/' "$ENGINE" > "$m"
+if cmp -s "$m" "$ENGINE"; then
+    bad "mutant 'no-clear' is caught" "the sed did not change the engine; the mutant is stale"
+elif [ "$(sed -n '/^rebuild_extension() {/,/^}/p' "$m" | grep -cx '[[:space:]]*rebuild_notice_clear')" -lt 3 ]; then
+    ok "mutant 'no-clear' is caught (a success exit that keeps the note)"
+else
+    bad "mutant 'no-clear' is caught" "the count still reached 3"
 fi
 
 printf 'rime-sysext-boot-wait: %d passed, %d failed\n' "$pass" "$fail"

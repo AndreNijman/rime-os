@@ -2327,7 +2327,7 @@ jobs:
       # engine waits for the network itself only when it has to download.
       # And a rebuild that cannot happen (offline, or refused) must not hold
       # the desktop: it ends at once, non-zero, with a note the session turns
-      # into a notice. Three broken engines are run and must be caught.
+      # into a notice. Broken engines are run and must be caught.
       - name: Run boot-time network-wait and refusal assertions for the sysext rebuild unit
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-sysext-boot-wait.sh
