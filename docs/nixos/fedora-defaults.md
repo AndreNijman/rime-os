@@ -97,8 +97,9 @@ wave-1 key `hostlayer`), not to the NixOS defaults:
 - `/etc/sysctl.d/90-desktop-writeback.conf` (`vm.dirty_bytes` 1 GiB, `vm.dirty_background_bytes` 256 MiB)
 
 `vm.swappiness = 100` and `vm.page-cluster = 0` on katana appear in no `sysctl.d` file there: they are the CachyOS
-kernel tree's own defaults (`mm/vmscan.c`: `int vm_swappiness = 100;`, `mm/swap.c`: `page_cluster = 0;`, read from
-`linux-cachyos-7.2.9-2.tar.gz`, the source `nix/pkgs/kernel` builds). A NixOS machine on the Rime kernel gets the same
+kernel tree's own defaults (`mm/vmscan.c`: `int vm_swappiness = 100;` under `#ifdef CONFIG_CACHY`, `mm/swap.c`
+`swap_setup()`: `page_cluster = 0;`, read from `linux-cachyos-7.2.9-2.tar.gz`, the source `nix/pkgs/kernel` builds;
+`nix/pkgs/kernel/config:35` has `CONFIG_CACHY=y`). A NixOS machine on the Rime kernel gets the same
 values; the `fedora-parity` VM runs nixpkgs' stock kernel and prints `vm.swappiness = 60`, which is that kernel's default.
 
 ## Handover
@@ -109,3 +110,6 @@ values; the `fedora-parity` VM runs nixpkgs' stock kernel and prints `vm.swappin
   hook must carry `boot.initrd.prepend` (the microcode cpio) into the BLS / `custom.cfg` entry.
 - The connectivity check endpoint (`21-rime-connectivity.conf`) is Andre's call.
 - The installer (D9) writes the timezone.
+- `/etc/default/useradd` is set with `mkForce` (fedora-parity.nix) so `useradd` and the installer give new accounts
+  zsh while declared accounts keep their declared shell. A host that sets `users.defaultUserShell` changes declared
+  accounts only; `useradd` keeps reading this file. Change it here (or turn `rime.fedoraParity.enable` off) instead.
