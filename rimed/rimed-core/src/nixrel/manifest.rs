@@ -81,6 +81,10 @@ pub struct Manifest {
     pub issued: u64,
     #[serde(default)]
     pub previous: Option<String>,
+    /// The oldest release this one may be installed over (an optional field a publisher sets when a state
+    /// migration needs an intermediate release). A machine older than this refuses the step.
+    #[serde(default)]
+    pub min_from: Option<String>,
     pub system: String,
     pub store_dir: String,
     #[serde(default = "no_source")]
@@ -189,6 +193,11 @@ impl Manifest {
         }
         if ReleaseId::parse(&self.release).is_none() {
             return Err(format!("{:?} is not a release ID", self.release));
+        }
+        if let Some(f) = &self.min_from {
+            if ReleaseId::parse(f).is_none() {
+                return Err(format!("min_from {f:?} is not a release ID"));
+            }
         }
         let n = self.paths.len();
         let mut seen = BTreeSet::new();
@@ -426,7 +435,8 @@ pub(crate) mod tests {
 
     #[test]
     fn every_validation_rule_refuses() {
-        let cases: Vec<(&str, Box<dyn Fn(&mut serde_json::Value)>)> = vec![
+        type Mutate = Box<dyn Fn(&mut serde_json::Value)>;
+        let cases: Vec<(&str, Mutate)> = vec![
             ("kind", Box::new(|v| v["kind"] = "rime-bootc-release".into())),
             ("aarch64", Box::new(|v| v["system"] = "aarch64-linux".into())),
             ("store", Box::new(|v| v["store_dir"] = "/gnu/store".into())),
@@ -437,6 +447,7 @@ pub(crate) mod tests {
             ("zero size", Box::new(|v| v["paths"][1]["file_size"] = 0.into())),
             ("outside the table", Box::new(|v| v["paths"][3]["references"] = serde_json::json!([9]))),
             ("no cache keys", Box::new(|v| v["cache"]["keys"] = serde_json::json!([]))),
+            ("min_from", Box::new(|v| v["min_from"] = "last tuesday".into())),
             ("cache key", Box::new(|v| v["cache"]["keys"] = serde_json::json!(["rime-cache-1:short"]))),
             // initrd dropped from the toplevel's references: the boot path is no longer in its closure.
             ("closure", Box::new(|v| v["paths"][0]["references"] = serde_json::json!([1, 3]))),

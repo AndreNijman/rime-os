@@ -11,8 +11,10 @@
 //! * [`activation`]: the boot-or-switch rule (§9) and the dry-activate parser.
 //! * [`gc`]: which system generations `rime gc` keeps (§11.3).
 //! * [`release`]: release IDs (`YYYY.MM.DD[.N]`) and their order.
+//! * [`channel`]: the Nix channel document and its fail-closed decision.
 
 pub mod activation;
+pub mod channel;
 pub mod classify;
 pub mod gc;
 pub mod hash;

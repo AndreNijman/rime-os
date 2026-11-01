@@ -696,7 +696,8 @@ pub fn fetch(roots: &Roots, repo: &str, tag: &str) -> Result<Fetched, Artifact> 
 
     let tmp = TempDir::new(tag).map_err(Artifact::Unavailable)?;
     let out = Command::new(rime_paths::SKOPEO)
-        .args(["copy", "--quiet", &format!("docker://{repo}:{tag}")])
+        // A digest is addressed with `@` (the NixOS client reads release manifests by digest).
+        .args(["copy", "--quiet", &if tag.starts_with("sha256:") { format!("docker://{repo}@{tag}") } else { format!("docker://{repo}:{tag}") }])
         .arg(format!("dir:{}", tmp.path().display()))
         .output()
         .map_err(|e| Artifact::Unavailable(format!("could not run skopeo: {e}")))?;
@@ -933,6 +934,10 @@ pub struct Expect {
     /// Every identity accepted; a signature from any one of them verifies.
     pub signers: Vec<String>,
     pub issuer: String,
+    /// The CA the certificate must chain to; `None` = the pinned [`FULCIO_ROOT`]. The NixOS client sets it from
+    /// its root-owned configuration (`rime.update.fulcioRoot`, a store path), which is how a VM test verifies
+    /// through this same code against a throwaway CA.
+    pub fulcio_root: Option<String>,
 }
 
 fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Expect) -> Verdict {
@@ -995,7 +1000,7 @@ fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Exp
         Ok(t) => t,
         Err(e) => return Verdict::Failed(format!("the certificate's start date is unreadable: {e}")),
     };
-    let root_pem = match roots.read(FULCIO_ROOT) {
+    let root_pem = match roots.read(want.fulcio_root.as_deref().unwrap_or(FULCIO_ROOT)) {
         Ok(s) => s,
         Err(e) => {
             return Verdict::CouldNotRun(format!(
@@ -1089,7 +1094,7 @@ pub fn expectations(roots: &Roots) -> Expect {
         Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
         _ => crate::trust::EXPECTED_ISSUER.to_string(),
     };
-    Expect { signers, issuer }
+    Expect { signers, issuer, fulcio_root: None }
 }
 
 /// Who this machine will accept a ROLLOUT DOCUMENT from.
@@ -1105,7 +1110,7 @@ pub fn rollout_expectations(roots: &Roots) -> Expect {
         Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
         _ => crate::trust::EXPECTED_ISSUER.to_string(),
     };
-    Expect { signers: crate::trust::expected_rollout_signers(roots), issuer }
+    Expect { signers: crate::trust::expected_rollout_signers(roots), issuer, fulcio_root: None }
 }
 
 /// One layer's cosign annotations.
