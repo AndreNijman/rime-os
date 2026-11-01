@@ -62,10 +62,20 @@ let
   # (SYSTEM_EXTRA_CERTIFICATE), so module trust follows from the image (D7). Then, when the hosted signing job
   # has produced one, its detached Authenticode signature is attached.
   kernelTarget = kernel.target;
-  imageWithCerts = kp.rebuildImage {
-    target = kernelTarget;
-    inherit (config.system) modulesTree;
-  };
+  #
+  # CONFIG_X86_DECODER_SELFTEST=y (the CachyOS config, as on bootc) makes `make bzImage` run the instruction
+  # decoder self-test (arch/x86/tools/insn_decoder_test), whose sources the kernel's dev output does not keep,
+  # so nixpkgs' rebuildImage fails on it. The test already ran on this vmlinux in the kernel build ("Decoded
+  # and checked N instructions"); re-linking the image after inserting certificates changes no code, so it is
+  # skipped here by overriding the variable on make's command line.
+  imageWithCerts =
+    (kp.rebuildImage {
+      target = kernelTarget;
+      inherit (config.system) modulesTree;
+    }).overrideAttrs
+      (old: {
+        buildFlags = old.buildFlags ++ [ "CONFIG_X86_DECODER_SELFTEST=" ];
+      });
   finalImage =
     if cfg.signing.imageSignature == null then
       imageWithCerts
@@ -87,8 +97,9 @@ in
       default = cfg.enable;
       defaultText = lib.literalExpression "config.rime.kernel.enable";
       description = ''
-        NVIDIA 615.78.08 with the open kernel modules (Turing and newer; pre-Turing cards are only warned
-        about, as on bootc). Eager module loading is gated on an NVIDIA display controller being present.
+        NVIDIA 615.78.08 with the open kernel modules (Turing and newer). Eager module loading is gated on an
+        NVIDIA display controller being present. Pre-Turing cards get no driver, as on bootc; the warning about
+        them comes from rimed (`rime doctor`), not from this module.
       '';
     };
 
@@ -210,6 +221,16 @@ in
           enable = lib.mkDefault true;
           schedsPackages = lib.mkDefault [ pkgs.rime.rime-scx ];
         };
+        # nixpkgs writes /etc/scx_loader.toml from `config`; with nothing set that file is EMPTY and scx_loader
+        # 1.1.3 refuses to start ("The config file is empty!", seen in kernel-vm). bootc ships no /etc file, so
+        # scx_loader reads the package's own config.toml (everything commented out: no default scheduler). Do
+        # the same whenever no setting is given. Priority 90: beats the nixpkgs module, loses to mkForce.
+        environment.etc."scx_loader.toml".source = lib.mkIf (
+          lib.filterAttrsRecursive (_: v: v != null) config.services.scx-loader.config == { }
+        ) (lib.mkOverride 90 "${config.services.scx-loader.package}/share/scx_loader/config.toml");
+        # bootc: scx_loader is not started at boot; D-Bus activates it on the first scxctl call (rimed's game
+        # mode), so a machine that never games runs no scheduler daemon. nixpkgs sets wantedBy multi-user.
+        systemd.services.scx_loader.wantedBy = lib.mkOverride 90 [ ];
       })
     ]
   );

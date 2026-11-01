@@ -91,6 +91,9 @@ in
       {
         imports = [ self.nixosModules.default ];
         rime.kernel.enable = true;
+        # qemu-vm.nix forces videoDrivers to [ "modesetting" ] with mkVMOverride (priority 10), which would
+        # silently drop the NVIDIA stack from the test VM. Win over it so the VM carries what hardware gets.
+        services.xserver.videoDrivers = lib.mkOverride 9 [ "nvidia" ];
         virtualisation = {
           cores = 4;
           memorySize = 4096;
@@ -98,8 +101,6 @@ in
       };
 
     testScript = ''
-      import subprocess, tempfile
-
       machine.wait_for_unit("multi-user.target")
 
       with subtest("the booted kernel is Rime's"):
@@ -119,7 +120,10 @@ in
           for m in ["ntsync", "msi_wmi_platform", "hid_xpadneo", "xone_dongle"]:
               taint = machine.succeed(f"cat /sys/module/{m}/taint").strip()
               assert "E" not in taint, f"{m} loaded UNSIGNED/unverified (taint {taint!r})"
-              print(f"{m}: taint {taint!r}, signer {machine.succeed(f'modinfo -F signer {m}').strip()!r}")
+              sig = machine.succeed(f"modinfo -F sig_id {m}").strip()
+              assert sig, f"{m} carries no module signature"
+              # Signed + loaded without the E taint = the kernel verified it against its built-in keyring.
+              print(f"{m}: taint {taint!r}, sig_id {sig!r}")
           machine.fail("journalctl -k --no-pager --grep 'module verification failed'")
 
       with subtest("out-of-tree modules are built for this kernel"):
@@ -132,7 +136,10 @@ in
           for m in ["nvidia", "nvidia_drm", "nvidia_modeset", "nvidia_uvm", "msi-ec", "xone_dongle", "hid_xpadneo"]:
               v = machine.succeed(f"modinfo -F vermagic {m}").split()[0]
               assert v == "${rime.rime-kernel.modDirVersion}", f"{m} built for {v}"
-              print(f"{m}: signer {machine.succeed(f'modinfo -F signer {m}').strip()!r}")
+              # kmodigest signatures carry no signer name; sig_id/sig_hashalgo prove a signature is appended.
+              sig = machine.succeed(f"modinfo -F sig_id {m}").strip()
+              assert sig, f"{m} carries no module signature"
+              print(f"{m}: sig_id {sig!r}, hash {machine.succeed(f'modinfo -F sig_hashalgo {m}').strip()!r}")
 
       with subtest("NVIDIA eager loading is gated on hardware"):
           machine.fail("lsmod | grep -w '^nvidia'")
@@ -140,8 +147,11 @@ in
           machine.fail("lsmod | grep -w '^nvidia_uvm'")
 
       with subtest("scx_loader drives a scheduler over D-Bus"):
-          machine.wait_for_unit("scx_loader.service")
-          machine.succeed("scxctl start --sched lavd")
+          # Not started at boot (as on bootc): the scxctl call D-Bus-activates it.
+          machine.fail("systemctl is-active scx_loader.service")
+          # The name rimed passes (syswriter.rs scx_load: `scxctl start -s scx_lavd`).
+          machine.succeed("scxctl start -s scx_lavd")
+          machine.succeed("systemctl is-active scx_loader.service")
           machine.wait_until_succeeds("grep -x enabled /sys/kernel/sched_ext/state", timeout=30)
           print("scx_loader ops: " + machine.succeed("cat /sys/kernel/sched_ext/root/ops"))
           machine.succeed("cat /sys/kernel/sched_ext/root/ops | grep lavd")
@@ -150,17 +160,14 @@ in
 
       with subtest("#127: every shipped scheduler attaches on this kernel, kill -9 falls back"):
           machine.succeed("systemctl stop scx_loader.service")
-          rc, out = machine.execute("bash ${scxSelftest} 2>&1", timeout=1800)
+          rc, out = machine.execute("bash ${scxSelftest} > /tmp/scx-selftest.log 2>&1; cat /tmp/scx-selftest.log", timeout=1800)
           print(out)
-          with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
-              f.write(out)
-              log = f.name
-          r = subprocess.run(
-              ["bash", "${parser}", "--parse-only", log, "--expect", "${schedulersTxt}"],
-              capture_output=True, text=True, env={"PATH": "${parserPath}"},
+          # bootc's own verdict parser, run on the guest's log (bash + coreutils/grep/sed are in the guest).
+          rc, verdict = machine.execute(
+              "PATH=${parserPath} bash ${parser} --parse-only /tmp/scx-selftest.log --expect ${schedulersTxt}"
           )
-          print(r.stdout + r.stderr)
-          assert r.returncode == 0, "sched-ext selftest FAILED"
+          print(verdict)
+          assert rc == 0, "sched-ext selftest FAILED"
     '';
   };
 }

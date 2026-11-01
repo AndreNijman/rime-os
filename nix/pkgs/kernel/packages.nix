@@ -25,6 +25,11 @@ let
         name = "msi-ec-${msiEcCommit}.tar.gz";
       };
       makeFlags = (old.makeFlags or [ ]) ++ [ "INSTALL_MOD_DIR=updates" ];
+      # d7fbbd88's Makefile starts `_SRC := $(if $(src),$(src),.)` (for akmod). stdenv exports $src = the
+      # tarball, so make would include <tarball>/Makefile.vars. Unset it for the build and install phases.
+      preBuild = (old.preBuild or "") + ''
+        unset src
+      '';
     });
 
     # The driver Rime pins, by version: a nixpkgs bump that moves new_feature off 615.78.08 fails evaluation

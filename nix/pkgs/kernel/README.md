@@ -67,25 +67,53 @@ toolchain: `PAHOLE_VERSION` 131 → 132, the Rust and clang capability probes (`
 config environment, and the IMA sub-options that become visible once `IMA=y`. Upstream config: 12,698 lines;
 `diff` of the `CONFIG_*=` lines: 77 lines.
 
+## Out-of-tree modules and scx
+
+- NVIDIA 615.78.08 open modules (`nvidiaPackages.new_feature`, version asserted), msi-ec d7fbbd88 (bootc's
+  tarball sha256, installed to `updates/`; its Makefile reads `$(src)`, so the build unsets stdenv's `$src`),
+  xone 0.5.8 + xpad-noone, xpadneo 0.10.5: all built against this kernel (`kernel-vm` checks each one's
+  vermagic and signature).
+- NVIDIA eager loading (nixpkgs puts `nvidia_uvm` in `boot.kernelModules`) goes through a modprobe `install`
+  gate that loads only when an NVIDIA display controller exists, so modules-load does not fail elsewhere.
+- scx: `pkgs.rime.rime-scx` = the 16 schedulers bootc ships (from nixpkgs scx 1.1.4) + scxtop, under nixpkgs'
+  `services.scx-loader`. As on bootc, scx_loader is not started at boot (D-Bus activated by `scxctl`) and reads
+  the package's own config.toml (no default scheduler). nixpkgs would write an EMPTY `/etc/scx_loader.toml`,
+  which scx_loader 1.1.3 refuses ("The config file is empty!").
+- `kernel-vm` runs bootc's own `tests/kernel/scx-selftest/init.sh` (adapted to a booted system) and parses it
+  with bootc's `run-scx-selftest.sh --parse-only`: 16 schedulers attach under load and detach, and a SIGKILLed
+  scheduler hands a busy task back to the kernel class (`busy_ext_enabled_before=1 after=0`).
+
 ## Module signing (D7): what is built, what is left
 
 Built and tested (`kernel-vm`):
-- Every in-tree and out-of-tree module carries a kmodigest signature (no key anywhere: the "key" is derived from
-  the module itself).
+- Every in-tree and out-of-tree module carries a kmodigest signature (`modinfo -F sig_id` = `PKCS#7`; there is
+  no signing key: kmodigest derives a one-module certificate from each module).
 - `rime.kernel.signing.insertModuleCertificates` (default on) boots `linuxPackages.rebuildImage`, which inserts
-  `modules.cer` of the system's whole module tree into the image's built-in keyring. Modules then verify: the VM
-  test loads in-tree (`ntsync`, `msi_wmi_platform`) and out-of-tree (`hid_xpadneo`, `xone_dongle`) modules and
-  requires no `E` (unsigned) taint and no "module verification failed" line.
+  `modules.cer` of the system's whole module tree into the image's built-in keyring (1,691,300 of 3,120,000
+  reserved bytes used). `kernel-vm` loads in-tree (`ntsync`, `msi_wmi_platform`) and out-of-tree
+  (`hid_xpadneo`, `xone_dongle`) modules and requires no `E` taint. Negative control: the same test with
+  `insertModuleCertificates = false` fails ("ntsync loaded UNSIGNED/unverified (taint 'E')"), so the check
+  can fail and the certificates are what make modules verify.
+- rebuildImage re-runs `make bzImage`, which with the CachyOS config's `CONFIG_X86_DECODER_SELFTEST=y` would
+  run the decoder self-test whose sources the dev output does not keep. The self-test already passed in the
+  kernel build ("Decoded and checked 7611306 instructions"); the re-link skips it (`nix/modules/kernel.nix`).
 - Enforcement stays off (decision A12, = bootc).
 
 The hook, not yet fed:
 - `system.build.rimeKernelImage` is the unsigned image (certificates inserted) that must be MOK-signed.
 - `rime.kernel.signing.imageSignature` takes a **detached** PE signature of exactly that image; the system then
-  boots `sbattach --attach <sig> <image>` (built inside a derivation, `sbverify --list` checked).
+  boots `sbattach --attach <sig> <image>` (built inside a derivation, `sbverify --list` checked). Not exercised
+  by a test: there is no signature to feed it yet.
 - TODO(handover): the hosted signing job. In CI, after the release closure is built: build
   `nixosConfigurations.<host>.config.system.build.rimeKernelImage`, `sbsign --key <MOK key> --cert <MOK cert>
-  --detached --output bzImage.sig` with the key from the CI secret (`APEX_SB_KEY_B64`/`APEX_SB_CRT_B64`, names
-  unchanged), commit/publish the `.sig` and set `imageSignature` to it. The key never enters the Nix store, a
-  binary cache or a user machine; only the signature does. The image depends on the system's module tree, so the
-  signature is per host configuration and the job runs per release. Which boot chain consumes the signed image
-  (shim+MOK or Lanzaboote) is the boot worker's decision (D3).
+  --detached --output bzImage.sig` with the key from the CI secret (`APEX_SB_*`, names unchanged), publish
+  the `.sig` and set `imageSignature` to it. The key never enters the Nix store, a binary cache or a user
+  machine; only the signature does. The image depends on the system's module tree, so the signature is per
+  host configuration and the job runs per release. Which boot chain consumes the signed image (shim+MOK or
+  Lanzaboote) is the boot worker's decision (D3).
+
+## Known differences at boot
+
+- NixOS passes `lsm=landlock,yama,bpf` on the kernel command line (its `security.lsm` default), which overrides
+  `CONFIG_LSM`: lockdown and integrity (IMA) are not active at boot, unlike bootc. That option belongs to the
+  security module; not changed here.
