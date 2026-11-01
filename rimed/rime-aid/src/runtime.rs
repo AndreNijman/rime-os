@@ -45,11 +45,25 @@
 //! third, and that one does remove the ability to create the socket at all.
 //!
 //! `bubblewrap` is the same security dependency the agent runtime uses, present
-//! because flatpak pulls it in and asserted in `Containerfile.base`. When it is
-//! genuinely absent the backend runs unconfined and the daemon **says so** in
-//! `rime ai status` — a silent downgrade is what `AGENTS.md` forbids, and
-//! refusing to serve at all would be worse than a stated weaker posture for a
-//! process that is still a per-user, unprivileged child.
+//! because flatpak pulls it in and asserted in `Containerfile.base`.
+//!
+//! ── There is no unconfined mode ─────────────────────────────────────────────
+//!
+//! This daemon used to run the backend UNCONFINED when `/usr/bin/bwrap` was
+//! missing, and say so in `rime ai status`. That was a fail-open path: a
+//! program that parses untrusted weights and HTTP, holding the user's prompts,
+//! would quietly have had the network and the whole home directory, and the
+//! only trace was one line of status nobody asked for. It is gone, and the
+//! rule now applied is the one `AGENTS.md` sets for the agent sandbox: a
+//! process that cannot be confined as required must not start.
+//!
+//! So confinement is a value, not a flag. [`require_confinement`] is the only
+//! way to obtain a [`Confinement`], it succeeds only when `bwrap` is present,
+//! executable, and actually builds the sandbox's namespaces (a probe run with
+//! the same flags a backend gets), and [`start`] cannot be called without one.
+//! The daemon asks for it before it creates a socket and refuses to start
+//! without it; there is no code path left that launches a backend without
+//! `bwrap` in front of it.
 
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -77,11 +91,122 @@ const READY_POLL: Duration = Duration::from_millis(100);
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
 /// `bubblewrap`. The same path the agent runtime asserts in `Containerfile.base`.
+///
+/// A fixed path, never a `PATH` lookup: this is the security boundary, and a
+/// `PATH`-resolved name would let a shadowing binary decide what "confined"
+/// means. Nothing (no environment variable, no setting) can change it.
 const BWRAP: &str = "/usr/bin/bwrap";
 
-/// Whether the backend will be confined.
-pub fn confinement_available() -> bool {
-    Path::new(BWRAP).is_file()
+/// How long the startup probe may take. Building the namespaces and running
+/// `true` takes milliseconds; the bound only stops a wedged `bwrap` from
+/// wedging the daemon's start with it.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Proof that the backend sandbox can be applied on this machine.
+///
+/// The field is private, so outside this module the only way to get one is
+/// [`require_confinement`], and [`start`] takes one by reference: no proof, no
+/// launch. That is the compiler holding the line a `confine: bool` parameter
+/// used to leave to every caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Confinement {
+    bwrap: PathBuf,
+}
+
+/// Check that the backend sandbox can be applied, or say exactly why not.
+///
+/// Called by the daemon before it creates a socket. An `Err` here means the
+/// daemon refuses to start; there is no fallback.
+pub fn require_confinement() -> Result<Confinement> {
+    confinement_at(Path::new(BWRAP))
+}
+
+/// [`require_confinement`] against a given `bwrap`, so the refusals can be
+/// tested without touching `/usr/bin`. Private on purpose: production code
+/// cannot choose a different binary.
+fn confinement_at(bwrap: &Path) -> Result<Confinement> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let refuse = |why: String| -> anyhow::Error {
+        anyhow::anyhow!(
+            "refusing to start: the sandbox local models run in cannot be applied ({why}). \
+             rime-aid never runs a model unsandboxed. It needs bubblewrap ({}), which ships \
+             with Rime OS, and a kernel that lets it create user namespaces",
+            bwrap.display()
+        )
+    };
+
+    let meta = match std::fs::metadata(bwrap) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(refuse(format!("{} is not installed", bwrap.display())))
+        }
+        Err(e) => return Err(refuse(format!("cannot inspect {}: {e}", bwrap.display()))),
+    };
+    if !meta.is_file() {
+        return Err(refuse(format!("{} is not a regular file", bwrap.display())));
+    }
+    if meta.permissions().mode() & 0o111 == 0 {
+        return Err(refuse(format!("{} is not executable", bwrap.display())));
+    }
+
+    // Present is not the same as working. A kernel or policy that refuses
+    // unprivileged user namespaces leaves a perfectly good `bwrap` that cannot
+    // build a sandbox, so it is RUN, with the namespace flags a backend gets.
+    let confinement = Confinement { bwrap: bwrap.to_path_buf() };
+    probe(&confinement).map_err(|e| refuse(format!("{e:#}")))?;
+    Ok(confinement)
+}
+
+/// Run `true` inside the sandbox a backend would get, minus the backend's own
+/// paths and devices.
+fn probe(c: &Confinement) -> Result<()> {
+    let mut argv = sandbox_argv(c);
+    argv.push("--".into());
+    argv.push("/usr/bin/true".into());
+    let (program, args) = argv.split_first().context("an empty probe argv")?;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/usr/sbin")
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("cannot run {}", c.bwrap.display()))?;
+
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().context("waiting for the sandbox probe")? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "{} did not finish building a test sandbox within {}s",
+                c.bwrap.display(),
+                PROBE_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    if status.success() {
+        return Ok(());
+    }
+    let mut err = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        use std::io::Read;
+        let _ = pipe.read_to_string(&mut err);
+    }
+    let err = err.trim();
+    bail!(
+        "{} could not build a test sandbox ({status}){}",
+        c.bwrap.display(),
+        if err.is_empty() { String::new() } else { format!(": {err}") }
+    )
 }
 
 /// Paths the confined backend must be able to see.
@@ -135,8 +260,50 @@ pub fn device_nodes(backend: Backend) -> Vec<PathBuf> {
 /// is not arbitrary: `--dev /dev` replaces the device tree, so the `--dev-bind`
 /// entries have to come after it or they are thrown away — a mistake whose
 /// symptom is "CUDA cannot find a device" three layers from its cause.
-pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
-    let mut a: Vec<String> = vec![BWRAP.to_string()];
+pub fn confine_argv(c: &Confinement, plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
+    let mut a = sandbox_argv(c);
+
+    // A runtime that is not under /usr needs its own directory bound, or the
+    // sandbox cannot see the program it is being asked to exec. That is the
+    // case for a build tree, and for the shell suite's fake backend; a
+    // system-extension install lands at /usr/bin and is already covered.
+    //
+    // READ-ONLY, and that is the point rather than an oversight: this must not
+    // become a way to hand the backend a writable path. The directory is bound
+    // rather than the file because a program's loader may need siblings next to
+    // it — a build tree's shared objects, a script's interpreter shim.
+    if let Some(dir) = program_dir_to_bind(&plan.program) {
+        a.push("--ro-bind".into());
+        a.push(dir.clone());
+        a.push(dir);
+    }
+
+    // The two paths that are this backend's job.
+    a.push("--ro-bind".into());
+    a.push(exposed.model.display().to_string());
+    a.push(exposed.model.display().to_string());
+    a.push("--bind".into());
+    a.push(exposed.socket_dir.display().to_string());
+    a.push(exposed.socket_dir.display().to_string());
+
+    // Devices, AFTER --dev.
+    for d in &exposed.devices {
+        a.push("--dev-bind".into());
+        a.push(d.display().to_string());
+        a.push(d.display().to_string());
+    }
+
+    a.push("--".into());
+    a.push(plan.program.clone());
+    a.extend(plan.argv.iter().cloned());
+    a
+}
+
+/// The sandbox itself: `bwrap`, the namespaces, the read-only system and the
+/// fresh `/proc`, `/dev` and `/tmp`. Shared by every backend launch and by the
+/// startup probe, so the probe tests the namespaces a backend really gets.
+fn sandbox_argv(c: &Confinement) -> Vec<String> {
+    let mut a: Vec<String> = vec![c.bwrap.display().to_string()];
 
     a.extend(
         [
@@ -176,40 +343,6 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
             .iter()
             .map(|s| s.to_string()),
     );
-
-    // A runtime that is not under /usr needs its own directory bound, or the
-    // sandbox cannot see the program it is being asked to exec. That is the
-    // case for a build tree, and for the shell suite's fake backend; a
-    // system-extension install lands at /usr/bin and is already covered.
-    //
-    // READ-ONLY, and that is the point rather than an oversight: this must not
-    // become a way to hand the backend a writable path. The directory is bound
-    // rather than the file because a program's loader may need siblings next to
-    // it — a build tree's shared objects, a script's interpreter shim.
-    if let Some(dir) = program_dir_to_bind(&plan.program) {
-        a.push("--ro-bind".into());
-        a.push(dir.clone());
-        a.push(dir);
-    }
-
-    // The two paths that are this backend's job.
-    a.push("--ro-bind".into());
-    a.push(exposed.model.display().to_string());
-    a.push(exposed.model.display().to_string());
-    a.push("--bind".into());
-    a.push(exposed.socket_dir.display().to_string());
-    a.push(exposed.socket_dir.display().to_string());
-
-    // Devices, AFTER --dev.
-    for d in &exposed.devices {
-        a.push("--dev-bind".into());
-        a.push(d.display().to_string());
-        a.push(d.display().to_string());
-    }
-
-    a.push("--".into());
-    a.push(plan.program.clone());
-    a.extend(plan.argv.iter().cloned());
     a
 }
 
@@ -255,8 +388,6 @@ pub struct Running {
     pub model: String,
     /// The socket it listens on.
     pub socket: PathBuf,
-    /// Whether it is confined.
-    pub confined: bool,
     /// The plan that started it, for `rime ai status`.
     pub plan: LaunchPlan,
     child: Child,
@@ -292,22 +423,19 @@ impl Running {
 ///
 /// The socket file is removed first: a path left by a previous backend cannot
 /// be bound over, and the failure reads as "the runtime will not start".
+///
+/// Always under `bwrap`: `confinement` is the proof that it works, and there is
+/// no argument that asks for anything else.
 pub fn start(
+    confinement: &Confinement,
     plan: &LaunchPlan,
     model: &str,
     socket: &Path,
     exposed: &Exposed<'_>,
-    confine: bool,
 ) -> Result<Running> {
     let _ = std::fs::remove_file(socket);
 
-    let argv: Vec<String> = if confine {
-        confine_argv(plan, exposed)
-    } else {
-        let mut a = vec![plan.program.clone()];
-        a.extend(plan.argv.iter().cloned());
-        a
-    };
+    let argv = confine_argv(confinement, plan, exposed);
     let (program, args) = argv
         .split_first()
         .context("a launch plan with no program")?;
@@ -382,7 +510,6 @@ pub fn start(
     let mut running = Running {
         model: model.to_string(),
         socket: socket.to_path_buf(),
-        confined: confine,
         plan: plan.clone(),
         child,
         pgid,
@@ -528,12 +655,37 @@ mod tests {
         Exposed { model, socket_dir: dir, devices: vec![PathBuf::from("/dev/nvidiactl")] }
     }
 
+    /// The shipped `bwrap`, for the pure argv tests. Built directly because
+    /// this module may; nothing outside it can.
+    fn shipped() -> Confinement {
+        Confinement { bwrap: PathBuf::from(BWRAP) }
+    }
+
+    /// A scratch directory unique to one test.
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "rime-aid-confine-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Write `body` as a shell script with the given mode.
+    fn script(path: &Path, body: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
     #[test]
     fn the_confined_backend_has_no_network() {
         // THE assertion. Without --unshare-net the "no port another account can
         // open" claim rests entirely on the planner having got --host right.
         let plan = a_plan();
         let argv = confine_argv(
+            &shipped(),
             &plan,
             &exposed(Path::new("/var/lib/rime/ai/models/blobs/sha256-aa"), Path::new("/run/x")),
         );
@@ -545,7 +697,7 @@ mod tests {
         // `--dev /dev` replaces the device tree. A --dev-bind before it is
         // silently undone, and the symptom is "CUDA found no device".
         let plan = a_plan();
-        let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        let argv = confine_argv(&shipped(), &plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
         let dev = argv.iter().position(|a| a == "--dev").expect("--dev is present");
         let bind = argv
             .iter()
@@ -557,7 +709,7 @@ mod tests {
     #[test]
     fn the_model_is_bound_read_only_and_the_socket_directory_is_not() {
         let plan = a_plan();
-        let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        let argv = confine_argv(&shipped(), &plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
         // Exact triples, not "contains": a --bind where --ro-bind belongs would
         // make the store writable by the inference process, which is the thing
         // the whole store design refuses.
@@ -578,7 +730,7 @@ mod tests {
     #[test]
     fn the_system_is_read_only_and_home_is_never_bound() {
         let plan = a_plan();
-        let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        let argv = confine_argv(&shipped(), &plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
         assert!(argv.windows(3).any(|w| w == ["--ro-bind", "/usr", "/usr"]), "{argv:?}");
         assert!(argv.windows(3).any(|w| w == ["--ro-bind", "/etc", "/etc"]), "{argv:?}");
         // The backend has no business in the user's home. It gets one model
@@ -600,7 +752,7 @@ mod tests {
     #[test]
     fn the_program_and_its_arguments_come_after_a_double_dash() {
         let plan = a_plan();
-        let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        let argv = confine_argv(&shipped(), &plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
         let dd = argv.iter().position(|a| a == "--").expect("--");
         assert_eq!(argv[dd + 1], plan.program);
         assert_eq!(&argv[dd + 2..], &plan.argv[..]);
@@ -636,7 +788,7 @@ mod tests {
             listen: Listen::Unix(PathBuf::from("/run/x/b.sock")),
             notes: vec![],
         };
-        let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        let argv = confine_argv(&shipped(), &plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
         assert!(
             argv.windows(3)
                 .any(|w| w == ["--ro-bind", "/opt/llama/bin", "/opt/llama/bin"]),
@@ -671,12 +823,134 @@ mod tests {
     fn the_confinement_argv_is_pure() {
         let plan = a_plan();
         let e = exposed(Path::new("/m.gguf"), Path::new("/run/x"));
-        assert_eq!(confine_argv(&plan, &e), confine_argv(&plan, &e));
+        assert_eq!(confine_argv(&shipped(), &plan, &e), confine_argv(&shipped(), &plan, &e));
     }
 
 
 
 
+
+    // ── fail closed ─────────────────────────────────────────────────────────
+    //
+    // The daemon used to run the backend UNCONFINED when bwrap was missing.
+    // These pin the replacement: no working bwrap, no Confinement, no start.
+
+    #[test]
+    fn the_shipped_bwrap_path_is_fixed_and_first() {
+        // argv[0] is what gets exec'd. Anything other than the fixed bwrap
+        // there means the backend is not inside the sandbox at all.
+        assert_eq!(BWRAP, "/usr/bin/bwrap");
+        let plan = a_plan();
+        let argv = confine_argv(&shipped(), &plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        assert_eq!(argv[0], BWRAP, "{argv:?}");
+        // And the backend is only ever what bwrap runs, after `--`.
+        let dd = argv.iter().position(|a| a == "--").expect("--");
+        assert!(!argv[..dd].contains(&plan.program), "{argv:?}");
+    }
+
+    #[test]
+    fn a_missing_bwrap_refuses_to_start() {
+        let d = scratch("missing");
+        let err = confinement_at(&d.join("bwrap")).expect_err("a missing bwrap was accepted");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("refusing to start"), "{msg}");
+        assert!(msg.contains("not installed"), "{msg}");
+        assert!(msg.contains("never runs a model unsandboxed"), "{msg}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_bwrap_that_is_not_executable_refuses_to_start() {
+        // What a bind-mounted empty file, a half-written package or a stray
+        // chmod leaves. `is_file()` alone said yes to this.
+        let d = scratch("noexec");
+        let b = d.join("bwrap");
+        script(&b, "exit 0", 0o644);
+        let msg = format!("{:#}", confinement_at(&b).expect_err("accepted a 0644 bwrap"));
+        assert!(msg.contains("not executable"), "{msg}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_directory_where_bwrap_should_be_refuses_to_start() {
+        let d = scratch("dir");
+        let b = d.join("bwrap");
+        std::fs::create_dir(&b).unwrap();
+        let msg = format!("{:#}", confinement_at(&b).expect_err("accepted a directory"));
+        assert!(msg.contains("not a regular file"), "{msg}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_bwrap_that_cannot_build_the_sandbox_refuses_to_start() {
+        // Present and executable is not working: a kernel that refuses
+        // unprivileged user namespaces leaves exactly this. bwrap's own reason
+        // must reach the message, because it is the actionable part.
+        let d = scratch("broken");
+        let b = d.join("bwrap");
+        script(&b, "echo 'bwrap: No permissions to create new namespace' >&2; exit 1", 0o755);
+        let msg = format!("{:#}", confinement_at(&b).expect_err("accepted a broken bwrap"));
+        assert!(msg.contains("could not build a test sandbox"), "{msg}");
+        assert!(msg.contains("No permissions to create new namespace"), "{msg}");
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn the_probe_builds_the_same_namespaces_a_backend_gets() {
+        // The probe is only evidence if it asks for what a launch asks for. A
+        // fake bwrap records its arguments and succeeds.
+        let d = scratch("probe");
+        let b = d.join("bwrap");
+        let log = d.join("argv");
+        script(&b, &format!("printf '%s\\n' \"$@\" > '{}'; exit 0", log.display()), 0o755);
+        let c = confinement_at(&b).expect("a working bwrap is accepted");
+        assert_eq!(c, Confinement { bwrap: b.clone() });
+        let probed: Vec<String> =
+            std::fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
+        let launch = confine_argv(&c, &a_plan(), &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+        let sandbox = sandbox_argv(&c);
+        assert_eq!(&probed[..sandbox.len() - 1], &sandbox[1..], "probe argv: {probed:?}");
+        assert_eq!(&launch[..sandbox.len()], &sandbox[..]);
+        for flag in ["--unshare-net", "--unshare-pid", "--die-with-parent", "--new-session"] {
+            assert!(probed.iter().any(|a| a == flag), "probe lacks {flag}: {probed:?}");
+        }
+        assert_eq!(probed.last().map(String::as_str), Some("/usr/bin/true"));
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn start_runs_the_backend_only_through_bwrap() {
+        // End to end through `start`: the fake bwrap records that IT was run
+        // and then fails, the way a sandbox that cannot be built does. The
+        // backend writes a marker if it is ever exec'd directly. It must not
+        // be, and the failure must be reported rather than retried unconfined.
+        let d = scratch("start");
+        let b = d.join("bwrap");
+        let log = d.join("bwrap-ran");
+        let marker = d.join("backend-ran-unconfined");
+        script(&b, &format!("printf '%s\\n' \"$@\" > '{}'; exit 1", log.display()), 0o755);
+        let backend = d.join("bin/llama-server");
+        std::fs::create_dir_all(backend.parent().unwrap()).unwrap();
+        script(&backend, &format!(": > '{}'; exit 0", marker.display()), 0o755);
+
+        let plan = LaunchPlan {
+            program: backend.display().to_string(),
+            argv: vec!["--model".into(), "/m.gguf".into()],
+            env: vec![],
+            listen: Listen::Unix(d.join("b.sock")),
+            notes: vec![],
+        };
+        let c = Confinement { bwrap: b.clone() };
+        let socket = d.join("b.sock");
+        let ex = Exposed { model: Path::new("/m.gguf"), socket_dir: &d, devices: vec![] };
+        let result = start(&c, &plan, "m", &socket, &ex);
+        assert!(result.is_err(), "a backend whose sandbox failed was reported as running");
+        let ran = std::fs::read_to_string(&log).expect("bwrap was not the program started");
+        assert!(ran.lines().any(|l| l == "--unshare-net"), "{ran}");
+        assert!(ran.lines().any(|l| l == plan.program), "{ran}");
+        assert!(!marker.exists(), "the backend ran without its sandbox");
+        std::fs::remove_dir_all(&d).ok();
+    }
 
     #[test]
     fn signalling_group_zero_or_one_is_refused() {

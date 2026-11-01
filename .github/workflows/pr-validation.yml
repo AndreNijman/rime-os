@@ -1967,6 +1967,26 @@ jobs:
           test -x "$RIME_BIN"
           ./tests/test-rime-task.sh
 
+      # rime-aid fails closed: the built daemon, in a private user + mount
+      # namespace, with /usr/bin/bwrap hidden, made non-executable and replaced
+      # by one that cannot build namespaces. Each must refuse to start and leave
+      # no socket; the real bwrap (installed and unblocked at the top of this
+      # job) is the positive control. RIME_TEST_REQUIRE_BWRAP turns the suite's
+      # skip into a failure here, because a skipped sandbox check is the one
+      # that matters most. Built explicitly first for the stale-cache reason
+      # the §21 step above gives.
+      - name: rime-aid refuses to start without its sandbox
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          AID_BIN: ${{ github.workspace }}/rimed/target/debug/rime-aid
+          RIME_TEST_REQUIRE_BWRAP: "1"
+        run: |
+          set -euo pipefail
+          cargo build -p rime-aid --locked --bin rime-aid --manifest-path rimed/Cargo.toml
+          test -x "$AID_BIN"
+          ./tests/test-rime-aid-fails-closed.sh
+
       # ── LAST IN THIS JOB, DELIBERATELY ──────────────────────────────────
       # A failed step skips every step BELOW it in the same job, and this
       # repository has already been bitten by that: a known-red step placed
@@ -4651,6 +4671,7 @@ jobs:
             tests/test-rime-modes.sh tests/test-rime-plugin.sh \
             tests/test-rime-host.sh tests/test-rime-dispatch.sh \
             tests/test-rime-ai.sh tests/test-rime-env-devices-live.sh \
+            tests/test-rime-aid-fails-closed.sh \
             tests/test-rime-greet-sessions.sh \
             tests/test-rime-session-watchdog.sh \
             files/system/libexec/rime-session-watchdog \
