@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rimeos.com/schema/nix-release.v1.json",
+  "title": "Rime NixOS release manifest, schema 1 (application/vnd.rimeos.nix-release.v1+json)",
+  "description": "docs/nixos/updates-and-release.md §3.1. Shape only: the cross-field rules of §3.2 (indices in range, closed reference table, boot and components inside the toplevel's closure, unique sorted paths) are rime_nix_release.validate and the client's Manifest::validate. Unknown fields are allowed: additions do not need a new schema major.",
+  "type": "object",
+  "required": ["schema", "kind", "release", "issued", "previous", "system", "store_dir", "source", "cache", "variants", "catalogue", "paths", "batch", "delta"],
+  "properties": {
+    "schema": { "const": 1 },
+    "kind": { "const": "rime-nixos-release" },
+    "release": { "$ref": "#/$defs/release" },
+    "issued": { "type": "integer", "minimum": 0 },
+    "previous": { "oneOf": [ { "$ref": "#/$defs/release" }, { "type": "null" } ] },
+    "system": { "const": "x86_64-linux" },
+    "store_dir": { "const": "/nix/store" },
+    "source": {
+      "type": "object",
+      "required": ["rime_os", "rime_shell", "nixpkgs"],
+      "properties": {
+        "rime_os": { "$ref": "#/$defs/rev" },
+        "rime_shell": { "$ref": "#/$defs/rev" },
+        "nixpkgs": { "$ref": "#/$defs/rev" }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "required": ["url_hint", "keys"],
+      "properties": {
+        "url_hint": { "type": "string" },
+        "keys": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[A-Za-z0-9._-]+:[A-Za-z0-9+/]{43}=$" } }
+      }
+    },
+    "variants": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["toplevel", "boot", "components"],
+        "properties": {
+          "toplevel": { "$ref": "#/$defs/index" },
+          "boot": {
+            "type": "object",
+            "required": ["kernel", "initrd", "kernel_modules", "kernel_params"],
+            "properties": {
+              "kernel": { "$ref": "#/$defs/index" },
+              "initrd": { "$ref": "#/$defs/index" },
+              "kernel_modules": { "$ref": "#/$defs/index" },
+              "kernel_params": { "type": "array", "items": { "type": "string" } }
+            }
+          },
+          "components": { "type": "object", "additionalProperties": { "type": "array", "items": { "$ref": "#/$defs/index" } } }
+        }
+      }
+    },
+    "catalogue": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "version", "out", "class"],
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "out": { "$ref": "#/$defs/index" },
+          "class": { "const": 2 }
+        }
+      }
+    },
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["path", "nar_hash", "nar_size", "file_size", "references"],
+        "properties": {
+          "path": { "type": "string", "pattern": "^/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[A-Za-z0-9+._?=-]+$" },
+          "nar_hash": { "type": "string", "pattern": "^sha256-[A-Za-z0-9+/]{43}=$" },
+          "nar_size": { "type": "integer", "minimum": 1 },
+          "file_size": { "type": "integer", "minimum": 1 },
+          "references": { "type": "array", "items": { "$ref": "#/$defs/index" } }
+        }
+      }
+    },
+    "batch": {
+      "type": "object",
+      "required": ["mass_rebuild", "nixpkgs_moved", "security"],
+      "properties": {
+        "mass_rebuild": { "type": "boolean" },
+        "nixpkgs_moved": { "type": "boolean" },
+        "security": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "delta": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["from", "variant", "paths", "file_size"],
+          "properties": {
+            "from": { "$ref": "#/$defs/release" },
+            "variant": { "type": "string" },
+            "paths": { "type": "integer", "minimum": 0 },
+            "file_size": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "release": { "type": "string", "pattern": "^[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}(\\.([2-9]|[1-9][0-9]+))?$" },
+    "rev": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "index": { "type": "integer", "minimum": 0 }
+  }
+}

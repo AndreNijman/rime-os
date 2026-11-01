@@ -1,6 +1,6 @@
 # Updates and release on NixOS (design)
 
-Status: **design, not built.** This is the D6 design document the NixOS pivot plan asks for before any code: the
+Status: **design; the release side is built** (§18 lists where the code differs, and why). This is the D6 design document the NixOS pivot plan asks for before any code: the
 release manifest, the binary cache, the `rime update` client, channels, batching, failure messages and the tests that
 prove each part. It is written to be implemented in Rust inside the existing `rimed/` workspace, reusing the bootc
 client's trust code wherever the wire format allows. A review step critiques it before the first PR.
@@ -27,6 +27,7 @@ Contents:
 15. [Tests](#15-tests)
 16. [Code layout in `rimed/`](#16-code-layout-in-rimed)
 17. [Handover and open items](#17-handover-and-open-items)
+18. [As built: the release side](#18-as-built-the-release-side-d6-release)
 
 ---
 
@@ -46,7 +47,7 @@ These are the decisions this document implements. They are restated here so the 
 - **R2 holds the full closure and is the only source clients use.** CI copies the cache.nixos.org paths into R2 and
   uploads Rime's own builds. Machines never contact cache.nixos.org. The narinfo signing key and the R2 write token
   live only in GitHub-hosted job secrets. The self-hosted build host builds, and never holds a key or a bucket
-  credential. Until an R2 bucket and token exist, everything is built and tested against a minio stand-in.
+  credential. Until an R2 bucket and token exist, everything is built and tested against an S3 stand-in (versitygw, §18).
 - **The rime-shell input moves automatically.** The release job resolves rime-shell `main` at build time and records
   the commit in the manifest, as `build-image.yml` does for the bootc image.
 - **Mass rebuilds are batched; security fixes are not.** A whole-system rebuild (a `stdenv` change, about 4 GB to
@@ -205,7 +206,8 @@ fails:
 The release job assembles an OCI image manifest with one layer by hand, exactly as `promote-channel.yml` does for the
 rollout document **(checked)**: an empty config (`application/vnd.oci.empty.v1+json`), `artifactType` and the layer
 media type set to `application/vnd.rimeos.nix-release.v1+json`, written to a `dir:` layout and pushed with
-`skopeo copy dir:… docker://…`. The manifest also carries annotations rimeos.com's sync reads:
+`skopeo copy dir:… docker://…`. (As built, the config is `application/vnd.oci.image.config.v1+json`, not the empty
+config: skopeo refuses to inspect the latter, §18.) The manifest also carries annotations rimeos.com's sync reads:
 `org.rimeos.release.id`, `org.opencontainers.image.revision` (rime-os), `org.rimeos.rime-shell.ref` and
 `org.rimeos.product=nixos`. Then `cosign sign --yes "$IMAGE@$digest"`.
 
@@ -410,7 +412,7 @@ not the daemon's `nix.conf`.
    references. For each path it asks cache.nixos.org whether the path is there (`nix path-info --store
    https://cache.nixos.org`). Paths that are not (Rime's own builds: the kernel and modules, NVIDIA, steam-unwrapped,
    rimed, rime-shell, the Hyprland rebuild, about 0.71 GB compressed in the probe) are exported with `nix copy --to
-   file://$out?compression=zstd` and handed to the publish job as a workflow artifact. The build job holds only
+   file://$out?compression=zstd` (as built: `nix-store --export` and a local import, §18) and handed to the publish job as a workflow artifact. The build job holds only
    `GITHUB_TOKEN` with `contents: read`; no `id-token`, no environment secrets.
    - **Substitute, never rebuild, what is already published.** The build host's substituters are
      `https://cache.rimeos.com` (trusting `rime-cache-*`) first, then cache.nixos.org. R2 is append-only, so a path it
@@ -1052,7 +1054,7 @@ verifies it. No real Rime key is ever used.
 Nodes:
 
 - `registry`: an OCI registry (the NixOS `docker-registry` service) standing in for GHCR;
-- `cache`: **minio** with a bucket `rime-cache`, anonymous read, standing in for R2. Clients read it over plain HTTP
+- `cache`: **minio** (as built: versitygw, §18) with a bucket `rime-cache`, anonymous read, standing in for R2. Clients read it over plain HTTP
   (`http://cache:9000/rime-cache`); the test driver writes it through the S3 API (`s3://rime-cache?endpoint=http://cache:9000&region=auto`),
   which also exercises the fill path;
 - `client`: a Rime NixOS system at generation A, with releases B (shell-only change), C (kernel change), D (glibc
@@ -1131,7 +1133,7 @@ New, side effects (`rime/src/nixos/`):
   `live.rs`'s `sessions()`, `machine_state()`, `session_helper()`), undo;
 - `gc.rs`, `pin.rs`, `rollback.rs`.
 
-New binary: `rime-nix-release` (in the `rime` crate or `rimed-core/src/bin/`): `manifest` (build the manifest from
+New binary: `rime-nix-release` (as built: Python in `nix/release/`, until D7's Rust types exist, §18): `manifest` (build the manifest from
 `closure.json` and the toplevels, with the shared classifier), `verify` (the publish self-check, using `verify.rs`).
 
 Changed: `trust.rs` (`NIX_SIGNER`, `nix_expectations`), `verify.rs` (by-digest fetch, refusal noun),
@@ -1158,7 +1160,7 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
 - **TODO(handover): the real R2 bucket.** Create bucket `rime-cache`, the custom domain `cache.rimeos.com` on the
   rimeos.com zone, a cache rule so `*.narinfo` and `nix-cache-info` bypass the edge cache (§6.1), an API token scoped
   to that bucket, the GitHub environment `nix-release` (deployment branch `main`) with `RIME_R2_ACCESS_KEY_ID`,
-  `RIME_R2_SECRET_ACCESS_KEY`, `RIME_R2_ENDPOINT`, and a $20/month billing alert. Until then every test uses minio.
+  `RIME_R2_SECRET_ACCESS_KEY`, `RIME_R2_ENDPOINT`, and a $20/month billing alert. Until then every test uses the S3 stand-in (versitygw, §18).
   R2's S3 compatibility with Nix's S3 store is not verified.
 - **TODO(handover): someone receives the refresh alarm.** The daily `refresh` fails loudly when the live channel
   document has under 7 days left (§4); a failed scheduled run must reach a person (GitHub's failed-workflow email to
@@ -1171,9 +1173,9 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
 - **TODO(handover): the narinfo key.** Generate `rime-cache-1` on a machine that is not a CI runner, set
   `RIME_NIX_CACHE_KEY`, commit the public key, delete the local copy.
 - cosign v2.5.2 pin and the publish self-check (§5.6); move to v3 only when the self-check passes with it.
-- `nix store sign --store s3://…` writing narinfos in place: verified in `fill-and-publish` with minio; fallback in
-  §6.3.
-- Streaming of `nix copy` between two remote stores without local disk: verified in `fill-and-publish` with a quota.
+- `nix store sign --store s3://…` writing narinfos in place: verified in `release-standin` against versitygw (§18).
+- Streaming of `nix copy` between two remote stores without local disk: not used as built (the publish job imports
+  the closure locally, §18); the hosted runner's disk against the real closure is a handover item.
 - `switch-to-configuration-ng`'s dry-run output and greetd's `restartIfChanged` were read at nixpkgs `d357a2b`
   (26.11pre); re-check at the pinned revision when the flake lands.
 - Release-ID race between the two pipelines on the same day: re-read before push (§2); residual risk caught by the
@@ -1186,3 +1188,111 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
 - fwupd UEFI capsules with Secure Boot on (plan open question 17): the firmware pass runs as today; the capsule path's
   signing is decided with the boot chain, not here.
 - Licences of unfree paths before anything is uploaded to a public bucket (§6.3, plan R14).
+
+---
+
+## 18. As built: the release side (D6 release)
+
+The release side (manifest, signing, cache fill, `nix-release.yml`, the local stand-in) is built in `nix/release/`
+and `.github/workflows/nix-release.yml`, tested by `checks.release-unit` and `checks.release-standin`. Where it differs
+from the sections above, this list is what the code does, and why. The sections above keep the design as reviewed;
+read them with this list.
+
+- **The tool is Python, not a Rust binary (§5.6, §6.3, §16).** `rime-nix-release` is
+  `nix/release/rime_nix_release.py` (standard library only), packaged by `nix/release/default.nix` with openssl,
+  skopeo and the pinned cosign on its `PATH`. Reason: the D7 client (`rime/src/nixos/`, `rimed-core/src/nixrel/`)
+  does not exist yet, so there is no shared Rust manifest type to build on, and the release side must not wait for
+  it. The self-check is a port of `verify.rs`'s chain (`.sig` tag, simple-signing payload digest, `docker-manifest-
+  digest`, repository, signature, chain at the leaf's `notBefore`, SAN, issuer from `.1.8` or raw `.1.1`). To keep
+  the port honest, `crosscheck-rime-trust` runs the **real** `rime trust --gate` (verify.rs) against the same
+  published object, and `release-standin` requires both to accept the good release and both to refuse a release
+  signed by `build-image.yml`. TODO(handover): when D7 lands `rimed-core::nixrel`, the manifest validation and the
+  self-check move to Rust and the Python port is deleted; the canonical-JSON and schema rules
+  (`nix/release/schema/*.schema.json`) are the contract both sides test against.
+- **Components come from the NixOS configuration, not the Rust classifier (§3.1).** `nix/release/components.nix`
+  maps each live-engine slug to the store paths the configuration selects (the Shell package, Hyprland's package,
+  `systemd.package`, the kernel, NVIDIA, the firmware environment, `/etc`). The classifier works on `/usr` paths and
+  has no NixOS form yet. `manifest` drops component paths that are not in the variant's closure. TODO(handover): D7
+  replaces this with the shared classifier.
+- **OCI config media type (§3.3).** The manifest and the channel document are pushed with the config
+  `application/vnd.oci.image.config.v1+json` (a minimal `{"architecture":"amd64","os":"linux","rootfs":…}`), not
+  the empty config. Reason (measured with skopeo 1.24.1 in the stand-in): `skopeo inspect --format '{{.Digest}}'` and
+  plain `skopeo inspect` refuse an object whose config is `application/vnd.oci.empty.v1+json`, and `verify.rs` and
+  `crosscheck-rime-trust` resolve tags that way. `artifactType` and the layer media type are as designed. The same
+  latent problem is in today's `promote-channel.yml` rollout document (TODO(handover): check the bootc reader there).
+- **The Rime-built paths travel as `nix-store --export`, not a `file://` cache (§6.3).** The build job writes
+  `rime.export` (Rime's paths in reference order) plus `closure.json` and `split.json`; the publish job imports it
+  into its own store and binds every path's narHash, narSize and references to `closure.json` before anything is
+  uploaded. Reasons: a binary cache refuses a path whose references it does not hold, so Rime's paths cannot be
+  pushed on their own before the upstream paths they reference (measured: `nix copy --no-recursive` to an S3 store
+  fails), and one local store makes the upload a single recursive `nix copy --to "$R2"` from the roots, which skips
+  every path the bucket already has. `nix-store --import` runs as root (trusted-users in the hosted job), which
+  `require-sigs` does not apply to. The upstream paths are verified (`nix store verify --sigs-needed 1` against the
+  named key) and then copied **into the local store** with `require-sigs` and only that key, not streamed
+  store-to-store. The disk-quota part of `fill-and-publish` is therefore not tested: the runner needs the closure on
+  local disk (about 9 GB for the desktop toplevels in the size probe; a hosted runner has about 14 GB free, not verified).
+  TODO(handover): measure the real closure on the hosted runner; if it does not fit, the D8 builder does the fill.
+- **Signing on S3 is done and verified (§6.3, §17).** `nix store sign --store s3://…` rewrites narinfos in place on
+  the S3 stand-in, keeps the upstream signature, and the next public read sees the new one (`release-standin`
+  subtests "published" and "an unsigned narinfo"). Every path is signed on every fill, including paths uploaded by an
+  earlier release. Every Nix call against a binary cache passes `narinfo-cache-positive-ttl 0` and
+  `narinfo-cache-negative-ttl 0`, or Nix's own narinfo disk cache answers the public-side check from the previous
+  read.
+- **`nix-cache-info` is written by the fill, not by Nix (§6.1).** Nix creates the file only when the bucket has none,
+  and then with `StoreDir` alone: the `want-mass-query`/`priority` store parameters do not reach it (measured in
+  `release-standin`). The fill writes `StoreDir: /nix/store`, `WantMassQuery: 1`, `Priority: 30` itself, through
+  the S3 API (a SigV4-signed PUT with the same `AWS_*` credentials Nix uses), before the first `nix copy`, and the
+  public-side check requires exactly that content.
+- **The public-side check also fetches every NAR's headers (§6.3).** `check-public` compares narHash, narSize and
+  references with `closure.json`, verifies the Rime signature, and sends a HEAD request for each `URL:` the narinfos
+  name, so a narinfo whose NAR is gone stops the release (the "deleted NAR" subtest). The manifest's `file_size`
+  values are the public narinfos' `FileSize`.
+- **The S3 stand-in is versitygw, not minio (§1, §15.2, §17).** nixpkgs at the pinned `1c89083` no longer ships a
+  minio server, and `minio-client` is marked insecure. versitygw (posix backend, `--region auto`, a bucket policy for
+  anonymous `GetObject`) serves the S3 API and anonymous reads; `awscli2` writes the bucket policy. R2's own S3
+  compatibility with Nix is still not verified (handover, §17).
+- **Kernel signing (§6.3 step 1).** `nix-release.yml` calls `./.github/workflows/nix-kernel-sign.yml` (D7's workflow)
+  by path as a reusable workflow, only when the repository variable `RIME_NIX_KERNEL_HOST` names a host, and passes
+  no secrets: that workflow's own job holds the `kernel-signing` environment. The build job refuses to continue
+  unless it reports `status=committed`, so the MOK signature is in rime-os and the (rime-os, rime-shell) pair still
+  identifies the toplevel (§2). Until `nix-kernel-sign.yml` is merged, actionlint is told to ignore only "could not
+  read reusable workflow file".
+- **Nix installer.** The hosted jobs install Nix 2.35.3 from `releases.nixos.org` with the tarball's sha256 checked
+  (`6ce3ce37…`) and `trusted-users = root runner`, so no step uses `sudo` with a secret in its environment. cosign is
+  installed by `sigstore/cosign-installer` pinned by SHA with `cosign-release: v2.5.2`.
+- **rime-shell branch (A15).** The build resolves the head of rime-shell `main` on `main`, and of `feat/nixos` on any
+  other branch while the pivot is unmerged, and builds with `--override-input rime-shell
+  github:AndreNijman/rime-shell/<sha>`. `flake.lock` is not rewritten by the release job; the manifest's
+  `source.rime_shell` and the tag record the commit. The daily schedule is the pickup: a new rime-shell head is a new
+  release, an unchanged pair publishes nothing.
+- **Release IDs (§2).** The bootc `:daily` labels are read in the publish job before the fill, not re-read
+  immediately before the push. The residual race with a bootc release published during the fill stays with the
+  rimeos.com chain test (§17).
+- **Variants.** Until D9's installer configurations exist, the only variant is `rime-vm` as `plain`, marked
+  `publishable = false` (it carries the test account), so `publish` refuses the real pipeline by design; only the
+  stand-in passes `--allow-test-variants`.
+- **Not built here (TODO(handover)).** The closure SBOM attestation (§2, `.att`); the unfree-redistribution upload
+  allowlist (§6.3 step 3, `nix/redistributable.nix`); the VM tests in the build job (§7, they need the D8 runners'
+  KVM); `nix-bump.yml` (§13.1); the R2 bucket, keys, environment and variables (§17).
+
+### 18.1 The local stand-in, and how to consume what it publishes
+
+`nix run path:.#rime-release-standin -- WORKDIR` (as root, inside the `rime-nix` container) runs the whole publish
+pipeline on one machine with throwaway keys and writes `WORKDIR/published.json`:
+
+| | Value |
+|---|---|
+| S3 endpoint (writes) | `s3://rime-cache?endpoint=http://127.0.0.1:19000&region=auto&compression=zstd`, access key `rimetestaccess`, secret `rimetestsecretkey` |
+| Bucket, public URL (reads) | `rime-cache`, `http://127.0.0.1:19000/rime-cache` (anonymous) |
+| Registry | `127.0.0.1:15000/andrenijman/rime-os` over plain HTTP |
+| Manifest ref | `nix-<rime-os sha>-<rime-shell sha>` (defaults `1111…`/`2222…`), digest in `published.json` |
+| Channel document | `nix-channels`, `edge` names the release |
+| Narinfo public key | `rime-test-cache-1:<base64>`, in `published.json` (secret in `WORKDIR/keys`) |
+| Signing trust | Fulcio root `WORKDIR/signing/fulcio-root.pem` (TEST CA), signer `https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main`, issuer `https://token.actions.githubusercontent.com` |
+
+A client consumes it with `rime-nix-release consume --repo 127.0.0.1:15000/andrenijman/rime-os --plain-http
+--fulcio-root WORKDIR/signing/fulcio-root.pem --cache http://127.0.0.1:19000/rime-cache [--store DIR]`: it verifies
+the channel document and the manifest, downloads the variant's toplevel with exactly the keys the manifest announces
+(`require-sigs`, no other substituter, `max-jobs 0`), and compares every path's narHash with the manifest.
+`checks.release-standin` does the same across three VMs (builder, server, client) and writes the equivalent
+`published.json` into its output.

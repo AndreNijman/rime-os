@@ -1,0 +1,1460 @@
+#!/usr/bin/env python3
+"""rime-nix-release: the release side of Rime OS on NixOS (docs/nixos/updates-and-release.md, D6).
+
+One tool, every step of the pipeline, so CI and the local stand-in run the same code:
+
+  closure      build host: closure.json for the variant toplevels (narHash, references, bootspec)
+  split        build host: which paths the upstream cache already serves with the same narHash
+  export       build host: Rime's own paths as a `nix-store --export` stream, the artifact
+  fill         publish job: verify + copy upstream paths, import + bind the artifact, copy to the
+               cache, sign every narinfo (idempotent: only missing paths are uploaded)
+  check-public publish job: read the closure back from the PUBLIC cache URL, anonymously
+  manifest     build the canonical release manifest (§3.1)
+  validate     §3.2, on any manifest file
+  verify       the self-check: verify a pushed object the way rime trust does (verify.rs port)
+  channels     write the next channel document (set / refresh), check a live one
+  publish      the whole publish job in the fixed order of §3.3 and §6.3
+  consume      a reference consumer: what a client does with a published release
+
+Python standard library only; external programs: nix, nix-store, skopeo, cosign, openssl.
+Nothing here holds a key: secrets arrive as file paths and environment variables.
+"""
+
+import argparse
+import base64
+import datetime
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+MEDIA_RELEASE = "application/vnd.rimeos.nix-release.v1+json"
+MEDIA_CHANNELS = "application/vnd.rimeos.nix-channels.v1+json"
+OCI_MANIFEST = "application/vnd.oci.image.manifest.v1+json"
+# Not application/vnd.oci.empty.v1+json: `skopeo inspect --format {{.Digest}}`, which is how the client resolves a
+# tag (verify::resolve), refuses an artifact with the empty config ("unsupported image-specific operation on
+# artifact"). Checked with skopeo 1.24.1; see docs §3.3.
+OCI_CONFIG = "application/vnd.oci.image.config.v1+json"
+SIG_LAYER = "application/vnd.dev.cosign.simplesigning.v1+json"
+ANN_SIG = "dev.cosignproject.cosign/signature"
+ANN_CERT = "dev.sigstore.cosign/certificate"
+ANN_CHAIN = "dev.sigstore.cosign/chain"
+
+NIX_SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main"
+ISSUER = "https://token.actions.githubusercontent.com"
+CHANNELS = ("stable", "candidate", "beta", "edge")
+CHANNELS_TAG = "nix-channels"
+DOC_LIFETIME = 14 * 86400
+DOC_MIN_LEFT = 7 * 86400
+STORE_DIR = "/nix/store"
+NIX32 = "0123456789abcdfghijklmnpqrsvwxyz"
+STORE_PATH_RE = re.compile(r"^/nix/store/[" + NIX32 + r"]{32}-[A-Za-z0-9+\-._?=]{1,211}$")
+RELEASE_RE = re.compile(r"^([0-9]{4})\.([0-9]{2})\.([0-9]{2})(?:\.([2-9]|[1-9][0-9]+))?$")
+SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+KEY_RE = re.compile(r"^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$")
+
+# Every binary-cache read: no narinfo answer is remembered between calls. Nix keeps positive lookups for 30 days by
+# default, which would let a check read a narinfo that was deleted or rewritten after the first lookup.
+FRESH = ["--option", "narinfo-cache-positive-ttl", "0", "--option", "narinfo-cache-negative-ttl", "0"]
+NIX = ["nix", "--extra-experimental-features", "nix-command"]
+
+
+class Refused(Exception):
+    """A release step that must stop the release. The message is what the log says."""
+
+
+def log(msg):
+    print(f"rime-nix-release: {msg}", file=sys.stderr, flush=True)
+
+
+# ── small pure helpers ─────────────────────────────────────────────────────────────────────────────────────────────
+
+def canonical(obj):
+    """§3.1: UTF-8, keys sorted, no insignificant whitespace."""
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def sha256_hex(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def nix32_decode(s):
+    """Nix's base-32 (the `sha256:<52 chars>` form) to bytes; the inverse of printHash32."""
+    n_bytes = len(s) * 5 // 8
+    out = bytearray(n_bytes)
+    for n in range(len(s)):
+        c = s[len(s) - n - 1]
+        d = NIX32.find(c)
+        if d < 0:
+            raise ValueError(f"not a nix32 character: {c!r}")
+        b = n * 5
+        i, j = divmod(b, 8)
+        out[i] |= (d << j) & 0xFF
+        carry = d >> (8 - j)
+        if i + 1 < n_bytes:
+            out[i + 1] |= carry
+        elif carry:
+            raise ValueError("nix32 string has bits past its length")
+    return bytes(out)
+
+
+def sri(h):
+    """Normalise every narHash form Nix prints to SRI `sha256-<base64>`; ValueError if it is not a sha256."""
+    if isinstance(h, dict):  # Nix's structured hash form
+        if h.get("algorithm") != "sha256":
+            raise ValueError(f"not a sha256 hash: {h!r}")
+        fmt, val = h.get("format"), h.get("hash", "")
+        if fmt == "base64":
+            raw = base64.b64decode(val, validate=True)
+        elif fmt == "nix32":
+            raw = nix32_decode(val)
+        elif fmt == "base16":
+            raw = bytes.fromhex(val)
+        else:
+            raise ValueError(f"unknown hash format {fmt!r}")
+    elif isinstance(h, str) and h.startswith("sha256-"):
+        raw = base64.b64decode(h[7:], validate=True)
+    elif isinstance(h, str) and h.startswith("sha256:"):
+        v = h[7:]
+        raw = bytes.fromhex(v) if len(v) == 64 else nix32_decode(v)
+    else:
+        raise ValueError(f"not a sha256 hash: {h!r}")
+    if len(raw) != 32:
+        raise ValueError(f"hash is {len(raw)} bytes, not 32: {h!r}")
+    return "sha256-" + base64.b64encode(raw).decode()
+
+
+def parse_release(rid):
+    m = RELEASE_RE.match(rid or "")
+    if not m:
+        raise ValueError(f"not a release ID: {rid!r}")
+    y, mo, d, n = m.groups()
+    return (int(y), int(mo), int(d), int(n) if n else 1)
+
+
+def valid_store_path(p):
+    return isinstance(p, str) and bool(STORE_PATH_RE.match(p)) and not p.split("-", 1)[1].startswith(".")
+
+
+def store_path_of(p):
+    """The store path a file inside the store belongs to (/nix/store/x-linux/bzImage -> /nix/store/x-linux)."""
+    parts = p.split("/")
+    if len(parts) < 4 or "/".join(parts[:3]) != STORE_DIR:
+        raise ValueError(f"not inside {STORE_DIR}: {p}")
+    return "/".join(parts[:4])
+
+
+def valid_key(k):
+    if not isinstance(k, str) or not KEY_RE.match(k):
+        return False
+    try:
+        return len(base64.b64decode(k.split(":", 1)[1], validate=True)) == 32
+    except ValueError:
+        return False
+
+
+def repo_of(ref):
+    """verify.rs repo_of: drop @digest, and a :tag only when the colon is after the last slash (a port stays)."""
+    head = ref.split("@", 1)[0]
+    if ":" in head and head.rfind(":") > head.rfind("/"):
+        return head.rsplit(":", 1)[0]
+    return head
+
+
+def topo_order(paths, refs):
+    """Dependencies first (nix-store --import and binary caches need a path's references before the path)."""
+    want = set(paths)
+    order, state = [], {}
+    for start in sorted(want):
+        stack = [(start, iter(sorted(r for r in refs.get(start, []) if r in want and r != start)))]
+        if state.get(start):
+            continue
+        state[start] = 1
+        while stack:
+            node, it = stack[-1]
+            nxt = next(it, None)
+            if nxt is None:
+                stack.pop()
+                state[node] = 2
+                order.append(node)
+            elif not state.get(nxt):
+                state[nxt] = 1
+                stack.append((nxt, iter(sorted(r for r in refs.get(nxt, []) if r in want and r != nxt))))
+            elif state[nxt] == 1:
+                raise Refused(f"reference cycle through {nxt}")
+    return order
+
+
+def closure_of(start, refs):
+    seen, todo = set(), [start]
+    while todo:
+        p = todo.pop()
+        if p in seen:
+            continue
+        seen.add(p)
+        todo.extend(refs.get(p, []))
+    return seen
+
+
+# ── running programs ───────────────────────────────────────────────────────────────────────────────────────────────
+
+def run(cmd, *, data=None, check=True, env=None, stdout=subprocess.PIPE, quiet=False):
+    if not quiet:
+        log("$ " + " ".join(cmd if len(cmd) < 14 else cmd[:12] + [f"... ({len(cmd) - 12} more)"]))
+    p = subprocess.run(cmd, input=data, stdout=stdout, stderr=subprocess.PIPE, env=env)
+    if check and p.returncode != 0:
+        what = " ".join(c for c in cmd[:8] if not c.startswith("-") and c != "nix-command" and "=" not in c)[:120]
+        raise Refused(f"{what} failed ({p.returncode}): "
+                      f"{p.stderr.decode(errors='replace').strip()[-2000:]}")
+    return p
+
+
+def nix_path_info(paths, store=None, recursive=False):
+    """{path: info|None}; info = nar_hash (SRI), nar_size, file_size (binary caches), references, signatures, url."""
+    if not paths:
+        return {}
+    out = {}
+    paths = list(paths)
+    for i in range(0, len(paths), 500):
+        raw = _path_info_chunk(paths[i:i + 500], store, recursive, out)
+        if isinstance(raw, list):  # Nix < 2.19
+            raw = {e["path"]: (None if e.get("valid") is False else e) for e in raw}
+        for path, info in raw.items():
+            if info is None:
+                out[path] = None
+                continue
+            refs = info.get("references", [])
+            out[path] = {
+                "nar_hash": sri(info["narHash"]),
+                "nar_size": int(info["narSize"]),
+                "file_size": int(info["downloadSize"]) if info.get("downloadSize") is not None else None,
+                "references": sorted(r if r.startswith("/") else f"{STORE_DIR}/{r}" for r in refs),
+                "signatures": info.get("signatures", []),
+                "url": info.get("url"),
+            }
+        for path in paths[i:i + 500]:
+            out.setdefault(path, None)
+    return out
+
+
+def _path_info_chunk(chunk, store, recursive, out):
+    """One `nix path-info --json` call. Nix 2.35 does not answer `null` for a path the store lacks: it fails with
+    "don't know how to build these paths:" and lists them. Those are recorded as missing (None in `out`) and the
+    call is repeated without them; any other failure, or a listed path that was not asked about, is a refusal."""
+    chunk = list(chunk)
+    while chunk:
+        cmd = NIX + ["path-info", "--json"] + FRESH + (["--store", store] if store else []) \
+            + (["-r"] if recursive else []) + chunk
+        p = run(cmd, check=False, quiet=True)
+        if p.returncode == 0:
+            try:
+                raw = json.loads(p.stdout or b"null")
+            except json.JSONDecodeError:
+                raw = None
+            if raw is not None:
+                return raw
+        err = p.stderr.decode(errors="replace")
+        absent = missing_from_error(err)
+        if recursive or not absent or not absent <= set(chunk):
+            raise Refused(f"nix path-info failed ({p.returncode}): {err[-1500:]}")
+        for path in absent:
+            out[path] = None
+        chunk = [c for c in chunk if c not in absent]
+    return {}
+
+
+def missing_from_error(err):
+    """The store paths Nix lists after "don't know how to build these paths:" (indented, one per line)."""
+    lines = err.splitlines()
+    for n, line in enumerate(lines):
+        if "don't know how to build these paths" in line:
+            found = set()
+            for nxt in lines[n + 1:]:
+                m = re.match(r"^\s+(/nix/store/[0-9a-z]{32}-\S+)\s*$", nxt)
+                if not m:
+                    break
+                found.add(m.group(1))
+            return found
+    return set()
+
+
+def store_url(base, **params):
+    sep = "&" if "?" in base else "?"
+    extra = "&".join(f"{k.replace('_', '-')}={v}" for k, v in params.items())
+    return base + (sep + extra if extra else "")
+
+
+# ── build host: closure, split, export ────────────────────────────────────────────────────────────────────────────
+
+def read_boot(toplevel):
+    """The variant's boot block from its bootspec (boot.json, org.nixos.bootspec.v1) and kernel-modules link."""
+    with open(os.path.join(toplevel, "boot.json")) as f:
+        spec = json.load(f)["org.nixos.bootspec.v1"]
+    return {
+        "kernel": store_path_of(spec["kernel"]),
+        "initrd": store_path_of(spec["initrd"]),
+        "kernel_modules": store_path_of(os.path.realpath(os.path.join(toplevel, "kernel-modules"))),
+        "kernel_params": list(spec.get("kernelParams", [])),
+    }
+
+
+def cmd_closure(a):
+    variants = {}
+    for v in a.variant:
+        name, top = v.split("=", 1)
+        top = os.path.realpath(top)
+        variants[name] = {"toplevel": top, "boot": read_boot(top)}
+    roots = [v["toplevel"] for v in variants.values()] + [os.path.realpath(p) for p in a.catalogue_out]
+    info = nix_path_info(roots, recursive=True)
+    missing = [p for p, i in info.items() if i is None]
+    if missing:
+        raise Refused(f"not valid in the local store: {missing[:5]}")
+    doc = {
+        "schema": 1,
+        "variants": variants,
+        "catalogue_outs": sorted(set(roots[len(variants):])),
+        "paths": {p: {k: i[k] for k in ("nar_hash", "nar_size", "references")} for p, i in sorted(info.items())},
+    }
+    for name, v in variants.items():
+        clo = closure_of(v["toplevel"], {p: i["references"] for p, i in doc["paths"].items()})
+        for k in ("kernel", "initrd", "kernel_modules"):
+            if v["boot"][k] not in clo:
+                raise Refused(f"{name}: boot.{k} {v['boot'][k]} is not in the toplevel's closure")
+    write_json(a.out, doc)
+    log(f"closure: {len(doc['paths'])} paths, variants {sorted(variants)}")
+
+
+def cmd_split(a):
+    clo = load_json(a.closure)
+    paths = sorted(clo["paths"])
+    upstream = []
+    if a.upstream:
+        up = nix_path_info(paths, store=a.upstream)
+        for p in paths:
+            i = up.get(p)
+            # Same path, different narHash upstream: this build host built it itself, non-reproducibly. It is
+            # treated as a Rime path, so closure.json, the cache and the manifest agree (§6.3).
+            if i is not None and i["nar_hash"] == clo["paths"][p]["nar_hash"]:
+                upstream.append(p)
+    up_set = set(upstream)
+    rime = [p for p in paths if p not in up_set]
+    # An upstream path's references are upstream paths; anything else means the upstream answer is inconsistent.
+    for p in upstream:
+        for r in clo["paths"][p]["references"]:
+            if r not in up_set:
+                raise Refused(f"upstream path {p} references {r}, which upstream does not serve")
+    write_json(a.out, {"upstream": upstream, "rime": rime})
+    log(f"split: {len(upstream)} upstream, {len(rime)} Rime-built")
+
+
+def cmd_export(a):
+    clo = load_json(a.closure)
+    split = load_json(a.split)
+    os.makedirs(a.out, exist_ok=True)
+    refs = {p: i["references"] for p, i in clo["paths"].items()}
+    order = topo_order(split["rime"], refs)
+    with open(os.path.join(a.out, "rime.export"), "wb") as f:
+        if order:
+            run(["nix-store", "--export"] + order, stdout=f)
+    shutil.copy(a.closure, os.path.join(a.out, "closure.json"))
+    shutil.copy(a.split, os.path.join(a.out, "split.json"))
+    log(f"export: {len(order)} Rime paths to {a.out}")
+
+
+# ── publish job: fill, check-public ────────────────────────────────────────────────────────────────────────────────
+
+def load_artifact(d):
+    clo = load_json(os.path.join(d, "closure.json"))
+    split = load_json(os.path.join(d, "split.json"))
+    allp = set(clo["paths"])
+    if set(split["upstream"]) | set(split["rime"]) != allp or set(split["upstream"]) & set(split["rime"]):
+        raise Refused("split.json does not partition closure.json")
+    for p, i in clo["paths"].items():
+        if not valid_store_path(p):
+            raise Refused(f"closure.json: not a store path: {p!r}")
+        sri(i["nar_hash"])
+        for r in i["references"]:
+            if r not in allp:
+                raise Refused(f"closure.json is not closed: {p} -> {r}")
+    return clo, split
+
+
+def fill(artifact, cache, secret_key_file, upstream, upstream_keys, report=None):
+    """§6.3 step 2. Returns {"uploaded": n, "already": n}."""
+    clo, split = load_artifact(artifact)
+    up_paths, rime_paths = split["upstream"], split["rime"]
+    trusted = " ".join(upstream_keys)
+
+    if up_paths:
+        if not upstream or not upstream_keys:
+            raise Refused("the closure has upstream paths but no upstream cache or key was given")
+        # Same narHash as the build host saw, and a signature by a key we name. Then the copy itself enforces the
+        # key again (require-sigs), so this is not a check-then-use gap.
+        up = nix_path_info(up_paths, store=upstream)
+        for p in up_paths:
+            if up.get(p) is None or up[p]["nar_hash"] != clo["paths"][p]["nar_hash"]:
+                raise Refused(f"upstream no longer serves {p} with the narHash closure.json names")
+        run(NIX + ["store", "verify", "--store", upstream, "--no-contents", "--sigs-needed", "1",
+                   "--trusted-public-keys", trusted] + FRESH + up_paths)
+        run(NIX + ["copy", "--from", upstream, "--option", "require-sigs", "true",
+                   "--option", "trusted-public-keys", trusted] + FRESH + up_paths)
+
+    if rime_paths:
+        with open(os.path.join(artifact, "rime.export"), "rb") as f:
+            run(["nix-store", "--import"], data=f.read())
+
+    # Bind what is now in the local store to closure.json: an artifact changed in transit is refused here.
+    local = nix_path_info(sorted(clo["paths"]))
+    for p, want in clo["paths"].items():
+        got = local.get(p)
+        if got is None:
+            raise Refused(f"{p} is not in the local store after import")
+        if got["nar_hash"] != want["nar_hash"] or got["nar_size"] != want["nar_size"] \
+                or sorted(got["references"]) != sorted(want["references"]):
+            raise Refused(f"{p}: the imported path is not the one closure.json names "
+                          f"(narHash {got['nar_hash']} != {want['nar_hash']})")
+
+    ensure_cache_info(cache)
+    there = nix_path_info(sorted(clo["paths"]), store=cache)
+    missing = [p for p, i in there.items() if i is None]
+    roots = [v["toplevel"] for v in clo["variants"].values()] + clo.get("catalogue_outs", [])
+    log(f"fill: {len(missing)} of {len(clo['paths'])} paths missing from the cache")
+    if missing:
+        # Recursive from the roots: Nix skips every path the destination already has, and adds references before
+        # the paths that need them (a binary cache refuses a path whose references it does not hold).
+        run(NIX + ["copy", "--to", store_url(cache, secret_key=secret_key_file)] + FRESH + roots)
+    # Every path, including ones uploaded by an earlier run or that came from upstream, carries the Rime signature.
+    # `nix store sign` appends: upstream signatures stay, for audit. It rewrites narinfos in place on S3 (verified).
+    p = run(NIX + ["store", "sign", "--store", cache, "--key-file", secret_key_file] + FRESH + sorted(clo["paths"]))
+    log("sign: " + p.stderr.decode(errors="replace").strip().splitlines()[-1:][0] if p.stderr.strip() else "sign: done")
+    result = {"uploaded": len(missing), "already": len(clo["paths"]) - len(missing)}
+    if report:
+        write_json(report, result)
+    return result
+
+
+CACHE_INFO = "StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n"
+
+
+def ensure_cache_info(cache):
+    """§6.1's nix-cache-info. Nix writes one only when the bucket has none, and then with StoreDir alone (measured in
+    release-standin: `want-mass-query`/`priority` store parameters do not reach the file), so the fill writes it.
+    s3:// through the S3 API (SigV4, the same AWS_* credentials Nix uses); file:// directly."""
+    if cache.startswith("file://"):
+        path = os.path.join(cache[len("file://"):].split("?", 1)[0], "nix-cache-info")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        cur = open(path).read() if os.path.exists(path) else None
+        if cur != CACHE_INFO:
+            open(path, "w").write(CACHE_INFO)
+        return
+    if not cache.startswith("s3://"):
+        raise Refused(f"cannot write nix-cache-info to {cache}")
+    url, headers = s3_request("PUT", cache, "nix-cache-info", CACHE_INFO.encode(), "text/x-nix-cache-info")
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(url, data=CACHE_INFO.encode(), method="PUT", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            if r.status not in (200, 201, 204):
+                raise Refused(f"writing nix-cache-info answered {r.status}")
+    except urllib.error.HTTPError as e:
+        raise Refused(f"writing nix-cache-info answered {e.code}: {e.read()[:300]!r}")
+
+
+def sigv4_key(secret, date, region, service):
+    import hmac
+    k = ("AWS4" + secret).encode()
+    for part in (date, region, service, "aws4_request"):
+        k = hmac.new(k, part.encode(), hashlib.sha256).digest()
+    return k
+
+
+def s3_request(method, cache, key, body, content_type, now=None, env=None):
+    """URL and headers for one path-style S3 request to the bucket a Nix s3:// store URL names, signed with SigV4."""
+    import hmac
+    import urllib.parse
+    env = os.environ if env is None else env
+    u = urllib.parse.urlparse(cache)
+    params = dict(urllib.parse.parse_qsl(u.query))
+    bucket = u.netloc
+    endpoint = params.get("endpoint") or "s3.amazonaws.com"
+    if "://" not in endpoint:
+        endpoint = "https://" + endpoint
+    e = urllib.parse.urlparse(endpoint)
+    region = params.get("region") or env.get("AWS_DEFAULT_REGION") or "us-east-1"
+    access, secret = env.get("AWS_ACCESS_KEY_ID"), env.get("AWS_SECRET_ACCESS_KEY")
+    if not access or not secret:
+        raise Refused("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not set for the cache")
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    amz, day = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
+    path = "/" + bucket + "/" + urllib.parse.quote(key)
+    payload = hashlib.sha256(body).hexdigest()
+    headers = {"host": e.netloc, "x-amz-content-sha256": payload, "x-amz-date": amz}
+    signed = ";".join(sorted(headers))
+    canon = "\n".join([method, path, "", *(f"{k}:{headers[k]}" for k in sorted(headers)), "", signed, payload])
+    scope = f"{day}/{region}/s3/aws4_request"
+    to_sign = "\n".join(["AWS4-HMAC-SHA256", amz, scope, hashlib.sha256(canon.encode()).hexdigest()])
+    sig = hmac.new(sigv4_key(secret, day, region, "s3"), to_sign.encode(), hashlib.sha256).hexdigest()
+    out = {"x-amz-content-sha256": payload, "x-amz-date": amz, "Content-Type": content_type,
+           "Authorization": f"AWS4-HMAC-SHA256 Credential={access}/{scope}, SignedHeaders={signed}, Signature={sig}"}
+    return f"{e.scheme}://{e.netloc}{path}", out
+
+
+def http_get(url):
+    import urllib.request
+    import urllib.error
+    try:
+        with urllib.request.urlopen(url, timeout=60) as r:
+            return r.read()
+    except urllib.error.HTTPError:
+        return None
+
+
+def http_status(url, method="HEAD"):
+    import urllib.request
+    import urllib.error
+    req = urllib.request.Request(url, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def check_public(closure, public, keys, report=None):
+    """Read the whole closure back through the public URL with no credentials. Returns {path: file_size}."""
+    clo = closure if isinstance(closure, dict) else load_json(closure)
+    paths = sorted(clo["paths"])
+    pub = nix_path_info(paths, store=public)
+    problems = []
+    for p in paths:
+        i, want = pub.get(p), clo["paths"][p]
+        if i is None:
+            problems.append(f"{p}: no narinfo at {public}")
+        elif i["nar_hash"] != want["nar_hash"] or sorted(i["references"]) != sorted(want["references"]) \
+                or i["nar_size"] != want["nar_size"]:
+            problems.append(f"{p}: the public narinfo does not match closure.json")
+        elif not i.get("file_size"):
+            problems.append(f"{p}: the public narinfo has no FileSize")
+    if problems:
+        raise Refused("public check: " + "; ".join(problems[:10]) + (f" (+{len(problems) - 10} more)" if len(problems) > 10 else ""))
+    p = run(NIX + ["store", "verify", "--store", public, "--no-contents", "--sigs-needed", "1",
+                   "--trusted-public-keys", " ".join(keys)] + FRESH + paths, check=False)
+    if p.returncode != 0:
+        raise Refused("public check: narinfo signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+    # A narinfo whose NAR is gone is what a client would hit as a download failure. HEAD every NAR.
+    base = public.split("?", 1)[0].rstrip("/")
+    info = http_get(f"{base}/nix-cache-info")
+    if info is None or info.decode(errors="replace") != CACHE_INFO:
+        raise Refused(f"public check: {base}/nix-cache-info is {info!r}, not {CACHE_INFO!r}")
+    gone = []
+    for path in paths:
+        url = pub[path].get("url")
+        if not url:
+            gone.append(f"{path}: narinfo names no NAR")
+            continue
+        code = http_status(f"{base}/{url}")
+        if code != 200:
+            gone.append(f"{path}: {url} answered {code}")
+    if gone:
+        raise Refused("public check: " + "; ".join(gone[:10]))
+    sizes = {p: pub[p]["file_size"] for p in paths}
+    if report:
+        write_json(report, sizes)
+    log(f"public check: {len(paths)} paths readable and signed at {public}")
+    return sizes
+
+
+# ── the manifest ───────────────────────────────────────────────────────────────────────────────────────────────────
+
+def build_manifest(clo, plan, sizes, *, release, previous, issued, source, cache_url_hint, cache_keys,
+                   previous_manifest=None, security=(), mass_rebuild=False):
+    refs = {p: i["references"] for p, i in clo["paths"].items()}
+    table = sorted(clo["paths"])
+    idx = {p: n for n, p in enumerate(table)}
+    variants = {}
+    for name, v in sorted(clo["variants"].items()):
+        pv = plan["variants"].get(name)
+        if pv is None:
+            raise Refused(f"variant {name} is in closure.json but not in the release plan")
+        if pv["toplevel"] != v["toplevel"]:
+            raise Refused(f"variant {name}: the plan's toplevel {pv['toplevel']} is not the built {v['toplevel']}")
+        clos = closure_of(v["toplevel"], refs)
+        comps = {}
+        dropped = 0
+        for slug, ps in sorted(pv.get("components", {}).items()):
+            keep = sorted({idx[p] for p in ps if p in clos})
+            dropped += len([p for p in ps if p not in clos])
+            if keep:
+                comps[slug] = keep
+        if dropped:
+            log(f"variant {name}: {dropped} component paths are not in the toplevel's closure (not listed)")
+        b = v["boot"]
+        variants[name] = {
+            "toplevel": idx[v["toplevel"]],
+            "boot": {"kernel": idx[b["kernel"]], "initrd": idx[b["initrd"]],
+                     "kernel_modules": idx[b["kernel_modules"]], "kernel_params": b["kernel_params"]},
+            "components": comps,
+        }
+    catalogue = []
+    for c in plan.get("catalogue", []):
+        if c["out"] not in idx:
+            raise Refused(f"catalogue entry {c['name']}: {c['out']} is not in closure.json")
+        catalogue.append({"name": c["name"], "version": c["version"], "out": idx[c["out"]], "class": 2})
+    paths = []
+    for p in table:
+        i = clo["paths"][p]
+        fs = sizes.get(p)
+        if not fs:
+            raise Refused(f"{p}: no public file size")
+        paths.append({"path": p, "nar_hash": sri(i["nar_hash"]), "nar_size": i["nar_size"], "file_size": fs,
+                      "references": sorted(idx[r] for r in i["references"])})
+    delta = None
+    nixpkgs_moved = False
+    if previous_manifest:
+        prev_paths = {e["path"] for e in previous_manifest["paths"]}
+        nixpkgs_moved = previous_manifest["source"]["nixpkgs"] != source["nixpkgs"]
+        if "plain" in clo["variants"]:
+            new = [p for p in closure_of(clo["variants"]["plain"]["toplevel"], refs) if p not in prev_paths]
+            delta = {"from": previous_manifest["release"], "variant": "plain", "paths": len(new),
+                     "file_size": sum(sizes[p] for p in new)}
+    return {
+        "schema": 1,
+        "kind": "rime-nixos-release",
+        "release": release,
+        "issued": int(issued),
+        "previous": previous,
+        "system": "x86_64-linux",
+        "store_dir": STORE_DIR,
+        "source": source,
+        "cache": {"url_hint": cache_url_hint, "keys": list(cache_keys)},
+        "variants": variants,
+        "catalogue": catalogue,
+        "paths": paths,
+        "batch": {"mass_rebuild": bool(mass_rebuild), "nixpkgs_moved": nixpkgs_moved, "security": list(security)},
+        "delta": delta,
+    }
+
+
+def validate(m):
+    """§3.2, the publisher's copy. Returns a list of reasons; empty means valid."""
+    errs = []
+    if not isinstance(m, dict):
+        return ["the manifest is not a JSON object"]
+    if m.get("schema") != 1:
+        return [f"schema {m.get('schema')!r} is not 1 (a higher one needs a newer rime)"]
+    for k, want in (("kind", "rime-nixos-release"), ("system", "x86_64-linux"), ("store_dir", STORE_DIR)):
+        if m.get(k) != want:
+            errs.append(f"{k} is {m.get(k)!r}, not {want!r}")
+    try:
+        parse_release(m.get("release"))
+    except ValueError as e:
+        errs.append(str(e))
+    if m.get("previous") is not None:
+        try:
+            parse_release(m["previous"])
+        except ValueError as e:
+            errs.append("previous: " + str(e))
+    src = m.get("source") or {}
+    for k in ("rime_os", "rime_shell", "nixpkgs"):
+        if not SHA40_RE.match(str(src.get(k, ""))):
+            errs.append(f"source.{k} is not a 40-hex revision")
+    keys = (m.get("cache") or {}).get("keys")
+    if not isinstance(keys, list) or not keys:
+        errs.append("cache.keys is empty")
+    else:
+        for k in keys:
+            if not valid_key(k):
+                errs.append(f"cache.keys: {k!r} is not <name>:<base64 of 32 bytes>")
+    paths = m.get("paths")
+    if not isinstance(paths, list) or not paths:
+        return errs + ["paths is empty"]
+    n = len(paths)
+    seen = set()
+    refs = {}
+
+    def ok_index(i):
+        return isinstance(i, int) and not isinstance(i, bool) and 0 <= i < n
+
+    prev = None
+    for i, e in enumerate(paths):
+        p = e.get("path") if isinstance(e, dict) else None
+        if not valid_store_path(p):
+            errs.append(f"paths[{i}]: {p!r} is not a store path")
+            continue
+        if p in seen:
+            errs.append(f"paths[{i}]: {p} appears twice")
+        if prev is not None and p < prev:
+            errs.append(f"paths[{i}]: the table is not sorted by path")
+        prev = p
+        seen.add(p)
+        try:
+            if sri(e.get("nar_hash")) != e.get("nar_hash"):
+                errs.append(f"paths[{i}]: nar_hash is not in SRI form")
+        except ValueError as x:
+            errs.append(f"paths[{i}]: {x}")
+        for k in ("nar_size", "file_size"):
+            v = e.get(k)
+            if not isinstance(v, int) or isinstance(v, bool) or v <= 0:
+                errs.append(f"paths[{i}]: {k} {v!r} is not a positive integer")
+        r = e.get("references")
+        if not isinstance(r, list) or not all(ok_index(x) for x in r):
+            errs.append(f"paths[{i}]: a reference is out of range")
+            refs[i] = []
+        else:
+            refs[i] = r
+
+    def closure(i):
+        return closure_of(i, refs)
+
+    variants = m.get("variants")
+    if not isinstance(variants, dict) or not variants:
+        errs.append("variants is empty")
+        variants = {}
+    for name, v in variants.items():
+        t = v.get("toplevel") if isinstance(v, dict) else None
+        if not ok_index(t):
+            errs.append(f"variants.{name}.toplevel is out of range")
+            continue
+        clo = closure(t)
+        boot = v.get("boot") or {}
+        for k in ("kernel", "initrd", "kernel_modules"):
+            if not ok_index(boot.get(k)):
+                errs.append(f"variants.{name}.boot.{k} is out of range")
+            elif boot[k] not in clo:
+                errs.append(f"variants.{name}.boot.{k} is not in the toplevel's closure")
+        if not isinstance(boot.get("kernel_params"), list):
+            errs.append(f"variants.{name}.boot.kernel_params is not a list")
+        for slug, ix in (v.get("components") or {}).items():
+            for x in ix:
+                if not ok_index(x):
+                    errs.append(f"variants.{name}.components.{slug}: index out of range")
+                elif x not in clo:
+                    errs.append(f"variants.{name}.components.{slug}: {paths[x]['path']} is not in the closure")
+    for c in m.get("catalogue") or []:
+        if not ok_index(c.get("out")):
+            errs.append(f"catalogue {c.get('name')!r}: out is out of range")
+        elif c.get("class") != 2:
+            errs.append(f"catalogue {c.get('name')!r}: class is not 2")
+    return errs
+
+
+def cmd_manifest(a):
+    clo = load_json(a.closure)
+    plan = load_json(a.plan)
+    sizes = load_json(a.public)
+    prev = load_json(a.previous_manifest) if a.previous_manifest else None
+    m = build_manifest(clo, plan, sizes, release=a.release, previous=a.previous or None, issued=a.issued or time.time(),
+                       source={"rime_os": a.rime_os, "rime_shell": a.rime_shell, "nixpkgs": a.nixpkgs},
+                       cache_url_hint=a.cache_url_hint, cache_keys=a.cache_key, previous_manifest=prev,
+                       security=a.security, mass_rebuild=a.mass_rebuild)
+    errs = validate(m)
+    if errs:
+        raise Refused("the manifest does not validate: " + "; ".join(errs[:10]))
+    with open(a.out, "wb") as f:
+        f.write(canonical(m))
+
+
+def cmd_validate(a):
+    with open(a.manifest, "rb") as f:
+        raw = f.read()
+    try:
+        m = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"invalid: not JSON: {e}")
+        return 1
+    errs = validate(m)
+    if not errs and a.canonical and canonical(m) != raw:
+        errs = ["not in canonical form (sorted keys, no whitespace)"]
+    for e in errs:
+        print(f"invalid: {e}")
+    if not errs:
+        print("valid")
+    return 1 if errs else 0
+
+
+# ── OCI objects ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def pack(payload, media, out, annotations):
+    """One-layer OCI image manifest in skopeo's dir: layout. Returns the manifest digest."""
+    os.makedirs(out, exist_ok=True)
+    cfg = b"{}"
+    for blob in (payload, cfg):
+        with open(os.path.join(out, sha256_hex(blob)), "wb") as f:
+            f.write(blob)
+    man = canonical({
+        "schemaVersion": 2,
+        "mediaType": OCI_MANIFEST,
+        "artifactType": media,
+        "config": {"mediaType": OCI_CONFIG, "digest": "sha256:" + sha256_hex(cfg), "size": len(cfg)},
+        "layers": [{"mediaType": media, "digest": "sha256:" + sha256_hex(payload), "size": len(payload)}],
+        "annotations": dict(sorted(annotations.items())),
+    })
+    with open(os.path.join(out, "manifest.json"), "wb") as f:
+        f.write(man)
+    with open(os.path.join(out, "version"), "w") as f:
+        f.write("Directory Transport Version: 1.1\n")
+    return "sha256:" + sha256_hex(man)
+
+
+class Registry:
+    """skopeo for transport (the client's own transport), cosign for signing."""
+
+    def __init__(self, repo, tls_verify=True, cosign="cosign"):
+        self.repo = repo
+        self.tls = tls_verify
+        self.cosign = cosign
+
+    def _tls(self, flag):
+        return [] if self.tls else [f"--{flag}-tls-verify=false"]
+
+    def tag_state(self, tag):
+        p = run(["skopeo", "--insecure-policy", "inspect", "--raw"] + ([] if self.tls else ["--tls-verify=false"])
+                + [f"docker://{self.repo}:{tag}"], check=False, quiet=True)
+        if p.returncode == 0:
+            return "sha256:" + sha256_hex(p.stdout)
+        err = p.stderr.decode(errors="replace")
+        if "manifest unknown" in err or "not found" in err.lower() or "name unknown" in err:
+            return None
+        raise Refused(f"cannot read {self.repo}:{tag}: {err.strip()[-500:]}")
+
+    def resolve(self, tag):
+        """Exactly verify::resolve's call."""
+        p = run(["skopeo", "--insecure-policy", "inspect", "--format", "{{.Digest}}"]
+                + ([] if self.tls else ["--tls-verify=false"]) + [f"docker://{self.repo}:{tag}"])
+        return p.stdout.decode().strip()
+
+    def push(self, src_dir, tag):
+        local = "sha256:" + sha256_hex(open(os.path.join(src_dir, "manifest.json"), "rb").read())
+        run(["skopeo", "--insecure-policy", "copy", "--preserve-digests"] + self._tls("dest")
+            + [f"dir:{src_dir}", f"docker://{self.repo}:{tag}"])
+        remote = self.tag_state(tag)
+        if remote != local:
+            raise Refused(f"pushed {local} to {tag}, the registry answers {remote}")
+        return local
+
+    def fetch(self, ref, out):
+        shutil.rmtree(out, ignore_errors=True)
+        run(["skopeo", "--insecure-policy", "copy"] + self._tls("src") + [f"docker://{ref}", f"dir:{out}"], quiet=True)
+
+    def sign(self, digest, test_signing=None):
+        ref = f"{self.repo}@{digest}"
+        if test_signing:
+            log("SIGNING WITH A TEST KEY (stand-in only): " + test_signing)
+            env = dict(os.environ, COSIGN_PASSWORD="")
+            cmd = [self.cosign, "sign", "--yes", "--key", os.path.join(test_signing, "cosign.key"),
+                   "--certificate", os.path.join(test_signing, "leaf.pem"),
+                   "--certificate-chain", os.path.join(test_signing, "chain.pem"), "--tlog-upload=false"]
+            if not self.tls:
+                cmd.append("--allow-http-registry")
+            run(cmd + [ref], env=env)
+        else:
+            # Keyless: the GitHub OIDC token of this job, Fulcio, Rekor. Only nix-release.yml on main can get here.
+            run([self.cosign, "sign", "--yes", ref])
+
+
+# ── the self-check: verify.rs, ported ──────────────────────────────────────────────────────────────────────────────
+
+def der_tlv(b, i):
+    tag = b[i]
+    ln = b[i + 1]
+    j = i + 2
+    if ln & 0x80:
+        n = ln & 0x7F
+        ln = int.from_bytes(b[j:j + n], "big")
+        j += n
+    return tag, j, j + ln
+
+
+def der_children(b, start, end):
+    out = []
+    i = start
+    while i < end:
+        t, s, e = der_tlv(b, i)
+        out.append((t, s, e))
+        i = e
+    return out
+
+
+def oid_bytes(dotted):
+    parts = [int(x) for x in dotted.split(".")]
+    out = bytearray([parts[0] * 40 + parts[1]])
+    for v in parts[2:]:
+        enc = [v & 0x7F]
+        v >>= 7
+        while v:
+            enc.append(0x80 | (v & 0x7F))
+            v >>= 7
+        out.extend(reversed(enc))
+    return bytes(out)
+
+
+def cert_extensions(der):
+    """{oid-bytes: extnValue bytes} of an X.509 certificate."""
+    _, s, e = der_tlv(der, 0)
+    _, ts, te = der_children(der, s, e)[0]
+    exts = {}
+    for t, s2, e2 in der_children(der, ts, te):
+        if t == 0xA3:  # [3] EXPLICIT Extensions
+            _, ss, se = der_tlv(der, s2)
+            for _, xs, xe in der_children(der, ss, se):
+                kids = der_children(der, xs, xe)
+                oid = der[kids[0][1]:kids[0][2]]
+                val = kids[-1]
+                exts[oid] = der[val[1]:val[2]]
+    return exts
+
+
+def pem_to_der(pem):
+    body = re.search(r"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", pem, re.S)
+    if not body:
+        raise ValueError("no certificate in PEM")
+    return base64.b64decode("".join(body.group(1).split()))
+
+
+def cert_san_uris(der):
+    v = cert_extensions(der).get(oid_bytes("2.5.29.17"))
+    if v is None:
+        return []
+    _, s, e = der_tlv(v, 0)
+    return [v[cs:ce].decode() for t, cs, ce in der_children(v, s, e) if t == 0x86]
+
+
+def cert_issuer(der):
+    exts = cert_extensions(der)
+    raw = exts.get(oid_bytes("1.3.6.1.4.1.57264.1.8"))
+    if raw is not None:
+        t, s, e = der_tlv(raw, 0)
+        if t == 0x0C:
+            return raw[s:e].decode()
+    raw = exts.get(oid_bytes("1.3.6.1.4.1.57264.1.1"))
+    if raw is not None:
+        # Fulcio writes .1.1 as the raw string; tolerate a DER UTF8String wrapper as verify.rs does.
+        if len(raw) >= 2 and raw[0] == 0x0C and raw[1] == len(raw) - 2:
+            raw = raw[2:]
+        return raw.decode()
+    return None
+
+
+def verify_sig_dir(sigdir, repo, digest, fulcio_root, signers, issuer):
+    """The `.sig` object for `digest`, already fetched into `sigdir`. Raises Refused; returns the signer."""
+    man = load_json(os.path.join(sigdir, "manifest.json"))
+    layers = man.get("layers") or []
+    if not layers:
+        raise Refused("the signature object has no layers")
+    lay = layers[0]
+    if lay.get("mediaType") != SIG_LAYER:
+        raise Refused(f"the signature layer is {lay.get('mediaType')}, not simple signing")
+    ann = lay.get("annotations") or {}
+    if ANN_SIG not in ann or ANN_CERT not in ann:
+        raise Refused("the signature carries no signature or no certificate (keyless cosign writes both)")
+    hexd = lay["digest"].split(":", 1)[1]
+    with open(os.path.join(sigdir, hexd), "rb") as f:
+        payload = f.read()
+    if sha256_hex(payload) != hexd:
+        raise Refused("the signed payload does not match its layer digest")
+    doc = json.loads(payload)
+    crit = doc.get("critical") or {}
+    if (crit.get("image") or {}).get("docker-manifest-digest") != digest:
+        raise Refused(f"the signature covers {(crit.get('image') or {}).get('docker-manifest-digest')}, not {digest}")
+    sref = (crit.get("identity") or {}).get("docker-reference", "")
+    if repo_of(sref) != repo_of(repo):
+        raise Refused(f"the signature covers an object in {sref}, not in {repo}")
+    with tempfile.TemporaryDirectory() as w:
+        leaf, pub, sig, pl, chain, root = (os.path.join(w, n) for n in ("leaf.pem", "pub.pem", "sig", "payload", "chain.pem", "root.pem"))
+        open(leaf, "w").write(ann[ANN_CERT])
+        open(sig, "wb").write(base64.b64decode(ann[ANN_SIG]))
+        open(pl, "wb").write(payload)
+        shutil.copy(fulcio_root, root)
+        p = run(["openssl", "x509", "-pubkey", "-noout", "-in", leaf], check=False, quiet=True)
+        if p.returncode:
+            raise Refused("the certificate does not parse")
+        open(pub, "wb").write(p.stdout)
+        if run(["openssl", "dgst", "-sha256", "-verify", pub, "-signature", sig, pl], check=False, quiet=True).returncode:
+            raise Refused("the signature does not verify against the certificate's public key")
+        p = run(["openssl", "x509", "-noout", "-startdate", "-dateopt", "iso_8601", "-in", leaf], check=False, quiet=True)
+        at = int(datetime.datetime.strptime(p.stdout.decode().strip().split("=", 1)[1], "%Y-%m-%d %H:%M:%SZ")
+                 .replace(tzinfo=datetime.timezone.utc).timestamp())
+        cmd = ["openssl", "verify", "-CAfile", root, "-attime", str(at)]
+        if ann.get(ANN_CHAIN):
+            open(chain, "w").write(ann[ANN_CHAIN])
+            cmd += ["-untrusted", chain]
+        p = run(cmd + [leaf], check=False, quiet=True)
+        if p.returncode:
+            raise Refused("the signing certificate does not chain to the pinned Fulcio root: "
+                          + (p.stdout + p.stderr).decode(errors="replace").strip()[-300:])
+    der = pem_to_der(ann[ANN_CERT])
+    sans = cert_san_uris(der)
+    if not sans:
+        raise Refused("the signing certificate names no identity")
+    if sans[0] not in signers:
+        raise Refused(f"signed by {sans[0]}, and the release expects {' or '.join(signers)}")
+    got = cert_issuer(der)
+    if got != issuer:
+        raise Refused(f"the identity was vouched for by {got}, not {issuer}")
+    return sans[0]
+
+
+def verify_object(reg, ref, media, fulcio_root, signers, issuer, work):
+    """Resolve, verify the signature, then read the layer BY that digest (verify::artifact_layer_at)."""
+    digest = ref if ref.startswith("sha256:") else reg.resolve(ref)
+    if not re.match(r"^sha256:[0-9a-f]{64}$", digest):
+        raise Refused(f"{ref} resolved to {digest!r}")
+    os.makedirs(work, exist_ok=True)
+    sigdir = os.path.join(work, "sig")
+    reg.fetch(f"{reg.repo}:{digest.replace(':', '-')}.sig", sigdir)
+    signer = verify_sig_dir(sigdir, reg.repo, digest, fulcio_root, signers, issuer)
+    objdir = os.path.join(work, "obj")
+    reg.fetch(f"{reg.repo}@{digest}", objdir)
+    raw = open(os.path.join(objdir, "manifest.json"), "rb").read()
+    if "sha256:" + sha256_hex(raw) != digest:
+        raise Refused("the object read is not the digest that was verified")
+    man = json.loads(raw)
+    lay = (man.get("layers") or [{}])[0]
+    if lay.get("mediaType") != media or man.get("artifactType") != media:
+        raise Refused(f"the object is {lay.get('mediaType')}, not {media}")
+    hexd = lay["digest"].split(":", 1)[1]
+    data = open(os.path.join(objdir, hexd), "rb").read()
+    if sha256_hex(data) != hexd:
+        raise Refused("the layer does not match its digest")
+    return digest, data, signer, man.get("annotations") or {}
+
+
+def cmd_verify(a):
+    reg = Registry(a.repo, tls_verify=not a.plain_http)
+    media = MEDIA_CHANNELS if a.channels else MEDIA_RELEASE
+    with tempfile.TemporaryDirectory() as w:
+        try:
+            digest, data, signer, _ = verify_object(reg, a.ref, media, a.fulcio_root, a.signer or [NIX_SIGNER],
+                                                    a.issuer, w)
+        except Refused as e:
+            print(f"refused: {e}")
+            return 1
+    obj = json.loads(data)
+    if not a.channels:
+        errs = validate(obj)
+        if errs:
+            print("refused: " + "; ".join(errs[:5]))
+            return 1
+    else:
+        left = obj.get("expires", 0) - time.time()
+        if a.min_left is not None and left < a.min_left:
+            print(f"refused: the channel document has {left / 86400:.1f} days left")
+            return 1
+    print(json.dumps({"digest": digest, "signer": signer, "release": obj.get("release")}))
+    return 0
+
+
+# ── the channel document ───────────────────────────────────────────────────────────────────────────────────────────
+
+def next_channels(current, repository, now, *, set_entry=None, entry_releases=None):
+    """The next channel document: serial + 1, a fresh 14-day expiry, every other entry carried forward.
+
+    set_entry: {"channel", "digest", "release", "percent", "halt", "reason"}. entry_releases maps a digest the
+    current document names to its (verified) release ID, for the never-backward rule (§4)."""
+    serial = int(current["serial"]) + 1 if current else 1
+    entries = {e["channel"]: dict(e) for e in (current or {}).get("channels", [])}
+    if current and current.get("repository") != repository:
+        raise Refused(f"the live document names {current.get('repository')}, not {repository}")
+    if set_entry:
+        ch = set_entry["channel"]
+        if ch not in CHANNELS:
+            raise Refused(f"unknown channel {ch!r}")
+        if not re.match(r"^sha256:[0-9a-f]{64}$", set_entry["digest"]):
+            raise Refused(f"bad digest {set_entry['digest']!r}")
+        pct = set_entry.get("percent", 100)
+        if not isinstance(pct, int) or isinstance(pct, bool) or not 0 <= pct <= 100:
+            raise Refused(f"percent {pct!r} is not 0-100")
+        new_rel = set_entry["release"]
+        parse_release(new_rel)
+        old = entries.get(ch)
+        if old:
+            old_rel = old.get("release") or (entry_releases or {}).get(old["digest"])
+            if old_rel is None:
+                raise Refused(f"{ch} offers {old['digest']}, whose release is unknown; refusing to compare")
+            if parse_release(new_rel) < parse_release(old_rel):
+                raise Refused(f"{ch} offers {old_rel}; {new_rel} is older. Fix forward: halt and release again")
+        e = {"channel": ch, "digest": set_entry["digest"], "percent": pct, "halt": bool(set_entry.get("halt", False)),
+             "release": new_rel}
+        if set_entry.get("reason"):
+            e["reason"] = str(set_entry["reason"])
+        entries[ch] = e
+    return {
+        "schema": 1,
+        "serial": serial,
+        "issued": int(now),
+        "expires": int(now) + DOC_LIFETIME,
+        "repository": repository,
+        "channels": [entries[c] for c in sorted(entries, key=lambda c: CHANNELS.index(c) if c in CHANNELS else 99)],
+    }
+
+
+def cmd_channels(a):
+    cur = load_json(a.current) if a.current else None
+    now = a.now or time.time()
+    if a.check_live:
+        left = cur["expires"] - now
+        if left < DOC_MIN_LEFT:
+            print(f"the live channel document has {left / 86400:.1f} days left (under 7): the refresh is broken")
+            return 1
+        print(f"the live channel document has {left / 86400:.1f} days left")
+        return 0
+    entry = None
+    if a.set:
+        entry = {"channel": a.set, "digest": a.digest, "release": a.release, "percent": a.percent,
+                 "halt": a.halt == "true", "reason": a.reason}
+    doc = next_channels(cur, a.repository, now, set_entry=entry)
+    with open(a.out, "wb") as f:
+        f.write(canonical(doc))
+    return 0
+
+
+# ── release IDs ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def next_release_id(script, today, os_rev, shell_rev, candidates):
+    """next-release-id with its published-* inputs = the newest of the candidates (bootc :daily, Nix edge)."""
+    cands = [c for c in candidates if c and c.get("id") and RELEASE_RE.match(c["id"])]
+    newest = max(cands, key=lambda c: parse_release(c["id"])) if cands else {"id": "", "os": "", "shell": ""}
+    p = run([script, today, os_rev, shell_rev, newest["id"], newest.get("os", ""), newest.get("shell", "")])
+    rid = p.stdout.decode().strip()
+    parse_release(rid)
+    return rid
+
+
+# ── the publish job ────────────────────────────────────────────────────────────────────────────────────────────────
+
+def cmd_publish(a):
+    for k in ("rime_os", "rime_shell", "nixpkgs"):
+        if not SHA40_RE.match(getattr(a, k)):
+            raise Refused(f"--{k.replace('_', '-')} is not a 40-hex revision")
+    tag = f"nix-{a.rime_os}-{a.rime_shell}"
+    reg = Registry(a.repo, tls_verify=not a.plain_http, cosign=a.cosign)
+    out = a.out
+    os.makedirs(out, exist_ok=True)
+    status = {"tag": tag, "repo": a.repo}
+
+    existing = reg.tag_state(tag)
+    if existing:
+        log(f"{tag} exists ({existing}): this rime-os + rime-shell pair was released; nothing new is published")
+        status.update(state="exists", manifest_digest=existing)
+        write_json(os.path.join(out, "published.json"), status)
+        return 0
+
+    plan = load_json(a.plan)
+    for name, v in plan["variants"].items():
+        if not v.get("publishable") and not a.allow_test_variants:
+            raise Refused(f"variant {name} is not publishable ({v.get('note', 'test configuration')})")
+
+    keys = a.cache_pubkey
+    fill(a.artifact, a.cache, a.secret_key_file, a.upstream, a.upstream_key, report=os.path.join(out, "fill.json"))
+    clo, _ = load_artifact(a.artifact)
+    sizes = check_public(clo, a.public, keys, report=os.path.join(out, "public.json"))
+
+    # What the channels offer now: read and VERIFIED, never trusted on its face.
+    signers = a.signer or [NIX_SIGNER]
+    cur_doc, offered, entry_releases = None, {}, {}
+    with tempfile.TemporaryDirectory() as w:
+        if reg.tag_state(CHANNELS_TAG):
+            _, data, _, _ = verify_object(reg, CHANNELS_TAG, MEDIA_CHANNELS, a.fulcio_root, signers, a.issuer, w)
+            cur_doc = json.loads(data)
+            for e in cur_doc.get("channels", []):
+                _, mdata, _, _ = verify_object(reg, e["digest"], MEDIA_RELEASE, a.fulcio_root, signers, a.issuer,
+                                               os.path.join(w, e["channel"]))
+                offered[e["channel"]] = json.loads(mdata)
+                entry_releases[e["digest"]] = offered[e["channel"]]["release"]
+    prev_manifest = offered.get(a.channel)
+    # next-release-id's published-* inputs: the newer of bootc's :daily labels and the Nix edge release (§2).
+    candidates = [{"id": a.bootc_release_id, "os": a.bootc_revision, "shell": a.bootc_shell}]
+    if "edge" in offered:
+        candidates.append({"id": offered["edge"]["release"], "os": offered["edge"]["source"]["rime_os"],
+                           "shell": offered["edge"]["source"]["rime_shell"]})
+    release = a.release or next_release_id(a.next_release_id, a.today, a.rime_os, a.rime_shell, candidates)
+
+    m = build_manifest(clo, plan, sizes, release=release,
+                       previous=prev_manifest["release"] if prev_manifest else None, issued=a.issued or time.time(),
+                       source={"rime_os": a.rime_os, "rime_shell": a.rime_shell, "nixpkgs": a.nixpkgs},
+                       cache_url_hint=a.cache_url_hint, cache_keys=keys, previous_manifest=prev_manifest)
+    errs = validate(m)
+    if errs:
+        raise Refused("the manifest does not validate: " + "; ".join(errs[:10]))
+    if prev_manifest and parse_release(release) <= parse_release(prev_manifest["release"]):
+        raise Refused(f"release {release} is not newer than {prev_manifest['release']}, which {a.channel} offers")
+    payload = canonical(m)
+    open(os.path.join(out, "manifest.json"), "wb").write(payload)
+    mdir = os.path.join(out, "manifest-oci")
+    digest = pack(payload, MEDIA_RELEASE, mdir, {
+        "org.rimeos.release.id": release,
+        "org.opencontainers.image.revision": a.rime_os,
+        "org.rimeos.rime-shell.ref": a.rime_shell,
+        "org.rimeos.product": "nixos",
+    })
+    # Re-read right before the push: never overwrite a manifest tag.
+    if reg.tag_state(tag):
+        raise Refused(f"{tag} appeared while this run was filling the cache; not overwriting it")
+    reg.push(mdir, tag)
+    reg.sign(digest, a.test_signing)
+    with tempfile.TemporaryDirectory() as w:
+        got, data, signer, _ = verify_object(reg, tag, MEDIA_RELEASE, a.fulcio_root, signers, a.issuer, w)
+    if got != digest or data != payload:
+        raise Refused("self-check: the published manifest is not the one built")
+    log(f"self-check: {tag} = {digest}, signed by {signer}")
+    status.update(state="published", release=release, manifest_digest=digest, manifest_tag=tag)
+
+    doc = next_channels(cur_doc, a.repo, time.time(), set_entry={
+        "channel": a.channel, "digest": digest, "release": release, "percent": a.percent, "halt": False},
+        entry_releases=entry_releases)
+    dpay = canonical(doc)
+    ddir = os.path.join(out, "channels-oci")
+    ddigest = pack(dpay, MEDIA_CHANNELS, ddir, {"org.rimeos.product": "nixos",
+                                               "org.opencontainers.image.revision": a.rime_os})
+    reg.push(ddir, CHANNELS_TAG)
+    reg.sign(ddigest, a.test_signing)
+    with tempfile.TemporaryDirectory() as w:
+        got, data, _, _ = verify_object(reg, CHANNELS_TAG, MEDIA_CHANNELS, a.fulcio_root, signers, a.issuer, w)
+    if got != ddigest or json.loads(data)["expires"] - time.time() < DOC_MIN_LEFT:
+        raise Refused("self-check: the live channel document is not the one written, or expires within 7 days")
+    open(os.path.join(out, "channels.json"), "wb").write(dpay)
+    status.update(channels_digest=ddigest, channels_serial=doc["serial"], channel=a.channel)
+    write_json(os.path.join(out, "published.json"), status)
+    log(f"published {release}: {tag} on {a.channel}, channel document serial {doc['serial']}")
+    return 0
+
+
+def cmd_refresh(a):
+    """The daily refresh and promote: re-sign the channel document (serial + 1, new expiry)."""
+    reg = Registry(a.repo, tls_verify=not a.plain_http, cosign=a.cosign)
+    signers = a.signer or [NIX_SIGNER]
+    with tempfile.TemporaryDirectory() as w:
+        _, data, _, _ = verify_object(reg, CHANNELS_TAG, MEDIA_CHANNELS, a.fulcio_root, signers, a.issuer, w)
+        cur = json.loads(data)
+        entry, releases = None, {}
+        for e in cur.get("channels", []):
+            if not e.get("release"):
+                _, md, _, _ = verify_object(reg, e["digest"], MEDIA_RELEASE, a.fulcio_root, signers, a.issuer,
+                                            os.path.join(w, e["channel"]))
+                releases[e["digest"]] = json.loads(md)["release"]
+        if a.set:
+            if not RELEASE_RE.match(a.release or ""):
+                raise Refused(f"release {a.release!r} is not a release ID")
+            # The release must name a manifest that exists and verifies.
+            mtag = a.manifest_tag
+            if not re.match(r"^nix-[0-9a-f]{40}-[0-9a-f]{40}$", mtag or ""):
+                raise Refused(f"--manifest-tag {mtag!r} is not nix-<os sha>-<shell sha>")
+            digest, md, _, _ = verify_object(reg, mtag, MEDIA_RELEASE, a.fulcio_root, signers, a.issuer,
+                                             os.path.join(w, "target"))
+            mm = json.loads(md)
+            if mm["release"] != a.release:
+                raise Refused(f"{mtag} is release {mm['release']}, not {a.release}")
+            entry = {"channel": a.set, "digest": digest, "release": a.release, "percent": a.percent,
+                     "halt": a.halt == "true", "reason": a.reason}
+    doc = next_channels(cur, a.repo, time.time(), set_entry=entry, entry_releases=releases)
+    os.makedirs(a.out, exist_ok=True)
+    d = pack(canonical(doc), MEDIA_CHANNELS, os.path.join(a.out, "channels-oci"), {"org.rimeos.product": "nixos"})
+    reg.push(os.path.join(a.out, "channels-oci"), CHANNELS_TAG)
+    reg.sign(d, a.test_signing)
+    with tempfile.TemporaryDirectory() as w:
+        got, data, _, _ = verify_object(reg, CHANNELS_TAG, MEDIA_CHANNELS, a.fulcio_root, signers, a.issuer, w)
+    if got != d or json.loads(data)["expires"] - time.time() < DOC_MIN_LEFT:
+        raise Refused("self-check: the live channel document is not the one written")
+    log(f"channel document serial {doc['serial']} live")
+    return 0
+
+
+# ── the reference consumer ─────────────────────────────────────────────────────────────────────────────────────────
+
+def cmd_consume(a):
+    """What a client does with a published release (the real one is D7's `rime update`). For the stand-in."""
+    reg = Registry(a.repo, tls_verify=not a.plain_http)
+    signers = a.signer or [NIX_SIGNER]
+    with tempfile.TemporaryDirectory() as w:
+        _, data, _, _ = verify_object(reg, CHANNELS_TAG, MEDIA_CHANNELS, a.fulcio_root, signers, a.issuer, w)
+        doc = json.loads(data)
+        if doc.get("repository") != a.repo or doc["expires"] < time.time():
+            raise Refused("the channel document is for another repository or expired")
+        e = next((e for e in doc["channels"] if e["channel"] == a.channel), None)
+        if e is None or e.get("halt"):
+            raise Refused(f"channel {a.channel} offers nothing")
+        digest, mdata, _, _ = verify_object(reg, e["digest"], MEDIA_RELEASE, a.fulcio_root, signers, a.issuer,
+                                            os.path.join(w, "m"))
+    m = json.loads(mdata)
+    errs = validate(m)
+    if errs:
+        raise Refused("; ".join(errs))
+    v = m["variants"][a.variant]
+    top = m["paths"][v["toplevel"]]["path"]
+    keys = " ".join(m["cache"]["keys"])  # exactly the keys the verified manifest announces (§6.4)
+    dest = ["--to", a.store] if a.store else []
+    run(NIX + ["copy", "--from", a.cache] + dest + ["--option", "require-sigs", "true", "--option",
+               "trusted-public-keys", keys, "--option", "substituters", "", "--option", "max-jobs", "0"] + FRESH + [top])
+    refs = {i: e["references"] for i, e in enumerate(m["paths"])}
+    clo = sorted(closure_of(v["toplevel"], refs))
+    local = nix_path_info([m["paths"][i]["path"] for i in clo], store=a.store)
+    for i in clo:
+        e = m["paths"][i]
+        got = local.get(e["path"])
+        if got is None or got["nar_hash"] != e["nar_hash"]:
+            raise Refused(f"{e['path']}: not the narHash the manifest names")
+    print(json.dumps({"release": m["release"], "digest": digest, "toplevel": top, "paths": len(clo),
+                      "serial": doc["serial"]}))
+    return 0
+
+
+# ── plumbing ───────────────────────────────────────────────────────────────────────────────────────────────────────
+
+def load_json(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def write_json(path, obj):
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=1, sort_keys=True)
+        f.write("\n")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(prog="rime-nix-release", description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def registry_args(p):
+        p.add_argument("--repo", required=True)
+        p.add_argument("--plain-http", action="store_true", help="registry over plain HTTP (stand-in only)")
+        p.add_argument("--fulcio-root", required=True)
+        p.add_argument("--signer", action="append", default=[], help=f"expected identity (default {NIX_SIGNER})")
+        p.add_argument("--issuer", default=ISSUER)
+
+    p = sub.add_parser("closure")
+    p.add_argument("--variant", action="append", required=True, help="name=toplevel")
+    p.add_argument("--catalogue-out", action="append", default=[])
+    p.add_argument("--out", required=True)
+    p.set_defaults(fn=cmd_closure)
+
+    p = sub.add_parser("split")
+    p.add_argument("--closure", required=True)
+    p.add_argument("--upstream", default="https://cache.nixos.org")
+    p.add_argument("--out", required=True)
+    p.set_defaults(fn=cmd_split)
+
+    p = sub.add_parser("export")
+    p.add_argument("--closure", required=True)
+    p.add_argument("--split", required=True)
+    p.add_argument("--out", required=True)
+    p.set_defaults(fn=cmd_export)
+
+    def fill_args(p):
+        p.add_argument("--artifact", required=True)
+        p.add_argument("--cache", required=True, help="s3://rime-cache?endpoint=...&region=auto&compression=zstd")
+        p.add_argument("--secret-key-file", required=True)
+        p.add_argument("--upstream", default="https://cache.nixos.org")
+        p.add_argument("--upstream-key", action="append", default=[])
+
+    p = sub.add_parser("fill")
+    fill_args(p)
+    p.add_argument("--report")
+    p.set_defaults(fn=lambda a: fill(a.artifact, a.cache, a.secret_key_file, a.upstream, a.upstream_key, a.report) and 0)
+
+    p = sub.add_parser("check-public")
+    p.add_argument("--closure", required=True)
+    p.add_argument("--public", required=True)
+    p.add_argument("--key", action="append", required=True)
+    p.add_argument("--report")
+    p.set_defaults(fn=lambda a: check_public(a.closure, a.public, a.key, a.report) and 0)
+
+    p = sub.add_parser("manifest")
+    for k in ("closure", "plan", "public", "release", "rime-os", "rime-shell", "nixpkgs", "out"):
+        p.add_argument("--" + k, required=True)
+    p.add_argument("--previous")
+    p.add_argument("--previous-manifest")
+    p.add_argument("--issued", type=int)
+    p.add_argument("--cache-url-hint", default="https://cache.rimeos.com")
+    p.add_argument("--cache-key", action="append", required=True)
+    p.add_argument("--security", action="append", default=[])
+    p.add_argument("--mass-rebuild", action="store_true")
+    p.set_defaults(fn=cmd_manifest)
+
+    p = sub.add_parser("validate")
+    p.add_argument("manifest")
+    p.add_argument("--canonical", action="store_true")
+    p.set_defaults(fn=cmd_validate)
+
+    p = sub.add_parser("verify")
+    registry_args(p)
+    p.add_argument("--ref", required=True, help="a tag or a sha256: digest")
+    p.add_argument("--channels", action="store_true")
+    p.add_argument("--min-left", type=int)
+    p.set_defaults(fn=cmd_verify)
+
+    p = sub.add_parser("channels")
+    p.add_argument("--current")
+    p.add_argument("--repository")
+    p.add_argument("--now", type=int)
+    p.add_argument("--check-live", action="store_true")
+    p.add_argument("--set", choices=CHANNELS)
+    p.add_argument("--digest")
+    p.add_argument("--release")
+    p.add_argument("--percent", type=int, default=100)
+    p.add_argument("--halt", choices=("true", "false"), default="false")
+    p.add_argument("--reason")
+    p.add_argument("--out")
+    p.set_defaults(fn=cmd_channels)
+
+    p = sub.add_parser("publish")
+    fill_args(p)
+    registry_args(p)
+    p.add_argument("--plan", required=True)
+    p.add_argument("--public", required=True, help="the cache's public, anonymous URL")
+    p.add_argument("--cache-pubkey", action="append", required=True)
+    p.add_argument("--cache-url-hint", default="https://cache.rimeos.com")
+    for k in ("rime-os", "rime-shell", "nixpkgs"):
+        p.add_argument("--" + k, required=True)
+    p.add_argument("--channel", default="edge", choices=CHANNELS)
+    p.add_argument("--percent", type=int, default=100)
+    p.add_argument("--today", default=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).strftime("%Y.%m.%d"))
+    p.add_argument("--release", help="force the release ID (tests); default: next-release-id")
+    p.add_argument("--next-release-id", default=os.environ.get("RIME_NEXT_RELEASE_ID", "files/scripts/next-release-id"))
+    p.add_argument("--bootc-release-id", default="")
+    p.add_argument("--bootc-revision", default="")
+    p.add_argument("--bootc-shell", default="")
+    p.add_argument("--issued", type=int)
+    p.add_argument("--allow-test-variants", action="store_true")
+    p.add_argument("--test-signing", help="TEST ONLY: a directory with cosign.key, leaf.pem, chain.pem")
+    p.add_argument("--cosign", default=os.environ.get("RIME_COSIGN", "cosign"))
+    p.add_argument("--out", required=True)
+    p.set_defaults(fn=cmd_publish)
+
+    p = sub.add_parser("refresh")
+    registry_args(p)
+    p.add_argument("--set", choices=CHANNELS)
+    p.add_argument("--release")
+    p.add_argument("--manifest-tag", help="nix-<os>-<shell> of the release to point --set at")
+    p.add_argument("--percent", type=int, default=100)
+    p.add_argument("--halt", choices=("true", "false"), default="false")
+    p.add_argument("--reason")
+    p.add_argument("--test-signing")
+    p.add_argument("--cosign", default=os.environ.get("RIME_COSIGN", "cosign"))
+    p.add_argument("--out", required=True)
+    p.set_defaults(fn=cmd_refresh)
+
+    p = sub.add_parser("consume")
+    registry_args(p)
+    p.add_argument("--channel", default="edge", choices=CHANNELS)
+    p.add_argument("--variant", default="plain")
+    p.add_argument("--cache", required=True)
+    p.add_argument("--store", help="the Nix store to download into (default: this machine's)")
+    p.set_defaults(fn=cmd_consume)
+
+    a = ap.parse_args(argv)
+    try:
+        return a.fn(a) or 0
+    except Refused as e:
+        log(f"REFUSED: {e}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
