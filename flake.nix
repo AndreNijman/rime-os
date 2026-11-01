@@ -57,7 +57,7 @@
       };
 
       checks.${system} =
-        import ./nix/tests { inherit pkgs self; }
+        import ./nix/tests { pkgs = import ./nix/tests/lib/test-pkgs.nix pkgs; inherit self; }
         // {
           # Cheap: proves the rime-vm system evaluates without building or downloading it.
           eval = pkgs.runCommand "rime-vm-eval" { } ''
