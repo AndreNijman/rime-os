@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rimeos.com/schema/nix-channels.v1.json",
+  "title": "Rime NixOS channel document (application/vnd.rimeos.nix-channels.v1+json)",
+  "description": "docs/nixos/updates-and-release.md §4: rimed_core::channel::RolloutDoc, with each entry's digest naming a release manifest and the optional `release` field added to RolloutEntry.",
+  "type": "object",
+  "required": ["schema", "serial", "issued", "expires", "repository", "channels"],
+  "properties": {
+    "schema": { "const": 1 },
+    "serial": { "type": "integer", "minimum": 1 },
+    "issued": { "type": "integer", "minimum": 0 },
+    "expires": { "type": "integer", "minimum": 0 },
+    "repository": { "type": "string", "minLength": 1 },
+    "channels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["channel", "digest", "percent", "halt"],
+        "properties": {
+          "channel": { "enum": ["stable", "candidate", "beta", "edge"] },
+          "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "halt": { "type": "boolean" },
+          "reason": { "type": "string" },
+          "release": { "type": "string", "pattern": "^[0-9]{4}\\.[0-9]{2}\\.[0-9]{2}(\\.([2-9]|[1-9][0-9]+))?$" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,462 @@
+# nix-release: Rime OS releases on NixOS (docs/nixos/updates-and-release.md §7, D6).
+#
+#   build    builds every variant toplevel (nix/release/variants.nix) with rime-shell at its branch head (A15),
+#            writes closure.json, splits off what cache.nixos.org serves, and stages Rime's own paths (only those)
+#            as an unsigned file:// binary cache, the artifact. Holds no secret and no write token.
+#   publish  main only, environment nix-release: binds the stage to closure.json and signs every narinfo with
+#            rime-cache-1, uploads the NARs as release assets of AndreNijman/rime-cache (one release per Rime
+#            release ID) FIRST, then pushes the narinfos (URL: rewritten to the absolute asset URL) to rime-cache
+#            main, which GitHub Pages serves as https://cache.rimeos.com. Waits for Pages, reads every Rime path back
+#            from the PUBLIC URL (and every upstream path from cache.nixos.org), then pushes the release manifest
+#            (nix-<os sha>-<shell sha>), cosign-signs it, self-checks it, updates the channel document
+#            (nix-channels), signs and self-checks that. Fixed order (§3.3, §6.3, §18).
+#            The repository variable RIME_NIX_CACHE_BACKEND=s3 selects the fallback (an S3 bucket holding the
+#            whole closure, docs §6); unset or github is production.
+#   refresh  daily: re-signs the channel document (serial + 1, 14-day expiry); fails loudly under 7 days left.
+#   promote  by hand: points one channel at a release; never at an older one.
+#
+# Every step is `rime-nix-release` (nix/release/rime_nix_release.py), built from THIS checkout in the job that runs
+# it. The publish job executes nothing the build job produced: the artifact is NARs + JSON, read as data.
+# nix/release/check_workflow.py (checks.release-unit) enforces the security shape of this file: hosted runners for
+# every signer, main only, environment nix-release, every action pinned by SHA, no ${{ inputs.* }} in a script.
+#
+# The GitHub environment `nix-release` (deployment branch: main) holds RIME_NIX_CACHE_KEY (the `rime-cache-1`
+# narinfo secret key; its public half is RIME_CACHE_PUBKEY below) and RIME_CACHE_TOKEN (a fine-grained PAT: the
+# rime-cache repository only, Contents read/write: release assets and pushes to main). Andre set both 2026-11-01.
+# The S3 fallback would also need RIME_R2_ACCESS_KEY_ID / RIME_R2_SECRET_ACCESS_KEY / RIME_R2_ENDPOINT (unset).
+# TODO(handover): D9's publishable plain/luks configurations; until they exist the only variant is rime-vm, which
+# is marked publishable = false, so publish refuses by design.
+# TODO(handover): when this lands on main, build-image.yml's path filter gains !nix/** and
+# !.github/workflows/nix-*.yml in the same PR (§7), so adding the Nix pipeline does not itself publish a bootc release.
+name: nix-release
+
+on:
+  push:
+    branches: [main, feat/nixos]
+    paths:
+      - "nix/**"
+      - "flake.nix"
+      - "flake.lock"
+      - "rimed/**"
+      - "files/**"
+      - "config/**"
+      - ".github/workflows/nix-release.yml"
+  schedule:
+    # Daily: the channel document refresh, and the rime-shell pickup (A15): a new rime-shell head is a new release
+    # even when rime-os did not move; an unchanged pair publishes nothing (the tag already exists).
+    - cron: "23 2 * * *"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "release = build and publish; refresh = re-sign the channel document; promote = point a channel"
+        type: choice
+        options: [release, refresh, promote]
+        default: release
+      channel:
+        description: "promote: the channel"
+        type: choice
+        options: [edge, beta, candidate, stable]
+        default: edge
+      release:
+        description: "promote: the release ID (YYYY.MM.DD[.N])"
+        type: string
+        default: ""
+      manifest_tag:
+        description: "promote: the release's manifest tag, nix-<rime-os sha>-<rime-shell sha>"
+        type: string
+        default: ""
+      percent:
+        description: "promote: share of machines, 0-100"
+        type: string
+        default: "100"
+      halt:
+        description: "promote: halt the channel"
+        type: boolean
+        default: false
+      reason:
+        description: "promote: why (shown to users when halted)"
+        type: string
+        default: ""
+
+permissions: {}
+
+# One group, never shared with build-image.yml, and a running release is never cancelled (§7).
+concurrency:
+  group: nix-release
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPO: ghcr.io/andrenijman/rime-os
+  NIX_VERSION: "2.35.3"
+  NIX_TARBALL_SHA256: 6ce3ce3703fdc241b560cba401c5d338042122fe5b1a81e07bf1a623f259eba0
+  UPSTREAM_CACHE: https://cache.nixos.org
+  # The production binary cache (§6, §18): narinfos on GitHub Pages of rime-cache, NARs as its release assets.
+  CACHE_URL: https://cache.rimeos.com
+  CACHE_REPO: AndreNijman/rime-cache
+  RIME_CACHE_PUBKEY: "rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k="
+  UPSTREAM_KEY: "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+  # rime-nix-release's own default; repeated here so the expected identity is visible in the workflow it names.
+  NIX_SIGNER: https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main
+
+jobs:
+  changes:
+    name: resolve the release inputs
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      action: ${{ steps.what.outputs.action }}
+      os: ${{ steps.what.outputs.os }}
+      shell: ${{ steps.what.outputs.shell }}
+      shell_branch: ${{ steps.what.outputs.shell_branch }}
+    steps:
+      - name: What this run does, and the rime-shell head it builds (A15)
+        id: what
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_ACTION: ${{ inputs.action }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          action=release
+          [ "$EVENT" = workflow_dispatch ] && action="$INPUT_ACTION"
+          case "$action" in release|refresh|promote) ;; *) echo "::error::unknown action"; exit 1 ;; esac
+          # During the pivot the NixOS Shell lives on rime-shell's feat/nixos; from main, rime-shell main (A15).
+          branch=feat/nixos
+          [ "$REF" = refs/heads/main ] && branch=main
+          shell="$(git ls-remote https://github.com/AndreNijman/rime-shell "refs/heads/$branch" | cut -f1)"
+          [[ "$shell" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::cannot resolve rime-shell $branch"; exit 1; }
+          {
+            echo "action=$action"
+            echo "os=$SHA"
+            echo "shell=$shell"
+            echo "shell_branch=$branch"
+          } >> "$GITHUB_OUTPUT"
+          echo "action=$action rime-os=$SHA rime-shell=$shell ($branch)"
+
+  # The kernel's MOK signature (D7). Optional: runs only when the repository variable RIME_NIX_KERNEL_HOST names a
+  # nixosConfiguration with rime.kernel.enable. The called job holds the APEX_SB_* secrets in its own environment
+  # (kernel-signing); this workflow never names them (§6.3). A NEW signature is not used by this run: it must be
+  # committed first, so the rime-os commit keeps identifying the release (§2). `build` refuses status=signed.
+  kernel-sign:
+    needs: changes
+    if: needs.changes.outputs.action == 'release' && vars.RIME_NIX_KERNEL_HOST != ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/nix-kernel-sign.yml
+    with:
+      host: ${{ vars.RIME_NIX_KERNEL_HOST }}
+      source: build
+
+  build:
+    name: build the variants and export Rime's paths
+    needs: [changes, kernel-sign]
+    # TODO(handover): the katana-nix self-hosted runners (D8) become the builder once they exist, with this hosted
+    # job as the fallback. A self-hosted build job must keep the fork-PR guard below and never name the
+    # nix-release environment or its secrets (check_workflow.py refuses both).
+    runs-on: ubuntu-24.04
+    if: >-
+      always() && needs.changes.result == 'success' && needs.changes.outputs.action == 'release'
+      && (needs.kernel-sign.result == 'success' || needs.kernel-sign.result == 'skipped')
+      && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    permissions:
+      contents: read
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: The kernel signature must already be committed
+        env:
+          SIGN_STATUS: ${{ needs.kernel-sign.outputs.status }}
+          SIGN_RESULT: ${{ needs.kernel-sign.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SIGN_RESULT" = success ] && [ "$SIGN_STATUS" != committed ]; then
+            echo "::error::nix-kernel-sign made a NEW signature ($SIGN_STATUS). Commit it (see that run's summary) and release from that commit."
+            exit 1
+          fi
+
+      - name: Free disk for the closure
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Install Nix (pinned, hash-checked)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLo nix.tar.xz "https://releases.nixos.org/nix/nix-$NIX_VERSION/nix-$NIX_VERSION-x86_64-linux.tar.xz"
+          echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
+          tar -xf nix.tar.xz
+          ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nmax-jobs = auto\n')
+          echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+
+      - name: Build the variant toplevels and the release tool
+        env:
+          SHELL_SHA: ${{ needs.changes.outputs.shell }}
+        run: |
+          set -euo pipefail
+          o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
+          nix flake check --no-build "${o[@]}"
+          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels" .#rime-release-toplevels
+          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
+          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/plan" .#rime-release-plan
+          nix build -L .#checks.x86_64-linux.release-unit
+          # TODO(handover): the VM tests (nix flake check) run here once the katana-nix runners have KVM to spare.
+
+      - name: closure.json, the upstream split and the stage (or the S3 fallback's export)
+        env:
+          BACKEND: ${{ vars.RIME_NIX_CACHE_BACKEND || 'github' }}
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP"
+          args=()
+          for v in "$t"/toplevels/*; do args+=(--variant "$(basename "$v")=$(readlink -f "$v")"); done
+          "$t/tool/bin/rime-nix-release" closure "${args[@]}" --out "$t/closure.json"
+          "$t/tool/bin/rime-nix-release" split --closure "$t/closure.json" --upstream "$UPSTREAM_CACHE" --out "$t/split.json"
+          case "$BACKEND" in
+            github) "$t/tool/bin/rime-nix-release" stage --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact" ;;
+            s3) "$t/tool/bin/rime-nix-release" export --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact" ;;
+            *) echo "::error::RIME_NIX_CACHE_BACKEND must be github or s3"; exit 1 ;;
+          esac
+          du -sh "$t/artifact"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nix-release-${{ needs.changes.outputs.os }}-${{ needs.changes.outputs.shell }}
+          path: ${{ runner.temp }}/artifact
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    name: fill the cache, publish the manifest and the channel document
+    needs: [changes, build]
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release'
+    runs-on: ubuntu-24.04
+    environment: nix-release
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Nix (pinned, hash-checked)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLo nix.tar.xz "https://releases.nixos.org/nix/nix-$NIX_VERSION/nix-$NIX_VERSION-x86_64-linux.tar.xz"
+          echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
+          tar -xf nix.tar.xz
+          ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\ntrusted-users = root runner\n')
+          echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: v2.5.2
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nix-release-${{ needs.changes.outputs.os }}-${{ needs.changes.outputs.shell }}
+          path: ${{ runner.temp }}/artifact
+
+      - name: Build the release tool and the plan from this checkout
+        env:
+          SHELL_SHA: ${{ needs.changes.outputs.shell }}
+        run: |
+          set -euo pipefail
+          o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
+          nix build "${o[@]}" --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
+          nix build "${o[@]}" --out-link "$RUNNER_TEMP/plan" .#rime-release-plan
+          nix flake metadata --json "${o[@]}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["locks"]["nodes"]["nixpkgs"]["locked"]["rev"])' > "$RUNNER_TEMP/nixpkgs-rev"
+
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | cosign login ghcr.io --username "$ACTOR" --password-stdin
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$ACTOR" --password-stdin
+
+      - name: The bootc release this one follows (next-release-id's published-* inputs)
+        id: bootc
+        run: |
+          set -euo pipefail
+          labels="$(skopeo inspect "docker://$IMAGE_REPO:daily" 2>/dev/null | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin).get("Labels") or {}))' || echo '{}')"
+          {
+            echo "id=$(printf '%s' "$labels" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("org.rimeos.release.id",""))')"
+            echo "rev=$(printf '%s' "$labels" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("org.opencontainers.image.revision",""))')"
+            echo "shell=$(printf '%s' "$labels" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("org.rimeos.rime-shell.ref",""))')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Fill the cache and publish
+        env:
+          OS_SHA: ${{ needs.changes.outputs.os }}
+          SHELL_SHA: ${{ needs.changes.outputs.shell }}
+          BOOTC_ID: ${{ steps.bootc.outputs.id }}
+          BOOTC_REV: ${{ steps.bootc.outputs.rev }}
+          BOOTC_SHELL: ${{ steps.bootc.outputs.shell }}
+          BACKEND: ${{ vars.RIME_NIX_CACHE_BACKEND || 'github' }}
+          CACHE_KEY: ${{ secrets.RIME_NIX_CACHE_KEY }}
+          RIME_CACHE_TOKEN: ${{ secrets.RIME_CACHE_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.RIME_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RIME_R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.RIME_R2_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP"
+          need=(CACHE_KEY RIME_CACHE_TOKEN)
+          [ "$BACKEND" = s3 ] && need=(CACHE_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY R2_ENDPOINT)
+          for v in "${need[@]}"; do
+            [ -n "${!v}" ] || { echo "::error::$v is not set in the nix-release environment"; exit 1; }
+          done
+          umask 077
+          printf '%s' "$CACHE_KEY" > "$t/rime-cache.sec"
+          trap 'shred -u "$t/rime-cache.sec" 2>/dev/null || rm -f "$t/rime-cache.sec"' EXIT
+          # The secret must be the half of the public key clients trust; a wrong secret stops here, before upload.
+          [ "$(nix key convert-secret-to-public < "$t/rime-cache.sec")" = "$RIME_CACHE_PUBKEY" ] \
+            || { echo "::error::RIME_NIX_CACHE_KEY is not the secret half of $RIME_CACHE_PUBKEY"; exit 1; }
+          if [ "$BACKEND" = s3 ]; then
+            cache=(--backend s3 --cache "s3://rime-cache?endpoint=$R2_ENDPOINT&region=auto&compression=zstd")
+          else
+            cache=(--backend github --gh-repo "$CACHE_REPO" --gh-remote "https://github.com/$CACHE_REPO.git"
+                   --public-wait 1800)
+          fi
+          "$t/tool/bin/rime-nix-release" publish "${cache[@]}" \
+            --artifact "$t/artifact" --plan "$t/plan" \
+            --secret-key-file "$t/rime-cache.sec" \
+            --upstream "$UPSTREAM_CACHE" --upstream-key "$UPSTREAM_KEY" \
+            --public "$CACHE_URL" --cache-pubkey "$RIME_CACHE_PUBKEY" --cache-url-hint "$CACHE_URL" \
+            --repo "$IMAGE_REPO" --fulcio-root files/system/trust/fulcio-root.pem --signer "$NIX_SIGNER" \
+            --rime-os "$OS_SHA" --rime-shell "$SHELL_SHA" --nixpkgs "$(cat "$t/nixpkgs-rev")" \
+            --today "$(TZ=Australia/Perth date +%Y.%m.%d)" \
+            --bootc-release-id "$BOOTC_ID" --bootc-revision "$BOOTC_REV" --bootc-shell "$BOOTC_SHELL" \
+            --out "$t/out"
+          cat "$t/out/published.json"
+
+      - name: Publish the release page on rimeos.com
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RIMEOS_SITE_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "$GH_TOKEN" ] || { echo "::warning::RIMEOS_SITE_DISPATCH_TOKEN is not set; the page waits for the site's schedule"; exit 0; }
+          gh workflow run deploy.yml --repo AndreNijman/rime-website --ref main
+
+  refresh:
+    name: re-sign the channel document
+    needs: changes
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (github.event_name == 'schedule' || needs.changes.outputs.action == 'refresh')
+    runs-on: ubuntu-24.04
+    environment: nix-release
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Nix (pinned, hash-checked)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLo nix.tar.xz "https://releases.nixos.org/nix/nix-$NIX_VERSION/nix-$NIX_VERSION-x86_64-linux.tar.xz"
+          echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
+          tar -xf nix.tar.xz
+          ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\n')
+          echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: v2.5.2
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | cosign login ghcr.io --username "$ACTOR" --password-stdin
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Refresh (serial + 1, 14 days), and fail loudly if the live document was under 7 days
+        run: |
+          set -euo pipefail
+          nix build --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
+          tool="$RUNNER_TEMP/tool/bin/rime-nix-release"
+          if ! skopeo inspect --raw "docker://$IMAGE_REPO:nix-channels" >/dev/null 2>&1; then
+            echo "no channel document has been published yet; nothing to refresh"
+            exit 0
+          fi
+          # Measured BEFORE the refresh: a document this close to expiry means earlier refreshes were missed.
+          late=0
+          "$tool" verify --repo "$IMAGE_REPO" --fulcio-root files/system/trust/fulcio-root.pem --signer "$NIX_SIGNER" \
+            --ref nix-channels --channels --min-left 604800 || late=1
+          "$tool" refresh --repo "$IMAGE_REPO" --fulcio-root files/system/trust/fulcio-root.pem --signer "$NIX_SIGNER" \
+            --out "$RUNNER_TEMP/out"
+          [ "$late" = 0 ] || { echo "::error::the live channel document had under 7 days left: refreshes were missed"; exit 1; }
+
+  promote:
+    name: point a channel at a release
+    needs: changes
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'promote'
+    runs-on: ubuntu-24.04
+    environment: nix-release
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Install Nix (pinned, hash-checked)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLo nix.tar.xz "https://releases.nixos.org/nix/nix-$NIX_VERSION/nix-$NIX_VERSION-x86_64-linux.tar.xz"
+          echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
+          tar -xf nix.tar.xz
+          ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\n')
+          echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: v2.5.2
+      - name: Log in to GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | cosign login ghcr.io --username "$ACTOR" --password-stdin
+          printf '%s' "$GH_TOKEN" | skopeo login ghcr.io --username "$ACTOR" --password-stdin
+      - name: Promote
+        # Inputs reach the script only through env: (the free-text reason can never become a command).
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          RELEASE: ${{ inputs.release }}
+          MANIFEST_TAG: ${{ inputs.manifest_tag }}
+          PERCENT: ${{ inputs.percent }}
+          HALT: ${{ inputs.halt }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          case "$CHANNEL" in edge|beta|candidate|stable) ;; *) echo "::error::bad channel"; exit 1 ;; esac
+          [[ "$RELEASE" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.([2-9]|[1-9][0-9]+))?$ ]] || { echo "::error::bad release ID"; exit 1; }
+          [[ "$MANIFEST_TAG" =~ ^nix-[0-9a-f]{40}-[0-9a-f]{40}$ ]] || { echo "::error::bad manifest tag"; exit 1; }
+          [[ "$PERCENT" =~ ^([0-9]|[1-9][0-9]|100)$ ]] || { echo "::error::percent must be 0-100"; exit 1; }
+          case "$HALT" in true|false) ;; *) echo "::error::halt must be true or false"; exit 1 ;; esac
+          nix build --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
+          "$RUNNER_TEMP/tool/bin/rime-nix-release" refresh --repo "$IMAGE_REPO" \
+            --fulcio-root files/system/trust/fulcio-root.pem --signer "$NIX_SIGNER" \
+            --set "$CHANNEL" --release "$RELEASE" --manifest-tag "$MANIFEST_TAG" --percent "$PERCENT" \
+            --halt "$HALT" --reason "$REASON" --out "$RUNNER_TEMP/out"

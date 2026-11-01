@@ -33,6 +33,7 @@
 
       packages.${system} = {
         inherit (pkgs.rime) rimed rime-shell rime-libexec rime-kernel rime-kernel-config rime-scx;
+        inherit (import ./nix/release { inherit pkgs self; }) rime-nix-release rime-release-plan rime-release-toplevels rime-release-standin;
       };
 
       nixosModules = {
