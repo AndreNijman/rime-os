@@ -78,6 +78,8 @@ in
           DOCUMENTATION_URL = "https://github.com/AndreNijman/rime-os#readme";
           SUPPORT_URL = "https://github.com/AndreNijman/rime-os/discussions";
           BUG_REPORT_URL = "https://github.com/AndreNijman/rime-os/issues";
+          # NixOS writes cpe:/o:nixos:<distroId>:<release>; Rime's vendor is Rime (bootc: cpe:/o:rimeos:rime_os:<N>).
+          CPE_NAME = "cpe:/o:rimeos:rime_os:${config.system.nixos.release}";
         };
       };
 
@@ -100,7 +102,15 @@ in
 
       # Boot: nixpkgs copies only boot.plymouth.theme into the initrd; the accent needs all 25 there.
       boot.initrd.systemd.contents."/etc/plymouth/themes".source = lib.mkForce themeDir;
-      boot.initrd.systemd.storePaths = [ initrdThemePicker ];
+      # The picker's tools: a store path named only in its PATH line is not copied into the initrd by itself
+      # (measured: "awk: command not found" at boot), so each binary is listed.
+      boot.initrd.systemd.storePaths = [
+        initrdThemePicker
+        "${pkgs.gawk}/bin/gawk"
+        "${pkgs.gawk}/bin/awk"
+        "${pkgs.gnused}/bin/sed"
+        "${pkgs.gnugrep}/bin/grep"
+      ];
       boot.initrd.availableKernelModules = [ "vfat" "nls_cp437" "nls_iso8859-1" ];
       boot.initrd.systemd.services.rime-plymouth-theme = {
         description = "Rime OS: start the boot splash in the owner's accent";
@@ -115,6 +125,8 @@ in
           Type = "oneshot";
           RemainAfterExit = true;
           ExecStart = "${initrdThemePicker}";
+          # The theme plymouthd will start, in the journal (the picker itself is silent).
+          ExecStartPost = "-${pkgs.gnugrep}/bin/grep -H ^Theme= /etc/plymouth/plymouthd.conf";
           # Never hold the boot back for a colour.
           TimeoutStartSec = 5;
           StandardOutput = "kmsg";

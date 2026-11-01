@@ -183,7 +183,9 @@ in
         };
     };
 
-    testScript = ''
+    testScript =
+      { nodes, ... }:
+      ''
       def shot(m, name):
           m.screenshot(name)
           print("screenshot:", name + ".png")
@@ -195,9 +197,13 @@ in
       with subtest("os-release, icons and the Plymouth logo are Rime's"):
           osr = splash.succeed("cat /etc/os-release")
           print(osr)
-          for line in ['NAME="Rime OS"', 'PRETTY_NAME="Rime OS"', "ID=rime", "ID_LIKE=nixos", "LOGO=rime-os",
-                       'HOME_URL="https://rimeos.com/"', 'ANSI_COLOR="0;38;2;145;194;220"']:
-              assert line in osr.splitlines(), line
+          kv = dict(l.split("=", 1) for l in osr.splitlines() if "=" in l)
+          kv = {k: v.strip('"') for k, v in kv.items()}
+          want = {"NAME": "Rime OS", "PRETTY_NAME": "Rime OS", "ID": "rime", "ID_LIKE": "nixos", "LOGO": "rime-os",
+                  "HOME_URL": "https://rimeos.com/", "ANSI_COLOR": "0;38;2;145;194;220", "VENDOR_NAME": "Rime OS"}
+          for k, v in want.items():
+              assert kv.get(k) == v, f"os-release {k}={kv.get(k)!r}, want {v!r}"
+          assert kv["CPE_NAME"].startswith("cpe:/o:rimeos:rime_os:"), kv["CPE_NAME"]
           assert "nixos.org" not in osr, "os-release still points at nixos.org"
           splash.succeed("test -s /run/current-system/sw/share/icons/hicolor/256x256/apps/rime-os.png")
           splash.succeed("test -s /run/current-system/sw/share/icons/hicolor/scalable/apps/distributor-logo.svg"
@@ -206,15 +212,19 @@ in
           splash.succeed("cmp /etc/plymouth/logo.png ${branding}/share/rime/branding/png/symbol/rime-symbol-dark-128.png")
 
       with subtest("the initrd carries all 25 themes, the picker and vfat"):
-          listing = splash.succeed("zstd -dc /run/current-system/initrd | cpio -it --quiet 2>/dev/null"
-                                   " || cat /run/current-system/initrd | cpio -it --quiet")
+          initrd = "${nodes.splash.system.build.initialRamdisk}/${nodes.splash.system.boot.loader.initrdFile}"
+          print(splash.succeed("ls -lL /run/booted-system/initrd " + initrd))
+          listing = splash.succeed(f"zstd -dc {initrd} > /tmp/initrd.cpio && cpio -it --quiet < /tmp/initrd.cpio")
           for want in ["rime-os/rime-os.plymouth", "rime-os-accent-00/rime-os-accent-00.plymouth",
                        "rime-os-accent-23/lockup-accent-hd.png", "rime-plymouth-theme-initrd", "vfat.ko"]:
               assert want in listing, f"initrd lacks {want}"
 
       with subtest("the boot splash is the ridge (rime-os)"):
           splash.succeed("plymouth --ping")
-          print(splash.succeed("journalctl -b -o cat -u rime-plymouth-theme.service --no-pager || true"))
+          j = splash.succeed("journalctl -b -o cat -u rime-plymouth-theme.service --no-pager")
+          print(j)
+          assert "not found" not in j, "the initrd picker is missing a tool"
+          assert "plymouthd.conf:Theme=rime-os\n" in j + "\n", "the initrd did not start rime-os"
           splash.succeed("grep -qx 'Theme=rime-os' /etc/plymouth/plymouthd.conf")
           splash.sleep(3)
           shot(splash, "plymouth-default")
@@ -234,12 +244,16 @@ in
                          " && printf '#fa98a0' > /var/lib/rime-greet/accents/rime")
           splash.succeed("/run/current-system/sw/libexec/rime-plymouth-accent")
           splash.succeed("grep -qx 'Theme=rime-os-accent-00' /etc/plymouth/plymouthd.conf")
-          splash.succeed("mount -o ro /dev/vdb1 /mnt && test \"$(cat /mnt/loader/credentials/rime.accent.cred)\" = 00; umount /mnt")
+          splash.succeed("mkdir -p /run/esp && mount -t vfat -o ro /dev/vdb1 /run/esp")
+          splash.succeed("test \"$(cat /run/esp/loader/credentials/rime.accent.cred)\" = 00")
+          splash.succeed("umount /run/esp")
           splash.shutdown()
           splash.start()
           splash.wait_for_unit("multi-user.target")
           out = splash.succeed("journalctl -b -o short-monotonic --no-pager -u rime-plymouth-theme.service -u plymouth-start.service")
           print(out)
+          assert "not found" not in out, "the initrd picker is missing a tool"
+          assert "plymouthd.conf:Theme=rime-os-accent-00" in out, "the initrd did not start the owner's accent"
           splash.succeed("plymouth --ping")
           splash.sleep(3)
           shot(splash, "plymouth-accent")
@@ -252,10 +266,10 @@ in
       with subtest("the greeter shows the ridge in Rime Blue"):
           desktop.sleep(10)
           shot(desktop, "greeter-default")
-          log = desktop.succeed("journalctl -b -u greetd --no-pager")
-          print(log[-4000:])
+          glog = desktop.succeed("journalctl -b -u greetd --no-pager")
+          print(glog[-4000:])
           for bad in ["Cannot open", "is not a type", "module \"QtQuick.Shapes\" is not installed"]:
-              assert bad not in log, f"greeter error: {bad}"
+              assert bad not in glog, f"greeter error: {bad}"
 
       with subtest("the greeter follows the user's published accent"):
           desktop.succeed("install -d /var/lib/rime-greet/accents && printf rime > /var/lib/rime-greet/last-user"
