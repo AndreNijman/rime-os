@@ -62,7 +62,8 @@ MODEL_NONCORE = ("9d1c9ca57499", "1e11040aee63")  # same core, base + image rebu
 MODEL_CORE = ("39a376d65646", "5ae90c64ba81")     # core, base and image rebuilt
 # PR #123's own figure for a core rebuild WITH real package changes
 # (e5ff68d1 -> b61d46c1, rechunked locally; those images were never pushed).
-# The registry pair above rebuilt core from the same inputs, so it is a floor.
+# The registry pair above rebuilt core from the same core inputs (only base and
+# image-tier files changed between its commits), so it is a floor.
 CORE_123 = 1.74e9
 GB = 1e9
 
@@ -117,6 +118,37 @@ def jobs_of(gh: str, run_id: int) -> dict[str, dict]:
     return jobs
 
 
+SLACK = dt.timedelta(minutes=2)
+
+
+def owner_of(img: dict, runs: list[dict], all_jobs: dict[int, dict[str, dict]]) -> dict | None:
+    """The run of the same commit whose image job was running when the image's
+    config was written (within SLACK), or None."""
+    for r in runs:
+        if r["headSha"] != img["revision"]:
+            continue
+        job = all_jobs[r["databaseId"]].get("image")
+        if not job or not job.get("started_at") or not job.get("completed_at"):
+            continue
+        if parse_time(job["started_at"]) - SLACK <= img["created"] <= parse_time(job["completed_at"]) + SLACK:
+            return r
+    return None
+
+
+def classify(run_: dict, jobs: dict[str, dict]) -> tuple[str, str]:
+    """(core_rebuilt, published) for an image built by run_.
+
+    Core was rebuilt only when the run's `core` job succeeded; a skipped core
+    job means the image reused the previous core. Published = a `main` run
+    whose `image` job succeeded (a branch run signs its image too, but never
+    moves a tag a machine follows).
+    """
+    core = (jobs.get("core") or {}).get("conclusion")
+    image_ok = (jobs.get("image") or {}).get("conclusion") == "success"
+    return ("y" if core == "success" else "n",
+            "y" if run_["headBranch"] == "main" and image_ok else "n")
+
+
 def fetch(args: argparse.Namespace) -> int:
     for tool in ("skopeo", args.gh):
         if shutil.which(tool) is None and not os.path.exists(tool):
@@ -155,25 +187,13 @@ def fetch(args: argparse.Namespace) -> int:
 
     # An image belongs to the run of the same commit whose image job was
     # running when the image's config was written.
-    slack = dt.timedelta(minutes=2)
     rows, unmatched = [], []
     for img in sorted(images, key=lambda i: i["created"]):
-        owner = None
-        for r in runs:
-            if r["headSha"] != img["revision"]:
-                continue
-            job = all_jobs[r["databaseId"]].get("image")
-            if not job or not job.get("started_at") or not job.get("completed_at"):
-                continue
-            if parse_time(job["started_at"]) - slack <= img["created"] <= parse_time(job["completed_at"]) + slack:
-                owner = r
-                break
+        owner = owner_of(img, runs, all_jobs)
         if owner is None:
             unmatched.append(img)
             continue
-        jobs = all_jobs[owner["databaseId"]]
-        core = jobs.get("core", {}).get("conclusion")
-        image_ok = jobs.get("image", {}).get("conclusion") == "success"
+        core_rebuilt, published = classify(owner, all_jobs[owner["databaseId"]])
         layers = img["manifest"]["layers"]
         rows.append({
             "created": img["created"].strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -183,8 +203,8 @@ def fetch(args: argparse.Namespace) -> int:
             "run_id": owner["databaseId"],
             "event": owner["event"],
             "branch": owner["headBranch"],
-            "core_rebuilt": "y" if core == "success" else "n",
-            "published": "y" if owner["headBranch"] == "main" and image_ok else "n",
+            "core_rebuilt": core_rebuilt,
+            "published": published,
             "layers": len(layers),
             "bytes": sum(l["size"] for l in layers),
             "base_digest": img["base_digest"],
@@ -196,6 +216,14 @@ def fetch(args: argparse.Namespace) -> int:
                if r["headBranch"] == "main"
                and all_jobs[r["databaseId"]].get("image", {}).get("conclusion") == "success"
                and r["databaseId"] not in matched_runs]
+
+    # ... and exactly one: two published images from one run would be counted
+    # as two releases.
+    per_run: dict[int, int] = {}
+    for r in rows:
+        if r["published"] == "y":
+            per_run[r["run_id"]] = per_run.get(r["run_id"], 0) + 1
+    doubled = sorted(k for k, n in per_run.items() if n > 1)
 
     os.makedirs(args.data, exist_ok=True)
     with open(os.path.join(args.data, "ledger.tsv"), "w", newline="") as f:
@@ -219,7 +247,9 @@ def fetch(args: argparse.Namespace) -> int:
     for r in missing:
         print(f"fetch: WARNING main run {r['databaseId']} succeeded but no signed image "
               f"matched it", file=sys.stderr)
-    return 1 if missing else 0
+    for k in doubled:
+        print(f"fetch: WARNING main run {k} owns {per_run[k]} published images", file=sys.stderr)
+    return 1 if missing or doubled else 0
 
 
 # ── report ───────────────────────────────────────────────────────────────────
@@ -353,7 +383,7 @@ def report(args: argparse.Namespace) -> int:
     last30 = [r for r in pub if parse_time(r["created"]) > win_start]
     r30, c30 = cadence(last30)
     p("\n## Cadence (published images, reissues included)\n")
-    p("| window | days | images published | core rebuilds | per 30 days: images | per 30 days: core |")
+    p("| window | days | updates (images after the first) | core rebuilds | per 30 days: updates | per 30 days: core |")
     p("|---|---|---|---|---|---|")
     p(f"| {pub[0]['created'][:10]} → {pub[-1]['created'][:10]} | {span:.1f} | {all_rel} | {all_core} "
       f"| {all_rel * 30 / span:.1f} | {all_core * 30 / span:.1f} |")
@@ -418,7 +448,8 @@ def report(args: argparse.Namespace) -> int:
 # ── self-test ────────────────────────────────────────────────────────────────
 
 def self_test() -> int:
-    """delta() and transitions() on a fixture with a known answer."""
+    """delta(), transitions(), release_key() and fetch's classify()/owner_of()
+    on fixtures with a known answer."""
     layers = {
         "sha256:a": {"l1": 100, "l2": 200, "l3": 300},
         "sha256:b": {"l1": 100, "l2": 200, "l4": 400},          # +l4
@@ -455,6 +486,34 @@ def self_test() -> int:
     check("bytes", [x["bytes"] for x in t], [400, 180, 80])
     t = transitions(ledger, layers, "2099.01.01")
     check("no switch before the cutoff", [x["kind"] for x in t], ["non-core", "core", "non-core"])
+
+    # Release IDs order by number, not as text: .10 comes after .2.
+    check("release .10 is after .2", release_key("2026.10.08.10") > release_key("2026.10.08.2"), True)
+    check("2026.10.08 is before 2026.10.08.2", release_key("2026.10.08") < release_key("2026.10.08.2"), True)
+
+    # fetch's decisions, on run/job records shaped like the GitHub API's.
+    main_run = {"databaseId": 1, "headBranch": "main", "headSha": "e" * 40}
+    branch_run = {"databaseId": 2, "headBranch": "perf/x", "headSha": "e" * 40}
+    ok = {"conclusion": "success"}
+    check("core success = rebuilt, main + image ok = published",
+          classify(main_run, {"core": ok, "image": ok}), ("y", "y"))
+    check("core skipped = not rebuilt",
+          classify(main_run, {"core": {"conclusion": "skipped"}, "image": ok}), ("n", "y"))
+    check("branch run = not published",
+          classify(branch_run, {"core": ok, "image": ok}), ("y", "n"))
+    check("main run, image job failed = not published",
+          classify(main_run, {"core": ok, "image": {"conclusion": "failure"}}), ("y", "n"))
+    window = {"image": {"started_at": "2026-01-05T10:00:00Z", "completed_at": "2026-01-05T10:30:00Z"}}
+    early = {"image": {"started_at": "2026-01-05T08:00:00Z", "completed_at": "2026-01-05T08:30:00Z"}}
+    jobs_by_run = {3: early, 1: window}
+    other = {"databaseId": 3, "headBranch": "main", "headSha": "e" * 40}
+    img = {"revision": "e" * 40, "created": parse_time("2026-01-05T10:31:00Z")}
+    check("owner = the run whose image job was running (2 min slack)",
+          (owner_of(img, [other, main_run], jobs_by_run) or {}).get("databaseId"), 1)
+    img_late = {"revision": "e" * 40, "created": parse_time("2026-01-05T10:33:00Z")}
+    check("no owner outside the slack", owner_of(img_late, [other, main_run], jobs_by_run), None)
+    img_other = {"revision": "f" * 40, "created": parse_time("2026-01-05T10:10:00Z")}
+    check("no owner for another commit", owner_of(img_other, [other, main_run], jobs_by_run), None)
     return 1 if failures else 0
 
 

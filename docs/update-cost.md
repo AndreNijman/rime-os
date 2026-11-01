@@ -423,9 +423,10 @@ annotations the rechunked layers carry; today it fetches layers whole.
   to the build-image run of the same commit whose `image` job was running when
   the image was written; it counts as **published** when that run was on `main`
   and its `image` job succeeded. Every successful `main` run since 2026-09-29
-  matched exactly one image (`fetch` fails otherwise).
-* **Core rebuilds** come from each run's jobs (`core` succeeded or skipped), not
-  from byte sizes.
+  matched exactly one image (`fetch` fails when a run matches none or more
+  than one).
+* **Core rebuilds** come from each run's jobs, not from byte sizes: `core`
+  succeeded = rebuilt; `core` skipped = the previous core was reused.
 * **The window** starts 2026-09-29, the first day with release IDs under the
   `rime-os` name; 2026-09-28 was the rename, and its first build has no
   signature tag under the `rime-os` name, so it cannot be listed this way.
@@ -441,7 +442,7 @@ python3 -I tools/update-cost-backtest.py report --data docs/update-cost
 
 ### Results, 2026-09-29 → 2026-11-01
 
-43 images published in 33 days (39.0 per 30 days), **10 of them rebuilt core**
+44 images published, so 43 updates in 33 days (39.0 per 30 days), **10 of them rebuilt core**
 (9.1 per 30 days): 8 from merges that changed core's inputs (two kernels, the
 Fedora 45 move, the app removal, msi-ec, the SELinux label, …) and 2 from the
 weekly cron, which reissued 2026.10.11.2 and 2026.10.19 as new digests when
@@ -466,7 +467,9 @@ release exists, so the layout is measured on the registry's rechunked pairs:
 | `9d1c9ca57499` → `1e11040aee63` (two `perf/update-rechunk` builds) | base + image, same core | 5 of 129 | **0.255 GB** |
 | `39a376d65646` → `5ae90c64ba81` (integration build → release 2026.11.01) | core + base + image | 50 of 129 | **1.27 GB** |
 
-The core pair rebuilt core twice from the same inputs a few hours apart, so
+The core pair rebuilt core twice from the same core inputs a few hours apart
+(between the two commits only base, image-tier scripts, tests and docs changed:
+review fixes to `Containerfile.base`, `rime-pkg`, `rime-secrets-start`), so
 1.27 GB is the floor of a core rebuild. PR #123 measured **1.74 GB** for a core
 rebuild with real package changes (`e5ff68d1 → b61d46c1`, rechunked locally;
 those images were never pushed). Both are shown below. The non-core pair's
