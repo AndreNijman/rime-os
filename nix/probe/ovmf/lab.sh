@@ -16,8 +16,17 @@
 # Inputs ($ART/in, made by build-nixos.sh): bzImage, initrd, rootfs.img, entry.json
 # Outputs: $ART/{fedora-rpms,keys,work,logs}; verdicts in $ART/logs/results.tsv
 #
-# Usage: lab.sh all | rpms | keys | vars | sign | disks | cases | case NAME
+# KERNEL=rime (kernsign, PLAN.md D3 + D7): the kernel is Rime's real 7.2.9 image and
+# it is NOT signed here. `detach` runs nix/pkgs/kernel/sign-detached.sh (the code the
+# hosted nix-kernel-sign.yml job runs, mounted at /kernel) with the throwaway key on
+# the unsigned image (in/bzImage.unsigned) into $ART/sig/<hash>.sig; build-nixos.sh
+# then builds the system whose rime.kernel.signing attaches and verifies it, and
+# `sign` takes that Nix-built image (in/bzImage.signed) as the signed kernel and
+# derives the stripped and tampered variants from it. Cases: RIME_CASES.
+#
+# Usage: lab.sh all | case NAME | STEP... (rpms keys detach vars sign disks cases)
 set -euo pipefail
+KERNEL=${KERNEL:-nixpkgs}
 
 ART=${ART:-/art}
 IN=$ART/in
@@ -105,8 +114,50 @@ step_vars() {
   done | tee "$LOGS/vars.txt"
 }
 
+# ── 4a. KERNEL=rime: the detached signature, made as nix-kernel-sign.yml makes it ──
+step_detach() {
+  [[ $KERNEL == rime ]] || die "detach is the KERNEL=rime step"
+  local hash; hash=$(jq -r .imageHash "$IN/signing-unsigned.json")
+  rm -rf "$ART/sig"; mkdir -p "$ART/sig"
+  # --pinned = the throwaway certificate: in CI it is nix/pkgs/kernel/signing/rime-mok.pem.
+  bash /kernel/sign-detached.sh --image "$IN/bzImage.unsigned" --hash "$hash" \
+    --key "$KEYS/test-mok.key" --cert "$KEYS/test-mok.crt" --pinned "$KEYS/test-mok.crt" \
+    --out "$ART/sig" --store-path "$(jq -r .image "$IN/signing-unsigned.json")" \
+    --note "OVMF rig (nix/probe/ovmf, KERNEL=rime), throwaway TEST key" | tee "$LOGS/detach.txt"
+  { ls -l "$ART/sig"; cat "$ART/sig/$hash.json"; } | tee -a "$LOGS/detach.txt"
+}
+
+# ── 4b. KERNEL=rime: the Nix-signed image and its variants ──────────────────
+step_sign_rime() {
+  cd "$W"
+  local hash; hash=$(jq -r .imageHash "$IN/signing.json")
+  cp "$IN/bzImage.unsigned" bzImage.unsigned
+  cp "$IN/bzImage.signed" bzImage.signed           # rime.kernel.signing's output (sign.nix)
+  # stripped: the same signed image with its signature removed again.
+  cp bzImage.signed bzImage.stripped; sbattach --remove bzImage.stripped >/dev/null
+  cp bzImage.signed bzImage.tampered
+  local off; off=$(( $(stat -c %s bzImage.signed) / 2 ))
+  python3 -I -c 'import sys; f=open(sys.argv[1],"r+b"); o=int(sys.argv[2]); f.seek(o); b=f.read(1)[0]; f.seek(o); f.write(bytes([b^0xff]))' bzImage.tampered "$off"
+  # What Nix booted is exactly the unsigned image + the detached signature from step_detach.
+  cp bzImage.unsigned reattached; sbattach --attach "$ART/sig/$hash.sig" reattached >/dev/null
+  { echo "--- image hash $hash; bzImage.signed = in/bzImage.unsigned + sig/$hash.sig (sbattach), byte for byte:"
+    cmp reattached bzImage.signed && echo "identical"
+    echo "--- sbverify --cert test-mok.crt bzImage.signed"; sbverify --cert "$KEYS/test-mok.crt" bzImage.signed 2>&1
+    sbverify --list bzImage.signed 2>&1
+    echo "--- sbverify --list bzImage.unsigned"; sbverify --list bzImage.unsigned 2>&1 || true
+    echo "--- bzImage.stripped = bzImage.signed after sbattach --remove (must not verify)"
+    sbverify --list bzImage.stripped 2>&1 || true
+    if sbverify --cert "$KEYS/test-mok.crt" bzImage.stripped 2>&1; then die "the stripped kernel still verifies"; fi
+    echo "--- bzImage.tampered = bzImage.signed with byte $off flipped (must not verify)"
+    if sbverify --cert "$KEYS/test-mok.crt" bzImage.tampered 2>&1; then die "sbverify accepted the tampered kernel"; fi
+    sha256sum bzImage.unsigned bzImage.signed bzImage.stripped bzImage.tampered "$ART/sig/$hash.sig" "$IN/initrd" "$IN/rootfs.img"
+  } | tee "$LOGS/sign.txt"
+  rm -f reattached
+}
+
 # ── 4. Sign the NixOS kernel with the test MOK ──────────────────────────────
 step_sign() {
+  [[ $KERNEL == rime ]] && { step_sign_rime; return; }
   cd "$W"
   cp "$IN/bzImage" bzImage.unsigned
   sbsign --key "$KEYS/test-mok.key" --cert "$KEYS/test-mok.crt" --output bzImage.signed bzImage.unsigned
@@ -267,6 +318,7 @@ make_disk_fw() {
 step_disks() {
   [[ -d $STATIC/configs.d ]] || die "missing $STATIC (run-all.sh copies it from fedora-bootc:45)"
   make_disk_bls signed; make_disk_bls unsigned; make_disk_bls tampered
+  if [[ $KERNEL == rime ]]; then make_disk_bls stripped; fi
   make_disk_custom signed; make_disk_custom unsigned
   make_disk_fw
 }
@@ -285,6 +337,19 @@ CASES=(
   "a-bls-sboff-unsigned       disk-bls-unsigned.img    vars-sb-off.fd    boots"
   "b-custom-sboff-unsigned    disk-custom-unsigned.img vars-sb-off.fd    boots"
 )
+
+# KERNEL=rime: Rime's 7.2.9 kernel, signed through rime.kernel.signing (sign.nix).
+RIME_CASES=(
+  "a-bls-sbon-mok-signed      disk-bls-signed.img      vars-sb-mok.fd    boots"
+  "b-custom-sbon-mok-signed   disk-custom-signed.img   vars-sb-mok.fd    boots"
+  "a-bls-sbon-mok-stripped    disk-bls-stripped.img    vars-sb-mok.fd    refused"
+  "a-bls-sbon-mok-unsigned    disk-bls-unsigned.img    vars-sb-mok.fd    refused"
+  "a-bls-sbon-nomok-signed    disk-bls-signed.img      vars-sb-nomok.fd  refused"
+  "a-bls-sbon-mok-tampered    disk-bls-tampered.img    vars-sb-mok.fd    refused"
+  "a-bls-sboff-unsigned       disk-bls-unsigned.img    vars-sb-off.fd    boots"
+  "a-bls-sboff-stripped       disk-bls-stripped.img    vars-sb-off.fd    boots"
+)
+[[ $KERNEL == rime ]] && CASES=("${RIME_CASES[@]}")
 
 strip_ansi() { sed -e 's/\x1b\[[0-9;?]*[A-Za-z]//g' -e 's/\x1b[()][A-Z0-9]//g' -e 's/\r//g' "$1"; }
 
@@ -347,6 +412,10 @@ run_case() {   # run_case NAME DISK VARS EXPECT
       # entry.json, and the kernel file this disk's entry names.
       grep -a -F "RIME-OVMF-PROBE: stage-2 reached: $(entry .kernelVersion) system=$(dirname "$(entry .init)")" "$s" >/dev/null || verdict=FAIL
       grep -a -E "RIME-OVMF-PROBE: cmdline: BOOT_IMAGE=[^ ]*/rime/nixos/$(kname)-bzImage\.efi " "$s" >/dev/null || verdict=FAIL
+      # KERNEL=rime: NixOS stage 2 reached multi-user.target on that kernel.
+      if [[ $KERNEL == rime ]]; then
+        grep -a -F 'RIME-OVMF-PROBE: multi-user.target active' "$s" >/dev/null || verdict=FAIL
+      fi
     fi
   fi
   printf '%s\t%s\t%s\t%s\t%s\texpect=%s\tgot=%s\tsb=%s\tqemu_rc=%s\t%ss\n' \
@@ -378,10 +447,15 @@ step_cases() {
   ! grep -E '^FAIL' "$LOGS/results.tsv" >/dev/null
 }
 
-case "${1:-all}" in
-  rpms) step_rpms;; keys) step_keys;; vars) step_vars;; sign) step_sign;;
-  disks) step_disks;; cases) step_cases;;
-  case) shift; for c in "${CASES[@]}"; do [[ ${c%% *} == "$1" ]] && { run_case $c; exit; }; done; die "no case $1";;
-  all) step_rpms; step_keys; step_vars; step_sign; step_disks; step_cases;;
-  *) die "usage: lab.sh all|rpms|keys|vars|sign|disks|cases|case NAME";;
-esac
+if [[ ${1:-all} == case ]]; then
+  shift; for c in "${CASES[@]}"; do [[ ${c%% *} == "$1" ]] && { run_case $c; exit; }; done; die "no case $1"
+fi
+for step in "${@:-all}"; do
+  case "$step" in
+    rpms) step_rpms;; keys) step_keys;; detach) step_detach;; vars) step_vars;; sign) step_sign;;
+    disks) step_disks;; cases) step_cases;;
+    all) [[ $KERNEL != rime ]] || die "KERNEL=rime runs in two halves around a Nix build: see run-all.sh"
+         step_rpms; step_keys; step_vars; step_sign; step_disks; step_cases;;
+    *) die "usage: lab.sh all | case NAME | STEP... (rpms keys detach vars sign disks cases)";;
+  esac
+done

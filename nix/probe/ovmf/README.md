@@ -192,12 +192,69 @@ the CachyOS kernel; real hardware. The ESP uses the removable path (`EFI/BOOT/BO
 beside it) instead of an NVRAM entry for `\EFI\fedora\shimx64.efi`; `fbx64.efi` is left out so shim does not run
 fallback.
 
+## KERNEL=rime: Rime's own kernel, signed through `rime.kernel.signing` (kernsign, D3 + D7)
+
+**Result (2026-11-01): 8 of 8 cases PASS** (`KERNEL=rime ART=/var/lab/rime-nix/artifacts/kernsign run-all.sh`,
+exit 0, 735 s). Fedora 45's shim and GRUB boot **Rime's real kernel** (`rime.kernel`: CachyOS 7.2.9,
+`7.2.9-cachyos1-rime1`, every module's kmodigest certificate inserted) to NixOS **multi-user.target** with Secure
+Boot on, signed by exactly the path a release takes, with a throwaway key standing in for the Rime MOK:
+
+1. `build-nixos.sh image` (12 s): `system.nix --arg rimeFlake (builtins.getFlake "path:<checkout>")`, pass 1, builds
+   `system.build.rimeKernelImage` (unsigned, store hash `brbllbw9adn8fmj5347mzplgh95maybc`, sha256 `fd0c743b…6823`).
+2. `lab.sh detach`: `nix/pkgs/kernel/sign-detached.sh` (the script `nix-kernel-sign.yml` runs) signs it detached with
+   the rig's TEST MOK (`$ART/keys/`, CN "Rime OVMF probe TEST MOK (throwaway, DO NOT TRUST)") into
+   `$ART/sig/<hash>.sig` + `.json`. The private key stays in `$ART/keys`, outside Nix.
+3. `build-nixos.sh system` (248 s): pass 2 with `signatureDir = $ART/sig` and `certificate = <test cert>`:
+   `sign.nix` attaches the signature and runs `sbverify --cert` inside the build. It asserts the same image hash as
+   pass 1 and `rimeKernelSigning.signed = true`, then builds the toplevel and rootfs. The toplevel's `kernel` is
+   `/nix/store/c0hh6nyv…-linux-image-7.2.9-signed/bzImage`.
+4. `lab.sh sign` checks that `bzImage.unsigned` + the `.sig` (sbattach) is byte-identical to the Nix-built
+   `bzImage.signed`, then derives `stripped` (`sbattach --remove`) and `tampered` (one byte flipped after signing).
+
+| Case | Disk / vars | Expect | Got | Time |
+|---|---|---|---|---|
+| a-bls-sbon-mok-signed | BLS, SB on, MOK enrolled | boots | multi-user.target active, `SecureBoot enabled` | 73 s |
+| b-custom-sbon-mok-signed | bootc-shaped `custom.cfg`, SB on, MOK | boots | multi-user.target active, `SecureBoot enabled` | 58 s |
+| a-bls-sbon-mok-stripped | signature removed, SB on, MOK | refused | GRUB `bad shim signature.` | 60 s |
+| a-bls-sbon-mok-unsigned | `rimeKernelImage` as built, SB on, MOK | refused | GRUB `bad shim signature.` | 60 s |
+| a-bls-sbon-nomok-signed | signed, SB on, MOK NOT enrolled | refused | GRUB `bad shim signature.` | 60 s |
+| a-bls-sbon-mok-tampered | signed then 1 byte flipped, SB on, MOK | refused | GRUB `bad shim signature.` | 60 s |
+| a-bls-sboff-unsigned | unsigned, SB off | boots | multi-user.target active, `SecureBoot disabled` | 34 s |
+| a-bls-sboff-stripped | stripped, SB off | boots | multi-user.target active, `SecureBoot disabled` | 32 s |
+
+From the SB-on boots' serial log (the marker runs once `multi-user.target` is active):
+```
+RIME-OVMF-PROBE: multi-user.target active
+RIME-OVMF-PROBE: stage-2 reached: 7.2.9-cachyos1-rime1 system=/nix/store/i2s45f24…-nixos-system-rime-ovmf-probe-26.11pre-git
+RIME-OVMF-PROBE: mokutil --sb-state: SecureBoot enabled
+RIME-OVMF-PROBE:   integrity: Loading X.509 certificate: UEFI:MokListRT (MOKvar table)
+RIME-OVMF-PROBE:   integrity: Loaded X.509 cert 'Rime OVMF probe TEST MOK (throwaway, DO NOT TRUST): 581c2983…'
+```
+So the Rime kernel's `LOAD_UEFI_KEYS` / platform keyring reads MokListRT as expected. A refused case ends in GRUB
+with `sb.c:shim_lock_verifier_write:192:bad shim signature.` and then `you need to load the kernel first.`
+
+In the SB-off rows, `/run/current-system/kernel` still names the signed store path, because the toplevel is shared.
+The file GRUB loaded is the disk's own `rime/nixos/*-bzImage.efi`, a copy of `bzImage.unsigned` or
+`bzImage.stripped` (`lab.sh` `make_disk_bls`).
+
+Findings:
+- The marker must not race the serial getty. The first run (`run-all.attempt1-getty-vhangup.log`) reached
+  multi-user, but printed nothing, because `serial-getty@ttyS0`'s vhangup() killed the tty descriptor the service
+  inherited. `KERNEL=rime` turns that getty off and reopens `/dev/ttyS0` after the wait. Default mode is unchanged:
+  same toplevel drv as before.
+- The Rime system's rootfs is about 5.3 GB (`ext4-fs.img`), against a few hundred MB for the minimal nixpkgs one.
+  `nixosModules.default` brings the whole Rime base along.
+- Not done here: a flake check that boots this. It needs Fedora's signed shim/GRUB RPMs from the network, the
+  Microsoft-enrolled OVMF varstore, bootupd's config from `fedora-bootc:45`, KVM, and about 5 GB of disk. So it
+  stays a script. TODO(handover): run it on a KVM-capable runner if a boot gate in CI is wanted.
+
 ## Reproduce
 
 From a rime-os checkout on this branch, on a host with rootful podman, `/dev/kvm` and the `rime-nix` container
 (STATE.md, Infrastructure):
 ```sh
 nix/probe/ovmf/run-all.sh                  # build NixOS bits + all 10 cases; exit 0 = every case PASS
+KERNEL=rime ART=/var/lab/rime-nix/artifacts/kernsign nix/probe/ovmf/run-all.sh   # Rime kernel, 8 cases
 SKIP_NIX=1 nix/probe/ovmf/run-all.sh       # reuse $ART/in
 SKIP_NIX=1 nix/probe/ovmf/run-all.sh case a-bls-sbon-mok-signed   # one case (after a full run)
 BOOT_TIMEOUT=300 REFUSE_TIMEOUT=120 …      # a loaded host: a timeout is reported FAIL (got=unknown), never PASS
