@@ -53,7 +53,8 @@ let
   # The bootc scripts, unchanged in logic. Build-time substitutions only:
   #   rime-gamescope-steam  python3 + libX11 for the WM_STATE restore by store path (ctypes.util.find_library finds
   #                         nothing on NixOS), so neither leaks onto the PATH Steam inherits through `exec "$@"`.
-  #   rime-session-select   its --finish-switch re-exec names /usr/libexec; it re-execs its own wrapper instead.
+  #   rime-session-select   nothing here: its --finish-switch re-exec is pointed at its WRAPPER in switchTools, because
+  #                         that re-exec runs as a transient system unit (systemd-run), whose PATH has no coreutils.
   rimeGaming = pkgs.stdenvNoCC.mkDerivation {
     pname = "rime-gaming";
     version = "0.1.0";
@@ -90,8 +91,6 @@ let
       substituteInPlace $out/libexec/rime-gamescope-steam \
         --replace-fail 'python3 - "$1" "$STEAM_APPID"' '${lib.getExe pkgs.python3} - "$1" "$STEAM_APPID"' \
         --replace-fail 'ctypes.util.find_library("X11") or "libX11.so.6"' '"${lib.getLib pkgs.libx11}/lib/libX11.so.6"'
-      substituteInPlace $out/libexec/rime-session-select \
-        --replace-fail '/usr/libexec/rime-session-select --finish-switch' "$out/libexec/rime-session-select --finish-switch"
       runHook postInstall
     '';
 
@@ -111,16 +110,28 @@ let
   # The desktop <-> Gaming Mode switch: rime-session-select and Steam's steamos-* commands. Nothing here needs Steam.
   switchTools = pkgs.runCommand "rime-gaming-switch" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
     mkdir -p $out/libexec $out/bin
+    # The --finish-switch re-exec (bootc: /usr/libexec/rime-session-select) runs through `systemd-run` as a transient
+    # system unit, which inherits nothing from this process: it must re-exec the WRAPPER, or it dies on its first
+    # `id` ("command not found") and the session is never ended. A private copy, so the substitution can name $out.
+    install -Dm755 ${rimeGaming}/libexec/rime-session-select $out/libexec/.rime-session-select-unwrapped
+    substituteInPlace $out/libexec/.rime-session-select-unwrapped \
+      --replace-fail '/usr/libexec/rime-session-select --finish-switch' "$out/libexec/rime-session-select --finish-switch"
     # Runs as root under sudo (env_reset), so everything it needs is set here, not inherited.
-    makeWrapper ${rimeGaming}/libexec/rime-session-select $out/libexec/rime-session-select \
+    makeWrapper $out/libexec/.rime-session-select-unwrapped $out/libexec/rime-session-select \
       --set PATH ${lib.makeBinPath [ pkgs.coreutils pkgs.gawk pkgs.gnugrep pkgs.gnused pkgs.systemd pkgs.getent ]} \
-      --set RIME_SESSION_DIR ${sessionDir}
+      --set RIME_SESSION_DIR ${sessionDir} ${greetdConfigArgs}
 
     makeWrapper ${rimeGaming}/bin/steamos-session-select $out/bin/steamos-session-select \
       --prefix PATH : ${lib.makeBinPath [ nnpSudo ]} \
       --set-default RIME_SESSION_HELPER ${helperFor "$out"}
     ln -s ${rimeGaming}/bin/steamos-update $out/bin/steamos-update
   '';
+
+  # rime-session-select copies greetd's config into the one-shot switch.toml (bootc: /etc/greetd/config.toml). NixOS
+  # has no such file: greetd runs `--config <store toml>`, generated exactly as the greetd module generates it, so this
+  # is the same store path. Without greetd the script's own default stays (and the copy is empty, as on bootc).
+  greetdConfigArgs = lib.optionalString config.services.greetd.enable
+    "--set RIME_GREETD_CONFIG ${(pkgs.formats.toml { }).generate "greetd.toml" config.services.greetd.settings}";
 
   helperFor = out: if cfg.sessionSelect == null then "${out}/libexec/rime-session-select" else cfg.sessionSelect;
 
@@ -320,6 +331,7 @@ in
     security.sudo.extraRules = lib.mkIf (cfg.sessionSelect == null) [
       {
         groups = [ "wheel" ];
+        runAs = "root"; # bootc: %wheel ALL=(root) NOPASSWD
         commands = [
           {
             command = "${sessionSelect} *";
@@ -337,6 +349,17 @@ in
       lib.mkDefault "${config.services.displayManager.sessionData.desktops}/share/wayland-sessions";
 
     environment.systemPackages = [ rimeGamingWrapped pkgs.xprop ];
+
+    # What the Shell reads to offer and run the desktop <-> Gaming Mode switch (PowerMenu.qml's gaming row probe,
+    # PowerControl.sh gamingmode/desktopmode) and Settings > Gaming's Discord switch (GamingService.qml). Their
+    # defaults are bootc's /usr/libexec and /usr/share/wayland-sessions, which do not exist here: without these the
+    # Power menu has no Gaming Mode row and the Discord switch errors. mkDefault: a desktop module that owns the
+    # switcher for every session (gaming off too) sets its own.
+    environment.sessionVariables = {
+      RIME_SESSION_HELPER = lib.mkDefault sessionSelect;
+      RIME_SESSION_DIR = lib.mkDefault sessionDir;
+      RIME_GAMING_DISCORD = lib.mkDefault "${rimeGamingWrapped}/libexec/rime-gaming-discord";
+    };
 
     # bootc /etc/profile.d/rime-game-env.sh. NixOS sources no /etc/profile.d, so the same file is sourced from the
     # bash and zsh login init (greetd's `sh -c '. /etc/profile; …'` is bash on NixOS). Not environment.*ShellInit:

@@ -61,6 +61,16 @@ let
         capabilities = "cap_sys_nice+pie";
       };
 
+      # A real greetd with a placeholder greeter: the switch's --finish-switch stops and starts it, and
+      # rime-session-select copies its config into the one-shot switch.toml.
+      services.greetd = {
+        enable = true;
+        settings.default_session.command = "${pkgs.coreutils}/bin/sleep infinity";
+      };
+
+      # zsh login shells get the game environment too (programs.zsh.loginShellInit).
+      programs.zsh.enable = true;
+
       virtualisation = {
         memorySize = 3072;
         cores = 2;
@@ -158,8 +168,8 @@ let
             assert out == "12000000000", repr(out)
             out = machine.succeed("su rime -c 'env -i HOME=/home/rime /bin/sh -c \". /etc/profile; echo \\$__GL_SHADER_DISK_CACHE_SIZE\"'").strip()
             assert out == "12000000000", repr(out)
-            out = machine.succeed("su rime -s /run/current-system/sw/bin/zsh -l -c 'echo $__GL_SHADER_DISK_CACHE_SIZE' 2>&1 || true").strip()
-            print(f"zsh login: {out!r}")
+            out = machine.succeed("su rime -s /run/current-system/sw/bin/zsh -l -c 'echo $__GL_SHADER_DISK_CACHE_SIZE'").strip()
+            assert out == "12000000000", repr(out)
 
         with subtest("gamemoded starts and drives Rime game mode"):
             ini = machine.succeed("cat /etc/gamemode.ini")
@@ -194,6 +204,8 @@ let
             assert int(amb.split()[1], 16) & (1 << 23), "the setcap wrapper did not make cap_sys_nice ambient"
             rc, out = machine.execute(${asRime "/run/wrappers/bin/rime-captest steam-run true 2>&1"})
             print(f"steam-run with an ambient capability: rc={rc}\n{out}")
+            # The trap itself: without this failure the nocaps hand-off below would prove nothing.
+            assert rc != 0 and "Unexpected capabilities" in out, (rc, out)
             cleared = machine.succeed(
                 ${asRime "/run/wrappers/bin/rime-captest ${g}/libexec/rime-gamescope-steam-nocaps grep -E '^Cap(Prm|Eff|Inh|Amb):' /proc/self/status 2>/dev/null"}
             )
@@ -202,14 +214,48 @@ let
                 assert int(line.split()[1], 16) == 0, line
             machine.succeed(${asRime "/run/wrappers/bin/rime-captest ${g}/libexec/rime-gamescope-steam-nocaps steam-run true 2>/dev/null"})
 
-        with subtest("steamos-session-select switches to Gaming Mode from inside no_new_privs"):
+        with subtest("the Shell finds the switch and the Discord helper (session variables)"):
+            # PowerMenu.qml's gaming-row probe, verbatim: exit 0 = the Power menu offers Gaming Mode.
+            probe = (
+                'h="${"$"}{RIME_SESSION_HELPER:-/usr/libexec/rime-session-select}"; '
+                'd="${"$"}{RIME_SESSION_DIR:-/usr/share/wayland-sessions}"; '
+                'test -x "$h" || exit 1; '
+                'f="$d/rime-gaming.desktop"; '
+                'test -f "$f" || exit 1; '
+                "t=$(sed -n 's/^TryExec=//p' \"$f\" | head -n1); "
+                '[ -z "$t" ] || command -v "$t" >/dev/null 2>&1'
+            )
+            machine.succeed("cat > /tmp/probe.sh <<'EOF'\n" + probe + "\nEOF\nchmod 755 /tmp/probe.sh")
+            machine.succeed(${asRime "sh /tmp/probe.sh"})
+            out = machine.succeed(${asRime "\"$RIME_GAMING_DISCORD\" status --json"})
+            print(out)
+            assert '"enabled"' in out, out
+
+        with subtest("steamos-session-select switches to Gaming Mode from inside Steam's sandbox"):
             # The trap: under no_new_privs (Steam's bubblewrap) the setuid sudo cannot work.
             rc, out = machine.execute(${asRime "setpriv --no-new-privs /run/wrappers/bin/sudo -n true 2>&1"})
             print(f"sudo under no_new_privs: rc={rc} {out}")
             assert rc != 0
-            machine.succeed("rm -f /var/lib/rime-greet/last-session")
-            machine.succeed(${asRime "${userEnv} setpriv --no-new-privs steamos-session-select gaming"})
+            machine.wait_for_unit("greetd.service")
+            before = machine.succeed("systemctl show -p InvocationID --value greetd.service").strip()
+            machine.succeed("rm -f /var/lib/rime-greet/last-session /run/rime-greet/switch.toml")
+            # Exactly what Steam's Power menu runs: steamos-session-select inside the FHS environment (bwrap).
+            machine.succeed(${asRime "${userEnv} steam-run steamos-session-select gaming"})
             machine.wait_until_succeeds("test \"$(cat /var/lib/rime-greet/last-session)\" = rime-gaming")
+            # The one-shot greetd config: greetd's own settings plus an autologin into the store-path Exec.
+            toml = machine.succeed("cat /run/rime-greet/switch.toml")
+            print(toml)
+            assert "[default_session]" in toml, toml
+            assert re.search(r'^\[initial_session\]\ncommand = "sh -lc \'exec /nix/store/\S+/libexec/rime-gaming-session\'"\nuser = "rime"$', toml, re.M), toml
+            # --finish-switch (a transient system unit) ends the session and restarts greetd.
+            machine.wait_until_succeeds("journalctl -b -o cat | grep -F 'starting greetd for the switch'")
+            machine.wait_until_succeeds(
+                f"test \"$(systemctl show -p InvocationID --value greetd.service)\" != {before}"
+            )
+            machine.wait_for_unit("greetd.service")
+            journal = machine.succeed("journalctl -b -o cat")
+            assert "command not found" not in journal, [l for l in journal.splitlines() if "command not found" in l]
+            assert not re.search(r"rime-session-switch-\d+\.service: Failed", journal), journal
             # rime-session-select refuses a session that is not installed.
             rc, out = machine.execute(${asRime "sudo -n $(readlink -f ${g}/libexec/rime-session-select) no-such-session 2>&1"})
             assert rc != 0 and "not an installed session" in out, out
