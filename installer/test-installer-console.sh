@@ -42,7 +42,8 @@
 #  ── What it will not do ─────────────────────────────────────────────────────
 #
 #  No root, no block device, nothing on this machine's bus. The podman legs
-#  run against registry.fedoraproject.org/fedora:45 with the fixtures mounted
+#  run against the live env's own base image (Containerfile.installer's FROM,
+#  registry.fedoraproject.org/fedora:45 today) with the fixtures mounted
 #  read-only (one `podman run --rm`, and one throwaway image booted with
 #  --systemd=always, removed afterwards); they need the Fedora mirrors for dnf.
 #  Without podman (or a reachable registry/mirror) they print SKIP, and CI
@@ -64,7 +65,11 @@ GEN="$PWD/../files/system/systemd/rime-keymap-env"
 for f in "$ENGINE" "$UNIT" "$CF" "$ISO" "$GEN"; do
     [ -f "$f" ] || { echo "FATAL: cannot find $f" >&2; exit 2; }
 done
-IMAGE="${RIME_TEST_FEDORA_IMAGE:-registry.fedoraproject.org/fedora:45}"
+# The image the live env is built FROM (Containerfile.installer), read out of
+# that file so the two cannot drift: a digest pin there is a pin here.
+CF_FROM="$(sed -n 's/^FROM[[:space:]]\{1,\}\([^[:space:]]\{1,\}\).*/\1/p' "$CF" | head -1)"
+[ -n "$CF_FROM" ] || die "no FROM line in $CF; this suite would not know which Fedora to measure"
+IMAGE="${RIME_TEST_FEDORA_IMAGE:-$CF_FROM}"
 
 pass=0; fail=0; skip=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
@@ -148,21 +153,70 @@ if [ -n "$l_en" ] && [ -n "$l_mk" ] && [ "$l_en" -lt "$l_mk" ]; then
 else
     bad "getty@.service is enabled BEFORE getty@tty1 is masked" "enable line ${l_en:-none}, mask line ${l_mk:-none}"
 fi
-if grep -qF 'autovt@tty1 is not masked' "$ISO"; then
-    ok "build-live-iso.sh refuses an ISO whose autovt@tty1 is not masked"
-else bad "build-live-iso.sh refuses an ISO whose autovt@tty1 is not masked"; fi
-if grep -qF 'kmsconvt@tty1 is not masked' "$ISO"; then
-    ok "build-live-iso.sh refuses an ISO whose kmsconvt@tty1 is not masked"
-else bad "build-live-iso.sh refuses an ISO whose kmsconvt@tty1 is not masked"; fi
-if grep -qF 'Ctrl+Alt+F2 would have no login' "$ISO"; then
-    ok "build-live-iso.sh refuses an ISO with no autovt@ alias"
-else bad "build-live-iso.sh refuses an ISO with no autovt@ alias"; fi
-# kmscon is unsupported in the live env, so the ISO accepts only agetty.
-if sed -n '/^_autovt=/,/^esac/p' "$ISO" | grep -F 'kmsconvt@.service' >/dev/null; then
-    bad "build-live-iso.sh accepts only getty@ as autovt@ (kmscon is refused in the live env)"
-else
-    ok "build-live-iso.sh accepts only getty@ as autovt@ (kmscon is refused in the live env)"
+# build-live-iso.sh's console asserts, RUN against fixture rootfs trees rather
+# than searched for their messages: a check that is bypassed or deleted while
+# its text survives must fail here. The block is lifted out of the script from
+# the getty@tty1 mask check to the end of the autovt@ case, and run under the
+# script's own `set -euo pipefail` with `sudo` as a pass-through.
+ISOBLOCK="$W/iso-asserts.sh"
+# shellcheck disable=SC2016  # a literal $WORK in the anchor, not an expansion
+sed -n '/^sudo test -L "\$WORK\/rootfs\/etc\/systemd\/system\/getty@tty1\.service"/,/^esac$/p' \
+    "$ISO" > "$ISOBLOCK"
+n=$(grep -c 'BUILD ASSERT FAILED' "$ISOBLOCK")
+if [ "$n" -lt 4 ] || ! grep -x 'esac' "$ISOBLOCK" >/dev/null; then
+    bad "build-live-iso.sh's console asserts are extracted" "$n asserts found; the anchors have moved"
+    finish; exit 1
 fi
+ok "build-live-iso.sh's console asserts are extracted ($n asserts)"
+mk_rootfs() {  # $1 = case; then name=target pairs under etc/systemd/system
+    local root="$W/iso/$1" kv; shift
+    local d="$root/rootfs/etc/systemd/system"
+    mkdir -p "$d"
+    for kv in "$@"; do ln -s "${kv#*=}" "$d/${kv%%=*}"; done
+    printf '%s' "$root"
+}
+iso_case() {  # $1 = what  $2 = expected message ('' = must pass)  $3.. = links
+    local what=$1 want=$2 root rc o; shift 2
+    root="$(mk_rootfs "$what" "$@")"
+    o="$(WORK="$root" bash -c 'set -euo pipefail; sudo() { "$@"; }; . "$0"' "$ISOBLOCK" 2>&1)"; rc=$?
+    if [ -z "$want" ]; then
+        if [ "$rc" = 0 ]; then ok "build-live-iso.sh accepts $what"
+        else bad "build-live-iso.sh accepts $what" "rc $rc: $o"; fi
+    elif [ "$rc" != 0 ] && printf '%s\n' "$o" | grep -F "BUILD ASSERT FAILED: $want" >/dev/null; then
+        ok "build-live-iso.sh refuses $what"
+    else
+        bad "build-live-iso.sh refuses $what" "rc $rc: ${o:-no output}"
+    fi
+}
+G1='getty@tty1.service=/dev/null'; A1='autovt@tty1.service=/dev/null'
+K1='kmsconvt@tty1.service=/dev/null'
+AV='autovt@.service=/usr/lib/systemd/system/getty@.service'
+iso_case "a live env with tty1 masked under every name and autovt@ = getty@" '' "$G1" "$A1" "$K1" "$AV"
+iso_case "a live env whose getty@tty1 is not masked" 'getty@tty1 is not masked' "$A1" "$K1" "$AV"
+iso_case "a live env whose autovt@tty1 is not masked" 'autovt@tty1 is not masked' "$G1" "$K1" "$AV"
+iso_case "a live env whose autovt@tty1 is a link but not a mask" 'autovt@tty1 is not masked' \
+    "$G1" 'autovt@tty1.service=/usr/lib/systemd/system/getty@.service' "$K1" "$AV"
+iso_case "a live env whose kmsconvt@tty1 is not masked" 'kmsconvt@tty1 is not masked' "$G1" "$A1" "$AV"
+iso_case "a live env with no autovt@ alias" "autovt@.service is 'missing', not getty@" "$G1" "$A1" "$K1"
+# kmscon is unsupported in the live env, so the ISO accepts only agetty.
+iso_case "a live env whose autovt@ is kmsconvt@" 'autovt@.service is ' \
+    "$G1" "$A1" "$K1" 'autovt@.service=/usr/lib/systemd/system/kmsconvt@.service'
+
+# The booted leg below trusts only a boot that FINISHED. `systemctl
+# is-system-running --wait` prints the final state and exits non-zero for
+# `degraded` (normal in a container: no consoles), so the word decides, not the
+# exit code; a timeout or a manager stuck in starting/initializing is no boot.
+boot_state_ok() {  # $1 = what is-system-running --wait printed
+    case "$1" in running|degraded) return 0 ;; *) return 1 ;; esac
+}
+for st in running degraded; do
+    if boot_state_ok "$st"; then ok "a boot that ends '$st' counts as booted"
+    else bad "a boot that ends '$st' counts as booted"; fi
+done
+for st in starting initializing maintenance stopping offline unknown ''; do
+    if boot_state_ok "$st"; then bad "a boot that ends '${st:-no answer}' does not count as booted"
+    else ok "a boot that ends '${st:-no answer}' does not count as booted"; fi
+done
 
 # ─────────────────────────────────────────────────────────────────────────────
 section "the engine writes the operator's layout where localed and 50-rime-keymap read it"
@@ -331,17 +385,18 @@ COPY rime-installer.service /usr/lib/systemd/system/rime-installer.service
 COPY units.sh /units.sh
 RUN sh -e /units.sh
 BOOTEOF
-boot_ok=0
+boot_ok=0; boot_why=""
 if podman build -q -t "$BOOT_IMG" "$W/boot" >"$W/boot.log" 2>&1; then
     BOOT_CID="$(podman run -d --rm --systemd=always "$BOOT_IMG" /sbin/init 2>>"$W/boot.log")"
     if [ -n "$BOOT_CID" ]; then
-        # degraded is fine (no consoles in a container); wait for the boot job.
-        timeout 60 podman exec "$BOOT_CID" systemctl is-system-running --wait >/dev/null 2>&1
-        boot_ok=1
+        # Wait for the boot job; only a finished boot counts (boot_state_ok).
+        state="$(timeout 60 podman exec "$BOOT_CID" systemctl is-system-running --wait 2>/dev/null)"
+        if boot_state_ok "$state"; then boot_ok=1
+        else boot_why="systemd did not finish booting within 60 s: '${state:-no answer}'"; fi
     fi
 fi
 if [ "$boot_ok" != 1 ]; then
-    skp "the booted Fedora 45 live-env leg" "could not build or boot ($(tail -1 "$W/boot.log"))"
+    skp "the booted Fedora 45 live-env leg" "${boot_why:-could not build or boot ($(tail -1 "$W/boot.log"))}"
 else
     show() {  # $1 = unit $2 = property
         podman exec "$BOOT_CID" systemctl show "$1" -p "$2" --value 2>/dev/null
@@ -353,6 +408,7 @@ else
     is "booted: autovt@tty2 loads" "loaded" "$(show autovt@tty2.service LoadState)"
     deps="$(podman exec "$BOOT_CID" systemctl list-dependencies getty.target --plain 2>/dev/null | tr -d ' ' | tr '\n' ' ')"
     case " $deps " in
+        "  ") bad "booted: getty.target wants no console on tty1" "list-dependencies printed nothing" ;;
         *" getty@tty1.service "*|*" autovt@tty1.service "*|*" kmsconvt@tty1.service "*)
             bad "booted: getty.target wants no console on tty1" "$deps" ;;
         *) ok "booted: getty.target wants no console on tty1" ;;
