@@ -30,3 +30,5 @@
 // import ./boot.nix { inherit pkgs self; }
 # catalogue, catalogue-data
 // import ./catalogue.nix { inherit pkgs self; }
+# bridge-unit, bridge-refusals
+// import ./bridge.nix { inherit pkgs self; }
