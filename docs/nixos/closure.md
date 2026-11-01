@@ -19,8 +19,8 @@ this measurement.
 | on disk after install (`plain`, btrfs zstd:3, optimised) | 4.30 GB | bootc 5.4 GB (2026.10.04.2, 12 GiB VM) |
 | `rime install steam` on top of `plain` | **+0.53 GB** download, +2.46 GB unpacked, +0.99 GB on disk | |
 | **A4** | **gaming is opt-in** (`rime.gaming.enable` stays `false`; installs ship `plain`) | 10-04 decision kept |
-| **A11 disk floor** (install + one mass rebuild + boot) | **16 GB** as `rime update` is designed (§11.5 gate); 12 GB if the gate counts compressed bytes | bootc 12 GB install-only, ~16 GB for its own update cycle |
-| A11 install-only minimum | 6 GB | bootc 12 GB |
+| **A11 disk floor** (install + one mass rebuild + boot) | **16 GB** as `rime update` is designed (§11.5 gate counts unpacked bytes); **12 GB** physically, and once the gate counts on-disk bytes | bootc 12 GB, which holds its 5.4 GB install plus one core update, barely (§6) |
+| A11 install-only minimum (no update headroom) | 6 GB | no bootc counterpart published |
 
 `plain` is the shape a fresh install ships (D9's generic rime-plain toplevel): every Rime area on, Rime's kernel with
 NVIDIA 615, no gaming, no test account. `rime-vm` is `nixosConfigurations.rime-vm` (gaming on, nixpkgs' kernel, no
@@ -42,6 +42,7 @@ sudo -n podman exec -w /work/wt-size rime-nix nix shell $R#bash $R#coreutils $R#
 nix build path:.#checks.x86_64-linux.size
 nix build path:.#checks.x86_64-linux.size.mutants.second-nerd-font
 nix build path:.#checks.x86_64-linux.size.mutants.registry-store-path
+nix build path:.#checks.x86_64-linux.size.mutants.registry-unlocked
 ```
 
 - **Download** is what a machine fetches from cache.rimeos.com (D6: machines fetch only from Rime's cache, zstd). All
@@ -190,12 +191,16 @@ booted into the current one. So the floor is **one system installed, plus room f
   each NAR's size and the compression ratio measured here (0.42 on disk per unpacked byte for `plain`), so the gate
   could estimate on-disk bytes instead. That is a D6 change, listed in the handover; until it lands, the published
   floor is the first figure.
-- **Install-only minimum: 6 GB** (partitions + installed system + 1 GB, rounded up). That is the
-  figure comparable to bootc's 12 GB, which `installer/rime-install` derives the same way (8.1 GB installed + 2 GiB of
-  partitions + headroom) and which does not include an update.
+- **Install-only minimum: 6 GB** (partitions + installed system + 1 GB, rounded up), with no room for an update.
+  bootc publishes no figure of this shape.
 - **With gaming:** 20 GB as designed. `rime install steam` must refuse by name below it.
-- bootc for comparison: 12 GB required (install only), and its own update cycle measured at about 14.1 GB of root plus
-  0.5-2 GB of partitions (2026-10-04, 30 GiB VM), published as "20 GB recommended".
+- **bootc for comparison: 12 GB.** `installer/rime-install` (~2312-2333) derived it on 2026-10-04 as an install floor
+  (8.1 GB peak install + 2 GiB of partitions + headroom), but the release that followed (2026.10.04.2, the apps out of
+  the image) installs in 5.4 GB, and a core-rebuild update needs about 5.1 GB free, so a 12 GB bootc disk holds the
+  install plus ONE core update, barely (repo CLAUDE.md, 2026-10-04). That is the same shape as this floor: the
+  physical 12 GB here matches bootc's 12 GB, and the 16 GB as designed is worse than bootc only because D6 §11.5
+  counts unpacked NAR bytes, a ~2.4× over-estimate on `compress-force=zstd:3` (ratio 0.42 above). bootc's own update
+  cycle measured about 14.1 GB of root plus 0.5-2 GB of partitions (2026-10-04, 30 GiB VM): "20 GB recommended".
 
 **The ESP.** On fresh installs `/boot` is the ESP (D9) and holds a kernel and initrd per kept generation. During a
 mass-rebuild update that is three (previous, current, new): 3 × 52.4 MB = 157.3 MB, plus Fedora's shim
@@ -206,7 +211,8 @@ the guard.
 
 `nix/tests/size.nix` reads the rime-vm toplevel's closure (`closureInfo`) and fails when a cut comes back: any
 `mbrola-voices`, more or fewer than one JetBrainsMono Nerd Font, `webkitgtk-*+abi=4.1`, the nixpkgs source (or a
-module's re-import of it), `/etc/nix/registry.json` naming a store path, the large `-doc` outputs or the NixOS manual,
+module's re-import of it), `/etc/nix/registry.json` naming a store path or not locking nixpkgs to this flake's rev
+(`self.inputs.nixpkgs.rev`, `1c89083e451e…` today), the large `-doc` outputs or the NixOS manual,
 or a closure above the budget (10,200,547,328 B = 9.5 GiB; 9,530,593,800 B measured, so ~640 MiB for the P2 ports
 still landing). Raising the budget is a deliberate edit with an entry here saying what grew and why.
 
@@ -216,15 +222,20 @@ Seen:
   `size guard: all cuts hold`.
 - Mutant `second-nerd-font` (nixpkgs' 3.5.0 font back in `fonts.packages`): fails with `FAIL: 2 JetBrainsMono Nerd
   Font paths in the closure, expected exactly 1 (the 3.5.1 pin)`.
-- Mutant `registry-store-path` (the registry back on `pkgs.path`): fails twice, `the nixpkgs source (…-source) is in
-  the closure` and `/etc/nix/registry.json names a store path`.
+- Mutant `registry-store-path` (the registry back on `pkgs.path`): fails three times, `the nixpkgs source (…-source)
+  is in the closure`, `/etc/nix/registry.json names a store path` and `does not lock nixpkgs to 1c89083e…`.
+- Mutant `registry-unlocked` (the registry on `github:NixOS/nixpkgs` with no rev, which would follow master): fails
+  with `/etc/nix/registry.json does not lock nixpkgs to 1c89083e451e891152365b799595cf7790a43325`.
+- The shipped registry (`<rime-vm toplevel>/etc/nix/registry.json`): `{"from":{"id":"nixpkgs","type":"indirect"},
+  "to":{"owner":"NixOS","repo":"nixpkgs","rev":"1c89083e451e891152365b799595cf7790a43325","type":"github"}}`.
 - `checks.vm-boot`, `checks.desktop` and `checks.gaming` pass with the cuts (firstrun seeds niri and labwc from the two
   kept doc files; `fc-list` finds the JetBrainsMono Nerd Font; the gaming session still gets 32-bit ALSA).
 
 ## 8. Handover
 
-- **STATE.md A4 and A11** (the integrator's file): A4 = gaming opt-in (§5); A11 floor = 16 GB as designed,
-  install-only 6 GB; P5 figure = 2.51 GB.
+- **STATE.md A4 and A11** (the integrator's file): A4 = gaming opt-in (§5); A11 floor = 16 GB as designed
+  (12 GB physical, = bootc's 12 GB, once D6 §11.5 counts on-disk bytes), install-only 6 GB, gaming 20 GB; P5 figure =
+  2.51 GB (zstd -19; bootc 4.20 GB).
 - **D6 §11.5:** count estimated on-disk bytes, not unpacked NAR bytes, in the free-space gate; that drops the floor to
   12 GB (§6).
 - **`gaming.nix`:** the `rime.gaming.enable` description quotes an older measurement (+2.95 GB NAR); the measured delta

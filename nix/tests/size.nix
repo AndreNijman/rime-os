@@ -4,7 +4,8 @@
 #   - mbrola-voices (645 MiB, speech-dispatcher's espeak-ng; bootc ships espeak-ng without voices);
 #   - a second JetBrainsMono Nerd Font (nixpkgs' 3.5.0 next to Rime's 3.5.1 pin);
 #   - webkitgtk 4.1 (NetworkManager-openconnect's GNOME auth dialog; bootc has no -gnome subpackage);
-#   - the nixpkgs source tree (/etc/nix/registry.json pointing at a store path instead of a locked GitHub rev);
+#   - the nixpkgs source tree (/etc/nix/registry.json pointing at a store path instead of a locked GitHub rev),
+#     and a registry that does not lock nixpkgs to this flake's rev;
 #   - the big -doc outputs and the NixOS manual (documentation.doc / documentation.nixos);
 # and when the closure's NAR total passes the budget below. The toplevel is the same one `nix build
 # path:.#nixosConfigurations.rime-vm.config.system.build.toplevel` builds, so the check costs one closureInfo.
@@ -89,6 +90,8 @@ let
       if grep -F '/nix/store/' ${toplevel}/etc/nix/registry.json >/dev/null; then
         no "/etc/nix/registry.json names a store path: $(cat ${toplevel}/etc/nix/registry.json)"
       fi
+      grep -F '"rev":"${self.inputs.nixpkgs.rev}"' ${toplevel}/etc/nix/registry.json >/dev/null ||
+        no "/etc/nix/registry.json does not lock nixpkgs to ${self.inputs.nixpkgs.rev}: $(cat ${toplevel}/etc/nix/registry.json)"
       for d in python3[.0-9]*-[.0-9]*-doc pipewire-[.0-9]*-doc wireplumber-[.0-9]*-doc nixos-manual-html; do
         [ "$(count "^/nix/store/[a-z0-9]{32}-$d\$")" = 0 ] || no "$d is in the closure (documentation.doc/nixos)"
       done
@@ -131,6 +134,16 @@ guard "rime-vm" rimeVm
         nix.registry.nixpkgs.to = lib.mkForce {
           type = "path";
           path = pkgs.path;
+        };
+      })
+    ]);
+    # The registry on GitHub nixpkgs without a locked rev: `nix run nixpkgs#x` would follow master, not the system.
+    registry-unlocked = guard "mutant-registry-unlocked" (variant [
+      ({ lib, ... }: {
+        nix.registry.nixpkgs.to = lib.mkForce {
+          type = "github";
+          owner = "NixOS";
+          repo = "nixpkgs";
         };
       })
     ]);
