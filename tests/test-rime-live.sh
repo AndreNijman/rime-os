@@ -276,10 +276,19 @@ grep -q '"state":"rolled-back"' "$R/var/lib/rime/live/history.jsonl" && grep -q 
 # ── `rime update` itself ─────────────────────────────────────────────────────
 # Both absolute helpers it may run are replaced, for this namespace only.
 printf '#!/bin/sh\necho "skopeo stub: no registry in this test" >&2\nexit 1\n' > "$T/skopeo"
-printf '#!/bin/sh\nexit 10\n' > "$T/boot-migrate"
+# The migration engine stub records that it ran (and with what), then answers
+# with $T/migrate-rc: 10 (refused) unless a case says otherwise.
+cat > "$T/boot-migrate" <<STUB
+#!/bin/sh
+echo "\$*" >> "$T/migrate-ran"
+exit \$(cat "$T/migrate-rc" 2>/dev/null || echo 10)
+STUB
 chmod +x "$T/skopeo" "$T/boot-migrate"
 [ -e /usr/bin/skopeo ] && mount --bind "$T/skopeo" /usr/bin/skopeo
-[ -e /usr/libexec/rime-boot-migrate ] && mount --bind "$T/boot-migrate" /usr/libexec/rime-boot-migrate
+ENGINE_STUBBED=0
+if [ -e /usr/libexec/rime-boot-migrate ]; then
+    mount --bind "$T/boot-migrate" /usr/libexec/rime-boot-migrate && ENGINE_STUBBED=1
+fi
 export HOME="$T/home"; mkdir -p "$HOME"
 upd() { "$RIME_BIN" update --force --fsync --skip-packages --skip-flatpak --skip-firmware "$@" > "$T/out" 2>&1; echo $?; }
 nolayer_setup() { setup; rm -f "$R/var/lib/rime/live/txn.json"; }
@@ -347,6 +356,131 @@ sed -i "s/\"checksum\":\"$B\"/\"checksum\":\"$S\"/; s/\"imageDigest\":\"sha256:b
 E64="sha256:$(printf e%.0s $(seq 64))"; B64="sha256:$(printf b%.0s $(seq 64))"
 [ "$(jq_ "d['booted']['digest']")" = "$E64" ] && [ "$(jq_ "d['from']['digest']")" = "$B64" ] \
     && ok "status.json: booted is the deployment running now, from is the record's" || bad "stale booted digest" "booted=$(jq_ "d['booted']['digest']") from=$(jq_ "d['from']['digest']")"
+
+# ── the boot-path migration runs only when asked, and only when healthy ──
+# 2026-11-01: `rime update` used to run the engine on every update. Every case
+# below reads the engine stub's record, so "the engine never ran" is measured,
+# not inferred from the output. The phase is read from RIME_MIGRATE_STATE (the
+# engine's own state hook), the recovery rows from an empty RIME_RECOVER_ROOT,
+# and `systemctl --failed` — run by absolute path — from $T/failed-units
+# through a stub bound over /usr/bin/systemctl for this namespace only. Not
+# RIME_TRUST_ROOT: under a fixture trust root `rime update` refuses to deploy.
+F="$T/fixture"
+cat > "$T/systemctl-abs" <<STUB
+#!/bin/sh
+case "\$1" in --failed) cat "$T/failed-units" 2>/dev/null; exit 0 ;; esac
+exec "$T/bin/systemctl" "\$@"
+STUB
+chmod +x "$T/systemctl-abs"
+SYSTEMCTL_STUBBED=0
+[ -e /usr/bin/systemctl ] && mount --bind "$T/systemctl-abs" /usr/bin/systemctl && SYSTEMCTL_STUBBED=1
+mig_setup() {   # $1 = phase ("" for none), $2 = failed units ("" for none)
+    nolayer_setup
+    rm -rf "$F" "$T/migrate-ran" "$T/migrate-rc"
+    mkdir -p "$F/state"
+    [ -n "$1" ] && printf '%s\n' "$1" > "$F/state/phase"
+    printf '%s' "$2" > "$T/failed-units"
+}
+mupd() { RIME_MIGRATE_STATE="$F/state" RIME_RECOVER_ROOT="$F" upd --no-live --allow-unverified "$@"; }
+mboot() { RIME_MIGRATE_STATE="$F/state" RIME_RECOVER_ROOT="$F" "$RIME_BIN" boot migrate > "$T/out" 2>&1; echo $?; }
+ran() { [ -s "$T/migrate-ran" ]; }
+
+# The engine must be AT its absolute path for these cases to mean anything: a
+# machine without it never runs the migration, gated or not. Where the host has
+# no engine (a CI runner) put the stub there: a read-only overlay keeps the
+# rest of /usr/libexec, and where overlay is refused (an overlay /usr) a tmpfs
+# holding only the stub will do — these are the last cases, and nothing they
+# run needs anything else from /usr/libexec.
+if [ "$ENGINE_STUBBED" != 1 ]; then
+    mkdir -p "$T/libexec-stub" && cp "$T/boot-migrate" "$T/libexec-stub/rime-boot-migrate"
+    if mount -t overlay overlay -o lowerdir="$T/libexec-stub":/usr/libexec /usr/libexec 2>/dev/null; then
+        ENGINE_STUBBED=1
+    elif mount -t tmpfs tmpfs /usr/libexec && cp "$T/boot-migrate" /usr/libexec/rime-boot-migrate; then
+        ENGINE_STUBBED=1
+    fi
+fi
+if [ "$ENGINE_STUBBED" != 1 ] || [ "$SYSTEMCTL_STUBBED" != 1 ]; then
+    bad "boot-path migration cases" "could not place the stubs (engine=$ENGINE_STUBBED systemctl=$SYSTEMCTL_STUBBED)"
+else
+    # 21. A plain update never runs the engine.
+    mig_setup "" ""
+    rc=$(mupd)
+    [ "$rc" = 0 ] && ! ran && [ "$(bootc_seq)" = "--download-only|--from-downloaded|" ] \
+        && ok "update: the boot path is left alone unless asked" || bad "unasked migration" "rc=$rc ran=$(cat "$T/migrate-ran" 2>/dev/null) $(tail -3 "$T/out")"
+
+    # 22. phase=failed, not asked: named, engine untouched, update goes on.
+    mig_setup failed ""
+    rc=$(mupd)
+    [ "$rc" = 0 ] && ! ran && grep -q 'boot-path migration \[last-attempt-failed\]' "$T/out" \
+        && grep -q 'rime-boot-migrate retry' "$T/out" && [ "$(bootc_seq)" = "--download-only|--from-downloaded|" ] \
+        && ok "update: a failed earlier attempt is named, and nothing retries" || bad "failed phase notice" "rc=$rc $(cat "$T/out")"
+
+    # 23. Asked and healthy: the engine runs; its refusal does not stop the update.
+    mig_setup "" ""
+    rc=$(mupd --migrate-boot)
+    [ "$rc" = 0 ] && [ "$(cat "$T/migrate-ran" 2>/dev/null)" = auto ] && [ "$(bootc_seq)" = "--download-only|--from-downloaded|" ] \
+        && ok "update --migrate-boot: healthy machine runs the engine; a refusal lets the update go on" || bad "asked+healthy" "rc=$rc ran=$(cat "$T/migrate-ran" 2>/dev/null) seq=$(bootc_seq) $(tail -3 "$T/out")"
+
+    # 24. Asked, healthy, and the engine migrates: no image update in the same run.
+    mig_setup "" ""; echo 0 > "$T/migrate-rc"
+    rc=$(mupd --migrate-boot)
+    [ "$rc" = 0 ] && ran && ! grep -q '^bootc upgrade' "$T/calls" 2>/dev/null && grep -q 'boot path was migrated' "$T/out" \
+        && ok "update --migrate-boot: a migration replaces this run's image update" || bad "instead-of" "rc=$rc seq=$(bootc_seq) $(tail -3 "$T/out")"
+
+    # 25. Asked, but a unit has failed: refused by name, engine untouched.
+    mig_setup "" "broken-thing.service"
+    rc=$(mupd --migrate-boot)
+    [ "$rc" = 0 ] && ! ran && grep -q 'REFUSED \[unhealthy\]' "$T/out" && grep -q 'broken-thing.service' "$T/out" \
+        && [ "$(bootc_seq)" = "--download-only|--from-downloaded|" ] \
+        && ok "update --migrate-boot: an unhealthy machine is refused, and still updated" || bad "asked+unhealthy" "rc=$rc ran=$(cat "$T/migrate-ran" 2>/dev/null) $(tail -5 "$T/out")"
+
+    # 26. Asked, phase=failed: refused by name before any health probe.
+    mig_setup failed ""
+    rc=$(mupd --migrate-boot)
+    [ "$rc" = 0 ] && ! ran && grep -q 'REFUSED \[last-attempt-failed\]' "$T/out" \
+        && ok "update --migrate-boot: a failed attempt is not re-armed" || bad "asked+failed" "rc=$rc $(tail -5 "$T/out")"
+
+    # 26b. Committed in this boot (BootNext set), plain update: the engine is
+    # still consulted, says "reboot", and no image is staged on top of it.
+    mig_setup committed ""; echo 0 > "$T/migrate-rc"
+    rc=$(mupd)
+    [ "$rc" = 0 ] && ran && ! grep -q '^bootc upgrade' "$T/calls" 2>/dev/null \
+        && ok "update: a committed migration is never stacked with an image update" || bad "committed+unasked" "rc=$rc ran=$(cat "$T/migrate-ran" 2>/dev/null) seq=$(bootc_seq) $(tail -3 "$T/out")"
+
+    # 26c. A waiting stage, plain update: left alone, said, update goes on.
+    mig_setup staged ""
+    rc=$(mupd)
+    [ "$rc" = 0 ] && ! ran && grep -q 'boot-path migration \[staged\]' "$T/out" \
+        && [ "$(bootc_seq)" = "--download-only|--from-downloaded|" ] \
+        && ok "update: a waiting stage is named, not committed" || bad "staged+unasked" "rc=$rc $(tail -5 "$T/out")"
+    # Each line of a notice starts with "rime:" at the margin. A Rust string
+    # continued without a trailing backslash keeps the source indentation.
+    grep -E '^[[:space:]]+rime: ' "$T/out" >/dev/null \
+        && bad "staged notice layout" "$(grep -E '^[[:space:]]+rime: ' "$T/out")" \
+        || ok "update: the staged notice is not indented by the source"
+    mig_setup failed ""
+    mupd >/dev/null
+    grep -E '^[[:space:]]+rime: ' "$T/out" >/dev/null \
+        && bad "failed notice layout" "$(grep -E '^[[:space:]]+rime: ' "$T/out")" \
+        || ok "update: the last-attempt-failed notice is not indented by the source"
+
+    # 27. `rime boot migrate`: the same gate, its own exit codes.
+    mig_setup "" ""; echo 0 > "$T/migrate-rc"
+    rc=$(mboot)
+    [ "$rc" = 0 ] && [ "$(cat "$T/migrate-ran")" = auto ] && ! grep -q '^bootc' "$T/calls" 2>/dev/null \
+        && ok "boot migrate: healthy machine migrates, and nothing else runs" || bad "boot migrate" "rc=$rc $(cat "$T/out")"
+    mig_setup "" ""
+    rc=$(mboot)
+    [ "$rc" = 10 ] && ran && ok "boot migrate: the engine's refusal is exit 10" || bad "boot migrate refused" "rc=$rc $(cat "$T/out")"
+    mig_setup "" "broken-thing.service"
+    rc=$(mboot)
+    [ "$rc" = 10 ] && ! ran && grep -q 'REFUSED \[unhealthy\]' "$T/out" \
+        && ok "boot migrate: an unhealthy machine is refused before the engine" || bad "boot migrate unhealthy" "rc=$rc $(cat "$T/out")"
+    mig_setup failed ""
+    rc=$(mboot)
+    [ "$rc" = 10 ] && ! ran && grep -q 'REFUSED \[last-attempt-failed\]' "$T/out" \
+        && ok "boot migrate: a failed attempt is refused by name" || bad "boot migrate failed" "rc=$rc $(cat "$T/out")"
+fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

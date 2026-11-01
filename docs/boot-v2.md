@@ -68,8 +68,21 @@ this dumbass reinstall shit. and also a failed or cancelled or power shut down
 or something sudo rime install in this change should not fully break the boot
 and actual system or whatever, everything should safely migrate."*
 
-`files/system/libexec/rime-boot-migrate` is that, and `rime update` runs it
-with no flag and nothing for the user to choose.
+`files/system/libexec/rime-boot-migrate` is that. Until 2026-11-01 `rime
+update` ran it with no flag and nothing for the user to choose.
+
+**Restated 2026-11-01: the migration runs only when asked.** The automatic run
+moved a real machine whose trial boot did not come up (`phase=failed`, its
+`/var` join reversed by hand), and Rime's next platform does not build on this
+chain. `rime update` now leaves the boot path alone. The move happens when the
+user asks for it — `sudo rime boot migrate`, or `sudo rime update
+--migrate-boot` in place of that run's image update — and only when the
+machine is healthy right now: §26's verdict (no failed unit, no regression in
+`rime recover status`), read before the engine runs. A machine whose last
+attempt failed is told so by name on every update, and is re-armed only by
+`rime-boot-migrate retry`. The other half of the rule stands unchanged: a
+failed, cancelled or power-cut migration must not break the boot, and nothing
+below about how the engine commits has changed.
 
 ### What the bare bootc command does to a machine, measured
 
@@ -402,7 +415,7 @@ Choosing credentials brings rules, and none of them is optional:
 > impossible, back up and reinstall" was the conclusion when this was written,
 > and it is wrong: `bootc install to-existing-root --composefs-backend
 > --bootloader systemd` converts a running machine in place, and Rime drives it
-> from `rime update`. Read "Migrating a machine that already exists" above for
+> from `rime boot migrate` (from `rime update` until 2026-11-01). Read "Migrating a machine that already exists" above for
 > what happens. What survives here is the **ESP arithmetic**, which was then
 > why the migration refused on the L16 (the slim initramfs retired it; see
 > "When it refuses").
@@ -724,8 +737,9 @@ helper for those commands on **executable** lines and fails the build if one
 appears. What the pivot has added to the image so far is the machinery that has
 to exist *before* a default can move: `systemd-boot-unsigned` and
 `systemd-ukify` in `Containerfile.core`, the blessing fix, the boot-counting
-unit below, and `rime-boot-migrate`, which `rime update` runs to move a machine
-that passes its precheck (see "Migrating a machine that already exists").
+unit below, and `rime-boot-migrate`, which `rime boot migrate` runs, when asked,
+to move a healthy machine that passes its precheck (see "Migrating a machine
+that already exists").
 Enrolment is still the human procedure further down.
 
 The two units that implement boot counting carry
@@ -792,6 +806,7 @@ machine and on a machine with nothing staged.
 | boot counter | `files/system/libexec/rime-boot-count` | renames the STAGED entry to `+3-0` so bootc's uncounted set gets a counter; picks the entry by composefs digest, refuses on ambiguity |
 | blessing repair | `files/system/selinux/rime_sdboot.te` + `files/system/units/10-rime-bless-boot-esp.conf` | lets `systemd-bless-boot` rename an entry on a FAT ESP, which `init_t` cannot |
 | reporting | `rime boot status` | read-only; what verified this boot and what the counter believes |
+| migration, asked for | `rime boot migrate` (root), or `rime update --migrate-boot` | the gate in front of `rime-boot-migrate auto`: runs it only when asked and the machine is healthy; names a failed earlier attempt (`rimed/rime/src/ops.rs`, `migration_gate`) |
 | CI | `.github/workflows/boot-v2.yml` | builds the lab, boots the scenarios, publishes nothing |
 
 Build-time tooling (`ukify`, `qemu`, `sbsign`, `swtpm`) lives in the

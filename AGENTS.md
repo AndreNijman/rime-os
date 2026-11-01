@@ -142,7 +142,9 @@ phase.
      which sd-boot cannot read. Only `--composefs-backend` works. `bootc --help`
      lists no migration verb, but **`bootc install to-existing-root
      --composefs-backend --bootloader systemd` converts a running machine in
-     place** (measured 2026-09-21), and `rime update` is what runs it. It is a
+     place** (measured 2026-09-21), and `rime boot migrate` is what runs it:
+     only when the user asks, and only on a healthy machine (since 2026-11-01
+     `rime update` no longer runs it on its own; `docs/boot-v2.md`). It is a
      reinstall for nobody.
    * **The migration commits at exactly one write, and everything before it is
      discardable.** Run bare, that bootc command deletes `/EFI/fedora` (the
