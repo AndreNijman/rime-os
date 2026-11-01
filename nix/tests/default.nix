@@ -3,4 +3,5 @@
 
 {
   vm-boot = import ./vm-boot.nix { inherit pkgs self; };
+  gaming = import ./gaming.nix { inherit pkgs self; };
 }
