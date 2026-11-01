@@ -13,6 +13,7 @@
   release-standin = import ./release-standin.nix { inherit pkgs self; };
   release-github = import ./release-github.nix { inherit pkgs self; };
   update-client = import ./update-client.nix { inherit pkgs self; };
+  update-e2e = import ./update-e2e.nix { inherit pkgs self; };
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }

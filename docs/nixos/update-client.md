@@ -36,9 +36,14 @@ not change. Dispatch is one `if is_nixos()` at the top of `ops::update`, `ops::p
 6. It computes the plan and checks headroom: the free space on `/nix` must be at least the missing NAR bytes plus
    1 GB.
 7. **Bind.** Before anything is downloaded, `nix path-info --json --store <cache>` must return the manifest's exact
-   narHash, narSize, file size and references for every missing path.
-8. It runs `nix copy --from <cache> --no-recursive --stdin` with `require-sigs = true`. The trusted keys come from
-   the **verified manifest's** `cache.keys`. They are never taken from the command line, and never from nix.conf
+   narHash, narSize, file size and references for every missing path. `<cache>` is the one the path's `origin`
+   names (§18.1): `rime` paths come from `rime.update.cacheUrl`, `upstream` paths from `rime.update.upstreamCacheUrl`
+   (cache.nixos.org by default). A manifest without `origin` (the S3 backend) takes every path from `cacheUrl`. The
+   URLs come from `/etc/rime/update.toml`, never from the manifest: `cache.upstream.url_hint` is informational. A
+   release with upstream paths on a machine whose `upstreamCacheUrl` is null is refused before anything downloads.
+8. It runs `nix copy --from <cache> --no-recursive --stdin` with `require-sigs = true`, once per cache, upstream
+   first (an upstream path never refers to a Rime one). The trusted keys come from
+   the **verified manifest's** `cache.keys` (Rime's keys and the upstream cache's). They are never taken from the command line, and never from nix.conf
    except under `--allow-unverified`. A narinfo signed by any other key is refused ("did not match its signature").
 9. It checks the copied paths against the manifest again (`check_local`), and checks the toplevel's `boot.json`
    against the manifest's `boot`.
@@ -192,10 +197,33 @@ The test checks the following.
   the two newest, and A, B, D and E stay valid.
 - `--pin` holds and `--unpin` releases. After a final reboot into E, `trust --gate` passes.
 
+## The end-to-end test
+
+`nix build path:.#checks.x86_64-linux.update-e2e` (`nix/tests/update-e2e.nix`) replaces the fixture publisher with
+the real pipeline. The server is release-github's stand-in: a registry, cosign 2.5.2 with a TEST Fulcio-shaped chain
+(`mint-test-signing`), the narinfos on a Pages origin fed by a bare git repository, the NARs as fake-github release
+assets behind a 302, and a fake upstream cache with its own TEST key. Every key is made when the test starts. For
+each release the server runs `rime-nix-release closure`, `split`, `stage` and `publish --backend github`, and the
+client installs what that produced. It checks:
+
+- **A:** up to date, `trust --gate` passes, the update notice says `none`.
+- **B** (the nixpkgs 6.12 kernel, present only in the upstream cache): the manifest marks the kernel
+  `origin: upstream` and no narinfo for it is committed to rime-cache; the plan and the update put it on the next
+  boot (current system and boot id unchanged, `status.json` `active` / `remaining: reboot`); the client asked the
+  upstream cache, and only the upstream cache, for the kernel and Rime's cache for the toplevel; after a reboot it
+  runs 6.12 and `trust --gate` passes.
+- **Rollback** to A, and a reboot into A.
+- **C** (Shell only): live, with the same boot id and greetd PID and the new Shell's marker on PATH.
+- **Refusals**, profile unchanged: a manifest changed after signing whose channel document is validly signed
+  (`nix/tests/update-e2e-tamper.py` builds it with the release tool's own functions and copies the original `.sig`),
+  and a channel document changed after signing. Both say `does not verify`.
+
 ## Handover (TODO)
 
-- **The real cache key.** `rime.update.cacheKeys` defaults to `[]` until Andre mints `rime-cache-1` (§6.4). It only
-  matters for `--allow-unverified`, because a normal update trusts the keys of the verified manifest.
+- **The real cache key.** `rime.update.cacheKeys` defaults to the `rime-cache-1` public key that `nix-release.yml`
+  checks its secret against (§6.2), and `upstreamCacheKeys` to cache.nixos.org's. Both only matter for
+  `--allow-unverified` and for nix.conf's substituters, because a normal update trusts the keys of the verified
+  manifest. No release has been signed with the real key yet.
 - **The real signing identity and root.** The defaults pin `nix-release.yml@refs/heads/main` and the Sigstore root
   built into rimed. Nothing has been signed by the real release job yet, so this end of the chain is unproven
   outside the fixture.

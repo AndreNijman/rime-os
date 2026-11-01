@@ -662,8 +662,11 @@ it is downloaded again.` A release with security fixes adds `rime: includes secu
 ### 8.5 Bind before import, then download
 
 *GitHub backend (§18):* the client reads each path's narinfo from the substituter the manifest's `paths[].origin`
-names (`rime` → `cache.rimeos.com`, `upstream` → `cache.upstream.url_hint`, cache.nixos.org), binds it exactly as
-below, and passes both substituters to `nix copy` with exactly `cache.keys` (Rime's keys and `cache.nixos.org-1`). A
+names (`rime` → `cache.rimeos.com`, `upstream` → cache.nixos.org), binds it exactly as below, and copies each group
+from its own cache (upstream first: an upstream path never refers to a Rime one) with exactly `cache.keys` (Rime's
+keys and `cache.nixos.org-1`). Both URLs come from the client's configuration (`rime.update.cacheUrl`,
+`upstreamCacheUrl`), never from the manifest: `cache.upstream.url_hint`, like `cache.url_hint` (§3.1), is
+informational. A
 Rime narinfo's `URL:` is an absolute `https://github.com/AndreNijman/rime-cache/releases/download/<tag>/<nar>`, which
 Nix follows (it redirects to `objects.githubusercontent.com`); the URL is not covered by the narinfo signature, which
 is why the bind and §8.6 hold the guarantee and not the URL (§18).
