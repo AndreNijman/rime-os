@@ -28,30 +28,30 @@ let
     grep -F /usr/libexec/apex-open-browser $out >/dev/null # rime-rename: keep (the spelling under test)
   '';
 
-  # Qt.application.layoutDirection as the RUNNING Shell's environment would get it, for a given locale.
-  # $1 = the Shell's pid (its environ is reused whole), $2 = locale, $3 = "none" drops QT_QPA_PLATFORMTHEME.
+  # Qt.application.layoutDirection inside the Shell's own engine (the quickshell binary the running Shell is, with its
+  # environment whole, so its platform theme, QML import path and Rime.I18n too), for a given locale.
+  # $1 = the Shell's pid, $2 = locale, $3 = "noi18n" leaves out `import Rime.I18n` (the control: no Qt catalogue).
+  # Qt decides the direction by translating QT_LAYOUT_DIRECTION, so only a process with qt_<lang>.qm installed mirrors.
   rtlProbe = pkgs.writeShellScriptBin "rime-rtl-probe" ''
     set -u
-    pid="$1" loc="$2" theme="''${3:-keep}"
+    pid="$1" loc="$2" mode="''${3:-i18n}"
+    qs="$(readlink "/proc/$pid/exe")"
     d="$(mktemp -d)"; trap 'rm -rf "$d"' EXIT
-    cat > "$d/p.qml" <<'QML'
-    import QtQuick
-    Item {
-        Timer { interval: 0; running: true; onTriggered: Qt.quit() }
-        Component.onCompleted: console.log("RIMEDIR=" + Qt.application.layoutDirection)
-    }
-    QML
+    {
+      echo 'import QtQuick'
+      echo 'import Quickshell'
+      [ "$mode" = noi18n ] || echo 'import Rime.I18n'
+      echo 'ShellRoot { Timer { interval: 300; running: true; onTriggered: { console.warn("RIMEDIR=" + Qt.application.layoutDirection); Qt.quit() } } }'
+    } > "$d/shell.qml"
     args=()
     while IFS= read -r -d "" e; do
       case "$e" in
-        LANG=*|LC_*|LANGUAGE=*|WAYLAND_DISPLAY=*|DISPLAY=*|QT_QPA_PLATFORM=*|QT_LOGGING_RULES=*) ;;
-        QT_QPA_PLATFORMTHEME=*) [ "$theme" = none ] || args+=("$e") ;;
+        LANG=*|LC_*|LANGUAGE=*|WAYLAND_DISPLAY=*|DISPLAY=*|HYPRLAND_INSTANCE_SIGNATURE=*|QT_QPA_PLATFORM=*) ;;
         *) args+=("$e") ;;
       esac
     done < "/proc/$pid/environ"
-    env -i "''${args[@]}" LANG="$loc" LC_ALL="$loc" QT_QPA_PLATFORM=offscreen \
-      QT_LOGGING_RULES='*.debug=true;qt.*=false' \
-      timeout 60 ${pkgs.qt6.qtdeclarative}/bin/qml "$d/p.qml" 2>&1 \
+    env -i "''${args[@]}" LANG="$loc" LC_ALL="$loc" QT_QPA_PLATFORM=offscreen QT_FORCE_STDERR_LOGGING=1 \
+      timeout 60 "$qs" -p "$d/shell.qml" 2>&1 \
       | sed -n 's/.*RIMEDIR=\([0-9]*\).*/\1/p' | head -n 1
   '';
 
@@ -174,7 +174,9 @@ pkgs.testers.runNixOSTest {
         """awww-daemon is SHOWING an image (not merely a saved choice), and apply() left ~/.curr_wall."""
         wl = wayland_display(node)
         q = f"WAYLAND_DISPLAY={wl} awww query"
-        cond = q + " | grep -F 'image: " + (want or "") + "' >/dev/null && test -e ~/.curr_wall"
+        # awww reports the file it opened, symlinks resolved: /run/current-system/sw/... shows as its store path
+        image = f"image: $(readlink -f {want})" if want else "image: "
+        cond = q + f" | grep -F \"{image}\" >/dev/null && test -e ~/.curr_wall"
         ok = poll(node, as_rime(cond), timeout * 2)
         seen = node.execute(as_rime(q + "; readlink ~/.curr_wall; cat ~/.config/rime-shell/src/user_data/wallpaper.json"))[1]
         return ok, seen
@@ -225,8 +227,9 @@ pkgs.testers.runNixOSTest {
     graphical_login(migrated)
     expect("migrated: the old wallpaper path comes back from this system's copy",
            painted(migrated, "/run/current-system/sw/share/backgrounds/rime/default.jpg"))
-    migrated.succeed("grep -F /run/current-system/sw/share/backgrounds/rime/default.jpg "
-                     "/home/rime/.config/rime-shell/src/user_data/wallpaper.json")
+    # saveConfig() runs after the image is up, so the saved choice can lag the screen by a moment
+    migrated.wait_until_succeeds("grep -F /run/current-system/sw/share/backgrounds/rime/default.jpg "
+                                 "/home/rime/.config/rime-shell/src/user_data/wallpaper.json", timeout=60)
     expect("migrated: the apex-agentd enablement link starts the agent runtime", apex_agentd_resolves(migrated))
     migrated.wait_until_succeeds(as_rime("systemctl --user is-active rime-agentd.service"), timeout=60)
 
@@ -250,16 +253,19 @@ pkgs.testers.runNixOSTest {
     machine.succeed(f"test -f /etc/plymouth/themes/{theme}/{theme}.plymouth")
     print("live plymouth theme: " + theme + " from accent " + machine.succeed("cat /var/lib/rime-greet/accents/rime"))
 
-    # the Shell's Qt: right-to-left for Arabic and Hebrew, left-to-right for English, and only with the platform theme
+    # the Shell's Qt: right-to-left for Arabic and Hebrew, left-to-right for English and for Urdu (Qt ships no
+    # qt_ur.qm, so it stays LTR anywhere: the catalogue, not the locale, decides), and only through Rime.I18n, which
+    # installs Qt's catalogue (NixOS's qt6ct links no KDE library, so the platform theme loads none)
     ps = machine.succeed("ps -u rime -o pid=,args=")
     shell_pid = next(l.split(None, 1)[0] for l in ps.splitlines() if "quickshell" in l and "rime-shell" in l)
     environ = machine.succeed(f"tr '\\0' '\\n' < /proc/{shell_pid}/environ")
     assert "QT_QPA_PLATFORMTHEME=qt6ct" in environ, environ
-    probe = lambda loc, theme="keep": machine.succeed(f"runuser -u rime -- rime-rtl-probe {shell_pid} {loc} {theme}").strip()
-    rtl = {loc: probe(loc) for loc in ("ar_EG.UTF-8", "he_IL.UTF-8", "en_US.UTF-8")}
-    rtl["ar_EG.UTF-8 without qt6ct"] = probe("ar_EG.UTF-8", "none")
+    probe = lambda loc, mode="i18n": machine.succeed(f"runuser -u rime -- rime-rtl-probe {shell_pid} {loc} {mode}").strip()
+    rtl = {loc: probe(loc) for loc in ("ar_EG.UTF-8", "he_IL.UTF-8", "en_US.UTF-8", "ur_PK.UTF-8")}
+    rtl["ar_EG.UTF-8 without Rime.I18n"] = probe("ar_EG.UTF-8", "noi18n")
     print(f"layoutDirection (1 = RightToLeft): {rtl}")
-    assert rtl == {"ar_EG.UTF-8": "1", "he_IL.UTF-8": "1", "en_US.UTF-8": "0", "ar_EG.UTF-8 without qt6ct": "0"}, rtl
+    assert rtl == {"ar_EG.UTF-8": "1", "he_IL.UTF-8": "1", "en_US.UTF-8": "0", "ur_PK.UTF-8": "0",
+                   "ar_EG.UTF-8 without Rime.I18n": "0"}, rtl
 
     # rime-hypr-migrate on a config spelled as an APEX image wrote it (D2): its defaults are recognised, not
     # carried over as user binds that name paths this system does not have
