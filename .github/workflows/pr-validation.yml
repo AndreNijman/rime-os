@@ -241,7 +241,13 @@ jobs:
           # produces, and hand-editing it is precisely how the Kotlin suite
           # stops being evidence about the protocol the desktop speaks.
           grep -Eq '^(rimed/|config/|Containerfile|docs/|README\.md|tests/|files/|android/core/src/test/resources/)' <<<"$files" && rust=true
-          grep -Eq '^installer/' <<<"$files" && installer=true
+          # `files/system/systemd/rime-keymap-env` is in the INSTALLER selector:
+          # installer/test-installer-console.sh runs that generator against a
+          # real Fedora systemd-localed, and the suite runs only in installer-ui.
+          # A PR changing only the generator set rust+engine, not installer, and
+          # skipped the one suite that checks it. The file an assertion is ABOUT
+          # has to select the job that runs it.
+          grep -Eq '^(installer/|files/system/systemd/rime-keymap-env$)' <<<"$files" && installer=true
           # files/** is the whole runtime payload of the image — the package
           # engine, session launchers, guards. A PR touching only that used to
           # run nothing but a syntax check that did not even reach it.
