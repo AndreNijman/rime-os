@@ -34,7 +34,9 @@ RESULT = re.compile(
 )
 IGNORED = re.compile(r"^test (\S+) \.\.\. ignored(?:, (.*))?$")
 STDOUT_START = re.compile(r"^---- (\S+) stdout ----$")
-SELF_SKIP = re.compile(r"^\s*SKIP\b|^\s*skipping\b", re.IGNORECASE)
+# A line that STARTS with SKIP, skipped or skipping (any case): "SKIP: ...", "skipped: loginctl is not on PATH".
+# Anchored, so a daemon's own log line under test ("rimed: skip (absent) ...") is not taken for one.
+SELF_SKIP = re.compile(r"^\s*(?:SKIP|skipp(?:ed|ing))\b", re.IGNORECASE)
 
 
 def norm(name):

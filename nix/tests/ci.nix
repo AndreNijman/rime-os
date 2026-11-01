@@ -189,6 +189,13 @@ in
       has "alpha                      3       2        1       0        1        1"
       has "TOTAL                      4       6        1       0        1        1"
       has "noDaemon: alpha: w: SKIP: the daemon did not come up"
+      # The other spelling tests use ("skipped: <why>", lower case) is a self-skip too.
+      sed 's/^\s*SKIP: the daemon did not come up in this environment$/skipped: loginctl is not on PATH/' selfskip.log > selfskip2.log
+      grep -F 'skipped: loginctl is not on PATH' selfskip2.log > /dev/null && ok "fixture: a lower-case skipped: line" || bad "fixture selfskip2.log has no skipped: line"
+      expect nonzero "a test that passed by printing skipped:" -- python3 ${report} selfskip2.log meta.json skips.json r.txt r.json
+      has "w (alpha) passed by skipping itself ('skipped: loginctl is not on PATH')"
+      expect 0 "the same, named in selfSkipOk" -- python3 ${report} selfskip2.log meta.json skips-ok.json r.txt r.json
+      has "TOTAL                      4       6        1       0        1        1"
       expect nonzero "a selfSkipOk name that no longer skips itself" -- python3 ${report} good.log meta.json skips-ok.json r.txt r.json
       has "selfSkipOk names w, which did not skip itself"
       grep -v 'Running tests/wire.rs' good.log > lost.log

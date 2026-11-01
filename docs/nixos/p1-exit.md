@@ -172,13 +172,13 @@ be trusted:
 
 ### The total
 
-From `share/doc/rimed/cargo-tests.txt` of `/nix/store/0shwgbganyn95ldqbf4xzf7lvy47hlp3-rimed-0.1.0`, the store path
+From `share/doc/rimed/cargo-tests.txt` of `/nix/store/8m0cym0j3255gnyi381f8bxwkc85svay-rimed-0.1.0`, the store path
 `nix eval --raw path:.#rimed.outPath` names for this branch (built in the container, checkPhase and postCheck passed):
 
 ```
 crate                targets  passed selfskip  failed  ignored  skipped
 rime                       5     679        8       0        1        7
-rime-agent-core           11     810        2       0        0        0
+rime-agent-core           11     809        3       0        0        0
 rime-agentd               16     272       29       0        0       27
 rime-aid                   1      22        0       0        0        0
 rime-backup-core           2     167        0       0        0        0
@@ -190,12 +190,12 @@ rime-secret-core           2     151        0       0        0        1
 rime-secretd               3     390        0       0        0        0
 rimed                      1      53        0       0        0        0
 rimed-core                15     901        0       0        0        0
-TOTAL                     70    3677       56       0        3       35
+TOTAL                     70    3676       57       0        3       35
 ```
 
 - **passed**: ran and passed.
 - **selfskip**: cargo reports ok, but the test printed SKIP and returned early, so it proved nothing. Before this report
-  existed, these 56 read as passes.
+  existed, these 57 read as passes.
 - **skipped**: excluded by `--skip` with a reason (below).
 - **ignored**: `#[ignore]` in the source.
 
@@ -239,7 +239,7 @@ TOTAL                     70    3677       56       0        3       35
 - **needsForeignOwnedFile (1)**, rime-secret-core: `project::tests::a_file_the_owner_does_not_own_is_refused` needs a
   file owned by another user at `/etc/hostname`; the sandbox has none and cannot make one.
 
-### Self-skipped (56), named in `selfSkipOk`
+### Self-skipped (57), named in `selfSkipOk`
 
 - **noLoginSessionCgroup (50)**: the same cause as needsLoginSessionCgroup. These catch the refusal, print SKIP and
   return. 8 in rime (its tests start rime-agentd), 25 in rime-agentd, 17 in rime-remoted (pairing asks rime-agentd who
@@ -249,8 +249,11 @@ TOTAL                     70    3677       56       0        3       35
   manager to start a scope.
 - **noFirefoxPolicy (2)**, rime-agentd: `the_capsule_sees_the_merged_policy_and_can_open_the_ca_it_names`,
   `a_session_that_asked_for_no_ca_sees_the_machines_own_file`. They need `/etc/firefox/policies/policies.json`.
-- **noHostTools (2)**, rime-agent-core: `sandbox::tests::a_confined_session_can_still_resolve_names` (needs
-  `/usr/bin/getent`), `sandbox::tests::the_masked_run_really_does_block_the_system_bus` (needs busctl and a system bus).
+- **noHostTools (3)**, rime-agent-core: `sandbox::tests::a_confined_session_can_still_resolve_names` (needs
+  `/usr/bin/getent`), `sandbox::tests::the_masked_run_really_does_block_the_system_bus` (needs busctl and a system bus),
+  `lock::tests::the_loginctl_contract_this_parser_relies_on_is_still_true` (needs loginctl on PATH and a running
+  logind; it prints `skipped: loginctl is not on PATH`, which the first version of the report did not recognise, so it
+  was counted as a pass).
 
 The full list with each test's SKIP line is in the build's `share/doc/rimed/cargo-tests.txt`.
 TODO(handover): the 76 tests blocked by the login-session cgroup (26 skipped + 50 self-skipped) can run in a NixOS VM
@@ -282,5 +285,7 @@ check where `cargo test` runs inside a logged-in user session.
 
 `checks.x86_64-linux.ci` runs the report on fixture logs: a clean log (exact per-crate rows), a failed test, a skip name
 that filtered nothing, a self-skip not in `selfSkipOk` (refused), the same self-skip named in `selfSkipOk` (accepted and
-counted as selfskip, not passed), a `selfSkipOk` name that did not skip itself (refused), and a target with no header.
-Mutant: counting a self-skip as passed (dropping `c["passed"] -= 1`) fails the check on the two row assertions.
+counted as selfskip, not passed), the lower-case `skipped: <why>` spelling (refused, then accepted when named), a
+`selfSkipOk` name that did not skip itself (refused), and a target with no header.
+Mutants: counting a self-skip as passed (dropping `c["passed"] -= 1`) fails the check on the two row assertions; the
+first version's pattern (`^SKIP|^skipping`, which missed `skipped:`) fails it on the lower-case fixture.

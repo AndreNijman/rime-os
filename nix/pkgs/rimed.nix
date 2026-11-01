@@ -190,7 +190,7 @@ let
   # Tests that cargo reports as PASSED but that returned early because their environment is missing (they print a
   # SKIP line), by the reason. The report counts them as "selfskip", not as passed, and refuses the build for a
   # self-skip not named here or a name here that no longer skips itself. Found 2026-11-01: before the report
-  # existed, these 56 read as passes.
+  # existed, these 57 read as passes.
   selfSkipOk = {
     # The same cause as needsLoginSessionCgroup above: rime-agentd (and rime-remoted's pairing, which asks it) refuses
     # a client whose /proc/<pid>/cgroup is "/" ("neither a login session nor a user service"), and these tests catch
@@ -260,11 +260,13 @@ let
       "a_session_that_asked_for_no_ca_sees_the_machines_own_file"
       "the_capsule_sees_the_merged_policy_and_can_open_the_ca_it_names"
     ];
-    # rime-agent-core sandbox probes that need host tools and services the build sandbox lacks: `getent` at
-    # /usr/bin/getent, and busctl with a running system bus.
+    # rime-agent-core probes that need host tools and services the build sandbox lacks: `getent` at
+    # /usr/bin/getent, busctl with a running system bus, and loginctl on PATH with a running logind (the lock
+    # contract test asks logind about this user; with loginctl but no logind it would fail, not skip).
     noHostTools = [
       "sandbox::tests::a_confined_session_can_still_resolve_names"
       "sandbox::tests::the_masked_run_really_does_block_the_system_bus"
+      "lock::tests::the_loginctl_contract_this_parser_relies_on_is_still_true"
     ];
   };
 in
