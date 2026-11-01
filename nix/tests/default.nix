@@ -30,3 +30,5 @@
 // import ./boot.nix { inherit pkgs self; }
 # catalogue, catalogue-data
 // import ./catalogue.nix { inherit pkgs self; }
+# keymap-luks
+// import ./keymap.nix { inherit pkgs self; }

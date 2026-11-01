@@ -79,6 +79,15 @@ per-machine arguments come from `host.toml` `[boot] kernel_params = ["rd.luks.uu
 `supportsInitrdSecrets = false`, so `boot.initrd.secrets` (key files baked into the initrd) is not available; TPM2 and
 passphrase unlock do not need it.
 
+The console keymap of the passphrase prompt (PLAN.md D2 keymap gate, R19): when `host.toml` `[keyboard] console`
+names a keymap other than `us`, the hook appends `rd.vconsole.keymap=<it>` to every entry (unless `[boot]
+kernel_params` already names one). The shared initrd keeps `KEYMAP=us`; its systemd-vconsole-setup loads the named
+map from the initrd's keymap tree, which is the generation's `/etc/kbd/keymaps` (nix/modules/keymap.nix adds the XKB
+names bootc's installer writes, e.g. `gb`, `ch`). The hook looks the name up in `<default toplevel>/etc/kbd/keymaps`:
+missing on a machine that unlocks LUKS at boot (`[[luks]]` in host.toml or an `rd.luks.*`/`luks.*` parameter) is a
+refusal by name, since the passphrase would be read with the us layout; missing without LUKS is a warning and no
+parameter. checks.keymap-luks is the VM proof (gb and ch passphrases typed as key codes at the initrd prompt).
+
 ## Not done here (handover)
 
 - Updating Fedora's signed `shimx64.efi`/`grubx64.efi` on the ESP (SBAT revocations; PLAN 4.1 "shim and GRUB
@@ -87,5 +96,6 @@ passphrase unlock do not need it.
 - Specialisations are not listed (Rime defines none).
 - Which `grub.cfg` katana's `\EFI\APEX\grubx64.efi` loads, and whether it sources `custom.cfg`, is still unverified
   (needs root on katana, D3).
-- `host.toml` itself (format and writer) belongs to the host-layer PR; this hook reads only `[boot] layout` and
-  `[boot] kernel_params`.
+- `host.toml` itself (format and writer) belongs to the host-layer PR; this hook reads only `[boot] layout`,
+  `[boot] kernel_params`, `[keyboard] console` and whether `[[luks]]` is present. TODO(handover, host layer):
+  rime-hostlayer's `validate_host` does not know `[boot]` yet, so a host.toml carrying it is refused there.

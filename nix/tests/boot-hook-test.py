@@ -393,6 +393,68 @@ class HookTest(unittest.TestCase):
             finally:
                 g.cleanup()
 
+    # PLAN.md D2 keymap gate / R19: host.toml [keyboard] console reaches the initrd as rd.vconsole.keymap=, and a
+    # LUKS machine whose keymap the generation does not ship is refused by name (checks.keymap-luks is the VM proof).
+    def keymap_fixture(self, toml, keymaps=("xkb/gb.map.gz",)):
+        g = Fixture(self)
+        top = g.generation(1)
+        for rel in keymaps:
+            km = os.path.join(top, "etc", "kbd", "keymaps", rel)
+            os.makedirs(os.path.dirname(km), exist_ok=True)
+            with open(km, "wb") as fh:
+                fh.write(b"keymap")
+        with open(g.host, "w") as h:
+            h.write(toml)
+        return g
+
+    def entry_options(self, g):
+        return [ln for ln in g.read("loader/entries/rime-generation-1.conf").splitlines() if ln.startswith("options ")][0]
+
+    def test_console_keymap_reaches_the_initrd(self):
+        cases = [
+            # host.toml, keymaps the generation ships, expected rd.vconsole.keymap params
+            ('[keyboard]\nconsole = "gb"\n', ("xkb/gb.map.gz",), ["rd.vconsole.keymap=gb"]),
+            ('[keyboard]\nconsole = "sg"\n[[luks]]\nname = "root"\ndevice = "UUID=0b1c"\n',
+             ("i386/qwertz/sg.map.gz",), ["rd.vconsole.keymap=sg"]),
+            ('[keyboard]\nconsole = "us"\n[[luks]]\nname = "root"\ndevice = "UUID=0b1c"\n', (), []),
+            ('[keyboard]\nxkb_layout = "gb"\n', ("xkb/gb.map.gz",), []),
+            # [boot] kernel_params naming a keymap wins; it is not repeated
+            ('[boot]\nkernel_params = ["rd.vconsole.keymap=uk"]\n[keyboard]\nconsole = "gb"\n', ("xkb/gb.map.gz",),
+             ["rd.vconsole.keymap=uk"]),
+            # not shipped, no LUKS: a warning, the console stays on us
+            ('[keyboard]\nconsole = "gb"\n', (), []),
+        ]
+        for toml, keymaps, want in cases:
+            g = self.keymap_fixture(toml, keymaps)
+            try:
+                self.assertEqual(g.run("install"), 0, (toml, g.stderr))
+                got = [w for w in self.entry_options(g).split() if w.startswith("rd.vconsole.keymap=")]
+                self.assertEqual(got, want, toml)
+                if not keymaps and "gb" in toml:
+                    self.assertIn("warning: [keyboard] console = 'gb' is not a keymap of generation 1", g.stderr)
+            finally:
+                g.cleanup()
+
+    def test_luks_machine_without_its_keymap_is_refused(self):
+        for toml in ('[keyboard]\nconsole = "ch"\n[[luks]]\nname = "root"\ndevice = "UUID=0b1c"\n',
+                     '[boot]\nkernel_params = ["rd.luks.uuid=0b1c"]\n[keyboard]\nconsole = "ch"\n'):
+            g = self.keymap_fixture(toml, ("xkb/gb.map.gz",))
+            try:
+                before = tree(g.boot)
+                self.assertEqual(g.run("install"), 3, toml)
+                self.assertIn("console = 'ch' is not a keymap of generation 1", g.stderr)
+                self.assertIn("passphrase prompt would read the us layout", g.stderr)
+                self.assertEqual(tree(g.boot), before)
+            finally:
+                g.cleanup()
+        for bad in ("g b", "$x", "../gb"):
+            g = self.keymap_fixture('[keyboard]\nconsole = "%s"\n' % bad)
+            try:
+                self.assertEqual(g.run("install"), 3, bad)
+                self.assertIn("is not a keymap name", g.stderr)
+            finally:
+                g.cleanup()
+
     def test_refuses_without_grub(self):
         f = self.f
         f.generation(1)
