@@ -163,7 +163,7 @@ def validate_host(host):
     errs = []
     if host.get("schema", 1) != 1:
         errs.append(f"schema {host.get('schema')!r} is not 1")
-    known = {"schema", "host", "locale", "keyboard", "mount", "luks"}
+    known = {"schema", "host", "locale", "keyboard", "mount", "luks", "boot"}
     for k in host:
         if k not in known:
             errs.append(f"unknown key {k!r}")
@@ -213,6 +213,21 @@ def validate_host(host):
         for k in m:
             if k not in ("what", "where", "type", "options", "freq", "passno"):
                 errs.append(f"unknown key mount[{i}].{k}")
+    # [boot]: read by the boot hook (nix/pkgs/rime-boot: layout, kernel_params such as rd.luks.uuid=), which
+    # refuses unsafe parameters itself; here only the shape, so a valid [boot] never makes the whole file invalid.
+    b = host.get("boot", {})
+    if not isinstance(b, dict):
+        errs.append("[boot] is not a table")
+        b = {}
+    for k, v in b.items():
+        if k == "layout":
+            if v not in ("auto", "bls", "custom-cfg"):
+                errs.append(f"boot.layout {v!r} is not one of auto, bls, custom-cfg")
+        elif k == "kernel_params":
+            if not isinstance(v, list) or not all(isinstance(p, str) and p and not re.search(r"\s", p) for p in v):
+                errs.append(f"boot.kernel_params {v!r} is not a list of kernel parameters")
+        else:
+            errs.append(f"unknown key boot.{k}")
     for i, v in enumerate(host.get("luks", [])):
         for k in ("name", "device"):
             if not matches("what", v.get(k)):

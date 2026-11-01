@@ -255,10 +255,22 @@ class HostTomlTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             for bad in ('[host]\nhostname = "a b"\n', '[host]\ntimezone = "../../etc/shadow"\n',
                         '[[mount]]\nwhat="/dev/x"\nwhere="/"\ntype="ext4"\noptions="nofail"\n',
-                        '[keyboard]\nxkb_layout = "us\\"\\nOption"\n', 'nonsense = 1\n'):
+                        '[keyboard]\nxkb_layout = "us\\"\\nOption"\n', 'nonsense = 1\n',
+                        '[boot]\nlayout = "grub"\n', '[boot]\nkernel_params = "rd.luks.uuid=x"\n',
+                        '[boot]\nkernel_params = ["a b"]\n', '[boot]\nentries = 3\n'):
                 write(f"{t}/h.toml", bad)
                 r = run("host", "validate", "--file", f"{t}/h.toml")
                 self.assertEqual(r.returncode, 1, bad)
+
+
+    def test_the_boot_table_the_hook_reads_is_valid(self):
+        # nix/pkgs/rime-boot reads [boot] layout + kernel_params (rd.luks.uuid= of a LUKS root, D9); the host layer
+        # must accept it, or one [boot] table drops every other fact of the machine ("not applied").
+        with tempfile.TemporaryDirectory() as t:
+            write(f"{t}/h.toml", '[host]\nhostname = "lab"\n[boot]\nlayout = "custom-cfg"\n'
+                  'kernel_params = ["rd.luks.uuid=5b1f0c2e-7d4a-4e8b-9c3f-a1b2c3d4e5f6", "quiet"]\n')
+            r = run("host", "validate", "--file", f"{t}/h.toml")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 class GeneratorTest(unittest.TestCase):
