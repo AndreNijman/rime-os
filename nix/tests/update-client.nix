@@ -189,6 +189,9 @@ pkgs.testers.runNixOSTest {
       def greetd_pid():
           return client.succeed("systemctl show -P MainPID greetd.service").strip()
 
+      def main_pid(unit):
+          return client.succeed(f"systemctl show -P MainPID {unit}").strip()
+
       def reboot():
           client.shutdown()
           client.start()
@@ -272,8 +275,12 @@ pkgs.testers.runNixOSTest {
           assert code == 0 and "a game is running" in out, out
           client.succeed("kill $(cat /sys/fs/cgroup/rime-game/cgroup.procs) && sleep 1 && rmdir /sys/fs/cgroup/rime-game")
           bid, pid = boot_id(), greetd_pid()
+          # system.path moved, so nixpkgs reloads dbus-broker and restarts polkit: rule 3 allows exactly that.
+          bus, pk = main_pid("dbus-broker.service"), main_pid("polkit.service")
           code, out = update()
           assert code == 0 and "is active now" in out, out
+          assert main_pid("dbus-broker.service") == bus, "dbus-broker was restarted, not reloaded"
+          assert main_pid("polkit.service") not in ("0", pk), "polkit was not restarted (the dry run said it would be)"
           assert link("/run/current-system") == C
           assert link("/run/booted-system") == A
           assert boot_id() == bid, "the machine rebooted"

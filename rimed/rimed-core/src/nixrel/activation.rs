@@ -12,8 +12,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::live::{Component, DeferReason, MachineState};
 
-/// Units a live switch may stop, restart or reload (§9 rule 3). Grows one unit at a time, each with a VM test.
-pub const RESTART_SAFE_UNITS: &[&str] = &["rimed.service", "rime-remoted.service"];
+/// Units a live switch may stop or restart (§9 rule 3). Grows one unit at a time, each with a VM test.
+/// `polkit.service`: nixpkgs restarts it whenever `system.path` changes (`restartTriggers = [ config.system.path ]`),
+/// and every Rime package (the Shell, rimed, the polkit actions) is in `system.path`, so without it no Rime-only release
+/// could go live. It holds no session state; nix/tests/update-client.nix proves the restart happens and the switch lands.
+pub const RESTART_SAFE_UNITS: &[&str] = &["rimed.service", "rime-remoted.service", "polkit.service"];
+
+/// Units a live switch may RELOAD (but not stop or restart). `dbus-broker.service`: nixpkgs reloads it
+/// (`reloadIfChanged = true`) when its config dir, built from `system.path`, changes; a reload re-reads the policy and
+/// keeps every connection. A restart of it would end every session's bus, so a restart still means `boot`.
+pub const RELOAD_SAFE_UNITS: &[&str] = &["dbus-broker.service"];
 
 /// What a generation boots: from its `boot.json` (bootspec) and `kernel-modules` link, or from a manifest's `boot`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,8 +36,10 @@ pub struct BootFacts {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DryRun {
     pub restart_systemd: bool,
-    /// Units (system and user) it would stop, restart or reload.
+    /// Units (system and user) it would stop or restart.
     pub disruptive: BTreeSet<String>,
+    /// Units (system and user) it would reload.
+    pub reload: BTreeSet<String>,
     /// Units it would only start (new units): always allowed.
     pub start: BTreeSet<String>,
     /// Changed units it would NOT touch (`restartIfChanged = false`, e.g. greetd).
@@ -66,12 +76,12 @@ pub fn parse_dry_activate(text: &str) -> DryRun {
         let mut matched = false;
         for (prefix, kind) in [
             ("would stop the following units: ", 'd'),
-            ("would reload the following units: ", 'd'),
+            ("would reload the following units: ", 'r'),
             ("would restart the following units: ", 'd'),
             ("would start the following units: ", 's'),
             ("would NOT stop the following changed units: ", 'k'),
             ("would stop the following user units: ", 'd'),
-            ("would reload the following user units: ", 'd'),
+            ("would reload the following user units: ", 'r'),
             ("would restart the following user units: ", 'd'),
             ("would start the following user units: ", 's'),
             ("would NOT restart the following user units: ", 'k'),
@@ -79,6 +89,7 @@ pub fn parse_dry_activate(text: &str) -> DryRun {
             if let Some(rest) = line.strip_prefix(prefix) {
                 let set = match kind {
                     'd' => &mut d.disruptive,
+                    'r' => &mut d.reload,
                     's' => &mut d.start,
                     _ => &mut d.skipped,
                 };
@@ -204,7 +215,16 @@ pub fn activation(i: &Inputs) -> Activation {
             let outside: Vec<&str> =
                 d.disruptive.iter().map(String::as_str).filter(|u| !RESTART_SAFE_UNITS.contains(u)).collect();
             if !outside.is_empty() {
-                reasons.push(format!("rule 3: it would stop, restart or reload {}", outside.join(", ")));
+                reasons.push(format!("rule 3: it would stop or restart {}", outside.join(", ")));
+            }
+            let outside: Vec<&str> = d
+                .reload
+                .iter()
+                .map(String::as_str)
+                .filter(|u| !RELOAD_SAFE_UNITS.contains(u) && !RESTART_SAFE_UNITS.contains(u))
+                .collect();
+            if !outside.is_empty() {
+                reasons.push(format!("rule 3: it would reload {}", outside.join(", ")));
             }
             if let Some(l) = d.unrecognised.first() {
                 reasons.push(format!("rule 3: the dry activation printed something not understood ({l})"));
@@ -410,6 +430,19 @@ mod tests {
         c.dry = DryActivate::Ran(parse_dry_activate("would restart the following units: greetd.service\n"));
         let a = c.run();
         assert!(a.kind == Kind::Boot && has(&a, "greetd.service"), "{:?}", a.reasons);
+        // What a Shell-only release prints at the pinned nixpkgs (system.path moved): a dbus-broker reload and a polkit
+        // restart. Both are allowed; a dbus-broker RESTART is not (every bus connection would end).
+        c.dry = DryActivate::Ran(parse_dry_activate(
+            "would stop the following units: polkit.service\nwould reload the following units: dbus-broker.service\n\
+             would start the following units: polkit.service\n",
+        ));
+        assert_eq!(c.run().kind, Kind::Switch, "{:?}", c.run().reasons);
+        c.dry = DryActivate::Ran(parse_dry_activate("would restart the following units: dbus-broker.service\n"));
+        let a = c.run();
+        assert!(a.kind == Kind::Boot && has(&a, "rule 3: it would stop or restart dbus-broker.service"), "{:?}", a.reasons);
+        c.dry = DryActivate::Ran(parse_dry_activate("would reload the following units: NetworkManager.service\n"));
+        let a = c.run();
+        assert!(a.kind == Kind::Boot && has(&a, "rule 3: it would reload NetworkManager.service"), "{:?}", a.reasons);
         c.dry = DryActivate::Ran(parse_dry_activate("would stop swap device: /dev/vda2\n"));
         assert!(has(&c.run(), "not understood"));
         c.dry = DryActivate::Failed("exit 1".into());
@@ -487,7 +520,8 @@ mod tests {
              would restart the following user units: f.service\n",
         );
         assert!(d.restart_systemd);
-        assert_eq!(d.disruptive, ["a.service", "b.service", "c.service", "d.service", "f.service"].iter().map(|s| s.to_string()).collect());
+        assert_eq!(d.disruptive, ["a.service", "c.service", "d.service", "f.service"].iter().map(|s| s.to_string()).collect());
+        assert_eq!(d.reload, ["b.service".to_string()].into());
         assert_eq!(d.skipped, ["greetd.service".to_string()].into());
         assert_eq!(d.start, ["e.service".to_string()].into());
         assert!(d.unrecognised.is_empty());

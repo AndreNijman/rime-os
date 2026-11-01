@@ -72,10 +72,22 @@ line.
    against the booted generation, not the running one, keeps every later update boot-class once a boot-class
    update is pending.
 2. The NVIDIA userspace changes. This is skipped on a machine known to have no NVIDIA GPU.
-3. The dry activation would restart systemd, or would stop, restart or reload any unit outside
-   `RESTART_SAFE_UNITS` (`rimed`, `rime-remoted`), or printed a line the parser does not know. A unit the dry run
-   lists as "would NOT stop the following changed units" (`restartIfChanged = false`, which is greetd's case) is
-   not disruptive.
+3. The dry activation would restart systemd, would stop or restart any unit outside `RESTART_SAFE_UNITS`
+   (`rimed`, `rime-remoted`, `polkit`), would reload any unit outside those and `RELOAD_SAFE_UNITS`
+   (`dbus-broker`, reload only), or printed a line the parser does not know. A unit the dry run lists as "would NOT
+   stop the following changed units" (`restartIfChanged = false`, which is greetd's case) is not disruptive.
+   The notice `Not checking switch inhibitors (action = dry-activate)` (nixpkgs `switchable-system.nix`) is expected
+   and skipped.
+
+   **Why polkit and dbus-broker are on the lists (measured in the VM test).** Every Rime package (the Shell, rimed,
+   Rime's polkit actions) reaches the system through `environment.systemPackages`, so every Rime release changes
+   `system.path`. At the pinned nixpkgs, `dbus.nix` builds dbus-broker's config dir from `system.path` and reloads it
+   on change (`reloadIfChanged = true`), and `polkit.nix` restarts polkit on any `system.path` change
+   (`restartTriggers = [ config.system.path ]`). With the lists as the contract started them, a Shell-only release
+   printed `would reload dbus-broker.service` and `would stop/start polkit.service` and was boot-class, so no
+   Rime-only release could ever go live (the contract's §9 expects the opposite). The test proves the reload keeps
+   dbus-broker's PID and the switch lands. Not proven: that the Shell's polkit authentication agent registers again
+   after polkit restarts (the test has no graphical session).
 4. glibc or linux-pam differ from the running or the booted generation.
 5. **Gaming Mode / busy.** A game is running (a non-empty `/sys/fs/cgroup/rime-game/cgroup.procs`, or a known game
    process), or this could not be told. The update installs for the next boot and the live part is **deferred**.
