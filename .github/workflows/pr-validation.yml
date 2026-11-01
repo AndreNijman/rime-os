@@ -83,6 +83,7 @@ jobs:
       installer: ${{ steps.paths.outputs.installer }}
       engine: ${{ steps.paths.outputs.engine }}
       android: ${{ steps.paths.outputs.android }}
+      rechunk: ${{ steps.paths.outputs.rechunk }}
     steps:
       - name: Checkout history
         uses: actions/checkout@v4
@@ -172,6 +173,7 @@ jobs:
           installer=false
           engine=false
           android=false
+          rechunk=false
           # `tests/` is in the Rust selector as well as the engine one because
           # test-rime-blueprint.sh and test-rime-modes.sh both drive the built
           # `rime` binary and therefore live in the `rust` job, the only one
@@ -278,7 +280,7 @@ jobs:
           # tests/test-build-local-shell-ref.sh, the suite that exists to hold
           # its rime-shell pinning rule. The file an assertion is ABOUT has to
           # select the job that runs it.
-          grep -Eq '^(files/|tests/|Containerfile|build-local\.sh|\.github/workflows/)' <<<"$files" && engine=true
+          grep -Eq '^(files/|tests/|rechunk/|Containerfile|build-local\.sh|\.github/workflows/)' <<<"$files" && engine=true
           # The Android client. Its own job, because none of the three above can
           # build it — and because without this rule an Android-only change
           # matches nothing, every selector stays false, every job is skipped,
@@ -294,16 +296,22 @@ jobs:
           # job is to hold the release flow would not have run on a change to
           # the release flow.
           grep -Eq '^(android/|tests/test-android-(release|signing)\.sh|\.github/workflows/release-android\.yml)' <<<"$files" && android=true
+          # The release rechunker, end to end on a real bootc image. Its own
+          # job because it pulls Fedora's bootc base and re-lays it three times
+          # (several minutes); only a change to the rechunker selects it. The
+          # rules file and its unit suite ride the engine selector above.
+          grep -Eq '^(rechunk/|tests/test-rechunk-e2e\.sh)' <<<"$files" && rechunk=true
 
           # The fail-towards-running rule, applied.
           if [ -z "${base:-}" ] || [ -z "${head:-}" ]; then
-            rust=true; installer=true; engine=true; android=true
+            rust=true; installer=true; engine=true; android=true; rechunk=true
           fi
 
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
           echo "installer=$installer" >> "$GITHUB_OUTPUT"
           echo "engine=$engine" >> "$GITHUB_OUTPUT"
           echo "android=$android" >> "$GITHUB_OUTPUT"
+          echo "rechunk=$rechunk" >> "$GITHUB_OUTPUT"
 
   static:
     name: Static validation
@@ -2295,6 +2303,16 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq btrfs-progs attr
           RIME_COMPACT_REQUIRE=1 ./tests/test-rime-store-compact.sh
+
+      # The rechunk rules (rechunk/components.conf) and the tool that applies
+      # them before every release is re-laid into content-based layers: which
+      # hand-installed payload gets a layer of its own, that a package-owned
+      # file is never moved out of its RPM's layer, and that a malformed rules
+      # file stops the build. Needs the `attr` tools installed just above; a
+      # filesystem without user xattrs exits 77, which fails this step.
+      - name: The rechunk rules tag the right files and refuse bad ones
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rechunk-components.sh
 
       # The same engine on a machine whose user extension predates the rebrand
       # (/var/lib/extensions/apex-user.raw): it must be adopted as current, not  (rime-rename: keep)
@@ -4601,6 +4619,9 @@ jobs:
             tests/in-login-session.sh \
             files/system/libexec/rime-store-compact \
             tests/test-rime-store-compact.sh \
+            rechunk/assign-components rechunk/rechunk-image \
+            rechunk/verify-lossless \
+            tests/test-rechunk-components.sh tests/test-rechunk-e2e.sh \
             files/system/libexec/rime-boot-migrate \
             tests/test-boot-migrate.sh \
             files/system/libexec/rime-env \
@@ -4768,6 +4789,32 @@ jobs:
           # can reach `main` without this step running. Putting it anywhere else
           # would make it another instance of the bug the comments above describe.
           ./tests/check-shellcheck-coverage.sh
+
+  # ── the release rechunker, on the runner type that runs it for real ─────
+  # build-image.yml's image job runs rechunk/rechunk-image on ubuntu-24.04:
+  # Ubuntu's rootful podman owns the storage, and the rpm-ostree that re-lays
+  # the image runs inside the Fedora image and writes into that storage. This
+  # job holds exactly that pairing: a Shell-only release must change only the
+  # Shell's layer, a plan for another image must be refused, and the lossless
+  # check must bite. RIME_RECHUNK_BASE is the base core is built FROM.
+  rechunk:
+    name: Release rechunker (end to end)
+    needs: changes
+    if: needs.changes.outputs.rechunk == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+        with:
+          required-gb: "30"
+      - name: A Shell-only release changes one layer, and the result is lossless
+        run: |
+          set -euo pipefail
+          command -v skopeo >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq skopeo; }
+          sudo podman version --format '{{.Server.Version}}'
+          sudo TMPDIR=/var/tmp ./tests/test-rechunk-e2e.sh
 
   android:
     name: Android client
@@ -5053,6 +5100,7 @@ jobs:
       - engine-services
       - engine-lint
       - android
+      - rechunk
     runs-on: ubuntu-24.04
     steps:
       # `skipped` counts as success HERE and only here, and the distinction is

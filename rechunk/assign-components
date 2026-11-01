@@ -1,0 +1,126 @@
+#!/usr/bin/bash
+# assign-components CONF [ROOT]
+#
+# Tags files NO package owns with user.component / user.update-interval xattrs,
+# following CONF (see rechunk/components.conf), so rpm-ostree build-chunked-oci
+# gives each group a layer of its own instead of one catch-all layer that
+# changes every release.
+#
+# Runs inside the image being rechunked (it asks that image's rpmdb who owns
+# what). ROOT defaults to / and exists for the tests.
+#
+# Output: one "component files bytes" line per component, then the size of the
+# unpackaged content left untagged (what still lands in the catch-all layer).
+# Exit 1 on a malformed CONF line, an unknown interval, or a component that
+# names two different intervals.
+set -euo pipefail
+export LC_ALL=C
+
+conf=${1:?usage: assign-components CONF [ROOT]}
+root=${2:-/}
+root=${root%/}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Every path an installed package owns, relative to ROOT (rpm prints absolute).
+if [ -n "${RIME_RECHUNK_OWNED_LIST:-}" ]; then
+    # tests hand in a fixed list instead of a real rpmdb
+    sort -u "$RIME_RECHUNK_OWNED_LIST" > "$work/owned"
+else
+    rpm --root "${root:-/}" -qa --qf '[%{FILENAMES}\n]' | sort -u > "$work/owned"
+fi
+
+declare -A interval_of=()
+declare -a order=()
+lineno=0
+while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    line=${line%%#*}
+    # Split the line into words WITHOUT expanding the glob in it (that happens
+    # below, under ROOT).
+    set -f
+    # shellcheck disable=SC2086 # deliberate word split of a config line
+    set -- $line
+    set +f
+    [ $# -eq 0 ] && continue
+    if [ $# -ne 3 ]; then
+        echo "assign-components: $conf:$lineno: want <component> <interval> <path>, got: $line" >&2
+        exit 1
+    fi
+    comp=$1 ival=$2 pat=$3
+    case $ival in daily|weekly|biweekly|monthly|quarterly|yearly) ;; *)
+        echo "assign-components: $conf:$lineno: unknown update interval '$ival'" >&2
+        exit 1 ;;
+    esac
+    case $pat in /*) ;; *)
+        echo "assign-components: $conf:$lineno: path must be absolute: $pat" >&2
+        exit 1 ;;
+    esac
+    case $comp in *[!A-Za-z0-9._-]*|'')
+        echo "assign-components: $conf:$lineno: bad component name '$comp'" >&2
+        exit 1 ;;
+    esac
+    if [ -n "${interval_of[$comp]:-}" ] && [ "${interval_of[$comp]}" != "$ival" ]; then
+        echo "assign-components: $conf:$lineno: $comp already has interval ${interval_of[$comp]}" >&2
+        exit 1
+    fi
+    if [ -z "${interval_of[$comp]:-}" ]; then
+        interval_of[$comp]=$ival
+        order+=("$comp")
+    fi
+    # Expand the glob under ROOT; no match is fine (the payload may be gone).
+    shopt -s nullglob
+    # shellcheck disable=SC2206 # the glob expansion is the point
+    matches=( "$root"$pat )
+    shopt -u nullglob
+    for m in "${matches[@]}"; do
+        # A pattern with no glob characters survives nullglob even when the
+        # path is gone; skip it rather than let find fail.
+        [ -e "$m" ] || continue
+        # Regular files only: user.* xattrs cannot live on symlinks, and a
+        # directory's layer placement follows its files.
+        find "$m" -xdev -type f -print0
+    done | while IFS= read -r -d '' f; do
+        printf '%s\t%s\n' "${f#"$root"}" "$comp"
+    done >> "$work/candidates"
+done < "$conf"
+
+touch "$work/candidates"
+# First rule wins for a file two rules match.
+sort -t $'\t' -k1,1 -s -u "$work/candidates" > "$work/cand.sorted"
+# Drop package-owned files: a rule never steals a file from its RPM's layer.
+join -t $'\t' -v1 "$work/cand.sorted" "$work/owned" > "$work/tag"
+
+for comp in "${order[@]}"; do
+    : > "$work/files.$comp"
+done
+while IFS=$'\t' read -r path comp; do
+    printf '%s\0' "$root$path" >> "$work/files.$comp"
+done < "$work/tag"
+
+for comp in "${order[@]}"; do
+    list="$work/files.$comp"
+    n=0 bytes=0
+    if [ -s "$list" ]; then
+        xargs -0 -r setfattr -n user.component -v "$comp" < "$list"
+        xargs -0 -r setfattr -n user.update-interval -v "${interval_of[$comp]}" < "$list"
+        n=$(tr -cd '\0' < "$list" | wc -c)
+        bytes=$(xargs -0 -r stat -c %s < "$list" | awk '{s += $1} END {print s + 0}')
+    fi
+    printf 'component %s files %d bytes %d\n' "$comp" "$n" "$bytes"
+done
+
+# What is still untagged and unowned = the catch-all layer. Printed so a new
+# hand-installed payload shows up in the build log instead of silently making
+# every update bigger.
+find "${root:-/}" -xdev \( -path "$root/proc" -o -path "$root/sys" -o -path "$root/dev" \
+        -o -path "$root/run" -o -path "$root/tmp" -o -path "$root/sysroot" -o -path "$root/var" \) -prune \
+    -o -type f -printf '/%P\t%s\n' 2>/dev/null \
+    | sort -t $'\t' -k1,1 > "$work/all"
+cut -f1 "$work/tag" > "$work/tagged"
+join -t $'\t' -v1 "$work/all" "$work/owned" | join -t $'\t' -v1 - "$work/tagged" > "$work/rest"
+rest_n=$(wc -l < "$work/rest")
+rest_b=$(awk -F'\t' '{s += $2} END {print s + 0}' "$work/rest")
+printf 'untagged-unpackaged files %d bytes %d\n' "$rest_n" "$rest_b"
+# awk, not head: head exits early and sort's SIGPIPE would fail the pipeline.
+sort -t $'\t' -k2,2 -n -r "$work/rest" | awk 'NR <= 15 { print "  largest untagged: " $0 }'

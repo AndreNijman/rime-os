@@ -1,0 +1,8 @@
+# Tags the hand-installed payloads of an already-built Rime image with layer
+# components (rechunk/assign-components) so rpm-ostree can split them out.
+# Built and thrown away by rechunk/rechunk-image; never pushed. The copy-up this
+# RUN causes is irrelevant: the rechunk step re-lays every file anyway.
+ARG BASE
+FROM ${BASE}
+RUN --mount=type=bind,source=.,target=/run/rechunk,ro \
+    /run/rechunk/assign-components /run/rechunk/components.conf

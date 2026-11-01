@@ -1,0 +1,87 @@
+#!/usr/bin/bash
+# verify-lossless ORIGINAL RECHUNKED
+#
+# Refuses a rechunked image unless it holds exactly what the original holds:
+# the same paths with the same type, mode, owner, size and symlink target, the
+# same bytes in every regular file (sha256), the same file capabilities, and
+# the same image config apart from the ostree commit rpm-ostree re-made.
+#
+# Ignored on purpose:
+#   /sysroot              the ostree repo is the rechunk's own re-encoding of
+#                         the same files (hardlinks into it), not content
+#   /etc/hosts, hostname, podman writes these into every container it runs
+#   resolv.conf, /run/.containerenv
+#   directory sizes       an overlay directory's st_size is not content
+#   user.* xattrs         the layer-component tags assign-components set
+#   ostree.commit and     labels rpm-ostree writes for the image it made
+#   ostree.final-diffid
+set -euo pipefail
+export LC_ALL=C
+
+orig=${1:?usage: verify-lossless ORIGINAL RECHUNKED}
+new=${2:?usage: verify-lossless ORIGINAL RECHUNKED}
+PODMAN=${PODMAN:-podman}
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+cat > "$work/inventory" <<'EOF'
+#!/bin/sh
+set -eu
+cd /
+prune='( -path /proc -o -path /sys -o -path /dev -o -path /run -o -path /tmp -o -path /sysroot -o -path /out
+         -o -path /etc/hosts -o -path /etc/hostname -o -path /etc/resolv.conf )'
+# shellcheck disable=SC2086
+find / -xdev $prune -prune -o \( -type d -printf 'd %m %U %G - %p\n' \) \
+    -o -printf '%y %m %U %G %s %p -> %l\n' 2>/dev/null | sort > /out/meta
+# shellcheck disable=SC2086
+find / -xdev $prune -prune -o -type f -print0 2>/dev/null \
+    | xargs -0 -r -n 256 -P "$(nproc)" sha256sum | sort -k2 > /out/sums
+# File capabilities. getcap answers 0 even for a file it could not read (the
+# error goes to stderr only), so a missing getcap or any message on stderr
+# means the inventory is incomplete: refuse rather than compare a partial list.
+command -v getcap >/dev/null || { echo "verify-lossless: no getcap in this image, file capabilities cannot be compared" >&2; exit 1; }
+getcap -r / 2>/out/caps.err | grep -v '^/\(proc\|sys\|sysroot\)/' | sort > /out/caps
+if [ -s /out/caps.err ]; then
+    echo "verify-lossless: getcap -r / reported errors, the capability inventory is incomplete:" >&2
+    head -n 20 /out/caps.err >&2
+    exit 1
+fi
+EOF
+chmod 0755 "$work/inventory"
+
+inventory() {
+    mkdir -p "$work/$2"
+    $PODMAN run --rm --network=none --security-opt label=disable \
+        -v "$work/inventory:/inventory:ro" -v "$work/$2:/out" \
+        --entrypoint /inventory "$1"
+    $PODMAN image inspect --format '{{json .Config}}' "$1" \
+        | jq -S 'del(.Labels["ostree.commit"], .Labels["ostree.final-diffid"])' > "$work/$2/config"
+}
+
+inventory "$orig" a &
+pa=$!
+inventory "$new" b &
+pb=$!
+wait "$pa"
+wait "$pb"
+
+fail=0
+for f in meta sums caps config; do
+    if ! cmp -s "$work/a/$f" "$work/b/$f"; then
+        echo "verify-lossless: $f differs between $orig and $new:" >&2
+        diff "$work/a/$f" "$work/b/$f" | awk 'NR <= 40' >&2 || true
+        fail=1
+    fi
+done
+[ "$(wc -l < "$work/a/sums")" -gt 1000 ] || {
+    echo "verify-lossless: only $(wc -l < "$work/a/sums") files inventoried in $orig — refusing a vacuous pass" >&2
+    fail=1
+}
+# Every Fedora bootc image carries file capabilities (newuidmap, newgidmap,
+# arping...): an empty list is a broken inventory, not a match.
+[ "$(wc -l < "$work/a/caps")" -gt 0 ] || {
+    echo "verify-lossless: no file capabilities inventoried in $orig — refusing a vacuous pass" >&2
+    fail=1
+}
+[ "$fail" = 0 ] || exit 1
+echo "verify-lossless: identical — $(wc -l < "$work/a/meta") paths, $(wc -l < "$work/a/sums") files, $(wc -l < "$work/a/caps") capabilities"
