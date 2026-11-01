@@ -1,0 +1,11 @@
+on: push
+jobs:
+  build-and-sign:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, katana-nix]
+    steps:
+      - run: sbsign --key k --cert c vmlinuz
+        env:
+          RIME_SB_KEY_B64: ${{ secrets.APEX_SB_KEY_B64 }}

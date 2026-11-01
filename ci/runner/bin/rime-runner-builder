@@ -1,0 +1,16 @@
+#!/bin/bash
+# rime-runner-builder: run nix-daemon for the jobs, in the foreground.
+# ExecStart of rime-runner-builder.service. Run as root.
+set -euo pipefail
+RIME_RUNNER_HOME=${RIME_RUNNER_HOME:-$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)}
+# shellcheck source=../lib/common.sh
+. "$RIME_RUNNER_HOME/lib/common.sh"
+
+mountpoint -q /var/lab || rr_die "/var/lab is not mounted"
+rr_podman_env
+rr_seed_store
+RIME_RUNNER_CGROUP_PARENT=${RIME_RUNNER_CGROUP_PARENT:-rime-runner.slice}
+builder_args "$RIME_RUNNER_NETWORK"
+# A stale socket from a crash would make jobs connect to nothing.
+rm -f "$RIME_RUNNER_NIX/var/nix/daemon-socket/socket"
+exec podman run "${BUILDER_ARGS[@]}" "$RIME_RUNNER_BUILDER_IMAGE" nix-daemon

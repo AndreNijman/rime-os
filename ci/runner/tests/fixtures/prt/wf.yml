@@ -1,0 +1,10 @@
+on:
+  pull_request_target:
+jobs:
+  nix:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, katana]
+    steps:
+      - run: nix build .#rimed

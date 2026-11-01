@@ -1,0 +1,7 @@
+# pull_request_target calling a guarded katana workflow: the guard passes
+# (event_name is pull_request_target), with base-repo rights.
+on:
+  pull_request_target:
+jobs:
+  call:
+    uses: ./.github/workflows/callee.yml

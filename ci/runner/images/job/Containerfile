@@ -1,0 +1,44 @@
+# The image every isolated katana job runs in. Built locally by
+# `rime-runner-ctl build-images` into the runner's own podman storage.
+#
+# Fedora (glibc, FHS) rather than a Nix-built image: the official runner and the
+# node it ships for JavaScript actions (actions/checkout, upload-artifact) are
+# prebuilt FHS binaries. Nix tools come from the builder's store, mounted at
+# /nix/store read-only, through /nix/var/nix/profiles/default/bin.
+#
+# Both inputs are pinned by digest. GitHub refuses jobs to a runner that is more
+# than 30 days behind its newest release when self-update is off (it is off:
+# the container is thrown away after one job), so bump RUNNER_VERSION/SHA256
+# and the tag in runner.conf within 30 days of every actions/runner release.
+FROM registry.fedoraproject.org/fedora:45@sha256:0239a7c91e6869c5aca1a7f7753b66c91fa8aac3e1c6fd18b75c6eef88b17ef6
+
+ARG RUNNER_VERSION=2.338.2
+ARG RUNNER_SHA256=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
+
+RUN dnf -y install --setopt=install_weak_deps=False \
+        git-core curl ca-certificates tar gzip xz zstd jq findutils which \
+        procps-ng hostname diffutils patch file python3 \
+        libicu krb5-libs openssl-libs zlib libstdc++ \
+    && rpm -e --nodeps sudo \
+    && dnf clean all && rm -rf /var/cache/dnf /var/log/dnf*
+
+RUN useradd --create-home --uid 1000 --user-group --shell /bin/bash runner \
+    && mkdir -p /opt/actions-runner \
+    && curl -fsSL -o /tmp/runner.tgz \
+        "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" \
+    && echo "${RUNNER_SHA256}  /tmp/runner.tgz" | sha256sum -c - \
+    && tar -xzf /tmp/runner.tgz -C /opt/actions-runner \
+    && rm -f /tmp/runner.tgz \
+    && chown -R runner:runner /opt/actions-runner \
+    && chmod 0700 /root
+
+COPY nix.conf /etc/nix/nix.conf
+COPY entrypoint.sh probe.sh /usr/local/libexec/rime-runner/
+
+ENV PATH=/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin \
+    NIX_REMOTE=daemon \
+    RUNNER_ALLOW_RUNASROOT=0
+
+USER runner
+WORKDIR /opt/actions-runner
+ENTRYPOINT ["/usr/local/libexec/rime-runner/entrypoint.sh"]

@@ -1,0 +1,22 @@
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  nix:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, katana-nix]
+    steps:
+      - run: nix build .#rimed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  sign:
+    needs: nix
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+    steps:
+      - run: cosign sign --yes "$IMAGE"
+        env:
+          KEY: ${{ secrets.APEX_SB_KEY_B64 }}

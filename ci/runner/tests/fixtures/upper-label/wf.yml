@@ -1,0 +1,8 @@
+# GitHub matches labels case-insensitively.
+on:
+  pull_request:
+jobs:
+  nix:
+    runs-on: KATANA-NIX
+    steps:
+      - run: nix build .#rimed

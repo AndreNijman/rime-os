@@ -1,0 +1,8 @@
+on: [push, pull_request]
+permissions:
+  id-token: write
+jobs:
+  sign:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: cosign sign --yes "$IMAGE"
