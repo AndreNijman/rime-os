@@ -2062,17 +2062,35 @@ RUN set -eux; \
         # Every directory zellij writes to is redirected under /tmp and removed
         # below. Without that it registers a session record in the build user's
         # ~/.cache and ~/.local/share, and the image would ship two dead zellij
-        # sessions nobody created.
-        if ZELLIJ_SOCKET_DIR=/tmp/rime-zcheck/sock \
+        # sessions nobody created. HOME is redirected too: with no terminal,
+        # zellij 0.45 writes $HOME/.config/zellij/config.kdl whatever
+        # XDG_CONFIG_HOME says, then panics. It parses the layout before that,
+        # so the parse check still holds.
+        if HOME=/tmp/rime-zcheck/home \
+          ZELLIJ_SOCKET_DIR=/tmp/rime-zcheck/sock \
           XDG_CACHE_HOME=/tmp/rime-zcheck/cache \
           XDG_DATA_HOME=/tmp/rime-zcheck/data \
           XDG_CONFIG_HOME=/tmp/rime-zcheck/config \
-            timeout 30 zellij --layout-string "$(cat /tmp/rime-mux-check.kdl)" 2>&1 \
-            | grep -q 'Failed to parse' \
+            timeout 30 zellij --layout-string "$(cat /tmp/rime-mux-check.kdl)" </dev/null 2>&1 \
+            | grep 'Failed to parse' >/dev/null \
             ; then echo "FATAL: zellij could not parse the generated layout"; exit 1; fi; \
     done; \
-    rm -rf /tmp/rime-mux-check.tsv /tmp/rime-mux-check.kdl /tmp/rime-zcheck; \
-    test ! -e /root/.cache/zellij; \
+    # zellij's server outlives the client and keeps writing after the cleanup
+    # below. End every zellij this step started (matched by executable, not by
+    # name), and wait until they are gone before cleaning up.
+    for _ in $(seq 50); do \
+        left=""; \
+        for p in /proc/[0-9]*; do \
+            [ "$(readlink "$p/exe" 2>/dev/null)" = /usr/bin/zellij ] || continue; \
+            left="$left ${p#/proc/}"; kill -9 "${p#/proc/}" 2>/dev/null || true; \
+        done; \
+        [ -z "$left" ] && break; \
+        sleep 0.1; \
+    done; \
+    [ -z "$left" ] || { echo "FATAL: zellij processes outlived the check:$left"; exit 1; }; \
+    rm -rf /tmp/rime-mux-check.tsv /tmp/rime-mux-check.kdl /tmp/rime-zcheck "/tmp/zellij-$(id -u)"; \
+    leak="$(find /root /tmp /var/tmp -path '*zellij*' -print 2>/dev/null)"; \
+    [ -z "$leak" ] || { echo "FATAL: the zellij check left files behind: $leak"; exit 1; }; \
     echo "context menu + settings generators + agent helpers: installed and self-tested"
 RUN set -eux; \
     systemctl --global enable rime-shell-firstrun.service; \

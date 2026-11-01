@@ -2507,5 +2507,32 @@ RUN printf '# Rime OS default locale. Override with: localectl set-locale LANG=.
 # See rime-logs 55 / rimelogs/09-timezone-utc.md.
 RUN ln -sfn ../usr/share/zoneinfo/Australia/Perth /etc/localtime
 
+# ── Build-time leftovers ───────────────────────────────────────────────────
+# fedora-bootc:45 images built since 2026-10-31 ship a real /var/roothome
+# (.ssh and buildinfo/). Before that /root was a dangling link, so every tool a
+# build step ran as root failed to write there, silently. Now those writes
+# succeed: `starship --version` and `zellij --version` leave caches in root's
+# home, and `gh --version` leaves .local/state/gh/device-id. /var content in an
+# image is copied into a machine only at install, so every fresh install would
+# get those files, and the same gh device id. /tmp is a tmpfs at runtime, so
+# build leftovers there are dead bytes in the image. Base's zellij check also
+# refuses a /root/.cache/zellij it inherits from here.
+#
+# Remove them, then fail on anything a build step leaves in those places beyond
+# what fedora-bootc itself ships, so a new leftover shows up here instead.
+RUN set -eux; \
+    rm -rf /var/roothome/.cache /var/roothome/.local \
+        /tmp/zellij-0 /tmp/nvim.root /tmp/node-compile-cache; \
+    dirs=""; \
+    for d in /var/roothome /tmp /var/tmp; do [ -d "$d" ] && dirs="$dirs $d"; done; \
+    left=""; \
+    if [ -n "$dirs" ]; then \
+        left="$(find $dirs -mindepth 1 \
+            \( -path /var/roothome/.ssh -o -path /var/roothome/buildinfo \
+               -o -path /tmp/.ICE-unix -o -path /tmp/.X11-unix \
+               -o -path /tmp/.XIM-unix -o -path /tmp/.font-unix \) -prune -o -print)"; \
+    fi; \
+    [ -z "$left" ] || { printf 'FATAL: a build step left files in root home or a tmp dir:\n%s\n' "$left"; exit 1; }
+
 # ── Container sanity lint (informational) ─────────────────────────────────
 RUN bootc container lint || true
