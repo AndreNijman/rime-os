@@ -2,6 +2,7 @@
 """drive.py: one boot-hook lab scenario in OVMF (README.md here). Runs INSIDE the rime-ovmf-probe container.
 
     drive.py LAYOUT FW        LAYOUT = bls | custom, FW = sb-mok | sb-off
+    drive.py matrix CELL FW   the P2 boot matrix (matrix.nix): CELL = bls-plain | bls-luks | custom-plain | custom-luks
 
 Five boots of one disk (a qcow2 overlay over $LAB/disks/LAYOUT/disk.raw, so every scenario starts from the same
 nixos-install'd generation 1), each a fresh QEMU with the same varstore copy:
@@ -85,7 +86,7 @@ class Qmp:
 
 
 class Boot:
-    def __init__(self, sc, n, action=None, timeout=300):
+    def __init__(self, sc, n, action=None, timeout=300, mem="2048", smp="2", gfx=False):
         self.sc, self.n, self.timeout = sc, n, timeout
         self.base = f"{sc.dir}/boot{n}"
         self.serial = self.base + ".serial.log"
@@ -95,7 +96,7 @@ class Boot:
                 os.unlink(p)
         argv = [
             "qemu-system-x86_64",
-            "-machine", "q35,smm=on,accel=kvm", "-cpu", "host", "-m", "2048", "-smp", "2",
+            "-machine", "q35,smm=on,accel=kvm", "-cpu", "host", "-m", mem, "-smp", smp,
             "-global", "driver=cfi.pflash01,property=secure,value=on",
             "-global", "ICH9-LPC.disable_s3=1",
             "-drive", f"if=pflash,unit=0,format=raw,readonly=on,file={CODE}",
@@ -105,6 +106,10 @@ class Boot:
             "-qmp", f"unix:{self.qmp_path},server=on,wait=off",
             "-display", "none", "-no-reboot", "-nic", "none",
         ]
+        if gfx:
+            # The greeter needs a KMS device (as nix/tests/vm-boot.nix); OVMF's GOP on it is what Plymouth's
+            # simpledrm and GRUB draw on, and OVMF still mirrors its text console to the serial port.
+            argv += ["-vga", "none", "-device", "virtio-gpu-pci,xres=1280,yres=800"]
         if action:
             argv += ["-fw_cfg", f"name=opt/rime/action,string={action}"]
         self.err = open(self.base + ".qemu.stderr", "wb")
@@ -307,7 +312,169 @@ class Scenario:
         return all(r.startswith("PASS") for r in self.results)
 
 
+MATRIX_TITLE = MENU_TITLE
+
+
+class MatrixScenario(Scenario):
+    """One boot-matrix cell x firmware: three boots of a qcow2 overlay over $LAB/disks/CELL/disk.raw.
+
+      1. GRUB's default, generation 1 (the shipped profile, the signed Rime kernel): for LUKS the passphrase is
+         typed at the real prompt (keyboard, QMP sendkey) when the initrd says it is asked; it reaches the greeter
+         (screenshot) and installs BAD generation 2 in the VM.
+      2. generation 2 is the default and fails (initrd emergency mode, its own marker).
+      3. B9/B10: the menu is driven to generation 1 (arrow keys + Return), which unlocks (LUKS) and reaches the
+         greeter again (screenshot).
+    """
+
+    PASS = "rimelab2026"
+
+    def __init__(self, cell, fw):
+        self.cell, self.fw = cell, fw
+        self.layout = cell.split("-")[0]
+        self.luks = cell.endswith("-luks")
+        self.name = f"{cell}-{fw}"
+        self.dir = f"{OUT}/{self.name}"
+        os.makedirs(self.dir, exist_ok=True)
+        with open(f"{LAB}/matrix-gens.json") as f:
+            self.gens = json.load(f)[cell]
+        self.vars = f"/tmp/{self.name}.vars.fd"
+        self.disk = f"/tmp/{self.name}.qcow2"
+        subprocess.run(["cp", f"{LAB}/fw/vars-{fw}.fd", self.vars], check=True)
+        subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw", "-b",
+                        f"{LAB}/disks/{cell}/disk.raw", self.disk], check=True)
+        self.results = []
+        self.want_sb = "enabled" if fw == "sb-mok" else "disabled"
+        self.luks_uuid = None
+        if self.luks:
+            with open(f"{LAB}/disks/{cell}/luks.env") as f:
+                env = dict(l.strip().split("=", 1) for l in f if "=" in l)
+            self.luks_uuid = env["uuid"]
+            self.PASS = env["pass"]
+
+    def boot(self, n, action=None):
+        return Boot(self, n, action=action, timeout=900, mem="4096", smp="4", gfx=True)
+
+    def type_passphrase(self, b, label):
+        """Wait for the initrd's ask marker, screenshot the prompt, type the passphrase on the keyboard."""
+        if not self.luks:
+            return []
+        t = b.wait_for(lambda t: "RIME-LAB: PASSPHRASE-ASKED" in t, 420)
+        if not t:
+            return ["the initrd never asked for the passphrase"]
+        time.sleep(4)  # Plymouth draws its prompt
+        b.qmp.shot(f"{b.base}-passphrase{label}.png")
+        for ch in self.PASS:
+            b.qmp.key(ch)
+            time.sleep(0.15)
+        b.qmp.key("ret")
+        return []
+
+    def greeter(self, b):
+        t = b.wait_for(lambda t: "RIME-LAB: GREETER-UP" in t or "RIME-LAB: GREETER-MISSING" in t, 600)
+        if t and "RIME-LAB: GREETER-UP" in t:
+            time.sleep(10)  # the driver holds the screen 25 s after GREETER-UP
+            b.qmp.shot(b.base + "-greeter.png")
+            return []
+        return ["greeter never came up (no GREETER-UP)"]
+
+    def good(self, t, gen):
+        problems = []
+        if f"RIME-LAB: stage-2 reached: generation={gen} system={self.gens[f'gen{gen}']}" not in t:
+            problems.append(f"no stage-2 marker for generation {gen}")
+        if f"sb-state: SecureBoot {self.want_sb}" not in t:
+            problems.append(f"SecureBoot not {self.want_sb}")
+        if self.want_sb == "enabled" and "Loaded X.509 cert 'Rime boot-hook lab TEST MOK" not in t:
+            problems.append("test MOK not loaded by the kernel")
+        if not re.search(r"RIME-LAB: cmdline: BOOT_IMAGE=\S*/rime/nixos/[0-9a-f]{32}-linux-image-\S+-signed\.efi ", t):
+            problems.append("kernel not the hook's content-addressed copy of the signed Rime image")
+        if not re.search(r"RIME-LAB: uname: \S*-rime", t):
+            problems.append("running kernel is not Rime's")
+        if "RIME-LAB: GREETER-UP" not in t:
+            problems.append("no GREETER-UP")
+        if self.luks:
+            if f"rd.luks.uuid={self.luks_uuid}" not in t.split("RIME-LAB: cmdline:", 1)[-1].split("\n", 1)[0]:
+                problems.append("rd.luks.uuid= not on the entry's command line")
+            if f"RIME-LAB: luks: /dev/mapper/luks-{self.luks_uuid} " not in t or "type:    LUKS2" not in t \
+                    and "type: LUKS2" not in t:
+                problems.append("root not on the LUKS2 volume named by rd.luks.uuid")
+        if "RIME-LAB: DONE, powering off" not in t:
+            problems.append("driver did not finish")
+        if self.layout == "custom":
+            with open(f"{LAB}/disks/{self.cell}/ostree-before.sha256") as f:
+                want = f.read().split()[0]
+            if not re.search(rf"ostree: loader -> loader\.1; {want}  /boot/loader\.1/entries/ostree-1\.conf", t):
+                problems.append("ostree's loader symlink or entry changed")
+            if "custom.cfg windows entry: 1" not in t:
+                problems.append("custom.cfg's Windows entry not kept exactly once")
+        return problems
+
+    def run(self):
+        g = self.gens
+        # 1. generation 1 by default; greeter; install BAD generation 2.
+        b = self.boot(1, action=f"install:{g['gen2']}")
+        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 180)
+        if menu:
+            b.qmp.shot(b.base + "-menu.png")
+        p = self.type_passphrase(b, "")
+        p += self.greeter(b)
+        rc, t = b.finish()
+        p += self.good(t, 1)
+        if "RIME-LAB: install rc=0" not in t:
+            p.append("installing generation 2 failed")
+        if "RIME-LAB: menu| set default=rime-generation-2" not in t:
+            p.append("generation 2 not the default after its switch-to-configuration boot")
+        self.verdict(b, not p, "gen1 (default) reaches the greeter; switch-to-configuration boot makes BAD gen2 the default",
+                     "; ".join(p) or f"menu {menu_order(menu or '')}")
+
+        # 2. generation 2 by default fails.
+        b = self.boot(2)
+        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 180)
+        order = menu_order(menu or "")
+        if menu:
+            b.qmp.shot(b.base + "-menu.png")
+        p = self.type_passphrase(b, "")
+        rc, t = b.finish()
+        if "RIME-LAB: BAD generation 2 reached initrd emergency mode" not in t:
+            p.append("no bad-generation marker")
+        if "RIME-LAB: stage-2 reached" in t:
+            p.append("something reached stage 2")
+        self.verdict(b, not p, "BAD gen2 is the default and fails at boot", "; ".join(p) or f"menu {order}")
+
+        # 3. pick generation 1 in the GRUB menu by keyboard; it reaches the greeter (B9 plain, B10 LUKS).
+        b = self.boot(3)
+        menu = b.wait_for(lambda t: "automatically" in t and {1, 2} <= set(menu_order(t)), 180)
+        p, keys = [], []
+        if not menu:
+            p.append("GRUB menu with generations 1 and 2 never appeared")
+        else:
+            order = menu_order(menu)
+            b.qmp.shot(b.base + "-menu.png")
+            delta = order.index(1) - order.index(2)
+            keys = ["down" if delta > 0 else "up"] * abs(delta)
+            for k in keys:
+                b.qmp.key(k)
+                time.sleep(0.4)
+            time.sleep(1.0)
+            b.qmp.shot(b.base + "-picked.png")
+            b.qmp.key("ret")
+        p += self.type_passphrase(b, "")
+        p += self.greeter(b)
+        rc, t = b.finish()
+        p += self.good(t, 1)
+        self.verdict(b, not p, "recovery: menu driven to gen1 (keys: " + " ".join(keys + ["ret"]) + "), it reaches the greeter",
+                     "; ".join(p) or f"menu {menu_order(menu or '')}")
+
+        for f in (self.vars, self.disk):
+            os.unlink(f)
+        return all(r.startswith("PASS") for r in self.results)
+
+
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "matrix":
+        if sys.argv[2] not in ("bls-plain", "bls-luks", "custom-plain", "custom-luks") \
+                or sys.argv[3] not in ("sb-mok", "sb-off"):
+            sys.exit("usage: drive.py matrix bls-plain|bls-luks|custom-plain|custom-luks sb-mok|sb-off")
+        sys.exit(0 if MatrixScenario(sys.argv[2], sys.argv[3]).run() else 1)
     if len(sys.argv) != 3 or sys.argv[1] not in ("bls", "custom") or sys.argv[2] not in ("sb-mok", "sb-off"):
         sys.exit("usage: drive.py bls|custom sb-mok|sb-off")
     sys.exit(0 if Scenario(sys.argv[1], sys.argv[2]).run() else 1)

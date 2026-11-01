@@ -28,6 +28,9 @@ let
   # bootc's guest PID 1, made safe for a booted system: no remounting /proc, /sys, /run, /tmp or cgroup2 under a
   # running systemd, store paths instead of /usr/bin, and "exit 0 after the verdict" instead of sysrq power-off.
   # --replace-fail on every edit: if init.sh changes shape, this fails loudly instead of testing something else.
+  # The attach/detach window is 60 s, not bootc's 10 s: under host load (a 4-vCPU guest on a busy runner, load
+  # average ~120) scx_eevdf took longer than 10 s to attach once (p2-gates K2). A healthy scheduler still passes
+  # the moment the kernel reports it enabled (the wait polls every 0.1 s); only a broken one waits the full window.
   scxSelftest = pkgs.runCommand "rime-scx-selftest" { } ''
     cp ${src + "/tests/kernel/scx-selftest/init.sh"} $out
     chmod u+w $out
@@ -53,7 +56,8 @@ let
       --replace-fail '/usr/bin/true' '${pkgs.coreutils}/bin/true' \
       --replace-fail 'bin="/usr/bin/$1"' 'bin="${rime.rime-scx}/bin/$1"' \
       --replace-fail '/selftest/schedulers.txt' '${schedulersTxt}' \
-      --replace-fail '/selftest/kill9.txt' '/nonexistent/kill9.txt'
+      --replace-fail '/selftest/kill9.txt' '/nonexistent/kill9.txt' \
+      --replace-fail 'SETTLE="$(param settle 10)"' 'SETTLE="$(param settle 60)"'
     ${pkgs.bash}/bin/bash -n $out
   '';
 

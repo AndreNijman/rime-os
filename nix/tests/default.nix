@@ -30,3 +30,5 @@
 // import ./boot.nix { inherit pkgs self; }
 # catalogue, catalogue-data
 // import ./catalogue.nix { inherit pkgs self; }
+# boot-loader-scan, boot-microcode, luks-boot, kernel-vm-signed
+// import ./bootmatrix.nix { inherit pkgs self; }

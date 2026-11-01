@@ -11,7 +11,8 @@
 # into the initrd's /etc/crypttab). `uuid` exists for a machine-specific configuration (and tests); `keymap` is the
 # console keymap the passphrase is typed with (the tpmkeymap work builds the keymap gate on it).
 #
-# Proven by checks.luks-boot (nix/tests/luks.nix) and, through Fedora's shim and GRUB, by the OVMF boot matrix
+# The systemd initrd is the only initrd at this nixpkgs pin (nix/probe/ovmf/system.nix), so there is nothing to assert.
+# Proven by checks.luks-boot (nix/tests/bootmatrix.nix) and, through Fedora's shim and GRUB, by the OVMF boot matrix
 # (nix/probe/ovmf/boothook, docs/nixos/boot-matrix.md).
 { config, lib, pkgs, ... }:
 
@@ -48,13 +49,6 @@ in
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
-      assertions = [
-        {
-          assertion = config.boot.initrd.systemd.enable;
-          message = "rime.luks needs the systemd initrd (rd.luks.uuid= is read by systemd-cryptsetup-generator).";
-        }
-      ];
-
       # dm_mod, dm_crypt, the cipher modules, systemd-cryptsetup + its generator and the cryptsetup targets in the
       # initrd, without a crypttab entry (the volume comes from the kernel command line).
       boot.initrd.luks.forceLuksSupportInInitrd = true;
