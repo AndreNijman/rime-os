@@ -3,7 +3,7 @@
 #
 #   nix/ci/run-checks.sh list                     every flake check, one name per line
 #   nix/ci/run-checks.sh plan OUTDIR              which checks CI runs and which it skips, and why
-#   nix/ci/run-checks.sh build CHECK OUTDIR       build one check, record pass/fail in OUTDIR/CHECK.result
+#   nix/ci/run-checks.sh build CHECK OUTDIR       build one check, record pass/fail/timeout in OUTDIR/CHECK.result
 #   nix/ci/run-checks.sh summary PLANDIR RESDIR   the RAN/SKIPPED table; exits 1 unless every planned check passed
 #
 # The plan is "every check, minus nix/ci/checks-not-in-ci.txt". A check added to the flake is therefore run by CI
@@ -15,6 +15,9 @@
 #                           tree needs path:, and CI uses the same reference so the commands are identical)
 #   RIME_FLAKE_CHECKS_FILE  read the check names from this file instead of evaluating the flake (the tests use it)
 #   RIME_CI_SKIP_FILE       the skip list (default nix/ci/checks-not-in-ci.txt)
+#   RIME_CHECK_TIMEOUT      build: seconds before the build is stopped and recorded as `timeout` (default 0 = none).
+#                           nix.yml sets it below the job's own timeout-minutes, so a check that runs too long is
+#                           reported as TIMED OUT with its time instead of a job killed with no result at all.
 set -euo pipefail
 
 FLAKE=${FLAKE:-path:.}
@@ -94,17 +97,25 @@ plan() {
 }
 
 build() {
-    local check=$1 out=$2 start rc
+    local check=$1 out=$2 limit=${RIME_CHECK_TIMEOUT:-0} start rc secs
     mkdir -p "$out"
     start=$(date +%s)
     set +e
-    nix build "$FLAKE#checks.$SYSTEM.$check" -L --print-out-paths --no-link
+    if [ "$limit" -gt 0 ]; then
+        timeout --kill-after=60 "$limit" nix build "$FLAKE#checks.$SYSTEM.$check" -L --print-out-paths --no-link
+    else
+        nix build "$FLAKE#checks.$SYSTEM.$check" -L --print-out-paths --no-link
+    fi
     rc=$?
     set -e
+    secs=$(( $(date +%s) - start ))
     if [ "$rc" = 0 ]; then
-        printf 'pass\t%s\n' "$(( $(date +%s) - start ))" > "$out/$check.result"
+        printf 'pass\t%s\n' "$secs" > "$out/$check.result"
+    elif [ "$limit" -gt 0 ] && { [ "$rc" = 124 ] || [ "$rc" = 137 ]; } && [ "$secs" -ge "$limit" ]; then
+        echo "run-checks: $check did not finish in $limit s; stopped" >&2
+        printf 'timeout\t%s\n' "$secs" > "$out/$check.result"
     else
-        printf 'fail\t%s\n' "$(( $(date +%s) - start ))" > "$out/$check.result"
+        printf 'fail\t%s\n' "$secs" > "$out/$check.result"
     fi
     return "$rc"
 }
@@ -128,6 +139,8 @@ summary() {
         case "$status" in
             pass) echo "| \`$c\` | RAN | pass (${secs} s) | |" ;;
             fail) echo "| \`$c\` | RAN | **FAIL** (${secs} s) | |"; rc=1 ;;
+            timeout) echo "| \`$c\` | RAN | **TIMED OUT** (stopped after ${secs} s) | RIME_CHECK_TIMEOUT in nix.yml |"; rc=1 ;;
+            setup) echo "| \`$c\` | NOT RUN | **FAIL** before the build | the job's setup failed (disk, Nix or KVM) |"; rc=1 ;;
             *)    echo "| \`$c\` | RAN | **NO RESULT** | the job did not report (cancelled, timed out or never started) |"; rc=1 ;;
         esac
     done < "$plan/checks.txt"

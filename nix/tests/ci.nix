@@ -133,6 +133,31 @@ in
       printf 'pass\t1\n' > "$NIX_BUILD_TOP/r/rimed.result"; rm "$NIX_BUILD_TOP/r/shell.result"
       expect nonzero "a check with no result fails the summary" -- bash nix/ci/run-checks.sh summary "$NIX_BUILD_TOP/p" "$NIX_BUILD_TOP/r"
       has '| `shell` | RAN | **NO RESULT** |'
+      printf 'pass\t1\n' > "$NIX_BUILD_TOP/r/shell.result"
+      printf 'timeout\t4501\n' > "$NIX_BUILD_TOP/r/libexec.result"
+      expect nonzero "a timed-out check fails the summary" -- bash nix/ci/run-checks.sh summary "$NIX_BUILD_TOP/p" "$NIX_BUILD_TOP/r"
+      has '| `libexec` | RAN | **TIMED OUT** (stopped after 4501 s) |'
+      printf 'setup\t0\n' > "$NIX_BUILD_TOP/r/libexec.result"
+      expect nonzero "a check whose job failed in setup fails the summary" -- bash nix/ci/run-checks.sh summary "$NIX_BUILD_TOP/p" "$NIX_BUILD_TOP/r"
+      has '| `libexec` | NOT RUN | **FAIL** before the build |'
+      has '| `hostlayer-katana` | SKIPPED | not built | needs katana'"'"'s real state'
+
+      echo "== build: RIME_CHECK_TIMEOUT stops a build and records it as timeout, not fail"
+      mkdir -p "$NIX_BUILD_TOP/stub" "$NIX_BUILD_TOP/b"
+      printf '#!${pkgs.runtimeShell}\nexec sleep 30\n' > "$NIX_BUILD_TOP/stub/nix"
+      chmod +x "$NIX_BUILD_TOP/stub/nix"
+      expect nonzero "a build past its limit" -- env PATH="$NIX_BUILD_TOP/stub:$PATH" RIME_CHECK_TIMEOUT=1 bash nix/ci/run-checks.sh build slow "$NIX_BUILD_TOP/b"
+      has "slow did not finish in 1 s"
+      if grep -E '^timeout' "$NIX_BUILD_TOP/b/slow.result" > /dev/null; then ok "recorded as timeout"; else bad "recorded as $(cat "$NIX_BUILD_TOP/b/slow.result")"; fi
+      printf '#!${pkgs.runtimeShell}\nexit 1\n' > "$NIX_BUILD_TOP/stub/nix"
+      expect nonzero "a build that fails inside its limit" -- env PATH="$NIX_BUILD_TOP/stub:$PATH" RIME_CHECK_TIMEOUT=30 bash nix/ci/run-checks.sh build quick "$NIX_BUILD_TOP/b"
+      if grep -E '^fail' "$NIX_BUILD_TOP/b/quick.result" > /dev/null; then ok "recorded as fail"; else bad "recorded as $(cat "$NIX_BUILD_TOP/b/quick.result")"; fi
+      echo "== mutant: run-checks.sh without the time limit (the build runs on until the job is killed)"
+      printf '#!${pkgs.runtimeShell}\nexec sleep 3\n' > "$NIX_BUILD_TOP/stub/nix"
+      sed 's/if \[ "$limit" -gt 0 \]; then$/if false; then/' nix/ci/run-checks.sh > "$NIX_BUILD_TOP/rc-mutant.sh"
+      if cmp -s nix/ci/run-checks.sh "$NIX_BUILD_TOP/rc-mutant.sh"; then bad "mutant: pattern not found"; fi
+      set +e; env PATH="$NIX_BUILD_TOP/stub:$PATH" RIME_CHECK_TIMEOUT=1 bash "$NIX_BUILD_TOP/rc-mutant.sh" build slow2 "$NIX_BUILD_TOP/b" > /dev/null 2>&1; set -e
+      if grep -E '^timeout' "$NIX_BUILD_TOP/b/slow2.result" > /dev/null; then bad "mutant: still recorded a timeout"; else ok "killed: no time limit, no timeout recorded ($(cut -f1 "$NIX_BUILD_TOP/b/slow2.result"))"; fi
 
       echo "== rimed-test-report.py"
       cd "$NIX_BUILD_TOP"
