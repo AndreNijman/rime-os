@@ -55,6 +55,12 @@ for jname, job in jobs.items():
             run = st.get("run", "")
             rule("sign-detached.sh" in run and "--pinned \"$PINNED_CERT\"" in run,
                  f"job {jname} step {sname!r}: signs through sign-detached.sh against the pinned certificate")
+    nix_install = [st.get("run", "") for st in steps if "/install\" --no-daemon" in st.get("run", "")]
+    rule(len(nix_install) == 1
+         and "kernel.apparmor_restrict_unprivileged_userns=0" in nix_install[0]
+         and 'echo "sandbox = true"' in nix_install[0]
+         and 'echo "sandbox-fallback = false"' in nix_install[0],
+         f"job {jname}: single-user Nix gets a working build sandbox on ubuntu-24.04 (userns relaxed, no silent fallback)")
     if uses_secret:
         rule(bool(job.get("environment")), f"job {jname}: the signing job runs in a protected environment")
         rule((job.get("env") or {}).get("PINNED_CERT") == "nix/pkgs/kernel/signing/rime-mok.pem",

@@ -14,7 +14,8 @@
 #   kernel-sign-workflow  .github/workflows/nix-kernel-sign.yml keeps its shape: GitHub-hosted runners only (never
 #                         self-hosted/katana), no PR triggers, read-only token, actions pinned by SHA, the APEX_SB_*
 #                         secret names unchanged and only in the signing step's env, behind an environment, the key
-#                         shredded in an always() step, and the pinned certificate passed to sign-detached.sh.
+#                         shredded in an always() step, the pinned certificate passed to sign-detached.sh, and a
+#                         Nix build sandbox that works on ubuntu-24.04 (userns relaxed, sandbox-fallback = false).
 { pkgs, self }:
 
 let
