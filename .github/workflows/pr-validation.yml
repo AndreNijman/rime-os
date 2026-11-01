@@ -1056,6 +1056,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/check-core-rebuild-selector.sh
 
+      # docs/update-cost.md quotes what tools/update-cost-backtest.py prints
+      # from the ledger committed in docs/update-cost/. This re-runs the report
+      # offline and fails if a quoted figure moved, plus the script's fixture.
+      - name: The update-cost backtest reproduces the documented figures
+        if: ${{ !cancelled() }}
+        run: ./tests/test-update-cost-backtest.sh
+
   static-windows:
     name: Static validation — Windows installer
     runs-on: ubuntu-24.04
