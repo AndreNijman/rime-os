@@ -85,9 +85,9 @@ Input: the sanitised snapshot `/var/lab/rime-nix/artifacts/katana-state/` (0700,
 
 | # | Gate | How proven | Evidence so far | Status |
 |---|---|---|---|---|
-| I1 | The installer passes `iso-qualify.py` in OVMF with SB on | iso-qualify log | the bootc installer's CI boots passed for v3.2.0 (build-installer-iso 37749860175); the NixOS swap does not exist yet (wave 2) | not met yet |
-| I2 | The plain boot driver (`plain-boot-drive.py`) passes on the installed NixOS system, SB on | driver log | none | not met yet |
-| I3 | The LUKS boot driver (`luks-boot-drive.py`) passes, SB on | driver log | none | not met yet |
+| I1 | The installer passes `iso-qualify.py` in OVMF with SB on | iso-qualify log | `/var/lab/rime-nix/artifacts/installer/i1-iso-qualify.log` + `i1-uefi-sb-usb.{json,png,serial.log}` (2026-11-02, nix/installer `nix/installer/lab/run.sh qualify`): the NixOS ISO (sha256 53238287b658…, PRODUCTION build carrying a TEST-signed cache) booted `uefi-sb` from USB with Microsoft keys only: `secure_boot` true, kernel 7.2.14-300.fc45, the GUI's first page read by OCR, verdict pass. The same ISO installed plain and LUKS onto blank disks (`install-{plain,luks}.log`, `rime-install-{plain,luks}.log`) | met (2026-11-02) |
+| I2 | The plain boot driver (`plain-boot-drive.py`) passes on the installed NixOS system, SB on | driver log | `/var/lab/rime-nix/artifacts/installer/boot-plain.log` (`verdict=booted`, `switched-root=yes`, login prompt) + `serial-boot-plain.log` ("Secure boot enabled", "systemd[1]: Switching root."): OVMF secboot code, a varstore with Microsoft keys + a TEST MOK (the kernel is signed by that TEST MOK). First boot to the greeter: `firstboot-plain.{log,json,png}` (SecureBoot=1, host.toml answers applied, D2 mounts, greetd session on VT 1). The release MOK signature is not proven | met (2026-11-02, TEST MOK) |
+| I3 | The LUKS boot driver (`luks-boot-drive.py`) passes, SB on | driver log | `/var/lab/rime-nix/artifacts/installer/boot-luks.log` (`verdict=switched-root`: prompt seen, passphrase typed, pivot, welcome) + `serial-boot-luks.log` ("Secure boot enabled", the systemd-cryptsetup prompt for rime-luks, "Switching root."): the same varstore with Microsoft keys + a TEST MOK | met (2026-11-02, TEST MOK) |
 
 ## Bridge (D1): topologies
 
