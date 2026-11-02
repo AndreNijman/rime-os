@@ -624,7 +624,13 @@ def evaluate(facts, backup=None):
     if t in ACCEPTED:
         ok, why = chain_ok(facts)
         (notes if ok else refusals).append(why if ok else ("boot-chain-unverified", why))
-        if (facts.get("boot") or {}).get("kind") not in ("top-level-dir", "partition"):
+        kind = (facts.get("boot") or {}).get("kind")
+        if kind == "partition":
+            # rime.rootfs binds /boot from the btrfs top level; a /boot partition (installer LUKS-A) would leave
+            # NixOS mounting the wrong /boot, and no VM has proven that layout yet (PLAN D2: refuse until proven).
+            refusals.append(("boot-partition", "/boot is its own partition (installer LUKS layout): not bridged in "
+                             "v1 until a VM proves it (rime.rootfs binds /boot from the btrfs top level)"))
+        elif kind != "top-level-dir":
             refusals.append(("boot-unknown", "/boot is neither a directory of the root btrfs nor a partition"))
     need = need_bytes(facts)
     free = int(root.get("free_bytes", 0))
@@ -1072,6 +1078,8 @@ def cmd_start(a):
     top = "/run/rime-migrate/top"
     os.makedirs(top, exist_ok=True)
     mount("-o", "subvolid=5", dev, top)
+    # rime-migrate-from-apex (and a store compaction) must have finished before anything is copied (D2).
+    wait_units()
     step("backup")
     state["backup"] = do_backup(a.backup, facts, os.path.join(top, facts["var_fsroot"].lstrip("/"), "home"))
     step("old side")

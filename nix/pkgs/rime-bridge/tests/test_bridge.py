@@ -211,6 +211,14 @@ class Refusals(unittest.TestCase):
         f["root"]["fstype"] = "ext4"
         self.assertIn("root-not-btrfs", names(B.evaluate(f)[1]))
 
+    def test_boot_partition_refused(self):
+        # installer LUKS-A: /boot on its own ext4. rime.rootfs cannot mount it yet, so it is refused by name.
+        f = base_facts()
+        f["boot"]["kind"] = "partition"
+        self.assertEqual(names(B.evaluate(f)[1]), ["boot-partition"])
+        f["boot"]["kind"] = "unknown"
+        self.assertEqual(names(B.evaluate(f)[1]), ["boot-unknown"])
+
     def test_luks_keymap(self):
         f = base_facts()
         f["root"]["luks"] = {"device": "/dev/vda3", "uuid": "x", "mapper": "/dev/mapper/luks-x"}

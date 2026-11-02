@@ -45,8 +45,10 @@ stdenvNoCC.mkDerivation {
     runHook preInstallCheck
     head -n1 $out/share/rime-bridge/rime-migrate | grep -qx '#!/usr/bin/python3 -I' \
       || { echo "share/rime-bridge/rime-migrate does not start with #!/usr/bin/python3 -I"; exit 1; }
-    RIME_MIGRATE=$out/bin/rime-migrate ${python3}/bin/python3 -I -W error::ResourceWarning \
+    # -B: the tests import $out/bin/rime-migrate; without it a __pycache__ lands in $out/bin (non-deterministic).
+    RIME_MIGRATE=$out/bin/rime-migrate ${python3}/bin/python3 -I -B -W error::ResourceWarning \
       -m unittest discover -v -s tests -p 'test_*.py'
+    if [ -e $out/bin/__pycache__ ]; then echo "bytecode written into \$out/bin"; exit 1; fi
     runHook postInstallCheck
   '';
 
