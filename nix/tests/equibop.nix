@@ -2,7 +2,9 @@
 # Rich Presence server (arRPC) listens and answers, started the way Gaming Mode starts it: Rime's own
 # rime-gaming-discord, hidden and muted, owned by a process whose exit stops it.
 #
-# No Discord account and no network: Equibop's window cannot load discord.com, which is not what is tested. What is
+# No Discord account and no network: Equibop's window cannot load discord.com, which is not what is tested. Without
+# a cached Equicord (sessionData/equicord.asar) the offline Equibop never starts arRPC: it waits on the download
+# ("Failed to fetch .../equibop.asar. Gonna retry with backoff."), the mutant this check was first seen to fail on. What is
 # tested is that the Electron main process starts, that arRPC binds $XDG_RUNTIME_DIR/discord-ipc-0, and that it
 # answers a game's IPC handshake (the Discord RPC frame protocol: op 0 HANDSHAKE in, op 1 READY out).
 { pkgs, self }:
@@ -64,8 +66,14 @@ pkgs.testers.runNixOSTest {
         assert e["kind"] == "nix" and e["buildable"] and e["version"] == "${pkgs.equibop.version}", e
 
     with subtest("Equibop's settings: arRPC on, first launch done (what a signed-in desktop Equibop leaves)"):
+        # Created as alice: `install -D` as root would leave ~/.config root-owned.
+        alice("mkdir -p ~/.config/equibop/sessionData")
+        # Equibop's first start downloads Equicord's equibop.asar from GitHub into sessionData/equicord.asar and does
+        # nothing else (arRPC included) until it has it; the VM is offline. A desktop Equibop that has run once has
+        # it, so the fixture puts nixpkgs' build of the same file there.
+        alice("cp ${pkgs.equicord}/equibop.asar ~/.config/equibop/sessionData/equicord.asar")
         for path, doc in [("settings.json", {"arRPC": True}), ("state.json", {"firstLaunch": False})]:
-            machine.succeed(f"install -D -o alice -g users -m 644 /dev/stdin /home/alice/.config/equibop/{path} <<'EOF'\n{json.dumps(doc)}\nEOF")
+            machine.succeed(f"install -o alice -g users -m 644 /dev/stdin /home/alice/.config/equibop/{path} <<'EOF'\n{json.dumps(doc)}\nEOF")
         alice("python3 ${discord} set on")
         st = json.loads(alice("python3 ${discord} status --json"))
         print(st)
@@ -77,7 +85,14 @@ pkgs.testers.runNixOSTest {
         alice("systemd-run --user --unit=owner ${pkgs.coreutils}/bin/sleep 600")
         owner = alice("systemctl --user show -p MainPID --value owner").strip()
         alice(f"systemd-run --user --unit=discord ${pkgs.xvfb-run}/bin/xvfb-run -a ${pkgs.python3}/bin/python3 ${discord} run --owner {owner}")
-        machine.wait_until_succeeds(f"test -S {RUN}/discord-ipc-0", timeout=180)
+        try:
+            machine.wait_until_succeeds(f"test -S {RUN}/discord-ipc-0", timeout=180)
+        except Exception:
+            # What Equibop did instead: its output, its processes and its config.
+            print(alice("journalctl --user -u discord --no-pager | tail -n 80"))
+            print(alice("ps -u alice -o pid=,ppid=,args= | cut -c1-220; ls -la ~/.config/equibop ~/.config/equibop/* | head -n 60"))
+            print(alice("tail -n 40 ~/.cache/rime/gaming-discord.log || true"))
+            raise
         procs = alice("ps -u alice -o pid=,args=")
         print(procs)
         assert "--ozone-platform=x11" in procs and "--disable-gpu" in procs, procs

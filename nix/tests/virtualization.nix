@@ -34,8 +34,10 @@ pkgs.testers.runNixOSTest {
         caps = machine.succeed("virsh -c qemu:///system capabilities")
         assert "<arch>x86_64</arch>" in caps, caps
         doms = machine.succeed("virsh -c qemu:///system domcapabilities --machine q35 --arch x86_64 --virttype qemu")
-        # UEFI firmware a guest can boot (OVMF, with a Secure Boot build among them), and the TPM emulator.
-        assert "<loader supported='yes'>" in doms and "OVMF" in doms, doms
+        # UEFI firmware a guest can boot (QEMU's edk2 x86_64 build, which nixpkgs ships in place of OVMF_CODE.fd,
+        # with its Secure Boot build among them), and the TPM emulator.
+        assert "<loader supported='yes'>" in doms, doms
+        assert "edk2-x86_64-code.fd" in doms and "edk2-x86_64-secure-code.fd" in doms, doms
         assert "<tpm supported='yes'>" in doms and "emulator" in doms, doms
 
     with subtest("the tools rime vm runs directly"):
