@@ -32,6 +32,7 @@ let
     [ "containment-names-only" "rime-bridge.py" ''s/if before\[k\]\[x\] != after\[k\]\[x\]})/if False})/'' "H8: a changed file whose name stayed is not seen" ]
     [ "containment-all-custom" "rime-bridge.py" ''s/return hashlib.sha256(re.sub(r"### BEGIN rime-boot.*?### END rime-boot ###\\n?", "", text,/return hashlib.sha256(re.sub(r".*", "", text,/'' "H8: custom.cfg outside the block not compared" ]
     [ "backup-same-disk" "rime-bridge.py" ''s/elif b.get("disk") and b.get("disk") == root.get("disk"):/elif False:/'' "backup on the migrated disk" ]
+    [ "rollback-keeps-kernels" "rime-bridge.py" ''s/if not had.get("rime") and os.path.isdir(kdir)/if False and os.path.isdir(kdir)/'' "H8 rollback leaves the hook's kernels on /boot" ]
     [ "accept-boot-partition" "rime-bridge.py" ''s/if kind == "partition":/if False:/; s/elif kind != "top-level-dir":/elif kind not in ("top-level-dir", "partition"):/'' "a /boot partition bridged into a rootfs that binds the top level's /boot" ]
   ];
   hlMutants = [

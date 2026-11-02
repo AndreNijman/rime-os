@@ -13,6 +13,7 @@ import importlib.util
 import os
 import struct
 import subprocess
+import tempfile
 import unittest
 import uuid
 
@@ -422,6 +423,42 @@ class Katana(unittest.TestCase):
         f = topo_e_katana()
         f["migration"] = m
         self.assertEqual(B.classify(f)["topology"], "E")
+
+
+class UndoBoot(unittest.TestCase):
+    """H8 rollback, boot side: custom.cfg as it was; the hook's menu and kernels removed only when start made them."""
+
+    def hook_writes(self, b):
+        os.makedirs(os.path.join(b, "grub2"), exist_ok=True)
+        os.makedirs(os.path.join(b, "rime/nixos"), exist_ok=True)
+        with open(os.path.join(b, "rime/nixos/k.efi"), "w") as f:
+            f.write("kernel")
+        with open(os.path.join(b, "grub2/rime-nixos.cfg"), "w") as f:
+            f.write("menuentry 'Rime' {}\n")
+        with open(os.path.join(b, "grub2/custom.cfg"), "a") as f:
+            f.write("### BEGIN rime-boot ###\nsource rime-nixos.cfg\n### END rime-boot ###\n")
+
+    def test_made_by_start_is_removed(self):
+        with tempfile.TemporaryDirectory() as b:
+            os.makedirs(os.path.join(b, "grub2"))
+            had = B.boot_had(b)
+            self.hook_writes(b)
+            B.undo_boot(b, None, had)
+            self.assertEqual(sorted(os.listdir(b)), ["grub2"])
+            self.assertEqual(os.listdir(os.path.join(b, "grub2")), [])
+
+    def test_what_was_there_stays(self):
+        with tempfile.TemporaryDirectory() as b:
+            self.hook_writes(b)
+            with open(os.path.join(b, "grub2/custom.cfg"), "w") as f:
+                f.write("user entry\n")
+            had = B.boot_had(b)
+            self.hook_writes(b)
+            B.undo_boot(b, "user entry\n", had)
+            self.assertTrue(os.path.isfile(os.path.join(b, "rime/nixos/k.efi")))
+            self.assertTrue(os.path.isfile(os.path.join(b, "grub2/rime-nixos.cfg")))
+            with open(os.path.join(b, "grub2/custom.cfg")) as f:
+                self.assertEqual(f.read(), "user entry\n")
 
 
 class Cli(unittest.TestCase):

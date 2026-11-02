@@ -1046,6 +1046,29 @@ def mount(*args):
     run(["mount", *args])
 
 
+def boot_had(bdir):
+    """What of the boot hook's own files /boot held before start (a rollback removes only what start made)."""
+    return {"rime": os.path.lexists(os.path.join(bdir, "rime")),
+            "rime-nixos.cfg": os.path.lexists(os.path.join(bdir, "grub2/rime-nixos.cfg"))}
+
+
+def undo_boot(bdir, old_custom, had):
+    """Rollback of the boot side: custom.cfg back as it was, and the hook's menu file and kernel directory gone when
+    start made them (they are outside every subvolume the rollback deletes)."""
+    p = os.path.join(bdir, "grub2/custom.cfg")
+    if old_custom is not None:
+        with open(p, "w") as f:
+            f.write(old_custom)
+    elif os.path.exists(p):
+        os.unlink(p)
+    menu = os.path.join(bdir, "grub2/rime-nixos.cfg")
+    if not had.get("rime-nixos.cfg") and os.path.lexists(menu):
+        os.unlink(menu)
+    kdir = os.path.join(bdir, "rime")
+    if not had.get("rime") and os.path.isdir(kdir) and not os.path.islink(kdir):
+        shutil.rmtree(kdir)
+
+
 def cmd_start(a):
     if not a.yes:
         raise Refused("not-confirmed", "start needs --yes (read `rime migrate check --explain` first)")
@@ -1089,8 +1112,9 @@ def cmd_start(a):
     state["fsck_before"] = fsck_gate(top, facts, "before")
     before = containment_snapshot(top, facts)
     made = []
-    old_custom = read(os.path.join(top, "boot/grub2/custom.cfg") if facts["boot"]["kind"] == "top-level-dir"
-                      else "/boot/grub2/custom.cfg")
+    bdir = os.path.join(top, "boot") if facts["boot"]["kind"] == "top-level-dir" else "/boot"
+    old_custom = read(os.path.join(bdir, "grub2/custom.cfg"))
+    had = boot_had(bdir)
     try:
         step("snapshot @pre-nixos")
         run(["btrfs", "subvolume", "snapshot", "-r", top, os.path.join(top, "@pre-nixos")])
@@ -1177,13 +1201,7 @@ def cmd_start(a):
     except BaseException as e:
         log(f"failed: {e}; removing what the bridge made")
         run(["umount", "-R", "/run/rime-migrate/target"], check=False)
-        p = os.path.join(top, "boot/grub2/custom.cfg") if facts["boot"]["kind"] == "top-level-dir" \
-            else "/boot/grub2/custom.cfg"
-        if old_custom is not None:
-            with open(p, "w") as f:
-                f.write(old_custom)
-        elif os.path.exists(p):
-            os.unlink(p)
+        undo_boot(bdir, old_custom, had)
         for s in reversed(made):
             run(["btrfs", "subvolume", "delete", os.path.join(top, s)], check=False)
         if state.get("relabelled_from"):

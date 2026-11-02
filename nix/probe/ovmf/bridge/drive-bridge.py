@@ -254,6 +254,8 @@ def phase_bootc(a):
           " && mount /dev/disk/by-id/virtio-rime-backup /run/backup")
     record(vm, "check", "/run/payload/rime-migrate check --explain --backup /run/backup", ok=False)
     rc, out = record(vm, "check-json", "/run/payload/rime-migrate check --json --backup /run/backup", ok=False)
+    if a.rollback_first:
+        rollback_probe(a, vm)
     rc, out = record(vm, "start", "time /run/payload/rime-migrate start --backup /run/backup"
                      " --payload /run/payload/payload --yes", timeout=5400, ok=False)
     if rc != 0:
@@ -264,6 +266,38 @@ def phase_bootc(a):
     record(vm, "update-after-start", "rime update --check 2>&1 | tail -n 20", ok=False, timeout=120)
     vm.send("sync; systemctl poweroff\n")
     vm.wait_off()
+
+
+def rollback_probe(a, vm):
+    """H8's failure path: the same start, with ONE fault injected after the boot hook has written custom.cfg, its menu
+    file and the kernels (the step "fsck gate after" raises). The rollback code itself is the shipped one. Afterwards
+    nothing start made may remain: no new subvolume, the old label, no masks, no hook files, custom.cfg as before."""
+    label = "apex-root" if a.kind == "E" else "rime-root"
+    show = ("btrfs subvolume list /sysroot; echo label=$(btrfs filesystem label /sysroot); ls /sysroot/boot /sysroot/boot/grub2;"
+            " ls -la /etc/systemd/system | grep -E 'rime-update-check|rime-store-compact|bootloader-update|rime-boot-migrate'; cat /sysroot/boot/grub2/custom.cfg 2>&1")
+    record(vm, "rollback-before", show + "; (sha256sum < /sysroot/boot/grub2/custom.cfg 2>/dev/null || echo absent)"
+           " > /run/rb-custom; cat /run/rb-custom", ok=False)
+    vm.sh("sed 's/^        step(\"fsck gate after\")$/        raise Failed(\"lab fault injection: after the boot entry\")/'"
+          " /run/payload/rime-migrate > /run/rime-migrate-fault && chmod 755 /run/rime-migrate-fault"
+          " && ! cmp -s /run/payload/rime-migrate /run/rime-migrate-fault")
+    rc, out = record(vm, "rollback-start", "/run/rime-migrate-fault start --backup /run/backup"
+                     " --payload /run/payload/payload --yes", timeout=5400, ok=False)
+    if rc != 10 or "FAILED: lab fault injection" not in out or "== rolled back" not in out:
+        raise Timeout(f"rollback probe: rc={rc}, want 10 with the injected fault and '== rolled back'")
+    if "rime-boot: menu:" not in out:
+        raise Timeout("rollback probe: the fault fired before the boot hook wrote its entry")
+    # The verdict is computed in the guest; the echoed command line holds VERDICT=$v, never VERDICT=clean.
+    rc, after = record(vm, "rollback-after", show + "; tail -n 4 /var/lib/rime/nixos-bridge/state.json; v=clean;"
+                       " for s in @nixos @nix @home @pre-nixos; do btrfs subvolume list /sysroot | awk '{print $NF}'"
+                       " | grep -x -- $s >/dev/null && v=subvol:$s; done;"
+                       f" [ \"$(btrfs filesystem label /sysroot)\" = {label} ] || v=label;"
+                       " ls /etc/systemd/system | grep -E '^(rime-update-check|rime-store-compact|bootloader-update|rime-boot-migrate)' >/dev/null && v=masks;"
+                       " [ -e /sysroot/boot/rime ] && v=boot-rime; [ -e /sysroot/boot/grub2/rime-nixos.cfg ] && v=menu;"
+                       " [ \"$(sha256sum < /sysroot/boot/grub2/custom.cfg 2>/dev/null || echo absent)\" = \"$(cat /run/rb-custom)\" ]"
+                       " || v=custom.cfg; echo VERDICT=$v", ok=False)
+    if not re.search(r"VERDICT=clean\b", after):
+        raise Timeout("rollback probe: " + (re.findall(r"VERDICT=\S+", after) or ["no verdict"])[-1])
+    say("[bootc2] rollback probe: nothing start made is left (VERDICT=clean)")
 
 
 def phase_nixos(a):
@@ -336,6 +370,8 @@ def main():
     ap.add_argument("--vars", default="/ovmf/vars-sb-off.fd")
     ap.add_argument("--phases", default="bootc,nixos,back")
     ap.add_argument("--fresh", action="store_true")
+    ap.add_argument("--rollback-first", action="store_true",
+                    help="before the real start, run start once with a fault after the boot entry (H8 rollback)")
     a = ap.parse_args()
     a.work = os.path.join(a.lab, f"run-{a.kind}")
     a.payload = os.path.join(a.lab, "payload.img")
