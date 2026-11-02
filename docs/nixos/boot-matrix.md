@@ -106,7 +106,7 @@ a 4-vCPU VM; with the old 10 s window `scx_eevdf` failed. 60 s still fails a sch
 
 ## Results
 
-Run on katana 2026-11-02 (00:10-01:40 AWST), worktree `nix/bootmatrix`. **All 8 runs pass, 24 of 24 boots**
+Run on katana 2026-11-02 (00:10-01:40 UTC, 08:10-09:40 AWST), worktree `nix/bootmatrix`. **All 8 runs pass, 24 of 24 boots**
 (`results.tsv`; times are wall clock per boot under katana's CI load):
 
 | run | gate | boot 1: gen 1 default, greeter, installs bad gen 2 | boot 2: bad gen 2 default, fails | boot 3: menu → gen 1, greeter |
