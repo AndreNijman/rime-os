@@ -62,8 +62,11 @@ in
     };
 
   wifiLab =
-    { pkgs, ... }:
+    { lib, pkgs, ... }:
     {
+      # qemu-vm.nix turns wpa_supplicant off in every VM (mkVMOverride false); NetworkManager's module turns it on
+      # (D-Bus controlled) on every other machine, which checks.hostgates-wifi-eval asserts. Back on here.
+      networking.wireless.enable = lib.mkOverride 9 true;
       environment.systemPackages = with pkgs; [ hostapd iw dnsmasq ];
       environment.etc."systemd/network/10-rime-test-wlo1.link".text = ''
         [Match]

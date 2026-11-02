@@ -175,4 +175,41 @@ in
           disks.h8_corrupt("games", E2)
     '';
   };
+
+  # H2 on a real machine: the VM tests turn wpa_supplicant back on (qemu-vm.nix forces it off in every VM), so this
+  # checks that a Rime system WITHOUT the VM module (the shape of a machine on its own disk) gets it from
+  # NetworkManager's module, D-Bus controlled: without it NetworkManager cannot bring any Wi-Fi profile up.
+  hostgates-wifi-eval =
+    let
+      evalWith = extra: (import (pkgs.path + "/nixos/lib/eval-config.nix") {
+        system = null;
+        modules = [
+          self.nixosModules.default
+          {
+            nixpkgs.hostPlatform = "x86_64-linux";
+            rime = { desktop.enable = true; services.enable = true; gaming.enable = true; security.enable = true; };
+            fileSystems."/" = { device = "/dev/disk/by-label/rime"; fsType = "btrfs"; };
+          }
+        ] ++ extra;
+      }).config;
+      facts = cfg: {
+        "networkmanager.enable" = cfg.networking.networkmanager.enable;
+        "networkmanager.wifi.backend" = cfg.networking.networkmanager.wifi.backend;
+        "wireless.enable" = cfg.networking.wireless.enable;
+        "wireless.dbusControlled" = cfg.networking.wireless.dbusControlled;
+        "wpa_supplicant on the system bus" =
+          builtins.any (p: pkgs.lib.hasPrefix "wpa_supplicant" (p.name or "")) cfg.services.dbus.packages;
+      };
+      good = f: builtins.all (v: v == true || v == "wpa_supplicant") (builtins.attrValues f);
+      machine = facts (evalWith [ ]);
+      # The mutant the check must see: the same system inside qemu-vm.nix (as every VM test), wpa_supplicant off.
+      inVm = facts (evalWith [ (pkgs.path + "/nixos/modules/virtualisation/qemu-vm.nix") ]);
+    in
+    pkgs.runCommand "rime-hostgates-wifi-eval" { } ''
+      echo "machine: "${pkgs.lib.escapeShellArg (builtins.toJSON machine)} | tee $out
+      echo "in qemu-vm.nix (mutant): "${pkgs.lib.escapeShellArg (builtins.toJSON inVm)} | tee -a $out
+      ${if !(good machine) then "echo 'a Rime machine would have no working wpa_supplicant for NetworkManager' >&2; exit 1"
+        else if good inVm then "echo 'the check cannot tell: wpa_supplicant is on even inside qemu-vm.nix' >&2; exit 1"
+        else "true"}
+    '';
 }

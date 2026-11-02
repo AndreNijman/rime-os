@@ -31,5 +31,5 @@
 // import ./boot.nix { inherit pkgs self; }
 # catalogue, catalogue-data
 // import ./catalogue.nix { inherit pkgs self; }
-# hostgates-net, hostgates-disks
+# hostgates-net, hostgates-disks, hostgates-wifi-eval
 // import ./hostgates.nix { inherit pkgs self; }
