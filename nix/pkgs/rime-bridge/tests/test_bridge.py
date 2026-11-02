@@ -212,11 +212,11 @@ class Refusals(unittest.TestCase):
         f["root"]["fstype"] = "ext4"
         self.assertIn("root-not-btrfs", names(B.evaluate(f)[1]))
 
-    def test_boot_partition_refused(self):
-        # installer LUKS-A: /boot on its own ext4. rime.rootfs cannot mount it yet, so it is refused by name.
+    def test_boot_partition_kinds(self):
+        # installer LUKS-A: /boot on its own ext4 is bridged (test_bridge_d2.py); anything else is refused by name.
         f = base_facts()
-        f["boot"]["kind"] = "partition"
-        self.assertEqual(names(B.evaluate(f)[1]), ["boot-partition"])
+        f["boot"].update(kind="partition", fstype="vfat")
+        self.assertEqual(names(B.evaluate(f)[1]), ["boot-partition-fstype"])
         f["boot"]["kind"] = "unknown"
         self.assertEqual(names(B.evaluate(f)[1]), ["boot-unknown"])
 

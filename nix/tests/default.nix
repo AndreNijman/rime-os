@@ -49,7 +49,7 @@
 // import ./keymap.nix { inherit pkgs self; }
 # hostgates-net, hostgates-disks, hostgates-wifi-eval
 // import ./hostgates.nix { inherit pkgs self; }
-# bridge-unit, bridge-refusals
+# bridge-unit, bridge-refusals, rootfs-unit
 // import ./bridge.nix { inherit pkgs self; }
 # pkg-translate (+ .katana)
 // import ./pkg-translate.nix { inherit pkgs self; }

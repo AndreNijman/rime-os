@@ -175,6 +175,9 @@ def render_host_toml(host):
             out.append(f"layout = {toml_str(boot['layout'])}")
         if boot.get("kernel_params"):
             out.append("kernel_params = [" + ", ".join(toml_str(k) for k in boot["kernel_params"]) + "]")
+        for k in ("device", "fstype"):
+            if boot.get(k):
+                out.append(f"{k} = {toml_str(boot[k])}")
         out.append("")
     for v in host.get("luks", []):
         out.append("[[luks]]")
@@ -195,20 +198,6 @@ def validate_host(host):
     for k in host:
         if k not in known:
             errs.append(f"unknown key {k!r}")
-    # [boot] is the Rime boot hook's (nix/pkgs/rime-boot): the bridge writes layout = "custom-cfg" on a migrated
-    # machine. Validated here too, so `apply` never refuses a host.toml the hook accepts.
-    boot = host.get("boot", {})
-    if not isinstance(boot, dict):
-        errs.append("[boot] is not a table")
-        boot = {}
-    for k, v in boot.items():
-        if k == "layout" and v not in ("bls", "custom-cfg"):
-            errs.append(f"boot.layout {v!r} is not bls or custom-cfg")
-        elif k == "kernel_params" and not (isinstance(v, list) and all(
-                isinstance(x, str) and matches("options", x) for x in v)):
-            errs.append("boot.kernel_params is not a list of kernel parameters")
-        elif k not in ("layout", "kernel_params"):
-            errs.append(f"unknown key boot.{k}")
     h = host.get("host", {})
     if not isinstance(h, dict):
         errs.append("[host] is not a table")
@@ -269,6 +258,14 @@ def validate_host(host):
             else:
                 errs += [f"boot.kernel_params {x!r} has a character the boot menu would expand or split"
                          for x in v if not matches("kernel_param", x)]
+        elif k == "device":
+            # A migrated machine whose /boot is its own partition (the installer's LUKS layout): the bridge records
+            # it here and rime.rootfs's generator mounts it at /boot (nix/modules/rootfs.nix).
+            if not matches("what", v):
+                errs.append(f"boot.device {v!r} is not a device")
+        elif k == "fstype":
+            if not matches("fstype", v):
+                errs.append(f"boot.fstype {v!r} is not a filesystem type")
         else:
             errs.append(f"unknown key boot.{k}")
     for i, v in enumerate(host.get("luks", [])):
