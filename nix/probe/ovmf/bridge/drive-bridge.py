@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
-"""drive-bridge.py KIND: the bridge's OVMF proof for topology KIND (A or E), in KVM guests only (README.md here).
+"""drive-bridge.py KIND: the bridge's OVMF proof for disk KIND, in KVM guests only (README.md here). A = topology A
+plain, L = topology A in the installer's default encrypted layout (LUKS2 root, ext4 /boot), E = topology E.
 
 Runs INSIDE the rime-ovmf-probe container (qemu, Fedora's OVMF). Every boot is one qemu process on the same copy-on-write
 overlay of disks/KIND/disk.raw and the same varstore copy, ending with a guest poweroff:
 
   bootc     log in on the serial console as the lab user (old TEST password), make KIND's firmware entries
             (guest-prep.sh), reboot so it boots through its own entry, [E: repair-e], check, start
-  nixos     GRUB's default is the NixOS entry the bridge added: the lab system's markers, the greeter, a serial
-            login with the OLD password, the home checksums
+  nixos     GRUB's default is the NixOS entry the bridge added: a serial login with the OLD password (mounts,
+            carried state, home checksums), then a GRAPHICAL login through rime-greet with the same old password typed
+            on the emulated keyboard: Hyprland starts for the user through greetd, the desktop is screenshotted
   back      pick the first GRUB entry (the ostree one) by key: bootc boots, the same login works, home intact
 
-Secure Boot is OFF (OVMF Secure Boot code with the key-less varstore): the published image's kernel is signed by the
-Rime MOK and the lab NixOS kernel by nothing, so an SB-on run needs MOK enrolment first (TODO(handover)).
+Secure Boot: --sb boots with the varstore run.sh makes (Microsoft keys, Secure Boot ON, MokList = the real Rime MOK
+certificate that signs the published bootc kernel + the lab's TEST MOK that signs the lab NixOS kernel); without it,
+the key-less varstore (Secure Boot off). Every boot records what the guest itself reports.
+L disks: every boot waits for the initrd's passphrase prompt and types the TEST passphrase on the emulated keyboard
+(QMP send-key), in the bootc (dracut) initrd and the NixOS (systemd) initrd alike.
 Nothing here touches the host: the disks are files, the NVRAM is the varstore copy, every key press goes to the guest.
 """
 import argparse
@@ -30,7 +35,12 @@ import struct
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][0-9A-Za-z]|\x1b[=>]|\r")
 COMPLETE = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][0-9A-Za-z]|\x1b[=>\\]|\x1b[^\[()=>\]P]")
 PASS = os.environ.get("RIME_LAB_PASS", "rime-lab-OLD-1")
+LUKS_PASS = os.environ.get("RIME_LAB_LUKS", "rimelabluks1")
 USER = "alex"
+# QMP qcodes for what the lab passwords need: letters, digits, '-'.
+QCODE = {**{c: c for c in "abcdefghijklmnopqrstuvwxyz0123456789"}, "-": "minus"}
+SB_STATE = ("od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
+            " | awk '{print \"SecureBoot efivar=\" $NF}'; dmesg | grep -i -E 'secure ?boot|Loaded X.509 cert' | head -n 12")
 
 
 class Timeout(Exception):
@@ -136,6 +146,24 @@ class VM:
     def key(self, *keys):
         self.qmp("send-key", keys=[{"type": "qcode", "data": k} for k in keys])
 
+    def type_keys(self, text):
+        for ch in text:
+            self.key(*(["shift", QCODE[ch.lower()]] if ch.isupper() else [QCODE[ch]]))
+            time.sleep(0.08)
+
+    def unlock(self, timeout=900):
+        """L disks: wait until the initrd asks for the LUKS passphrase (dracut's systemd-ask-password-console prints
+        its prompt on the serial console; the NixOS lab initrd prints a marker, system.nix), then type it."""
+        if self.a.kind != "L":
+            return
+        self.expect(r"Please enter passphrase|RIME-LAB: PASSPHRASE-ASKED", timeout,
+                    fail=r"Kernel panic|You are in emergency|Timed out waiting for device")
+        time.sleep(3)
+        self.screendump(os.path.join(self.a.logs, f"{self.a.kind}-{self.name}-passphrase.png"))
+        self.type_keys(LUKS_PASS)
+        self.key("ret")
+        say(f"[{self.name}] LUKS passphrase typed on the keyboard")
+
     def login(self, timeout=900):
         self.expect(r"login: $|login: ", timeout)
         time.sleep(1)
@@ -225,10 +253,15 @@ def record(vm, name, cmd, timeout=300, ok=True):
 
 
 def boot_bootc(a, vm, first):
+    vm.unlock()
     vm.login()
     vm.root()
-    record(vm, f"{vm.name}-cmdline", "cat /proc/cmdline; findmnt -no SOURCE,OPTIONS /sysroot")
+    record(vm, f"{vm.name}-cmdline", "cat /proc/cmdline; findmnt -no SOURCE,OPTIONS /sysroot; lsblk -o NAME,TYPE,FSTYPE,LABEL,MOUNTPOINTS")
     record(vm, f"{vm.name}-efi", "efibootmgr -v")
+    rc, out = record(vm, f"{vm.name}-sb", "mokutil --sb-state; " + SB_STATE + "; mokutil --list-enrolled | grep -E 'Subject:|CN='",
+                     ok=False)
+    if a.sb and "SecureBoot efivar=1" not in out:
+        raise Timeout(f"[{vm.name}] the guest does not report Secure Boot on")
     vm.sh("mkdir -p /run/payload && mount -o ro /dev/disk/by-id/virtio-rime-payload /run/payload")
 
 
@@ -252,7 +285,11 @@ def phase_bootc(a):
                " || mount -o ro /dev/vda2 /run/e; find /run/e -maxdepth 3 | sort; umount /run/e")
     vm.sh("mkfs.ext4 -q -F -L rime-backup /dev/disk/by-id/virtio-rime-backup && mkdir -p /run/backup"
           " && mount /dev/disk/by-id/virtio-rime-backup /run/backup")
-    record(vm, "check", "/run/payload/rime-migrate check --explain --backup /run/backup", ok=False)
+    # D2: the left-behind report BEFORE anything is written (--payload previews the new system's carry plan).
+    rc, out = record(vm, "check", "/run/payload/rime-migrate check --explain --backup /run/backup"
+                     " --payload /run/payload/payload", ok=False)
+    if "left behind" not in out.lower():
+        raise Timeout("check --explain --payload printed no left-behind report")
     rc, out = record(vm, "check-json", "/run/payload/rime-migrate check --json --backup /run/backup", ok=False)
     if a.rollback_first:
         rollback_probe(a, vm)
@@ -302,9 +339,9 @@ def rollback_probe(a, vm):
 
 def phase_nixos(a):
     vm = VM(a, "nixos")
-    # The lab unit's RIME-BRIDGE markers (system.nix) never reach ttyS0: serial-getty hangs the tty up under it and
-    # the unit fails on the write. The driver checks the same things itself after a serial login.
-    vm.expect(r"Welcome to NixOS", 900, fail=r"Kernel panic|emergency mode|You are in emergency")
+    vm.unlock()
+    vm.expect(r"Welcome to (NixOS|Rime OS)", 900,
+              fail=r"Kernel panic|emergency mode|You are in emergency|Timed out waiting for device")
     say("[nixos] NixOS reached the serial getty")
     time.sleep(20)
     vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-greeter.png"))
@@ -314,15 +351,61 @@ def phase_nixos(a):
                      " echo greetd=$(systemctl is-active greetd); pgrep -a -u greetd | head -n 5;"
                      " id; cat /proc/cmdline; readlink /run/current-system; cat /etc/machine-id; hostname;"
                      " for m in / /nix /var/home /boot; do findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS -M $m; done;"
+                     " lsblk -o NAME,TYPE,FSTYPE,LABEL,MOUNTPOINTS; cat /var/lib/rime/host.toml;"
                      " echo phase=$(cat /var/lib/rime/boot-migrate/phase 2>/dev/null || echo none);"
                      " ls /var/lib/rime/boot-migrate 2>/dev/null; systemctl --failed --no-legend --no-pager;"
-                     " head -n 5 /var/lib/rime/carry/report.txt;"
+                     " echo last-user=$(cat /var/lib/rime-greet/last-user 2>/dev/null || echo none);"
+                     " head -n 5 /var/lib/rime/carry/report.txt; " + SB_STATE + ";"
                      " cd ~ && sha256sum -c .rime-lab/sums && cat Documents/note.txt",
                      timeout=180)
     if "greetd=active" not in out:
         raise Timeout("[nixos] greetd is not active")
+    # carry's host.toml must survive start's [boot] write (it once truncated it: rime-bridge write_boot_table)
+    if not re.search(r"^timezone = ", out, re.M) or not re.search(r"^layout = \"custom-cfg\"", out, re.M):
+        raise Timeout("[nixos] host.toml lost what carry wrote (no [host] timezone) or start's [boot] layout")
+    if a.kind == "L" and "rd.luks.uuid=" not in out:
+        raise Timeout("[nixos] no rd.luks.uuid= on the command line (host.toml [boot] kernel_params)")
     if a.kind == "E" and "phase=failed" not in out:
         raise Timeout("[nixos] phase=failed did not carry over")
+    if a.kind == "L" and not re.search(r"^/boot\s+\S+\s+ext4", out, re.M):
+        raise Timeout("[nixos] /boot is not the ext4 boot partition")
+    if a.kind == "L" and not re.search(r"crypt\s+btrfs", out):
+        raise Timeout("[nixos] the root is not the opened LUKS volume")
+    if a.sb and "SecureBoot efivar=1" not in out:
+        raise Timeout("[nixos] the guest does not report Secure Boot on")
+    prefilled = "last-user=alex" in out
+    vm.send("exit\n")
+    # The graphical login: rime-greet (greetd's greeter) and the OLD password typed on the emulated keyboard.
+    time.sleep(5)
+    vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-greeter-before-login.png"))
+    if not prefilled:
+        vm.type_keys(USER)
+        vm.key("ret")
+        time.sleep(2)
+    vm.type_keys(PASS)
+    vm.key("ret")
+    say(f"[nixos] graphical login typed (user prefilled by rime-greet: {prefilled})")
+    time.sleep(45)
+    vm.login()
+    # Hyprland's process name on NixOS is its wrapper's (".Hyprland-wrapp"), so match the comm column with awk (never
+    # pgrep -f: the pattern would be in this very command line). loginctl prints Name, TTY, Service, Type, Class,
+    # State per session; "--" separates them.
+    rc, out = record(vm, "nixos-graphical-login",
+                     "for i in $(seq 180); do ls /run/user/1000/hypr/*/.socket.sock >/dev/null 2>&1 && break; sleep 1;"
+                     " done; ps -u alex -o pid=,comm=,args= | awk '$2 ~ /Hyprland|quickshell/';"
+                     " ls -1a /run/user/1000/hypr/*/;"
+                     " for s in $(loginctl list-sessions --no-legend | awk '{print $1}'); do echo --;"
+                     " loginctl show-session $s -p Name -p Type -p Class -p Service -p TTY -p State; done; echo --",
+                     timeout=240, ok=False)
+    blocks = [dict(ln.split("=", 1) for ln in b.split() if "=" in ln) for b in out.split("--")]
+    greetd_wayland = any(b.get("Name") == "alex" and b.get("Service") == "greetd" and b.get("Type") == "wayland"
+                         and b.get("State") == "active" for b in blocks)
+    hypr = re.search(r"^\s*\d+ \S*Hyprland", out, re.M) and re.search(r"^\.socket\.sock\s*$", out, re.M)
+    if not hypr or not greetd_wayland:
+        raise Timeout("[nixos] no Hyprland session for alex started through greetd")
+    time.sleep(10)
+    vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-desktop.png"))
+    say("[nixos] graphical login: Hyprland runs for alex in a greetd wayland session; desktop screenshotted")
     vm.send("exit\n")
     time.sleep(2)
     vm.qmp("system_powerdown")
@@ -350,8 +433,9 @@ def phase_back(a):
         vm.key("up")
         time.sleep(0.3)
     say(f"[back] menu text seen and Return pressed: {picked}")
+    vm.unlock()
     vm.login()
-    rc, out = record(vm, "back-checks", "cat /proc/cmdline; id; cd ~ && sha256sum -c .rime-lab/sums; rpm-ostree status 2>&1 | head -n 20",
+    rc, out = record(vm, "back-checks", "cat /proc/cmdline; id; cd ~ && sha256sum -c .rime-lab/sums; rpm-ostree status 2>&1 | head -n 20; " + SB_STATE,
                      timeout=120)
     if "ostree=" not in out:
         raise Timeout("back: not an ostree boot")
@@ -363,16 +447,19 @@ def phase_back(a):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("kind", choices=["A", "E"])
+    ap.add_argument("kind", choices=["A", "L", "E"])
     ap.add_argument("--lab", default="/lab")
     ap.add_argument("--logs", default="/art")
     ap.add_argument("--code", default="/ovmf/code-secboot.raw")
     ap.add_argument("--vars", default="/ovmf/vars-sb-off.fd")
+    ap.add_argument("--sb", action="store_true", help="Secure Boot ON with /lab/fw/vars-sb-bridge.fd (run.sh keys)")
     ap.add_argument("--phases", default="bootc,nixos,back")
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--rollback-first", action="store_true",
                     help="before the real start, run start once with a fault after the boot entry (H8 rollback)")
     a = ap.parse_args()
+    if a.sb:
+        a.vars = os.path.join(a.lab, "fw", "vars-sb-bridge.fd")
     a.work = os.path.join(a.lab, f"run-{a.kind}")
     a.payload = os.path.join(a.lab, "payload.img")
     os.makedirs(a.logs, exist_ok=True)
@@ -387,7 +474,8 @@ def main():
                             f"{a.work}/win.qcow2"], check=True)
         subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", f"{a.work}/backup.qcow2", "40G"], check=True)
         shutil.copy(a.vars, os.path.join(a.work, "vars.fd"))
-    say(f"bridge OVMF proof {a.kind}: Secure Boot OFF ({os.path.basename(a.code)} + {os.path.basename(a.vars)})")
+    say(f"bridge OVMF proof {a.kind}: Secure Boot {'ON' if a.sb else 'OFF'} ({os.path.basename(a.code)}"
+        f" + {os.path.basename(a.vars)})")
     for ph in a.phases.split(","):
         say(f"== phase {ph}")
         {"bootc": phase_bootc, "nixos": phase_nixos, "back": phase_back}[ph](a)

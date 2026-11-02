@@ -51,7 +51,7 @@
 // import ./hostgates.nix { inherit pkgs self; }
 # niri-default, libexec-pycache, hostname-default
 // import ./hygiene.nix { inherit pkgs self; }
-# bridge-unit, bridge-refusals
+# bridge-unit, bridge-refusals, rootfs-unit
 // import ./bridge.nix { inherit pkgs self; }
 # pkg-translate (+ .katana)
 // import ./pkg-translate.nix { inherit pkgs self; }

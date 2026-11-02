@@ -355,6 +355,20 @@ class HostTomlTest(unittest.TestCase):
                           '"rd.vconsole.keymap=uk"]\n', r.stdout)
 
 
+    def test_the_boot_partition_the_bridge_records(self):
+        # A migrated LUKS-A machine: /boot is ext4 on its own partition. The bridge writes [boot] device + fstype;
+        # rime.rootfs's generator mounts it. `host show` (render_host_toml) must keep both, validate must accept them.
+        with tempfile.TemporaryDirectory() as t:
+            write(f"{t}/h.toml", '[boot]\nlayout = "custom-cfg"\ndevice = "UUID=b007b007-0000-4000-8000-000000000b00"\n'
+                  'fstype = "ext4"\n')
+            r = run("host", "validate", "--file", f"{t}/h.toml")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            r = run("host", "show", "--file", f"{t}/h.toml")
+            self.assertIn('device = "UUID=b007b007-0000-4000-8000-000000000b00"\nfstype = "ext4"', r.stdout)
+            for bad in ('[boot]\ndevice = "UUID=x y"\n', '[boot]\nfstype = "Ext4;rm"\n', '[boot]\ndevice = 3\n'):
+                write(f"{t}/h.toml", bad)
+                self.assertEqual(run("host", "validate", "--file", f"{t}/h.toml").returncode, 1, bad)
+
     def test_the_boot_table_the_hook_reads_is_valid(self):
         # nix/pkgs/rime-boot reads [boot] layout + kernel_params (rd.luks.uuid= of a LUKS root, D9); the host layer
         # must accept it, or one [boot] table drops every other fact of the machine ("not applied").
