@@ -36,14 +36,21 @@ Partial, and what each still needs:
 | X5 | `rime rollback` is proven, and every refusal leaves the profile and the running system unchanged, but no test runs a rollback AFTER a refusal | One `update-e2e` subtest: refuse, then `rime rollback`, reboot, assert the previous generation. Agent work |
 
 Also open but not a row: every row that signs uses TEST keys (MOK, cache key, Fulcio identity; I2/I3 say so). The real
-keys exist only in CI and are first proven by a signed release (P3/P4).
+keys exist only in CI and are first proven by a signed release (P3/P4). What the real Rime MOK certificate does is
+proven without its key (nix/secureboot, 2026-11-02, `nix/probe/ovmf/mok`): on a Microsoft-keys-only varstore with
+Secure Boot on, `mokutil --import` in a booted guest and MokManager driven screen by screen (screenshots) enrol it, it
+is then the ONLY MOK, and it admits a kernel CI signed with the real key while a TEST-MOK kernel stays refused; the
+wrong-password mutant enrols nothing. The NixOS kernel carrying the release signature is NOT proven:
+`nix-kernel-sign.yml` cannot be dispatched until it is on `main` or registered by a release run with
+`RIME_NIX_KERNEL_HOST` set (HTTP 404, docs/nixos/boot-matrix.md "The real Rime MOK"); both are Andre's. `run.sh
+realsig` takes the artefact the day it exists. katana's real PCR 7 under the real MOK and db/dbx: P3.
 
 ## Kernel
 
 | # | Gate | How proven | Evidence so far | Status |
 |---|---|---|---|---|
 | K1 | The Rime kernel has BTF, with the bootc tier's gate (pahole, required `=y` options, no BTF-mismatch escape hatch, committed config, kfunc BTF read by two readers) | `kernel-gate` | `kernel-vm-signed` (nix/bootmatrix): the VM boots the image signed by `sign-detached.sh` (TEST key, `require = true`, sbverify) and `/sys/kernel/btf/vmlinux` is byte for byte `kernel-gate`'s `vmlinux.btf`; `kernel-gate` builds green. Log `/var/lab/rime-nix/artifacts/bootmatrix/logs/kernel-vm-signed.log` | **met** 2026-11-02 (nix/bootmatrix) |
-| K2 | The scx gate: all 16 shipped sched-ext schedulers attach, survive load and detach on the shipped kernel | `kernel-vm-signed` (the signed image; `kernel-vm` boots it unsigned) (bootc's own `tests/kernel/scx-selftest` + `run-scx-selftest.sh --parse-only`) | `kernel-vm-signed`: attach window 60 s (`nix/tests/kernel.nix`); three consecutive `--rebuild` passes, 17/17 VERDICT PASS each, host load average 5→16, 16→25, 25→34 (`scx_eevdf` attach 3.8 / 6.2 / 11.4 s: the third fails the old 10 s window). Logs `/var/lab/rime-nix/artifacts/bootmatrix/logs/k2-kernel-vm-signed.pass{1,2,3}.log` | **met** 2026-11-02 (nix/bootmatrix) |
+| K2 | The scx gate: all 16 shipped sched-ext schedulers attach, survive load and detach on the shipped kernel | `kernel-vm-signed` | `kernel-vm-signed` (the signed image, running bootc's own `tests/kernel/scx-selftest` + `run-scx-selftest.sh --parse-only`; `kernel-vm` boots it unsigned): attach window 60 s (`nix/tests/kernel.nix`); three consecutive `--rebuild` passes, 17/17 VERDICT PASS each, host load average 5→16, 16→25, 25→34 (`scx_eevdf` attach 3.8 / 6.2 / 11.4 s). Logs `/var/lab/rime-nix/artifacts/bootmatrix/logs/k2-kernel-vm-signed.pass{1,2,3}.log`. The `settle = 10` mutant (bootc's window) under 40-60 CPU burners (load 58-93) PASSES 4 of 4 (`scx_eevdf` 8.0-9.3 s), `settle = 5` FAILS: the 60 s window is headroom for a host with VMs and builds running, not what makes K2 pass under CPU load (docs/nixos/boot-matrix.md "K2 under load", `/var/lab/rime-nix/artifacts/secureboot/k2/`) | **met** 2026-11-02 (nix/bootmatrix) |
 | K3 | A `kill -9` of the running scheduler hands every task back to the kernel's class | `kernel-vm-signed` | `kernel-vm-signed`, the same three passes: the `kill -9` case passes in each | **met** 2026-11-02 (nix/bootmatrix) |
 
 ## Boot chain: OVMF, shim → Fedora GRUB → MOK-signed kernel (D3)
