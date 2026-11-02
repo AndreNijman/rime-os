@@ -3,7 +3,8 @@
 # reports the feature as in this system. No guest is booted (nested KVM is not assumed on the test host).
 #
 # Mutant (passthru.mutants.no-swtpm, built by hand, must FAIL): virtualisation.libvirtd.qemu.swtpm.enable forced off,
-# so libvirtd cannot start a guest's TPM: swtpm and swtpm_setup are not on libvirtd's PATH.
+# so libvirtd cannot start a guest's TPM: swtpm and swtpm_setup are not on libvirtd's PATH. The script also asserts
+# the option itself first, so the mutant fails by name before any behaviour is looked at.
 { pkgs, self }:
 
 let
@@ -19,8 +20,12 @@ test = pkgs.testers.runNixOSTest {
     virtualisation.memorySize = 2048;
   };
 
-  testScript = ''
+  testScript = { nodes, ... }: ''
     import json
+
+    # The option the module sets (nix/modules/virtualization.nix), read from the evaluated node: swtpm for guests is on.
+    swtpm_enable = ${if nodes.machine.virtualisation.libvirtd.qemu.swtpm.enable then "True" else "False"}
+    assert swtpm_enable, "virtualisation.libvirtd.qemu.swtpm.enable is off: libvirtd cannot give a guest a TPM"
 
     machine.wait_for_unit("multi-user.target")
 
