@@ -74,7 +74,7 @@ where `rime update` keeps its own: `/var/lib/rime/nix/releases/<release>/{manife
 |---|---|---|
 | 802 paths (eight desktop apps) | 2.16 s at 16 threads, 0.92 s at 64 | 2.18 s recursive, 7.55 s as an explicit list (cold) |
 | the lab system, 2,127 paths (1,874 upstream) | 3.52 s at 32 threads (8.14 s on the first cold run), 2.20 s at 64 | 4.3 s and 5.44 s as the engine runs it; the old `--recursive` form 5.96 s and 5.85 s |
-| the lab install inside the VM, from the ISO's `file://` cache | 8.69 s (`narinfo_seconds`) | the whole check, signature included, 10 s (13:26:49 to 13:26:59 in `rime-install-gb.log`) |
+| the lab install inside the VM, from the ISO's `file://` cache | 8.69 s, 1.67 s and 8.18 s (`narinfo_seconds`, lab runs 1-3) | the whole check, signature included, 10 s, 2 s and 10 s (run 3: 14:30:00 to 14:30:10 in `lab/rime-install-gb.log`, `nix store verify` 0.92 s) |
 
 The bounds are 300 s for the lookups and 600 s for the verify. Exit 2 from the checker ("a cache did not answer") is
 reported as a network problem, not as a forged release.
@@ -154,6 +154,11 @@ unlock keymap differs from the console keymap (gate M1 is the module-level proof
 end: a `gb` install with the passphrase `rime"lab42` (`"` is Shift+2 on `gb`, Shift+' on `us`) is unlocked by typing
 those keys on a `gb` layout, and the same key presses typed as a `us` layout do not open it (the control).
 
+After the unlock the greeter must type the same layout. It did not: greetd's sway took the configuration's XKB
+environment (`us`), so the lab's `gb` install showed "English (US)" at the login screen. The greeter command now
+starts through a wrapper that reads the keymap generator's output (host.toml's `[keyboard]`) and replaces the
+`XKB_DEFAULT_*` variables before sway starts; the run-3 screenshot reads "English (UK)".
+
 ## Recovery key
 
 `rime-install` writes the recovery key to the stick it booted from. A stick written from the ISO is ISO 9660 and so
@@ -173,6 +178,7 @@ virtio disk (`RIME_RECOVERY_ALLOW_FIXED=1`, the test seam for a VM disk that is 
 | `hostnamectl --static` empty | two causes. The earlier runs had no `/etc/hostname` until the first `rime-hostlayer apply`. This run had the file (PID 1 used it), but NixOS points systemd-hostnamed at `/etc/static/hostname` (`SYSTEMD_ETC_HOSTNAME`, set for when `networking.hostName` makes that link), which does not exist when the closure names no machine | the install's own activation writes `/etc/hostname`, and `hostlayer.nix` points hostnamed at it. A minimal NixOS VM shows `Static hostname: (unset)` before and `rime-lab-x` after (`artifacts/installer2/hostnamed-static-{before,after}.log`, probe `hostnamed-static-probe.flake.nix`). `installer-polish-eval` checks the unit; with the setting dropped it fails (`mutants/polish-hostnamed-static.log`). The lab's firstboot compares `/etc/hostname` and `hostnamectl --static` with the answer |
 | zsh-newuser-install on the first console login | NixOS ships no `/etc/skel/.zshrc` | `fedora-parity.nix` ships Fedora's stock one (a real file, 0644), which rime-shell-firstrun replaces at the first desktop login as on Fedora |
 | systemd-journald restarts once | see "journald" below | explained, not changed |
+| the greeter offers English (US) on a `gb` install | greetd's sway took the configuration's XKB variables, not host.toml's | the greeter reads host.toml's keymap at start (`desktop.nix`); `checks.hostlayer` asserts it, mutant `mutants/hostlayer-greeter-us.log` |
 
 **journald.** The first boot of the `gb` LUKS install (`artifacts/installer2/lab/run1-oldiso/firstboot-gb.json`,
 `journald` facts) shows `NRestarts=1` and, in order: the initrd's journald (PID 115) starts at 16.73 s;
@@ -181,7 +187,8 @@ virtio disk (`RIME_RECOVERY_ALLOW_FIXED=1`, the test seam for a VM disk that is 
 `systemd-journald.service: Scheduled restart job, restart counter is at 1.` at 27.91 s; then the runtime journal is
 flushed to `/var/log/journal`. That is the systemd initrd handing the journal over at switch-root: PID 1 stops the
 initrd's journald with SIGTERM and the unit's `Restart=` starts the real one, which the counter records as one restart.
-There is no error, core dump or watchdog line. Not changed. Also seen there: journald warns that `/var/log/journal`
+There is no error, core dump or watchdog line; run 3's `lab/firstboot-gb.json` shows the same order (switch-root at
+48.72 s, SIGTERM to the initrd's journald and restart counter 1 at 53.54 s). Not changed. Also seen there: journald warns that `/var/log/journal`
 is copy-on-write on btrfs (systemd's `journal-nocow.conf` tmpfiles rule would set `+C`); left for the base module's
 owner.
 
@@ -199,11 +206,43 @@ owner.
   Pass at installer2's head: `artifacts/installer2/check-installer-nixos.log`. Mutant: the release signature left
   unchecked (`signer = signers[0]`) installs a release signed by another identity, and the check fails exactly in
   "a release signed by another identity" (`artifacts/installer2/mutants/release-sig-skipped.log`).
+* `checks.hostlayer`: among its subtests, the greeter's sway types host.toml's `gb` + `caps:escape`, not the
+  configuration's `us` (`artifacts/installer2/check-hostlayer.log`; mutant `mutants/hostlayer-greeter-us.log`).
 * The OVMF lab, `nix/installer/lab/run.sh` (results below).
 
 ### Results (2026-11-02, katana, nix/installer2)
 
-RESULTS-TABLE
+Run 3 is the current one: the lab ISO built from installer2's head (greeter fix included), sha256 f169cea2775f…,
+system `c4is44z0…-nixos-system-unnamed`, a TEST release `2026.11.02` (digest sha256:e8faff499009…, 2,128 paths)
+signed by a throwaway TEST signer, cache key `rime-installer-lab-TEST-1`. All evidence under
+`/var/lab/rime-nix/artifacts/installer2/lab/`.
+
+| step | result | evidence |
+|---|---|---|
+| `qualify` (I1) | pass: `uefi-sb` from USB with Microsoft keys only, `secure_boot` true, Fedora kernel 7.2.14-300.fc45, the GUI's first page by OCR | `i1-iso-qualify.log`, `i1-uefi-sb-usb.{json,png,serial.log}` |
+| `install gb` (LUKS, XKB `gb`, passphrase `rime"lab42`) | pass. Release check 10 s (narinfo 8.18 s, `nix store verify` 0.92 s); install 14:29:59 to 14:35:54; host.toml `[keyboard] console = "gb"`; `recovery_unsaved` (the ISO stick is read-only, as designed) | `install-gb.{log,serial.log}`, `install-gb-gui.png`, `rime-install-gb.log`, `result-gb.txt` |
+| `firstboot gb` (I3, SB on, TEST MOK) | pass: the passphrase typed on a `gb` layout opens the volume (`luks_result` "Switching root"); `rd.vconsole.keymap=gb` on the command line; SecureBoot 1 "enabled (user)"; `/etc/hostname` and `hostnamectl --static` both `rime-lab-gb`; greeter on VT 1 (`Class=greeter`) showing **English (UK)**; no zsh-newuser-install; one `splash`; journald `NRestarts=1` (explained below) | `firstboot-gb.{log,json,png,serial.log}` |
+| `firstboot-us-control` (run 2, same engine and passphrase) | FAILS as it must: the same key presses typed on a `us` layout give "Failed to activate with specified passphrase" | `run2-greeter-us/firstboot-gb-us-control.{json,log,serial.log}` |
+| `install part` (Windows-shaped disk: Windows ESP, MSR, NTFS `Windows`, the app's `RIME-EFI` + empty 8304) | pass, 14:40:32 to 14:45:03: "grub: Windows entry added (ESP /dev/vda1 …)", "nvram: Rime OS -> /dev/vda part 4 \EFI\fedora\shimx64.efi", "esp: /dev/vda4 is now RIME-ESP" | `install-part.log`, `rime-install-part.log`, `result-part.txt`, `part-disk-before.txt` |
+| `firstboot part` (I2, SB on) | pass: firmware `BdsDxe: starting Boot0004` (Rime OS on partition 4, shim), staged files absent, one Windows entry in GRUB. After it: Windows' ESP still holds `EFI/Microsoft/Boot/bootmgfw.efi`, NTFS `Windows` intact, `RIME-ESP` without `rimeinst/`, `rime-root` btrfs | `firstboot-part.{log,json,png,serial.log}`, `part-disk-after.txt` |
+
+The probe's `nvram` fact is empty in `firstboot-part.json` (`efibootmgr` through the probe's `sudo` prints nothing in
+that VM); the firmware's own `BdsDxe` line is the evidence that the entry the engine wrote is the one that booted.
+
+History of this lab:
+
+* **Run 1** (`lab/run1-oldiso/`, an ISO from before ab01f061f): `firstboot gb` failed only on the static hostname
+  (hostnamed reading `/etc/static/hostname`, fixed in `hostlayer.nix`); `install part` failed "Could not read the EFI
+  System Partition /dev/vda4" because the lab's Windows fixture wrote nothing (`put` ignored its offset; `run.sh` now
+  checks it and `blkid` verifies the fixture). Its first gb release check: 10 s, narinfo 8.69 s.
+* **Run 2** (`lab/run2-greeter-us/`, ISO sha256 d8b63b74…): every step passed (release check 2 s, narinfo 1.67 s),
+  but the gb install's greeter screenshot read **English (US)**: greetd's sway took the configuration's `us` keymap,
+  not host.toml's, so a `gb` user typed a `us` layout at the greeter. Fixed in 1ffc80fcd (`desktop.nix`'s greeter
+  reads the keymap generator's output at start); `checks.hostlayer` asserts `XKB_DEFAULT_LAYOUT=gb` and
+  `XKB_DEFAULT_OPTIONS=caps:escape` in the greeter's sway (mutant: the old `us` environment fails,
+  `artifacts/installer2/mutants/hostlayer-greeter-us.log`), and `checks.desktop` still passes
+  (`artifacts/installer2/check-desktop.log`, the configuration's `us` default where no host.toml names one).
+* **Run 3**: the table above; the greeter now reads English (UK).
 
 ### Earlier runs
 
