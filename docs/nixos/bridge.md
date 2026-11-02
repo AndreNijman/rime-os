@@ -158,6 +158,19 @@ it is covered by the signed manifest and verified by narHash like every other pa
 binary that would need its own updates. The cost: the bridge needs `chroot` and a kernel that runs the closure's
 binaries, which every bootc machine has. A static nix stays the answer for the ISO (no target system to chroot into).
 
+**Decision (integrate-wave3, 2026-11-03): the start record is the one rule both sides read.** `start` writes
+`/var/lib/rime/nixos-bridge/state.json` at its first step. Until wave 3 the rollback (`try`) began only at the
+snapshot step, so a failure in the backup, while masking the old side's units or at the first fsck gate left a record
+with neither `failed` nor `rolled back`, the units it had masked still masked, and the readiness release's `rime`
+refusing its bootc verbs for good (readiness review of #137). Now every step after the record exists is inside the
+rollback, `mask_old_side` records each unit as it masks it (a failure half way unmasks exactly those), and `check` and
+`start` both read the record with the same rule as `rimed/rime/src/nixos_bridge.rs`: no record, or a start that failed
+and rolled back, allows; a finished move refuses `already-moved`, any other record `start-unfinished` (naming the last
+step), an unreadable one `start-record-unreadable`. `check --json` carries the record as `start_record`. Proof:
+`bridge-unit`'s `StartRecord` tests (a failed backup, a failure half way through the masks, a failed first fsck gate
+each end in `rolled back` with the masks undone; check and start refuse over each kind of record and start touches
+nothing; a rolled-back record allows); mutants `start-early-steps-outside-rollback` and `check-ignores-start-record`.
+
 ## What the OVMF lab proved (2026-11-02, Secure Boot on)
 
 `nix/probe/ovmf/bridge` (README there), evidence `/var/lab/rime-nix/artifacts/bridge2/`. Both runs use disks made
@@ -183,20 +196,19 @@ exist yet).
 
 ## Handover (outside this branch's scope)
 
-- **Readiness release (bootc PR to rime-os main):** install `share/rime-bridge/rime-migrate` as
-  `/usr/libexec/rime-migrate` and wire `rime migrate`. **Re-copy it from this branch before that PR merges:** the copy
-  on draft #137 (`files/system/libexec/rime-migrate` at 37a5f9a89) predates `write_boot_table` (it still truncates
-  carry's host.toml, so an encrypted machine loses `rd.luks.*` and does not unlock), `preview_extract` (check crashes
-  on a payload's unit masks) and `start`'s mandatory preview; its copies of `test_bridge*.py` need the same refresh; make `rime update` refuse while
-  `/var/lib/rime/nixos-bridge/state.json` exists (the old side must not stage over a bridged disk); a Rust
-  `rime backup key export` verb can call `rime-migrate key-export`.
+- **Readiness release (bootc PR to rime-os main):** DONE at integrate-wave3. Draft rime-os #137 carries this
+  branch's `rime-bridge.py` byte for byte as `/usr/libexec/rime-migrate` (first line `#!/usr/bin/python3 -I`) and its
+  `test_bridge*.py`, refreshed after bridge2 merged (write_boot_table, preview_extract, the mandatory preview and the
+  start record above), and `rime` refuses `update` and the other bootc verbs while the start record says so.
+  Still open there: the release key file (`nixos-bridge-payload.pub`, made by the release environment) and a Rust
+  `rime backup key export` verb that calls `rime-migrate key-export` (not needed: `rime migrate key-export` exists).
 - **Release pipeline:** generate `rime-bridge-payload-1` once (above), build `preview.tar` (the payload's
   `rime-hostlayer`, the system's `etc/` and `sw/bin` names, greetd's config; `nix/probe/ovmf/bridge/payload.sh` shows
   the layout) and run `payload-sign.sh` on every payload; the readiness release ships the public line.
 - **katana (P3):** read `\EFI\APEX\grub.cfg` with `rime migrate check --explain`.
-- **Readiness release, again:** after `start`, the bootc side's `rime update --check` still runs normally in the lab
-  (`*-update-after-start.txt`): the refusal belongs to `rimed/rime/src/nixos_bridge.rs` (draft PR rime-os #137), not
-  to this branch.
+- **Readiness release, again:** the lab's `*-update-after-start.txt` shows `rime update --check` still running after
+  `start`: that image predates #137, whose `rime` refuses it (tests/test-rime-migrate.sh there, 10 verb forms x 5
+  records). A booted bootc VM of the readiness image is only possible once #137 is built.
 - **Release pipeline, again:** `payload-sign.sh` needs `cmp` (diffutils) next to openssl.
 - **Desktop:** the first NixOS login after the move shows Hyprland's "updated to 0.57.0" notice
   (`artifacts/bridge2/L/L-nixos-desktop.png`). Whether to silence it is the desktop module's call.

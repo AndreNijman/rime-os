@@ -60,6 +60,7 @@ FLOOR_BYTES = int(os.environ.get("RIME_MIGRATE_FLOOR_BYTES", 19 * GB))
 RENAMED_SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main"
 SIGNER_OVERRIDE = "usr/share/rime-os/trust/expected-signer"
 STATE = "/var/lib/rime/nixos-bridge"
+RUN_DIR = "/run/rime-migrate"  # start's mount points (tests point it at a temporary directory)
 BOOT_MIGRATE_DIRS = ("var/lib/rime/boot-migrate", "var/lib/apex/boot-migrate")
 ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 EFI_GLOBAL = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
@@ -1035,9 +1036,46 @@ def existing_subvols(dev):
         m.close()
 
 
+def start_record():
+    """The record a start leaves (STATE/state.json): None when there is none, {"unreadable": why} when it cannot be
+    read as JSON."""
+    p = os.path.join(STATE, "state.json")
+    try:
+        with open(p) as f:
+            rec = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        return {"unreadable": str(e)}
+    return rec if isinstance(rec, dict) else {"unreadable": "not a JSON object"}
+
+
+def record_refusal(rec):
+    """The refusal a start record means, or None. The same rule the bootc side's `rime` applies to its own verbs
+    (rimed/rime/src/nixos_bridge.rs, readiness release): only a start that undid itself (failed, and its last step is
+    "rolled back") allows another; a finished move, a start that neither finished nor rolled back, and an unreadable
+    record refuse by name."""
+    p = os.path.join(STATE, "state.json")
+    if rec is None:
+        return None
+    if "unreadable" in rec:
+        return ("start-record-unreadable", f"{p} cannot be read ({rec['unreadable']}); look at it before anything else")
+    steps = rec.get("steps") or []
+    last = steps[-1] if steps else "none"
+    if rec.get("failed") and last == "rolled back":
+        return None
+    if rec.get("done"):
+        return ("already-moved", f"{p}: this machine was moved to NixOS on {rec['done']}; boot the Rime (NixOS) entry")
+    return ("start-unfinished", f"{p}: a start reached step {last!r} and neither finished nor rolled itself back; "
+            "nothing new is started over it")
+
+
 def cmd_check(a):
     facts = gather(a)
     c, refusals, notes = evaluate(facts, facts.get("backup"))
+    rec = start_record()
+    if record_refusal(rec):
+        refusals.append(record_refusal(rec))
     preview = None
     if getattr(a, "payload", None):
         try:
@@ -1051,7 +1089,8 @@ def cmd_check(a):
             refusals.append((e.name, str(e)))
     if a.json:
         print(json.dumps({"facts": facts, "classification": c, "refusals": [{"name": n, "text": t} for n, t in refusals],
-                          "notes": notes, "chain": chain_read(facts), "carry_preview": preview}, indent=1, sort_keys=True))
+                          "notes": notes, "chain": chain_read(facts), "carry_preview": preview,
+                          "start_record": rec}, indent=1, sort_keys=True))
     else:
         sys.stdout.write(report(facts, c, refusals, notes, a.explain))
         if preview is not None:
@@ -1394,14 +1433,14 @@ def do_backup(dest, facts, var_home):
 
 
 def mask_old_side(state):
-    masked = []
+    # Recorded as it goes: a failure half way through still unmasks exactly what was masked (unmask_old_side).
+    masked = state.setdefault("masked", [])
     for u in MASK_UNITS:
         p = os.path.join("/etc/systemd/system", u)
         if os.path.lexists(p):
             continue
         os.symlink("/dev/null", p)
         masked.append(u)
-    state["masked"] = masked
     run(["systemctl", "daemon-reload"], check=False)
     for u in ("rime-update-check.timer", "rime-store-compact.timer"):
         run(["systemctl", "stop", u], check=False)
@@ -1578,6 +1617,8 @@ def cmd_start(a):
         lo = trial_leftovers(facts)
         if lo["files"] or lo["nvram"] or lo["top"]:
             refusals.append(("e-repair-pending", "run `rime migrate repair-e --confirm` first (D3)"))
+    if record_refusal(start_record()):
+        refusals.append(record_refusal(start_record()))
     if refusals:
         sys.stdout.write(report(facts, c, refusals, notes, True))
         return EXIT_REFUSED
@@ -1600,25 +1641,28 @@ def cmd_start(a):
             json.dump(state, f, indent=1, sort_keys=True)
         print(f"== {s}", flush=True)
 
-    os.makedirs("/run/rime-migrate", exist_ok=True)
-    top = "/run/rime-migrate/top"
+    os.makedirs(RUN_DIR, exist_ok=True)
+    top = os.path.join(RUN_DIR, "top")
     os.makedirs(top, exist_ok=True)
     mount("-o", "subvolid=5", dev, top)
     # rime-migrate-from-apex (and a store compaction) must have finished before anything is copied (D2).
     wait_units()
-    step("backup")
-    state["backup"] = do_backup(a.backup, facts, os.path.join(top, facts["var_fsroot"].lstrip("/"), "home"))
-    step("old side")
-    wait_units()
-    mask_old_side(state)
-    step("fsck gate before")
-    state["fsck_before"] = fsck_gate(top, facts, "before")
-    before = containment_snapshot(top, facts)
     made = []
     bdir = os.path.join(top, "boot") if facts["boot"]["kind"] == "top-level-dir" else "/boot"
     old_custom = read(os.path.join(bdir, "grub2/custom.cfg"))
     had = boot_had(bdir)
+    # Every step after the record exists is inside the rollback (wave 3): a failure in the backup, while masking the
+    # old side or at the first fsck gate used to leave a record with neither `failed` nor `rolled back`, units masked,
+    # and the bootc verbs refused for good. Now it unmasks what it masked and records `rolled back` like any other.
     try:
+        step("backup")
+        state["backup"] = do_backup(a.backup, facts, os.path.join(top, facts["var_fsroot"].lstrip("/"), "home"))
+        step("old side")
+        wait_units()
+        mask_old_side(state)
+        step("fsck gate before")
+        state["fsck_before"] = fsck_gate(top, facts, "before")
+        before = containment_snapshot(top, facts)
         step("snapshot @pre-nixos")
         run(["btrfs", "subvolume", "snapshot", "-r", top, os.path.join(top, "@pre-nixos")])
         made.append("@pre-nixos")
@@ -1634,7 +1678,7 @@ def cmd_start(a):
         src_home = os.path.join(top, facts["var_fsroot"].lstrip("/"), "home")
         run(["cp", "-a", "--reflink=always", "--one-file-system", src_home + "/.", os.path.join(top, "@home")])
         step("install closure")
-        t = "/run/rime-migrate/target"
+        t = os.path.join(RUN_DIR, "target")
         os.makedirs(t, exist_ok=True)
         mount("-o", "subvol=@nixos,compress-force=zstd:3", dev, t)
         for sub, where in (("@nix", "nix"), ("@home", "var/home")):
@@ -1709,7 +1753,7 @@ def cmd_start(a):
               flush=True)
     except BaseException as e:
         log(f"failed: {e}; removing what the bridge made")
-        run(["umount", "-R", "/run/rime-migrate/target"], check=False)
+        run(["umount", "-R", os.path.join(RUN_DIR, "target")], check=False)
         undo_boot(bdir, old_custom, had)
         for s in reversed(made):
             run(["btrfs", "subvolume", "delete", os.path.join(top, s)], check=False)
@@ -1721,7 +1765,7 @@ def cmd_start(a):
         raise
     state["done"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     step("done")
-    report_path = os.path.join("/run/rime-migrate/target", "var/lib/rime/carry/report.txt")
+    report_path = os.path.join(RUN_DIR, "target", "var/lib/rime/carry/report.txt")
     print(f"done: NixOS {man['toplevel']} is in the GRUB menu; the ostree entries stay. Left-behind report: "
           f"/var/lib/rime/carry/report.txt on the new system ({'present' if os.path.exists(report_path) else 'missing'})")
     return EXIT_OK

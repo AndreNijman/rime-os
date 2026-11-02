@@ -67,6 +67,9 @@ let
     [ "key-export-same-disk" "rime-bridge.py" ''s/    if b.get("disk") and b\["disk"\] == (facts.get("root") or {}).get("disk"):/    if False:/'' "key-export writes the keys onto the disk they unlock" ]
     [ "manifest-paths-unchecked" "rime-bridge.py" ''s/    if not re.fullmatch(r"\/nix\/store\/\[0-9a-z\]{32}-\[^\/\]+", man\["toplevel"\]) or not re.fullmatch(/    if False and not re.fullmatch(/'' "a signed toplevel outside /nix/store chrooted into" ]
     [ "ed25519-y-only" "rime-bridge.py" ''s/    return (lhs\[0\] \* rhs\[2\] - rhs\[0\] \* lhs\[2\]) % _P == 0 and /    return /'' "a negated S (same y, other x) accepted" ]
+    # integrate-wave3: every start step after the record exists is inside the rollback; check and start honour it.
+    [ "start-early-steps-outside-rollback" "rime-bridge.py" ''s/^    except BaseException as e:$/    except BaseException as e:\n        if state["steps"][-1] in ("backup", "old side", "fsck gate before"):\n            raise/'' "a start failing in the backup, masks or first fsck gate leaves units masked and no rollback" ]
+    [ "check-ignores-start-record" "rime-bridge.py" ''s/^    if rec.get("failed") and last == "rolled back":$/    if True:/'' "check and start run over an unfinished start" ]
   ];
   hlMutants = [
     [ "hostlayer-no-boot" "rime-hostlayer.py" ''s/"mount", "luks", "boot"}/"mount", "luks"}/'' "[boot] table refused" ]

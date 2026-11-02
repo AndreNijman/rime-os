@@ -841,5 +841,128 @@ class Commands(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.d, out[0], "luks-header.img")))
 
 
+class StartRecord(unittest.TestCase):
+    """The start record (STATE/state.json): every step after it exists is inside the rollback, so a start that fails in
+    the backup, while masking the old side or at the first fsck gate unmasks what it masked and records `rolled back`;
+    check and start both refuse over a record that neither finished nor rolled back. Mutants start-early-steps-outside-
+    rollback, check-ignores-start-record (nix/tests/bridge.nix)."""
+
+    NAMES = ("gather", "PAYLOAD_KEY_FILE", "mount", "run", "STATE", "RUN_DIR", "wait_units", "do_backup",
+             "mask_old_side", "unmask_old_side", "fsck_gate", "containment_snapshot", "carry_preview", "boot_had",
+             "undo_boot")
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.saved = {n: getattr(B, n) for n in self.NAMES}
+        keyfile = os.path.join(self.d, "nixos-bridge-payload.pub")
+        pathlib.Path(keyfile).write_text(TEST_KEY + "\n")
+        B.PAYLOAD_KEY_FILE = keyfile
+        B.STATE = os.path.join(self.d, "state")
+        B.RUN_DIR = os.path.join(self.d, "run")
+        self.facts = luks_a()
+        self.facts["existing_subvols"] = []
+        self.facts["backup"] = {"path": os.path.join(self.d, "backup"), "exists": True, "disk": "/dev/vdc",
+                                "free_bytes": 100 * GB}
+        B.gather = lambda a: copy.deepcopy(self.facts)
+        self.calls = []
+        B.mount = lambda *a: self.calls.append(("mount",) + a)
+        B.run = lambda cmd, **k: self.calls.append(("run", tuple(cmd)))
+        B.wait_units = lambda *a, **k: None
+        B.carry_preview = lambda payload, man, *a, **k: (0, "LEFT BEHIND (0)")
+        B.boot_had = lambda bdir: {}
+        B.undo_boot = lambda *a: self.calls.append(("undo_boot",))
+        B.do_backup = lambda *a: os.path.join(self.d, "backup", "b")
+        B.containment_snapshot = lambda *a: {}
+        self.unmasked = []
+        B.unmask_old_side = lambda state: self.unmasked.append(list(state.get("masked", [])))
+        self.payload = os.path.join(self.d, "payload")
+        make_payload(self.payload)
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(B, n, v)
+        shutil.rmtree(self.d)
+
+    def masks(self, state):
+        state.setdefault("masked", []).append("rime-update-check.timer")
+
+    def start(self):
+        a = B.argparse.Namespace(cmd="start", yes=True, backup=self.facts["backup"]["path"], payload=self.payload,
+                                 disk=[])
+        with contextlib.redirect_stdout(io.StringIO()):
+            return B.cmd_start(a)
+
+    def record(self):
+        with open(os.path.join(B.STATE, "state.json")) as f:
+            return json.load(f)
+
+    def fails_in(self, where):
+        def boom(*a, **k):
+            raise B.Failed(f"TEST failure in {where}")
+        return boom
+
+    def assert_rolled_back(self, masked):
+        rec = self.record()
+        self.assertEqual(rec["steps"][-1], "rolled back", rec["steps"])
+        self.assertIn("TEST failure", rec["failed"])
+        self.assertEqual(self.unmasked, [masked])
+        self.assertIsNone(B.record_refusal(B.start_record()))
+
+    def test_a_failed_backup_rolls_back(self):
+        B.do_backup = self.fails_in("backup")
+        B.mask_old_side = self.masks
+        with self.assertRaises(B.Failed):
+            self.start()
+        self.assert_rolled_back([])
+
+    def test_a_failure_while_masking_unmasks_what_was_masked(self):
+        def half(state):
+            self.masks(state)
+            raise B.Failed("TEST failure half way through the masks")
+        B.mask_old_side = half
+        with self.assertRaises(B.Failed):
+            self.start()
+        self.assert_rolled_back(["rime-update-check.timer"])
+
+    def test_a_failed_first_fsck_gate_rolls_back(self):
+        B.mask_old_side = self.masks
+        B.fsck_gate = self.fails_in("fsck gate before")
+        with self.assertRaises(B.Failed):
+            self.start()
+        self.assert_rolled_back(["rime-update-check.timer"])
+
+    def write_record(self, rec):
+        os.makedirs(B.STATE, exist_ok=True)
+        with open(os.path.join(B.STATE, "state.json"), "w") as f:
+            f.write(rec if isinstance(rec, str) else json.dumps(rec))
+
+    def check(self):
+        a = B.argparse.Namespace(cmd="check", explain=True, json=False, backup=None, disk=[], payload=None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = B.cmd_check(a)
+        return rc, out.getvalue()
+
+    def test_check_and_start_refuse_over_an_unfinished_start(self):
+        rc, out = self.check()
+        self.assertEqual(rc, B.EXIT_OK, out)  # positive control: no record
+        for rec, name in (({"steps": ["backup", "old side"]}, "start-unfinished"),
+                          ({"steps": ["backup", "done"], "done": "2026-11-03"}, "already-moved"),
+                          ("{not json", "start-record-unreadable")):
+            self.write_record(rec)
+            rc, out = self.check()
+            self.assertEqual(rc, B.EXIT_REFUSED, out)
+            self.assertIn(name, out)
+            B.mask_old_side = self.masks
+            before = self.calls[:]
+            self.assertEqual(self.start(), B.EXIT_REFUSED)
+            self.assertEqual(self.calls, before, "start touched the machine over an existing record")
+
+    def test_a_start_that_rolled_back_allows_another(self):
+        self.write_record({"steps": ["backup", "rolled back"], "failed": "TEST"})
+        rc, out = self.check()
+        self.assertEqual(rc, B.EXIT_OK, out)
+
+
 if __name__ == "__main__":
     unittest.main()
