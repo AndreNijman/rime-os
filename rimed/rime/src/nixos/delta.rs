@@ -1073,15 +1073,18 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
         let hex: String = Sha256::digest(claimed).iter().map(|b| format!("{b:02x}")).collect();
         let t = Instant::now();
-        let r = stream(
-            "cat",
-            &[src.display().to_string()],
-            "sh",
-            &["-c".into(), reader.into(), "sh".into(), fifo.display().to_string(), out.display().to_string()],
-            &fifo,
-            size,
-            &format!("sha256:{hex}"),
+        // On a thread with a deadline: a stream that never ends must fail the test, not hang the build.
+        let (tx, rx) = mpsc::channel();
+        let (zargs, nargs, f) = (
+            vec![src.display().to_string()],
+            vec!["-c".to_string(), reader.to_string(), "sh".into(), fifo.display().to_string(), out.display().to_string()],
+            fifo.clone(),
         );
+        let want = format!("sha256:{hex}");
+        std::thread::spawn(move || {
+            let _ = tx.send(stream("cat", &zargs, "sh", &nargs, &f, size, &want));
+        });
+        let r = rx.recv_timeout(Duration::from_secs(60)).expect("stream() did not return within 60 s");
         let el = t.elapsed();
         let got = fs::read(&out).unwrap_or_default();
         let _ = fs::remove_dir_all(&dir);
@@ -1125,17 +1128,26 @@ mod tests {
         assert!(el < Duration::from_secs(30), "{el:?}");
     }
 
+    /// NIX_LIKE, plus a mark the importer writes only if it read the NAR to its end and was still alive to say so.
+    const NIX_LIKE_MARKS_THE_END: &str = r#"exec 3<"$1"; exec 3<&-; sleep 0.2; cat "$1" > "$2" && printf END >> "$2""#;
+
     #[test]
     fn a_stream_that_does_not_hash_right_never_reaches_its_end() {
         // The reader has every byte but is killed before the end: `cat` exits non-zero, so nothing is imported.
         let d = bytes(41 * 1024);
         let mut other = d.clone();
         other[7] ^= 1;
-        let (r, _, el) = run_stream(NIX_LIKE, &d, d.len() as u64, &other);
+        let (r, got, el) = run_stream(NIX_LIKE_MARKS_THE_END, &d, d.len() as u64, &other);
         assert!(r.as_ref().is_err_and(|e| e.contains("does not hash")), "{r:?}");
+        assert!(!got.ends_with(b"END"), "the importer read a NAR that does not hash to its end");
         assert!(el < Duration::from_secs(30), "{el:?}");
-        let (r, _, _) = run_stream(NIX_LIKE, &d, d.len() as u64 - 1, &d);
+        let (r, got, _) = run_stream(NIX_LIKE_MARKS_THE_END, &d, d.len() as u64 - 1, &d);
         assert!(r.as_ref().is_err_and(|e| e.contains("longer than")), "{r:?}");
+        assert!(!got.ends_with(b"END"), "the importer read an over-long NAR to its end");
+        // The mark itself works: a stream that checks out ends with it.
+        let (r, got, _) = run_stream(NIX_LIKE_MARKS_THE_END, &d, d.len() as u64, &d);
+        assert_eq!(r, Ok(()));
+        assert!(got.ends_with(b"END") && got.len() == d.len() + 3, "{} B", got.len());
     }
 
     #[test]
