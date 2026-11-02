@@ -154,20 +154,35 @@ in
             listing = machine.succeed(f"zstd -dcf {init} | cpio -it --quiet")
             assert "usr/lib/systemd/system-generators/systemd-cryptsetup-generator" in listing or \
                 "systemd-cryptsetup-generator" in listing, "no cryptsetup generator in the initrd"
-            crypttab = machine.succeed(f"cd /tmp && zstd -dcf {init} | cpio -i --quiet --to-stdout etc/crypttab || true")
-            assert "${luksUuid}" not in crypttab, crypttab
-            vc = machine.succeed(f"zstd -dcf {init} | cpio -i --quiet --to-stdout etc/vconsole.conf")
+
+            # Unpacked once: /etc files in the initrd are symlinks into its own /nix/store, which the VM's store
+            # does not hold (the initrd is a compressed file, not a set of references).
+            machine.succeed(f"mkdir -p /tmp/initrd && cd /tmp/initrd && zstd -dcf {init} | cpio -idm --quiet")
+
+            def initrd_file(name):
+                """A file of the initrd, a symlink resolved inside the unpacked tree; "" when absent."""
+                path = f"/tmp/initrd/{name}"
+                for _ in range(8):
+                    target = machine.succeed(f"readlink {path} || true").strip()
+                    if not target:
+                        break
+                    path = "/tmp/initrd" + target if target.startswith("/") else f"{path.rsplit('/', 1)[0]}/{target}"
+                return machine.succeed(f"cat {path} 2>/dev/null || true")
+
+            crypttab = initrd_file("etc/crypttab")
+            print("initrd crypttab: " + repr(crypttab))
+            assert "${luksUuid}" not in crypttab and "luks" not in crypttab, crypttab
+            vc = initrd_file("etc/vconsole.conf")
             print("initrd vconsole.conf: " + vc)
             assert "KEYMAP=de" in vc, vc
 
         with subtest("boot the LUKS configuration, type the passphrase at the prompt"):
             # The disk's loader already lists the specialisation (useBootLoader installs it); make it the next boot
             # (the test harness's systemd-boot, in the VM; Rime's own chain is the OVMF matrix's).
-            entries = machine.succeed("ls /boot/loader/entries")
-            print(entries)
-            luks_entry = [e for e in entries.split() if "specialisation-luks" in e]
-            assert len(luks_entry) == 1, entries
-            machine.succeed(f"bootctl set-oneshot {luks_entry[0]}")
+            print(machine.succeed("head -n 20 /boot/loader/entries/*.conf"))
+            luks_entry = machine.succeed("grep -l rd.luks.uuid= /boot/loader/entries/*.conf").split()
+            assert len(luks_entry) == 1, luks_entry
+            machine.succeed(f"bootctl set-oneshot $(basename {luks_entry[0]})")
             machine.succeed("sync")
             machine.crash()
             machine.start()
