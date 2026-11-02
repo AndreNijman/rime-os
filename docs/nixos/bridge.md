@@ -34,6 +34,16 @@ left alone, and an invalid device writes nothing and says why, so a bad table ne
 accepted (`BOOT_PART_FSTYPES`), because that is all the installer writes; xfs would add a module and an fsck tool to
 every closure for no machine. Anything else is refused by name: `boot-partition-fstype`, `boot-unknown`.
 
+**Found by the encrypted OVMF run, fixed (`write_boot_table`).** `start` used to open host.toml for writing *before*
+reading it to merge, so the open truncated what carry had just written: every migrated machine (A and E alike) came
+up with a host.toml holding only `[boot] layout/device/fstype`, and lost its carried timezone, locale, keyboard,
+`[[mount]]`, `[[luks]]` and `[boot] kernel_params`. On a plain disk nothing visibly broke (the generic toplevel's
+defaults hid it); on an encrypted one the menu entry had no `rd.luks.*`, nothing asked for the passphrase and the
+initrd timed out on `/dev/disk/by-label/rime-root`. Now the text is read and merged first and written through a
+temporary file and `rename`; unit test `BootTable.test_written_over_carrys_file_keeps_it`, mutant
+`boot-table-clobbers-carry`. The earlier A and E lab runs (`artifacts/bridge/`) had this defect; the `bridge2` runs
+check the carried host.toml after the first NixOS boot.
+
 ### One option set: `rime.rootfs`
 
 `rime.installTarget` (the installer's) and `rime.rootfs` (the bridge's) declared the same three subvolumes of the same
@@ -139,6 +149,29 @@ it is covered by the signed manifest and verified by narHash like every other pa
 binary that would need its own updates. The cost: the bridge needs `chroot` and a kernel that runs the closure's
 binaries, which every bootc machine has. A static nix stays the answer for the ISO (no target system to chroot into).
 
+## What the OVMF lab proved (2026-11-02, Secure Boot on)
+
+`nix/probe/ovmf/bridge` (README there), evidence `/var/lab/rime-nix/artifacts/bridge2/`. Both runs use disks made
+from the published image (2026.11.01.2), Fedora's Secure Boot OVMF with the real Rime MOK certificate and a lab TEST
+MOK in MokList, the NixOS Rime 7.2.9 kernel signed by the TEST MOK, and a payload signed in the readiness format by a
+TEST key that a lab-only bridge trusts. Every boot reports `SecureBoot efivar=1`.
+
+- **L, the installer's encrypted default** (`run-L-bootc.log`, `run-L.log`, `L/`): passphrase at dracut's prompt,
+  `check --explain` (A, /boot partition, chain verified, left-behind report), `start` (LUKS header backup read back),
+  then the NixOS initrd asks for the same passphrase, `/` is the opened volume, `/boot` the ext4, host.toml carries
+  `rd.luks.*` and `[[luks]]`; rime-greet logs alex in with the old password into Hyprland and the Shell; the ostree
+  entry still boots (passphrase, home intact); NixOS again. p2-gates D2.
+- **E, katana's topology** (`run-E-bootc.log`, `run-E.log`, `E/`): repair-e archives the trial (ESP dirs, NVRAM
+  entry, `/composefs`, `/state`), then the same sequence without LUKS. p2-gates D1, X1.
+
+The first encrypted run found the host.toml truncation above; the first SB run found that `check --payload` crashed on
+unit masks in `preview.tar` (`preview_extract` now makes masks links to `/dev/null` and leaves other special files
+out, counted; tests `Preview.test_masks_survive_and_specials_never_crash`, `test_mask_never_written_through_a_link`,
+mutants `preview-specials-crash`, `preview-mask-through-link`).
+
+Not proven here: katana's own `\EFI\APEX\grub.cfg` (above, P3) and a real-key signed payload (the release key does not
+exist yet).
+
 ## Handover (outside this branch's scope)
 
 - **Readiness release (bootc PR to rime-os main):** install `share/rime-bridge/rime-migrate` as
@@ -149,3 +182,13 @@ binaries, which every bootc machine has. A static nix stays the answer for the I
   `rime-hostlayer`, the system's `etc/` and `sw/bin` names, greetd's config; `nix/probe/ovmf/bridge/payload.sh` shows
   the layout) and run `payload-sign.sh` on every payload; the readiness release ships the public line.
 - **katana (P3):** read `\EFI\APEX\grub.cfg` with `rime migrate check --explain`.
+- **Readiness release, again:** after `start`, the bootc side's `rime update --check` still runs normally in the lab
+  (`*-update-after-start.txt`): the refusal belongs to `rimed/rime/src/nixos_bridge.rs` (draft PR rime-os #137), not
+  to this branch.
+- **Release pipeline, again:** `payload-sign.sh` needs `cmp` (diffutils) next to openssl.
+- **Desktop:** the first NixOS login after the move shows Hyprland's "updated to 0.57.0" notice
+  (`artifacts/bridge2/L/L-nixos-desktop.png`). Whether to silence it is the desktop module's call.
+- **Lab host (not Rime):** on katana, `/proc/sys/kernel/modprobe` names a `/nix/store/...-kmod-31/bin/modprobe` that
+  does not exist on the host (written from inside the privileged `rime-nix` container by something that runs NixOS
+  activation or sysctl there), so the host kernel cannot autoload modules: `cryptsetup` inside the lab container needed
+  `modprobe dm_crypt` by hand. A reboot clears it; this branch did not change it.

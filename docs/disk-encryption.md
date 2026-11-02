@@ -4,6 +4,12 @@ This is the installer's half of L-002, "Enable LUKS2 by default". The other
 half (what is enrolled into the LUKS2 header, and when a TPM keyslot is safe)
 is `/usr/libexec/rime-luks-enroll` and `docs/boot-v2.md`.
 
+Rime OS is moving from bootc to NixOS. The layout, the keys and the recovery
+story below are the same on both; what differs on NixOS (where the unlock
+arguments come from, the TPM re-enrolment, `rime-luks-enroll`'s refusal, and
+what `rime migrate` does with an encrypted machine) is in
+[On NixOS](#on-nixos-rime-and-moving-an-encrypted-machine-to-it).
+
 The acceptance line for the item is *"encryption default does not strand users
 across qualified hardware and recovery cases"*, so this document is organised
 around the ways a person can be locked out, and what stops each one.
@@ -257,8 +263,63 @@ Every one of these fires **before anything is written**, and says so.
 4. **You have neither key.** There is no fourth option, by design. The
    acknowledgement checkbox on the last installer screen exists for this case.
 
-Once inside, `sudo systemd-cryptenroll --recovery-key /dev/<partition>` makes a
-new recovery key, and `cryptsetup luksChangeKey` changes the passphrase.
+Once inside, `cryptsetup luksChangeKey` changes the passphrase. A new recovery
+key is `rime-luks-enroll --device /dev/<partition> --recovery-out <file>
+--replace-recovery`: on a volume that already has one, `rime-luks-enroll`
+**refuses** without `--replace-recovery`, because its full path wipes the
+recovery slot and the key the owner filed stops working (the TPM-only re-bind,
+which keeps it, is `--tpm-only`; see [On NixOS](#on-nixos-rime-and-moving-an-encrypted-machine-to-it)).
+`systemd-cryptenroll --recovery-key` on its own adds a second recovery key and
+leaves the first one working.
+
+---
+
+## On NixOS Rime, and moving an encrypted machine to it
+
+**The same disk.** The NixOS installer (`docs/nixos/installer.md`) writes the
+layout above unchanged: ESP, ext4 `rime-boot` as `/boot`, the 1 MiB BIOS boot
+partition 4, LUKS2 `RIMEROOT` holding btrfs `rime-root` (now with the `@nixos`,
+`@nix` and `@home` subvolumes). The recovery key is made and shown the same way,
+by the same `rime-luks-enroll`, which NixOS ships in `rime-libexec`
+(`nix/pkgs/rime-libexec.nix`) rather than at `/usr/libexec`.
+
+**Unlocking.** The toplevel is one generic build, so it names no volume: the
+machine's `rd.luks.uuid=`, `rd.luks.name=` (and the keymap arguments) live in
+`/var/lib/rime/host.toml` `[boot] kernel_params`, and the boot hook writes them
+into every menu entry. `rime.luks` (`nix/modules/luks.nix`) puts dm-crypt,
+`systemd-cryptsetup` and its generator into the systemd initrd, which opens the
+volume as `/dev/mapper/luks-<uuid>`; `rime.rootfs` mounts `/boot` from
+host.toml's `[boot] device` (`docs/nixos/bridge.md`). The prompt, the keymap
+rules and the recovery key at that prompt are the ones described above.
+
+**TPM.** The initrd unseals a `systemd-tpm2` token by itself
+(`nix/modules/luks-tpm.nix`) and asks only when the TPM refuses. PCR 7 is the
+same on NixOS as on bootc Rime while shim, GRUB and the MOK stay the same
+(measured in `nix/probe/ovmf/tpm`), so moving to NixOS needs no re-enrolment.
+When PCR 7 does change, `sudo systemctl start
+rime-luks-tpm-reenrol@<luks-uuid>.service` re-binds the TPM slot through
+`rime-luks-enroll --tpm-only`, which never touches the passphrase or recovery
+slots and fails if they changed. **`rime-luks-enroll` without `--tpm-only` on a
+volume that already has a recovery key refuses unless `--replace-recovery` is
+given**, and that flag means what it says: a new key is written and the old one
+stops opening the volume. (On bootc every run rotated the key silently; that is
+what the refusal stops. p2-gates T3.)
+
+**Moving an encrypted bootc machine (`rime migrate`).** The volume, its
+passphrase, its recovery key and its TPM slot are kept: the bridge writes the
+new system inside the opened volume, carries the `rd.luks.*` arguments from the
+running kernel's command line into host.toml, and records the `rime-boot`
+partition as `[boot] device`. Before anything is written, `start`'s backup takes
+the machine's keys off the disk: `keys/luks-header.img` (`cryptsetup
+luksHeaderBackup`, read back with `luksDump`) and `rime backup`'s keys. The
+recovery key is **not** exported, because bootc never stored it (the installer
+showed it once); the header backup plus the passphrase is what restores access.
+`check` refuses a LUKS root it cannot see open (`root-locked`) and a non-`us`
+unlock keymap until that is proven (`luks-keymap`). Proven in the bridge's OVMF
+lab with Secure Boot on: the installer's encrypted layout, the passphrase typed
+in the bootc initrd and then in the NixOS initrd, back to bootc and to NixOS
+again (`nix/probe/ovmf/bridge`, kind `L`; evidence
+`/var/lab/rime-nix/artifacts/bridge2/L/`).
 
 ---
 
