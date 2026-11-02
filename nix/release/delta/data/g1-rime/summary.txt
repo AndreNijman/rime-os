@@ -1,0 +1,33 @@
+paths added 31, NAR 0.068 GB
+full zstd -3 (shipped)    0.028 GB
+full zstd -19 --long=27   0.020 GB
+delta (--patch-from)      0.003 GB  (15.9 % of full)
+  same-name         30 paths  full 0.009 GB  delta 0.003 GB
+  same-package       1 paths  full 0.011 GB  delta 0.000 GB
+largest 25 after delta (MB full -> MB delta, window log):
+        8.3 ->       3.2  w27  same-name     rimed-0.1.0
+       11.5 ->       0.0  w27  same-package  rime-shell-0-unstable-8932539
+        0.5 ->       0.0  w27  same-name     system-path
+        0.0 ->       0.0  w27  same-name     etc
+        0.0 ->       0.0  w27  same-name     system-units
+        0.1 ->       0.0  w27  same-name     nixos-system-rime-vm-26.11.20261030.1c89083
+        0.0 ->       0.0  w27  same-name     dbus-1
+        0.0 ->       0.0  w27  same-name     user-units
+        0.0 ->       0.0  w27  same-name     rime-gaming-wrapped
+        0.0 ->       0.0  w27  same-name     etc-pam-environment
+        0.0 ->       0.0  w27  same-name     set-environment
+        0.0 ->       0.0  w27  same-name     rime-shell-autostart
+        0.0 ->       0.0  w27  same-name     unit-rime-lid.service
+        0.0 ->       0.0  w27  same-name     gamemode.ini
+        0.0 ->       0.0  w27  same-name     desktops
+        0.0 ->       0.0  w27  same-name     unit-rime-update-check.service
+        0.0 ->       0.0  w27  same-name     rime-gaming-session-entry
+        0.0 ->       0.0  w27  same-name     unit-rime-gc.service
+        0.0 ->       0.0  w27  same-name     unit-polkit.service
+        0.0 ->       0.0  w27  same-name     unit-dbus-broker.service
+        0.0 ->       0.0  w27  same-name     etc-profile
+        0.0 ->       0.0  w27  same-name     etc-zshenv
+        0.0 ->       0.0  w27  same-name     unit-gamemoded.service
+        0.0 ->       0.0  w27  same-name     unit-dbus-broker.service
+        0.0 ->       0.0  w27  same-name     X-Restart-Triggers-gamemoded
+paths with more than one candidate tried: 2; max window log: 27
