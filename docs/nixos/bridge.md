@@ -59,12 +59,13 @@ setting before and after (only the order of two tmpfiles rules changed:
 over the **exact bytes** of `manifest.json`; `manifest.json` names every other file (store, registration, preview) by
 sha256. The key is the one the bootc image ships at `/usr/share/rime-os/trust/nixos-bridge-payload.pub`, one line
 `<key name>:<base64 of the 32-byte public key>`, and the names in the two files must agree. This is byte for byte the
-format the readiness release's `rime migrate start` checks before it runs the bridge (`rimed/rime/src/nixos_bridge.rs`,
-`openssl pkeyutl -verify -pubin -keyform DER -rawin`, draft PR rime-os #137), and the bridge checks it a second time
-itself (`verify_payload`, pure Python RFC 8032, because it runs with Fedora's python and nothing from /nix). Refusals,
-each by name: `payload-key-missing` (the image has no key file: no payload is installed), `payload-key-bad`,
-`payload-unsigned`, `payload-key-untrusted` (signed by a key of another name; the bootc wrapper says
-`payload-signature-bad` for the same case and runs first), `payload-signature-bad`, `payload-corrupt`.
+format `openssl pkeyutl -verify -pubin -keyform DER -rawin` accepts (what `payload-sign.sh` runs after signing). The
+bridge is the ONLY verifier: the readiness release's `rime migrate` (`rimed/rime/src/nixos_bridge.rs`, draft PR rime-os
+#137 at 37a5f9a89) execs `/usr/libexec/rime-migrate` with no gate of its own (an earlier draft checked it in Rust too,
+and that check was dropped there so the two could never disagree). `verify_payload` is pure Python RFC 8032, because
+the bridge runs with Fedora's python and nothing from /nix. Refusals, each by name: `payload-key-missing` (the image
+has no key file: no payload is installed), `payload-key-bad`, `payload-unsigned`, `payload-key-untrusted` (signed by a
+key of another name), `payload-signature-bad`, `payload-corrupt`.
 
 The producer is `nix/pkgs/rime-bridge/payload-sign.sh` (installed as `share/rime-bridge/payload-sign.sh`): it takes a
 Nix-format secret key (`nix key generate-secret` output, seed and public half), signs with OpenSSL, reads the
@@ -97,7 +98,15 @@ sign a NixOS store path.
 `check --payload P --explain` runs the payload's own `rime-hostlayer carry --plan` (from `preview.tar`, which the
 signature covers) against an empty root, with the machine's real `/` and `/proc/cmdline`: the user sees what will not
 come across before anything is written. `start` prints the same report first and refuses (`carry-refused`) if the plan
-fails.
+fails. A payload without `preview.tar` is refused by `start` too (`payload-no-preview`, before
+anything is mounted): the report is never optional. (Until the verifier pass, `start` skipped the report silently when
+the payload had no preview.)
+
+The commands, not only their helpers, are tested (`test_bridge_d2.Commands`): `start` refuses an unsigned, a
+foreign-key and a tampered payload, and one with no preview, before it mounts or writes anything; `check --explain`
+refuses (`carry-refused`) when the plan fails and still prints it; `key-export` refuses the disk whose keys it exports.
+Mutants `start-unverified`, `start-without-preview`, `check-carry-refusal-dropped`, `key-export-same-disk`,
+`manifest-paths-unchecked`, `ed25519-y-only` (a negated S: same y, other x) are killed by `bridge-unit`.
 
 ### What `check` reads of the EFI grub.cfg (and why katana may read `boot-chain-unverified`)
 
@@ -175,7 +184,10 @@ exist yet).
 ## Handover (outside this branch's scope)
 
 - **Readiness release (bootc PR to rime-os main):** install `share/rime-bridge/rime-migrate` as
-  `/usr/libexec/rime-migrate` and wire `rime migrate`; make `rime update` refuse while
+  `/usr/libexec/rime-migrate` and wire `rime migrate`. **Re-copy it from this branch before that PR merges:** the copy
+  on draft #137 (`files/system/libexec/rime-migrate` at 37a5f9a89) predates `write_boot_table` (it still truncates
+  carry's host.toml, so an encrypted machine loses `rd.luks.*` and does not unlock), `preview_extract` (check crashes
+  on a payload's unit masks) and `start`'s mandatory preview; its copies of `test_bridge*.py` need the same refresh; make `rime update` refuse while
   `/var/lib/rime/nixos-bridge/state.json` exists (the old side must not stage over a bridged disk); a Rust
   `rime backup key export` verb can call `rime-migrate key-export`.
 - **Release pipeline:** generate `rime-bridge-payload-1` once (above), build `preview.tar` (the payload's

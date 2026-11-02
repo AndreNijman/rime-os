@@ -60,6 +60,13 @@ let
     [ "repair-e-deletes" "rime-bridge.py" ''s/            os.rename(src, dst)/            shutil.rmtree(src)/'' "the trial's /state deleted, not archived" ]
     [ "repair-e-exdev-unchecked" "rime-bridge.py" ''s/            if tree_sums(src) != tree_sums(dst):/            if False:/; s/            run(\["cp", "-a", "--reflink=auto", src, dst\])/            os.makedirs(dst)/'' "an archive copy removed the original unverified" ]
     [ "trial-top-not-pending" "rime-bridge.py" ''s/        m\["trial_top"\] = \[n for n in TRIAL_TOP if os.path.lexists(os.path.join(top, n))\]/        m["trial_top"] = []/; s/"top": list((facts.get("migration") or {}).get("trial_top", \[\]))/"top": []/'' "start runs with the trial's trees still in the top level" ]
+    # verify-bridge2: the commands call their gates (not only the helpers), and the verifier compares x as well as y.
+    [ "start-unverified" "rime-bridge.py" ''s/^    man = verify_payload(a.payload)$/    man = json.load(open(os.path.join(a.payload, "manifest.json")))/'' "start installs an unsigned or tampered payload" ]
+    [ "start-without-preview" "rime-bridge.py" ''s/^    rc, text = carry_preview(a.payload, man)$/    rc, text = carry_preview(a.payload, man) if "preview" in man else (0, "")/'' "start begins without showing the left-behind report" ]
+    [ "check-carry-refusal-dropped" "rime-bridge.py" ''s/                if rc:$/                if False:/'' "check says bridgeable when the carry plan fails" ]
+    [ "key-export-same-disk" "rime-bridge.py" ''s/    if b.get("disk") and b\["disk"\] == (facts.get("root") or {}).get("disk"):/    if False:/'' "key-export writes the keys onto the disk they unlock" ]
+    [ "manifest-paths-unchecked" "rime-bridge.py" ''s/    if not re.fullmatch(r"\/nix\/store\/\[0-9a-z\]{32}-\[^\/\]+", man\["toplevel"\]) or not re.fullmatch(/    if False and not re.fullmatch(/'' "a signed toplevel outside /nix/store chrooted into" ]
+    [ "ed25519-y-only" "rime-bridge.py" ''s/    return (lhs\[0\] \* rhs\[2\] - rhs\[0\] \* lhs\[2\]) % _P == 0 and /    return /'' "a negated S (same y, other x) accepted" ]
   ];
   hlMutants = [
     [ "hostlayer-no-boot" "rime-hostlayer.py" ''s/"mount", "luks", "boot"}/"mount", "luks"}/'' "[boot] table refused" ]

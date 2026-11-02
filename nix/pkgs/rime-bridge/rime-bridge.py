@@ -79,9 +79,9 @@ TRIAL_TOP = ("composefs", "state")
 BOOT_PART_FSTYPES = ("ext4",)
 # rime backup's key store (rimed/rime-backup-core/src/keys.rs SYSTEM_ROOT): keys/<uid>.key, recipients/<uid>.pub.
 BACKUP_KEYS_ROOT = "/var/lib/rime-backup"
-# The payload's manifest is signed (docs/nixos/bridge.md "The payload is signed"). The format is the one the bootc side's
-# `rime migrate start` checks before it runs this program (rimed/rime/src/nixos_bridge.rs in the readiness release),
-# byte for byte, so either verifier accepts exactly what the other does:
+# The payload's manifest is signed (docs/nixos/bridge.md "The payload is signed"). This program is the only verifier
+# (the readiness release's `rime migrate`, rimed/rime/src/nixos_bridge.rs, execs it with no check of its own); the
+# format is what payload-sign.sh writes and `openssl pkeyutl -verify -rawin` accepts:
 #   PAYLOAD_KEY_FILE   one line "<name>:<base64 of the 32-byte ed25519 public key>", shipped in the bootc image
 #   manifest.json.sig  one line "<name>:<base64 of the 64-byte ed25519 signature>" over the exact bytes of
 #                      manifest.json, signed by the key of the same name
@@ -1582,12 +1582,13 @@ def cmd_start(a):
         sys.stdout.write(report(facts, c, refusals, notes, True))
         return EXIT_REFUSED
     man = verify_payload(a.payload)
-    if "preview" in man:
-        rc, text = carry_preview(a.payload, man)
-        sys.stdout.write("the /etc carry (preview; the real one runs below):\n"
-                         + "".join(f"  | {ln}\n" for ln in text.splitlines()))
-        if rc:
-            raise Refused("carry-refused", f"rime-hostlayer carry --plan exited {rc}; nothing was written")
+    # The left-behind report comes first, always (D2): a payload with no preview.tar is refused by name
+    # (payload-no-preview, raised by carry_preview) instead of starting without showing what stays behind.
+    rc, text = carry_preview(a.payload, man)
+    sys.stdout.write("the /etc carry (preview; the real one runs below):\n"
+                     + "".join(f"  | {ln}\n" for ln in text.splitlines()))
+    if rc:
+        raise Refused("carry-refused", f"rime-hostlayer carry --plan exited {rc}; nothing was written")
     root = facts["root"]
     dev = root["luks"]["mapper"] if root.get("luks") else root["device"]
     state = {"started": datetime.datetime.now(datetime.timezone.utc).isoformat(), "topology": c, "steps": []}

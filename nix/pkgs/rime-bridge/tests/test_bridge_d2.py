@@ -6,11 +6,13 @@ Same loader as test_bridge.py: RIME_MIGRATE names the program under test (a muta
 """
 
 import base64
+import contextlib
 import copy
 import errno
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import pathlib
 import os
@@ -279,6 +281,10 @@ class Ed25519(unittest.TestCase):
         # S >= L (malleability) is refused even though [S]B would still match
         s = int.from_bytes(sig2[32:], "little") + B._L
         self.assertFalse(B.ed25519_verify(pub2, h("72"), sig2[:32] + s.to_bytes(32, "little")))
+        # S' = L - S makes [S']B = -(R + [k]A): the same y, the other x. Only the x comparison refuses it
+        # (mutant ed25519-y-only).
+        neg = (B._L - int.from_bytes(sig2[32:], "little")) % B._L
+        self.assertFalse(B.ed25519_verify(pub2, h("72"), sig2[:32] + neg.to_bytes(32, "little")))
 
     def test_the_product_trusts_the_image_key_file(self):
         # The shipped program trusts the key file the bootc image carries (the readiness release), nothing compiled in.
@@ -436,6 +442,20 @@ class Payload(unittest.TestCase):
         with self.assertRaises(B.Refused) as cm:
             B.verify_payload(self.d, (TEST_KEY,))
         self.assertEqual(cm.exception.name, "payload-signature-bad")
+
+    def test_signed_toplevel_must_be_a_store_path(self):
+        # Defence behind the signature: a signed manifest whose toplevel is not a /nix/store path is still refused
+        # (start chroots into it and runs its activate) (mutant manifest-paths-unchecked).
+        make_payload(self.d)
+        p = os.path.join(self.d, "manifest.json")
+        m = json.loads(pathlib.Path(p).read_text())
+        m["toplevel"] = "/etc/../nix/store/" + "b" * 32 + "-x"
+        raw = json.dumps(m, indent=1).encode()
+        pathlib.Path(p).write_bytes(raw)
+        pathlib.Path(self.d, "manifest.json.sig").write_text(sign_manifest(raw) + "\n")
+        with self.assertRaises(B.Refused) as cm:
+            B.verify_payload(self.d, (TEST_KEY,))
+        self.assertEqual(cm.exception.name, "payload-corrupt")
 
     def test_no_key_file_refuses_every_payload(self):
         # The product with no nixos-bridge-payload.pub (a release before the key ships): nothing is installed.
@@ -697,6 +717,128 @@ class ArchiveTrialTop(unittest.TestCase):
         c, refusals, notes = B.evaluate(f)
         self.assertEqual(c["topology"], "E")
         self.assertTrue(any("/composefs (btrfs top level)" in n and "/state" in n for n in notes), notes)
+
+
+
+# ── the commands: check, start and key-export call their gates (not only the helpers do) ─────────────────────────
+
+class Commands(unittest.TestCase):
+    """cmd_start verifies the payload's signature before it mounts or writes anything; cmd_check refuses when the
+    carry preview fails; cmd_key_export refuses the disk whose keys it exports. Mutants start-unverified,
+    check-carry-refusal-dropped, key-export-same-disk (nix/tests/bridge.nix)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.keyfile = os.path.join(self.d, "nixos-bridge-payload.pub")
+        pathlib.Path(self.keyfile).write_text(TEST_KEY + "\n")
+        self.saved = {n: getattr(B, n) for n in ("gather", "collect_live", "backup_facts", "PAYLOAD_KEY_FILE",
+                                                  "mount", "run", "STATE", "BACKUP_KEYS_ROOT", "wait_units")}
+        B.PAYLOAD_KEY_FILE = self.keyfile
+        B.STATE = os.path.join(self.d, "state")
+        B.BACKUP_KEYS_ROOT = os.path.join(self.d, "no-backup-keys")
+        self.facts = luks_a()
+        self.facts["existing_subvols"] = []
+        self.facts["backup"] = {"path": os.path.join(self.d, "backup"), "exists": True, "disk": "/dev/vdc",
+                                "free_bytes": 100 * GB}
+        B.gather = lambda a: copy.deepcopy(self.facts)
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(B, n, v)
+        shutil.rmtree(self.d)
+
+    def forbid_writes(self):
+        def touched(*a, **k):
+            raise AssertionError(f"start touched the machine before the payload was verified: {a}")
+        B.mount = B.run = B.wait_units = touched
+
+    def start(self, payload):
+        a = B.argparse.Namespace(cmd="start", yes=True, backup=self.facts["backup"]["path"], payload=payload, disk=[])
+        with self.assertRaises(B.Refused) as cm, contextlib.redirect_stdout(io.StringIO()):
+            B.cmd_start(a)
+        self.assertFalse(os.path.exists(B.STATE), "start wrote its state before the payload was verified")
+        return cm.exception.name
+
+    def test_start_refuses_an_unsigned_payload(self):
+        p = os.path.join(self.d, "payload")
+        make_payload(p, sign=False)
+        self.forbid_writes()
+        self.assertEqual(self.start(p), "payload-unsigned")
+
+    def test_start_refuses_a_payload_signed_by_another_key(self):
+        p = os.path.join(self.d, "payload")
+        make_payload(p, sign=False)
+        raw = pathlib.Path(p, "manifest.json").read_bytes()
+        other = hashlib.sha256(b"another TEST key").digest()
+        pathlib.Path(p, "manifest.json.sig").write_text(sign_manifest(raw, seed=other, name="rime-other-1") + "\n")
+        self.forbid_writes()
+        self.assertEqual(self.start(p), "payload-key-untrusted")
+
+    def test_start_refuses_a_tampered_payload(self):
+        p = os.path.join(self.d, "payload")
+        make_payload(p)
+        with open(os.path.join(p, "manifest.json"), "ab") as f:
+            f.write(b" ")
+        self.forbid_writes()
+        self.assertEqual(self.start(p), "payload-signature-bad")
+
+    def test_start_refuses_a_payload_without_the_left_behind_report(self):
+        # Signed and intact, but no preview.tar: start must not begin without showing what stays behind (D2).
+        p = os.path.join(self.d, "payload")
+        make_payload(p)
+        self.forbid_writes()
+        self.assertEqual(self.start(p), "payload-no-preview")
+
+    def preview(self, rc):
+        tree = os.path.join(self.d, f"tree{rc}")
+        os.makedirs(os.path.join(tree, "system/etc"))
+        pathlib.Path(tree, "greetd-config.toml").write_text("[terminal]\nvt = 1\n")
+        pathlib.Path(tree, "rime-hostlayer").write_text(
+            f"import sys\nprint('LEFT BEHIND (1; every entry is in report.json)')\nsys.exit({rc})\n")
+        tar = os.path.join(self.d, f"preview{rc}.tar")
+        with tarfile.open(tar, "w") as tf:
+            for n in sorted(os.listdir(tree)):
+                tf.add(os.path.join(tree, n), n)
+        p = os.path.join(self.d, f"payload{rc}")
+        make_payload(p, preview=tar)
+        return p
+
+    def check(self, payload):
+        a = B.argparse.Namespace(cmd="check", explain=True, json=False, backup=None, disk=[], payload=payload)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = B.cmd_check(a)
+        return rc, out.getvalue()
+
+    def test_check_shows_the_left_behind_report(self):
+        rc, out = self.check(self.preview(0))
+        self.assertEqual(rc, B.EXIT_OK, out)
+        self.assertIn("LEFT BEHIND", out)
+
+    def test_check_refuses_when_the_carry_plan_fails(self):
+        rc, out = self.check(self.preview(4))
+        self.assertEqual(rc, B.EXIT_REFUSED, out)
+        self.assertIn("carry-refused", out)
+        self.assertIn("LEFT BEHIND", out)
+
+    def key_export(self, disk):
+        B.collect_live = lambda: luks_a()
+        B.backup_facts = lambda p, devs=None: {"path": p, "exists": True, "disk": disk, "free_bytes": 100 * GB}
+        B.run = FakeRun(LUKS_UUID)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return B.cmd_key_export(B.argparse.Namespace(cmd="key-export", to=self.d))
+
+    def test_key_export_refuses_the_disk_it_exports_from(self):
+        with self.assertRaises(B.Refused) as cm:
+            self.key_export("/dev/vda")
+        self.assertEqual(cm.exception.name, "backup-same-disk")
+        self.assertFalse([n for n in os.listdir(self.d) if n.startswith("rime-keys-")])
+
+    def test_key_export_to_another_disk(self):
+        self.assertEqual(self.key_export("/dev/vdc"), B.EXIT_OK)
+        out = [n for n in os.listdir(self.d) if n.startswith("rime-keys-")]
+        self.assertEqual(len(out), 1)
+        self.assertTrue(os.path.isfile(os.path.join(self.d, out[0], "luks-header.img")))
 
 
 if __name__ == "__main__":
