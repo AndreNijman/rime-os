@@ -230,8 +230,10 @@ in
       with subtest("host.toml: hostname, timezone, locale, keymap"):
           toml = installer.succeed("cat /mnt/@nixos/var/lib/rime/host.toml")
           print(toml)
+          vendor = installer.succeed("awk -F': *' '/^vendor_id/ { print $2; exit }' /proc/cpuinfo").strip()
+          mc = {"GenuineIntel": "intel", "AuthenticAMD": "amd"}.get(vendor, "both")
           for line in ('hostname = "rime-check"', 'timezone = "Australia/Perth"', 'LANG = "en_AU.UTF-8"',
-                       'xkb_layout = "de"', 'layout = "bls"'):
+                       'xkb_layout = "de"', 'layout = "bls"', f'microcode = "{mc}"'):
               assert line in toml, (line, toml)
 
       with subtest("the account: a password, wheel, a home on @home"):

@@ -7,9 +7,15 @@
 #                     variant; the hook program cannot run a program at all. Negative controls in the same check:
 #                     the same system with NixOS's GRUB installer (rime.boot off) and with an activation snippet
 #                     calling `bootctl install` must both be flagged.
-#   boot-microcode    the real hook, run on the shipped toplevel in both layouts, writes an entry whose `initrd`
-#                     file starts with Intel's and AMD's early microcode cpios; the same system with microcode off
-#                     must show neither.
+#   boot-microcode    the real hook, run on the shipped toplevel in both layouts, writes an entry that loads Intel's
+#                     and AMD's early microcode cpios as their own initrd files before the generation's initrd (which
+#                     carries none); host.toml [boot] microcode picks the vendors; with no bootspec extension the
+#                     entry has no microcode; the mutant (cpios prepended into the initrd, NixOS's default) fails.
+#   boot-esp-budget   the fresh-install ESP (installer/rime-install-nixos.sh NIXOS_ESP_MIB) holds rime.boot.
+#                     configurationLimit + 1 generations (the peak of an update: the new one is copied before the
+#                     oldest is removed) at kernel-boot-budget's per-generation ceiling, the microcode files once,
+#                     Fedora's shim + GRUB and the hook's floor. Mutant: configurationLimit = 20 must not fit. A
+#                     smaller boot filesystem (a migrated machine's /boot) is the hook's prune-to-fit (boot-hook-unit).
 #   luks-boot         nix/modules/luks.nix: a LUKS2 root with a fixed UUID is opened in the systemd initrd from
 #                     rd.luks.uuid= alone (no crypttab entry), the passphrase is typed at the console prompt, / is
 #                     /dev/mapper/luks-<uuid>, and the keymap passthrough reaches the initrd's vconsole.conf.
@@ -17,7 +23,8 @@
 #                     carries a detached MOK signature made by sign-detached.sh with a deterministic TEST key, the
 #                     VM boots that image, and its /sys/kernel/btf/vmlinux is byte for byte the BTF kernel-gate
 #                     checked (K1 carries over to the signed derivation).
-{ pkgs, self }:
+# settle: passed to kernel.nix (the scx attach window; `settle = 10` is the K2 mutant).
+{ pkgs, self, settle ? 60 }:
 
 let
   inherit (pkgs) lib;
@@ -30,14 +37,32 @@ let
   # Negative controls: must be flagged by the scan / show no microcode.
   withNixosGrub = extend { rime.boot.enable = lib.mkForce false; };
   withBootctl = extend { system.activationScripts.rime-scan-mutant = "bootctl install --no-variables"; };
-  noMicrocode = extend {
-    hardware.cpu.intel.updateMicrocode = lib.mkForce false;
-    hardware.cpu.amd.updateMicrocode = lib.mkForce false;
+  noMicrocode = extend { boot.bootspec.extensions."org.rimeos.microcode.v1" = lib.mkForce { }; };
+  # The mutant: NixOS's default layout (both cpios prepended INTO the initrd, no split). The split check must fail it.
+  prepended = extend {
+    boot.bootspec.extensions."org.rimeos.microcode.v1" = lib.mkForce { };
+    hardware.cpu.intel.updateMicrocode = lib.mkForce true;
+    hardware.cpu.amd.updateMicrocode = lib.mkForce true;
   };
+
+  rimeCfg = self.nixosConfigurations.rime.config;
+  ucode = rimeCfg.boot.bootspec.extensions."org.rimeos.microcode.v1";
+  # nix/tests/kernel.nix kernel-boot-budget: one generation's boot image + initrd stays under this.
+  perGenerationMiB = 130;
+  # Fedora's shim, GRUB and MokManager in EFI/fedora and EFI/BOOT (2 x 6.1 MB measured, nix/probe/ovmf) + grub2/.
+  loaderMiB = 20;
+  espBudget = limit: ''
+    esp=$(sed -n 's/^NIXOS_ESP_MIB=\([0-9]*\)$/\1/p' ${../../installer/rime-install-nixos.sh})
+    test -n "$esp"
+    uc=$(( ($(stat -L -c %s ${ucode.intel}) + $(stat -L -c %s ${ucode.amd}) + 1048575) / 1048576 ))
+    need=$(( (${toString limit} + 1) * ${toString perGenerationMiB} + uc + ${toString loaderMiB} + ${toString rimeCfg.rime.boot.reserveMiB} ))
+    echo "configurationLimit ${toString limit}: (${toString limit} + 1) x ${toString perGenerationMiB} MiB + microcode $uc MiB + shim/GRUB ${toString loaderMiB} MiB + floor ${toString rimeCfg.rime.boot.reserveMiB} MiB = $need MiB; ESP $esp MiB"
+    test "$need" -le "$esp"
+  '';
 
   luksUuid = "5b1f0c2e-7d4a-4e8b-9c3f-a1b2c3d4e5f6";
 
-  kernelChecks = import ./kernel.nix { inherit pkgs self; };
+  kernelChecks = import ./kernel.nix { inherit pkgs self settle; };
 
   # A throwaway RSA-2048 key + self-signed certificate, deterministic (the kernel-sign check's recipe, another seed).
   # TEST ONLY: lives in this check's store paths, never committed, never the Rime MOK.
@@ -94,9 +119,29 @@ in
 
   boot-microcode = pkgs.runCommand "rime-boot-microcode" { nativeBuildInputs = [ pkgs.python3 ]; } ''
     set -euo pipefail
-    python3 -I ${./boot-microcode.py} ${hook} ${shipped} both | tee $out
-    echo "--- negative control: microcode off" | tee -a $out
-    python3 -I ${./boot-microcode.py} ${hook} ${noMicrocode} none | tee -a $out
+    t=${./boot-microcode.py}
+    python3 -I $t ${hook} ${shipped} unset intel,amd | tee $out
+    for v in intel amd both none; do
+      case $v in both) e=intel,amd;; *) e=$v;; esac
+      echo "--- host.toml [boot] microcode = $v" | tee -a $out
+      python3 -I $t ${hook} ${shipped} $v $e | tee -a $out
+    done
+    echo "--- negative control: no microcode extension" | tee -a $out
+    python3 -I $t ${hook} ${noMicrocode} unset none | tee -a $out
+    echo "--- mutant: microcode prepended into the initrd (NixOS's default); the check must FAIL it" | tee -a $out
+    if python3 -I $t ${hook} ${prepended} unset intel,amd >> $out 2>&1; then
+      echo "MUTANT SURVIVED" | tee -a $out; exit 1
+    fi
+    echo "mutant failed, as it must" | tee -a $out
+  '';
+
+  boot-esp-budget = pkgs.runCommand "rime-boot-esp-budget" { } ''
+    set -euo pipefail
+    { ${espBudget rimeCfg.rime.boot.configurationLimit} } | tee $out
+    echo "PASS: the shipped limit fits the fresh-install ESP" | tee -a $out
+    echo "--- mutant: configurationLimit = 20" | tee -a $out
+    if ( ${espBudget 20} ) >> $out 2>&1; then echo "MUTANT SURVIVED" | tee -a $out; exit 1; fi
+    echo "mutant does not fit, as it must not" | tee -a $out
   '';
 
   luks-boot = pkgs.testers.runNixOSTest {

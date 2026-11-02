@@ -9,6 +9,7 @@
 # The layout is a per-machine fact (D2 host layer): /var/lib/rime/host.toml `[boot] layout = "bls" | "custom-cfg"`
 # wins over rime.boot.layout, and "auto" detects ostree's /boot/loader symlink. Per-machine kernel arguments (LUKS
 # rd.luks.uuid=, rd.vconsole.keymap=, wave 2) come from host.toml `[boot] kernel_params = [ ... ]`.
+# host.toml `[boot] microcode = "intel" | "amd" | "both" | "none"` picks the early microcode every entry loads.
 { config, lib, pkgs, ... }:
 
 let
@@ -104,12 +105,20 @@ in
     boot.loader.grub.enable = lib.mkForce false;
     boot.loader.systemd-boot.enable = lib.mkForce false;
 
-    # CPU microcode, early (wave-1 handover): one generic toplevel boots every machine (D9), so both vendors'
-    # update cpios are prepended to the initrd (boot.initrd.prepend, first in the file); the kernel's early loader
-    # takes the one matching the CPU. The hook copies <toplevel>/initrd whole, so the entry's `initrd` line names
-    # a file that starts with them (checks.boot-microcode). A host that knows its vendor may turn the other off.
-    hardware.cpu.intel.updateMicrocode = lib.mkDefault true;
-    hardware.cpu.amd.updateMicrocode = lib.mkDefault true;
+    # CPU microcode, early. One generic toplevel boots every machine (D9), so the toplevel names BOTH vendors'
+    # early-update cpios (nixpkgs' own files, unchanged) in its bootspec, and the hook loads them as separate
+    # `initrd` files before the generation's initrd. The kernel's early loader reads the uncompressed cpios at the
+    # start of the concatenated image (nix/probe/ovmf/mok, boots U1/U2). host.toml [boot] microcode =
+    # "intel" | "amd" | "both" | "none" picks per machine (the installer writes the CPU's vendor). Split rather than
+    # prepended (boot.initrd.prepend, NixOS's default) so a microcode file is stored ONCE on the ESP for every
+    # generation and a machine carries only its vendor's (15 MB for Intel, 0.3 MB for AMD, per generation before;
+    # docs/nixos/boot-matrix.md "ESP budget"). checks.boot-microcode proves it on the shipped toplevel.
+    hardware.cpu.intel.updateMicrocode = lib.mkDefault false;
+    hardware.cpu.amd.updateMicrocode = lib.mkDefault false;
+    boot.bootspec.extensions."org.rimeos.microcode.v1" = {
+      intel = "${pkgs.microcode-intel}/intel-ucode.img";
+      amd = "${pkgs.microcode-amd}/amd-ucode.img";
+    };
 
     environment.systemPackages = [ cli ];
     system.build.rimeBootHook = hook;

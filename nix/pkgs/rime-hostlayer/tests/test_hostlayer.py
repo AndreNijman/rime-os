@@ -309,7 +309,8 @@ class HostTomlTest(unittest.TestCase):
                         '[keyboard]\nxkb_layout = "us\\"\\nOption"\n', 'nonsense = 1\n',
                         '[boot]\nlayout = "grub"\n', '[boot]\nkernel_params = "rd.luks.uuid=x"\n',
                         '[boot]\nkernel_params = ["a b"]\n', '[boot]\nkernel_params = ["a=$(id)"]\n',
-                        '[boot]\nlayout = "systemd-boot"\n', '[boot]\nentries = 3\n'):
+                        '[boot]\nlayout = "systemd-boot"\n', '[boot]\nentries = 3\n',
+                        '[boot]\nmicrocode = "arm"\n', '[boot]\nmicrocode = true\n'):
                 write(f"{t}/h.toml", bad)
                 r = run("host", "validate", "--file", f"{t}/h.toml")
                 self.assertEqual(r.returncode, 1, bad)
@@ -323,6 +324,17 @@ class HostTomlTest(unittest.TestCase):
             self.assertIn('[boot]\nlayout = "custom-cfg"\nkernel_params = ["rd.luks.uuid=luks-0b1c", '
                           '"rd.vconsole.keymap=uk"]\n', r.stdout)
 
+
+    def test_the_boot_microcode_the_hook_reads_is_valid(self):
+        # nix/pkgs/rime-boot reads [boot] microcode (the installer writes the CPU's vendor); every value the hook
+        # takes is valid here and is written back by `host show`.
+        with tempfile.TemporaryDirectory() as t:
+            for v in ("both", "intel", "amd", "none"):
+                write(f"{t}/h.toml", f'[boot]\nlayout = "bls"\nmicrocode = "{v}"\nkernel_params = ["quiet"]\n')
+                r = run("host", "validate", "--file", f"{t}/h.toml")
+                self.assertEqual(r.returncode, 0, v + r.stdout + r.stderr)
+                r = run("host", "show", "--file", f"{t}/h.toml", check=0)
+                self.assertIn(f'[boot]\nlayout = "bls"\nmicrocode = "{v}"\nkernel_params = ["quiet"]\n', r.stdout)
 
     def test_the_boot_table_the_hook_reads_is_valid(self):
         # nix/pkgs/rime-boot reads [boot] layout + kernel_params (rd.luks.uuid= of a LUKS root, D9); the host layer

@@ -79,6 +79,9 @@ PATTERNS = {
 
 # [boot] layout values rime-boot reads (nix/modules/boot.nix rime.boot.layout, plus "auto").
 BOOT_LAYOUTS = ("auto", "bls", "custom-cfg")
+# [boot] microcode values rime-boot reads (nix/pkgs/rime-boot MICROCODE): which vendors' early-microcode cpios every
+# entry loads.
+BOOT_MICROCODE = ("both", "intel", "amd", "none")
 
 # Network filesystems (libmount's mnt_fstype_is_netfs, as systemd-fstab-generator uses it): such a mount waits for
 # the network and hangs from remote-fs.target, never from local-fs.target, and is never fsck'd.
@@ -173,6 +176,8 @@ def render_host_toml(host):
         out.append("[boot]")
         if boot.get("layout"):
             out.append(f"layout = {toml_str(boot['layout'])}")
+        if boot.get("microcode"):
+            out.append(f"microcode = {toml_str(boot['microcode'])}")
         if boot.get("kernel_params"):
             out.append("kernel_params = [" + ", ".join(toml_str(k) for k in boot["kernel_params"]) + "]")
         out.append("")
@@ -207,7 +212,9 @@ def validate_host(host):
         elif k == "kernel_params" and not (isinstance(v, list) and all(
                 isinstance(x, str) and matches("options", x) for x in v)):
             errs.append("boot.kernel_params is not a list of kernel parameters")
-        elif k not in ("layout", "kernel_params"):
+        elif k == "microcode" and v not in BOOT_MICROCODE:
+            errs.append(f"boot.microcode {v!r} is not one of {', '.join(BOOT_MICROCODE)}")
+        elif k not in ("layout", "kernel_params", "microcode"):
             errs.append(f"unknown key boot.{k}")
     h = host.get("host", {})
     if not isinstance(h, dict):
@@ -269,6 +276,9 @@ def validate_host(host):
             else:
                 errs += [f"boot.kernel_params {x!r} has a character the boot menu would expand or split"
                          for x in v if not matches("kernel_param", x)]
+        elif k == "microcode":
+            if v not in BOOT_MICROCODE:
+                errs.append(f"boot.microcode {v!r} is not one of {', '.join(BOOT_MICROCODE)}")
         else:
             errs.append(f"unknown key boot.{k}")
     for i, v in enumerate(host.get("luks", [])):
