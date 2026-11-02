@@ -101,6 +101,33 @@ Proven:
   sha256s equal the Intel cpio (15,237,120 B), the AMD cpio (307,200 B) and the initrd, in that order, through
   blscfg with three `initrd` lines (U1-bls) and through a menuentry with one line naming three files (U2-menu); the
   control with one file has exactly one piece (U3-control). `/var/lab/rime-nix/artifacts/secureboot/mok/split/`.
+- **Wave 4: the early loader itself, read from the guest** (same lab, `run.sh split` U1-U5 **5/5 PASS** 2026-11-03,
+  `/var/lab/rime-nix/artifacts/boot2/mok/split/`). U1/U2 now also assert the microcode file names in the bytes GRUB
+  handed the kernel (`AuthenticAMD.bin` and `GenuineIntel.bin`; U3: none), and the image size allows GRUB's 4-byte
+  padding of each file (4,973,393 B is 4,973,396 in the image). U4 boots U2's menu (three files on one `initrd`
+  line) with `-cpu host,-hypervisor` and `nokaslr`, starts QEMU stopped, and walks the loader with hardware
+  breakpoints over the gdbstub (addresses from the kernel's own `System.map`): `get_microcode_blob()` is called from
+  `load_ucode_intel_bsp()`, calls `find_microcode_in_initrd()`, and that returns `data=0xffff88804f075094
+  size=15,228,928`: exactly the size of `kernel/x86/microcode/GenuineIntel.bin` inside nixpkgs' `intel-ucode.img`, and
+  the 48 bytes at that address (read in QEMU's physical-memory mode) are byte for byte the file's first patch header
+  (rev 0x45, sig 0x650, date 0x05251999). U5, the same with the initrd alone, returns `data=0 size=0`. So the early
+  loader finds the microcode in the separate cpio GRUB loads before the initrd, the layout `rime-boot` writes.
+- **Why the wave-3 probe read "none"** (wave-4 input, secureboot problem 4): it looked for
+  `/kernel/x86/microcode/*.bin` in rootfs. nixpkgs' cpios hold that one file and **no directory entries**, and the
+  kernel's initramfs unpacker (`init/initramfs.c`) creates a file only inside a directory that already exists, so the
+  names never reach rootfs from these cpios, with or without a working loader. The early loader does not read rootfs:
+  it scans the raw image with `find_cpio_data()`. The probe now reads the raw image (`/sys/firmware/initrd`, kept by
+  `retain_initrd`).
+- **Why a VM never shows a loaded revision.** With the CPUID hypervisor bit set (any KVM guest by default),
+  `microcode_loader_disabled()` turns the loader off (`x86_hypervisor_present && !CONFIG_MICROCODE_DBG`,
+  `arch/x86/kernel/cpu/microcode/core.c`): R1 and U1-U3 report `hypervisor-flag=1` and no `Current revision` line.
+  Without the bit (U4/U5) the loader runs, but `get_microcode_blob()` still returns NULL (`mc=0`, recorded, not
+  asserted): `scan_microcode()` takes only a newer revision than the CPU's (`cur_rev >= mc_header->rev` skips), and
+  the guest reports the host's 0x43b, which is also the newest patch for this CPU (signature 0x906a3) in the blob.
+  KVM also ignores a guest's write to MSR 0x79, so no VM can show a revision being **applied**.
+  P3/HARDWARE: on katana, `dmesg | grep microcode` after the first NixOS boot (`Current revision` and, with a newer
+  blob than the firmware's, `updated early from ... to ...`). Today katana's firmware already runs 0x43b, the
+  newest in the pinned blob, so even katana will report no early update until either moves.
 - `boot-microcode`: the real hook on the shipped toplevel, both layouts, every `microcode` value, reads every file the
   entry names: the vendor cpios are wholly uncompressed cpio holding only their vendor's `.bin`, byte for byte the
   bootspec's; the last file is byte for byte `<toplevel>/initrd` and starts with **no** microcode; the boot
@@ -131,8 +158,23 @@ What one generation puts on the boot filesystem (measured 2026-11-02): the signe
   space is the root's; an encrypted bootc install has its own small ext4 `/boot` (that topology is refused by
   `rime migrate check` today, p2-gates D2). Either way the hook does not assume a size: prune-to-fit keeps the newest
   generations that fit and refuses only when the current, booted and pinned generations (130 MiB each at the
-  ceiling, plus the microcode once) do not. Prune-to-fit is proven in `boot-hook-unit` with the free space
-  simulated (`free_bytes` replaced by a fixed-size model); no VM fills a real ESP or `/boot` to the floor.
+  ceiling, plus the microcode once) do not. Prune-to-fit is proven twice: in `boot-hook-unit` with the free space
+  simulated (`free_bytes` replaced by a fixed-size model), and in `boot-esp-prune` on a real full ESP (below).
+- **`boot-esp-prune`** (wave 4, `nix/tests/boot.nix`): a 256 MiB FAT32 disk is the ESP at `/boot` (`mkfs.vfat -F
+  32`, so `statvfs` and ENOSPC are the kernel's), five generations whose initrds each carry a 28 MiB incompressible
+  pad (sizes measured in the VM: kernel 13.2 MiB, microcode 15.2 MiB, initrd 28.6 MiB + pad). Generation 1 is the
+  booted one and the oldest. Generations 1-3 install with nothing left out (free after 3: 56,798,720 B); generation
+  4 does not fit and the hook logs `generation 2 left out of the menu: /boot cannot hold its files as well (free 54.2
+  MiB, floor 32.0 MiB)`, removes 2's initrd and writes 4; generation 5 leaves out 3. Generation 1 (booted) is never
+  left out and its files stay. After every install every file every entry names is on the ESP with its source's
+  size, and `rime-boot check` agrees. PASS at `e94b69c6a` (`vm-test-run-rime-boot-esp-prune`). Mutants (each FAILS,
+  logs in `/var/lab/rime-nix/artifacts/boot2/logs/`): the hook never leaves a generation out (`if True:` for the
+  fits test) → generation 4's `switch-to-configuration boot` exits 1 with `[Errno 28] No space left on device`; the
+  booted generation treated like any other → "generation 1 left out".
+- **No separate Secure Boot boot of a pruned ESP (DECIDED-NOT-TO).** A pruned ESP is the layout the boot matrix
+  already boots through Fedora's shim and GRUB with Secure Boot on (B1-B10), with fewer entries; what pruning could
+  break is a file an entry still names, and `boot-esp-prune` checks every one of them by size and with `rime-boot
+  check` after each install. A boot through shim would add the firmware, not a new path through the hook.
 - `rime gc` removes generations from the profile; the hook then removes their files. A pinned generation always
   stays listed.
 
@@ -145,6 +187,33 @@ installer or the host layer), so one generation boots on any machine. `rime.luks
 builds its own configuration. The keymap reaches the initrd's `vconsole.conf` so the passphrase is typed with the
 user's layout. `luks-boot` proves this in the NixOS test VM (a fixed UUID, the passphrase typed at the console
 prompt); the matrix proves it through shim and GRUB.
+
+### rime luks rebind
+
+`rime luks status` says, per LUKS volume with a TPM slot, whether the slot still matches this boot's PCR 7 (`ok`, rc
+0) or was sealed to other values (`stale`, rc 1: a new Secure Boot key, a db/dbx update, a firmware change). `rime
+luks rebind` starts `rime-luks-tpm-reenrol@<uuid>.service` for each stale volume (the unit asks for the passphrase
+or recovery key through systemd's password agent, `rime-luks-enroll` re-seals the TPM slot and keeps the recovery
+key and passphrase slots byte for byte), then measures again. Its exit code is `failed == 0 && still.is_empty()`
+(`rimed/rime/src/luks.rs`): 0 only when every unit succeeded **and** every volume measures `ok` afterwards.
+
+- **`luks-tpm-rebind`** (wave 4, `nix/tests/luks-tpm.nix`): three arms replace the unit's `ExecStart` with a runtime
+  drop-in so that exactly one half fails: the unit succeeds but the slot stays stale → rc 1; the slot is re-sealed
+  but the unit fails → rc 1; the unit re-seals and succeeds → rc 0. PASS at `af5208599`. Mutants of the exit-code
+  line, each built in an isolated copy of the tree (`/var/lab/rime-nix/artifacts/boot2/logs/luks-mutants.txt`):
+  MUTANTS_RESULT
+- **Under Secure Boot after a real policy change** (OVMF TPM lab, `nix/probe/ovmf/tpm/run.sh run rebind-sb`; wave 4):
+  OVMF with Secure Boot on, Fedora 45's shim and GRUB, the NixOS kernel signed by a TEST MOK, swtpm, one disk and
+  one varstore carried from boot to boot. S1 seals a TPM slot to the boot's PCR 7; S2 unseals it with no prompt; a
+  throwaway TEST certificate is then appended to **db** in the varstore (`virt-fw-vars --add-db`, what a firmware
+  update or an owner's key does); S3: PCR 7 moved, the slot is refused and the passphrase is typed, `rime luks status`
+  says `stale` (rc 1), `rime luks rebind` (its own unit; the driver answers the one ask) re-seals: `re-bound`, kept
+  slots `unchanged`, rc 0, status `ok` afterwards; S4 unseals with no prompt under the new db, PCR 7 equal to S3's.
+  **4/4 PASS** (`/var/lab/rime-nix/artifacts/boot2/tpm/rebind-sb/`: PCR 7 `eaa882d1…` before, `87f86b52…` after).
+  Mutant `run mutant-rebind-skipped` (S3 only measures, nobody re-seals): S3 FAILS and S4 FAILS ("initrd asked 1
+  times, expected 0"), as it must.
+- **P3/HARDWARE:** katana's real PCR 7 under the real Rime MOK, its real db/dbx and its firmware; the real rebind on
+  real firmware after a real dbx update.
 
 ### Kernel lockdown under Secure Boot
 

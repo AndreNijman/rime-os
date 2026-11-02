@@ -137,7 +137,9 @@ in
   # After every install every file every entry names is on the ESP with its source's size, and `rime-boot check`
   # agrees. Mutant (docs/nixos/boot-matrix.md, "ESP budget"): a hook that never leaves a generation out copies
   # gen4's initrd into a full ESP and fails with ENOSPC (switch-to-configuration boot exits non-zero).
-  # Booting from the pruned ESP needs Fedora's shim and GRUB: nix/probe/ovmf/boothook, scenario prune-sb-mok.
+  # No separate Secure Boot boot of the pruned ESP (DECIDED-NOT-TO, docs/nixos/boot-matrix.md "ESP budget"): it is the
+  # layout the boot matrix boots through Fedora's shim and GRUB (nix/probe/ovmf/boothook) with fewer entries, and
+  # every file every remaining entry names is checked here, byte size and `rime-boot check` both.
   boot-esp-prune =
     let
       espMiB = 256;
