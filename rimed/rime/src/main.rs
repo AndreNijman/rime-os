@@ -23,6 +23,7 @@ mod gitshim;
 mod host;
 mod lid;
 mod live;
+mod luks;
 mod mcp;
 mod migrate;
 mod mode;
@@ -201,6 +202,14 @@ enum Cmd {
     Firmware {
         #[command(subcommand)]
         cmd: firmware::FirmwareCmd,
+    },
+    /// LUKS volumes and their TPM slot (NixOS): `status` says whether each
+    /// slot still matches this boot's PCR values, so the volume unlocks
+    /// without asking; `rebind` re-seals the stale ones to PCR 7 (after a new
+    /// Secure Boot key or a dbx update), keeping the recovery key.
+    Luks {
+        #[command(subcommand)]
+        cmd: luks::LuksCmd,
     },
     /// Persistent state: which schema each store is on, and what a rollback
     /// would do to it (§25).
@@ -1688,6 +1697,7 @@ async fn main() {
         Cmd::Qualify { cmd } => qualify::main(cmd),
         Cmd::Storage { cmd } => storage::main(cmd),
         Cmd::Firmware { cmd } => firmware::main(cmd),
+        Cmd::Luks { cmd } => luks::main(cmd),
         Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
@@ -3154,6 +3164,14 @@ async fn cmd_doctor(json: bool) -> i32 {
     // reason on the line, because `rime doctor` runs unprivileged and
     // measured, nothing in any Containerfile installs fwupd today.
     for (ok, what) in firmware::doctor_lines(&firmware::Roots::from_env()) {
+        checks.push(recover::Check { ok, what });
+    }
+
+    // A LUKS volume whose TPM slot no longer matches PCR 7 (a new Secure Boot
+    // key, a dbx update) asks for its passphrase at every boot, and nothing
+    // else says why. rime-luks-tpm-status.service measures it at boot; a
+    // stale slot is a WARN naming the volume and `sudo rime luks rebind`.
+    for (ok, what) in luks::doctor_lines() {
         checks.push(recover::Check { ok, what });
     }
 

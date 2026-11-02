@@ -86,8 +86,16 @@ in
             machine.succeed("grep -x 'set default=rime-generation-2' /boot/grub2/rime-nixos.cfg")
             machine.succeed("grep '^title Rime (generation 1, ' /boot/loader/entries/rime-generation-1.conf")
             files = machine.succeed("ls /boot/rime/nixos").split()
-            # one kernel (named by content, shared by both generations) + each generation's own initrd
-            assert len(files) == 3 and len([f for f in files if f.endswith("bzImage.efi")]) == 1, files
+            # one kernel (named by content, shared by both generations) + each generation's own initrd + one copy
+            # of each vendor's early microcode (host.toml [boot] microcode unset = both), shared by both generations
+            intel = [f for f in files if f.endswith("-intel-ucode.img")]
+            amd = [f for f in files if f.endswith("-amd-ucode.img")]
+            assert len(intel) == 1 and len(amd) == 1, files
+            rest = [f for f in files if f not in intel + amd]
+            assert len(rest) == 3 and len([f for f in rest if f.endswith("bzImage.efi")]) == 1, files
+            for e in ("rime-generation-1.conf", "rime-generation-2.conf"):
+                lines = machine.succeed(f"grep '^initrd ' /boot/loader/entries/{e}").splitlines()
+                assert len(lines) == 3 and intel[0] in lines[0] and amd[0] in lines[1], lines
             k = machine.succeed("grep -h '^linux ' /boot/loader/entries/*.conf").splitlines()
             assert len(k) == 2 and k[0] == k[1], k
             rc, out = check()

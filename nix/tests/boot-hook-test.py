@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -18,6 +19,7 @@ import time
 import unittest
 
 HOOK = None  # the module under test, loaded in __main__
+MiB = 1024 * 1024
 
 
 def load_hook(path):
@@ -88,7 +90,8 @@ class Fixture:
             f.write(content)
         return p
 
-    def toplevel(self, n, kernel=b"kernel-A", initrd=b"initrd-A", params=("console=ttyS0",), signed_kernel=None):
+    def toplevel(self, n, kernel=b"kernel-A", initrd=b"initrd-A", params=("console=ttyS0",), signed_kernel=None,
+                 ucode=None):
         """A fake toplevel. `signed_kernel`: <toplevel>/kernel points at a different (signed) image than bootspec's
         `kernel`, the way nix/modules/kernel.nix relinks it."""
         top = os.path.join(self.store, f"top{n}-nixos-system")
@@ -105,11 +108,21 @@ class Fixture:
             os.symlink(dst, p)
         with open(os.path.join(top, "init"), "w") as f:
             f.write("#!/bin/sh\n")
+        doc = {"org.nixos.bootspec.v1": {
+            "init": os.path.join(top, "init"), "kernel": k, "initrd": i,
+            "kernelParams": list(params), "label": "NixOS test", "system": "x86_64-linux", "toplevel": top,
+        }, "org.nixos.specialisation.v1": {}}
+        if ucode:  # nix/modules/boot.nix's org.rimeos.microcode.v1: {vendor: <store>/<vendor>-ucode.img}
+            ext = {}
+            for vendor, data in ucode.items():
+                d = os.path.join(self.store, f"u{hashlib.md5(data).hexdigest()[:6]}-microcode-{vendor}")
+                os.makedirs(d, exist_ok=True)
+                ext[vendor] = os.path.join(d, f"{vendor}-ucode.img")
+                with open(ext[vendor], "wb") as fh:
+                    fh.write(data)
+            doc["org.rimeos.microcode.v1"] = ext
         with open(os.path.join(top, "boot.json"), "w") as f:
-            json.dump({"org.nixos.bootspec.v1": {
-                "init": os.path.join(top, "init"), "kernel": k, "initrd": i,
-                "kernelParams": list(params), "label": "NixOS test", "system": "x86_64-linux", "toplevel": top,
-            }, "org.nixos.specialisation.v1": {}}, f)
+            json.dump(doc, f)
         return top
 
     def generation(self, n, current=True, **kw):
@@ -151,6 +164,24 @@ class Fixture:
     def nixos_files(self):
         d = os.path.join(self.boot, "rime", "nixos")
         return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def host_toml(self, text):
+        with open(self.host, "w") as fh:
+            fh.write(text)
+
+    def initrd_lines(self, text):
+        return [l.strip() for l in text.splitlines() if l.strip().startswith("initrd ")]
+
+    def blob_of(self, rel):
+        return slurp(os.path.join(self.boot, rel.lstrip("/")))
+
+    def virtual_capacity(self, mib):
+        """Make the boot filesystem hold `mib` MiB of file data (free = capacity - what is under boot)."""
+        def used():
+            return sum(os.lstat(os.path.join(d, n)).st_size for d, _, ns in os.walk(self.boot) for n in ns)
+        real = HOOK.free_bytes
+        HOOK.free_bytes = lambda path: max(0, int(mib * MiB) - used())
+        self.t.addCleanup(setattr, HOOK, "free_bytes", real)
 
     def make_ostree_boot(self):
         """bootc's /boot: loader -> loader.1 with ostree's entry, an ostree dir, and the bootc installer's Windows
@@ -507,6 +538,187 @@ class HookTest(unittest.TestCase):
             os.unlink(os.path.join(f.boot, "rime", "nixos", n))
         self.assertEqual(f.run("check"), 1)
         self.assertTrue(json.loads(f.stdout)["missing"])
+
+    # ── early microcode as separate initrd files (org.rimeos.microcode.v1, host.toml [boot] microcode) ──
+    def test_microcode_split_dedupe_and_vendor(self):
+        f = self.f
+        uc = {"intel": b"INTEL-UCODE", "amd": b"AMD-UCODE"}
+        f.generation(1, kernel=b"K1", initrd=b"I1", ucode=uc)
+        f.generation(2, kernel=b"K2", initrd=b"I2", ucode=uc)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        e2 = f.read("loader/entries/rime-generation-2.conf")
+        got = [f.blob_of(l.split()[1]) for l in f.initrd_lines(e2)]
+        self.assertEqual(got, [b"INTEL-UCODE", b"AMD-UCODE", b"I2"])  # one line per file, microcode first
+        # each microcode file is stored once for both generations
+        self.assertEqual(len(f.nixos_files()), 6)
+        e1 = f.read("loader/entries/rime-generation-1.conf")
+        self.assertEqual(f.initrd_lines(e1)[:2], f.initrd_lines(e2)[:2])
+        self.assertEqual(f.run("check"), 0, f.stdout)
+        # the CPU's vendor only: the other vendor's file leaves the ESP
+        f.host_toml('[boot]\nmicrocode = "intel"\n')
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        e2 = f.read("loader/entries/rime-generation-2.conf")
+        self.assertEqual([f.blob_of(l.split()[1]) for l in f.initrd_lines(e2)], [b"INTEL-UCODE", b"I2"])
+        self.assertEqual(len(f.nixos_files()), 5)
+        f.host_toml('[boot]\nmicrocode = "none"\n')
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(len(f.initrd_lines(f.read("loader/entries/rime-generation-2.conf"))), 1)
+        self.assertEqual(len(f.nixos_files()), 4)
+        # anything else is refused by name, before a write
+        f.host_toml('[boot]\nmicrocode = "arm"\n')
+        before = tree(f.boot)
+        self.assertEqual(f.run("install"), 3)
+        self.assertIn("[boot] microcode must be one of both, intel, amd, none", f.stderr)
+        self.assertEqual(tree(f.boot), before)
+
+    def test_microcode_custom_cfg_one_line_and_check_sees_every_file(self):
+        f = self.f
+        f.cfg["layout"] = "custom-cfg"
+        f.generation(1, kernel=b"K1", initrd=b"I1", ucode={"intel": b"INTEL-UCODE", "amd": b"AMD-UCODE"})
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        lines = f.initrd_lines(f.read("grub2/rime-nixos.cfg"))
+        self.assertEqual(len(lines), 1, lines)
+        self.assertEqual([f.blob_of(p) for p in lines[0].split()[1:]], [b"INTEL-UCODE", b"AMD-UCODE", b"I1"])
+        self.assertEqual(f.run("check"), 0, f.stdout)
+        # check names a missing file even when it is the 2nd path on the line
+        amd = lines[0].split()[2]
+        os.unlink(os.path.join(f.boot, amd.lstrip("/")))
+        self.assertEqual(f.run("check"), 1)
+        self.assertEqual([os.path.basename(m) for m in json.loads(f.stdout)["missing"]], [os.path.basename(amd)])
+
+    def test_generation_without_microcode_extension_has_one_initrd(self):
+        f = self.f
+        f.generation(1, kernel=b"K1", initrd=b"I1")
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(len(f.initrd_lines(f.read("loader/entries/rime-generation-1.conf"))), 1)
+
+    # ── space: prune to fit, never run out (docs/nixos/boot-matrix.md "ESP budget") ──
+    def big(self, n, **kw):
+        """Generation n with a 1 MiB kernel and a 1 MiB initrd of its own."""
+        return self.f.generation(n, kernel=bytes([n]) * MiB, initrd=bytes([100 + n]) * MiB, **kw)
+
+    def test_prune_leaves_out_the_oldest_generations_that_do_not_fit(self):
+        f = self.f
+        f.cfg["reserveMiB"] = 1
+        for n in range(1, 5):
+            self.big(n)
+        f.virtual_capacity(1 + 4.5)  # the floor + two generations
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(f.entries(), ["rime-generation-3.conf", "rime-generation-4.conf"])
+        self.assertIn("generation 1 left out of the menu", f.stderr)
+        self.assertIn("generation 2 left out of the menu", f.stderr)
+        self.assertEqual(f.run("check"), 0, f.stdout)
+
+    def test_prune_reclaims_through_a_bootable_menu(self):
+        f = self.f
+        f.cfg["reserveMiB"] = 1
+        f.virtual_capacity(1 + 4.5)
+        self.big(1)
+        top2 = self.big(2)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(f.entries(), ["rime-generation-1.conf", "rime-generation-2.conf"])
+        os.symlink(top2, f.cfg["bootedSystem"])  # running generation 2 (mandatory)
+        self.big(3)
+        self.big(4)
+        # Making room removes only Rime's own files: another loader's entry, Fedora's shim directory and a file at
+        # the filesystem's root survive it, byte for byte.
+        foreign = {os.path.join(f.boot, "loader", "entries", "fedora-other.conf"): b"title someone else's\n",
+                   os.path.join(f.boot, "EFI", "fedora", "shimx64.efi"): b"shim",
+                   os.path.join(f.boot, "stray.bin"): b"stray"}
+        for p, data in foreign.items():
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "wb") as fh:
+                fh.write(data)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertIn("making room: menu of generation(s) 2", f.stderr)
+        for p, data in foreign.items():
+            self.assertEqual(slurp(p), data, p)
+        self.assertEqual(f.entries(), ["fedora-other.conf", "rime-generation-2.conf", "rime-generation-4.conf"])
+        self.assertIn("set default=rime-generation-4\n", f.read("grub2/rime-nixos.cfg"))
+        self.assertEqual(len(f.nixos_files()), 4)
+        self.assertEqual(f.run("check"), 0, f.stdout)
+
+    def test_prune_keeps_a_file_a_kept_generation_shares_with_a_dropped_one(self):
+        f = self.f
+        f.cfg["reserveMiB"] = 1
+        f.virtual_capacity(1 + 4.5)
+        self.big(1)
+        top2 = self.big(2)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        os.symlink(top2, f.cfg["bootedSystem"])
+        self.big(3)
+        f.generation(4, kernel=bytes([1]) * MiB, initrd=bytes([104]) * MiB)  # generation 1's kernel, a new initrd
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertIn("making room", f.stderr)
+        self.assertEqual(f.entries(), ["rime-generation-2.conf", "rime-generation-4.conf"])
+        self.assertEqual(f.run("check"), 0, f.stdout)  # the shared kernel was not removed while making room
+
+    def interrupted_after_making_room(self, layout):
+        f = self.f
+        f.cfg["layout"] = layout
+        f.cfg["reserveMiB"] = 1
+        f.virtual_capacity(1 + 4.5)
+        self.big(1)
+        top2 = self.big(2)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        os.symlink(top2, f.cfg["bootedSystem"])
+        self.big(3)
+        self.big(4)
+        real = HOOK.atomic_copy
+
+        def dies(src, dst):
+            raise OSError(5, "Input/output error (simulated power cut)")
+
+        HOOK.atomic_copy = dies
+        try:
+            self.assertEqual(f.run("install"), 2)
+        finally:
+            HOOK.atomic_copy = real
+        # what a power cut here would boot: a menu of generation 2 alone, every file it names present
+        menu = f.read("grub2/rime-nixos.cfg")
+        self.assertIn("set default=rime-generation-2\n", menu)
+        if layout == "bls":
+            self.assertEqual(f.entries(), ["rime-generation-2.conf"])
+        else:
+            self.assertEqual(re.findall(r"--id (rime-generation-\d+)", menu), ["rime-generation-2"])
+        f.run("check")
+        self.assertEqual(json.loads(f.stdout)["missing"], [])
+        self.assertEqual(f.run("install"), 0, f.stderr)  # the next run finishes the job
+        self.assertEqual(f.run("check"), 0, f.stdout)
+        self.assertEqual(json.loads(f.stdout)["default_generation"], 4)
+
+    def test_prune_interrupted_after_making_room_still_boots_bls(self):
+        self.interrupted_after_making_room("bls")
+
+    def test_prune_interrupted_after_making_room_still_boots_custom_cfg(self):
+        self.interrupted_after_making_room("custom-cfg")
+
+    def test_prune_refuses_when_current_booted_and_pinned_do_not_fit(self):
+        f = self.f
+        f.cfg["reserveMiB"] = 1
+        f.virtual_capacity(1 + 3)
+        self.big(1)
+        self.big(2)
+        os.makedirs(f.pins)
+        os.symlink("/dev/null", os.path.join(f.pins, "pin-1"))
+        before = tree(f.boot)
+        self.assertEqual(f.run("install"), 3)
+        self.assertIn("current, booted and pinned generation(s) 2, 1", f.stderr)
+        self.assertIn("Nothing was written", f.stderr)
+        self.assertEqual(tree(f.boot), before)
+
+    def test_prune_refuses_to_make_room_when_nothing_kept_is_on_disk(self):
+        f = self.f
+        f.cfg["reserveMiB"] = 1
+        f.virtual_capacity(1 + 2.5)
+        self.big(1)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.big(2)
+        os.unlink(os.path.join(f.profiles, "system-1-link"))  # deleted, so only 2 (not on disk) is kept
+        before = tree(f.boot)
+        self.assertEqual(f.run("install"), 3)
+        self.assertIn("making room would leave nothing to boot", f.stderr)
+        self.assertEqual(tree(f.boot), before)
 
     def test_grub_path_from_mountinfo(self):
         f = self.f

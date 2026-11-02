@@ -1,0 +1,13 @@
+# The MOK enrolment lab's image (README.md here): the TPM lab image (../tpm/Containerfile: Fedora 45's Secure Boot
+# OVMF, QEMU, virt-firmware, sbsigntools, busybox, Fedora's signed kernel-core RPM) plus mokutil, whose binary and
+# libraries go into the guest initrd that runs `mokutil --import` under Fedora's signed kernel.
+#
+# Build:  sudo podman build -t rime-ovmf-mok nix/probe/ovmf/mok     (after rime-ovmf-tpm exists)
+FROM localhost/rime-ovmf-tpm:latest
+
+RUN dnf -y install --setopt=install_weak_deps=False mokutil mtools \
+    && dnf clean all \
+    && mokutil --version
+
+WORKDIR /work
+ENTRYPOINT ["/bin/bash"]

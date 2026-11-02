@@ -289,9 +289,16 @@ sudo -n podman exec -w /work/<worktree> rime-nix nix build path:.#checks.x86_64-
 
 ## Handover
 
-* **Release (P3):** the release kernel signed by the real Rime MOK. Only the TEST MOK signature is proven. A person
-  clicking through MokManager is not proven either: the boot drivers use a varstore with the TEST MOK already
-  enrolled; the install queues the import (`mokutil --import`). Owner: the secureboot worker.
+* **Release (P3):** the release kernel signed by the real Rime MOK. Only the TEST MOK signature is proven here; the
+  release signature is blocked until `nix-kernel-sign.yml` is on main or `RIME_NIX_KERNEL_HOST` is set (Andre's call;
+  `nix/probe/ovmf/mok/run.sh realsig` boots the artefact the day it exists). MokManager enrolment (2026-11-02,
+  nix/secureboot): the boot drivers here still use a varstore with the TEST MOK already enrolled
+  (`virt-fw-vars --add-mok`), but the enrolment itself is proven in `nix/probe/ovmf/mok`: on a Microsoft-keys-only
+  varstore with Secure Boot on, a Fedora-signed kernel runs `mokutil --import` of the real Rime MOK (what this
+  installer's Fedora live environment runs), and MokManager is driven screen by screen (Enroll MOK, Continue, Yes,
+  password, Reboot; screenshots) until the real Rime MOK is the only MOK and a CI-signed kernel boots. Not proven: this
+  installer's own `mokutil --import` call on the NixOS path followed by MokManager (the lab's guest is a busybox
+  initrd), and a person doing it on real firmware (P3).
 * **Release (P3):** the first production NixOS netinstall ISO, built against a release published by
   `nix-release.yml` and `cache.rimeos.com` serving it; then `build-installer-iso.yml` pins that ISO in a new `.exe`
   release (whose 17 GB floor also updates rimeos.com/download#windows). A real `stage-image` run of the app against a

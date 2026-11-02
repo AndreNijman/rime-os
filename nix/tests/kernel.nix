@@ -14,8 +14,11 @@
 #                          updates/, xone, xpadneo) and the ones that can load without hardware verify against
 #                          the kmodigest certificates inserted into the booted image (no `E` taint);
 #                        - NVIDIA eager loading is gated on hardware: no NVIDIA here, modules-load still succeeds;
-#                        - NTSYNC is loaded and /dev/ntsync exists.
-{ pkgs, self }:
+#                        - NTSYNC is loaded and /dev/ntsync exists;
+#                        - the lockdown LSM is loaded and reads [none] (decision A12 posture, G12).
+# settle: the scx self-test attach/detach window in seconds. 60 is the check; `settle = 10` (bootc's value) is the K2
+# mutant (docs/nixos/boot-matrix.md, "K2 under load").
+{ pkgs, self, settle ? 60 }:
 
 let
   inherit (pkgs) lib;
@@ -57,7 +60,7 @@ let
       --replace-fail 'bin="/usr/bin/$1"' 'bin="${rime.rime-scx}/bin/$1"' \
       --replace-fail '/selftest/schedulers.txt' '${schedulersTxt}' \
       --replace-fail '/selftest/kill9.txt' '/nonexistent/kill9.txt' \
-      --replace-fail 'SETTLE="$(param settle 10)"' 'SETTLE="$(param settle 60)"'
+      --replace-fail 'SETTLE="$(param settle 10)"' 'SETTLE="$(param settle ${toString settle})"'
     ${pkgs.bash}/bin/bash -n $out
   '';
 
@@ -163,6 +166,10 @@ in
         # qemu-vm.nix forces videoDrivers to [ "modesetting" ] with mkVMOverride (priority 10), which would
         # silently drop the NVIDIA stack from the test VM. Win over it so the VM carries what hardware gets.
         services.xserver.videoDrivers = lib.mkOverride 9 [ "nvidia" ];
+        # The shipped profile's LSM list (security.nix G12 puts lockdown first; rime.security is off in this VM).
+        # NixOS writes it as `lsm=`, which overrides CONFIG_LSM, and Rime's kernel initialises lockdown only when
+        # `lsm=` names it: the lockdown subtest checks that list on this kernel.
+        security.lsm = lib.mkForce self.nixosConfigurations.rime.config.security.lsm;
         virtualisation = {
           cores = 4;
           memorySize = 4096;
@@ -178,6 +185,16 @@ in
           machine.succeed("test -s /sys/kernel/btf/vmlinux")
           machine.succeed("test -d /sys/kernel/sched_ext")
           machine.succeed("grep -w modprobe.blacklist=nouveau /proc/cmdline")
+
+      with subtest("lockdown: the LSM is loaded and not engaged (A12, G12; boot-matrix.md 'Kernel lockdown')"):
+          # Rime's kernel initialises lockdown only when `lsm=` names it (LOCKDOWN_LSM_EARLY unset), and
+          # security.nix keeps it first in NixOS's list. Loaded = the file exists; [none] = not forced by the config
+          # and not raised by anything at boot. Bootc Rime under Secure Boot reads the same (MOK lab R1).
+          lsm = machine.succeed("cat /sys/kernel/security/lsm").strip()
+          assert "lockdown" in lsm.split(","), lsm
+          mode = machine.succeed("cat /sys/kernel/security/lockdown").strip()
+          assert mode == "[none] integrity confidentiality", mode
+          print(f"lsm={lsm} lockdown={mode}")
 
       with subtest("modules load and verify against the image's kmodigest certificates"):
           machine.succeed("systemctl is-active systemd-modules-load.service")

@@ -264,7 +264,11 @@ Every one of these fires **before anything is written**, and says so.
 3. **Automatic (TPM) unlocking stopped working** after a firmware update, a TPM
    clear or a motherboard swap. The passphrase still works; if it does not, the
    recovery key does. `docs/boot-v2.md` has the measured behaviour of each of
-   those cases.
+   those cases. On the NixOS system, a new Secure Boot key or a dbx update (PCR 7
+   changes) is detected at boot: `rime doctor` names the volume, and
+   `sudo rime luks rebind` re-seals its TPM slot to PCR 7 after asking once for
+   the passphrase or recovery key (`rime-luks-tpm-reenrol@<uuid>.service`, which
+   runs `rime-luks-enroll --tpm-only`; every other keyslot is kept).
 4. **You have neither key.** There is no fourth option, by design. The
    acknowledgement checkbox on the last installer screen exists for this case.
 
@@ -325,6 +329,13 @@ lab with Secure Boot on: the installer's encrypted layout, the passphrase typed
 in the bootc initrd and then in the NixOS initrd, back to bootc and to NixOS
 again (`nix/probe/ovmf/bridge`, kind `L`; evidence
 `/var/lab/rime-nix/artifacts/bridge2/L/`).
+
+`rime-luks-enroll` itself never replaces a recovery key behind your back: on a
+volume that already has one, the full path refuses unless it is given
+`--replace-recovery` (an explicit rotation, after which every printed copy of the
+old key is useless), and `--tpm-only` re-binds the TPM slot and leaves the
+recovery key and the passphrase alone. Earlier bootc versions of the helper wiped
+the old recovery key and printed a new one.
 
 ---
 

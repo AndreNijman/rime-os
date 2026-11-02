@@ -143,7 +143,7 @@ let
           if [ -e /dev/tpmrm0 ]; then
             say "tpm: present $(cat /sys/class/tpm/tpm0/tpm_version_major 2>/dev/null)"
             say "pcr7-sysfs: $(cat /sys/class/tpm/tpm0/pcr-sha256/7)"
-            say "pcrread: $(tpm2_pcrread sha256:7 2>&1 | tr -s ' \n' ' ')"
+            say "pcrread: $(TPM2TOOLS_TCTI=device:/dev/tpmrm0 tpm2_pcrread sha256:7 2>&1 | tr -s ' \n' ' ')"
             say "eventlog-begin"
             base64 -w 0 /sys/kernel/security/tpm0/binary_bios_measurements; echo
             say "eventlog-end"

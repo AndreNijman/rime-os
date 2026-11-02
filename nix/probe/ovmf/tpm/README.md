@@ -112,8 +112,9 @@ the expected result.
   sets `printk` to 1 and the parser drops `[ secs.usec ] …` lines; the replay check proves the result).
 - The console agent's passphrase prompt has no newline, so the test unit's `RIME-ASK n` report lands at the end of
   the prompt's line: never anchor it with `^`.
-- `tpm2_pcrread` on NixOS printed a tabrmd D-Bus warning before falling back to `/dev/tpmrm0` (the value still
-  read); the lab unit now sets `TPM2TOOLS_TCTI=device:/dev/tpmrm0` (11-02), so the tools go straight to the device.
+- `tpm2_pcrread` on NixOS printed a tabrmd D-Bus warning before falling back to `/dev/tpmrm0` (the value still read);
+  `systems.nix` now names the device TCTI (`TPM2TOOLS_TCTI=device:/dev/tpmrm0`), the form `checks.luks-tpm-rebind`
+  proves prints no warning and matches sysfs.
 - `serial-getty@ttyS0` `vhangup()`s ttyS0 when it starts, and every later write of the stage-2 driver to it is lost
   (an independent rerun lost N4's `tpm2_clear` and `DONE` lines and failed N4, although the clear ran: N5 then read
   "State not recoverable"). `rime-tpm-lab.service` is now ordered before the getty.

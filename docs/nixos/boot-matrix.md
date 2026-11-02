@@ -1,7 +1,8 @@
 # The P2 boot matrix
 
 What this proves, how to run it again, and the decisions it records. Gate rows: `docs/nixos/p2-gates.md` B1-B10,
-X2, K1-K3. Evidence of the run recorded below: `/var/lab/rime-nix/artifacts/bootmatrix/` (not committed).
+X2, K1-K3. Evidence of the run recorded below: `/var/lab/rime-nix/artifacts/bootmatrix/` (not committed); the
+Secure Boot follow-ups (microcode split, ESP budget, lockdown, K2 mutant, the real MOK): `/var/lab/rime-nix/artifacts/secureboot/`.
 
 ## The cells
 
@@ -68,20 +69,72 @@ boot. The matrix drives exactly that: recovery boots press the arrow key within 
 - The hook writes only to the boot filesystem it is given (a fresh install's own ESP at `/boot`, or bootc's
   `/boot`). If that filesystem holds Windows Boot Manager (`EFI/Microsoft/Boot/bootmgfw.efi`) it refuses **by name**
   ("this is a Windows EFI system partition") and writes nothing (`boot-hook-unit`, `test_refuses_a_windows_esp`).
-- Space: before the first write the hook adds up the kernel and initrd files it must copy and refuses when free
-  space is below that plus `rime.boot.reserveMiB` (32 MiB), naming the filesystem, both sizes and the floor, and
-  writes nothing (`test_space_floor_refuses_and_writes_nothing`). A full disk part way through (ENOSPC) leaves the old
-  menu in place (`boot-hook-unit`).
+- Space: before the first write the hook adds up the kernel, microcode and initrd files it must copy. When they do
+  not fit above `rime.boot.reserveMiB` (32 MiB), it leaves the **oldest** generations that are not current, booted or
+  pinned out of the menu until they do, logging each ("generation N left out of the menu: ... it stays in the
+  profile"), and it **refuses**, naming the filesystem, the sizes and the floor and writing nothing, only when the
+  current, booted and pinned generations alone do not fit (`test_prune_*`, `test_space_floor_refuses_and_writes_nothing`).
+  When the new files fit only once the files of generations no longer listed are removed, it first writes a menu of
+  the kept generations already on disk (bootable as it stands), removes what that menu does not name, then copies:
+  a power cut in between boots one of those generations (`test_prune_interrupted_after_making_room_still_boots_*`,
+  both layouts). It never removes a file a kept generation still names
+  (`test_prune_keeps_a_file_a_kept_generation_shares_with_a_dropped_one`). A full disk part way through (ENOSPC)
+  leaves the old menu in place (`boot-hook-unit`). Budget: "ESP budget" below.
 - Nothing on the activation path names a loader installer or an NVRAM writer (X2, `boot-loader-scan`).
 
 ### Early microcode
 
-`rime.boot.enable` turns on Intel's and AMD's early microcode (`hardware.cpu.{intel,amd}.updateMicrocode`,
-`mkDefault`). `boot-microcode` runs the real hook on the shipped system in both layouts and reads the entry's
-`initrd` file: two leading uncompressed cpio archives, `GenuineIntel.bin` and `AuthenticAMD.bin`, before the
-compressed initrd; with microcode off, none. Cost: the shipped initrd goes from 36.0 MB to 51.6 MB, **+15.5 MB per
-generation** on the ESP / `/boot` (with 10 generations listed, up to 155 MB more if every generation has its own
-initrd). A host that knows its CPU vendor can turn the other one off (handover).
+One generic toplevel boots every machine (D9), so it names **both** vendors' early-microcode cpios (nixpkgs'
+`microcode-intel` and `microcode-amd` files, unchanged) in its bootspec, `org.rimeos.microcode.v1`
+(`nix/modules/boot.nix`), and does **not** prepend them to the initrd (`hardware.cpu.{intel,amd}.updateMicrocode`
+default false under `rime.boot`). The hook loads them as their own `initrd` files before the generation's initrd:
+one `initrd` line per file in a BLS entry, one `initrd a b c` line in `custom.cfg`'s menu. GRUB concatenates them
+and the kernel's early loader reads the uncompressed cpios at the start of the image. `/var/lib/rime/host.toml`
+`[boot] microcode = "intel" | "amd" | "both" | "none"` picks the vendors per machine; the default is `both`, and the
+installer writes the CPU's own vendor (`/proc/cpuinfo` `vendor_id`, anything unknown keeps `both`). The files are
+content-addressed like the rest, so **one copy** serves every generation that names the same package.
+
+Proven:
+
+- `nix/probe/ovmf/mok` `run.sh split`, through Fedora 45's shim and GRUB with Secure Boot on and the real Rime MOK
+  enrolled: `retain_initrd` exposes the image GRUB handed the kernel (`/sys/firmware/initrd`), and its pieces'
+  sha256s equal the Intel cpio (15,237,120 B), the AMD cpio (307,200 B) and the initrd, in that order, through
+  blscfg with three `initrd` lines (U1-bls) and through a menuentry with one line naming three files (U2-menu); the
+  control with one file has exactly one piece (U3-control). `/var/lab/rime-nix/artifacts/secureboot/mok/split/`.
+- `boot-microcode`: the real hook on the shipped toplevel, both layouts, every `microcode` value, reads every file the
+  entry names: the vendor cpios are wholly uncompressed cpio holding only their vendor's `.bin`, byte for byte the
+  bootspec's; the last file is byte for byte `<toplevel>/initrd` and starts with **no** microcode; the boot
+  filesystem holds kernel + initrd + one file per vendor, nothing else. A toplevel without the extension gets one
+  `initrd` line (the negative control) and the mutant, NixOS's default prepend, **fails** the check.
+- `boot-hook-unit`: dedupe across generations, vendor selection, refusing any other value by name before a write,
+  `rime-boot check` naming a missing microcode file that is the 2nd path on a `custom.cfg` line. Mutants (each
+  fails at least one test, `/var/lab/rime-nix/artifacts/secureboot/esp/boot-hook-unit-mutants.txt`): microcode lines
+  dropped, `check` reading only the first path, prune disabled, the making-room GC removing a shared file, the
+  interim menu skipped, `microcode` ignored.
+
+Before (wave 1): both cpios were prepended into every initrd, **+15.5 MB per generation** on the ESP (36.0 → 51.6
+MB). Now: 15.5 MB once for `both`, 15.2 MB for an Intel machine, 0.3 MB for an AMD one.
+
+### ESP budget
+
+What one generation puts on the boot filesystem (measured 2026-11-02): the signed Rime 7.2.9 image 17.7 MB
+(`linux-image-7.2.9-signed/bzImage`, 17,733,752 B) and the initrd about 36-38 MB (36.0 MB for `rime` in wave 1,
+37.8 MB for `rime-vm` today), so about 55 MB, under `kernel-boot-budget`'s ceiling of 130 MiB. The microcode is
+15.5 MB once. Fedora's shim, GRUB and MokManager in `EFI/fedora` and `EFI/BOOT` are 2 × 6.1 MB.
+
+- **Fresh install: a 2048 MiB ESP** (`installer/rime-install-nixos.sh` `NIXOS_ESP_MIB`). `rime.boot.configurationLimit
+  = 10`; an update's peak is 11 generations (the new one is copied before the oldest is removed): 11 × 130 MiB at the
+  ceiling + 15 MiB microcode + 20 MiB loaders + the 32 MiB floor = 1,497 MiB, fits. `boot-esp-budget` asserts that
+  arithmetic from the module's own values and the installer's own number, and its mutant (`configurationLimit = 20`,
+  2,797 MiB) fails. At today's sizes 11 generations are about 620 MB.
+- **Migrated machine (`custom-cfg`, bootc's `/boot`)**: plain bootc Rime keeps `/boot` on the btrfs root, so the
+  space is the root's; an encrypted bootc install has its own small ext4 `/boot` (that topology is refused by
+  `rime migrate check` today, p2-gates D2). Either way the hook does not assume a size: prune-to-fit keeps the newest
+  generations that fit and refuses only when the current, booted and pinned generations (130 MiB each at the
+  ceiling, plus the microcode once) do not. Prune-to-fit is proven in `boot-hook-unit` with the free space
+  simulated (`free_bytes` replaced by a fixed-size model); no VM fills a real ESP or `/boot` to the floor.
+- `rime gc` removes generations from the profile; the hook then removes their files. A pinned generation always
+  stays listed.
 
 ### LUKS
 
@@ -93,6 +146,46 @@ builds its own configuration. The keymap reaches the initrd's `vconsole.conf` so
 user's layout. `luks-boot` proves this in the NixOS test VM (a fixed UUID, the passphrase typed at the console
 prompt); the matrix proves it through shim and GRUB.
 
+### Kernel lockdown under Secure Boot
+
+Decision (2026-11-02, decision A12 "keep it off at launch, as today"): **the NixOS Rime kernel boots with lockdown
+`[none]` under Secure Boot, like bootc Rime today, and does not copy Fedora's lock-on-Secure-Boot.**
+
+Why the two kernels differ, measured rather than recalled:
+
+- Fedora's kernel (`kernel-core-7.2.13-300.fc45`, its `/lib/modules/*/config`): `CONFIG_LOCK_DOWN_IN_EFI_SECURE_BOOT=y`
+  and `CONFIG_SECURITY_LOCKDOWN_LSM_EARLY=y`. That option comes from Fedora's downstream patch ("efi: Lock down the
+  kernel if booted in secure boot mode"): it raises lockdown to `integrity` when the firmware reports Secure Boot,
+  and the kernel prints `Kernel is locked down from EFI Secure Boot mode; see man kernel_lockdown.7` (MOK lab boot I1).
+- Rime's kernel (`linux-cachyos-7.2.9-2`, the bootc kernel tier's source): the option does **not exist** in its
+  `security/lockdown/Kconfig` (only `SECURITY_LOCKDOWN_LSM`, `_EARLY`, `LOCK_DOWN_KERNEL_FORCE_{NONE,INTEGRITY,
+  CONFIDENTIALITY}`), and `nix/pkgs/kernel/config` has `SECURITY_LOCKDOWN_LSM=y`, `_EARLY` unset, `FORCE_NONE=y`,
+  `CONFIG_LSM="lockdown,..."`. Nothing raises lockdown, so it reads `[none]` with Secure Boot on.
+- bootc Rime today, measured: the published bootc kernel `7.2.9-cachyos1.apex1.fc45`, signed with the real Rime MOK
+  and booted through Fedora's shim with Secure Boot on (MOK lab boot R1): `/sys/kernel/security/lockdown` =
+  `[none] integrity confidentiality`, no locked-down message. katana's running system reads the same
+  (`nix/modules/security.nix` G12 note).
+
+Why not turn it on now: lockdown `integrity` refuses unsigned modules, `/dev/mem`, `/dev/port`, MSR writes from user
+space, ACPI table overrides, unsigned kexec, hibernation, `bpf_probe_write_user` and parts of debugfs. Rime's own
+modules would load (every module verifies against the kmodigest certificates in the image, `kernel-vm`), but the
+change takes those interfaces away from the machine's owner and is a product decision, A12's to make, not a side
+effect of the move. What the NixOS kernel keeps so the decision stays one line:
+
+- the lockdown LSM is built in, listed in `CONFIG_LSM` and first in the shipped `lsm=` (`security.nix`, G12), so
+  `lockdown=integrity` on the command line, or `echo integrity > /sys/kernel/security/lockdown` at run time, turns
+  it on with no rebuild;
+- `kernel-gate` (`nix/pkgs/kernel/gate.nix`, item 7) fails the build if the posture drifts: `SECURITY_LOCKDOWN_LSM`,
+  `LOCK_DOWN_KERNEL_FORCE_NONE` and `MODULE_SIG` must be `=y`, `FORCE_INTEGRITY`, `FORCE_CONFIDENTIALITY` and
+  `MODULE_SIG_FORCE` must be unset, and `CONFIG_LSM` must name `lockdown`. Mutants (each FATAL, gate script run on a
+  mutated copy of the config): `artifacts/secureboot/lockdown/gate-mutants.txt`;
+- `kernel-vm` / `kernel-vm-signed` boot the kernel with the shipped profile's `lsm=` and assert the LSM is loaded
+  and reads `[none] integrity confidentiality`.
+
+To turn it on later (A12 changed): add `lockdown=integrity` to the shipped kernel parameters (or set
+`FORCE_INTEGRITY` and change gate item 7), change the `kernel-vm` assertion, and run the MOK lab and the boot matrix
+again.
+
 ## Signed kernel (K1-K3)
 
 `kernel-vm-signed`: `kernel-vm` (16 schedulers attach, survive load, detach; `kill -9` falls back) on the image
@@ -100,9 +193,68 @@ signed by `sign-detached.sh` with a deterministic TEST key, `rime.kernel.signing
 signed image (`sbverify` against the TEST certificate) and `/sys/kernel/btf/vmlinux` is byte for byte the BTF
 `kernel-gate` checked (K1 carries over: signing appends a signature and changes no byte of the kernel's BTF).
 
-The scx self-test's attach window is 60 s in the checks (`nix/tests/kernel.nix`, `settle`): under katana's load
-(load average 60-120 from CI and other labs) `scx_eevdf` took 16.0 s and `scx_flow`/`scx_lavd` ~11 s to attach in
-a 4-vCPU VM; with the old 10 s window `scx_eevdf` failed. 60 s still fails a scheduler that never attaches.
+### K2 under load
+
+The scx self-test's attach window is 60 s in the checks (`nix/tests/kernel.nix`, `settle`); bootc's self-test uses
+10 s. Under katana's load on 2026-11-01/02 (load average 60-120 from CI and other labs, several VMs at once)
+`scx_eevdf` took 11.4 s and 16.0 s and `scx_flow`/`scx_lavd` ~11 s to attach in a 4-vCPU VM, and the 10 s window
+failed. 60 s still fails a scheduler that never attaches.
+
+The mutant, run 2026-11-02 (`nix/tests/bootmatrix.nix` takes `settle`; `kernel-vm-signed` with `settle = 10`, built
+with `--impure --expr` from `scratch/secureboot/k2/mutant.nix`), against host CPU load made on purpose (40, then 60
+`sha256sum /dev/zero` burners on katana's 20 threads):
+
+| run | window | host load average (1 min) | `scx_eevdf` attach | verdict |
+|---|---|---|---|---|
+| mutant, 40 burners | 10 s | 8 → 58 | 8.5 s | PASS 17/17 |
+| control (`checks.kernel-vm-signed`), 40 burners | 60 s | 59 → 63 | 9.3 s | PASS 17/17 |
+| mutant `--rebuild` pass 1, 60 burners | 10 s | 72 → 91 | 9.2 s | PASS 17/17 |
+| mutant `--rebuild` pass 2, 60 burners | 10 s | 90 → 88 | 8.0 s | PASS 17/17 |
+| mutant `--rebuild` pass 3, 60 burners | 10 s | 87 → 93 | 8.7 s | PASS 17/17 |
+| mutant, `settle = 5` | 5 s | ~90 | not enabled within 5 s | **FAIL** |
+
+What this shows, and the record (`artifacts/secureboot/k2/`):
+
+- **The 60 s window is not what makes K2 pass under CPU load alone.** With the host's CPUs saturated (load
+  58-93) the 10 s window passed four times out of four. CPU load does slow `scx_eevdf` (3.8 s at load 5 in the
+  wave-2 passes), but it levels off at 8.0-9.3 s however many burners run, under 2 s inside bootc's window. The
+  11.4 s and 16.0 s attaches came with several VMs and Nix builds running at once (memory and I/O pressure as well
+  as CPU), which CPU burners do not reproduce; that kind of host is what the 60 s window is for.
+- **The check can fail** on the attach time: `settle = 5` fails `scx_eevdf` and `scx_flow` ("not enabled within
+  5s"; 15 of 17 pass, `k2/mutant5.log`), so the window is measured, not decorative.
+- Decision: keep 60 s. It is headroom for a loaded CI host, not a correctness change; a scheduler that never
+  attaches still fails. Why `scx_eevdf` alone needs 8-9 s on a busy 4-vCPU VM is recorded, not fixed here.
+
+### The real Rime MOK
+
+Every signing proof above uses a TEST key. `nix/probe/ovmf/mok` (README there) proves what can be proven without
+the private key, with the **real** Rime MOK certificate (`nix/pkgs/kernel/signing/rime-mok.pem`, CN "APEX-OS Secure
+Boot key (andre)", sha256 of the DER `2fdd2f55...`) and a varstore that starts with Microsoft's keys only, no MOK of
+any kind. Run 2026-11-02, all PASS (`artifacts/secureboot/mok/run/results.tsv`):
+
+- C1: the published bootc kernel (signed in CI with the real Rime key) is refused before enrolment ("bad shim
+  signature").
+- I1: a Fedora-signed kernel boots under Secure Boot and runs `mokutil --import rime-mok.der` (MokNew + MokAuth
+  written by the guest, nothing pre-seeded).
+- M1: shim starts MokManager; the driver presses keys over QMP and saves a screenshot of every screen: press any
+  key, Enroll MOK, Continue, Yes, the password, Reboot (`M1-01` ... `M1-09-*.png`).
+- R1: the same bootc kernel now boots: `SecureBoot enabled`, the Rime MOK in MokListRT and in the kernel's platform
+  keyring, lockdown `[none]`.
+- R2: a kernel signed by a key that is not enrolled is still refused.
+- V: `virt-fw-vars` reads MokList: exactly one certificate, the Rime MOK.
+- Mutant: MokManager gets the wrong password (`RIME_MOK_MUTANT=wrong-password`): M1 never reaches Reboot, R1 never
+  boots, V finds an empty MokList, exit 1 (`artifacts/secureboot/mok/run-mutant/`).
+
+**Not proven: the NixOS kernel carrying the release signature.** `nix-kernel-sign.yml` cannot be dispatched from
+`feat/nixos`: `gh workflow run nix-kernel-sign.yml --ref feat/nixos` and the REST dispatch both answer HTTP 404
+"workflow ... not found on the default branch". GitHub dispatches a workflow only once it exists on the default
+branch (`main`) or has been registered by a run, and this one has never run: its only caller, `nix-release.yml`'s
+`kernel-sign` job, runs only on a release with the repository variable `RIME_NIX_KERNEL_HOST` set, which is not set
+(`artifacts/secureboot/release-mok/dispatch.txt`). Pushing to `main` or setting that variable is Andre's (both
+publish), so the run waits for him. When the artefact exists, `run.sh realsig DIR` checks it names this commit's
+`rime` image, attaches it exactly as `sign.nix` does (`sbattach` + `sbverify --cert rime-mok.pem`, `require = true`)
+and boots that NixOS kernel on the enrolled, Rime-MOK-only varstore. katana's real PCR 7 under the real MOK and its
+real db/dbx is P3.
 
 ## Results
 
@@ -152,8 +304,9 @@ Checks (all built on this branch; logs in `artifacts/bootmatrix/logs/`):
   scripts, `switch-to-configuration`, `INSTALL_BOOTLOADER` and what they reference to depth 4): **0 findings**.
   Mutants: a system with `rime.boot` off (NixOS's own GRUB) is flagged (`install-grub.pl`: `grub-install`), and an
   activation script that names `bootctl` is flagged (line 99).
-- `boot-microcode`: both layouts, two leading cpios (`GenuineIntel.bin`, `AuthenticAMD.bin`), initrd 51,584,750 B.
-  Mutant: microcode off gives no cpio and 36,040,430 B, the check's `none` case.
+- `boot-microcode` (wave 2, superseded by "Early microcode" above): both layouts, two leading cpios
+  (`GenuineIntel.bin`, `AuthenticAMD.bin`) inside the initrd, 51,584,750 B; with microcode off 36,040,430 B. The
+  split layout now keeps them out of the initrd and the prepended layout is the check's mutant.
 - `luks-boot`: the systemd initrd carries the cryptsetup generator with no crypttab entry, and KEYMAP=de
   in `vconsole.conf`; the entry with `rd.luks.uuid=` boots after the passphrase is typed and `/` is
   `/dev/mapper/luks-<uuid>`. Mutant (run by the verifier, 2026-11-02): `nix/modules/luks.nix` without
@@ -161,7 +314,8 @@ Checks (all built on this branch; logs in `artifacts/bootmatrix/logs/`):
   log `artifacts/verify-bootmatrix/luks-boot-mutant-forceLuks.log`.
 - `kernel-vm-signed` (K1-K3): three consecutive `nix build --rebuild` passes, 17/17 each (16 schedulers + `kill -9`),
   VERDICT PASS, at rising host load (load average 5→16, 16→25, 25→34; `scx_eevdf` attached in 3.8 s, 6.2 s and
-  11.4 s). The third would have failed the old 10 s window (the mutant: `settle 10` is what failed on 2026-11-01).
+  11.4 s). The third would have failed the old 10 s window; the `settle = 10` mutant run under CPU load is in "K2
+  under load" above.
   The booted kernel is the signed image (sbverify, not the unsigned file) and its `/sys/kernel/btf/vmlinux` is byte
   for byte `kernel-gate`'s `vmlinux.btf`.
 

@@ -8,7 +8,11 @@
 #      kernel/btf-xcheck.sh (bpftool, root cause) and rime-kernel-btf-gate (rimed's kernelbtf.rs, symptom);
 #   6. the scx release's bundled BPF header knows every member of this kernel's struct sched_ext_ops
 #      (Containerfile.core scx-builder: files/system/src/scx/check-sched-ext-ops.sh). A kernel bump that outruns
-#      the scx pin fails here, at build time, instead of only in kernel-vm's attach test.
+#      the scx pin fails here, at build time, instead of only in kernel-vm's attach test;
+#   7. the lockdown posture (decision A12, PLAN D3 "as today"; docs/nixos/boot-matrix.md, "Kernel lockdown under
+#      Secure Boot"): the lockdown LSM is built in and named in CONFIG_LSM (so `lockdown=integrity` on the command
+#      line works and G12's `lsm=` keeps it), lockdown is NOT forced by the config, and module signing is on but
+#      not enforced. Changing any of these is a product decision: change this list, the doc and A12 together.
 # Output: the verdict text plus the .BTF blob it read.
 {
   lib,
@@ -73,6 +77,20 @@ runCommand "rime-kernel-gate-${mdv}"
       echo "FATAL: CONFIG_MODULE_ALLOW_BTF_MISMATCH=y (tolerates the defect this gate exists for)"; exit 1
     fi
     echo "CONFIG_MODULE_ALLOW_BTF_MISMATCH is not set (deliberate)"
+    echo "=== lockdown and module-signing posture (A12) ==="
+    for opt in CONFIG_SECURITY_LOCKDOWN_LSM CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE CONFIG_MODULE_SIG; do
+      grep "^$opt=y" "$conf" >/dev/null || { echo "FATAL: $opt is not =y (A12 posture)"; exit 1; }
+      echo "$opt=y"
+    done
+    for opt in CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY CONFIG_LOCK_DOWN_KERNEL_FORCE_CONFIDENTIALITY CONFIG_MODULE_SIG_FORCE; do
+      if grep "^$opt=y" "$conf" >/dev/null; then echo "FATAL: $opt=y (A12: lockdown and module-signature enforcement stay off at launch)"; exit 1; fi
+      echo "$opt is not set (A12)"
+    done
+    lsm="$(sed -n 's/^CONFIG_LSM="\(.*\)"$/\1/p' "$conf")"
+    case ",$lsm," in
+      *,lockdown,*) echo "CONFIG_LSM=$lsm (lockdown listed)" ;;
+      *) echo "FATAL: CONFIG_LSM=$lsm does not list lockdown"; exit 1 ;;
+    esac
     if ! diff -u ${./config} "$conf"; then
       echo "FATAL: the kernel's final .config differs from nix/pkgs/kernel/config (oldconfig changed it at build time)"
       exit 1

@@ -94,7 +94,10 @@ let
               done
               vc=$(systemctl show -P ActiveState systemd-vconsole-setup.service)/$(systemctl show -P Result systemd-vconsole-setup.service)
               # ... and until plymouth holds THIS question (its n-th password request): only then are keys read.
-              # Bounded: 180 s, then reported as agent=none and the test fails by name.
+              # Bounded: 180 s, then reported as agent=none and the test fails by name. (nix/secureboot fixed the same
+              # race by waiting for an ask-password agent unit to be active; at integration this stronger wait, which
+              # reads plymouth's own trace for THIS request, was kept: it is the one checks.keymap-luks's type-early
+              # mutant proves.)
               agent=none w=0
               while [ "$w" -lt ${if mutant == "type-early" then "0" else "900"} ]; do
                 q=0

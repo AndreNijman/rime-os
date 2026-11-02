@@ -34,7 +34,7 @@
 #           nixos-install. Subvolumes @nixos (/), @nix (/nix), @home
 #           (/var/home), mounted compress-force=zstd:3.
 #    /var/lib/rime/host.toml  hostname, timezone (required), locale, keyboard,
-#           and [boot] layout=bls + kernel_params (rd.luks.uuid=…, and
+#           and [boot] layout=bls + microcode (the CPU's vendor) + kernel_params (rd.luks.uuid=…, and
 #           rd.vconsole.keymap=us when the unlock prompt cannot use the owner's
 #           layout). The boot hook reads [boot]; rime-hostlayer applies the rest.
 #    /var/lib/rime/nix/{releases/<release>/,applied.json}  the release this
@@ -346,6 +346,16 @@ Install from Windows with the Rime OS installer app (it makes Rime's own EFI par
   done
   [ -n "${RIME_EXTRA_KARGS:-}" ] && log "nixos: TEST kernel arguments: $RIME_EXTRA_KARGS"
 
+  # ── early microcode: this CPU's vendor only ────────────────────────────────
+  # host.toml [boot] microcode: the boot hook loads that vendor's microcode as its own initrd file (one copy on the
+  # ESP for every generation). An unknown vendor keeps both (the hook's default).
+  case "$(awk -F': *' '/^vendor_id/ { print $2; exit }' "${RIME_CPUINFO:-/proc/cpuinfo}" 2>/dev/null)" in
+    GenuineIntel) NIXOS_MICROCODE=intel ;;
+    AuthenticAMD) NIXOS_MICROCODE=amd ;;
+    *) NIXOS_MICROCODE=both ;;
+  esac
+  log "nixos: early microcode for this machine: $NIXOS_MICROCODE"
+
   # ── tools and loaders ──────────────────────────────────────────────────────
   for k in nix python3 openssl timeout xargs unshare sgdisk wipefs partprobe udevadm mkfs.vfat mkfs.btrfs btrfs blkid findmnt lsblk; do
     have "$k" || die "$k is missing from this installer, so $DISK cannot be prepared. Nothing has been erased. The ISO was built incorrectly; download it again."
@@ -455,7 +465,7 @@ nixos_host_toml() {  # $1=file — host.toml for this machine (rime-hostlayer's 
     [ -n "${CONSOLE_KEYMAP:-}" ] && printf 'console = "%s"\n' "$CONSOLE_KEYMAP"
     printf 'xkb_layout = "%s"\n' "${KEYMAP:-us}"
     [ -n "${KEYVARIANT:-}" ] && printf 'xkb_variant = "%s"\n' "$KEYVARIANT"
-    printf '\n[boot]\nlayout = "bls"\nkernel_params = [%s]\n' "$list"
+    printf '\n[boot]\nlayout = "bls"\nmicrocode = "%s"\nkernel_params = [%s]\n' "${NIXOS_MICROCODE:-both}" "$list"
   } > "$f.tmp" && chmod 0644 "$f.tmp" && mv -f "$f.tmp" "$f"
 }
 

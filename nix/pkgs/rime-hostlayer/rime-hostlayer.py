@@ -79,6 +79,9 @@ PATTERNS = {
 
 # [boot] layout values rime-boot reads (nix/modules/boot.nix rime.boot.layout, plus "auto").
 BOOT_LAYOUTS = ("auto", "bls", "custom-cfg")
+# [boot] microcode values rime-boot reads (nix/pkgs/rime-boot MICROCODE): which vendors' early-microcode cpios every
+# entry loads.
+BOOT_MICROCODE = ("both", "intel", "amd", "none")
 
 # Network filesystems (libmount's mnt_fstype_is_netfs, as systemd-fstab-generator uses it): such a mount waits for
 # the network and hangs from remote-fs.target, never from local-fs.target, and is never fsck'd.
@@ -173,6 +176,8 @@ def render_host_toml(host):
         out.append("[boot]")
         if boot.get("layout"):
             out.append(f"layout = {toml_str(boot['layout'])}")
+        if boot.get("microcode"):
+            out.append(f"microcode = {toml_str(boot['microcode'])}")
         if boot.get("kernel_params"):
             out.append("kernel_params = [" + ", ".join(toml_str(k) for k in boot["kernel_params"]) + "]")
         for k in ("device", "fstype"):
@@ -266,6 +271,9 @@ def validate_host(host):
         elif k == "fstype":
             if not matches("fstype", v):
                 errs.append(f"boot.fstype {v!r} is not a filesystem type")
+        elif k == "microcode":
+            if v not in BOOT_MICROCODE:
+                errs.append(f"boot.microcode {v!r} is not one of {', '.join(BOOT_MICROCODE)}")
         else:
             errs.append(f"unknown key boot.{k}")
     for i, v in enumerate(host.get("luks", [])):

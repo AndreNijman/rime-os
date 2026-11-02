@@ -43,7 +43,7 @@
 // import ./branding-surfaces.nix { inherit pkgs self; }
 # installer-nixos, installer-target-eval (the NixOS install path of installer/rime-install)
 // import ./installer.nix { inherit pkgs self; }
-# boot-loader-scan, boot-microcode, luks-boot, kernel-vm-signed
+# boot-loader-scan, boot-microcode, boot-esp-budget, luks-boot, kernel-vm-signed
 // import ./bootmatrix.nix { inherit pkgs self; }
 # keymap-luks
 // import ./keymap.nix { inherit pkgs self; }
@@ -69,3 +69,5 @@
 // { gaming-launch = import ./gaming-launch.nix { inherit pkgs self; }; }
 # vm-harness, vm-harness-vm
 // import ./vm-harness.nix { inherit pkgs self; }
+# luks-tpm-rebind (rime-luks-tpm-status, rime luks, rime doctor)
+// import ./luks-tpm.nix { inherit pkgs self; }

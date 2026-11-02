@@ -11,8 +11,13 @@ What it does, on every `switch-to-configuration boot|switch` (NixOS calls it wit
   1. reads the system profile's generations (/nix/var/nix/profiles/system-<N>-link), keeps the newest
      `configurationLimit` plus the profile's current generation, the booted one and every pinned one;
   2. copies each kept generation's kernel (realpath of <toplevel>/kernel, so a MOK-signed image that the kernel
-     module links there is what boots) and initrd into <boot>/rime/nixos/ under content-addressed names
-     (<sha256>-<store name>), refusing BEFORE writing anything when the filesystem would drop below its floor;
+     module links there is what boots), the early-microcode cpios its bootspec names (org.rimeos.microcode.v1,
+     only the vendor(s) host.toml [boot] microcode asks for) and its initrd into <boot>/rime/nixos/ under
+     content-addressed names (<sha256>-<store name>): a microcode file is stored ONCE for every generation that
+     shares it, and each entry lists it as its own initrd before the generation's initrd;
+     when the files do not fit above the floor, the oldest generations that are not current, booted or pinned
+     are left out of the menu until they do (making room first, see "Space"); it refuses, writing nothing, only
+     when the current, booted and pinned generations alone do not fit;
   3. writes the menu for the machine's layout:
        bls         fresh installs (the FAT ESP is /boot): one BLS entry per generation in <boot>/loader/entries,
                    read by Fedora GRUB's blscfg, plus <boot>/grub2/rime-nixos.cfg (default + timeout);
@@ -23,6 +28,10 @@ What it does, on every `switch-to-configuration boot|switch` (NixOS calls it wit
 
 Order (a power cut at any point leaves a bootable menu): kernel/initrd written to a temporary name, fsynced,
 renamed, directory fsynced; then entries; then the menu file (tmp + fsync + rename); only then is anything removed.
+
+Space: when the new files fit only after the files of generations no longer listed are removed, the hook first
+writes a menu of the kept generations whose files are already on disk (bootable as it stands), removes what that
+menu does not name, and only then copies; a power cut in between boots one of those generations.
 
 Recovery in v1 is manual (D3, D9): the menu is always shown (timeout_style=menu, `timeout` seconds) and every kept
 generation is listed, so a user whose new generation does not boot picks an older one. There is no boot counting:
@@ -64,6 +73,10 @@ INCLUDE_BLOCK = (
     "fi\n" + BLOCK_END + "\n"
 )
 LAYOUTS = ("bls", "custom-cfg")
+# host.toml [boot] microcode: which vendors' early-microcode cpios every entry carries. "both" (the default) is what
+# a generic install needs; the installer writes the CPU's own vendor.
+MICROCODE = {"both": ("intel", "amd"), "intel": ("intel",), "amd": ("amd",), "none": ()}
+MICROCODE_EXT = "org.rimeos.microcode.v1"
 # Kernel parameters are written into GRUB script (custom-cfg) and BLS `options` lines that blscfg expands like GRUB
 # script. Anything that GRUB would expand, quote or split is refused by name instead of escaped: that includes `*` and
 # `?` (GRUB's wildcard translator globs them against devices and files) and `#` (a word starting with it is a comment).
@@ -228,11 +241,17 @@ class Generation:
         self.toplevel = toplevel
         self.date = time.strftime("%Y-%m-%d %H:%M", time.localtime(os.lstat(link).st_mtime))
         spec_path = os.path.join(toplevel, "boot.json")
-        spec = {}
+        doc = {}
         if os.path.exists(spec_path):
             with open(spec_path, encoding="utf-8") as f:
-                spec = json.load(f).get("org.nixos.bootspec.v1", {})
+                doc = json.load(f)
+        spec = doc.get("org.nixos.bootspec.v1", {})
         self.spec = spec
+        # nix/modules/boot.nix: {"intel": <cpio>, "amd": <cpio>}. A generation built before the split (or with the
+        # extension off) has none: its initrd may carry microcode itself (boot.initrd.prepend) and is used as is.
+        ucode = doc.get(MICROCODE_EXT) or {}
+        self.microcode = {k: os.path.realpath(v) for k, v in ucode.items() if k in ("intel", "amd") and v}
+        self.mandatory = False
         # The toplevel's own kernel link, not bootspec's `kernel`: bootspec names ${kernelPackages.kernel}/bzImage
         # (unsigned), while nix/modules/kernel.nix relinks <toplevel>/kernel to the MOK-signed image when the hosted
         # signing job's signature is set. Whatever <toplevel>/kernel is, is what boots.
@@ -250,6 +269,18 @@ class Generation:
             raise HookError(f"generation {number} ({toplevel}) has no kernel")
         if not self.initrd or not os.path.isfile(self.initrd):
             raise HookError(f"generation {number} ({toplevel}) has no initrd")
+
+    def initrds(self, vendors):
+        """The files this generation's entry loads as initrds, in order: the microcode cpios, then the initrd."""
+        out = []
+        for v in vendors:
+            p = self.microcode.get(v)
+            if p is None:
+                continue
+            if not os.path.isfile(p):
+                raise HookError(f"generation {self.number}: its {v} microcode {p} does not exist")
+            out.append(p)
+        return out + [self.initrd]
 
     @property
     def entry_id(self):
@@ -315,14 +346,15 @@ def plan_generations(cfg, toplevel_arg):
         top = os.path.realpath(toplevel_arg)
         if raw[current][1] != top:
             log(f"note: {top} is not the profile's current generation {current}; the menu defaults to generation {current}")
-    keep = set(sorted(raw, reverse=True)[: int(cfg["configurationLimit"])])
-    keep.add(current)
-    keep |= {n for n in pinned_numbers(cfg) if n in raw}
+    must = {current} | {n for n in pinned_numbers(cfg) if n in raw}
     booted = cfg.get("bootedSystem")
     if booted and os.path.exists(booted):
         b = os.path.realpath(booted)
-        keep |= {n for n, (_, t) in raw.items() if t == b}
+        must |= {n for n, (_, t) in raw.items() if t == b}
+    keep = set(sorted(raw, reverse=True)[: int(cfg["configurationLimit"])]) | must
     gens = [Generation(n, *raw[n]) for n in sorted(keep, reverse=True)]
+    for g in gens:
+        g.mandatory = g.number in must
     default = next(g for g in gens if g.number == current)
     return gens, default
 
@@ -355,7 +387,8 @@ def store_name(path):
 
 def boot_file_name(path, kind):
     suffix = ".efi" if kind == "kernel" else ".img"
-    return f"{sha256_file(path)[:32]}-{store_name(path)}{suffix}"
+    name = store_name(path)
+    return f"{sha256_file(path)[:32]}-{name}{'' if name.endswith(suffix) else suffix}"
 
 
 def pe_signed(path):
@@ -476,18 +509,19 @@ def options_of(g, host_params):
     return " ".join([f"init={g.init}"] + g.params + host_params)
 
 
-def bls_entry(g, files, grub_path, host_params):
-    k, i = files[g.kernel], files[g.initrd]
+def bls_entry(g, files, grub_path, host_params, vendors):
+    # One `initrd` line per file: Fedora GRUB's blscfg loads them in order and the kernel gets one concatenated
+    # image, microcode first (nix/probe/ovmf/mok, boots U1/U2).
     return (
         f"title {g.title()}\n"
         f"version {g.number}\n"
-        f"linux {grub_path}/rime/nixos/{k}\n"
-        f"initrd {grub_path}/rime/nixos/{i}\n"
-        f"options {options_of(g, host_params)}\n"
+        f"linux {grub_path}/rime/nixos/{files[g.kernel]}\n"
+        + "".join(f"initrd {grub_path}/rime/nixos/{files[i]}\n" for i in g.initrds(vendors))
+        + f"options {options_of(g, host_params)}\n"
     )
 
 
-def menu_file(layout, gens, default, files, grub_path, host_params, timeout):
+def menu_file(layout, gens, default, files, grub_path, host_params, timeout, vendors):
     lines = [
         "# Rime boot menu, written by rime-boot (boot.loader.external). Do not edit: every",
         "# switch-to-configuration boot rewrites it. Sourced from custom.cfg (bootupd's 41_custom.cfg).",
@@ -502,7 +536,7 @@ def menu_file(layout, gens, default, files, grub_path, host_params, timeout):
             lines += [
                 f"menuentry '{g.title()}' --id {g.entry_id} {{",
                 f"  linux {grub_path}/rime/nixos/{files[g.kernel]} {options_of(g, host_params)}",
-                f"  initrd {grub_path}/rime/nixos/{files[g.initrd]}",
+                "  initrd " + " ".join(f"{grub_path}/rime/nixos/{files[i]}" for i in g.initrds(vendors)),
                 "}",
             ]
     lines.append(f"set default={default.entry_id}")
@@ -577,48 +611,133 @@ def install(cfg, toplevel_arg):
     host_params = host_params + keymap_params(cfg, host, host_params, default)
     grub_path = grub_path_of(cfg)
 
+    vendors = microcode_vendors(cfg, host_boot)
     rdir = os.path.join(boot, "rime", "nixos")
-    files = {}
-    for g in gens:
-        files.setdefault(g.kernel, boot_file_name(g.kernel, "kernel"))
-        files.setdefault(g.initrd, boot_file_name(g.initrd, "initrd"))
-
-    # (e) the floor: refuse before the first write.
-    need = 0
-    to_copy = []
-    seen = set()
-    for src, name in sorted(files.items(), key=lambda kv: kv[1]):
-        dst = os.path.join(rdir, name)
-        if name in seen or (os.path.isfile(dst) and os.path.getsize(dst) == os.path.getsize(src)):
-            continue
-        seen.add(name)
-        to_copy.append((src, dst))
-        need += os.path.getsize(src)
     reserve = int(cfg["reserveMiB"]) * 1024 * 1024
+    mib = lambda b: f"{b / 1048576:.1f} MiB"  # noqa: E731
+    on_disk = files_on_disk(rdir)
     avail = free_bytes(boot if not os.path.isdir(rdir) else rdir)
-    if to_copy and avail < need + reserve:
-        mib = lambda b: f"{b / 1048576:.1f} MiB"  # noqa: E731
-        raise Refusal(
-            f"not enough space on {boot}: {mib(avail)} free, the new kernel and initrd files need {mib(need)} "
-            f"plus the {mib(reserve)} floor (rime.boot.reserveMiB). Nothing was written; remove old generations "
-            "(rime gc) and run the hook again"
-        )
 
-    log(f"layout {layout} ({why}); GRUB path of {boot}: {grub_path or '/'}")
+    # (e) the floor, before the first write: leave out the oldest optional generations until the files fit, in
+    # free space as it is or once the files no kept generation names are removed.
+    kept, dropped = list(gens), []
+    while True:
+        files, to_copy, need, reclaim = space_plan(kept, vendors, rdir, on_disk)
+        if not to_copy or avail >= need + reserve:
+            room = "free"
+            break
+        if avail + reclaim >= need + reserve:
+            room = "reclaim"
+            break
+        optional = [g for g in kept if not g.mandatory]
+        if not optional:
+            raise Refusal(
+                f"not enough space on {boot}: {mib(avail)} free ({mib(reclaim)} more once unlisted files are "
+                f"removed), the new kernel, microcode and initrd files of the current, booted and pinned "
+                f"generation(s) {', '.join(str(g.number) for g in kept)} need {mib(need)} plus the {mib(reserve)} "
+                "floor (rime.boot.reserveMiB). Nothing was written; unpin a generation or make the boot "
+                "filesystem bigger, and run the hook again"
+            )
+        oldest = min(optional, key=lambda g: g.number)
+        kept.remove(oldest)
+        dropped.append(oldest.number)
+    for n in dropped:
+        log(f"generation {n} left out of the menu: {boot} cannot hold its files as well (free {mib(avail)}, "
+            f"floor {mib(reserve)}); it stays in the profile")
+
+    log(f"layout {layout} ({why}); GRUB path of {boot}: {grub_path or '/'}; microcode {'+'.join(vendors) or 'none'}")
     os.makedirs(rdir, exist_ok=True)
     for name in os.listdir(rdir):
         if name.startswith(TMP_PREFIX):
             os.unlink(os.path.join(rdir, name))
+
+    if room == "reclaim":
+        # Make room without ever leaving a menu that names a missing file: list only kept generations whose files
+        # are all on disk, remove everything else, then copy.
+        present = [g for g in kept if all(on_disk.get(files[p]) == os.path.getsize(p)
+                                          for p in [g.kernel] + g.initrds(vendors))]
+        if not present:
+            raise Refusal(
+                f"not enough space on {boot}: {mib(avail)} free and no kept generation's files are on it yet, "
+                "so making room would leave nothing to boot. Nothing was written; free space on the boot "
+                "filesystem and run the hook again"
+            )
+        interim = default if default in present else present[0]
+        log(f"making room: menu of generation(s) {', '.join(str(g.number) for g in present)} "
+            f"(default {interim.number}) while the unlisted files are removed")
+        write_menus(cfg, boot, grub2, layout, present, interim, files, grub_path, host_params, vendors)
+        # Keep every file a KEPT generation names (some may be on disk for a generation not yet complete): exactly
+        # the `reclaim` bytes space_plan counted go.
+        collect_garbage(boot, rdir, layout, present, set(files.values()))
+        avail = free_bytes(rdir)
+        if avail < need + reserve:
+            raise Refusal(
+                f"not enough space on {boot} after removing unlisted files: {mib(avail)} free, the new files need "
+                f"{mib(need)} plus the {mib(reserve)} floor. The menu lists generation(s) "
+                f"{', '.join(str(g.number) for g in present)}, all bootable; nothing new was copied"
+            )
+
     for src, dst in to_copy:
         log(f"copy {src} -> {dst}")
         atomic_copy(src, dst)
-    for g in gens:
+    for g in kept:
         log(
             f"generation {g.number}{' (default)' if g is default else ''}: kernel {files[g.kernel]}"
-            f"{' (signed)' if pe_signed(g.kernel) else ' (no signature)'}, initrd {files[g.initrd]}"
+            f"{' (signed)' if pe_signed(g.kernel) else ' (no signature)'}, initrd "
+            + " + ".join(files[i] for i in g.initrds(vendors))
         )
+    write_menus(cfg, boot, grub2, layout, kept, default, files, grub_path, host_params, vendors)
+    # Only now remove what nothing names any more.
+    collect_garbage(boot, rdir, layout, kept, {files[p] for g in kept for p in [g.kernel] + g.initrds(vendors)})
+    try:
+        fd = os.open(boot, os.O_RDONLY | os.O_DIRECTORY)
+        os.syncfs(fd) if hasattr(os, "syncfs") else os.sync()
+        os.close(fd)
+    except OSError:
+        os.sync()
+    log(f"menu: {len(kept)} generation(s), default generation {default.number}")
+    return 0
 
-    wanted_entries = set()
+
+def microcode_vendors(cfg, host_boot):
+    v = host_boot.get("microcode", "both")
+    if v not in MICROCODE:
+        raise Refusal(f"{cfg['hostToml']}: [boot] microcode must be one of {', '.join(MICROCODE)}, not {v!r}")
+    return MICROCODE[v]
+
+
+def files_on_disk(rdir):
+    """{name: size} of the regular files rime-boot keeps in rdir (temporary files excluded)."""
+    out = {}
+    if os.path.isdir(rdir):
+        for name in os.listdir(rdir):
+            p = os.path.join(rdir, name)
+            st = os.lstat(p)
+            if stat.S_ISREG(st.st_mode) and not name.startswith(TMP_PREFIX):
+                out[name] = st.st_size
+    return out
+
+
+def space_plan(gens, vendors, rdir, on_disk):
+    """(files {src: name}, to_copy [(src, dst)], bytes to copy, bytes freed by removing what gens do not name)."""
+    files = {}
+    for g in gens:
+        for p in [g.kernel] + g.initrds(vendors):
+            files.setdefault(p, boot_file_name(p, "kernel" if p == g.kernel else "initrd"))
+    need, to_copy, seen = 0, [], set()
+    for src, name in sorted(files.items(), key=lambda kv: kv[1]):
+        if name in seen or on_disk.get(name) == os.path.getsize(src):
+            continue
+        seen.add(name)
+        to_copy.append((src, os.path.join(rdir, name)))
+        need += os.path.getsize(src)
+    referenced = set(files.values())
+    reclaim = sum(size for name, size in on_disk.items() if name not in referenced)
+    return files, to_copy, need, reclaim
+
+
+def write_menus(cfg, boot, grub2, layout, gens, default, files, grub_path, host_params, vendors):
+    """Entries (bls), the menu file and custom.cfg's include block, each written atomically."""
     if layout == "bls":
         edir = os.path.join(boot, "loader", "entries")
         os.makedirs(edir, exist_ok=True)
@@ -626,13 +745,10 @@ def install(cfg, toplevel_arg):
             if name.startswith(TMP_PREFIX):
                 os.unlink(os.path.join(edir, name))
         for g in gens:
-            name = g.entry_id + ".conf"
-            wanted_entries.add(name)
-            atomic_write(os.path.join(edir, name), bls_entry(g, files, grub_path, host_params))
-
+            atomic_write(os.path.join(edir, g.entry_id + ".conf"), bls_entry(g, files, grub_path, host_params, vendors))
     atomic_write(
         os.path.join(grub2, MENU_FILE),
-        menu_file(layout, gens, default, files, grub_path, host_params, cfg["timeout"]),
+        menu_file(layout, gens, default, files, grub_path, host_params, cfg["timeout"], vendors),
     )
     custom = os.path.join(grub2, "custom.cfg")
     try:
@@ -641,32 +757,37 @@ def install(cfg, toplevel_arg):
         old = None
     atomic_write(custom, with_include_block(old))
 
-    # Only now remove what nothing names any more.
+
+def collect_garbage(boot, rdir, layout, gens, referenced):
+    """Remove the BLS entries of generations not in gens and the files of rdir not in referenced (call it only
+    after the menu that names gens is written)."""
     if layout == "bls":
         edir = os.path.join(boot, "loader", "entries")
+        wanted = {g.entry_id + ".conf" for g in gens}
         for name in os.listdir(edir):
-            if name.startswith(ENTRY_PREFIX) and name.endswith(".conf") and name not in wanted_entries:
+            if name.startswith(ENTRY_PREFIX) and name.endswith(".conf") and name not in wanted:
                 log(f"remove entry {name}")
                 os.unlink(os.path.join(edir, name))
         fsync_dir(edir)
-    referenced = set(files.values())
-    for name in os.listdir(rdir):
-        p = os.path.join(rdir, name)
-        if name not in referenced and stat.S_ISREG(os.lstat(p).st_mode):
-            log(f"remove unreferenced {p}")
-            os.unlink(p)
-    fsync_dir(rdir)
-    try:
-        fd = os.open(boot, os.O_RDONLY | os.O_DIRECTORY)
-        os.syncfs(fd) if hasattr(os, "syncfs") else os.sync()
-        os.close(fd)
-    except OSError:
-        os.sync()
-    log(f"menu: {len(gens)} generation(s), default generation {default.number}")
-    return 0
+    if os.path.isdir(rdir):
+        for name in os.listdir(rdir):
+            p = os.path.join(rdir, name)
+            if name not in referenced and stat.S_ISREG(os.lstat(p).st_mode):
+                log(f"remove unreferenced {p}")
+                os.unlink(p)
+        fsync_dir(rdir)
 
 
 # ── check (read-only) ──────────────────────────────────────────────────────────
+
+def boot_refs(text):
+    """Every file a menu entry loads: the kernel (first word of `linux`) and every path on every `initrd` line."""
+    refs = []
+    for kind, rest in re.findall(r"^\s*(linux|initrd) (.+?)\s*$", text, re.M):
+        words = rest.split()
+        refs += words[:1] if kind == "linux" else words
+    return refs
+
 
 def check(cfg):
     boot = cfg["bootDir"]
@@ -695,10 +816,10 @@ def check(cfg):
             except FileNotFoundError:
                 out["missing"].append(entry)
                 body = ""
-            refs = re.findall(r"^(?:linux|initrd) (\S+)$", body, re.M)
+            refs = boot_refs(body)
         else:
             blk = re.search(r"--id " + re.escape(f"{ENTRY_PREFIX}{n}") + r" \{\n(.*?)\n\}", text, re.S)
-            refs = re.findall(r"^\s*(?:linux|initrd) (\S+)", blk.group(1), re.M) if blk else []
+            refs = boot_refs(blk.group(1)) if blk else []
             if not blk:
                 out["missing"].append(f"menuentry {ENTRY_PREFIX}{n}")
         for r in refs:
