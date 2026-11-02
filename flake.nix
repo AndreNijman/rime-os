@@ -71,6 +71,8 @@
         modules = [
           self.nixosModules.default
           ./nix/hosts/vm.nix
+          # vm.nix sets no hostName (host.toml names the machine), which would name the toplevel "unnamed".
+          { system.name = "rime-vm"; }
         ];
       };
 
