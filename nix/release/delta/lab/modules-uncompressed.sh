@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# delta.md §6/§7 item 5: what the weekly kernel-modules delta would be with CONFIG_MODULE_COMPRESS_NONE.
+# delta.md §6.1: what the weekly kernel-modules delta would be with CONFIG_MODULE_COMPRESS_NONE.
 # The weekly pair's module trees (nixpkgs linux-6.18.58/.59-modules, .ko.xz) are copied and every module
 # decompressed in place: the tree a MODULE_COMPRESS_NONE build installs (same objects, same signatures, .ko).
 # Then the NAR, its full size at zstd -3 / -19 --long=27, and the delta at -19 --long=27 --patch-from, for the tree
