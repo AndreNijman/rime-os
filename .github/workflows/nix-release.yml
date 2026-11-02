@@ -269,6 +269,39 @@ jobs:
           esac
           du -sh "$t/artifact"
 
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        if: needs.changes.outputs.build == 'full' && (vars.RIME_NIX_CACHE_BACKEND || 'github') == 'github'
+        with:
+          cosign-release: v2.5.2
+
+      # Deltas (docs/nixos/delta.md §7): one per changed path against the channel's previous release, verified with
+      # cosign like a client verifies it. The toplevels are built by now, so only from here does the daemon also
+      # substitute from Rime's cache (the previous release's paths, the delta bases). A failure here ships the release
+      # without deltas: clients then download whole paths, as before deltas existed.
+      - name: Deltas against the previous release (github backend)
+        if: needs.changes.outputs.build == 'full' && (vars.RIME_NIX_CACHE_BACKEND || 'github') == 'github'
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP"
+          printf 'extra-substituters = %s\nextra-trusted-public-keys = %s\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY" \
+            | sudo tee -a /etc/nix/nix.conf >/dev/null
+          sudo systemctl restart nix-daemon
+          # The bases are the previous release's paths (a mass rebuild: ~10 GB of NAR into the store beside the new
+          # closure), so a runner without the room skips deltas instead of failing the release. --jobs 4: zstd -19
+          # is one thread per path; the mass rebuild's 8,262 CPU-s is ~35 min on 4 cores (delta.md §6). The time
+          # limit keeps a slow delta run from eating the job's 360 minutes.
+          avail=$(df --output=avail -B1G /nix | tail -1 | tr -d ' ')
+          if [ "$avail" -lt 25 ]; then
+            echo "::warning::no deltas for this release: only ${avail} GB free for the delta bases (clients download whole paths)"
+          elif ! timeout 150m "$t/tool/bin/rime-nix-release" deltas --artifact "$t/artifact" --repo "$IMAGE_REPO" \
+              --fulcio-root files/system/trust/fulcio-root.pem --signer "$NIX_SIGNER" --upstream "$UPSTREAM_CACHE" \
+              --substituter "$CACHE_URL" --trusted-key "$RIME_CACHE_PUBKEY" \
+              --substituter "$UPSTREAM_CACHE" --trusted-key "$UPSTREAM_KEY" --tmp "$t" --jobs 4; then
+            echo "::warning::no deltas for this release: rime-nix-release deltas failed (clients download whole paths)"
+            rm -rf "$t/artifact/deltas" "$t/artifact/deltas.json"
+          fi
+          du -sh "$t/artifact/deltas" 2>/dev/null || true
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: needs.changes.outputs.build == 'full'
         with:
