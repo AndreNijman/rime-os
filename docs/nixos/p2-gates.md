@@ -10,17 +10,41 @@ Columns:
 - **How proven**: the evidence that will close the line: a `checks.x86_64-linux.<attr>` (a Nix VM or build check), a
   log from a named rig (OVMF lab, iso-qualify), or a screenshot. A line closes only on that evidence, seen.
 - **Evidence so far**: partial proof that exists today, with where it is. Partial is not met.
-- **Status**: every line is **not met yet**. Change a line only with the evidence named in its row.
+- **Status**: met, partial or not met, as of the evidence named in its row (see **P2 status** below). Change a line
+  only with the evidence named in its row.
 
 P4 gates (8 weekly updates, live shell-only update, 30-day bytes, wall-clock) are not P2 and are not listed.
+
+## P2 status (integration of wave 2, 2026-11-02)
+
+**45 of 50 met, 5 partial, 0 not met.** Every branch below is merged on `feat/nixos`; on the merged HEAD the whole
+`nix flake check path:. -L --keep-going` passes (every Nix check named in a row re-ran there, not only on its branch;
+log `/var/lab/rime-nix/artifacts/integrate-wave2/flakecheck2.log`) and `hostlayer-katana` passes on the real katana
+snapshot (`integrate-wave2/hostlayer-katana.log`). Evidence from outside `nix flake check` was produced on the
+branches and NOT re-run at integration: the OVMF lab, iso-qualify and the boot drivers (B1-B10, T1-T3, I1-I3, D1, D2,
+X1), the delta measurements (G1, G2) and `pkg-translate.katana` on the real snapshot (P1); the logs are where each row
+says.
+
+Partial, and what each still needs:
+
+| # | Missing | Needs |
+|---|---|---|
+| D2 | The default (encrypted) install is refused by `rime migrate check` (`boot-partition`), not migrated | Code: teach `rime.rootfs`/the bridge a separate ext4 /boot, then a LUKS topology-A OVMF run. Agent work, no Andre input |
+| G3 | The import cost is measured VM-free only; deltas are not wired into `rime update` | P4 work (delta.md §7): wire deltas into the client, then time it in `update-e2e`. Agent work |
+| P2 | Steam itself starting an installed game (`steam -applaunch`), Proton, a real GPU | A Steam account + network for the VM (a test account: Andre's call); real hardware is the P3 gate on katana |
+| X4 | Literal cases: a tampered narHash inside a NAR, and an unsigned manifest under a validly signed channel. Proven today: a manifest changed after signing, a changed channel document, an unsigned channel document, a wrong identity, a wrong cache key | Two more `update-e2e` subtests (new `update-e2e-tamper` modes). Agent work |
+| X5 | `rime rollback` is proven, and every refusal leaves the profile and the running system unchanged, but no test runs a rollback AFTER a refusal | One `update-e2e` subtest: refuse, then `rime rollback`, reboot, assert the previous generation. Agent work |
+
+Also open but not a row: every row that signs uses TEST keys (MOK, cache key, Fulcio identity; I2/I3 say so). The real
+keys exist only in CI and are first proven by a signed release (P3/P4).
 
 ## Kernel
 
 | # | Gate | How proven | Evidence so far | Status |
 |---|---|---|---|---|
 | K1 | The Rime kernel has BTF, with the bootc tier's gate (pahole, required `=y` options, no BTF-mismatch escape hatch, committed config, kfunc BTF read by two readers) | `kernel-gate` | `kernel-vm-signed` (nix/bootmatrix): the VM boots the image signed by `sign-detached.sh` (TEST key, `require = true`, sbverify) and `/sys/kernel/btf/vmlinux` is byte for byte `kernel-gate`'s `vmlinux.btf`; `kernel-gate` builds green. Log `/var/lab/rime-nix/artifacts/bootmatrix/logs/kernel-vm-signed.log` | **met** 2026-11-02 (nix/bootmatrix) |
-| K2 | The scx gate: all 16 shipped sched-ext schedulers attach, survive load and detach on the shipped kernel | `kernel-vm` (bootc's own `tests/kernel/scx-selftest` + `run-scx-selftest.sh --parse-only`) | `kernel-vm-signed`: attach window 60 s (`nix/tests/kernel.nix`); three consecutive `--rebuild` passes, 17/17 VERDICT PASS each, host load average 5→16, 16→25, 25→34 (`scx_eevdf` attach 3.8 / 6.2 / 11.4 s: the third fails the old 10 s window). Logs `/var/lab/rime-nix/artifacts/bootmatrix/logs/k2-kernel-vm-signed.pass{1,2,3}.log` | **met** 2026-11-02 (nix/bootmatrix) |
-| K3 | A `kill -9` of the running scheduler hands every task back to the kernel's class | `kernel-vm` | `kernel-vm-signed`, the same three passes: the `kill -9` case passes in each | **met** 2026-11-02 (nix/bootmatrix) |
+| K2 | The scx gate: all 16 shipped sched-ext schedulers attach, survive load and detach on the shipped kernel | `kernel-vm-signed` (the signed image; `kernel-vm` boots it unsigned) (bootc's own `tests/kernel/scx-selftest` + `run-scx-selftest.sh --parse-only`) | `kernel-vm-signed`: attach window 60 s (`nix/tests/kernel.nix`); three consecutive `--rebuild` passes, 17/17 VERDICT PASS each, host load average 5→16, 16→25, 25→34 (`scx_eevdf` attach 3.8 / 6.2 / 11.4 s: the third fails the old 10 s window). Logs `/var/lab/rime-nix/artifacts/bootmatrix/logs/k2-kernel-vm-signed.pass{1,2,3}.log` | **met** 2026-11-02 (nix/bootmatrix) |
+| K3 | A `kill -9` of the running scheduler hands every task back to the kernel's class | `kernel-vm-signed` | `kernel-vm-signed`, the same three passes: the `kill -9` case passes in each | **met** 2026-11-02 (nix/bootmatrix) |
 
 ## Boot chain: OVMF, shim → Fedora GRUB → MOK-signed kernel (D3)
 
@@ -106,7 +130,7 @@ Input: the sanitised snapshot `/var/lab/rime-nix/artifacts/katana-state/` (0700,
 |---|---|---|---|---|
 | G1 | The size of a `zstd --patch-from` delta against the previous release's paths is measured, for a non-mass-rebuild release pair | measurement script + raw data committed (`probe/tools/delta.py` over closure TSVs, or the real narinfo `fileSize` set) | `docs/nixos/delta.md` §3; tool `nix/release/delta/rime_delta.py` (`checks.delta` + 6 mutants); raw data `nix/release/delta/data/g1-rime/`, `data/g1-nixpkgs/` (closures, pairs, per-path results). Weekly nixpkgs pair 3ec6363→1c89083: shipped 745.9 MB → delta 230.9 MB (31.0 %; kernel 137.7 MB of it); Rime-only pair: 27.6 MB → 3.2 MB | **met** (nix/g2, 2026-11-02) |
 | G2 | The same for a mass-rebuild pair (glibc/stdenv), the case A3 batches | same | `docs/nixos/delta.md` §4; raw data `nix/release/delta/data/g2-mass/` (closures, pairs, per-path results, versions). Pair 55bfb4d→3ec6363 (glibc 2.44-25→-57, systemd 262, Qt 6.12, kernel, linux-firmware; 2067 of 2088 paths): shipped 4,100.2 MB → delta 582.0 MB (14.2 %); same-name rebuilds 1,998 → 76 MB | **met** (nix/g2, 2026-11-02) |
-| G3 | The client's import step (fetch delta, reconstruct the NAR, check narHash, import) has a measured cost | client VM test timing | VM-free benchmark instead (`docs/nixos/delta.md` §5, `nix/release/delta/lab/g3*.sh`, logs `data/g3-all.log`, `data/*/apply-all*`, `data/*/nixcopy-baseline*`): `apply-all` moves a chroot store to the new release from a signed file cache. Weekly (161 paths): 42.1 s vs 3.4 s plain `nix copy`, peak RSS 788 MiB; mass rebuild (2067 paths): 271.2 s vs 10.3 s, peak RSS 1,640 MiB; break-even ~13.4 MB/s; `nix store verify` clean every run; `checks.delta` proves apply, apply-all and 5 refusals (+ measure's re-decode guard) | **met (VM-free prototype benchmark, as the G2 task asked)** (nix/g2, 2026-11-02); the "How proven" VM timing inside `rime update` is NOT done: deltas are not wired into the shipped client, deferred to P4 (delta.md §7) |
+| G3 | The client's import step (fetch delta, reconstruct the NAR, check narHash, import) has a measured cost | client VM test timing | VM-free benchmark instead (`docs/nixos/delta.md` §5, `nix/release/delta/lab/g3*.sh`, logs `data/g3-all.log`, `data/*/apply-all*`, `data/*/nixcopy-baseline*`): `apply-all` moves a chroot store to the new release from a signed file cache. Weekly (161 paths): 42.1 s vs 3.4 s plain `nix copy`, peak RSS 788 MiB; mass rebuild (2067 paths): 271.2 s vs 10.3 s, peak RSS 1,640 MiB; break-even ~13.4 MB/s; `nix store verify` clean every run; `checks.delta` proves apply, apply-all and 5 refusals (+ measure's re-decode guard) | partial (nix/g2, 2026-11-02): the VM-free prototype benchmark is met, as the G2 task asked; the "How proven" VM timing inside `rime update` is NOT done: deltas are not wired into the shipped client, deferred to P4 (delta.md §7) |
 
 ## D5 gates (packages)
 
@@ -128,5 +152,5 @@ Listed so they are not lost; they close the same way.
 | X1 | The topology E repair runs | D3 P2 gates | OVMF lab log: `/var/lab/rime-nix/artifacts/bridge/E/E-repair-e*.txt`, `E-after-repair.txt` (trial ESP dirs + the trial NVRAM entry archived under /var/lib/rime/boot-migrate/archive-*, entry deleted, BootOrder untouched, phase=failed kept and carried to NixOS). The trial's `/composefs` and `/state` in the btrfs top level are left in place by design (not on the boot path; `E/E-back-state.txt`) | met (2026-11-02) |
 | X2 | The `test-boot-v2.sh` scan finds no `bootctl`, `grub-install` or `efibootmgr` in the activation script or the boot hook | D3 | `boot-loader-scan`: `rime-vm` and `rime-vm-luks`, 14 files each (hook, activate, dry-activate, switch-to-configuration, INSTALL_BOOTLOADER, depth 4), 0 findings; negative controls flagged (NixOS GRUB `install-grub.pl` grub-install; activation `bootctl` line 99). Log `/var/lab/rime-nix/artifacts/bootmatrix/logs/checks-nonvm.log` | **met** 2026-11-02 (nix/bootmatrix) |
 | X3 | A machine that never took the release carrying `RENAMED_SIGNER` is refused by name | D1 | `rime migrate check` VM test: `bridge-refusals` X3 disk `REFUSED [renamed-signer]`, sha256 unchanged (`/var/lab/rime-nix/artifacts/bridge/bridge-refusals.log`); mutant no-signer-check | met (2026-11-02) |
-| X4 | An end-to-end update in a VM refuses a tampered narHash, an unsigned manifest and a wrong identity | D6 | `update-e2e` (release + client) | not met yet |
-| X5 | Rollback works after a refused update | D6 | `update-e2e` | not met yet |
+| X4 | An end-to-end update in a VM refuses a tampered narHash, an unsigned manifest and a wrong identity | D6 | `update-e2e` (release pipeline + client, two VMs): a manifest changed after signing while the channel document naming it is validly signed, refused "does not verify"; a channel document changed after signing, refused "does not verify"; each refusal asserts exit != 0, the profile unchanged and `/run/current-system` still C. `update-client`: an unsigned channel document refused "is not signed", a manifest signed by another identity refused ("build-image.yml"), a wrong cache key refused ("did not match its signature"), a replay and a `min_from` refused. Both PASS at integration (`/var/lab/rime-nix/artifacts/integrate-wave2/flakecheck2.log`). **Not literally tested:** a tampered narHash inside a NAR, an unsigned manifest under a signed channel | partial (2026-11-02) |
+| X5 | Rollback works after a refused update | D6 | `update-e2e` and `update-client`: `rime rollback` makes the generation before the booted one boot next and a reboot returns to A (both tests); every later refusal leaves the profile and the running system unchanged (asserted in `refused()`). **Not tested:** a rollback run AFTER a refusal | partial (2026-11-02) |

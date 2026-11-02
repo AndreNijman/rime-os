@@ -1,5 +1,57 @@
 # Rime on NixOS: integration status (feat/nixos, 2026-11-02)
 
+## Wave 2 (2026-11-02): merged, all 61 checks pass, P2 45 of 50 met
+
+Merged into `feat/nixos` with `--no-ff` from 0545be610, in this order: `nix/rebrand` (b9d083e91; rime-shell's
+`nix/rebrand` first, as rime-shell `feat/nixos` 97a42d92, pushed), `nix/installer` (cf3993e05), `nix/bootmatrix`
+(af79360c6), `nix/tpmkeymap` (2dee86dd3), `nix/hostgates` (9dbb56894), `nix/g2` (12c1f530a), `nix/bridge` (ef53e8936),
+`nix/d5` (28e32bbbb), `nix/flakes` (b1263e396, the Rust-touching ones last). `flake.lock` pins rime-shell 97a42d92 on
+GitHub, so no command needs `--override-input` any more. Evidence: `/var/lab/rime-nix/artifacts/integrate-wave2/`.
+
+What the merge needed (each its own commit):
+
+- b40513bab: the host-layer fixtures carried katana's real machine-id and disk UUIDs; replaced with made-up values.
+- a34782975: `rime update`'s catalogue pass failed every update when the release built no copy of a requested app
+  (a catalogue app named in the profile but missing from the release's outs). It now names the app and leaves the
+  catalogue profile as it is; `rime install` still refuses such an app. Test
+  `an_app_the_release_names_no_build_of_is_named_not_failed`; mutant (`apps_without_a_build` returns nothing) fails it.
+- 43cfec25a: `kernel-vm-signed` (new in bootmatrix) boots the signed Rime kernel, so it joins the other kernel checks
+  in `nix/ci/checks-not-in-ci.txt` (re-measured with `nix-store -qR`: six checks reach linux-rime).
+- c3bc50699: bootmatrix turned the Rime boot hook on in the shipped profile; `activation`'s QEMU node has no /boot and
+  the hook rightly refused it, so A1's switch failed. The test turns the hook off (A1 is about greetd; the hook has its
+  own checks).
+- fb49ebd59: hostgates removed `rime-vm`'s hostName (host.toml names the machine), which renamed the toplevel
+  `nixos-system-unnamed-…` and failed `release-unit`. `system.name = "rime-vm"` restores the name.
+
+Proof on HEAD fb49ebd59:
+
+- `nix flake check path:. -L --keep-going` (no override): run 1 failed only `activation` and `release-unit` (above);
+  run 2 **all checks passed!**, EXIT 0 (`flakecheck2.log`). No virtiofsd hang in either run. All **61** checks'
+  `outPath`s evaluated and valid in the store (`proof-final.txt`).
+- `hostlayer-katana` on katana's real snapshot and runtime share (`artifacts/hostgates/kat-run.sh`): 13 subtests,
+  EXIT 0 (`hostlayer-katana.log`); the snapshot's file hashes are the same before and after (f0ad6e4d…).
+- cargo (rimed): 3750 passed, 57 self-skipped, 0 failed, 3 ignored, 35 skipped by name.
+- Closure (rime-vm toplevel `n4w06x94…-nixos-system-rime-vm-26.11.20261030.1c89083`): **2108 paths, 10,575,430,816 B
+  NAR (9.8 GiB)**; wave 1 was 2079 paths, 10,556,067,672 B (+29 paths, +19.4 MB). `checks.size` passes.
+- P2 checklist: `docs/nixos/p2-gates.md` "P2 status": 45 met, 5 partial (D2, G3, P2, X4, X5), 0 not met.
+
+Not merged: `nix/ci-hosted-fix` (the hosted-eval `import (path + …)` fix and the scxctl stub flake); it was held until
+wave 2 landed and has no verdict yet. Hosted CI on the merged head has not run.
+
+Handover:
+
+- Bridge: the old (bootc) side does not refuse `rime update` once `rime migrate start` has run; the bridge payload is
+  not signed; D2's encrypted layout is refused (`boot-partition`), not migrated; the runs are SB off only; katana's real
+  `\EFI\APEX\grub.cfg` is unknown (PLAN open question 7).
+- Installer: a LUKS install with a non-US keymap is refused; lift it once rime-boot's `rd.vconsole.keymap` is proven
+  on the installed `rime` configuration.
+- P2: Steam starting an installed game (`-applaunch`) needs an account and the network; real GPU is the P3 gate.
+- X4/X5: two `update-e2e` subtests owed (tampered narHash in a NAR, unsigned manifest under a signed channel; rollback
+  after a refusal). G3: deltas are not wired into `rime update` (P4).
+- Every signing row used TEST keys; the release MOK, cache key and Fulcio identity are proven only by a real release.
+- CI timings of the new VM checks on hosted runners are not measured.
+
+
 ## Wave 1 (2026-11-02): merged, all 30 checks pass
 
 The eleven wave-1 branches (`nix/ci`, `nix/size`, `nix/ledger`, `nix/kernsign`, `nix/boothook`, `nix/catalogue`,
@@ -150,7 +202,7 @@ The screenshots are in `/var/lab/rime-nix/artifacts/`:
 | rime-aid sandbox | `nix/pkgs/rimed.nix:110` | The backend sandbox binds only /usr and /etc, so a backend cannot start until it binds `/nix/store` and `/run/opengl-driver`. |
 | Agent sessions and system PATH | rimed / security | **Done in wave 1** (9f72789c3): `security`'s "PATH: a confined session runs a system binary by name" passes. |
 | `rime agent enable` | rimed | **Done in wave 1** (27dcc332b): the enable link stays valid across updates. |
-| G2 message | rimed sandbox.rs | MissingBwrap still says `/usr/bin/bwrap`, even when the compiled path is a store path. |
+| G2 message | rimed sandbox.rs | **Done**: MissingBwrap names `rime_paths::BWRAP`, the path the build runs (a store path on NixOS); pinned by `the_missing_bwrap_message_names_the_path_this_build_runs`. |
 | RTL / qttranslations | shell | **Done in wave 1** (72900bf2c): RTL is measured inside the Shell's own quickshell. |
 | D1 / D2 | libexec | **Done in wave 1** (polish): the apex unit aliases (mutants fail without them) and the migrated wallpaper path and hypr-migrate are checked. |
 | Steam Remote Play ports | gaming / security | Not opened through `programs.steam.remotePlay.openFirewall`, because that option feeds NixOS's own firewall, which G8 keeps off. Whether rime.nft must allow them is the gaming owner's call. |
@@ -161,7 +213,7 @@ The screenshots are in `/var/lab/rime-nix/artifacts/`:
 | CI builders | rimed | rimed's checkPhase needs user namespaces (bwrap tests) on the builder. |
 | Flaky test skips | rimed | `a_stale_socket_from_a_dead_daemon_is_replaced` and one remoted record test are `--skip`ped in the Nix build. |
 | Hyprland and UWSM | desktop | `programs.hyprland.withUWSM = true` keeps Hyprland a binary-cache hit. Rime Tiling execs start-hyprland directly. CI cost if the cache misses: a full Hyprland build. |
-| flake.lock | flake | Locked to GitHub rime-shell 8c111744. The polish merge (89325393) is local: push rime-shell `feat/nixos` and relock; until then every command needs `--override-input`. |
+| flake.lock | flake | **Done in wave 2**: locked to GitHub rime-shell `feat/nixos` 97a42d92; no `--override-input`. |
 | rime-shell | rime-shell feat/nixos | The PR needs a `## Release note`. a88d0340 must also be cherry-picked to main. |
 | Wallpaper first paint | desktop | **Done in wave 1** (polish: "the first login paints the wallpaper"). |
 | thermald | services | **Done in wave 1** (polish: kept out of a VM by a condition; its mutant fails). Not checked on hardware. |

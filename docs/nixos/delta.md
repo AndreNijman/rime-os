@@ -79,7 +79,7 @@ against the older nixpkgs, as if Rime had released then. Two compat shims make t
 `hyprland-qtutils`); assertions are dropped (the Hyprland >= 0.57 one). Nothing from the newer nixpkgs is overlaid,
 so the old side keeps the packages that revision really had. The shims change a few /etc lines on the old side
 only; those paths are rebuilt in every release anyway. Each old side was built into its own chroot store
-(`nix build --store /work/scratch/g2/store-<rev>`, `scratch/g2/buildold.sh`) so the shared store was not filled.
+(`nix build --store /work/scratch/g2/store-<rev>`, `/var/lab/rime-nix/artifacts/g2/scratch/buildold.sh`) so the shared store was not filled.
 
 ## 3. G1: a release without a mass rebuild
 
