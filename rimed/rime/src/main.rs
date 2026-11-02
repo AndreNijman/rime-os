@@ -1332,6 +1332,14 @@ struct UpdateArgs {
     /// durability if the machine loses power mid-update.
     #[arg(long)]
     fsync: bool,
+    /// NixOS: download every new store path whole, even where the release offers a
+    /// delta against a path this machine already has.
+    #[arg(long, conflicts_with_all = ["check", "firmware_only"])]
+    no_deltas: bool,
+    /// NixOS: download and verify the release, then stop. Nothing is installed or
+    /// activated, and Flatpak, firmware and packages are left alone.
+    #[arg(long, conflicts_with_all = ["check", "plan", "firmware_only", "live_only", "no_live", "pin", "unpin"])]
+    download_only: bool,
     /// Download and verify the update, print what would activate live and
     /// what would wait, and change nothing.
     #[arg(long, conflicts_with_all = ["check", "firmware_only", "live_only", "no_live"])]
@@ -1737,6 +1745,8 @@ async fn main() {
             skip_flatpak: args.skip_flatpak,
             force: args.force,
             allow_unverified: args.allow_unverified,
+            no_deltas: args.no_deltas,
+            download_only: args.download_only,
         }),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Live { cmd } => match cmd {

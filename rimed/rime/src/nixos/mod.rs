@@ -8,6 +8,7 @@
 //! Every program is run by the absolute path the NixOS module wrote into `/etc/rime/update.toml` (store paths), or
 //! from a generation's own `bin/switch-to-configuration`; never by a PATH lookup.
 
+pub mod delta;
 pub mod fetch;
 pub mod generations;
 pub mod pkg;
@@ -69,10 +70,30 @@ pub struct Config {
     pub nix_store: String,
     #[serde(default = "three")]
     pub keep_generations: usize,
+    /// Deltas (delta.md §7): `zstd` and `curl` by store path and the base URL of the delta files. Any of the three
+    /// missing, or `deltas = false`, and every path is downloaded whole, as before deltas existed.
+    #[serde(default = "yes")]
+    pub deltas: bool,
+    #[serde(default)]
+    pub zstd: Option<String>,
+    #[serde(default)]
+    pub curl: Option<String>,
+    #[serde(default)]
+    pub delta_url: Option<String>,
+    /// The decoder window cap as a power of two; unset: 29 (512 MiB), 30 on a machine with 8 GiB of memory or more.
+    #[serde(default)]
+    pub delta_window_log_max: Option<u32>,
+    /// Deltas rebuilt at once; unset: half the CPUs, 1 to 6.
+    #[serde(default)]
+    pub delta_jobs: Option<usize>,
 }
 
 fn three() -> usize {
     3
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Config {

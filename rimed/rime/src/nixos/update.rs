@@ -16,7 +16,7 @@ use crate::ops::UpdateOptions;
 use crate::trust::Roots;
 
 use super::fetch::{self, Pointer, Release, Stop};
-use super::{generations, lock, now, resolve_link, state, store, write_atomic, write_json, write_status, Applied, AppliedRelease, Config, Pins, Status, CHECK_STATE, CONFIG, GCROOTS};
+use super::{delta, generations, lock, now, resolve_link, state, store, write_atomic, write_json, write_status, Applied, AppliedRelease, Config, Pins, Status, CHECK_STATE, CONFIG, GCROOTS};
 
 const GB: f64 = 1_000_000_000.0;
 /// §11.5: the reserve on top of the unpacked size.
@@ -58,7 +58,7 @@ pub fn update(opts: UpdateOptions) -> i32 {
                 s.code
             }
         };
-        if opts.live.plan_only {
+        if opts.live.plan_only || opts.download_only {
             return worst;
         }
     }
@@ -127,7 +127,11 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
             } else {
                 let closure: Vec<&str> = m.variant_closure(v).keys().copied().collect();
                 let missing = store::invalid(cfg, &closure).unwrap_or_default();
-                let bytes: u64 = m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.file_size).sum();
+                let want: Vec<&str> = missing.iter().map(String::as_str).collect();
+                let bytes: u64 = match delta::prepare(cfg, m, &want, opts.no_deltas).filter(|p| p.any()) {
+                    Some(d) => d.download_bytes(),
+                    None => m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.file_size).sum(),
+                };
                 println!("rime: release {} is available: {} new store paths, {:.2} GB to download", m.release, missing.len(), bytes as f64 / GB);
                 ("available", digest)
             }
@@ -263,7 +267,22 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
             println!("rime: includes security fixes: {}", b.security.join(", "));
         }
     }
-    println!("rime: {} new store paths, {:.2} GB to download ({:.2} GB unpacked)", missing.len(), dl as f64 / GB, unpacked as f64 / GB);
+    let want: Vec<&str> = missing.iter().map(String::as_str).collect();
+    let prepared = delta::prepare(cfg, m, &want, opts.no_deltas);
+    for why in prepared.iter().flat_map(|p| &p.skipped) {
+        println!("rime: delta not tried: {why}");
+    }
+    let deltas = prepared.filter(|p| p.any());
+    match &deltas {
+        Some(d) => println!(
+            "rime: {} new store paths, {:.2} GB to download with deltas ({:.2} GB without; {:.2} GB unpacked)",
+            missing.len(),
+            d.download_bytes() as f64 / GB,
+            dl as f64 / GB,
+            unpacked as f64 / GB
+        ),
+        None => println!("rime: {} new store paths, {:.2} GB to download ({:.2} GB unpacked)", missing.len(), dl as f64 / GB, unpacked as f64 / GB),
+    }
 
     let target_bc = by_component(closure.iter().copied());
     let running_bc = store::closure(cfg, &running).ok().map(|c| by_component(c.iter().map(String::as_str)));
@@ -296,7 +315,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     }
 
     // 9. headroom.
-    let need = unpacked + RESERVE;
+    let need = unpacked + RESERVE + deltas.as_ref().map_or(0, |d| d.scratch_bytes());
     match free_bytes("/nix/store") {
         Some(free) if free < need && !missing.is_empty() => {
             return Err(stop(format!(
@@ -317,7 +336,6 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
         cfg.cache_keys.iter().chain(cfg.upstream_cache_keys.iter()).cloned().collect()
     };
     if !missing.is_empty() {
-        let want: Vec<&str> = missing.iter().map(String::as_str).collect();
         let groups = m.by_origin(&want);
         let mut infos = std::collections::BTreeMap::new();
         let mut copies: Vec<(&str, &Vec<&str>)> = Vec::new();
@@ -347,11 +365,24 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
         let _ = write_json(&state("pending.json"), &json!({"release": m.release, "variant": cfg.variant, "manifest": serde_json::from_slice::<Value>(&rel.bytes).unwrap_or(Value::Null)}), 0o644);
         // Upstream first: an upstream path never refers to a Rime one, so a Rime path's references are valid by the
         // time it arrives (Origin orders Rime before Upstream, hence the reverse).
-        for (from, paths) in copies.iter().rev() {
-            store::copy_from_cache(cfg, from, paths, &keys, opts.keep_fsync).map_err(|e| {
-                stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
-            })?;
+        let started = std::time::Instant::now();
+        match &deltas {
+            // Deltas (delta.md §7): any refusal falls back to the whole path from the same cache.
+            Some(d) => {
+                let o = d.run(cfg, &keys, opts.keep_fsync).map_err(|e| {
+                    stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
+                })?;
+                delta::report(&o);
+            }
+            None => {
+                for (from, paths) in copies.iter().rev() {
+                    store::copy_from_cache(cfg, from, paths, &keys, opts.keep_fsync).map_err(|e| {
+                        stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
+                    })?;
+                }
+            }
         }
+        println!("rime: downloaded in {:.1} s", started.elapsed().as_secs_f64());
     }
 
     // 11. verify what arrived.
@@ -365,6 +396,11 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
         Ok(_) | Err(_) => {
             return Err(stop(format!("rime: release {} describes its kernel differently from what it contains. Nothing was changed.", m.release)))
         }
+    }
+
+    if opts.download_only {
+        println!("rime: --download-only: release {} is downloaded and verified; nothing was installed", m.release);
+        return Ok(0);
     }
 
     let status_target = (digest.as_str(), m.release.as_str(), target.as_str());

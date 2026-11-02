@@ -32,3 +32,5 @@ zbus.workspace = true
 zvariant.workspace = true
 tokio.workspace = true
 clap.workspace = true
+# Deltas (src/nixos/delta.rs) hash the delta file and the rebuilt NAR; already in the tree via rime-backup-core.
+sha2 = "0.10.9"
