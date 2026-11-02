@@ -125,7 +125,9 @@ PRODUCTION ISO carrying the fixed engine (sha256 412183c3d885..., `rime-os-insta
 * I2 `plain-boot-drive.py`: `verdict=booted`, `switched-root=yes`; I3 `luks-boot-drive.py`: `verdict=switched-root`,
   prompt seen and typed (`boot-*.log`, `serial-boot-*.log`: "Secure boot enabled" on the Rime 7.2.9 kernel);
 * `firstboot --nixos`: the FIRST run on a fresh install failed, because the account's first `sudo` printed its lecture
-  into the LANG section (the first run had passed on an account that had already used sudo). Kept as
+  into the LANG section (the first run most likely passed on an account that had already used sudo during the probe's
+  development). The re-run's engine is the fixed one: each install log has 2,100 `checking` lines from
+  `nix store verify --recursive`. Kept as
   `lecture-race-firstboot-plain.*`. The probe now runs that sudo before its first marker, silenced; the plain disk
   was reinstalled from the same ISO and booted again (`install-plain.log`, `boot-plain.log`) and the probe passed
   (`firstboot-plain.{log,json,png,serial.log}`: greeter on VT 1, screenshot of the ridge greeter);
