@@ -43,7 +43,7 @@ LUKSPASS=rimelabpass42
 USERPASS=labpass7
 
 step_prep() {
-  sudo -n podman build -q -t rime-ovmf-probe "$WT/nix/probe/ovmf" >/dev/null
+  sudo -n podman image exists rime-ovmf-probe || sudo -n podman build -q -t rime-ovmf-probe "$WT/nix/probe/ovmf" >/dev/null
   sudo -n podman build -q -t rime-installer-lab "$HERE" >/dev/null
   lab /bin/bash -euc '
     K=/lab/keys; mkdir -p $K /lab/fw
@@ -62,6 +62,7 @@ step_prep() {
       --add-mok "$(cat $K/test-mok.guid)" $K/test-mok.der >/dev/null
     virt-fw-vars --input /lab/fw/vars-sb-mok.fd --print 2>/dev/null | grep -E "^ *(MokList|PK|KEK|db)\b|name=" | head -20 || true
     rpm -q edk2-ovmf qemu-system-x86-core tesseract' | tee "$ART/prep.txt"
+  sudo -n chown -R "$(id -u):$(id -g)" "$LAB/keys" "$LAB/fw"
   if [[ ! -f $LAB/keys/cache.sec ]]; then
     nixc key generate-secret --key-name rime-installer-lab-TEST-1 > "$LAB/keys/cache.sec"
     chmod 600 "$LAB/keys/cache.sec"
@@ -90,7 +91,8 @@ step_system() {
   p=$(nixc build --impure --no-link --print-out-paths --option cores 4 --expr "$(sexpr toplevel signed)" \
     2>"$LAB/system-build.log") || { tail -n 40 "$LAB/system-build.log"; exit 1; }
   echo "$p" | tee "$LAB/system" "$ART/system.txt"
-  nixc path-info -rS "$p" | awk '{s+=$2} END {printf "closure: %d paths, %.2f GB NAR\n", NR, s/1e9}' | tee -a "$ART/system.txt"
+  echo "closure: $(nixc path-info -r "$p" | wc -l) paths, $(nixc path-info -S "$p" | awk '{printf "%.2f GB NAR", $2/1e9}')" \
+    | tee -a "$ART/system.txt"
 }
 
 step_cache() {
@@ -199,8 +201,9 @@ step_boot() {
 step_firstboot() {
   local kind=$1 rc=0
   lab python3 -I /rig/installer/iso-qualify.py firstboot --work "/lab/run-$kind" --name "firstboot-$kind" \
-    --disk "/lab/run-$kind/disk.raw" --nixos --display --code /lab/fw/code-secboot.fd \
-    --vars-template /lab/fw/vars-sb-mok.fd --user alex --password "$USERPASS" --timeout 600 \
+    --disk "/lab/run-$kind/disk.raw" --nixos --display --vars-template /lab/fw/vars-sb-mok.fd \
+    --user alex --password "$USERPASS" --timeout 600 --expect-system "$(cat "$LAB/system")" \
+    --expect-host "rime-lab-$kind" --expect-tz Australia/Perth --expect-lang en_AU.UTF-8 \
     > "$ART/firstboot-$kind.log" 2>&1 || rc=$?
   cat "$ART/firstboot-$kind.log"
   cp "$LAB/run-$kind/firstboot-$kind".{json,png,serial.log} "$ART/" 2>/dev/null || true
