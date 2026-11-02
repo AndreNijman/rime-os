@@ -94,7 +94,7 @@ All evidence is in `/var/lab/rime-nix/artifacts/installer/`. The lab system is
 | install, LUKS2 | pass: engine 79 s; the recovery key was enrolled (not saved to the read-only boot USB, see Handover) | `install-luks.log`, `rime-install-luks.log`, `result-luks.txt` |
 | I2: `plain-boot-drive.py` (SB on, TEST MOK in the varstore) | `verdict=booted`, `switched-root=yes`, login prompt | `boot-plain.log`, `serial-boot-plain.log` ("Secure boot enabled", "systemd[1]: Switching root.") |
 | I3: `luks-boot-drive.py` (SB on, TEST MOK) | `verdict=switched-root`: the prompt was seen, the passphrase typed, the pivot and "Welcome" followed | `boot-luks.log`, `serial-boot-luks.log` |
-| first boot, plain (`iso-qualify.py firstboot --nixos`) | pass: the installed system is the ISO's, hostname/timezone/LANG from the answers, SecureBoot=1 and bootctl "enabled (user)", @nixos/@nix/@home with compress-force=zstd:3, the BLS entry, and greetd's greeter session on VT 1 | `firstboot-plain.{log,json,png,serial.log}` |
+| a later boot, plain (`iso-qualify.py firstboot --nixos`; greetd had already started on the first boot of both disks, per the serial logs) | pass: the installed system is the ISO's, hostname/timezone/LANG from the answers, SecureBoot=1 and bootctl "enabled (user)", @nixos/@nix/@home with compress-force=zstd:3, the BLS entry, and greetd's greeter session on VT 1 | `firstboot-plain.{log,json,png,serial.log}` |
 | `checks.installer-nixos` | pass | `check-installer-nixos.log` |
 
 Mutants, each one failing as it should:
@@ -144,7 +144,8 @@ The drivers were not edited. Since the NixOS initrd's journald does not forward 
 * **Seen on the installed system (not the installer's doing):**
   * The BLS options start with the toplevel's `quiet splash root=fstab splash loglevel=3`, so `splash` appears twice.
   * systemd-journald restarts once after the pivot (`scheduled-restart-jobs=1` in the plain driver).
-  * No static hostname is written (`hostnamectl --static` is empty; the host layer sets the running one).
+  * No static hostname is written (`hostnamectl --static` is empty), but the running hostname is the answered one.
+* **Not probed:** the LUKS install's greeter session. `firstboot --nixos` does not type the passphrase; the LUKS serial log shows greetd started.
   * The account's zsh opens zsh-newuser-install on its first login, because there is no `~/.zshrc`.
 * `installer/test-installer.sh`, run in the lab container: every engine guard passes at the branch head. Its GUI half
   draws nothing there, and the base commit fails the same way, so it needs CI's runner.

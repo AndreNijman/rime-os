@@ -413,7 +413,7 @@ def mode_firstboot_nixos(a):
                    "xargs -r -I{} loginctl show-session {} -p VTNr -p Class | tr '\\n' ' '; echo" % a.greeter_user)
         script = (
             "printf '__RQ_%s__\\n' BEGIN; "
-            # The running hostname: the host layer sets it at activation (there is no static /etc/hostname).
+            # The running hostname: the install writes no static /etc/hostname.
             "printf '__RQ_%s__\\n' HOST; cat /proc/sys/kernel/hostname; "
             "printf '__RQ_%s__\\n' SYSTEM; readlink /run/current-system; "
             "printf '__RQ_%s__\\n' TZ; timedatectl show -p Timezone --value; "
