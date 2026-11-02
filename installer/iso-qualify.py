@@ -476,6 +476,11 @@ def mode_firstboot_nixos(a):
             "printf '__RQ_%s__\\n' JOURNALD; systemctl show systemd-journald.service -p NRestarts; "
             "sudo -n journalctl -b -o short-monotonic --no-pager -u systemd-journald.service 2>&1 | head -n 15; "
             "sudo -n journalctl -b -o short-monotonic --no-pager 2>&1 | grep -m3 -E 'Switching root|systemd-journald.service: (Main process exited|Scheduled restart)|Received SIGTERM'; "
+            # installer3: the gaming switch the installer writes when gaming is chosen, and the journal's No_COW.
+            "printf '__RQ_%s__\\n' GAMING; cat /var/lib/rime/switch/rime-feature@gaming.target.on 2>/dev/null || echo no-switch; "
+            "systemctl is-active rime-feature@gaming.target; command -v steam >/dev/null && echo steam || echo no-steam; "
+            "printf '__RQ_%s__\\n' NOCOW; lsattr -d /var/log/journal 2>&1 | cut -d' ' -f1; "
+            "sudo -n journalctl -b --no-pager 2>&1 | grep -c -i 'copy-on-write' || true; "
             "printf '__RQ_%s__\\n' GREETER; for i in $(seq 60); do g=$(" + greeter + "); case $g in *VTNr=1*Class=greeter*) break;; esac; sleep 2; done; echo \"$g\"; systemctl is-active greetd.service; "
             "printf '__RQ_%s__\\n' END\n"
         )
@@ -495,7 +500,9 @@ def mode_firstboot_nixos(a):
                      secure_boot=section("SB", "FS"), mounts=section("FS", "BLS").splitlines(),
                      bls_entries=section("BLS", "CMDLINE").split(), cmdline=section("CMDLINE", "STAGED"),
                      staged=section("STAGED", "WINDOWS"), windows_entries=section("WINDOWS", "NVRAM"),
-                     nvram=section("NVRAM", "JOURNALD").splitlines(), journald=section("JOURNALD", "GREETER").splitlines(), greeter=section("GREETER", "END"),
+                     nvram=section("NVRAM", "JOURNALD").splitlines(), journald=section("JOURNALD", "GAMING").splitlines(),
+                     gaming=section("GAMING", "NOCOW").splitlines(), journal_nocow=section("NOCOW", "GREETER").splitlines(),
+                     greeter=section("GREETER", "END"),
                      zsh_newuser_wizard=bool(getattr(a, "newuser_wizard", False)))
         if a.display:
             time.sleep(8)  # let the greeter paint
@@ -519,6 +526,14 @@ def mode_firstboot_nixos(a):
         if a.expect_no_staged and facts["staged"] != "absent":
             problems.append("the staged installer (/boot/rimeinst) is still on the ESP after the first boot: %r"
                             % facts["staged"])
+        if a.expect_gaming == "yes" and facts["gaming"] != ["steam", "active", "steam"]:
+            problems.append("gaming was chosen, and the switch/target/steam read %r" % facts["gaming"])
+        if a.expect_gaming == "no" and facts["gaming"][:1] != ["no-switch"]:
+            problems.append("gaming was not chosen, and the switch reads %r" % facts["gaming"])
+        if a.expect_nocow and (facts["journal_nocow"][:1] == [] or "C" not in facts["journal_nocow"][0]
+                               or facts["journal_nocow"][1:] != ["0"]):
+            problems.append("/var/log/journal is not No_COW, or journald warned about copy-on-write: %r"
+                            % facts["journal_nocow"])
         if a.expect_windows_entry and facts["windows_entries"] != "1":
             problems.append("no Windows entry in /boot/grub2/custom.cfg (%r)" % facts["windows_entries"])
         # The firmware's SecureBoot variable (1) and bootctl's reading of it, both.
@@ -576,6 +591,11 @@ def main():
                     help="the keyboard the passphrase is typed on (key positions, not characters)")
     ap.add_argument("--expect-no-staged", action="store_true", help="firstboot --nixos: /boot/rimeinst is gone")
     ap.add_argument("--expect-windows-entry", action="store_true", help="firstboot --nixos: GRUB has a Windows entry")
+    ap.add_argument("--expect-gaming", choices=["yes", "no"],
+                    help="firstboot --nixos: the gaming switch holds `steam`, its target is active and steam is there "
+                         "(yes), or there is no switch (no)")
+    ap.add_argument("--expect-nocow", action="store_true",
+                    help="firstboot --nixos: /var/log/journal is No_COW (lsattr C) and journald did not warn")
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
     a.work = os.path.abspath(a.work)
