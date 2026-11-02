@@ -1107,8 +1107,23 @@ pub fn catalogue_pass() -> i32 {
         return 0;
     };
     let requested = read_list(Path::new(REQUESTED));
-    if requested_apps(&cat, &requested).is_empty() {
+    let apps = requested_apps(&cat, &requested);
+    if apps.is_empty() {
         return 0;
+    }
+    // A requested app the installed release names no build of (a release whose `catalogue[]` is still empty, or an
+    // app the translator carried from bootc before any release builds it) is not something a further
+    // `sudo rime update` can fix, so it must not fail every update: say so and leave the profile as it is.
+    if let Ok(outs) = fs::read_to_string(&cat.outs_file).map_err(|e| e.to_string()).and_then(|t| parse_outs(&t)) {
+        let missing = apps_without_a_build(&apps, &outs);
+        if !missing.is_empty() {
+            say(format!(
+                "warning: this release names no build of {}; the catalogue apps were left as they are until a \
+                 release builds them",
+                missing.join(", ")
+            ));
+            return 0;
+        }
     }
     match set_apps_profile(&cat, &requested) {
         Ok(()) => {
@@ -1117,6 +1132,11 @@ pub fn catalogue_pass() -> i32 {
         }
         Err(e) => fail(format!("catalogue apps were not updated: {e}")),
     }
+}
+
+/// The requested class 2 apps the release record names no build of, in the order they were requested.
+pub fn apps_without_a_build(apps: &[String], outs: &BTreeMap<String, String>) -> Vec<String> {
+    apps.iter().filter(|a| !outs.contains_key(a.as_str())).cloned().collect()
 }
 
 fn upgrade(cat: &Catalogue) -> i32 {
@@ -1275,6 +1295,27 @@ mod tests {
         assert_eq!(apps.get("go").map(String::as_str), Some("/nix/store/abc-go-1.26"));
         assert_eq!(doc["release"], "2026.11.02");
         assert!(parse_outs(&outs_document("x", &[("bad".into(), "/tmp/x".into())]).to_string()).is_err());
+    }
+
+    #[test]
+    fn an_app_the_release_names_no_build_of_is_named_not_failed() {
+        // nix/release emits `catalogue = [ ]` today, so the record is {"apps": {}} while the translator carried
+        // buildable apps into the requested list: those are reported by name and the update does not fail.
+        let empty = parse_outs(&outs_document("2026.11.02", &[]).to_string()).expect("parses");
+        let apps = vec!["mangohud".to_string(), "wine".to_string()];
+        assert_eq!(apps_without_a_build(&apps, &empty), apps);
+        let some = parse_outs(&outs_document("x", &[("wine".into(), "/nix/store/abc-wine-11".into())]).to_string())
+            .expect("parses");
+        assert_eq!(apps_without_a_build(&apps, &some), vec!["mangohud".to_string()]);
+        let both = parse_outs(
+            &outs_document(
+                "x",
+                &[("wine".into(), "/nix/store/abc-wine-11".into()), ("mangohud".into(), "/nix/store/abc-mh".into())],
+            )
+            .to_string(),
+        )
+        .expect("parses");
+        assert!(apps_without_a_build(&apps, &both).is_empty());
     }
 
     #[test]
