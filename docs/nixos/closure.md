@@ -19,9 +19,9 @@ this measurement.
 | on disk after install (`plain`, btrfs zstd:3, optimised), re-measured (§9) | 5.45 GB; 4.30 GB before linux-firmware | bootc 5.4 GB (2026.10.04.2, 12 GiB VM) |
 | `rime install steam` on top of `plain`, re-measured after linux-firmware (§10) | **+0.50 GB** download, +2.20 GB unpacked, +0.88 GB on disk | |
 | **A4** | **gaming is opt-in** (`rime.gaming.enable` stays `false`; installs ship `plain`) | 10-04 decision kept |
-| **A11 disk floor** (install + one mass rebuild + boot), recomputed at the wave-1 integration (§9) | **19 GB** as `rime update` is designed (§11.5 gate counts unpacked bytes); **14 GB** physically, and once the gate counts on-disk bytes (16 GB and 12 GB before linux-firmware) | bootc 12 GB, which holds its 5.4 GB install plus one core update, barely (§6) |
+| **A11 disk floor** (install + one mass rebuild + boot), as built in wave 3 (§11: the gate counts on-disk bytes) | **16 GB** whole disk (2 GiB ESP counted), **14 GB** root partition; nix/release/floors.nix. Was 19 GB while the gate counted unpacked bytes (§9) | bootc 12 GB, which holds its 5.4 GB install plus one core update, barely (§6) |
 | A11 install-only minimum (no update headroom), recomputed (§9) | 7 GB (6 GB before linux-firmware) | no bootc counterpart published |
-| A11 floor **with gaming** (§10) | **22 GB** as designed; **16 GB** physical; 8 GB install-only | |
+| A11 floor **with gaming** (§10, §11) | **18 GB** whole disk, **16 GB** root partition (was 22 GB under the unpacked gate); 8 GB install-only | |
 
 `plain` is the shape a fresh install ships (D9's generic rime-plain toplevel): every Rime area on, Rime's kernel with
 NVIDIA 615, no gaming, no test account. `rime-vm` is `nixosConfigurations.rime-vm` (gaming on, nixpkgs' kernel, no
@@ -364,3 +364,72 @@ partitions 537,919,488 + installed 6,327,009,280 + one rebuild + 1,000,000,000 f
 `rime install steam` must refuse by name below the gaming floor (22 GB until D6 §11.5 counts on-disk bytes, then
 16 GB). `rime.gaming.enable`'s option text quotes the new delta. Log: `/var/lab/rime-nix/artifacts/d5/size-run.log`
 (not committed).
+
+## 11. The floors counted on disk, and the release variants (wave 3 "updates", 2026-11-02)
+
+D6 §11.5 now counts on-disk bytes, so the floors of §6 and §10 are recomputed. All of them, and the ratio the update
+gate uses, live in ONE file, `nix/release/floors.nix`, which `/etc/rime/update.toml` (`on_disk_ratio`),
+`/etc/rime/catalogue.json` (`floors`, read by `rime install`) and `checks.release-plan` read. The installer should read
+the same file: `(import nix/release/floors.nix).floors.plain.diskGB` (16) for a whole disk, `.partitionGB` (14) for an
+existing partition, and `.plain-gaming.diskGB` / `.partitionGB` (18 / 16) when gaming is chosen, refusing the gaming
+choice by name below them (handed to installer2, who owns `nix/installer` and `installer/rime-install-nixos.sh`; its
+branch still hardcodes `NIXOS_MIN_GB=19` and `NIXOS_PART_MIN_GB=17`).
+
+**The ratio.** The measured on-disk/unpacked ratios of §10 are 0.524 (`plain`: 5,442,637,824 / 10,382,141,376) and
+0.503 (`plain-gaming`). The gate uses **0.55**, the larger plus a margin, so its estimate errs high. Only a store on
+btrfs mounted `compress-force=zstd` uses it; any other filesystem counts the unpacked size (ratio 1.0). §6's 0.42 came
+from the first measurement and is not used.
+
+**The ESP is 2 GiB, not 512 MiB.** §6 took the partitions from the bootc installer (`installer/rime-install`:
+1 MiB + 512 MiB). The NixOS install path (`installer/rime-install-nixos.sh`, `NIXOS_ESP_MIB=2048`) makes a 2 GiB ESP,
+because `/boot` holds a kernel and initrd per kept generation (D9). The floors below count 2 GiB + 2 MiB of GPT and
+alignment. That is why they are 2 GB above the "14 GB plain, 16 GB gaming" the D5 handover expected.
+
+A floor = partitions + the installed system on disk + the gate's need for one mass rebuild (a whole second closure,
+`ceil(unpacked × 0.55)` + 1 GB reserve) + 1 GB for home and logs:
+
+| variant | installed on disk | gate need for a rebuild | root part (`storeBytes`) | whole disk | published disk | published root partition |
+|---|---|---|---|---|---|---|
+| `plain` | 5,442,637,824 B | 6,710,177,757 B | 13,152,815,581 B | 15,302,396,381 B | **16 GB** | **14 GB** |
+| `plain-gaming` | 6,327,009,280 B | 7,918,684,102 B | 15,245,693,382 B | 17,395,274,182 B | **18 GB** | **16 GB** |
+| `plain-virtualization` (estimated) | 5,800,374,254 B | 7,067,914,187 B | 13,868,288,441 B | 16,017,869,241 B | **17 GB** | **14 GB** |
+| `plain-gaming-virtualization` (estimated) | 6,684,745,710 B | 8,276,420,532 B | 15,961,166,242 B | 18,110,747,042 B | **19 GB** | **16 GB** |
+
+**Decision: both figures are published, and they reconcile the handover.** The "14 GB plain, 16 GB gaming" the D5
+handover expected is the ROOT PARTITION floor (`partitionGB`, the installer's "into an existing partition" mode, where
+the ESP is already there); the whole-disk floor adds the 2 GiB ESP and GPT (`diskGB`). `checks.release-plan` recomputes
+both from the measurements and fails on any drift.
+
+The two virtualization rows are estimates: no virtualization system was installed and measured with `df`. They add
+the closure delta measured when the four release variants were built together (2026-11-02, this wave:
+`plain-virtualization` adds 89 paths of 658,470,728 B and drops 29 of 8,040,856 B, net 650,429,872 B) at the gate's
+ratio. Measuring them on disk is a follow-up; `nix/release/floors.nix` marks them `estimated = true`.
+
+**Who refuses what.** `rime install steam` (and every package of a feature the system does not carry) looks up the
+floor of the system it would select (base + every switched-on feature + this one, or the largest floor of its subsets
+when that exact system has none) and refuses by name, before the switch file is written, when the filesystem holding
+`/nix` is smaller than the floor's store part (15,245,693,382 B for `plain-gaming`): "steam: Rime's Gaming system needs a
+disk of at least 18 GB, and the filesystem holding /nix here is N GB (...). Nothing was changed." Proven in
+`checks.update-e2e` on its real 12 GiB disk and, for the combined lookup, in `checks.catalogue` with lab floors.
+`rime update` itself does not apply floors: its own gate (D6 §11.5) refuses an update that does not fit.
+
+**The four release variants**, all built at once (2026-11-02, `.#rime-release-toplevels`; NAR sizes from
+`nix path-info -rS`):
+
+| variant | paths | unpacked (NAR) |
+|---|---|---|
+| `plain` | 1851 | 10,442,212,352 B |
+| `plain-gaming` | 2152 | 12,639,497,504 B |
+| `plain-virtualization` | 1911 | 11,092,642,224 B |
+| `plain-gaming-virtualization` | 2212 | 13,289,927,384 B |
+
+These `plain` figures are of the wave-3 tree (44 more paths than §10's run, +60 MB unpacked); the floors keep §10's
+on-disk measurement, which this change does not move by more than the rounding.
+
+**The class 2 catalogue** (`.#rime-release-catalogue`, the 13 buildable apps, now published with every release):
+622 paths, 7,128,130,304 B unpacked as a union; 238 of them (5,313,430,424 B) are not already in `plain`. Per app
+(closure, unpacked): clang 2.12 GB, rust 1.84 GB, wine 1.83 GB, equibop 1.55 GB, java 1.01 GB, mangohud 0.92 GB,
+android-tools 0.29 GB, neovim 0.27 GB, go 0.27 GB, llama-cpp 0.15 GB, wireguard-tools 0.12 GB, htop 0.06 GB,
+usbutils 0.06 GB. Upstream nixpkgs serves most of it, so Rime's own cache grows by much less, but the hosted release
+runner now builds or fetches about 5.3 GB more unpacked per release; the "Free disk for the closure" step must keep
+room for it.

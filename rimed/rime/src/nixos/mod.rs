@@ -15,6 +15,7 @@ pub mod store;
 pub mod translate;
 pub mod trust;
 pub mod update;
+pub mod variant;
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -69,6 +70,14 @@ pub struct Config {
     pub nix_store: String,
     #[serde(default = "three")]
     pub keep_generations: usize,
+    /// §11.5: on-disk bytes per unpacked NAR byte on a store mounted compress-force=zstd (nix/release/floors.nix).
+    /// Absent: 1.0, the unpacked size, which errs high.
+    #[serde(default = "one")]
+    pub on_disk_ratio: f64,
+}
+
+fn one() -> f64 {
+    1.0
 }
 
 fn three() -> usize {

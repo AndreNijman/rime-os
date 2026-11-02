@@ -18,8 +18,19 @@
 #   2026.11.02 B  the nixpkgs 6.12 kernel, an UPSTREAM-ONLY path   -> installs for the next boot; reboot into it
 #   rollback      back to A, reboot
 #   2026.11.03 C  A + a new Shell build + a greetd unit change      -> applies live: no reboot, greetd untouched
-#   then refusals: a manifest changed after signing (its channel document validly signed), and a channel document
-#   changed after signing. Neither moves the profile.
+#              G  the same release's plain-gaming variant (its own Shell build): the machine switches gaming on
+#                 (the switch file `rime install steam` writes), and the same release installs G live (§11.6)
+#   reboot into G, then 2026.11.04 D (a Shell build) and refusals, none of which moves the profile:
+#     D's Shell NAR changed inside on the release asset store (narinfo + signature untouched: only NarHash catches it;
+#       the NAR is put back afterwards),
+#     a manifest changed after signing (its channel document validly signed),
+#     a copy of D's signed manifest with no signature at all under a validly signed channel document (D's closure
+#       would install: only the missing signature stops it),
+#     a channel document changed after signing;
+#   then `rime rollback` after those refusals: the generation before the booted one (C) boots, and runs.
+# Every release names the class 2 catalogue's htop build (manifest catalogue[]); after release A the machine installs
+# it with `rime install htop` from the signed release, and `rime install steam` is refused by name: a 12 GiB disk is
+# below the gaming system's floor (nix/release/floors.nix).
 { pkgs, self }:
 
 let
@@ -29,7 +40,7 @@ let
   REPO = "server:5000/andrenijman/rime-os";
 
   tamper = pkgs.writeShellScriptBin "update-e2e-tamper" ''
-    export PATH=${lib.makeBinPath [ pkgs.skopeo release.cosign pkgs.openssl pkgs.coreutils ]}:$PATH
+    export PATH=${lib.makeBinPath [ pkgs.skopeo release.cosign pkgs.openssl pkgs.coreutils pkgs.zstd pkgs.xz ]}:$PATH
     export RIME_COSIGN=${release.cosign}/bin/cosign PYTHONPATH=${tool}/lib/rime-nix-release
     exec ${pkgs.python3}/bin/python3 ${./update-e2e-tamper.py} "$@"
   '';
@@ -67,8 +78,8 @@ pkgs.testers.runNixOSTest {
   name = "rime-update-e2e";
   # nixosModules.default sets nixpkgs.overlays (pkgs.rime.*), so nodes evaluate their own nixpkgs.
   node.pkgsReadOnly = false;
-  # Three publishes of a real NixOS closure, three downloads, three reboots.
-  globalTimeout = 2 * 3600;
+  # Four publishes of a real NixOS closure, five downloads, four reboots.
+  globalTimeout = 3 * 3600;
 
   nodes.server =
     { nodes, ... }:
@@ -118,7 +129,8 @@ pkgs.testers.runNixOSTest {
       environment.etc = lib.mapAttrs' (n: p: lib.nameValuePair "rime-e2e/plan-${n}.json" { source = p; })
         nodes.client.system.build.rimePlans;
       # The build job's output: every release's closure is valid in the server's store, none is on the client's disk.
-      system.extraDependencies = builtins.attrValues nodes.client.system.build.rimeReleases;
+      system.extraDependencies = builtins.attrValues nodes.client.system.build.rimeReleases
+        ++ [ nodes.client.system.build.rimeHtop ];
     };
 
   nodes.client =
@@ -129,25 +141,40 @@ pkgs.testers.runNixOSTest {
         A = config;
         B = ext { rimeTest.kernel = true; };
         C = ext { rimeTest.shell = "C"; };
+        # Release C's plain-gaming variant. It does not carry Steam (the real gaming closure is 2.2 GB, closure.md
+        # §11): what is tested is that the client picks the variant its switch files name.
+        G = ext { rimeTest.shell = "G"; };
+        D = ext { rimeTest.shell = "D"; };
       };
+      # The class 2 build every release names: from the catalogue's own build (system.build.rimeCatalogue), not in
+      # the client's system closure, so only `rime install htop` brings it.
+      htop = config.system.build.rimeCatalogue.passthru.apps.htop;
       str = p: builtins.unsafeDiscardStringContext (toString p);
       components = import ../release/components.nix { inherit lib; };
       # What nix/release/default.nix's rime-release-plan holds, for one release of this machine.
-      plan = name: c: pkgs.writeText "rime-e2e-plan-${name}.json" (builtins.toJSON {
-        variants.plain = {
-          toplevel = str c.system.build.toplevel;
-          publishable = false;
-          note = "TEST: update-e2e";
-          components = lib.mapAttrs (_: map str) (components c pkgs);
-        };
-        catalogue = [ ];
+      variant = c: {
+        toplevel = str c.system.build.toplevel;
+        publishable = false;
+        note = "TEST: update-e2e";
+        components = lib.mapAttrs (_: map str) (components c pkgs);
+      };
+      plan = name: vs: pkgs.writeText "rime-e2e-plan-${name}.json" (builtins.toJSON {
+        variants = lib.mapAttrs (_: variant) vs;
+        catalogue = [ { name = "htop"; version = htop.version; out = str htop; } ];
       });
+      plans = {
+        A.plain = cfgs.A;
+        B.plain = cfgs.B;
+        C = { plain = cfgs.C; plain-gaming = cfgs.G; };
+        D.plain = cfgs.D;
+      };
     in
     {
       imports = [ self.nixosModules.default delta ];
 
       system.build.rimeReleases = lib.mapAttrs (_: c: c.system.build.toplevel) cfgs;
-      system.build.rimePlans = lib.mapAttrs plan cfgs;
+      system.build.rimePlans = lib.mapAttrs plan plans;
+      system.build.rimeHtop = htop;
       system.build.rimeKernelB = cfgs.B.boot.kernelPackages.kernel;
       # What the fake upstream serves: closures of plain nixpkgs packages, as cache.nixos.org would. The 6.12 kernel
       # is only there, so release B cannot install from Rime's cache alone.
@@ -175,6 +202,8 @@ pkgs.testers.runNixOSTest {
       virtualisation.containers.registries.settings.registry = [ { location = "server:5000"; insecure = true; } ];
 
       rime.services.enable = true;
+      # `rime install` and the floors it reads (/etc/rime/catalogue.json); the release names the class 2 builds.
+      rime.catalogue.enable = true;
       services.greetd = {
         enable = true;
         settings.default_session.command = "${config.services.greetd.package}/bin/agreety --cmd /bin/sh";
@@ -210,6 +239,8 @@ pkgs.testers.runNixOSTest {
       NIXPKGS = "1c89083e451e891152365b799595cf7790a43325"
       SHELL_SHA = "5" * 40
       A, B, C = "${b.rimeReleases.A}", "${b.rimeReleases.B}", "${b.rimeReleases.C}"
+      G, D = "${b.rimeReleases.G}", "${b.rimeReleases.D}"
+      HTOP = "${b.rimeHtop}"
       KERNEL_B = "${b.rimeKernelB}"
       UPSTREAM_ROOTS = "${lib.concatStringsSep " " (map toString b.rimeUpstreamRoots)}"
       CLIENT_IP = "${nodes.client.networking.primaryIPAddress}"
@@ -217,11 +248,12 @@ pkgs.testers.runNixOSTest {
       def hash_of(p):
           return os.path.basename(p)[:32]
 
-      def publish(name, top, os_sha, rid):
+      def publish(name, variants, os_sha, rid):
           d = f"/root/{name}"
+          vargs = " ".join(f"--variant {v}={top}" for v, top in variants.items())
           server.succeed(
               f"mkdir -p {d}",
-              f"rime-nix-release closure --variant plain={top} --out {d}/closure.json",
+              f"rime-nix-release closure {vargs} --catalogue-out {HTOP} --out {d}/closure.json",
               f"rime-nix-release split --closure {d}/closure.json --upstream {UPSTREAM} --out {d}/split.json",
               f"rime-nix-release stage --closure {d}/closure.json --split {d}/split.json --out {d}/artifact",
           )
@@ -319,7 +351,7 @@ pkgs.testers.runNixOSTest {
           client.succeed(f"curl -fsS {PAGES}/nix-cache-info | grep 'Priority: 50'")
 
       with subtest("release A, published by the pipeline: the machine is up to date; trust --gate verifies it"):
-          _, split_a, man_a = publish("A", A, "a" * 40, "2026.11.01")
+          _, split_a, man_a = publish("A", {"plain": A}, "a" * 40, "2026.11.01")
           assert A in split_a["rime"] and split_a["upstream"], split_a
           assert man_a["cache"]["upstream"]["url_hint"] == UPSTREAM, man_a["cache"]
           client.fail("rime trust --gate")  # nothing recorded for the running system yet
@@ -328,10 +360,32 @@ pkgs.testers.runNixOSTest {
           client.succeed("rime trust --gate")
           assert "state=none" in checker()
 
+      with subtest("the release's catalogue builds reach `rime install`: htop from the signed release"):
+          assert [c["name"] for c in man_a["catalogue"]] == ["htop"], man_a["catalogue"]
+          assert man_a["paths"][man_a["catalogue"][0]["out"]]["path"] == HTOP, man_a["catalogue"]
+          client.fail(f"nix-store --check-validity {HTOP}")  # not in the system closure
+          outs = json.loads(client.succeed("cat /var/lib/rime/nix/catalogue-outs.json"))
+          print(outs)
+          assert outs["release"] == "2026.11.01" and outs["apps"] == {"htop": HTOP}, outs
+          out = client.succeed("rime install htop 2>&1")
+          print(out)
+          assert "htop: installed (in /nix/var/nix/profiles/rime-apps" in out, out
+          client.succeed(f"nix-store --check-validity {HTOP}")
+          assert f"GET /{hash_of(HTOP)}.narinfo" in served_to_client("pages"), "htop did not come from Rime's cache"
+          assert "htop 3." in client.succeed("/nix/var/nix/profiles/rime-apps/bin/htop --version")
+
+      with subtest("`rime install steam` is refused by name below the gaming system's floor; no switch is written"):
+          code, out = client.execute("rime install steam 2>&1")
+          print(out)
+          assert code != 0, out
+          assert "steam: Rime's Gaming system needs a disk of at least 18 GB" in out, out
+          assert "Nothing was changed" in out, out
+          client.fail("test -e /var/lib/rime/switch/rime-feature@gaming.target.on")
+
       before = profile()
 
       with subtest("release B (kernel, upstream-only): installs for the next boot from BOTH caches; reboot into it"):
-          digest_b, split_b, man_b = publish("B", B, "b" * 40, "2026.11.02")
+          digest_b, split_b, man_b = publish("B", {"plain": B}, "b" * 40, "2026.11.02")
           assert KERNEL_B in split_b["upstream"] and KERNEL_B not in split_b["rime"], "the 6.12 kernel is not upstream-only"
           origins = {e["path"]: e.get("origin") for e in man_b["paths"]}
           assert origins[KERNEL_B] == "upstream" and origins[B] == "rime", (origins[KERNEL_B], origins[B])
@@ -368,7 +422,7 @@ pkgs.testers.runNixOSTest {
           assert "6.12" not in client.succeed("uname -r")
 
       with subtest("release C (Shell only): applies live with no reboot, greetd untouched"):
-          publish("C", C, "c" * 40, "2026.11.03")
+          publish("C", {"plain": C, "plain-gaming": G}, "c" * 40, "2026.11.03")
           bid, pid = boot_id(), greetd_pid()
           code, out = update()
           assert code == 0 and "is active now" in out, out
@@ -382,17 +436,68 @@ pkgs.testers.runNixOSTest {
           assert st["state"] == "active" and st["booted"]["toplevel"] == A and st["target"]["toplevel"] == C, st
           client.succeed("rime trust --gate")
 
+      with subtest("the switch files pick the variant: gaming switched on, the same release installs plain-gaming live"):
+          # What `rime install steam` writes on a disk above the floor (checks.catalogue proves that path).
+          client.succeed("mkdir -p /var/lib/rime/switch && echo steam > /var/lib/rime/switch/rime-feature@gaming.target.on")
+          code, out = update()
+          assert code == 0 and "installing the plain-gaming system (switched on for this machine: gaming)" in out, out
+          assert "is active now" in out, out
+          assert link("/run/current-system") == G
+          assert link("/nix/var/nix/profiles/system") == G
+          assert client.succeed("rime-test-shell").strip() == "G"
+          client.succeed("rime trust --gate")
+          client.succeed("rm /var/lib/rime/switch/rime-feature@gaming.target.on")
+
+      with subtest("reboot into G; release D published"):
+          reboot()
+          assert link("/run/booted-system") == G
+          digest_d, _, _ = publish("D", {"plain": D}, "d" * 40, "2026.11.04")
+          shell_d = server.succeed(f"nix-store -qR {D} | grep -- '-rime-shell-test-D$'").strip()
+
       before = profile()
+
+      with subtest("refused: a NAR changed inside on the release asset store; its signed narinfo untouched"):
+          said = server.succeed(f"update-e2e-tamper nar --pages {PAGES} --github-dir /var/lib/fake-github"
+                                f" --path {shell_d} --old 'echo D' --new 'echo E'")
+          print(said)
+          refused("tampered NAR", "a download did not match its signature")
+          client.fail(f"nix-store --check-validity {shell_d}")
+          client.fail(f"nix-store --check-validity {D}")
+          assert link("/run/current-system") == G
+          # Put D's NAR back, so the unsigned subtest below offers a closure that WOULD install: a client that
+          # skipped the manifest's signature would move the profile there, not stop at this NAR.
+          asset = said.split()[0]
+          server.succeed(f"mv {asset}.orig {asset}")
 
       with subtest("refused: a manifest changed after signing, though the channel document naming it is validly signed"):
           print(server.succeed(f"update-e2e-tamper manifest --repo {REPO} --fulcio-root /root/sign/fulcio-root.pem"
-                               " --test-signing /root/sign --release 2026.11.04"))
+                               " --test-signing /root/sign --release 2026.11.05"))
           refused("tampered manifest", "does not verify")
-          assert link("/run/current-system") == C
+          assert link("/run/current-system") == G
+
+      with subtest("refused: an unsigned manifest under a validly signed channel document"):
+          # A copy of D's validly signed manifest (its closure installs: the NAR is back), pushed with no signature.
+          new = server.succeed(f"update-e2e-tamper unsigned --repo {REPO} --fulcio-root /root/sign/fulcio-root.pem"
+                               f" --test-signing /root/sign --release 2026.11.06 --from {digest_d}").strip().splitlines()[-1]
+          assert new.startswith("sha256:"), new
+          server.succeed(f"skopeo inspect --tls-verify=false docker://{REPO}@{new}")
+          server.fail(f"skopeo inspect --tls-verify=false docker://{REPO}:{new.replace(':', '-')}.sig")
+          refused("unsigned manifest", "is not signed")
+          assert link("/run/current-system") == G
+          client.fail(f"nix-store --check-validity {shell_d}")
 
       with subtest("refused: a channel document changed after signing"):
           print(server.succeed(f"update-e2e-tamper channels --repo {REPO}"))
           refused("tampered channel document", "does not verify")
+          assert link("/run/current-system") == G
+
+      with subtest("rollback after the refusals: the generation before the booted one (C) boots and runs"):
+          print(client.succeed("rime rollback 2>&1"))
+          assert link("/nix/var/nix/profiles/system") == C
+          reboot()
+          assert link("/run/booted-system") == C
           assert link("/run/current-system") == C
+          assert client.succeed("rime-test-shell").strip() == "C"
+          client.fail(f"nix-store --check-validity {shell_d}")
     '';
 }

@@ -90,6 +90,10 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     echo "killed: $name"
   }
   wmutant "action pinned by tag" "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" "actions/checkout@v4"
+  wmutant "a release without its catalogue apps" \
+    'for c in "$t"/catalogue/*; do args+=(--catalogue-out "$(readlink -f "$c")"); done' ""
+  wmutant "the catalogue never built" '-L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue' '-L .#rime-release-plan'
+  wmutant "no release-plan check" ".#checks.x86_64-linux.release-plan" ".#checks.x86_64-linux.release-unit"
   wmutant "publish on a self-hosted runner" \
     "    environment: nix-release
     permissions:" "    runs-on: [self-hosted, katana]
@@ -214,12 +218,16 @@ open("dry.sh", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))'
   python3 - "$plan" <<'PY'
 import json, re, sys
 plan = json.load(open(sys.argv[1]))
-v = plan["variants"]["plain"]
-assert re.match(r"^/nix/store/[0-9a-z]{32}-nixos-system-rime-vm-", v["toplevel"]), v["toplevel"]
-assert v["publishable"] is False, "rime-vm carries a test account and must never be publishable"
-for slug in ("shell", "rime-daemon", "rime-tools", "compositor", "shell-runtime", "systemd", "libraries", "kernel"):
-    assert v["components"].get(slug), f"component {slug} is empty"
-print("plan ok:", sorted(v["components"]))
+# The generic installed system per feature set (nix/release/variants.nix); checks.release-plan proves the set,
+# the features each carries, and that none carries a test account.
+assert "plain" in plan["variants"], sorted(plan["variants"])
+for name, v in plan["variants"].items():
+    assert re.match(r"^/nix/store/[0-9a-z]{32}-nixos-system-rime-" + re.escape(name) + "-", v["toplevel"]), v["toplevel"]
+    assert v["publishable"] is True, f"{name}: the generic installed system is publishable"
+    for slug in ("shell", "rime-daemon", "rime-tools", "compositor", "shell-runtime", "systemd", "libraries", "kernel"):
+        assert v["components"].get(slug), f"{name}: component {slug} is empty"
+assert plan["catalogue"], "the plan names no catalogue builds"
+print("plan ok:", sorted(plan["variants"]), sorted(c["name"] for c in plan["catalogue"]))
 PY
 
   touch $out

@@ -69,8 +69,11 @@ let
       switch = "${switchDir}/rime-feature@${name}.target.on";
     };
 
+  # nix/release/floors.nix, per release variant: `rime install steam` refuses below the floor of the system it selects.
+
   catalogueJson = {
     inherit (data) schema aliases refuse;
+    inherit (cfg) floors;
     flathub_remote = "flathub";
     switch_dir = switchDir;
     apps_profile = appsProfile;
@@ -97,6 +100,21 @@ in
       type = lib.types.listOf lib.types.package;
       default = [ ];
       description = "Libraries added to Rime's nix-ld set.";
+    };
+
+    floors = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule {
+        options.store_bytes = lib.mkOption { type = lib.types.ints.unsigned; };
+        options.disk_gb = lib.mkOption { type = lib.types.ints.unsigned; };
+      });
+      # nix/release/floors.nix, per release variant.
+      default = lib.mapAttrs (_: f: { store_bytes = f.storeBytes; disk_gb = f.diskGB; }) (import ../release/floors.nix).floors;
+      defaultText = lib.literalExpression "nix/release/floors.nix";
+      description = ''
+        The disk floor of each release variant: `rime install steam` (any package of a feature) is refused by name
+        when the filesystem holding /nix is smaller than `store_bytes` of the system it would select. Only VM tests
+        set this, with lab figures that fit their small disks.
+      '';
     };
 
     appimage.enable = lib.mkOption {

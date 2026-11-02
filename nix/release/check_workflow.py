@@ -17,7 +17,9 @@ Refuses, for every workflow given:
     --allow-test-variants, RIME_TEST_BEFORE_PUSH);
   - for nix-release.yml, a concurrency other than: group nix-release, never cancelled; or exactly PER_REF_GROUP and
     PER_REF_CANCEL below (main keeps that group and is never cancelled; other refs, which only dry-run, get a group
-    of their own and cancel). Anything else could let one push cancel a release running on main.
+    of their own and cancel). Anything else could let one push cancel a release running on main;
+  - for nix-release.yml, a release that leaves the class 2 catalogue out: no `closure --catalogue-out`, no build of
+    .#rime-release-catalogue, or no run of checks.release-plan.
 Exit status 1 with one line per finding.
 """
 
@@ -60,6 +62,19 @@ def check(path):
         per_ref = c.get("group") == PER_REF_GROUP and c.get("cancel-in-progress") == PER_REF_CANCEL
         if not (fixed or per_ref):
             bad.append("concurrency must keep main in group nix-release and never cancel it there")
+        # The class 2 catalogue ships with the release (§3.1): the closure step names every app build, and the
+        # build step runs checks.release-plan, which fails when a buildable catalogue app has no build.
+        runs = [st.get("run", "") for job in (wf.get("jobs") or {}).values() for st in (job.get("steps") or [])]
+        closure = [r for r in runs if "rime-nix-release\" closure" in r or "rime-nix-release closure" in r]
+        if not closure or not all("--catalogue-out" in r for r in closure):
+            bad.append("the closure step must pass every catalogue app build (--catalogue-out)")
+        # A real build with an out-link the closure step reads, not only the dry run's mention of it.
+        lines = [ln for r in runs for ln in r.splitlines()]
+        if not any("nix build" in ln and ".#rime-release-catalogue" in ln and "--dry-run" not in ln
+                   and "--out-link" in ln for ln in lines):
+            bad.append("the build step must build .#rime-release-catalogue (an out-link, not a dry run)")
+        if not any("checks.x86_64-linux.release-plan" in r for r in runs):
+            bad.append("the build step must run checks.x86_64-linux.release-plan")
     for name, job in (wf.get("jobs") or {}).items():
         where = f"job {name}"
         steps = job.get("steps") or []
