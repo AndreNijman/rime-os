@@ -142,12 +142,12 @@ runner has):
   threads in the container; expect several times that on 4 vCPU), as does the packages job with its checkPhase on top.
   `desktop`, `libexec`, `shell`, `eval` and `kernel-config-fresh` do not. This is the main risk to the 60-minute budget,
   and the binary cache (R2) is what removes it.
-- The `shell` and `gaming` checks compile Hyprland: their VMs use `programs.hyprland` without `withUWSM = true`, and the
-  NixOS module's override then gives `/nix/store/a6gqc16mwivb1pf7xpf6sgcnjvggprx4-hyprland-0.57.0`, which is 404 on
-  cache.nixos.org. `desktop` and `libexec` (whose module sets `withUWSM = true`) get
-  `dmxlm63flzqqmm1wxfgmq057g2df2pmx-hyprland-0.57.0` = `pkgs.hyprland`, 200 on the cache. TODO(handover): the owners of
-  `nix/tests/shell.nix` and `nix/tests/gaming.nix` set `programs.hyprland.withUWSM = true` (as the desktop module does)
-  so their Hyprland substitutes.
+- Hyprland in the `shell` check (fixed on `nix/flakes`): its VM used `programs.hyprland` without `withUWSM = true`, and
+  the NixOS module's override then gave `/nix/store/a6gqc16mwivb1pf7xpf6sgcnjvggprx4-hyprland-0.57.0`, which is not on
+  cache.nixos.org. `nix/tests/shell.nix` now sets `withUWSM = true` as the desktop module does, so `shell`, `desktop` and
+  `libexec` all get `dmxlm63flzqqmm1wxfgmq057g2df2pmx-hyprland-0.57.0` = `pkgs.hyprland`, which `nix path-info --store
+  https://cache.nixos.org` lists (`/var/lab/rime-nix/artifacts/flakes/hyprland-cache.txt`). `gaming` needs no change:
+  its node has `programs.hyprland.enable = false`, and `nix-store -qR` of its derivation names no Hyprland at all.
 
 ### Handover
 
@@ -174,15 +174,15 @@ be trusted:
 
 ### The total
 
-From `share/doc/rimed/cargo-tests.txt` of `/nix/store/8m0cym0j3255gnyi381f8bxwkc85svay-rimed-0.1.0`, the store path
+From `share/doc/rimed/cargo-tests.txt` of `/nix/store/3raai4vl8hdy1kgx4wgq3g3ipimf7742-rimed-0.1.0`, the store path
 `nix eval --raw path:.#rimed.outPath` names for this branch (built in the container, checkPhase and postCheck passed):
 
 ```
 crate                targets  passed selfskip  failed  ignored  skipped
-rime                       5     679        8       0        1        7
-rime-agent-core           11     809        3       0        0        0
+rime                       5     704        8       0        1        7
+rime-agent-core           11     811        3       0        0        0
 rime-agentd               16     272       29       0        0       27
-rime-aid                   1      22        0       0        0        0
+rime-aid                   1      24        0       0        0        0
 rime-backup-core           2     167        0       0        0        0
 rime-paths                 4       5        0       0        0        0
 rime-perm-core             2      22        0       0        0        0
@@ -190,9 +190,9 @@ rime-remote-core           3     116        0       0        2        0
 rime-remoted               5      89       17       0        0        0
 rime-secret-core           2     151        0       0        0        1
 rime-secretd               3     390        0       0        0        0
-rimed                      1      53        0       0        0        0
-rimed-core                15     901        0       0        0        0
-TOTAL                     70    3676       57       0        3       35
+rimed                      1      55        0       0        0        0
+rimed-core                15     935        0       0        0        0
+TOTAL                     70    3741       57       0        3       35
 ```
 
 - **passed**: ran and passed.
@@ -200,6 +200,9 @@ TOTAL                     70    3676       57       0        3       35
   existed, these 57 read as passes.
 - **skipped**: excluded by `--skip` with a reason (below).
 - **ignored**: `#[ignore]` in the source.
+- **In a logged-in session** (`checks.rimed-session`, below): the 76 of these that need a login-session cgroup (26 of
+  the 35 skipped, 50 of the 57 self-skipped) all pass in a NixOS VM, none by skipping. With them, 3741 + 76 = 3817 of
+  the 3836 tests have run and passed; 9 skipped, 7 self-skipped and 3 ignored remain.
 
 ### Skipped by name (35), from `nix/pkgs/rimed.nix`
 
@@ -258,8 +261,30 @@ TOTAL                     70    3676       57       0        3       35
   was counted as a pass).
 
 The full list with each test's SKIP line is in the build's `share/doc/rimed/cargo-tests.txt`.
-TODO(handover): the 76 tests blocked by the login-session cgroup (26 skipped + 50 self-skipped) can run in a NixOS VM
-check where `cargo test` runs inside a logged-in user session.
+The 76 tests blocked by the login-session cgroup (26 skipped + 50 self-skipped) run in `checks.rimed-session`
+(below).
+
+### In a logged-in session: `checks.rimed-session`
+
+`nix/tests/rimed-session.nix` builds the workspace's release test binaries the way rimed's checkPhase does (same
+source, same `RIME_PATH_*`, compiled only), boots a VM where getty logs alice in on tty1 (`session-N.scope` under
+`user-1000.slice`), and her login shell runs every test binary with the 76 names (`rimed.passthru.sessionTests` =
+`needsLoginSessionCgroup` + `noLoginSessionCgroup`) as filters. Each name must have run, passed and printed no SKIP line.
+Negative control: the same runner from the driver's root shell (`runuser`, so the process sits in `backdoor.service`,
+a system service and not a session) must see them refused.
+
+Result on `nix/flakes` (2026-11-02, `/nix/store/np2rw28pqicy7587wli07yxax5jzlivj-vm-test-run-rime-rimed-session`, log
+`/var/lab/rime-nix/artifacts/flakes/rimed-session.log`): the runner's cgroup was
+`0::/user.slice/user-1000.slice/session-1.scope`, and
+
+    rimed-session: 76 names; in a login session 76 passed without SKIP (76 test runs ok), 0 did not; outside one (backdoor.service) 76 refused
+
+so all 76 tests that `cargo test` in the sandbox cannot run (26 skipped + 50 self-skipped) pass on NixOS in a real
+login session, and none of them passes by skipping. Getting there needed test fixtures only, no Rime code change: the
+tests were written against a bootc machine's `/bin` (a stand-in agent run as `/bin/cat`, stand-in claude scripts with
+`#!/bin/bash` that call `cat` and `mv`, a copy of `/bin/sleep` run under another name, which must not be nixpkgs'
+multi-call coreutils), and rime-remoted's `end_to_end` stale-build guard compares source mtimes with the binaries', so
+the VM's copy of the source tree gets the epoch. Earlier runs before those fixtures: 60 of 76, then 73 of 76.
 
 ### Ignored in the source (3)
 
@@ -356,8 +381,35 @@ error path then calls `self.process.stdout.read()`, which never returns, because
 that pipe and wait for a connection forever. So a one-line failure becomes a hang until the 3600 s global timeout. To see
 the real error, kill the client's two orphaned virtiofsd by PID; the driver then prints `QEMU process exited with code 1
 before connecting to monitor socket` with QEMU's output. The client is the node with no nix-store virtiofsd (it boots a
-disk image), so its two daemons have the least head start. TODO(handover): a wait for each socket before `exec` (an
-overlay of the run script, or upstream), or retry the check once.
+disk image), so its two daemons have the least head start.
+
+**Fixed for every Rime VM test on `nix/flakes`.** `flake.nix` hands `nix/tests` a `pkgs` whose
+`testers.runNixOSTest` imports `nix/tests/lib/vm-harness.nix` into every test, which sets `qemu.package` (mkDefault) to
+`nix/tests/lib/rime-qemu.nix`: nixpkgs' `qemu_test` with `qemu-system-x86_64` replaced by
+`nix/tests/lib/qemu-wait-sockets.sh`. The wrapper reads every non-server `-chardev socket,path=` QEMU is given, waits
+until each is LISTENING in `/proc/net/unix` (never by connecting: virtiofsd serves one connection), then `exec`s the real
+QEMU; it names every socket that was late (`rime-qemu: 1 of 3 socket(s) not listening yet (shared)`). A socket that never
+listens (300 s, `RIME_VM_SOCKET_WAIT`) is named, the run script's background children are killed so the driver's pipe
+closes, and QEMU is not started: a failure, never a hang. `nix eval` of `config.qemu.package.name` of every VM check gives
+`qemu-rime-test-11.1.2` for all 23 (`qemu-per-check.json`). Checks: `vm-harness` (no VM: late, bound-not-listening,
+server and never-listening sockets against a fake QEMU; the wrapper with its wait removed fails "QEMU ran before the
+socket listened") and `vm-harness-vm` (a real VM whose virtiofsd starts 5 s late every time: boots, both virtiofs mounts
+present). Its stock half, `nix build path:.#checks.x86_64-linux.vm-harness-vm.stock` (nixpkgs' QEMU, 300 s timeout),
+hangs at "starting vm" until the timeout (`vm-harness-vm-stock.log`).
+
+Before the fix (evidence in `/var/lab/rime-nix/artifacts/flakes/`): the four hangs above, the stock `vm-harness-vm`
+above, and one seen live on 2026-11-02 07:50 in another agent's `nix flake check` (`race-in-the-wild-2026-11-02.txt`):
+an update-client driver 3151 s old, the server's QEMU running, NO client QEMU, the client's `shared` and `xchg`
+virtiofsd reparented to the builder's shell and still waiting.
+
+Stress after the fix (`nix/tests/lib/stress.sh`, the update-client driver of commit 32d3ee3d4,
+`/nix/store/2cb1hig425s5wdwvsckmjmd9s5ww2ad1-nixos-test-driver-rime-update-client`, run 6 times AT ONCE in the
+container, 12 VMs, beside the other agents' VM tests; launched 2026-11-02 08:25 with 40 GB available and load average
+29.5, which rose to 98 during the runs): **6 of 6 passed, 0 hangs, 0 failures**, 1496-1506 s each. In 21 of the 30 VM
+starts (5 per run: server, client, and the client's reboots) a virtiofsd socket was not listening yet when the run
+script exec'd QEMU (19 times `shared`, once `nix-store`, once `shared` and `xchg`): every one a race that stock nixpkgs
+leaves to chance, and that the wrapper waited out (0-2 polls, at most 4 s). Logs: `stress6/run*.log`, `stress6/summary.txt`,
+`stress6-late-sockets.txt`, `stress6-launch.txt`.
 
 ### P1 exit gate, line by line (PLAN §6.1)
 

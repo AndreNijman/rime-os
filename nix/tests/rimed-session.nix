@@ -67,6 +67,9 @@ let
     nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.python3 ];
   });
 
+  # sleep as its own program, not a link to the multi-call coreutils (see the node's /bin below).
+  sleepProgram = (pkgs.coreutils.override { singleBinary = false; }).overrideAttrs { doCheck = false; };
+
   # Runs every test binary with the 76 names as filters (libtest runs a test matching any of them), each in its
   # package directory as cargo would, with the environment rimed's preCheck gives (a fresh HOME, git identity, CA
   # file). $1 = the output file.
@@ -98,15 +101,30 @@ let
     def matches(test, name):
         return test == name or test.endswith("::" + name)
 
-    def parse(text):
-        st = {n: {"ok": 0, "failed": 0, "skip": []} for n in NAMES}
+    class Status:
+        def __init__(self) -> None:
+            self.ok = 0
+            self.failed = 0
+            self.skip: list[str] = []
+
+        def clean(self) -> bool:
+            return self.ok > 0 and self.failed == 0 and not self.skip
+
+        def __repr__(self) -> str:
+            return f"ok={self.ok} failed={self.failed} skip={self.skip}"
+
+    def parse(text: str) -> dict[str, Status]:
+        st = {n: Status() for n in NAMES}
         block = None
         for line in text.splitlines():
             m = re.match(r"^test (\S+) \.\.\. (ok|FAILED|ignored)", line)
             if m:
                 for n in NAMES:
                     if matches(m.group(1), n):
-                        st[n]["ok" if m.group(2) == "ok" else "failed"] += 1
+                        if m.group(2) == "ok":
+                            st[n].ok += 1
+                        else:
+                            st[n].failed += 1
                 continue
             m = re.match(r"^---- (\S+) stdout ----$", line)
             if m:
@@ -117,11 +135,8 @@ let
             if block and SELF_SKIP.search(line):
                 for n in NAMES:
                     if matches(block, n):
-                        st[n]["skip"].append(line.strip())
+                        st[n].skip.append(line.strip())
         return st
-
-    def clean(s):
-        return s["ok"] > 0 and s["failed"] == 0 and not s["skip"]
   '';
 in
 pkgs.testers.runNixOSTest {
@@ -147,22 +162,31 @@ pkgs.testers.runNixOSTest {
       '';
       # What the tests use besides their compiled-in store paths, as rimed's checkPhase provides it.
       environment.systemPackages = with pkgs; [ bubblewrap curl git openssh openssl python3 util-linux ];
-      systemd.tmpfiles.rules = [
-        "L+ /bin/true - - - - ${pkgs.coreutils}/bin/true"
-        "L+ /bin/setpriv - - - - ${pkgs.util-linux}/bin/setpriv"
-      ];
+      # The tests' fixtures were written against a bootc machine's /bin (rimed's checkPhase gives /bin/true and
+      # /bin/setpriv for the same reason): a stand-in agent run as /bin/cat (relay.rs), stand-in claude scripts with
+      # #!/bin/bash that run cat and mv from PATH=<dir>:/usr/bin:/bin (mcp_launch.rs), and a copy of /bin/sleep run
+      # under another name (hook_bridge.rs), which must be a real program: nixpkgs' coreutils is one multi-call binary
+      # that refuses to run as "rimeprobe". rimed-test-tree links them. Test fixtures only: no Rime program runs them.
+
       # The build directory the binaries were compiled in, before alice can log in: the source tree (writable, hers),
       # the profile directory linked to the store copy, and cargo's per-target tmp directory.
       systemd.services.rimed-test-tree = {
         requiredBy = [ "getty@tty1.service" ];
         before = [ "getty@tty1.service" ];
         serviceConfig.Type = "oneshot";
-        path = [ pkgs.coreutils ];
+        path = [ pkgs.coreutils pkgs.findutils ];
         script = ''
+          for f in ${pkgs.coreutils}/bin/*; do ln -sfn "$f" /bin/; done
+          ln -sfn ${sleepProgram}/bin/sleep /bin/sleep
+          ln -sfn ${pkgs.bash}/bin/bash /bin/bash
+          ln -sfn ${pkgs.util-linux}/bin/setpriv /bin/setpriv
           src=$(cat ${testBins}/build-dir)
           prof=$(cat ${testBins}/profile-dir)
           mkdir -p "$(dirname "$src")"
           cp -r ${testBins}/source "$src"
+          # rime-remoted's end_to_end refuses a daemon binary older than any rime-agentd source file (a stale-build
+          # guard). The binaries keep the store's mtime (1 s after the epoch); the copied sources get the epoch.
+          find "$src" -exec touch -h -d @0 {} +
           # $prof is <target>/<triple>/release; CARGO_TARGET_TMPDIR is <target>/tmp
           mkdir -p "$(dirname "$prof")" "$(dirname "$(dirname "$prof")")/tmp"
           chown alice "$(dirname "$(dirname "$prof")")/tmp"
@@ -182,17 +206,17 @@ pkgs.testers.runNixOSTest {
     assert "session-" in session.splitlines()[0] and ".scope" in session.splitlines()[0], session.splitlines()[0]
 
     st = parse(session)
-    bad = {n: s for n, s in st.items() if not clean(s)}
+    bad = {n: s for n, s in st.items() if not s.clean()}
     for n, s in st.items():
-        print(("PASS " if clean(s) else "BAD  ") + n + ": " + json.dumps(s))
-    total_ok = sum(s["ok"] for s in st.values())
+        print(("PASS " if s.clean() else "BAD  ") + n + ": " + repr(s))
+    total_ok = sum(s.ok for s in st.values())
 
     with subtest("negative control: the same runner outside a login session"):
         machine.succeed("runuser -u alice -- ${runner} /tmp/rst/outside.txt || true")
         outside = machine.succeed("cat /tmp/rst/outside.txt")
         assert "backdoor.service" in outside.splitlines()[0], outside.splitlines()[0]
         ost = parse(outside)
-        refused = [n for n, s in ost.items() if not clean(s)]
+        refused = [n for n, s in ost.items() if not s.clean()]
         print(f"outside a session: {len(refused)} of {len(NAMES)} refused (SKIP or failed)")
 
     totals = (
@@ -201,8 +225,8 @@ pkgs.testers.runNixOSTest {
     )
     print(totals)
     machine.succeed(f"echo {json.dumps(totals)} > /tmp/rst/totals.txt")
-    machine.copy_from_vm("/tmp/rst/totals.txt", "")
-    machine.copy_from_vm("/tmp/rst/session.txt", "")
+    machine.copy_from_machine("/tmp/rst/totals.txt", "")
+    machine.copy_from_machine("/tmp/rst/session.txt", "")
     assert not bad, "not clean in a login session: " + ", ".join(sorted(bad))
     assert len(refused) >= len(NAMES) // 2, f"only {len(refused)} refused outside a session: the control proves nothing"
   '';
