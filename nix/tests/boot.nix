@@ -125,4 +125,146 @@ in
             machine.succeed("umount /boot")
       '';
   };
+
+  # The prune-to-fit path on a REAL full ESP (wave-3 open item: boot-hook-test.py mocks free_bytes). A 256 MiB FAT32
+  # disk is the ESP at /boot, statvfs and ENOSPC are the kernel's. Five generations whose initrds each carry an
+  # incompressible pad, sized so that the kernel, both microcode files and three initrds fit above the 32 MiB floor
+  # and a fourth does not. Generation 1 is the BOOTED one (/run/booted-system) and the oldest.
+  #   gen1..gen3  installed one by one: nothing is left out, the ESP fills up;
+  #   gen4        the ESP cannot take its initrd (measured in the VM first): the hook leaves out generation 2, the
+  #               oldest it may (generation 1 is booted, generation 4 the default), removes its initrd, writes 4;
+  #   gen5        generation 3 goes next; generation 1 is still listed and its files are still on the ESP.
+  # After every install every file every entry names is on the ESP with its source's size, and `rime-boot check`
+  # agrees. Mutant (docs/nixos/boot-matrix.md, "ESP budget"): a hook that never leaves a generation out copies
+  # gen4's initrd into a full ESP and fails with ENOSPC (switch-to-configuration boot exits non-zero).
+  # Booting from the pruned ESP needs Fedora's shim and GRUB: nix/probe/ovmf/boothook, scenario prune-sb-mok.
+  boot-esp-prune =
+    let
+      espMiB = 256;
+      padMiB = 28; # measured: kernel 13.2 MiB, microcode 15.2, initrd 28.6 + pad; 3 fit in 256 MiB above 32, 4 do not
+      pad = n: pkgs.runCommand "rime-esp-prune-pad-${toString n}" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+        python3 -I -c '
+        import hashlib, sys
+        out = open(sys.argv[1], "wb")
+        seed = b"rime-esp-prune-" + sys.argv[2].encode()
+        for i in range(${toString padMiB}):
+            out.write(hashlib.shake_256(seed + i.to_bytes(4, "big")).digest(1 << 20))
+        ' $out ${toString n}
+      '';
+      gen = n: { ... }: {
+        imports = [ self.nixosModules.default ];
+        rime.boot.enable = true;
+        system.switch.enable = true;
+        environment.etc."rime-boot-test-generation".text = "${toString n}\n";
+        # Incompressible bytes in the (systemd) initrd: each generation's initrd is its own file of a known size.
+        boot.initrd.systemd.contents."/rime-esp-pad".source = pad n;
+      };
+      later = [ 2 3 4 5 ];
+    in
+    pkgs.testers.runNixOSTest {
+      name = "rime-boot-esp-prune";
+      node.pkgsReadOnly = false;
+
+      nodes = {
+        machine = { nodes, pkgs, ... }: {
+          imports = [ (gen 1) ];
+          virtualisation.memorySize = 2048;
+          virtualisation.emptyDiskImages = [ espMiB ];
+          virtualisation.additionalPaths = map (n: nodes."gen${toString n}".system.build.toplevel) later;
+          environment.systemPackages = [ pkgs.dosfstools ];
+        };
+      } // lib.genAttrs (map (n: "gen${toString n}") later) (name: gen (lib.toInt (lib.removePrefix "gen" name)));
+
+      testScript = { nodes, ... }:
+        let
+          top = n: if n == 1 then nodes.machine.system.build.toplevel else nodes."gen${toString n}".system.build.toplevel;
+        in
+        ''
+          import json, re
+          P = "/nix/var/nix/profiles/system"
+          RESERVE = 32 * 1024 * 1024
+          TOP = {${lib.concatMapStringsSep ", " (n: "${toString n}: \"${top n}\"") ([ 1 ] ++ later)}}
+          machine.wait_for_unit("multi-user.target")
+          assert machine.succeed("readlink -f /run/booted-system").strip() == TOP[1]
+
+          def free():
+              a, s = machine.succeed("stat -f -c '%a %S' /boot").split()
+              return int(a) * int(s)
+
+          def size(p):
+              return int(machine.succeed(f"stat -L -c %s {p}").strip())
+
+          def initrd_of(n):
+              return machine.succeed(f"readlink -f {TOP[n]}/initrd").strip()
+
+          def entries():
+              return sorted(int(m) for m in re.findall(r"rime-generation-(\d+)\.conf",
+                                                         machine.succeed("ls /boot/loader/entries")))
+
+          def install(n):
+              machine.succeed(f"nix-env -p {P} --set {TOP[n]}")
+              rc, out = machine.execute(f"{TOP[n]}/bin/switch-to-configuration boot 2>&1")
+              print(f"--- install generation {n}: rc={rc}\n{out}")
+              return rc, out
+
+          def consistent(want):
+              """Every listed generation's entry names files that are on the ESP with the source's size."""
+              assert entries() == want, (entries(), want)
+              on_esp = set(machine.succeed("ls /boot/rime/nixos").split())
+              named = set()
+              for n in want:
+                  e = machine.succeed(f"cat /boot/loader/entries/rime-generation-{n}.conf")
+                  for kind, path in re.findall(r"^(linux|initrd) (\S+)$", e, re.M):
+                      name = path.rsplit("/", 1)[1]
+                      named.add(name)
+                      assert name in on_esp, (n, name, sorted(on_esp))
+                  assert f"init={TOP[n]}/init " in e, e
+                  got = size(f"/boot/rime/nixos/$(sed -n 's|^initrd .*/||p' /boot/loader/entries/rime-generation-{n}.conf | tail -1)")
+                  assert got == size(initrd_of(n)), (n, got)
+              # nothing on the ESP that no entry names (the pruned generation's initrd is gone)
+              assert on_esp == named, sorted(on_esp ^ named)
+              rc, out = machine.execute("rime-boot check")
+              c = json.loads(out)
+              assert rc == 0 and c["up_to_date"], out
+              assert free() >= RESERVE, f"the hook went below its floor: {free()} B free"
+
+          with subtest("a 256 MiB FAT32 ESP at /boot, the booted generation 1 installed"):
+              machine.succeed("mkfs.vfat -F 32 -n RIMEESP /dev/vdb && mkdir -p /boot "
+                              "&& mount -t vfat -o umask=0077 /dev/vdb /boot && mkdir /boot/grub2")
+              rc, out = install(1)
+              assert rc == 0 and "left out" not in out, out
+              consistent([1])
+
+          with subtest("generations 2 and 3 fit: nothing is left out, the ESP fills"):
+              for n in (2, 3):
+                  rc, out = install(n)
+                  assert rc == 0 and "left out" not in out, out
+                  consistent(list(range(1, n + 1)))
+              print(f"free after generation 3: {free()} B")
+
+          with subtest("generation 4 does not fit: the oldest optional generation (2) is left out, never the booted 1"):
+              # The ESP really is full for it: measured, not assumed.
+              need = size(initrd_of(4))
+              assert free() < need + RESERVE, f"the ESP still has room ({free()} B free, {need} B needed): tests nothing"
+              i2 = machine.succeed("sed -n 's|^initrd .*/||p' /boot/loader/entries/rime-generation-2.conf | tail -1").strip()
+              rc, out = install(4)
+              assert rc == 0, out
+              assert re.search(r"generation 2 left out of the menu", out), out
+              assert not re.search(r"generation [13] left out", out), out
+              consistent([1, 3, 4])
+              machine.fail(f"test -e /boot/rime/nixos/{i2}")
+              machine.succeed("grep -x 'set default=rime-generation-4' /boot/grub2/rime-nixos.cfg")
+              # still in the profile: only the menu left it out
+              machine.succeed(f"test -e {P}-2-link")
+
+          with subtest("generation 5: generation 3 goes next; the booted generation 1 stays listed and on the ESP"):
+              rc, out = install(5)
+              assert rc == 0, out
+              assert re.search(r"generation 3 left out of the menu", out), out
+              # generation 2 is still in the profile, so it is weighed and left out again; 1 and 4 never are
+              assert not re.search(r"generation [14] left out", out), out
+              consistent([1, 4, 5])
+              machine.succeed("grep -x 'set default=rime-generation-5' /boot/grub2/rime-nixos.cfg")
+        '';
+    };
 }
