@@ -377,7 +377,9 @@ default window (no `--long` on the client). The cost is the pipeline's CPU: the 
 `parallel-compression=true` (same bytes; `artifacts/deltas/level19-nixcopy-timing.log`). On the weekly pair the
 pipeline's parallel level 19 wrote 641.5 MB for 156 of the 161 paths (§5.2), ~1 % more than the CLI's 637.6 MB for
 all 161 (not taken apart; parallel compression's chunks are the likely cost). In the update-delta VM check, `stage`
-of a ~660-path client closure went from 7-19 s to 185-480 s (4 vCPUs, katana loaded). **Shipped**:
+of a ~660-path client closure went from 7-19 s to 185-480 s (4 vCPUs, katana loaded), and `checks.update-e2e`
+(three releases staged) from 212 s to 1,078 s of test script, ~302 s per stage, inside its 2-hour limit
+(`artifacts/deltas/update-e2e-level19.log`; `release-github` stages a tiny closure, 0.1 s). **Shipped**:
 `stage` now uses level 19 with parallel compression (`STAGE_LEVEL`, pinned by `test_stage_writes_level_19`).
 The remaining 7 % of `-19 --long=27` is out of reach of `nix copy` (it has no long-distance or window setting);
 it would need the pipeline to compress the NARs itself, which is not done.
