@@ -59,6 +59,26 @@ in
         HOME=/home
         SHELL=/run/current-system/sw/bin/zsh
       '');
+      # Fedora's zsh ships /etc/skel/.zshrc, so a new account's first zsh finds one; NixOS ships none, and the
+      # first console login stopped in zsh-newuser-install's menu (installer2 OVMF firstboot). The same stock
+      # skeleton, a real file (useradd -m copies a symlink as a symlink into the read-only store):
+      # rime-shell-firstrun recognises it (is_stock_zshrc: its first line, compinit + COMPLETE_IN_WORD only) and
+      # replaces it with Rime's zsh configuration at the first desktop login, exactly as on Fedora.
+      environment.etc."skel/.zshrc" = lib.mkIf config.programs.zsh.enable {
+        mode = "0644";
+        text = ''
+          # .zshrc is sourced in interactive shells.
+          # It should contain commands to set up aliases,
+          # functions, options, key bindings, etc.
+          #
+
+          autoload -U compinit
+          compinit
+
+          #allow tab completion in the middle of a word
+          setopt COMPLETE_IN_WORD
+        '';
+      };
     }
 
     (lib.mkIf nm {

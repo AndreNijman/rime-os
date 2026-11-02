@@ -367,6 +367,26 @@ def mode_firstboot(a):
         stop(proc, qmp)
 
 
+# The key a character sits on, per keyboard layout, for the characters the lab's passphrases use: lowercase letters
+# and digits (the same keys on us and gb), plus the punctuation whose key differs between them. On gb `"` is
+# Shift+2 and `@` is Shift+'; on us it is the other way round.
+LAYOUT_SHIFTED = {
+    "us": {'"': "apostrophe", "@": "2", "#": "3"},
+    "gb": {'"': "2", "@": "apostrophe", "#": "backslash"},
+}
+
+
+def layout_keys(layout, ch):
+    if ch.isdigit() or (ch.isalpha() and ch.islower()):
+        return [ch]
+    if ch.isalpha():
+        return ["shift", ch.lower()]
+    if ch in LAYOUT_SHIFTED[layout]:
+        k = LAYOUT_SHIFTED[layout][ch]
+        return [k] if ch == "#" and layout == "gb" else ["shift", k]
+    raise ValueError("cannot type %r on a %s keyboard" % (ch, layout))
+
+
 def login(a, ser):
     """Log in on the serial getty and leave a plain bash with echo off. None, or the failure reason."""
     if not ser.wait(r"\S+ login: ", a.timeout):
@@ -382,7 +402,8 @@ def login(a, ser):
     m = ser.wait(r"\$ |# |> |% |Type one of the keys in parentheses", 90, since=at)
     if not m:
         return "login did not give a shell"
-    if m.group(0).startswith("Type"):
+    a.newuser_wizard = m.group(0).startswith("Type")
+    if a.newuser_wizard:
         # zsh with no ~/.zshrc opens zsh-newuser-install on a first login; q leaves it without writing anything.
         at = ser.mark()
         ser.send("q")
@@ -405,6 +426,27 @@ def mode_firstboot_nixos(a):
     proc, ser, qmp = start(a, name, cmd)
     facts = {"firmware": fw, "varstore": a.vars_template}
     try:
+        if a.luks_passphrase:
+            # The unlock prompt, typed on the guest's KEYBOARD as key positions of the --luks-layout keyboard: what
+            # the console keymap makes of them is the property under test (the serial line has no keymap).
+            m = ser.wait(r"Please enter passphrase", a.timeout, proc=proc)
+            facts["luks_prompt"] = bool(m)
+            if not m:
+                return report(a, name, "fail", reason="no LUKS passphrase prompt", tail=ser.text()[-3000:], **facts)
+            time.sleep(3)
+            at = ser.mark()
+            for ch in a.luks_passphrase:
+                keys = layout_keys(a.luks_layout, ch)
+                qmp.cmd("send-key", keys=[{"type": "qcode", "data": k} for k in keys], **{"hold-time": 80})
+                time.sleep(0.15)
+            qmp.key("ret")
+            facts["luks_layout_typed"] = a.luks_layout
+            m = ser.wait(r"Switching root|Failed to activate with specified passphrase|Please enter passphrase", 120,
+                         since=at, proc=proc)
+            facts["luks_result"] = m.group(0) if m else None
+            if not m or m.group(0) != "Switching root":
+                return report(a, name, "fail", reason="the passphrase did not unlock the disk (%s)" % facts["luks_result"],
+                              tail=ser.text()[-3000:], **facts)
         why = login(a, ser)
         if why:
             return report(a, name, "fail", reason=why, tail=ser.text()[-3000:], **facts)
@@ -416,8 +458,9 @@ def mode_firstboot_nixos(a):
             # silenced: a fresh account's FIRST sudo prints the lecture, which landed inside the LANG section.
             "echo '" + a.password + "' | sudo -S -p '' -v >/dev/null 2>&1; "
             "printf '__RQ_%s__\\n' BEGIN; "
-            # The running hostname: the install writes no static /etc/hostname.
+            # The running hostname, then the static one (/etc/hostname, from host.toml by rime-hostlayer apply).
             "printf '__RQ_%s__\\n' HOST; cat /proc/sys/kernel/hostname; "
+            "printf '__RQ_%s__\\n' STATIC; cat /etc/hostname; hostnamectl --static; "
             "printf '__RQ_%s__\\n' SYSTEM; readlink /run/current-system; "
             "printf '__RQ_%s__\\n' TZ; timedatectl show -p Timezone --value; "
             "printf '__RQ_%s__\\n' LANG; localectl status | sed -n 's/.*LANG=//p'; "
@@ -425,6 +468,10 @@ def mode_firstboot_nixos(a):
             "sudo -n bootctl status 2>&1 | grep -m1 'Secure Boot:' | sed 's/^ *//'; "
             "printf '__RQ_%s__\\n' FS; findmnt -no FSTYPE,OPTIONS / | tr ',' ' '; findmnt -no OPTIONS /nix | tr ',' ' '; findmnt -no OPTIONS /var/home | tr ',' ' '; findmnt -no FSTYPE /boot; "
             "printf '__RQ_%s__\\n' BLS; sudo -n ls /boot/loader/entries; "
+            "printf '__RQ_%s__\\n' CMDLINE; cat /proc/cmdline; "
+            "printf '__RQ_%s__\\n' STAGED; sudo -n test -e /boot/rimeinst && echo present || echo absent; "
+            "printf '__RQ_%s__\\n' WINDOWS; sudo -n cat /boot/grub2/custom.cfg 2>/dev/null | grep -c bootmgfw.efi; "
+            "printf '__RQ_%s__\\n' NVRAM; sudo -n efibootmgr -v 2>&1 | grep -E '^Boot(Current|Order)|Rime OS'; "
             "printf '__RQ_%s__\\n' GREETER; for i in $(seq 60); do g=$(" + greeter + "); case $g in *VTNr=1*Class=greeter*) break;; esac; sleep 2; done; echo \"$g\"; systemctl is-active greetd.service; "
             "printf '__RQ_%s__\\n' END\n"
         )
@@ -438,10 +485,14 @@ def mode_firstboot_nixos(a):
             m = re.search(r"__RQ_%s__\r?\n(.*?)__RQ_%s" % (tag, nxt), out, re.S)
             return m.group(1).strip() if m else ""
 
-        facts.update(hostname=section("HOST", "SYSTEM"), system=section("SYSTEM", "TZ"),
+        facts.update(hostname=section("HOST", "STATIC"), static_hostname=section("STATIC", "SYSTEM").splitlines(),
+                     system=section("SYSTEM", "TZ"),
                      timezone=section("TZ", "LANG"), lang=section("LANG", "SB"),
                      secure_boot=section("SB", "FS"), mounts=section("FS", "BLS").splitlines(),
-                     bls_entries=section("BLS", "GREETER").split(), greeter=section("GREETER", "END"))
+                     bls_entries=section("BLS", "CMDLINE").split(), cmdline=section("CMDLINE", "STAGED"),
+                     staged=section("STAGED", "WINDOWS"), windows_entries=section("WINDOWS", "NVRAM"),
+                     nvram=section("NVRAM", "GREETER").splitlines(), greeter=section("GREETER", "END"),
+                     zsh_newuser_wizard=bool(getattr(a, "newuser_wizard", False)))
         if a.display:
             time.sleep(8)  # let the greeter paint
             png = os.path.join(a.work, name + ".png")
@@ -453,6 +504,19 @@ def mode_firstboot_nixos(a):
                           ("timezone", a.expect_tz), ("lang", a.expect_lang)):
             if want and facts[key] != want:
                 problems.append("%s is %r, expected %r" % (key, facts[key], want))
+        if a.expect_host and facts["static_hostname"] != [a.expect_host, a.expect_host]:
+            problems.append("the static hostname (/etc/hostname, hostnamectl --static) is %r, expected %r"
+                            % (facts["static_hostname"], a.expect_host))
+        n = facts["cmdline"].split().count("splash")
+        if n > 1:
+            problems.append("splash is on the kernel command line %d times" % n)
+        if facts["zsh_newuser_wizard"]:
+            problems.append("zsh-newuser-install ran on the account's first login (no ~/.zshrc)")
+        if a.expect_no_staged and facts["staged"] != "absent":
+            problems.append("the staged installer (/boot/rimeinst) is still on the ESP after the first boot: %r"
+                            % facts["staged"])
+        if a.expect_windows_entry and facts["windows_entries"] != "1":
+            problems.append("no Windows entry in /boot/grub2/custom.cfg (%r)" % facts["windows_entries"])
         # The firmware's SecureBoot variable (1) and bootctl's reading of it, both.
         sb = [x.strip() for x in facts["secure_boot"].splitlines()]
         if a.vars_template and not (sb[:1] == ["1"] and any(x.startswith("Secure Boot: enabled") for x in sb)):
@@ -503,6 +567,11 @@ def main():
     ap.add_argument("--expect-host")
     ap.add_argument("--expect-tz")
     ap.add_argument("--expect-lang")
+    ap.add_argument("--luks-passphrase", help="firstboot --nixos: type this at the LUKS prompt (on the keyboard)")
+    ap.add_argument("--luks-layout", default="us", choices=sorted(LAYOUT_SHIFTED),
+                    help="the keyboard the passphrase is typed on (key positions, not characters)")
+    ap.add_argument("--expect-no-staged", action="store_true", help="firstboot --nixos: /boot/rimeinst is gone")
+    ap.add_argument("--expect-windows-entry", action="store_true", help="firstboot --nixos: GRUB has a Windows entry")
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
     a.work = os.path.abspath(a.work)

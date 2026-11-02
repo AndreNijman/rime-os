@@ -547,7 +547,9 @@ in
       # ── Boot splash (Containerfile.rime:265-312; bootc kargs.d `quiet splash`) ────────────────────
       # The theme (the layered ridge and its accents) is chosen in branding.nix.
       boot.plymouth.enable = true;
-      boot.kernelParams = [ "quiet" "splash" ];
+      # `splash` itself comes from boot.plymouth (nixpkgs' plymouth module adds it): naming it here as well put
+      # `splash splash` on every boot entry (installer2, checks.installer-polish-eval).
+      boot.kernelParams = [ "quiet" ];
       boot.consoleLogLevel = lib.mkDefault 3;
 
       # ── Flatpak + Flathub (files/system/units/rime-flathub-setup.service) ─────────────────────────
