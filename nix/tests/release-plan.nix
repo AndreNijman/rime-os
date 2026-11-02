@@ -10,11 +10,32 @@
 #   3. The floors: every published floor in nix/release/floors.nix is the arithmetic of its parts; every variant has
 #      one; the plain system renders the same floors into /etc/rime/catalogue.json and the gate's ratio into
 #      /etc/rime/update.toml.
-{ pkgs, self }:
+#   4. Redistribution (R14, nix/redistributable.nix): every app whose licence (nixpkgs meta.license, read here, not
+#      through redistributable.nix's rule) does not allow redistribution is device-built: the plan names its
+#      derivation (build "device"), never its output, and redistributable.nix lists it with a reason; the plan's
+#      non_redistributable list holds each device-built app's output and none of the published apps' outputs.
+#      Mutants (passthru, must FAIL): "publish-vendor-apps" (an empty list and a rule that allows everything: the
+#      vendor apps are published as built outputs) and "unlisted" (the list emptied: the rule still keeps them off the
+#      cache, but nothing records why).
+{ pkgs, self, redistributable ? null, mutant ? null }:
 
 let
   lib = pkgs.lib;
-  release = import ../release { inherit pkgs self; };
+  release = import ../release ({ inherit pkgs self; } // lib.optionalAttrs (redistributable != null) { inherit redistributable; });
+  redistReal = import ../redistributable.nix { inherit lib; };
+  plainPkgs = release.variants.plain.system.pkgs;
+  # Each package's licence as nixpkgs records it (meta.license, as JSON); release-plan-check.py decides from it.
+  licences = p: lib.toList (p.meta.license or [ ]);
+  buildableEntries = lib.filterAttrs (_: e: e.kind == "nix" && (e.attrs or [ ]) != [ ]) catalogue.entries;
+  redist = {
+    listed = lib.mapAttrs (_: d: d.reason) (if redistributable != null then redistributable.deviceBuilt else redistReal.deviceBuilt);
+    licences = lib.mapAttrs (_: e: map (a: { attr = a; licences = licences (lib.attrByPath (lib.splitString "." a) null plainPkgs); }) e.attrs) buildableEntries;
+    # What each app is when built, and as a recipe, independently of the release's own split.
+    outs = lib.mapAttrs (n: _: map (o: str release.variants.plain.system.config.system.build.rimeCatalogue.passthru.apps.${n}.${o}.outPath)
+      (release.variants.plain.system.config.system.build.rimeCatalogue.passthru.apps.${n}.outputs or [ "out" ])) buildableEntries;
+    drvs = lib.mapAttrs (n: _: str (builtins.unsafeDiscardOutputDependency release.variants.plain.system.config.system.build.rimeCatalogue.passthru.apps.${n}.drvPath)) buildableEntries;
+  };
+  str = p: builtins.unsafeDiscardStringContext (toString p);
   catalogue = import ../catalogue/catalogue.nix;
   floors = import ../release/floors.nix;
 
@@ -36,7 +57,7 @@ let
   plainEtc = release.variants.plain.system.config.environment.etc;
 
   input = pkgs.writeText "release-plan-input.json" (builtins.toJSON {
-    inherit offered expectedVariants carried;
+    inherit offered expectedVariants carried redist;
     entries = catalogue.entries;
     floors = {
       inherit (floors) ratioPermille reserve home espBytes gptBytes GB published publishedPartition;
@@ -48,9 +69,21 @@ let
     };
   });
 in
-pkgs.runCommand "rime-release-plan-check"
+pkgs.runCommand ("rime-release-plan-check" + lib.optionalString (mutant != null) "-mutant-${mutant}")
   {
     nativeBuildInputs = [ pkgs.python3 ];
+    passthru.mutants = lib.optionalAttrs (mutant == null) {
+      publish-vendor-apps = import ./release-plan.nix {
+        inherit pkgs self;
+        mutant = "publish-vendor-apps";
+        redistributable = redistReal // { deviceBuilt = { }; mayPublish = _: _: _: true; };
+      };
+      unlisted = import ./release-plan.nix {
+        inherit pkgs self;
+        mutant = "unlisted";
+        redistributable = redistReal // { deviceBuilt = { }; };
+      };
+    };
     plan = release.rime-release-plan;
     updateToml = plainEtc."rime/update.toml".source;
     inherit input;

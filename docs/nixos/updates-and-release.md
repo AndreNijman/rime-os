@@ -490,11 +490,30 @@ not the daemon's `nix.conf`.
      and `nix path-info --json` narHash and references compared with `closure.json`. Any difference stops the release.
    - Only then: build the manifest, push, sign, self-check (§5.6), update the channel document, sign, self-check,
      dispatch the rimeos.com deploy as `build-image.yml` does.
-3. **Unfree paths.** steam-unwrapped is `unfreeRedistributable` at `1c89083`; NVIDIA, ChatGPT, Claude Desktop and
-   claude-code licences are not verified (plan risk R14). The flake's `allowUnfreePredicate` list is the upload
-   allowlist: the publish job refuses a closure containing an unfree package that is not on a second, reviewed
-   `nix/redistributable.nix` list. A package that may not be redistributed is fetched from its vendor on the device
-   with a pinned hash instead (class 2 only).
+3. **Unfree paths (plan risk R14; decided 2026-11-03, built).** The public cache never carries OpenAI's or
+   Anthropic's binaries: neither vendor's licence has been checked for redistribution, and bootc's image carrying them
+   (2026-09-11 to 2026-10-04) is no reason to assume it is allowed. `nix/redistributable.nix` holds the reviewed list
+   (`deviceBuilt`: chatgpt, claude-desktop, each with its reason and the vendor downloads that hold its bytes) and the
+   rule for every other class 2 app: it is published only when every package behind it has a licence nixpkgs marks
+   `redistributable` (compound `AND` needs every part, `OR` one, `WITH` an exception is its base licence; no licence
+   = not redistributable).
+   - A **device-built** app's catalogue entry names its derivation (`"build": "device"`, `out` = the `.drv`) instead
+     of an output. The release publishes the recipe only: the pinned vendor URL and sha256, the vendor-key check and
+     nixpkgs' packaging. The machine fetches the vendor file from the vendor itself (fixed-output, same hash) and
+     builds the app; the vendor-key check runs there in the same build. Measured at this pin: the recipe closure is
+     4,658 paths / 19.2 MB (chatgpt) and 4,374 / 18.2 MB (claude-desktop), almost all `.drv` files shared with every
+     other recipe in nixpkgs.
+   - `rime-nix-release manifest` and `publish` refuse a closure holding any store path in the plan's
+     `non_redistributable` (each device-built app's outputs, its verified vendor tree, the vendor download), before
+     anything is uploaded (`refuse_non_redistributable`). `manifest` also refuses a device entry that names an output
+     and a cache entry that names a `.drv`.
+   - `checks.release-plan` fails when an app whose licence does not allow redistribution is published, or is
+     device-built without being listed with a reason (mutants `publish-vendor-apps`, `unlisted`);
+     `checks.release-unit` holds the tool mutants ("a path that may not be redistributed is published (R14)", "a
+     device build names an output").
+   - **The system closures** (not catalogue apps): NVIDIA's driver and steam-unwrapped are `unfreeRedistributable` at
+     the nixpkgs pin. No check walks every unfree derivation of a variant's closure; a new unfree package in a
+     variant needs its licence read by hand (open, `docs/nixos/open-items.md`).
 
 ### 6.4 Keys
 
@@ -1315,7 +1334,7 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
   which would skip the narinfo signature). Any refusal fetches that path whole.
 - fwupd UEFI capsules with Secure Boot on (plan open question 17): the firmware pass runs as today; the capsule path's
   signing is decided with the boot chain, not here.
-- Licences of unfree paths before anything is uploaded to a public bucket (§6.3, plan R14).
+- Licences of unfree paths in the variants' system closures (§6.3 step 3 covers catalogue apps; plan R14).
 
 ---
 
@@ -1405,8 +1424,8 @@ read them with this list.
   failed at the bind step after importing the upstream paths ("path … libidn2-2.3.8 is not valid") while `fill` run by
   hand on the same artifact passed; `checks.release-standin` (VMs) passes. Suspected environmental (the shared
   container store); the S3 path is the fallback only.
-- **Not built here (TODO(handover)).** The closure SBOM attestation (§2, `.att`); the unfree-redistribution upload
-  allowlist (§6.3 step 3, `nix/redistributable.nix`); the VM tests in the build job (§7, they need the D8 runners'
+- **Not built here (TODO(handover)).** The closure SBOM attestation (§2, `.att`); a licence walk of the variants'
+  whole system closures (§6.3 step 3; catalogue apps are covered by `nix/redistributable.nix`); the VM tests in the build job (§7, they need the D8 runners'
   KVM); `nix-bump.yml` (§13.1); the `rime-cache` repository bootstrap and Pages (§17); NARs of 2 GiB or more
   (split or host elsewhere); a narinfo re-sign command for key rotation (§18.1).
 

@@ -63,6 +63,10 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "a NAR of 2 GiB is uploaded" 'if os.path.getsize(path) > GH_MAX_ASSET:' 'if False:'
   mutant "upstream paths marked as Rime's" \
     'entry["origin"] = "upstream" if p in upstream["paths"] else "rime"' 'entry["origin"] = "rime"'
+  mutant "a path that may not be redistributed is published (R14)" \
+    'leaked = sorted(banned & set(clo["paths"]))' 'leaked = []'
+  mutant "a device build names an output" \
+    'if not c["out"].endswith(".drv"):' 'if False:'
   mutant "a test variant is published" \
     'if not v.get("publishable") and not allow_test_variants:' 'if False:'
   mutant "the push hook runs in a real publish" \

@@ -534,6 +534,55 @@ class PublishGuards(unittest.TestCase):
             r.refuse_unpublishable(plan, False)
         r.refuse_unpublishable(plan, True)  # the stand-in only
 
+    def test_a_path_that_may_not_be_redistributed_is_never_published(self):
+        # R14 (nix/redistributable.nix): the plan names the vendor app's paths; the closure must not hold one.
+        clo, plan, sizes, n = synthetic()
+        vendor = sp(20, "rime-chatgpt-26.1027.51404")
+        plan["non_redistributable"] = [vendor, sp(21, "chatgpt-26.1027.51404-1.x86_64.rpm")]
+        r.refuse_non_redistributable(clo, plan)  # not in the closure: fine
+        clo["paths"][vendor] = {"nar_hash": nh(vendor), "nar_size": 5, "references": []}
+        clo["catalogue_outs"] = [vendor]
+        sizes[vendor] = 5
+        plan["catalogue"] = [{"name": "chatgpt", "version": "26.1027.51404", "out": vendor}]
+        with self.assertRaisesRegex(r.Refused, "may not be redistributed.*rime-chatgpt"):
+            r.refuse_non_redistributable(clo, plan)
+        with self.assertRaisesRegex(r.Refused, "may not be redistributed"):
+            r.build_manifest(clo, plan, sizes, release="2026.11.01", previous=None, issued=1,
+                             source={"rime_os": SHA_A, "rime_shell": SHA_B, "nixpkgs": SHA_N},
+                             cache_url_hint="", cache_keys=[KEY])
+        plan["non_redistributable"] = ["chatgpt"]
+        with self.assertRaisesRegex(r.Refused, "not a store path"):
+            r.refuse_non_redistributable(clo, plan)
+
+    def test_a_device_built_app_is_published_as_its_derivation(self):
+        clo, plan, sizes, n = synthetic()
+        drv = sp(22, "rime-chatgpt-26.1027.51404.drv")
+        out = sp(20, "rime-chatgpt-26.1027.51404")
+        clo["paths"][drv] = {"nar_hash": nh(drv), "nar_size": 7, "references": []}
+        clo["catalogue_outs"] = [drv]
+        sizes[drv] = 7
+        plan["non_redistributable"] = [out]
+        plan["catalogue"] = [{"name": "chatgpt", "version": "26.1027.51404", "out": drv, "build": "device"}]
+        args = dict(release="2026.11.01", previous=None, issued=1,
+                    source={"rime_os": SHA_A, "rime_shell": SHA_B, "nixpkgs": SHA_N},
+                    cache_url_hint="https://cache.rimeos.com", cache_keys=[KEY])
+        m = r.build_manifest(clo, plan, sizes, **args)
+        self.assertEqual(r.validate(m), [])
+        (c,) = m["catalogue"]
+        self.assertEqual((m["paths"][c["out"]]["path"], c["build"]), (drv, "device"))
+        # A device build that names an output, and a cache build that names a derivation, are refused.
+        plan["catalogue"][0].update(out=drv, build="cache")
+        with self.assertRaisesRegex(r.Refused, "build 'cache'"):
+            r.build_manifest(clo, plan, sizes, **args)
+        plan["catalogue"][0].update(out=n["shell"], build="device")
+        with self.assertRaisesRegex(r.Refused, "built on the device, but .* is not a derivation"):
+            r.build_manifest(clo, plan, sizes, **args)
+        bad = copy.deepcopy(m)
+        del bad["catalogue"][0]["build"]
+        self.assertTrue(any("device build names a derivation" in e for e in r.validate(bad)))
+        bad["catalogue"][0]["build"] = "elsewhere"
+        self.assertTrue(any("neither cache nor device" in e for e in r.validate(bad)))
+
     def test_the_push_hook_needs_a_test_signed_run(self):
         import types
         old = os.environ.get("RIME_TEST_BEFORE_PUSH")
