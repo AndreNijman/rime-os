@@ -1,9 +1,10 @@
 # Branding: the layered ridge on every OS surface Rime owns outside the Shell and the terminal greeting
 # (docs/branding.md). Imported by desktop.nix; on by default wherever the module set is.
 #
-#   os-release      NAME/PRETTY_NAME "Rime OS", ID=rime with ID_LIKE=nixos, LOGO=rime-os, Rime's URLs, a Rime Blue
-#                   ANSI_COLOR (bootc: Containerfile.core's os-release sed, which keeps ID=fedora for dnf copr; on NixOS
-#                   the one ID consumer, switch-to-configuration, compares against this same distroId).
+#   os-release      NAME/PRETTY_NAME "Rime OS", ID=nixos + VARIANT_ID=rime, DEFAULT_HOSTNAME=rime,
+#                   LOGO=rime-os, Rime's URLs, a Rime Blue ANSI_COLOR. Same pattern as bootc (ID=fedora + VARIANT_ID=rime
+#                   + NAME "Rime OS", Containerfile.rime): tooling that keys on the base distro's ID keeps working, and
+#                   rimed's VARIANT_ID reads match on both products (decision 2026-11-02, brand review REVIEW.md).
 #   icons           pkgs.rime.rime-branding: hicolor apps/rime-os (+ distributor-logo, start-here, rime-os-logo),
 #                   share/rime/branding, and share/pixmaps/rime-os*.png.
 #   boot splash     pkgs.rime.rime-plymouth: rime-os (plane 3 in Rime Blue) is the theme; rime-os-accent-00..23 recolour
@@ -66,11 +67,15 @@ in
     {
       system.nixos = {
         distroName = lib.mkDefault "Rime OS";
-        distroId = lib.mkDefault "rime";
+        distroId = lib.mkDefault "nixos";
         vendorName = lib.mkDefault "Rime OS";
         variantName = lib.mkDefault "Rime";
+        # VARIANT_ID picks the greeter's edition accent (GreetContext.qml:313-320); rimed reads it on both products.
+        variant_id = lib.mkDefault "rime";
         extraOSReleaseArgs = lib.mapAttrs (_: lib.mkDefault) {
           PRETTY_NAME = "Rime OS";
+          # NixOS derives DEFAULT_HOSTNAME from distroId ("nixos"); a fresh Rime is "rime" (base.nix's hostName too).
+          DEFAULT_HOSTNAME = "rime";
           LOGO = "rime-os";
           ANSI_COLOR = "0;38;2;145;194;220"; # Rime Blue #91C2DC
           HOME_URL = "https://rimeos.com/";

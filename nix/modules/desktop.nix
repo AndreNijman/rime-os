@@ -352,8 +352,7 @@ in
         # this runs after the Z above. (The directory itself is created by the libexec area.)
         "Z /var/lib/rime-greet/wallpapers - root root -"
       ];
-      # VARIANT_ID picks the greeter's edition accent (GreetContext.qml:313-320).
-      system.nixos.variant_id = lib.mkDefault "rime";
+      # VARIANT_ID=rime (it picks the greeter's edition accent, GreetContext.qml:313-320) is set in branding.nix.
 
       environment.etc."systemd/system-environment-generators/50-rime-keymap".source = keymapGenerator;
 

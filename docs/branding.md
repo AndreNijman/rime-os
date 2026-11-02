@@ -160,7 +160,7 @@ puts the ridge on every OS surface Rime owns outside Rime Shell and the terminal
 
 | Surface | What | Where |
 |---|---|---|
-| os-release | `NAME`/`PRETTY_NAME` `Rime OS`, `ID=rime` + `ID_LIKE=nixos`, `VARIANT=Rime`, `LOGO=rime-os`, `ANSI_COLOR` Rime Blue, rimeos.com / rime-os URLs | `system.nixos.*` (all `mkDefault`) |
+| os-release | `NAME`/`PRETTY_NAME` `Rime OS`, `ID=nixos` + `VARIANT_ID=rime` (the bootc pattern: ID stays the base distro), `DEFAULT_HOSTNAME=rime`, `VARIANT=Rime`, `LOGO=rime-os`, `ANSI_COLOR` Rime Blue, rimeos.com / rime-os URLs | `system.nixos.*` (all `mkDefault`) |
 | icons | hicolor `rime-os` (+ `distributor-logo`, `start-here`, `rime-os-logo`) and `share/pixmaps/rime-os*.png`, `distributor-logo.png` | `pkgs.rime.rime-branding` + a pixmaps derivation |
 | boot splash | `rime-os`: the horizontal lockup centred on charcoal `#212224`, six progress dots below with a travelling Rime Blue pulse (brand pack page 2); passphrase prompt with bullets on an encrypted disk | `pkgs.rime.rime-plymouth`, built from `templates/rime-lockup-horizontal.svg.in` by `files/branding/plymouth/ridge/make-ridge-themes.py`; script `files/branding/plymouth/ridge/rime-os.script` |
 | splash accent | `rime-os-accent-00..23`: identical except plane 3, the bright dot and the bullets, in `accents.json` slot NN | shutdown/reboot: `rime-plymouth-accent` rewrites `/etc/plymouth/plymouthd.conf` (a real file on NixOS); boot: the initrd unit `rime-plymouth-theme` reads `loader/credentials/rime.accent.cred` from the ESP before plymouthd starts |

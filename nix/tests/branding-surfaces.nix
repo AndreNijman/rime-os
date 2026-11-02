@@ -222,10 +222,11 @@ in
           print(osr)
           kv = dict(l.split("=", 1) for l in osr.splitlines() if "=" in l)
           kv = {k: v.strip('"') for k, v in kv.items()}
-          want = {"NAME": "Rime OS", "PRETTY_NAME": "Rime OS", "ID": "rime", "ID_LIKE": "nixos", "LOGO": "rime-os",
+          want = {"NAME": "Rime OS", "PRETTY_NAME": "Rime OS", "ID": "nixos", "VARIANT_ID": "rime", "DEFAULT_HOSTNAME": "rime", "LOGO": "rime-os",
                   "HOME_URL": "https://rimeos.com/", "ANSI_COLOR": "0;38;2;145;194;220", "VENDOR_NAME": "Rime OS"}
           for k, v in want.items():
               assert kv.get(k) == v, f"os-release {k}={kv.get(k)!r}, want {v!r}"
+          assert "ID_LIKE" not in kv, f"ID is nixos itself, no ID_LIKE: {kv.get('ID_LIKE')!r}"
           assert kv["CPE_NAME"].startswith("cpe:/o:rimeos:rime_os:"), kv["CPE_NAME"]
           assert "nixos.org" not in osr, "os-release still points at nixos.org"
           splash.succeed("test -s /run/current-system/sw/share/icons/hicolor/256x256/apps/rime-os.png")
