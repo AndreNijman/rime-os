@@ -104,7 +104,9 @@ def engine_facts(engine):
     names |= set(re.findall(r"\$PKG_ROOT/([A-Za-z0-9._-]+)", code))
     w = re.search(r"'\{(requested:\$requested[^']*)\}' > \"\$\{STATE\}\.tmp\"", code, re.S)
     assert w, "rime-pkg's state.json writer was not found"
-    keys = set(re.findall(r"(\w+):\$", w.group(1)))
+    # Every key of the object, whatever its value is: `name:$var`, but also `image_bytes:($size|tonumber)` (a
+    # `:\$`-only pattern missed those, so a new key with a computed value would have slipped past the judge).
+    keys = set(re.findall(r"(?:^|[{,\s])(\w+):", w.group(1)))
     # deb_cache() and friends: printf '%s/%s.deb' "$DEB_DIR" ...; the .depends writer: "${DEB_DIR}/${name}.depends".
     deb = {s for l in code.splitlines() if "DEB_DIR" in l for s in re.findall(r"(?:%s|\})\.([a-z]+)['\"]", l)}
     return consts, names, keys, deb

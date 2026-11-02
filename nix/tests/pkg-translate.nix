@@ -15,7 +15,8 @@
 #                                 requested.bootc. Then the judge's own mutants, each of which must FAIL: the
 #                                 translator's pkg-deb rows removed ("UNREPORTED pkg-deb: deb/othertool"), a file
 #                                 rime-pkg never writes under /var/lib/rime/pkg ("UNCLASSIFIED"), a rime-pkg that
-#                                 starts using a new directory there, and a snapshot `.omitted` marker.
+#                                 starts using a new directory there, a state.json key it starts writing with a
+#                                 computed value, and a snapshot `.omitted` marker.
 #
 #   checks.pkg-translate.katana   the same judge on katana's real records. They are NEVER in the repository or the
 #                                 store; they reach it at RUN time:
@@ -155,6 +156,10 @@ let
     # 3. rime-pkg starts using a new directory the judge has no word for.
     { cat ${engine}; echo 'readonly NEW_DIR="''${PKG_ROOT}/newdir"'; } > $TMPDIR/rime-pkg.new
     refuses "rime-pkg uses 'newdir'" --rime ${rime}/bin/rime --root $TMPDIR/tree --engine $TMPDIR/rime-pkg.new
+    # 3b. rime-pkg's state.json writer gains a key whose value is computed, not a bare $var (as image_bytes is).
+    sed 's/image_bytes:(\$size|tonumber),$/image_bytes:($size|tonumber), extra_key:($size|tonumber),/' ${engine} > $TMPDIR/rime-pkg.key
+    ! cmp -s ${engine} $TMPDIR/rime-pkg.key
+    refuses "rime-pkg writes state.json key 'extra_key'" --rime ${rime}/bin/rime --root $TMPDIR/tree --engine $TMPDIR/rime-pkg.key
     # 4. A D2 snapshot marker where the judge reads (katana's /var/lib/rime/appimage/.omitted was once a carried row).
     cp -a $TMPDIR/tree $TMPDIR/m4
     mk $TMPDIR/m4/var/lib/rime/appimage/.omitted "(contents omitted from snapshot: size 0)"
