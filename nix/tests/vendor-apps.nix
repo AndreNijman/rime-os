@@ -4,7 +4,7 @@
 #
 # The VM has no network: the apps come from the store the release record names, as on a machine that substitutes
 # them from Rime's cache. Neither app can sign in offline, which is not what is tested. What is tested: the record
-# installs both, they are on the user's PATH, `chatgpt --version` names the pinned version, and each Electron app's
+# installs both, they are on the user's PATH and their launcher entries start them, `chatgpt --version` names the pinned version, and each Electron app's
 # main process starts under X and is still running 25 s later with its renderer up and no missing library.
 #
 # The build-time half (the bytes are the pinned ones and verify against the vendor key) is checked here too, outside
@@ -85,7 +85,14 @@ let
               assert f"{name}: installed (in /nix/var/nix/profiles/rime-apps" in out, out
               where = alice(f"command -v {name}").strip()
               assert where.startswith("/nix/var/nix/profiles/rime-apps/"), where
-          machine.succeed("test -e /nix/var/nix/profiles/rime-apps/share/applications/com.anthropic.Claude.desktop")
+          # The launcher entries start what the profile put on alice's PATH (no /usr/bin path left from the vendor
+          # package), and Claude Desktop's entry keeps the claude:// handler.
+          apps = "/nix/var/nix/profiles/rime-apps/share/applications"
+          for entry, exe in [("com.anthropic.Claude.desktop", "claude-desktop"), ("chatgpt.desktop", "chatgpt")]:
+              execs = machine.succeed(f"grep '^Exec=' {apps}/{entry} | cut -d= -f2- | cut -d' ' -f1 | sort -u").split()
+              assert execs == [exe], (entry, execs)
+              alice(f"command -v {exe}")
+          machine.succeed(f"grep -x 'MimeType=x-scheme-handler/claude;.*' {apps}/com.anthropic.Claude.desktop")
 
       with subtest("chatgpt --version names the pinned version"):
           out = alice("chatgpt --version")
