@@ -229,6 +229,18 @@ class Refusals(unittest.TestCase):
         f["boot"]["sources_custom_cfg"] = False
         self.assertEqual(names(B.evaluate(f)[1]), ["boot-chain-unverified"])
 
+    def test_chain_through_shim_fallback(self):
+        # A fresh install's first boots: the firmware started the removable path (\EFI\BOOT\BOOTX64.EFI = shim +
+        # fbx64.efi, measured in the bridge OVMF lab: BootCurrent was the disk's auto-created entry).
+        f = base_facts()
+        f["nvram"]["boot_current"] = "0002"
+        f["nvram"]["entries"]["0002"] = {"label": "UEFI Misc Device", "path": None, "partuuid": None}
+        self.assertEqual(names(B.evaluate(f)[1]), ["boot-chain-unverified"])   # no fallback facts: not proven
+        f["esps"][0]["fallback_csv"] = True
+        c, refusals, notes = B.evaluate(f)
+        self.assertEqual((c["topology"], refusals), ("A", []))
+        self.assertTrue(any("\\EFI\\fedora\\grub.cfg" in n for n in notes), notes)
+
     def test_chain_unknown_loader_live(self):
         f = base_facts()
         f["nvram"] = {"available": False}

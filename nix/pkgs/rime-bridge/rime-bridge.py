@@ -276,6 +276,9 @@ def esp_facts(dev, path, disk):
                 m = re.search(r'BOOT_UUID="?([0-9A-Fa-f-]+)"?', read(b, "") if b else "")
                 f["grub"][n.lower()] = {"grub_cfg": read(g, "", 1 << 16) if g else "",
                                         "boot_uuid": m.group(1).lower() if m else None}
+        # shim in \EFI\BOOT with its fallback and no GRUB there hands over to \EFI\fedora (BOOTX64.CSV)
+        f["fallback_csv"] = bool(find_ci(efi, "BOOT/fbx64.efi") and not find_ci(efi, "BOOT/grubx64.efi")
+                                 and find_ci(efi, "fedora/BOOTX64.CSV"))
     le = find_ci(path, "loader/entries")
     if le:
         f["loader_entries"] = sorted(os.listdir(le))
@@ -575,6 +578,12 @@ def chain_ok(facts):
     else:
         d = loader_dir(path) or "boot"
     g = esp.get("grub", {}).get(d)
+    if not g and d == "boot" and has_dir(esp, "fedora") and esp.get("fallback_csv"):
+        # The removable path \EFI\BOOT\BOOTX64.EFI is shim with its fallback (fbx64.efi) and no GRUB beside it:
+        # fallback reads \EFI\fedora\BOOTX64.CSV and starts \EFI\fedora\shimx64.efi, whose GRUB reads
+        # \EFI\fedora\grub.cfg. That is how a fresh install boots before the firmware has a "Fedora" entry.
+        d = "fedora"
+        g = esp.get("grub", {}).get(d)
     if not g:
         return False, f"{esp['device']} \\EFI\\{d}\\ has no grub.cfg Rime can read"
     if g.get("boot_uuid") != (boot.get("uuid") or "").lower():

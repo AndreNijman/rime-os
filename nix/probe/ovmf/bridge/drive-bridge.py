@@ -28,6 +28,7 @@ import zlib
 import struct
 
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][0-9A-Za-z]|\x1b[=>]|\r")
+COMPLETE = re.compile(rb"\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][0-9A-Za-z]|\x1b[=>\\]|\x1b[^\[()=>\]P]")
 PASS = os.environ.get("RIME_LAB_PASS", "rime-lab-OLD-1")
 USER = "alex"
 
@@ -42,6 +43,7 @@ class VM:
         self.w = a.work
         self.log = open(os.path.join(a.logs, f"{a.kind}-{name}.serial.log"), "wb")
         self.buf = b""
+        self.raw = b""
         self.cur = 0
         self.lock = threading.Lock()
         ser, qmp = os.path.join(self.w, "serial.sock"), os.path.join(self.w, "qmp.sock")
@@ -91,8 +93,16 @@ class VM:
                 return
             self.log.write(d)
             self.log.flush()
+            # The serial socket delivers a few bytes at a time, so an escape sequence is often split across reads:
+            # strip only up to an escape that may still be incomplete, and keep that tail for the next read.
+            self.raw += d
+            cut = len(self.raw)
+            esc = self.raw.rfind(b"\x1b")
+            if esc >= 0 and len(self.raw) - esc < 64 and not COMPLETE.match(self.raw, esc):
+                cut = esc
             with self.lock:
-                self.buf += ANSI.sub(b"", d)
+                self.buf += ANSI.sub(b"", self.raw[:cut])
+            self.raw = self.raw[cut:]
 
     def qmp(self, cmd, **args):
         self.qf.write(json.dumps({"execute": cmd, "arguments": args}).encode() + b"\n")

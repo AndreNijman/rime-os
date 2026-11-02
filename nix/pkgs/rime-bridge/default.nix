@@ -27,6 +27,9 @@ stdenvNoCC.mkDerivation {
 
   buildInputs = [ python3 ];
   dontBuild = true;
+  # share/rime-bridge/rime-migrate must keep #!/usr/bin/python3 (it runs on the bootc machine, which has no /nix);
+  # bin/ already names this python explicitly.
+  dontPatchShebangs = true;
 
   installPhase = ''
     runHook preInstall
@@ -40,6 +43,8 @@ stdenvNoCC.mkDerivation {
   doInstallCheck = true;
   installCheckPhase = ''
     runHook preInstallCheck
+    head -n1 $out/share/rime-bridge/rime-migrate | grep -qx '#!/usr/bin/python3 -I' \
+      || { echo "share/rime-bridge/rime-migrate does not start with #!/usr/bin/python3 -I"; exit 1; }
     RIME_MIGRATE=$out/bin/rime-migrate ${python3}/bin/python3 -I -W error::ResourceWarning \
       -m unittest discover -v -s tests -p 'test_*.py'
     runHook postInstallCheck

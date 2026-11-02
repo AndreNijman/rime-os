@@ -26,6 +26,7 @@ let
     [ "floor-dropped" "rime-bridge.py" ''s/return FLOOR_BYTES + int(/return 0 + int(/'' "A11 floor not counted" ]
     [ "accept-B" "rime-bridge.py" ''s/^ACCEPTED = ("A", "E")/ACCEPTED = ("A", "B", "E")/'' "topology B bridged" ]
     [ "chain-no-configfile" "rime-bridge.py" ''s/if "configfile" not in g.get("grub_cfg", ""):/if False:/'' "D3 chain check gone" ]
+    [ "fallback-unconditional" "rime-bridge.py" ''s/ and has_dir(esp, "fedora") and esp.get("fallback_csv"):/:/'' "removable path trusted without shim's fallback" ]
     [ "backup-same-disk" "rime-bridge.py" ''s/elif b.get("disk") and b.get("disk") == root.get("disk"):/elif False:/'' "backup on the migrated disk" ]
   ];
   hlMutants = [
