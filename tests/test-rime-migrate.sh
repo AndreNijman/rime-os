@@ -64,6 +64,16 @@ PY
 )"
 [[ -z "$nonstd" ]] && ok "imports the standard library only" || bad "non-stdlib imports" "$nonstd"
 "$PROG" --help >/dev/null 2>&1 && ok "--help answers without root" || bad "--help failed"
+# docs/nixos-move.md names these as `rime migrate <sub>`; check-doc-verbs.sh
+# cannot ask them of the Rust binary (it passes them through to this program),
+# so tests/doc-verbs-allow lists them and THIS is where they are proved to parse.
+for sub in check repair-e start; do
+    if "$PROG" "$sub" --help >/dev/null 2>&1; then
+        ok "rime migrate $sub is a real subcommand of the program"
+    else
+        bad "rime migrate $sub --help failed: docs/nixos-move.md names a verb that does not parse"
+    fi
+done
 # The program refuses to run without root and names the command to type.
 if [[ $EUID -ne 0 ]]; then
     out="$("$PROG" check 2>&1)"; rc=$?
