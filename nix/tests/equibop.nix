@@ -51,7 +51,9 @@ let
     };
     # Equibop itself is NOT in the system: it comes from the release record, as on a real machine.
     environment.systemPackages = [ config.rime.services.rimed.package pkgs.xvfb-run pkgs.python3 pkgs.procps ];
-    environment.etc."rime-test/equibop-outs.json".source = config.system.build.rimeCatalogue;
+    # The release record names only equibop (the whole catalogue's record would pull every class 2 app into the VM).
+    environment.etc."rime-test/equibop-outs.json".text =
+      builtins.toJSON { apps.equibop = "${config.system.build.rimeCatalogue.passthru.apps.equibop}"; };
     virtualisation.additionalPaths = [ config.system.build.rimeCatalogue.passthru.apps.equibop ];
     fonts.enableDefaultPackages = true;
     virtualisation = {

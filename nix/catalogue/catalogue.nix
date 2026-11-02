@@ -92,20 +92,12 @@
     # plain native one, which that helper starts with no Flatpak socket dance. Rime's build (nix/pkgs/rime-equibop.nix)
     # takes Equicord from nixpkgs instead of downloading it at first start: no app updates itself outside rime update.
     equibop = { kind = "nix"; attrs = [ "rime.rime-equibop" ]; summary = "Equibop, a Discord client (Rich Presence in Gaming Mode)"; };
-    # Vendor apps (D5): Rime derivations that keep the pinned vendor-key check of rime-pkg (vendor_fetch_*). nixpkgs'
-    # chatgpt is rejected because it has no vendor-key check; claude-desktop and helium are not in nixpkgs.
-    chatgpt = {
-      kind = "nix";
-      attrs = [ ];
-      summary = "ChatGPT desktop app";
-      pending = "ChatGPT needs a Rime build that checks OpenAI's signing key, and that build does not exist yet";
-    };
-    claude-desktop = {
-      kind = "nix";
-      attrs = [ ];
-      summary = "Claude Desktop";
-      pending = "Claude Desktop needs a Rime build that checks Anthropic's signing key, and that build does not exist yet";
-    };
+    # Vendor apps (D5): Rime derivations that keep the pinned vendor-key check of rime-pkg (vendor_fetch_*):
+    # nix/pkgs/rime-vendor-apps (one pinned version each, verified in the build; pins.nix says how to bump). nixpkgs'
+    # chatgpt is not used as it is because it takes OpenAI's deb on its sha256 alone; claude-desktop and helium are not
+    # in nixpkgs.
+    chatgpt = { kind = "nix"; attrs = [ "rime.rime-chatgpt" ]; summary = "ChatGPT desktop app"; };
+    claude-desktop = { kind = "nix"; attrs = [ "rime.rime-claude-desktop" ]; summary = "Claude Desktop"; };
     helium = {
       kind = "nix";
       attrs = [ ];

@@ -55,6 +55,8 @@
 // import ./pkg-translate.nix { inherit pkgs self; }
 # equibop
 // { equibop = import ./equibop.nix { inherit pkgs self; }; }
+# vendor-apps (+ .mutants: inrelease-tampered, rpm-tampered)
+// { vendor-apps = import ./vendor-apps.nix { inherit pkgs self; }; }
 # virtualization
 // { virtualization = import ./virtualization.nix { inherit pkgs self; }; }
 # vendor-verify, vendor-fetch-refuses

@@ -15,11 +15,9 @@
 # The fingerprints are rime-pkg's (CHATGPT_KEY_FPR, CLAUDE_KEY_FPR): `readonly`, with no override. checks.vendor-verify
 # rewrites them in a COPY of the block to throwaway keys, exactly as tests/test-rime-pkg-rpm6.sh does.
 #
-# TODO(handover): real pins. OpenAI's rpm repository keeps exactly ONE build (no per-version URL), so a fixed-output
-# hash breaks the day OpenAI publishes; Claude Desktop's apt pool keeps versions, but its InRelease and Packages move
-# with every release. Either needs a Rime-side mirror or a pin-bump job that runs the verifier, and packaging the
-# verified rpm/deb as an app (Electron: autoPatchelf + runtime libraries) is not done. The catalogue keeps both apps
-# `pending` until then.
+# The pins and the packaged apps: nix/pkgs/rime-vendor-apps (pins.nix: one version of each, its bytes by sha256 and
+# the vendor's signed index kept beside it; sources.nix: fetchVerified of exactly those; chatgpt.nix, claude-desktop.nix:
+# the apps the catalogue installs). checks.vendor-apps installs both from a release record, offline.
 {
   lib,
   runCommand,

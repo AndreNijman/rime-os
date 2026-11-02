@@ -19,6 +19,9 @@
   # D5 catalogue apps Rime builds itself: Equibop with nixpkgs' Equicord (no run-time download), and the vendor apps
   # (ChatGPT, Claude Desktop) from their vendor-key-checked, pinned downloads.
   rime-equibop = callPackage ./rime-equibop.nix { };
+  rime-vendor-sources = callPackage ./rime-vendor-apps/sources.nix { inherit (pkgs.rime) rime-vendor; };
+  rime-chatgpt = callPackage ./rime-vendor-apps/chatgpt.nix { sources = pkgs.rime.rime-vendor-sources; };
+  rime-claude-desktop = callPackage ./rime-vendor-apps/claude-desktop.nix { sources = pkgs.rime.rime-vendor-sources; };
   # Not callPackage: that would wrap the kernel's own .override, which NixOS's boot.kernelPackages calls
   # (linuxPackagesFor -> kernel.override { features, randstructSeed, ... }).
   rime-kernel = import ./kernel { inherit pkgs; };
