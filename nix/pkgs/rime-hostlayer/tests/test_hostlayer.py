@@ -211,6 +211,37 @@ class CarryTest(Fixture):
         self.assertIn("/etc/npmrc: not carried; keys set there: prefix", rep)
         self.assertIn("/etc/hypr: absent", rep)
 
+    def test_the_files_a_vpn_profile_names_are_carried_with_it(self):
+        # An OpenVPN profile as written by hand (certificates under /etc/openvpn) and as nmcli import writes one
+        # (under the person's home, already on the disk the new system boots from); one names a file that is gone.
+        e = f"{self.src}/etc"
+        write(f"{e}/openvpn/client/ca.crt", "CA-TEST\n", 0o644)
+        write(f"{e}/openvpn/client/me.key", "KEY-TEST\n", 0o600)
+        write(f"{self.src}/var/home/andre/.cert/nm-openvpn/work-ta.pem", "TA-TEST\n", 0o600)
+        write(f"{self.dest}/var/home/andre/.cert/nm-openvpn/work-ta.pem", "TA-TEST\n", 0o600)
+        write(f"{e}/NetworkManager/system-connections/Work.nmconnection",
+              "[connection]\nid=Work\ntype=vpn\n\n[vpn]\n"
+              "service-type=org.freedesktop.NetworkManager.openvpn\nremote=vpn.example\n"
+              "ca=/etc/openvpn/client/ca.crt\nkey=/etc/openvpn/client/me.key\n"
+              "ta=/var/home/andre/.cert/nm-openvpn/work-ta.pem\ncert=/etc/openvpn/client/gone.crt\n", 0o600)
+        self.carry(check=0)
+        self.assertEqual(self.read("etc/openvpn/client/ca.crt"), "CA-TEST\n")
+        self.assertEqual(self.read("etc/openvpn/client/me.key"), "KEY-TEST\n")
+        self.assertEqual(oct(os.stat(f"{self.dest}/etc/openvpn/client/me.key").st_mode & 0o777), "0o600")
+        rep = json.loads(self.read("var/lib/rime/carry/report.json"))
+        carried = {c["from"] for c in rep["carried"]}
+        self.assertIn("/etc/openvpn/client/ca.crt", carried)
+        self.assertIn("/etc/openvpn/client/me.key", carried)
+        self.assertNotIn("/var/home/andre/.cert/nm-openvpn/work-ta.pem", carried, "a home file was rewritten")
+        checked = {c["path"]: c["result"] for c in rep["checked"]}
+        self.assertIn("already on this disk", checked["/var/home/andre/.cert/nm-openvpn/work-ta.pem"])
+        left = {l["path"]: l["why"] for l in rep["left_behind"]}
+        self.assertIn("named by /etc/NetworkManager/system-connections/Work.nmconnection", left["/etc/openvpn/client/gone.crt"])
+        # Carried with the profile, so neither "left behind" nor a private key "not copied".
+        self.assertNotIn("/etc/openvpn/client/ca.crt", left)
+        self.assertNotIn("/etc/openvpn/client/me.key", rep["not_copied_private_keys"])
+        self.assertNotIn("KEY-TEST", json.dumps(rep))
+
     def test_a_person_colliding_with_a_nixos_id_is_refused_by_name_and_nothing_is_written(self):
         write(f"{self.src}/etc/passwd", PASSWD + "builder:x:30001:30000::/var/home/builder:/bin/bash\n")
         write(f"{self.src}/etc/group", GROUP + "builder:x:30000:\n")
