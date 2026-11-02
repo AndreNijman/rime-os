@@ -175,8 +175,32 @@ in
     # H2's lab: mac80211_hwsim's two radios (wlo1, the machine's card; the other, the access point, moved into the
     # network namespace "ap"), set up once; the access point is restarted for each profile's SSID.
     WIFI = {}
-    # Wait for NetworkManager's state before asking it to connect (False only in the mutant "wifi-no-wait").
+    # Wait for NetworkManager's state before asking it to connect (False only in the mutant "wifi-no-wait": it
+    # neither waits for the device nor for autoconnect, and asks at once).
     WIFI_WAIT = True
+    # Seconds wpa_supplicant is held down just before that wait (wifi_hold_supplicant): the outage the hosted run
+    # 41400977973 hit by chance, made certain, so the wait is exercised every run and the mutant fails every run.
+    # hostgates-net sets it; 0 (no hold) elsewhere.
+    WIFI_HOLD = 0
+    WIFI_HOLDS = []
+
+    def wifi_hold_supplicant(m):
+        """Stop wpa_supplicant and keep it from being D-Bus activated for WIFI_HOLD seconds, then start it again: the
+        Wi-Fi device is `unavailable` meanwhile, as it is while nixpkgs restarts wpa_supplicant for a new radio."""
+        if not WIFI_HOLD:
+            return
+        if not WIFI_HOLDS:
+            m.succeed("mkdir -p /run/systemd/system/wpa_supplicant.service.d",
+                      "printf '[Unit]\\nConditionPathExists=!/run/rime-test-wpa-hold\\n' "
+                      "> /run/systemd/system/wpa_supplicant.service.d/rime-test-hold.conf",
+                      "systemctl daemon-reload")
+        WIFI_HOLDS.append(1)
+        m.succeed("touch /run/rime-test-wpa-hold", "systemctl stop wpa_supplicant.service",
+                  f"systemd-run --on-active={WIFI_HOLD}s --unit=rime-test-wpa-back-{len(WIFI_HOLDS)} "
+                  "${pkgs.bash}/bin/sh -c '${pkgs.coreutils}/bin/rm -f /run/rime-test-wpa-hold && "
+                  "/run/current-system/sw/bin/systemctl start wpa_supplicant.service'")
+        m.fail("systemctl is-active wpa_supplicant.service")
+        print(f"H2: wpa_supplicant held down for {WIFI_HOLD} s")
 
     def wifi_lab(m):
         if WIFI:
@@ -272,8 +296,9 @@ in
                                     f"{shlex.quote(conn)} | grep .", timeout=120).strip()
         band = nm_get(m, conn, "802-11-wireless.band")
         wifi_ap(m, ssid, psk, band)
+        wifi_hold_supplicant(m)
         wifi_ready(m, dev, ssid)
-        if nm_get(m, conn, "connection.autoconnect") == "yes":
+        if WIFI_WAIT and nm_get(m, conn, "connection.autoconnect") == "yes":
             for _ in range(45):
                 if m.execute(f"nmcli -g GENERAL.STATE connection show {shlex.quote(conn)} | grep -x activated")[0] == 0:
                     print(f"H2: {conn!r} came up by itself (autoconnect)")
@@ -320,10 +345,10 @@ in
         filesystems get the UUIDs host.toml names, so the generated units find them as on the old machine."""
 
         # How each filesystem is made with the UUID host.toml names, and its smallest disk (mkfs.xfs refuses
-        # under 300 MB).
-        MKFS = {"ext4": ("mkfs.ext4 -q -U {uuid} -L {label} {dev}", 128 << 20),
-                "btrfs": ("mkfs.btrfs -q -f -U {uuid} -L {label} {dev}", 128 << 20),
-                "xfs": ("mkfs.xfs -q -f -m uuid={uuid} -L {label} {dev}", 320 << 20)}
+        # under 300 MB). The lab's own tools, not the system's: what the system ships is what the checks test.
+        MKFS = {"ext4": ("${pkgs.e2fsprogs}/bin/mkfs.ext4 -q -U {uuid} -L {label} {dev}", 128 << 20),
+                "btrfs": ("${pkgs.btrfs-progs}/bin/mkfs.btrfs -q -f -U {uuid} -L {label} {dev}", 128 << 20),
+                "xfs": ("${pkgs.xfsprogs}/bin/mkfs.xfs -q -f -m uuid={uuid} -L {label} {dev}", 320 << 20)}
 
         def __init__(self, m, mounts):
             import os

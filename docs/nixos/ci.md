@@ -119,3 +119,13 @@ Two traps found while making it, both in the test, not the product:
   that device's gateway. In a NixOS VM test the primary connection is QEMU's user network (eth0), so a server on the
   test VLAN (eth1) gets the handshake through eth1 and every data packet sent out of eth0: activated, no traffic.
   Base the VPN on the VLAN's device: `nmcli connection up <vpn> ifname eth1`.
+
+**The mutant made deterministic (nix/ci2, 11-03).** A race mutant proves nothing when it passes. `hostgates-net` now
+holds wpa_supplicant down for 20 s right before the wait (`wifi_hold_supplicant` in hostlayer-common.nix: the unit
+stopped, its D-Bus activation refused by a runtime `ConditionPathExists=!/run/rime-test-wpa-hold` drop-in, a
+`systemd-run --on-active=20s` timer lifts it): the Wi-Fi device is `unavailable`, as it is while nixpkgs restarts
+wpa_supplicant for a new radio, on every run, not only on a slow runner. The check waits it out (24.4 s, NetworkManager
+"re-acquiring supplicant interface", then "Started WPA Supplicant instance") and passes; the mutant `wifi-no-wait`
+(no wait, no autoconnect, `nmcli connection up` at once) fails with the hosted error "No suitable device found for this
+connection" (`/var/lab/rime-nix/artifacts/ci2/hostgates-net2.log`, `hostgates-net2-mut-wifi-no-wait.log`). Only
+`hostgates-net` sets the hold; `hostlayer-katana` (run by hand) does not.
