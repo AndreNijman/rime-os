@@ -1,0 +1,41 @@
+===== g2-mass deltas 2026-11-02T01:26:21+00:00 7.53 17.49 32.19 5/1940 31230
+server written in 12 s
+server: 2088 narinfos
+server FileSize total over 2067 added paths (nix copy ?compression=zstd): 4102426733 B
+new toplevel absent from the machine store before
+{"paths": 2067, "delta_paths": 2066, "full_paths": 1, "delta_bytes": 581958584, "full_nar_bytes": 1232, "nar_bytes": 10616181136, "rebuild_s": 117.7, "import_s": 150.9, "wall_s": 271.2, "children_max_rss_mib": 1639.5, "self_max_rss_mib": 43.2}
+	Percent of CPU this job got: 50%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:31.27
+	Maximum resident set size (kbytes): 1678836
+	Exit status: 0
+new toplevel valid in the machine store after
+verify (contents + TEST signature) of the 2067 added paths: rc=0
+===== g2-mass plain nix copy 2026-11-02T01:31:12+00:00 6.40 11.37 25.62 1/1875 117397
+2067 store paths deleted, 9.8 GiB freed
+machine store back on the old release: none of the 2067 added paths is valid
+	Percent of CPU this job got: 303%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:10.32
+	Maximum resident set size (kbytes): 1459464
+	Exit status: 0
+new toplevel valid after the plain nix copy
+===== g1-nixpkgs deltas, run 3 2026-11-02T01:34:30+00:00 5.78 7.42 21.29 3/2037 195214
+161 store paths deleted, 1.9 GiB freed
+server: 2079 narinfos
+server FileSize total over 161 added paths (nix copy ?compression=zstd): 746244317 B
+new toplevel absent from the machine store before
+{"paths": 161, "delta_paths": 157, "full_paths": 4, "delta_bytes": 228380692, "full_nar_bytes": 9202016, "nar_bytes": 2111192904, "rebuild_s": 22.3, "import_s": 19.6, "wall_s": 42.1, "children_max_rss_mib": 787.8, "self_max_rss_mib": 36.4}
+	Percent of CPU this job got: 42%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:42.20
+	Maximum resident set size (kbytes): 806688
+	Exit status: 0
+new toplevel valid in the machine store after
+verify (contents + TEST signature) of the 161 added paths: rc=0
+===== g1-nixpkgs plain nix copy, run 2 2026-11-02T01:35:40+00:00 4.83 6.65 19.93 3/1874 208034
+161 store paths deleted, 1.9 GiB freed
+machine store back on the old release: none of the 161 added paths is valid
+	Percent of CPU this job got: 201%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:03.36
+	Maximum resident set size (kbytes): 552868
+	Exit status: 0
+new toplevel valid after the plain nix copy
+===== end 2026-11-02T01:35:52+00:00 6.07 6.85 19.85 4/1859 214094
