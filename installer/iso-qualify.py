@@ -378,8 +378,16 @@ def login(a, ser):
         return "no password prompt"
     at = ser.mark()
     ser.send(a.password + "\n")
-    if not ser.wait(r"\$ |# |> ", 90, since=at):
+    # zsh's default prompt ends in "% ".
+    m = ser.wait(r"\$ |# |> |% |Type one of the keys in parentheses", 90, since=at)
+    if not m:
         return "login did not give a shell"
+    if m.group(0).startswith("Type"):
+        # zsh with no ~/.zshrc opens zsh-newuser-install on a first login; q leaves it without writing anything.
+        at = ser.mark()
+        ser.send("q")
+        if not ser.wait(r"\$ |# |> |% ", 30, since=at):
+            return "login did not give a shell (after leaving zsh-newuser-install)"
     time.sleep(5)
     ser.send("exec bash --norc --noprofile\n")
     time.sleep(2)
@@ -405,13 +413,17 @@ def mode_firstboot_nixos(a):
                    "xargs -r -I{} loginctl show-session {} -p VTNr -p Class | tr '\\n' ' '; echo" % a.greeter_user)
         script = (
             "printf '__RQ_%s__\\n' BEGIN; "
-            "printf '__RQ_%s__\\n' HOST; hostnamectl --static; "
+            # The running hostname: the host layer sets it at activation (there is no static /etc/hostname).
+            "printf '__RQ_%s__\\n' HOST; cat /proc/sys/kernel/hostname; "
             "printf '__RQ_%s__\\n' SYSTEM; readlink /run/current-system; "
             "printf '__RQ_%s__\\n' TZ; timedatectl show -p Timezone --value; "
             "printf '__RQ_%s__\\n' LANG; localectl status | sed -n 's/.*LANG=//p'; "
-            "printf '__RQ_%s__\\n' SB; od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d0-aa0d-00e098032b8c | awk '{print $NF}'; "
+            # As root (the account is in wheel): the ESP and efivars are not readable by a user.
+            "echo '" + a.password + "' | sudo -S -p '' -v; "
+            "printf '__RQ_%s__\\n' SB; sudo -n od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c 2>&1 | awk '{print $NF}'; "
+            "sudo -n bootctl status 2>&1 | grep -m1 'Secure Boot:' | sed 's/^ *//'; "
             "printf '__RQ_%s__\\n' FS; findmnt -no FSTYPE,OPTIONS / | tr ',' ' '; findmnt -no OPTIONS /nix | tr ',' ' '; findmnt -no OPTIONS /var/home | tr ',' ' '; findmnt -no FSTYPE /boot; "
-            "printf '__RQ_%s__\\n' BLS; ls /boot/loader/entries; "
+            "printf '__RQ_%s__\\n' BLS; sudo -n ls /boot/loader/entries; "
             "printf '__RQ_%s__\\n' GREETER; for i in $(seq 60); do g=$(" + greeter + "); case $g in *VTNr=1*Class=greeter*) break;; esac; sleep 2; done; echo \"$g\"; systemctl is-active greetd.service; "
             "printf '__RQ_%s__\\n' END\n"
         )
@@ -440,7 +452,9 @@ def mode_firstboot_nixos(a):
                           ("timezone", a.expect_tz), ("lang", a.expect_lang)):
             if want and facts[key] != want:
                 problems.append("%s is %r, expected %r" % (key, facts[key], want))
-        if a.vars_template and facts["secure_boot"] != "1":
+        # The firmware's SecureBoot variable (1) and bootctl's reading of it, both.
+        sb = [x.strip() for x in facts["secure_boot"].splitlines()]
+        if a.vars_template and not (sb[:1] == ["1"] and any(x.startswith("Secure Boot: enabled") for x in sb)):
             problems.append("Secure Boot is not on in the booted system (SecureBoot=%r)" % facts["secure_boot"])
         m = facts["mounts"]
         if len(m) < 4 or not m[0].startswith("btrfs") or "subvol=/@nixos" not in m[0] \
