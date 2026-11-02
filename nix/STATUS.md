@@ -41,6 +41,11 @@ Proof on the merged head:
   --with-binary` 98/0, cargo `nixos_bridge` 7 passed, `tests/test-boot-v2.sh` 154/1 (the one is the existing
   efivarfs inverse control).
 
+No single `nix flake check` with EXIT 0 built everything on the merged head (wave 2 had one). In its place:
+`nix flake check path:. --no-build -L` at the merged head, EXIT 0 (`flake-check-nobuild.log`), the per-check builds
+above, and `flake-check-1.log` (ffd32786c), whose only errors are the two out-of-space disk images and what depends on
+them.
+
 Not re-run at integration: the OVMF lab and the iso-qualify / boot drivers, the delta timing runs, the katana-snapshot
 runs (P1, H1-H10). **The bridge changed at 223a0758d after every OVMF bridge run**: an OVMF re-run of topology A
 (plain) and L (encrypted) is owed before P3.
@@ -50,6 +55,11 @@ per-key sections). The ones that block P3: the real MOK signature on the NixOS k
 `main`, `RIME_NIX_KERNEL_HOST` unset: Andre's), the payload key `rime-bridge-payload-1`, katana's PCR 7 and
 `\EFI\APEX\grub.cfg`, P3-S1..S4, the production netinstall ISO and `.exe`, and the OVMF A/L re-run above. rime-shell
 PR #49 is open and was left alone.
+
+`feat/nixos` is not pushed (`origin/feat/nixos` is aa86b8883, before the wave-3 merges), so hosted CI has not
+run on it. The merged `nix/<key>` branches and worktrees are deleted locally. The sections below are as of the wave
+they name: `nix/ci-hosted-fix` was merged between waves 2 and 3 (694ed2cb6), "Closure" is wave 0's figure (today's
+is above), and "Stubbed: TODO(handover)" is superseded by `docs/nixos/open-items.md`.
 
 ## Wave 2 (2026-11-02): merged, all 61 checks pass, P2 45 of 50 met
 

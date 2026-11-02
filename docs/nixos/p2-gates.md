@@ -31,6 +31,10 @@ What re-ran on the merged head (code at 223a0758d; the commits after it change o
   disk images at once; 10 GB free, about 6 GB per image) and it was stopped; the checks it had not reached were then
   built one at a time with the build directory off /var/lab (`build-2.log`, `build-3.log`): both rc 0, so `update-delta`, `update-e2e` and
   `update-client` passed too. After that, 73 of 73 BUILT, 0 MISSING.
+- **No single `nix flake check` with EXIT 0 built everything on the merged head** (wave 2 had one). What stands in
+  for it: `nix flake check path:. --no-build -L` at the merged head, EXIT 0, every output evaluated
+  (`flake-check-nobuild.log`); the per-check builds above; and `flake-check-1.log` (at ffd32786c), whose only
+  errors are the two disk images that ran out of space and the five derivations above them.
 - `vm-boot` at the merged head: all ten subtests (`build-2.log`). `bridge-unit` at the merged head: suite green, 49
   mutants killed, including the two added at this integration (`bridge-unit-HEAD.log`).
 - Closure of `rime-vm`: 2121 paths, 10,567,108,960 B NAR (9.8 GiB), against wave 2's 2108 paths and 10,575,430,816 B
