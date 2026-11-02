@@ -6,8 +6,8 @@
 # check that no longer exists, and tests/check-suites-run-in-ci.sh refuses one with no reason, so this list can only
 # say what is true.
 #
-# The kernel five build the Rime kernel (linux-rime-7.2.9, measured with `nix build --dry-run` against an empty
-# store: the derivation is in the plan of exactly these five; kernel-sign joined with nix/kernsign). Nothing Rime-built is in a binary cache yet, and a
+# The kernel six build the Rime kernel (linux-rime-7.2.9, measured with `nix build --dry-run` against an empty
+# store: the derivation is in the plan of exactly these six, re-measured at the wave-2 merge with `nix-store -qR` of every check drvPath; kernel-sign joined with nix/kernsign, kernel-vm-signed with nix/bootmatrix). Nothing Rime-built is in a binary cache yet, and a
 # kernel plus its module set on a 4-vCPU hosted runner is hours, not minutes.
 #
 # hostlayer-katana is listed for honesty, not cost: without RIME_KATANA_STATE (katana's sanitised /etc snapshot,
@@ -19,4 +19,5 @@ kernel-gate         needs the Rime binary cache (TODO(handover) R2): it reads th
 kernel-vm           needs the Rime binary cache (TODO(handover) R2): it boots the Rime kernel and its signed modules
 kernel-boot-budget  needs the Rime binary cache (TODO(handover) R2): it measures the Rime kernel image and initrd
 kernel-sign         needs the Rime binary cache (TODO(handover) R2): it signs and relinks the real Rime kernel image
+kernel-vm-signed    needs the Rime binary cache (TODO(handover) R2): it boots the signed Rime kernel (K1-K3)
 hostlayer-katana    needs katana's real state (RIME_KATANA_STATE, never in CI): without it the test boots nothing and would pass
