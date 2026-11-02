@@ -1,0 +1,1 @@
+{"paths": 161, "delta_paths": 157, "full_paths": 4, "delta_bytes": 228380692, "full_nar_bytes": 9202016, "nar_bytes": 2111192904, "rebuild_s": 338.0, "import_s": 114.6, "wall_s": 455.8, "children_max_rss_mib": 786.5, "self_max_rss_mib": 34.5}

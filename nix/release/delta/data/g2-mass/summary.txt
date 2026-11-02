@@ -1,0 +1,34 @@
+paths added 2067, NAR 10.616 GB
+full zstd -3 (shipped)    4.100 GB
+full zstd -19 --long=27   3.190 GB
+delta (--patch-from)      0.582 GB  (18.2 % of full)
+  same-name       1783 paths  full 1.421 GB  delta 0.076 GB
+  same-package     283 paths  full 1.769 GB  delta 0.506 GB
+  none               1 paths  full 0.000 GB  delta 0.000 GB
+largest 25 after delta (MB full -> MB delta, window log):
+      133.8 ->     133.3  w28  same-package  linux-6.18.58-modules
+      844.1 ->      76.5  w30  same-package  linux-firmware-20261019-zstd
+      117.1 ->      49.7  w29  same-package  qtwebengine-6.140.0-rc
+      104.2 ->      35.8  w29  same-package  firefox-unwrapped-158.0.1
+       35.9 ->      35.0  w27  same-package  initrd-linux-6.18.58
+       55.4 ->      33.5  w28  same-package  python3-3.14.8
+       23.4 ->      15.6  w28  same-package  qtdeclarative-6.12.0
+       14.8 ->      14.0  w27  same-package  linux-6.18.58
+       34.6 ->      12.8  w29  same-package  mesa-26.2.5
+       32.2 ->      11.5  w29  same-package  mesa-26.2.5
+       27.2 ->      11.4  w27  same-name     sing-box-1.14.3
+       36.8 ->      10.7  w28  same-name     deno-2.9.7
+       38.3 ->       9.3  w28  same-name     openvino-2026.4.0-lib
+       18.3 ->       9.2  w27  same-package  qtbase-6.12.0
+        8.3 ->       5.3  w27  same-name     rimed-0.1.0
+        8.7 ->       4.9  w27  same-package  git-2.56.0
+       10.5 ->       4.9  w27  same-package  systemd-262
+       10.5 ->       4.9  w27  same-package  systemd-262
+        7.7 ->       4.4  w27  same-name     niri-26.04
+        8.9 ->       3.6  w27  same-name     cni-plugins-1.9.1
+        5.9 ->       3.5  w27  same-name     resvg-0.48.1
+        7.3 ->       3.2  w27  same-package  qttools-6.12.0
+        9.5 ->       2.8  w27  same-name     skopeo-1.24.1
+        2.6 ->       2.6  w27  same-package  inotify-tools-4.26.270
+        4.8 ->       2.4  w27  same-package  systemd-minimal-262
+paths with more than one candidate tried: 582; max window log: 30

@@ -1,0 +1,10 @@
+ 08:29:42 up 4 days, 14:34,  1 user,  load average: 34.87, 34.74, 29.37
+38 store paths deleted, 532.7 MiB freed
+machine store back on the old release: none of the 161 added paths is valid
+	Percent of CPU this job got: 88%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:20.97
+	Maximum resident set size (kbytes): 500668
+	Exit status: 0
+new toplevel valid after the plain nix copy
+exit=0
+ 08:30:56 up 4 days, 14:36,  1 user,  load average: 37.85, 35.59, 30.08

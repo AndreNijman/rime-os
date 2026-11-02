@@ -1,0 +1,23 @@
+	Command being timed: "python3 -I /work/wt-g2/nix/release/delta/rime_delta.py apply-all /work/scratch/g2/pairs/g2-mass/results.tsv --server /work/scratch/g2/server-g2-mass --deltas /work/scratch/g2/pairs/g2-mass/deltas --store /work/scratch/g2/store-55bfb4d --into /work/scratch/g2/g3-into-g2-mass --trusted-key rime-g2-TEST-throwaway-1:d9Q3Jq57XETgvE9OO1EmCxDxgM5J/3UL5o1VF+Twy2w= --log /work/scratch/g2/pairs/g2-mass/apply-all.jsonl"
+	User time (seconds): 70.79
+	System time (seconds): 67.37
+	Percent of CPU this job got: 50%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 4:31.27
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 1678836
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 6999
+	Minor (reclaiming a frame) page faults: 10275913
+	Voluntary context switches: 617770
+	Involuntary context switches: 177569
+	Swaps: 0
+	File system inputs: 22476472
+	File system outputs: 64552688
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
