@@ -153,9 +153,12 @@ let
   # ── 50-rime-keymap: the system keymap reaches greetd's greeter host (files/system/systemd/rime-keymap-env)
   # NixOS writes /etc/X11/xorg.conf.d/00-keyboard.conf from services.xserver.xkb (graphical-desktop.nix),
   # the same file localectl writes on Fedora, so the generator runs unchanged; only its PATH is given.
+  # Only the script is interpolated (`files + "/…"`), never `''${files}/…`: that copies the whole files/ tree
+  # (11 MiB, bootc's Plymouth art included) into the store, and from this runtime script into every closure.
+  # checks.size refuses a closure that holds the files/ tree (mutant files-tree-back).
   keymapGenerator = pkgs.writeShellScript "50-rime-keymap" ''
     export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gnused ]}
-    exec ${pkgs.bash}/bin/bash ${files}/system/systemd/rime-keymap-env
+    exec ${pkgs.bash}/bin/bash ${files + "/system/systemd/rime-keymap-env"}
   '';
 
   # JetBrainsMono Nerd Font at the version the bootc image pins (Containerfile.core:1490, v3.5.1);
