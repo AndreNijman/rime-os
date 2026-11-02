@@ -107,7 +107,7 @@ class Fixture(unittest.TestCase):
         write(f"{e}/subuid", SUBIDS)
         write(f"{e}/subgid", SUBIDS)
         write(f"{e}/login.defs", "UID_MIN 1000\nGID_MIN 1000\n")
-        write(f"{e}/machine-id", "e9cc8221c5e54fbcb8586980b2f2e386\n", 0o444)
+        write(f"{e}/machine-id", "0f1a70000000400080000000c0ffee01\n", 0o444)
         write(f"{e}/hostname", "apex\n")
         os.symlink("../usr/share/zoneinfo/Australia/Perth", f"{e}/localtime")
         write(f"{e}/locale.conf", "# comment\nLANG=en_US.UTF-8\n")
@@ -117,7 +117,7 @@ class Fixture(unittest.TestCase):
               ' Option "XkbVariant" "extd"\nEndSection\n')
         write(f"{e}/fstab",
               "UUID=a41f / btrfs subvol=root 0 0\n"
-              "UUID=a41fee21 /var/home/andre/Games ext4 defaults,noatime,nofail 0 2\n"
+              "UUID=f1a70001 /var/home/andre/Games ext4 defaults,noatime,nofail 0 2\n"
               "UUID=8c87 /var/lab ext4 defaults,noatime,nofail 0 2\n"
               "/dev/zram0 none swap defaults 0 0\n")
         write(f"{e}/NetworkManager/system-connections/Home Wi-Fi.nmconnection", "[connection]\nid=Home Wi-Fi\n",
@@ -193,7 +193,7 @@ class CarryTest(Fixture):
 
     def test_files_and_state_move_where_nixos_reads_them(self):
         self.carry(check=0)
-        self.assertEqual(self.read("etc/machine-id"), "e9cc8221c5e54fbcb8586980b2f2e386\n")
+        self.assertEqual(self.read("etc/machine-id"), "0f1a70000000400080000000c0ffee01\n")
         nm = f"{self.dest}/etc/NetworkManager/system-connections/Home Wi-Fi.nmconnection"
         self.assertEqual(oct(os.stat(nm).st_mode & 0o777), "0o600")
         self.assertEqual(self.read("etc/ssh/ssh_host_ed25519_key"), "PRIVATE-TEST\n")

@@ -81,8 +81,8 @@ pkgs.runCommand "rime-hostlayer-fixture"
     UUID=0b1c2d3e-0000-4000-8000-000000000002 /boot ext4 defaults 1 2
     UUID=0B1C-2D3E /boot/efi vfat umask=0077,shortname=winnt 0 2
     UUID=0b1c2d3e-0000-4000-8000-000000000001 /var btrfs subvol=var,compress=zstd:1 0 0
-    UUID=a41fee21-0000-4000-8000-00000000f1a7 /var/home/andre/Games ext4 defaults,nofail 0 2
-    UUID=8c8746e1-0000-4000-8000-00000000f1a7 /var/lab ext4 nofail,noatime 0 0
+    UUID=f1a70001-0000-4000-8000-00000000f1a7 /var/home/andre/Games ext4 defaults,nofail 0 2
+    UUID=f1a70002-0000-4000-8000-00000000f1a7 /var/lab ext4 nofail,noatime 0 0
     EOF
     echo 'luks-fixture UUID=0b1c2d3e-0000-4000-8000-0000000000aa none discard,tpm2-device=auto' > $r/etc/crypttab
 

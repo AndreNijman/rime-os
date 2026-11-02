@@ -130,7 +130,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the old disks: generated nofail mounts, and the boot went on without them"):
         check_mounts(machine)
-        machine.succeed("grep -x 'What=/dev/disk/by-uuid/a41fee21-0000-4000-8000-00000000f1a7' "
+        machine.succeed("grep -x 'What=/dev/disk/by-uuid/f1a70001-0000-4000-8000-00000000f1a7' "
                         "/run/systemd/generator/var-home-andre-Games.mount")
         machine.succeed("grep -x 'Options=defaults,nofail' /run/systemd/generator/var-home-andre-Games.mount")
 
