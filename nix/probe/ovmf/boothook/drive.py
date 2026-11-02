@@ -362,8 +362,12 @@ class MatrixScenario(Scenario):
         t = b.wait_for(lambda t: "RIME-LAB: PASSPHRASE-ASKED" in t, 420)
         if not t:
             return ["the initrd never asked for the passphrase"]
-        time.sleep(4)  # Plymouth draws its prompt
+        # The ask waits for as long as it takes: screenshot it as it is first asked and again once Plymouth (on
+        # simpledrm/fbcon over the firmware framebuffer) has had time to draw, then type.
+        time.sleep(4)
         b.qmp.shot(f"{b.base}-passphrase{label}.png")
+        time.sleep(12)
+        b.qmp.shot(f"{b.base}-passphrase{label}-late.png")
         for ch in self.PASS:
             b.qmp.key(ch)
             time.sleep(0.15)

@@ -261,19 +261,29 @@ let
   # vdb = the plain filesystem image; kernel arguments rime.part=, rime.uuid=, rime.fs=; passphrase on fw_cfg.
   wpkgs = nixpkgs.legacyPackages.x86_64-linux;
   writerKernel = wpkgs.linuxPackages.kernel;
+  writerModuleList = [
+    "virtio_pci" "virtio_blk" "qemu_fw_cfg"
+    "aes_generic" "aesni_intel" "cbc" "ecb" "xts" "sha256_generic" "sha256" "sha512_generic" "hmac" "af_alg"
+    "algif_skcipher" "algif_hash" "encrypted_keys" "trusted" "dm_mod" "dm_crypt"
+  ];
   writerModules = wpkgs.makeModulesClosure {
-    kernel = writerKernel;
-    firmware = wpkgs.linux-firmware;
-    rootModules = [ "virtio_pci" "virtio_blk" "dm_mod" "dm_crypt" "qemu_fw_cfg" "xts" "aesni_intel" ];
+    # The modules live in the kernel's `modules` output (`out` has only bzImage and System.map).
+    kernel = writerKernel.modules;
+    firmware = wpkgs.runCommand "rime-luks-writer-no-firmware" { } "mkdir -p $out/lib/firmware";
+    # dm_crypt needs the ciphers its key types allocate at load (cbc(aes), sha256, hmac: "encrypted_key: failed
+    # to alloc_cipher (-2)" otherwise) and cryptsetup's AF_ALG sockets.
+    rootModules = writerModuleList;
     allowMissing = true;
   };
   writerInit = wpkgs.writeScript "rime-luks-writer-init" ''
     #!${wpkgs.busybox}/bin/sh
     export PATH=${lib.makeBinPath [ wpkgs.kmod wpkgs.cryptsetup wpkgs.coreutils wpkgs.e2fsprogs wpkgs.btrfs-progs wpkgs.busybox ]}
+    export MODULE_DIR=/lib/modules/
     mkdir -p /proc /sys /dev /tmp /run/cryptsetup
     mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
     say() { echo "RIME-WRITER: $*" > /dev/ttyS0; }
-    for m in virtio_pci virtio_blk dm_mod dm_crypt qemu_fw_cfg xts aesni_intel; do modprobe $m 2>/dev/null; done
+    for m in ${lib.concatStringsSep " " writerModuleList}; do modprobe $m 2>/dev/null || say "modprobe $m: not loaded"; done
+    if [ -d /sys/module/dm_crypt ]; then say "dm_crypt loaded"; else say "dm_crypt NOT loaded"; fi
     for w in $(cat /proc/cmdline); do case $w in rime.*=*) k=''${w%%=*}; eval "''${k#rime.}=''${w#*=}";; esac; done
     i=0; while [ ! -b /dev/vda$part ] || [ ! -b /dev/vdb ]; do i=$((i+1)); [ $i -gt 100 ] && break; sleep 0.1; done
     pass=$(cat /sys/firmware/qemu_fw_cfg/by_name/opt/rime/passphrase/raw)
@@ -283,9 +293,10 @@ let
     printf %s "$pass" | cryptsetup luksFormat --batch-mode --type luks2 --uuid "$uuid" --label RIMEROOT \
       --pbkdf argon2id --iter-time 1000 "$P" - || rc=1
     printf %s "$pass" | cryptsetup open "$P" rimew - || rc=1
-    # Only the image's non-zero blocks are written (conv=sparse): unwritten blocks of the volume read back as
-    # noise, which neither ext4 (uninitialised groups) nor btrfs (free space) reads.
-    dd if=/dev/vdb of=/dev/mapper/rimew bs=4M conv=sparse,fsync status=none || rc=1
+    [ -b /dev/mapper/rimew ] || { say "no /dev/mapper/rimew"; rc=1; }
+    # Every block, zeros included: a block left unwritten reads back as decrypted noise, and ext4 expects zeros in
+    # places it never writes (an earlier conv=sparse copy failed e2fsck).
+    [ "$rc" = 0 ] && { dd if=/dev/vdb of=/dev/mapper/rimew bs=4M conv=fsync status=none || rc=1; }
     case "$fs" in
       ext4) e2fsck -fn /dev/mapper/rimew > /tmp/fsck 2>&1 || rc=1 ;;
       btrfs) btrfs check --readonly /dev/mapper/rimew > /tmp/fsck 2>&1 || rc=1 ;;

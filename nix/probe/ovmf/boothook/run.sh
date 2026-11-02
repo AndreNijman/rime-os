@@ -11,6 +11,7 @@
 #   run.sh matrix-sign        the real Rime kernel image(s) of every cell signed by sign-detached.sh (TEST MOK)
 #   run.sh matrix-gens        gen1/gen2 of every cell, built with those signatures; the LUKS writer VM
 #   run.sh matrix-disks [CELL...]   one base disk per cell (LUKS2 written inside the writer VM, never on the host)
+#   run.sh matrix-write CELL...     only the writer VM step of matrix-disks, again (a LUKS cell's disk.raw + payload)
 #   run.sh matrix-run [CELL-FW...]  CELL = bls-plain|bls-luks|custom-plain|custom-luks, FW = sb-mok|sb-off
 #   run.sh matrix             all of the above
 set -euo pipefail
@@ -29,7 +30,9 @@ PIN=1c89083e451e891152365b799595cf7790a43325
 WT=$(cd "$HERE/../../../.." && pwd)
 to_work() { echo "/work/${1#/var/lab/rime-nix/}"; }
 mkdir -p "$LAB" "$ART"
-probe() { sudo -n podman run --rm --device /dev/kvm -v "$LAB:/lab:z" -v "$ART:/out:z" -v "$HERE:/rig:ro,z" \
+# No SELinux relabel (:z) of the mounts: it walks $LAB recursively, including a disk tree mkdisk.sh is building
+# (immutable /var/empty: the relabel fails the run). The probe is a lab container with no host paths but these.
+probe() { sudo -n podman run --rm --device /dev/kvm --security-opt label=disable -v "$LAB:/lab" -v "$ART:/out" -v "$HERE:/rig:ro" \
   -e LAB=/lab -e OUT=/out --entrypoint "$1" rime-ovmf-probe "${@:2}"; }
 
 prep_firmware() {
@@ -127,6 +130,14 @@ step_matrix_disks() {
       -c bash "$(to_work "$HERE")/mkdisk.sh" "$c" > "$ART/mkdisk-$c.log" 2>&1 \
       || { tail -30 "$ART/mkdisk-$c.log"; exit 1; }
     grep -v '^copying path' "$ART/mkdisk-$c.log" | tail -n 4
+    step_matrix_write "$c"
+    sudo -n du -h --apparent-size "$LAB/disks/$c/disk.raw"; sudo -n du -h "$LAB/disks/$c/disk.raw"
+  done
+}
+
+step_matrix_write() {   # CELL...: a LUKS cell's volume, formatted and filled in the writer VM (no-op for plain)
+  local c
+  for c in "$@"; do
     if [[ -f $LAB/disks/$c/luks.env ]]; then
       # The LUKS2 volume is formatted and filled inside a throwaway VM (matrix.nix luksWriter).
       probe /bin/bash -euc "source /lab/disks/$c/luks.env
@@ -140,7 +151,6 @@ step_matrix_disks() {
       grep -q 'RIME-WRITER: DONE rc=0' "$ART/luks-writer-$c.log" || { echo "luks writer failed for $c" >&2; exit 1; }
       sudo -n rm -f "$LAB/disks/$c/payload.img"
     fi
-    du -h --apparent-size "$LAB/disks/$c/disk.raw"; sudo -n du -h "$LAB/disks/$c/disk.raw"
   done
 }
 
@@ -197,6 +207,7 @@ case "${1:-all}" in
   matrix-sign) step_matrix_sign;;
   matrix-gens) step_matrix_gens;;
   matrix-disks) shift; step_matrix_disks "$@";;
+  matrix-write) shift; step_matrix_write "$@";;
   matrix-run) shift; step_matrix_run "$@" || rc=$?;;
   matrix) prep_firmware | tee "$ART/prep.txt"; step_matrix_sign; step_matrix_gens; step_matrix_disks
           step_matrix_run || rc=$?;;
