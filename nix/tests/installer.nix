@@ -155,6 +155,29 @@ in
           assert rc != 0 and "is not signed by rime-installer-check-OTHER-1" in out, out
           untouched("/dev/vdb")
 
+      with subtest("refused by name, nothing written: a cache signed by another key OF THE SAME NAME"):
+          # The pre-wipe check verifies the signatures with the stamped key, not the key's name.
+          answers("/dev/vdb")
+          installer.succeed(
+              "mkdir -p /tmp/stamps-same && cp /tmp/stamps/* /tmp/stamps-same/",
+              "nix key generate-secret --key-name rime-installer-check-TEST-1 | nix key convert-secret-to-public > /tmp/stamps-same/nixos-cache.pub",
+              "! cmp -s /tmp/stamps/nixos-cache.pub /tmp/stamps-same/nixos-cache.pub",
+          )
+          rc, out = run("RIME_NIXOS_STAMPS=/tmp/stamps-same")
+          print(out)
+          assert rc != 0 and "is not signed by rime-installer-check-TEST-1" in out and "Nothing has been erased" in out, out
+          untouched("/dev/vdb")
+
+      with subtest("refused by name, nothing written: LUKS with a non-US unlock keymap (D9)"):
+          # The generic initrd has the US console keymap only, so a 'de' passphrase prompt cannot be honoured yet.
+          # The engine maps the XKB layout to a console keymap through the kbd tree (Fedora's /usr/lib/kbd/keymaps on
+          # the ISO); without one every layout resolves to us, so the check hands it nixpkgs' kbd tree.
+          answers("/dev/vdb", encrypt="yes", lukspass="rimecheckluks42", keymap="de")
+          rc, out = run("RIME_KBD_KEYMAPS=${pkgs.kbd}/share/keymaps")
+          print(out)
+          assert rc != 0 and "encrypted install with the 'de" in out and "Nothing has been erased" in out, out
+          untouched("/dev/vdb")
+
       with subtest("installs the prebuilt system onto the whole disk"):
           answers("/dev/vdb")
           rc, out = run("RIME_EXTRA_KARGS='console=ttyS0,115200'")

@@ -180,6 +180,16 @@ onto another disk."
   done
   if [ "$ENCRYPT" = yes ]; then
     have cryptsetup || die "cryptsetup is missing from this installer. Nothing has been erased."
+    # D9: "LUKS with a non-us keymap is refused by name until the keymap VM gate passes". The generic toplevel's
+    # initrd carries the US console keymap only (rd.vconsole.keymap= names a map it does not have, and the prompt
+    # stays US), so a passphrase typed on another layout would not open the disk at first boot. UNLOCK_KEYMAP is
+    # rime-install's decision for the prompt (us when the layout cannot type the passphrase at all, as on bootc).
+    # Lifted when the initrd ships every console keymap and the boot hook carries host.toml's (nix/tpmkeymap).
+    if [ -n "${UNLOCK_KEYMAP:-}" ] && [ "$UNLOCK_KEYMAP" != us ]; then
+      die "An encrypted install with the '$UNLOCK_KEYMAP' keyboard layout is not supported yet: the disk-unlock screen of this Rime OS uses the US layout only, so the passphrase you typed might not open the disk.
+
+Nothing has been erased. Go back and either choose the US (English) keyboard layout, or install without encryption."
+    fi
   fi
   for k in shimx64.efi grubx64.efi mmx64.efi BOOTX64.CSV; do
     [ -f "$NIXOS_EFI_SRC/$k" ] || die "This installer carries no $k (looked in ${NIXOS_EFI_SRC:-/boot/efi/EFI/*}). Nothing has been erased."
@@ -190,17 +200,17 @@ onto another disk."
 
   # ── the system is in the cache and signed, before the disk is touched ──────
   note "Checking that $NIXOS_SYSTEM is available …"
-  local info
-  if ! info=$(nixos_nix path-info --json --store "$NIXOS_CACHE" "$NIXOS_SYSTEM" 2>>"$LOG"); then
+  if ! nixos_nix path-info --store "$NIXOS_CACHE" "$NIXOS_SYSTEM" >>"$LOG" 2>&1; then
     die "Rime OS could not be found in its package cache ($NIXOS_CACHE).
 
 Nothing has been erased — your disks are untouched.
 Check the network connection (a network install needs it), then try again."
   fi
-  case "$info" in
-    *'"signatures"'*"${NIXOS_PUBKEY%%:*}:"*) : ;;
-    *) die "Rime OS in $NIXOS_CACHE is not signed by ${NIXOS_PUBKEY%%:*}. Nothing has been erased." ;;
-  esac
+  # Every path of the closure, signed by the stamped key itself (not merely by a key of the same name), before the
+  # disk is touched: `nix copy` checks the same again, but only after the wipe.
+  if ! nixos_nix store verify --store "$NIXOS_CACHE" --no-contents --sigs-needed 1 --recursive "$NIXOS_SYSTEM" >>"$LOG" 2>&1; then
+    die "Rime OS in $NIXOS_CACHE is not signed by ${NIXOS_PUBKEY%%:*}, or its cache is incomplete. Nothing has been erased."
+  fi
   log "nixos: system $NIXOS_SYSTEM in $NIXOS_CACHE, signed by ${NIXOS_PUBKEY%%:*}; tz=$NIXOS_TZ lang=$NIXOS_LANG kargs=${NIXOS_KARGS[*]:-}"
 }
 
@@ -301,10 +311,8 @@ nixos_install() {
     rkey=""
     dev="/dev/mapper/$LUKS_MAPPER"
     # The generic system opens the volume the boot hook names from host.toml.
+    # (A non-US unlock keymap was refused in nixos_preflight.)
     NIXOS_KARGS=("rd.luks.uuid=$LUKS_UUID" "${NIXOS_KARGS[@]}")
-    if [ -n "${UNLOCK_KEYMAP:-}" ] && [ "$UNLOCK_KEYMAP" != us ]; then
-      NIXOS_KARGS+=("rd.vconsole.keymap=$UNLOCK_KEYMAP")
-    fi
     log "luks: $root uuid=$LUKS_UUID mapper=$LUKS_MAPPER"
   fi
 
