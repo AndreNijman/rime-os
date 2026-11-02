@@ -6,11 +6,10 @@
 #   nix/modules/packages-catalogue.nix  `floors` -> /etc/rime/catalogue.json (`rime install steam` refuses below the
 #                                       floor of the system it would select)
 #   nix/tests/release-plan.nix          checks.release-plan: the arithmetic below, and every published number
-#   the installer (NOT YET)             should read the disk floor and the gaming choice from here:
-#                                       `floors.<variant>.diskGB` for a whole disk, `.partitionGB` for an existing
-#                                       partition (plain, and plain-gaming when gaming is chosen). Handed to installer2:
-#                                       installer/rime-install-nixos.sh still hardcodes NIXOS_MIN_GB=19 (verify-updates,
-#                                       2026-11-03)
+#   nix/installer/choices.nix           the installer's disk floors: `floors.<variant>.diskGB` for a whole disk,
+#                                       `.partitionGB` for an existing partition (plain, and plain-gaming when gaming
+#                                       is chosen), stamped into the ISO as nixos-choices.json and read by
+#                                       installer/rime-install-nixos.sh (checks.installer-choices)
 #
 # Decision (2026-11-02, wave 3 "updates"): the gate counts ON-DISK bytes on a store mounted compress-force=zstd, as
 # the unpacked NAR size times `ratioPermille`/1000 (rounded up), plus the 1 GB reserve. The ratio is the larger of the

@@ -711,7 +711,9 @@ nixos_install() {
   # journald's files No_COW on btrfs (systemd's journal-nocow.conf `h /var/log/journal - - - - +C`, which NixOS
   # links too, comes too late: systemd-journal-flush writes the first files before systemd-tmpfiles-setup runs, and
   # +C on a directory reaches only files created after it). Set while the directory is empty, which is the only time
-  # it takes. chattr (FS_NOCOW_FL), never `btrfs property`: that one is an xattr.
+  # it takes. chattr (FS_NOCOW_FL), never `btrfs property`: that one is an xattr. nixos-enter's own
+  # `systemd-tmpfiles --create` (under nixos-install) applies that `h ... +C` as well, but `h` only adjusts a path that
+  # exists, so the mkdir is what makes it take there; the chattr does not depend on that run (it ignores failures).
   mkdir -p "$TROOT/var/log/journal"
   chattr +C "$TROOT/var/log/journal" >>"$LOG" 2>&1 || nixos_fail "Could not make /var/log/journal No_COW"
   log "nixos: $(lsattr -d "$TROOT/var/log/journal" 2>&1)"

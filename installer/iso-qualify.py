@@ -479,7 +479,9 @@ def mode_firstboot_nixos(a):
             # installer3: the gaming switch the installer writes when gaming is chosen, and the journal's No_COW.
             "printf '__RQ_%s__\\n' GAMING; cat /var/lib/rime/switch/rime-feature@gaming.target.on 2>/dev/null || echo no-switch; "
             "systemctl is-active rime-feature@gaming.target; command -v steam >/dev/null && echo steam || echo no-steam; "
-            "printf '__RQ_%s__\\n' NOCOW; lsattr -d /var/log/journal 2>&1 | cut -d' ' -f1; "
+            # FS_IOC_GETFLAGS & FS_NOCOW_FL through the system's python3: e2fsprogs' lsattr is not on its PATH.
+            "printf '__RQ_%s__\\n' NOCOW; python3 -c 'import fcntl,os,struct; f=os.open(\"/var/log/journal\",os.O_RDONLY); "
+            "print(\"C\" if struct.unpack(\"<I\",fcntl.ioctl(f,0x80086601,bytes(8))[:4])[0] & 0x800000 else \"-\")' 2>&1 | tail -n 1; "
             "sudo -n journalctl -b --no-pager 2>&1 | grep -c -i 'copy-on-write' || true; "
             "printf '__RQ_%s__\\n' GREETER; for i in $(seq 60); do g=$(" + greeter + "); case $g in *VTNr=1*Class=greeter*) break;; esac; sleep 2; done; echo \"$g\"; systemctl is-active greetd.service; "
             "printf '__RQ_%s__\\n' END\n"
@@ -595,7 +597,7 @@ def main():
                     help="firstboot --nixos: the gaming switch holds `steam`, its target is active and steam is there "
                          "(yes), or there is no switch (no)")
     ap.add_argument("--expect-nocow", action="store_true",
-                    help="firstboot --nixos: /var/log/journal is No_COW (lsattr C) and journald did not warn")
+                    help="firstboot --nixos: /var/log/journal is No_COW (FS_NOCOW_FL) and journald did not warn")
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
     a.work = os.path.abspath(a.work)
