@@ -41,8 +41,9 @@ jobs:
   plan:
     name: Evaluate and plan
     runs-on: ubuntu-24.04
-    # Evaluation one attribute per process (nix/ci/eval-each.sh): ~50 CPU-min measured locally under load.
-    timeout-minutes: 45
+    # Evaluation one attribute per process (nix/ci/eval-each.sh): ~50 CPU-min measured locally under load; 10-11 min
+    # on the hosted runner (docs/nixos/ci.md). Twice the slowest, rounded up.
+    timeout-minutes: 25
     outputs:
       run: ${{ steps.plan.outputs.run }}
     steps:
@@ -76,9 +77,9 @@ jobs:
   packages:
     name: Packages (rimed, rime-shell, rime-libexec)
     runs-on: ubuntu-24.04
-    # rimed compiles in 11 min on 20 threads (docs/nixos/p1-exit.md), then runs its whole cargo test: several times
-    # that on 4 vCPUs. The first hosted run gives the real figure; tighten this from it.
-    timeout-minutes: 150
+    # rimed compiles in 11 min on 20 threads (docs/nixos/p1-exit.md), then runs its whole cargo test: 18-24 min in
+    # all on the hosted runner (docs/nixos/ci.md). Twice the slowest, rounded up.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/free-disk-space
@@ -114,8 +115,9 @@ jobs:
     # The build itself is stopped at RIME_CHECK_TIMEOUT (below), inside this, so a check that runs too long is
     # recorded and shown as TIMED OUT with its time; this job limit only catches a hung setup step. Every leg starts
     # from an empty store and the rimed, gaming, security and rimed-session legs compile the rimed workspace before
-    # their VM (no Rime binary cache yet, R2), so the budget is the packages job's plus a VM test.
-    timeout-minutes: 180
+    # their VM (no Rime binary cache yet, R2), so the budget is the packages job's plus a VM test. The slowest leg
+    # measured on the hosted runner took 54 min (terminal-look; docs/nixos/ci.md): the build limit is twice that.
+    timeout-minutes: 125
     strategy:
       fail-fast: false
       matrix:
@@ -146,10 +148,10 @@ jobs:
             case " $features " in *" $f "*) ;; *) echo "::error::Nix does not offer the $f system feature"; exit 1 ;; esac
           done
       - name: Build ${{ matrix.check }}
-        timeout-minutes: 170
+        timeout-minutes: 115
         env:
-          # 165 min; with run-checks.sh's 60 s kill grace it ends inside the step limit, so a result is recorded.
-          RIME_CHECK_TIMEOUT: "9900"
+          # 110 min; with run-checks.sh's 60 s kill grace it ends inside the step limit, so a result is recorded.
+          RIME_CHECK_TIMEOUT: "6600"
           CHECK: ${{ matrix.check }}
         run: nix/ci/run-checks.sh build "$CHECK" "$RUNNER_TEMP/results"
       - name: Record the result
