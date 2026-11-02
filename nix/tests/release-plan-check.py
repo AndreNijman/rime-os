@@ -57,6 +57,7 @@ for name in expected:
     carried = inp["carried"][name]
     for f in ("gaming", "virtualization"):
         check(carried[f] == (f in feats), f"variant {name}: rime.{f}.enable = {carried[f]}")
+    check(carried["passwordAccounts"] == [], f"variant {name} carries no account with a password ({carried['passwordAccounts']})")
 tops = [v["toplevel"] for v in plan["variants"].values()]
 check(len(tops) == len(set(tops)), "every variant is a different system")
 
@@ -73,10 +74,15 @@ for name, m in fl["measured"].items():
     check(comp["storeBytes"] == store, f"floor {name}: store bytes {comp['storeBytes']} == {store}")
     check(comp["diskGB"] == disk_gb, f"floor {name}: disk {comp['diskGB']} GB == {disk_gb} GB")
     check(fl["published"].get(name) == disk_gb, f"floor {name}: published {fl['published'].get(name)} GB == {disk_gb} GB")
+    part_gb = -(-store // GB)
+    check(comp["partitionGB"] == part_gb, f"floor {name}: partition {comp['partitionGB']} GB == {part_gb} GB")
+    check(fl["publishedPartition"].get(name) == part_gb,
+          f"floor {name}: published partition {fl['publishedPartition'].get(name)} GB == {part_gb} GB")
     # The gate needs room for a whole second system on top of the installed one; a floor below that strands updates.
     check(store >= on_disk + estimate, f"floor {name} holds a full rebuild under the gate's own arithmetic")
 for name in expected:
     check(name in fl["published"], f"variant {name} has a published floor")
+    check(name in fl["publishedPartition"], f"variant {name} has a published partition floor")
 check(fl["ratioPermille"] / 1000 >= 0.524, f"the gate's ratio {fl['ratioPermille'] / 1000} is no lower than the worst measured (0.524)")
 check(fl["espBytes"] == 2048 * 1024 * 1024, "the floors count the installer's 2 GiB ESP")
 

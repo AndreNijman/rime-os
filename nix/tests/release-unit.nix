@@ -209,12 +209,16 @@ open("dry.sh", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))'
   python3 - "$plan" <<'PY'
 import json, re, sys
 plan = json.load(open(sys.argv[1]))
-v = plan["variants"]["plain"]
-assert re.match(r"^/nix/store/[0-9a-z]{32}-nixos-system-rime-vm-", v["toplevel"]), v["toplevel"]
-assert v["publishable"] is False, "rime-vm carries a test account and must never be publishable"
-for slug in ("shell", "rime-daemon", "rime-tools", "compositor", "shell-runtime", "systemd", "libraries", "kernel"):
-    assert v["components"].get(slug), f"component {slug} is empty"
-print("plan ok:", sorted(v["components"]))
+# The generic installed system per feature set (nix/release/variants.nix); checks.release-plan proves the set,
+# the features each carries, and that none carries a test account.
+assert "plain" in plan["variants"], sorted(plan["variants"])
+for name, v in plan["variants"].items():
+    assert re.match(r"^/nix/store/[0-9a-z]{32}-nixos-system-rime-" + re.escape(name) + "-", v["toplevel"]), v["toplevel"]
+    assert v["publishable"] is True, f"{name}: the generic installed system is publishable"
+    for slug in ("shell", "rime-daemon", "rime-tools", "compositor", "shell-runtime", "systemd", "libraries", "kernel"):
+        assert v["components"].get(slug), f"{name}: component {slug} is empty"
+assert plan["catalogue"], "the plan names no catalogue builds"
+print("plan ok:", sorted(plan["variants"]), sorted(c["name"] for c in plan["catalogue"]))
 PY
 
   touch $out

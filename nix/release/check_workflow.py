@@ -66,8 +66,11 @@ def check(path):
         closure = [r for r in runs if "rime-nix-release\" closure" in r or "rime-nix-release closure" in r]
         if not closure or not all("--catalogue-out" in r for r in closure):
             bad.append("the closure step must pass every catalogue app build (--catalogue-out)")
-        if not any(".#rime-release-catalogue" in r for r in runs):
-            bad.append("the build step must build .#rime-release-catalogue")
+        # A real build with an out-link the closure step reads, not only the dry run's mention of it.
+        lines = [ln for r in runs for ln in r.splitlines()]
+        if not any("nix build" in ln and ".#rime-release-catalogue" in ln and "--dry-run" not in ln
+                   and "--out-link" in ln for ln in lines):
+            bad.append("the build step must build .#rime-release-catalogue (an out-link, not a dry run)")
         if not any("checks.x86_64-linux.release-plan" in r for r in runs):
             bad.append("the build step must run checks.x86_64-linux.release-plan")
     for name, job in (wf.get("jobs") or {}).items():

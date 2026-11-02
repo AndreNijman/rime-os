@@ -6,7 +6,9 @@
 #   nix/modules/packages-catalogue.nix  `floors` -> /etc/rime/catalogue.json (`rime install steam` refuses below the
 #                                       floor of the system it would select)
 #   nix/tests/release-plan.nix          checks.release-plan: the arithmetic below, and every published number
-#   the installer                       the disk floor and the gaming choice (installer2: read `diskGB` from here)
+#   the installer                       the disk floor and the gaming choice: `floors.<variant>.diskGB` for a whole disk,
+#                                       `.partitionGB` for an existing partition (plain, and plain-gaming when gaming
+#                                       is chosen)
 #
 # Decision (2026-11-02, wave 3 "updates"): the gate counts ON-DISK bytes on a store mounted compress-force=zstd, as
 # the unpacked NAR size times `ratioPermille`/1000 (rounded up), plus the 1 GB reserve. The ratio is the larger of the
@@ -16,7 +18,8 @@
 # A floor is what the disk must hold for the gate to accept one mass rebuild (every path new, the D6 §11.3 worst
 # case) beside the installed system: partitions + the installed system on disk + the gate's need for a whole second
 # closure + 1 GB for home and logs. `storeBytes` is the part on the root filesystem (what `rime install` compares
-# with the size of the filesystem holding /nix); `diskGB` adds the installer's partitions and rounds up to a GB.
+# with the size of the filesystem holding /nix); `diskGB` adds the installer's partitions and rounds up to a GB;
+# `partitionGB` is `storeBytes` rounded up to a GB (the root partition when the ESP is not counted).
 let
   GB = 1000000000;
   ceilDiv = a: b: (a + b - 1) / b;
@@ -55,6 +58,9 @@ let
     storeBytes = m.onDisk + onDiskEstimate m.unpacked + reserve + home;
     diskBytes = storeBytes + espBytes + gptBytes;
     diskGB = ceilDiv diskBytes GB;
+    # The root partition alone (the installer's "into a partition" mode, where the ESP already exists): the
+    # "14 GB plain, 16 GB gaming" of the D5 handover is this figure.
+    partitionGB = ceilDiv storeBytes GB;
   };
 in
 {
@@ -70,5 +76,11 @@ in
     plain-gaming = 18;
     plain-virtualization = 17;
     plain-gaming-virtualization = 19;
+  };
+  publishedPartition = {
+    plain = 14;
+    plain-gaming = 16;
+    plain-virtualization = 14;
+    plain-gaming-virtualization = 16;
   };
 }

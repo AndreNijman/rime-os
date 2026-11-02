@@ -27,6 +27,10 @@ let
   carried = lib.mapAttrs (_: v: {
     gaming = v.system.config.rime.gaming.enable;
     virtualization = v.system.config.rime.virtualization.enable;
+    # A published system carries no account with a password in its configuration (rime-vm's rime/rime test
+    # account is why rime-vm was never publishable).
+    passwordAccounts = lib.attrNames (lib.filterAttrs (_: u: u.initialPassword != null || u.password != null
+      || u.initialHashedPassword != null || u.hashedPassword != null) v.system.config.users.users);
   }) release.variants;
 
   plainEtc = release.variants.plain.system.config.environment.etc;
@@ -35,9 +39,9 @@ let
     inherit offered expectedVariants carried;
     entries = catalogue.entries;
     floors = {
-      inherit (floors) ratioPermille reserve home espBytes gptBytes GB published;
+      inherit (floors) ratioPermille reserve home espBytes gptBytes GB published publishedPartition;
       measured = lib.mapAttrs (_: m: { inherit (m) unpacked onDisk; }) floors.measured;
-      computed = lib.mapAttrs (_: f: { inherit (f) storeBytes diskGB; }) floors.floors;
+      computed = lib.mapAttrs (_: f: { inherit (f) storeBytes diskGB partitionGB; }) floors.floors;
     };
     rendered = {
       catalogue = builtins.fromJSON (builtins.unsafeDiscardStringContext plainEtc."rime/catalogue.json".text);
