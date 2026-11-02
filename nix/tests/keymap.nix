@@ -85,7 +85,8 @@ in
               # ... and until an agent reads the keyboard for this ask. plymouth-start waits for the accent picker
               # (nix/modules/branding.nix, up to 5 s with no ESP, as here) and the console agent is ordered after
               # plymouth-start, so an ask can exist for seconds with nobody reading keys: keys typed then are lost and
-              # the test timed out (twice in a row on nix/secureboot, after the microcode split moved initrd timing).
+              # the test timed out (twice in a row at the nix/secureboot head; base passed once: a timing race of the
+              # harness that predates that branch).
               # A person types at the prompt they see, so this is the harness's race, not the product's. Bounded: 30 s.
               w=0 agent=none
               while [ "$w" -lt 150 ]; do
