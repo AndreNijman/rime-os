@@ -113,7 +113,8 @@ NIXOS_WORK=/run/rime-installer/nixos
 # rime-boot's reserve on /boot (nix/pkgs/rime-boot reserveMiB) plus room for shim, GRUB and MokManager.
 NIXOS_ESP_SLACK=$(( (32 + 16) * 1024 * 1024 ))
 
-nixos_stamp() { tr -d '\r\n' < "$NIXOS_STAMPS/$1" 2>/dev/null || true; }
+# An absent stamp is empty (the redirection's own error is silenced too: `cmd <f 2>/dev/null` opens f first).
+nixos_stamp() { { tr -d '\r\n' < "$NIXOS_STAMPS/$1"; } 2>/dev/null || true; }
 
 nixos_nix() {  # nix with the release's keys as the ONLY trusted ones, never a build user
   nix --extra-experimental-features nix-command \

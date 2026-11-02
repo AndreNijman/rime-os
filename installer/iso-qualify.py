@@ -472,6 +472,10 @@ def mode_firstboot_nixos(a):
             "printf '__RQ_%s__\\n' STAGED; sudo -n test -e /boot/rimeinst && echo present || echo absent; "
             "printf '__RQ_%s__\\n' WINDOWS; sudo -n cat /boot/grub2/custom.cfg 2>/dev/null | grep -c bootmgfw.efi; "
             "printf '__RQ_%s__\\n' NVRAM; sudo -n efibootmgr -v 2>&1 | grep -E '^Boot(Current|Order)|Rime OS'; "
+            # systemd-journald's own record of this boot (installer2 item 8: one restart after the pivot).
+            "printf '__RQ_%s__\\n' JOURNALD; systemctl show systemd-journald.service -p NRestarts; "
+            "sudo -n journalctl -b -o short-monotonic --no-pager -u systemd-journald.service 2>&1 | head -n 15; "
+            "sudo -n journalctl -b -o short-monotonic --no-pager 2>&1 | grep -m3 -E 'Switching root|systemd-journald.service: (Main process exited|Scheduled restart)|Received SIGTERM'; "
             "printf '__RQ_%s__\\n' GREETER; for i in $(seq 60); do g=$(" + greeter + "); case $g in *VTNr=1*Class=greeter*) break;; esac; sleep 2; done; echo \"$g\"; systemctl is-active greetd.service; "
             "printf '__RQ_%s__\\n' END\n"
         )
@@ -491,7 +495,7 @@ def mode_firstboot_nixos(a):
                      secure_boot=section("SB", "FS"), mounts=section("FS", "BLS").splitlines(),
                      bls_entries=section("BLS", "CMDLINE").split(), cmdline=section("CMDLINE", "STAGED"),
                      staged=section("STAGED", "WINDOWS"), windows_entries=section("WINDOWS", "NVRAM"),
-                     nvram=section("NVRAM", "GREETER").splitlines(), greeter=section("GREETER", "END"),
+                     nvram=section("NVRAM", "JOURNALD").splitlines(), journald=section("JOURNALD", "GREETER").splitlines(), greeter=section("GREETER", "END"),
                      zsh_newuser_wizard=bool(getattr(a, "newuser_wizard", False)))
         if a.display:
             time.sleep(8)  # let the greeter paint

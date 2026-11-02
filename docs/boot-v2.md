@@ -1511,6 +1511,14 @@ that has a TPM binding and no recovery path turns a firmware update into a
 data-loss event, so the script never opens that window. Move the key file off
 the encrypted disk before you reboot, not after.
 
+**On a volume that already has a recovery key it refuses** (NixOS pivot,
+tpmkeymap): the bootc version wiped the old key and enrolled a new one, which
+silently strands every printed copy of the old key. Re-bind only the TPM slot
+with `--tpm-only` (the recovery key and passphrase slots are fingerprinted
+before and after and must not change), or rotate the recovery key on purpose
+with `--replace-recovery`. The installer always runs the full path on a volume
+it has just formatted, so it never meets the refusal.
+
 It adds a TPM key slot only where this machine can enforce one, and when it
 declines it tells you why in words you can act on:
 

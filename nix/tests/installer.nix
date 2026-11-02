@@ -408,7 +408,7 @@ in
                   "RIME_NIXOS_UPSTREAM_CACHE=http://upstream-cache.test:8081")
 
       with subtest("refused by name, nothing written: no network route to a cache that is downloaded from"):
-          installer.succeed("wipefs -a /dev/vdb2 /dev/vdb1 /dev/vdb")
+          installer.succeed("wipefs -a /dev/vdb2 /dev/vdb1 /dev/vdb", "udevadm settle")
           answers("/dev/vdb")
           installer.succeed("ip route del default || true")
           refused("/dev/vdb", HTTP, "not connected to any network")
@@ -424,6 +424,7 @@ in
                   "takes", "store paths from the upstream cache, and this ISO names none")
 
       with subtest("installs over http from both caches"):
+          answers("/dev/vdb")
           rc, out = run(HTTP)
           print(out)
           assert rc == 0 and "RIME-INSTALL-OK" in out, out
@@ -524,7 +525,7 @@ in
           rc, out = run()
           print(out)
           assert rc != 0 and "/dev/vdd1 is Windows' EFI System Partition" in out and "Nothing has been erased" in out, out
-          installer.succeed("rc=0; blkid -p /dev/vdd5 || rc=$?; test $rc -eq 2")
+          installer.succeed("t=$(blkid -p -s TYPE -o value /dev/vdd5 || true); test -z \"$t\"")  # no filesystem (a partition always shows its GPT entry)
 
       # The live environment the Windows app staged boots from Rime's ESP and keeps it mounted read-only there.
       installer.succeed("mkdir -p /run/initramfs/live && mount -o ro /dev/vdd4 /run/initramfs/live")
@@ -534,8 +535,8 @@ in
           rc, out = run()
           print(out)
           assert rc != 0 and "/dev/vdb1 already carries the label \"RIME-ESP\"" in out and "Nothing has been erased" in out, out
-          installer.succeed("rc=0; blkid -p /dev/vdd5 || rc=$?; test $rc -eq 2")
-          installer.succeed("wipefs -a /dev/vdb1 /dev/vdb2 /dev/vdb")
+          installer.succeed("t=$(blkid -p -s TYPE -o value /dev/vdd5 || true); test -z \"$t\"")  # no filesystem (a partition always shows its GPT entry)
+          installer.succeed("wipefs -a /dev/vdb1 /dev/vdb2 /dev/vdb", "udevadm settle")
 
       with subtest("installs into the free partition, beside Windows, from the staged live medium"):
           answers("/dev/vdd", mode="partition", target="/dev/vdd5", esp="/dev/vdd4")

@@ -75,6 +75,11 @@ own help points at `to-filesystem` for LUKS.
    enrolment policy belongs to the system it applies to. The installer offers
    the existing passphrase both as `$PASSWORD` (systemd-cryptenroll's own
    variable) and on stdin.
+   The volume was formatted a moment earlier, so it has no recovery key yet:
+   the helper's full path now refuses a volume that already carries one
+   (re-binding the TPM is `--tpm-only`, rotating the key on purpose is
+   `--replace-recovery`; `docs/boot-v2.md`), where the bootc version wiped it
+   and handed out a new one.
 3. The installer then **proves both keys open the volume** with `cryptsetup
    open --test-passphrase`, before the ten-minute `bootc install` starts. A
    recovery key that was printed but does not work is worse than none, and
