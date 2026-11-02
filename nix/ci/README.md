@@ -8,6 +8,7 @@ cd /work/<worktree>
 nix/ci/run-checks.sh plan /work/scratch/plan        # prints WILL RUN / SKIPPED <check>: <reason>
 nix/ci/run-checks.sh build rimed /work/scratch/res  # one check, as one matrix leg runs it
 nix/ci/run-checks.sh summary /work/scratch/plan /work/scratch/res
+nix/ci/eval-each.sh path:.                        # evaluate every output, one process each (what the plan job runs)
 RIME_FLAKE_CHECKS_FILE=/work/scratch/plan/checks.txt tests/check-suites-run-in-ci.sh
 ```
 

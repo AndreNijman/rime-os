@@ -41,7 +41,8 @@ jobs:
   plan:
     name: Evaluate and plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Evaluation one attribute per process (nix/ci/eval-each.sh): ~50 CPU-min measured locally under load.
+    timeout-minutes: 45
     outputs:
       run: ${{ steps.plan.outputs.run }}
     steps:
@@ -49,9 +50,11 @@ jobs:
       # Nix 2.35.4, the same as the build container the checks were proven in. It authenticates GitHub fetches
       # (the nixpkgs pin) with the job's own read-only github.token, for the rate limit; no other credential.
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
-      - name: nix flake check --no-build
-        # Evaluates every check, the skipped kernel ones included, so a broken expression fails here in minutes.
-        run: nix flake check "$FLAKE" --no-build
+      - name: Evaluate every flake output, one process each
+        # Every check (the skipped kernel ones included), package and configuration, so a broken expression fails
+        # here. Not `nix flake check --no-build`: one evaluator for all checks peaked at 27.9 GB and the 16 GB
+        # runner killed it (exit 143). One process per attribute peaks at 3.5 GB (update-client), 3 at a time.
+        run: RIME_EVAL_JOBS=3 nix/ci/eval-each.sh "$FLAKE"
       - name: Plan the checks
         id: plan
         run: |

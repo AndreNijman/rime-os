@@ -226,7 +226,7 @@ jobs:
             exit 0
           fi
           echo "The release toplevels moved (${was:-no comparable earlier commit} -> $now): dry run." | tee -a "$GITHUB_STEP_SUMMARY"
-          nix flake check --no-build "${o[@]}"
+          RIME_EVAL_JOBS=3 nix/ci/eval-each.sh . "${o[@]}"  # not nix flake check: 27.9 GB in one evaluator
           nix build --dry-run "${o[@]}" .#rime-release-toplevels .#rime-nix-release .#rime-release-plan 2>&1 | tee "$RUNNER_TEMP/dry-run.txt"
           {
             echo
@@ -244,7 +244,7 @@ jobs:
         run: |
           set -euo pipefail
           o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
-          nix flake check --no-build "${o[@]}"
+          RIME_EVAL_JOBS=3 nix/ci/eval-each.sh . "${o[@]}"  # not nix flake check: 27.9 GB in one evaluator
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels" .#rime-release-toplevels
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/plan" .#rime-release-plan
