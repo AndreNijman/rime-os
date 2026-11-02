@@ -271,7 +271,7 @@ nixos_preflight() {
     || die "This ISO names no valid system to install ('$NIXOS_SYSTEM' in $NIXOS_STAMPS/nixos-system). Nothing has been erased. The ISO was built incorrectly; download it again."
   local k
   for k in "$NIXOS_PUBKEY" ${NIXOS_UP_CACHE:+"$NIXOS_UP_PUBKEY"}; do
-    printf '%s' "$k" | grep -Eq '^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$' \
+    printf '%s' "$k" | grep -E '^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$' >/dev/null \
       || die "This ISO carries no valid key for its package cache ($NIXOS_STAMPS/nixos-cache.pub or nixos-upstream-cache.pub). Nothing has been erased. The ISO was built incorrectly; download it again."
   done
   nixos_cache_ok "$NIXOS_CACHE" "${RIME_NIXOS_CACHE:-}" \
@@ -281,7 +281,7 @@ nixos_preflight() {
       || die "This ISO names no usable upstream package cache ('$NIXOS_UP_CACHE'). Nothing has been erased."
   fi
   NIXOS_TRUSTED="$NIXOS_PUBKEY${NIXOS_UP_CACHE:+ $NIXOS_UP_PUBKEY}"
-  printf '%s' "$NIXOS_VARIANT" | grep -Eq '^[a-z][a-z0-9-]{0,31}$' \
+  printf '%s' "$NIXOS_VARIANT" | grep -E '^[a-z][a-z0-9-]{0,31}$' >/dev/null \
     || die "This ISO names no valid system variant ('$NIXOS_VARIANT'). Nothing has been erased."
   [ -d "$NIXOS_RELEASE_DIR" ] \
     || die "This ISO carries no signed release record for the system it installs ($NIXOS_RELEASE_DIR), so it cannot prove that system is a Rime OS release.

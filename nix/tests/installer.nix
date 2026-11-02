@@ -430,10 +430,16 @@ in
 
       with subtest("installs over http from both caches"):
           answers("/dev/vdb")
-          rc, out = run(HTTP)
+          # A production NixOS ISO also carries the netinstall marker (the GUI's
+          # network page reads it), so rime-install starts with NETINSTALL=1.
+          # RIME_NETINSTALL=1 sets it the same way, before the NixOS library is
+          # sourced: the bootc netinstall steps (pinned image digest, skopeo,
+          # registry) must stay off, or this install would die on them.
+          rc, out = run(HTTP + " RIME_NETINSTALL=1")
           print(out)
           assert rc == 0 and "RIME-INSTALL-OK" in out, out
           ilog = installer.succeed("cat /var/log/rime-install.log")
+          assert "Network install: Rime OS will be downloaded" not in ilog, ilog
           summary = json.loads(installer.succeed("cat /run/rime-installer/nixos/release/summary.json"))
           print(summary)
           ups = len(installer.succeed("cat /tmp/up.paths").split())
