@@ -168,8 +168,9 @@ The drivers were not edited. Since the NixOS initrd's journald does not forward 
   * tpmkeymap's luks.nix change 49053ae23 (TPM enrolment, keymap in the initrd) is NOT here, so the engine refuses
     LUKS with a non-US unlock keymap by name (D9). Once tpmkeymap lands (its rime-boot appends
     `rd.vconsole.keymap=` from host.toml `[keyboard] console`), drop that refusal in `nixos_preflight`.
-* **Bridge:** `nix/installer/target.nix` (`rime.installTarget`) declares the D2 mounts for a fresh install. The bridge's
-  `rime.rootfs` does the same for a migrated machine, and the two should become one option.
+* **Bridge:** done (nix/bridge2): `rime.rootfs` is the one option set for a fresh install (`boot = "esp"`) and a
+  migrated machine (`boot = "bootc"`); `nix/installer/target.nix` maps `rime.installTarget` onto it
+  (docs/nixos/bridge.md).
 * **Recovery key (pre-existing bootc behaviour, unchanged):** the key is written to the boot USB. That fails when the USB
   mounts read-only ("source write-protected", as in the lab), so the result says `recovery_unsaved` and the GUI shows
   the key instead.
