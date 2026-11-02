@@ -107,9 +107,10 @@ class Boot:
             "-display", "none", "-no-reboot", "-nic", "none",
         ]
         if gfx:
-            # The greeter needs a KMS device (as nix/tests/vm-boot.nix); OVMF's GOP on it is what Plymouth's
-            # simpledrm and GRUB draw on, and OVMF still mirrors its text console to the serial port.
-            argv += ["-vga", "none", "-device", "virtio-gpu-pci,xres=1280,yres=800"]
+            # The greeter needs a display (sway on pixman): QEMU's standard VGA, OVMF's GOP on it is what GRUB,
+            # Plymouth and simpledrm draw on, and OVMF still mirrors its text console to the serial port. (Fedora's
+            # qemu-system-x86-core in the rime-ovmf-probe image has no virtio-gpu-pci; that is a separate RPM.)
+            argv += ["-vga", "std"]
         if action:
             argv += ["-fw_cfg", f"name=opt/rime/action,string={action}"]
         self.err = open(self.base + ".qemu.stderr", "wb")
@@ -385,7 +386,7 @@ class MatrixScenario(Scenario):
             problems.append(f"SecureBoot not {self.want_sb}")
         if self.want_sb == "enabled" and "Loaded X.509 cert 'Rime boot-hook lab TEST MOK" not in t:
             problems.append("test MOK not loaded by the kernel")
-        if not re.search(r"RIME-LAB: cmdline: BOOT_IMAGE=\S*/rime/nixos/[0-9a-f]{32}-linux-image-\S+-signed\.efi ", t):
+        if not re.search(r"RIME-LAB: cmdline: BOOT_IMAGE=\S*/rime/nixos/[0-9a-f]{32}-linux-image-\S+-signed-bzImage\.efi ", t):
             problems.append("kernel not the hook's content-addressed copy of the signed Rime image")
         if not re.search(r"RIME-LAB: uname: \S*-rime", t):
             problems.append("running kernel is not Rime's")

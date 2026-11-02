@@ -202,6 +202,7 @@ case "${1:-all}" in
           step_matrix_run || rc=$?;;
   *) echo "usage: run.sh prep|gens|disks|scenarios [SCENARIO...]|all|matrix-prep|matrix-sign|matrix-gens|matrix-disks|matrix-run|matrix" >&2; exit 2;;
 esac
-sudo -n chown -R "$(id -u):$(id -g)" "$LAB" "$ART"
+# Never into $LAB/disks: a disk being built there (another run.sh) holds a root-owned NixOS tree.
+sudo -n find "$LAB" "$ART" -path "$LAB/disks" -prune -o -exec chown "$(id -u):$(id -g)" {} +
 [[ -f $ART/results.tsv ]] && { echo; sort -k2,2 -k3,3 -s "$ART/results.tsv"; }
 exit "$rc"

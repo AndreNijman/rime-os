@@ -30,7 +30,7 @@ MOUNTS=()
 cleanup() {
   local i
   for ((i=${#MOUNTS[@]}-1; i>=0; i--)); do umount "${MOUNTS[i]}" 2>/dev/null || umount -l "${MOUNTS[i]}" || true; done
-  for l in "$LOOP" "${L_BOOT:-}" "${L_BTRFS:-}"; do [[ -n $l ]] && { losetup -d "$l" 2>/dev/null || true; }; done
+  for l in "$LOOP" "${L_BOOT:-}" "${L_BTRFS:-}"; do if [[ -n $l ]]; then losetup -d "$l" 2>/dev/null || true; fi; done   # if, not &&: a trap's last status is the script's
 }
 trap cleanup EXIT
 release() {   # the main path: strict, flushed; a lazy umount here once lost the paths nix copy had just written

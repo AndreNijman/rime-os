@@ -129,6 +129,8 @@ let
           TimeoutStartSec = "20min";
         };
         script = ''
+          # Never stop part way: a failed report line must not leave the VM running to the driver's timeout.
+          set +e
           say() { echo "RIME-LAB: $*"; }
           say "stage-2 reached: generation=$(cat /etc/rime-lab-generation) system=$(readlink -f /run/current-system)"
           say "cmdline: $(cat /proc/cmdline)"
@@ -182,7 +184,7 @@ let
           esac
           say "rime-boot check: $(/run/current-system/sw/bin/rime-boot check 2>&1 | tr -s ' \n' ' ')"
           if [ -d /boot/loader/entries ] && [ ! -L /boot/loader ]; then
-            for e in /boot/loader/entries/*.conf; do sed "s|^|RIME-LAB: entry $(basename "$e")| |" "$e"; done
+            for e in /boot/loader/entries/*.conf; do sed "s#^#RIME-LAB: entry $(basename "$e")| #" "$e"; done
           fi
           grep -E '^(menuentry|set default|set timeout|  *(linux|initrd) )' /boot/grub2/rime-nixos.cfg | sed 's/^/RIME-LAB: menu| /'
           say "files: $(ls -l /boot/rime/nixos | awk 'NR>1{print $5, $9}' | tr '\n' ' ')"
