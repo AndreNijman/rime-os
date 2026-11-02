@@ -206,6 +206,18 @@ NETINSTALL=0
 # ISO, and those guards run before anything is written.
 [ -n "${RIME_NETINSTALL:-}" ] && NETINSTALL="$RIME_NETINSTALL"
 
+# The NixOS install path (PLAN.md D9; rime-install-nixos.sh): active only on an
+# ISO built with a NixOS system (it stamps nixos-system), which installs that
+# prebuilt system instead of running bootc. RIME_NIXOS_LIB is a test seam.
+NIXOS=0
+for _nl in "${RIME_NIXOS_LIB:-/usr/lib/rime-installer/rime-install-nixos.sh}" "$(dirname "$0")/rime-install-nixos.sh"; do
+  if [ -r "$_nl" ]; then
+    # shellcheck source=rime-install-nixos.sh
+    . "$_nl"
+    break
+  fi
+done
+
 # ── Where the OS comes from, and why bootc runs HERE ────────────────────────
 #
 # bootc runs in this live environment, not inside a container of the image it
@@ -936,6 +948,7 @@ restore_console() {
 # disk with no way forward. Deepest mount first. Safe to call at any time.
 TROOT=/run/rime-target
 unmount_target() {
+  if [ "${NIXOS:-0}" = 1 ]; then nixos_unmount; fi
   umount "$TROOT/boot/efi" 2>/dev/null || true
   umount "$TROOT"          2>/dev/null || true
   [ -n "${DEPLOY_MNT:-}" ] && { umount "$DEPLOY_MNT/proc" 2>/dev/null || true; umount "$DEPLOY_MNT/var" 2>/dev/null || true; }
@@ -1114,10 +1127,13 @@ elif [ "${1:-}" = --check-passphrase ]; then
   # `Run installer disk-encryption suite` were this one refusal. Measured:
   # 62 passed / 0 failed here, 24 passed / 7 failed there, same commit.
   :
+elif [ "$NIXOS" = 1 ]; then
+  # No image: the NixOS path copies a system closure (nixos_preflight checks it).
+  :
 elif [ ! -d "$OCI_DIR" ] && ! { have podman && podman image exists "$IMAGE" 2>/dev/null; }; then
   die "The Rime OS image is not present in the live environment (no OCI directory at $OCI_DIR and no $IMAGE in its container storage)."
 fi
-[ "${1:-}" = --check-passphrase ] || choose_source_imgref
+[ "${1:-}" = --check-passphrase ] || [ "$NIXOS" = 1 ] || choose_source_imgref
 
 # ── shared post-install: create the admin account inside the new system ──────
 # useradd/chpasswd via --root against the ostree deployment's /etc. The stateroot
@@ -1516,7 +1532,9 @@ set_locale_keymap_in() {  # $1=deploy dir
   fi
   [ -n "$layout" ] || layout=us
 
-  lang=$(sed -n 's/^LANG=//p' /etc/locale.conf 2>/dev/null | tr -d '"' | head -1)
+  # An answered locale (answers `locale=`) beats the live environment's.
+  lang="${LOCALE:-}"
+  [ -n "$lang" ] || lang=$(sed -n 's/^LANG=//p' /etc/locale.conf 2>/dev/null | tr -d '"' | head -1)
   # C.UTF-8 is systemd's fallback, not a choice — do not propagate it as one.
   case "$lang" in ""|"C.UTF-8"|"C.utf8"|"C") lang="en_US.UTF-8" ;; esac
 
@@ -1847,6 +1865,20 @@ answers file carrying encrypt=yes and lukspass=." ;;
   esac
   [ -b "$DISK" ] || die "unattended: rime.disk=$DISK is not a block device."
   log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
+  if [ "$NIXOS" = 1 ]; then
+    INSTALL_MODE=disk; TARGET="$DISK"; ENCRYPT=no
+    TIMEZONE=$(kv rime.tz); LOCALE=$(kv rime.lang)
+    NIXOS_EXTRA_KARGS=$(kvall rime.karg | tr '\n' ' ')
+    nixos_preflight
+    trap - ERR
+    set +e
+    nixos_install
+    nixos_mok
+    nixos_finish
+    echo "RIME-INSTALL-UNATTENDED-OK"; log "unattended install complete (nixos)"
+    if echo "$CMD" | grep -qw rime.poweroff; then sync; poweroff; fi
+    exit 0
+  fi
   echo "Rime OS unattended install to $DISK …"
   EXTRA_KARGS=()
   for k in $(kvall rime.karg); do EXTRA_KARGS+=(--karg "$k"); done
@@ -1998,7 +2030,7 @@ USERNAME=""; P1=""; HOSTNAME=""; MOKPW=""
 # come from the answers file or not at all. A stale value here would silently
 # install a layout nobody picked, and a wrong layout is a password that cannot
 # be typed on first boot.
-KEYMAP=""; KEYVARIANT=""; TIMEZONE=""
+KEYMAP=""; KEYVARIANT=""; TIMEZONE=""; LOCALE=""
 # Encryption is a DECISION, and a decision that goes missing must not be made
 # silently in either direction — see the `encrypt` validation below.
 ENCRYPT=""; LUKSPASS=""
@@ -2025,6 +2057,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     keymap)    KEYMAP="$v" ;;
     keyvariant) KEYVARIANT="$v" ;;
     timezone)  TIMEZONE="$v" ;;
+    locale)    LOCALE="$v" ;;
     encrypt)   ENCRYPT="$v" ;;
     lukspass)  LUKSPASS="$v" ;;
     confirmed) CONFIRMED="$v" ;;
@@ -2302,6 +2335,12 @@ if [ -n "$_disk_mounts" ]; then
   else
     die "$DISK (or a partition of it) is currently mounted — refusing."
   fi
+fi
+
+# The NixOS path refuses first, by its own rules (whole disk, btrfs, its disk
+# floor, a timezone, the system present and signed in its cache).
+if [ "$NIXOS" = 1 ]; then
+  nixos_preflight
 fi
 
 # Refuse a target that cannot possibly hold the install, BEFORE erasing it.
@@ -2667,6 +2706,16 @@ fi
 # destruction at that point is a lie in the frightening direction. Each branch
 # sets it at the exact moment data actually starts being destroyed.
 log "install start: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME FS=$ROOTFS_TYPE"
+
+if [ "$NIXOS" = 1 ]; then
+  # Every step checks itself and dies with its own reason (nixos_fail).
+  trap - ERR
+  set +e
+  nixos_install
+  nixos_mok
+  nixos_finish
+  exit 0
+fi
 
 # Disarm the ERR trap around the install: the trap fires even under `set +e`, and
 # with pipefail a failing `bootc … | tee` pipeline would hit it BEFORE we can
