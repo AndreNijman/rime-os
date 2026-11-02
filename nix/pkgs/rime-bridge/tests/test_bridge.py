@@ -321,6 +321,24 @@ class WaitUnits(unittest.TestCase):
         self.assertEqual(cm.exception.name, "old-side-busy")
 
 
+class Chroot(unittest.TestCase):
+    def test_host_chroot_by_absolute_path(self):
+        seen = []
+
+        def fake(argv, **kw):
+            seen.append((argv, kw.get("env", {}).get("PATH", "")))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        old = B.subprocess.run
+        B.subprocess.run = fake
+        try:
+            B.chroot("/t", "/nix/store/x/bin/true")
+        finally:
+            B.subprocess.run = old
+        argv, path = seen[0]
+        self.assertTrue(os.path.isabs(argv[0]) and argv[0].endswith("/chroot"), argv)
+        self.assertNotIn(os.path.dirname(argv[0]), path.split(":"))
+
+
 class LoadOption(unittest.TestCase):
     def option(self, desc, partuuid, path, attrs=1):
         hd = struct.pack("<IQQ", 1, 2048, 1048576) + uuid.UUID(partuuid).bytes_le + bytes([2, 2])

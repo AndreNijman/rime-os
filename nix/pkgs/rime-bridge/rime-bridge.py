@@ -1011,13 +1011,14 @@ def verify_payload(payload):
     return man
 
 
-def chroot(t, *cmd, env=None, stdin=None):
+def chroot(t, *cmd, env=None, stdin=None, check=True):
     e = {"PATH": "/run/current-system/sw/bin:/nix/var/nix/profiles/system/sw/bin", "HOME": "/root", "LANG": "C.UTF-8"}
     e.update(env or {})
-    r = subprocess.run(["chroot", t, *cmd], env=e, stdin=stdin, text=True, stdout=subprocess.PIPE,
+    # The host's chroot by absolute path: with env= given, the child's PATH (the target's) is what exec searches.
+    r = subprocess.run([shutil.which("chroot") or "/usr/sbin/chroot", t, *cmd], env=e, stdin=stdin, text=True, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT)
     sys.stdout.write("".join(f"  | {ln}\n" for ln in r.stdout.splitlines()[-40:]))
-    if r.returncode:
+    if r.returncode and check:
         raise Failed(f"chroot {' '.join(cmd)} exited {r.returncode}")
     return r
 
@@ -1132,8 +1133,12 @@ def cmd_start(a):
         if os.path.lexists(os.path.join(t, "etc/mtab")):
             os.unlink(os.path.join(t, "etc/mtab"))
         os.symlink("/proc/mounts", os.path.join(t, "etc/mtab"))
-        chroot(t, f"{man['toplevel']}/activate", env={"IN_NIXOS_ENTER": "1",
-                                                     "LOCALE_ARCHIVE": f"{man['toplevel']}/sw/lib/locale/locale-archive"})
+        # As nixos-enter does: activation in a chroot may fail parts that need the running system (it runs again
+        # at the first boot); its rc is recorded, not fatal. switch-to-configuration boot below is.
+        r = chroot(t, f"{man['toplevel']}/activate", check=False,
+                   env={"IN_NIXOS_ENTER": "1", "LOCALE_ARCHIVE": f"{man['toplevel']}/sw/lib/locale/locale-archive"})
+        state["activate_rc"] = r.returncode
+        print(f"first activation rc={r.returncode}", flush=True)
         chroot(t, "/nix/var/nix/profiles/system/bin/switch-to-configuration", "boot",
                env={"NIXOS_INSTALL_BOOTLOADER": "1"})
         for p in reversed(("run/rime-src/etc", "run/rime-src/usr", "run/rime-src/var")):
