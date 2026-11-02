@@ -388,32 +388,84 @@ fn openssl_verify(
     ))
 }
 
-/// The value of `--payload` in `start`'s arguments, either spelling.
-pub fn payload_arg(args: &[String]) -> Option<PathBuf> {
+/// What the bridge's argument parser will bind to `--payload` in `start`'s
+/// arguments, or a refusal when this gate could check a different directory
+/// from the one the bridge then installs.
+///
+/// The bridge parses with Python's argparse defaults: a long option may be
+/// abbreviated to any prefix (`--payl DIR`, `--p=DIR`) and a repeated option
+/// keeps its LAST value. Reading only the exact spelling, and the first one,
+/// let `--payload SIGNED --payload OTHER` or `--payl OTHER` past the signature
+/// check (found in review 2026-11-02, proved against the shipped parser). So:
+/// an abbreviation is refused, a repeat is refused, and no `--payload` at all
+/// is refused too (fail closed: a spelling this scan missed must not reach
+/// the bridge unchecked), except when help was asked for, where argparse
+/// prints help and exits before `start` runs. `-p`/`-payload` (one dash) are
+/// not `--payload` to argparse and need no handling here.
+pub fn payload_arg(args: &[String]) -> Result<Option<PathBuf>, PayloadRefusal> {
+    let mut found: Option<PathBuf> = None;
+    let mut seen = 0;
+    let mut help = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        if a == "--payload" {
-            return it.next().map(PathBuf::from);
+        if a == "-h" {
+            help = true;
+            continue;
         }
-        if let Some(v) = a.strip_prefix("--payload=") {
-            return Some(PathBuf::from(v));
+        let Some(opt) = a.strip_prefix("--") else { continue };
+        let (name, inline) = match opt.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (opt, None),
+        };
+        if name.is_empty() {
+            continue;
         }
+        if inline.is_none() && "help".starts_with(name) {
+            help = true;
+            continue;
+        }
+        if !"payload".starts_with(name) {
+            continue;
+        }
+        if name != "payload" {
+            return Err(refuse(
+                "payload-arg-abbreviated",
+                format!("`{a}`: spell the option out as `--payload DIR`, so the directory checked is the one installed"),
+            ));
+        }
+        seen += 1;
+        if seen > 1 {
+            return Err(refuse(
+                "payload-arg-repeated",
+                "--payload is given more than once; give the payload directory once".to_string(),
+            ));
+        }
+        found = match inline {
+            Some(v) => Some(PathBuf::from(v)),
+            None => it.next().map(PathBuf::from),
+        };
     }
-    None
+    if found.is_none() && !help {
+        return Err(refuse(
+            "payload-missing",
+            "start needs --payload DIR: the signed NixOS payload to install".to_string(),
+        ));
+    }
+    Ok(found)
 }
 
 /// `rime migrate …`: the signature gate for `start`, then the bridge itself.
 pub fn migrate(args: &[String]) -> i32 {
     if args.first().map(String::as_str) == Some("start") {
-        // No --payload: the program's own argument parser says so.
-        if let Some(payload) = payload_arg(&args[1..]) {
-            match verify_payload_signature(Path::new(OPENSSL), &relocated(PAYLOAD_KEY), &payload) {
-                Ok(name) => eprintln!("rime: payload manifest signed by {name}: verified"),
-                Err(r) => {
-                    println!("REFUSED [{}] {}", r.name, r.text);
-                    return EXIT_REFUSED;
-                }
-            }
+        // Ok(None) only when help was asked for: argparse prints it and exits.
+        let checked = payload_arg(&args[1..]).and_then(|p| match p {
+            Some(payload) => verify_payload_signature(Path::new(OPENSSL), &relocated(PAYLOAD_KEY), &payload)
+                .map(|name| eprintln!("rime: payload manifest signed by {name}: verified")),
+            None => Ok(()),
+        });
+        if let Err(r) = checked {
+            println!("REFUSED [{}] {}", r.name, r.text);
+            return EXIT_REFUSED;
         }
     }
     let err = Command::new(MIGRATE_ENGINE).args(args).exec();
@@ -526,10 +578,37 @@ mod tests {
     #[test]
     fn payload_arg_both_spellings() {
         let v = |a: &[&str]| payload_arg(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        assert_eq!(v(&["--backup", "/b", "--payload", "/p", "--yes"]), Some("/p".into()));
-        assert_eq!(v(&["--payload=/q"]), Some("/q".into()));
-        assert_eq!(v(&["--backup", "/b"]), None);
-        assert_eq!(v(&["--payload"]), None);
+        assert_eq!(v(&["--backup", "/b", "--payload", "/p", "--yes"]), Ok(Some("/p".into())));
+        assert_eq!(v(&["--payload=/q"]), Ok(Some("/q".into())));
+        // `--backup=--payload` is a value, not the option.
+        assert_eq!(v(&["--backup=--payload", "--payload", "/p"]), Ok(Some("/p".into())));
+    }
+
+    #[test]
+    fn payload_arg_refuses_what_argparse_would_read_differently() {
+        let name = |a: &[&str]| {
+            payload_arg(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .unwrap_err()
+                .name
+        };
+        // argparse takes the LAST of a repeated option and any unambiguous
+        // prefix: each of these would install a directory nobody checked.
+        assert_eq!(name(&["--payload", "/signed", "--payload", "/other"]), "payload-arg-repeated");
+        assert_eq!(name(&["--payload=/signed", "--payload", "/other"]), "payload-arg-repeated");
+        assert_eq!(name(&["--backup", "/b", "--payl", "/other", "--yes"]), "payload-arg-abbreviated");
+        assert_eq!(name(&["--p=/other"]), "payload-arg-abbreviated");
+        assert_eq!(name(&["--payload", "/signed", "--pay", "/other"]), "payload-arg-abbreviated");
+        // No payload at all: refused here too (fail closed).
+        assert_eq!(name(&["--backup", "/b", "--yes"]), "payload-missing");
+        assert_eq!(name(&["--payload"]), "payload-missing");
+    }
+
+    #[test]
+    fn payload_arg_lets_help_through() {
+        let v = |a: &[&str]| payload_arg(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(v(&["--help"]), Ok(None));
+        assert_eq!(v(&["-h"]), Ok(None));
+        assert_eq!(v(&["--backup", "/b", "--he"]), Ok(None));
     }
 
     #[test]

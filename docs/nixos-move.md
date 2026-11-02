@@ -69,6 +69,21 @@ runs the bridge:
 Refusals, each by name: `payload-key-missing`, `payload-key-bad`,
 `payload-unsigned`, `payload-signature-bad`, `payload-unverifiable`.
 
+The directory checked must be the directory the bridge installs. The bridge
+reads its arguments with Python's argparse defaults, which accept any prefix of
+a long option (`--payl DIR`) and keep the last of a repeated one, so `rime
+migrate start` also refuses, before anything is checked or run:
+`payload-arg-abbreviated` (spell it `--payload`), `payload-arg-repeated`
+(`--payload` given twice) and `payload-missing` (no `--payload`; `--help` is
+let through, since argparse prints help and exits before `start` runs).
+Decided 2026-11-02 after review proved both spellings reached the bridge
+unchecked.
+
+Not covered here: the window between this check and the bridge reading
+`manifest.json` and the payload files again. Run `start` on a payload
+directory only root can write; closing that window (the bridge verifying the
+signature itself, over what it then installs) belongs to the bridge.
+
 **The key is not shipped yet.** Until it is, every `start` refuses with
 `payload-key-missing`; `check` and `repair-e` are not affected. The image build
 asserts the file is absent so that adding it is a deliberate change.

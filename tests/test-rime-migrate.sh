@@ -99,13 +99,16 @@ record() {   # record NAME -> $W/rec/NAME/var/lib/rime/nixos-bridge/state.json
         running)    printf '{"started": "2026-11-02T02:00:00+00:00", "steps": ["backup", "old side", "install closure"]}\n' ;;
         rolledback) printf '{"failed": "chroot exited 1", "started": "2026-11-02T02:00:00+00:00", "steps": ["backup", "old side", "rolled back"]}\n' ;;
         halfrolled) printf '{"failed": "chroot exited 1", "started": "2026-11-02T02:00:00+00:00", "steps": ["backup", "old side"]}\n' ;;
+        # "rolled back" as the last step with no "failed": not a rollback the
+        # bridge wrote (it sets "failed" first), so it is not trusted as one.
+        rbnofail)   printf '{"started": "2026-11-02T02:00:00+00:00", "steps": ["backup", "old side", "rolled back"]}\n' ;;
         garbage)    printf '{"started": "2026-11-02T0' ;;
         absent)     rm -rf "$W/rec/absent"; mkdir -p "$W/rec/absent" ;;
     esac > "$d/state.json"
     [[ "$1" == absent ]] && rm -rf "$W/rec/absent/var"
     true
 }
-for r in moved running rolledback halfrolled garbage absent; do record "$r"; done
+for r in moved running rolledback halfrolled rbnofail garbage absent; do record "$r"; done
 statefile() { echo "$W/rec/$1/var/lib/rime/nixos-bridge/state.json"; }
 
 # ── 2. the update timer ─────────────────────────────────────────────────────
@@ -124,7 +127,7 @@ run_check() {   # run_check RECORD -> rc; $W/run/state, $W/check.log
     RIME_BOOTC_BIN="$W/bootc" RIME_UPDATE_DIR="$W/run" RIME_BRIDGE_STATE="$(statefile "$1")" \
         bash "$CHECK" >"$W/check.log" 2>&1
 }
-for r in moved running halfrolled garbage; do
+for r in moved running halfrolled rbnofail garbage; do
     run_check "$r"
     if [[ ! -e "$W/bootc.calls" ]] && pipe_has -x 'state=none' "$W/run/state" \
        && pipe_has -F 'REFUSED [nixos-migration-started]' "$W/check.log"; then
@@ -159,7 +162,7 @@ if (( WITH_BINARY )); then
            "boot migrate" "live apply" "live rollback" "live soft-reboot --yes")
     for v in "${VERBS[@]}"; do
         # shellcheck disable=SC2086  # the verb is words on purpose
-        for r in moved running halfrolled garbage; do
+        for r in moved running halfrolled rbnofail garbage; do
             out="$(rime_at "$r" $v 2>&1)"; rc=$?
             if [[ $rc -eq 3 ]] && pipe_has -F "REFUSED [nixos-migration-started]" <<<"$out" \
                && ! pipe_has 'must run as root' <<<"$out"; then
@@ -239,6 +242,23 @@ if (( WITH_BINARY )); then
         else
             bad "good signature" "rc=$rc $out"
         fi
+        # 6. Spellings the bridge's argparse reads differently from an exact
+        #    match: it keeps the LAST of a repeated option and accepts any
+        #    prefix of --payload. With the signed payload above in place, each
+        #    would hand the bridge an unchecked directory unless refused here.
+        mkdir -p "$W/other"
+        for spec in "payload-arg-repeated|--payload $W/payload --payload $W/other" \
+                    "payload-arg-abbreviated|--payl $W/other" \
+                    "payload-arg-abbreviated|--p=$W/other" \
+                    "payload-missing|"; do
+            want="${spec%%|*}"; read -r -a extra <<<"${spec#*|}"
+            out="$(RIME_BRIDGE_ROOT="$keyroot" "$RIME_BIN" migrate start --backup "$W/backup" "${extra[@]}" --yes 2>&1)"; rc=$?
+            if [[ $rc -eq 3 ]] && pipe_has -F "REFUSED [$want]" <<<"$out" && ! pipe_has 'cannot run the bridge' <<<"$out"; then
+                ok "start ${extra[*]:-(no --payload)}: refused [$want] before the bridge"
+            else
+                bad "start ${extra[*]:-(no --payload)} should refuse [$want]" "rc=$rc $out"
+            fi
+        done
     else
         bad "openssl is needed for the payload signature half"
     fi
