@@ -1321,7 +1321,8 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
 - cosign v2.5.2 pin and the publish self-check (§5.6); move to v3 only when the self-check passes with it.
 - `nix store sign --store s3://…` writing narinfos in place: verified in `release-standin` against versitygw (§18).
 - Streaming of `nix copy` between two remote stores without local disk: not used as built (the publish job imports
-  the closure locally, §18); the hosted runner's disk against the real closure is a handover item.
+  the closure locally, §18); the hosted runner's disk against the real closure: measured, it fits (§18, "Hosted
+  runner disk").
 - `switch-to-configuration-ng`'s dry-run output and greetd's `restartIfChanged` were read at nixpkgs `d357a2b`
   (26.11pre); re-check at the pinned revision when the flake lands.
 - Release-ID race between the two pipelines on the same day: re-read before push (§2); residual risk caught by the
@@ -1379,8 +1380,14 @@ read them with this list.
   `require-sigs` does not apply to. The upstream paths are verified (`nix store verify --sigs-needed 1` against the
   named key) and then copied **into the local store** with `require-sigs` and only that key, not streamed
   store-to-store. The disk-quota part of `fill-and-publish` is therefore not tested: the runner needs the closure on
-  local disk (about 9 GB for the desktop toplevels in the size probe; a hosted runner has about 14 GB free, not verified).
-  TODO(handover): measure the real closure on the hosted runner; if it does not fit, the D8 builder does the fill.
+  local disk. **Hosted runner disk (measured 2026-11-03, nix/ci2).** The release's off-main dry run (run
+  41534111012, job "build the variants and export Rime's paths", runner image ubuntu-24.04 20261025.353.1) printed
+  `these 2422 paths will be fetched (5.8 GiB download, 17.1 GiB unpacked)` for the four variant toplevels and the
+  catalogue; the Nix workflow's check job on the same image (run 41450212626) printed `available on /: 86 GB (want
+  40 GB)` before any cleanup (the release job's "Free disk for the closure" step removes more, and prints `df`, on a
+  full build). So the closure (about 18.6 GB with the paths Rime builds itself) fits with more than 60 GB to spare;
+  the stage and the delta bases (skipped below 25 GB free) come out of that margin. Not measured: a full build's own
+  `df` after the stage (it is in that step's summary on the first full release).
 - **Signing on S3 is done and verified (§6.3, §17).** `nix store sign --store s3://…` rewrites narinfos in place on
   the S3 stand-in, keeps the upstream signature, and the next public read sees the new one (`release-standin`
   subtests "published" and "an unsigned narinfo"). Every path is signed on every fill, including paths uploaded by an
