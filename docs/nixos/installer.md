@@ -156,9 +156,13 @@ The drivers were not edited. Since the NixOS initrd's journald does not forward 
   * The real Rime MOK signature of the release kernel. Only the TEST MOK signature has been proven.
   * Cosign/manifest verification of the toplevel before install. Today the cache signature (`require-sigs`, one key)
     is the only trust.
-* **Not proven:** MokManager enrolment by a person. The boot drivers use a varstore with the TEST MOK already enrolled
-  (`virt-fw-vars --add-mok`). The install queues the import (`mokutil --import`), and nobody has clicked through the
-  blue screen in the lab.
+* **MokManager enrolment (2026-11-02, nix/secureboot):** the boot drivers here still use a varstore with the TEST MOK
+  already enrolled (`virt-fw-vars --add-mok`). The enrolment itself is proven in `nix/probe/ovmf/mok`: on a
+  Microsoft-keys-only varstore with Secure Boot on, a Fedora-signed kernel runs `mokutil --import` of the real Rime MOK
+  (what this installer's Fedora live environment runs), and MokManager is driven screen by screen (Enroll MOK,
+  Continue, Yes, password, Reboot; screenshots) until the real Rime MOK is the only MOK and a CI-signed kernel boots.
+  Not proven: this installer's own `mokutil --import` call on the NixOS path followed by MokManager (the lab's guest
+  is a busybox initrd, not this installer), and a person doing it on real firmware (P3).
 * **Not supported on the NixOS path yet:**
   * partition mode is refused by name, so the Windows `.exe` flow does not work: it installs beside Windows;
   * NETINSTALL is refused by `build-live-iso.sh`.

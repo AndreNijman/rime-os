@@ -86,7 +86,8 @@ in
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${reenrol} %i";
-        # The report `rime doctor` reads follows the re-bind (the CLI measures again too).
+        # The report `rime doctor` reads follows a SUCCESSFUL re-bind (ExecStartPost does not run when ExecStart
+        # fails; the file then still says stale, which is right). `rime luks rebind` measures again either way.
         ExecStartPost = "-${status}/bin/rime-luks-tpm-status --write ${statusFile}";
         PrivateNetwork = true;
       };

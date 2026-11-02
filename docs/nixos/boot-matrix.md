@@ -130,7 +130,9 @@ What one generation puts on the boot filesystem (measured 2026-11-02): the signe
 - **Migrated machine (`custom-cfg`, bootc's `/boot`)**: plain bootc Rime keeps `/boot` on the btrfs root, so the
   space is the root's; an encrypted bootc install has its own small ext4 `/boot` (that topology is refused by
   `rime migrate check` today, p2-gates D2). Either way the hook does not assume a size: prune-to-fit keeps the newest
-  generations that fit and refuses only when current + booted + pinned (at most 3 × 130 MiB + microcode) do not.
+  generations that fit and refuses only when the current, booted and pinned generations (130 MiB each at the
+  ceiling, plus the microcode once) do not. Prune-to-fit is proven in `boot-hook-unit` with the free space
+  simulated (`free_bytes` replaced by a fixed-size model); no VM fills a real ESP or `/boot` to the floor.
 - `rime gc` removes generations from the profile; the hook then removes their files. A pinned generation always
   stays listed.
 
@@ -218,8 +220,8 @@ What this shows, and the record (`artifacts/secureboot/k2/`):
   wave-2 passes), but it levels off at 8.0-9.3 s however many burners run, under 2 s inside bootc's window. The
   11.4 s and 16.0 s attaches came with several VMs and Nix builds running at once (memory and I/O pressure as well
   as CPU), which CPU burners do not reproduce; that kind of host is what the 60 s window is for.
-- **The check can fail** on the attach time: `settle = 5` fails `scx_eevdf` ("not enabled within 5s") with every
-  other scheduler passing, so the window is measured, not decorative.
+- **The check can fail** on the attach time: `settle = 5` fails `scx_eevdf` and `scx_flow` ("not enabled within
+  5s"; 15 of 17 pass, `k2/mutant5.log`), so the window is measured, not decorative.
 - Decision: keep 60 s. It is headroom for a loaded CI host, not a correctness change; a scheduler that never
   attaches still fails. Why `scx_eevdf` alone needs 8-9 s on a busy 4-vCPU VM is recorded, not fixed here.
 
