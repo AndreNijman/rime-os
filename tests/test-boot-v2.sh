@@ -445,10 +445,10 @@ if py_boot_path "$TMP/py-docstring-only"; then
 else
     ok "inverse control (Python): a docstring or comment naming bootctl does not trip the tripwire"
 fi
-printf '#!/usr/bin/python3 -I\n"""Doc."""\nimport subprocess\nsubprocess.run(["efibootmgr", "-o", "0001"])\n' \
+printf '#!/usr/bin/python3 -I\n"""Doc."""\nimport subprocess\nsubprocess.run(["efibootmgr", "-o", "0001"])\ndef f():\n    """Doc."""\n    subprocess.run([\n        "bootctl",\n        "install"])\n' \
     > "$TMP/py-really-does-it"
 if is_python "$TMP/py-really-does-it" && py_boot_path "$TMP/py-really-does-it"; then
-    ok "forward control (Python): a real run([\"efibootmgr\", ...]) call does trip the tripwire"
+    ok "forward control (Python): real run([...]) calls, one-line and multi-line, do trip the tripwire"
 else
     bad "forward control (Python): a real efibootmgr call does NOT trip the tripwire — the scan proves nothing"
 fi
