@@ -58,7 +58,7 @@ jobs:
           nix/ci/run-checks.sh plan "$RUNNER_TEMP/plan"
           echo "run=$(cat "$RUNNER_TEMP/plan/run.json")" >> "$GITHUB_OUTPUT"
           {
-            echo "### Flake checks this run skips"
+            echo "### Flake checks this run skips ($(wc -l < "$RUNNER_TEMP/plan/skipped.tsv" | tr -d ' ') of $(wc -l < "$RUNNER_TEMP/plan/checks.txt" | tr -d ' '))"
             echo
             while IFS=$'\t' read -r name reason; do echo "- SKIPPED \`$name\`: $reason"; done < "$RUNNER_TEMP/plan/skipped.tsv"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -73,7 +73,9 @@ jobs:
   packages:
     name: Packages (rimed, rime-shell, rime-libexec)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # rimed compiles in 11 min on 20 threads (docs/nixos/p1-exit.md), then runs its whole cargo test: several times
+    # that on 4 vCPUs. The first hosted run gives the real figure; tighten this from it.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: ./.github/actions/free-disk-space
@@ -106,7 +108,11 @@ jobs:
     needs: plan
     if: ${{ needs.plan.outputs.run != '[]' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # The build itself is stopped at RIME_CHECK_TIMEOUT (below), inside this, so a check that runs too long is
+    # recorded and shown as TIMED OUT with its time; this job limit only catches a hung setup step. Every leg starts
+    # from an empty store and the rimed, gaming, security and rimed-session legs compile the rimed workspace before
+    # their VM (no Rime binary cache yet, R2), so the budget is the packages job's plus a VM test.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -137,13 +143,21 @@ jobs:
             case " $features " in *" $f "*) ;; *) echo "::error::Nix does not offer the $f system feature"; exit 1 ;; esac
           done
       - name: Build ${{ matrix.check }}
-        run: nix/ci/run-checks.sh build "${{ matrix.check }}" "$RUNNER_TEMP/results"
+        timeout-minutes: 170
+        env:
+          # 165 min; with run-checks.sh's 60 s kill grace it ends inside the step limit, so a result is recorded.
+          RIME_CHECK_TIMEOUT: "9900"
+          CHECK: ${{ matrix.check }}
+        run: nix/ci/run-checks.sh build "$CHECK" "$RUNNER_TEMP/results"
       - name: Record the result
         if: ${{ !cancelled() }}
+        env:
+          CHECK: ${{ matrix.check }}
         run: |
-          if [ ! -f "$RUNNER_TEMP/results/${{ matrix.check }}.result" ]; then
+          # No result file: the build step never ran (a setup step failed). Said as that, not as a failed check.
+          if [ ! -f "$RUNNER_TEMP/results/$CHECK.result" ]; then
             mkdir -p "$RUNNER_TEMP/results"
-            printf 'fail\t0\n' > "$RUNNER_TEMP/results/${{ matrix.check }}.result"
+            printf 'setup\t0\n' > "$RUNNER_TEMP/results/$CHECK.result"
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ !cancelled() }}
@@ -160,11 +174,15 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # A failed plan job leaves no plan, and a run whose checks all failed to start leaves no results: the summary
+      # below must still run and say so, not vanish with a download error.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
         with:
           name: plan
           path: ${{ runner.temp }}/plan
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
         with:
           pattern: result-*
           merge-multiple: true
@@ -175,9 +193,11 @@ jobs:
           PACKAGES_RESULT: ${{ needs.packages.result }}
         run: |
           set +e
-          table=$(nix/ci/run-checks.sh summary "$RUNNER_TEMP/plan" "$RUNNER_TEMP/results")
+          mkdir -p "$RUNNER_TEMP/results"
+          table=$(nix/ci/run-checks.sh summary "$RUNNER_TEMP/plan" "$RUNNER_TEMP/results" 2>&1)
           rc=$?
           set -e
+          [ -s "$RUNNER_TEMP/plan/checks.txt" ] || table="No plan: the plan job did not produce one, so no check is known to have run. $table"
           {
             echo "### Nix: every flake check"
             echo
@@ -186,7 +206,9 @@ jobs:
             echo "Packages job: **$PACKAGES_RESULT**. Plan job: **$PLAN_RESULT**."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$table"
-          while IFS=$'\t' read -r name reason; do echo "SKIPPED $name: $reason"; done < "$RUNNER_TEMP/plan/skipped.tsv"
+          if [ -f "$RUNNER_TEMP/plan/skipped.tsv" ]; then
+            while IFS=$'\t' read -r name reason; do echo "SKIPPED $name: $reason"; done < "$RUNNER_TEMP/plan/skipped.tsv"
+          fi
           [ "$PLAN_RESULT" = success ] || { echo "::error::the plan job did not succeed"; rc=1; }
           [ "$PACKAGES_RESULT" = success ] || { echo "::error::the packages job did not succeed"; rc=1; }
           exit "$rc"

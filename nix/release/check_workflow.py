@@ -11,9 +11,11 @@ Refuses, for every workflow given:
   - a self-hosted job that lacks the fork-PR guard, or names the nix-release environment, RIME_NIX_CACHE_KEY,
     RIME_CACHE_TOKEN or the R2 secrets;
   - any job outside the nix-release environment naming those secrets;
-  - pull_request_target, a workflow-level permission grant, a concurrency group other than nix-release (for
-    nix-release.yml) or one that cancels in progress, and the stand-in's test-only switches (--test-signing,
-    --allow-test-variants, RIME_TEST_BEFORE_PUSH).
+  - pull_request_target, a workflow-level permission grant, and the stand-in's test-only switches (--test-signing,
+    --allow-test-variants, RIME_TEST_BEFORE_PUSH);
+  - for nix-release.yml, a concurrency other than: group nix-release, never cancelled; or exactly PER_REF_GROUP and
+    PER_REF_CANCEL below (main keeps that group and is never cancelled; other refs, which only dry-run, get a group
+    of their own and cancel). Anything else could let one push cancel a release running on main.
 Exit status 1 with one line per finding.
 """
 
@@ -28,6 +30,8 @@ SECRETS = ("RIME_NIX_CACHE_KEY", "RIME_CACHE_TOKEN", "RIME_R2_ACCESS_KEY_ID", "R
 # a test key, a test configuration (rime-vm's test account) and a shell hook from the environment
 TEST_ONLY = ("--test-signing", "--allow-test-variants", "RIME_TEST_BEFORE_PUSH")
 FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
+PER_REF_GROUP = "${{ github.ref == 'refs/heads/main' && 'nix-release' || format('nix-release-{0}', github.ref) }}"
+PER_REF_CANCEL = "${{ github.ref != 'refs/heads/main' }}"
 
 
 def hosted(runs_on):
@@ -50,8 +54,10 @@ def check(path):
             bad.append(f"{t} is the stand-in's; it never appears in a workflow")
     if path.endswith("nix-release.yml"):
         c = wf.get("concurrency") or {}
-        if c.get("group") != "nix-release" or c.get("cancel-in-progress") is not False:
-            bad.append("concurrency must be group nix-release, cancel-in-progress false")
+        fixed = c.get("group") == "nix-release" and c.get("cancel-in-progress") is False
+        per_ref = c.get("group") == PER_REF_GROUP and c.get("cancel-in-progress") == PER_REF_CANCEL
+        if not (fixed or per_ref):
+            bad.append("concurrency must keep main in group nix-release and never cancel it there")
     for name, job in (wf.get("jobs") or {}).items():
         where = f"job {name}"
         steps = job.get("steps") or []

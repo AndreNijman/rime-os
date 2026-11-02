@@ -102,7 +102,14 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     "if: needs.changes.outputs.action == 'release'"
   wmutant "an input expanded into a script" '          case "$CHANNEL" in' '          echo "''${{ inputs.reason }}"
           case "$CHANNEL" in'
-  wmutant "a run cancelled by the next" "cancel-in-progress: false" "cancel-in-progress: true"
+  # The concurrency expressions hold single quotes and GitHub expressions, so they are built in single quotes.
+  cancel='cancel-in-progress: ''${{ github.ref != '"'"'refs/heads/main'"'"' }}'
+  wmutant "a run cancelled by the next" "$cancel" "cancel-in-progress: true"
+  wmutant "a release on main cancelled by the next push" "$cancel" \
+    'cancel-in-progress: ''${{ github.ref != '"'"'refs/heads/feat/nixos'"'"' }}'
+  wmutant "main in a group of its own per ref" \
+    'group: ''${{ github.ref == '"'"'refs/heads/main'"'"' && '"'"'nix-release'"'"' || format('"'"'nix-release-{0}'"'"', github.ref) }}' \
+    'group: ''${{ format('"'"'nix-release-{0}'"'"', github.ref) }}'
   wmutant "a test variant published" '            --out "$t/out"' '            --allow-test-variants --out "$t/out"'
   wmutant "the stand-in's push hook in a workflow" '          RIME_CACHE_TOKEN: ''${{ secrets.RIME_CACHE_TOKEN }}' \
     '          RIME_CACHE_TOKEN: ''${{ secrets.RIME_CACHE_TOKEN }}
@@ -115,6 +122,68 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
       LEAK: ''${{ secrets.RIME_CACHE_TOKEN }}
     if: >-
       always() && needs.changes.result'
+
+  echo "== off main, the build job is a dry-run proof (the step's own script, nix and git stubbed)"
+  python3 - wf/nix-release.yml > dry.sh <<'PY'
+import sys, yaml
+wf = yaml.safe_load(open(sys.argv[1]))
+jobs = wf["jobs"]
+steps = jobs["build"]["steps"]
+dry = [s for s in steps if s.get("if") == "needs.changes.outputs.build == 'dry-run'"]
+assert len(dry) == 1, "one dry-run step"
+# every step that builds, stages, uploads or frees disk for that runs only on main (build=full)
+for s in steps:
+    text = s.get("run", "") + s.get("uses", "")
+    if any(k in text for k in ("--out-link", "rime-nix-release\" closure", "upload-artifact", "/usr/share/dotnet")):
+        assert s.get("if") == "needs.changes.outputs.build == 'full'", f"step {s.get('name') or s.get('uses')} is not main-only"
+what = jobs["changes"]["steps"][0]["run"]
+assert "build=dry-run\n" in what and '[ "$REF" = refs/heads/main ] && build=full' in what, "build=full on main only"
+print(dry[0]["run"])
+PY
+  mkdir -p stub rt
+  cat > stub/nix <<'SH'
+#!${pkgs.bash}/bin/bash
+echo "nix $*" >> "$LOG"
+case "$1" in
+  eval) if [ "$PWD" = "$RUNNER_TEMP/before" ]; then echo -n "$WAS"; else echo -n "$NOW"; fi ;;
+  build) [[ " $* " == *" --dry-run "* ]] || { echo "a real build in a dry run: $*" >&2; exit 9; }; echo "these 2 derivations will be built:" ;;
+esac
+SH
+  cat > stub/git <<'SH'
+#!${pkgs.bash}/bin/bash
+echo "git $*" >> "$LOG"
+case "$1" in worktree) mkdir -p "$RUNNER_TEMP/before" ;; esac
+SH
+  chmod +x stub/nix stub/git
+  dryrun() { # $1 = case, $2 = BEFORE, $3 = was drv, $4 = now drv
+    mkdir -p "rt/$1"
+    env PATH=$PWD/stub:$PATH LOG=$PWD/dry-$1.log RUNNER_TEMP=$PWD/rt/$1 GITHUB_STEP_SUMMARY=$PWD/sum-$1.md \
+      GITHUB_REPOSITORY=AndreNijman/rime-os SHELL_SHA=0123 BEFORE="$2" WAS="$3" NOW="$4" bash dry.sh > out-$1.txt
+    touch dry-$1.log
+    cat out-$1.txt
+  }
+  b=1111111111111111111111111111111111111111
+  dryrun same $b /nix/store/a.drv /nix/store/a.drv
+  grep -F "did not move" out-same.txt >/dev/null
+  if grep -E "^nix (build|flake)" dry-same.log; then echo "FAIL: toplevels unchanged, but it built or checked"; exit 1; fi
+  dryrun moved $b /nix/store/a.drv /nix/store/b.drv
+  grep -F -- "nix build --dry-run" dry-moved.log >/dev/null
+  grep -F -- "nix flake check --no-build" dry-moved.log >/dev/null
+  grep -F "Dry run, nothing built or published" sum-moved.md >/dev/null
+  dryrun new-branch 0000000000000000000000000000000000000000 /nix/store/a.drv /nix/store/a.drv
+  grep -F -- "nix build --dry-run" dry-new-branch.log >/dev/null
+  if grep -F "git fetch" dry-new-branch.log; then echo "FAIL: fetched the all-zero commit"; exit 1; fi
+  dryrun dispatched "" /nix/store/a.drv /nix/store/a.drv
+  grep -F -- "nix build --dry-run" dry-dispatched.log >/dev/null
+  # mutant: no comparison, so an unchanged toplevel is dry-run anyway; the "same" case must catch it
+  OLD='[ -n "$was" ] && [ "$was" = "$now" ]' NEW='false' python3 -c '
+import os
+s = open("dry.sh").read(); assert os.environ["OLD"] in s
+open("dry.sh", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))'
+  dryrun mut-same $b /nix/store/a.drv /nix/store/a.drv
+  if grep -F "did not move" out-mut-same.txt >/dev/null; then echo "FAIL: the mutant did not change the outcome"; exit 1; fi
+  grep -F -- "nix build --dry-run" dry-mut-same.log >/dev/null
+  echo "killed: a dry run although the toplevels did not move"
 
   echo "== actionlint"
   mkdir -p repo/.github/workflows

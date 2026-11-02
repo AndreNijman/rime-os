@@ -26,6 +26,8 @@
   terminal-migrate = import ./terminal-migrate.nix { inherit pkgs self; };
   terminal-look = import ./terminal-look.nix { inherit pkgs self; };
   delta = import ./delta.nix { inherit pkgs self; };
+  unit-docs = import ./unit-docs.nix { inherit pkgs self; };
+  rimed-session = import ./rimed-session.nix { inherit pkgs self; };
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }
@@ -59,3 +61,5 @@
 // import ./vendor-verify.nix { inherit pkgs self; }
 # gaming-launch (P2)
 // { gaming-launch = import ./gaming-launch.nix { inherit pkgs self; }; }
+# vm-harness, vm-harness-vm
+// import ./vm-harness.nix { inherit pkgs self; }
