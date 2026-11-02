@@ -1,21 +1,32 @@
-# rime.rootfs: the filesystems of a Rime OS NixOS machine whose root is the btrfs a bootc install made (PLAN.md D2).
+# rime.rootfs: the filesystems of every Rime OS NixOS machine, migrated or freshly installed (PLAN.md D2, D9).
+# ONE option set for both (it replaced rime.installTarget's own copy; nix/installer/target.nix only maps onto it).
 #
-# The bridge (`rime migrate start`, nix/pkgs/rime-bridge) creates three top-level subvolumes inside the existing
-# filesystem (and LUKS2 container) and relabels the filesystem `rime-root` when it was `apex-root`:
+# The root is one btrfs, labelled `label`, directly or inside a LUKS2 volume, with three top-level subvolumes:
 #
 #   @nixos  /          the NixOS root (/etc, /var)
 #   @nix    /nix       the store, a subvolume of its own so it can be snapshotted apart from /
-#   @home   /var/home  a reflink copy of the old home; /home links to it, as on bootc
+#   @home   /var/home  homes; /home links to it, as on bootc
 #
-# Every subvolume is mounted compress-force=zstd:3 (D2). The top level (subvolid=5) is mounted at `topMount` so
-# bootc's /boot, a directory there, can be bound to /boot: the Rime boot hook (rime.boot, layout custom-cfg)
-# writes its menu and kernels there and GRUB reads them from btrfs. ostree's tree stays where it was, so its GRUB
-# entries still boot the old system (emergency only, D2).
+# Every subvolume is mounted compress-force=zstd:3 (D2). The bridge (`rime migrate start`, nix/pkgs/rime-bridge) makes
+# them inside the bootc machine's existing filesystem and relabels it `rime-root` when it was `apex-root`; the
+# installer (installer/rime-install-nixos.sh) makes them on a fresh disk.
 #
-# TODO(handover): a LUKS-A machine has /boot on its own ext4 partition (installer/rime-install); that needs the
-# /boot source from host.toml (a generator), not this static bind. The bridge refuses nothing for it yet because
-# no LUKS VM has run (B10).
-{ config, lib, ... }:
+# Where /boot comes from is the one difference, `boot`:
+#
+#   "bootc"  a MIGRATED machine. bootc left /boot either as a directory of the btrfs top level (the plain layout)
+#            or as its own ext4 partition (the installer's LUKS layout, installer/rime-install). The bridge records
+#            which in /var/lib/rime/host.toml ([boot] device + fstype for a partition), and the generator
+#            rime-rootfs-boot (rootfs/boot-generator.py) writes boot.mount from it at every boot: the partition,
+#            or a bind of `topMount`/boot (the top level, subvolid=5, is mounted at `topMount`). The Rime boot hook
+#            (rime.boot, layout custom-cfg) writes its menu and kernels there and bootc's GRUB reads them; ostree's
+#            entries stay, so the old system still boots (emergency only, D2). /boot is NOT in fileSystems: the
+#            generator is its only owner, because the source is a per-machine fact, not a build-time one.
+#   "esp"    a FRESH install: Rime's own ESP (FAT, label `espLabel`) at /boot; Fedora's shim + GRUB (bootupd's static
+#            config) live there and the boot hook writes BLS entries for GRUB's blscfg (layout bls).
+#
+# LUKS: the initrd can open a LUKS2 root (rime.luks) in both cases; which volume comes from the kernel command line
+# (host.toml [boot] kernel_params, rd.luks.*: the installer writes them, the bridge carries them from bootc's).
+{ config, lib, pkgs, ... }:
 
 let
   cfg = config.rime.rootfs;
@@ -25,31 +36,74 @@ let
     fsType = "btrfs";
     options = [ "subvol=${s}" "compress-force=zstd:3" ];
   };
+  bootGenerator = pkgs.runCommand "rime-rootfs-boot" { } ''
+    install -Dm755 ${./rootfs/boot-generator.py} $out
+    substituteInPlace $out \
+      --replace-fail '#!/usr/bin/env python3' '#!${pkgs.python3}/bin/python3 -I' \
+      --replace-fail '@topMount@' '${cfg.topMount}'
+  '';
 in
 {
   options.rime.rootfs = {
-    enable = lib.mkEnableOption "the @nixos/@nix/@home btrfs layout a migrated bootc machine has (D2)";
+    enable = lib.mkEnableOption "the @nixos/@nix/@home btrfs layout of a Rime OS machine (D2)";
     label = lib.mkOption {
       type = lib.types.str;
       default = "rime-root";
       description = "Label of the btrfs that holds the subvolumes (the bridge relabels apex-root to this).";
     };
+    boot = lib.mkOption {
+      type = lib.types.enum [ "bootc" "esp" ];
+      default = "bootc";
+      description = ''
+        Where /boot is: "bootc" for a migrated machine (bootc's /boot, a top-level directory or its own partition,
+        as host.toml [boot] records; mounted by the rime-rootfs-boot generator), "esp" for a fresh install (Rime's
+        ESP, label espLabel).
+      '';
+    };
+    espLabel = lib.mkOption {
+      type = lib.types.str;
+      default = "RIME-ESP";
+      description = "FAT label of Rime's own EFI System Partition, mounted at /boot when boot = \"esp\".";
+    };
     topMount = lib.mkOption {
       type = lib.types.str;
       default = "/mnt/rime-top";
-      description = "Where the btrfs top level (subvolid=5) is mounted, so its /boot directory can be bound.";
+      description = "Where the btrfs top level (subvolid=5) is mounted when boot = \"bootc\", so its /boot can be bound.";
+    };
+    bootGenerator = lib.mkOption {
+      type = lib.types.package;
+      readOnly = true;
+      default = bootGenerator;
+      description = "The rime-rootfs-boot generator this configuration installs (for the checks).";
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    fileSystems = {
-      "/" = sub "@nixos";
-      "/nix" = sub "@nix" // { neededForBoot = true; };
-      "/var/home" = sub "@home";
-      ${cfg.topMount} = { device = dev; fsType = "btrfs"; options = [ "subvolid=5" ]; };
-      "/boot" = { device = "${cfg.topMount}/boot"; fsType = "none"; options = [ "bind" ]; depends = [ cfg.topMount ]; };
-    };
-    boot.initrd.supportedFilesystems.btrfs = true;
-    systemd.tmpfiles.rules = [ "L /home - - - - /var/home" ];
-  };
+  config = lib.mkIf cfg.enable (lib.mkMerge [
+    {
+      fileSystems = {
+        "/" = sub "@nixos";
+        "/nix" = sub "@nix" // { neededForBoot = true; };
+        "/var/home" = sub "@home";
+      };
+      boot.initrd.supportedFilesystems.btrfs = true;
+      systemd.tmpfiles.rules = [ "L /home - - - - /var/home" ];
+      # One toplevel opens a LUKS2 root when the command line names one (host.toml [boot] kernel_params).
+      rime.luks.enable = lib.mkDefault true;
+    }
+    (lib.mkIf (cfg.boot == "bootc") {
+      fileSystems.${cfg.topMount} = { device = dev; fsType = "btrfs"; options = [ "subvolid=5" ]; };
+      systemd.generators.rime-rootfs-boot = "${bootGenerator}";
+      # A /boot partition is ext4 (the installer's LUKS layout); its fsck and module must be there.
+      boot.supportedFilesystems.ext4 = true;
+    })
+    (lib.mkIf (cfg.boot == "esp") {
+      fileSystems."/boot" = {
+        device = "/dev/disk/by-label/${cfg.espLabel}";
+        fsType = "vfat";
+        options = [ "umask=0077" ];
+      };
+      # D3 v1 chain on a fresh install: BLS entries on the ESP for Fedora GRUB's blscfg.
+      rime.boot.layout = lib.mkDefault "bls";
+    })
+  ]);
 }
