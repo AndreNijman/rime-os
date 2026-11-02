@@ -82,12 +82,13 @@ nixos_nix() {  # nix with the cache's key as the ONLY trusted one, never a build
 # with the store paths they were built against, and the live env never gets a
 # /nix of its own.
 nixos_in_target() {
-  unshare --mount --propagation private -- /bin/bash -c '
+  # bash -c SCRIPT $0 $1 ARGS...: $0 is the target root, $1 the system, then the command.
+  unshare --mount --propagation private -- bash -c '
     set -e
     mkdir -p /nix
     mount --rbind "$0/nix" /nix
     export PATH="$1/sw/bin:$PATH"
-    shift 2
+    shift
     exec "$@"' "$TROOT" "$NIXOS_SYSTEM" "$@"
 }
 

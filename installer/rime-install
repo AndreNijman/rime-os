@@ -1075,8 +1075,9 @@ quiet_console
 unmount_target
 # bootc installs from THIS environment (see "Where the OS comes from"), so its
 # absence is a refusal here and not a "command not found" after the disk is
-# prepared. --check-passphrase is exempt: it reads no image and no disk.
-if [ "${1:-}" != --check-passphrase ]; then
+# prepared. --check-passphrase is exempt: it reads no image and no disk, and so
+# is the NixOS path, which runs no bootc (nixos_preflight checks its own tools).
+if [ "${1:-}" != --check-passphrase ] && [ "$NIXOS" != 1 ]; then
   have "$BOOTC" || die "bootc is missing from the live environment, so Rime OS cannot be installed from it.
 
 Nothing has been erased — your disks are untouched.
