@@ -55,22 +55,21 @@ let
     modules = [
       self.nixosModules.default
       ../installer/target.nix
-      (
-        { pkgs, ... }:
-        {
-          nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
-          rime.installTarget.enable = true;
-          rime.boot.enable = true;
-          documentation.enable = false;
-          system.stateVersion = "26.11";
-          rime.update = {
-            repository = repo;
-            fulcioRoot = "${keys}/ca.pem";
-          };
-          virtualisation.containers.registries.settings.registry = [ { location = "localhost:5000"; insecure = true; } ];
-          environment.systemPackages = [ pkgs.rime.rimed ];
-        }
-      )
+      {
+        nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
+        rime.installTarget.enable = true;
+        rime.boot.enable = true;
+        documentation.enable = false;
+        system.stateVersion = "26.11";
+        rime.update = {
+          repository = repo;
+          fulcioRoot = "${keys}/ca.pem";
+        };
+        virtualisation.containers.registries.settings.registry = [ { location = "localhost:5000"; insecure = true; } ];
+      }
+      # `rime trust --gate` on the installed disk. Its own module: the outer `pkgs` has no overlay, and this
+      # system's `pkgs` cannot set nixpkgs.hostPlatform (it is computed from it).
+      ({ pkgs, ... }: { environment.systemPackages = [ pkgs.rime.rimed ]; })
     ];
   };
   target = targetSystem.config.system.build.toplevel;
@@ -559,7 +558,11 @@ in
           installer.succeed("mkdir -p /mnt && mount -o subvolid=5 /dev/vdb2 /mnt")
           gen = installer.succeed("readlink /mnt/@nix/var/nix/profiles/system").strip()
           assert installer.succeed(f"readlink /mnt/@nix/var/nix/profiles/{gen}").strip() == GAMING
-          installer.succeed("grep -x plain-gaming /mnt/@nixos/etc/rime-test-variant")
+          # What boots is that system: the boot entry names its init (/etc is only set up by its first activation).
+          installer.succeed("mkdir -p /esp && mount /dev/vdb1 /esp")
+          entry = installer.succeed("cat /esp/loader/entries/*.conf")
+          installer.succeed("umount /esp")
+          assert f"init={GAMING}/init" in entry and f"init={SYSTEM}/init" not in entry, entry
           r = json.loads(installer.succeed("cat /mnt/@nixos/var/lib/rime/nix/applied.json"))["releases"][0]
           assert r["toplevel"] == GAMING, r
           sw = "/mnt/@nixos/var/lib/rime/switch/rime-feature@gaming.target.on"
