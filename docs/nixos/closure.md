@@ -17,10 +17,11 @@ this measurement.
 | saved by the cuts (unpacked) | **1,509,148,536 B (1.51 GB)**, 38 paths | |
 | **P5 fresh-install download** (`plain`, zstd -19), re-measured at the wave-1 integration (§9) | **3.46 GB** (xz: 3.25 GB); 2.51 GB before linux-firmware | bootc 4.20 GB |
 | on disk after install (`plain`, btrfs zstd:3, optimised), re-measured (§9) | 5.45 GB; 4.30 GB before linux-firmware | bootc 5.4 GB (2026.10.04.2, 12 GiB VM) |
-| `rime install steam` on top of `plain` (measured before linux-firmware, not re-measured) | **+0.53 GB** download, +2.46 GB unpacked, +0.99 GB on disk | |
+| `rime install steam` on top of `plain`, re-measured after linux-firmware (§10) | **+0.50 GB** download, +2.20 GB unpacked, +0.88 GB on disk | |
 | **A4** | **gaming is opt-in** (`rime.gaming.enable` stays `false`; installs ship `plain`) | 10-04 decision kept |
 | **A11 disk floor** (install + one mass rebuild + boot), recomputed at the wave-1 integration (§9) | **19 GB** as `rime update` is designed (§11.5 gate counts unpacked bytes); **14 GB** physically, and once the gate counts on-disk bytes (16 GB and 12 GB before linux-firmware) | bootc 12 GB, which holds its 5.4 GB install plus one core update, barely (§6) |
 | A11 install-only minimum (no update headroom), recomputed (§9) | 7 GB (6 GB before linux-firmware) | no bootc counterpart published |
+| A11 floor **with gaming** (§10) | **22 GB** as designed; **16 GB** physical; 8 GB install-only | |
 
 `plain` is the shape a fresh install ships (D9's generic rime-plain toplevel): every Rime area on, Rime's kernel with
 NVIDIA 615, no gaming, no test account. `rime-vm` is `nixosConfigurations.rime-vm` (gaming on, nixpkgs' kernel, no
@@ -153,6 +154,9 @@ The delta is not trivial:
 | unpacked | 9.10 GB | 11.55 GB | +2.46 GB |
 | on disk, optimised | 4.30 GB | 5.28 GB | +0.99 GB |
 
+(First measurement, before linux-firmware. Re-measured in §10: **+0.50 GB** download (3.46 → 3.95 GB), +2.20 GB
+unpacked, +0.88 GB on disk; 14 % more download.)
+
 That is 21 % more download for every install, against bootc's 4.20 GB. PLAN's lower bound (0.12 GB, from
 the probe) left 32-bit graphics on in both closures; with them following gaming, the real cost is the figure above.
 Turning 32-bit graphics off does not shrink gaming (§4), so there is no cheaper "gaming in every install".
@@ -197,7 +201,8 @@ booted into the current one. So the floor is **one system installed, plus room f
   floor is the first figure.
 - **Install-only minimum: 6 GB** (partitions + installed system + 1 GB, rounded up), with no room for an update.
   bootc publishes no figure of this shape.
-- **With gaming:** 20 GB as designed. `rime install steam` must refuse by name below it.
+- **With gaming:** 20 GB as designed (superseded: **22 GB** as designed, 16 GB physical, §10). `rime install steam`
+  must refuse by name below it.
 - **bootc for comparison: 12 GB.** `installer/rime-install` (~2312-2333) derived it on 2026-10-04 as an install floor
   (8.1 GB peak install + 2 GiB of partitions + headroom), but the release that followed (2026.10.04.2, the apps out of
   the image) installs in 5.4 GB, and a core-rebuild update needs about 5.1 GB free, so a 12 GB bootc disk holds the
@@ -251,9 +256,9 @@ Seen:
 
 - **STATE.md A4 and A11** (the integrator's file): A4 = gaming opt-in (§5); A11 floor = 19 GB as designed
   (14 GB physical, once D6 §11.5 counts on-disk bytes), install-only 7 GB; P5 figure = 3.46 GB (zstd -19; bootc
-  4.20 GB). These are the §9 figures, after linux-firmware joined the closure. The gaming floor (20 GB) and the
-  `rime install steam` delta were measured before linux-firmware and are stale: re-run `size-measure.sh` for
-  `plain-gaming`.
+  4.20 GB). These are the §9 figures, after linux-firmware joined the closure. The gaming floor is **22 GB** as
+  designed (16 GB physical, 8 GB install-only) and the `rime install steam` delta **+0.50 GB** download, both
+  re-measured after linux-firmware (§10).
 - **D6 §11.5:** count estimated on-disk bytes, not unpacked NAR bytes, in the free-space gate; that drops the floor to
   12 GB (§6).
 - **Installer and catalogue:** refuse by name below the floor, and refuse `rime install steam` below the gaming floor.
@@ -323,3 +328,39 @@ as §6: partitions 537,919,488 + installed 5,450,555,392 + one rebuild + 1,000,0
 
 The ESP check in §6 is unchanged (3 × 52.4 MB). Not re-measured: `rime-vm`, the `*-no32` variants and `plain-gaming`,
 so the gaming floor and the `rime install steam` delta in §1 are pre-firmware figures.
+
+## 10. `plain-gaming` re-measured (D5, 2026-11-02)
+
+Measured on 2026-11-02 on the `nix/d5` branch (base `0545be610`, wave 1 merged, plus D5's rimed and catalogue
+changes), with the committed flake.lock, `PHASES="download disk" size-measure.sh <dir> plain plain-gaming`, same tools
+as §2. Both variants come from the same run, so the delta is a difference of two totals measured together. Raw rows
+(columns as §4):
+
+```
+plain         1807  10382141376  3458656531  3246764060  52435933  5414600704  4890623218  10449990790  5442637824  4869867905
+plain-gaming  2108  12579425640  3954671995  3694696704  52435933  6388350976  5664384969  12627766927  6327009280  5583781592
+```
+
+| | `plain` | `plain-gaming` | delta |
+|---|---|---|---|
+| paths | 1807 | 2108 | +301 |
+| download, zstd -19 | 3,458,656,531 B | 3,954,671,995 B | **+496,015,464 B (+0.50 GB, +14 %)** |
+| download, xz | 3,246,764,060 B | 3,694,696,704 B | +447,932,644 B |
+| unpacked (NAR) | 10,382,141,376 B | 12,579,425,640 B | +2,197,284,264 B (+2.20 GB) |
+| on disk, `df` used, optimised | 5,442,637,824 B | 6,327,009,280 B | +884,371,456 B (+0.88 GB) |
+
+`plain` here differs from §9 by D5's rimed and catalogue changes (zstd -19 3,458,656,531 against 3,458,585,216 B;
+on disk 5,442,637,824 against 5,450,555,392 B, which includes run-to-run btrfs variance); the floor below uses only
+this run's `plain-gaming`.
+
+The delta is 0.03 GB smaller than §5's +0.53 GB; the paths that changed between the two measurements were not
+compared, so the cause is not stated here. A4 (opt-in) stands. **Gaming floor**, the §6 parts with `plain-gaming`:
+partitions 537,919,488 + installed 6,327,009,280 + one rebuild + 1,000,000,000 for home and logs:
+
+- **as designed** (rebuild room = unpacked 12,579,425,640 + 1 GB reserve): 21,444,354,408 B → **22 GB**;
+- **physical** (rebuild room = a second install on disk + 1 GB): 15,191,938,048 B → **16 GB**;
+- **install-only**: 7,864,928,768 B → **8 GB**.
+
+`rime install steam` must refuse by name below the gaming floor (22 GB until D6 §11.5 counts on-disk bytes, then
+16 GB). `rime.gaming.enable`'s option text quotes the new delta. Log: `/var/lab/rime-nix/artifacts/d5/size-run.log`
+(not committed).
