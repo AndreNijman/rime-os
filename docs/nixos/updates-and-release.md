@@ -1177,6 +1177,13 @@ Then **`rime rollback` after those refusals** boots the generation before the bo
 `checks.catalogue` proves the combined floor lookup with lab floors (steam selected, then `rime install qemu` refused
 by name because `plain-gaming-virtualization` does not fit). `checks.release-plan` (eval + Python) proves the plan's
 catalogue, variants and floors (§3.1, §11.5).
+Mutants that fail these checks (`/var/lab/rime-nix/artifacts/updates/mutants.log`): the tamper tool writing the NAR
+back unchanged (the NAR subtest: "rime update exited 0"); rimed reading an absent signature as verified (the unsigned
+subtest); `rime rollback` taking the oldest older generation (only the rollback-after-refusals subtest, since the
+first rollback has one older generation); `rime install` looking up the floor without the feature it adds
+(`checks.catalogue`); the plan dropping a catalogue app, a published floor or partition floor off by one, a variant
+named with "+", a published variant with a password account, the gate ratio not rendered (`checks.release-plan`);
+the workflow building no catalogue or passing none to `closure` (`checks.release-unit`).
 
 ### 15.3 Workflow checks
 
