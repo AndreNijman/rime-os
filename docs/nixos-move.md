@@ -11,14 +11,17 @@ through unchanged, so its own `--help` is the reference:
 
 | command | what it does |
 |---|---|
-| `sudo rime migrate check [--explain]` | read-only: can this machine move, and if not, what blocks it |
-| `sudo rime migrate repair-e --confirm` | topology E only: removes an earlier boot trial's leftovers that block a start |
+| `sudo rime migrate check [--explain] [--payload DIR]` | read-only: can this machine move, and if not, what blocks it; with `--payload`, also what will not come across |
+| `sudo rime migrate repair-e --confirm` | topology E only: moves an earlier boot trial's leftovers that block a start aside (archived, never deleted) |
+| `sudo rime migrate key-export --to DIR` | copies the LUKS header backup and the backup tool's keys to DIR |
 | `sudo rime migrate start --backup DIR --payload DIR` | backs up, installs the NixOS closure beside bootc, adds the GRUB entry; on any failure it removes what it made and records `rolled back` |
 
 The copy here is taken byte for byte from the NixOS side's `rime-bridge.py`
-(first line changed to `#!/usr/bin/python3 -I`). Its tests are in
-`tests/rime-migrate/` and run from `tests/test-rime-migrate.sh`. The fixture
-uses a synthetic root UUID (`0b0b0b0b-…`), never a real machine's.
+(first line changed to `#!/usr/bin/python3 -I`), at the NixOS branch's bridge
+commit 9594161f9 (source sha256 `d307ec75…2a62867`). Its tests
+(`test_bridge.py`, `test_bridge_d2.py`) are in `tests/rime-migrate/` and run
+from `tests/test-rime-migrate.sh`. The fixture uses a synthetic root UUID
+(`0b0b0b0b-…`), never a real machine's.
 
 On a system older than this release `rime migrate` does not exist; on one where
 the program is missing, `rime migrate` says so and points at `sudo rime update`.
@@ -57,36 +60,42 @@ the old side runs it by itself.
 
 ## The payload signature
 
-`rime migrate start --payload DIR` verifies `DIR/manifest.json.sig` before it
-runs the bridge:
+The bridge checks the payload itself, at the point it reads it
+(`verify_payload`), before `check --payload` reports on it and before `start`
+writes anything:
 
-- key: `/usr/share/rime-os/trust/nixos-bridge-payload.pub`, Nix format
-  `name:base64(32-byte ed25519 public key)`;
-- signature: `name:base64(64-byte ed25519 signature)` over the exact bytes of
-  `DIR/manifest.json`, with the same `name`;
-- checked with `/usr/bin/openssl pkeyutl -verify -rawin`.
+- `DIR/manifest.sig` is `<key name>:<base64 ed25519 signature>` over
+  `rime-bridge-payload-v1\n` followed by the exact bytes of
+  `DIR/manifest.json`; the manifest names every other payload file by sha256;
+- the only trusted key is the one the program compiles in
+  (`TRUSTED_PAYLOAD_KEYS`): `rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=`,
+  the narinfo key the NixOS update path already trusts;
+- refusals, each by name: `payload-missing`, `payload-unsigned`,
+  `payload-key-untrusted`, `payload-signature-bad`, `payload-corrupt`. No
+  option or environment variable skips the check.
 
-Refusals, each by name: `payload-key-missing`, `payload-key-bad`,
-`payload-unsigned`, `payload-signature-bad`, `payload-unverifiable`.
+`rime migrate` puts no check of its own in front: it passes every argument to
+the program unchanged.
 
-The directory checked must be the directory the bridge installs. The bridge
-reads its arguments with Python's argparse defaults, which accept any prefix of
-a long option (`--payl DIR`) and keep the last of a repeated one, so `rime
-migrate start` also refuses, before anything is checked or run:
-`payload-arg-abbreviated` (spell it `--payload`), `payload-arg-repeated`
-(`--payload` given twice) and `payload-missing` (no `--payload`; `--help` is
-let through, since argparse prints help and exits before `start` runs).
-Decided 2026-11-02 after review proved both spellings reached the bridge
-unchecked.
+**Decided 2026-11-02: one verifier, in the bridge, and no key file in the
+image.** An earlier draft of this release had `rime` verify a
+`manifest.json.sig` against a key file it would ship, before running the
+bridge. The bridge then gained its own check (above). Two verifiers of one
+format can only disagree, and when they do the outer one blocks a move the
+bridge would accept; the outer one also checked the directory before the
+bridge read it again, which is why it needed refusals for argument spellings
+the bridge's parser reads differently. Checking where the payload is read
+closes both. The trust root is the constant in the program, pinned by
+`tests/test-rime-migrate.sh` (a refresh of the bridge that changes the key or
+the domain fails CI), and it is the same public key the NixOS side ships: no
+new trust root reaches anyone.
 
-Not covered here: the window between this check and the bridge reading
-`manifest.json` and the payload files again. Run `start` on a payload
-directory only root can write; closing that window (the bridge verifying the
-signature itself, over what it then installs) belongs to the bridge.
-
-**The key is not shipped yet.** Until it is, every `start` refuses with
-`payload-key-missing`; `check` and `repair-e` are not affected. The image build
-asserts the file is absent so that adding it is a deliberate change.
+**Decided 2026-11-02: no `NIX_SIGNER` in this image.** The NixOS release design
+(`docs/nixos/updates-and-release.md` on the NixOS branch) once planned for this
+release to carry the Nix release workflow's Sigstore identity as well. Nothing on
+the bootc side verifies a Nix channel document or closure through `rime trust`;
+the only Nix object it ever installs is the bridge payload, and that is checked
+by the key above. The identity belongs to the NixOS system's own `rime`.
 
 ## Disk encryption docs
 

@@ -307,7 +307,7 @@ enum Cmd {
     /// services) are activated without a restart when that is safe; the rest
     /// waits in the staged deployment. `--plan` shows which is which.
     Update(UpdateArgs),
-    /// Move this machine to Rime OS on NixOS: `check`, `repair-e`, `start`.
+    /// Move this machine to Rime OS on NixOS: `check`, `repair-e`, `key-export`, `start`.
     ///
     /// Runs /usr/libexec/rime-migrate with these arguments (`rime migrate
     /// check --explain` first; it writes nothing). Once `start` has run, the

@@ -1617,10 +1617,10 @@ RUN set -eux; \
 # ostree deployments, and from then on `rime update` and the other bootc verbs
 # refuse by name (rimed/rime/src/nixos_bridge.rs).
 #
-# The payload signing key is NOT shipped yet: `rime migrate start` refuses
-# [payload-key-missing] until a release adds
-# /usr/share/rime-os/trust/nixos-bridge-payload.pub. The assertion below makes
-# shipping it a deliberate edit of this block.
+# The payload's signature is checked by the program itself, where it reads the
+# payload, against the key it compiles in (TRUSTED_PAYLOAD_KEYS: rime-cache-1,
+# the NixOS update path's narinfo key). There is no separate key file:
+# tests/test-rime-migrate.sh pins that constant (docs/nixos-move.md).
 COPY --chmod=0755 files/system/libexec/rime-migrate /usr/libexec/rime-migrate
 RUN set -eux; \
     test -x /usr/libexec/rime-migrate; \
@@ -1629,9 +1629,6 @@ RUN set -eux; \
     /usr/libexec/rime-migrate --help >/dev/null; \
     : '── what the bridge runs on the old side ──'; \
     command -v btrfs lsblk findmnt mount umount unshare chroot tar zstd cp systemctl ostree cryptsetup; \
-    : '── what rime migrate start verifies the payload with ──'; \
-    test -x /usr/bin/openssl; \
-    test ! -e /usr/share/rime-os/trust/nixos-bridge-payload.pub; \
     echo "rime-migrate installed"
 
 # ── shared-machine recipes: guest disposability and kiosk (P2-016) ──────────

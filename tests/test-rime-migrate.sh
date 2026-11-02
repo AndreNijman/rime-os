@@ -13,13 +13,18 @@
 #    3. With --with-binary (or RIME_BIN set): the `rime` binary against fixture
 #       records (RIME_BRIDGE_ROOT). Every bootc verb is REFUSED by name after a
 #       start, before the root gate, and allowed again after a rollback; `rime
-#       migrate start` refuses an unsigned or wrongly signed payload by name and
-#       lets a correctly signed one through to the bridge.
+#       migrate …` hands every argument to the bridge unchanged.
+#
+#  The payload signature is the bridge's own check (verify_payload, at the
+#  point it reads the payload; its unit suite covers unsigned, untrusted-key,
+#  tampered and good payloads). This suite pins the trust root it compiles in:
+#  the rime-cache-1 key, and the domain prefix that keeps a manifest signature
+#  from ever being a narinfo signature.
 #
 #  Failures it exists to catch: a finished move whose old side still runs
 #  `bootc upgrade` (the bridge's VM run saw exactly that); a refusal that a
 #  rolled-back start leaves in place for ever; an unreadable record read as
-#  "never started"; an unsigned payload reaching the bridge.
+#  "never started"; a bridge refresh that quietly changes whom it trusts.
 #
 #  Run: ./tests/test-rime-migrate.sh [--with-binary]
 # ─────────────────────────────────────────────────────────────────────────────
@@ -67,7 +72,7 @@ PY
 # docs/nixos-move.md names these as `rime migrate <sub>`; check-doc-verbs.sh
 # cannot ask them of the Rust binary (it passes them through to this program),
 # so tests/doc-verbs-allow lists them and THIS is where they are proved to parse.
-for sub in check repair-e start; do
+for sub in check repair-e key-export start; do
     if "$PROG" "$sub" --help >/dev/null 2>&1; then
         ok "rime migrate $sub is a real subcommand of the program"
     else
@@ -87,6 +92,33 @@ if RIME_MIGRATE="$PROG" python3 -I -B -W error::ResourceWarning -m unittest disc
     ok "unit suite: $(grep -E '^Ran [0-9]+ tests' "$W/unit.log")"
 else
     bad "unit suite" "$(tail -n 20 "$W/unit.log")"
+fi
+
+# The payload trust root the bridge compiles in. The public half of
+# rime-cache-1 is the NixOS update path's narinfo key (nix/modules/update.nix
+# rime.update.cacheKeys on the NixOS branch; docs/nixos-move.md). A refresh of
+# the bridge that changes either constant must change this line on purpose.
+trust="$(python3 -I - "$PROG" <<'PY'
+import ast, sys
+want = {"TRUSTED_PAYLOAD_KEYS", "PAYLOAD_DOMAIN"}
+got = {}
+for n in ast.parse(open(sys.argv[1]).read()).body:
+    if isinstance(n, ast.Assign) and len(n.targets) == 1 and getattr(n.targets[0], "id", None) in want:
+        got[n.targets[0].id] = ast.literal_eval(n.value)
+print(repr(got.get("TRUSTED_PAYLOAD_KEYS")), repr(got.get("PAYLOAD_DOMAIN")))
+PY
+)"
+if [[ "$trust" == "('rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=',) b'rime-bridge-payload-v1\\n'" ]]; then
+    ok "the payload is trusted only when signed by rime-cache-1, under the bridge's own domain"
+else
+    bad "payload trust root changed" "$trust"
+fi
+# No way around the check: no environment variable or option skips it.
+skip_re='RIME_[A-Z_]*(UNSIGNED|INSECURE|SKIP_SIG|TRUST)|allow-unsigned|--insecure|--no-verify'
+if ! pipe_has -E "$skip_re" "$PROG"; then
+    ok "nothing in the program switches the payload signature off"
+else
+    bad "the program names a way to skip the payload signature" "$(grep -n -E "$skip_re" "$PROG")"
 fi
 
 # ── fixture records ─────────────────────────────────────────────────────────
@@ -196,71 +228,17 @@ if (( WITH_BINARY )); then
         ! pipe_has 'REFUSED' <<<"$out" && ok "rime $v is not held by the move" || bad "rime $v refused" "$out"
     done
 
-    sec "rime migrate start: the payload signature"
-    if openssl version >/dev/null 2>&1; then
-        K="$W/key"; mkdir -p "$K" "$W/payload"
-        openssl genpkey -algorithm ed25519 -out "$K/test.pem" 2>/dev/null
-        openssl pkey -in "$K/test.pem" -pubout -outform DER -out "$K/pub.der" 2>/dev/null
-        # The raw key is the SubjectPublicKeyInfo's last 32 bytes (RFC 8410).
-        pub_b64="$(tail -c 32 "$K/pub.der" | base64 -w0)"
-        printf '{"store": {"file": "store.tar.zst", "sha256": "0"}, "toplevel": "/nix/store/x"}\n' > "$W/payload/manifest.json"
-        sign() {   # sign NAME -> payload/manifest.json.sig
-            openssl pkeyutl -sign -inkey "$K/test.pem" -rawin -in "$W/payload/manifest.json" -out "$K/sig.bin"
-            printf '%s:%s\n' "$1" "$(base64 -w0 "$K/sig.bin")" > "$W/payload/manifest.json.sig"
-        }
-        keyroot="$W/rec/absent"
-        start() { RIME_BRIDGE_ROOT="$keyroot" "$RIME_BIN" migrate start --backup "$W/backup" --payload "$W/payload" 2>&1; }
-        # 1. no key shipped (this release): refused, never reaches the bridge.
-        out="$(start)"; rc=$?
-        [[ $rc -eq 3 ]] && pipe_has -F 'REFUSED [payload-key-missing]' <<<"$out" \
-            && ok "no key on the system: start refused by name" || bad "no key" "rc=$rc $out"
-        mkdir -p "$keyroot/usr/share/rime-os/trust"
-        printf 'rime-test-bridge-1:%s\n' "$pub_b64" > "$keyroot/usr/share/rime-os/trust/nixos-bridge-payload.pub"
-        # 2. unsigned
-        out="$(start)"; rc=$?
-        [[ $rc -eq 3 ]] && pipe_has -F 'REFUSED [payload-unsigned]' <<<"$out" \
-            && ok "unsigned payload: refused by name" || bad "unsigned" "rc=$rc $out"
-        # 3. signed by the trusted key, then the manifest changed
-        sign rime-test-bridge-1
-        printf '{"store": {"file": "store.tar.zst", "sha256": "1"}, "toplevel": "/nix/store/x"}\n' > "$W/payload/manifest.json"
-        out="$(start)"; rc=$?
-        [[ $rc -eq 3 ]] && pipe_has -F 'REFUSED [payload-signature-bad]' <<<"$out" \
-            && ok "a manifest changed after signing: refused by name" || bad "tampered" "rc=$rc $out"
-        # 4. signed under another key name
-        sign someone-else-1
-        out="$(start)"; rc=$?
-        [[ $rc -eq 3 ]] && pipe_has -F 'REFUSED [payload-signature-bad]' <<<"$out" \
-            && ok "signed by a key this system does not trust: refused" || bad "other key" "rc=$rc $out"
-        # 5. correctly signed: verified, then handed to the bridge (absent on a
-        #    build runner, which is the "predates" message; a real bridge would
-        #    answer for itself and refuse a non-root run).
-        sign rime-test-bridge-1
-        out="$(start)"; rc=$?
-        if pipe_has -F 'payload manifest signed by rime-test-bridge-1: verified' <<<"$out" \
-           && ! pipe_has 'REFUSED \[payload' <<<"$out"; then
-            ok "a correctly signed payload is verified and handed to the bridge (rc=$rc)"
-        else
-            bad "good signature" "rc=$rc $out"
-        fi
-        # 6. Spellings the bridge's argparse reads differently from an exact
-        #    match: it keeps the LAST of a repeated option and accepts any
-        #    prefix of --payload. With the signed payload above in place, each
-        #    would hand the bridge an unchecked directory unless refused here.
-        mkdir -p "$W/other"
-        for spec in "payload-arg-repeated|--payload $W/payload --payload $W/other" \
-                    "payload-arg-abbreviated|--payl $W/other" \
-                    "payload-arg-abbreviated|--p=$W/other" \
-                    "payload-missing|"; do
-            want="${spec%%|*}"; read -r -a extra <<<"${spec#*|}"
-            out="$(RIME_BRIDGE_ROOT="$keyroot" "$RIME_BIN" migrate start --backup "$W/backup" "${extra[@]}" --yes 2>&1)"; rc=$?
-            if [[ $rc -eq 3 ]] && pipe_has -F "REFUSED [$want]" <<<"$out" && ! pipe_has 'cannot run the bridge' <<<"$out"; then
-                ok "start ${extra[*]:-(no --payload)}: refused [$want] before the bridge"
-            else
-                bad "start ${extra[*]:-(no --payload)} should refuse [$want]" "rc=$rc $out"
-            fi
-        done
+    sec "rime migrate: the bridge gets every argument"
+    # No gate in front of the bridge: whatever start is given reaches it as is
+    # (here the bridge is absent, so rime says so; on a Rime image it answers).
+    out="$(RIME_BRIDGE_ROOT="$W/rec/absent" "$RIME_BIN" migrate start --backup "$W/backup" --payload "$W/nowhere" --yes 2>&1)"; rc=$?
+    if [[ -x /usr/libexec/rime-migrate ]]; then
+        ! pipe_has -F 'REFUSED [payload' <<<"$out" && ok "start went to the bridge (rc=$rc)" || bad "start" "rc=$rc $out"
+    elif [[ $rc -eq 1 ]] && pipe_has -F 'cannot run the bridge (/usr/libexec/rime-migrate)' <<<"$out" \
+         && ! pipe_has 'REFUSED' <<<"$out"; then
+        ok "start is handed to /usr/libexec/rime-migrate with nothing in front of it"
     else
-        bad "openssl is needed for the payload signature half"
+        bad "start should reach the bridge" "rc=$rc $out"
     fi
 fi
 

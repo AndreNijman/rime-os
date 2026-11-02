@@ -6,11 +6,11 @@
 //!
 //! The bridge itself is one Python program, `/usr/libexec/rime-migrate`
 //! (standard library only, Fedora's own python). This CLI execs it with the
-//! arguments it was given and adds one gate of its own in front of `start`:
-//! the payload manifest must carry an ed25519 signature by the key this image
-//! ships at [`PAYLOAD_KEY`]. The program's own `verify_payload` checks the
-//! sha256 of every payload file against that manifest, so a signed manifest
-//! covers the whole payload.
+//! arguments it was given. The bridge checks the payload itself, where it
+//! reads it: `manifest.sig` (ed25519, the `rime-cache-1` key the NixOS update
+//! path already trusts, compiled into the bridge as `TRUSTED_PAYLOAD_KEYS`)
+//! over the manifest, and the sha256 of every file the manifest names.
+//! tests/test-rime-migrate.sh pins that trust root.
 //!
 //! ## The refusals
 //!
@@ -42,8 +42,8 @@
 //! The gate runs in `main` before the root gate and before any D-Bus connect
 //! or subprocess, which is also what lets the fixture suite
 //! (tests/test-rime-migrate.sh) drive the real binary without root.
-//! `RIME_BRIDGE_ROOT` relocates the files this module READS (the record and
-//! the payload key); no program path comes from the environment.
+//! `RIME_BRIDGE_ROOT` relocates the one file this module READS (the record);
+//! no program path comes from the environment.
 
 use std::io::ErrorKind;
 use std::os::unix::process::CommandExt;
@@ -57,22 +57,6 @@ pub const MIGRATE_ENGINE: &str = "/usr/libexec/rime-migrate";
 
 /// What `rime migrate start` writes at every step (`STATE` in rime-migrate).
 pub const BRIDGE_STATE: &str = "/var/lib/rime/nixos-bridge/state.json";
-
-/// The public half of the key that signs bridge payload manifests.
-///
-/// Nix's key format, one line: `<name>:<base64 of the 32-byte ed25519 key>`,
-/// the same shape as the binary cache's `rime-cache-1:…`. The image ships no
-/// such file until the signing key is decided; until then `start` is refused
-/// by name (`payload-key-missing`) rather than installing an unsigned payload.
-pub const PAYLOAD_KEY: &str = "/usr/share/rime-os/trust/nixos-bridge-payload.pub";
-
-/// The signature beside the manifest: `<key name>:<base64 of the 64-byte
-/// ed25519 signature>` over the exact bytes of `manifest.json`.
-pub const PAYLOAD_SIG: &str = "manifest.json.sig";
-
-/// openssl does the ed25519 arithmetic, as it does for every signature
-/// `verify.rs` checks. A fixed absolute path, never one from the environment.
-const OPENSSL: &str = "/usr/bin/openssl";
 
 /// The refusal name every gated verb prints.
 pub const REFUSAL: &str = "nixos-migration-started";
@@ -214,260 +198,16 @@ pub fn guard(verb: &str) -> Result<(), i32> {
     }
 }
 
-// ── the payload signature ────────────────────────────────────────────────────
+// ── rime migrate ─────────────────────────────────────────────────────────────
 
-/// A refusal of `start`, by name, as the bridge prints them.
-#[derive(Debug, PartialEq, Eq)]
-pub struct PayloadRefusal {
-    pub name: &'static str,
-    pub text: String,
-}
-
-fn refuse(name: &'static str, text: String) -> PayloadRefusal {
-    PayloadRefusal { name, text }
-}
-
-/// `<name>:<base64>` decoded to its name and exactly `len` bytes.
-fn nix_style(text: &str, len: usize) -> Option<(String, Vec<u8>)> {
-    let line = text.trim();
-    if line.lines().count() != 1 {
-        return None;
-    }
-    let (name, b64) = line.split_once(':')?;
-    if name.is_empty() || name.chars().any(|c| c.is_whitespace()) {
-        return None;
-    }
-    let bytes = crate::verify::b64_decode(b64)?;
-    if bytes.len() == len {
-        Some((name.to_string(), bytes))
-    } else {
-        None
-    }
-}
-
-/// The DER SubjectPublicKeyInfo of a raw ed25519 public key (RFC 8410).
-fn ed25519_spki_der(key: &[u8]) -> Vec<u8> {
-    let mut der = vec![
-        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-    ];
-    der.extend_from_slice(key);
-    der
-}
-
-/// A fresh private directory for openssl's inputs (public data only; created,
-/// never reused, so a planted path cannot stand in for it).
-fn scratch_dir() -> Result<PathBuf, String> {
-    use std::os::unix::fs::DirBuilderExt;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!(
-        "rime-migrate-verify.{}.{nanos}",
-        std::process::id()
-    ));
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&dir)
-        .map_err(|e| format!("{}: {e}", dir.display()))?;
-    Ok(dir)
-}
-
-/// Check `payload/manifest.json` against its signature and the key file.
-/// `Ok(key name)` when it verifies; a named refusal otherwise.
-pub fn verify_payload_signature(
-    openssl: &Path,
-    key_file: &Path,
-    payload: &Path,
-) -> Result<String, PayloadRefusal> {
-    let key_text = match std::fs::read_to_string(key_file) {
-        Ok(t) => t,
-        Err(e) if e.kind() == ErrorKind::NotFound => {
-            return Err(refuse(
-                "payload-key-missing",
-                format!(
-                    "this system has no payload signing key ({}), so no payload can be checked; \
-                     start waits for the Rime OS update that ships it",
-                    key_file.display()
-                ),
-            ))
-        }
-        Err(e) => {
-            return Err(refuse(
-                "payload-key-missing",
-                format!("{}: {e}", key_file.display()),
-            ))
-        }
-    };
-    let (key_name, key) = nix_style(&key_text, 32).ok_or_else(|| {
-        refuse(
-            "payload-key-bad",
-            format!(
-                "{} is not one `<name>:<base64 ed25519 public key>` line",
-                key_file.display()
-            ),
-        )
-    })?;
-    let manifest = payload.join("manifest.json");
-    let sig_path = payload.join(PAYLOAD_SIG);
-    let sig_text = std::fs::read_to_string(&sig_path).map_err(|e| {
-        refuse(
-            "payload-unsigned",
-            format!("{}: {e}; an unsigned payload is never installed", sig_path.display()),
-        )
-    })?;
-    let (sig_name, sig) = nix_style(&sig_text, 64).ok_or_else(|| {
-        refuse(
-            "payload-signature-bad",
-            format!(
-                "{} is not one `<key name>:<base64 ed25519 signature>` line",
-                sig_path.display()
-            ),
-        )
-    })?;
-    if sig_name != key_name {
-        return Err(refuse(
-            "payload-signature-bad",
-            format!("the payload is signed by key {sig_name}; this system trusts {key_name}"),
-        ));
-    }
-    if !manifest.is_file() {
-        return Err(refuse(
-            "payload-signature-bad",
-            format!("{}: no such file", manifest.display()),
-        ));
-    }
-    let dir = scratch_dir().map_err(|e| refuse("payload-unverifiable", e))?;
-    let result = openssl_verify(openssl, &dir, &key_name, &key, &sig, &manifest);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
-}
-
-/// The ed25519 check itself, with its inputs written into `dir`.
-fn openssl_verify(
-    openssl: &Path,
-    dir: &Path,
-    key_name: &str,
-    key: &[u8],
-    sig: &[u8],
-    manifest: &Path,
-) -> Result<String, PayloadRefusal> {
-    let der = dir.join("key.der");
-    let raw = dir.join("sig.bin");
-    std::fs::write(&der, ed25519_spki_der(key))
-        .and_then(|_| std::fs::write(&raw, sig))
-        .map_err(|e| refuse("payload-unverifiable", e.to_string()))?;
-    let out = Command::new(openssl)
-        .args(["pkeyutl", "-verify", "-pubin", "-keyform", "DER", "-rawin", "-inkey"])
-        .arg(&der)
-        .arg("-in")
-        .arg(manifest)
-        .arg("-sigfile")
-        .arg(&raw)
-        .output()
-        .map_err(|e| {
-            refuse(
-                "payload-unverifiable",
-                format!("could not run {}: {e}", openssl.display()),
-            )
-        })?;
-    if out.status.success() {
-        return Ok(key_name.to_string());
-    }
-    let why = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    Err(refuse(
-        "payload-signature-bad",
-        format!(
-            "the manifest's signature does not verify against {key_name} ({})",
-            if why.is_empty() {
-                "openssl refused it".to_string()
-            } else {
-                why
-            }
-        ),
-    ))
-}
-
-/// What the bridge's argument parser will bind to `--payload` in `start`'s
-/// arguments, or a refusal when this gate could check a different directory
-/// from the one the bridge then installs.
+/// `rime migrate …`: the bridge itself, with every argument unchanged.
 ///
-/// The bridge parses with Python's argparse defaults: a long option may be
-/// abbreviated to any prefix (`--payl DIR`, `--p=DIR`) and a repeated option
-/// keeps its LAST value. Reading only the exact spelling, and the first one,
-/// let `--payload SIGNED --payload OTHER` or `--payl OTHER` past the signature
-/// check (found in review 2026-11-02, proved against the shipped parser). So:
-/// an abbreviation is refused, a repeat is refused, and no `--payload` at all
-/// is refused too (fail closed: a spelling this scan missed must not reach
-/// the bridge unchecked), except when help was asked for, where argparse
-/// prints help and exits before `start` runs. `-p`/`-payload` (one dash) are
-/// not `--payload` to argparse and need no handling here.
-pub fn payload_arg(args: &[String]) -> Result<Option<PathBuf>, PayloadRefusal> {
-    let mut found: Option<PathBuf> = None;
-    let mut seen = 0;
-    let mut help = false;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "-h" {
-            help = true;
-            continue;
-        }
-        let Some(opt) = a.strip_prefix("--") else { continue };
-        let (name, inline) = match opt.split_once('=') {
-            Some((n, v)) => (n, Some(v)),
-            None => (opt, None),
-        };
-        if name.is_empty() {
-            continue;
-        }
-        if inline.is_none() && "help".starts_with(name) {
-            help = true;
-            continue;
-        }
-        if !"payload".starts_with(name) {
-            continue;
-        }
-        if name != "payload" {
-            return Err(refuse(
-                "payload-arg-abbreviated",
-                format!("`{a}`: spell the option out as `--payload DIR`, so the directory checked is the one installed"),
-            ));
-        }
-        seen += 1;
-        if seen > 1 {
-            return Err(refuse(
-                "payload-arg-repeated",
-                "--payload is given more than once; give the payload directory once".to_string(),
-            ));
-        }
-        found = match inline {
-            Some(v) => Some(PathBuf::from(v)),
-            None => it.next().map(PathBuf::from),
-        };
-    }
-    if found.is_none() && !help {
-        return Err(refuse(
-            "payload-missing",
-            "start needs --payload DIR: the signed NixOS payload to install".to_string(),
-        ));
-    }
-    Ok(found)
-}
-
-/// `rime migrate …`: the signature gate for `start`, then the bridge itself.
+/// No gate of its own: the bridge verifies the payload's signature where it
+/// reads the payload (`verify_payload`: `manifest.sig` over
+/// `rime-bridge-payload-v1\n` + `manifest.json`, by a key in its
+/// `TRUSTED_PAYLOAD_KEYS`), so a second check here could only disagree with it
+/// (decided 2026-11-02, docs/nixos-move.md).
 pub fn migrate(args: &[String]) -> i32 {
-    if args.first().map(String::as_str) == Some("start") {
-        // Ok(None) only when help was asked for: argparse prints it and exits.
-        let checked = payload_arg(&args[1..]).and_then(|p| match p {
-            Some(payload) => verify_payload_signature(Path::new(OPENSSL), &relocated(PAYLOAD_KEY), &payload)
-                .map(|name| eprintln!("rime: payload manifest signed by {name}: verified")),
-            None => Ok(()),
-        });
-        if let Err(r) = checked {
-            println!("REFUSED [{}] {}", r.name, r.text);
-            return EXIT_REFUSED;
-        }
-    }
     let err = Command::new(MIGRATE_ENGINE).args(args).exec();
     eprintln!("rime: cannot run the bridge ({MIGRATE_ENGINE}): {err}");
     eprintln!(
@@ -573,152 +313,5 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         assert!(matches!(read_marker(&d, true), Marker::Unreadable { .. }));
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn payload_arg_both_spellings() {
-        let v = |a: &[&str]| payload_arg(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        assert_eq!(v(&["--backup", "/b", "--payload", "/p", "--yes"]), Ok(Some("/p".into())));
-        assert_eq!(v(&["--payload=/q"]), Ok(Some("/q".into())));
-        // `--backup=--payload` is a value, not the option.
-        assert_eq!(v(&["--backup=--payload", "--payload", "/p"]), Ok(Some("/p".into())));
-    }
-
-    #[test]
-    fn payload_arg_refuses_what_argparse_would_read_differently() {
-        let name = |a: &[&str]| {
-            payload_arg(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
-                .unwrap_err()
-                .name
-        };
-        // argparse takes the LAST of a repeated option and any unambiguous
-        // prefix: each of these would install a directory nobody checked.
-        assert_eq!(name(&["--payload", "/signed", "--payload", "/other"]), "payload-arg-repeated");
-        assert_eq!(name(&["--payload=/signed", "--payload", "/other"]), "payload-arg-repeated");
-        assert_eq!(name(&["--backup", "/b", "--payl", "/other", "--yes"]), "payload-arg-abbreviated");
-        assert_eq!(name(&["--p=/other"]), "payload-arg-abbreviated");
-        assert_eq!(name(&["--payload", "/signed", "--pay", "/other"]), "payload-arg-abbreviated");
-        // No payload at all: refused here too (fail closed).
-        assert_eq!(name(&["--backup", "/b", "--yes"]), "payload-missing");
-        assert_eq!(name(&["--payload"]), "payload-missing");
-    }
-
-    #[test]
-    fn payload_arg_lets_help_through() {
-        let v = |a: &[&str]| payload_arg(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
-        assert_eq!(v(&["--help"]), Ok(None));
-        assert_eq!(v(&["-h"]), Ok(None));
-        assert_eq!(v(&["--backup", "/b", "--he"]), Ok(None));
-    }
-
-    #[test]
-    fn nix_style_lines() {
-        assert!(nix_style("rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=\n", 32).is_some());
-        assert!(nix_style("rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=", 64).is_none());
-        assert!(nix_style(":LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=", 32).is_none());
-        assert!(nix_style("LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=", 32).is_none());
-        assert!(nix_style("a:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=\nb:x", 32).is_none());
-    }
-
-    // RFC 8032 §7.1 TEST 2: one-byte message 0x72.
-    const RFC_PUB: &str = "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c";
-    const RFC_SIG: &str = "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da\
-                           085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00";
-
-    fn hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
-    }
-
-    fn b64(bytes: &[u8]) -> String {
-        const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::new();
-        for chunk in bytes.chunks(3) {
-            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-            for i in 0..4 {
-                if i <= chunk.len() {
-                    out.push(A[((n >> (18 - 6 * i)) & 63) as usize] as char);
-                } else {
-                    out.push('=');
-                }
-            }
-        }
-        out
-    }
-
-    /// openssl from PATH: the CI runner has it at /usr/bin, a Nix shell does not.
-    fn openssl() -> PathBuf {
-        let path = std::env::var_os("PATH").expect("PATH");
-        std::env::split_paths(&path)
-            .map(|d| d.join("openssl"))
-            .find(|p| p.is_file())
-            .expect("these tests need openssl on PATH (the CI runner has it)")
-    }
-
-    struct Lab {
-        dir: PathBuf,
-    }
-
-    impl Lab {
-        fn new(tag: &str, manifest: &[u8], sig: Option<String>, key: Option<String>) -> Lab {
-            let dir = std::env::temp_dir().join(format!(
-                "rime-bridge-sig.{tag}.{}",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(dir.join("payload")).unwrap();
-            std::fs::write(dir.join("payload/manifest.json"), manifest).unwrap();
-            if let Some(s) = sig {
-                std::fs::write(dir.join("payload").join(PAYLOAD_SIG), s).unwrap();
-            }
-            if let Some(k) = key {
-                std::fs::write(dir.join("key.pub"), k).unwrap();
-            }
-            Lab { dir }
-        }
-        fn check(&self) -> Result<String, PayloadRefusal> {
-            verify_payload_signature(&openssl(), &self.dir.join("key.pub"), &self.dir.join("payload"))
-        }
-    }
-
-    impl Drop for Lab {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    fn key_line() -> String {
-        format!("rime-test-bridge-1:{}\n", b64(&hex(RFC_PUB)))
-    }
-
-    fn sig_line(name: &str) -> String {
-        format!("{name}:{}\n", b64(&hex(RFC_SIG)))
-    }
-
-    #[test]
-    fn a_good_signature_verifies() {
-        let lab = Lab::new("good", &[0x72], Some(sig_line("rime-test-bridge-1")), Some(key_line()));
-        assert_eq!(lab.check(), Ok("rime-test-bridge-1".to_string()));
-    }
-
-    #[test]
-    fn a_changed_manifest_is_refused() {
-        let lab = Lab::new("tampered", &[0x73], Some(sig_line("rime-test-bridge-1")), Some(key_line()));
-        assert_eq!(lab.check().unwrap_err().name, "payload-signature-bad");
-    }
-
-    #[test]
-    fn unsigned_unkeyed_and_wrong_key_are_refused_by_name() {
-        let unsigned = Lab::new("unsigned", &[0x72], None, Some(key_line()));
-        assert_eq!(unsigned.check().unwrap_err().name, "payload-unsigned");
-        let unkeyed = Lab::new("unkeyed", &[0x72], Some(sig_line("rime-test-bridge-1")), None);
-        assert_eq!(unkeyed.check().unwrap_err().name, "payload-key-missing");
-        let other = Lab::new("other", &[0x72], Some(sig_line("someone-else-1")), Some(key_line()));
-        assert_eq!(other.check().unwrap_err().name, "payload-signature-bad");
-        let badkey = Lab::new("badkey", &[0x72], Some(sig_line("rime-test-bridge-1")), Some("x\n".into()));
-        assert_eq!(badkey.check().unwrap_err().name, "payload-key-bad");
     }
 }

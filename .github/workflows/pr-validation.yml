@@ -1436,10 +1436,10 @@ jobs:
 
       # The NixOS move's binary half: every bootc verb refused by name once a
       # fixture record says `rime migrate start` ran, allowed again after a
-      # start that rolled back, and `rime migrate start` refusing an unsigned
-      # or wrongly signed payload. RIME_BRIDGE_ROOT relocates only what is
-      # READ; a stub bootc on PATH proves none of it reached bootc.
-      - name: NixOS move — rime refuses the bootc verbs after a start, and unsigned payloads
+      # start that rolled back, and `rime migrate` handing its arguments to
+      # the bridge unchanged. RIME_BRIDGE_ROOT relocates only what is READ; a
+      # stub bootc on PATH proves none of it reached bootc.
+      - name: NixOS move — rime refuses the bootc verbs after a start
         if: ${{ !cancelled() }}
         working-directory: ${{ github.workspace }}
         env:
