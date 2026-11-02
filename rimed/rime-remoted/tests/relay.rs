@@ -307,16 +307,26 @@ fn serve(
     // status the client can read rather than a close frame it has to guess at.
     match role {
         Role::Host => {
+            // The check and the claim are ONE critical section, and the claim
+            // comes before the 101: otherwise a second host that dials the
+            // instant the first one reads its 101 finds the room still empty
+            // (the CI flake "host number 2 was not treated as an intruder").
+            let taken = Arc::new(AtomicBool::new(false));
             {
-                let rooms = rooms.lock().expect("rooms");
+                let mut rooms = rooms.lock().expect("rooms");
                 if rooms.contains_key(rendezvous) {
                     drop(rooms);
                     return refuse(&mut stream, 409, "Conflict");
                 }
+                rooms.insert(rendezvous.to_string(), (stream.try_clone()?, Arc::clone(&taken)));
             }
             seen.lock().expect("seen").arrivals.push("host".into());
-            accept(&mut stream, &key)?;
-            send_text(&mut stream, Notice::Waiting.text().as_bytes())?;
+            let upgraded = accept(&mut stream, &key)
+                .and_then(|()| send_text(&mut stream, Notice::Waiting.text().as_bytes()));
+            if let Err(e) = upgraded {
+                rooms.lock().expect("rooms").remove(rendezvous);
+                return Err(e);
+            }
 
             // A REQUIREMENT, not double bookkeeping: a relay that parks a
             // waiting host and never notices when its socket dies answers the
@@ -330,7 +340,6 @@ fn serve(
             // `peek` rather than `read`: it blocks until there is something
             // to say and consumes nothing, so the session that may later run
             // over this socket still gets every byte.
-            let taken = Arc::new(AtomicBool::new(false));
             {
                 let watch = stream.try_clone()?;
                 let rooms = Arc::clone(&rooms);
@@ -344,11 +353,7 @@ fn serve(
                     }
                 });
             }
-            rooms
-                .lock()
-                .expect("rooms")
-                .insert(rendezvous.to_string(), (stream, taken));
-            // Parked. The guest that arrives next takes it and does the copy.
+            // Parked (the room already holds a clone of this socket). The guest that arrives next takes it and does the copy.
             Ok(())
         }
         Role::Guest => {
