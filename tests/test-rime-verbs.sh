@@ -58,7 +58,7 @@ install remove resolve search repo pkg env devices firewall remote
 agent project request secret account mcp skill provenance backup
 blueprint apply sync plugin cloudflare
 ai host build send open
-task recover disposable boot
+task recover disposable boot migrate
 trust storage qualify firmware channel schema
 lid permissions user vm browser
 "
