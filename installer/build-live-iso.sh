@@ -74,8 +74,38 @@ if [ "$NETINSTALL" = 1 ]; then echo "build mode: NETWORK INSTALL (small ISO, pul
 if [ "$PRODUCTION" = 1 ]; then ALLOW_UNATTENDED=0; else ALLOW_UNATTENDED=1; fi
 echo "build mode: PRODUCTION=$PRODUCTION (ALLOW_UNATTENDED=$ALLOW_UNATTENDED)"
 
+# NIXOS_SYSTEM=/nix/store/...: the NixOS ISO (PLAN.md D9). The same Fedora live env, shim and GRUB (the only chain a
+# machine with Microsoft's keys alone boots), but rime-install installs THIS prebuilt system closure, copied from a
+# signed binary cache, instead of running bootc (rime-install-nixos.sh). Inputs, all checked here:
+#   NIXOS_CACHE_DIR      a file:// binary cache holding the closure; embedded on the ISO as nix-cache/  (or)
+#   NIXOS_CACHE_URL      the cache to fetch it from at install time (https://...)
+#   NIXOS_CACHE_PUB      the cache's public key file (name:base64): the installer trusts nothing else
+#   NIXOS_MOK_CERT       the MOK certificate (DER) the system's kernel is signed with, offered for enrolment
+#   NIXOS_KERNEL_SIGNED  signed | unsigned (the system's kernel image; stamped as kernel-signed)
+# No bootc inputs are carried and no OCI image is needed in this mode.
+NIXOS=0
+if [ -n "${NIXOS_SYSTEM:-}" ]; then
+  NIXOS=1
+  [[ "$NIXOS_SYSTEM" =~ ^/nix/store/[a-z0-9]{32}-[^/]+$ ]] || { echo "FATAL: NIXOS_SYSTEM '$NIXOS_SYSTEM' is not a store path" >&2; exit 1; }
+  [ "$NETINSTALL" != 1 ] || { echo "FATAL: NETINSTALL=1 is a bootc mode; a NixOS ISO uses NIXOS_CACHE_URL" >&2; exit 1; }
+  if [ -n "${NIXOS_CACHE_DIR:-}" ]; then
+    [ -f "$NIXOS_CACHE_DIR/nix-cache-info" ] && [ -f "$NIXOS_CACHE_DIR/${NIXOS_SYSTEM:11:32}.narinfo" ] \
+      || { echo "FATAL: $NIXOS_CACHE_DIR is not a binary cache holding $NIXOS_SYSTEM" >&2; exit 1; }
+  else
+    [[ "${NIXOS_CACHE_URL:-}" =~ ^https:// ]] || { echo "FATAL: set NIXOS_CACHE_DIR or an https NIXOS_CACHE_URL" >&2; exit 1; }
+  fi
+  grep -Eqx '[A-Za-z0-9._-]+:[A-Za-z0-9+/=]{44}' "${NIXOS_CACHE_PUB:-/nonexistent}" \
+    || { echo "FATAL: NIXOS_CACHE_PUB must name a file holding the cache's public key" >&2; exit 1; }
+  case "${NIXOS_KERNEL_SIGNED:-}" in signed|unsigned) ;; *) echo "FATAL: NIXOS_KERNEL_SIGNED must be signed or unsigned" >&2; exit 1;; esac
+  if [ "$NIXOS_KERNEL_SIGNED" = signed ]; then
+    openssl x509 -inform DER -in "${NIXOS_MOK_CERT:-/nonexistent}" -noout >/dev/null 2>&1 \
+      || { echo "FATAL: a signed kernel needs NIXOS_MOK_CERT (DER) to offer for enrolment" >&2; exit 1; }
+  fi
+  echo "build mode: NIXOS (installs $NIXOS_SYSTEM)"
+fi
+
 mkdir -p "$WORK"
-if [ "$NETINSTALL" != 1 ]; then
+if [ "$NETINSTALL" != 1 ] && [ "$NIXOS" != 1 ]; then
   [ -f "$OCI" ] || { echo "ERROR: $OCI missing (run the skopeo export first)"; exit 1; }
 fi
 
@@ -151,6 +181,18 @@ echo "== 3. the installed image's own bootc inputs, carried into the live env ==
 #                                      image (bootc-dev/bootc#1400)
 #   /usr/libexec/rime-luks-enroll      the recovery-key helper the encrypted
 #                                      install runs
+if [ "$NIXOS" = 1 ]; then
+  # Nothing of bootc's is carried: the NixOS path labels nothing and runs the system's own tools. The recovery-key
+  # helper comes from this repository (the same file the bootc image ships).
+  sudo install -Dm0755 "$HERE/../files/system/libexec/rime-luks-enroll" "$WORK/rootfs/usr/libexec/rime-luks-enroll"
+  D="$WORK/rootfs/usr/lib/rime-installer"; sudo mkdir -p "$D"
+  printf '%s\n' "$NIXOS_SYSTEM" | sudo tee "$D/nixos-system" >/dev/null
+  if [ -n "${NIXOS_CACHE_DIR:-}" ]; then echo iso; else echo "$NIXOS_CACHE_URL"; fi | sudo tee "$D/nixos-cache" >/dev/null
+  sudo install -m0644 "$NIXOS_CACHE_PUB" "$D/nixos-cache.pub"
+  if [ -n "${NIXOS_MOK_CERT:-}" ]; then sudo install -m0644 "$NIXOS_MOK_CERT" "$D/nixos-mok.der"; fi
+  grep -qx "$NIXOS_SYSTEM" "$D/nixos-system" || { echo "FATAL: nixos-system stamp not written"; exit 1; }
+  echo "nixos stamped: system $NIXOS_SYSTEM, cache $(cat "$D/nixos-cache"), key $(cut -d: -f1 "$D/nixos-cache.pub")"
+else
 if [ "$NETINSTALL" = 1 ]; then
   SRC_IMAGE="$RELEASE_IMAGE"
   sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/rime-installer/netinstall"
@@ -191,6 +233,7 @@ live_bootc=$(sudo podman run --rm "$IMG" rpm -q --qf '%{VERSION}-%{RELEASE}' boo
 [ "$(printf '%s\n%s\n' "$img_bootc" "$live_bootc" | sort -V | tail -1)" = "$live_bootc" ] \
   || { echo "FATAL: the live env's bootc $live_bootc is older than the image's $img_bootc" >&2; exit 1; }
 echo "bootc: live env $live_bootc, image $img_bootc"
+fi  # NIXOS
 
 # Stamp the edition so rime-install derives IMAGE and --target-imgref from it
 # rather than assuming daily. Asserted below, because a wrong or missing stamp
@@ -213,7 +256,9 @@ echo "edition stamped: $EDITION"
 # machine, whichever OS is on the disk. Doing it during the install is the whole
 # point: the alternative was installing, booting, running mokutil by hand and
 # rebooting again, which is a lot to ask of someone who just wanted an OS.
-if [ "$NETINSTALL" = 1 ]; then
+if [ "$NIXOS" = 1 ]; then
+  KSIGNED="$NIXOS_KERNEL_SIGNED"
+elif [ "$NETINSTALL" = 1 ]; then
   # A netinstall used to stamp "unknown" here, because it could not know which
   # image the registry would hand it — and "unknown" meant it never offered
   # Secure Boot enrolment at all. It knows now: step 0 pinned the exact digest
@@ -268,7 +313,15 @@ echo "== 5b. OCI dir on the ISO (bootc install source) =="
 # streams blobs directly off the ISO, so nothing is unpacked into the live
 # env's RAM-backed /var/tmp on the way to the disk.
 sudo rm -rf "$ISOROOT/container"
-if [ "$NETINSTALL" = 1 ]; then
+sudo rm -rf "$ISOROOT/nix-cache"
+if [ "$NIXOS" = 1 ]; then
+  if [ -n "${NIXOS_CACHE_DIR:-}" ]; then
+    sudo cp -a "$NIXOS_CACHE_DIR" "$ISOROOT/nix-cache"
+    echo "  nix-cache: $(sudo du -sh "$ISOROOT/nix-cache" | cut -f1) (the system closure, signed)"
+  else
+    echo "  (nixos: the closure comes from $NIXOS_CACHE_URL)"
+  fi
+elif [ "$NETINSTALL" = 1 ]; then
   echo "  (netinstall: no OCI dir on the ISO)"
 else
   sudo skopeo copy "oci-archive:$OCI" "oci:$ISOROOT/container"

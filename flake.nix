@@ -51,6 +51,22 @@
         terminal = ./nix/modules/terminal.nix;
       };
 
+      # The generic system a fresh install gets (PLAN.md D9): installer/rime-install-nixos.sh copies this prebuilt
+      # toplevel from a signed binary cache and runs nixos-install --system on it; nothing is evaluated on the
+      # target. Every machine-specific value (LUKS UUID, keymap, hostname, timezone, locale) is in host.toml.
+      nixosConfigurations.rime = lib.nixosSystem {
+        modules = [
+          self.nixosModules.default
+          ./nix/hosts/profile.nix
+          ./nix/installer/target.nix
+          {
+            nixpkgs.hostPlatform = system;
+            rime.installTarget.enable = true;
+            rime.kernel.enable = true;
+          }
+        ];
+      };
+
       nixosConfigurations.rime-vm = lib.nixosSystem {
         modules = [
           self.nixosModules.default

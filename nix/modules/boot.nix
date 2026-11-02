@@ -64,7 +64,9 @@ in
       default = 5;
       description = ''
         Seconds GRUB shows the menu (timeout_style=menu). v1 recovery from a bad generation is manual, through
-        this menu (D3), so it is always shown; bootupd's static config would show it for 1 s.
+        this menu (D3, R22), so it is always shown; bootupd's static config would show it for 1 s. 5 s: long
+        enough to read the list and press an arrow key (any key stops the countdown), short enough not to slow
+        every boot (docs/nixos/boot-matrix.md, "Menu").
       '';
     };
 
@@ -101,6 +103,13 @@ in
     # boot.loader.external already defaults these to false; forced here so nothing turns a loader installer back on.
     boot.loader.grub.enable = lib.mkForce false;
     boot.loader.systemd-boot.enable = lib.mkForce false;
+
+    # CPU microcode, early (wave-1 handover): one generic toplevel boots every machine (D9), so both vendors'
+    # update cpios are prepended to the initrd (boot.initrd.prepend, first in the file); the kernel's early loader
+    # takes the one matching the CPU. The hook copies <toplevel>/initrd whole, so the entry's `initrd` line names
+    # a file that starts with them (checks.boot-microcode). A host that knows its vendor may turn the other off.
+    hardware.cpu.intel.updateMicrocode = lib.mkDefault true;
+    hardware.cpu.amd.updateMicrocode = lib.mkDefault true;
 
     environment.systemPackages = [ cli ];
     system.build.rimeBootHook = hook;

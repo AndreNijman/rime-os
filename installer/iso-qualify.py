@@ -147,7 +147,7 @@ class Qmp:
         return "error" not in r
 
 
-def qemu_cmd(a, name, iso=None, media="cdrom", disk=None, firmware="uefi", display=True):
+def qemu_cmd(a, name, iso=None, media="cdrom", disk=None, firmware="uefi", display=True, vars_template=None):
     work = a.work
     cmd = ["qemu-system-x86_64", "-m", str(a.mem), "-smp", str(a.smp),
            "-nodefaults", "-no-user-config", "-display", "none",
@@ -160,7 +160,8 @@ def qemu_cmd(a, name, iso=None, media="cdrom", disk=None, firmware="uefi", displ
     else:
         vars_src = "OVMF_VARS.secboot.fd" if firmware == "uefi-sb" else "OVMF_VARS.fd"
         myvars = os.path.join(work, "%s.vars.fd" % name)
-        shutil.copyfile(os.path.join(OVMF, vars_src), myvars)
+        # vars_template: a prepared varstore (e.g. the NixOS lab's Microsoft keys + a TEST MOK), copied, never written.
+        shutil.copyfile(vars_template or os.path.join(OVMF, vars_src), myvars)
         cmd += ["-machine", "q35,smm=on,accel=%s" % a.accel,
                 "-global", "driver=cfi.pflash01,property=secure,value=on",
                 "-drive", "if=pflash,unit=0,format=raw,readonly=on,file=%s/OVMF_CODE.secboot.fd" % OVMF,
@@ -276,6 +277,8 @@ def mode_live(a):
 
 def mode_firstboot(a):
     name = a.name
+    if a.nixos:
+        return mode_firstboot_nixos(a)
     cmd = qemu_cmd(a, name, disk=a.disk, firmware="uefi", display=False)
     proc, ser, qmp = start(a, name, cmd)
     facts = {}
@@ -364,6 +367,116 @@ def mode_firstboot(a):
         stop(proc, qmp)
 
 
+def login(a, ser):
+    """Log in on the serial getty and leave a plain bash with echo off. None, or the failure reason."""
+    if not ser.wait(r"\S+ login: ", a.timeout):
+        return "no login prompt on the serial console"
+    time.sleep(5)
+    at = ser.mark()
+    ser.send(a.user + "\n")
+    if not ser.wait(r"[Pp]assword:", 60, since=at):
+        return "no password prompt"
+    at = ser.mark()
+    ser.send(a.password + "\n")
+    # zsh's default prompt ends in "% ".
+    m = ser.wait(r"\$ |# |> |% |Type one of the keys in parentheses", 90, since=at)
+    if not m:
+        return "login did not give a shell"
+    if m.group(0).startswith("Type"):
+        # zsh with no ~/.zshrc opens zsh-newuser-install on a first login; q leaves it without writing anything.
+        at = ser.mark()
+        ser.send("q")
+        if not ser.wait(r"\$ |# |> |% ", 30, since=at):
+            return "login did not give a shell (after leaving zsh-newuser-install)"
+    time.sleep(5)
+    ser.send("exec bash --norc --noprofile\n")
+    time.sleep(2)
+    ser.send("stty -echo; export TERM=dumb PS1='$ '\n")
+    time.sleep(1)
+    return None
+
+
+def mode_firstboot_nixos(a):
+    """First boot of a NixOS install (nix/installer/lab): Secure Boot as the varstore says, the system the ISO
+    installed, what host.toml asked for, the D2 layout, and the greeter on VT 1 (screenshotted with --display)."""
+    name = a.name
+    fw = "uefi-sb" if a.vars_template else "uefi"
+    cmd = qemu_cmd(a, name, disk=a.disk, firmware=fw, display=a.display, vars_template=a.vars_template)
+    proc, ser, qmp = start(a, name, cmd)
+    facts = {"firmware": fw, "varstore": a.vars_template}
+    try:
+        why = login(a, ser)
+        if why:
+            return report(a, name, "fail", reason=why, tail=ser.text()[-3000:], **facts)
+        at = ser.mark()
+        greeter = ("loginctl list-sessions --no-legend | awk '$3==\"%s\"{print $1}' | "
+                   "xargs -r -I{} loginctl show-session {} -p VTNr -p Class | tr '\\n' ' '; echo" % a.greeter_user)
+        script = (
+            # As root (the account is in wheel): the ESP and efivars are not readable by a user. Before BEGIN and
+            # silenced: a fresh account's FIRST sudo prints the lecture, which landed inside the LANG section.
+            "echo '" + a.password + "' | sudo -S -p '' -v >/dev/null 2>&1; "
+            "printf '__RQ_%s__\\n' BEGIN; "
+            # The running hostname: the install writes no static /etc/hostname.
+            "printf '__RQ_%s__\\n' HOST; cat /proc/sys/kernel/hostname; "
+            "printf '__RQ_%s__\\n' SYSTEM; readlink /run/current-system; "
+            "printf '__RQ_%s__\\n' TZ; timedatectl show -p Timezone --value; "
+            "printf '__RQ_%s__\\n' LANG; localectl status | sed -n 's/.*LANG=//p'; "
+            "printf '__RQ_%s__\\n' SB; sudo -n od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c 2>&1 | awk '{print $NF}'; "
+            "sudo -n bootctl status 2>&1 | grep -m1 'Secure Boot:' | sed 's/^ *//'; "
+            "printf '__RQ_%s__\\n' FS; findmnt -no FSTYPE,OPTIONS / | tr ',' ' '; findmnt -no OPTIONS /nix | tr ',' ' '; findmnt -no OPTIONS /var/home | tr ',' ' '; findmnt -no FSTYPE /boot; "
+            "printf '__RQ_%s__\\n' BLS; sudo -n ls /boot/loader/entries; "
+            "printf '__RQ_%s__\\n' GREETER; for i in $(seq 60); do g=$(" + greeter + "); case $g in *VTNr=1*Class=greeter*) break;; esac; sleep 2; done; echo \"$g\"; systemctl is-active greetd.service; "
+            "printf '__RQ_%s__\\n' END\n"
+        )
+        ser.send(script)
+        if not ser.wait(r"__RQ_END__", 300, since=at):
+            return report(a, name, "fail", reason="the checks never finished", tail=ser.text()[-4000:], **facts)
+        out = ser.text()[at:]
+        out = out[out.index("__RQ_BEGIN__"):]
+
+        def section(tag, nxt):
+            m = re.search(r"__RQ_%s__\r?\n(.*?)__RQ_%s" % (tag, nxt), out, re.S)
+            return m.group(1).strip() if m else ""
+
+        facts.update(hostname=section("HOST", "SYSTEM"), system=section("SYSTEM", "TZ"),
+                     timezone=section("TZ", "LANG"), lang=section("LANG", "SB"),
+                     secure_boot=section("SB", "FS"), mounts=section("FS", "BLS").splitlines(),
+                     bls_entries=section("BLS", "GREETER").split(), greeter=section("GREETER", "END"))
+        if a.display:
+            time.sleep(8)  # let the greeter paint
+            png = os.path.join(a.work, name + ".png")
+            if qmp.screendump(png) and os.path.exists(png):
+                facts["screenshot"] = png
+                facts["screen_ocr"] = " ".join((ocr(png) or "").split())[:400]
+        problems = []
+        for key, want in (("system", a.expect_system), ("hostname", a.expect_host),
+                          ("timezone", a.expect_tz), ("lang", a.expect_lang)):
+            if want and facts[key] != want:
+                problems.append("%s is %r, expected %r" % (key, facts[key], want))
+        # The firmware's SecureBoot variable (1) and bootctl's reading of it, both.
+        sb = [x.strip() for x in facts["secure_boot"].splitlines()]
+        if a.vars_template and not (sb[:1] == ["1"] and any(x.startswith("Secure Boot: enabled") for x in sb)):
+            problems.append("Secure Boot is not on in the booted system (SecureBoot=%r)" % facts["secure_boot"])
+        m = facts["mounts"]
+        if len(m) < 4 or not m[0].startswith("btrfs") or "subvol=/@nixos" not in m[0] \
+                or "subvol=/@nix" not in m[1] or "subvol=/@home" not in m[2] or m[3] != "vfat":
+            problems.append("the D2 layout is not what is mounted: %r" % m)
+        if not any("compress" in x and "zstd" in x for x in m[:1]):
+            problems.append("/ is not zstd-compressed: %r" % m[:1])
+        if not facts["bls_entries"]:
+            problems.append("no BLS entries in /boot/loader/entries")
+        if not re.search(r"VTNr=1\s+Class=greeter", facts["greeter"]) or facts["greeter"].splitlines()[-1:] != ["active"]:
+            problems.append("no greeter session on VT 1: %r" % facts["greeter"])
+        return report(a, name, "fail" if problems else "pass", reason="; ".join(problems) or None, **facts)
+    finally:
+        try:
+            ser.send("echo '%s' | sudo -S -p '' systemctl poweroff\n" % a.password)
+            proc.wait(60)
+        except Exception:
+            pass
+        stop(proc, qmp)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("mode", choices=["live", "firstboot"])
@@ -381,6 +494,15 @@ def main():
     ap.add_argument("--password", default="testpass")
     ap.add_argument("--expect-image", default="ghcr.io/andrenijman/rime-os:rime")
     ap.add_argument("--expect-digest")
+    # firstboot of a NixOS install (nix/installer/lab/run.sh): no bootc, no trust gate; see mode_firstboot_nixos.
+    ap.add_argument("--nixos", action="store_true")
+    ap.add_argument("--vars-template", help="firstboot --nixos: boot with Secure Boot on from this varstore")
+    ap.add_argument("--display", action="store_true", help="firstboot --nixos: a display, and a screenshot")
+    ap.add_argument("--greeter-user", default="greetd")
+    ap.add_argument("--expect-system")
+    ap.add_argument("--expect-host")
+    ap.add_argument("--expect-tz")
+    ap.add_argument("--expect-lang")
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
     a.work = os.path.abspath(a.work)
