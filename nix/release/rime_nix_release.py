@@ -286,6 +286,10 @@ def missing_from_error(err):
     return set()
 
 
+# The zstd level of the Rime cache's NARs (`stage`); delta.md §8 measured it against level 3.
+STAGE_LEVEL = 19
+
+
 def store_url(base, **params):
     sep = "&" if "?" in base else "?"
     extra = "&".join(f"{k.replace('_', '-')}={v}" for k, v in params.items())
@@ -681,8 +685,11 @@ def cmd_stage(a):
     refs = {p: i["references"] for p, i in clo["paths"].items()}
     order = topo_order(rime, refs)
     if order:
-        run(NIX + ["copy", "--no-recursive", "--to", store_url("file://" + os.path.abspath(cache),
-                                                               compression="zstd")] + FRESH + order)
+        # Level 19 (delta.md §8): 14-20 % fewer bytes than zstd's default level 3 for every client, and it decodes
+        # with any zstd's default window (no --long). parallel-compression: the same bytes, less wall clock.
+        run(NIX + ["copy", "--no-recursive", "--to", store_url("file://" + os.path.abspath(cache), compression="zstd",
+                                                               compression_level=STAGE_LEVEL,
+                                                               parallel_compression="true")] + FRESH + order)
     for f in placeholders:
         if "rime-placeholder" not in open(f).read():
             raise Refused(f"{f} was overwritten by the copy")
@@ -828,8 +835,8 @@ class GitHub:
         """files: {asset name: local path}. Uploads what is not already an uploaded asset of the same size in the
         release `release_id` or its parts (<id>-part2, ...), skipping the rest; returns ({name: url}, uploaded)."""
         for name, path in files.items():
-            if not re.match(r"^[0-9a-z]{52}\.nar(\.[a-z0-9]+)?$", name):
-                raise Refused(f"{name} is not a NAR file name")
+            if not re.match(r"^[0-9a-z]{52}\.(nar(\.[a-z0-9]+)?|delta)$", name):
+                raise Refused(f"{name} is not a NAR or delta file name")
             if os.path.getsize(path) > GH_MAX_ASSET:
                 raise Refused(f"{name} is {os.path.getsize(path)} bytes; a release asset must be under 2 GiB "
                               "(TODO(handover): split large NARs or host them elsewhere)")
@@ -1070,11 +1077,303 @@ def check_public_github(closure, split, public, keys, upstream, upstream_keys, r
     return sizes
 
 
+# ── deltas (docs/nixos/delta.md §7, §10): zstd --patch-from against the previous release ───────────────────────────
+#
+# The build job makes them (`deltas`): for every path of the new closure the previous release lacks, a delta against
+# the same package in the previous release (pairing: delta/rime_delta.py), at zstd -19 --long=27, decoded again and
+# kept only if it rebuilds the exact NAR and is at most DELTA_MAX_RATIO of the path's download size. The publish job
+# binds them to the VERIFIED previous manifest and to closure.json, uploads them next to the NARs (GitHub backend
+# only) and lists them in the manifest's `delta.files`, so the cosign signature over the manifest covers each delta's
+# sha256 and size. A client that cannot use a delta downloads the path whole; nothing here can make a release fail
+# that would have published without deltas, except a broken tool.
+
+DELTA_LEVEL = 19
+DELTA_LONG = 27
+DELTA_MAX_RATIO = 0.8
+DELTA_NAME_RE = re.compile(r"^[0-9a-z]{52}\.delta$")
+DELTA_FILE_RE = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}/[0-9a-z]{52}\.delta$")
+
+
+def delta_window_log(*sizes):
+    """zstd's rule for --patch-from: the highest bit of the larger NAR plus one, at least --long=27, at most 31."""
+    return max(DELTA_LONG, min(31, max(sizes).bit_length()))
+
+
+def sha256_file_raw(fn):
+    h = hashlib.sha256()
+    with open(fn, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.digest()
+
+
+def nix32_raw(digest):
+    out = []
+    for i in range((len(digest) * 8 + 4) // 5 - 1, -1, -1):
+        b, j = i * 5 // 8, i * 5 % 8
+        c = digest[b] >> j
+        if b + 1 < len(digest):
+            c |= digest[b + 1] << (8 - j)
+        out.append(NIX32[c & 0x1F])
+    return "".join(out)
+
+
+def dump_checked(path, dest, nar_hash, nar_size):
+    """`nix-store --dump path` into dest; Refused unless it is exactly the NAR `nar_hash`/`nar_size` name."""
+    with open(dest, "wb") as f:
+        p = subprocess.run(["nix-store", "--dump", path], stdout=f, stderr=subprocess.PIPE)
+    if p.returncode != 0:
+        raise Refused(f"nix-store --dump {path}: {p.stderr.decode(errors='replace').strip()[-300:]}")
+    if os.path.getsize(dest) != int(nar_size) or "sha256-" + base64.b64encode(sha256_file_raw(dest)).decode() != sri(nar_hash):
+        raise Refused(f"{path}: the local copy is not the NAR the manifest names")
+
+
+def make_delta(base_nar, new_nar, new_hash, wlog, dest, level=DELTA_LEVEL):
+    """One delta, decoded again with the window a client allows; Refused unless it rebuilds the exact NAR."""
+    p = subprocess.run(["zstd", "-q", "-f", "-T1", f"-{level}", f"--long={DELTA_LONG}", f"--patch-from={base_nar}",
+                        new_nar, "-o", dest], stderr=subprocess.PIPE)
+    if p.returncode != 0:
+        raise Refused(f"zstd --patch-from: {p.stderr.decode(errors='replace').strip()[-300:]}")
+    h = hashlib.sha256()
+    d = subprocess.Popen(["zstd", "-q", "-d", "-c", f"--long={wlog}", f"--patch-from={base_nar}", dest],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for chunk in iter(lambda: d.stdout.read(1 << 20), b""):
+        h.update(chunk)
+    err = d.stderr.read()
+    if d.wait() != 0 or "sha256-" + base64.b64encode(h.digest()).decode() != sri(new_hash):
+        raise Refused(f"the delta does not rebuild the NAR ({err.decode(errors='replace').strip()[-200:]})")
+    return os.path.getsize(dest)
+
+
+def realise_bases(bases, substituters, keys):
+    """The bases this host lacks, substituted (best effort: a base that cannot be had just means no delta)."""
+    have = nix_path_info(sorted(bases))
+    missing = [b for b in sorted(bases) if have.get(b) is None]
+    if not missing:
+        return set(bases)
+    opts = []
+    if substituters:
+        opts += ["--option", "substituters", " ".join(substituters)]
+    if keys:
+        opts += ["--option", "trusted-public-keys", " ".join(keys)]
+    for i in range(0, len(missing), 200):
+        run(["nix-store", "--realise"] + opts + ["--option", "fallback", "false"] + FRESH + missing[i:i + 200],
+            check=False)
+    have = nix_path_info(sorted(bases))
+    return {b for b in bases if have.get(b) is not None}
+
+
+def download_sizes(artifact, clo, split, upstream):
+    """What a client downloads for each path today: the staged FileSize (Rime paths), the upstream cache's (the
+    rest). The yardstick for DELTA_MAX_RATIO."""
+    _, _, staged = load_stage(artifact)
+    sizes = {p: int(ni["FileSize"]) for p, (_, ni) in staged.items() if ni.get("FileSize")}
+    up = sorted(set(split["upstream"]))
+    if up and upstream:
+        for p, i in nix_path_info(up, store=upstream).items():
+            if i and i.get("file_size"):
+                sizes[p] = i["file_size"]
+    return sizes
+
+
+def cmd_deltas(a):
+    """Build job (GitHub backend): artifact/deltas/<nix32 sha256>.delta and artifact/deltas.json."""
+    import concurrent.futures
+    import threading
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "delta"))
+    import rime_delta  # the pairing rules G2 measured with (delta/rime_delta.py)
+    clo, split = load_artifact(a.artifact)
+    if a.previous_manifest:
+        prev = load_json(a.previous_manifest)
+    else:
+        reg = Registry(a.repo, tls_verify=not a.plain_http)
+        prev = channel_manifest(reg, a.channel, a.fulcio_root, a.signer or [NIX_SIGNER], a.issuer)
+    out = os.path.join(a.artifact, "deltas")
+    table = os.path.join(a.artifact, "deltas.json")
+    if os.path.exists(out) or os.path.exists(table):
+        raise Refused(f"{out} exists; `deltas` writes a fresh one")
+    os.makedirs(out)
+    result = {"schema": 1, "from": None, "level": a.level, "long": DELTA_LONG, "max_ratio": a.max_ratio,
+              "files": [], "skipped": []}
+    if prev is None:
+        log("deltas: the channel offers no release yet; no deltas")
+        write_json(table, result)
+        return 0
+    errs = validate(prev)
+    if errs:
+        raise Refused("the previous manifest does not validate: " + "; ".join(errs[:5]))
+    result["from"] = prev["release"]
+    prev_by_path = {e["path"]: e for e in prev["paths"]}
+    old_rows = [{"path": e["path"], "name": rime_delta.store_name(e["path"]), "nar_size": str(e["nar_size"])}
+                for e in prev["paths"]]
+    old_by = {"name": {}, "family": {}, "loose": {}}
+    for r in old_rows:
+        old_by["name"].setdefault(r["name"], []).append(r)
+        old_by["family"].setdefault(rime_delta.family(r["name"]), []).append(r)
+        old_by["loose"].setdefault(rime_delta.loose_family(r["name"]), []).append(r)
+    added = sorted(p for p in clo["paths"] if p not in prev_by_path)
+    pairs = {}
+    for p in added:
+        row = {"path": p, "name": rime_delta.store_name(p), "nar_size": str(clo["paths"][p]["nar_size"])}
+        _, found = rime_delta.candidates(row, old_by)
+        if found:
+            pairs[p] = [c["path"] for c in found]
+        else:
+            result["skipped"].append({"path": p, "why": "no earlier version in the previous release"})
+    sizes = download_sizes(a.artifact, clo, split, a.upstream)
+    bases = realise_bases({b for bs in pairs.values() for b in bs}, a.substituter, a.trusted_key)
+    big = threading.Lock()  # one window over 2^29 at a time: zstd -19 with a 1 GiB base needs several GiB
+
+    def one(p):
+        new = clo["paths"][p]
+        full = sizes.get(p)
+        if not full:
+            return None, f"no download size known for {p}"
+        tmp = tempfile.mkdtemp(dir=a.tmp or None, prefix="rime-delta-")
+        try:
+            new_nar = os.path.join(tmp, "new.nar")
+            dump_checked(p, new_nar, new["nar_hash"], new["nar_size"])
+            best = None
+            for b in pairs[p]:
+                if b not in bases:
+                    continue
+                be = prev_by_path[b]
+                base_nar = os.path.join(tmp, "base.nar")
+                try:
+                    dump_checked(b, base_nar, be["nar_hash"], be["nar_size"])
+                    w = delta_window_log(be["nar_size"], new["nar_size"])
+                    d = os.path.join(tmp, "try.delta")
+                    if w > 29:
+                        with big:
+                            size = make_delta(base_nar, new_nar, new["nar_hash"], w, d, a.level)
+                    else:
+                        size = make_delta(base_nar, new_nar, new["nar_hash"], w, d, a.level)
+                except Refused as e:
+                    log(f"deltas: {p} against {b}: {e}")
+                    continue
+                if best is None or size < best[1]:
+                    keep = os.path.join(tmp, "best.delta")
+                    os.replace(d, keep)
+                    best = (b, size, w)
+            if best is None:
+                return None, "no usable base on the build host"
+            b, size, w = best
+            if size > a.max_ratio * full:
+                return None, f"the delta ({size} B) is over {a.max_ratio:.0%} of the whole download ({full} B)"
+            digest = sha256_file_raw(os.path.join(tmp, "best.delta"))
+            name = nix32_raw(digest) + ".delta"
+            os.replace(os.path.join(tmp, "best.delta"), os.path.join(out, name))
+            be = prev_by_path[b]
+            return {"path": p, "base": b, "base_nar_hash": sri(be["nar_hash"]), "base_nar_size": be["nar_size"],
+                    "name": name, "file_hash": "sha256-" + base64.b64encode(digest).decode(), "file_size": size,
+                    "window_log": w, "full_size": full}, None
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, a.jobs)) as ex:
+        for p, (entry, why) in zip(sorted(pairs), ex.map(one, sorted(pairs))):
+            if entry:
+                result["files"].append(entry)
+            else:
+                result["skipped"].append({"path": p, "why": why})
+    write_json(table, result)
+    saved = sum(e["full_size"] - e["file_size"] for e in result["files"])
+    log(f"deltas: {len(result['files'])} of {len(added)} new paths against {prev['release']}, "
+        f"{sum(e['file_size'] for e in result['files'])} B instead of {sum(e['full_size'] for e in result['files'])} B "
+        f"({saved} B saved); {len(result['skipped'])} without")
+    return 0
+
+
+def bind_deltas(artifact, clo, prev, sizes, max_ratio=DELTA_MAX_RATIO):
+    """The publish job's check of deltas.json: [entry] that are for THIS closure, against the VERIFIED previous
+    manifest, and are the files on disk. Anything else is dropped with a log line (the path is then downloaded
+    whole), never a refused release."""
+    table = os.path.join(artifact, "deltas.json")
+    if not os.path.exists(table):
+        return []
+    d = load_json(table)
+    if prev is None or d.get("from") != prev["release"]:
+        log(f"deltas: made against {d.get('from')}, but the channel offers "
+            f"{prev['release'] if prev else 'nothing'}; publishing without deltas")
+        return []
+    prev_by_path = {e["path"]: e for e in prev["paths"]}
+    keep, seen = [], set()
+    for e in d.get("files", []):
+        p, b = e.get("path"), e.get("base")
+        why = None
+        try:
+            name = e.get("name", "")
+            fn = os.path.join(artifact, "deltas", name)
+            if p not in clo["paths"] or p in prev_by_path:
+                why = "not a new path of this closure"
+            elif p in seen:
+                why = "a second delta for the path"
+            elif b not in prev_by_path:
+                why = "its base is not in the previous release"
+            elif sri(prev_by_path[b]["nar_hash"]) != sri(e["base_nar_hash"]) \
+                    or prev_by_path[b]["nar_size"] != e["base_nar_size"]:
+                why = "its base is not the previous release's"
+            elif not DELTA_NAME_RE.match(name) or not os.path.isfile(fn):
+                why = f"no file {name!r}"
+            elif os.path.getsize(fn) != e["file_size"]:
+                why = "the file's size differs"
+            else:
+                digest = sha256_file_raw(fn)
+                if "sha256-" + base64.b64encode(digest).decode() != e["file_hash"] or nix32_raw(digest) + ".delta" != name:
+                    why = "the file's sha256 differs"
+                elif e["window_log"] != delta_window_log(e["base_nar_size"], clo["paths"][p]["nar_size"]):
+                    why = "its window is not the one the sizes need"
+                elif not sizes.get(p) or e["file_size"] > max_ratio * sizes[p]:
+                    why = f"over {max_ratio:.0%} of the published download size"
+        except (KeyError, TypeError, ValueError) as x:
+            why = f"malformed ({x})"
+        if why:
+            log(f"deltas: {p}: dropped: {why}")
+            continue
+        seen.add(p)
+        keep.append(e)
+    return keep
+
+
+def publish_deltas(gh, release, artifact, entries):
+    """Upload the bound deltas as release assets beside the NARs; [entry + file] for the ones that answer publicly."""
+    if not entries:
+        return []
+    files = {e["name"]: os.path.join(artifact, "deltas", e["name"]) for e in entries}
+    urls, uploaded = gh.put_assets(release, files)
+    out = []
+    for e in entries:
+        url = urls[e["name"]]
+        tag = url.rsplit("/", 2)[-2]
+        code = http_reachable(url)
+        if code != 200:
+            log(f"deltas: {url} answered {code}; {e['path']} is published without its delta")
+            continue
+        out.append(dict(e, file=f"{tag}/{e['name']}"))
+    log(f"deltas: {len(out)} published ({uploaded} uploaded now)")
+    return out
+
+
+def channel_manifest(reg, channel, fulcio_root, signers, issuer):
+    """The manifest `channel` offers now, VERIFIED (None when the channel offers nothing)."""
+    with tempfile.TemporaryDirectory() as w:
+        if not reg.tag_state(CHANNELS_TAG):
+            return None
+        _, data, _, _ = verify_object(reg, CHANNELS_TAG, MEDIA_CHANNELS, fulcio_root, signers, issuer, w)
+        e = next((e for e in json.loads(data).get("channels", []) if e["channel"] == channel), None)
+        if e is None:
+            return None
+        _, mdata, _, _ = verify_object(reg, e["digest"], MEDIA_RELEASE, fulcio_root, signers, issuer,
+                                       os.path.join(w, "m"))
+        return json.loads(mdata)
+
+
 # ── the manifest ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 def build_manifest(clo, plan, sizes, *, release, previous, issued, source, cache_url_hint, cache_keys,
-                   previous_manifest=None, security=(), mass_rebuild=False, upstream=None):
-    """upstream: None (one cache holds the whole closure: the S3 fallback) or {"url_hint", "keys", "paths"} (the
+                   previous_manifest=None, security=(), mass_rebuild=False, upstream=None, deltas=()):
+    """deltas: bind_deltas/publish_deltas entries (each with `file`), listed in delta.files.
+    upstream: None (one cache holds the whole closure: the S3 fallback) or {"url_hint", "keys", "paths"} (the
     GitHub backend: those paths come from cache.nixos.org; cache.keys then lists its keys too, and each such path
     carries origin "upstream")."""
     refs = {p: i["references"] for p, i in clo["paths"].items()}
@@ -1129,6 +1428,13 @@ def build_manifest(clo, plan, sizes, *, release, previous, issued, source, cache
             new = [p for p in closure_of(clo["variants"]["plain"]["toplevel"], refs) if p not in prev_paths]
             delta = {"from": previous_manifest["release"], "variant": "plain", "paths": len(new),
                      "file_size": sum(sizes[p] for p in new)}
+            if deltas:
+                by = {e["path"]: e for e in deltas}
+                delta["files"] = [{"path": idx[e["path"]], "base": e["base"], "base_nar_hash": sri(e["base_nar_hash"]),
+                                   "base_nar_size": e["base_nar_size"], "file": e["file"], "file_hash": e["file_hash"],
+                                   "file_size": e["file_size"], "window_log": e["window_log"]}
+                                  for e in sorted(deltas, key=lambda e: idx[e["path"]])]
+                delta["delta_size"] = sum(by[p]["file_size"] if p in by else sizes[p] for p in new)
     cache = {"url_hint": cache_url_hint, "keys": list(cache_keys)}
     if upstream is not None:
         cache["keys"] = list(dict.fromkeys(list(cache_keys) + list(upstream["keys"])))
@@ -1263,6 +1569,56 @@ def validate(m):
             errs.append(f"catalogue {c.get('name')!r}: out is out of range")
         elif c.get("class") != 2:
             errs.append(f"catalogue {c.get('name')!r}: class is not 2")
+    errs += validate_delta(m.get("delta"), paths, ok_index)
+    return errs
+
+
+def validate_delta(d, paths, ok_index):
+    """The delta table (§3.1, delta.md §7). Its `files` are what clients download in place of whole paths."""
+    if d is None:
+        return []
+    if not isinstance(d, dict):
+        return ["delta is not an object"]
+    errs = []
+    files = d.get("files")
+    if files is None:
+        return errs
+    if not isinstance(files, list):
+        return ["delta.files is not a list"]
+
+    def pos_int(v):
+        return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+    seen = set()
+    for i, e in enumerate(files):
+        w = f"delta.files[{i}]"
+        if not isinstance(e, dict):
+            errs.append(f"{w} is not an object")
+            continue
+        if not ok_index(e.get("path")):
+            errs.append(f"{w}.path is out of range")
+            continue
+        if e["path"] in seen:
+            errs.append(f"{w}: a second delta for {paths[e['path']]['path']}")
+        seen.add(e["path"])
+        if not valid_store_path(e.get("base")) or e.get("base") == paths[e["path"]].get("path"):
+            errs.append(f"{w}.base is not another store path")
+        for k in ("base_nar_hash", "file_hash"):
+            try:
+                if sri(e.get(k)) != e.get(k):
+                    errs.append(f"{w}.{k} is not in SRI form")
+            except ValueError as x:
+                errs.append(f"{w}.{k}: {x}")
+        for k in ("base_nar_size", "file_size"):
+            if not pos_int(e.get(k)):
+                errs.append(f"{w}.{k} is not a positive integer")
+        if not isinstance(e.get("file"), str) or not DELTA_FILE_RE.match(e["file"]):
+            errs.append(f"{w}.file is not <release tag>/<nix32>.delta")
+        wl = e.get("window_log")
+        if not isinstance(wl, int) or isinstance(wl, bool) or not DELTA_LONG <= wl <= 31:
+            errs.append(f"{w}.window_log is not {DELTA_LONG}..31")
+    if files and not pos_int(d.get("delta_size")):
+        errs.append("delta.delta_size is not a positive integer")
     return errs
 
 
@@ -1717,18 +2073,22 @@ def cmd_publish(a):
         sizes = check_public_github(clo, split, a.public, keys, a.upstream, a.upstream_key,
                                     report=os.path.join(out, "public.json"), wait=a.public_wait)
         upstream = {"url_hint": a.upstream, "keys": a.upstream_key, "paths": set(split["upstream"])}
+        deltas = publish_deltas(gh, release, a.artifact, bind_deltas(a.artifact, clo, prev_manifest, sizes))
     else:
         if not a.cache:
             raise Refused("--backend s3 needs --cache s3://...")
         fill(a.artifact, a.cache, a.secret_key_file, a.upstream, a.upstream_key, report=os.path.join(out, "fill.json"))
         clo, _ = load_artifact(a.artifact)
         sizes = check_public(clo, a.public, keys, report=os.path.join(out, "public.json"))
+        deltas = []
+        if os.path.exists(os.path.join(a.artifact, "deltas.json")):
+            log("deltas: the S3 fallback publishes no deltas (delta.md §7); every path is downloaded whole")
 
     m = build_manifest(clo, plan, sizes, release=release,
                        previous=prev_manifest["release"] if prev_manifest else None, issued=a.issued or time.time(),
                        source={"rime_os": a.rime_os, "rime_shell": a.rime_shell, "nixpkgs": a.nixpkgs},
                        cache_url_hint=a.cache_url_hint, cache_keys=keys, previous_manifest=prev_manifest,
-                       upstream=upstream)
+                       upstream=upstream, deltas=deltas)
     errs = validate(m)
     if errs:
         raise Refused("the manifest does not validate: " + "; ".join(errs[:10]))
@@ -1753,7 +2113,8 @@ def cmd_publish(a):
     if got != digest or data != payload:
         raise Refused("self-check: the published manifest is not the one built")
     log(f"self-check: {tag} = {digest}, signed by {signer}")
-    status.update(state="published", release=release, manifest_digest=digest, manifest_tag=tag)
+    status.update(state="published", release=release, manifest_digest=digest, manifest_tag=tag,
+                  deltas=len((m.get("delta") or {}).get("files", [])))
 
     doc = next_channels(cur_doc, a.repo, time.time(), set_entry={
         "channel": a.channel, "digest": digest, "release": release, "percent": a.percent, "halt": False},
@@ -1916,6 +2277,24 @@ def main(argv=None):
     p.add_argument("--split", required=True)
     p.add_argument("--out", required=True)
     p.set_defaults(fn=cmd_stage)
+
+    p = sub.add_parser("deltas", help="build job: zstd --patch-from deltas against the previous release")
+    p.add_argument("--artifact", required=True, help="the stage (`stage --out`); writes deltas/ and deltas.json")
+    p.add_argument("--previous-manifest", help="the previous release's manifest (default: verified from --repo)")
+    p.add_argument("--repo")
+    p.add_argument("--plain-http", action="store_true")
+    p.add_argument("--fulcio-root")
+    p.add_argument("--signer", action="append", default=[])
+    p.add_argument("--issuer", default=ISSUER)
+    p.add_argument("--channel", default="edge", choices=CHANNELS)
+    p.add_argument("--upstream", default="https://cache.nixos.org", help="for the upstream paths' download sizes")
+    p.add_argument("--substituter", action="append", default=[], help="where the previous release's paths are")
+    p.add_argument("--trusted-key", action="append", default=[])
+    p.add_argument("--level", type=int, default=DELTA_LEVEL)
+    p.add_argument("--max-ratio", type=float, default=DELTA_MAX_RATIO)
+    p.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2))
+    p.add_argument("--tmp", help="scratch for the NARs (default: TMPDIR)")
+    p.set_defaults(fn=cmd_deltas)
 
     p = sub.add_parser("fill")
     fill_args(p)

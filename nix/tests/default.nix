@@ -21,6 +21,7 @@
   update-client = import ./update-client.nix { inherit pkgs self; };
   update-e2e = import ./update-e2e.nix { inherit pkgs self; };
   release-plan = import ./release-plan.nix { inherit pkgs self; };
+  update-delta = import ./update-delta.nix { inherit pkgs self; };
   branding = import ./branding.nix { inherit pkgs self; };
   greeting = import ./greeting.nix { inherit pkgs self; };
   greeting-vm = import ./greeting-vm.nix { inherit pkgs self; };

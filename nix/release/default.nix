@@ -22,7 +22,7 @@ let
     version = "1";
     src = lib.fileset.toSource {
       root = ./.;
-      fileset = lib.fileset.unions [ ./rime_nix_release.py ./crosscheck-rime-trust.sh ./mint-test-signing.sh ./fake_github.py ];
+      fileset = lib.fileset.unions [ ./rime_nix_release.py ./delta/rime_delta.py ./crosscheck-rime-trust.sh ./mint-test-signing.sh ./fake_github.py ];
     };
     nativeBuildInputs = [ pkgs.makeWrapper ];
     buildInputs = [ pkgs.bash ];
@@ -30,6 +30,8 @@ let
     installPhase = ''
       runHook preInstall
       install -Dm644 rime_nix_release.py $out/lib/rime-nix-release/rime_nix_release.py
+      # `deltas` pairs paths with the rules G2 measured with (docs/nixos/delta.md §3).
+      install -Dm644 delta/rime_delta.py $out/lib/rime-nix-release/delta/rime_delta.py
       install -Dm755 ${../../files/scripts/next-release-id} $out/libexec/rime-nix-release/next-release-id
       install -Dm755 crosscheck-rime-trust.sh $out/bin/crosscheck-rime-trust
       install -Dm755 mint-test-signing.sh $out/bin/mint-test-signing
@@ -40,7 +42,7 @@ let
       # nix itself is NOT wrapped in: the tool drives the Nix the machine runs (CI's installer, a VM's nix.package).
       makeWrapper ${pkgs.python3}/bin/python3 $out/bin/rime-nix-release \
         --add-flags $out/lib/rime-nix-release/rime_nix_release.py \
-        --prefix PATH : ${lib.makeBinPath [ pkgs.openssl pkgs.skopeo cosign pkgs.coreutils pkgs.git ]} \
+        --prefix PATH : ${lib.makeBinPath [ pkgs.openssl pkgs.skopeo cosign pkgs.coreutils pkgs.git pkgs.zstd ]} \
         --set-default RIME_NEXT_RELEASE_ID $out/libexec/rime-nix-release/next-release-id \
         --set-default RIME_COSIGN ${cosign}/bin/cosign
       for s in crosscheck-rime-trust mint-test-signing; do

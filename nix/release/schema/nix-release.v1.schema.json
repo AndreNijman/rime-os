@@ -109,7 +109,27 @@
             "from": { "$ref": "#/$defs/release" },
             "variant": { "type": "string" },
             "paths": { "type": "integer", "minimum": 0 },
-            "file_size": { "type": "integer", "minimum": 0 }
+            "file_size": { "type": "integer", "minimum": 0 },
+            "delta_size": { "description": "Bytes a machine on `from` downloads when every listed delta is used.", "type": "integer", "minimum": 1 },
+            "files": {
+              "description": "zstd --patch-from deltas (docs/nixos/delta.md §7): `path` (an index) rebuilt from `base`, which the client must hold with exactly base_nar_hash/base_nar_size. `file` is <release tag>/<name> under the client's configured delta URL; the signature over this manifest covers file_hash and file_size.",
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["path", "base", "base_nar_hash", "base_nar_size", "file", "file_hash", "file_size", "window_log"],
+                "additionalProperties": false,
+                "properties": {
+                  "path": { "type": "integer", "minimum": 0 },
+                  "base": { "type": "string", "pattern": "^/nix/store/[0-9a-df-np-sv-z]{32}-[A-Za-z0-9+\\-._?=]+$" },
+                  "base_nar_hash": { "type": "string", "pattern": "^sha256-[A-Za-z0-9+/]{43}=$" },
+                  "base_nar_size": { "type": "integer", "minimum": 1 },
+                  "file": { "type": "string", "pattern": "^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}/[0-9a-df-np-sv-z]{52}\\.delta$" },
+                  "file_hash": { "type": "string", "pattern": "^sha256-[A-Za-z0-9+/]{43}=$" },
+                  "file_size": { "type": "integer", "minimum": 1 },
+                  "window_log": { "type": "integer", "minimum": 27, "maximum": 31 }
+                }
+              }
+            }
           }
         }
       ]

@@ -324,6 +324,10 @@ pub struct UpdateOptions {
     /// questions, and a machine whose last update left it broken is not a
     /// machine that should also stop checking who signed the next one.
     pub allow_unverified: bool,
+    /// NixOS: download every path whole even where the release offers a delta (docs/nixos/delta.md §7).
+    pub no_deltas: bool,
+    /// NixOS: download and verify the release, then stop: nothing is installed, activated or recorded.
+    pub download_only: bool,
 }
 
 /// The system-extension package engine behind `rime install`/`remove`/`pkg`.
@@ -904,6 +908,10 @@ fn rename_target() -> Option<String> {
 pub fn update(opts: UpdateOptions) -> i32 {
     if crate::nixos::is_nixos() {
         return crate::nixos::update::update(opts);
+    }
+    if opts.no_deltas || opts.download_only {
+        eprintln!("rime: --no-deltas and --download-only are for NixOS systems; nothing was changed");
+        return 2;
     }
     let started = Instant::now();
     let mut worst = 0;

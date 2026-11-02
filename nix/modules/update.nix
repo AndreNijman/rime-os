@@ -26,8 +26,15 @@ let
     keep_generations = cfg.keepGenerations;
     # §11.5: the free-space gate counts on-disk bytes on a compress-force=zstd store (nix/release/floors.nix).
     on_disk_ratio = floors.ratio;
+    # Deltas (docs/nixos/delta.md §7): the decoder and the downloader by store path, and where the delta files are.
+    deltas = cfg.deltas.enable;
+    zstd = "${pkgs.zstd}/bin/zstd";
+    curl = "${pkgs.curl}/bin/curl";
   } // lib.optionalAttrs (cfg.fulcioRoot != null) { fulcio_root = "${cfg.fulcioRoot}"; }
-    // lib.optionalAttrs (cfg.upstreamCacheUrl != null) { upstream_cache_url = cfg.upstreamCacheUrl; };
+    // lib.optionalAttrs (cfg.upstreamCacheUrl != null) { upstream_cache_url = cfg.upstreamCacheUrl; }
+    // lib.optionalAttrs (cfg.deltas.url != null) { delta_url = cfg.deltas.url; }
+    // lib.optionalAttrs (cfg.deltas.windowLogMax != null) { delta_window_log_max = cfg.deltas.windowLogMax; }
+    // lib.optionalAttrs (cfg.deltas.jobs != null) { delta_jobs = cfg.deltas.jobs; };
 in
 {
   options.rime.update = {
@@ -93,6 +100,31 @@ in
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = "The CA signing certificates must chain to; null = the Sigstore root pinned in rimed.";
+    };
+    deltas = {
+      enable = lib.mkEnableOption "delta downloads (docs/nixos/delta.md §7): a changed path is rebuilt from a zstd patch against the version this machine has" // { default = true; };
+      url = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = "https://github.com/AndreNijman/rime-cache/releases/download";
+        description = ''
+          Where the delta files of a release are: the manifest names each as `<release tag>/<file>`, relative to this.
+          The manifest's signature covers each file's sha256 and size; the URL itself comes only from here (§8.1).
+          null turns deltas off.
+        '';
+      };
+      windowLogMax = lib.mkOption {
+        type = lib.types.nullOr (lib.types.ints.between 20 31);
+        default = null;
+        description = ''
+          The largest zstd decoder window (2^n bytes of memory per delta being rebuilt) this machine accepts; a delta
+          that needs more is skipped and its path downloaded whole. null: 29 (512 MiB), 30 with 8 GiB of memory or more.
+        '';
+      };
+      jobs = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        description = "Deltas rebuilt at once; null: half the CPUs, between 1 and 6.";
+      };
     };
     keepGenerations = lib.mkOption {
       type = lib.types.ints.between 2 50;

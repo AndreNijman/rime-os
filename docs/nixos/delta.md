@@ -3,6 +3,7 @@
 Status: **measured** on 2026-11-02 in the `rime-nix` container on katana (Nix 2.35.4, zstd 1.5.7). Every number
 below comes from a command in this file; the tool is `nix/release/delta/rime_delta.py`, the raw per-path data is in
 `nix/release/delta/data/<pair>/`, and `checks.x86_64-linux.delta` proves the tool on fixtures. GB is 10^9 bytes.
+Since 2026-11-02 the shipped client and pipeline (§7) are measured too: §5.2 (VMs, the client's Nix 2.34.9), §6.1, §8.1.
 
 This closes the P2 rows **G1**, **G2** and **G3** of `docs/nixos/p2-gates.md` (PLAN D6 "G2 delta transport", §7.2
 Q4, decision A3: "G2 delta transport is measured before P4").
@@ -19,7 +20,11 @@ previous release, a path with no base counted whole):
 | G1 weekly nixpkgs bump (no glibc/stdenv change, kernel .58 → .59) | 161 | 745.9 MB | 589.3 MB | **230.9 MB** | 31.0 % |
 | G2 mass rebuild (glibc, systemd 262, Qt 6.12, kernel, firmware) | 2067 of 2088 | 4,100.2 MB | 3,189.9 MB | **582.0 MB** | 14.2 % |
 
-Client import (G3, `rime_delta.py apply-all`, local disk, network excluded):
+Since 2026-11-02 `stage` writes level 19 without `--long` (§8.1), so a weekly release downloaded whole is 637.6 MB
+for these 161 paths by the zstd CLI, not 745.9 MB (the pipeline itself wrote 641.5 MB for the 156 a machine lacked
+in §5.2: §8.1).
+
+Client import, prototype (G3 before the client shipped: `rime_delta.py apply-all`, local disk, network excluded):
 
 | release | plain `nix copy` | deltas: rebuild + verify + import | peak RSS (deltas) | break-even link speed |
 |---|---|---|---|---|
@@ -28,6 +33,16 @@ Client import (G3, `rime_delta.py apply-all`, local disk, network excluded):
 
 Every delta import ended with the toplevel valid and `nix store verify` clean; a delta that does not rebuild the
 signed `NarHash` is refused before anything is imported (`checks.x86_64-linux.delta`, 6 mutants caught).
+
+**G3 with the shipped client** (§5.2: `rime update --download-only` in a VM, the weekly pair, a release made by the
+real pipeline; whole paths now at zstd level 19, §8.1):
+
+| weekly pair, 156 paths | downloaded | wall | client CPU |
+|---|---|---|---|
+| whole, unshaped virtual link | 641.5 MB | **11.4 s** | 21.6 s |
+| deltas, unshaped virtual link | **235.6 MB** | 28.4 s | 34.6 s |
+| whole, 100 Mbit/s | 641.5 MB | 55.8 s | 41.3 s |
+| deltas, 100 Mbit/s | **235.6 MB** | **35.1 s** | 37.8 s |
 
 Over 30 days at A3's cadence (assumed: 3 weekly bumps + 1 mass rebuild): **6.34 GB** today, **4.96 GB** with -19
 alone, **1.27 GB** with deltas. A bootc core rebuild is 1.74 GB per update (rime-os #123); four of them are 6.96 GB.
@@ -200,14 +215,53 @@ What the client pays, measured:
   also faster end to end, above it a plain `nix copy` finishes first but deltas still move 3-7x fewer bytes. On a
   busy disk (run 2) the break-even falls to ~1.2 MB/s. A streamed, parallel import would move the break-even up.
 
+### 5.2 G3 in VMs: `rime update` with the shipped client (2026-11-02)
+
+`nix/release/delta/lab/g3-vm.sh` runs `nix/tests/update-delta.nix` with `pair` = the weekly pair of §3 (old
+`nixos-system-rime-vm-26.11.20261023.3ec6363`, new `…20261030.1c89083`). A server VM (4 vCPUs, 6 GiB) runs the
+release pipeline as the build job does: `stage` (level 19) and `publish` of the old release, then `stage`, `deltas`
+(against the old release, fetched from the channel and verified with cosign, `--jobs 2`) and `publish` of the new
+one, to the fake GitHub with TEST keys. A client VM (4 vCPUs, 8 GiB, the client's Nix 2.34.9, its own 6.12 kernel so
+the pair's kernel is not already on its disk) holds the old closure and runs `rime update --download-only` four
+times; between runs the new paths are deleted again and both VMs drop their page caches. Wall is the whole command;
+CPU is the client VM's busy time from `/proc/stat` (rime, curl, zstd, nix and the daemon); bytes are what the client
+asked GitHub for (the manifest's sizes) and what its NIC received. Log `artifacts/deltas/g3-vm.log`, one JSON line per
+run in `artifacts/deltas/g3-results.jsonl`, committed as `nix/release/delta/data/g3-vm/g3-results.jsonl` with the
+run's G3 lines (`g3-summary.txt`); whole test 1,705 s, katana load 2-3.
+
+| run | GitHub files | GitHub bytes | NIC received | wall | `rime` download phase | client CPU | iowait |
+|---|---|---|---|---|---|---|---|
+| deltas, unshaped | 150 deltas + 6 whole | **235,562,875 B** | 247.8 MB | 28.4 s | 25.8 s | 34.6 s | 19.6 s |
+| `--no-deltas`, unshaped | 156 whole | 641,503,083 B | 671.4 MB | **11.4 s** | 10.2 s | 21.6 s | 5.8 s |
+| deltas, 100 Mbit/s (`tc tbf` on the server) | 150 deltas + 6 whole | **235,562,875 B** | 247.4 MB | **35.1 s** | 33.9 s | 37.8 s | 10.9 s |
+| `--no-deltas`, 100 Mbit/s | 156 whole | 641,503,083 B | 671.4 MB | 55.8 s | 54.6 s | 41.3 s | 6.4 s |
+
+- **Every run passed**: the new toplevel valid (Nix imported every path only after checking its signed NarHash),
+  `nix-store --verify-path` clean on the first 40 of the 156 new paths (the script checks no more), 0 deltas refused. `rime` said
+  "156 new store paths, 0.24 GB to download with deltas (0.64 GB without; 2.11 GB unpacked)" and "150 paths rebuilt
+  from deltas (182.3 MB), 6 downloaded whole (53.3 MB)". The release's table has 153 deltas (235.9 MB); 3 are for
+  paths the client already held, so it never fetched them. The 6 whole paths have no delta in the table (a new
+  package, or a delta over 80 % of the whole file).
+- **Bytes: 63 % fewer than whole at level 19, 68 % fewer than today's level 3** (745.9 MB, §3), matching §3's
+  measurement (230.9 MB for 161 paths) within 2 %.
+- **Time: deltas win on a 100 Mbit/s link (35 s against 56 s) and lose on the unshaped virtual link (28 s against
+  11 s; whole paths arrived at ~63 MB/s there)**. From the 100 Mbit/s runs the client's own work is ~16 s with deltas and ~5 s without, which puts
+  the break-even near **34 MB/s (~275 Mbit/s)**, 2.6x the prototype's ~13 MB/s (§5): the streamed, parallel import
+  (§7 item 3) did what §5 said it would. Above that speed a machine still moves 2.7x fewer bytes and pays ~17 s more.
+  The unshaped run also spent 19.6 s in iowait (both VMs share katana's NVMe and the host's page cache).
+- The pipeline side: `deltas` + `publish` of the new release took 965 s in the server VM (2 jobs, 4 vCPUs); `stage`
+  at level 19 took 470-490 s per release there (§8.1).
+- Not measured here: peak RSS in the VM (the prototype's 788 MiB was the decoder windows, which the client now caps,
+  §7 item 4), the mass-rebuild pair (its old side lives in a chroot store, not in a toplevel the VM test can take; the
+  prototype's §5 numbers stand for it), and a real internet link.
+
 ## 6. What deltas cannot shrink, and what they cost the release pipeline
 
 - **Compressed content inside a path.** The kernel's `.ko.xz` modules, the zstd initrd and the bzImage (g1-nixpkgs:
   138 of 231 MB), `linux-firmware-*-zstd` (§4), and anything else a package compresses itself. Those bytes change
   everywhere when one input byte changes. Rime builds its own kernel (D3): uncompressed modules
   (`CONFIG_MODULE_COMPRESS_NONE`) would put plain ELF in the NAR, let the transport compress it, and let deltas see
-  it. Not measured; the disk cost on `compress-force=zstd:3` should be close to the `.xz` files'. This is the
-  single biggest lever on the weekly delta.
+  it. Measured in §6.1: the biggest lever on the weekly delta, and not shipped yet.
 - **Compiled code after a source change.** rimed (Rust) kept 22 % of its full size as a delta for a +336/−40 line
   change; firefox, mesa, deno and sing-box keep 25-40 % across a version bump.
 - **New packages** have no base (4 paths in g1-nixpkgs, 2.4 MB).
@@ -224,49 +278,127 @@ What the client pays, measured:
   1 GiB. The client must pass `--long=<w>` (`ZSTD_d_windowLogMax`) or the decode fails, and the window is resident
   memory (peak RSS 788 MiB and 1,640 MiB, §5).
 
-## 7. Recommendation (A3, P4)
+### 6.1 Uncompressed kernel modules (`MODULE_COMPRESS` unset): measured, not shipped
 
-**Deltas are worth shipping, in P4, not now.** They cut every measured release 3-9x (mass rebuild 4.10 → 0.58 GB,
-weekly 0.75 → 0.23 GB, Rime-only 28 → 3 MB) and turn R2 ("mass rebuilds make updates larger than bootc") around:
-with deltas a mass rebuild is a third of a bootc core rebuild. They are not wired into `rimed/rime/src/nixos/` on
-this branch because the numbers do not justify a small change: the prototype is serial, costs 3x the disk writes
-of a plain `nix copy`, and is slower end to end above ~108 Mbit/s; the update client is rewritten in P4 anyway.
+Rime's 7.2.9 kernel has no `MODULE_COMPRESS_NONE` symbol: "none" is `MODULE_COMPRESS` unset (`"-d MODULE_COMPRESS"`
+in `nix/pkgs/kernel/config.nix`, which also drops `_ZSTD`, `_ALL` and `MODULE_DECOMPRESS`). Built that way in the
+`rime-nix` container (65 min, `checks.kernel-gate` passed; `artifacts/deltas/kernel-build-2.log`), then measured:
 
-For P4 (the `rime update` client and the release pipeline):
+| | NAR | whole at zstd -3 | whole at zstd -19 | whole at -19 --long=27 | weekly delta |
+|---|---|---|---|---|---|
+| Rime 7.2.9 modules, `.ko.zst` (as today) | 175.1 MB | 166.5 MB | 165.4 MB | 165.3 MB | |
+| Rime 7.2.9 modules, plain `.ko` | 668.5 MB | 138.4 MB | **106.1 MB (-36 %)** | 103.7 MB | |
+| weekly pair `linux-6.18.59-modules`, `.ko.xz` | 144.3 MB | 134.4 MB | | 133.8 MB | 92.0 MB |
+| same, every module decompressed | 703.1 MB | 146.6 MB | | 109.4 MB | **19.3 MB (-79 %)** |
 
-1. **Pipeline:** make one delta per changed path against the **previous release only** (`delta.from` in the
-   manifest), at `zstd -19 --long=27`; skip a path whose delta is over ~80 % of its full file. Cost measured: 2,193
-   (weekly) and 8,262 (mass) single-thread CPU seconds, parallel per path; publish `<hash>.delta` beside the NARs.
-2. **Client:** use deltas when the machine runs `delta.from`; otherwise, and on any refusal (missing base, hash
-   mismatch, decode failure, window over the cap), fetch that path whole. Never import a NAR whose `NarHash` was
-   not checked, and import through Nix so the signature is checked again (the prototype's step 4).
-3. **Client speed:** stream the rebuilt NAR into the import instead of writing it, and run paths in parallel
-   (the prototype uses 42-51 % of one CPU). Target: the weekly release under 15 s locally, measured in a VM
-   running `rime update`.
-4. **Memory:** cap the decoder window (default 512 MiB, `wlog` 29) and fetch larger paths whole; at 1 GiB only
-   linux-firmware is affected, and its delta saves 782 MB, so an 8 GB+ machine should allow 1 GiB.
-5. **Kernel:** build Rime's kernel with uncompressed modules (`CONFIG_MODULE_COMPRESS_NONE`) and measure the delta
-   again: compressed modules, initrd and bzImage are 138 of the weekly release's 231 MB delta (§3, §6).
+(`nix/release/delta/lab/modules-rime.sh`, `artifacts/deltas/modules-rime.log`; `modules-uncompressed.sh`,
+`artifacts/deltas/modules-uncompressed.log`. A delta of Rime's own kernel needs two Rime kernel versions, so the
+weekly pair's tree stands in for it; its plain NAR needs a 1 GiB window, `wlog` 30.) Plain modules ship 36 % fewer
+bytes whole and turn the modules' weekly delta from 92 MB into 19 MB: the single biggest saving left on a weekly
+release. The disk cost on `compress-force=zstd:3` is about the same as the compressed files'.
 
-Now, without any client change: the release cache can be written at a higher zstd level. `-19 --long=27` was 21-26 %
-smaller than level 3 and decodes with any zstd's default window limit (2^27); the `nix copy
-?compression-level=19` variant (no `--long`) was **not** measured, so measure it before switching.
+**Not shipped, because the module signatures do not survive.** `checks.kernel-vm` failed
+(`artifacts/deltas/kernel-vm.log`): "ntsync loaded UNSIGNED/unverified (taint 'E')". The kernel signs every module
+at `modules_install` (kmodigest certificates, D3); the compressed `.ko.zst` keeps that signature, but a plain `.ko`
+is an ELF file, and nixpkgs' fixup phase strips it (`stripDebugList` covers `lib`, `stripExclude` names only the
+build tree and `vmlinux`): 0 of 200 sampled plain modules still carried `~Module signature appended~`. Shipping
+unsigned modules is not an option under lockdown, so the kernel files were reverted on this branch and the change is
+**decided not to ship here**. To ship it: `stripExclude = [ "*.ko" ]` (or `dontStrip`) on the kernel derivation and
+on every out-of-tree module package (msi-ec, nvidia-open, xone, xpadneo), then `checks.kernel-vm` must pass again;
+it is one kernel rebuild (~65 min) and one VM check. Do it together with the next `kernel.pin` bump, which also gives
+the first real delta of Rime's own modules.
 
-**A3:** keep batching non-security mass rebuilds to at most once every 4 weeks until P4 ships deltas: today each
-one is a 4.1 GB download. Once deltas ship, a mass rebuild costs ~0.6 GB and batching is no longer needed for size;
-revisit A3 then with the 30-day number measured from real releases (§1: 1.27 GB with deltas vs 6.34 GB today).
+## 7. What shipped (2026-11-02), and A3
 
-## 8. Not measured
+The measurement recommended deltas for P4. They shipped on `nix/deltas` instead, with G3's VM timing (§5.2), so
+this section is now what the code does; each item names the recommendation it closes.
 
-- Real network transfer: every number is local disk; the download saving is computed from bytes, the client cost
-  from local wall time. The break-even in §5 is arithmetic from both.
+1. **Pipeline** (`rime-nix-release deltas`, `nix/release/rime_nix_release.py`; the build job's step "Deltas against
+   the previous release (github backend)" in `.github/workflows/nix-release.yml`). One delta per changed path
+   against the channel's **previous release only**, verified with cosign as a client verifies it; `zstd -19
+   --long=27 --patch-from`; every delta decoded again and compared with the NAR; a path whose delta is over **80 %**
+   of its full download is skipped (fetched whole). `publish` binds the table into the signed manifest
+   (`delta.files`: path, base, base NarHash/NarSize, file, file sha256/size, window; `delta.delta_size`) and uploads
+   the `.delta` files as release assets beside the NARs. On the hosted runner: `--jobs 4` (the mass rebuild's 8,262
+   CPU-s is ~35 min), a 150-minute limit, and only with 25 GB free for the bases; any failure warns and ships the
+   release without deltas, so clients download whole paths. The S3 fallback backend publishes none.
+2. **Client** (`rimed/rime/src/nixos/delta.rs`, wired into `rime update`). A path is rebuilt from its delta only when
+   the machine holds the base with exactly the manifest's `base_nar_hash`/`base_nar_size`; the delta file is
+   downloaded from the client's own `rime.update.deltas.url` and refused unless its sha256 and size are the
+   manifest's; the rebuilt NAR's size and NarHash are checked while it streams; Nix imports it from a one-path file
+   cache whose narinfo is the signed one, so the signature and NarHash are checked again. **Any refusal** (no base,
+   wrong base, tampered or truncated delta, window over the cap, decode or import failure) fetches that path whole and
+   says why (`rime: delta refused, downloaded whole instead: <path>: <reason>`). `rime update --no-deltas` turns it
+   off for one run, `rime.update.deltas.enable = false` for good.
+3. **Client speed.** The rebuilt NAR is never written to disk: `zstd -d` feeds a FIFO that `nix copy` reads (the
+   client holds the FIFO read-write, because Nix opens a `file://` NAR twice: once to try a memory map, then to read
+   it). Paths run in parallel, references first, `jobs` = half the CPUs (1-6), within a memory budget of half of
+   MemAvailable counted in decoder windows; whole paths are batched into one `nix copy`. Measured in §5.2.
+4. **Memory.** The decoder window cap is `wlog` 29 (512 MiB), 30 (1 GiB) on a machine with 8 GiB of memory or
+   more (linux-firmware's base needs 1 GiB and its delta saves ~780 MB); `rime.update.deltas.windowLogMax` sets it.
+   A delta over the cap is not downloaded (`rime: delta not tried: ... decoder window ...`).
+5. **Kernel: not shipped.** Uncompressed modules were built and measured (-36 % whole, the modules' weekly delta
+   92 → 19 MB), but nixpkgs' strip removes their signatures and `checks.kernel-vm` refuses them (§6.1). Reverted;
+   the fix and its cost are in §6.1.
+6. **The cache's own level.** `stage` writes Rime's NARs at zstd level 19 (§8.1).
+
+**Checks.** `checks.x86_64-linux.update-delta` (`nix/tests/update-delta.nix`): a server VM runs the real release
+pipeline (stage, deltas, publish to a fake GitHub with a TEST cosign identity) for release A and then B with deltas
+against A; a client VM on A runs `rime update --download-only` five times: deltas used (B's payload rebuilt from its
+delta, its whole NAR never fetched), a tampered delta (refused for its hash, payload fetched whole), a wrong base
+(the client's copy of payload-1 changed: refused, fetched whole), a window over the cap (`delta_window_log_max = 26`:
+the delta is not even fetched), `--no-deltas`. Five mutants of `delta.rs` each make it fail
+(`nix/release/delta/lab/update-delta-mutants.sh`, §5.2). rimed's unit tests cover the scheduler (references first,
+refusal → whole, a failed whole download stops the update, the memory budget, cycles), the narinfo rewrite (the
+signature lines survive, NarHash/NarSize must be the manifest's), the window cap, and the FIFO stream against real
+processes (a reader that opens the NAR twice, one that quits unread, a stream that does not hash right and whose
+reader must never see its end; each runs under a 60 s deadline, so a stream that never ends fails the test instead
+of hanging the build). Mutants of `stream()` (verifier, 2026-11-03): dropping the final NarHash comparison fails
+that test; dropping the `importer.kill()` before the pipe closes used to HANG `cargo test` (the check could only
+fail by never finishing) and now fails it on the deadline.
+`checks.release-unit` covers `deltas` and `validate_delta`.
+
+**A3 (decided, not closed): keep batching non-security mass rebuilds to at most once every 4 weeks for now.** With
+deltas a mass rebuild measures ~0.6 GB (§4) instead of 4.1 GB, so the size reason for batching is gone in the lab.
+It stays until the release byte log (`delta` in every manifest, updates-and-release.md §3.1) shows the same on real
+releases: the P4 30-day gate (30-day bytes <= bootc at the same cadence) revisits A3 with that number.
+
+## 8. Measured since, and still not measured
+
+### 8.1 `nix copy` at zstd level 19, without `--long`
+
+`nix/release/delta/lab/level19.sh` (`artifacts/deltas/level19.log`), over the weekly pair's 161 added paths:
+
+| | bytes | vs level 3 |
+|---|---|---|
+| NAR | 2,111.2 MB | |
+| zstd -3 (what `nix copy ?compression=zstd` wrote) | 745.9 MB | |
+| **zstd -19** (`?compression=zstd&compression-level=19`) | **637.6 MB** | **-14.5 %** |
+| zstd -19 --long=27 | 589.3 MB | -21.0 % |
+
+`nix copy ?compression=zstd&compression-level=19` writes what the CLI does: 133,809,352 B for
+`linux-6.18.59-modules` against `zstd -19 -T1`'s 133,780,419 B (0.02 %). A level-19 NAR decodes with any zstd's
+default window (no `--long` on the client). The cost is the pipeline's CPU: the openvino closure (11 paths) took
+1.0 s at level 3 (64.9 MB), 87 s / 96 CPU-s at level 19 (51.8 MB, -20.2 %), 61 s / 172 CPU-s with
+`parallel-compression=true` (same bytes; `artifacts/deltas/level19-nixcopy-timing.log`). On the weekly pair the
+pipeline's parallel level 19 wrote 641.5 MB for 156 of the 161 paths (§5.2), ~1 % more than the CLI's 637.6 MB for
+all 161 (not taken apart; parallel compression's chunks are the likely cost). In the update-delta VM check, `stage`
+of a ~660-path client closure went from 7-19 s to 185-480 s (4 vCPUs, katana loaded), and `checks.update-e2e`
+(three releases staged) from 212 s to 1,078 s of test script, ~302 s per stage, inside its 2-hour limit
+(`artifacts/deltas/update-e2e-level19.log`; `release-github` stages a tiny closure, 0.1 s). **Shipped**:
+`stage` now uses level 19 with parallel compression (`STAGE_LEVEL`, pinned by `test_stage_writes_level_19`).
+The remaining 7 % of `-19 --long=27` is out of reach of `nix copy` (it has no long-distance or window setting);
+it would need the pipeline to compress the NARs itself, which is not done.
+
+### 8.2 Still not measured
+
+- A real network: §5.2's VM runs use a virtual link (unshaped, and shaped to 100 Mbit/s with `tc`), not the internet.
 - The installed `plain` shape (Rime's CachyOS kernel + NVIDIA 615): its kernel and NVIDIA paths change on every
-  kernel bump; by §6 they behave like the g1-nixpkgs kernel paths (compressed modules).
-- `zstd -19` without `--long` (what `nix copy ?compression=zstd&compression-level=19` would write): only level 3
-  (shipped) and -19 --long=27 were measured.
-- A delta chain (two releases behind), `--patch-from` at other levels, and bsdiff/xdelta-style per-file deltas.
-- The client inside a VM running `rime update` (G3's "How proven" column): the prototype is not wired into
-  `rimed/rime/src/nixos/` (§7), so the measured cost is the tool's, run against chroot stores.
+  kernel bump; by §6 they behave like the g1-nixpkgs kernel paths.
+- A delta of Rime's own kernel with plain modules: it needs two Rime kernel versions and the signature fix of §6.1,
+  so it is measured at the next `kernel.pin` bump. The weekly pair's proxy (§6.1) stands in for it.
+- A delta chain (two releases behind: those machines fetch whole paths), `--patch-from` at other levels, and
+  bsdiff/xdelta-style per-file deltas.
 
 ## 9. Reproduce
 
@@ -282,4 +414,14 @@ nix build --store /work/scratch/g2/store-<rev7> --impure --print-out-paths \
 # one pair: closures, pairing, every delta (kept for the client), summary
 nix shell <nixpkgs>#python3 <nixpkgs>#zstd -c \
   nix/release/delta/measure-pair.sh OUTDIR OLD_STORE OLD_TOPLEVEL NEW_STORE NEW_TOPLEVEL 6
+
+# the shipped client and pipeline in VMs (§7 Checks), its five mutants (each must FAIL), and G3 on the weekly pair (§5.2)
+nix build path:.#checks.x86_64-linux.update-delta -L
+nix/release/delta/lab/update-delta-mutants.sh /work/artifacts/deltas/mutants
+nix/release/delta/lab/g3-vm.sh /work/artifacts/deltas/g3-vm.log [OLD_TOPLEVEL NEW_TOPLEVEL]
+
+# level 19 (§8.1) and the kernel modules (§6.1)
+nix/release/delta/lab/level19.sh OUT.tsv
+nix/release/delta/lab/modules-uncompressed.sh OLD_MODULES NEW_MODULES WORKDIR
+nix/release/delta/lab/modules-rime.sh MODULES_OUT WORKDIR    # needs a kernel built with "-d MODULE_COMPRESS"
 ```

@@ -656,6 +656,140 @@ class GitHubAssets(unittest.TestCase):
         self.assertEqual(self.state.data["releases"], [])  # nothing was created or uploaded
 
 
+def delta_case(d, payload=b"delta-bytes" * 3, full=100):
+    """A previous release with an older rime-shell, and one delta for the new rime-shell in artifact `d`."""
+    clo, plan, sizes, n = synthetic()
+    old_shell = sp(20, "rime-shell")
+    prev = manifest(release="2026.11.01")
+    for e in prev["paths"]:
+        if e["path"] == n["shell"]:
+            e["path"], e["nar_hash"], e["nar_size"] = old_shell, nh(old_shell), 900
+    prev["paths"].sort(key=lambda e: e["path"])
+    digest = hashlib.sha256(payload).digest()
+    name = r.nix32_raw(digest) + ".delta"
+    os.makedirs(os.path.join(d, "deltas"), exist_ok=True)
+    open(os.path.join(d, "deltas", name), "wb").write(payload)
+    entry = {"path": n["shell"], "base": old_shell, "base_nar_hash": nh(old_shell), "base_nar_size": 900,
+             "name": name, "file_hash": "sha256-" + base64.b64encode(digest).decode(), "file_size": len(payload),
+             "window_log": 27, "full_size": full}
+    with open(os.path.join(d, "deltas.json"), "w") as f:
+        json.dump({"schema": 1, "from": "2026.11.01", "files": [entry], "skipped": []}, f)
+    sizes[n["shell"]] = full
+    return clo, plan, sizes, prev, entry, n
+
+
+class Deltas(unittest.TestCase):
+    def test_bound_deltas_are_listed_and_validate(self):
+        with tempfile.TemporaryDirectory() as d:
+            clo, plan, sizes, prev, entry, n = delta_case(d)
+            kept = r.bind_deltas(d, clo, prev, sizes)
+            self.assertEqual([e["path"] for e in kept], [n["shell"]])
+            pub = [dict(kept[0], file="2026.11.02/" + kept[0]["name"])]
+            m = r.build_manifest(clo, plan, sizes, release="2026.11.02", previous="2026.11.01", issued=1,
+                                 source={"rime_os": SHA_A, "rime_shell": SHA_B, "nixpkgs": SHA_N},
+                                 cache_url_hint="https://cache.rimeos.com", cache_keys=[KEY],
+                                 previous_manifest=prev, deltas=pub)
+            self.assertEqual(r.validate(m), [])
+            f = m["delta"]["files"]
+            self.assertEqual(len(f), 1)
+            self.assertEqual(m["paths"][f[0]["path"]]["path"], n["shell"])
+            self.assertEqual(f[0]["file"], "2026.11.02/" + entry["name"])
+            self.assertEqual(m["delta"]["paths"], 1)
+            self.assertEqual(m["delta"]["delta_size"], entry["file_size"])
+            self.assertEqual(m["delta"]["file_size"], 100)
+
+    def test_bind_drops_what_does_not_match(self):
+        cases = {
+            "made against another release": lambda prev, e, d, sizes: prev.update(release="2026.10.31"),
+            "base differs": lambda prev, e, d, sizes: e.update(base_nar_hash=nh("other")),
+            "base not in the previous release": lambda prev, e, d, sizes: e.update(base=sp(21, "rime-shell")),
+            "file differs": lambda prev, e, d, sizes: open(os.path.join(d, "deltas", e["name"]), "ab").write(b"x"),
+            "sha differs": lambda prev, e, d, sizes: e.update(file_hash=nh("x")),
+            "over the ratio": lambda prev, e, d, sizes: sizes.update({e["path"]: 40}),
+            "wrong window": lambda prev, e, d, sizes: e.update(window_log=31),
+            "not a new path": lambda prev, e, d, sizes: e.update(path=sorted(clo_paths(prev))[0]),
+        }
+        for name, f in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                clo, plan, sizes, prev, entry, n = delta_case(d)
+                t = json.load(open(os.path.join(d, "deltas.json")))
+                f(prev, t["files"][0], d, sizes)
+                json.dump(t, open(os.path.join(d, "deltas.json"), "w"))
+                self.assertEqual(r.bind_deltas(d, clo, prev, sizes), [], name)
+
+    def test_every_delta_rule_refuses(self):
+        with tempfile.TemporaryDirectory() as d:
+            clo, plan, sizes, prev, entry, n = delta_case(d)
+            pub = [dict(entry, file="2026.11.02/" + entry["name"])]
+            good = r.build_manifest(clo, plan, sizes, release="2026.11.02", previous="2026.11.01", issued=1,
+                                    source={"rime_os": SHA_A, "rime_shell": SHA_B, "nixpkgs": SHA_N},
+                                    cache_url_hint="https://cache.rimeos.com", cache_keys=[KEY],
+                                    previous_manifest=prev, deltas=pub)
+        cases = {
+            "path range": lambda f, dd: f.update(path=999),
+            "base is the path": lambda f, dd: f.update(base=good["paths"][f["path"]]["path"]),
+            "base hash": lambda f, dd: f.update(base_nar_hash="sha256:nothex"),
+            "file hash form": lambda f, dd: f.update(file_hash="sha256:" + "0" * 52),
+            "size": lambda f, dd: f.update(file_size=0),
+            "file escapes": lambda f, dd: f.update(file="../" + entry["name"]),
+            "file kind": lambda f, dd: f.update(file="2026.11.02/" + entry["name"][:-6] + ".nar.zst"),
+            "window": lambda f, dd: f.update(window_log=26),
+            "duplicate": lambda f, dd: dd["files"].append(dict(f)),
+            "no delta_size": lambda f, dd: dd.pop("delta_size"),
+        }
+        for name, mut in cases.items():
+            with self.subTest(name):
+                m = copy.deepcopy(good)
+                mut(m["delta"]["files"][0], m["delta"])
+                self.assertNotEqual(r.validate(m), [], name)
+
+    def test_make_delta_rebuilds_or_refuses(self):
+        import random
+        rnd = random.Random(7)
+        base = bytes(rnd.getrandbits(8) for _ in range(300_000))
+        new = base[:100_000] + b"changed" * 100 + base[100_000:]
+        with tempfile.TemporaryDirectory() as d:
+            b, nw, out = (os.path.join(d, x) for x in ("base.nar", "new.nar", "x.delta"))
+            open(b, "wb").write(base)
+            open(nw, "wb").write(new)
+            h = "sha256-" + base64.b64encode(hashlib.sha256(new).digest()).decode()
+            size = r.make_delta(b, nw, h, 27, out)
+            self.assertLess(size, len(new) // 20)
+            self.assertEqual(r.delta_window_log(len(base), len(new)), 27)
+            self.assertEqual(r.delta_window_log(600 << 20, 10), 30)
+            with self.assertRaises(r.Refused):
+                r.make_delta(b, nw, nh("not the new NAR"), 27, out)
+
+
+
+class StageCompression(unittest.TestCase):
+    def test_stage_writes_level_19(self):
+        """delta.md §8: the Rime cache's NARs are zstd level 19 (not Nix's default 3), compressed in parallel."""
+        clo, _, _, x = synthetic()
+        calls = []
+        real_run = r.run
+        r.run = lambda cmd, **kw: calls.append(cmd)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                for n, v in (("closure.json", clo), ("split.json", {"rime": [x["shell"]], "upstream": [x["glibc"]]})):
+                    json.dump(v, open(os.path.join(d, n), "w"))
+                a = type("A", (), {"closure": os.path.join(d, "closure.json"), "split": os.path.join(d, "split.json"),
+                                   "out": os.path.join(d, "stage")})()
+                with self.assertRaises(r.Refused):  # nothing was copied: the narinfo count check refuses
+                    r.cmd_stage(a)
+        finally:
+            r.run = real_run
+        copies = [c for c in calls if "copy" in c]
+        self.assertEqual(len(copies), 1, calls)
+        url = next(c for c in copies[0] if str(c).startswith("file://"))
+        self.assertIn("compression=zstd", url)
+        self.assertIn("compression-level=19", url)
+        self.assertIn("parallel-compression=true", url)
+
+def clo_paths(m):
+    return [e["path"] for e in m["paths"]]
+
+
 class Schema(unittest.TestCase):
     """The JSON Schema files describe what the tool writes."""
 
@@ -671,6 +805,13 @@ class Schema(unittest.TestCase):
         jsonschema.validate(manifest(release="2026.11.02", previous="2026.11.01", previous_manifest=prev), rel)
         jsonschema.validate(r.next_channels(None, "R", 1, set_entry={
             "channel": "edge", "digest": "sha256:" + "1" * 64, "release": "2026.11.01", "reason": "x"}), chans)
+        with tempfile.TemporaryDirectory() as d:
+            clo, plan, sizes, dprev, entry, n = delta_case(d)
+            jsonschema.validate(r.build_manifest(
+                clo, plan, sizes, release="2026.11.02", previous="2026.11.01", issued=1,
+                source={"rime_os": SHA_A, "rime_shell": SHA_B, "nixpkgs": SHA_N},
+                cache_url_hint="https://cache.rimeos.com", cache_keys=[KEY], previous_manifest=dprev,
+                deltas=[dict(entry, file="2026.11.02/" + entry["name"])]), rel)
         bad = manifest()
         bad["paths"][0]["nar_hash"] = "md5:x"
         with self.assertRaises(jsonschema.ValidationError):

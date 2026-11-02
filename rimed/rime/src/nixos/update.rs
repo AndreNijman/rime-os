@@ -16,7 +16,7 @@ use crate::ops::UpdateOptions;
 use crate::trust::Roots;
 
 use super::fetch::{self, Pointer, Release, Stop};
-use super::{generations, lock, now, resolve_link, state, store, write_atomic, write_json, write_status, Applied, AppliedRelease, Config, Pins, Status, CHECK_STATE, CONFIG, GCROOTS};
+use super::{delta, generations, lock, now, resolve_link, state, store, write_atomic, write_json, write_status, Applied, AppliedRelease, Config, Pins, Status, CHECK_STATE, CONFIG, GCROOTS};
 
 const GB: f64 = 1_000_000_000.0;
 /// §11.5: the reserve on top of the unpacked size.
@@ -58,7 +58,7 @@ pub fn update(opts: UpdateOptions) -> i32 {
                 s.code
             }
         };
-        if opts.live.plan_only {
+        if opts.live.plan_only || opts.download_only {
             return worst;
         }
     }
@@ -127,7 +127,11 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
             } else {
                 let closure: Vec<&str> = m.variant_closure(v).keys().copied().collect();
                 let missing = store::invalid(cfg, &closure).unwrap_or_default();
-                let bytes: u64 = m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.file_size).sum();
+                let want: Vec<&str> = missing.iter().map(String::as_str).collect();
+                let bytes: u64 = match delta::prepare(cfg, m, &want, opts.no_deltas).filter(|p| p.any()) {
+                    Some(d) => d.download_bytes(),
+                    None => m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.file_size).sum(),
+                };
                 println!("rime: release {} is available: {} new store paths, {:.2} GB to download", m.release, missing.len(), bytes as f64 / GB);
                 ("available", digest)
             }
@@ -174,20 +178,21 @@ fn components_json(a: &Activation, live: bool, overrides: &[(Component, &str, St
 }
 
 /// §11.5: refused by name unless the filesystem holding /nix has room for `unpacked` bytes of new store paths, counted
-/// as they will sit on disk (variant.rs `store_ratio`: compressed only on a compress-force=zstd btrfs), plus RESERVE.
-fn headroom(cfg: &Config, unpacked: u64, missing: &BTreeSet<String>) -> Result<(), Stop> {
+/// as they will sit on disk (variant.rs `store_ratio`: compressed only on a compress-force=zstd btrfs), plus RESERVE,
+/// plus `scratch`: the delta decoder's working files (delta.md §7; 0 when the paths come whole).
+fn headroom(cfg: &Config, unpacked: u64, scratch: u64, missing: &BTreeSet<String>) -> Result<(), Stop> {
     if missing.is_empty() {
         return Ok(());
     }
     let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
     let ratio = super::variant::store_ratio(&mounts, "/nix/store", cfg.on_disk_ratio);
-    let need = super::variant::need_on_disk(unpacked, ratio, RESERVE);
+    let need = super::variant::need_on_disk(unpacked, ratio, RESERVE) + scratch;
     match free_bytes("/nix/store") {
         Some(free) if free < need => Err(stop(format!(
             "rime: this update needs {:.2} GB free on /nix ({:.2} GB of new store paths{}, plus 1 GB to spare) and {:.2} GB is free. Nothing was changed. (`sudo rime gc` removes old generations.)",
             need as f64 / GB,
             unpacked as f64 / GB,
-            if ratio < 1.0 { format!(", about {:.2} GB on this compressed disk", (need - RESERVE) as f64 / GB) } else { String::new() },
+            if ratio < 1.0 { format!(", about {:.2} GB on this compressed disk", (need - RESERVE - scratch) as f64 / GB) } else { String::new() },
             free as f64 / GB
         ))),
         _ => Ok(()),
@@ -197,8 +202,18 @@ fn headroom(cfg: &Config, unpacked: u64, missing: &BTreeSet<String>) -> Result<(
 /// §8.5: bind `missing` to the signed manifest, then download it. GitHub backend (§18.1): each path from the cache its
 /// `origin` names, Rime's or the upstream one, every one checked against exactly the verified manifest's `cache.keys`
 /// (Rime's keys and the upstream's); under --allow-unverified, the keys compiled into the system. `bound` runs between
-/// the bind and the first download. Shared by the OS step and `rime install` of a class 2 app.
-fn fetch_paths(cfg: &Config, m: &Manifest, verified: bool, missing: &BTreeSet<String>, keep_fsync: bool, bound: impl FnOnce()) -> Result<(), Stop> {
+/// the bind and the first download. Shared by the OS step and `rime install` of a class 2 app. `deltas` (the OS step
+/// only, delta.md §7): the prepared delta plan, which downloads every path itself and falls back to the whole path
+/// from the same cache on any refusal; None downloads every path whole.
+fn fetch_paths(
+    cfg: &Config,
+    m: &Manifest,
+    verified: bool,
+    missing: &BTreeSet<String>,
+    keep_fsync: bool,
+    deltas: Option<&delta::Prepared>,
+    bound: impl FnOnce(),
+) -> Result<(), Stop> {
     if missing.is_empty() {
         return Ok(());
     }
@@ -235,13 +250,26 @@ fn fetch_paths(cfg: &Config, m: &Manifest, verified: bool, missing: &BTreeSet<St
         }
     }
     bound();
-    // Upstream first: an upstream path never refers to a Rime one, so a Rime path's references are valid by the
-    // time it arrives (Origin orders Rime before Upstream, hence the reverse).
-    for (from, paths) in copies.iter().rev() {
-        store::copy_from_cache(cfg, from, paths, &keys, keep_fsync).map_err(|e| {
-            stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
-        })?;
+    let started = std::time::Instant::now();
+    match deltas {
+        // Deltas (delta.md §7): any refusal falls back to the whole path from the same cache.
+        Some(d) => {
+            let o = d.run(cfg, &keys, keep_fsync).map_err(|e| {
+                stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
+            })?;
+            delta::report(&o);
+        }
+        None => {
+            // Upstream first: an upstream path never refers to a Rime one, so a Rime path's references are valid by
+            // the time it arrives (Origin orders Rime before Upstream, hence the reverse).
+            for (from, paths) in copies.iter().rev() {
+                store::copy_from_cache(cfg, from, paths, &keys, keep_fsync).map_err(|e| {
+                    stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
+                })?;
+            }
+        }
     }
+    println!("rime: downloaded in {:.1} s", started.elapsed().as_secs_f64());
     Ok(())
 }
 
@@ -276,8 +304,8 @@ pub fn fetch_apps(outs: &[&str]) -> Result<(), String> {
     let all: Vec<&str> = closure.iter().map(|i| m.path(*i)).collect();
     let missing = store::invalid(&cfg, &all)?;
     let unpacked: u64 = m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.nar_size).sum();
-    headroom(&cfg, unpacked, &missing).map_err(|s| s.message)?;
-    fetch_paths(&cfg, &m, verified, &missing, false, || {}).map_err(|s| s.message)
+    headroom(&cfg, unpacked, 0, &missing).map_err(|s| s.message)?;
+    fetch_paths(&cfg, &m, verified, &missing, false, None, || {}).map_err(|s| s.message)
 }
 
 fn free_bytes(path: &str) -> Option<u64> {
@@ -378,7 +406,22 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
             println!("rime: includes security fixes: {}", b.security.join(", "));
         }
     }
-    println!("rime: {} new store paths, {:.2} GB to download ({:.2} GB unpacked)", missing.len(), dl as f64 / GB, unpacked as f64 / GB);
+    let want: Vec<&str> = missing.iter().map(String::as_str).collect();
+    let prepared = delta::prepare(cfg, m, &want, opts.no_deltas);
+    for why in prepared.iter().flat_map(|p| &p.skipped) {
+        println!("rime: delta not tried: {why}");
+    }
+    let deltas = prepared.filter(|p| p.any());
+    match &deltas {
+        Some(d) => println!(
+            "rime: {} new store paths, {:.2} GB to download with deltas ({:.2} GB without; {:.2} GB unpacked)",
+            missing.len(),
+            d.download_bytes() as f64 / GB,
+            dl as f64 / GB,
+            unpacked as f64 / GB
+        ),
+        None => println!("rime: {} new store paths, {:.2} GB to download ({:.2} GB unpacked)", missing.len(), dl as f64 / GB, unpacked as f64 / GB),
+    }
 
     let target_bc = by_component(closure.iter().copied());
     let running_bc = store::closure(cfg, &running).ok().map(|c| by_component(c.iter().map(String::as_str)));
@@ -411,10 +454,10 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     }
 
     // 9. headroom.
-    headroom(cfg, unpacked, &missing)?;
+    headroom(cfg, unpacked, deltas.as_ref().map_or(0, |d| d.scratch_bytes()), &missing)?;
 
     // 10. bind, then download.
-    fetch_paths(cfg, m, rel.verified, &missing, opts.keep_fsync, || {
+    fetch_paths(cfg, m, rel.verified, &missing, opts.keep_fsync, deltas.as_ref(), || {
         let _ = write_json(&state("pending.json"), &json!({"release": m.release, "variant": rel.variant.chosen, "manifest": serde_json::from_slice::<Value>(&rel.bytes).unwrap_or(Value::Null)}), 0o644);
     })?;
 
@@ -429,6 +472,11 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
         Ok(_) | Err(_) => {
             return Err(stop(format!("rime: release {} describes its kernel differently from what it contains. Nothing was changed.", m.release)))
         }
+    }
+
+    if opts.download_only {
+        println!("rime: --download-only: release {} is downloaded and verified; nothing was installed", m.release);
+        return Ok(0);
     }
 
     let status_target = (digest.as_str(), m.release.as_str(), target.as_str());

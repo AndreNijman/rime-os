@@ -198,6 +198,12 @@ bytes. Media type `application/vnd.rimeos.nix-release.v1+json`.
 - **`batch`** says what kind of release this is, for the user-facing size message (§8.4) and the release page.
 - **`delta`** is the download a machine on `previous` makes, computed by CI for the `plain` variant. It feeds the
   release byte log (the P4 30-day gate) and the release page. It is informational; the client computes its own.
+  On the GitHub backend it also carries the release's zstd deltas (docs/nixos/delta.md §7): `delta_size` (the bytes
+  a machine on `from` downloads when every delta is used) and `files`, one entry per changed path: `path` (an index),
+  `base` (the path in `from` it is rebuilt from) with `base_nar_hash`/`base_nar_size`, `file` (`<tag>/<nix32>.delta`
+  under the client's own `rime.update.deltas.url`, never a URL from the manifest), `file_hash`, `file_size` and
+  `window_log`. The manifest's signature covers every one, so a delta file, its base and the NAR it rebuilds are all
+  bound before `rime update` downloads a byte; any mismatch fetches that path whole.
 - **`cache.url_hint`** is informational. The client reads its cache URL from its own configuration, never from the
   manifest (§8.1).
 - **`cache.keys`** are the narinfo public keys valid for this release (§6.4).
@@ -1297,10 +1303,11 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
 - Release-ID race between the two pipelines on the same day: re-read before push (§2); residual risk caught by the
   rimeos.com chain test.
 - Soft reboot into a NixOS generation: not supported in v1 (§10.1).
-- G2 delta transport (`zstd --patch-from` against the previous release's NARs): measured in plan PR 5 first. If it is
-  adopted, it becomes a step between §8.5's binding and the import: fetch delta, rebuild the NAR, check the narHash
-  against the manifest, `nix-store --import`. The manifest's narHash binding is what makes that safe without trusting
-  the delta.
+- G2 delta transport (`zstd --patch-from` against the previous release's NARs): measured (delta.md §1-§6) and
+  adopted (delta.md §7, rimed `src/nixos/delta.rs`, `rime-nix-release deltas`). It is a step between §8.5's binding
+  and the import: fetch the delta, rebuild the NAR, check its size and narHash against the manifest while streaming it,
+  and import it with `nix copy` from a one-path file cache whose narinfo is the signed one (not `nix-store --import`,
+  which would skip the narinfo signature). Any refusal fetches that path whole.
 - fwupd UEFI capsules with Secure Boot on (plan open question 17): the firmware pass runs as today; the capsule path's
   signing is decided with the boot chain, not here.
 - Licences of unfree paths before anything is uploaded to a public bucket (§6.3, plan R14).
