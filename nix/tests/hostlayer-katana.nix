@@ -170,6 +170,28 @@ pkgs.testers.runNixOSTest {
         with subtest("andre logs in through greetd"):
             greeter_login(machine, "andre", "rime")
 
+        # katana's two extra disks, as blank virtual disks given the filesystems (UUIDs) its fstab names: read here
+        # from the carried host.toml at run time, never written into the repository.
+        local = [m for m in json.loads(machine.succeed(f"{HL} host get mount")) if m["what"].startswith("UUID=")]
+        print("katana's extra disks:", [(m["where"], m["type"], m["passno"]) for m in local])
+        assert len(local) == 2, f"expected katana's two fstab disks, found {len(local)}"
+        names = ["disk1", "disk2"]
+        disks = DiskLab(machine, dict(zip(names, local)))
+
+        with subtest("katana's disks attached blank: the boot does not stop; they get their filesystems"):
+            disks.restart(names)
+            disks.booted_whole()
+            disks.make_filesystems()
+
+        with subtest("H6: both of katana's fstab disks mount at boot"):
+            disks.h6_all_mount()
+
+        with subtest("H7: the second disk taken out of the machine; the boot completes, the first still mounts"):
+            disks.h7_one_absent("disk2")
+
+        with subtest("H8: fsck containment on katana's state: the first disk corrupt"):
+            disks.h8_corrupt("disk1", "${pkgs.e2fsprogs}/bin")
+
         print(report)
         machine.shutdown()
         after = snapshot_digest(state)

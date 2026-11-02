@@ -229,6 +229,136 @@ in
         print("NetworkManager VPN plugins:", names.split())
         assert "nm-openvpn-service.name" in names.split(), names
 
+    class DiskLab:
+        """H6-H8 on the machine's carried [[mount]]s of local disks: one raw file per disk, attached (or taken out
+        of the machine) between boots through QEMU_OPTS, named by its serial (/dev/disk/by-id/virtio-<name>). The
+        filesystems get the UUIDs host.toml names, so the generated units find them as on the old machine."""
+
+        def __init__(self, m, mounts, size=128 << 20):
+            import os
+            self.m = m
+            self.mounts = mounts                  # name -> the host.toml [[mount]] (what = UUID=..., where, passno)
+            self.uuid = {n: mt["what"].split("=", 1)[1] for n, mt in mounts.items()}
+            for n, mt in mounts.items():
+                assert mt["what"].startswith("UUID="), f"{n}: {mt['what']} is not a UUID= mount"
+            tmp = os.environ.get("TMPDIR", "/tmp")
+            self.path = {n: os.path.join(tmp, f"rime-disk-{n}.raw") for n in mounts}
+            for p in self.path.values():
+                with open(p, "wb") as f:
+                    f.truncate(size)
+            self.base_opts = os.environ.get("QEMU_OPTS", "")
+            self.baseline_failed = None
+
+        def attach(self, names):
+            # The machine's extra disks for its next start; a name left out is a disk taken out of the machine.
+            import os
+            os.environ["QEMU_OPTS"] = (self.base_opts + " " + " ".join(
+                f"-drive file={self.path[n]},if=none,id=d{n},format=raw -device virtio-blk-pci,drive=d{n},serial={n}"
+                for n in names)).strip()
+            print("disks attached:", list(names))
+
+        def restart(self, names):
+            self.m.shutdown()   # a no-op when it is not running
+            self.attach(names)
+            self.m.start()
+            self.m.wait_for_unit("multi-user.target")
+
+        def unit_of(self, n):
+            where = self.mounts[n]["where"]
+            return self.m.succeed(f"systemd-escape --path --suffix=mount {shlex.quote(where)}").strip()
+
+        def fsck_unit(self, n):
+            return self.m.succeed(f"systemd-escape --template systemd-fsck@.service "
+                                  f"--path /dev/disk/by-uuid/{self.uuid[n]}").strip()
+
+        def mounted_uuid(self, n):
+            rc, out = self.m.execute(f"findmnt -no UUID {shlex.quote(self.mounts[n]['where'])}")
+            return out.strip() if rc == 0 else None
+
+        def failed_units(self):
+            return set(self.m.succeed("systemctl list-units --failed --plain --no-legend | awk '{print $1}'").split())
+
+        def booted_whole(self):
+            m = self.m
+            m.fail("systemctl is-active emergency.target")
+            m.fail("systemctl is-active rescue.target")
+            m.succeed("systemctl is-active local-fs.target multi-user.target")
+            m.succeed("findmnt -no OPTIONS / | tr , '\\n' | grep -x rw")
+            print("system:", m.execute("systemctl is-system-running")[1], "| failed:", sorted(self.failed_units()))
+
+        def wait_mounted(self, n):
+            where = shlex.quote(self.mounts[n]["where"])
+            self.m.wait_until_succeeds(f"findmnt -no UUID {where} | grep -x {self.uuid[n]}", timeout=60)
+            assert self.m.succeed(f"cat {where}/.rime-test-disk").strip() == n, f"{n}: not the disk written"
+
+        def make_filesystems(self):
+            """The blank disks get the filesystems host.toml names (by UUID), and a marker each."""
+            m = self.m
+            for n in self.mounts:
+                assert self.mounted_uuid(n) is None, f"{n}: a blank disk is mounted?"
+                assert self.mounts[n]["type"] == "ext4", f"{n}: this lab makes ext4 only, not {self.mounts[n][type]}"
+                m.succeed(f"mkfs.ext4 -q -U {self.uuid[n]} -L {n} /dev/disk/by-id/virtio-{n}")
+            m.succeed("udevadm settle")
+            for n in self.mounts:
+                m.succeed(f"systemctl start {self.unit_of(n)}")
+                m.succeed(f"echo {n} > {shlex.quote(self.mounts[n]['where'])}/.rime-test-disk")
+
+        def h6_all_mount(self):
+            self.restart(list(self.mounts))
+            self.booted_whole()
+            for n, mt in self.mounts.items():
+                self.wait_mounted(n)
+                if mt["passno"]:
+                    fsck = self.fsck_unit(n)
+                    out = self.m.succeed(f"systemctl show -p Result -p ActiveState {shlex.quote(fsck)}")
+                    print(fsck, out.split())
+                    assert "Result=success" in out and "ActiveState=active" in out, out
+            self.baseline_failed = self.failed_units()
+
+        def h7_one_absent(self, gone):
+            rest = [n for n in self.mounts if n != gone]
+            self.restart(rest)
+            self.booted_whole()
+            for n in rest:
+                self.wait_mounted(n)
+            assert self.mounted_uuid(gone) is None, "a disk that is not there is mounted?"
+            self.m.fail(f"test -e /dev/disk/by-id/virtio-{gone}")
+            print(self.m.execute(f"systemctl status --no-pager {self.unit_of(gone)}")[1])
+
+        def h8_corrupt(self, bad, e2):
+            """fsck containment: damage on one disk that `fsck -a` must NOT repair by itself. Its fsck fails, it is
+            not mounted, the failure does not spread (no emergency shell, / read-write, the other disks mounted,
+            nothing else failed than at a healthy boot)."""
+            import os
+            import shutil
+            import subprocess
+            assert self.mounts[bad]["passno"], f"{bad} has passno 0: no fsck runs on it"
+            self.m.shutdown()   # a no-op when it is not running
+            # The root directory's inode cleared, and the superblock no longer says "clean" (as after a crash):
+            # without the second step e2fsck -p trusts the clean flag and checks nothing.
+            for req in ("clri <2>", "ssv state 0"):
+                subprocess.run([f"{e2}/debugfs", "-w", "-R", req, self.path[bad]], check=True)
+            probe = self.path[bad] + ".probe"
+            shutil.copyfile(self.path[bad], probe)
+            rc = subprocess.run([f"{e2}/e2fsck", "-p", probe], capture_output=True, text=True)
+            os.unlink(probe)
+            print("e2fsck -p on a copy:", rc.returncode, rc.stdout, rc.stderr)
+            assert rc.returncode & 4, f"the damage is one fsck -a repairs (rc {rc.returncode}): not a containment test"
+            self.restart(list(self.mounts))
+            self.booted_whole()
+            fsck = self.fsck_unit(bad)
+            self.m.wait_until_succeeds(f"systemctl is-failed {shlex.quote(fsck)}", timeout=120)
+            print(self.m.succeed(f"journalctl -b --no-pager -u {shlex.quote(fsck)}"))
+            assert self.mounted_uuid(bad) is None, "the corrupt disk was mounted"
+            for n in self.mounts:
+                if n != bad:
+                    self.wait_mounted(n)
+            self.m.wait_for_unit("graphical.target")
+            failed = self.failed_units()
+            new = failed - (self.baseline_failed or set()) - {fsck, self.unit_of(bad)}
+            print("failed now:", sorted(failed), "| at the healthy boot:", sorted(self.baseline_failed or ()))
+            assert not new, f"the bad disk's failure spread to: {sorted(new)}"
+
     def host_local_report(checked, left):
         """H10: katana's host-local files. Two match what the system ships (nix/modules/tuning.nix), so the report
         says nothing needs carrying; the I/O scheduler rule is left behind with how to port it."""

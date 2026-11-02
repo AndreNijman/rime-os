@@ -116,51 +116,8 @@ in
     };
 
     testScript = common.checks + ''
-      import os
-      import shutil
-      import subprocess
-
-      FIX = "${fixtureDisks}"
       E2 = "${pkgs.e2fsprogs}/bin"
-      tmp = os.environ.get("TMPDIR", "/tmp")
-      disks = {n: os.path.join(tmp, f"hostgates-{n}.raw") for n in ("games", "lab")}
-      for path in disks.values():
-          with open(path, "wb") as f:
-              f.truncate(128 << 20)
-      base_opts = os.environ.get("QEMU_OPTS", "")
 
-      def attach(names):
-          # The machine's extra disks for its next start; a name left out is a disk taken out of the machine.
-          os.environ["QEMU_OPTS"] = (base_opts + " " + " ".join(
-              f"-drive file={disks[n]},if=none,id={n},format=raw -device virtio-blk-pci,drive={n},serial={n}"
-              for n in names)).strip()
-          print("disks attached:", names)
-
-      def restart(names):
-          machine.shutdown()
-          attach(names)
-          machine.start()
-          machine.wait_for_unit("multi-user.target")
-
-      def unit_of(where):
-          return machine.succeed(f"systemd-escape --path --suffix=mount {shlex.quote(where)}").strip()
-
-      def fsck_unit(uuid):
-          return machine.succeed(
-              f"systemd-escape --template systemd-fsck@.service --path /dev/disk/by-uuid/{uuid}").strip()
-
-      def mounted_uuid(where):
-          rc, out = machine.execute(f"findmnt -no UUID {shlex.quote(where)}")
-          return out.strip() if rc == 0 else None
-
-      def booted_whole():
-          machine.fail("systemctl is-active emergency.target")
-          machine.fail("systemctl is-active rescue.target")
-          machine.succeed("systemctl is-active local-fs.target multi-user.target")
-          machine.succeed("findmnt -no OPTIONS / | tr , '\\n' | grep -x rw")
-          print("system:", machine.execute("systemctl is-system-running")[1])
-
-      attach(["games", "lab"])
       machine.start()
       machine.wait_for_unit("multi-user.target")
 
@@ -174,7 +131,7 @@ in
           left = {l["path"]: l["why"] for l in report["left_behind"]}
           host_local_report(checked, left)
           # What the system ships in their place, live.
-          machine.succeed("grep 'LIBINPUT_IGNORE_DEVICE' /etc/udev/rules.d/99-dualsense-touchpad.rules")
+          machine.succeed("grep LIBINPUT_IGNORE_DEVICE /etc/udev/rules.d/99-dualsense-touchpad.rules")
           assert machine.succeed("sysctl -n vm.dirty_bytes").strip() == "1073741824"
           assert machine.succeed("sysctl -n vm.dirty_background_bytes").strip() == "268435456"
 
@@ -194,64 +151,28 @@ in
           karg = checked["kernel command line"]
           assert "rd.driver.blacklist=nouveau" in karg.split("not carried", 1)[1], karg
 
+      with subtest("the extra disks are absent at the first boot: the boot does not stop"):
+          check_mounts(machine)
+
       mounts = {m["where"]: m for m in json.loads(machine.succeed(f"{HL} host get mount"))}
       games = mounts["/var/home/andre/Games"]
       lab = mounts["/var/lab"]
       assert games["passno"] == 2 and lab["passno"] == 0, mounts
-      uuid = {n: m["what"].split("=", 1)[1] for n, m in (("games", games), ("lab", lab))}
+      disks = DiskLab(machine, {"games": games, "lab": lab})
 
-      with subtest("first boot: blank disks (no filesystem with those UUIDs) do not hold the boot"):
-          booted_whole()
-          check_mounts(machine)
-          assert mounted_uuid(games["where"]) is None and mounted_uuid(lab["where"]) is None
+      with subtest("blank disks (no filesystem with those UUIDs) do not hold the boot; they get their filesystems"):
+          disks.restart(["games", "lab"])
+          disks.booted_whole()
+          disks.make_filesystems()
 
-      with subtest("the disks get the filesystems host.toml names"):
-          for n in ("games", "lab"):
-              machine.succeed(f"mkfs.ext4 -q -U {uuid[n]} -L {n} /dev/disk/by-id/virtio-{n}")
-          machine.succeed("udevadm settle")
-          for n, m in (("games", games), ("lab", lab)):
-              machine.succeed(f"systemctl start {unit_of(m['where'])}")
-              machine.succeed(f"echo {n} > {shlex.quote(m['where'])}/.rime-test-disk")
-
-      with subtest("H6: both fstab disks mount at boot"):
-          restart(["games", "lab"])
-          booted_whole()
-          for n, m in (("games", games), ("lab", lab)):
-              machine.wait_until_succeeds(f"findmnt -no UUID {shlex.quote(m['where'])} | grep -x {uuid[n]}", timeout=60)
-              assert machine.succeed(f"cat {shlex.quote(m['where'])}/.rime-test-disk").strip() == n
-          fsck = fsck_unit(uuid["games"])
-          out = machine.succeed(f"systemctl show -p Result -p ActiveState {shlex.quote(fsck)}")
-          print(fsck, out)
-          assert "Result=success" in out and "ActiveState=active" in out, out
+      with subtest("H6: both fstab disks mount at boot, the passno 2 one after a clean fsck"):
+          disks.h6_all_mount()
 
       with subtest("H7: the games disk taken out of the machine; the boot completes, the other disk mounts"):
-          restart(["lab"])
-          booted_whole()
-          machine.wait_until_succeeds(f"findmnt -no UUID /var/lab | grep -x {uuid['lab']}", timeout=60)
-          assert mounted_uuid(games["where"]) is None, "a disk that is not there is mounted?"
-          machine.fail("test -e /dev/disk/by-id/virtio-games")
-          print(machine.execute(f"systemctl status --no-pager {unit_of(games['where'])}")[1])
+          disks.h7_one_absent("games")
 
       with subtest("H8: fsck containment: a corrupt disk is not mounted and does not stop the boot"):
-          machine.shutdown()
-          # Clear the root directory's inode: damage `fsck -a` (preen) must NOT repair on its own.
-          subprocess.run([f"{E2}/debugfs", "-w", "-R", "clri <2>", disks["games"]], check=True)
-          probe = disks["games"] + ".probe"
-          shutil.copyfile(disks["games"], probe)
-          rc = subprocess.run([f"{E2}/e2fsck", "-p", probe], capture_output=True, text=True)
-          os.unlink(probe)
-          print("e2fsck -p on a copy:", rc.returncode, rc.stdout, rc.stderr)
-          assert rc.returncode & 4, f"the corruption is one fsck -a repairs (rc {rc.returncode}): not a containment test"
-          attach(["games", "lab"])
-          machine.start()
-          machine.wait_for_unit("multi-user.target")
-          booted_whole()
-          fsck = fsck_unit(uuid["games"])
-          machine.wait_until_succeeds(f"systemctl is-failed {shlex.quote(fsck)}", timeout=120)
-          print(machine.succeed(f"journalctl -b --no-pager -u {shlex.quote(fsck)}"))
-          assert mounted_uuid(games["where"]) is None, "the corrupt disk was mounted"
-          machine.wait_until_succeeds(f"findmnt -no UUID /var/lab | grep -x {uuid['lab']}", timeout=60)
-          machine.wait_for_unit("graphical.target")
+          disks.h8_corrupt("games", E2)
     '';
   };
 }
