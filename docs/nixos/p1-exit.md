@@ -405,7 +405,8 @@ virtiofsd reparented to the builder's shell and still waiting.
 Stress after the fix (`nix/tests/lib/stress.sh`, the update-client driver of commit 32d3ee3d4,
 `/nix/store/2cb1hig425s5wdwvsckmjmd9s5ww2ad1-nixos-test-driver-rime-update-client`, run 6 times AT ONCE in the
 container, 12 VMs, beside the other agents' VM tests; launched 2026-11-02 08:25 with 40 GB available and load average
-29.5, which rose to 98 during the runs): **6 of 6 passed, 0 hangs, 0 failures**, 1496-1506 s each. In 21 of the 30 VM
+29.5 (`stress6-launch.txt`; a peak near 98 was seen live during the runs but not logged); the same driver path is what
+`checks.x86_64-linux.update-client.driver` evaluates to at commit 2f913c7ca, unchanged by the docs-only commit after it): **6 of 6 passed, 0 hangs, 0 failures**, 1496-1506 s each. In 21 of the 30 VM
 starts (5 per run: server, client, and the client's reboots) a virtiofsd socket was not listening yet when the run
 script exec'd QEMU (19 times `shared`, once `nix-store`, once `shared` and `xchg`): every one a race that stock nixpkgs
 leaves to chance, and that the wrapper waited out (0-2 polls, at most 4 s). Logs: `stress6/run*.log`, `stress6/summary.txt`,
