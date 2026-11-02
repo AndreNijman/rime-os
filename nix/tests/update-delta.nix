@@ -238,7 +238,11 @@ pkgs.testers.runNixOSTest {
           d = man_b["delta"]
           print(f"G3 delta table: {len(d['files'])} deltas, {d['delta_size']} B")
           closure = [e["path"] for e in man_b["paths"]]
-          invalid = set(client.succeed("nix-store --check-validity --print-invalid " + " ".join(closure)).split())
+          # ~2,000 paths: one bash -c argument would pass MAX_ARG_STRLEN (128 KiB, exit 126), so they go in a file.
+          lst = server.out_dir / "g3-closure.txt"
+          lst.write_text("\n".join(closure) + "\n")
+          client.copy_from_host(str(lst), "/tmp/g3-closure.txt")
+          invalid = set(client.succeed("xargs nix-store --check-validity --print-invalid < /tmp/g3-closure.txt").split())
           missing = [p for p in closure if p in invalid]
           old = {e["path"] for e in man_old["paths"]}
           print(f"G3: {len(missing)} paths of the new release are not on the client"
