@@ -79,9 +79,9 @@ let
         $tool measure pairs.tsv res.tsv -j 2 --keep deltas
         $tool summary res.tsv
         col() { grep -F "$1"$'\t' res.tsv | cut -f"$2"; }
-        full=$(col "$newOut" 8) delta=$(col "$newOut" 10)
+        full=$(col "$newOut" 8) delta=$(col "$newOut" 9)
         [ "$delta" -lt $((full / 20)) ] || fail "delta $delta B is not much smaller than the full $full B"
-        [ "$(col "$onlyNew" 6)" = "" ] && [ "$(col "$onlyNew" 10)" = "$(col "$onlyNew" 8)" ] ||
+        [ "$(col "$onlyNew" 6)" = "" ] && [ "$(col "$onlyNew" 9)" = "$(col "$onlyNew" 8)" ] ||
           fail "a path with no base must cost its full size"
         hp=$(basename $newOut | cut -c1-32)
         [ -s deltas/$hp.delta ] || fail "measure --keep wrote no delta for $newOut"
@@ -138,6 +138,45 @@ let
         refuse wrong-base "refused" --narinfo good.narinfo --delta deltas/$hp.delta --base $oldDev
         refuse untrusted-key "nix copy refused" --narinfo other-key.narinfo --delta deltas/$hp.delta --base $oldOut
 
+        echo "== apply-all (the G3 benchmark): a machine on the old release moves to the new one"
+        cachepath() { # cachepath DIR PATH...: a file binary cache entry per path (NAR + narinfo signed with sk)
+          python3 -I - "$@" <<'EOF'
+        import base64, hashlib, os, subprocess, sys
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        d, paths = sys.argv[1], sys.argv[2:]
+        os.makedirs(d + "/nar", exist_ok=True)
+        open(d + "/nix-cache-info", "w").write("StoreDir: /nix/store\n")
+        name, secret = open("sk").read().strip().split(":", 1)
+        key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(secret)[:32])
+        for path in paths:
+            nar = subprocess.run(["nix-store", "--dump", path], check=True, capture_output=True).stdout
+            nar_hash = "sha256:" + subprocess.run(["nix-hash", "--type", "sha256", "--base32", path], check=True,
+                                                  capture_output=True, text=True).stdout.strip()
+            fh = nar_hash.split(":")[1]
+            open(f"{d}/nar/{fh}.nar", "wb").write(nar)
+            sig = base64.b64encode(key.sign(f"1;{path};{nar_hash};{len(nar)};".encode())).decode()
+            open(f"{d}/{os.path.basename(path)[:32]}.narinfo", "w").write(
+                f"StorePath: {path}\nURL: nar/{fh}.nar\nCompression: none\nNarHash: {nar_hash}\nNarSize: {len(nar)}\n"
+                f"References: \nSig: {name}:{sig}\n")
+        EOF
+        }
+        machine=$TMPDIR/machine
+        cachepath old-cache $oldOut $oldDev
+        nix copy --from file://$PWD/old-cache --to $machine --option trusted-public-keys "$(cat pk)" $oldOut $oldDev
+        cachepath server $newOut $newDev $onlyNew
+        # The server keeps NARs only for paths with no base: a path with a delta must come from its delta.
+        for p in $newOut $newDev; do
+          rm server/nar/$(nix-hash --type sha256 --base32 $p).nar
+        done
+        $tool apply-all res.tsv --server server --deltas deltas --store $machine --into w-all \
+          --trusted-key "$(cat pk)" --log all.jsonl | tee all.json
+        for p in $newOut $newDev $onlyNew; do
+          diff -r $machine$p $p || fail "apply-all: $p differs from the release's"
+        done
+        nix store verify --store $machine --trusted-public-keys "$(cat pk)" $newOut $newDev $onlyNew ||
+          fail "apply-all: nix store verify"
+        grep -F '"delta_paths": 2, "full_paths": 1' all.json >/dev/null || fail "apply-all: expected 2 delta + 1 full path"
+
         touch $out
       '';
 
@@ -160,6 +199,8 @@ let
     nix32-reversed = mutant "nix32-reversed" ''return "".join(out)'' ''return "".join(reversed(out))'';
     # measure keeps no delta for the client
     keep-nothing = mutant "keep-nothing" "if a.keep and best_file:" "if False:";
+    # apply-all fetches every path whole instead of rebuilding it from its delta
+    apply-all-no-delta = mutant "apply-all-no-delta" ''if r["base"]:'' "if False:";
   };
 in
 run tool

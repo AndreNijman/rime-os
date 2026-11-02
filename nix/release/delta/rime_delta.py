@@ -36,7 +36,8 @@ import time
 import urllib.request
 
 ZSTD_LEVEL = "-19"
-LONG = 27  # the window the measurement is specified at (--long=27, 128 MiB)
+SHIPPED_LEVEL = "-3"  # the level the release pipeline compresses NARs at today (nix copy ?compression=zstd)
+LONG = 27  # --long=27 (128 MiB), as G1/G2 specify; --patch-from raises the window to the base's size
 MAX_WINDOW_LOG = 31  # zstd's limit on 64-bit
 NIX32 = "0123456789abcdfghijklmnpqrsvwxyz"
 NAME_RE = re.compile(r"^/nix/store/[0-9a-z]{32}-(.+)$")
@@ -178,9 +179,9 @@ def window_log(*sizes):
     return max(LONG, min(MAX_WINDOW_LOG, max(10, biggest.bit_length())))
 
 
-def zstd_size(args, src, dest):
+def zstd_size(args, src, dest, level=ZSTD_LEVEL):
     t = time.monotonic()
-    p = subprocess.run(["zstd", "-q", "-f", "-T1", ZSTD_LEVEL] + args + [src, "-o", dest], capture_output=True, text=True)
+    p = subprocess.run(["zstd", "-q", "-f", "-T1", level] + args + [src, "-o", dest], capture_output=True, text=True)
     if p.returncode != 0:
         raise RuntimeError(f"zstd {' '.join(args)} {src}: {p.stderr.strip()}")
     return os.path.getsize(dest), time.monotonic() - t
@@ -219,8 +220,9 @@ def reconstruct(base_nar, delta, out, wlog):
 
 
 def try_delta(base_nar, new_nar, digest, wlog, dest):
-    """One delta at one window; it only counts if it rebuilds the exact NAR."""
-    size, secs = zstd_size([f"--long={wlog}", f"--patch-from={base_nar}"], new_nar, dest)
+    """One delta (zstd -19 --long=27 --patch-from); it only counts if it rebuilds the exact NAR. `wlog` is the window
+    the decoder allows."""
+    size, secs = zstd_size([f"--long={LONG}", f"--patch-from={base_nar}"], new_nar, dest)
     back = dest + ".back"
     t = time.monotonic()
     reconstruct(base_nar, dest, back, wlog)
@@ -243,26 +245,27 @@ def measure_one(row, a, tmp_root):
         if not narinfo_hash_matches(row["nar_hash"], digest):
             raise RuntimeError(f"{row['path']}: dumped NAR hash {nar_hash_string(digest)} != {row['nar_hash']}")
         full, full_s = zstd_size([f"--long={LONG}"], new_nar, os.path.join(tmp, "full.zst"))
+        # What the D6 pipeline writes today: `nix copy --to file://...?compression=zstd` with compression-level
+        # unset = libzstd's default level 3, no long-distance window.
+        full_nix, _ = zstd_size([], new_nar, os.path.join(tmp, "full3.zst"), level=SHIPPED_LEVEL)
         res = {**row, "full_zstd": full, "full_s": round(full_s, 2), "tried": 0, "base": "", "base_size": 0,
-               "delta_27": full, "delta_w": full, "wlog": LONG, "delta_s": 0, "apply_s": 0}
+               "delta": full, "wlog": LONG, "delta_s": 0, "apply_s": 0, "full_nix": full_nix}
         best_file = None
         for n, cand in enumerate(filter(None, row["candidates"].split(","))):
             base_path = cand.rsplit("=", 1)[0]
             base_nar = os.path.join(tmp, "base.nar")
             bsize = dump_nar(a.old_store, base_path, base_nar)
-            d27 = os.path.join(tmp, f"d{n}-27.zst")
-            size27, secs27, apply27 = try_delta(base_nar, new_nar, digest, LONG, d27)
+            dfile = os.path.join(tmp, f"d{n}.zst")
+            # zstd raises the window to cover the base in --patch-from mode whatever --long says (measured on a 550 MiB
+            # llvm lib with --long=27: frame window 550 MiB), so one compression at the specified flags is enough;
+            # the decoder must allow that window (`wlog`).
             wl = window_log(bsize, size)
-            if wl > LONG:  # the base or the new NAR is larger than --long=27's 128 MiB window
-                dw = os.path.join(tmp, f"d{n}-w.zst")
-                sizew, _secsw, applyw = try_delta(base_nar, new_nar, digest, wl, dw)
-            else:
-                dw, sizew, applyw = d27, size27, apply27
+            dsize, dsecs, applys = try_delta(base_nar, new_nar, digest, wl, dfile)
             res["tried"] += 1
-            if not res["base"] or sizew < res["delta_w"]:
-                res.update(base=base_path, base_size=bsize, delta_27=size27, delta_w=sizew, wlog=wl,
-                           delta_s=round(secs27, 2), apply_s=round(applyw, 3))
-                best_file = dw
+            if not res["base"] or dsize < res["delta"]:
+                res.update(base=base_path, base_size=bsize, delta=dsize, wlog=wl, delta_s=round(dsecs, 2),
+                           apply_s=round(applys, 3))
+                best_file = dfile
         if a.keep and best_file:
             # The server side of a release: the best delta, named by the new path's hash part.
             shutil.copyfile(best_file, os.path.join(a.keep, os.path.basename(row["path"])[:32] + ".delta"))
@@ -271,8 +274,8 @@ def measure_one(row, a, tmp_root):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-RESULT_COLS = ["path", "name", "nar_size", "match", "tried", "base", "base_size", "full_zstd", "delta_27", "delta_w",
-               "wlog", "full_s", "delta_s", "apply_s"]
+RESULT_COLS = ["path", "name", "nar_size", "match", "tried", "base", "base_size", "full_zstd", "delta", "wlog",
+               "full_s", "delta_s", "apply_s", "full_nix"]
 
 
 def cmd_measure(a):
@@ -303,7 +306,7 @@ def cmd_measure(a):
             out.write("\t".join(str(res[c]) for c in RESULT_COLS) + "\n")
             out.flush()
             if i % 50 == 0 or int(r["nar_size"]) > 100_000_000:
-                print(f"  {i}/{len(todo)} {res['name']} full {res['full_zstd']} delta {res['delta_w']}", flush=True)
+                print(f"  {i}/{len(todo)} {res['name']} full {res['full_zstd']} delta {res['delta']}", flush=True)
     if failed:
         raise SystemExit(f"measure: {failed} paths failed")
 
@@ -317,19 +320,20 @@ def cmd_summary(a):
     def tot(rs, col):
         return sum(int(r[col]) for r in rs)
 
-    full, d27, dw = tot(rows, "full_zstd"), tot(rows, "delta_27"), tot(rows, "delta_w")
+    full, delta = tot(rows, "full_zstd"), tot(rows, "delta")
     print(f"paths added {len(rows)}, NAR {tot(rows, 'nar_size') / G:.3f} GB")
+    if rows and "full_nix" in rows[0]:
+        print(f"full zstd -3 (shipped)    {tot(rows, 'full_nix') / G:.3f} GB")
     print(f"full zstd -19 --long=27   {full / G:.3f} GB")
-    print(f"delta --long=27           {d27 / G:.3f} GB  ({d27 / full * 100 if full else 0:.1f} % of full)")
-    print(f"delta, window covers base {dw / G:.3f} GB  ({dw / full * 100 if full else 0:.1f} % of full)")
+    print(f"delta (--patch-from)      {delta / G:.3f} GB  ({delta / full * 100 if full else 0:.1f} % of full)")
     for kind in ("same-name", "same-package", "loose-package", "none"):
         rs = [r for r in rows if r["match"] == kind]
         if rs:
-            print(f"  {kind:14} {len(rs):5} paths  full {tot(rs, 'full_zstd') / G:.3f} GB  delta {tot(rs, 'delta_w') / G:.3f} GB")
-    big = sorted(rows, key=lambda r: -int(r["delta_w"]))[: a.top]
+            print(f"  {kind:14} {len(rs):5} paths  full {tot(rs, 'full_zstd') / G:.3f} GB  delta {tot(rs, 'delta') / G:.3f} GB")
+    big = sorted(rows, key=lambda r: -int(r["delta"]))[: a.top]
     print(f"largest {a.top} after delta (MB full -> MB delta, window log):")
     for r in big:
-        print(f"  {int(r['full_zstd']) / 1e6:9.1f} -> {int(r['delta_w']) / 1e6:9.1f}  w{r['wlog']}  {r['match']:13} {r['name']}")
+        print(f"  {int(r['full_zstd']) / 1e6:9.1f} -> {int(r['delta']) / 1e6:9.1f}  w{r['wlog']}  {r['match']:13} {r['name']}")
     multi = sum(1 for r in rows if int(r["tried"]) > 1)
     print(f"paths with more than one candidate tried: {multi}; max window log: {max((int(r['wlog']) for r in rows), default=LONG)}")
 
