@@ -68,8 +68,12 @@ children() { # the PIDs whose parent is this process
 }
 
 start=$SECONDS
+late=()   # the sockets that were not listening yet when QEMU would have started: each one a lost race without this
+polls=0
 for s in "${sockets[@]}"; do
+    listening "$s" || late+=("${s##*/}")
     until listening "$s"; do
+        polls=$((polls + 1))
         if [ $((SECONDS - start)) -ge "$wait_s" ]; then
             echo "rime-qemu: $s is not listening after ${wait_s} s; not starting QEMU" >&2
             pids=$(children)
@@ -83,7 +87,8 @@ for s in "${sockets[@]}"; do
         @sleep@ 0.05
     done
 done
-waited=$((SECONDS - start))
-[ "$waited" -gt 0 ] && echo "rime-qemu: waited ${waited} s for ${#sockets[@]} socket(s)" >&2
+if [ "${#late[@]}" -gt 0 ]; then
+    echo "rime-qemu: ${#late[@]} of ${#sockets[@]} socket(s) not listening yet (${late[*]}): waited $polls polls, $((SECONDS - start)) s" >&2
+fi
 
 exec "$real" "$@"

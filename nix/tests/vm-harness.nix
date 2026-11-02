@@ -77,10 +77,12 @@ let
       echo "-- a virtiofsd socket that appears 2 s late: QEMU starts only once it listens"
       python3 ${sockHelper} $PWD/s1 2 0 & h=$!
       start=$SECONDS
-      "$q" -name x -chardev socket,id=shared,path=$PWD/s1 -device foo
+      "$q" -name x -chardev socket,id=shared,path=$PWD/s1 -device foo 2> late.err
       t=$((SECONDS - start))
       kill $h
       grep -x "listening $PWD/s1" qemu.out || { echo "case late: QEMU ran before the socket listened"; cat qemu.out; return 1; }
+      # said, naming the socket (the stress runs count these lines: each one a race QEMU would have lost)
+      grep -F "rime-qemu: 1 of 1 socket(s) not listening yet (s1)" late.err || { echo "case late: not reported"; cat late.err; return 1; }
       [ "$t" -ge 1 ] || { echo "case late: did not wait ($t s)"; return 1; }
 
       echo "-- bound but not listening for 2 s (the moment between bind and listen)"

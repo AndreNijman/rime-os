@@ -18,6 +18,7 @@ mkdir -p "$out"
 pids=()
 for i in $(seq 1 "$n"); do
     d=$(mktemp -d "$out/run$i.XXXXXX")
+    mkdir -p "$d/out"
     (
         start=$SECONDS
         TMPDIR=$d timeout --kill-after=30 "$limit" "$driver/bin/nixos-test-driver" -o "$d/out" > "$out/run$i.log" 2>&1
@@ -31,9 +32,10 @@ wait "${pids[@]}"
 for i in $(seq 1 "$n"); do
     l=$out/run$i.log
     rc=$(tail -n 1 "$l" | awk -F'[= ]' '/^rc=/ { print $2 }')
-    waited=$(grep -ac 'rime-qemu: waited' "$l")
+    # VM starts where a socket was not listening yet when the run script exec'd QEMU: races QEMU would have lost
+    waited=$(grep -ac 'rime-qemu: .* not listening yet' "$l")
     if [ "$rc" = 0 ]; then
-        echo "run$i: ok ($(tail -n 1 "$l" | cut -d' ' -f2-), the wrapper waited in $waited VM start(s))"
+        echo "run$i: ok ($(tail -n 1 "$l" | cut -d' ' -f2-), a socket was late in $waited of its VM starts)"
     elif [ "$rc" = 124 ] || [ "$rc" = 137 ]; then
         echo "run$i: HUNG (stopped at $limit s)"
     else
