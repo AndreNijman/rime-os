@@ -7,7 +7,7 @@ varstore, every key press goes to the guest.
 | File | What it does |
 |---|---|
 | `mkbootc.sh KIND` | Runs inside the published image (`podman run --privileged`, an empty tmpfs over `/sys/firmware`). Makes `disks/KIND/disk.raw` (and for E `win.raw`) |
-| `system.nix` | The lab NixOS system the bridge installs: the product modules + `rime.rootfs` + `rime.boot`, nixpkgs' kernel. Its `rime-bridge-lab` unit was meant to print markers on ttyS0; serial-getty hangs that tty up under it and the unit fails (lab-only, harmless), so the driver checks the same things after a serial login |
+| `system.nix` | The lab NixOS system the bridge installs: the product modules + `rime.rootfs` + `rime.boot`, nixpkgs' kernel. Its `rime-bridge-lab` unit was meant to print markers on ttyS0; serial-getty hangs that tty up under it and the unit fails (lab-only, harmless), so the driver checks the same things after a serial login. That failed unit is why the lab system reads `degraded`; it is not a product unit |
 | `payload.sh TOPLEVEL BRIDGE` | Inside the rime-nix container: the payload disk (`payload/store.tar.zst`, `registration`, `manifest.json`, the bridge as it runs on bootc, `guest-prep.sh`) |
 | `guest-prep.sh KIND` | Inside the guest (refuses outside KVM): the firmware entries a real machine of KIND has (E: katana's `APEX-OS Primary` first, `Fedora`, the trial's `Rime OS` systemd-boot entry not in BootOrder; katana's is Boot0006, here the first free number) |
 | `refusals-mutant.nix` | `bridge-refusals` with a rime-migrate whose btrfs mounts are read-write: it MUST fail (proves the before/after sha256 can catch a write) |
@@ -40,8 +40,9 @@ the same image, with `/sys/firmware` replaced by an empty tmpfs first (checked b
 
 - **bootc**: log in on ttyS0 with the old password, `guest-prep.sh`, power off and boot again through the machine's own
   entry (A: `Fedora`; E: `APEX-OS Primary`), [E: `check` (topology E), `repair-e`, `repair-e --confirm`], format the
-  backup disk, `check --explain --backup`, `start --backup --payload --yes` (about 17 min: backup, both fsck gates with
-  a scrub, the 4 GB closure, `nix-store --verify --check-contents`), record the subvolumes, `custom.cfg` and the state.
+  backup disk, `check --explain --backup`, `start --backup --payload --yes` (3 min 13 s in the evidence run; 16-17 min when
+  it shared the host with a second guest and a NixOS VM test: backup, both fsck gates with a scrub, the 4 GB closure,
+  `nix-store --verify --check-contents`), record the subvolumes, `custom.cfg` and the state.
 - **nixos**: GRUB's default is now the NixOS entry the boot hook wrote: wait for the serial getty, screenshot the
   greeter (VGA), log in on ttyS0 with the OLD password, then greetd active, the mounts, the carried `phase` (E:
   `failed`), the machine-id and the home checksums.

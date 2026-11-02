@@ -125,7 +125,7 @@ Listed so they are not lost; they close the same way.
 
 | # | Gate | Source | How proven | Status |
 |---|---|---|---|---|
-| X1 | The topology E repair runs | D3 P2 gates | OVMF lab log: `/var/lab/rime-nix/artifacts/bridge/E/E-repair-e*.txt`, `E-after-repair.txt` (trial ESP dirs + the trial NVRAM entry archived under /var/lib/rime/boot-migrate/archive-*, entry deleted, BootOrder untouched, phase=failed kept and carried to NixOS) | met (2026-11-02) |
+| X1 | The topology E repair runs | D3 P2 gates | OVMF lab log: `/var/lab/rime-nix/artifacts/bridge/E/E-repair-e*.txt`, `E-after-repair.txt` (trial ESP dirs + the trial NVRAM entry archived under /var/lib/rime/boot-migrate/archive-*, entry deleted, BootOrder untouched, phase=failed kept and carried to NixOS). The trial's `/composefs` and `/state` in the btrfs top level are left in place by design (not on the boot path; `E/E-back-state.txt`) | met (2026-11-02) |
 | X2 | The `test-boot-v2.sh` scan finds no `bootctl`, `grub-install` or `efibootmgr` in the activation script or the boot hook | D3 | check attr (boothook) | not met yet |
 | X3 | A machine that never took the release carrying `RENAMED_SIGNER` is refused by name | D1 | `rime migrate check` VM test: `bridge-refusals` X3 disk `REFUSED [renamed-signer]`, sha256 unchanged (`/var/lab/rime-nix/artifacts/bridge/bridge-refusals.log`); mutant no-signer-check | met (2026-11-02) |
 | X4 | An end-to-end update in a VM refuses a tampered narHash, an unsigned manifest and a wrong identity | D6 | `update-e2e` (release + client) | not met yet |
