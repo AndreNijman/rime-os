@@ -14,8 +14,12 @@
 #     only tells the verifier which file to take; the build checks that the copy's primary is the one repomd names
 #     and that it names the pinned rpm and sha256.
 #   - claude-desktop: the deb itself is not signed; Anthropic signs InRelease, which names Packages by sha256, which
-#     names the deb by sha256. InRelease is kept here (it is the signed root and its URL moves); Packages is fetched
-#     by hash (Acquire-By-Hash), the deb by its pool path. gpgv does not enforce Valid-Until, so the kept InRelease
+#     names the deb by sha256. InRelease is kept here (it is the signed root and its URL moves), and so is the
+#     Packages it names (68 KB of text): its by-hash URL answers today, but an apt archive drops old by-hash entries
+#     after a few releases, and a machine that builds the app itself (see Redistribution below) must still find it.
+#     The build checks the kept Packages' sha256 against packagesSha256 before the verifier reads it, and the
+#     verifier checks it again against the signed InRelease (decided 2026-11-02 by the nix/apps verification). The
+#     deb is fetched by its pool path, which Anthropic keeps (63 versions listed). gpgv does not enforce Valid-Until, so the kept InRelease
 #     keeps verifying. The verifier takes the NEWEST claude-desktop in Packages (`sort -V | tail -1`), so the pin is
 #     always the newest version the kept Packages lists.
 #
@@ -23,8 +27,9 @@
 #   chatgpt         curl $REPO/repodata/repomd.xml > chatgpt/repomd.xml; fetch the primary it names into chatgpt/
 #                   (keep the hash-prefixed name, remove the old one); take <location href> and the sha256 from it.
 #   claude-desktop  curl $REPO/dists/stable/InRelease > claude-desktop/InRelease; packagesSha256 = its
-#                   main/binary-amd64/Packages SHA256 line; file/sha256 = the newest claude-desktop stanza of that
-#                   Packages.
+#                   main/binary-amd64/Packages SHA256 line; curl $REPO/dists/stable/main/binary-amd64/Packages >
+#                   claude-desktop/Packages (its sha256 must be packagesSha256); file/sha256 = the newest
+#                   claude-desktop stanza of that Packages.
 #   then: nix build path:.#rime-chatgpt path:.#rime-claude-desktop (the verifier and the package checks run in it)
 #   and checks.vendor-apps. A version the nixpkgs-derived packaging no longer fits fails there, not on a machine.
 #
@@ -50,6 +55,7 @@
     # rime-pkg's CLAUDE_REPO default.
     repo = "https://downloads.claude.ai/claude-desktop/apt/stable";
     inRelease = ./claude-desktop/InRelease;
+    packages = ./claude-desktop/Packages;
     packagesSha256 = "a8d00f835869869d2c0dd35da06a9c15faf8fca90ee0b6f666b7727650a3cebd";
     file = "pool/main/c/claude-desktop/claude-desktop_4.4212.0_amd64.deb";
     sha256 = "4fcf658e0fc895390ab82593287281dfbce261b0ec3ea90060e82d8bfbfd7a84";

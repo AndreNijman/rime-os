@@ -34,6 +34,12 @@ let
     cp ${c.primaryFile} $out/${c.primary}
   '';
 
+  claudePackages = runCommand "rime-claude-desktop-packages-${d.version}" { } ''
+    got=$(sha256sum ${d.packages} | cut -d' ' -f1)
+    [ "$got" = "${d.packagesSha256}" ] || { echo "the kept Packages is not the pinned one ($got != ${d.packagesSha256})" >&2; exit 1; }
+    cp ${d.packages} $out
+  '';
+
   # The vendor repositories as the verifier reads them: repository path -> file.
   files = {
     chatgpt = {
@@ -46,10 +52,9 @@ let
     };
     claude-desktop = {
       "dists/stable/InRelease" = d.inRelease;
-      "dists/stable/main/binary-amd64/Packages" = fetchurl {
-        url = "${d.repo}/dists/stable/main/binary-amd64/by-hash/SHA256/${d.packagesSha256}";
-        sha256 = d.packagesSha256;
-      };
+      # The kept copy (pins.nix says why), checked against the pinned hash; the verifier then checks it against the
+      # signed InRelease.
+      "dists/stable/main/binary-amd64/Packages" = claudePackages;
       ${d.file} = fetchurl {
         url = "${d.repo}/${d.file}";
         inherit (d) sha256;
