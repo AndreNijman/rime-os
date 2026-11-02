@@ -220,6 +220,23 @@ let
     lib.optionalString (vars != { }) ("${pkgs.coreutils}/bin/env "
       + lib.concatStrings (lib.mapAttrsToList (k: v: "${k}=${lib.escapeShellArg v} ") vars));
 
+  # ... but the MACHINE's keymap is host.toml's, which rime-hostlayer apply writes to
+  # /etc/X11/xorg.conf.d/00-keyboard.conf at every activation; the configuration's is only the default.
+  # The installer2 OVMF run showed a gb install's greeter on English (US): the account password is typed there,
+  # so a password with `"` or `@` could not be typed. When the greeter starts, the same generator the manager
+  # runs (rime-keymap-env) is read; a layout there replaces all four configuration values.
+  greeterKeymap = pkgs.writeShellScript "rime-greeter-keymap" ''
+    env=$(${keymapGenerator} 2>/dev/null || true)
+    case "$env" in
+      *XKB_DEFAULT_LAYOUT=*)
+        unset XKB_DEFAULT_LAYOUT XKB_DEFAULT_VARIANT XKB_DEFAULT_MODEL XKB_DEFAULT_OPTIONS
+        while IFS= read -r kv; do
+          case "$kv" in XKB_DEFAULT_[A-Z]*=*) export "$kv" ;; esac
+        done <<< "$env" ;;
+    esac
+    exec "$@"
+  '';
+
   # greetd's config exactly as the greetd module generates it (same derivation, same store path).
   greetdToml = (pkgs.formats.toml { }).generate "greetd.toml" config.services.greetd.settings;
 
@@ -345,7 +362,7 @@ in
           # puts the keymap) to the greeter, measured in checks.desktop: show-environment had the keymap,
           # the greeter's sway did not. On NixOS the keymap is configuration (services.xserver.xkb), so
           # it is handed to the greeter host directly.
-          command = "${greeterXkbEnv}${sw}/libexec/rime-greet-session ${lib.getExe pkgs.sway} --unsupported-gpu"
+          command = "${greeterXkbEnv}${greeterKeymap} ${sw}/libexec/rime-greet-session ${lib.getExe pkgs.sway} --unsupported-gpu"
             + " -c ${rimeGreet}/share/rime-greet/sway-greet.conf";
         };
       };
@@ -575,7 +592,9 @@ in
       # ── Boot splash (Containerfile.rime:265-312; bootc kargs.d `quiet splash`) ────────────────────
       # The theme (the layered ridge and its accents) is chosen in branding.nix.
       boot.plymouth.enable = true;
-      boot.kernelParams = [ "quiet" "splash" ];
+      # `splash` itself comes from boot.plymouth (nixpkgs' plymouth module adds it): naming it here as well put
+      # `splash splash` on every boot entry (installer2, checks.installer-polish-eval).
+      boot.kernelParams = [ "quiet" ];
       boot.consoleLogLevel = lib.mkDefault 3;
 
       # ── Flatpak + Flathub (files/system/units/rime-flathub-setup.service) ─────────────────────────

@@ -134,6 +134,13 @@ pkgs.testers.runNixOSTest {
                         "/run/systemd/generator/var-home-andre-Games.mount")
         machine.succeed("grep -x 'Options=defaults,nofail' /run/systemd/generator/var-home-andre-Games.mount")
 
+    with subtest("the greeter types in host.toml's keymap, not the configuration's us"):
+        # The password is typed at the greeter: on a gb machine its sway must read gb (installer2 OVMF run).
+        machine.wait_until_succeeds("pgrep -u greetd -x sway")
+        env = machine.succeed("tr '\\0' '\\n' < /proc/$(pgrep -u greetd -x sway | head -n1)/environ | grep '^XKB_' || true")
+        print("greeter sway XKB environment:", env)
+        assert "XKB_DEFAULT_LAYOUT=gb" in env.split() and "XKB_DEFAULT_OPTIONS=caps:escape" in env.split(), env
+
     with subtest("andre logs in through greetd with the carried password"):
         greeter_login(machine, "andre", "rime")
         machine.succeed("test \"$(stat -c %U /var/home/andre)\" = andre")

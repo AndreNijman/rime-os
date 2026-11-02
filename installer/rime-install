@@ -578,6 +578,30 @@ live_esp_readonly() {
 # deleted by the installed system on its first boot, once nothing runs from
 # it. A oneshot with a path condition: after it has run once it never runs
 # again, and on a machine that was not installed from Windows it never runs.
+# A staged Windows install cleans up after itself, and only on success (both
+# install paths call this last). The entry is removed only when it is provably
+# the one the app made: its number comes from the hand-off file, and its label
+# and loader path must both match.
+remove_setup_entry() {
+  local _bn
+  [ "${ESP_IS_LIVE:-0}" = 1 ] && [ -f /run/initramfs/live/rimeinst/handoff.cfg ] || return 0
+  _bn=$(sed -n 's/^bootnum=\([0-9A-Fa-f]\{4\}\)$/\1/p' /run/initramfs/live/rimeinst/handoff.cfg | head -1)
+  if [ -n "$_bn" ] && have efibootmgr \
+     && efibootmgr -v 2>/dev/null | grep -i "^Boot${_bn}\*\? Rime OS Setup" | grep -i 'rimeinst' >/dev/null; then
+    efibootmgr -q -b "$_bn" -B >>"$LOG" 2>&1 \
+      && log "handoff: removed the one-shot setup entry Boot$_bn" \
+      || log "handoff: could not remove Boot$_bn (harmless: it is not in BootOrder)"
+  else
+    log "handoff: setup entry ${_bn:-?} not found or not ours; left alone"
+  fi
+  # The staged files themselves are NOT deleted here: this session runs from
+  # the squashfs among them, and a file deleted while open keeps the ESP from
+  # going back to read-only, which leaves its FAT marked dirty. The installed
+  # system deletes them on its first boot (install_staged_cleanup_in; on the
+  # NixOS path, rime.boot's rime-staged-cleanup unit).
+  return 0
+}
+
 install_staged_cleanup_in() {  # $1 = deployment root
   local d="$1"
   [ "$ESP_IS_LIVE" = 1 ] || return 0
@@ -2338,12 +2362,6 @@ if [ -n "$_disk_mounts" ]; then
   fi
 fi
 
-# The NixOS path refuses first, by its own rules (whole disk, btrfs, its disk
-# floor, a timezone, the system present and signed in its cache).
-if [ "$NIXOS" = 1 ]; then
-  nixos_preflight
-fi
-
 # Refuse a target that cannot possibly hold the install, BEFORE erasing it.
 # There used to be no check at all in headless mode, so a too-small stick was
 # wiped and the install then failed on space several minutes later —
@@ -2491,6 +2509,14 @@ else
   TARGET_DESC="$DISK (entire disk)"
 fi
 log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME"
+
+# The NixOS path refuses next, by its own rules, with every generic guard above
+# already passed (a partition of DISK, a real ESP on it, nothing mounted): its
+# floors, a timezone, Rime's own ESP (never Windows'), the labels it boots by,
+# the network, and the system proven a signed release present in its caches.
+if [ "$NIXOS" = 1 ]; then
+  nixos_preflight
+fi
 
 # ── The encryption helper has to EXIST before the disk is destroyed ─────────
 # An encrypted disk whose recovery key was never created is the stranding case
@@ -3453,21 +3479,7 @@ Full log: $LOG"
 # the disk they are dead weight (1.8 GB of the ESP), so they go. The entry is
 # removed only when it is provably the one the app made: its number comes from
 # the hand-off file, and its label and loader path must both match.
-if [ "$ESP_IS_LIVE" = 1 ] && [ -f /run/initramfs/live/rimeinst/handoff.cfg ]; then
-  _bn=$(sed -n 's/^bootnum=\([0-9A-Fa-f]\{4\}\)$/\1/p' /run/initramfs/live/rimeinst/handoff.cfg | head -1)
-  if [ -n "$_bn" ] && have efibootmgr \
-     && efibootmgr -v 2>/dev/null | grep -i "^Boot${_bn}\*\? Rime OS Setup" | grep -qi 'rimeinst'; then
-    efibootmgr -q -b "$_bn" -B >>"$LOG" 2>&1 \
-      && log "handoff: removed the one-shot setup entry Boot$_bn" \
-      || log "handoff: could not remove Boot$_bn (harmless: it is not in BootOrder)"
-  else
-    log "handoff: setup entry ${_bn:-?} not found or not ours; left alone"
-  fi
-  # The staged files themselves are NOT deleted here: this session runs from
-  # the squashfs among them, and a file deleted while open keeps the ESP from
-  # going back to read-only, which leaves its FAT marked dirty. The installed
-  # system deletes them on its first boot (install_staged_cleanup_in).
-fi
+remove_setup_entry
 log "install complete"
 write_result ok ""
 # The machine-readable success sentinel. It MUST be the very last line on

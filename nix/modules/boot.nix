@@ -111,6 +111,22 @@ in
     hardware.cpu.intel.updateMicrocode = lib.mkDefault true;
     hardware.cpu.amd.updateMicrocode = lib.mkDefault true;
 
+    # A machine installed from Windows: the Rime installer app staged the live environment on this ESP and the
+    # installer ran from it, so it could not delete it (rime-install remove_setup_entry). It goes at the first
+    # boot, as on bootc (rime-install install_staged_cleanup_in); inert everywhere else.
+    systemd.services.rime-staged-cleanup = {
+      description = "Remove the installer Rime OS was set up from";
+      unitConfig = {
+        RequiresMountsFor = cfg.mountPoint;
+        ConditionPathExists = "${cfg.mountPoint}/rimeinst/handoff.cfg";
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.coreutils}/bin/rm -rf ${cfg.mountPoint}/rimeinst ${cfg.mountPoint}/EFI/rimeinst";
+      };
+      wantedBy = [ "multi-user.target" ];
+    };
+
     environment.systemPackages = [ cli ];
     system.build.rimeBootHook = hook;
   };

@@ -55,11 +55,14 @@ def main():
     ap.add_argument("--mem", type=int, default=6144)
     ap.add_argument("--smp", type=int, default=4)
     ap.add_argument("--accel", default="kvm")
+    # A prepared varstore (copied, never written): the lab's Microsoft keys + TEST MOK, for a machine where the Rime
+    # key is already enrolled. The copy this run writes (<work>/<name>.vars.fd) keeps the installer's NVRAM entry.
+    ap.add_argument("--vars-template")
     a = ap.parse_args()
     a.work = os.path.abspath(a.work)
     os.makedirs(a.work, exist_ok=True)
 
-    cmd = iq.qemu_cmd(a, a.name, iso=a.iso, media="usb", firmware="uefi-sb")
+    cmd = iq.qemu_cmd(a, a.name, iso=a.iso, media="usb", firmware="uefi-sb", vars_template=a.vars_template)
     cmd += ["-drive", "if=none,id=tgt,format=raw,file=%s" % a.disk,
             "-device", "virtio-blk-pci,drive=tgt,serial=rimetarget,bootindex=1",
             "-drive", "if=none,id=lab,format=raw,file=%s" % a.labdisk,

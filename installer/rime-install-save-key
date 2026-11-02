@@ -1,0 +1,150 @@
+#!/usr/bin/bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-install-save-key — copy the disk recovery key to a USB stick the owner
+#  plugs in after the install (docs/nixos/installer.md "Recovery key").
+#
+#    rime-install-save-key DEVICE [HOSTNAME]  <<< "RECOVERY-KEY"
+#
+#  WHY: rime-install writes the key to the stick the installer booted from
+#  (surface_recovery_key), but a stick written with `dd` from the ISO is
+#  read-only (ISO 9660), and so is a staged Windows install's live medium. On
+#  those machines the screen was the only copy. The final page now offers to
+#  save it to ANOTHER stick: one that does not travel in the laptop's bag is
+#  the better place anyway.
+#
+#  The front end lists candidate sticks; this program trusts none of that and
+#  refuses, writing nothing:
+#   - a device that is not removable (USB, or the removable flag),
+#   - the disk Rime OS was just installed on (it carries RIME-ESP, rime-root,
+#     RIMEROOT, or the ESP the Windows app staged, RIMEEFI/RIME-EFI) and the
+#     disk this installer runs from: the key must never sit beside what it
+#     opens,
+#   - a device with no filesystem this program can write to (FAT, exFAT, NTFS,
+#     ext4): it never formats anything,
+#   - a device that is mounted.
+#  It writes rime-recovery-key-<HOSTNAME>.txt (a new name if one exists), syncs,
+#  unmounts, mounts again read-only and reads the key back.
+#
+#  Output, one line: `RIME-RECOVERY-SAVED: <file> on <device>` (exit 0) or
+#  `RIME-RECOVERY-SAVE-FAILED: <reason>` (exit 1). The key itself is never
+#  printed or logged.
+#
+#  TEST SEAM (environment only, logged): RIME_RECOVERY_ALLOW_FIXED=1 accepts a
+#  non-removable disk (a VM's virtio disk is not removable).
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+LOG=${RIME_SAVE_KEY_LOG:-/var/log/rime-install.log}
+log() { printf '%s save-key: %s\n' "$(date -Is 2>/dev/null)" "$*" >>"$LOG" 2>/dev/null || :; }
+fail() { log "refused: $1"; echo "RIME-RECOVERY-SAVE-FAILED: $1"; exit 1; }
+
+DEV="${1:-}"
+HOST="${2:-rime}"
+printf '%s' "$HOST" | grep -E '^[A-Za-z0-9][A-Za-z0-9-]{0,62}$' >/dev/null || HOST=rime
+IFS= read -r KEY || true
+KEY=$(printf '%s' "$KEY" | tr -d '\r\n ')
+[ "$(id -u)" = 0 ] || fail "this must run as root"
+[ -n "$KEY" ] || fail "no recovery key was given"
+# systemd-cryptenroll's recovery keys: 8 groups of 8 modhex characters. Anything
+# else is a front-end bug, and writing it would hand the owner a useless file.
+printf '%s' "$KEY" | grep -E '^[cbdefghijklnrtuv]{8}(-[cbdefghijklnrtuv]{8}){7}$' >/dev/null \
+  || fail "that is not a recovery key"
+[ -n "$DEV" ] && [ -b "$DEV" ] || fail "${DEV:-no device} is not a block device"
+
+# The disk the device lives on.
+type=$(lsblk -dno TYPE "$DEV" 2>/dev/null | tr -d ' ')
+case "$type" in
+  part) disk="/dev/$(lsblk -dno PKNAME "$DEV" 2>/dev/null | head -1 | tr -d ' ')" ;;
+  disk) disk="$DEV" ;;
+  *) fail "$DEV is a ${type:-unknown device}, not a USB stick or a partition of one" ;;
+esac
+[ -b "$disk" ] || fail "could not tell which disk $DEV is on"
+
+rm_=$(lsblk -dno RM "$disk" 2>/dev/null | tr -d ' ')
+tran=$(lsblk -dno TRAN "$disk" 2>/dev/null | tr -d ' ')
+if [ "$rm_" != 1 ] && [ "$tran" != usb ]; then
+  if [ "${RIME_RECOVERY_ALLOW_FIXED:-0}" = 1 ]; then
+    log "TEST: $disk is not removable (rm=$rm_ tran=$tran); accepted by RIME_RECOVERY_ALLOW_FIXED"
+  else
+    fail "$disk is not a removable disk (a USB stick or card)"
+  fi
+fi
+
+# Never beside what the key opens, never on this installer's own medium.
+# Labels and types are read from the devices themselves (blkid -p), not udev's
+# cache, which lags a stick formatted a moment ago and is empty for a label-less
+# volume.
+probe() { blkid -p -o value -s "$1" "$2" 2>/dev/null | head -1; }
+for name in $(lsblk -rpno NAME "$disk" 2>/dev/null); do
+  label=$(probe LABEL "$name")
+  case "$label" in
+    RIME-ESP|rime-root|RIMEROOT|RIMEEFI|RIME-EFI)
+      fail "$disk is the disk Rime OS is installed on (it has a partition named $label): the key must be kept apart from it" ;;
+  esac
+  [ "$(probe TYPE "$name")" = crypto_LUKS ] && fail "$disk holds an encrypted volume ($name): choose a stick that holds only files"
+done
+live=$(findmnt -no SOURCE /run/initramfs/live 2>/dev/null || true)
+if [ -n "$live" ]; then
+  lp=$(lsblk -dno PKNAME "$live" 2>/dev/null | head -1 | tr -d ' ')
+  [ "$live" = "$disk" ] || [ "/dev/$lp" = "$disk" ] && fail "$disk is the stick this installer is running from"
+fi
+
+# The filesystem to write to: the device itself, or the disk's first partition
+# that has one this program can mount.
+target=""
+fs=""
+for d in "$DEV" $(lsblk -rpno NAME "$disk" 2>/dev/null | tail -n +2); do
+  f=$(probe TYPE "$d")
+  case "$f" in vfat|exfat|ntfs|ext4) target="$d"; fs="$f"; break ;; esac
+  [ "$d" = "$DEV" ] && [ "$type" = part ] && break   # a named partition: that one, or none
+done
+[ -n "$target" ] || fail "$DEV has no filesystem the installer can write to (FAT32, exFAT, NTFS or ext4); it formats nothing"
+[ -z "$(findmnt -rno TARGET --source "$target" 2>/dev/null)" ] || fail "$target is in use (mounted)"
+
+mnt=$(mktemp -d /run/rime-save-key.XXXXXX) || fail "could not make a mount point"
+cleanup() { umount "$mnt" 2>/dev/null; rmdir "$mnt" 2>/dev/null; :; }
+trap cleanup EXIT
+opts=""
+case "$fs" in
+  vfat|exfat) opts="-o umask=0077" ;;
+  ntfs) opts="-t ntfs3" ;;
+esac
+# shellcheck disable=SC2086
+mount $opts "$target" "$mnt" >>"$LOG" 2>&1 || fail "$target could not be mounted"
+[ -w "$mnt" ] && touch "$mnt/.rime-write-test" 2>>"$LOG" && rm -f "$mnt/.rime-write-test" \
+  || fail "$target is read-only (a locked card, or a stick written from an ISO image)"
+
+name="rime-recovery-key-$HOST.txt"
+n=2
+while [ -e "$mnt/$name" ]; do name="rime-recovery-key-$HOST-$n.txt"; n=$((n + 1)); done
+if ! ( umask 077; {
+      printf 'Rime OS DISK RECOVERY KEY\n'
+      printf '=========================\n\n'
+      printf 'Machine : %s\n' "$HOST"
+      printf 'Written : %s\n\n' "$(date -Is 2>/dev/null || date)"
+      printf '    %s\n\n' "$KEY"
+      printf 'WHAT IT IS FOR\n'
+      printf 'If Rime OS ever asks for the disk passphrase and will not accept it --\n'
+      printf 'you forgot it, the keyboard is typing something other than what is on\n'
+      printf 'the keys, or the automatic unlock stopped working after a firmware\n'
+      printf 'update -- type THIS instead, at the same prompt. It always works.\n\n'
+      printf 'The letters it uses are in the same place on nearly every keyboard\n'
+      printf 'layout, so it can be typed even when the layout is wrong.\n\n'
+      printf 'KEEP IT SAFE\n'
+      printf 'This key opens the disk. Keep this stick away from the computer (not\n'
+      printf 'in the same bag), or copy the key to a password manager or paper and\n'
+      printf 'delete this file.\n'
+    } > "$mnt/$name" ) 2>>"$LOG"; then
+  fail "writing to $target failed"
+fi
+chmod 0600 "$mnt/$name" 2>/dev/null || :
+sync -f "$mnt/$name" 2>/dev/null || sync
+umount "$mnt" >>"$LOG" 2>&1 || fail "$target could not be unmounted after writing; do not remove it yet, then try again"
+# Read it back from the stick itself, not from the page cache of the mount that wrote it.
+blockdev --flushbufs "$target" >/dev/null 2>&1 || :
+# shellcheck disable=SC2086
+mount -o ro $([ "$fs" = ntfs ] && echo "-t ntfs3") "$target" "$mnt" >>"$LOG" 2>&1 || fail "$target could not be mounted again to check the copy"
+grep -Fx "    $KEY" "$mnt/$name" >/dev/null 2>&1 || fail "the copy on $target does not read back correctly"
+umount "$mnt" >>"$LOG" 2>&1 || :
+log "saved $name on $target ($fs, disk $disk)"
+echo "RIME-RECOVERY-SAVED: $name on $target"
+exit 0

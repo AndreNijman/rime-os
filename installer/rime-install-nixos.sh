@@ -13,41 +13,77 @@
 #  ACTIVE WHEN the ISO was built with NIXOS_SYSTEM=… (build-live-iso.sh), which
 #  stamps $NIXOS_STAMPS/nixos-system. On a bootc ISO nothing here runs.
 #
-#  WHAT IT WRITES (whole disk only; partition mode is refused by name):
+#  WHAT IT WRITES
+#   whole disk (mode=disk):
 #    GPT 1  EFI System Partition, FAT32 "RIME-ESP", 2 GiB, mounted at /boot.
-#           Fedora's shim + GRUB (from this live env) at EFI/fedora and the
-#           removable path EFI/BOOT, bootupd's static GRUB config, and the BLS
-#           entries + kernels the system's boot hook (rime-boot, layout bls)
-#           writes during nixos-install.
 #    GPT 2  btrfs "rime-root" — plain, or inside LUKS2 "RIMEROOT" (argon2id,
 #           recovery key from rime-luks-enroll, both keys proven before the
-#           system is copied). Subvolumes @nixos (/), @nix (/nix), @home
+#           system is copied).
+#   one partition (mode=partition, unencrypted; docs/nixos/installer.md):
+#    TARGET btrfs "rime-root". Nothing else on the disk is formatted.
+#    ESP    Rime's OWN EFI System Partition (the one the Windows app makes, or
+#           one the owner made): never Windows' (rime-boot keeps kernels on the
+#           ESP at /boot and refuses one holding Windows Boot Manager, R20).
+#           Relabelled "RIME-ESP" as the very last step.
+#   both:
+#    the ESP: Fedora's shim + GRUB (from this live env) at EFI/fedora and the
+#           removable path EFI/BOOT (never over another loader there),
+#           bootupd's static GRUB config, a Windows entry in grub2/custom.cfg
+#           when Windows is beside it, and the BLS entries + kernels the
+#           system's boot hook (rime-boot, layout bls) writes during
+#           nixos-install. Subvolumes @nixos (/), @nix (/nix), @home
 #           (/var/home), mounted compress-force=zstd:3.
 #    /var/lib/rime/host.toml  hostname, timezone (required), locale, keyboard,
-#           and [boot] layout=bls + kernel_params (rd.luks.uuid=…). The boot
-#           hook reads [boot]; rime-hostlayer applies the rest at activation.
+#           and [boot] layout=bls + kernel_params (rd.luks.uuid=…, and
+#           rd.vconsole.keymap=us when the unlock prompt cannot use the owner's
+#           layout). The boot hook reads [boot]; rime-hostlayer applies the rest.
+#    /var/lib/rime/nix/{releases/<release>/,applied.json}  the release this
+#           system was installed as, the way `rime update` records one.
 #    the user, created imperatively (users.mutableUsers), in wheel.
 #
+#  BEFORE ANYTHING IS ERASED, the system is proven to be a SIGNED RELEASE
+#  (docs/nixos/installer.md "Release check"): the release manifest carried on
+#  the ISO is verified as `rime update` verifies one (cosign signature, Fulcio
+#  chain, the nix-release.yml identity), its toplevel must be the stamped
+#  system, and every closure path is looked up in its cache in parallel and
+#  bound to the manifest's NarHash (rime-install-nixos-release), then checked
+#  for a signature by the trusted key itself (nix store verify).
+#
 #  STAMPS ($NIXOS_STAMPS, default /usr/lib/rime-installer; written at ISO build):
-#    nixos-system      the toplevel store path to install
-#    nixos-cache       the binary cache URL, or `iso` = the cache on this ISO
-#    nixos-cache.pub   the cache's public key (name:base64); nothing unsigned
-#                      by it is copied
-#    nixos-mok.der     the certificate the kernel is signed with (optional)
-#    kernel-signed     `signed` when that kernel is signed (as for bootc)
+#    nixos-system             the toplevel store path to install
+#    nixos-cache              the Rime binary cache URL, or `iso` = the cache on this ISO
+#    nixos-cache.pub          its public key (name:base64); nothing unsigned by it is copied
+#    nixos-upstream-cache     the cache of the paths the release takes from nixpkgs
+#    nixos-upstream-cache.pub (cache.nixos.org), `iso`, or absent when one cache holds all
+#    nixos-variant            the release variant the system is (default plain)
+#    nixos-release/           the signed release record (manifest/, sig/, repo,
+#                             fulcio-root.pem, signers, issuer)
+#    nixos-mok.der            the certificate the kernel is signed with (optional)
+#    kernel-signed            `signed` when that kernel is signed (as for bootc)
 #
 #  TEST SEAMS (environment only, each one logged when used):
-#    RIME_NIXOS_STAMPS       another stamp directory
-#    RIME_NIXOS_CACHE        another cache URL
-#    RIME_NIXOS_EFI_SRC      where shimx64.efi/grubx64.efi/mmx64.efi/BOOTX64.CSV are
-#    RIME_NIXOS_GRUB_STATIC  bootupd's static GRUB config directory
-#    RIME_NIXOS_MIN_BYTES    a lower disk floor (a test VM's disk)
-#    RIME_EXTRA_KARGS        extra kernel arguments (a lab's serial console)
+#    RIME_NIXOS_STAMPS          another stamp directory
+#    RIME_NIXOS_CACHE           another cache URL (http:// accepted here only)
+#    RIME_NIXOS_UPSTREAM_CACHE  another upstream cache URL (likewise)
+#    RIME_NIXOS_EFI_SRC         where shimx64.efi/grubx64.efi/mmx64.efi/BOOTX64.CSV are
+#    RIME_NIXOS_GRUB_STATIC     bootupd's static GRUB config directory
+#    RIME_NIXOS_MIN_BYTES       a lower disk floor (a test VM's disk)
+#    RIME_NIXOS_PART_MIN_BYTES  a lower partition floor (likewise)
+#    RIME_EXTRA_KARGS           extra kernel arguments (a lab's serial console)
 # ─────────────────────────────────────────────────────────────────────────────
 
 NIXOS_STAMPS="${RIME_NIXOS_STAMPS:-/usr/lib/rime-installer}"
 NIXOS=0
 [ -r "$NIXOS_STAMPS/nixos-system" ] && NIXOS=1
+# A NixOS ISO that fetches its system at install time is a network install too
+# (build-live-iso.sh writes the netinstall marker, which the GUI reads for its
+# network page), but none of the bootc netinstall steps (the pinned image
+# digest, skopeo, the registry) apply: they are switched off here and the NixOS
+# path checks the network for its own cache (nixos_net_check).
+if [ "$NIXOS" = 1 ]; then
+  NIXOS_NETINSTALL="${NETINSTALL:-0}"
+  NETINSTALL=0
+fi
 
 # The disk floor (closure.md A11): a fresh system, ONE update staged beside it
 # and the rollback generation, as `rime update`'s space gate counts them —
@@ -56,6 +92,10 @@ NIXOS=0
 # erased. Decimal gigabytes, like the disk sizes printed on the box.
 NIXOS_MIN_GB=19
 NIXOS_MIN_BYTES="${RIME_NIXOS_MIN_BYTES:-$((NIXOS_MIN_GB * 1000 * 1000 * 1000))}"
+# The same floor for the root partition alone (partition mode): the disk floor
+# less the whole-disk layout's 2 GiB ESP, rounded up.
+NIXOS_PART_MIN_GB=17
+NIXOS_PART_MIN_BYTES="${RIME_NIXOS_PART_MIN_BYTES:-$((NIXOS_PART_MIN_GB * 1000 * 1000 * 1000))}"
 NIXOS_ESP_MIB=2048
 NIXOS_ESP_LABEL=RIME-ESP
 NIXOS_ROOT_LABEL=rime-root
@@ -65,14 +105,22 @@ NIXOS_MOUNT_OPTS="compress-force=zstd:3"
 # as a POSIX bracket expression: `]` first and `-` last, because `\]` inside brackets ends them in grep -E (the
 # Python spelling, copied verbatim, refused every parameter, `console=tty0` included).
 NIXOS_SAFE_PARAM='^[][A-Za-z0-9_./:=,+@%~^!-]+$'
+# The release check's bounds (docs/nixos/installer.md "Release check": a 4,000-path closure is 15-40 s of narinfo
+# lookups on cache.nixos.org, measured 2026-11-02): the whole lookup, then each `nix store verify` group.
+NIXOS_CHECK_DEADLINE=300
+NIXOS_VERIFY_DEADLINE=600
+NIXOS_WORK=/run/rime-installer/nixos
+# rime-boot's reserve on /boot (nix/pkgs/rime-boot reserveMiB) plus room for shim, GRUB and MokManager.
+NIXOS_ESP_SLACK=$(( (32 + 16) * 1024 * 1024 ))
 
-nixos_stamp() { tr -d '\r\n' < "$NIXOS_STAMPS/$1" 2>/dev/null || true; }
+# An absent stamp is empty (the redirection's own error is silenced too: `cmd <f 2>/dev/null` opens f first).
+nixos_stamp() { { tr -d '\r\n' < "$NIXOS_STAMPS/$1"; } 2>/dev/null || true; }
 
-nixos_nix() {  # nix with the cache's key as the ONLY trusted one, never a build user
+nixos_nix() {  # nix with the release's keys as the ONLY trusted ones, never a build user
   nix --extra-experimental-features nix-command \
       --option build-users-group '' \
       --option require-sigs true \
-      --option trusted-public-keys "$NIXOS_PUBKEY" \
+      --option trusted-public-keys "$NIXOS_TRUSTED" \
       --option substituters '' \
       "$@"
 }
@@ -97,14 +145,114 @@ nixos_unmount() {
   return 0
 }
 
+nixos_cache_url() {  # $1=stamped value  $2=seam value  $3=what (for the log) — prints the URL to use
+  local v="$1"
+  if [ -n "$2" ]; then v="$2"; log "nixos: TEST $3 $2"; fi
+  [ "$v" = iso ] && v="file://${RIME_LIVE_MEDIUM:-/run/initramfs/live}/nix-cache"
+  printf '%s' "$v"
+}
+
+nixos_cache_ok() {  # $1=URL  $2=seam value — https and file:///, and http:// only through a TEST seam
+  case "$1" in
+    https://*|file:///*) return 0 ;;
+    http://*) [ -n "$2" ] ;;
+    *) return 1 ;;
+  esac
+}
+
+# Which layer is missing, before saying "the cache could not be reached" (the
+# bootc netinstall's net_diagnose, for the cache's own host).
+nixos_net_diagnose() {  # $1=URL
+  local host="${1#*://}"
+  host="${host%%/*}"; host="${host%%:*}"
+  if ! ip route show default 2>/dev/null | grep . >/dev/null; then echo no-route; return; fi
+  if ! getent hosts "$host" >/dev/null 2>&1; then echo "no-dns $host"; return; fi
+  echo ok
+}
+
+nixos_net_check() {  # $1=URL — waits for a just-connected link, then refuses by the layer that is missing
+  case "$1" in file://*) return 0 ;; esac
+  local v="" w
+  for w in 1 2 3 4 5 6 7 8 9 10; do
+    v=$(nixos_net_diagnose "$1")
+    [ "$v" = ok ] && break
+    sleep 2
+  done
+  case "$v" in
+    ok) log "nixos: network: a route and a name for ${1%%/nix*}" ;;
+    no-route) die "This machine is not connected to any network, and this installer downloads Rime OS while it installs.
+
+Nothing has been erased — your disks are untouched.
+Connect to Wi-Fi or plug in a network cable, then try again." ;;
+    *) die "This machine is connected to a network, but cannot look up ${v#no-dns } (no DNS), so Rime OS cannot be downloaded.
+
+Nothing has been erased — your disks are untouched.
+Check the network (a captive portal, a DNS setting), then try again." ;;
+  esac
+}
+
+nixos_checker() {  # the release checker this installer carries (never one from the cache)
+  local c
+  for c in /usr/lib/rime-installer/rime-install-nixos-release.py "$(dirname "$0")/rime-install-nixos-release.py"; do
+    [ -r "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+
+# Which device of DISK's would be wiped (whole-disk mode), or which one is the
+# target (partition mode), may carry these labels. Any OTHER device with them
+# would win /dev/disk/by-label at boot, and the installed system would mount
+# its root or /boot from the wrong disk.
+nixos_label_clash() {  # $1=label  $2=the device allowed to carry it in partition mode
+  local dev parent
+  while read -r dev; do
+    [ -n "$dev" ] || continue
+    if [ "$INSTALL_MODE" = partition ]; then
+      [ "$dev" = "$2" ] && continue
+    else
+      parent=$(lsblk -dno PKNAME "$dev" 2>/dev/null | head -1 | tr -d ' ')
+      [ "$dev" = "$DISK" ] || [ "/dev/$parent" = "$DISK" ] && continue
+    fi
+    die "$dev already carries the label \"$1\", which Rime OS uses to find its own partitions at boot: with two of them the installed system could start from the wrong one.
+
+Nothing has been erased — your disks are untouched.
+Erase or relabel $dev (an earlier Rime OS install?), or disconnect it, then try again."
+  done < <(lsblk -rpno NAME,LABEL 2>/dev/null | awk -v l="$1" '$2 == l { print $1 }')
+}
+
+# The ESP partition mode installs to, read-only: Windows Boot Manager on it?
+# How much room? Another loader at the removable path?
+nixos_esp_probe() {
+  local m own=0
+  NIXOS_ESP_WINDOWS=0; NIXOS_ESP_FREE=0
+  if [ "${ESP_IS_LIVE:-0}" = 1 ]; then
+    m=/run/initramfs/live
+  else
+    m=$(mktemp -d) || return 1
+    own=1
+    mount -o ro "$ESP_DEV" "$m" >>"$LOG" 2>&1 || { rmdir "$m"; return 1; }
+  fi
+  # FAT lookups ignore case, so this finds EFI/Microsoft/Boot/bootmgfw.efi however it is spelt.
+  [ -f "$m/EFI/Microsoft/Boot/bootmgfw.efi" ] && NIXOS_ESP_WINDOWS=1
+  NIXOS_ESP_FREE=$(df -B1 --output=avail "$m" 2>/dev/null | tail -1 | tr -d ' ')
+  if [ "$own" = 1 ]; then umount "$m" 2>/dev/null; rmdir "$m" 2>/dev/null; fi
+  case "$NIXOS_ESP_FREE" in ''|*[!0-9]*) return 1 ;; esac
+  return 0
+}
+
 # ── pre-flight: everything that can refuse, while every disk is intact ──────
 nixos_preflight() {
   NIXOS_SYSTEM=$(nixos_stamp nixos-system)
   NIXOS_PUBKEY=$(nixos_stamp nixos-cache.pub)
-  NIXOS_CACHE="${RIME_NIXOS_CACHE:-$(nixos_stamp nixos-cache)}"
+  NIXOS_UP_PUBKEY=$(nixos_stamp nixos-upstream-cache.pub)
+  NIXOS_VARIANT=$(nixos_stamp nixos-variant); : "${NIXOS_VARIANT:=plain}"
+  NIXOS_RELEASE_DIR="$NIXOS_STAMPS/nixos-release"
   [ -n "${RIME_NIXOS_STAMPS:-}" ] && log "nixos: TEST stamps from $RIME_NIXOS_STAMPS"
-  [ -n "${RIME_NIXOS_CACHE:-}" ] && log "nixos: TEST cache $RIME_NIXOS_CACHE"
-  [ "$NIXOS_CACHE" = iso ] && NIXOS_CACHE="file://${RIME_LIVE_MEDIUM:-/run/initramfs/live}/nix-cache"
+  NIXOS_CACHE=$(nixos_cache_url "$(nixos_stamp nixos-cache)" "${RIME_NIXOS_CACHE:-}" cache)
+  NIXOS_UP_CACHE=""
+  if [ -n "$NIXOS_UP_PUBKEY" ] || [ -n "${RIME_NIXOS_UPSTREAM_CACHE:-}" ]; then
+    NIXOS_UP_CACHE=$(nixos_cache_url "$(nixos_stamp nixos-upstream-cache)" "${RIME_NIXOS_UPSTREAM_CACHE:-}" "upstream cache")
+  fi
   NIXOS_EFI_SRC="${RIME_NIXOS_EFI_SRC:-}"
   if [ -z "$NIXOS_EFI_SRC" ]; then
     NIXOS_EFI_SRC=$(dirname "$(ls /boot/efi/EFI/*/shimx64.efi 2>/dev/null | head -1)" 2>/dev/null || true)
@@ -113,23 +261,32 @@ nixos_preflight() {
   fi
   NIXOS_GRUB_STATIC="${RIME_NIXOS_GRUB_STATIC:-/usr/lib/bootupd/grub2-static}"
 
-  # Partition mode needs an ESP shared with another OS and a root partition the
-  # user picked; the NixOS layout (Rime's own ESP at /boot, three subvolumes)
-  # is only written to a whole disk so far.
-  [ "$INSTALL_MODE" = disk ] || die "This installer puts Rime OS on a whole disk only: installing it into one partition beside another system is not supported yet.
-
-Nothing has been erased. Go back and choose \"Erase the whole disk\", or install
-onto another disk."
+  case "$INSTALL_MODE" in
+    disk|partition) : ;;
+    *) die "Unknown install mode '$INSTALL_MODE'. Nothing has been erased." ;;
+  esac
   [ "$ROOTFS_TYPE" = btrfs ] || die "Rime OS installs on btrfs only (got '$ROOTFS_TYPE'). Nothing has been erased."
 
   printf '%s' "$NIXOS_SYSTEM" | grep -Eq '^/nix/store/[0-9a-z]{32}-[^/]+$' \
     || die "This ISO names no valid system to install ('$NIXOS_SYSTEM' in $NIXOS_STAMPS/nixos-system). Nothing has been erased. The ISO was built incorrectly; download it again."
-  printf '%s' "$NIXOS_PUBKEY" | grep -Eq '^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$' \
-    || die "This ISO carries no valid key for its package cache ($NIXOS_STAMPS/nixos-cache.pub). Nothing has been erased. The ISO was built incorrectly; download it again."
-  case "$NIXOS_CACHE" in
-    https://*|file:///*) : ;;
-    *) die "This ISO names no usable package cache ('$NIXOS_CACHE'). Nothing has been erased." ;;
-  esac
+  local k
+  for k in "$NIXOS_PUBKEY" ${NIXOS_UP_CACHE:+"$NIXOS_UP_PUBKEY"}; do
+    printf '%s' "$k" | grep -E '^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$' >/dev/null \
+      || die "This ISO carries no valid key for its package cache ($NIXOS_STAMPS/nixos-cache.pub or nixos-upstream-cache.pub). Nothing has been erased. The ISO was built incorrectly; download it again."
+  done
+  nixos_cache_ok "$NIXOS_CACHE" "${RIME_NIXOS_CACHE:-}" \
+    || die "This ISO names no usable package cache ('$NIXOS_CACHE'). Nothing has been erased."
+  if [ -n "$NIXOS_UP_CACHE" ]; then
+    nixos_cache_ok "$NIXOS_UP_CACHE" "${RIME_NIXOS_UPSTREAM_CACHE:-}" \
+      || die "This ISO names no usable upstream package cache ('$NIXOS_UP_CACHE'). Nothing has been erased."
+  fi
+  NIXOS_TRUSTED="$NIXOS_PUBKEY${NIXOS_UP_CACHE:+ $NIXOS_UP_PUBKEY}"
+  printf '%s' "$NIXOS_VARIANT" | grep -E '^[a-z][a-z0-9-]{0,31}$' >/dev/null \
+    || die "This ISO names no valid system variant ('$NIXOS_VARIANT'). Nothing has been erased."
+  [ -d "$NIXOS_RELEASE_DIR" ] \
+    || die "This ISO carries no signed release record for the system it installs ($NIXOS_RELEASE_DIR), so it cannot prove that system is a Rime OS release.
+
+Nothing has been erased. The ISO was built incorrectly; download it again."
 
   # ── the disk floor, by name ────────────────────────────────────────────────
   local sz
@@ -139,8 +296,24 @@ onto another disk."
   esac
   [ "$NIXOS_MIN_BYTES" = "$((NIXOS_MIN_GB * 1000 * 1000 * 1000))" ] \
     || log "nixos: TEST disk floor $NIXOS_MIN_BYTES bytes (RIME_NIXOS_MIN_BYTES)"
-  [ "$sz" -ge "$NIXOS_MIN_BYTES" ] \
-    || die "$DISK is too small: $((sz / 1000000000)) GB. Rime OS needs a disk of at least $NIXOS_MIN_GB GB (the system, one update beside it and the previous version to go back to). Nothing has been erased."
+  if [ "$INSTALL_MODE" = disk ]; then
+    [ "$sz" -ge "$NIXOS_MIN_BYTES" ] \
+      || die "$DISK is too small: $((sz / 1000000000)) GB. Rime OS needs a disk of at least $NIXOS_MIN_GB GB (the system, one update beside it and the previous version to go back to). Nothing has been erased."
+  else
+    # rime-install's generic partition guards ran first: TARGET is a partition
+    # of DISK, ESP_DEV an EFI System Partition on DISK, encryption refused.
+    [ "$NIXOS_PART_MIN_BYTES" = "$((NIXOS_PART_MIN_GB * 1000 * 1000 * 1000))" ] \
+      || log "nixos: TEST partition floor $NIXOS_PART_MIN_BYTES bytes (RIME_NIXOS_PART_MIN_BYTES)"
+    sz=$(lsblk -bdno SIZE "$TARGET" 2>/dev/null | tr -d ' ' || true)
+    case "$sz" in ''|*[!0-9]*) die "Could not read the size of $TARGET. Nothing has been erased." ;; esac
+    [ "$sz" -ge "$NIXOS_PART_MIN_BYTES" ] \
+      || die "$TARGET is too small: $((sz / 1000000000)) GB. Rime OS needs a partition of at least $NIXOS_PART_MIN_GB GB (the system, one update beside it and the previous version to go back to). Nothing has been erased."
+    nixos_esp_probe || die "Could not read the EFI System Partition $ESP_DEV. Nothing has been erased."
+    [ "$NIXOS_ESP_WINDOWS" = 0 ] || die "$ESP_DEV is Windows' EFI System Partition (it holds Windows Boot Manager). Rime OS keeps its kernels on its own EFI System Partition and does not put them beside Windows' boot files.
+
+Nothing has been erased — your disks are untouched.
+Install from Windows with the Rime OS installer app (it makes Rime's own EFI partition), or create a separate EFI System Partition of at least 1 GB for Rime and choose that one."
+  fi
 
   # ── timezone: required ─────────────────────────────────────────────────────
   # host.toml must name one: NixOS leaves /etc/localtime to it (base.nix sets
@@ -166,7 +339,6 @@ onto another disk."
 
   # ── kernel arguments this machine's boot entries carry ─────────────────────
   NIXOS_KARGS=()
-  local k
   for k in ${NIXOS_EXTRA_KARGS:-} ${RIME_EXTRA_KARGS:-}; do
     printf '%s' "$k" | grep -Eq "$NIXOS_SAFE_PARAM" \
       || die "Kernel argument '$k' is not one the boot menu can carry. Nothing has been erased."
@@ -175,21 +347,24 @@ onto another disk."
   [ -n "${RIME_EXTRA_KARGS:-}" ] && log "nixos: TEST kernel arguments: $RIME_EXTRA_KARGS"
 
   # ── tools and loaders ──────────────────────────────────────────────────────
-  for k in nix unshare sgdisk wipefs partprobe udevadm mkfs.vfat mkfs.btrfs btrfs blkid findmnt; do
+  for k in nix python3 openssl timeout xargs unshare sgdisk wipefs partprobe udevadm mkfs.vfat mkfs.btrfs btrfs blkid findmnt lsblk; do
     have "$k" || die "$k is missing from this installer, so $DISK cannot be prepared. Nothing has been erased. The ISO was built incorrectly; download it again."
   done
+  if [ "$INSTALL_MODE" = partition ]; then
+    have fatlabel || have mlabel \
+      || die "fatlabel is missing from this installer, so the EFI partition cannot be named for Rime OS. Nothing has been erased."
+  fi
+  NIXOS_CHECKER=$(nixos_checker) \
+    || die "This installer carries no release checker (rime-install-nixos-release.py). Nothing has been erased. The ISO was built incorrectly; download it again."
   if [ "$ENCRYPT" = yes ]; then
     have cryptsetup || die "cryptsetup is missing from this installer. Nothing has been erased."
-    # D9: "LUKS with a non-us keymap is refused by name until the keymap VM gate passes". The generic toplevel's
-    # initrd carries the US console keymap only (rd.vconsole.keymap= names a map it does not have, and the prompt
-    # stays US), so a passphrase typed on another layout would not open the disk at first boot. UNLOCK_KEYMAP is
-    # rime-install's decision for the prompt (us when the layout cannot type the passphrase at all, as on bootc).
-    # Lifted when the initrd ships every console keymap and the boot hook carries host.toml's (nix/tpmkeymap).
-    if [ -n "${UNLOCK_KEYMAP:-}" ] && [ "$UNLOCK_KEYMAP" != us ]; then
-      die "An encrypted install with the '$UNLOCK_KEYMAP' keyboard layout is not supported yet: the disk-unlock screen of this Rime OS uses the US layout only, so the passphrase you typed might not open the disk.
-
-Nothing has been erased. Go back and either choose the US (English) keyboard layout, or install without encryption."
-    fi
+    # The initrd carries every console keymap (nix/modules/keymap.nix) and the
+    # boot hook puts host.toml's [keyboard] console on every entry
+    # (rd.vconsole.keymap=, rime-boot keymap_params). When rime-install decided
+    # the unlock prompt needs another layout (UNLOCK_KEYMAP: us, because the
+    # owner's layout cannot type the passphrase), that one is named in [boot]
+    # kernel_params below, and a kernel_params keymap wins over [keyboard].
+    log "nixos: unlock keymap ${UNLOCK_KEYMAP:-us} (console keymap ${CONSOLE_KEYMAP:-us})"
   fi
   for k in shimx64.efi grubx64.efi mmx64.efi BOOTX64.CSV; do
     [ -f "$NIXOS_EFI_SRC/$k" ] || die "This installer carries no $k (looked in ${NIXOS_EFI_SRC:-/boot/efi/EFI/*}). Nothing has been erased."
@@ -198,20 +373,72 @@ Nothing has been erased. Go back and either choose the US (English) keyboard lay
     [ -e "$NIXOS_GRUB_STATIC/$k" ] || die "This installer carries no static GRUB configuration ($NIXOS_GRUB_STATIC/$k). Nothing has been erased."
   done
 
-  # ── the system is in the cache and signed, before the disk is touched ──────
-  note "Checking that $NIXOS_SYSTEM is available …"
-  if ! nixos_nix path-info --store "$NIXOS_CACHE" "$NIXOS_SYSTEM" >>"$LOG" 2>&1; then
-    die "Rime OS could not be found in its package cache ($NIXOS_CACHE).
+  # ── no other disk may answer to Rime's labels ──────────────────────────────
+  nixos_label_clash "$NIXOS_ESP_LABEL" "${ESP_DEV:-}"
+  nixos_label_clash "$NIXOS_ROOT_LABEL" "${TARGET:-}"
+
+  # ── the network, for a cache that is fetched from ──────────────────────────
+  nixos_net_check "$NIXOS_CACHE"
+  [ -z "$NIXOS_UP_CACHE" ] || nixos_net_check "$NIXOS_UP_CACHE"
+
+  # ── the system is a signed release, in its caches, before a disk is touched ─
+  nixos_release_check
+  if [ "$INSTALL_MODE" = partition ]; then
+    local need=$(( NIXOS_BOOT_BYTES + NIXOS_ESP_SLACK ))
+    [ "$NIXOS_ESP_FREE" -ge "$need" ] \
+      || die "The EFI System Partition $ESP_DEV has $((NIXOS_ESP_FREE / 1048576)) MB free, and Rime OS needs $((need / 1048576)) MB there for its kernel and boot loader. Nothing has been erased."
+  fi
+  log "nixos: system $NIXOS_SYSTEM = release $NIXOS_RELEASE ($NIXOS_DIGEST); mode=$INSTALL_MODE tz=$NIXOS_TZ lang=$NIXOS_LANG kargs=${NIXOS_KARGS[*]:-}"
+}
+
+# The release check (docs/nixos/installer.md "Release check"). Sets
+# NIXOS_RELEASE, NIXOS_DIGEST, NIXOS_BOOT_BYTES and leaves the verified
+# manifest and the per-cache path lists in $NIXOS_WORK/release.
+nixos_release_check() {
+  local out rc=0 sum
+  note "Checking that $NIXOS_SYSTEM is a signed Rime OS release …"
+  rm -rf "$NIXOS_WORK/release"; mkdir -p "$NIXOS_WORK"
+  out=$(python3 -I "$NIXOS_CHECKER" check --release-dir "$NIXOS_RELEASE_DIR" --system "$NIXOS_SYSTEM" \
+          --variant "$NIXOS_VARIANT" --out "$NIXOS_WORK/release" --cache "$NIXOS_CACHE" --key "$NIXOS_PUBKEY" \
+          ${NIXOS_UP_CACHE:+--upstream-cache "$NIXOS_UP_CACHE" --upstream-key "$NIXOS_UP_PUBKEY"} \
+          --deadline "$NIXOS_CHECK_DEADLINE" 2>>"$LOG") || rc=$?
+  log "nixos: release check rc=$rc: $out"
+  case "$rc" in
+    0) : ;;
+    2) die "The package cache did not answer while Rime OS was being checked (${out#unreachable: }).
 
 Nothing has been erased — your disks are untouched.
-Check the network connection (a network install needs it), then try again."
+Check the network connection, then try again." ;;
+    *) die "This ISO's copy of Rime OS failed its release check: ${out#refused: }.
+
+Nothing has been erased — your disks are untouched.
+The ISO or its package cache is not a Rime OS release; download the ISO again from rimeos.com." ;;
+  esac
+  sum="$NIXOS_WORK/release/summary.json"
+  NIXOS_RELEASE=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"])' "$sum")
+  NIXOS_DIGEST=$(cat "$NIXOS_WORK/release/digest")
+  NIXOS_BOOT_BYTES=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["boot_bytes"])' "$sum")
+  # Every path, signed by the trusted key ITSELF (not merely by a key of the same name, which is all a narinfo's
+  # Sig line names), per cache, both caches at once and bounded: `nix copy` checks the same again, but only after
+  # the wipe.
+  local pr="" pu="" fail="" t0 t1
+  t0=$(date +%s%N)
+  nixos_verify "$NIXOS_CACHE" "$NIXOS_PUBKEY" "$NIXOS_WORK/release/rime.paths" & pr=$!
+  if [ -s "$NIXOS_WORK/release/upstream.paths" ]; then
+    nixos_verify "$NIXOS_UP_CACHE" "$NIXOS_UP_PUBKEY" "$NIXOS_WORK/release/upstream.paths" & pu=$!
   fi
-  # Every path of the closure, signed by the stamped key itself (not merely by a key of the same name), before the
-  # disk is touched: `nix copy` checks the same again, but only after the wipe.
-  if ! nixos_nix store verify --store "$NIXOS_CACHE" --no-contents --sigs-needed 1 --recursive "$NIXOS_SYSTEM" >>"$LOG" 2>&1; then
-    die "Rime OS in $NIXOS_CACHE is not signed by ${NIXOS_PUBKEY%%:*}, or its cache is incomplete. Nothing has been erased."
-  fi
-  log "nixos: system $NIXOS_SYSTEM in $NIXOS_CACHE, signed by ${NIXOS_PUBKEY%%:*}; tz=$NIXOS_TZ lang=$NIXOS_LANG kargs=${NIXOS_KARGS[*]:-}"
+  wait "$pr" || fail="${NIXOS_PUBKEY%%:*} ($NIXOS_CACHE)"
+  if [ -n "$pu" ]; then wait "$pu" || fail="${fail:+$fail and }${NIXOS_UP_PUBKEY%%:*} ($NIXOS_UP_CACHE)"; fi
+  [ -z "$fail" ] || die "Rime OS release $NIXOS_RELEASE in its package cache is not signed by $fail, or the cache did not answer in time. Nothing has been erased."
+  t1=$(date +%s%N)
+  log "nixos: release $NIXOS_RELEASE verified: $(tr -d '\n' < "$sum") store-verify-seconds=$(( (t1 - t0) / 1000000 / 1000 )).$(printf '%03d' $(( (t1 - t0) / 1000000 % 1000 )))"
+}
+
+nixos_verify() {  # $1=cache  $2=its key  $3=path list
+  timeout "$NIXOS_VERIFY_DEADLINE" xargs -a "$3" \
+    nix --extra-experimental-features nix-command --option build-users-group '' --option require-sigs true \
+        --option trusted-public-keys "$2" --option substituters '' \
+        store verify --store "$1" --no-contents --sigs-needed 1 >>"$LOG" 2>&1
 }
 
 nixos_host_toml() {  # $1=file — host.toml for this machine (rime-hostlayer's schema)
@@ -234,16 +461,32 @@ nixos_host_toml() {  # $1=file — host.toml for this machine (rime-hostlayer's 
 
 nixos_esp() {  # $1=mounted ESP  $2=its FAT UUID — Fedora's shim + GRUB with bootupd's static config
   local d="$1" u="$2" x f
-  mkdir -p "$d/EFI/fedora" "$d/EFI/BOOT" "$d/grub2" || return 1
+  # A Fedora-family neighbour's \EFI\fedora is rewritten below: its originals go to ESP_BACKUP_DIR first, as on
+  # the bootc path (cp -n keeps the TRUE originals an earlier install backed up).
+  if [ "${ESP_SHARED_FEDORA:-0}" = 1 ] && [ -d "$d/EFI/fedora" ]; then
+    mkdir -p "$d/$ESP_BACKUP_DIR"
+    for f in grub.cfg bootuuid.cfg shimx64.efi grubx64.efi; do
+      [ -f "$d/EFI/fedora/$f" ] && cp -n "$d/EFI/fedora/$f" "$d/$ESP_BACKUP_DIR/$f"
+    done
+    log "esp: backed up the neighbour's EFI/fedora to $ESP_BACKUP_DIR: $(ls "$d/$ESP_BACKUP_DIR" | tr '\n' ' ')"
+  fi
+  mkdir -p "$d/EFI/fedora" "$d/grub2" || return 1
   cp "$NIXOS_EFI_SRC"/{shimx64.efi,grubx64.efi,mmx64.efi,BOOTX64.CSV} "$d/EFI/fedora/" || return 1
+  cp "$NIXOS_GRUB_STATIC/grub-static-efi.cfg" "$d/EFI/fedora/grub.cfg" || return 1
+  printf 'set BOOT_UUID="%s"\n' "$u" > "$d/EFI/fedora/bootuuid.cfg" || return 1
   # The removable-media path, for firmware that keeps no boot entry. No
-  # fbx64.efi: shim as BOOTX64.EFI would otherwise run fallback.
-  cp "$NIXOS_EFI_SRC/shimx64.efi" "$d/EFI/BOOT/BOOTX64.EFI" || return 1
-  cp "$NIXOS_EFI_SRC"/{grubx64.efi,mmx64.efi} "$d/EFI/BOOT/" || return 1
-  for x in fedora BOOT; do
-    cp "$NIXOS_GRUB_STATIC/grub-static-efi.cfg" "$d/EFI/$x/grub.cfg" || return 1
-    printf 'set BOOT_UUID="%s"\n' "$u" > "$d/EFI/$x/bootuuid.cfg" || return 1
-  done
+  # fbx64.efi: shim as BOOTX64.EFI would otherwise run fallback. Never over
+  # ANOTHER loader there (an ESP Rime shares in partition mode): only when the
+  # path is free or already holds this shim.
+  if [ ! -e "$d/EFI/BOOT/BOOTX64.EFI" ] || cmp -s "$d/EFI/BOOT/BOOTX64.EFI" "$NIXOS_EFI_SRC/shimx64.efi"; then
+    mkdir -p "$d/EFI/BOOT" || return 1
+    cp "$NIXOS_EFI_SRC/shimx64.efi" "$d/EFI/BOOT/BOOTX64.EFI" || return 1
+    cp "$NIXOS_EFI_SRC"/{grubx64.efi,mmx64.efi} "$d/EFI/BOOT/" || return 1
+    cp "$NIXOS_GRUB_STATIC/grub-static-efi.cfg" "$d/EFI/BOOT/grub.cfg" || return 1
+    printf 'set BOOT_UUID="%s"\n' "$u" > "$d/EFI/BOOT/bootuuid.cfg" || return 1
+  else
+    log "esp: EFI/BOOT/BOOTX64.EFI is another loader; left alone (Rime boots from its firmware entry)"
+  fi
   { cat "$NIXOS_GRUB_STATIC/grub-static-pre.cfg"
     for f in "$NIXOS_GRUB_STATIC"/configs.d/*.cfg; do
       echo "### BEGIN $(basename "$f") ###"; cat "$f"; echo "### END $(basename "$f") ###"
@@ -257,25 +500,52 @@ nixos_fail() {  # $1=what failed — the disk has been written from here on
   die "$1 (see $LOG)."
 }
 
-# ── the install: everything from here on destroys $DISK ────────────────────
+nixos_copy() {  # $1=cache  $2=path list — exactly these paths, their references already on the target
+  [ -s "$2" ] || return 0
+  nixos_nix copy --from "$1" --to "local?root=$TROOT" --no-recursive --stdin < "$2" >>"$LOG" 2>&1
+}
+
+# The release this system was installed as, the way `rime update` records an
+# applied one (rimed/rime/src/nixos: releases/<release>/{manifest.json,digest},
+# applied.json), so the first update compares against it.
+nixos_release_state() {  # $1=generation number
+  local d="$TROOT/var/lib/rime/nix" gen="$1"
+  mkdir -p "$d/releases/$NIXOS_RELEASE" || return 1
+  install -m0644 "$NIXOS_WORK/release/manifest.json" "$d/releases/$NIXOS_RELEASE/manifest.json" || return 1
+  printf '%s' "$NIXOS_DIGEST" > "$d/releases/$NIXOS_RELEASE/digest" && chmod 0644 "$d/releases/$NIXOS_RELEASE/digest" || return 1
+  python3 -I -c 'import json,sys,time
+rel, dig, top, gen, out = sys.argv[1:6]
+doc = {"releases": [{"release": rel, "digest": dig, "toplevel": top, "generation": int(gen) if gen.isdigit() else None,
+                     "at": int(time.time())}]}
+open(out, "w").write(json.dumps(doc, sort_keys=True) + "\n")' \
+    "$NIXOS_RELEASE" "$NIXOS_DIGEST" "$NIXOS_SYSTEM" "$gen" "$d/applied.json" && chmod 0644 "$d/applied.json"
+}
+
+# ── the install: everything from here on destroys $DISK (or $TARGET) ────────
 nixos_install() {
-  local esp root dev esp_uuid groups g have_groups
+  local esp root dev esp_uuid groups g have_groups espnum
   TARGET_DESC="${TARGET_DESC:-$DISK}"
-  note "Installing Rime OS to $DISK … (full log: $LOG)"
+  note "Installing Rime OS to $TARGET_DESC … (full log: $LOG)"
   WROTE_DISK=1
   udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
-  wipefs -a "$DISK" >>"$LOG" 2>&1 || nixos_fail "Could not clear $DISK"
-  sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 || nixos_fail "Could not clear the partition table of $DISK"
-  local rootname=rime-root
-  [ "$ENCRYPT" = yes ] && rootname=rime-luks
-  sgdisk -n "1:0:+${NIXOS_ESP_MIB}M" -t 1:ef00 -c "1:EFI System Partition" \
-         -n 2:0:0 -t 2:8304 -c "2:$rootname" "$DISK" >>"$LOG" 2>&1 \
-    || nixos_fail "Could not partition $DISK"
-  partprobe "$DISK" >>"$LOG" 2>&1 || true
-  udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
-  esp=$(part_dev "$DISK" 1); root=$(part_dev "$DISK" 2)
-  [ -n "$esp" ] && [ -n "$root" ] || nixos_fail "The new partitions on $DISK did not appear"
-  mkfs.vfat -F 32 -n "$NIXOS_ESP_LABEL" "$esp" >>"$LOG" 2>&1 || nixos_fail "Could not format the EFI partition $esp"
+  if [ "$INSTALL_MODE" = partition ]; then
+    esp="$ESP_DEV"; root="$TARGET"
+    wipefs -a "$root" >>"$LOG" 2>&1 || nixos_fail "Could not clear $root"
+  else
+    wipefs -a "$DISK" >>"$LOG" 2>&1 || nixos_fail "Could not clear $DISK"
+    sgdisk --zap-all "$DISK" >>"$LOG" 2>&1 || nixos_fail "Could not clear the partition table of $DISK"
+    local rootname=rime-root
+    [ "$ENCRYPT" = yes ] && rootname=rime-luks
+    sgdisk -n "1:0:+${NIXOS_ESP_MIB}M" -t 1:ef00 -c "1:EFI System Partition" \
+           -n 2:0:0 -t 2:8304 -c "2:$rootname" "$DISK" >>"$LOG" 2>&1 \
+      || nixos_fail "Could not partition $DISK"
+    partprobe "$DISK" >>"$LOG" 2>&1 || true
+    udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+    esp=$(part_dev "$DISK" 1); root=$(part_dev "$DISK" 2)
+    [ -n "$esp" ] && [ -n "$root" ] || nixos_fail "The new partitions on $DISK did not appear"
+    mkfs.vfat -F 32 -n "$NIXOS_ESP_LABEL" "$esp" >>"$LOG" 2>&1 || nixos_fail "Could not format the EFI partition $esp"
+  fi
+  espnum=$(cat "/sys/class/block/$(basename "$esp")/partition" 2>/dev/null || echo 1)
 
   dev="$root"
   if [ "$ENCRYPT" = yes ]; then
@@ -311,9 +581,15 @@ nixos_install() {
     rkey=""
     dev="/dev/mapper/$LUKS_MAPPER"
     # The generic system opens the volume the boot hook names from host.toml.
-    # (A non-US unlock keymap was refused in nixos_preflight.)
     NIXOS_KARGS=("rd.luks.uuid=$LUKS_UUID" "${NIXOS_KARGS[@]}")
-    log "luks: $root uuid=$LUKS_UUID mapper=$LUKS_MAPPER"
+    # The unlock prompt's layout: rime-boot carries host.toml's console keymap
+    # on every entry; when rime-install chose another one for the prompt (us,
+    # because the owner's layout cannot type this passphrase), it is named here
+    # and wins (rime-boot keymap_params: a kernel_params keymap is kept as is).
+    if [ -n "${UNLOCK_KEYMAP:-}" ] && [ "$UNLOCK_KEYMAP" != "${CONSOLE_KEYMAP:-}" ]; then
+      NIXOS_KARGS+=("rd.vconsole.keymap=$UNLOCK_KEYMAP")
+    fi
+    log "luks: $root uuid=$LUKS_UUID mapper=$LUKS_MAPPER unlock-keymap=${UNLOCK_KEYMAP:-us}"
   fi
 
   mkfs.btrfs -f -L "$NIXOS_ROOT_LABEL" "$dev" >>"$LOG" 2>&1 || nixos_fail "mkfs.btrfs failed on $dev"
@@ -329,19 +605,36 @@ nixos_install() {
   mkdir -p "$TROOT/nix" "$TROOT/var/home" "$TROOT/boot"
   mount -o "subvol=@nix,$NIXOS_MOUNT_OPTS" "$dev" "$TROOT/nix" >>"$LOG" 2>&1 || nixos_fail "Could not mount @nix"
   mount -o "subvol=@home,$NIXOS_MOUNT_OPTS" "$dev" "$TROOT/var/home" >>"$LOG" 2>&1 || nixos_fail "Could not mount @home"
-  mount -o umask=0077 "$esp" "$TROOT/boot" >>"$LOG" 2>&1 || nixos_fail "Could not mount the EFI partition"
+  if [ "${ESP_IS_LIVE:-0}" = 1 ]; then
+    # The live medium IS the ESP (a staged Windows install): writable for as
+    # long as this takes, then read-only again (live_esp_readonly).
+    mount -o remount,rw /run/initramfs/live >>"$LOG" 2>&1 || nixos_fail "Could not make the EFI partition $esp writable"
+    mount --bind /run/initramfs/live "$TROOT/boot" >>"$LOG" 2>&1 || nixos_fail "Could not mount the EFI partition"
+  else
+    mount -o umask=0077 "$esp" "$TROOT/boot" >>"$LOG" 2>&1 || nixos_fail "Could not mount the EFI partition"
+  fi
   ln -sfn /var/home "$TROOT/home"
   log "nixos: $(findmnt -R -no TARGET,SOURCE,FSTYPE,OPTIONS "$TROOT" | tr '\n' ';')"
 
   esp_uuid=$(blkid -s UUID -o value "$esp" 2>>"$LOG" || true)
   [ -n "$esp_uuid" ] || nixos_fail "The EFI partition has no UUID"
   nixos_esp "$TROOT/boot" "$esp_uuid" || nixos_fail "Could not write the boot loader to the EFI partition"
+  # Windows beside Rime: a GRUB entry in custom.cfg, which bootupd's static
+  # config sources and rime-boot keeps byte for byte (with_include_block).
+  # Skipped where Windows uses BitLocker (add_windows_entry says why).
+  [ "$INSTALL_MODE" = partition ] && add_windows_entry "$TROOT"
   nixos_host_toml "$TROOT/var/lib/rime/host.toml" || nixos_fail "Could not write host.toml"
   log "nixos: host.toml: $(tr '\n' ' ' < "$TROOT/var/lib/rime/host.toml")"
 
   note "Copying Rime OS onto the disk … (this is the long part)"
-  nixos_nix copy --from "$NIXOS_CACHE" --to "local?root=$TROOT" "$NIXOS_SYSTEM" >>"$LOG" 2>&1 \
+  # The release's own path lists, per cache: nixpkgs' paths from the upstream cache first (they reference no Rime
+  # path), then Rime's. Each copy names exactly the paths the verified manifest lists (rime update's order).
+  nixos_copy "$NIXOS_UP_CACHE" "$NIXOS_WORK/release/upstream.paths" \
+    || nixos_fail "Copying the system from $NIXOS_UP_CACHE failed"
+  nixos_copy "$NIXOS_CACHE" "$NIXOS_WORK/release/rime.paths" \
     || nixos_fail "Copying the system from $NIXOS_CACHE failed"
+  nixos_nix path-info --store "local?root=$TROOT" --recursive "$NIXOS_SYSTEM" >/dev/null 2>>"$LOG" \
+    || nixos_fail "The copied system is incomplete"
   log "nixos: copied; store on disk: $(du -sh --apparent-size "$TROOT/nix/store" 2>/dev/null | cut -f1) apparent, $(df -h --output=used "$TROOT/nix" | tail -1) used"
 
   note "Installing the boot menu …"
@@ -354,8 +647,10 @@ nixos_install() {
   [ -n "$gen" ] && [ "$(readlink "$TROOT/nix/var/nix/profiles/$gen")" = "$NIXOS_SYSTEM" ] \
     || nixos_fail "The system profile does not point at $NIXOS_SYSTEM"
   ls "$TROOT"/boot/loader/entries/*.conf >/dev/null 2>&1 || nixos_fail "The boot hook wrote no boot entry"
+  gen=${gen#system-}; gen=${gen%-link}
+  nixos_release_state "$gen" || nixos_fail "Could not record the installed release"
   INSTALLED_OK=1
-  log "nixos: entries: $(ls "$TROOT/boot/loader/entries" | tr '\n' ' ')"
+  log "nixos: entries: $(ls "$TROOT/boot/loader/entries" | tr '\n' ' '); release $NIXOS_RELEASE generation $gen"
 
   note "Creating your account …"
   have_groups=$(cut -d: -f1 "$TROOT/etc/group" 2>/dev/null | tr '\n' ' ')
@@ -382,16 +677,35 @@ nixos_install() {
   if disk_is_loopback "$DISK"; then
     log "nvram: $DISK is loop-backed — no firmware entry"
   elif have efibootmgr && [ -d /sys/firmware/efi/efivars ]; then
-    efibootmgr -q --create --disk "$DISK" --part 1 --label "Rime OS" --loader '\EFI\fedora\shimx64.efi' >>"$LOG" 2>&1 \
-      && log "nvram: Rime OS -> $DISK part 1 \\EFI\\fedora\\shimx64.efi" \
+    efibootmgr -q --create --disk "$DISK" --part "$espnum" --label "Rime OS" --loader '\EFI\fedora\shimx64.efi' >>"$LOG" 2>&1 \
+      && log "nvram: Rime OS -> $DISK part $espnum \\EFI\\fedora\\shimx64.efi" \
       || log "nvram: efibootmgr failed; the removable path EFI/BOOT/BOOTX64.EFI still boots"
   fi
 
   sync
   nixos_unmount
   if [ -n "${LUKS_MAPPER:-}" ]; then cryptsetup close "$LUKS_MAPPER" >>"$LOG" 2>&1 || true; fi
+  if [ "$INSTALL_MODE" = partition ]; then
+    live_esp_readonly
+    # The installed system finds /boot by this label (target.nix). Last, so a
+    # failed install leaves the ESP as it was found (the Windows app's live boot
+    # names its partition by PARTUUID, not by label, so a retry still starts).
+    nixos_relabel_esp "$esp" || nixos_fail "Could not name the EFI partition $esp \"$NIXOS_ESP_LABEL\""
+  fi
   udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
   return 0
+}
+
+nixos_relabel_esp() {  # $1=ESP device — FAT label RIME-ESP (the live medium is read-only here; the label is in the boot sector)
+  if have fatlabel; then
+    fatlabel "$1" "$NIXOS_ESP_LABEL" >>"$LOG" 2>&1 || return 1
+  else
+    mlabel -i "$1" "::$NIXOS_ESP_LABEL" >>"$LOG" 2>&1 || return 1
+  fi
+  udevadm trigger --action=change "$1" >>"$LOG" 2>&1 || true
+  udevadm settle --timeout=30 >>"$LOG" 2>&1 || true
+  log "esp: $1 is now \"$(blkid -p -s LABEL -o value "$1" 2>/dev/null)\""
+  [ "$(blkid -p -s LABEL -o value "$1" 2>/dev/null)" = "$NIXOS_ESP_LABEL" ]
 }
 
 # ── Secure Boot: the same choice the bootc path offers ─────────────────────
@@ -429,22 +743,34 @@ To enrol it later: mokutil --import /var/lib/rime/secureboot/rime-mok.der"
 }
 
 nixos_finish() {
-  local crypt=""
+  local crypt="" where
   [ "$ENCRYPT" = yes ] && crypt="
 
 This disk is ENCRYPTED: Rime OS asks for the disk passphrase every time it
 starts. The RECOVERY KEY shown earlier works at the same prompt."
+  if [ "$INSTALL_MODE" = partition ] && [ "${WINDOWS_ENTRY:-0}" = 1 ]; then
+    where="Installed into $TARGET, beside Windows; Windows' own partitions were not touched.
+To start Windows, choose Windows in the menu that shows for five seconds at power-on."
+  elif [ "$INSTALL_MODE" = partition ]; then
+    where="Installed into $TARGET; the other partitions on $DISK were not touched.
+To start another system on this disk, use your computer's boot menu (usually F12, F11, F9 or Esc)."
+  else
+    where="Installed on $DISK (whole disk)."
+  fi
+  # A staged Windows install: the one-shot "Rime OS Setup" firmware entry goes
+  # now; the staged files go on the installed system's first boot.
+  remove_setup_entry
   note "Rime OS is installed.
 
-Installed on $DISK (whole disk).$crypt
+$where$crypt
 
 Log in as: $USERNAME
 Hostname:  $HOSTNAME
 
-Remove the USB stick and reboot.
+$( [ "${ESP_IS_LIVE:-0}" = 1 ] && echo "Restart when you are ready." || echo "Remove the USB stick and reboot." )
 
 Full log: $LOG"
-  log "install complete (nixos $NIXOS_SYSTEM)"
+  log "install complete (nixos $NIXOS_SYSTEM, release ${NIXOS_RELEASE:-?})"
   write_result ok ""
   echo "RIME-INSTALL-OK"
 }

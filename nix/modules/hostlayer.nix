@@ -70,7 +70,9 @@ in
     # declares). Here the name is the machine's own /etc/hostname, so hostnamed reads and writes the real files:
     # without this `hostnamectl` said "Static hostname: (unset)" on every Rime machine and `hostnamectl hostname X`
     # could not write. (localed and timedated already use /etc: imperativeLocale, and timeZone is null.)
-    # checks.hostname-default (mutant hostnamed-static).
+    # checks.hostname-default (mutant hostnamed-static) and checks.installer-polish-eval (installer2 OVMF first boot
+    # showed the same "(unset)"). Both wave-3 fixes kept as one unconditional setting: the machine-info half applies
+    # whether or not a configuration names the host.
     systemd.services.systemd-hostnamed.environment = {
       SYSTEMD_ETC_HOSTNAME = lib.mkForce "/etc/hostname";
       SYSTEMD_ETC_MACHINE_INFO = lib.mkForce "/etc/machine-info";

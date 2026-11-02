@@ -38,10 +38,13 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 
 pub const MIB: u64 = 1024 * 1024;
 const ALIGN_LBA: u64 = 2048;
-/// The smallest root partition offered. The Linux installer refuses below
-/// 10 GB for btrfs; 16 GB leaves room for the first update (a core update is
-/// about 5 GB of new objects next to the old ones).
-pub const MIN_ROOT_BYTES: u64 = 16 * 1000 * 1000 * 1000;
+/// The smallest root partition offered: the Linux installer's own floor for a
+/// root partition, so a space this app accepts is never refused after it has
+/// rewritten the GPT. The NixOS engine refuses a partition below 17 GB
+/// (installer/rime-install-nixos.sh NIXOS_PART_MIN_GB: a fresh system, one
+/// update beside it and the rollback generation, closure.md A11); the bootc
+/// engine's 10 GB floor is lower, so this one constant serves both ISOs.
+pub const MIN_ROOT_BYTES: u64 = 17 * 1000 * 1000 * 1000;
 /// Free space left on Rime's ESP after the live files. Rime's own boot files
 /// need about 30 MB; the rest is room for the systemd-boot layout Rime is
 /// moving to, which needs about 350 MiB (docs/boot-v2.md).
@@ -711,5 +714,25 @@ mod tests {
         assert!(e.contains("needs at least"), "{e}");
         let outside = Space::Free { first_lba: 2048, last_lba: 4_000_000 };
         assert!(plan(&inputs(&before, &payload, outside)).is_err(), "overlapping Windows' partitions");
+    }
+
+    #[test]
+    fn a_root_the_linux_installer_would_refuse_is_refused_here() {
+        if !tool("sfdisk") {
+            panic!("sfdisk is required (util-linux)");
+        }
+        // The NixOS engine refuses a root partition below 17 GB (NIXOS_PART_MIN_GB). A space that leaves 16.5 GB
+        // after Rime's ESP must be refused HERE, before the GPT is rewritten, not by the engine after.
+        let disk = windows_disk();
+        let (_iso, payload) = fake_iso();
+        let mut f = File::open(&disk.0).unwrap();
+        let before = GptSnapshot::read(&mut f, 64 * GIB).unwrap();
+        let hole = before.free_regions(2048, 2048).into_iter().max_by_key(|(a, b)| b - a).unwrap();
+        let full = plan(&inputs(&before, &payload, Space::Free { first_lba: hole.0, last_lba: hole.1 })).unwrap();
+        let short = Space::Free { first_lba: hole.0, last_lba: full.esp.last_lba + 16_500_000_000 / 512 };
+        let e = plan(&inputs(&before, &payload, short)).unwrap_err().to_string();
+        assert!(e.contains("needs at least"), "{e}");
+        let enough = Space::Free { first_lba: hole.0, last_lba: full.esp.last_lba + 17_100_000_000 / 512 };
+        assert!(plan(&inputs(&before, &payload, enough)).unwrap().root_bytes() >= 17_000_000_000);
     }
 }
