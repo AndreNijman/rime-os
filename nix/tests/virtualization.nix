@@ -39,6 +39,12 @@ pkgs.testers.runNixOSTest {
         assert "<loader supported='yes'>" in doms, doms
         assert "edk2-x86_64-code.fd" in doms and "edk2-x86_64-secure-code.fd" in doms, doms
         assert "<tpm supported='yes'>" in doms and "emulator" in doms, doms
+        # domcapabilities lists the emulator backend whether or not libvirtd can start swtpm, so pin what
+        # qemu.swtpm.enable gives: swtpm and swtpm_setup on libvirtd's own PATH (a unit's PATH does not include the
+        # system profile, so environment.systemPackages does not stand in for it).
+        unit_env = machine.succeed("systemctl show -p Environment --value libvirtd.service")
+        path = next(v[5:] for v in unit_env.split() if v.startswith("PATH="))
+        machine.succeed(f"env -i PATH={path} /bin/sh -c 'command -v swtpm && command -v swtpm_setup'")
 
     with subtest("the tools rime vm runs directly"):
         machine.succeed("qemu-system-x86_64 --version")
