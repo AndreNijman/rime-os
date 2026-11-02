@@ -224,7 +224,7 @@ signed by a throwaway TEST signer, cache key `rime-installer-lab-TEST-1`. All ev
 | `firstboot gb` (I3, SB on, TEST MOK) | pass: the passphrase typed on a `gb` layout opens the volume (`luks_result` "Switching root"); `rd.vconsole.keymap=gb` on the command line; SecureBoot 1 "enabled (user)"; `/etc/hostname` and `hostnamectl --static` both `rime-lab-gb`; greeter on VT 1 (`Class=greeter`) showing **English (UK)**; no zsh-newuser-install; one `splash`; journald `NRestarts=1` (explained below) | `firstboot-gb.{log,json,png,serial.log}` |
 | `firstboot-us-control` (run 2, same engine and passphrase) | FAILS as it must: the same key presses typed on a `us` layout give "Failed to activate with specified passphrase" | `run2-greeter-us/firstboot-gb-us-control.{json,log,serial.log}` |
 | `install part` (Windows-shaped disk: Windows ESP, MSR, NTFS `Windows`, the app's `RIME-EFI` + empty 8304) | pass, 14:40:32 to 14:45:03: "grub: Windows entry added (ESP /dev/vda1 …)", "nvram: Rime OS -> /dev/vda part 4 \EFI\fedora\shimx64.efi", "esp: /dev/vda4 is now RIME-ESP" | `install-part.log`, `rime-install-part.log`, `result-part.txt`, `part-disk-before.txt` |
-| `firstboot part` (I2, SB on) | pass: firmware `BdsDxe: starting Boot0004` (Rime OS on partition 4, shim), staged files absent, one Windows entry in GRUB. After it: Windows' ESP still holds `EFI/Microsoft/Boot/bootmgfw.efi`, NTFS `Windows` intact, `RIME-ESP` without `rimeinst/`, `rime-root` btrfs | `firstboot-part.{log,json,png,serial.log}`, `part-disk-after.txt` |
+| `firstboot part` (I2, SB on) | pass: firmware `BdsDxe: starting Boot0004` (Rime OS on partition 4, shim), staged files absent, one Windows entry in GRUB. Run 3 kept no copy of the disk after it; the after-install inspection (Windows' ESP still holds its `EFI/Microsoft/Boot/bootmgfw.efi` fixture, NTFS `Windows` intact, `RIME-ESP` without `rimeinst/`, `rime-root` btrfs) is run 2's, from the same install scripts, and `checks.installer-nixos` compares sha256 of Windows' three partitions before and after | `firstboot-part.{log,json,png,serial.log}`; `run2-greeter-us/part-disk-after.txt` (`lab/part-disk-after.txt` is a copy of it) |
 
 The probe's `nvram` fact is empty in `firstboot-part.json` (`efibootmgr` through the probe's `sudo` prints nothing in
 that VM); the firmware's own `BdsDxe` line is the evidence that the entry the engine wrote is the one that booted.
@@ -282,8 +282,10 @@ sudo -n podman exec -w /work/<worktree> rime-nix nix build path:.#checks.x86_64-
   fix.
 * **`installer/test-installer.sh` on katana.** Its engine half runs the real `rime-install` as root on the host with
   real loop devices and names `/dev/sda`/`/dev/sdb`; on katana that is the machine the hard lines protect. CI's runner
-  runs it (`pr-validation.yml`); `checks.installer-nixos` runs the same guards in a VM. Its GUI half needs root podman
-  images the lab container cannot build.
+  runs it (`pr-validation.yml`); `checks.installer-nixos` runs the same guards in a VM. Its GUI half (every page
+  drawn headless in root podman, stubbed engine and disks, nothing on the host's disks) can run on katana: the first
+  attempt failed only because the render images could not be built then; run alone at 0f210d2bf it passed 24/24
+  (12 pages at 1024x600 and 1366x768), `/var/lab/rime-nix/artifacts/verify-installer2/gui-half/`.
 
 ## Handover
 
