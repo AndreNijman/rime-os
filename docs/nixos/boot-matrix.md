@@ -106,4 +106,66 @@ a 4-vCPU VM; with the old 10 s window `scx_eevdf` failed. 60 s still fails a sch
 
 ## Results
 
-RESULTS
+Run on katana 2026-11-02 (00:10-01:40 AWST), worktree `nix/bootmatrix`. **All 8 runs pass, 24 of 24 boots**
+(`results.tsv`; times are wall clock per boot under katana's CI load):
+
+| run | gate | boot 1: gen 1 default, greeter, installs bad gen 2 | boot 2: bad gen 2 default, fails | boot 3: menu → gen 1, greeter |
+|---|---|---|---|---|
+| `bls-plain-sb-mok` | B1, B9 | PASS 102 s | PASS 58 s | PASS 79 s |
+| `custom-plain-sb-mok` | B2, B9 | PASS 85 s | PASS 43 s | PASS 81 s |
+| `bls-plain-sb-off` | B3, B9 | PASS 67 s | PASS 29 s | PASS 53 s |
+| `custom-plain-sb-off` | B4, B9 | PASS 65 s | PASS 29 s | PASS 52 s |
+| `bls-luks-sb-mok` | B5, B10 | PASS 106 s | PASS 60 s | PASS 110 s |
+| `custom-luks-sb-mok` | B6, B10 | PASS 95 s | PASS 48 s | PASS 109 s |
+| `bls-luks-sb-off` | B7, B10 | PASS 89 s | PASS 32 s | PASS 87 s |
+| `custom-luks-sb-off` | B8, B10 | PASS 89 s | PASS 37 s | PASS 95 s |
+
+Every run's menu order was `[1]` on boot 1 and `[2, 1]` after `switch-to-configuration boot` (the bad generation
+became the default by itself); the recovery keys were `down ret`. What one good LUKS boot reports
+(`custom-luks-sb-mok` boot 3, serial, shortened):
+
+```
+RIME-LAB: PASSPHRASE-ASKED 1.60 4.16
+RIME-LAB: cmdline: BOOT_IMAGE=/rime/nixos/233b3613626c118170332b2894910f8d-linux-image-7.2.9-signed-bzImage.efi init=/nix/store/…-nixos-system-rime-bootmatrix-…/init quiet splash … rd.luks.uuid=5b1f0c2e-…
+RIME-LAB: uname: 7.2.9-cachyos1-rime1
+RIME-LAB: sb-state: SecureBoot enabled
+RIME-LAB: root: /dev/mapper/luks-5b1f0c2e-7d4a-4e8b-9c3f-a1b2c3d4e5f6[/@nixos] btrfs …
+RIME-LAB: luks: /dev/mapper/luks-5b1f0c2e-7d4a-4e8b-9c3f-a1b2c3d4e5f6  type: LUKS2 cipher: aes-xts-plain64 device: /dev/vda3
+RIME-LAB: ostree: loader -> loader.1; bfd20738…  /boot/loader.1/entries/ostree-1.conf
+RIME-LAB: custom.cfg windows entry: 1
+RIME-LAB: GREETER-UP after 19 s: session 1 VTNr=1 Type=wayland Class=greeter ; sway pid 1122; qs pid 1169
+```
+
+The SB-off runs report `SecureBoot disabled`; every boot 2 reports `BAD generation 2 reached initrd emergency mode
+(root by-label/rime-lab-missing)`. Screenshots per run: `boot{1,3}-greeter.png` (rime-greet), `boot3-menu.png` and
+`boot3-picked.png` (the selection moved from generation 2 to generation 1), and for LUKS `boot*-passphrase-late.png`
+(Plymouth's "Please enter passphrase for disk root (luks-5b1f0c2e-…)"; the shot 4 s after the ask still shows shim's
+text, Plymouth draws a few seconds later).
+
+Checks (all built on this branch; logs in `artifacts/bootmatrix/logs/`):
+
+- `boot-loader-scan` (X2): the shipped `rime-vm` and `rime-vm-luks` toplevels, 14 files each (the hook, activation
+  scripts, `switch-to-configuration`, `INSTALL_BOOTLOADER` and what they reference to depth 4): **0 findings**.
+  Mutants: a system with `rime.boot` off (NixOS's own GRUB) is flagged (`install-grub.pl`: `grub-install`), and an
+  activation script that names `bootctl` is flagged (line 99).
+- `boot-microcode`: both layouts, two leading cpios (`GenuineIntel.bin`, `AuthenticAMD.bin`), initrd 51,584,750 B.
+  Mutant: microcode off gives no cpio and 36,040,430 B, the check's `none` case.
+- `luks-boot`: the systemd initrd carries the cryptsetup generator with no crypttab entry, and KEYMAP=de
+  in `vconsole.conf`; the entry with `rd.luks.uuid=` boots after the passphrase is typed and `/` is
+  `/dev/mapper/luks-<uuid>`. Mutant (read by hand):
+  `rime-vm`'s initrd without `rime.luks` has no cryptsetup generator and no `dm_crypt`.
+- `kernel-vm-signed` (K1-K3): three consecutive `nix build --rebuild` passes, 17/17 each (16 schedulers + `kill -9`),
+  VERDICT PASS, at rising host load (load average 5→16, 16→25, 25→34; `scx_eevdf` attached in 3.8 s, 6.2 s and
+  11.4 s). The third would have failed the old 10 s window (the mutant: `settle 10` is what failed on 2026-11-01).
+  The booted kernel is the signed image (sbverify, not the unsigned file) and its `/sys/kernel/btf/vmlinux` is byte
+  for byte `kernel-gate`'s `vmlinux.btf`.
+
+### Lab notes
+
+- Fedora's `qemu-system-x86-core` has no `virtio-gpu-pci`: the matrix uses `-vga std` (the bochs DRM device).
+- The probe container runs with `--security-opt label=disable` and no `:z`: a recursive relabel of `/lab` fails on a
+  disk tree still being built (its `var/empty` is immutable).
+- The LUKS writer VM needs the kernel's `modules` output (not `out`), the cipher and AF_ALG modules `dm_crypt` loads
+  (`encrypted_key: failed to alloc_cipher (-2)` otherwise), and copies every block (a sparse copy left decrypted noise
+  where ext4 expects zeros, and e2fsck failed).
+- The big disks are deleted after the run; `run.sh matrix` rebuilds them (about 15 min).
