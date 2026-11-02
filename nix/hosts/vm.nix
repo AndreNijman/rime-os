@@ -10,7 +10,8 @@
 
   nixpkgs.hostPlatform = "x86_64-linux";
 
-  networking.hostName = "rime-vm";
+  # No networking.hostName: the host layer names the machine from host.toml at activation ("rime" when
+  # nothing names it), the same as on real hardware.
 
   # Every Rime area and the boot hook come from the shipped profile (./profile.nix). rime.kernel stays off: the VM
   # boots nixpkgs' cached kernel. qemu-vm boots the kernel directly, so the boot hook only runs if a test calls

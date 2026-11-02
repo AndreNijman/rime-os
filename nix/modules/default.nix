@@ -15,6 +15,7 @@
     ./boot.nix
     ./luks.nix
     ./hostlayer.nix
+    ./tuning.nix
     ./rename-compat.nix
     ./update.nix
     ./greeting.nix

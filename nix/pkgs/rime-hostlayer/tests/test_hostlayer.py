@@ -244,6 +244,57 @@ class CarryTest(Fixture):
         r = self.carry(check=2)
         self.assertIn("already carried", r.stderr)
 
+    def test_luks_and_keymap_kernel_arguments_reach_host_toml_boot(self):
+        cmdline = f"{self.tmp.name}/cmdline"
+        uuid = "0b1c2d3e-0000-4000-8000-0000000000aa"
+        write(cmdline, f"BOOT_IMAGE=(hd0,gpt2)/ostree/default-x/vmlinuz root=UUID=a41f rw rootflags=subvol=root "
+                       f"ostree=/ostree/boot.1/default/x/0 rd.luks.uuid=luks-{uuid} rd.luks.options=tpm2-device=auto,"
+                       f"discard rd.vconsole.keymap=uk rhgb quiet nvidia-drm.modeset=1\n")
+        self.carry("--cmdline", cmdline, check=0)
+        with open(f"{self.dest}/var/lib/rime/host.toml", "rb") as f:
+            host = tomllib.load(f)
+        self.assertEqual(host["boot"], {"kernel_params": [
+            f"rd.luks.uuid=luks-{uuid}", "rd.luks.options=tpm2-device=auto,discard", "rd.vconsole.keymap=uk"]})
+        self.assertEqual(host["luks"], [{"name": f"luks-{uuid}", "device": f"UUID={uuid}",
+                                         "options": "tpm2-device=auto,discard", "tpm2": True}])
+        rep = self.read("var/lib/rime/carry/report.txt")
+        self.assertIn("not carried (the image's own, or port them to the system configuration): rhgb quiet "
+                      "nvidia-drm.modeset=1", rep)
+        self.assertNotIn("ostree=", rep.split("kernel command line", 1)[1].split("\n", 1)[0])
+        run("host", "validate", "--file", f"{self.dest}/var/lib/rime/host.toml", check=0)
+
+    def test_a_luks_argument_the_boot_menu_cannot_hold_is_refused(self):
+        cmdline = f"{self.tmp.name}/cmdline"
+        write(cmdline, "rd.luks.options=$weird\n")
+        r = self.carry("--cmdline", cmdline, check=2)
+        self.assertIn("rd.luks.options=$weird", r.stderr)
+        self.assertEqual(os.listdir(self.dest), [], "a refused carry wrote something")
+
+    def test_no_cmdline_carries_no_kernel_arguments(self):
+        self.carry(check=0)
+        with open(f"{self.dest}/var/lib/rime/host.toml", "rb") as f:
+            self.assertNotIn("boot", tomllib.load(f))
+        self.assertIn("kernel command line: not given (--cmdline)", self.read("var/lib/rime/carry/report.txt"))
+
+    def test_host_local_tuning_is_reported_or_matched_to_the_system(self):
+        e = f"{self.src}/etc"
+        write(f"{e}/udev/rules.d/60-bfq-nvme.rules", 'ACTION=="add", KERNEL=="nvme0n1", ATTR{queue/scheduler}="bfq"\n')
+        write(f"{e}/sysctl.d/90-writeback.conf", "# old comment\nvm.dirty_bytes = 1073741824\n")
+        write(f"{e}/sysctl.d/91-edited.conf", "vm.swappiness = 10\n")
+        # The new system ships 90-writeback.conf with the same setting (another comment) and its own 91-edited.conf.
+        write(f"{self.sys}/etc/sysctl.d/90-writeback.conf", "# Rime's\nvm.dirty_bytes=1073741824\n")
+        write(f"{self.sys}/etc/sysctl.d/91-edited.conf", "vm.swappiness = 60\n")
+        self.carry(check=0)
+        rep = json.loads(self.read("var/lib/rime/carry/report.json"))
+        left = {e["path"]: e["why"] for e in rep["left_behind"]}
+        checked = {c["path"]: c["result"] for c in rep["checked"]}
+        self.assertIn("NixOS builds /etc/udev/rules.d", left["/etc/udev/rules.d/60-bfq-nvme.rules"])
+        self.assertIn("the new system ships the same settings", checked["/etc/sysctl.d/90-writeback.conf"])
+        self.assertNotIn("/etc/sysctl.d/90-writeback.conf", left)
+        self.assertIn("ships its own file of this name", left["/etc/sysctl.d/91-edited.conf"])
+        self.assertIn("/etc/udev/rules.d/60-bfq-nvme.rules: a udev rule written on this machine",
+                      self.read("var/lib/rime/carry/report.txt"))
+
     def test_plan_writes_nothing(self):
         r = self.carry("--plan", check=0)
         self.assertIn("CARRIED", r.stdout)
@@ -257,10 +308,20 @@ class HostTomlTest(unittest.TestCase):
                         '[[mount]]\nwhat="/dev/x"\nwhere="/"\ntype="ext4"\noptions="nofail"\n',
                         '[keyboard]\nxkb_layout = "us\\"\\nOption"\n', 'nonsense = 1\n',
                         '[boot]\nlayout = "grub"\n', '[boot]\nkernel_params = "rd.luks.uuid=x"\n',
-                        '[boot]\nkernel_params = ["a b"]\n', '[boot]\nentries = 3\n'):
+                        '[boot]\nkernel_params = ["a b"]\n', '[boot]\nkernel_params = ["a=$(id)"]\n',
+                        '[boot]\nlayout = "systemd-boot"\n', '[boot]\nentries = 3\n'):
                 write(f"{t}/h.toml", bad)
                 r = run("host", "validate", "--file", f"{t}/h.toml")
                 self.assertEqual(r.returncode, 1, bad)
+
+    def test_the_boot_table_rime_boot_reads_is_valid(self):
+        with tempfile.TemporaryDirectory() as t:
+            write(f"{t}/h.toml", 'schema = 1\n[boot]\nlayout = "custom-cfg"\n'
+                                 'kernel_params = ["rd.luks.uuid=luks-0b1c", "rd.vconsole.keymap=uk"]\n')
+            run("host", "validate", "--file", f"{t}/h.toml", check=0)
+            r = run("host", "show", "--file", f"{t}/h.toml", check=0)
+            self.assertIn('[boot]\nlayout = "custom-cfg"\nkernel_params = ["rd.luks.uuid=luks-0b1c", '
+                          '"rd.vconsole.keymap=uk"]\n', r.stdout)
 
 
     def test_the_boot_table_the_hook_reads_is_valid(self):
@@ -300,6 +361,26 @@ class GeneratorTest(unittest.TestCase):
                             'options = "defaults"\n'.replace("/srv/data dir", "/srv/data-dir"))
         self.assertTrue(os.path.islink(f"{out}/local-fs.target.requires/srv-data\\x2ddir.mount"))
         self.assertIn("Before=local-fs.target", open(f"{out}/srv-data\\x2ddir.mount").read())
+
+    def test_a_network_mount_waits_for_the_network_and_hangs_from_remote_fs(self):
+        out = self.generate('[[mount]]\nwhat = "nas:/export"\nwhere = "/mnt/nas"\ntype = "nfs"\n'
+                            'options = "_netdev,nofail"\npassno = 2\n'
+                            '[[mount]]\nwhat = "//nas/share"\nwhere = "/mnt/share"\ntype = "cifs"\n'
+                            'options = "credentials=/etc/smb"\n'
+                            '[[mount]]\nwhat = "/dev/disk/by-label/iscsi"\nwhere = "/mnt/iscsi"\ntype = "ext4"\n'
+                            'options = "_netdev,nofail"\n')
+        nfs = open(f"{out}/mnt-nas.mount").read()
+        self.assertIn("After=network-online.target\nWants=network-online.target\n", nfs)
+        self.assertNotIn("local-fs.target", nfs)
+        self.assertNotIn("systemd-fsck", nfs, "a network filesystem is never fsck'd")
+        self.assertTrue(os.path.islink(f"{out}/remote-fs.target.wants/mnt-nas.mount"))
+        # No nofail: the boot waits for it, as remote-fs.target does for an fstab line without nofail.
+        self.assertIn("Before=remote-fs.target", open(f"{out}/mnt-share.mount").read())
+        self.assertTrue(os.path.islink(f"{out}/remote-fs.target.requires/mnt-share.mount"))
+        # _netdev on a block device makes it a network mount too (iSCSI).
+        self.assertTrue(os.path.islink(f"{out}/remote-fs.target.wants/mnt-iscsi.mount"))
+        self.assertFalse(os.path.exists(f"{out}/local-fs.target.wants"))
+        self.assertFalse(os.path.exists(f"{out}/local-fs.target.requires"))
 
     def test_a_broken_host_toml_writes_nothing_and_exits_0(self):
         out = self.generate("[[mount\n")

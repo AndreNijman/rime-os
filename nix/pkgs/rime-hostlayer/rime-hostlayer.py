@@ -10,11 +10,14 @@ The system closure is built once, in CI, for every machine. What belongs to ONE 
 
 Subcommands:
 
-  carry --from SRC --root DEST --system TOPLEVEL [--declared JSON] [--image-etc DIR] [--plan] [--force]
+  carry --from SRC --root DEST --system TOPLEVEL [--declared JSON] [--image-etc DIR] [--cmdline FILE]
+        [--plan] [--force]
       Bring one machine's state from an old root (bootc: its /etc and /var) into a new NixOS root, before the
       new system's first activation. Opens SRC read-only and never writes under it. Refuses BY NAME, before
       writing anything, when an account the machine must keep (a person, an account with subordinate ids, their
-      primary groups) collides with an id the NixOS system declares.
+      primary groups) collides with an id the NixOS system declares. --cmdline is the old system's kernel
+      command line (the bridge passes /proc/cmdline): its per-machine arguments (LUKS, console keymap, resume)
+      go to host.toml [boot] kernel_params, which the boot hook appends to every entry; the rest are reported.
   host show | get KEY | validate [--file F]
   generate-mounts NORMAL [EARLY LATE]      the systemd generator (installed as rime-hostlayer-mounts)
   apply [--root R]                         activation: hostname, timezone, locale, keyboards from host.toml
@@ -69,7 +72,24 @@ PATTERNS = {
     "options": r"[^\s#]+",
     "what": r"[^\s#]+",
     "unit": r"[A-Za-z0-9_.:-]+(@[A-Za-z0-9_.:-]*)?\.(service|socket|timer|path|mount)",
+    # Exactly what rime-boot (nix/pkgs/rime-boot SAFE_PARAM) writes into a menu entry: nothing GRUB would expand,
+    # quote or split.
+    "kernel_param": r"[A-Za-z0-9_./:=,+@%~^\-\[\]!]+",
 }
+
+# [boot] layout values rime-boot reads (nix/modules/boot.nix rime.boot.layout, plus "auto").
+BOOT_LAYOUTS = ("auto", "bls", "custom-cfg")
+
+# Network filesystems (libmount's mnt_fstype_is_netfs, as systemd-fstab-generator uses it): such a mount waits for
+# the network and hangs from remote-fs.target, never from local-fs.target, and is never fsck'd.
+NETFS_TYPES = {"nfs", "nfs4", "cifs", "smb3", "smbfs", "ncpfs", "coda", "ocfs2", "gfs", "gfs2", "ceph", "9p",
+               "afs", "glusterfs", "fuse.sshfs", "fuse.glusterfs", "davfs", "fuse.davfs2", "lustre", "pvfs2"}
+
+# The old kernel command line: per-machine arguments carried to host.toml [boot] kernel_params, and the ones that
+# belong to the old boot itself (dropped silently). Everything else is reported, not carried.
+KARG_CARRY = re.compile(r"(rd\.)?luks\.[a-z.]+=.*|rd\.luks=.*|rd\.vconsole\.(keymap|font)=.*|resume(_offset)?=.*")
+KARG_OLD_BOOT = re.compile(r"(BOOT_IMAGE|initrd|ostree|root|rootflags|rootfstype|ro|rw|rd\.auto|systemd\.machine_id)"
+                           r"(=.*)?")
 
 
 def log(msg):
@@ -148,6 +168,14 @@ def render_host_toml(host):
         out.append(f"freq = {int(m.get('freq', 0))}")
         out.append(f"passno = {int(m.get('passno', 0))}")
         out.append("")
+    boot = host.get("boot", {})
+    if boot:
+        out.append("[boot]")
+        if boot.get("layout"):
+            out.append(f"layout = {toml_str(boot['layout'])}")
+        if boot.get("kernel_params"):
+            out.append("kernel_params = [" + ", ".join(toml_str(k) for k in boot["kernel_params"]) + "]")
+        out.append("")
     for v in host.get("luks", []):
         out.append("[[luks]]")
         for k in ("name", "device", "keyfile", "options"):
@@ -213,19 +241,20 @@ def validate_host(host):
         for k in m:
             if k not in ("what", "where", "type", "options", "freq", "passno"):
                 errs.append(f"unknown key mount[{i}].{k}")
-    # [boot]: read by the boot hook (nix/pkgs/rime-boot: layout, kernel_params such as rd.luks.uuid=), which
-    # refuses unsafe parameters itself; here only the shape, so a valid [boot] never makes the whole file invalid.
-    b = host.get("boot", {})
-    if not isinstance(b, dict):
+    boot = host.get("boot", {})
+    if not isinstance(boot, dict):
         errs.append("[boot] is not a table")
-        b = {}
-    for k, v in b.items():
+        boot = {}
+    for k, v in boot.items():
         if k == "layout":
-            if v not in ("auto", "bls", "custom-cfg"):
-                errs.append(f"boot.layout {v!r} is not one of auto, bls, custom-cfg")
+            if v not in BOOT_LAYOUTS:
+                errs.append(f"boot.layout {v!r} is not one of {', '.join(BOOT_LAYOUTS)}")
         elif k == "kernel_params":
-            if not isinstance(v, list) or not all(isinstance(p, str) and p and not re.search(r"\s", p) for p in v):
-                errs.append(f"boot.kernel_params {v!r} is not a list of kernel parameters")
+            if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+                errs.append("boot.kernel_params is not a list of strings")
+            else:
+                errs += [f"boot.kernel_params {x!r} has a character the boot menu would expand or split"
+                         for x in v if not matches("kernel_param", x)]
         else:
             errs.append(f"unknown key boot.{k}")
     for i, v in enumerate(host.get("luks", [])):
@@ -303,18 +332,31 @@ def device_path(what):
     return what
 
 
+def is_netfs(m):
+    return m["type"] in NETFS_TYPES or "_netdev" in m["options"].split(",")
+
+
+def mount_target(m):
+    return "remote-fs.target" if is_netfs(m) else "local-fs.target"
+
+
 def mount_unit(m, source):
-    """The text of one .mount unit, and the dependency it hangs from local-fs.target."""
+    """The text of one .mount unit, and the dependency it hangs from its target (mount_target): local-fs.target,
+    or remote-fs.target for a network filesystem, which also waits for the network (systemd-fstab-generator's
+    rules; hanging it from local-fs.target would order the network before the local filesystems: a cycle)."""
     opts = m["options"].split(",")
     nofail = "nofail" in opts
     noauto = "noauto" in opts
+    netfs = is_netfs(m)
     what = device_path(m["what"])
     lines = ["# Generated by rime-hostlayer-mounts from " + source + " (PLAN.md D2). Options as written there.",
              "[Unit]", f"SourcePath={source}", "Documentation=man:systemd.mount(5)"]
+    if netfs:
+        lines += ["After=network-online.target", "Wants=network-online.target"]
     if not nofail:
         # Without nofail the boot waits for this mount, as for an fstab line without it.
-        lines.append("Before=local-fs.target")
-    if int(m.get("passno", 0)) > 0 and what.startswith("/dev/"):
+        lines.append(f"Before={mount_target(m)}")
+    if int(m.get("passno", 0)) > 0 and what.startswith("/dev/") and not netfs:
         fsck = f"systemd-fsck@{unit_escape_path(what)}.service"
         lines += [f"Requires={fsck}", f"After={fsck}"]
     lines += ["", "[Mount]", f"What={what}", f"Where={m['where']}", f"Type={m['type']}",
@@ -340,7 +382,7 @@ def cmd_generate_mounts(a):
         try:
             write_atomic(target, text)
             if dep:
-                d = os.path.join(a.normal, f"local-fs.target.{dep}")
+                d = os.path.join(a.normal, f"{mount_target(m)}.{dep}")
                 os.makedirs(d, exist_ok=True)
                 link = os.path.join(d, name)
                 if not os.path.lexists(link):
@@ -843,6 +885,35 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+# Configuration directories whose files NixOS builds from the system configuration: a file written there on the
+# old machine cannot be carried as a file (on NixOS /etc/udev/rules.d is one store directory). The report says so
+# and names the option to port it to.
+HOST_LOCAL_WHY = {
+    "etc/udev/rules.d": "a udev rule written on this machine: not carried (NixOS builds /etc/udev/rules.d from "
+                        "the system configuration; port it there, services.udev)",
+    "etc/sysctl.d": "a kernel setting written on this machine: not carried (port it to the system "
+                    "configuration, boot.kernel.sysctl)",
+    "etc/modprobe.d": "module options written on this machine: not carried (port them to the system "
+                      "configuration, boot.extraModprobeConfig)",
+    "etc/modules-load.d": "a module list written on this machine: not carried (port it to the system "
+                          "configuration, boot.kernelModules)",
+    "etc/tmpfiles.d": "a tmpfiles rule written on this machine: not carried (port it to the system "
+                      "configuration, systemd.tmpfiles.rules)",
+}
+
+
+def settings_of(data):
+    """A udev rule or sysctl file's settings: its non-comment lines, whitespace around = and between tokens
+    folded. Two files with the same settings and different comments are the same configuration."""
+    out = []
+    for ln in data.decode(errors="replace").splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith(("#", ";")):
+            continue
+        out.append(re.sub(r"\s*=\s*", "=", re.sub(r"\s+", " ", ln)))
+    return out
+
+
 class Carry:
     def __init__(self, a):
         self.src = Src(a.src)
@@ -858,6 +929,7 @@ class Carry:
         with open(dpath) as f:
             self.declared = json.load(f)
         self.image_etc = a.image_etc or self.src.p("usr/etc")
+        self.cmdline = a.cmdline
 
     def d(self, rel):
         return os.path.join(self.dest, rel.lstrip("/"))
@@ -1013,9 +1085,17 @@ class Carry:
             opts = p[3] if len(p) > 3 else ""
             luks.append({"name": p[0], "device": p[1], "keyfile": p[2] if len(p) > 2 and p[2] != "none" else "",
                          "options": opts, "tpm2": "tpm2-device" in opts})
+        params = self.params
+        if params:
+            host["boot"] = {"kernel_params": params}
+            have = {v["device"].split("=", 1)[-1].lower() for v in luks}
+            for uuid, v in self.luks_from_args(params).items():
+                if uuid not in have:
+                    luks.append(v)
         if luks:
             host["luks"] = luks
-            self.copied.add("etc/crypttab")
+            if self.src.lexists("etc/crypttab"):
+                self.copied.add("etc/crypttab")
         errs = validate_host(host)
         if errs:
             raise Refused("the old system's facts do not make a valid host.toml: " + "; ".join(errs))
@@ -1025,6 +1105,60 @@ class Carry:
                                        "sha256": sha256(text.encode())})
         if not self.plan_only:
             write_atomic(self.d("var/lib/rime/host.toml"), text, 0o644)
+
+    def kernel_args(self):
+        """The old kernel command line's per-machine arguments (PLAN.md D2: the LUKS volume and its unlock options,
+        the console keymap the passphrase prompt uses, resume) for host.toml [boot] kernel_params. bootc keeps them
+        as kernel arguments (the installer's `bootc install --karg`), not in /etc/crypttab. A LUKS argument the
+        boot menu cannot hold is refused by name: without it the machine would not unlock."""
+        if not self.cmdline:
+            self.report["checked"].append({"path": "kernel command line", "result": "not given (--cmdline): "
+                                           "no kernel arguments carried"})
+            return []
+        try:
+            with open(self.cmdline) as f:
+                args = f.read().split()
+        except OSError as e:
+            raise Refused(f"cannot read the old kernel command line {self.cmdline}: {e}")
+        carried, other = [], []
+        for arg in args:
+            if KARG_CARRY.fullmatch(arg):
+                if not matches("kernel_param", arg):
+                    raise Refused(f"the kernel argument {arg!r} cannot be written into a boot entry (a character "
+                                  f"GRUB would expand or split); without it this machine may not unlock")
+                if arg not in carried:
+                    carried.append(arg)
+            elif not KARG_OLD_BOOT.fullmatch(arg) and arg not in other:
+                other.append(arg)
+        self.report["checked"].append({"path": "kernel command line", "result": (
+            "carried to host.toml [boot] kernel_params: " + (" ".join(carried) or "none")
+            + "; not carried (the image's own, or port them to the system configuration): "
+            + (" ".join(other) or "none"))})
+        return carried
+
+    @staticmethod
+    def luks_from_args(params):
+        """rd.luks.uuid= / rd.luks.name= / rd.luks.options= as host.toml [[luks]] entries, keyed by UUID."""
+        out, opts_all, opts_by = {}, "", {}
+        for p in params:
+            k, _, v = p.partition("=")
+            k = k.removeprefix("rd.")
+            if k == "luks.uuid":
+                uuid = v.removeprefix("UUID=").removeprefix("luks-").lower()
+                out.setdefault(uuid, f"luks-{uuid}")
+            elif k == "luks.name" and "=" in v:
+                uuid, name = v.split("=", 1)
+                out[uuid.removeprefix("UUID=").lower()] = name
+            elif k == "luks.options":
+                # systemd-cryptsetup-generator: "<uuid>=<options>" names one volume, anything else is for all.
+                m = re.fullmatch(r"(?:UUID=)?([0-9a-fA-F]{8}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?[0-9a-fA-F]{4}-?"
+                                 r"[0-9a-fA-F]{12})=(.*)", v)
+                if m:
+                    opts_by[m.group(1).lower()] = m.group(2)
+                else:
+                    opts_all = v
+        return {u: {"name": n, "device": f"UUID={u}", "keyfile": "", "options": opts_by.get(u, opts_all),
+                    "tpm2": "tpm2-device" in opts_by.get(u, opts_all)} for u, n in out.items()}
 
     # ── files ──
     def files(self):
@@ -1136,6 +1270,11 @@ class Carry:
                 if private and stat.S_ISREG(st.st_mode):
                     self.report["not_copied_private_keys"].append("/" + rel)
                     continue
+                shipped = self.shipped_by_system(rel, st)
+                if shipped == "same":
+                    self.report["checked"].append({"path": "/" + rel, "result": "the new system ships the same "
+                                                   "settings: nothing to carry"})
+                    continue
                 if img:
                     other = os.path.join(img, os.path.relpath(rel, "etc"))
                     try:
@@ -1148,12 +1287,33 @@ class Carry:
                     except OSError:
                         pass
                 why = "differs from the image default" if img else "no image default to compare with"
-                if rel_dir.startswith("etc/systemd/system") and stat.S_ISREG(st.st_mode) and fn.endswith(
+                host_local = next((w for d, w in HOST_LOCAL_WHY.items() if rel_dir == d), None)
+                if shipped == "differs":
+                    why = "the new system ships its own file of this name; this machine's version is not carried"
+                elif host_local and stat.S_ISREG(st.st_mode):
+                    why = host_local
+                elif rel_dir.startswith("etc/systemd/system") and stat.S_ISREG(st.st_mode) and fn.endswith(
                         (".service", ".timer", ".socket", ".mount", ".path")):
                     why = "a unit written on this machine: not carried, port it to the system configuration"
                 elif stat.S_ISLNK(st.st_mode):
                     why = f"symlink -> {os.readlink(full)}"
                 self.report["left_behind"].append({"path": "/" + rel, "why": why})
+
+    def shipped_by_system(self, rel, st):
+        """"same" when the new system's /etc has this file with the same settings (comments and blank lines aside,
+        for the configuration directories in HOST_LOCAL_WHY), "differs" when it has its own, else None."""
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        mine = os.path.join(self.system, "etc", os.path.relpath(rel, "etc"))
+        try:
+            with open(mine, "rb") as f:
+                theirs = f.read()
+        except OSError:
+            return None
+        ours = self.src.read(rel)
+        if os.path.dirname(rel) in HOST_LOCAL_WHY:
+            return "same" if settings_of(theirs) == settings_of(ours) else "differs"
+        return "same" if theirs == ours else "differs"
 
     def write_report(self):
         rep = self.report
@@ -1190,7 +1350,8 @@ class Carry:
     def run(self, force=False):
         self.force = force
         self.preflight()
-        self.accounts()  # refuses before anything is written
+        self.params = self.kernel_args()  # refuses before anything is written
+        self.accounts()  # likewise
         self.host()
         self.files()
         self.switches()
@@ -1218,6 +1379,7 @@ def main(argv=None):
     c.add_argument("--system", required=True)
     c.add_argument("--declared")
     c.add_argument("--image-etc")
+    c.add_argument("--cmdline")
     c.add_argument("--plan", action="store_true")
     c.add_argument("--force", action="store_true")
     h = sub.add_parser("host")
