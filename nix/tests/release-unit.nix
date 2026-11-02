@@ -154,7 +154,13 @@ SH
 echo "git $*" >> "$LOG"
 case "$1" in worktree) mkdir -p "$RUNNER_TEMP/before" ;; esac
 SH
-  chmod +x stub/nix stub/git
+  # the step evaluates through nix/ci/eval-each.sh (one evaluator per attribute), relative to the checkout
+  mkdir -p nix/ci
+  cat > nix/ci/eval-each.sh <<'SH'
+#!${pkgs.bash}/bin/bash
+echo "eval-each $*" >> "$LOG"
+SH
+  chmod +x stub/nix stub/git nix/ci/eval-each.sh
   dryrun() { # $1 = case, $2 = BEFORE, $3 = was drv, $4 = now drv
     mkdir -p "rt/$1"
     env PATH=$PWD/stub:$PATH LOG=$PWD/dry-$1.log RUNNER_TEMP=$PWD/rt/$1 GITHUB_STEP_SUMMARY=$PWD/sum-$1.md \
@@ -165,10 +171,10 @@ SH
   b=1111111111111111111111111111111111111111
   dryrun same $b /nix/store/a.drv /nix/store/a.drv
   grep -F "did not move" out-same.txt >/dev/null
-  if grep -E "^nix (build|flake)" dry-same.log; then echo "FAIL: toplevels unchanged, but it built or checked"; exit 1; fi
+  if grep -E "^(nix (build|flake)|eval-each)" dry-same.log; then echo "FAIL: toplevels unchanged, but it built or checked"; exit 1; fi
   dryrun moved $b /nix/store/a.drv /nix/store/b.drv
   grep -F -- "nix build --dry-run" dry-moved.log >/dev/null
-  grep -F -- "nix flake check --no-build" dry-moved.log >/dev/null
+  grep -F -- "eval-each . --override-input rime-shell" dry-moved.log >/dev/null
   grep -F "Dry run, nothing built or published" sum-moved.md >/dev/null
   dryrun new-branch 0000000000000000000000000000000000000000 /nix/store/a.drv /nix/store/a.drv
   grep -F -- "nix build --dry-run" dry-new-branch.log >/dev/null
