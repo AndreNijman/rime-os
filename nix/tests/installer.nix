@@ -17,8 +17,8 @@ let
   inherit (pkgs) lib;
 
   # A small system with the installer's target layout and the boot hook: what the engine installs here.
-  target = (import "${pkgs.path}/nixos/lib/eval-config.nix" {
-    system = null;
+  # Through nixpkgs' flake lib (as nixosConfigurations are), so system.nixos.revision is set (base.nix's registry).
+  target = (self.inputs.nixpkgs.lib.nixosSystem {
     modules = [
       self.nixosModules.default
       ../installer/target.nix
@@ -174,9 +174,11 @@ in
       installer.succeed("mkdir -p /mnt /esp && mount -o subvolid=5 /dev/vdb2 /mnt && mount /dev/vdb1 /esp")
 
       with subtest("btrfs: @nixos, @nix, @home; the system mounts them compressed"):
-          subs = installer.succeed("btrfs subvolume list /mnt | awk '{print $NF}' | sort").split()
+          # Top level only (-o): systemd-tmpfiles' `v` lines nest /srv, /tmp, /var/tmp, ... inside @nixos.
+          subs = installer.succeed("btrfs subvolume list -o /mnt | awk '{print $NF}' | sort").split()
           assert subs == ["@home", "@nix", "@nixos"], subs
-          fstab = installer.succeed("cat /mnt/@nixos/etc/fstab")
+          # The installed /etc/fstab links into /etc/static (absolute): read the system's own, the profile is it.
+          fstab = installer.succeed(f"cat {SYSTEM}/etc/fstab")
           for s in ("@nixos", "@nix", "@home"):
               assert f"subvol={s},compress-force=zstd:3" in fstab, fstab
           installer.succeed(f"test -e /mnt/@nix/store/{SYSTEM.removeprefix('/nix/store/')}")
