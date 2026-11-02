@@ -431,7 +431,7 @@ pub fn translate(cat: &Catalogue, root: &Path) -> Report {
                 &n,
                 None,
                 Outcome::Carried,
-                format!("/usr/local/lib/{n} stays in /var/usrlocal, unmanaged by rime; it is not on NixOS's paths"),
+                format!("{n} stays in /var/usrlocal/lib (bootc's /usr/local/lib), unmanaged by rime; it is not on NixOS's paths"),
             );
         }
     }
