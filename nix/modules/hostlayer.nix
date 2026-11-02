@@ -66,6 +66,15 @@ in
     # The closure names no machine; `apply` writes /etc/hostname from host.toml ("rime" when nobody named it).
     # Above mkDefault, so a test node's name (the test framework's mkDefault) still wins.
     networking.hostName = lib.mkOverride 1100 "";
+    # nixpkgs points hostnamed at /etc/static/hostname and /etc/static/machine-info (names a NixOS configuration
+    # declares). Here the name is the machine's own /etc/hostname, so hostnamed reads and writes the real files:
+    # without this `hostnamectl` said "Static hostname: (unset)" on every Rime machine and `hostnamectl hostname X`
+    # could not write. (localed and timedated already use /etc: imperativeLocale, and timeZone is null.)
+    # checks.hostname-default (mutant hostnamed-static).
+    systemd.services.systemd-hostnamed.environment = {
+      SYSTEMD_ETC_HOSTNAME = lib.mkForce "/etc/hostname";
+      SYSTEMD_ETC_MACHINE_INFO = lib.mkForce "/etc/machine-info";
+    };
     i18n.imperativeLocale = true;
     # graphical-desktop.nix writes this file from services.xserver.xkb; here it is the machine's (host.toml), and
     # the configuration's text is only the default `apply` writes when host.toml names no X11 layout.
