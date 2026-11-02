@@ -44,7 +44,7 @@ const MAX_WINDOW_LOG: u32 = 31;
 const DEFAULT_WINDOW_LOG: u32 = 29;
 const LARGE_WINDOW_LOG: u32 = 30;
 const LARGE_MEMORY: u64 = 8 << 30;
-/// How long `nix copy` may take to open the rebuilt NAR before the delta is given up.
+/// How long `nix copy` may go without reading the rebuilt NAR before the delta is given up.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(600);
 /// A narinfo is a few hundred bytes; anything this large is not one.
 const NARINFO_MAX: u64 = 1 << 20;
@@ -526,7 +526,7 @@ impl<'a> NixExec<'a> {
         let max_s = max.to_string();
         let mut args: Vec<&str> = vec![
             "-fsSL", "--proto", "=https,http,file", "--proto-redir", "=https,http", "--retry", "2",
-            "--connect-timeout", "30", "--max-filesize", &max_s,
+            "--connect-timeout", "30", "--speed-limit", "1024", "--speed-time", "300", "--max-filesize", &max_s,
         ];
         let d;
         if let Some(p) = dest {
@@ -695,7 +695,21 @@ fn dump(nix_store: &str, base: &str, dest: &Path, size: u64, nar_hash: &str) -> 
 
 /// Run the decoder and the importer, and copy the decoder's output into the FIFO the importer reads, hashing it.
 /// Ok only when both exit 0 and the stream was exactly `size` bytes hashing to `nar_hash` (Nix checks the same).
+///
+/// Nix opens a `file://` cache's NAR twice: once to try a memory map (a FIFO cannot be mapped: it closes it unread),
+/// then again to read it. A plain write end would see the first close as the reader leaving (a broken pipe), or close
+/// before the second open and leave Nix waiting for a writer that never comes. So this process holds the FIFO open
+/// read-write: neither open by Nix blocks, the bytes wait in the pipe across Nix's reopen, and the end of the NAR is
+/// signalled only once Nix has drained the pipe. Nix never sees that end unless the stream checked out.
 fn stream(zstd: &str, zargs: &[String], nix: &str, nargs: &[String], fifo: &Path, size: u64, nar_hash: &str) -> Result<(), String> {
+    use std::os::unix::io::AsRawFd;
+    // Before Nix starts, so its first open finds a writer.
+    let pipe = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(fifo)
+        .map_err(|e| format!("{}: {e}", fifo.display()))?;
     let mut importer = Command::new(nix)
         .args(nargs)
         .stdin(Stdio::null())
@@ -725,78 +739,106 @@ fn stream(zstd: &str, zargs: &[String], nix: &str, nargs: &[String], fifo: &Path
             t
         })
     });
-    let mut problem: Option<String> = None;
-    // The FIFO's write end opens only once a reader has it open; poll so an importer that exits without reading
-    // (an untrusted signature, say) does not leave this waiting forever.
-    let started = Instant::now();
-    let mut writer = loop {
-        match fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(fifo) {
-            Ok(f) => break Some(f),
-            Err(e) if e.raw_os_error() == Some(libc::ENXIO) => {
-                if matches!(importer.try_wait(), Ok(Some(_))) {
-                    problem = Some("nix copy stopped before reading the NAR".into());
-                    break None;
-                }
-                if started.elapsed() > OPEN_TIMEOUT {
-                    problem = Some("nix copy did not read the NAR".into());
-                    break None;
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-            Err(e) => {
-                problem = Some(format!("{}: {e}", fifo.display()));
-                break None;
-            }
+    let fd = pipe.as_raw_fd();
+    let mut last = Instant::now();
+    // Wait until the pipe has room (or, with `drained`, is empty); an importer that exits or stops reading for
+    // OPEN_TIMEOUT ends the wait with the reason.
+    let wait = |importer: &mut std::process::Child, drained: bool, last: &Instant| -> Result<(), String> {
+        if let Ok(Some(st)) = importer.try_wait() {
+            return Err(format!("nix copy stopped before reading the whole NAR ({st})"));
         }
+        if last.elapsed() > OPEN_TIMEOUT {
+            return Err(format!("nix copy read nothing for {} s", OPEN_TIMEOUT.as_secs()));
+        }
+        if drained {
+            std::thread::sleep(Duration::from_millis(2));
+        } else {
+            let mut p = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
+            // SAFETY: one pollfd on a descriptor this function owns.
+            unsafe { libc::poll(&mut p, 1, 100) };
+        }
+        Ok(())
     };
+    let mut problem: Option<String> = None;
     let mut h = Sha256::new();
     let mut n = 0u64;
-    if let Some(f) = writer.as_mut() {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: clearing O_NONBLOCK on a descriptor we own; writes then block while the importer catches up.
-        unsafe {
-            let fl = libc::fcntl(f.as_raw_fd(), libc::F_GETFL);
-            libc::fcntl(f.as_raw_fd(), libc::F_SETFL, fl & !libc::O_NONBLOCK);
-        }
-        let mut out = decoder.stdout.take().expect("piped");
-        let mut buf = vec![0u8; 1 << 20];
-        loop {
-            let k = match out.read(&mut buf) {
-                Ok(0) => break,
-                Ok(k) => k,
-                Err(e) => {
-                    problem = Some(format!("reading the decoder: {e}"));
-                    break;
-                }
-            };
-            n += k as u64;
-            if n > size {
-                problem = Some(format!("the rebuilt NAR is longer than the manifest's {size} B"));
+    let mut out = decoder.stdout.take().expect("piped");
+    let mut buf = vec![0u8; 1 << 20];
+    'read: loop {
+        let k = match out.read(&mut buf) {
+            Ok(0) => break,
+            Ok(k) => k,
+            Err(e) => {
+                problem = Some(format!("reading the decoder: {e}"));
                 break;
             }
-            h.update(&buf[..k]);
-            if let Err(e) = f.write_all(&buf[..k]) {
-                problem = Some(format!("nix copy stopped reading: {e}"));
-                break;
+        };
+        n += k as u64;
+        if n > size {
+            problem = Some(format!("the rebuilt NAR is longer than the manifest's {size} B"));
+            break;
+        }
+        h.update(&buf[..k]);
+        let mut rest = &buf[..k];
+        while !rest.is_empty() {
+            match (&pipe).write(rest) {
+                Ok(w) => {
+                    rest = &rest[w..];
+                    last = Instant::now();
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::Interrupted => {
+                    if let Err(p) = wait(&mut importer, false, &last) {
+                        problem = Some(p);
+                        break 'read;
+                    }
+                }
+                Err(e) => {
+                    problem = Some(format!("{}: {e}", fifo.display()));
+                    break 'read;
+                }
             }
         }
     }
-    drop(writer);
-    drop(decoder.stdout.take());
+    drop(out);
     if problem.is_some() {
         let _ = decoder.kill();
     }
     let dec = decoder.wait().map_err(|e| e.to_string())?;
-    let imp = importer.wait().map_err(|e| e.to_string())?;
     let dec_err = dec_err.and_then(|t| t.join().ok()).unwrap_or_default();
-    let imp_err = imp_err.and_then(|t| t.join().ok()).unwrap_or_default();
     let tail = |s: &str| s.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("").to_string();
-    if !dec.success() && problem.is_none() {
+    if problem.is_none() && !dec.success() {
         problem = Some(format!("zstd could not rebuild the NAR: {}", tail(&dec_err)));
     }
     if problem.is_none() && (n != size || !hash::nar_hash_bytes(nar_hash).is_some_and(|x| x == h.finalize().to_vec())) {
         problem = Some(format!("the rebuilt NAR ({n} B) does not hash to the manifest's narHash"));
     }
+    // The NAR checked out: let Nix drain the pipe, then end it. FIONREAD counts the bytes still in the pipe.
+    let mut before = libc::c_int::MAX;
+    while problem.is_none() {
+        let mut queued: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one c_int.
+        if unsafe { libc::ioctl(fd, libc::FIONREAD, &mut queued) } != 0 {
+            problem = Some(format!("{}: {}", fifo.display(), std::io::Error::last_os_error()));
+            break;
+        }
+        if queued == 0 {
+            break;
+        }
+        if queued < before {
+            before = queued;
+            last = Instant::now();
+        }
+        if let Err(p) = wait(&mut importer, true, &last) {
+            problem = Some(p);
+        }
+    }
+    if problem.is_some() {
+        // Before the pipe closes: a reader that has all the bytes must never see their end.
+        let _ = importer.kill();
+    }
+    drop(pipe);
+    let imp = importer.wait().map_err(|e| e.to_string())?;
+    let imp_err = imp_err.and_then(|t| t.join().ok()).unwrap_or_default();
     match (problem, imp.success()) {
         (None, true) => Ok(()),
         (Some(p), _) => Err(if imp_err.trim().is_empty() { p } else { format!("{p} (nix: {})", tail(&imp_err)) }),
@@ -1017,6 +1059,83 @@ mod tests {
         assert!(rewrite_narinfo(&ni, p, sri, 1).is_err(), "NarSize differs");
         assert!(rewrite_narinfo(&ni, p, "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", 0).is_err(), "NarHash differs");
         assert!(rewrite_narinfo(&ni, "/nix/store/1fsxp2bgcinx2wmqw6w5x82j2bmsvl8-hello", sri, 0).is_err());
+    }
+
+    /// `stream` against real processes: `cat` as the decoder, `sh` as the importer.
+    fn run_stream(reader: &str, data: &[u8], size: u64, claimed: &[u8]) -> (Result<(), String>, Vec<u8>, Duration) {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!("rime-delta-stream-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let (src, fifo, out) = (dir.join("nar"), dir.join("stream.nar"), dir.join("out"));
+        fs::write(&src, data).unwrap();
+        let c = std::ffi::CString::new(fifo.display().to_string()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let hex: String = Sha256::digest(claimed).iter().map(|b| format!("{b:02x}")).collect();
+        let t = Instant::now();
+        let r = stream(
+            "cat",
+            &[src.display().to_string()],
+            "sh",
+            &["-c".into(), reader.into(), "sh".into(), fifo.display().to_string(), out.display().to_string()],
+            &fifo,
+            size,
+            &format!("sha256:{hex}"),
+        );
+        let el = t.elapsed();
+        let got = fs::read(&out).unwrap_or_default();
+        let _ = fs::remove_dir_all(&dir);
+        (r, got, el)
+    }
+
+    fn bytes(n: usize) -> Vec<u8> {
+        let mut x: u32 = 2463534242;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x as u8
+            })
+            .collect()
+    }
+
+    /// What Nix's LocalBinaryCacheStore does with a NAR: open it for a memory map, close it unread, open it again.
+    const NIX_LIKE: &str = r#"exec 3<"$1"; exec 3<&-; sleep 0.2; cat "$1" > "$2""#;
+
+    #[test]
+    fn the_stream_survives_nix_opening_the_nar_twice_small_and_large() {
+        for n in [41 * 1024, 3 << 20] {
+            let d = bytes(n);
+            let (r, got, _) = run_stream(NIX_LIKE, &d, n as u64, &d);
+            assert_eq!(r, Ok(()), "{n} B");
+            assert!(got == d, "{n} B: the reader got {} B, not the stream", got.len());
+        }
+    }
+
+    #[test]
+    fn an_importer_that_quits_without_reading_fails_the_delta_without_a_hang() {
+        let d = bytes(3 << 20);
+        let (r, _, el) = run_stream(r#"exec 3<"$1"; exec 3<&-; exit 1"#, &d, d.len() as u64, &d);
+        assert!(r.as_ref().is_err_and(|e| e.contains("stopped before reading")), "{r:?}");
+        assert!(el < Duration::from_secs(30), "{el:?}");
+        let d = bytes(1000);
+        let (r, _, el) = run_stream("exit 1", &d, d.len() as u64, &d);
+        assert!(r.is_err(), "{r:?}");
+        assert!(el < Duration::from_secs(30), "{el:?}");
+    }
+
+    #[test]
+    fn a_stream_that_does_not_hash_right_never_reaches_its_end() {
+        // The reader has every byte but is killed before the end: `cat` exits non-zero, so nothing is imported.
+        let d = bytes(41 * 1024);
+        let mut other = d.clone();
+        other[7] ^= 1;
+        let (r, _, el) = run_stream(NIX_LIKE, &d, d.len() as u64, &other);
+        assert!(r.as_ref().is_err_and(|e| e.contains("does not hash")), "{r:?}");
+        assert!(el < Duration::from_secs(30), "{el:?}");
+        let (r, _, _) = run_stream(NIX_LIKE, &d, d.len() as u64 - 1, &d);
+        assert!(r.as_ref().is_err_and(|e| e.contains("longer than")), "{r:?}");
     }
 
     #[test]
