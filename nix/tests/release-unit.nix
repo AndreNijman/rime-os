@@ -102,12 +102,14 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     "if: needs.changes.outputs.action == 'release'"
   wmutant "an input expanded into a script" '          case "$CHANNEL" in' '          echo "''${{ inputs.reason }}"
           case "$CHANNEL" in'
-  wmutant "a run cancelled by the next" "cancel-in-progress: ''${{ github.ref != 'refs/heads/main' }}" "cancel-in-progress: true"
-  wmutant "a release on main cancelled by the next push" \
-    "cancel-in-progress: ''${{ github.ref != 'refs/heads/main' }}" "cancel-in-progress: ''${{ github.ref != 'refs/heads/feat/nixos' }}"
+  # The concurrency expressions hold single quotes and GitHub expressions, so they are built in single quotes.
+  cancel='cancel-in-progress: ''${{ github.ref != '"'"'refs/heads/main'"'"' }}'
+  wmutant "a run cancelled by the next" "$cancel" "cancel-in-progress: true"
+  wmutant "a release on main cancelled by the next push" "$cancel" \
+    'cancel-in-progress: ''${{ github.ref != '"'"'refs/heads/feat/nixos'"'"' }}'
   wmutant "main in a group of its own per ref" \
-    "group: ''${{ github.ref == 'refs/heads/main' && 'nix-release' || format('nix-release-{0}', github.ref) }}" \
-    "group: ''${{ format('nix-release-{0}', github.ref) }}"
+    'group: ''${{ github.ref == '"'"'refs/heads/main'"'"' && '"'"'nix-release'"'"' || format('"'"'nix-release-{0}'"'"', github.ref) }}' \
+    'group: ''${{ format('"'"'nix-release-{0}'"'"', github.ref) }}'
   wmutant "a test variant published" '            --out "$t/out"' '            --allow-test-variants --out "$t/out"'
   wmutant "the stand-in's push hook in a workflow" '          RIME_CACHE_TOKEN: ''${{ secrets.RIME_CACHE_TOKEN }}' \
     '          RIME_CACHE_TOKEN: ''${{ secrets.RIME_CACHE_TOKEN }}
@@ -140,7 +142,7 @@ print(dry[0]["run"])
 PY
   mkdir -p stub rt
   cat > stub/nix <<'SH'
-#!/usr/bin/env bash
+#!${pkgs.bash}/bin/bash
 echo "nix $*" >> "$LOG"
 case "$1" in
   eval) if [ "$PWD" = "$RUNNER_TEMP/before" ]; then echo -n "$WAS"; else echo -n "$NOW"; fi ;;
@@ -148,7 +150,7 @@ case "$1" in
 esac
 SH
   cat > stub/git <<'SH'
-#!/usr/bin/env bash
+#!${pkgs.bash}/bin/bash
 echo "git $*" >> "$LOG"
 case "$1" in worktree) mkdir -p "$RUNNER_TEMP/before" ;; esac
 SH
