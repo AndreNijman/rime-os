@@ -52,6 +52,11 @@ the same image, with `/sys/firmware` replaced by an empty tmpfs first (checked b
 `--phases bootc,nixos,back,nixos` (what the evidence run used) ends with NixOS again: after the ostree round trip the
 default is still the NixOS entry.
 
+`--rollback-first` (phase bootc, before the real start) runs `start` once with a copy of rime-migrate that raises
+right after the boot entry is written (`step("fsck gate after")` replaced by a fault), requires rc 10 and
+"rolled back", then computes a verdict in the guest: no @nixos/@nix/@home/@pre-nixos, the old label, none of the
+bridge's masks, no `/boot/rime` or `grub2/rime-nixos.cfg`, `custom.cfg` as before. Only `VERDICT=clean` passes.
+
 ## Secure Boot
 
 OFF (`code-secboot.raw` + `vars-sb-off.fd`). The published kernel is signed by the real Rime MOK and the lab NixOS
@@ -66,9 +71,10 @@ sudo podman run --rm --privileged -e RIME_LAB_PASS=rime-lab-OLD-1 -v $LAB:/lab -
   --entrypoint bash ghcr.io/andrenijman/rime-os@sha256:0ace1f6d… /rig/mkbootc.sh A
 nix build --impure --expr '(import ./nix/probe/ovmf/bridge/system.nix { flake = builtins.getFlake "path:/work/wt-bridge"; })'
 nix shell nixpkgs#{zstd,e2fsprogs,python3,gnutar,coreutils,gnused,bash} -c bash nix/probe/ovmf/bridge/payload.sh TOPLEVEL BRIDGE
-nix/probe/ovmf/bridge/run.sh A --fresh --phases bootc,nixos,back,nixos
+nix/probe/ovmf/bridge/run.sh A --fresh --rollback-first --phases bootc,nixos,back,nixos
 # after rebuilding rime-bridge only: REFRESH_ONLY=1 ... payload.sh x BRIDGE swaps the bridge on the payload disk
 ```
 
 Evidence: `/var/lab/rime-nix/artifacts/bridge/` (`run-KIND.log` + `KIND/` per command; `run1/` = the first
-passing run, on the bridge before the H8 refactor).
+passing run, on the bridge before the H8 refactor). Verifier re-run with `--rollback-first`:
+`/var/lab/rime-nix/artifacts/verify-bridge/` (`run-KIND.log` + `ovmf/KIND/`).
