@@ -16,6 +16,8 @@
 #       mounted, and the boot still completes with / read-write and no emergency/rescue shell;
 #   H10 katana's three host-local files: two match what the system now ships (tuning.nix) and the report says so,
 #       the third is in the "left behind" report with how to port it; the carried kernel arguments.
+# hostgates-wifi-eval  no VM: a Rime system outside qemu-vm.nix has NetworkManager's wpa_supplicant (the VM tests
+#       must turn it back on, so H2 in a VM alone cannot show it), with the qemu-vm.nix evaluation as its mutant.
 { pkgs, self }:
 
 let

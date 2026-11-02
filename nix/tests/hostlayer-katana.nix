@@ -4,7 +4,9 @@
 # NetworkManager connections, ssh host keys and machine-id, the extra disks as generated nofail mounts (the disks are
 # absent: the boot must not stop), andre's shell rewritten to the system's zsh. And the P2 host gates
 # (docs/nixos/p2-gates.md) on that state: H2 a carried Wi-Fi profile comes up on a simulated access point,
-# H3 what katana has of VPN profiles, H10 katana's host-local files matched or left behind.
+# H3 what katana has of VPN profiles, H10 katana's host-local files matched or left behind, and H6-H8 on two blank
+# virtual disks given the filesystem UUIDs katana's fstab names (read from the carried host.toml at run time): both
+# mount, the boot completes with the second taken out, and the first made corrupt is contained (DiskLab).
 #
 # The snapshot is NEVER in the repository or the Nix store. It reaches the VM at RUN time as a read-only 9p share:
 #
