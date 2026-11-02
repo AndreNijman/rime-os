@@ -128,6 +128,11 @@ in
       grep -F 'rimeinst' ${c.systemd.units."rime-staged-cleanup.service".unit}/rime-staged-cleanup.service
       grep -Fx 'ConditionPathExists=/boot/rimeinst/handoff.cfg' ${c.systemd.units."rime-staged-cleanup.service".unit}/rime-staged-cleanup.service
       test -z "${c.networking.hostName}"   # the name is host.toml's (rime-hostlayer apply), never the image's
+      # ... so hostnamed reads that file, not NixOS' /etc/static/hostname (absent): `hostnamectl --static`
+      # said "(unset)" on the OVMF first boot until this was set.
+      grep -Fx 'Environment="SYSTEMD_ETC_HOSTNAME=/etc/hostname"' \
+        ${c.systemd.units."systemd-hostnamed.service".unit}/systemd-hostnamed.service \
+        || { echo "systemd-hostnamed does not read /etc/hostname"; exit 1; }
       echo ok > $out
     '';
 

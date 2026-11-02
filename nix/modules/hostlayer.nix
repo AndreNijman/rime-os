@@ -66,6 +66,11 @@ in
     # The closure names no machine; `apply` writes /etc/hostname from host.toml ("rime" when nobody named it).
     # Above mkDefault, so a test node's name (the test framework's mkDefault) still wins.
     networking.hostName = lib.mkOverride 1100 "";
+    # NixOS points systemd-hostnamed at /etc/static/hostname (where networking.hostName would put it), which does
+    # not exist when the closure names no machine: PID 1 read /etc/hostname, but `hostnamectl --static` said
+    # "(unset)" (installer2 OVMF firstboot). hostnamed reads the file `apply` writes.
+    systemd.services.systemd-hostnamed.environment.SYSTEMD_ETC_HOSTNAME =
+      lib.mkIf (config.networking.hostName == "") (lib.mkForce "/etc/hostname");
     i18n.imperativeLocale = true;
     # graphical-desktop.nix writes this file from services.xserver.xkb; here it is the machine's (host.toml), and
     # the configuration's text is only the default `apply` writes when host.toml names no X11 layout.

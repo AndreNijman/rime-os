@@ -213,13 +213,14 @@ EOF
 # app leaves it), 5 the free space for Rime (8304). Built in the rime-nix container from files (no loop device).
 windows_disk() {   # windows_disk IMAGE
   local w; w=$(to_work "$1")
-  sudo -n podman exec rime-nix nix shell github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325#{gptfdisk,dosfstools,mtools,ntfs3g,coreutils} -c bash -euc "
+  sudo -n podman exec rime-nix nix shell github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325#{gptfdisk,dosfstools,mtools,ntfs3g,coreutils,gnused,util-linux} -c bash -euc "
     img=$w; rm -f \$img; truncate -s 32G \$img
     sgdisk -n 1:2048:+260M -t 1:ef00 -c 1:'EFI system partition' -n 2:0:+16M -t 2:0c01 -c 2:'Microsoft reserved partition' \
       -n 3:0:+4G -t 3:0700 -c 3:'Basic data partition' -n 4:0:+2G -t 4:ef00 -c 4:RIME-EFI -n 5:0:0 -t 5:8304 \$img >/dev/null
     part() { sgdisk -i \$1 \$img | sed -n \"s/^\$2 sector: \([0-9]*\).*/\1/p\"; }
     put() {   # put N FILE: write FILE at partition N's start
-      dd if=\$2 of=\$img bs=512 seek=\$(part \$1 First) conv=notrunc,sparse status=none; rm -f \$2; }
+      local at; at=\$(part \$1 First); [ -n \"\$at\" ]
+      dd if=\$2 of=\$img bs=512 seek=\$at conv=notrunc,sparse status=none; rm -f \$2; }
     size() { echo \$(( \$(part \$1 Last) - \$(part \$1 First) + 1 )); }
     t=\$(dirname \$img)
     truncate -s \$(( \$(size 1) * 512 )) \$t/p1; mkfs.vfat -F 32 -n SYSTEM \$t/p1 >/dev/null
@@ -233,6 +234,11 @@ windows_disk() {   # windows_disk IMAGE
     echo fixture-staged-squashfs > \$t/sq; mcopy -i \$t/p4 \$t/sq ::/rimeinst/squashfs.img
     put 4 \$t/p4
     rm -f \$t/bootmgfw.efi \$t/handoff.cfg \$t/sq
+    # Each filesystem must really be there: the rig once ran without sed, wrote none of them and said nothing.
+    for pt in 1:vfat 3:ntfs 4:vfat; do
+      got=\$(blkid -p -s TYPE -o value -O \$(( \$(part \${pt%%:*} First) * 512 )) \$img || true)
+      [ \"\$got\" = \"\${pt#*:}\" ] || { echo \"windows_disk: partition \${pt%%:*} holds '\$got', not \${pt#*:}\" >&2; exit 1; }
+    done
     sgdisk -p \$img"
   sudo -n chown "$(id -u):$(id -g)" "$1"
 }
@@ -242,7 +248,8 @@ step_install() {
   labdisk "$kind"
   sudo -n rm -f "$d/disk.raw"
   if [[ $kind == part ]]; then
-    windows_disk "$d/disk.raw" | tee "$ART/part-disk-before.txt"
+    windows_disk "$d/disk.raw" > "$ART/part-disk-before.txt" || { cat "$ART/part-disk-before.txt"; return 1; }
+    cat "$ART/part-disk-before.txt"
     sha256sum <(dd if="$d/disk.raw" bs=1M count=$((2048 * 512 / 1048576 + 276)) status=none) > /dev/null
     vt=(--vars-template /lab/fw/vars-sb-mok.fd)
   else
