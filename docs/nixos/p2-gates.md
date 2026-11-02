@@ -104,9 +104,9 @@ Input: the sanitised snapshot `/var/lab/rime-nix/artifacts/katana-state/` (0700,
 
 | # | Gate | How proven | Evidence so far | Status |
 |---|---|---|---|---|
-| G1 | The size of a `zstd --patch-from` delta against the previous release's paths is measured, for a non-mass-rebuild release pair | measurement script + raw data committed (`probe/tools/delta.py` over closure TSVs, or the real narinfo `fileSize` set) | none: PLAN §3.5 and §7.2 Q4 record it as not measured | not met yet (owner: unowned, `size` or `release`) |
+| G1 | The size of a `zstd --patch-from` delta against the previous release's paths is measured, for a non-mass-rebuild release pair | measurement script + raw data committed (`probe/tools/delta.py` over closure TSVs, or the real narinfo `fileSize` set) | `docs/nixos/delta.md` §3; tool `nix/release/delta/rime_delta.py` (`checks.delta` + 5 mutants); raw data `nix/release/delta/data/g1-rime/`, `data/g1-nixpkgs/` (closures, pairs, per-path results). Weekly nixpkgs pair 3ec6363→1c89083: shipped 745.9 MB → delta 230.9 MB (31.0 %; kernel 137.7 MB of it); Rime-only pair: 27.6 MB → 3.2 MB | **met** (nix/g2, 2026-11-02) |
 | G2 | The same for a mass-rebuild pair (glibc/stdenv), the case A3 batches | same | none | not met yet |
-| G3 | The client's import step (fetch delta, reconstruct the NAR, check narHash, import) has a measured cost | client VM test timing | none | not met yet (client) |
+| G3 | The client's import step (fetch delta, reconstruct the NAR, check narHash, import) has a measured cost | client VM test timing | VM-free benchmark instead (`docs/nixos/delta.md` §5, `nix/release/delta/lab/g3.sh`, logs `data/g1-nixpkgs/g3-*.log`): `apply-all` moves a chroot store from 3ec6363 to 1c89083 (161 paths) from a signed file cache: 73.5 s / 455.8 s under load vs 21.0 s for plain `nix copy`, peak RSS 788 MiB, `nix store verify` clean; `checks.delta` proves apply, apply-all and 5 refusals | **met** for the measured cost (nix/g2, 2026-11-02); a VM run inside `rime update` is not done (not wired, §7) |
 
 ## D5 gates (packages)
 

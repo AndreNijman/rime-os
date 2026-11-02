@@ -1,0 +1,13 @@
+ 08:24:22 up 4 days, 14:29,  1 user,  load average: 36.13, 31.72, 26.57
+server: 2079 narinfos
+server FileSize total over 161 added paths (nix copy ?compression=zstd): 746244317 B
+new toplevel absent from the machine store before
+{"paths": 161, "delta_paths": 157, "full_paths": 4, "delta_bytes": 228380692, "full_nar_bytes": 9202016, "nar_bytes": 2111192904, "rebuild_s": 43.6, "import_s": 29.4, "wall_s": 73.5, "children_max_rss_mib": 787.8, "self_max_rss_mib": 35.9}
+	Percent of CPU this job got: 59%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:13.74
+	Maximum resident set size (kbytes): 806756
+	Exit status: 0
+new toplevel valid in the machine store after
+verify (contents + TEST signature) of the 161 added paths: rc=0
+g3 exit=0
+ 08:25:44 up 4 days, 14:30,  1 user,  load average: 34.47, 31.68, 26.97
