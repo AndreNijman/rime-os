@@ -13,6 +13,10 @@ touches a host's ESP, NVRAM or disks: every disk and varstore is a file, QEMU ru
 **Result (2026-11-02): `run` 6/6 PASS; the wrong-password mutant FAILS M1, R1 and V, as it must; `split` 3/3 PASS.**
 Evidence: `/var/lab/rime-nix/artifacts/secureboot/mok/{run,run-mutant,split}/` (not committed).
 
+**Wave 4 (2026-11-03): `run` 6/6 PASS again; `split` 5/5 PASS (U1-U3 now also assert the microcode names, U4/U5 read
+the kernel's early loader over QEMU's gdbstub); `installer` MI1 + V + MI2 PASS, its wrong-password mutant FAILS.**
+Evidence: `/var/lab/rime-nix/artifacts/boot2/mok/{run,split,installer,installer-mutant}/` (not committed).
+
 ## Run it
 
 ```
@@ -20,14 +24,17 @@ nix/probe/ovmf/mok/run.sh all                              # prep, disks, run
 RIME_MOK_MUTANT=wrong-password nix/probe/ovmf/mok/run.sh run   # expected: exit 1
 nix/probe/ovmf/mok/run.sh split                            # after run: early microcode as separate initrd files
 nix/probe/ovmf/mok/run.sh realsig DIR                      # after run: the NixOS kernel with the release signature
+nix/probe/ovmf/mok/run.sh installer ILAB                   # the NixOS installer's own mokutil path (see below)
+RIME_MOK_MUTANT=wrong-password nix/probe/ovmf/mok/run.sh installer ILAB   # expected: exit 1
 ```
 
 | Step | What |
 |---|---|
-| `prep` | builds `rime-ovmf-probe`, `rime-ovmf-tpm` and this image (`Containerfile`: + mokutil, mtools); copies Fedora's shim/GRUB/MokManager from the OVMF probe's artifacts, the bootc kernel (`BOOTC_KERNEL`, default the running bootc system's own `vmlinuz`), `rime-mok.pem` and nixpkgs' microcode cpios; makes the Microsoft-only varstore |
+| `prep` | builds `rime-ovmf-probe`, `rime-ovmf-tpm` and this image (`Containerfile`: + mokutil, mtools, gdb-headless); copies Fedora's shim/GRUB/MokManager from the OVMF probe's artifacts, the bootc kernel (`BOOTC_KERNEL`, default the running bootc system's own `vmlinuz`) and its `System.map` (`BOOTC_SYSMAP`), `rime-mok.pem` and nixpkgs' microcode cpios; makes the Microsoft-only varstore |
 | `disks` | `mkdisk.sh`: the Fedora kernel (from the image's `kernel-core` RPM), the TEST-MOK-signed control kernel, a busybox initrd carrying `mokutil`, a GPT disk with an ESP (shim as `BOOTX64.EFI` → GRUB → `/stage.cfg`, rewritten before each boot) |
 | `run` | `drive.py run`: the boots below |
-| `split` | `drive.py split`: three boots of the bootc kernel on the enrolled varstore, the initrd split into Intel cpio + AMD cpio + initrd through GRUB's blscfg (three `initrd` lines) and a plain menuentry (one line, three files), and a one-file control; `retain_initrd` lets the guest compare what GRUB handed the kernel piece by piece (docs/nixos/boot-matrix.md, "Early microcode") |
+| `split` | `drive.py split`: three boots of the bootc kernel on the enrolled varstore, the initrd split into Intel cpio + AMD cpio + initrd through GRUB's blscfg (three `initrd` lines) and a plain menuentry (one line, three files), and a one-file control; `retain_initrd` lets the guest compare what GRUB handed the kernel piece by piece and read the microcode file names in it. Then U4/U5: the guest CPU without the hypervisor flag, the kernel stopped at reset, and `get_microcode_blob()` / `find_microcode_in_initrd()` walked with hardware breakpoints: with the menu layout the loader finds `GenuineIntel.bin` (its size, its first patch header read from guest memory), with the initrd alone nothing (docs/nixos/boot-matrix.md, "Early microcode") |
+| `installer ILAB` | ILAB = the installer lab's LAB (`nix/installer/lab/run.sh`) after `install plain`, which installed from the NixOS installer ISO on a Microsoft-keys-only varstore with `mokpw` in the answers, so `rime-install-nixos.sh`'s `nixos_mok()` ran `mokutil --import` of the lab's TEST MOK (its log: `secureboot: MOK enrolment queued`). MI1: the installed disk boots with the install's own varstore and shim starts MokManager, driven as M1; V: MokList holds exactly that TEST MOK; MI2: `iso-qualify.py firstboot` boots the installed NixOS (kernel signed by the TEST MOK) on the varstore MokManager wrote, Secure Boot on, to the greeter |
 | `realsig DIR` | DIR = `nix-kernel-sign.yml`'s artefact (`<hash>.sig` + `<hash>.json`): refuses unless it names this commit's `rime` image, attaches it as `nix/pkgs/kernel/sign.nix` does (`sbattach`, `sbverify --cert rime-mok.pem`, `require = true`) and boots that NixOS kernel on the enrolled varstore. **Not run yet**: the workflow cannot be dispatched from `feat/nixos` (docs/nixos/boot-matrix.md, "The real Rime MOK") |
 
 Defaults: `LAB=/var/lab/rime-nix/scratch/secureboot/mok`, `ART=/var/lab/rime-nix/artifacts/secureboot/mok`.
@@ -52,6 +59,11 @@ and reads lockdown `[integrity]`; the Rime kernel reads `[none]` (docs/nixos/boo
 Secure Boot").
 
 ## Notes
+
+- `gdb-headless`, not `gdb-minimal`: Fedora's `gdb.minimal` is built without expat, cannot read QEMU's target
+  description and refuses the x86-64 register packet (`Remote 'g' packet reply is too long`). The binary is
+  `/usr/libexec/gdb` (the `gdb` package adds `/usr/bin/gdb`).
+- GRUB pads every initrd file to 4 bytes, the last one too: the image is the sum of the padded sizes.
 
 - MokManager draws on the screen and mirrors its text to the serial console; the driver waits for each screen's
   text on serial ("Press any key to perform MOK management", "Perform MOK management", "Enroll the key(s)?",
