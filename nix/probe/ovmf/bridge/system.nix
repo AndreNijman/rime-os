@@ -43,6 +43,7 @@ in
           say "greetd=$(systemctl is-active greetd.service) greeter=$(pgrep -a -u greeter | head -3 | tr '\n' ' ')"
           say "mounts: $(findmnt -no TARGET,SOURCE,FSROOT,OPTIONS / /nix /var/home /boot | tr '\n' ';')"
           say "machine-id=$(cat /etc/machine-id) hostname=$(hostname)"
+          say "boot-migrate phase=$(cat /var/lib/rime/boot-migrate/phase 2>/dev/null || echo none) files=$(ls /var/lib/rime/boot-migrate 2>/dev/null | tr '\n' ' ')"
           say "carry: $(head -c 300 /var/lib/rime/carry/report.txt 2>/dev/null | tr '\n' ' ')"
           for h in /var/home/*; do
             [ -f "$h/.rime-lab/sums" ] || continue

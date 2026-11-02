@@ -108,6 +108,9 @@ loaders "$E" fedora
 cp /usr/lib/efi/shim/*/EFI/fedora/BOOTX64.CSV "$E/EFI/fedora/"
 mkdir -p "$E/EFI/BOOT"; cp /usr/lib/efi/shim/*/EFI/BOOT/{BOOTX64.EFI,fbx64.efi} "$E/EFI/BOOT/"
 
+say "lab instrumentation: unmask serial-getty@ttyS0 (the image masks it; the lab logs in over ttyS0)"
+rm -f "$D/etc/systemd/system/serial-getty@ttyS0.service"
+
 say "account $USER_NAME (TEST password) with a seeded home and its checksums"
 chroot "$D" useradd -M -d "/var/home/$USER_NAME" -G wheel -u 1000 -s /bin/bash "$USER_NAME"
 echo "$USER_NAME:$USER_PASS" | chroot "$D" chpasswd

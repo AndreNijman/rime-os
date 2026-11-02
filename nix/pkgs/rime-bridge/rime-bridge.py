@@ -1096,6 +1096,12 @@ def cmd_start(a):
             mount("-o", "remount,bind,ro", p)
         chroot(t, f"{man['toplevel']}/sw/bin/rime-hostlayer", "carry", "--from", "/run/rime-src", "--root", "/",
                "--system", man["toplevel"])
+        # The boot-v2 record (phase=failed on topology E, and repair-e's archive) carries over as it is: the
+        # NixOS side must never re-run that migration or forget it failed (D1, D3).
+        bm = os.path.realpath("/var/lib/rime/boot-migrate")
+        if os.path.isdir(bm):
+            run(["cp", "-a", bm + "/.", os.path.join(t, "var/lib/rime/boot-migrate")])
+            state["boot_migrate_carried"] = sorted(os.listdir(bm))
         ht = os.path.join(t, "var/lib/rime/host.toml")
         with open(ht, "a") as f:
             f.write('\n[boot]\nlayout = "custom-cfg"\n')

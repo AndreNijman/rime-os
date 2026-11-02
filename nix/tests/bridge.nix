@@ -63,17 +63,15 @@ in
     name = "rime-bridge-refusals";
     nodes.machine = { ... }: {
       virtualisation.memorySize = 2048;
-      # one 1 GiB disk per case, by serial: /dev/disk/by-id/virtio-<case>
-      virtualisation.qemu.options = map (c:
-        "-drive file=/tmp/bridge-${c}.img,if=virtio,format=raw,serial=${c},cache=unsafe")
-        [ "caseA" "caseB" "caseC" "caseD" "caseF" "caseX3" "caseH9" ];
+      # one 1 GiB disk per case (qcow2, empty), by serial: /dev/disk/by-id/virtio-<case>
+      virtualisation.emptyDiskImages = map (c: {
+        size = 1024;
+        driveConfig.deviceExtraOpts.serial = c;
+      }) [ "caseA" "caseB" "caseC" "caseD" "caseF" "caseX3" "caseH9" ];
       environment.systemPackages = [ bridge pkgs.dosfstools pkgs.btrfs-progs pkgs.gptfdisk pkgs.util-linux ];
     };
 
     testScript = ''
-      import subprocess
-      for c in ["caseA", "caseB", "caseC", "caseD", "caseF", "caseX3", "caseH9"]:
-          subprocess.run(["truncate", "-s", "1G", f"/tmp/bridge-{c}.img"], check=True)
       machine.wait_for_unit("multi-user.target")
       SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main"
       DEP = "ostree/deploy/default/deploy/" + "ab" * 32 + ".0"

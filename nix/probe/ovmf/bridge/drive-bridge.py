@@ -48,20 +48,23 @@ class VM:
         for s in (ser, qmp):
             if os.path.exists(s):
                 os.unlink(s)
-        drives = [f"file={self.w}/disk.qcow2,format=qcow2,if=virtio,serial=rime-disk"]
+        # virtio-blk with a serial each, so the guest sees /dev/disk/by-id/virtio-<serial> (serial= is a -device
+        # property, not a -drive one).
+        drives = [("rime-disk", f"file={self.w}/disk.qcow2,format=qcow2")]
         if a.kind == "E":
-            drives.append(f"file={self.w}/win.qcow2,format=qcow2,if=virtio,serial=win-disk")
-        drives += [f"file={a.payload},format=raw,if=virtio,readonly=on,serial=rime-payload",
-                   f"file={self.w}/backup.qcow2,format=qcow2,if=virtio,serial=rime-backup"]
+            drives.append(("win-disk", f"file={self.w}/win.qcow2,format=qcow2"))
+        drives += [("rime-payload", f"file={a.payload},format=raw,readonly=on"),
+                   ("rime-backup", f"file={self.w}/backup.qcow2,format=qcow2")]
         cmd = ["qemu-system-x86_64", "-machine", "q35,smm=on,accel=kvm", "-cpu", "host", "-m", "6144", "-smp", "4",
                "-global", "driver=cfi.pflash01,property=secure,value=on", "-global", "ICH9-LPC.disable_s3=1",
                "-drive", f"if=pflash,unit=0,format=raw,readonly=on,file={a.code}",
                "-drive", f"if=pflash,unit=1,format=raw,file={self.w}/vars.fd"]
-        for d in drives:
-            cmd += ["-drive", d]
+        for i, (serial, spec) in enumerate(drives):
+            # no bootindex: OVMF would rewrite BootOrder from it, and topology E's order is the point
+            cmd += ["-drive", f"{spec},if=none,id=d{i}", "-device", f"virtio-blk-pci,drive=d{i},serial={serial}"]
         cmd += ["-chardev", f"socket,id=ser0,path={ser},server=on,wait=off",
                 "-serial", "chardev:ser0", "-qmp", f"unix:{qmp},server=on,wait=off",
-                "-device", "virtio-vga", "-display", "none", "-nic", "none", "-no-reboot"]
+                "-device", "VGA", "-display", "none", "-nic", "none", "-no-reboot"]
         say(f"[{name}] qemu: {' '.join(cmd)}")
         self.p = subprocess.Popen(cmd, stdout=open(os.path.join(a.logs, f"{a.kind}-{name}.qemu.log"), "wb"),
                                   stderr=subprocess.STDOUT)
@@ -129,8 +132,8 @@ class VM:
         self.send(USER + "\n")
         self.expect(r"[Pp]assword: ?", 60)
         self.send(PASS + "\n")
-        self.expect(r"\$ |\] ?\$|> ", 120, fail=r"Login incorrect")
-        self.send("stty cols 1000 rows 50; export PS1='LAB$ '\n")
+        self.expect(r"\$ |\] ?\$|> |❯ ", 120, fail=r"Login incorrect")
+        self.send("unset PROMPT_COMMAND; stty cols 1000 rows 50; export PS1='LAB$ '\n")
         self.expect(r"LAB\$ ", 30)
 
     _n = 0
@@ -151,11 +154,12 @@ class VM:
         return rc, out
 
     def root(self):
-        self.send("sudo -S -p 'SUDOPW:' -i\n")
+        # 'SUDO''PW:' so the echoed command line never matches the prompt the expect waits for
+        self.send("sudo -S -p 'SUDO''PW:' -i\n")
         self.expect(r"SUDOPW:", 60)
         self.send(PASS + "\n")
         time.sleep(2)
-        self.send("export PS1='ROOT# '; dmesg -n 1; stty cols 1000\n")
+        self.send("unset PROMPT_COMMAND; export PS1='ROOT# '; dmesg -n 1; stty cols 1000\n")
         self.expect(r"ROOT# ", 60)
 
     def screendump(self, path):
@@ -258,7 +262,8 @@ def phase_nixos(a):
     vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-greeter.png"))
     vm.login()
     record(vm, "nixos-checks", "id; cat /proc/cmdline; findmnt -no SOURCE,FSTYPE,OPTIONS / /nix /var/home /boot;"
-           " systemctl is-active greetd; readlink /run/current-system; cd ~ && sha256sum -c .rime-lab/sums && cat Documents/note.txt",
+           " systemctl is-active greetd; readlink /run/current-system; cat /var/lib/rime/boot-migrate/phase 2>/dev/null;"
+           " cd ~ && sha256sum -c .rime-lab/sums && cat Documents/note.txt",
            timeout=120)
     vm.send("exit\n")
     time.sleep(2)
