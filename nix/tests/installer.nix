@@ -4,23 +4,34 @@
 #                         the live environment. Before writing a byte it proves the system is a signed release
 #                         (rime-install-nixos-release: the release manifest's cosign signature over a TEST Fulcio CA,
 #                         the toplevel, every path's narinfo bound to the manifest, then `nix store verify` with the
-#                         trusted key itself) and refuses, by name: a disk below the 19 GB floor, no timezone, no
-#                         release record, a release signed by another identity, a tampered manifest, a release whose
-#                         system is not the ISO's, a cache whose copy is not the release's (NarHash), an ISO key the
-#                         release does not name, a cache signed by another key of the SAME name, another disk carrying
-#                         Rime's labels, no network route and no DNS for an https-style cache, and Windows' own ESP in
-#                         partition mode. Then it installs four times:
+#                         trusted key itself) and refuses, by name: a disk below the plain floor and a disk below
+#                         the gaming floor when gaming is chosen (both from nix/release/floors.nix through the ISO's
+#                         nixos-choices.json, nix/installer/choices.nix), an ISO with no choices list, gaming chosen
+#                         on a release with no plain-gaming system, no timezone, no release record, a release signed
+#                         by another identity, a tampered manifest, a release whose system is not the ISO's, a cache
+#                         whose copy is not the release's (NarHash), an ISO key the release does not name, a cache
+#                         signed by another key of the SAME name, another disk carrying Rime's labels, no network
+#                         route and no DNS for an https-style cache, and Windows' own ESP in partition mode. Then it
+#                         installs five times:
 #                           whole disk from a file:// cache (GPT, btrfs subvolumes, Fedora's shim/GRUB layout with
 #                             fixture binaries, the boot hook's BLS entry, host.toml, the account, the NVRAM entry, the
-#                             installed release recorded the way `rime update` records one);
+#                             installed release recorded the way `rime update` records one, /var/log/journal No_COW),
+#                             and `rime trust --gate` passes on the installed system (nixos-enter: its own
+#                             /run/current-system) against the signed release served from a registry;
+#                           whole disk with gaming chosen: the release's plain-gaming toplevel (a stand-in variant of
+#                             the small target), the gaming switch `rime install steam` writes, the gate passes;
 #                           whole disk over http from TWO caches, Rime's and an upstream one holding the libc closure
-#                             (the production cache.rimeos.com + cache.nixos.org split, rime update's per-origin copy);
+#                             (the production cache.rimeos.com + cache.nixos.org split, rime update's per-origin copy),
+#                             with the production netinstall MARKER file present (the bootc netinstall steps stay off);
 #                           LUKS with a German keymap (the unlock prompt's keymap reaches the BLS entry; the D9
 #                             refusal is gone), then the recovery key saved to another stick (rime-install-save-key);
 #                           partition mode on a Windows-shaped disk, from a live medium on Rime's own ESP (what the
 #                             Windows app stages): Windows' ESP and NTFS partition byte-identical afterwards, a GRUB
 #                             entry for Windows, the one-shot "Rime OS Setup" NVRAM entry removed, the ESP named RIME-ESP.
 #   installer-target-eval nixosConfigurations.rime (what the release ISO installs) evaluates, with the layout above.
+#   installer-choices     the ISO's nixos-choices.json is floors.nix's published figures for plain and plain-gaming,
+#                         names release variants, the shipped catalogue's gaming switch and `steam`; the engine and the
+#                         ISO build state no floor of their own; the GUI shows the stamped floors and passes gaming.
 #
 # The real chain (Fedora shim -> GRUB -> the signed kernel, Secure Boot on, LUKS) is proven by nix/installer/lab
 # (docs/nixos/installer.md), not here.
@@ -29,24 +40,55 @@
 let
   inherit (pkgs) lib;
 
+  # THROWAWAY Fulcio CA, signing identities and cache keys (nix/release/fixture-keys.nix).
+  keys = pkgs.callPackage ../release/fixture-keys.nix { };
+
+  # Where the test's release is served (a registry on the installer VM), as `rime update` / `rime trust --gate` of
+  # the installed system read it from /etc/rime/update.toml.
+  repo = "localhost:5000/rime/os";
+
   # A small system with the installer's target layout and the boot hook: what the engine installs here.
   # Through nixpkgs' flake lib (as nixosConfigurations are), so system.nixos.revision is set (base.nix's registry).
-  target = (self.inputs.nixpkgs.lib.nixosSystem {
+  # It trusts the TEST release identity and registry, and carries `rime`, so the installed system's own
+  # `rime trust --gate` can be run on it.
+  targetSystem = self.inputs.nixpkgs.lib.nixosSystem {
     modules = [
       self.nixosModules.default
       ../installer/target.nix
+      (
+        { pkgs, ... }:
+        {
+          nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
+          rime.installTarget.enable = true;
+          rime.boot.enable = true;
+          documentation.enable = false;
+          system.stateVersion = "26.11";
+          rime.update = {
+            repository = repo;
+            fulcioRoot = "${keys}/ca.pem";
+          };
+          virtualisation.containers.registries.settings.registry = [ { location = "localhost:5000"; insecure = true; } ];
+          environment.systemPackages = [ pkgs.rime.rimed ];
+        }
+      )
+    ];
+  };
+  target = targetSystem.config.system.build.toplevel;
+  # The release's plain-gaming system, stood in for by the small target under that variant's name (the real one,
+  # nix/release/variants.nix, is installed and booted by the OVMF lab): what the installer must install when gaming is
+  # chosen is the release's toplevel of that variant, whatever it holds.
+  targetGaming = (targetSystem.extendModules {
+    modules = [
       {
-        nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
-        rime.installTarget.enable = true;
-        rime.boot.enable = true;
-        documentation.enable = false;
-        system.stateVersion = "26.11";
+        system.name = "rime-plain-gaming";
+        environment.etc."rime-test-variant".text = "plain-gaming";
       }
     ];
   }).config.system.build.toplevel;
 
-  # THROWAWAY Fulcio CA, signing identities and cache keys (nix/release/fixture-keys.nix).
-  keys = pkgs.callPackage ../release/fixture-keys.nix { };
+  # What build-live-iso.sh stamps as nixos-choices.json (NIXOS_CHOICES).
+  choicesData = import ../installer/choices.nix;
+  choices = pkgs.writeText "nixos-choices.json" (builtins.toJSON choicesData);
 
   # The engine exactly as the ISO carries it (Containerfile.installer + build-live-iso.sh), shebangs made to work on
   # NixOS; the release verifier beside the checker, as /usr/lib/rime-installer holds both.
@@ -94,6 +136,50 @@ in
 
   # The ISO's production caches (installer/nixos-production.env, build-live-iso.sh's defaults) are the ones an
   # installed system's `rime update` uses: one release, one cache, one key, whether it is installed or updated.
+  # The installer's floors and its one choice are floors.nix's and the catalogue's, never numbers of its own.
+  installer-choices =
+    let
+      floors = import ../release/floors.nix;
+      variants = import ../release/variants.nix { inherit self; };
+      catalogueJson = builtins.fromJSON (builtins.unsafeDiscardStringContext self.nixosConfigurations.rime.config.environment.etc."rime/catalogue.json".text);
+      c = choicesData;
+      eq = what: a: b: lib.optionalString (a != b) ''
+        echo ${lib.escapeShellArg "installer-choices: ${what} is ${builtins.toJSON a}, expected ${builtins.toJSON b}"}; exit 1
+      '';
+    in
+    pkgs.runCommand "rime-installer-choices" { } ''
+      ${lib.concatStrings (lib.mapAttrsToList (n: v: ''
+        ${eq "${n} disk_gb" v.disk_gb floors.published.${n}}
+        ${eq "${n} partition_gb" v.partition_gb floors.publishedPartition.${n}}
+        ${eq "${n} is a release variant" (variants ? ${n}) true}
+        ${eq "${n} features" v.features (variants.${n}.selected or null)}
+      '') c.variants)}
+      ${eq "the variants offered" (lib.attrNames c.variants) [ "plain" "plain-gaming" ]}
+      ${eq "the gaming switch" c.features.gaming.switch catalogueJson.features.gaming.switch}
+      ${eq "the gaming names" (map (n: catalogueJson.entries.${n}.feature or null) c.features.gaming.names) [ "gaming" ]}
+      # No floor of the engine's or the ISO build's own: the numbers come from the stamp only.
+      for f in ${../../installer/rime-install-nixos.sh} ${../../installer/build-live-iso.sh}; do
+        if grep -En '(MIN_GB|MIN_BYTES)=[0-9"$(]*[0-9]' "$f"; then echo "installer-choices: $f states a floor"; exit 1; fi
+      done
+      grep -F 'nixos-choices.json' ${../../installer/build-live-iso.sh} >/dev/null
+      grep -F '"$NIXOS_STAMPS/nixos-choices.json"' ${../../installer/rime-install-nixos.sh} >/dev/null
+      # The GUI shows these floors (it states none of its own) and offers gaming only when the stamp offers it.
+      # Its gaming_offer() is exec'd alone: importing the GUI needs GTK.
+      RIME_NIXOS_CHOICES=${choices} ${pkgs.python3}/bin/python3 -I - ${../../installer/rime-installer-gui} <<'PY'
+      import json, os, re, sys
+      src = open(sys.argv[1]).read()
+      g = {"os": os, "json": json}
+      exec(compile(src[src.index("NIXOS_CHOICES = "):src.index("def netinstall")], "gui", "exec"), g)
+      o = g["gaming_offer"]()
+      assert o and o["plain"] == (${toString c.variants.plain.disk_gb}, ${toString c.variants.plain.partition_gb}), o
+      assert o["gaming"] == (${toString c.variants.plain-gaming.disk_gb}, ${toString c.variants.plain-gaming.partition_gb}), o
+      g["NIXOS_CHOICES"] = "/nonexistent"
+      assert g["gaming_offer"]() is None
+      assert re.search(r'"confirm_esp_id", "gaming"\)', src), "spawn_engine does not pass gaming"
+      PY
+      cp ${choices} $out
+    '';
+
   installer-production-defaults =
     let u = self.nixosConfigurations.rime.config.rime.update;
     in pkgs.runCommand "rime-installer-production-defaults" { } ''
@@ -145,12 +231,16 @@ in
         memorySize = 4096;
         cores = 4;
         diskSize = 12288;
-        # vdb: the whole-disk target (21.5 GB, above the floor); vdc: 16 GiB = 17.2 GB, below it; vdd: a
-        # Windows-shaped disk for partition mode; vde: a small stick for the recovery key.
-        emptyDiskImages = [ 20480 16384 24576 64 ];
-        additionalPaths = [ target ];
+        # vdb: the whole-disk target (21.5 GB, above every floor); vdc: 16 GiB = 17.2 GB, above the plain floor
+        # (16 GB) and below the gaming one (18 GB); vdd: a Windows-shaped disk for partition mode; vde: a small stick
+        # for the recovery key; vdf: 14 GiB = 15.0 GB, below the plain floor.
+        emptyDiskImages = [ 20480 16384 24576 64 14336 ];
+        additionalPaths = [ target targetGaming ];
       };
       nix.settings.experimental-features = [ "nix-command" ];
+      # The release registry the installed system's `rime trust --gate` reads (update.toml repository).
+      services.dockerRegistry.enable = true;
+      virtualisation.containers.enable = true; # skopeo's policy.json, to publish the release into it
       # The caches the http installs fetch from, served on this machine (the engine resolves their names first).
       networking.hosts."127.0.0.1" = [ "rime-cache.test" "upstream-cache.test" ];
       environment.systemPackages = [
@@ -167,13 +257,17 @@ in
         pkgs.openssl
         pkgs.ntfs3g
         pkgs.findutils
+        pkgs.e2fsprogs
+        pkgs.skopeo
       ];
     };
 
     testScript = ''
       import json, shlex
       SYSTEM = "${target}"
+      GAMING = "${targetGaming}"
       KEYS = "${keys}"
+      REPO = "${repo}"
       PY = "${pkgs.python3}/bin/python3"
       MINT = f"{PY} -I ${engine}/libexec/mint-test-release.py --lib ${engine}/bin/rime_nix_release.py"
       ENV = ("RIME_NIXOS_STAMPS=/tmp/stamps RIME_NIXOS_EFI_SRC=/tmp/efi "
@@ -184,8 +278,9 @@ in
 
       def mint(out, *extra, key=f"{KEYS}/good.key", cert=f"{KEYS}/good.pem"):
           print(installer.succeed(
-              f"{MINT} --system {SYSTEM} --cache file:///tmp/cache --key \"$(cat {KEYS}/cache.pub)\" "
-              f"--sign-key {key} --sign-cert {cert} --ca {KEYS}/ca.pem --out {out} " + " ".join(extra)))
+              f"{MINT} --system {SYSTEM} --also-variant plain-gaming={GAMING} --repo {REPO} --cache file:///tmp/cache "
+              f"--key \"$(cat {KEYS}/cache.pub)\" --sign-key {key} --sign-cert {cert} --ca {KEYS}/ca.pem --out {out} "
+              + " ".join(extra)))
 
       def stamps(d, release=None):
           # A copy of the ISO's stamps; RELEASE: another release record in place of the good one.
@@ -196,8 +291,9 @@ in
       with subtest("a TEST-signed cache holding the system, its signed release record, and the ISO's stamps"):
           installer.succeed(
               "mkdir -p /tmp/stamps /tmp/efi /tmp/grub-static/configs.d",
-              f"nix copy --to 'file:///tmp/cache?compression=zstd&secret-key={KEYS}/cache.sec' {SYSTEM}",
+              f"nix copy --to 'file:///tmp/cache?compression=zstd&secret-key={KEYS}/cache.sec' {SYSTEM} {GAMING}",
               f"cp {KEYS}/cache.pub /tmp/stamps/nixos-cache.pub",
+              "cp ${choices} /tmp/stamps/nixos-choices.json",
               f"echo {SYSTEM} > /tmp/stamps/nixos-system",
               "echo file:///tmp/cache > /tmp/stamps/nixos-cache",
               "echo unsigned > /tmp/stamps/kernel-signed",
@@ -207,6 +303,28 @@ in
               "echo 'fixture: blscfg' > /tmp/grub-static/configs.d/10_blscfg.cfg",
           )
           mint("/tmp/stamps/nixos-release")
+
+      with subtest("the release is served from a registry, as `rime trust --gate` of an installed system fetches it"):
+          installer.wait_for_unit("docker-registry.service")
+          installer.wait_for_open_port(5000)
+          d = installer.succeed("sha256sum /tmp/stamps/nixos-release/manifest/manifest.json | cut -d' ' -f1").strip()
+          installer.succeed(
+              f"skopeo copy --quiet --preserve-digests --dest-tls-verify=false dir:/tmp/stamps/nixos-release/manifest docker://{REPO}:nix-test",
+              f"skopeo copy --quiet --preserve-digests --dest-tls-verify=false dir:/tmp/stamps/nixos-release/sig docker://{REPO}:sha256-{d}.sig",
+              f"test \"$(skopeo inspect --raw --tls-verify=false docker://{REPO}@sha256:{d} | sha256sum | cut -d' ' -f1)\" = {d}",
+          )
+
+      def gate(variant, top):
+          # The installed system's own `rime trust --gate`, with its own /run/current-system (nixos-enter activates
+          # it) and update.toml: the signed release it was installed as names this toplevel.
+          installer.succeed(
+              "mkdir -p /mnt && mount -o subvol=@nixos /dev/vdb2 /mnt && mount -o subvol=@nix /dev/vdb2 /mnt/nix")
+          rc, out = installer.execute("nixos-enter --root /mnt -- rime trust --gate 2>&1")
+          installer.succeed("umount -R /mnt")
+          print(out)
+          assert rc == 0, out
+          assert f"system:    {top} is the signed {variant} system of 2026.11.02" in out, out
+          assert "signature: verified" in out, out
 
       def answers(disk, **over):
           fp = installer.succeed(f"lsblk -bdnP -o MAJ:MIN,SIZE,WWN,SERIAL,PTUUID,PARTUUID,PARTTYPE {disk} | head -1").strip()
@@ -236,9 +354,41 @@ in
               assert w in out, (w, out)
           untouched(disk)
 
-      with subtest("refused by name, nothing written: a disk below the 19 GB floor"):
+      with subtest("refused by name, nothing written: a disk below the plain floor (floors.nix: ${toString choicesData.variants.plain.disk_gb} GB)"):
+          answers("/dev/vdf")
+          refused("/dev/vdf", "", "/dev/vdf is too small for Rime OS: 15 GB",
+                  "Rime OS needs a disk of at least ${toString choicesData.variants.plain.disk_gb} GB")
+
+      with subtest("refused by name, nothing written: gaming chosen on a disk below the gaming floor (${toString choicesData.variants.plain-gaming.disk_gb} GB)"):
+          answers("/dev/vdc", gaming="yes")
+          refused("/dev/vdc", "", "/dev/vdc is too small for Rime OS with gaming (Steam): 17 GB",
+                  "needs a disk of at least ${toString choicesData.variants.plain-gaming.disk_gb} GB",
+                  "Without gaming Rime OS needs ${toString choicesData.variants.plain.disk_gb} GB")
+
+      with subtest("the same disk passes every check for the plain system (dry run: nothing written)"):
           answers("/dev/vdc")
-          refused("/dev/vdc", "", "/dev/vdc is too small", "at least 19 GB")
+          rc, out = run("RIME_DRY_RUN=1")
+          print(out)
+          assert rc == 0 and "RIME-INSTALL-DRYRUN-OK" in out, out
+          untouched("/dev/vdc")
+
+      with subtest("refused by name, nothing written: an ISO with no list of its systems and their floors"):
+          stamps("/tmp/s-nochoices")
+          installer.succeed("rm /tmp/s-nochoices/nixos-choices.json")
+          answers("/dev/vdb")
+          refused("/dev/vdb", "RIME_NIXOS_STAMPS=/tmp/s-nochoices", "carries no list of the systems it installs")
+
+      with subtest("refused by name, nothing written: gaming chosen, and the release has no plain-gaming system"):
+          print(installer.succeed(
+              f"{MINT} --system {SYSTEM} --repo {REPO} --cache file:///tmp/cache --key \"$(cat {KEYS}/cache.pub)\" "
+              f"--sign-key {KEYS}/good.key --sign-cert {KEYS}/good.pem --ca {KEYS}/ca.pem --out /tmp/rel-plain"))
+          stamps("/tmp/s-plainonly", "/tmp/rel-plain")
+          answers("/dev/vdb", gaming="yes")
+          refused("/dev/vdb", "RIME_NIXOS_STAMPS=/tmp/s-plainonly", "release 2026.11.02 has no plain-gaming system")
+
+      with subtest("refused by name, nothing written: a gaming answer that is neither yes nor no"):
+          answers("/dev/vdb", gaming="maybe")
+          refused("/dev/vdb", "", "bad gaming 'maybe'")
 
       with subtest("refused by name, nothing written: no timezone"):
           answers("/dev/vdb", timezone=None)
@@ -311,6 +461,7 @@ in
           print(out)
           assert rc == 0 and "RIME-INSTALL-OK" in out, out
           print(installer.succeed("cat /var/log/rime-install.log | tail -n 40"))
+          assert "System:    plain" in out, out
 
       with subtest("GPT: a 2 GiB ESP and a Linux root partition"):
           parts = installer.succeed("lsblk -bnrpo NAME,SIZE,PARTTYPE,FSTYPE,LABEL /dev/vdb").splitlines()
@@ -352,6 +503,13 @@ in
               "test \"$(stat -c %a /mnt/@nixos/var/lib/rime/nix/applied.json)\" = 644",
           )
 
+      with subtest("journald's directory is No_COW before anything is written to it; no feature switched on"):
+          attrs = installer.succeed("lsattr -d /mnt/@nixos/var/log/journal").split()[0]
+          print(attrs)
+          assert "C" in attrs, attrs
+          installer.succeed("test -z \"$(ls -A /mnt/@nixos/var/log/journal)\"")
+          installer.succeed("test ! -e /mnt/@nixos/var/lib/rime/switch/rime-feature@gaming.target.on")
+
       with subtest("ESP: Fedora's shim and GRUB, the static config, the boot hook's BLS entry"):
           installer.succeed(
               "cmp /esp/EFI/fedora/shimx64.efi /tmp/efi/shimx64.efi",
@@ -389,6 +547,26 @@ in
           installer.succeed("efibootmgr -v | grep -i 'Rime OS' | grep -i 'shimx64.efi'")
 
       installer.succeed("umount /esp /mnt")
+
+      with subtest("the installed system passes `rime trust --gate` before its first update"):
+          gate("plain", SYSTEM)
+
+      with subtest("gaming chosen: the release's plain-gaming system, its switch on, the gate passes"):
+          answers("/dev/vdb", gaming="yes")
+          rc, out = run()
+          print(out)
+          assert rc == 0 and "RIME-INSTALL-OK" in out and "System:    plain-gaming (Steam and Gaming Mode included)" in out, out
+          installer.succeed("mkdir -p /mnt && mount -o subvolid=5 /dev/vdb2 /mnt")
+          gen = installer.succeed("readlink /mnt/@nix/var/nix/profiles/system").strip()
+          assert installer.succeed(f"readlink /mnt/@nix/var/nix/profiles/{gen}").strip() == GAMING
+          installer.succeed("grep -x plain-gaming /mnt/@nixos/etc/rime-test-variant")
+          r = json.loads(installer.succeed("cat /mnt/@nixos/var/lib/rime/nix/applied.json"))["releases"][0]
+          assert r["toplevel"] == GAMING, r
+          sw = "/mnt/@nixos/var/lib/rime/switch/rime-feature@gaming.target.on"
+          assert installer.succeed(f"cat {sw}") == "steam\n"
+          installer.succeed(f"test \"$(stat -c %a {sw})\" = 644")
+          installer.succeed("umount /mnt")
+          gate("plain-gaming", GAMING)
 
       with subtest("two caches over http: Rime's paths from Rime's, the libc closure from the upstream one"):
           # The production shape (cache.rimeos.com + cache.nixos.org): the release says which cache each path comes
@@ -432,12 +610,14 @@ in
 
       with subtest("installs over http from both caches"):
           answers("/dev/vdb")
-          # A production NixOS ISO also carries the netinstall marker (the GUI's
-          # network page reads it), so rime-install starts with NETINSTALL=1.
-          # RIME_NETINSTALL=1 sets it the same way, before the NixOS library is
-          # sourced: the bootc netinstall steps (pinned image digest, skopeo,
-          # registry) must stay off, or this install would die on them.
-          rc, out = run(HTTP + " RIME_NETINSTALL=1")
+          # A production NixOS ISO carries the netinstall MARKER file (build-live-iso.sh writes it; the GUI's network
+          # page reads it) and no pinned image digest, so rime-install starts with NETINSTALL=1 from the file itself,
+          # exactly as on the ISO. The NixOS library switches it off: the bootc netinstall steps (the pinned digest,
+          # skopeo, the registry) must never run on this path, or this install would die on the missing digest.
+          installer.succeed("mkdir -p /usr/lib/rime-installer && touch /usr/lib/rime-installer/netinstall",
+                            "test ! -e /usr/lib/rime-installer/image-digest")
+          rc, out = run(HTTP)
+          installer.succeed("rm -rf /usr/lib/rime-installer")
           print(out)
           assert rc == 0 and "RIME-INSTALL-OK" in out, out
           ilog = installer.succeed("cat /var/log/rime-install.log")

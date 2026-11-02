@@ -2062,6 +2062,9 @@ ENCRYPT=""; LUKSPASS=""
 # The typed ERASE and the identity of every device it was typed against. See
 # the confirmation binding immediately before the dry-run stop.
 CONFIRMED=""; CONFIRM_TARGET=""; CONFIRM_DISK_ID=""; CONFIRM_TARGET_ID=""; CONFIRM_ESP_ID=""
+# The NixOS ISO's one system choice (rime-install-nixos.sh nixos_choose): absent is "no", the plain system, which
+# is also what a machine that never runs `rime install steam` keeps. It sets the disk floor.
+GAMING=""
 
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -2085,6 +2088,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     locale)    LOCALE="$v" ;;
     encrypt)   ENCRYPT="$v" ;;
     lukspass)  LUKSPASS="$v" ;;
+    gaming)    GAMING="$v" ;;
     confirmed) CONFIRMED="$v" ;;
     confirm_target)    CONFIRM_TARGET="$v" ;;
     confirm_disk_id)   CONFIRM_DISK_ID="$v" ;;
@@ -2106,6 +2110,11 @@ done < "$ANSWERS"
 [ -n "${HOSTNAME:-}" ]     || die "answers: hostname missing"
 [ -n "${P1:-}" ] || die "answers: password missing"
 case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL_MODE'" ;; esac
+case "$GAMING" in
+  ''|no) : ;;
+  yes) [ "$NIXOS" = 1 ] || die "answers: gaming=yes, and this ISO installs one Rime OS image with no gaming choice. Nothing has been erased." ;;
+  *) die "answers: bad gaming '$GAMING' (expected yes or no). Nothing has been erased." ;;
+esac
 
 # ── Encryption: explicit, or refuse ─────────────────────────────────────────
 # Rime OS encrypts the disk BY DEFAULT. "By default" is a property of the

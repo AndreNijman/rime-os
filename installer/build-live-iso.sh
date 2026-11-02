@@ -82,6 +82,10 @@ echo "build mode: PRODUCTION=$PRODUCTION (ALLOW_UNATTENDED=$ALLOW_UNATTENDED)"
 #   NIXOS_RELEASE_REF    repo@sha256:… / repo:nix-<os>-<shell> of the published release: fetched with skopeo
 #                        (default repository, signers, issuer and the pinned Fulcio root)
 #   NIXOS_VARIANT        the release variant NIXOS_SYSTEM is (default plain)
+#   NIXOS_CHOICES        the systems an install may choose and their disk floors, as JSON (`nix eval --json --file
+#                        nix/installer/choices.nix`): stamped as nixos-choices.json; it must name NIXOS_VARIANT, and
+#                        every system it offers must be a variant of the signed release (the installer installs the
+#                        release's toplevel of the one chosen)
 #   NIXOS_CACHE_DIR      a file:// binary cache holding the WHOLE closure, embedded on the ISO as nix-cache/ (the lab's
 #                        offline ISO), with NIXOS_CACHE_PUB its public key file; or nothing, for the production
 #                        network install: Rime's paths from cache.rimeos.com, nixpkgs' from cache.nixos.org, the keys
@@ -139,9 +143,27 @@ if [ -n "${NIXOS_SYSTEM:-}" ]; then
     [ -f "$NIXOS_RELEASE_DIR/$_f" ] || { echo "FATAL: the release record $NIXOS_RELEASE_DIR has no $_f" >&2; exit 1; }
   done
   _keys=(--key "$NIXOS_PUB_TEXT"); [ -z "$NIXOS_UP_PUB" ] || _keys+=(--key "$NIXOS_UP_PUB")
-  RIME_NIXOS_RELEASE_LIB="$HERE/../nix/release/rime_nix_release.py" python3 -I "$HERE/rime-install-nixos-release.py" verify \
-      --release-dir "$NIXOS_RELEASE_DIR" --system "$NIXOS_SYSTEM" --variant "$NIXOS_VARIANT" "${_keys[@]}" \
-    || { echo "FATAL: $NIXOS_SYSTEM is not the $NIXOS_VARIANT system of the signed release in $NIXOS_RELEASE_DIR" >&2; exit 1; }
+  [ -f "${NIXOS_CHOICES:-/nonexistent}" ] \
+    || { echo "FATAL: set NIXOS_CHOICES (nix eval --json --file nix/installer/choices.nix): the installer reads its disk floors from it" >&2; exit 1; }
+  # Every system the ISO offers: one line each, the base (NIXOS_VARIANT) among them.
+  mapfile -t _offer < <(python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["schema"] == 1
+for n, v in sorted(c["variants"].items()):
+    assert int(v["disk_gb"]) > 0 and int(v["partition_gb"]) > 0, n
+    assert all(f in c["features"] for f in v["features"]), n
+    print(n)' "$NIXOS_CHOICES") || { echo "FATAL: NIXOS_CHOICES $NIXOS_CHOICES is not the installer's choices JSON" >&2; exit 1; }
+  _offers=(); _base=0
+  for _o in "${_offer[@]}"; do _offers+=(--offer "$_o"); [ "$_o" != "$NIXOS_VARIANT" ] || _base=1; done
+  [ "$_base" = 1 ] || { echo "FATAL: NIXOS_CHOICES offers ${_offer[*]}, not this ISO's $NIXOS_VARIANT system" >&2; exit 1; }
+  _verified=$(RIME_NIXOS_RELEASE_LIB="$HERE/../nix/release/rime_nix_release.py" python3 -I "$HERE/rime-install-nixos-release.py" verify \
+      --release-dir "$NIXOS_RELEASE_DIR" --system "$NIXOS_SYSTEM" --variant "$NIXOS_VARIANT" "${_offers[@]}" "${_keys[@]}") \
+    || { echo "FATAL: $NIXOS_SYSTEM is not the $NIXOS_VARIANT system of the signed release in $NIXOS_RELEASE_DIR, or the release lacks a system NIXOS_CHOICES offers: $_verified" >&2; exit 1; }
+  echo "release record: $_verified"
+  if [ -n "${NIXOS_CACHE_DIR:-}" ]; then
+    # The offline ISO's cache must hold every system it offers, not only the stamped one.
+    for _t in $(python3 -I -c 'import json,sys; print(" ".join(json.loads(sys.argv[1])["offered"].values()))' "$_verified"); do
+      [ -f "$NIXOS_CACHE_DIR/${_t:11:32}.narinfo" ] || { echo "FATAL: $NIXOS_CACHE_DIR does not hold the offered system $_t" >&2; exit 1; }
+    done
+  fi
   case "${NIXOS_KERNEL_SIGNED:-}" in signed|unsigned) ;; *) echo "FATAL: NIXOS_KERNEL_SIGNED must be signed or unsigned" >&2; exit 1;; esac
   if [ "$NIXOS_KERNEL_SIGNED" = signed ]; then
     openssl x509 -inform DER -in "${NIXOS_MOK_CERT:-/nonexistent}" -noout >/dev/null 2>&1 \
@@ -234,6 +256,7 @@ if [ "$NIXOS" = 1 ]; then
   D="$WORK/rootfs/usr/lib/rime-installer"; sudo mkdir -p "$D"
   printf '%s\n' "$NIXOS_SYSTEM" | sudo tee "$D/nixos-system" >/dev/null
   printf '%s\n' "$NIXOS_VARIANT" | sudo tee "$D/nixos-variant" >/dev/null
+  sudo install -m0644 "$NIXOS_CHOICES" "$D/nixos-choices.json"
   if [ -n "${NIXOS_CACHE_DIR:-}" ]; then echo iso; else echo "$NIXOS_CACHE_URL"; fi | sudo tee "$D/nixos-cache" >/dev/null
   printf '%s\n' "$NIXOS_PUB_TEXT" | sudo tee "$D/nixos-cache.pub" >/dev/null
   if [ -n "$NIXOS_UP_URL" ]; then
@@ -249,7 +272,7 @@ if [ "$NIXOS" = 1 ]; then
   if [ -n "${NIXOS_MOK_CERT:-}" ]; then sudo install -m0644 "$NIXOS_MOK_CERT" "$D/nixos-mok.der"; fi
   grep -qx "$NIXOS_SYSTEM" "$D/nixos-system" || { echo "FATAL: nixos-system stamp not written"; exit 1; }
   sudo env RIME_NIXOS_RELEASE_LIB="$D/rime_nix_release.py" python3 -I "$D/rime-install-nixos-release.py" verify \
-      --release-dir "$D/nixos-release" --system "$NIXOS_SYSTEM" --variant "$NIXOS_VARIANT" --key "$NIXOS_PUB_TEXT" >/dev/null \
+      --release-dir "$D/nixos-release" --system "$NIXOS_SYSTEM" --variant "$NIXOS_VARIANT" "${_offers[@]}" --key "$NIXOS_PUB_TEXT" >/dev/null \
     || { echo "FATAL: the release record stamped into the live env does not verify"; exit 1; }
   echo "nixos stamped: system $NIXOS_SYSTEM ($NIXOS_VARIANT), cache $(cat "$D/nixos-cache") key ${NIXOS_PUB_TEXT%%:*}${NIXOS_UP_URL:+, upstream $NIXOS_UP_URL key ${NIXOS_UP_PUB%%:*}}, release record verified"
 else

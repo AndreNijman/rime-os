@@ -39,15 +39,17 @@ fail() { log "refused: $1"; echo "RIME-RECOVERY-SAVE-FAILED: $1"; exit 1; }
 
 DEV="${1:-}"
 HOST="${2:-rime}"
-printf '%s' "$HOST" | grep -E '^[A-Za-z0-9][A-Za-z0-9-]{0,62}$' >/dev/null || HOST=rime
+# Values are matched whole with [[ =~ ]] (the pattern in a variable), never piped into grep under pipefail.
+re='^[A-Za-z0-9][A-Za-z0-9-]{0,62}$'
+[[ $HOST =~ $re ]] || HOST=rime
 IFS= read -r KEY || true
 KEY=$(printf '%s' "$KEY" | tr -d '\r\n ')
 [ "$(id -u)" = 0 ] || fail "this must run as root"
 [ -n "$KEY" ] || fail "no recovery key was given"
 # systemd-cryptenroll's recovery keys: 8 groups of 8 modhex characters. Anything
 # else is a front-end bug, and writing it would hand the owner a useless file.
-printf '%s' "$KEY" | grep -E '^[cbdefghijklnrtuv]{8}(-[cbdefghijklnrtuv]{8}){7}$' >/dev/null \
-  || fail "that is not a recovery key"
+re='^[cbdefghijklnrtuv]{8}(-[cbdefghijklnrtuv]{8}){7}$'
+[[ $KEY =~ $re ]] || fail "that is not a recovery key"
 [ -n "$DEV" ] && [ -b "$DEV" ] || fail "${DEV:-no device} is not a block device"
 
 # The disk the device lives on.
