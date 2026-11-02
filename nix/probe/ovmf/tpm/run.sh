@@ -4,7 +4,8 @@
 # shim, GRUB, Secure Boot OVMF, swtpm, tpm2-tools and signed kernel).
 #   LAB  scratch (default /var/lab/rime-nix/scratch/tpmkeymap/lab): TEST keys, varstores, disks, TPM state
 #   ART  evidence (default /var/lab/rime-nix/artifacts/tpmkeymap/tpm)
-#   run.sh prep|system|disks|probes|run [SCENARIO]|all      SCENARIO = main (default) | mutant-bootc-reenrol
+#   run.sh prep|system|disks|probes|run [SCENARIO]|all      SCENARIO = main (default) | mutant-bootc-reenrol | rebind-sb
+#                                                           | mutant-rebind-skipped
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 OVMF_RIG=$(cd "$HERE/.." && pwd)
@@ -89,7 +90,7 @@ case "${1:-all}" in
   prep) step_prep;; system) step_system;; disks) step_disks;; probes) step_probes;;
   run) shift; step_run "$@" || rc=$?;;
   all) step_prep; step_system; step_disks; step_run main || rc=$?;;
-  *) echo "usage: run.sh prep|system|disks|probes|run [main|mutant-bootc-reenrol]|all" >&2; exit 2;;
+  *) echo "usage: run.sh prep|system|disks|probes|run [main|mutant-bootc-reenrol|rebind-sb|mutant-rebind-skipped]|all" >&2; exit 2;;
 esac
 sudo -n chown -R "$(id -u):$(id -g)" "$LAB" "$ART"
 exit "$rc"

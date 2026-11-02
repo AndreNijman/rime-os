@@ -76,7 +76,8 @@ let
       services.udisks2.enable = false;
       users.users.root.initialHashedPassword = "!";
       system.stateVersion = "26.05";
-      environment.systemPackages = [ pkgs.tpm2-tools pkgs.cryptsetup pkgs.mokutil ];
+      # pkgs.rime.rimed: the `rime` CLI, for `rime luks status|rebind` (scenario rebind-sb)
+      environment.systemPackages = [ pkgs.tpm2-tools pkgs.cryptsetup pkgs.mokutil pkgs.rime.rimed ];
 
       # TEST ONLY: report passphrase asks (and whether the volume came up without one) on the serial console.
       boot.initrd.systemd.services.rime-test-askwatch = {
@@ -122,7 +123,7 @@ let
         # it (measured: N4 lost its tpm2_clear and DONE lines and failed the verdict although the clear ran). The
         # getty waits for this oneshot.
         before = [ "serial-getty@ttyS0.service" ];
-        path = [ pkgs.coreutils pkgs.util-linux pkgs.mokutil pkgs.kmod pkgs.gnugrep pkgs.gnused pkgs.findutils
+        path = [ pkgs.coreutils pkgs.util-linux pkgs.mokutil pkgs.kmod pkgs.gnugrep pkgs.gnused pkgs.findutils pkgs.rime.rimed
           pkgs.tpm2-tools pkgs.cryptsetup pkgs.python3 sd ];
         serviceConfig = { Type = "oneshot"; StandardOutput = "tty"; StandardError = "tty"; TTYPath = "/dev/ttyS0"; };
         # tpm2-tools straight to the kernel's resource manager: no tabrmd D-Bus attempt and its warning first.
@@ -165,6 +166,46 @@ let
               PASSWORD=$(cat /run/rime-pass) systemd-cryptenroll --tpm2-device=auto \
                 --tpm2-pcrs=7:sha256=''${action#init:} "$dev" 2>&1 | sed 's/^/RIME-TPM: enrol| /'
               say "init rc=''${PIPESTATUS[0]}"
+              tokens
+              ;;
+            seal)
+              # rebind-sb's first boot: data written, a TPM slot sealed to THIS boot's PCR 7 (what an install does).
+              printf 'RIME-TPM-LAB-MARKER %s' "$(cfg marker)" | dd of=/dev/mapper/cryptdata bs=512 conv=sync status=none
+              sync
+              PASSWORD=$(cat /run/rime-pass) systemd-cryptenroll --tpm2-device=auto --tpm2-pcrs=7 "$dev" 2>&1 \
+                | sed 's/^/RIME-TPM: enrol| /'
+              say "seal rc=''${PIPESTATUS[0]}"
+              tokens
+              ;;
+            rebind-cli)
+              # The owner's path after a Secure Boot policy change (the lab added a db certificate between boots):
+              # `rime luks status` says stale, `rime luks rebind` starts rime-luks-tpm-reenrol@ and asks once; this
+              # driver is the password agent (the CLI runs in its own unit, --no-ask-password: no tty agent).
+              rime luks status 2>&1 | sed 's/^/RIME-TPM: status-before| /'
+              say "status-before rc=''${PIPESTATUS[0]}"
+              rm -f /run/rebind.rc /run/rebind.out
+              systemd-run --no-block --no-ask-password --collect --unit=rime-lab-rebind -p RuntimeMaxSec=150 \
+                /bin/sh -c '${pkgs.rime.rimed}/bin/rime luks rebind > /run/rebind.out 2>&1; echo $? > /run/rebind.rc'
+              answered=0 done=" "
+              for _ in $(seq 1 700); do
+                for f in /run/systemd/ask-password/ask.*; do
+                  [ -e "$f" ] || continue
+                  case "$done" in *" $f "*) continue ;; esac
+                  grep -q '^Id=rime-luks-tpm:${luksUuid}$' "$f" || continue
+                  done="$done$f "
+                  sock=$(sed -n 's/^Socket=//p' "$f")
+                  say "answering ask: $(sed -n 's/^Message=//p' "$f")"
+                  printf %s "$(cat /run/rime-pass)" | ${sd}/lib/systemd/systemd-reply-password 1 "$sock"
+                  answered=$((answered + 1))
+                done
+                [ -s /run/rebind.rc ] && break
+                sleep 0.2
+              done
+              sed 's/^/RIME-TPM: rebind| /' /run/rebind.out 2>/dev/null
+              journalctl -b -o cat --no-pager -u "rime-luks-tpm-reenrol@${luksUuid}.service" | sed 's/^/RIME-TPM: reenrol| /'
+              say "rebind-cli answered=$answered rc=$(cat /run/rebind.rc 2>/dev/null || echo none)"
+              rime luks status 2>&1 | sed 's/^/RIME-TPM: status-after| /'
+              say "status-after rc=''${PIPESTATUS[0]}"
               tokens
               ;;
             rebind:*)

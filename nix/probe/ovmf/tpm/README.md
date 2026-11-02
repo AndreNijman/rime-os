@@ -6,12 +6,16 @@ machine. Everything is a file under the lab's scratch directory and every key is
 touches a host's ESP, NVRAM, TPM or disks.
 
 **Result (2026-11-02): main 10/10 PASS; the mutant scenario FAILS at M4, as it must.**
+**Wave 4 (2026-11-03): `rebind-sb` 4/4 PASS; `mutant-rebind-skipped` FAILS at S3 and S4, as it must** (section
+"`rime luks rebind` after a db change" below).
 
 ## Run it
 
 ```
 nix/probe/ovmf/tpm/run.sh all                       # prep, system, disks, run main
 nix/probe/ovmf/tpm/run.sh run mutant-bootc-reenrol  # expected: exit 1, M4 FAIL
+nix/probe/ovmf/tpm/run.sh run rebind-sb             # `rime luks rebind` after a db change (after prep/system/disks)
+nix/probe/ovmf/tpm/run.sh run mutant-rebind-skipped # expected: exit 1, S3 + S4 FAIL
 ```
 
 | Step | What |
@@ -106,6 +110,24 @@ the recovery slot and write a new key (`--replace-recovery`, the full path). `$A
 So the lab catches a re-enrolment that loses the owner's recovery key. `run.sh` exits 1 on this scenario; that is
 the expected result.
 
+## `rime luks rebind` after a db change (wave 4)
+
+The owner's path after a real Secure Boot policy change, under Secure Boot (the lab system now carries `rimed`'s
+`rime` CLI; `systems.nix` actions `seal` and `rebind-cli`). One disk, one varstore, one TPM state:
+
+| Boot | What | Pass needs |
+|---|---|---|
+| S1 | NixOS, action `seal`: passphrase typed, then `systemd-cryptenroll --tpm2-pcrs=7` seals a slot to this boot | sealed, PCR 7 recorded |
+| S2 | NixOS | the slot unseals with **no** prompt; PCR 7 = S1's |
+| (host) | `virt-fw-vars --add-db` appends a THROWAWAY TEST certificate (`$LAB/keys/test-db.crt`) to **db** in the varstore | the cert's subject is in db afterwards and not before (`db-change.txt`) |
+| S3 | NixOS, action `rebind-cli`: `rime luks status` before; `rime luks rebind` in its own unit (`systemd-run --no-ask-password`), the guest answers its one ask through `systemd-reply-password`; `rime luks status` after | PCR 7 moved; slot refused (1 ask, passphrase); status before `stale` rc 1; `re-bound`; `kept: unchanged <sha256>`; answered=1 rc=0; status after rc 0; passphrase and recovery slots identical before and after |
+| S4 | NixOS | the re-sealed slot unseals with no prompt; PCR 7 = S3's |
+
+Run 2026-11-03 (`$ART/rebind-sb/`): **4/4 PASS**, PCR 7 `eaa882d15072806b…` at S1/S2 and `87f86b52c2d2e82e…` at S3/S4.
+`mutant-rebind-skipped` makes S3 only measure (nobody runs `rime luks rebind`): S1, S2 PASS, **S3 FAIL** (no stale
+report, no re-bind) and **S4 FAIL** (`initrd asked 1 times, expected 0`): the S4 verdict depends on the re-seal.
+Real firmware, katana's real PCR 7 and its real db/dbx stay P3/HARDWARE.
+
 ## Traps hit building it
 
 - busybox `base64` ignores `-w 0` and wraps; kernel console messages land inside the base64 too (the probe initrd now
@@ -126,3 +148,5 @@ the expected result.
   so a lab with fresh keys reads another value there (independent reruns with new keys: P3 = N1 = `c9d8fd95…d548e`,
   then `a1c21dd1…4ab4`; P2 = `078ded20…5c92` every time; final run 10/10 PASS, mutant M4-only FAIL:
   `/var/lab/rime-nix/artifacts/verify-tpmkeymap/tpm/{main,mutant-bootc-reenrol}`).
+- `virt-fw-vars --print` shows db only as a blob size; `--print --verbose` lists each certificate's subject (the first
+  `rebind-sb` run read the plain form and called a real db change "not added").

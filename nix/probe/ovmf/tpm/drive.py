@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """drive.py: the TPM lab's boot sequence in OVMF + swtpm, Secure Boot on (README.md here). Runs INSIDE rime-ovmf-tpm.
 
-    drive.py SCENARIO LUKS_UUID       SCENARIO = main | mutant-bootc-reenrol
+    drive.py SCENARIO LUKS_UUID       SCENARIO = main | mutant-bootc-reenrol | rebind-sb | mutant-rebind-skipped
 
 One varstore (Microsoft keys + the TEST MOK in MokList), one swtpm state directory, one LUKS2 data disk and one NixOS
 disk (a qcow2 overlay over $LAB/disks/bls/disk.raw) carry over between boots, as they would on one machine.
@@ -25,6 +25,15 @@ mutant-bootc-reenrol (the lab must catch bootc's re-enrolment, which replaced th
   M2  NixOS, reenrol-bootc   passphrase; rime-luks-enroll's FULL path (--replace-recovery: what bootc did every run)
   M3  NixOS, clear   TPM unlock; tpm2_clear
   M4  NixOS          the pre-existing recovery key is typed: it must be REFUSED (the scenario's verdict is FAIL)
+rebind-sb (p2-gates T3 / wave-4 open item: the owner's `rime luks rebind` after a real Secure Boot policy change):
+  S1  NixOS, seal    passphrase; a TPM slot sealed to this boot's PCR 7
+  S2  NixOS          the slot unseals with no prompt
+      (host)         a THROWAWAY TEST certificate is appended to db in the varstore (virt-fw-vars --add-db)
+  S3  NixOS, rebind-cli   PCR 7 moved; the slot is refused, the passphrase typed; `rime luks status` says stale (1);
+                     `rime luks rebind` (its own unit; this driver answers the one ask) re-seals: rc 0, kept slots
+                     byte-identical, `rime luks status` ok (0)
+  S4  NixOS          the re-sealed slot unseals with no prompt; PCR 7 = S3's
+mutant-rebind-skipped: the same with S3 only measuring (no `rime luks rebind`): S3 and S4 must FAIL (S4 asks again).
 
 Every verdict needs a positive marker; a timeout is never a pass. Evidence: $OUT/SCENARIO/{NAME.serial.txt,
 NAME.eventlog.bin, NAME.eventlog.yaml, NAME.pcr7-events.txt, NAME.swtpm.log}, $OUT/SCENARIO/results.tsv, pcr7.txt.
@@ -353,6 +362,75 @@ class Scenario:
             p.append("a TPM was present")
         self.verdict(b, p, "T3: no TPM device, the PRE-EXISTING recovery key unlocks", "")
 
+    def db_change(self):
+        """A Secure Boot policy change between two boots: a THROWAWAY TEST certificate is appended to db in the
+        varstore the machine boots with (what a firmware update or the owner adding a key does). PCR 7 measures db."""
+        k = f"{LAB}/keys"
+        if not os.path.exists(f"{k}/test-db.crt"):
+            subprocess.run(["openssl", "req", "-new", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "3650",
+                            "-subj", "/CN=Rime TPM lab TEST db cert (throwaway, DO NOT TRUST)/",
+                            "-keyout", f"{k}/test-db.key", "-out", f"{k}/test-db.crt"], check=True, capture_output=True)
+            os.chmod(f"{k}/test-db.key", 0o600)
+        out = self.vars + ".db"
+        r = subprocess.run(["virt-fw-vars", "--input", self.vars, "--output", out, "--add-db",
+                            "a0baa8a3-041d-48a8-bc87-c36d121b5e3d", f"{k}/test-db.crt"], capture_output=True, text=True)
+        # --verbose prints every certificate's subject (plain --print shows only the db blob's size).
+        before = subprocess.run(["virt-fw-vars", "--input", self.vars, "--print", "--verbose"], capture_output=True,
+                                text=True).stdout
+        after = subprocess.run(["virt-fw-vars", "--input", out, "--print", "--verbose"], capture_output=True,
+                               text=True).stdout
+        with open(f"{self.dir}/db-change.txt", "w") as f:
+            f.write(r.stdout + r.stderr + "\n--- before\n" + before + "\n--- after\n" + after)
+        os.replace(out, self.vars)
+        return r.returncode == 0 and "Rime TPM lab TEST db cert" in after and "Rime TPM lab TEST db cert" not in before
+
+    def rebind_sb(self, rebind=True):
+        b, t = self.nixos("S1", action="seal", secrets=["TEST-passphrase"])
+        p = self.common(b, t, want_nixos=True) + self.unlock(b, t, asks=1, typed=["TEST-passphrase"])
+        if field(t, "seal rc") != "0":
+            p.append(f"sealing to this boot's PCR 7 failed (rc {field(t, 'seal rc')})")
+        self.verdict(b, p, "NixOS under Secure Boot (TEST MOK): passphrase typed, TPM slot sealed to this PCR 7",
+                     f"pcr7 {self.pcr.get('S1')}")
+
+        b, t = self.nixos("S2")
+        p = self.common(b, t, want_nixos=True) + self.unlock(b, t, asks=0, typed=[])
+        if self.pcr.get("S2") != self.pcr.get("S1"):
+            p.append(f"PCR 7 moved with no policy change: S1 {self.pcr.get('S1')} S2 {self.pcr.get('S2')}")
+        self.verdict(b, p, "the slot unseals with no prompt (the baseline)", f"pcr7 {self.pcr.get('S2')}")
+
+        changed = self.db_change()
+        # The mutant (mutant-rebind-skipped): S3 only measures, nobody re-seals; S3 and S4 must then fail.
+        b, t = self.nixos("S3", action="rebind-cli" if rebind else "measure", secrets=["TEST-passphrase"])
+        p = self.common(b, t, want_nixos=True) + self.unlock(b, t, asks=1, typed=["TEST-passphrase"])
+        if not changed:
+            p.append("the TEST db certificate was not added to the varstore (db-change.txt)")
+        if not self.pcr.get("S3") or self.pcr.get("S3") == self.pcr.get("S1"):
+            p.append(f"PCR 7 did not change with db: S1 {self.pcr.get('S1')} S3 {self.pcr.get('S3')}")
+        if field(t, "status-before rc") != "1" or not re.search(rf"RIME-TPM: status-before\|\s+stale\s+{self.uuid}", t):
+            p.append(f"`rime luks status` did not call the slot stale (rc {field(t, 'status-before rc')})")
+        if not re.search(r"^RIME-TPM: rebind-cli answered=1 rc=0$", t, re.M):
+            p.append(f"rime luks rebind: {field(t, 'rebind-cli answered')!r}")
+        if not re.search(rf"RIME-TPM: rebind\| {self.uuid}: re-bound", t):
+            p.append("rime luks rebind did not report the volume re-bound")
+        if not re.search(r"RIME-TPM: reenrol\| kept: unchanged [0-9a-f]{64}", t):
+            p.append("rime-luks-enroll did not prove the kept slots unchanged")
+        if field(t, "status-after rc") != "0":
+            p.append(f"`rime luks status` after the rebind: rc {field(t, 'status-after rc')}")
+        kept = [l for l in luks_lines(t) if " recovery " in l or " passphrase " in l]
+        if len(set(kept)) * 2 != len(kept):   # printed before and after: each kept slot twice, identical
+            p.append(f"recovery/passphrase slots changed: {kept}")
+        self.verdict(b, p, "db changed: PCR 7 moved, the slot refused (passphrase), `rime luks rebind` re-seals it",
+                     f"pcr7 {self.pcr.get('S3')}; " + " | ".join(sorted(set(kept))))
+
+        b, t = self.nixos("S4")
+        p = self.common(b, t, want_nixos=True) + self.unlock(b, t, asks=0, typed=[])
+        if self.pcr.get("S4") != self.pcr.get("S3"):
+            p.append(f"PCR 7 not stable after the change: S3 {self.pcr.get('S3')} S4 {self.pcr.get('S4')}")
+        self.verdict(b, p, "the re-sealed slot unseals with no prompt under the new db", f"pcr7 {self.pcr.get('S4')}")
+
+    def mutant_rebind_skipped(self):
+        self.rebind_sb(rebind=False)
+
     def mutant_bootc_reenrol(self):
         b, t = self.nixos("M1", action=f"init:{'ab' * 32}", secrets=["TEST-passphrase"])
         p = self.common(b, t, want_nixos=True)
@@ -398,8 +476,9 @@ def pcr7_events(yaml_text):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or sys.argv[1] not in ("main", "mutant-bootc-reenrol"):
-        sys.exit("usage: drive.py main|mutant-bootc-reenrol LUKS_UUID")
+    if len(sys.argv) != 3 or sys.argv[1] not in ("main", "mutant-bootc-reenrol", "rebind-sb",
+                                                      "mutant-rebind-skipped"):
+        sys.exit("usage: drive.py main|mutant-bootc-reenrol|rebind-sb|mutant-rebind-skipped LUKS_UUID")
     sc = Scenario(sys.argv[1], sys.argv[2])
     getattr(sc, sys.argv[1].replace("-", "_"))()
     sys.exit(0 if all(r.startswith("PASS") for r in sc.rows) else 1)
