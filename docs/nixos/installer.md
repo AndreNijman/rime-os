@@ -170,11 +170,20 @@ virtio disk (`RIME_RECOVERY_ALLOW_FIXED=1`, the test seam for a VM disk that is 
 | seen | cause | now |
 |---|---|---|
 | `splash` twice on every entry | `desktop.nix` named it and nixpkgs' plymouth module adds it | `desktop.nix` names `quiet` only; `checks.installer-polish-eval` counts it (mutant: both again fails, `artifacts/installer2/mutants/polish-splash-twice.log`) |
-| `hostnamectl --static` empty | no `/etc/hostname` before the first `rime-hostlayer apply` | written by the install's own activation; `installer-nixos` and the lab's firstboot both check `/etc/hostname` |
+| `hostnamectl --static` empty | two causes. The earlier runs had no `/etc/hostname` until the first `rime-hostlayer apply`. This run had the file (PID 1 used it), but NixOS points systemd-hostnamed at `/etc/static/hostname` (`SYSTEMD_ETC_HOSTNAME`, set for when `networking.hostName` makes that link), which does not exist when the closure names no machine | the install's own activation writes `/etc/hostname`, and `hostlayer.nix` points hostnamed at it. A minimal NixOS VM shows `Static hostname: (unset)` before and `rime-lab-x` after (`artifacts/installer2/hostnamed-static-{before,after}.log`, probe `hostnamed-static-probe.flake.nix`). `installer-polish-eval` checks the unit; with the setting dropped it fails (`mutants/polish-hostnamed-static.log`). The lab's firstboot compares `/etc/hostname` and `hostnamectl --static` with the answer |
 | zsh-newuser-install on the first console login | NixOS ships no `/etc/skel/.zshrc` | `fedora-parity.nix` ships Fedora's stock one (a real file, 0644), which rime-shell-firstrun replaces at the first desktop login as on Fedora |
 | systemd-journald restarts once | see "journald" below | explained, not changed |
 
-**journald.** RESULTS-JOURNALD
+**journald.** The first boot of the `gb` LUKS install (`artifacts/installer2/lab/run1-oldiso/firstboot-gb.json`,
+`journald` facts) shows `NRestarts=1` and, in order: the initrd's journald (PID 115) starts at 16.73 s;
+`systemd[1]: Switching root.` at 25.00 s; the initrd journal stops; the real root's journald (PID 421) starts at
+27.90 s; `systemd-journald[115]: Received SIGTERM from PID 1 (systemd).` and
+`systemd-journald.service: Scheduled restart job, restart counter is at 1.` at 27.91 s; then the runtime journal is
+flushed to `/var/log/journal`. That is the systemd initrd handing the journal over at switch-root: PID 1 stops the
+initrd's journald with SIGTERM and the unit's `Restart=` starts the real one, which the counter records as one restart.
+There is no error, core dump or watchdog line. Not changed. Also seen there: journald warns that `/var/log/journal`
+is copy-on-write on btrfs (systemd's `journal-nocow.conf` tmpfiles rule would set `+C`); left for the base module's
+owner.
 
 ## Proof
 
@@ -247,8 +256,10 @@ sudo -n podman exec -w /work/<worktree> rime-nix nix build path:.#checks.x86_64-
   release (whose 17 GB floor also updates rimeos.com/download#windows). A real `stage-image` run of the app against a
   NixOS ISO (the Windows lab, `windows-installer/lab`) has not been done; the app's Linux half is proven by
   `installer-nixos` (`ESP_IS_LIVE=1`) and the OVMF partition run (`ESP_IS_LIVE=0`).
-* **Kernel owner:** the `Lockdown: ... is restricted; see man kernel_lockdown.7` line on the installed system's
-  serial console is the kernel's Secure Boot lockdown, not an installer fault.
+* **Kernel owner:** `Lockdown: swapper/0: hibernation is restricted; see man kernel_lockdown.7` on the live
+  environment's serial console (Fedora's kernel, every earlier I1 and install log) is that kernel's Secure Boot
+  lockdown, not an installer fault. Whether the Rime kernel should allow hibernation under Secure Boot is the kernel
+  owner's call.
 * **Bridge:** `nix/installer/target.nix` (`rime.installTarget`) and the bridge's `rime.rootfs` declare the same D2
   mounts; they should become one option (bridge2's piece; not edited here).
 * **Obsolete:** the merge order with bootmatrix (its luks.nix and tpmkeymap's keymap work are on main now).
