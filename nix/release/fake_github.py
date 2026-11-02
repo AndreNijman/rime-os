@@ -156,6 +156,9 @@ def handler(state, role, objects_url):
                 a = next((a for a in (r or {}).get("assets", []) if a["name"] == m.group(2)), None) if r else None
             if not a or a.get("state") != "uploaded":
                 return self.reply(404, raw=b"Not Found", headers={"Content-Type": "text/plain"})
+            # What a client fetched, for the tests (update-delta.nix): "ADDRESS METHOD TAG/NAME".
+            with state.lock, open(os.path.join(state.dir, "downloads.log"), "a") as f:
+                f.write(f"{self.client_address[0]} {self.command} {m.group(1)}/{m.group(2)}\n")
             return self.reply(302, raw=b"", headers={"Location": f"{objects_url}/{a['id']}/{a['name']}"})
 
         # ── objects origin ──

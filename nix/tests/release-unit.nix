@@ -10,7 +10,7 @@ let
 in
 pkgs.runCommand "rime-release-unit"
 {
-  nativeBuildInputs = [ py pkgs.openssl pkgs.actionlint pkgs.shellcheck pkgs.gnugrep ];
+  nativeBuildInputs = [ py pkgs.openssl pkgs.actionlint pkgs.shellcheck pkgs.gnugrep pkgs.zstd ];
   plan = release.rime-release-plan;
   nextReleaseId = "${release.rime-nix-release}/libexec/rime-nix-release/next-release-id";
 } ''
@@ -69,6 +69,17 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
     'return os.environ.get("RIME_TEST_BEFORE_PUSH") if a.test_signing else None' \
     'return os.environ.get("RIME_TEST_BEFORE_PUSH")'
   mutant "a NAR URL on the Pages origin passes" 'if u.netloc == origin:' 'if False:'
+  # deltas (docs/nixos/delta.md §7)
+  mutant "a delta file with another sha256 binds" \
+    'if "sha256-" + base64.b64encode(digest).decode() != e["file_hash"] or nix32_raw(digest) + ".delta" != name:' \
+    'if False:'
+  mutant "a delta over the ratio is published" \
+    'elif not sizes.get(p) or e["file_size"] > max_ratio * sizes[p]:' 'elif not sizes.get(p):'
+  mutant "a delta file outside its release" \
+    'if not isinstance(e.get("file"), str) or not DELTA_FILE_RE.match(e["file"]):' \
+    'if not isinstance(e.get("file"), str):'
+  mutant "a delta that does not rebuild the NAR is kept" \
+    'if d.wait() != 0 or "sha256-" + base64.b64encode(h.digest()).decode() != sri(new_hash):' 'if d.wait() != 0:'
 
   echo "== the workflow's security shape"
   cp -r ${workflows} wf
