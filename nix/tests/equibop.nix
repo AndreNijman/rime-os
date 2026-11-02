@@ -10,7 +10,9 @@
 { pkgs, self }:
 
 let
-  discord = "${self}/files/system/libexec/rime-gaming-discord";
+  # A path literal, not "${self}/...": only this file is hashed, so an unrelated change elsewhere in the repository
+  # does not re-run the VM test.
+  discord = ../../files/system/libexec/rime-gaming-discord;
 
   # A game's side of Discord RPC: HANDSHAKE, then the READY dispatch arRPC sends back.
   handshake = pkgs.writeText "rpc-handshake.py" ''
