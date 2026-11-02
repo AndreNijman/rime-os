@@ -10,6 +10,7 @@ let
   cfg = config.rime.update;
   toml = pkgs.formats.toml { };
   nix = config.nix.package;
+  floors = import ../release/floors.nix;
   settings = {
     repository = cfg.repository;
     channel = cfg.channel;
@@ -23,6 +24,8 @@ let
     nix_env = "${nix}/bin/nix-env";
     nix_store = "${nix}/bin/nix-store";
     keep_generations = cfg.keepGenerations;
+    # §11.5: the free-space gate counts on-disk bytes on a compress-force=zstd store (nix/release/floors.nix).
+    on_disk_ratio = floors.ratio;
   } // lib.optionalAttrs (cfg.fulcioRoot != null) { fulcio_root = "${cfg.fulcioRoot}"; }
     // lib.optionalAttrs (cfg.upstreamCacheUrl != null) { upstream_cache_url = cfg.upstreamCacheUrl; };
 in
@@ -43,7 +46,11 @@ in
     variant = lib.mkOption {
       type = lib.types.str;
       default = "plain";
-      description = "Which system of each release this machine installs (`plain` or `luks`, §3.1 `variants`).";
+      description = ''
+        The base of the release variant this machine installs (§3.1 `variants`, §11.6): `plain` is the generic
+        installed system (plain and LUKS alike, D9). The client adds every feature switched on for this machine
+        (/var/lib/rime/switch), so a machine with gaming switched on installs `plain-gaming`.
+      '';
     };
     cacheUrl = lib.mkOption {
       type = lib.types.str;

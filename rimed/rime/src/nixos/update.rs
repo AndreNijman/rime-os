@@ -117,7 +117,7 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
         Ok(None) => ("none", String::new()),
         Ok(Some((rel, digest))) => {
             let m = &rel.manifest;
-            let v = m.variant(&cfg.variant).expect("checked by fetch::manifest");
+            let v = m.variant(&rel.variant.chosen).expect("chosen by fetch::manifest");
             let target = m.path(v.toplevel);
             let current = generations::list().ok().and_then(|g| g.all.get(&g.current).cloned());
             let newer = Applied::load().high_water().map_or(true, |hw| release::compare(&m.release, &hw) != Some(std::cmp::Ordering::Less));
@@ -173,6 +173,113 @@ fn components_json(a: &Activation, live: bool, overrides: &[(Component, &str, St
         .collect()
 }
 
+/// §11.5: refused by name unless the filesystem holding /nix has room for `unpacked` bytes of new store paths, counted
+/// as they will sit on disk (variant.rs `store_ratio`: compressed only on a compress-force=zstd btrfs), plus RESERVE.
+fn headroom(cfg: &Config, unpacked: u64, missing: &BTreeSet<String>) -> Result<(), Stop> {
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+    let ratio = super::variant::store_ratio(&mounts, "/nix/store", cfg.on_disk_ratio);
+    let need = super::variant::need_on_disk(unpacked, ratio, RESERVE);
+    match free_bytes("/nix/store") {
+        Some(free) if free < need => Err(stop(format!(
+            "rime: this update needs {:.2} GB free on /nix ({:.2} GB of new store paths{}, plus 1 GB to spare) and {:.2} GB is free. Nothing was changed. (`sudo rime gc` removes old generations.)",
+            need as f64 / GB,
+            unpacked as f64 / GB,
+            if ratio < 1.0 { format!(", about {:.2} GB on this compressed disk", (need - RESERVE) as f64 / GB) } else { String::new() },
+            free as f64 / GB
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// §8.5: bind `missing` to the signed manifest, then download it. GitHub backend (§18.1): each path from the cache its
+/// `origin` names, Rime's or the upstream one, every one checked against exactly the verified manifest's `cache.keys`
+/// (Rime's keys and the upstream's); under --allow-unverified, the keys compiled into the system. `bound` runs between
+/// the bind and the first download. Shared by the OS step and `rime install` of a class 2 app.
+fn fetch_paths(cfg: &Config, m: &Manifest, verified: bool, missing: &BTreeSet<String>, keep_fsync: bool, bound: impl FnOnce()) -> Result<(), Stop> {
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let keys: Vec<String> = if verified {
+        m.cache.keys.clone()
+    } else {
+        cfg.cache_keys.iter().chain(cfg.upstream_cache_keys.iter()).cloned().collect()
+    };
+    let want: Vec<&str> = missing.iter().map(String::as_str).collect();
+    let groups = m.by_origin(&want);
+    let mut infos = std::collections::BTreeMap::new();
+    let mut copies: Vec<(&str, &Vec<&str>)> = Vec::new();
+    for (origin, paths) in &groups {
+        let Some(from) = cfg.cache_for(*origin) else {
+            return Err(stop(format!(
+                "rime: release {} takes {} store paths from the upstream cache, and {CONFIG} names none. Nothing was changed.",
+                m.release,
+                paths.len()
+            )));
+        };
+        infos.extend(
+            store::path_info(cfg, Some(from), paths, false)
+                .map_err(|e| stop(format!("rime: could not reach the release server ({e}); nothing was changed.")))?,
+        );
+        copies.push((from, paths));
+    }
+    match bind(m, &want, &infos) {
+        Ok(()) => {}
+        Err(BindError::Missing(p)) => {
+            return Err(stop(format!("rime: the update server does not hold all of release {} yet ({p}). Try again later; nothing was changed.", m.release)))
+        }
+        Err(BindError::Mismatch { path, what }) => {
+            return Err(stop(format!("rime: the update server's copy of {path} does not match the signed release. Nothing was downloaded or changed.\n  ({what})")))
+        }
+    }
+    bound();
+    // Upstream first: an upstream path never refers to a Rime one, so a Rime path's references are valid by the
+    // time it arrives (Origin orders Rime before Upstream, hence the reverse).
+    for (from, paths) in copies.iter().rev() {
+        store::copy_from_cache(cfg, from, paths, &keys, keep_fsync).map_err(|e| {
+            stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
+        })?;
+    }
+    Ok(())
+}
+
+/// `rime install` of class 2 apps (pkg.rs set_apps_profile): `outs` are store paths the release record names
+/// (catalogue-outs.json). Each one's closure is taken from the signed manifest saved with that record (§8.2 step 14),
+/// bound and downloaded exactly as the OS step downloads, with the same free-space gate.
+pub fn fetch_apps(outs: &[&str]) -> Result<(), String> {
+    let cfg = Config::load()?;
+    // Already in the store (a valid path's closure is valid): nothing to download, so nothing to bind.
+    if store::invalid(&cfg, outs)?.is_empty() {
+        return Ok(());
+    }
+    let cat = super::pkg::Catalogue::load()?;
+    let text = std::fs::read_to_string(&cat.outs_file).map_err(|e| format!("{}: {e}", cat.outs_file))?;
+    let doc: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", cat.outs_file))?;
+    let release = doc.get("release").and_then(Value::as_str).ok_or_else(|| format!("{} names no release", cat.outs_file))?;
+    let dir = state("releases").join(release);
+    let bytes = std::fs::read(dir.join("manifest.json")).map_err(|e| {
+        format!("the signed manifest of release {release} is not kept on this machine ({e}); `sudo rime update` keeps it")
+    })?;
+    let m = rimed_core::nixrel::manifest::parse(&bytes).map_err(|r| r.message())?;
+    let verified = std::fs::read_to_string(dir.join("verified")).map(|v| v.trim() == "true").unwrap_or(false);
+    let mut closure: BTreeSet<usize> = BTreeSet::new();
+    for out in outs {
+        let entry = m
+            .catalogue
+            .iter()
+            .find(|c| c.class == 2 && c.out < m.paths.len() && m.path(c.out) == *out)
+            .ok_or_else(|| format!("release {release}'s signed manifest names no build {out}"))?;
+        closure.extend(m.closure_of(entry.out));
+    }
+    let all: Vec<&str> = closure.iter().map(|i| m.path(*i)).collect();
+    let missing = store::invalid(&cfg, &all)?;
+    let unpacked: u64 = m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.nar_size).sum();
+    headroom(&cfg, unpacked, &missing).map_err(|s| s.message)?;
+    fetch_paths(&cfg, &m, verified, &missing, false, || {}).map_err(|s| s.message)
+}
+
 fn free_bytes(path: &str) -> Option<u64> {
     let c = std::ffi::CString::new(path).ok()?;
     let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -202,7 +309,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     // 4. manifest: the trust gate.
     let rel = fetch::manifest(cfg, roots, &digest, &rel_id, opts.allow_unverified || opts.live.allow_unverified)?;
     let m = &rel.manifest;
-    let v = m.variant(&cfg.variant).expect("checked by fetch::manifest");
+    let v = m.variant(&rel.variant.chosen).expect("chosen by fetch::manifest");
     let target = m.path(v.toplevel).to_string();
     let gens = generations::list().map_err(|e| stop(format!("rime: {e}")))?;
     let current_gen_top = gens.all.get(&gens.current).cloned().unwrap_or_default();
@@ -222,7 +329,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
             applied.record(AppliedRelease { release: m.release.clone(), digest: digest.clone(), toplevel: target.clone(), generation: Some(gens.current), at: now() });
             let _ = applied.save();
         }
-        save_outs(m);
+        save_release(&rel);
         if booted == target || running == target {
             println!("rime: the OS is up to date ({})", m.release);
             return Ok(0);
@@ -255,6 +362,14 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     let dl: u64 = m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.file_size).sum();
     let unpacked: u64 = m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.nar_size).sum();
     println!("rime: {from_release} → {}", m.release);
+    if rel.variant.chosen != cfg.variant {
+        println!("rime: installing the {} system (switched on for this machine: {})", rel.variant.chosen,
+                 rel.variant.chosen.strip_prefix(&format!("{}-", cfg.variant)).unwrap_or(&rel.variant.chosen).replace('-', ", "));
+    }
+    if !rel.variant.waiting.is_empty() {
+        println!("rime: {} is switched on for this machine, and release {} builds no {} system yet; it stays selected for a later release",
+                 rel.variant.waiting.join(" and "), m.release, rel.variant.wanted);
+    }
     if let Some(b) = &m.batch {
         if b.mass_rebuild {
             println!("rime: this release rebuilds the whole system, so most of it is downloaded again.");
@@ -296,63 +411,12 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     }
 
     // 9. headroom.
-    let need = unpacked + RESERVE;
-    match free_bytes("/nix/store") {
-        Some(free) if free < need && !missing.is_empty() => {
-            return Err(stop(format!(
-                "rime: this update needs {:.2} GB free on /nix and {:.2} GB is free. Nothing was changed. (`sudo rime gc` removes old generations.)",
-                need as f64 / GB,
-                free as f64 / GB
-            )))
-        }
-        _ => {}
-    }
+    headroom(cfg, unpacked, &missing)?;
 
     // 10. bind, then download.
-    // GitHub backend (§8.5, §18.1): each path from the cache its `origin` names, Rime's or the upstream one, every
-    // one checked against exactly the verified manifest's `cache.keys` (Rime's keys and the upstream's).
-    let keys: Vec<String> = if rel.verified {
-        m.cache.keys.clone()
-    } else {
-        cfg.cache_keys.iter().chain(cfg.upstream_cache_keys.iter()).cloned().collect()
-    };
-    if !missing.is_empty() {
-        let want: Vec<&str> = missing.iter().map(String::as_str).collect();
-        let groups = m.by_origin(&want);
-        let mut infos = std::collections::BTreeMap::new();
-        let mut copies: Vec<(&str, &Vec<&str>)> = Vec::new();
-        for (origin, paths) in &groups {
-            let Some(from) = cfg.cache_for(*origin) else {
-                return Err(stop(format!(
-                    "rime: release {} takes {} store paths from the upstream cache, and {CONFIG} names none. Nothing was changed.",
-                    m.release,
-                    paths.len()
-                )));
-            };
-            infos.extend(
-                store::path_info(cfg, Some(from), paths, false)
-                    .map_err(|e| stop(format!("rime: could not reach the release server ({e}); nothing was changed.")))?,
-            );
-            copies.push((from, paths));
-        }
-        match bind(m, &want, &infos) {
-            Ok(()) => {}
-            Err(BindError::Missing(p)) => {
-                return Err(stop(format!("rime: the update server does not hold all of release {} yet ({p}). Try again later; nothing was changed.", m.release)))
-            }
-            Err(BindError::Mismatch { path, what }) => {
-                return Err(stop(format!("rime: the update server's copy of {path} does not match the signed release. Nothing was downloaded or changed.\n  ({what})")))
-            }
-        }
-        let _ = write_json(&state("pending.json"), &json!({"release": m.release, "variant": cfg.variant, "manifest": serde_json::from_slice::<Value>(&rel.bytes).unwrap_or(Value::Null)}), 0o644);
-        // Upstream first: an upstream path never refers to a Rime one, so a Rime path's references are valid by the
-        // time it arrives (Origin orders Rime before Upstream, hence the reverse).
-        for (from, paths) in copies.iter().rev() {
-            store::copy_from_cache(cfg, from, paths, &keys, opts.keep_fsync).map_err(|e| {
-                stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
-            })?;
-        }
-    }
+    fetch_paths(cfg, m, rel.verified, &missing, opts.keep_fsync, || {
+        let _ = write_json(&state("pending.json"), &json!({"release": m.release, "variant": rel.variant.chosen, "manifest": serde_json::from_slice::<Value>(&rel.bytes).unwrap_or(Value::Null)}), 0o644);
+    })?;
 
     // 11. verify what arrived.
     let local = store::path_info(cfg, None, &[target.as_str()], true).map_err(|e| stop(format!("rime: {e}")))?;
@@ -521,6 +585,7 @@ fn save_release(rel: &Release) {
     let dir = state("releases").join(&rel.manifest.release);
     let _ = write_atomic(&dir.join("manifest.json"), &rel.bytes, 0o644);
     let _ = write_atomic(&dir.join("digest"), rel.digest.as_bytes(), 0o644);
+    let _ = write_atomic(&dir.join("verified"), if rel.verified { b"true\n" } else { b"false\n" }, 0o644);
     save_outs(&rel.manifest);
 }
 

@@ -50,12 +50,13 @@ fn check() -> (bool, Vec<String>) {
         Ok(m) => m,
         Err(r) => return (false, [out, vec![r.message()]].concat()),
     };
+    // Any system of the release (variant.rs): which one a machine runs follows its switched-on features.
+    if let Some((name, _)) = m.variants.iter().find(|(_, v)| m.path(v.toplevel) == running) {
+        out.push(format!("system:    {running} is the signed {name} system of {}", m.release));
+        return (true, out);
+    }
     match m.variant(&cfg.variant).map(|v| m.path(v.toplevel).to_string()) {
-        Some(t) if t == running => {
-            out.push(format!("system:    {running} is the signed {} system of {}", cfg.variant, m.release));
-            (true, out)
-        }
-        Some(t) => (false, [out, vec![format!("system:    the signed release names {t}, and this machine runs {running}")]].concat()),
-        None => (false, [out, vec![format!("system:    the signed release has no {} system", cfg.variant)]].concat()),
+        Some(t) => (false, [out, vec![format!("system:    the signed release names {t} ({}), and this machine runs {running}", cfg.variant)]].concat()),
+        None => (false, [out, vec![format!("system:    no system of the signed release is {running}")]].concat()),
     }
 }

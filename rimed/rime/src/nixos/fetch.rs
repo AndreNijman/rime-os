@@ -142,6 +142,8 @@ pub struct Release {
     pub digest: String,
     pub bytes: Vec<u8>,
     pub verified: bool,
+    /// The system of this release this machine installs: its base plus its switched-on features (variant.rs).
+    pub variant: super::variant::Choice,
 }
 
 /// §8.2 step 4, the trust gate: by digest, signature, then §3.2.
@@ -157,11 +159,12 @@ pub fn manifest(cfg: &Config, roots: &Roots, digest: &str, release: &str, allow_
             m.release
         )));
     }
-    if m.variant(&cfg.variant).is_none() {
+    let names: Vec<&str> = m.variants.keys().map(String::as_str).collect();
+    let Some(variant) = super::variant::for_machine(&cfg.variant, &names) else {
         return Err(stop(format!(
             "rime: release {release} has no {} system; this machine was installed as {}. Nothing was changed.",
             cfg.variant, cfg.variant
         )));
-    }
-    Ok(Release { manifest: m, digest: digest.to_string(), bytes, verified })
+    };
+    Ok(Release { manifest: m, digest: digest.to_string(), bytes, verified, variant })
 }

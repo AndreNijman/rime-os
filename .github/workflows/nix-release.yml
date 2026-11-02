@@ -29,8 +29,11 @@
 # narinfo secret key; its public half is RIME_CACHE_PUBKEY below) and RIME_CACHE_TOKEN (a fine-grained PAT: the
 # rime-cache repository only, Contents read/write: release assets and pushes to main). Andre set both 2026-11-01.
 # The S3 fallback would also need RIME_R2_ACCESS_KEY_ID / RIME_R2_SECRET_ACCESS_KEY / RIME_R2_ENDPOINT (unset).
-# TODO(handover): D9's publishable plain/luks configurations; until they exist the only variant is rime-vm, which
-# is marked publishable = false, so publish refuses by design.
+# The variants are the generic installed system (D9, nixosConfigurations.rime) with each set of offered features:
+# plain, plain-gaming, plain-virtualization, plain-gaming-virtualization (nix/release/variants.nix). Every buildable
+# class 2 catalogue app is built too (rime-release-catalogue) and passed to `closure --catalogue-out`, so its
+# closure is signed and published with the release; `manifest` refuses a plan app that is not in closure.json, and
+# checks.release-plan fails when a buildable catalogue app has no build (docs/nixos/updates-and-release.md §3.1).
 # TODO(handover): when this lands on main, build-image.yml's path filter gains !nix/** and
 # !.github/workflows/nix-*.yml in the same PR (§7), so adding the Nix pipeline does not itself publish a bootc release.
 name: nix-release
@@ -227,7 +230,7 @@ jobs:
           fi
           echo "The release toplevels moved (${was:-no comparable earlier commit} -> $now): dry run." | tee -a "$GITHUB_STEP_SUMMARY"
           nix flake check --no-build "${o[@]}"
-          nix build --dry-run "${o[@]}" .#rime-release-toplevels .#rime-nix-release .#rime-release-plan 2>&1 | tee "$RUNNER_TEMP/dry-run.txt"
+          nix build --dry-run "${o[@]}" .#rime-release-toplevels .#rime-release-catalogue .#rime-nix-release .#rime-release-plan 2>&1 | tee "$RUNNER_TEMP/dry-run.txt"
           {
             echo
             echo "Dry run, nothing built or published:"
@@ -248,7 +251,9 @@ jobs:
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels" .#rime-release-toplevels
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/plan" .#rime-release-plan
+          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue
           nix build -L .#checks.x86_64-linux.release-unit
+          nix build "${o[@]}" -L .#checks.x86_64-linux.release-plan
           # TODO(handover): the VM tests (nix flake check) run here once the katana-nix runners have KVM to spare.
 
       - name: closure.json, the upstream split and the stage (or the S3 fallback's export)
@@ -260,6 +265,7 @@ jobs:
           t="$RUNNER_TEMP"
           args=()
           for v in "$t"/toplevels/*; do args+=(--variant "$(basename "$v")=$(readlink -f "$v")"); done
+          for c in "$t"/catalogue/*; do args+=(--catalogue-out "$(readlink -f "$c")"); done
           "$t/tool/bin/rime-nix-release" closure "${args[@]}" --out "$t/closure.json"
           "$t/tool/bin/rime-nix-release" split --closure "$t/closure.json" --upstream "$UPSTREAM_CACHE" --out "$t/split.json"
           case "$BACKEND" in

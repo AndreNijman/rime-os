@@ -172,6 +172,11 @@ bytes. Media type `application/vnd.rimeos.nix-release.v1+json`.
 - **`variants`.** The installer ships two generic toplevels, `plain` and `luks`; everything per-machine comes from the
   host layer (`/var/lib/rime/host.toml`). The machine picks its variant from `host.toml`'s `variant` key. A variant
   missing from the manifest is a refusal, not a fallback to another variant.
+  **As built (wave 3, 2026-11-02):** D9 made one generic toplevel for plain and LUKS, so the base is `plain`, and a
+  release publishes one variant per set of offered features (`nix/release/variants.nix`): `plain`, `plain-gaming`,
+  `plain-virtualization`, `plain-gaming-virtualization`, each the generic system with exactly those features forced
+  on or off. The client picks among them from its switch files (§11.6). A missing BASE is still a refusal; a missing
+  feature variant falls back to the largest built subset, said by name (§11.6).
 - **`boot`** is copied by CI from the toplevel's bootspec (`boot.json`, `org.nixos.bootspec.v1`: kernel, initrd,
   kernelParams) plus the `kernel-modules` link. The client uses it for `--check` and `--plan`, and after realising the
   closure it re-reads the real `boot.json` and refuses if the two disagree.
@@ -181,6 +186,15 @@ bytes. Media type `application/vnd.rimeos.nix-release.v1+json`.
   Rust classifier the client links (`rimed-core`), so there is one rule set, not two.
 - **`catalogue`** is the class 2 catalogue (leaf apps that `rime install` adds to the `rime-apps` profile). Class 1
   packages (steam, gamescope, gamemode, the virtualization set) are in the toplevel and are not listed here.
+  **As built (wave 3):** `rime-release-plan` lists one build for every buildable `kind = "nix"` entry of
+  `nix/catalogue/catalogue.nix`, from the plain system's package set (`system.build.rimeCatalogue`, 13 apps today);
+  the release workflow builds `.#rime-release-catalogue` and passes each to `closure --catalogue-out`, so the apps'
+  closures are signed and published with the release (`manifest` refuses a plan app missing from closure.json).
+  `checks.release-plan` fails when a buildable entry has no build, or an unbuilt one gives no `pending` reason; this
+  closes the latent defect where the plan emitted `catalogue = [ ]`. `rime update` saves the signed manifest per
+  release and writes `catalogue-outs.json`; `rime install <app>` then fetches the app's closure from that saved
+  manifest through the same bind-then-copy path as the OS (§8.5), never `nix-store --realise` from whatever
+  substituters are configured.
 - **`batch`** says what kind of release this is, for the user-facing size message (§8.4) and the release page.
 - **`delta`** is the download a machine on `previous` makes, computed by CI for the `plain` variant. It feeds the
   release byte log (the P4 30-day gate) and the release page. It is informational; the client computes its own.
@@ -924,11 +938,39 @@ that is still on `from` (not restarted yet, or rolled back) is the permissive st
 
 Before downloading: free space on the filesystem holding `/nix/store` must be at least the missing paths' unpacked size
 (`nar_size`, an over-estimate on `compress-force=zstd:3`) plus a reserve of 1 GB. If it is not, `rime gc` runs first
-with the rules above; if that is still not enough, the update is refused by name, with the numbers. For fresh installs
+with the rules above; if that is still not enough, the update is refused by name, with the numbers.
+
+**As built (wave 3, 2026-11-02): on-disk bytes.** The need is `ceil(unpacked × on_disk_ratio)` + 1 GB, where
+`on_disk_ratio` (`/etc/rime/update.toml`, from `nix/release/floors.nix`) is **0.55**, the larger measured ratio (0.524
+for `plain`, closure.md §10-§11) plus a margin. The ratio applies only when the filesystem holding `/nix/store` (the
+longest mount in `/proc/self/mounts`) is btrfs mounted with `compress-force=zstd`; anything else counts unpacked bytes
+(ratio 1.0), so a machine on ext4 is never told an update fits when it does not. The same gate runs before
+`rime install <class 2 app>` downloads. The disk floors follow: **16 GB plain, 18 GB gaming** (17 and 19 with
+virtual machines, estimated), with the NixOS installer's 2 GiB ESP counted (closure.md §11). `rime update` applies no
+floor of its own; `rime install` of a feature package refuses by name below the floor of the system it would select. For fresh installs
 where `/boot` is the ESP, the hook's own floor (D3) covers the ESP: a boot-class update whose kernel and initrd do not
 fit is refused by the hook, and the client says so (§14).
 
 ---
+
+### 11.6 Which variant a machine installs (wave 3, 2026-11-02)
+
+The variant is `<base>` (update.toml `variant`, `plain`) plus every feature whose switch file
+(`/var/lib/rime/switch/rime-feature@<feature>.target.on`, written by `rime install steam` / `rime install qemu`) names
+at least one package, sorted and joined with `-`: `plain-gaming`, `plain-gaming-virtualization`
+(`rimed/rime/src/nixos/variant.rs`). Decisions, taken without asking (Andre: "figure it out yourself"):
+
+- **The switch files are the only input.** A machine running a system that carries gaming with no gaming switch moves
+  to `plain` on its next update. The installer and the bridge must therefore write the switch when they install a
+  feature system (handed to installer2 and the bridge owner).
+- **A missing feature variant falls back.** When the release has no variant for the exact set, the client installs the
+  largest built subset that still has the base and says which features wait ("virtualization is switched on for this
+  machine, and release R builds no plain-gaming-virtualization system yet; it stays selected for a later release").
+  A missing base is refused as before.
+- **The same release can install twice.** "Up to date" compares the CHOSEN variant's toplevel with the profile, so
+  switching a feature on and running `sudo rime update` installs that release's other variant, live when only
+  switch-class paths differ.
+- **`rime trust --gate`** passes when the running system is ANY variant of a verified release, and names it.
 
 ## 12. Channels and pinning
 
@@ -1119,6 +1161,20 @@ The test network has no route to the internet, so passing tests also prove the c
 | `interrupted-download` | `nix copy` killed mid-way, then `rime update` completes; profile unchanged in between |
 | `fill-and-publish` | the publish script against minio with a fake upstream cache (signed with a fake upstream key): upstream signatures kept, Rime key added, verification from the public URL catches a deleted NAR, the manifest is not pushed when any path is missing; a re-signed narinfo is seen by the next public read; runs with a disk quota smaller than the closure |
 | `trust-offline` | `rime trust` with networking off re-verifies the saved signature and the running toplevel |
+
+**As built in `checks.update-e2e` (wave 3, 2026-11-02),** on top of the A/B/rollback/C sequence of §18: every release
+names the catalogue's htop build; after A, `catalogue-outs.json` names it and `rime install htop` fetches it from Rime's
+cache and runs it; `rime install steam` is refused by name on the 12 GiB disk ("needs a disk of at least 18 GB"), no
+switch written. Release C publishes `plain` and `plain-gaming`; with the gaming switch written, the same release installs
+`plain-gaming` live. After a reboot into it, release D is published and refused four ways, each with exit != 0, the
+profile and `/run/current-system` unchanged: **D's Shell NAR changed inside on the asset store** (narinfo and its
+signature untouched; `update-e2e-tamper nar`; "a download did not match its signature", the path not valid
+afterwards); a manifest changed after signing; **an unsigned manifest under a validly signed channel document**
+(`update-e2e-tamper unsigned`; no `.sig` in the registry; "is not signed"); a channel document changed after signing.
+Then **`rime rollback` after those refusals** boots the generation before the booted one (C) and its Shell runs.
+`checks.catalogue` proves the combined floor lookup with lab floors (steam selected, then `rime install qemu` refused
+by name because `plain-gaming-virtualization` does not fit). `checks.release-plan` (eval + Python) proves the plan's
+catalogue, variants and floors (§3.1, §11.5).
 
 ### 15.3 Workflow checks
 

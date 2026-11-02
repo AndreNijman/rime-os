@@ -95,6 +95,16 @@ let
           };
         };
       };
+      # Lab floors (closure.md §11): every one-feature system fits this VM's disk, the system with both features does
+      # not, so the subtest below proves the floor is looked up for the COMBINED selection, by name, before any
+      # switch is written. The real figures (nix/release/floors.nix) are checked in checks.release-plan and, against
+      # a real 12 GiB disk, in checks.update-e2e.
+      rime.catalogue.floors = {
+        plain = { store_bytes = 1; disk_gb = 1; };
+        plain-gaming = { store_bytes = 1; disk_gb = 1; };
+        plain-virtualization = { store_bytes = 1; disk_gb = 1; };
+        plain-gaming-virtualization = { store_bytes = 1000000000000000; disk_gb = 1000000; };
+      };
       # Gaming is opt-in (A4): this system does not carry it, so `rime install steam` selects it for the next update.
       rime.gaming.enable = false;
 
@@ -206,6 +216,19 @@ let
           has(machine.succeed("rime install qemu-kvm 2>&1"), "comes with Rime's Virtual machines system")
           machine.succeed("test \"$(cat /var/lib/rime/switch/rime-feature@virtualization.target.on)\" = qemu")
           has(machine.succeed("rime remove qemu 2>&1"), "Virtual machines is switched off for this machine")
+          machine.fail("test -e /var/lib/rime/switch/rime-feature@virtualization.target.on")
+
+      with subtest("a feature whose system is below this disk's floor is refused by name, before its switch"):
+          has(machine.succeed("rime install steam 2>&1"), "steam comes with Rime's Gaming system")
+          out = machine.fail("rime install qemu 2>&1")
+          has(out, "qemu: Rime's Virtual machines system needs a disk of at least 1000000 GB")
+          has(out, "Nothing was changed")
+          machine.fail("test -e /var/lib/rime/switch/rime-feature@virtualization.target.on")
+          machine.fail("grep -x qemu /var/lib/rime/pkg/requested")
+          # Without gaming selected the virtual machines system alone fits.
+          machine.succeed("rime remove steam 2>&1")
+          has(machine.succeed("rime install qemu 2>&1"), "comes with Rime's Virtual machines system")
+          machine.succeed("rime remove qemu 2>&1")
           machine.fail("test -e /var/lib/rime/switch/rime-feature@virtualization.target.on")
 
       with subtest("a class 2 app comes from the release record into the rime-apps profile"):

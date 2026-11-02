@@ -52,7 +52,12 @@ let
     meta.mainProgram = "rime-nix-release";
   };
 
-  variants = import ./variants.nix { inherit self; };
+  variants = import ./variants.nix { inherit self lib; };
+  catalogueData = import ../catalogue/catalogue.nix;
+  catalogueApps = variants.plain.system.config.system.build.rimeCatalogue.passthru.apps;
+  catalogueVersion = name:
+    lib.getVersion (lib.attrByPath (lib.splitString "." (lib.head catalogueData.entries.${name}.attrs)) null
+      variants.plain.system.pkgs);
   components = import ./components.nix { inherit lib; };
   str = p: builtins.unsafeDiscardStringContext (toString p);
 
@@ -67,13 +72,20 @@ let
         components = lib.mapAttrs (_: map str) (components v.system.config v.system.pkgs);
       })
       variants;
-    # TODO(handover): the class 2 catalogue (rime.catalogue is a stub until D5 fills it).
-    catalogue = [ ];
+    # The class 2 catalogue (§3.1 `catalogue[]`): one build per buildable `nix` entry of nix/catalogue/catalogue.nix,
+    # from the plain system's own package set (system.build.rimeCatalogue), so every variant's machines fetch the
+    # same build. checks.release-plan fails when a buildable entry has no build here.
+    catalogue = lib.mapAttrsToList (name: p: { inherit name; version = catalogueVersion name; out = str p; }) catalogueApps;
   });
 
   # Building this builds every variant's toplevel; `result/<variant>` is each one.
   rime-release-toplevels = pkgs.linkFarm "rime-release-toplevels"
     (lib.mapAttrsToList (name: v: { inherit name; path = v.system.config.system.build.toplevel; }) variants);
+
+  # Building this builds every class 2 app; `result/<name>` is each one. The release job passes each to
+  # `rime-nix-release closure --catalogue-out`, so the apps' closures are signed and published with the release.
+  rime-release-catalogue = pkgs.linkFarm "rime-release-catalogue"
+    (lib.mapAttrsToList (name: path: { inherit name path; }) catalogueApps);
 
   fixtures = import ./fixtures.nix { inherit pkgs; };
 
@@ -90,5 +102,5 @@ let
   };
 in
 {
-  inherit cosign rime-nix-release rime-release-plan rime-release-toplevels rime-release-standin fixtures;
+  inherit cosign rime-nix-release rime-release-plan rime-release-toplevels rime-release-catalogue rime-release-standin fixtures variants;
 }

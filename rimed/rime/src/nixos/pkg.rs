@@ -55,6 +55,9 @@ pub struct Catalogue {
     pub aliases: BTreeMap<String, String>,
     #[serde(default)]
     pub refuse: Vec<RefuseRule>,
+    /// nix/release/floors.nix: the disk floor of each release variant (`plain`, `plain-gaming`, ...).
+    #[serde(default)]
+    pub floors: BTreeMap<String, super::variant::Floor>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -638,6 +641,20 @@ fn select_feature(cat: &Catalogue, name: &str, feature: &str) -> Result<(), Stri
         .get(feature)
         .ok_or_else(|| format!("the catalogue describes no feature '{feature}'"))?;
     let path = switch_path(f);
+    if !f.in_system {
+        // closure.md §11: the system this selects must leave room for one whole update beside it. Refused by name,
+        // before the switch is written, when the filesystem holding /nix is below that system's floor.
+        let base = super::Config::load().map(|c| c.variant).unwrap_or_else(|_| "plain".to_string());
+        let mut on = super::variant::switched_on(Some(cat));
+        on.push(feature.to_string());
+        if let (Some(floor), Some(size)) =
+            (super::variant::floor_for(&cat.floors, &base, &on), super::variant::fs_size("/nix/store"))
+        {
+            if let Some(why) = super::variant::floor_refusal(&f.title, floor, size) {
+                return Err(why);
+            }
+        }
+    }
     let wanted = edit_list(&read_list(&path), &[name.to_string()], &[]);
     write_list(&path, &wanted, false)?;
     if f.in_system {
@@ -709,9 +726,10 @@ fn set_apps_profile(cat: &Catalogue, requested: &[String]) -> Result<(), String>
         })?;
         paths.push(p.as_str());
     }
-    let mut realise = vec!["--realise"];
-    realise.extend(&paths);
-    status(&sys("nix-store"), &realise).map_err(|e| format!("cannot fetch the apps from the cache: {e}"))?;
+    // Through the signed release, as the OS step downloads (§3.2, §8.5): each app's closure is bound to the release
+    // manifest saved with the record and checked against that release's cache keys, never the machine's
+    // substituters alone.
+    super::update::fetch_apps(&paths).map_err(|e| format!("cannot fetch the apps from the cache: {e}"))?;
     let mut set = vec!["--profile", profile, "--install", "--remove-all"];
     set.extend(&paths);
     status(&sys("nix-env"), &set)?;

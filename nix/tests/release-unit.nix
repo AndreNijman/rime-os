@@ -90,6 +90,10 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     echo "killed: $name"
   }
   wmutant "action pinned by tag" "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" "actions/checkout@v4"
+  wmutant "a release without its catalogue apps" \
+    'for c in "$t"/catalogue/*; do args+=(--catalogue-out "$(readlink -f "$c")"); done' ""
+  wmutant "the catalogue never built" '-L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue' '-L .#rime-release-plan'
+  wmutant "no release-plan check" ".#checks.x86_64-linux.release-plan" ".#checks.x86_64-linux.release-unit"
   wmutant "publish on a self-hosted runner" \
     "    environment: nix-release
     permissions:" "    runs-on: [self-hosted, katana]
