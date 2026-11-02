@@ -974,6 +974,21 @@ at least one package, sorted and joined with `-`: `plain-gaming`, `plain-gaming-
   switch-class paths differ.
 - **`rime trust --gate`** passes when the running system is ANY variant of a verified release, and names it.
 
+**What is proven, and what is not (adversarial verification, 2026-11-03).** The selection is proven in `update-e2e`
+with a STAND-IN `plain-gaming` (release C's own test system with a different Shell build, not the real gaming
+closure): the switch file picks it, it installs live, `rime trust --gate` passes on it. The four real variant
+toplevels of `.#rime-release-toplevels` were BUILT at this branch's HEAD (not only evaluated), and each carries
+exactly its features (`plain`: no steam, no qemu; `plain-gaming`: steam; `plain-virtualization`: qemu-system-x86_64,
+libvirtd.service, swtpm; `plain-gaming-virtualization`: all of them); `checks.release-plan` asserts the options. No VM
+has activated or booted a real `plain-gaming` or any virtualization variant, so "a feature reaches a real machine" is
+proven up to the published build, not on a running system. Two consequences for the other pieces, NOT done here:
+the installer installs `nixosConfigurations.rime` itself (`docs/nixos/installer.md`), which is none of the published
+variants (they force the features and set `system.name`), so a fresh install fails `rime trust --gate` until its first
+`rime update`; the installer should install the release's `plain` (or `plain-gaming`) toplevel instead. And because
+the switch files are the only input, a machine installed or bridged with gaming chosen keeps it only if the installer
+or the bridge writes `rime-feature@gaming.target.on` (a system without the switch already runs with the feature's
+target off, `ConditionPathExists`, so moving it to `plain` removes nothing that was switched on).
+
 ## 12. Channels and pinning
 
 - **Channels.** `edge`, `beta`, `candidate`, `stable`, as on bootc, now entries in the channel document. Only `edge` is
@@ -1171,15 +1186,17 @@ switch written. Release C publishes `plain` and `plain-gaming`; with the gaming 
 `plain-gaming` live. After a reboot into it, release D is published and refused four ways, each with exit != 0, the
 profile and `/run/current-system` unchanged: **D's Shell NAR changed inside on the asset store** (narinfo and its
 signature untouched; `update-e2e-tamper nar`; "a download did not match its signature", the path not valid
-afterwards); a manifest changed after signing; **an unsigned manifest under a validly signed channel document**
-(`update-e2e-tamper unsigned`; no `.sig` in the registry; "is not signed"); a channel document changed after signing.
+afterwards; the NAR is then put back); a manifest changed after signing; **an unsigned manifest under a validly signed
+channel document** (`update-e2e-tamper unsigned --from` D's signed manifest, so its closure would install; no `.sig`
+in the registry; "is not signed"); a channel document changed after signing.
 Then **`rime rollback` after those refusals** boots the generation before the booted one (C) and its Shell runs.
 `checks.catalogue` proves the combined floor lookup with lab floors (steam selected, then `rime install qemu` refused
 by name because `plain-gaming-virtualization` does not fit). `checks.release-plan` (eval + Python) proves the plan's
 catalogue, variants and floors (§3.1, §11.5).
 Mutants that fail these checks (`/var/lab/rime-nix/artifacts/updates/mutants.log`): the tamper tool writing the NAR
 back unchanged (the NAR subtest: "rime update exited 0"); rimed reading an absent signature as verified (the unsigned
-subtest); `rime rollback` taking the oldest older generation (only the rollback-after-refusals subtest, since the
+subtest: with D's NAR put back and the unsigned copy taken from D's signed manifest, the mutant installs it, "rime
+update exited 0", verified 2026-11-03); `rime rollback` taking the oldest older generation (only the rollback-after-refusals subtest, since the
 first rollback has one older generation); `rime install` looking up the floor without the feature it adds
 (`checks.catalogue`); the plan dropping a catalogue app, a published floor or partition floor off by one, a variant
 named with "+", a published variant with a password account, the gate ratio not rendered (`checks.release-plan`);

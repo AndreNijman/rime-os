@@ -21,9 +21,11 @@
 #              G  the same release's plain-gaming variant (its own Shell build): the machine switches gaming on
 #                 (the switch file `rime install steam` writes), and the same release installs G live (§11.6)
 #   reboot into G, then 2026.11.04 D (a Shell build) and refusals, none of which moves the profile:
-#     D's Shell NAR changed inside on the release asset store (narinfo + signature untouched: only NarHash catches it),
+#     D's Shell NAR changed inside on the release asset store (narinfo + signature untouched: only NarHash catches it;
+#       the NAR is put back afterwards),
 #     a manifest changed after signing (its channel document validly signed),
-#     a manifest with no signature at all under a validly signed channel document,
+#     a copy of D's signed manifest with no signature at all under a validly signed channel document (D's closure
+#       would install: only the missing signature stops it),
 #     a channel document changed after signing;
 #   then `rime rollback` after those refusals: the generation before the booted one (C) boots, and runs.
 # Every release names the class 2 catalogue's htop build (manifest catalogue[]); after release A the machine installs
@@ -449,18 +451,23 @@ pkgs.testers.runNixOSTest {
       with subtest("reboot into G; release D published"):
           reboot()
           assert link("/run/booted-system") == G
-          publish("D", {"plain": D}, "d" * 40, "2026.11.04")
+          digest_d, _, _ = publish("D", {"plain": D}, "d" * 40, "2026.11.04")
           shell_d = server.succeed(f"nix-store -qR {D} | grep -- '-rime-shell-test-D$'").strip()
 
       before = profile()
 
       with subtest("refused: a NAR changed inside on the release asset store; its signed narinfo untouched"):
-          print(server.succeed(f"update-e2e-tamper nar --pages {PAGES} --github-dir /var/lib/fake-github"
-                               f" --path {shell_d} --old 'echo D' --new 'echo E'"))
+          said = server.succeed(f"update-e2e-tamper nar --pages {PAGES} --github-dir /var/lib/fake-github"
+                                f" --path {shell_d} --old 'echo D' --new 'echo E'")
+          print(said)
           refused("tampered NAR", "a download did not match its signature")
           client.fail(f"nix-store --check-validity {shell_d}")
           client.fail(f"nix-store --check-validity {D}")
           assert link("/run/current-system") == G
+          # Put D's NAR back, so the unsigned subtest below offers a closure that WOULD install: a client that
+          # skipped the manifest's signature would move the profile there, not stop at this NAR.
+          asset = said.split()[0]
+          server.succeed(f"mv {asset}.orig {asset}")
 
       with subtest("refused: a manifest changed after signing, though the channel document naming it is validly signed"):
           print(server.succeed(f"update-e2e-tamper manifest --repo {REPO} --fulcio-root /root/sign/fulcio-root.pem"
@@ -469,13 +476,15 @@ pkgs.testers.runNixOSTest {
           assert link("/run/current-system") == G
 
       with subtest("refused: an unsigned manifest under a validly signed channel document"):
+          # A copy of D's validly signed manifest (its closure installs: the NAR is back), pushed with no signature.
           new = server.succeed(f"update-e2e-tamper unsigned --repo {REPO} --fulcio-root /root/sign/fulcio-root.pem"
-                               " --test-signing /root/sign --release 2026.11.06").strip().splitlines()[-1]
+                               f" --test-signing /root/sign --release 2026.11.06 --from {digest_d}").strip().splitlines()[-1]
           assert new.startswith("sha256:"), new
           server.succeed(f"skopeo inspect --tls-verify=false docker://{REPO}@{new}")
           server.fail(f"skopeo inspect --tls-verify=false docker://{REPO}:{new.replace(':', '-')}.sig")
           refused("unsigned manifest", "is not signed")
           assert link("/run/current-system") == G
+          client.fail(f"nix-store --check-validity {shell_d}")
 
       with subtest("refused: a channel document changed after signing"):
           print(server.succeed(f"update-e2e-tamper channels --repo {REPO}"))

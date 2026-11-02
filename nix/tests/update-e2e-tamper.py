@@ -8,13 +8,15 @@ publish. Built on the release tool's own functions, so the objects are byte-for-
   update-e2e-tamper channels --repo R
       The live channel document, changed after signing (serial + 1, nothing else), pushed under nix-channels with
       the previous document's signature copied next to it.
-  update-e2e-tamper unsigned --repo R --fulcio-root PEM --test-signing DIR --release ID
-      The manifest edge offers, as a NEW object (release ID) pushed with no signature at all. The channel document
-      naming it is signed with the test key: a signed channel must not carry an unsigned manifest.
+  update-e2e-tamper unsigned --repo R --fulcio-root PEM --test-signing DIR --release ID [--from DIGEST]
+      A copy of a manifest (DIGEST, a validly signed release, so the copy names a closure the client could install;
+      default: the one edge offers), as a NEW object (release ID) pushed with no signature at all. The channel
+      document naming it is signed with the test key: a signed channel must not carry an unsigned manifest.
   update-e2e-tamper nar --pages URL --github-dir DIR --path STOREPATH --old TEXT --new TEXT
       The NAR of STOREPATH as the release asset store (fake-github's files/) serves it, changed inside: decompressed,
       TEXT replaced by NEW (same length, so NarSize still matches), compressed again the same way. The narinfo and
       its signature are untouched, so its NarHash names the original contents: only the hash check can catch it.
+      The original asset is kept beside it as FILE.orig (FILE is the first word printed), so a test can put it back.
 
 Prints the new digest (manifest, channels, unsigned) or the asset file changed (nar).
 """
@@ -49,6 +51,7 @@ def main():
     ap.add_argument("--path")
     ap.add_argument("--old")
     ap.add_argument("--new")
+    ap.add_argument("--from", dest="from_digest")
     a = ap.parse_args()
     if a.what == "nar":
         return tamper_nar(a)
@@ -59,8 +62,9 @@ def main():
                                                      [r.NIX_SIGNER], r.ISSUER, os.path.join(w, "cur"))
             cur = json.loads(data)
             edge = next(e for e in cur["channels"] if e["channel"] == "edge")
-            # Read, not verified: the edge may already be an earlier subtest's tampered manifest.
-            m, ann = raw_object(reg, edge["digest"], os.path.join(w, "man"))
+            # Read, not verified: the edge may already be an earlier subtest's tampered manifest. With --from, a
+            # validly signed release, so a client that skipped the signature check would install what it names.
+            m, ann = raw_object(reg, a.from_digest or edge["digest"], os.path.join(w, "man"))
             m["release"] = a.release
             new = r.pack(r.canonical(m), r.MEDIA_RELEASE, os.path.join(w, "unsigned"), ann)
             reg.push(os.path.join(w, "unsigned"), "e2e-unsigned")
@@ -134,6 +138,7 @@ def tamper_nar(a):
     if nar.count(old) != 1:
         sys.exit(f"{a.path}: {old!r} occurs {nar.count(old)} times in its NAR")
     nar = nar.replace(old, new)
+    open(f + ".orig", "wb").write(raw)
     out = subprocess.run(tool + ["-c"], input=nar, capture_output=True, check=True).stdout if tool else nar
     open(f, "wb").write(out)
     print(f"{f} ({comp}): {old!r} -> {new!r} inside the NAR of {a.path}; narinfo {fields['NarHash']} unchanged")
