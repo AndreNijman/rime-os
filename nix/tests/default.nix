@@ -39,3 +39,5 @@
 // import ./branding-surfaces.nix { inherit pkgs self; }
 # installer-nixos, installer-target-eval (the NixOS install path of installer/rime-install)
 // import ./installer.nix { inherit pkgs self; }
+# boot-loader-scan, boot-microcode, luks-boot, kernel-vm-signed
+// import ./bootmatrix.nix { inherit pkgs self; }
