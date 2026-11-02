@@ -946,7 +946,9 @@ for `plain`, closure.md §10-§11) plus a margin. The ratio applies only when th
 longest mount in `/proc/self/mounts`) is btrfs mounted with `compress-force=zstd`; anything else counts unpacked bytes
 (ratio 1.0), so a machine on ext4 is never told an update fits when it does not. The same gate runs before
 `rime install <class 2 app>` downloads. The disk floors follow: **16 GB plain, 18 GB gaming** (17 and 19 with
-virtual machines, estimated), with the NixOS installer's 2 GiB ESP counted (closure.md §11). `rime update` applies no
+virtual machines, estimated), with the NixOS installer's 2 GiB ESP counted; a root partition alone needs **14 GB plain,
+16 GB gaming** (closure.md §11). How it is proven: the compressed branch (btrfs `compress-force=zstd` → 0.55) only by
+rimed unit tests and killed mutants (`variant.rs`); every VM test's store is ext4, so they run the 1.0 branch. `rime update` applies no
 floor of its own; `rime install` of a feature package refuses by name below the floor of the system it would select. For fresh installs
 where `/boot` is the ESP, the hook's own floor (D3) covers the ESP: a boot-class update whose kernel and initrd do not
 fit is refused by the hook, and the client says so (§14).

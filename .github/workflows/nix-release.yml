@@ -193,9 +193,15 @@ jobs:
             exit 1
           fi
 
+      # Since wave 3 a release builds four variant toplevels (13.3 GB unpacked as a union) and the class 2 catalogue
+      # (5.3 GB more that plain does not hold), about 18.6 GB in /nix/store before the stage's NARs: twice what one
+      # rime-vm toplevel needed (closure.md §11). The free space is printed so a full disk is told apart from a failure.
       - name: Free disk for the closure
         if: needs.changes.outputs.build == 'full'
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup /usr/share/swift /usr/local/share/boost
+          df -h / "$RUNNER_TEMP" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Install Nix (pinned, hash-checked)
         run: |
