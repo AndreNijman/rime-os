@@ -39,7 +39,11 @@ Refused by name before anything is erased:
 * no timezone. The answer is used, or else the live environment's `/etc/localtime`;
 * an invalid locale or kernel parameter;
 * a missing system, cache key or loader file;
-* a cache that does not hold the system, or holds it unsigned by the stamped key.
+* a cache that does not hold the system, or whose closure is not signed by the stamped key itself (`nix store verify
+  --recursive` with that key as the only trusted one; a key of the same name is not enough);
+* an encrypted install whose unlock prompt would need a non-US console keymap (D9: "refused by name until the keymap
+  VM gate passes"). The generic toplevel's initrd carries the US map only. This lifts when tpmkeymap's initrd keymaps
+  and the boot hook's `rd.vconsole.keymap=` from host.toml land.
 
 Then, on the whole disk:
 
@@ -66,8 +70,9 @@ Then, on the whole disk:
 * `checks.installer-target-eval`: `nixosConfigurations.rime` (what a release ISO installs) evaluates with that layout.
 * `checks.installer-nixos`: the engine, `rime-install --headless`, in a NixOS VM standing in for the live env,
   installs onto a blank 20 GiB disk. It is checked partition by partition, subvolume by subvolume, and file by file on
-  the ESP, host.toml, the profile and the account. It refuses the 19 GB floor, no timezone, partition mode and a
-  wrongly signed cache, and the disk is shown untouched each time. The EFI binaries there are fixtures; the real chain
+  the ESP, host.toml, the profile and the account. It refuses the 19 GB floor, no timezone, partition mode, a
+  wrongly signed cache (another key, and another key of the same name) and LUKS with a non-US unlock keymap, and the
+  disk is shown untouched each time. The EFI binaries there are fixtures; the real chain
   is the lab's job.
 * `nix/installer/lab/run.sh` is the OVMF lab and holds the gate evidence. It builds:
   * the lab system, with its Rime kernel signed by a THROWAWAY TEST MOK (`sign-detached.sh`);
@@ -106,6 +111,30 @@ Mutants, each one failing as it should:
 * firstboot run with `--expect-tz Europe/Berlin --greeter-user nobody`: verdict fail, both named
   (`firstboot-plain-mutant.log`).
 
+### Independent re-run (2026-11-02, verification of nix/installer at 14a69aada)
+
+Evidence: `/var/lab/rime-nix/artifacts/installer-verify/`. A fresh THROWAWAY TEST MOK and TEST cache key
+(`prep.txt`), the kernel re-signed with it (`sign.txt`; `kernel-sbverify.txt` "Signature verification OK", and the same
+image fails against the first run's TEST MOK), the lab system
+`/nix/store/irnss0hfhric61afccx06kys09zsbz81-nixos-system-unnamed-26.11.20261030.1c89083` (`system.txt`), a new
+PRODUCTION ISO carrying the fixed engine (sha256 412183c3d885..., `rime-os-installer.iso.sha256`):
+
+* I1 `iso-qualify.py live --firmware uefi-sb --media usb`: pass (`i1-iso-qualify.log`, `i1-uefi-sb-usb.*`);
+* install plain and LUKS from that ISO, SB on with Microsoft keys only: pass, NVRAM entry, MOK import queued
+  (`install-*.log`, `rime-install-*.log`);
+* I2 `plain-boot-drive.py`: `verdict=booted`, `switched-root=yes`; I3 `luks-boot-drive.py`: `verdict=switched-root`,
+  prompt seen and typed (`boot-*.log`, `serial-boot-*.log`: "Secure boot enabled" on the Rime 7.2.9 kernel);
+* `firstboot --nixos`: the FIRST run on a fresh install failed, because the account's first `sudo` printed its lecture
+  into the LANG section (the first run had passed on an account that had already used sudo). Kept as
+  `lecture-race-firstboot-plain.*`. The probe now runs that sudo before its first marker, silenced; the plain disk
+  was reinstalled from the same ISO and booted again (`install-plain.log`, `boot-plain.log`) and the probe passed
+  (`firstboot-plain.{log,json,png,serial.log}`: greeter on VT 1, screenshot of the ridge greeter);
+* `checks.installer-nixos` passed (`check-installer-nixos.log`; the final head evaluates to the same out path
+  `4s8ds57w…-vm-test-run-rime-installer-nixos`, `check-installer-nixos-final.log`), with two new mutants, each failing
+  where it should: the old name-only signature check (`check-installer-nixos-mutant-sig-name-only.log`: the same-name
+  key passes the pre-flight, the disk is wiped, `nix copy` fails) and the LUKS keymap refusal removed
+  (`check-installer-nixos-mutant-no-keymap-refusal.log`).
+
 The lab found five bugs, all fixed. The first three were in the engine and the last two in the firstboot probe:
 
 1. The engine refused every kernel parameter, because rime-boot's Python character class did not survive in `grep -E`.
@@ -134,8 +163,9 @@ The drivers were not edited. Since the NixOS initrd's journald does not forward 
 * **bootmatrix overlap:**
   * `nix/modules/luks.nix` here is exactly bootmatrix 0add5aa48's, and its cherry-picks f020b7d91 and 859cfd35c are on
     this branch. Merge bootmatrix first, or drop those commits.
-  * tpmkeymap's luks.nix change 49053ae23 (TPM enrolment, keymap in the initrd) is NOT here. The engine passes
-    `rd.vconsole.keymap=` for a non-US LUKS keymap, and that needs tpmkeymap's initrd keymap.
+  * tpmkeymap's luks.nix change 49053ae23 (TPM enrolment, keymap in the initrd) is NOT here, so the engine refuses
+    LUKS with a non-US unlock keymap by name (D9). Once tpmkeymap lands (its rime-boot appends
+    `rd.vconsole.keymap=` from host.toml `[keyboard] console`), drop that refusal in `nixos_preflight`.
 * **Bridge:** `nix/installer/target.nix` (`rime.installTarget`) declares the D2 mounts for a fresh install. The bridge's
   `rime.rootfs` does the same for a migrated machine, and the two should become one option.
 * **Recovery key (pre-existing bootc behaviour, unchanged):** the key is written to the boot USB. That fails when the USB

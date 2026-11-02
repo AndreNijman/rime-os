@@ -6,7 +6,8 @@
 #                         real ones are the OVMF lab's job), a prebuilt system copied from a signed file:// cache,
 #                         the boot hook's BLS entry, host.toml, the account, the NVRAM entry. It also refuses, by
 #                         name and before writing a byte: a disk below the 19 GB floor, no timezone, partition mode,
-#                         and a cache signed by another key.
+#                         a cache signed by another key (also one of the SAME name), and LUKS with a non-US unlock
+#                         keymap (D9).
 #   installer-target-eval nixosConfigurations.rime (what the release ISO installs) evaluates, with the layout above.
 #
 # The real chain (Fedora shim -> GRUB -> the signed kernel, Secure Boot on, LUKS) is proven by nix/installer/lab
