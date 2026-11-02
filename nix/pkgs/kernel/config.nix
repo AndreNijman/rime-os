@@ -37,7 +37,7 @@ let
   sources = import ./sources.nix { inherit lib fetchurl; };
   inherit (sources) pin;
 
-  commonMakeFlags = import "${path}/pkgs/os-specific/linux/kernel/common-flags.nix" {
+  commonMakeFlags = import (path + "/pkgs/os-specific/linux/kernel/common-flags.nix") {
     inherit lib stdenv buildPackages;
   };
 
