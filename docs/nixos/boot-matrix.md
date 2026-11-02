@@ -14,8 +14,8 @@ shim and GRUB** (the files bootupd installs) in OVMF with Secure Boot on (MOK en
 |---|---|---|
 | `bls-plain` | ESP + ext4 root (fresh install) | BLS entries in the ESP's `loader/entries` |
 | `bls-luks` | ESP + LUKS2 (ext4 inside) | BLS |
-| `custom-plain` | ESP + bootc-shaped ext4 `/boot` (ostree's `loader.1`, a Windows entry in `custom.cfg`) + btrfs `@nixos` | `custom.cfg` (migrated machine) |
-| `custom-luks` | the same with the btrfs inside LUKS2 | `custom.cfg` |
+| `custom-plain` | ESP + one btrfs (topology E): `/boot` a bootc-shaped top-level directory (ostree's `loader.1`, a Windows entry in `custom.cfg`), bound at `/boot`, NixOS in `@nixos` | `custom.cfg` (migrated machine) |
+| `custom-luks` | the bootc installer's LUKS layout: ESP + bootc-shaped ext4 `/boot` (`rime-boot`; ostree's `loader.1`, a Windows entry in `custom.cfg`) + LUKS2 with btrfs `@nixos` inside | `custom.cfg` |
 
 Each cell runs with `sb-mok` and `sb-off`: 8 runs. Each run is three boots of one disk:
 
@@ -142,6 +142,10 @@ The SB-off runs report `SecureBoot disabled`; every boot 2 reports `BAD generati
 (Plymouth's "Please enter passphrase for disk root (luks-5b1f0c2e-…)"; the shot 4 s after the ask still shows shim's
 text, Plymouth draws a few seconds later).
 
+Reproduced independently on 2026-11-02 (01:56-02:06 UTC) from this branch's committed rig with a separate LAB/ART:
+`matrix-gens` evaluated to the same 8 toplevels as the run above, fresh disks for `bls-plain` and `custom-luks`,
+`bls-plain-sb-mok` and `custom-luks-sb-off` 6 of 6 boots PASS (`artifacts/verify-bootmatrix/matrix/`).
+
 Checks (all built on this branch; logs in `artifacts/bootmatrix/logs/`):
 
 - `boot-loader-scan` (X2): the shipped `rime-vm` and `rime-vm-luks` toplevels, 14 files each (the hook, activation
@@ -152,8 +156,9 @@ Checks (all built on this branch; logs in `artifacts/bootmatrix/logs/`):
   Mutant: microcode off gives no cpio and 36,040,430 B, the check's `none` case.
 - `luks-boot`: the systemd initrd carries the cryptsetup generator with no crypttab entry, and KEYMAP=de
   in `vconsole.conf`; the entry with `rd.luks.uuid=` boots after the passphrase is typed and `/` is
-  `/dev/mapper/luks-<uuid>`. Mutant (read by hand):
-  `rime-vm`'s initrd without `rime.luks` has no cryptsetup generator and no `dm_crypt`.
+  `/dev/mapper/luks-<uuid>`. Mutant (run by the verifier, 2026-11-02): `nix/modules/luks.nix` without
+  `boot.initrd.luks.forceLuksSupportInInitrd` fails the check ("no cryptsetup generator in the initrd");
+  log `artifacts/verify-bootmatrix/luks-boot-mutant-forceLuks.log`.
 - `kernel-vm-signed` (K1-K3): three consecutive `nix build --rebuild` passes, 17/17 each (16 schedulers + `kill -9`),
   VERDICT PASS, at rising host load (load average 5→16, 16→25, 25→34; `scx_eevdf` attached in 3.8 s, 6.2 s and
   11.4 s). The third would have failed the old 10 s window (the mutant: `settle 10` is what failed on 2026-11-01).
