@@ -1,0 +1,1196 @@
+Package: claude-desktop
+Version: 1.17180.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 483775
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.17180.0_amd64.deb
+Size: 143265500
+MD5sum: 25a7d2ccb6018020dd96060676f416cf
+SHA1: 78123cc44610c43597b8d5973ed485b9aa92efa0
+SHA256: 798e373af6fa46edc59b1cb3229a6104fc38ccf66cb9bfeeea698437fa03f5bd
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.17282.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 486466
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.17282.0_amd64.deb
+Size: 144238024
+MD5sum: ffe3c9692b2caf19b3e30e1415bb9fe3
+SHA1: 02a9cd950d2b5b326bd5e3e138657cbae8a90a13
+SHA256: 1c2bab32bac58dd7994e39190f370131790342409f201cf7c7133120a5b5c8df
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.17377.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 486516
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.17377.0_amd64.deb
+Size: 144245744
+MD5sum: e6bf2cf9c8fbbee881a3a966a0b93897
+SHA1: e9278faa33b0d87d91c9155437f4cf4cef40a0da
+SHA256: 563c8df8ee3b957ca234115980386e960007ed8cfc8cc04c77d58a8d43f6c018
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.17377.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 486520
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.17377.1_amd64.deb
+Size: 144240360
+MD5sum: 930b91e844c466cf5a3cee579242dcbd
+SHA1: 39c8c1215f09a9e4c46a9a7fb9267cfb14fc4ae5
+SHA256: f4bd78545200877b591179838de7ad7a577df6ed2e845969dd25690efc5c85c7
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.17377.2
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 486518
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.17377.2_amd64.deb
+Size: 144239512
+MD5sum: a4b0be0461d54501bbb5f2928160bd73
+SHA1: 0ba232e420cc369f9a935345cb76441a3c2c8e20
+SHA256: ec08d41aa7988d2d3a3f5f4ffdf38d207b412e662639f40d7a265b8afae212ab
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.18286.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 489516
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.18286.0_amd64.deb
+Size: 144639156
+MD5sum: 43ebd1314a30ca547e907c447ed48f32
+SHA1: a719f3fe1644376c107cfc38d30e9bfc7659fd17
+SHA256: 8f314ad1a80aab52711a8eaabc06aae48fb341f0adea4a0d7264db5cab9d0536
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.18286.2
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 489467
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.18286.2_amd64.deb
+Size: 144629132
+MD5sum: 853168e12c721d6bc6ce9566bbd5348e
+SHA1: de768021c9ca3e2805fec9be63f4d81d1b2131e1
+SHA256: 56fa5de053e0a68dc7583677857bedcf4219b19d90201400e0237b7d74d512f1
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.19367.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 490895
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.19367.0_amd64.deb
+Size: 145293396
+MD5sum: 467766ac77b0e0c373750f26b194a7ce
+SHA1: daff3136287046397222fc49ae5c36d01cd2c627
+SHA256: 76f570730c1185924e2423c5f88a27bec17c1e7adb055ecd09401a0e93a9299b
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.20186.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 517318
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.20186.1_amd64.deb
+Size: 165188628
+MD5sum: 0790d2a4ec989269a5db54b2f7767076
+SHA1: 5b6c4904130da3dd7983646245ab5d7855b6bae9
+SHA256: 0b6dec05fe6bba8fa1f41a5552834ce210733565fba02e2d730efdfdee18f6db
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.20186.7
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 517297
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.20186.7_amd64.deb
+Size: 165208112
+MD5sum: 368f7007dcc26ad2343f59bf77cff828
+SHA1: 02ccbc8d7eec1fed7962dfc192ea2e364fbe7d55
+SHA256: 3891aabd2264a6edf2639d2cff134a184e7a03bc8d3744728adff9f807422b46
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.20186.9
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 517314
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.20186.9_amd64.deb
+Size: 165181160
+MD5sum: f05e134a7e8cfd422d01cb0239ed8c52
+SHA1: d55b8e76dcc9300ba7df4b552a678963a02ee909
+SHA256: f290f383abd7312c354507c5e3d5739009ef0f6ef0fdebc8d0867bdf33de0034
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.21459.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 519919
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.21459.0_amd64.deb
+Size: 165685328
+MD5sum: be983ef86266b04d0ac3abd8d43496f5
+SHA1: e0fba9252c32af1cc9b4f73cc667bda02539d1fb
+SHA256: 7d0193d9767a8d9ea830c29cc2c9d2f62f83a206808a18b159911d4328990c5b
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.21459.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 520265
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.21459.1_amd64.deb
+Size: 165685304
+MD5sum: 7edc9d6938241ec7fffe6c25d0e17987
+SHA1: 7357cbe9b88e4c7b15047fb4aa7b22d68e86bfb8
+SHA256: 3f83f7763cf6de70d87556fc15827efe08317b339b94dc028de9c6e4f6faf2e9
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.21459.3
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 520288
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.21459.3_amd64.deb
+Size: 165690244
+MD5sum: 16b990ee65cb6910108e4582dba6cc97
+SHA1: ee35a112e75e7f057ee24f9d8bc460382557d027
+SHA256: 332d24ef8dfda7cdd633ef624ef335ceb31ab54b471e28d785abc6016ae6a9be
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.22209.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 522704
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.22209.0_amd64.deb
+Size: 166152700
+MD5sum: 16df2eab48eb7932457926967d6f2671
+SHA1: 669ea626c2be85de6577ad63bf2e4a40f3851249
+SHA256: 6d18ae792c2bddad01edc97c2c3f4cf489004cefe8fed6760a696ed25c49bf61
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.22209.3
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 522788
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.22209.3_amd64.deb
+Size: 166133396
+MD5sum: b45d694e282652576060e8e68f66c68b
+SHA1: 007562e350d65cdb31403be3417a7f72d5835d0f
+SHA256: d427f46ac9233dbc4d8a441a602f09f750b8a5f05d1fc7a00285d7a6ce07655c
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.24012.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 523379
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.24012.0_amd64.deb
+Size: 166348588
+MD5sum: 0f6fa1f839c34dc1022c7abc7c015d70
+SHA1: 12a83593af8b884c5a378e31d9fd35a212a98de6
+SHA256: 1096a8063956f8430fdbe504bb1c5e02985f31d0f45d082e4966e5d30ea7e3ac
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.24012.9
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 522773
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.24012.9_amd64.deb
+Size: 166243212
+MD5sum: 66953780374412dd4040b5e49bac7598
+SHA1: 7255891cf687fc907327e1d313e4b1b26c803d9d
+SHA256: 302e6d208dd8c8e9e52067daa28ef3b1171a1613586fd0e10bedc642225b6ee1
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.24012.11
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 522726
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.24012.11_amd64.deb
+Size: 166158636
+MD5sum: 8c9fa939ac981f8cee79debd9ade1393
+SHA1: ae2da469495fd975f9c0f1e489762deb87b0a2d3
+SHA256: 99c4bcf5e3f7d0ec44a49fbf24d7d659f2ea46e29c7ec61c77c7298522f57e76
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.25927.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 543793
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.25927.0_amd64.deb
+Size: 171438972
+MD5sum: 94821d5bd48b11e48cb8f225bd3d2d2c
+SHA1: f069e229e37a4297d3d800a29d457db6c17c0ee1
+SHA256: 2363d27ec82ed1cbe80b6b124ec7c153275684161f92061cc154737171a69c66
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.26832.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 544759
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.26832.0_amd64.deb
+Size: 171906316
+MD5sum: ce1436d7c81b0c9c10c53071a66818a4
+SHA1: 456f73463e7bab30cea3975c799639b0161a20d2
+SHA256: 2bc6f0d4109bb43b307696e1128df53fbf393ef98f947a7869948642450245d7
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.28929.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 546775
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.28929.0_amd64.deb
+Size: 172264532
+MD5sum: 3ec1e8e1e2d6dbc3d811f8d1a8ae832d
+SHA1: 00f941c995cf7d1756c6141862446cb84eab32a3
+SHA256: 3ceb391268bde9a7fec32520d349b704043166204cdd571c62d1e950701f48fc
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.30096.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 547832
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.30096.1_amd64.deb
+Size: 172617692
+MD5sum: 82708bb2ea8e7c5c2ef75842d31aff1d
+SHA1: 24b60af4d6fdf2db7095db260081a5b99460fddb
+SHA256: 09e41a20a5b47ea0e5bc226d4fffa77af43ad450c7cbf5e66e56d6e4fd4ad2e9
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.30096.5
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 547836
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.30096.5_amd64.deb
+Size: 172579328
+MD5sum: 122611932c5db7240066c8f3106541c7
+SHA1: fbd96c80176b756ae7fed0edf9a97680bb096e17
+SHA256: e699763dd0e33bd831a1c771ea2684ead894f2680f02c71693a4e345046bd8f5
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.32352.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 545273
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.32352.0_amd64.deb
+Size: 171857164
+MD5sum: 26b98f1fe614430075fae16b9f96d533
+SHA1: 742442d2ef5248a923fe6bc26ff65333c4c85ba1
+SHA256: 2440d074376553d70b22fc1e53347da60e58757498965efeb9899887da61e0d9
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.32352.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 545274
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.32352.1_amd64.deb
+Size: 171870372
+MD5sum: 40f1edc796056c52697df4456957a458
+SHA1: 99c692eaefc10b7d47f81f3941819fa07cc088ee
+SHA256: 9d00c4ea86d037061e1ca1f1709f930ec4a4d7737d87b2f68b87bc3e87e38186
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.32885.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 538816
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.32885.1_amd64.deb
+Size: 171376132
+MD5sum: 39ddb61415dd78f7e249e8c9af1df4ea
+SHA1: 3747754ae984720e5eef9f57d52f2addc0fe1811
+SHA256: f8a5ddea7c8cbe769589cf19c2e1832d5d532ab19bf8202621ba957c9351a2fc
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.34493.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 539005
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.34493.0_amd64.deb
+Size: 158798952
+MD5sum: 3876d17b121598b409723b77e2e3418b
+SHA1: 9f7f48003c3d0555c4167e5b50a3973a5b6b1ba8
+SHA256: 5818aefa28e1ef912a53b501b7148123da6b5c5c174e0c8e3fe641ab5f6c602d
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.34493.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 539030
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.34493.1_amd64.deb
+Size: 158823068
+MD5sum: 60217ae25fa1147bfa3ece9451b12246
+SHA1: 8e1d98c3eb0f3c54ab8778c235b2d5833367a5c2
+SHA256: 19829779633a277fcd72a6583426c68a4ecff7aa43a26718d6645c2e954747ca
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.37937.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 555911
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.37937.0_amd64.deb
+Size: 165185536
+MD5sum: 093de214c94c3c2c44ebd7a924baafc2
+SHA1: 7aaec2386048839751a279d16a23ad4ee5b6dc47
+SHA256: 99ceb88204aab49b1388d6773fe60255bcb8402cc964e1a2d767d81e42f02790
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.37937.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 555985
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.37937.1_amd64.deb
+Size: 165264032
+MD5sum: 4c62c3a3f7610ae2e5794efececed0da
+SHA1: d0863973bdcfce5e5a44c002d7d0edb6bc313793
+SHA256: 66bbc61dd0464b550c4d63812520119e8344b462541de44797352b8918842f4f
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.37937.3
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 555898
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.37937.3_amd64.deb
+Size: 165280756
+MD5sum: dd32f828328ddfc41d887b19b1c304e9
+SHA1: 4a83612eeef075c2574f24f23a9fe34d8bfd1fd3
+SHA256: 53590c5725fb3487299f940f5b89d55182b0faee14ca1bf3e35badae0f61135f
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.40609.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 563639
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.40609.0_amd64.deb
+Size: 166561632
+MD5sum: 6fe642631986fe44715a8abd9aec647b
+SHA1: f1bc3bc7dded5809cdd3340641cd0f9f3d2c7993
+SHA256: a96e96ff8eb4d4d7ffa785aba7fc23f8684b12ac83ed2ef4060f0f09f4177a98
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.40609.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 563766
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.40609.1_amd64.deb
+Size: 166589364
+MD5sum: 3acef935b869e0e8e624c68d6fef7736
+SHA1: 2472f119f80f8f8b1521a4a63643039469e71dd1
+SHA256: 80182e8511c6bbee6de26c7ee225fbd2a9aba2274ef1405a1d89cd8fe7a380dc
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.44121.2
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 568037
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.44121.2_amd64.deb
+Size: 167403792
+MD5sum: c031441f65b2a64a896280b0758ffbee
+SHA1: eabd0a7a6fe2499817e7e8dbd347dbcbd9a8fb0a
+SHA256: 5facb6346119f2eb44c57b704b0923c068e19a6915c294e5e3fa923117cbb37c
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.46388.2
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 572671
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.46388.2_amd64.deb
+Size: 168494808
+MD5sum: e31a5d1f9b17bee0c4af041f5bbb3327
+SHA1: 249f1b6be3f9c20f0b9d4c97dfa61d645fd97e7d
+SHA256: 98bf54e85e4916068c4281459b0f0431d8ff68034773f3ee98311d7206566ab1
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.49585.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 548705
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.49585.0_amd64.deb
+Size: 170566964
+MD5sum: 2c403c7c42bd1e69f5e032840144ea5a
+SHA1: 8acc3a615e7f6d56ea3bd0815be219b4bd08981a
+SHA256: e0b4ce6313943a69e9bd61749a293bfca241b4dfb37f88df6411b4b69ec67a40
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.52386.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 553310
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.52386.0_amd64.deb
+Size: 172390480
+MD5sum: 49c2acd21b2cddbde5512d564f6cafe4
+SHA1: 6802c9b767a86cc6e6608f1ec2cc5b2f54f82ea1
+SHA256: 9c5d113ea2c31c0d4f6075c02e6180bf4ab53d35736b9a497ce0e84f62e9654b
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.52386.3
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 553317
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.52386.3_amd64.deb
+Size: 172377212
+MD5sum: 1eea6fa108776317a7c27aff4a375559
+SHA1: 5c511819bc906fa80a8b468f0a89e45901a4b695
+SHA256: 797594ce81c19d3f6b5373fdb801699c757016f5600715fa1751ec34e8688456
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 1.52386.6
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 553351
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | kwalletd6 | kwalletd5, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_1.52386.6_amd64.deb
+Size: 172578672
+MD5sum: 4482c098588cbff3ff54074c8d0d2614
+SHA1: 60b2d620305d0db29ec4aad925f8b59a6fdb9085
+SHA256: 2e83a76c6ed9187671bfe80664fc6d59840171f4a2a81f408662c879a67f4e0a
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.110.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 558398
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.110.0_amd64.deb
+Size: 172266756
+MD5sum: 47f25db1395d485241ca70bfb4e55f2f
+SHA1: d5befcd09a7658e3b4d62e00a110d44526a3a1b7
+SHA256: f44cb8b52f6e9171ac2e67cbcc8070c4974a2f0a9b9f141b430b32b4ff541109
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.110.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 558402
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.110.1_amd64.deb
+Size: 172437436
+MD5sum: c4befee160fb80a75e8ba16c1d44cabc
+SHA1: 2b05b98141e199efccc9d743b441ddee1cf70de6
+SHA256: 0a9b0ac5456451637d8068ed757db0335cb6c0f24375479e740f572dbf886466
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.2553.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 561610
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.2553.0_amd64.deb
+Size: 173925180
+MD5sum: 061a78424039ed62545de42bc895fb77
+SHA1: 6dbc4e273d70878c4a82dbd3ac5c55f53933fb5a
+SHA256: e605cfda93f3f00dfb10f314f52c0f38266d42a23bf9baf8fc0261ab855a6388
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.2553.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 561625
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.2553.1_amd64.deb
+Size: 173781820
+MD5sum: 3ab8ed91ebfb7e01579238339ef99c7b
+SHA1: ae2d2d2494e8e30cdd6cf9186ebdb1113544cb20
+SHA256: 6700fdd84e77a6b8c93912c2f69eb5d1e40fa99bcd9d37f438f809ef2a6fe6f8
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.2553.13
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 561672
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.2553.13_amd64.deb
+Size: 173779072
+MD5sum: 298879965b28d2c1c1baa4ad274a842b
+SHA1: f72fef586beb938132abc45882c85aca28205665
+SHA256: 02a95a9d133472c1b773c8e9dbdee56681b8164500178083bd8b53b9d11d109f
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.7032.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 570707
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.7032.0_amd64.deb
+Size: 174864804
+MD5sum: fcc23678b66b195fea04bef62c1cb3ee
+SHA1: 73be3bb6de9e1c3f5ea2df0626cfa62d865780ff
+SHA256: 1e7f4504bca5b2f6b2d3c4123d145d727647e77f2ee2d046850711e61e7d7b11
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.9939.4
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 573005
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.9939.4_amd64.deb
+Size: 175639708
+MD5sum: e5588d4463c442aa2c815651f58cd588
+SHA1: 620b8a0142290f7a92de2448eebeb3cc8545e5ef
+SHA256: 3cfddb23bf2911e05e27b4ed3856b8e795df94643b2c35b59deb317cf995bca0
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.19675.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 583899
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.19675.1_amd64.deb
+Size: 179366068
+MD5sum: 1d2fa96d651094e59425eebcbdb11623
+SHA1: 0060e8912d4295aab48fb97901c6f67cce7ae70a
+SHA256: 9ba127eeccf270f6e60d35f5c5333654053bf0540c88fc82a009d01711b106fc
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.26454.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 588638
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.26454.0_amd64.deb
+Size: 180809792
+MD5sum: e92ae2a401d1af25d40407282e862d3e
+SHA1: 3dd0b99cafbcd50fcfa5f4f3ba4f46ccde0bf395
+SHA256: 6d3e4973dcb11511ddd962040b3073b435d1592b3174a82ef52e50377a75a63f
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.26454.2
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 588688
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.26454.2_amd64.deb
+Size: 180943856
+MD5sum: 4f8baf7d6d5c38fadc06d14d012f6693
+SHA1: e5dd0cc94f6a460cb3af8efcc431f73cb7ada86a
+SHA256: b251a0224a8635874f33598df8ed8952b427f84815ee59580cc022d6bdb2430f
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.31226.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 591025
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.31226.0_amd64.deb
+Size: 181244372
+MD5sum: 6754dab6dad2ba018005f5145f367930
+SHA1: 8bccb438127cc431bc542844b89fdf43a540aa13
+SHA256: eb86fda7c8073117b29f2e9022da5ffd398b8f125e331d7d5956e9ba0e3bd6d4
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.31226.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 590997
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.31226.1_amd64.deb
+Size: 181377680
+MD5sum: f49bb670e11635dbde347071c32002d8
+SHA1: 9498c3ac1949eacadb57e51dba6fc71e7699ba76
+SHA256: 5a9bebdfcb1df6ce38767b373f3a7fabf77156a2ddd8a3f5d04961da5bde305e
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.37337.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 597746
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.37337.1_amd64.deb
+Size: 182483892
+MD5sum: d30ca33c6c7385a2b12ed6c57acd1485
+SHA1: f30e73386cd7ba582def4340e9ca30e08495e399
+SHA256: 41745b0914f0ff51631a1ff1bb403b836bf5c995845cca6742dd39bca3a2da14
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.42304.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 602444
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.42304.0_amd64.deb
+Size: 183117920
+MD5sum: 9c06594cbfc59aa117609e1adc27b015
+SHA1: 9432483fc54acce51391343c5b37ef1359e04d73
+SHA256: 74cd2ccc29d24165144e455cbc872c6cc2a24a263b83e73420e95f89166d4aa4
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 2.42304.2
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 602458
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_2.42304.2_amd64.deb
+Size: 183213384
+MD5sum: 609d9870250b1a54449f3adcd86bb624
+SHA1: aee924874bdc9860b606d3eac46dbf1a16ae932a
+SHA256: 38a7d58b58a976c88ca652eaa2f7ac02c87c4a388ae30f468d72b790e6b57f90
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 3.1623.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 615541
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_3.1623.0_amd64.deb
+Size: 187223160
+MD5sum: 57288e85c1fa52cb4904a3279dea0c29
+SHA1: d7fadffd50e124dd6bac2ed7e7c3baa01644d0c0
+SHA256: d39e1d9a570f1e517f158479f5a1d903b9a74d1ef3f279362002dcad375e33cf
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 3.1623.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 615551
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_3.1623.1_amd64.deb
+Size: 187252840
+MD5sum: 976009c095d2e07cdd436321ca63e009
+SHA1: f6756e191910ad98e58e7fcdbb64238dfcc6c37d
+SHA256: 731677d2f39b2a7343ee381ec5d3396dd28ec1d832cfcb1f9e4a022e9e80eadb
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 3.1623.3
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 615600
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_3.1623.3_amd64.deb
+Size: 187161404
+MD5sum: 351ec66362345615681f0dcc1558049a
+SHA1: c9dc8fb74b5cf8b13cd6746908c1ab1b847bb97c
+SHA256: 851be2cc89c007b65b243f71a0a0e7f3d5a8874eaf91f01941528deb653bd593
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 3.1623.4
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 615600
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_3.1623.4_amd64.deb
+Size: 187123492
+MD5sum: f8f746e9dbc32dda89ff5aa686dc201e
+SHA1: 340f71c2180fbcdc7d30f7cf7b9ca7e240779236
+SHA256: 671c9fdfe0b02b50d4b907c3bdf136dcfec29051ab8cffcfa29ebe3026a72c3d
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 3.6556.1
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 597817
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_3.6556.1_amd64.deb
+Size: 169884780
+MD5sum: 1fd315c5238e4057718609a9fde39805
+SHA1: c0675e800eeb3febf715da7ff1643275f7102829
+SHA256: ced5179997fdb90219e866685c7f3bcfcb494514d82022e27c89b28a371dfe87
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 3.6556.2
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 597819
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_3.6556.2_amd64.deb
+Size: 169811528
+MD5sum: 640251718ee796adb9f8bbd3549d965b
+SHA1: 5ec001d42473343c88a53f39d35fe8359eea6c6e
+SHA256: 0f6ed1f2845c30419b8545a8320676d7464a19f625e05e02919238aa6978ecb4
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 4.29.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 603926
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_4.29.0_amd64.deb
+Size: 168669992
+MD5sum: 321f5bf48e77fa4a76e133f7d56cda09
+SHA1: 5a45b1b1e21c3268ba319c7a4e37396d0a4c9e52
+SHA256: 4aa0f763d6c05ac79502392dd50f5d7f5c455b2f0a405d5bdf1554acd8342a89
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai
+
+Package: claude-desktop
+Version: 4.4212.0
+Architecture: amd64
+Maintainer: Anthropic PBC <support@anthropic.com>
+Installed-Size: 607084
+Depends: libgtk-3-0, libnotify4, libnss3, xdg-utils, libatspi2.0-0, libdrm2, libgbm1, libxcb-dri3-0, libsecret-1-0, kde-cli-tools | kde-runtime | trash-cli | libglib2.0-bin | gvfs, libc6 (>= 2.34), libxtst6, libuuid1, libpipewire-0.3-0, xdg-desktop-portal, xdg-desktop-portal-gtk | xdg-desktop-portal-gnome | xdg-desktop-portal-kde
+Recommends: libasound2t64 | libasound2 | pulseaudio, libayatana-appindicator3-1 | libappindicator3-1, ca-certificates, gnome-keyring | plasma-workspace, bubblewrap, socat, openssh-client, qemu-system-x86, ovmf, virtiofsd
+Suggests: gnome-keyring, lsb-release
+Filename: pool/main/c/claude-desktop/claude-desktop_4.4212.0_amd64.deb
+Size: 168999876
+MD5sum: 990cd2d3cebe7344763a778ae759fb01
+SHA1: 5c566be122129a27b9ace12ce09049157c6eeaba
+SHA256: 4fcf658e0fc895390ab82593287281dfbce261b0ec3ea90060e82d8bfbfd7a84
+Section: utils
+Priority: optional
+Homepage: https://claude.ai
+Description: Desktop application for Claude.ai
+ Desktop application for Claude.ai

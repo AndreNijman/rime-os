@@ -1,31 +1,115 @@
 #!/usr/bin/env python3
 """The P1 gate's judge (docs/nixos/p2-gates.md): `rime pkg translate` must report EVERY package record under a root.
 
-It counts the records itself, from the filesystem, by the same source list the translator documents
-(rimed/rime/src/nixos/translate.rs), and compares them with the report's rows as a multiset of (source, item): a
-record with no row is "unreported", a row with no record is "invented". Both fail. It also fails on a row with no
-outcome or no reason.
+It counts the records itself, from the filesystem, and compares them with the report's rows as a multiset of
+(source, item): a record with no row is "unreported", a row with no record is "invented". Both fail. It also fails on
+a row with no outcome or no reason.
 
-    pkg-translate-check.py --rime BIN --catalogue FILE --root DIR [--expect JSON] [--report OUT]
+What counts as a record does not come from the translator. It comes from the bootc package engine itself
+(--engine, files/system/libexec/rime-pkg), and a sweep of the tree:
+
+  - every path rime-pkg names under its PKG_ROOT (/var/lib/rime/pkg) must be in PKG_ENTRIES below, either counted as
+    records or set aside with the reason it is not one. A name rime-pkg starts using that this table does not know
+    fails the judge, before any tree is read;
+  - every entry actually present under PKG_ROOT in the tree must be one of those names (or a temporary name rime-pkg
+    derives from one). Anything else is UNCLASSIFIED and fails: a record no source list knows cannot hide;
+  - every key rime-pkg's state.json writer emits, and every key in the tree's state.json, must be in STATE_KEYS;
+  - every file in rime-pkg's DEB_DIR must carry one of the suffixes rime-pkg writes there;
+  - a `.omitted` marker (a D2 snapshot's "contents left out" note) in any directory the judge reads fails: a
+    snapshot directory with its contents left out cannot be judged, and the marker is not a record of the machine.
+
+    pkg-translate-check.py --rime BIN --catalogue FILE --engine RIME-PKG --root DIR [--expect JSON] [--report OUT]
 
 --expect is {"<item>": "<outcome>", ...} for the outcomes a fixture pins. Nothing under --root is written.
 """
 import argparse
 import collections
+import fnmatch
 import json
 import os
+import re
 import subprocess
 import sys
 import tomllib
 
 OUTCOMES = {"kept", "feature", "pending", "flatpak", "lookup", "carried", "dropped", "refused"}
 
+# Every name rime-pkg uses directly under PKG_ROOT: None = counted as records by records() below; a string = why it
+# holds no package record (it is still allowed to be there).
+PKG_ENTRIES = {
+    "requested": None,
+    "state.json": None,
+    "local": None,
+    "deb": None,
+    "etc": None,
+    "etc.list": None,
+    "var.list": None,
+    "rollback": None,
+    "copr-keys": None,
+    "copr-keyring": "the rpm keyring rime-pkg rebuilds from copr-keys/, which are reported owner by owner",
+    "work": "build staging (vendor.*/github.* downloads in flight)",
+    ".lock": "the engine's lock file",
+    "rpm-cache": "downloaded RPMs; their packages are reported by the names that requested them",
+}
+# Temporary names rime-pkg derives from those (mktemp beside the real one).
+PKG_TEMP = {
+    "work.??????": "a build's staging directory (rime-pkg sweeps leaked ones)",
+    "copr-keyring.new.*": "a COPR keyring being rebuilt",
+    "copr-keyring.old.*": "a COPR keyring being replaced",
+    "state.json.tmp": "state.json being written",
+}
+# Every key of rime-pkg's state.json: None = names reported by records(); a string = why it names no package.
+STATE_KEYS = {
+    "requested": None,
+    "local_files": None,
+    "deb_files": None,
+    "deb_depends": None,
+    "unsigned_accepted": None,
+    "vendor_verified": None,
+    "github_sources": None,
+    "resolved": "the RPM transaction resolved from the requested names, which are reported",
+    "image_twins": "the image's x86_64 builds of the i686 packages resolved, about the image",
+    "os_id": "the OS the extension was built for",
+    "os_version_id": "the OS version the extension was built for",
+    "built": "when the extension was built",
+    "image": "the extension image's path",
+    "image_sha256": "the extension image's hash",
+    "image_bytes": "the extension image's size",
+    "pkg_compat_level": "the engine's record format",
+}
+
+MARKERS = set()
+
 
 def ls(path):
     try:
-        return sorted(os.listdir(path))
+        names = sorted(os.listdir(path))
     except (FileNotFoundError, NotADirectoryError):
         return []
+    if ".omitted" in names:
+        MARKERS.add(path)
+    return [n for n in names if n != ".omitted"]
+
+
+def engine_facts(engine):
+    """What rime-pkg itself says: the names it uses under PKG_ROOT, its state.json keys, its DEB_DIR suffixes."""
+    with open(engine) as f:
+        src = f.read()
+    code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+    m = re.search(r"^readonly PKG_ROOT=(\S+)$", code, re.M)
+    assert m and m.group(1) == "/var/lib/rime/pkg", "rime-pkg's PKG_ROOT moved: the judge reads /var/lib/rime/pkg"
+    consts = dict(re.findall(r'^readonly (\w+)="\$\{PKG_ROOT\}/([^"/$]+)"', code, re.M))
+    names = set(consts.values())
+    names |= set(re.findall(r"\$\{PKG_ROOT\}/([A-Za-z0-9._-]+)", code))
+    names |= set(re.findall(r"\$PKG_ROOT/([A-Za-z0-9._-]+)", code))
+    w = re.search(r"'\{(requested:\$requested[^']*)\}' > \"\$\{STATE\}\.tmp\"", code, re.S)
+    assert w, "rime-pkg's state.json writer was not found"
+    # Every key of the object, whatever its value is: `name:$var`, but also `image_bytes:($size|tonumber)` (a
+    # `:\$`-only pattern missed those, so a new key with a computed value would have slipped past the judge).
+    keys = set(re.findall(r"(?:^|[{,\s])(\w+):", w.group(1)))
+    # deb_cache() and friends: printf '%s/%s.deb' "$DEB_DIR" ...; the .depends writer: "${DEB_DIR}/${name}.depends".
+    deb = {s for l in code.splitlines() if "DEB_DIR" in l for s in re.findall(r"(?:%s|\})\.([a-z]+)['\"]", l)}
+    return consts, names, keys, deb
 
 
 def read_list(path):
@@ -35,6 +119,34 @@ def read_list(path):
     except FileNotFoundError:
         return []
     return [l for l in lines if l and not l.startswith("#")]
+
+
+def sweep(root, engine):
+    """The independent part: what rime-pkg names, against the judge's tables and the tree. Returns failures."""
+    bad = []
+    consts, names, keys, deb_suffixes = engine_facts(engine)
+    for n in sorted(names - PKG_ENTRIES.keys()):
+        bad.append(f"rime-pkg uses {n!r} under /var/lib/rime/pkg and the judge does not know whether it holds records")
+    for k in sorted(keys - STATE_KEYS.keys()):
+        bad.append(f"rime-pkg writes state.json key {k!r} and the judge does not know whether it names packages")
+    if not deb_suffixes:
+        bad.append("rime-pkg's DEB_DIR file suffixes were not found")
+    pkg = os.path.join(root, "var/lib/rime/pkg")
+    for n in ls(pkg):
+        if n in PKG_ENTRIES or any(fnmatch.fnmatchcase(n, p) for p in PKG_TEMP):
+            continue
+        bad.append(f"UNCLASSIFIED /var/lib/rime/pkg/{n}: no name rime-pkg uses there")
+    try:
+        with open(os.path.join(pkg, "state.json")) as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        state = {}
+    for k in sorted(state.keys() - STATE_KEYS.keys()):
+        bad.append(f"UNCLASSIFIED state.json key {k!r}")
+    for f in ls(os.path.join(pkg, "deb")):
+        if f.rsplit(".", 1)[-1] not in deb_suffixes:
+            bad.append(f"UNCLASSIFIED /var/lib/rime/pkg/deb/{f}: rime-pkg writes only {sorted(deb_suffixes)} there")
+    return bad, consts, deb_suffixes
 
 
 def records(root):
@@ -62,13 +174,16 @@ def records(root):
             seen.append(l)
             want.append(("state.json", l))
     bare = {l.split(":", 1)[1] if ":" in l else l for l in seen}
-    for key in ["local_files", "deb_files", "vendor_verified", "unsigned_accepted", "github_sources"]:
+    for key in [k for k, why in STATE_KEYS.items() if why is None and k != "requested"]:
         v = state.get(key, [])
         for n in (sorted(v) if isinstance(v, dict) else v):
             if n not in bare:
                 want.append(("state.json", n))
 
     want += [("pkg-local", f) for f in ls(os.path.join(pkg, "local"))]
+    want += [("pkg-deb", f"deb/{s}") for s in sorted({f.rsplit(".", 1)[0] for f in ls(os.path.join(pkg, "deb"))})]
+    if os.path.exists(os.path.join(pkg, "etc")):
+        want.append(("etc-save", "/var/lib/rime/pkg/etc"))
     want += [("copr-keys", f) for f in ls(os.path.join(pkg, "copr-keys"))]
     want += [("repos", f) for f in ls(j("/etc/yum.repos.d")) if f.endswith(".repo")]
     for name, abs_ in [("etc-list", "/var/lib/rime/pkg/etc.list"), ("var-list", "/var/lib/rime/pkg/var.list")]:
@@ -132,6 +247,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rime", required=True)
     ap.add_argument("--catalogue", required=True)
+    ap.add_argument("--engine", required=True, help="rime-pkg, whose own names define what a record is")
     ap.add_argument("--root", required=True)
     ap.add_argument("--expect")
     ap.add_argument("--report")
@@ -147,6 +263,7 @@ def main():
             f.write(out)
     rows = report["rows"]
 
+    unclassified, consts, deb_suffixes = sweep(a.root, a.engine)
     want = collections.Counter(records(a.root))
     got = collections.Counter((r["source"], r["item"]) for r in rows)
     unreported = want - got
@@ -164,7 +281,16 @@ def main():
     print("features:", json.dumps(report["features"]))
     print("flatpaks to install:", " ".join(report["flatpak_install"]) or "(none)")
 
+    print(f"rime-pkg names under /var/lib/rime/pkg: {len(PKG_ENTRIES)} classified ({len(consts)} readonly); "
+          f"state.json keys: {len(STATE_KEYS)} classified; deb/ suffixes: {' '.join(sorted(deb_suffixes))}")
     fail = False
+    for b in unclassified:
+        print(b)
+        fail = True
+    for d in sorted(MARKERS):
+        print(f"SNAPSHOT MARKER {os.path.relpath(d, a.root)}/.omitted: this directory's contents were left out; resolve it "
+              "(a sidecar, or an empty directory) before judging")
+        fail = True
     for (s, i), n in sorted(unreported.items()):
         print(f"UNREPORTED {s}: {i} (x{n})")
         fail = True

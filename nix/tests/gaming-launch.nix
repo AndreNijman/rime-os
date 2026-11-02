@@ -16,14 +16,19 @@
 # the way Steam starts a game in this session: inside Steam's FHS environment (steam-run), with the running Steam
 # client's own environment (the game environment, gamescope's DISPLAY), named as Steam names a game to gamescope
 # (STEAM_GAME on its window, GAMESCOPECTRL_BASELAYER_APPID on the root: the test sets both, as Steam would); gamescope
-# focuses it (GAMESCOPE_FOCUSED_APP) and composites it (gamescope's screenshot shows the cube; a second, different
-# shot, when the cube has turned in time, is kept too).
+# focuses it (GAMESCOPE_FOCUSED_APP) and composites it: gamescope's own screenshot shows the CUBE, told apart from any
+# other picture (Steam's UI, a black or grey frame) by its LunarG teal, at least 1% of the frame (the cube's two faces
+# measure about 5%). Shots are taken until one shows it, for up to 90 s, and a failed screenshot request is retried
+# while gamescope still runs; a second, different picture of the cube (it turned) is reported, not required.
 #
 # NOT proven (needs the network, a Steam account or real hardware): Steam logging in, updating, and launching an
 # installed game itself (`steam -applaunch`), Proton, and anything on a real GPU (P3 on katana).
 #
-# Mutant (built by hand: checks.gaming-launch.extendNixOS with RIME_GAMESCOPE_STEAM=/nonexistent): a session that
-# starts Steam without rime-gamescope-steam must FAIL the environment assertions.
+# Mutants (built by hand, each must FAIL):
+#   checks.gaming-launch.extendNixOS with RIME_GAMESCOPE_STEAM=/nonexistent: a session that starts Steam without
+#     rime-gamescope-steam fails the environment assertions.
+#   checks.gaming-launch.mutants.game-unmapped: the game runs and is focused, then its window is unmapped, so
+#     gamescope composites something else: fails at "gamescope never composited the game".
 { pkgs, self }:
 
 let
@@ -56,6 +61,16 @@ let
       </dev/null >/tmp/game.log 2>&1 &
   '';
 
+  # The share of a raw RGB frame (stdin) in the cube's LunarG teal: blue and green well above red, and close together
+  # (Steam's own blue is far bluer than it is green).
+  teal = pkgs.writeText "teal-share.py" ''
+    import sys
+    data = sys.stdin.buffer.read()
+    r, g, b = data[0::3], data[1::3], data[2::3]
+    n = sum(1 for x, y, z in zip(r, g, b) if z > x + 30 and y > x + 20 and abs(z - y) < 40)
+    print(f"{n / max(len(r), 1):.4f}")
+  '';
+
   # Accepts on 80 and 443 and never answers: Steam's update download waits instead of failing at once.
   stall = pkgs.writeText "steam-update-stall.py" ''
     import selectors, socket
@@ -71,9 +86,8 @@ let
             conn, _ = key.fileobj.accept()
             held.append(conn)
   '';
-in
-pkgs.testers.runNixOSTest {
-  name = "rime-gaming-launch";
+  mk = mutant: pkgs.testers.runNixOSTest {
+  name = "rime-gaming-launch" + pkgs.lib.optionalString (mutant != null) "-mutant-${mutant}";
   node.pkgsReadOnly = false;
 
   nodes.machine = { pkgs, ... }: {
@@ -115,7 +129,7 @@ pkgs.testers.runNixOSTest {
       serviceConfig.ExecStart = "${pkgs.python3}/bin/python3 ${stall}";
     };
 
-    environment.systemPackages = [ pkgs.vulkan-tools pkgs.procps pkgs.python3 pkgs.xprop pkgs.xwininfo pkgs.file pkgs.imagemagick ];
+    environment.systemPackages = [ pkgs.vulkan-tools pkgs.procps pkgs.python3 pkgs.xprop pkgs.xwininfo pkgs.xdotool pkgs.file pkgs.imagemagick ];
 
     virtualisation = {
       memorySize = 6144;
@@ -170,30 +184,41 @@ pkgs.testers.runNixOSTest {
         focus = machine.wait_until_succeeds(X + "sh -c 'xprop -root GAMESCOPE_FOCUSED_APP | grep -w ${appid}'", timeout=30)
         print(focus)
         sh(X + "xprop -root | grep -i -E '^GAMESCOPE' | cut -c1-200")
-        # gamescope's own screenshot of what it composites. Some shots catch a black frame (nothing committed: seen
-        # at the start and once between two good ones), and under load the cube can sit on one frame for seconds, so
-        # take up to eight, 3 s apart, until two different pictures of the cube are in hand. The gate needs one; a
-        # second, different one (the cube turned) is reported, not required. Stops early if the session has ended.
+        # The mutant (mutants.game-unmapped) takes the game off screen here; gamescope composites whatever else there is.
+        ${if mutant == "game-unmapped" then ''machine.succeed(X + f"xdotool windowunmap {wid}")'' else "pass"}
+        # gamescope's own screenshot of what it composites, until one shows the cube. Some shots catch a black frame
+        # (nothing committed yet), the cube can sit on one frame for seconds under load, and a screenshot request can
+        # fail while gamescope is busy: retry for up to 90 s while gamescope runs. One picture of the cube is the
+        # gate; a second, different one (the cube turned) is reported, not required.
         import time
-        good = {}
-        for n in range(8):
+        good, shots, deadline, n = {}, [], time.monotonic() + 90, 0
+        while time.monotonic() < deadline and len(good) < 2:
             time.sleep(3)
+            n += 1
             shot = f"/tmp/shot{n}.png"
             rc, out = machine.execute(X + f"gamescopectl screenshot {shot}")
             if rc != 0:
-                print(f"gamescopectl failed ({rc}), the session has ended: {out}")
-                break
-            machine.wait_until_succeeds(f"identify {shot}", timeout=30)
-            _, info = sh(f"identify -format '%m %w %h %k %#' {shot}")
-            fmt, w, h, colours, digest = info.split()
+                if machine.execute("pgrep -u ${user} -x gamescope-wl || pgrep -u ${user} -x gamescope")[0] != 0:
+                    print(f"gamescope has exited: {out}")
+                    break
+                print(f"screenshot request failed ({rc}), retrying: {out.strip()}")
+                continue
+            rc, _ = machine.execute(f"timeout 30 sh -c 'until identify {shot} >/dev/null 2>&1; do sleep 1; done'")
+            if rc != 0:
+                print(f"{shot} never became a readable picture, retrying")
+                continue
+            _, info = sh(f"identify -format '%m %w %h %#' {shot}")
+            fmt, w, h, digest = info.split()
             assert fmt == "PNG" and (w, h) == ("1280", "800"), info
-            if int(colours) > 100:
+            share = float(machine.succeed(f"magick {shot} -depth 8 rgb:- | python3 ${teal}").strip())
+            shots.append((shot, share))
+            print(f"{shot}: cube teal {share:.2%}")
+            if share >= 0.01:
                 good.setdefault(digest, shot)
-            if len(good) == 2:
-                break
         sh(TREE)
         sh("tail -n 40 /tmp/game.log")
-        assert good, "gamescope never composited the game (every screenshot flat)"
+        print("shots (picture, cube teal share):", shots)
+        assert good, "gamescope never composited the game (no screenshot shows the cube)"
         print(f"pictures of the game: {len(good)} distinct ({'the cube turned' if len(good) > 1 else 'one frame'})")
         for name, shot in zip(("game-a.png", "game-b.png"), good.values()):
             machine.succeed(f"cp {shot} /tmp/{name}")
@@ -201,4 +226,6 @@ pkgs.testers.runNixOSTest {
 
     sh("cut -c1-300 /tmp/rime-gaming-session.log | tail -n 40")
   '';
-}
+};
+in
+mk null // { mutants.game-unmapped = mk "game-unmapped"; }

@@ -189,7 +189,7 @@ let
               ("Thing.AppImage", "AppImages run directly on Rime"),
               ("waydroid", "Waydroid needs system configuration"),
               ("libgcc.i686", "Steam's come with the gaming system: rime install steam"),
-              ("chatgpt", "ChatGPT needs a Rime build that checks OpenAI's signing key"),
+              ("helium", "Helium is in neither nixpkgs nor Flathub"),
           ]:
               out = machine.fail(f"rime install {name} 2>&1")
               has(out, f"refusing {name}: ")

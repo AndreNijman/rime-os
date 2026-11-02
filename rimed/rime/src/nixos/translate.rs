@@ -8,10 +8,11 @@
 //!
 //! Sources (each reported as present or absent):
 //! * `/var/lib/rime/pkg/requested` and `state.json`'s `requested` (one row per distinct name);
-//!   `state.json`'s `local_files`/`deb_files`/`vendor_verified`/`unsigned_accepted`/`github_sources` annotate those
-//!   rows, and get rows of their own only when they name something the requested list does not;
-//! * `/var/lib/rime/pkg/local/*`, `copr-keys/<owner>`, `etc.list`, `var.list`, `rollback/`, and the package
-//!   repositories in `/etc/yum.repos.d/*.repo`;
+//!   `state.json`'s `local_files`/`deb_files`/`deb_depends`/`vendor_verified`/`unsigned_accepted`/`github_sources`
+//!   annotate those rows, and get rows of their own only when they name something the requested list does not;
+//! * `/var/lib/rime/pkg/local/*`, `deb/<name>.*` (one row per package: its .deb and the .trust/.entry/.files/.depends
+//!   records beside it), `copr-keys/<owner>`, `etc.list`, `etc/` (the saved /etc files), `var.list`, `rollback/`, and
+//!   the package repositories in `/etc/yum.repos.d/*.repo`;
 //! * `/var/lib/rime/appimage/<name>.AppImage`;
 //! * system Flatpaks (`/var/lib/flatpak/app/<id>`), system extensions (`/var/lib/extensions/*.raw`),
 //!   `/var/usrlocal/lib/<name>` (Claude Desktop's hand install lives there);
@@ -101,6 +102,18 @@ fn names(dir: &Path) -> Option<Vec<String>> {
     let mut v: Vec<String> = rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     v.sort();
     Some(v)
+}
+
+/// Regular files (and symlinks) anywhere under a directory.
+fn count_files(dir: &Path) -> usize {
+    let Ok(rd) = fs::read_dir(dir) else { return 0 };
+    rd.filter_map(|e| e.ok())
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => count_files(&e.path()),
+            Ok(_) => 1,
+            Err(_) => 0,
+        })
+        .sum()
 }
 
 fn str_list(v: &Value, key: &str) -> Vec<String> {
@@ -248,9 +261,19 @@ pub fn translate(cat: &Catalogue, root: &Path) -> Report {
         Some(Value::Object(o)) => o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect(),
         _ => BTreeMap::new(),
     };
+    // What each .deb declared it needs (rime-pkg records it verbatim and resolves none of it).
+    let deb_depends: BTreeMap<String, String> = match state.get("deb_depends") {
+        Some(Value::Object(o)) => o.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect(),
+        _ => BTreeMap::new(),
+    };
     let note_for = |line: &str| -> String {
         let bare = line.split_once(':').map(|(_, b)| b).unwrap_or(line);
         let mut n = vec![];
+        if line.starts_with("deb:") {
+            if let Some(d) = deb_depends.get(bare).filter(|d| !d.is_empty()) {
+                n.push(format!("the .deb declared Depends: {d}"));
+            }
+        }
         if vendor.contains(bare) {
             n.push("vendor-verified on bootc".to_string());
         }
@@ -284,7 +307,7 @@ pub fn translate(cat: &Catalogue, root: &Path) -> Report {
     // record of its own.
     let bare_requested: BTreeSet<String> =
         seen.iter().map(|l| l.split_once(':').map(|(_, b)| b.to_string()).unwrap_or_else(|| l.clone())).collect();
-    for key in ["local_files", "deb_files", "vendor_verified", "unsigned_accepted", "github_sources"] {
+    for key in ["local_files", "deb_files", "deb_depends", "vendor_verified", "unsigned_accepted", "github_sources"] {
         for n in str_list(&state, key) {
             if !bare_requested.contains(&n) {
                 c.row(
@@ -302,6 +325,40 @@ pub fn translate(cat: &Catalogue, root: &Path) -> Report {
     let local = c.source("pkg-local", "/var/lib/rime/pkg/local");
     for f in names(&local).unwrap_or_default() {
         c.row("pkg-local", &f, None, Outcome::Refused, format!("a package file kept for a local: request; {}", pkg::RPM_REASON));
+    }
+    // rime-pkg's DEB_DIR: <name>.deb plus its .trust/.entry/.files/.depends records, one package per name (the name
+    // is the file name minus its LAST extension, as rime-pkg's gc_cache_dir reads it).
+    let deb = c.source("pkg-deb", "/var/lib/rime/pkg/deb");
+    let mut debs: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for f in names(&deb).unwrap_or_default() {
+        let stem = f.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_else(|| f.clone());
+        debs.entry(stem).or_default().push(f);
+    }
+    for (stem, files) in debs {
+        let item = format!("deb/{stem}");
+        let listed = files.join(" ");
+        let canon = c.cat.canonical(&stem);
+        if c.cat.entries.contains_key(&canon) {
+            c.row(
+                "pkg-deb",
+                &item,
+                Some(canon.clone()),
+                Outcome::Dropped,
+                format!(
+                    "the vendor download bootc verified and kept ({listed}): on Rime on NixOS {canon} is the catalogue's \
+                     own build of a pinned copy checked against the same vendor key, so this file is not used"
+                ),
+            );
+        } else {
+            let deps = deb_depends.get(&stem).filter(|d| !d.is_empty()).map(|d| format!("; it declared Depends: {d}"));
+            c.row(
+                "pkg-deb",
+                &item,
+                None,
+                Outcome::Refused,
+                format!("a .deb kept for a deb: request ({listed}){}; {}", deps.unwrap_or_default(), pkg::RPM_REASON),
+            );
+        }
     }
     let copr = c.source("copr-keys", "/var/lib/rime/pkg/copr-keys");
     for owner in names(&copr).unwrap_or_default() {
@@ -345,6 +402,21 @@ pub fn translate(cat: &Catalogue, root: &Path) -> Report {
                 format!("{what} ({n} lines): a Nix package carries its own configuration, nothing is copied"),
             );
         }
+    }
+    // rime-pkg's ETC_SAVE: its saved copies of the /etc files the extension's packages installed.
+    let etc_save = c.source("etc-save", "/var/lib/rime/pkg/etc");
+    if etc_save.exists() {
+        let n = count_files(&etc_save);
+        c.row(
+            "etc-save",
+            "/var/lib/rime/pkg/etc",
+            None,
+            Outcome::Dropped,
+            format!(
+                "bootc's saved copies of the /etc files the extension's packages installed ({n} files): a Nix package \
+                 carries its own configuration, nothing is copied back into /etc; the directory stays where it is"
+            ),
+        );
     }
     let rollback = c.source("pkg-rollback", "/var/lib/rime/pkg/rollback");
     if rollback.exists() {
@@ -706,14 +778,18 @@ mod tests {
         };
         w(
             "var/lib/rime/pkg/requested",
-            "steam\nblender\nwine\nhelium-bin\nlibgcc.i686\nfoo.i686\nlocal:mytool\ndeb:claude-desktop\nnotathing\n",
+            "steam\nblender\nwine\nhelium-bin\nlibgcc.i686\nfoo.i686\nlocal:mytool\ndeb:claude-desktop\nnotathing\ndeb:tool\n",
         );
         w(
             "var/lib/rime/pkg/state.json",
             r#"{"requested":["steam","kernel"],"local_files":["mytool","ghost"],"vendor_verified":["claude-desktop"],
-                "github_sources":{"mytool":"o/r"}}"#,
+                "github_sources":{"mytool":"o/r"},"deb_files":["tool"],"deb_depends":{"tool":"libc6 (>= 2.34)","stray":""}}"#,
         );
         w("var/lib/rime/pkg/local/mytool.rpm", "");
+        for f in ["claude-desktop.deb", "claude-desktop.trust", "claude-desktop.entry", "claude-desktop.files", "tool.deb", "tool.depends"] {
+            w(&format!("var/lib/rime/pkg/deb/{f}"), "");
+        }
+        w("var/lib/rime/pkg/etc/thing/thing.conf", "");
         w("etc/yum.repos.d/_copr:copr.fedorainfracloud.org:imput:helium.repo", "");
         w("etc/yum.repos.d/README", "");
         w("var/lib/rime/pkg/copr-keys/imput/helium.gpg", "");
@@ -744,10 +820,10 @@ mod tests {
     fn every_record_gets_exactly_one_row() {
         let d = tree();
         let r = translate(&cat(), &d);
-        // 9 requested lines + 1 state-only name + 1 orphan local_files + 1 local file + 1 copr + 1 AppImage
-        // + 1 repo + 2 system Flatpaks + 1 extension + 2 usrlocal + 2 npm + 1 opt + 2 blueprint apps + 1 blueprint
-        // section.
-        assert_eq!(r.rows.len(), 9 + 1 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + 2 + 2 + 1 + 2 + 1, "{:#?}", r.rows);
+        // 10 requested lines + 1 state-only name + 1 orphan local_files + 1 orphan deb_depends + 1 local file
+        // + 2 deb packages + 1 saved /etc + 1 copr + 1 AppImage + 1 repo + 2 system Flatpaks + 1 extension
+        // + 2 usrlocal + 2 npm + 1 opt + 2 blueprint apps + 1 blueprint section.
+        assert_eq!(r.rows.len(), 10 + 1 + 1 + 1 + 1 + 2 + 1 + 1 + 1 + 1 + 2 + 1 + 2 + 2 + 1 + 2 + 1, "{:#?}", r.rows);
         for line in pkg::read_list(&d.join("var/lib/rime/pkg/requested")) {
             assert_eq!(r.rows.iter().filter(|x| x.source == "requested" && x.item == line).count(), 1, "{line}");
         }
@@ -768,6 +844,14 @@ mod tests {
         assert!(r.rows.iter().any(|x| x.item == "local:mytool" && x.detail.contains("github:o/r")));
         assert_eq!(outcome(&r, "deb:claude-desktop"), Outcome::Pending, "a vendor app the catalogue knows");
         assert_eq!(outcome(&r, "notathing"), Outcome::Lookup);
+        assert_eq!(outcome(&r, "deb:tool"), Outcome::Refused);
+        assert!(r.rows.iter().any(|x| x.item == "deb:tool" && x.detail.contains("declared Depends: libc6 (>= 2.34)")));
+        assert_eq!(outcome(&r, "deb/tool"), Outcome::Refused);
+        assert!(r.rows.iter().any(|x| x.item == "deb/tool" && x.detail.contains("tool.deb tool.depends")));
+        assert_eq!(outcome(&r, "deb/claude-desktop"), Outcome::Dropped, "the vendor copy: the catalogue builds its own");
+        assert_eq!(outcome(&r, "stray"), Outcome::Refused, "deb_depends names a package nobody requested");
+        assert_eq!(outcome(&r, "/var/lib/rime/pkg/etc"), Outcome::Dropped);
+        assert!(r.rows.iter().any(|x| x.item == "/var/lib/rime/pkg/etc" && x.detail.contains("(1 files)")));
         assert_eq!(outcome(&r, "kernel"), Outcome::Refused);
         assert_eq!(outcome(&r, "ghost"), Outcome::Refused);
         assert_eq!(outcome(&r, "imput"), Outcome::Dropped);
