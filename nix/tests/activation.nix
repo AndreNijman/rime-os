@@ -30,6 +30,11 @@ pkgs.testers.runNixOSTest {
         QT_QUICK_BACKEND = "software";
       };
       systemd.services.rime-flathub-setup.enable = lib.mkForce false;
+      # The shipped profile turns the Rime boot hook on (nix/hosts/profile.nix), and the hook rightly refuses a
+      # machine with no /boot, which this QEMU node is (no ESP, no Fedora GRUB): `switch` would then exit 1 at
+      # "Failed to install bootloader" before A1 is even asked. A1 is about greetd, not the menu; the hook has its own
+      # checks (boot-hook-unit, boot-hook-vm, the OVMF matrix).
+      rime.boot.enable = lib.mkForce false;
 
       # The next generation: only greetd's unit differs (as in a real update that touches it).
       specialisation.changed.configuration = {
