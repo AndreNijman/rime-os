@@ -113,3 +113,10 @@ the expected result.
 - The console agent's passphrase prompt has no newline, so the test unit's `RIME-ASK n` report lands at the end of
   the prompt's line: never anchor it with `^`.
 - `tpm2_pcrread` on NixOS prints a tabrmd D-Bus warning before falling back to `/dev/tpmrm0`; the value still reads.
+- `serial-getty@ttyS0` `vhangup()`s ttyS0 when it starts, and every later write of the stage-2 driver to it is lost
+  (an independent rerun lost N4's `tpm2_clear` and `DONE` lines and failed N4, although the clear ran: N5 then read
+  "State not recoverable"). `rime-tpm-lab.service` is now ordered before the getty.
+- P2's PCR 7 is the same on every run (no MOK in the chain); P3/P4/N* depend on the TEST MOK that `prep` generates,
+  so a lab with fresh keys reads another value there (an independent rerun with new keys: P3 = N1 =
+  `c9d8fd95…d548e`, P2 = `078ded20…5c92` again, 10/10 PASS, mutant M4-only FAIL:
+  `/var/lab/rime-nix/artifacts/verify-tpmkeymap/`).

@@ -111,6 +111,10 @@ let
         description = "Rime TPM lab: stage-2 measurements and driver";
         wantedBy = [ "multi-user.target" ];
         after = [ "systemd-user-sessions.service" "tpm2.target" ];
+        # serial-getty@ttyS0 vhangup()s ttyS0 when it starts, which silently drops every later write of this unit to
+        # it (measured: N4 lost its tpm2_clear and DONE lines and failed the verdict although the clear ran). The
+        # getty waits for this oneshot.
+        before = [ "serial-getty@ttyS0.service" ];
         path = [ pkgs.coreutils pkgs.util-linux pkgs.mokutil pkgs.kmod pkgs.gnugrep pkgs.gnused pkgs.findutils
           pkgs.tpm2-tools pkgs.cryptsetup pkgs.python3 sd ];
         serviceConfig = { Type = "oneshot"; StandardOutput = "tty"; StandardError = "tty"; TTYPath = "/dev/ttyS0"; };

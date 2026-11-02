@@ -70,6 +70,15 @@ in
               case "$seen" in *" $f "*) continue ;; esac
               seen="$seen$f "
               n=$((n + 1))
+              # The test types as soon as it sees the report: hold it until the keymap load has finished (active or
+              # failed), so a key typed before loadkeys ran cannot pass or fail the gate by timing. Bounded: 30 s.
+              w=0
+              while [ "$w" -lt 150 ]; do
+                case "$(systemctl show -P ActiveState systemd-vconsole-setup.service)" in
+                  activating|inactive|deactivating) sleep 0.2; w=$((w + 1)) ;;
+                  *) break ;;
+                esac
+              done
               vc=$(systemctl show -P ActiveState systemd-vconsole-setup.service)/$(systemctl show -P Result systemd-vconsole-setup.service)
               line="RIME-ASK $tag $n keymap=$km vconsole-setup=$vc"
               echo "$line" > /dev/ttyS0
