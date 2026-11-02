@@ -158,6 +158,25 @@ class BootTable(unittest.TestCase):
         self.assertEqual(t["luks"][0]["name"], f"luks-{LUKS_UUID}")
         self.assertEqual(t["host"], {"hostname": "lab"})
 
+    def test_written_over_carrys_file_keeps_it(self):
+        """start's write keeps every table carry wrote (the lab's first encrypted run lost rd.luks.* here: the file
+        was opened for writing, so truncated, before it was read)."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        ht = os.path.join(d, "host.toml")
+        carried = ('schema = 1\n\n[host]\ntimezone = "Australia/Perth"\n\n[boot]\nkernel_params = ["rd.luks.uuid=%s"]\n\n'
+                   '[[luks]]\nname = "luks-%s"\ndevice = "UUID=%s"\n' % (LUKS_UUID, LUKS_UUID, LUKS_UUID))
+        with open(ht, "w") as f:
+            f.write(carried)
+        B.write_boot_table(ht, self.TABLE)
+        with open(ht, "rb") as f:
+            t = tomllib.load(f)
+        self.assertEqual(t["boot"], dict(self.TABLE, kernel_params=[f"rd.luks.uuid={LUKS_UUID}"]))
+        self.assertEqual(t["host"], {"timezone": "Australia/Perth"})
+        self.assertEqual(t["luks"][0]["device"], f"UUID={LUKS_UUID}")
+        self.assertEqual(oct(os.stat(ht).st_mode & 0o777), "0o644")
+        self.assertEqual(os.listdir(d), ["host.toml"])
+
     def test_replaces_not_duplicates(self):
         out = B.merge_boot_table('[boot]\nlayout = "bls"\ndevice = "UUID=old"\n', self.TABLE)
         self.assertEqual(tomllib.loads(out)["boot"], self.TABLE)
@@ -475,6 +494,53 @@ class Preview(unittest.TestCase):
         self.assertIn("greetd-config.toml", text.split("GREETD ", 1)[1].splitlines()[0])
         self.assertIn("ROOT-EMPTY True", text)
         self.assertIn("LEFT BEHIND", text)
+
+    def test_masks_survive_and_specials_never_crash(self):
+        """A NixOS etc/ holds unit masks: a dereferencing tar writes them as the /dev/null character device, a plain
+        one as a link to /dev/null. Both come back as links to /dev/null; a fifo, another device and an absolute link
+        elsewhere are left out and counted (the lab's first SB run crashed here with SpecialFileError)."""
+        def member(name, kind, **kw):
+            m = tarfile.TarInfo(name)
+            m.type = kind
+            for k, v in kw.items():
+                setattr(m, k, v)
+            return m
+        with tarfile.open(self.tar, "a") as tf:
+            tf.addfile(member("system/etc/systemd/system/apex-flathub-setup.service", tarfile.CHRTYPE, devmajor=1, devminor=3))
+            tf.addfile(member("system/etc/systemd/system/other.service", tarfile.SYMTYPE, linkname="/dev/null"))
+            tf.addfile(member("system/etc/fifo", tarfile.FIFOTYPE))
+            tf.addfile(member("system/etc/zero", tarfile.CHRTYPE, devmajor=1, devminor=5))
+            tf.addfile(member("system/etc/abs", tarfile.SYMTYPE, linkname="/etc/passwd"))
+        out = os.path.join(self.d, "out")
+        os.makedirs(out)
+        masks, skipped = B.preview_extract(self.tar, out)
+        self.assertEqual(sorted(masks), ["system/etc/systemd/system/apex-flathub-setup.service",
+                                         "system/etc/systemd/system/other.service"])
+        self.assertEqual(sorted(skipped), ["system/etc/abs", "system/etc/fifo", "system/etc/zero"])
+        for n in masks:
+            self.assertEqual(os.readlink(os.path.join(out, n)), "/dev/null")
+        for n in skipped:
+            self.assertFalse(os.path.lexists(os.path.join(out, n)))
+        self.assertTrue(os.path.isfile(os.path.join(out, "rime-hostlayer")))
+        man = make_payload(self.payload, preview=self.tar)
+        rc, text = B.carry_preview(self.payload, man, src="/nonexistent-src", cmdline="/nonexistent-cmdline")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("preview: 2 unit mask(s) kept as links to /dev/null, 3 special file(s) left out", text)
+
+    def test_mask_never_written_through_a_link(self):
+        """A mask whose directory is a link out of the extraction dir is left out, never created there."""
+        outside = os.path.join(self.d, "outside")
+        os.makedirs(outside)
+        with tarfile.open(self.tar, "a") as tf:
+            m = tarfile.TarInfo("system/escape/x.service")
+            m.type, m.devmajor, m.devminor = tarfile.CHRTYPE, 1, 3
+            tf.addfile(m)
+        out = os.path.join(self.d, "out")
+        os.makedirs(os.path.join(out, "system"))
+        os.symlink(outside, os.path.join(out, "system/escape"))
+        masks, skipped = B.preview_extract(self.tar, out)
+        self.assertIn("system/escape/x.service", skipped)
+        self.assertEqual(os.listdir(outside), [])
 
     def test_no_preview_refused_by_name(self):
         man = make_payload(self.payload)

@@ -854,6 +854,22 @@ def merge_boot_table(text, table):
     return "\n".join(lines[:hdr + 1] + mine + keep + lines[end:]) + "\n"
 
 
+def write_boot_table(path, table):
+    """Merge TABLE into the [boot] of the host.toml at PATH (the one carry just wrote) and replace the file. The text
+    is read BEFORE anything is opened for writing: opening it with "w" first truncates what carry wrote, and the
+    machine loses its rd.luks.* arguments (no unlock), timezone, locale, keyboard, mounts and [[luks]] (the bridge
+    OVMF lab's first encrypted run). Returns the text written."""
+    text = merge_boot_table(read(path, "") or "", table)
+    tmp = path + ".rime-bridge.tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return text
+
+
 def need_bytes(facts):
     return FLOOR_BYTES + int((facts.get("home") or {}).get("bytes", 0)) + int(
         (facts.get("ostree") or {}).get("store_bytes", 0))
@@ -1453,6 +1469,41 @@ def verify_payload(payload, trusted=None):
     return man
 
 
+def preview_extract(tar, dest):
+    """Extract preview.tar into DEST with tarfile's "data" filter, except for what a NixOS etc/ really holds and that
+    filter refuses: a unit MASK (a link to /dev/null, or the /dev/null character device a dereferencing tar writes for
+    one) is made again as a link to /dev/null AFTER everything else, as a leaf whose directory lies inside DEST, so no
+    other member can be written through it. Any other device, fifo or absolute link is left out and counted.
+    Returns (masks, skipped)."""
+    masks, skipped = [], []
+
+    def keep(m, path):
+        if (m.ischr() and (m.devmajor, m.devminor) == (1, 3)) or (m.issym() and m.linkname == "/dev/null"):
+            masks.append(m.name)
+            return None
+        if m.isdev() or m.isfifo():
+            skipped.append(m.name)
+            return None
+        try:
+            return tarfile.data_filter(m, path)
+        except tarfile.FilterError:
+            skipped.append(m.name)
+            return None
+
+    with tarfile.open(tar) as tf:
+        tf.extractall(dest, filter=keep)
+    real = os.path.realpath(dest)
+    for name in masks:
+        target = os.path.join(dest, name)
+        parent = os.path.realpath(os.path.dirname(target))
+        if os.path.commonpath([parent, real]) != real or os.path.lexists(target):
+            skipped.append(name)
+            continue
+        os.makedirs(parent, exist_ok=True)
+        os.symlink("/dev/null", target)
+    return masks, skipped
+
+
 def carry_preview(payload, man, src="/", cmdline="/proc/cmdline"):
     """The left-behind report BEFORE start: the payload's own rime-hostlayer (preview.tar: the program, the NixOS
     system's etc/ and sw/bin names, the greeter's shipped config) run as `carry --plan` by this system's python,
@@ -1461,15 +1512,16 @@ def carry_preview(payload, man, src="/", cmdline="/proc/cmdline"):
         raise Refused("payload-no-preview", "this payload carries no preview.tar, so the carry cannot be shown first")
     tmp = tempfile.mkdtemp(prefix="rime-migrate-preview-")
     try:
-        with tarfile.open(os.path.join(payload, man["preview"]["file"])) as tf:
-            tf.extractall(tmp, filter="data")
+        masks, skipped = preview_extract(os.path.join(payload, man["preview"]["file"]), tmp)
+        note = (f"preview: {len(masks)} unit mask(s) kept as links to /dev/null"
+                + (f", {len(skipped)} special file(s) left out: {', '.join(skipped[:5])}" if skipped else "") + "\n")
         root = os.path.join(tmp, "root")
         os.makedirs(root)
         env = {"PATH": "/usr/bin:/usr/sbin", "LANG": "C.UTF-8",
                "RIME_GREETD_DEFAULT": os.path.join(tmp, "greetd-config.toml")}
         r = run([sys.executable, "-I", "-B", os.path.join(tmp, "rime-hostlayer"), "carry", "--from", src, "--root",
                  root, "--system", os.path.join(tmp, "system"), "--cmdline", cmdline, "--plan"], check=False, env=env)
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
+        return r.returncode, note + (r.stdout or "") + (r.stderr or "")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1627,8 +1679,7 @@ def cmd_start(a):
             state["boot_migrate_carried"] = sorted(os.listdir(bm))
         ht = os.path.join(t, "var/lib/rime/host.toml")
         state["boot_table"] = boot_table(facts)
-        with open(ht, "w") as f:
-            f.write(merge_boot_table(read(ht, "") or "", state["boot_table"]))
+        write_boot_table(ht, state["boot_table"])
         chroot(t, f"{man['toplevel']}/sw/bin/rime-hostlayer", "host", "validate", "--file", "/var/lib/rime/host.toml")
         step("first activation and boot entry")
         open(os.path.join(t, "etc/NIXOS"), "a").close()
