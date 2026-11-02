@@ -27,6 +27,7 @@ let
     [ "accept-B" "rime-bridge.py" ''s/^ACCEPTED = ("A", "E")/ACCEPTED = ("A", "B", "E")/'' "topology B bridged" ]
     [ "chain-no-configfile" "rime-bridge.py" ''s/if "configfile" not in g.get("grub_cfg", ""):/if False:/'' "D3 chain check gone" ]
     [ "fallback-unconditional" "rime-bridge.py" ''s/ and has_dir(esp, "fedora") and esp.get("fallback_csv"):/:/'' "removable path trusted without shim's fallback" ]
+    [ "wait-on-finished-oneshot" "rime-bridge.py" ''s/in ("activating", "deactivating", "reloading")/in ("active", "activating", "deactivating", "reloading")/'' "start hangs on a RemainAfterExit unit that finished" ]
     [ "backup-same-disk" "rime-bridge.py" ''s/elif b.get("disk") and b.get("disk") == root.get("disk"):/elif False:/'' "backup on the migrated disk" ]
   ];
   hlMutants = [

@@ -5,7 +5,7 @@ Runs INSIDE the rime-ovmf-probe container (qemu, Fedora's OVMF). Every boot is o
 overlay of disks/KIND/disk.raw and the same varstore copy, ending with a guest poweroff:
 
   bootc     log in on the serial console as the lab user (old TEST password), make KIND's firmware entries
-            (guest-prep.sh), [E: reboot so the machine boots the way katana does, repair-e], check, start
+            (guest-prep.sh), reboot so it boots through its own entry, [E: repair-e], check, start
   nixos     GRUB's default is the NixOS entry the bridge added: the lab system's markers, the greeter, a serial
             login with the OLD password, the home checksums
   back      pick the first GRUB entry (the ostree one) by key: bootc boots, the same login works, home intact
@@ -237,11 +237,13 @@ def phase_bootc(a):
     boot_bootc(a, vm, True)
     record(vm, "prep", "bash /run/payload/guest-prep.sh " + a.kind)
     record(vm, "lsblk", "lsblk -o NAME,SIZE,FSTYPE,LABEL,UUID,MOUNTPOINTS")
+    # Boot again: a real machine of either kind has booted through its own firmware entry many times (A: shim's
+    # fallback made "Fedora" on the first boot; E: katana's "APEX-OS Primary").
+    vm.send("systemctl poweroff\n")
+    vm.wait_off()
+    vm = VM(a, "bootc2")
+    boot_bootc(a, vm, False)
     if a.kind == "E":
-        vm.send("systemctl poweroff\n")
-        vm.wait_off()
-        vm = VM(a, "bootc2")
-        boot_bootc(a, vm, False)
         record(vm, "check-before-repair", "/run/payload/rime-migrate check --explain", ok=False)
         record(vm, "repair-e-dry", "/run/payload/rime-migrate repair-e", ok=False)
         record(vm, "repair-e", "/run/payload/rime-migrate repair-e --confirm", timeout=600)

@@ -34,6 +34,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 PROG = "rime-migrate"
@@ -975,12 +976,24 @@ def unmask_old_side(state):
     run(["systemctl", "daemon-reload"], check=False)
 
 
-def wait_units():
+def unit_busy(show):
+    """True while a unit's job is still running (`systemctl show -p ActiveState` text). Both WAIT_UNITS are oneshot,
+    rime-migrate-from-apex.service with RemainAfterExit=yes: "active" there means it FINISHED, not that it runs."""
+    props = dict(line.split("=", 1) for line in show.splitlines() if "=" in line)
+    return props.get("ActiveState") in ("activating", "deactivating", "reloading")
+
+
+def wait_units(timeout=3600, poll=5):
     for u in WAIT_UNITS:
-        r = run(["systemctl", "is-active", u], check=False)
-        if r.stdout.strip() in ("active", "activating", "reloading"):
-            print(f"waiting for {u} to finish", flush=True)
-            run(["systemctl", "start", "--wait", u], check=False)
+        deadline = time.monotonic() + timeout
+        said = False
+        while unit_busy(run(["systemctl", "show", "-p", "ActiveState", u], check=False).stdout):
+            if not said:
+                print(f"waiting for {u} to finish", flush=True)
+                said = True
+            if time.monotonic() > deadline:
+                raise Refused("old-side-busy", f"{u} still running after {timeout} s; start again once it has finished")
+            time.sleep(poll)
 
 
 def verify_payload(payload):

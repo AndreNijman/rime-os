@@ -289,6 +289,38 @@ class TrialLeftovers(unittest.TestCase):
         self.assertTrue(all(x["esp"] == "/dev/vda2" for x in B.trial_leftovers(f)["files"]))
 
 
+class WaitUnits(unittest.TestCase):
+    """start waits for a running old-side oneshot, never for one that finished (RemainAfterExit=yes reads "active")."""
+
+    def fake_run(self, states):
+        calls = []
+
+        def run(cmd, check=True):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, f"ActiveState={states.get(cmd[-1], 'inactive')}\n", "")
+        return run, calls
+
+    def with_run(self, states, **kw):
+        run, calls = self.fake_run(states)
+        old = B.run
+        B.run = run
+        try:
+            B.wait_units(**kw)
+        finally:
+            B.run = old
+        return calls
+
+    def test_finished_oneshot_is_not_waited_for(self):
+        calls = self.with_run({"rime-migrate-from-apex.service": "active"}, timeout=0, poll=0)
+        self.assertTrue(all(c[:2] == ["systemctl", "show"] for c in calls))
+        self.assertEqual(len(calls), len(B.WAIT_UNITS))
+
+    def test_running_oneshot_times_out_by_name(self):
+        with self.assertRaises(B.Refused) as cm:
+            self.with_run({"rime-store-compact.service": "activating"}, timeout=0, poll=0)
+        self.assertEqual(cm.exception.name, "old-side-busy")
+
+
 class LoadOption(unittest.TestCase):
     def option(self, desc, partuuid, path, attrs=1):
         hd = struct.pack("<IQQ", 1, 2048, 1048576) + uuid.UUID(partuuid).bytes_le + bytes([2, 2])
