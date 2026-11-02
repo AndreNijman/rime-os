@@ -18,11 +18,23 @@
 # change PCR 7 (a new Secure Boot key, a dbx update, a slot sealed to another chain), run by the owner:
 #
 #   sudo systemctl start rime-luks-tpm-reenrol@$(cryptsetup luksUUID /dev/<part>).service
+#
+# or, for every volume whose slot no longer matches, `sudo rime luks rebind`. How the owner learns it is needed:
+# rime-luks-tpm-status.service (every boot) recomputes each systemd-tpm2 token's PCR policy digest from this boot's
+# PCR values (nix/pkgs/rime-luks-tpm, no TPM command) and writes /run/rime/luks-tpm.json; `rime doctor` turns a
+# stale slot into a WARN naming the volume, `sudo rime luks rebind` and this unit (checks.luks-tpm-rebind).
+# Volumes are found on the machine (every crypto_LUKS block device, lsblk), not declared: the UUID is a per-machine
+# fact (host.toml kernel_params), so this module deliberately reads no rime.luks.* option and needs no per-volume unit.
 { config, lib, pkgs, ... }:
 
 let
   cfg = config.rime.luksTpm;
   enroll = "${pkgs.rime.rime-libexec}/libexec/rime-luks-enroll";
+  statusFile = "/run/rime/luks-tpm.json";
+  status = pkgs.writeShellScriptBin "rime-luks-tpm-status" ''
+    export PATH=${lib.makeBinPath [ pkgs.cryptsetup pkgs.util-linux ]}
+    exec ${pkgs.python3}/bin/python3 -I ${../pkgs/rime-luks-tpm/rime-luks-tpm-status.py} "$@"
+  '';
   reenrol = pkgs.writeShellScript "rime-luks-tpm-reenrol" ''
     set -euo pipefail
     uuid=$1
@@ -51,6 +63,21 @@ in
     boot.initrd.systemd.tpm2.enable = true;
     systemd.tpm2.enable = true;
 
+    environment.systemPackages = [ status ];
+
+    systemd.services.rime-luks-tpm-status = {
+      description = "Check that each LUKS volume's TPM slot matches this boot's PCR values";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "cryptsetup.target" "local-fs.target" "tpm2.target" ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${status}/bin/rime-luks-tpm-status --write ${statusFile}";
+        StandardOutput = "null";
+        PrivateNetwork = true;
+      };
+    };
+
     systemd.services."rime-luks-tpm-reenrol@" = {
       description = "Re-bind the TPM2 slot of LUKS volume %i to PCR 7 (keeps its recovery key)";
       documentation = [ "file:${enroll}" ];
@@ -59,6 +86,8 @@ in
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${reenrol} %i";
+        # The report `rime doctor` reads follows the re-bind (the CLI measures again too).
+        ExecStartPost = "-${status}/bin/rime-luks-tpm-status --write ${statusFile}";
         PrivateNetwork = true;
       };
     };

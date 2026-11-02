@@ -63,3 +63,5 @@
 // { gaming-launch = import ./gaming-launch.nix { inherit pkgs self; }; }
 # vm-harness, vm-harness-vm
 // import ./vm-harness.nix { inherit pkgs self; }
+# luks-tpm-rebind (rime-luks-tpm-status, rime luks, rime doctor)
+// import ./luks-tpm.nix { inherit pkgs self; }
