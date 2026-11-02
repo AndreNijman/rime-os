@@ -115,9 +115,30 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
   wmutant "the kernel signer called off main" \
     "if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && vars.RIME_NIX_KERNEL_HOST != '''" \
     "if: needs.changes.outputs.action == 'release' && vars.RIME_NIX_KERNEL_HOST != '''"
+  # The patterns end in the job's runs-on/environment lines: the kernel-sign job's if: starts with the same text.
   wmutant "publish not restricted to main" \
-    "if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release'" \
-    "if: needs.changes.outputs.action == 'release'"
+    "if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release'
+    runs-on: ubuntu-24.04
+    environment: nix-release" \
+    "if: needs.changes.outputs.action == 'release'
+    runs-on: ubuntu-24.04
+    environment: nix-release"
+  # "Restricted to main" is the exact term of a conjunction (check_workflow.main_only), not a substring: each of these
+  # still holds the text github.ref == 'refs/heads/main', and each passed the substring rule.
+  wmutant "the kernel signer called off main through an or" \
+    "vars.RIME_NIX_KERNEL_HOST != '''" "vars.RIME_NIX_KERNEL_HOST != ''' || true"
+  wmutant "publish off main through an or" \
+    "needs.changes.outputs.action == 'release'
+    runs-on: ubuntu-24.04
+    environment: nix-release" \
+    "needs.changes.outputs.action == 'release' || github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    environment: nix-release"
+  wmutant "the refresh signer off main through an or" \
+    "github.ref == 'refs/heads/main'
+      && (github.event_name" \
+    "github.ref == 'refs/heads/main' || true
+      && (github.event_name"
   wmutant "an input expanded into a script" '          case "$CHANNEL" in' '          echo "''${{ inputs.reason }}"
           case "$CHANNEL" in'
   # The concurrency expressions hold single quotes and GitHub expressions, so they are built in single quotes.
