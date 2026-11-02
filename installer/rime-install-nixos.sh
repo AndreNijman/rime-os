@@ -61,8 +61,10 @@ NIXOS_ESP_LABEL=RIME-ESP
 NIXOS_ROOT_LABEL=rime-root
 NIXOS_SUBVOLS="@nixos @nix @home"
 NIXOS_MOUNT_OPTS="compress-force=zstd:3"
-# rime-boot's own rule for a kernel parameter (nix/pkgs/rime-boot SAFE_PARAM).
-NIXOS_SAFE_PARAM='^[A-Za-z0-9_./:=,+@%~^\-\[\]!]+$'
+# rime-boot's own rule for a kernel parameter (nix/pkgs/rime-boot SAFE_PARAM), the same character set written
+# as a POSIX bracket expression: `]` first and `-` last, because `\]` inside brackets ends them in grep -E (the
+# Python spelling, copied verbatim, refused every parameter, `console=tty0` included).
+NIXOS_SAFE_PARAM='^[][A-Za-z0-9_./:=,+@%~^!-]+$'
 
 nixos_stamp() { tr -d '\r\n' < "$NIXOS_STAMPS/$1" 2>/dev/null || true; }
 
