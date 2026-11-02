@@ -412,14 +412,15 @@ def mode_firstboot_nixos(a):
         greeter = ("loginctl list-sessions --no-legend | awk '$3==\"%s\"{print $1}' | "
                    "xargs -r -I{} loginctl show-session {} -p VTNr -p Class | tr '\\n' ' '; echo" % a.greeter_user)
         script = (
+            # As root (the account is in wheel): the ESP and efivars are not readable by a user. Before BEGIN and
+            # silenced: a fresh account's FIRST sudo prints the lecture, which landed inside the LANG section.
+            "echo '" + a.password + "' | sudo -S -p '' -v >/dev/null 2>&1; "
             "printf '__RQ_%s__\\n' BEGIN; "
             # The running hostname: the install writes no static /etc/hostname.
             "printf '__RQ_%s__\\n' HOST; cat /proc/sys/kernel/hostname; "
             "printf '__RQ_%s__\\n' SYSTEM; readlink /run/current-system; "
             "printf '__RQ_%s__\\n' TZ; timedatectl show -p Timezone --value; "
             "printf '__RQ_%s__\\n' LANG; localectl status | sed -n 's/.*LANG=//p'; "
-            # As root (the account is in wheel): the ESP and efivars are not readable by a user.
-            "echo '" + a.password + "' | sudo -S -p '' -v; "
             "printf '__RQ_%s__\\n' SB; sudo -n od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c 2>&1 | awk '{print $NF}'; "
             "sudo -n bootctl status 2>&1 | grep -m1 'Secure Boot:' | sed 's/^ *//'; "
             "printf '__RQ_%s__\\n' FS; findmnt -no FSTYPE,OPTIONS / | tr ',' ' '; findmnt -no OPTIONS /nix | tr ',' ' '; findmnt -no OPTIONS /var/home | tr ',' ' '; findmnt -no FSTYPE /boot; "
