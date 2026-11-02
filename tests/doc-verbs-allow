@@ -54,4 +54,5 @@ rime or something
 # --help and fails if any does not parse.
 rime migrate check
 rime migrate repair-e
+rime migrate key-export
 rime migrate start
