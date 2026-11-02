@@ -38,7 +38,9 @@ sexpr() {   # sexpr ATTR [signed]
 # The lab's kernel arguments, through host.toml [boot] kernel_params (RIME_EXTRA_KARGS): the serial console the
 # drivers read (tty0 too, so the keyboard reaches the console passphrase prompt), systemd's info lines
 # ("Switching root.", an info line, so loglevel 7), its status lines past the shipped `quiet`, and no Plymouth, so the passphrase is asked on the console, as the bootc lab does.
-KARGS="console=tty0 console=ttyS0,115200 loglevel=7 systemd.show_status=1 plymouth.enable=0 rd.plymouth=0"
+# systemd.log_target=kmsg: once the NixOS initrd's journald is up, PID 1 logs to it and nothing reaches the serial
+# console, so "Switching root." (what the drivers wait for) was never seen although the pivot happened.
+KARGS="console=tty0 console=ttyS0,115200 loglevel=7 systemd.show_status=1 systemd.log_target=kmsg plymouth.enable=0 rd.plymouth=0"
 LUKSPASS=rimelabpass42
 USERPASS=labpass7
 
