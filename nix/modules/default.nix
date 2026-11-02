@@ -19,6 +19,8 @@
     ./update.nix
     ./greeting.nix
     ./terminal.nix
+    ./keymap.nix
+    ./luks-tpm.nix
   ];
 
   nixpkgs.overlays = [ overlay ];

@@ -117,8 +117,8 @@ def load_config(path):
     return cfg
 
 
-def read_host_boot(cfg):
-    """The [boot] table of /var/lib/rime/host.toml (D2 host layer), or {} when there is none."""
+def read_host(cfg):
+    """The parsed /var/lib/rime/host.toml (D2 host layer), or {} when there is none."""
     p = cfg["hostToml"]
     if not p or not os.path.exists(p):
         return {}
@@ -126,13 +126,68 @@ def read_host_boot(cfg):
         raise HookError("python has no tomllib; cannot read " + p)
     with open(p, "rb") as f:
         try:
-            data = tomllib.load(f)
+            return tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
             raise Refusal(f"{p} is not valid TOML ({e}); fix it or remove it") from e
-    boot = data.get("boot", {})
+
+
+def read_host_boot(cfg, host=None):
+    """The [boot] table of host.toml, or {} when there is none."""
+    boot = (read_host(cfg) if host is None else host).get("boot", {})
     if not isinstance(boot, dict):
-        raise Refusal(f"{p}: [boot] must be a table")
+        raise Refusal(f"{cfg['hostToml']}: [boot] must be a table")
     return boot
+
+
+# ── console keymap (PLAN.md D2 keymap gate, R19, Q16) ──────────────────────────
+#
+# The initrd is shared by every machine and keeps KEYMAP=us. A machine whose host.toml [keyboard] console names
+# another keymap gets rd.vconsole.keymap=<it> on every entry: the initrd's systemd-vconsole-setup loads it from the
+# initrd's /etc/kbd/keymaps before the LUKS passphrase is asked for (checks.keymap-luks proves gb and ch). The
+# initrd's keymap tree is the generation's /etc/kbd/keymaps (nixos/modules/config/console.nix: both are consoleEnv),
+# so <toplevel>/etc/kbd/keymaps says whether the name will load. When it will not and the machine unlocks a LUKS
+# volume at boot, the hook refuses by name: the passphrase would be read with the us layout (R19 lockout).
+KEYMAP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+-]*$")
+KEYMAP_SUFFIXES = (".map", ".map.gz", ".map.bz2", ".map.xz", ".map.zst")
+
+
+def keymap_in_tree(root, name):
+    """True when loadkeys would find NAME (as NAME.map[.gz|...]) anywhere under ROOT."""
+    if not os.path.isdir(root):
+        return False
+    want = {name + suf for suf in KEYMAP_SUFFIXES}
+    for _d, _dirs, files in os.walk(root, followlinks=True):
+        if want.intersection(files):
+            return True
+    return False
+
+
+def uses_luks(host, params):
+    return bool(host.get("luks")) or any(p.startswith(("rd.luks.", "luks.")) for p in params)
+
+
+def keymap_params(cfg, host, host_params, default):
+    """[] or ["rd.vconsole.keymap=<host.toml [keyboard] console>"], appended to every entry."""
+    kb = host.get("keyboard", {})
+    name = kb.get("console") if isinstance(kb, dict) else None
+    if not name or name == "us":
+        return []
+    if any(p.startswith("rd.vconsole.keymap=") for p in host_params):
+        return []  # [boot] kernel_params names one itself: it wins
+    if not isinstance(name, str) or not KEYMAP_NAME.match(name):
+        raise Refusal(f"{cfg['hostToml']}: [keyboard] console = {name!r} is not a keymap name")
+    tree = os.path.join(default.toplevel, "etc", "kbd", "keymaps")
+    if keymap_in_tree(tree, name):
+        return [f"rd.vconsole.keymap={name}"]
+    if uses_luks(host, host_params + default.params):
+        raise Refusal(
+            f"{cfg['hostToml']}: [keyboard] console = {name!r} is not a keymap of generation {default.number} "
+            f"({tree}), and this machine unlocks LUKS at boot: its passphrase prompt would read the us layout. "
+            "Pick a keymap that generation ships (localectl list-keymaps), or set it to \"us\""
+        )
+    log(f"warning: [keyboard] console = {name!r} is not a keymap of generation {default.number}; "
+        "the boot console stays on us")
+    return []
 
 
 def is_ostree_boot(boot_dir):
@@ -507,7 +562,8 @@ def install(cfg, toplevel_arg):
             "writes its menu and kernels only to its own ESP. Nothing was written; mount Rime's ESP at "
             f"{boot} and run the hook again"
         )
-    host_boot = read_host_boot(cfg)
+    host = read_host(cfg)
+    host_boot = read_host_boot(cfg, host)
     layout, why = resolve_layout(cfg, host_boot)
     host_params = host_boot.get("kernel_params", [])
     if not isinstance(host_params, list) or not all(isinstance(p, str) for p in host_params):
@@ -518,6 +574,7 @@ def install(cfg, toplevel_arg):
     gens, default = plan_generations(cfg, toplevel_arg)
     for g in gens:
         check_params(g.params, f"generation {g.number}")
+    host_params = host_params + keymap_params(cfg, host, host_params, default)
     grub_path = grub_path_of(cfg)
 
     rdir = os.path.join(boot, "rime", "nixos")

@@ -41,3 +41,5 @@
 // import ./installer.nix { inherit pkgs self; }
 # boot-loader-scan, boot-microcode, luks-boot, kernel-vm-signed
 // import ./bootmatrix.nix { inherit pkgs self; }
+# keymap-luks
+// import ./keymap.nix { inherit pkgs self; }
