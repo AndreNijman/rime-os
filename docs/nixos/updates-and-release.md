@@ -310,8 +310,13 @@ module option `rime.trust.nixSigners`. `EXPECTED_SIGNER` and `RENAMED_SIGNER` st
 `build-image.yml`. Nix objects are verified against `nix_expectations(roots)` (the `NIX_SIGNER` set and
 `EXPECTED_ISSUER`); a manifest signed by `build-image.yml`, by `promote-channel.yml` or by a fork's workflow is refused.
 
-The bootc readiness release ships `NIX_SIGNER` and the `rime-cache-1` public key one release before the bridge first
-uses them, as the rename did for `RENAMED_SIGNER`.
+The bootc readiness release (rime-os PR #137, draft) does **not** ship `NIX_SIGNER` or the `rime-cache-1` key. Nothing on
+the bootc side verifies a Nix channel document or a closure through `rime trust`: the only Nix object a bootc machine
+handles is the bridge payload, and the bridge checks that itself (`manifest.json.sig`, ed25519 over the exact bytes of
+`manifest.json`) against the one key in the image's `/usr/share/rime-os/trust/nixos-bridge-payload.pub`, a dedicated
+release key (`rime-bridge-payload-1`) made in the release environment. Until a bootc release ships that file, every
+`rime migrate start` refuses `payload-key-missing` (see `docs/nixos/bridge.md`). `NIX_SIGNER` and `rime-cache-1` are
+first read on the NixOS side, after the move.
 
 ### 5.2 Verification chain
 

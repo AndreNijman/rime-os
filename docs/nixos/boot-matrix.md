@@ -201,7 +201,7 @@ The scx self-test's attach window is 60 s in the checks (`nix/tests/kernel.nix`,
 failed. 60 s still fails a scheduler that never attaches.
 
 The mutant, run 2026-11-02 (`nix/tests/bootmatrix.nix` takes `settle`; `kernel-vm-signed` with `settle = 10`, built
-with `--impure --expr` from `scratch/secureboot/k2/mutant.nix`), against host CPU load made on purpose (40, then 60
+with `--impure --expr` from `/var/lab/rime-nix/artifacts/secureboot/k2/mutant.nix`), against host CPU load made on purpose (40, then 60
 `sha256sum /dev/zero` burners on katana's 20 threads):
 
 | run | window | host load average (1 min) | `scx_eevdf` attach | verdict |
