@@ -86,21 +86,28 @@ let
         conflicts = [ "initrd-switch-root.target" ];
         before = [ "initrd-switch-root.target" ];
         serviceConfig.Type = "simple";
+        # The count is written at every ask, and once more when initrd-switch-root stops this unit (TERM): a 0.2 s
+        # poll alone can miss a volume that opens just before switch-root (measured: N5/N6 read "asks none").
         script = ''
           seen=" " n=0 unlocked=0
-          while :; do
+          echo 0 > /run/rime-test-asks
+          scan() {
             for f in /run/systemd/ask-password/ask.*; do
               [ -e "$f" ] || continue
               case "$seen" in *" $f "*) continue ;; esac
               seen="$seen$f "
               n=$((n + 1))
               echo "RIME-ASK $n" > /dev/ttyS0
+              echo "$n" > /run/rime-test-asks
             done
             if [ "$unlocked" = 0 ] && [ -e /dev/mapper/cryptdata ]; then
               unlocked=1
               echo "RIME-UNLOCKED after $n asks" > /dev/ttyS0
-              echo "$n" > /run/rime-test-asks
             fi
+          }
+          trap 'scan; exit 0' TERM
+          while :; do
+            scan
             sleep 0.2
           done
         '';

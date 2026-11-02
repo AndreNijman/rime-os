@@ -64,7 +64,9 @@ in
             esac
           done
           seen=" " n=0 unlocked=0
-          while :; do
+          # One scan per 0.2 s, and a last one when initrd-switch-root stops this unit (TERM): the poll alone can miss
+          # a volume that opens just before switch-root (the TPM lab hit it), and the test waits for RIME-UNLOCKED.
+          scan() {
             for f in /run/systemd/ask-password/ask.*; do
               [ -e "$f" ] || continue
               case "$seen" in *" $f "*) continue ;; esac
@@ -89,6 +91,10 @@ in
               echo "RIME-UNLOCKED $tag after $n asks" > /dev/ttyS0
               echo "RIME-UNLOCKED $tag after $n asks" >> /run/rime-test-asks
             fi
+          }
+          trap 'scan; exit 0' TERM
+          while :; do
+            scan
             sleep 0.2
           done
         '';

@@ -116,7 +116,11 @@ the expected result.
 - `serial-getty@ttyS0` `vhangup()`s ttyS0 when it starts, and every later write of the stage-2 driver to it is lost
   (an independent rerun lost N4's `tpm2_clear` and `DONE` lines and failed N4, although the clear ran: N5 then read
   "State not recoverable"). `rime-tpm-lab.service` is now ordered before the getty.
+- The initrd ask watcher polled every 0.2 s and wrote its count only once it saw `/dev/mapper/cryptdata`; when the
+  volume opened just before switch-root the count was never written (an independent rerun: N5/N6 "asked none
+  times" although the recovery key unlocked). It now writes the count at every ask and scans once more on the TERM
+  that switch-root sends.
 - P2's PCR 7 is the same on every run (no MOK in the chain); P3/P4/N* depend on the TEST MOK that `prep` generates,
-  so a lab with fresh keys reads another value there (an independent rerun with new keys: P3 = N1 =
-  `c9d8fd95…d548e`, P2 = `078ded20…5c92` again, 10/10 PASS, mutant M4-only FAIL:
-  `/var/lab/rime-nix/artifacts/verify-tpmkeymap/`).
+  so a lab with fresh keys reads another value there (independent reruns with new keys: P3 = N1 = `c9d8fd95…d548e`,
+  then `a1c21dd1…4ab4`; P2 = `078ded20…5c92` every time; final run 10/10 PASS, mutant M4-only FAIL:
+  `/var/lab/rime-nix/artifacts/verify-tpmkeymap/tpm/{main,mutant-bootc-reenrol}`).

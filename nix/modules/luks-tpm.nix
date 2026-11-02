@@ -10,7 +10,8 @@
 # passphrase or the recovery key (systemd-ask-password: `systemctl start` answers it on the terminal it runs in),
 # wipes the TPM slot in its own systemd-cryptenroll call, enrols a new one bound to PCR 7 (Secure Boot enforcing
 # only), and fails if any keyslot or token that is not the TPM's changed: the recovery key the owner filed at install
-# keeps working. bootc's rime-luks-enroll wiped it and printed a new one (S3); --tpm-only never does. The unit is not
+# keeps working. It also fails (exit 3) when it ends without a TPM slot (Secure Boot off, no TPM, a refused
+# enrolment), so the unit never reports success for a volume that will ask at every boot. bootc's rime-luks-enroll wiped it and printed a new one (S3); --tpm-only never does. The unit is not
 # started by anything: the OVMF lab (nix/probe/ovmf/tpm, README.md: boots P3 and N1) measured that PCR 7 is the
 # same on NixOS as on bootc Rime when shim, GRUB and the MOK stay the same (PCR 7 records the key that signed the
 # kernel, not the kernel), so the move itself needs no re-enrolment. It is for the cases that DO

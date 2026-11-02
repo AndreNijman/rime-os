@@ -59,6 +59,8 @@
 #  path now refuses a volume that already has a recovery key (bootc's version
 #  wiped it and handed out a new one, which strands every printed copy of the
 #  old key): --tpm-only keeps it, --replace-recovery rotates it on purpose.
+#  Unlike the full path, a --tpm-only run that ends without a TPM slot (any
+#  decline) exits 3: re-binding the slot was the whole job.
 #
 #  ═══ WHAT IT DOES NOT DO ═══
 #
@@ -419,7 +421,10 @@ assert_kept() {
 
 # Every path from here on ends in one of these two, and both exit 0: the
 # recovery key is enrolled, so the volume is usable, and an installer must never
-# read "no TPM slot" as a failed install.
+# read "no TPM slot" as a failed install. The TPM-only path is the exception:
+# its whole job is the TPM slot, and a decline after the old slot was wiped
+# (tpm2-enrolment-failed, pcr-uninitialised) leaves the volume with none, so
+# rime-luks-tpm-reenrol@ must fail rather than report success.
 decline() {  # decline SLUG PROSE...
     local slug="$1"; shift
     assert_kept
@@ -438,6 +443,7 @@ decline() {  # decline SLUG PROSE...
         say "The disk still unlocks with your passphrase, and with the recovery key"
         say "in $RECOVERY_OUT. Keep that key somewhere that is not this computer."
     fi
+    (( ! TPM_ONLY )) || exit 3
     exit 0
 }
 
