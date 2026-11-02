@@ -15,23 +15,34 @@ Columns:
 
 P4 gates (8 weekly updates, live shell-only update, 30-day bytes, wall-clock) are not P2 and are not listed.
 
-## P2 status (integration of wave 2, 2026-11-02)
+## P2 status (integration of wave 3, 2026-11-03)
 
-**46 of 50 met, 4 partial, 0 not met** (D2 met on `nix/bridge2`, after this integration). Every branch below is merged on `feat/nixos`; on the merged HEAD the whole
-`nix flake check path:. -L --keep-going` passes (every Nix check named in a row re-ran there, not only on its branch;
-log `/var/lab/rime-nix/artifacts/integrate-wave2/flakecheck2.log`) and `hostlayer-katana` passes on the real katana
-snapshot (`integrate-wave2/hostlayer-katana.log`). Evidence from outside `nix flake check` was produced on the
-branches and NOT re-run at integration: the OVMF lab, iso-qualify and the boot drivers (B1-B10, T1-T3, I1-I3, D1, D2,
-X1), the delta measurements (G1, G2) and `pkg-translate.katana` on the real snapshot (P1); the logs are where each row
-says.
+**50 of 50 met, 0 partial, 0 not met**, counted from the Status column of every row below (wave 2 ended at 45 met,
+5 partial, nix/STATUS.md; D2, G3, P2, X4 and X5 were closed by wave 3: D2 by `nix/bridge2`, G3 by `nix/deltas`, P2 by decision in
+`nix/apps` with its hardware half in `docs/nixos/p3-katana-gates.md` P3-S1..S4, X4 and X5 by `nix/updates`). Every
+wave-3 branch (`nix/hygiene`, `nix/bridge2`, `nix/installer2`, `nix/apps`, `nix/secureboot`, `nix/updates`,
+`nix/deltas`) is merged on `feat/nixos`.
 
-Partial, and what each still needs:
+What re-ran on the merged head (code at 223a0758d; the commits after it change only docs), evidence in `/var/lab/rime-nix/artifacts/integrate-wave3/`:
 
-| # | Missing | Needs |
-|---|---|---|
-| P2 | Nothing for P2: Steam's own `-applaunch`, sign-in, Proton and a real GPU moved to P3 by decision (nix/apps, 2026-11-02; docs/nixos/p3-katana-gates.md P3-S1..S4), and the VM gate as worded is proven | Integrator: count P2 as met and drop this line |
-| X4 | Closed on `nix/updates` (wave 3): both literal cases are `update-e2e` subtests now; see the X4 row | Re-run at integration |
-| X5 | Closed on `nix/updates` (wave 3): `update-e2e` runs `rime rollback` after four refusals; see the X5 row | Re-run at integration |
+- **Every one of the 73 `checks.x86_64-linux.*`**: each check's `outPath`, evaluated at the merged head, is valid in
+  the store, i.e. that exact derivation passed (`outs-final.txt`, the method of wave 2's `proof-final.txt`). One
+  `nix flake check path:. -L --keep-going` ran first (`flake-check-1.log`); /var/lab ran out of space under it (two
+  disk images at once; 10 GB free, about 6 GB per image) and it was stopped; the checks it had not reached were then
+  built one at a time with the build directory off /var/lab (`build-2.log`, `build-3.log`): both rc 0, so `update-delta`, `update-e2e` and
+  `update-client` passed too. After that, 73 of 73 BUILT, 0 MISSING.
+- `vm-boot` at the merged head: all ten subtests (`build-2.log`). `bridge-unit` at the merged head: suite green, 49
+  mutants killed, including the two added at this integration (`bridge-unit-HEAD.log`).
+- Closure of `rime-vm`: 2121 paths, 10,567,108,960 B NAR (9.8 GiB), against wave 2's 2108 paths and 10,575,430,816 B
+  (`closure.txt`).
+
+Not re-run at integration (as in wave 2): the OVMF lab, iso-qualify and the boot drivers (B1-B10, T1-T3, I1-I3, D1,
+D2, X1), the delta measurements (G1, G2 and G3's VM timing runs), `pkg-translate.katana` on the real snapshot (P1) and
+`hostlayer-katana` on it (H1-H10); the logs are where each row says. **The bridge changed after every OVMF bridge run**:
+223a0758d (this integration) makes every start step after the start record roll back and makes `check` and `start`
+refuse over an unfinished record. That is proven by `bridge-unit` (5 new unit tests, mutants
+`start-early-steps-outside-rollback` and `check-ignores-start-record`), not by a lab run; an OVMF re-run of topology A
+(plain) and L (encrypted) on this bridge is owed before P3 (`docs/nixos/open-items.md`).
 
 Also open but not a row: every row that signs uses TEST keys (MOK, cache key, Fulcio identity; I2/I3 say so). The real
 keys exist only in CI and are first proven by a signed release (P3/P4). What the real Rime MOK certificate does is

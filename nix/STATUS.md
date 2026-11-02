@@ -1,4 +1,55 @@
-# Rime on NixOS: integration status (feat/nixos, 2026-11-02)
+# Rime on NixOS: integration status (feat/nixos, 2026-11-03)
+
+## Wave 3 (2026-11-03): merged, all 73 checks' outPaths valid, P2 50 of 50 met
+
+rime-shell first: `nix/shell-keys` (5e8635e6, the keys suite waits for its windows, not for a time) merged into
+rime-shell `feat/nixos` as 90f4d49a and pushed; 2adce61a0 locks it in `flake.lock`. Then merged into `feat/nixos`
+with `--no-ff`, in this order: `nix/hygiene` (743dc2390 → 4eb809859), `nix/bridge2` (627cb4f31 → 2294d127e),
+`nix/installer2` (f0c424e2b → 04c4d78b2), `nix/apps` (7fb9936a8 → c65bf0196), `nix/secureboot` (40697a650 →
+bb934fa2c), `nix/updates` (50d72dddb → 91ecbc555), `nix/deltas` (960801c77 → ffd32786c). Evidence:
+`/var/lab/rime-nix/artifacts/integrate-wave3/`; each branch's own evidence stays in `/var/lab/rime-nix/artifacts/<key>/`.
+
+What the merge needed (each its own commit):
+
+- 223a0758d fix(bridge): the bridge's `start` wrote its record after some steps had already run, so a failure in
+  those steps was not rolled back, and `check`/`start` did not look at an unfinished record. Every start step after
+  the record now rolls back, and both refuse with `already-moved`, `start-unfinished` or `start-record-unreadable`.
+  Five unit tests; mutants `start-early-steps-outside-rollback` and `check-ignores-start-record` fail them
+  (`bridge-unit`, 49 mutants killed, `bridge-unit-HEAD.log`). The bootc readiness side (draft PR #137) carries the
+  same contract.
+- 31020b023 docs(nixos): `docs/nixos/open-items.md` (every wave-2 handover item, 153 in all, with its state after
+  wave 3), `updates-and-release.md` §5.1 (the bootc readiness image ships the bridge payload key file only, not the
+  Nix signer or cache key) and the K2 mutant reference in `boot-matrix.md` (moved into artifacts).
+
+Proof on the merged head:
+
+- Every one of the **73** `checks.x86_64-linux.*`: its `outPath`, evaluated at the merged head, valid in the store
+  (`outs-final.txt`). The first `nix flake check path:. -L --keep-going` (`flake-check-1.log`) hit ENOSPC on /var/lab
+  (two ~6 GB disk images at once, ~10 GB free) and was stopped; the rest were built one at a time with the build
+  directory off /var/lab (`build-2.log`: boot-loader-scan, boot-microcode, bridge-refusals, ci, hostgates-disks,
+  hostgates-net, hostlayer, hostname-default, vm-boot, rc 0; `build-3.log`: update-delta, update-e2e (all subtests, 1619 s), update-client,
+  rc 0). The code head is 223a0758d; the commits after it change only docs.
+- `vm-boot`: all ten subtests passed. `bridge-unit`: green, 49 mutants killed.
+- cargo (rimed, in-build): 3770 passed, 57 self-skipped, 0 failed, 3 ignored, 35 skipped by name (`rimed-build.log`;
+  wave 2: 3750).
+- Closure (rime-vm toplevel `5yaprqcp…-nixos-system-rime-vm-26.11.20261030.1c89083`): **2121 paths,
+  10,567,108,960 B NAR (9.8 GiB)**; wave 2 was 2108 paths, 10,575,430,816 B (+13 paths, −8.3 MB) (`closure.txt`).
+- P2 checklist: `docs/nixos/p2-gates.md` "P2 status": **50 met**, 0 partial, 0 not met (wave 2: 45 met, 5 partial;
+  D2, G3, P2, X4, X5 closed by wave 3).
+- Readiness draft PR rime-os #137 (`feat/nixos-readiness`, still a draft, not merged): body refreshed for the
+  integrated bridge; checks 16 pass, 5 skipped (`pr137-checks-final.txt`); `tests/test-rime-migrate.sh
+  --with-binary` 98/0, cargo `nixos_bridge` 7 passed, `tests/test-boot-v2.sh` 154/1 (the one is the existing
+  efivarfs inverse control).
+
+Not re-run at integration: the OVMF lab and the iso-qualify / boot drivers, the delta timing runs, the katana-snapshot
+runs (P1, H1-H10). **The bridge changed at 223a0758d after every OVMF bridge run**: an OVMF re-run of topology A
+(plain) and L (encrypted) is owed before P3.
+
+Handover: every open item, with owner and reason, is in `docs/nixos/open-items.md` ("Opened by wave 3" and the
+per-key sections). The ones that block P3: the real MOK signature on the NixOS kernel (`nix-kernel-sign.yml` not on
+`main`, `RIME_NIX_KERNEL_HOST` unset: Andre's), the payload key `rime-bridge-payload-1`, katana's PCR 7 and
+`\EFI\APEX\grub.cfg`, P3-S1..S4, the production netinstall ISO and `.exe`, and the OVMF A/L re-run above. rime-shell
+PR #49 is open and was left alone.
 
 ## Wave 2 (2026-11-02): merged, all 61 checks pass, P2 45 of 50 met
 

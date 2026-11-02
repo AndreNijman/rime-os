@@ -12,8 +12,8 @@ States:
 - **STILL OPEN**: agent work not done yet, and why.
 
 An item that repeats one already answered says "see" and the first answer, so the two cannot drift. "The integration
-check" means the wave-3 `nix flake check path:. -L --keep-going` on the merged head (`docs/nixos/p2-gates.md`,
-"P2 status"; logs in `/var/lab/rime-nix/artifacts/integrate-wave3/`).
+check" means the wave-3 proof on the merged head: every `checks.x86_64-linux.*` outPath valid in the store
+(`/var/lab/rime-nix/artifacts/integrate-wave3/outs-final.txt`; how it was built: `docs/nixos/p2-gates.md`, "P2 status").
 
 ## build:tpmkeymap
 
@@ -187,8 +187,8 @@ check" means the wave-3 `nix flake check path:. -L --keep-going` on the merged h
    feature variants (5468b6bf5, `nix/release/variants.nix`). The installer installing them: see "Opened by wave 3".
 7. *P2 stays partly met.* FIXED: met by decision (nix/apps, ce99ac05a, 17bc4fded: compositing mutant); Steam's own
    launch, sign-in, Proton and the real GPU are P3-S1..S4.
-8. *d5's cargo mutants never logged.* DECIDED-NOT-TO: rimed's in-build cargo report is the evidence (0 failed at the
-   integration build, `artifacts/integrate-wave3/rimed-build.log`).
+8. *d5's cargo mutants never logged.* DECIDED-NOT-TO: rimed's in-build cargo report is the evidence (3770 passed, 0 failed
+   at the integration build, `/var/lab/rime-nix/artifacts/integrate-wave3/rimed-build.log`).
 9. *"Not problems" (attribution greps, host reads).* DECIDED-NOT-TO: nothing to act on.
 
 ## verify:tpmkeymap
@@ -356,7 +356,7 @@ Items the wave-3 pieces and this integration found and did not close.
 | Virtualization floors are estimates; the compressed 0.55 branch of the floor maths is unit-tested only | STILL OPEN | updates owner: measure a `plain-virt` closure when a release builds it |
 | The hosted runner's free disk for a full release closure is not measured | STILL OPEN | first hosted `nix-release.yml` run (`docs/nixos/updates-and-release.md` 1364) |
 | virtualization check: no explicit `swtpm.enable` assertion (the mutant fails it through behaviour) | STILL OPEN | apps owner: one assert line |
-| `release-standin` not re-run at the deltas head (3 VMs) | FIXED if the integration check builds it (p2-gates "P2 status") | — |
+| `release-standin` not re-run at the deltas head (3 VMs) | FIXED: built at the merged head (`outs-final.txt`) | — |
 | Uncompressed kernel modules | DECIDED-NOT-TO now: at the next `kernel.pin` bump (`docs/nixos/delta.md` 306) | kernel owner |
 | The mass-rebuild pair is timed VM-free only | DECIDED-NOT-TO: `delta.md` §5.2 says why (the weekly pair is VM-timed) | — |
 | A real internet link for the delta/update path | P3/HARDWARE | katana on the real cache |
