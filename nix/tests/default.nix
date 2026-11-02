@@ -47,3 +47,5 @@
 // import ./keymap.nix { inherit pkgs self; }
 # hostgates-net, hostgates-disks, hostgates-wifi-eval
 // import ./hostgates.nix { inherit pkgs self; }
+# bridge-unit, bridge-refusals
+// import ./bridge.nix { inherit pkgs self; }

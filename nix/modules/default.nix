@@ -22,6 +22,7 @@
     ./terminal.nix
     ./keymap.nix
     ./luks-tpm.nix
+    ./rootfs.nix
   ];
 
   nixpkgs.overlays = [ overlay ];
