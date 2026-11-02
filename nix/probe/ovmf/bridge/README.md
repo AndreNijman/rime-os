@@ -7,9 +7,10 @@ varstore, every key press goes to the guest.
 | File | What it does |
 |---|---|
 | `mkbootc.sh KIND` | Runs inside the published image (`podman run --privileged`, an empty tmpfs over `/sys/firmware`). Makes `disks/KIND/disk.raw` (and for E `win.raw`) |
-| `system.nix` | The lab NixOS system the bridge installs: the product modules + `rime.rootfs` + `rime.boot`, nixpkgs' kernel, one unit printing `RIME-BRIDGE:` markers on ttyS0 once greetd runs |
+| `system.nix` | The lab NixOS system the bridge installs: the product modules + `rime.rootfs` + `rime.boot`, nixpkgs' kernel. Its `rime-bridge-lab` unit was meant to print markers on ttyS0; serial-getty hangs that tty up under it and the unit fails (lab-only, harmless), so the driver checks the same things after a serial login |
 | `payload.sh TOPLEVEL BRIDGE` | Inside the rime-nix container: the payload disk (`payload/store.tar.zst`, `registration`, `manifest.json`, the bridge as it runs on bootc, `guest-prep.sh`) |
-| `guest-prep.sh KIND` | Inside the guest (refuses outside KVM): the firmware entries a real machine of KIND has (E: katana's `APEX-OS Primary` first, `Fedora`, the trial's `Boot0006` not in BootOrder) |
+| `guest-prep.sh KIND` | Inside the guest (refuses outside KVM): the firmware entries a real machine of KIND has (E: katana's `APEX-OS Primary` first, `Fedora`, the trial's `Rime OS` systemd-boot entry not in BootOrder; katana's is Boot0006, here the first free number) |
+| `refusals-mutant.nix` | `bridge-refusals` with a rime-migrate whose btrfs mounts are read-write: it MUST fail (proves the before/after sha256 can catch a write) |
 | `drive-bridge.py KIND` | Inside `localhost/rime-ovmf-probe`: the three phases below, logs in `$ART/KIND` |
 | `run.sh KIND [--fresh] [--phases …]` | Starts `drive-bridge.py` in the probe container |
 
@@ -37,14 +38,18 @@ the same image, with `/sys/firmware` replaced by an empty tmpfs first (checked b
 
 ## Phases (`drive-bridge.py`)
 
-- **bootc**: log in on ttyS0 with the old password, `guest-prep.sh`, [E: power off, boot again through
-  `APEX-OS Primary`, `check` (topology E), `repair-e`, `repair-e --confirm`], format the backup disk,
-  `check --explain --backup`, `start --backup --payload --yes`, record the new subvolumes, `custom.cfg` and the state.
-- **nixos**: GRUB's default is now the NixOS entry the boot hook wrote: wait for the lab markers (greetd active),
-  screenshot the greeter, log in on ttyS0 with the OLD password, compare the home checksums, read the carried
-  `phase`.
+- **bootc**: log in on ttyS0 with the old password, `guest-prep.sh`, power off and boot again through the machine's own
+  entry (A: `Fedora`; E: `APEX-OS Primary`), [E: `check` (topology E), `repair-e`, `repair-e --confirm`], format the
+  backup disk, `check --explain --backup`, `start --backup --payload --yes` (about 17 min: backup, both fsck gates with
+  a scrub, the 4 GB closure, `nix-store --verify --check-contents`), record the subvolumes, `custom.cfg` and the state.
+- **nixos**: GRUB's default is now the NixOS entry the boot hook wrote: wait for the serial getty, screenshot the
+  greeter (VGA), log in on ttyS0 with the OLD password, then greetd active, the mounts, the carried `phase` (E:
+  `failed`), the machine-id and the home checksums.
 - **back**: hold Up in GRUB's menu to pick the first entry (the ostree deployment): bootc boots, the same login works,
   home is intact.
+
+`--phases bootc,nixos,back,nixos` (what the evidence run used) ends with NixOS again: after the ostree round trip the
+default is still the NixOS entry.
 
 ## Secure Boot
 
@@ -60,5 +65,9 @@ sudo podman run --rm --privileged -e RIME_LAB_PASS=rime-lab-OLD-1 -v $LAB:/lab -
   --entrypoint bash ghcr.io/andrenijman/rime-os@sha256:0ace1f6d… /rig/mkbootc.sh A
 nix build --impure --expr '(import ./nix/probe/ovmf/bridge/system.nix { flake = builtins.getFlake "path:/work/wt-bridge"; })'
 nix shell nixpkgs#{zstd,e2fsprogs,python3,gnutar,coreutils,gnused,bash} -c bash nix/probe/ovmf/bridge/payload.sh TOPLEVEL BRIDGE
-nix/probe/ovmf/bridge/run.sh A --fresh
+nix/probe/ovmf/bridge/run.sh A --fresh --phases bootc,nixos,back,nixos
+# after rebuilding rime-bridge only: REFRESH_ONLY=1 ... payload.sh x BRIDGE swaps the bridge on the payload disk
 ```
+
+Evidence: `/var/lab/rime-nix/artifacts/bridge/` (`run-KIND.log` + `KIND/` per command; `run1/` = the first
+passing run, on the bridge before the H8 refactor).

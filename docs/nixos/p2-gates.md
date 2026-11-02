@@ -71,8 +71,8 @@ Input: the sanitised snapshot `/var/lab/rime-nix/artifacts/katana-state/` (0700,
 | H5 | `machine-id` is unchanged | VM test | none | not met yet |
 | H6 | Both fstab mounts come up | VM test | none | not met yet |
 | H7 | Boot still completes with one of those disks absent | VM test (second disk removed) | none | not met yet |
-| H8 | fsck containment gate (D2) | VM test | none | not met yet |
-| H9 | Free-space gate on the disk figure: closure + one mass rebuild (~10.5 GB) + what the old copies can pin (D2) | `rime migrate check` VM test: refuses below the figure, by name | none | not met yet |
+| H8 | fsck containment gate (D2) | VM test | `rime migrate start` runs ostree fsck + `btrfs device stats -c` + a read-only scrub before and after, then compares ostree's /boot, custom.cfg outside the hook's block, the deployments and every ESP file: both clean and unchanged in the OVMF A and E runs (`/var/lab/rime-nix/artifacts/bridge/A/A-start.txt`, `E/E-start.txt`); a failure rolls back (seen once, when an earlier A run hit a missing chroot: "removing what the bridge made" then "rolled back"; that log was overwritten, so the rollback path has no kept evidence); `bridge-unit` tests the diff with 2 mutants | met (2026-11-02) |
+| H9 | Free-space gate on the disk figure: closure + one mass rebuild (~10.5 GB) + what the old copies can pin (D2) | `rime migrate check` VM test: refuses below the figure, by name | check `bridge-refusals`: `REFUSED [free-space]` on the H9 disk and on a 1 GiB A under the real 19 GB floor, disk sha256 unchanged (`/var/lab/rime-nix/artifacts/bridge/bridge-refusals.log`); the OVMF A run reports "52.5 GB free, 27.8 GB needed (floor 19.0 + home 0.0 + old store 8.8)"; mutants free-space-flipped + floor-dropped | met (2026-11-02) |
 | H10 | The `/etc` carry list, including katana's host-local files (`60-bfq-nvme.rules`, `99-dualsense-touchpad.rules`, `90-desktop-writeback.conf`, docs/nixos/fedora-defaults.md) | VM test: each file present or listed in the "left behind" report | none | not met yet |
 
 ## Activation
@@ -93,12 +93,12 @@ Input: the sanitised snapshot `/var/lab/rime-nix/artifacts/katana-state/` (0700,
 
 | # | Gate | How proven | Evidence so far | Status |
 |---|---|---|---|---|
-| D1 | Topology **E** (a failed boot migration's leftovers; katana) migrates in a VM | OVMF lab log on a VM built to topology E | none (wave 2) | not met yet |
-| D2 | Topology **A** (installer default) migrates in a VM | OVMF lab log | none | not met yet |
-| D3 | Topology **B** is refused by name | `rime migrate check` VM test: names B, writes nothing | none | not met yet |
-| D4 | Topology **C** is refused by name | same | none | not met yet |
-| D5 | Topology **D** is refused by name | same | none | not met yet |
-| D6 | Topology **F** is refused by name | same | none | not met yet |
+| D1 | Topology **E** (a failed boot migration's leftovers; katana) migrates in a VM | OVMF lab log on a VM built to topology E | `/var/lab/rime-nix/artifacts/bridge/run-E.log` + `E/`: a disk from the published image (2026.11.01.2) + katana's leftovers, booted through `APEX-OS Primary`; check = E (on D), repair-e, start; NixOS boots by default, greeter shown (`E/E-nixos-greeter.png`), old password logs in, home sums OK, phase=failed carried; the ostree entry still boots; NixOS again after it. SB off; katana's snapshot also classifies as E (`katana-state-classify.log`) | met (2026-11-02, SB off) |
+| D2 | Topology **A** (installer default) migrates in a VM | OVMF lab log | `/var/lab/rime-nix/artifacts/bridge/run-A.log` + `A/`: a disk from the published image (2026.11.01.2), booted through `Fedora`; check = A, start; @nixos/@nix/@home mounted compress-force=zstd:3, greeter shown (`A/A-nixos-greeter.png`), old password logs in, home sums OK, machine-id kept; the ostree entry still boots; NixOS again after it. SB off | met (2026-11-02, SB off) |
+| D3 | Topology **B** is refused by name | `rime migrate check` VM test: names B, writes nothing | check `bridge-refusals`: `REFUSED [topology-B]`, disk sha256 unchanged (`/var/lab/rime-nix/artifacts/bridge/bridge-refusals.log`); its rw-mount mutant fails on the sha256 (`bridge-refusals-mutant-rw.log`) | met (2026-11-02) |
+| D4 | Topology **C** is refused by name | same | check `bridge-refusals`: `REFUSED [topology-C]`, disk sha256 unchanged | met (2026-11-02) |
+| D5 | Topology **D** is refused by name | same | check `bridge-refusals`: `REFUSED [topology-D]`, disk sha256 unchanged | met (2026-11-02) |
+| D6 | Topology **F** is refused by name | same | check `bridge-refusals`: `REFUSED [topology-F]`, disk sha256 unchanged | met (2026-11-02) |
 
 ## G2 delta transport (D6)
 
@@ -125,8 +125,8 @@ Listed so they are not lost; they close the same way.
 
 | # | Gate | Source | How proven | Status |
 |---|---|---|---|---|
-| X1 | The topology E repair runs | D3 P2 gates | OVMF lab log | not met yet |
+| X1 | The topology E repair runs | D3 P2 gates | OVMF lab log: `/var/lab/rime-nix/artifacts/bridge/E/E-repair-e*.txt`, `E-after-repair.txt` (trial ESP dirs + the trial NVRAM entry archived under /var/lib/rime/boot-migrate/archive-*, entry deleted, BootOrder untouched, phase=failed kept and carried to NixOS) | met (2026-11-02) |
 | X2 | The `test-boot-v2.sh` scan finds no `bootctl`, `grub-install` or `efibootmgr` in the activation script or the boot hook | D3 | check attr (boothook) | not met yet |
-| X3 | A machine that never took the release carrying `RENAMED_SIGNER` is refused by name | D1 | `rime migrate check` VM test | not met yet |
+| X3 | A machine that never took the release carrying `RENAMED_SIGNER` is refused by name | D1 | `rime migrate check` VM test: `bridge-refusals` X3 disk `REFUSED [renamed-signer]`, sha256 unchanged (`/var/lab/rime-nix/artifacts/bridge/bridge-refusals.log`); mutant no-signer-check | met (2026-11-02) |
 | X4 | An end-to-end update in a VM refuses a tampered narHash, an unsigned manifest and a wrong identity | D6 | `update-e2e` (release + client) | not met yet |
 | X5 | Rollback works after a refused update | D6 | `update-e2e` | not met yet |
