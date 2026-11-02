@@ -79,11 +79,17 @@ TRIAL_TOP = ("composefs", "state")
 BOOT_PART_FSTYPES = ("ext4",)
 # rime backup's key store (rimed/rime-backup-core/src/keys.rs SYSTEM_ROOT): keys/<uid>.key, recipients/<uid>.pub.
 BACKUP_KEYS_ROOT = "/var/lib/rime-backup"
-# The payload's manifest is signed with the Rime cache key (rime-cache-1, nix/modules/update.nix rime.update.cacheKeys
-# default): manifest.sig = "<key name>:<base64 ed25519 signature>" over PAYLOAD_DOMAIN + the manifest's exact bytes.
-# The domain prefix keeps a payload signature from ever being a valid narinfo signature, and the other way round.
-TRUSTED_PAYLOAD_KEYS = ("rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=",)
-PAYLOAD_DOMAIN = b"rime-bridge-payload-v1\n"
+# The payload's manifest is signed (docs/nixos/bridge.md "The payload is signed"). The format is the one the bootc side's
+# `rime migrate start` checks before it runs this program (rimed/rime/src/nixos_bridge.rs in the readiness release),
+# byte for byte, so either verifier accepts exactly what the other does:
+#   PAYLOAD_KEY_FILE   one line "<name>:<base64 of the 32-byte ed25519 public key>", shipped in the bootc image
+#   manifest.json.sig  one line "<name>:<base64 of the 64-byte ed25519 signature>" over the exact bytes of
+#                      manifest.json, signed by the key of the same name
+PAYLOAD_KEY_FILE = "/usr/share/rime-os/trust/nixos-bridge-payload.pub"
+PAYLOAD_SIG = "manifest.json.sig"
+# None = trust PAYLOAD_KEY_FILE, the product. The OVMF lab's build replaces this one line with its TEST key
+# (nix/probe/ovmf/bridge/lab-bridge.nix); no flag or environment variable can do the same.
+TRUSTED_PAYLOAD_KEYS = None
 
 TOPOLOGY_TEXT = {
     "A": "ostree + bootupd GRUB, shim in \\EFI\\fedora on Rime's own ESP (installer default)",
@@ -243,21 +249,38 @@ def parse_key(text):
     return (name, raw) if name and b64 else (None, None)
 
 
-def verify_manifest_signature(manifest_bytes, sig_text, trusted=None):
+def payload_keys(path=None):
+    """The keys a payload may be signed by: TRUSTED_PAYLOAD_KEYS when a lab build set it, else PAYLOAD_KEY_FILE.
+    Refused by name: payload-key-missing (no key file: this system cannot check any payload), payload-key-bad."""
+    if TRUSTED_PAYLOAD_KEYS is not None and path is None:
+        return tuple(TRUSTED_PAYLOAD_KEYS)
+    path = path or PAYLOAD_KEY_FILE
+    text = read(path)
+    if text is None:
+        raise Refused("payload-key-missing", f"this system has no payload signing key ({path}), so no payload can be "
+                      "checked; take the release that ships it first")
+    name, raw = parse_key(text) if len(text.strip().splitlines()) == 1 else (None, None)
+    if name is None or len(raw) != 32:
+        raise Refused("payload-key-bad", f"{path} is not one \"<name>:<base64 ed25519 public key>\" line")
+    return (text.strip(),)
+
+
+def verify_manifest_signature(manifest_bytes, sig_text, trusted):
     """The payload manifest's signature check. Raises Refused by name: payload-unsigned, payload-key-untrusted,
     payload-signature-bad. Returns the key name that signed it."""
-    trusted = TRUSTED_PAYLOAD_KEYS if trusted is None else trusted
     if sig_text is None or not sig_text.strip():
-        raise Refused("payload-unsigned", "the payload has no manifest.sig: a payload nobody signed is never installed")
-    name, sig = parse_key(sig_text)
+        raise Refused("payload-unsigned", f"the payload has no {PAYLOAD_SIG}: a payload nobody signed is never "
+                      "installed")
+    name, sig = parse_key(sig_text) if len(sig_text.strip().splitlines()) == 1 else (None, None)
     if name is None or len(sig) != 64:
-        raise Refused("payload-signature-bad", "manifest.sig is not \"<key name>:<base64 ed25519 signature>\"")
+        raise Refused("payload-signature-bad", f"{PAYLOAD_SIG} is not one \"<key name>:<base64 ed25519 signature>\" "
+                      "line")
     keys = dict(parse_key(k) for k in trusted)
     if name not in keys:
-        raise Refused("payload-key-untrusted", f"the manifest is signed by {name!r}, not by a key this bridge trusts "
+        raise Refused("payload-key-untrusted", f"the manifest is signed by {name!r}, not by a key this system trusts "
                       f"({', '.join(k.split(':')[0] for k in trusted)})")
-    if not ed25519_verify(keys[name], PAYLOAD_DOMAIN + manifest_bytes, sig):
-        raise Refused("payload-signature-bad", f"manifest.sig does not verify against {name}: the manifest was "
+    if not ed25519_verify(keys[name], manifest_bytes, sig):
+        raise Refused("payload-signature-bad", f"{PAYLOAD_SIG} does not verify against {name}: the manifest was "
                       "changed after it was signed, or the signature belongs to another file")
     return name
 
@@ -1398,15 +1421,17 @@ def wait_units(timeout=3600, poll=5):
 
 
 def verify_payload(payload, trusted=None):
-    """The payload: manifest.json signed (manifest.sig, TRUSTED_PAYLOAD_KEYS), then every file it names by sha256.
-    Refused by name: payload-missing, payload-unsigned, payload-key-untrusted, payload-signature-bad, payload-corrupt."""
+    """The payload: manifest.json signed (PAYLOAD_SIG, by a key payload_keys() trusts), then every file it names by
+    sha256. Refused by name: payload-key-missing, payload-key-bad, payload-missing, payload-unsigned,
+    payload-key-untrusted, payload-signature-bad, payload-corrupt."""
+    trusted = payload_keys() if trusted is None else trusted
     mp = os.path.join(payload, "manifest.json")
     try:
         with open(mp, "rb") as f:
             raw = f.read()
     except OSError as e:
         raise Refused("payload-missing", f"{mp}: {e.strerror}")
-    signer = verify_manifest_signature(raw, read(os.path.join(payload, "manifest.sig")), trusted)
+    signer = verify_manifest_signature(raw, read(os.path.join(payload, PAYLOAD_SIG)), trusted)
     man = json.loads(raw)
     for key in ("store", "registration", "preview"):
         if key not in man:

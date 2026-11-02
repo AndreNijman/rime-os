@@ -236,8 +236,9 @@ TEST_PUB = ed_sign(TEST_SEED, b"")[0]
 TEST_KEY = "rime-test-1:" + base64.b64encode(TEST_PUB).decode()
 
 
-def sign_manifest(raw, seed=TEST_SEED, name="rime-test-1", domain=True):
-    return f"{name}:" + base64.b64encode(ed_sign(seed, (B.PAYLOAD_DOMAIN if domain else b"") + raw)[1]).decode()
+def sign_manifest(raw, seed=TEST_SEED, name="rime-test-1", prefix=b""):
+    """manifest.json.sig as the release writes it: the key name and the signature over the manifest's exact bytes."""
+    return f"{name}:" + base64.b64encode(ed_sign(seed, prefix + raw)[1]).decode()
 
 
 class Ed25519(unittest.TestCase):
@@ -260,9 +261,59 @@ class Ed25519(unittest.TestCase):
         s = int.from_bytes(sig2[32:], "little") + B._L
         self.assertFalse(B.ed25519_verify(pub2, h("72"), sig2[:32] + s.to_bytes(32, "little")))
 
-    def test_trusted_key_is_the_cache_key(self):
-        self.assertEqual([k.split(":")[0] for k in B.TRUSTED_PAYLOAD_KEYS], ["rime-cache-1"])
-        self.assertEqual(len(B.parse_key(B.TRUSTED_PAYLOAD_KEYS[0])[1]), 32)
+    def test_the_product_trusts_the_image_key_file(self):
+        # The shipped program trusts the key file the bootc image carries (the readiness release), nothing compiled in.
+        self.assertIsNone(B.TRUSTED_PAYLOAD_KEYS)
+        self.assertEqual(B.PAYLOAD_KEY_FILE, "/usr/share/rime-os/trust/nixos-bridge-payload.pub")
+        self.assertEqual(B.PAYLOAD_SIG, "manifest.json.sig")
+
+
+class KeyFile(unittest.TestCase):
+    """payload_keys(): the image's nixos-bridge-payload.pub, in the readiness release's format."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.f = os.path.join(self.d, "nixos-bridge-payload.pub")
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def key(self, text):
+        with open(self.f, "w") as f:
+            f.write(text)
+        try:
+            return B.payload_keys(self.f), None
+        except B.Refused as e:
+            return None, e.name
+
+    def test_good(self):
+        self.assertEqual(self.key(TEST_KEY + "\n"), ((TEST_KEY,), None))
+
+    def test_missing(self):
+        with self.assertRaises(B.Refused) as cm:
+            B.payload_keys(self.f)
+        self.assertEqual(cm.exception.name, "payload-key-missing")
+
+    def test_bad(self):
+        self.assertEqual(self.key("rime-test-1:" + base64.b64encode(b"x" * 31).decode())[1], "payload-key-bad")
+        self.assertEqual(self.key(TEST_KEY + "\n" + TEST_KEY + "\n")[1], "payload-key-bad")
+        self.assertEqual(self.key("no colon here")[1], "payload-key-bad")
+
+    def test_payload_checked_against_the_key_file(self):
+        pl = os.path.join(self.d, "pl")
+        make_payload(pl)
+        with open(self.f, "w") as f:
+            f.write(TEST_KEY + "\n")
+        old = B.PAYLOAD_KEY_FILE
+        B.PAYLOAD_KEY_FILE = self.f
+        try:
+            self.assertEqual(B.verify_payload(pl)["signed_by"], "rime-test-1")
+            os.unlink(self.f)
+            with self.assertRaises(B.Refused) as cm:
+                B.verify_payload(pl)
+            self.assertEqual(cm.exception.name, "payload-key-missing")
+        finally:
+            B.PAYLOAD_KEY_FILE = old
 
 
 class SignedManifest(unittest.TestCase):
@@ -290,12 +341,19 @@ class SignedManifest(unittest.TestCase):
         self.assertEqual(self.refused(sign_manifest(self.RAW, other, "rime-other-1")), "payload-key-untrusted")
         # the right name with another key's signature is a bad signature, not a trusted one
         self.assertEqual(self.refused(sign_manifest(self.RAW, other)), "payload-signature-bad")
-        # the production default trusts rime-cache-1 only
-        self.assertEqual(self.refused(sign_manifest(self.RAW), B.TRUSTED_PAYLOAD_KEYS), "payload-key-untrusted")
+        self.assertEqual(self.refused(sign_manifest(self.RAW), ("rime-other-1:" + TEST_KEY.split(":")[1],)),
+                         "payload-key-untrusted")
 
-    def test_domain_separated(self):
-        # A signature over the bare manifest (what a narinfo-style signature would be) is not a payload signature.
-        self.assertEqual(self.refused(sign_manifest(self.RAW, domain=False)), "payload-signature-bad")
+    def test_exact_bytes_only(self):
+        # The signature covers manifest.json's bytes and nothing else: one with any prefix (the domain-separated form
+        # this branch first used) is not the readiness release's format and is refused.
+        self.assertEqual(self.refused(sign_manifest(self.RAW, prefix=b"rime-bridge-payload-v1\n")),
+                         "payload-signature-bad")
+
+    def test_one_line(self):
+        sig = sign_manifest(self.RAW)
+        self.assertEqual(B.verify_manifest_signature(self.RAW, sig + "\n", (TEST_KEY,)), "rime-test-1")
+        self.assertEqual(self.refused(sig + "\n" + sig + "\n"), "payload-signature-bad")
 
     def test_garbage(self):
         self.assertEqual(self.refused("rime-test-1:not base64!"), "payload-signature-bad")
@@ -317,7 +375,7 @@ def make_payload(d, sign=True, preview=None):
     with open(os.path.join(d, "manifest.json"), "wb") as f:
         f.write(raw)
     if sign:
-        with open(os.path.join(d, "manifest.sig"), "w") as f:
+        with open(os.path.join(d, "manifest.json.sig"), "w") as f:
             f.write(sign_manifest(raw) + "\n")
     return m
 
@@ -360,11 +418,23 @@ class Payload(unittest.TestCase):
             B.verify_payload(self.d, (TEST_KEY,))
         self.assertEqual(cm.exception.name, "payload-signature-bad")
 
-    def test_production_key_refuses_the_lab_key(self):
+    def test_no_key_file_refuses_every_payload(self):
+        # The product with no nixos-bridge-payload.pub (a release before the key ships): nothing is installed.
         make_payload(self.d)
+        old, B.PAYLOAD_KEY_FILE = B.PAYLOAD_KEY_FILE, os.path.join(self.d, "absent.pub")
+        try:
+            with self.assertRaises(B.Refused) as cm:
+                B.verify_payload(self.d)
+        finally:
+            B.PAYLOAD_KEY_FILE = old
+        self.assertEqual(cm.exception.name, "payload-key-missing")
+
+    def test_old_signature_file_name_is_unsigned(self):
+        make_payload(self.d)
+        os.rename(os.path.join(self.d, "manifest.json.sig"), os.path.join(self.d, "manifest.sig"))
         with self.assertRaises(B.Refused) as cm:
-            B.verify_payload(self.d)
-        self.assertEqual(cm.exception.name, "payload-key-untrusted")
+            B.verify_payload(self.d, (TEST_KEY,))
+        self.assertEqual(cm.exception.name, "payload-unsigned")
 
 
 class Preview(unittest.TestCase):

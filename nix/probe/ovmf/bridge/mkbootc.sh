@@ -18,7 +18,7 @@ KIND=$1
 L=/lab
 W=$L/disks/$KIND
 IMGREF_TARGET=ostree-unverified-registry:ghcr.io/andrenijman/rime-os:rime
-ROOT_UUID=$( [[ $KIND == E ]] && echo 087699bd-5e1f-4c1a-9b77-0e0e0e0e0e0e || echo 3a7d2c10-7b4e-4a51-8d1c-a1a1a1a1a1a1 )
+ROOT_UUID=$( [[ $KIND == E ]] && echo 0b0b0b0b-5e1f-4c1a-9b77-0e0e0e0e0e0e || echo 3a7d2c10-7b4e-4a51-8d1c-a1a1a1a1a1a1 )
 LABEL=$( [[ $KIND == E ]] && echo apex-root || echo rime-root )
 USER_NAME=alex
 USER_PASS=${RIME_LAB_PASS:?the TEST password of the lab account}

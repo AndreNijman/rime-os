@@ -42,8 +42,11 @@ let
     [ "unknown-shape-guessed" "rime-bridge.py" ''s/    if shape == "unknown":/    if False:/'' "an unknown grub.cfg shape not explained" ]
     [ "stub-target-ignored" "rime-bridge.py" ''s/return "grub2-stub", re.search(UUID_RX, line).group(0).lower(), missing, cmds/return "grub2-stub", None, missing, cmds/'' "a grub2 stub's target never compared" ]
     [ "unsigned-accepted" "rime-bridge.py" ''s/    if sig_text is None or not sig_text.strip():/    if False:/'' "an unsigned payload not refused by name" ]
-    [ "signature-unchecked" "rime-bridge.py" ''s/    if not ed25519_verify(keys\[name\], PAYLOAD_DOMAIN + manifest_bytes, sig):/    if False:/'' "a tampered manifest installed" ]
-    [ "signature-no-domain" "rime-bridge.py" ''s/ed25519_verify(keys\[name\], PAYLOAD_DOMAIN + manifest_bytes, sig)/ed25519_verify(keys[name], manifest_bytes, sig)/'' "a bare (narinfo-style) signature accepted" ]
+    [ "signature-unchecked" "rime-bridge.py" ''s/    if not ed25519_verify(keys\[name\], manifest_bytes, sig):/    if False:/'' "a tampered manifest installed" ]
+    [ "signature-prefixed" "rime-bridge.py" ''s/ed25519_verify(keys\[name\], manifest_bytes, sig)/ed25519_verify(keys[name], b"rime-bridge-payload-v1\\n" + manifest_bytes, sig)/'' "a format the readiness release's verifier does not use" ]
+    [ "signature-file-renamed" "rime-bridge.py" ''s/^PAYLOAD_SIG = "manifest.json.sig"/PAYLOAD_SIG = "manifest.sig"/'' "the signature read from a file the producer never writes" ]
+    [ "key-compiled-in" "rime-bridge.py" ''s|^TRUSTED_PAYLOAD_KEYS = None|TRUSTED_PAYLOAD_KEYS = ("rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=",)|'' "the image's key file ignored" ]
+    [ "key-file-first-line" "rime-bridge.py" ''s/    name, raw = parse_key(text) if len(text.strip().splitlines()) == 1 else (None, None)/    name, raw = parse_key(text.splitlines()[0])/'' "a key file that is not one line accepted" ]
     [ "any-key-trusted" "rime-bridge.py" ''s/    if name not in keys:/    if False:/'' "a key nobody trusts not refused by name" ]
     [ "ed25519-s-unbounded" "rime-bridge.py" ''s/if a is None or r is None or s >= _L:/if a is None or r is None:/'' "a malleable S accepted" ]
     [ "preview-preview-skipped" "rime-bridge.py" ''s/    for key in ("store", "registration", "preview"):/    for key in ("store", "registration"):/'' "preview.tar not bound to the signature" ]
@@ -185,30 +188,45 @@ in
     ${lib.concatMapStrings (runMutant ../pkgs/rime-hostlayer "${../pkgs/rime-hostlayer}/tests" "RIME_HOSTLAYER")
       hlMutants}
 
-    # The key the bridge trusts is the one nix/modules/update.nix ships as rime.update.cacheKeys' default.
-    want=$(grep -o 'rime-cache-1:[A-Za-z0-9+/=]*' ${../modules/update.nix} | head -n1)
-    have=$(grep -o 'TRUSTED_PAYLOAD_KEYS = ("rime-cache-1:[A-Za-z0-9+/=]*' ${src}/rime-bridge.py | cut -d'"' -f2)
-    [ -n "$want" ] && [ "$want" = "$have" ] || { echo "trusted payload key $have is not update.nix's $want"; exit 1; }
-    echo "trusted payload key = update.nix rime-cache-1: $have"
-
-    # An OpenSSL-made signature verifies with the bridge's own ed25519 (independent implementation), through
-    # verify_payload, with the TEST key substituted the way the lab builds its bridge.
+    # The payload signature end to end with OpenSSL, in the readiness release's format: payload-sign.sh (the
+    # release's signer) signs with a Nix-format secret key; the signature verifies with the exact command the bootc
+    # side's `rime migrate start` runs (openssl pkeyutl -verify -rawin, DER SubjectPublicKeyInfo) AND with the bridge's
+    # own ed25519 (an independent implementation), reading the key file the bootc image ships.
     mkdir pl
     printf store > pl/store.tar.zst; printf reg > pl/registration
     python3 -I ${mkManifest} pl
     openssl genpkey -algorithm ed25519 -out test.pem
-    pub=$(openssl pkey -in test.pem -pubout -outform DER | tail -c 32 | base64 -w0)
-    { printf 'rime-bridge-payload-v1
-'; cat pl/manifest.json; } > signed-bytes
-    openssl pkeyutl -sign -inkey test.pem -rawin -in signed-bytes -out sig.bin
-    echo "rime-test-1:$(base64 -w0 sig.bin)" > pl/manifest.sig
-    sed "s|^TRUSTED_PAYLOAD_KEYS = .*|TRUSTED_PAYLOAD_KEYS = (\"rime-test-1:$pub\",)|" ${bridge}/bin/rime-migrate > lab-bridge.py
-    python3 -I -c 'import importlib.machinery as m, sys; b = m.SourceFileLoader("b", "lab-bridge.py").load_module(); print("openssl-signed payload:", b.verify_payload("pl")["signed_by"])'
+    { openssl pkey -in test.pem -outform DER | tail -c 32; openssl pkey -in test.pem -pubout -outform DER | tail -c 32; } > secret.bin
+    echo "rime-bridge-TEST-1:$(base64 -w0 secret.bin)" > secret.key
+    bash ${bridge}/share/rime-bridge/payload-sign.sh secret.key pl > nixos-bridge-payload.pub
+    [ "$(cut -d: -f1 pl/manifest.json.sig)" = rime-bridge-TEST-1 ] || { echo "manifest.json.sig names another key"; exit 1; }
+    { printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00'; cut -d: -f2 nixos-bridge-payload.pub | base64 -d; } > pub.der
+    cut -d: -f2 pl/manifest.json.sig | base64 -d > sig.bin
+    openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in pl/manifest.json -sigfile sig.bin
+    sed "s|^PAYLOAD_KEY_FILE = .*|PAYLOAD_KEY_FILE = \"$PWD/nixos-bridge-payload.pub\"|" ${bridge}/bin/rime-migrate > img-bridge.py
+    python3 -I -c 'import importlib.machinery as m; b = m.SourceFileLoader("b", "img-bridge.py").load_module(); print("payload-sign.sh payload, bridge verifier:", b.verify_payload("pl")["signed_by"])'
+    cp pl/manifest.json manifest.orig
     printf ' ' >> pl/manifest.json
-    if python3 -I -c 'import importlib.machinery as m; b = m.SourceFileLoader("b", "lab-bridge.py").load_module(); b.verify_payload("pl")' 2> tamper.err; then
-      echo "a manifest changed after openssl signed it was accepted"; exit 1
+    if openssl pkeyutl -verify -pubin -keyform DER -inkey pub.der -rawin -in pl/manifest.json -sigfile sig.bin >/dev/null 2>&1; then
+      echo "openssl accepted a manifest changed after signing"; exit 1
     fi
-    grep -q 'payload-signature-bad' tamper.err && echo "openssl-signed payload, one byte appended: refused [payload-signature-bad]"
+    if python3 -I -c 'import importlib.machinery as m; b = m.SourceFileLoader("b", "img-bridge.py").load_module(); b.verify_payload("pl")' 2> tamper.err; then
+      echo "a manifest changed after signing was accepted"; exit 1
+    fi
+    grep 'payload-signature-bad' tamper.err >/dev/null
+    echo "one byte appended after signing: openssl refuses, bridge refuses [payload-signature-bad]"
+    cp manifest.orig pl/manifest.json
+    rm nixos-bridge-payload.pub
+    if python3 -I -c 'import importlib.machinery as m; b = m.SourceFileLoader("b", "img-bridge.py").load_module(); b.verify_payload("pl")' 2> nokey.err; then
+      echo "a payload was accepted with no key file"; exit 1
+    fi
+    grep 'payload-key-missing' nokey.err >/dev/null && echo "no key file in the image: refused [payload-key-missing]"
+    # payload-sign.sh refuses a secret whose halves do not belong together.
+    { head -c 32 secret.bin; head -c 32 /dev/zero; } | base64 -w0 | sed 's/^/rime-bridge-TEST-1:/' > bad.key
+    if bash ${bridge}/share/rime-bridge/payload-sign.sh bad.key pl > /dev/null 2> bad.err; then
+      echo "payload-sign.sh signed with a mismatched key"; exit 1
+    fi
+    grep 'does not belong' bad.err >/dev/null && echo "payload-sign.sh: a mismatched secret refused"
 
     echo "bridge-unit: suite green, ${toString (builtins.length mutants + builtins.length hlMutants)} mutants killed" | tee $out
   '';

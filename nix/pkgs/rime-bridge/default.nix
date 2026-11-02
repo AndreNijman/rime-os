@@ -4,6 +4,7 @@
 #   share/rime-bridge/rime-migrate          the same file with `#!/usr/bin/python3 -I`: what runs ON the bootc
 #                                          machine (Fedora's python, nothing from /nix), and what the OVMF lab copies
 #                                          into its VMs (nix/probe/ovmf/bridge)
+#   share/rime-bridge/payload-sign.sh       writes the payload's manifest.json.sig (the release pipeline; the lab)
 #
 # One Python file, standard library only. checkPhase runs tests/test_bridge.py: the topology classifier (A-F, E over
 # A/B/D), every named refusal, the NVRAM load-option parser and the forbidden-tool scan.
@@ -22,7 +23,7 @@ stdenvNoCC.mkDerivation {
 
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions [ ./rime-bridge.py ./tests ];
+    fileset = lib.fileset.unions [ ./rime-bridge.py ./payload-sign.sh ./tests ];
   };
 
   buildInputs = [ python3 ];
@@ -35,6 +36,8 @@ stdenvNoCC.mkDerivation {
     runHook preInstall
     install -Dm755 rime-bridge.py $out/share/rime-bridge/rime-migrate
     substituteInPlace $out/share/rime-bridge/rime-migrate --replace-fail '#!/usr/bin/env python3' '#!/usr/bin/python3 -I'
+    # The release pipeline's signer of the payload manifest (docs/nixos/bridge.md); run with bash, needs openssl.
+    install -Dm755 payload-sign.sh $out/share/rime-bridge/payload-sign.sh
     install -Dm755 rime-bridge.py $out/bin/rime-migrate
     substituteInPlace $out/bin/rime-migrate --replace-fail '#!/usr/bin/env python3' '#!${python3}/bin/python3 -I'
     runHook postInstall
