@@ -49,3 +49,13 @@
 // import ./hostgates.nix { inherit pkgs self; }
 # bridge-unit, bridge-refusals
 // import ./bridge.nix { inherit pkgs self; }
+# pkg-translate (+ .katana)
+// import ./pkg-translate.nix { inherit pkgs self; }
+# equibop
+// { equibop = import ./equibop.nix { inherit pkgs self; }; }
+# virtualization
+// { virtualization = import ./virtualization.nix { inherit pkgs self; }; }
+# vendor-verify, vendor-fetch-refuses
+// import ./vendor-verify.nix { inherit pkgs self; }
+# gaming-launch (P2)
+// { gaming-launch = import ./gaming-launch.nix { inherit pkgs self; }; }

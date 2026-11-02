@@ -14,6 +14,8 @@
   rime-greeting = callPackage ./rime-greeting.nix { rime-branding = pkgs.rime.rime-branding; };
   # Ghostty's Rime theme and the one-time Alacritty -> Ghostty carry-over (files/desktop/ghostty).
   rime-terminal = callPackage ./rime-terminal.nix { inherit rime-shell-src; };
+  # D5: rime-pkg's vendor-key check (ChatGPT, Claude Desktop) as a verifier and a verified-fetch builder.
+  rime-vendor = callPackage ./rime-vendor.nix { };
   # Not callPackage: that would wrap the kernel's own .override, which NixOS's boot.kernelPackages calls
   # (linuxPackagesFor -> kernel.override { features, randstructSeed, ... }).
   rime-kernel = import ./kernel { inherit pkgs; };

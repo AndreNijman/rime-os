@@ -414,6 +414,8 @@ struct Surface {
     bootloader_unavailable: Option<String>,
     rows: Vec<Row>,
     routes: Vec<Route>,
+    /// Rime on NixOS: there is no package extension, so no repair that rebuilds one.
+    nixos: bool,
 }
 
 /// The recovery surface's rows as `(id, health, detail)`, for §26's post-update
@@ -1196,6 +1198,7 @@ fn probe(sys: &Sys) -> Surface {
     });
 
     Surface {
+        nixos: on_nixos(sys),
         bootloader: chain.bootloader,
         bootloader_unavailable: chain.bootloader_unavailable,
         rows,
@@ -1209,6 +1212,9 @@ fn probe(sys: &Sys) -> Surface {
 /// and every branch of it is a state the developer's machine does not have at
 /// the same time.
 fn package_row(sys: &Sys, running_version: &str) -> Row {
+    if on_nixos(sys) {
+        return nixos_package_row(sys);
+    }
     const STATE: &str = "/var/lib/rime/pkg/state.json";
     let id = "package-extensions";
     let label = "Package extensions";
@@ -1324,6 +1330,113 @@ fn package_row(sys: &Sys, running_version: &str) -> Row {
         detail: format!("{resolved} packages, built for OS {built_for} (running {running_version})"),
         action: None,
     }
+}
+
+/// Rime on NixOS (`/etc/NIXOS`; on the real system also `/run/current-system` in the store).
+fn on_nixos(sys: &Sys) -> bool {
+    match &sys.fixture {
+        Some(_) => sys.exists("/etc/NIXOS"),
+        None => crate::nixos::is_nixos(),
+    }
+}
+
+/// The package row on Rime on NixOS: no extension and no state.json, so nothing is "built for" an OS version. What
+/// can be wrong is a requested catalogue app this machine's release record names no build of, or a build that is
+/// not in the store (`sudo rime update` / `sudo rime pkg upgrade` fix those; neither rebuilds anything).
+fn nixos_package_row(sys: &Sys) -> Row {
+    use crate::nixos::pkg;
+    let id = "package-extensions";
+    let label = "Packages";
+    let row = |state, detail: String, action: Option<&str>| Row { id, label, state, detail, action: action.map(String::from) };
+    let requested: Vec<String> = match sys.read_result(pkg::REQUESTED) {
+        Ok(t) => t.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(String::from).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => vec![],
+        Err(e) => {
+            return row(
+                Health::Unavailable,
+                format!("{} could not be read: {e}", pkg::REQUESTED),
+                Some("sudo rime recover status"),
+            )
+        }
+    };
+    if requested.is_empty() {
+        return row(
+            Health::Verified,
+            "nothing installed with rime install outside Flatpak (Flatpak keeps its own record)".into(),
+            None,
+        );
+    }
+    let cat = match sys.read(pkg::CATALOGUE).map(|t| pkg::Catalogue::parse(&t)) {
+        Some(Ok(c)) => c,
+        Some(Err(e)) => return row(Health::Attention, e, None),
+        None => {
+            return row(
+                Health::Attention,
+                format!("{} names are requested, but this system has no package catalogue ({})", requested.len(), pkg::CATALOGUE),
+                None,
+            )
+        }
+    };
+    let apps = pkg::requested_apps(&cat, &requested);
+    let pending: Vec<&String> = requested
+        .iter()
+        .filter(|n| matches!(cat.entries.get(&cat.canonical(n)), Some(pkg::Entry::Nix { buildable: false, .. })))
+        .collect();
+    if !apps.is_empty() {
+        let outs = match sys.read(&cat.outs_file).map(|t| pkg::parse_outs(&t)) {
+            Some(Ok(o)) => o,
+            Some(Err(e)) => return row(Health::Attention, e, Some("sudo rime update")),
+            None => {
+                return row(
+                    Health::Attention,
+                    format!(
+                        "{} requested, but no release record names their builds ({})",
+                        apps.join(", "),
+                        cat.outs_file
+                    ),
+                    Some("sudo rime update"),
+                )
+            }
+        };
+        let unnamed: Vec<&String> = apps.iter().filter(|a| !outs.contains_key(*a)).collect();
+        if !unnamed.is_empty() {
+            return row(
+                Health::Attention,
+                format!(
+                    "this machine's release names no build of {}",
+                    unnamed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+                Some("sudo rime update"),
+            );
+        }
+        let absent: Vec<&String> = apps.iter().filter(|a| !sys.exists(&outs[*a]) || !sys.exists(&cat.apps_profile)).collect();
+        if !absent.is_empty() {
+            return row(
+                Health::Attention,
+                format!(
+                    "{} requested, but not installed at the build this release names",
+                    absent.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+                Some("sudo rime pkg upgrade"),
+            );
+        }
+    }
+    if !pending.is_empty() {
+        return row(
+            Health::Available,
+            format!(
+                "{} names requested; not built for this release yet: {}",
+                requested.len(),
+                pending.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ),
+            Some("rime pkg list"),
+        );
+    }
+    row(
+        Health::Verified,
+        format!("{} names requested, {} catalogue apps at the builds this release names", requested.len(), apps.len()),
+        None,
+    )
 }
 
 /// §19's four action buttons, and the command each one runs.
@@ -1493,8 +1606,9 @@ fn applicable_repairs(s: &Surface) -> Vec<&'static RepairStep> {
         .iter()
         .filter(|step| match step.id {
             "reprovision-desktop" => state("rime-shell") == Some(Health::Attention),
+            // On NixOS the engine it runs does not exist, and nothing there is an extension to rebuild.
             "rebuild-package-extension" => {
-                state("package-extensions") == Some(Health::Attention)
+                !s.nixos && state("package-extensions") == Some(Health::Attention)
             }
             // An unrecognised step is never offered. A new entry in the table
             // with no diagnosis here would otherwise be silently proposed
@@ -2870,6 +2984,54 @@ sysext /usr overlay ro,nodev,relatime,lowerdir=/run/systemd/sysext/meta/usr:/usr
         );
         let real = Sys { fixture: None };
         assert_eq!(real.path("/proc/cmdline"), PathBuf::from("/proc/cmdline"));
+    }
+
+    #[test]
+    fn on_nixos_the_package_row_reads_the_catalogue_and_never_offers_an_extension_rebuild() {
+        let dir = std::env::temp_dir().join(format!("rime-recover-nixos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let w = |p: &str, t: &str| {
+            let f = dir.join(p.trim_start_matches('/'));
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, t).unwrap();
+        };
+        w("/etc/NIXOS", "");
+        let sys = Sys { fixture: Some(dir.clone()) };
+        // A bootc state.json left behind by the move is not read: it would say "built for OS 45" forever.
+        w("/var/lib/rime/pkg/state.json", r#"{"os_version_id": "45", "resolved": ["a"]}"#);
+        let row = package_row(&sys, "26.05");
+        assert_eq!(row.state, Health::Verified, "{}", row.detail);
+        w(
+            "/etc/rime/catalogue.json",
+            r#"{"schema": 1, "flathub_remote": "flathub", "apps_profile": "/nix/var/nix/profiles/rime-apps",
+                "outs_file": "/var/lib/rime/nix/catalogue-outs.json",
+                "entries": {"go": {"kind": "nix", "buildable": true},
+                            "chatgpt": {"kind": "nix", "buildable": false, "pending": "later"},
+                            "steam": {"kind": "toggle", "feature": "gaming"}},
+                "aliases": {"golang": "go"}}"#,
+        );
+        w("/var/lib/rime/pkg/requested", "steam\ngolang\n");
+        let row = package_row(&sys, "26.05");
+        assert_eq!(row.state, Health::Attention, "{}", row.detail);
+        assert_eq!(row.action.as_deref(), Some("sudo rime update"));
+        let surface = |rows| Surface { bootloader: "systemd-boot", bootloader_unavailable: None, rows, routes: vec![], nixos: true };
+        assert!(applicable_repairs(&surface(vec![row])).is_empty(), "no extension rebuild on NixOS");
+        w("/var/lib/rime/nix/catalogue-outs.json", r#"{"apps": {"go": "/nix/store/abc-go"}}"#);
+        let row = package_row(&sys, "26.05");
+        assert_eq!(row.action.as_deref(), Some("sudo rime pkg upgrade"), "{}", row.detail);
+        w("/nix/store/abc-go/bin/go", "");
+        w("/nix/var/nix/profiles/rime-apps", "");
+        assert_eq!(package_row(&sys, "26.05").state, Health::Verified);
+        w("/var/lib/rime/pkg/requested", "steam\ngolang\nchatgpt\n");
+        let row = package_row(&sys, "26.05");
+        assert_eq!(row.state, Health::Available, "{}", row.detail);
+        assert!(row.detail.contains("chatgpt"), "{}", row.detail);
+        // The same Attention row on bootc is offered the rebuild, as before.
+        let attention = Row { id: "package-extensions", label: "x", state: Health::Attention, detail: String::new(), action: None };
+        let mut s = surface(vec![attention]);
+        s.nixos = false;
+        assert_eq!(applicable_repairs(&s).len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -150,7 +150,7 @@ impl Catalogue {
         Ok(c)
     }
 
-    fn load() -> Result<Catalogue, String> {
+    pub fn load() -> Result<Catalogue, String> {
         let text = fs::read_to_string(CATALOGUE).map_err(|e| {
             format!("this system has no package catalogue ({CATALOGUE}: {e}); it was built without rime.catalogue")
         })?;
@@ -690,6 +690,7 @@ fn set_apps_profile(cat: &Catalogue, requested: &[String]) -> Result<(), String>
     if apps.is_empty() {
         if Path::new(profile).exists() {
             status(&sys("nix-env"), &["--profile", profile, "--uninstall", ".*"])?;
+            record_generation(cat, requested);
         }
         return Ok(());
     }
@@ -713,7 +714,74 @@ fn set_apps_profile(cat: &Catalogue, requested: &[String]) -> Result<(), String>
     status(&sys("nix-store"), &realise).map_err(|e| format!("cannot fetch the apps from the cache: {e}"))?;
     let mut set = vec!["--profile", profile, "--install", "--remove-all"];
     set.extend(&paths);
-    status(&sys("nix-env"), &set)
+    status(&sys("nix-env"), &set)?;
+    record_generation(cat, requested);
+    Ok(())
+}
+
+/// Where the class 2 lines of the requested list are kept per rime-apps generation, so `rime pkg rollback` moves the
+/// list back with the profile (bootc kept the previous extension's state.json beside it, in rollback/).
+pub const GENERATIONS: &str = "/var/lib/rime/pkg/apps-generations";
+
+/// The generation number a profile link points at (`rime-apps` -> `rime-apps-12-link`).
+pub fn profile_generation(profile: &Path) -> Option<u64> {
+    let target = fs::read_link(profile).ok()?;
+    let name = target.file_name()?.to_str()?;
+    let base = profile.file_name()?.to_str()?;
+    name.strip_prefix(base)?.strip_prefix('-')?.strip_suffix("-link")?.parse().ok()
+}
+
+/// The lines of a requested list that are class 2 apps (whatever spelling), in list order.
+pub fn app_lines(cat: &Catalogue, list: &[String]) -> Vec<String> {
+    list.iter().filter(|n| matches!(cat.entry(n), Some((_, Entry::Nix { .. })))).cloned().collect()
+}
+
+/// The requested list after a rollback to a generation whose class 2 lines were `recorded`: every other line as it is
+/// now, the class 2 lines as they were.
+pub fn rolled_back(cat: &Catalogue, now: &[String], recorded: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = now.iter().filter(|n| !matches!(cat.entry(n), Some((_, Entry::Nix { .. })))).cloned().collect();
+    for r in recorded {
+        if !out.contains(r) {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
+fn record_generation(cat: &Catalogue, requested: &[String]) {
+    let Some(n) = profile_generation(Path::new(&cat.apps_profile)) else {
+        return;
+    };
+    let path = Path::new(GENERATIONS).join(n.to_string());
+    if let Err(e) = write_list(&path, &app_lines(cat, requested), false) {
+        say(format!("warning: {e}; `rime pkg rollback` will not move the requested list back to this generation"));
+    }
+}
+
+/// `rime pkg rollback`: the rime-apps profile's previous generation, and the requested list's class 2 lines with it.
+fn rollback(cat: &Catalogue) -> i32 {
+    let profile = Path::new(&cat.apps_profile);
+    if let Err(e) = status(&sys("nix-env"), &["--profile", &cat.apps_profile, "--rollback"]) {
+        return fail(e);
+    }
+    say("catalogue apps: back to the previous generation");
+    let Some(n) = profile_generation(profile) else {
+        return 0;
+    };
+    let record = Path::new(GENERATIONS).join(n.to_string());
+    if !record.exists() {
+        say(format!(
+            "warning: generation {n} has no record of what was requested ({}); the requested list was not changed",
+            record.display()
+        ));
+        return 0;
+    }
+    let now = read_list(Path::new(REQUESTED));
+    let back = rolled_back(cat, &now, &read_list(&record));
+    match write_list(Path::new(REQUESTED), &back, true) {
+        Ok(()) => 0,
+        Err(e) => fail(e),
+    }
 }
 
 /// claude-code's route (rime-pkg user_tool_run): npm as the user behind sudo, into their own ~/.local.
@@ -1025,6 +1093,32 @@ fn list(cat: &Catalogue) -> i32 {
     0
 }
 
+/// The release record `set_apps_profile` reads: the class 2 builds a release manifest names (`catalogue[]`, each an
+/// index into its path table), by catalogue name. Written by `rime update` with the release it installs (§8.2 step 14).
+pub fn outs_document(release: &str, apps: &[(String, String)]) -> serde_json::Value {
+    let apps: BTreeMap<&str, &str> = apps.iter().map(|(n, p)| (n.as_str(), p.as_str())).collect();
+    serde_json::json!({ "schema": 1, "release": release, "apps": apps })
+}
+
+/// `rime update`'s catalogue pass (§8.2 step 15; on bootc, rime-pkg upgrade): the rime-apps profile follows the
+/// requested list at the builds the installed release names. Nothing requested, or no catalogue: nothing to do.
+pub fn catalogue_pass() -> i32 {
+    let Ok(cat) = Catalogue::load() else {
+        return 0;
+    };
+    let requested = read_list(Path::new(REQUESTED));
+    if requested_apps(&cat, &requested).is_empty() {
+        return 0;
+    }
+    match set_apps_profile(&cat, &requested) {
+        Ok(()) => {
+            say("catalogue apps: at the builds this release names");
+            0
+        }
+        Err(e) => fail(format!("catalogue apps were not updated: {e}")),
+    }
+}
+
 fn upgrade(cat: &Catalogue) -> i32 {
     let mut rc = 0;
     let requested = read_list(Path::new(REQUESTED));
@@ -1100,13 +1194,7 @@ pub fn run(args: &[String]) -> i32 {
         "upgrade" => upgrade(&cat),
         "flatpak-upgrade" => flatpak_upgrade(),
         "verify" => verify(&cat),
-        "rollback" => match status(&sys("nix-env"), &["--profile", &cat.apps_profile, "--rollback"]) {
-            Ok(()) => {
-                say("catalogue apps: back to the previous generation");
-                0
-            }
-            Err(e) => fail(e),
-        },
+        "rollback" => rollback(&cat),
         "rebuild" => {
             say("nothing to rebuild: on NixOS installed apps are store paths, not a system extension");
             0
@@ -1158,6 +1246,35 @@ mod tests {
             }"#,
         )
         .expect("fixture parses")
+    }
+
+    #[test]
+    fn a_rollback_moves_only_the_app_lines_back() {
+        let c = fixture();
+        let now: Vec<String> = ["steam", "go", "claude-code"].iter().map(|s| s.to_string()).collect();
+        let recorded: Vec<String> = vec!["golang".into()];
+        assert_eq!(rolled_back(&c, &now, &recorded), vec!["steam", "claude-code", "golang"]);
+        assert_eq!(rolled_back(&c, &now, &[]), vec!["steam", "claude-code"]);
+        assert_eq!(app_lines(&c, &now), vec!["go"]);
+        let d = std::env::temp_dir().join(format!("rime-gen-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        let link = d.join("rime-apps");
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink("rime-apps-12-link", &link).unwrap();
+        assert_eq!(profile_generation(&link), Some(12));
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("/nix/store/x", &link).unwrap();
+        assert_eq!(profile_generation(&link), None);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_outs_document_update_writes_is_the_one_install_reads() {
+        let doc = outs_document("2026.11.02", &[("go".into(), "/nix/store/abc-go-1.26".into())]);
+        let apps = parse_outs(&doc.to_string()).expect("parses");
+        assert_eq!(apps.get("go").map(String::as_str), Some("/nix/store/abc-go-1.26"));
+        assert_eq!(doc["release"], "2026.11.02");
+        assert!(parse_outs(&outs_document("x", &[("bad".into(), "/tmp/x".into())]).to_string()).is_err());
     }
 
     #[test]

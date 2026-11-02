@@ -12,6 +12,7 @@ pub mod fetch;
 pub mod generations;
 pub mod pkg;
 pub mod store;
+pub mod translate;
 pub mod trust;
 pub mod update;
 

@@ -23,6 +23,7 @@
     ./keymap.nix
     ./luks-tpm.nix
     ./rootfs.nix
+    ./virtualization.nix
   ];
 
   nixpkgs.overlays = [ overlay ];

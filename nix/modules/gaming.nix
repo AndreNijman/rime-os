@@ -218,9 +218,9 @@ in
       default = false;
       description = ''
         Rime's gaming stack: Steam, Rime Gaming Mode (a gamescope session in the greeter), gamemode, NTSYNC and
-        the game environment. Off by default (decision A4, docs/nixos/closure.md section 5, measured 2026-11-01 on
-        the laptop-shaped `plain` toplevels in nix/tests/size.nix): it adds 0.53 GB of download (zstd -19,
-        2.51 -> 3.04 GB), 2.46 GB unpacked and 0.99 GB on disk (btrfs zstd:3). Shipping it in every install
+        the game environment. Off by default (decision A4, docs/nixos/closure.md section 5, re-measured 2026-11-02
+        on the laptop-shaped `plain` toplevels in nix/tests/size.nix): it adds 0.50 GB of download (zstd -19,
+        3.46 -> 3.95 GB), 2.20 GB unpacked and 0.88 GB on disk (btrfs zstd:3). Shipping it in every install
         would reverse "install as small as possible" (2026-10-04), and bootc never shipped Steam or gamescope in
         the image either: they came from `rime install`. A machine that wants gaming sets this to true;
         `rime install steam` must do that.

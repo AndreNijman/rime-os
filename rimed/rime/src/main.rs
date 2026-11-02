@@ -934,6 +934,22 @@ enum PkgCmd {
     /// Convert rpm-ostree layered packages into Rime packages, so that OS
     /// updates work again without losing the software. Requires root.
     Adopt,
+    /// Report what every package a bootc Rime machine installed becomes on
+    /// Rime on NixOS, item by item; `--write` records it under the root.
+    Translate {
+        /// The root whose records to read (a copy of a machine's state).
+        #[arg(long, default_value = "/")]
+        root: String,
+        /// The package catalogue to translate against.
+        #[arg(long)]
+        catalogue: Option<String>,
+        /// The report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Write the NixOS requested list, feature switches and the report under the root.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 /// `rime env <verb>` — the capsule surface (§8).
@@ -1785,6 +1801,22 @@ async fn main() {
             };
             ops::pkg(&argv)
         }
+        // Both systems: it reads a bootc machine's records against a NixOS catalogue file.
+        Cmd::Pkg {
+            cmd: PkgCmd::Translate { root, catalogue, json, write },
+        } => {
+            let mut a = vec!["--root".to_string(), root];
+            if let Some(c) = catalogue {
+                a.extend(["--catalogue".to_string(), c]);
+            }
+            if json {
+                a.push("--json".into());
+            }
+            if write {
+                a.push("--write".into());
+            }
+            nixos::translate::run(&a)
+        }
         Cmd::Pkg { cmd } => {
             let argv: Vec<String> = match cmd {
                 PkgCmd::List => vec!["list".into()],
@@ -1801,6 +1833,7 @@ async fn main() {
                 PkgCmd::Rollback => vec!["rollback".into()],
                 PkgCmd::Verify => vec!["verify".into()],
                 PkgCmd::Adopt => vec!["adopt".into()],
+                PkgCmd::Translate { .. } => unreachable!("routed above"),
             };
             ops::pkg(&argv)
         }
