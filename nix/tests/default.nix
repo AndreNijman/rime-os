@@ -37,3 +37,5 @@
 // import ./catalogue.nix { inherit pkgs self; }
 # branding-surfaces-static, branding-surfaces (the ridge on os-release, the splash and the greeter)
 // import ./branding-surfaces.nix { inherit pkgs self; }
+# installer-nixos, installer-target-eval (the NixOS install path of installer/rime-install)
+// import ./installer.nix { inherit pkgs self; }
