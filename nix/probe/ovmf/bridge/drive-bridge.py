@@ -268,15 +268,27 @@ def phase_bootc(a):
 
 def phase_nixos(a):
     vm = VM(a, "nixos")
-    vm.expect(r"RIME-BRIDGE: READY", 900, fail=r"Kernel panic|emergency mode|You are in emergency")
-    say("[nixos] lab markers READY")
-    time.sleep(10)
+    # The lab unit's RIME-BRIDGE markers (system.nix) never reach ttyS0: serial-getty hangs the tty up under it and
+    # the unit fails on the write. The driver checks the same things itself after a serial login.
+    vm.expect(r"Welcome to NixOS", 900, fail=r"Kernel panic|emergency mode|You are in emergency")
+    say("[nixos] NixOS reached the serial getty")
+    time.sleep(20)
     vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-greeter.png"))
     vm.login()
-    record(vm, "nixos-checks", "id; cat /proc/cmdline; findmnt -no SOURCE,FSTYPE,OPTIONS / /nix /var/home /boot;"
-           " systemctl is-active greetd; readlink /run/current-system; cat /var/lib/rime/boot-migrate/phase 2>/dev/null;"
-           " cd ~ && sha256sum -c .rime-lab/sums && cat Documents/note.txt",
-           timeout=120)
+    rc, out = record(vm, "nixos-checks",
+                     "for i in $(seq 60); do systemctl is-active -q greetd && break; sleep 1; done;"
+                     " echo greetd=$(systemctl is-active greetd); pgrep -a -u greetd | head -n 5;"
+                     " id; cat /proc/cmdline; readlink /run/current-system; cat /etc/machine-id; hostname;"
+                     " for m in / /nix /var/home /boot; do findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS -M $m; done;"
+                     " echo phase=$(cat /var/lib/rime/boot-migrate/phase 2>/dev/null || echo none);"
+                     " ls /var/lib/rime/boot-migrate 2>/dev/null; systemctl --failed --no-legend --no-pager;"
+                     " head -n 5 /var/lib/rime/carry/report.txt;"
+                     " cd ~ && sha256sum -c .rime-lab/sums && cat Documents/note.txt",
+                     timeout=180)
+    if "greetd=active" not in out:
+        raise Timeout("[nixos] greetd is not active")
+    if a.kind == "E" and "phase=failed" not in out:
+        raise Timeout("[nixos] phase=failed did not carry over")
     vm.send("exit\n")
     time.sleep(2)
     vm.qmp("system_powerdown")

@@ -339,6 +339,34 @@ class Chroot(unittest.TestCase):
         self.assertNotIn(os.path.dirname(argv[0]), path.split(":"))
 
 
+class Containment(unittest.TestCase):
+    """H8: the bridge may add its own GRUB block and files; any other change to ostree's /boot or an ESP fails."""
+
+    def snap(self):
+        return {"boot": {"loader.1/entries/ostree-1.conf": "a", "grub2/grub.cfg": "b"},
+                "custom_outside_block": B.custom_outside_block("if true; then echo user; fi\n"),
+                "deployments": ["abc.0"], "esp:/dev/vda2": {"EFI/fedora/grub.cfg": "c"}}
+
+    def test_unchanged(self):
+        self.assertEqual(B.containment_diff(self.snap(), self.snap()), {})
+
+    def test_changed_file_content_is_named(self):
+        a = self.snap()
+        a["boot"]["grub2/grub.cfg"] = "changed"
+        self.assertEqual(B.containment_diff(self.snap(), a), {"boot": ["grub2/grub.cfg"]})
+
+    def test_esp_file_added_is_named(self):
+        a = self.snap()
+        a["esp:/dev/vda2"]["EFI/systemd/systemd-bootx64.efi"] = "d"
+        self.assertEqual(B.containment_diff(self.snap(), a), {"esp:/dev/vda2": ["EFI/systemd/systemd-bootx64.efi"]})
+
+    def test_rime_block_is_ours_the_rest_is_not(self):
+        user = "if true; then echo user; fi\n"
+        block = "### BEGIN rime-boot ###\nsource $prefix/rime-nixos.cfg\n### END rime-boot ###\n"
+        self.assertEqual(B.custom_outside_block(user + block), B.custom_outside_block(user))
+        self.assertNotEqual(B.custom_outside_block(user + "set timeout=0\n" + block), B.custom_outside_block(user))
+
+
 class LoadOption(unittest.TestCase):
     def option(self, desc, partuuid, path, attrs=1):
         hd = struct.pack("<IQQ", 1, 2048, 1048576) + uuid.UUID(partuuid).bytes_le + bytes([2, 2])

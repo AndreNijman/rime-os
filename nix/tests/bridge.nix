@@ -29,6 +29,8 @@ let
     [ "fallback-unconditional" "rime-bridge.py" ''s/ and has_dir(esp, "fedora") and esp.get("fallback_csv"):/:/'' "removable path trusted without shim's fallback" ]
     [ "wait-on-finished-oneshot" "rime-bridge.py" ''s/in ("activating", "deactivating", "reloading")/in ("active", "activating", "deactivating", "reloading")/'' "start hangs on a RemainAfterExit unit that finished" ]
     [ "chroot-by-name" "rime-bridge.py" ''s/\[shutil.which("chroot") or "\/usr\/sbin\/chroot", t/["chroot", t/'' "chroot looked up in the target's PATH" ]
+    [ "containment-names-only" "rime-bridge.py" ''s/if before\[k\]\[x\] != after\[k\]\[x\]})/if False})/'' "H8: a changed file whose name stayed is not seen" ]
+    [ "containment-all-custom" "rime-bridge.py" ''s/return hashlib.sha256(re.sub(r"### BEGIN rime-boot.*?### END rime-boot ###\\n?", "", text,/return hashlib.sha256(re.sub(r".*", "", text,/'' "H8: custom.cfg outside the block not compared" ]
     [ "backup-same-disk" "rime-bridge.py" ''s/elif b.get("disk") and b.get("disk") == root.get("disk"):/elif False:/'' "backup on the migrated disk" ]
   ];
   hlMutants = [

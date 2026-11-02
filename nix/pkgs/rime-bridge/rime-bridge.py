@@ -879,15 +879,28 @@ def tree_sums(base, rels=None):
     return out
 
 
+def custom_outside_block(text):
+    """sha256 of custom.cfg without the boot hook's own block: everything else in it belongs to the user."""
+    return hashlib.sha256(re.sub(r"### BEGIN rime-boot.*?### END rime-boot ###\n?", "", text,
+                                 flags=re.S).encode()).hexdigest()
+
+
+def containment_diff(before, after):
+    """H8: what changed between two containment snapshots ({} = nothing it must not touch)."""
+    diff = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    return {k: sorted(x for x in set(before.get(k) or {}) ^ set(after.get(k) or {}) | {
+        x for x in set(before.get(k) or {}) & set(after.get(k) or {}) if before[k][x] != after[k][x]})[:5]
+            if isinstance(before.get(k), dict) or isinstance(after.get(k), dict)
+            else [before.get(k), after.get(k)] for k in diff}
+
+
 def containment_snapshot(top, facts):
     """H8: what the bridge must leave byte for byte: ostree's /boot (loader, entries, kernels, grub.cfg and
     bootuuid.cfg) and every file on every ESP. custom.cfg is compared outside the Rime block only."""
     boot = os.path.join(top, "boot") if facts["boot"]["kind"] == "top-level-dir" else "/boot"
     snap = {"boot": {k: v for k, v in tree_sums(boot).items()
                      if not k.startswith(("rime/", "grub2/rime-nixos.cfg", "grub2/custom.cfg", "lost+found"))}}
-    cc = read(os.path.join(boot, "grub2/custom.cfg"), "")
-    snap["custom_outside_block"] = hashlib.sha256(re.sub(
-        r"### BEGIN rime-boot.*?### END rime-boot ###\n?", "", cc, flags=re.S).encode()).hexdigest()
+    snap["custom_outside_block"] = custom_outside_block(read(os.path.join(boot, "grub2/custom.cfg"), ""))
     snap["deployments"] = deployment_dirs(top)
     m = Mounts()
     try:
@@ -1148,10 +1161,8 @@ def cmd_start(a):
         step("fsck gate after")
         state["fsck_after"] = fsck_gate(top, facts, "after")
         after = containment_snapshot(top, facts)
-        diff = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
-        if diff:
-            detail = {k: sorted(x for x in set(before.get(k) or {}) ^ set(after.get(k) or {}))[:5] if isinstance(
-                before.get(k), dict) else [before.get(k), after.get(k)] for k in diff}
+        detail = containment_diff(before, after)
+        if detail:
             raise Failed(f"fsck containment: the bridge changed what it must not: {json.dumps(detail)}")
         print("containment: ostree /boot, custom.cfg outside the Rime block, deployments and every ESP unchanged",
               flush=True)
