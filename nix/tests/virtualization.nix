@@ -1,9 +1,13 @@
 # The virtual machines feature (nix/modules/virtualization.nix): with rime.virtualization.enable the system has a
 # libvirtd that answers, QEMU with KVM support, UEFI firmware for guests, swtpm and virtiofsd, and the catalogue
 # reports the feature as in this system. No guest is booted (nested KVM is not assumed on the test host).
+#
+# Mutant (passthru.mutants.no-swtpm, built by hand, must FAIL): virtualisation.libvirtd.qemu.swtpm.enable forced off,
+# so libvirtd cannot start a guest's TPM: swtpm and swtpm_setup are not on libvirtd's PATH.
 { pkgs, self }:
 
-pkgs.testers.runNixOSTest {
+let
+test = pkgs.testers.runNixOSTest {
   name = "rime-virtualization";
   node.pkgsReadOnly = false;
 
@@ -51,4 +55,11 @@ pkgs.testers.runNixOSTest {
         machine.succeed("swtpm --version")
         machine.succeed("test -x \"$(command -v virtiofsd)\"")
   '';
+};
+in
+test
+// {
+  mutants.no-swtpm = test.extendNixOS {
+    module = { lib, ... }: { virtualisation.libvirtd.qemu.swtpm.enable = lib.mkForce false; };
+  };
 }
