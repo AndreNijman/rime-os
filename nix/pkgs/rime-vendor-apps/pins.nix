@@ -27,6 +27,12 @@
 #                   Packages.
 #   then: nix build path:.#rime-chatgpt path:.#rime-claude-desktop (the verifier and the package checks run in it)
 #   and checks.vendor-apps. A version the nixpkgs-derived packaging no longer fits fails there, not on a machine.
+#
+# Redistribution (plan risk R14, docs/nixos/updates-and-release.md 6.3): the release builds both apps like any class 2
+# app, so Rime's cache would serve OpenAI's and Anthropic's binaries, as bootc's image did from 2026-09-11 to
+# 2026-10-04. Neither licence is verified. If the upload allowlist (nix/redistributable.nix, not written yet) leaves
+# them out, nothing here changes: the vendor files are fixed-output fetches, so a machine that cannot substitute an
+# app builds it itself from the vendor's own URLs, and the vendor-key check runs there in the same build.
 {
   chatgpt = {
     version = "26.1027.51404";
