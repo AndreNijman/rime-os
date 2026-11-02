@@ -27,7 +27,7 @@ Client import (G3, `rime_delta.py apply-all`, local disk, network excluded):
 | mass rebuild | 10.3 s | 271.2 s | 1,640 MiB | ~13.5 MB/s |
 
 Every delta import ended with the toplevel valid and `nix store verify` clean; a delta that does not rebuild the
-signed `NarHash` is refused before anything is imported (`checks.x86_64-linux.delta`, 5 mutants caught).
+signed `NarHash` is refused before anything is imported (`checks.x86_64-linux.delta`, 6 mutants caught).
 
 Over 30 days at A3's cadence (assumed: 3 weekly bumps + 1 mass rebuild): **6.34 GB** today, **4.96 GB** with -19
 alone, **1.27 GB** with deltas. A bootc core rebuild is 1.74 GB per update (rime-os #123); four of them are 6.96 GB.
@@ -152,13 +152,15 @@ The prototype is `rime_delta.py apply` (one path) and `apply-all` (a whole relea
 5. `apply-all`: references first, a path with no base is fetched whole from the release cache with `nix copy`.
 
 `checks.x86_64-linux.delta` (`nix/tests/delta.nix`) proves it on fixtures: pairing (outputs pair with the same
-output), measuring (every delta re-decoded), `apply` into a chroot store (`diff -r` against the release's path,
+output), measuring (every delta re-decoded; a zstd shim that corrupts what it decodes makes `measure` fail with
+"does not rebuild the NAR"), `apply` into a chroot store (`diff -r` against the release's path,
 `nix store verify` with the trusted key), five refusals (a bit-flipped delta, a truncated delta, a narinfo whose
 NarHash is another path's, the delta applied to the wrong base, a narinfo signed by an untrusted key: each exits
 non-zero, says why, and imports nothing), and `apply-all` moving a store from the old release to the new one with
-two paths rebuilt from deltas (the server holds no NAR for them) and one fetched whole. Five mutants each make the
-check fail (`artifacts/g2/delta-check-mutants.log`): `no-narhash-check`, `pair-ignores-output`, `nix32-reversed`,
-`keep-nothing`, `apply-all-no-delta`.
+two paths rebuilt from deltas (the server holds no NAR for them) and one fetched whole. Six mutants each make the
+check fail (`artifacts/g2/delta-check-mutants.log` for the first five, `artifacts/verify-g2/delta-check-mutants-6.log`
+for all six): `no-narhash-check`, `pair-ignores-output`, `nix32-reversed`, `keep-nothing`, `apply-all-no-delta`,
+`measure-trusts-delta` (added in review: `measure` no longer compares the decoded delta with the NAR).
 
 **Benchmark** (`nix/release/delta/lab/g3.sh`, `g3-baseline.sh`, `g3-all.sh`; logs `data/g3-all.log`, `data/g1-nixpkgs/g3-*.log`,
 `data/*/apply-all*.{json,time}`, `data/*/nixcopy-baseline*.time`): the machine is a chroot store holding the old
@@ -271,7 +273,7 @@ revisit A3 then with the 30-day number measured from real releases (§1: 1.27 GB
 ```
 # inside the rime-nix container, from a worktree of this branch
 nix build path:.#checks.x86_64-linux.delta -L                       # the tool on fixtures
-nix build path:.#checks.x86_64-linux.delta.mutants.<name> -L        # each must FAIL (5 mutants, nix/tests/delta.nix)
+nix build path:.#checks.x86_64-linux.delta.mutants.<name> -L        # each must FAIL (6 mutants, nix/tests/delta.nix)
 
 # a pair's old side, against an older nixpkgs, into its own chroot store
 nix build --store /work/scratch/g2/store-<rev7> --impure --print-out-paths \

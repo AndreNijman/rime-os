@@ -2,10 +2,11 @@
 # network or a VM.
 #
 # Two releases of a small multi-output package (out + dev) and one package only the new release has. The check
-# pairs them, measures the deltas, rebuilds the new NAR on the client side from the old path and the delta, checks
-# it against a signed narinfo, and imports it into a chroot store with `nix copy` (Nix checks the signature and the
-# hash again). Then the refusals: a corrupted delta, a narinfo whose NarHash names another path, a delta applied to
-# the wrong base, a narinfo signed by an untrusted key. Last, mutants of the tool: each must make this check fail.
+# pairs them, measures the deltas (and `measure` must refuse a delta that decodes to the wrong bytes), rebuilds the
+# new NAR on the client side from the old path and the delta, checks it against a signed narinfo, and imports it
+# into a chroot store with `nix copy` (Nix checks the signature and the hash again). Then the refusals: a corrupted
+# delta, a narinfo whose NarHash names another path, a delta applied to the wrong base, a narinfo signed by an
+# untrusted key. Last, mutants of the tool: each must make this check fail.
 { pkgs, self }:
 
 let
@@ -85,6 +86,28 @@ let
           fail "a path with no base must cost its full size"
         hp=$(basename $newOut | cut -c1-32)
         [ -s deltas/$hp.delta ] || fail "measure --keep wrote no delta for $newOut"
+
+        echo "== measure refuses a delta that does not rebuild the NAR (a zstd shim flips one byte of what it decodes)"
+        mkdir -p shim
+        cat > shim/zstd <<'EOF'
+        #!${pkgs.runtimeShell}
+        dst= dec= patch= prev=
+        for a in "$@"; do
+          case $a in -d) dec=1 ;; --patch-from=*) patch=1 ;; esac
+          [ "$prev" = -o ] && dst=$a
+          prev=$a
+        done
+        ${pkgs.lib.getBin pkgs.zstd}/bin/zstd "$@" || exit $?
+        if [ -n "$dec" ] && [ -n "$patch" ] && [ -n "$dst" ]; then
+          python3 -c 'import sys; f = open(sys.argv[1], "r+b"); f.seek(100); b = f.read(1); f.seek(100); f.write(bytes([b[0] ^ 0xFF]))' "$dst"
+        fi
+        EOF
+        chmod +x shim/zstd
+        if PATH=$PWD/shim:$PATH $tool measure pairs.tsv res-bad.tsv -j 1 > measure-bad.out 2>&1; then
+          cat measure-bad.out; fail "measure accepted a delta that does not rebuild the NAR"
+        fi
+        grep -F "does not rebuild the NAR" measure-bad.out >/dev/null || { cat measure-bad.out; fail "measure: no 'does not rebuild the NAR'"; }
+        echo "refused as expected: measure with a decoder that corrupts its output"
 
         echo "== a signed narinfo for the new path (the server side), a key the client trusts and one it does not"
         nix key generate-secret --key-name rime-delta-test-1 > sk
@@ -201,6 +224,8 @@ let
     keep-nothing = mutant "keep-nothing" "if a.keep and best_file:" "if False:";
     # apply-all fetches every path whole instead of rebuilding it from its delta
     apply-all-no-delta = mutant "apply-all-no-delta" ''if r["base"]:'' "if False:";
+    # measure no longer checks that a delta decodes back to the new NAR
+    measure-trusts-delta = mutant "measure-trusts-delta" "ok = sha256_file(back) == digest" "ok = True";
   };
 in
 run tool
