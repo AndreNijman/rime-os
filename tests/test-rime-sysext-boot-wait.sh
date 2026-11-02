@@ -110,6 +110,9 @@ twins_unchanged() { return 0; }
 load_requested() { echo steam; }
 image_pin_excludes() { echo 'git-2.56.0-1.fc45.x86_64'; }
 rpm_cache_open() { return 1; }
+# The image's 32-bit twins from Koji: nothing needed, nothing missing.
+twin_pass() { TWIN_MISSING=(); return 1; }
+TWIN_MISSING=()
 # dnf5's resolving download. The pinned pass fails (nothing fits the image);
 # the unpinned pass is the diagnostic one, and it stalls the way a whole-set
 # download plus a guard pass over every package does.
