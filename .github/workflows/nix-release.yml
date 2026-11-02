@@ -150,9 +150,13 @@ jobs:
   # nixosConfiguration with rime.kernel.enable. The called job holds the APEX_SB_* secrets in its own environment
   # (kernel-signing); this workflow never names them (§6.3). A NEW signature is not used by this run: it must be
   # committed first, so the rime-os commit keeps identifying the release (§2). `build` refuses status=signed.
+  # MAIN ONLY (decided 11-02): off main this workflow is a dry run that uses no signature, so signing there would
+  # only put the key in reach of every push. The pivot's signing proof on feat/nixos is a deliberate act: dispatch
+  # nix-kernel-sign.yml itself on feat/nixos (its sign job allows main and feat/nixos). check_workflow.py refuses a
+  # caller of nix-kernel-sign.yml that is not restricted to main.
   kernel-sign:
     needs: changes
-    if: needs.changes.outputs.action == 'release' && vars.RIME_NIX_KERNEL_HOST != ''
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && vars.RIME_NIX_KERNEL_HOST != ''
     permissions:
       contents: read
     uses: ./.github/workflows/nix-kernel-sign.yml
