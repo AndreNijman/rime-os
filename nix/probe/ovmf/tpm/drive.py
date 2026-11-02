@@ -122,11 +122,12 @@ class Boot:
         end = time.time() + self.timeout
         while time.time() < end and self.proc.poll() is None:
             t = self.text()
-            n = len(re.findall(r"^RIME-ASK \d+", t, re.M))
+            # not anchored: the console agent's prompt has no newline, so the report lands at the end of its line
+            n = len(re.findall(r"RIME-ASK \d+\b", t))
             if n > asked:
-                # type once the console agent's prompt is out (or 5 s after the ask, if its text came first)
+                # type once the console agent's prompt for this ask is out (or 5 s after the ask)
                 seen = seen or time.time()
-                if "Please enter passphrase" in t.split(f"RIME-ASK {n}")[-1] or time.time() - seen > 5:
+                if t.count("Please enter passphrase") >= n or time.time() - seen > 5:
                     asked, seen = n, None
                     # an unplanned ask is answered with the passphrase so the sequence goes on; the verdict
                     # compares what was typed with the plan

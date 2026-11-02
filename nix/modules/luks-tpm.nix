@@ -11,8 +11,9 @@
 # wipes the TPM slot in its own systemd-cryptenroll call, enrols a new one bound to PCR 7 (Secure Boot enforcing
 # only), and fails if any keyslot or token that is not the TPM's changed: the recovery key the owner filed at install
 # keeps working. bootc's rime-luks-enroll wiped it and printed a new one (S3); --tpm-only never does. The unit is not
-# started by anything: the OVMF lab (nix/probe/ovmf/tpm) measured that PCR 7 is the same on NixOS as on bootc Rime
-# when shim, GRUB and the MOK stay the same, so the move itself needs no re-enrolment. It is for the cases that DO
+# started by anything: the OVMF lab (nix/probe/ovmf/tpm, README.md: boots P3 and N1) measured that PCR 7 is the
+# same on NixOS as on bootc Rime when shim, GRUB and the MOK stay the same (PCR 7 records the key that signed the
+# kernel, not the kernel), so the move itself needs no re-enrolment. It is for the cases that DO
 # change PCR 7 (a new Secure Boot key, a dbx update, a slot sealed to another chain), run by the owner:
 #
 #   sudo systemctl start rime-luks-tpm-reenrol@$(cryptsetup luksUUID /dev/<part>).service

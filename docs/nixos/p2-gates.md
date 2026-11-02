@@ -47,16 +47,16 @@ kernel, signed by the real pipeline's key path** (kernsign) boots from an entry 
 
 | # | Gate | How proven | Evidence so far | Status |
 |---|---|---|---|---|
-| T1 | PCR 7 is recorded before the move | OVMF lab log (`tpm2_pcrread sha256:7`, swtpm) | none | not met yet |
-| T2 | PCR 7 is recorded after the move, and the difference is explained | OVMF lab log | none | not met yet |
-| T3 | The TPM-only re-enrolment keeps the pre-existing recovery key working: after re-enrolment, the volume unlocks **with the recovery key** | OVMF lab log of the recovery-key unlock | none (`rime-luks-enroll` is shipped in rime-libexec, not wired: rime-libexec.nix:38) | not met yet |
+| T1 | PCR 7 is recorded before the move | OVMF lab log (`tpm2_pcrread sha256:7`, swtpm) | `nix/probe/ovmf/tpm` (README.md), Secure Boot on, swtpm: boot P2 (Fedora shim -> GRUB -> Fedora-signed kernel) and P3/P4 (same chain, MOK-signed kernel: the bootc-Rime shape). PCR 7 read from sysfs `pcr-sha256/7` in a busybox initrd and equal to the `tpm2_eventlog` replay of the saved event log (`tpm2_pcrread` itself runs on the NixOS boots). `/var/lab/rime-nix/artifacts/tpmkeymap/tpm/main/{results.tsv,pcr7.txt,P*.eventlog.yaml}`. TEST MOK and OVMF's db: katana's real value is TODO(handover) | **met** (2026-11-02) |
+| T2 | PCR 7 is recorded after the move, and the difference is explained | OVMF lab log | boot N1: NixOS Rime through the Rime boot hook's BLS entry on the same shim/GRUB/MOK: `tpm2_pcrread sha256:7` = sysfs = event-log replay = **P3's value** (`345554e0...`). P2 differs from P3 by one `EV_EFI_VARIABLE_AUTHORITY` (MokListRT) event carrying the MOK certificate: PCR 7 records the key that signed the kernel, not the kernel (README.md, "Why P2 and P3 differ"). N2: the bootc-era TPM slot unseals on NixOS with 0 asks. `/var/lab/rime-nix/artifacts/tpmkeymap/tpm/main/` | **met** (2026-11-02) |
+| T3 | The TPM-only re-enrolment keeps the pre-existing recovery key working: after re-enrolment, the volume unlocks **with the recovery key** | OVMF lab log of the recovery-key unlock | wired: `nix/modules/luks-tpm.nix` `rime-luks-tpm-reenrol@<uuid>.service` -> `rime-luks-enroll --tpm-only` (never touches the recovery or passphrase slots, and fails if they changed). Lab N3: stale slot refused, re-enrolment `result=success`, slots 0 and 1 byte-identical; N4: the new slot unseals, 0 asks; N5 (TPM cleared) and N6 (no TPM): the recovery key made with the disk unlocks at the initrd prompt. Mutant `run.sh run mutant-bootc-reenrol` (bootc's recovery-replacing re-enrolment): M4 FAILS (the old key is refused). `/var/lab/rime-nix/artifacts/tpmkeymap/tpm/{main,mutant-bootc-reenrol}/` | **met** (2026-11-02) |
 
 ## Keymap gate (D2)
 
 | # | Gate | How proven | Evidence so far | Status |
 |---|---|---|---|---|
-| M1 | A LUKS volume with the **gb** keymap unlocks with a passphrase holding a layout-dependent character | Nix VM test (systemd initrd, `console.keyMap = "uk"`, the character typed as keycodes) | none | not met yet |
-| M2 | The same with the **ch** keymap | Nix VM test | none | not met yet |
+| M1 | A LUKS volume with the **gb** keymap unlocks with a passphrase holding a layout-dependent character | Nix VM test (systemd initrd, `console.keyMap = "uk"`, the character typed as keycodes) | `checks.x86_64-linux.keymap-luks`: host.toml `[keyboard] console = "gb"` -> rime-boot writes `rd.vconsole.keymap=gb` -> systemd initrd + plymouth prompt; passphrase `a@b"c#d` typed as key codes unlocks at the first ask; a same-run us control refuses the same key codes. The keymap is `gb` (the kbd name bootc's installer writes, shipped by `rime-kbd-xkb`), not nixpkgs' `uk`. Mutant `initrd-us` (the initrd's keymap tree is nixpkgs' kbd alone, so the us map stays): FAILS (`nix build --impure --expr` over `nix/tests/keymap.nix { pkgs; self; mutant = "initrd-us"; }`). `/var/lab/rime-nix/artifacts/tpmkeymap/{keymap-luks,checks-keymap-libexec-2}.log`, `/var/lab/rime-nix/artifacts/tpmkeymap/mutant-keymap-initrd-us{,-2}.log` | **met** (2026-11-02) |
+| M2 | The same with the **ch** keymap | Nix VM test | `checks.x86_64-linux.keymap-luks`, same run: `rd.vconsole.keymap=ch` from host.toml, passphrase `zy-'+*` typed as y, z, slash, minus, shift+1, shift+3, unlocks at the first ask | **met** (2026-11-02) |
 
 ## Host-layer gate (D2) on a VM made from a copy of katana's state
 
