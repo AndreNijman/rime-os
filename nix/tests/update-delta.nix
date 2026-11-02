@@ -82,7 +82,7 @@ in
 pkgs.testers.runNixOSTest {
   name = "rime-update-delta" + lib.optionalString (mutant != null) "-mutant" + lib.optionalString g3 "-g3";
   node.pkgsReadOnly = false;
-  globalTimeout = if g3 then 4 * 3600 else 3600;
+  globalTimeout = if g3 then 6 * 3600 else 3600;
 
   nodes.server =
     { nodes, ... }:
@@ -219,26 +219,31 @@ pkgs.testers.runNixOSTest {
 
       with subtest("G3 setup: publish the old release; the client gets its closure (not measured)"):
           man_old = publish("OLD", OLD, "d" * 40, "2026.10.23")
-          server.copy_from_machine("/root/cache.pub", "")
-          client.copy_from_host(str(server.out_dir / "cache.pub"), "/root/cache.pub")
+          for k in ("cache.pub", "up.pub"):
+              server.copy_from_machine(f"/root/{k}", "")
+              client.copy_from_host(str(server.out_dir / k), f"/root/{k}")
           t0 = time.monotonic()
-          client.succeed(f"nix copy --from {PAGES} --option trusted-public-keys \"$(cat /root/cache.pub)\" {OLD} 2>&1")
+          # Rime's paths come from the release cache, the split's upstream paths (glibc, ...) from the fake upstream.
+          client.succeed(f"nix-store --realise {OLD} --option substituters '{PAGES} {UPSTREAM}'"
+                         " --option trusted-public-keys \"$(cat /root/cache.pub) $(cat /root/up.pub)\""
+                         " > /tmp/g3-setup.log 2>&1 || { tail -20 /tmp/g3-setup.log; false; }")
           print(f"G3 setup: the old closure copied to the client in {time.monotonic() - t0:.0f} s")
           client.succeed(f"nix-store --check-validity {OLD}")
 
       with subtest("G3 setup: publish the new release with deltas against the old"):
           t0 = time.monotonic()
-          man_new = publish("NEW", NEW, "e" * 40, "2026.10.30", deltas=True)
+          # man_b and old: the names the shared helpers (new_paths) read
+          man_b = publish("NEW", NEW, "e" * 40, "2026.10.30", deltas=True)
           print(f"G3 setup: deltas + publish of the new release in {time.monotonic() - t0:.0f} s")
-          d = man_new["delta"]
+          d = man_b["delta"]
           print(f"G3 delta table: {len(d['files'])} deltas, {d['delta_size']} B")
-          closure = [e["path"] for e in man_new["paths"]]
+          closure = [e["path"] for e in man_b["paths"]]
           invalid = set(client.succeed("nix-store --check-validity --print-invalid " + " ".join(closure)).split())
           missing = [p for p in closure if p in invalid]
-          old_set = {e["path"] for e in man_old["paths"]}
+          old = {e["path"] for e in man_old["paths"]}
           print(f"G3: {len(missing)} paths of the new release are not on the client"
-                f" ({len([p for p in closure if p not in old_set])} not in the old release)")
-          sizes = {e["path"]: e for e in man_new["paths"]}
+                f" ({len([p for p in closure if p not in old])} not in the old release)")
+          sizes = {e["path"]: e for e in man_b["paths"]}
           print("G3: whole download of those, by the manifest:",
                 sum(sizes[p]["file_size"] for p in missing), "B; NAR", sum(sizes[p]["nar_size"] for p in missing), "B")
           server.succeed(f": > {DLOG}")
