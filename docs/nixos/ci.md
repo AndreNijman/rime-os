@@ -80,10 +80,10 @@ Same method, same 2 CPUs and 4 busy loops (katana's own load was ~28 at the time
 | fixed check, unpinned | PASS (test script 110 s) | `hostgates-net.log` |
 
 Re-run in verification (11-03, logs in `/var/lab/rime-nix/artifacts/verify-hygiene/`): the mutant is a race, so it does not
-fail every time. Pinned to CPUs 4,5 with 4 busy loops it PASSED (`hostgates-net-mutant-wifi-no-wait-pinned.log`); with 6
+fail every time. Pinned to CPUs 4,5 with 4 busy loops it PASSED (a new run, not the failing log of the same name above); with 6
 it failed in `wifi_ap` because `nmcli -s -g 802-11-wireless-security.psk` read back an EMPTY psk while wpa_supplicant
 restarted, and hostapd refused a 0-length passphrase (`-pinned-2.log`); on CPU 4 alone with 6 it failed with "No suitable
-device found" (`-pinned-3.log`). The empty-psk read is a race the fixed check had too: `wifi_up` now waits until the psk
+device found" (`-pinned-3.log`). These mutant runs were at the content before the psk wait below. The empty-psk read is a race the fixed check had too: `wifi_up` now waits until the psk
 reads back non-empty. With that, the fixed check PASSES pinned to CPUs 4,5 (110 s) and to CPU 4 alone (134 s), 6 busy
 loops each (`hostgates-net-final-pinned-45.log`, `hostgates-net-final-pinned-4.log`).
 
