@@ -82,7 +82,20 @@ in
                 esac
               done
               vc=$(systemctl show -P ActiveState systemd-vconsole-setup.service)/$(systemctl show -P Result systemd-vconsole-setup.service)
-              line="RIME-ASK $tag $n keymap=$km vconsole-setup=$vc"
+              # ... and until an agent reads the keyboard for this ask. plymouth-start waits for the accent picker
+              # (nix/modules/branding.nix, up to 5 s with no ESP, as here) and the console agent is ordered after
+              # plymouth-start, so an ask can exist for seconds with nobody reading keys: keys typed then are lost and
+              # the test timed out (twice in a row on nix/secureboot, after the microcode split moved initrd timing).
+              # A person types at the prompt they see, so this is the harness's race, not the product's. Bounded: 30 s.
+              w=0 agent=none
+              while [ "$w" -lt 150 ]; do
+                if systemctl -q is-active systemd-ask-password-plymouth.service; then agent=plymouth; break; fi
+                if systemctl -q is-active systemd-ask-password-console.service; then agent=console; break; fi
+                sleep 0.2; w=$((w + 1))
+              done
+              # The agent forwards the question to plymouthd, which then draws the prompt and reads keys.
+              sleep 1
+              line="RIME-ASK $tag $n keymap=$km vconsole-setup=$vc agent=$agent"
               echo "$line" > /dev/ttyS0
               echo "$line" >> /run/rime-test-asks
             done
