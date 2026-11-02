@@ -60,6 +60,7 @@ FLOOR_BYTES = int(os.environ.get("RIME_MIGRATE_FLOOR_BYTES", 19 * GB))
 RENAMED_SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main"
 SIGNER_OVERRIDE = "usr/share/rime-os/trust/expected-signer"
 STATE = "/var/lib/rime/nixos-bridge"
+RUN_DIR = "/run/rime-migrate"  # start's mount points (tests point it at a temporary directory)
 BOOT_MIGRATE_DIRS = ("var/lib/rime/boot-migrate", "var/lib/apex/boot-migrate")
 ESP_TYPE = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 EFI_GLOBAL = "8be4df61-93ca-11d2-aa0d-00e098032b8c"
@@ -79,9 +80,9 @@ TRIAL_TOP = ("composefs", "state")
 BOOT_PART_FSTYPES = ("ext4",)
 # rime backup's key store (rimed/rime-backup-core/src/keys.rs SYSTEM_ROOT): keys/<uid>.key, recipients/<uid>.pub.
 BACKUP_KEYS_ROOT = "/var/lib/rime-backup"
-# The payload's manifest is signed (docs/nixos/bridge.md "The payload is signed"). The format is the one the bootc side's
-# `rime migrate start` checks before it runs this program (rimed/rime/src/nixos_bridge.rs in the readiness release),
-# byte for byte, so either verifier accepts exactly what the other does:
+# The payload's manifest is signed (docs/nixos/bridge.md "The payload is signed"). This program is the only verifier
+# (the readiness release's `rime migrate`, rimed/rime/src/nixos_bridge.rs, execs it with no check of its own); the
+# format is what payload-sign.sh writes and `openssl pkeyutl -verify -rawin` accepts:
 #   PAYLOAD_KEY_FILE   one line "<name>:<base64 of the 32-byte ed25519 public key>", shipped in the bootc image
 #   manifest.json.sig  one line "<name>:<base64 of the 64-byte ed25519 signature>" over the exact bytes of
 #                      manifest.json, signed by the key of the same name
@@ -854,6 +855,22 @@ def merge_boot_table(text, table):
     return "\n".join(lines[:hdr + 1] + mine + keep + lines[end:]) + "\n"
 
 
+def write_boot_table(path, table):
+    """Merge TABLE into the [boot] of the host.toml at PATH (the one carry just wrote) and replace the file. The text
+    is read BEFORE anything is opened for writing: opening it with "w" first truncates what carry wrote, and the
+    machine loses its rd.luks.* arguments (no unlock), timezone, locale, keyboard, mounts and [[luks]] (the bridge
+    OVMF lab's first encrypted run). Returns the text written."""
+    text = merge_boot_table(read(path, "") or "", table)
+    tmp = path + ".rime-bridge.tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, path)
+    return text
+
+
 def need_bytes(facts):
     return FLOOR_BYTES + int((facts.get("home") or {}).get("bytes", 0)) + int(
         (facts.get("ostree") or {}).get("store_bytes", 0))
@@ -1019,9 +1036,46 @@ def existing_subvols(dev):
         m.close()
 
 
+def start_record():
+    """The record a start leaves (STATE/state.json): None when there is none, {"unreadable": why} when it cannot be
+    read as JSON."""
+    p = os.path.join(STATE, "state.json")
+    try:
+        with open(p) as f:
+            rec = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        return {"unreadable": str(e)}
+    return rec if isinstance(rec, dict) else {"unreadable": "not a JSON object"}
+
+
+def record_refusal(rec):
+    """The refusal a start record means, or None. The same rule the bootc side's `rime` applies to its own verbs
+    (rimed/rime/src/nixos_bridge.rs, readiness release): only a start that undid itself (failed, and its last step is
+    "rolled back") allows another; a finished move, a start that neither finished nor rolled back, and an unreadable
+    record refuse by name."""
+    p = os.path.join(STATE, "state.json")
+    if rec is None:
+        return None
+    if "unreadable" in rec:
+        return ("start-record-unreadable", f"{p} cannot be read ({rec['unreadable']}); look at it before anything else")
+    steps = rec.get("steps") or []
+    last = steps[-1] if steps else "none"
+    if rec.get("failed") and last == "rolled back":
+        return None
+    if rec.get("done"):
+        return ("already-moved", f"{p}: this machine was moved to NixOS on {rec['done']}; boot the Rime (NixOS) entry")
+    return ("start-unfinished", f"{p}: a start reached step {last!r} and neither finished nor rolled itself back; "
+            "nothing new is started over it")
+
+
 def cmd_check(a):
     facts = gather(a)
     c, refusals, notes = evaluate(facts, facts.get("backup"))
+    rec = start_record()
+    if record_refusal(rec):
+        refusals.append(record_refusal(rec))
     preview = None
     if getattr(a, "payload", None):
         try:
@@ -1035,7 +1089,8 @@ def cmd_check(a):
             refusals.append((e.name, str(e)))
     if a.json:
         print(json.dumps({"facts": facts, "classification": c, "refusals": [{"name": n, "text": t} for n, t in refusals],
-                          "notes": notes, "chain": chain_read(facts), "carry_preview": preview}, indent=1, sort_keys=True))
+                          "notes": notes, "chain": chain_read(facts), "carry_preview": preview,
+                          "start_record": rec}, indent=1, sort_keys=True))
     else:
         sys.stdout.write(report(facts, c, refusals, notes, a.explain))
         if preview is not None:
@@ -1378,14 +1433,14 @@ def do_backup(dest, facts, var_home):
 
 
 def mask_old_side(state):
-    masked = []
+    # Recorded as it goes: a failure half way through still unmasks exactly what was masked (unmask_old_side).
+    masked = state.setdefault("masked", [])
     for u in MASK_UNITS:
         p = os.path.join("/etc/systemd/system", u)
         if os.path.lexists(p):
             continue
         os.symlink("/dev/null", p)
         masked.append(u)
-    state["masked"] = masked
     run(["systemctl", "daemon-reload"], check=False)
     for u in ("rime-update-check.timer", "rime-store-compact.timer"):
         run(["systemctl", "stop", u], check=False)
@@ -1453,6 +1508,41 @@ def verify_payload(payload, trusted=None):
     return man
 
 
+def preview_extract(tar, dest):
+    """Extract preview.tar into DEST with tarfile's "data" filter, except for what a NixOS etc/ really holds and that
+    filter refuses: a unit MASK (a link to /dev/null, or the /dev/null character device a dereferencing tar writes for
+    one) is made again as a link to /dev/null AFTER everything else, as a leaf whose directory lies inside DEST, so no
+    other member can be written through it. Any other device, fifo or absolute link is left out and counted.
+    Returns (masks, skipped)."""
+    masks, skipped = [], []
+
+    def keep(m, path):
+        if (m.ischr() and (m.devmajor, m.devminor) == (1, 3)) or (m.issym() and m.linkname == "/dev/null"):
+            masks.append(m.name)
+            return None
+        if m.isdev() or m.isfifo():
+            skipped.append(m.name)
+            return None
+        try:
+            return tarfile.data_filter(m, path)
+        except tarfile.FilterError:
+            skipped.append(m.name)
+            return None
+
+    with tarfile.open(tar) as tf:
+        tf.extractall(dest, filter=keep)
+    real = os.path.realpath(dest)
+    for name in masks:
+        target = os.path.join(dest, name)
+        parent = os.path.realpath(os.path.dirname(target))
+        if os.path.commonpath([parent, real]) != real or os.path.lexists(target):
+            skipped.append(name)
+            continue
+        os.makedirs(parent, exist_ok=True)
+        os.symlink("/dev/null", target)
+    return masks, skipped
+
+
 def carry_preview(payload, man, src="/", cmdline="/proc/cmdline"):
     """The left-behind report BEFORE start: the payload's own rime-hostlayer (preview.tar: the program, the NixOS
     system's etc/ and sw/bin names, the greeter's shipped config) run as `carry --plan` by this system's python,
@@ -1461,15 +1551,16 @@ def carry_preview(payload, man, src="/", cmdline="/proc/cmdline"):
         raise Refused("payload-no-preview", "this payload carries no preview.tar, so the carry cannot be shown first")
     tmp = tempfile.mkdtemp(prefix="rime-migrate-preview-")
     try:
-        with tarfile.open(os.path.join(payload, man["preview"]["file"])) as tf:
-            tf.extractall(tmp, filter="data")
+        masks, skipped = preview_extract(os.path.join(payload, man["preview"]["file"]), tmp)
+        note = (f"preview: {len(masks)} unit mask(s) kept as links to /dev/null"
+                + (f", {len(skipped)} special file(s) left out: {', '.join(skipped[:5])}" if skipped else "") + "\n")
         root = os.path.join(tmp, "root")
         os.makedirs(root)
         env = {"PATH": "/usr/bin:/usr/sbin", "LANG": "C.UTF-8",
                "RIME_GREETD_DEFAULT": os.path.join(tmp, "greetd-config.toml")}
         r = run([sys.executable, "-I", "-B", os.path.join(tmp, "rime-hostlayer"), "carry", "--from", src, "--root",
                  root, "--system", os.path.join(tmp, "system"), "--cmdline", cmdline, "--plan"], check=False, env=env)
-        return r.returncode, (r.stdout or "") + (r.stderr or "")
+        return r.returncode, note + (r.stdout or "") + (r.stderr or "")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1526,16 +1617,19 @@ def cmd_start(a):
         lo = trial_leftovers(facts)
         if lo["files"] or lo["nvram"] or lo["top"]:
             refusals.append(("e-repair-pending", "run `rime migrate repair-e --confirm` first (D3)"))
+    if record_refusal(start_record()):
+        refusals.append(record_refusal(start_record()))
     if refusals:
         sys.stdout.write(report(facts, c, refusals, notes, True))
         return EXIT_REFUSED
     man = verify_payload(a.payload)
-    if "preview" in man:
-        rc, text = carry_preview(a.payload, man)
-        sys.stdout.write("the /etc carry (preview; the real one runs below):\n"
-                         + "".join(f"  | {ln}\n" for ln in text.splitlines()))
-        if rc:
-            raise Refused("carry-refused", f"rime-hostlayer carry --plan exited {rc}; nothing was written")
+    # The left-behind report comes first, always (D2): a payload with no preview.tar is refused by name
+    # (payload-no-preview, raised by carry_preview) instead of starting without showing what stays behind.
+    rc, text = carry_preview(a.payload, man)
+    sys.stdout.write("the /etc carry (preview; the real one runs below):\n"
+                     + "".join(f"  | {ln}\n" for ln in text.splitlines()))
+    if rc:
+        raise Refused("carry-refused", f"rime-hostlayer carry --plan exited {rc}; nothing was written")
     root = facts["root"]
     dev = root["luks"]["mapper"] if root.get("luks") else root["device"]
     state = {"started": datetime.datetime.now(datetime.timezone.utc).isoformat(), "topology": c, "steps": []}
@@ -1547,25 +1641,28 @@ def cmd_start(a):
             json.dump(state, f, indent=1, sort_keys=True)
         print(f"== {s}", flush=True)
 
-    os.makedirs("/run/rime-migrate", exist_ok=True)
-    top = "/run/rime-migrate/top"
+    os.makedirs(RUN_DIR, exist_ok=True)
+    top = os.path.join(RUN_DIR, "top")
     os.makedirs(top, exist_ok=True)
     mount("-o", "subvolid=5", dev, top)
     # rime-migrate-from-apex (and a store compaction) must have finished before anything is copied (D2).
     wait_units()
-    step("backup")
-    state["backup"] = do_backup(a.backup, facts, os.path.join(top, facts["var_fsroot"].lstrip("/"), "home"))
-    step("old side")
-    wait_units()
-    mask_old_side(state)
-    step("fsck gate before")
-    state["fsck_before"] = fsck_gate(top, facts, "before")
-    before = containment_snapshot(top, facts)
     made = []
     bdir = os.path.join(top, "boot") if facts["boot"]["kind"] == "top-level-dir" else "/boot"
     old_custom = read(os.path.join(bdir, "grub2/custom.cfg"))
     had = boot_had(bdir)
+    # Every step after the record exists is inside the rollback (wave 3): a failure in the backup, while masking the
+    # old side or at the first fsck gate used to leave a record with neither `failed` nor `rolled back`, units masked,
+    # and the bootc verbs refused for good. Now it unmasks what it masked and records `rolled back` like any other.
     try:
+        step("backup")
+        state["backup"] = do_backup(a.backup, facts, os.path.join(top, facts["var_fsroot"].lstrip("/"), "home"))
+        step("old side")
+        wait_units()
+        mask_old_side(state)
+        step("fsck gate before")
+        state["fsck_before"] = fsck_gate(top, facts, "before")
+        before = containment_snapshot(top, facts)
         step("snapshot @pre-nixos")
         run(["btrfs", "subvolume", "snapshot", "-r", top, os.path.join(top, "@pre-nixos")])
         made.append("@pre-nixos")
@@ -1581,7 +1678,7 @@ def cmd_start(a):
         src_home = os.path.join(top, facts["var_fsroot"].lstrip("/"), "home")
         run(["cp", "-a", "--reflink=always", "--one-file-system", src_home + "/.", os.path.join(top, "@home")])
         step("install closure")
-        t = "/run/rime-migrate/target"
+        t = os.path.join(RUN_DIR, "target")
         os.makedirs(t, exist_ok=True)
         mount("-o", "subvol=@nixos,compress-force=zstd:3", dev, t)
         for sub, where in (("@nix", "nix"), ("@home", "var/home")):
@@ -1627,8 +1724,7 @@ def cmd_start(a):
             state["boot_migrate_carried"] = sorted(os.listdir(bm))
         ht = os.path.join(t, "var/lib/rime/host.toml")
         state["boot_table"] = boot_table(facts)
-        with open(ht, "w") as f:
-            f.write(merge_boot_table(read(ht, "") or "", state["boot_table"]))
+        write_boot_table(ht, state["boot_table"])
         chroot(t, f"{man['toplevel']}/sw/bin/rime-hostlayer", "host", "validate", "--file", "/var/lib/rime/host.toml")
         step("first activation and boot entry")
         open(os.path.join(t, "etc/NIXOS"), "a").close()
@@ -1657,7 +1753,7 @@ def cmd_start(a):
               flush=True)
     except BaseException as e:
         log(f"failed: {e}; removing what the bridge made")
-        run(["umount", "-R", "/run/rime-migrate/target"], check=False)
+        run(["umount", "-R", os.path.join(RUN_DIR, "target")], check=False)
         undo_boot(bdir, old_custom, had)
         for s in reversed(made):
             run(["btrfs", "subvolume", "delete", os.path.join(top, s)], check=False)
@@ -1669,7 +1765,7 @@ def cmd_start(a):
         raise
     state["done"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     step("done")
-    report_path = os.path.join("/run/rime-migrate/target", "var/lib/rime/carry/report.txt")
+    report_path = os.path.join(RUN_DIR, "target", "var/lib/rime/carry/report.txt")
     print(f"done: NixOS {man['toplevel']} is in the GRUB menu; the ostree entries stay. Left-behind report: "
           f"/var/lib/rime/carry/report.txt on the new system ({'present' if os.path.exists(report_path) else 'missing'})")
     return EXIT_OK

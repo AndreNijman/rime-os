@@ -18,12 +18,18 @@ through unchanged, so its own `--help` is the reference:
 
 The copy here is taken byte for byte from the NixOS side's `rime-bridge.py`
 (first line changed to `#!/usr/bin/python3 -I`), at the NixOS branch's bridge
-commit f03485259 (sha256 of the file without its first line:
-`7b24b07a708c1e97fff4861ae3f24e012a97e63be0dc00bc0af1497b582596b3`). Its tests
+commit 223a0758d (sha256 of the file without its first line:
+`a6fcdc2a182abdee7ec6c7e47ba28084d8017e8ca7e8db31b56f69332964d14b`). Its tests
 (`test_bridge.py`, `test_bridge_d2.py`) are in `tests/rime-migrate/` and run
 from `tests/test-rime-migrate.sh`. The fixture uses a synthetic root UUID
-(`0b0b0b0b-…`), never a real machine's. That commit is not on the NixOS
-branch's tip yet: compare again, by that hash, before this release ships.
+(`0b0b0b0b-…`), never a real machine's. That commit is on the NixOS branch
+(feat/nixos, wave 3 integrated); compare again, by that hash, before this
+release ships. Since the previous copy it gained: `write_boot_table` (start no
+longer truncates the host.toml the /etc carry wrote, so an encrypted machine
+keeps `rd.luks.*` and unlocks), `preview_extract` (check no longer crashes on a
+payload's unit masks), a start that refuses a payload without `preview.tar`
+(`payload-no-preview`: the left-behind report always comes first), and the
+start record rule below.
 
 On a system older than this release `rime migrate` does not exist; on one where
 the program is missing, `rime migrate` says so and points at `sudo rime update`.
@@ -50,18 +56,17 @@ NixOS GRUB entry, "Rime (generation …)". `boot status`,
 | unreadable as root, or not JSON | refused (fails closed) |
 | permission denied as a normal user | left to the root check, which runs next |
 
-**A start that stops before its snapshot step stays refused.** The bridge
-writes the record at its first step (`backup`) but removes what it made and
-records `rolled back` only for a failure from its snapshot step on. A start
-that fails in the backup, while masking the old side's units, or at the first
-fsck gate leaves a record with neither `failed` nor `rolled back`, the units it
-masked still masked, and these verbs refused. That is the safe answer (nobody
-can tell it apart from a start still running), so the refusal says exactly that
-and names the record rather than promising a rollback that did not happen.
-`rime migrate check` does not read the record. Both belong in the bridge (its
-rollback should cover every step after the record is written, and `check`
-should report the record): a handover to the NixOS side, not changed here,
-because this copy must stay byte for byte the bridge it was taken from.
+**A start that fails at any step undoes itself.** The bridge writes the record
+at its first step (`backup`), and every step after that is inside its
+rollback: a start that fails in the backup, while masking the old side's units
+(each one is recorded as it is masked), at an fsck gate or later unmasks what it
+masked, removes what it made and records `failed` with `rolled back`, which
+allows these verbs again. (Until the NixOS side's wave 3 the rollback began only
+at the snapshot step, so such a failure left the verbs refused for good.)
+`rime migrate check` and `start` read the record with the same rule as the
+table above and refuse by name: `already-moved`, `start-unfinished` (naming the
+last step), `start-record-unreadable`. A record that is still refused after
+this, for example a start killed by a power cut, names its path and last step.
 
 `rime-update-check` (the timer that looks for updates) reads the same record
 with the same rule: while it refuses, it never asks the registry and reports

@@ -257,7 +257,7 @@ if (( WITH_BINARY )); then
     pipe_has -F 'Rime (generation' <<<"$out" && pipe_has -F 'sudo rime update' <<<"$out" \
         && ok "the refusal names the new boot entry and where updates are now" || bad "refusal text" "$out"
     out="$(rime_at running update 2>&1)"
-    pipe_has -F 'install closure' <<<"$out" && pipe_has -F 'stopped before its snapshot step' <<<"$out" \
+    pipe_has -F 'install closure' <<<"$out" && pipe_has -F 'was cut off (a crash or a' <<<"$out" \
         && pipe_has -F 'record: ' <<<"$out" \
         && ok "an unfinished start names its last step and the record, and promises no rollback it lacks" \
         || bad "unfinished text" "$out"

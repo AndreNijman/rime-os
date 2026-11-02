@@ -6,11 +6,13 @@ Same loader as test_bridge.py: RIME_MIGRATE names the program under test (a muta
 """
 
 import base64
+import contextlib
 import copy
 import errno
 import hashlib
 import importlib.machinery
 import importlib.util
+import io
 import json
 import pathlib
 import os
@@ -158,6 +160,25 @@ class BootTable(unittest.TestCase):
         self.assertEqual(t["luks"][0]["name"], f"luks-{LUKS_UUID}")
         self.assertEqual(t["host"], {"hostname": "lab"})
 
+    def test_written_over_carrys_file_keeps_it(self):
+        """start's write keeps every table carry wrote (the lab's first encrypted run lost rd.luks.* here: the file
+        was opened for writing, so truncated, before it was read)."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d)
+        ht = os.path.join(d, "host.toml")
+        carried = ('schema = 1\n\n[host]\ntimezone = "Australia/Perth"\n\n[boot]\nkernel_params = ["rd.luks.uuid=%s"]\n\n'
+                   '[[luks]]\nname = "luks-%s"\ndevice = "UUID=%s"\n' % (LUKS_UUID, LUKS_UUID, LUKS_UUID))
+        with open(ht, "w") as f:
+            f.write(carried)
+        B.write_boot_table(ht, self.TABLE)
+        with open(ht, "rb") as f:
+            t = tomllib.load(f)
+        self.assertEqual(t["boot"], dict(self.TABLE, kernel_params=[f"rd.luks.uuid={LUKS_UUID}"]))
+        self.assertEqual(t["host"], {"timezone": "Australia/Perth"})
+        self.assertEqual(t["luks"][0]["device"], f"UUID={LUKS_UUID}")
+        self.assertEqual(oct(os.stat(ht).st_mode & 0o777), "0o644")
+        self.assertEqual(os.listdir(d), ["host.toml"])
+
     def test_replaces_not_duplicates(self):
         out = B.merge_boot_table('[boot]\nlayout = "bls"\ndevice = "UUID=old"\n', self.TABLE)
         self.assertEqual(tomllib.loads(out)["boot"], self.TABLE)
@@ -260,6 +281,10 @@ class Ed25519(unittest.TestCase):
         # S >= L (malleability) is refused even though [S]B would still match
         s = int.from_bytes(sig2[32:], "little") + B._L
         self.assertFalse(B.ed25519_verify(pub2, h("72"), sig2[:32] + s.to_bytes(32, "little")))
+        # S' = L - S makes [S']B = -(R + [k]A): the same y, the other x. Only the x comparison refuses it
+        # (mutant ed25519-y-only).
+        neg = (B._L - int.from_bytes(sig2[32:], "little")) % B._L
+        self.assertFalse(B.ed25519_verify(pub2, h("72"), sig2[:32] + neg.to_bytes(32, "little")))
 
     def test_the_product_trusts_the_image_key_file(self):
         # The shipped program trusts the key file the bootc image carries (the readiness release), nothing compiled in.
@@ -418,6 +443,20 @@ class Payload(unittest.TestCase):
             B.verify_payload(self.d, (TEST_KEY,))
         self.assertEqual(cm.exception.name, "payload-signature-bad")
 
+    def test_signed_toplevel_must_be_a_store_path(self):
+        # Defence behind the signature: a signed manifest whose toplevel is not a /nix/store path is still refused
+        # (start chroots into it and runs its activate) (mutant manifest-paths-unchecked).
+        make_payload(self.d)
+        p = os.path.join(self.d, "manifest.json")
+        m = json.loads(pathlib.Path(p).read_text())
+        m["toplevel"] = "/etc/../nix/store/" + "b" * 32 + "-x"
+        raw = json.dumps(m, indent=1).encode()
+        pathlib.Path(p).write_bytes(raw)
+        pathlib.Path(self.d, "manifest.json.sig").write_text(sign_manifest(raw) + "\n")
+        with self.assertRaises(B.Refused) as cm:
+            B.verify_payload(self.d, (TEST_KEY,))
+        self.assertEqual(cm.exception.name, "payload-corrupt")
+
     def test_no_key_file_refuses_every_payload(self):
         # The product with no nixos-bridge-payload.pub (a release before the key ships): nothing is installed.
         make_payload(self.d)
@@ -475,6 +514,53 @@ class Preview(unittest.TestCase):
         self.assertIn("greetd-config.toml", text.split("GREETD ", 1)[1].splitlines()[0])
         self.assertIn("ROOT-EMPTY True", text)
         self.assertIn("LEFT BEHIND", text)
+
+    def test_masks_survive_and_specials_never_crash(self):
+        """A NixOS etc/ holds unit masks: a dereferencing tar writes them as the /dev/null character device, a plain
+        one as a link to /dev/null. Both come back as links to /dev/null; a fifo, another device and an absolute link
+        elsewhere are left out and counted (the lab's first SB run crashed here with SpecialFileError)."""
+        def member(name, kind, **kw):
+            m = tarfile.TarInfo(name)
+            m.type = kind
+            for k, v in kw.items():
+                setattr(m, k, v)
+            return m
+        with tarfile.open(self.tar, "a") as tf:
+            tf.addfile(member("system/etc/systemd/system/apex-flathub-setup.service", tarfile.CHRTYPE, devmajor=1, devminor=3))
+            tf.addfile(member("system/etc/systemd/system/other.service", tarfile.SYMTYPE, linkname="/dev/null"))
+            tf.addfile(member("system/etc/fifo", tarfile.FIFOTYPE))
+            tf.addfile(member("system/etc/zero", tarfile.CHRTYPE, devmajor=1, devminor=5))
+            tf.addfile(member("system/etc/abs", tarfile.SYMTYPE, linkname="/etc/passwd"))
+        out = os.path.join(self.d, "out")
+        os.makedirs(out)
+        masks, skipped = B.preview_extract(self.tar, out)
+        self.assertEqual(sorted(masks), ["system/etc/systemd/system/apex-flathub-setup.service",
+                                         "system/etc/systemd/system/other.service"])
+        self.assertEqual(sorted(skipped), ["system/etc/abs", "system/etc/fifo", "system/etc/zero"])
+        for n in masks:
+            self.assertEqual(os.readlink(os.path.join(out, n)), "/dev/null")
+        for n in skipped:
+            self.assertFalse(os.path.lexists(os.path.join(out, n)))
+        self.assertTrue(os.path.isfile(os.path.join(out, "rime-hostlayer")))
+        man = make_payload(self.payload, preview=self.tar)
+        rc, text = B.carry_preview(self.payload, man, src="/nonexistent-src", cmdline="/nonexistent-cmdline")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("preview: 2 unit mask(s) kept as links to /dev/null, 3 special file(s) left out", text)
+
+    def test_mask_never_written_through_a_link(self):
+        """A mask whose directory is a link out of the extraction dir is left out, never created there."""
+        outside = os.path.join(self.d, "outside")
+        os.makedirs(outside)
+        with tarfile.open(self.tar, "a") as tf:
+            m = tarfile.TarInfo("system/escape/x.service")
+            m.type, m.devmajor, m.devminor = tarfile.CHRTYPE, 1, 3
+            tf.addfile(m)
+        out = os.path.join(self.d, "out")
+        os.makedirs(os.path.join(out, "system"))
+        os.symlink(outside, os.path.join(out, "system/escape"))
+        masks, skipped = B.preview_extract(self.tar, out)
+        self.assertIn("system/escape/x.service", skipped)
+        self.assertEqual(os.listdir(outside), [])
 
     def test_no_preview_refused_by_name(self):
         man = make_payload(self.payload)
@@ -631,6 +717,251 @@ class ArchiveTrialTop(unittest.TestCase):
         c, refusals, notes = B.evaluate(f)
         self.assertEqual(c["topology"], "E")
         self.assertTrue(any("/composefs (btrfs top level)" in n and "/state" in n for n in notes), notes)
+
+
+
+# ── the commands: check, start and key-export call their gates (not only the helpers do) ─────────────────────────
+
+class Commands(unittest.TestCase):
+    """cmd_start verifies the payload's signature before it mounts or writes anything; cmd_check refuses when the
+    carry preview fails; cmd_key_export refuses the disk whose keys it exports. Mutants start-unverified,
+    check-carry-refusal-dropped, key-export-same-disk (nix/tests/bridge.nix)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.keyfile = os.path.join(self.d, "nixos-bridge-payload.pub")
+        pathlib.Path(self.keyfile).write_text(TEST_KEY + "\n")
+        self.saved = {n: getattr(B, n) for n in ("gather", "collect_live", "backup_facts", "PAYLOAD_KEY_FILE",
+                                                  "mount", "run", "STATE", "BACKUP_KEYS_ROOT", "wait_units")}
+        B.PAYLOAD_KEY_FILE = self.keyfile
+        B.STATE = os.path.join(self.d, "state")
+        B.BACKUP_KEYS_ROOT = os.path.join(self.d, "no-backup-keys")
+        self.facts = luks_a()
+        self.facts["existing_subvols"] = []
+        self.facts["backup"] = {"path": os.path.join(self.d, "backup"), "exists": True, "disk": "/dev/vdc",
+                                "free_bytes": 100 * GB}
+        B.gather = lambda a: copy.deepcopy(self.facts)
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(B, n, v)
+        shutil.rmtree(self.d)
+
+    def forbid_writes(self):
+        def touched(*a, **k):
+            raise AssertionError(f"start touched the machine before the payload was verified: {a}")
+        B.mount = B.run = B.wait_units = touched
+
+    def start(self, payload):
+        a = B.argparse.Namespace(cmd="start", yes=True, backup=self.facts["backup"]["path"], payload=payload, disk=[])
+        with self.assertRaises(B.Refused) as cm, contextlib.redirect_stdout(io.StringIO()):
+            B.cmd_start(a)
+        self.assertFalse(os.path.exists(B.STATE), "start wrote its state before the payload was verified")
+        return cm.exception.name
+
+    def test_start_refuses_an_unsigned_payload(self):
+        p = os.path.join(self.d, "payload")
+        make_payload(p, sign=False)
+        self.forbid_writes()
+        self.assertEqual(self.start(p), "payload-unsigned")
+
+    def test_start_refuses_a_payload_signed_by_another_key(self):
+        p = os.path.join(self.d, "payload")
+        make_payload(p, sign=False)
+        raw = pathlib.Path(p, "manifest.json").read_bytes()
+        other = hashlib.sha256(b"another TEST key").digest()
+        pathlib.Path(p, "manifest.json.sig").write_text(sign_manifest(raw, seed=other, name="rime-other-1") + "\n")
+        self.forbid_writes()
+        self.assertEqual(self.start(p), "payload-key-untrusted")
+
+    def test_start_refuses_a_tampered_payload(self):
+        p = os.path.join(self.d, "payload")
+        make_payload(p)
+        with open(os.path.join(p, "manifest.json"), "ab") as f:
+            f.write(b" ")
+        self.forbid_writes()
+        self.assertEqual(self.start(p), "payload-signature-bad")
+
+    def test_start_refuses_a_payload_without_the_left_behind_report(self):
+        # Signed and intact, but no preview.tar: start must not begin without showing what stays behind (D2).
+        p = os.path.join(self.d, "payload")
+        make_payload(p)
+        self.forbid_writes()
+        self.assertEqual(self.start(p), "payload-no-preview")
+
+    def preview(self, rc):
+        tree = os.path.join(self.d, f"tree{rc}")
+        os.makedirs(os.path.join(tree, "system/etc"))
+        pathlib.Path(tree, "greetd-config.toml").write_text("[terminal]\nvt = 1\n")
+        pathlib.Path(tree, "rime-hostlayer").write_text(
+            f"import sys\nprint('LEFT BEHIND (1; every entry is in report.json)')\nsys.exit({rc})\n")
+        tar = os.path.join(self.d, f"preview{rc}.tar")
+        with tarfile.open(tar, "w") as tf:
+            for n in sorted(os.listdir(tree)):
+                tf.add(os.path.join(tree, n), n)
+        p = os.path.join(self.d, f"payload{rc}")
+        make_payload(p, preview=tar)
+        return p
+
+    def check(self, payload):
+        a = B.argparse.Namespace(cmd="check", explain=True, json=False, backup=None, disk=[], payload=payload)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = B.cmd_check(a)
+        return rc, out.getvalue()
+
+    def test_check_shows_the_left_behind_report(self):
+        rc, out = self.check(self.preview(0))
+        self.assertEqual(rc, B.EXIT_OK, out)
+        self.assertIn("LEFT BEHIND", out)
+
+    def test_check_refuses_when_the_carry_plan_fails(self):
+        rc, out = self.check(self.preview(4))
+        self.assertEqual(rc, B.EXIT_REFUSED, out)
+        self.assertIn("carry-refused", out)
+        self.assertIn("LEFT BEHIND", out)
+
+    def key_export(self, disk):
+        B.collect_live = lambda: luks_a()
+        B.backup_facts = lambda p, devs=None: {"path": p, "exists": True, "disk": disk, "free_bytes": 100 * GB}
+        B.run = FakeRun(LUKS_UUID)
+        with contextlib.redirect_stdout(io.StringIO()):
+            return B.cmd_key_export(B.argparse.Namespace(cmd="key-export", to=self.d))
+
+    def test_key_export_refuses_the_disk_it_exports_from(self):
+        with self.assertRaises(B.Refused) as cm:
+            self.key_export("/dev/vda")
+        self.assertEqual(cm.exception.name, "backup-same-disk")
+        self.assertFalse([n for n in os.listdir(self.d) if n.startswith("rime-keys-")])
+
+    def test_key_export_to_another_disk(self):
+        self.assertEqual(self.key_export("/dev/vdc"), B.EXIT_OK)
+        out = [n for n in os.listdir(self.d) if n.startswith("rime-keys-")]
+        self.assertEqual(len(out), 1)
+        self.assertTrue(os.path.isfile(os.path.join(self.d, out[0], "luks-header.img")))
+
+
+class StartRecord(unittest.TestCase):
+    """The start record (STATE/state.json): every step after it exists is inside the rollback, so a start that fails in
+    the backup, while masking the old side or at the first fsck gate unmasks what it masked and records `rolled back`;
+    check and start both refuse over a record that neither finished nor rolled back. Mutants start-early-steps-outside-
+    rollback, check-ignores-start-record (nix/tests/bridge.nix)."""
+
+    NAMES = ("gather", "PAYLOAD_KEY_FILE", "mount", "run", "STATE", "RUN_DIR", "wait_units", "do_backup",
+             "mask_old_side", "unmask_old_side", "fsck_gate", "containment_snapshot", "carry_preview", "boot_had",
+             "undo_boot")
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.saved = {n: getattr(B, n) for n in self.NAMES}
+        keyfile = os.path.join(self.d, "nixos-bridge-payload.pub")
+        pathlib.Path(keyfile).write_text(TEST_KEY + "\n")
+        B.PAYLOAD_KEY_FILE = keyfile
+        B.STATE = os.path.join(self.d, "state")
+        B.RUN_DIR = os.path.join(self.d, "run")
+        self.facts = luks_a()
+        self.facts["existing_subvols"] = []
+        self.facts["backup"] = {"path": os.path.join(self.d, "backup"), "exists": True, "disk": "/dev/vdc",
+                                "free_bytes": 100 * GB}
+        B.gather = lambda a: copy.deepcopy(self.facts)
+        self.calls = []
+        B.mount = lambda *a: self.calls.append(("mount",) + a)
+        B.run = lambda cmd, **k: self.calls.append(("run", tuple(cmd)))
+        B.wait_units = lambda *a, **k: None
+        B.carry_preview = lambda payload, man, *a, **k: (0, "LEFT BEHIND (0)")
+        B.boot_had = lambda bdir: {}
+        B.undo_boot = lambda *a: self.calls.append(("undo_boot",))
+        B.do_backup = lambda *a: os.path.join(self.d, "backup", "b")
+        B.containment_snapshot = lambda *a: {}
+        self.unmasked = []
+        B.unmask_old_side = lambda state: self.unmasked.append(list(state.get("masked", [])))
+        self.payload = os.path.join(self.d, "payload")
+        make_payload(self.payload)
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(B, n, v)
+        shutil.rmtree(self.d)
+
+    def masks(self, state):
+        state.setdefault("masked", []).append("rime-update-check.timer")
+
+    def start(self):
+        a = B.argparse.Namespace(cmd="start", yes=True, backup=self.facts["backup"]["path"], payload=self.payload,
+                                 disk=[])
+        with contextlib.redirect_stdout(io.StringIO()):
+            return B.cmd_start(a)
+
+    def record(self):
+        with open(os.path.join(B.STATE, "state.json")) as f:
+            return json.load(f)
+
+    def fails_in(self, where):
+        def boom(*a, **k):
+            raise B.Failed(f"TEST failure in {where}")
+        return boom
+
+    def assert_rolled_back(self, masked):
+        rec = self.record()
+        self.assertEqual(rec["steps"][-1], "rolled back", rec["steps"])
+        self.assertIn("TEST failure", rec["failed"])
+        self.assertEqual(self.unmasked, [masked])
+        self.assertIsNone(B.record_refusal(B.start_record()))
+
+    def test_a_failed_backup_rolls_back(self):
+        B.do_backup = self.fails_in("backup")
+        B.mask_old_side = self.masks
+        with self.assertRaises(B.Failed):
+            self.start()
+        self.assert_rolled_back([])
+
+    def test_a_failure_while_masking_unmasks_what_was_masked(self):
+        def half(state):
+            self.masks(state)
+            raise B.Failed("TEST failure half way through the masks")
+        B.mask_old_side = half
+        with self.assertRaises(B.Failed):
+            self.start()
+        self.assert_rolled_back(["rime-update-check.timer"])
+
+    def test_a_failed_first_fsck_gate_rolls_back(self):
+        B.mask_old_side = self.masks
+        B.fsck_gate = self.fails_in("fsck gate before")
+        with self.assertRaises(B.Failed):
+            self.start()
+        self.assert_rolled_back(["rime-update-check.timer"])
+
+    def write_record(self, rec):
+        os.makedirs(B.STATE, exist_ok=True)
+        with open(os.path.join(B.STATE, "state.json"), "w") as f:
+            f.write(rec if isinstance(rec, str) else json.dumps(rec))
+
+    def check(self):
+        a = B.argparse.Namespace(cmd="check", explain=True, json=False, backup=None, disk=[], payload=None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = B.cmd_check(a)
+        return rc, out.getvalue()
+
+    def test_check_and_start_refuse_over_an_unfinished_start(self):
+        rc, out = self.check()
+        self.assertEqual(rc, B.EXIT_OK, out)  # positive control: no record
+        for rec, name in (({"steps": ["backup", "old side"]}, "start-unfinished"),
+                          ({"steps": ["backup", "done"], "done": "2026-11-03"}, "already-moved"),
+                          ("{not json", "start-record-unreadable")):
+            self.write_record(rec)
+            rc, out = self.check()
+            self.assertEqual(rc, B.EXIT_REFUSED, out)
+            self.assertIn(name, out)
+            B.mask_old_side = self.masks
+            before = self.calls[:]
+            self.assertEqual(self.start(), B.EXIT_REFUSED)
+            self.assertEqual(self.calls, before, "start touched the machine over an existing record")
+
+    def test_a_start_that_rolled_back_allows_another(self):
+        self.write_record({"steps": ["backup", "rolled back"], "failed": "TEST"})
+        rc, out = self.check()
+        self.assertEqual(rc, B.EXIT_OK, out)
 
 
 if __name__ == "__main__":

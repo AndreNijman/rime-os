@@ -33,7 +33,7 @@
 //! | absent | allowed: the move never started |
 //! | `"failed"` set AND the last step is `"rolled back"` | allowed: start removed what it made and unmasked the old side |
 //! | `"done"` set | refused: the machine has moved |
-//! | anything else that parses | refused: a start began and did not finish (a crash, a power cut, one running now, or one that failed before its snapshot step: the bridge's rollback covers only the steps from the snapshot on) |
+//! | anything else that parses | refused: a start began and did not finish (a crash, a power cut, or one running now; a start that fails undoes itself and records `rolled back`) |
 //! | unreadable or not JSON, as root | refused: nobody knows which of the above it is |
 //!
 //! Unreadable as an ordinary user is not a refusal: the directory is 0700
@@ -170,10 +170,10 @@ pub fn refusal(verb: &str, marker: &Marker, record: &Path) -> Option<String> {
         Marker::Unfinished { started, last_step } => format!(
             "a move to Rime OS on NixOS began {started} and has not finished (last step:\n\
              {last_step}). Nothing on the old system changes until that is settled. A start\n\
-             that fails from its snapshot step on removes what it made and records\n\
-             \"rolled back\", which allows this again; one that is still running, or that\n\
-             stopped before its snapshot step, leaves the record as it is. The record below is\n\
-             the whole state of the move: read it (as root) before changing anything."
+             that fails at any step removes what it made and records \"rolled back\", which\n\
+             allows this again; one that is still running, or that was cut off (a crash or a\n\
+             power cut), leaves the record as it is. The record below is the whole state of\n\
+             the move: read it (as root) before changing anything."
         ),
         Marker::Unreadable { why } => format!(
             "this machine has a record of a move to Rime OS on NixOS that cannot be read\n\
@@ -295,8 +295,8 @@ mod tests {
         let t = refusal("update", &m, &rec()).unwrap();
         assert!(t.contains("install closure"), "{t}");
         // It names the record and promises nothing the bridge does not do: a
-        // start that stops before its snapshot leaves this record as it is.
-        assert!(t.contains("stopped before its snapshot step"), "{t}");
+        // start that was cut off (a crash, a power cut) leaves this record as it is.
+        assert!(t.contains("was cut off (a crash or a"), "{t}");
         assert!(t.ends_with(BRIDGE_STATE), "{t}");
         assert!(!t.contains("check --explain"), "{t}");
     }
