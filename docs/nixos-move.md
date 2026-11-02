@@ -41,7 +41,7 @@ NixOS GRUB entry, "Rime (generation …)". `boot status`,
 | absent | allowed |
 | `failed` set and the last step is `rolled back` | allowed (the start undid itself) |
 | `done` set | refused: the move finished, boot the NixOS entry |
-| any other readable record | refused: a start is unfinished; `sudo rime migrate check --explain` says where it stopped |
+| any other readable record | refused: a start neither finished nor rolled itself back; the refusal names the last step the record reached |
 | unreadable as root, or not JSON | refused (fails closed) |
 | permission denied as a normal user | left to the root check, which runs next |
 
