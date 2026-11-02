@@ -89,8 +89,9 @@
     usbutils = { kind = "nix"; attrs = [ "usbutils" ]; summary = "lsusb"; };
     clang = { kind = "nix"; attrs = [ "clang" ]; summary = "the Clang C/C++ compiler"; };
     # Equibop is the Discord client Gaming Mode's Rich Presence runs hidden (rime-gaming-discord); nixpkgs' build is a
-    # plain native one, which that helper starts with no Flatpak socket dance.
-    equibop = { kind = "nix"; attrs = [ "equibop" ]; summary = "Equibop, a Discord client (Rich Presence in Gaming Mode)"; };
+    # plain native one, which that helper starts with no Flatpak socket dance. Rime's build (nix/pkgs/rime-equibop.nix)
+    # takes Equicord from nixpkgs instead of downloading it at first start: no app updates itself outside rime update.
+    equibop = { kind = "nix"; attrs = [ "rime.rime-equibop" ]; summary = "Equibop, a Discord client (Rich Presence in Gaming Mode)"; };
     # Vendor apps (D5): Rime derivations that keep the pinned vendor-key check of rime-pkg (vendor_fetch_*). nixpkgs'
     # chatgpt is rejected because it has no vendor-key check; claude-desktop and helium are not in nixpkgs.
     chatgpt = {

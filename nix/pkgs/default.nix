@@ -16,6 +16,9 @@
   rime-terminal = callPackage ./rime-terminal.nix { inherit rime-shell-src; };
   # D5: rime-pkg's vendor-key check (ChatGPT, Claude Desktop) as a verifier and a verified-fetch builder.
   rime-vendor = callPackage ./rime-vendor.nix { };
+  # D5 catalogue apps Rime builds itself: Equibop with nixpkgs' Equicord (no run-time download), and the vendor apps
+  # (ChatGPT, Claude Desktop) from their vendor-key-checked, pinned downloads.
+  rime-equibop = callPackage ./rime-equibop.nix { };
   # Not callPackage: that would wrap the kernel's own .override, which NixOS's boot.kernelPackages calls
   # (linuxPackagesFor -> kernel.override { features, randstructSeed, ... }).
   rime-kernel = import ./kernel { inherit pkgs; };
