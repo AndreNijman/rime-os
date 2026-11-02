@@ -68,6 +68,8 @@ did not answer <unit>` to the kernel log. `checks.desktop-plymouth-stuck` freeze
 | mutant `no-bound` (the units as plymouth ships them) | FAILS with the hosted runner's error: "Shell did not start in time" | `plymouth-stuck-mut-no-bound.log` |
 | mutant `no-kill` (bounded, plymouthd left frozen) | FAILS: both units time out, then systemctl loses PID 1 ("Transport endpoint is not connected") and multi-user.target is never seen | `plymouth-stuck-mut-no-kill.log` |
 | `checks.desktop` with the fix | PASS (test script 45.6 s) | `desktop-ci2.log` |
+| `checks.desktop` with the fix, pinned to 2 CPUs with 4 busy loops, 3 times | PASS 3/3 (50-57 s); no `rime: plymouthd` line, so the bounds never fired on a slow but answering splash | `desktop-fix-pinned-{1,2,3}.log` |
+| the check, pinned the same way, twice | PASS 2/2 (sysinit.target at 27.9 s and 27.3 s) | `plymouth-stuck-pinned-{1,2}.log` |
 
 ## keymap-luks under load
 
@@ -127,5 +129,6 @@ stopped, its D-Bus activation refused by a runtime `ConditionPathExists=!/run/ri
 wpa_supplicant for a new radio, on every run, not only on a slow runner. The check waits it out (24.4 s, NetworkManager
 "re-acquiring supplicant interface", then "Started WPA Supplicant instance") and passes; the mutant `wifi-no-wait`
 (no wait, no autoconnect, `nmcli connection up` at once) fails with the hosted error "No suitable device found for this
-connection" (`/var/lab/rime-nix/artifacts/ci2/hostgates-net2.log`, `hostgates-net2-mut-wifi-no-wait.log`). Only
-`hostgates-net` sets the hold; `hostlayer-katana` (run by hand) does not.
+connection" (`/var/lab/rime-nix/artifacts/ci2/hostgates-net2.log`, `hostgates-net2-mut-wifi-no-wait.log`). Pinned to 2 CPUs with 4 busy loops: the check
+PASSES and the mutant FAILS the same way (`hostgates-net-pinned.log`, `hostgates-net-mut-wifi-no-wait-pinned.log`).
+Only `hostgates-net` sets the hold; `hostlayer-katana` (run by hand) does not.
