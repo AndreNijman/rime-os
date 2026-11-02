@@ -24,6 +24,19 @@
 
 let
   cfg = config.rime.desktop;
+
+  # The splash's client units, bounded (see "Boot splash" below): past the bound, plymouthd is stopped.
+  plymouthBounded = timeout: {
+    TimeoutStartSec = timeout;
+    ExecStopPost = "${pkgs.writeShellScript "rime-plymouth-unstick" ''
+      [ "$SERVICE_RESULT" = success ] && exit 0
+      pid=$(cat /run/plymouth/pid 2>/dev/null) || exit 0
+      # A stale pid file must not name some other process.
+      [ "$(cat /proc/"$pid"/comm 2>/dev/null)" = plymouthd ] || exit 0
+      echo "<4>rime: plymouthd (pid $pid) did not answer $1 ($SERVICE_RESULT); stopping it so the boot goes on" > /dev/kmsg
+      kill -KILL "$pid" 2>/dev/null || true
+    ''} %N";
+  };
   files = ../../files;
   sw = "/run/current-system/sw";
   sessionsDir = "/etc/rime/wayland-sessions";
@@ -592,6 +605,15 @@ in
       # ── Boot splash (Containerfile.rime:265-312; bootc kargs.d `quiet splash`) ────────────────────
       # The theme (the layered ridge and its accents) is chosen in branding.nix.
       boot.plymouth.enable = true;
+      # A splash that stops answering must not hold the boot. plymouth-read-write (Before=sysinit.target) has no
+      # timeout of its own, plymouth-quit-wait has none at all (TimeoutSec=0) and greetd starts after it: a plymouthd
+      # that never answers its socket left hosted run 41450212626's desktop check with no sysinit.target, and on a
+      # machine would hold the splash until the default 90 s and then the greeter forever. Each client unit is bounded,
+      # and one that does not finish stops plymouthd (SIGKILL, by its pid file: a stopped process ignores SIGTERM), so
+      # the boot and the greeter go on without a splash. checks.desktop-plymouth-stuck freezes plymouthd to prove it.
+      systemd.services.plymouth-read-write.serviceConfig = plymouthBounded "15s";
+      systemd.services.plymouth-quit.serviceConfig = plymouthBounded "15s";
+      systemd.services.plymouth-quit-wait.serviceConfig = plymouthBounded "60s";
       # `splash` itself comes from boot.plymouth (nixpkgs' plymouth module adds it): naming it here as well put
       # `splash splash` on every boot entry (installer2, checks.installer-polish-eval).
       boot.kernelParams = [ "quiet" ];
