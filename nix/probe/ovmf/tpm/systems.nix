@@ -125,6 +125,8 @@ let
         path = [ pkgs.coreutils pkgs.util-linux pkgs.mokutil pkgs.kmod pkgs.gnugrep pkgs.gnused pkgs.findutils
           pkgs.tpm2-tools pkgs.cryptsetup pkgs.python3 sd ];
         serviceConfig = { Type = "oneshot"; StandardOutput = "tty"; StandardError = "tty"; TTYPath = "/dev/ttyS0"; };
+        # tpm2-tools straight to the kernel's resource manager: no tabrmd D-Bus attempt and its warning first.
+        environment.TPM2TOOLS_TCTI = "device:/dev/tpmrm0";
         script = ''
           set +e
           say() { echo "RIME-TPM: $*"; }
