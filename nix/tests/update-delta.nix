@@ -49,7 +49,9 @@ let
     { config, lib, ... }:
     {
       options.rimeTest.payload = lib.mkOption { type = lib.types.str; default = "1"; };
-      config.environment.systemPackages = [ (payload config.rimeTest.payload) ];
+      # Through /etc: a package with only share/rime-delta-payload would not be linked into the system path, so
+      # nothing would refer to it and it would not be in the closure.
+      config.environment.etc."rime-delta-payload".source = payload config.rimeTest.payload;
     };
 
   rimedMutant = pkgs.rime.rimed.overrideAttrs (old: {
@@ -344,7 +346,9 @@ pkgs.testers.runNixOSTest {
 
       def nar_name(path):
           info = server.succeed(f"cat /var/lib/pages/{hash_of(path)}.narinfo")
-          return re.search(r"^URL: (.+)$", info, re.M).group(1).rsplit("/", 1)[1]
+          m = re.search(r"^URL: (.+)$", info, re.M)
+          assert m, info
+          return m.group(1).rsplit("/", 1)[1]
 
       def new_paths():
           return [e["path"] for e in man_b["paths"] if e["path"] not in old]
@@ -402,7 +406,7 @@ pkgs.testers.runNixOSTest {
     + (if g3 then g3Script else ''
       with subtest("release A (no previous release: no deltas); release B with deltas against A"):
           man_a = publish("A", A, "a" * 40, "2026.11.01", deltas=True)
-          assert not man_a.get("delta", {}).get("files"), man_a.get("delta")
+          assert not (man_a.get("delta") or {}).get("files"), man_a.get("delta")
           old = {e["path"] for e in man_a["paths"]}
           man_b = publish("B", B, "b" * 40, "2026.11.02", deltas=True)
           files = man_b["delta"]["files"]
@@ -439,7 +443,7 @@ pkgs.testers.runNixOSTest {
                          f"! cmp -s {f} /root/delta.orig")
           code, out = update()
           assert code == 0, out
-          assert f"delta refused, downloaded whole instead: {PAY_B}" in out, out
+          assert f"delta refused, downloaded whole instead: {PAY_B}: the delta file is not the one the manifest names" in out, out
           got = fetched()
           assert any(g.endswith("/" + PAY_DELTA) for g in got) and any(g.endswith("/" + PAY_NAR) for g in got), got
           downloaded_ok()
@@ -448,17 +452,17 @@ pkgs.testers.runNixOSTest {
 
       with subtest("a wrong base (the client's copy of payload-1 changed) is refused; the payload downloaded whole"):
           blob = f"{PAY_A}/share/rime-delta-payload/blob"
-          client.succeed("mount -o remount,rw /nix/store",
+          client.succeed("mount -o remount,rw,bind /nix/store",
                          f"cp {blob} /root/blob.orig",
                          f"printf 'X' | dd of={blob} bs=1 seek=4242 conv=notrunc status=none")
           code, out = update()
           assert code == 0, out
-          assert f"delta refused, downloaded whole instead: {PAY_B}" in out, out
+          assert f"delta refused, downloaded whole instead: {PAY_B}: the local {PAY_A} is not the base" in out, out
           got = fetched()
           assert any(g.endswith("/" + PAY_NAR) for g in got), got
           downloaded_ok()
           forget_b()
-          client.succeed(f"cp /root/blob.orig {blob}", "mount -o remount,ro /nix/store",
+          client.succeed(f"cp /root/blob.orig {blob}", "mount -o remount,ro,bind /nix/store",
                          f"nix-store --verify-path {PAY_A}")
 
       with subtest("a delta over the window cap is not tried: no .delta fetched, the payload downloaded whole"):
