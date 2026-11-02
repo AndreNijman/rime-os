@@ -369,7 +369,9 @@ sudo -n podman exec -w /work/<worktree> rime-nix nix build path:.#checks.x86_64-
   runs it (`pr-validation.yml`); `checks.installer-nixos` runs the same guards in a VM. Its GUI half (every page
   drawn headless in root podman, stubbed engine and disks, nothing on the host's disks) can run on katana: the first
   attempt failed only because the render images could not be built then; run alone at 0f210d2bf it passed 24/24
-  (12 pages at 1024x600 and 1366x768), `/var/lab/rime-nix/artifacts/verify-installer2/gui-half/`.
+  (12 pages at 1024x600 and 1366x768), `/var/lab/rime-nix/artifacts/verify-installer2/gui-half/`. Re-run on
+  installer3's GUI (the gaming box added, drawn here without a `nixos-choices.json` stamp, so hidden): 24/24,
+  `/var/lab/rime-nix/artifacts/installer3/gui-half/`; the page with the box is in `artifacts/installer3/gui/`.
 
 ## Handover
 
