@@ -286,6 +286,10 @@ def missing_from_error(err):
     return set()
 
 
+# The zstd level of the Rime cache's NARs (`stage`); delta.md §8 measured it against level 3.
+STAGE_LEVEL = 19
+
+
 def store_url(base, **params):
     sep = "&" if "?" in base else "?"
     extra = "&".join(f"{k.replace('_', '-')}={v}" for k, v in params.items())
@@ -681,8 +685,11 @@ def cmd_stage(a):
     refs = {p: i["references"] for p, i in clo["paths"].items()}
     order = topo_order(rime, refs)
     if order:
-        run(NIX + ["copy", "--no-recursive", "--to", store_url("file://" + os.path.abspath(cache),
-                                                               compression="zstd")] + FRESH + order)
+        # Level 19 (delta.md §8): 14-20 % fewer bytes than zstd's default level 3 for every client, and it decodes
+        # with any zstd's default window (no --long). parallel-compression: the same bytes, less wall clock.
+        run(NIX + ["copy", "--no-recursive", "--to", store_url("file://" + os.path.abspath(cache), compression="zstd",
+                                                               compression_level=STAGE_LEVEL,
+                                                               parallel_compression="true")] + FRESH + order)
     for f in placeholders:
         if "rime-placeholder" not in open(f).read():
             raise Refused(f"{f} was overwritten by the copy")

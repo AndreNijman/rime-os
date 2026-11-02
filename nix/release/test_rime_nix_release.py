@@ -761,6 +761,31 @@ class Deltas(unittest.TestCase):
                 r.make_delta(b, nw, nh("not the new NAR"), 27, out)
 
 
+
+class StageCompression(unittest.TestCase):
+    def test_stage_writes_level_19(self):
+        """delta.md §8: the Rime cache's NARs are zstd level 19 (not Nix's default 3), compressed in parallel."""
+        clo, _, _, x = synthetic()
+        calls = []
+        real_run = r.run
+        r.run = lambda cmd, **kw: calls.append(cmd)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                for n, v in (("closure.json", clo), ("split.json", {"rime": [x["shell"]], "upstream": [x["glibc"]]})):
+                    json.dump(v, open(os.path.join(d, n), "w"))
+                a = type("A", (), {"closure": os.path.join(d, "closure.json"), "split": os.path.join(d, "split.json"),
+                                   "out": os.path.join(d, "stage")})()
+                with self.assertRaises(r.Refused):  # nothing was copied: the narinfo count check refuses
+                    r.cmd_stage(a)
+        finally:
+            r.run = real_run
+        copies = [c for c in calls if "copy" in c]
+        self.assertEqual(len(copies), 1, calls)
+        url = next(c for c in copies[0] if str(c).startswith("file://"))
+        self.assertIn("compression=zstd", url)
+        self.assertIn("compression-level=19", url)
+        self.assertIn("parallel-compression=true", url)
+
 def clo_paths(m):
     return [e["path"] for e in m["paths"]]
 
