@@ -17,9 +17,11 @@
 #
 #  The payload signature is the bridge's own check (verify_payload, at the
 #  point it reads the payload; its unit suite covers unsigned, untrusted-key,
-#  tampered and good payloads). This suite pins the trust root it compiles in:
-#  the rime-cache-1 key, and the domain prefix that keeps a manifest signature
-#  from ever being a narinfo signature.
+#  tampered, missing-key-file and good payloads). This suite pins where that
+#  trust comes from: the image's key file
+#  /usr/share/rime-os/trust/nixos-bridge-payload.pub, nothing compiled in, and
+#  the signature file the NixOS side's payload-sign.sh writes
+#  (manifest.json.sig, over the manifest's exact bytes).
 #
 #  Failures it exists to catch: a finished move whose old side still runs
 #  `bootc upgrade` (the bridge's VM run saw exactly that); a refusal that a
@@ -94,24 +96,62 @@ else
     bad "unit suite" "$(tail -n 20 "$W/unit.log")"
 fi
 
-# The payload trust root the bridge compiles in. The public half of
-# rime-cache-1 is the NixOS update path's narinfo key (nix/modules/update.nix
-# rime.update.cacheKeys on the NixOS branch; docs/nixos-move.md). A refresh of
-# the bridge that changes either constant must change this line on purpose.
+# Where the bridge's payload trust comes from. The NixOS side signs the
+# payload with its payload-sign.sh (nix/pkgs/rime-bridge on the NixOS branch):
+# manifest.json.sig, "<name>:<base64 ed25519 signature>" over the exact bytes
+# of manifest.json. The bridge trusts exactly one thing: the key file this
+# image carries, PAYLOAD_KEY_FILE; TRUSTED_PAYLOAD_KEYS is None in the product
+# (only the OVMF lab's build sets it). A refresh of the bridge that changes any
+# of the three must change this line on purpose, together with the producer.
 trust="$(python3 -I - "$PROG" <<'PY'
 import ast, sys
-want = {"TRUSTED_PAYLOAD_KEYS", "PAYLOAD_DOMAIN"}
+want = {"TRUSTED_PAYLOAD_KEYS", "PAYLOAD_KEY_FILE", "PAYLOAD_SIG"}
 got = {}
 for n in ast.parse(open(sys.argv[1]).read()).body:
     if isinstance(n, ast.Assign) and len(n.targets) == 1 and getattr(n.targets[0], "id", None) in want:
         got[n.targets[0].id] = ast.literal_eval(n.value)
-print(repr(got.get("TRUSTED_PAYLOAD_KEYS")), repr(got.get("PAYLOAD_DOMAIN")))
+print(repr(got.get("TRUSTED_PAYLOAD_KEYS", "unset")), repr(got.get("PAYLOAD_KEY_FILE")), repr(got.get("PAYLOAD_SIG")))
 PY
 )"
-if [[ "$trust" == "('rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k=',) b'rime-bridge-payload-v1\\n'" ]]; then
-    ok "the payload is trusted only when signed by rime-cache-1, under the bridge's own domain"
+if [[ "$trust" == "None '/usr/share/rime-os/trust/nixos-bridge-payload.pub' 'manifest.json.sig'" ]]; then
+    ok "the payload is trusted only by the image's key file, in the format payload-sign.sh writes"
 else
     bad "payload trust root changed" "$trust"
+fi
+# The key file. This image does not carry one yet (the release key is made in
+# the release environment: docs/nixos-move.md), so every start refuses
+# payload-key-missing. Once files/system/trust/nixos-bridge-payload.pub is
+# added it must be one "<name>:<base64 32-byte key>" line and the image must
+# install it where the bridge reads it.
+KEYSRC="$REPO/files/system/trust/nixos-bridge-payload.pub"
+if [[ -e "$KEYSRC" ]]; then
+    if python3 -I -c 'import base64,sys; t=open(sys.argv[1]).read().strip(); n,_,b=t.partition(":"); assert n and len(t.splitlines())==1 and len(base64.b64decode(b, validate=True))==32' "$KEYSRC" 2>/dev/null \
+       && pipe_has -F 'files/system/trust/nixos-bridge-payload.pub /usr/share/rime-os/trust/nixos-bridge-payload.pub' "$REPO/Containerfile.base"; then
+        ok "the payload key file is one valid line and the image installs it"
+    else
+        bad "files/system/trust/nixos-bridge-payload.pub is not one valid key line, or Containerfile.base does not install it"
+    fi
+else
+    # The shipped program itself, loaded as a module, with its key file absent.
+    # -B: -I ignores PYTHONDONTWRITEBYTECODE, and loading the program as a
+    # module would otherwise leave a __pycache__ beside it in files/.
+    if (cd "$W" && python3 -I -B - "$PROG" <<'PY'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("bridge", sys.argv[1])
+B = importlib.util.module_from_spec(importlib.util.spec_from_loader("bridge", loader))
+loader.exec_module(B)
+B.PAYLOAD_KEY_FILE = "/nonexistent/nixos-bridge-payload.pub"
+try:
+    B.payload_keys()
+except B.Refused as e:
+    sys.exit(0 if e.name == "payload-key-missing" else 1)
+sys.exit(1)
+PY
+    ); then
+        ok "no key file shipped yet: the bridge refuses every payload (payload-key-missing)"
+    else
+        bad "with no key file the bridge does not refuse payload-key-missing"
+    fi
 fi
 # No way around the check: no environment variable or option skips it.
 skip_re='RIME_[A-Z_]*(UNSIGNED|INSECURE|SKIP_SIG|TRUST)|allow-unsigned|--insecure|--no-verify'
@@ -217,8 +257,10 @@ if (( WITH_BINARY )); then
     pipe_has -F 'Rime (generation' <<<"$out" && pipe_has -F 'sudo rime update' <<<"$out" \
         && ok "the refusal names the new boot entry and where updates are now" || bad "refusal text" "$out"
     out="$(rime_at running update 2>&1)"
-    pipe_has -F 'install closure' <<<"$out" && pipe_has -F 'rime migrate check --explain' <<<"$out" \
-        && ok "an unfinished start names its last step and the check to run" || bad "unfinished text" "$out"
+    pipe_has -F 'install closure' <<<"$out" && pipe_has -F 'stopped before its snapshot step' <<<"$out" \
+        && pipe_has -F 'record: ' <<<"$out" \
+        && ok "an unfinished start names its last step and the record, and promises no rollback it lacks" \
+        || bad "unfinished text" "$out"
     [[ ! -e "$W/bootc.calls" ]] && ok "no gated verb reached bootc, refused or not" \
         || bad "bootc was called" "$(cat "$W/bootc.calls")"
     # Reading verbs and the bridge itself stay open after a start.

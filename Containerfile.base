@@ -1618,9 +1618,12 @@ RUN set -eux; \
 # refuse by name (rimed/rime/src/nixos_bridge.rs).
 #
 # The payload's signature is checked by the program itself, where it reads the
-# payload, against the key it compiles in (TRUSTED_PAYLOAD_KEYS: rime-cache-1,
-# the NixOS update path's narinfo key). There is no separate key file:
-# tests/test-rime-migrate.sh pins that constant (docs/nixos-move.md).
+# payload: manifest.json.sig against the one key in
+# /usr/share/rime-os/trust/nixos-bridge-payload.pub. This image does not carry
+# that key yet (the release key is made in the release environment), so every
+# `start` refuses payload-key-missing until a release ships it; `check` and
+# `repair-e` are not affected. tests/test-rime-migrate.sh pins the path and
+# checks the key file once it is added (docs/nixos-move.md).
 COPY --chmod=0755 files/system/libexec/rime-migrate /usr/libexec/rime-migrate
 RUN set -eux; \
     test -x /usr/libexec/rime-migrate; \

@@ -7,10 +7,11 @@
 //! The bridge itself is one Python program, `/usr/libexec/rime-migrate`
 //! (standard library only, Fedora's own python). This CLI execs it with the
 //! arguments it was given. The bridge checks the payload itself, where it
-//! reads it: `manifest.sig` (ed25519, the `rime-cache-1` key the NixOS update
-//! path already trusts, compiled into the bridge as `TRUSTED_PAYLOAD_KEYS`)
-//! over the manifest, and the sha256 of every file the manifest names.
-//! tests/test-rime-migrate.sh pins that trust root.
+//! reads it: `manifest.json.sig` (ed25519 over the manifest's exact bytes, as
+//! the NixOS side's `payload-sign.sh` writes it) against the one key in the
+//! image's `/usr/share/rime-os/trust/nixos-bridge-payload.pub`, and the sha256
+//! of every file the manifest names. No key file, no payload
+//! (`payload-key-missing`). tests/test-rime-migrate.sh pins that trust root.
 //!
 //! ## The refusals
 //!
@@ -32,7 +33,7 @@
 //! | absent | allowed: the move never started |
 //! | `"failed"` set AND the last step is `"rolled back"` | allowed: start removed what it made and unmasked the old side |
 //! | `"done"` set | refused: the machine has moved |
-//! | anything else that parses | refused: a start began and did not finish (a crash, a power cut, or one running now) |
+//! | anything else that parses | refused: a start began and did not finish (a crash, a power cut, one running now, or one that failed before its snapshot step: the bridge's rollback covers only the steps from the snapshot on) |
 //! | unreadable or not JSON, as root | refused: nobody knows which of the above it is |
 //!
 //! Unreadable as an ordinary user is not a refusal: the directory is 0700
@@ -168,14 +169,16 @@ pub fn refusal(verb: &str, marker: &Marker, record: &Path) -> Option<String> {
         ),
         Marker::Unfinished { started, last_step } => format!(
             "a move to Rime OS on NixOS began {started} and has not finished (last step:\n\
-             {last_step}). Nothing on the old system changes until that is settled: a run that\n\
-             fails removes what it made and then allows this again.\n\
-             See what state the machine is in with `sudo rime migrate check --explain`."
+             {last_step}). Nothing on the old system changes until that is settled. A start\n\
+             that fails from its snapshot step on removes what it made and records\n\
+             \"rolled back\", which allows this again; one that is still running, or that\n\
+             stopped before its snapshot step, leaves the record as it is. The record below is\n\
+             the whole state of the move: read it (as root) before changing anything."
         ),
         Marker::Unreadable { why } => format!(
             "this machine has a record of a move to Rime OS on NixOS that cannot be read\n\
-             ({why}). Until it can, the old system is treated as moved.\n\
-             See what state the machine is in with `sudo rime migrate check --explain`."
+             ({why}). Until it can, the old system is treated as moved. The record\n\
+             below is the whole state of the move: look at it (as root) before changing anything."
         ),
     };
     let body: String = what.lines().map(|l| format!("rime: {l}\n")).collect();
@@ -203,10 +206,10 @@ pub fn guard(verb: &str) -> Result<(), i32> {
 /// `rime migrate …`: the bridge itself, with every argument unchanged.
 ///
 /// No gate of its own: the bridge verifies the payload's signature where it
-/// reads the payload (`verify_payload`: `manifest.sig` over
-/// `rime-bridge-payload-v1\n` + `manifest.json`, by a key in its
-/// `TRUSTED_PAYLOAD_KEYS`), so a second check here could only disagree with it
-/// (decided 2026-11-02, docs/nixos-move.md).
+/// reads the payload (`verify_payload`: `manifest.json.sig` over
+/// `manifest.json`, by the key in the image's `nixos-bridge-payload.pub`), so
+/// a second check here could only disagree with it (decided 2026-11-02,
+/// docs/nixos-move.md).
 pub fn migrate(args: &[String]) -> i32 {
     let err = Command::new(MIGRATE_ENGINE).args(args).exec();
     eprintln!("rime: cannot run the bridge ({MIGRATE_ENGINE}): {err}");
@@ -254,7 +257,10 @@ mod tests {
             }
         );
         let t = refusal("boot migrate", &m, &rec()).expect("refused");
-        assert!(t.starts_with("rime: 'boot migrate' REFUSED [nixos-migration-started]\n"), "{t}");
+        assert!(
+            t.starts_with("rime: 'boot migrate' REFUSED [nixos-migration-started]\n"),
+            "{t}"
+        );
         assert!(t.contains("Rime (generation"), "{t}");
         assert!(t.contains("began S"), "{t}");
         assert!(t.ends_with(BRIDGE_STATE), "{t}");
@@ -288,7 +294,11 @@ mod tests {
         );
         let t = refusal("update", &m, &rec()).unwrap();
         assert!(t.contains("install closure"), "{t}");
-        assert!(t.contains("rime migrate check --explain"), "{t}");
+        // It names the record and promises nothing the bridge does not do: a
+        // start that stops before its snapshot leaves this record as it is.
+        assert!(t.contains("stopped before its snapshot step"), "{t}");
+        assert!(t.ends_with(BRIDGE_STATE), "{t}");
+        assert!(!t.contains("check --explain"), "{t}");
     }
 
     #[test]
