@@ -1,0 +1,26 @@
+building '/nix/store/n6p19rr6yapr7n06l02dilq1rbsk5sdd-rime-sessions.drv'...
+rime-libexec> Running phase: unpackPhase
+rime-libexec> unpacking source archive /nix/store/k9dfxnw6nkvsdnzs9pkj8rjhdfnz7ylw-source
+rime-libexec> source root is source
+rime-libexec> Running phase: patchPhase
+rime-libexec> Running phase: updateAutotoolsGnuConfigScriptsPhase
+rime-libexec> Running phase: configurePhase
+rime-libexec> no configure script, doing nothing
+rime-libexec> Running phase: installPhase
+rime-libexec> install: omitting directory 'files/system/libexec/__pycache__'
+error: Cannot build '/nix/store/c860qnvsx6k39813rqzfl7c57q4c62nm-rime-libexec-0.1.0.drv'.
+       Reason: builder failed with exit code 1.
+       Output paths:
+         /nix/store/8y06zr04f1dq55jxd6v6hf1nf5id3254-rime-libexec-0.1.0
+building '/nix/store/3r1zgv275i9f2ai597dsf9x028pw7zjs-rime-vm-eval.drv'...
+error: Cannot build '/nix/store/q9bapnjkfax7pk0dndz685lns1771kwc-etc-bashrc.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/w1lv1xrssi2r99l2w3b7g6r14nqvcll8-etc-bashrc
+error: Cannot build '/nix/store/yqm1zrywpqmiwii9bljr53yg1z11zsra-etc-bashrc.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/hwq10q2bay93gms1nyb20w24mbp38f16-etc-bashrc
+error: Cannot build '/nix/store/5m3ss1nnb1h5n0vbnqsigx5x3l868vqp-etc-profile.drv'.
+       Reason: 1 dependency failed.
+       Output paths:

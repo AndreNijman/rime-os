@@ -4,7 +4,8 @@
 #              builds this before rimed so the failure has a name.
 #   ci         nix/ci/run-checks.sh, tests/check-suites-run-in-ci.sh and nix/pkgs/rimed-test-report.py, on this
 #              repository as it is and against mutants each of which must be refused; plus actionlint and
-#              ci/runner/check-workflows.py over the workflows.
+#              ci/runner/check-workflows.py over the workflows. run-checks.sh's classify is proved on real logs
+#              (nix/ci/fixtures) and its single download retry with a stub nix.
 { pkgs, self }:
 
 let
@@ -158,6 +159,69 @@ in
       if cmp -s nix/ci/run-checks.sh "$NIX_BUILD_TOP/rc-mutant.sh"; then bad "mutant: pattern not found"; fi
       set +e; env PATH="$NIX_BUILD_TOP/stub:$PATH" RIME_CHECK_TIMEOUT=1 bash "$NIX_BUILD_TOP/rc-mutant.sh" build slow2 "$NIX_BUILD_TOP/b" > /dev/null 2>&1; set -e
       if grep -E '^timeout' "$NIX_BUILD_TOP/b/slow2.result" > /dev/null; then bad "mutant: still recorded a timeout"; else ok "killed: no time limit, no timeout recorded ($(cut -f1 "$NIX_BUILD_TOP/b/slow2.result"))"; fi
+
+      echo "== classify: a download failure (retried) or not (never retried); the fixtures are real logs"
+      cd "$NIX_BUILD_TOP/repo"
+      F=nix/ci/fixtures
+      expect 0 "HTTP 416 on a resumed NAR" -- bash nix/ci/run-checks.sh classify $F/download-416.log
+      has "a substitute could not be downloaded"
+      expect 0 "curl: Failed sending data to the peer" -- bash nix/ci/run-checks.sh classify $F/download-curl-send.log
+      expect nonzero "a builder that failed" -- bash nix/ci/run-checks.sh classify $F/build-failure.log
+      has "a builder failed"
+      expect nonzero "a builder that failed after nix recovered from download warnings" -- bash nix/ci/run-checks.sh classify $F/build-failure-after-download-warnings.log
+      expect nonzero "an evaluation error" -- bash nix/ci/run-checks.sh classify $F/eval-error.log
+      # a substitute that failed AND a builder that failed in the same build: a real failure
+      cat $F/download-416.log $F/build-failure.log > "$NIX_BUILD_TOP/both.log"
+      expect nonzero "a download failure and a builder failure" -- bash nix/ci/run-checks.sh classify "$NIX_BUILD_TOP/both.log"
+      # A test's own output that quotes nix's words is not nix's line.
+      sed 's/^/vm-test-run-x> /' $F/download-416.log > "$NIX_BUILD_TOP/quoted.log"
+      expect nonzero "nix's words inside a build's -L output" -- bash nix/ci/run-checks.sh classify "$NIX_BUILD_TOP/quoted.log"
+
+      echo "== build: retried ONCE on a download failure, never on a builder failure"
+      # stub nix: the first call prints $FIRST and fails; later calls print $THEN and exit $THEN_RC
+      cat > "$NIX_BUILD_TOP/stub/nix" <<EOF
+      #!${pkgs.runtimeShell}
+      n=\$(( \$(cat "\$CALLS" 2>/dev/null || echo 0) + 1 )); echo \$n > "\$CALLS"
+      if [ \$n = 1 ]; then cat "\$FIRST"; exit 1; fi
+      cat "\$THEN"; exit "\$THEN_RC"
+      EOF
+      chmod +x "$NIX_BUILD_TOP/stub/nix"
+      echo "/nix/store/00000000000000000000000000000000-ok" > "$NIX_BUILD_TOP/ok.log"
+      runb() { # NAME FIRST THEN THEN_RC [SCRIPT]
+        rm -f "$NIX_BUILD_TOP/calls"
+        expect "$5" "build $1" -- env PATH="$NIX_BUILD_TOP/stub:$PATH" CALLS="$NIX_BUILD_TOP/calls" FIRST="$2" THEN="$3" THEN_RC="$4" \
+          RIME_CHECK_TIMEOUT=600 bash "''${6:-nix/ci/run-checks.sh}" build "$1" "$NIX_BUILD_TOP/rb"
+      }
+      runb dl $F/download-416.log "$NIX_BUILD_TOP/ok.log" 0 0
+      has "dl failed on a download; retrying ONCE"
+      [ "$(cat "$NIX_BUILD_TOP/calls")" = 2 ] && ok "two attempts" || bad "attempts: $(cat "$NIX_BUILD_TOP/calls")"
+      grep -E "^pass[[:space:]]+[0-9]+[[:space:]]+retried$" "$NIX_BUILD_TOP/rb/dl.result" > /dev/null && ok "recorded as pass, retried" || bad "dl.result: $(cat "$NIX_BUILD_TOP/rb/dl.result")"
+      [ -s "$NIX_BUILD_TOP/rb/dl.first.log" ] && ok "the first attempt's log is kept" || bad "no dl.first.log"
+      runb dl2 $F/download-416.log $F/download-416.log 1 nonzero
+      [ "$(cat "$NIX_BUILD_TOP/calls")" = 2 ] && ok "a second download failure is not retried again" || bad "attempts: $(cat "$NIX_BUILD_TOP/calls")"
+      grep -E "^fail[[:space:]]+[0-9]+[[:space:]]+retried$" "$NIX_BUILD_TOP/rb/dl2.result" > /dev/null && ok "recorded as fail, retried" || bad "dl2.result: $(cat "$NIX_BUILD_TOP/rb/dl2.result")"
+      runb real $F/build-failure-after-download-warnings.log "$NIX_BUILD_TOP/ok.log" 0 nonzero
+      [ "$(cat "$NIX_BUILD_TOP/calls")" = 1 ] && ok "a builder failure is built once" || bad "a builder failure was retried"
+      grep -E "^fail[[:space:]]+[0-9]+[[:space:]]*$" "$NIX_BUILD_TOP/rb/real.result" > /dev/null && ok "recorded as fail" || bad "real.result: $(cat "$NIX_BUILD_TOP/rb/real.result")"
+      # the summary says a pass needed its retry
+      bash nix/ci/run-checks.sh plan "$NIX_BUILD_TOP/p2" > /dev/null
+      mkdir -p "$NIX_BUILD_TOP/r2"
+      while read -r c; do printf 'pass\t1\t\n' > "$NIX_BUILD_TOP/r2/$c.result"; done < "$NIX_BUILD_TOP/p2/run.txt"
+      printf 'pass\t7\tretried\n' > "$NIX_BUILD_TOP/r2/rimed.result"
+      expect 0 "a retried pass is a pass" -- bash nix/ci/run-checks.sh summary "$NIX_BUILD_TOP/p2" "$NIX_BUILD_TOP/r2"
+      has '| `rimed` | RAN | pass (7 s) | after ONE retry: the first attempt failed on a download |'
+      has '| `shell` | RAN | pass (1 s) | |'
+
+      echo "== mutant: classify ignores builder failures (a real failure would be retried)"
+      sed 's/^    if grep -E "^error: builder for /    if false \&\& grep -E "^error: builder for /' nix/ci/run-checks.sh > "$NIX_BUILD_TOP/rc-m-classify.sh"
+      if cmp -s nix/ci/run-checks.sh "$NIX_BUILD_TOP/rc-m-classify.sh"; then bad "mutant: pattern not found"; fi
+      runb mreal "$NIX_BUILD_TOP/both.log" "$NIX_BUILD_TOP/ok.log" 0 0 "$NIX_BUILD_TOP/rc-m-classify.sh"
+      [ "$(cat "$NIX_BUILD_TOP/calls")" = 2 ] && ok "killed: the mutant retried a builder failure (and the check passed)" || bad "mutant not caught"
+      echo "== mutant: no retry"
+      sed 's/^        if \[ "\$limit" = 0 \] || \[ "\$left" -ge 60 \]; then$/        if false; then/' nix/ci/run-checks.sh > "$NIX_BUILD_TOP/rc-m-noretry.sh"
+      if cmp -s nix/ci/run-checks.sh "$NIX_BUILD_TOP/rc-m-noretry.sh"; then bad "mutant: pattern not found"; fi
+      runb mdl $F/download-416.log "$NIX_BUILD_TOP/ok.log" 0 nonzero "$NIX_BUILD_TOP/rc-m-noretry.sh"
+      grep -E "^fail" "$NIX_BUILD_TOP/rb/mdl.result" > /dev/null && ok "killed: without the retry the download failure is a fail" || bad "mutant not caught"
 
       echo "== rimed-test-report.py"
       cd "$NIX_BUILD_TOP"
