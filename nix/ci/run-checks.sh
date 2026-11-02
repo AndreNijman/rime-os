@@ -4,6 +4,7 @@
 #   nix/ci/run-checks.sh list                     every flake check, one name per line
 #   nix/ci/run-checks.sh plan OUTDIR              which checks CI runs and which it skips, and why
 #   nix/ci/run-checks.sh build CHECK OUTDIR       build one check, record pass/fail/timeout in OUTDIR/CHECK.result
+#   nix/ci/run-checks.sh classify LOG             is a failed build's log a download failure (exit 0) or not (1)
 #   nix/ci/run-checks.sh summary PLANDIR RESDIR   the RAN/SKIPPED table; exits 1 unless every planned check passed
 #
 # The plan is "every check, minus nix/ci/checks-not-in-ci.txt". A check added to the flake is therefore run by CI
@@ -18,6 +19,10 @@
 #   RIME_CHECK_TIMEOUT      build: seconds before the build is stopped and recorded as `timeout` (default 0 = none).
 #                           nix.yml sets it below the job's own timeout-minutes, so a check that runs too long is
 #                           reported as TIMED OUT with its time instead of a job killed with no result at all.
+#
+# build retries ONCE, and only when classify says the failure was a download (a substitute that could not be
+# fetched: cache.nixos.org's HTTP 416 after a broken resume, curl's "Failed sending data to the peer"), never
+# when any builder failed. The retry is said in the log and in the result (`pass N retried`), so it is visible.
 set -euo pipefail
 
 FLAKE=${FLAKE:-path:.}
@@ -96,32 +101,67 @@ plan() {
     return "$rc"
 }
 
-build() {
-    local check=$1 out=$2 limit=${RIME_CHECK_TIMEOUT:-0} start rc secs
-    mkdir -p "$out"
-    start=$(date +%s)
+# classify LOG: exit 0 when the log shows a substitute that could not be downloaded AND no builder that failed;
+# exit 1 otherwise (a real failure, an evaluation error, or nothing recognisable: never retried).
+# Only nix's own lines count (column 0, or its indented "Reason:"); a build's -L output is prefixed "name> ".
+classify() {
+    local log=$1
+    [ -f "$log" ] || die "classify: no log at $log"
+    if grep -E "^error: builder for '|^[[:space:]]+Reason: builder failed|^error: .* failed with exit code" "$log" > /dev/null; then
+        echo "run-checks: a builder failed: not a download failure"
+        return 1
+    fi
+    if grep -E "^error: unable to download '[^']*': HTTP error|^error: some substitutes for the outputs of derivation '[^']*' failed|^error: path '[^']*' is required, but there is no substituter that can build it" "$log" > /dev/null; then
+        echo "run-checks: a substitute could not be downloaded: $(grep -m1 -E '^error: unable to download|^error: some substitutes' "$log" | cut -c1-200)"
+        return 0
+    fi
+    echo "run-checks: no download failure in the log"
+    return 1
+}
+
+build_once() { # CHECK LIMIT LOG: one nix build, its output to the terminal and LOG; returns nix's status
+    local check=$1 limit=$2 log=$3
     set +e
     if [ "$limit" -gt 0 ]; then
-        timeout --kill-after=60 "$limit" nix build "$FLAKE#checks.$SYSTEM.$check" -L --print-out-paths --no-link
+        timeout --kill-after=60 "$limit" nix build "$FLAKE#checks.$SYSTEM.$check" -L --print-out-paths --no-link 2>&1 | tee "$log"
     else
-        nix build "$FLAKE#checks.$SYSTEM.$check" -L --print-out-paths --no-link
+        nix build "$FLAKE#checks.$SYSTEM.$check" -L --print-out-paths --no-link 2>&1 | tee "$log"
     fi
-    rc=$?
+    local rc=${PIPESTATUS[0]}
     set -e
+    return "$rc"
+}
+
+build() {
+    local check=$1 out=$2 limit=${RIME_CHECK_TIMEOUT:-0} start rc secs left note=
+    mkdir -p "$out"
+    start=$(date +%s)
+    rc=0; build_once "$check" "$limit" "$out/$check.log" || rc=$?
     secs=$(( $(date +%s) - start ))
+    if [ "$rc" != 0 ] && ! { [ "$limit" -gt 0 ] && [ "$secs" -ge "$limit" ]; } && classify "$out/$check.log" >&2; then
+        left=0
+        [ "$limit" -gt 0 ] && left=$(( limit - secs ))
+        if [ "$limit" = 0 ] || [ "$left" -ge 60 ]; then
+            echo "run-checks: $check failed on a download; retrying ONCE" >&2
+            mv "$out/$check.log" "$out/$check.first.log"
+            rc=0; build_once "$check" "$left" "$out/$check.log" || rc=$?
+            secs=$(( $(date +%s) - start ))
+            note=retried
+        fi
+    fi
     if [ "$rc" = 0 ]; then
-        printf 'pass\t%s\n' "$secs" > "$out/$check.result"
+        printf 'pass\t%s\t%s\n' "$secs" "$note" > "$out/$check.result"
     elif [ "$limit" -gt 0 ] && { [ "$rc" = 124 ] || [ "$rc" = 137 ]; } && [ "$secs" -ge "$limit" ]; then
         echo "run-checks: $check did not finish in $limit s; stopped" >&2
-        printf 'timeout\t%s\n' "$secs" > "$out/$check.result"
+        printf 'timeout\t%s\t%s\n' "$secs" "$note" > "$out/$check.result"
     else
-        printf 'fail\t%s\n' "$secs" > "$out/$check.result"
+        printf 'fail\t%s\t%s\n' "$secs" "$note" > "$out/$check.result"
     fi
     return "$rc"
 }
 
 summary() {
-    local plan=$1 res=$2 rc=0 c status secs reason
+    local plan=$1 res=$2 rc=0 c status secs reason note
     [ -s "$plan/checks.txt" ] || die "no plan in $plan"
     echo "| flake check | CI | result | why |"
     echo "|---|---|---|---|"
@@ -131,13 +171,15 @@ summary() {
             echo "| \`$c\` | SKIPPED | not built | $reason |"
             continue
         fi
+        note=
         if [ -f "$res/$c.result" ]; then
-            IFS=$'\t' read -r status secs < "$res/$c.result"
+            IFS=$'\t' read -r status secs note < "$res/$c.result"
         else
             status=missing secs=
         fi
         case "$status" in
-            pass) echo "| \`$c\` | RAN | pass (${secs} s) | |" ;;
+            pass) if [ "$note" = retried ]; then echo "| \`$c\` | RAN | pass (${secs} s) | after ONE retry: the first attempt failed on a download |"
+                  else echo "| \`$c\` | RAN | pass (${secs} s) | |"; fi ;;
             fail) echo "| \`$c\` | RAN | **FAIL** (${secs} s) | |"; rc=1 ;;
             timeout) echo "| \`$c\` | RAN | **TIMED OUT** (stopped after ${secs} s) | RIME_CHECK_TIMEOUT in nix.yml |"; rc=1 ;;
             setup) echo "| \`$c\` | NOT RUN | **FAIL** before the build | the job's setup failed (disk, Nix or KVM) |"; rc=1 ;;
@@ -151,8 +193,9 @@ cmd=${1:-}
 shift || true
 case "$cmd" in
     list) list_checks ;;
+    classify) [ $# = 1 ] || die "usage: classify LOG"; classify "$1" ;;
     plan) [ $# = 1 ] || die "usage: plan OUTDIR"; plan "$1" ;;
     build) [ $# = 2 ] || die "usage: build CHECK OUTDIR"; build "$1" "$2" ;;
     summary) [ $# = 2 ] || die "usage: summary PLANDIR RESULTDIR"; summary "$1" "$2" ;;
-    *) die "usage: $0 list | plan OUTDIR | build CHECK OUTDIR | summary PLANDIR RESULTDIR" ;;
+    *) die "usage: $0 list | plan OUTDIR | build CHECK OUTDIR | classify LOG | summary PLANDIR RESULTDIR" ;;
 esac

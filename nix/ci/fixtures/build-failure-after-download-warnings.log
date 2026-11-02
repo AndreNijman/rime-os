@@ -1,0 +1,34 @@
+warning: unable to download 'https://cache.nixos.org/nar/0203g6aw13d7y63b0870az2mp99xlmws8ji3hr4gj7mw40yd055p.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 32686044 in 0 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/0jzyji3id79y3amm5ads9fqarl7csj5gricxzrp5s6hgdr9bim67.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 2097152 in 86 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/0xvrzac8babhy52a44cn68gyfg2ms3pv4d6jvqpckdrjbx3vy4cf.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 12 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/1mg9n2pb4r2s4zfq62p96qnha56bflpj6nsk96a5rapvpyiyycmz.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 1096810 in 93 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/1rb88nx2i8w37h3w4wl5pdny1rwm48laj981k1gywgr6fbnxf0xj.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 715693 in 6 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/163ikcvla3rpl9f5sqkxxrahvkbrc1kbvfl4mbk3g52jgwrqcbgl.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 46 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/0jmsx1dlw20ic2pqhckm6hgz4zkszrp6bf6xlzd9dlv8v1ccdx28.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 50 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/1qnvggz3kvmwlgamg9krv8smmk4fciyc5xsqpghl3c3mscf790hd.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 8 ms (attempt 1/5)
+building '/nix/store/n6p19rr6yapr7n06l02dilq1rbsk5sdd-rime-sessions.drv'...
+rime-libexec> Running phase: unpackPhase
+rime-libexec> unpacking source archive /nix/store/k9dfxnw6nkvsdnzs9pkj8rjhdfnz7ylw-source
+rime-libexec> source root is source
+rime-libexec> Running phase: patchPhase
+rime-libexec> Running phase: updateAutotoolsGnuConfigScriptsPhase
+rime-libexec> Running phase: configurePhase
+rime-libexec> no configure script, doing nothing
+rime-libexec> Running phase: installPhase
+rime-libexec> install: omitting directory 'files/system/libexec/__pycache__'
+error: Cannot build '/nix/store/c860qnvsx6k39813rqzfl7c57q4c62nm-rime-libexec-0.1.0.drv'.
+       Reason: builder failed with exit code 1.
+       Output paths:
+         /nix/store/8y06zr04f1dq55jxd6v6hf1nf5id3254-rime-libexec-0.1.0
+building '/nix/store/3r1zgv275i9f2ai597dsf9x028pw7zjs-rime-vm-eval.drv'...
+error: Cannot build '/nix/store/q9bapnjkfax7pk0dndz685lns1771kwc-etc-bashrc.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/w1lv1xrssi2r99l2w3b7g6r14nqvcll8-etc-bashrc
+error: Cannot build '/nix/store/yqm1zrywpqmiwii9bljr53yg1z11zsra-etc-bashrc.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/hwq10q2bay93gms1nyb20w24mbp38f16-etc-bashrc
+error: Cannot build '/nix/store/5m3ss1nnb1h5n0vbnqsigx5x3l868vqp-etc-profile.drv'.
+       Reason: 1 dependency failed.
+       Output paths:

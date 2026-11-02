@@ -8,6 +8,9 @@
 #   $out/cmdline   an old bootc kernel command line: a LUKS volume, its options and console keymap, resume, and
 #                  arguments the carry must leave (the old boot's own, a module blacklist)
 #   $out/wg        the WireGuard TEST keys: server.key and machine.pub for the peer node, server.pub
+#   $out/openvpn   the OpenVPN server's TEST CA, certificate and key for the peer node (made here, random keys;
+#                  the client's certificate and key are in the root, under /etc/openvpn/client, where the carried
+#                  OpenVPN profile names them)
 { pkgs, netfs ? true }:
 
 let
@@ -55,11 +58,80 @@ pkgs.runCommand "rime-hostgates-fixture"
     method=disabled
     EOF
 
+    # ── H2: a Wi-Fi profile pinned to the old machine's card by its MAC address (made up, locally administered),
+    # as katana's 5 GHz one is: it may come up only on a card with that permanent address. ──
+    cat > $r/etc/NetworkManager/system-connections/FixtureWifi-Pinned.nmconnection <<EOF
+    [connection]
+    id=FixtureWifi-Pinned
+    uuid=6c1e1f0a-0000-4000-8000-000000000006
+    type=wifi
+    autoconnect=false
+
+    [wifi]
+    mac-address=02:52:49:4D:45:01
+    mode=infrastructure
+    ssid=FixtureWifi-Pinned
+
+    [wifi-security]
+    key-mgmt=wpa-psk
+    psk=TEST-not-a-real-passphrase-either
+
+    [ipv4]
+    method=auto
+    EOF
+
+    # ── H3: an OpenVPN profile whose certificates live in files it names (NetworkManager keyfile, TLS) ──
+    # A TEST CA issues the peer's server certificate and this machine's client certificate (EC P-256, no
+    # passphrase; cert-pass-flags=4 says so, as nmcli writes it). The carry must take the files with the profile.
+    mkdir -p $out/openvpn $r/etc/openvpn/client
+    ec="-newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 36500"
+    openssl req -x509 -new $ec -subj /CN=rime-hostgates-TEST-ca \
+      -keyout ca.key -out $out/openvpn/ca.crt 2>/dev/null
+    openssl req -x509 -new $ec -subj /CN=peer -CA $out/openvpn/ca.crt -CAkey ca.key \
+      -addext extendedKeyUsage=serverAuth -keyout $out/openvpn/server.key -out $out/openvpn/server.crt 2>/dev/null
+    openssl req -x509 -new $ec -subj /CN=rime-hostgates-TEST-machine -CA $out/openvpn/ca.crt -CAkey ca.key \
+      -addext extendedKeyUsage=clientAuth -keyout $r/etc/openvpn/client/fixture.key \
+      -out $r/etc/openvpn/client/fixture.crt 2>/dev/null
+    cp $out/openvpn/ca.crt $r/etc/openvpn/client/ca.crt
+    openssl verify -CAfile $out/openvpn/ca.crt $out/openvpn/server.crt $r/etc/openvpn/client/fixture.crt
+    cat > $r/etc/NetworkManager/system-connections/FixtureOpenVPN.nmconnection <<EOF
+    [connection]
+    id=FixtureOpenVPN
+    uuid=6c1e1f0a-0000-4000-8000-000000000005
+    type=vpn
+    autoconnect=false
+
+    [vpn]
+    service-type=org.freedesktop.NetworkManager.openvpn
+    connection-type=tls
+    remote=peer:1194
+    dev-type=tun
+    ca=/etc/openvpn/client/ca.crt
+    cert=/etc/openvpn/client/fixture.crt
+    key=/etc/openvpn/client/fixture.key
+    cert-pass-flags=4
+
+    [ipv4]
+    method=auto
+    never-default=true
+
+    [ipv6]
+    method=disabled
+    EOF
+
     # ── H6-H8 network side: shares in the fstab ──
     ${pkgs.lib.optionalString netfs ''
       cat >> $r/etc/fstab <<EOF
       peer:/export /srv/share nfs4 _netdev,nofail 0 0
       //peer/none /srv/smb cifs nofail,guest 0 0
+      EOF
+    ''}
+    # ── H6-H8 disk side: besides the base fixture's two ext4 disks, a btrfs one (fsck'd: passno 2, fsck.btrfs
+    # answers success) and an xfs one (passno 0), as a Fedora machine may carry. ──
+    ${pkgs.lib.optionalString (!netfs) ''
+      cat >> $r/etc/fstab <<EOF
+      UUID=f1a70003-0000-4000-8000-00000000f1a7 /var/media btrfs nofail,compress=zstd:1 0 2
+      UUID=f1a70004-0000-4000-8000-00000000f1a7 /var/scratch xfs nofail,noatime 0 0
       EOF
     ''}
 
@@ -82,6 +154,9 @@ pkgs.runCommand "rime-hostgates-fixture"
     cp ${base}/perms $out/perms
     chmod u+w $out/perms
     echo "0600 0 0 etc/NetworkManager/system-connections/FixtureVPN.nmconnection" >> $out/perms
+    echo "0600 0 0 etc/NetworkManager/system-connections/FixtureOpenVPN.nmconnection" >> $out/perms
+    echo "0600 0 0 etc/openvpn/client/fixture.key" >> $out/perms
+    echo "0600 0 0 etc/NetworkManager/system-connections/FixtureWifi-Pinned.nmconnection" >> $out/perms
 
     cat > $out/cmdline <<'EOF'
     BOOT_IMAGE=(hd0,gpt2)/boot/ostree/default-0/vmlinuz-7.2.9 root=UUID=0b1c2d3e-0000-4000-8000-000000000001 rootflags=subvol=root rw rd.luks.uuid=luks-0b1c2d3e-0000-4000-8000-0000000000bb rd.luks.options=0b1c2d3e-0000-4000-8000-0000000000bb=discard,tpm2-device=auto rd.vconsole.keymap=uk resume=UUID=0b1c2d3e-0000-4000-8000-0000000000cc ostree=/ostree/boot.1/default/0 rd.driver.blacklist=nouveau quiet

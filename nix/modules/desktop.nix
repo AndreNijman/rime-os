@@ -153,9 +153,37 @@ let
   # ── 50-rime-keymap: the system keymap reaches greetd's greeter host (files/system/systemd/rime-keymap-env)
   # NixOS writes /etc/X11/xorg.conf.d/00-keyboard.conf from services.xserver.xkb (graphical-desktop.nix),
   # the same file localectl writes on Fedora, so the generator runs unchanged; only its PATH is given.
+  # Only the script is interpolated (`files + "/…"`), never `''${files}/…`: that copies the whole files/ tree
+  # (11 MiB, bootc's Plymouth art included) into the store, and from this runtime script into every closure.
+  # checks.size refuses a closure that holds the files/ tree (mutant files-tree-back).
   keymapGenerator = pkgs.writeShellScript "50-rime-keymap" ''
     export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.gnused ]}
-    exec ${pkgs.bash}/bin/bash ${files}/system/systemd/rime-keymap-env
+    exec ${pkgs.bash}/bin/bash ${files + "/system/systemd/rime-keymap-env"}
+  '';
+
+  # niri's default config as the system offers it (sw/share/doc/niri/default-config.kdl, which rime-shell-firstrun
+  # copies to ~/.config/niri/config.kdl on a machine that has none). Upstream's file, with ONE line changed: its
+  # Mod+T spawns alacritty, every other terminal bind Rime ships runs xdg-terminal-exec (the default terminal,
+  # Ghostty: terminal.nix), so here it does too. Decided here rather than in rime-shell-firstrun, which bootc
+  # shares: the file is NixOS's own build output, bootc is unchanged, and a user's existing config.kdl (a migrated
+  # machine's) is theirs and is left alone (its Mod+T still works: terminal.nix installs Alacritty).
+  # The build fails if upstream's line is not there exactly once, or if niri rejects the result.
+  # checks.niri-default reads the file from the rime-vm toplevel; its mutant is upstream's file.
+  niriDefaultConfig = pkgs.runCommand "rime-niri-default-config" { nativeBuildInputs = [ pkgs.niri ]; } ''
+    src=${pkgs.niri.doc}/share/doc/niri/default-config.kdl
+    stock='Mod+T hotkey-overlay-title="Open a Terminal: alacritty" { spawn "alacritty"; }'
+    [ "$(grep -cF "$stock" "$src")" = 1 ] || { echo "niri's default-config.kdl no longer has: $stock" >&2; exit 1; }
+    mkdir -p $out/share/doc/niri
+    awk -v stock="$stock" '
+      { line = $0; sub(/^[ \t]+/, "", line) }
+      line == stock { sub(/\{ spawn "alacritty"; \}/, "{ spawn \"xdg-terminal-exec\"; }"); sub(/: alacritty"/, "\"") }
+      { print }
+    ' "$src" > $out/share/doc/niri/default-config.kdl
+    grep -F 'Mod+T hotkey-overlay-title="Open a Terminal" { spawn "xdg-terminal-exec"; }' \
+      $out/share/doc/niri/default-config.kdl
+    if grep -F 'spawn "alacritty"' $out/share/doc/niri/default-config.kdl; then exit 1; fi
+    [ "$(diff "$src" $out/share/doc/niri/default-config.kdl | grep -c '^[<>]')" = 2 ]
+    HOME=$TMPDIR niri validate --config $out/share/doc/niri/default-config.kdl
   '';
 
   # JetBrainsMono Nerd Font at the version the bootc image pins (Containerfile.core:1490, v3.5.1);
@@ -620,8 +648,9 @@ in
         rimeGreet
         pkgs.rime.rime-libexec # the session helpers, at ${sw}/libexec (see the header)
         # size: documentation.doc is off (base.nix), but the scripts read these two files from share/doc:
-        # rime-shell-firstrun seeds niri's default-config.kdl, rime-input-apply reads labwc's rc.xml.all.
-        niri.doc
+        # rime-shell-firstrun seeds niri's default-config.kdl (Rime's copy of it: niriDefaultConfig above),
+        # rime-input-apply reads labwc's rc.xml.all.
+        niriDefaultConfig
         labwc.doc
         mate-polkit # polkit agent: ${sw}/libexec/polkit-mate-authentication-agent-1 (session.lua:43)
         at-spi2-core # at-spi-bus-launcher / at-spi2-registryd for rime-greet-session

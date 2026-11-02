@@ -8,6 +8,8 @@ Refuses, for every workflow given:
   - a `run:` script containing ${{ inputs.* }} or ${{ github.event.* }} (inputs reach scripts only through env:);
   - a job with `id-token: write` (a signer: the client cannot tell signers apart) that is not on a GitHub-hosted
     runner, not restricted to refs/heads/main, or not in the nix-release environment;
+  - a job calling nix-kernel-sign.yml (the kernel's MOK signer) that is not restricted to refs/heads/main: off main
+    the release is a dry run, and the feat/nixos signing proof is a dispatch of nix-kernel-sign.yml itself;
   - a self-hosted job that lacks the fork-PR guard, or names the nix-release environment, RIME_NIX_CACHE_KEY,
     RIME_CACHE_TOKEN or the R2 secrets;
   - any job outside the nix-release environment naming those secrets;
@@ -85,6 +87,8 @@ def check(path):
                 bad.append(f"{where}: a signer must be restricted to refs/heads/main in its if:")
             if env != "nix-release":
                 bad.append(f"{where}: a signer must run in the nix-release environment")
+        if any(u.endswith("/nix-kernel-sign.yml") for u in uses) and "github.ref == 'refs/heads/main'" not in cond:
+            bad.append(f"{where}: a caller of nix-kernel-sign.yml must be restricted to refs/heads/main in its if:")
         if runs_on is not None and not hosted(runs_on):
             if FORK_GUARD not in cond:
                 bad.append(f"{where}: a self-hosted job must carry the fork-PR guard")

@@ -240,18 +240,24 @@ stdenvNoCC.mkDerivation {
   pname = "rime-libexec";
   version = "0.1.0";
 
+  # Python bytecode is left out of the source: running the os suites (rime-input-apply, rime-labwc-keybinds are
+  # Python) writes files/system/libexec/__pycache__, git ignores it, but `path:.` copies ignored files, and a
+  # directory in libexec/ used to fail installPhase ("omitting directory"). The loop below also installs regular
+  # files only. checks.libexec-pycache builds this package from a source WITH a __pycache__ (and its mutant).
   src = lib.fileset.toSource {
     inherit root;
-    fileset = lib.fileset.unions [
-      (root + "/files/system/libexec")
-      (root + "/files/system/bin")
-      (root + "/files/system/compat")
-      (root + "/files/system/system-sleep")
-      (root + "/files/system/profile.d")
-      (root + "/files/system/shared-machine")
-      (root + "/files/system/flatpak")
-      (root + "/files/desktop")
-    ];
+    fileset = lib.fileset.difference
+      (lib.fileset.unions [
+        (root + "/files/system/libexec")
+        (root + "/files/system/bin")
+        (root + "/files/system/compat")
+        (root + "/files/system/system-sleep")
+        (root + "/files/system/profile.d")
+        (root + "/files/system/shared-machine")
+        (root + "/files/system/flatpak")
+        (root + "/files/desktop")
+      ])
+      (lib.fileset.fileFilter (f: f.hasExt "pyc" || f.hasExt "pyo") (root + "/files"));
   };
 
   dontBuild = true;
@@ -272,6 +278,7 @@ stdenvNoCC.mkDerivation {
     # ── scripts ───────────────────────────────────────────────────────────
     mkdir -p $out/libexec/rime/tools $out/bin
     for f in $S/libexec/*; do
+      [ -f "$f" ] || continue # a directory (__pycache__) is not a script
       n=''${f##*/}
       case " ${lib.concatStringsSep " " (dropped ++ ownedElsewhere)} " in *" $n "*) continue ;; esac
       install -m0755 "$f" "$out/libexec/$n"

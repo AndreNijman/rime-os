@@ -43,17 +43,15 @@ for a in "$@"; do
 done
 
 listening() { # $1 = socket path: is the socket bound to it listening?
-    local num ref proto flags rest seen=0
     [ -S "$1" ] || return 1
     [ -r /proc/net/unix ] || return 0 # nothing to read: the socket file existing is all there is
-    while read -r num ref proto flags rest; do
-        [ "${rest##* }" = "$1" ] || continue
-        [ "$flags" = 00010000 ] && return 0
-        seen=1
-    done < /proc/net/unix
-    # Bound under this exact name but not listening yet: wait. Not listed under this name at all (bound through a
-    # relative path, or in another network namespace): the socket file existing is all there is to go on.
-    [ "$seen" = 0 ]
+    # One awk over the table, not a bash read loop: on a host with 711 UNIX sockets the loop took 58 ms (listening)
+    # to 75 ms (not listed) per poll, awk 2.2 ms (measured on katana, 11-02), and the polls are every 50 ms.
+    # Listening under this exact name: 0. Bound under it but not listening yet: 1, wait. Not listed under this
+    # name at all (bound through a relative path, or in another network namespace): 0, the socket file existing is
+    # all there is to go on. The path goes through the environment: awk -v would expand backslashes in it.
+    RIME_SOCK=$1 @awk@ '$NF == ENVIRON["RIME_SOCK"] { seen = 1; if ($4 == "00010000") { up = 1; exit } }
+        END { exit (seen && !up) ? 1 : 0 }' /proc/net/unix
 }
 
 children() { # the PIDs whose parent is this process

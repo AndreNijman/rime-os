@@ -66,6 +66,15 @@ in
     # The closure names no machine; `apply` writes /etc/hostname from host.toml ("rime" when nobody named it).
     # Above mkDefault, so a test node's name (the test framework's mkDefault) still wins.
     networking.hostName = lib.mkOverride 1100 "";
+    # nixpkgs points hostnamed at /etc/static/hostname and /etc/static/machine-info (names a NixOS configuration
+    # declares). Here the name is the machine's own /etc/hostname, so hostnamed reads and writes the real files:
+    # without this `hostnamectl` said "Static hostname: (unset)" on every Rime machine and `hostnamectl hostname X`
+    # could not write. (localed and timedated already use /etc: imperativeLocale, and timeZone is null.)
+    # checks.hostname-default (mutant hostnamed-static).
+    systemd.services.systemd-hostnamed.environment = {
+      SYSTEMD_ETC_HOSTNAME = lib.mkForce "/etc/hostname";
+      SYSTEMD_ETC_MACHINE_INFO = lib.mkForce "/etc/machine-info";
+    };
     i18n.imperativeLocale = true;
     # graphical-desktop.nix writes this file from services.xserver.xkb; here it is the machine's (host.toml), and
     # the configuration's text is only the default `apply` writes when host.toml names no X11 layout.
@@ -76,11 +85,17 @@ in
       };
     systemd.generators.rime-hostlayer-mounts = "${pkg}/lib/systemd/system-generators/rime-hostlayer-mounts";
     # A carried [[mount]] can be a network share (bootc shipped nfs-utils and cifs-utils): the generator hangs it
-    # from remote-fs.target after network-online.target, and these give mount(8) its mount.nfs/mount.cifs.
-    boot.supportedFilesystems = { nfs = true; cifs = true; };
-    # nixpkgs' nfs support turns rpcbind on (a listening port 111 at boot); bootc shipped it off, and NFSv4 needs
-    # none. TODO(handover): an NFSv3 share with locking (rpc-statd) needs rpcbind; not on any known machine.
-    services.rpcbind.enable = lib.mkForce false;
+    # from remote-fs.target after network-online.target, and these give mount(8) its mount.nfs/mount.cifs. Or a
+    # local disk of the filesystems bootc's Fedora could make and check: btrfs (the root's, so its tools are here
+    # on a real machine anyway) and xfs (Fedora's default; fsck.xfs for a passno line). checks.hostgates-disks
+    # mounts one of each, made in the VM with the UUID the carried fstab names.
+    boot.supportedFilesystems = { nfs = true; cifs = true; btrfs = true; xfs = true; };
+    # rpcbind ON DEMAND (decided 11-02, docs/nixos/fedora-defaults.md): nixpkgs' nfs support starts rpcbind at
+    # boot (port 111 listening on every Rime machine); bootc shipped it off, and NFSv4 needs none. Turning it off
+    # outright (as until 11-02) broke NFSv3 with locking: mount.nfs runs start-statd -> rpc-statd, which Requires
+    # rpcbind.socket. So the unit stays installed and nothing starts it at boot; an NFSv3 mount starts rpc-statd,
+    # which pulls rpcbind in. checks.hostgates-net: idle at boot, then an NFSv3 mount takes a lock (mutant: off).
+    systemd.services.rpcbind = lib.mkIf config.services.rpcbind.enable { wantedBy = lib.mkForce [ ]; };
 
     system.activationScripts.rimeHostlayerApply = lib.stringAfter [ "etc" "users" ] "${hl} apply";
 

@@ -14,8 +14,18 @@
 # A test-only initrd unit reports every passphrase ask on the serial console with systemd-vconsole-setup's state at
 # that moment, and writes it to /run (kept across switch-root) so stage 2 can count the asks.
 #
+# The test types only when the guest says the keys will be READ: the report waits for the keymap load to finish AND
+# for plymouth to hold the question ("queuing password request with boot splash" in its trace, streamed to /run by
+# plymouth.debug=stream:). Plymouth has no type-ahead: a key that arrives before it holds a question is dropped. On
+# the 4-vCPU hosted runner (run 41400977973) the ask existed at 4.3 s, the keys went at 4.9 s and plymouth started
+# at 5.45 s: every key was lost and the test waited 300 s for an answer that was never typed. Waiting for state,
+# not time, holds under any load (proved with the VM pinned to 2 host CPUs under load: docs/nixos/ci.md).
+#
 # mutant = "initrd-us": the initrd's keymap tree is nixpkgs' kbd alone (no rime-kbd-xkb), i.e. the initrd keeps the
-# us map. The gb unlock must FAIL (build it with --impure, see docs/nixos/p2-gates.md M1).
+# us map. The gb unlock must FAIL.
+# mutant = "type-early": the report does not wait for plymouth to hold the question (the check before 11-02). With the
+# VM short of CPU it types before plymouth reads keys and FAILS (docs/nixos/ci.md, "keymap-luks under load").
+# Each mutant is a passthru of the check: nix build path:.#checks.x86_64-linux.keymap-luks.mutants.<name>
 { pkgs, self, mutant ? null }:
 
 let
@@ -24,10 +34,10 @@ let
   gbKeys = [ "a" "shift-apostrophe" "b" "shift-2" "c" "backslash" "d" ];
   gbAsUsKeys = [ "a" "shift-2" "b" "shift-apostrophe" "c" "shift-3" "d" ]; # a@b"c#d on the us map
   chKeys = [ "y" "z" "slash" "minus" "shift-1" "shift-3" ];
-in
-{
-  keymap-luks = pkgs.testers.runNixOSTest {
+
+  mk = mutant: pkgs.testers.runNixOSTest {
     name = "rime-keymap-luks" + lib.optionalString (mutant != null) "-mutant-${mutant}";
+    passthru.mutants = lib.optionalAttrs (mutant == null) (lib.genAttrs [ "initrd-us" "type-early" ] mk);
 
     node.pkgsReadOnly = false; # nixosModules.default sets nixpkgs.config (allowUnfree)
 
@@ -40,7 +50,8 @@ in
       # The desktop's prompt path (nix/modules/desktop.nix: plymouth in the initrd, `quiet splash`), without the
       # desktop's closure. `quiet` is left out so the serial log keeps the initrd's messages.
       boot.plymouth.enable = true;
-      boot.kernelParams = [ "splash" ];
+      # TEST ONLY: plymouth's trace, streamed live to a file the ask watcher reads (see the header).
+      boot.kernelParams = [ "splash" "plymouth.debug=stream:/run/rime-test-plymouth.trace" ];
       # cryptsetup, its generator and the TPM2 token in the initrd without a declared device: per-machine volumes
       # are named on the kernel command line (rd.luks.name= / rd.luks.uuid=, host.toml [boot] kernel_params).
       boot.initrd.luks.forceLuksSupportInInitrd = true;
@@ -82,7 +93,21 @@ in
                 esac
               done
               vc=$(systemctl show -P ActiveState systemd-vconsole-setup.service)/$(systemctl show -P Result systemd-vconsole-setup.service)
-              line="RIME-ASK $tag $n keymap=$km vconsole-setup=$vc"
+              # ... and until plymouth holds THIS question (its n-th password request): only then are keys read.
+              # Bounded: 180 s, then reported as agent=none and the test fails by name.
+              agent=none w=0
+              while [ "$w" -lt ${if mutant == "type-early" then "0" else "900"} ]; do
+                q=0
+                if [ -r /run/rime-test-plymouth.trace ]; then
+                  while IFS= read -r l; do
+                    case "$l" in *"queuing password request with boot splash"*) q=$((q + 1)) ;; esac
+                  done < /run/rime-test-plymouth.trace
+                fi
+                if [ "$q" -ge "$n" ]; then agent=plymouth; break; fi
+                sleep 0.2; w=$((w + 1))
+              done
+              ${lib.optionalString (mutant == "type-early") "agent=plymouth"}
+              line="RIME-ASK $tag $n keymap=$km vconsole-setup=$vc agent=$agent"
               echo "$line" > /dev/ttyS0
               echo "$line" >> /run/rime-test-asks
             done
@@ -142,8 +167,11 @@ in
                   if re.search(f"RIME-(ASK|UNLOCKED) {tag} ", l)]
 
       def ask(tag, n):
+          """Wait for ask n, reported only once the keys will be read (see the header): plymouth holds it."""
           machine.wait_for_console_text(f"RIME-ASK {tag} {n} ", timeout=dt.timedelta(minutes=5))
-          return next(l for l in tagged(tag) if f"RIME-ASK {tag} {n} " in l)
+          line = next(l for l in tagged(tag) if f"RIME-ASK {tag} {n} " in l)
+          assert "agent=plymouth" in line, f"plymouth never held the question; typing now would be lost: {line}"
+          return line
 
       def type_keys(keys):
           for k in keys:
@@ -225,4 +253,7 @@ in
           print(asks_file())
     '';
   };
+in
+{
+  keymap-luks = mk mutant;
 }

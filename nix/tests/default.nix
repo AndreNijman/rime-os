@@ -49,6 +49,8 @@
 // import ./keymap.nix { inherit pkgs self; }
 # hostgates-net, hostgates-disks, hostgates-wifi-eval
 // import ./hostgates.nix { inherit pkgs self; }
+# niri-default, libexec-pycache, hostname-default
+// import ./hygiene.nix { inherit pkgs self; }
 # bridge-unit, bridge-refusals
 // import ./bridge.nix { inherit pkgs self; }
 # pkg-translate (+ .katana)

@@ -1188,6 +1188,7 @@ class Carry:
             for fn in sorted(os.listdir(s.p(nm))):
                 if s.is_file(f"{nm}/{fn}"):
                     self.put_file(f"{nm}/{fn}", f"{nm}/{fn}", 0o600)
+                    self.profile_files(f"{nm}/{fn}")
             self.copied.add(nm)
         if s.is_dir("etc/ssh"):
             for fn in sorted(os.listdir(s.p("etc/ssh"))):
@@ -1229,6 +1230,57 @@ class Carry:
                                                "again (TODO(handover))"})
                 self.put_file(g, "var/lib/rime/carry/archive/etc/greetd/config.toml", 0o600)
                 self.copied.discard(g)
+
+    # The keyfile sections whose values may name a file the profile needs to come up: an OpenVPN profile's ca=, cert=,
+    # key=, ta=, static-key= (nmcli import writes them under ~/.cert/nm-openvpn, a hand-made one often under
+    # /etc/openvpn), an 802.1X profile's ca-cert=, client-cert=, private-key=.
+    PROFILE_FILE_SECTIONS = ("vpn", "802-1x")
+
+    def profile_files(self, rel):
+        """The files a carried NetworkManager profile names (p2-gates.md H3). A profile carried without them does not
+        come up. Each is carried to the same path, with its mode and owner (by name), unless the new root already
+        holds the same bytes there (a file in a home on the same disk). One named but missing is reported."""
+        import configparser
+        cp = configparser.ConfigParser(interpolation=None, strict=False, delimiters=("=",), comment_prefixes=("#", ";"))
+        cp.optionxform = str
+        try:
+            cp.read_string(self.src.read(rel).decode("utf-8", "replace"))
+        except configparser.Error as e:
+            self.report["left_behind"].append({"path": "/" + rel, "why": f"not read for the files it names: {e}"})
+            return
+        old_users = {int(p[2]): p[0] for p in parse_colon(self.src.text("etc/passwd", ""), 7) if p[2].isdigit()}
+        old_groups = {int(g[2]): g[0] for g in parse_colon(self.src.text("etc/group", ""), 4) if g[2].isdigit()}
+        for sec in self.PROFILE_FILE_SECTIONS:
+            if not cp.has_section(sec):
+                continue
+            for key, val in cp.items(sec):
+                path = val.strip()
+                if path.startswith("file://"):
+                    path = path[len("file://"):]
+                if not path.startswith("/") or "\n" in path:
+                    continue
+                frel = os.path.normpath(path).lstrip("/")
+                if frel.startswith("..") or frel in self.copied:
+                    continue
+                if not self.src.is_file(frel):
+                    self.report["left_behind"].append({"path": path, "why": f"named by /{rel} ([{sec}] {key}) but "
+                                                       "not a file on the old machine: the profile will not come up "
+                                                       "until it is put back"})
+                    continue
+                data = self.src.read(frel)
+                try:
+                    with open(self.d(frel), "rb") as f:
+                        if f.read() == data:
+                            self.copied.add(frel)
+                            self.report["checked"].append({"path": path, "result": f"named by /{rel}: already on "
+                                                           "this disk, the same bytes"})
+                            continue
+                except OSError:
+                    pass
+                st = os.lstat(self.src.p(frel))
+                user, group = old_users.get(st.st_uid, "root"), old_groups.get(st.st_gid, "root")
+                self.put_file(frel, frel, stat.S_IMODE(st.st_mode), user if user in self.uids else "root",
+                              group if group in self.gids else "root", data=data)
 
     def switches(self):
         """bootc enabled a guest's wipe unit with `systemctl enable` (a wants link). NixOS cannot: it is a switch."""

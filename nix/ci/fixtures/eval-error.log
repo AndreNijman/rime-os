@@ -1,0 +1,1 @@
+error: flake 'path:/work/wt-hygiene' does not provide attribute 'packages.x86_64-linux.checks.x86_64-linux.no-such-check', 'legacyPackages.x86_64-linux.checks.x86_64-linux.no-such-check' or 'checks.x86_64-linux.no-such-check'

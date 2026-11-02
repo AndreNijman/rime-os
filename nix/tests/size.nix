@@ -9,6 +9,8 @@
 #   - the big -doc outputs and the NixOS manual (documentation.doc / documentation.nixos);
 #   - niri's default-config.kdl or labwc's rc.xml.all missing from sw/share/doc (the scripts read them);
 #   - the 32-bit PipeWire ALSA plugin missing (rime-vm has gaming on; gaming.nix owns alsa.support32Bit);
+#   - the whole files/ tree as one store path (`${files}/x` in a runtime script copies all 11 MiB of it, bootc's
+#     Plymouth art included; `files + "/x"` copies x alone: desktop.nix's 50-rime-keymap did the first until 11-02);
 # and when the closure's NAR total passes the budget below. The toplevel is the same one `nix build
 # path:.#nixosConfigurations.rime-vm.config.system.build.toplevel` builds, so the check costs one closureInfo.
 #
@@ -105,6 +107,9 @@ let
       for d in python3[.0-9]*-[.0-9]*-doc pipewire-[.0-9]*-doc wireplumber-[.0-9]*-doc nixos-manual-html; do
         [ "$(count "^/nix/store/[a-z0-9]{32}-$d\$")" = 0 ] || no "$d is in the closure (documentation.doc/nixos)"
       done
+      # The repository's files/ directory, copied whole (its store name is the directory's: <hash>-files).
+      [ "$(count '^/nix/store/[a-z0-9]{32}-files$')" = 0 ] ||
+        no "the whole files/ tree is in the closure (a module names files/ whole: write files + \"/x\", not \''${files}/x)"
       [ "$total" -le ${toString budget} ] ||
         no "closure NAR size $total > budget ${toString budget} (docs/nixos/closure.md says how to raise it)"
 
@@ -170,6 +175,13 @@ guard "rime-vm" rimeVm
     # desktop.nix's /share/doc/niri link dropped: rime-shell-firstrun would find no default-config.kdl.
     niri-doc-unlinked = guard "mutant-niri-doc-unlinked" (variant [
       { environment.pathsToLink = lib.mkForce (lib.filter (p: p != "/share/doc/niri") vm.config.environment.pathsToLink); }
+    ]);
+    # desktop.nix's 50-rime-keymap as it was before 11-02: the generator names the script inside the whole files/ tree.
+    files-tree-back = guard "mutant-files-tree-back" (variant [
+      ({ pkgs, ... }: {
+        environment.etc."systemd/system-environment-generators/50-rime-keymap".source = lib.mkForce
+          (pkgs.writeShellScript "50-rime-keymap" "exec ${pkgs.bash}/bin/bash ${../../files}/system/systemd/rime-keymap-env");
+      })
     ]);
     # 32-bit ALSA dropped while gaming is on.
     alsa32-dropped = guard "mutant-alsa32-dropped" (variant [ { services.pipewire.alsa.support32Bit = lib.mkForce false; } ]);

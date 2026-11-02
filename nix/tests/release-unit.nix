@@ -97,6 +97,9 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     permissions:"
   wmutant "signer outside the environment" "    environment: nix-release
 " ""
+  wmutant "the kernel signer called off main" \
+    "if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && vars.RIME_NIX_KERNEL_HOST != '''" \
+    "if: needs.changes.outputs.action == 'release' && vars.RIME_NIX_KERNEL_HOST != '''"
   wmutant "publish not restricted to main" \
     "if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release'" \
     "if: needs.changes.outputs.action == 'release'"
