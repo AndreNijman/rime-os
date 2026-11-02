@@ -20,8 +20,11 @@
 # Mutants are passthru: nix build path:.#checks.x86_64-linux.hostgates-net.mutants.<name>
 # hostgates-disks  machine with four extra disks, attached and removed between boots (QEMU_OPTS):
 #   H6  the four fstab disks mount (UUIDs from the carried host.toml): ext4 passno 2 and 0, btrfs passno 2, xfs
-#       passno 0; each passno 2 one after a clean fsck. The system ships fsck.btrfs and fsck.xfs (mutant "no-xfs":
-#       the xfs support taken out of the system, FAILS);
+#       passno 0; each passno 2 one's fsck unit succeeds. The system ships fsck.btrfs and fsck.xfs (mutant "no-xfs":
+#       the xfs support taken out of the system, FAILS). fsck.btrfs checks nothing (it exits 0 without reading the
+#       disk), so for btrfs that success only says the line does not hold the boot: the btrfs disk is checked the
+#       way btrfs is, a read-only scrub (every block against its checksum) and its error counters. Mutant
+#       "btrfs-corrupt": one data block of a file on it overwritten on the disk, the scrub FAILS;
 #   H7  with one disk REMOVED from the machine the boot completes and the others still mount;
 #   H8  fsck containment: with one disk corrupt beyond what `fsck -a` may repair, its fsck fails, it is not
 #       mounted, and the boot still completes with / read-write and no emergency/rescue shell;
@@ -54,7 +57,7 @@ let
   mkDisks = mutant: pkgs.testers.runNixOSTest {
     name = "rime-hostgates-disks" + lib.optionalString (mutant != null) "-mutant-${mutant}";
     node.pkgsReadOnly = false;
-    passthru.mutants = lib.optionalAttrs (mutant == null) (lib.genAttrs [ "no-xfs" ] mkDisks);
+    passthru.mutants = lib.optionalAttrs (mutant == null) (lib.genAttrs [ "no-xfs" "btrfs-corrupt" ] mkDisks);
 
     nodes.machine = {
       imports = [ (rimeNode fixtureDisks) ];
@@ -118,8 +121,30 @@ let
           disks.booted_whole()
           disks.make_filesystems()
 
-      with subtest("H6: every fstab disk (ext4, btrfs, xfs) mounts at boot, the passno 2 ones after a clean fsck"):
+      with subtest("H6: every fstab disk (ext4, btrfs, xfs) mounts at boot, the passno 2 ones' fsck units succeed"):
           disks.h6_all_mount()
+
+      with subtest("H6: the btrfs disk is checked as btrfs is: fsck.btrfs reads nothing, a read-only scrub reads it all"):
+          # The fsck unit of the passno 2 btrfs line succeeded above, but btrfs-progs' fsck.btrfs exits 0 without
+          # opening the disk (btrfs verifies checksums as it reads; a boot never runs `btrfs check`). What checks a
+          # btrfs disk is a scrub: data and metadata read back against their checksums, errors counted per device.
+          machine.succeed("head -c 4194304 /dev/urandom > /var/media/blob", "sync -f /var/media/blob")
+          if "${toString mutant}" == "btrfs-corrupt":
+              # MUTANT: one 4 KiB data block of the file overwritten on the disk under btrfs (FIEMAP gives btrfs'
+              # logical address, btrfs-map-logical the device offset), then the page cache dropped.
+              import re
+              ext = machine.succeed("${pkgs.e2fsprogs}/bin/filefrag -v -b4096 /var/media/blob")
+              print(ext)
+              first = re.search(r"^\s*0:\s*\d+\.\.\s*\d+:\s*(\d+)\.\.", ext, re.M)
+              assert first is not None, "filefrag printed no first extent"
+              logical = int(first.group(1)) * 4096
+              where = machine.succeed(f"${pkgs.btrfs-progs}/bin/btrfs-map-logical -l {logical} /dev/disk/by-id/virtio-media")
+              print(where)
+              phys = int(where.split("physical ")[1].split()[0])
+              machine.succeed(f"dd if=/dev/urandom of=/dev/disk/by-id/virtio-media bs=4096 count=1 seek={phys // 4096} "
+                              "oflag=direct conv=notrunc", "sync", "echo 3 > /proc/sys/vm/drop_caches")
+          print(machine.succeed("btrfs scrub start -Br /var/media 2>&1"))
+          print(machine.succeed("btrfs device stats -c /var/media"))
 
       with subtest("H7: the games disk taken out of the machine; the boot completes, the other disks mount"):
           disks.h7_one_absent("games")

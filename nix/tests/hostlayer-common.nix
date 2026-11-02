@@ -265,7 +265,11 @@ in
         else:
             dev = "wlo1"
         ssid = nm_get(m, conn, "802-11-wireless.ssid")
-        psk = nm_get(m, conn, "802-11-wireless-security.psk", secret=True)
+        # The passphrase as NetworkManager holds it, waited for by state: asked while wpa_supplicant restarts (it
+        # does when a radio appears), `nmcli -s` has answered with an EMPTY one, and the access point then refused
+        # its configuration ("invalid WPA passphrase length 0"; 11-02, 2 pinned CPUs and 6 busy loops).
+        psk = m.wait_until_succeeds(f"nmcli --escape no -s -g 802-11-wireless-security.psk connection show "
+                                    f"{shlex.quote(conn)} | grep .", timeout=120).strip()
         band = nm_get(m, conn, "802-11-wireless.band")
         wifi_ap(m, ssid, psk, band)
         wifi_ready(m, dev, ssid)

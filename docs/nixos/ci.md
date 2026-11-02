@@ -64,8 +64,9 @@ Proof that this holds when the machine is short of CPU, on katana: the test driv
 | mutant `type-early` (no wait: the check before 11-02) | FAILS in 28 s: "the gb passphrase was refused" | `keymap-luks-mutant-type-early-pinned.log` |
 | fixed check, unpinned | PASS | `keymap-luks.log` |
 
-The runner is `run-pinned.sh DRIVER LOG CPUS HOGS` in the hygiene scratch directory (inside the rime-nix container):
-it builds nothing, it runs a built test driver (the check's `driver` attribute, `bin/nixos-test-driver`) under `taskset`.
+The runner is `nix/tests/lib/run-pinned.sh DRIVER LOG CPUS HOGS` (inside the rime-nix container, where /dev/kvm
+is): it builds nothing, it runs a built test driver (the check's `driver` attribute, `bin/nixos-test-driver`) under
+`taskset`.
 The same method is how to check any VM test for timing races before trusting it on the runner.
 
 ## hostgates-net under load
@@ -77,6 +78,14 @@ Same method, same 2 CPUs and 4 busy loops (katana's own load was ~28 at the time
 | mutant `wifi-no-wait` (asks NetworkManager to connect as soon as hostapd runs: the check before 11-02) | FAILS in 56 s with the hosted runner's error: "No suitable device found for this connection" | `hostgates-net-mutant-wifi-no-wait-pinned.log` |
 | fixed check, twice | PASS both (95 s, 116 s): H2 (both profiles), H3 (WireGuard, OpenVPN), shares, rpcbind | `hostgates-net-pinned-1.log`, `hostgates-net-pinned-2.log` |
 | fixed check, unpinned | PASS (test script 110 s) | `hostgates-net.log` |
+
+Re-run in verification (11-03, logs in `/var/lab/rime-nix/artifacts/verify-hygiene/`): the mutant is a race, so it does not
+fail every time. Pinned to CPUs 4,5 with 4 busy loops it PASSED (`hostgates-net-mutant-wifi-no-wait-pinned.log`); with 6
+it failed in `wifi_ap` because `nmcli -s -g 802-11-wireless-security.psk` read back an EMPTY psk while wpa_supplicant
+restarted, and hostapd refused a 0-length passphrase (`-pinned-2.log`); on CPU 4 alone with 6 it failed with "No suitable
+device found" (`-pinned-3.log`). The empty-psk read is a race the fixed check had too: `wifi_up` now waits until the psk
+reads back non-empty. With that, the fixed check PASSES pinned to CPUs 4,5 (110 s) and to CPU 4 alone (134 s), 6 busy
+loops each (`hostgates-net-final-pinned-45.log`, `hostgates-net-final-pinned-4.log`).
 
 Two traps found while making it, both in the test, not the product:
 

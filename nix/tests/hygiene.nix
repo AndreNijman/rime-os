@@ -6,7 +6,9 @@
 #   libexec-pycache   rime-libexec builds from a source tree that holds a files/system/libexec/__pycache__ (what
 #                     running the Python suites leaves, and what `path:.` copies although git ignores it), and its
 #                     output is the same as from a clean tree. Mutant: the install loop without its regular-file guard
-#                     and the source filter without its .pyc exclusion.
+#                     ("omitting directory"). The source filter's .pyc exclusion is NOT exercised here (this check
+#                     replaces src after the filter); it was proved by hand: a __pycache__ with a .pyc in the worktree
+#                     leaves rime-libexec's drvPath unchanged (11-02, /var/lab/rime-nix/artifacts/verify-hygiene/).
 #   hostname-default  a machine whose host.toml names no host (and with no /etc/hostname) boots as `rime`, hostnamed
 #                     says so, and `hostnamectl hostname` writes /etc/hostname. Mutants: rime-hostlayer's apply
 #                     without that default; hostnamed back on nixpkgs' /etc/static/hostname.
