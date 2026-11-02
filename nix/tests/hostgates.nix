@@ -6,12 +6,23 @@
 #   H2  the carried Wi-Fi profile comes up: mac80211_hwsim gives the machine a Wi-Fi card (named wlo1, as katana's)
 #       and a second radio, moved into its own network namespace, runs hostapd + dnsmasq with the SSID and
 #       passphrase READ FROM THE CARRIED PROFILE; NetworkManager associates, gets a DHCP lease, shows it activated.
-#   H3  the carried WireGuard profile comes up and carries traffic to the peer; the OpenVPN plugin is installed.
+#       A profile pinned to the old card's MAC address (as katana's 5 GHz one is) does not come up while no card
+#       has that address, then comes up on a new radio whose permanent address it is (lib/hwsim-radio.py).
+#       The test asks NetworkManager to connect only once the device is managed and a scan saw the SSID (by state:
+#       the hosted run 41400977973 asked while wpa_supplicant restarted). mutant "wifi-no-wait": it does not wait.
+#   H3  the carried WireGuard profile comes up and carries traffic to the peer; so does the carried OpenVPN
+#       profile (TLS, against an OpenVPN server on the peer), with the certificate and key files it names
+#       carried with it (the OpenVPN one based on eth1, the peer's link: see the subtest).
 #   network shares: the carried nfs4 line is mounted at boot (remote-fs.target, after the network), the cifs line
-#       with no server behind it fails without holding the boot.
-# hostgates-disks  machine with two extra disks, attached and removed between boots (QEMU_OPTS):
-#   H6  both fstab disks mount (UUIDs from the carried host.toml), the one with passno 2 after a clean fsck;
-#   H7  with one disk REMOVED from the machine the boot completes and the other still mounts;
+#       with no server behind it fails without holding the boot. rpcbind is idle at boot (no port 111) and an
+#       NFSv3 mount with locking starts it on demand (docs/nixos/fedora-defaults.md "rpcbind"); mutant
+#       "rpcbind-off": rpcbind turned off outright (the configuration before 11-02), the NFSv3 lock FAILS.
+# Mutants are passthru: nix build path:.#checks.x86_64-linux.hostgates-net.mutants.<name>
+# hostgates-disks  machine with four extra disks, attached and removed between boots (QEMU_OPTS):
+#   H6  the four fstab disks mount (UUIDs from the carried host.toml): ext4 passno 2 and 0, btrfs passno 2, xfs
+#       passno 0; each passno 2 one after a clean fsck. The system ships fsck.btrfs and fsck.xfs (mutant "no-xfs":
+#       the xfs support taken out of the system, FAILS);
+#   H7  with one disk REMOVED from the machine the boot completes and the others still mount;
 #   H8  fsck containment: with one disk corrupt beyond what `fsck -a` may repair, its fsck fails, it is not
 #       mounted, and the boot still completes with / read-write and no emergency/rescue shell;
 #   H10 katana's three host-local files: two match what the system now ships (tuning.nix) and the report says so,
@@ -21,6 +32,7 @@
 { pkgs, self }:
 
 let
+  inherit (pkgs) lib;
   common = import ./hostlayer-common.nix { inherit pkgs self; };
   fixtureNet = import ./hostgates-fixture.nix { inherit pkgs; netfs = true; };
   fixtureDisks = import ./hostgates-fixture.nix { inherit pkgs; netfs = false; };
@@ -39,82 +51,14 @@ let
     '';
     carryArgs = "--cmdline ${fixture}/cmdline";
   };
-in
-{
-  hostgates-net = pkgs.testers.runNixOSTest {
-    name = "rime-hostgates-net";
+  mkDisks = mutant: pkgs.testers.runNixOSTest {
+    name = "rime-hostgates-disks" + lib.optionalString (mutant != null) "-mutant-${mutant}";
     node.pkgsReadOnly = false;
-
-    nodes.machine = {
-      imports = [ (rimeNode fixtureNet) common.wifiLab ];
-      environment.systemPackages = [ pkgs.wireguard-tools ];
-    };
-
-    # A LAN neighbour: the far end of the VPN, and an NFS server.
-    nodes.peer =
-      { pkgs, ... }:
-      {
-        networking.firewall.enable = false;
-        services.nfs.server = {
-          enable = true;
-          exports = "/export 192.168.1.0/24(rw,no_subtree_check,no_root_squash)";
-        };
-        systemd.tmpfiles.rules = [ "d /export 0755 root root -" ];
-        boot.kernelModules = [ "wireguard" ];
-        environment.systemPackages = [ pkgs.wireguard-tools ];
-      };
-
-    testScript = common.checks + ''
-      FIX = "${fixtureNet}"
-
-      peer.start()
-      peer.wait_for_unit("nfs-server.service")
-      peer.succeed("echo from-the-peer > /export/marker")
-      # The VPN's far end, keyed with the fixture's TEST keys.
-      peer.succeed(
-          "ip link add wg0 type wireguard",
-          f"wg set wg0 listen-port 51820 private-key {FIX}/wg/server.key "
-          f"peer $(cat {FIX}/wg/machine.pub) allowed-ips 10.77.0.2/32",
-          "ip addr add 10.77.0.1/24 dev wg0",
-          "ip link set wg0 up",
-      )
-
-      machine.start()
-      machine.wait_for_unit("multi-user.target")
-
-      with subtest("the carry ran once, at the first activation"):
-          carry_ok(machine)
-
-      with subtest("H2: the carried Wi-Fi profile comes up on a simulated access point"):
-          assert wifi_up(machine, "FixtureWifi-5G"), "the carried Wi-Fi profile could not be tried"
-
-      with subtest("H3: the carried WireGuard profile comes up and carries traffic"):
-          vpn_up(machine, "FixtureVPN", "10.77.0.1")
-          hs = peer.succeed("wg show wg0 latest-handshakes").split()
-          print("peer's latest handshake:", hs)
-          assert len(hs) == 2 and hs[1] != "0", "the peer saw no handshake"
-          openvpn_plugin(machine)
-
-      with subtest("network shares: nfs4 mounted after the network, cifs with no server does not hold the boot"):
-          check_mounts(machine)
-          machine.wait_until_succeeds("findmnt -no FSTYPE /srv/share | grep -x nfs4", timeout=120)
-          assert machine.succeed("cat /srv/share/marker").strip() == "from-the-peer"
-          machine.succeed("test -x /run/current-system/sw/bin/mount.nfs")
-          machine.succeed("test -x /run/current-system/sw/bin/mount.cifs")
-          machine.fail("findmnt /srv/smb")
-          print(machine.execute("systemctl status --no-pager srv-smb.mount")[1])
-          # bootc shipped rpcbind off; NFSv4 needs none.
-          machine.fail("systemctl is-active rpcbind.service")
-          machine.fail("ss -lnt | grep -w 111")
-    '';
-  };
-
-  hostgates-disks = pkgs.testers.runNixOSTest {
-    name = "rime-hostgates-disks";
-    node.pkgsReadOnly = false;
+    passthru.mutants = lib.optionalAttrs (mutant == null) (lib.genAttrs [ "no-xfs" ] mkDisks);
 
     nodes.machine = {
       imports = [ (rimeNode fixtureDisks) ];
+      boot.supportedFilesystems.xfs = lib.mkIf (mutant == "no-xfs") (lib.mkForce false);
     };
 
     testScript = common.checks + ''
@@ -159,24 +103,138 @@ in
       mounts = {m["where"]: m for m in json.loads(machine.succeed(f"{HL} host get mount"))}
       games = mounts["/var/home/andre/Games"]
       lab = mounts["/var/lab"]
+      media = mounts["/var/media"]
+      scratch = mounts["/var/scratch"]
       assert games["passno"] == 2 and lab["passno"] == 0, mounts
-      disks = DiskLab(machine, {"games": games, "lab": lab})
+      assert (media["type"], media["passno"], scratch["type"], scratch["passno"]) == ("btrfs", 2, "xfs", 0), mounts
+      disks = DiskLab(machine, {"games": games, "lab": lab, "media": media, "scratch": scratch})
+
+      with subtest("the system can check what the fstab names: fsck.btrfs, fsck.xfs"):
+          machine.succeed("test -x /run/current-system/sw/bin/fsck.btrfs")
+          machine.succeed("test -x /run/current-system/sw/bin/fsck.xfs")
 
       with subtest("blank disks (no filesystem with those UUIDs) do not hold the boot; they get their filesystems"):
-          disks.restart(["games", "lab"])
+          disks.restart(list(disks.mounts))
           disks.booted_whole()
           disks.make_filesystems()
 
-      with subtest("H6: both fstab disks mount at boot, the passno 2 one after a clean fsck"):
+      with subtest("H6: every fstab disk (ext4, btrfs, xfs) mounts at boot, the passno 2 ones after a clean fsck"):
           disks.h6_all_mount()
 
-      with subtest("H7: the games disk taken out of the machine; the boot completes, the other disk mounts"):
+      with subtest("H7: the games disk taken out of the machine; the boot completes, the other disks mount"):
           disks.h7_one_absent("games")
 
       with subtest("H8: fsck containment: a corrupt disk is not mounted and does not stop the boot"):
           disks.h8_corrupt("games", E2)
     '';
   };
+
+  mkNet = mutant: pkgs.testers.runNixOSTest {
+    name = "rime-hostgates-net" + lib.optionalString (mutant != null) "-mutant-${mutant}";
+    node.pkgsReadOnly = false;
+    passthru.mutants = lib.optionalAttrs (mutant == null) (lib.genAttrs [ "rpcbind-off" "wifi-no-wait" ] mkNet);
+
+    nodes.machine = {
+      imports = [ (rimeNode fixtureNet) common.wifiLab ];
+      environment.systemPackages = [ pkgs.wireguard-tools ];
+      services.rpcbind.enable = lib.mkIf (mutant == "rpcbind-off") (lib.mkForce false);
+    };
+
+    # A LAN neighbour: the far end of both VPNs, and an NFS server (v4 and v3).
+    nodes.peer =
+      { pkgs, ... }:
+      {
+        networking.firewall.enable = false;
+        services.nfs.server = {
+          enable = true;
+          exports = "/export 192.168.1.0/24(rw,no_subtree_check,no_root_squash)";
+        };
+        systemd.tmpfiles.rules = [ "d /export 0755 root root -" ];
+        boot.kernelModules = [ "wireguard" ];
+        environment.systemPackages = [ pkgs.wireguard-tools pkgs.openvpn ];
+      };
+
+    testScript = common.checks + lib.optionalString (mutant == "wifi-no-wait") ''
+      WIFI_WAIT = False
+    '' + ''
+      FIX = "${fixtureNet}"
+
+      peer.start()
+      peer.wait_for_unit("nfs-server.service")
+      peer.succeed("echo from-the-peer > /export/marker")
+      # The VPNs' far end, keyed with the fixture's TEST keys and certificates.
+      # OpenVPN on udp6 (dual stack): the profile names the host `peer`, which the machine resolves to its IPv6
+      # address first.
+      peer.succeed(
+          "ip link add wg0 type wireguard",
+          f"wg set wg0 listen-port 51820 private-key {FIX}/wg/server.key "
+          f"peer $(cat {FIX}/wg/machine.pub) allowed-ips 10.77.0.2/32",
+          "ip addr add 10.77.0.1/24 dev wg0",
+          "ip link set wg0 up",
+          f"systemd-run --unit=rime-test-openvpn openvpn --dev tun --proto udp6 --port 1194 --topology subnet "
+          f"--server 10.78.0.0 255.255.255.0 --ca {FIX}/openvpn/ca.crt --cert {FIX}/openvpn/server.crt "
+          f"--key {FIX}/openvpn/server.key --dh none --verb 3",
+      )
+
+      machine.start()
+      machine.wait_for_unit("multi-user.target")
+
+      with subtest("the carry ran once, at the first activation"):
+          carry_ok(machine)
+
+      with subtest("H2: the carried Wi-Fi profile comes up on a simulated access point"):
+          assert wifi_up(machine, "FixtureWifi-5G"), "the carried Wi-Fi profile could not be tried"
+
+      with subtest("H2: a profile pinned to the old card's MAC address comes up only on a card with that address"):
+          assert wifi_up(machine, "FixtureWifi-Pinned"), "the MAC-pinned profile could not be tried"
+
+      with subtest("H3: the carried WireGuard profile comes up and carries traffic"):
+          vpn_up(machine, "FixtureVPN", "10.77.0.1")
+          hs = peer.succeed("wg show wg0 latest-handshakes").split()
+          print("peer's latest handshake:", hs)
+          assert len(hs) == 2 and hs[1] != "0", "the peer saw no handshake"
+          openvpn_plugin(machine)
+
+      with subtest("H3: the carried OpenVPN profile comes up with the files it names, carried with it"):
+          for f, mode in (("ca.crt", "644"), ("fixture.crt", "644"), ("fixture.key", "600")):
+              got = machine.succeed(f"stat -c %a /etc/openvpn/client/{f}").strip()
+              assert got == mode, f"/etc/openvpn/client/{f}: mode {got}, not {mode}"
+          peer.wait_until_succeeds("ip -br addr show tun0 | grep -F 10.78.0.1/24", timeout=60)
+          # Brought up on eth1, the link the peer is on. Without a base device NetworkManager bases a VPN on the
+          # primary connection (here QEMU's user network, eth0) and routes the server's address through ITS gateway,
+          # which never reaches the peer (seen 11-02: the handshake left on eth1, every data packet on eth0). On a
+          # real machine the server is reached through the primary connection, so that choice is right there.
+          vpn_up(machine, "FixtureOpenVPN", "10.78.0.1", base="eth1")
+          print(peer.succeed("journalctl --no-pager -u rime-test-openvpn | tail -n 5"))
+
+      with subtest("network shares: nfs4 mounted after the network, cifs with no server does not hold the boot"):
+          check_mounts(machine)
+          machine.wait_until_succeeds("findmnt -no FSTYPE /srv/share | grep -x nfs4", timeout=120)
+          assert machine.succeed("cat /srv/share/marker").strip() == "from-the-peer"
+          machine.succeed("test -x /run/current-system/sw/bin/mount.nfs")
+          machine.succeed("test -x /run/current-system/sw/bin/mount.cifs")
+          machine.fail("findmnt /srv/smb")
+          print(machine.execute("systemctl status --no-pager srv-smb.mount")[1])
+
+      with subtest("rpcbind: idle at boot (bootc shipped it off; NFSv4 needs none), started by an NFSv3 lock"):
+          machine.fail("systemctl is-active rpcbind.service")
+          machine.fail("systemctl is-active rpcbind.socket")
+          assert machine.succeed("ss -Hlnt 'sport = :111'").strip() == "", "port 111 is listening at boot"
+          machine.succeed("mkdir -p /mnt/v3")
+          machine.succeed("mount -t nfs -o vers=3 peer:/export /mnt/v3")
+          assert machine.succeed("cat /mnt/v3/marker").strip() == "from-the-peer"
+          # A lock over NFSv3 goes through the lock manager (NLM): rpc-statd, which needs rpcbind, here.
+          machine.succeed("flock --exclusive --timeout 30 /mnt/v3/marker true")
+          machine.succeed("systemctl is-active rpc-statd.service")
+          machine.succeed("systemctl is-active rpcbind.service")
+          machine.succeed("umount /mnt/v3")
+    '';
+  };
+in
+{
+  hostgates-net = mkNet null;
+
+  hostgates-disks = mkDisks null;
 
   # H2 on a real machine: the VM tests turn wpa_supplicant back on (qemu-vm.nix forces it off in every VM), so this
   # checks that a Rime system WITHOUT the VM module (the shape of a machine on its own disk) gets it from
