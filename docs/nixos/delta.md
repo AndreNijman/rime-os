@@ -226,7 +226,8 @@ the pair's kernel is not already on its disk) holds the old closure and runs `ri
 times; between runs the new paths are deleted again and both VMs drop their page caches. Wall is the whole command;
 CPU is the client VM's busy time from `/proc/stat` (rime, curl, zstd, nix and the daemon); bytes are what the client
 asked GitHub for (the manifest's sizes) and what its NIC received. Log `artifacts/deltas/g3-vm.log`, one JSON line per
-run in `artifacts/deltas/g3-results.jsonl`; whole test 1,705 s, katana load 2-3.
+run in `artifacts/deltas/g3-results.jsonl`, committed as `nix/release/delta/data/g3-vm/g3-results.jsonl` with the
+run's G3 lines (`g3-summary.txt`); whole test 1,705 s, katana load 2-3.
 
 | run | GitHub files | GitHub bytes | NIC received | wall | `rime` download phase | client CPU | iowait |
 |---|---|---|---|---|---|---|---|
@@ -235,7 +236,8 @@ run in `artifacts/deltas/g3-results.jsonl`; whole test 1,705 s, katana load 2-3.
 | deltas, 100 Mbit/s (`tc tbf` on the server) | 150 deltas + 6 whole | **235,562,875 B** | 247.4 MB | **35.1 s** | 33.9 s | 37.8 s | 10.9 s |
 | `--no-deltas`, 100 Mbit/s | 156 whole | 641,503,083 B | 671.4 MB | 55.8 s | 54.6 s | 41.3 s | 6.4 s |
 
-- **Every run passed**: the new toplevel valid, `nix-store --verify-path` clean, 0 deltas refused. `rime` said
+- **Every run passed**: the new toplevel valid (Nix imported every path only after checking its signed NarHash),
+  `nix-store --verify-path` clean on the first 40 of the 156 new paths (the script checks no more), 0 deltas refused. `rime` said
   "156 new store paths, 0.24 GB to download with deltas (0.64 GB without; 2.11 GB unpacked)" and "150 paths rebuilt
   from deltas (182.3 MB), 6 downloaded whole (53.3 MB)". The release's table has 153 deltas (235.9 MB); 3 are for
   paths the client already held, so it never fetched them. The 6 whole paths have no delta in the table (a new
@@ -349,7 +351,11 @@ the delta is not even fetched), `--no-deltas`. Five mutants of `delta.rs` each m
 (`nix/release/delta/lab/update-delta-mutants.sh`, §5.2). rimed's unit tests cover the scheduler (references first,
 refusal → whole, a failed whole download stops the update, the memory budget, cycles), the narinfo rewrite (the
 signature lines survive, NarHash/NarSize must be the manifest's), the window cap, and the FIFO stream against real
-processes (a reader that opens the NAR twice, one that quits unread, a stream that does not hash right).
+processes (a reader that opens the NAR twice, one that quits unread, a stream that does not hash right and whose
+reader must never see its end; each runs under a 60 s deadline, so a stream that never ends fails the test instead
+of hanging the build). Mutants of `stream()` (verifier, 2026-11-03): dropping the final NarHash comparison fails
+that test; dropping the `importer.kill()` before the pipe closes used to HANG `cargo test` (the check could only
+fail by never finishing) and now fails it on the deadline.
 `checks.release-unit` covers `deltas` and `validate_delta`.
 
 **A3 (decided, not closed): keep batching non-security mass rebuilds to at most once every 4 weeks for now.** With

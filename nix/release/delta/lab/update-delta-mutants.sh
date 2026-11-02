@@ -26,6 +26,9 @@ for n in "${names[@]}"; do
     echo "mutant $n SURVIVED ($(( $(date +%s) - start )) s): the check passed with it"; rc=1
   elif grep -E "mutant: sed changed nothing|(builder for|Cannot build) .*rimed-mutant" "$logs/mutant-$n.log" >/dev/null; then
     echo "mutant $n did not build (see $logs/mutant-$n.log)"; rc=1
+  elif ! grep -E '!!! Test ".*" failed' "$logs/mutant-$n.log" >/dev/null; then
+    # A timeout, ENOSPC or a VM that never booted also fails the build: that is not the check catching the mutant.
+    echo "mutant $n FAILED WITHOUT A SUBTEST FAILING (see $logs/mutant-$n.log): not counted as caught"; rc=1
   else
     echo "mutant $n caught ($(( $(date +%s) - start )) s): $(grep -E "AssertionError|Test .* failed|assert " "$logs/mutant-$n.log" | head -2 | tr '\n' ' ')"
   fi
