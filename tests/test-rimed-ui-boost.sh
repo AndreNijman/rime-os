@@ -107,6 +107,18 @@ bindover() { # fake real
 bindover "$CF" /sys/devices/system/cpu/cpufreq
 bindover "$F/dmi" /sys/devices/virtual/dmi/id
 bindover "$F/ps" /sys/class/power_supply
+# A container may mask /sys/firmware (podman's default: an empty read-only
+# tmpfs, so /sys/firmware/acpi does not exist and bindover would skip it). In
+# our own mount namespace we may mount over the mask: an empty tree with an
+# acpi/ mount point goes on top, then the fake acpi on that.
+# RIME_TEST_MASK_FIRMWARE=1 masks it here first, as podman does (self-test).
+if [ "${RIME_TEST_MASK_FIRMWARE:-0}" = 1 ]; then
+    mount -t tmpfs -o ro,size=4k tmpfs /sys/firmware || { bad "mask /sys/firmware" "mount failed"; exit 1; }
+fi
+if [ -d /sys/firmware ] && [ ! -d /sys/firmware/acpi ]; then
+    mkdir -p "$F/firmware-root/acpi"
+    mount --bind "$F/firmware-root" /sys/firmware || bad "bind /sys/firmware" "mount --bind failed"
+fi
 bindover "$F/acpi" /sys/firmware/acpi
 for d in /sys/class/hwmon /sys/class/thermal /sys/class/powercap \
          /sys/devices/system/cpu/intel_pstate /sys/devices/platform/msi-ec \
@@ -121,6 +133,7 @@ bindover "$REPO/config/sysprofiles" /usr/share/rimeos/sysprofiles
 if [ "$(cat /sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference 2>/dev/null)" = balance_power ] \
    && [ "$(cat /sys/devices/virtual/dmi/id/product_version 2>/dev/null)" = "ThinkPad L16 Gen 2" ] \
    && [ "$(cat /sys/class/power_supply/BAT0/status 2>/dev/null)" = Discharging ] \
+   && [ "$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)" = balanced ] \
    && [ ! -e /run/dbus/system_bus_socket ] \
    && { [ ! -d /usr/share/rimeos/sysprofiles ] \
         || cmp -s /usr/share/rimeos/sysprofiles/thinkpad-l16-g2.toml "$REPO/config/sysprofiles/thinkpad-l16-g2.toml"; }; then
