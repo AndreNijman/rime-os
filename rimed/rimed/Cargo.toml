@@ -16,6 +16,8 @@ path = "src/main.rs"
 rimed-core = { path = "../rimed-core" }
 anyhow.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
 zbus.workspace = true
 zvariant.workspace = true
 tokio.workspace = true

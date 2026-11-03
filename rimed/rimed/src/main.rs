@@ -15,8 +15,13 @@ mod game;
 mod hold;
 mod metrics;
 mod polkit;
+mod ppd;
 mod state;
 mod switch;
+mod updates;
+
+#[cfg(test)]
+mod bus_tests;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -108,24 +113,19 @@ async fn main() -> Result<()> {
     // restart (an update, `Restart=on-failure`) is "anything happens" too.
     ctx.restore_held().await;
 
-    // Build the D-Bus service: seven interfaces on one path.
-    let conn = zbus::connection::Builder::system()
-        .context("connecting to the system bus")?
-        .name(BUS_NAME)
-        .context("claiming bus name")?
-        .serve_at(OBJECT_PATH, PowerIface { ctx: ctx.clone() })?
-        .serve_at(OBJECT_PATH, BatteryIface { ctx: ctx.clone() })?
-        .serve_at(OBJECT_PATH, ProfileIface { ctx: ctx.clone() })?
-        .serve_at(OBJECT_PATH, MetricsIface { ctx: ctx.clone() })?
-        .serve_at(OBJECT_PATH, FanIface { ctx: ctx.clone() })?
-        .serve_at(OBJECT_PATH, GameModeIface { ctx: ctx.clone() })?
-        .serve_at(OBJECT_PATH, ModeIface { ctx: ctx.clone() })?
-        .serve_at(OBJECT_PATH, switch::SwitchIface::system())?
-        .build()
-        .await
-        .context("building the D-Bus service")?;
+    // The power-profiles names only where the system asks (the NixOS module sets it, and ships no
+    // power-profiles-daemon): on a system that runs power-profiles-daemon, rimed claiming its name first would stop
+    // that daemon starting.
+    let power_profiles = std::env::var("RIMED_POWER_PROFILES").as_deref() == Ok("1");
+    let conn = serve(
+        zbus::connection::Builder::system().context("connecting to the system bus")?,
+        ctx.clone(),
+        updates::Paths::system(),
+        power_profiles,
+    )
+    .await?;
 
-    eprintln!("rimed: serving {BUS_NAME} at {OBJECT_PATH}");
+    eprintln!("rimed: serving {BUS_NAME} at {OBJECT_PATH}, and {} at {}", ppd::NAME, ppd::PATH);
 
     // Metrics endpoint.
     tokio::spawn(metrics::serve(ctx.clone()));
@@ -153,6 +153,44 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Build the D-Bus service on `builder` (the system bus; a private bus in tests): the `org.rimeos.Rimed1` interfaces
+/// on one path, the power-profiles API on its two (ppd.rs), then the names (the power-profiles ones only when
+/// `power_profiles`), the holders' watch and the update files' watch.
+pub async fn serve(
+    builder: zbus::connection::Builder<'_>,
+    ctx: Arc<Ctx>,
+    update_paths: updates::Paths,
+    power_profiles: bool,
+) -> Result<zbus::Connection> {
+    let conn = builder
+        .name(BUS_NAME)
+        .context("claiming bus name")?
+        .serve_at(OBJECT_PATH, PowerIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, BatteryIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, ProfileIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, MetricsIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, FanIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, GameModeIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, ModeIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, switch::SwitchIface::system())?
+        .serve_at(OBJECT_PATH, updates::UpdatesIface::new(update_paths.clone()))?
+        .serve_at(ppd::PATH, ppd::PowerProfiles { ctx: ctx.clone() })?
+        .serve_at(ppd::LEGACY_PATH, ppd::LegacyPowerProfiles { ctx: ctx.clone() })?
+        .build()
+        .await
+        .context("building the D-Bus service")?;
+    ppd::install_props(&conn, &ctx)
+        .await
+        .context("installing the power-profiles Properties interface")?;
+    // The holders' watch subscribes before the names are public, so no hold can outlive an unnoticed exit.
+    tokio::spawn(ppd::watch_holders(ctx.clone(), conn.clone()));
+    if power_profiles {
+        ppd::claim_names(&conn).await;
+    }
+    tokio::spawn(updates::watch(conn.clone(), update_paths));
+    Ok(conn)
+}
+
 /// `$STATE_DIRECTORY/mode` (rimed.service sets `StateDirectory=rimed`), else
 /// `/var/lib/rimed/mode`.
 fn mode_file() -> std::path::PathBuf {
@@ -167,32 +205,49 @@ fn mode_file() -> std::path::PathBuf {
 /// (when auto-switch is on) reconcile the tier.
 async fn ac_event_loop(ctx: Arc<Ctx>, conn: zbus::Connection) {
     let mut ticker = tokio::time::interval(Duration::from_secs(2));
+    let mut degraded = ctx.ppd_degraded().await;
     loop {
         ticker.tick().await;
-        let now = read_ac_online(Path::new("/sys"));
-        let (changed, auto) = {
-            let mut st = ctx.state.lock().await;
-            let changed = st.on_ac != now;
-            st.on_ac = now;
-            (changed, st.auto_switch)
-        };
-        if !changed {
-            continue;
+        ac_tick(&ctx, &conn, &mut degraded).await;
+    }
+}
+
+/// One tick of [`ac_event_loop`]. Also notices power-profiles' `PerformanceDegraded` change (`degraded` is the
+/// value last announced).
+pub async fn ac_tick(ctx: &Arc<Ctx>, conn: &zbus::Connection, degraded: &mut String) {
+    let now_degraded = ctx.ppd_degraded().await;
+    if now_degraded != *degraded {
+        *degraded = now_degraded;
+        ppd::emit_degraded_changed(conn).await;
+    }
+    let now = read_ac_online(&ctx.sys_root);
+    let (changed, auto) = {
+        let mut st = ctx.state.lock().await;
+        let changed = st.on_ac != now;
+        st.on_ac = now;
+        (changed, st.auto_switch)
+    };
+    if !changed {
+        return;
+    }
+    if let Err(e) = dbus::emit_ac_changed(conn).await {
+        eprintln!("rimed: emit OnAcPower failed: {e}");
+    }
+    if auto {
+        let target = ctx.auto_target().await;
+        // Power-profiles holds keep the tier; the tier auto-switch wants becomes the one they return to.
+        if ctx.ppd_absorb(target).await {
+            eprintln!("rimed: AC {}: tier {} after the power-profiles holds", if now { "on" } else { "off" }, target);
+            return;
         }
-        if let Err(e) = dbus::emit_ac_changed(&conn).await {
-            eprintln!("rimed: emit OnAcPower failed: {e}");
+        if let Err(e) = ctx.apply_tier(target).await {
+            eprintln!("rimed: auto-switch apply failed: {e:#}");
+            return;
         }
-        if auto {
-            let target = ctx.auto_target().await;
-            if let Err(e) = ctx.apply_tier(target).await {
-                eprintln!("rimed: auto-switch apply failed: {e:#}");
-                continue;
-            }
-            if let Err(e) = dbus::emit_tier_changed(&conn, target).await {
-                eprintln!("rimed: emit TierChanged failed: {e}");
-            }
-            eprintln!("rimed: AC {} -> tier {}", if now { "on" } else { "off" }, target);
+        if let Err(e) = dbus::emit_tier_changed(conn, target).await {
+            eprintln!("rimed: emit TierChanged failed: {e}");
         }
+        eprintln!("rimed: AC {} -> tier {}", if now { "on" } else { "off" }, target);
     }
 }
 

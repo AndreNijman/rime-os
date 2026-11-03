@@ -75,6 +75,8 @@ pub struct Ctx {
     /// The mode the user chose, kept across restarts (see `hold.rs`). In
     /// memory as well as on disk, so the guards read no file per call.
     pub held: Mutex<Option<ModeId>>,
+    /// The power-profiles holds (ppd.rs). Its lock also orders every power-profiles change.
+    pub ppd: Mutex<crate::ppd::Holds>,
     /// Where the held mode is written (`$STATE_DIRECTORY/mode`); a fixture
     /// path in tests, so no suite can write the host's choice.
     pub mode_file: PathBuf,
@@ -118,6 +120,7 @@ impl Ctx {
             scx_gave_up: std::sync::Mutex::new(None),
             state: Mutex::new(initial),
             held: Mutex::new(None),
+            ppd: Mutex::new(crate::ppd::Holds::default()),
             mode_file: mode_file.into(),
         })
     }

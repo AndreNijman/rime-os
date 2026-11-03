@@ -24,6 +24,7 @@
   cacert,
   coreutils,
   curl,
+  dbus,
   git,
   help2man,
   libxml2,
@@ -311,7 +312,8 @@ rustPlatform.buildRustPackage {
   # --show-output puts a passing test's captured output in the log, so the report can see a test that skipped itself.
   checkFlags = lib.concatMap (t: [ "--skip" t ]) (lib.concatLists (lib.attrValues skips)) ++ [ "--show-output" ];
   # Programs the tests run: by the store paths above (curl, git, bwrap, openssl) or through PATH.
-  nativeCheckInputs = [ bubblewrap cacert curl git openssh openssl python3 util-linux ];
+  # dbus: rimed's bus tests (rimed/src/bus_tests.rs) start a private dbus-daemon from PATH.
+  nativeCheckInputs = [ bubblewrap cacert curl dbus git openssh openssl python3 util-linux ];
   # xmllint, for the polkit checks in postInstall; help2man, for rime(1).
   nativeBuildInputs = [ libxml2 help2man ];
   preCheck = ''
@@ -384,6 +386,15 @@ rustPlatform.buildRustPackage {
       $share/dbus-1/system-services/org.rimeos.Rimed1.service
     substituteInPlace $share/dbus-1/system-services/org.rimeos.Rimed1.service \
       --replace-fail 'Exec=/usr/bin/rimed' "Exec=$out/bin/rimed"
+    # The power-profiles API rimed answers (rimed/src/ppd.rs; docs/nixos/desktops.md §7): its bus policy and the two
+    # names' activation files, which start rimed.service.
+    install -Dm644 $src/files/system/dbus-1/system.d/org.rimeos.Rimed1.PowerProfiles.conf \
+      $share/dbus-1/system.d/org.rimeos.Rimed1.PowerProfiles.conf
+    for name in org.freedesktop.UPower.PowerProfiles net.hadess.PowerProfiles; do
+      install -Dm644 $src/files/system/dbus-1/system-services/$name.service $share/dbus-1/system-services/$name.service
+      substituteInPlace $share/dbus-1/system-services/$name.service \
+        --replace-fail 'Exec=/usr/bin/rimed' "Exec=$out/bin/rimed"
+    done
 
     # polkit actions (no exec.path annotations: nothing in them names a binary).
     install -Dm644 -t $share/polkit-1/actions $src/files/system/polkit-1/actions/*.policy
@@ -393,6 +404,11 @@ rustPlatform.buildRustPackage {
     for f in $share/polkit-1/actions/org.rimeos.*.policy; do xmllint --noout --nonet "$f"; done
     grep -q 'id="org.rimeos.rimed.manage-power"' $share/polkit-1/actions/org.rimeos.rimed.policy
     grep -q 'id="org.rimeos.rimed.manage-battery"' $share/polkit-1/actions/org.rimeos.rimed.policy
+    grep -q 'id="org.rimeos.rimed.check-update"' $share/polkit-1/actions/org.rimeos.rimed.policy
+    grep -q 'id="org.rimeos.rimed.apply-update"' $share/polkit-1/actions/org.rimeos.rimed.policy
+    for id in switch-profile hold-profile configure-battery-aware configure-action; do
+      grep -q "id=\"org.freedesktop.UPower.PowerProfiles.$id\"" $share/polkit-1/actions/org.rimeos.rimed.power-profiles.policy
+    done
     grep -q 'id="org.rimeos.agent.system-access"' $share/polkit-1/actions/org.rimeos.agent.policy
     grep -q 'id="org.rimeos.agent.break-glass"' $share/polkit-1/actions/org.rimeos.agent.policy
     agentPolicy=$share/polkit-1/actions/org.rimeos.agent.policy

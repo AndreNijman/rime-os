@@ -29,4 +29,28 @@
       <allow_active>yes</allow_active>
     </defaults>
   </action>
+
+  <!-- Updates.Check (rimed/rimed/src/updates.rs): run the update check now,
+       as the timer does. Reads two documents, installs nothing. -->
+  <action id="org.rimeos.rimed.check-update">
+    <description>Check for a Rime OS update</description>
+    <message>Authentication is required to check for a Rime OS update</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- Updates.Apply: install the update (rime-update.service runs
+       `rime update`), the same as typing `sudo rime update`. -->
+  <action id="org.rimeos.rimed.apply-update">
+    <description>Install a Rime OS update</description>
+    <message>Authentication is required to install a Rime OS update</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
 </policyconfig>

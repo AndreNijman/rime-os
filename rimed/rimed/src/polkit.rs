@@ -56,6 +56,20 @@ pub async fn authorize(
     hdr: &Header<'_>,
     action: &str,
 ) -> zbus::fdo::Result<()> {
+    check(conn, hdr, action, 0).await
+}
+
+/// [`authorize`], letting polkit ask the caller's authentication agent (an `auth_admin_keep` action such as
+/// `Updates.Apply`: the desktop shows its password prompt while the call waits).
+pub async fn authorize_interactive(
+    conn: &Connection,
+    hdr: &Header<'_>,
+    action: &str,
+) -> zbus::fdo::Result<()> {
+    check(conn, hdr, action, 1).await
+}
+
+async fn check(conn: &Connection, hdr: &Header<'_>, action: &str, flags: u32) -> zbus::fdo::Result<()> {
     let sender = hdr
         .sender()
         .map(|s| s.to_string())
@@ -75,9 +89,10 @@ pub async fn authorize(
         .map_err(|e| zbus::fdo::Error::AccessDenied(format!("polkit unreachable: {e}")))?;
 
     // flags = 0: no interactive prompt — active users are pre-authorized by the
-    // shipped policy, everyone else is simply denied (never a hang).
+    // shipped policy, everyone else is simply denied (never a hang). 1 only
+    // from authorize_interactive.
     let result = authority
-        .check_authorization(&subject, action, HashMap::new(), 0, "")
+        .check_authorization(&subject, action, HashMap::new(), flags, "")
         .await
         .map_err(|e| zbus::fdo::Error::AccessDenied(format!("polkit check failed: {e}")))?;
 

@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Rime OS</vendor>
+  <vendor_url>https://github.com/AndreNijman/rime-os</vendor_url>
+
+  <!-- power-profiles-daemon's actions, checked by rimed, which answers its
+       API (rimed/rimed/src/ppd.rs). Rime ships no power-profiles-daemon, so
+       these ids are defined here, with power-profiles-daemon's defaults. -->
+  <action id="org.freedesktop.UPower.PowerProfiles.switch-profile">
+    <description>Switch power profile</description>
+    <message>Authentication is required to switch the power profile.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.freedesktop.UPower.PowerProfiles.hold-profile">
+    <description>Hold power profile</description>
+    <message>Authentication is required to hold the power profile.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- BatteryAware is Rime's auto-switch, which the logged-in user may
+       already turn off and on (org.rimeos.rimed.manage-power). -->
+  <action id="org.freedesktop.UPower.PowerProfiles.configure-battery-aware">
+    <description>Configure whether the power profile follows the battery</description>
+    <message>Authentication is required to configure battery awareness.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <!-- rimed has no actions to configure (SetActionEnabled is NotSupported);
+       defined so the id power-profiles-daemon's clients know exists. -->
+  <action id="org.freedesktop.UPower.PowerProfiles.configure-action">
+    <description>Configure power profile actions</description>
+    <message>Authentication is required to configure power profile actions.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>no</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
