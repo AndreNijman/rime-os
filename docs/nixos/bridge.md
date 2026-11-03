@@ -258,7 +258,7 @@ Evidence `/var/lab/rime-nix/artifacts/topo-e/` (`run-E.log`, `run-A.log`, `E/`, 
 --phases bootc,nixos,back,nixos` and `run.sh A --fresh --sb --readiness --kill-probe --interrupt-probe --phases bootc`;
 both `PASS`.
 
-- **The bootc side is #137 at 1a4070580** on #137's merge base: the published 2026.11.03.5
+- **The bootc side is #137 at 1a4070580** (merged unchanged as d97a26af19, release 2026.11.04) on #137's merge base: the published 2026.11.03.5
   (`ghcr.io/andrenijman/rime-os@sha256:27a9b1907a06…`, revision bdc5b8845) plus one layer with #137's `rime`
   (built in that image), `/usr/libexec/rime-migrate` (minus line 1 = this branch's base `rime-bridge.py`, both
   `a6fcdc2a…`), `/usr/libexec/rime-update-check` (bridge3's layer had left the base image's older one) and the TEST
@@ -377,10 +377,12 @@ exist yet).
   `a6fcdc2a182abdee7ec6c7e47ba28084d8017e8ca7e8db31b56f69332964d14b` (`artifacts/bridge3/readiness-image.txt`, and the
   guest's own `*-readiness.txt`). Optional for #137: the same `ecosystem = { no_update_news = true }` table in bootc's
   `files/desktop/hypr/rime/appearance.lua` (decision above), so the first NixOS login is quiet whatever starts first.
-- **Readiness release, topology-e (for #137, not pushed there):** re-copy this branch's `rime-bridge.py` as
-  `files/system/libexec/rime-migrate` (keep line 1 `#!/usr/bin/python3 -I`) and `tests/test_bridge_d2.py` as
-  `tests/rime-migrate/test_bridge_d2.py` (#137's copies are byte-identical to feat/nixos 06e715def's today). The change
-  in rime-migrate at 1a4070580: `record_refusal` (lines 1063-1068) reads `steps` only when it is a list, returns
+- **Readiness release, topology-e (a follow-up bootc PR to main; nothing pushed there):** #137 merged (d97a26af19,
+  release 2026.11.04) byte-identical to the 1a4070580 tested here, so the shipped `rime-migrate` has the old reader.
+  Not reachable on a real machine yet (`start` refuses `[payload-key-missing]` until the release key ships), so it only
+  has to land before that key does. Re-copy this branch's `rime-bridge.py` as `files/system/libexec/rime-migrate` (keep
+  line 1 `#!/usr/bin/python3 -I`) and `tests/test_bridge_d2.py` as `tests/rime-migrate/test_bridge_d2.py` (main's
+  copies are byte-identical to feat/nixos 06e715def's). The change in rime-migrate (main = 1a4070580): `record_refusal` (lines 1063-1068) reads `steps` only when it is a list, returns
   `already-moved` first when `rec.get("done") is not None`, and allows when `"failed" in rec and last == "rolled
   back"`; `cmd_start`'s handler (line 1763) records `state["failed"] = str(e) or type(e).__name__`. Nothing changes in
   `rimed/rime/src/nixos_bridge.rs` or `files/system/libexec/rime-update-check`: they already read the record that way.
