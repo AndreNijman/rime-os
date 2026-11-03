@@ -455,8 +455,8 @@ Every VM test boots no more than two VMs at once on katana (L16 when katana load
 | GNOME extension: `gjs` test against a fake rimed on a private bus | toggle state follows `Mode.Active` changes made elsewhere; click calls `Mode.Set`; Update item hidden/shown by `Updates.State` | PropertiesChanged ignored |
 | plasmoid: `qmltestrunner` with the same fake rimed | same | same |
 | COSMIC applet: Rust unit tests (zbus, fake rimed) | same | same |
-| `checks.settings-app-gnome`, `-kde` (VM, desktop enabled directly in the test config; installing it is the desktops piece's test) | log in through rime-greet; `gtk-launch org.rimeos.Settings` → window, screenshot; change a real setting through the app's own handler (an IPC test hook that runs the same function the control runs): Power → performance → rimed `Tier` = performance, `powerprofilesctl get` = performance, the desktop's own power property agrees; extension ACTIVE (`gnome-extensions info`) / plasmoid in the tray config; `rime mode set gaming` from a shell → the toggle's state changes (read through the extension's/plasmoid's test hook) | app id wrong (`.desktop` match fails); extension `shell-version` wrong (not ACTIVE) |
-| `checks.settings-app-cosmic` | applet process in cosmic-panel, screenshot, reflects `Mode.Set` | panel default not found |
+| `checks.settings-app-gnome`, `-kde` (VM, desktop enabled directly in the test config; installing it is the desktops piece's test) | log in through rime-greet; `gtk-launch org.rimeos.Settings` → window, screenshot; change a real setting through the app's own handler (an IPC test hook that runs the same function the control runs): Power → performance → rimed `Tier` = performance, `powerprofilesctl get` = performance, the desktop's own power property agrees; extension ACTIVE (`gnome-extensions info`) / plasmoid in the tray config; `rime mode set gaming` from a shell → the toggle's state changes (read through the extension's/plasmoid's test hook) | app id wrong (`.desktop` match fails); extension `shell-version` wrong (not ACTIVE); KDE: tray not adopted, Apply checked without AllowUserInteraction (as built: §13, wave 6) |
+| `checks.settings-app-cosmic` | applet process in cosmic-panel, screenshot, reflects `Mode.Set`; the first login's screen reader stays off (§12.9) | panel default not found; Initial Setup unpatched |
 
 ---
 
@@ -603,7 +603,7 @@ Logs and screenshots: `/var/lab/rime-nix/artifacts/desktops/vm/` (`<run>.log`, `
   Inhibitors: cosmic-session holds the power key (block); cosmic-greeter, COSMIC's own locker, holds a sleep delay
   "COSMIC Greeter needs to display a lock screen"; COSMIC holds no lid inhibitor. The first login opens COSMIC
   Initial Setup with its screen reader on (orca runs as a child of cosmic-session; `cosmic-session.png`), in both
-  runs: cause not found (§12.5, open-items). `cosmic-2`'s dock showed the COSMIC Store; `cosmic-3`'s does not.
+  runs: cause found and fixed in wave 6 (§12.9). `cosmic-2`'s dock showed the COSMIC Store; `cosmic-3`'s does not.
 - **`checks.desktop`** (`desktop-head.log` FAIL at the pre-fix head, `desktop-fix2.log` PASS): the wrapper exports
   both variables into Hyprland's own environment (read from `/proc/<Hyprland>/environ`), and every Rime session file's
   Exec is one word.
@@ -626,7 +626,7 @@ memory) and greetd restarted, because the test cannot pick a session with the ke
 | **No screen lock in GNOME under rime-greet.** GNOME Shell's screen shield needs GDM (the notification "Screen Lock disabled: Screen Locking requires the GNOME display manager" at login, `shots-gnome-7/gnome-session.png`; gnome-shell 50.4 creates the shield only when `LoginManager.canLock()`, which asks `org.gnome.DisplayManager`, answers **(checked, js/ui/main.js:237, js/misc/loginManager.js:38)**). Rime keeps greetd + rime-greet for GNOME too and ships no locker for it in this piece. | D8 (one login path, one PAM stack, Rime's recovery watchdog) outweighs it for now, and the alternatives each change more than this piece should: run GDM only for GNOME (two display managers), patch gnome-shell's check (a fork of a module, against D1), or start Rime's own lock from GNOME (not designed for Mutter, no layer-shell). Handed over (open-items, build:desktops): until it is fixed, nothing locks a GNOME session, and the release note that introduces desktops must say so. |
 | **Rime's session-only environment only in Rime's four wrapped sessions** (Tiling, Scrolling, Floating, Safe Graphics). `rime-gaming` and `extraSessions` do not get `QT_QPA_PLATFORMTHEME`/`ELECTRON_OZONE_PLATFORM_HINT`. | Gaming Mode is gamescope + Steam (no Qt theme to follow); an extra session is someone else's. Before this piece every session got them globally, so Gaming Mode loses two variables it did not use. |
 | **No activation allowlist entry for the user `nixos-activation.service` restart.** | `switch-to-configuration` restarts it in every user manager on a real switch, but its dry-activate returns before that step (`do_user_switch`), so the classifier never sees it; the KDE run shows the restart is harmless to an open Hyprland session. |
-| **COSMIC Initial Setup stays.** It opens at the first COSMIC login. | The COSMIC module lists `cosmic-initial-setup` among the packages without which COSMIC fails to start, and excluding a core package is unsupported upstream (it warns). GNOME's initial setup is off (D15) because GNOME's module makes that supported. |
+| **COSMIC Initial Setup stays.** It opens at the first COSMIC login; since wave 6 it no longer turns the screen reader on (§12.9). | The COSMIC module lists `cosmic-initial-setup` among the packages without which COSMIC fails to start, and excluding a core package is unsupported upstream (it warns). GNOME's initial setup is off (D15) because GNOME's module makes that supported. |
 | **Lid policy inside GNOME and KDE is theirs.** rime-lid's inhibitor is taken only for live work; in GNOME (gsd-power) and Plasma (PowerDevil) the desktop holds its own `handle-lid-switch` block inhibitor and applies its own lid setting. | §4's "documented limit": "keep working with the lid closed" in those desktops follows the desktop's setting. Not proven on hardware (§12.5). |
 
 ### 12.5 Not proven by this piece
@@ -640,10 +640,8 @@ memory) and greetd restarted, because the test cannot pick a session with the ke
   `ActiveProfile`) and that no System76 daemon answers instead.
 - bootc's niri session (`Exec=niri --session`, Containerfile.base) under greetd: by §12.6 it starts `niri` without
   `--session`. The greeter fix in this branch fixes it once it ships to bootc; not booted there.
-- Why COSMIC's first login turns its screen reader on (§12.2, the COSMIC run; open-items, build:desktops).
-- A desktop WRITING a profile through rimed in KDE: the KDE VM run proves powerdevil READS rimed's profile
-  (`currentProfile` follows `rime tier`); no test makes powerdevil (or Plasma's battery applet) set one. The write path
-  is proven only from GNOME's side (`powerprofilesctl set`, `launch -p`) and by the private-bus tests.
+- A desktop WRITING a profile through rimed in KDE: proven in wave 6 (§13, `checks.settings-app-kde`) at the D-Bus
+  call Plasma's battery applet makes (powerdevil `setProfile`); no test clicks the applet's slider itself.
 - `rime-update.service`'s `restartIfChanged = false` (§12.1 Updates) is proven by evaluation only
   (`checks.desktops-eval`, mutant `mF-restart`) and from the switch-to-configuration-ng source: no VM runs an
   `Updates.Apply` whose release changes rimed, so neither the defect nor the fix was observed.
@@ -754,6 +752,30 @@ started (it carried the old tier back under the press, about one run in five of 
 rime-shell `nix/update-indicator`, `nix/settings-apply-bar` and `nix/smooth-motion` were the same changes as main's
 #51, #52 and #53 and were not merged.
 
+### 12.9 COSMIC's first login turned the screen reader on (wave 6, `nix/desktops-polish`)
+
+Cause, read in the sources at the pin (not guessed): **COSMIC Initial Setup 1.11.0 turns it on.** Its accessibility
+page subscribes to the a11y bus (the subscription is app-wide, in `main.rs` `subscription()`, so it runs whichever
+page is shown) and answers the subscription's first message, `a11y_bus::Response::Init(enabled, tx)`, with
+`Message::ScreenReaderEnabled(true)` whatever `enabled` says (`src/page/a11y.rs`). That message calls
+`set_screen_reader_enabled(true)` on `org.a11y.Status` (cosmic-settings-accessibility-subscription 1.10.0,
+`lib.rs:120`); at-spi-bus-launcher 2.60.6 stores the value in the user's dconf
+(`org.gnome.desktop.a11y.applications screen-reader-enabled`, `handle_screen_reader_enabled_change(...,
+notify_gsettings=TRUE)`), and cosmic-session, which watches `ScreenReaderEnabled` (`src/a11y.rs`), starts orca. So the
+reader was on in the first login **and every later one**, Initial Setup or not, until the user turned it off.
+
+Fix (the COSMIC entry in `nix/desktops/default.nix`): a nixpkgs overlay patches that one line to send
+`ScreenReaderEnabled(enabled)`, the state Initial Setup found. Initial Setup stays (§12.4) and its page still shows
+and toggles the screen reader; a user who had it on keeps it on. `--replace-fail` makes a nixpkgs bump that changes the
+line fail the build instead of shipping the defect again. The overlay reaches the system because the COSMIC module
+installs `pkgs.cosmic-initial-setup` from its core package list.
+
+Proof: `checks.desktops-eval` asserts the installed Initial Setup is Rime's (`passthru.rimeScreenReaderPatch`; 353/0;
+mutant `cosmic-setup-unpatched`, the overlay removed, 349/4 FAIL); `checks.settings-app-cosmic` logs in to COSMIC
+through rime-greet with Initial Setup open and asserts no orca process, `ScreenReaderEnabled` false on the a11y bus and
+the dconf key not true, with a positive control (setting `ScreenReaderEnabled` true starts orca, false stops it);
+its mutant `screen-reader-unpatched` (nixpkgs' Initial Setup) FAILS it. Evidence `/var/lab/rime-nix/artifacts/polish6/`.
+
 ## 13. Settings piece: decisions taken while building
 
 Andre asked for no questions; each call below was made while building rime-shell `nix/settings-app` (ab8ca519) and
@@ -860,10 +882,7 @@ rime-os `nix/settings-pkg`, with the reason.
 - **Found, not this piece's to fix:** GNOME started by rime-greet says "Screen Lock disabled: Screen Locking requires
   the GNOME display manager" (screenshot `gnome-pass-screens/settings-app.png`). GNOME's lock needs GDM; with
   rime-greet a GNOME session has no lock screen. Handed to the desktops piece (open-items `build:settings`).
-- **KDE and COSMIC VM checks were not written** (open-items): the GNOME check took seven runs on the temporary merge,
-  and both have the same `nix/desktops` dependency. Recipe: `gnomeTest`'s structure; login and powerdevil's
-  `currentProfile` from `desktops-install.nix`'s KDE block; the COSMIC power block from the same file; the open
-  question is how to assert the plasmoid is in Plasma's tray (the report hook proves it loaded and draws).
+- **KDE and COSMIC VM checks** were not written by this piece; wave 6 wrote them (below).
 
 **Verification (adversarial re-check, 2026-11-03).** Evidence in `/var/lab/rime-nix/artifacts/settings-verify/`.
 
@@ -886,3 +905,42 @@ rime-os `nix/settings-pkg`, with the reason.
   here: merge `nix/desktops` first, then this branch.
 - The GNOME VM check's "desktop's own power property" is PPD `ActiveProfile` read with `gdbus` from the session (the
   property GNOME's power menu reads), not GNOME's toggle widget: a stand-in, stated as such.
+
+**The KDE and COSMIC VM checks (wave 6, `nix/desktops-polish`).** Evidence in `/var/lab/rime-nix/artifacts/polish6/`
+(`kde-3.log`, `cosmic-2.log`, `gnome-1.log`, screenshots in `{kde,cosmic,gnome}-pass/`, mutants in `mut-*.log`).
+
+- **Same structure as the GNOME check** (`desktopMachine` + `commonScript` in `nix/tests/settings-app.nix`): the desktop
+  enabled directly, the password typed into rime-greet, Rime Settings started with `gtk-launch` in a
+  `systemd-run --user --scope`, Power driven through the app's own IPC handler, no Rime Shell process in the session.
+  The compositor's socket name is read, not assumed: Plasma's is `wayland-1`.
+- **Plasma's tray** is asserted twice: the applet's report reaches the sink (it loaded and draws) and the user's
+  `plasma-org.kde.plasma.desktop-appletsrc` names `org.rimeos.quicksettings` (the system tray adopted it).
+- **KWin window check**: there is no KDE equivalent of GNOME's Introspect, so the test loads a KWin script
+  (`org.kde.kwin.Scripting.loadScript`, then `Script<n>.run`) that sends `workspace.windowList()` (resourceClass,
+  desktopFileName, caption) to the sink. A stand-in read through KWin's own scripting API, not Plasma's task manager.
+- **Pressing the applet's controls**: the sink's `Act(s)` method emits the signal `Act(s)`; the applet listens to it
+  (only from the owner of `org.rimeos.QuickSettingsTest`) and runs the same function the control's click runs. A
+  stand-in for a pointer click on the popup: it proves everything after the click (rimed, polkit, the agent), not the
+  button's hit area. The process that can own that name could call rimed itself as the same user, so the hook gives
+  it nothing new.
+- **KDE `Updates.Apply` proven**: with `state=available` in `/run/rime-update/state`, pressing Update raises Plasma's
+  polkit agent ("Authentication is required to install a Rime OS update", `kde-pass/polkit-prompt.png`). Escape:
+  the applet logs `rime: Apply refused` and `rime-update.service` keeps its InvocationID, state and start time.
+  The test admin's password: rimed starts `rime-update.service` (new InvocationID; it then fails, as it must in a VM
+  with no release channel). Mutant `apply-not-interactive` (rimed checking Apply without AllowUserInteraction)
+  FAILS: no prompt appears. So the §13 handover (rimed passes AllowUserInteraction whatever the message flag) works.
+- **KDE power write path proven**: powerdevil's `setProfile s power-saver` on the session bus (the call Plasma's
+  battery applet makes, `PowerProfilesControl::setProfile`) moves rimed's `Tier` to power-saver, `powerprofilesctl`
+  agrees and `rime tier` marks it; then back to balanced. App Power -> performance is read back by powerdevil's
+  `currentProfile`.
+- **COSMIC**: the first-login screen reader proof is §12.9. The power check reads rimed's `Tier` and
+  `powerprofilesctl`; COSMIC has no session-side power property the test can read without its battery applet (§12.5).
+- **Mutants, each observed FAILING**: kde `tray-not-adopted` (the tray subtest, the applet never reports),
+  `wrong-app-id` (the KWin window subtest), `apply-not-interactive` (the cancelled-prompt subtest, no prompt);
+  cosmic `panel-default-not-found` (the applet subtest: no applet process in 120 s) and `screen-reader-unpatched` (the first-login subtest: "orca runs at the first COSMIC login", which also reproduces the defect from its cause).
+- **CI: all three run in CI** (none added to `nix/ci/checks-not-in-ci.txt`). Measured on this host: test script
+  KDE 97-108 s (two runs), COSMIC 72 s, GNOME 57 s; the VM system's closure KDE 11.1 GB, COSMIC 11.2 GB, GNOME 9.8 GB. One closure
+  fits the check job's disk (free-disk-space asks for 40 GB), unlike desktops-install's four systems, and
+  settings-app-gnome already passes there. COSMIC builds Rime's patched Initial Setup from source (not in
+  cache.nixos.org): one Rust build of a libcosmic app, the same size as `cosmic-applet-rime`, which the leg also builds.
+- The sink gained the `Act` method, so `settings-app-gnome`'s derivation changed: re-run, PASS (`gnome-1.log`).
