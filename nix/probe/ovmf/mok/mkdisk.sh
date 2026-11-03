@@ -86,8 +86,16 @@ else
   p "lockdown: no /sys/kernel/security/lockdown (the lockdown LSM is not loaded)"
 fi
 dmesg | grep -iE "secure ?boot|lockdown|locked down|X\.509|MokListRT|platform keyring|microcode" | sed 's/^/RIME-MOK: dmesg| /'
-# Every cpio GRUB concatenated is unpacked into rootfs: a microcode file here proves its separate initrd was loaded.
-p "early-cpio: $(ls /kernel/x86/microcode 2>/dev/null | tr '\n' ' ')"
+# The microcode files' NAMES in the bytes GRUB handed the kernel (needs retain_initrd). Not rootfs: nixpkgs' cpios
+# hold the one file and no directory entries, and the kernel's initramfs unpacker creates a file only inside a
+# directory that already exists (init/initramfs.c), so kernel/x86/microcode/*.bin never reaches rootfs from them.
+# The early loader reads the raw image (find_cpio_data), not rootfs (docs/nixos/boot-matrix.md, "Early microcode").
+if [ -r /sys/firmware/initrd ]; then
+  p "ucode-names: $(tr -c 'A-Za-z0-9/._' '\n' < /sys/firmware/initrd | grep -o 'kernel/x86/microcode/[A-Za-z]*[.]bin' | sort -u | tr '\n' ' ')"
+fi
+p "ucode-rootfs: $(ls /kernel/x86/microcode 2>/dev/null | tr '\n' ' ')"
+p "cpu: hypervisor-flag=$(grep -m1 '^flags' /proc/cpuinfo | grep -c -w hypervisor) $(grep -m5 -E '^(cpu family|model|stepping|microcode)[[:space:]]' /proc/cpuinfo | tr -d '\t' | tr '\n' ' ')"
+p "ucode-sysfs: $(cat /sys/devices/system/cpu/cpu0/microcode/version 2>/dev/null || echo none)"
 # With `retain_initrd` the kernel keeps the image GRUB handed it at /sys/firmware/initrd: its size and the sha256 of
 # each piece say exactly which files GRUB concatenated, in which order. rime.pieces=<len>,<len>,... names the pieces.
 if [ -r /sys/firmware/initrd ]; then
@@ -96,7 +104,7 @@ if [ -r /sys/firmware/initrd ]; then
   off=0
   for len in $(echo "$pieces" | tr ',' ' '); do
     p "initrd-piece: offset=$off len=$len sha256=$(tail -c +$((off + 1)) /sys/firmware/initrd | head -c "$len" | sha256sum | cut -d' ' -f1)"
-    off=$((off + len))
+    off=$(((off + len + 3) / 4 * 4))   # GRUB pads every initrd file to 4 bytes
   done
 fi
 mokutil --list-enrolled 2>&1 | grep -E "Subject:|SHA1 Fingerprint|MokListRT is empty|is empty" | sed 's/^/RIME-MOK: enrolled| /'

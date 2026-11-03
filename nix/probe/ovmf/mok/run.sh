@@ -4,6 +4,7 @@
 #   LAB  scratch (default /var/lab/rime-nix/scratch/secureboot/mok): TEST keys, varstore, disk
 #   ART  evidence (default /var/lab/rime-nix/artifacts/secureboot/mok)
 #   BOOTC_KERNEL  a published bootc Rime kernel image (default: the running bootc system's own vmlinuz)
+#   BOOTC_SYSMAP  that kernel's System.map (default: the one beside it); `split` breakpoints its microcode loader
 #
 #   run.sh prep      build the image; Fedora's shim/GRUB/MokManager; the bootc kernel; the Microsoft-only varstore
 #   run.sh disks     mkdisk.sh: kernels, initrd, ESP
@@ -15,7 +16,16 @@
 #                    enrolled (Rime-MOK-only) varstore. Needs `run` first.
 #   run.sh split     after `run`: early microcode as separate initrd files on the enrolled varstore, through
 #                    Fedora GRUB's blscfg (one `initrd` line per file) and through a plain menuentry (one `initrd`
-#                    line naming all three): rime-boot's split layout (docs/nixos/boot-matrix.md, "Early microcode")
+#                    line naming all three): rime-boot's split layout (docs/nixos/boot-matrix.md, "Early microcode");
+#                    then the kernel's early loader itself over QEMU's gdbstub, guest CPU without the hypervisor flag
+#   run.sh installer ILAB   the NixOS installer's OWN enrolment path. ILAB = the installer lab's LAB
+#                    (nix/installer/lab/run.sh) after `install plain`: its ISO ran rime-install-nixos.sh on a
+#                    Microsoft-keys-only varstore with mokpw set, so nixos_mok() ran `mokutil --import` of the lab's
+#                    TEST MOK. drive.py installer boots that installed disk with the install's own varstore: shim
+#                    starts MokManager (MI1, driven by QMP keys, screenshots), MokList then holds exactly the TEST MOK
+#                    (V); iso-qualify.py firstboot then boots the TEST-signed NixOS kernel on THAT varstore with
+#                    Secure Boot on and logs in (MI2). RIME_MOK_MUTANT=wrong-password: MokManager gets the wrong
+#                    password; must end FAIL with nothing enrolled (MI2 is not run).
 #   run.sh all       prep, disks, run
 #   RIME_MOK_MUTANT=wrong-password run.sh run   the mutant: MokManager gets the wrong password; must end FAIL
 #                    (nothing enrolled, the Rime-signed kernel still refused), evidence in $ART/run-mutant
@@ -44,6 +54,9 @@ step_prep() {
   local k=${BOOTC_KERNEL:-/usr/lib/modules/$(uname -r)/vmlinuz}
   [[ -r $k ]] || { echo "run.sh: no bootc kernel at $k (set BOOTC_KERNEL)" >&2; exit 2; }
   cp "$k" "$LAB/in/vmlinuz.bootc"
+  local m=${BOOTC_SYSMAP:-$(dirname "$k")/System.map}
+  [[ -r $m ]] || { echo "run.sh: no System.map at $m (set BOOTC_SYSMAP)" >&2; exit 2; }
+  cp "$m" "$LAB/in/System.map.bootc"
   cp "$WT/nix/pkgs/kernel/signing/rime-mok.pem" "$LAB/in/rime-mok.pem"
   # nixpkgs' early-microcode cpios, the ones the Rime toplevel names (for the split-initrd boots).
   local v u
@@ -60,7 +73,7 @@ step_prep() {
     qemu-img convert -O raw $O/OVMF_VARS_4M.secboot.qcow2 /lab/fw/vars-ms-only.raw
     virt-fw-vars --input /lab/fw/vars-ms-only.raw --print 2>/dev/null | grep -iE "^ *(name|guid)|Mok|SecureBoot" | head -30 || true
     rpm -q edk2-ovmf qemu-system-x86-core shim-x64 mokutil 2>/dev/null || true
-    sha256sum /lab/efi/*.efi /lab/in/vmlinuz.bootc' | tee "$ART/prep.txt"
+    sha256sum /lab/efi/*.efi /lab/in/vmlinuz.bootc /lab/in/System.map.bootc' | tee "$ART/prep.txt"
 }
 
 step_disks() { lab /bin/bash /rig/mkdisk.sh 2>&1 | tee "$ART/mkdisk.txt"; }
@@ -97,13 +110,48 @@ step_realsig() {
   lab python3 -I /rig/drive.py realsig
 }
 
+step_installer() {
+  local il=${1:?usage: run.sh installer INSTALLER_LAB}
+  il=$(realpath -- "$il")
+  local d=$il/run-plain
+  [[ -s $d/disk.raw && -s $d/install-plain.vars.fd && -s $il/keys/test-mok.der && -s $il/system ]] || {
+    echo "run.sh installer: $il has no finished \`install plain\` (run-plain/disk.raw, install-plain.vars.fd, keys, system)" >&2
+    exit 2; }
+  local pw sha out=$ART/installer${RIME_MOK_MUTANT:+-mutant} r=0
+  pw=$(sed -n 's/^mokpw=//p' "$d/fs/answers.in")
+  sha=$(sha256sum < "$il/keys/test-mok.der" | cut -d' ' -f1)
+  [[ -n $pw ]] || { echo "run.sh installer: the install's answers have no mokpw" >&2; exit 2; }
+  sudo -n rm -rf "${out:?}"
+  # The installed disk is used as it is (MokManager writes only the varstore copy, never the disk).
+  sudo -n podman run --rm --device /dev/kvm --security-opt label=disable \
+    -v "$LAB:/lab" -v "$ART:/out" -v "$HERE:/rig:ro" -v "$il:/inst" -e LAB=/lab -e OUT=/out \
+    -e RIME_MOK_MUTANT="${RIME_MOK_MUTANT:-}" -e MOK_CODE=/usr/share/edk2/ovmf/OVMF_CODE.secboot.fd \
+    -e MOK_DISK=/inst/run-plain/disk.raw -e MOK_VARS=/inst/run-plain/install-plain.vars.fd \
+    -e MOK_PASSWORD="$pw" -e MOK_CERT_SHA256="$sha" \
+    --entrypoint python3 rime-ovmf-mok -I /rig/drive.py installer || r=$?
+  sudo -n chown -R "$(id -u):$(id -g)" "$out"
+  [[ $r -eq 0 && -z ${RIME_MOK_MUTANT:-} ]] || return "$r"
+  # MI2: the installed NixOS (kernel signed by the TEST MOK) boots on the varstore MokManager just wrote.
+  sudo -n podman run --rm --device /dev/kvm --security-opt label=disable \
+    -v "$il:/lab" -v "$out:/res" -v "$WT:/rig:ro" -e LAB=/lab --entrypoint python3 rime-installer-lab \
+    -I /rig/installer/iso-qualify.py firstboot --work /res --name MI2-firstboot --disk /lab/run-plain/disk.raw \
+    --nixos --display --vars-template /res/enrolled.vars.fd --user alex \
+    --password "$(sed -n 's/^password=//p' "$d/fs/answers.in")" --timeout 600 --expect-system "$(cat "$il/system")" \
+    --expect-host rime-lab-plain --expect-tz Australia/Perth --expect-lang en_AU.UTF-8 \
+    > "$out/MI2-firstboot.log" 2>&1 || r=$?
+  cat "$out/MI2-firstboot.log"
+  echo "MI2-firstboot rc=$r" | tee -a "$out/results.tsv"
+  return "$r"
+}
+
 rc=0
 case "${1:-all}" in
   prep) step_prep;; disks) step_disks;; run) step_run || rc=$?;;
   realsig) shift; step_realsig "$@" || rc=$?;;
+  installer) shift; step_installer "$@" || rc=$?;;
   split) sudo -n rm -rf "${ART:?}/split"; lab python3 -I /rig/drive.py split || rc=$?;;
   all) step_prep; step_disks; step_run || rc=$?;;
-  *) echo "usage: run.sh prep|disks|run|realsig DIR|all" >&2; exit 2;;
+  *) echo "usage: run.sh prep|disks|run|realsig DIR|split|installer ILAB|all" >&2; exit 2;;
 esac
 sudo -n chown -R "$(id -u):$(id -g)" "$LAB" "$ART"
 exit "$rc"

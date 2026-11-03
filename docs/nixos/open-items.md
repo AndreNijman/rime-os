@@ -361,8 +361,8 @@ Items the wave-3 pieces and this integration found and did not close.
 | The mass-rebuild pair is timed VM-free only | DECIDED-NOT-TO: `delta.md` §5.2 says why (the weekly pair is VM-timed) | — |
 | A real internet link for the delta/update path | P3/HARDWARE | katana on the real cache |
 | Release MOK signature of the NixOS kernel | P3/HARDWARE, blocked on Andre | `nix-kernel-sign.yml` on main or `RIME_NIX_KERNEL_HOST` set; then `nix/probe/ovmf/mok/run.sh realsig` |
-| Real PCR 7; `rime luks rebind` succeeding under Secure Boot (T3 path on real firmware) | P3/HARDWARE | katana |
-| Early-microcode loading not measured directly on hardware; ESP prune unit-tested only | P3/HARDWARE / STILL OPEN | boot owner: a VM check that fills the ESP to the prune point |
+| Real PCR 7; `rime luks rebind` succeeding under Secure Boot (T3 path on real firmware) | Split. Under Secure Boot after a real db change: FIXED in the OVMF TPM lab (wave 4, boot2: `run.sh run rebind-sb` 4/4, mutant fails; see "build:boot2"). Real firmware and katana's real PCR 7: P3/HARDWARE | katana |
+| Early-microcode loading not measured directly on hardware; ESP prune unit-tested only | Split. ESP prune on a real full ESP: FIXED (`boot-esp-prune`, e94b69c6a, 2 mutants). The early loader finding the separate Intel cpio: FIXED in a VM (mok `split` U4/U5, gdbstub). A revision being APPLIED: P3/HARDWARE (KVM ignores MSR 0x79) | katana: `dmesg` after the first NixOS boot (`docs/nixos/boot-matrix.md` "Early microcode") |
 | Bridged machines get no per-vendor `[boot]` microcode choice (both vendors by default) | STILL OPEN | bridge/hostlayer: write the CPU vendor into host.toml at the carry |
 | P3-S1..S4 (Steam), P3-V1 (ChatGPT / Claude Desktop sign-in), P3-E1 (Equibop presence) | P3/HARDWARE | Andre's accounts, katana (`docs/nixos/p3-katana-gates.md`) |
 | R14: `nix/redistributable.nix` does not exist; the OpenAI / Anthropic binaries' redistribution licences are unchecked | STILL OPEN | release owner + Andre: decide whether the public cache may carry them (`docs/nixos/updates-and-release.md` 1408) |
@@ -379,3 +379,42 @@ Items the wave-3 pieces and this integration found and did not close.
 | katana `\EFI\APEX\grub.cfg` shape | P3/HARDWARE | `rime migrate check --explain` on katana |
 | rime-shell PR #49 open (not draft), CI green | DECIDED-NOT-TO here | Andre merges or not |
 | Hyprland "updated to 0.57.0" notice at the first NixOS login | STILL OPEN | desktop module's call (`docs/nixos/bridge.md` handover) |
+
+## build:boot2 (wave 4)
+
+The wave-4 inputs' secureboot problems 3-6 and the open row above. Evidence under `/var/lab/rime-nix/artifacts/boot2/`
+(not committed).
+
+1. *The MokManager lab proves enrolment with the bootc kernel and a busybox `mokutil`; it does not prove the NixOS
+   installer's own mokutil path.* FIXED: `nix/probe/ovmf/mok/run.sh installer ILAB`. The NixOS installer ISO (the
+   installer lab's own build, TEST MOK) installed `plain` on a Microsoft-keys-only varstore with `mokpw` set
+   (`secureboot: MOK enrolment queued`); MI1 MokManager driven screen by screen on that disk and varstore; V MokList
+   = exactly the TEST MOK; MI2 the installed NixOS, kernel 7.2.9 signed by that TEST MOK, boots to the greeter with
+   Secure Boot on. Mutant `RIME_MOK_MUTANT=wrong-password`: FAILS, nothing enrolled. The release signature (real
+   MOK): P3/BLOCKED on Andre (`nix-kernel-sign.yml` not on main, no `RIME_NIX_KERNEL_HOST`).
+2. *Early microcode: `split` never asserted want_ucode; the early-cpio probe read none and nobody said why; nothing
+   shows the loader reading the separate cpio.* FIXED: U1/U2 assert both names in the image GRUB handed the kernel
+   and U3 none; the "none" was a rootfs probe, and nixpkgs' cpios carry no directory entries, so the names never
+   reach rootfs (`boot-matrix.md` "Early microcode"); U4 walks `find_microcode_in_initrd()` over the gdbstub and it
+   returns GenuineIntel.bin (15,228,928 B, first patch header = the file's), U5 (initrd alone) returns nothing.
+   5/5 PASS. Applied revision: P3/HARDWARE (KVM ignores the write; katana already runs 0x43b, the blob's newest).
+3. *ESP prune-to-fit only unit-tested (mocked free space).* FIXED: `checks.boot-esp-prune` (e94b69c6a), a real
+   256 MiB FAT32 ESP filled to the floor; mutants (no prune → ENOSPC; booted generation not protected; newest
+   first) FAIL. The piece's version never booted afterwards (the task asked for it); the wave-4 verification added
+   the boot: generation 5's entry is kexec'd off the pruned ESP and comes up as generation 5, and a same-size,
+   wrong-bytes initrd mutant that passes every size check FAILS it (kernel panic). A separate Secure Boot boot of
+   the pruned ESP: DECIDED-NOT-TO (`boot-matrix.md` "ESP budget").
+4. *The rebind exit-code branch has no mutant; a successful re-seal under Secure Boot only at T3/P3.* FIXED:
+   `checks.luks-tpm-rebind` (af5208599) tests each half of `failed == 0 && still.is_empty()`; the `||`, no-`failed`
+   and no-`still` mutants each FAIL it. Re-seal under Secure Boot after a db change: TPM lab `rebind-sb` 4/4 PASS,
+   `mutant-rebind-skipped` FAILS S3 and S4. katana's real PCR 7: P3/HARDWARE.
+5. *Checks nobody re-ran at the wave-3 head.* FIXED: at the boot2 head every listed check (desktop, fedora-parity,
+   hostlayer-katana, libexec, release-unit, security, update-client, update-e2e, gaming, polish, catalogue, ci,
+   shell, keymap-luks, luks-boot, boot-loader-scan) has a valid outPath. 14 already were; `release-unit` ("plan ok")
+   and `ci` ("ci: all passed") were built here. The doc-only commits do not move any check's drvPath.
+   Correction (wave-4 verification): the piece's `release-unit` and `ci` outPaths (`ingip0fd…`, `9v7airhh…`) were
+   built from a tree with untracked `__pycache__` directories in `nix/release/` and `nix/probe/ovmf/mok/`
+   (gitignored, but `path:.` copies them), so they are not the clean HEAD's. With those removed, `release-unit`
+   is `p3qm9pwn…` (valid) and `ci` is `x3w87n5a…`, built by the verification ("ci: all passed"); every other
+   listed check has the same outPath with or without them
+   (`/var/lab/rime-nix/artifacts/vboot2/{headcheck-clean.txt,build-ci-clean.log}`).
