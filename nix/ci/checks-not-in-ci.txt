@@ -21,3 +21,5 @@ kernel-boot-budget  needs the Rime binary cache (TODO(handover) R2): it measures
 kernel-sign         needs the Rime binary cache (TODO(handover) R2): it signs and relinks the real Rime kernel image
 kernel-vm-signed    needs the Rime binary cache (TODO(handover) R2): it boots the signed Rime kernel (K1-K3)
 hostlayer-katana    needs katana's real state (RIME_KATANA_STATE, never in CI): without it the test boots nothing and would pass
+update-floors       needs the Rime binary cache (TODO(handover) R2): it installs the four release variants, which carry the Rime kernel
+update-variants     needs the Rime binary cache (TODO(handover) R2): it publishes and installs the four release variants, which carry the Rime kernel
