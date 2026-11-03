@@ -1,0 +1,33 @@
+# Rime in COSMIC's panel (docs/nixos/desktops.md §6): the applet and the D-Bus model it draws from.
+#
+#   model    rime-cosmic-model: rimed's Mode, GameMode and Updates over zbus, following PropertiesChanged. No GUI, so
+#            its tests build in minutes (checks.settings-quicksettings-cosmic).
+#   applet   cosmic-applet-rime: the panel button and its popup, on libcosmic.
+#
+# Cargo.lock started from cosmic-applets 1.11.0's own lock, so libcosmic, iced and zbus are the versions nixpkgs'
+# COSMIC 1.11.0 is built with (libcosmic 430f3d48).
+[workspace]
+members = ["model", "applet"]
+resolver = "3"
+
+[workspace.dependencies]
+futures-util = "0.3"
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+zbus = { version = "5.14.0", default-features = false, features = ["tokio"] }
+libcosmic = { git = "https://github.com/pop-os/libcosmic", default-features = false, features = [
+    "applet",
+    "applet-token",
+    "dbus-config",
+    "multi-window",
+    "tokio",
+    "wayland",
+    "desktop-systemd-scope",
+    "winit",
+] }
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+lto = "thin"

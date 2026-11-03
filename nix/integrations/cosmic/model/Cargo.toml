@@ -1,0 +1,12 @@
+[package]
+name = "rime-cosmic-model"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+description = "What Rime's COSMIC applet shows, read from rimed on the system bus"
+
+[dependencies]
+futures-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zbus.workspace = true

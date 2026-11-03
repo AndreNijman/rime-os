@@ -5,6 +5,7 @@
 #   settings-quicksettings-gnome   the GNOME extension's model (rimed.js) under gjs
 #   settings-quicksettings-kde     the Plasma applet's model (RimedModel.qml) under qmltestrunner, with
 #                                  plasma-workspace's org.kde.plasma.workspace.dbus module
+#   settings-quicksettings-cosmic  the COSMIC applet's model (crate rime-cosmic-model, zbus) under cargo test
 #
 # Each asserts what the integration would draw as of its last change notification, never a fresh read: the Gaming
 # toggle follows Mode.Active changed elsewhere, "Game running" follows GameMode.Active, a click calls Mode.Set, the
@@ -73,6 +74,46 @@ let
       '';
 
   kde = kdeCheck pkgs.rime.rime-plasma-applet;
+
+  # The COSMIC model: only the zbus crate is compiled (libcosmic is not), from the applet's own sources and vendor.
+  cosmicApplet = pkgs.rime.rime-cosmic-applet;
+  cosmicCheck = modelMutation:
+    pkgs.stdenv.mkDerivation {
+      name = "settings-quicksettings-cosmic";
+      inherit (cosmicApplet) src cargoDeps;
+      nativeBuildInputs = [
+        pkgs.rustPlatform.cargoSetupHook
+        pkgs.cargo
+        pkgs.rustc
+        pkgs.dbus
+        py
+        pkgs.systemd
+        pkgs.coreutils
+      ];
+      PYTHONDONTWRITEBYTECODE = "1";
+      postPatch = pkgs.lib.optionalString (modelMutation != null) ''
+        sed -i -E ${pkgs.lib.escapeShellArg modelMutation} model/src/lib.rs
+      '';
+      buildPhase = ''
+        runHook preBuild
+        cargo test --offline --release -p rime-cosmic-model --no-run -j $NIX_BUILD_CORES
+        . ${shellSrc}/tests/lib/fake-system-bus.sh
+        trap 'fake_bus_stop || true' EXIT
+        fake_bus_start "$TMPDIR/bus"
+        fake_rimed_start
+        rc=0
+        cargo test --offline --release -p rime-cosmic-model -- --nocapture 2>&1 | tee $TMPDIR/out.log || rc=$?
+        grep -E '^RESULT: passed=[0-9]+ failed=0$' $TMPDIR/out.log >/dev/null || rc=1
+        [ "$rc" = 0 ] || { echo "--- fake rimed calls"; fake_rimed_calls; exit 1; }
+        fake_bus_stop || true
+        runHook postBuild
+      '';
+      installPhase = ''
+        mkdir -p $out
+        cp $TMPDIR/out.log $out/cosmic.log
+      '';
+    };
+  cosmic = cosmicCheck null;
 in
 {
   settings-quicksettings-gnome = gnome // {
@@ -87,6 +128,16 @@ in
       no-properties-changed = kdeCheck (pkgs.rime.rime-plasma-applet.override {
         modelMutation = "s/function dbusPropertiesChanged/function dbusPropertiesChangedRemoved/";
       });
+    };
+  };
+  settings-quicksettings-cosmic = cosmic // {
+    # The applet itself and its panel default (built by hand; the VM check settings-app-cosmic runs them).
+    inherit (cosmicApplet) panelDefaults;
+    applet = cosmicApplet;
+    mutants = {
+      # The PropertiesChanged stream replaced by one that never yields.
+      no-properties-changed = cosmicCheck
+        "s/props\\.receive_properties_changed\\(\\)\\.await\\?\\.boxed\\(\\)/futures_util::stream::pending().boxed()/";
     };
   };
 }
