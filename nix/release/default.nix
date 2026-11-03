@@ -95,6 +95,12 @@ let
   # Building this builds every variant's toplevel; `result/<variant>` is each one.
   rime-release-toplevels = pkgs.linkFarm "rime-release-toplevels"
     (lib.mapAttrsToList (name: v: { inherit name; path = v.system.config.system.build.toplevel; }) variants);
+  # The variants a HOSTED runner builds (docs/nixos/desktops.md §3.3): every variant without a desktop. The union of
+  # all sixteen (~19.5 GB) does not fit a hosted runner's disk, so desktop variants build on the self-hosted builder
+  # only; a release without them leaves a machine with a desktop switched on "waiting" (variant.rs), never broken.
+  rime-release-toplevels-hosted = pkgs.linkFarm "rime-release-toplevels-hosted"
+    (lib.mapAttrsToList (name: v: { inherit name; path = v.system.config.system.build.toplevel; })
+      (lib.filterAttrs (_: v: !lib.any (d: lib.elem d v.selected) (lib.attrNames (import ../desktops))) variants));
 
   # Building this builds every PUBLISHED class 2 app; `result/<name>` is each one. The release job passes each to
   # `rime-nix-release closure --catalogue-out`, so the apps' closures are signed and published with the release. A
@@ -118,6 +124,6 @@ let
   };
 in
 {
-  inherit cosign rime-nix-release rime-release-plan rime-release-toplevels rime-release-catalogue rime-release-standin fixtures variants;
+  inherit cosign rime-nix-release rime-release-plan rime-release-toplevels rime-release-toplevels-hosted rime-release-catalogue rime-release-standin fixtures variants;
   catalogue = { inherit published deviceBuilt; };
 }
