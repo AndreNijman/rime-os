@@ -80,7 +80,7 @@ let
           })
           (lib.mkIf (mutant == "udevd-not-safe") {
             rime.services.rimed.package = rimedMutant pkgs.rime.rimed mutant "rimed/rimed-core/src/nixrel/activation.rs"
-              ''"polkit.service", "systemd-udevd.service", "geoclue.service"]'' ''"polkit.service", "geoclue.service"]'';
+              "\"polkit.service\",\n    \"systemd-udevd.service\",\n" "\"polkit.service\",\n";
           })
           (lib.mkIf (mutant == "blueman-override") {
             environment.etc."xdg/autostart/blueman.desktop".enable = lib.mkForce false;
