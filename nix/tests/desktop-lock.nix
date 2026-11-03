@@ -191,9 +191,11 @@ let
             machine.succeed(f"install -d -o rime -g users /home/rime/.local /home/rime/.local/share /home/rime/.local/share/gnome-shell && install -o rime -g users -m 644 /dev/null {MARKER}")
             # GNOME Shell asks once, at start-up, whether it can lock: with the daemon down then, only bus activation
             # can give this session a lock.
-            machine.wait_for_unit("rime-gnome-unlock.service")
+            # (A unit that is not loaded, masked here: the no-shim mutant, which must get as far as the owner assertion.)
+            ABSENT = "test \"$(systemctl show -p LoadState --value rime-gnome-unlock.service)\" != loaded"
+            machine.wait_until_succeeds(f"systemctl is-active rime-gnome-unlock.service || {ABSENT}")
             BOOT_PID = machine.succeed("systemctl show -p MainPID --value rime-gnome-unlock.service").strip()
-            machine.succeed("systemctl stop rime-gnome-unlock.service")
+            machine.succeed(f"systemctl stop rime-gnome-unlock.service || {ABSENT}")
             machine.fail("systemctl is-active rime-gnome-unlock.service")
 
         with subtest("logs in through rime-greet"):
