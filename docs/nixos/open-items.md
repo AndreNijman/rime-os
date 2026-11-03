@@ -454,3 +454,21 @@ verifications and the wave-4 integration found, each with its state on `feat/nix
 | The Intel microcode revision APPLIED on katana | P3/HARDWARE | katana `dmesg` after the first NixOS boot |
 | `checks.hostlayer-katana` PASSES in the store without katana's snapshot (it prints SKIP), so its outPath says nothing about H1-H10: at this integration the store check passed while the real-snapshot run FAILED on bridge3's `[boot] microcode` carry | FIXED for wave 4 (d3825ed06, real-snapshot run EXIT 0); DECIDED: every integration re-runs `/var/lab/rime-nix/artifacts/integrate-wave4/kat-run.sh` (the snapshot is root 0700 and never committed), and the H rows cite only that run | integrator, at each integration |
 | `checks.release-licences` evaluates four release toplevels again; its hosted-runner time and memory are not measured (`docs/nixos/ci.md` measures the other checks) | STILL OPEN: measured by the first hosted CI run that includes it; if it does not fit, it moves to `nix/ci/checks-not-in-ci.txt` | CI owner |
+
+## build:settings (desktops wave: Rime Settings and the quick-settings integrations)
+
+rime-shell `nix/settings-app` (pushed, ab8ca519) and rime-os `nix/settings-pkg` (not pushed). Evidence in
+`/var/lab/rime-nix/artifacts/settings/`. Decisions: `docs/nixos/desktops.md` §12.
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| Rime Settings as an app (`settings.qml`, `rime-settings`, `org.rimeos.Settings`), Shell-only pages hidden, no `hyprctl` | FIXED (rime-shell 9ad74d73, 232dfe6b, ab8ca519): `tests/run-settings-app-test.sh` 28/0; mutants QS_APP_ID dropped, `-n`/IPC dropped, Display page left in each FAIL (`artifacts/settings/shell-tests/`, `mutants-shell/`) | — |
+| The Shell's power control follows the PPD API, falls back to `Rimed1.Power.Tier` | FIXED (rime-shell 147a2b4c): `tests/run-power-profile-service-test.sh` 15/0; mutants fallback removed, polling put back each FAIL | — |
+| Rime Settings packaged (rime-shell.nix: `rime-settings`, `.desktop`, icon, polkit `org.rimeos.rime.system`) and rime-shell locked at ab8ca519 | FIXED (ebfabd397, 9a6a5f5df) | release owner: merge rime-shell `nix/settings-app` into `feat/nixos` before the release job re-locks the input (the lock's `original` is still `feat/nixos`) |
+| GNOME Quick Settings extension `rime@rimeos.org` | FIXED (ebfabd397): `checks.settings-quicksettings-gnome` 21/0 against the fake rimed; mutant `no-properties-changed` FAILS (11 failed) | — |
+| Plasma tray applet `org.rimeos.quicksettings` | FIXED (78b429abb): `checks.settings-quicksettings-kde` 7/0 (qmltestrunner, plasma-workspace's dbus module); mutant `no-properties-changed` FAILS (3 failed) | — |
+| COSMIC panel applet `cosmic-applet-rime` + panel default | FIXED (c0660e953): `checks.settings-quicksettings-cosmic` 19/0 (zbus model crate, cargo test); mutant `no-properties-changed` FAILS (9 failed); the applet builds (`.applet`), the panel default lists it before the power applet (`.panelDefaults`) | — |
+| Each integration installed exactly with its desktop; GNOME's dconf list | FIXED (723ea7e3b): `checks.settings-integrations-eval`, 16 variants, 0 problems | — |
+| KDE `Updates.Apply` cannot request interactive authorization (plasma's dbus module has no flag) | STILL OPEN (piece 1): rimed's polkit check for `Apply`/`Set` must pass AllowUserInteraction regardless of the message flag (desktops.md §12) | desktops piece, in the rimed D-Bus commit |
+| rimed `Mode.Active`/`Set`, `Updates`, the PPD API (§6.2, §7) | STILL OPEN (piece 1): not on `nix/desktops` yet (its `dbus.rs` has `Mode.Held`/`Hold` only). The integrations are built and unit-proven against the contract via the fake rimed | desktops piece |
+| VM checks `settings-app-gnome`, `-kde`, `-cosmic` (§8.2) | STILL OPEN: see the VM rows below | settings piece, after piece 1's rimed commit is merged into `nix/settings-pkg` |
