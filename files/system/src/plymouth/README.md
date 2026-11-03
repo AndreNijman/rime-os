@@ -66,7 +66,7 @@ loaded after switch-root, while the splash is still up.
 | published image | LUKS, separate `/boot` | the same core-dump |
 | published image, nothing loaded late | plain | no crash |
 | published image, `bochs` loaded late (opens fine) | plain | no crash |
-| test image (`…-6.rime1.fc45`), reached with `bootc switch` | plain / LUKS / plain + `/boot/efi` | see the PR |
+| test image (`…-6.rime1.fc45`), reached with `bootc switch` | plain / LUKS / plain + `/boot/efi` | no crash, no failed units; the debug log shows `on_keyboard_removed` and then `Could not get card resources` for vgem |
 
 Rebuild the patch from a plymouth git checkout with `git format-patch`; the
 build checks that the prepared source has the handler call.
