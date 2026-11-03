@@ -147,7 +147,13 @@ pkgs.testers.runNixOSTest {
                 # katana has no LUKS volume, no resume and no console keymap on its command line.
                 assert checked["kernel command line"].startswith("carried to host.toml [boot] kernel_params: none;")
                 assert "rd.driver.blacklist=nouveau" in checked["kernel command line"]
-                machine.fail(f"{HL} host get boot")
+                # [boot] holds no kernel_params; its one key is the microcode vendor the carry reads from the CPU it
+                # runs on (bridge3, rime-hostlayer cpu_microcode): here the VM's CPU, which is katana's.
+                boot = json.loads(machine.succeed(f"{HL} host get boot"))
+                print("host.toml [boot]:", boot)
+                vendor = machine.succeed("sed -n 's/^vendor_id[[:space:]]*: *//p' /proc/cpuinfo | head -n 1").strip()
+                assert "kernel_params" not in boot, boot
+                assert boot.get("microcode") == {"GenuineIntel": "intel", "AuthenticAMD": "amd"}.get(vendor), (vendor, boot)
 
         with subtest("H2: a carried Wi-Fi profile comes up on a simulated access point"):
             conns = [l.rsplit(":", 1) for l in machine.succeed("nmcli -g UUID,TYPE connection show").splitlines()]
