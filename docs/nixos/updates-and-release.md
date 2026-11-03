@@ -1385,7 +1385,9 @@ read them with this list.
   `these 2422 paths will be fetched (5.8 GiB download, 17.1 GiB unpacked)` for the four variant toplevels and the
   catalogue; the Nix workflow's check job on the same image (run 41450212626) printed `available on /: 86 GB (want
   40 GB)` before any cleanup (the release job's "Free disk for the closure" step removes more, and prints `df`, on a
-  full build). So the closure (about 18.6 GB with the paths Rime builds itself) fits with more than 60 GB to spare;
+  full build). So what the release fetches (17.1 GiB = 18.4 GB unpacked, build inputs included) fits with more than
+  60 GB to spare. Not sized (verification, 11-03): the outputs of the 762 derivations the same dry run said it would
+  build (`these 762 derivations will be built`); no figure for them was printed, so "fits" rests on that margin;
   the stage and the delta bases (skipped below 25 GB free) come out of that margin. Not measured: a full build's own
   `df` after the stage (it is in that step's summary on the first full release).
 - **Signing on S3 is done and verified (§6.3, §17).** `nix store sign --store s3://…` rewrites narinfos in place on
