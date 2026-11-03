@@ -413,6 +413,10 @@ let
         ''
         + lib.optionalString (id == "gnome") ''
 
+          # Recorded, not asserted (desktops.md §12.4): GNOME Shell creates its screen shield only when
+          # org.gnome.DisplayManager answers (LoginManager.canLock()); under rime-greet nothing owns that name.
+          print(client.succeed("busctl status org.gnome.DisplayManager 2>&1 || true"))
+
           with subtest("power profiles: rimed's tier is the profile GNOME reads; powerprofilesctl drives rimed"):
               client.succeed("rime tier performance")
               assert ppd_get("ActiveProfile") == 's "performance"', ppd_get("ActiveProfile")
