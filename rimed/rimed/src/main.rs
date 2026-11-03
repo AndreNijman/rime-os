@@ -10,6 +10,7 @@
 //! probed at start-up, and an absent one is reported rather than fatal.
 
 mod boost;
+mod choice;
 mod dbus;
 mod fan;
 mod game;
@@ -103,6 +104,9 @@ async fn main() -> Result<()> {
 
     // Bring hardware to the initial state (charge thresholds + tier + fan).
     ctx.apply_charge_defaults().await.ok();
+    // The user's tier for this power source wins over the profile's default
+    // (choice.rs): a restart or a live update must not undo their pick.
+    let initial_tier = ctx.auto_target().await;
     ctx.apply_tier(initial_tier).await.ok();
     ctx.fan.apply_default().await;
 

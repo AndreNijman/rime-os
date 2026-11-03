@@ -1,5 +1,5 @@
 //! Test double for tests/test-rimed-ui-boost.sh: a fake logind (seat0 with one
-//! session) and a fake polkit that allows every check, on whatever bus
+//! session) and a fake polkit, on whatever bus
 //! `DBUS_SYSTEM_BUS_ADDRESS` names. NEVER run it on a real system bus: it
 //! refuses to start without that variable.
 //!
@@ -8,6 +8,12 @@
 //!   $FAKE_SESSION_DIR/uid     the session's uid (default 0)
 //!   $FAKE_SESSION_DIR/remote  "1" = remote session
 //!   $FAKE_SESSION_DIR/active  "0" = session not active
+//!
+//! The fake polkit answers the way rimed's shipped policy does for every one
+//! of its actions (`allow_active=yes`, `auth_admin` otherwise) with no agent:
+//! authorized only when the caller's uid is the user of the active, local
+//! session; anyone else gets "not authorized, challenge" and, because rimed
+//! asks without the interactive flag, a refusal.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -77,23 +83,44 @@ impl Session {
 struct Subject {
     #[allow(dead_code)]
     kind: String,
-    #[allow(dead_code)]
     details: HashMap<String, OwnedValue>,
 }
 
-struct Authority;
+struct Authority {
+    facts: Facts,
+}
 
 #[interface(name = "org.freedesktop.PolicyKit1.Authority")]
 impl Authority {
-    fn check_authorization(
+    async fn check_authorization(
         &self,
-        _subject: Subject,
+        subject: Subject,
         _action_id: String,
         _details: HashMap<String, String>,
         _flags: u32,
         _cancellation_id: String,
+        #[zbus(connection)] conn: &zbus::Connection,
     ) -> (bool, bool, HashMap<String, String>) {
-        (true, false, HashMap::new())
+        let name = subject
+            .details
+            .get("name")
+            .and_then(|v| String::try_from(v.try_clone().ok()?).ok());
+        let caller = match name.as_deref().map(zbus::names::BusName::try_from) {
+            Some(Ok(n)) => match zbus::fdo::DBusProxy::new(conn).await {
+                Ok(p) => p.get_connection_unix_user(n).await.ok(),
+                Err(_) => None,
+            },
+            _ => None,
+        };
+        let session_uid: u32 = self
+            .facts
+            .read("uid")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let local_active = self.facts.read("remote").as_deref() != Some("1")
+            && self.facts.read("active").as_deref() != Some("0");
+        let ok = local_active && caller == Some(session_uid);
+        (ok, !ok, HashMap::new())
     }
 }
 
@@ -105,6 +132,9 @@ async fn main() -> zbus::Result<()> {
         std::process::exit(2);
     }
     let dir = PathBuf::from(std::env::var_os("FAKE_SESSION_DIR").unwrap_or_else(|| ".".into()));
+    let authority = Authority {
+        facts: Facts { dir: dir.clone() },
+    };
     let _conn = zbus::connection::Builder::address(addr.as_str())?
         .name("org.freedesktop.login1")?
         .name("org.freedesktop.PolicyKit1")?
@@ -115,7 +145,7 @@ async fn main() -> zbus::Result<()> {
                 facts: Facts { dir },
             },
         )?
-        .serve_at("/org/freedesktop/PolicyKit1/Authority", Authority)?
+        .serve_at("/org/freedesktop/PolicyKit1/Authority", authority)?
         .build()
         .await?;
     eprintln!("fake-session-bus: serving login1 + PolicyKit1");

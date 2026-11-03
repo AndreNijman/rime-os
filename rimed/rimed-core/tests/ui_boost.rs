@@ -22,7 +22,7 @@ fn epp(e: &str) -> Action {
 }
 
 #[test]
-fn the_l16_boosts_balanced_only_and_restores_its_own_epp() {
+fn the_l16_boosts_balanced_and_power_saver_and_restores_their_own_epp() {
     let p = builtin("thinkpad-l16-g2");
     let plan = p
         .ui_boost_plan(Tier::Balanced)
@@ -36,8 +36,12 @@ fn the_l16_boosts_balanced_only_and_restores_its_own_epp() {
         .filter(|a| matches!(a, Action::Epp(_)))
         .collect();
     assert_eq!(plan.restore, tier_epp);
-    // Power-saver: the user chose the battery. Performance: nothing to raise.
-    assert_eq!(p.ui_boost_plan(Tier::PowerSaver), None);
+    // Power-saver is boosted too (smooth UI in every tier) and restores its
+    // own EPP; only EPP moves, boost-off and the clock floor stay.
+    let ps = p.ui_boost_plan(Tier::PowerSaver).expect("power-saver is boosted");
+    assert_eq!(ps.boost, vec![epp("balance_performance")]);
+    assert_eq!(ps.restore, vec![epp("power")]);
+    // Performance: nothing to raise.
     assert_eq!(p.ui_boost_plan(Tier::Performance), None);
 }
 

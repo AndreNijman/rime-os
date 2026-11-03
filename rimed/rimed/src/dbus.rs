@@ -82,6 +82,9 @@ impl PowerIface {
             self.ctx.state.lock().await.auto_switch = a;
         }
         self.ctx.apply_tier(t).await.map_err(to_fdo)?;
+        // Remembered per power source, so an AC event or a restart does not
+        // quietly put the profile's default back (choice.rs).
+        self.ctx.record_choice(t).await;
         PowerIface::tier_changed_signal(&ctxt, t.as_str()).await?;
         self.tier_changed(&ctxt).await?;
         if !released.cookies.is_empty() {

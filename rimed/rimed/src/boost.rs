@@ -592,7 +592,7 @@ mod tests {
 
 /// The daemon half: what reaches the writer, on tokio's paused clock.
 #[cfg(test)]
-mod ctx_tests {
+pub(crate) mod ctx_tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
@@ -603,7 +603,7 @@ mod ctx_tests {
 
     use crate::state::{Ctx, State};
 
-    const PROFILE: &str = r#"
+    pub(crate) const PROFILE: &str = r#"
         id = "test-boost"
         kind = "device"
         [defaults]
@@ -634,7 +634,7 @@ mod ctx_tests {
         root
     }
 
-    fn build(tag: &str, profile: &str) -> (Arc<Ctx>, Arc<MockWriter>) {
+    pub(crate) fn build(tag: &str, profile: &str) -> (Arc<Ctx>, Arc<MockWriter>) {
         let root = scratch(tag);
         std::fs::create_dir_all(root.join("profiles")).unwrap();
         std::fs::write(root.join("profiles/test-boost.toml"), profile).unwrap();

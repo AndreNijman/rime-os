@@ -355,8 +355,18 @@ if command -v powerprofilesctl >/dev/null && python3 -c 'import gi' 2>/dev/null;
     L=$!
     if wait_epp power 1500; then
         ok "a power-saver hold applies the power-saver tier"
-        out=$("$RIME_BIN" ui boost 400 2>&1)
-        [ "$(epp_all)" = power ] && ok "no boost in power-saver ($out)" || bad "boost under hold" "epp=$(epp_all)"
+        # Smooth UI in every tier: power-saver is boosted too, but only EPP
+        # moves; CPU boost stays off and the floor stays at the minimum.
+        "$RIME_BIN" ui boost 400 >"$T/b3.out" 2>&1 &
+        B3=$!
+        if wait_epp balance_performance 1000 && [ "$(vals boost)" = 0 ] \
+            && [ "$(vals scaling_min_freq)" = 400000 ]; then
+            ok "power-saver is boosted too, EPP only (boost off, floor at minimum)"
+        else
+            bad "boost in power-saver" "epp=$(epp_all) boost=$(vals boost) min=$(vals scaling_min_freq) $(cat "$T/b3.out")"
+        fi
+        wait "$B3"
+        wait_epp power 1000 && ok "and power-saver's own EPP comes back" || bad "power-saver restore" "epp=$(epp_all)"
     else
         bad "hold" "epp=$(epp_all)"
     fi
@@ -367,6 +377,97 @@ else
     [ "$REQUIRE" = 1 ] && bad "powerprofilesctl" "not installed (or no python3-gi)" \
         || echo "SKIP  powerprofilesctl / python3-gi not installed"
 fi
+
+# ── the tier the user picks sticks (the Dashboard's Power profile) ───────────
+# The Shell runs `rime tier <id>` and reads back with busctl. Before this fix
+# the pick held only until the next AC event or rimed restart, when the
+# profile's default (battery: balanced) came back.
+pp() { awk '{print}' "$F/acpi/platform_profile"; }
+tier_prop() { # what the Shell reads: busctl when present, else dbus-send
+    if command -v busctl >/dev/null; then
+        busctl --system get-property org.rimeos.Rimed1 /org/rimeos/Rimed1 org.rimeos.Rimed1.Power Tier 2>/dev/null \
+            | sed -n 's/^s "\(.*\)"$/\1/p'
+    else
+        dbus-send --system --print-reply --dest=org.rimeos.Rimed1 /org/rimeos/Rimed1 \
+            org.freedesktop.DBus.Properties.Get string:org.rimeos.Rimed1.Power string:Tier 2>/dev/null \
+            | sed -n 's/.*string "\(.*\)"/\1/p'
+    fi
+}
+wait_tier() { # want timeout_ms
+    local i=0
+    while [ "$i" -lt "$(( $2 / 50 ))" ]; do
+        [ "$(tier_prop)" = "$1" ] && return 0
+        sleep 0.05; i=$((i+1))
+    done
+    return 1
+}
+wait_epp balance_power 1500 >/dev/null
+dbus-monitor --address "$DBUS_SYSTEM_BUS_ADDRESS" \
+    "type='signal',path='/org/rimeos/Rimed1',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged'" \
+    >"$T/props.log" 2>&1 &
+MON=$!; PIDS+=("$MON")
+sleep 0.3
+
+# A user who is not the active session's user: polkit (allow_active only, no
+# agent) refuses, `rime tier` says so and exits non-zero, nothing is written.
+echo 4242 > "$S/uid"
+before=$(sysfs_hash)
+out=$("$RIME_BIN" tier power-saver 2>&1); rc=$?
+echo 0 > "$S/uid"
+# The Shell's Power panel turns this refusal into words by matching
+# "not authorized" (rime-shell PowerProfileService.explain): keep the text.
+if [ "$rc" != 0 ] && [ "$(sysfs_hash)" = "$before" ] && [ "$(tier_prop)" = balanced ] \
+    && [[ "$out" == *"not authorized"* ]]; then
+    ok "SetTier from a user who is not the active session's is refused, exits $rc, says 'not authorized', writes nothing"
+else
+    bad "refused SetTier" "rc=$rc tier=$(tier_prop) $out"
+fi
+
+out=$("$RIME_BIN" tier power-saver 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(epp_all)" = power ] && [ "$(pp)" = low-power ] \
+    && [ "$(vals boost)" = 0 ] && [ "$(vals scaling_min_freq)" = 400000 ]; then
+    ok "rime tier power-saver as the session user: EPP power, low-power, boost off, floor at minimum"
+else
+    bad "rime tier power-saver" "rc=$rc epp=$(epp_all) pp=$(pp) boost=$(vals boost) min=$(vals scaling_min_freq) $out"
+fi
+[ "$(tier_prop)" = power-saver ] && ok "Tier reads back power-saver (the Shell's busctl read)" \
+    || bad "Tier readback" "$(tier_prop)"
+sleep 0.3
+grep -A3 '"Tier"' "$T/props.log" | grep 'power-saver' >/dev/null \
+    && ok "PropertiesChanged carries Tier = power-saver" || bad "PropertiesChanged" "$(tail -20 "$T/props.log")"
+grep -x 'battery=power-saver' "$T/state/tier" >/dev/null \
+    && ok "the pick is kept on disk for the battery" || bad "tier file" "$(cat "$T/state/tier" 2>&1)"
+
+# Plug in: the AC tier applies (no AC pick yet: the profile's default).
+echo 1 > "$F/ps/AC/online"
+if wait_epp performance 4000 && wait_tier performance 1000; then
+    ok "plugging in applies the AC tier (performance)"
+else
+    bad "AC plug" "epp=$(epp_all) tier=$(tier_prop)"
+fi
+# Unplug: the battery pick comes back, not the profile's balanced.
+echo 0 > "$F/ps/AC/online"
+if wait_epp power 4000 && wait_tier power-saver 1000 && [ "$(pp)" = low-power ]; then
+    ok "unplugging brings the picked power-saver back, not the default balanced"
+else
+    bad "AC unplug" "epp=$(epp_all) tier=$(tier_prop) pp=$(pp)"
+fi
+
+# Restart rimed (a boot, or a live update restarting it): the pick survives.
+kill "$RIMED_PID"; wait "$RIMED_PID" 2>/dev/null
+for _ in $(seq 100); do has_owner org.rimeos.Rimed1 || break; sleep 0.05; done
+STATE_DIRECTORY=$T/state "$RIMED_BIN" >>"$T/rimed.log" 2>&1 &
+RIMED_PID=$!; PIDS+=("$RIMED_PID")
+for _ in $(seq 200); do has_owner org.rimeos.Rimed1 && break; sleep 0.05; done
+if wait_tier power-saver 3000 && wait_epp power 1000 && [ "$(pp)" = low-power ]; then
+    ok "after a rimed restart the picked power-saver is applied again"
+else
+    bad "restart" "tier=$(tier_prop) epp=$(epp_all) pp=$(pp)"
+fi
+# Back to balanced: also a pick, also kept.
+"$RIME_BIN" tier balanced >/dev/null 2>&1
+wait_epp balance_power 1500 && [ "$(pp)" = balanced ] && grep -x 'battery=balanced' "$T/state/tier" >/dev/null \
+    && ok "picking balanced again writes balanced and is kept" || bad "back to balanced" "epp=$(epp_all) pp=$(pp)"
 
 grep -q "panicked" "$T/rimed.log" && bad "rimed log" "$(grep -m3 panicked "$T/rimed.log")"
 echo "passed=$pass failed=$fail"

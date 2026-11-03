@@ -35,6 +35,16 @@ They match the rime-shell picker IDs verbatim (`PowerProfileService.qml`).
 | `SetAutoSwitch` | method | `b → ()` | Toggle auto-switch; enabling reconciles immediately; polkit `manage-power` |
 | `TierChanged` | signal | `s` | Emitted whenever the active tier changes |
 
+**A `SetTier` is kept (2026-11-03).** With auto-switch on (the Dashboard's
+Power profile, `rime tier`), the tier set becomes the user's tier for the power
+source the machine is on, written to `$STATE_DIRECTORY/tier` (`ac=…`,
+`battery=…`). Auto-switch follows it before the profile's AC/battery default:
+on an AC transition, and on every rimed start (boot, live update). Before this,
+the next AC event or restart put the profile's default back, and a pick of
+Power Saver on battery quietly became Balanced again. A `SetTier` with
+auto-switch off is a mode pinning a tier (`rime mode`) and is not recorded.
+Power-profiles holds are not recorded either.
+
 ## `org.rimeos.Rimed1.Battery`
 
 | Member | Kind | Signature | Notes |
@@ -295,8 +305,10 @@ then `Session.User/Remote/Active`). Any other caller, root included, gets
   the bus gives it back too. When no caller holds the window, the tier's EPP
   is written back at once.
 - **Tiers:** only the tiers in the profile's `[ui_boost] tiers` (default
-  `["balanced"]`) whose EPP is below the boost's. `performance` and
-  `power-saver` answer `0` and write nothing. Any tier change ends a boost;
+  `["balanced"]`) whose EPP is below the boost's; the L16 lists `balanced`
+  and `power-saver`, so animations stay smooth in every tier (power-saver
+  keeps CPU boost off and its clock floor during a boost: only EPP moves).
+  `performance` answers `0` and writes nothing. Any tier change ends a boost;
   the tier's own writes land last.
 
 **How the Shell should call it.** On the input event itself (key press,
