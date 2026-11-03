@@ -634,6 +634,12 @@ in
       systemd.services.plymouth-read-write.serviceConfig = plymouthBounded "15s";
       systemd.services.plymouth-quit.serviceConfig = plymouthBounded "15s";
       systemd.services.plymouth-quit-wait.serviceConfig = plymouthBounded "60s";
+      # nixpkgs' plymouth has the bootc image's crash on hide (files/system/src/plymouth/README.md): when the initrd
+      # draws on simpledrm and the real DRM device comes up without a usable display, the script plugin (the Rime
+      # theme) keeps a freed keyboard and plymouthd segfaults hiding the splash. Same patch as Containerfile.core.
+      boot.plymouth.package = pkgs.plymouth.overrideAttrs (old: {
+        patches = (old.patches or [ ]) ++ [ (files + "/system/src/plymouth/plymouth-keyboard-removed-handler.patch") ];
+      });
       # `splash` itself comes from boot.plymouth (nixpkgs' plymouth module adds it): naming it here as well put
       # `splash splash` on every boot entry (installer2, checks.installer-polish-eval).
       boot.kernelParams = [ "quiet" ];

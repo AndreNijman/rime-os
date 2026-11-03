@@ -142,6 +142,13 @@ in
       "d /var/lib/rime-greet/wallpapers 0755 root root -"
     ];
 
+    # The weekly TRIM (util-linux's fstrim.service, enabled by services.fstrim) through rime-fstrim, as bootc does
+    # with files/system/units/10-rime-fstrim.conf: btrfs hands FITRIM "Unknown error 512" when system sleep starts
+    # during the trim, which left the unit failed for the week; the wrapper trims that filesystem again.
+    systemd.services.fstrim = lib.mkIf config.services.fstrim.enable {
+      serviceConfig.ExecStart = [ "" (helper "rime-fstrim") ];
+    };
+
     # libexec: files/system/units/rime-guest-{wipe,session}@.service
     systemd.services."rime-guest-wipe@" = {
       description = "Clear the disposable guest account %i";
