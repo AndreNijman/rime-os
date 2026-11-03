@@ -20,8 +20,18 @@ use crate::live::{Component, DeferReason, MachineState};
 /// holds no session state and replays nothing missed (nix/tests/desktops.nix, desktops-install-gnome).
 /// `geoclue.service`: restarted when its agent whitelist changes (GNOME adds gnome-shell's); clients reconnect
 /// (nix/tests/desktops.nix, desktops-install-gnome).
-pub const RESTART_SAFE_UNITS: &[&str] =
-    &["rimed.service", "rime-remoted.service", "polkit.service", "systemd-udevd.service", "geoclue.service"];
+/// `systemd-tmpfiles-resetup.service`: a oneshot (`systemd-tmpfiles --create --remove`, no `--boot`) that every switch
+/// starts through sysinit-reactivation.target and restarts when `/etc/tmpfiles.d` changes; it runs no process past its
+/// own run. The first switch of a boot only starts it, so the second one restarts it: `rime remove gnome` after `rime
+/// install gnome` in the same boot (desktops-install-gnome, measured).
+pub const RESTART_SAFE_UNITS: &[&str] = &[
+    "rimed.service",
+    "rime-remoted.service",
+    "polkit.service",
+    "systemd-udevd.service",
+    "geoclue.service",
+    "systemd-tmpfiles-resetup.service",
+];
 
 /// Units a live switch may RELOAD (but not stop or restart). `dbus-broker.service`: nixpkgs reloads it
 /// (`reloadIfChanged = true`) when its config dir, built from `system.path`, changes; a reload re-reads the policy and
@@ -49,8 +59,23 @@ pub struct DryRun {
     pub start: BTreeSet<String>,
     /// Changed units it would NOT touch (`restartIfChanged = false`, e.g. greetd).
     pub skipped: BTreeSet<String>,
+    /// System accounts the activation would remove (update-users-groups' "would remove user ‘…’"): the accounts of
+    /// services the target no longer declares. Human accounts are never declared (`users.mutableUsers`), so they are
+    /// never on this list; one with an open session still means `boot`.
+    #[serde(default)]
+    pub removed_users: BTreeSet<String>,
+    /// The other account lines it printed (groups removed, users and groups revived with their old ids).
+    #[serde(default)]
+    pub accounts: Vec<String>,
     /// Lines the parser did not recognise. Any of them means `boot`.
     pub unrecognised: Vec<String>,
+}
+
+/// The name inside update-users-groups.pl's quotes: `‘colord’` (remove) or `'colord' with GID 990` (revive).
+fn quoted_name(rest: &str) -> Option<&str> {
+    let rest = rest.strip_prefix('‘').or_else(|| rest.strip_prefix('\''))?;
+    let end = rest.find(['’', '\''])?;
+    Some(&rest[..end]).filter(|n| !n.is_empty())
 }
 
 fn units(list: &str) -> impl Iterator<Item = String> + '_ {
@@ -76,6 +101,22 @@ pub fn parse_dry_activate(text: &str) -> DryRun {
         }
         if line == "would restart systemd" {
             d.restart_systemd = true;
+            continue;
+        }
+        // The account bookkeeping of nixos/modules/config/update-users-groups.pl in dry mode (its `dry_print`). A
+        // desktop removed takes its service accounts with it (GNOME: colord); one added again revives them. Its
+        // "warning: would not apply …" lines stay unrecognised.
+        if let Some(rest) = line.strip_prefix("would remove user ") {
+            if let Some(name) = quoted_name(rest) {
+                d.removed_users.insert(name.to_string());
+                continue;
+            }
+        }
+        if ["would remove group ", "would revive group ", "would revive user "]
+            .iter()
+            .any(|p| line.strip_prefix(p).and_then(quoted_name).is_some())
+        {
+            d.accounts.push(line.to_string());
             continue;
         }
         let mut matched = false;
@@ -267,6 +308,15 @@ pub fn activation(i: &Inputs) -> Activation {
                 .collect();
             if !outside.is_empty() {
                 reasons.push(format!("rule 3: it would reload {}", outside.join(", ")));
+            }
+            let logged_in: Vec<&str> = d
+                .removed_users
+                .iter()
+                .map(String::as_str)
+                .filter(|u| i.machine.sessions.iter().any(|s| s.user == *u))
+                .collect();
+            if !logged_in.is_empty() {
+                reasons.push(format!("rule 3: it would remove the account of {}, logged in now", logged_in.join(", ")));
             }
             if let Some(l) = d.unrecognised.first() {
                 reasons.push(format!("rule 3: the dry activation printed something not understood ({l})"));
@@ -572,6 +622,32 @@ mod tests {
         c.target = closure(&tools_b);
         c.machine.sessions[0].locked = Some(true);
         assert_eq!(c.run().kind, Kind::Switch, "{:?}", c.run().reasons);
+    }
+
+    #[test]
+    fn rule_3_lets_a_removed_desktops_service_accounts_go() {
+        // What `rime remove gnome` printed in desktops-install-gnome (after `rime install gnome` in the same boot).
+        let text = "would remove group ‘colord’\nwould remove user ‘colord’\n\
+                    would restart the following units: systemd-tmpfiles-resetup.service\n";
+        let d = parse_dry_activate(text);
+        assert!(d.unrecognised.is_empty(), "{:?}", d.unrecognised);
+        assert_eq!(d.removed_users, ["colord".to_string()].into());
+        let mut c = Case::shell_only();
+        c.dry = DryActivate::Ran(d.clone());
+        assert_eq!(c.run().kind, Kind::Switch, "{:?}", c.run().reasons);
+        // Installing it again revives them with their old ids.
+        let d = parse_dry_activate("would revive group 'colord' with GID 990\nwould revive user 'colord' with UID 990\n");
+        assert!(d.unrecognised.is_empty() && d.accounts.len() == 2, "{d:?}");
+        // An account with an open session is not removed under it.
+        let mut c = Case::shell_only();
+        let user = c.machine.sessions[0].user.clone();
+        c.dry = DryActivate::Ran(parse_dry_activate(&format!("would remove user ‘{user}’\n")));
+        let a = c.run();
+        assert!(a.kind == Kind::Boot && has(&a, "would remove the account of"), "{:?}", a.reasons);
+        // update-users-groups' warnings, and anything else, still mean a restart.
+        for l in ["warning: would not apply GID change of group ‘x’ (1 -> 2) in /etc/group", "would remove group"] {
+            assert_eq!(parse_dry_activate(l).unrecognised, [l.to_string()], "{l}");
+        }
     }
 
     #[test]
