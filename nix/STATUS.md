@@ -1,5 +1,48 @@
 # Rime on NixOS: integration status (feat/nixos, 2026-11-03)
 
+## Wave 4 (2026-11-03): merged, all 79 checks' outPaths valid, P2 50 of 50 met
+
+Merged into `feat/nixos` (from df8a25051) with `--no-ff`, the Rust-touching branches last: `nix/boot2` (70989d360 →
+5953f37e4), `nix/bridge3` (2ff99eb71 → d3e8f46d8), `nix/installer3` (080bb6d9c → 0784d08b5), `nix/updates2`
+(2ca045ee1 → 832a98f7a), `nix/ci2` (88bd35c31 → 8a74fd2ec). Conflicts were in `docs/nixos/open-items.md` (rows
+kept from both sides; the swtpm row names both commits that added the assertion) and `nix/tests/virtualization.nix`
+(ci2's assertion kept; updates2 had added the same one). Evidence: `/var/lab/rime-nix/artifacts/integrate-wave4/`;
+each branch's own evidence stays in `/var/lab/rime-nix/artifacts/<key>/`. `rime-bridge.py` did not change in wave 4,
+so the readiness draft PR #137 needed no refresh.
+
+What the merge needed (each its own commit, each with a check and a mutant):
+
+- 1318549ac fix(release): `check_workflow` refused a main-only `if:` written `github.ref=='refs/heads/main'` or with
+  the operands swapped. `release-unit` now accepts both; the old checker refuses both (`check-workflow-mutant.txt`).
+- 1da079e8c fix(release): new `checks.release-licences` re-evaluates every release variant with the unfree gate
+  closed except redistributable licences. Its first run found nixpkgs' `hardware.xone` dongle firmware (licence
+  `unfree`) in all four variants; `nix/modules/kernel.nix` now ships xone and xpadneo without it (bootc never shipped
+  it either). Mutants `unfree-system-package` and `xone-dongle-firmware` FAIL it.
+- 17bf3dcff fix(recover): `rime recover` read a device-built app's `.drv` as the app; it now reads the output path from
+  the `.drv`. cargo (rimed, in-build) 3827 passed, 0 failed, 3 ignored (`rimed-build.log`); the old filter FAILS the
+  extended test (`rimed-mutant-recover-drv.log`).
+- c785bb235 test(delta): two base candidates and a referencing path in `checks.delta` (verify:g2 3); mutants
+  `first-candidate-wins` and `no-references-first` FAIL.
+- d3825ed06 fix(tests): `hostlayer-katana` on katana's real snapshot failed (bridge3 carries `[boot] microcode`); the
+  subtest now expects it. Re-run EXIT 0, snapshot digest unchanged (`hostlayer-katana.log`).
+- docs: `docs/nixos/open-items.md` (every row's state after wave 4, "Opened by wave 4"), `docs/nixos/p2-gates.md`
+  ("P2 status" for wave 4, H rows) and this section.
+
+Proof on the merged head:
+
+- Every one of the **79** `checks.x86_64-linux.*`: its `outPath`, evaluated at the final head, valid in the store
+  (`outs-final.txt`). No whole `nix flake check` (its evaluation peaks near 34 GB; a 55-check dry run was OOM-killed):
+  `nix/ci/eval-each.sh` evaluated 100 attributes OK (`eval-each.log`), then every check not yet valid was built from
+  its `.drv` (`A/`, `B/`, `C/summary.txt`, PASS per check with its outPath; at most two VMs at once).
+- Closure (rime-vm toplevel `rlyhwcrj…-nixos-system-rime-vm-26.11.20261030.1c89083`): **2122 paths,
+  10,567,142,456 B NAR (9.84 GiB)**; wave 3 was 2121 paths, 10,567,108,960 B (+1 path, +33 kB) (`closure.txt`).
+- P2 checklist: `docs/nixos/p2-gates.md` "P2 status": **50 met**, 0 partial, 0 not met.
+
+Not re-run at integration: the OVMF labs (each piece ran its own), iso-qualify, the delta timing runs and
+`pkg-translate.katana` on the real snapshot (translator unchanged). Topology E was not re-run on bridge3's bridge
+(owed before P3). Open after wave 4: `docs/nixos/open-items.md` "Opened by wave 4" (the Xbox dongle firmware fetch,
+the E re-run, bootc verbs after a rollback boot) and the plymouthd cause row.
+
 ## Wave 3 (2026-11-03): merged, all 73 checks' outPaths valid, P2 50 of 50 met
 
 rime-shell first: `nix/shell-keys` (5e8635e6, the keys suite waits for its windows, not for a time) merged into
