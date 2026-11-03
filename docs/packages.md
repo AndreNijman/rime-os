@@ -653,6 +653,10 @@ downloaded RPM against a trusted key and still refuses kernel and core-system
 replacements in an extension. Disabling the COPR also removes its key from the
 Rime keyring.
 
+If `enable-copr` fails (the signing key cannot be downloaded or imported), the
+repository is left as it was: a COPR that was already enabled stays enabled with
+the key it had, and one that was not is disabled again.
+
 If a stored COPR key cannot be read, the keyring cannot be rebuilt, and both
 commands say which key and which COPR it belongs to. Enabling another COPR then
 fails, and disabling one removes the whole COPR keyring, so that the disabled
