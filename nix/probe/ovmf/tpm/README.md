@@ -7,7 +7,8 @@ touches a host's ESP, NVRAM, TPM or disks.
 
 **Result (2026-11-02): main 10/10 PASS; the mutant scenario FAILS at M4, as it must.**
 **Wave 4 (2026-11-03): `rebind-sb` 4/4 PASS; `mutant-rebind-skipped` FAILS at S3 and S4, as it must** (section
-"`rime luks rebind` after a db change" below).
+"`rime luks rebind` after a db change" below). `main` re-run on the wave-4 lab system (it now carries `rime`):
+10/10 PASS, the same PCR 7 values (`/var/lab/rime-nix/artifacts/boot2/tpm/main/`).
 
 ## Run it
 

@@ -201,7 +201,9 @@ key and passphrase slots byte for byte), then measures again. Its exit code is `
   drop-in so that exactly one half fails: the unit succeeds but the slot stays stale → rc 1; the slot is re-sealed
   but the unit fails → rc 1; the unit re-seals and succeeds → rc 0. PASS at `af5208599`. Mutants of the exit-code
   line, each built in an isolated copy of the tree (`/var/lab/rime-nix/artifacts/boot2/logs/luks-mutants.txt`):
-  MUTANTS_RESULT
+  `failed == 0 || still.is_empty()` FAILS arm 1 ("rebind reported success while the slot is still stale: rc=0");
+  `still.is_empty()` alone FAILS arm 2 ("rebind reported success although its unit failed: rc=0");
+  `failed == 0` alone FAILS arm 1. Each build exits 1.
 - **Under Secure Boot after a real policy change** (OVMF TPM lab, `nix/probe/ovmf/tpm/run.sh run rebind-sb`; wave 4):
   OVMF with Secure Boot on, Fedora 45's shim and GRUB, the NixOS kernel signed by a TEST MOK, swtpm, one disk and
   one varstore carried from boot to boot. S1 seals a TPM slot to the boot's PCR 7; S2 unseals it with no prompt; a
