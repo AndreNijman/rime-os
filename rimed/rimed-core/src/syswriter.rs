@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 
-use crate::tier::Action;
+use crate::tier::{Action, MinFreq};
 
 /// What applying one [`Action`] actually did to the machine.
 ///
@@ -769,6 +769,69 @@ impl RealWriter {
         self.write_tolerant(path, value, "sysfs")
     }
 
+    /// CPU boost on or off. Per policy where the driver publishes `boost` there
+    /// (amd-pstate since 6.11, which is what power-profiles-daemon wrote);
+    /// otherwise the one global switch, `cpufreq/boost` (acpi-cpufreq,
+    /// amd-pstate without per-policy control) or intel_pstate's `no_turbo`,
+    /// whose sense is inverted.
+    fn write_cpu_boost(&self, on: bool) -> Outcome {
+        let v = if on { "1" } else { "0" };
+        let mut landed = false;
+        let mut last = None;
+        for p in self.cpufreq_policies() {
+            let attr = p.join("boost");
+            if attr.exists() {
+                match self.write_tolerant(&attr, v, "cpu boost") {
+                    Outcome::Landed => landed = true,
+                    Outcome::Refused(why) | Outcome::Unknown(why) => last = Some(why),
+                }
+            }
+        }
+        if landed {
+            return Outcome::Landed;
+        }
+        if let Some(why) = last {
+            return Outcome::Refused(why);
+        }
+        let global = self.sys_root.join("devices/system/cpu/cpufreq/boost");
+        if global.exists() {
+            return self.write_tolerant(&global, v, "cpu boost");
+        }
+        let no_turbo = self.sys_root.join("devices/system/cpu/intel_pstate/no_turbo");
+        if no_turbo.exists() {
+            return self.write_tolerant(&no_turbo, if on { "0" } else { "1" }, "cpu boost");
+        }
+        Outcome::Refused("cpu boost: this machine publishes no boost control".into())
+    }
+
+    /// Every policy's `scaling_min_freq` set to the value that policy publishes
+    /// under `floor`'s attribute. A policy without that attribute (a driver
+    /// other than amd-pstate, for `lowest_nonlinear`) is skipped: the floor is
+    /// read from the hardware, never guessed.
+    fn write_cpu_min_freq(&self, floor: MinFreq) -> Outcome {
+        let src = floor.source_attr();
+        let mut landed = false;
+        let mut last = None;
+        for p in self.cpufreq_policies() {
+            let Some(khz) = std::fs::read_to_string(p.join(src))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            else {
+                last = Some(format!("scaling_min_freq: {src} absent"));
+                continue;
+            };
+            match self.write_tolerant(&p.join("scaling_min_freq"), &khz, "scaling_min_freq") {
+                Outcome::Landed => landed = true,
+                Outcome::Refused(why) | Outcome::Unknown(why) => last = Some(why),
+            }
+        }
+        if landed {
+            return Outcome::Landed;
+        }
+        Outcome::Refused(last.unwrap_or_else(|| "scaling_min_freq: no cpufreq policies".into()))
+    }
+
     /// Every cpufreq policy directory under the sysfs root.
     ///
     /// Prefers the per-policy directories (`cpufreq/policy*`), which every
@@ -1462,6 +1525,8 @@ impl SysWriter for RealWriter {
             Action::PlatformProfile(p) => Ok(self.write_platform_profile(p)),
             Action::CpuPowerLimit { pl1_w, pl2_w } => Ok(self.apply_cpu_power_limit(*pl1_w, *pl2_w)),
             Action::CpuPowerFirmware => Ok(self.apply_cpu_power_firmware()),
+            Action::CpuBoost(on) => Ok(self.write_cpu_boost(*on)),
+            Action::CpuMinFreq(floor) => Ok(self.write_cpu_min_freq(*floor)),
             Action::PowerSaveAttr { path, value, what } => {
                 Ok(self.write_tolerant(Path::new(path), value, what))
             }

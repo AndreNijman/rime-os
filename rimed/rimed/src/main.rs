@@ -9,12 +9,15 @@
 //! charge thresholds, cpufreq knobs, the ACPI platform profile, fans, GPUs) is
 //! probed at start-up, and an absent one is reported rather than fatal.
 
+mod boost;
 mod dbus;
 mod fan;
 mod game;
 mod hold;
 mod metrics;
 mod polkit;
+mod ppd;
+mod session;
 mod state;
 
 use std::path::Path;
@@ -28,7 +31,7 @@ use rimed_core::{select, Fingerprint, ProfileSet};
 
 use crate::dbus::{
     BatteryIface, FanIface, GameModeIface, MetricsIface, ModeIface, PowerIface, ProfileIface,
-    BUS_NAME, OBJECT_PATH,
+    UiIface, BUS_NAME, OBJECT_PATH,
 };
 use crate::state::{read_ac_online, Ctx, State};
 
@@ -107,7 +110,7 @@ async fn main() -> Result<()> {
     // restart (an update, `Restart=on-failure`) is "anything happens" too.
     ctx.restore_held().await;
 
-    // Build the D-Bus service: seven interfaces on one path.
+    // Build the D-Bus service: eight interfaces on one path.
     let conn = zbus::connection::Builder::system()
         .context("connecting to the system bus")?
         .name(BUS_NAME)
@@ -119,11 +122,20 @@ async fn main() -> Result<()> {
         .serve_at(OBJECT_PATH, FanIface { ctx: ctx.clone() })?
         .serve_at(OBJECT_PATH, GameModeIface { ctx: ctx.clone() })?
         .serve_at(OBJECT_PATH, ModeIface { ctx: ctx.clone() })?
+        .serve_at(OBJECT_PATH, UiIface { ctx: ctx.clone() })?
         .build()
         .await
         .context("building the D-Bus service")?;
 
     eprintln!("rimed: serving {BUS_NAME} at {OBJECT_PATH}");
+
+    // Callers that leave the bus give back their UI boost and their profile
+    // holds. Subscribed before the facade names are claimed, so no hold can be
+    // taken by a peer the watch has not started watching.
+    tokio::spawn(peer_watch(ctx.clone(), conn.clone()).await);
+
+    // The power-profiles API on PPD's own names: rimed is the one writer.
+    ppd::serve(&ctx, &conn).await;
 
     // Metrics endpoint.
     tokio::spawn(metrics::serve(ctx.clone()));
@@ -248,6 +260,45 @@ async fn game_owner_watch(ctx: Arc<Ctx>, conn: zbus::Connection) {
                     );
                     complained = true;
                 }
+            }
+        }
+    }
+}
+
+/// Subscribe to `NameOwnerChanged` now, and answer the task that handles it.
+///
+/// A unique name that loses its owner is a peer that left the bus: its UI
+/// boost share and its power-profiles holds go with it (so a crashed client
+/// can never leave the machine boosted or held), and the caller policy forgets
+/// its uid.
+async fn peer_watch(
+    ctx: Arc<Ctx>,
+    conn: zbus::Connection,
+) -> impl std::future::Future<Output = ()> {
+    use zbus::export::futures_util::StreamExt;
+    let stream = match zbus::fdo::DBusProxy::new(&conn).await {
+        Ok(p) => p.receive_name_owner_changed().await.ok(),
+        Err(_) => None,
+    };
+    async move {
+        let Some(mut stream) = stream else {
+            eprintln!("rimed: cannot watch bus peers; boosts end on their timer only");
+            return;
+        };
+        while let Some(sig) = stream.next().await {
+            let Ok(a) = sig.args() else { continue };
+            if a.new_owner().is_some() {
+                continue;
+            }
+            let name = a.name().to_string();
+            if !name.starts_with(':') {
+                continue;
+            }
+            ctx.callers.forget(&name);
+            ctx.ui_boost_peer_gone(&name).await;
+            let released = ctx.ppd_holds.lock().await.release_sender(&name);
+            if let Some(r) = released {
+                ppd::settle(&ctx, &conn, &r).await;
             }
         }
     }

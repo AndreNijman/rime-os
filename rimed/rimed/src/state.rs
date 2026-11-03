@@ -14,8 +14,11 @@ use rimed_core::tier::Tier;
 use rimed_core::{ProfileSet, Selection};
 use tokio::sync::Mutex;
 
+use crate::boost::{BoostCell, Limits};
 use crate::fan::FanController;
 use crate::game::{GameSession, ScxGaveUp};
+use crate::ppd::Holds;
+use crate::session::CallerPolicy;
 
 /// Mutable daemon state (behind an async mutex).
 #[derive(Debug, Clone)]
@@ -78,6 +81,13 @@ pub struct Ctx {
     /// Where the held mode is written (`$STATE_DIRECTORY/mode`); a fixture
     /// path in tests, so no suite can write the host's choice.
     pub mode_file: PathBuf,
+    /// The UI boost (`Ui.Boost`, see `boost.rs`). Lock order: `ui_boost`
+    /// BEFORE `state`, never the other way round.
+    pub ui_boost: Mutex<BoostCell>,
+    /// Profile holds taken through the power-profiles facade (`ppd.rs`).
+    pub ppd_holds: Mutex<Holds>,
+    /// Who may call the unprivileged per-session methods (`session.rs`).
+    pub callers: CallerPolicy,
 }
 
 impl Ctx {
@@ -119,6 +129,9 @@ impl Ctx {
             state: Mutex::new(initial),
             held: Mutex::new(None),
             mode_file: mode_file.into(),
+            ui_boost: Mutex::new(BoostCell::new(Limits::default())),
+            ppd_holds: Mutex::new(Holds::default()),
+            callers: CallerPolicy::default(),
         })
     }
 
@@ -137,7 +150,13 @@ impl Ctx {
 
     /// Apply a tier: update state and push the plan through the writer.
     /// Returns the previous tier.
+    ///
+    /// A running UI boost is cancelled first and the boost lock is held until
+    /// the tier's own plan has landed, so no boost write and no boost restore
+    /// can interleave with the tier's writes: the tier always writes last.
     pub async fn apply_tier(self: &Arc<Self>, tier: Tier) -> Result<Option<Tier>> {
+        let mut boost = self.ui_boost.lock().await;
+        boost.cancel();
         let prev = {
             let mut st = self.state.lock().await;
             let prev = st.tier;
@@ -145,9 +164,12 @@ impl Ctx {
             Some(prev)
         };
 
+        // `plan_transition` is the WHOLE tier (a pure state assertion), so it
+        // also puts back the EPP of a boost cancelled above.
         for action in &self.profile().plan_transition(prev, tier) {
             self.writer.apply(action)?;
         }
+        drop(boost);
 
         Ok(prev)
     }

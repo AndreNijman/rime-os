@@ -1,7 +1,8 @@
-//! The frozen `org.rimeos.Rimed1` D-Bus surface. Seven interfaces share one
+//! The frozen `org.rimeos.Rimed1` D-Bus surface. Eight interfaces share one
 //! object path (`/org/rimeos/Rimed1`); all state lives in [`Ctx`]. The seventh,
-//! `org.rimeos.Rimed1.Mode` (2026-10-10), is additive: it changes no frozen
-//! member's signature.
+//! `org.rimeos.Rimed1.Mode` (2026-10-10), and the eighth, `org.rimeos.Rimed1.Ui`
+//! (2026-11-03), are additive: they change no frozen member's signature. The
+//! power-profiles facade (PPD's API, on PPD's own paths) is in `ppd.rs`.
 //!
 //! Tier IDs are the frozen strings from `rimed_core::Tier` and must never
 //! change — the rime-shell `PowerProfileService` and the `rime` CLI both depend
@@ -74,9 +75,19 @@ impl PowerIface {
         let t: Tier = tier
             .parse()
             .map_err(|e: rimed_core::UnknownTier| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
+        // The user's choice drops every power-profiles hold, as in PPD; only
+        // the auto-switch setting the first hold turned off comes back.
+        let released = self.ctx.ppd_holds.lock().await.clear();
+        if let Some(a) = released.auto_switch {
+            self.ctx.state.lock().await.auto_switch = a;
+        }
         self.ctx.apply_tier(t).await.map_err(to_fdo)?;
         PowerIface::tier_changed_signal(&ctxt, t.as_str()).await?;
         self.tier_changed(&ctxt).await?;
+        if !released.cookies.is_empty() {
+            crate::ppd::settle(&self.ctx, conn, &released).await;
+        }
+        crate::ppd::emit_changed(conn).await;
         Ok(())
     }
 
@@ -100,6 +111,7 @@ impl PowerIface {
             self.ctx.apply_tier(target).await.map_err(to_fdo)?;
             PowerIface::tier_changed_signal(&ctxt, target.as_str()).await?;
             self.tier_changed(&ctxt).await?;
+            crate::ppd::emit_changed(conn).await;
         }
         Ok(())
     }
@@ -107,6 +119,71 @@ impl PowerIface {
     /// Emitted whenever the active tier changes (D-Bus name `TierChanged`).
     #[zbus(signal, name = "TierChanged")]
     async fn tier_changed_signal(ctxt: &SignalContext<'_>, tier: &str) -> zbus::Result<()>;
+}
+
+// ── Ui ───────────────────────────────────────────────────────────────────────
+
+/// `org.rimeos.Rimed1.Ui` — the input-triggered UI boost (see `boost.rs` and
+/// docs/rimed-dbus.md). Unprivileged: the caller must be the user of seat0's
+/// active local session (`session.rs`), no polkit.
+pub struct UiIface {
+    pub ctx: Arc<Ctx>,
+}
+
+#[interface(name = "org.rimeos.Rimed1.Ui")]
+impl UiIface {
+    /// Ask for `ms` of boost (capped at 600). Answers how many milliseconds
+    /// the boost now lasts, 0 when nothing is boosted (the tier needs none,
+    /// the cooldown, or `ms` = 0, which gives this caller's share back).
+    /// `LimitsExceeded` when this caller asks too often.
+    async fn boost(
+        &self,
+        ms: u32,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<u32> {
+        let sender = hdr
+            .sender()
+            .map(|s| s.to_string())
+            .ok_or_else(|| zbus::fdo::Error::AccessDenied("no sender on message".into()))?;
+        self.ctx.callers.admit(conn, &sender).await?;
+        self.ctx.ui_boost(&sender, ms).await.map_err(|_| {
+            zbus::fdo::Error::LimitsExceeded("too many UI boost requests from this caller".into())
+        })
+    }
+
+    /// Whether a boost is on the hardware right now. Not signalled: it
+    /// changes on every animation.
+    #[zbus(property(emits_changed_signal = "false"))]
+    async fn active(&self) -> bool {
+        self.ctx.ui_boost_active().await
+    }
+
+    /// What a boost writes in the current tier, e.g.
+    /// `energy_performance_preference = balance_performance (all policies)`;
+    /// empty when this tier is not boosted.
+    #[zbus(property(emits_changed_signal = "false"))]
+    async fn lever(&self) -> String {
+        let tier = self.ctx.state.lock().await.tier;
+        self.ctx
+            .profile()
+            .ui_boost_plan(tier)
+            .map(|p| {
+                p.boost
+                    .iter()
+                    .map(|a| a.describe())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            })
+            .unwrap_or_default()
+    }
+
+    /// The most one call buys, in milliseconds.
+    #[zbus(property(emits_changed_signal = "const"))]
+    async fn max_ms(&self) -> u32 {
+        let l = self.ctx.ui_boost.lock().await.engine.limits();
+        u32::try_from(l.per_call.as_millis()).unwrap_or(u32::MAX)
+    }
 }
 
 // ── Battery ──────────────────────────────────────────────────────────────────
@@ -646,6 +723,7 @@ pub async fn emit_tier_changed(conn: &Connection, tier: Tier) -> zbus::Result<()
     let ctxt = iref.signal_context().clone();
     PowerIface::tier_changed_signal(&ctxt, tier.as_str()).await?;
     iref.get().await.tier_changed(&ctxt).await?;
+    crate::ppd::emit_changed(conn).await;
     Ok(())
 }
 

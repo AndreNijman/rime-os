@@ -30,16 +30,36 @@ battery = "balanced"
 governor = "performance"
 epp = "performance"
 platform_profile = "performance"
+cpu_boost = true
+cpu_min_freq = "lowest_nonlinear"
 
 [tiers.balanced]
 governor = "powersave"
 epp = "balance_power"
 platform_profile = "balanced"
+cpu_boost = true
+cpu_min_freq = "lowest_nonlinear"
 
 [tiers.power-saver]
 governor = "powersave"
 epp = "power"
 platform_profile = "low-power"
+# Boost off and the clock floor at the hardware minimum: what
+# power-profiles-daemon's amd-pstate driver wrote for power-saver, kept now that
+# rimed is the only writer (PPD is masked; see docs/rimed-dbus.md).
+cpu_boost = false
+cpu_min_freq = "cpuinfo_min"
+
+# ── UI boost ─────────────────────────────────────────────────────────────────
+# Balanced is the battery default here (governor powersave, EPP balance_power).
+# Short frame bursts every 16 ms read as low load to the firmware, clocks stay
+# low and frames run late. The boost raises EPP to balance_performance for the
+# length of one animation only (Ui.Boost, capped at 600 ms, coalesced and rate
+# limited by rimed), then writes balance_power back. Power-saver is not boosted.
+[ui_boost]
+enabled = true
+epp = "balance_performance"
+tiers = ["balanced"]
 
 # Charge window only — no paths. Applied to whichever batteries support it.
 [charge]
