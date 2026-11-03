@@ -17,6 +17,10 @@
 #   oci       the published image as an OCI layout in $LAB/oci + ONE layer with those files (oci-layer.py): the
 #             READINESS image mkbootc.sh deploys with ostree
 #   disk-A, disk-L   mkbootc.sh A|L inside the published image (L needs dm_crypt on the host: see README)
+#
+# RIME_LAB_KERNEL=release (topology-e): the NixOS kernel carries the RELEASE signature committed in
+# nix/pkgs/kernel/signing/signatures/ (system.nix releaseKernel), not a TEST MOK one: `kernel` signs nothing, `vars`
+# enrols ONLY the real Rime MOK certificate, `toplevel` records the image hash and `sbverify` against rime-mok.pem.
 set -euo pipefail
 RIG=$(cd "$(dirname "$0")" && pwd)
 TREE=$(cd "$RIG/../../../.." && pwd)             # the rime-os worktree (= /work/<name> in rime-nix)
@@ -26,7 +30,9 @@ READINESS=${READINESS:-/var/lab/rime-nix/wt-readiness}
 BASE=${BASE:-ghcr.io/andrenijman/rime-os@sha256:0ace1f6dad51597d79a7d0d84135dd2896fc89d748ec74b9ecfc7c98c92df9bf}
 OVMF_WORK=${OVMF_WORK:-/var/lab/rime-nix/artifacts/ovmf/work}
 PIN=github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325
-NIXJ=(--max-jobs 2 --option cores 4)
+NIXJ=(--max-jobs "${RIME_LAB_JOBS:-2}" --option cores 4)
+KERNEL=${RIME_LAB_KERNEL:-test}
+[[ $KERNEL == test || $KERNEL == release ]] || { echo "prepare: RIME_LAB_KERNEL is test or release" >&2; exit 2; }
 work() { echo "/work/${1#/var/lab/rime-nix/}"; }   # host path under /var/lab/rime-nix -> the rime-nix container's
 NIX() { sudo -n podman exec -w "$(work "$TREE")" rime-nix "$@"; }
 PROBE() { sudo -n podman run --rm --security-opt label=disable -v "$LAB:/lab" -v "$TREE:/tree:ro" --entrypoint bash \
@@ -55,14 +61,18 @@ step_keys() {
 
 step_vars() {
   cp "$OVMF_WORK/vars-secboot.raw" "$LAB/fw/vars-secboot.raw"
+  # shellcheck disable=SC2016 # expanded by the PROBE shell, not here
+  local test_mok='--add-mok "$g" keys/test-mok.der'
+  [[ $KERNEL == release ]] && test_mok=   # the release-signed kernel: MokList = the Rime MOK and nothing else
   PROBE 'set -e; cd /lab; g=$(cat keys/test-mok.guid)
     virt-fw-vars --input /lab/fw/vars-secboot.raw --output fw/vars-sb-bridge.fd \
-      --add-mok "$g" keys/rime-mok.der --add-mok "$g" keys/test-mok.der --set-shim-verbose
+      --add-mok "$g" keys/rime-mok.der '"$test_mok"' --set-shim-verbose
     virt-fw-vars --input fw/vars-sb-bridge.fd --print --verbose 2>&1 | grep -E "^name=|subject CN=" | head -40'
 }
 
 step_kernel() {
   local j img hash expr
+  if [[ $KERNEL == release ]]; then echo "kernel: RIME_LAB_KERNEL=release, nothing to sign (the committed signature)"; return; fi
   expr="(import ./nix/probe/ovmf/bridge/system.nix { flake = builtins.getFlake \"path:$(work "$TREE")\"; })"
   j=$(NIX nix eval --raw --impure --expr "$expr.imageJson")
   echo "$j" > "$LAB/sig/image.json"
@@ -80,11 +90,33 @@ step_kernel() {
 }
 
 step_toplevel() {
-  local t
-  t=$(NIX nix build --no-link --print-out-paths --impure "${NIXJ[@]}" --expr \
-    "(import ./nix/probe/ovmf/bridge/system.nix { flake = builtins.getFlake \"path:$(work "$TREE")\";
-       signatureDir = $(work "$LAB")/sig; certificate = $(work "$LAB")/keys/test-mok.crt; }).toplevel")
+  local t args expr
+  if [[ $KERNEL == release ]]; then
+    args="releaseKernel = true;"
+  else
+    args="signatureDir = $(work "$LAB")/sig; certificate = $(work "$LAB")/keys/test-mok.crt;"
+  fi
+  expr="(import ./nix/probe/ovmf/bridge/system.nix { flake = builtins.getFlake \"path:$(work "$TREE")\"; $args })"
+  t=$(NIX nix build --no-link --print-out-paths --impure "${NIXJ[@]}" --expr "$expr.toplevel")
   echo "$t" | tee "$LAB/toplevel"
+  if [[ $KERNEL == release ]]; then
+    # The booted kernel is the release-signed one: its image hash names a committed .sig, and sbverify accepts the
+    # attached signature against the Rime MOK certificate (sign.nix already refused to build otherwise).
+    { echo "kernel: release signature (RIME_LAB_KERNEL=release)"
+      NIX nix eval --raw --impure --expr "$expr.imageJson"; echo
+      ls -la "$TREE/nix/pkgs/kernel/signing/signatures/"
+      # resolved in the container: on the host /nix/store does not exist, so readlink -f there answers nothing
+      echo "toplevel kernel: $(NIX nix shell $PIN#coreutils -c readlink -f "$t/kernel")"
+    } | tee "$ART/kernel-release.txt"
+    local k; k=$(NIX nix shell $PIN#coreutils -c readlink -f "$t/kernel")
+    [[ $k == /nix/store/* ]] || { echo "prepare: the toplevel's kernel did not resolve ($k)"; exit 1; }
+    sudo -n cp "/var/lab/rime-nix/nix/store/${k#/nix/store/}" "$LAB/sig/nixos-kernel.efi"
+    sudo -n chown "$(id -u):$(id -g)" "$LAB/sig/nixos-kernel.efi"
+    PROBE 'set -e; sbverify --cert /lab/keys/rime-mok.pem /lab/sig/nixos-kernel.efi
+      sbverify --cert /lab/keys/test-mok.crt /lab/sig/nixos-kernel.efi 2>&1 && echo "UNEXPECTED: the TEST MOK verifies it" || echo "the TEST MOK does not verify it (as wanted)"
+      sbverify --list /lab/sig/nixos-kernel.efi' 2>&1 | tee -a "$ART/kernel-release.txt"
+    rm -f "$LAB/sig/nixos-kernel.efi"
+  fi
 }
 
 step_payload() {
@@ -98,20 +130,39 @@ step_payload() {
 step_image() {
   local c=$LAB/ctx l=$LAB/layer
   sudo -n rm -rf "$c" "$l"; mkdir -p "$c" "$l/usr/bin" "$l/usr/libexec" "$l/usr/share/rime-os/trust"
-  git -C "$READINESS" archive HEAD rimed config files/system/libexec/rime-migrate | tar -C "$c" -xf -
+  # Every file #137 changes in the image (`git diff main...` on the branch: Containerfile.base COPYs rime-migrate and
+  # only tests it; rime-update-check gains the bridge-record predicate; `rime` gains `migrate` and the guard).
+  git -C "$READINESS" archive HEAD rimed config files/system/libexec/rime-migrate files/system/libexec/rime-update-check \
+    | tar -C "$c" -xf -
   { echo "readiness branch: $(git -C "$READINESS" rev-parse HEAD)"
     echo "rime-migrate minus line 1: $(tail -n +2 "$c/files/system/libexec/rime-migrate" | sha256sum | cut -d' ' -f1)"
     echo "rime-bridge.py minus line 1: $(tail -n +2 "$TREE/nix/pkgs/rime-bridge/rime-bridge.py" | sha256sum | cut -d' ' -f1)"
+    echo "base image: $BASE"
   } | tee "$ART/readiness-image.txt"
+  local m1 m2
+  m1=$(tail -n +2 "$c/files/system/libexec/rime-migrate" | sha256sum | cut -d' ' -f1)
+  m2=$(tail -n +2 "$TREE/nix/pkgs/rime-bridge/rime-bridge.py" | sha256sum | cut -d' ' -f1)
+  if [[ $m1 != "$m2" ]]; then
+    echo "prepare: NOTE the readiness branch's rime-migrate is not this tree's rime-bridge.py (minus line 1)" | tee -a "$ART/readiness-image.txt"
+    [[ ${RIME_LAB_ALLOW_BRIDGE_DRIFT:-} == 1 ]] || { echo "prepare: refusing (RIME_LAB_ALLOW_BRIDGE_DRIFT=1 to test #137's copy anyway)" >&2; exit 1; }
+  fi
   # As Containerfile.base's rime-builder stage: FROM the image, rust + cargo, CARGO_HOME in the build tree.
   sudo -n podman run --rm --security-opt label=disable -v "$c:/build" -e CARGO_HOME=/build/.cargo \
     -e CARGO_TARGET_DIR=/build/target --entrypoint bash "$BASE" -c 'set -eux
       dnf5 -y install --setopt=install_weak_deps=False rust cargo >/dev/null
       cd /build/rimed && cargo build --release --locked --bin rime
-      /build/target/release/rime --help 2>&1 | grep -w migrate' 2>&1 | tail -n 30 | tee "$ART/readiness-rime-build.log"
+      /build/target/release/rime --help 2>&1 | grep -w migrate
+      # Containerfile.base`s own checks of the bridge, in the image it lands in
+      B=/build/files/system/libexec/rime-migrate
+      test "$(head -n1 $B)" = "#!/usr/bin/python3 -I"
+      python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" $B
+      python3 -I $B --help >/dev/null
+      command -v btrfs lsblk findmnt mount umount unshare chroot tar zstd cp systemctl ostree cryptsetup
+      bash -n /build/files/system/libexec/rime-update-check' 2>&1 | tail -n 40 | tee "$ART/readiness-rime-build.log"
   sudo -n chown -R "$(id -u):$(id -g)" "$c"
   install -m755 "$c/target/release/rime" "$l/usr/bin/rime"
   install -m755 "$c/files/system/libexec/rime-migrate" "$l/usr/libexec/rime-migrate"
+  install -m755 "$c/files/system/libexec/rime-update-check" "$l/usr/libexec/rime-update-check"
   printf '%s\n' "$(cat "$LAB/keys/payload-TEST.pub")" > "$l/usr/share/rime-os/trust/nixos-bridge-payload.pub"
   chmod 644 "$l/usr/share/rime-os/trust/nixos-bridge-payload.pub"
   [[ $(head -n 1 "$l/usr/libexec/rime-migrate") == '#!/usr/bin/python3 -I' ]] || { echo "prepare: rime-migrate shebang" >&2; exit 1; }
@@ -125,7 +176,7 @@ step_oci() {
   sudo -n podman save --format oci-dir -o "$LAB/oci" "$BASE"
   sudo -n chown -R "$(id -u):$(id -g)" "$LAB/oci"
   python3 "$RIG/oci-layer.py" "$LAB/oci" "$LAB/layer" \
-    "readiness $(git -C "$READINESS" rev-parse --short HEAD): rime, rime-migrate, TEST nixos-bridge-payload.pub" \
+    "readiness $(git -C "$READINESS" rev-parse --short HEAD): rime, rime-migrate, rime-update-check, TEST nixos-bridge-payload.pub" \
     | tee -a "$ART/readiness-image.txt"
   du -sh "$LAB/oci"
 }

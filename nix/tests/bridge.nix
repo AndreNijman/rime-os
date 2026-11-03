@@ -69,7 +69,13 @@ let
     [ "ed25519-y-only" "rime-bridge.py" ''s/    return (lhs\[0\] \* rhs\[2\] - rhs\[0\] \* lhs\[2\]) % _P == 0 and /    return /'' "a negated S (same y, other x) accepted" ]
     # integrate-wave3: every start step after the record exists is inside the rollback; check and start honour it.
     [ "start-early-steps-outside-rollback" "rime-bridge.py" ''s/^    except BaseException as e:$/    except BaseException as e:\n        if state["steps"][-1] in ("backup", "old side", "fsck gate before"):\n            raise/'' "a start failing in the backup, masks or first fsck gate leaves units masked and no rollback" ]
-    [ "check-ignores-start-record" "rime-bridge.py" ''s/^    if rec.get("failed") and last == "rolled back":$/    if True:/'' "check and start run over an unfinished start" ]
+    [ "check-ignores-start-record" "rime-bridge.py" ''s/^    if "failed" in rec and last == "rolled back":$/    if True:/'' "check and start run over an unfinished start" ]
+    # topology-e: the bridge reads the start record exactly as the readiness release's `rime` and rime-update-check do.
+    [ "record-failed-truthy" "rime-bridge.py" ''s/^    if "failed" in rec and last == "rolled back":$/    if rec.get("failed") and last == "rolled back":/'' "a start that rolled back after a Ctrl-C (failed empty) refused start-unfinished while rime allows its verbs" ]
+    [ "failed-text-empty-on-interrupt" "rime-bridge.py" ''s/^        state\["failed"\] = str(e) or type(e).__name__ .*$/        state["failed"] = str(e)/'' "an interrupted start records an empty failed (older readers refuse it)" ]
+    [ "record-done-not-first" "rime-bridge.py" ''s/^    if rec.get("done") is not None:$/    if rec.get("done") is not None and last != "rolled back":/'' "a done record with rolled back last allowed (rime says Done)" ]
+    [ "record-done-truthy" "rime-bridge.py" ''s/^    if rec.get("done") is not None:$/    if rec.get("done"):/'' "an empty done read as not done (rime says Done)" ]
+    [ "record-steps-any-type" "rime-bridge.py" ''s/^    steps = steps if isinstance(steps, list) else \[\]$/    steps = steps or []/'' "a record whose steps is not a list crashes check" ]
   ];
   hlMutants = [
     [ "hostlayer-no-boot" "rime-hostlayer.py" ''s/"mount", "luks", "boot"}/"mount", "luks"}/'' "[boot] table refused" ]

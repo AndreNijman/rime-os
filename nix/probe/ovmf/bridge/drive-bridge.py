@@ -8,15 +8,24 @@ overlay of disks/KIND/disk.raw and the same varstore copy, ending with a guest p
   bootc     log in on the serial console as the lab user (old TEST password), make KIND's firmware entries
             (guest-prep.sh), reboot so it boots through its own entry, [E: repair-e], check, start; with
             --readiness the disk is the READINESS image (prepare.sh image) and every bridge command is that
-            release's own `rime migrate ...`; after start, `rime update`, `rime update --check` and
-            `rime boot migrate` must each answer `REFUSED [nixos-migration-started]` with exit 3
+            release's own `rime migrate ...`; the verb probes below run before and after start
   nixos     GRUB's default is the NixOS entry the bridge added: a serial login with the OLD password (mounts,
             carried state, home checksums), then a GRAPHICAL login through rime-greet with the same old password typed
             on the emulated keyboard: Hyprland starts for the user through greetd, the desktop is screenshotted
-  back      pick the first GRUB entry (the ostree one) by key: bootc boots, the same login works, home intact
+  back      pick the first GRUB entry (the ostree one) by key: bootc boots, the same login works, home intact;
+            with --readiness every bootc verb must still refuse there (the record says done)
+
+The verb probes (--readiness, verb-probe.sh on the payload disk): every verb the readiness `rime` holds after a start
+(11 forms) plus rime-update-check, run against the guest's REAL start record with bootc/ostree/... stubbed in a private
+mount namespace. Allowed with no record, after a start that rolled itself back (same boot AND after a reboot into
+ostree), refused after a finished start (same boot, and booted back into ostree after NixOS). --kill-probe and
+--interrupt-probe run on throwaway overlays of the disk (the main disk's qemu is off): a start SIGKILLed after it masked
+the old side (no rollback: refused, also after a reboot, and a second start refuses before writing), and a start
+interrupted by Ctrl-C on the console during the closure install (rolls back: allowed).
 
 Secure Boot: --sb boots with the varstore run.sh makes (Microsoft keys, Secure Boot ON, MokList = the real Rime MOK
-certificate that signs the published bootc kernel + the lab's TEST MOK that signs the lab NixOS kernel); without it,
+certificate that signs the published bootc kernel + the lab's TEST MOK that signs the lab NixOS kernel, or with
+RIME_LAB_KERNEL=release the Rime MOK alone and the release-signed NixOS kernel); without it,
 the key-less varstore (Secure Boot off). Every boot records what the guest itself reports.
 L disks: every boot waits for the initrd's passphrase prompt and types the TEST passphrase on the emulated keyboard
 (QMP send-key), in the bootc (dracut) initrd and the NixOS (systemd) initrd alike.
@@ -42,10 +51,6 @@ LUKS_PASS = os.environ.get("RIME_LAB_LUKS", "rimelabluks1")
 USER = "alex"
 # QMP qcodes for what the lab passwords need: letters, digits, '-'.
 QCODE = {**{c: c for c in "abcdefghijklmnopqrstuvwxyz0123456789"}, "-": "minus"}
-# The bridge's verbs `rime` refuses once the start record exists (rimed/rime/src/nixos_bridge.rs on the readiness
-# branch). `rime update` and `rime boot migrate` would change the machine if NOT refused, so they run only after start.
-REFUSED = "REFUSED [nixos-migration-started]"
-GATED = ("update", "update --check", "boot migrate")
 # The user last ran Hyprland 0.56 on bootc: NixOS's 0.57 takes its "updated" path at the first graphical login.
 HYPR_LAST = "0.56.2"
 SB_STATE = ("od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
@@ -57,9 +62,9 @@ class Timeout(Exception):
 
 
 class VM:
-    def __init__(self, a, name):
+    def __init__(self, a, name, work=None):
         self.a, self.name = a, name
-        self.w = a.work
+        self.w = work or a.work
         self.log = open(os.path.join(a.logs, f"{a.kind}-{name}.serial.log"), "wb")
         self.buf = b""
         self.raw = b""
@@ -313,11 +318,24 @@ def phase_bootc(a):
     rc, out = record(vm, "check-json", f"{a.migrate} check --json --backup /run/backup", ok=False)
     if "CPU vendor" not in out and "microcode" not in out:
         say("[bootc2] note: check --json names no CPU vendor (the carry preview is in check --explain)")
+    if a.readiness:
+        probe(vm, "no-record", "allowed")   # no start record: every bootc verb is allowed
     if a.rollback_first:
         rollback_probe(a, vm)
-    if a.readiness:
-        # No record, or a start that failed and rolled back (the probe above): `rime` allows its bootc verbs.
-        refusals(vm, "refusals-before-start", ("update --check",), want=False)
+        if a.readiness:
+            # failed + rolled back: allowed, in this boot and after booting the ostree system again
+            probe(vm, "rolled-back", "allowed")
+            poweroff(vm)
+            vm = boot_for_probe(a, "bootc3", None)
+            record(vm, "rolled-back-rebooted-boot", "cat /proc/cmdline; rpm-ostree status 2>&1 | head -n 12", ok=False)
+            probe(vm, "rolled-back-rebooted", "allowed")
+    if a.kill_probe or a.interrupt_probe:
+        poweroff(vm)
+        if a.kill_probe:
+            kill_probe(a)
+        if a.interrupt_probe:
+            interrupt_probe(a)
+        vm = boot_for_probe(a, "bootc4", None)
     rc, out = record(vm, "start", f"time {a.migrate} start --backup /run/backup"
                      " --payload /run/payload/payload --yes", timeout=5400, ok=False)
     if rc != 0:
@@ -326,7 +344,7 @@ def phase_bootc(a):
            " cat $b/grub2/custom.cfg; ls -la $b $b/rime/nixos 2>/dev/null; cat $b/grub2/rime-nixos.cfg 2>/dev/null; done;"
            " ls -la /run/backup /run/backup/*; cat /var/lib/rime/nixos-bridge/state.json", ok=False)
     if a.readiness:
-        refusals(vm, "refusals-after-start", GATED, want=True)
+        probe(vm, "done", "refused")
     else:
         record(vm, "update-after-start", "rime update --check 2>&1 | tail -n 20", ok=False, timeout=120)
     vm.send("sync; systemctl poweroff\n")
@@ -376,20 +394,124 @@ def readiness_facts(vm):
         raise Timeout("[bootc2] this is not the readiness lab image (no TEST payload key or no readiness bridge)")
 
 
-def refusals(vm, name, verbs, want):
-    """Each `rime VERB` once, as root, its output and exit code recorded. want=True: every one must exit 3 with
-    REFUSED [nixos-migration-started]; want=False: none may (the verdict is counted in the guest, so the echoed
-    command line can never match it)."""
-    loop = " ".join(f"'{v}'" for v in verbs)
-    rc, out = record(vm, name, f"n=0; for v in {loop}; do o=$(timeout 300 rime $v </dev/null 2>&1); r=$?;"
-                     " printf '%s\\n' \"$o\" | tail -n 12; echo \"verb=[rime $v] rc=$r\";"
-                     f" [ $r = 3 ] && printf '%s' \"$o\" | grep -F '{REFUSED}' >/dev/null && n=$((n+1)); done;"
-                     " echo REFUSED-COUNT=$n", timeout=1200, ok=False)
-    got = re.findall(r"REFUSED-COUNT=(\d+)", out)
-    n = int(got[-1]) if got else -1
-    if n != (len(verbs) if want else 0):
-        raise Timeout(f"[{vm.name}] {name}: {n} of {len(verbs)} verbs refused, want {len(verbs) if want else 0}")
-    say(f"[{vm.name}] {name}: {n}/{len(verbs)} refused, as wanted")
+def probe(vm, label, want):
+    """verb-probe.sh in the guest: every held verb + rime-update-check against this guest's start record; the verdict
+    (PROBE-VERDICT=ok) is computed in the guest."""
+    rc, out = record(vm, f"probe-{label}", f"bash /run/payload/verb-probe.sh {label} {want}", timeout=3600, ok=False)
+    v = re.findall(r"^VERBS=.*$", out, re.M)
+    if "PROBE-VERDICT=ok" not in out:
+        raise Timeout(f"[{vm.name}] verb probe {label}: want every verb {want}: {v[-1] if v else 'no summary'}")
+    say(f"[{vm.name}] verb probe {label}: {v[-1]}")
+    return out
+
+
+def overlay(a, tag):
+    """A throwaway copy-on-write layer over the run's disks and varstore (the main disk's qemu must be off)."""
+    w = f"{a.work}-{tag}"
+    shutil.rmtree(w, ignore_errors=True)
+    os.makedirs(w)
+    names = ["disk", "backup"] + (["win"] if a.kind == "E" else [])
+    for n in names:
+        subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", f"{a.work}/{n}.qcow2",
+                        f"{w}/{n}.qcow2"], check=True)
+    shutil.copy(os.path.join(a.work, "vars.fd"), os.path.join(w, "vars.fd"))
+    return w
+
+
+def boot_for_probe(a, name, work):
+    vm = VM(a, name, work)
+    boot_bootc(a, vm, False)
+    vm.sh("mkdir -p /run/backup && mount /dev/disk/by-id/virtio-rime-backup /run/backup")
+    return vm
+
+
+def poweroff(vm):
+    vm.send("sync; systemctl poweroff\n")
+    vm.wait_off()
+
+
+def kill_probe(a):
+    """A start that did NOT roll back: SIGKILLed (nothing can catch it) right after it masked the old side. The record
+    then ends at "old side" with neither `failed` nor `rolled back`: every bootc verb must refuse, after a reboot too,
+    rime-update-check must say none, and a second start must refuse (start-unfinished) before it writes anything."""
+    w = overlay(a, "kill")
+    vm = boot_for_probe(a, "kill1", w)
+    vm.sh(f"sed 's/^        step(\"fsck gate before\")$/        os.kill(os.getpid(), 9)/' {a.bridge} > /run/rime-migrate-kill"
+          f" && chmod 755 /run/rime-migrate-kill && ! cmp -s {a.bridge} /run/rime-migrate-kill")
+    rc, out = record(vm, "kill-start", "/run/rime-migrate-kill start --backup /run/backup --payload /run/payload/payload"
+                     " --yes", timeout=5400, ok=False)
+    if rc != 137:
+        raise Timeout(f"kill probe: rc={rc}, want 137 (SIGKILL)")
+    record(vm, "kill-after", "cat /var/lib/rime/nixos-bridge/state.json; echo; ls -la /etc/systemd/system | grep /dev/null;"
+           " btrfs subvolume list /sysroot", ok=False)
+    probe(vm, "killed-start", "refused")
+    poweroff(vm)
+    vm = boot_for_probe(a, "kill2", w)
+    probe(vm, "killed-start-rebooted", "refused")
+    rc, out = record(vm, "kill-second-start", "btrfs subvolume list /sysroot > /run/k1;"
+                     f" {a.migrate} start --backup /run/backup --payload /run/payload/payload --yes; r=$?;"
+                     " btrfs subvolume list /sysroot | cmp -s - /run/k1 && echo SUBVOLS-UNCHANGED; echo SECOND-START-RC=$r",
+                     timeout=600, ok=False)
+    if not re.search(r"^SECOND-START-RC=3$", out, re.M) or "REFUSED [start-unfinished]" not in out \
+            or not re.search(r"^SUBVOLS-UNCHANGED$", out, re.M):
+        raise Timeout("kill probe: a second start over the unfinished record did not refuse start-unfinished untouched")
+    poweroff(vm)
+    shutil.rmtree(w, ignore_errors=True)
+    say("[kill] a start that did not roll back holds every bootc verb, after a reboot too; a second start refuses")
+
+
+def interrupted_start(vm, bridge, name):
+    """`BRIDGE start` on the console, interrupted with Ctrl-C (the console's own SIGINT) while it unpacks the closure.
+    Returns the console text."""
+    start = len(vm.buf)
+    vm.cur = start
+    vm.send(f"{bridge} start --backup /run/backup --payload /run/payload/payload --yes\n")
+    vm.expect(r"== install closure", 3600, fail=r"REFUSED \[|FAILED:")
+    time.sleep(15)
+    vm.send("\x03")
+    say(f"[{vm.name}] Ctrl-C sent during the closure install")
+    mark = len(vm.buf)
+    vm.cur = mark
+    vm.expect(r"ROOT# ", 1800)
+    with vm.lock:
+        text = vm.buf[start:vm.cur].decode("utf-8", "replace")
+    with open(os.path.join(vm.a.logs, f"{vm.a.kind}-{name}.txt"), "w") as f:
+        f.write(text)
+    return text
+
+
+def interrupt_probe(a):
+    """A start the user interrupts with Ctrl-C: the bridge catches KeyboardInterrupt (BaseException), removes what it
+    made and records `rolled back`, so every bootc verb is allowed again. str(KeyboardInterrupt()) is empty, so the
+    record's `failed` is "" with #137's bridge; this probe records how each reader answers that record: `rime` (Rust),
+    rime-update-check (python) and the bridge's own check, #137's copy and this branch's (the payload disk's)."""
+    w = overlay(a, "int")
+    vm = boot_for_probe(a, "int1", w)
+    show = ("cat /var/lib/rime/nixos-bridge/state.json; echo; btrfs subvolume list /sysroot;"
+            " echo label=$(btrfs filesystem label /sysroot); ls /etc/systemd/system | grep -E '^(rime-|bootloader-)' ;"
+            " ls /sysroot/boot | grep -x rime; ls /sysroot/boot/grub2 | grep rime")
+    interrupted_start(vm, a.migrate, "int-start-readiness")
+    rc, out = record(vm, "int-after-readiness", show + "; python3 -I -c 'import json; print(\"FAILED-FIELD=\" +"
+                     " repr(json.load(open(\"/var/lib/rime/nixos-bridge/state.json\")).get(\"failed\")))'", ok=False)
+    if '"rolled back"' not in out:
+        raise Timeout("interrupt probe: the interrupted start did not record rolled back")
+    probe(vm, "interrupted-start", "allowed")
+    record(vm, "int-check-readiness", f"{a.migrate} check --explain --backup /run/backup 2>&1 | grep -E 'REFUSED|record'; echo rc=$?",
+           ok=False)
+    record(vm, "int-check-branch", "/run/payload/rime-migrate check --explain --backup /run/backup 2>&1"
+           " | grep -E 'REFUSED|record'; echo rc=$?", ok=False)
+    # A second interrupted start with this branch's bridge (allowed by its check over the record above): the record it
+    # leaves names the interruption.
+    text = interrupted_start(vm, "/run/payload/rime-migrate", "int-start-branch")
+    if "REFUSED [" in text:
+        raise Timeout("interrupt probe: this branch's bridge refused to start over a rolled-back record")
+    rc, out = record(vm, "int-after-branch", show + "; python3 -I -c 'import json; print(\"FAILED-FIELD=\" +"
+                     " repr(json.load(open(\"/var/lib/rime/nixos-bridge/state.json\")).get(\"failed\")))'", ok=False)
+    record(vm, "int-check-readiness-2", f"{a.migrate} check --explain --backup /run/backup 2>&1 | grep -E 'REFUSED|record'",
+           ok=False)
+    probe(vm, "interrupted-start-branch", "allowed")
+    poweroff(vm)
+    shutil.rmtree(w, ignore_errors=True)
 
 
 def phase_nixos(a):
@@ -610,6 +732,10 @@ def phase_back(a):
         raise Timeout("back: not an ostree boot")
     vm.root()
     record(vm, "back-state", "systemctl --failed --no-legend; ls /sysroot; btrfs subvolume list /sysroot", ok=False)
+    if a.readiness:
+        # booted back into ostree after the move: the record says done, so the old side still holds every verb
+        vm.sh("mkdir -p /run/payload && mount -o ro /dev/disk/by-id/virtio-rime-payload /run/payload")
+        probe(vm, "done-back-on-ostree", "refused")
     vm.send("systemctl poweroff\n")
     vm.wait_off()
 
@@ -632,6 +758,10 @@ def main():
                     help="after the greeter-first checks, cut the update-window knob and log in again: the window shows")
     ap.add_argument("--readiness", action="store_true",
                     help="the disk runs the readiness image: `rime migrate` (its /usr/libexec/rime-migrate), refusals")
+    ap.add_argument("--kill-probe", action="store_true",
+                    help="(readiness) on an overlay: a start SIGKILLed after the masks; every verb must refuse")
+    ap.add_argument("--interrupt-probe", action="store_true",
+                    help="(readiness) on an overlay: a start interrupted by Ctrl-C rolls back; every verb allowed")
     a = ap.parse_args()
     a.bridge = "/usr/libexec/rime-migrate" if a.readiness else "/run/payload/rime-migrate"
     a.migrate = "rime migrate" if a.readiness else a.bridge

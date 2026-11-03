@@ -7,6 +7,11 @@
 #              boots with Secure Boot ON through shim + Fedora's GRUB, exactly as a release kernel does. Here the MOK
 #              is a THROWAWAY TEST key (run.sh keys), enrolled in the lab varstore next to the real Rime MOK
 #              certificate that signs the published bootc kernel.
+#   releaseKernel = true (topology-e): no signing pass at all. The kernel is the product's (NVIDIA on, so the module
+#              tree and with it the image hash are nixosConfigurations.rime's), and its signature is the one the
+#              release key made, committed in nix/pkgs/kernel/signing/signatures/ (require = true: the evaluation
+#              fails unless that file exists for this image). The lab varstore for it holds ONLY the real Rime MOK
+#              (prepare.sh with RIME_LAB_KERNEL=release), so the NixOS entry boots only with the release signature.
 #
 # The product modules (desktop with the greeter, services, security, hostlayer, the boot hook) plus rime.rootfs
 # (the @nixos/@nix/@home layout the bridge makes, /boot from host.toml) and the Rime kernel (no NVIDIA in OVMF).
@@ -17,6 +22,7 @@
   flake,
   signatureDir ? null,
   certificate ? null,
+  releaseKernel ? false,
 }:
 
 let
@@ -39,9 +45,12 @@ let
               rootfs.enable = true;
               kernel = {
                 enable = true;
-                nvidia.enable = false;
+                nvidia.enable = releaseKernel;
                 signing =
-                  if signed then
+                  if releaseKernel then
+                    # the committed release signature and the Rime MOK certificate (the option defaults)
+                    { require = true; }
+                  else if signed then
                     {
                       inherit signatureDir certificate;
                       require = true;

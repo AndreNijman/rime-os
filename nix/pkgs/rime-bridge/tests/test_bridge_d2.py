@@ -963,6 +963,46 @@ class StartRecord(unittest.TestCase):
         rc, out = self.check()
         self.assertEqual(rc, B.EXIT_OK, out)
 
+    def test_a_start_interrupted_by_ctrl_c_rolls_back_and_allows_another(self):
+        # topology-e: Ctrl-C on the console during the closure install. KeyboardInterrupt is a BaseException, so the
+        # rollback runs; str(KeyboardInterrupt()) is "", so `failed` used to be "", and check/start then refused
+        # start-unfinished over a start that HAD rolled back, while `rime` (key present) allowed every bootc verb.
+        B.mask_old_side = self.masks
+
+        def interrupted(*a, **k):
+            raise KeyboardInterrupt
+        B.fsck_gate = interrupted
+        with self.assertRaises(KeyboardInterrupt):
+            self.start()
+        rec = self.record()
+        self.assertEqual(rec["steps"][-1], "rolled back", rec["steps"])
+        self.assertEqual(rec["failed"], "KeyboardInterrupt")
+        self.assertEqual(self.unmasked, [["rime-update-check.timer"]])
+        self.assertIsNone(B.record_refusal(B.start_record()))
+        rc, out = self.check()
+        self.assertEqual(rc, B.EXIT_OK, out)
+
+    def test_the_record_rule_is_the_readiness_release_rule(self):
+        # The same table as rimed/rime/src/nixos_bridge.rs `classify` and rime-update-check's predicate (readiness
+        # release): `failed` PRESENT (any value) with "rolled back" last allows; `done` set (not null) wins over
+        # everything; steps that are not a list name no step.
+        allow = ({"steps": ["backup", "rolled back"], "failed": ""},       # a record #137's bridge wrote on Ctrl-C
+                 {"steps": ["backup", "rolled back"], "failed": None},
+                 {"steps": ["rolled back"], "failed": "x", "done": None})
+        for rec in allow:
+            self.assertIsNone(B.record_refusal(rec), rec)
+        refuse = (({"steps": ["backup", "rolled back"], "failed": "x", "done": "D"}, "already-moved"),
+                  ({"steps": ["done"], "done": ""}, "already-moved"),
+                  ({"steps": ["backup", "rolled back"]}, "start-unfinished"),
+                  ({"steps": ["backup", "old side"], "failed": "x"}, "start-unfinished"),
+                  ({"steps": {"rolled back": 1}, "failed": "x"}, "start-unfinished"),
+                  ({"steps": "rolled back", "failed": "x"}, "start-unfinished"),
+                  ({}, "start-unfinished"))
+        for rec, name in refuse:
+            got = B.record_refusal(rec)
+            self.assertIsNotNone(got, rec)
+            self.assertEqual(got[0], name, rec)
+
 
 if __name__ == "__main__":
     unittest.main()
