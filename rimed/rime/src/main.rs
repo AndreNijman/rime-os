@@ -26,6 +26,7 @@ mod live;
 mod mcp;
 mod migrate;
 mod mode;
+mod nixos_bridge;
 mod oauth_device;
 mod ops;
 mod permissions;
@@ -313,6 +314,17 @@ enum Cmd {
     /// services) are activated without a restart when that is safe; the rest
     /// waits in the staged deployment. `--plan` shows which is which.
     Update(UpdateArgs),
+    /// Move this machine to Rime OS on NixOS: `check`, `repair-e`, `key-export`, `start`.
+    ///
+    /// Runs /usr/libexec/rime-migrate with these arguments (`rime migrate
+    /// check --explain` first; it writes nothing). Once `start` has run, the
+    /// old system refuses `update`, `rollback`, `pin`, `channel set`, `boot
+    /// migrate` and the live-update verbs by name.
+    Migrate {
+        /// Everything after `migrate`, passed to the bridge as it is.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// The live-update engine: what is active, what waits and why.
     Live {
         #[command(subcommand)]
@@ -1575,9 +1587,41 @@ fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
     }
 }
 
+/// Which verbs the NixOS move holds still once `rime migrate start` has run.
+///
+/// Every verb here drives bootc or ostree on the old side. A function, like
+/// `privileged_verb`, so the set is an assertion; the record that decides and
+/// what each state means is in `nixos_bridge`. `migrate` itself is not here:
+/// `check` must keep working after a start, and a second `start` is the
+/// bridge's own business.
+fn bridged_verb(cmd: &Cmd) -> Option<&'static str> {
+    match cmd {
+        Cmd::Update(_) => Some("update"),
+        Cmd::Rollback => Some("rollback"),
+        Cmd::Pin => Some("pin"),
+        Cmd::Channel { cmd: channel::ChannelCmd::Set { .. } } => Some("channel set"),
+        Cmd::Boot { cmd: boot::BootCmd::Migrate } => Some("boot migrate"),
+        Cmd::Live { cmd: LiveCmd::Apply { .. } } => Some("live apply"),
+        Cmd::Live { cmd: LiveCmd::Rollback } => Some("live rollback"),
+        Cmd::Live { cmd: LiveCmd::SoftReboot { .. } } => Some("live soft-reboot"),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // The NixOS move's hold, BEFORE the root gate: as root the record is
+    // readable and decides; as anyone else it is not (0700), and every verb
+    // here is root-only, so the root gate below answers instead. Running
+    // first is also what lets tests/test-rime-migrate.sh drive the real
+    // binary against a fixture record without root.
+    if let Some(verb) = bridged_verb(&cli.command) {
+        if let Err(code) = nixos_bridge::guard(verb) {
+            std::process::exit(code);
+        }
+    }
 
     // Root-only verbs bail HERE — before any sysfs probe, D-Bus connect or
     // subprocess — so an unprivileged `rime update` costs nothing and answers
@@ -1720,6 +1764,9 @@ async fn main() {
             migrate_boot: args.migrate_boot,
             allow_unverified: args.allow_unverified,
         }),
+        // Not root-gated here: the bridge refuses a non-root run itself, with
+        // the sudo line to type, after argument parsing (so `--help` works).
+        Cmd::Migrate { args } => nixos_bridge::migrate(&args),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Live { cmd } => match cmd {
             LiveCmd::Status { json } => live::status(json),
@@ -3840,6 +3887,54 @@ mod tests {
         );
         assert_eq!(privilege(&["rime", "remove", "htop"]), Some("remove"));
         assert_eq!(privilege(&["rime", "pkg", "upgrade"]), Some("pkg upgrade"));
+    }
+
+    fn bridged(argv: &[&str]) -> Option<&'static str> {
+        bridged_verb(&Cli::try_parse_from(argv).expect("parses").command)
+    }
+
+    #[test]
+    fn the_nixos_move_holds_every_bootc_verb_and_nothing_else() {
+        // Every verb that drives bootc or ostree on the old side.
+        for (argv, verb) in [
+            (&["rime", "update"][..], "update"),
+            (&["rime", "update", "--check"][..], "update"),
+            (&["rime", "update", "--firmware-only"][..], "update"),
+            (&["rime", "update", "--migrate-boot"][..], "update"),
+            (&["rime", "rollback"][..], "rollback"),
+            (&["rime", "pin"][..], "pin"),
+            (&["rime", "channel", "set", "stable"][..], "channel set"),
+            (&["rime", "boot", "migrate"][..], "boot migrate"),
+            (&["rime", "live", "apply"][..], "live apply"),
+            (&["rime", "live", "rollback"][..], "live rollback"),
+            (&["rime", "live", "soft-reboot", "--yes"][..], "live soft-reboot"),
+        ] {
+            assert_eq!(bridged(argv), Some(verb), "{argv:?}");
+        }
+        // And nothing that reads, nor the bridge itself: `rime migrate check`
+        // must keep working after a start.
+        for argv in [
+            &["rime", "migrate", "check", "--explain"][..],
+            &["rime", "migrate", "start", "--backup", "/b", "--payload", "/p", "--yes"][..],
+            &["rime", "boot", "status"][..],
+            &["rime", "channel", "status"][..],
+            &["rime", "live", "status"][..],
+            &["rime", "trust"][..],
+            &["rime", "install", "htop"][..],
+        ] {
+            assert_eq!(bridged(argv), None, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn migrate_passes_every_argument_through() {
+        match Cli::try_parse_from(["rime", "migrate", "check", "--explain", "--disk", "/dev/vdb"])
+            .expect("parses")
+            .command
+        {
+            Cmd::Migrate { args } => assert_eq!(args, ["check", "--explain", "--disk", "/dev/vdb"]),
+            _ => panic!("not migrate"),
+        }
     }
 
     #[test]

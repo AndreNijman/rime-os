@@ -2356,7 +2356,10 @@ exit 0
         lab.with_sched_ext("enabled").with_ops("rusty_1.1.4_x86_64_unknown_linux_gnu");
         let ops = lab.scx_dir().join("root/ops");
         let bin = lab.scxctl(&format!(
-            "( sleep 0.3; echo lavd_1.1.4_x86_64_unknown_linux_gnu > '{}' ) >/dev/null 2>&1 &\nexit 0\n",
+            // Written beside and renamed over: a shell `>` truncates first, and a poll that
+            // lands in that window reads an empty `ops` (= "attached, name unknown", which
+            // ends the wait by design), so the test failed under load. sysfs never truncates.
+            "( sleep 0.3; echo lavd_1.1.4_x86_64_unknown_linux_gnu > '{0}.new' && mv '{0}.new' '{0}' ) >/dev/null 2>&1 &\nexit 0\n",
             ops.display()
         ));
         let w = RealWriter::for_scx_test(lab.sys(), &bin, Duration::from_secs(3));

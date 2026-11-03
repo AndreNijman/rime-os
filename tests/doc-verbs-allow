@@ -45,3 +45,14 @@ rime fleet report
 # nothing is or will be named `or` — and tightening it is a separate change
 # with its own both-ways test, not something to smuggle in behind a doc fix.
 rime or something
+
+# docs/nixos-move.md: `rime migrate` passes every argument unchanged to the
+# bridge program /usr/libexec/rime-migrate (Python, argparse), so its
+# subcommands are not clap's and `rime migrate check --help` can only answer
+# where that program is installed, which a CI runner is not. They are real
+# commands: tests/test-rime-migrate.sh asks the shipped program for each one's
+# --help and fails if any does not parse.
+rime migrate check
+rime migrate repair-e
+rime migrate key-export
+rime migrate start
