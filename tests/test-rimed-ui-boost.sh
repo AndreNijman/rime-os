@@ -469,6 +469,23 @@ fi
 wait_epp balance_power 1500 && [ "$(pp)" = balanced ] && grep -x 'battery=balanced' "$T/state/tier" >/dev/null \
     && ok "picking balanced again writes balanced and is kept" || bad "back to balanced" "epp=$(epp_all) pp=$(pp)"
 
+# A mode pins a tier with auto-switch OFF first (rimed-core mode::plan), so it
+# must not rewrite the kept pick; going back to Daily (auto) brings it back.
+"$RIME_BIN" tier power-saver >/dev/null 2>&1
+wait_tier power-saver 1500 >/dev/null
+out=$("$RIME_BIN" mode set development 2>&1); rc=$?
+if [ "$rc" = 0 ] && wait_tier performance 1500 && grep -x 'battery=power-saver' "$T/state/tier" >/dev/null; then
+    ok "a mode pinning performance applies it and leaves the kept pick alone"
+else
+    bad "mode pin" "rc=$rc tier=$(tier_prop) file=$(tr '\n' ' ' < "$T/state/tier") $out"
+fi
+out=$("$RIME_BIN" mode set daily 2>&1); rc=$?
+if [ "$rc" = 0 ] && wait_tier power-saver 2000 && wait_epp power 1000 && [ "$(pp)" = low-power ]; then
+    ok "back to Daily (auto-switch on): the kept power-saver comes back"
+else
+    bad "mode daily" "rc=$rc tier=$(tier_prop) epp=$(epp_all) pp=$(pp) $out"
+fi
+
 grep -q "panicked" "$T/rimed.log" && bad "rimed log" "$(grep -m3 panicked "$T/rimed.log")"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
