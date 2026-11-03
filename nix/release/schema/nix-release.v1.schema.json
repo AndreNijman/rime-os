@@ -70,7 +70,8 @@
           "name": { "type": "string" },
           "version": { "type": "string" },
           "out": { "$ref": "#/$defs/index" },
-          "class": { "const": 2 }
+          "class": { "const": 2 },
+          "build": { "enum": ["cache", "device"] }
         }
       }
     },

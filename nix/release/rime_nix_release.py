@@ -1403,11 +1403,21 @@ def build_manifest(clo, plan, sizes, *, release, previous, issued, source, cache
                      "kernel_modules": idx[b["kernel_modules"]], "kernel_params": b["kernel_params"]},
             "components": comps,
         }
+    refuse_non_redistributable(clo, plan)
     catalogue = []
     for c in plan.get("catalogue", []):
         if c["out"] not in idx:
             raise Refused(f"catalogue entry {c['name']}: {c['out']} is not in closure.json")
-        catalogue.append({"name": c["name"], "version": c["version"], "out": idx[c["out"]], "class": 2})
+        entry = {"name": c["name"], "version": c["version"], "out": idx[c["out"]], "class": 2}
+        # A device-built app (R14): `out` is its derivation, which the machine fetches and builds; anything else is
+        # a built output the machine fetches from the cache.
+        if c.get("build", "cache") == "device":
+            if not c["out"].endswith(".drv"):
+                raise Refused(f"catalogue entry {c['name']}: built on the device, but {c['out']} is not a derivation")
+            entry["build"] = "device"
+        elif c.get("build", "cache") != "cache" or c["out"].endswith(".drv"):
+            raise Refused(f"catalogue entry {c['name']}: {c['out']} with build {c.get('build')!r}")
+        catalogue.append(entry)
     paths = []
     for p in table:
         i = clo["paths"][p]
@@ -1569,6 +1579,10 @@ def validate(m):
             errs.append(f"catalogue {c.get('name')!r}: out is out of range")
         elif c.get("class") != 2:
             errs.append(f"catalogue {c.get('name')!r}: class is not 2")
+        elif c.get("build", "cache") not in ("cache", "device"):
+            errs.append(f"catalogue {c.get('name')!r}: build is neither cache nor device")
+        elif (c.get("build") == "device") != paths[c["out"]]["path"].endswith(".drv"):
+            errs.append(f"catalogue {c.get('name')!r}: a device build names a derivation, a cache build an output")
     errs += validate_delta(m.get("delta"), paths, ok_index)
     return errs
 
@@ -2012,6 +2026,21 @@ def before_push_hook(a):
     return os.environ.get("RIME_TEST_BEFORE_PUSH") if a.test_signing else None
 
 
+def refuse_non_redistributable(clo, plan):
+    """R14 (nix/redistributable.nix): a path the plan names as not redistributable (a vendor app the public cache never
+    carries, its verified vendor files, its vendor download) must not be in what is published. Exact store paths, so a
+    renamed package cannot slip past a name match. Such an app reaches machines as its derivation only (catalogue
+    `build: device`): each machine fetches the vendor file itself, from the pinned URL and hash, and builds it."""
+    banned = set(plan.get("non_redistributable", []))
+    for p in banned:
+        if not valid_store_path(p):
+            raise Refused(f"the plan's non_redistributable list names {p!r}, which is not a store path")
+    leaked = sorted(banned & set(clo["paths"]))
+    if leaked:
+        raise Refused(f"{len(leaked)} path(s) that may not be redistributed are in the publish set "
+                      f"(nix/redistributable.nix): {', '.join(leaked[:5])}")
+
+
 def refuse_unpublishable(plan, allow_test_variants):
     """A variant marked publishable = false (a test configuration, e.g. rime-vm's test account) never ships, unless
     the stand-in passes --allow-test-variants."""
@@ -2039,6 +2068,8 @@ def cmd_publish(a):
 
     plan = load_json(a.plan)
     refuse_unpublishable(plan, a.allow_test_variants)
+    # Before anything is uploaded: build_manifest checks it again on the artifact as filled.
+    refuse_non_redistributable(load_artifact(a.artifact)[0], plan)
 
     keys = a.cache_pubkey
     # What the channels offer now: read and VERIFIED, never trusted on its face.

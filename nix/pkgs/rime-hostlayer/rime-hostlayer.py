@@ -692,6 +692,30 @@ class Src:
         except OSError:
             return None
 
+    def resolve(self, rel, hops=40):
+        """The path rel names once every symlink on the way is followed INSIDE the old root (an absolute target is
+        read against the root and ".." stops at it, as the old machine read them), relative to the root; None when
+        the links loop."""
+        parts, done = [p for p in rel.split("/") if p not in ("", ".")], []
+        while parts:
+            part = parts.pop(0)
+            if part == "..":
+                if done:
+                    done.pop()
+                continue
+            cur = "/".join(done + [part])
+            link = self.readlink(cur)
+            if link is None:
+                done.append(part)
+                continue
+            hops -= 1
+            if hops < 0:
+                return None
+            if link.startswith("/"):
+                done = []
+            parts = [p for p in link.split("/") if p not in ("", ".")] + parts
+        return "/".join(done)
+
 
 def parse_colon(text, nfields):
     out = []
@@ -945,6 +969,7 @@ class Carry:
                        "carried": [], "host_toml": {}, "checked": [], "left_behind": [], "accounts": {},
                        "not_copied_private_keys": [], "switches": []}
         self.copied = set()  # source paths (relative) carried or folded in
+        self.profile_named = set()  # the paths NetworkManager profiles name, each handled once (profile_files)
         self.uids, self.gids = {}, {}
         dpath = a.declared or os.path.join(self.system, "etc/rime/hostlayer/declared-accounts.json")
         with open(dpath) as f:
@@ -1288,6 +1313,7 @@ class Carry:
             return
         old_users = {int(p[2]): p[0] for p in parse_colon(self.src.text("etc/passwd", ""), 7) if p[2].isdigit()}
         old_groups = {int(g[2]): g[0] for g in parse_colon(self.src.text("etc/group", ""), 4) if g[2].isdigit()}
+        carried_to = {c["to"] for c in self.report["carried"]}
         for sec in self.PROFILE_FILE_SECTIONS:
             if not cp.has_section(sec):
                 continue
@@ -1298,27 +1324,88 @@ class Carry:
                 if not path.startswith("/") or "\n" in path:
                     continue
                 frel = os.path.normpath(path).lstrip("/")
-                if frel.startswith("..") or frel in self.copied:
+                # Once per named path; a path another step already carried to the same place is not written twice.
+                if frel.startswith("..") or frel in self.profile_named or "/" + frel in carried_to:
                     continue
-                if not self.src.is_file(frel):
+                self.profile_named.add(frel)
+                # A path the new system's configuration provides (a CA bundle under /etc/ssl or /etc/pki, a link into
+                # /etc/static): the profile reads the new system's copy. Carrying the old bytes over it would shadow
+                # what NixOS manages there.
+                managed = self.managed_by_system(frel)
+                # A symlink (a cert kept next to its siblings, update-ca-trust's links) is followed inside the old
+                # root; the profile needs the bytes it pointed at, carried to the path the profile names.
+                real = self.src.resolve(frel)
+                via = None
+                if not managed and real is not None and real != frel:
+                    via = self.managed_by_system(real)
+                if via:
+                    # The named path is a link to a path the new system manages (a client cert dir linking the CA
+                    # bundle): the link itself is carried, absolute, so the profile reads the new system's copy
+                    # through it. Not carrying it would leave the named path missing on the new system.
+                    target = "/" + real
+                    self.copied.add(frel)
+                    cur = os.readlink(self.d(frel)) if os.path.islink(self.d(frel)) else None
+                    if cur == target:
+                        self.report["checked"].append({"path": path, "result": f"named by /{rel}: already on this "
+                                                       f"disk, the same link (-> {target})"})
+                        continue
+                    self.report["carried"].append({"from": "/" + frel, "to": "/" + frel, "link": target})
+                    self.report["checked"].append({"path": path, "result": f"named by /{rel}: a link to {target}, "
+                                                   f"set by the new system's configuration ({via}); the link is "
+                                                   "carried, the bytes are not"})
+                    if not self.plan_only:
+                        lt = self.d(frel)
+                        os.makedirs(os.path.dirname(lt), exist_ok=True)
+                        tmp = os.path.join(os.path.dirname(lt), f".{os.path.basename(lt)}.rime-hostlayer.tmp")
+                        if os.path.lexists(tmp):
+                            os.unlink(tmp)
+                        os.symlink(target, tmp)
+                        os.rename(tmp, lt)
+                    continue
+                if managed:
+                    self.copied.add(frel)
+                    self.report["checked"].append({"path": path, "result": f"named by /{rel}: set by the new "
+                                                   f"system's configuration ({managed}), not carried; the profile "
+                                                   "reads the new system's copy"})
+                    continue
+                if real is None or not self.src.is_file(real):
                     self.report["left_behind"].append({"path": path, "why": f"named by /{rel} ([{sec}] {key}) but "
                                                        "not a file on the old machine: the profile will not come up "
                                                        "until it is put back"})
                     continue
-                data = self.src.read(frel)
+                link = self.src.readlink(frel)
+                if link is not None and os.path.islink(self.d(frel)) and os.readlink(self.d(frel)) == link:
+                    self.copied.update((frel, real))
+                    self.report["checked"].append({"path": path, "result": f"named by /{rel}: already on this disk, "
+                                                   f"the same link (-> {link})"})
+                    continue
+                data = self.src.read(real)
                 try:
-                    with open(self.d(frel), "rb") as f:
-                        if f.read() == data:
-                            self.copied.add(frel)
-                            self.report["checked"].append({"path": path, "result": f"named by /{rel}: already on "
-                                                           "this disk, the same bytes"})
-                            continue
+                    if not os.path.islink(self.d(frel)):
+                        with open(self.d(frel), "rb") as f:
+                            if f.read() == data:
+                                self.copied.add(frel)
+                                self.report["checked"].append({"path": path, "result": f"named by /{rel}: already "
+                                                               "on this disk, the same bytes"})
+                                continue
                 except OSError:
                     pass
-                st = os.lstat(self.src.p(frel))
+                st = os.lstat(self.src.p(real))
                 user, group = old_users.get(st.st_uid, "root"), old_groups.get(st.st_gid, "root")
-                self.put_file(frel, frel, stat.S_IMODE(st.st_mode), user if user in self.uids else "root",
+                self.copied.add(frel)
+                self.put_file(real, frel, stat.S_IMODE(st.st_mode), user if user in self.uids else "root",
                               group if group in self.gids else "root", data=data)
+
+    def managed_by_system(self, frel):
+        """Why the new system's configuration owns /frel ("in the system's /etc" or "a link into /etc/static" in the
+        new root), or None. Only /etc is configuration-managed on NixOS."""
+        if frel != "etc" and not frel.startswith("etc/"):
+            return None
+        if os.path.lexists(os.path.join(self.system, frel)):
+            return "in the new system's /etc"
+        if managed_by_config(self.d(frel)):
+            return "a link into /etc/static"
+        return None
 
     def switches(self):
         """bootc enabled a guest's wipe unit with `systemctl enable` (a wants link). NixOS cannot: it is a switch."""

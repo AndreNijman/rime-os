@@ -3,8 +3,8 @@
 # reports the feature as in this system. No guest is booted (nested KVM is not assumed on the test host).
 #
 # Mutant (passthru.mutants.no-swtpm, built by hand, must FAIL): virtualisation.libvirtd.qemu.swtpm.enable forced off,
-# so libvirtd cannot start a guest's TPM: swtpm and swtpm_setup are not on libvirtd's PATH. The script asserts the
-# option explicitly first, so the mutant fails on that line before the behaviour is even reached.
+# so libvirtd cannot start a guest's TPM: swtpm and swtpm_setup are not on libvirtd's PATH. The script also asserts
+# the option itself first, so the mutant fails by name before any behaviour is looked at.
 { pkgs, self }:
 
 let
@@ -23,9 +23,9 @@ test = pkgs.testers.runNixOSTest {
   testScript = { nodes, ... }: ''
     import json
 
-    # The option itself, explicitly (wave 4 "updates2"): the behaviour below is what it buys, this says it is set.
-    swtpm_enable = "${pkgs.lib.boolToString nodes.machine.virtualisation.libvirtd.qemu.swtpm.enable}"
-    assert swtpm_enable == "true", f"virtualisation.libvirtd.qemu.swtpm.enable is {swtpm_enable}"
+    # The option the module sets (nix/modules/virtualization.nix), read from the evaluated node: swtpm for guests is on.
+    swtpm_enable = ${if nodes.machine.virtualisation.libvirtd.qemu.swtpm.enable then "True" else "False"}
+    assert swtpm_enable, "virtualisation.libvirtd.qemu.swtpm.enable is off: libvirtd cannot give a guest a TPM"
 
     machine.wait_for_unit("multi-user.target")
 

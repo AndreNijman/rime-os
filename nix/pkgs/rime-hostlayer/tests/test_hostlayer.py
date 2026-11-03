@@ -248,6 +248,99 @@ class CarryTest(Fixture):
         self.assertNotIn("/etc/openvpn/client/me.key", rep["not_copied_private_keys"])
         self.assertNotIn("KEY-TEST", json.dumps(rep))
 
+    def test_a_profile_naming_a_path_the_system_manages_does_not_carry_it(self):
+        # An 802.1X profile trusting the distribution's CA bundle: NixOS's configuration provides that path (the
+        # toplevel's /etc, or a link into /etc/static already in the new root). The old bytes are never written over it.
+        e = f"{self.src}/etc"
+        write(f"{e}/pki/tls/certs/ca-bundle.crt", "FEDORA-BUNDLE\n")
+        write(f"{e}/ssl/certs/ca-certificates.crt", "FEDORA-BUNDLE-2\n")
+        write(f"{self.sys}/etc/pki/tls/certs/ca-bundle.crt", "NIXOS-BUNDLE\n")
+        os.makedirs(f"{self.dest}/etc/ssl/certs")
+        os.symlink("/etc/static/ssl/certs/ca-certificates.crt", f"{self.dest}/etc/ssl/certs/ca-certificates.crt")
+        write(f"{e}/NetworkManager/system-connections/Eduroam.nmconnection",
+              "[connection]\nid=Eduroam\ntype=wifi\n\n[802-1x]\neap=peap;\n"
+              "ca-cert=/etc/pki/tls/certs/ca-bundle.crt\nclient-cert=/etc/ssl/certs/ca-certificates.crt\n", 0o600)
+        self.carry(check=0)
+        self.assertFalse(os.path.lexists(f"{self.dest}/etc/pki/tls/certs/ca-bundle.crt"), "a managed path was carried")
+        self.assertEqual(os.readlink(f"{self.dest}/etc/ssl/certs/ca-certificates.crt"),
+                         "/etc/static/ssl/certs/ca-certificates.crt", "the /etc/static link was replaced")
+        rep = json.loads(self.read("var/lib/rime/carry/report.json"))
+        carried = {c["to"] for c in rep["carried"]}
+        self.assertNotIn("/etc/pki/tls/certs/ca-bundle.crt", carried)
+        self.assertNotIn("/etc/ssl/certs/ca-certificates.crt", carried)
+        checked = {c["path"]: c["result"] for c in rep["checked"]}
+        self.assertIn("set by the new system's configuration (in the new system's /etc)",
+                      checked["/etc/pki/tls/certs/ca-bundle.crt"])
+        self.assertIn("set by the new system's configuration (a link into /etc/static)",
+                      checked["/etc/ssl/certs/ca-certificates.crt"])
+        left = {l["path"] for l in rep["left_behind"]}
+        self.assertNotIn("/etc/pki/tls/certs/ca-bundle.crt", left)
+
+    def test_a_profile_naming_a_link_to_a_managed_path_gets_the_link(self):
+        # A VPN profile's ca= is a link to the distribution's CA bundle, which the new system provides. The bundle's old
+        # bytes are not carried, but the named path must still exist: the link is carried, pointing at the new copy.
+        e = f"{self.src}/etc"
+        write(f"{e}/ssl/certs/ca-certificates.crt", "FEDORA-BUNDLE\n")
+        os.makedirs(f"{e}/openvpn/client")
+        os.symlink("/etc/ssl/certs/ca-certificates.crt", f"{e}/openvpn/client/ca.crt")
+        write(f"{self.sys}/etc/ssl/certs/ca-certificates.crt", "NIXOS-BUNDLE\n")
+        write(f"{e}/NetworkManager/system-connections/V.nmconnection",
+              "[connection]\nid=V\ntype=vpn\n\n[vpn]\nca=/etc/openvpn/client/ca.crt\n", 0o600)
+        self.carry(check=0)
+        self.assertEqual(os.readlink(f"{self.dest}/etc/openvpn/client/ca.crt"), "/etc/ssl/certs/ca-certificates.crt")
+        self.assertFalse(os.path.lexists(f"{self.dest}/etc/ssl/certs/ca-certificates.crt"), "a managed path was carried")
+        rep = json.loads(self.read("var/lib/rime/carry/report.json"))
+        links = {c["to"]: c.get("link") for c in rep["carried"]}
+        self.assertEqual(links.get("/etc/openvpn/client/ca.crt"), "/etc/ssl/certs/ca-certificates.crt")
+        self.assertNotIn("/etc/openvpn/client/ca.crt", {l["path"] for l in rep["left_behind"]})
+        # A second carry finds the same link and leaves it.
+        self.carry("--force", check=0)
+        rep = json.loads(self.read("var/lib/rime/carry/report.json"))
+        self.assertIn("the same link", {c["path"]: c["result"] for c in rep["checked"]}["/etc/openvpn/client/ca.crt"])
+        self.assertEqual(os.readlink(f"{self.dest}/etc/openvpn/client/ca.crt"), "/etc/ssl/certs/ca-certificates.crt")
+
+    def test_a_symlinked_file_a_profile_names_is_followed_inside_the_old_root(self):
+        # A cert kept as a link (relative, absolute, and through a linked directory) is carried as the bytes it pointed
+        # at, to the path the profile names; a link out of the root is read against the root; a dangling or looping
+        # link is reported as missing, never as carried.
+        e = f"{self.src}/etc"
+        write(f"{e}/openvpn/keys/ca-2026.crt", "CA-LINKED\n", 0o644)
+        write(f"{e}/openvpn/keys/me-2026.key", "KEY-LINKED\n", 0o600)
+        os.makedirs(f"{e}/openvpn/client")
+        os.symlink("../keys/ca-2026.crt", f"{e}/openvpn/client/ca.crt")
+        os.symlink("/etc/openvpn/keys/me-2026.key", f"{e}/openvpn/client/me.key")
+        os.symlink("keys", f"{e}/openvpn/current")
+        os.symlink("/../../etc/openvpn/keys/ca-2026.crt", f"{e}/openvpn/client/up.crt")
+        os.symlink("nowhere.crt", f"{e}/openvpn/client/dangling.crt")
+        os.symlink("loop-b.crt", f"{e}/openvpn/client/loop-a.crt")
+        os.symlink("loop-a.crt", f"{e}/openvpn/client/loop-b.crt")
+        write(f"{e}/NetworkManager/system-connections/Linked.nmconnection",
+              "[connection]\nid=Linked\ntype=vpn\n\n[vpn]\nservice-type=org.freedesktop.NetworkManager.openvpn\n"
+              "ca=/etc/openvpn/client/ca.crt\nkey=/etc/openvpn/client/me.key\n"
+              "ta=/etc/openvpn/current/ca-2026.crt\ncert=/etc/openvpn/client/up.crt\n"
+              "static-key=/etc/openvpn/client/dangling.crt\n\n[802-1x]\nca-cert=/etc/openvpn/keys/ca-2026.crt\n", 0o600)
+        write(f"{e}/NetworkManager/system-connections/Loop.nmconnection",
+              "[connection]\nid=Loop\ntype=vpn\n\n[vpn]\nca=/etc/openvpn/client/loop-a.crt\n", 0o600)
+        self.carry(check=0)
+        for rel, want in (("etc/openvpn/client/ca.crt", "CA-LINKED\n"), ("etc/openvpn/client/me.key", "KEY-LINKED\n"),
+                          ("etc/openvpn/current/ca-2026.crt", "CA-LINKED\n"), ("etc/openvpn/client/up.crt", "CA-LINKED\n"),
+                          ("etc/openvpn/keys/ca-2026.crt", "CA-LINKED\n")):
+            self.assertFalse(os.path.islink(f"{self.dest}/{rel}"), rel)
+            self.assertEqual(self.read(rel), want, rel)
+        self.assertEqual(oct(os.stat(f"{self.dest}/etc/openvpn/client/me.key").st_mode & 0o777), "0o600")
+        rep = json.loads(self.read("var/lib/rime/carry/report.json"))
+        moves = {c["to"]: c["from"] for c in rep["carried"]}
+        self.assertEqual(moves["/etc/openvpn/client/ca.crt"], "/etc/openvpn/keys/ca-2026.crt")
+        self.assertEqual(moves["/etc/openvpn/client/me.key"], "/etc/openvpn/keys/me-2026.key")
+        left = {}
+        for l in rep["left_behind"]:
+            left.setdefault(l["path"], []).append(l["why"])
+        for p in ("/etc/openvpn/client/dangling.crt", "/etc/openvpn/client/loop-a.crt"):
+            self.assertTrue(any("not a file on the old machine" in w for w in left[p]), (p, left[p]))
+            self.assertNotIn(p, moves)
+        self.assertNotIn("/etc/openvpn/client/ca.crt", left)
+        self.assertNotIn("KEY-LINKED", json.dumps(rep))
+
     def test_a_person_colliding_with_a_nixos_id_is_refused_by_name_and_nothing_is_written(self):
         write(f"{self.src}/etc/passwd", PASSWD + "builder:x:30001:30000::/var/home/builder:/bin/bash\n")
         write(f"{self.src}/etc/group", GROUP + "builder:x:30000:\n")

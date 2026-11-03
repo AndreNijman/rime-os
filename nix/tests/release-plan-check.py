@@ -42,6 +42,56 @@ check(not extra, f"the plan builds nothing the catalogue does not offer (extra: 
 names = [c["name"] for c in plan.get("catalogue", [])]
 check(len(names) == len(set(names)), "each app is named once in the plan")
 
+# 4 (here, next to the catalogue). Redistribution (R14): an app whose licence does not allow redistribution never has
+# its output in the plan; it is device-built (its derivation) and listed in nix/redistributable.nix with a reason.
+rd = inp["redist"]
+banned = set(plan.get("non_redistributable", []))
+check(all(p.startswith("/nix/store/") for p in banned), "non_redistributable names store paths only")
+def redistributable(l):
+    """A nixpkgs licence (simple, compound AND/OR, or WITH an exception) allows redistribution."""
+    if not isinstance(l, dict):
+        return False
+    kind = l.get("licenseType", "simple")
+    if kind == "compound":
+        parts = [redistributable(x) for x in l.get("licenses", [])]
+        return bool(parts) and (any(parts) if l.get("operator") == "OR" else all(parts))
+    if kind == "exception":
+        return redistributable(l.get("license"))
+    return l.get("redistributable") is True
+
+
+def lname(l):
+    if not isinstance(l, dict):
+        return repr(l)
+    if "licenses" in l:
+        return "(" + f" {l.get('operator')} ".join(lname(x) for x in l["licenses"]) + ")"
+    if "license" in l:
+        return f"{lname(l['license'])} WITH {lname(l.get('exception'))}"
+    return l.get("shortName") or l.get("spdxId") or l.get("fullName") or "?"
+
+
+for name in buildable:
+    lic = rd["licences"][name]
+    allowed = all(l["licences"] and all(redistributable(x) for x in l["licences"]) for l in lic)
+    c = built.get(name) or {}
+    device = c.get("build") == "device"
+    print(f"  {name}: licences {[(l['attr'], [lname(x) for x in l['licences']]) for l in lic]} -> "
+          f"{'redistributable' if allowed else 'NOT redistributable'}; plan: {'device' if device else 'cache'} build")
+    if device:
+        check(c.get("out") == rd["drvs"][name] and c["out"].endswith(".drv"),
+              f"device-built {name}: the plan names its derivation {rd['drvs'][name]} ({c.get('out')})")
+        check(bool(rd["listed"].get(name)), f"device-built {name} is listed in nix/redistributable.nix with a reason")
+        for o in rd["outs"][name]:
+            check(o in banned, f"device-built {name}: its output {o} is in non_redistributable")
+    else:
+        check(allowed, f"{name} is published from the cache only if its licence allows redistribution")
+        check(name not in rd["listed"], f"published {name} is not listed as device-built in nix/redistributable.nix")
+        check(not c.get("out", "").endswith(".drv"), f"published {name} names its built output, not a derivation")
+        for o in rd["outs"][name]:
+            check(o not in banned, f"published {name}'s output {o} is not in non_redistributable")
+for name in rd["listed"]:
+    check(name in buildable, f"nix/redistributable.nix lists {name}, a buildable catalogue app")
+
 # 2. The variants: one per set of offered features, named as rimed names them, carrying exactly their features.
 expected = sorted(inp["expectedVariants"])
 check(len(expected) == 2 ** len(inp["offered"]), f"{len(expected)} variants expected for features {inp['offered']}")

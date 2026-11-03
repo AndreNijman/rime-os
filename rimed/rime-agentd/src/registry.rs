@@ -1365,6 +1365,11 @@ mod tests {
 
         // The phone walks out of Wi-Fi range: nothing detaches, the next
         // write to it fails, and `broadcast` drops it.
+        // Shut down, not only dropped: a test in this binary that forks (pty's
+        // held spawns park a child before execve) holds a copy of every fd,
+        // so a drop alone may leave the socket open and the write succeeds
+        // (hosted run 41549507599, "the dead connection was not dropped").
+        remote_peer.shutdown(std::net::Shutdown::Both).unwrap();
         drop(remote_peer);
         s.absorb(b"output nobody on the phone will see\r\n");
         assert_eq!(s.remote_viewers(), 0, "the dead connection was not dropped");

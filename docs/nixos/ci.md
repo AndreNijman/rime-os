@@ -42,8 +42,34 @@ is recorded, not cut off. If a leg ever passes 55 min, raise these from the new 
 | hostgates-net | 41400977973 | H2 asked NetworkManager to connect 0.3 s after hostapd started, while wpa_supplicant was restarting (nixpkgs restarts it when a radio appears): "No suitable device found". Passed in 41450212626: a race | fixed (nix/hygiene): the test waits for the device's state (managed, past `unavailable`) and for a scan that saw the SSID; mutant `hostgates-net.mutants.wifi-no-wait` |
 | hostgates-disks | 41400977973 | not the VM: rimed's relay test `two_desktops_cannot_hold_one_rendezvous`, compiled in the same leg | fixed by aa86b8883 (the relay claims a room before it sends the 101); passed in 41450212626 (1618 s) |
 | release-unit | 41400977973 | the release dry-run proof met the new `nix/ci/eval-each.sh` | fixed by 8bc447255; passed in 41450212626 (218 s) |
-| desktop | 41450212626 | the guest wrote nothing after `register-nix-paths` at 11.9 s; 287 s later the driver gave up: "Shell did not start in time". Passed in every earlier run | **open**: not reproduced; handed to the desktop check's owner. A guest stall, not the QEMU wrapper (all 4 sockets listened before QEMU started) |
+| desktop | 41450212626 | the guest wrote nothing after `register-nix-paths` at 11.9 s; 287 s later the driver gave up: "Shell did not start in time". Passed in every earlier run | fixed (nix/ci2): plymouthd stopped answering; see "desktop: a splash that stops answering". The module bounds the splash's units and stops plymouthd; `checks.desktop-plymouth-stuck` (mutants `no-kill`, `no-bound`) |
 | any | (earlier runs) | a substitute download from cache.nixos.org failed mid-build | `run-checks.sh` retries a build once when the log says a download failed, never on a builder failure (`nix/ci/fixtures/`, checks.ci) |
+
+## desktop: a splash that stops answering
+
+Hosted job 125298150203 (run 41450212626; log `/var/lab/rime-nix/artifacts/ci2/desktop-41450212626.log`): after
+switch-root, `Starting Tell Plymouth To Write Out Runtime Data...` at 10.6 s (plymouth-read-write.service,
+`Before=sysinit.target`, no timeout of its own) and then nothing: no sysinit.target, so no test backdoor, and the
+driver gave up 287 s later. Six local runs of the same check, pinned to 2 CPUs with 4 and 6 busy loops, all passed
+(`desktop-pinned-{a,b}-{1,2,3}.log`): not reproduced by load. Freezing plymouthd (SIGSTOP) just before
+plymouth-read-write gives the hosted console log line for line, ending at "Reached target Remote File Systems", rc 1
+(`desktop-experiment-freeze-plymouthd.log`). Why plymouthd stopped answering on the runner is not known; what it
+cost is: plymouth-quit-wait has `TimeoutSec=0` and greetd starts after it, so on a machine the same fault holds the
+greeter forever.
+
+Fix (`nix/modules/desktop.nix`, "Boot splash"): plymouth-read-write and plymouth-quit are bounded to 15 s and
+plymouth-quit-wait to 60 s; when one of them does not finish, its `ExecStopPost` SIGKILLs plymouthd by its pid file
+(a stopped process ignores SIGTERM; a pid whose `comm` is not plymouthd is left alone) and logs `rime: plymouthd (pid N)
+did not answer <unit>` to the kernel log. `checks.desktop-plymouth-stuck` freezes plymouthd before plymouth-read-write:
+
+| Run | Result | Log (`/var/lab/rime-nix/artifacts/ci2/`) |
+|---|---|---|
+| the check | PASS: plymouth-read-write timed out at 24.0 s, plymouthd killed, sysinit.target at 24.1 s, rime-greet on VT 1; test script 28.7 s | `plymouth-stuck.log` |
+| mutant `no-bound` (the units as plymouth ships them) | FAILS with the hosted runner's error: "Shell did not start in time" | `plymouth-stuck-mut-no-bound.log` |
+| mutant `no-kill` (bounded, plymouthd left frozen) | FAILS: both units time out, then systemctl loses PID 1 ("Transport endpoint is not connected") and multi-user.target is never seen | `plymouth-stuck-mut-no-kill.log` |
+| `checks.desktop` with the fix | PASS (test script 45.6 s) | `desktop-ci2.log` |
+| `checks.desktop` with the fix, pinned to 2 CPUs with 4 busy loops, 3 times | PASS 3/3 (50-57 s); no `rime: plymouthd` line, so the bounds never fired on a slow but answering splash | `desktop-fix-pinned-{1,2,3}.log` |
+| the check, pinned the same way, twice | PASS 2/2 (sysinit.target at 27.9 s and 27.3 s) | `plymouth-stuck-pinned-{1,2}.log` |
 
 ## keymap-luks under load
 
@@ -95,3 +121,14 @@ Two traps found while making it, both in the test, not the product:
   that device's gateway. In a NixOS VM test the primary connection is QEMU's user network (eth0), so a server on the
   test VLAN (eth1) gets the handshake through eth1 and every data packet sent out of eth0: activated, no traffic.
   Base the VPN on the VLAN's device: `nmcli connection up <vpn> ifname eth1`.
+
+**The mutant made deterministic (nix/ci2, 11-03).** A race mutant proves nothing when it passes. `hostgates-net` now
+holds wpa_supplicant down for 20 s right before the wait (`wifi_hold_supplicant` in hostlayer-common.nix: the unit
+stopped, its D-Bus activation refused by a runtime `ConditionPathExists=!/run/rime-test-wpa-hold` drop-in, a
+`systemd-run --on-active=20s` timer lifts it): the Wi-Fi device is `unavailable`, as it is while nixpkgs restarts
+wpa_supplicant for a new radio, on every run, not only on a slow runner. The check waits it out (24.4 s, NetworkManager
+"re-acquiring supplicant interface", then "Started WPA Supplicant instance") and passes; the mutant `wifi-no-wait`
+(no wait, no autoconnect, `nmcli connection up` at once) fails with the hosted error "No suitable device found for this
+connection" (`/var/lab/rime-nix/artifacts/ci2/hostgates-net2.log`, `hostgates-net2-mut-wifi-no-wait.log`). Pinned to 2 CPUs with 4 busy loops: the check
+PASSES and the mutant FAILS the same way (`hostgates-net-pinned.log`, `hostgates-net-mut-wifi-no-wait-pinned.log`).
+Only `hostgates-net` sets the hold; `hostlayer-katana` (run by hand) does not.

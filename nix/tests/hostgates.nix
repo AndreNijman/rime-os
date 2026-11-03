@@ -9,7 +9,9 @@
 #       A profile pinned to the old card's MAC address (as katana's 5 GHz one is) does not come up while no card
 #       has that address, then comes up on a new radio whose permanent address it is (lib/hwsim-radio.py).
 #       The test asks NetworkManager to connect only once the device is managed and a scan saw the SSID (by state:
-#       the hosted run 41400977973 asked while wpa_supplicant restarted). mutant "wifi-no-wait": it does not wait.
+#       the hosted run 41400977973 asked while wpa_supplicant restarted). It holds wpa_supplicant down for 20 s just
+#       before that wait, so the wait is needed on every run. mutant "wifi-no-wait": it neither waits nor lets
+#       autoconnect happen, and asks at once: "No suitable device found", every run.
 #   H3  the carried WireGuard profile comes up and carries traffic to the peer; so does the carried OpenVPN
 #       profile (TLS, against an OpenVPN server on the peer), with the certificate and key files it names
 #       carried with it (the OpenVPN one based on eth1, the peer's link: see the subtest).
@@ -20,8 +22,9 @@
 # Mutants are passthru: nix build path:.#checks.x86_64-linux.hostgates-net.mutants.<name>
 # hostgates-disks  machine with four extra disks, attached and removed between boots (QEMU_OPTS):
 #   H6  the four fstab disks mount (UUIDs from the carried host.toml): ext4 passno 2 and 0, btrfs passno 2, xfs
-#       passno 0; each passno 2 one's fsck unit succeeds. The system ships fsck.btrfs and fsck.xfs (mutant "no-xfs":
-#       the xfs support taken out of the system, FAILS). fsck.btrfs checks nothing (it exits 0 without reading the
+#       passno 0; each passno 2 one's fsck unit succeeds. The system ships fsck.btrfs, and checks the xfs disk the way
+#       xfs is checked (fsck.xfs reads nothing): `xfs_repair -n`, unmounted, every structure read (mutant "no-xfs":
+#       the xfs support taken out of the system, FAILS there; the lab makes its filesystems with its own tools). fsck.btrfs checks nothing (it exits 0 without reading the
 #       disk), so for btrfs that success only says the line does not hold the boot: the btrfs disk is checked the
 #       way btrfs is, a read-only scrub (every block against its checksum) and its error counters. Mutant
 #       "btrfs-corrupt": one data block of a file on it overwritten on the disk, the scrub FAILS;
@@ -112,9 +115,8 @@ let
       assert (media["type"], media["passno"], scratch["type"], scratch["passno"]) == ("btrfs", 2, "xfs", 0), mounts
       disks = DiskLab(machine, {"games": games, "lab": lab, "media": media, "scratch": scratch})
 
-      with subtest("the system can check what the fstab names: fsck.btrfs, fsck.xfs"):
+      with subtest("the system can check what the fstab names: fsck.btrfs (xfs: after H6, by checking it)"):
           machine.succeed("test -x /run/current-system/sw/bin/fsck.btrfs")
-          machine.succeed("test -x /run/current-system/sw/bin/fsck.xfs")
 
       with subtest("blank disks (no filesystem with those UUIDs) do not hold the boot; they get their filesystems"):
           disks.restart(list(disks.mounts))
@@ -145,6 +147,17 @@ let
                               "oflag=direct conv=notrunc", "sync", "echo 3 > /proc/sys/vm/drop_caches")
           print(machine.succeed("btrfs scrub start -Br /var/media 2>&1"))
           print(machine.succeed("btrfs device stats -c /var/media"))
+
+      with subtest("H6: the xfs disk is checked as xfs is, with what the system ships: xfs_repair -n reads it all"):
+          # fsck.xfs is a no-op script (xfs replays its log at mount); an xfs disk is checked unmounted by
+          # xfs_repair -n, which reads every structure and changes nothing. With the system's own tools only.
+          unit = disks.unit_of("scratch")
+          machine.succeed(f"systemctl stop {unit}")
+          assert disks.mounted_uuid("scratch") is None, "the xfs disk is still mounted"
+          print(machine.succeed("PATH=/run/current-system/sw/bin xfs_repair -n /dev/disk/by-id/virtio-scratch 2>&1"))
+          machine.succeed("test -x /run/current-system/sw/bin/fsck.xfs")
+          machine.succeed(f"systemctl start {unit}")
+          disks.wait_mounted("scratch")
 
       with subtest("H7: the games disk taken out of the machine; the boot completes, the other disks mount"):
           disks.h7_one_absent("games")
@@ -182,6 +195,7 @@ let
     testScript = common.checks + lib.optionalString (mutant == "wifi-no-wait") ''
       WIFI_WAIT = False
     '' + ''
+      WIFI_HOLD = 20
       FIX = "${fixtureNet}"
 
       peer.start()

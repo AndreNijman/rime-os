@@ -1346,7 +1346,8 @@ struct UpdateArgs {
     #[arg(long, conflicts_with_all = ["check", "firmware_only"])]
     no_deltas: bool,
     /// NixOS: download and verify the release, then stop. Nothing is installed or
-    /// activated, and Flatpak, firmware and packages are left alone.
+    /// activated, and Flatpak, firmware and packages are left alone. The download
+    /// is kept safe from `rime gc` until the next `rime update` installs it.
     #[arg(long, conflicts_with_all = ["check", "plan", "firmware_only", "live_only", "no_live", "pin", "unpin"])]
     download_only: bool,
     /// Download and verify the update, print what would activate live and

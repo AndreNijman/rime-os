@@ -326,7 +326,10 @@ pub struct UpdateOptions {
     pub allow_unverified: bool,
     /// NixOS: download every path whole even where the release offers a delta (docs/nixos/delta.md §7).
     pub no_deltas: bool,
-    /// NixOS: download and verify the release, then stop: nothing is installed, activated or recorded.
+    /// NixOS: download and verify the release, then stop: nothing is installed or activated, and no generation,
+    /// boot entry or applied-release record is written. One record stays: `pending.json` (written when the download
+    /// starts, removed only by an install), so `rime gc` keeps the downloaded paths until the next `rime update`
+    /// installs them (nixos/generations.rs `pending_closure`).
     pub download_only: bool,
 }
 

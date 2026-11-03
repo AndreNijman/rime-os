@@ -1,6 +1,7 @@
 # The release side (docs/nixos/updates-and-release.md, D6): the tool, its pinned cosign, the release plan the
 # workflow builds from, and the local stand-in. flake.nix exposes these as packages.
-{ pkgs, self }:
+# `redistributable` is nix/redistributable.nix; checks.release-plan passes altered copies to its mutants.
+{ pkgs, self, redistributable ? import ../redistributable.nix { inherit (pkgs) lib; } }:
 let
   lib = pkgs.lib;
 
@@ -57,6 +58,13 @@ let
   variants = import ./variants.nix { inherit self lib; };
   catalogueData = import ../catalogue/catalogue.nix;
   catalogueApps = variants.plain.system.config.system.build.rimeCatalogue.passthru.apps;
+  # R14 (nix/redistributable.nix): an app whose bytes the public cache may not carry is published as its derivation
+  # only, and built on the machine; the exact paths that hold vendor bytes go to the plan's non_redistributable list.
+  redist = redistributable;
+  plainPkgs = variants.plain.system.pkgs;
+  published = lib.filterAttrs (n: _: redist.mayPublish plainPkgs n catalogueData.entries.${n}) catalogueApps;
+  deviceBuilt = lib.filterAttrs (n: _: !(published ? ${n})) catalogueApps;
+  drvOf = p: builtins.unsafeDiscardOutputDependency p.drvPath;
   catalogueVersion = name:
     lib.getVersion (lib.attrByPath (lib.splitString "." (lib.head catalogueData.entries.${name}.attrs)) null
       variants.plain.system.pkgs);
@@ -77,17 +85,23 @@ let
     # The class 2 catalogue (§3.1 `catalogue[]`): one build per buildable `nix` entry of nix/catalogue/catalogue.nix,
     # from the plain system's own package set (system.build.rimeCatalogue), so every variant's machines fetch the
     # same build. checks.release-plan fails when a buildable entry has no build here.
-    catalogue = lib.mapAttrsToList (name: p: { inherit name; version = catalogueVersion name; out = str p; }) catalogueApps;
+    catalogue = lib.mapAttrsToList (name: p: { inherit name; version = catalogueVersion name; out = str p; }) published
+      ++ lib.mapAttrsToList (name: p: { inherit name; version = catalogueVersion name; out = str (drvOf p); build = "device"; })
+        deviceBuilt;
+    non_redistributable = lib.unique (map str (lib.concatLists
+      (lib.mapAttrsToList (redist.vendorPaths plainPkgs.rime.rime-vendor-sources) deviceBuilt)));
   });
 
   # Building this builds every variant's toplevel; `result/<variant>` is each one.
   rime-release-toplevels = pkgs.linkFarm "rime-release-toplevels"
     (lib.mapAttrsToList (name: v: { inherit name; path = v.system.config.system.build.toplevel; }) variants);
 
-  # Building this builds every class 2 app; `result/<name>` is each one. The release job passes each to
-  # `rime-nix-release closure --catalogue-out`, so the apps' closures are signed and published with the release.
+  # Building this builds every PUBLISHED class 2 app; `result/<name>` is each one. The release job passes each to
+  # `rime-nix-release closure --catalogue-out`, so the apps' closures are signed and published with the release. A
+  # device-built app (R14) is linked as its derivation, which builds nothing: the release carries the recipe only.
   rime-release-catalogue = pkgs.linkFarm "rime-release-catalogue"
-    (lib.mapAttrsToList (name: path: { inherit name path; }) catalogueApps);
+    (lib.mapAttrsToList (name: path: { inherit name path; }) published
+      ++ lib.mapAttrsToList (name: p: { inherit name; path = drvOf p; }) deviceBuilt);
 
   fixtures = import ./fixtures.nix { inherit pkgs; };
 
@@ -105,4 +119,5 @@ let
 in
 {
   inherit cosign rime-nix-release rime-release-plan rime-release-toplevels rime-release-catalogue rime-release-standin fixtures variants;
+  catalogue = { inherit published deviceBuilt; };
 }

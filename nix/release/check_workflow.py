@@ -9,7 +9,9 @@ Refuses, for every workflow given:
   - a job with `id-token: write` (a signer: the client cannot tell signers apart) that is not on a GitHub-hosted
     runner, not restricted to refs/heads/main, or not in the nix-release environment;
   - a job calling nix-kernel-sign.yml (the kernel's MOK signer) that is not restricted to refs/heads/main: off main
-    the release is a dry run, and the feat/nixos signing proof is a dispatch of nix-kernel-sign.yml itself;
+    the release is a dry run, and the feat/nixos signing proof is a dispatch of nix-kernel-sign.yml itself.
+    "Restricted" is exact for both rules (main_only): the if: is a conjunction with the term
+    github.ref == 'refs/heads/main' itself, never a substring of an || or a negation;
   - a self-hosted job that lacks the fork-PR guard, or names the nix-release environment, RIME_NIX_CACHE_KEY,
     RIME_CACHE_TOKEN or the R2 secrets;
   - any job outside the nix-release environment naming those secrets;
@@ -36,6 +38,71 @@ TEST_ONLY = ("--test-signing", "--allow-test-variants", "RIME_TEST_BEFORE_PUSH")
 FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
 PER_REF_GROUP = "${{ github.ref == 'refs/heads/main' && 'nix-release' || format('nix-release-{0}', github.ref) }}"
 PER_REF_CANCEL = "${{ github.ref != 'refs/heads/main' }}"
+
+
+MAIN_ONLY = "github.ref == 'refs/heads/main'"
+
+
+def _top_level(expr, sep):
+    """Split an expression on `sep` outside parentheses and quotes."""
+    parts, depth, quote, cur, i = [], 0, None, "", 0
+    while i < len(expr):
+        ch = expr[i]
+        if quote:
+            cur += ch
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote, cur = ch, cur + ch
+        elif ch == "(":
+            depth, cur = depth + 1, cur + ch
+        elif ch == ")":
+            depth, cur = depth - 1, cur + ch
+        elif depth == 0 and expr.startswith(sep, i):
+            parts.append(cur)
+            cur, i = "", i + len(sep)
+            continue
+        else:
+            cur += ch
+        i += 1
+    parts.append(cur)
+    return parts
+
+
+def _bare(expr):
+    """Whitespace collapsed, the ${{ }} wrapper and redundant outer parentheses removed."""
+    e = " ".join(str(expr).split())
+    m = re.fullmatch(r"\$\{\{(.*)\}\}", e)
+    e = m.group(1).strip() if m else e
+    while e.startswith("(") and e.endswith(")") and _balanced(e[1:-1]):
+        e = e[1:-1].strip()
+    return e
+
+
+def _balanced(expr):
+    depth, quote = 0, None
+    for ch in expr:
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "'\"":
+            quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0 and quote is None
+
+
+def main_only(cond):
+    """True only when the if: is a conjunction (no top-level ||) one of whose terms is exactly MAIN_ONLY: then the job
+    cannot run on any other ref, whatever the other terms say. A substring would accept `MAIN_ONLY || true`,
+    `!(MAIN_ONLY)` or `github.ref == 'refs/heads/main-x'`."""
+    e = _bare(cond)
+    if not e or not _balanced(e) or len(_top_level(e, "||")) != 1:
+        return False
+    return any(_bare(t) == MAIN_ONLY for t in _top_level(e, "&&"))
 
 
 def hosted(runs_on):
@@ -98,11 +165,11 @@ def check(path):
         if signer:
             if runs_on is None or not hosted(runs_on):
                 bad.append(f"{where}: a signer (id-token: write) must run on a GitHub-hosted runner")
-            if "github.ref == 'refs/heads/main'" not in cond:
+            if not main_only(cond):
                 bad.append(f"{where}: a signer must be restricted to refs/heads/main in its if:")
             if env != "nix-release":
                 bad.append(f"{where}: a signer must run in the nix-release environment")
-        if any(u.endswith("/nix-kernel-sign.yml") for u in uses) and "github.ref == 'refs/heads/main'" not in cond:
+        if any(u.endswith("/nix-kernel-sign.yml") for u in uses) and not main_only(cond):
             bad.append(f"{where}: a caller of nix-kernel-sign.yml must be restricted to refs/heads/main in its if:")
         if runs_on is not None and not hosted(runs_on):
             if FORK_GUARD not in cond:

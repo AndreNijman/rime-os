@@ -6,6 +6,7 @@
   rimed = import ./rimed.nix { inherit pkgs self; };
   libexec = import ./libexec.nix { inherit pkgs self; };
   desktop = import ./desktop.nix { inherit pkgs self; };
+  desktop-plymouth-stuck = import ./desktop-plymouth-stuck.nix { inherit pkgs self; };
   shell = import ./shell.nix { inherit pkgs self; };
   gaming = import ./gaming.nix { inherit pkgs self; };
   security = import ./security.nix { inherit pkgs self; };
