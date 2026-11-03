@@ -7,9 +7,10 @@
 #   PAYLOAD_DIR  the payload: manifest.json (and the files it names by sha256)
 #
 # Writes PAYLOAD_DIR/manifest.json.sig = "<name>:<base64 of the 64-byte ed25519 signature>" over the exact bytes of
-# manifest.json, then verifies it the way the bootc side's `rime migrate start` does (openssl pkeyutl -verify -rawin
-# against the public half) and prints the public key line, which is what the bootc image ships as
-# /usr/share/rime-os/trust/nixos-bridge-payload.pub. The secret seed exists only in a 0700 temporary directory.
+# manifest.json, then verifies it with OpenSSL (pkeyutl -verify -rawin against the public half: a second, independent
+# ed25519 implementation; on the bootc side the bridge's own verify_payload is the only check) and prints the public
+# key line, which is what the bootc image ships as /usr/share/rime-os/trust/nixos-bridge-payload.pub. The secret
+# seed exists only in a 0700 temporary directory.
 # Needs: openssl (3.x, ed25519 with -rawin), base64, head, tail, cmp.
 set -euo pipefail
 die() { printf 'payload-sign: %s\n' "$*" >&2; exit 1; }
@@ -35,7 +36,7 @@ tail -c 32 "$t/pub.der" | cmp -s - "$t/pub.half" || die "$secret: its public hal
 openssl pkeyutl -sign -keyform DER -inkey "$t/key.der" -rawin -in "$dir/manifest.json" -out "$t/sig.bin"
 [[ $(stat -c %s "$t/sig.bin") -eq 64 ]] || die "openssl made a signature that is not 64 bytes"
 printf '%s:%s\n' "$name" "$(base64 -w0 < "$t/sig.bin")" > "$dir/manifest.json.sig"
-# Read back, from the files as written, exactly as the bootc side checks them.
+# Read back, from the files as written: the signature line and the public half the bootc image will carry.
 sig=$(cat "$dir/manifest.json.sig")
 printf '%s' "${sig#*:}" | base64 -d > "$t/sig.check"
 openssl pkeyutl -verify -pubin -keyform DER -inkey "$t/pub.der" -rawin -in "$dir/manifest.json" \

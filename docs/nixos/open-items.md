@@ -363,7 +363,7 @@ Items the wave-3 pieces and this integration found and did not close.
 | Release MOK signature of the NixOS kernel | P3/HARDWARE, blocked on Andre | `nix-kernel-sign.yml` on main or `RIME_NIX_KERNEL_HOST` set; then `nix/probe/ovmf/mok/run.sh realsig` |
 | Real PCR 7; `rime luks rebind` succeeding under Secure Boot (T3 path on real firmware) | P3/HARDWARE | katana |
 | Early-microcode loading not measured directly on hardware; ESP prune unit-tested only | P3/HARDWARE / STILL OPEN | boot owner: a VM check that fills the ESP to the prune point |
-| Bridged machines get no per-vendor `[boot]` microcode choice (both vendors by default) | STILL OPEN | bridge/hostlayer: write the CPU vendor into host.toml at the carry |
+| Bridged machines get no per-vendor `[boot]` microcode choice (both vendors by default) | FIXED (bridge3): `rime-hostlayer carry` writes `[boot] microcode` from `/proc/cpuinfo` `vendor_id`; unit tests + mutants `hostlayer-microcode-dropped`/`-swapped` in `bridge-unit`; OVMF A and L: host.toml `intel`, menu and `/boot` intel only | `docs/nixos/bridge.md`, `artifacts/bridge3/` |
 | P3-S1..S4 (Steam), P3-V1 (ChatGPT / Claude Desktop sign-in), P3-E1 (Equibop presence) | P3/HARDWARE | Andre's accounts, katana (`docs/nixos/p3-katana-gates.md`) |
 | R14: `nix/redistributable.nix` does not exist; the OpenAI / Anthropic binaries' redistribution licences are unchecked | STILL OPEN | release owner + Andre: decide whether the public cache may carry them (`docs/nixos/updates-and-release.md` 1408) |
 | Production NixOS netinstall ISO, a new `.exe` (17 GB floor), rimeos.com's 16 → 17 GB text, a real Windows `stage-image` run | P3/HARDWARE | release environment + Windows lab (installer.md handover) |
@@ -374,8 +374,8 @@ Items the wave-3 pieces and this integration found and did not close.
 | `rime update --download-only` leaves `pending.json`; the `ops.rs` comment wording | STILL OPEN | update client owner (wording only) |
 | The delta stream test's 60 s deadline | DECIDED-NOT-TO: a hang fails instead of blocking (`delta.md` 355) | — |
 | Payload key `rime-bridge-payload-1` | P3/HARDWARE | release environment generates it; a bootc release ships `nixos-bridge-payload.pub` (`docs/nixos/bridge.md`) |
-| Plain topology A not re-run on the fixed bridge; the bridge changed again at this integration (223a0758d: every start step after the record rolls back, `check`/`start` read the record) | STILL OPEN (lab re-run) | covered by `bridge-unit` + 2 mutants; an OVMF re-run of A (plain) and L on 223a0758d is owed before P3 |
+| Plain topology A not re-run on the fixed bridge; the bridge changed again at this integration (223a0758d: every start step after the record rolls back, `check`/`start` read the record) | FIXED (bridge3): OVMF A (plain, `\EFI\fedora\`) and L re-run on the readiness image (#137 f26b97d17, its rime-migrate = this bridge byte for byte minus line 1), SB on, `--rollback-first`, NixOS, ostree, NixOS: both PASS; the bootc verbs refuse after `start` | `artifacts/bridge3/run-{A,L}.log`, `docs/nixos/bridge.md` |
 | LUKS recovery key export | DECIDED-NOT-TO | `docs/nixos/bridge.md` 145 |
 | katana `\EFI\APEX\grub.cfg` shape | P3/HARDWARE | `rime migrate check --explain` on katana |
 | rime-shell PR #49 open (not draft), CI green | DECIDED-NOT-TO here | Andre merges or not |
-| Hyprland "updated to 0.57.0" notice at the first NixOS login | STILL OPEN | desktop module's call (`docs/nixos/bridge.md` handover) |
+| Hyprland "updated to 0.57.0" notice at the first NixOS login | FIXED (bridge3): `ecosystem.no_update_news = true` in Rime's appearance.lua; `desktop` subtest + mutant `desktop.mutants.update-news` (fails `bool: false`); OVMF A and L: lastVersion 0.56.2 -> 0.57.0 with no window | `docs/nixos/bridge.md` decision |
