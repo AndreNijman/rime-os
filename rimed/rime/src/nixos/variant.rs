@@ -52,6 +52,7 @@ pub struct Choice {
 
 /// Pick the variant for `base` + `features` among those `has` says the release builds. The largest subset of the
 /// features wins; between subsets of one size, the first in sorted order. `None`: the release has no `base` system.
+#[cfg(test)]
 pub fn choose(base: &str, features: &[String], has: impl Fn(&str) -> bool) -> Option<Choice> {
     choose_keeping(base, features, has, |_| false)
 }

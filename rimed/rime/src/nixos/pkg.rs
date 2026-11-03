@@ -23,7 +23,7 @@
 //! `rime blueprint` and checkpoints). Flatpaks are recorded by Flatpak itself, as on bootc.
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -181,6 +181,15 @@ impl Catalogue {
     /// A feature of the exclusive `desktop` group (D3: at most one desktop besides Rime's own sessions).
     pub fn is_desktop(&self, feature: &str) -> bool {
         self.features.get(feature).and_then(|f| f.group.as_deref()) == Some("desktop")
+    }
+
+    /// The logind `Desktop` of every desktop's sessions (lowercase, as the session list reads it).
+    pub fn other_desktop_sessions(&self) -> BTreeSet<String> {
+        self.features
+            .iter()
+            .filter(|(id, _)| self.is_desktop(id))
+            .flat_map(|(_, f)| f.session_ids.iter().map(|s| s.to_ascii_lowercase()))
+            .collect()
     }
 
     fn entry(&self, name: &str) -> Option<(String, &Entry)> {

@@ -143,6 +143,32 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
     0
 }
 
+
+/// Unit names in a generation's `etc/systemd/{system,user}` (unit files and links; not the `.wants`/`.d` directories).
+fn unit_names(toplevel: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for sub in ["etc/systemd/system", "etc/systemd/user"] {
+        for e in std::fs::read_dir(toplevel.join(sub)).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let dir = [".wants", ".requires", ".upholds", ".d"].iter().any(|x| n.ends_with(x));
+            if n.contains('.') && !dir {
+                out.insert(n);
+            }
+        }
+    }
+    out
+}
+
+/// The units only one of `running` and `target` has (activation rule 3 lets them stop or start). Nothing, when either
+/// generation's units could not be listed: an unreadable list must not make every unit look one-sided.
+fn one_sided_units(running: &str, target: &str) -> BTreeSet<String> {
+    let (a, b) = (unit_names(Path::new(running)), unit_names(Path::new(target)));
+    if a.is_empty() || b.is_empty() {
+        return BTreeSet::new();
+    }
+    a.symmetric_difference(&b).cloned().collect()
+}
+
 fn manifest_boot(m: &Manifest, v: &Variant) -> BootFacts {
     BootFacts {
         kernel: m.path(v.boot.kernel).to_string(),
@@ -429,7 +455,8 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     let booted_boot = store::boot_facts(Path::new("/run/booted-system")).ok();
     let target_boot = manifest_boot(m, v);
     let machine = crate::live::machine_state(&crate::live::Paths::from_env());
-    let decide = |dry: &DryActivate| {
+    let other_desktops = super::pkg::Catalogue::load().map(|c| c.other_desktop_sessions()).unwrap_or_default();
+    let decide = |dry: &DryActivate, one_sided: &BTreeSet<String>| {
         activation(&Inputs {
             booted_boot: booted_boot.as_ref(),
             booted: booted_bc.as_ref(),
@@ -438,9 +465,11 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
             target: &target_bc,
             dry_run: dry,
             machine: &machine,
+            one_sided,
+            other_desktops: &other_desktops,
         })
     };
-    let plan = decide(&DryActivate::NotYet);
+    let plan = decide(&DryActivate::NotYet, &BTreeSet::new());
     for c in plan.changed.iter().filter(|c| **c != Component::Metadata) {
         let how = if plan.kind == Kind::Switch { "can be activated now" } else { "applies at the next restart" };
         println!("  {:<22} {how}", c.label());
@@ -542,7 +571,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
         Ok(r) => DryActivate::Failed(r.why()),
         Err(e) => DryActivate::Failed(e),
     };
-    let a = decide(&dry);
+    let a = decide(&dry, &one_sided_units(&running, &target));
     if a.kind == Kind::Boot {
         let locked_or_busy = !a.deferred.is_empty();
         for (c, r) in a.deferred.iter().filter(|(c, _)| *c == Component::Shell || *c == Component::HyprlandConfig) {
@@ -653,4 +682,42 @@ fn save_outs(m: &Manifest) {
 /// Manifest `catalogue[]` as (name, store path); `check_local` has already refused an index outside the table.
 pub fn catalogue_outs(m: &Manifest) -> Vec<(String, String)> {
     m.catalogue.iter().filter(|c| c.class == 2 && c.out < m.paths.len()).map(|c| (c.name.clone(), m.path(c.out).to_string())).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn generation(root: &Path, system: &[&str], user: &[&str]) -> String {
+        for (sub, names) in [("etc/systemd/system", system), ("etc/systemd/user", user)] {
+            let d = root.join(sub);
+            std::fs::create_dir_all(&d).unwrap();
+            for n in names {
+                if n.ends_with(".wants") || n.ends_with(".d") {
+                    std::fs::create_dir_all(d.join(n)).unwrap();
+                } else {
+                    std::fs::write(d.join(n), "").unwrap();
+                }
+            }
+        }
+        root.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn one_sided_units_are_the_units_only_one_generation_has() {
+        let t = std::env::temp_dir().join(format!("rime-onesided-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let plain = generation(&t.join("a"), &["rimed.service", "multi-user.target.wants", "dbus.service"], &["rime-shell.service"]);
+        let gnome = generation(
+            &t.join("b"),
+            &["rimed.service", "multi-user.target.wants", "dbus.service", "accounts-daemon.service", "dbus.service.d"],
+            &["rime-shell.service", "gnome-session-manager@.service"],
+        );
+        let want: BTreeSet<String> = ["accounts-daemon.service", "gnome-session-manager@.service"].map(String::from).into();
+        assert_eq!(one_sided_units(&plain, &gnome), want);
+        assert_eq!(one_sided_units(&gnome, &plain), want, "removing is the same set");
+        // An unreadable generation lists nothing, and nothing is one-sided (not every unit of the other).
+        assert!(one_sided_units(&t.join("missing").to_string_lossy(), &gnome).is_empty());
+        let _ = std::fs::remove_dir_all(&t);
+    }
 }

@@ -16,7 +16,12 @@ use crate::live::{Component, DeferReason, MachineState};
 /// `polkit.service`: nixpkgs restarts it whenever `system.path` changes (`restartTriggers = [ config.system.path ]`),
 /// and every Rime package (the Shell, rimed, the polkit actions) is in `system.path`, so without it no Rime-only release
 /// could go live. It holds no session state; nix/tests/update-client.nix proves the restart happens and the switch lands.
-pub const RESTART_SAFE_UNITS: &[&str] = &["rimed.service", "rime-remoted.service", "polkit.service"];
+/// `systemd-udevd.service`: nixpkgs restarts it when the udev rules or hwdb change (a desktop brings its own rules); it
+/// holds no session state and replays nothing missed (nix/tests/desktops.nix, desktops-install-gnome).
+/// `geoclue.service`: restarted when its agent whitelist changes (GNOME adds gnome-shell's); clients reconnect
+/// (nix/tests/desktops.nix, desktops-install-gnome).
+pub const RESTART_SAFE_UNITS: &[&str] =
+    &["rimed.service", "rime-remoted.service", "polkit.service", "systemd-udevd.service", "geoclue.service"];
 
 /// Units a live switch may RELOAD (but not stop or restart). `dbus-broker.service`: nixpkgs reloads it
 /// (`reloadIfChanged = true`) when its config dir, built from `system.path`, changes; a reload re-reads the policy and
@@ -129,6 +134,24 @@ pub struct Inputs<'a> {
     pub target: &'a ByComponent,
     pub dry_run: &'a DryActivate,
     pub machine: &'a MachineState,
+    /// Units (system and user) only one of the running and target generations has (their `etc/systemd/{system,user}`):
+    /// a desktop's own units when it is added or removed (docs/nixos/desktops.md §5). Rule 3 lets activation stop or
+    /// start them; a unit both generations have is judged as before.
+    pub one_sided: &'a BTreeSet<String>,
+    /// The logind `Desktop` of every desktop in the catalogue that is not Rime's (`gnome`, `plasma`, `cosmic`). Their
+    /// sessions run no Rime Shell, so rule 6 does not wait for them to unlock.
+    pub other_desktops: &'a BTreeSet<String>,
+}
+
+/// `foo@bar.service` is in `set` as itself or as its template `foo@.service`.
+fn unit_in(set: &BTreeSet<String>, unit: &str) -> bool {
+    if set.contains(unit) {
+        return true;
+    }
+    match (unit.split_once('@'), unit.rsplit_once('.')) {
+        (Some((name, _)), Some((_, kind))) => set.contains(&format!("{name}@.{kind}")),
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,8 +250,12 @@ pub fn activation(i: &Inputs) -> Activation {
             if d.restart_systemd {
                 reasons.push("rule 3: it would restart systemd".into());
             }
-            let outside: Vec<&str> =
-                d.disruptive.iter().map(String::as_str).filter(|u| !RESTART_SAFE_UNITS.contains(u)).collect();
+            let outside: Vec<&str> = d
+                .disruptive
+                .iter()
+                .map(String::as_str)
+                .filter(|u| !RESTART_SAFE_UNITS.contains(u) && !unit_in(i.one_sided, u))
+                .collect();
             if !outside.is_empty() {
                 reasons.push(format!("rule 3: it would stop or restart {}", outside.join(", ")));
             }
@@ -285,10 +312,12 @@ pub fn activation(i: &Inputs) -> Activation {
         None => user_clearable.push(DeferReason::Busy("whether a game is running could not be determined".into())),
     }
 
-    // Rule 6: a locked or unknown session, and the switch would restart the Shell or reload Hyprland config.
+    // Rule 6: a locked or unknown session, and the switch would restart the Shell or reload Hyprland config. Only a
+    // session that may run the Shell counts: another desktop's (GNOME, Plasma, COSMIC) runs none.
     let per_session = changed.contains(&Component::Shell) || changed.contains(&Component::HyprlandConfig);
     if per_session {
-        if let Some(s) = i.machine.sessions.iter().find(|s| s.locked != Some(false)) {
+        let shell_sessions = i.machine.sessions.iter().filter(|s| !i.other_desktops.contains(&s.desktop));
+        if let Some(s) = shell_sessions.into_iter().find(|s| s.locked != Some(false)) {
             let state = if s.locked == Some(true) { "locked" } else { "lock state unknown" };
             user_clearable.push(DeferReason::Locked(format!("{}'s session {} is {state}", s.user, s.session_id)));
         }
@@ -358,6 +387,8 @@ mod tests {
         target: ByComponent,
         dry: DryActivate,
         machine: MachineState,
+        one_sided: BTreeSet<String>,
+        other_desktops: BTreeSet<String>,
     }
 
     impl Case {
@@ -370,6 +401,8 @@ mod tests {
                 target: closure(B_SHELL),
                 dry: quiet(),
                 machine: idle_unlocked(),
+                one_sided: BTreeSet::new(),
+                other_desktops: ["gnome", "plasma", "cosmic"].map(String::from).into(),
             }
         }
         fn run(&self) -> Activation {
@@ -381,6 +414,8 @@ mod tests {
                 target: &self.target,
                 dry_run: &self.dry,
                 machine: &self.machine,
+                one_sided: &self.one_sided,
+                other_desktops: &self.other_desktops,
             })
         }
     }
@@ -537,6 +572,64 @@ mod tests {
         c.target = closure(&tools_b);
         c.machine.sessions[0].locked = Some(true);
         assert_eq!(c.run().kind, Kind::Switch, "{:?}", c.run().reasons);
+    }
+
+    #[test]
+    fn rule_3_allows_udevd_and_geoclue_restarts() {
+        // What adding GNOME prints (docs/nixos/desktops.md §5): new udev rules restart udevd, geoclue's whitelist
+        // restarts geoclue. Each one alone switches; each is proved in nix/tests/desktops.nix.
+        for u in ["systemd-udevd.service", "geoclue.service"] {
+            let mut c = Case::shell_only();
+            c.dry = DryActivate::Ran(parse_dry_activate(&format!("would restart the following units: {u}\n")));
+            assert_eq!(c.run().kind, Kind::Switch, "{u}: {:?}", c.run().reasons);
+        }
+    }
+
+    #[test]
+    fn rule_3_lets_a_removed_or_added_desktops_own_units_stop() {
+        // Removing GNOME: units only the running generation has are stopped; that is the removal itself.
+        let mut c = Case::shell_only();
+        c.dry = DryActivate::Ran(parse_dry_activate(
+            "would stop the following units: accounts-daemon.service, gnome-remote-desktop.service, user@1000.service\n\
+             would stop the following user units: gnome-session-manager@gnome.service\n",
+        ));
+        let a = c.run();
+        assert!(a.kind == Kind::Boot && has(&a, "accounts-daemon.service"), "{:?}", a.reasons);
+        c.one_sided = ["accounts-daemon.service", "gnome-remote-desktop.service", "gnome-session-manager@.service"]
+            .map(String::from)
+            .into();
+        let a = c.run();
+        // user@1000.service is in both generations: still judged, still boot.
+        assert!(a.kind == Kind::Boot && has(&a, "user@1000.service") && !has(&a, "accounts-daemon"), "{:?}", a.reasons);
+        assert!(!has(&a, "gnome-session-manager"), "a template in one generation covers its instances: {:?}", a.reasons);
+        c.dry = DryActivate::Ran(parse_dry_activate(
+            "would stop the following units: accounts-daemon.service, gnome-remote-desktop.service\n",
+        ));
+        assert_eq!(c.run().kind, Kind::Switch, "{:?}", c.run().reasons);
+        // A unit both generations have is still refused: one_sided is not an allowlist for everything.
+        c.dry = DryActivate::Ran(parse_dry_activate("would restart the following units: NetworkManager.service\n"));
+        assert_eq!(c.run().kind, Kind::Boot);
+    }
+
+    #[test]
+    fn rule_6_asks_only_sessions_that_run_the_shell() {
+        // A locked GNOME session beside an unlocked Rime one: the Shell swap goes ahead.
+        let mut c = Case::shell_only();
+        c.machine.sessions.push(SessionState {
+            user: "sam".into(),
+            uid: 1001,
+            session_id: "3".into(),
+            desktop: "gnome".into(),
+            locked: Some(true),
+        });
+        assert_eq!(c.run().kind, Kind::Switch, "{:?}", c.run().reasons);
+        // The same locked session with an unknown desktop still waits: an unknown session may run the Shell.
+        c.machine.sessions[1].desktop = String::new();
+        assert!(has(&c.run(), "rule 6"), "{:?}", c.run().reasons);
+        // And a locked Rime session still waits whatever else is logged in.
+        c.machine.sessions[1].desktop = "gnome".into();
+        c.machine.sessions[0].locked = Some(true);
+        assert!(has(&c.run(), "rule 6: "), "{:?}", c.run().reasons);
     }
 
     #[test]
