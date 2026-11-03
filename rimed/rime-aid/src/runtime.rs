@@ -1024,7 +1024,12 @@ mod tests {
         // "succeed" when the sleep ends.
         let d = scratch("hang");
         let b = d.join("bwrap");
-        script(&b, "exec sleep 5", 0o755);
+        // By its path: the probe runs bwrap with the sandbox's own PATH
+        // (`rime_paths::AID_SANDBOX_PATH`), which a build sandbox may not have.
+        let sleep = std::env::var_os("PATH")
+            .and_then(|p| std::env::split_paths(&p).map(|d| d.join("sleep")).find(|f| f.is_file()))
+            .expect("sleep on the test's PATH");
+        script(&b, &format!("exec '{}' 5", sleep.display()), 0o755);
         let c = Confinement { bwrap: b.clone() };
         let began = Instant::now();
         let err = probe(&c, Duration::from_millis(300)).expect_err("a hung bwrap was accepted");
