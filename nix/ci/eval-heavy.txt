@@ -5,3 +5,5 @@
 checks.x86_64-linux.desktops-eval            # 11.1 GB
 checks.x86_64-linux.settings-integrations-eval  # 7.1 GB
 checks.x86_64-linux.release-licences         # 5.2 GB
+checks.x86_64-linux.update-variants          # 12.1 GB (rime-nix container, 2026-11-04): Nix run 41692268474's
+                                             # runner shut down while it ran beside two others
