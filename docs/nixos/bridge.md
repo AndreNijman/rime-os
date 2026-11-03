@@ -230,6 +230,76 @@ getoption-skipped mutant then FAILS on that line (`desktop-mutant-window-only-fi
 VGA`) it is the other way round: the window renders and stays (`ps` sees it, the journal has no line), so the lab
 driver asserts both.
 
+### The start record is read one way everywhere (topology-e)
+
+Three programs read `/var/lib/rime/nixos-bridge/state.json`: the bridge's own `check`/`start` (`record_refusal`), the
+readiness `rime` before every bootc verb (`nixos_bridge.rs` `classify`) and `rime-update-check`. They now apply ONE
+rule: `done` present and not null is a finished move (refused); otherwise `failed` PRESENT (whatever its text) with
+the last step `"rolled back"` is a start that undid itself (allowed); anything else, including `steps` that is not a
+list, is an unfinished start (refused); an unreadable record refuses. The bridge used to read `failed` as a truth value
+and look at `done` second.
+
+Why it mattered (found by the topology-e interrupt probe on the readiness image): a Ctrl-C during `start` raises
+`KeyboardInterrupt`, whose text is `""`. The rollback ran, the record said `failed: ""` and `"rolled back"`; `rime` and
+`rime-update-check` allowed every bootc verb (correct: the old side is restored), but the bridge's own `check` and
+`start` refused `[start-unfinished]` with the self-contradicting "reached step 'rolled back' and neither finished nor
+rolled itself back", for ever, with no verb to clear it. Fixed on both ends: `start` records `str(e) or
+type(e).__name__` (`"KeyboardInterrupt"`, which even #137's current reader accepts), and `record_refusal` uses the
+rule above. Rust and `rime-update-check` already used it, so they do not change. Tests
+`StartRecord.test_a_start_interrupted_by_ctrl_c_rolls_back_and_allows_another`,
+`test_the_record_rule_is_the_readiness_release_rule` (both FAIL on the old bridge); mutants `record-failed-truthy`,
+`failed-text-empty-on-interrupt`, `record-done-not-first`, `record-done-truthy`, `record-steps-any-type` (each
+killed, `bridge-unit`: 56 mutants killed).
+
+## What the OVMF lab proved on E with the release kernel (topology-e, 2026-11-04, Secure Boot on)
+
+Evidence `/var/lab/rime-nix/artifacts/topo-e/` (`run-E.log`, `run-A.log`, `E/`, `A/`, `kernel-release.txt`,
+`readiness-image.txt`, `prepare-*.log`). Commands: `run.sh E --fresh --sb --readiness --rollback-first --greeter-first
+--phases bootc,nixos,back,nixos` and `run.sh A --fresh --sb --readiness --kill-probe --interrupt-probe --phases bootc`;
+both `PASS`.
+
+- **The bootc side is #137 at 1a4070580** on #137's merge base: the published 2026.11.03.5
+  (`ghcr.io/andrenijman/rime-os@sha256:27a9b1907a06…`, revision bdc5b8845) plus one layer with #137's `rime`
+  (built in that image), `/usr/libexec/rime-migrate` (minus line 1 = this branch's base `rime-bridge.py`, both
+  `a6fcdc2a…`), `/usr/libexec/rime-update-check` (bridge3's layer had left the base image's older one) and the TEST
+  payload key. `prepare.sh image` now refuses when rime-migrate and `rime-bridge.py` differ.
+- **The NixOS kernel is the release-signed one**, not a TEST MOK one: the lab system with NVIDIA on hashes its image
+  `5r2srpcsqwk47dlmfc9pch2wy3rw9kfn`, the same as `nixosConfigurations.rime`, so the committed release signature
+  applies; `sbverify --cert rime-mok.pem` OK, the TEST MOK does not verify it (`kernel-release.txt`). MokList holds the
+  real Rime MOK certificate and nothing else (`prepare-vars.log`), and every boot reports `SecureBoot efivar=1`, so
+  shim and GRUB accepted the release signature on NixOS as on bootc.
+- **E end to end:** boot through `APEX-OS Primary`, `repair-e` (the trial archived), `check` (E), the left-behind
+  report, a start with an injected fault after the boot entry (rc 10, `VERDICT=clean`), a reboot into ostree, then the
+  real `start` (about 3 min 35 s): NixOS from GRUB's default, **the first login through rime-greet before any serial
+  login** (alex prefilled from the carried last-user, `E-nixos-greeter-before-login.png`; Hyprland + the Shell for alex
+  in a greetd wayland session, no update window, `E-nixos-desktop.png`; on that boot Hyprland started 0.13 s before
+  firstrun exited and the window still stayed off), then `@nixos`/`@nix`/`@home`, the carried `phase=failed`, and the
+  home checksums `Documents/note.txt`, `Pictures/blob.bin`, `.config/rime-lab/settings.toml` all `OK`
+  (`E-nixos-checks.txt`). Back on the ostree entry: home intact; NixOS again: PASS.
+- **Every bootc verb, read on the real record** (`verb-probe.sh`: `rime update`, `update --check`,
+  `update --firmware-only`, `update --migrate-boot`, `rollback`, `pin`, `channel set`, `boot migrate`, `live apply`,
+  `live rollback`, `live soft-reboot`, each as the image's `/usr/bin/rime` with bootc/ostree/… stubbed, plus
+  `rime-update-check` with a stub bootc that reports an update; `KIND-probe-LABEL.txt` holds each verb's output):
+
+  | Probe | Record | `rime` (11 forms) | `rime-update-check` |
+  |---|---|---|---|
+  | `no-record` (E, A) | none | 11 allowed | `state=available` |
+  | `rolled-back` (E) | `failed` = the fault's text, last `"rolled back"` | 11 allowed | `state=available` |
+  | `rolled-back-rebooted` (E) | the same, after booting the ostree deployment again | 11 allowed; the masked units enabled again | `state=available` |
+  | `done` (E, A) | `done` set | 11 refused: exit 3, `rime: '<verb>' REFUSED [nixos-migration-started]`, no stub reached | refused, `state=none` |
+  | `done-back-on-ostree` (E) | the same, booted back from NixOS | 11 refused | refused |
+  | `killed-start` (A) | last `"old side"`, no `failed` (SIGKILL at the first fsck gate) | 11 refused | refused |
+  | `killed-start-rebooted` (A) | the same after a reboot | 11 refused; a second `start` exits 3 `REFUSED [start-unfinished]`, subvolumes unchanged | refused |
+  | `interrupted-start` (A, #137's rime-migrate) | `failed: ""`, last `"rolled back"` (Ctrl-C in `install closure`) | 11 allowed | `state=available` |
+  | `interrupted-start-branch` (A, this branch's) | `failed: "KeyboardInterrupt"`, last `"rolled back"` | 11 allowed | `state=available` |
+
+  "Allowed" means the guard let the verb through: what it then did is its own (the stubs show `update` and `rollback`
+  reaching bootc; `boot migrate` stopped at rime-boot-migrate's own state, E `[last-attempt-failed]`, A
+  `[unhealthy]`). So `rime` and `rime-update-check` agree in every state, and allow again only after a start whose
+  record says failed + rolled back. The one disagreement was the bridge itself: on `interrupted-start` #137's
+  `rime migrate check` refused `[start-unfinished]` (`A-int-check-readiness.txt`), while this branch's bridge does not
+  (`A-int-check-branch.txt`). The decision above has the fix.
+
 ## What the OVMF lab proved on the readiness image (bridge3, 2026-11-03, Secure Boot on)
 
 Evidence `/var/lab/rime-nix/artifacts/bridge3/` (`run-A.log`, `run-L.log`, `A/`, `L/`; the records of the second
@@ -307,6 +377,13 @@ exist yet).
   `a6fcdc2a182abdee7ec6c7e47ba28084d8017e8ca7e8db31b56f69332964d14b` (`artifacts/bridge3/readiness-image.txt`, and the
   guest's own `*-readiness.txt`). Optional for #137: the same `ecosystem = { no_update_news = true }` table in bootc's
   `files/desktop/hypr/rime/appearance.lua` (decision above), so the first NixOS login is quiet whatever starts first.
+- **Readiness release, topology-e (for #137, not pushed there):** re-copy this branch's `rime-bridge.py` as
+  `files/system/libexec/rime-migrate` (keep line 1 `#!/usr/bin/python3 -I`) and `tests/test_bridge_d2.py` as
+  `tests/rime-migrate/test_bridge_d2.py` (#137's copies are byte-identical to feat/nixos 06e715def's today). The change
+  in rime-migrate at 1a4070580: `record_refusal` (lines 1063-1068) reads `steps` only when it is a list, returns
+  `already-moved` first when `rec.get("done") is not None`, and allows when `"failed" in rec and last == "rolled
+  back"`; `cmd_start`'s handler (line 1763) records `state["failed"] = str(e) or type(e).__name__`. Nothing changes in
+  `rimed/rime/src/nixos_bridge.rs` or `files/system/libexec/rime-update-check`: they already read the record that way.
 - **Release pipeline, again:** `payload-sign.sh` needs `cmp` (diffutils) next to openssl.
 - **Desktop:** DONE (bridge3): the "updated" window is off (decision above).
 - **Lab host (not Rime):** RESOLVED by 2026-11-03: katana's `/proc/sys/kernel/modprobe` reads `/usr/sbin/modprobe`
