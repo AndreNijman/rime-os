@@ -93,9 +93,20 @@ let
   # bootc keeps only Rime's own entries (Containerfile.base:3147-3237): Hyprland's renamed "Rime Tiling",
   # niri "Rime Scrolling", labwc "Rime Floating", "Rime Safe Graphics". sway/labwc/hyprland-uwsm stock
   # entries are not offered. Gaming Mode comes from the gaming area through rime.desktop.extraSessions.
-  # Rime's session-only environment, on the Exec line of each of Rime's sessions (D7: not global, so GNOME, Plasma and
-  # COSMIC never see it). The compositor and everything it starts (the Shell, apps from the launcher) inherit it.
-  rimeSessionEnv = "${pkgs.coreutils}/bin/env QT_QPA_PLATFORMTHEME=qt6ct ELECTRON_OZONE_PLATFORM_HINT=auto";
+  # Rime's session-only environment, set by each of Rime's sessions (D7: not global, so GNOME, Plasma and COSMIC never
+  # see it). The compositor and everything it starts (the Shell, apps from the launcher) inherit it.
+  # The Exec line must stay ONE word: greetd runs a session as `/bin/sh -c "exec <argv joined by spaces>"` and
+  # rime-greet hands it `sh -lc <Exec>`, so `sh -lc` takes the first word of a longer Exec as its script and the rest
+  # become $0, $1 (an `env VAR=x compositor` Exec ran a bare `env`: no session; checks.desktop). So each session's
+  # Exec is a wrapper that sets the environment and execs the real command with its arguments.
+  rimeSessionWrapper = id: cmd: pkgs.writeShellScript "rime-session-${id}" ''
+    export QT_QPA_PLATFORMTHEME=qt6ct ELECTRON_OZONE_PLATFORM_HINT=auto
+    exec ${cmd} "$@"
+  '';
+  hyprlandSession = rimeSessionWrapper "hyprland" "${hyprland}/bin/start-hyprland";
+  niriSession = rimeSessionWrapper "niri" "${pkgs.niri}/bin/niri --session";
+  labwcSession = rimeSessionWrapper "labwc" "${pkgs.labwc}/bin/labwc";
+  safeGraphicsSession = rimeSessionWrapper "safe-graphics" "${sw}/libexec/rime-safe-graphics";
 
   rimeSessions = pkgs.runCommand "rime-sessions"
     {
@@ -108,7 +119,7 @@ let
       [Desktop Entry]
       Name=Rime Tiling
       Comment=Windows tile themselves and reflow as you open and close them (Hyprland)
-      Exec=${rimeSessionEnv} ${hyprland}/bin/start-hyprland
+      Exec=${hyprlandSession}
       Type=Application
       DesktopNames=Hyprland
       Keywords=tiling;wayland;compositor;
@@ -117,13 +128,15 @@ let
         cp ${files}/desktop/wayland-sessions/$f.desktop $d/$f.desktop
       done
       chmod u+w $d/*
-      sed -i 's|^Exec=niri |Exec=${rimeSessionEnv} ${pkgs.niri}/bin/niri |' $d/niri.desktop
-      sed -i 's|^Exec=labwc$|Exec=${rimeSessionEnv} ${pkgs.labwc}/bin/labwc|' $d/rime-labwc.desktop
+      sed -i 's|^Exec=niri --session$|Exec=${niriSession}|' $d/niri.desktop
+      sed -i 's|^Exec=labwc$|Exec=${labwcSession}|' $d/rime-labwc.desktop
       sed -i -f ${fhsToNixos} $d/rime-safe-graphics.desktop
-      sed -i 's|^Exec=|Exec=${rimeSessionEnv} |' $d/rime-safe-graphics.desktop
-      grep -qx 'Exec=${rimeSessionEnv} ${pkgs.niri}/bin/niri --session' $d/niri.desktop
-      grep -qx 'Exec=${rimeSessionEnv} ${pkgs.labwc}/bin/labwc' $d/rime-labwc.desktop
-      grep -qx 'Exec=${rimeSessionEnv} ${sw}/libexec/rime-safe-graphics' $d/rime-safe-graphics.desktop
+      sed -i 's|^Exec=${sw}/libexec/rime-safe-graphics$|Exec=${safeGraphicsSession}|' $d/rime-safe-graphics.desktop
+      grep -qx 'Exec=${niriSession}' $d/niri.desktop
+      grep -qx 'Exec=${labwcSession}' $d/rime-labwc.desktop
+      grep -qx 'Exec=${safeGraphicsSession}' $d/rime-safe-graphics.desktop
+      # One word per Exec (see rimeSessionWrapper).
+      if grep -E '^Exec=.*[[:space:]]' $d/*.desktop; then exit 1; fi
       # Session names are product names (tests/test-rime-greet-sessions.sh rule).
       if grep -iE '^Name=.*(hyprland|labwc|niri|sway)' $d/*.desktop; then exit 1; fi
     '';
@@ -672,9 +685,9 @@ in
         };
       };
       # The terminal (Ghostty, Alacritty, xdg-terminal-exec, $TERMINAL) is nix/modules/terminal.nix.
-      # Rime's session-only environment (QT_QPA_PLATFORMTHEME=qt6ct, ELECTRON_OZONE_PLATFORM_HINT=auto) is set on the
-      # Exec line of Rime's own sessions (rimeSessions), not globally: COSMIC sets qt5ct and does not evaluate with
-      # both, and Plasma must not be themed by qt6ct (docs/nixos/desktops.md D7).
+      # Rime's session-only environment (QT_QPA_PLATFORMTHEME=qt6ct, ELECTRON_OZONE_PLATFORM_HINT=auto) is set by the
+      # wrapper each of Rime's own sessions runs (rimeSessionWrapper), not globally: COSMIC sets qt5ct and does not
+      # evaluate with both, and Plasma must not be themed by qt6ct (docs/nixos/desktops.md D7).
       environment.etc = {
         # bootc: /etc/gtk-{3,4}.0/settings.ini. nixpkgs' GTK is built with sysconfdir = its own store
         # path, so /etc/gtk-N.0 is never read; GTK also reads $XDG_CONFIG_DIRS/gtk-N.0, and NixOS sets
