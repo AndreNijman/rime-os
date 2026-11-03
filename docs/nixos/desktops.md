@@ -739,9 +739,13 @@ Gaming; `Mode.Active` therefore reads the game's own tier while a power-saver ho
 each observed failing: `live_in_game` always the game's tier (both tests), `Mode.Active` ignoring the override,
 game enter ignoring a standing hold, and the `ActiveProfile` write recording no pick (the choice bus test).
 `tests/test-rimed-ui-boost.sh` (real rimed, `powerprofilesctl`, power-profiles-daemon 0.30) now expects
-`powerprofilesctl set` to be a tier pick for the session user and refused for anyone else. It needs the real
-`/sys/firmware` (under podman: `--security-opt unmask=/sys/firmware`); with podman's default mask rimed sees no
-`platform_profile` and four assertions fail on pristine main as well.
+`powerprofilesctl set` to be a tier pick for the session user and refused for anyone else. Under podman's default
+mask of `/sys/firmware` (an empty read-only tmpfs) it used to skip the fake ACPI bind silently, so rimed saw no
+`platform_profile` and four assertions failed later (also on pristine main; the workaround was
+`--security-opt unmask=/sys/firmware`). Since nix/small-fixes it mounts its own tree over a masked `/sys/firmware` and
+binds the fake `acpi` there, and its first assertion ("the fake sysfs ... is what rimed sees") now includes
+`platform_profile`, so a missed bind stops the run before rimed starts. `RIME_TEST_MASK_FIRMWARE=1` masks
+`/sys/firmware` the way podman does, inside the test's namespace, to prove that path.
 
 The Shell side (rime-shell `feat/nixos` e6fb6f98, which merges main's #51-#54 and `nix/settings-app`):
 PowerProfileService keeps `nix/settings-app`'s two backends (§13) and #54's "says why" (`error`, `errorDetail`,
