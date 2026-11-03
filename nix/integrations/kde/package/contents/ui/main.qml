@@ -11,7 +11,10 @@
     update waits. Everything is read by RimedModel.qml, which follows PropertiesChanged; this file only draws.
 
     Test hook: when a process owns org.rimeos.QuickSettingsTest on the session bus (only the VM tests run one), every
-    redraw is reported to it as JSON. Nothing is sent otherwise: the name is watched, not polled.
+    redraw is reported to it as JSON. Nothing is sent otherwise: the name is watched, not polled. That process can
+    also press the applet's controls: its signal Act(s) runs the function the control's click runs ("update",
+    "gaming"). A process that can own the name can make the same calls to rimed itself, as the same user, so the
+    hook gives it nothing new.
 */
 pragma ComponentBehavior: Bound
 
@@ -34,6 +37,14 @@ PlasmoidItem {
 
     function openSettings(page) {
         Qt.openUrlExternally("rime-settings:" + page);
+    }
+
+    // The Update button's click (and the test hook's "update").
+    function updateClicked() {
+        if (rimed.updateState === "restart")
+            root.restart();
+        else
+            rimed.applyUpdate();
     }
 
     function restart() {
@@ -112,7 +123,7 @@ PlasmoidItem {
                 enabled: rimed.updateSensitive
                 icon.name: rimed.updateState === "restart" ? "system-reboot" : "system-software-update"
                 text: rimed.updateSubtitle !== "" ? rimed.updateTitle + " — " + rimed.updateSubtitle : rimed.updateTitle
-                onClicked: rimed.updateState === "restart" ? root.restart() : rimed.applyUpdate()
+                onClicked: root.updateClicked()
             }
 
             Kirigami.Separator {
@@ -146,6 +157,24 @@ PlasmoidItem {
         busType: DBus.BusType.Session
         watchedService: root.testName
         onRegisteredChanged: root.report()
+    }
+
+    // The test process presses a control: the same function its click runs.
+    DBus.SignalWatcher {
+        busType: DBus.BusType.Session
+        service: root.testName
+        path: "/org/rimeos/QuickSettingsTest"
+        iface: root.testName
+
+        function dbusAct(action) {
+            const a = String(action);
+            if (a === "update" && rimed.updateSensitive)
+                root.updateClicked();
+            else if (a === "gaming")
+                rimed.toggleGaming();
+            else
+                console.warn("rime: test hook: nothing to press for", a);
+        }
     }
 
     function report() {
