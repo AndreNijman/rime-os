@@ -43,7 +43,7 @@
 #
 #  No root, no block device, nothing on this machine's bus. The podman legs
 #  run against the live env's own base image (Containerfile.installer's FROM,
-#  registry.fedoraproject.org/fedora:45 today) with the fixtures mounted
+#  a digest-pinned registry.fedoraproject.org/fedora:45) with the fixtures mounted
 #  read-only (one `podman run --rm`, and one throwaway image booted with
 #  --systemd=always, removed afterwards); they need the Fedora mirrors for dnf.
 #  Without podman (or a reachable registry/mirror) they print SKIP, and CI
@@ -98,6 +98,15 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 # ─────────────────────────────────────────────────────────────────────────────
+section "the live env's base image is pinned"
+# A tag (fedora:45) moves under the build: the ISO a release builds would not
+# be the one its PR tested. Only a digest is accepted.
+if [[ "$CF_FROM" =~ ^registry\.fedoraproject\.org/fedora@sha256:[0-9a-f]{64}$ ]]; then
+    ok "Containerfile.installer's FROM is a fedora image pinned by digest"
+else
+    bad "Containerfile.installer's FROM is a fedora image pinned by digest" "got '$CF_FROM'"
+fi
+
 section "cage owns tty1 against every console that could take it"
 # ─────────────────────────────────────────────────────────────────────────────
 # One systemd property can be split over several lines; collect them all.
@@ -160,10 +169,10 @@ fi
 # script's own `set -euo pipefail` with `sudo` as a pass-through.
 ISOBLOCK="$W/iso-asserts.sh"
 # shellcheck disable=SC2016  # a literal $WORK in the anchor, not an expansion
-sed -n '/^sudo test -L "\$WORK\/rootfs\/etc\/systemd\/system\/getty@tty1\.service"/,/^esac$/p' \
+sed -n '/^\[ "\$(sudo readlink "\$WORK\/rootfs\/etc\/systemd\/system\/getty@tty1\.service")" = \/dev\/null \]/,/^esac$/p' \
     "$ISO" > "$ISOBLOCK"
 n=$(grep -c 'BUILD ASSERT FAILED' "$ISOBLOCK")
-if [ "$n" -lt 4 ] || ! grep -x 'esac' "$ISOBLOCK" >/dev/null; then
+if [ "$n" -lt 5 ] || ! grep -x 'esac' "$ISOBLOCK" >/dev/null; then
     bad "build-live-iso.sh's console asserts are extracted" "$n asserts found; the anchors have moved"
     finish; exit 1
 fi
@@ -172,7 +181,7 @@ mk_rootfs() {  # $1 = case; then name=target pairs under etc/systemd/system
     local root="$W/iso/$1" kv; shift
     local d="$root/rootfs/etc/systemd/system"
     mkdir -p "$d"
-    for kv in "$@"; do ln -s "${kv#*=}" "$d/${kv%%=*}"; done
+    for kv in "$@"; do mkdir -p "$(dirname "$d/${kv%%=*}")"; ln -s "${kv#*=}" "$d/${kv%%=*}"; done
     printf '%s' "$root"
 }
 iso_case() {  # $1 = what  $2 = expected message ('' = must pass)  $3.. = links
@@ -193,6 +202,10 @@ K1='kmsconvt@tty1.service=/dev/null'
 AV='autovt@.service=/usr/lib/systemd/system/getty@.service'
 iso_case "a live env with tty1 masked under every name and autovt@ = getty@" '' "$G1" "$A1" "$K1" "$AV"
 iso_case "a live env whose getty@tty1 is not masked" 'getty@tty1 is not masked' "$A1" "$K1" "$AV"
+iso_case "a live env whose getty@tty1 is a link but not a mask" 'getty@tty1 is not masked' \
+    'getty@tty1.service=/usr/lib/systemd/system/getty@.service' "$A1" "$K1" "$AV"
+iso_case "a live env where getty.target still wants getty@tty1" 'getty.target still wants getty@tty1' \
+    "$G1" "$A1" "$K1" "$AV" 'getty.target.wants/getty@tty1.service=/usr/lib/systemd/system/getty@.service'
 iso_case "a live env whose autovt@tty1 is not masked" 'autovt@tty1 is not masked' "$G1" "$K1" "$AV"
 iso_case "a live env whose autovt@tty1 is a link but not a mask" 'autovt@tty1 is not masked' \
     "$G1" 'autovt@tty1.service=/usr/lib/systemd/system/getty@.service' "$K1" "$AV"

@@ -556,8 +556,16 @@ for u in rime-installer.service seatd.service; do
   sudo test -L "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/$u" \
     || { echo "BUILD ASSERT FAILED: $u is not enabled in the live rootfs"; exit 1; }
 done
-sudo test -L "$WORK/rootfs/etc/systemd/system/getty@tty1.service" \
+# Masked = a link to /dev/null, like the two below. `test -L` alone passed any
+# link there, including one to getty@.service, which ENABLES the getty it was
+# meant to mask.
+[ "$(sudo readlink "$WORK/rootfs/etc/systemd/system/getty@tty1.service")" = /dev/null ] \
   || { echo "BUILD ASSERT FAILED: getty@tty1 is not masked — it would fight cage for tty1"; exit 1; }
+# Nothing wants a console on tty1 (Containerfile.installer removes the link its
+# getty@ enable plants, DefaultInstance=tty1). -L: a dangling link counts too.
+if sudo test -L "$WORK/rootfs/etc/systemd/system/getty.target.wants/getty@tty1.service"; then
+  echo "BUILD ASSERT FAILED: getty.target still wants getty@tty1 — a console is asked for on cage's tty1"; exit 1
+fi
 # autovt@tty1 must be masked too: systemd 262 loads a unit referenced as
 # autovt@tty1 through the alias, as the live getty@ template, and the getty@tty1
 # mask above is then ignored (see Containerfile.installer). Masked = /dev/null.
