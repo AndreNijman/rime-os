@@ -442,7 +442,7 @@ room for it.
 step) onto a fresh 40 GiB disk, twice: btrfs mounted `compress-force=zstd:3` (the @nix mount of D2/D9) and ext4.
 It records `df -B1` used after the install and again after `nix store optimise` (a running Rime optimises every path it
 adds, `auto-optimise-store`), compsize on btrfs, and the NAR size and path count from the installed store's own
-database. Measurement at this branch (artifacts/updates2/measure-1/summary.tsv, run 2026-11-03, 26 minutes):
+database. Measurement at this branch (artifacts/updates2/measure-1/summary.tsv, run 2026-11-03: the test script took 1,881 s):
 
 | variant | paths | unpacked (NAR) | btrfs, optimised | ratio | ext4, optimised | ext4 / NAR |
 |---|---|---|---|---|---|---|
@@ -487,5 +487,12 @@ updates-and-release.md §11.5 said "a machine on ext4 is never told an update fi
 
 The measured toplevels carry `/etc/rime/catalogue.json`, which renders the floors: changing `floors.nix` changes the
 toplevels, so the measurement was run again after the edit (§12 is the measurement of the tree before the edit; the
-re-run at the committed head must land within 3 % of it, which is what the check asserts). Not in hosted CI
+re-run at the committed head must land within 3 % of it, which is what the check asserts). **Re-run at this branch's
+head** (artifacts/updates2/measure-2/summary.tsv, `checks.update-floors` drv `id7kx2xc…`, output valid, its result in
+`update-floors-head.check.txt`): every path count and NAR size identical, every on-disk figure within 0.07 % of the
+table above (`plain` btrfs 5,422,972,928 B, `plain-virtualization` 5,567,815,680 B), every floor unchanged; the four
+mutants fail at that head (`update-floors-mutant-*-head.log`). The first re-run failed on a driver artefact, not a
+size: the closure's `nix path-info --json` (megabytes) read back through the test driver came back as a valid but
+shorter document (1839 of 1923 paths), so the check now sums inside the VM with `jq` and cross-checks the path count
+against `nix-store -qR`. Not in hosted CI
 (`nix/ci/checks-not-in-ci.txt`): the variants carry the Rime kernel, which no binary cache holds yet.

@@ -51,7 +51,7 @@ let
         # install copies them from there, as the installer copies from its cache.
         virtualisation.additionalPaths = builtins.attrValues tops;
         nix.settings.experimental-features = [ "nix-command" ];
-        environment.systemPackages = [ config.system.build.nixos-install pkgs.btrfs-progs pkgs.compsize ];
+        environment.systemPackages = [ config.system.build.nixos-install pkgs.btrfs-progs pkgs.compsize pkgs.jq ];
       };
 
     testScript = ''
@@ -88,16 +88,22 @@ let
                   if fs == "btrfs":
                       machine.succeed("btrfs filesystem sync /mnt")
                   optimised = used()
-                  info = json.loads(machine.succeed(
-                      f"nix path-info --json --json-format 1 --recursive --store 'local?root=/mnt' {t}"))
-                  nar = sum(i["narSize"] for i in info.values())
+                  # Summed inside the VM: the whole closure's JSON (megabytes) read back through the driver once
+                  # came back as a valid but SHORTER document (1839 of 1923 paths, 2026-11-03), so only the two
+                  # numbers cross, and the path count is checked against a second query of the same database.
+                  machine.succeed(
+                      f"nix path-info --json --json-format 1 --recursive --store 'local?root=/mnt' {t} > /tmp/info.json")
+                  npaths, nar = map(int, machine.succeed(
+                      "jq -r '[length, ([.[] | .narSize] | add)] | @tsv' /tmp/info.json").split())
+                  qr = int(machine.succeed(f"nix-store --store 'local?root=/mnt' -qR {t} | wc -l").strip())
+                  assert npaths == qr, f"{v} on {fs}: path-info lists {npaths} paths, nix-store -qR {qr}"
                   comp = ""
                   if fs == "btrfs":
                       comp = machine.succeed("compsize -b /mnt/nix/store | awk '$1 == \"TOTAL\" { print $3 }'").strip()
                   # The profile points at the variant: this is the system the disk would boot.
                   assert machine.succeed("readlink -f /mnt/nix/var/nix/profiles/system").strip() == t
                   machine.succeed("umount /mnt")
-                  row = [v, fs, str(len(info)), str(nar), str(empty), str(installed), str(optimised), comp or "-", t]
+                  row = [v, fs, str(npaths), str(nar), str(empty), str(installed), str(optimised), comp or "-", t]
                   print("\t".join(row))
                   rows.append(row)
 
