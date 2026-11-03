@@ -595,7 +595,7 @@ Logs and screenshots: `/var/lab/rime-nix/artifacts/desktops/vm/` (`<run>.log`, `
   recently") and a sleep delay "GNOME needs to lock the screen"; gsd-media-keys the power/suspend/hibernate keys
   (block); gnome-shell, ModemManager, NetworkManager, rtkit and UPower sleep delays. GNOME shows "Screen Lock
   disabled: Screen Locking requires the GNOME display manager" at login (`gnome-session.png`; §12.4), and nothing owns
-  `org.gnome.DisplayManager` (`busctl status` in the log).
+  `org.gnome.DisplayManager` (`busctl status` in the log). Fixed in wave 6: rime-gnome-unlock owns it (§12.9).
 - **COSMIC** (`cosmic-3.log`, PASS, 509 s, with the COSMIC Store left out; `cosmic-2.log` the run before it;
   screenshots `shots-cosmic-3/`): installed live from the running release; logind `Desktop=cosmic Type=wayland
   Service=greetd`, `XDG_CURRENT_DESKTOP=COSMIC`; secrets owner gnome-keyring; `com.system76.PowerDaemon` has no
@@ -623,7 +623,7 @@ memory) and greetd restarted, because the test cannot pick a session with the ke
 
 | What | Why |
 |---|---|
-| **No screen lock in GNOME under rime-greet.** GNOME Shell's screen shield needs GDM (the notification "Screen Lock disabled: Screen Locking requires the GNOME display manager" at login, `shots-gnome-7/gnome-session.png`; gnome-shell 50.4 creates the shield only when `LoginManager.canLock()`, which asks `org.gnome.DisplayManager`, answers **(checked, js/ui/main.js:237, js/misc/loginManager.js:38)**). Rime keeps greetd + rime-greet for GNOME too and ships no locker for it in this piece. | D8 (one login path, one PAM stack, Rime's recovery watchdog) outweighs it for now, and the alternatives each change more than this piece should: run GDM only for GNOME (two display managers), patch gnome-shell's check (a fork of a module, against D1), or start Rime's own lock from GNOME (not designed for Mutter, no layer-shell). Handed over (open-items, build:desktops): until it is fixed, nothing locks a GNOME session, and the release note that introduces desktops must say so. |
+| **No GDM for GNOME's lock; a small `org.gnome.DisplayManager` instead** (wave 6, `nix/desktop-lock`; replaces the piece-1 row "No screen lock in GNOME under rime-greet"). gnome-shell 50.4 builds its screen shield only when `LoginManager.canLock()` gets an answer from `org.gnome.DisplayManager` **(checked, js/ui/main.js:237, js/misc/loginManager.js:38)**, and its unlock dialog checks the password through libgdm's reauthentication channel (`Gdm.Client` → `Manager.OpenReauthenticationChannel` → `UserVerifier`). Rime ships `rime-gnome-unlock` (`nix/pkgs/rime-gnome-unlock`, `nix/desktops/gnome-lock.nix`, on only while `rime.desktops.gnome.enable`): a root daemon that owns the name and does what gdm does for a session it did not start (gdm-manager.c 2357-2383, the "unmanaged session" temporary reauthentication path). The caller's uid and pid come from the bus; the session from logind (`GetSessionByPID`, else the user's `Display`), and it must be the caller's own local, active, wayland/x11 `user` session; a private peer socket only that uid may connect to; `gdm-password` only; PAM `pam_authenticate` with `PAM_DISALLOW_NULL_AUTHTOK` through the `rime-gnome-unlock` service (`auth substack login`, every other stack `pam_deny`); success only when PAM ends with the same user; then logind `UnlockSession`. Refused: `OpenSession` (no greeter), another user's name, a remote/inactive/greeter session, other PAM services. "Switch User" is off (`org.gnome.desktop.lockdown disable-user-switching`): it asks the display manager for a second greeter, which greetd cannot give. | GDM cannot sit beside greetd: `gdm_manager_start` always starts the local display factory (gdm-manager.c:962/946), which puts a greeter on every graphical seat (gdm-local-display-factory.c:532), and no setting turns that off (gdm-settings-keys.h has none). Patching gnome-shell's check is a fork (D1); a second display manager breaks D8. The daemon is 628 lines of Python with 33 private-bus tests driven by GNOME's own libgdm client, four unit mutants and two VM mutants (§12.9). It fails closed: the only path that unlocks is logind `UnlockSession` after `pam_authenticate` returned success for the session's own user; every error, timeout, cancel or unknown caller ends in a refusal (unit tests). If the daemon is off, GNOME is back to having no lock screen, and the check fails (VM mutant `no-shim`). |
 | **Rime's session-only environment only in Rime's four wrapped sessions** (Tiling, Scrolling, Floating, Safe Graphics). `rime-gaming` and `extraSessions` do not get `QT_QPA_PLATFORMTHEME`/`ELECTRON_OZONE_PLATFORM_HINT`. | Gaming Mode is gamescope + Steam (no Qt theme to follow); an extra session is someone else's. Before this piece every session got them globally, so Gaming Mode loses two variables it did not use. |
 | **No activation allowlist entry for the user `nixos-activation.service` restart.** | `switch-to-configuration` restarts it in every user manager on a real switch, but its dry-activate returns before that step (`do_user_switch`), so the classifier never sees it; the KDE run shows the restart is harmless to an open Hyprland session. |
 | **COSMIC Initial Setup stays.** It opens at the first COSMIC login. | The COSMIC module lists `cosmic-initial-setup` among the packages without which COSMIC fails to start, and excluding a core package is unsupported upstream (it warns). GNOME's initial setup is off (D15) because GNOME's module makes that supported. |
@@ -631,8 +631,10 @@ memory) and greetd restarted, because the test cannot pick a session with the ke
 
 ### 12.5 Not proven by this piece
 
-- Screen lock in KDE and COSMIC under rime-greet (not exercised by the VM tests); GNOME has none (§12.4).
+- ~~Screen lock in KDE and COSMIC under rime-greet; GNOME has none.~~ Proven by `checks.desktop-lock-{gnome,kde,cosmic}` (§12.9).
 - What a lid close does in each desktop: the VM tests record the inhibitors, a VM has no lid.
+- A real suspend and resume while locked: the VM aborts s2idle, so `checks.desktop-lock-gnome` proves only that
+  the lock is set before the kernel starts to suspend (§12.9).
 - `checks.polish` was not re-run: it boots three VMs at once, over this host's two-VM limit for this work.
 - Real hardware: GNOME/KDE/COSMIC on katana's NVIDIA GPU and its panel.
 - The COSMIC battery applet showing rimed's profile: the VM has no battery, Initial Setup covers the panel in the
@@ -753,6 +755,43 @@ order change above does not reach it. The merge also drops a `busctl` read that 
 started (it carried the old tier back under the press, about one run in five of `run-power-profile-test.sh`).
 rime-shell `nix/update-indicator`, `nix/settings-apply-bar` and `nix/smooth-motion` were the same changes as main's
 #51, #52 and #53 and were not merged.
+
+### 12.9 Screen lock under rime-greet (wave 6, branch `nix/desktop-lock`)
+
+GNOME locks through `rime-gnome-unlock` (decision and why: §12.4); Plasma and COSMIC lock with their own lockers, now
+proven. Evidence in `/var/lab/rime-nix/artifacts/lock/` (`vm-<desktop>-4.log`, screenshots `shots-<desktop>-4/`).
+
+| Check | What it proves | Mutants (each observed failing) |
+|---|---|---|
+| `checks.gnome-unlock` (the package; its installCheck runs 33 tests on a private dbus-daemon with a fake logind, pam_wrapper + pam_matrix, and GNOME's own libgdm `Gdm.Client` as the caller) | right password unlocks (logind `UnlockSession`), wrong one refused with GNOME's message and no unlock; another uid on the bus or on the private socket turned away; another user's name, root, a remote, inactive, greeter or other-uid session refused; `OpenSession` refused; only `gdm-password`; PAM ending with another user refused; the daemon refuses to run as non-root; no `__pycache__` in `$out` | `.mutants.any-peer` (1 test fails), `pam-user-unchecked` (2), `remote-allowed` (several), `other-user-channel` (2): `unit-mutant-*.log` |
+| `checks.desktop-lock-gnome` (VM, 154 s of test script) | login through rime-greet; `org.gnome.DisplayManager` owned by rime-gnome-unlock, no gdm process; GNOME Shell deletes the "Screen Lock disabled" marker (`gnome-session.png`: no notice); Quick Settings shows the lock button (`gnome-quick-settings.png`); locks from `loginctl lock-session`, Super+L, `org.gnome.ScreenSaver.Lock` and the idle timeout (10 s delay, locked within 10 s); wrong password refused twice (`pam_unix(rime-gnome-unlock:auth): authentication failure`, `gdm-password refused (PAM 7)`, still locked, shield up), right one unlocks (`unlocked by gdm-password`, LockedHint no, shield down); suspend: `SetLockedHint(true)` 0.10 s after the request and 0.38 s BEFORE `PM: suspend entry`, still locked afterwards; sessions and seats unchanged (also after suspend); no new error-priority line; no daemon warning but pam_gnome_keyring's; no socket left behind | `.mutants.pam-ignored` ("a wrong password unlocked the session"), `.mutants.no-shim` (no owner of `org.gnome.DisplayManager`): `vm-mut-gnome-*.log` |
+| `checks.desktop-lock-kde` (VM, 105 s) | Plasma's kscreenlocker: `loginctl lock-session` and Meta+L lock; wrong password refused (`pam_unix(kde:auth)`), right one unlocks; sessions, seats, error journal unchanged | none of its own: it tests Plasma's locker, which Rime does not change |
+| `checks.desktop-lock-cosmic` (VM, 105 s) | cosmic-greeter's locker: `loginctl lock-session` and Super+Escape lock; wrong password refused (`pam_unix(cosmic-greeter:auth)`, "Incorrect password" on screen), right one unlocks; sessions, seats unchanged; the error journal gains only cosmic-greeter's own "no rectangle for surface Id(N)" (logged on every lock, src/common.rs:426: the lock surface opens before its rectangle is known; harmless) | as KDE |
+
+Found while building:
+
+- **cosmic-greeter 1.11 never sets logind's LockedHint**: it stays `no` while COSMIC is locked (both rounds in
+  `vm-cosmic-4.log`). Its own record of the lock is `$XDG_RUNTIME_DIR/cosmic-greeter-<session>.lock` (src/locker.rs),
+  which the check reads. Anything that asks logind whether a COSMIC session is locked gets the wrong answer; rule 6
+  (§3.5) is not affected today because it asks only sessions that run Rime Shell (open-items).
+- **Plasma's lock screen offers "Switch User"**, which needs a display manager that can start a second greeter;
+  greetd cannot (`shots-kde-4/kde-wrong-password.png`; open-items, not changed here). GNOME's is turned off (§12.4).
+- **The VM cannot finish a suspend**: its virtio devices refuse s2idle (-95) and the kernel aborts. The check proves
+  the lock comes before `PM: suspend entry`, not a real sleep and wake; that is hardware (§12.5).
+- pam_gnome_keyring (in `login`, which `rime-gnome-unlock`'s PAM service substacks, as GDM's `gdm-password` does) logs
+  two warnings per right-password unlock inside the daemon's unit ("unable to locate daemon control file", "stashed
+  password to try later in open session"): from a root daemon without the user's environment it does not find the
+  user's keyring daemon, so the unlock password is not handed to gnome-keyring. Nothing depends on it: gnome-keyring
+  is unlocked at login by greetd's PAM, and a screen lock does not lock it. The check allows only `gkr-pam:` lines.
+
+CI: all four checks run in the hosted workflow (none listed in `nix/ci/checks-not-in-ci.txt`). Each VM is one
+system on the stock kernel (closures 9.8 GB GNOME, 11.1 GB KDE, 11.2 GB COSMIC, measured with `nix path-info -S` of
+the test machine's toplevel), the same shape as `settings-app-gnome`, which already runs there; a check leg starts
+with at least 40 GB free (`free-disk-space` `required-gb: "40"`). The desktops-install checks stay out because they
+hold four systems twice over.
+
+Release note (for the PR that brings desktops): GNOME now locks the screen, from Super+L, Quick Settings, the idle
+timeout and before suspend; switching users from GNOME's lock screen is not available.
 
 ## 13. Settings piece: decisions taken while building
 
