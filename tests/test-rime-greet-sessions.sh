@@ -557,4 +557,68 @@ else
 fi
 fi
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+section "§8 the environment each session starts with, lifted out of the shipped QML"
+# ─────────────────────────────────────────────────────────────────────────────
+# The greeter hands greetd an environment with the command (Greetd.launch(argv,
+# env)): XDG_SESSION_TYPE=wayland for every session, plus XDG_CURRENT_DESKTOP and
+# XDG_SESSION_DESKTOP for a desktop whose file has DesktopNames (GNOME, Plasma,
+# COSMIC). Rime's own sessions must start with exactly the environment they had
+# apart from XDG_SESSION_TYPE (docs/nixos/desktops.md §4.1). _addSession and
+# _sessionEnv are extracted and run over the enumeration of this repo's session
+# files, the upstream hyprland shape from §2, and desktop-shaped entries.
+if ! command -v node >/dev/null 2>&1; then
+    skp "the greeter's session environment is extractable and runnable"
+else
+printf '[Desktop Entry]\nName=GNOME\nExec=gnome-session\nType=Application\nDesktopNames=GNOME\n' > "$STAGE/gnome.desktop"
+printf '[Desktop Entry]\nName=Plasma (Wayland)\nExec=startplasma-wayland\nDesktopNames=KDE\n' > "$STAGE/plasma.desktop"
+printf '[Desktop Entry]\nName=Something Else\nExec=something\n' > "$STAGE/plain-no-names.desktop"
+printf '#!/bin/sh\nexit 0\n' > "$STUBS/gamescope"; chmod +x "$STUBS/gamescope"
+env_lines="$(run_enum "$STUBS")"
+rm -f "$STAGE/gnome.desktop" "$STAGE/plasma.desktop" "$STAGE/plain-no-names.desktop" "$STUBS/gamescope"
+ENV_JS="$WORK/sessionenv.js"
+python3 - "$GREETER" "$ENV_JS" <<'PY'
+import re, sys
+src = open(sys.argv[1], encoding="utf-8").read()
+def fn(name):
+    start = src.find("    function %s(" % name)
+    if start < 0:
+        sys.exit("no %s in the greeter" % name)
+    end = src.find("\n    }", start)
+    return src[start:end + len("\n    }")]
+m = re.search(r'readonly\s+property\s+var\s+ownSessions:\s*(\[[^\]]*\])', src)
+if not m:
+    sys.exit("no ownSessions in the greeter")
+harness = fn("_addSession") + "\n" + fn("_sessionEnv") + """
+const ctx = { sessions: [], ownSessions: %s, _selectWanted() {} };
+const lines = require("fs").readFileSync(0, "utf-8").split("\\n");
+for (const l of lines) _addSession(l);
+for (const s of ctx.sessions) console.log(s.id + "\\t" + _sessionEnv(s).join(" "));
+""" % m.group(1)
+open(sys.argv[2], "w", encoding="utf-8").write(harness)
+PY
+is "the greeter's session environment is extractable and runnable" "0" "$?"
+envs="$(printf '%s\n' "$env_lines" | node "$ENV_JS" 2>&1)"
+env_of() { printf '%s\n' "$envs" | awk -F'\t' -v id="$1" '$1 == id { print $2 }'; }
+for id in hyprland niri rime-labwc rime-safe-graphics rime-gaming; do
+    is "Rime's own $id gets XDG_SESSION_TYPE only" "XDG_SESSION_TYPE=wayland" "$(env_of "$id")"
+done
+is "GNOME gets its desktop names and its session id" \
+   "XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=GNOME XDG_SESSION_DESKTOP=gnome" "$(env_of gnome)"
+is "Plasma's DesktopNames becomes XDG_CURRENT_DESKTOP" \
+   "XDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=KDE XDG_SESSION_DESKTOP=plasma" "$(env_of plasma)"
+is "a session with no DesktopNames gets XDG_SESSION_TYPE only" "XDG_SESSION_TYPE=wayland" "$(env_of plain-no-names)"
+# Several names: the separator becomes ":", as GDM writes it.
+multi="$(printf 'cosmic\tCOSMIC\tstart-cosmic\tCOSMIC;Pop;\n' | node "$ENV_JS" 2>&1)"
+is "several DesktopNames are joined with ':'" \
+   "$(printf 'cosmic\tXDG_SESSION_TYPE=wayland XDG_CURRENT_DESKTOP=COSMIC:Pop XDG_SESSION_DESKTOP=cosmic')" "$multi"
+# The launch passes the environment it computed.
+if grep -F 'if (e) Greetd.launch(a, e)' "$GREETER" >/dev/null; then
+    ok "the greeter launches with the environment"
+else
+    bad "the greeter launches with the environment" "no Greetd.launch(a, e) in the greeter"
+fi
+fi
+
 finish
