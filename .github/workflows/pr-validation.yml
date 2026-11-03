@@ -2462,6 +2462,21 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-shell-autostart.sh
 
+      # The weekly TRIM wrapper, with fstrim stubbed: it lists every mounted
+      # filesystem (fstab or not), trims one again when system sleep
+      # interrupted it ("Unknown error 512"), and lets real errors fail.
+      - name: Run fstrim-wrapper assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-fstrim.sh
+
+      # plymouthd crashed hiding the splash when the display driver came up
+      # after the initramfs; the image ships Fedora's plymouth rebuilt with
+      # the fix. Static: the patch, the build that applies it, and the guards
+      # that refuse any other plymouth.
+      - name: Run plymouth keyboard-fix assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-plymouth-keyboard.sh
+
       - name: Run input-settings assertions
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-input.sh
@@ -4675,6 +4690,8 @@ jobs:
             tests/test-rime-firstrun.sh \
             tests/test-rime-shell-autostart.sh \
             files/system/libexec/rime-shell-autostart \
+            tests/test-rime-fstrim.sh files/system/libexec/rime-fstrim \
+            tests/test-rime-plymouth-keyboard.sh \
             files/system/libexec/rime-secrets-start \
             tests/test-rime-secrets-start.sh tests/test-rime-secrets-guard.sh \
             tests/test-rime-keyring-session-start.sh \
