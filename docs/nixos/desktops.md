@@ -330,8 +330,9 @@ icon. It installs from `feat/nixos`'s rime-shell input in every system (also Rim
 **Shell power service.** `PowerProfileService.qml` polls `org.rimeos.Rimed1 Tier` with busctl every 4 s and sets via
 `rime tier` **(checked)**. Once rimed serves the PPD API (§7), it uses Quickshell's own
 `Quickshell.Services.UPower.PowerProfiles` (`profile`, `hasPerformanceProfile`, `degradationReason`, `holds`
-**(checked, qmltypes)**): event-driven, no polling. It falls back to the busctl path when the bus name has no owner
-(a machine on an older rimed), so the two pieces can land in either order.
+**(checked, qmltypes)**): event-driven, no polling. It falls back to the busctl path when the bus name is not rimed's:
+no owner (a machine on an older rimed) or another daemon's (bootc enables power-profiles-daemon beside rimed), so the
+two pieces can land in either order and bootc keeps driving rimed (§12, verification).
 
 ---
 
@@ -739,3 +740,136 @@ each observed failing: `live_in_game` always the game's tier (both tests), `Mode
 game enter ignoring a standing hold, and the `ActiveProfile` write recording no pick (the choice bus test).
 `tests/test-rimed-ui-boost.sh` (real rimed, `powerprofilesctl`, power-profiles-daemon 0.30) now expects
 `powerprofilesctl set` to be a tier pick for the session user and refused for anyone else.
+
+## 13. Settings piece: decisions taken while building
+
+Andre asked for no questions; each call below was made while building rime-shell `nix/settings-app` (ab8ca519) and
+rime-os `nix/settings-pkg`, with the reason.
+
+**Rime Settings (rime-shell).**
+
+- **About is app-only.** In the Shell, About lives in the bar's menu; in the app it is the only place that names the
+  release, so the app lists it and the Shell's Nexus does not grow a second copy.
+- **Desktop sizes on the Desktops page come from the catalogue's floors (`store_bytes`)**, the same figures `rime
+  install <desktop>` compares, never a second estimate in QML.
+- **Shell-only pages** (`PageRegistry` `shellOnly`): Appearance, Layout, Display, Input, Keybinds, Misc. Every kept page
+  was read for `hyprctl` and Hyprland IPC; run-settings-app-test.sh puts a `hyprctl` stub on PATH and opens every page.
+  The Display-left-in mutant is caught by the listing assertions only (opened under labwc, Display calls no stub);
+  the stub assertion itself is shown to fail by the `hyprctl-page` mutant (a kept page running `hyprctl monitors -j`),
+  added in verification.
+- **`rime-settings` takes `rime-settings:<page>` URLs** as well as a bare page, so KDE's `Qt.openUrlExternally` and the
+  `.desktop` file's `%u` reach the same code; an empty page opens the app's first page.
+- **The `.desktop` file names one main category** (`Settings;DesktopSettings;`), not `Settings;System;`: two main
+  categories put it in two menus (desktop-file-validate's hint, ab8ca519).
+- **PowerProfileService** follows Quickshell's UPower `PowerProfiles` (the PPD API rimed serves, §7) and falls back to
+  `Rimed1.Power.Tier` while that name is not rimed's: the two pieces land in either order. As first built the check
+  was `NameHasOwner` ("no owner = older rimed"), which is wrong on bootc: `Containerfile.core` enables
+  power-profiles-daemon, which owns the name beside rimed (katana: `NameHasOwner` = true, the unit active), so the
+  Shell would have set PPD's profile and never reached rimed's tier. Fixed in verification (rime-shell 0d5aac66): ONE
+  busctl call sent to the power-profiles name for rimed's own object (`Properties.Get org.rimeos.Rimed1.Power Tier` at
+  `/org/rimeos/Rimed1`), which only rimed answers; on katana's bootc it fails ("Object does not exist at path
+  /org/rimeos/Rimed1"), so bootc takes the fallback. Since the wave-5 integration (rime-os main #139, §12.8) bootc
+  masks power-profiles-daemon and rimed owns the power-profiles name there too, so this check finds rimed on both
+  systems; it stays as the guard for a system that runs the daemon on purpose (`RIMED_POWER_PROFILES=0`).
+
+**Quick settings (rime-os `nix/integrations/`).**
+
+- **Restart goes through each desktop's own dialog**: GNOME `org.gnome.SessionManager.Reboot` (its countdown dialog),
+  Plasma `org.kde.LogoutPrompt.promptReboot`, COSMIC `cosmic-osd restart` (what cosmic-applet-power runs). A desktop's
+  restart dialog knows about unsaved work; a direct `systemctl reboot` would not.
+- **Update item titles differ by desktop, on purpose.** GNOME's quick toggle has a title and a subtitle, so it reads
+  "Update" / "Rime 2026.11.04"; Plasma's popup and COSMIC's menu have one line ("Update to 2026.11.04" in Plasma,
+  title and subtitle joined in COSMIC). The states shown are the same everywhere: available (clickable),
+  downloading/installing (shown, not clickable), restart (clickable); up-to-date, deferred, failed and unknown hide it
+  (Rime Settings' Updates page says why an update failed or waits).
+- **Test hook**: an integration reports what it draws to `org.rimeos.QuickSettingsTest` on the session bus
+  (`Report(ss)`), only while that name has an owner, which it watches (no polling). Only the VM tests own that name.
+- **GNOME's power property** read by the VM test is PPD's `ActiveProfile` on the same proxy GNOME's own power menu uses;
+  Plasma's is powerdevil's (`org.kde.Solid.PowerManagement.Actions.PowerProfile currentProfile`).
+- **GNOME `enabled-extensions`**: one dconf key, so the GNOME entry in `nix/desktops` (piece 1's file) now lists both
+  `kimpanel@kde.org` and `rime@rimeos.org`; a second dconf database would hide one list behind the other.
+  `checks.settings-integrations-eval` fails a variant with two lists.
+- **GNOME `shell-version`** is written from `gnome-shell.version`'s major and the build asserts that major is in
+  `knownMajors` (50): a nixpkgs move to 51 fails the build until someone reads 51's `quickSettings.js`.
+- **KDE: pure QML on `org.kde.plasma.workspace.dbus`**, no C++ plugin to build. Two facts about that module (6.8.2),
+  both found by experiment: `asyncCall`'s `signature` must be a struct (`"(s)"`, `"(ssv)"`) whenever there are
+  arguments, and it cannot set `ALLOW_INTERACTIVE_AUTHORIZATION` on a call. Open Rime Settings uses
+  `Qt.openUrlExternally("rime-settings:<page>")` rather than `KIO::ApplicationLauncherJob` (C++ only).
+- **KDE's Update click and polkit (handover to rimed):** because the plasma module cannot ask for interactive
+  authorization, `Updates.Apply` (`auth_admin_keep`) from Plasma reaches rimed without the flag. rimed's polkit check
+  for `Apply` (and `Mode.Set`) must pass `AllowUserInteraction` whatever the message flag says, or Plasma's click is
+  refused with `NotAuthorized` instead of showing Plasma's polkit agent. GNOME's and COSMIC's calls set the flag.
+- **COSMIC: two crates.** `rime-cosmic-model` (zbus only) holds every D-Bus read and both actions and is what the
+  unit test compiles in about a minute; `cosmic-applet-rime` (libcosmic, about 4 minutes) only draws. The applet
+  uses `tokio::spawn` from `update()` with `SingleThreadExecutor`, the pattern every shipped cosmic-applets applet
+  uses (checked in cosmic-applets 1.11.0).
+- **COSMIC panel default**: nixpkgs' cosmic-panel installs no `share/cosmic`, so cosmic-panel's own compiled default
+  is what a new user gets. Rime installs cosmic-panel's `data/default_schema` (Panel and its entries) with
+  `org.rimeos.CosmicAppletRime` inserted before the power applet, linked by the COSMIC module's `pathsToLink`
+  `/share/cosmic`. The build fails if cosmic-panel's default stops listing the power applet. It is a default: a user
+  who already changed the panel keeps their own list and adds Rime in COSMIC Settings → Desktop → Panel → Applets.
+- **No power-profile toggle in any integration** (§6.1): unchanged.
+
+**Branches.**
+
+- **rime-os `nix/settings-pkg` is based on `feat/nixos` c54c25060 + `nix/desktops` 269263491** (fast-forward), not
+  on `df8a25051`: the GNOME entry it edits and the module list it adds to exist only from there.
+- **Pushes**: the task asked both not to push and to push rime-shell `nix/settings-app` through the push clone so
+  rime-os can lock it. rime-shell `nix/settings-app` was pushed (ab8ca519); rime-os `nix/settings-pkg` was not.
+  `flake.lock` locks rime-shell at ab8ca519 while its `original` still follows `feat/nixos`: **merge
+  `nix/settings-app` into rime-shell `feat/nixos` before the release job re-locks the input**, or a re-lock drops
+  Rime Settings.
+- **`nix/desktops` was not merged into `nix/settings-pkg`** (no cherry-picks either: piece 1 owns those commits).
+  Since it was written, `nix/desktops` gained the rimed contract (677034535: §6.2 `Mode.Active`/`Set`, `Updates`, §7
+  PPD API) and the greeter's session environment (8a9bab87a). `checks.settings-app-gnome` was proved on a temporary
+  merge of the two branches (deleted afterwards) and is in `nix/ci/checks-not-in-ci.txt` on `nix/settings-pkg` alone,
+  where it fails at login: without 8a9bab87a greetd starts GNOME in a `tty` logind session and mutter answers "Failed
+  to find any matching session". **Drop that skip line when the branches merge.** Done at the wave-5 integration:
+  `nix/desktops`, then `nix/settings-pkg`, merged into `feat/nixos` (neither rebased) and the line deleted; rime-shell
+  `nix/settings-app` merged into rime-shell `feat/nixos` and `flake.lock` re-locked to it.
+
+**The GNOME VM check (`checks.settings-app-gnome`).**
+
+- **GNOME is enabled in the test machine** (`rime.desktops.gnome.enable`), not installed with `rime install`:
+  installing from a release is piece 1's `desktops-install`, which already proves rimed's PPD answers under GNOME,
+  KDE and COSMIC. This check proves what this piece adds, in a session reached by typing the password into rime-greet.
+- **App id, not window title.** GNOME 50 has no `introspect` setting any more: Shell Introspect's `GetWindows`
+  answers only in unsafe mode or to the owner of `org.freedesktop.impl.portal.desktop.gtk`/`.gnome`
+  (js/misc/introspect.js). The test's probe stops `xdg-desktop-portal-gtk.service` (D-Bus-activated; it comes back on
+  the next request), owns the gtk name for one call and asserts `app-id` `org.rimeos.Settings.desktop` and `wm-class`
+  `org.rimeos.Settings` on exactly one window. Nothing in the shipped system does this.
+- **The app is started in a `systemd-run --user --scope`**, as GNOME starts apps. Started straight from the test's
+  `su - rime`, it sat in su's PAM session, which is not the active seat session, and polkit refused it
+  `switch-profile` (`allow_active` only).
+- **Power is driven through the app's own handler** (`qs ipc call settings power <tier>`, the function the Power
+  page's control calls), after the Power page is shown: PowerProfileService picks its backend with one owner check
+  when the page appears. The two changes above were made in the same run and were not separated.
+- **Found, not this piece's to fix:** GNOME started by rime-greet says "Screen Lock disabled: Screen Locking requires
+  the GNOME display manager" (screenshot `gnome-pass-screens/settings-app.png`). GNOME's lock needs GDM; with
+  rime-greet a GNOME session has no lock screen. Handed to the desktops piece (open-items `build:settings`).
+- **KDE and COSMIC VM checks were not written** (open-items): the GNOME check took seven runs on the temporary merge,
+  and both have the same `nix/desktops` dependency. Recipe: `gnomeTest`'s structure; login and powerdevil's
+  `currentProfile` from `desktops-install.nix`'s KDE block; the COSMIC power block from the same file; the open
+  question is how to assert the plasmoid is in Plasma's tray (the report hook proves it loaded and draws).
+
+**Verification (adversarial re-check, 2026-11-03).** Evidence in `/var/lab/rime-nix/artifacts/settings-verify/`.
+
+- Re-run from a clean `git archive` of rime-shell ab8ca519: `run-settings-app-test.sh` 28/0, `run-power-profile-service-test.sh`
+  15/0. `checks.settings-quicksettings-{gnome,kde,cosmic}` and `checks.settings-integrations-eval` built at 500b6175c's
+  drvPaths; the three `no-properties-changed` mutants FAIL (gnome 11, kde 3, cosmic 9 failed).
+- `checks.settings-app-gnome`: the temporary merge was reproduced (500b6175c + `nix/desktops` d9627d0af, only
+  `nix/tests/default.nix` conflicted, both import lines kept) and evaluates to the same outPath as the recorded pass
+  (`lcvmxjpy…-vm-test-run-rime-settings-app-gnome`, valid in the store); `--rebuild` ran the VM again: every subtest
+  passed (test script 51.44 s), the build's non-zero exit is only `--rebuild`'s output comparison (screenshots differ).
+- Found and fixed: the bootc owner check above (new case "another daemon owns the API" in
+  `run-power-profile-service-test.sh`, mutant `owner-by-name` = the old `NameHasOwner` check, FAILS), and the
+  `hyprctl-page` mutant for the stub assertion. `flake.lock` re-locked to rime-shell 0d5aac66; the results at the
+  re-locked head are recorded in p2-gates S1, S2 and S5. `checks.settings-app-gnome` now also sends that owner check
+  from the user's session and requires rimed's answer: its Power subtest would pass through the `rime tier` fallback
+  too, so without it the check did not show which path the app took (PASS, `owner check: v s "balanced"`). That
+  assertion has no mutant: making rimed refuse it would need a rimed built without the power-profiles names.
+- Branch base: `nix/settings-pkg` was cut at `nix/desktops` 269263491, so it carries `nix/desktops`' first three
+  commits (81669c7a9, c59812edb, 269263491). If `nix/desktops` is rebased before it merges, those become duplicates
+  here: merge `nix/desktops` first, then this branch.
+- The GNOME VM check's "desktop's own power property" is PPD `ActiveProfile` read with `gdbus` from the session (the
+  property GNOME's power menu reads), not GNOME's toggle widget: a stand-in, stated as such.

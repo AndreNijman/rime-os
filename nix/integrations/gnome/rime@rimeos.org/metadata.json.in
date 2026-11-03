@@ -1,0 +1,8 @@
+{
+  "uuid": "rime@rimeos.org",
+  "name": "Rime",
+  "description": "Rime's Gaming Mode and updates in Quick Settings, and a way into Rime Settings. Shipped and enabled by Rime OS.",
+  "shell-version": ["@SHELL_VERSION@"],
+  "url": "https://rimeos.com",
+  "version-name": "1"
+}
