@@ -569,9 +569,9 @@ let
             assert key != "true", key
 
         with subtest("the screen reader still works when asked for: on starts orca, off stops it"):
-            machine.succeed(user(f"busctl --user set-property org.a11y.Bus /org/a11y/bus org.a11y.Status ScreenReaderEnabled b true"))
+            machine.succeed(user("busctl --user set-property org.a11y.Bus /org/a11y/bus org.a11y.Status ScreenReaderEnabled b true"))
             machine.wait_until_succeeds("pgrep -u rime -f '/bin/[.]?orca'", timeout=60)
-            machine.succeed(user(f"busctl --user set-property org.a11y.Bus /org/a11y/bus org.a11y.Status ScreenReaderEnabled b false"))
+            machine.succeed(user("busctl --user set-property org.a11y.Bus /org/a11y/bus org.a11y.Status ScreenReaderEnabled b false"))
             machine.wait_until_fails("pgrep -u rime -f '/bin/[.]?orca'", timeout=60)
 
         with subtest("cosmic-panel runs Rime's applet; it reports and follows rimed"):
