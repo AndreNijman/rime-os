@@ -378,4 +378,4 @@ Items the wave-3 pieces and this integration found and did not close.
 | LUKS recovery key export | DECIDED-NOT-TO | `docs/nixos/bridge.md` 145 |
 | katana `\EFI\APEX\grub.cfg` shape | P3/HARDWARE | `rime migrate check --explain` on katana |
 | rime-shell PR #49 open (not draft), CI green | DECIDED-NOT-TO here | Andre merges or not |
-| Hyprland "updated to 0.57.0" notice at the first NixOS login | FIXED (bridge3): `ecosystem.no_update_news = true` in Rime's appearance.lua; `desktop` subtest + mutant `desktop.mutants.update-news` (fails `bool: false`); OVMF A and L: lastVersion 0.56.2 -> 0.57.0 with no window | `docs/nixos/bridge.md` decision |
+| Hyprland "updated to 0.57.0" notice at the first NixOS login | FIXED (bridge3): `ecosystem.no_update_news = true` in Rime's appearance.lua; `desktop` subtest + mutant `desktop.mutants.update-news` (fails `bool: false`); OVMF A and L: lastVersion 0.56.2 -> 0.57.0 with no window (after a serial login: a first login straight through the greeter is not measured; the same table in #137's bootc appearance.lua closes that) | `docs/nixos/bridge.md` decision |
