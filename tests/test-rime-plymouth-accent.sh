@@ -100,8 +100,8 @@ done
 # invisible. The package must be installed, and the build must refuse an
 # initramfs the plugin or its font did not reach.
 grep -q 'Image.Text' "$THEMES"/rime-os-chartreuse/rime-os.script \
-    && grep -vE '^[[:space:]]*#' "$ROOT/Containerfile.core" \
-        | grep -E 'dnf5 -y install plymouth ' | grep -qw 'plymouth-plugin-label' \
+    && awk '/^COPY --from=plymouth-builder /{on=1} on{print} on && !/\\$/ && !/^COPY/{exit}' "$ROOT/Containerfile.core" \
+        | grep -E 'install /tmp/rime-plymouth/|for p in |plymouth-plugin-' | grep -w 'plymouth-plugin-label' >/dev/null \
     && ok "the splash's text has a renderer: core installs plymouth-plugin-label" \
     || bad "the splash's text has a renderer: core installs plymouth-plugin-label"
 _want="$(sed -n '/for want in usr\/bin\/rime-plymouth-theme/,/; do/p' "$ROOT/Containerfile.rime")"

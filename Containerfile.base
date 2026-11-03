@@ -2917,7 +2917,23 @@ COPY files/system/units/10-rime-vconsole-guard.conf \
 # machine as broken. See the drop-in for why ExecStart is reset and re-added.
 COPY files/system/units/10-rime-countme-nonfatal.conf \
      /usr/lib/systemd/system/rpm-ostree-countme.service.d/10-rime-countme-nonfatal.conf
+# And the weekly TRIM: stock fstrim.service stays failed for the week when
+# system sleep interrupts the trim ("FITRIM ioctl failed: Unknown error 512"),
+# and with an /etc/fstab it never trims the root filesystem, which bootc never
+# lists there. The wrapper lists every mounted filesystem and trims one again
+# when the kernel interrupted it; real errors still fail the unit.
+# tests/test-rime-fstrim.sh asserts both, and these two paths.
+COPY --chmod=0755 files/system/libexec/rime-fstrim \
+     /usr/libexec/rime-fstrim
+COPY files/system/units/10-rime-fstrim.conf \
+     /usr/lib/systemd/system/fstrim.service.d/10-rime-fstrim.conf
 RUN set -eux; \
+    bash -n /usr/libexec/rime-fstrim; \
+    test -x /usr/bin/fstrim; \
+    # the unit this overrides still runs fstrim once, as a oneshot (else re-read the drop-in)
+    grep -x 'Type=oneshot' /usr/lib/systemd/system/fstrim.service >/dev/null; \
+    test "$(grep -c '^ExecStart' /usr/lib/systemd/system/fstrim.service)" -eq 1; \
+    grep -x 'ExecStart=/usr/libexec/rime-fstrim' /usr/lib/systemd/system/fstrim.service.d/10-rime-fstrim.conf >/dev/null; \
     bash -n /usr/libexec/rime-vconsole-guard; \
     # The fallback keymap the guard relies on has to exist in THIS image, or the
     # repair would swap one unloadable keymap for another.

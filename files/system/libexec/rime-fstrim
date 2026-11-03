@@ -1,0 +1,82 @@
+#!/bin/bash
+# rime-fstrim: the weekly TRIM (fstrim.service), made to finish on a bootc machine.
+#
+# Two things go wrong with the stock unit here:
+#
+# 1. The kernel can interrupt a trim and hand fstrim "Unknown error 512".
+#    btrfs stops a FITRIM as soon as the task is frozen for system sleep
+#    (btrfs_trim_interrupted(): fatal_signal_pending() || freezing()) and
+#    returns -ERESTARTSYS. When the freezer has started but has not yet
+#    signalled this task, there is no signal to restart the call, so 512
+#    (ERESTARTSYS, kernel-internal) reaches user space. fstrim counts that as
+#    a failure, exits 32, and the unit stays failed until next week's run.
+#    Closing a laptop's lid while the timer's catch-up trim runs after boot
+#    is enough. A filesystem that fails ONLY that way (or with EINTR) is
+#    trimmed again, up to RIME_FSTRIM_TRIES times; any other error stands.
+#
+# 2. --listed-in /etc/fstab:/proc/self/mountinfo uses /etc/fstab alone when
+#    it exists, and a bootc root is never in it: bootc writes fstab only for
+#    a separate /boot (mounted ro, which fstrim skips), the installer's
+#    beside-Windows mode adds /boot/efi. So machines WITH an fstab never
+#    trimmed their root filesystem at all. Every mounted filesystem is
+#    listed in mountinfo, so that is the list (fstrim takes each device
+#    once). The one thing only fstab can say is X-fstrim.notrim; if any line
+#    says it, the stock order is kept so that opt-out still holds.
+set -uo pipefail
+
+FSTRIM="${RIME_FSTRIM_BIN:-/usr/bin/fstrim}"
+FSTAB="${RIME_FSTRIM_FSTAB:-/etc/fstab}"
+TRIES="${RIME_FSTRIM_TRIES:-3}"
+DELAY="${RIME_FSTRIM_DELAY:-10}"
+export LC_ALL=C   # the error text below is matched in English
+
+listed=/proc/self/mountinfo
+if [ -r "$FSTAB" ] && grep -E '^[[:space:]]*[^#[:space:]].*X-fstrim\.notrim' "$FSTAB" >/dev/null; then
+    listed="$FSTAB:/proc/self/mountinfo"
+fi
+
+INTR='^fstrim: (.+): FITRIM ioctl failed: (Unknown error 512|Interrupted system call)$'
+
+# Run fstrim with "$@", pass its output through, keep it in $OUT. Returns fstrim's status.
+run() {
+    local rc
+    OUT="$("$FSTRIM" "$@" 2>&1)"
+    rc=$?
+    [ -n "$OUT" ] && printf '%s\n' "$OUT"
+    return "$rc"
+}
+
+run --listed-in "$listed" --verbose --quiet-unsupported
+rc=$?
+[ "$rc" -eq 0 ] && exit 0
+
+interrupted="$(printf '%s\n' "$OUT" | sed -n -E "s/$INTR/\\1/p")"
+# Any other complaint (another FITRIM error, a mount fstrim could not read) is a real failure: the
+# interrupted filesystems are still retried, but the run keeps fstrim's status.
+other="$(printf '%s\n' "$OUT" | grep '^fstrim: ' | grep -v -E "$INTR")"
+[ -n "$interrupted" ] || exit "$rc"
+
+left=""
+while IFS= read -r target; do
+    ok=0
+    for ((try = 2; try <= TRIES; try++)); do
+        echo "rime-fstrim: the trim of $target was interrupted (system sleep); trying again in ${DELAY}s ($try/$TRIES)"
+        sleep "$DELAY"
+        run --verbose --quiet-unsupported "$target"
+        r=$?
+        if [ "$r" -eq 0 ]; then
+            ok=1
+            break
+        fi
+        # a different failure this time: no point retrying
+        printf '%s\n' "$OUT" | grep -E "$INTR" >/dev/null || break
+    done
+    [ "$ok" -eq 1 ] || left="$left $target"
+done <<< "$interrupted"
+
+if [ -n "$left" ]; then
+    echo "rime-fstrim: not trimmed:$left"
+    exit "$rc"
+fi
+[ -z "$other" ] || exit "$rc"
+exit 0
