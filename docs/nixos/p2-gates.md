@@ -15,7 +15,44 @@ Columns:
 
 P4 gates (8 weekly updates, live shell-only update, 30-day bytes, wall-clock) are not P2 and are not listed.
 
-## P2 status (integration of wave 4, 2026-11-03)
+## P2 status (integration of wave 5, 2026-11-03)
+
+**50 of 50 met, 0 partial, 0 not met**, counted from the Status column of every row below; no row changed status at
+wave 5. Wave 5 merged rime-os main (up to bdc5b8845, including #139's power-profiles replacement and #130's rustls
+0.23.46), `nix/desktops` (GNOME, KDE Plasma, COSMIC), `nix/settings-pkg`, `nix/units-fix` and the `feat/nixos` fixes
+made meanwhile (2c17f83af); rime-shell main (6062e9c5, #51-#54) and `nix/settings-app`, as rime-shell `feat/nixos`
+e6fb6f98, which `flake.lock` now pins (original ref `feat/nixos`).
+
+What re-ran on the merged head, evidence in `/var/lab/rime-nix/artifacts/integrate-wave5/`:
+
+- **Every one of the 88 `checks.x86_64-linux.*`**: each check evaluated alone (`nix/ci/eval-each.sh`,
+  `RIME_EVAL_JOBS=5`: 111 attributes OK, 0 FAIL, `logs/eval-each.log`), then every check whose outPath was not
+  already valid built from its `.drv`, at most three VMs at once (`F-*/summary.txt`, `F-A/` to `F-L/`: PASS/FAIL per
+  check with its outPath; `F-D/` is `checks.polish` alone, its three VMs). After that, 88 of 88 BUILT, 0 MISSING
+  (`outs-final.txt`). Four failed once and passed on a re-run of the same `.drv`: `update-floors`, `update-variants`
+  and `update-delta` ran out of disk (5 GB left on /var/lab, the guests' writes turned read-only; `F-H/`, `F-I/`),
+  re-run with the build directory off /var/lab (`F-K/`, `F-J/`); `desktops-install-kde` lost a boot race in nixpkgs
+  (openresolv's avahi hook sent SIGHUP to an avahi still starting, so its stale PID file failed the live switch;
+  `F-J/`), re-run PASS (`F-L/`; open-items, "Opened by wave 5").
+- `nix/ci/run-checks.sh plan`: 88 checks, 76 run by hosted CI, 12 skipped (`logs/run-checks-plan.log`).
+  `settings-app-gnome` left `nix/ci/checks-not-in-ci.txt`: it passes at this head with no temporary merge (S5).
+- **`hostlayer-katana` on katana's real snapshot** (H1-H8, H10): re-run at this head, EXIT 0, snapshot digest
+  unchanged (`hostlayer-katana.log`).
+- Kernel: `system.build.rimeKernelSigning` at this head gives `imageHash` `5r2srpcsqwk47dlmfc9pch2wy3rw9kfn` and
+  `signed = true`: the merge did not change the kernel image, so the committed release signature still applies
+  (`logs/kernel-imagehash.log`). Nothing was re-signed.
+- rimed serves the power-profiles API from ONE implementation (`docs/nixos/desktops.md` §12.8: `nix/desktops`'
+  `ppd.rs` with #139's intents carried into it; what that changes on bootc once `feat/nixos` reaches main is listed
+  there). The rimed package's cargo tests pass in the build sandbox after one test fix (866426b77,
+  `docs/nixos/open-items.md`, "Opened by wave 5").
+- Closure of `rime-vm`: 2127 paths, 10,568,986,608 B NAR (9.84 GiB), against wave 4's 2122 paths and
+  10,567,142,456 B (`closure.txt`).
+
+Not re-run at this integration, as at wave 4: the OVMF labs, iso-qualify and the boot drivers, the delta timing runs
+(G1-G3) and `pkg-translate.katana` on the real snapshot. The OVMF topology E run on bridge3's bridge is still owed
+before P3 (wave 4).
+
+### P2 status at the wave-4 integration (history)
 
 **50 of 50 met, 0 partial, 0 not met**, counted from the Status column of every row below; no row changed status at
 wave 4 (wave 3 closed the last five). Wave 4 added evidence: `nix/boot2` (the NixOS installer's own MokManager path,
@@ -215,13 +252,14 @@ Listed so they are not lost; they close the same way.
 
 Not in PLAN.md §6.1's P2 cell and not counted in **P2 status** above: Andre's desktops request (GNOME, KDE, COSMIC)
 came after it. Listed here so the settings piece's gates close the same way. Branches: rime-shell `nix/settings-app`
-(0d5aac66 after verification; built as ab8ca519), rime-os `nix/settings-pkg`. Evidence:
-`/var/lab/rime-nix/artifacts/settings/`, verification `/var/lab/rime-nix/artifacts/settings-verify/`.
+(0d5aac66 after verification; built as ab8ca519), rime-os `nix/settings-pkg`, both merged into their `feat/nixos` at
+the wave-5 integration (rime-shell e6fb6f98). Evidence: `/var/lab/rime-nix/artifacts/settings/`, verification
+`/var/lab/rime-nix/artifacts/settings-verify/`, integration `/var/lab/rime-nix/artifacts/integrate-wave5/`.
 
 | # | Gate | How proven | Status |
 |---|---|---|---|
 | S1 | Rime Settings is an app: one window with app id `org.rimeos.Settings`, a second launch raises it, Shell-only pages absent, no `hyprctl` | rime-shell `tests/run-settings-app-test.sh` 28/0 (headless labwc, wlr-foreign-toplevel); mutants QS_APP_ID dropped, `-n`/IPC dropped, Display page left in: each FAILS (`shell-tests/`, `mutants-shell/`). Verified: the Display mutant fails only the listing assertions (with it, "no hyprctl" still PASSED); the stub assertion is shown to fail by the `hyprctl-page` mutant added in verification (a kept page runs `hyprctl monitors -j`); at 0d5aac66 28/0 and all 7 mutants CAUGHT (`settings-verify/settings-app-fixed.log`, `mutate.log`) | met (2026-11-03, verified) |
-| S2 | The Shell's power control follows the PPD API without polling and falls back to `Rimed1.Power.Tier` when that API is not rimed's (no owner, or bootc's power-profiles-daemon) | rime-shell `tests/run-power-profile-service-test.sh` 15/0; mutants fallback removed, polling put back: each FAILS. Verification found the owner check (`NameHasOwner`) would pick bootc's power-profiles-daemon, which owns the name on katana; fixed in rime-shell 0d5aac66 (the check asks the power-profiles name for rimed's own object; on katana it fails, `settings-verify/bootc-host-owner-probe.log`). At 0d5aac66: 17/0 with the new case "another daemon owns the API" (`power-profile-fixed.log`); mutants fallback removed, polling put back, owner-by-name (the old check) each FAIL (`mutate.log`) | met (2026-11-03, verified + fixed) |
+| S2 | The Shell's power control follows the PPD API without polling and falls back to `Rimed1.Power.Tier` when that API is not rimed's (no owner, or bootc's power-profiles-daemon) | rime-shell `tests/run-power-profile-service-test.sh` 15/0; mutants fallback removed, polling put back: each FAILS. Verification found the owner check (`NameHasOwner`) would pick bootc's power-profiles-daemon, which owns the name on katana; fixed in rime-shell 0d5aac66 (the check asks the power-profiles name for rimed's own object; on katana it fails, `settings-verify/bootc-host-owner-probe.log`). At 0d5aac66: 17/0 with the new case "another daemon owns the API" (`power-profile-fixed.log`); mutants fallback removed, polling put back, owner-by-name (the old check) each FAIL (`mutate.log`). Wave-5 integration (rime-shell e6fb6f98, PowerProfileService merged with main's #54): `run-power-profile-service-test.sh` 17/0 (`integrate-wave5/logs/shell-power-profile-service.log`), `run-power-profile-test.sh` 14/0 in 8 of 8 runs (`shell-power-profile-repeat.log`), `mutate-settings-app.sh` 7 caught, 0 survived (`shell-mutate-settings-app.log`). Since #139 the bootc image masks power-profiles-daemon and its rimed owns the names, so once this Shell reaches bootc (the P2 merge; bootc images build rime-shell main) it takes the power-profiles path there too, where it shows no refusal message (open-items, "Opened by wave 5") | met (2026-11-03, verified + fixed; re-run at the wave-5 merge) |
 | S3 | GNOME / Plasma / COSMIC integrations follow rimed by PropertiesChanged only: Gaming follows `Mode.Active`, "Game running" follows `GameMode.Active`, a click calls `Mode.Set`, Update shown for available/downloading/installing/restart and calls `Updates.Apply`, no property read while nothing changes | `checks.settings-quicksettings-gnome` 21/0, `-kde` 7/0, `-cosmic` 19/0, each against rime-shell's fake rimed on a private bus; mutant `no-properties-changed` FAILS each (`integrations/*-mutant-no-properties-changed.log`) | met (2026-11-03) |
 | S4 | Each integration is in a release variant exactly when its desktop is; GNOME has one `enabled-extensions` list naming `rime@rimeos.org` and `kimpanel@kde.org` | `checks.settings-integrations-eval`: 16 variants, 0 problems | met (2026-11-03) |
-| S5 | In a VM, logged in through rime-greet: Rime Settings opens from `gtk-launch` (screenshot), Power → performance reaches rimed `Tier`, `powerprofilesctl` and the desktop's own power property; the extension is ACTIVE / the plasmoid is in the tray / the applet runs in cosmic-panel; `rime mode set gaming` flips the toggle; no Rime Shell | `checks.settings-app-gnome`, `-kde`, `-cosmic`; mutants wrong app id, wrong `shell-version`, panel default not found | GNOME met (2026-11-03) on `nix/settings-pkg` + `nix/desktops` (temporary merge): `checks.settings-app-gnome` passes (artifacts/settings/vm/gnome-merged-PASS.log, screenshots gnome-pass-screens/); mutants wrong app id ("no window with wm-class org.rimeos.Settings", mut-wrong-app-id.log) and wrong `shell-version` (not ACTIVE, mut-wrong-shell-version.log) FAIL. Fails on `nix/settings-pkg` alone (greeter session type), so CI skips it there until the merge. Verified: the recorded merge reproduced (500b6175c + d9627d0af evaluates to the same outPath `lcvmxjpy…`, valid) and re-run with `--rebuild`, every subtest passed (`settings-verify/vm-gnome-rebuild.log`); after the PowerProfileService fix, re-run on the re-locked branch merged with d9627d0af: PASS (`relock-vm-gnome.log`), and with the new assertion that rimed answers PowerProfileService's owner check from the user's session (`owner check: v s "balanced"`): PASS at 606c013ec + d9627d0af, `/nix/store/smy971am…-vm-test-run-rime-settings-app-gnome` (`relock-vm-gnome-owner.log`). The "desktop's own power property" is PPD `ActiveProfile` read with gdbus, a stand-in for GNOME's power menu, which reads that property. KDE and COSMIC: not met, checks not written (open-items `build:settings`) |
+| S5 | In a VM, logged in through rime-greet: Rime Settings opens from `gtk-launch` (screenshot), Power → performance reaches rimed `Tier`, `powerprofilesctl` and the desktop's own power property; the extension is ACTIVE / the plasmoid is in the tray / the applet runs in cosmic-panel; `rime mode set gaming` flips the toggle; no Rime Shell | `checks.settings-app-gnome`, `-kde`, `-cosmic`; mutants wrong app id, wrong `shell-version`, panel default not found | GNOME met (2026-11-03) on `nix/settings-pkg` + `nix/desktops` (temporary merge): `checks.settings-app-gnome` passes (artifacts/settings/vm/gnome-merged-PASS.log, screenshots gnome-pass-screens/); mutants wrong app id ("no window with wm-class org.rimeos.Settings", mut-wrong-app-id.log) and wrong `shell-version` (not ACTIVE, mut-wrong-shell-version.log) FAIL. Fails on `nix/settings-pkg` alone (greeter session type), so CI skipped it there until the merge. At the wave-5 integration (both branches merged, no temporary merge): PASS, `/nix/store/wq29lgcq…-vm-test-run-rime-settings-app-gnome` (`integrate-wave5/F-B/summary.txt`), and it left `checks-not-in-ci.txt`, so hosted CI runs it. Verified: the recorded merge reproduced (500b6175c + d9627d0af evaluates to the same outPath `lcvmxjpy…`, valid) and re-run with `--rebuild`, every subtest passed (`settings-verify/vm-gnome-rebuild.log`); after the PowerProfileService fix, re-run on the re-locked branch merged with d9627d0af: PASS (`relock-vm-gnome.log`), and with the new assertion that rimed answers PowerProfileService's owner check from the user's session (`owner check: v s "balanced"`): PASS at 606c013ec + d9627d0af, `/nix/store/smy971am…-vm-test-run-rime-settings-app-gnome` (`relock-vm-gnome-owner.log`). The "desktop's own power property" is PPD `ActiveProfile` read with gdbus, a stand-in for GNOME's power menu, which reads that property. KDE and COSMIC: not met, checks not written (open-items `build:settings`) |

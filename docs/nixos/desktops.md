@@ -739,7 +739,20 @@ Gaming; `Mode.Active` therefore reads the game's own tier while a power-saver ho
 each observed failing: `live_in_game` always the game's tier (both tests), `Mode.Active` ignoring the override,
 game enter ignoring a standing hold, and the `ActiveProfile` write recording no pick (the choice bus test).
 `tests/test-rimed-ui-boost.sh` (real rimed, `powerprofilesctl`, power-profiles-daemon 0.30) now expects
-`powerprofilesctl set` to be a tier pick for the session user and refused for anyone else.
+`powerprofilesctl set` to be a tier pick for the session user and refused for anyone else. It needs the real
+`/sys/firmware` (under podman: `--security-opt unmask=/sys/firmware`); with podman's default mask rimed sees no
+`platform_profile` and four assertions fail on pristine main as well.
+
+The Shell side (rime-shell `feat/nixos` e6fb6f98, which merges main's #51-#54 and `nix/settings-app`):
+PowerProfileService keeps `nix/settings-app`'s two backends (§13) and #54's "says why" (`error`, `errorDetail`,
+`explain()`, the 8 s message, no read while a set runs) on the `rime tier` path. On the power-profiles path Quickshell
+writes `ActiveProfile` itself: it keeps the value it wrote and only logs a refusal (`pushPropertyUpdate`, Quickshell
+0.3.2), so no message is shown there; rimed allows that write to the active local user, who is the one running the
+Shell. The Shell never reads the D-Bus `Profiles` list (its own list is high to low, `check-tier-parity`), so the
+order change above does not reach it. The merge also drops a `busctl` read that was already on its way when a set
+started (it carried the old tier back under the press, about one run in five of `run-power-profile-test.sh`).
+rime-shell `nix/update-indicator`, `nix/settings-apply-bar` and `nix/smooth-motion` were the same changes as main's
+#51, #52 and #53 and were not merged.
 
 ## 13. Settings piece: decisions taken while building
 
