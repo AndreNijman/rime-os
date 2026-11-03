@@ -84,5 +84,5 @@
 # settings-quicksettings-{gnome,kde,cosmic} (docs/nixos/desktops.md §8.2; + .mutants)
 // import ./settings-quicksettings.nix { inherit pkgs self; }
 // import ./settings-integrations-eval.nix { inherit pkgs self; }
-# settings-app-gnome (VM; docs/nixos/desktops.md §8.2; + .mutants)
+# settings-app-{gnome,kde,cosmic} (VM; docs/nixos/desktops.md §8.2; + .mutants)
 // import ./settings-app.nix { inherit pkgs self; }
