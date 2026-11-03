@@ -3,11 +3,16 @@ the test rewrites between cases (FAKE_LOGIND_CONFIG), and every UnlockSession ap
 
   {"pids": {"<pid>": "<session id>"},          GetSessionByPID (absent: org.freedesktop.login1.NoSessionForPID)
    "display": {"<uid>": "<session id>"},       GetUser + User.Display (absent uid: NoSuchUser)
-   "sessions": {"<id>": {"uid": 1000, "class": "user", "type": "wayland", "remote": false, "state": "active"}}}
+   "sessions": {"<id>": {"uid": 1000, "class": "user", "type": "wayland", "remote": false, "state": "active",
+                         "tty": "tty7"}},                      (tty optional)
+   "delay": 0}                                  seconds GetSessionByPID and GetUser take (a loaded logind)
+
+TestRemoveSession(s) (test only) emits Manager.SessionRemoved for that id.
 """
 import json
 import os
 import sys
+import time
 
 from gi.repository import Gio, GLib
 
@@ -17,6 +22,8 @@ MANAGER_XML = """<node><interface name="org.freedesktop.login1.Manager">
   <method name="GetSessionByPID"><arg type="u" direction="in"/><arg type="o" direction="out"/></method>
   <method name="GetUser"><arg type="u" direction="in"/><arg type="o" direction="out"/></method>
   <method name="UnlockSession"><arg type="s" direction="in"/></method>
+  <method name="TestRemoveSession"><arg type="s" direction="in"/></method>
+  <signal name="SessionRemoved"><arg type="s"/><arg type="o"/></signal>
 </interface></node>"""
 SESSION_XML = """<node><interface name="org.freedesktop.login1.Session">
   <property name="Id" type="s" access="read"/>
@@ -25,6 +32,9 @@ SESSION_XML = """<node><interface name="org.freedesktop.login1.Session">
   <property name="Type" type="s" access="read"/>
   <property name="Remote" type="b" access="read"/>
   <property name="State" type="s" access="read"/>
+  <property name="TTY" type="s" access="read"/>
+  <property name="VTNr" type="u" access="read"/>
+  <property name="Display" type="s" access="read"/>
 </interface></node>"""
 USER_XML = """<node><interface name="org.freedesktop.login1.User">
   <property name="Display" type="(so)" access="read"/>
@@ -64,6 +74,9 @@ class FakeLogind:
                 "Type": GLib.Variant("s", s["type"]),
                 "Remote": GLib.Variant("b", s["remote"]),
                 "State": GLib.Variant("s", s["state"]),
+                "TTY": GLib.Variant("s", s.get("tty", "")),
+                "VTNr": GLib.Variant("u", s.get("vtnr", 0)),
+                "Display": GLib.Variant("s", s.get("display", "")),
             }[name]
 
         return self.ensure(session_path(sid), SESSION_XML, get)
@@ -77,6 +90,8 @@ class FakeLogind:
 
     def on_manager(self, _c, _sender, _path, _iface, method, params, invocation):
         cfg = config()
+        if method in ("GetSessionByPID", "GetUser"):
+            time.sleep(cfg.get("delay", 0))
         if method == "GetSessionByPID":
             (pid,) = params.unpack()
             sid = cfg["pids"].get(str(pid))
@@ -94,6 +109,11 @@ class FakeLogind:
             (sid,) = params.unpack()
             with open(os.environ["FAKE_LOGIND_UNLOCKS"], "a") as f:
                 f.write(sid + "\n")
+            invocation.return_value(None)
+        elif method == "TestRemoveSession":
+            (sid,) = params.unpack()
+            self.bus.emit_signal(None, ROOT, "org.freedesktop.login1.Manager", "SessionRemoved",
+                                 GLib.Variant("(so)", (sid, session_path(sid))))
             invocation.return_value(None)
 
 

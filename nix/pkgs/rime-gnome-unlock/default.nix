@@ -62,6 +62,7 @@ stdenvNoCC.mkDerivation {
     export RIME_GNOME_UNLOCK=$out/lib/rime-gnome-unlock/rime_gnome_unlock.py
     export PAM_WRAPPER_LIB=${libpam-wrapper}/lib/libpam_wrapper.so
     export PAM_WRAPPER_MODULES=${libpam-wrapper}/lib/pam_wrapper
+    export PAM_MODULES=${lib.getLib pam}/lib/security
     export HOME=$TMPDIR
     ${python}/bin/python3 -B -W error::ResourceWarning tests/test_rime_gnome_unlock.py -v
     if [ -e $out/lib/rime-gnome-unlock/__pycache__ ]; then echo "bytecode written into \$out"; exit 1; fi

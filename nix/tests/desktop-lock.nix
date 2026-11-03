@@ -6,7 +6,11 @@
 #   desktop-lock-gnome    rime-gnome-unlock owns org.gnome.DisplayManager (no GDM process), so GNOME Shell builds its
 #                         lock screen: the "Screen Lock disabled" notice is not shown (its marker file
 #                         ~/.local/share/gnome-shell/lock-warning-shown, created before login, is deleted by GNOME
-#                         Shell only when the lock exists); Quick Settings shows the lock button (screenshot). Locks:
+#                         Shell only when the lock exists); Quick Settings shows the lock button (screenshot). The
+#                         daemon is STOPPED before the login, so the lock exists only because GNOME Shell's one
+#                         start-up question (canLock) bus-activated it. Its unit runs with the bounding set, seccomp
+#                         filter and no_new_privs it declares (/proc/<pid>/status). A channel's socket is the session
+#                         user's, mode 0600: `nobody` cannot connect, the user can. Locks:
 #                           - Super+L, then a WRONG password (refused: still locked, PAM logged the failure, the lock
 #                             screen says so), then the right one (unlocked);
 #                           - `loginctl lock-session`; org.gnome.ScreenSaver.Lock (what gsd and the menus call);
@@ -20,7 +24,9 @@
 #                         first lock, again after suspend), the error-priority journal gained nothing during the
 #                         lock/unlock rounds, and rime-gnome-unlock logged the refusal and the unlock and no warning
 #                         but pam_gnome_keyring's. The daemon refuses root (no session) and a user asking for another
-#                         user's name.
+#                         user's name. Then the daemon dies: killed (SIGKILL) while the lock prompt holds a channel, it
+#                         comes back, Escape resets the prompt and the password unlocks; killed 8 times in a row
+#                         (past systemd's default start limit), it is still running and the lock still works.
 #   desktop-lock-kde      Plasma's own locker (kscreenlocker, PAM service `kde`): `loginctl lock-session`, wrong
 #                         password refused, right one unlocks; Meta+L, wrong then right again; sessions, seats and
 #                         the error journal as above.
@@ -35,6 +41,8 @@
 #   gnome.pam-ignored   rime-gnome-unlock reports success whatever PAM answered: the wrong password unlocks.
 #   gnome.no-shim       rime-gnome-unlock's service is off: nothing owns org.gnome.DisplayManager, so GNOME Shell
 #                       builds no lock screen; the check fails at its owner assertion.
+#   gnome.start-limited the unit has a start limit (systemd's default burst of 5, over 60 s): the crash loop leaves
+#                       it failed.
 { pkgs, self }:
 
 let
@@ -139,7 +147,8 @@ let
             return machine.succeed(f"journalctl -b --no-pager -o cat | grep -c 'pam_unix({PAM}:auth): authentication failure' || true").strip()
 
         def type_password(password):
-            # A modifier wakes the lock screen and raises the prompt without typing anything into it.
+            # Shift wakes a blanked screen and types nothing. GNOME's lock screen ignores it (js/ui/unlockDialog.js:678)
+            # and raises its prompt on the first character, which it keeps.
             machine.send_key("shift")
             machine.sleep(3)
             machine.send_chars(password + "\n")
@@ -180,6 +189,12 @@ let
             # GNOME Shell deletes this at start-up when it has a lock screen and creates it (with the "Screen Lock
             # disabled" notification) when it does not (js/ui/main.js _handleLockScreenWarning).
             machine.succeed(f"install -d -o rime -g users /home/rime/.local /home/rime/.local/share /home/rime/.local/share/gnome-shell && install -o rime -g users -m 644 /dev/null {MARKER}")
+            # GNOME Shell asks once, at start-up, whether it can lock: with the daemon down then, only bus activation
+            # can give this session a lock.
+            machine.wait_for_unit("rime-gnome-unlock.service")
+            BOOT_PID = machine.succeed("systemctl show -p MainPID --value rime-gnome-unlock.service").strip()
+            machine.succeed("systemctl stop rime-gnome-unlock.service")
+            machine.fail("systemctl is-active rime-gnome-unlock.service")
 
         with subtest("logs in through rime-greet"):
             machine.wait_for_unit("greetd.service")
@@ -194,14 +209,20 @@ let
             SID = session_id()
             print("graphical session:", SID, machine.succeed(f"loginctl show-session {SID}"))
             assert machine.succeed(f"loginctl show-session {SID} -p Type --value").strip() == "wayland"
+            print("terminal (rime-gnome-unlock's PAM_TTY):", machine.succeed(f"loginctl show-session {SID} -p TTY -p VTNr -p Display"))
             machine.screenshot(f"{ID}-session")
       ''
       + lib.optionalString (id == "gnome") ''
 
+        def unlock_pid():
+            return machine.succeed("systemctl show -p MainPID --value rime-gnome-unlock.service").strip()
+
         with subtest("GNOME: rime-gnome-unlock answers as the display manager; GNOME Shell built its lock screen"):
             owner = machine.succeed("busctl status org.gnome.DisplayManager --no-pager")
             print(owner)
-            pid = machine.succeed("systemctl show -p MainPID --value rime-gnome-unlock.service").strip()
+            pid = unlock_pid()
+            assert pid not in ("0", BOOT_PID), f"rime-gnome-unlock was not started again after the stop ({pid})"
+            print(machine.succeed("journalctl -b --no-pager -o short-monotonic -u rime-gnome-unlock.service -u dbus.service | grep -iE 'activat|Start' || true"))
             assert f"PID={pid}" in owner, f"org.gnome.DisplayManager is not owned by rime-gnome-unlock ({pid})"
             machine.fail("pgrep -x gdm")
             machine.fail("pgrep -f gdm-session-worker")
@@ -213,6 +234,37 @@ let
             machine.screenshot("gnome-quick-settings")
             machine.send_key("esc")
             machine.sleep(2)
+
+        with subtest("GNOME: the unit's sandbox is in force"):
+            pid = unlock_pid()
+            print(machine.succeed("systemctl show rime-gnome-unlock.service -p CapabilityBoundingSet -p SystemCallFilter "
+                                  "-p ProtectProc -p LimitNOFILE -p Restart -p StartLimitIntervalUSec -p NoNewPrivileges"))
+            status = machine.succeed(f"cat /proc/{pid}/status")
+            # CAP_CHOWN (0), CAP_DAC_READ_SEARCH (2), CAP_SETGID (6), CAP_SETUID (7), CAP_AUDIT_WRITE (29).
+            assert re.search(r"^CapBnd:\s+00000000200000c5$", status, re.M), status
+            assert re.search(r"^Seccomp:\s+2$", status, re.M), status
+            assert re.search(r"^NoNewPrivs:\s+1$", status, re.M), status
+            assert machine.succeed(f"prlimit --pid {pid} --nofile -o SOFT,HARD --noheadings").split() == ["1024", "1024"]
+
+        with subtest("GNOME: a channel's socket is the session user's alone"):
+            # From the user's own systemd manager (no session of its own), as GNOME Shell (a user unit) asks.
+            out = machine.succeed(user("systemd-run --user --wait --pipe --quiet gdbus call --system --dest org.gnome.DisplayManager "
+                                       "--object-path /org/gnome/DisplayManager/Manager "
+                                       "--method org.gnome.DisplayManager.Manager.OpenReauthenticationChannel rime"))
+            found = re.search(r"unix:path=([^',]+)", out)
+            assert found, out
+            path = found.group(1)
+            st = machine.succeed(f"stat -c '%U %a' {path}").strip()
+            print("channel socket:", path, st)
+            assert st == "rime 600", st
+            # dbus-send --peer: a direct connection with no message-bus Hello, as libgdm makes.
+            cancel = (f"dbus-send --peer=unix:path={path} --print-reply /org/gnome/DisplayManager/Session "
+                      "org.gnome.DisplayManager.UserVerifier.Cancel")
+            out = machine.fail(f"setpriv --reuid=65534 --regid=65534 --clear-groups {cancel} 2>&1")
+            print("as nobody:", out)
+            assert "Permission denied" in out, out
+            print("as rime:", machine.succeed(user(cancel)))
+            machine.wait_until_fails(f"test -e {path}", timeout=10)
 
         with subtest("GNOME: the daemon refuses callers who are not the session's own user"):
             out = machine.fail("gdbus call --system --dest org.gnome.DisplayManager --object-path /org/gnome/DisplayManager/Manager "
@@ -279,6 +331,44 @@ let
       ''
       + lib.optionalString (id == "gnome") ''
 
+        # Before the suspend round, not after: in this VM the kernel aborts s2idle (virtio -95) and a lock started
+        # just after that hung GNOME Shell's main loop (GetActive unanswered for 77 s, no call reached the daemon),
+        # in two runs. The suspend round itself passes; it stays the last lock of the test.
+        def channels_opened():
+            return int(machine.succeed("journalctl -b -u rime-gnome-unlock.service --no-pager -o cat | grep -c 'reauthentication channel for pid' || true").strip())
+
+        def kill_unlock():
+            pid = unlock_pid()
+            machine.succeed(f"kill -9 {pid}")
+            machine.wait_until_succeeds(f"systemctl is-active rime-gnome-unlock.service && test \"$(systemctl show -p MainPID --value rime-gnome-unlock.service)\" != {pid} && busctl status org.gnome.DisplayManager >/dev/null", timeout=30)
+
+        with subtest("GNOME: the daemon killed under an open lock prompt comes back; Escape, then the password unlocks"):
+            machine.succeed(f"loginctl lock-session {SID}")
+            wait_locked("loginctl lock-session, then the daemon killed")
+            opened = channels_opened()
+            # GNOME's lock screen ignores Shift (js/ui/unlockDialog.js:678); Ctrl raises the prompt and types nothing.
+            machine.send_key("ctrl")
+            machine.wait_until_succeeds(f"test $(journalctl -b -u rime-gnome-unlock.service --no-pager -o cat | grep -c 'reauthentication channel for pid') -gt {opened}", timeout=30)
+            machine.sleep(2)
+            kill_unlock()
+            assert locked_hint() == "yes" and shield_active(), "the lock fell when its daemon died"
+            machine.screenshot("gnome-locked-daemon-killed")
+            machine.send_key("esc")
+            machine.sleep(3)
+            unlock_right("gnome-unlocked-after-kill")
+
+        with subtest("GNOME: a crash loop does not exhaust the unit; the lock still works"):
+            before = int(machine.succeed("systemctl show -p NRestarts --value rime-gnome-unlock.service").strip())
+            for _ in range(8):
+                kill_unlock()
+            restarts = int(machine.succeed("systemctl show -p NRestarts --value rime-gnome-unlock.service").strip())
+            print(f"restarts: {before} -> {restarts}")
+            assert restarts >= before + 8, restarts
+            machine.send_key("${d.lockKey}")
+            wait_locked("${d.lockKey}, after the crash loop")
+            unlock_wrong("gnome-wrong-password-after-crashes")
+            unlock_right("gnome-unlocked-after-crashes")
+
         with subtest("GNOME: suspend locks the session before the system sleeps"):
             machine.succeed("systemd-run --unit lockmon -p StandardOutput=file:/tmp/lockmon.log dbus-monitor --system "
                             "\"type='method_call',interface='org.freedesktop.login1.Session',member='SetLockedHint'\"")
@@ -323,8 +413,9 @@ let
             print(ulog)
             assert "unlocked by gdm-password" in ulog and "refused (PAM" in ulog, ulog
             # pam_gnome_keyring (in the login stack, as in GDM's gdm-password) warns that it found no keyring daemon
-            # to hand the password to; anything else at warning or worse is the daemon's.
-            warn = [line for line in machine.succeed("journalctl -b -u rime-gnome-unlock.service -p warning --no-pager -o cat").splitlines()
+            # to hand the password to; anything else at warning or worse is the daemon's (its own processes only:
+            # systemd's notes on the kills above are not the daemon's).
+            warn = [line for line in machine.succeed("journalctl -b _SYSTEMD_UNIT=rime-gnome-unlock.service -p warning --no-pager -o cat").splitlines()
                     if not line.startswith("gkr-pam: ")]
             assert not warn, warn
             assert machine.succeed("ls -A /run/rime-gnome-unlock").strip() == "", "a reauthentication socket was left behind"
@@ -358,6 +449,11 @@ in
         id = "gnome";
         name = "rime-desktop-lock-gnome-no-shim";
         extraConfig = { lib, ... }: { systemd.services.rime-gnome-unlock.enable = lib.mkForce false; };
+      };
+      start-limited = lockTest {
+        id = "gnome";
+        name = "rime-desktop-lock-gnome-start-limited";
+        extraConfig = { lib, ... }: { systemd.services.rime-gnome-unlock.unitConfig.StartLimitIntervalSec = lib.mkForce "60s"; };
       };
     };
   };

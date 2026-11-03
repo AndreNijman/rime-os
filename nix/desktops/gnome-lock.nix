@@ -36,21 +36,35 @@ in
     # Up before the first GNOME login; the bus would start it on the first call anyway.
     wantedBy = [ "multi-user.target" ];
     before = [ "display-manager.service" ];
+    # GNOME Shell asks whether it can lock ONCE, when it starts (loginManager.js canLock: a synchronous Version read):
+    # a daemon that is down then, or stuck in a start limit, leaves that session without a lock until it logs out.
+    # So it always comes back, however often it fails, and the bus can start it at any time.
+    unitConfig.StartLimitIntervalSec = 0;
     serviceConfig = {
       Type = "dbus";
       BusName = "org.gnome.DisplayManager";
       ExecStart = lib.getExe unlock;
-      Restart = "on-failure";
-      # The private reauthentication sockets: the directory lets nobody list it (GDM's own is 0711 too).
+      Restart = "always";
+      RestartSec = "1s";
+      # The private reauthentication sockets: the directory lets nobody list it (GDM's own is 0711 too); each socket
+      # is 0600 and owned by its session's user (CAP_CHOWN).
       RuntimeDirectory = "rime-gnome-unlock";
       RuntimeDirectoryMode = "0711";
-      # Root, because it runs PAM for other users (pam_unix reads /etc/shadow). No ProtectHome: modules in the
-      # login stack may read the user's home or /run/user; no MemoryDenyWriteExecute: ctypes' PAM conversation
-      # callback needs an executable trampoline.
+      # Fixed, so the daemon's own check (exit for a restart past 3/4 of it) has a known bound.
+      LimitNOFILE = 1024;
+      # Root, because it runs PAM for other users. What the login stack needs of root, and nothing else:
+      #   CAP_DAC_READ_SEARCH   pam_unix reading /etc/shadow; modules looking into /run/user/<uid> or a home
+      #   CAP_SETUID/SETGID     pam_gnome_keyring (and similar) acting as the user in a child process
+      #   CAP_AUDIT_WRITE       libpam's audit records (AF_NETLINK)
+      #   CAP_CHOWN             giving each private socket to its session's user
+      CapabilityBoundingSet = [ "CAP_CHOWN" "CAP_DAC_READ_SEARCH" "CAP_SETUID" "CAP_SETGID" "CAP_AUDIT_WRITE" ];
+      # No ProtectHome: modules in the login stack may read the user's home or /run/user; no MemoryDenyWriteExecute:
+      # ctypes' PAM conversation callback needs an executable trampoline.
       NoNewPrivileges = true;
       PrivateTmp = true;
       PrivateDevices = true;
       ProtectSystem = "full";
+      ProtectProc = "invisible";
       ProtectKernelTunables = true;
       ProtectKernelModules = true;
       ProtectKernelLogs = true;
@@ -62,6 +76,8 @@ in
       RestrictSUIDSGID = true;
       LockPersonality = true;
       SystemCallArchitectures = "native";
+      # A call outside the set kills the process (SIGSYS): a PAM worker, that one attempt; the daemon, a restart.
+      SystemCallFilter = [ "@system-service" ];
       RestrictAddressFamilies = [ "AF_UNIX" "AF_NETLINK" ];
     };
   };
