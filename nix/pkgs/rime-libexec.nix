@@ -125,6 +125,7 @@ let
     rime-display-apply = [ procps util-linux ];
     rime-disposable = [ ];
     rime-env = [ jq ];
+    rime-fstrim = [ util-linux ];
     rime-gpu-notice = [ libnotify ];
     rime-greet-publish-all = [ getent ];
     rime-greet-session = [ dbus glib ];

@@ -592,6 +592,12 @@ in
       # ── Boot splash (Containerfile.rime:265-312; bootc kargs.d `quiet splash`) ────────────────────
       # The theme (the layered ridge and its accents) is chosen in branding.nix.
       boot.plymouth.enable = true;
+      # nixpkgs' plymouth has the bootc image's crash on hide (files/system/src/plymouth/README.md): when the initrd
+      # draws on simpledrm and the real DRM device comes up without a usable display, the script plugin (the Rime
+      # theme) keeps a freed keyboard and plymouthd segfaults hiding the splash. Same patch as Containerfile.core.
+      boot.plymouth.package = pkgs.plymouth.overrideAttrs (old: {
+        patches = (old.patches or [ ]) ++ [ (files + "/system/src/plymouth/plymouth-keyboard-removed-handler.patch") ];
+      });
       # `splash` itself comes from boot.plymouth (nixpkgs' plymouth module adds it): naming it here as well put
       # `splash splash` on every boot entry (installer2, checks.installer-polish-eval).
       boot.kernelParams = [ "quiet" ];
