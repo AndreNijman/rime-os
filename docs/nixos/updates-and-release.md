@@ -966,8 +966,11 @@ real variant by `checks.update-floors` (closure.md §12). How it is proven: the 
 of the four real variants whose missing paths are U = 6.45 GB of NAR is refused by name at 0.6 GB below
 `ceil(0.55 × U)` + 1 GB ("… about 3.55 GB on this compressed disk, plus 1 GB to spare) … Nothing was changed."), and
 installs at a free space between that and U + 1 GB, a figure the 1.0 branch refuses; the download then took
-3,319,480,320 B on disk, a ratio of 0.515 against the gate's 0.55. Its mutants `ratio-one` (update.toml 1.0) and
-`compress-not-forced` (the store mounted `compress=zstd:3`, which rimed must count at 1.0) fail. On ext4 the NAR size is not an upper bound: a closure takes 3.6-4.5 % more (about
+3,319,480,320 B on disk (3,319,099,392 B in the re-run at d12fd309c), a ratio of 0.515 against the gate's 0.55. Its
+mutants `ratio-one` (update.toml 1.0) and `compress-not-forced` (the store mounted `compress=zstd:3`, which rimed must
+count at 1.0) fail. Both still refuse at that free space, but on the unpacked figure ("needs 7.45 GB free on /nix (6.45
+GB of new store paths, plus 1 GB to spare)", with no compressed estimate), so the refusal-by-name assertion is what
+kills them (`artifacts/verify-updates2/update-variants-mutant-{ratio-one,compress-not-forced}-d12fd309c.log`). On ext4 the NAR size is not an upper bound: a closure takes 3.6-4.5 % more (about
 0.48 GB per variant, closure.md §12); the 1 GB reserve is what keeps the 1.0 branch's promise, and
 `checks.update-floors` fails if a closure ever outgrows NAR + reserve. `rime update` applies no
 floor of its own; `rime install` of a feature package refuses by name below the floor of the system it would select. For fresh installs
@@ -1032,6 +1035,13 @@ commit; `release-standin` was first built at the wave-3 merge) were built at the
 catalogue and with it every Rime system: `update-e2e` (`vm-test-run-rime-update-e2e` `5ar4a10a…`, its whole level-19
 run, `artifacts/updates2/update-e2e-head.log`), `release-standin` (`0yfvcj2v…`) and `release-github` (`3n812xv2…`),
 the last two unchanged by this branch and valid at its head (`artifacts/updates2/check-validity-head.txt`).
+That file predates the `stale-entry` fix (d12fd309c), which changed `update-variants` alone: at d12fd309c its drv is
+`b6falvd6…` → `ak78cja6…`, built and valid (`artifacts/verify-updates2/update-variants-fixed.log`,
+`head-validity-d12fd309c.txt`), and all four of its mutants (`ratio-one`, `compress-not-forced`, `swapped-variants`,
+`stale-entry`) and all four `update-floors` mutants were built at that head's drvs and fail on their own assertions
+(`artifacts/verify-updates2/*-d12fd309c.log`, `update-variants-mutant-stale-entry.log`,
+`update-variants-mutant-swapped-variants-head.log`). The test creates `/boot/grub2` on the client's ESP so the real
+variant's boot hook does not refuse a GRUB-less ESP; the hook's refusal path is therefore not exercised here.
 
 **Earlier proof (adversarial verification, 2026-11-03).** The selection is proven in `update-e2e`
 with a STAND-IN `plain-gaming` (release C's own test system with a different Shell build, not the real gaming
