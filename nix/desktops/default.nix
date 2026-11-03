@@ -98,6 +98,27 @@
         services.desktopManager.cosmic.enable = true;
         # D15: Rime installs apps; the COSMIC module adds its store only because Flatpak is on (not a core package).
         environment.cosmic.excludePackages = [ pkgs.cosmic-store ];
+        # COSMIC Initial Setup (one of the module's core packages: kept, desktops.md §12.4) turned the screen reader
+        # ON at every start: when its accessibility subscription connects (src/page/a11y.rs, `Response::Init`) it
+        # sends `ScreenReaderEnabled(true)` whatever the current state, at-spi-bus-launcher stores that in the user's
+        # dconf (org.gnome.desktop.a11y.applications screen-reader-enabled) and cosmic-session starts orca for it
+        # (src/a11y.rs), in this login and every later one. Patched to send the state it found: its page still shows
+        # and toggles the screen reader, and a user who had it on keeps it on (desktops.md §12.9).
+        nixpkgs.overlays = [
+          (_final: prev: {
+            cosmic-initial-setup = prev.cosmic-initial-setup.overrideAttrs (o: {
+              postPatch = (o.postPatch or "") + ''
+                substituteInPlace src/page/a11y.rs --replace-fail \
+                  'return cosmic::Task::done(Message::ScreenReaderEnabled(true).into());' \
+                  'return cosmic::Task::done(Message::ScreenReaderEnabled(enabled).into());'
+              '';
+              passthru = (o.passthru or { }) // {
+                rimeScreenReaderPatch = true;
+                unpatched = prev.cosmic-initial-setup;
+              };
+            });
+          })
+        ];
         # rimed owns the CPU policy (scx, cpusets, tiers); system76-scheduler would fight it.
         services.system76-scheduler.enable = lib.mkForce false;
       };
