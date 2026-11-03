@@ -1321,7 +1321,8 @@ each generation, so it changes when the generation activates) replaces `/usr/sha
 - cosign v2.5.2 pin and the publish self-check (§5.6); move to v3 only when the self-check passes with it.
 - `nix store sign --store s3://…` writing narinfos in place: verified in `release-standin` against versitygw (§18).
 - Streaming of `nix copy` between two remote stores without local disk: not used as built (the publish job imports
-  the closure locally, §18); the hosted runner's disk against the real closure: measured, it fits (§18, "Hosted
+  the closure locally, §18); the hosted runner's disk against the real closure: the fetched set and the free disk are
+  measured and fit with a wide margin; the built outputs and a full release's own `df` are not yet seen (§18, "Hosted
   runner disk").
 - `switch-to-configuration-ng`'s dry-run output and greetd's `restartIfChanged` were read at nixpkgs `d357a2b`
   (26.11pre); re-check at the pinned revision when the flake lands.
