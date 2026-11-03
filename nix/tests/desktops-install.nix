@@ -23,8 +23,9 @@
 #          greeter-env           rime-greet launches without the session environment (GreetContext.qml, bind-mounted
 #                                over the store file inside the VM: XDG_CURRENT_DESKTOP never reaches GNOME)
 #          blueman-override      the blueman autostart override removed (blueman-applet starts in GNOME)
-#   kde    kwallet-secrets       kwalletrc's secrets API left on (KWallet's daemon answers org.freedesktop.secrets)
-#          kwallet-pam-login     pam_kwallet back in `login` (greetd's stack): ksecretd starts in a Hyprland login
+#   kde    kwallet-pam-login     pam_kwallet back in `login` (greetd's stack): ksecretd starts in a Hyprland login
+#          (kwalletrc's secrets API on is checks.desktops-eval's: with pam_kwallet out of `login` nothing starts
+#          ksecretd before gnome-keyring holds the name, so this test passes either way: mut-kde-kwallet-secrets-3)
 #   cosmic system76-power        system76-power on (and the configuration's assertions dropped so it evaluates)
 { pkgs, self }:
 
@@ -88,9 +89,6 @@ let
           })
           (lib.mkIf (mutant == "kwallet-pam-login") {
             security.pam.services.login.kwallet.enable = lib.mkOverride 10 true;
-          })
-          (lib.mkIf (mutant == "kwallet-secrets") {
-            environment.etc."xdg/kwalletrc".text = lib.mkForce "[org.freedesktop.secrets]\napiEnabled=true\n";
           })
           (lib.mkIf (mutant == "system76-power") {
             hardware.system76.power-daemon.enable = lib.mkOverride 10 true;
@@ -493,6 +491,6 @@ lib.mapAttrs' (
   lib.nameValuePair "desktops-install-${id}" (mkTest id "" // { mutants = lib.genAttrs muts (mkTest id); })
 ) {
   gnome = [ "same-release-channel" "udevd-not-safe" "greeter-env" "blueman-override" ];
-  kde = [ "kwallet-secrets" "kwallet-pam-login" ];
+  kde = [ "kwallet-pam-login" ];
   cosmic = [ "system76-power" ];
 }
