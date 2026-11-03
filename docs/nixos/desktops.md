@@ -328,8 +328,9 @@ icon. It installs from `feat/nixos`'s rime-shell input in every system (also Rim
 **Shell power service.** `PowerProfileService.qml` polls `org.rimeos.Rimed1 Tier` with busctl every 4 s and sets via
 `rime tier` **(checked)**. Once rimed serves the PPD API (§7), it uses Quickshell's own
 `Quickshell.Services.UPower.PowerProfiles` (`profile`, `hasPerformanceProfile`, `degradationReason`, `holds`
-**(checked, qmltypes)**): event-driven, no polling. It falls back to the busctl path when the bus name has no owner
-(a machine on an older rimed), so the two pieces can land in either order.
+**(checked, qmltypes)**): event-driven, no polling. It falls back to the busctl path when the bus name is not rimed's:
+no owner (a machine on an older rimed) or another daemon's (bootc enables power-profiles-daemon beside rimed), so the
+two pieces can land in either order and bootc keeps driving rimed (§12, verification).
 
 ---
 
@@ -522,12 +523,21 @@ rime-os `nix/settings-pkg`, with the reason.
   install <desktop>` compares, never a second estimate in QML.
 - **Shell-only pages** (`PageRegistry` `shellOnly`): Appearance, Layout, Display, Input, Keybinds, Misc. Every kept page
   was read for `hyprctl` and Hyprland IPC; run-settings-app-test.sh puts a `hyprctl` stub on PATH and opens every page.
+  The Display-left-in mutant is caught by the listing assertions only (opened under labwc, Display calls no stub);
+  the stub assertion itself is shown to fail by the `hyprctl-page` mutant (a kept page running `hyprctl monitors -j`),
+  added in verification.
 - **`rime-settings` takes `rime-settings:<page>` URLs** as well as a bare page, so KDE's `Qt.openUrlExternally` and the
   `.desktop` file's `%u` reach the same code; an empty page opens the app's first page.
 - **The `.desktop` file names one main category** (`Settings;DesktopSettings;`), not `Settings;System;`: two main
   categories put it in two menus (desktop-file-validate's hint, ab8ca519).
 - **PowerProfileService** follows Quickshell's UPower `PowerProfiles` (the PPD API rimed serves, §7) and falls back to
-  `Rimed1.Power.Tier` only while that name has no owner: the two pieces land in either order.
+  `Rimed1.Power.Tier` while that name is not rimed's: the two pieces land in either order. As first built the check
+  was `NameHasOwner` ("no owner = older rimed"), which is wrong on bootc: `Containerfile.core` enables
+  power-profiles-daemon, which owns the name beside rimed (katana: `NameHasOwner` = true, the unit active), so the
+  Shell would have set PPD's profile and never reached rimed's tier. Fixed in verification (rime-shell 0d5aac66): ONE
+  busctl call sent to the power-profiles name for rimed's own object (`Properties.Get org.rimeos.Rimed1.Power Tier` at
+  `/org/rimeos/Rimed1`), which only rimed answers; on katana's bootc it fails ("Object does not exist at path
+  /org/rimeos/Rimed1"), so bootc takes the fallback.
 
 **Quick settings (rime-os `nix/integrations/`).**
 
@@ -606,3 +616,19 @@ rime-os `nix/settings-pkg`, with the reason.
   and both have the same `nix/desktops` dependency. Recipe: `gnomeTest`'s structure; login and powerdevil's
   `currentProfile` from `desktops-install.nix`'s KDE block; the COSMIC power block from the same file; the open
   question is how to assert the plasmoid is in Plasma's tray (the report hook proves it loaded and draws).
+
+**Verification (adversarial re-check, 2026-11-03).** Evidence in `/var/lab/rime-nix/artifacts/settings-verify/`.
+
+- Re-run from a clean `git archive` of rime-shell ab8ca519: `run-settings-app-test.sh` 28/0, `run-power-profile-service-test.sh`
+  15/0. `checks.settings-quicksettings-{gnome,kde,cosmic}` and `checks.settings-integrations-eval` built at 500b6175c's
+  drvPaths; the three `no-properties-changed` mutants FAIL (gnome 11, kde 3, cosmic 9 failed).
+- `checks.settings-app-gnome`: the temporary merge was reproduced (500b6175c + `nix/desktops` d9627d0af, only
+  `nix/tests/default.nix` conflicted, both import lines kept) and evaluates to the same outPath as the recorded pass
+  (`lcvmxjpy…-vm-test-run-rime-settings-app-gnome`, valid in the store); `--rebuild` ran the VM again: every subtest
+  passed (test script 51.44 s), the build's non-zero exit is only `--rebuild`'s output comparison (screenshots differ).
+- Found and fixed: the bootc owner check above (new case "another daemon owns the API" in
+  `run-power-profile-service-test.sh`, mutant `owner-by-name` = the old `NameHasOwner` check, FAILS), and the
+  `hyprctl-page` mutant for the stub assertion. `flake.lock` re-locked to rime-shell 0d5aac66; the results at the
+  re-locked head are recorded in p2-gates S1, S2 and S5.
+- The GNOME VM check's "desktop's own power property" is PPD `ActiveProfile` read with `gdbus` from the session (the
+  property GNOME's power menu reads), not GNOME's toggle widget: a stand-in, stated as such.

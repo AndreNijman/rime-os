@@ -457,14 +457,15 @@ verifications and the wave-4 integration found, each with its state on `feat/nix
 
 ## build:settings (desktops wave: Rime Settings and the quick-settings integrations)
 
-rime-shell `nix/settings-app` (pushed, ab8ca519) and rime-os `nix/settings-pkg` (not pushed). Evidence in
-`/var/lab/rime-nix/artifacts/settings/`. Decisions: `docs/nixos/desktops.md` §12.
+rime-shell `nix/settings-app` (pushed, ab8ca519; 0d5aac66 after verification) and rime-os `nix/settings-pkg` (not
+pushed). Evidence in `/var/lab/rime-nix/artifacts/settings/`, verification in `/var/lab/rime-nix/artifacts/settings-verify/`. Decisions: `docs/nixos/desktops.md` §12.
 
 | Item | State | Owner / what is needed |
 |---|---|---|
 | Rime Settings as an app (`settings.qml`, `rime-settings`, `org.rimeos.Settings`), Shell-only pages hidden, no `hyprctl` | FIXED (rime-shell 9ad74d73, 232dfe6b, ab8ca519): `tests/run-settings-app-test.sh` 28/0; mutants QS_APP_ID dropped, `-n`/IPC dropped, Display page left in each FAIL (`artifacts/settings/shell-tests/`, `mutants-shell/`) | — |
 | The Shell's power control follows the PPD API, falls back to `Rimed1.Power.Tier` | FIXED (rime-shell 147a2b4c): `tests/run-power-profile-service-test.sh` 15/0; mutants fallback removed, polling put back each FAIL | — |
-| Rime Settings packaged (rime-shell.nix: `rime-settings`, `.desktop`, icon, polkit `org.rimeos.rime.system`) and rime-shell locked at ab8ca519 | FIXED (ebfabd397, 9a6a5f5df) | release owner: merge rime-shell `nix/settings-app` into `feat/nixos` before the release job re-locks the input (the lock's `original` is still `feat/nixos`) |
+| PowerProfileService took the PPD path whenever the name had ANY owner: on bootc (power-profiles-daemon enabled in `Containerfile.core`, active on katana) the Shell would have set that daemon's profile instead of rimed's tier | FIXED in verification (rime-shell 0d5aac66): the owner check asks the power-profiles name for rimed's own object; test case "another daemon owns the API" + mutant owner-by-name (FAILS); `flake.lock` re-locked to 0d5aac66 | — |
+| Rime Settings packaged (rime-shell.nix: `rime-settings`, `.desktop`, icon, polkit `org.rimeos.rime.system`) and rime-shell locked at ab8ca519, re-locked at 0d5aac66 in verification | FIXED (ebfabd397, 9a6a5f5df, verification re-lock) | release owner: merge rime-shell `nix/settings-app` into `feat/nixos` before the release job re-locks the input (the lock's `original` is still `feat/nixos`) |
 | GNOME Quick Settings extension `rime@rimeos.org` | FIXED (ebfabd397): `checks.settings-quicksettings-gnome` 21/0 against the fake rimed; mutant `no-properties-changed` FAILS (11 failed) | — |
 | Plasma tray applet `org.rimeos.quicksettings` | FIXED (78b429abb): `checks.settings-quicksettings-kde` 7/0 (qmltestrunner, plasma-workspace's dbus module); mutant `no-properties-changed` FAILS (3 failed) | — |
 | COSMIC panel applet `cosmic-applet-rime` + panel default | FIXED (c0660e953): `checks.settings-quicksettings-cosmic` 19/0 (zbus model crate, cargo test); mutant `no-properties-changed` FAILS (9 failed); the applet builds (`.applet`), the panel default lists it before the power applet (`.panelDefaults`) | — |
