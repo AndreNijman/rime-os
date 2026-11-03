@@ -6,14 +6,37 @@ varstore, every key press goes to the guest.
 
 | File | What it does |
 |---|---|
-| `mkbootc.sh KIND` | Runs inside the published image (`podman run --privileged`, an empty tmpfs over `/sys/firmware`). Makes `disks/KIND/disk.raw` (and for E `win.raw`); KIND A, L or E |
+| `prepare.sh STEP…` | Makes every input below on the host, through containers only (steps `keys vars kernel toplevel payload image oci disk-A disk-L disk-E`; its header says what each does) |
+| `oci-layer.py OCI ROOT NOTE` | Appends one root-owned layer (the files under ROOT) to an OCI layout in place: how `prepare.sh oci` makes the **readiness image** (below) |
+| `mkbootc.sh KIND` | Runs inside the published image (`podman run --privileged`, an empty tmpfs over `/sys/firmware`). Makes `disks/KIND/disk.raw` (and for E `win.raw`) from the OCI layout in `$LAB/oci`; KIND A, L or E |
 | `system.nix` | The lab NixOS system the bridge installs: the product modules + `rime.rootfs` + `rime.boot` + the **Rime kernel** (NVIDIA off), signed in two passes (`imageJson`, then `toplevel` with `signatureDir`/`certificate`, `require = true`) by the lab's TEST MOK. Lab-only knobs: serial console, Plymouth off (the passphrase prompt on the console), pixman/software Qt for the VGA greeter, an initrd unit that says `RIME-LAB: PASSPHRASE-ASKED` on ttyS0 when systemd-cryptsetup asks, Flathub setup off (no network) |
-| `lab-bridge.nix` | The shipped `rime-bridge` with ONE line changed (`TRUSTED_PAYLOAD_KEYS` = the lab's TEST payload key), because the published image has no `nixos-bridge-payload.pub` yet |
+| `lab-bridge.nix` | The shipped `rime-bridge` with ONE line changed (`TRUSTED_PAYLOAD_KEYS` = the lab's TEST payload key), for a run WITHOUT `--readiness` on a disk of the published image alone (no `nixos-bridge-payload.pub` there) |
 | `payload.sh TOPLEVEL BRIDGE SECRET` | Inside the rime-nix container: the payload disk (`payload/store.tar.zst`, `registration`, `preview.tar`, `manifest.json` + `manifest.json.sig` signed with the product's `payload-sign.sh` and the TEST key, the bridge as it runs on bootc, `guest-prep.sh`) |
 | `guest-prep.sh KIND` | Inside the guest (refuses outside KVM): the firmware entries a real machine of KIND has (E: katana's `APEX-OS Primary` first, `Fedora`, the trial's `Rime OS` systemd-boot entry not in BootOrder; katana's is Boot0006, here the first free number) |
 | `refusals-mutant.nix` | `bridge-refusals` with a rime-migrate whose btrfs mounts are read-write: it MUST fail (proves the before/after sha256 can catch a write) |
-| `drive-bridge.py KIND` | Inside `localhost/rime-ovmf-probe`: the three phases below, logs in `$ART/KIND` |
+| `drive-bridge.py KIND` | Inside `localhost/rime-ovmf-probe`: the three phases below, logs in `$ART/KIND`. `--readiness`: the disk is the readiness image, so the guest's own `rime migrate` and `/usr/libexec/rime-migrate` run (not the payload disk's copy) and the bootc verbs' refusals are checked |
 | `run.sh KIND [--fresh] [--phases …]` | Starts `drive-bridge.py` in the probe container |
+
+## The readiness image (bridge3)
+
+The readiness release (draft rime-os #137, branch `feat/nixos-readiness`) is not built or published yet, so the lab
+makes its bootc side itself: the published image (2026.11.01.2, digest below) plus ONE layer with exactly what #137
+adds for the move: `/usr/bin/rime` built from that branch's `rimed/` inside the published image (as
+Containerfile.base's rime-builder stage does: rust + cargo, `cargo build --release --locked --bin rime`, in a
+container that is thrown away), its `files/system/libexec/rime-migrate` as `/usr/libexec/rime-migrate`, and the TEST
+payload key's public line as `/usr/share/rime-os/trust/nixos-bridge-payload.pub` (where the release will put
+`rime-bridge-payload-1`'s). The branch is read with `git archive` only. `$ART/readiness-image.txt` records the branch
+commit, the sha256 of rime-migrate minus its first line next to `rime-bridge.py`'s (they must match), every file's
+sha256 and the new manifest digest; the guest prints the same facts back (`KIND-readiness.txt`).
+
+Why an OCI layer and not `podman build FROM` the published image: on katana `podman build`'s COPY walked the image's
+whole 129-layer rootfs (the ostree repo included) through fuse-overlayfs for more than 20 minutes while holding
+podman's storage lock, which stalled every other podman user on the host. `podman save --format oci-dir` and
+`oci-layer.py` need no lock beyond the save.
+
+With `--readiness`, phase bootc also runs `rime update --check` before `start` (it must NOT be refused) and
+`rime update`, `rime update --check` and `rime boot migrate` after it (each must print
+`REFUSED [nixos-migration-started]` and exit 3: `KIND-refusals-*.txt`, verdict computed in the guest).
 
 ## How the disks are made, and how they differ from a real install
 
@@ -23,7 +46,7 @@ the same image, with `/sys/firmware` replaced by an empty tmpfs first (checked b
 
 - `ostree admin init-fs` + `ostree container image deploy` of an OCI export of the published image
   `ghcr.io/andrenijman/rime-os@sha256:0ace1f6dad51597d79a7d0d84135dd2896fc89d748ec74b9ecfc7c98c92df9bf`
-  (release 2026.11.01.2) with bootc's kernel arguments;
+  (release 2026.11.01.2; since bridge3 with the readiness layer above) with bootc's kernel arguments;
 - the ESP gets the image's own shim, GRUB, MokManager and bootupd's static `grub.cfg` + `bootuuid.cfg` in
   `\EFI\fedora\` and `\EFI\BOOT\`; `/boot/grub2/grub.cfg` is bootupd's static config (pre + `configs.d`, which sources
   `$prefix/custom.cfg` from `41_custom.cfg`);
@@ -94,26 +117,24 @@ Every boot records `mokutil --sb-state`, the `SecureBoot` efivar and the kernel'
 ## Running it
 
 ```
-# once: an OCI export of the image into $LAB/oci; keys in $LAB/keys (all TEST, never committed):
-#   test-mok.{key,crt,der,guid}  openssl req -x509 -newkey rsa:2048 -subj "/CN=Rime bridge lab TEST MOK (throwaway, DO NOT TRUST)/"
-#   rime-mok.pem                 the Rime MOK certificate (public) out of the published image
-#   payload-TEST.{sec,pub}       nix key generate-secret --key-name rime-bridge-lab-TEST-1 (in rime-nix)
-# fw/vars-sb-bridge.fd: virt-fw-vars --input vars-secboot.raw --add-mok GUID rime-mok.der --add-mok GUID test-mok.der
-sudo podman run --rm --privileged -e RIME_LAB_PASS=rime-lab-OLD-1 -e RIME_LAB_LUKS=rimelabluks1 -e DM_DISABLE_UDEV=1 \
-  -v $LAB:/lab -v $RIG:/rig:ro --entrypoint bash ghcr.io/andrenijman/rime-os@sha256:0ace1f6d… /rig/mkbootc.sh L
-# kernel: eval system.nix's imageJson, build the image, sign-detached.sh with the TEST MOK into $LAB/sig, then
-nix build --impure --expr '(import ./nix/probe/ovmf/bridge/system.nix { flake = builtins.getFlake "path:/work/wt-bridge2";
-  signatureDir = /work/scratch/bridge2/sig; certificate = /work/scratch/bridge2/keys/test-mok.crt; }).toplevel'
-nix build --impure --expr '(import ./nix/probe/ovmf/bridge/lab-bridge.nix { flake = …; publicKey = "<payload-TEST.pub>"; })'
-nix shell nixpkgs#{zstd,e2fsprogs,python3,gnutar,coreutils,gnused,bash,openssl,findutils,diffutils} \
-  -c bash nix/probe/ovmf/bridge/payload.sh TOPLEVEL BRIDGE /work/scratch/bridge2/keys/payload-TEST.sec
-nix/probe/ovmf/bridge/run.sh L --fresh --sb --phases bootc,nixos,back,nixos
-nix/probe/ovmf/bridge/run.sh E --fresh --sb --phases bootc,nixos,back,nixos
-# after rebuilding rime-bridge only: REFRESH_ONLY=1 ... payload.sh x BRIDGE x swaps the bridge on the payload disk
+cd nix/probe/ovmf/bridge            # LAB (scratch) and ART (evidence) default to .../scratch/bridge3 and .../artifacts/bridge3
+./prepare.sh keys vars kernel toplevel payload image oci
+sudo modprobe dm_crypt              # on the host, only while disk-L runs (cryptsetup on a loop device over the FILE)
+./prepare.sh disk-A disk-L
+sudo modprobe -r dm_crypt
+./run.sh A --fresh --sb --readiness --rollback-first --phases bootc,nixos,back,nixos
+./run.sh L --fresh --sb --readiness --rollback-first --phases bootc,nixos,back,nixos
+# E: ./prepare.sh disk-E; ./run.sh E --fresh --sb --readiness --phases bootc,nixos,back,nixos
+# the first NixOS login straight through the greeter (no serial login first), then a negative control on the
+# same guest (the update-window knob cut from the user's copy, firstrun masked: the window must show):
+# ./run.sh A --fresh --sb --readiness --greeter-first --negative-control --phases bootc,nixos
+# (--negative-control edits the guest user's config and masks firstrun: only on a --fresh throwaway disk)
+# without --readiness (the published image alone): build lab-bridge.nix and pass it to payload.sh as BRIDGE
 ```
 
-Evidence: `/var/lab/rime-nix/artifacts/bridge2/` (Secure Boot ON, L and E: `run-KIND-bootc.log` (phase bootc) and
-`run-KIND.log` (nixos, back, nixos; re-run on the same disks after a driver fix) + `KIND/` per command and
-screenshot, `mkbootc-KIND.log`, `payload.log`, `sign.txt`, `keys-and-varstore.txt`). Earlier, Secure Boot off, A and E:
-`/var/lab/rime-nix/artifacts/bridge/` (`run1/` = the first passing run, on the bridge before the H8 refactor). Verifier re-run with `--rollback-first`:
+Evidence: `/var/lab/rime-nix/artifacts/bridge3/` (Secure Boot ON, readiness image, A plain and L: `run-KIND.log` +
+`KIND/` per command and screenshot, `mkbootc-KIND.log`, `prepare-*.log`, `readiness-image.txt`,
+`readiness-rime-build.log`, `payload.log`). Earlier, published image + lab bridge, Secure Boot ON, L and E:
+`/var/lab/rime-nix/artifacts/bridge2/`. Secure Boot off, A and E: `/var/lab/rime-nix/artifacts/bridge/` (`run1/` = the
+first passing run, on the bridge before the H8 refactor). Verifier re-run with `--rollback-first`:
 `/var/lab/rime-nix/artifacts/verify-bridge/` (`run-KIND.log` + `ovmf/KIND/`).

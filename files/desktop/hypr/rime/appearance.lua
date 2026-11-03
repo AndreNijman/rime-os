@@ -46,6 +46,16 @@ hl.config({
         disable_splash_rendering = true,
         force_default_wallpaper  = 0,
     },
+
+    -- Hyprland's own "updated to <version>" window (hyprland-update-screen) at the
+    -- first start after its version moves. Hyprland moves only with a Rime release,
+    -- whose notes are the "what's new" (the page the Shell opens), and Rime's config
+    -- changes are migrated for the user: the window would announce an upstream
+    -- release nobody chose. Off, like the logo and splash above. (Hyprland's
+    -- twice-a-year donation window, ecosystem.no_donation_nag, is left on.)
+    ecosystem = {
+        no_update_news = true,
+    },
 })
 
 -- ── Motion ───────────────────────────────────────────────────────────────────

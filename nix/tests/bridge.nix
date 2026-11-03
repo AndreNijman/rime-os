@@ -75,6 +75,8 @@ let
     [ "hostlayer-no-boot" "rime-hostlayer.py" ''s/"mount", "luks", "boot"}/"mount", "luks"}/'' "[boot] table refused" ]
     [ "hostlayer-boot-device-refused" "rime-hostlayer.py" ''s/        elif k == "device":/        elif False:/'' "[boot] device (a /boot partition) refused" ]
     [ "hostlayer-boot-device-dropped" "rime-hostlayer.py" ''s/        for k in ("device", "fstype"):/        for k in ():/'' "host show drops [boot] device" ]
+    [ "hostlayer-microcode-dropped" "rime-hostlayer.py" ''s/            boot\["microcode"\] = self.microcode/            pass/'' "carry drops the CPU vendor: a bridged machine loads both vendors' microcode" ]
+    [ "hostlayer-microcode-swapped" "rime-hostlayer.py" ''s/"GenuineIntel": "intel", "AuthenticAMD": "amd"/"GenuineIntel": "amd", "AuthenticAMD": "intel"/'' "the vendors swapped: an Intel machine gets only AMD microcode" ]
   ];
   # The rime.rootfs /boot generator (nix/modules/rootfs/boot-generator.py) and its mutants.
   genSrc = ../modules/rootfs/boot-generator.py;
@@ -202,9 +204,10 @@ in
       hlMutants}
 
     # The payload signature end to end with OpenSSL, in the readiness release's format: payload-sign.sh (the
-    # release's signer) signs with a Nix-format secret key; the signature verifies with the exact command the bootc
-    # side's `rime migrate start` runs (openssl pkeyutl -verify -rawin, DER SubjectPublicKeyInfo) AND with the bridge's
-    # own ed25519 (an independent implementation), reading the key file the bootc image ships.
+    # release's signer) signs with a Nix-format secret key; the signature verifies with OpenSSL (pkeyutl -verify
+    # -rawin, DER SubjectPublicKeyInfo: the check payload-sign.sh runs after signing) AND with the bridge's own ed25519,
+    # the ONLY verifier on the bootc side (the readiness release's `rime migrate` execs the bridge with no gate of its
+    # own), reading the key file the bootc image ships.
     mkdir pl
     printf store > pl/store.tar.zst; printf reg > pl/registration
     python3 -I ${mkManifest} pl

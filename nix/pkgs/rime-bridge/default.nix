@@ -9,8 +9,8 @@
 # One Python file, standard library only. checkPhase runs tests/test_bridge.py: the topology classifier (A-F, E over
 # A/B/D), every named refusal, the NVRAM load-option parser and the forbidden-tool scan.
 #
-# TODO(handover): the bootc side. The readiness release (D1.1) installs share/rime-bridge/rime-migrate as
-# /usr/libexec/rime-migrate in the rime-os image and `rime migrate` execs it; that is a bootc PR to main.
+# The bootc side: the readiness release (D1.1, draft rime-os #137) installs rime-bridge.py as /usr/libexec/rime-migrate
+# (first line #!/usr/bin/python3 -I) and its `rime migrate` execs it (docs/nixos/bridge.md "Handover").
 {
   lib,
   stdenvNoCC,

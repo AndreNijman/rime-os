@@ -4,8 +4,8 @@
 # the OVMF rig varstores in $OVMF_WORK (nix/probe/ovmf/lab.sh made them). Logs and screenshots go to $ART/KIND.
 set -euo pipefail
 KIND=$1; shift
-LAB=${LAB:-/var/lab/rime-nix/scratch/bridge2}
-ART=${ART:-/var/lab/rime-nix/artifacts/bridge2}
+LAB=${LAB:-/var/lab/rime-nix/scratch/bridge3}
+ART=${ART:-/var/lab/rime-nix/artifacts/bridge3}
 OVMF_WORK=${OVMF_WORK:-/var/lab/rime-nix/artifacts/ovmf/work}
 RIG=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$ART/$KIND"

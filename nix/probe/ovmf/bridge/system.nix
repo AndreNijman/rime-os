@@ -88,6 +88,8 @@ let
 in
 {
   toplevel = c.system.build.toplevel;
+  # pass 1 builds this (the unsigned image imageJson names) for sign-detached.sh (prepare.sh kernel)
+  image = c.system.build.rimeKernelImage;
   imageJson = builtins.toJSON {
     inherit (c.system.build.rimeKernelSigning) imageHash target;
     image = "${c.system.build.rimeKernelImage}";

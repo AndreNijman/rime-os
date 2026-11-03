@@ -59,18 +59,19 @@ setting before and after (only the order of two tmpfiles rules changed:
 over the **exact bytes** of `manifest.json`; `manifest.json` names every other file (store, registration, preview) by
 sha256. The key is the one the bootc image ships at `/usr/share/rime-os/trust/nixos-bridge-payload.pub`, one line
 `<key name>:<base64 of the 32-byte public key>`, and the names in the two files must agree. This is byte for byte the
-format `openssl pkeyutl -verify -pubin -keyform DER -rawin` accepts (what `payload-sign.sh` runs after signing). The
-bridge is the ONLY verifier: the readiness release's `rime migrate` (`rimed/rime/src/nixos_bridge.rs`, draft PR rime-os
-#137 at 37a5f9a89) execs `/usr/libexec/rime-migrate` with no gate of its own (an earlier draft checked it in Rust too,
-and that check was dropped there so the two could never disagree). `verify_payload` is pure Python RFC 8032, because
+format `openssl pkeyutl -verify -pubin -keyform DER -rawin` accepts, which `payload-sign.sh` runs after signing (on the
+release side only). On the bootc side the bridge is the ONLY verifier: there is no outer OpenSSL check. The readiness
+release's `rime migrate` (`rimed/rime/src/nixos_bridge.rs`, draft PR rime-os #137 at f26b97d17) execs
+`/usr/libexec/rime-migrate` with no gate of its own (an earlier draft checked it in Rust too, and that check was
+dropped there so the two could never disagree); the bootc image has no openssl step for the payload at all. `verify_payload` is pure Python RFC 8032, because
 the bridge runs with Fedora's python and nothing from /nix. Refusals, each by name: `payload-key-missing` (the image
 has no key file: no payload is installed), `payload-key-bad`, `payload-unsigned`, `payload-key-untrusted` (signed by a
 key of another name), `payload-signature-bad`, `payload-corrupt`.
 
 The producer is `nix/pkgs/rime-bridge/payload-sign.sh` (installed as `share/rime-bridge/payload-sign.sh`): it takes a
 Nix-format secret key (`nix key generate-secret` output, seed and public half), signs with OpenSSL, reads the
-signature back and verifies it with the same `pkeyutl -verify -rawin` command as the bootc side, and prints the public
-key line the image ships. `bridge-unit` runs it end to end: OpenSSL's verifier and the bridge's both accept it, a byte
+signature back and verifies it with OpenSSL's `pkeyutl -verify -rawin` (a check of the release's own output, not
+something the bootc side repeats), and prints the public key line the image ships. `bridge-unit` runs it end to end: OpenSSL's verifier and the bridge's both accept it, a byte
 appended after signing is refused by both, no key file is `payload-key-missing`, a secret whose halves do not match
 is refused; 5 mutants on the format (`signature-unchecked`, `signature-prefixed`, `signature-file-renamed`,
 `key-compiled-in`, `key-file-first-line`).
@@ -171,6 +172,98 @@ step), an unreadable one `start-record-unreadable`. `check --json` carries the r
 each end in `rolled back` with the masks undone; check and start refuse over each kind of record and start touches
 nothing; a rolled-back record allows); mutants `start-early-steps-outside-rollback` and `check-ignores-start-record`.
 
+### `[boot] microcode` comes from the moved machine's CPU (bridge3)
+
+**Decision.** `rime-hostlayer carry` writes `[boot] microcode = "intel"` or `"amd"` into host.toml from the
+`vendor_id` of `/proc/cpuinfo` (`--cpuinfo` names another file), the rule the installer uses. A vendor that is neither
+GenuineIntel nor AuthenticAMD, or a file it cannot read, writes nothing, so rime-boot's default (`both`) applies. The
+carry report names the answer under `CPU vendor`.
+
+**Why.** Before this a bridged machine loaded both vendors' early microcode where an installed one loads its own
+(`docs/nixos/boot-matrix.md` "Early microcode"): the other vendor's cpio copied into `/boot` and loaded by GRUB at every boot
+for nothing.
+The carry runs inside `start`'s chroot of the new root with `/proc` mounted, so `/proc/cpuinfo` is the machine being
+moved, and `rime-bridge.py` did not change for it. Proof: `rime-hostlayer`'s
+`test_the_cpu_vendor_picks_the_boot_microcode` (Intel, AMD, Hygon, no vendor) and
+`test_microcode_alone_makes_a_boot_table_and_an_unreadable_cpuinfo_none`; mutants `hostlayer-microcode-dropped` and
+`hostlayer-microcode-swapped` in `bridge-unit`; the OVMF runs below (`*-nixos-checks.txt`: host.toml, `MENU` and `BOOTFILE` lines): host.toml says `intel`
+(the lab CPU is `-cpu host` on katana) and the boot menu and `/boot` hold only `intel-ucode`.
+
+### Hyprland's "updated" window is off (bridge3)
+
+**Decision.** Rime's `appearance.lua` sets `ecosystem = { no_update_news = true }`. Hyprland 0.57 opens its own
+"Hyprland updated to 0.57.0" window (hyprland-update-screen) at the first login after `lastVersion` changes. Rime's own
+release notes are the "what is new" for every update, and the window points at Hyprland's changelog, not at what
+changed for the user. The donation nag (`no_donation_nag`) stays as Hyprland ships it. Who meets the window: the
+published bootc image 2026.11.01.2 already ships `hyprland-0.57.0-2.fc45` (`rpm -q hyprland` in it, verify-bridge3), so
+a user who logged in there has `lastVersion` 0.57.0 and NixOS's 0.57.0 takes no "updated" path; the window comes for a
+user whose last bootc session ran 0.56 or older, and at every later Hyprland bump a NixOS release brings. The lab seeds
+`lastVersion` 0.56.2 on the bootc side to force the path. (An earlier text cited
+`artifacts/bridge2/L/L-nixos-desktop.png` as showing the window: that file is the SECOND NixOS boot's screenshot, the
+bridge2 driver overwrote the first boot's, and it shows a bare desktop. The window on an OVMF guest is shown by the
+negative control below.)
+
+**How it reaches a bridged user.** The file is in `/share/rime/hypr/rime/`, which rime-shell-firstrun (a oneshot
+user unit in `default.target`) refreshes into `~/.config/hypr/rime/` when the user manager starts; the carried bootc
+copy has no knob (`BOOTC-KNOB=0`). **Greeter-first login measured (verify-bridge3):** `run.sh A --fresh --sb
+--readiness --greeter-first --negative-control --phases bootc,nixos` makes the user's FIRST NixOS session the
+greeter's (no serial login before it): firstrun exited at 38.39 s of the boot and Hyprland started at 38.42 s, after
+it (`A-nixos-update-news.txt`: `ExecMainExitTimestampMonotonic`, `HYPR-START-US`; the likely mechanism, pam_systemd
+waiting for the user manager whose `default.target` orders after the oneshot, is not confirmed), `lastVersion` 0.56.2 -> 0.57.0, `getoption` true,
+`UPDATE-SCREEN=0`, journal clean, bare desktop (`A-nixos-desktop.png`). Evidence
+`/var/lab/rime-nix/artifacts/verify-bridge3/greeter-first/` (`run-A.log` PASS, `A/`). The order is observed on one
+run, not a systemd guarantee Rime sets: the same line in the readiness release's `appearance.lua` (handover below)
+makes it irrelevant. **Negative control on the same guest:** with the table cut from the user's copy (firstrun masked)
+and `lastVersion` set back to 0.56.2, the next greeter login opens the window (`A-nixos-negative-desktop.png`:
+"Hyprland updated to 0.57.0!", `getoption` false, `UPDATE-SCREEN=1`, `A-nixos-negative-control.txt`), so the lab's
+checks can fail there. Proof in Nix:
+`desktop` subtest "no Hyprland 'updated' window after a version change" (seeds `lastVersion` 0.56.2, logs in,
+`lastVersion` becomes 0.57.*, `hyprctl getoption ecosystem:no_update_news` is set and true, no
+hyprland-update-screen process and no journal line naming `hyprland-update`, screenshot
+`hyprland-no-update-news.png`); its mutant `checks.x86_64-linux.desktop.mutants.update-news` (the same system with the
+table cut out of `appearance.lua`) fails with `bool: false`. The verifier found the process check alone could not fail
+in that VM: with the table cut AND the getoption assertion skipped the check still PASSED, because
+hyprland-update-screen starts (`--new-version 0.57.0`) and then SEGFAULTS in hyprtoolkit at its first configure (no GPU
+buffers in the test VM), so it is gone before `ps` looks (`artifacts/verify-bridge3/desktop-mutant-window-only.log`). The
+subtest now also asserts the journal names no `hyprland-update` (systemd-coredump records the crash); the same
+getoption-skipped mutant then FAILS on that line (`desktop-mutant-window-only-fixed.log`). On the OVMF guest (`-device
+VGA`) it is the other way round: the window renders and stays (`ps` sees it, the journal has no line), so the lab
+driver asserts both.
+
+## What the OVMF lab proved on the readiness image (bridge3, 2026-11-03, Secure Boot on)
+
+Evidence `/var/lab/rime-nix/artifacts/bridge3/` (`run-A.log`, `run-L.log`, `A/`, `L/`; the records of the second
+NixOS boot in `KIND/nixos-again/`). The disks are the **readiness image**: the published 2026.11.01.2 plus one layer
+with draft #137's `rime` and `/usr/libexec/rime-migrate` (f26b97d17) and the TEST payload key where the release puts
+its own (`nix/probe/ovmf/bridge/README.md`, `readiness-image.txt`). So the bootc side is #137 itself, not a lab
+bridge: the guest's `rime migrate check --explain` and `rime migrate start` run, and `KIND-readiness.txt` shows the
+guest's rime-migrate minus line 1 hashing to the same `a6fcdc2a…` as this branch's `rime-bridge.py`. Same Secure
+Boot rig as below (Fedora's SB OVMF, real Rime MOK + TEST MOK, `SecureBoot efivar=1` on every boot). Both runs:
+`--rollback-first` (an injected fault after the boot entry: rc 10, `VERDICT=clean`), then `check --explain`, `start`,
+NixOS, back to the ostree entry, NixOS again; `run.sh KIND --fresh --sb --readiness --rollback-first --phases
+bootc,nixos,back,nixos`; both `PASS`.
+
+- **Plain A through `\EFI\fedora\`** (re-run owed since the host.toml fix): firmware boots `Boot0005 Fedora` ->
+  `\EFI\fedora\shimx64.efi`, `check` = A with a verified chain (`A-check.txt`), `start` 5 min 29 s; NixOS mounts
+  `@nixos`/`@nix`/`@home` and `/boot` from the btrfs top level, host.toml keeps timezone, locale and keyboard, rime-greet
+  logs alex in with the old password into Hyprland + the Shell (`A-nixos-desktop.png`); back on ostree the home sums
+  hold (`A-back-checks.txt`).
+- **L, encrypted** (re-run on the start-record bridge): the same with dracut's and the NixOS initrd's passphrase
+  prompts, `/` in the opened LUKS volume, `/boot` the ext4, host.toml `kernel_params` rd.luks.* (`L-nixos-checks.txt`),
+  `start` 5 min 51 s.
+- **The bootc verbs refuse after `start`** (readiness problem 8, bridge2 open 3): `rime update`, `rime update --check`
+  and `rime boot migrate` each exit 3 with `REFUSED [nixos-migration-started]` (`KIND-refusals-after-start.txt`,
+  `REFUSED-COUNT=3`); before `start`, `rime update --check` is not refused (`KIND-refusals-before-start.txt`).
+- **Microcode:** host.toml `[boot] microcode = "intel"` (the guest is `-cpu host`, GenuineIntel), the menu's `initrd`
+  line and `/boot/rime/nixos` carry `intel-ucode` only; `check --explain` and `start` print `CPU vendor: vendor_id
+  GenuineIntel: host.toml [boot] microcode = intel` in the left-behind report.
+- **Hyprland's window:** alex's `lastVersion` is seeded 0.56.2 on the bootc side; at the first NixOS login it
+  becomes 0.57.0, `hyprctl getoption ecosystem:no_update_news` is `bool: true set: true` and no hyprland-update-screen
+  runs (`KIND-nixos-update-news.txt`); the screenshot is the bare desktop.
+
+The first pass of both runs (`artifacts/bridge3/run1/`, also PASS) wrote the second NixOS boot's records over the
+first's; the driver now writes a repeated phase into `PHASE-again/`.
+
 ## What the OVMF lab proved (2026-11-02, Secure Boot on)
 
 `nix/probe/ovmf/bridge` (README there), evidence `/var/lab/rime-nix/artifacts/bridge2/`. Both runs use disks made
@@ -206,13 +299,16 @@ exist yet).
   `rime-hostlayer`, the system's `etc/` and `sw/bin` names, greetd's config; `nix/probe/ovmf/bridge/payload.sh` shows
   the layout) and run `payload-sign.sh` on every payload; the readiness release ships the public line.
 - **katana (P3):** read `\EFI\APEX\grub.cfg` with `rime migrate check --explain`.
-- **Readiness release, again:** the lab's `*-update-after-start.txt` shows `rime update --check` still running after
-  `start`: that image predates #137, whose `rime` refuses it (tests/test-rime-migrate.sh there, 10 verb forms x 5
-  records). A booted bootc VM of the readiness image is only possible once #137 is built.
+- **Readiness release, again:** DONE (bridge3). On a booted bootc VM of the readiness image (#137 at f26b97d17 as a
+  layer on the published image, lab README) `rime update`, `rime update --check` and `rime boot migrate` each print
+  `REFUSED [nixos-migration-started]` and exit 3 after `start`, and `rime update --check` is not refused before it
+  (`artifacts/bridge3/{A,L}/*-refusals-*.txt`). `rime-bridge.py` did not change in bridge3: #137's
+  `/usr/libexec/rime-migrate` minus its first line and `rime-bridge.py` minus its first line are both sha256
+  `a6fcdc2a182abdee7ec6c7e47ba28084d8017e8ca7e8db31b56f69332964d14b` (`artifacts/bridge3/readiness-image.txt`, and the
+  guest's own `*-readiness.txt`). Optional for #137: the same `ecosystem = { no_update_news = true }` table in bootc's
+  `files/desktop/hypr/rime/appearance.lua` (decision above), so the first NixOS login is quiet whatever starts first.
 - **Release pipeline, again:** `payload-sign.sh` needs `cmp` (diffutils) next to openssl.
-- **Desktop:** the first NixOS login after the move shows Hyprland's "updated to 0.57.0" notice
-  (`artifacts/bridge2/L/L-nixos-desktop.png`). Whether to silence it is the desktop module's call.
-- **Lab host (not Rime):** on katana, `/proc/sys/kernel/modprobe` names a `/nix/store/...-kmod-31/bin/modprobe` that
-  does not exist on the host (written from inside the privileged `rime-nix` container by something that runs NixOS
-  activation or sysctl there), so the host kernel cannot autoload modules: `cryptsetup` inside the lab container needed
-  `modprobe dm_crypt` by hand. A reboot clears it; this branch did not change it.
+- **Desktop:** DONE (bridge3): the "updated" window is off (decision above).
+- **Lab host (not Rime):** RESOLVED by 2026-11-03: katana's `/proc/sys/kernel/modprobe` reads `/usr/sbin/modprobe`
+  again (it had named a `/nix/store/...-kmod-31/bin/modprobe` written from inside the privileged `rime-nix`
+  container). bridge3 loaded `dm_crypt` on the host only while `prepare.sh disk-L` ran and removed it after.

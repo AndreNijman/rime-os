@@ -91,7 +91,8 @@ default false under `rime.boot`). The hook loads them as their own `initrd` file
 one `initrd` line per file in a BLS entry, one `initrd a b c` line in `custom.cfg`'s menu. GRUB concatenates them
 and the kernel's early loader reads the uncompressed cpios at the start of the image. `/var/lib/rime/host.toml`
 `[boot] microcode = "intel" | "amd" | "both" | "none"` picks the vendors per machine; the default is `both`, and the
-installer writes the CPU's own vendor (`/proc/cpuinfo` `vendor_id`, anything unknown keeps `both`). The files are
+installer writes the CPU's own vendor (`/proc/cpuinfo` `vendor_id`, anything unknown keeps `both`), and so does the
+bridge's `rime-hostlayer carry` on a moved machine (`docs/nixos/bridge.md`). The files are
 content-addressed like the rest, so **one copy** serves every generation that names the same package.
 
 Proven:

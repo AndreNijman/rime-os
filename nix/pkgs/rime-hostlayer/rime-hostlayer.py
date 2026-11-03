@@ -82,6 +82,8 @@ BOOT_LAYOUTS = ("auto", "bls", "custom-cfg")
 # [boot] microcode values rime-boot reads (nix/pkgs/rime-boot MICROCODE): which vendors' early-microcode cpios every
 # entry loads.
 BOOT_MICROCODE = ("both", "intel", "amd", "none")
+# /proc/cpuinfo vendor_id -> the [boot] microcode carry writes (installer/rime-install-nixos.sh decides the same way)
+CPU_MICROCODE = {"GenuineIntel": "intel", "AuthenticAMD": "amd"}
 
 # Network filesystems (libmount's mnt_fstype_is_netfs, as systemd-fstab-generator uses it): such a mount waits for
 # the network and hangs from remote-fs.target, never from local-fs.target, and is never fsck'd.
@@ -949,6 +951,7 @@ class Carry:
             self.declared = json.load(f)
         self.image_etc = a.image_etc or self.src.p("usr/etc")
         self.cmdline = a.cmdline
+        self.cpuinfo = a.cpuinfo
 
     def d(self, rel):
         return os.path.join(self.dest, rel.lstrip("/"))
@@ -1105,8 +1108,14 @@ class Carry:
             luks.append({"name": p[0], "device": p[1], "keyfile": p[2] if len(p) > 2 and p[2] != "none" else "",
                          "options": opts, "tpm2": "tpm2-device" in opts})
         params = self.params
+        boot = {}
+        if self.microcode:
+            boot["microcode"] = self.microcode
         if params:
-            host["boot"] = {"kernel_params": params}
+            boot["kernel_params"] = params
+        if boot:
+            host["boot"] = boot
+        if params:
             have = {v["device"].split("=", 1)[-1].lower() for v in luks}
             for uuid, v in self.luks_from_args(params).items():
                 if uuid not in have:
@@ -1154,6 +1163,30 @@ class Carry:
             + "; not carried (the image's own, or port them to the system configuration): "
             + (" ".join(other) or "none"))})
         return carried
+
+    def cpu_microcode(self):
+        """host.toml [boot] microcode from the CPU this carry runs on (the machine being moved): its vendor_id, as the
+        installer decides it (installer/rime-install-nixos.sh). A bridged machine then loads one vendor's early
+        microcode, not both (rime-boot MICROCODE; docs/nixos/boot-matrix.md). An unknown vendor or an unreadable
+        file writes nothing: rime-boot's default, both vendors, is the safe answer."""
+        why = f"no vendor_id in {self.cpuinfo}"
+        try:
+            with open(self.cpuinfo) as f:
+                text = f.read()
+        except OSError as e:
+            why = f"cannot read {self.cpuinfo}: {e}"
+            text = ""
+        m = re.search(r"^vendor_id\s*:\s*(\S+)", text, re.M)
+        vendor = m.group(1) if m else None
+        mc = CPU_MICROCODE.get(vendor)
+        if mc:
+            result = f"vendor_id {vendor}: host.toml [boot] microcode = {mc} (only that vendor's early microcode)"
+        elif vendor:
+            result = f"vendor_id {vendor} is neither Intel's nor AMD's: no [boot] microcode (both vendors load)"
+        else:
+            result = why + ": no [boot] microcode (both vendors load)"
+        self.report["checked"].append({"path": "CPU vendor", "result": result})
+        return mc
 
     @staticmethod
     def luks_from_args(params):
@@ -1422,6 +1455,7 @@ class Carry:
         self.force = force
         self.preflight()
         self.params = self.kernel_args()  # refuses before anything is written
+        self.microcode = self.cpu_microcode()
         self.accounts()  # likewise
         self.host()
         self.files()
@@ -1451,6 +1485,8 @@ def main(argv=None):
     c.add_argument("--declared")
     c.add_argument("--image-etc")
     c.add_argument("--cmdline")
+    # the machine's CPU (host.toml [boot] microcode); the default is the running one, which is the machine moved
+    c.add_argument("--cpuinfo", default="/proc/cpuinfo")
     c.add_argument("--plan", action="store_true")
     c.add_argument("--force", action="store_true")
     h = sub.add_parser("host")
