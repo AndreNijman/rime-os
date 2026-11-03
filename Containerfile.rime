@@ -329,6 +329,12 @@ COPY --chmod=0755 files/scripts/check-initramfs-budget.sh \
 RUN set -eux; \
     command -v plymouth-set-default-theme >/dev/null \
         || { echo "FATAL: plymouth engine missing from core"; exit 1; }; \
+    # plymouthd runs from this initramfs: it must be core's patched rebuild
+    # (the keyboard-removed fix, Containerfile.core plymouth-builder), never a
+    # Fedora build some later dnf transaction swapped in.
+    rpm -q --qf '%{RELEASE}\n' plymouth plymouth-core-libs plymouth-graphics-libs plymouth-plugin-script \
+        | grep -Ev '\.rime[0-9]+\.fc[0-9]+$' >/dev/null \
+        && { echo "FATAL: plymouth is not Rime's build: $(rpm -q plymouth)"; exit 1; }; \
     for t in /tmp/rime-plymouth-src/rime-os-accent-*; do \
         cp -a "$t" /usr/share/plymouth/themes/; \
     done; \
