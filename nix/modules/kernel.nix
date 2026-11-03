@@ -303,7 +303,15 @@ in
       })
 
       (lib.mkIf cfg.controllers.enable {
-        hardware.xone.enable = true;
+        # nixpkgs' hardware.xone, without its `hardware.firmware = [ pkgs.xone-dongle-firmware ]`. Decision (wave 4
+        # integration, 2026-11-03; checks.release-licences found it): the wireless dongle's firmware is extracted from
+        # a Microsoft driver package whose licence (nixpkgs: `unfree`) does not allow redistribution, so Rime's
+        # public cache must not carry it, and bootc never baked it in either (Containerfile.core: "wired pads work
+        # as shipped, dongle users run xone-get-firmware.sh once"). The driver, its module blacklist and xpad-noone
+        # are kept, so wired pads work; the dongle's firmware on NixOS is docs/nixos/open-items.md "Opened by wave 4".
+        boot.blacklistedKernelModules = [ "xpad" "mt76x2u" ];
+        boot.extraModulePackages = [ kp.xone ];
+        hardware.xpad-noone.enable = lib.mkDefault true;
         hardware.xpadneo.enable = true;
       })
 
