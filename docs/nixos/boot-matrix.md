@@ -106,7 +106,9 @@ Proven:
   handed the kernel (`AuthenticAMD.bin` and `GenuineIntel.bin`; U3: none), and the image size allows GRUB's 4-byte
   padding of each file (4,973,393 B is 4,973,396 in the image). U4 boots U2's menu (three files on one `initrd`
   line) with `-cpu host,-hypervisor` and `nokaslr`, starts QEMU stopped, and walks the loader with hardware
-  breakpoints over the gdbstub (addresses from the kernel's own `System.map`): `get_microcode_blob()` is called from
+  breakpoints over the gdbstub (addresses from the kernel's own `System.map`; the kernel is the bootc Rime kernel
+  7.2.9-cachyos1.apex1.fc45, the same source as the NixOS kernel, whose config also has `CONFIG_MICROCODE=y`,
+  `nix/pkgs/kernel/config`; the NixOS kernel's own loader is not walked): `get_microcode_blob()` is called from
   `load_ucode_intel_bsp()`, calls `find_microcode_in_initrd()`, and that returns `data=0xffff88804f075094
   size=15,228,928`: exactly the size of `kernel/x86/microcode/GenuineIntel.bin` inside nixpkgs' `intel-ucode.img`, and
   the 48 bytes at that address (read in QEMU's physical-memory mode) are byte for byte the file's first patch header
@@ -222,6 +224,8 @@ key and passphrase slots byte for byte), then measures again. Its exit code is `
   `failed == 0 || still.is_empty()` FAILS arm 1 ("rebind reported success while the slot is still stale: rc=0");
   `still.is_empty()` alone FAILS arm 2 ("rebind reported success although its unit failed: rc=0");
   `failed == 0` alone FAILS arm 1. Each build exits 1.
+  Independent verification (wave 4, vboot2): the `||` mutant rebuilt in a fresh copy FAILS arm 1 the same way, rc 1
+  (`/var/lab/rime-nix/artifacts/vboot2/luks-tpm-rebind-mutant-or.log`).
 - **Under Secure Boot after a real policy change** (OVMF TPM lab, `nix/probe/ovmf/tpm/run.sh run rebind-sb`; wave 4):
   OVMF with Secure Boot on, Fedora 45's shim and GRUB, the NixOS kernel signed by a TEST MOK, swtpm, one disk and
   one varstore carried from boot to boot. S1 seals a TPM slot to the boot's PCR 7; S2 unseals it with no prompt; a
