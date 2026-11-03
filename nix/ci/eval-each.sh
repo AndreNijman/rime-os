@@ -18,6 +18,8 @@ shift
 SYSTEM="${SYSTEM:-x86_64-linux}"
 JOBS="${RIME_EVAL_JOBS:-2}"
 HEAVY_MIB="${RIME_EVAL_HEAVY_MIB:-4096}"
+# Start a light evaluation only with this much free: above the biggest light peak (update-floors, 3.8 GB, 2026-11-04).
+GATE="${RIME_EVAL_GATE_MIB:-5120}"
 # Attributes measured too big to share a 16 GB hosted runner with others (peak RSS per evaluator, hosted run
 # 41687259044 and the rime-nix container, 2026-11-04): evaluated ONE AT A TIME after the parallel batch.
 HEAVY_LIST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/eval-heavy.txt"
@@ -48,14 +50,26 @@ for out in nixosModules overlays; do
     fi
 done
 
+# The kB value of one /proc key ("VmHWM:", "MemAvailable:"). Plain bash: the rime-nix container has no awk or sed.
+field() {
+    local k v _
+    while read -r k v _; do [ "$k" = "$1" ] && { echo "$v"; return; }; done < "$2" 2>/dev/null
+}
+export -f field
+
 one() {
     local attr="$1" t0 rc rss
+    # Light attributes run $JOBS at a time: start one only while GATE_MIB is free, so a few ~3 GB evaluators
+    # finishing late cannot stack up on a 16 GB runner. The heavy pass runs one at a time with GATE_MIB=0.
+    while [ "${GATE_MIB:-0}" -gt 0 ] && [ "$(( $(field MemAvailable: /proc/meminfo) / 1024 ))" -lt "$GATE_MIB" ]; do
+        sleep 2
+    done
     t0=$(date +%s)
     # GNU time is not on every runner: poll the evaluator's own peak RSS (VmHWM) while it runs.
     nix eval --raw "${NIX_ARGS[@]}" "$FLAKE#$attr" >/dev/null 2>"$work/${attr//\//_}.err" &
     local pid=$! peak=0 cur
     while kill -0 "$pid" 2>/dev/null; do
-        cur=$(awk '/^VmHWM:/ {print $2}' "/proc/$pid/status" 2>/dev/null)
+        cur=$(field VmHWM: "/proc/$pid/status")
         [ "${cur:-0}" -gt "$peak" ] && peak=$cur
         sleep 0.5
     done
@@ -68,7 +82,7 @@ one() {
         fi
     else
         echo "FAIL $attr $(( $(date +%s) - t0 ))s ${rss}MiB"
-        sed 's/^/  /' "$work/${attr//\//_}.err" | tail -n 40
+        tail -n 40 "$work/${attr//\//_}.err" | while IFS= read -r l; do printf '  %s\n' "$l"; done
         echo 1 > "$work/failed"
     fi
 }
@@ -91,9 +105,9 @@ done < "$work/attrs"
 
 # xargs runs `one` in a fresh bash: hand it the extra args as a plain string (they never contain spaces of their own).
 # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
-xargs -P "$JOBS" -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$@"' _ {} < "$work/light"
+GATE_MIB="$GATE" xargs -P "$JOBS" -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$@"' _ {} < "$work/light"
 # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
-xargs -P 1 -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$@"' _ {} < "$work/alone"
+GATE_MIB=0 xargs -P 1 -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$@"' _ {} < "$work/alone"
 
 echo "eval-each: $(wc -l < "$work/attrs") attributes evaluated, $JOBS at a time; $(wc -l < "$work/alone") heavy ones alone"
 [ ! -e "$work/failed" ]

@@ -41,9 +41,10 @@ jobs:
   plan:
     name: Evaluate and plan
     runs-on: ubuntu-24.04
-    # Evaluation one attribute per process (nix/ci/eval-each.sh): ~50 CPU-min measured locally under load; 10-11 min
-    # on the hosted runner (docs/nixos/ci.md). Twice the slowest, rounded up.
-    timeout-minutes: 25
+    # Evaluation one attribute per process (nix/ci/eval-each.sh). Hosted runner 2026-11-04: 61 light attributes in
+    # 12.5 min at 3 at a time; with ~115 attributes, 4 at a time, and the ~11 GB ones (nix/ci/eval-heavy.txt) one at a
+    # time after them, the estimate is ~30 min. 45 leaves room for a slow runner.
+    timeout-minutes: 45
     outputs:
       run: ${{ steps.plan.outputs.run }}
     steps:
@@ -54,9 +55,10 @@ jobs:
       - name: Evaluate every flake output, one process each
         # Every check (the skipped kernel ones included), package and configuration, so a broken expression fails
         # here. Not `nix flake check --no-build`: one evaluator for all checks peaked at 27.9 GB and the 16 GB
-        # runner killed it (exit 143). One process per attribute peaks at 3.5 GB (update-client), 3 at a time.
-        # The runner's memory, disk and biggest processes every 20 s: two runs lost the runner ("shutdown signal",
-        # exit 143) about 14 min in with no evaluator above 3 GB, so the next failure has to say what ran out.
+        # runner killed it (exit 143). One process per attribute: the light ones peak at ~3 GB, 4 at a time (the
+        # runner's core count), each started only with 5 GB available; the ones in nix/ci/eval-heavy.txt (up to
+        # ~12 GB) run alone afterwards. The runner's memory, disk and biggest processes are logged every 20 s: that
+        # log is how run 41720602044's lost runner was traced to release-plan + release-unit (~11 GB each) side by side.
         run: |
           ( while sleep 20; do
               printf 'RES %s mem=%s disk=%s top=%s\n' "$(date +%T)" \
@@ -65,7 +67,7 @@ jobs:
                 "$(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s:%dM ", $2, $1/1024}')"
             done ) &
           mon=$!
-          rc=0; RIME_EVAL_JOBS=3 nix/ci/eval-each.sh "$FLAKE" || rc=$?
+          rc=0; RIME_EVAL_JOBS=4 nix/ci/eval-each.sh "$FLAKE" || rc=$?
           kill "$mon" 2>/dev/null || true
           exit "$rc"
       - name: Plan the checks
