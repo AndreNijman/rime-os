@@ -405,5 +405,7 @@ The wave-4 inputs' secureboot problems 3-6 and the open row above. Evidence unde
    `checks.luks-tpm-rebind` (af5208599) tests each half of `failed == 0 && still.is_empty()`; the `||`, no-`failed`
    and no-`still` mutants each FAIL it. Re-seal under Secure Boot after a db change: TPM lab `rebind-sb` 4/4 PASS,
    `mutant-rebind-skipped` FAILS S3 and S4. katana's real PCR 7: P3/HARDWARE.
-5. *Checks nobody re-ran at the wave-3 head.* See this piece's handover: each was checked for a valid outPath at the
-   boot2 head and the missing ones built.
+5. *Checks nobody re-ran at the wave-3 head.* FIXED: at the boot2 head every listed check (desktop, fedora-parity,
+   hostlayer-katana, libexec, release-unit, security, update-client, update-e2e, gaming, polish, catalogue, ci,
+   shell, keymap-luks, luks-boot, boot-loader-scan) has a valid outPath. 14 already were; `release-unit` ("plan ok")
+   and `ci` ("ci: all passed") were built here. The doc-only commits do not move any check's drvPath.
