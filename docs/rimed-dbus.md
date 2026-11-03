@@ -8,7 +8,9 @@ IDs never change.
 
 - **Bus name:** `org.rimeos.Rimed1`
 - **Object path:** `/org/rimeos/Rimed1`
-- All seven interfaces live on that one object path.
+- All eight interfaces live on that one object path.
+- rimed also serves power-profiles-daemon's API on PPD's own names and paths
+  (see [The power-profiles API](#the-power-profiles-api-rimed-is-the-one-writer)).
 
 ## Tier IDs (frozen)
 
@@ -259,10 +261,113 @@ keeps game mode on (Gaming), two existing behaviours change, on purpose:
 - `GameMode.StartOwnedBy` on the held session does not adopt the owner, so
   Gaming Mode ending does not release it.
 
+## `org.rimeos.Rimed1.Ui` (2026-11-03)
+
+A short, input-triggered **UI boost**: smooth animations on battery without
+moving the tier. On the L16 the battery default stays `balanced` (governor
+`powersave`, EPP `balance_power`); for the length of one animation rimed raises
+every policy's `energy_performance_preference` to `balance_performance`, then
+writes the tier's own EPP back.
+
+| Member | Kind | Signature | Notes |
+|---|---|---|---|
+| `Boost(ms)` | method | `u → u` | Ask for `ms` of boost. Answers the milliseconds the boost now lasts; `0` = nothing boosted |
+| `Active` | property (r) | `b` | A boost is on the hardware now. Not signalled (`emits_changed_signal = false`) |
+| `Lever` | property (r) | `s` | What a boost writes in the current tier, e.g. `energy_performance_preference = balance_performance (all policies)`; `""` when this tier is not boosted |
+| `MaxMs` | property (r) | `u` | The most one call buys (600) |
+
+**Who may call it.** Unprivileged, no polkit: the caller's uid must be the user
+of seat0's **active, local** session (logind over D-Bus: `Seat.ActiveSession`,
+then `Session.User/Remote/Active`). Any other caller, root included, gets
+`org.freedesktop.DBus.Error.AccessDenied`. An unreachable logind refuses.
+
+**Limits** (rimed enforces them; a client never has to):
+
+- **Cap:** one call buys at most 600 ms.
+- **Coalesce, never stack:** a call while boosted moves the end of the one
+  window to `max(current end, now + ms)`. Ten callers at once still end 600 ms
+  after the last call.
+- **Ceiling + cooldown:** one continuous window lasts at most 1.5 s; a window
+  that reached it is followed by 1 s in which `Boost` answers `0`.
+- **Rate:** per bus connection, 8 calls back to back, then 20 a second;
+  beyond that `org.freedesktop.DBus.Error.LimitsExceeded`.
+- **Release:** `Boost(0)` gives this caller's share back. A caller that leaves
+  the bus gives it back too. When no caller holds the window, the tier's EPP
+  is written back at once.
+- **Tiers:** only the tiers in the profile's `[ui_boost] tiers` (default
+  `["balanced"]`) whose EPP is below the boost's. `performance` and
+  `power-saver` answer `0` and write nothing. Any tier change ends a boost;
+  the tier's own writes land last.
+
+**How the Shell should call it.** On the input event itself (key press,
+pointer press, gesture begin), *before* the first animated frame, and without
+waiting for the reply: send the method call with the `NO_REPLY_EXPECTED` flag.
+Ask for the animation's own length (a 300 ms transition asks 300); repeating
+the call during a long gesture is fine, coalescing makes it free.
+
+```
+# From a shell (waits for the answer, for testing):
+rime ui boost 300
+busctl call org.rimeos.Rimed1 /org/rimeos/Rimed1 org.rimeos.Rimed1.Ui Boost u 300
+# Fire-and-forget, as an input handler should:
+busctl call --expect-reply=no org.rimeos.Rimed1 /org/rimeos/Rimed1 org.rimeos.Rimed1.Ui Boost u 300
+```
+
+**Hyprland.** `rime ui hypr-boost` (started by `rime/session.lua`) follows
+Hyprland's event socket and asks for 500 ms on `openwindow`, `closewindow`,
+`workspace`/`workspacev2`, `activespecial`, `fullscreen` and `movewindow`, at
+most once per 100 ms, fire-and-forget. Those events arrive as the animation
+starts; the Shell's call on the input event is the one that lands before the
+first frame.
+
+**Profile knobs** (`config/sysprofiles/*.toml`):
+
+```toml
+[ui_boost]
+enabled = true                 # default true
+epp = "balance_performance"    # performance | balance_performance | balance_power | power
+tiers = ["balanced"]           # default ["balanced"]
+```
+
+## The power-profiles API: rimed is the one writer
+
+power-profiles-daemon (PPD) and rimed both wrote the governor, EPP, CPU boost,
+the min-frequency floor and `platform_profile`, and the last writer won. Since
+2026-11-03 **`power-profiles-daemon.service` is masked** in the image and rimed
+owns PPD's names:
+
+- `org.freedesktop.UPower.PowerProfiles` at `/org/freedesktop/UPower/PowerProfiles`
+- `net.hadess.PowerProfiles` at `/net/hadess/PowerProfiles`
+
+The PPD package stays, so `powerprofilesctl` and desktop applets keep working,
+against rimed. A PPD started by hand anyway cannot own its name and exits
+before its drivers write anything.
+
+| Member | Behaviour |
+|---|---|
+| `ActiveProfile` (rw) | Reads rimed's tier (`performance`, `balanced`, `power-saver`). **Writing it is refused** (the error's message says AccessDenied and names `rime tier`; zbus wraps a property-setter error, so the error NAME on the wire is `org.freedesktop.zbus.Error`): a property write carries no caller rimed could check with polkit |
+| `Profiles` | The three tiers, lowest first; `CpuDriver`/`Driver` = `rimed`, `PlatformDriver` when the firmware has `platform_profile` |
+| `HoldProfile(s,s,s) → u` | `performance` or `power-saver`; polkit `manage-power`. `power-saver` wins over `performance`. Auto-switch is off while a hold stands. Refused during game mode |
+| `ReleaseProfile(u)` | Releasing the last hold puts back the tier and the auto-switch setting from before the first hold. A holder leaving the bus releases its holds. `SetTier` drops every hold (the user's choice stands) |
+| `ProfileReleased(u)` | Emitted per released cookie |
+| `ActiveProfileHolds` | `Profile`, `ApplicationId`, `Reason` |
+| `Actions`, `ActionsInfo` | Empty. `SetActionEnabled` is refused |
+| `PerformanceDegraded`, `PerformanceInhibited` | `""` |
+| `BatteryAware` | `true` (rimed's AC/battery auto-switch) |
+| `Version` | `rimed <version>` |
+
+What moved from PPD into rimed's tiers (amd-pstate): `cpu_boost` (per-policy
+`boost`, else `cpufreq/boost`, else intel_pstate `no_turbo`) and `cpu_min_freq`
+(`scaling_min_freq` from `amd_pstate_lowest_nonlinear_freq` in
+performance/balanced, `cpuinfo_min_freq` in power-saver), the values PPD 0.30
+wrote. Not ported: `trickle_charge` (peripheral batteries only) and the amdgpu
+`panel_power`/`dpm` actions (off by default in PPD; nothing changes).
+
 ## Authorization
 
-The D-Bus system policy (`org.rimeos.Rimed1.conf`) lets only root own the name
-and lets any local user *send* to the service. Reads are unrestricted;
+The D-Bus system policy (`org.rimeos.Rimed1.conf`) lets only root own the names
+(rimed's own and PPD's two)
+and lets any local user *send* to them. Reads are unrestricted;
 **polkit gates the mutating methods inside the daemon**:
 
 - `SetTier`, `SetAutoSwitch` → action `org.rimeos.rimed.manage-power`
@@ -272,6 +377,11 @@ and lets any local user *send* to the service. Reads are unrestricted;
   `org.rimeos.rimed.manage-power` (reusing the shipped action instead of adding
   new ones to the polkit policy; see the IMAGE TODO in `docs/m6-notes.md` if
   finer granularity is wanted)
+
+- `Ui.Boost` → **no polkit**: the caller must be the user of seat0's active
+  local session (see `org.rimeos.Rimed1.Ui` above).
+- The power-profiles API: `HoldProfile` → `org.rimeos.rimed.manage-power`;
+  writing `ActiveProfile` is always refused.
 
 Both actions ship `allow_active = yes` (the logged-in local user acts
 **passwordless**) and `allow_inactive`/`allow_any = auth_admin`. The daemon
