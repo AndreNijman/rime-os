@@ -43,11 +43,17 @@ let
   # Every subset, written out independently of variants.nix's own fold.
   powerset = xs: if xs == [ ] then [ [ ] ] else
     let rest = powerset (lib.tail xs); in rest ++ map (s: [ (lib.head xs) ] ++ s) rest;
-  expectedVariants = map (s: lib.concatStringsSep "-" ([ "plain" ] ++ lib.sort (a: b: a < b) s)) (powerset offered);
+  # ...keeping those with at most one feature of each catalogue `group` (desktops.md D3: one other desktop).
+  groups = lib.mapAttrs (_: f: f.group or null) catalogue.features;
+  oneEach = s: let g = lib.filter (x: x != null) (map (f: groups.${f}) s); in lib.length g == lib.length (lib.unique g);
+  expectedVariants = map (s: lib.concatStringsSep "-" ([ "plain" ] ++ lib.sort (a: b: a < b) s))
+    (lib.filter oneEach (powerset offered));
+  desktopIds = lib.attrNames (import ../desktops);
 
   carried = lib.mapAttrs (_: v: {
     gaming = v.system.config.rime.gaming.enable;
     virtualization = v.system.config.rime.virtualization.enable;
+  } // lib.genAttrs desktopIds (d: v.system.config.rime.desktops.${d}.enable) // {
     # A published system carries no account with a password in its configuration (rime-vm's rime/rime test
     # account is why rime-vm was never publishable).
     passwordAccounts = lib.attrNames (lib.filterAttrs (_: u: u.initialPassword != null || u.password != null
@@ -57,11 +63,13 @@ let
   plainEtc = release.variants.plain.system.config.environment.etc;
 
   input = pkgs.writeText "release-plan-input.json" (builtins.toJSON {
-    inherit offered expectedVariants carried redist;
+    inherit offered expectedVariants carried redist groups;
     entries = catalogue.entries;
     floors = {
       inherit (floors) ratioPermille reserve home espBytes gptBytes GB published publishedPartition;
-      measured = lib.mapAttrs (_: m: { inherit (m) unpacked onDisk; }) floors.measured;
+      measured = lib.mapAttrs (_: m: { inherit (m) unpacked onDisk; }) (floors.measured // floors.desktopMeasured);
+      base = lib.mapAttrs (_: m: { inherit (m) unpacked onDisk; }) floors.measured;
+      inherit (floors) desktopDeltas;
       computed = lib.mapAttrs (_: f: { inherit (f) storeBytes diskGB partitionGB; }) floors.floors;
     };
     rendered = {

@@ -94,7 +94,18 @@ for name in rd["listed"]:
 
 # 2. The variants: one per set of offered features, named as rimed names them, carrying exactly their features.
 expected = sorted(inp["expectedVariants"])
-check(len(expected) == 2 ** len(inp["offered"]), f"{len(expected)} variants expected for features {inp['offered']}")
+# At most one feature per group (desktops.md D3): 2^(ungrouped) x (members + 1) per group.
+groups = {}
+for f in inp["offered"]:
+    groups.setdefault(inp["groups"].get(f), []).append(f)
+want_count = 2 ** len(groups.pop(None, []))
+for members in groups.values():
+    want_count *= len(members) + 1
+check(len(expected) == want_count, f"{len(expected)} variants expected for features {inp['offered']} (groups {groups})")
+for name in expected:
+    feats = name.split("-")[1:]
+    for g, members in groups.items():
+        check(len([f for f in feats if f in members]) <= 1, f"variant {name} holds at most one {g} feature")
 check(sorted(plan["variants"]) == expected, f"the plan's variants {sorted(plan['variants'])} == {expected}")
 for name in expected:
     v = plan["variants"].get(name)
@@ -105,7 +116,7 @@ for name in expected:
           f"variant {name}'s toplevel is its own system ({v['toplevel']})")
     feats = set(name.split("-")[1:])
     carried = inp["carried"][name]
-    for f in ("gaming", "virtualization"):
+    for f in [k for k in carried if k != "passwordAccounts"]:
         check(carried[f] == (f in feats), f"variant {name}: rime.{f}.enable = {carried[f]}")
     check(carried["passwordAccounts"] == [], f"variant {name} carries no account with a password ({carried['passwordAccounts']})")
 tops = [v["toplevel"] for v in plan["variants"].values()]
@@ -130,7 +141,15 @@ for name, m in fl["measured"].items():
           f"floor {name}: published partition {fl['publishedPartition'].get(name)} GB == {part_gb} GB")
     # The gate needs room for a whole second system on top of the installed one; a floor below that strands updates.
     check(store >= on_disk + estimate, f"floor {name} holds a full rebuild under the gate's own arithmetic")
+# A desktop variant's floor is its base's measured system plus the desktop's measured delta (desktops.md D14).
+for d, delta in fl["desktopDeltas"].items():
+    for base, m in fl["base"].items():
+        name = "-".join(["plain"] + sorted(base.split("-")[1:] + [d]))
+        got = fl["measured"].get(name)
+        want = {"unpacked": m["unpacked"] + delta, "onDisk": m["onDisk"] + -(-delta * fl["ratioPermille"] // 1000)}
+        check(got == want, f"desktop floor {name} = {base} + {d}'s delta ({got} == {want})")
 for name in expected:
+    check(name in fl["measured"], f"variant {name} has a floor of its own (not floor_for's fallback)")
     check(name in fl["published"], f"variant {name} has a published floor")
     check(name in fl["publishedPartition"], f"variant {name} has a published partition floor")
 check(fl["ratioPermille"] / 1000 >= 0.524, f"the gate's ratio {fl['ratioPermille'] / 1000} is no lower than the worst measured (0.524)")
