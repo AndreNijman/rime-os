@@ -838,6 +838,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-boot-migrate.sh
 
+      # The move to Rime OS on NixOS, bootc side: the bridge program the image
+      # ships (its own unit suite, stdlib only, Fedora's python) and the update
+      # timer's refusal after `rime migrate start`. In `static` for the reason
+      # the step above is: a PR touching only files/system/libexec/rime-migrate
+      # must not be able to skip it. The `rime` binary half runs in `rust`.
+      - name: NixOS move — the bridge program, and no update check after a start
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-migrate.sh
+
       # The efivars guard. In `static` for the same reason as the step above:
       # the scan it ends with walks EVERY tracked file, so a PR adding a
       # `bootc install --via-loopback` with no `--generic-image` anywhere — a
@@ -1424,6 +1433,22 @@ jobs:
           # A missing binary must be a hard failure, not a skip.
           test -x "$RIME_BIN"
           ./tests/test-boot-v2.sh --with-binary
+
+      # The NixOS move's binary half: every bootc verb refused by name once a
+      # fixture record says `rime migrate start` ran, allowed again after a
+      # start that rolled back, and `rime migrate` handing its arguments to
+      # the bridge unchanged. RIME_BRIDGE_ROOT relocates only what is READ; a
+      # stub bootc on PATH proves none of it reached bootc.
+      - name: NixOS move — rime refuses the bootc verbs after a start
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          RIME_BIN: ${{ github.workspace }}/rimed/target/debug/rime
+        run: |
+          set -euo pipefail
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$RIME_BIN"
+          ./tests/test-rime-migrate.sh --with-binary
 
       # §27's binary half: `rime trust` and `rime status` against fixture
       # machines — an unverified pull on a permissive policy (what every Rime
@@ -4700,6 +4725,7 @@ jobs:
             tests/test-rime-sysext-boot-wait.sh \
             files/system/libexec/rime-update-check \
             files/system/libexec/rime-update-notice \
+            tests/test-rime-migrate.sh \
             files/system/libexec/rime-live-session \
             tests/test-rime-live.sh tests/test-rime-live-session.sh \
             tests/test-rimed-ui-boost.sh \

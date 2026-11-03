@@ -385,9 +385,36 @@ DANGER='(bootctl[[:space:]]+(install|update)|bootupctl|grub2-install|grub2-mkcon
 mapfile -t shipped < <(find "$REPO/files" -type f \
     \( -path '*/libexec/*' -o -name '*.service' -o -name '*.timer' \) | sort)
 (( ${#shipped[@]} > 0 )) || bad "found no shipped units or helpers to scan — the scan is vacuous"
+# A Python helper (rime-migrate) is read by its code, not its lines: its
+# docstring promises never to run these tools, and its real calls would be
+# list arguments (run(["efibootmgr", "-o", ...])) the shell pattern above never
+# matches. So for Python: drop comments and docstrings, then ANY remaining
+# mention of a boot-path tool is a hit.
+py_boot_path() {  # py_boot_path FILE -> exit 0 if the code names a boot-path tool
+    python3 -I - "$1" <<'PY'
+import io, re, sys, tokenize
+src = open(sys.argv[1], encoding="utf-8").read()
+code, prev = [], tokenize.NEWLINE
+for t in tokenize.generate_tokens(io.StringIO(src).readline):
+    if t.type == tokenize.COMMENT:
+        continue
+    if t.type == tokenize.STRING and prev in (tokenize.NEWLINE, tokenize.NL, tokenize.INDENT, tokenize.DEDENT):
+        continue  # a docstring (a string standing as its own statement)
+    if t.type not in (tokenize.NL, tokenize.COMMENT):
+        prev = t.type
+    code.append(t.string)
+sys.exit(0 if re.search(r"bootctl|bootupctl|grub2-install|grub2-mkconfig|efibootmgr", " ".join(code)) else 1)
+PY
+}
+is_python() { head -n1 "$1" | grep -E '^#!.*python3' >/dev/null; }
 hits=0
 for f in "${shipped[@]}"; do
-    if grep -nE "^[^#]*\b$DANGER" "$f" >/dev/null 2>&1; then
+    if is_python "$f"; then
+        if py_boot_path "$f"; then
+            bad "$f (Python) names a boot-path command in its code"
+            hits=$((hits + 1))
+        fi
+    elif grep -nE "^[^#]*\b$DANGER" "$f" >/dev/null 2>&1; then
         bad "$f runs a boot-path command on an executable line"
         hits=$((hits + 1))
     fi
@@ -410,6 +437,20 @@ if grep -nE "^[^#]*\b$DANGER" "$TMP/really-does-it" >/dev/null 2>&1; then
     ok "forward control: a real 'bootctl install' line does trip the tripwire"
 else
     bad "forward control: a real 'bootctl install' line does NOT trip the tripwire — the scan proves nothing"
+fi
+printf '#!/usr/bin/python3 -I\n"""Never runs bootctl, grub2-install or efibootmgr."""\n# nor bootupctl\nprint("hi")\n' \
+    > "$TMP/py-docstring-only"
+if py_boot_path "$TMP/py-docstring-only"; then
+    bad "inverse control (Python): a docstring naming bootctl trips the tripwire (false red)"
+else
+    ok "inverse control (Python): a docstring or comment naming bootctl does not trip the tripwire"
+fi
+printf '#!/usr/bin/python3 -I\n"""Doc."""\nimport subprocess\nsubprocess.run(["efibootmgr", "-o", "0001"])\ndef f():\n    """Doc."""\n    subprocess.run([\n        "bootctl",\n        "install"])\n' \
+    > "$TMP/py-really-does-it"
+if is_python "$TMP/py-really-does-it" && py_boot_path "$TMP/py-really-does-it"; then
+    ok "forward control (Python): real run([...]) calls, one-line and multi-line, do trip the tripwire"
+else
+    bad "forward control (Python): a real efibootmgr call does NOT trip the tripwire — the scan proves nothing"
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════

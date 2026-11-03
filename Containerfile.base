@@ -1619,6 +1619,31 @@ RUN set -eux; \
     test -L /etc/systemd/user/default.target.wants/rime-update-notice.service; \
     echo "rime-update-check + rime-update-notice enabled"
 
+# ── the move to Rime OS on NixOS: `rime migrate` (PLAN.md D1, D2) ─────────────
+# The bridge program, from the NixOS branch's nix/pkgs/rime-bridge (its
+# share/rime-bridge/rime-migrate): one Python file, standard library only, run
+# by this image's own python with -I, nothing from /nix. `rime migrate` execs
+# it. `check` writes nothing; `start` installs a signed payload beside the
+# ostree deployments, and from then on `rime update` and the other bootc verbs
+# refuse by name (rimed/rime/src/nixos_bridge.rs).
+#
+# The payload's signature is checked by the program itself, where it reads the
+# payload: manifest.json.sig against the one key in
+# /usr/share/rime-os/trust/nixos-bridge-payload.pub. This image does not carry
+# that key yet (the release key is made in the release environment), so every
+# `start` refuses payload-key-missing until a release ships it; `check` and
+# `repair-e` are not affected. tests/test-rime-migrate.sh pins the path and
+# checks the key file once it is added (docs/nixos-move.md).
+COPY --chmod=0755 files/system/libexec/rime-migrate /usr/libexec/rime-migrate
+RUN set -eux; \
+    test -x /usr/libexec/rime-migrate; \
+    test "$(head -n1 /usr/libexec/rime-migrate)" = '#!/usr/bin/python3 -I'; \
+    python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' /usr/libexec/rime-migrate; \
+    /usr/libexec/rime-migrate --help >/dev/null; \
+    : '── what the bridge runs on the old side ──'; \
+    command -v btrfs lsblk findmnt mount umount unshare chroot tar zstd cp systemctl ostree cryptsetup; \
+    echo "rime-migrate installed"
+
 # ── shared-machine recipes: guest disposability and kiosk (P2-016) ──────────
 #
 # Everything here ships INERT. No guest account is created, no kiosk config is
