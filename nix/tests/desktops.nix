@@ -13,7 +13,8 @@
 #                       so installing one never needs a restart for that reason, §3.5);
 #                     - the blueman autostart override (NotShowIn GNOME/KDE/COSMIC) is in every system with
 #                       blueman, the kwallet-pam override and kwalletrc (secrets API off) in every KDE system, and
-#                       COSMIC's system76-scheduler is off.
+#                       COSMIC's system76-scheduler is off;
+#                     - no desktop's app store (GNOME Software, Discover, COSMIC Store) is installed (D15).
 { pkgs, self }:
 let
   lib = pkgs.lib;
@@ -21,6 +22,7 @@ let
   table = import ../desktops;
   ids = lib.attrNames table;
   forbidden = [ "power-profiles-daemon" "system76-power" ];
+  appStores = [ "gnome-software" "discover" "cosmic-store" ]; # D15: Rime installs apps
   nameOf = p: p.pname or (builtins.parseDrvName (p.name or "")).name;
 
   facts = name: v:
@@ -43,6 +45,7 @@ let
         dbus = pkgsIn c.services.dbus.packages;
         systemd = pkgsIn c.systemd.packages;
       };
+      appStores = lib.filter (n: lib.elem n appStores) (map nameOf c.environment.systemPackages);
       qtTheme = vars.QT_QPA_PLATFORMTHEME or null;
       setEnvHasQt6ct = lib.hasInfix "qt6ct" setEnv;
       setEnvHasQtTheme = lib.hasInfix "QT_QPA_PLATFORMTHEME" setEnv;

@@ -28,6 +28,7 @@ for name, v in sorted(variants.items()):
     check(v["system76Power"] is False, f"{name}: system76-power is off")
     for where, found in v["forbiddenPackages"].items():
         check(found == [], f"{name}: no power-profiles-daemon/system76-power package in {where} ({found})")
+    check(v["appStores"] == [], f"{name}: no desktop app store is installed ({v['appStores']})")
     check(not v["setEnvHasQt6ct"], f"{name}: qt6ct is not in /etc/set-environment")
     check(not v["setEnvHasElectronHint"], f"{name}: ELECTRON_OZONE_PLATFORM_HINT is not in /etc/set-environment")
     if not v["desktops"]:

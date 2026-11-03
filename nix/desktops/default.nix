@@ -85,9 +85,11 @@
     desktopNames = [ "COSMIC" ];
     delta = 2519964376;
     config =
-      { lib, ... }:
+      { lib, pkgs, ... }:
       {
         services.desktopManager.cosmic.enable = true;
+        # D15: Rime installs apps; the COSMIC module adds its store only because Flatpak is on (not a core package).
+        environment.cosmic.excludePackages = [ pkgs.cosmic-store ];
         # rimed owns the CPU policy (scx, cpusets, tiers); system76-scheduler would fight it.
         services.system76-scheduler.enable = lib.mkForce false;
       };
