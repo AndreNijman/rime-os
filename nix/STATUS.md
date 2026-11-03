@@ -33,7 +33,7 @@ Proof on the merged head:
 - Every one of the **79** `checks.x86_64-linux.*`: its `outPath`, evaluated at the final head, valid in the store
   (`outs-final.txt`). No whole `nix flake check` (its evaluation peaks near 34 GB; a 55-check dry run was OOM-killed):
   `nix/ci/eval-each.sh` evaluated 100 attributes OK (`eval-each.log`), then every check not yet valid was built from
-  its `.drv` (`A/`, `B/`, `C/summary.txt`, PASS per check with its outPath; at most two VMs at once).
+  its `.drv` (`A/` to `D/summary.txt`, PASS per check with its outPath; at most two VMs at once; `ci` reads the docs, so it is built again after the last docs commit).
 - Closure (rime-vm toplevel `rlyhwcrj…-nixos-system-rime-vm-26.11.20261030.1c89083`): **2122 paths,
   10,567,142,456 B NAR (9.84 GiB)**; wave 3 was 2121 paths, 10,567,108,960 B (+1 path, +33 kB) (`closure.txt`).
 - P2 checklist: `docs/nixos/p2-gates.md` "P2 status": **50 met**, 0 partial, 0 not met.

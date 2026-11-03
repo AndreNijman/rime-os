@@ -29,7 +29,7 @@ What re-ran on the merged head, evidence in `/var/lab/rime-nix/artifacts/integra
 - **Every one of the 79 `checks.x86_64-linux.*`**: each check's `outPath`, evaluated at the final head, is valid
   in the store (`outs-final.txt`). No whole `nix flake check` ran (its evaluation alone peaks near 34 GB): each check
   was evaluated alone (`nix/ci/eval-each.sh`, 100 attributes OK, `eval-each.log`) and every check whose outPath was not
-  already valid was built from its `.drv`, at most two VMs at once (`A/`, `B/`, `C/summary.txt`: PASS/FAIL per check
+  already valid was built from its `.drv`, at most two VMs at once (`A/` to `D/summary.txt`: PASS/FAIL per check
   with its outPath).
 - **`hostlayer-katana` on katana's real snapshot** (H1-H8, H10): re-run at this head (`hostlayer-katana.log`, EXIT 0,
   snapshot digest unchanged). Its first run failed: bridge3's carry now writes `[boot] microcode` from the CPU, and

@@ -204,7 +204,7 @@ check" means the wave-3 proof on the merged head: every `checks.x86_64-linux.*` 
 2. *M1's "How proven" said `console.keyMap = "uk"`; T1 reads PCR 7 from sysfs plus an event-log replay.* FIXED (wave
    2): the column says `rd.vconsole.keymap=gb` from host.toml; T1 discloses its method (p2-gates T1).
 3. */var/lab hit 99 % (other workers' scratch).* FIXED as a host condition (wave-4 integration): /var/lab was at 55 %
-   (220 GB free) before every build batch of the wave-4 proof (`integrate-wave4/{A,B,C}/summary.txt`); each wave's
+   (220 GB free) before every build batch of the wave-4 proof (`integrate-wave4/{A,B,C,D}/summary.txt`); each wave's
    integrator deletes its scratch at the end.
 4. *`rime.luksTpm.enable` mostly restates nixpkgs defaults.* DECIDED-NOT-TO: not a defect (the module says so).
 5. *Carried forward:* real PCR 7 (P3, see build:tpmkeymap 2); MokManager (FIXED, same); luks-tpm options (see
