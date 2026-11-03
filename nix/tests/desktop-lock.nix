@@ -33,8 +33,8 @@
 #
 # Mutants (passthru.mutants, built by hand; each must FAIL):
 #   gnome.pam-ignored   rime-gnome-unlock reports success whatever PAM answered: the wrong password unlocks.
-#   gnome.no-shim       rime-gnome-unlock's service is off: GNOME Shell has no lock screen (marker kept, Super+L
-#                       does nothing).
+#   gnome.no-shim       rime-gnome-unlock's service is off: nothing owns org.gnome.DisplayManager, so GNOME Shell
+#                       builds no lock screen; the check fails at its owner assertion.
 { pkgs, self }:
 
 let
