@@ -208,8 +208,8 @@ user unit in `default.target`) refreshes into `~/.config/hypr/rime/` when the us
 copy has no knob (`BOOTC-KNOB=0`). **Greeter-first login measured (verify-bridge3):** `run.sh A --fresh --sb
 --readiness --greeter-first --negative-control --phases bootc,nixos` makes the user's FIRST NixOS session the
 greeter's (no serial login before it): firstrun exited at 38.39 s of the boot and Hyprland started at 38.42 s, after
-it (`A-nixos-update-news.txt`: `ExecMainExitTimestampMonotonic`, `HYPR-START-US`; pam_systemd waits for the user
-manager, whose `default.target` waits for the oneshot), `lastVersion` 0.56.2 -> 0.57.0, `getoption` true,
+it (`A-nixos-update-news.txt`: `ExecMainExitTimestampMonotonic`, `HYPR-START-US`; the likely mechanism, pam_systemd
+waiting for the user manager whose `default.target` orders after the oneshot, is not confirmed), `lastVersion` 0.56.2 -> 0.57.0, `getoption` true,
 `UPDATE-SCREEN=0`, journal clean, bare desktop (`A-nixos-desktop.png`). Evidence
 `/var/lab/rime-nix/artifacts/verify-bridge3/greeter-first/` (`run-A.log` PASS, `A/`). The order is observed on one
 run, not a systemd guarantee Rime sets: the same line in the readiness release's `appearance.lua` (handover below)

@@ -128,6 +128,7 @@ sudo modprobe -r dm_crypt
 # the first NixOS login straight through the greeter (no serial login first), then a negative control on the
 # same guest (the update-window knob cut from the user's copy, firstrun masked: the window must show):
 # ./run.sh A --fresh --sb --readiness --greeter-first --negative-control --phases bootc,nixos
+# (--negative-control edits the guest user's config and masks firstrun: only on a --fresh throwaway disk)
 # without --readiness (the published image alone): build lab-bridge.nix and pass it to payload.sh as BRIDGE
 ```
 
