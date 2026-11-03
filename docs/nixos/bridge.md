@@ -192,19 +192,31 @@ moved, and `rime-bridge.py` did not change for it. Proof: `rime-hostlayer`'s
 ### Hyprland's "updated" window is off (bridge3)
 
 **Decision.** Rime's `appearance.lua` sets `ecosystem = { no_update_news = true }`. Hyprland 0.57 opens its own
-"Hyprland updated to 0.57.0" window (hyprland-update-screen) at the first login after `lastVersion` changes; a bridged
-machine comes from bootc's Hyprland 0.56, so the first NixOS login showed it over the Shell
-(`artifacts/bridge2/L/L-nixos-desktop.png`). Rime's own release notes are the "what is new" for every update, and the
-window points at Hyprland's changelog, not at what changed for the user. The donation nag (`no_donation_nag`) stays
-as Hyprland ships it.
+"Hyprland updated to 0.57.0" window (hyprland-update-screen) at the first login after `lastVersion` changes. Rime's own
+release notes are the "what is new" for every update, and the window points at Hyprland's changelog, not at what
+changed for the user. The donation nag (`no_donation_nag`) stays as Hyprland ships it. Who meets the window: the
+published bootc image 2026.11.01.2 already ships `hyprland-0.57.0-2.fc45` (`rpm -q hyprland` in it, verify-bridge3), so
+a user who logged in there has `lastVersion` 0.57.0 and NixOS's 0.57.0 takes no "updated" path; the window comes for a
+user whose last bootc session ran 0.56 or older, and at every later Hyprland bump a NixOS release brings. The lab seeds
+`lastVersion` 0.56.2 on the bootc side to force the path. (An earlier text cited
+`artifacts/bridge2/L/L-nixos-desktop.png` as showing the window: that file is the SECOND NixOS boot's screenshot, the
+bridge2 driver overwrote the first boot's, and it shows a bare desktop. The window on an OVMF guest is shown by the
+negative control below.)
 
 **How it reaches a bridged user.** The file is in `/share/rime/hypr/rime/`, which rime-shell-firstrun (a oneshot
-user unit in `default.target`) refreshes into `~/.config/hypr/rime/` when the user manager starts; Hyprland reads the
-config before VersionKeeper decides. In the OVMF runs below the user had logged in on the serial console first, so
-the knob was already in `~/.config` (`KNOB` line in `*-nixos-checks.txt`, `lastVersion` still 0.56.2) when the
-graphical login came; a first login straight through the greeter, where the user manager and the session start
-together, is not measured. Shipping the same line in the readiness release's `appearance.lua` (handover below) makes
-that order irrelevant. Proof:
+user unit in `default.target`) refreshes into `~/.config/hypr/rime/` when the user manager starts; the carried bootc
+copy has no knob (`BOOTC-KNOB=0`). **Greeter-first login measured (verify-bridge3):** `run.sh A --fresh --sb
+--readiness --greeter-first --negative-control --phases bootc,nixos` makes the user's FIRST NixOS session the
+greeter's (no serial login before it): firstrun exited at 38.39 s of the boot and Hyprland started at 38.42 s, after
+it (`A-nixos-update-news.txt`: `ExecMainExitTimestampMonotonic`, `HYPR-START-US`; pam_systemd waits for the user
+manager, whose `default.target` waits for the oneshot), `lastVersion` 0.56.2 -> 0.57.0, `getoption` true,
+`UPDATE-SCREEN=0`, journal clean, bare desktop (`A-nixos-desktop.png`). Evidence
+`/var/lab/rime-nix/artifacts/verify-bridge3/greeter-first/` (`run-A.log` PASS, `A/`). The order is observed on one
+run, not a systemd guarantee Rime sets: the same line in the readiness release's `appearance.lua` (handover below)
+makes it irrelevant. **Negative control on the same guest:** with the table cut from the user's copy (firstrun masked)
+and `lastVersion` set back to 0.56.2, the next greeter login opens the window (`A-nixos-negative-desktop.png`:
+"Hyprland updated to 0.57.0!", `getoption` false, `UPDATE-SCREEN=1`, `A-nixos-negative-control.txt`), so the lab's
+checks can fail there. Proof in Nix:
 `desktop` subtest "no Hyprland 'updated' window after a version change" (seeds `lastVersion` 0.56.2, logs in,
 `lastVersion` becomes 0.57.*, `hyprctl getoption ecosystem:no_update_news` is set and true, no
 hyprland-update-screen process and no journal line naming `hyprland-update`, screenshot
@@ -214,8 +226,9 @@ in that VM: with the table cut AND the getoption assertion skipped the check sti
 hyprland-update-screen starts (`--new-version 0.57.0`) and then SEGFAULTS in hyprtoolkit at its first configure (no GPU
 buffers in the test VM), so it is gone before `ps` looks (`artifacts/verify-bridge3/desktop-mutant-window-only.log`). The
 subtest now also asserts the journal names no `hyprland-update` (systemd-coredump records the crash); the same
-getoption-skipped mutant then FAILS on that line (`desktop-mutant-window-only-fixed.log`). On the OVMF guests (virtio
-GPU) the window does render: `artifacts/bridge2/L/L-nixos-desktop.png` is the negative control there.
+getoption-skipped mutant then FAILS on that line (`desktop-mutant-window-only-fixed.log`). On the OVMF guest (`-device
+VGA`) it is the other way round: the window renders and stays (`ps` sees it, the journal has no line), so the lab
+driver asserts both.
 
 ## What the OVMF lab proved on the readiness image (bridge3, 2026-11-03, Secure Boot on)
 

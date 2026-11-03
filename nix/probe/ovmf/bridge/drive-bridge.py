@@ -302,6 +302,10 @@ def phase_bootc(a):
     vm.sh(f"install -d -o {USER} -g {USER} /var/home/{USER}/.local /var/home/{USER}/.local/share"
           f" /var/home/{USER}/.local/share/hyprland && printf {HYPR_LAST} > /var/home/{USER}/.local/share/hyprland/lastVersion"
           f" && chown {USER}:{USER} /var/home/{USER}/.local/share/hyprland/lastVersion")
+    # What the user's own Hyprland config (bootc's firstrun copy, carried as is) says about the window: the
+    # greeter-first run below proves the NixOS side wins whatever this is.
+    record(vm, "bootc-hypr-config", f"ls -la --time-style=full-iso /var/home/{USER}/.config/hypr/rime/;"
+           f" echo BOOTC-KNOB=$(grep -c no_update_news /var/home/{USER}/.config/hypr/rime/appearance.lua)", ok=False)
     rc, out = record(vm, "check", f"{a.migrate} check --explain --backup /run/backup"
                      " --payload /run/payload/payload", ok=False)
     if "left behind" not in out.lower():
@@ -396,7 +400,27 @@ def phase_nixos(a):
     say("[nixos] NixOS reached the serial getty")
     time.sleep(20)
     vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-greeter.png"))
-    vm.login()
+    # --greeter-first: the user's FIRST NixOS session is the greeter's (no serial login before it), so the user
+    # manager, rime-shell-firstrun (it refreshes ~/.config/hypr/rime from the system) and Hyprland start together,
+    # as on a real moved machine. The serial checks run after the graphical login instead.
+    greeter_first = a.greeter_first and not a.logs.endswith("nixos-again")
+    if greeter_first:
+        graphical_login(a, vm, prefilled=True)  # carry writes last-user; if not, the password lands in the
+        nixos_checks(a, vm)                     # user field, the login fails and so does this run
+        if a.negative_control:
+            update_window_negative_control(a, vm)
+    else:
+        vm.login()
+        prefilled = nixos_checks(a, vm)
+        vm.send("exit\n")
+        graphical_login(a, vm, prefilled)
+    vm.send("exit\n")
+    time.sleep(2)
+    vm.qmp("system_powerdown")
+    vm.wait_off()
+
+
+def nixos_checks(a, vm):
     rc, out = record(vm, "nixos-checks",
                      "for i in $(seq 60); do systemctl is-active -q greetd && break; sleep 1; done;"
                      " echo greetd=$(systemctl is-active greetd); pgrep -a -u greetd | head -n 5;"
@@ -431,8 +455,10 @@ def phase_nixos(a):
     microcode_check(out)
     if not re.search(r"^KNOB \d+:\s*no_update_news = true", out, re.M):
         raise Timeout("[nixos] ~/.config/hypr/rime/appearance.lua has no ecosystem.no_update_news (firstrun's refresh)")
-    prefilled = "last-user=alex" in out
-    vm.send("exit\n")
+    return "last-user=alex" in out
+
+
+def graphical_login(a, vm, prefilled):
     # The graphical login: rime-greet (greetd's greeter) and the OLD password typed on the emulated keyboard.
     time.sleep(5)
     vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-greeter-before-login.png"))
@@ -466,7 +492,18 @@ def phase_nixos(a):
                      " export XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE=$(basename $(ls -d /run/user/1000/hypr/*/));"
                      " hyprctl version | head -n 1; for k in ecosystem:no_update_news ecosystem.no_update_news; do"
                      " echo \"getoption $k: $(hyprctl getoption $k | tr '\\n' ' ')\"; done;"
-                     " echo UPDATE-SCREEN=$(ps -u alex -o args= | grep -c '[h]yprland-update-screen')", timeout=120, ok=False)
+                     " echo UPDATE-SCREEN=$(ps -u alex -o args= | grep -c '[h]yprland-update-screen');"
+                     # ps reads one instant (in the Nix check's VM the window segfaults before ps looks): the journal
+                     # keeps any launch (its coredump, or the process's own lines), so assert on it too
+                     " echo JOURNAL-LINES=$(journalctl -b --no-pager -o cat 2>/dev/null | wc -l);"
+                     " echo UPDATE-JOURNAL=$(journalctl -b --no-pager -o cat 2>/dev/null | grep -c hyprland-update);"
+                     " echo UPDATE-USER-JOURNAL=$(journalctl --user -b --no-pager -o cat 2>/dev/null | grep -c hyprland-update);"
+                     " grep -i -E 'versionkeeper|update|lastVersion' /run/user/1000/hypr/*/hyprland.log | head -n 20 | sed 's/^/HYPRLOG /';"
+                     # the order on this boot: when the user manager and firstrun finished vs when Hyprland started
+                     " systemctl --user show rime-shell-firstrun -p ActiveEnterTimestampMonotonic -p ExecMainExitTimestampMonotonic;"
+                     " for p in $(ps -u alex -o pid=,comm= | awk '$2 ~ /Hyprland/{print $1}'); do"
+                     " echo HYPR-START-US=$(( $(cut -d' ' -f22 /proc/$p/stat) * 1000000 / $(getconf CLK_TCK) )); done;"
+                     " loginctl list-sessions --no-legend", timeout=120, ok=False)
     # The first NixOS graphical login is the one after the version moved (0.56 on bootc): VersionKeeper wrote the
     # running version, and with the knob it started no hyprland-update-screen.
     if not re.search(r"^HYPR-LAST=0\.57", out, re.M):
@@ -475,13 +512,54 @@ def phase_nixos(a):
         raise Timeout("[nixos] ecosystem no_update_news is not set in the running Hyprland")
     if not re.search(r"^UPDATE-SCREEN=0$", out, re.M):
         raise Timeout("[nixos] hyprland-update-screen is running")
+    lines = re.search(r"^JOURNAL-LINES=(\d+)$", out, re.M)
+    if not lines or int(lines.group(1)) < 100:
+        raise Timeout("[nixos] the boot's journal is not readable here: the update-window check would prove nothing")
+    if not re.search(r"^UPDATE-JOURNAL=0$", out, re.M) or not re.search(r"^UPDATE-USER-JOURNAL=0$", out, re.M):
+        raise Timeout("[nixos] the journal names hyprland-update: the update window was launched")
+    fr = re.search(r"^ExecMainExitTimestampMonotonic=(\d+)$", out, re.M)
+    hs = [int(x) for x in re.findall(r"^HYPR-START-US=(\d+)$", out, re.M)]
+    if fr and hs:
+        say(f"[nixos] order: rime-shell-firstrun exited at {int(fr.group(1)) / 1e6:.2f} s, Hyprland started at"
+            f" {min(hs) / 1e6:.2f} s ({'after' if min(hs) > int(fr.group(1)) else 'BEFORE'} firstrun)")
     time.sleep(10)
     vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-desktop.png"))
     say("[nixos] graphical login: Hyprland runs for alex in a greetd wayland session, no update window; screenshotted")
-    vm.send("exit\n")
-    time.sleep(2)
-    vm.qmp("system_powerdown")
-    vm.wait_off()
+
+
+def update_window_negative_control(a, vm):
+    """The update-window checks above must be able to fail on THIS guest: with the table cut out of the user's copy
+    (firstrun masked so nothing restores it) and lastVersion set back, a new greeter login must show
+    hyprland-update-screen (screenshot, ps or the journal). The guest is thrown away afterwards."""
+    rc, out = record(vm, "nixos-negative-control-prep",
+                     "systemctl --user mask rime-shell-firstrun;"
+                     " sed -i '/ecosystem = {/,/},/d' ~/.config/hypr/rime/appearance.lua;"
+                     " echo KNOB-LEFT=$(grep -c no_update_news ~/.config/hypr/rime/appearance.lua);"
+                     " printf 0.56.2 > ~/.local/share/hyprland/lastVersion;"
+                     " for s in $(loginctl list-sessions --no-legend | awk '{print $1}'); do"
+                     " [ \"$(loginctl show-session $s -p Service --value)\" = greetd ] &&"
+                     " [ \"$(loginctl show-session $s -p Name --value)\" = alex ] && loginctl terminate-session $s"
+                     " && echo TERMINATED=$s; done", timeout=120, ok=False)
+    if not re.search(r"^KNOB-LEFT=0$", out, re.M) or "TERMINATED=" not in out:
+        raise Timeout("[nixos] negative control: could not cut the knob or end the graphical session")
+    time.sleep(20)
+    vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-negative-greeter.png"))
+    vm.type_keys(PASS)
+    vm.key("ret")
+    time.sleep(45)
+    vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-negative-desktop.png"))
+    rc, out = record(vm, "nixos-negative-control",
+                     "export XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE=$(basename $(ls -td /run/user/1000/hypr/*/ | head -n 1));"
+                     " echo HYPR-LAST=$(cat ~/.local/share/hyprland/lastVersion);"
+                     " echo \"getoption: $(hyprctl getoption ecosystem:no_update_news | tr '\\n' ' ')\";"
+                     " echo UPDATE-SCREEN=$(ps -u alex -o args= | grep -c '[h]yprland-update-screen');"
+                     " echo UPDATE-JOURNAL=$(journalctl -b --no-pager -o cat 2>/dev/null | grep -c hyprland-update);"
+                     " journalctl -b --no-pager -o cat 2>/dev/null | grep hyprland-update | head -n 5 | sed 's/^/JLINE /'",
+                     timeout=120, ok=False)
+    shown = (re.search(r"^UPDATE-SCREEN=[1-9]", out, re.M) or re.search(r"^UPDATE-JOURNAL=[1-9]", out, re.M))
+    if not re.search(r"getoption: (int|bool): (0|false)", out) or not shown:
+        raise Timeout("[nixos] negative control: with the knob cut no update window was seen: the checks have no teeth")
+    say("[nixos] negative control: knob cut + lastVersion 0.56.2 -> hyprland-update-screen launched (screenshotted)")
 
 
 def microcode_check(out):
@@ -548,6 +626,10 @@ def main():
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--rollback-first", action="store_true",
                     help="before the real start, run start once with a fault after the boot entry (H8 rollback)")
+    ap.add_argument("--greeter-first", action="store_true",
+                    help="the first NixOS phase logs in through the greeter before any serial login")
+    ap.add_argument("--negative-control", action="store_true",
+                    help="after the greeter-first checks, cut the update-window knob and log in again: the window shows")
     ap.add_argument("--readiness", action="store_true",
                     help="the disk runs the readiness image: `rime migrate` (its /usr/libexec/rime-migrate), refusals")
     a = ap.parse_args()
