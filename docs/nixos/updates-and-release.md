@@ -1013,6 +1013,15 @@ label and boot through Fedora's shim and GRUB, which the test VM does not have (
 installer lab boot that chain), so the test installs each for the next boot (`--no-live`). The live path for a
 variant switch is proven with the stand-in below.
 
+**Decision (wave 4 "updates2"): the update checks do not boot the real variants (DECIDED-NOT-TO here).** Booting one
+needs Rime's installed disk layout (ESP with shim and GRUB, the labelled btrfs subvolumes), which only the installer
+creates; a second copy of that layout inside an update test would be a second installer that could drift from the
+real one. The boot of a published variant belongs to the installer's proof: the installer is to install the release's
+`plain` / `plain-gaming` toplevel (open-items, installer row) and its OVMF lab boots what it installed. What the update
+checks own is proven here: the switch files select the real variant, its exact published toplevel becomes the system
+profile, and its own boot hook writes the entry that boots it. The live activation path is the same code for every
+variant (`switch-to-configuration` of the selected toplevel) and is proven live by `update-e2e` with the stand-in.
+
 **Earlier proof (adversarial verification, 2026-11-03).** The selection is proven in `update-e2e`
 with a STAND-IN `plain-gaming` (release C's own test system with a different Shell build, not the real gaming
 closure): the switch file picks it, it installs live, `rime trust --gate` passes on it. The four real variant
