@@ -7,14 +7,19 @@
 # into a chroot store with `nix copy` (Nix checks the signature and the hash again). Then the refusals: a corrupted
 # delta, a narinfo whose NarHash names another path, a delta applied to the wrong base, a narinfo signed by an
 # untrusted key. Last, mutants of the tool: each must make this check fail.
+#
+# Two candidates and references (verify:g2 3, wave 4 integration): the old release also has a decoy of the same
+# package (same NAR size, other bytes), listed first, so `measure` tries two bases and must keep the smaller delta,
+# not the first; and the server's narinfos say the new path that sorts first references the one that sorts last, so
+# `apply-all` must import references first (in path order, `nix copy --no-recursive` refuses the referrer).
 { pkgs, self }:
 
 let
   py = pkgs.python3.withPackages (ps: [ ps.cryptography ]);
 
   # A deterministic 3 MiB blob with a few edits per version, a versioned text file, and a dev output.
-  fixture =
-    name: ver: edits:
+  fixtureSeed =
+    name: ver: seed: edits:
     pkgs.runCommand "${name}-${ver}"
       {
         outputs = [ "out" "dev" ];
@@ -24,7 +29,7 @@ let
         mkdir -p $out/share $out/bin $dev/include
         python3 - <<'EOF'
         import os, random
-        blob = bytearray(random.Random(1).randbytes(3 << 20))
+        blob = bytearray(random.Random(${toString seed}).randbytes(3 << 20))
         for off in [${edits}]:
             blob[off:off + 64] = random.Random(off).randbytes(64)
         open(os.environ["out"] + "/share/blob", "wb").write(blob)
@@ -34,7 +39,10 @@ let
         printf '#define VERSION "${ver}"\n' > $dev/include/${name}.h
       '';
 
+  fixture = name: ver: fixtureSeed name ver 1;
   old = fixture "rime-delta-fixture" "1.0" "";
+  # Same package, same NAR size, every byte of the blob different: a base that gives no useful delta.
+  decoy = fixtureSeed "rime-delta-fixture" "0.9" 2 "";
   new = fixture "rime-delta-fixture" "1.1" "4096, 1048576, 2097152";
   only-new = pkgs.runCommand "rime-delta-newpkg-2.0" { } ''
     mkdir -p $out; head -c 65536 /dev/zero | tr '\0' x > $out/data
@@ -50,6 +58,7 @@ let
         newOut = new.out;
         newDev = new.dev;
         onlyNew = only-new;
+        decoyOut = decoy.out;
       }
       ''
         set -euo pipefail
@@ -64,14 +73,17 @@ let
               "$(nix-store --dump "$p" | wc -c)" "$(nix-hash --type sha256 --base32 "$p")"
           done
         }
-        tsv $oldOut $oldDev > old.tsv
+        tsv $decoyOut $oldOut $oldDev > old.tsv
         tsv $newOut $newDev $onlyNew > new.tsv
 
         echo "== pair"
         $tool pair old.tsv new.tsv pairs.tsv
         cand() { grep -F "$1"$'\t' pairs.tsv | cut -f5,6; }
-        [ "$(cand "$newOut")" = "same-package"$'\t'"$oldOut=$(nix-store --dump $oldOut | wc -c)" ] ||
-          fail "out paired with: $(cand "$newOut")"
+        oldSize=$(nix-store --dump $oldOut | wc -c) decoySize=$(nix-store --dump $decoyOut | wc -c)
+        [ "$oldSize" = "$decoySize" ] || fail "the decoy's NAR ($decoySize B) must be as large as the old out's ($oldSize B)"
+        # equal distance from the new size: the order of old.tsv stands, so the decoy is tried first
+        [ "$(cand "$newOut")" = "same-package"$'\t'"$decoyOut=$decoySize,$oldOut=$oldSize" ] ||
+          fail "out paired with: $(cand "$newOut") (expected the decoy, then the old out)"
         [ "$(cand "$newDev")" = "same-package"$'\t'"$oldDev=$(nix-store --dump $oldDev | wc -c)" ] ||
           fail "dev paired with: $(cand "$newDev") (outputs must pair with the same output)"
         [ "$(cand "$onlyNew")" = "none"$'\t' ] || fail "a new package got a base: $(cand "$onlyNew")"
@@ -82,6 +94,8 @@ let
         col() { grep -F "$1"$'\t' res.tsv | cut -f"$2"; }
         full=$(col "$newOut" 8) delta=$(col "$newOut" 9)
         [ "$delta" -lt $((full / 20)) ] || fail "delta $delta B is not much smaller than the full $full B"
+        [ "$(col "$newOut" 5)" = 2 ] || fail "measure tried $(col "$newOut" 5) bases for out, not 2"
+        [ "$(col "$newOut" 6)" = "$oldOut" ] || fail "measure kept base $(col "$newOut" 6), not the smaller delta's $oldOut"
         [ "$(col "$onlyNew" 6)" = "" ] && [ "$(col "$onlyNew" 9)" = "$(col "$onlyNew" 8)" ] ||
           fail "a path with no base must cost its full size"
         hp=$(basename $newOut | cut -c1-32)
@@ -162,9 +176,14 @@ let
         refuse untrusted-key "nix copy refused" --narinfo other-key.narinfo --delta deltas/$hp.delta --base $oldOut
 
         echo "== apply-all (the G3 benchmark): a machine on the old release moves to the new one"
-        cachepath() { # cachepath DIR PATH...: a file binary cache entry per path (NAR + narinfo signed with sk)
+        cachepath() { # cachepath DIR PATH...: a file binary cache entry per path (NAR + narinfo signed with sk);
+          # $REFS = "PATH=REF ..." gives a path References (in the narinfo and in the signed fingerprint)
           python3 -I - "$@" <<'EOF'
         import base64, hashlib, os, subprocess, sys
+        refs = {}
+        for pair in os.environ.get("REFS", "").split():
+            p, r = pair.split("=", 1)
+            refs.setdefault(p, []).append(r)
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         d, paths = sys.argv[1], sys.argv[2:]
         os.makedirs(d + "/nar", exist_ok=True)
@@ -177,16 +196,22 @@ let
                                                   capture_output=True, text=True).stdout.strip()
             fh = nar_hash.split(":")[1]
             open(f"{d}/nar/{fh}.nar", "wb").write(nar)
-            sig = base64.b64encode(key.sign(f"1;{path};{nar_hash};{len(nar)};".encode())).decode()
+            rs = sorted(refs.get(path, []))
+            fp = f"1;{path};{nar_hash};{len(nar)};{','.join(rs)}"
+            sig = base64.b64encode(key.sign(fp.encode())).decode()
             open(f"{d}/{os.path.basename(path)[:32]}.narinfo", "w").write(
                 f"StorePath: {path}\nURL: nar/{fh}.nar\nCompression: none\nNarHash: {nar_hash}\nNarSize: {len(nar)}\n"
-                f"References: \nSig: {name}:{sig}\n")
+                f"References: {' '.join(os.path.basename(r) for r in rs)}\nSig: {name}:{sig}\n")
         EOF
         }
         machine=$TMPDIR/machine
         cachepath old-cache $oldOut $oldDev
         nix copy --from file://$PWD/old-cache --to $machine --option trusted-public-keys "$(cat pk)" $oldOut $oldDev
-        cachepath server $newOut $newDev $onlyNew
+        # the path that sorts first references the one that sorts last: path order would import the referrer first
+        first=$(printf '%s\n' $newOut $newDev $onlyNew | sort | head -n 1)
+        last=$(printf '%s\n' $newOut $newDev $onlyNew | sort | tail -n 1)
+        echo "server: $first references $last"
+        REFS="$first=$last" cachepath server $newOut $newDev $onlyNew
         # The server keeps NARs only for paths with no base: a path with a delta must come from its delta.
         for p in $newOut $newDev; do
           rm server/nar/$(nix-hash --type sha256 --base32 $p).nar
@@ -199,6 +224,8 @@ let
         nix store verify --store $machine --trusted-public-keys "$(cat pk)" $newOut $newDev $onlyNew ||
           fail "apply-all: nix store verify"
         grep -F '"delta_paths": 2, "full_paths": 1' all.json >/dev/null || fail "apply-all: expected 2 delta + 1 full path"
+        nix path-info --store $machine -r $first | grep -Fx "$last" >/dev/null ||
+          fail "apply-all: $first was imported without its reference $last"
 
         touch $out
       '';
@@ -226,6 +253,10 @@ let
     apply-all-no-delta = mutant "apply-all-no-delta" ''if r["base"]:'' "if False:";
     # measure no longer checks that a delta decodes back to the new NAR
     measure-trusts-delta = mutant "measure-trusts-delta" "ok = sha256_file(back) == digest" "ok = True";
+    # measure keeps the first base it tries instead of the smallest delta
+    first-candidate-wins = mutant "first-candidate-wins" ''if not res["base"] or dsize < res["delta"]:'' ''if not res["base"]:'';
+    # apply-all imports in path order, not references first
+    no-references-first = mutant "no-references-first" "if rp in rows and rp != p:" "if False:";
   };
 in
 run tool
