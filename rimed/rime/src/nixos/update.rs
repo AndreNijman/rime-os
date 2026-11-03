@@ -457,7 +457,10 @@ fn os_step_from(
             let _ = applied.save();
         }
         save_release(&rel);
-        if booted == target || running == target {
+        // Running it is up to date; booting it is not, when a live switch moved away from it since (`rime install
+        // gnome` live, then `rime remove gnome` while logged in to GNOME installs plain again for the next boot: once
+        // that session ends, plain goes live here).
+        if running == target {
             println!("rime: the OS is up to date ({})", m.release);
             return Ok(0);
         }
