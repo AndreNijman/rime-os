@@ -79,3 +79,5 @@
 // import ./luks-tpm.nix { inherit pkgs self; }
 # desktops-eval (docs/nixos/desktops.md §8.1)
 // import ./desktops.nix { inherit pkgs self; }
+# settings-quicksettings-gnome (docs/nixos/desktops.md §8.2; + .mutants)
+// import ./settings-quicksettings.nix { inherit pkgs self; }

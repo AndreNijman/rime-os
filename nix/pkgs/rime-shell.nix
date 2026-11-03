@@ -6,6 +6,10 @@
 #   $out/lib/qt-6/qml/Rime/I18n/                  the Rime.I18n module [/usr/lib64/rime-shell/qml/Rime/I18n]
 #   $out/share/polkit-1/actions/org.rimeos.shell.agent.policy        [/usr/share/polkit-1/actions]
 #   $out/bin/rime-shell                           quickshell -c <shellDir> with the module and tools on its paths
+#   $out/bin/rime-settings                        Rime Settings, the app (settings.qml; docs/nixos/desktops.md §5, D9),
+#                                                 or the Shell's Nexus inside a Rime session
+#   $out/share/applications/org.rimeos.Settings.desktop, share/icons/hicolor/scalable/apps/org.rimeos.Settings.svg
+#   $out/share/polkit-1/actions/org.rimeos.rime.system.policy   pkexec rime install|remove <desktop> from the app
 #
 # THE PATH CONTRACT. quickshell finds a running instance by the MD5 of the config path string it was given
 # (launch.cpp: absoluteFilePath, not canonical). hypridle's lock_cmd (`qs -c <dir> ipc call lockscreen lock`),
@@ -24,6 +28,7 @@
   stdenv,
   makeWrapper,
   libxml2,
+  desktop-file-utils,
   pkg-config,
   quickshell,
   qt6,
@@ -175,7 +180,7 @@ stdenv.mkDerivation (finalAttrs: {
 
     # Guard: nothing the shell runs may still name a Fedora prefix. A path that survived would fail at runtime,
     # silently (most call sites guard with `|| true` or a test -x).
-    if grep -rnI -E '/usr/(share|libexec|lib64|sbin)/|/usr/bin/[^e]' src shell.qml; then
+    if grep -rnI -E '/usr/(share|libexec|lib64|sbin)/|/usr/bin/[^e]' src shell.qml settings.qml bin dots-extra/polkit dots-extra/settings-app; then
       echo "rime-shell: Fedora paths survived the rewrite (above)" >&2
       exit 1
     fi
@@ -229,6 +234,20 @@ stdenv.mkDerivation (finalAttrs: {
     # The shell's own polkit action (Containerfile.base: "The shell's own polkit action").
     install -m0644 dots-extra/polkit/org.rimeos.shell.agent.policy $out/share/polkit-1/actions/
 
+    # Rime Settings, the app (settings.qml beside shell.qml: its pages import relatively, so it lives in this tree).
+    # Every system carries it; inside a Rime session `rime-settings` opens the Shell's Nexus instead.
+    install -Dm0644 dots-extra/polkit/org.rimeos.rime.system.policy $out/share/polkit-1/actions/org.rimeos.rime.system.policy
+    install -Dm0644 dots-extra/settings-app/org.rimeos.Settings.desktop $out/share/applications/org.rimeos.Settings.desktop
+    install -Dm0644 dots-extra/settings-app/org.rimeos.Settings.svg \
+      $out/share/icons/hicolor/scalable/apps/org.rimeos.Settings.svg
+    chmod 0755 $out/share/rime-shell/bin/rime-settings
+    # Same module, plugins and tools as the Shell's wrapper: the app is the same QML tree in another instance.
+    makeWrapper $out/share/rime-shell/bin/rime-settings $out/bin/rime-settings \
+      --prefix QML_IMPORT_PATH : $out/${qmlPrefix} \
+      --prefix QML2_IMPORT_PATH : $out/${qmlPrefix} \
+      --prefix QT_PLUGIN_PATH : ${qtPluginPath} \
+      --prefix PATH : ${lib.makeBinPath runtimeDeps}
+
     makeWrapper ${lib.getExe quickshell} $out/bin/rime-shell \
       --prefix QML_IMPORT_PATH : $out/${qmlPrefix} \
       --prefix QML2_IMPORT_PATH : $out/${qmlPrefix} \
@@ -246,6 +265,7 @@ stdenv.mkDerivation (finalAttrs: {
   nativeInstallCheckInputs = [
     qt6.qtdeclarative
     libxml2 # xmllint
+    desktop-file-utils
   ];
   installCheckPhase = ''
     runHook preInstallCheck
@@ -271,6 +291,27 @@ stdenv.mkDerivation (finalAttrs: {
     if grep -E '<allow_(any|inactive)>(yes|auth_self_keep|auth_admin_keep)' $policy; then
       echo "the shell's policy grants an inactive or remote session"; exit 1
     fi
+
+    # Rime Settings: the launcher points at this tree's settings.qml, the .desktop entry is valid and names the
+    # window's app id (QS_APP_ID) as StartupWMClass, and pkexec maps the system rime to org.rimeos.rime.system.
+    test -s $out/share/rime-shell/settings.qml
+    grep -F 'app="$shellDir/settings.qml"' $out/share/rime-shell/bin/rime-settings
+    grep -F 'shellDir="''${RIME_SHELL_DIR:-${shellDir}}"' $out/share/rime-shell/bin/rime-settings
+    grep -F 'QS_APP_ID=org.rimeos.Settings ' $out/share/rime-shell/bin/rime-settings
+    desktop-file-validate $out/share/applications/org.rimeos.Settings.desktop
+    grep -x 'StartupWMClass=org.rimeos.Settings' $out/share/applications/org.rimeos.Settings.desktop
+    grep -x 'Exec=rime-settings %u' $out/share/applications/org.rimeos.Settings.desktop
+    test -x $out/bin/rime-settings
+    sys=$out/share/polkit-1/actions/org.rimeos.rime.system.policy
+    xmllint --noout --nonet $sys
+    test "$(xmllint --xpath 'string(//action[@id="org.rimeos.rime.system"]/annotate[@key="org.freedesktop.policykit.exec.path"])' $sys)" \
+      = "${systemPrefix}/bin/rime"
+    test "$(xmllint --xpath 'string(//action[@id="org.rimeos.rime.system"]/defaults/allow_active)' $sys)" = auth_admin_keep
+    if grep -E '<allow_(any|inactive)>(yes|auth_self_keep|auth_admin_keep)' $sys; then
+      echo "org.rimeos.rime.system grants an inactive or remote session"; exit 1
+    fi
+    # The Desktops page runs exactly the program the action names.
+    grep -F '"pkexec", "${systemPrefix}/bin/rime"' $out/share/rime-shell/src/services/config_tab/pages/DesktopsPage.qml
 
     probe=$(mktemp -d)
     export XDG_RUNTIME_DIR=$probe/xdg HOME=$probe/home
