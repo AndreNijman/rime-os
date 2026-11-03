@@ -22,8 +22,14 @@ let
   features = lib.sort (a: b: a < b) (lib.attrNames (lib.filterAttrs (_: f: f.offered) catalogue.features));
   base = "plain";
 
-  # Every subset of the offered features, each sorted.
-  subsets = lib.foldr (f: acc: acc ++ map (s: [ f ] ++ s) acc) [ [ ] ] features;
+  # Every subset of the offered features, each sorted, with at most one feature of each `group` (D3: one other
+  # desktop at a time, so desktops add 4 variants each instead of doubling the count).
+  groupOf = f: catalogue.features.${f}.group or null;
+  oneOfEachGroup = set:
+    let grouped = lib.filter (g: g != null) (map groupOf set);
+    in lib.length grouped == lib.length (lib.unique grouped);
+  subsets = lib.filter oneOfEachGroup (lib.foldr (f: acc: acc ++ map (s: [ f ] ++ s) acc) [ [ ] ] features);
+  desktops = lib.attrNames (import ../desktops);
   name = set: lib.concatStringsSep "-" ([ base ] ++ lib.sort (a: b: a < b) set);
 
   variant = set: {
@@ -32,6 +38,7 @@ let
         {
           rime.gaming.enable = lib.mkForce (lib.elem "gaming" set);
           rime.virtualization.enable = lib.mkForce (lib.elem "virtualization" set);
+          rime.desktops = lib.genAttrs desktops (d: { enable = lib.mkForce (lib.elem d set); });
           # The toplevel says which variant it is (nixos-system-rime-plain-gaming-...); the generic system sets no
           # host name, which would name every variant "unnamed".
           system.name = "rime-${name set}";

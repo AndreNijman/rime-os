@@ -33,7 +33,10 @@ let
   lib = pkgs.lib;
   release = import ../release { inherit pkgs self; };
   floors = import ../release/floors.nix;
-  tops = lib.mapAttrs (_: v: v.system.config.system.build.toplevel) release.variants;
+  # The variants floors.nix records a measurement of. The desktop variants (docs/nixos/desktops.md D14) are estimated
+  # from their measured closure delta and are not installed here.
+  tops = lib.mapAttrs (_: v: v.system.config.system.build.toplevel)
+    (lib.filterAttrs (n: _: floors.measured ? ${n}) release.variants);
 
   measure = pkgs.testers.runNixOSTest {
     name = "rime-update-floors-measure";

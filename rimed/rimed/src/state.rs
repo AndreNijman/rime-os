@@ -79,14 +79,16 @@ pub struct Ctx {
     /// The mode the user chose, kept across restarts (see `hold.rs`). In
     /// memory as well as on disk, so the guards read no file per call.
     pub held: Mutex<Option<ModeId>>,
+    /// The power-profiles holds (`ppd.rs`). Its lock also orders every
+    /// power-profiles change. Lock order: `ppd` BEFORE `game`, `ui_boost` and
+    /// `state`, never the other way round.
+    pub ppd: Mutex<Holds>,
     /// Where the held mode is written (`$STATE_DIRECTORY/mode`); a fixture
     /// path in tests, so no suite can write the host's choice.
     pub mode_file: PathBuf,
     /// The UI boost (`Ui.Boost`, see `boost.rs`). Lock order: `ui_boost`
     /// BEFORE `state`, never the other way round.
     pub ui_boost: Mutex<BoostCell>,
-    /// Profile holds taken through the power-profiles facade (`ppd.rs`).
-    pub ppd_holds: Mutex<Holds>,
     /// Who may call the unprivileged per-session methods (`session.rs`).
     pub callers: CallerPolicy,
     /// The tier the user picked per power source (`choice.rs`), which
@@ -136,11 +138,11 @@ impl Ctx {
             scx_gave_up: std::sync::Mutex::new(None),
             state: Mutex::new(initial),
             held: Mutex::new(None),
+            ppd: Mutex::new(Holds::default()),
             choice: Mutex::new(crate::choice::read(&choice_file)),
             choice_file,
             mode_file,
             ui_boost: Mutex::new(BoostCell::new(Limits::default())),
-            ppd_holds: Mutex::new(Holds::default()),
             callers: CallerPolicy::default(),
         })
     }

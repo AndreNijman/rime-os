@@ -25,6 +25,9 @@
 # the gaming and virtualization hints (rime gaming, rime-vm), the AI runtime (rime ai, llama-cpp), the names the docs
 # use, and the RPM names on this project's own machines (blender chromium gamemode gamescope helium-bin libgcc.i686
 # libreoffice libSM.i686 mangohud obs-studio steam steam-devices wine).
+let
+  desktops = import ../desktops;
+in
 {
   schema = 1;
 
@@ -44,7 +47,16 @@
       offered = true;
       summary = "QEMU/KVM, libvirt, OVMF, swtpm and virtiofsd for rime vm (nix/modules/virtualization.nix)";
     };
-  };
+  }
+  # One feature per desktop in nix/desktops. `group`: a machine selects at most one feature of a group (D3); the
+  # release builds no variant with two (nix/release/variants.nix), and `rime install` refuses the second by name.
+  // builtins.mapAttrs (id: d: {
+    inherit (d) title summary;
+    option = [ "rime" "desktops" id "enable" ];
+    offered = true;
+    group = "desktop";
+    session_ids = d.sessionIds;
+  }) desktops;
 
   entries = {
     # ── class 1: features ─────────────────────────────────────────────────────────────────────────────────────────
@@ -112,7 +124,11 @@
     "libgcc.i686" = { kind = "refuse"; reason = "32-bit libraries are not installed one at a time on Rime; Steam's come with the gaming system: rime install steam"; };
     "libSM.i686" = { kind = "refuse"; reason = "32-bit libraries are not installed one at a time on Rime; Steam's come with the gaming system: rime install steam"; };
     waydroid = { kind = "refuse"; reason = "Waydroid needs system configuration (the binder driver and a system service) that no Rime system carries yet"; };
-  };
+  }
+  # Desktops (nix/desktops): `rime install gnome` (or an alias, `plasma`) selects the desktop's feature.
+  // builtins.listToAttrs (builtins.concatLists (builtins.attrValues (builtins.mapAttrs (id: d:
+    map (n: { name = n; value = { kind = "toggle"; feature = id; summary = "the ${d.title} desktop"; }; }) ([ id ] ++ d.aliases)
+  ) desktops)));
 
   # Other names people type for the same thing. Keys are matched case-insensitively.
   aliases = {

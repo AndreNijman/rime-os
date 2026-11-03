@@ -72,6 +72,9 @@ in
     systemd.services.rimed = {
       wantedBy = [ "multi-user.target" ];
       path = [ systemPath ];
+      # rimed answers power-profiles-daemon's D-Bus API (rimed/src/ppd.rs, docs/nixos/desktops.md §7); a Rime NixOS
+      # system never runs power-profiles-daemon (desktop.nix, desktops.nix assert it).
+      environment.RIMED_POWER_PROFILES = "1";
     };
 
     systemd.services.rime-secretd = {

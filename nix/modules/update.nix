@@ -159,7 +159,7 @@ in
 
     # The update notice (bootc's rime-update-check, D6 §8.3): `rime update --check` verifies the channel document and
     # the manifest it names, downloads nothing, and as root writes /run/rime-update/state (`state=available|none`,
-    # `digest=…`), which Rime Shell's Settings -> Updates reads.
+    # `digest=…`, `release=…`, `running=…`), which rimed's org.rimeos.Rimed1.Updates interface reads.
     systemd.services.rime-update-check = {
       description = "Check whether a Rime OS update is available";
       serviceConfig = {
@@ -181,6 +181,28 @@ in
         OnUnitActiveSec = "6h";
         RandomizedDelaySec = "20min";
         AccuracySec = "5min";
+      };
+    };
+
+    # The update itself, started by rimed's Updates.Apply() (polkit org.rimeos.rimed.apply-update, an administrator):
+    # exactly `sudo rime update`. Its progress is /run/rime-live/status.json, which the same interface follows.
+    # restartIfChanged = false, X-StopOnRemoval = false (as nixpkgs' own nixos-upgrade.service): its ExecStart names
+    # rimed's store path, so a release that changes rimed changes this unit, and switch-to-configuration-ng (main.rs at
+    # the pin) restarts a changed unit that is active OR activating. Without it the dry run would list
+    # rime-update.service (activating: it IS the update), rule 3 would send such an Apply to `boot`, and a live switch
+    # would stop the unit that runs it. With it the dry run prints "would NOT stop the following changed units", which
+    # the classifier reads as kept. Read from the source, not observed in a VM.
+    systemd.services.rime-update = {
+      description = "Install the Rime OS update";
+      restartIfChanged = false;
+      unitConfig.X-StopOnRemoval = false;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${config.rime.services.rimed.package}/bin/rime update";
+        RuntimeDirectory = "rime-update";
+        RuntimeDirectoryMode = "0755";
+        RuntimeDirectoryPreserve = "yes";
+        TimeoutStartSec = "6h";
       };
     };
 

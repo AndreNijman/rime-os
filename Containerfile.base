@@ -357,12 +357,20 @@ RUN set -eux; \
 # files and the last writer won, so it is MASKED (the package stays: its
 # powerprofilesctl talks to rimed, which serves PPD's API on PPD's bus names).
 # A PPD started anyway cannot own its name and quits before its drivers run.
+# rimed authorises PPD's API with PPD's own polkit actions (rimed/rimed/src/
+# ppd.rs: a tier write, a hold, BatteryAware), and here the package's policy is
+# what defines them: an id that policy stops defining would make polkit refuse
+# that call for everyone, so the build fails instead.
 RUN systemctl enable rimed.service && \
     systemctl mask power-profiles-daemon.service && \
     test "$(readlink /etc/systemd/system/power-profiles-daemon.service)" = /dev/null && \
     ! systemctl is-enabled --quiet power-profiles-daemon.service && \
     grep -qF '<allow own="org.freedesktop.UPower.PowerProfiles"/>' \
-        /usr/share/dbus-1/system.d/org.rimeos.Rimed1.conf
+        /usr/share/dbus-1/system.d/org.rimeos.Rimed1.conf && \
+    for a in switch-profile hold-profile configure-battery-aware; do \
+        grep -qF "<action id=\"org.freedesktop.UPower.PowerProfiles.$a\">" \
+            /usr/share/polkit-1/actions/power-profiles-daemon.policy || exit 1; \
+    done
 
 # ── agent runtime (rime-agentd) ─────────────────────────────────────────────
 # A USER unit, and deliberately NOT `systemctl --global enable`d: a per-user

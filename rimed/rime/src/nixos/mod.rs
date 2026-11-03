@@ -9,6 +9,7 @@
 //! from a generation's own `bin/switch-to-configuration`; never by a PATH lookup.
 
 pub mod delta;
+pub mod desktop;
 pub mod fetch;
 pub mod generations;
 pub mod pkg;

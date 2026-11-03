@@ -87,7 +87,12 @@ let
           print(out)
           names = sorted(l.strip() for l in out.strip().splitlines())
           assert names == ["Name=Rime Floating", "Name=Rime Safe Graphics", "Name=Rime Scrolling", "Name=Rime Tiling"], names
-          machine.succeed("grep -qx 'Exec=.*/bin/start-hyprland' /etc/rime/wayland-sessions/hyprland.desktop")
+          # One word per Exec: greetd joins rime-greet's `sh -lc <Exec>` with spaces, so `sh -lc` would run only the
+          # first word of a longer one. Rime's environment comes from the session's wrapper.
+          machine.fail("grep -E '^Exec=.*[[:space:]]' /etc/rime/wayland-sessions/*.desktop")
+          wrapper = machine.succeed("sed -n 's/^Exec=//p' /etc/rime/wayland-sessions/hyprland.desktop").strip()
+          machine.succeed(f"grep -E '^exec /nix/store/[^ ]*/bin/start-hyprland \"\\$@\"$' {wrapper}")
+          machine.succeed(f"grep -x 'export QT_QPA_PLATFORMTHEME=qt6ct ELECTRON_OZONE_PLATFORM_HINT=auto' {wrapper}")
 
       with subtest("Rime's Hyprland config is seeded for the user (rime-shell-firstrun's job on a real login)"):
           machine.succeed("install -d -o rime -g users /home/rime/.config /home/rime/.config/hypr")
@@ -162,6 +167,10 @@ let
           out = machine.wait_until_succeeds(as_rime(f"HYPRLAND_INSTANCE_SIGNATURE={sig} hyprctl version"), timeout=60)
           print(out)
           assert "Hyprland 0.57" in out, out
+          # Rime's session environment reached the compositor (D7: set by the session, not globally).
+          hypr_env = machine.succeed("tr '\\0' '\\n' < /proc/$(pgrep -u rime -f '^Hyprland --watchdog-fd' | head -n1)/environ")
+          assert "QT_QPA_PLATFORMTHEME=qt6ct" in hypr_env.splitlines(), hypr_env
+          assert "ELECTRON_OZONE_PLATFORM_HINT=auto" in hypr_env.splitlines(), hypr_env
           errs = machine.succeed(as_rime(f"HYPRLAND_INSTANCE_SIGNATURE={sig} hyprctl configerrors"))
           print("configerrors:", errs)
           assert "ecosystem" not in errs, errs

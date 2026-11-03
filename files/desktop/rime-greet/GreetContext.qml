@@ -32,7 +32,7 @@ Item {
     property string edition: "mono"
 
     // ── Session model ─────────────────────────────────────────────
-    // sessions: [{ id, name, exec }] parsed from wayland-sessions.
+    // sessions: [{ id, name, exec, desktopNames }] parsed from wayland-sessions.
     property var    sessions:     []
     property int    sessionIndex: 0
     property string _wantSession: ""    // desired id from last-session
@@ -86,7 +86,8 @@ Item {
         var exec = parts[2].replace(/%[a-zA-Z]/g, "").trim()   // strip field codes
         if (exec === "") return
         var list = ctx.sessions.slice()
-        list.push({ id: parts[0], name: parts[1], exec: exec })
+        list.push({ id: parts[0], name: parts[1], exec: exec,
+                    desktopNames: parts.length > 3 ? parts[3].trim() : "" })
         ctx.sessions = list
         ctx._selectWanted()
     }
@@ -227,13 +228,54 @@ Item {
     // so a hostile username can't inject shell), and the actual launch
     // is deferred to persistProc.onExited so the write flushes before
     // quickshell exits. An unwritable state dir is tolerated.
+    // ── The environment a session starts with ────────────────────
+    // greetd hands it to PAM before the session opens, so logind records
+    // it too. Every session here is a Wayland session: XDG_SESSION_TYPE=
+    // wayland always (logind's Type, which rimed's session reading needs).
+    // A desktop whose session file has DesktopNames (GNOME, Plasma, COSMIC)
+    // also gets what GDM or SDDM would have given it: XDG_CURRENT_DESKTOP
+    // (DesktopNames, ";" -> ":") and XDG_SESSION_DESKTOP (the session id);
+    // gnome-session and the portals choose by them. Rime's own sessions set
+    // their desktop variables themselves and keep exactly the environment
+    // they had, so they get XDG_SESSION_TYPE only (docs/nixos/desktops.md
+    // §4.1; tests/test-rime-greet-sessions.sh §7 runs this function).
+    readonly property var ownSessions: ["hyprland", "niri", "rime-labwc", "rime-safe-graphics", "rime-gaming"]
+    function _sessionEnv(s) {
+        var env = ["XDG_SESSION_TYPE=wayland"]
+        if (!s || ctx.ownSessions.indexOf(s.id) >= 0) return env
+        var names = String(s.desktopNames || "").split(";").filter(function(n) { return n.trim() !== "" })
+        if (names.length === 0) return env
+        env.push("XDG_CURRENT_DESKTOP=" + names.join(":"))
+        env.push("XDG_SESSION_DESKTOP=" + s.id)
+        return env
+    }
+
+    // ── The command greetd runs ──────────────────────────────────
+    // greetd 0.10 does not exec the argv it is handed: it runs
+    // `/bin/sh -c "exec <argv joined by spaces>"` (greetd/src/session/
+    // worker.rs). An unquoted ["sh", "-lc", cmd] therefore reached the shell
+    // as `sh -lc <first word of cmd>` with the other words as $0, $1, so an
+    // Exec of more than one word ran its first word alone: Plasma's
+    // `plasma-dbus-run-session-if-needed …/startplasma-wayland` exited at
+    // once, niri lost `--session`. The command is single-quoted for that
+    // join, so `sh -lc` receives the session's Exec whole
+    // (tests/test-rime-greet-sessions.sh §9 runs it through /bin/sh).
+    function _shQuote(s) {
+        return "'" + String(s).replace(/'/g, "'\\''") + "'"
+    }
+    function _sessionArgv(cmd) {
+        return ["sh", "-lc", ctx._shQuote(cmd.length > 0 ? cmd : "exec ${SHELL:-/bin/sh} -l")]
+    }
+
     property var _pendingArgv: null
+    property var _pendingEnv: null
     function launch() {
         var cmd  = ctx.sessionCommand.trim()
-        var argv = cmd.length > 0 ? ["sh", "-lc", cmd]
-                                  : ["sh", "-lc", "exec ${SHELL:-/bin/sh} -l"]
+        var argv = ctx._sessionArgv(cmd)
         var sid  = ctx.currentSession ? ctx.currentSession.id : ""
         ctx._pendingArgv = argv
+        // No session at all (the login-shell fallback above): no environment, as before.
+        ctx._pendingEnv  = ctx.currentSession ? ctx._sessionEnv(ctx.currentSession) : null
         persistProc.environment = {
             "AG_USER": ctx.username,
             "AG_SESS": sid,
@@ -271,8 +313,11 @@ Item {
         onExited: function(exitCode, exitStatus) {
             if (ctx._pendingArgv) {
                 var a = ctx._pendingArgv
+                var e = ctx._pendingEnv
                 ctx._pendingArgv = null
-                Greetd.launch(a)
+                ctx._pendingEnv = null
+                if (e) Greetd.launch(a, e)
+                else Greetd.launch(a)
             }
         }
     }
@@ -664,7 +709,8 @@ Item {
             " name=$(sed -n 's/^Name=//p' \"$f\" | head -n1);" +
             " exec=$(sed -n 's/^Exec=//p' \"$f\" | head -n1);" +
             " [ -n \"$exec\" ] || continue;" +
-            " printf '%s\\t%s\\t%s\\n' \"$id\" \"${name:-$id}\" \"$exec\";" +
+            " dn=$(sed -n 's/^DesktopNames=//p' \"$f\" | head -n1);" +
+            " printf '%s\\t%s\\t%s\\t%s\\n' \"$id\" \"${name:-$id}\" \"$exec\" \"$dn\";" +
             " done"]
         stdout: SplitParser {
             onRead: function(line) { ctx._addSession(line) }

@@ -549,8 +549,12 @@ impl Ctx {
         };
 
         // ── apply ────────────────────────────────────────────────────────────
-        if let Err(e) = self.apply_tier(cfg.tier).await {
-            eprintln!("rimed: game: tier {} failed: {e:#}", cfg.tier);
+        // A power-saver hold that stands already beats game mode's tier, as
+        // it beats every performance hold (ppd.rs). No game lock is held here:
+        // the power-profiles lock is always taken before it.
+        let live = crate::ppd::live_in_game(cfg.tier, self.ppd.lock().await.effective());
+        if let Err(e) = self.apply_tier(live).await {
+            eprintln!("rimed: game: tier {live} failed: {e:#}");
         }
 
         let prior_fan_mode = match &cfg.fan_mode {

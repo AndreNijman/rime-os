@@ -173,6 +173,8 @@ jobs:
     # TODO(handover): the katana-nix self-hosted runners (D8) become the builder once they exist, with this hosted
     # job as the fallback. A self-hosted build job must keep the fork-PR guard below and never name the
     # nix-release environment or its secrets (check_workflow.py refuses both).
+    # This hosted job builds .#rime-release-toplevels-hosted (no desktop variants: the sixteen do not fit its disk,
+    # docs/nixos/desktops.md §3.3); the self-hosted builder builds .#rime-release-toplevels, all of them.
     runs-on: ubuntu-24.04
     if: >-
       always() && needs.changes.result == 'success' && needs.changes.outputs.action == 'release'
@@ -226,13 +228,13 @@ jobs:
         run: |
           set -euo pipefail
           o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
-          now="$(nix eval --raw "${o[@]}" .#rime-release-toplevels.drvPath)"
+          now="$(nix eval --raw "${o[@]}" .#rime-release-toplevels-hosted.drvPath)"
           was=
           # The commit this push replaced, with the SAME rime-shell, so only a rime-os change can move it.
           if [[ "${BEFORE:-}" =~ ^[0-9a-f]{40}$ ]] && [ "$BEFORE" != 0000000000000000000000000000000000000000 ] \
             && git fetch --quiet --no-tags --depth=1 "https://github.com/$GITHUB_REPOSITORY" "$BEFORE" \
             && git worktree add --quiet --detach "$RUNNER_TEMP/before" "$BEFORE"; then
-            was="$(cd "$RUNNER_TEMP/before" && nix eval --raw "${o[@]}" .#rime-release-toplevels.drvPath)" || was=
+            was="$(cd "$RUNNER_TEMP/before" && nix eval --raw "${o[@]}" .#rime-release-toplevels-hosted.drvPath)" || was=
           fi
           if [ -n "$was" ] && [ "$was" = "$now" ]; then
             echo "The release toplevels did not move ($now): nothing to prove." | tee -a "$GITHUB_STEP_SUMMARY"
@@ -240,7 +242,7 @@ jobs:
           fi
           echo "The release toplevels moved (${was:-no comparable earlier commit} -> $now): dry run." | tee -a "$GITHUB_STEP_SUMMARY"
           RIME_EVAL_JOBS=3 nix/ci/eval-each.sh . "${o[@]}"  # not nix flake check: 27.9 GB in one evaluator
-          nix build --dry-run "${o[@]}" .#rime-release-toplevels .#rime-release-catalogue .#rime-nix-release .#rime-release-plan 2>&1 | tee "$RUNNER_TEMP/dry-run.txt"
+          nix build --dry-run "${o[@]}" .#rime-release-toplevels-hosted .#rime-release-catalogue .#rime-nix-release .#rime-release-plan 2>&1 | tee "$RUNNER_TEMP/dry-run.txt"
           {
             echo
             echo "Dry run, nothing built or published:"
@@ -258,7 +260,7 @@ jobs:
           set -euo pipefail
           o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
           RIME_EVAL_JOBS=3 nix/ci/eval-each.sh . "${o[@]}"  # not nix flake check: 27.9 GB in one evaluator
-          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels" .#rime-release-toplevels
+          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels" .#rime-release-toplevels-hosted
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/plan" .#rime-release-plan
           nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue

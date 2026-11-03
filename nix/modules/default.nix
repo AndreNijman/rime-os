@@ -24,6 +24,7 @@
     ./luks-tpm.nix
     ./rootfs.nix
     ./virtualization.nix
+    ./desktops.nix
   ];
 
   nixpkgs.overlays = [ overlay ];

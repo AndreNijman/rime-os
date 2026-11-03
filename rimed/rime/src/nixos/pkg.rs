@@ -23,7 +23,7 @@
 //! `rime blueprint` and checkpoints). Flatpaks are recorded by Flatpak itself, as on bootc.
 
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -72,6 +72,12 @@ pub struct Feature {
     pub summary: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// An exclusive group (`desktop`): at most one feature of a group is ever switched on.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// For a desktop: the wayland-session ids (logind `Desktop`) its sessions report.
+    #[serde(default)]
+    pub session_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -170,6 +176,20 @@ impl Catalogue {
             return name.to_string();
         }
         lower
+    }
+
+    /// A feature of the exclusive `desktop` group (D3: at most one desktop besides Rime's own sessions).
+    pub fn is_desktop(&self, feature: &str) -> bool {
+        self.features.get(feature).and_then(|f| f.group.as_deref()) == Some("desktop")
+    }
+
+    /// The logind `Desktop` of every desktop's sessions (lowercase, as the session list reads it).
+    pub fn other_desktop_sessions(&self) -> BTreeSet<String> {
+        self.features
+            .iter()
+            .filter(|(id, _)| self.is_desktop(id))
+            .flat_map(|(_, f)| f.session_ids.iter().map(|s| s.to_ascii_lowercase()))
+            .collect()
     }
 
     fn entry(&self, name: &str) -> Option<(String, &Entry)> {
@@ -583,6 +603,12 @@ fn install(cat: &Catalogue, args: &[String]) -> i32 {
     let mut nix_add: Vec<String> = vec![];
     for (name, r) in &plan {
         match r {
+            Route::Toggle { name: canon, feature } if cat.is_desktop(feature) => {
+                match super::desktop::install(cat, canon, feature) {
+                    Ok(()) => requested = edit_list(&requested, std::slice::from_ref(canon), &[]),
+                    Err(e) => rc = fail(format!("{name}: {e}")),
+                }
+            }
             Route::Toggle { name: canon, feature } => match select_feature(cat, canon, feature) {
                 Ok(()) => requested = edit_list(&requested, std::slice::from_ref(canon), &[]),
                 Err(e) => rc = fail(format!("{name}: {e}")),
@@ -907,6 +933,12 @@ fn remove(cat: &Catalogue, names: &[String]) -> i32 {
         }
         match cat.entry(name) {
             Some((_, Entry::Flatpak { id, .. })) => flatpak_ids.push(id.clone()),
+            Some((canon, Entry::Toggle { feature, .. })) if cat.is_desktop(feature) => {
+                match super::desktop::remove(cat, &canon, feature) {
+                    Ok(()) => requested = edit_list(&requested, &[], &lines_naming(cat, &requested, &canon)),
+                    Err(e) => rc = fail(format!("{name}: {e}")),
+                }
+            }
             Some((canon, Entry::Toggle { feature, .. })) => match deselect_feature(cat, &canon, feature) {
                 Ok(()) => requested = edit_list(&requested, &[], &lines_naming(cat, &requested, &canon)),
                 Err(e) => rc = fail(format!("{name}: {e}")),

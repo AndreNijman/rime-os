@@ -348,9 +348,25 @@ if command -v powerprofilesctl >/dev/null && python3 -c 'import gi' 2>/dev/null;
         || bad "ppctl get" "$(powerprofilesctl get 2>&1)"
     powerprofilesctl list 2>&1 | grep '^\* balanced:' >/dev/null && ok "powerprofilesctl list marks balanced" \
         || bad "ppctl list" "$(powerprofilesctl list 2>&1)"
+    # A write is Power.SetTier, authorised by polkit (switch-profile) against
+    # the caller: refused for a user who is not the active session's...
+    echo 4242 > "$S/uid"
+    before=$(sysfs_hash)
     out=$(powerprofilesctl set performance 2>&1); rc=$?
-    [ "$rc" != 0 ] && [ "$(epp_all)" = balance_power ] && ok "powerprofilesctl set is refused and writes nothing" \
-        || bad "ppctl set" "rc=$rc epp=$(epp_all) $out"
+    echo 0 > "$S/uid"
+    [ "$rc" != 0 ] && [ "$(sysfs_hash)" = "$before" ] && [ ! -e "$T/state/tier" ] \
+        && ok "powerprofilesctl set from a user who is not the active session's is refused and writes nothing" \
+        || bad "refused ppctl set" "rc=$rc epp=$(epp_all) $out"
+    # ...and for the session user it is a tier pick, kept for this power source.
+    out=$(powerprofilesctl set performance 2>&1); rc=$?
+    if [ "$rc" = 0 ] && wait_epp performance 1500 && grep -x 'battery=performance' "$T/state/tier" >/dev/null; then
+        ok "powerprofilesctl set performance applies the tier and keeps it as the battery pick"
+    else
+        bad "ppctl set" "rc=$rc epp=$(epp_all) file=$(tr '\n' ' ' < "$T/state/tier" 2>&1) $out"
+    fi
+    powerprofilesctl set balanced >/dev/null 2>&1
+    wait_epp balance_power 1500 && grep -x 'battery=balanced' "$T/state/tier" >/dev/null \
+        && ok "powerprofilesctl set balanced puts the battery tier back" || bad "ppctl set balanced" "epp=$(epp_all)"
     powerprofilesctl launch -p power-saver -r test -i rime-test sleep 1.5 >/dev/null 2>&1 &
     L=$!
     if wait_epp power 1500; then

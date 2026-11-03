@@ -418,7 +418,7 @@ pub fn parse_show_session(id: &str, text: &str) -> Option<SessionState> {
     })
 }
 
-fn sessions() -> Result<Vec<SessionState>, String> {
+pub(crate) fn sessions() -> Result<Vec<SessionState>, String> {
     let list = output("loginctl", &["list-sessions", "--no-legend", "--no-pager"])?;
     let mut out = Vec::new();
     for line in list.lines() {

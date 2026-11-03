@@ -27,7 +27,7 @@ def ceil_div(a, b):
 
 
 variants = sorted({v for v, _ in m})
-check(variants == sorted(fl["published"]), f"every published variant was measured: {variants}")
+check(variants == sorted(fl["measured"]), f"every variant floors.nix records as measured was measured: {variants}")
 
 for v in variants:
     for fs in ("btrfs", "ext4"):

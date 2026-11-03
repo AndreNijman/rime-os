@@ -1137,8 +1137,10 @@ name = "rimed"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rimed-core",
  "serde",
+ "serde_json",
  "tokio",
  "zbus",
  "zvariant",

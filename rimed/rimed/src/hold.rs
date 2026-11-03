@@ -163,6 +163,29 @@ impl Ctx {
         Some(id)
     }
 
+    /// `Mode.Set`: hold `id`, end every power-profiles hold (back to the tier before them), then move the levers in the planner's order, stopping at
+    /// the first step that fails (the order `rime mode set` used client-side). Returns the released hold cookies.
+    pub async fn set_mode(self: &Arc<Self>, id: ModeId) -> Result<Vec<u32>> {
+        self.set_held(Some(id)).await?;
+        // Back to the tier before the first hold, so the plan starts from the state the user left.
+        let released = self.ppd_release(|_| true).await?;
+        let game_active = self.game_active().await;
+        let state = {
+            let st = self.state.lock().await;
+            ModeState {
+                tier: st.tier,
+                auto_switch: st.auto_switch,
+                game_active,
+            }
+        };
+        for step in mode::plan(id.spec(), &state) {
+            self.apply_step(&step)
+                .await
+                .with_context(|| format!("{} failed", step.describe()))?;
+        }
+        Ok(released)
+    }
+
     /// One planner step, done by the daemon itself — the same effect as the
     /// D-Bus member [`Step`] names, without the bus or polkit.
     async fn apply_step(self: &Arc<Self>, step: &Step) -> Result<()> {

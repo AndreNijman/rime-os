@@ -113,12 +113,12 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
         let r = fetch::manifest(cfg, roots, &digest, &rel, opts.allow_unverified)?;
         Ok(Some((r, digest)))
     })();
-    let (state, digest) = match r {
+    let (state, digest, offered) = match r {
         Err(s) => {
             eprintln!("{}", s.message);
             return s.code;
         }
-        Ok(None) => ("none", String::new()),
+        Ok(None) => ("none", String::new(), String::new()),
         Ok(Some((rel, digest))) => {
             let m = &rel.manifest;
             let v = m.variant(&rel.variant.chosen).expect("chosen by fetch::manifest");
@@ -127,7 +127,7 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
             let newer = Applied::load().high_water().map_or(true, |hw| release::compare(&m.release, &hw) != Some(std::cmp::Ordering::Less));
             if current.as_deref() == Some(target) || !newer {
                 println!("rime: the OS is up to date ({})", Applied::load().high_water().unwrap_or(m.release.clone()));
-                ("none", digest)
+                ("none", digest, String::new())
             } else {
                 let closure: Vec<&str> = m.variant_closure(v).keys().copied().collect();
                 let missing = store::invalid(cfg, &closure).unwrap_or_default();
@@ -137,14 +137,49 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
                     None => m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.file_size).sum(),
                 };
                 println!("rime: release {} is available: {} new store paths, {:.2} GB to download", m.release, missing.len(), bytes as f64 / GB);
-                ("available", digest)
+                ("available", digest, m.release.clone())
             }
         }
     };
     if crate::ops::effective_uid() == Some(0) {
-        let _ = write_atomic(Path::new(CHECK_STATE), format!("state={state}\ndigest={digest}\n").as_bytes(), 0o644);
+        // release=: the release on offer (rimed's Updates interface names it); running=: the release this machine
+        // runs now (none recorded: empty).
+        let running = resolve_link("/run/current-system").and_then(|t| super::release_of(&t)).map(|r| r.release).unwrap_or_default();
+        let body = check_state(state, &digest, &offered, &running);
+        let _ = write_atomic(Path::new(CHECK_STATE), body.as_bytes(), 0o644);
     }
     0
+}
+
+/// The checker's state file (/run/rime-update/state), as rimed's Updates interface reads it (rimed/src/updates.rs).
+fn check_state(state: &str, digest: &str, release: &str, running: &str) -> String {
+    format!("state={state}\ndigest={digest}\nrelease={release}\nrunning={running}\n")
+}
+
+
+/// Unit names in a generation's `etc/systemd/{system,user}` (unit files and links; not the `.wants`/`.d` directories).
+fn unit_names(toplevel: &Path) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for sub in ["etc/systemd/system", "etc/systemd/user"] {
+        for e in std::fs::read_dir(toplevel.join(sub)).into_iter().flatten().flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            let dir = [".wants", ".requires", ".upholds", ".d"].iter().any(|x| n.ends_with(x));
+            if n.contains('.') && !dir {
+                out.insert(n);
+            }
+        }
+    }
+    out
+}
+
+/// The units only one of `running` and `target` has (activation rule 3 lets them stop or start). Nothing, when either
+/// generation's units could not be listed: an unreadable list must not make every unit look one-sided.
+fn one_sided_units(running: &str, target: &str) -> BTreeSet<String> {
+    let (a, b) = (unit_names(Path::new(running)), unit_names(Path::new(target)));
+    if a.is_empty() || b.is_empty() {
+        return BTreeSet::new();
+    }
+    a.symmetric_difference(&b).cloned().collect()
 }
 
 fn manifest_boot(m: &Manifest, v: &Variant) -> BootFacts {
@@ -323,19 +358,82 @@ fn free_bytes(path: &str) -> Option<u64> {
 }
 
 fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Stop> {
+    os_step_from(cfg, roots, opts, None, &mut None)
+}
+
+/// What a same-release install did (docs/nixos/desktops.md §5: `rime install <desktop>` / `rime remove <desktop>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SameRelease {
+    /// The new system is running now.
+    Live,
+    /// The new system is installed for the next restart.
+    NextBoot,
+    /// The running release builds no system with the switches as they are now; nothing was installed.
+    NotInRelease,
+    /// A newer release is already installed for the next restart; this one was not touched.
+    NewerStaged(String),
+}
+
+/// Install the system the switch files select from the release this machine RUNS: its digest from the record
+/// `rime update` kept (`/var/lib/rime/releases/<release>/digest`), its manifest fetched by that digest and verified
+/// again. The channel is never read, so a newer release on the channel is not installed (§8.2 step 3 is skipped).
+pub fn install_running_release(no_live: bool) -> Result<SameRelease, String> {
+    let cfg = Config::load()?;
+    let roots = Roots::from_env();
+    let _lock = lock("the update")?;
+    let running = resolve_link("/run/current-system").unwrap_or_default();
+    let applied = Applied::load();
+    let Some(rec) = applied.by_toplevel(&running).cloned() else {
+        return Err("this system's release is not recorded on this machine; `sudo rime update` records it".into());
+    };
+    if let Some(hw) = applied.high_water() {
+        if release::compare(&rec.release, &hw) == Some(std::cmp::Ordering::Less) {
+            return Ok(SameRelease::NewerStaged(hw));
+        }
+    }
+    let digest = std::fs::read_to_string(state("releases").join(&rec.release).join("digest"))
+        .map(|d| d.trim().to_string())
+        .map_err(|e| format!("the record of release {} on this machine has no digest ({e}); `sudo rime update` keeps it", rec.release))?;
+    let mut opts = UpdateOptions::default();
+    opts.live.no_live = no_live;
+    let mut chosen = None;
+    os_step_from(&cfg, &roots, &opts, Some((digest, rec.release.clone())), &mut chosen).map_err(|s| s.message)?;
+    let current = resolve_link("/run/current-system").unwrap_or_default();
+    let profile = resolve_link(super::PROFILE).unwrap_or_default();
+    Ok(match chosen {
+        Some(t) if t == current && t != running => SameRelease::Live,
+        Some(t) if t != running && t == profile => SameRelease::NextBoot,
+        _ => SameRelease::NotInRelease,
+    })
+}
+
+/// The OS step. `same`: install from this (digest, release) instead of the channel's (a same-release install).
+/// `chosen`: set to the toplevel of the system the release offers this machine, once known.
+fn os_step_from(
+    cfg: &Config,
+    roots: &Roots,
+    opts: &UpdateOptions,
+    same: Option<(String, String)>,
+    chosen: &mut Option<String>,
+) -> Result<i32, Stop> {
     if roots.fixture.is_some() && !opts.live.plan_only {
         return Err(stop("rime: RIME_TRUST_ROOT is set: this program will not deploy on fixture facts"));
     }
-    if let Some(h) = Pins::load().hold {
-        println!("rime: updates are held at {h} (`sudo rime update --unpin` releases them); the OS was not updated");
-        return Ok(0);
-    }
-    // 3. channel document.
-    let (digest, rel_id) = match fetch::channel(cfg, roots, opts.allow_unverified || opts.live.allow_unverified, opts.force, true)? {
-        Pointer::Take { digest, release } => (digest, release),
-        Pointer::Hold(m) => {
-            println!("{m}");
-            return Ok(0);
+    // 3. channel document; a same-release install never reads it (and a hold does not apply: nothing is updated).
+    let (digest, rel_id) = match same {
+        Some(p) => p,
+        None => {
+            if let Some(h) = Pins::load().hold {
+                println!("rime: updates are held at {h} (`sudo rime update --unpin` releases them); the OS was not updated");
+                return Ok(0);
+            }
+            match fetch::channel(cfg, roots, opts.allow_unverified || opts.live.allow_unverified, opts.force, true)? {
+                Pointer::Take { digest, release } => (digest, release),
+                Pointer::Hold(m) => {
+                    println!("{m}");
+                    return Ok(0);
+                }
+            }
         }
     };
     // 4. manifest: the trust gate.
@@ -343,6 +441,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     let m = &rel.manifest;
     let v = m.variant(&rel.variant.chosen).expect("chosen by fetch::manifest");
     let target = m.path(v.toplevel).to_string();
+    *chosen = Some(target.clone());
     let gens = generations::list().map_err(|e| stop(format!("rime: {e}")))?;
     let current_gen_top = gens.all.get(&gens.current).cloned().unwrap_or_default();
     let running = resolve_link("/run/current-system").unwrap_or_default();
@@ -362,7 +461,10 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
             let _ = applied.save();
         }
         save_release(&rel);
-        if booted == target || running == target {
+        // Running it is up to date; booting it is not, when a live switch moved away from it since (`rime install
+        // gnome` live, then `rime remove gnome` while logged in to GNOME installs plain again for the next boot: once
+        // that session ends, plain goes live here).
+        if running == target {
             println!("rime: the OS is up to date ({})", m.release);
             return Ok(0);
         }
@@ -433,7 +535,8 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     let booted_boot = store::boot_facts(Path::new("/run/booted-system")).ok();
     let target_boot = manifest_boot(m, v);
     let machine = crate::live::machine_state(&crate::live::Paths::from_env());
-    let decide = |dry: &DryActivate| {
+    let other_desktops = super::pkg::Catalogue::load().map(|c| c.other_desktop_sessions()).unwrap_or_default();
+    let decide = |dry: &DryActivate, one_sided: &BTreeSet<String>| {
         activation(&Inputs {
             booted_boot: booted_boot.as_ref(),
             booted: booted_bc.as_ref(),
@@ -442,9 +545,11 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
             target: &target_bc,
             dry_run: dry,
             machine: &machine,
+            one_sided,
+            other_desktops: &other_desktops,
         })
     };
-    let plan = decide(&DryActivate::NotYet);
+    let plan = decide(&DryActivate::NotYet, &BTreeSet::new());
     for c in plan.changed.iter().filter(|c| **c != Component::Metadata) {
         let how = if plan.kind == Kind::Switch { "can be activated now" } else { "applies at the next restart" };
         println!("  {:<22} {how}", c.label());
@@ -546,7 +651,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
         Ok(r) => DryActivate::Failed(r.why()),
         Err(e) => DryActivate::Failed(e),
     };
-    let a = decide(&dry);
+    let a = decide(&dry, &one_sided_units(&running, &target));
     if a.kind == Kind::Boot {
         let locked_or_busy = !a.deferred.is_empty();
         for (c, r) in a.deferred.iter().filter(|(c, _)| *c == Component::Shell || *c == Component::HyprlandConfig) {
@@ -657,4 +762,50 @@ fn save_outs(m: &Manifest) {
 /// Manifest `catalogue[]` as (name, store path); `check_local` has already refused an index outside the table.
 pub fn catalogue_outs(m: &Manifest) -> Vec<(String, String)> {
     m.catalogue.iter().filter(|c| c.class == 2 && c.out < m.paths.len()).map(|c| (c.name.clone(), m.path(c.out).to_string())).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_check_state_file_carries_the_release_on_offer_and_the_running_one() {
+        assert_eq!(
+            check_state("available", "sha256:x", "2026.11.02", "2026.11.01"),
+            "state=available\ndigest=sha256:x\nrelease=2026.11.02\nrunning=2026.11.01\n"
+        );
+    }
+
+    fn generation(root: &Path, system: &[&str], user: &[&str]) -> String {
+        for (sub, names) in [("etc/systemd/system", system), ("etc/systemd/user", user)] {
+            let d = root.join(sub);
+            std::fs::create_dir_all(&d).unwrap();
+            for n in names {
+                if n.ends_with(".wants") || n.ends_with(".d") {
+                    std::fs::create_dir_all(d.join(n)).unwrap();
+                } else {
+                    std::fs::write(d.join(n), "").unwrap();
+                }
+            }
+        }
+        root.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn one_sided_units_are_the_units_only_one_generation_has() {
+        let t = std::env::temp_dir().join(format!("rime-onesided-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let plain = generation(&t.join("a"), &["rimed.service", "multi-user.target.wants", "dbus.service"], &["rime-shell.service"]);
+        let gnome = generation(
+            &t.join("b"),
+            &["rimed.service", "multi-user.target.wants", "dbus.service", "accounts-daemon.service", "dbus.service.d"],
+            &["rime-shell.service", "gnome-session-manager@.service"],
+        );
+        let want: BTreeSet<String> = ["accounts-daemon.service", "gnome-session-manager@.service"].map(String::from).into();
+        assert_eq!(one_sided_units(&plain, &gnome), want);
+        assert_eq!(one_sided_units(&gnome, &plain), want, "removing is the same set");
+        // An unreadable generation lists nothing, and nothing is one-sided (not every unit of the other).
+        assert!(one_sided_units(&t.join("missing").to_string_lossy(), &gnome).is_empty());
+        let _ = std::fs::remove_dir_all(&t);
+    }
 }
