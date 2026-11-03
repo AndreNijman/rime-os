@@ -1302,8 +1302,33 @@ class Carry:
                 # A symlink (a cert kept next to its siblings, update-ca-trust's links) is followed inside the old
                 # root; the profile needs the bytes it pointed at, carried to the path the profile names.
                 real = self.src.resolve(frel)
+                via = None
                 if not managed and real is not None and real != frel:
-                    managed = self.managed_by_system(real)
+                    via = self.managed_by_system(real)
+                if via:
+                    # The named path is a link to a path the new system manages (a client cert dir linking the CA
+                    # bundle): the link itself is carried, absolute, so the profile reads the new system's copy
+                    # through it. Not carrying it would leave the named path missing on the new system.
+                    target = "/" + real
+                    self.copied.add(frel)
+                    cur = os.readlink(self.d(frel)) if os.path.islink(self.d(frel)) else None
+                    if cur == target:
+                        self.report["checked"].append({"path": path, "result": f"named by /{rel}: already on this "
+                                                       f"disk, the same link (-> {target})"})
+                        continue
+                    self.report["carried"].append({"from": "/" + frel, "to": "/" + frel, "link": target})
+                    self.report["checked"].append({"path": path, "result": f"named by /{rel}: a link to {target}, "
+                                                   f"set by the new system's configuration ({via}); the link is "
+                                                   "carried, the bytes are not"})
+                    if not self.plan_only:
+                        lt = self.d(frel)
+                        os.makedirs(os.path.dirname(lt), exist_ok=True)
+                        tmp = os.path.join(os.path.dirname(lt), f".{os.path.basename(lt)}.rime-hostlayer.tmp")
+                        if os.path.lexists(tmp):
+                            os.unlink(tmp)
+                        os.symlink(target, tmp)
+                        os.rename(tmp, lt)
+                    continue
                 if managed:
                     self.copied.add(frel)
                     self.report["checked"].append({"path": path, "result": f"named by /{rel}: set by the new "

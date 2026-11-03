@@ -270,6 +270,29 @@ class CarryTest(Fixture):
         left = {l["path"] for l in rep["left_behind"]}
         self.assertNotIn("/etc/pki/tls/certs/ca-bundle.crt", left)
 
+    def test_a_profile_naming_a_link_to_a_managed_path_gets_the_link(self):
+        # A VPN profile's ca= is a link to the distribution's CA bundle, which the new system provides. The bundle's old
+        # bytes are not carried, but the named path must still exist: the link is carried, pointing at the new copy.
+        e = f"{self.src}/etc"
+        write(f"{e}/ssl/certs/ca-certificates.crt", "FEDORA-BUNDLE\n")
+        os.makedirs(f"{e}/openvpn/client")
+        os.symlink("/etc/ssl/certs/ca-certificates.crt", f"{e}/openvpn/client/ca.crt")
+        write(f"{self.sys}/etc/ssl/certs/ca-certificates.crt", "NIXOS-BUNDLE\n")
+        write(f"{e}/NetworkManager/system-connections/V.nmconnection",
+              "[connection]\nid=V\ntype=vpn\n\n[vpn]\nca=/etc/openvpn/client/ca.crt\n", 0o600)
+        self.carry(check=0)
+        self.assertEqual(os.readlink(f"{self.dest}/etc/openvpn/client/ca.crt"), "/etc/ssl/certs/ca-certificates.crt")
+        self.assertFalse(os.path.lexists(f"{self.dest}/etc/ssl/certs/ca-certificates.crt"), "a managed path was carried")
+        rep = json.loads(self.read("var/lib/rime/carry/report.json"))
+        links = {c["to"]: c.get("link") for c in rep["carried"]}
+        self.assertEqual(links.get("/etc/openvpn/client/ca.crt"), "/etc/ssl/certs/ca-certificates.crt")
+        self.assertNotIn("/etc/openvpn/client/ca.crt", {l["path"] for l in rep["left_behind"]})
+        # A second carry finds the same link and leaves it.
+        self.carry("--force", check=0)
+        rep = json.loads(self.read("var/lib/rime/carry/report.json"))
+        self.assertIn("the same link", {c["path"]: c["result"] for c in rep["checked"]}["/etc/openvpn/client/ca.crt"])
+        self.assertEqual(os.readlink(f"{self.dest}/etc/openvpn/client/ca.crt"), "/etc/ssl/certs/ca-certificates.crt")
+
     def test_a_symlinked_file_a_profile_names_is_followed_inside_the_old_root(self):
         # A cert kept as a link (relative, absolute, and through a linked directory) is carried as the bytes it pointed
         # at, to the path the profile names; a link out of the root is read against the root; a dangling or looping
