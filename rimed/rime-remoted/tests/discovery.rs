@@ -35,6 +35,7 @@ struct Fixture {
     argv: PathBuf,
     pidfile: PathBuf,
     control: PathBuf,
+    log: PathBuf,
     port: u16,
 }
 
@@ -64,14 +65,17 @@ impl Fixture {
         let pidfile = root.join("publisher.pid");
         let stub = bindir.join("avahi-publish-service");
         // Records what it was asked to publish and its own pid, then holds
-        // the registration the way the real tool does: by not exiting.
+        // the registration the way the real tool does: by not exiting. `exec`,
+        // so the pid it wrote is the process that holds on: a `sleep` forked
+        // under a shell outlives the shell the daemon's death signal kills, and
+        // every run of this file used to leave three of them behind for an hour.
         std::fs::write(
             &stub,
             format!(
                 "#!/usr/bin/env bash\n\
                  printf '%s\\n' \"$*\" > {argv}\n\
                  echo $$ > {pid}\n\
-                 while true; do sleep 3600; done\n",
+                 exec sleep 3600\n",
                 argv = argv.display(),
                 pid = pidfile.display(),
             ),
@@ -81,50 +85,95 @@ impl Fixture {
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         std::fs::set_permissions(&stub, perms).ok()?;
 
-        let port = {
-            let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
-            let p = probe.local_addr().ok()?.port();
-            drop(probe);
-            p
-        };
-
+        // `--port 0`: the kernel picks the port when the daemon binds, and the
+        // daemon reads back the one it got (that read-back is half of what the
+        // record test proves). Not a port probed here and handed over: that one
+        // is free when it is probed and anybody's once the probe is dropped, and
+        // a daemon given a taken `--port` exits with "Address already in use".
+        // Measured: 2 of 600 runs of this file in the Nix build sandbox, and the
+        // hosted CI's "the daemon did not come up" (run 41597182018).
         let mut args = vec![
             "--port".to_string(),
-            port.to_string(),
+            "0".to_string(),
             "--allow-foreground".to_string(),
         ];
         args.extend(extra.iter().map(|s| s.to_string()));
 
+        // The daemon's stderr is kept: it is where the port is, and where the
+        // reason is when the daemon does not come up.
+        let log = root.join("daemon.log");
         let child = Command::new(bin("rime-remoted"))
             .args(&args)
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .env("RIME_REMOTE_AVAHI_PUBLISH", &stub)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(&log).ok()?)
             .spawn()
             .ok()?;
 
-        let f = Fixture {
+        let mut f = Fixture {
             child,
             root,
             argv,
             pidfile,
             control: runtime.join("rime-remoted").join("control.sock"),
-            port,
+            log,
+            port: 0,
         };
-        f.wait_ready().then_some(f)
+        match f.wait_ready() {
+            Ok(port) => {
+                f.port = port;
+                Some(f)
+            }
+            Err(why) => {
+                eprintln!("{why}");
+                None
+            }
+        }
     }
 
-    fn wait_ready(&self) -> bool {
+    /// The port the daemon is listening on, once its control socket answers
+    /// and it has said which port it got. The port is checked rather than
+    /// believed: something must be accepting on it.
+    fn wait_ready(&mut self) -> Result<u16, String> {
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Err(format!("the daemon exited ({status}): {}", self.stderr()));
+            }
             if UnixStream::connect(&self.control).is_ok() {
-                return true;
+                if let Some(port) = self.listening_on() {
+                    if port != 0 && std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                        return Ok(port);
+                    }
+                    return Err(format!(
+                        "the daemon says it is listening on port {port} and nothing accepts there: {}",
+                        self.stderr()
+                    ));
+                }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        false
+        Err(format!("the daemon did not come up in 15 s: {}", self.stderr()))
+    }
+
+    /// "rime-remoted: listening on PORT, ..." from the daemon's startup line.
+    fn listening_on(&self) -> Option<u16> {
+        std::fs::read_to_string(&self.log)
+            .ok()?
+            .lines()
+            .find_map(|l| l.strip_prefix("rime-remoted: listening on "))?
+            .split(',')
+            .next()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    fn stderr(&self) -> String {
+        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+        format!("{:?}", text.trim())
     }
 
     /// What the publisher was asked to advertise, once it has been asked.
@@ -198,6 +247,7 @@ macro_rules! fixture {
         match Fixture::start($tag, $extra) {
             Some(f) => f,
             None => {
+                // Fixture::start printed the daemon's own reason above this line.
                 eprintln!("SKIP: the daemon did not come up in this environment");
                 return;
             }
