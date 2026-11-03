@@ -6,7 +6,10 @@ Runs INSIDE the rime-ovmf-probe container (qemu, Fedora's OVMF). Every boot is o
 overlay of disks/KIND/disk.raw and the same varstore copy, ending with a guest poweroff:
 
   bootc     log in on the serial console as the lab user (old TEST password), make KIND's firmware entries
-            (guest-prep.sh), reboot so it boots through its own entry, [E: repair-e], check, start
+            (guest-prep.sh), reboot so it boots through its own entry, [E: repair-e], check, start; with
+            --readiness the disk is the READINESS image (prepare.sh image) and every bridge command is that
+            release's own `rime migrate ...`; after start, `rime update`, `rime update --check` and
+            `rime boot migrate` must each answer `REFUSED [nixos-migration-started]` with exit 3
   nixos     GRUB's default is the NixOS entry the bridge added: a serial login with the OLD password (mounts,
             carried state, home checksums), then a GRAPHICAL login through rime-greet with the same old password typed
             on the emulated keyboard: Hyprland starts for the user through greetd, the desktop is screenshotted
@@ -39,6 +42,12 @@ LUKS_PASS = os.environ.get("RIME_LAB_LUKS", "rimelabluks1")
 USER = "alex"
 # QMP qcodes for what the lab passwords need: letters, digits, '-'.
 QCODE = {**{c: c for c in "abcdefghijklmnopqrstuvwxyz0123456789"}, "-": "minus"}
+# The bridge's verbs `rime` refuses once the start record exists (rimed/rime/src/nixos_bridge.rs on the readiness
+# branch). `rime update` and `rime boot migrate` would change the machine if NOT refused, so they run only after start.
+REFUSED = "REFUSED [nixos-migration-started]"
+GATED = ("update", "update --check", "boot migrate")
+# The user last ran Hyprland 0.56 on bootc: NixOS's 0.57 takes its "updated" path at the first graphical login.
+HYPR_LAST = "0.56.2"
 SB_STATE = ("od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c"
             " | awk '{print \"SecureBoot efivar=\" $NF}'; dmesg | grep -i -E 'secure ?boot|Loaded X.509 cert' | head -n 12")
 
@@ -277,30 +286,45 @@ def phase_bootc(a):
     vm = VM(a, "bootc2")
     boot_bootc(a, vm, False)
     if a.kind == "E":
-        record(vm, "check-before-repair", "/run/payload/rime-migrate check --explain", ok=False)
-        record(vm, "repair-e-dry", "/run/payload/rime-migrate repair-e", ok=False)
-        record(vm, "repair-e", "/run/payload/rime-migrate repair-e --confirm", timeout=600)
+        record(vm, "check-before-repair", f"{a.migrate} check --explain", ok=False)
+        record(vm, "repair-e-dry", f"{a.migrate} repair-e", ok=False)
+        record(vm, "repair-e", f"{a.migrate} repair-e --confirm", timeout=600)
         record(vm, "after-repair", "efibootmgr -v; ls -la /var/lib/rime/boot-migrate/ /var/lib/rime/boot-migrate/archive-*/;"
                " cat /var/lib/rime/boot-migrate/phase; mkdir -p /run/e && mount -o ro LABEL=EFI-SYSTEM /run/e 2>/dev/null"
                " || mount -o ro /dev/vda2 /run/e; find /run/e -maxdepth 3 | sort; umount /run/e")
     vm.sh("mkfs.ext4 -q -F -L rime-backup /dev/disk/by-id/virtio-rime-backup && mkdir -p /run/backup"
           " && mount /dev/disk/by-id/virtio-rime-backup /run/backup")
     # D2: the left-behind report BEFORE anything is written (--payload previews the new system's carry plan).
-    rc, out = record(vm, "check", "/run/payload/rime-migrate check --explain --backup /run/backup"
+    if a.readiness:
+        readiness_facts(vm)
+    # The lab user last ran Hyprland 0.56 here (its data file, as Hyprland writes it): phase nixos checks the
+    # first NixOS graphical login opens no "updated to 0.57.0" window.
+    vm.sh(f"install -d -o {USER} -g {USER} /var/home/{USER}/.local /var/home/{USER}/.local/share"
+          f" /var/home/{USER}/.local/share/hyprland && printf {HYPR_LAST} > /var/home/{USER}/.local/share/hyprland/lastVersion"
+          f" && chown {USER}:{USER} /var/home/{USER}/.local/share/hyprland/lastVersion")
+    rc, out = record(vm, "check", f"{a.migrate} check --explain --backup /run/backup"
                      " --payload /run/payload/payload", ok=False)
     if "left behind" not in out.lower():
         raise Timeout("check --explain --payload printed no left-behind report")
-    rc, out = record(vm, "check-json", "/run/payload/rime-migrate check --json --backup /run/backup", ok=False)
+    rc, out = record(vm, "check-json", f"{a.migrate} check --json --backup /run/backup", ok=False)
+    if "CPU vendor" not in out and "microcode" not in out:
+        say("[bootc2] note: check --json names no CPU vendor (the carry preview is in check --explain)")
     if a.rollback_first:
         rollback_probe(a, vm)
-    rc, out = record(vm, "start", "time /run/payload/rime-migrate start --backup /run/backup"
+    if a.readiness:
+        # No record, or a start that failed and rolled back (the probe above): `rime` allows its bootc verbs.
+        refusals(vm, "refusals-before-start", ("update --check",), want=False)
+    rc, out = record(vm, "start", f"time {a.migrate} start --backup /run/backup"
                      " --payload /run/payload/payload --yes", timeout=5400, ok=False)
     if rc != 0:
         raise Timeout(f"start failed rc={rc}")
-    record(vm, "after-start", "btrfs subvolume list /sysroot; cat /sysroot/boot/grub2/custom.cfg;"
-           " ls -la /sysroot/boot /sysroot/boot/rime 2>/dev/null; cat /sysroot/boot/grub2/rime-nixos.cfg 2>/dev/null;"
+    record(vm, "after-start", "btrfs subvolume list /sysroot; findmnt /boot; for b in /sysroot/boot /boot; do echo \"== $b\";"
+           " cat $b/grub2/custom.cfg; ls -la $b $b/rime/nixos 2>/dev/null; cat $b/grub2/rime-nixos.cfg 2>/dev/null; done;"
            " ls -la /run/backup /run/backup/*; cat /var/lib/rime/nixos-bridge/state.json", ok=False)
-    record(vm, "update-after-start", "rime update --check 2>&1 | tail -n 20", ok=False, timeout=120)
+    if a.readiness:
+        refusals(vm, "refusals-after-start", GATED, want=True)
+    else:
+        record(vm, "update-after-start", "rime update --check 2>&1 | tail -n 20", ok=False, timeout=120)
     vm.send("sync; systemctl poweroff\n")
     vm.wait_off()
 
@@ -315,8 +339,8 @@ def rollback_probe(a, vm):
     record(vm, "rollback-before", show + "; (sha256sum < /sysroot/boot/grub2/custom.cfg 2>/dev/null || echo absent)"
            " > /run/rb-custom; cat /run/rb-custom", ok=False)
     vm.sh("sed 's/^        step(\"fsck gate after\")$/        raise Failed(\"lab fault injection: after the boot entry\")/'"
-          " /run/payload/rime-migrate > /run/rime-migrate-fault && chmod 755 /run/rime-migrate-fault"
-          " && ! cmp -s /run/payload/rime-migrate /run/rime-migrate-fault")
+          f" {a.bridge} > /run/rime-migrate-fault && chmod 755 /run/rime-migrate-fault"
+          f" && ! cmp -s {a.bridge} /run/rime-migrate-fault")
     rc, out = record(vm, "rollback-start", "/run/rime-migrate-fault start --backup /run/backup"
                      " --payload /run/payload/payload --yes", timeout=5400, ok=False)
     if rc != 10 or "FAILED: lab fault injection" not in out or "== rolled back" not in out:
@@ -335,6 +359,33 @@ def rollback_probe(a, vm):
     if not re.search(r"VERDICT=clean\b", after):
         raise Timeout("rollback probe: " + (re.findall(r"VERDICT=\S+", after) or ["no verdict"])[-1])
     say("[bootc2] rollback probe: nothing start made is left (VERDICT=clean)")
+
+
+def readiness_facts(vm):
+    """What the readiness image under test is: its rime, its bridge (the readiness branch's copy) and the payload key."""
+    rc, out = record(vm, "readiness", "rime --help 2>&1 | grep -w migrate; head -n 1 /usr/libexec/rime-migrate;"
+                     " echo bridge-minus-line-1=$(tail -n +2 /usr/libexec/rime-migrate | sha256sum | cut -d' ' -f1);"
+                     " cat /usr/share/rime-os/trust/nixos-bridge-payload.pub; sha256sum /usr/bin/rime;"
+                     " rpm -q --whatprovides /usr/bin/rime 2>&1 | head -n 1; cat /etc/os-release | grep -E '^(VERSION|IMAGE_VERSION)='",
+                     ok=False)
+    if "rime-bridge-lab-TEST-" not in out or "#!/usr/bin/python3 -I" not in out:
+        raise Timeout("[bootc2] this is not the readiness lab image (no TEST payload key or no readiness bridge)")
+
+
+def refusals(vm, name, verbs, want):
+    """Each `rime VERB` once, as root, its output and exit code recorded. want=True: every one must exit 3 with
+    REFUSED [nixos-migration-started]; want=False: none may (the verdict is counted in the guest, so the echoed
+    command line can never match it)."""
+    loop = " ".join(f"'{v}'" for v in verbs)
+    rc, out = record(vm, name, f"n=0; for v in {loop}; do o=$(timeout 300 rime $v </dev/null 2>&1); r=$?;"
+                     " printf '%s\\n' \"$o\" | tail -n 12; echo \"verb=[rime $v] rc=$r\";"
+                     f" [ $r = 3 ] && printf '%s' \"$o\" | grep -F '{REFUSED}' >/dev/null && n=$((n+1)); done;"
+                     " echo REFUSED-COUNT=$n", timeout=1200, ok=False)
+    got = re.findall(r"REFUSED-COUNT=(\d+)", out)
+    n = int(got[-1]) if got else -1
+    if n != (len(verbs) if want else 0):
+        raise Timeout(f"[{vm.name}] {name}: {n} of {len(verbs)} verbs refused, want {len(verbs) if want else 0}")
+    say(f"[{vm.name}] {name}: {n}/{len(verbs)} refused, as wanted")
 
 
 def phase_nixos(a):
@@ -356,6 +407,10 @@ def phase_nixos(a):
                      " ls /var/lib/rime/boot-migrate 2>/dev/null; systemctl --failed --no-legend --no-pager;"
                      " echo last-user=$(cat /var/lib/rime-greet/last-user 2>/dev/null || echo none);"
                      " head -n 5 /var/lib/rime/carry/report.txt; " + SB_STATE + ";"
+                     " grep -m1 vendor_id /proc/cpuinfo; grep -E '^\\s*initrd' /boot/grub2/rime-nixos.cfg | sed 's/^/MENU /';"
+                     " ls /boot/rime/nixos | grep -i ucode | sed 's/^/BOOTFILE /';"
+                     " grep -n no_update_news ~/.config/hypr/rime/appearance.lua | sed 's/^/KNOB /';"
+                     " echo HYPR-LAST=$(cat ~/.local/share/hyprland/lastVersion 2>/dev/null || echo none);"
                      " cd ~ && sha256sum -c .rime-lab/sums && cat Documents/note.txt",
                      timeout=180)
     if "greetd=active" not in out:
@@ -373,6 +428,9 @@ def phase_nixos(a):
         raise Timeout("[nixos] the root is not the opened LUKS volume")
     if a.sb and "SecureBoot efivar=1" not in out:
         raise Timeout("[nixos] the guest does not report Secure Boot on")
+    microcode_check(out)
+    if not re.search(r"^KNOB \d+:\s*no_update_news = true", out, re.M):
+        raise Timeout("[nixos] ~/.config/hypr/rime/appearance.lua has no ecosystem.no_update_news (firstrun's refresh)")
     prefilled = "last-user=alex" in out
     vm.send("exit\n")
     # The graphical login: rime-greet (greetd's greeter) and the OLD password typed on the emulated keyboard.
@@ -403,13 +461,46 @@ def phase_nixos(a):
     hypr = re.search(r"^\s*\d+ \S*Hyprland", out, re.M) and re.search(r"^\.socket\.sock\s*$", out, re.M)
     if not hypr or not greetd_wayland:
         raise Timeout("[nixos] no Hyprland session for alex started through greetd")
+    rc, out = record(vm, "nixos-update-news",
+                     "sleep 5; echo HYPR-LAST=$(cat ~/.local/share/hyprland/lastVersion);"
+                     " export XDG_RUNTIME_DIR=/run/user/1000 HYPRLAND_INSTANCE_SIGNATURE=$(basename $(ls -d /run/user/1000/hypr/*/));"
+                     " hyprctl version | head -n 1; for k in ecosystem:no_update_news ecosystem.no_update_news; do"
+                     " echo \"getoption $k: $(hyprctl getoption $k | tr '\\n' ' ')\"; done;"
+                     " echo UPDATE-SCREEN=$(ps -u alex -o args= | grep -c '[h]yprland-update-screen')", timeout=120, ok=False)
+    # The first NixOS graphical login is the one after the version moved (0.56 on bootc): VersionKeeper wrote the
+    # running version, and with the knob it started no hyprland-update-screen.
+    if not re.search(r"^HYPR-LAST=0\.57", out, re.M):
+        raise Timeout(f"[nixos] Hyprland's lastVersion did not move from {HYPR_LAST}: VersionKeeper never took its path")
+    if not re.search(r"getoption \S+: (int|bool): (1|true) set: true", out):
+        raise Timeout("[nixos] ecosystem no_update_news is not set in the running Hyprland")
+    if not re.search(r"^UPDATE-SCREEN=0$", out, re.M):
+        raise Timeout("[nixos] hyprland-update-screen is running")
     time.sleep(10)
     vm.screendump(os.path.join(a.logs, f"{a.kind}-nixos-desktop.png"))
-    say("[nixos] graphical login: Hyprland runs for alex in a greetd wayland session; desktop screenshotted")
+    say("[nixos] graphical login: Hyprland runs for alex in a greetd wayland session, no update window; screenshotted")
     vm.send("exit\n")
     time.sleep(2)
     vm.qmp("system_powerdown")
     vm.wait_off()
+
+
+def microcode_check(out):
+    """A bridged machine boots only its own CPU vendor's early microcode: carry wrote [boot] microcode from the CPU's
+    vendor_id, and rime-boot's menu lists only that vendor's cpio before the generation's initrd."""
+    m = re.search(r"^vendor_id\s*:\s*(\S+)", out, re.M)
+    want = {"GenuineIntel": "intel", "AuthenticAMD": "amd"}.get(m.group(1) if m else "")
+    if not want:
+        raise Timeout(f"[nixos] the lab CPU's vendor is not Intel's or AMD's: {m.group(0) if m else 'none'}")
+    other = {"intel": "amd", "amd": "intel"}[want]
+    if not re.search(rf'^microcode = "{want}"$', out, re.M):
+        raise Timeout(f"[nixos] host.toml has no [boot] microcode = \"{want}\"")
+    menu = " ".join(re.findall(r"^MENU (.*)$", out, re.M))
+    files = re.findall(r"^BOOTFILE (.*)$", out, re.M)
+    if f"{want}-ucode" not in menu or f"{other}-ucode" in menu:
+        raise Timeout(f"[nixos] the menu's initrd lines are not {want}-only: {menu[:400]}")
+    if any(f"{other}-ucode" in f for f in files):
+        raise Timeout(f"[nixos] {other} microcode is on /boot: {files}")
+    say(f"[nixos] microcode: host.toml {want}, menu and /boot/rime/nixos carry {want} only")
 
 
 def phase_back(a):
@@ -457,7 +548,11 @@ def main():
     ap.add_argument("--fresh", action="store_true")
     ap.add_argument("--rollback-first", action="store_true",
                     help="before the real start, run start once with a fault after the boot entry (H8 rollback)")
+    ap.add_argument("--readiness", action="store_true",
+                    help="the disk runs the readiness image: `rime migrate` (its /usr/libexec/rime-migrate), refusals")
     a = ap.parse_args()
+    a.bridge = "/usr/libexec/rime-migrate" if a.readiness else "/run/payload/rime-migrate"
+    a.migrate = "rime migrate" if a.readiness else a.bridge
     if a.sb:
         a.vars = os.path.join(a.lab, "fw", "vars-sb-bridge.fd")
     a.work = os.path.join(a.lab, f"run-{a.kind}")
@@ -476,8 +571,14 @@ def main():
         shutil.copy(a.vars, os.path.join(a.work, "vars.fd"))
     say(f"bridge OVMF proof {a.kind}: Secure Boot {'ON' if a.sb else 'OFF'} ({os.path.basename(a.code)}"
         f" + {os.path.basename(a.vars)})")
+    base, seen = a.logs, set()
     for ph in a.phases.split(","):
-        say(f"== phase {ph}")
+        # a phase run again (nixos after the ostree round trip) records into PHASE-again/, so the first run's records
+        # (the first NixOS login: lastVersion before and after, the screenshot) are not overwritten
+        a.logs = os.path.join(base, f"{ph}-again") if ph in seen else base
+        os.makedirs(a.logs, exist_ok=True)
+        seen.add(ph)
+        say(f"== phase {ph}" + (f" (records in {a.logs})" if a.logs != base else ""))
         {"bootc": phase_bootc, "nixos": phase_nixos, "back": phase_back}[ph](a)
         say(f"== phase {ph} PASS")
     say(f"BRIDGE OVMF {a.kind}: PASS")

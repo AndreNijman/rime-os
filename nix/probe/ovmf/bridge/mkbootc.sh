@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# mkbootc.sh KIND: a bootc-shaped Rime OS disk from the PUBLISHED image, for the bridge lab (README.md here).
+# mkbootc.sh KIND: a bootc-shaped Rime OS disk from the PUBLISHED image (or prepare.sh's readiness image built on it,
+# named in info.json by RIME_LAB_IMAGE), for the bridge lab (README.md here).
 #   KIND = A  installer default: GPT [1M BIOS boot][512M ESP EFI-SYSTEM][btrfs rime-root], shim + GRUB in
 #             \EFI\fedora on Rime's own ESP, /boot a directory of the btrfs top level (as installer/rime-install
 #             install_plain_disk lays it out)
@@ -235,7 +236,7 @@ python3 - "$W/info.json" <<PY
 import json, sys
 json.dump({"kind": "$KIND", "root_uuid": "$ROOT_UUID", "label": "$LABEL", "user": "$USER_NAME",
            "luks_uuid": "${LUKS_UUID:-}", "boot_uuid": "${BOOT_UUID:-}",
-           "deployment": "${D#"$T"}", "image": "ghcr.io/andrenijman/rime-os@sha256:0ace1f6dad51597d79a7d0d84135dd2896fc89d748ec74b9ecfc7c98c92df9bf"},
+           "deployment": "${D#"$T"}", "image": "${RIME_LAB_IMAGE:-ghcr.io/andrenijman/rime-os@sha256:0ace1f6dad51597d79a7d0d84135dd2896fc89d748ec74b9ecfc7c98c92df9bf}"},
           open(sys.argv[1], "w"), indent=1)
 PY
 sync
