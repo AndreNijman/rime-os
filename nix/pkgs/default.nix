@@ -35,4 +35,5 @@
   rime-bridge = callPackage ./rime-bridge { };
   # Rime in each desktop's own quick settings (docs/nixos/desktops.md §6): nix/integrations.
   rime-gnome-extension = callPackage ../integrations/gnome { };
+  rime-plasma-applet = callPackage ../integrations/kde { };
 }

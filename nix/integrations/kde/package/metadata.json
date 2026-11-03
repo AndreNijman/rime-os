@@ -1,0 +1,24 @@
+{
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "Rime OS"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Gaming Mode and updates from Rime",
+        "EnabledByDefault": true,
+        "FormFactors": [
+            "desktop"
+        ],
+        "Icon": "input-gaming",
+        "Id": "org.rimeos.quicksettings",
+        "License": "MIT",
+        "Name": "Rime",
+        "Website": "https://rimeos.com"
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "SystemServices"
+}

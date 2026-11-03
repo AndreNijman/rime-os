@@ -3,6 +3,8 @@
 # Shell's own PowerProfileService test uses, so the contract is written once).
 #
 #   settings-quicksettings-gnome   the GNOME extension's model (rimed.js) under gjs
+#   settings-quicksettings-kde     the Plasma applet's model (RimedModel.qml) under qmltestrunner, with
+#                                  plasma-workspace's org.kde.plasma.workspace.dbus module
 #
 # Each asserts what the integration would draw as of its last change notification, never a fresh read: the Gaming
 # toggle follows Mode.Active changed elsewhere, "Game running" follows GameMode.Active, a click calls Mode.Set, the
@@ -41,12 +43,49 @@ let
       '';
 
   gnome = gnomeCheck pkgs.rime.rime-gnome-extension;
+
+  kdeCheck = applet:
+    pkgs.runCommand "settings-quicksettings-kde"
+      {
+        nativeBuildInputs = [ pkgs.dbus py pkgs.systemd pkgs.coreutils pkgs.kdePackages.qtdeclarative ];
+        QML_IMPORT_PATH = pkgs.lib.concatMapStringsSep ":" (p: "${p}/${pkgs.kdePackages.qtbase.qtQmlPrefix}") [
+          pkgs.kdePackages.plasma-workspace
+          pkgs.kdePackages.qtdeclarative
+        ];
+        QT_QPA_PLATFORM = "offscreen";
+        PYTHONDONTWRITEBYTECODE = "1";
+      }
+      ''
+        . ${shellSrc}/tests/lib/fake-system-bus.sh
+        trap 'fake_bus_stop || true' EXIT
+        fake_bus_start "$TMPDIR/bus"
+        fake_rimed_start
+        mkdir $TMPDIR/t
+        cp ${applet}/share/plasma/plasmoids/org.rimeos.quicksettings/contents/ui/RimedModel.qml $TMPDIR/t/
+        cp ${./settings-quicksettings-kde.qml} $TMPDIR/t/tst_quicksettings.qml
+        rc=0
+        HOME=$TMPDIR qmltestrunner -input $TMPDIR/t/tst_quicksettings.qml 2>&1 | tee $TMPDIR/out.log || rc=$?
+        grep -E '^Totals: [0-9]+ passed, 0 failed' $TMPDIR/out.log >/dev/null || rc=1
+        [ "$rc" = 0 ] || { echo "--- fake rimed calls"; fake_rimed_calls; exit 1; }
+        mkdir -p $out
+        cp $TMPDIR/out.log $out/kde.log
+        fake_bus_stop || true
+      '';
+
+  kde = kdeCheck pkgs.rime.rime-plasma-applet;
 in
 {
   settings-quicksettings-gnome = gnome // {
     mutants = {
       no-properties-changed = gnomeCheck (pkgs.rime.rime-gnome-extension.override {
         rimedMutation = "/g-properties-changed/d";
+      });
+    };
+  };
+  settings-quicksettings-kde = kde // {
+    mutants = {
+      no-properties-changed = kdeCheck (pkgs.rime.rime-plasma-applet.override {
+        modelMutation = "s/function dbusPropertiesChanged/function dbusPropertiesChangedRemoved/";
       });
     };
   };
