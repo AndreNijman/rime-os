@@ -86,3 +86,7 @@
 // import ./settings-integrations-eval.nix { inherit pkgs self; }
 # settings-app-gnome (VM; docs/nixos/desktops.md §8.2; + .mutants)
 // import ./settings-app.nix { inherit pkgs self; }
+# gnome-unlock (+ .mutants): rime-gnome-unlock's own tests in the sandbox (docs/nixos/desktops.md §12.4)
+// import ./gnome-unlock.nix { inherit pkgs self; }
+# desktop-lock-{gnome,kde,cosmic} (VM; docs/nixos/desktops.md §12.4, §12.5; + gnome .mutants)
+// import ./desktop-lock.nix { inherit pkgs self; }

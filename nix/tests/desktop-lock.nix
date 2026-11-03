@@ -1,0 +1,366 @@
+# The screen lock of each other desktop under rime-greet, in a VM (docs/nixos/desktops.md §12.4, §12.5).
+#
+# Each check enables one desktop directly in the test machine (as settings-app-gnome), logs in through rime-greet
+# with the typed password, then locks and unlocks the way a person does: keys typed into the lock screen.
+#
+#   desktop-lock-gnome    rime-gnome-unlock owns org.gnome.DisplayManager (no GDM process), so GNOME Shell builds its
+#                         lock screen: the "Screen Lock disabled" notice is not shown (its marker file
+#                         ~/.local/share/gnome-shell/lock-warning-shown, created before login, is deleted by GNOME
+#                         Shell only when the lock exists); Quick Settings shows the lock button (screenshot). Locks:
+#                           - Super+L, then a WRONG password (refused: still locked, PAM logged the failure, the lock
+#                             screen says so), then the right one (unlocked);
+#                           - `loginctl lock-session`; org.gnome.ScreenSaver.Lock (what gsd and the menus call);
+#                           - the idle timeout (idle-delay 10 s);
+#                           - suspend: the lock is set (SetLockedHint true, dbus-monitor) BEFORE the kernel's
+#                             "PM: suspend entry" (s2idle); the VM's virtio devices then refuse to suspend (-95) and
+#                             the kernel aborts the sleep, so the journal may gain exactly that abort and nothing else;
+#                             the session is still locked afterwards and the right password unlocks it.
+#                         Each lock: the shield is up (ScreenSaver GetActive true); each unlock: logind LockedHint no,
+#                         GetActive false. Then: no session or seat was added (loginctl, against the list before the
+#                         first lock, again after suspend), the error-priority journal gained nothing during the
+#                         lock/unlock rounds, and rime-gnome-unlock logged the refusal and the unlock and no warning
+#                         but pam_gnome_keyring's. The daemon refuses root (no session) and a user asking for another
+#                         user's name.
+#   desktop-lock-kde      Plasma's own locker (kscreenlocker, PAM service `kde`): `loginctl lock-session`, wrong
+#                         password refused, right one unlocks; Meta+L, wrong then right again; sessions, seats and
+#                         the error journal as above.
+#   desktop-lock-cosmic   COSMIC's locker (cosmic-greeter in the session, PAM service `cosmic-greeter`): the same,
+#                         with COSMIC's Super+Escape. cosmic-greeter 1.11 never sets logind's LockedHint (it stays
+#                         "no" while locked; printed in the log); its lock state is its own file
+#                         $XDG_RUNTIME_DIR/cosmic-greeter-<session>.lock, there while locked (src/locker.rs).
+#
+# The passwords are the VM's test account's (rime/rime); the wrong one is only ever typed inside the VM.
+#
+# Mutants (passthru.mutants, built by hand; each must FAIL):
+#   gnome.pam-ignored   rime-gnome-unlock reports success whatever PAM answered: the wrong password unlocks.
+#   gnome.no-shim       rime-gnome-unlock's service is off: GNOME Shell has no lock screen (marker kept, Super+L
+#                       does nothing).
+{ pkgs, self }:
+
+let
+  inherit (pkgs) lib;
+
+  desktops = {
+    # lockKey: the desktop's own lock shortcut (GNOME and Plasma Super+L, COSMIC Super+Escape).
+    gnome = { session = "gnome"; process = "gnome-shell"; pam = "rime-gnome-unlock"; lockKey = "meta_l-l"; };
+    kde = { session = "plasma"; process = "plasmashell"; pam = "kde"; lockKey = "meta_l-l"; };
+    cosmic = { session = "cosmic"; process = "cosmic-comp"; pam = "cosmic-greeter"; lockKey = "meta_l-esc"; };
+  };
+
+  lockTest = { id, name, overlay ? null, extraConfig ? { } }:
+    let d = desktops.${id}; in
+    pkgs.testers.runNixOSTest {
+      inherit name;
+      node.pkgsReadOnly = false;
+
+      nodes.machine = { lib, pkgs, ... }: {
+        imports = [ self.nixosModules.default extraConfig ];
+        nixpkgs.overlays = lib.mkAfter (lib.optional (overlay != null) overlay);
+
+        rime.services.enable = true;
+        rime.desktop.enable = true;
+        rime.desktops.${id}.enable = true;
+
+        users.users.rime = {
+          isNormalUser = true;
+          uid = 1000;
+          initialPassword = "rime";
+          extraGroups = [ "wheel" "video" "audio" "networkmanager" ];
+        };
+
+        virtualisation = {
+          memorySize = 6144;
+          cores = 4;
+          qemu.options = [ "-vga none" "-device virtio-gpu-pci,xres=1280,yres=800" ];
+        };
+        environment.sessionVariables = {
+          WLR_RENDERER = "pixman";
+          QT_QUICK_BACKEND = "software";
+        };
+        systemd.services.rime-flathub-setup.enable = lib.mkForce false;
+        systemd.tmpfiles.rules = [ "f+ /var/lib/rime-greet/last-session 0644 greetd greetd - ${d.session}" ];
+        # Suspend as s2idle, woken by an RTC alarm (rtcwake), so the VM resumes by itself.
+        systemd.sleep.settings.Sleep.SuspendState = "freeze";
+        environment.systemPackages = [ pkgs.dbus pkgs.util-linux ];
+      };
+
+      testScript = ''
+        import json
+        import re
+        import shlex
+
+        ID = "${id}"
+        PROCESS = "${d.process}"
+        PAM = "${d.pam}"
+        MARKER = "/home/rime/.local/share/gnome-shell/lock-warning-shown"
+
+        def user(cmd):
+            env = ("export XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
+                   "WAYLAND_DISPLAY=wayland-0; ")
+            return "su - rime -c " + shlex.quote(env + cmd)
+
+        def session_id():
+            return machine.succeed("loginctl show-user rime -p Display --value").strip()
+
+        def locked_hint():
+            return machine.succeed(f"loginctl show-session {SID} -p LockedHint --value").strip()
+
+        def locked_cmd():
+            # COSMIC's locker never sets logind's LockedHint (cosmic-greeter 1.11 has no SetLockedHint); its own
+            # record of the lock is $XDG_RUNTIME_DIR/cosmic-greeter-<session>.lock, created on lock and removed on
+            # unlock (src/locker.rs). GNOME and Plasma set LockedHint.
+            if ID == "cosmic":
+                return "ls /run/user/1000/cosmic-greeter-*.lock"
+            return f"test \"$(loginctl show-session {SID} -p LockedHint --value)\" = yes"
+
+        def unlocked_cmd():
+            if ID == "cosmic":
+                return "! ls /run/user/1000/cosmic-greeter-*.lock"
+            return f"test \"$(loginctl show-session {SID} -p LockedHint --value)\" = no"
+
+        def is_locked():
+            return machine.execute(locked_cmd())[0] == 0
+
+        GETACTIVE = user("gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver "
+                         "--method org.gnome.ScreenSaver.GetActive")
+
+        def shield_active():
+            return "true" in machine.succeed(GETACTIVE)
+
+        def wait_locked(how):
+            machine.wait_until_succeeds(locked_cmd(), timeout=90)
+            if ID == "gnome":
+                # LockedHint is set as the lock starts; the shield is up once its animation ends.
+                machine.wait_until_succeeds(GETACTIVE + " | grep -F true", timeout=30)
+            machine.sleep(3)
+            print(f"locked ({how}); LockedHint={locked_hint()}")
+
+        def pam_failures():
+            return machine.succeed(f"journalctl -b --no-pager -o cat | grep -c 'pam_unix({PAM}:auth): authentication failure' || true").strip()
+
+        def type_password(password):
+            # A modifier wakes the lock screen and raises the prompt without typing anything into it.
+            machine.send_key("shift")
+            machine.sleep(3)
+            machine.send_chars(password + "\n")
+
+        def unlock_wrong(shot):
+            before = int(pam_failures())
+            type_password("not-the-password")
+            machine.wait_until_succeeds(f"test $(journalctl -b --no-pager -o cat | grep -c 'pam_unix({PAM}:auth): authentication failure') -gt {before}", timeout=60)
+            machine.sleep(5)
+            machine.screenshot(shot)
+            assert is_locked(), "a wrong password unlocked the session"
+            if ID == "gnome":
+                assert shield_active(), "a wrong password lowered GNOME's screen shield"
+            machine.sleep(3)  # the lock screen clears the failed prompt before the next try
+
+        def unlock_right(shot):
+            type_password("rime")
+            machine.wait_until_succeeds(unlocked_cmd(), timeout=60)
+            if ID == "gnome":
+                machine.wait_until_succeeds(GETACTIVE + " | grep -F false", timeout=30)
+            machine.sleep(3)
+            machine.screenshot(shot)
+
+        def sessions():
+            # logind's view, without the short-lived su sessions this script's own commands open.
+            out = []
+            for s in json.loads(machine.succeed("loginctl list-sessions --json=short")):
+                props = machine.succeed(f"loginctl show-session {s['session']} -p Service -p Class -p Type -p Seat -p Name").split()
+                if "Service=su" not in props:
+                    out.append(" ".join(sorted(props)) + " id=" + s["session"])
+            return sorted(out)
+
+        def seats():
+            return machine.succeed("loginctl list-seats --no-legend").split()
+
+        machine.wait_for_unit("multi-user.target")
+        if ID == "gnome":
+            # GNOME Shell deletes this at start-up when it has a lock screen and creates it (with the "Screen Lock
+            # disabled" notification) when it does not (js/ui/main.js _handleLockScreenWarning).
+            machine.succeed(f"install -d -o rime -g users /home/rime/.local /home/rime/.local/share /home/rime/.local/share/gnome-shell && install -o rime -g users -m 644 /dev/null {MARKER}")
+
+        with subtest("logs in through rime-greet"):
+            machine.wait_for_unit("greetd.service")
+            machine.wait_until_succeeds("pgrep -u greetd -f 'qs -p .*/rime-greet/shell.qml'")
+            machine.sleep(8)
+            machine.send_chars("rime\n")
+            machine.sleep(2)
+            machine.send_chars("rime\n")
+            machine.wait_until_succeeds(f"pgrep -u rime {PROCESS}", timeout=300)
+            machine.wait_until_succeeds("test -S /run/user/1000/wayland-0 || test -S /run/user/1000/wayland-1", timeout=120)
+            machine.sleep(30)
+            SID = session_id()
+            print("graphical session:", SID, machine.succeed(f"loginctl show-session {SID}"))
+            assert machine.succeed(f"loginctl show-session {SID} -p Type --value").strip() == "wayland"
+            machine.screenshot(f"{ID}-session")
+      ''
+      + lib.optionalString (id == "gnome") ''
+
+        with subtest("GNOME: rime-gnome-unlock answers as the display manager; GNOME Shell built its lock screen"):
+            owner = machine.succeed("busctl status org.gnome.DisplayManager --no-pager")
+            print(owner)
+            pid = machine.succeed("systemctl show -p MainPID --value rime-gnome-unlock.service").strip()
+            assert f"PID={pid}" in owner, f"org.gnome.DisplayManager is not owned by rime-gnome-unlock ({pid})"
+            machine.fail("pgrep -x gdm")
+            machine.fail("pgrep -f gdm-session-worker")
+            machine.wait_until_fails(f"test -e {MARKER}", timeout=60)
+            # No GNOME idle lock behind the test's back: only the idle subtest sets a delay.
+            machine.succeed(user("gsettings set org.gnome.desktop.session idle-delay 0"))
+            machine.send_key("meta_l-s")
+            machine.sleep(3)
+            machine.screenshot("gnome-quick-settings")
+            machine.send_key("esc")
+            machine.sleep(2)
+
+        with subtest("GNOME: the daemon refuses callers who are not the session's own user"):
+            out = machine.fail("gdbus call --system --dest org.gnome.DisplayManager --object-path /org/gnome/DisplayManager/Manager "
+                               "--method org.gnome.DisplayManager.Manager.OpenReauthenticationChannel root 2>&1")
+            assert "AccessDenied" in out, out
+            out = machine.fail(user("gdbus call --system --dest org.gnome.DisplayManager --object-path /org/gnome/DisplayManager/Manager "
+                                    "--method org.gnome.DisplayManager.Manager.OpenReauthenticationChannel root 2>&1"))
+            assert "AccessDenied" in out, out
+      ''
+      + ''
+
+        SESSIONS = sessions()
+        SEATS = seats()
+        ERRORS_BEFORE = machine.succeed("journalctl -b -p err --no-pager -o cat | sort").splitlines()
+        print("sessions before:", SESSIONS, "seats:", SEATS)
+
+        with subtest("locks from loginctl; a wrong password is refused; the right one unlocks"):
+            machine.succeed(f"loginctl lock-session {SID}")
+            wait_locked("loginctl lock-session")
+            machine.screenshot(f"{ID}-locked")
+            unlock_wrong(f"{ID}-wrong-password")
+            unlock_right(f"{ID}-unlocked")
+
+        with subtest("the lock shortcut (${d.lockKey}) locks; wrong then right again"):
+            machine.send_key("${d.lockKey}")
+            wait_locked("${d.lockKey}")
+            machine.screenshot(f"{ID}-locked-super-l")
+            unlock_wrong(f"{ID}-wrong-password-2")
+            unlock_right(f"{ID}-unlocked-2")
+      ''
+      + lib.optionalString (id == "gnome") ''
+
+        with subtest("GNOME: org.gnome.ScreenSaver.Lock locks"):
+            machine.succeed(user("gdbus call --session --dest org.gnome.ScreenSaver --object-path /org/gnome/ScreenSaver "
+                                 "--method org.gnome.ScreenSaver.Lock"))
+            wait_locked("ScreenSaver.Lock")
+            unlock_right("gnome-unlocked-3")
+
+        with subtest("GNOME: the idle timeout locks"):
+            machine.succeed(user("gsettings set org.gnome.desktop.session idle-delay 10"))
+            t0 = int(machine.succeed("date +%s"))
+            wait_locked("idle")
+            print(f"idle lock within {int(machine.succeed('date +%s')) - t0} s")
+            machine.screenshot("gnome-locked-idle")
+            machine.succeed(user("gsettings set org.gnome.desktop.session idle-delay 0"))
+            unlock_right("gnome-unlocked-idle")
+      ''
+      + ''
+
+        with subtest("no session or seat was added, and nothing new logged at error priority"):
+            after = sessions()
+            print("sessions after:", after)
+            assert after == SESSIONS, f"sessions changed: {SESSIONS} -> {after}"
+            assert seats() == SEATS, seats()
+            errors = machine.succeed("journalctl -b -p err --no-pager -o cat | sort").splitlines()
+            new = sorted(set(errors) - set(ERRORS_BEFORE))
+            print("error-priority lines during the lock rounds:", new)
+            if ID == "cosmic":
+                # cosmic-greeter 1.11 logs this at error level on every lock: the lock surface opens before its
+                # rectangle tracker reports it (src/common.rs:426, blur_rects on SubsurfaceOpened), and the
+                # Rectangle message just after applies the blur. Upstream's, harmless; nothing else is allowed.
+                new = [line for line in new if not re.fullmatch(r"no rectangle for surface Id\(\d+\)", line)]
+            assert not new, new
+      ''
+      + lib.optionalString (id == "gnome") ''
+
+        with subtest("GNOME: suspend locks the session before the system sleeps"):
+            machine.succeed("systemd-run --unit lockmon -p StandardOutput=file:/tmp/lockmon.log dbus-monitor --system "
+                            "\"type='method_call',interface='org.freedesktop.login1.Session',member='SetLockedHint'\"")
+            machine.sleep(2)
+            start = float(machine.succeed("date +%s.%N"))
+            machine.succeed("rtcwake -m no -s 25")
+            machine.succeed("systemctl suspend")
+            machine.wait_until_succeeds("journalctl -b -k --no-pager | grep -F 'PM: suspend exit'", timeout=180)
+            entry = [float(line.split()[0]) for line in machine.succeed(
+                "journalctl -b -k --no-pager -o short-unix | grep -F 'PM: suspend entry'").splitlines()]
+            entry = [t for t in entry if t > start]
+            assert entry, "the system never entered suspend"
+            mon = machine.succeed("cat /tmp/lockmon.log").splitlines()
+            locks = []
+            for i, line in enumerate(mon):
+                if "member=SetLockedHint" in line and i + 1 < len(mon) and "boolean true" in mon[i + 1]:
+                    locks.append(float(line.split("time=")[1].split()[0]))
+            locks = [t for t in locks if t > start]
+            print(f"suspend requested {start:.3f}, SetLockedHint(true) {locks}, PM: suspend entry {entry}")
+            assert locks and locks[0] < entry[0], "the session was not locked before the system suspended"
+            machine.succeed("systemctl stop lockmon")
+            # The VM's virtio devices refuse s2idle (-95; virtio-fs: "suspend/resume not yet supported"), so the
+            # kernel aborts the sleep it had entered. The lock ordering above is the proof; the journal may gain only
+            # that abort, nothing else.
+            vm_abort = re.compile(r"(virtio-pci \S+: PM: .*returns -95|virtio-pci \S+: PM: failed to suspend async: error -95"
+                                  r"|PM: Some devices failed to suspend, or early wake event detected"
+                                  r"|Failed to put system to sleep\. System resumed again: Operation not supported"
+                                  r"|Failed to start System Suspend\.)")
+            errors = machine.succeed("journalctl -b -p err --no-pager -o cat | sort").splitlines()
+            other = [line for line in sorted(set(errors) - set(ERRORS_BEFORE)) if not vm_abort.fullmatch(line)]
+            assert not other, other
+            assert locked_hint() == "yes", "the session was not locked after resume"
+            machine.sleep(5)
+            machine.screenshot("gnome-locked-after-resume")
+            unlock_right("gnome-unlocked-resume")
+            after = sessions()
+            assert after == SESSIONS, f"sessions changed across suspend: {SESSIONS} -> {after}"
+            assert seats() == SEATS, seats()
+
+        with subtest("GNOME: rime-gnome-unlock logged the refusal and the unlock, and no warning of its own"):
+            ulog = machine.succeed("journalctl -b -u rime-gnome-unlock.service --no-pager -o cat")
+            print(ulog)
+            assert "unlocked by gdm-password" in ulog and "refused (PAM" in ulog, ulog
+            # pam_gnome_keyring (in the login stack, as in GDM's gdm-password) warns that it found no keyring daemon
+            # to hand the password to; anything else at warning or worse is the daemon's.
+            warn = [line for line in machine.succeed("journalctl -b -u rime-gnome-unlock.service -p warning --no-pager -o cat").splitlines()
+                    if not line.startswith("gkr-pam: ")]
+            assert not warn, warn
+            assert machine.succeed("ls -A /run/rime-gnome-unlock").strip() == "", "a reauthentication socket was left behind"
+      '';
+    };
+
+  test = id: lockTest { inherit id; name = "rime-desktop-lock-${id}"; };
+in
+{
+  desktop-lock-gnome = test "gnome" // {
+    mutants = {
+      pam-ignored = lockTest {
+        id = "gnome";
+        name = "rime-desktop-lock-gnome-pam-ignored";
+        overlay = _final: prev: {
+          rime = prev.rime // {
+            rime-gnome-unlock = prev.rime.rime-gnome-unlock.overrideAttrs (o: {
+              # The package's own tests catch this too; the mutant is for the VM check alone to catch.
+              doInstallCheck = false;
+              postInstall = (o.postInstall or "") + ''
+                f=$out/lib/rime-gnome-unlock/rime_gnome_unlock.py
+                substituteInPlace $f --replace-fail \
+                  'ok = code == PAM_SUCCESS and final_user == self.channel.user and not self.cancelled.is_set()' \
+                  'ok = not self.cancelled.is_set()'
+              '';
+            });
+          };
+        };
+      };
+      no-shim = lockTest {
+        id = "gnome";
+        name = "rime-desktop-lock-gnome-no-shim";
+        extraConfig = { lib, ... }: { systemd.services.rime-gnome-unlock.enable = lib.mkForce false; };
+      };
+    };
+  };
+  desktop-lock-kde = test "kde";
+  desktop-lock-cosmic = test "cosmic";
+}
