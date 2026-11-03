@@ -225,7 +225,7 @@ pkgs.testers.runNixOSTest {
       b = nodes.client.system.build;
     in
     ''
-      import json, os
+      import hashlib, itertools, json, os
 
       SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main"
       ISSUER = "https://token.actions.githubusercontent.com"
@@ -244,6 +244,24 @@ pkgs.testers.runNixOSTest {
       KERNEL_B = "${b.rimeKernelB}"
       UPSTREAM_ROOTS = "${lib.concatStringsSep " " (map toString b.rimeUpstreamRoots)}"
       CLIENT_IP = "${nodes.client.networking.primaryIPAddress}"
+
+      _reads = itertools.count()
+
+      def read_json(machine, path):
+          # Not json.loads(machine.succeed(f"cat {path}")). succeed() brings output back over the guest console as
+          # ONE base64 line ending in a newline, and checks only the command's exit status, not that the line
+          # arrived whole: a short line whose length is still a multiple of 4 decodes without an error. CI run
+          # 41597182018 read release D's split.json (one entry per path of the release closure, about 80 kB, the
+          # largest file this test reads) as its first 78 kB, "Unterminated string"; A, B and C read whole.
+          # The file crosses the driver's shared directory instead and must match the sha256 the guest computed.
+          name = f"read-json-{next(_reads)}"
+          want = machine.succeed(f"cp {path} /tmp/shared/{name} && sync /tmp/shared/{name} && sha256sum {path}").split()[0]
+          host = machine.shared_dir / name
+          data = host.read_bytes()
+          host.unlink()
+          got = hashlib.sha256(data).hexdigest()
+          assert got == want, f"{machine.name}:{path} came back as {len(data)} bytes with sha256 {got}, not {want}"
+          return json.loads(data)
 
       def hash_of(p):
           return os.path.basename(p)[:32]
@@ -268,10 +286,10 @@ pkgs.testers.runNixOSTest {
               f" --allow-test-variants --test-signing /root/sign --out {d}/out 2>&1")
           print(log)
           assert rc == 0, f"publish {name} failed"
-          st = json.loads(server.succeed(f"cat {d}/out/published.json"))
+          st = read_json(server, f"{d}/out/published.json")
           assert st["state"] == "published" and st["release"] == rid, st
-          split = json.loads(server.succeed(f"cat {d}/split.json"))
-          man = json.loads(server.succeed(f"cat {d}/out/manifest.json"))
+          split = read_json(server, f"{d}/split.json")
+          man = read_json(server, f"{d}/out/manifest.json")
           server.succeed(f"rm -rf {d}/artifact")  # two full copies of the Rime set do not fit twice over
           return st["manifest_digest"], split, man
 
@@ -364,7 +382,7 @@ pkgs.testers.runNixOSTest {
           assert [c["name"] for c in man_a["catalogue"]] == ["htop"], man_a["catalogue"]
           assert man_a["paths"][man_a["catalogue"][0]["out"]]["path"] == HTOP, man_a["catalogue"]
           client.fail(f"nix-store --check-validity {HTOP}")  # not in the system closure
-          outs = json.loads(client.succeed("cat /var/lib/rime/nix/catalogue-outs.json"))
+          outs = read_json(client, "/var/lib/rime/nix/catalogue-outs.json")
           print(outs)
           assert outs["release"] == "2026.11.01" and outs["apps"] == {"htop": HTOP}, outs
           out = client.succeed("rime install htop 2>&1")
@@ -401,7 +419,7 @@ pkgs.testers.runNixOSTest {
           assert link("/run/current-system") == A, "a kernel change was activated live"
           assert boot_id() == bid
           assert link("/nix/var/nix/profiles/system") == B
-          st = json.loads(client.succeed("cat /run/rime-live/status.json"))
+          st = read_json(client, "/run/rime-live/status.json")
           print(st)
           assert st["product"] == "nixos" and st["target"]["toplevel"] == B and st["staged_for_boot"], st
           assert st["state"] == "active" and st["remaining"] == "reboot", st
@@ -431,7 +449,7 @@ pkgs.testers.runNixOSTest {
           assert boot_id() == bid, "the machine rebooted"
           assert greetd_pid() == pid, "greetd was restarted by the switch"
           assert client.succeed("rime-test-shell").strip() == "C"
-          st = json.loads(client.succeed("cat /run/rime-live/status.json"))
+          st = read_json(client, "/run/rime-live/status.json")
           print(st)
           assert st["state"] == "active" and st["booted"]["toplevel"] == A and st["target"]["toplevel"] == C, st
           client.succeed("rime trust --gate")
