@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.gnome.DisplayManager
+Exec=@out@/bin/rime-gnome-unlock
+User=root
+SystemdService=rime-gnome-unlock.service

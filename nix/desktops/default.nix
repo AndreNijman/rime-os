@@ -29,28 +29,32 @@
     desktopNames = [ "GNOME" ];
     delta = 1110685288;
     config =
-      { pkgs, lib, ... }:
-      {
-        services.desktopManager.gnome.enable = true;
-        # D15: no network sharing surfaces on a rime-firewall machine; Rime is the app store; no first-run wizard
-        # (the Rime installer already made the account).
-        services.gnome.gnome-initial-setup.enable = false;
-        services.gnome.gnome-remote-desktop.enable = false;
-        services.gnome.rygel.enable = false;
-        services.gnome.gnome-user-share.enable = false;
-        environment.gnome.excludePackages = with pkgs; [ gnome-tour epiphany gnome-software ];
-        # fcitx5 is Rime's one input method (i18n.inputMethod); GNOME shows its candidates through kimpanel.
-        environment.systemPackages = [ pkgs.gnomeExtensions.kimpanel ];
-        programs.dconf.profiles.user.databases = [
-          {
-            # rime@rimeos.org: Gaming and Update in Quick Settings (nix/integrations/gnome, nix/modules/integrations.nix).
-            settings."org/gnome/shell".enabled-extensions = [
-              pkgs.gnomeExtensions.kimpanel.extensionUuid
-              pkgs.rime.rime-gnome-extension.passthru.uuid
-            ];
-          }
-        ];
-      };
+      { pkgs, lib, ... }@args:
+      lib.mkMerge [
+        # The screen lock under rime-greet (desktops.md §12.4).
+        (import ./gnome-lock.nix args)
+        {
+          services.desktopManager.gnome.enable = true;
+          # D15: no network sharing surfaces on a rime-firewall machine; Rime is the app store; no first-run wizard
+          # (the Rime installer already made the account).
+          services.gnome.gnome-initial-setup.enable = false;
+          services.gnome.gnome-remote-desktop.enable = false;
+          services.gnome.rygel.enable = false;
+          services.gnome.gnome-user-share.enable = false;
+          environment.gnome.excludePackages = with pkgs; [ gnome-tour epiphany gnome-software ];
+          # fcitx5 is Rime's one input method (i18n.inputMethod); GNOME shows its candidates through kimpanel.
+          environment.systemPackages = [ pkgs.gnomeExtensions.kimpanel ];
+          programs.dconf.profiles.user.databases = [
+            {
+              # rime@rimeos.org: Gaming and Update in Quick Settings (nix/integrations/gnome, nix/modules/integrations.nix).
+              settings."org/gnome/shell".enabled-extensions = [
+                pkgs.gnomeExtensions.kimpanel.extensionUuid
+                pkgs.rime.rime-gnome-extension.passthru.uuid
+              ];
+            }
+          ];
+        }
+      ];
   };
 
   kde = {
