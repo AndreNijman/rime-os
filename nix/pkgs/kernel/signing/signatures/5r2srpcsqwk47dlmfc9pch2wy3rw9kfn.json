@@ -1,0 +1,10 @@
+{
+  "image_hash": "5r2srpcsqwk47dlmfc9pch2wy3rw9kfn",
+  "image_store_path": "/nix/store/5r2srpcsqwk47dlmfc9pch2wy3rw9kfn-linux-image-7.2.9",
+  "image_sha256": "fd0c743b8e153d5b92d2c18da43b5db45093eab5ebe6321d0597b03c230d6823",
+  "signature_sha256": "5043d580c52485ba49f49ee053bac4b98d8880bbfb9a18ca5618926dbe7ba28b",
+  "certificate_subject": "CN=APEX-OS Secure Boot key (andre)",
+  "certificate_sha256": "2fdd2f55e18d6d56ca97094bb9ffa116d9ad962c8cb5591484ee1e2a6958bcbb",
+  "signed_at": "2026-11-03T11:16:08Z",
+  "note": "nix-kernel-sign.yml https://github.com/AndreNijman/rime-os/actions/runs/41604595000 host=rime source=build commit=c54c2506018c762f1268fdd0016e2d682e24d487"
+}
