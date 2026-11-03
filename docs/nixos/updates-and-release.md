@@ -1022,6 +1022,12 @@ checks own is proven here: the switch files select the real variant, its exact p
 profile, and its own boot hook writes the entry that boots it. The live activation path is the same code for every
 variant (`switch-to-configuration` of the selected toplevel) and is proven live by `update-e2e` with the stand-in.
 
+The checks whose recorded passes had drifted (wave 3 "deltas" ran `update-e2e` and `release-github` at an earlier
+commit; `release-standin` was first built at the wave-3 merge) were built at the wave-4 "updates2" head, where the measured floors move the
+catalogue and with it every Rime system: `update-e2e` (`vm-test-run-rime-update-e2e` `5ar4a10a…`, its whole level-19
+run, `artifacts/updates2/update-e2e-head.log`), `release-standin` (`0yfvcj2v…`) and `release-github` (`3n812xv2…`),
+the last two unchanged by this branch and valid at its head (`artifacts/updates2/check-validity-head.txt`).
+
 **Earlier proof (adversarial verification, 2026-11-03).** The selection is proven in `update-e2e`
 with a STAND-IN `plain-gaming` (release C's own test system with a different Shell build, not the real gaming
 closure): the switch file picks it, it installs live, `rime trust --gate` passes on it. The four real variant
