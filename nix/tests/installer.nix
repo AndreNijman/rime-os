@@ -5,7 +5,8 @@
 #                         (rime-install-nixos-release: the release manifest's cosign signature over a TEST Fulcio CA,
 #                         the toplevel, every path's narinfo bound to the manifest, then `nix store verify` with the
 #                         trusted key itself) and refuses, by name: a disk below the plain floor and a disk below
-#                         the gaming floor when gaming is chosen (both from nix/release/floors.nix through the ISO's
+#                         the gaming floor when gaming is chosen, a partition below the gaming partition floor (the
+#                         plain system fits it: dry run) (all from nix/release/floors.nix through the ISO's
 #                         nixos-choices.json, nix/installer/choices.nix), an ISO with no choices list, gaming chosen
 #                         on a release with no plain-gaming system, no timezone, no release record, a release signed
 #                         by another identity, a tampered manifest, a release whose system is not the ISO's, a cache
@@ -28,7 +29,8 @@
 #                           partition mode on a Windows-shaped disk, from a live medium on Rime's own ESP (what the
 #                             Windows app stages): Windows' ESP and NTFS partition byte-identical afterwards, a GRUB
 #                             entry for Windows, the one-shot "Rime OS Setup" NVRAM entry removed, the ESP named RIME-ESP.
-#   installer-target-eval nixosConfigurations.rime (what the release ISO installs) evaluates, with the layout above.
+#   installer-target-eval nixosConfigurations.rime (the base every release variant extends: what the ISO installs is
+#                         the release's plain or plain-gaming toplevel built on it) evaluates, with the layout above.
 #   installer-choices     the ISO's nixos-choices.json is floors.nix's published figures for plain and plain-gaming,
 #                         names release variants, the shipped catalogue's gaming switch and `steam`; the engine and the
 #                         ISO build state no floor of their own; the GUI shows the stamped floors and passes gaming.
@@ -363,6 +365,27 @@ in
           refused("/dev/vdc", "", "/dev/vdc is too small for Rime OS with gaming (Steam): 17 GB",
                   "needs a disk of at least ${toString choicesData.variants.plain-gaming.disk_gb} GB",
                   "Without gaming Rime OS needs ${toString choicesData.variants.plain.disk_gb} GB")
+
+      with subtest("refused by name, nothing written: gaming chosen on a partition below the gaming partition floor (${toString choicesData.variants.plain-gaming.partition_gb} GB); plain fits it (dry run)"):
+          # vdf2 is about 14.5 GB: above the plain partition floor (14 GB), below the gaming one (16 GB).
+          installer.succeed(
+              "sgdisk -n 1:0:+512M -t 1:ef00 -n 2:0:0 -t 2:8304 /dev/vdf", "udevadm settle",
+              "mkfs.vfat -F 32 -n ESPTEST /dev/vdf1")
+          answers("/dev/vdf", mode="partition", target="/dev/vdf2", esp="/dev/vdf1", gaming="yes")
+          rc, out = run()
+          print(out)
+          assert rc != 0 and "Nothing has been erased" in out, out
+          for w in ("/dev/vdf2 is too small for Rime OS with gaming (Steam): 14 GB",
+                    "needs a partition of at least ${toString choicesData.variants.plain-gaming.partition_gb} GB",
+                    "Without gaming Rime OS needs ${toString choicesData.variants.plain.partition_gb} GB"):
+              assert w in out, (w, out)
+          installer.succeed("t=$(blkid -p -s TYPE -o value /dev/vdf2 || true); test -z \"$t\"")
+          answers("/dev/vdf", mode="partition", target="/dev/vdf2", esp="/dev/vdf1")
+          rc, out = run("RIME_DRY_RUN=1")
+          print(out)
+          assert rc == 0 and "RIME-INSTALL-DRYRUN-OK" in out, out
+          installer.succeed("t=$(blkid -p -s TYPE -o value /dev/vdf2 || true); test -z \"$t\"",
+                            "wipefs -a /dev/vdf1 /dev/vdf2 /dev/vdf", "udevadm settle")
 
       with subtest("the same disk passes every check for the plain system (dry run: nothing written)"):
           answers("/dev/vdc")

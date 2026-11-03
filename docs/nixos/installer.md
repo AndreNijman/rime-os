@@ -260,6 +260,21 @@ the engine creates the directory with `+C` (table above); installer3's lab first
   One survives: `chattr +C` alone dropped (`no-chattr`): `nixos-install`'s `nixos-enter` runs the target's
   `systemd-tmpfiles --create`, whose `h /var/log/journal - - - - +C` sets the flag on the directory the engine
   created; the engine keeps its own `chattr` so the result does not rest on a run whose failures nixos-enter ignores.
+  **Independent verification (2026-11-03, verify-installer3, `artifacts/verify-installer3/`):** `installer-nixos`
+  re-run with `--rebuild` at installer3's head 7d2df3615: pass, same outPath `ny6qpx5p…`
+  (`rebuild-installer-nixos.log`). The gate mutants above all died before `rime trust --gate` ran, so one was added:
+  `applied.json` records the ISO's stamped (plain) system instead of the one installed, with the test's own
+  `applied.json` assertion removed, and the gaming install's gate fails by itself ("the running system (…plain-gaming…)
+  was not installed by rime update", `mutant-gate-applied-stamp.log`): the gate check can fail. `chattr -C` on the
+  journal directory right after the switch is written also SURVIVES (`mutant-nocow-cleared-before-useradd.log`: the
+  account's `nixos-enter` re-applies tmpfiles' `+C`); the same `chattr -C` after the last `nixos-enter` (just before
+  unmount) is the mutant that shows the `lsattr` `C` assertion can fail (`mutant-nocow-cleared-at-end.log`). Added by
+  the verifier: gaming refused by name on a 14.5 GB PARTITION (below the gaming partition floor 16 GB, above the plain
+  one 14 GB: "/dev/vdf2 is too small for Rime OS with gaming (Steam): 14 GB … needs a partition of at least 16 GB …
+  Without gaming Rime OS needs 14 GB"), and the same partition passes a plain dry run (`installer-nixos-newhead.log`,
+  pass, outPath `9f2yz1f1…`);
+  mutant: the gaming system checked against the plain partition floor, `mutant-gaming-partition-floor-is-plains.log`.
+  Not tested: `gaming=yes` refused on a bootc ISO (`rime-install`; the GUI shows the box only with the NixOS stamp).
 * `checks.hostlayer`: among its subtests, the greeter's sway types host.toml's `gb` + `caps:escape`, not the
   configuration's `us` (`artifacts/installer2/check-hostlayer.log`; mutant `mutants/hostlayer-greeter-us.log`).
 * The OVMF lab, `nix/installer/lab/run.sh` (results below).
