@@ -26,6 +26,7 @@
     ./virtualization.nix
     ./desktops.nix
     ./integrations.nix
+    ./avahi-resolvconf.nix
   ];
 
   nixpkgs.overlays = [ overlay ];

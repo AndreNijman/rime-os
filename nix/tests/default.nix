@@ -86,3 +86,5 @@
 // import ./settings-integrations-eval.nix { inherit pkgs self; }
 # settings-app-gnome (VM; docs/nixos/desktops.md §8.2; + .mutants)
 // import ./settings-app.nix { inherit pkgs self; }
+# avahi-resolvconf (+ .mutants: no-ready-gate, unprivileged-cleanup; nix/modules/avahi-resolvconf.nix)
+// { avahi-resolvconf = import ./avahi-resolvconf.nix { inherit pkgs self; }; }
