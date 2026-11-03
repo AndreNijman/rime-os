@@ -1,0 +1,7 @@
+# Attributes whose evaluation alone needs more than ~4 GB: nix/ci/eval-each.sh evaluates these ONE AT A TIME after
+# the parallel batch, so a 16 GB hosted runner never holds two of them at once. Peak RSS of one evaluator, measured
+# 2026-11-04 (hosted nix-release run 41687259044 and the rime-nix container at feat/nixos 06e715def).
+# Three at once (7.1 + 5.2 + ~3 GB) got the hosted runner's step killed (exit 143) on that run.
+checks.x86_64-linux.desktops-eval            # 11.1 GB
+checks.x86_64-linux.settings-integrations-eval  # 7.1 GB
+checks.x86_64-linux.release-licences         # 5.2 GB

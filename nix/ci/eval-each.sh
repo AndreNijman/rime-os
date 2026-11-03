@@ -7,6 +7,8 @@
 #
 # usage: nix/ci/eval-each.sh FLAKE [extra nix args, e.g. --override-input rime-shell github:...]
 # env:   RIME_EVAL_JOBS  attributes evaluated at once (default 2)
+#        RIME_EVAL_HEAVY_MIB  an attribute NOT in nix/ci/eval-heavy.txt that peaks above this prints a warning
+#                       telling you to add it there (default 4096)
 #        SYSTEM          default x86_64-linux
 # Prints one line per attribute: OK|FAIL <attr> <seconds>s <max RSS MiB>. Exit 1 if any attribute fails.
 set -uo pipefail
@@ -15,6 +17,10 @@ FLAKE="${1:?usage: eval-each.sh FLAKE [nix args...]}"
 shift
 SYSTEM="${SYSTEM:-x86_64-linux}"
 JOBS="${RIME_EVAL_JOBS:-2}"
+HEAVY_MIB="${RIME_EVAL_HEAVY_MIB:-4096}"
+# Attributes measured too big to share a 16 GB hosted runner with others (peak RSS per evaluator, hosted run
+# 41687259044 and the rime-nix container, 2026-11-04): evaluated ONE AT A TIME after the parallel batch.
+HEAVY_LIST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/eval-heavy.txt"
 NIX_ARGS=("$@")
 
 names() { # names OUTPUT-PATH -> attribute names, one per line
@@ -57,6 +63,9 @@ one() {
     rss=$((peak / 1024))
     if [ "$rc" = 0 ]; then
         echo "OK $attr $(( $(date +%s) - t0 ))s ${rss}MiB"
+        if [ "$rss" -gt "$HEAVY_MIB" ] && ! grep -qxF "${attr%.drvPath}" "$work/heavy" 2>/dev/null; then
+            echo "::warning::eval-each: ${attr%.drvPath} peaked at ${rss} MiB; add it to nix/ci/eval-heavy.txt so it is evaluated alone"
+        fi
     else
         echo "FAIL $attr $(( $(date +%s) - t0 ))s ${rss}MiB"
         sed 's/^/  /' "$work/${attr//\//_}.err" | tail -n 40
@@ -64,12 +73,27 @@ one() {
     fi
 }
 export -f one
-export FLAKE work
+export FLAKE work HEAVY_MIB
 export NIX_ARGS_STR="${NIX_ARGS[*]-}"
+
+# Split off the heavy attributes. Plain bash, no sed/awk: the rime-nix container has neither.
+: > "$work/heavy"
+if [ -r "$HEAVY_LIST" ]; then
+    while read -r line; do
+        line="${line%%#*}"; line="${line//[[:space:]]/}"
+        [ -n "$line" ] && printf '%s\n' "${line//x86_64-linux/$SYSTEM}" >> "$work/heavy"
+    done < "$HEAVY_LIST"
+fi
+: > "$work/light"; : > "$work/alone"
+while read -r attr; do
+    if grep -qxF "${attr%.drvPath}" "$work/heavy"; then echo "$attr" >> "$work/alone"; else echo "$attr" >> "$work/light"; fi
+done < "$work/attrs"
 
 # xargs runs `one` in a fresh bash: hand it the extra args as a plain string (they never contain spaces of their own).
 # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
-xargs -P "$JOBS" -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$@"' _ {} < "$work/attrs"
+xargs -P "$JOBS" -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$@"' _ {} < "$work/light"
+# shellcheck disable=SC2016 # expanded by the inner bash, on purpose
+xargs -P 1 -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$@"' _ {} < "$work/alone"
 
-echo "eval-each: $(wc -l < "$work/attrs") attributes evaluated, $JOBS at a time"
+echo "eval-each: $(wc -l < "$work/attrs") attributes evaluated, $JOBS at a time; $(wc -l < "$work/alone") heavy ones alone"
 [ ! -e "$work/failed" ]
