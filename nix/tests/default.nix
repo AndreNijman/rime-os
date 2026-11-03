@@ -88,3 +88,5 @@
 // import ./settings-app.nix { inherit pkgs self; }
 # avahi-resolvconf (+ .mutants: no-ready-gate, unprivileged-cleanup; nix/modules/avahi-resolvconf.nix)
 // { avahi-resolvconf = import ./avahi-resolvconf.nix { inherit pkgs self; }; }
+# shell-kept (the Shell's kept panel windows on Hyprland; phase "short"; nix/tests/shell-kept.nix)
+// { shell-kept = import ./shell-kept.nix { inherit pkgs self; }; }
