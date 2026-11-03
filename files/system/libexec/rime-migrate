@@ -1051,21 +1051,23 @@ def start_record():
 
 
 def record_refusal(rec):
-    """The refusal a start record means, or None. The same rule the bootc side's `rime` applies to its own verbs
-    (rimed/rime/src/nixos_bridge.rs, readiness release): only a start that undid itself (failed, and its last step is
-    "rolled back") allows another; a finished move, a start that neither finished nor rolled back, and an unreadable
-    record refuse by name."""
+    """The refusal a start record means, or None. The same rule, read the same way, as the bootc side's `rime` for its
+    own verbs (rimed/rime/src/nixos_bridge.rs `classify`) and rime-update-check (readiness release): `done` set (not
+    null) is a finished move; otherwise a start that undid itself (`failed` PRESENT, whatever its text, and the last
+    step "rolled back") allows another; any other record, and an unreadable one, refuses by name. (`failed` is the
+    exception's text, which is "" for a Ctrl-C: reading it as a truth value refused a start that had rolled back.)"""
     p = os.path.join(STATE, "state.json")
     if rec is None:
         return None
     if "unreadable" in rec:
         return ("start-record-unreadable", f"{p} cannot be read ({rec['unreadable']}); look at it before anything else")
-    steps = rec.get("steps") or []
+    steps = rec.get("steps")
+    steps = steps if isinstance(steps, list) else []
     last = steps[-1] if steps else "none"
-    if rec.get("failed") and last == "rolled back":
-        return None
-    if rec.get("done"):
+    if rec.get("done") is not None:
         return ("already-moved", f"{p}: this machine was moved to NixOS on {rec['done']}; boot the Rime (NixOS) entry")
+    if "failed" in rec and last == "rolled back":
+        return None
     return ("start-unfinished", f"{p}: a start reached step {last!r} and neither finished nor rolled itself back; "
             "nothing new is started over it")
 
@@ -1760,7 +1762,7 @@ def cmd_start(a):
         if state.get("relabelled_from"):
             run(["btrfs", "filesystem", "label", top, state["relabelled_from"]], check=False)
         unmask_old_side(state)
-        state["failed"] = str(e)
+        state["failed"] = str(e) or type(e).__name__   # a Ctrl-C's text is "": the record names it
         step("rolled back")
         raise
     state["done"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
