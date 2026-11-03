@@ -6248,6 +6248,25 @@ cmd_repo_list() {
     dnf5 repolist --all
 }
 
+# Whether COPR OWNER/PROJECT is "enabled", "disabled" (configured, switched
+# off) or "absent" (not configured), as `dnf5 copr list` reports it. Prints
+# nothing and returns 1 when dnf5 cannot say. Its lines look like
+#   copr.fedorainfracloud.org/OWNER/PROJECT [eternal_deps] [multilib] (disabled)
+# with the flags and "(disabled)" both optional (dnf5 5.4, Fedora 45).
+copr_state() {
+    local out line
+    out="$(dnf5 copr list 2>/dev/null)" || return 1
+    while IFS= read -r line; do
+        [ "${line%% *}" = "copr.fedorainfracloud.org/$1" ] || continue
+        case " $line " in
+            *" (disabled) "*) printf 'disabled' ;;
+            *) printf 'enabled' ;;
+        esac
+        return 0
+    done <<<"$out"
+    printf 'absent'
+}
+
 cmd_repo_enable_copr() {
     [ "$#" = 1 ] || die "usage: rime repo enable-copr OWNER/PROJECT"
     need_root repo
@@ -6257,20 +6276,30 @@ cmd_repo_enable_copr() {
     # sweep in refresh_copr_keyring) or swap in a keyring built from a key set
     # that another command has since changed.
     take_lock
+    # Every failure below puts the repository back the way it was. A COPR
+    # that was already enabled stays enabled: re-running enable-copr while
+    # copr.fedorainfracloud.org is unreachable must not switch off a working
+    # repository (it used to). One that was not enabled is disabled again.
+    local was
+    was="$(copr_state "$1")" \
+        || die "could not read whether COPR '$1' is enabled (dnf5 copr list failed); nothing was changed"
     dnf5 -y copr enable "$1" >&2 || die "could not enable COPR '$1'"
     local owner="${1%%/*}" project="${1#*/}" keyfile
     local key="https://download.copr.fedorainfracloud.org/results/${owner}/${project}/pubkey.gpg"
     keyfile="$(mktemp)"
     if ! curl --fail --silent --show-error --location \
               --proto '=https' --tlsv1.2 "$key" -o "$keyfile"; then
-        dnf5 -y copr disable "$1" >&2 || true
         rm -f "$keyfile"
+        if [ "$was" = enabled ]; then
+            die "could not download the signing key for COPR '$1'; it stays enabled, as it was"
+        fi
+        dnf5 -y copr disable "$1" >&2 || true
         die "could not download the signing key for COPR '$1'; repository disabled"
     fi
     local mine="${COPR_KEYS}/${owner}/${project}.gpg" failed prior=""
-    # Enabling a COPR that is already enabled replaces its key. If the new one
-    # cannot be imported, the COPR stays as it was (its previous key, still
-    # enabled) rather than losing the key it had.
+    # Enabling a COPR that already has a key replaces it. If the new one
+    # cannot be imported, the COPR stays as it was (its previous key, enabled
+    # or disabled as before) rather than losing the key it had.
     if [ -f "$mine" ]; then
         prior="$(mktemp)"
         cp -p -- "$mine" "$prior"
@@ -6284,21 +6313,31 @@ cmd_repo_enable_copr() {
             # key: putting the file back is all that is needed.
             install -Dm0600 "$prior" "$mine"
             rm -f "$prior"
-            if [ -n "$failed" ] && [ "$failed" != "$mine" ]; then
-                die "could not update COPR '$1': the signing key stored for COPR '$(copr_of_keyfile "$failed")' (${failed}) cannot be imported, so the COPR keyring cannot be rebuilt; fix it with: sudo rime repo disable-copr $(copr_of_keyfile "$failed"). COPR '$1' keeps its previous key"
+            local stays="stays enabled"
+            if [ "$was" != enabled ]; then
+                dnf5 -y copr disable "$1" >&2 || true
+                stays="stays disabled"
             fi
-            die "could not import the new signing key for COPR '$1'; it keeps its previous key and stays enabled"
+            if [ -n "$failed" ] && [ "$failed" != "$mine" ]; then
+                die "could not update COPR '$1': the signing key stored for COPR '$(copr_of_keyfile "$failed")' (${failed}) cannot be imported, so the COPR keyring cannot be rebuilt; fix it with: sudo rime repo disable-copr $(copr_of_keyfile "$failed"). COPR '$1' keeps its previous key and ${stays}"
+            fi
+            die "could not import the new signing key for COPR '$1'; it keeps its previous key and ${stays}"
         fi
-        dnf5 -y copr disable "$1" >&2 || true
+        # No key of its own before this command. Enabled anyway (by hand, with
+        # dnf5) stays enabled, keyless, as it was: its packages were refused
+        # before and still are.
+        local left="repository disabled"
+        if [ "$was" = enabled ]; then left="it stays enabled, as it was"
+        else dnf5 -y copr disable "$1" >&2 || true; fi
         rm -f "$mine"
         refresh_copr_keyring || true
         # The new key is not always the one that failed: one unreadable key
         # left by an earlier COPR fails every refresh, and blaming the new
         # COPR would send the user after the wrong file.
         if [ -n "$failed" ] && [ "$failed" != "$mine" ]; then
-            die "could not enable COPR '$1': the signing key stored for COPR '$(copr_of_keyfile "$failed")' (${failed}) cannot be imported, so the COPR keyring cannot be rebuilt; fix it with: sudo rime repo disable-copr $(copr_of_keyfile "$failed"). Repository '$1' disabled"
+            die "could not enable COPR '$1': the signing key stored for COPR '$(copr_of_keyfile "$failed")' (${failed}) cannot be imported, so the COPR keyring cannot be rebuilt; fix it with: sudo rime repo disable-copr $(copr_of_keyfile "$failed"). COPR '$1': ${left}"
         fi
-        die "could not import the signing key for COPR '$1'; repository disabled"
+        die "could not import the signing key for COPR '$1'; ${left}"
     fi
     rm -f "$keyfile" ${prior:+"$prior"}
     msg "enabled COPR '$1'; rime search/install will now use it"
