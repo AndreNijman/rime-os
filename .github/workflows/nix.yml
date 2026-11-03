@@ -55,7 +55,19 @@ jobs:
         # Every check (the skipped kernel ones included), package and configuration, so a broken expression fails
         # here. Not `nix flake check --no-build`: one evaluator for all checks peaked at 27.9 GB and the 16 GB
         # runner killed it (exit 143). One process per attribute peaks at 3.5 GB (update-client), 3 at a time.
-        run: RIME_EVAL_JOBS=3 nix/ci/eval-each.sh "$FLAKE"
+        # The runner's memory, disk and biggest processes every 20 s: two runs lost the runner ("shutdown signal",
+        # exit 143) about 14 min in with no evaluator above 3 GB, so the next failure has to say what ran out.
+        run: |
+          ( while sleep 20; do
+              printf 'RES %s mem=%s disk=%s top=%s\n' "$(date +%T)" \
+                "$(free -m | awk 'NR==2 {print $3"/"$2"M avail "$7"M"}')" \
+                "$(df -m / | awk 'NR==2 {print $4"M free"}')" \
+                "$(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s:%dM ", $2, $1/1024}')"
+            done ) &
+          mon=$!
+          rc=0; RIME_EVAL_JOBS=3 nix/ci/eval-each.sh "$FLAKE" || rc=$?
+          kill "$mon" 2>/dev/null || true
+          exit "$rc"
       - name: Plan the checks
         id: plan
         run: |
