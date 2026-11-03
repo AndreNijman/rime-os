@@ -1942,6 +1942,26 @@ jobs:
           ./tests/test-rime-live.sh
           ./tests/test-rime-live-session.sh
 
+      # The UI boost and the one-writer power-profiles facade, end to end: the
+      # built rimed on a private system bus (fake logind + polkit) over a fake
+      # sysfs, inside `unshare -Urmn`. Boost raises EPP and restores it exactly,
+      # the 600 ms cap, release on disconnect, other users / remote sessions
+      # refused, the Hyprland event watcher, and the real power-profiles-daemon
+      # never getting its names while rimed holds them. Built explicitly first:
+      # a restored cache can hold a stale binary. REQUIRE turns skips (no
+      # namespace, no PPD) into failures.
+      - name: Run UI boost + one-writer assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          RIME_TEST_REQUIRE_UI_BOOST: '1'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends dbus-daemon power-profiles-daemon python3-gi
+          cargo build --locked --manifest-path rimed/Cargo.toml -p rimed -p rime --bins --examples
+          ./tests/test-rimed-ui-boost.sh
+
       # §21's Task. It belongs in this job rather than `engine` because it
       # drives the built `rime` binary, and this is the only job with a Rust
       # toolchain and a warm cargo cache.
@@ -4682,6 +4702,7 @@ jobs:
             files/system/libexec/rime-update-notice \
             files/system/libexec/rime-live-session \
             tests/test-rime-live.sh tests/test-rime-live-session.sh \
+            tests/test-rimed-ui-boost.sh \
             tests/test-rime-update-notice.sh \
             tests/test-rime-recover.sh \
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \

@@ -138,11 +138,11 @@ pub use mode::{Mode, ModeId, ModeMatch, ModeState, PolicyIntent, TierPolicy, Unk
 pub use perf::{CpuPerf, GpuPerf, PerfSnapshot, PowerReading, SchedulerState, Temp};
 pub use profile::{
     ChargeConfig, CpusetPolicy, FanConfig, GameModeConfig, IrqPolicy, NvidiaConfig, Profile,
-    ProfileKind, ProfileSet, TierSettings,
+    ProfileKind, ProfileSet, TierSettings, UiBoostConfig, UiBoostPlan,
 };
 pub use select::{select, Selection};
 pub use syswriter::{MockWriter, Outcome, RealWriter, SysWriter};
-pub use tier::{Action, Tier, UnknownTier};
+pub use tier::{Action, MinFreq, Tier, UnknownTier};
 pub use topology::{CoreSource, CoreTopology};
 pub use workload::{Assessment, Signal, Signals, Vram, Workload};
 

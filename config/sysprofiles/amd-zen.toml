@@ -28,13 +28,22 @@ battery = "balanced"
 governor = "performance"
 epp = "performance"
 platform_profile = "performance"
+cpu_boost = true
+cpu_min_freq = "lowest_nonlinear"
 
 [tiers.balanced]
 governor = "powersave"
 epp = "balance_power"
 platform_profile = "balanced"
+cpu_boost = true
+cpu_min_freq = "lowest_nonlinear"
 
 [tiers.power-saver]
 governor = "powersave"
 epp = "power"
 platform_profile = "low-power"
+# Boost off and the clock floor at the hardware minimum: what
+# power-profiles-daemon's amd-pstate driver wrote for power-saver, kept now that
+# rimed is the only writer (PPD is masked; see docs/rimed-dbus.md).
+cpu_boost = false
+cpu_min_freq = "cpuinfo_min"

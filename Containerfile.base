@@ -352,7 +352,17 @@ RUN set -eux; \
     grep -qE '^enabled=true' /etc/NetworkManager/conf.d/21-rime-connectivity.conf; \
     grep -qE '^uri=' /etc/NetworkManager/conf.d/21-rime-connectivity.conf; \
     grep -qE '^response=' /etc/NetworkManager/conf.d/21-rime-connectivity.conf
-RUN systemctl enable rimed.service
+# rimed is the ONE writer of the CPU power policy (governor, EPP, boost,
+# min-frequency floor, platform_profile). power-profiles-daemon wrote the same
+# files and the last writer won, so it is MASKED (the package stays: its
+# powerprofilesctl talks to rimed, which serves PPD's API on PPD's bus names).
+# A PPD started anyway cannot own its name and quits before its drivers run.
+RUN systemctl enable rimed.service && \
+    systemctl mask power-profiles-daemon.service && \
+    test "$(readlink /etc/systemd/system/power-profiles-daemon.service)" = /dev/null && \
+    ! systemctl is-enabled --quiet power-profiles-daemon.service && \
+    grep -qF '<allow own="org.freedesktop.UPower.PowerProfiles"/>' \
+        /usr/share/dbus-1/system.d/org.rimeos.Rimed1.conf
 
 # ── agent runtime (rime-agentd) ─────────────────────────────────────────────
 # A USER unit, and deliberately NOT `systemctl --global enable`d: a per-user

@@ -61,6 +61,7 @@ ai host build send open
 task recover disposable boot
 trust storage qualify firmware channel schema
 lid permissions user vm browser
+ui
 "
 
 for v in $VERBS; do

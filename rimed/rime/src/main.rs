@@ -42,6 +42,7 @@ mod storage;
 mod task;
 mod touchpad;
 mod trust;
+mod ui;
 mod user;
 mod verify;
 mod vm;
@@ -129,6 +130,12 @@ enum Cmd {
     Lid {
         #[command(subcommand)]
         cmd: Option<lid::LidCmd>,
+    },
+    /// Short UI boosts: ask rimed for one, or follow Hyprland and ask on every
+    /// window and workspace animation (`org.rimeos.Rimed1.Ui`).
+    Ui {
+        #[command(subcommand)]
+        cmd: ui::UiCmd,
     },
     /// What applications may touch, who enforces it, and what a revocation
     /// would actually do (P1-061).
@@ -1659,6 +1666,7 @@ async fn main() {
         // "what verified my boot". `migrate` writes, and is in the set.
         Cmd::Boot { cmd } => boot::boot_main(cmd),
         Cmd::Lid { cmd } => lid::main(cmd),
+        Cmd::Ui { cmd } => ui::main(cmd).await,
         Cmd::Permissions { cmd } => permissions::main(cmd),
         // Same shape as `boot`, and for the same reason: the honest answer to
         // "is my operating system signed" must not cost a password, so the
