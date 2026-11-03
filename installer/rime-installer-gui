@@ -352,6 +352,31 @@ def read_result():
     return out if out.get("status") in ("ok", "failed") else None
 
 
+NIXOS_CHOICES = os.environ.get("RIME_NIXOS_CHOICES",
+                               "/usr/lib/rime-installer/nixos-choices.json")
+
+
+def gaming_offer():
+    """The NixOS ISO's gaming choice, or None when it offers none.
+
+    build-live-iso.sh stamps nix/installer/choices.nix as nixos-choices.json;
+    the engine (rime-install-nixos.sh nixos_choose) reads the same file and is
+    the one that refuses a disk below a floor. This front end only shows the
+    floors, so it never states a number of its own. Returns
+    {"plain": (disk_gb, partition_gb), "gaming": (disk_gb, partition_gb),
+     "summary": str} when the file offers both plain and plain-gaming."""
+    try:
+        with open(NIXOS_CHOICES) as f:
+            c = json.load(f)
+        v = c["variants"]
+        floors = {k: (int(v[n]["disk_gb"]), int(v[n]["partition_gb"]))
+                  for k, n in (("plain", "plain"), ("gaming", "plain-gaming"))}
+        summary = str(c["features"]["gaming"]["summary"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return dict(floors, summary=summary)
+
+
 def netinstall():
     """True when this ISO downloads the OS instead of carrying it."""
     return os.path.exists("/usr/lib/rime-installer/netinstall")
@@ -1512,11 +1537,28 @@ class Installer(Adw.Application):
         body.append(sc)
         body.append(lbl("The disk you booted from is not listed.", "rime-dim"))
 
+        # NixOS ISOs only: install the gaming system (Steam, Gaming Mode) from
+        # the start. Its disk floor is higher, so the choice sits beside the
+        # disk it has to fit on. The engine refuses a disk below the floor.
+        offer = gaming_offer()
+        self.cb_gaming = None
+        if offer:
+            self.cb_gaming = Gtk.CheckButton(label="Include gaming (Steam)")
+            self.cb_gaming.set_active(self.answers.get("gaming") == "yes")
+            a11y(self.cb_gaming, "Include gaming (Steam)", offer["summary"])
+            body.append(self.cb_gaming)
+            body.append(lbl(f"{offer['summary']}. Needs a disk of at least "
+                            f"{offer['gaming'][0]} GB ({offer['plain'][0]} GB without "
+                            "gaming). You can add it later with rime install steam.",
+                            "rime-dim"))
+
         def nxt(_b):
             row = self.disk_list.get_selected_row()
             if row is None:
                 return
             self.disk = self._disks[row.get_index()]["dev"]
+            if self.cb_gaming is not None:
+                self.answers["gaming"] = "yes" if self.cb_gaming.get_active() else "no"
             self.go("mode")
 
         return self.frame("STEP 4 OF 7", "Select a disk",
@@ -2131,6 +2173,8 @@ class Installer(Adw.Application):
 
         summary = (f"{self.answers['username']} @ {self.answers['hostname']}"
                    f"   ·   {self.ed}   ·   btrfs")
+        if self.answers.get("gaming") == "yes":
+            summary += "   ·   gaming (Steam)"
         rest.append(lbl(summary, "rime-mono rime-dim"))
         # The encryption decision belongs on the page where the disk is
         # confirmed, not only on the page where it was made. A user who ticked
@@ -2340,7 +2384,7 @@ class Installer(Adw.Application):
                           "hostname", "rootfs", "mokpw", "encrypt", "lukspass",
                           "keymap", "keyvariant", "timezone", "confirmed",
                           "confirm_target", "confirm_disk_id",
-                          "confirm_target_id", "confirm_esp_id"):
+                          "confirm_target_id", "confirm_esp_id", "gaming"):
                     if a.get(k):
                         f.write(f"{k}={a[k]}\n")
         except OSError as e:

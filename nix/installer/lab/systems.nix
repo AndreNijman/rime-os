@@ -1,5 +1,6 @@
-# The installer lab's system (installer/lab/run.sh; docs/nixos/installer.md): the toplevel the lab ISO installs.
-# It is nixosConfigurations.rime (the generic fresh-install system, nix/installer/target.nix) plus only what an
+# The installer lab's systems (installer/lab/run.sh; docs/nixos/installer.md): the toplevels the lab ISO installs.
+# Each is a release variant (nix/release/variants.nix: `plain`, and `plain-gaming` when gaming is chosen; both built
+# on nixosConfigurations.rime, the generic fresh-install system, nix/installer/target.nix) plus only what an
 # OVMF VM needs, with the REAL Rime kernel signed the way the release kernel is (a detached signature of
 # system.build.rimeKernelImage, attached by nix/pkgs/kernel/sign.nix), here by a THROWAWAY TEST MOK. Built with
 # --impure from the rime-os flake:
@@ -16,6 +17,7 @@
   flake,
   signatureDir ? null,
   certificate ? null,
+  variant ? "plain",
 }:
 
 let
@@ -52,7 +54,8 @@ let
       systemd.services.rime-flathub-setup.enable = lib.mkForce false;
     };
 
-  system = extra: (flake.nixosConfigurations.rime.extendModules { modules = [ lab ] ++ extra; }).config;
+  base = (import ../../release/variants.nix { self = flake; }).${variant}.system;
+  system = extra: (base.extendModules { modules = [ lab ] ++ extra; }).config;
 
   c = system [ ];
 in

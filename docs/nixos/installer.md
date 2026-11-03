@@ -42,6 +42,7 @@ engine repeats on the target machine).
 | `NIXOS_UPSTREAM_URL`, `NIXOS_UPSTREAM_PUB` | `nixos-upstream-cache`, `nixos-upstream-cache.pub` | the upstream cache and its key (absent on a lab ISO whose cache holds everything) |
 | `NIXOS_MOK_CERT` | `nixos-mok.der` | the certificate the kernel is signed with, offered for enrolment |
 | `NIXOS_KERNEL_SIGNED` | `kernel-signed` | whether to offer enrolment at all (`signed`/`unsigned`) |
+| `NIXOS_CHOICES` | `nixos-choices.json` | the systems an owner may choose (`plain`, `plain-gaming`) with each one's disk floor, and the gaming feature's switch file: `nix eval --json --file nix/installer/choices.nix` (see "Plain or gaming") |
 
 The NixOS live env adds `nix-core` (Fedora's Nix), `bootupd` (for its static GRUB config), `openssl` (the release
 verifier) and `findutils` (`xargs`). Those are installed only when `Containerfile.installer` is built with
@@ -58,7 +59,9 @@ Before any disk is touched, `installer/rime-install-nixos-release.py check` (run
    pinned Fulcio root, its SAN one of the allowed signers, its OIDC issuer; then the release layer read by that digest
    and validated. The verifier is the ISO's own copy;
 2. requires the ISO's system to be the release's toplevel for the stamped variant, and every cache key the ISO trusts
-   to be one the release names;
+   to be one the release names; then takes the system to install from the release itself: the toplevel of the variant
+   the owner chose (`--install-variant`, `plain` or `plain-gaming`), refusing a release that has none ("release X has
+   no plain-gaming system"). The build checks the same with `verify --offer` for every variant the ISO offers;
 3. looks up every path of the closure in the cache its `origin` names, in parallel (32 threads) under a 300 s deadline:
    present, with the release's NarHash, NarSize and references, signed by the trusted key's name.
 
@@ -82,8 +85,14 @@ reported as a network problem, not as a forged release.
 ## What the engine refuses (installer/rime-install-nixos.sh), before anything is erased
 
 * a root filesystem other than btrfs;
-* a disk below **19 GB** in whole-disk mode, or a root partition below **17 GB** in partition mode (closure.md A11: a
-  fresh system, one update staged beside it and the rollback generation, as `rime update`'s space gate counts them);
+* a disk below the chosen system's floor in whole-disk mode, or a root partition below it in partition mode. The
+  floors are `nix/release/floors.nix`'s, stamped as `nixos-choices.json`: **16 GB** disk / **14 GB** partition for
+  `plain`, **18 GB** / **16 GB** for `plain-gaming` (a fresh system and one update staged beside it, the figures
+  `rime update`'s space gate and `rime install steam` use). The refusal names the choice: "/dev/vdc is too small for
+  Rime OS with gaming (Steam): 17 GB. ... Without gaming Rime OS needs 16 GB: go back and leave gaming off". The
+  engine states no number of its own (`checks.installer-choices`);
+* an ISO without `nixos-choices.json`, `gaming=yes` on an ISO or release without a gaming system, `gaming=` other than
+  `yes`/`no`, and `gaming=yes` on a bootc ISO;
 * no timezone (the answer, else the live environment's `/etc/localtime`), an invalid locale or kernel parameter;
 * a missing system, cache key, release record, release checker or loader file;
 * a release record that fails the check above: no record, a manifest changed after it was signed, a release signed by
@@ -102,7 +111,10 @@ reported as a network problem, not as a forged release.
    plain, or LUKS2 (argon2id) with a recovery key, the same as the bootc path. In partition mode only the chosen
    partition is wiped; Rime's own ESP is relabelled `RIME-ESP` last.
 2. **btrfs `rime-root`** with `@nixos` (/), `@nix` (/nix) and `@home` (/var/home), mounted `compress-force=zstd:3`
-   (D2). `nix/installer/target.nix` is the matching NixOS side.
+   (D2). `nix/installer/target.nix` is the matching NixOS side. `/var/log/journal` is created empty with No_COW
+   (`chattr +C`) before anything is written, so the journal files journald creates inherit it. systemd's
+   `journal-nocow.conf` (`h /var/log/journal - - - - +C`) only adjusts a path that exists: before installer3 the
+   directory did not exist at install, so nothing set it and journald created it copy-on-write at first boot.
 3. **ESP.** Fedora's shim, GRUB and MokManager in `EFI/fedora` and `EFI/BOOT`; bootupd's static config in
    `EFI/*/grub.cfg` and `grub2/grub.cfg`, with `bootuuid.cfg` naming the ESP.
 4. **host.toml** (`/var/lib/rime/host.toml`): hostname, timezone, `LANG`, console and XKB keymap, and `[boot]` with
@@ -113,10 +125,25 @@ reported as a network problem, not as a forged release.
    answered name from the first boot) and `switch-to-configuration boot`, whose hook (rime-boot) writes the BLS
    entries GRUB reads.
 6. **The release record** (see above), the account (`useradd`/`chpasswd` through `nixos-enter`, wheel and the desktop
-   groups) and the network connections.
+   groups) and the network connections. With gaming chosen, `/var/lib/rime/switch/rime-feature@gaming.target.on`
+   (0644, `steam`), the file `rime install steam` writes, so the feature is on at the first boot and every
+   `rime update` keeps choosing `plain-gaming` (updates-and-release.md §11.6).
 7. **Secure Boot.** The MOK certificate at `/var/lib/rime/secureboot/rime-mok.der`; `mokutil --import` unless already
    enrolled; an NVRAM entry for shim (in partition mode on Rime's ESP, by partition number). In partition mode a
    "Windows Boot Manager" entry is added to the GRUB menu, and the Windows app's one-shot setup entry is removed.
+
+## Plain or gaming (A4)
+
+An install is `plain` unless the owner chooses gaming: `gaming=yes` in the answers file, or **Include gaming (Steam)**
+on the GUI's disk page, which appears only when the ISO's `nixos-choices.json` offers `plain-gaming` and shows both
+floors from it. Gaming installs the release's `plain-gaming` toplevel and writes the gaming switch (above); the
+finish note names the system ("System: plain-gaming (Steam and Gaming Mode included)"). Virtualization is not offered
+at install (A4: `rime install qemu` afterwards).
+
+The installed system is the release's published variant toplevel, not the ISO's `nixosConfigurations.rime` build: a
+fresh install passes `rime trust --gate` before its first `rime update`. `checks.installer-nixos` runs the gate inside
+the installed disk (`nixos-enter`) for both choices against a TEST registry holding the signed release: "system: ... is
+the signed plain system of 2026.11.02" and "... plain-gaming ...", "signature: verified".
 
 ## Partition mode and the Windows app
 
@@ -135,11 +162,13 @@ change to the app, with two consequences:
 
 * **only a production (network) ISO can be installed from Windows.** The app does not stage `nix-cache/`, so a lab
   ISO's `iso` cache does not exist on a staged ESP;
-* **the app's smallest root was 16 GB, below the engine's 17 GB partition floor.** A space the app accepted could be
+* **the app's smallest root was 16 GB, below the engine's then 17 GB partition floor.** A space the app accepted could be
   refused by the engine after the GPT was rewritten. `MIN_ROOT_BYTES` is now 17 GB (the bootc engine accepts it too),
   with a test at 16.5 GB (`cargo test` 45 passed, `artifacts/installer2/windows-app-cargo-test.log`; with the floor
   back at 16 GB the new test fails, `artifacts/installer2/mutants/windows-app-floor16.log`). The published v3.2.0
-  `.exe` and the website still carry 16 GB until the next installer release.
+  `.exe` and the website still carry 16 GB until the next installer release. The engine's partition floors are now
+  14 GB (`plain`) and 16 GB (`plain-gaming`), both below the app's 17 GB, so a space the app accepts is never refused
+  by the engine for size; the app's 17 GB is not lowered here (it is the published app's figure, P3 release).
 
 ESP room on a machine installed from Windows: the app sizes Rime's ESP as payload + 512 MiB + 16 MiB rounded up to
 256 MiB. For the lab ISO's six files (2,057,417,888 bytes) that is 2,684,354,560 bytes, leaving about 598 MiB beside
@@ -178,6 +207,7 @@ virtio disk (`RIME_RECOVERY_ALLOW_FIXED=1`, the test seam for a VM disk that is 
 | `hostnamectl --static` empty | two causes. The earlier runs had no `/etc/hostname` until the first `rime-hostlayer apply`. This run had the file (PID 1 used it), but NixOS points systemd-hostnamed at `/etc/static/hostname` (`SYSTEMD_ETC_HOSTNAME`, set for when `networking.hostName` makes that link), which does not exist when the closure names no machine | the install's own activation writes `/etc/hostname`, and `hostlayer.nix` points hostnamed at it. A minimal NixOS VM shows `Static hostname: (unset)` before and `rime-lab-x` after (`artifacts/installer2/hostnamed-static-{before,after}.log`, probe `hostnamed-static-probe.flake.nix`). `installer-polish-eval` checks the unit; with the setting dropped it fails (`mutants/polish-hostnamed-static.log`). The lab's firstboot compares `/etc/hostname` and `hostnamectl --static` with the answer |
 | zsh-newuser-install on the first console login | NixOS ships no `/etc/skel/.zshrc` | `fedora-parity.nix` ships Fedora's stock one (a real file, 0644), which rime-shell-firstrun replaces at the first desktop login as on Fedora |
 | systemd-journald restarts once | see "journald" below | explained, not changed |
+| journald: `/var/log/journal` is copy-on-write on btrfs | `@nixos` is new, so systemd's tmpfiles `h /var/log/journal - - - - +C` never sees the directory before journald creates it | the engine creates it, empty and No_COW, at install; `checks.installer-nixos` reads `lsattr -d` (`C`, empty) on the plain install, and the OVMF lab reads FS_NOCOW_FL at the first boot of both (mutant: the directory not created at install fails, `artifacts/installer3/mutants/vm-no-journal-dir.log`; dropping only the `chattr` SURVIVES, `vm-no-chattr.log`, because `nixos-install`'s `nixos-enter` runs the target's `systemd-tmpfiles --create`, which applies `h ... +C` once the directory exists; the `chattr` stays so the result does not rest on that run, whose failures nixos-enter ignores). OVMF lab first boots: no copy-on-write warning (installer2's had two each) and `/var/log/journal` is `C` |
 | the greeter offers English (US) on a `gb` install | greetd's sway took the configuration's XKB variables, not host.toml's | the greeter reads host.toml's keymap at start (`desktop.nix`); `checks.hostlayer` asserts it, mutant `mutants/hostlayer-greeter-us.log` |
 
 **journald.** The first boot of the `gb` LUKS install (`artifacts/installer2/lab/run1-oldiso/firstboot-gb.json`,
@@ -188,15 +218,23 @@ virtio disk (`RIME_RECOVERY_ALLOW_FIXED=1`, the test seam for a VM disk that is 
 flushed to `/var/log/journal`. That is the systemd initrd handing the journal over at switch-root: PID 1 stops the
 initrd's journald with SIGTERM and the unit's `Restart=` starts the real one, which the counter records as one restart.
 There is no error, core dump or watchdog line; run 3's `lab/firstboot-gb.json` shows the same order (switch-root at
-48.72 s, SIGTERM to the initrd's journald and restart counter 1 at 53.54 s). Not changed. Also seen there: journald warns that `/var/log/journal`
-is copy-on-write on btrfs (systemd's `journal-nocow.conf` tmpfiles rule would set `+C`); left for the base module's
-owner.
+48.72 s, SIGTERM to the initrd's journald and restart counter 1 at 53.54 s). Not changed. Also seen there: journald warned that `/var/log/journal`
+was copy-on-write on btrfs (`Creating journal file /var/log/journal/<machine-id>/system.journal on a btrfs file system,
+and copy-on-write is enabled`, twice in each of installer2's `firstboot-{gb,part}.serial.log`). Fixed by installer3:
+the engine creates the directory with `+C` (table above); installer3's lab first boots have no such line.
 
 ## Proof
 
 * `checks.installer-target-eval`: `nixosConfigurations.rime` evaluates with the installer's layout.
 * `checks.installer-production-defaults`: the ISO's production defaults are `rime update`'s.
 * `checks.installer-polish-eval`: one `splash`, a stock `/etc/skel/.zshrc`, the staged-cleanup unit.
+* `checks.installer-choices`: the stamped `nixos-choices.json` is floors.nix's published figures for `plain` and
+  `plain-gaming`, names release variants and the shipped catalogue's gaming switch and `steam`; neither the engine nor
+  `build-live-iso.sh` states a floor; the GUI's `gaming_offer()` reads the stamp and `spawn_engine` passes `gaming`.
+  Mutants, each failing it (`artifacts/installer3/mutants/choices-*.log`): `NIXOS_MIN_GB=19` back in the engine,
+  `gaming` dropped from the GUI's answers, the GUI adding 1 GB of its own, a choices floor of 19, another switch path.
+  The GUI's disk page with and without the stamp, 1024x600 and 1366x768: `artifacts/installer3/gui/` (minimum height
+  490 px with the gaming box, 402 px without; the smallest panel is 600).
 * `checks.installer-nixos`: the engine, `rime-install --headless`, in a NixOS VM standing in for the live env, against a
   TEST release minted by `nix/installer/mint-test-release.py` (a throwaway Fulcio root and signer; `--bad-narhash` for
   the poisoned-cache case). Subtests: every refusal above, each with the disk shown untouched; a whole-disk install
@@ -206,9 +244,68 @@ owner.
   Pass at installer2's head: `artifacts/installer2/check-installer-nixos.log`. Mutant: the release signature left
   unchecked (`signer = signers[0]`) installs a release signed by another identity, and the check fails exactly in
   "a release signed by another identity" (`artifacts/installer2/mutants/release-sig-skipped.log`).
+  installer3 adds: the plain floor (a 15 GB disk refused), the gaming floor (17 GB refused for gaming, naming the plain
+  floor; the same disk passes a plain dry run), an ISO without `nixos-choices.json`, gaming on a release without
+  `plain-gaming`, `gaming=maybe`; `/var/log/journal` No_COW and no switch on the plain install; a gaming install whose
+  profile, boot entry and `applied.json` name the release's `plain-gaming` toplevel and whose switch holds `steam`
+  (0644); the installed system's own `rime trust --gate` (through `nixos-enter`, the release served from a TEST
+  registry) for both: "is the signed plain system of 2026.11.02", "is the signed plain-gaming system", "signature:
+  verified"; and the http install run as a production ISO runs it, with the real `/usr/lib/rime-installer/netinstall`
+  marker (`NETINSTALL=1` reset to 0 by the NixOS engine). Pass at installer3's head:
+  `artifacts/installer3/installer-nixos-head.log` (first pass `installer-nixos-run3.log`). Mutants
+  (`artifacts/installer3/mutants/vm-*.log`, summary `vm-summary.txt`), each failing it: the release check without
+  `--install-variant` (`no-install-variant`, fails in "gaming chosen, and the release has no plain-gaming system"), no
+  switch written (`no-switches`), the netinstall marker's `NETINSTALL=1` kept (`netinstall-kept`, the http install
+  refused), no release record (`no-release-state`), `/var/log/journal` not created at install (`no-journal-dir`).
+  One survives: `chattr +C` alone dropped (`no-chattr`): `nixos-install`'s `nixos-enter` runs the target's
+  `systemd-tmpfiles --create`, whose `h /var/log/journal - - - - +C` sets the flag on the directory the engine
+  created; the engine keeps its own `chattr` so the result does not rest on a run whose failures nixos-enter ignores.
+  **Independent verification (2026-11-03, verify-installer3, `artifacts/verify-installer3/`):** `installer-nixos`
+  re-run with `--rebuild` at installer3's head 7d2df3615: pass, same outPath `ny6qpx5p…`
+  (`rebuild-installer-nixos.log`). The gate mutants above all died before `rime trust --gate` ran, so one was added:
+  `applied.json` records the ISO's stamped (plain) system instead of the one installed, with the test's own
+  `applied.json` assertion removed, and the gaming install's gate fails by itself ("the running system (…plain-gaming…)
+  was not installed by rime update", `mutant-gate-applied-stamp.log`): the gate check can fail. `chattr -C` on the
+  journal directory right after the switch is written also SURVIVES (`mutant-nocow-cleared-before-useradd.log`: the
+  account's `nixos-enter` re-applies tmpfiles' `+C`); the same `chattr -C` after the last `nixos-enter` (just before
+  unmount) is the mutant that shows the `lsattr` `C` assertion can fail (`mutant-nocow-cleared-at-end.log`). Added by
+  the verifier: gaming refused by name on a 14.5 GB PARTITION (below the gaming partition floor 16 GB, above the plain
+  one 14 GB: "/dev/vdf2 is too small for Rime OS with gaming (Steam): 14 GB … needs a partition of at least 16 GB …
+  Without gaming Rime OS needs 14 GB"), and the same partition passes a plain dry run (`installer-nixos-newhead.log`,
+  pass, outPath `9f2yz1f1…`);
+  mutant: the gaming system checked against the plain partition floor, `mutant-gaming-partition-floor-is-plains.log`.
+  Not tested: `gaming=yes` refused on a bootc ISO (`rime-install`; the GUI shows the box only with the NixOS stamp).
 * `checks.hostlayer`: among its subtests, the greeter's sway types host.toml's `gb` + `caps:escape`, not the
   configuration's `us` (`artifacts/installer2/check-hostlayer.log`; mutant `mutants/hostlayer-greeter-us.log`).
 * The OVMF lab, `nix/installer/lab/run.sh` (results below).
+
+### Results (2026-11-03, katana, nix/installer3)
+
+One lab ISO built from nix/installer3 (sha256 e8236ee89b26…, 6.0 GB) carrying a TEST-signed cache (4.0 GB) with both
+the `plain` closure (1843 paths, 9.31 GB NAR) and the `plain-gaming` one (2137 paths, 10.88 GB NAR), the TEST release
+2026.11.02 offering both variants, and `nixos-choices.json` stamped from `nix/installer/choices.nix`
+(`lab/choices.json`: plain 16 / 14, plain-gaming 18 / 16). Evidence in `/var/lab/rime-nix/artifacts/installer3/lab/`:
+
+* **I1** (`qualify`): USB boot under `uefi-sb` with Microsoft keys only, `secure_boot` true, kernel 7.2.14-300.fc45,
+  the GUI's first page read by OCR, pass (`i1-*`).
+* **gaming install** (`install gaming`, a blank 20 GB disk, headless answers with `gaming=yes`): the engine logs
+  `system plain-gaming (gaming=yes): floors 18 GB disk, 16 GB partition; switches:
+  /var/lib/rime/switch/rime-feature@gaming.target.on steam`, the release check passes (rc 0, 2137 paths), installs the
+  release's `plain-gaming` toplevel (`caaxrpnh…`, not the ISO's plain one), writes the switch, and ends
+  `System: plain-gaming (Steam and Gaming Mode included)`. 2 min 21 s from start to done; store on disk 9.8 GB
+  apparent, 5.3 GB used (`install-gaming.log`, `rime-install-gaming.log`, `install-gaming-gui.png`).
+* **plain install** (`install plain`): the release's `plain` toplevel (`gra070xw…`), 1 min 49 s, 8.5 GB apparent,
+  4.6 GB used (`install-plain.log`, `rime-install-plain.log`).
+* **first boots** (`firstboot gaming|plain`, SB on, the varstore with the TEST MOK): the booted toplevel is the one
+  installed; on the gaming disk the switch holds `steam`, `rime-feature@gaming.target` is active and `steam` is on
+  PATH; on the plain disk there is no switch, the target is inactive and there is no `steam`; `/var/log/journal` is
+  No_COW (`C`) and the boot's journal has no copy-on-write line; greetd's greeter on VT 1 (`firstboot-*.{json,png}`).
+  The first boot of each disk (`boot1/`) measured all of that except the No_COW flag: its probe called `lsattr`, which
+  is not on the installed system's PATH, so `iso-qualify.py` now reads FS_IOC_GETFLAGS through the system's `python3`
+  and the second boots (`firstboot-*`) pass. Both first boots already had 0 copy-on-write lines; installer2's had two.
+* Not driven in the lab: the GUI's "Include gaming (Steam)" box (the lab installs headless from an answers file). The
+  GUI's disk page is rendered with and without it in `artifacts/installer3/gui/`, and `checks.installer-choices`
+  holds `spawn_engine` to passing `gaming`.
 
 ### Results (2026-11-02, katana, nix/installer2)
 
@@ -224,7 +321,7 @@ signed by a throwaway TEST signer, cache key `rime-installer-lab-TEST-1`. All ev
 | `firstboot gb` (I3, SB on, TEST MOK) | pass: the passphrase typed on a `gb` layout opens the volume (`luks_result` "Switching root"); `rd.vconsole.keymap=gb` on the command line; SecureBoot 1 "enabled (user)"; `/etc/hostname` and `hostnamectl --static` both `rime-lab-gb`; greeter on VT 1 (`Class=greeter`) showing **English (UK)**; no zsh-newuser-install; one `splash`; journald `NRestarts=1` (explained below) | `firstboot-gb.{log,json,png,serial.log}` |
 | `firstboot-us-control` (run 2, same engine and passphrase) | FAILS as it must: the same key presses typed on a `us` layout give "Failed to activate with specified passphrase" | `run2-greeter-us/firstboot-gb-us-control.{json,log,serial.log}` |
 | `install part` (Windows-shaped disk: Windows ESP, MSR, NTFS `Windows`, the app's `RIME-EFI` + empty 8304) | pass, 14:40:32 to 14:45:03: "grub: Windows entry added (ESP /dev/vda1 …)", "nvram: Rime OS -> /dev/vda part 4 \EFI\fedora\shimx64.efi", "esp: /dev/vda4 is now RIME-ESP" | `install-part.log`, `rime-install-part.log`, `result-part.txt`, `part-disk-before.txt` |
-| `firstboot part` (I2, SB on) | pass: firmware `BdsDxe: starting Boot0004` (Rime OS on partition 4, shim), staged files absent, one Windows entry in GRUB. Run 3 kept no copy of the disk after it; the after-install inspection (Windows' ESP still holds its `EFI/Microsoft/Boot/bootmgfw.efi` fixture, NTFS `Windows` intact, `RIME-ESP` without `rimeinst/`, `rime-root` btrfs) is run 2's, from the same install scripts, and `checks.installer-nixos` compares sha256 of Windows' three partitions before and after | `firstboot-part.{log,json,png,serial.log}`; `run2-greeter-us/part-disk-after.txt` (`lab/part-disk-after.txt` is a copy of it) |
+| `firstboot part` (I2, SB on) | pass: firmware `BdsDxe: starting Boot0004` (Rime OS on partition 4, shim), staged files absent, one Windows entry in GRUB. Run 3 kept no copy of the disk after it; the after-install inspection (Windows' ESP still holds its `EFI/Microsoft/Boot/bootmgfw.efi` fixture, a 17-byte stand-in file, not a Windows install, NTFS `Windows` intact, `RIME-ESP` without `rimeinst/`, `rime-root` btrfs) is run 2's, from the same install scripts, and `checks.installer-nixos` compares sha256 of Windows' three partitions before and after | `firstboot-part.{log,json,png,serial.log}`; `run2-greeter-us/part-disk-after.txt` (`lab/part-disk-after.txt` is a copy of it) |
 
 The probe's `nvram` fact is empty in `firstboot-part.json` (`efibootmgr` through the probe's `sudo` prints nothing in
 that VM); the firmware's own `BdsDxe` line is the evidence that the entry the engine wrote is the one that booted.
@@ -266,6 +363,8 @@ bash nix/installer/lab/run.sh install gb && bash nix/installer/lab/run.sh firstb
 bash nix/installer/lab/run.sh firstboot-us-control      # must FAIL: the gb passphrase typed on a us layout
 bash nix/installer/lab/run.sh install part && bash nix/installer/lab/run.sh firstboot part
 bash nix/installer/lab/run.sh install plain && bash nix/installer/lab/run.sh boot plain   # and luks
+bash nix/installer/lab/run.sh install plain && bash nix/installer/lab/run.sh firstboot plain
+bash nix/installer/lab/run.sh install gaming && bash nix/installer/lab/run.sh firstboot gaming
 bash nix/installer/lab/run.sh clean
 sudo -n podman exec -w /work/<worktree> rime-nix nix build path:.#checks.x86_64-linux.installer-nixos -L
 ```
@@ -285,7 +384,9 @@ sudo -n podman exec -w /work/<worktree> rime-nix nix build path:.#checks.x86_64-
   runs it (`pr-validation.yml`); `checks.installer-nixos` runs the same guards in a VM. Its GUI half (every page
   drawn headless in root podman, stubbed engine and disks, nothing on the host's disks) can run on katana: the first
   attempt failed only because the render images could not be built then; run alone at 0f210d2bf it passed 24/24
-  (12 pages at 1024x600 and 1366x768), `/var/lab/rime-nix/artifacts/verify-installer2/gui-half/`.
+  (12 pages at 1024x600 and 1366x768), `/var/lab/rime-nix/artifacts/verify-installer2/gui-half/`. Re-run on
+  installer3's GUI (the gaming box added, drawn here without a `nixos-choices.json` stamp, so hidden): 24/24,
+  `/var/lab/rime-nix/artifacts/installer3/gui-half/`; the page with the box is in `artifacts/installer3/gui/`.
 
 ## Handover
 

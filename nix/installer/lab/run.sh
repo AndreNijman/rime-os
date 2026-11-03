@@ -8,19 +8,22 @@
 #
 #   run.sh prep        lab image, a THROWAWAY TEST MOK and a TEST cache key, OVMF varstores
 #   run.sh sign        the Rime kernel image of the lab system, signed by the TEST MOK (sign-detached.sh)
-#   run.sh system      the lab system (nix/installer/lab/systems.nix pass 2) -> $LAB/system
-#   run.sh cache       its closure into a file:// binary cache signed by the TEST cache key -> $LAB/cache
-#   run.sh release     the lab system's release record, signed by the THROWAWAY Fulcio CA and identity of
+#   run.sh system      the lab systems (nix/installer/lab/systems.nix pass 2): the `plain` variant -> $LAB/system,
+#                      `plain-gaming` -> $LAB/system-gaming (the same signed kernel image: checked)
+#   run.sh cache       both closures into a file:// binary cache signed by the TEST cache key -> $LAB/cache
+#   run.sh release     the release record of both, signed by the THROWAWAY Fulcio CA and identity of
 #                      nix/release/fixture-keys.nix (mint-test-release.py) -> $LAB/release
-#   run.sh iso         installer/build-live-iso.sh, NixOS mode, PRODUCTION=1, the cache and the release on the ISO
+#   run.sh iso         installer/build-live-iso.sh, NixOS mode, PRODUCTION=1, the cache and the release on the ISO,
+#                      offering plain and plain-gaming (NIXOS_CHOICES = nix/installer/choices.nix)
 #   run.sh qualify     I1: installer/iso-qualify.py live --firmware uefi-sb --media usb
-#   run.sh install plain|luks|gb|part
+#   run.sh install plain|luks|gb|part|gaming
 #                      install from the ISO (Secure Boot on, Microsoft keys) onto a blank 20 GiB disk; gb = LUKS with
 #                      the gb keymap and a passphrase holding `"` (Shift+2 on gb, Shift+' on us); part = partition
 #                      mode onto a Windows-shaped 32 GiB disk (Windows' ESP, MSR, NTFS, Rime's own ESP with a staged
-#                      installer, free space), on a machine whose varstore already has the TEST MOK
+#                      installer, free space), on a machine whose varstore already has the TEST MOK; gaming = plain
+#                      with gaming=yes (the plain-gaming system and the gaming switch)
 #   run.sh boot plain|luks      I2/I3: plain-boot-drive.py / luks-boot-drive.py, Secure Boot on, TEST MOK enrolled
-#   run.sh firstboot plain|gb|part
+#   run.sh firstboot plain|gb|part|gaming
 #                      iso-qualify.py firstboot (NixOS): log in, read host.toml's effect, the greeter; gb types the
 #                      passphrase at the unlock prompt on a gb keyboard first; part boots the install's own varstore
 #                      (its NVRAM entry) and checks the Windows entry and the staged installer's removal
@@ -40,8 +43,8 @@ CLAB=$(to_work "$LAB")
 nixc() { sudo -n podman exec rime-nix nix "$@"; }
 lab() { sudo -n podman run --rm --device /dev/kvm --security-opt label=disable -v "$LAB:/lab" -v "$ART:/out" \
   -v "$WT:/rig:ro" -e LAB=/lab -e OUT=/out --entrypoint "$1" rime-installer-lab "${@:2}"; }
-sexpr() {   # sexpr ATTR [signed]
-  local args="flake = builtins.getFlake \"path:$(to_work "$WT")\";"
+sexpr() {   # sexpr ATTR [signed|unsigned [VARIANT]]
+  local args="flake = builtins.getFlake \"path:$(to_work "$WT")\"; variant = \"${3:-plain}\";"
   [[ ${2:-} == signed ]] && args+=" signatureDir = $CLAB/sig; certificate = $CLAB/keys/test-mok.crt;"
   echo "(import $(to_work "$HERE")/systems.nix { $args }).$1"
 }
@@ -90,6 +93,9 @@ step_sign() {
   local js h img tgt
   js=$(nixc eval --impure --raw --expr "$(sexpr imageJson)")
   echo "$js" | tee "$ART/image.json"
+  # One signature serves both systems only if gaming does not change the kernel image.
+  [[ $(nixc eval --impure --raw --expr "$(sexpr imageJson unsigned plain-gaming)") == "$js" ]] \
+    || { echo "run.sh sign: plain-gaming's kernel image differs from plain's" >&2; exit 1; }
   read -r h img tgt < <(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["imageHash"], d["image"], d["target"])' "$js")
   nixc build --no-link "$img"
   mkdir -p "$LAB/in" "$LAB/sig"
@@ -101,19 +107,25 @@ step_sign() {
 }
 
 step_system() {
-  local p
-  p=$(nixc build --impure --no-link --print-out-paths --option cores 4 --expr "$(sexpr toplevel signed)" \
-    2>"$LAB/system-build.log") || { tail -n 40 "$LAB/system-build.log"; exit 1; }
-  echo "$p" | tee "$LAB/system" "$ART/system.txt"
-  echo "closure: $(nixc path-info -r "$p" | wc -l) paths, $(nixc path-info -S "$p" | awk '{printf "%.2f GB NAR", $2/1e9}')" \
-    | tee -a "$ART/system.txt"
+  local p v f
+  : > "$ART/system.txt"
+  for v in plain plain-gaming; do
+    f=$LAB/system; [[ $v == plain ]] || f=$LAB/system-gaming
+    p=$(nixc build --impure --no-link --print-out-paths --max-jobs 2 --option cores 4 --expr "$(sexpr toplevel signed "$v")" \
+      2>"$LAB/system-build-$v.log") || { tail -n 40 "$LAB/system-build-$v.log"; exit 1; }
+    echo "$p" > "$f"
+    echo "$v: $p" | tee -a "$ART/system.txt"
+    echo "closure: $(nixc path-info -r "$p" | wc -l) paths, $(nixc path-info -S "$p" | awk '{printf "%.2f GB NAR", $2/1e9}')" \
+      | tee -a "$ART/system.txt"
+  done
 }
 
 step_cache() {
   local p
   p=$(cat "$LAB/system")
   sudo -n rm -rf "$LAB/cache"
-  nixc copy --to "file://$CLAB/cache?compression=zstd&parallel-compression=true&secret-key=$CLAB/keys/cache.sec" "$p"
+  nixc copy --to "file://$CLAB/cache?compression=zstd&parallel-compression=true&secret-key=$CLAB/keys/cache.sec" "$p" \
+    "$(cat "$LAB/system-gaming")"
   nixc path-info --store "file://$CLAB/cache" --json "$p" | python3 -c 'import json,sys; d=json.load(sys.stdin); d=d if isinstance(d,list) else [dict(path=k,**v) for k,v in d.items()]; print("cache signatures:", d[0].get("signatures"))' \
     | tee "$ART/cache.txt"
   sudo -n du -sh "$LAB/cache" | tee -a "$ART/cache.txt"
@@ -128,17 +140,19 @@ step_release() {
     github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325#python3 \
     github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325#openssl -c \
     python3 -I "$(to_work "$WT")/nix/installer/mint-test-release.py" --lib "$(to_work "$WT")/nix/release/rime_nix_release.py" \
-      --system "$(cat "$LAB/system")" --cache "file://$CLAB/cache" --key "$(cat "$LAB/keys/cache.pub")" \
+      --system "$(cat "$LAB/system")" --also-variant "plain-gaming=$(cat "$LAB/system-gaming")" --cache "file://$CLAB/cache" --key "$(cat "$LAB/keys/cache.pub")" \
       --sign-key "$keys/good.key" --sign-cert "$keys/good.pem" --ca "$keys/ca.pem" --out "$CLAB/release" \
     | tee "$ART/release.json"
 }
 
 step_iso() {
   local w=$LAB/iso-build
+  nixc eval --json --file "$(to_work "$WT")/nix/installer/choices.nix" > "$LAB/choices.json"
+  cp "$LAB/choices.json" "$ART/choices.json"
   # The mutable live env needs a recovery-key helper; the NixOS ISO carries the repo's (files/system/libexec).
   sudo -n env WORK="$w" PRODUCTION=1 NETINSTALL=0 \
     NIXOS_SYSTEM="$(cat "$LAB/system")" NIXOS_CACHE_DIR="$LAB/cache" NIXOS_CACHE_PUB="$LAB/keys/cache.pub" \
-    NIXOS_RELEASE_DIR="$LAB/release" \
+    NIXOS_RELEASE_DIR="$LAB/release" NIXOS_CHOICES="$LAB/choices.json" \
     NIXOS_MOK_CERT="$LAB/keys/test-mok.der" NIXOS_KERNEL_SIGNED=signed IMG=localhost/rime-installer-nix:lab \
     bash "$WT/installer/build-live-iso.sh" > "$ART/build-live-iso.log" 2>&1 \
     || { tail -n 40 "$ART/build-live-iso.log"; exit 1; }
@@ -175,6 +189,7 @@ labdisk() {   # labdisk KIND: a vfat RIMELAB image with go + answers.in
       gb) echo "encrypt=yes"; echo "lukspass=$GBPASS" ;;
       *) echo "encrypt=no" ;;
     esac
+    if [[ $kind == gaming ]]; then echo "gaming=yes"; fi
     echo "confirmed=ERASE"
   } > "$d/fs/answers.in"
   cat > "$d/fs/go" <<EOF
@@ -284,6 +299,8 @@ step_boot() {
 
 step_firstboot() {   # step_firstboot KIND [NAME [LAYOUT]]
   local kind=$1 name=${2:-firstboot-$1} layout=${3:-gb} rc=0 extra=(--vars-template /lab/fw/vars-sb-mok.fd)
+  local sys=$LAB/system gaming=no
+  if [[ $kind == gaming ]]; then sys=$LAB/system-gaming; gaming=yes; fi
   case $kind in
     gb) extra+=(--luks-passphrase "$GBPASS" --luks-layout "$layout") ;;
     # The install's own varstore: the TEST MOK it started with, plus the NVRAM entry the installer wrote.
@@ -291,7 +308,8 @@ step_firstboot() {   # step_firstboot KIND [NAME [LAYOUT]]
   esac
   lab python3 -I /rig/installer/iso-qualify.py firstboot --work "/lab/run-$kind" --name "$name" \
     --disk "/lab/run-$kind/disk.raw" --nixos --display "${extra[@]}" \
-    --user alex --password "$USERPASS" --timeout 600 --expect-system "$(cat "$LAB/system")" \
+    --user alex --password "$USERPASS" --timeout 600 --expect-system "$(cat "$sys")" \
+    --expect-gaming "$gaming" --expect-nocow \
     --expect-host "rime-lab-$kind" --expect-tz Australia/Perth --expect-lang en_AU.UTF-8 \
     > "$ART/$name.log" 2>&1 || rc=$?
   cat "$ART/$name.log"
@@ -308,9 +326,9 @@ rc=0
 case "${1:-}" in
   prep) step_prep;; sign) step_sign;; system) step_system;; cache) step_cache;; release) step_release;; iso) step_iso;;
   qualify) step_qualify || rc=$?;;
-  install) step_install "${2:?plain|luks|gb|part}" || rc=$?;;
+  install) step_install "${2:?plain|luks|gb|part|gaming}" || rc=$?;;
   boot) step_boot "${2:?plain|luks}" || rc=$?;;
-  firstboot) step_firstboot "${2:?plain|gb|part}" || rc=$?;;
+  firstboot) step_firstboot "${2:?plain|gb|part|gaming}" || rc=$?;;
   firstboot-us-control) step_firstboot gb firstboot-gb-us-control us || rc=$?;;
   clean) step_clean;;
   *) echo "usage: run.sh prep|sign|system|cache|release|iso|qualify|install KIND|boot KIND|firstboot KIND|firstboot-us-control|clean" >&2; exit 2;;

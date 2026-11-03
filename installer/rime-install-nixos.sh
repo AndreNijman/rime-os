@@ -39,13 +39,22 @@
 #           layout). The boot hook reads [boot]; rime-hostlayer applies the rest.
 #    /var/lib/rime/nix/{releases/<release>/,applied.json}  the release this
 #           system was installed as, the way `rime update` records one.
+#    /var/lib/rime/switch/rime-feature@gaming.target.on  (`steam`) when gaming
+#           was chosen: the switch `rime install steam` writes, so the system
+#           installed (the release's plain-gaming variant) and the one every
+#           update selects (base + switched-on features) are the same.
+#    /var/log/journal  created No_COW (chattr +C) before anything writes to it:
+#           journald's first files are written before tmpfiles' `h ... +C`
+#           runs, and +C on a directory only reaches files created after it.
 #    the user, created imperatively (users.mutableUsers), in wheel.
 #
 #  BEFORE ANYTHING IS ERASED, the system is proven to be a SIGNED RELEASE
 #  (docs/nixos/installer.md "Release check"): the release manifest carried on
 #  the ISO is verified as `rime update` verifies one (cosign signature, Fulcio
-#  chain, the nix-release.yml identity), its toplevel must be the stamped
-#  system, and every closure path is looked up in its cache in parallel and
+#  chain, the nix-release.yml identity), the stamped system must be its
+#  stamped variant, the system INSTALLED is the release's own toplevel of the
+#  variant chosen (plain, or plain-gaming), so `rime trust --gate` passes on the
+#  first boot, and every closure path is looked up in its cache in parallel and
 #  bound to the manifest's NarHash (rime-install-nixos-release), then checked
 #  for a signature by the trusted key itself (nix store verify).
 #
@@ -55,7 +64,10 @@
 #    nixos-cache.pub          its public key (name:base64); nothing unsigned by it is copied
 #    nixos-upstream-cache     the cache of the paths the release takes from nixpkgs
 #    nixos-upstream-cache.pub (cache.nixos.org), `iso`, or absent when one cache holds all
-#    nixos-variant            the release variant the system is (default plain)
+#    nixos-variant            the release variant the system is (default plain): the BASE an install gets
+#    nixos-choices.json       the systems an install may choose (the base, and <base>-gaming when the owner
+#                             chooses gaming) with the disk floor of each (nix/installer/choices.nix, which reads
+#                             nix/release/floors.nix); every one of them must be a variant of the signed release
 #    nixos-release/           the signed release record (manifest/, sig/, repo,
 #                             fulcio-root.pem, signers, issuer)
 #    nixos-mok.der            the certificate the kernel is signed with (optional)
@@ -81,29 +93,23 @@ NIXOS=0
 # digest, skopeo, the registry) apply: they are switched off here and the NixOS
 # path checks the network for its own cache (nixos_net_check).
 if [ "$NIXOS" = 1 ]; then
-  NIXOS_NETINSTALL="${NETINSTALL:-0}"
   NETINSTALL=0
 fi
 
-# The disk floor (closure.md A11): a fresh system, ONE update staged beside it
-# and the rollback generation, as `rime update`'s space gate counts them —
-# unpacked bytes, not compressed ones. Below it the machine installs but its
-# first update is refused, so it is refused here instead, before anything is
-# erased. Decimal gigabytes, like the disk sizes printed on the box.
-NIXOS_MIN_GB=19
-NIXOS_MIN_BYTES="${RIME_NIXOS_MIN_BYTES:-$((NIXOS_MIN_GB * 1000 * 1000 * 1000))}"
-# The same floor for the root partition alone (partition mode): the disk floor
-# less the whole-disk layout's 2 GiB ESP, rounded up.
-NIXOS_PART_MIN_GB=17
-NIXOS_PART_MIN_BYTES="${RIME_NIXOS_PART_MIN_BYTES:-$((NIXOS_PART_MIN_GB * 1000 * 1000 * 1000))}"
+# The disk floors (closure.md A11) are NOT written here: they come from the ISO's nixos-choices.json, generated from
+# nix/release/floors.nix, the one place `rime update`'s space gate and `rime install steam` read them from too
+# (nixos_choose). A floor is a fresh system and ONE mass-rebuild update staged beside it plus the gate's reserve, as
+# that gate counts them: below it the machine installs but its first update is refused, so it is refused here
+# instead, before anything is erased. Decimal gigabytes, like the disk sizes printed on the box.
 NIXOS_ESP_MIB=2048
 NIXOS_ESP_LABEL=RIME-ESP
 NIXOS_ROOT_LABEL=rime-root
 NIXOS_SUBVOLS="@nixos @nix @home"
 NIXOS_MOUNT_OPTS="compress-force=zstd:3"
 # rime-boot's own rule for a kernel parameter (nix/pkgs/rime-boot SAFE_PARAM), the same character set written
-# as a POSIX bracket expression: `]` first and `-` last, because `\]` inside brackets ends them in grep -E (the
-# Python spelling, copied verbatim, refused every parameter, `console=tty0` included).
+# as a POSIX bracket expression: `]` first and `-` last, because `\]` inside brackets ends them in a POSIX ERE (the
+# Python spelling, copied verbatim, refused every parameter, `console=tty0` included). Matched with bash's [[ =~ ]],
+# which compiles the same POSIX ERE.
 NIXOS_SAFE_PARAM='^[][A-Za-z0-9_./:=,+@%~^!-]+$'
 # The release check's bounds (docs/nixos/installer.md "Release check": a 4,000-path closure is 15-40 s of narinfo
 # lookups on cache.nixos.org, measured 2026-11-02): the whole lookup, then each `nix store verify` group.
@@ -165,7 +171,7 @@ nixos_cache_ok() {  # $1=URL  $2=seam value — https and file:///, and http:// 
 nixos_net_diagnose() {  # $1=URL
   local host="${1#*://}"
   host="${host%%/*}"; host="${host%%:*}"
-  if ! ip route show default 2>/dev/null | grep . >/dev/null; then echo no-route; return; fi
+  if [ -z "$(ip route show default 2>/dev/null)" ]; then echo no-route; return; fi
   if ! getent hosts "$host" >/dev/null 2>&1; then echo "no-dns $host"; return; fi
   echo ok
 }
@@ -240,6 +246,69 @@ nixos_esp_probe() {
   return 0
 }
 
+# Which system this machine gets and the floors it must meet (A4: the ISO's base variant, plain, unless the owner
+# chose gaming: then <base>-gaming), from the ISO's nixos-choices.json (nix/installer/choices.nix, generated from
+# nix/release/floors.nix). Sets NIXOS_GAMING, NIXOS_INSTALL_VARIANT, NIXOS_MIN_GB, NIXOS_PART_MIN_GB (and their
+# bytes), NIXOS_BASE_MIN_GB / NIXOS_BASE_PART_MIN_GB (for the refusal's hint) and NIXOS_SWITCHES ("FILE NAME,…" per
+# feature the chosen system carries: the switch `rime install` writes for it).
+nixos_choose() {
+  local f="$NIXOS_STAMPS/nixos-choices.json" out line re
+  case "${GAMING:-no}" in
+    yes|no) NIXOS_GAMING="${GAMING:-no}" ;;
+    *) die "answers: bad gaming '$GAMING' (expected yes or no). Nothing has been erased." ;;
+  esac
+  [ -r "$f" ] || die "This ISO carries no list of the systems it installs and their disk floors ($f). Nothing has been erased. The ISO was built incorrectly; download it again."
+  out=$(python3 -I - "$f" "$NIXOS_VARIANT" "$NIXOS_GAMING" 2>>"$LOG" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+base, gaming = sys.argv[2], sys.argv[3] == "yes"
+vs = c["variants"]
+if base not in vs:
+    print("nobase " + base)
+    sys.exit(0)
+name = base + "-gaming" if gaming else base
+if name not in vs:
+    print("none " + name)
+    sys.exit(0)
+print("base", int(vs[base]["disk_gb"]), int(vs[base]["partition_gb"]))
+print("variant", name, int(vs[name]["disk_gb"]), int(vs[name]["partition_gb"]))
+for feat in vs[name]["features"]:
+    s = c["features"][feat]
+    print("switch", s["switch"], ",".join(s["names"]))
+PY
+  ) || die "This ISO's list of systems ($f) could not be read. Nothing has been erased. The ISO was built incorrectly; download it again."
+  NIXOS_SWITCHES=(); NIXOS_INSTALL_VARIANT=""
+  NIXOS_MIN_GB=""; NIXOS_PART_MIN_GB=""; NIXOS_BASE_MIN_GB=""; NIXOS_BASE_PART_MIN_GB=""
+  re='^/var/lib/rime/switch/rime-feature@[a-z0-9-]+\.target\.on [a-z0-9][a-z0-9.+-]*(,[a-z0-9][a-z0-9.+-]*)*$'
+  while read -r line; do
+    case "$line" in
+      "nobase "*) die "This ISO's list of systems does not name its own system ${line#nobase }. Nothing has been erased. The ISO was built incorrectly; download it again." ;;
+      "none "*) die "This ISO does not offer Rime OS with gaming (its release has no ${line#none } system). Nothing has been erased.
+Leave gaming off: Steam can be added after the install with \`rime install steam\`." ;;
+      "base "*) read -r NIXOS_BASE_MIN_GB NIXOS_BASE_PART_MIN_GB <<<"${line#base }" ;;
+      "variant "*) read -r NIXOS_INSTALL_VARIANT NIXOS_MIN_GB NIXOS_PART_MIN_GB <<<"${line#variant }" ;;
+      "switch "*)
+        [[ ${line#switch } =~ $re ]] || die "This ISO's list of systems names a feature switch Rime OS does not use ('${line#switch }'). Nothing has been erased."
+        NIXOS_SWITCHES+=("${line#switch }") ;;
+    esac
+  done <<<"$out"
+  re='^[a-z][a-z0-9-]{0,63}$'
+  [[ $NIXOS_INSTALL_VARIANT =~ $re ]] && [[ $NIXOS_MIN_GB =~ ^[0-9]+$ ]] && [[ $NIXOS_PART_MIN_GB =~ ^[0-9]+$ ]] \
+    && [[ $NIXOS_BASE_MIN_GB =~ ^[0-9]+$ ]] && [[ $NIXOS_BASE_PART_MIN_GB =~ ^[0-9]+$ ]] \
+    || die "This ISO's list of systems ($f) names no floor for ${NIXOS_INSTALL_VARIANT:-its system}. Nothing has been erased. The ISO was built incorrectly; download it again."
+  NIXOS_MIN_BYTES="${RIME_NIXOS_MIN_BYTES:-$((NIXOS_MIN_GB * 1000 * 1000 * 1000))}"
+  NIXOS_PART_MIN_BYTES="${RIME_NIXOS_PART_MIN_BYTES:-$((NIXOS_PART_MIN_GB * 1000 * 1000 * 1000))}"
+  [ -z "${RIME_NIXOS_MIN_BYTES:-}" ] || log "nixos: TEST disk floor $NIXOS_MIN_BYTES bytes (RIME_NIXOS_MIN_BYTES)"
+  [ -z "${RIME_NIXOS_PART_MIN_BYTES:-}" ] || log "nixos: TEST partition floor $NIXOS_PART_MIN_BYTES bytes (RIME_NIXOS_PART_MIN_BYTES)"
+  log "nixos: system $NIXOS_INSTALL_VARIANT (gaming=$NIXOS_GAMING): floors ${NIXOS_MIN_GB} GB disk, ${NIXOS_PART_MIN_GB} GB partition; switches: ${NIXOS_SWITCHES[*]:-none}"
+}
+
+nixos_floor_hint() {  # $1=disk|partition — what to do when only the gaming system does not fit
+  [ "$NIXOS_GAMING" = yes ] || return 0
+  local gb="$NIXOS_BASE_MIN_GB"; [ "$1" = partition ] && gb="$NIXOS_BASE_PART_MIN_GB"
+  printf ' Without gaming Rime OS needs %s GB: go back and leave gaming off (Steam can be added later with `rime install steam` on a bigger disk), or choose a bigger %s.' "$gb" "$1"
+}
+
 # ── pre-flight: everything that can refuse, while every disk is intact ──────
 nixos_preflight() {
   NIXOS_SYSTEM=$(nixos_stamp nixos-system)
@@ -267,11 +336,15 @@ nixos_preflight() {
   esac
   [ "$ROOTFS_TYPE" = btrfs ] || die "Rime OS installs on btrfs only (got '$ROOTFS_TYPE'). Nothing has been erased."
 
-  printf '%s' "$NIXOS_SYSTEM" | grep -Eq '^/nix/store/[0-9a-z]{32}-[^/]+$' \
+  # Every value checked below is matched whole with [[ =~ ]], the pattern in a variable (unquoted on the right, so
+  # it is a regex), never piped into grep: under pipefail a grep that stops reading early fails its producer.
+  local re k
+  re='^/nix/store/[0-9a-z]{32}-[^/]+$'
+  [[ $NIXOS_SYSTEM =~ $re ]] \
     || die "This ISO names no valid system to install ('$NIXOS_SYSTEM' in $NIXOS_STAMPS/nixos-system). Nothing has been erased. The ISO was built incorrectly; download it again."
-  local k
+  re='^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$'
   for k in "$NIXOS_PUBKEY" ${NIXOS_UP_CACHE:+"$NIXOS_UP_PUBKEY"}; do
-    printf '%s' "$k" | grep -E '^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$' >/dev/null \
+    [[ $k =~ $re ]] \
       || die "This ISO carries no valid key for its package cache ($NIXOS_STAMPS/nixos-cache.pub or nixos-upstream-cache.pub). Nothing has been erased. The ISO was built incorrectly; download it again."
   done
   nixos_cache_ok "$NIXOS_CACHE" "${RIME_NIXOS_CACHE:-}" \
@@ -281,33 +354,32 @@ nixos_preflight() {
       || die "This ISO names no usable upstream package cache ('$NIXOS_UP_CACHE'). Nothing has been erased."
   fi
   NIXOS_TRUSTED="$NIXOS_PUBKEY${NIXOS_UP_CACHE:+ $NIXOS_UP_PUBKEY}"
-  printf '%s' "$NIXOS_VARIANT" | grep -E '^[a-z][a-z0-9-]{0,31}$' >/dev/null \
+  re='^[a-z][a-z0-9-]{0,31}$'
+  [[ $NIXOS_VARIANT =~ $re ]] \
     || die "This ISO names no valid system variant ('$NIXOS_VARIANT'). Nothing has been erased."
   [ -d "$NIXOS_RELEASE_DIR" ] \
     || die "This ISO carries no signed release record for the system it installs ($NIXOS_RELEASE_DIR), so it cannot prove that system is a Rime OS release.
 
 Nothing has been erased. The ISO was built incorrectly; download it again."
 
-  # ── the disk floor, by name ────────────────────────────────────────────────
-  local sz
+  # ── which system, and its disk floor, by name ──────────────────────────────
+  nixos_choose
+  local sz what
+  if [ "$NIXOS_GAMING" = yes ]; then what="Rime OS with gaming (Steam)"; else what="Rime OS"; fi
   sz=$(lsblk -bdno SIZE "$DISK" 2>/dev/null | tr -d ' ' || true)
   case "$sz" in
     ''|*[!0-9]*) die "Could not read the size of $DISK. Nothing has been erased." ;;
   esac
-  [ "$NIXOS_MIN_BYTES" = "$((NIXOS_MIN_GB * 1000 * 1000 * 1000))" ] \
-    || log "nixos: TEST disk floor $NIXOS_MIN_BYTES bytes (RIME_NIXOS_MIN_BYTES)"
   if [ "$INSTALL_MODE" = disk ]; then
     [ "$sz" -ge "$NIXOS_MIN_BYTES" ] \
-      || die "$DISK is too small: $((sz / 1000000000)) GB. Rime OS needs a disk of at least $NIXOS_MIN_GB GB (the system, one update beside it and the previous version to go back to). Nothing has been erased."
+      || die "$DISK is too small for $what: $((sz / 1000000000)) GB. $what needs a disk of at least $NIXOS_MIN_GB GB (the system and one update beside it).$(nixos_floor_hint disk) Nothing has been erased."
   else
     # rime-install's generic partition guards ran first: TARGET is a partition
     # of DISK, ESP_DEV an EFI System Partition on DISK, encryption refused.
-    [ "$NIXOS_PART_MIN_BYTES" = "$((NIXOS_PART_MIN_GB * 1000 * 1000 * 1000))" ] \
-      || log "nixos: TEST partition floor $NIXOS_PART_MIN_BYTES bytes (RIME_NIXOS_PART_MIN_BYTES)"
     sz=$(lsblk -bdno SIZE "$TARGET" 2>/dev/null | tr -d ' ' || true)
     case "$sz" in ''|*[!0-9]*) die "Could not read the size of $TARGET. Nothing has been erased." ;; esac
     [ "$sz" -ge "$NIXOS_PART_MIN_BYTES" ] \
-      || die "$TARGET is too small: $((sz / 1000000000)) GB. Rime OS needs a partition of at least $NIXOS_PART_MIN_GB GB (the system, one update beside it and the previous version to go back to). Nothing has been erased."
+      || die "$TARGET is too small for $what: $((sz / 1000000000)) GB. $what needs a partition of at least $NIXOS_PART_MIN_GB GB (the system and one update beside it).$(nixos_floor_hint partition) Nothing has been erased."
     nixos_esp_probe || die "Could not read the EFI System Partition $ESP_DEV. Nothing has been erased."
     [ "$NIXOS_ESP_WINDOWS" = 0 ] || die "$ESP_DEV is Windows' EFI System Partition (it holds Windows Boot Manager). Rime OS keeps its kernels on its own EFI System Partition and does not put them beside Windows' boot files.
 
@@ -324,8 +396,8 @@ Install from Windows with the Rime OS installer app (it makes Rime's own EFI par
     log "nixos: no timezone answered; using the live environment's $NIXOS_TZ"
   fi
   [ -n "$NIXOS_TZ" ] || die "No timezone was chosen, and Rime OS needs one. Nothing has been erased. Go back and pick your timezone."
-  printf '%s' "$NIXOS_TZ" | grep -Eq '^[A-Za-z][A-Za-z0-9+_-]*(/[A-Za-z0-9+_-]+)*$' \
-    || die "Invalid timezone '$NIXOS_TZ'. Nothing has been erased."
+  re='^[A-Za-z][A-Za-z0-9+_-]*(/[A-Za-z0-9+_-]+)*$'
+  [[ $NIXOS_TZ =~ $re ]] || die "Invalid timezone '$NIXOS_TZ'. Nothing has been erased."
   if [ -d /usr/share/zoneinfo ] && [ ! -f "/usr/share/zoneinfo/$NIXOS_TZ" ]; then
     die "Unknown timezone '$NIXOS_TZ'. Nothing has been erased."
   fi
@@ -334,13 +406,13 @@ Install from Windows with the Rime OS installer app (it makes Rime's own EFI par
   NIXOS_LANG="${LOCALE:-}"
   [ -n "$NIXOS_LANG" ] || NIXOS_LANG=$(sed -n 's/^LANG=//p' /etc/locale.conf 2>/dev/null | tr -d '"' | head -1)
   case "$NIXOS_LANG" in ""|C|C.UTF-8|C.utf8) NIXOS_LANG=en_US.UTF-8 ;; esac
-  printf '%s' "$NIXOS_LANG" | grep -Eq '^[A-Za-z]{2,3}(_[A-Za-z]{2})?(\.(UTF-8|utf8))?(@[A-Za-z0-9]+)?$' \
-    || die "Invalid locale '$NIXOS_LANG'. Nothing has been erased."
+  re='^[A-Za-z]{2,3}(_[A-Za-z]{2})?(\.(UTF-8|utf8))?(@[A-Za-z0-9]+)?$'
+  [[ $NIXOS_LANG =~ $re ]] || die "Invalid locale '$NIXOS_LANG'. Nothing has been erased."
 
   # ── kernel arguments this machine's boot entries carry ─────────────────────
   NIXOS_KARGS=()
   for k in ${NIXOS_EXTRA_KARGS:-} ${RIME_EXTRA_KARGS:-}; do
-    printf '%s' "$k" | grep -Eq "$NIXOS_SAFE_PARAM" \
+    [[ $k =~ $NIXOS_SAFE_PARAM ]] \
       || die "Kernel argument '$k' is not one the boot menu can carry. Nothing has been erased."
     NIXOS_KARGS+=("$k")
   done
@@ -357,7 +429,7 @@ Install from Windows with the Rime OS installer app (it makes Rime's own EFI par
   log "nixos: early microcode for this machine: $NIXOS_MICROCODE"
 
   # ── tools and loaders ──────────────────────────────────────────────────────
-  for k in nix python3 openssl timeout xargs unshare sgdisk wipefs partprobe udevadm mkfs.vfat mkfs.btrfs btrfs blkid findmnt lsblk; do
+  for k in nix python3 openssl timeout xargs unshare sgdisk wipefs partprobe udevadm mkfs.vfat mkfs.btrfs btrfs chattr blkid findmnt lsblk; do
     have "$k" || die "$k is missing from this installer, so $DISK cannot be prepared. Nothing has been erased. The ISO was built incorrectly; download it again."
   done
   if [ "$INSTALL_MODE" = partition ]; then
@@ -398,7 +470,7 @@ Install from Windows with the Rime OS installer app (it makes Rime's own EFI par
     [ "$NIXOS_ESP_FREE" -ge "$need" ] \
       || die "The EFI System Partition $ESP_DEV has $((NIXOS_ESP_FREE / 1048576)) MB free, and Rime OS needs $((need / 1048576)) MB there for its kernel and boot loader. Nothing has been erased."
   fi
-  log "nixos: system $NIXOS_SYSTEM = release $NIXOS_RELEASE ($NIXOS_DIGEST); mode=$INSTALL_MODE tz=$NIXOS_TZ lang=$NIXOS_LANG kargs=${NIXOS_KARGS[*]:-}"
+  log "nixos: system $NIXOS_SYSTEM = release $NIXOS_RELEASE $NIXOS_INSTALL_VARIANT ($NIXOS_DIGEST); mode=$INSTALL_MODE tz=$NIXOS_TZ lang=$NIXOS_LANG kargs=${NIXOS_KARGS[*]:-}"
 }
 
 # The release check (docs/nixos/installer.md "Release check"). Sets
@@ -409,7 +481,8 @@ nixos_release_check() {
   note "Checking that $NIXOS_SYSTEM is a signed Rime OS release …"
   rm -rf "$NIXOS_WORK/release"; mkdir -p "$NIXOS_WORK"
   out=$(python3 -I "$NIXOS_CHECKER" check --release-dir "$NIXOS_RELEASE_DIR" --system "$NIXOS_SYSTEM" \
-          --variant "$NIXOS_VARIANT" --out "$NIXOS_WORK/release" --cache "$NIXOS_CACHE" --key "$NIXOS_PUBKEY" \
+          --variant "$NIXOS_VARIANT" --install-variant "$NIXOS_INSTALL_VARIANT" \
+          --out "$NIXOS_WORK/release" --cache "$NIXOS_CACHE" --key "$NIXOS_PUBKEY" \
           ${NIXOS_UP_CACHE:+--upstream-cache "$NIXOS_UP_CACHE" --upstream-key "$NIXOS_UP_PUBKEY"} \
           --deadline "$NIXOS_CHECK_DEADLINE" 2>>"$LOG") || rc=$?
   log "nixos: release check rc=$rc: $out"
@@ -428,6 +501,14 @@ The ISO or its package cache is not a Rime OS release; download the ISO again fr
   NIXOS_RELEASE=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["release"])' "$sum")
   NIXOS_DIGEST=$(cat "$NIXOS_WORK/release/digest")
   NIXOS_BOOT_BYTES=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["boot_bytes"])' "$sum")
+  # From here on the system is the one INSTALLED: the signed release's own toplevel of the chosen variant (the
+  # stamped one, or its gaming sibling), never a path the ISO names by itself. `rime trust --gate` accepts a running
+  # system only when it is a variant toplevel of the release recorded in applied.json, which is this one.
+  local top re='^/nix/store/[0-9a-z]{32}-[^/]+$'
+  top=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["toplevel"])' "$sum")
+  [[ $top =~ $re ]] || die "The release check named no system to install ('$top'). Nothing has been erased."
+  [ "$top" = "$NIXOS_SYSTEM" ] || log "nixos: installing release $NIXOS_RELEASE's $NIXOS_INSTALL_VARIANT system $top (the ISO's $NIXOS_VARIANT system is $NIXOS_SYSTEM)"
+  NIXOS_SYSTEM="$top"
   # Every path, signed by the trusted key ITSELF (not merely by a key of the same name, which is all a narinfo's
   # Sig line names), per cache, both caches at once and bounded: `nix copy` checks the same again, but only after
   # the wipe.
@@ -531,6 +612,20 @@ open(out, "w").write(json.dumps(doc, sort_keys=True) + "\n")' \
     "$NIXOS_RELEASE" "$NIXOS_DIGEST" "$NIXOS_SYSTEM" "$gen" "$d/applied.json" && chmod 0644 "$d/applied.json"
 }
 
+# The features of the chosen system, switched on the way `rime install steam` switches one on (rimed
+# rime/src/nixos/pkg.rs write_list: one requesting name per line, 0644): the update client then keeps selecting the
+# same variant (base + switched-on features), and rime-feature@<feature>.target starts at boot.
+nixos_switches() {
+  local s file names n
+  for s in "${NIXOS_SWITCHES[@]}"; do
+    file="$TROOT${s%% *}"; names="${s#* }"
+    mkdir -p "$(dirname "$file")" || return 1
+    { for n in ${names//,/ }; do printf '%s\n' "$n"; done; } > "$file.tmp" || return 1
+    chmod 0644 "$file.tmp" && mv -f "$file.tmp" "$file" || return 1
+    log "nixos: switched on ${s%% *} ($names)"
+  done
+}
+
 # ── the install: everything from here on destroys $DISK (or $TARGET) ────────
 nixos_install() {
   local esp root dev esp_uuid groups g have_groups espnum
@@ -613,6 +708,15 @@ nixos_install() {
   mount -o "subvol=@nixos,$NIXOS_MOUNT_OPTS" "$dev" "$TROOT" >>"$LOG" 2>&1 || nixos_fail "Could not mount @nixos"
   chmod 0755 "$TROOT"
   mkdir -p "$TROOT/nix" "$TROOT/var/home" "$TROOT/boot"
+  # journald's files No_COW on btrfs (systemd's journal-nocow.conf `h /var/log/journal - - - - +C`, which NixOS
+  # links too, comes too late: systemd-journal-flush writes the first files before systemd-tmpfiles-setup runs, and
+  # +C on a directory reaches only files created after it). Set while the directory is empty, which is the only time
+  # it takes. chattr (FS_NOCOW_FL), never `btrfs property`: that one is an xattr. nixos-enter's own
+  # `systemd-tmpfiles --create` (under nixos-install) applies that `h ... +C` as well, but `h` only adjusts a path that
+  # exists, so the mkdir is what makes it take there; the chattr does not depend on that run (it ignores failures).
+  mkdir -p "$TROOT/var/log/journal"
+  chattr +C "$TROOT/var/log/journal" >>"$LOG" 2>&1 || nixos_fail "Could not make /var/log/journal No_COW"
+  log "nixos: $(lsattr -d "$TROOT/var/log/journal" 2>&1)"
   mount -o "subvol=@nix,$NIXOS_MOUNT_OPTS" "$dev" "$TROOT/nix" >>"$LOG" 2>&1 || nixos_fail "Could not mount @nix"
   mount -o "subvol=@home,$NIXOS_MOUNT_OPTS" "$dev" "$TROOT/var/home" >>"$LOG" 2>&1 || nixos_fail "Could not mount @home"
   if [ "${ESP_IS_LIVE:-0}" = 1 ]; then
@@ -659,6 +763,7 @@ nixos_install() {
   ls "$TROOT"/boot/loader/entries/*.conf >/dev/null 2>&1 || nixos_fail "The boot hook wrote no boot entry"
   gen=${gen#system-}; gen=${gen%-link}
   nixos_release_state "$gen" || nixos_fail "Could not record the installed release"
+  nixos_switches || nixos_fail "Could not switch on the features of the $NIXOS_INSTALL_VARIANT system"
   INSTALLED_OK=1
   log "nixos: entries: $(ls "$TROOT/boot/loader/entries" | tr '\n' ' '); release $NIXOS_RELEASE generation $gen"
 
@@ -776,11 +881,12 @@ $where$crypt
 
 Log in as: $USERNAME
 Hostname:  $HOSTNAME
+System:    ${NIXOS_INSTALL_VARIANT:-plain}$( [ "${NIXOS_GAMING:-no}" = yes ] && echo " (Steam and Gaming Mode included)")
 
 $( [ "${ESP_IS_LIVE:-0}" = 1 ] && echo "Restart when you are ready." || echo "Remove the USB stick and reboot." )
 
 Full log: $LOG"
-  log "install complete (nixos $NIXOS_SYSTEM, release ${NIXOS_RELEASE:-?})"
+  log "install complete (nixos $NIXOS_SYSTEM, ${NIXOS_INSTALL_VARIANT:-?}, release ${NIXOS_RELEASE:-?})"
   write_result ok ""
   echo "RIME-INSTALL-OK"
 }

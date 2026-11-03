@@ -999,6 +999,9 @@ variants (they force the features and set `system.name`), so a fresh install fai
 the switch files are the only input, a machine installed or bridged with gaming chosen keeps it only if the installer
 or the bridge writes `rime-feature@gaming.target.on` (a system without the switch already runs with the feature's
 target off, `ConditionPathExists`, so moving it to `plain` removes nothing that was switched on).
+The installer side is done (nix/installer3, `docs/nixos/installer.md` "Plain or gaming"): it installs the release's
+`plain` or `plain-gaming` toplevel, writes the gaming switch with `steam` when gaming is chosen, and the installed
+system passes `rime trust --gate` before any update (`checks.installer-nixos`, both variants).
 
 ## 12. Channels and pinning
 

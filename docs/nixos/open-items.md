@@ -219,10 +219,10 @@ check" means the wave-3 proof on the merged head: every `checks.x86_64-linux.*` 
 4. *P2 on real hardware, `-applaunch`, login, Proton.* P3/HARDWARE: P3-S1..S4 (Andre's Steam account, katana).
 5. *Floors should count on-disk bytes (14/16 GB).* FIXED on the release side: floors count on-disk bytes (5468b6bf5,
    3ad89d90c; `nix/release/floors.nix`: plain disk 16 GB / partition 14 GB, plain-gaming 18 / 16). The installer
-   still uses its own 19 / 17: see "Opened by wave 3".
+   reads the same figures since nix/installer3 (`nix/installer/choices.nix`; "Opened by wave 3" row 1).
 6. *Refuse `rime install steam` below the gaming floor.* FIXED for `rime install` (`variant.rs`
-   `steam_is_refused_by_name_below_the_gaming_floor`, 5468b6bf5). The installer's own gaming refusal: see "Opened by
-   wave 3".
+   `steam_is_refused_by_name_below_the_gaming_floor`, 5468b6bf5). The installer refuses gaming below its floor by name
+   since nix/installer3 ("Opened by wave 3" row 1).
 7. *`appimage.enable` stays on.* DECIDED-NOT-TO: decided (d5; the translator's AppImage note assumes it).
 8. *virtualization check: pin `swtpm.enable`.* FIXED: the no-swtpm mutant now fails it (27ddb6fb9). An explicit
    assertion line was not added: see "Opened by wave 3".
@@ -298,8 +298,8 @@ check" means the wave-3 proof on the merged head: every `checks.x86_64-linux.*` 
    handles `recovery_unsaved` (installer.md).
 7. *splash twice, journald restart, no static /etc/hostname, zsh-newuser-install.* FIXED: one `splash`, a stock
    `/etc/skel/.zshrc`, hostnamed reads `/etc/hostname` (da24223c4, ab01f061f; `checks.installer-polish-eval`,
-   `checks.hygiene`; installer.md 177-199). The journald restart is explained in installer.md; its nocow rule: see
-   "Opened by wave 3".
+   `checks.hygiene`; installer.md 177-199). The journald restart is explained in installer.md; the journal is No_COW
+   since nix/installer3 ("Opened by wave 3").
 8. *LUKS greeter session not probed.* FIXED: the greeter types in the machine keymap from host.toml (1ffc80fcd) and
    the I3 firstboot run types a `gb` passphrase (installer.md 224).
 9. *Rerun recipe.* DECIDED-NOT-TO: information.
@@ -352,7 +352,7 @@ Items the wave-3 pieces and this integration found and did not close.
 
 | Item | State | Owner / what is needed |
 |---|---|---|
-| The installer still hardcodes `NIXOS_MIN_GB=19` / `NIXOS_PART_MIN_GB=17` (`installer/rime-install-nixos.sh` 93-98) while the release publishes per-variant floors (`nix/release/floors.nix`: plain 16 / 14, plain-gaming 18 / 16); it has no gaming-floor refusal, does not install the published `plain` / `plain-gaming` toplevel by choice, and does not write `/var/lib/rime/switch/rime-feature@gaming.target.on` | STILL OPEN | installer owner: read the floors and variants from the release (the catalogue document already carries `disk_gb`), refuse gaming below its floor, write the switch file; re-run `checks.installer-nixos` and the OVMF install. Safe direction today: it refuses 16-18 GB disks a release would fit. |
+| The installer still hardcodes `NIXOS_MIN_GB=19` / `NIXOS_PART_MIN_GB=17` (`installer/rime-install-nixos.sh` 93-98) while the release publishes per-variant floors (`nix/release/floors.nix`: plain 16 / 14, plain-gaming 18 / 16); it has no gaming-floor refusal, does not install the published `plain` / `plain-gaming` toplevel by choice, and does not write `/var/lib/rime/switch/rime-feature@gaming.target.on` | FIXED (nix/installer3) | The ISO stamps `nix/installer/choices.nix` (floors.nix's figures) as `nixos-choices.json`; the engine reads its floors only from it, refuses gaming below 18 / 16 GB by name, installs the release's `plain` or `plain-gaming` toplevel (`--install-variant`) and writes the switch with `steam`; the GUI offers the choice. `checks.installer-choices` (5 mutants killed) and `checks.installer-nixos` (both installs pass the installed system's own `rime trust --gate`); OVMF: `artifacts/installer3/lab/` (installer.md "Plain or gaming"). Verified independently (`artifacts/verify-installer3/`): a mutant recording the wrong system in `applied.json` fails the gaming install's own `rime trust --gate`; the gaming refusal is now also checked for a partition (14.5 GB: refused for gaming, plain dry run passes). |
 | Virtualization floors are estimates; the compressed 0.55 branch of the floor maths is unit-tested only | STILL OPEN | updates owner: measure a `plain-virt` closure when a release builds it |
 | The hosted runner's free disk for a full release closure is not measured | STILL OPEN | first hosted `nix-release.yml` run (`docs/nixos/updates-and-release.md` 1364) |
 | virtualization check: no explicit `swtpm.enable` assertion (the mutant fails it through behaviour) | STILL OPEN | apps owner: one assert line |
@@ -368,7 +368,7 @@ Items the wave-3 pieces and this integration found and did not close.
 | R14: `nix/redistributable.nix` does not exist; the OpenAI / Anthropic binaries' redistribution licences are unchecked | STILL OPEN | release owner + Andre: decide whether the public cache may carry them (`docs/nixos/updates-and-release.md` 1408) |
 | Production NixOS netinstall ISO, a new `.exe` (17 GB floor), rimeos.com's 16 → 17 GB text, a real Windows `stage-image` run | P3/HARDWARE | release environment + Windows lab (installer.md handover) |
 | Hibernation under lockdown | DECIDED-NOT-TO here | kernel owner's call (installer.md handover) |
-| journald files copy-on-write on btrfs (no nocow rule) | STILL OPEN | base module owner (installer.md 192) |
+| journald files copy-on-write on btrfs (no nocow rule) | FIXED (nix/installer3) | the engine creates `/var/log/journal`, empty and `chattr +C`, before anything is written; `checks.installer-nixos` reads `lsattr` `C` (mutant: directory not created fails; `chattr` alone dropped survives because nixos-enter's tmpfiles `h ... +C` then sets it); the OVMF lab first boots show `C` and no copy-on-write line (installer2's had two) (installer.md "Polish found at first boot", Results installer3) |
 | `desktop` stalled once on the hosted runner (41450212626), not reproduced | STILL OPEN | desktop check owner (`docs/nixos/ci.md`) |
 | rime-hostlayer `profile_files` should refuse a profile already managed by configuration | STILL OPEN | hostlayer owner (follow-up from 16c26dc8c) |
 | `rime update --download-only` leaves `pending.json`; the `ops.rs` comment wording | STILL OPEN | update client owner (wording only) |

@@ -9,8 +9,12 @@ verifies:
   DIR/sig/        its cosign `.sig` object (simple signing, signature + certificate annotations)
   DIR/repo DIR/fulcio-root.pem DIR/signers DIR/issuer   what the signature must chain to and name
 
-  mint-test-release.py --system TOPLEVEL --cache URL --key NAME:KEY [--upstream-cache URL --upstream-key NAME:KEY
-      --upstream-paths FILE] --sign-key PEM --sign-cert PEM --ca PEM --out DIR [--bad-narhash]
+  mint-test-release.py --system TOPLEVEL [--variant NAME] [--also-variant NAME=TOPLEVEL ...] --cache URL
+      --key NAME:KEY [--upstream-cache URL --upstream-key NAME:KEY --upstream-paths FILE] --sign-key PEM
+      --sign-cert PEM --ca PEM --out DIR [--repo REPO] [--bad-narhash]
+
+--also-variant adds another variant toplevel to the same release (plain-gaming beside plain, as nix-release.yml
+publishes every variant in one manifest): the installer installs whichever one the owner chose.
 
 The closure comes from the local store (`nix path-info --json -r`), file sizes from the caches' narinfos (FileSize),
 exactly the fields nix-release.yml's manifest step takes. --bad-narhash records a wrong NarHash for the toplevel AND
@@ -54,6 +58,7 @@ def main():
     ap.add_argument("--lib")
     ap.add_argument("--system", required=True)
     ap.add_argument("--variant", default="plain")
+    ap.add_argument("--also-variant", action="append", default=[], metavar="NAME=TOPLEVEL")
     ap.add_argument("--release", default="2026.11.02")
     ap.add_argument("--cache", required=True)
     ap.add_argument("--key", action="append", required=True)
@@ -71,7 +76,13 @@ def main():
     R = load_lib(a.lib)
 
     top = os.path.realpath(a.system)
-    info = R.nix_path_info([top], recursive=True)
+    tops = {a.variant: top}
+    for spec in a.also_variant:
+        name, _, path = spec.partition("=")
+        if not name or not path or name in tops:
+            sys.exit(f"mint-test-release: bad --also-variant {spec!r}")
+        tops[name] = os.path.realpath(path)
+    info = R.nix_path_info(sorted(set(tops.values())), recursive=True)
     missing = [p for p, i in info.items() if i is None]
     if missing:
         sys.exit(f"mint-test-release: not in the local store: {missing[:3]}")
@@ -80,8 +91,8 @@ def main():
         upstream_paths = {l.strip() for l in open(a.upstream_paths) if l.strip()}
     sizes = {p: file_size(R, a.upstream_cache if p in upstream_paths else a.cache, p) for p in info}
     clo = {"paths": {p: {k: i[k] for k in ("nar_hash", "nar_size", "references")} for p, i in info.items()},
-           "variants": {a.variant: {"toplevel": top, "boot": R.read_boot(top)}}}
-    plan = {"variants": {a.variant: {"toplevel": top, "components": {}}}, "catalogue": []}
+           "variants": {n: {"toplevel": t, "boot": R.read_boot(t)} for n, t in tops.items()}}
+    plan = {"variants": {n: {"toplevel": t, "components": {}} for n, t in tops.items()}, "catalogue": []}
     upstream = None
     if upstream_paths:
         upstream = {"url_hint": a.upstream_cache, "keys": a.upstream_key, "paths": upstream_paths}

@@ -3,9 +3,10 @@
 
 Run by rime-install-nixos.sh before anything is erased:
 
-  rime-install-nixos-release check --release-dir D --system S --variant V --out DIR
+  rime-install-nixos-release check --release-dir D --system S --variant V [--install-variant W] --out DIR
       --cache URL --key KEY [--upstream-cache URL --upstream-key KEY] [--threads N] [--deadline S]
-  rime-install-nixos-release verify --release-dir D --system S --variant V [--key KEY ...]   (build time: 1 and 2)
+  rime-install-nixos-release verify --release-dir D --system S --variant V [--offer W ...] [--key KEY ...]
+      (build time: 1 and 2)
 
 1. The release manifest carried on the ISO (D/manifest, skopeo's dir: layout) is verified the way `rime update`
    verifies one (rimed verify.rs, ported in nix/release/rime_nix_release.py and kept honest by
@@ -13,8 +14,11 @@ Run by rime-install-nixos.sh before anything is erased:
    chained to the pinned Fulcio root (D/fulcio-root.pem) at its notBefore, its SAN one of D/signers, its OIDC issuer
    D/issuer; then the layer read BY that digest and the manifest validated (§3.2). The verifier is the ISO's own
    copy, never one fetched from a cache.
-2. The system this ISO installs must be the release's `V` variant toplevel, and the cache keys the ISO trusts must be
-   keys the release names (cache.keys): an ISO stamped for other caches is refused.
+2. The system this ISO is stamped with must be the release's `V` variant toplevel, and the cache keys the ISO trusts
+   must be keys the release names (cache.keys): an ISO stamped for other caches is refused. The system INSTALLED is
+   the release's own toplevel of variant W (default V; plain-gaming when the owner chose gaming), taken from the
+   verified manifest, so the installed machine runs a variant toplevel of the release it records (`rime trust
+   --gate`). `verify --offer W` refuses an ISO whose release has no W system (build-live-iso.sh, per choice).
 3. Every path of the toplevel's closure is looked up in the cache its `origin` names (no origin: the Rime cache), in
    parallel and under a deadline: present, with the manifest's NarHash, NarSize and references, and a signature by
    the trusted key's name. The cryptographic signature check is `nix store verify` (the engine, per origin).
@@ -141,6 +145,11 @@ def cmd_check(a):
     top = paths[v["toplevel"]]["path"]
     if top != a.system:
         raise R.Refused(f"this ISO installs {a.system}, and release {m['release']}'s {a.variant} system is {top}")
+    want = a.install_variant or a.variant
+    v = (m.get("variants") or {}).get(want)
+    if v is None:
+        raise R.Refused(f"release {m['release']} has no {want} system")
+    top = paths[v["toplevel"]]["path"]
     keys = set(m["cache"]["keys"])
     if a.key not in keys:
         raise R.Refused(f"the ISO trusts the cache key {a.key.split(':', 1)[0]}, and release {m['release']} "
@@ -192,7 +201,7 @@ def cmd_check(a):
     for name, sel in (("rime.paths", rime), ("upstream.paths", upstream)):
         with open(os.path.join(a.out, name), "w") as f:
             f.write("".join(paths[i]["path"] + "\n" for i in sel))
-    summary = {"release": m["release"], "digest": digest, "signer": signer, "variant": a.variant, "toplevel": top,
+    summary = {"release": m["release"], "digest": digest, "signer": signer, "variant": want, "toplevel": top,
                "paths": len(clo), "rime": len(rime), "upstream": len(upstream), "narinfo_seconds": round(took, 2),
                "boot_bytes": boot_bytes}
     with open(os.path.join(a.out, "summary.json"), "w") as f:
@@ -213,7 +222,14 @@ def cmd_verify(a):
     for k in a.key:
         if k not in m["cache"]["keys"]:
             raise R.Refused(f"the ISO trusts the cache key {k.split(':', 1)[0]}, which release {m['release']} does not name")
-    print(json.dumps({"release": m["release"], "digest": digest, "signer": signer, "toplevel": top}, sort_keys=True))
+    offered = {}
+    for w in a.offer:
+        o = (m.get("variants") or {}).get(w)
+        if o is None:
+            raise R.Refused(f"this ISO offers the {w} system, and release {m['release']} has none")
+        offered[w] = m["paths"][o["toplevel"]]["path"]
+    print(json.dumps({"release": m["release"], "digest": digest, "signer": signer, "toplevel": top, "offered": offered},
+                     sort_keys=True))
     return 0
 
 
@@ -224,6 +240,7 @@ def main(argv=None):
     p.add_argument("--release-dir", required=True)
     p.add_argument("--system", required=True)
     p.add_argument("--variant", default="plain")
+    p.add_argument("--install-variant", help="the variant to install (default --variant): its toplevel is the release's")
     p.add_argument("--out", required=True)
     p.add_argument("--cache", required=True)
     p.add_argument("--key", required=True)
@@ -236,6 +253,7 @@ def main(argv=None):
     p.add_argument("--release-dir", required=True)
     p.add_argument("--system", required=True)
     p.add_argument("--variant", default="plain")
+    p.add_argument("--offer", action="append", default=[], help="a variant the ISO lets the owner choose")
     p.add_argument("--key", action="append", default=[])
     a = ap.parse_args(argv)
     try:
