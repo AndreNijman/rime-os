@@ -72,6 +72,12 @@ pub struct Feature {
     pub summary: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// An exclusive group (`desktop`): at most one feature of a group is ever switched on.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// For a desktop: the wayland-session ids (logind `Desktop`) its sessions report.
+    #[serde(default)]
+    pub session_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq)]
@@ -170,6 +176,11 @@ impl Catalogue {
             return name.to_string();
         }
         lower
+    }
+
+    /// A feature of the exclusive `desktop` group (D3: at most one desktop besides Rime's own sessions).
+    pub fn is_desktop(&self, feature: &str) -> bool {
+        self.features.get(feature).and_then(|f| f.group.as_deref()) == Some("desktop")
     }
 
     fn entry(&self, name: &str) -> Option<(String, &Entry)> {

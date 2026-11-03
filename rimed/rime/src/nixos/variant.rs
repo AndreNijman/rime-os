@@ -53,6 +53,18 @@ pub struct Choice {
 /// Pick the variant for `base` + `features` among those `has` says the release builds. The largest subset of the
 /// features wins; between subsets of one size, the first in sorted order. `None`: the release has no `base` system.
 pub fn choose(base: &str, features: &[String], has: impl Fn(&str) -> bool) -> Option<Choice> {
+    choose_keeping(base, features, has, |_| false)
+}
+
+/// [`choose`], where the features `waits_first` names (the desktops, docs/nixos/desktops.md §3.2) are the ones that
+/// wait when the release cannot carry everything: among the largest subsets, one that keeps every other switched-on
+/// feature wins, so adding a desktop never parks gaming or virtualization. Then the first in sorted order.
+pub fn choose_keeping(
+    base: &str,
+    features: &[String],
+    has: impl Fn(&str) -> bool,
+    waits_first: impl Fn(&str) -> bool,
+) -> Option<Choice> {
     let mut f: Vec<String> = features.to_vec();
     f.sort_unstable();
     f.dedup();
@@ -61,7 +73,10 @@ pub fn choose(base: &str, features: &[String], has: impl Fn(&str) -> bool) -> Op
     let mut subsets: Vec<Vec<String>> = (0u32..(1 << n))
         .map(|mask| (0..n).filter(|i| mask & (1 << i) != 0).map(|i| f[i].clone()).collect())
         .collect();
-    subsets.sort_by(|a: &Vec<String>, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    let keeps_the_rest = |s: &Vec<String>| f.iter().all(|x| waits_first(x) || s.contains(x));
+    subsets.sort_by(|a: &Vec<String>, b| {
+        b.len().cmp(&a.len()).then_with(|| keeps_the_rest(b).cmp(&keeps_the_rest(a))).then_with(|| a.cmp(b))
+    });
     for s in subsets {
         let v = name(base, &s);
         if has(&v) {
@@ -75,7 +90,8 @@ pub fn choose(base: &str, features: &[String], has: impl Fn(&str) -> bool) -> Op
 /// The variant this machine wants from a release that builds `variants`, with its switches read from the catalogue.
 pub fn for_machine(base: &str, variants: &[&str]) -> Option<Choice> {
     let cat = Catalogue::load().ok();
-    choose(base, &switched_on(cat.as_ref()), |v| variants.contains(&v))
+    let is_desktop = |f: &str| cat.as_ref().is_some_and(|c| c.is_desktop(f));
+    choose_keeping(base, &switched_on(cat.as_ref()), |v| variants.contains(&v), is_desktop)
 }
 
 /// A floor from nix/release/floors.nix, rendered into the catalogue (`floors.<variant>`).
@@ -196,6 +212,28 @@ mod tests {
         let c = choose("plain", &s(&["gaming"]), |v| v == "plain").unwrap();
         assert_eq!((c.chosen.as_str(), c.waiting.clone()), ("plain", s(&["gaming"])));
         assert_eq!(choose("plain", &[], |v| v == "luks"), None);
+    }
+
+    #[test]
+    fn a_desktop_waits_before_gaming_or_virtualization_does() {
+        // docs/nixos/desktops.md §3.2: gaming + virtualization + GNOME on a release that builds plain-gaming-gnome
+        // and plain-gaming-virtualization but not the three together. Both are the largest fitting subsets; the
+        // one that keeps every non-desktop feature wins and GNOME waits (lexically, gaming-gnome would come first).
+        let rel = ["plain", "plain-gaming", "plain-gaming-gnome", "plain-gaming-virtualization"];
+        let desktop = |f: &str| f == "gnome" || f == "kde" || f == "cosmic";
+        let c = choose_keeping("plain", &s(&["gnome", "virtualization", "gaming"]), |v| rel.contains(&v), desktop).unwrap();
+        assert_eq!(c.wanted, "plain-gaming-gnome-virtualization");
+        assert_eq!((c.chosen.as_str(), c.waiting.clone()), ("plain-gaming-virtualization", s(&["gnome"])));
+        // Without a desktop marker the old order holds (sorted order between equal sizes).
+        let c = choose("plain", &s(&["gnome", "virtualization", "gaming"]), |v| rel.contains(&v)).unwrap();
+        assert_eq!(c.chosen, "plain-gaming-gnome");
+        // The whole set, when the release carries it, still wins over everything.
+        let all = |v: &str| rel.contains(&v) || v == "plain-gaming-gnome-virtualization";
+        assert_eq!(choose_keeping("plain", &s(&["gnome", "virtualization", "gaming"]), all, desktop).unwrap().chosen,
+                   "plain-gaming-gnome-virtualization");
+        // Only the desktop switched on, on a release without its variant: plain, the desktop waits.
+        let c = choose_keeping("plain", &s(&["kde"]), |v| v == "plain", desktop).unwrap();
+        assert_eq!((c.chosen.as_str(), c.waiting.clone()), ("plain", s(&["kde"])));
     }
 
     #[test]

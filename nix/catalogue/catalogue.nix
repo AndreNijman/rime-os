@@ -55,6 +55,7 @@ in
     option = [ "rime" "desktops" id "enable" ];
     offered = true;
     group = "desktop";
+    session_ids = d.sessionIds;
   }) desktops;
 
   entries = {
