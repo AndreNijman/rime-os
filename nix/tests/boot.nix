@@ -137,6 +137,9 @@ in
   # After every install every file every entry names is on the ESP with its source's size, and `rime-boot check`
   # agrees. Mutant (docs/nixos/boot-matrix.md, "ESP budget"): a hook that never leaves a generation out copies
   # gen4's initrd into a full ESP and fails with ENOSPC (switch-to-configuration boot exits non-zero).
+  # Then the pruned ESP boots: generation 5's entry (kernel, initrds, options) is kexec'd off the ESP and the VM comes
+  # up as generation 5. Mutant: a hook that writes an initrd of the right size with the wrong bytes passes every size
+  # check and `rime-boot check`, and fails this boot.
   # No separate Secure Boot boot of the pruned ESP (DECIDED-NOT-TO, docs/nixos/boot-matrix.md "ESP budget"): it is the
   # layout the boot matrix boots through Fedora's shim and GRUB (nix/probe/ovmf/boothook) with fewer entries, and
   # every file every remaining entry names is checked here, byte size and `rime-boot check` both.
@@ -173,7 +176,7 @@ in
           virtualisation.memorySize = 2048;
           virtualisation.emptyDiskImages = [ espMiB ];
           virtualisation.additionalPaths = map (n: nodes."gen${toString n}".system.build.toplevel) later;
-          environment.systemPackages = [ pkgs.dosfstools ];
+          environment.systemPackages = [ pkgs.dosfstools pkgs.kexec-tools ];
         };
       } // lib.genAttrs (map (n: "gen${toString n}") later) (name: gen (lib.toInt (lib.removePrefix "gen" name)));
 
@@ -267,6 +270,35 @@ in
               assert not re.search(r"generation [14] left out", out), out
               consistent([1, 4, 5])
               machine.succeed("grep -x 'set default=rime-generation-5' /boot/grub2/rime-nixos.cfg")
+
+          with subtest("the pruned ESP boots: generation 5's entry, with its own files and options, kexec'd off the ESP"):
+              # The test VM starts with QEMU's -kernel, so a reboot never reads the ESP. kexec loads exactly what the
+              # default entry names, read off the full, pruned ESP: its kernel, its initrd files in the entry's order
+              # (each padded to 4 bytes and concatenated, as GRUB hands them over) and its options line. A size check
+              # cannot see a file whose bytes are wrong; a boot can (mutant: docs/nixos/boot-matrix.md "ESP budget").
+              # GRUB reading the menu itself: the boot matrix (nix/probe/ovmf/boothook), the same files and layout.
+              e = machine.succeed("cat /boot/loader/entries/rime-generation-5.conf")
+              km = re.search(r"^linux (\S+)$", e, re.M)
+              om = re.search(r"^options (.*)$", e, re.M)
+              assert km and om, e
+              kernel = km.group(1).rsplit("/", 1)[1]
+              initrds = [p.rsplit("/", 1)[1] for p in re.findall(r"^initrd (\S+)$", e, re.M)]
+              opts = om.group(1)
+              assert len(initrds) >= 2 and f"init={TOP[5]}/init" in opts, e
+              machine.succeed("rm -f /tmp/esp-initrd && for f in "
+                              + " ".join(f"/boot/rime/nixos/{n}" for n in initrds)
+                              + "; do cat $f >> /tmp/esp-initrd && s=$(stat -c %s /tmp/esp-initrd)"
+                              + " && head -c $(( (4 - s % 4) % 4 )) /dev/zero >> /tmp/esp-initrd; done")
+              machine.succeed(f"kexec -l /boot/rime/nixos/{kernel} --initrd=/tmp/esp-initrd --command-line='{opts}'")
+              machine.execute("systemctl kexec >&2 &", check_return=False)
+              machine.connected = False
+              machine.connect()
+              machine.wait_for_unit("multi-user.target")
+              booted = machine.succeed("readlink -f /run/booted-system").strip()
+              assert booted == TOP[5], f"did not boot generation 5 off the ESP: booted {booted}"
+              machine.succeed("grep -x 5 /etc/rime-boot-test-generation")
+              cmd = machine.succeed("cat /proc/cmdline").strip()
+              assert cmd == opts, (cmd, opts)
         '';
     };
 }

@@ -123,7 +123,9 @@ Proven:
   `arch/x86/kernel/cpu/microcode/core.c`): R1 and U1-U3 report `hypervisor-flag=1` and no `Current revision` line.
   Without the bit (U4/U5) the loader runs, but `get_microcode_blob()` still returns NULL (`mc=0`, recorded, not
   asserted): `scan_microcode()` takes only a newer revision than the CPU's (`cur_rev >= mc_header->rev` skips), and
-  the guest reports the host's 0x43b, which is also the newest patch for this CPU (signature 0x906a3) in the blob.
+  the guest reports the host's 0x43b, which is also the newest patch for this CPU (signature 0x906a3) in the blob
+  (verified by parsing every patch header of `GenuineIntel.bin` in the pinned microcode-intel-20260925: the only
+  patches for 0x906a3 are rev 0x43b, `/var/lab/rime-nix/artifacts/vboot2/ucode-906a3.txt`).
   KVM also ignores a guest's write to MSR 0x79, so no VM can show a revision being **applied**.
   P3/HARDWARE: on katana, `dmesg | grep microcode` after the first NixOS boot (`Current revision` and, with a newer
   blob than the firmware's, `updated early from ... to ...`). Today katana's firmware already runs 0x43b, the
@@ -171,10 +173,26 @@ What one generation puts on the boot filesystem (measured 2026-11-02): the signe
   logs in `/var/lab/rime-nix/artifacts/boot2/logs/`): the hook never leaves a generation out (`if True:` for the
   fits test) → generation 4's `switch-to-configuration boot` exits 1 with `[Errno 28] No space left on device`; the
   booted generation treated like any other → "generation 1 left out".
+  Independent verification (wave 4, vboot2): a third mutant, the oldest-first order reversed (the newest optional
+  generation goes first), FAILS ("generation 3 left out" at generation 4;
+  `/var/lab/rime-nix/artifacts/vboot2/mutant-newest-first.log`).
+- **The pruned ESP boots** (added by the wave-4 verification, vboot2). The sizes and `rime-boot check` above cannot
+  see a file whose bytes are wrong, and the test VM starts with QEMU's `-kernel`, so a plain reboot never reads the
+  ESP. The last subtest therefore boots off the full, pruned ESP: it reads generation 5's entry, concatenates the
+  initrd files it names in its order (each padded to 4 bytes, as GRUB hands them over), `kexec -l`s the kernel file
+  it names with its `options` line, `systemctl kexec`, and asserts the VM came up as generation 5
+  (`/run/booted-system`, `/etc/rime-boot-test-generation`, `/proc/cmdline` = the entry's options). PASS
+  `/nix/store/d2vvhjkmci74ncdkimcg20kkkzq2frca-vm-test-run-rime-boot-esp-prune`
+  (`/var/lab/rime-nix/artifacts/vboot2/boot-esp-prune-kexec.log`). Mutant: the hook writes every main initrd with
+  the right size and zero bytes: generations 1-5 pass every size check and `rime-boot check`, and the boot FAILS
+  (`Kernel panic - not syncing: VFS: Unable to mount root fs`;
+  `/var/lab/rime-nix/artifacts/vboot2/boot-esp-prune-mutant-zero-initrd.log`). GRUB reading the menu itself is not
+  in this check: the boot matrix (`nix/probe/ovmf/boothook`) boots the same layout and entry format through GRUB.
 - **No separate Secure Boot boot of a pruned ESP (DECIDED-NOT-TO).** A pruned ESP is the layout the boot matrix
   already boots through Fedora's shim and GRUB with Secure Boot on (B1-B10), with fewer entries; what pruning could
-  break is a file an entry still names, and `boot-esp-prune` checks every one of them by size and with `rime-boot
-  check` after each install. A boot through shim would add the firmware, not a new path through the hook.
+  break is a file an entry still names, and `boot-esp-prune` checks every one of them by size, with `rime-boot
+  check` after each install, and by booting the default entry's files off the pruned ESP (kexec, above). A boot
+  through shim would add the firmware, not a new path through the hook.
 - `rime gc` removes generations from the profile; the hook then removes their files. A pinned generation always
   stays listed.
 
@@ -197,7 +215,7 @@ or recovery key through systemd's password agent, `rime-luks-enroll` re-seals th
 key and passphrase slots byte for byte), then measures again. Its exit code is `failed == 0 && still.is_empty()`
 (`rimed/rime/src/luks.rs`): 0 only when every unit succeeded **and** every volume measures `ok` afterwards.
 
-- **`luks-tpm-rebind`** (wave 4, `nix/tests/luks-tpm.nix`): three arms replace the unit's `ExecStart` with a runtime
+- **`luks-tpm-rebind`** (the wave-3 check in `nix/tests/luks-tpm.nix`, extended in wave 4): three arms replace the unit's `ExecStart` with a runtime
   drop-in so that exactly one half fails: the unit succeeds but the slot stays stale → rc 1; the slot is re-sealed
   but the unit fails → rc 1; the unit re-seals and succeeds → rc 0. PASS at `af5208599`. Mutants of the exit-code
   line, each built in an isolated copy of the tree (`/var/lab/rime-nix/artifacts/boot2/logs/luks-mutants.txt`):

@@ -399,8 +399,11 @@ The wave-4 inputs' secureboot problems 3-6 and the open row above. Evidence unde
    returns GenuineIntel.bin (15,228,928 B, first patch header = the file's), U5 (initrd alone) returns nothing.
    5/5 PASS. Applied revision: P3/HARDWARE (KVM ignores the write; katana already runs 0x43b, the blob's newest).
 3. *ESP prune-to-fit only unit-tested (mocked free space).* FIXED: `checks.boot-esp-prune` (e94b69c6a), a real
-   256 MiB FAT32 ESP filled to the floor; mutants (no prune → ENOSPC; booted generation not protected) FAIL. A
-   separate Secure Boot boot of the pruned ESP: DECIDED-NOT-TO (`boot-matrix.md` "ESP budget").
+   256 MiB FAT32 ESP filled to the floor; mutants (no prune → ENOSPC; booted generation not protected; newest
+   first) FAIL. The piece's version never booted afterwards (the task asked for it); the wave-4 verification added
+   the boot: generation 5's entry is kexec'd off the pruned ESP and comes up as generation 5, and a same-size,
+   wrong-bytes initrd mutant that passes every size check FAILS it (kernel panic). A separate Secure Boot boot of
+   the pruned ESP: DECIDED-NOT-TO (`boot-matrix.md` "ESP budget").
 4. *The rebind exit-code branch has no mutant; a successful re-seal under Secure Boot only at T3/P3.* FIXED:
    `checks.luks-tpm-rebind` (af5208599) tests each half of `failed == 0 && still.is_empty()`; the `||`, no-`failed`
    and no-`still` mutants each FAIL it. Re-seal under Secure Boot after a db change: TPM lab `rebind-sb` 4/4 PASS,
@@ -409,3 +412,9 @@ The wave-4 inputs' secureboot problems 3-6 and the open row above. Evidence unde
    hostlayer-katana, libexec, release-unit, security, update-client, update-e2e, gaming, polish, catalogue, ci,
    shell, keymap-luks, luks-boot, boot-loader-scan) has a valid outPath. 14 already were; `release-unit` ("plan ok")
    and `ci` ("ci: all passed") were built here. The doc-only commits do not move any check's drvPath.
+   Correction (wave-4 verification): the piece's `release-unit` and `ci` outPaths (`ingip0fd…`, `9v7airhh…`) were
+   built from a tree with untracked `__pycache__` directories in `nix/release/` and `nix/probe/ovmf/mok/`
+   (gitignored, but `path:.` copies them), so they are not the clean HEAD's. With those removed, `release-unit`
+   is `p3qm9pwn…` (valid) and `ci` is `x3w87n5a…`, built by the verification ("ci: all passed"); every other
+   listed check has the same outPath with or without them
+   (`/var/lab/rime-nix/artifacts/vboot2/{headcheck-clean.txt,build-ci-clean.log}`).
