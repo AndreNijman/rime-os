@@ -197,7 +197,7 @@ let
           r = nodes.client.system.build.rimeReleases;
         in
         ''
-          import json, shlex
+          import shlex
 
           A, AD, B, BD = "${r.A}", "${r.AD}", "${r.B}", "${r.BD}"
           ID, NAME, TITLE = "${id}", "${id}", "${d.title}"
@@ -251,13 +251,23 @@ let
                       return props
               raise Exception("no greetd session of rime")
 
+          def running(proc):
+              """pgrep for the user's PROC by argv[0]: Nix wraps some binaries (gnome-shell runs as .gnome-shell-wrapped)."""
+              return f"pgrep -u rime -f -- '^([^ ]*/)?\\.?{proc}(-wrapped)?( |$)'"
+
           def environ_of(proc):
-              pid = client.succeed(f"pgrep -u rime -x {proc} | head -n1").strip()
+              pid = client.succeed(running(proc) + " | head -n1").strip()
               return dict(l.split("=", 1) for l in client.succeed(f"tr '\\0' '\\n' < /proc/{pid}/environ").splitlines() if "=" in l)
 
           def secrets_owner():
-              out = client.succeed(as_rime("busctl --user status org.freedesktop.secrets 2>&1 | grep -E '^(Comm|EXE)=' || true"))
+              out = client.succeed(as_rime("busctl --user status org.freedesktop.secrets 2>&1 | grep -E '^(PID|Comm|CommandLine)=' || true"))
               print("org.freedesktop.secrets:", out)
+              # The bootc failure this guards against: a second daemon owning the name with the login keyring locked.
+              locked = client.succeed(as_rime(
+                  "busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/collection/login"
+                  " org.freedesktop.Secret.Collection Locked"
+              )).strip()
+              assert locked == "b false", f"the login keyring behind org.freedesktop.secrets is locked: {locked}"
               return out
 
           start_all()
@@ -377,7 +387,7 @@ let
               greeter_session(SESSION)
               client.screenshot(f"greeter-{ID}")
               login()
-              client.wait_until_succeeds(f"pgrep -u rime -x {PROCESS}", timeout=300)
+              client.wait_until_succeeds(running(PROCESS), timeout=300)
               client.sleep(30)  # autostart entries, the keyring, the panel
               client.screenshot(f"{ID}-session")
 
@@ -412,8 +422,8 @@ let
               assert client.succeed(f"{PPCTL} get").strip() == "performance"
               client.succeed(f"{PPCTL} set balanced")
               assert client.succeed(f"{PPCTL} get").strip() == "balanced"
-              assert "balanced" in client.succeed("rime tier 2>&1")
-              client.succeed(f"systemd-run --unit=rime-test-launch {PPCTL} launch -p performance -r rime-test -i org.rimeos.Test sleep 8")
+              assert "* balanced" in client.succeed("rime tier 2>&1")  # the chosen tier is starred
+              client.succeed(f"systemd-run --unit=rime-test-launch {PPCTL} launch -p performance -r rime-test -i org.rimeos.Test /run/current-system/sw/bin/sleep 8")
               client.wait_until_succeeds(f"busctl get-property {PPD} {PPD_PATH} {PPD} ActiveProfileHolds | grep org.rimeos.Test", timeout=10)
               assert ppd_get("ActiveProfile") == 's "performance"', ppd_get("ActiveProfile")
               client.wait_until_succeeds(f"busctl get-property {PPD} {PPD_PATH} {PPD} ActiveProfileHolds | grep -x 'aa{{sv}} 0'", timeout=30)
@@ -452,7 +462,7 @@ let
               assert f"session is open, so {TITLE} is removed at the next restart" in out, out
               assert link("/run/current-system") == AD, "the open session's system was switched away"
               assert link("/nix/var/nix/profiles/system") == A
-              client.succeed(f"pgrep -u rime -x {PROCESS}")
+              client.succeed(running(PROCESS))
 
           with subtest(f"logged out, rime remove {NAME} is live: the session and the desktop's services are gone"):
               logout()
