@@ -27,7 +27,11 @@ chatgpt.overrideAttrs (old: {
   unpackPhase = ''
     runHook preUnpack
     mkdir root
-    (cd root && rpm2cpio "$src" | cpio -idm --quiet --no-absolute-filenames)
+    # Through a file, not a pipe: cpio may exit at the archive trailer while rpm2cpio still writes padding,
+    # and under pipefail rpm2cpio's "Error writing archive: Write error" then fails the build (seen on a hosted run).
+    rpm2cpio "$src" > payload.cpio
+    (cd root && cpio -idm --quiet --no-absolute-filenames < ../payload.cpio)
+    rm payload.cpio
     test -x root/usr/lib/chatgpt/ChatGPT
     chmod -R u+w root
     runHook postUnpack
