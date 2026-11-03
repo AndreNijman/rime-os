@@ -39,6 +39,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod common;
+
 use rime_remote_core::device::DeviceStore;
 use rime_remote_core::noise::{Channel, Handshake};
 use rime_remote_core::wire::Frame;
@@ -189,14 +191,12 @@ impl Harness {
 
         let daemon_saw = stand_in_agentd(&runtime.join("rime-agentd").join("control.sock"));
 
-        let port = {
-            let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("probe");
-            probe.local_addr().expect("addr").port()
-        };
+        // `--port 0`, and the port the daemon got read back from its log: see
+        // `common` for why a probed port handed over as `--port N` races.
         let log = root.join("remoted.log");
         let mut args = vec![
             "--port".to_string(),
-            port.to_string(),
+            "0".to_string(),
             "--allow-foreground".into(),
             "--no-announce".into(),
             "--handshake-timeout-ms".into(),
@@ -211,28 +211,22 @@ impl Harness {
             .stderr(std::fs::File::create(&log).expect("log file"))
             .spawn()
             .expect("spawn rime-remoted");
-        let h = Harness {
+        let mut h = Harness {
             remoted,
             root,
-            port,
+            port: 0,
             control: runtime.join("rime-remoted").join("control.sock"),
             log,
             daemon_saw,
             device,
         };
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while Instant::now() < deadline {
-            if UnixStream::connect(&h.control).is_ok()
-                && TcpStream::connect(("127.0.0.1", h.port)).is_ok()
-            {
-                return h;
+        match common::remoted_port(&mut h.remoted, &h.control, &h.log, Duration::from_secs(15)) {
+            Ok(port) => {
+                h.port = port;
+                h
             }
-            std::thread::sleep(Duration::from_millis(25));
+            Err(why) => panic!("{why}"),
         }
-        panic!(
-            "rime-remoted did not come up: {}",
-            std::fs::read_to_string(&h.log).unwrap_or_default()
-        );
     }
 
     fn status(&self) -> serde_json::Value {

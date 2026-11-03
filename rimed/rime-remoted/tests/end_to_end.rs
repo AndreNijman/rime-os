@@ -27,6 +27,8 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod common;
+
 use rime_remote_core::noise::{Channel, Handshake};
 use rime_remote_core::pairing::{PairingOffer, PairingRequest};
 use rime_remote_core::wire::Frame;
@@ -184,20 +186,15 @@ impl Harness {
             .ok()?;
         let agentd_socket = runtime.join("rime-agentd").join("control.sock");
 
-        // A port nobody else is on. Picked by binding one and letting it go
-        // rather than by hoping: a hardcoded port makes two runs of this
-        // suite on one machine fight.
-        let port = {
-            let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
-            let p = probe.local_addr().ok()?.port();
-            drop(probe);
-            p
-        };
-
+        // `--port 0`: the kernel picks the port when the daemon binds, and the
+        // fixture reads back the one it got (see `common`). Its stderr is kept:
+        // it is where that port is, and where the reason is when it does not
+        // come up.
+        let log = root.join("remoted.log");
         let remoted = Command::new(bin("rime-remoted"))
             .args([
                 "--port",
-                &port.to_string(),
+                "0",
                 "--allow-foreground",
                 // The real deadline is thirty seconds, which is right for a
                 // phone waking its radio and wrong for a suite that runs on
@@ -209,34 +206,46 @@ impl Harness {
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(&log).ok()?)
             .spawn()
             .ok()?;
         let remoted_socket = runtime.join("rime-remoted").join("control.sock");
 
-        let h = Harness {
+        let mut h = Harness {
             agentd,
             remoted,
             root,
             agentd_socket,
             remoted_socket,
-            port,
+            port: 0,
         };
-        h.wait_ready().then_some(h)
+        match h.wait_ready(&log) {
+            Ok(port) => {
+                h.port = port;
+                Some(h)
+            }
+            Err(why) => {
+                eprintln!("{why}");
+                None
+            }
+        }
     }
 
-    fn wait_ready(&self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(15);
+    /// Both daemons answer; the port `rime-remoted` got.
+    fn wait_ready(&mut self, log: &std::path::Path) -> Result<u16, String> {
+        let within = Duration::from_secs(15);
+        let deadline = Instant::now() + within;
+        let port = common::remoted_port(&mut self.remoted, &self.remoted_socket, log, within)?;
         while Instant::now() < deadline {
-            let agentd = UnixStream::connect(&self.agentd_socket).is_ok();
-            let remoted = UnixStream::connect(&self.remoted_socket).is_ok();
-            let listening = TcpStream::connect(("127.0.0.1", self.port)).is_ok();
-            if agentd && remoted && listening {
-                return true;
+            if let Ok(Some(status)) = self.agentd.try_wait() {
+                return Err(format!("rime-agentd exited ({status})"));
+            }
+            if UnixStream::connect(&self.agentd_socket).is_ok() {
+                return Ok(port);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        false
+        Err("rime-agentd did not come up in 15 s".to_string())
     }
 
     /// One request on `rime-remoted`'s local control socket.
@@ -277,6 +286,7 @@ macro_rules! harness {
         match Harness::start($tag) {
             Some(h) => h,
             None => {
+                // Harness::start printed the reason above this line.
                 eprintln!("SKIP: the daemons did not come up in this environment");
                 return;
             }
