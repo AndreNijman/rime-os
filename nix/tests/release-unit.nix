@@ -145,6 +145,24 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
       && (github.event_name" \
     "github.ref == 'refs/heads/main' || true
       && (github.event_name"
+  # The same restriction written without spaces or with the operands swapped is still main-only: refusing it was a
+  # false refusal (wave 4 integration). Each rewrite must PASS; the exact-text checker before the fix refused both.
+  waccept() {
+    local name="$1" old="$2" new="$3"
+    OLD="$old" NEW="$new" python3 -c '
+import os, sys
+s = open("wf/nix-release.yml").read()
+if os.environ["OLD"] not in s:
+    sys.exit("pattern not found")
+open("acc.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]))' \
+      || { echo "FAIL: workflow rewrite $name: pattern not found"; exit 1; }
+    cp acc.yml wf-acc-nix-release.yml
+    python3 rel/check_workflow.py wf-acc-nix-release.yml >/dev/null \
+      || { echo "FAIL: workflow rewrite '$name' (still main-only) was refused"; exit 1; }
+    echo "accepted: $name"
+  }
+  waccept "main written without spaces" "if: github.ref == 'refs/heads/main' &&" "if: github.ref=='refs/heads/main' &&"
+  waccept "main with the operands swapped" "if: github.ref == 'refs/heads/main' &&" "if: github.event_name != 'pull_request' && 'refs/heads/main' == github.ref &&"
   wmutant "an input expanded into a script" '          case "$CHANNEL" in' '          echo "''${{ inputs.reason }}"
           case "$CHANNEL" in'
   # The concurrency expressions hold single quotes and GitHub expressions, so they are built in single quotes.

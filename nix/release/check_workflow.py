@@ -102,7 +102,17 @@ def main_only(cond):
     e = _bare(cond)
     if not e or not _balanced(e) or len(_top_level(e, "||")) != 1:
         return False
-    return any(_bare(t) == MAIN_ONLY for t in _top_level(e, "&&"))
+    return any(_is_main_term(_bare(t)) for t in _top_level(e, "&&"))
+
+
+# The same comparison written without spaces or with the operands swapped (GitHub expressions take single-quoted
+# strings only). Decision (wave 4 integration): these are the same restriction, so refusing them was a false refusal;
+# the match is still exact, so `refs/heads/main-x` or a negation never passes.
+_MAIN_TERM_RE = re.compile(r"github\.ref\s*==\s*'refs/heads/main'|'refs/heads/main'\s*==\s*github\.ref")
+
+
+def _is_main_term(term):
+    return _MAIN_TERM_RE.fullmatch(term) is not None
 
 
 def hosted(runs_on):
