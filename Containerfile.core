@@ -388,6 +388,75 @@ RUN set -eux; \
     cat /out/scx/versions; \
     cd /; rm -rf "/build/scx-loader-${SCX_LOADER_VERSION}" /tmp/scx-loader.tar.gz /build/.cargo
 
+# ── plymouth-builder: Fedora's plymouth, rebuilt with one fix ───────────────
+# plymouthd (it runs from the initramfs and stays up until the session starts)
+# crashed with SIGSEGV when it hid the splash on machines where the initramfs
+# draws on simpledrm and, after that, a DRM device with no usable display
+# appears (a render-only GPU, e.g. the second GPU of a hybrid laptop):
+# plymouth frees every simpledrm renderer before it opens the new device.
+# free_keyboards_for_renderer() frees that renderer's keyboard without calling
+# the keyboard_removed_handler (the pixel displays next to it get theirs). When
+# the new device opens, its keyboard replaces the freed one; when it does not
+# ("Could not get card resources"), the splash plugin keeps the freed keyboard.
+# Only the SCRIPT plugin, Rime's theme, removes a handler from it on hide:
+# ply_keyboard_remove_input_handler <- stop_script_animation <-
+# hide_splash_screen. Result: plymouth-start.service "failed (core-dump)" on
+# every boot of those machines. Upstream main has the same code (checked
+# 2026-11-03); files/system/src/plymouth/README.md has the evidence.
+#
+# The source is Fedora's own SRPM for the build the image used to install
+# (sha256-pinned), with its two patches, plus ours. The release gains
+# `.rime1` (6.rime1.fc45 sorts above 6.fc45), and Containerfile.rime refuses
+# an initramfs built from any other plymouth, so a later dnf transaction that
+# swaps in a newer Fedora build fails the build instead of shipping the crash.
+#
+# When Fedora ships a newer plymouth: set PLYMOUTH_NVR to it and
+# PLYMOUTH_SRPM_SHA256 to its SRPM's sha256 (kojipkgs, the URL below), and
+# rebuild; the build stops at "rpmbuild -bp" if the patch no longer applies,
+# and at the prepared-source check if it applies but loses the fix. Drop the
+# patch once Fedora's build has the handler call in free_keyboards_for_renderer.
+FROM quay.io/fedora/fedora-bootc:45 AS plymouth-builder
+ARG PLYMOUTH_NVR=plymouth-26.134.222-6.fc45
+ARG PLYMOUTH_SRPM_SHA256=c2a0668c9cb1b8edf5f3d7891c3e2f5dcbc74a6498f1f5dd2e0beef6dc3b6d24
+COPY files/system/src/plymouth/plymouth-keyboard-removed-handler.patch /build/
+RUN set -eux; \
+    sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
+    dnf5 -y install rpm-build 'dnf5-command(builddep)' >/dev/null; \
+    V="${PLYMOUTH_NVR#plymouth-}"; VER="${V%-*}"; REL="${V##*-}"; \
+    curl -fsSL --retry 3 -o "/build/${PLYMOUTH_NVR}.src.rpm" \
+      "https://kojipkgs.fedoraproject.org/packages/plymouth/${VER}/${REL}/src/${PLYMOUTH_NVR}.src.rpm"; \
+    echo "${PLYMOUTH_SRPM_SHA256}  /build/${PLYMOUTH_NVR}.src.rpm" | sha256sum -c -; \
+    T=/build/topdir; \
+    rpm -i --define "_topdir ${T}" "/build/${PLYMOUTH_NVR}.src.rpm"; \
+    cp /build/plymouth-keyboard-removed-handler.patch "${T}/SOURCES/"; \
+    SPEC="${T}/SPECS/plymouth.spec"; \
+    grep '^Release: %autorelease$' "${SPEC}" >/dev/null \
+        || { echo "FATAL: plymouth.spec Release line changed; re-check the .rime1 suffix"; exit 1; }; \
+    sed -i 's/^Release: %autorelease$/Release: %autorelease -e rime1/' "${SPEC}"; \
+    # after the last Fedora patch (the spec applies them in order with %autosetup -p1)
+    LAST="$(grep -n '^Patch' "${SPEC}" | tail -n 1 | cut -d: -f1)"; \
+    test -n "${LAST}"; \
+    sed -i "${LAST}a Patch: plymouth-keyboard-removed-handler.patch" "${SPEC}"; \
+    dnf5 -y builddep "${SPEC}" >/dev/null; \
+    # %prep alone first: the fix must be in the source that gets compiled, not
+    # only in SOURCES (rpmbuild -bb removes its build tree when it succeeds)
+    if ! rpmbuild --define "_topdir ${T}" -bp "${SPEC}" >/dev/null; then \
+        echo "FATAL: rpmbuild -bp failed: does the patch still apply to ${PLYMOUTH_NVR}? (errors above)"; exit 1; \
+    fi; \
+    grep 'keyboard_removed_handler (manager->event_handler_data, keyboard)' \
+        $(find "${T}/BUILD" -path '*/src/libply-splash-core/ply-device-manager.c') >/dev/null \
+        || { echo "FATAL: the keyboard-removed patch is not in the prepared source"; exit 1; }; \
+    if ! rpmbuild --define "_topdir ${T}" --define "_smp_mflags -j$(nproc)" -bb "${SPEC}"; then \
+        echo "FATAL: rpmbuild -bb of the patched ${PLYMOUTH_NVR} failed (compiler output above)"; exit 1; \
+    fi; \
+    mkdir -p /out/plymouth; \
+    for p in plymouth plymouth-core-libs plymouth-graphics-libs plymouth-scripts \
+             plymouth-plugin-script plymouth-plugin-label; do \
+        cp "${T}/RPMS/x86_64/${p}-${VER}-${REL%.fc45}.rime1.fc45.x86_64.rpm" /out/plymouth/; \
+    done; \
+    ls -l /out/plymouth; \
+    cd /; rm -rf /build
+
 
 # ─────────────────────────────────────────────────────────────────────────
 FROM quay.io/fedora/fedora-bootc:45
@@ -2177,9 +2246,27 @@ RUN set -eux; \
 # ships label-pango.so and label-freetype.so; plymouth-populate-initrd copies
 # only the freetype one into the initramfs, with the default font linked as
 # usr/share/fonts/Plymouth.ttf (+1.3 MB). Containerfile.rime asserts both.
+#
+# The packages are the plymouth-builder stage's rebuild of Fedora's (the
+# keyboard-removed fix, see that stage), installed as local files so dnf
+# cannot pick Fedora's build of the same version. A later dnf transaction
+# could still swap in a NEWER Fedora build; Containerfile.rime refuses to
+# build the initramfs from anything but this one.
+#
+# --nogpgcheck for the same reason as the kernel RPMs above: these are local
+# files this build made, with no repo signature to check (RPM 6 refuses them
+# unsigned). What stands in for one: the SRPM's pinned sha256 and the patch in
+# this repository, both checked in the plymouth-builder stage.
+COPY --from=plymouth-builder /out/plymouth/ /tmp/rime-plymouth/
 RUN set -eux; \
-    dnf5 -y install plymouth plymouth-scripts plymouth-plugin-script plymouth-plugin-label; \
-    dnf5 clean all
+    dnf5 -y --nogpgcheck install /tmp/rime-plymouth/*.rpm; \
+    rm -rf /tmp/rime-plymouth; \
+    dnf5 clean all; \
+    for p in plymouth plymouth-core-libs plymouth-graphics-libs plymouth-scripts \
+             plymouth-plugin-script plymouth-plugin-label; do \
+        rpm -q --qf '%{RELEASE}\n' "$p" | grep -E '\.rime[0-9]+\.fc[0-9]+$' >/dev/null \
+            || { echo "FATAL: $p is not Rime's plymouth build: $(rpm -q "$p")"; exit 1; }; \
+    done
 
 # ── efibootmgr: an EXPLICIT dependency of the Windows-boot helper ──────────
 # The power menu's "Boot into Windows" button (wired up in Containerfile.base)

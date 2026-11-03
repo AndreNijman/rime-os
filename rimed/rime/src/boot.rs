@@ -63,6 +63,20 @@ pub enum BootCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Move this machine from GRUB to systemd-boot, in place. Requires root.
+    ///
+    /// Runs only when asked: `rime update` no longer does this on its own.
+    /// Refused, with the reason named, when the machine is unhealthy right now
+    /// (a failed unit, or a regression `rime recover status` reports), when
+    /// an earlier attempt's trial boot did not come up (re-arm that with
+    /// `rime-boot-migrate retry`), or when the engine's own precheck refuses
+    /// (`rime-boot-migrate precheck --explain` lists every check). Nothing
+    /// changes what boots until one BootNext write, and if the new path does
+    /// not come up the boot after it is GRUB again.
+    ///
+    /// Exit status: 0 migrated or nothing to do, 10 refused, anything else
+    /// failed with nothing committed.
+    Migrate,
 }
 
 /// Where the report reads from.
@@ -522,10 +536,11 @@ fn print_human(r: &Value) {
             // leaving a reader to wonder which half is broken.
             println!(
                 "Boot counting  : not in effect — this machine boots via {}, which has no \n\
-                 \x20                boot counter. Rime is moving to systemd-boot: `sudo rime\n\
-                 \x20                update` migrates this machine in place when it can be done\n\
-                 \x20                safely, and `rime-boot-migrate precheck` says why not when\n\
-                 \x20                it cannot. Until then this is the normal state, not a fault.",
+                 \x20                boot counter. Rime is moving to systemd-boot:\n\
+                 \x20                `sudo rime boot migrate` moves this machine in place when\n\
+                 \x20                you ask, it is healthy and it can be done safely, and\n\
+                 \x20                `rime-boot-migrate precheck` says why not when it cannot.\n\
+                 \x20                Until then this is the normal state, not a fault.",
                 s(&["bootloader"])
             );
         }
@@ -651,6 +666,7 @@ pub fn boot_main(cmd: BootCmd) -> i32 {
             }
             0
         }
+        BootCmd::Migrate => crate::ops::boot_migrate_command(),
     }
 }
 

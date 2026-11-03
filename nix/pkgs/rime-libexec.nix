@@ -92,6 +92,8 @@ let
     "rime-migrate-from-apex"
     "rime-session-migrate"
     "rime-vconsole-guard"
+    # bootc's rime-sysext-rebuild failure notice: NixOS has no package extension to rebuild.
+    "rime-pkg-notice"
   ];
 
   # Shipped by another Rime module, which owns the one copy on the system profile (buildEnv picks a winner

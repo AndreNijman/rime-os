@@ -805,7 +805,7 @@ fn stream(zstd: &str, zargs: &[String], nix: &str, nargs: &[String], fifo: &Path
     }
     let dec = decoder.wait().map_err(|e| e.to_string())?;
     let dec_err = dec_err.and_then(|t| t.join().ok()).unwrap_or_default();
-    let tail = |s: &str| s.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("").to_string();
+    let tail = |s: &str| s.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").to_string();
     if problem.is_none() && !dec.success() {
         problem = Some(format!("zstd could not rebuild the NAR: {}", tail(&dec_err)));
     }

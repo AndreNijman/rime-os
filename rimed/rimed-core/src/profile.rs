@@ -7,7 +7,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-use crate::tier::{Action, Tier};
+use crate::tier::{Action, MinFreq, Tier};
 use crate::topology::{CoreSource, CoreTopology};
 
 /// Where the profile classifies in the layered selection hierarchy.
@@ -39,6 +39,79 @@ pub struct TierSettings {
     /// sustain: katana's are 38 W / 45 W for an i7-12700H rated 45 W / 115 W,
     /// and that alone halved a CPU-bound game's frame rate.
     pub cpu_power_limit_w: Option<[u32; 2]>,
+    /// CPU boost (AMD Core Performance Boost / Intel Turbo) in this tier.
+    /// Omitted = left alone. A profile that sets it sets it in EVERY tier
+    /// (checked at load), so each tier stays a complete state assertion.
+    #[serde(default)]
+    pub cpu_boost: Option<bool>,
+    /// The `scaling_min_freq` floor in this tier (`cpuinfo_min` or
+    /// `lowest_nonlinear`). All tiers or none, like `cpu_boost`.
+    #[serde(default)]
+    pub cpu_min_freq: Option<MinFreq>,
+}
+
+/// The input-triggered UI boost (`org.rimeos.Rimed1.Ui.Boost`): which
+/// `energy_performance_preference` an animation gets, and in which tiers.
+///
+/// The tier's own settings are never changed. For the length of one animation
+/// (capped by the daemon) every policy's EPP is raised to `epp`, then the
+/// tier's own EPP is written back. A tier whose EPP already performs at least
+/// as well, or whose governor is `performance` (amd-pstate pins EPP there), is
+/// left alone: the call answers 0 ms and writes nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiBoostConfig {
+    #[serde(default = "ui_boost_enabled")]
+    pub enabled: bool,
+    #[serde(default = "ui_boost_epp")]
+    pub epp: String,
+    #[serde(default = "ui_boost_tiers")]
+    pub tiers: Vec<Tier>,
+}
+
+fn ui_boost_enabled() -> bool {
+    true
+}
+fn ui_boost_epp() -> String {
+    "balance_performance".to_string()
+}
+fn ui_boost_tiers() -> Vec<Tier> {
+    vec![Tier::Balanced]
+}
+
+impl Default for UiBoostConfig {
+    /// Balanced only, to `balance_performance`: the value power-profiles-daemon
+    /// itself gives balanced on AC. Power-saver is never boosted by default — a
+    /// user who picked it asked for the battery over the animation.
+    fn default() -> Self {
+        UiBoostConfig {
+            enabled: ui_boost_enabled(),
+            epp: ui_boost_epp(),
+            tiers: ui_boost_tiers(),
+        }
+    }
+}
+
+/// How strongly an `energy_performance_preference` value favours performance:
+/// 0 = `performance` .. 3 = `power`. `None` for a value outside the four
+/// canonical strings (`default`, a raw 0-255 number), which the boost treats
+/// as "cannot compare, do not touch".
+pub fn epp_rank(epp: &str) -> Option<u8> {
+    match epp.trim().to_ascii_lowercase().as_str() {
+        "performance" => Some(0),
+        "balance_performance" => Some(1),
+        "balance_power" => Some(2),
+        "power" => Some(3),
+        _ => None,
+    }
+}
+
+/// The two halves of one UI boost: what to write when it starts and what puts
+/// the tier back when it ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiBoostPlan {
+    pub boost: Vec<Action>,
+    pub restore: Vec<Action>,
 }
 
 /// Default tier for AC and battery, used by the daemon's auto-switch.
@@ -431,6 +504,9 @@ pub struct Profile {
     /// M6 game-mode policy. Absent in pre-M6 profiles; defaults apply.
     #[serde(default)]
     pub gamemode: Option<GameModeConfig>,
+    /// The UI boost. Absent = [`UiBoostConfig::default`].
+    #[serde(default)]
+    pub ui_boost: Option<UiBoostConfig>,
 }
 
 impl Profile {
@@ -442,6 +518,31 @@ impl Profile {
             if !p.tiers.contains_key(&tier) {
                 bail!("profile '{}' is missing tier '{}'", p.id, tier);
             }
+        }
+        // A knob set in only some tiers would leave the previous tier's value
+        // behind in the others, and a tier is a complete state assertion.
+        let boost_set = p.tiers.values().filter(|t| t.cpu_boost.is_some()).count();
+        let floor_set = p.tiers.values().filter(|t| t.cpu_min_freq.is_some()).count();
+        for (knob, n) in [("cpu_boost", boost_set), ("cpu_min_freq", floor_set)] {
+            if n != 0 && n != p.tiers.len() {
+                bail!(
+                    "profile '{}': {knob} is set in {n} of {} tiers; set it in every tier or none",
+                    p.id,
+                    p.tiers.len()
+                );
+            }
+        }
+        if let Some(b) = &p.ui_boost {
+            if epp_rank(&b.epp).is_none() {
+                bail!(
+                    "profile '{}': ui_boost.epp = {:?} is not one of performance, \
+                     balance_performance, balance_power, power",
+                    p.id,
+                    b.epp
+                );
+            }
+        }
+        for tier in Tier::ALL {
             // A typo here is written straight into the CPU's power limits, so
             // it is refused at load, not discovered as a hot or slow machine.
             if let Some([pl1, pl2]) = p.tiers[&tier].cpu_power_limit_w {
@@ -492,6 +593,12 @@ impl Profile {
         if let Some(p) = &s.platform_profile {
             actions.push(Action::PlatformProfile(p.clone()));
         }
+        if let Some(on) = s.cpu_boost {
+            actions.push(Action::CpuBoost(on));
+        }
+        if let Some(floor) = s.cpu_min_freq {
+            actions.push(Action::CpuMinFreq(floor));
+        }
         // Only a profile that holds power limits in SOME tier hands them back
         // in the others; every other profile's plans are unchanged.
         match s.cpu_power_limit_w {
@@ -509,6 +616,45 @@ impl Profile {
     /// left over from the previous tier that needs tearing down.
     pub fn plan_transition(&self, _from: Option<Tier>, to: Tier) -> Vec<Action> {
         self.plan_tier(to)
+    }
+
+    /// The profile's UI-boost policy, or the shipped default.
+    pub fn ui_boost_config(&self) -> UiBoostConfig {
+        self.ui_boost.clone().unwrap_or_default()
+    }
+
+    /// The UI boost for `tier`, or `None` when this tier must not be boosted.
+    ///
+    /// Pure, like [`Profile::plan_tier`]. `None` when the boost is disabled,
+    /// when the tier is not listed, when the tier sets no EPP (there would be
+    /// nothing exact to put back), when its governor is `performance` (the
+    /// driver pins EPP there and refuses writes), and when the tier's EPP
+    /// already favours performance at least as much as the boost would.
+    ///
+    /// `restore` is the tier's OWN EPP action, the same one [`Profile::plan_tier`]
+    /// emits, so ending a boost lands exactly where applying the tier lands.
+    pub fn ui_boost_plan(&self, tier: Tier) -> Option<UiBoostPlan> {
+        let cfg = self.ui_boost_config();
+        if !cfg.enabled || !cfg.tiers.contains(&tier) {
+            return None;
+        }
+        let s = self.tier(tier);
+        let tier_epp = s.epp.as_ref()?;
+        if s
+            .governor
+            .as_deref()
+            .is_some_and(|g| g.eq_ignore_ascii_case("performance"))
+        {
+            return None;
+        }
+        let (have, want) = (epp_rank(tier_epp)?, epp_rank(&cfg.epp)?);
+        if have <= want {
+            return None;
+        }
+        Some(UiBoostPlan {
+            boost: vec![Action::Epp(cfg.epp.clone())],
+            restore: vec![Action::Epp(tier_epp.clone())],
+        })
     }
 
     /// The profile's fan policy, or the shipped defaults when it declares none.

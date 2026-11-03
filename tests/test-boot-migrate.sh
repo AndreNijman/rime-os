@@ -422,13 +422,44 @@ grep -q 'ExecStart=/usr/libexec/rime-boot-migrate confirm' "$UNIT" \
     || bad "the unit runs something other than 'rime-boot-migrate confirm'"
 
 # ═════════════════════════════════════════════════════════════════════════════
-sec "rime update runs it, and a refusal does not stop the update"
-grep -q 'fn migrate_boot_path' "$OPS" \
+sec "rime runs it only when asked, and a refusal does not stop the update"
+# 2026-11-01: `rime update` no longer migrates on its own. The decision is
+# migration_gate's (unit-tested in ops.rs, behaviour in test-rime-live.sh);
+# what this static check guards is that nothing reaches the engine around it.
+OPS_CODE="$TMP/ops.rs"
+# Line comments off, so the long history comment cannot satisfy a grep.
+sed 's|//.*$||' "$OPS" > "$OPS_CODE"
+grep -q 'fn migration_gate' "$OPS_CODE" \
+    && ok "ops.rs has the migration gate" \
+    || bad "ops.rs has no migration gate"
+grep -q 'fn run_migration_engine' "$OPS_CODE" \
     && ok "ops.rs has the migration step" \
-    || bad "rime update does not call the migration"
-grep -q 'Ok(10) =>' "$OPS" \
+    || bad "rime has no way to run the migration"
+# The engine is reached from exactly one place, and that place is the gate's
+# Run arm. A second call — say, straight from update() — would be the
+# 2026-09-20 automatic migration back again.
+calls="$(grep -c 'run_migration_engine()' "$OPS_CODE" || true)"
+[[ "$calls" == 2 ]] \
+    && ok "the engine runner is defined once and called once" \
+    || bad "run_migration_engine() appears $calls times (want: definition + one call)"
+grep -q 'MigrationGate::Run => run_migration_engine(),' "$OPS_CODE" \
+    && ok "the only call is the gate's Run arm" \
+    || bad "the engine is called somewhere other than the gate's Run arm"
+grep -c 'run(ENGINE' "$OPS_CODE" | pipe_has -x 1 \
+    && ok "the engine binary is executed in exactly one place" \
+    || bad "the engine binary is executed in more than one place"
+grep -q 'boot_migration(opts.migrate_boot)' "$OPS_CODE" \
+    && ok "rime update passes the user's --migrate-boot, not a constant" \
+    || bad "rime update does not tie the migration to --migrate-boot"
+grep -q 'Ok(10) =>' "$OPS_CODE" \
     && ok "ops.rs treats exit 10 (refused) as 'carry on'" \
     || bad "a refusal is not distinguished from a failure"
+grep -q 'const BOOT_MIGRATE_STATE: &str = "/var/lib/rime/boot-migrate";' "$OPS_CODE" \
+    && ok "rime reads the phase from the engine's own state directory" \
+    || bad "rime reads the phase from somewhere the engine does not write"
+grep -q '^STATE="${RIME_MIGRATE_STATE:-/var/lib/rime/boot-migrate}"' "$MIG" \
+    && ok "and that is where the engine keeps it" \
+    || bad "the engine's state directory moved: rime's phase read would miss it"
 # Instead of, not as well as: an ostree deployment staged in the same
 # invocation would give one shutdown two finalize paths.
 if grep -q 'return finish_update(started, worst, &opts);' "$OPS"; then
@@ -465,8 +496,8 @@ if [[ "$rc" == 3 ]]; then
 else
     bad "auto on a confirmed machine exits $rc — rime update would print a refusal forever"
 fi
-grep -q 'Ok(3) => false' "$OPS" \
-    && ok "rime update treats exit 3 as silence" \
+grep -q 'Ok(3) => MIGRATION_NOTHING_DONE,' "$OPS" \
+    && ok "rime treats exit 3 as nothing done, silently" \
     || bad "rime update does not handle the 'nothing to do' code"
 
 # 2. Two updates in one boot must not re-run the install.

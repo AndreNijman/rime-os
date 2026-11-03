@@ -62,6 +62,7 @@ const BOOTC: &[(&str, &str)] = &[
     ("SAFE_PATH", "/usr/local/bin:/usr/bin:/bin"),
     ("MINIMAL_PATH", "/usr/bin:/bin"),
     ("AID_SANDBOX_PATH", "/usr/bin:/usr/sbin"),
+    ("AID_PROBE_PROGRAM", "/usr/bin/true"),
 ];
 
 #[test]

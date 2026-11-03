@@ -1056,6 +1056,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/check-core-rebuild-selector.sh
 
+      # docs/update-cost.md quotes what tools/update-cost-backtest.py prints
+      # from the ledger committed in docs/update-cost/. This re-runs the report
+      # offline and fails if a quoted figure moved, plus the script's fixture.
+      - name: The update-cost backtest reproduces the documented figures
+        if: ${{ !cancelled() }}
+        run: ./tests/test-update-cost-backtest.sh
+
   static-windows:
     name: Static validation — Windows installer
     runs-on: ubuntu-24.04
@@ -1935,6 +1942,26 @@ jobs:
           ./tests/test-rime-live.sh
           ./tests/test-rime-live-session.sh
 
+      # The UI boost and the one-writer power-profiles facade, end to end: the
+      # built rimed on a private system bus (fake logind + polkit) over a fake
+      # sysfs, inside `unshare -Urmn`. Boost raises EPP and restores it exactly,
+      # the 600 ms cap, release on disconnect, other users / remote sessions
+      # refused, the Hyprland event watcher, and the real power-profiles-daemon
+      # never getting its names while rimed holds them. Built explicitly first:
+      # a restored cache can hold a stale binary. REQUIRE turns skips (no
+      # namespace, no PPD) into failures.
+      - name: Run UI boost + one-writer assertions
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          RIME_TEST_REQUIRE_UI_BOOST: '1'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends dbus-daemon power-profiles-daemon python3-gi
+          cargo build --locked --manifest-path rimed/Cargo.toml -p rimed -p rime --bins --examples
+          ./tests/test-rimed-ui-boost.sh
+
       # §21's Task. It belongs in this job rather than `engine` because it
       # drives the built `rime` binary, and this is the only job with a Rust
       # toolchain and a warm cargo cache.
@@ -1966,6 +1993,26 @@ jobs:
           # A missing binary must be a hard failure, not a skip.
           test -x "$RIME_BIN"
           ./tests/test-rime-task.sh
+
+      # rime-aid fails closed: the built daemon, in a private user + mount
+      # namespace, with /usr/bin/bwrap hidden, made non-executable and replaced
+      # by one that cannot build namespaces. Each must refuse to start and leave
+      # no socket; the real bwrap (installed and unblocked at the top of this
+      # job) is the positive control. RIME_TEST_REQUIRE_BWRAP turns the suite's
+      # skip into a failure here, because a skipped sandbox check is the one
+      # that matters most. Built explicitly first for the stale-cache reason
+      # the §21 step above gives.
+      - name: rime-aid refuses to start without its sandbox
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          AID_BIN: ${{ github.workspace }}/rimed/target/debug/rime-aid
+          RIME_TEST_REQUIRE_BWRAP: "1"
+        run: |
+          set -euo pipefail
+          cargo build -p rime-aid --locked --bin rime-aid --manifest-path rimed/Cargo.toml
+          test -x "$AID_BIN"
+          ./tests/test-rime-aid-fails-closed.sh
 
       # ── LAST IN THIS JOB, DELIBERATELY ──────────────────────────────────
       # A failed step skips every step BELOW it in the same job, and this
@@ -2325,7 +2372,10 @@ jobs:
       # The boot must not wait for the network to decide that nothing needs
       # rebuilding: the unit carries no network-online.target ordering and the
       # engine waits for the network itself only when it has to download.
-      - name: Run boot-time network-wait assertions for the sysext rebuild unit
+      # And a rebuild that cannot happen (offline, or refused) must not hold
+      # the desktop: it ends at once, non-zero, with a note the session turns
+      # into a notice. Broken engines are run and must be caught.
+      - name: Run boot-time network-wait and refusal assertions for the sysext rebuild unit
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-sysext-boot-wait.sh
 
@@ -2431,6 +2481,21 @@ jobs:
       - name: Run shell-launcher assertions
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-shell-autostart.sh
+
+      # The weekly TRIM wrapper, with fstrim stubbed: it lists every mounted
+      # filesystem (fstab or not), trims one again when system sleep
+      # interrupted it ("Unknown error 512"), and lets real errors fail.
+      - name: Run fstrim-wrapper assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-fstrim.sh
+
+      # plymouthd crashed hiding the splash when the display driver came up
+      # after the initramfs; the image ships Fedora's plymouth rebuilt with
+      # the fix. Static: the patch, the build that applies it, and the guards
+      # that refuse any other plymouth.
+      - name: Run plymouth keyboard-fix assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-plymouth-keyboard.sh
 
       - name: Run input-settings assertions
         if: ${{ !cancelled() }}
@@ -4631,10 +4696,13 @@ jobs:
             files/system/libexec/rime-screen-reader \
             files/system/libexec/rime-gpu-notice \
             tests/test-rime-gpu-notice.sh \
+            files/system/libexec/rime-pkg-notice \
+            tests/test-rime-sysext-boot-wait.sh \
             files/system/libexec/rime-update-check \
             files/system/libexec/rime-update-notice \
             files/system/libexec/rime-live-session \
             tests/test-rime-live.sh tests/test-rime-live-session.sh \
+            tests/test-rimed-ui-boost.sh \
             tests/test-rime-update-notice.sh \
             tests/test-rime-recover.sh \
             tests/test-rime-pkg.sh tests/test-rime-deb.sh \
@@ -4643,6 +4711,8 @@ jobs:
             tests/test-rime-firstrun.sh \
             tests/test-rime-shell-autostart.sh \
             files/system/libexec/rime-shell-autostart \
+            tests/test-rime-fstrim.sh files/system/libexec/rime-fstrim \
+            tests/test-rime-plymouth-keyboard.sh \
             files/system/libexec/rime-secrets-start \
             tests/test-rime-secrets-start.sh tests/test-rime-secrets-guard.sh \
             tests/test-rime-keyring-session-start.sh \
@@ -4651,6 +4721,7 @@ jobs:
             tests/test-rime-modes.sh tests/test-rime-plugin.sh \
             tests/test-rime-host.sh tests/test-rime-dispatch.sh \
             tests/test-rime-ai.sh tests/test-rime-env-devices-live.sh \
+            tests/test-rime-aid-fails-closed.sh \
             tests/test-rime-greet-sessions.sh \
             tests/test-rime-session-watchdog.sh \
             files/system/libexec/rime-session-watchdog \

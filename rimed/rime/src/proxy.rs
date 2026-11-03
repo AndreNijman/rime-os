@@ -142,3 +142,21 @@ pub async fn daemon_running(conn: &zbus::Connection) -> bool {
         Err(_) => false,
     }
 }
+
+#[proxy(
+    interface = "org.rimeos.Rimed1.Ui",
+    default_service = "org.rimeos.Rimed1",
+    default_path = "/org/rimeos/Rimed1"
+)]
+pub trait Ui {
+    /// Ask for `ms` of UI boost; answers the milliseconds it now lasts.
+    fn boost(&self, ms: u32) -> zbus::Result<u32>;
+    /// The same call without waiting for the answer (NO_REPLY_EXPECTED): what
+    /// an input handler uses, so the animation never waits on the bus.
+    #[zbus(name = "Boost", no_reply)]
+    fn boost_no_reply(&self, ms: u32) -> zbus::Result<()>;
+    #[zbus(property)]
+    fn active(&self) -> zbus::Result<bool>;
+    #[zbus(property)]
+    fn lever(&self) -> zbus::Result<String>;
+}

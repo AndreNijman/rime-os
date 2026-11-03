@@ -19,3 +19,7 @@ serde.workspace = true
 zbus.workspace = true
 zvariant.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# `test-util`: the UI boost timer tests run on tokio's paused clock.
+tokio = { workspace = true, features = ["test-util"] }

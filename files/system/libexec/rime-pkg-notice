@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-pkg-notice — tell the user once per boot that their installed packages
+#  could not be rebuilt for this OS, and what to run.
+#
+#  rime-sysext-rebuild.service (root) rebuilds the user package extension when
+#  an update changed what it was built against. When that rebuild cannot
+#  happen (offline, or no build of the set fits the image) it stops at once so
+#  the desktop is not held, and writes /run/rime-pkg/rebuild:
+#
+#      state=failed
+#      reason=offline|refused
+#      boot=<boot id>
+#
+#  This USER unit (notify-send needs the session bus) runs from a timer two
+#  minutes into the session, when the Shell's notification server is up, reads
+#  that file and says it. Nothing else.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#
+#  * Repeat itself within a boot. A second login does not hear it again; the
+#    next boot does, because the packages are still missing then.
+#  * Speak for a rebuild that worked: every successful build removes the file,
+#    and /run starts empty at every boot.
+#  * Guess. An unknown reason or a half-written file says nothing.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+NOTE="${RIME_PKG_REBUILD_NOTICE:-/run/rime-pkg/rebuild}"
+SEEN_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rime"
+SEEN="$SEEN_DIR/pkg-notice.seen"
+
+log() { printf 'rime-pkg-notice: %s\n' "$*" >&2; }
+
+[[ -r "$NOTE" ]] || exit 0
+
+state="" reason="" boot=""
+while IFS='=' read -r k v; do
+    case "$k" in
+        state)  state="$v" ;;
+        reason) reason="$v" ;;
+        boot)   boot="$v" ;;
+    esac
+done < "$NOTE"
+
+[[ "$state" == failed && -n "$boot" ]] || exit 0
+
+title="Your installed apps are not available"
+case "$reason" in
+    offline)
+        body="Rime needed to rebuild them for this version, and this computer was offline when it started. Connect to the internet, then run: sudo rime pkg rebuild" ;;
+    refused)
+        body="Rime could not rebuild them for this version: the package repositories do not offer a build that fits it yet, or a download failed. Run: sudo rime pkg rebuild to see which package is in the way." ;;
+    *)
+        log "unknown reason '${reason}'; saying nothing"
+        exit 0 ;;
+esac
+
+key="${boot} ${reason}"
+[[ -f "$SEEN" && "$(cat "$SEEN")" == "$key" ]] && exit 0
+
+if command -v notify-send >/dev/null 2>&1; then
+    # Recorded only once it was shown: a notification server that was not up
+    # yet is not the user having been told.
+    notify-send --app-name='Rime OS' --urgency=normal --icon=system-software-install \
+        "$title" "$body" || { log "notify-send failed"; exit 0; }
+else
+    log "no notify-send; printing instead"
+fi
+printf '%s. %s\n' "$title" "$body"
+mkdir -p "$SEEN_DIR"
+printf '%s\n' "$key" > "$SEEN"
+exit 0

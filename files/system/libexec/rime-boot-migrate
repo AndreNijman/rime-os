@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
 #  rime-boot-migrate — move a running Rime machine from ostree + GRUB to
-#  composefs + systemd-boot, in place, through `rime update`, without ever
-#  leaving the machine unbootable.
+#  composefs + systemd-boot, in place, through `rime boot migrate`, without
+#  ever leaving the machine unbootable.
+#
+#  ═══ ONLY WHEN ASKED (2026-11-01) ═══
+#
+#  Until 2026-11-01 `rime update` ran `auto` on every update, with no flag, as
+#  the rule quoted below asked. That automatic run is paused: it migrated a
+#  real machine whose trial boot did not come up (phase=failed), and Rime's
+#  next platform does not build on this chain. `rime` now runs `auto` only
+#  when the user asked (`rime boot migrate`, `rime update --migrate-boot`) and
+#  the machine is healthy right now (rimed/rime/src/ops.rs, migration_gate).
+#  Nothing in this script changed for that: the gate is in front of it.
 #
 #  ═══ WHY THIS EXISTS ═══
 #
@@ -78,11 +88,12 @@
 #                                   every check, not just the first refusal
 #      rime-boot-migrate stage      write the new path; change no boot variable
 #      rime-boot-migrate commit     the single atomic write (needs a stage)
-#      rime-boot-migrate auto       precheck + stage + commit (what rime update runs)
+#      rime-boot-migrate auto       precheck + stage + commit (what rime boot migrate runs)
 #      rime-boot-migrate confirm    make it the default (runs after a good boot)
 #      rime-boot-migrate abort      discard an uncommitted stage
 #
-#  Test hooks, read by nothing but tests/test-boot-migrate.sh:
+#  Test hooks, read by nothing but the tests (RIME_MIGRATE_STATE is also
+#  honoured by `rime` itself, so its phase read and this script agree):
 #      RIME_MIGRATE_ROOT     alternative /sysroot
 #      RIME_MIGRATE_STATE    alternative state directory
 #      RIME_MIGRATE_ESP      an already-mounted ESP, instead of finding one
@@ -133,7 +144,7 @@ log()    { printf 'rime-boot-migrate: %s\n' "$*" >&2; }
 # ── the decision channel ─────────────────────────────────────────────────────
 #
 # rimed reads this engine's EXIT CODE and nothing else — rimed/rime/src/ops.rs,
-# migrate_boot_path(): 0 migrated, 3 nothing to do, 10 refused, anything else
+# run_migration_engine(): 0 migrated, 3 nothing to do, 10 refused, anything else
 # failed — and a user reads the prose on stderr. Neither changes here, and the
 # "REFUSED [name]" line keeps its exact shape, because something already parses
 # the shape of this output and a rename would be a silent break.
@@ -1396,7 +1407,7 @@ cmd_retry() {
     echo staged > "$STATE/phase"
     rm -f "$STATE/failed-at"
     sync
-    log "armed again. The next 'rime-boot-migrate auto' — or 'rime update' —"
+    log "armed again. The next 'rime-boot-migrate auto' — or 'sudo rime boot migrate' —"
     log "will commit, and the boot after it tries systemd-boot once more."
     return 0
 }
@@ -1496,8 +1507,8 @@ cmd_explain() {
         printf 'before it migrates; run this again after any of them changes.\n'
         return 10
     fi
-    printf '\nThis machine can migrate. "rime update" will do it, or run\n'
-    printf '"rime-boot-migrate auto" now.\n'
+    printf '\nThis machine can migrate. "sudo rime boot migrate" does it, after a\n'
+    printf 'health check; "rime update" no longer does it on its own.\n'
     return 0
 }
 

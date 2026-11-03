@@ -72,22 +72,39 @@ That is the whole mechanism. It needs no build cache and no registry cache, and
 it cannot silently stop working: if the core digest moves, the layers move; if
 it does not, they do not.
 
-### The one row that rebuilds every run got 275 MiB smaller
+### The rows that rebuild every run (corrected 2026-11-01)
 
 The `image` row above rebuilds on every run, and CI builds it `--layers=false`:
 one squashed layer for the whole of `Containerfile.rime`. Its digest therefore
-moves every build and **every machine re-downloads all of it on every update**.
-Measured with `skopeo inspect --raw` across all 14 published `rime-<sha>` tags
-(manifests only, nothing pulled):
+moves every build and every machine re-downloads all of it on every update.
+Measured in 2026-09 with `skopeo inspect --raw` across the 14 `rime-<sha>` tags
+of the time (manifests only, nothing pulled):
 
 | rime-tier layer, compressed | |
 |---|---|
 | the 13 builds up to 2026-09-21 | **358.1 – 359.5 MiB** |
 | `rime-44c9a5cb`, first with the slim initramfs | **84.5 MiB** |
 
-**~275 MiB off every `bootc upgrade`**, for free, as a side effect of
-`initramfs-slim`. It is the cheapest recurring win on this page, because unlike
-core, every machine pays this layer on every update.
+That took ~275 MiB off every `bootc upgrade`, as a side effect of
+`initramfs-slim`.
+
+**Correction (2026-11-01, from the backtest below).** The 84.5 MiB was never
+the whole per-update floor, and it no longer describes what an update costs:
+
+* **`base` rebuilds every run too**, and is one squashed layer as well. A
+  release with no core rebuild therefore changed **two** layers, not one:
+  measured on all 33 such releases from 2026-09-29 to 2026-10-19, **0.151 –
+  0.162 GB** per update (2026.10.16 → 2026.10.19: base layer 57.9 MiB, image
+  layer 96.3 MiB; the image layer grew from 84.5 MiB since 2026-09).
+* **Since release 2026.11.01 the image is rechunked** (one layer per group of
+  packages, `rechunk/`), so neither squashed layer exists any more. A release
+  with no core rebuild now changes **5 of 129 layers, 0.255 GB**, measured on
+  the only such pair the registry holds (two `perf/update-rechunk` builds on
+  the same core). That is **more** than the 0.161 GB it cost before
+  rechunking. Rechunking pays off only on core rebuilds (4.8 GB → 1.3-1.7 GB).
+* `rime-<sha>` tags are not a list of what machines received: a rebuild of the
+  same commit (the weekly cron's reissue) moves the tag. The backtest reads the
+  signature tags instead, which name every signed image.
 
 Two things that measurement also settled, both in
 `ROADMAP/evidence/initramfs-slim2-20260922.md`:
@@ -383,6 +400,170 @@ summary (the "Report update cost" step): total layers, how many are inherited
 from core, and how many are new. If a future change pushes content back down
 into core, that number climbs, and the regression shows the week it happens
 instead of the month someone next runs `rime update` on a hotel connection.
+
+## What an update really costs: the backtest (2026-11-01)
+
+The figures above are per build. What a machine pays depends on how often
+releases come and how many of them rebuild core, so this section replays the
+published history from the registry, release by release.
+
+### Method
+
+`bootc` skips a layer only when it holds a blob with the same digest, so a
+machine on release A downloads, to reach B, the compressed size of every layer
+in B's manifest whose digest is not in A's. That is what `bootc upgrade --check`
+prints as "Total new layers", and what `tools/update-cost-backtest.py` sums.
+It is an upper bound only if bootc ever starts using the zstd:chunked
+annotations the rechunked layers carry; today it fetches layers whole.
+
+* **Which images.** Every image build-image publishes is signed, and the
+  signature is the registry tag `sha256-<digest>.sig`, so those tags list every
+  signed image, including the weekly cron's reissues of an existing release
+  (which the release records on rimeos.com do not list). An OS image is matched
+  to the build-image run of the same commit whose `image` job was running when
+  the image was written; it counts as **published** when that run was on `main`
+  and its `image` job succeeded. Every successful `main` run since 2026-09-29
+  matched exactly one image (`fetch` fails when a run matches none or more
+  than one).
+* **Core rebuilds** come from each run's jobs, not from byte sizes: `core`
+  succeeded = rebuilt; `core` skipped = the previous core was reused.
+* **The window** starts 2026-09-29, the first day with release IDs under the
+  `rime-os` name; 2026-09-28 was the rename, and its first build has no
+  signature tag under the `rime-os` name, so it cannot be listed this way.
+* **The data is committed** (`docs/update-cost/ledger.tsv`, one row per signed
+  OS image; `docs/update-cost/layers.tsv`, every layer), so `report` and
+  `tests/test-update-cost-backtest.sh` need no network.
+
+```
+python3 -I tools/update-cost-backtest.py fetch --data docs/update-cost --since 2026-09-29 --gh <path to gh>
+python3 -I tools/update-cost-backtest.py report --data docs/update-cost
+./tests/test-update-cost-backtest.sh      # in CI: the report still prints the figures below
+```
+
+### Results, 2026-09-29 → 2026-11-01
+
+44 images published, so 43 updates in 33 days (39.0 per 30 days), **10 of them rebuilt core**
+(9.1 per 30 days): 8 from merges that changed core's inputs (two kernels, the
+Fedora 45 move, the app removal, msi-ec, the SELinux label, …) and 2 from the
+weekly cron, which reissued 2026.10.11.2 and 2026.10.19 as new digests when
+`fedora-bootc` moved. The full per-transition table is the first thing `report`
+prints.
+
+**Per update, tiered layout (before rechunking):**
+
+| kind | updates | median | range |
+|---|---|---|---|
+| core rebuild | 9 | **4.78 GB** | 4.04 – 5.99 GB |
+| no core rebuild | 33 | **0.161 GB** | 0.151 – 0.162 GB |
+
+Excluded, once per machine: the switch to the rechunked layout,
+2026.10.19 → 2026.11.01, **128 of 129 layers, 4.22 GB**.
+
+**Per update, rechunked layout (2026.11.01 onward).** Only one rechunked
+release exists, so the layout is measured on the registry's rechunked pairs:
+
+| pair | rebuilt | new layers | download |
+|---|---|---|---|
+| `9d1c9ca57499` → `1e11040aee63` (two `perf/update-rechunk` builds) | base + image, same core | 5 of 129 | **0.255 GB** |
+| `39a376d65646` → `5ae90c64ba81` (integration build → release 2026.11.01) | core + base + image | 50 of 129 | **1.27 GB** |
+
+The core pair rebuilt core twice from the same core inputs a few hours apart
+(between the two commits only base, image-tier scripts, tests and docs changed:
+review fixes to `Containerfile.base`, `rime-pkg`, `rime-secrets-start`), so
+1.27 GB is the floor of a core rebuild. PR #123 measured **1.74 GB** for a core
+rebuild with real package changes (`e5ff68d1 → b61d46c1`, rechunked locally;
+those images were never pushed). Both are shown below. The non-core pair's
+first image comes from a run whose `image` job failed after it pushed and
+signed the image; the image itself is complete.
+
+**What a machine really downloaded** (tiered history, 27.4 days, rechunk switch
+excluded), and the same updates replayed in the rechunked layout:
+
+| updates | count | downloaded | per 30 days | same updates, rechunked |
+|---|---|---|---|---|
+| every release | 42 | 48.7 GB | **53.3 GB** | 21.7 GB |
+| once a day | 15 | 40.5 GB | **44.3 GB** | 13.1 GB |
+| once a week | 4 | 19.8 GB | **21.7 GB** | 5.6 GB |
+
+**30 days at a cadence**, for a machine that installs every release:
+
+| cadence | releases / 30 d | core / 30 d | tiered | rechunked (1.27 GB core) | rechunked (1.74 GB core) |
+|---|---|---|---|---|---|
+| today (whole window) | 39.0 | 9.1 | 48.2 GB | **19.2 GB** | 23.4 GB |
+| today (last 30 days) | 36 | 9 | 47.4 GB | **18.3 GB** | 22.5 GB |
+| monthly core, same releases | 39.0 | 1 | 10.9 GB | **11.0 GB** | 11.4 GB |
+| monthly core, last 30 days' releases | 36 | 1 | 10.4 GB | **10.2 GB** | 10.7 GB |
+
+What this says:
+
+* **Core rebuilds were ~90 % of the bytes** (9 × 4.8 GB against 33 × 0.16 GB).
+  Rechunking cuts each of them by 64-74 %, which is the whole of its gain.
+* **A release without a core rebuild got more expensive**, 0.161 → 0.255 GB.
+  At a monthly core cadence the two layouts cost the same; the release count,
+  not core, then decides the bill (35 non-core releases × 0.255 GB = 8.9 GB).
+* **A monthly core cadence** at today's release count is ~10-11 GB per 30 days
+  in either layout; at today's core cadence the rechunked layout is 18-23 GB.
+
+### Why a release without a core rebuild costs 0.255 GB
+
+The five layers that differ between the two non-core builds, pulled and opened
+(each rechunked layer is a slice of an ostree repository, so a changed path
+shows as a different object checksum). Between those builds the Shell, rimed
+and every package were the same; this is the floor of every non-core release:
+
+| layer | size | what changed inside it |
+|---|---|---|
+| 0 | 15.6 MiB | ostree's commit and directory metadata (changes whenever any file does) |
+| 7 | 39.3 MiB | `usr/share/rpm/rpmdb.sqlite`, rewritten by base's `dnf` transactions |
+| 85 | 44.6 MiB | `var/cache/ldconfig/aux-cache`; the rest of the layer is qemu-user-static, glibc locales and headers, unchanged |
+| 103 | 23.7 MiB | `usr/lib/sysimage/libdnf5/transaction_history.sqlite` (+ `-wal`, `-shm`) |
+| 127 | 119.6 MiB | `usr/share/rime/release.json`, two `__pycache__` files, `var/log/dnf5.log*`, and zellij session files under `tmp/` left by base's zellij check. The 100 MB initramfs in this layer did **not** change |
+
+So ~240 MB of the 255 MB is unchanged content re-sent because one small,
+volatile file shares its layer. Not changed by this document, and the obvious
+next step for rechunk tuning: give the volatile files (rpmdb, dnf history and
+logs, ldconfig cache, `release.json`, bytecode caches) a layer of their own or
+stop writing them, and keep `/tmp` out of the image. Estimated, not measured:
+a non-core release would then cost the metadata layer plus a few MB, and a
+monthly-core month ~2-3 GB instead of ~10.
+
+### Time on the wire
+
+Measured 2026-11-01 09:35-10:08 UTC from the development machine's home link,
+with `skopeo` 1.24.1 instead of `bootc`, so nothing on the machine changed: copy
+the old image into an OCI layout, then the new image into the **same** layout.
+skopeo reuses every blob the layout already holds, as bootc reuses layers it
+already has, so the second copy fetches exactly the delta. Its bytes on disk
+matched the manifests to within the new manifest and config (~97 KB).
+
+```
+echo '{"default":[{"type":"insecureAcceptAnything"}]}' > policy.json   # reading only; signatures are not the question
+skopeo --policy policy.json copy -q docker://ghcr.io/andrenijman/rime-os@<old> oci:<dir>:old
+time skopeo --policy policy.json copy -q docker://ghcr.io/andrenijman/rime-os@<new> oci:<dir>:new
+# link reference: one 125 MB blob, one stream
+curl -H "Authorization: Bearer $(curl -s 'https://ghcr.io/token?scope=repository:andrenijman/rime-os:pull' | jq -r .token)" \
+  -o /dev/null -w '%{speed_download}\n' https://ghcr.io/v2/andrenijman/rime-os/blobs/<digest>
+```
+
+| what | bytes | time | rate |
+|---|---|---|---|
+| link reference: one 125 MB layer, single `curl` stream (3 runs) | 125.5 MB | 18.0 / 11.1 / 11.1 s | 7.0 / 11.3 / 11.3 MB/s |
+| fresh download, full rechunked image (`9d1c9ca57499`) | 4.20 GB | 846 s (14.1 min) | 5.0 MB/s |
+| **non-core update**, 5 layers (`→ 1e11040aee63`) | 0.255 GB | **79 s** | 3.2 MB/s |
+| fresh download, full rechunked image (`39a376d65646`) | 4.22 GB | 853 s (14.2 min) | 4.9 MB/s |
+| **core update**, 50 layers (`→ 5ae90c64ba81`, release 2026.11.01) | 1.27 GB | **127 s** | 10.0 MB/s |
+
+On this ~90 Mbit/s link a non-core update downloads in about 80 s and a core
+update in about two minutes. At the last 30 days' release count that is ~48 min
+of downloading a month at a monthly core cadence (1 × 127 s + 35 × 79 s) and
+~55 min at today's (9 × 127 s + 27 × 79 s): the small updates dominate, because
+they are many and fetched more slowly per byte. The rate
+varied between runs (7-11 MB/s for the same blob), and the full copies ran while
+the backtest's own registry reads were in flight, so read the times as
+±30 %. Only the **download** is timed. Applying an update (ostree import of the
+layers, deployment, the initramfs and bootloader steps) was not measured: doing
+that needs a VM, and this measurement was deliberately kept off the machine it
+ran on.
 
 ## Also changed: the firmware half of `rime update`
 

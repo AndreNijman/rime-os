@@ -584,7 +584,7 @@ fn install(cat: &Catalogue, args: &[String]) -> i32 {
     for (name, r) in &plan {
         match r {
             Route::Toggle { name: canon, feature } => match select_feature(cat, canon, feature) {
-                Ok(()) => requested = edit_list(&requested, &[canon.clone()], &[]),
+                Ok(()) => requested = edit_list(&requested, std::slice::from_ref(canon), &[]),
                 Err(e) => rc = fail(format!("{name}: {e}")),
             },
             Route::Nix { name: canon } => nix_add.push(canon.clone()),
@@ -597,7 +597,7 @@ fn install(cat: &Catalogue, args: &[String]) -> i32 {
             Route::UserNpm { name: canon, package, npm } => match npm_as_user(npm, "install", package) {
                 Ok(()) => {
                     say(format!("{canon}: installed into your ~/.local (it updates itself)"));
-                    requested = edit_list(&requested, &[canon.clone()], &[]);
+                    requested = edit_list(&requested, std::slice::from_ref(canon), &[]);
                 }
                 Err(e) => rc = fail(format!("{name}: {e}")),
             },

@@ -2623,7 +2623,7 @@ fn pin_wants_link_in(config_home: &Path, unit: &str, stable_dirs: &[&str]) {
     };
     for entry in dirs.flatten() {
         let wants = entry.path();
-        if wants.extension().is_none_or(|e| e != "wants") {
+        if wants.extension().map_or(true, |e| e != "wants") {
             continue;
         }
         let link = wants.join(unit);

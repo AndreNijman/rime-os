@@ -1166,6 +1166,26 @@ grep -q 'not a fault' <<<"$textg" \
 grep -q 'rime-boot-migrate precheck' <<<"$textg" \
     && ok "and names the command that says why a machine cannot migrate" \
     || bad "the GRUB report does not say how to find out why: $textg"
+# 2026-11-01: `rime update` no longer migrates on its own, so the report must
+# name the command that does, and must not still promise the update will.
+grep -q 'sudo rime boot migrate' <<<"$textg" \
+    && ok "and names the command that migrates it, now that updates do not" \
+    || bad "the GRUB report does not name 'sudo rime boot migrate': $textg"
+if tr -s ' \n' ' ' <<<"$textg" | pipe_has 'rime update` migrates'; then
+    bad "the GRUB report still says 'rime update' migrates the machine: $textg"
+else
+    ok "and no longer says an update migrates it"
+fi
+# `boot migrate` writes BootNext and the ESP; it must be behind the root gate
+# while `boot status` stays root-free. Only meaningful as a non-root caller.
+if [[ "$(id -u)" != 0 ]]; then
+    rc=0; out="$("$RIME_BIN" boot migrate 2>&1)" || rc=$?
+    if [[ "$rc" == 1 ]] && grep -qi 'root' <<<"$out"; then
+        ok "rime boot migrate refuses a non-root caller before doing anything"
+    else
+        bad "rime boot migrate as non-root: rc=$rc: $out"
+    fi
+fi
 
 # Read-only means read-only. Nothing under the fixture root may change.
 before="$(find "$G" -type f -printf '%p %s\n' | sort | sha256sum)"

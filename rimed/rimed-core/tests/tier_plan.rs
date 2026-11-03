@@ -101,6 +101,8 @@ fn no_shipped_profile_can_emit_a_vendor_power_limit_action() {
                             | Action::PlatformProfile(_)
                             | Action::CpuPowerLimit { .. }
                             | Action::CpuPowerFirmware
+                            | Action::CpuBoost(_)
+                            | Action::CpuMinFreq(_)
                     ),
                     "{id}/{tier} planned a non-portable action: {a:?}"
                 );
@@ -126,6 +128,9 @@ fn amd_zen_performance_is_the_top_of_the_table() {
             Action::Governor("performance".into()),
             Action::Epp("performance".into()),
             Action::PlatformProfile("performance".into()),
+            // PPD parity, now that rimed is the only writer.
+            Action::CpuBoost(true),
+            Action::CpuMinFreq(rimed_core::tier::MinFreq::LowestNonlinear),
         ]
     );
     assert_eq!(
@@ -134,6 +139,8 @@ fn amd_zen_performance_is_the_top_of_the_table() {
             Action::Governor("powersave".into()),
             Action::Epp("power".into()),
             Action::PlatformProfile("low-power".into()),
+            Action::CpuBoost(false),
+            Action::CpuMinFreq(rimed_core::tier::MinFreq::CpuinfoMin),
         ]
     );
 }

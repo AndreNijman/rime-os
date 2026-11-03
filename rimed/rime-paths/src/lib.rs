@@ -187,6 +187,10 @@ fixed_paths! {
     MINIMAL_PATH = "/usr/bin:/bin";
     /// The rime-aid backend's PATH inside its sandbox.
     AID_SANDBOX_PATH = "/usr/bin:/usr/sbin";
+    /// The program rime-aid's startup probe runs inside a test sandbox to prove
+    /// `bwrap` can build one. It must exist inside the sandbox: on NixOS /usr
+    /// holds only /usr/bin/env, so the build gives a store path.
+    AID_PROBE_PROGRAM = "/usr/bin/true";
 }
 
 #[cfg(test)]

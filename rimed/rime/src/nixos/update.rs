@@ -27,6 +27,10 @@ fn stop(m: impl Into<String>) -> Stop {
 }
 
 pub fn update(opts: UpdateOptions) -> i32 {
+    if opts.migrate_boot {
+        eprintln!("rime: --migrate-boot moves a bootc machine from GRUB to systemd-boot; a NixOS system has no such move. Nothing was changed.");
+        return 2;
+    }
     let started = Instant::now();
     let mut worst = 0;
     if !opts.firmware_only {

@@ -114,6 +114,8 @@ let
     # The rime-aid backend sandbox binds /nix/store, /run/current-system and /run/opengl-driver read-only
     # (rime-aid/src/runtime.rs NIX_SYSTEM_TREES), so this PATH resolves inside it.
     AID_SANDBOX_PATH = systemBinDir;
+    # rime-aid's startup probe runs this inside a test sandbox; /usr/bin/true does not exist on NixOS.
+    AID_PROBE_PROGRAM = "${coreutils}/bin/true";
   };
 
   # The PATH rime-agentd hands every agent session: the user's own directories first (as the bootc unit has them),

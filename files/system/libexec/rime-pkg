@@ -179,6 +179,16 @@ readonly LOCK="${PKG_ROOT}/.lock"
 # test can point it at a temp directory (RIME_PKG_RPM_CACHE), as
 # RIME_PKG_GITHUB_API does.
 RPM_CACHE="${RIME_PKG_RPM_CACHE-${PKG_ROOT}/rpm-cache}"
+# What the last `rebuild --if-needed` that failed left for the desktop:
+# rime-pkg-notice (a user timer, two minutes into a session) reads it and says
+# once per boot that the user's packages are missing and why. Under /run, so a
+# boot that rebuilds cleanly starts with nothing to say; every successful build
+# removes it. The variable exists so a test can point it at a temp file.
+REBUILD_NOTICE="${RIME_PKG_REBUILD_NOTICE-/run/rime-pkg/rebuild}"
+# Set by cmd_rebuild for the boot rebuild only (rime-sysext-rebuild.service):
+# a set that does not fit the image stops at once instead of downloading again
+# to say which package is in the way. See download_rpms.
+BOOT_FAST_FAIL=0
 # Free space the cache must never take from an OS update, on top of the 3% of
 # the filesystem ostree keeps free for itself (min-free-space-percent). bootc
 # refuses an update unless the space it needs is free: "available 5.7 GB,
@@ -828,8 +838,10 @@ cache_local_deb() {
 # resolves against the host rpmdb, so an extension carries only the delta.
 download_rpms() {
     local destdir="$1"; shift
+    # --destdir is given per call: twin_pass resolves the same request into a
+    # directory of its own.
     local -a args=(-y --setopt=keepcache=True download --resolve \
-        --arch="$(uname -m)" --arch=noarch --destdir "$destdir")
+        --arch="$(uname -m)" --arch=noarch)
     # Resolve the 32-bit closure too. RPM Fusion's steam (and every other
     # multilib application) declares its 32-bit libraries as requires, and
     # dnf will not fetch a provider outside the declared arch set — without
@@ -858,9 +870,15 @@ download_rpms() {
     RPM_FETCHED=()
     if [ -n "$pin" ]; then
         rc=0
-        download_set "$destdir" "$cache" "${args[@]}" --exclude="$pin" "$@" || rc=$?
+        download_set "$destdir" "$cache" "${args[@]}" --destdir "$destdir" --exclude="$pin" "$@" || rc=$?
         if [ "$rc" = 0 ]; then
             compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
+            # The solver found a set, but one whose 32-bit copy of an image
+            # library is not the image's build, because no repository has
+            # that build. Swap in the set made with the image's own.
+            rc=0
+            twin_pass "$destdir" "$cache" "$pin" set "${#args[@]}" "${args[@]}" "$@" || rc=$?
+            [ "$rc" = 2 ] && die "$RPM_SET_REFUSED"
             return 0
         fi
         # A set that changed under the download, or a file name Rime will not
@@ -868,6 +886,33 @@ download_rpms() {
         # pull newer builds of image packages and end in a guard refusal that
         # blames the image for a passing mirror change.
         [ "$rc" = 2 ] && die "$RPM_SET_REFUSED"
+        # The commonest reason nothing fits an image a few weeks old: a 32-bit
+        # library the request needs must be the image's exact build, and the
+        # repositories no longer carry it. Before the boot gives up and before
+        # anyone reads a solver dump, try again with those builds from Koji.
+        rc=0
+        twin_pass "$destdir" "$cache" "$pin" resolve "${#args[@]}" "${args[@]}" "$@" || rc=$?
+        [ "$rc" = 2 ] && die "$RPM_SET_REFUSED"
+        [ "$rc" = 0 ] && return 0
+        # A twin it needed and could not get is the answer: without the
+        # image's own build of it nothing can fit, and the newest builds
+        # below would only refuse in the guard for a reason that names
+        # nothing.
+        if [ "${#TWIN_MISSING[@]}" -gt 0 ]; then
+            local missing
+            missing="$(printf '%s; ' "${TWIN_MISSING[@]}")"
+            die "this needs the image's own build of 32-bit package(s) that no enabled repository carries any more and that could not be taken from Fedora's build system: ${missing%; }. Run 'sudo rime update' first: an up-to-date OS matches the builds the repositories carry"
+        fi
+        # At boot nobody reads the diagnosis below, and getting it costs a
+        # second download of the whole set at the newest builds plus a guard
+        # pass over every one of them, all while the desktop waits: 11 of the
+        # 12.5 minutes one refused boot rebuild took (measured 2026-11-01:
+        # pinned pass failed at 114 s, the refusal came at 773 s). The boot
+        # rebuild stops here; `sudo rime pkg rebuild`, run by a person, still
+        # takes the long way and names the package.
+        if [ "${BOOT_FAST_FAIL:-0}" = 1 ]; then
+            die "no build of your packages fits this OS from what the repositories offer right now (or the download failed); run 'sudo rime update' first, or 'sudo rime pkg rebuild' to see which package is in the way"
+        fi
         # Nothing in the repositories fits the image as it is. Resolve again
         # against the newest builds, so guard_rpms can name the package that
         # needs an OS update instead of the user reading a solver dump. A
@@ -876,9 +921,9 @@ download_rpms() {
         rm -f -- "$destdir"/*.rpm
     fi
     rc=0
-    download_set "$destdir" "$cache" "${args[@]}" "$@" || rc=$?
+    download_set "$destdir" "$cache" "${args[@]}" --destdir "$destdir" "$@" || rc=$?
     [ "$rc" = 2 ] && die "$RPM_SET_REFUSED"
-    [ "$rc" = 0 ] || die "dependency resolution failed for: $*"
+    [ "$rc" = 0 ] || die "dependency resolution failed for: $*. If this OS has not been updated for a while, run 'sudo rime update' first: the repositories keep only the newest build of each package, and an older OS can need builds they no longer carry"
     compgen -G "${destdir}/*.rpm" >/dev/null || die "nothing to download — is the package name right?"
 }
 
@@ -1079,6 +1124,499 @@ image_pin_excludes() {
         | sort -u | paste -sd, -
 }
 
+# ── the image's 32-bit twins, from Fedora's build system ─────────────────────
+# A 32-bit library must be the SAME build as the 64-bit copy the image ships:
+# the two share files and a package name, and the solver will not put an i686
+# build beside an installed x86_64 one of another version. So a request that
+# needs the i686 half of an image library needs the image's exact EVR of it.
+#
+# WHY THIS EXISTS: Fedora's `updates` repository keeps only the NEWEST build of
+# each package. An image built a few weeks ago ships builds `updates` no longer
+# has, and for a multilib library that means no repository anywhere carries the
+# matching i686 build; Fedora's updates-archive repository carries x86_64 only.
+# Measured 2026-11-01 on the 2026-10-04 image (Fedora 43): `rime install
+# gamescope steam mangoapp` needs 20 i686 twins no repository has, glibc,
+# openssl-libs and nss among them. libheif shows how it ends: the image ships
+# libheif-1.23.5-3.fc43 and libheif-ffmpeg at the same build; `fedora` has
+# libheif-1.20.2-6, which libheif-ffmpeg conflicts with, and the pin keeps out
+# `updates`' 1.23.7-1. Both passes of download_rpms failed, and every machine
+# that skipped a few weeks of updates could not install Steam.
+#
+# Fedora's build system, Koji, keeps every build Fedora ever released. So the
+# twins no repository carries are fetched from there at exactly the image's
+# build, and trusted exactly like a repository package: each must verify
+# against the Fedora release key the image itself ships for its release, and
+# against nothing else.
+#
+# Koji's plain copies are UNSIGNED (rpmkeys answers "digests OK" and exit 0,
+# which is why only the literal "digests signatures OK" counts). The signed
+# copy, data/signed/<keyid>/, is pruned once a build is superseded (404 for
+# libheif-1.23.5-3.fc43 on 2026-11-01); the signature header itself stays in
+# data/sigcache/<keyid>/…/<file>.sig, and a signed rpm is the unsigned one with
+# that header in place of its own, which is how Koji writes the signed copy.
+# Signed copy first, then the splice; either way the result is verified.
+#
+# Koji's directories are named after the BUILD (the source package): mesa-libGL
+# lives under /packages/mesa/. Name, version and source come from the image's
+# own rpmdb, never from what a repository or Koji says.
+#
+# The solver has to SEE a twin to choose it (a set it could not make cannot be
+# patched afterwards), and `dnf5 download` takes no file path, so the fetched
+# twins become a small repository for one more resolution: --repofrompath, with
+# an index written by twin_repo_index (createrepo_c is not in the image).
+#
+# https only, redirects included, as for every key and package the engine
+# fetches itself. A connect timeout bounds an outage: the boot rebuild reaches
+# this too, and one unreachable twin ends every fetch after it (KOJI_DOWN).
+readonly KOJI_PACKAGES=https://kojipkgs.fedoraproject.org/packages
+readonly -a KOJI_CURL=(curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+    --fail --silent --show-error --location --connect-timeout 20)
+# Fedora 45 keeps the release keys in /usr/share, Fedora 43 in /etc. Both are
+# the image's own files.
+RELEASE_KEY_DIRS=(/usr/share/pki/rpm-gpg /etc/pki/rpm-gpg)
+readonly TWIN_REPO_ID=rime-image-twins
+# Why the last twin could not be had, for the warning that names it.
+TWIN_WHY=""
+# Every twin the last twin_pass needed and could not get, "NAME.i686 EVR
+# (why)", for the error download_rpms ends with when nothing fits without them.
+TWIN_MISSING=()
+# 1 once Fedora's build system could not be reached: the twins after it are
+# not tried, so an outage costs one timeout, not one per twin.
+KOJI_DOWN=0
+
+# The Fedora release key of this OS version.
+fedora_release_key() {
+    local d f v
+    v="$(os_version)"
+    for d in "${RELEASE_KEY_DIRS[@]}"; do
+        f="${d}/RPM-GPG-KEY-fedora-${v}-primary"
+        [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+    return 1
+}
+
+# A private keyring at $1 holding ONLY that key. Prints its short id (last 8
+# hex digits of the fingerprint, lower case), which names Koji's per-key
+# directories: 31645531 for Fedora 43.
+release_keyring() {
+    local kr="$1" key fpr
+    key="$(fedora_release_key)" || return 1
+    mkdir -p -- "$kr" || return 1
+    rpmkeys --dbpath "$kr" --import "$key" >/dev/null 2>&1 || return 1
+    fpr="$(rpm --dbpath "$kr" -q gpg-pubkey --qf '%{VERSION}\n' 2>/dev/null | head -n1)"
+    [[ "$fpr" =~ ^[0-9a-fA-F]{8,}$ ]] || return 1
+    fpr="${fpr,,}"
+    printf '%s' "${fpr: -8}"
+}
+
+# Is $2 signed by a key in keyring $1, with intact digests? The literal words,
+# never the exit code: an unsigned rpm answers "digests OK" and 0.
+release_signature_ok() {
+    local out=""
+    if out="$(rpmkeys --dbpath "$1" --checksig -- "$2" 2>&1)" \
+       && [[ "$out" = *"digests signatures OK"* ]]; then
+        return 0
+    fi
+    TWIN_WHY="rpmkeys says: ${out:-nothing}"
+    return 1
+}
+
+# Write $3: the rpm $1 with the signature header $2 in place of its own. An rpm
+# is a 96-byte lead, the signature header (16 bytes + 16 per index entry + its
+# data, padded to 8), then the main header and payload, which are what the
+# signature covers; so the splice changes nothing a signature vouches for.
+splice_sighdr() {
+    local unsigned="$1" sig="$2" out="$3" il dl size
+    [ "$(od -A n -t x1 -N 4 -- "$sig" | tr -d ' \n')" = 8eade801 ] || return 1
+    [ "$(od -A n -t x1 -j 96 -N 4 -- "$unsigned" | tr -d ' \n')" = 8eade801 ] || return 1
+    [ "$(stat -c %s -- "$sig")" -le 1048576 ] || return 1
+    read -r il dl < <(od -A n -t u4 --endian=big -j 104 -N 8 -- "$unsigned") || return 1
+    [[ "${il:-x}" =~ ^[0-9]{1,5}$ && "${dl:-x}" =~ ^[0-9]{1,8}$ ]] || return 1
+    size=$(( 16 + 16 * il + dl ))
+    size=$(( (size + 7) / 8 * 8 ))
+    { head -c 96 -- "$unsigned"; cat -- "$sig"; tail -c +"$(( 96 + size + 1 ))" -- "$unsigned"; } > "$out"
+}
+
+# Fetch $1 into $2 from Koji, at most $3 seconds. 0 = fetched; 1 = Koji does
+# not have it (404 or 410: the build or that copy of it does not exist); 2 =
+# Koji could not be reached or failed (anything else, 5xx included), with
+# curl's own words in KOJI_ERR.
+KOJI_ERR=""
+koji_get() {
+    local err="" rc=0
+    err="$("${KOJI_CURL[@]}" --max-time "$3" -o "$2" -- "$1" 2>&1 >/dev/null)" || rc=$?
+    [ "$rc" = 0 ] && return 0
+    rm -f -- "$2"
+    KOJI_ERR="${err:-curl exited ${rc}}"
+    KOJI_ERR="${KOJI_ERR//$'\n'/ }"
+    if [ "$rc" = 22 ] && [[ "$err" =~ error:\ (404|410) ]]; then
+        return 1
+    fi
+    return 2
+}
+
+# Fetch one build from Koji into $1 and verify it against keyring $7. $2 source
+# name, $3 source version, $4 source release, $5 file (N-V-R.ARCH.rpm), $6 arch,
+# $8 key id. Sets TWIN_WHY when it fails, and KOJI_DOWN when Koji could not be
+# reached.
+koji_fetch() {
+    local dir="$1" src="$2" sver="$3" srel="$4" file="$5" arch="$6" kr="$7" kid="$8"
+    local base="${KOJI_PACKAGES}/${src}/${sver}/${srel}" out="${dir}/${file}" rc=0
+    rm -f -- "$out" "${out}.unsigned" "${out}.sig"
+    koji_get "${base}/data/signed/${kid}/${arch}/${file}" "$out" 300 || rc=$?
+    if [ "$rc" != 0 ]; then
+        local lacks="${file}"
+        [ "$rc" = 1 ] && { rc=0; koji_get "${base}/${arch}/${file}" "${out}.unsigned" 300 || rc=$?; }
+        [ "$rc" = 0 ] && { lacks="a Fedora $(os_version) signature for ${file}"
+                           koji_get "${base}/data/sigcache/${kid}/${arch}/${file}.sig" "${out}.sig" 120 || rc=$?; }
+        if [ "$rc" != 0 ]; then
+            rm -f -- "${out}.unsigned" "${out}.sig"
+            if [ "$rc" = 1 ]; then
+                TWIN_WHY="Fedora's build system does not have ${lacks}"
+            else
+                KOJI_DOWN=1
+                TWIN_WHY="Fedora's build system could not be reached (${KOJI_ERR})"
+            fi
+            return 1
+        fi
+        if ! splice_sighdr "${out}.unsigned" "${out}.sig" "$out"; then
+            rm -f -- "$out" "${out}.unsigned" "${out}.sig"
+            TWIN_WHY="Fedora's build system served a signature that is not an rpm signature header"
+            return 1
+        fi
+        rm -f -- "${out}.unsigned" "${out}.sig"
+    fi
+    release_signature_ok "$kr" "$out" || { rm -f -- "$out"; return 1; }
+}
+
+# 32-bit packages a request needs, read on stdin one per line as "NAME
+# VERSION-RELEASE". Prints one tab-separated line (name, EVR, VERSION, RELEASE,
+# SOURCERPM, VENDOR, all from the image's rpmdb) for each that must be the
+# image's build while no enabled repository has the i686 package at it:
+#   - a twin: the image ships NAME.x86_64 at another VERSION-RELEASE;
+#   - a sibling: the image ships no NAME.x86_64, but NAME comes from the same
+#     source as an image package, at another build. Siblings are tied to their
+#     build too: libnsl.i686 requires glibc(x86-32) at its own release exactly,
+#     and with glibc.i686 at the image's build no other libnsl fits (measured,
+#     steam needs libnsl(x86-32)). Its EVR is the image's build of that source.
+twin_needed() {
+    local n a evr ver rel src vendor rest have_vr sn sv sr
+    local -A img=() meta=() bysrc=()
+    while IFS=$'\t' read -r n a evr ver rel src vendor rest; do
+        [ "$a" = x86_64 ] || continue
+        img["$n"]="${ver}-${rel}"
+        meta["$n"]="${evr}"$'\t'"${ver}"$'\t'"${rel}"$'\t'"${src}"$'\t'"${vendor}"
+        # Source name -> the image's build of it, as a sibling would carry it.
+        sn="${src%.src.rpm}"; sr="${sn##*-}"; sn="${sn%-*}"; sv="${sn##*-}"; sn="${sn%-*}"
+        [ -n "$sn" ] && [ -z "${bysrc[$sn]:-}" ] || continue
+        case "$evr" in
+            *:*) bysrc["$sn"]="${evr%%:*}:${sv}-${sr}" ;;
+            *)   bysrc["$sn"]="${sv}-${sr}" ;;
+        esac
+        bysrc["$sn"]+=$'\t'"${sv}"$'\t'"${sr}"$'\t'"${src}"$'\t'"${vendor}"
+    done < <(rpm -qa --qf '%{NAME}\t%{ARCH}\t%{EVR}\t%{VERSION}\t%{RELEASE}\t%{SOURCERPM}\t%{VENDOR}\n' 2>/dev/null)
+    local -a want=() names=() others=()
+    local -A vr=() line=()
+    while read -r n have_vr; do
+        [ -n "$n" ] || continue
+        if [ -n "${img[$n]:-}" ]; then
+            [ "$have_vr" = "${img[$n]}" ] && continue
+            line["$n"]="${meta[$n]}"
+            vr["$n"]="${img[$n]}"
+        else
+            others+=("$n"); vr["$n"]="$have_vr"
+        fi
+    done
+    local repo
+    local -a rq=(-q repoquery)
+    for repo in ${ENABLE_REPOS:-}; do rq+=(--enable-repo "$repo"); done
+    if [ "${#others[@]}" -gt 0 ]; then
+        local s b
+        while read -r n src; do
+            [ -n "$n" ] && [ -z "${line[$n]:-}" ] && [ -z "${img[$n]:-}" ] || continue
+            sn="${src%.src.rpm}"; sn="${sn%-*}"; sn="${sn%-*}"
+            b="${bysrc[$sn]:-}"
+            [ -n "$b" ] || continue
+            IFS=$'\t' read -r s sv sr _ <<<"$b"
+            [ "${vr[$n]}" = "${sv}-${sr}" ] && continue
+            line["$n"]="$b"
+            vr["$n"]="${sv}-${sr}"
+        done < <(dnf5 "${rq[@]}" --arch=i686 --qf '%{name} %{sourcerpm}\n' "${others[@]}" 2>/dev/null)
+    fi
+    for n in "${!line[@]}"; do
+        want+=("${n}-${vr[$n]}.i686"); names+=("$n")
+    done
+    [ "${#want[@]}" -gt 0 ] || return 0
+    local have i
+    have="$(dnf5 "${rq[@]}" --arch=i686 --qf '%{name}-%{version}-%{release}.%{arch}\n' "${want[@]}" 2>/dev/null)" || return 0
+    for i in "${!want[@]}"; do
+        printf '%s\n' "$have" | grep -xF -- "${want[$i]}" >/dev/null && continue
+        printf '%s\t%s\n' "${names[$i]}" "${line[${names[$i]}]}"
+    done | LC_ALL=C sort
+}
+
+# Fetch the twins described on stdin (twin_needed's lines) into $1, verified.
+# $2 = the rpm cache or "": a copy kept there by the last build is used when it
+# verifies again. Returns 0 when at least one twin is in $1. Every twin it
+# cannot supply is named, with the one thing that cures it for good.
+twin_fetch() {
+    local dir="$1" cache="$2" kr="${1}.keyring" kid="" n evr ver rel src vendor file sname sver srel got=0
+    local hint="Run 'sudo rime update' first: an up-to-date OS matches the builds the repositories carry"
+    if ! kid="$(release_keyring "$kr")"; then
+        warn "cannot fetch the image's own 32-bit libraries: this OS has no Fedora $(os_version) release key to verify them with. ${hint}"
+        return 1
+    fi
+    while IFS=$'\t' read -r n evr ver rel src vendor; do
+        [ -n "$n" ] || continue
+        file="${n}-${ver}-${rel}.i686.rpm"
+        if [ "$vendor" != "Fedora Project" ]; then
+            TWIN_MISSING+=("${n}.i686 ${evr} (built by '${vendor:-unknown}', not Fedora)")
+            warn "${n}.i686 ${evr}, the 32-bit twin of the image's ${n}, is in no enabled repository, and Fedora's build system cannot supply it (built by '${vendor:-unknown}', not Fedora). ${hint}"
+            continue
+        fi
+        sname="${src%.src.rpm}"; srel="${sname##*-}"; sname="${sname%-*}"; sver="${sname##*-}"; sname="${sname%-*}"
+        if ! [[ "$sname" =~ ^[A-Za-z0-9._+-]+$ && "$sver" =~ ^[A-Za-z0-9._+~^]+$ && "$srel" =~ ^[A-Za-z0-9._+~^]+$ ]]; then
+            TWIN_MISSING+=("${n}.i686 ${evr} (the image does not say which build it came from)")
+            warn "${n}.i686 ${evr}: the image does not say which build it came from ('${src}'). ${hint}"
+            continue
+        fi
+        if [ -n "$cache" ] && [ -f "${cache}/${file}" ] \
+           && cp --reflink=auto -- "${cache}/${file}" "${dir}/${file}" 2>/dev/null \
+           && release_signature_ok "$kr" "${dir}/${file}"; then
+            :
+        elif [ "$KOJI_DOWN" = 1 ]; then
+            rm -f -- "${dir}/${file}"
+            TWIN_MISSING+=("${n}.i686 ${evr} (${TWIN_WHY})")
+            continue
+        elif ! koji_fetch "$dir" "$sname" "$sver" "$srel" "$file" i686 "$kr" "$kid"; then
+            rm -f -- "${dir}/${file}"
+            TWIN_MISSING+=("${n}.i686 ${evr} (${TWIN_WHY})")
+            warn "${n}.i686 ${evr}, the 32-bit twin of the image's ${n}, is in no enabled repository and was not taken from Fedora's build system: ${TWIN_WHY}. ${hint}"
+            continue
+        fi
+        # It must be the build that was asked for, whatever served it: name,
+        # architecture and the image's exact EVR, epoch included.
+        if [ "$(rpm -qp --nosignature --qf '%{NAME} %{ARCH} %{EVR}' -- "${dir}/${file}" 2>/dev/null)" != "${n} i686 ${evr}" ]; then
+            rm -f -- "${dir}/${file}"
+            TWIN_MISSING+=("${n}.i686 ${evr} (Fedora's build system served a different package as ${file})")
+            warn "${n}.i686 ${evr}: Fedora's build system served a different package as ${file}; not using it. ${hint}"
+            continue
+        fi
+        got=$((got + 1))
+    done
+    rm -rf -- "$kr"
+    [ "$got" -gt 0 ]
+}
+
+# Write repodata/ for the rpms in $1: what dnf5 needs to resolve against them
+# (primary metadata: identity, checksum, dependencies, files), in the format
+# createrepo_c writes, which the image does not ship.
+twin_repo_index() {
+    local dir="$1" md="${1}/repodata" f n=0 name arch epoch ver rel osum osz sum sz ts
+    mkdir -p -- "$md" || return 1
+    {
+        for f in "$dir"/*.rpm; do
+            [ -e "$f" ] || continue
+            IFS=$'\t' read -r name arch epoch ver rel < <(rpm -qp --nosignature \
+                --qf '%{NAME}\t%{ARCH}\t%|EPOCH?{%{EPOCH}}:{0}|\t%{VERSION}\t%{RELEASE}\n' -- "$f" 2>/dev/null) || return 1
+            n=$((n + 1))
+            printf '<package type="rpm">\n<name>%s</name>\n<arch>%s</arch>\n<version epoch="%s" ver="%s" rel="%s"/>\n' \
+                "$(xml_escape "$name")" "$(xml_escape "$arch")" "$(xml_escape "$epoch")" "$(xml_escape "$ver")" "$(xml_escape "$rel")"
+            printf '<checksum type="sha256" pkgid="YES">%s</checksum>\n<summary/>\n<description/>\n<size package="%s" installed="0" archive="0"/>\n<location href="%s"/>\n<format>\n' \
+                "$(sha "$f")" "$(stat -c %s -- "$f")" "$(xml_escape "${f##*/}")"
+            twin_repo_deps provides PROVIDE "$f"
+            twin_repo_deps requires REQUIRE "$f"
+            twin_repo_deps conflicts CONFLICT "$f"
+            twin_repo_deps obsoletes OBSOLETE "$f"
+            rpm -qp --nosignature --qf '[%{FILENAMES}\n]' -- "$f" 2>/dev/null \
+                | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's|.*|<file>&</file>|'
+            printf '</format>\n</package>\n'
+        done
+    } > "${md}/body" || return 1
+    {
+        printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+        printf '<metadata xmlns="http://linux.duke.edu/metadata/common" xmlns:rpm="http://linux.duke.edu/metadata/rpm" packages="%s">\n' "$n"
+        cat -- "${md}/body"
+        printf '</metadata>\n'
+    } > "${md}/primary.xml" || return 1
+    rm -f -- "${md}/body"
+    osum="$(sha "${md}/primary.xml")"; osz="$(stat -c %s -- "${md}/primary.xml")"
+    gzip -n -f -- "${md}/primary.xml" || return 1
+    sum="$(sha "${md}/primary.xml.gz")"; sz="$(stat -c %s -- "${md}/primary.xml.gz")"
+    ts="$(date +%s)"
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+        '<repomd xmlns="http://linux.duke.edu/metadata/repo" xmlns:rpm="http://linux.duke.edu/metadata/rpm">' \
+        "<revision>${ts}</revision>" \
+        '<data type="primary">' \
+        "<checksum type=\"sha256\">${sum}</checksum>" \
+        "<open-checksum type=\"sha256\">${osum}</open-checksum>" \
+        '<location href="repodata/primary.xml.gz"/>' \
+        "<timestamp>${ts}</timestamp>" \
+        "<size>${sz}</size>" \
+        "<open-size>${osz}</open-size>" \
+        '</data>' \
+        '</repomd>' > "${md}/repomd.xml"
+}
+
+xml_escape() {
+    local s="$1"
+    s="${s//&/&amp;}"; s="${s//</&lt;}"; s="${s//>/&gt;}"; s="${s//\"/&quot;}"
+    printf '%s' "$s"
+}
+
+# One dependency list of rpm $3 as primary.xml entries: $1 the element
+# (provides, requires, …), $2 rpm's tag prefix (PROVIDE, REQUIRE, …). The sense
+# is the low bits of the flags (LESS 2, GREATER 4, EQUAL 8). rpmlib() entries
+# are left out, as createrepo_c does: they describe the archive, not a package.
+twin_repo_deps() {
+    local rows
+    rows="$(rpm -qp --nosignature --qf "[%{${2}NAME}\t%{${2}FLAGS}\t%{${2}VERSION}\n]" -- "$3" 2>/dev/null \
+            | awk -F'\t' 'NF && $1 !~ /^rpmlib\(/')"
+    [ -n "$rows" ] || return 0
+    printf '<rpm:%s>\n' "$1"
+    awk -F'\t' '
+        function esc(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); gsub(/"/, "\\&quot;", s); return s }
+        {
+            f = $2 % 16; fl = ""
+            if (f == 2) fl = "LT"; else if (f == 4) fl = "GT"; else if (f == 8) fl = "EQ"
+            else if (f == 10) fl = "LE"; else if (f == 12) fl = "GE"
+            out = "<rpm:entry name=\"" esc($1) "\""
+            if (fl != "" && $3 != "") {
+                v = $3; e = "0"; r = ""
+                if (index(v, ":")) { e = substr(v, 1, index(v, ":") - 1); v = substr(v, index(v, ":") + 1) }
+                if (match(v, /-[^-]*$/)) { r = substr(v, RSTART + 1); v = substr(v, 1, RSTART - 1) }
+                out = out " flags=\"" fl "\" epoch=\"" esc(e) "\" ver=\"" esc(v) "\""
+                if (r != "") out = out " rel=\"" esc(r) "\""
+            }
+            print out "/>"
+        }' <<<"$rows"
+    printf '</rpm:%s>\n' "$1"
+}
+
+# Every repository build, of either architecture, of a package the twin
+# repository $1 holds, at any EVR but the twin's (the image's): one comma-joined
+# --exclude list. With a twin in reach the solver still preferred the GA build
+# and to DOWNGRADE the image's x86_64 copy to match it (glibc-2.42-4 over the
+# image's 2.42-16, measured on the 2026-10-04 image; the guard then refused the
+# set). The image pin keeps out newer builds; this keeps out the older ones,
+# for these names only.
+twin_excludes() {
+    local tw="$1" f n evr
+    local -A img=()
+    for f in "$tw"/*.rpm; do
+        [ -e "$f" ] || continue
+        read -r n evr < <(rpm -qp --nosignature --qf '%{NAME} %{EVR}\n' -- "$f" 2>/dev/null) || continue
+        img["$n"]="$evr"
+    done
+    [ "${#img[@]}" -gt 0 ] || return 0
+    # Spaces, not tabs: dnf5's --qf turns \n into a newline but prints \t as is.
+    local -a q=(-q repoquery --qf '%{name} %{evr} %{arch}\n')
+    local repo
+    for repo in ${ENABLE_REPOS:-}; do q+=(--enable-repo "$repo"); done
+    while read -r n evr f; do
+        [ -n "${img[$n]:-}" ] && [ "$evr" != "${img[$n]}" ] && printf '%s-%s.%s\n' "$n" "$evr" "$f"
+    done < <(dnf5 "${q[@]}" "${!img[@]}" 2>/dev/null) | LC_ALL=C sort -u | paste -sd, -
+}
+
+# dnf5 caches a --repofrompath repository's metadata like any other, under a
+# directory named for its id and path, and within its expiry reads the cache
+# instead of the index twin_pass just rewrote (measured: a twin added in the
+# second round was "not available"). The twin repository is therefore always
+# read fresh, and its cache directories, one per build directory, are removed.
+twin_repo_args() {
+    printf '%s\n' "--repofrompath=${TWIN_REPO_ID},$1" "--setopt=${TWIN_REPO_ID}.metadata_expire=0"
+}
+twin_repo_forget() {
+    rm -rf -- /var/cache/libdnf5/"${TWIN_REPO_ID}"-* 2>/dev/null || true
+}
+
+# The i686 packages in a `dnf5 download --url` listing on stdin, as "NAME
+# VERSION-RELEASE" lines (twin_needed's input).
+twin_listing_i686() {
+    sed -n -E 's#^.*/##; s/\.i686\.rpm$//p' \
+        | awk -F- 'NF >= 3 { n = $1; for (i = 2; i <= NF - 2; i++) n = n "-" $i; print n, $(NF - 1) "-" $NF }' \
+        | LC_ALL=C sort -u
+}
+
+# Resolve the request again with the image's own 32-bit twins in reach. $1
+# destdir, $2 cache or "", $3 the image pin, $4 mode, $5 how many of the rest
+# are download_rpms' dnf5 arguments; the remainder is the request.
+#   set      $1 holds a set the solver made: its i686 packages are the first
+#            candidates, and $1 is replaced only when the new set resolves.
+#   resolve  nothing resolved: the first candidates are the i686 packages of the
+#            request resolved as if nothing were installed (--alldeps), the one
+#            resolution that cannot trip over the image.
+# Either way the candidates are only a start: a twin changes what the solver
+# picks next (glibc.i686 at the image's build pulls glibc-devel.i686 at it too,
+# measured), so the request is listed again with the twins in reach until no new
+# twin is needed, at most four times, and only then downloaded.
+# Returns 0 when $1 now holds a set resolved with twins, 2 when download_set
+# refused one (RPM_SET_REFUSED), 1 otherwise: nothing needed, nothing could be
+# fetched, or still no fit, and $1 is as it was.
+twin_pass() {
+    local destdir="$1" cache="$2" pin="$3" mode="$4" nargs="$5"
+    shift 5
+    local -a dargs=("${@:1:$nargs}")
+    shift "$nargs"
+    TWIN_MISSING=(); KOJI_DOWN=0
+    [ "$(uname -m)" = x86_64 ] || return 1
+    command -v rpm >/dev/null 2>&1 || return 1
+    local candidates needed f
+    if [ "$mode" = set ]; then
+        candidates="$(for f in "$destdir"/*.rpm; do
+                          [ -e "$f" ] || continue
+                          rpm -qp --nosignature --qf '%{ARCH} %{NAME} %{VERSION}-%{RELEASE}\n' -- "$f" 2>/dev/null
+                      done | awk '$1 == "i686" { print $2, $3 }' | LC_ALL=C sort -u)"
+    else
+        candidates="$(dnf5 -q "${dargs[@]}" --alldeps --url "$@" 2>/dev/null | twin_listing_i686)"
+    fi
+    [ -n "$candidates" ] || return 1
+    needed="$(twin_needed <<<"$candidates")"
+    [ -n "$needed" ] || return 1
+    local tw="${destdir}.twins" out="${destdir}.with-twins" rc=0 n fresh count=0 line ex=""
+    local -A tried=()
+    local -a trepo=()
+    rm -rf -- "$tw" "$out"
+    mkdir -p -- "$tw" "$out" || return 1
+    for _ in 1 2 3 4; do
+        fresh=""
+        while IFS= read -r line; do
+            n="${line%%$'\t'*}"
+            [ -n "$n" ] && [ -z "${tried[$n]:-}" ] || continue
+            tried["$n"]=1
+            fresh+="${line}"$'\n'
+        done <<<"$needed"
+        [ -n "$fresh" ] || break
+        n="$(grep -c . <<<"$fresh")"
+        msg "${n} 32-bit package(s) this needs must be the image's own build, which no repository carries any more; fetching from Fedora's build system"
+        twin_fetch "$tw" "$cache" <<<"$fresh" || true
+        compgen -G "${tw}/*.rpm" >/dev/null || break
+        twin_repo_index "$tw" || { rm -rf -- "$tw" "$out"; return 1; }
+        mapfile -t trepo < <(twin_repo_args "$tw")
+        ex="$(twin_excludes "$tw")"
+        ex="${pin}${pin:+${ex:+,}}${ex}"
+        needed="$(dnf5 -q "${dargs[@]}" --url "${trepo[@]}" ${ex:+--exclude="$ex"} "$@" 2>/dev/null \
+                      | twin_listing_i686 | twin_needed)" || needed=""
+    done
+    if ! compgen -G "${tw}/*.rpm" >/dev/null; then
+        rm -rf -- "$tw" "$out"
+        return 1
+    fi
+    count="$(compgen -G "${tw}/*.rpm" | wc -l)"
+    download_set "$out" "$cache" "${dargs[@]}" --destdir "$out" \
+        "${trepo[@]}" ${ex:+--exclude="$ex"} "$@" || rc=$?
+    twin_repo_forget
+    if [ "$rc" = 0 ] && compgen -G "${out}/*.rpm" >/dev/null; then
+        rm -f -- "$destdir"/*.rpm
+        mv -f -- "$out"/*.rpm "$destdir"/ || rc=1
+    elif [ "$rc" = 0 ]; then
+        rc=1
+    fi
+    rm -rf -- "$tw" "$out"
+    [ "$rc" = 0 ] && msg "resolved with the image's own build of ${count} 32-bit package(s) from Fedora's build system, each verified against the Fedora $(os_version) key"
+    return "$rc"
+}
+
 # Does the machine, as it is right now, satisfy this requirement? Asked of
 # libdnf5 because it honours version ranges and rich ("(a or b)") dependencies,
 # which `rpm -q --whatprovides` does not: on rpm 6.0.2 that reports
@@ -1263,7 +1801,7 @@ guard_rpms() {
                 rm -f "$rpmfile"
                 continue
             fi
-            warn "refusing '${name}': needs ${evr} but the image ships ${installed} — that requires an OS update, not a package install"
+            warn "refusing '${name}': needs ${evr} but the image ships ${installed} — that requires an OS update, not a package install: run 'sudo rime update' first"
             bad=1
             rm -f "$rpmfile"
             continue
@@ -2979,7 +3517,7 @@ warn_twin_mismatch() {
         want="${twin[$name]:-}"
         [ -n "$want" ] || continue
         ver="$(rpm -qp --nosignature --qf '%{EVR}' "$f" 2>/dev/null)"
-        [ "$ver" = "$want" ] || warn "${name}.i686 ${ver} does not match the image's ${name}.x86_64 ${want}; 32-bit programs using it may fail until the repositories carry the matching build"
+        [ "$ver" = "$want" ] || warn "${name}.i686 ${ver} does not match the image's ${name}.x86_64 ${want}; 32-bit programs using it may fail. Run 'sudo rime update' first: an up-to-date OS matches the builds the repositories carry"
     done
 }
 
@@ -3035,6 +3573,7 @@ rebuild_extension() {
         gc_local_cache
         [ -z "${RPM_CACHE:-}" ] || rm -rf -- "$RPM_CACHE"
         post_merge
+        rebuild_notice_clear
         return 0
     fi
 
@@ -3117,6 +3656,7 @@ rebuild_extension() {
         save_requested "${want[@]}"
         gc_local_cache
         write_state "$rpms" ${debcached[@]+"${debcached[@]}"}
+        rebuild_notice_clear
         return 0
     fi
 
@@ -3143,6 +3683,7 @@ rebuild_extension() {
     save_requested "${want[@]}"
     gc_local_cache
     write_state "$rpms" ${debcached[@]+"${debcached[@]}"}
+    rebuild_notice_clear
 
     msg "done — $(jq -r '.resolved | length' "$STATE") package(s), $(numfmt --to=iec "$(jq -r .image_bytes "$STATE")")B extension"
 }
@@ -4405,13 +4946,52 @@ cmd_upgrade() {
 # cost every boot the whole NetworkManager-wait-online delay), so a boot that
 # DOES have to download waits for the network here instead. Only inside a
 # systemd service (INVOCATION_ID) so a manual `rime pkg rebuild --if-needed` and
-# the test suites never start a target. Bounded: offline, the rebuild is
-# attempted anyway and fails as it always did.
+# the test suites never start a target. Bounded at 90 s.
+#
+# Returns 1 when the machine is offline after the wait, and the caller stops
+# there instead of handing dnf5 a rebuild it cannot download while the desktop
+# waits. "Offline" is measured, not inferred from the start job: the target is
+# reached even when NetworkManager-wait-online gives up (it is only wanted), so
+# the question asked afterwards is whether any default route exists at all.
 wait_for_boot_network() {
     [ -n "${INVOCATION_ID:-}" ] || return 0
     command -v systemctl >/dev/null 2>&1 || return 0
     msg "waiting for the network before rebuilding"
     timeout 90 systemctl start network-online.target >/dev/null 2>&1 || true
+    boot_network_up
+}
+
+# Any default route, IPv4 or IPv6. No route = nothing to download from. Not a
+# reachability probe: a route to a captive portal still counts as up, and the
+# download's own failure ends that case (download_rpms, BOOT_FAST_FAIL).
+boot_network_up() {
+    command -v ip >/dev/null 2>&1 || return 0
+    [ -n "$(ip -4 route show default 2>/dev/null)$(ip -6 route show default 2>/dev/null)" ]
+}
+
+# Leave the desktop a note that the boot rebuild failed and why (offline or
+# refused); rime-pkg-notice says it once per boot. Written whole and renamed,
+# world-readable: it holds one word of reason and the boot id, nothing else.
+# Never fatal: a note that cannot be written costs the notice, not the boot.
+rebuild_notice_set() {
+    local reason="$1" dir boot=""
+    dir="$(dirname -- "$REBUILD_NOTICE")"
+    boot="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+    if install -d -m 0755 -- "$dir" 2>/dev/null \
+       && printf 'state=failed\nreason=%s\nboot=%s\n' "$reason" "$boot" > "${REBUILD_NOTICE}.tmp" 2>/dev/null \
+       && chmod 0644 -- "${REBUILD_NOTICE}.tmp" 2>/dev/null \
+       && mv -f -- "${REBUILD_NOTICE}.tmp" "$REBUILD_NOTICE" 2>/dev/null; then
+        return 0
+    fi
+    rm -f -- "${REBUILD_NOTICE}.tmp" 2>/dev/null || true
+    warn "could not leave the desktop a note at ${REBUILD_NOTICE}"
+    return 0
+}
+
+# Every build that succeeds takes the note back, so the notice never says the
+# packages are missing after `sudo rime pkg rebuild` brought them back.
+rebuild_notice_clear() {
+    rm -f -- "$REBUILD_NOTICE" 2>/dev/null || true
 }
 
 cmd_rebuild() {
@@ -4434,6 +5014,10 @@ cmd_rebuild() {
         if [ "$built_for" = "$(os_version)" ] \
            && [ "$built_level" = "$PKG_COMPAT_LEVEL" ] && merged \
            && twins_unchanged "$STATE"; then
+            # Nothing to rebuild, so nothing for the desktop to be told. /run
+            # survives a soft-reboot, and a note from before one must not
+            # outlive the problem it described.
+            rebuild_notice_clear
             return 0
         fi
         msg "extension compatibility changed (OS ${built_for}, level ${built_level} -> OS $(os_version), level ${PKG_COMPAT_LEVEL}, or the image's 32-bit libraries moved) — rebuilding"
@@ -4445,17 +5029,32 @@ cmd_rebuild() {
         return 0
     fi
 
+    # A boot that NEEDS a rebuild still holds the desktop until it is done
+    # (rime-sysext-rebuild.service is wanted by multi-user.target): the
+    # packages are the user's applications, and a desktop without them is the
+    # thing this unit exists to prevent. A rebuild that CANNOT happen is
+    # different: holding the desktop for it buys nothing. So offline and
+    # refused end at once, non-zero (the unit shows failed, not "Finished"),
+    # with a note the desktop turns into a notice (rime-pkg-notice). The next
+    # boot, `rime update` or `sudo rime pkg rebuild` tries again.
     if [ "$if_needed" = 1 ]; then
-        wait_for_boot_network
-    fi
-
-    # In a SUBSHELL on purpose: this runs from rime-sysext-rebuild.service at
-    # boot, and `die` would otherwise exit straight out of the script and mark
-    # the unit failed. An unreachable mirror is not a boot failure — the
-    # packages simply get rebuilt on the next attempt.
-    if [ "$if_needed" = 1 ]; then
+        if ! wait_for_boot_network; then
+            warn "this machine is offline, so your packages cannot be rebuilt for this OS version now; they stay unavailable until 'sudo rime pkg rebuild' succeeds"
+            rebuild_notice_set offline
+            return 1
+        fi
+        # Only inside the boot service, like the network wait: a person who
+        # runs `rime pkg rebuild --if-needed` (or `rime recover repair`) is
+        # reading, and gets the long diagnosis.
+        if [ -n "${INVOCATION_ID:-}" ]; then
+            BOOT_FAST_FAIL=1
+        fi
+        # In a SUBSHELL so that a `die` inside the build returns here, where
+        # the note for the desktop is written, instead of ending the script.
         if ! ( rebuild_extension "${want[@]}" ); then
             warn "your packages could not be rebuilt for this OS version (the reason is above) and stay unavailable until 'sudo rime pkg rebuild' succeeds"
+            rebuild_notice_set refused
+            return 1
         fi
         return 0
     fi

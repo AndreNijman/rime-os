@@ -241,7 +241,10 @@ fn failed_units() -> (Vec<String>, Option<String>) {
     (units, None)
 }
 
-fn health() -> (Verdict, Option<String>) {
+/// The machine's health right now: §26's verdict, and the reason the failed
+/// units could not be listed, if they could not. Also the health half of the
+/// boot-path migration gate (`ops::migration_gate`).
+pub(crate) fn health() -> (Verdict, Option<String>) {
     let (units, why) = failed_units();
     let rows = crate::recover::health_rows();
     (channel::verdict(&rows, &units), why)

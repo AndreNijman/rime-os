@@ -50,4 +50,11 @@ hl.on("hyprland.start", function()
     -- Guarded so it is a silent no-op if fcitx5 is ever absent. `-d` daemonises,
     -- `-r` replaces a stale instance.
     hl.exec_cmd("command -v fcitx5 >/dev/null && fcitx5 -d -r")
+
+    -- Smooth window and workspace animations on battery without changing the
+    -- tier: on every open/close/workspace event this asks rimed for a short UI
+    -- boost (org.rimeos.Rimed1.Ui.Boost, capped at 600 ms, rate limited; see
+    -- docs/rimed-dbus.md). It asks without waiting for an answer and exits with
+    -- the compositor.
+    hl.exec_cmd("/usr/bin/rime ui hypr-boost")
 end)
