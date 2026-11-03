@@ -53,6 +53,8 @@ for name, v in sorted(variants.items()):
               f"{name}: KWallet's Secret Service API is off ({v['kwalletrc']!r})")
     if "cosmic" in v["desktops"]:
         check(v["system76Scheduler"] is False, f"{name}: system76-scheduler is off")
+        check(v["cosmicSetup"] != [] and all(v["cosmicSetup"]),
+              f"{name}: COSMIC Initial Setup is Rime's (it does not turn the screen reader on): {v['cosmicSetup']}")
 
 print(f"desktops-eval: {passed} passed, {len(failures)} failed")
 if failures:

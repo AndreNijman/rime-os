@@ -14,7 +14,8 @@
 #                     - the blueman autostart override (NotShowIn GNOME/KDE/COSMIC) is in every system with
 #                       blueman, the kwallet-pam override, kwalletrc (secrets API off) and no pam_kwallet in
 #                       `login` (greetd's stack) in every KDE system, and
-#                       COSMIC's system76-scheduler is off;
+#                       COSMIC's system76-scheduler is off and its Initial Setup is Rime's build (it does not turn
+#                       the screen reader on, desktops.md §12.9);
 #                     - no desktop's app store (GNOME Software, Discover, COSMIC Store) is installed (D15).
 { pkgs, self }:
 let
@@ -41,6 +42,9 @@ let
       ppd = c.services.power-profiles-daemon.enable;
       system76Power = c.hardware.system76.power-daemon.enable;
       system76Scheduler = c.services.system76-scheduler.enable;
+      # One entry per cosmic-initial-setup in the system's packages: true when it is Rime's patched build.
+      cosmicSetup = map (p: p.passthru.rimeScreenReaderPatch or false)
+        (lib.filter (p: nameOf p == "cosmic-initial-setup") c.environment.systemPackages);
       forbiddenPackages = {
         systemPath = pkgsIn c.environment.systemPackages;
         dbus = pkgsIn c.services.dbus.packages;
