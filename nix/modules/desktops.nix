@@ -15,6 +15,13 @@ let
   table = import ../desktops;
   cfg = config.rime.desktops;
   enabled = lib.filterAttrs (id: _: cfg.${id}.enable) table;
+  secondPowerDaemons = lib.unique (
+    lib.filter (n: lib.elem n [ "power-profiles-daemon" "system76-power" ]) (
+      map (p: p.pname or (builtins.parseDrvName (p.name or "")).name) (
+        config.environment.systemPackages ++ config.services.dbus.packages ++ config.systemd.packages
+      )
+    )
+  );
 
   # An autostart entry with one key added, written under /etc/xdg/autostart, which comes before the system profile's
   # etc/xdg in XDG_CONFIG_DIRS: the autostart spec reads the first file of a name and ignores the rest.
@@ -51,6 +58,12 @@ in
         {
           assertion = lib.length (lib.attrNames enabled) <= 1;
           message = "Rime adds one other desktop at a time (docs/nixos/desktops.md D3): ${lib.concatStringsSep ", " (lib.attrNames enabled)} are all on";
+        }
+        {
+          # D6: rimed owns org.freedesktop.UPower.PowerProfiles and net.hadess.PowerProfiles. A second daemon on the
+          # system (or its D-Bus policy) would take the name or write the same sysfs files.
+          assertion = secondPowerDaemons == [ ];
+          message = "rimed serves the power-profiles API; these packages would run a second power daemon: ${lib.concatStringsSep ", " secondPowerDaemons}";
         }
       ];
 
