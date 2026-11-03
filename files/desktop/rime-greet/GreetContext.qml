@@ -250,12 +250,28 @@ Item {
         return env
     }
 
+    // ── The command greetd runs ──────────────────────────────────
+    // greetd 0.10 does not exec the argv it is handed: it runs
+    // `/bin/sh -c "exec <argv joined by spaces>"` (greetd/src/session/
+    // worker.rs). An unquoted ["sh", "-lc", cmd] therefore reached the shell
+    // as `sh -lc <first word of cmd>` with the other words as $0, $1, so an
+    // Exec of more than one word ran its first word alone: Plasma's
+    // `plasma-dbus-run-session-if-needed …/startplasma-wayland` exited at
+    // once, niri lost `--session`. The command is single-quoted for that
+    // join, so `sh -lc` receives the session's Exec whole
+    // (tests/test-rime-greet-sessions.sh §9 runs it through /bin/sh).
+    function _shQuote(s) {
+        return "'" + String(s).replace(/'/g, "'\\''") + "'"
+    }
+    function _sessionArgv(cmd) {
+        return ["sh", "-lc", ctx._shQuote(cmd.length > 0 ? cmd : "exec ${SHELL:-/bin/sh} -l")]
+    }
+
     property var _pendingArgv: null
     property var _pendingEnv: null
     function launch() {
         var cmd  = ctx.sessionCommand.trim()
-        var argv = cmd.length > 0 ? ["sh", "-lc", cmd]
-                                  : ["sh", "-lc", "exec ${SHELL:-/bin/sh} -l"]
+        var argv = ctx._sessionArgv(cmd)
         var sid  = ctx.currentSession ? ctx.currentSession.id : ""
         ctx._pendingArgv = argv
         // No session at all (the login-shell fallback above): no environment, as before.

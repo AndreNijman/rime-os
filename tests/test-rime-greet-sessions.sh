@@ -621,4 +621,50 @@ else
 fi
 fi
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+section "§9 the command greetd runs, lifted out of the shipped QML"
+# ─────────────────────────────────────────────────────────────────────────────
+# greetd 0.10 does not exec the argv the greeter hands it: it runs
+# `/bin/sh -c "exec <argv joined by spaces>"` (greetd/src/session/worker.rs).
+# _shQuote and _sessionArgv are extracted and their argv is put through that
+# same join and a real /bin/sh; the session program must receive exactly the
+# arguments `sh -c <Exec>` gives it. Unquoted, an Exec of more than one word ran
+# its first word alone (Plasma's session exited at once; niri lost --session).
+if ! command -v node >/dev/null 2>&1; then
+    skp "the greeter's session command is extractable and runnable"
+else
+ARGV_JS="$WORK/argv.js"
+python3 - "$GREETER" "$ARGV_JS" <<'PY2'
+import sys
+src = open(sys.argv[1], encoding="utf-8").read()
+def fn(name):
+    start = src.find("    function %s(" % name)
+    if start < 0:
+        sys.exit("no %s in the greeter" % name)
+    end = src.find("\n    }", start)
+    return src[start:end + len("\n    }")]
+harness = fn("_shQuote") + "\n" + fn("_sessionArgv") + """
+const ctx = { _shQuote };
+console.log(_sessionArgv(process.argv[2]).join(" "));
+"""
+open(sys.argv[2], "w", encoding="utf-8").write(harness)
+PY2
+is "the greeter's session command is extractable and runnable" "0" "$?"
+printf '#!/bin/sh\nfor a in "$@"; do printf "[%%s]" "$a"; done\nprintf "\\n"\n' > "$STUBS/show-args"
+chmod +x "$STUBS/show-args"
+greetd_runs() {  # greetd 0.10's own line, source_profile = false
+    /bin/sh -c "exec $(node "$ARGV_JS" "$1")"
+}
+for exec_line in \
+    "$STUBS/show-args" \
+    "$STUBS/show-args --session" \
+    "$STUBS/show-args a 'b c' \"d e\"" \
+    "$STUBS/show-args \"it's\" \$HOME/x" \
+    "env RIME_T=1 $STUBS/show-args x"
+do
+    is "greetd runs: $exec_line" "$(/bin/sh -c "$exec_line")" "$(greetd_runs "$exec_line" 2>&1)"
+done
+fi
+
 finish
