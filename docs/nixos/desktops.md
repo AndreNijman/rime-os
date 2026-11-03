@@ -455,15 +455,19 @@ Every VM test boots no more than two VMs at once on katana (L16 when katana load
 
 Computed with `floors.nix`'s own formula (store = on-disk + on-disk estimate of a whole second closure + 1 GB reserve
 + 1 GB home; ratio 0.55; ESP 2 GiB), the desktop's measured NAR delta added to the measured base exactly as
-virtualization's is (`withVirtualization`). The script reproduces today's published figures (16/18/17/19 disk,
-14/16/14/16 partition) before adding anything **(checked, measure-sizes.txt)**:
+virtualization's is (`withVirtualization`). The script reproduces the published figures of the time it was run
+(16/18/17/19 disk, 14/16/14/16 partition) before adding anything **(checked, measure-sizes.txt)**. Since then wave 4
+("updates2", in this branch's base) MEASURED the two virtualization bases instead of estimating them (smaller on disk:
+plain-virtualization 5,564,084,224 B against the 5,800,374,254 B estimate), so their published figures are now 16/18
+disk, 14/16 partition, and the virtualization rows below are the as-built `floors.nix` figures, which
+`checks.release-plan` recomputes:
 
 | Base | none | + GNOME | + KDE Plasma | + COSMIC |
 |---|---|---|---|---|
 | plain | 16 / 14 | **17 / 15** | **18 / 16** | **19 / 16** |
 | plain-gaming | 18 / 16 | **19 / 17** | **21 / 18** | **21 / 19** |
-| plain-virtualization | 17 / 14 | **18 / 16** | **19 / 17** | **19 / 17** |
-| plain-gaming-virtualization | 19 / 16 | **20 / 18** | **21 / 19** | **21 / 19** |
+| plain-virtualization | 16 / 14 | **18 / 15** | **19 / 17** | **19 / 17** |
+| plain-gaming-virtualization | 18 / 16 | **20 / 17** | **21 / 19** | **21 / 19** |
 
 (disk GB / partition GB). The deltas are `gnomeDelta = 1110685288`, `kdeDelta = 2424402376`, `cosmicDelta =
 2519964376` bytes (NAR, measured 2026-11-03). They are estimates on disk (marked `estimated = true`, like
@@ -524,9 +528,9 @@ this section says otherwise. Evidence (logs, screenshots) is in `/var/lab/rime-n
 | Area | Where | Notes |
 |---|---|---|
 | Desktop table, module | `nix/desktops/default.nix`, `nix/modules/desktops.nix` | `rime.desktops.<id>.enable`; one table drives the catalogue, variants, the greeter's session list and the eval check. |
-| Variants and floors | `nix/release/variants.nix`, `nix/release/floors.nix` | 16 published variants, at most one desktop each; names list their features sorted (`plain-gaming-gnome`, `plain-cosmic-gaming`). Floors = measured base + measured NAR delta x 0.55, marked `estimated`. Published: plain 16, plain-gnome 17, plain-kde 18, plain-cosmic 19, plain-gaming 18, plain-gaming-gnome 19, plain-gaming-kde 21, plain-cosmic-gaming 21 (disk GB); the virtualization rows follow §9 except plain-gnome-virtualization's partition 15 (not 16) and plain-gaming-gnome-virtualization's 17 (not 18): the script's rounding, not a new measurement. |
+| Variants and floors | `nix/release/variants.nix`, `nix/release/floors.nix` | 16 published variants, at most one desktop each; names list their features sorted (`plain-gaming-gnome`, `plain-cosmic-gaming`). Floors = measured base + measured NAR delta x 0.55, marked `estimated`. Published: plain 16, plain-gnome 17, plain-kde 18, plain-cosmic 19, plain-gaming 18, plain-gaming-gnome 19, plain-gaming-kde 21, plain-cosmic-gaming 21 (disk GB); the virtualization rows are §9's table (plain-gnome-virtualization 18/15, plain-gaming-gnome-virtualization 20/17): computed on the wave-4 MEASURED virtualization bases, which are smaller than the estimates the first draft of §9 used. |
 | Catalogue | `nix/catalogue/catalogue.nix`, `rime/src/nixos/pkg.rs` | features carry `group = "desktop"` and `session_ids`; `variant::choose` prefers, among the largest variants a release builds, one that keeps every non-desktop feature. |
-| CI | `.github/workflows/nix-release.yml` | The 16 closures (~19.5 GB) do not fit a hosted runner: the hosted job builds `rime-release-toplevels-hosted` (variants without a desktop); desktop variants build on the self-hosted runner. `update-floors` installs only the variants `floors.nix` records as measured. |
+| CI | `.github/workflows/nix-release.yml` | The 16 closures (~19.5 GB) do not fit a hosted runner: the hosted job builds `rime-release-toplevels-hosted` (variants without a desktop). No job builds the desktop variants yet: the self-hosted builder that would build `rime-release-toplevels` is a TODO(handover) in the workflow (every job is `ubuntu-24.04`), so CI does not build the twelve desktop closures. `update-floors` installs only the variants `floors.nix` records as measured. |
 | PPD off | `nix/modules/desktop.nix`, `nix/modules/desktops.nix` | `services.power-profiles-daemon.enable = mkForce false`, `hardware.system76.power-daemon.enable = mkForce false`, an assertion refusing either (and a second desktop). |
 | Rime-only env | `nix/modules/desktop.nix` | `QT_QPA_PLATFORMTHEME=qt6ct` and `ELECTRON_OZONE_PLATFORM_HINT=auto` are exported by a one-line wrapper each of Rime's four sessions (Tiling, Scrolling, Floating, Safe Graphics) runs as its whole Exec, not globally. The Exec stays one word because `rime-session-select` (the Gaming Mode switch back) refuses an Exec with `=` in it, and the build refuses an Exec with a space. `rime-gaming` and `extraSessions` do not get them (§12.4). |
 | Greeter env and command | `files/desktop/rime-greet/GreetContext.qml` | as §4; Rime's own sessions are named in `ownSessions` (hyprland, niri, rime-labwc, rime-safe-graphics, rime-gaming) and get `XDG_SESSION_TYPE` only, so their environment is byte-for-byte what it was. A desktop is recognised by DesktopNames, not by an allowlist of other desktops. The command is single-quoted for greetd (§12.6): `launch()` hands greetd `["sh", "-lc", '<Exec>']`. |
@@ -538,13 +542,13 @@ this section says otherwise. Evidence (logs, screenshots) is in `/var/lab/rime-n
 | Up to date means running | `rime/src/nixos/update.rs` `os_step` | Only `running == target` is up to date. Before, `booted == target` also counted, so install (live) → remove while logged in (next boot = the booted system) → log out → `rime remove` said "up to date" and left the desktop running. Found while writing the VM test; fixed in 5fafdace5. |
 | PPD API | `rimed/src/ppd.rs` | as §7. Properties are served through a custom `org.freedesktop.DBus.Properties` so `ActiveProfile` writes run polkit and SetTier; `Power.SetTier` (CLI, Shell) also releases holds, as a PPD write does; an AC change emits PropertiesChanged; `PerformanceDegraded` carries rimed's thermal/lap reasons. `ReleaseProfile` checks no owner, as PPD does not. The names are claimed only with `RIMED_POWER_PROFILES=1` (set by the NixOS module): the bootc image still runs power-profiles-daemon, so rimed must not take its name there. Bus policy `org.rimeos.Rimed1.PowerProfiles.conf`, activation files for both names (`SystemdService=rimed.service`), policy `org.rimeos.rimed.power-profiles.policy` (a unit test checks the shipped policies name exactly the action ids rimed asks for). |
 | Mode.Set / Active | `rimed/src/dbus.rs`, `hold.rs`, `rime/src/mode.rs` | as §6.2. `rime mode set` calls `Mode.Set`; an older rimed (UnknownMethod) gets the old client path. |
-| Updates | `rimed/src/updates.rs`, `nix/modules/update.nix` | as §6.2. The checker's `/run/rime-update/state` now carries `state=`, `digest=`, `release=` (on offer) and `running=`; rimed reads it and `/run/rime-live/status.json` by inotify. `Apply` (polkit `apply-update`, interactive, `auth_admin_keep`) starts the new `rime-update.service` (`rime update`, oneshot, 6 h timeout). |
+| Updates | `rimed/src/updates.rs`, `nix/modules/update.nix` | as §6.2. The checker's `/run/rime-update/state` now carries `state=`, `digest=`, `release=` (on offer) and `running=`; rimed reads it and `/run/rime-live/status.json` by inotify. `Apply` (polkit `apply-update`, interactive, `auth_admin_keep`) starts the new `rime-update.service` (`rime update`, oneshot, 6 h timeout). The unit has `restartIfChanged = false` and `X-StopOnRemoval = false` (added in verification, §12.7; nixpkgs' `nixos-upgrade.service` does the same): `rime update` runs `switch-to-configuration` inside it, its ExecStart names rimed's store path, and switch-to-configuration-ng at the pin restarts a changed unit that is activating, so without it an Apply whose release changes rimed would be classified `boot` (rule 3) and a live switch would stop its own unit. With it the dry run prints `would NOT stop the following changed units: rime-update.service`, which the parser reads as kept (as for greetd). Read from the source at the pin, not observed in a VM. |
 
 ### 12.2 Tests and mutants (every mutant listed was observed failing the check, except the one the KDE row says survives; logs in `artifacts/desktops/mutants/`, the VM checks' in `artifacts/desktops/vm/mut-<desktop>-<mutant>.log`)
 
 | Check | Mutants killed |
 |---|---|
-| `checks.desktops-eval` | ppd-on, qt-global, two-desktops |
+| `checks.desktops-eval` | ppd-on, qt-global, two-desktops; mF-restart, mG-stoprm (verification, §12.7) |
 | `checks.release-plan` | drop-floor |
 | rimed private-bus tests (`bus_tests.rs`, inside `path:.#rimed`'s check) | ppd-write-keeps-holds, ppd-precedence-swapped, ppd-no-owner-cleanup, ppd-ac-no-props, ppd-write-not-polkit, mode-set-no-hold, updates-no-watch, updates-apply-not-interactive |
 | variant/pkg/desktop/update unit tests (`rime`) | variant-lexical-tiebreak, desktop-refusal-removed, desktop-floor-without-feature, onesided-no-guard |
@@ -628,6 +632,32 @@ memory) and greetd restarted, because the test cannot pick a session with the ke
 - bootc's niri session (`Exec=niri --session`, Containerfile.base) under greetd: by §12.6 it starts `niri` without
   `--session`. The greeter fix in this branch fixes it once it ships to bootc; not booted there.
 - Why COSMIC's first login turns its screen reader on (§12.2, the COSMIC run; open-items, build:desktops).
+- A desktop WRITING a profile through rimed in KDE: the KDE VM run proves powerdevil READS rimed's profile
+  (`currentProfile` follows `rime tier`); no test makes powerdevil (or Plasma's battery applet) set one. The write path
+  is proven only from GNOME's side (`powerprofilesctl set`, `launch -p`) and by the private-bus tests.
+- `rime-update.service`'s `restartIfChanged = false` (§12.1 Updates) is proven by evaluation only
+  (`checks.desktops-eval`, mutant `mF-restart`) and from the switch-to-configuration-ng source: no VM runs an
+  `Updates.Apply` whose release changes rimed, so neither the defect nor the fix was observed.
+
+### 12.5a Behaviour that differs from §2-§9 or from bootc (found in verification)
+
+- **A power-saver hold during Gaming Mode does not win.** §7 says any power-saver hold beats every performance
+  hold, and Gaming Mode is rimed's own performance hold. In `ppd.rs` a PPD choice made while game mode is on only
+  replaces the tier game mode restores at its end (`set_base_tier`), so `HoldProfile("power-saver")` during Gaming
+  Mode leaves `ActiveProfile = performance` while `ActiveProfileHolds` lists the power-saver hold. This is the
+  existing "game mode owns the tier" rule; no test covers the hold case.
+- **The second-power-daemon assertion matches package names** (`power-profiles-daemon`, `system76-power` in
+  systemPackages, dbus.packages and systemd.packages), not the closure. A module that ships either daemon under a
+  wrapper or inside another package's output would pass it; the VM tests' process checks are the backstop.
+- **One-sided units relax rule 3 for every update**, not only `rime install`: `one_sided_units` is computed in
+  `os_step` for each switch, so a release that only adds or only removes a unit may start or stop it live.
+- **The new D-Bus objects exist on bootc too.** `serve()` registers the Updates and PowerProfiles objects on every
+  rimed; only the well-known names are gated by `RIMED_POWER_PROFILES=1`. On bootc `Updates.Apply` would start
+  `rime-update.service`, which the bootc image does not ship (handover).
+- **The greeter change reaches bootc** (`GreetContext.qml` is shared): every bootc session now gets
+  `XDG_SESSION_TYPE=wayland` through greetd's environment (logind `Type=wayland`), and multi-word Execs run whole
+  (bootc's `niri --session` gets `--session`). `Greetd.launch(argv, env)` needs quickshell 0.3.2, which the bootc
+  image has. Not booted on bootc.
 
 ### 12.6 Found while building: greetd re-splits the session command
 
@@ -646,3 +676,24 @@ Fixed twice, each enough on its own: the greeter single-quotes the command (`lau
 `["sh", "-lc", '<Exec>']`, `tests/test-rime-greet-sessions.sh` §9 lifts the shipped function and compares what greetd
 runs with the Exec run directly; mutant `greet-argv-unquoted` fails it), and Rime's own session files carry a
 one-word Exec (`desktop.nix` refuses a space at build time). The greeter file is shared with bootc.
+
+### 12.7 Verification (adversarial pass, at f817a388a)
+
+Evidence: `/var/lab/rime-nix/artifacts/verify-desktops/` (`<check>.log`, `mut-<id>.log`).
+
+- Re-run at HEAD's drvPaths, all PASS: `activation` (VM), `update-client` (VM), `update-e2e` (VM), `security` (VM),
+  `catalogue`, `catalogue-data`, `eval`, `ci`, `fedora-parity`, `unit-docs`, `libexec`, `release-unit`; the
+  `desktops-eval`, `release-plan`, `desktop`, `desktops-install-{gnome,kde,cosmic}` and `rimed` outputs in the store
+  match HEAD's drvPaths. Not run on this branch: `checks.polish` (three VMs), `update-floors` and `update-variants`
+  (binary cache), and the rest of the 83 checks not named here.
+- Own mutants, each observed failing: GNOME kernel parameter (`desktops-eval`), plain-kde published partition
+  (`release-plan`), system76-power `mkForce` removed (module assertion), `hyprland` dropped from `ownSessions`
+  (`tests/test-rime-greet-sessions.sh` §8), `restartIfChanged` removed from `rime-update.service` (`mF-restart`:
+  `desktops-eval` fails every variant), its `X-StopOnRemoval = false` removed (`mG-stoprm`: 16 variants fail), the game-mode branch of `set_base_tier` removed (`mD-gamewrite`: the bus test
+  `game_mode_is_a_performance_hold_and_a_write_sets_where_it_returns` fails).
+- `tests/test-rime-greet-sessions.sh` has 3 failures at both this branch and its base c54c25060 (pre-existing).
+- Fixed here: `rime-update.service` `restartIfChanged = false` and `X-StopOnRemoval = false` (§12.1), the §9
+  virtualization rows and the §12.1 floors explanation. That fix changes the module, so the VM outputs above are for
+  f817a388a. Re-run after it (`new-<check>.log`), PASS: `desktops-eval`, `release-plan`, `activation` (VM). NOT re-run
+  after it: `desktop`, `desktops-install-{gnome,kde,cosmic}`, `update-client`, `update-e2e`, `security` (the change is
+  two `[Unit]`/`X-` keys of one oneshot unit; the integrator re-runs them at the merge).
