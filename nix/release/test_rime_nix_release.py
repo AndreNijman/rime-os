@@ -554,6 +554,55 @@ class PublishGuards(unittest.TestCase):
         with self.assertRaisesRegex(r.Refused, "not a store path"):
             r.refuse_non_redistributable(clo, plan)
 
+    def test_publish_refuses_a_vendor_path_before_anything_is_uploaded(self):
+        # R14: `publish` refuses before its fill; build_manifest's own refusal comes only after the upload.
+        import types
+
+        class Uploaded(Exception):
+            pass
+
+        class Reg:
+            def __init__(self, *a, **k):
+                pass
+
+            def tag_state(self, tag):
+                return None
+
+        clo, plan, _, _ = synthetic()
+        vendor = sp(20, "rime-chatgpt-26.1027.51404")
+        clo["paths"][vendor] = {"nar_hash": nh(vendor), "nar_size": 5, "references": []}
+        plan["non_redistributable"] = [vendor]
+        uploads = []
+
+        def upload(*a, **k):
+            uploads.append(a)
+            raise Uploaded()
+
+        saved = (r.Registry, r.fill, r.gh_fill)
+        r.Registry, r.fill, r.gh_fill = Reg, upload, upload
+        try:
+            with tempfile.TemporaryDirectory() as t:
+                art = os.path.join(t, "artifact")
+                os.makedirs(art)
+                with open(os.path.join(art, "closure.json"), "w") as f:
+                    json.dump(clo, f)
+                with open(os.path.join(art, "split.json"), "w") as f:
+                    json.dump({"upstream": [], "rime": sorted(clo["paths"])}, f)
+                with open(os.path.join(t, "plan.json"), "w") as f:
+                    json.dump(plan, f)
+                a = types.SimpleNamespace(
+                    rime_os=SHA_A, rime_shell=SHA_B, nixpkgs=SHA_N, repo="localhost:5000/rime", plain_http=True,
+                    cosign="cosign", out=os.path.join(t, "out"), plan=os.path.join(t, "plan.json"),
+                    allow_test_variants=False, artifact=art, cache_pubkey=[KEY], signer=None, fulcio_root=None,
+                    issuer=None, channel="edge", bootc_release_id=None, bootc_revision=None, bootc_shell=None,
+                    release="2026.11.01", next_release_id=None, today=None, backend="s3", cache="s3://rime-test",
+                    secret_key_file=None, upstream=None, upstream_key=[], public=None)
+                with self.assertRaisesRegex(r.Refused, "may not be redistributed.*rime-chatgpt"):
+                    r.cmd_publish(a)
+        finally:
+            r.Registry, r.fill, r.gh_fill = saved
+        self.assertEqual(uploads, [], "the publish uploaded before it refused")
+
     def test_a_device_built_app_is_published_as_its_derivation(self):
         clo, plan, sizes, n = synthetic()
         drv = sp(22, "rime-chatgpt-26.1027.51404.drv")

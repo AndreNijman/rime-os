@@ -67,6 +67,8 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
     'leaked = sorted(banned & set(clo["paths"]))' 'leaked = []'
   mutant "a device build names an output" \
     'if not c["out"].endswith(".drv"):' 'if False:'
+  mutant "publish uploads before its R14 refusal" \
+    'refuse_non_redistributable(load_artifact(a.artifact)[0], plan)' 'None'
   mutant "a test variant is published" \
     'if not v.get("publishable") and not allow_test_variants:' 'if False:'
   mutant "the push hook runs in a real publish" \
