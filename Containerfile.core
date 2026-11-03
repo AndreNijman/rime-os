@@ -426,7 +426,7 @@ RUN set -eux; \
     curl -fsSL --retry 3 -o "/build/${PLYMOUTH_NVR}.src.rpm" \
       "https://kojipkgs.fedoraproject.org/packages/plymouth/${VER}/${REL}/src/${PLYMOUTH_NVR}.src.rpm"; \
     echo "${PLYMOUTH_SRPM_SHA256}  /build/${PLYMOUTH_NVR}.src.rpm" | sha256sum -c -; \
-    T=/build/rpmbuild; \
+    T=/build/topdir; \
     rpm -i --define "_topdir ${T}" "/build/${PLYMOUTH_NVR}.src.rpm"; \
     cp /build/plymouth-keyboard-removed-handler.patch "${T}/SOURCES/"; \
     SPEC="${T}/SPECS/plymouth.spec"; \
@@ -440,11 +440,15 @@ RUN set -eux; \
     dnf5 -y builddep "${SPEC}" >/dev/null; \
     # %prep alone first: the fix must be in the source that gets compiled, not
     # only in SOURCES (rpmbuild -bb removes its build tree when it succeeds)
-    rpmbuild --define "_topdir ${T}" -bp "${SPEC}" >/dev/null; \
+    if ! rpmbuild --define "_topdir ${T}" -bp "${SPEC}" >/dev/null; then \
+        echo "FATAL: rpmbuild -bp failed: does the patch still apply to ${PLYMOUTH_NVR}? (errors above)"; exit 1; \
+    fi; \
     grep 'keyboard_removed_handler (manager->event_handler_data, keyboard)' \
         $(find "${T}/BUILD" -path '*/src/libply-splash-core/ply-device-manager.c') >/dev/null \
         || { echo "FATAL: the keyboard-removed patch is not in the prepared source"; exit 1; }; \
-    rpmbuild --define "_topdir ${T}" --define "_smp_mflags -j$(nproc)" -bb "${SPEC}"; \
+    if ! rpmbuild --define "_topdir ${T}" --define "_smp_mflags -j$(nproc)" -bb "${SPEC}"; then \
+        echo "FATAL: rpmbuild -bb of the patched ${PLYMOUTH_NVR} failed (compiler output above)"; exit 1; \
+    fi; \
     mkdir -p /out/plymouth; \
     for p in plymouth plymouth-core-libs plymouth-graphics-libs plymouth-scripts \
              plymouth-plugin-script plymouth-plugin-label; do \
