@@ -576,6 +576,33 @@ rime-os `nix/settings-pkg`, with the reason.
   `flake.lock` locks rime-shell at ab8ca519 while its `original` still follows `feat/nixos`: **merge
   `nix/settings-app` into rime-shell `feat/nixos` before the release job re-locks the input**, or a re-lock drops
   Rime Settings.
-- **`nix/desktops` was not merged into `nix/settings-pkg`**: piece 1's rimed D-Bus commit (§6.2 `Mode.Active`/`Set`,
-  `Updates`, §7 PPD API) does not exist yet. The VM checks' assertions that need it (Power → performance → rimed
-  `Tier` and `powerprofilesctl get`; `rime mode set gaming` → the toggle) wait for it.
+- **`nix/desktops` was not merged into `nix/settings-pkg`** (no cherry-picks either: piece 1 owns those commits).
+  Since it was written, `nix/desktops` gained the rimed contract (677034535: §6.2 `Mode.Active`/`Set`, `Updates`, §7
+  PPD API) and the greeter's session environment (8a9bab87a). `checks.settings-app-gnome` was proved on a temporary
+  merge of the two branches (deleted afterwards) and is in `nix/ci/checks-not-in-ci.txt` on `nix/settings-pkg` alone,
+  where it fails at login: without 8a9bab87a greetd starts GNOME in a `tty` logind session and mutter answers "Failed
+  to find any matching session". **Drop that skip line when the branches merge.**
+
+**The GNOME VM check (`checks.settings-app-gnome`).**
+
+- **GNOME is enabled in the test machine** (`rime.desktops.gnome.enable`), not installed with `rime install`:
+  installing from a release is piece 1's `desktops-install`, which already proves rimed's PPD answers under GNOME,
+  KDE and COSMIC. This check proves what this piece adds, in a session reached by typing the password into rime-greet.
+- **App id, not window title.** GNOME 50 has no `introspect` setting any more: Shell Introspect's `GetWindows`
+  answers only in unsafe mode or to the owner of `org.freedesktop.impl.portal.desktop.gtk`/`.gnome`
+  (js/misc/introspect.js). The test's probe stops `xdg-desktop-portal-gtk.service` (D-Bus-activated; it comes back on
+  the next request), owns the gtk name for one call and asserts `app-id` `org.rimeos.Settings.desktop` and `wm-class`
+  `org.rimeos.Settings` on exactly one window. Nothing in the shipped system does this.
+- **The app is started in a `systemd-run --user --scope`**, as GNOME starts apps. Started straight from the test's
+  `su - rime`, it sat in su's PAM session, which is not the active seat session, and polkit refused it
+  `switch-profile` (`allow_active` only).
+- **Power is driven through the app's own handler** (`qs ipc call settings power <tier>`, the function the Power
+  page's control calls), after the Power page is shown: PowerProfileService picks its backend with one owner check
+  when the page appears. The two changes above were made in the same run and were not separated.
+- **Found, not this piece's to fix:** GNOME started by rime-greet says "Screen Lock disabled: Screen Locking requires
+  the GNOME display manager" (screenshot `gnome-pass-screens/settings-app.png`). GNOME's lock needs GDM; with
+  rime-greet a GNOME session has no lock screen. Handed to the desktops piece (open-items `build:settings`).
+- **KDE and COSMIC VM checks were not written** (open-items): the GNOME check took seven runs on the temporary merge,
+  and both have the same `nix/desktops` dependency. Recipe: `gnomeTest`'s structure; login and powerdevil's
+  `currentProfile` from `desktops-install.nix`'s KDE block; the COSMIC power block from the same file; the open
+  question is how to assert the plasmoid is in Plasma's tray (the report hook proves it loaded and draws).
