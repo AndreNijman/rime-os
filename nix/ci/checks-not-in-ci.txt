@@ -23,3 +23,4 @@ kernel-vm-signed    needs the Rime binary cache (TODO(handover) R2): it boots th
 hostlayer-katana    needs katana's real state (RIME_KATANA_STATE, never in CI): without it the test boots nothing and would pass
 update-floors       needs the Rime binary cache (TODO(handover) R2): it installs the four release variants, which carry the Rime kernel
 update-variants     needs the Rime binary cache (TODO(handover) R2): it publishes and installs the four release variants, which carry the Rime kernel
+settings-app-gnome  needs the desktops piece (nix/desktops: greeter session type, rimed Mode.Set/power-profiles API), not on this branch: passes merged with it (artifacts/settings/vm/gnome-merged-PASS.log); drop this line at that merge
