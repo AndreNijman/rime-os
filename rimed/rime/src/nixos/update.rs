@@ -109,12 +109,12 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
         let r = fetch::manifest(cfg, roots, &digest, &rel, opts.allow_unverified)?;
         Ok(Some((r, digest)))
     })();
-    let (state, digest) = match r {
+    let (state, digest, offered) = match r {
         Err(s) => {
             eprintln!("{}", s.message);
             return s.code;
         }
-        Ok(None) => ("none", String::new()),
+        Ok(None) => ("none", String::new(), String::new()),
         Ok(Some((rel, digest))) => {
             let m = &rel.manifest;
             let v = m.variant(&rel.variant.chosen).expect("chosen by fetch::manifest");
@@ -123,7 +123,7 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
             let newer = Applied::load().high_water().map_or(true, |hw| release::compare(&m.release, &hw) != Some(std::cmp::Ordering::Less));
             if current.as_deref() == Some(target) || !newer {
                 println!("rime: the OS is up to date ({})", Applied::load().high_water().unwrap_or(m.release.clone()));
-                ("none", digest)
+                ("none", digest, String::new())
             } else {
                 let closure: Vec<&str> = m.variant_closure(v).keys().copied().collect();
                 let missing = store::invalid(cfg, &closure).unwrap_or_default();
@@ -133,14 +133,23 @@ fn check(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> i32 {
                     None => m.paths.iter().filter(|p| missing.contains(&p.path)).map(|p| p.file_size).sum(),
                 };
                 println!("rime: release {} is available: {} new store paths, {:.2} GB to download", m.release, missing.len(), bytes as f64 / GB);
-                ("available", digest)
+                ("available", digest, m.release.clone())
             }
         }
     };
     if crate::ops::effective_uid() == Some(0) {
-        let _ = write_atomic(Path::new(CHECK_STATE), format!("state={state}\ndigest={digest}\n").as_bytes(), 0o644);
+        // release=: the release on offer (rimed's Updates interface names it); running=: the release this machine
+        // runs now (none recorded: empty).
+        let running = resolve_link("/run/current-system").and_then(|t| super::release_of(&t)).map(|r| r.release).unwrap_or_default();
+        let body = check_state(state, &digest, &offered, &running);
+        let _ = write_atomic(Path::new(CHECK_STATE), body.as_bytes(), 0o644);
     }
     0
+}
+
+/// The checker's state file (/run/rime-update/state), as rimed's Updates interface reads it (rimed/src/updates.rs).
+fn check_state(state: &str, digest: &str, release: &str, running: &str) -> String {
+    format!("state={state}\ndigest={digest}\nrelease={release}\nrunning={running}\n")
 }
 
 
@@ -751,6 +760,14 @@ pub fn catalogue_outs(m: &Manifest) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_check_state_file_carries_the_release_on_offer_and_the_running_one() {
+        assert_eq!(
+            check_state("available", "sha256:x", "2026.11.02", "2026.11.01"),
+            "state=available\ndigest=sha256:x\nrelease=2026.11.02\nrunning=2026.11.01\n"
+        );
+    }
 
     fn generation(root: &Path, system: &[&str], user: &[&str]) -> String {
         for (sub, names) in [("etc/systemd/system", system), ("etc/systemd/user", user)] {

@@ -122,8 +122,13 @@ pub trait GameMode {
 )]
 pub trait Mode {
     fn hold(&self, mode: &str) -> zbus::Result<()>;
+    /// Hold the mode and move every lever to it, in rimed (2026-11-03). Absent on an older rimed.
+    fn set(&self, mode: &str) -> zbus::Result<()>;
     #[zbus(property)]
     fn held(&self) -> zbus::Result<String>;
+    /// The mode the levers are in now: "gaming" or "daily" (2026-11-03).
+    #[zbus(property)]
+    fn active(&self) -> zbus::Result<String>;
 }
 
 /// Connect to the system bus, returning None (never panicking) if the bus

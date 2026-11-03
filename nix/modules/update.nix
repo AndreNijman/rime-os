@@ -159,7 +159,7 @@ in
 
     # The update notice (bootc's rime-update-check, D6 §8.3): `rime update --check` verifies the channel document and
     # the manifest it names, downloads nothing, and as root writes /run/rime-update/state (`state=available|none`,
-    # `digest=…`), which Rime Shell's Settings -> Updates reads.
+    # `digest=…`, `release=…`, `running=…`), which rimed's org.rimeos.Rimed1.Updates interface reads.
     systemd.services.rime-update-check = {
       description = "Check whether a Rime OS update is available";
       serviceConfig = {
@@ -181,6 +181,20 @@ in
         OnUnitActiveSec = "6h";
         RandomizedDelaySec = "20min";
         AccuracySec = "5min";
+      };
+    };
+
+    # The update itself, started by rimed's Updates.Apply() (polkit org.rimeos.rimed.apply-update, an administrator):
+    # exactly `sudo rime update`. Its progress is /run/rime-live/status.json, which the same interface follows.
+    systemd.services.rime-update = {
+      description = "Install the Rime OS update";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${config.rime.services.rimed.package}/bin/rime update";
+        RuntimeDirectory = "rime-update";
+        RuntimeDirectoryMode = "0755";
+        RuntimeDirectoryPreserve = "yes";
+        TimeoutStartSec = "6h";
       };
     };
 

@@ -389,6 +389,32 @@ async fn cmd_set(name: Option<String>, auto: bool, dry_run: bool) -> i32 {
         }
     };
 
+    let spec = id.spec();
+    let steps = mode::plan(spec, &state);
+
+    // rimed sets the mode itself (`Mode.Set`: it holds the mode, then moves
+    // the same levers this plan names, in the same order), so every client of
+    // the bus gets the same answer. An rimed that predates it gets the old
+    // path below.
+    if !dry_run {
+        match set(id).await {
+            Ok(true) => {
+                if steps.is_empty() {
+                    println!("rime: already in '{id}' — nothing to do.");
+                    return 0;
+                }
+                for step in &steps {
+                    println!("rime: {}", step.describe());
+                }
+                println!("rime: mode -> {id}");
+                report_unapplied(spec);
+                return 0;
+            }
+            Ok(false) => {}
+            Err(code) => return code,
+        }
+    }
+
     // Keep the choice across restarts, BEFORE any lever moves (see the module
     // header). Also when the levers already match: "already in gaming" after a
     // boot of an older image still has to be remembered from now on.
@@ -398,8 +424,6 @@ async fn cmd_set(name: Option<String>, auto: bool, dry_run: bool) -> i32 {
         }
     }
 
-    let spec = id.spec();
-    let steps = mode::plan(spec, &state);
     if steps.is_empty() {
         println!("rime: already in '{id}' — nothing to do.");
         return 0;
@@ -429,6 +453,50 @@ async fn cmd_set(name: Option<String>, auto: bool, dry_run: bool) -> i32 {
     println!("rime: mode -> {id}");
     report_unapplied(spec);
     0
+}
+
+/// A method, interface or object this rimed does not have (it is older).
+fn unknown_to_rimed(e: &zbus::Error) -> bool {
+    match e {
+        zbus::Error::MethodError(name, _, _) => matches!(
+            name.as_str(),
+            "org.freedesktop.DBus.Error.UnknownMethod"
+                | "org.freedesktop.DBus.Error.UnknownInterface"
+                | "org.freedesktop.DBus.Error.UnknownObject"
+        ),
+        zbus::Error::FDO(e) => matches!(
+            **e,
+            zbus::fdo::Error::UnknownMethod(_)
+                | zbus::fdo::Error::UnknownInterface(_)
+                | zbus::fdo::Error::UnknownObject(_)
+        ),
+        _ => false,
+    }
+}
+
+/// `Mode.Set(id)`: rimed holds the mode and moves the levers. `Ok(false)`: this
+/// rimed predates it (the caller sets the mode the old way).
+async fn set(id: ModeId) -> Result<bool, i32> {
+    let Some(conn) = connect().await else {
+        eprintln!("rime: cannot reach the system bus.");
+        return Err(1);
+    };
+    let proxy = match ModeProxy::new(&conn).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("rime: cannot reach rimed's Mode interface: {e}");
+            return Err(1);
+        }
+    };
+    match proxy.set(id.as_str()).await {
+        Ok(()) => Ok(true),
+        Err(e) if unknown_to_rimed(&e) => Ok(false),
+        Err(e) => {
+            eprintln!("rime: setting '{id}' failed: {e}");
+            eprintln!("rime: rimed stops at the first lever that fails rather than applying a partial mode.");
+            Err(1)
+        }
+    }
 }
 
 /// Tell rimed to keep `id` across restarts. An rimed without the `Mode`
