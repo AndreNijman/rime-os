@@ -182,6 +182,11 @@ let
           # ... so it opened no window (its doLater runs on the first event-loop pass; give it time anyway).
           machine.sleep(5)
           machine.fail("ps -u rime -o args= | grep '[h]yprland-update-screen'")
+          # ps alone cannot fail here: in this VM (no GPU buffers) hyprland-update-screen SEGFAULTS in
+          # hyprtoolkit at its first configure, ~1.5 s after it starts, so it is gone before ps looks (seen with
+          # the knob cut AND the getoption assertion above skipped: the check still passed). A launch leaves
+          # systemd-coredump's record of process "hyprland-update" in the journal, and nothing else names it.
+          machine.fail("journalctl -b --no-pager -o cat | grep -F hyprland-update")
           machine.screenshot("hyprland-no-update-news")
 
       with subtest("the login password opened the keyring"):

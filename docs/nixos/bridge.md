@@ -186,7 +186,7 @@ The carry runs inside `start`'s chroot of the new root with `/proc` mounted, so 
 moved, and `rime-bridge.py` did not change for it. Proof: `rime-hostlayer`'s
 `test_the_cpu_vendor_picks_the_boot_microcode` (Intel, AMD, Hygon, no vendor) and
 `test_microcode_alone_makes_a_boot_table_and_an_unreadable_cpuinfo_none`; mutants `hostlayer-microcode-dropped` and
-`hostlayer-microcode-swapped` in `bridge-unit`; the OVMF runs below (`*-microcode.txt`): host.toml says `intel`
+`hostlayer-microcode-swapped` in `bridge-unit`; the OVMF runs below (`*-nixos-checks.txt`: host.toml, `MENU` and `BOOTFILE` lines): host.toml says `intel`
 (the lab CPU is `-cpu host` on katana) and the boot menu and `/boot` hold only `intel-ucode`.
 
 ### Hyprland's "updated" window is off (bridge3)
@@ -207,9 +207,15 @@ together, is not measured. Shipping the same line in the readiness release's `ap
 that order irrelevant. Proof:
 `desktop` subtest "no Hyprland 'updated' window after a version change" (seeds `lastVersion` 0.56.2, logs in,
 `lastVersion` becomes 0.57.*, `hyprctl getoption ecosystem:no_update_news` is set and true, no
-hyprland-update-screen process, screenshot `hyprland-no-update-news.png`); its mutant
-`checks.x86_64-linux.desktop.mutants.update-news` (the same system with the table cut out of `appearance.lua`) fails
-with `bool: false`.
+hyprland-update-screen process and no journal line naming `hyprland-update`, screenshot
+`hyprland-no-update-news.png`); its mutant `checks.x86_64-linux.desktop.mutants.update-news` (the same system with the
+table cut out of `appearance.lua`) fails with `bool: false`. The verifier found the process check alone could not fail
+in that VM: with the table cut AND the getoption assertion skipped the check still PASSED, because
+hyprland-update-screen starts (`--new-version 0.57.0`) and then SEGFAULTS in hyprtoolkit at its first configure (no GPU
+buffers in the test VM), so it is gone before `ps` looks (`artifacts/verify-bridge3/desktop-mutant-window-only.log`). The
+subtest now also asserts the journal names no `hyprland-update` (systemd-coredump records the crash); the same
+getoption-skipped mutant then FAILS on that line (`desktop-mutant-window-only-fixed.log`). On the OVMF guests (virtio
+GPU) the window does render: `artifacts/bridge2/L/L-nixos-desktop.png` is the negative control there.
 
 ## What the OVMF lab proved on the readiness image (bridge3, 2026-11-03, Secure Boot on)
 
