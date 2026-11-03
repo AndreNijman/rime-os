@@ -345,19 +345,82 @@ fn free_bytes(path: &str) -> Option<u64> {
 }
 
 fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Stop> {
+    os_step_from(cfg, roots, opts, None, &mut None)
+}
+
+/// What a same-release install did (docs/nixos/desktops.md §5: `rime install <desktop>` / `rime remove <desktop>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SameRelease {
+    /// The new system is running now.
+    Live,
+    /// The new system is installed for the next restart.
+    NextBoot,
+    /// The running release builds no system with the switches as they are now; nothing was installed.
+    NotInRelease,
+    /// A newer release is already installed for the next restart; this one was not touched.
+    NewerStaged(String),
+}
+
+/// Install the system the switch files select from the release this machine RUNS: its digest from the record
+/// `rime update` kept (`/var/lib/rime/releases/<release>/digest`), its manifest fetched by that digest and verified
+/// again. The channel is never read, so a newer release on the channel is not installed (§8.2 step 3 is skipped).
+pub fn install_running_release(no_live: bool) -> Result<SameRelease, String> {
+    let cfg = Config::load()?;
+    let roots = Roots::from_env();
+    let _lock = lock("the update")?;
+    let running = resolve_link("/run/current-system").unwrap_or_default();
+    let applied = Applied::load();
+    let Some(rec) = applied.by_toplevel(&running).cloned() else {
+        return Err("this system's release is not recorded on this machine; `sudo rime update` records it".into());
+    };
+    if let Some(hw) = applied.high_water() {
+        if release::compare(&rec.release, &hw) == Some(std::cmp::Ordering::Less) {
+            return Ok(SameRelease::NewerStaged(hw));
+        }
+    }
+    let digest = std::fs::read_to_string(state("releases").join(&rec.release).join("digest"))
+        .map(|d| d.trim().to_string())
+        .map_err(|e| format!("the record of release {} on this machine has no digest ({e}); `sudo rime update` keeps it", rec.release))?;
+    let mut opts = UpdateOptions::default();
+    opts.live.no_live = no_live;
+    let mut chosen = None;
+    os_step_from(&cfg, &roots, &opts, Some((digest, rec.release.clone())), &mut chosen).map_err(|s| s.message)?;
+    let current = resolve_link("/run/current-system").unwrap_or_default();
+    let profile = resolve_link(super::PROFILE).unwrap_or_default();
+    Ok(match chosen {
+        Some(t) if t == current && t != running => SameRelease::Live,
+        Some(t) if t != running && t == profile => SameRelease::NextBoot,
+        _ => SameRelease::NotInRelease,
+    })
+}
+
+/// The OS step. `same`: install from this (digest, release) instead of the channel's (a same-release install).
+/// `chosen`: set to the toplevel of the system the release offers this machine, once known.
+fn os_step_from(
+    cfg: &Config,
+    roots: &Roots,
+    opts: &UpdateOptions,
+    same: Option<(String, String)>,
+    chosen: &mut Option<String>,
+) -> Result<i32, Stop> {
     if roots.fixture.is_some() && !opts.live.plan_only {
         return Err(stop("rime: RIME_TRUST_ROOT is set: this program will not deploy on fixture facts"));
     }
-    if let Some(h) = Pins::load().hold {
-        println!("rime: updates are held at {h} (`sudo rime update --unpin` releases them); the OS was not updated");
-        return Ok(0);
-    }
-    // 3. channel document.
-    let (digest, rel_id) = match fetch::channel(cfg, roots, opts.allow_unverified || opts.live.allow_unverified, opts.force, true)? {
-        Pointer::Take { digest, release } => (digest, release),
-        Pointer::Hold(m) => {
-            println!("{m}");
-            return Ok(0);
+    // 3. channel document; a same-release install never reads it (and a hold does not apply: nothing is updated).
+    let (digest, rel_id) = match same {
+        Some(p) => p,
+        None => {
+            if let Some(h) = Pins::load().hold {
+                println!("rime: updates are held at {h} (`sudo rime update --unpin` releases them); the OS was not updated");
+                return Ok(0);
+            }
+            match fetch::channel(cfg, roots, opts.allow_unverified || opts.live.allow_unverified, opts.force, true)? {
+                Pointer::Take { digest, release } => (digest, release),
+                Pointer::Hold(m) => {
+                    println!("{m}");
+                    return Ok(0);
+                }
+            }
         }
     };
     // 4. manifest: the trust gate.
@@ -365,6 +428,7 @@ fn os_step(cfg: &Config, roots: &Roots, opts: &UpdateOptions) -> Result<i32, Sto
     let m = &rel.manifest;
     let v = m.variant(&rel.variant.chosen).expect("chosen by fetch::manifest");
     let target = m.path(v.toplevel).to_string();
+    *chosen = Some(target.clone());
     let gens = generations::list().map_err(|e| stop(format!("rime: {e}")))?;
     let current_gen_top = gens.all.get(&gens.current).cloned().unwrap_or_default();
     let running = resolve_link("/run/current-system").unwrap_or_default();

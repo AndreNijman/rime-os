@@ -603,6 +603,12 @@ fn install(cat: &Catalogue, args: &[String]) -> i32 {
     let mut nix_add: Vec<String> = vec![];
     for (name, r) in &plan {
         match r {
+            Route::Toggle { name: canon, feature } if cat.is_desktop(feature) => {
+                match super::desktop::install(cat, canon, feature) {
+                    Ok(()) => requested = edit_list(&requested, &[canon.clone()], &[]),
+                    Err(e) => rc = fail(format!("{name}: {e}")),
+                }
+            }
             Route::Toggle { name: canon, feature } => match select_feature(cat, canon, feature) {
                 Ok(()) => requested = edit_list(&requested, &[canon.clone()], &[]),
                 Err(e) => rc = fail(format!("{name}: {e}")),
@@ -927,6 +933,12 @@ fn remove(cat: &Catalogue, names: &[String]) -> i32 {
         }
         match cat.entry(name) {
             Some((_, Entry::Flatpak { id, .. })) => flatpak_ids.push(id.clone()),
+            Some((canon, Entry::Toggle { feature, .. })) if cat.is_desktop(feature) => {
+                match super::desktop::remove(cat, &canon, feature) {
+                    Ok(()) => requested = edit_list(&requested, &[], &lines_naming(cat, &requested, &canon)),
+                    Err(e) => rc = fail(format!("{name}: {e}")),
+                }
+            }
             Some((canon, Entry::Toggle { feature, .. })) => match deselect_feature(cat, &canon, feature) {
                 Ok(()) => requested = edit_list(&requested, &[], &lines_naming(cat, &requested, &canon)),
                 Err(e) => rc = fail(format!("{name}: {e}")),
