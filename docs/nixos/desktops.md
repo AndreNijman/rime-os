@@ -1,6 +1,7 @@
 # Other desktops, Rime Settings, quick toggles and power profiles on NixOS (design)
 
-Status: **design, nothing built.** Andre (2026-11-03): *"with the rime nix release there should also be first party
+Status: **piece 1 (desktops) built on `nix/desktops`; as built in §12. Piece 2 (Rime Settings, quick toggles) not
+started.** Andre (2026-11-03): *"with the rime nix release there should also be first party
 support for other desktop environments, gnome, kde etc, if a user installs them they can instantly use them. and make
 the rime settings an actual app for them to control when theyre not running an environment that has rime shell"*;
 *"gaming mode and those important things will show up in like gnome quick access too. all power profiles in desktops
@@ -27,6 +28,7 @@ Contents:
 9. [Disk floors and the installer](#9-disk-floors-and-the-installer)
 10. [Work split, order and shared files](#10-work-split-order-and-shared-files)
 11. [What is not proven here](#11-what-is-not-proven-here)
+12. [As built (piece 1, desktops)](#12-as-built-piece-1-desktops-branch-nixdesktops)
 
 ---
 
@@ -270,7 +272,7 @@ Changes (desktops piece):
 | Power | PPD off, rimed serves its API (§7); `hardware.system76.power-daemon.enable = mkForce false`; COSMIC's system76-scheduler forced off. | COSMIC's module turns system76-power on when PPD and tuned are off and its applet prefers `com.system76.PowerDaemon` **(checked, cosmic module and applet)**; system76-scheduler would fight rimed's scx/cpuset policy. KDE powerdevil stays (it is the KDE power UI and reads the PPD API). |
 | Portals | Upstream portal config per desktop (`configPackages`), Rime's `xdg.portal.config` only for hyprland/labwc/niri **(checked)**. GNOME → gnome+gtk, KDE → kde+gtk(+kwallet), COSMIC → cosmic+gtk, chosen by `XDG_CURRENT_DESKTOP`. | Needs the greeter env row above. |
 | Polkit agent | Rime's mate-polkit is started only by Rime's session.lua and its autostart file is `OnlyShowIn=MATE` **(checked)**. GNOME Shell, polkit-kde-agent and cosmic-osd are the agents in theirs. | No duplicate prompts. |
-| Secret Service | gnome-keyring (unlocked by greetd's PAM hook) is the one `org.freedesktop.secrets` everywhere. KDE: `/etc/xdg/kwalletrc` `[org.freedesktop.secrets] apiEnabled=false`; no `pam_kwallet` on greetd (plasma6 adds it to `login` only, not greetd **(checked)**). KDE apps using the KWallet API get a wallet that asks once. kwallet-pam's `pam_kwallet_init.desktop` autostart has no ShowIn **(checked)** and will exist in every session once KDE is installed: ship an override with `OnlyShowIn=KDE;`, and the VM tests assert no kwalletd process and one secrets owner (gnome-keyring) in a Hyprland login on a KDE variant. | Two owners of the name was the bootc keyring failure (two daemons, one locked). |
+| Secret Service | gnome-keyring (unlocked by greetd's PAM hook) is the one `org.freedesktop.secrets` everywhere. KDE: `/etc/xdg/kwalletrc` `[org.freedesktop.secrets] apiEnabled=false`; no `pam_kwallet` on greetd (plasma6 adds it to `login` only, not greetd **(checked)**; **wrong**: greetd's PAM substacks `login`, so it ran at every greetd login; as built, Rime turns it off in `login`, §12.1). KDE apps using the KWallet API get a wallet that asks once. kwallet-pam's `pam_kwallet_init.desktop` autostart has no ShowIn **(checked)** and will exist in every session once KDE is installed: ship an override with `OnlyShowIn=KDE;`, and the VM tests assert no kwalletd process and one secrets owner (gnome-keyring) in a Hyprland login on a KDE variant. | Two owners of the name was the bootc keyring failure (two daemons, one locked). |
 | Network/Bluetooth applets | nm-applet is already `NotShowIn=KDE;GNOME;COSMIC` **(checked)**. blueman's autostart has no ShowIn **(checked)**: ship an override `/etc/xdg/autostart/blueman.desktop` with `NotShowIn=GNOME;KDE;COSMIC;`. | Each desktop has its own NM and Bluetooth UI; two Bluetooth agents fight over pairing. |
 | Audio | PipeWire + WirePlumber as today; every desktop is a PipeWire client. | Nothing to change. |
 | Input method | fcitx5 everywhere (Rime's `i18n.inputMethod` wins over GNOME's ibus default: `im = fcitx5` in every variant **(checked)**). GNOME: ship the kimpanel extension enabled; KDE: KWin's input method set to fcitx5 (`kwinrc [Wayland] InputMethod`). ibus-daemon must not run. | One input method, Rime's. |
@@ -498,6 +500,8 @@ piece 1's rimed D-Bus commit exists; until then its unit tests run against the f
 
 ## 11. What is not proven here
 
+Written with the design; what the build went on to prove, and what it still does not, is §12.
+
 - Nothing was booted: GNOME, KDE and COSMIC under rime-greet, the greeter env, Quickshell as a plain xdg client under
   Mutter, the lid inhibitor under each desktop and every dry-activate prediction in §3.5 are for the VM tests.
 - The dry-activate list is predicted from unit content diffs, not from `switch-to-configuration dry-activate` (not run
@@ -506,3 +510,139 @@ piece 1's rimed D-Bus commit exists; until then its unit tests run against the f
   are outputs of the derivations the dry run listed.
 - Disk floors for desktop variants are estimates (NAR delta x 0.55), not an installed measurement.
 - The hosted runner's free disk (14 GB) is the figure from updates-and-release.md §18, still not verified.
+
+---
+
+## 12. As built (piece 1, desktops; branch `nix/desktops`)
+
+Built on `feat/nixos` c54c25060. Every design row of §2-§9 that belongs to piece 1 is built as written except where
+this section says otherwise. Evidence (logs, screenshots) is in `/var/lab/rime-nix/artifacts/desktops/`
+(`mutants/`, `vm/`).
+
+### 12.1 What exists
+
+| Area | Where | Notes |
+|---|---|---|
+| Desktop table, module | `nix/desktops/default.nix`, `nix/modules/desktops.nix` | `rime.desktops.<id>.enable`; one table drives the catalogue, variants, the greeter's session list and the eval check. |
+| Variants and floors | `nix/release/variants.nix`, `nix/release/floors.nix` | 16 published variants, at most one desktop each; names list their features sorted (`plain-gaming-gnome`, `plain-cosmic-gaming`). Floors = measured base + measured NAR delta x 0.55, marked `estimated`. Published: plain 16, plain-gnome 17, plain-kde 18, plain-cosmic 19, plain-gaming 18, plain-gaming-gnome 19, plain-gaming-kde 21, plain-cosmic-gaming 21 (disk GB); the virtualization rows follow §9 except plain-gnome-virtualization's partition 15 (not 16) and plain-gaming-gnome-virtualization's 17 (not 18): the script's rounding, not a new measurement. |
+| Catalogue | `nix/catalogue/catalogue.nix`, `rime/src/nixos/pkg.rs` | features carry `group = "desktop"` and `session_ids`; `variant::choose` prefers, among the largest variants a release builds, one that keeps every non-desktop feature. |
+| CI | `.github/workflows/nix-release.yml` | The 16 closures (~19.5 GB) do not fit a hosted runner: the hosted job builds `rime-release-toplevels-hosted` (variants without a desktop); desktop variants build on the self-hosted runner. `update-floors` installs only the variants `floors.nix` records as measured. |
+| PPD off | `nix/modules/desktop.nix`, `nix/modules/desktops.nix` | `services.power-profiles-daemon.enable = mkForce false`, `hardware.system76.power-daemon.enable = mkForce false`, an assertion refusing either (and a second desktop). |
+| Rime-only env | `nix/modules/desktop.nix` | `QT_QPA_PLATFORMTHEME=qt6ct` and `ELECTRON_OZONE_PLATFORM_HINT=auto` are exported by a one-line wrapper each of Rime's four sessions (Tiling, Scrolling, Floating, Safe Graphics) runs as its whole Exec, not globally. The Exec stays one word because `rime-session-select` (the Gaming Mode switch back) refuses an Exec with `=` in it, and the build refuses an Exec with a space. `rime-gaming` and `extraSessions` do not get them (§12.4). |
+| Greeter env and command | `files/desktop/rime-greet/GreetContext.qml` | as §4; Rime's own sessions are named in `ownSessions` (hyprland, niri, rime-labwc, rime-safe-graphics, rime-gaming) and get `XDG_SESSION_TYPE` only, so their environment is byte-for-byte what it was. A desktop is recognised by DesktopNames, not by an allowlist of other desktops. The command is single-quoted for greetd (§12.6): `launch()` hands greetd `["sh", "-lc", '<Exec>']`. |
+| Autostart overrides | `nix/modules/desktops.nix` | blueman `NotShowIn=GNOME;KDE;COSMIC;`, `pam_kwallet_init` `OnlyShowIn=KDE;`, `/etc/xdg/kwalletrc` secrets API off. |
+| pam_kwallet (D12) | `nix/desktops/default.nix` | `security.pam.services.login.kwallet.enable = mkForce false` on KDE systems. plasma6 puts pam_kwallet in `login`, and greetd's PAM is `auth substack login` / `session include login`, so it ran at every greetd login: the first KDE run (`kde-3.log`) shows `ksecretd --pam-login` (KWallet 6.31's daemon; its test looked for the old name, kwalletd) in a Hyprland login. Plasma's screen locker (`kde` PAM service) keeps it; KDE apps using the KWallet API get a wallet that asks once, as D12 says. |
+| App stores (D15) | `nix/desktops/default.nix` | GNOME Software and Discover excluded as designed; the COSMIC Store too (the COSMIC module adds `cosmic-store` whenever Flatpak is on; it is not one of its core packages). Found in the first COSMIC run (its dock showed the store). `desktops-eval` refuses any of the three in any variant. |
+| install/remove | `rime/src/nixos/desktop.rs`, `update.rs` (`install_running_release`) | as §3.4. `remove` deletes the whole switch file (every alias that put the desktop there). The same-release path calls `os_step` with the saved digest and `allow_unverified = false`; the manifest is fetched again by digest and verified again. Outcomes: Live, NextBoot (a session of the desktop is open, or the classifier says Boot), NotInRelease, NewerStaged (a newer release is already staged: it is not replaced). |
+| Classifier | `rimed-core/src/nixrel/activation.rs` | as §3.5: `systemd-udevd.service` and `geoclue.service` restart-safe; one-sided units may start/stop; rule 6 asks only sessions that run Rime Shell (conservative: a session whose Shell state is unknown still defers if it runs the Shell). Added once the VM test ran: `systemd-tmpfiles-resetup.service` restart-safe (a oneshot every switch starts; the second switch of a boot restarts it, so `rime remove gnome` after `rime install gnome` was "next boot"); the account lines of `update-users-groups.pl` (`would remove group/user ‘X’`, `would revive group/user 'X' with …`) are recognised; removing the account of a user with an open session is Boot. `warning: would not apply …` stays unrecognised. |
+| Up to date means running | `rime/src/nixos/update.rs` `os_step` | Only `running == target` is up to date. Before, `booted == target` also counted, so install (live) → remove while logged in (next boot = the booted system) → log out → `rime remove` said "up to date" and left the desktop running. Found while writing the VM test; fixed in 5fafdace5. |
+| PPD API | `rimed/src/ppd.rs` | as §7. Properties are served through a custom `org.freedesktop.DBus.Properties` so `ActiveProfile` writes run polkit and SetTier; `Power.SetTier` (CLI, Shell) also releases holds, as a PPD write does; an AC change emits PropertiesChanged; `PerformanceDegraded` carries rimed's thermal/lap reasons. `ReleaseProfile` checks no owner, as PPD does not. The names are claimed only with `RIMED_POWER_PROFILES=1` (set by the NixOS module): the bootc image still runs power-profiles-daemon, so rimed must not take its name there. Bus policy `org.rimeos.Rimed1.PowerProfiles.conf`, activation files for both names (`SystemdService=rimed.service`), policy `org.rimeos.rimed.power-profiles.policy` (a unit test checks the shipped policies name exactly the action ids rimed asks for). |
+| Mode.Set / Active | `rimed/src/dbus.rs`, `hold.rs`, `rime/src/mode.rs` | as §6.2. `rime mode set` calls `Mode.Set`; an older rimed (UnknownMethod) gets the old client path. |
+| Updates | `rimed/src/updates.rs`, `nix/modules/update.nix` | as §6.2. The checker's `/run/rime-update/state` now carries `state=`, `digest=`, `release=` (on offer) and `running=`; rimed reads it and `/run/rime-live/status.json` by inotify. `Apply` (polkit `apply-update`, interactive, `auth_admin_keep`) starts the new `rime-update.service` (`rime update`, oneshot, 6 h timeout). |
+
+### 12.2 Tests and mutants (every mutant listed was observed failing the check, except the one the KDE row says survives; logs in `artifacts/desktops/mutants/`, the VM checks' in `artifacts/desktops/vm/mut-<desktop>-<mutant>.log`)
+
+| Check | Mutants killed |
+|---|---|
+| `checks.desktops-eval` | ppd-on, qt-global, two-desktops |
+| `checks.release-plan` | drop-floor |
+| rimed private-bus tests (`bus_tests.rs`, inside `path:.#rimed`'s check) | ppd-write-keeps-holds, ppd-precedence-swapped, ppd-no-owner-cleanup, ppd-ac-no-props, ppd-write-not-polkit, mode-set-no-hold, updates-no-watch, updates-apply-not-interactive |
+| variant/pkg/desktop/update unit tests (`rime`) | variant-lexical-tiebreak, desktop-refusal-removed, desktop-floor-without-feature, onesided-no-guard |
+| activation unit tests (`rimed-core`) | act-no-udevd, act-no-geoclue, act-no-onesided, act-no-template, act-rule6-all, act-no-tmpfiles-resetup, act-accounts-unrecognised, act-removed-user-logged-in-ignored |
+| greeter (`tests/test-rime-greet-sessions.sh` §8 env, §9 command) | §8: see the VM row greeter-env; §9: greet-argv-unquoted (the old `["sh","-lc",cmd]`: 4 of 5 Exec shapes lose their arguments, `env …` prints the environment) |
+| `checks.desktops-eval` (rows added while building) | cosmic-store (the COSMIC Store exclusion removed: the four COSMIC variants fail), kwallet-pam-login-eval (pam_kwallet back in `login`: the four KDE variants fail), kwalletrc-api-on (`apiEnabled=true`: the four KDE variants fail) |
+| `checks.desktop` (VM) | the multi-word Exec this branch first shipped (`desktop-head.log`: the session exited at once) |
+| `checks.desktops-install-gnome` (VM) | same-release-channel (`rime install gnome` printed `2026.11.10 → 2026.11.11` and activated the newer release's plain-gnome; the test refuses the system), udevd-not-safe (`mut-gnome-udevd-not-safe-2.log`: "needs a restart: rule 3: it would stop or restart systemd-udevd.service", GNOME installed for the next restart, the test wants it live; the first run, `mut-gnome-udevd-not-safe.log`, never booted: its anchor was stale, fixed in 9312d695a), greeter-env (GNOME never started: the login timed out at 300 s waiting for gnome-shell; this is what the missing environment breaks), blueman-override ("blueman-applet runs in the GNOME session") |
+| `checks.desktops-install-kde` (VM) | kwallet-pam-login (`mut-kde-kwallet-pam-login.log`: "ksecretd runs in a Rime session"). Its first mutant, kwallet-secrets (KWallet's Secret Service API on), was killed before the pam fix (`mut-kde-kwallet-secrets.log`: ksecretd, started by pam_kwallet, owned `org.freedesktop.secrets`) and SURVIVES at 29e3fc0a5 (`mut-kde-kwallet-secrets-3.log`; the `-2` run failed only at a logout wait that kde-4 passes): with pam_kwallet out of `login` nothing starts ksecretd before gnome-keyring holds the name. It is no longer a VM mutant; `checks.desktops-eval` guards the setting (kwalletrc-api-on). |
+| `checks.desktops-install-cosmic` (VM) | system76-power ("system76-power runs") |
+
+#### What the VM runs showed
+
+Logs and screenshots: `/var/lab/rime-nix/artifacts/desktops/vm/` (`<run>.log`, `shots-<run>/`).
+
+- **KDE** (`kde-4.log`, PASS, 459 s, at 29e3fc0a5; screenshots `shots-kde-4/`): `rime install kde` while the user was
+  logged in to Hyprland was live (`2026.11.10 → 2026.11.10`): the user's `nixos-activation.service` was restarted by the
+  switch (new InvocationID, NRestarts 0) and the Hyprland socket and session survived. In a Hyprland login on the KDE
+  system neither `kwalletd` nor `ksecretd` ran and the one `org.freedesktop.secrets` was gnome-keyring. The run before
+  the fix (`kde-3.log`, PASS, 544 s) passed only because it looked for `kwalletd`: its process list shows
+  `ksecretd --pam-login` in the Hyprland login (§12.1, pam_kwallet). In Plasma (both runs): logind `Desktop=plasma Type=wayland Service=greetd`; plasmashell's `XDG_CONFIG_DIRS`
+  starts with plasma-workspace's own `etc/xdg`; secrets owner gnome-keyring; powerdevil's `currentProfile` followed
+  `rime tier performance` then `power-saver`, `profileChoices` = `performance balanced power-saver`. Inhibitors in
+  Plasma: PowerDevil holds `handle-power-key:handle-suspend-key:handle-hibernate-key:handle-lid-switch` (block, "KDE
+  handles power events"); kwin, ModemManager, NetworkManager, rtkit and UPower hold sleep delays. Remove while logged
+  in: next boot; after logout: live, session file gone.
+- **GNOME** (`gnome-7.log`, PASS, 341 s, at the final test; `gnome-6.log` the same run one commit earlier;
+  screenshots `shots-gnome-7/`): `rime install gnome` printed
+  `2026.11.10 → 2026.11.10` and installed `plain-gnome` live while 2026.11.11 was on the channel. Greeter lists GNOME;
+  the login gives logind `Desktop=gnome Type=wayland Service=greetd`, gnome-shell's `XDG_CURRENT_DESKTOP=GNOME`,
+  `XDG_SESSION_DESKTOP=gnome`, `XDG_SESSION_TYPE=wayland`; secrets owner gnome-keyring; none of Rime's session
+  programs, no power-profiles-daemon or system76-power. `rime tier performance` is what GNOME reads over the system
+  bus; `powerprofilesctl list/get/set` and `launch -p performance` (hold seen, released) work against rimed.
+  Inhibitors in GNOME: gsd-power `handle-lid-switch` (block, "External monitor attached or configuration changed
+  recently") and a sleep delay "GNOME needs to lock the screen"; gsd-media-keys the power/suspend/hibernate keys
+  (block); gnome-shell, ModemManager, NetworkManager, rtkit and UPower sleep delays. GNOME shows "Screen Lock
+  disabled: Screen Locking requires the GNOME display manager" at login (`gnome-session.png`; §12.4), and nothing owns
+  `org.gnome.DisplayManager` (`busctl status` in the log).
+- **COSMIC** (`cosmic-3.log`, PASS, 509 s, with the COSMIC Store left out; `cosmic-2.log` the run before it;
+  screenshots `shots-cosmic-3/`): installed live from the running release; logind `Desktop=cosmic Type=wayland
+  Service=greetd`, `XDG_CURRENT_DESKTOP=COSMIC`; secrets owner gnome-keyring; `com.system76.PowerDaemon` has no
+  owner and no system76-power process runs; rimed's `ActiveProfile` follows `rime tier power-saver`/`performance`.
+  Inhibitors: cosmic-session holds the power key (block); cosmic-greeter, COSMIC's own locker, holds a sleep delay
+  "COSMIC Greeter needs to display a lock screen"; COSMIC holds no lid inhibitor. The first login opens COSMIC
+  Initial Setup with its screen reader on (orca runs as a child of cosmic-session; `cosmic-session.png`), in both
+  runs: cause not found (§12.5, open-items). `cosmic-2`'s dock showed the COSMIC Store; `cosmic-3`'s does not.
+- **`checks.desktop`** (`desktop-head.log` FAIL at the pre-fix head, `desktop-fix2.log` PASS): the wrapper exports
+  both variables into Hyprland's own environment (read from `/proc/<Hyprland>/environ`), and every Rime session file's
+  Exec is one word.
+
+### 12.3 How the VM tests stand in for a release
+
+`nix/tests/desktops-install.nix` uses the fixture publisher (`fixture-publish.py`, the same cache/channel layout
+`rime update` reads, signed with the test CA) plus a multi-variant manifest writer, not update-e2e's full release
+pipeline: the pipeline would build and push every variant of two releases (four toplevels per desktop here) through
+the real signing path, which update-e2e already proves; what this test needs is two releases, each with plain and
+plain-<desktop>, and a newer one on the channel. Release 1 (2026.11.10) is installed first through `rime update`;
+release 2 (2026.11.11, marked by `/etc/rime-test-release`) is on the channel before `rime install`, so installing it
+would be visible. The greeter's session is preselected through `/var/lib/rime-greet/last-session` (rime-greet's own
+memory) and greetd restarted, because the test cannot pick a session with the keyboard reliably.
+
+### 12.4 Decided not to
+
+| What | Why |
+|---|---|
+| **No screen lock in GNOME under rime-greet.** GNOME Shell's screen shield needs GDM (the notification "Screen Lock disabled: Screen Locking requires the GNOME display manager" at login, `shots-gnome-7/gnome-session.png`; gnome-shell 50.4 creates the shield only when `LoginManager.canLock()`, which asks `org.gnome.DisplayManager`, answers **(checked, js/ui/main.js:237, js/misc/loginManager.js:38)**). Rime keeps greetd + rime-greet for GNOME too and ships no locker for it in this piece. | D8 (one login path, one PAM stack, Rime's recovery watchdog) outweighs it for now, and the alternatives each change more than this piece should: run GDM only for GNOME (two display managers), patch gnome-shell's check (a fork of a module, against D1), or start Rime's own lock from GNOME (not designed for Mutter, no layer-shell). Handed over (open-items, build:desktops): until it is fixed, nothing locks a GNOME session, and the release note that introduces desktops must say so. |
+| **Rime's session-only environment only in Rime's four wrapped sessions** (Tiling, Scrolling, Floating, Safe Graphics). `rime-gaming` and `extraSessions` do not get `QT_QPA_PLATFORMTHEME`/`ELECTRON_OZONE_PLATFORM_HINT`. | Gaming Mode is gamescope + Steam (no Qt theme to follow); an extra session is someone else's. Before this piece every session got them globally, so Gaming Mode loses two variables it did not use. |
+| **No activation allowlist entry for the user `nixos-activation.service` restart.** | `switch-to-configuration` restarts it in every user manager on a real switch, but its dry-activate returns before that step (`do_user_switch`), so the classifier never sees it; the KDE run shows the restart is harmless to an open Hyprland session. |
+| **COSMIC Initial Setup stays.** It opens at the first COSMIC login. | The COSMIC module lists `cosmic-initial-setup` among the packages without which COSMIC fails to start, and excluding a core package is unsupported upstream (it warns). GNOME's initial setup is off (D15) because GNOME's module makes that supported. |
+| **Lid policy inside GNOME and KDE is theirs.** rime-lid's inhibitor is taken only for live work; in GNOME (gsd-power) and Plasma (PowerDevil) the desktop holds its own `handle-lid-switch` block inhibitor and applies its own lid setting. | §4's "documented limit": "keep working with the lid closed" in those desktops follows the desktop's setting. Not proven on hardware (§12.5). |
+
+### 12.5 Not proven by this piece
+
+- Screen lock in KDE and COSMIC under rime-greet (not exercised by the VM tests); GNOME has none (§12.4).
+- What a lid close does in each desktop: the VM tests record the inhibitors, a VM has no lid.
+- `checks.polish` was not re-run: it boots three VMs at once, over this host's two-VM limit for this work.
+- Real hardware: GNOME/KDE/COSMIC on katana's NVIDIA GPU and its panel.
+- The COSMIC battery applet showing rimed's profile: the VM has no battery, Initial Setup covers the panel in the
+  screenshots, and rimed's journal does not name its callers. What is proven is the API the applet reads (rimed's
+  `ActiveProfile`) and that no System76 daemon answers instead.
+- bootc's niri session (`Exec=niri --session`, Containerfile.base) under greetd: by §12.6 it starts `niri` without
+  `--session`. The greeter fix in this branch fixes it once it ships to bootc; not booted there.
+- Why COSMIC's first login turns its screen reader on (§12.2, the COSMIC run; open-items, build:desktops).
+
+### 12.6 Found while building: greetd re-splits the session command
+
+greetd 0.10.3 runs a session as `/bin/sh -c "[ -f /etc/profile ] && . /etc/profile; exec " + cmd.join(" ")`
+(`greetd/src/session/worker.rs`). rime-greet passed `["sh", "-lc", cmd]`, so a `cmd` with a space in it became
+`exec sh -lc <first word> <rest>`: `sh -lc` ran only the first word and the rest became `$0`, `$1`, ... Every session
+whose Exec has more than one word lost its arguments:
+
+- Plasma's Exec is `plasma-dbus-run-session-if-needed …/startplasma-wayland`: the session exited at once (`kde-1`,
+  `kde-2` FAIL).
+- Hyprland's Exec in this branch's first version (`env QT_QPA_PLATFORMTHEME=… start-hyprland`) printed the environment
+  and exited (`desktop-head.log`, bisected in `desktop-bis{A,B,C}.log`).
+- bootc's niri entry (`niri --session`) has been starting `niri` without `--session` (§12.5).
+
+Fixed twice, each enough on its own: the greeter single-quotes the command (`launch()` hands greetd
+`["sh", "-lc", '<Exec>']`, `tests/test-rime-greet-sessions.sh` §9 lifts the shipped function and compares what greetd
+runs with the Exec run directly; mutant `greet-argv-unquoted` fails it), and Rime's own session files carry a
+one-word Exec (`desktop.nix` refuses a space at build time). The greeter file is shared with bootc.
