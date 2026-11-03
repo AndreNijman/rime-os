@@ -26,3 +26,14 @@ A GitHub runner has them.)
 - **The checks of this machinery** are `ci` and `ci-userns` (`nix/tests/ci.nix`): the plan, the summary,
   check-suites and the rimed test report against mutants that must be refused, actionlint, ci/runner/check-workflows.py,
   and bubblewrap's user namespace inside the build sandbox.
+
+## integrate/: what an integrator runs locally
+
+`nix/ci/integrate/` holds the helpers every integration used to copy into `artifacts/integrate-wave<N>/`. Each one
+works on the checkout it lives in (RIME_TREE overrides):
+
+- `drive.sh TAG P check...` (in the container): evaluates each check's drvPath, then builds them P at a time; logs
+  and `summary.txt` in `/work/artifacts/<checkout name>/TAG/` (RIME_ART), builds in RIME_BUILD_DIR.
+- `outs.sh` (in the container): every check's outPath and whether it is BUILT, MISSING or EVALFAIL.
+- `kat-run.sh` (on the host): `hostlayer-katana` on katana's real sanitised snapshot; the snapshot's digest is printed
+  before and after, and nothing from it is committed.
