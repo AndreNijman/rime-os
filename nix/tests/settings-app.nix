@@ -224,6 +224,13 @@ let
             fields = machine.succeed("pgrep -u rime -a -f 'rime-shell/settings.qml' | head -n1").split()
             qs, app = fields[1], fields[-1]
             machine.succeed("rime tier balanced")
+            # PowerProfileService's owner check, as the user's session sends it: the power-profiles name, asked for
+            # rimed's own object, answers only when rimed owns that name. Without this the subtest below would also
+            # pass through the `rime tier` fallback, so it would not show which path the app took.
+            owner = machine.succeed(user("busctl --system call org.freedesktop.UPower.PowerProfiles /org/rimeos/Rimed1 "
+                                         "org.freedesktop.DBus.Properties Get ss org.rimeos.Rimed1.Power Tier")).strip()
+            print("owner check:", owner)
+            assert owner.startswith('v s "'), "rimed does not answer on the power-profiles name: " + owner
             # Show the Power page first: PowerProfileService picks its backend (rimed's power-profiles API) with one
             # owner check when the page appears, as it would before anyone could click.
             machine.succeed(user(f"{qs} -p {app} ipc call settings open power"))
