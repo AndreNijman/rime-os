@@ -629,6 +629,12 @@ rime-os `nix/settings-pkg`, with the reason.
 - Found and fixed: the bootc owner check above (new case "another daemon owns the API" in
   `run-power-profile-service-test.sh`, mutant `owner-by-name` = the old `NameHasOwner` check, FAILS), and the
   `hyprctl-page` mutant for the stub assertion. `flake.lock` re-locked to rime-shell 0d5aac66; the results at the
-  re-locked head are recorded in p2-gates S1, S2 and S5.
+  re-locked head are recorded in p2-gates S1, S2 and S5. `checks.settings-app-gnome` now also sends that owner check
+  from the user's session and requires rimed's answer: its Power subtest would pass through the `rime tier` fallback
+  too, so without it the check did not show which path the app took (PASS, `owner check: v s "balanced"`). That
+  assertion has no mutant: making rimed refuse it would need a rimed built without the power-profiles names.
+- Branch base: `nix/settings-pkg` was cut at `nix/desktops` 269263491, so it carries `nix/desktops`' first three
+  commits (81669c7a9, c59812edb, 269263491). If `nix/desktops` is rebased before it merges, those become duplicates
+  here: merge `nix/desktops` first, then this branch.
 - The GNOME VM check's "desktop's own power property" is PPD `ActiveProfile` read with `gdbus` from the session (the
   property GNOME's power menu reads), not GNOME's toggle widget: a stand-in, stated as such.
