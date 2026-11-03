@@ -1,0 +1,266 @@
+# nix-kernel-sign: the Rime MOK signature for the NixOS kernel image (PLAN.md D3 + D7, decision A8).
+#
+# What it does, for one nixosConfiguration (`host`):
+#   1. evaluates config.system.build.rimeKernelSigning: the unsigned image (rimeKernelImage: the Rime kernel with
+#      every module's kmodigest certificate inserted), its 32-character store hash, and where its signature goes;
+#   2. realises that image (source=build: from source, substituting ONLY from cache.nixos.org, so no byte built
+#      on a self-hosted runner is ever signed; source=cache: from the Rime binary cache, never building);
+#   3. signs it DETACHED with the APEX_SB_KEY_B64 / APEX_SB_CRT_B64 secrets (names as in build-image.yml) through
+#      nix/pkgs/kernel/sign-detached.sh, which refuses a certificate that is not the committed
+#      nix/pkgs/kernel/signing/rime-mok.pem;
+#   4. proves the Nix side accepts it: builds rimeKernelBootImage with the new .sig in place, i.e. sign.nix's
+#      sbattach + `sbverify --cert rime-mok.pem` gate;
+#   5. uploads <hash>.sig + <hash>.json as an artifact and prints how to commit them.
+#
+# The private key exists only in $RUNNER_TEMP for the signing step (0600, shredded in an always() step). It is
+# never in the Nix store, a binary cache, the artifact or a user's machine; only the signature is.
+#
+# Why the signature is COMMITTED (to nix/pkgs/kernel/signing/signatures/) and not fed to a release as an
+# artifact: the rime-os commit plus the rime-shell commit must identify a release (docs/nixos/updates-and-release.md
+# §2, §6.3). So the release flow is: call this workflow; if `status` is `signed` (a new signature), commit the
+# two files and release from that commit. Shipped hosts set rime.kernel.signing.require, so a release whose image
+# has no committed signature fails evaluation instead of shipping an unsigned kernel.
+#
+# GitHub-hosted runners ONLY (never katana or any self-hosted runner: they hold no signing secret and must
+# never). nix/tests/kernel-sign.nix (checks.kernel-sign-workflow) enforces that and the rest of this shape.
+#
+# TODO(handover): create the GitHub environment `kernel-signing` (required reviewer: Andre; deployment branches:
+# main and, during the pivot, feat/nixos) and move APEX_SB_KEY_B64 / APEX_SB_CRT_B64 into it. Until then the
+# job reads the repository secrets build-image.yml uses, and GitHub creates the environment unprotected on the
+# first run. source=cache needs the repository variables RIME_NIX_CACHE_URL and RIME_NIX_CACHE_PUBKEY (D6
+# cache.rimeos.com + rime-cache-1), which do not exist yet. A hosted kernel build (source=build) has not been
+# timed or measured for disk (D7 risk); the job allows the 6-hour maximum.
+name: nix-kernel-sign
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "nixosConfigurations.<host> whose kernel image to sign (must set rime.kernel.enable)"
+        required: true
+        type: string
+      source:
+        description: "build = from source, cache.nixos.org only; cache = substitute from the Rime cache, never build"
+        required: true
+        type: choice
+        options: [build, cache]
+        default: build
+      expect_image:
+        description: "optional: the image store path the release build produced; refuse if this run's differs"
+        required: false
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      host:
+        required: true
+        type: string
+      source:
+        required: false
+        type: string
+        default: build
+      expect_image:
+        required: false
+        type: string
+        default: ""
+    secrets:
+      APEX_SB_KEY_B64:
+        required: false
+      APEX_SB_CRT_B64:
+        required: false
+    outputs:
+      image_hash:
+        description: "store hash of the signed image (the .sig file name)"
+        value: ${{ jobs.sign.outputs.image_hash }}
+      status:
+        description: "committed = a signature for this image is already in the repo; signed = new, commit the artifact"
+        value: ${{ jobs.sign.outputs.status }}
+      artifact:
+        description: "artifact holding <hash>.sig and <hash>.json (empty when status=committed)"
+        value: ${{ jobs.sign.outputs.artifact }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nix-kernel-sign-${{ inputs.host }}
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    # Never from a fork; only from refs whose images can be released.
+    if: >-
+      github.repository == 'AndreNijman/rime-os'
+      && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/feat/nixos')
+    runs-on: ubuntu-24.04
+    environment: kernel-signing
+    timeout-minutes: 360
+    outputs:
+      image_hash: ${{ steps.eval.outputs.hash }}
+      status: ${{ steps.result.outputs.status }}
+      artifact: ${{ steps.result.outputs.artifact }}
+    env:
+      HOST: ${{ inputs.host }}
+      SOURCE: ${{ inputs.source }}
+      EXPECT_IMAGE: ${{ inputs.expect_image }}
+      NIX_VERSION: 2.35.4
+      NIX_TARBALL_SHA256: ff66236d2f7e2a21f3350e73668e021ac6a8881ef277a38e16e952bfb22718c3
+      PINNED_CERT: nix/pkgs/kernel/signing/rime-mok.pem
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check inputs
+        run: |
+          set -euo pipefail
+          [[ $HOST =~ ^[A-Za-z0-9_-]+$ ]] || { echo "::error::host '$HOST' is not a nixosConfigurations name"; exit 1; }
+          [[ $SOURCE == build || $SOURCE == cache ]] || { echo "::error::source must be build or cache"; exit 1; }
+          [[ -z $EXPECT_IMAGE || $EXPECT_IMAGE =~ ^/nix/store/[0-9a-z]{32}-[A-Za-z0-9._+-]+$ ]] \
+            || { echo "::error::expect_image '$EXPECT_IMAGE' is not a store path"; exit 1; }
+          test -s "$PINNED_CERT"
+          openssl x509 -in "$PINNED_CERT" -noout -subject -fingerprint -sha256
+
+      - name: Free disk space
+        uses: ./.github/actions/free-disk-space
+
+      - name: Install Nix (pinned, hash-checked)
+        env:
+          CACHE_URL: ${{ vars.RIME_NIX_CACHE_URL }}
+          CACHE_KEY: ${{ vars.RIME_NIX_CACHE_PUBKEY }}
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 ships kernel.apparmor_restrict_unprivileged_userns=1 (build-image.yml, pr-validation.yml
+          # relax it too): single-user Nix's build sandbox needs an unprivileged user namespace. Relaxed for this
+          # ephemeral runner only; sandbox-fallback = false below makes a sandbox that still cannot start fail the
+          # build instead of building the image unsandboxed.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+          cd "$RUNNER_TEMP"
+          curl -sSfL --retry 3 -o nix.tar.xz \
+            "https://releases.nixos.org/nix/nix-$NIX_VERSION/nix-$NIX_VERSION-x86_64-linux.tar.xz"
+          echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
+          tar -xJf nix.tar.xz
+          "./nix-$NIX_VERSION-x86_64-linux/install" --no-daemon --no-channel-add --yes
+          mkdir -p ~/.config/nix
+          {
+            echo "experimental-features = nix-command flakes"
+            echo "sandbox = true"
+            echo "sandbox-fallback = false"
+            echo "cores = 0"
+            if [[ $SOURCE == build ]]; then
+              # Upstream only: nothing a Rime machine built (self-hosted runner, Rime cache) is signed.
+              echo "substituters = https://cache.nixos.org"
+              echo "trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+              echo "max-jobs = auto"
+            else
+              [[ -n $CACHE_URL && -n $CACHE_KEY ]] \
+                || { echo "::error::source=cache needs the RIME_NIX_CACHE_URL and RIME_NIX_CACHE_PUBKEY variables (TODO(handover))"; exit 1; }
+              echo "substituters = $CACHE_URL https://cache.nixos.org"
+              echo "trusted-public-keys = $CACHE_KEY cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+              # Never build: the image must be the one the release published.
+              echo "max-jobs = 0"
+            fi
+          } > ~/.config/nix/nix.conf
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+
+      - name: Evaluate the image
+        id: eval
+        run: |
+          set -euo pipefail
+          attr="path:.#nixosConfigurations.$HOST.config"
+          [[ $(nix eval --raw "$attr.rime.kernel.enable" --apply 'b: if b then "yes" else "no"') == yes ]] \
+            || { echo "::error::$HOST does not set rime.kernel.enable: it boots no Rime kernel image"; exit 1; }
+          nix eval --json "$attr.system.build.rimeKernelSigning" > "$RUNNER_TEMP/signing.json"
+          cat "$RUNNER_TEMP/signing.json"
+          image=$(jq -r .image "$RUNNER_TEMP/signing.json")
+          hash=$(jq -r .imageHash "$RUNNER_TEMP/signing.json")
+          if [[ -n $EXPECT_IMAGE && $EXPECT_IMAGE != "$image" ]]; then
+            echo "::error::this commit's $HOST image is $image, the caller expected $EXPECT_IMAGE"
+            exit 1
+          fi
+          { echo "image=$image"; echo "hash=$hash"
+            echo "target=$(jq -r .target "$RUNNER_TEMP/signing.json")"
+            echo "sigfile=$(jq -r .signatureFile "$RUNNER_TEMP/signing.json")"
+            echo "committed=$(jq -r .signed "$RUNNER_TEMP/signing.json")"; } >> "$GITHUB_OUTPUT"
+
+      - name: Realise the unsigned image
+        run: |
+          set -euo pipefail
+          out=$(nix build -L --no-link --print-out-paths \
+            "path:.#nixosConfigurations.$HOST.config.system.build.rimeKernelImage")
+          [[ $out == "${{ steps.eval.outputs.image }}" ]] || { echo "::error::built $out, evaluated ${{ steps.eval.outputs.image }}"; exit 1; }
+          nix path-info --json "$out" | jq .
+
+      - name: Sign (detached, Rime MOK)
+        if: steps.eval.outputs.committed != 'true'
+        env:
+          RIME_SB_KEY_B64: ${{ secrets.APEX_SB_KEY_B64 }}
+          RIME_SB_CRT_B64: ${{ secrets.APEX_SB_CRT_B64 }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          [[ -n ${RIME_SB_KEY_B64:-} && -n ${RIME_SB_CRT_B64:-} ]] \
+            || { echo "::error::APEX_SB_KEY_B64 / APEX_SB_CRT_B64 are not available to this job"; exit 1; }
+          SECDIR="$RUNNER_TEMP/rime-sb"
+          mkdir -p "$SECDIR"; chmod 700 "$SECDIR"
+          ( umask 077
+            printf '%s' "$RIME_SB_KEY_B64" | base64 -d > "$SECDIR/rime-mok.key"
+            printf '%s' "$RIME_SB_CRT_B64" | base64 -d > "$SECDIR/rime-mok.crt" )
+          img="${{ steps.eval.outputs.image }}/${{ steps.eval.outputs.target }}"
+          nix shell --inputs-from path:. nixpkgs#sbsigntool nixpkgs#openssl -c \
+            bash nix/pkgs/kernel/sign-detached.sh \
+              --image "$img" --hash "${{ steps.eval.outputs.hash }}" \
+              --key "$SECDIR/rime-mok.key" --cert "$SECDIR/rime-mok.crt" --pinned "$PINNED_CERT" \
+              --out "$RUNNER_TEMP/sig" --store-path "${{ steps.eval.outputs.image }}" \
+              --note "nix-kernel-sign.yml $RUN_URL host=$HOST source=$SOURCE commit=$GITHUB_SHA"
+
+      - name: Remove the key
+        if: always()
+        run: |
+          SECDIR="$RUNNER_TEMP/rime-sb"
+          [ -d "$SECDIR" ] || exit 0
+          shred -u "$SECDIR"/rime-mok.* 2>/dev/null || rm -f "$SECDIR"/rime-mok.*
+          rmdir "$SECDIR" 2>/dev/null || true
+
+      - name: The Nix side accepts it (sign.nix sbattach + sbverify --cert)
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.eval.outputs.committed }}" != true ]]; then
+            cp "$RUNNER_TEMP/sig/${{ steps.eval.outputs.hash }}.sig" "${{ steps.eval.outputs.sigfile }}"
+          fi
+          signed=$(nix eval --raw "path:.#nixosConfigurations.$HOST.config.system.build.rimeKernelSigning.signed" --apply 'b: if b then "yes" else "no"')
+          [[ $signed == yes ]] || { echo "::error::the module did not pick up ${{ steps.eval.outputs.sigfile }}"; exit 1; }
+          nix build -L --no-link --print-out-paths \
+            "path:.#nixosConfigurations.$HOST.config.system.build.rimeKernelBootImage"
+
+      - name: Result
+        id: result
+        run: |
+          set -euo pipefail
+          h="${{ steps.eval.outputs.hash }}"
+          if [[ "${{ steps.eval.outputs.committed }}" == true ]]; then
+            echo "status=committed" >> "$GITHUB_OUTPUT"; echo "artifact=" >> "$GITHUB_OUTPUT"
+            echo "### $HOST: image $h is already signed (${{ steps.eval.outputs.sigfile }})" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "status=signed" >> "$GITHUB_OUTPUT"; echo "artifact=kernel-signature-$h" >> "$GITHUB_OUTPUT"
+          {
+            echo "### $HOST: signed kernel image $h"
+            echo
+            echo "Commit both files to \`nix/pkgs/kernel/signing/signatures/\` (artifact \`kernel-signature-$h\`):"
+            echo
+            echo '```json'; cat "$RUNNER_TEMP/sig/$h.json"; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the signature
+        if: steps.result.outputs.status == 'signed'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kernel-signature-${{ steps.eval.outputs.hash }}
+          path: |
+            ${{ runner.temp }}/sig/${{ steps.eval.outputs.hash }}.sig
+            ${{ runner.temp }}/sig/${{ steps.eval.outputs.hash }}.json
+          if-no-files-found: error
+          retention-days: 90

@@ -98,6 +98,30 @@ impl fmt::Display for UnknownTier {
 
 impl std::error::Error for UnknownTier {}
 
+/// The `scaling_min_freq` floor a tier asks for, named by the per-policy
+/// attribute the value is read from (so the plan carries no machine numbers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MinFreq {
+    /// `cpuinfo_min_freq`: the lowest frequency the hardware can run at.
+    #[serde(rename = "cpuinfo_min")]
+    CpuinfoMin,
+    /// `amd_pstate_lowest_nonlinear_freq`: the lowest frequency that still
+    /// saves energy per unit of work. Below it a core runs longer for the same
+    /// job and the saving is lost.
+    #[serde(rename = "lowest_nonlinear")]
+    LowestNonlinear,
+}
+
+impl MinFreq {
+    /// The per-policy attribute holding this floor's frequency (kHz).
+    pub const fn source_attr(self) -> &'static str {
+        match self {
+            MinFreq::CpuinfoMin => "cpuinfo_min_freq",
+            MinFreq::LowestNonlinear => "amd_pstate_lowest_nonlinear_freq",
+        }
+    }
+}
+
 /// A single intended hardware effect. Every effect a tier can request is one of
 /// these; the `SysWriter` trait is the only thing that turns them into real
 /// sysfs writes or process execs, which is what makes the whole engine
@@ -121,6 +145,17 @@ pub enum Action {
     /// [`Action::CpuPowerLimit`] (restart thermald where it was paused). A
     /// no-op when nothing was held.
     CpuPowerFirmware,
+    /// Turn CPU boost (AMD Core Performance Boost, Intel Turbo) on or off on
+    /// every policy: the per-policy `boost` attribute where the driver has one
+    /// (amd-pstate), else the global `cpufreq/boost`, else intel_pstate's
+    /// `no_turbo` (inverted). What power-profiles-daemon wrote for power-saver
+    /// (off) and the other profiles (on) before rimed became the only writer.
+    CpuBoost(bool),
+    /// Set every policy's `scaling_min_freq` to the frequency the policy itself
+    /// publishes under [`MinFreq`]'s attribute. Also power-profiles-daemon's
+    /// amd-pstate behaviour: the lowest non-linear frequency in balanced and
+    /// performance, the hardware minimum in power-saver.
+    CpuMinFreq(MinFreq),
     /// Write a power-saving control (absolute sysfs path) for game mode:
     /// USB runtime PM, the HDA codec's power_save. `what` is a log label.
     PowerSaveAttr { path: String, value: String, what: String },
@@ -237,6 +272,12 @@ impl Action {
                 format!("CPU package power limits = {pl1_w} W sustained, {pl2_w} W burst")
             }
             Action::CpuPowerFirmware => "CPU package power limits = the firmware's".to_string(),
+            Action::CpuBoost(on) => {
+                format!("CPU boost = {} (all policies)", if *on { "on" } else { "off" })
+            }
+            Action::CpuMinFreq(m) => {
+                format!("scaling_min_freq = {} (all policies)", m.source_attr())
+            }
             Action::PowerSaveAttr { path, value, what } => format!("{what}: {path} <- {value}"),
             Action::ChargeThresholds {
                 start,
