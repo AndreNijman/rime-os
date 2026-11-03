@@ -10,6 +10,7 @@
 #                                       `.partitionGB` for an existing partition (plain, and plain-gaming when gaming
 #                                       is chosen), stamped into the ISO as nixos-choices.json and read by
 #                                       installer/rime-install-nixos.sh (checks.installer-choices)
+#   nix/desktops/default.nix            each desktop's measured `delta` (read here: desktopMeasured)
 #
 # Decision (2026-11-02, wave 3 "updates"): the gate counts ON-DISK bytes on a store mounted compress-force=zstd, as
 # the unpacked NAR size times `ratioPermille`/1000 (rounded up), plus the 1 GB reserve. The ratio is the largest
@@ -46,6 +47,24 @@ let
     plain-gaming-virtualization = { unpacked = 13281460928; onDisk = 6455635968; estimated = false; };
   };
 
+  # Desktops (docs/nixos/desktops.md §9, D14): each desktop on each base above, ESTIMATED like virtualization: the
+  # desktop's measured closure NAR delta (nix/desktops `delta`, 2026-11-03: the same on plain and on plain-gaming to
+  # 0.07 MB) added to the base, its on-disk part at the gate's ratio. Kept apart from `measured`, so a new base
+  # measurement carries every desktop floor with it.
+  desktopDeltas = builtins.mapAttrs (_: d: d.delta) (import ../desktops);
+  featuresOf = name: builtins.filter (f: builtins.isString f && f != "plain") (builtins.split "-" name);
+  variantName = set: builtins.concatStringsSep "-" ([ "plain" ] ++ builtins.sort builtins.lessThan set);
+  withDesktop = m: delta: {
+    unpacked = m.unpacked + delta;
+    onDisk = m.onDisk + onDiskEstimate delta;
+    estimated = true;
+  };
+  desktopMeasured = builtins.listToAttrs (builtins.concatLists (builtins.attrValues (builtins.mapAttrs (base: m:
+    builtins.attrValues (builtins.mapAttrs (d: delta: {
+      name = variantName (featuresOf base ++ [ d ]);
+      value = withDesktop m delta;
+    }) desktopDeltas)) measured)));
+
   ratioPermille = 550;
   reserve = GB; # the gate's reserve (§11.5)
   home = GB; # home, logs, /var: the same allowance bootc's 12 GB figure carries (closure.md §6)
@@ -67,10 +86,11 @@ let
 in
 {
   inherit GB measured ratioPermille reserve home espBytes gptBytes onDiskEstimate virtualizationDelta;
+  inherit desktopDeltas desktopMeasured;
   ratio = ratioPermille / 1000.0;
   # Per release variant (nix/release/variants.nix names). A variant with no floor of its own (one not measured yet)
   # takes the largest floor of the variants whose features it contains: rimed (variant::floor_for) does that.
-  floors = builtins.mapAttrs (_: floor) measured;
+  floors = builtins.mapAttrs (_: floor) (measured // desktopMeasured);
   # The published figures, stated as numbers so a change to a measurement shows up as a failing check
   # (checks.release-plan recomputes them), not as a silent new floor.
   published = {
@@ -78,11 +98,36 @@ in
     plain-gaming = 18;
     plain-virtualization = 16;
     plain-gaming-virtualization = 18;
+    # desktops.md §9
+    plain-gnome = 17;
+    plain-kde = 18;
+    plain-cosmic = 19;
+    plain-gaming-gnome = 19;
+    plain-gaming-kde = 21;
+    plain-cosmic-gaming = 21;
+    plain-gnome-virtualization = 18;
+    plain-kde-virtualization = 19;
+    plain-cosmic-virtualization = 19;
+    plain-gaming-gnome-virtualization = 20;
+    plain-gaming-kde-virtualization = 21;
+    plain-cosmic-gaming-virtualization = 21;
   };
   publishedPartition = {
     plain = 14;
     plain-gaming = 16;
     plain-virtualization = 14;
     plain-gaming-virtualization = 16;
+    plain-gnome = 15;
+    plain-kde = 16;
+    plain-cosmic = 16;
+    plain-gaming-gnome = 17;
+    plain-gaming-kde = 18;
+    plain-cosmic-gaming = 19;
+    plain-gnome-virtualization = 15;
+    plain-kde-virtualization = 17;
+    plain-cosmic-virtualization = 17;
+    plain-gaming-gnome-virtualization = 17;
+    plain-gaming-kde-virtualization = 19;
+    plain-cosmic-gaming-virtualization = 19;
   };
 }

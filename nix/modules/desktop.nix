@@ -93,6 +93,10 @@ let
   # bootc keeps only Rime's own entries (Containerfile.base:3147-3237): Hyprland's renamed "Rime Tiling",
   # niri "Rime Scrolling", labwc "Rime Floating", "Rime Safe Graphics". sway/labwc/hyprland-uwsm stock
   # entries are not offered. Gaming Mode comes from the gaming area through rime.desktop.extraSessions.
+  # Rime's session-only environment, on the Exec line of each of Rime's sessions (D7: not global, so GNOME, Plasma and
+  # COSMIC never see it). The compositor and everything it starts (the Shell, apps from the launcher) inherit it.
+  rimeSessionEnv = "${pkgs.coreutils}/bin/env QT_QPA_PLATFORMTHEME=qt6ct ELECTRON_OZONE_PLATFORM_HINT=auto";
+
   rimeSessions = pkgs.runCommand "rime-sessions"
     {
       passthru.providedSessions = [ "hyprland" "niri" "rime-labwc" "rime-safe-graphics" ];
@@ -104,7 +108,7 @@ let
       [Desktop Entry]
       Name=Rime Tiling
       Comment=Windows tile themselves and reflow as you open and close them (Hyprland)
-      Exec=${hyprland}/bin/start-hyprland
+      Exec=${rimeSessionEnv} ${hyprland}/bin/start-hyprland
       Type=Application
       DesktopNames=Hyprland
       Keywords=tiling;wayland;compositor;
@@ -113,12 +117,13 @@ let
         cp ${files}/desktop/wayland-sessions/$f.desktop $d/$f.desktop
       done
       chmod u+w $d/*
-      sed -i 's|^Exec=niri |Exec=${pkgs.niri}/bin/niri |' $d/niri.desktop
-      sed -i 's|^Exec=labwc$|Exec=${pkgs.labwc}/bin/labwc|' $d/rime-labwc.desktop
+      sed -i 's|^Exec=niri |Exec=${rimeSessionEnv} ${pkgs.niri}/bin/niri |' $d/niri.desktop
+      sed -i 's|^Exec=labwc$|Exec=${rimeSessionEnv} ${pkgs.labwc}/bin/labwc|' $d/rime-labwc.desktop
       sed -i -f ${fhsToNixos} $d/rime-safe-graphics.desktop
-      grep -qx 'Exec=${pkgs.niri}/bin/niri --session' $d/niri.desktop
-      grep -qx 'Exec=${pkgs.labwc}/bin/labwc' $d/rime-labwc.desktop
-      grep -qx 'Exec=${sw}/libexec/rime-safe-graphics' $d/rime-safe-graphics.desktop
+      sed -i 's|^Exec=|Exec=${rimeSessionEnv} |' $d/rime-safe-graphics.desktop
+      grep -qx 'Exec=${rimeSessionEnv} ${pkgs.niri}/bin/niri --session' $d/niri.desktop
+      grep -qx 'Exec=${rimeSessionEnv} ${pkgs.labwc}/bin/labwc' $d/rime-labwc.desktop
+      grep -qx 'Exec=${rimeSessionEnv} ${sw}/libexec/rime-safe-graphics' $d/rime-safe-graphics.desktop
       # Session names are product names (tests/test-rime-greet-sessions.sh rule).
       if grep -iE '^Name=.*(hyprland|labwc|niri|sway)' $d/*.desktop; then exit 1; fi
     '';
@@ -563,8 +568,10 @@ in
       };
 
       # ── Power, sensors, devices ─────────────────────────────────────────────────────────────────────
-      # power-profiles-daemon, not tlp (Containerfile.core:1940): rimed layers its own policy on PPD.
-      services.power-profiles-daemon.enable = true;
+      # No power-profiles-daemon (docs/nixos/desktops.md D6): rimed serves its D-Bus API itself, so every desktop's
+      # power control drives Rime's tiers and nothing else writes platform_profile/EPP. Forced: GNOME and Plasma
+      # turn it on by default.
+      services.power-profiles-daemon.enable = lib.mkForce false;
       services.thermald.enable = true;
       # thermald is Intel-only and restarts on failure: skip it cleanly elsewhere (10-rime-intel-only.conf).
       systemd.services.thermald.serviceConfig.ExecCondition =
@@ -665,10 +672,9 @@ in
         };
       };
       # The terminal (Ghostty, Alacritty, xdg-terminal-exec, $TERMINAL) is nix/modules/terminal.nix.
-      environment.sessionVariables = {
-        QT_QPA_PLATFORMTHEME = "qt6ct";
-        ELECTRON_OZONE_PLATFORM_HINT = "auto";
-      };
+      # Rime's session-only environment (QT_QPA_PLATFORMTHEME=qt6ct, ELECTRON_OZONE_PLATFORM_HINT=auto) is set on the
+      # Exec line of Rime's own sessions (rimeSessions), not globally: COSMIC sets qt5ct and does not evaluate with
+      # both, and Plasma must not be themed by qt6ct (docs/nixos/desktops.md D7).
       environment.etc = {
         # bootc: /etc/gtk-{3,4}.0/settings.ini. nixpkgs' GTK is built with sysconfdir = its own store
         # path, so /etc/gtk-N.0 is never read; GTK also reads $XDG_CONFIG_DIRS/gtk-N.0, and NixOS sets
