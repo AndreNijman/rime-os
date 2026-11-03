@@ -62,6 +62,8 @@ let
       kwalletrc = c.environment.etc."xdg/kwalletrc".text or null;
       loginKwallet = c.security.pam.services.login.kwallet.enable;
       greetd = c.services.greetd.enable;
+      updateUnitRestartIfChanged = c.systemd.services.rime-update.restartIfChanged;
+      updateUnitStopOnRemoval = c.systemd.services.rime-update.unitConfig.X-StopOnRemoval or true;
       otherDisplayManagers = lib.filter (x: x) [
         c.services.displayManager.gdm.enable
         c.services.displayManager.sddm.enable

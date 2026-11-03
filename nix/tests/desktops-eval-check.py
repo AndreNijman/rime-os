@@ -42,6 +42,9 @@ for name, v in sorted(variants.items()):
     check(v["initrd"] == plain["initrd"], f"{name}: initrd is plain's")
     check(v["kernelParams"] == plain["kernelParams"], f"{name}: kernel parameters are plain's")
     check(v["greetd"] and v["otherDisplayManagers"] == [], f"{name}: greetd is the only display manager")
+    check(v["updateUnitRestartIfChanged"] is False,
+          f"{name}: a switch never restarts rime-update.service, the unit Updates.Apply runs the update in")
+    check(v["updateUnitStopOnRemoval"] is False, f"{name}: a switch never stops rime-update.service on removal")
     if v["blueman"]:
         check(v["bluemanOverride"], f"{name}: blueman's autostart is overridden (NotShowIn GNOME/KDE/COSMIC)")
     if "kde" in v["desktops"]:
