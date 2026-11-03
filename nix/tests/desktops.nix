@@ -12,7 +12,8 @@
 #                     - kernel, initrd and kernel parameters are plain's (a desktop never changes how the machine boots,
 #                       so installing one never needs a restart for that reason, §3.5);
 #                     - the blueman autostart override (NotShowIn GNOME/KDE/COSMIC) is in every system with
-#                       blueman, the kwallet-pam override and kwalletrc (secrets API off) in every KDE system, and
+#                       blueman, the kwallet-pam override, kwalletrc (secrets API off) and no pam_kwallet in
+#                       `login` (greetd's stack) in every KDE system, and
 #                       COSMIC's system76-scheduler is off;
 #                     - no desktop's app store (GNOME Software, Discover, COSMIC Store) is installed (D15).
 { pkgs, self }:
@@ -59,6 +60,7 @@ let
       bluemanOverride = c.environment.etc ? "xdg/autostart/blueman.desktop";
       kwalletOverride = c.environment.etc ? "xdg/autostart/pam_kwallet_init.desktop";
       kwalletrc = c.environment.etc."xdg/kwalletrc".text or null;
+      loginKwallet = c.security.pam.services.login.kwallet.enable;
       greetd = c.services.greetd.enable;
       otherDisplayManagers = lib.filter (x: x) [
         c.services.displayManager.gdm.enable

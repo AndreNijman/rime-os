@@ -23,7 +23,8 @@
 #          greeter-env           rime-greet launches without the session environment (GreetContext.qml, bind-mounted
 #                                over the store file inside the VM: XDG_CURRENT_DESKTOP never reaches GNOME)
 #          blueman-override      the blueman autostart override removed (blueman-applet starts in GNOME)
-#   kde    kwallet-secrets       kwalletrc's secrets API left on (kwalletd answers org.freedesktop.secrets)
+#   kde    kwallet-secrets       kwalletrc's secrets API left on (KWallet's daemon answers org.freedesktop.secrets)
+#          kwallet-pam-login     pam_kwallet back in `login` (greetd's stack): ksecretd starts in a Hyprland login
 #   cosmic system76-power        system76-power on (and the configuration's assertions dropped so it evaluates)
 { pkgs, self }:
 
@@ -84,6 +85,9 @@ let
           })
           (lib.mkIf (mutant == "blueman-override") {
             environment.etc."xdg/autostart/blueman.desktop".enable = lib.mkForce false;
+          })
+          (lib.mkIf (mutant == "kwallet-pam-login") {
+            security.pam.services.login.kwallet.enable = lib.mkOverride 10 true;
           })
           (lib.mkIf (mutant == "kwallet-secrets") {
             environment.etc."xdg/kwalletrc".text = lib.mkForce "[org.freedesktop.secrets]\napiEnabled=true\n";
@@ -371,7 +375,9 @@ let
               hyprland_login()
               procs = user_processes()
               print(procs)
-              assert "kwalletd" not in procs, "kwalletd runs in a Rime session"
+              # KWallet 6.31's daemon is ksecretd (kwalletd before it); pam_kwallet at the greeter would start it.
+              for bad in ("kwalletd", "ksecretd"):
+                  assert bad not in procs, f"{bad} runs in a Rime session"
               owner = secrets_owner()
               assert "gnome-keyring" in owner and "kwallet" not in owner, owner
               # rime-greet hands a Rime session XDG_SESSION_TYPE only: logind's Desktop stays empty (§4.1).
@@ -487,6 +493,6 @@ lib.mapAttrs' (
   lib.nameValuePair "desktops-install-${id}" (mkTest id "" // { mutants = lib.genAttrs muts (mkTest id); })
 ) {
   gnome = [ "same-release-channel" "udevd-not-safe" "greeter-env" "blueman-override" ];
-  kde = [ "kwallet-secrets" ];
+  kde = [ "kwallet-secrets" "kwallet-pam-login" ];
   cosmic = [ "system76-power" ];
 }

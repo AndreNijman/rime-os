@@ -58,7 +58,7 @@
     desktopNames = [ "KDE" ];
     delta = 2424402376;
     config =
-      { config, pkgs, ... }:
+      { config, lib, pkgs, ... }:
       {
         services.desktopManager.plasma6.enable = true;
         environment.plasma6.excludePackages = [ pkgs.kdePackages.discover ];
@@ -73,6 +73,10 @@
           [org.freedesktop.secrets]
           apiEnabled=false
         '';
+        # D12: no pam_kwallet at the greeter. plasma6 puts it in `login`, and greetd's PAM substacks `login`, so it
+        # started KWallet's daemon (ksecretd --pam-login) in every greetd login, Hyprland included. Plasma's own
+        # screen locker (`kde`) keeps it.
+        security.pam.services.login.kwallet.enable = lib.mkForce false;
       };
   };
 
