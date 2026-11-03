@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn rule_3_allows_udevd_and_geoclue_restarts() {
         // What adding GNOME prints (docs/nixos/desktops.md §5): new udev rules restart udevd, geoclue's whitelist
-        // restarts geoclue. Each one alone switches; each is proved in nix/tests/desktops.nix.
+        // restarts geoclue. Each one alone switches; udevd is proved in nix/tests/desktops-install.nix (its mutant).
         for u in ["systemd-udevd.service", "geoclue.service"] {
             let mut c = Case::shell_only();
             c.dry = DryActivate::Ran(parse_dry_activate(&format!("would restart the following units: {u}\n")));

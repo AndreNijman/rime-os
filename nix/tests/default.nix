@@ -79,3 +79,5 @@
 // import ./luks-tpm.nix { inherit pkgs self; }
 # desktops-eval (docs/nixos/desktops.md §8.1)
 // import ./desktops.nix { inherit pkgs self; }
+# desktops-install-{gnome,kde,cosmic} (+ .mutants; docs/nixos/desktops.md §8.1)
+// import ./desktops-install.nix { inherit pkgs self; }
