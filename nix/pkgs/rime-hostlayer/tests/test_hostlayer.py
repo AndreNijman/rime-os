@@ -143,8 +143,14 @@ class Fixture(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def carry(self, *extra, check=None):
-        return run("carry", "--from", self.src, "--root", self.dest, "--system", self.sys, *extra, check=check)
+    def carry(self, *extra, check=None, cpuinfo=None):
+        # A fixture CPU, never the build machine's: with no vendor_id, carry writes no [boot] microcode.
+        if cpuinfo is None:
+            cpuinfo = f"{self.tmp.name}/cpuinfo"
+            if not os.path.exists(cpuinfo):
+                write(cpuinfo, "processor\t: 0\nmodel name\t: lab\n")
+        return run("carry", "--from", self.src, "--root", self.dest, "--system", self.sys, "--cpuinfo", cpuinfo,
+                   *extra, check=check)
 
     def read(self, rel):
         with open(os.path.join(self.dest, rel)) as f:
@@ -293,6 +299,37 @@ class CarryTest(Fixture):
                       "nvidia-drm.modeset=1", rep)
         self.assertNotIn("ostree=", rep.split("kernel command line", 1)[1].split("\n", 1)[0])
         run("host", "validate", "--file", f"{self.dest}/var/lib/rime/host.toml", check=0)
+
+    def test_the_cpu_vendor_picks_the_boot_microcode(self):
+        # docs/nixos/bridge.md: a bridged machine loads only its own vendor's early microcode, as an installed one does.
+        cmdline = f"{self.tmp.name}/cmdline"
+        write(cmdline, "root=UUID=a41f rd.vconsole.keymap=uk\n")
+        for vendor, want in (("GenuineIntel", "intel"), ("AuthenticAMD", "amd"), ("HygonGenuine", None), (None, None)):
+            with self.subTest(vendor=vendor):
+                self.tearDown(); self.setUp()
+                cpu = f"{self.tmp.name}/cpuinfo-{vendor}"
+                write(cpu, "processor\t: 0\n" + (f"vendor_id\t: {vendor}\n" if vendor else "") + "flags\t\t: fpu\n")
+                write(cmdline, "root=UUID=a41f rd.vconsole.keymap=uk\n")
+                self.carry("--cmdline", cmdline, cpuinfo=cpu, check=0)
+                with open(f"{self.dest}/var/lib/rime/host.toml", "rb") as f:
+                    boot = tomllib.load(f)["boot"]
+                self.assertEqual(boot.get("microcode"), want)
+                self.assertEqual(boot["kernel_params"], ["rd.vconsole.keymap=uk"], "microcode displaced kernel_params")
+                checked = {c["path"]: c["result"] for c in json.loads(self.read("var/lib/rime/carry/report.json"))["checked"]}
+                self.assertIn(f"microcode = {want}" if want else "no [boot] microcode", checked["CPU vendor"])
+                run("host", "validate", "--file", f"{self.dest}/var/lib/rime/host.toml", check=0)
+
+    def test_microcode_alone_makes_a_boot_table_and_an_unreadable_cpuinfo_none(self):
+        cpu = f"{self.tmp.name}/cpuinfo-amd"
+        write(cpu, "vendor_id\t: AuthenticAMD\n")
+        self.carry(cpuinfo=cpu, check=0)
+        with open(f"{self.dest}/var/lib/rime/host.toml", "rb") as f:
+            self.assertEqual(tomllib.load(f)["boot"], {"microcode": "amd"})
+        self.tearDown(); self.setUp()
+        self.carry(cpuinfo=f"{self.tmp.name}/no-such-cpuinfo", check=0)
+        with open(f"{self.dest}/var/lib/rime/host.toml", "rb") as f:
+            self.assertNotIn("boot", tomllib.load(f))
+        self.assertIn("CPU vendor: cannot read", self.read("var/lib/rime/carry/report.txt"))
 
     def test_a_luks_argument_the_boot_menu_cannot_hold_is_refused(self):
         cmdline = f"{self.tmp.name}/cmdline"
