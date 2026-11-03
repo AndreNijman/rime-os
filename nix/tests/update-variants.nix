@@ -19,7 +19,8 @@
 # 2. Variant selection with the real toplevels (§11.6): the switch files `rime install steam` / `rime install qemu`
 #    write move the machine plain -> plain-gaming -> plain -> plain-virtualization -> plain ->
 #    plain-gaming-virtualization -> plain, each `rime update --no-live` ending with the profile on exactly that
-#    variant's toplevel and that variant's own boot hook (nix/pkgs/rime-boot) having written its menu entry. None of
+#    variant's toplevel and that variant's own boot hook (nix/pkgs/rime-boot) having written the BLS entry of the
+#    generation the update created (rime-generation-<N>.conf, N from the profile link, naming its init). None of
 #    them is booted: they mount Rime's installed layout by label and boot through Fedora's shim and GRUB
 #    (checks.installer-nixos and the OVMF installer lab boot that chain), so --no-live installs each for the next boot.
 #
@@ -27,6 +28,8 @@
 #   ratio-one            update.toml's on_disk_ratio 1.0 (the gate counting unpacked bytes on this store)
 #   compress-not-forced  the store mounted compress=zstd:3 instead of compress-force (rimed must count 1.0 there)
 #   swapped-variants     the release publishes plain-gaming with plain-virtualization's toplevel and back
+#   stale-entry          the newest generation's boot entry removed after each return to plain, as if the boot hook
+#                        had not run (an older generation's entry still names plain's init)
 #
 # Not in hosted CI (nix/ci/checks-not-in-ci.txt): the variants carry the Rime kernel, which no binary cache holds yet.
 { pkgs, self }:
@@ -261,8 +264,17 @@ let
               assert f"installing the {name} system" in out, out
           got = profile()
           assert got == top, f"{name}: the profile is {got}, not the real {name} {top}"
-          # The variant's own boot hook ran and wrote its entry (nix/pkgs/rime-boot, BLS).
-          client.succeed(f"grep -l 'init={top}/init' /boot/loader/entries/*.conf")
+          # The variant's own boot hook ran and wrote the entry of THIS generation (nix/pkgs/rime-boot, BLS: one
+          # rime-generation-<N>.conf per generation). Any generation's entry would not do: on every return to plain
+          # an older generation's entry already names plain's init, whether the hook ran or not.
+          link = client.succeed("readlink /nix/var/nix/profiles/system").strip()
+          n = re.fullmatch(r"system-([0-9]+)-link", link)
+          assert n is not None, f"the system profile points at {link!r}, not a generation link"
+          entry = f"/boot/loader/entries/rime-generation-{n.group(1)}.conf"
+          if MUTANT == "stale-entry" and name == "plain":
+              # As if the hook had not run: this generation's entry is missing, older ones remain.
+              client.succeed(f"rm -f {entry}")
+          client.succeed(f"grep -F 'init={top}/init' {entry}")
 
       with subtest("gaming switched on: the real plain-gaming, and back"):
           switch("gaming", "steam", True)
@@ -291,5 +303,5 @@ let
 in
 mkTest ""
 // {
-  mutants = lib.genAttrs [ "ratio-one" "compress-not-forced" "swapped-variants" ] mkTest;
+  mutants = lib.genAttrs [ "ratio-one" "compress-not-forced" "swapped-variants" "stale-entry" ] mkTest;
 }

@@ -1003,8 +1003,13 @@ real `plain`), then the switch files move it, one `sudo rime update --no-live` e
 (gaming on: "installing the plain-gaming system (switched on for this machine: gaming)", `steam` in the system) →
 `plain` (gaming off) → `plain-virtualization` (`qemu-system-x86_64` in the system) → `plain` → `plain-gaming-virtualization`
 (both on) → `plain`. Each step ends with the system profile on exactly that variant's published toplevel and that
-variant's own boot hook (nix/pkgs/rime-boot) having written its BLS entry `init=<toplevel>/init`. Mutant
-`swapped-variants` (the release names plain-gaming with plain-virtualization's toplevel and back) fails.
+variant's own boot hook (nix/pkgs/rime-boot) having written the BLS entry of the generation the update created
+(`rime-generation-<N>.conf`, N read from the profile link) with `init=<toplevel>/init`. Mutant
+`swapped-variants` (the release names plain-gaming with plain-virtualization's toplevel and back) fails. The
+adversarial verification of wave 4 found the first version of that entry assertion vacuous on the three returns to
+`plain`: it accepted ANY entry naming plain's init, and the hook keeps one entry per generation, so the first
+update's entry satisfied it whether or not the hook ran again. It now reads the new generation's own entry; mutant
+`stale-entry` (that entry removed after each return to `plain`, older ones left) fails.
 Found on the way: a system without `/etc/rime/catalogue.json` reads no switch file at all (`variant::switched_on`),
 so the client enables `rime.catalogue` as every published variant does.
 
