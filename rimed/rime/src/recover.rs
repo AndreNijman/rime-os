@@ -1340,6 +1340,21 @@ fn on_nixos(sys: &Sys) -> bool {
     }
 }
 
+/// The store path an app's release record names as installed. A device-built app (nix/redistributable.nix: the
+/// public cache never carries it) is named by its `.drv`, which `rime install` fetches and then builds on the
+/// machine; the `.drv` existing says nothing about that build. Its `out` output is read from the `.drv` itself
+/// (ATerm `Derive([("out","/nix/store/…",…`), so the row asks for the BUILT path, still without a store query.
+/// None: a `.drv` that cannot be read or names no `out` path (content-addressed), which counts as not installed.
+fn built_output(sys: &Sys, out: &str) -> Option<String> {
+    if !out.ends_with(".drv") {
+        return Some(out.to_string());
+    }
+    let text = sys.read(out)?;
+    let rest = text.strip_prefix("Derive([(\"out\",\"")?;
+    let path = &rest[..rest.find('"')?];
+    path.starts_with("/nix/store/").then(|| path.to_string())
+}
+
 /// The package row on Rime on NixOS: no extension and no state.json, so nothing is "built for" an OS version. What
 /// can be wrong is a requested catalogue app this machine's release record names no build of, or a build that is
 /// not in the store (`sudo rime update` / `sudo rime pkg upgrade` fix those; neither rebuilds anything).
@@ -1409,7 +1424,10 @@ fn nixos_package_row(sys: &Sys) -> Row {
                 Some("sudo rime update"),
             );
         }
-        let absent: Vec<&String> = apps.iter().filter(|a| !sys.exists(&outs[*a]) || !sys.exists(&cat.apps_profile)).collect();
+        let absent: Vec<&String> = apps
+            .iter()
+            .filter(|a| !built_output(sys, &outs[*a]).is_some_and(|p| sys.exists(&p)) || !sys.exists(&cat.apps_profile))
+            .collect();
         if !absent.is_empty() {
             return row(
                 Health::Attention,
@@ -3022,6 +3040,44 @@ sysext /usr overlay ro,nodev,relatime,lowerdir=/run/systemd/sysext/meta/usr:/usr
         w("/nix/store/abc-go/bin/go", "");
         w("/nix/var/nix/profiles/rime-apps", "");
         assert_eq!(package_row(&sys, "26.05").state, Health::Verified);
+        // A device-built app is named by its .drv (rime install builds it on the machine): the .drv being in the
+        // store is not the app being installed; only its built `out` path is (wave 4: the row said Verified for a
+        // fetched .drv whose build had failed).
+        w(
+            "/var/lib/rime/nix/catalogue-outs.json",
+            r#"{"apps": {"go": "/nix/store/abc-go", "claude-desktop": "/nix/store/ddd-claude-desktop.drv"}}"#,
+        );
+        w("/var/lib/rime/pkg/requested", "steam\ngolang\nclaude-desktop\n");
+        let cat_with_device = r#"{"schema": 1, "flathub_remote": "flathub", "apps_profile": "/nix/var/nix/profiles/rime-apps",
+                "outs_file": "/var/lib/rime/nix/catalogue-outs.json",
+                "entries": {"go": {"kind": "nix", "buildable": true},
+                            "claude-desktop": {"kind": "nix", "buildable": true},
+                            "steam": {"kind": "toggle", "feature": "gaming"}},
+                "aliases": {"golang": "go"}}"#;
+        w("/etc/rime/catalogue.json", cat_with_device);
+        w(
+            "/nix/store/ddd-claude-desktop.drv",
+            r#"Derive([("out","/nix/store/eee-claude-desktop-1.0","","")],[],[],"x86_64-linux","/bin/sh",[],[])"#,
+        );
+        let row = package_row(&sys, "26.05");
+        assert_eq!(row.state, Health::Attention, "a fetched .drv whose build is absent: {}", row.detail);
+        assert!(row.detail.contains("claude-desktop"), "{}", row.detail);
+        assert_eq!(row.action.as_deref(), Some("sudo rime pkg upgrade"));
+        w("/nix/store/eee-claude-desktop-1.0/bin/claude-desktop", "");
+        assert_eq!(package_row(&sys, "26.05").state, Health::Verified, "the built output is installed");
+        // A .drv naming no out path (content-addressed) cannot show its build: not installed, never Verified.
+        w("/nix/store/ddd-claude-desktop.drv", r#"Derive([("out","","r:sha256","")],[],[],"x86_64-linux","/bin/sh",[],[])"#);
+        assert_eq!(package_row(&sys, "26.05").state, Health::Attention);
+        w(
+            "/etc/rime/catalogue.json",
+            r#"{"schema": 1, "flathub_remote": "flathub", "apps_profile": "/nix/var/nix/profiles/rime-apps",
+                "outs_file": "/var/lib/rime/nix/catalogue-outs.json",
+                "entries": {"go": {"kind": "nix", "buildable": true},
+                            "chatgpt": {"kind": "nix", "buildable": false, "pending": "later"},
+                            "steam": {"kind": "toggle", "feature": "gaming"}},
+                "aliases": {"golang": "go"}}"#,
+        );
+        w("/var/lib/rime/nix/catalogue-outs.json", r#"{"apps": {"go": "/nix/store/abc-go"}}"#);
         w("/var/lib/rime/pkg/requested", "steam\ngolang\nchatgpt\n");
         let row = package_row(&sys, "26.05");
         assert_eq!(row.state, Health::Available, "{}", row.detail);
