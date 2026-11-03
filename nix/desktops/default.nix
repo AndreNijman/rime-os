@@ -43,7 +43,11 @@
         environment.systemPackages = [ pkgs.gnomeExtensions.kimpanel ];
         programs.dconf.profiles.user.databases = [
           {
-            settings."org/gnome/shell".enabled-extensions = [ pkgs.gnomeExtensions.kimpanel.extensionUuid ];
+            # rime@rimeos.org: Gaming and Update in Quick Settings (nix/integrations/gnome, nix/modules/integrations.nix).
+            settings."org/gnome/shell".enabled-extensions = [
+              pkgs.gnomeExtensions.kimpanel.extensionUuid
+              pkgs.rime.rime-gnome-extension.passthru.uuid
+            ];
           }
         ];
       };

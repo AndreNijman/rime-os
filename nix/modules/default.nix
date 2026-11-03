@@ -25,6 +25,7 @@
     ./rootfs.nix
     ./virtualization.nix
     ./desktops.nix
+    ./integrations.nix
   ];
 
   nixpkgs.overlays = [ overlay ];
