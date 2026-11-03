@@ -62,7 +62,9 @@ let
         {
           nixpkgs.hostPlatform = "x86_64-linux";
           rime.kernel.enable = true;
-          rime.kernel.signing = signing;
+          # Committed signatures (nix/pkgs/kernel/signing/signatures) are for the release key; this check signs
+          # with its own throwaway keys, so it never looks there unless a case asks for it explicitly.
+          rime.kernel.signing = { signatureDir = null; } // signing;
           boot.loader.grub.enable = false;
           fileSystems."/" = {
             device = "/dev/vda";
@@ -180,9 +182,14 @@ assert lib.hasInfix (builtins.unsafeDiscardStringContext "${signedImage}/${targe
 );
 assert !requireUnsigned.success;
 assert requireSigned.success;
-# The default certificate is the committed Rime MOK, and no signature is committed for this test image.
+# The default certificate is the committed Rime MOK; with no signature directory nothing is attached.
 assert (mkSystem { }).rime.kernel.signing.certificate == ../pkgs/kernel/signing/rime-mok.pem;
 assert !(mkSystem { }).system.build.rimeKernelSigning.signed;
+# The committed directory is picked up by itself: a committed release signature for this image signs it,
+# and its absence leaves it unsigned (true before the first hosted signing and after every kernel change).
+assert
+  (mkSystem { signatureDir = ../pkgs/kernel/signing/signatures; }).system.build.rimeKernelSigning.signed
+  == builtins.pathExists (../pkgs/kernel/signing/signatures + "/${info.imageHash}.sig");
 {
   kernel-sign = pkgs.runCommand "rime-kernel-sign" { nativeBuildInputs = tools; } ''
     set -euo pipefail
