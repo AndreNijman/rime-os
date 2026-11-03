@@ -955,11 +955,24 @@ with the rules above; if that is still not enough, the update is refused by name
 `on_disk_ratio` (`/etc/rime/update.toml`, from `nix/release/floors.nix`) is **0.55**, the larger measured ratio (0.524
 for `plain`, closure.md §10-§11) plus a margin. The ratio applies only when the filesystem holding `/nix/store` (the
 longest mount in `/proc/self/mounts`) is btrfs mounted with `compress-force=zstd`; anything else counts unpacked bytes
-(ratio 1.0), so a machine on ext4 is never told an update fits when it does not. The same gate runs before
-`rime install <class 2 app>` downloads. The disk floors follow: **16 GB plain, 18 GB gaming** (17 and 19 with
-virtual machines, estimated), with the NixOS installer's 2 GiB ESP counted; a root partition alone needs **14 GB plain,
-16 GB gaming** (closure.md §11). How it is proven: the compressed branch (btrfs `compress-force=zstd` → 0.55) only by
-rimed unit tests and killed mutants (`variant.rs`); every VM test's store is ext4, so they run the 1.0 branch. `rime update` applies no
+(ratio 1.0), and with the 1 GB reserve a machine on ext4 is not told an update fits when it does not (see below:
+the ratio alone does not hold that). The same gate runs before
+`rime install <class 2 app>` downloads. The disk floors follow: **16 GB plain, 18 GB gaming** (the same with
+virtual machines, measured in wave 4; 17 and 19 were wave 3's estimate), with the NixOS installer's 2 GiB ESP counted; a root partition alone needs **14 GB plain,
+16 GB gaming** (closure.md §11). Every floor is held to a VM install of the
+real variant by `checks.update-floors` (closure.md §12). How it is proven: the compressed branch (btrfs
+`compress-force=zstd` → 0.55) by rimed unit tests and killed mutants (`variant.rs`), and end to end by
+`checks.update-variants` (§11.6): with the client's whole /nix on btrfs mounted `compress-force=zstd:3`, a release
+of the four real variants whose missing paths are U = 6.45 GB of NAR is refused by name at 0.6 GB below
+`ceil(0.55 × U)` + 1 GB ("… about 3.55 GB on this compressed disk, plus 1 GB to spare) … Nothing was changed."), and
+installs at a free space between that and U + 1 GB, a figure the 1.0 branch refuses; the download then took
+3,319,480,320 B on disk (3,319,099,392 B in the re-run at d12fd309c), a ratio of 0.515 against the gate's 0.55. Its
+mutants `ratio-one` (update.toml 1.0) and `compress-not-forced` (the store mounted `compress=zstd:3`, which rimed must
+count at 1.0) fail. Both still refuse at that free space, but on the unpacked figure ("needs 7.45 GB free on /nix (6.45
+GB of new store paths, plus 1 GB to spare)", with no compressed estimate), so the refusal-by-name assertion is what
+kills them (`artifacts/verify-updates2/update-variants-mutant-{ratio-one,compress-not-forced}-d12fd309c.log`). On ext4 the NAR size is not an upper bound: a closure takes 3.6-4.5 % more (about
+0.48 GB per variant, closure.md §12); the 1 GB reserve is what keeps the 1.0 branch's promise, and
+`checks.update-floors` fails if a closure ever outgrows NAR + reserve. `rime update` applies no
 floor of its own; `rime install` of a feature package refuses by name below the floor of the system it would select. For fresh installs
 where `/boot` is the ESP, the hook's own floor (D3) covers the ESP: a boot-class update whose kernel and initrd do not
 fit is refused by the hook, and the client says so (§14).
@@ -985,7 +998,52 @@ at least one package, sorted and joined with `-`: `plain-gaming`, `plain-gaming-
   switch-class paths differ.
 - **`rime trust --gate`** passes when the running system is ANY variant of a verified release, and names it.
 
-**What is proven, and what is not (adversarial verification, 2026-11-03).** The selection is proven in `update-e2e`
+**What is proven (wave 4 "updates2", 2026-11-03): selection with the REAL published variants.**
+`checks.update-variants` (`nix/tests/update-variants.nix`, two VMs) publishes one release naming the four toplevels of
+`.#rime-release-toplevels` built from the same commit (cache, manifest and signature as `checks.update-client`, THROWAWAY
+keys; the variants table by `nix/tests/update-variants-publish.py`). A client whose base is `plain` takes it (the
+real `plain`), then the switch files move it, one `sudo rime update --no-live` each: `plain` → `plain-gaming`
+(gaming on: "installing the plain-gaming system (switched on for this machine: gaming)", `steam` in the system) →
+`plain` (gaming off) → `plain-virtualization` (`qemu-system-x86_64` in the system) → `plain` → `plain-gaming-virtualization`
+(both on) → `plain`. Each step ends with the system profile on exactly that variant's published toplevel and that
+variant's own boot hook (nix/pkgs/rime-boot) having written the BLS entry of the generation the update created
+(`rime-generation-<N>.conf`, N read from the profile link) with `init=<toplevel>/init`. Mutant
+`swapped-variants` (the release names plain-gaming with plain-virtualization's toplevel and back) fails. The
+adversarial verification of wave 4 found the first version of that entry assertion vacuous on the three returns to
+`plain`: it accepted ANY entry naming plain's init, and the hook keeps one entry per generation, so the first
+update's entry satisfied it whether or not the hook ran again. It now reads the new generation's own entry; mutant
+`stale-entry` (that entry removed after each return to `plain`, older ones left) fails.
+Found on the way: a system without `/etc/rime/catalogue.json` reads no switch file at all (`variant::switched_on`),
+so the client enables `rime.catalogue` as every published variant does.
+
+What is still not proven: none of the four is BOOTED or activated live in a VM. They mount Rime's installed layout by
+label and boot through Fedora's shim and GRUB, which the test VM does not have (`checks.installer-nixos` and the OVMF
+installer lab boot that chain), so the test installs each for the next boot (`--no-live`). The live path for a
+variant switch is proven with the stand-in below.
+
+**Decision (wave 4 "updates2"): the update checks do not boot the real variants (DECIDED-NOT-TO here).** Booting one
+needs Rime's installed disk layout (ESP with shim and GRUB, the labelled btrfs subvolumes), which only the installer
+creates; a second copy of that layout inside an update test would be a second installer that could drift from the
+real one. The boot of a published variant belongs to the installer's proof: the installer is to install the release's
+`plain` / `plain-gaming` toplevel (open-items, installer row) and its OVMF lab boots what it installed. What the update
+checks own is proven here: the switch files select the real variant, its exact published toplevel becomes the system
+profile, and its own boot hook writes the entry that boots it. The live activation path is the same code for every
+variant (`switch-to-configuration` of the selected toplevel) and is proven live by `update-e2e` with the stand-in.
+
+The checks whose recorded passes had drifted (wave 3 "deltas" ran `update-e2e` and `release-github` at an earlier
+commit; `release-standin` was first built at the wave-3 merge) were built at the wave-4 "updates2" head, where the measured floors move the
+catalogue and with it every Rime system: `update-e2e` (`vm-test-run-rime-update-e2e` `5ar4a10a…`, its whole level-19
+run, `artifacts/updates2/update-e2e-head.log`), `release-standin` (`0yfvcj2v…`) and `release-github` (`3n812xv2…`),
+the last two unchanged by this branch and valid at its head (`artifacts/updates2/check-validity-head.txt`).
+That file predates the `stale-entry` fix (d12fd309c), which changed `update-variants` alone: at d12fd309c its drv is
+`b6falvd6…` → `ak78cja6…`, built and valid (`artifacts/verify-updates2/update-variants-fixed.log`,
+`head-validity-d12fd309c.txt`), and all four of its mutants (`ratio-one`, `compress-not-forced`, `swapped-variants`,
+`stale-entry`) and all four `update-floors` mutants were built at that head's drvs and fail on their own assertions
+(`artifacts/verify-updates2/*-d12fd309c.log`, `update-variants-mutant-stale-entry.log`,
+`update-variants-mutant-swapped-variants-head.log`). The test creates `/boot/grub2` on the client's ESP so the real
+variant's boot hook does not refuse a GRUB-less ESP; the hook's refusal path is therefore not exercised here.
+
+**Earlier proof (adversarial verification, 2026-11-03).** The selection is proven in `update-e2e`
 with a STAND-IN `plain-gaming` (release C's own test system with a different Shell build, not the real gaming
 closure): the switch file picks it, it installs live, `rime trust --gate` passes on it. The four real variant
 toplevels of `.#rime-release-toplevels` were BUILT at this branch's HEAD (not only evaluated), and each carries

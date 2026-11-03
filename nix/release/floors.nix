@@ -12,9 +12,11 @@
 #                                       installer/rime-install-nixos.sh (checks.installer-choices)
 #
 # Decision (2026-11-02, wave 3 "updates"): the gate counts ON-DISK bytes on a store mounted compress-force=zstd, as
-# the unpacked NAR size times `ratioPermille`/1000 (rounded up), plus the 1 GB reserve. The ratio is the larger of the
-# two measured (plain 0.524, plain-gaming 0.503, closure.md §10) plus a margin, so the estimate errs high. Any other
-# store filesystem counts the unpacked size (ratio 1).
+# the unpacked NAR size times `ratioPermille`/1000 (rounded up), plus the 1 GB reserve. The ratio is the largest
+# measured (plain 0.524 in closure.md §10; 0.520, 0.500, 0.502 and 0.486 for the four variants in §12) plus a margin,
+# so the estimate errs high. Any other store filesystem counts the unpacked size (ratio 1); on ext4 a closure really
+# takes 3.6-4.5 % more than its NAR size (§12), about 0.48 GB for every variant, which the 1 GB reserve absorbs
+# (checks.update-floors holds the gate to that).
 #
 # A floor is what the disk must hold for the gate to accept one mass rebuild (every path new, the D6 §11.3 worst
 # case) beside the installed system: partitions + the installed system on disk + the gate's need for a whole second
@@ -25,24 +27,23 @@ let
   GB = 1000000000;
   ceilDiv = a: b: (a + b - 1) / b;
 
-  # closure.md §10: both toplevels measured in one run (2026-11-02), btrfs compress-force=zstd:3, `df` used after
-  # `nix store optimise`. `unpacked` is the closure's NAR size.
+  # closure.md §12 (wave 4 "updates2", 2026-11-03): all four release variant toplevels (`.#rime-release-toplevels` at
+  # this tree) installed in a VM by checks.update-floors.measure (nixos-install --system, the installer's copy and
+  # profile step) onto btrfs mounted compress-force=zstd:3; `onDisk` is `df` used after `nix store optimise` (a running
+  # Rime optimises every path it adds: base.nix auto-optimise-store), `unpacked` the closure's NAR size from the
+  # installed store's own database. checks.update-floors fails when a figure here is more than 3 % from what the VM
+  # measures, so a release whose closure moves must be re-measured here.
   #
-  # Virtualization was not installed and measured on disk. Its systems are ESTIMATED: the closure's NAR-size delta,
-  # measured on 2026-11-02 (wave 3 "updates", the four release variants built at once: plain-virtualization adds 89
-  # paths, 658,470,728 B, and drops 29, 8,040,856 B; the same 650,429,872 B net over plain-gaming), on top of the
-  # measured system, with the on-disk part counted at the gate's own ratio.
+  # Before this, the two virtualization systems were ESTIMATED (plain's measurement + the NAR delta at the gate's
+  # ratio); measured, they are smaller on disk than estimated (plain-virtualization 5,564,084,224 B against
+  # 5,800,374,254 B), and their published floors drop by 1 GB. Decision: publish the measurement.
+  # `virtualizationDelta` stays as a record: the measured NAR delta of plain-virtualization over plain (unchanged).
   virtualizationDelta = 650429872;
-  measured = rec {
-    plain = { unpacked = 10382141376; onDisk = 5442637824; };
-    plain-gaming = { unpacked = 12579425640; onDisk = 6327009280; };
-    plain-virtualization = withVirtualization plain;
-    plain-gaming-virtualization = withVirtualization plain-gaming;
-  };
-  withVirtualization = m: {
-    unpacked = m.unpacked + virtualizationDelta;
-    onDisk = m.onDisk + onDiskEstimate virtualizationDelta;
-    estimated = true;
+  measured = {
+    plain = { unpacked = 10433745168; onDisk = 5423476736; estimated = false; };
+    plain-gaming = { unpacked = 12631031056; onDisk = 6309990400; estimated = false; };
+    plain-virtualization = { unpacked = 11084175040; onDisk = 5564084224; estimated = false; };
+    plain-gaming-virtualization = { unpacked = 13281460928; onDisk = 6455635968; estimated = false; };
   };
 
   ratioPermille = 550;
@@ -75,8 +76,8 @@ in
   published = {
     plain = 16;
     plain-gaming = 18;
-    plain-virtualization = 17;
-    plain-gaming-virtualization = 19;
+    plain-virtualization = 16;
+    plain-gaming-virtualization = 18;
   };
   publishedPartition = {
     plain = 14;

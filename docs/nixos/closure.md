@@ -22,6 +22,7 @@ this measurement.
 | **A11 disk floor** (install + one mass rebuild + boot), as built in wave 3 (§11: the gate counts on-disk bytes) | **16 GB** whole disk (2 GiB ESP counted), **14 GB** root partition; nix/release/floors.nix. Was 19 GB while the gate counted unpacked bytes (§9) | bootc 12 GB, which holds its 5.4 GB install plus one core update, barely (§6) |
 | A11 install-only minimum (no update headroom), recomputed (§9) | 7 GB (6 GB before linux-firmware) | no bootc counterpart published |
 | A11 floor **with gaming** (§10, §11) | **18 GB** whole disk, **16 GB** root partition (was 22 GB under the unpacked gate); 8 GB install-only | |
+| A11 floor **with virtual machines** (§12, measured; was estimated in §11) | **16 GB** whole disk / **14 GB** root partition (`plain-virtualization`, was 17 / 14 estimated); **18 GB** / **16 GB** with gaming too (was 19 / 16) | |
 
 `plain` is the shape a fresh install ships (D9's generic rime-plain toplevel): every Rime area on, Rime's kernel with
 NVIDIA 615, no gaming, no test account. `rime-vm` is `nixosConfigurations.rime-vm` (gaming on, nixpkgs' kernel, no
@@ -392,8 +393,8 @@ A floor = partitions + the installed system on disk + the gate's need for one ma
 |---|---|---|---|---|---|---|
 | `plain` | 5,442,637,824 B | 6,710,177,757 B | 13,152,815,581 B | 15,302,396,381 B | **16 GB** | **14 GB** |
 | `plain-gaming` | 6,327,009,280 B | 7,918,684,102 B | 15,245,693,382 B | 17,395,274,182 B | **18 GB** | **16 GB** |
-| `plain-virtualization` (estimated) | 5,800,374,254 B | 7,067,914,187 B | 13,868,288,441 B | 16,017,869,241 B | **17 GB** | **14 GB** |
-| `plain-gaming-virtualization` (estimated) | 6,684,745,710 B | 8,276,420,532 B | 15,961,166,242 B | 18,110,747,042 B | **19 GB** | **16 GB** |
+| `plain-virtualization` (estimated; superseded by §12: 16 / 14) | 5,800,374,254 B | 7,067,914,187 B | 13,868,288,441 B | 16,017,869,241 B | **17 GB** | **14 GB** |
+| `plain-gaming-virtualization` (estimated; superseded by §12: 18 / 16) | 6,684,745,710 B | 8,276,420,532 B | 15,961,166,242 B | 18,110,747,042 B | **19 GB** | **16 GB** |
 
 **Decision: both figures are published, and they reconcile the handover.** The "14 GB plain, 16 GB gaming" the D5
 handover expected is the ROOT PARTITION floor (`partitionGB`, the installer's "into an existing partition" mode, where
@@ -403,7 +404,7 @@ both from the measurements and fails on any drift.
 The two virtualization rows are estimates: no virtualization system was installed and measured with `df`. They add
 the closure delta measured when the four release variants were built together (2026-11-02, this wave:
 `plain-virtualization` adds 89 paths of 658,470,728 B and drops 29 of 8,040,856 B, net 650,429,872 B) at the gate's
-ratio. Measuring them on disk is a follow-up; `nix/release/floors.nix` marks them `estimated = true`.
+ratio. They were measured on disk in wave 4 (§12), which replaces every row of this table.
 
 **Who refuses what.** `rime install steam` (and every package of a feature the system does not carry) looks up the
 floor of the system it would select (base + every switched-on feature + this one, or the largest floor of its subsets
@@ -433,3 +434,65 @@ android-tools 0.29 GB, neovim 0.27 GB, go 0.27 GB, llama-cpp 0.15 GB, wireguard-
 usbutils 0.06 GB. Upstream nixpkgs serves most of it, so Rime's own cache grows by much less, but the hosted release
 runner now builds or fetches about 5.3 GB more unpacked per release; the "Free disk for the closure" step must keep
 room for it.
+
+## 12. All four variants measured on disk, ext4 and btrfs (wave 4 "updates2", 2026-11-03)
+
+`checks.update-floors.measure` (`nix/tests/update-floors.nix`, a VM test) installs each toplevel of
+`.#rime-release-toplevels` with `nixos-install --system <toplevel> --no-bootloader` (the installer's copy and profile
+step) onto a fresh 40 GiB disk, twice: btrfs mounted `compress-force=zstd:3` (the @nix mount of D2/D9) and ext4.
+It records `df -B1` used after the install and again after `nix store optimise` (a running Rime optimises every path it
+adds, `auto-optimise-store`), compsize on btrfs, and the NAR size and path count from the installed store's own
+database. Measurement at this branch (artifacts/updates2/measure-1/summary.tsv, run 2026-11-03: the test script took 1,881 s):
+
+| variant | paths | unpacked (NAR) | btrfs, optimised | ratio | ext4, optimised | ext4 / NAR |
+|---|---|---|---|---|---|---|
+| `plain` | 1863 | 10,433,745,168 B | 5,423,476,736 B | 0.520 | 10,906,607,616 B | 1.045 |
+| `plain-gaming` | 2164 | 12,631,031,056 B | 6,309,990,400 B | 0.500 | 13,106,106,368 B | 1.038 |
+| `plain-virtualization` | 1923 | 11,084,175,040 B | 5,564,084,224 B | 0.502 | 11,561,340,928 B | 1.043 |
+| `plain-gaming-virtualization` | 2224 | 13,281,460,928 B | 6,455,635,968 B | 0.486 | 13,760,393,216 B | 1.036 |
+
+The floors, recomputed from these (`nix/release/floors.nix`, `checks.release-plan` recomputes them):
+
+| variant | root part (`storeBytes`) | whole disk | published disk | published root partition |
+|---|---|---|---|---|
+| `plain` | 13,162,036,579 B | 15,311,617,379 B | **16 GB** (unchanged) | **14 GB** (unchanged) |
+| `plain-gaming` | 15,257,057,481 B | 17,406,638,281 B | **18 GB** (unchanged) | **16 GB** (unchanged) |
+| `plain-virtualization` | 13,660,380,496 B | 15,809,961,296 B | **16 GB** (was 17, estimated) | **14 GB** |
+| `plain-gaming-virtualization` | 15,760,439,479 B | 17,910,020,279 B | **18 GB** (was 19, estimated) | **16 GB** |
+
+**Decision: the measured virtualization floors are published, 1 GB lower than the estimate.** The estimate added the
+NAR delta at the gate's 0.55; on disk the virtualization systems sit at 0.502 and 0.486 (the cause was not
+measured separately). The floors keep the
+same attribute names (`floors.<variant>.diskGB` / `.partitionGB`, `published`, `publishedPartition`); every
+`measured` entry now carries `estimated = false`.
+
+**The compressed ratio.** The worst measured is 0.520 (`plain`); the gate's 0.55 stays. The previous worst, 0.524 (§10),
+was the wave-2 tree. compsize's own figure for the store (data extents only) is 0.433-0.471: `df` adds metadata, which
+is why the floors use `df`.
+
+**ext4: the NAR size is NOT an upper bound.** A store on ext4 takes 3.6-4.5 % more than its NAR size (4 KiB blocks, a
+directory per path), 0.47-0.48 GB for every variant; before `nix store optimise` 6.3-8.9 % more. The gate's 1.0 branch
+counts the NAR size plus its 1 GB reserve, and the reserve absorbs that overhead for every closure Rime publishes.
+**Decision: the gate's arithmetic is not changed** (a different ext4 ratio would change rimed and every check built
+on it, for a filesystem neither the installer nor the bridge gives /nix); `checks.update-floors` instead fails if a
+whole closure on ext4 ever needs more than NAR + the reserve (its `reserve-small` mutant: a 0.4 GB reserve fails).
+updates-and-release.md §11.5 said "a machine on ext4 is never told an update fits when it does not" because of the
+1.0 ratio alone; it now says the reserve is what holds that.
+
+**What `checks.update-floors` fails on** (it reads the measurement; its mutants reuse it):
+1. a published floor no longer holds for the measured install (mutant `published-low`);
+2. the gate's ratio is below a measured btrfs ratio (mutant `ratio-low`, 0.45);
+3. a whole closure on ext4 needs more than NAR + the reserve (mutant `reserve-small`);
+4. a figure in `floors.nix` is more than 3 % from the measurement (mutant `stale-measure`, `plain` on disk 10 % lower).
+
+The measured toplevels carry `/etc/rime/catalogue.json`, which renders the floors: changing `floors.nix` changes the
+toplevels, so the measurement was run again after the edit (§12 is the measurement of the tree before the edit; the
+re-run at the committed head must land within 3 % of it, which is what the check asserts). **Re-run at this branch's
+head** (artifacts/updates2/measure-2/summary.tsv, `checks.update-floors` drv `id7kx2xc…`, output valid, its result in
+`update-floors-head.check.txt`): every path count and NAR size identical, every on-disk figure within 0.07 % of the
+table above (`plain` btrfs 5,422,972,928 B, `plain-virtualization` 5,567,815,680 B), every floor unchanged; the four
+mutants fail at that head (`update-floors-mutant-*-head.log`). The first re-run failed on a driver artefact, not a
+size: the closure's `nix path-info --json` (megabytes) read back through the test driver came back as a valid but
+shorter document (1839 of 1923 paths), so the check now sums inside the VM with `jq` and cross-checks the path count
+against `nix-store -qR`. Not in hosted CI
+(`nix/ci/checks-not-in-ci.txt`): the variants carry the Rime kernel, which no binary cache holds yet.
