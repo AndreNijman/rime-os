@@ -2,8 +2,9 @@
 """rime-migrate: the bridge from a bootc Rime OS machine to Rime OS on NixOS (PLAN.md D1, D2, D3).
 
   check [--explain] [--json] [--backup DIR] [--payload DIR] [--disk DEV ...]
-      Writes nothing. Names the machine's boot topology (A-F, PLAN.md D1 / out/understand-boot.md), the free space
-      against the disk figure (H9), the home size, the backup destination, the signer the old system trusts (X3),
+      Writes nothing. Names the machine's boot topology (A-F, PLAN.md D1 / out/understand-boot.md), the data and
+      metadata space start needs against what the root btrfs has (H9, space_plan; --explain says what divergence after
+      the move costs), the home size (the backup's), the backup destination, the signer the old system trusts (X3),
       the boot chain it read (every grub.cfg by shape) and every reason the machine is refused, by name. --disk DEV
       probes an unbooted disk read-only instead of the running system (every mount read-only, btrfs with
       rescue=nologreplay, ext4 with noload; a LUKS root is read only when its mapping is already open).
@@ -55,8 +56,14 @@ EXIT_OK, EXIT_USAGE, EXIT_REFUSED, EXIT_FAILED = 0, 2, 3, 10
 GB = 10**9
 
 # A11 disk floor as `rime update` is designed (docs/nixos/closure.md §6): one system installed, room for one mass
-# rebuild (~10.5 GB unpacked) and boot. H9 adds what the old copies can pin: home and the old store, if rewritten.
+# rebuild (~10.5 GB unpacked) and boot. H9 (space_plan) adds the old store, if rewritten, to it as DATA, and checks the
+# METADATA the reflink copy of home duplicates separately; home's data is shared, not charged (space_plan says why).
 FLOOR_BYTES = int(os.environ.get("RIME_MIGRATE_FLOOR_BYTES", 19 * GB))
+# H9's metadata estimate (space_plan): per name in home (inode item, inode ref, dir item + dir index, one file extent
+# item, the extra extent back-reference, item headers, at leaf fill) and the margin over the larger of the two
+# estimates. Both are checked against a real `cp -a --reflink=always` in bridge-refusals (docs/nixos/bridge.md H9).
+ENTRY_META_BYTES = 1024
+META_MARGIN = 1.25
 RENAMED_SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/build-image.yml@refs/heads/main"
 SIGNER_OVERRIDE = "usr/share/rime-os/trust/expected-signer"
 STATE = "/var/lib/rime/nixos-bridge"
@@ -135,11 +142,20 @@ def read(path, default=None, limit=1 << 20):
 
 def du_bytes(path):
     """Allocated bytes under PATH on its own filesystem (hard links once)."""
-    total, seen = 0, set()
+    return du_tree(path)["bytes"]
+
+
+def du_tree(path):
+    """One walk of PATH on its own filesystem: allocated bytes (hard links once), every name in it (files and
+    directories: each one is a directory entry, and all but the second name of a hard link an inode, in the btrfs
+    trees a reflink copy duplicates), and the bytes of regular files smaller than one 4 KiB sector (btrfs keeps such a
+    file's data INLINE, in the metadata tree, so its copy costs metadata, not data). The metadata half of H9 reads the
+    last two (space_plan)."""
+    total, entries, small, seen = 0, 0, 0, set()
     try:
         dev = os.lstat(path).st_dev
     except OSError:
-        return 0
+        return {"bytes": 0, "entries": 0, "small_bytes": 0}
     for d, dirs, files in os.walk(path):
         try:
             if os.lstat(d).st_dev != dev:
@@ -152,12 +168,15 @@ def du_bytes(path):
                 st = os.lstat(os.path.join(d, n))
             except OSError:
                 continue
+            entries += 1
             if st.st_nlink > 1:
                 if (st.st_dev, st.st_ino) in seen:
                     continue
                 seen.add((st.st_dev, st.st_ino))
             total += st.st_blocks * 512
-    return total
+            if stat.S_ISREG(st.st_mode) and st.st_size < 4096:
+                small += st.st_size
+    return {"bytes": total, "entries": entries, "small_bytes": small}
 
 
 def find_ci(base, rel):
@@ -474,9 +493,50 @@ def migration_facts(var_root, top):
 
 def root_facts_from(top, dev, devs, src_fsroot="/"):
     st = os.statvfs(top)
-    return {"device": dev["name"], "disk": disk_of(devs, dev["name"]), "fstype": dev.get("fstype"),
-            "uuid": dev.get("uuid"), "label": dev.get("label"), "free_bytes": st.f_bavail * st.f_frsize,
-            "size_bytes": st.f_blocks * st.f_frsize, "subvol": src_fsroot}
+    r = {"device": dev["name"], "disk": disk_of(devs, dev["name"]), "fstype": dev.get("fstype"),
+         "uuid": dev.get("uuid"), "label": dev.get("label"), "free_bytes": st.f_bavail * st.f_frsize,
+         "size_bytes": st.f_blocks * st.f_frsize, "subvol": src_fsroot}
+    if dev.get("fstype") == "btrfs":
+        r["usage"] = btrfs_usage(top)
+    return r
+
+
+def btrfs_usage(top):
+    """`btrfs filesystem usage -b` of the filesystem mounted at TOP (read-only ioctls; a read-only mount answers too),
+    parsed by parse_btrfs_usage. None when the command fails or prints no Data/Metadata line: H9 then refuses
+    [space-unmeasured] instead of guessing."""
+    r = run(["btrfs", "filesystem", "usage", "-b", top], check=False)
+    return parse_btrfs_usage(r.stdout or "")
+
+
+def parse_btrfs_usage(text):
+    """The figures H9 needs from `btrfs filesystem usage -b` (bytes): Size and Used of each block-group type (logical,
+    summed over profiles), the Data and Metadata ratios (raw bytes per logical byte: DUP and RAID1 are 2), the device
+    space no chunk holds yet (Device unallocated, raw) and the global reserve (logical metadata the kernel keeps for
+    itself). Mixed block groups (`Data+Metadata`, only on tiny filesystems) are one pool, `mixed` set."""
+    u = {"data_size": 0, "data_used": 0, "meta_size": 0, "meta_used": 0, "mixed": False}
+    seen = set()
+    for key, rx in (("unallocated", r"^\s*Device unallocated:\s+(\d+)"), ("global_reserve", r"^\s*Global reserve:\s+(\d+)"),
+                    ("data_ratio", r"^\s*Data ratio:\s+([\d.]+)"), ("meta_ratio", r"^\s*Metadata ratio:\s+([\d.]+)")):
+        m = re.search(rx, text, re.M)
+        if m is None:
+            return None
+        u[key] = float(m.group(1)) if "ratio" in key else int(m.group(1))
+    for m in re.finditer(r"^(Data|Metadata|Data\+Metadata),[^:]*:\s*Size:(\d+),\s*Used:(\d+)", text, re.M):
+        kind, size, used = m.group(1), int(m.group(2)), int(m.group(3))
+        seen.add(kind)
+        if kind == "Data+Metadata":
+            u["mixed"] = True
+            for k in ("data", "meta"):
+                u[k + "_size"] += size
+                u[k + "_used"] += used
+        else:
+            k = "data" if kind == "Data" else "meta"
+            u[k + "_size"] += size
+            u[k + "_used"] += used
+    if not ({"Data", "Metadata"} <= seen or "Data+Metadata" in seen) or u["data_ratio"] <= 0 or u["meta_ratio"] <= 0:
+        return None
+    return u
 
 
 def luks_of(devs, root_dev):
@@ -519,7 +579,7 @@ def collect_live():
         facts["boot"]["device"] = re.sub(r"\[.*\]$", "", bf.get("source") or "")
         v = json.loads(run(["findmnt", "-n", "-J", "-o", "FSROOT", "--target", "/var"]).stdout)["filesystems"][0]
         facts["var_fsroot"] = v["fsroot"]
-        facts["home"] = {"path": "/var/home", "bytes": du_bytes("/var/home")}
+        facts["home"] = dict(du_tree("/var/home"), path="/var/home")
         facts["migration"] = migration_facts("/var", top)
         facts["signer"] = signer_facts(["/"])
         facts["keymap"] = keymap_of("/etc")
@@ -567,7 +627,7 @@ def collect_disks(disks):
                 os.path.join(top, "ostree/deploy")) else []
             var = os.path.join(top, "ostree/deploy", sr[0], "var") if sr else os.path.join(top, "state/os/default/var")
             facts["var_fsroot"] = "/" + os.path.relpath(var, top)
-            facts["home"] = {"path": facts["var_fsroot"] + "/home", "bytes": du_bytes(os.path.join(var, "home"))}
+            facts["home"] = dict(du_tree(os.path.join(var, "home")), path=facts["var_fsroot"] + "/home")
             facts["migration"] = migration_facts(var, top)
             deps = deployment_dirs(top)
             facts["signer"] = signer_facts(deps[:1] or [top])
@@ -871,9 +931,105 @@ def write_boot_table(path, table):
     return text
 
 
-def need_bytes(facts):
-    return FLOOR_BYTES + int((facts.get("home") or {}).get("bytes", 0)) + int(
-        (facts.get("ostree") or {}).get("store_bytes", 0))
+DIVERGENCE = (
+    "  divergence: @home shares every data block with the old system's home and @pre-nixos shares everything, so "
+    "start costs them no data space. After the move, each file changed or added on NixOS takes new space while the "
+    "old side keeps its old blocks: the data free above shrinks as home diverges, gradually. The space comes back "
+    "when the old side (@pre-nixos, ostree/ and the old var/home) is removed; that reclaim step (`rime migrate "
+    "finish`) is planned and is not in this release. Until then the GRUB menu's ostree entries still boot the old "
+    "system, with home as it was at the move.")
+
+
+def space_plan(facts):
+    """H9: what `start` consumes on the root btrfs, data and metadata apart, against what the filesystem has for each.
+    None when the root is not btrfs; {"unmeasured": True} when `btrfs filesystem usage` could not be read.
+
+    DATA. start installs the closure into @nix and must leave room for one mass rebuild (FLOOR_BYTES), and the old
+    ostree store is counted again in case it is ever rewritten (a compaction or an update unsharing its extents from
+    @pre-nixos; start masks both). Home is NOT charged: `cp -a --reflink=always` makes @home share every data extent
+    with the old var/home, and the read-only @pre-nixos snapshot shares everything, so neither costs data when it is
+    made. What costs data later is DIVERGENCE: every file changed or added on NixOS takes new space while the old side
+    keeps the old blocks, gradually, and it comes back when the old side is removed. Charging the whole home (the
+    first H9) refused every machine whose home fills more than about half its disk. Available: unused space in data
+    chunks + unallocated / data ratio (= statfs free on a single-profile filesystem).
+
+    METADATA. The reflink copy is not free in metadata: every name in home gets a new inode, directory entries and
+    file extent items in @home, every shared extent one more back-reference, and a file under one sector keeps its
+    data inline in the metadata tree, so it is copied there. Metadata ENOSPC is btrfs's real failure mode (a full
+    metadata space with free data). Home's metadata is estimated two ways, the larger kept:
+      share     metadata used x min(1, home bytes / data used): home's part of all metadata by its size. Capped at 1:
+                du counts uncompressed bytes and Used on-disk ones, and home's metadata cannot exceed all of it.
+      per name  names x ENTRY_META_BYTES + bytes of files under 4 KiB: a home of many small files on a disk whose
+                data is mostly large files, where the share is too small.
+    Need = that x META_MARGIN, times the metadata ratio on the device (DUP writes every block twice). Available on
+    the device = (unused in metadata chunks - the global reserve, which the kernel keeps for itself) x ratio + the
+    unallocated space DATA did not take (metadata chunks are allocated from it). Mixed block groups (tiny
+    filesystems): one pool, the per-name estimate only (the pool's Used is data and metadata together)."""
+    root = facts.get("root") or {}
+    if root.get("fstype") != "btrfs":
+        return None
+    u = root.get("usage")
+    if not u:
+        return {"unmeasured": True}
+    home = facts.get("home") or {}
+    hbytes, entries, small = int(home.get("bytes", 0)), int(home.get("entries", 0)), int(home.get("small_bytes", 0))
+    store = int((facts.get("ostree") or {}).get("store_bytes", 0))
+    data_ratio = float(u["data_ratio"])
+    meta_ratio = float(u["meta_ratio"])
+    reserve = int(u["global_reserve"])
+    unalloc = int(u["unallocated"])
+    p = {"floor": FLOOR_BYTES, "store": store, "home": hbytes, "entries": entries, "small_bytes": small,
+         "data_ratio": data_ratio, "meta_ratio": meta_ratio, "reserve": reserve, "unallocated": unalloc,
+         "mixed": bool(u.get("mixed")), "margin": META_MARGIN}
+    data_need = FLOOR_BYTES + store
+    per_name = entries * ENTRY_META_BYTES + small
+    if p["mixed"]:
+        pool_free = max(0, u["data_size"] - u["data_used"] - reserve)
+        p.update(share=0, per_name=per_name, home_meta=per_name, data_need=data_need,
+                 data_free=pool_free, data_avail=pool_free + unalloc / data_ratio)
+        p["meta_need"] = int(per_name * META_MARGIN)
+        p["meta_avail"] = max(0, p["data_avail"] - data_need)
+        p["meta_need_raw"], p["meta_avail_raw"] = p["meta_need"] * data_ratio, p["meta_avail"] * data_ratio
+        p["data_ok"] = data_need <= p["data_avail"]
+        p["meta_ok"] = p["meta_need"] <= p["meta_avail"]
+        return p
+    data_free = max(0, u["data_size"] - u["data_used"])
+    data_avail = data_free + unalloc / data_ratio
+    data_draw_raw = max(0, data_need - data_free) * data_ratio
+    used = int(u["data_used"])
+    share = int(u["meta_used"] * (min(1.0, hbytes / used) if used else (1.0 if hbytes else 0.0)))
+    home_meta = max(share, per_name)
+    meta_need = int(home_meta * META_MARGIN)
+    meta_unused = max(0, u["meta_size"] - u["meta_used"])
+    meta_free = max(0, meta_unused - reserve)
+    meta_need_raw = meta_need * meta_ratio
+    meta_avail_raw = meta_free * meta_ratio + max(0, unalloc - data_draw_raw)
+    p.update(data_need=data_need, data_free=data_free, data_avail=data_avail, data_draw_raw=data_draw_raw,
+             share=share, per_name=per_name, home_meta=home_meta, meta_need=meta_need, meta_unused=meta_unused,
+             meta_free=meta_free, meta_need_raw=meta_need_raw, meta_avail_raw=meta_avail_raw)
+    p["data_ok"] = not data_need > data_avail
+    p["meta_ok"] = not meta_need_raw > meta_avail_raw
+    return p
+
+
+def space_lines(p):
+    """H9's two figures as check prints them and the refusals repeat them: (data, metadata), each None when there is
+    no figure (the root is not btrfs, or its usage could not be read)."""
+    if p is None or p.get("unmeasured"):
+        return None, None
+    d = (f"{p['data_avail'] / GB:.1f} GB free, {p['data_need'] / GB:.1f} GB needed: floor {p['floor'] / GB:.1f} + "
+         f"old store {p['store'] / GB:.1f} (home is a reflink copy: no data at start)")
+    est = (f"home's metadata {p['home_meta'] / GB:.2f} GB (share {p['share'] / GB:.2f}, per name "
+           f"{p['per_name'] / GB:.2f}: {p['entries']} names) x margin {p['margin']:g}")
+    if p["mixed"]:
+        m = (f"{p['meta_avail'] / GB:.2f} GB left in the mixed data+metadata pool after data, "
+             f"{p['meta_need'] / GB:.2f} GB needed: {est}")
+    else:
+        m = (f"{p['meta_avail_raw'] / GB:.2f} GB on the device, {p['meta_need_raw'] / GB:.2f} GB needed: {est} x ratio "
+             f"{p['meta_ratio']:g}; on the device = (unused in metadata chunks {p['meta_unused'] / GB:.2f} - global "
+             f"reserve {p['reserve'] / GB:.2f}) x {p['meta_ratio']:g} + unallocated {p['unallocated'] / GB:.2f} "
+             f"less {p['data_draw_raw'] / GB:.2f} data takes")
+    return d, m
 
 
 def evaluate(facts, backup=None):
@@ -911,12 +1067,16 @@ def evaluate(facts, backup=None):
                              "records it and NixOS mounts it at /boot (rime.rootfs)")
         elif b.get("kind") != "top-level-dir":
             refusals.append(("boot-unknown", "/boot is neither a directory of the root btrfs nor a partition"))
-    need = need_bytes(facts)
-    free = int(root.get("free_bytes", 0))
-    if root.get("fstype") == "btrfs" and free < need:
-        refusals.append(("free-space", f"{free / GB:.1f} GB free, {need / GB:.1f} GB needed: floor "
-                         f"{FLOOR_BYTES / GB:.1f} + home {facts['home']['bytes'] / GB:.1f} + old store "
-                         f"{facts['ostree']['store_bytes'] / GB:.1f} (H9)"))
+    plan = space_plan(facts)
+    data_line, meta_line = space_lines(plan)
+    if plan is not None and plan.get("unmeasured"):
+        refusals.append(("space-unmeasured", "`btrfs filesystem usage -b` of the root could not be read, so the data "
+                         "and metadata the move needs cannot be checked (H9)"))
+    elif plan is not None:
+        if not plan["data_ok"]:
+            refusals.append(("free-space", f"data: {data_line} (H9)"))
+        if not plan["meta_ok"]:
+            refusals.append(("metadata-space", f"metadata: {meta_line} (H9)"))
     for s in facts.get("existing_subvols", []):
         refusals.append(("already-started", f"subvolume {s} already exists"))
     if backup is not None:
@@ -989,10 +1149,18 @@ def report(facts, c, refusals, notes, explain):
         lines.append(f"  boot-v2: phase={m.get('phase')} state={m.get('state_dir')} composefs/={m.get('composefs_leftover')}")
         lines.append(f"  signer: renamed signer known={facts.get('signer', {}).get('renamed_known')} "
                      f"({facts.get('signer', {}).get('evidence')})")
-    r = facts.get("root") or {}
-    lines.append(f"space: {int(r.get('free_bytes', 0)) / GB:.1f} GB free, {need_bytes(facts) / GB:.1f} GB needed "
-                 f"(floor {FLOOR_BYTES / GB:.1f} + home {facts.get('home', {}).get('bytes', 0) / GB:.1f} + old store "
-                 f"{facts.get('ostree', {}).get('store_bytes', 0) / GB:.1f})")
+    plan = space_plan(facts)
+    data_line, meta_line = space_lines(plan)
+    if plan is None:
+        lines.append("space: the root is not btrfs (no figure)")
+    elif plan.get("unmeasured"):
+        lines.append("space: `btrfs filesystem usage -b` could not be read (no figure)")
+    else:
+        lines.append(f"space: data {data_line}")
+        lines.append(f"space: metadata {meta_line}")
+    if explain and plan is not None and not plan.get("unmeasured"):
+        lines.append(DIVERGENCE)
+    # The backup (start's first step) copies all of home off the disk: its destination is checked against this.
     lines.append(f"home: {facts.get('home', {}).get('bytes', 0) / GB:.2f} GB")
     if facts.get("backup"):
         b = facts["backup"]
@@ -1090,7 +1258,7 @@ def cmd_check(a):
         except Refused as e:
             refusals.append((e.name, str(e)))
     if a.json:
-        print(json.dumps({"facts": facts, "classification": c, "refusals": [{"name": n, "text": t} for n, t in refusals],
+        print(json.dumps({"facts": facts, "classification": c, "space": space_plan(facts), "refusals": [{"name": n, "text": t} for n, t in refusals],
                           "notes": notes, "chain": chain_read(facts), "carry_preview": preview,
                           "start_record": rec}, indent=1, sort_keys=True))
     else:
