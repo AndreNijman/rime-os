@@ -96,8 +96,8 @@ pkgs.testers.runNixOSTest {
     try:
         with subtest("quickshell runs with the Rime config at the contract path"):
             machine.wait_until_succeeds("grep -F 'starting quickshell -c ${shellDir}' /tmp/rime-shell.log", timeout=60)
-            machine.wait_until_succeeds("pgrep -u ${user} -f '^[^ ]*quickshell -c ${shellDir}$'", timeout=60)
-            pid = machine.succeed("pgrep -u ${user} -f '^[^ ]*quickshell -c ${shellDir}$' | head -n1").strip()
+            machine.wait_until_succeeds("pgrep -u ${user} -f '^[^ ]*quickshell -c ${shellDir}( -n)?$'", timeout=60)
+            pid = machine.succeed("pgrep -u ${user} -f '^[^ ]*quickshell -c ${shellDir}( -n)?$' | head -n1").strip()
             machine.succeed(f"tr '\\0' '\\n' < /proc/{pid}/environ | grep -Fx 'RIME_SHELL_DIR=${shellDir}'")
             machine.succeed(f"tr '\\0' '\\n' < /proc/{pid}/environ | grep -E '^QML_IMPORT_PATH=/nix/store/[^:]*-rime-shell-[^:]*/lib/qt-6/qml'")
             # hypridle is the lock screen's timer and must run the shell's own config.

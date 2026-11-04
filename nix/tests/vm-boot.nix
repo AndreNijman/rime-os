@@ -56,7 +56,7 @@ pkgs.testers.runNixOSTest {
 
     sw = "/run/current-system/sw"
     shell_dir = sw + "/share/rime-shell"
-    quickshell = "pgrep -u rime -f '^[^ ]*quickshell -c " + shell_dir + "$'"
+    quickshell = "pgrep -u rime -f '^[^ ]*quickshell -c " + shell_dir + "( -n)?$'"
 
     def as_rime(cmd):
         return "su - rime -c " + shlex.quote("export XDG_RUNTIME_DIR=/run/user/1000; " + cmd)

@@ -53,20 +53,33 @@ fn spawn(program: &str, args: &[&str]) {
     tokio::spawn(cosmic::process::spawn(cmd));
 }
 
-/// Sends what is drawn to the VM tests' sink, if one runs.
-async fn report(view: View) {
-    let Ok(conn) = zbus::Connection::session().await else { return };
-    let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return };
-    if !dbus.name_has_owner(TEST_NAME.try_into().expect("name")).await.unwrap_or(false) {
-        return;
-    }
-    let json = format!(
-        "{{\"gaming\":{{\"checked\":{},\"subtitle\":{:?},\"reactive\":{}}},\"update\":{{\"visible\":{},\"title\":{:?},\"subtitle\":{:?}}}}}",
-        view.gaming_checked, view.gaming_subtitle, view.rimed, view.update_visible, view.update_title, view.update_subtitle,
-    );
-    let _ = conn
-        .call_method(Some(TEST_NAME), "/org/rimeos/QuickSettingsTest", Some(TEST_NAME), "Report", &("cosmic", json))
-        .await;
+/// Sends what is drawn to the VM tests' sink, if one runs, in the order it was drawn.
+///
+/// One task and one connection, fed by a queue: a task per redraw, each opening its own connection, could deliver an
+/// older view after a newer one, and the sink's last line then disagreed with the panel (the settings-app-cosmic flake).
+fn report(view: View) {
+    static QUEUE: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<View>> = std::sync::OnceLock::new();
+    let tx = QUEUE.get_or_init(|| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<View>();
+        tokio::spawn(async move {
+            let Ok(conn) = zbus::Connection::session().await else { return };
+            let Ok(dbus) = zbus::fdo::DBusProxy::new(&conn).await else { return };
+            while let Some(view) = rx.recv().await {
+                if !dbus.name_has_owner(TEST_NAME.try_into().expect("name")).await.unwrap_or(false) {
+                    continue;
+                }
+                let json = format!(
+                    "{{\"gaming\":{{\"checked\":{},\"subtitle\":{:?},\"reactive\":{}}},\"update\":{{\"visible\":{},\"title\":{:?},\"subtitle\":{:?}}}}}",
+                    view.gaming_checked, view.gaming_subtitle, view.rimed, view.update_visible, view.update_title, view.update_subtitle,
+                );
+                let _ = conn
+                    .call_method(Some(TEST_NAME), "/org/rimeos/QuickSettingsTest", Some(TEST_NAME), "Report", &("cosmic", json))
+                    .await;
+            }
+        });
+        tx
+    });
+    let _ = tx.send(view);
 }
 
 impl cosmic::Application for Applet {
@@ -139,7 +152,7 @@ impl cosmic::Application for Applet {
             }
             Message::Rimed(v) => {
                 self.view = v.clone();
-                tokio::spawn(report(v));
+                report(v);
             }
             Message::ToggleGaming(on) => {
                 // The toggle shows Mode.Active; rimed's answer comes back as a property.

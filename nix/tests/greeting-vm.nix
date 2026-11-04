@@ -89,7 +89,7 @@ pkgs.testers.runNixOSTest {
 
     sw = "/run/current-system/sw"
     shell_dir = sw + "/share/rime-shell"
-    quickshell = "pgrep -u rime -f '^[^ ]*quickshell -c " + shell_dir + "$'"
+    quickshell = "pgrep -u rime -f '^[^ ]*quickshell -c " + shell_dir + "( -n)?$'"
     logo = "/home/rime/.cache/rime/logo"
 
     def in_session(cmd):

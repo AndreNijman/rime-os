@@ -161,9 +161,15 @@ pkgs.testers.runNixOSTest {
         with subtest("shell: live writes land through hyprctl eval"):
             layout = option("shell-layout", "general:layout")
             assert layout.get("str") == "master", "kept layout not applied: " + repr(layout)
-            log = shell_log()
-            want = [l for l in log.splitlines() if "Rime window corners:" in l]
-            assert want, "the Shell never synced the window corners"
+            # The Shell writes this line once it has applied its settings, a few
+            # seconds after it answers IPC: on a slow runner the first read can be early.
+            want = []
+            for _ in range(60):
+                want = [l for l in shell_log().splitlines() if "Rime window corners:" in l]
+                if want:
+                    break
+                time.sleep(1)
+            assert want, "the Shell never synced the window corners (waited 60 s)"
             r = int(want[-1].rsplit("rounding", 1)[1].strip())
             rounding = option("shell-rounding", "decoration:rounding")
             assert rounding.get("int") == r, "rounding " + repr(rounding) + ", the Shell wrote " + str(r)
