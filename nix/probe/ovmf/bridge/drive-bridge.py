@@ -794,10 +794,14 @@ def boots_seen(out, want):
 
 
 def usage(vm, name):
+    # du per top-level name that exists (.rime-finish-old only while a finish is half done)
     rc, out = record(vm, name, "btrfs filesystem usage -b /mnt/rime-top; btrfs filesystem df /mnt/rime-top;"
-                     " btrfs filesystem du -s /mnt/rime-top/* /mnt/rime-top/.rime-finish-old 2>/dev/null", timeout=1200)
+                     " for d in /mnt/rime-top/* /mnt/rime-top/.rime-finish-old; do [ -e \"$d\" ] &&"
+                     " btrfs filesystem du -s \"$d\"; done; true", timeout=1200, ok=False)
     used = re.search(r"^\s*Used:\s+(\d+)$", out, re.M)
     free = re.search(r"^\s*Free \(estimated\):\s+(\d+)", out, re.M)
+    if not used or not free:
+        raise Timeout(f"[{vm.name}] {name}: no Used/Free (estimated) in btrfs filesystem usage")
     return int(used.group(1)), int(free.group(1))
 
 
