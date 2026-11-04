@@ -91,7 +91,7 @@ echo "=== /usr/libexec/rime-update-check (stub bootc reports an update)"
 printf '%s\n' "$o" | sed 's/^/  | /'
 sed 's/^/  stub: /' "$S/calls"
 echo "  state: $st"
-if grep -F "$REFUSED" <<<"$o" >/dev/null && [[ $st == "state=none digest= " ]] && ! grep 'upgrade --check' "$S/calls" >/dev/null; then
+if grep -F "$REFUSED" <<<"$o" >/dev/null && [[ $st == "state=none digest= "* ]] && ! grep 'upgrade --check' "$S/calls" >/dev/null; then
   ruc=refused
 elif ! grep -F 'nixos-migration-started' <<<"$o" >/dev/null && [[ $st == state=available* ]]; then
   ruc=allowed

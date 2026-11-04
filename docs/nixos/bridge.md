@@ -109,6 +109,56 @@ refuses (`carry-refused`) when the plan fails and still prints it; `key-export` 
 Mutants `start-unverified`, `start-without-preview`, `check-carry-refusal-dropped`, `key-export-same-disk`,
 `manifest-paths-unchecked`, `ed25519-y-only` (a negated S: same y, other x) are killed by `bridge-unit`.
 
+### H9 counts what `start` consumes: data and metadata apart (bridge-space)
+
+**The defect.** The first H9 charged the whole home as data: `floor + home + old store` against statfs free, the worst
+case "every file in home is rewritten after the move". The real L16 (1.6 TB btrfs, Secure Boot on; everything else
+passed) read `376.8 GB free, 1334.1 GB needed (floor 19.0 + home 1294.2 + old store 20.9)`: REFUSED. That rule locks
+out every machine whose home fills more than about half its disk, which is most real users.
+
+**What `start` really consumes.** `cp -a --reflink=always --one-file-system` makes `@home` share every data extent with
+the old `var/home`, and `@pre-nixos` is a read-only snapshot that shares everything: neither costs data space when it
+is made. Their immediate cost is btrfs METADATA: the copy writes a new inode, directory entries and file extent items
+for every name in home, one more back-reference per shared extent, and the data of every file under one sector, which
+btrfs keeps inline in the metadata tree. A full metadata space with free data is btrfs's real ENOSPC.
+
+**Decision.** `space_plan` (`rime-bridge.py`) checks two figures from `btrfs filesystem usage -b` of the root (read-only
+ioctls; `--disk` mode reads its read-only mount the same way), and refuses each by its own name:
+
+| | Needed | Available |
+|---|---|---|
+| `free-space` (data) | `FLOOR_BYTES` (closure + one mass rebuild, 19 GB) + the old ostree store, counted again in case it is rewritten | unused space in data chunks + unallocated / data ratio (= statfs free on one profile) |
+| `metadata-space` | home's metadata x `META_MARGIN` (1.25) x the metadata ratio (DUP: 2) | (unused in metadata chunks - the global reserve) x ratio + the unallocated space data did not take |
+
+Home's metadata is estimated two ways and the larger is kept: its **share** (metadata used x min(1, home bytes / data
+used); capped because du counts uncompressed bytes and Used on-disk ones, and home's metadata cannot exceed all of it)
+and **per name** (names x `ENTRY_META_BYTES` (1 KiB) + bytes of files under 4 KiB; the share alone misses a home of many
+small files on a disk of large ones). Data takes its unallocated first; metadata gets what is left (unallocated is
+counted once). Mixed block groups (tiny filesystems only) are one pool, per-name estimate only. A btrfs root whose usage
+cannot be read is refused `space-unmeasured`, never guessed.
+
+**The L16, again** (`test_bridge.SpaceH9.test_l16_passes`, its real `usage -b` verbatim): data 376.8 GB free, 39.9 GB
+needed (floor 19.0 + old store 20.9); metadata 70.26 GB on the device, 39.46 GB needed (share capped at all 15.79 GB
+used, x 1.25 x 2; available (2.47 unused - 0.54 reserve) x 2 + 66.40 unallocated). It passes, with 30 GB of metadata
+headroom. Its home's names were not counted; the per-name estimate would pass up to ~22 M names.
+
+**Divergence is the user's, after the move, and gradual.** Every file changed or added on NixOS takes new space while the
+old side keeps its old blocks, so the free figure shrinks as home diverges; it comes back when the old side
+(`@pre-nixos`, `ostree/`, the old `var/home`) is removed. That is PLAN.md D2's reclaim step, `rime migrate finish`
+(planned, not built); `check --explain` says so in a `divergence:` line and names no verb that exists today. Until then
+the ostree entries still boot the old system with home as it was at the move ("Booting back to bootc").
+
+**The full-home du stays.** The gate needs home's bytes only for the capped share and its names for the per-name
+estimate (both from ONE walk, `du_tree`), but `start`'s first step copies all of home off the disk and
+`backup-too-small` compares the backup's free space with home's size. On the L16 that walk took ~5 min over 1.3 TB.
+
+**Proof.** `bridge-unit`: the L16 fixture passes; a data floor fixture refuses `free-space`; a tight metadata fixture
+refuses `metadata-space` (and passes at the exact boundary); a home of 6 M small files on a disk of games refuses
+`metadata-space`; unallocated shared refuses; mixed block groups; the explain text. Mutants killed:
+`metadata-gate-dropped`, `metadata-ratio-ignored`, `home-as-data` (the L16 refused), `global-reserve-dropped`,
+`share-uncapped`, `per-name-dropped`, `unallocated-twice`, plus `free-space-flipped` and `floor-dropped` rewritten for the
+new code. `bridge-refusals` (VM, real btrfs): `REFUSED [free-space] data: ... floor 0.3 + old store 0.3 (home is a reflink copy: no data at start)` on the H9 disk and on a 1 GiB A under the real 19 GB floor; case M (1 GiB, filled with 8 MiB files then half freed, 60,603 home names) `REFUSED [metadata-space]`, 0.13 GB on the device vs 0.38 GB needed, disk sha256 unchanged, and the refused `cp --reflink` run anyway on that disk fails (rc 1): the refusal was real. Case R measures the estimate against a REAL start (snapshot + `cp -a --reflink=always`) on a 4 GB disk with a 1.5 GB store and 40,403 home names: snapshot + subvolume 96 KiB metadata, the copy +58.5 MB metadata (1,449 B per name) and +0 B data; the estimate (101.2 MB before the margin) is 1.73x what the copy took, 2.16x with it. Log: `/var/lab/rime-nix/artifacts/bridge-space/bridge-refusals.log`; unit + mutants: `.../bridge-space/bridge-unit.log`. OVMF A (Secure Boot, readiness = fix/migrate-space 5b814f243): `check` passes on the new gate (data 52.5 GB free / 27.8 needed, metadata 26.18 / 0.00 GB on the device), the real reflink `start` rc 0 in 1 m 27 s, every bootc verb refused after, NixOS boots to a graphical login: `BRIDGE OVMF A: PASS` (`/var/lab/rime-nix/artifacts/bridge-space/ovmf/run-A.log`, `.../ovmf/A/`).
+
 ### What `check` reads of the EFI grub.cfg (and why katana may read `boot-chain-unverified`)
 
 `check --explain` prints one `boot chain:` line: how the booted loader was found (NVRAM BootCurrent, or the only Rime
