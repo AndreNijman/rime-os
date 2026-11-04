@@ -1,5 +1,30 @@
 # Validation
 
+## 2026-11-04: an empty partition made in Windows, and a root that stays its size
+
+Branch `fix/windows-empty-partition`, against the **published v3.2.1 ISO**, Windows Server 2022, Secure Boot on.
+Full transcript: `/var/lab/winlab/evidence-replace-fix/RESULTS.md` on the lab host (not in git: disk images).
+
+- **Four boots, the case the v3.2.1 lab found refused:** shrink C:, `New-Partition` with no drive letter, never
+  formatted, ~2 GB unallocated after it. `candidates` lists it as "Empty partition … Rime deletes it", the
+  install locks, dismounts and re-reads its RAW volume, and Rime installs, boots from its own ESP, and starts
+  Windows (C: Healthy) with Windows' ESP untouched. The final GPT is the staged GPT: Rime's two partitions exactly
+  over the old partition's sectors, and the 2.1 GB after them still unallocated after Rime's first boot.
+- **growpart:** proved by running the branch's `installer/rime-install` inside the published live image (put on
+  the transport disk, sha256-checked and bind-mounted over the image's engine by `tests/staged-install.py
+  --engine-from-transport`); the ISO itself was not rebuilt. The installed system shows
+  `bootc-generic-growpart.service` masked and never started. Without the change, v3.2.1 grew the root to the
+  end of the disk on this same layout.
+- **One boot, a scratch disk:** a lettered RAW partition is locked, dismounted, re-read, loses its letter and is
+  replaced; an NTFS partition is not offered and `install` on it is refused; with another process holding a
+  handle on the volume, `install` is refused "something is using it", the letter stays, the table is unchanged
+  and the partition's bytes read back from the host all zero. Measured on the way (see ARCHITECTURE.md,
+  "Exclusivity"): the lock fails with error 5 and a no-sharing open with error 32 under that contention, and
+  `GetVolumeInformationW` answers 87, not 1005, for a RAW volume someone holds open.
+- `tests/installed-check.py` now waits for `bootloader-update.service` to finish (no queued job, not
+  activating, a start timestamp from this boot) before reading `Result=`: queued, it already said
+  `Result=success`.
+
 ## 2026-10-08: release v3.2.0, the published files
 
 - The draft's `rime-os-netinstall-x86_64.iso` and `rime-windows-installer.exe`
