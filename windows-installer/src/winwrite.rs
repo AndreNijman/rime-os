@@ -257,39 +257,50 @@ impl VolumeLock {
         if ok == 0 { Err(last_error()) } else { Ok(()) }
     }
 
-    /// Open `\\?\Volume{...}` and take FSCTL_LOCK_VOLUME. Windows answers
-    /// ERROR_ACCESS_DENIED while any other handle to the volume is open,
-    /// which is the point; a few tries over a second ride out a transient
-    /// look by Explorer or the volume service, and no more than that.
+    /// Open `\\?\Volume{...}` with NO sharing, then take FSCTL_LOCK_VOLUME.
+    ///
+    /// Both halves refuse when something else has the volume open. Measured
+    /// in the lab (Windows Server 2022, a lettered RAW partition, another
+    /// process holding a read handle on `\\.\F:` that shares read and
+    /// write): the lock through a shared handle fails with
+    /// ERROR_ACCESS_DENIED, and an open that shares nothing fails first with
+    /// ERROR_SHARING_VIOLATION. With nothing else open, both succeed. The
+    /// no-sharing open is kept as well as the lock because it also stops a
+    /// new handle being opened between this open and the lock. A few tries
+    /// over a second ride out a transient look by Explorer or the volume
+    /// service, and no more than that.
     pub fn lock(volume: &str) -> io::Result<VolumeLock> {
         let device = volume.trim_end_matches('\\');
         if !device.starts_with("\\\\?\\Volume{") || device.contains('/') {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "only a volume GUID path can be locked"));
         }
-        let h = unsafe {
-            CreateFileW(
-                wide(device).as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                std::ptr::null_mut(),
-                OPEN_EXISTING,
-                0,
-                std::ptr::null_mut(),
-            )
-        };
-        if h == INVALID_HANDLE {
-            return Err(last_error());
-        }
-        let v = VolumeLock { h, name: volume.to_string() };
         let mut last = None;
-        for _ in 0..5 {
+        for attempt in 0..5 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            let h = unsafe {
+                CreateFileW(
+                    wide(device).as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null_mut(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if h == INVALID_HANDLE {
+                last = Some(last_error());
+                continue;
+            }
+            let v = VolumeLock { h, name: volume.to_string() };
             match v.fsctl(FSCTL_LOCK_VOLUME) {
                 Ok(()) => return Ok(v),
-                Err(e) => last = Some(e),
+                Err(e) => last = Some(e), // dropping v closes the handle
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        Err(last.unwrap_or_else(|| io::Error::other("FSCTL_LOCK_VOLUME failed")))
+        Err(last.unwrap_or_else(|| io::Error::other("the volume lock failed")))
     }
 
     /// FSCTL_DISMOUNT_VOLUME, through the locked handle.

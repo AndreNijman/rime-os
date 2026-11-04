@@ -460,7 +460,8 @@ pub struct Volume {
     pub filesystem: String,
     pub label: String,
     /// Why GetVolumeInformationW gave no filesystem, when it gave none.
-    /// ERROR_UNRECOGNIZED_VOLUME is "RAW"; anything else is "unknown".
+    /// ERROR_UNRECOGNIZED_VOLUME is what a RAW volume answers; measured, it
+    /// answers ERROR_INVALID_PARAMETER while another handle is open on it.
     pub fs_error: Option<u32>,
     /// (physical drive number, offset, length) — a volume can span several.
     pub extents: Vec<(u32, u64, u64)>,
@@ -582,8 +583,12 @@ impl Volume {
             name: self.name.clone(),
             mount_points: self.mount_points.clone(),
             filesystem: self.filesystem.clone(),
-            unrecognised: self.filesystem.eq_ignore_ascii_case("RAW")
-                || (self.filesystem.is_empty() && self.fs_error == Some(ERROR_UNRECOGNIZED_VOLUME)),
+            // Windows names no filesystem for it. Measured in the lab: a RAW
+            // volume answers ERROR_UNRECOGNIZED_VOLUME (1005) normally, and
+            // ERROR_INVALID_PARAMETER (87) while another process holds a
+            // handle on it. Either way the bytes decide: `verdict` probes
+            // them, and `take_over` locks the volume and probes them again.
+            unrecognised: self.filesystem.eq_ignore_ascii_case("RAW") || self.filesystem.is_empty(),
             exactly_this_partition: self.extents.len() == 1 && self.extents[0] == (disk, offset, length),
             what: self.describe_use(),
         }

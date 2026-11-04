@@ -113,8 +113,11 @@ pub fn assess(p: &PartitionFacts, claims: &[Claim]) -> Verdict {
                 claims.iter().map(|c| c.what.as_str()).collect::<Vec<_>>().join("; ")
             ),
             Some(
-                "choose a partition Windows is not using. This program will not \
-                 dismount, offline or force a volume closed."
+                "choose a partition Windows is not using. This survey is the old, \
+                 strict rule: `candidates` and the installer also offer an empty \
+                 partition whose only claim is one unrecognised (RAW) volume, and \
+                 take that one volume from Windows (exclusive lock, dismount) \
+                 before writing. Nothing forces a volume something else has open."
                     .to_string(),
             ),
         );

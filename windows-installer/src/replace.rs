@@ -37,9 +37,11 @@ pub struct VolumeClaim {
     pub mount_points: Vec<String>,
     /// The filesystem Windows reports; empty when it reported none.
     pub filesystem: String,
-    /// Windows said it recognises NO filesystem here (GetVolumeInformationW
-    /// failed with ERROR_UNRECOGNIZED_VOLUME, or named the filesystem RAW).
-    /// Any other failure to answer is not this, and is refused.
+    /// Windows names NO filesystem here: it said RAW, or GetVolumeInformationW
+    /// gave none (measured: ERROR_UNRECOGNIZED_VOLUME normally,
+    /// ERROR_INVALID_PARAMETER while another process holds a handle on the
+    /// volume). This is only Windows' view; the bytes are probed regardless,
+    /// and again under the lock.
     pub unrecognised: bool,
     /// One extent, on this disk, at exactly the partition's offset and
     /// length: a basic volume and nothing larger (a spanned or striped
@@ -348,8 +350,7 @@ mod tests {
     #[test]
     fn only_one_raw_volume_exactly_over_a_basic_data_partition_is_released() {
         let p = part(plan::WINDOWS_BASIC_DATA, BIG, 0);
-        // Windows could not say what the filesystem is, for a reason other
-        // than "none": not RAW, so not ours to lock.
+        // A volume not marked unrecognised: not RAW, so not ours to lock.
         let unknown = VolumeClaim { unrecognised: false, ..raw(&[]) };
         // A spanned/striped volume that includes the partition.
         let spanned = VolumeClaim { exactly_this_partition: false, ..raw(&[]) };
