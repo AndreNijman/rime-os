@@ -18,21 +18,39 @@ through unchanged, so its own `--help` is the reference:
 
 The copy here is taken byte for byte from the NixOS side's `rime-bridge.py`
 (first line changed to `#!/usr/bin/python3 -I`), at the NixOS branch's bridge
-commit 223a0758d (sha256 of the file without its first line:
-`a6fcdc2a182abdee7ec6c7e47ba28084d8017e8ca7e8db31b56f69332964d14b`). Its tests
+commit 5edb2bd22 (branch nix/bridge-space; sha256 of the file without its first line:
+`6c8219e94ccd8fc0309fcee02a607344115a777ce5ec6993e3f9fc21e54213e3`). Its tests
 (`test_bridge.py`, `test_bridge_d2.py`) are in `tests/rime-migrate/` and run
 from `tests/test-rime-migrate.sh`. The fixture uses a synthetic root UUID
-(`0b0b0b0b-…`), never a real machine's. That commit is on the NixOS branch
-(feat/nixos, wave 3 integrated); compare again, by that hash, before this
-release ships. Since the previous copy it gained: `write_boot_table` (start no
-longer truncates the host.toml the /etc carry wrote, so an encrypted machine
-keeps `rd.luks.*` and unlocks), `preview_extract` (check no longer crashes on a
-payload's unit masks), a start that refuses a payload without `preview.tar`
-(`payload-no-preview`: the left-behind report always comes first), and the
-start record rule below.
+(`0b0b0b0b-…`), never a real machine's. Compare again, by that hash, before
+this release ships. Since the previous copy (223a0758d) it changed one thing:
+the free-space check.
 
 On a system older than this release `rime migrate` does not exist; on one where
 the program is missing, `rime migrate` says so and points at `sudo rime update`.
+
+## How much free space the move needs
+
+`start` makes a reflink copy of `/var/home` and a read-only snapshot of the old
+system. Both share their data blocks with what is already on the disk, so they
+cost no data space when made; the copy does duplicate the files' btrfs
+metadata. `check` therefore asks two things, each refused by its own name:
+
+| refusal | needed | counted against |
+|---|---|---|
+| `free-space` (data) | 19 GB (the NixOS system plus room for one full rebuild) + the size of the old ostree store | unused space in data chunks + unallocated space |
+| `metadata-space` | home's metadata x 1.25 x the metadata profile's copies (2 on DUP) | (unused metadata space - the kernel's global reserve) x copies + the unallocated space data does not take |
+
+Home's metadata is the larger of its share of all metadata used (by home's
+size against all data used, at most all of it) and 1 KiB per file or directory
+plus the bytes of files under 4 KiB. A btrfs root whose usage cannot be read is
+refused `space-unmeasured`. Earlier copies charged home's full size as data,
+which refused a 1.3 TB home on a disk with 377 GB free.
+
+The space the copy shares is not free forever: each file changed or added on
+NixOS takes new space while the old system keeps its blocks. `check --explain`
+says so in a `divergence:` line. The space comes back when the old side is
+removed, a step (`rime migrate finish`) that is planned and not in this release.
 
 ## After a start, the bootc verbs refuse
 
