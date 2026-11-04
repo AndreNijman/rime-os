@@ -76,6 +76,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json, os
+    ${builtins.readFile ./lib/read-json.py}
 
     SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main"
     BOOTC = SIGNER.replace("nix-release.yml", "build-image.yml")
@@ -160,7 +161,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the build job: closure.json, the split, the export"):
         builder.succeed(f"rime-nix-release closure --variant plain={PLAIN} --variant luks={LUKS} --out /root/closure.json")
         builder.succeed(f"rime-nix-release split --closure /root/closure.json --upstream {UPSTREAM} --out /root/split.json")
-        split = json.loads(builder.succeed("cat /root/split.json"))
+        split = read_json(builder, "/root/split.json")
         assert HELLO in split["upstream"], split
         assert PLAIN in split["rime"] and LUKS in split["rime"], split
         assert not any("rime-standin" in p for p in split["upstream"]), split
@@ -190,7 +191,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("refused: an artifact changed in transit (closure.json no longer matches what was imported)"):
         server.succeed("cp -r /root/artifact /root/artifact-tampered")
-        clo = json.loads(server.succeed("cat /root/artifact-tampered/closure.json"))
+        clo = read_json(server, "/root/artifact-tampered/closure.json")
         clo["paths"][PLAIN]["nar_hash"] = clo["paths"][HELLO]["nar_hash"]
         put(server, "/root/artifact-tampered/closure.json", json.dumps(clo))
         rc, log, _ = publish(A, H1, artifact="/root/artifact-tampered")
@@ -201,13 +202,13 @@ pkgs.testers.runNixOSTest {
     with subtest("published: release 2026.11.01 on edge"):
         rc, log, out = publish(A, H1)
         assert rc == 0, log
-        st = json.loads(server.succeed(f"cat {out}/published.json"))
+        st = read_json(server, f"{out}/published.json")
         assert st["state"] == "published" and st["release"] == "2026.11.01", st
         hello_ni = server.succeed(f"curl -fsS {PUBLIC}/{narinfo_of(HELLO)}")
         assert "Sig: upstream-test-1:" in hello_ni and "Sig: rime-test-cache-1:" in hello_ni, hello_ni
         info = server.succeed(f"curl -fsS {PUBLIC}/nix-cache-info")
         assert "WantMassQuery: 1" in info and "Priority: 30" in info, info
-        man = json.loads(server.succeed(f"cat {out}/manifest.json"))
+        man = read_json(server, f"{out}/manifest.json")
         assert sorted(man["variants"]) == ["luks", "plain"]
         assert man["previous"] is None and man["delta"] is None
         server.succeed(f"rime-nix-release validate --canonical {out}/manifest.json")
@@ -218,17 +219,17 @@ pkgs.testers.runNixOSTest {
 
     with subtest("idempotent: the same pair publishes nothing; a new shell pair uploads no NAR"):
         rc, log, out = publish(A, H1)
-        assert rc == 0 and json.loads(server.succeed(f"cat {out}/published.json"))["state"] == "exists", log
+        assert rc == 0 and read_json(server, f"{out}/published.json")["state"] == "exists", log
         assert bucket() == first_bucket and tag("nix-channels") == chan1
         rc, log, out = publish(A, H2)
         assert rc == 0, log
-        fill = json.loads(server.succeed(f"cat {out}/fill.json"))
+        fill = read_json(server, f"{out}/fill.json")
         assert fill["uploaded"] == 0, fill
         assert bucket() == first_bucket, "a re-publish of the same closure wrote objects"
-        man = json.loads(server.succeed(f"cat {out}/manifest.json"))
+        man = read_json(server, f"{out}/manifest.json")
         assert man["release"] == "2026.11.01.2" and man["previous"] == "2026.11.01", man["release"]
         assert man["delta"] == {"from": "2026.11.01", "variant": "plain", "paths": 0, "file_size": 0}, man["delta"]
-        chan = json.loads(server.succeed(f"cat {out}/channels.json"))
+        chan = read_json(server, f"{out}/channels.json")
         assert chan["serial"] == 2 and chan["channels"][0]["release"] == "2026.11.01.2", chan
 
     with subtest("refused: a NAR deleted from the bucket is caught from the public side"):
@@ -243,9 +244,9 @@ pkgs.testers.runNixOSTest {
         aws(f"s3 rm s3://rime-cache/{narinfo_of(SHELL)}")
         rc, log, out = publish(A, H3)
         assert rc == 0, log
-        assert json.loads(server.succeed(f"cat {out}/fill.json"))["uploaded"] >= 1
+        assert read_json(server, f"{out}/fill.json")["uploaded"] >= 1
         good_tag = f"nix-{A}-{H3}"
-        assert json.loads(server.succeed(f"cat {out}/published.json"))["release"] == "2026.11.01.3"
+        assert read_json(server, f"{out}/published.json")["release"] == "2026.11.01.3"
 
     with subtest("an unsigned narinfo fails the public check; the next fill re-signs it and the next read sees it"):
         key = narinfo_of(HELLO)

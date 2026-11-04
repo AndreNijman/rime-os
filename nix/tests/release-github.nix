@@ -90,6 +90,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json, os
+    ${builtins.readFile ./lib/read-json.py}
 
     SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main"
     ISSUER = "https://token.actions.githubusercontent.com"
@@ -189,7 +190,7 @@ pkgs.testers.runNixOSTest {
     with subtest("the build job: closure.json, the split, the stage (Rime-built paths only)"):
         builder.succeed(f"rime-nix-release closure --variant plain={PLAIN} --variant luks={LUKS} --out /root/closure.json")
         builder.succeed(f"rime-nix-release split --closure /root/closure.json --upstream {UPSTREAM} --out /root/split.json")
-        split = json.loads(builder.succeed("cat /root/split.json"))
+        split = read_json(builder, "/root/split.json")
         assert HELLO in split["upstream"] and PLAIN in split["rime"], split
         SHELL = builder.succeed(f"readlink -f {PLAIN}/sw-shell").strip()
         builder.succeed("rime-nix-release stage --closure /root/closure.json --split /root/split.json --out /root/artifact")
@@ -203,7 +204,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("refused: an artifact changed in transit (nothing uploaded, nothing committed, nothing tagged)"):
         server.succeed("cp -r /root/artifact /root/artifact-tampered")
-        clo = json.loads(server.succeed("cat /root/artifact-tampered/closure.json"))
+        clo = read_json(server, "/root/artifact-tampered/closure.json")
         clo["paths"][PLAIN]["nar_hash"] = clo["paths"][HELLO]["nar_hash"]
         put(server, "/root/artifact-tampered/closure.json", json.dumps(clo))
         rc, txt, _ = publish(A, H1, artifact="/root/artifact-tampered")
@@ -213,9 +214,9 @@ pkgs.testers.runNixOSTest {
     with subtest("published: NARs as release assets, narinfos on main with absolute URLs on another origin"):
         rc, txt, out = publish(A, H1)
         assert rc == 0, txt
-        st = json.loads(server.succeed(f"cat {out}/published.json"))
+        st = read_json(server, f"{out}/published.json")
         assert st["state"] == "published" and st["release"] == "2026.11.01", st
-        fill = json.loads(server.succeed(f"cat {out}/fill.json"))
+        fill = read_json(server, f"{out}/fill.json")
         assert fill["uploaded"] == len(split["rime"]) and fill["assets_uploaded"] == len(split["rime"]), fill
         assert len(gh_assets("2026.11.01")) == len(split["rime"])
         added = server.succeed(f"git -C /var/lib/rime-cache.git diff --name-status {seed} main").split("\n")
@@ -238,7 +239,7 @@ pkgs.testers.runNixOSTest {
         client.succeed(f"curl -fsSL -o /tmp/nar '{url}'")
         assert client.succeed("sha256sum < /tmp/nar").split()[0] == server.succeed(f"sha256sum < /root/artifact/cache/{nar}").split()[0]
         assert "objects.test:8083" in client.succeed(f"curl -sS -o /dev/null -w '%{{redirect_url}}' '{url}'")
-        man = json.loads(server.succeed(f"cat {out}/manifest.json"))
+        man = read_json(server, f"{out}/manifest.json")
         up_key = server.succeed("cat /root/up.pub").strip()
         assert man["cache"]["upstream"]["keys"] == [up_key] and up_key in man["cache"]["keys"], man["cache"]
         origins = {e["path"]: e["origin"] for e in man["paths"]}
@@ -249,14 +250,14 @@ pkgs.testers.runNixOSTest {
 
     with subtest("idempotent: the same pair publishes nothing; a new shell pair uploads and commits nothing"):
         rc, txt, out = publish(A, H1)
-        assert rc == 0 and json.loads(server.succeed(f"cat {out}/published.json"))["state"] == "exists", txt
+        assert rc == 0 and read_json(server, f"{out}/published.json")["state"] == "exists", txt
         rc, txt, out = publish(A, H2)
         assert rc == 0, txt
-        fill = json.loads(server.succeed(f"cat {out}/fill.json"))
+        fill = read_json(server, f"{out}/fill.json")
         assert fill["uploaded"] == 0 and fill["assets_uploaded"] == 0 and fill["commit"] is None, fill
         assert head() == first, "a re-publish of the same closure committed"
         assert gh_release("2026.11.01.2") is None, "a re-publish of the same closure created a release"
-        assert json.loads(server.succeed(f"cat {out}/manifest.json"))["release"] == "2026.11.01.2"
+        assert read_json(server, f"{out}/manifest.json")["release"] == "2026.11.01.2"
         assert tag("nix-channels") != chan1
 
     with subtest("refused: a NAR asset deleted from its release is caught from the public side"):
@@ -285,11 +286,11 @@ pkgs.testers.runNixOSTest {
         assert "push refused" in txt, "the concurrent commit did not make the first push fail"
         concurrent = server.succeed("cat /root/concurrent").strip()
         server.succeed(f"git -C /var/lib/rime-cache.git merge-base --is-ancestor {concurrent} main")
-        fill = json.loads(server.succeed(f"cat {out}/fill.json"))
+        fill = read_json(server, f"{out}/fill.json")
         assert fill["uploaded"] == 1 and fill["assets_uploaded"] == 1, fill
         assert [x["name"] for x in gh_assets("2026.11.01.3")] == [name]
         good_tag = f"nix-{A}-{H3}"
-        assert json.loads(server.succeed(f"cat {out}/published.json"))["release"] == "2026.11.01.3"
+        assert read_json(server, f"{out}/published.json")["release"] == "2026.11.01.3"
 
     with subtest("the client consumes edge from Pages + the upstream cache, with exactly the manifest's keys"):
         client.fail(f"nix path-info {PLAIN}")

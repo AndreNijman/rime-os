@@ -293,6 +293,7 @@ pkgs.testers.runNixOSTest {
     in
     ''
       import json, os, re
+      ${builtins.readFile ./lib/read-json.py}
 
       SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main"
       ISSUER = "https://token.actions.githubusercontent.com"
@@ -339,7 +340,7 @@ pkgs.testers.runNixOSTest {
               f" --allow-test-variants --test-signing /root/sign --out {d}/out 2>&1")
           print(log)
           assert rc == 0, f"publish {name} failed"
-          man = json.loads(server.succeed(f"cat {d}/out/manifest.json"))
+          man = read_json(server, f"{d}/out/manifest.json")
           server.succeed(f"rm -rf {d}/artifact")
           return man
 

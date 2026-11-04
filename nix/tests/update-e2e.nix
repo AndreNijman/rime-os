@@ -225,7 +225,7 @@ pkgs.testers.runNixOSTest {
       b = nodes.client.system.build;
     in
     ''
-      import hashlib, itertools, json, os
+      import os
 
       SIGNER = "https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main"
       ISSUER = "https://token.actions.githubusercontent.com"
@@ -245,23 +245,7 @@ pkgs.testers.runNixOSTest {
       UPSTREAM_ROOTS = "${lib.concatStringsSep " " (map toString b.rimeUpstreamRoots)}"
       CLIENT_IP = "${nodes.client.networking.primaryIPAddress}"
 
-      _reads = itertools.count()
-
-      def read_json(machine, path):
-          # Not json.loads(machine.succeed(f"cat {path}")). succeed() brings output back over the guest console as
-          # ONE base64 line ending in a newline, and checks only the command's exit status, not that the line
-          # arrived whole: a short line whose length is still a multiple of 4 decodes without an error. CI run
-          # 41597182018 read release D's split.json (one entry per path of the release closure, about 80 kB, the
-          # largest file this test reads) as its first 78 kB, "Unterminated string"; A, B and C read whole.
-          # The file crosses the driver's shared directory instead and must match the sha256 the guest computed.
-          name = f"read-json-{next(_reads)}"
-          want = machine.succeed(f"cp {path} /tmp/shared/{name} && sync /tmp/shared/{name} && sha256sum {path}").split()[0]
-          host = machine.shared_dir / name
-          data = host.read_bytes()
-          host.unlink()
-          got = hashlib.sha256(data).hexdigest()
-          assert got == want, f"{machine.name}:{path} came back as {len(data)} bytes with sha256 {got}, not {want}"
-          return json.loads(data)
+      ${builtins.readFile ./lib/read-json.py}
 
       def hash_of(p):
           return os.path.basename(p)[:32]
