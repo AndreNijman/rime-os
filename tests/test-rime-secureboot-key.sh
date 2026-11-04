@@ -6,7 +6,8 @@
 # with RIME_SBK_PREFIX (a fake root) and stubbed findmnt/lsblk/mount/umount/
 # mountpoint on PATH, where a "mount" is a symlink to a fake device's files.
 # The VM proof (a real shim, a real MokManager, OVMF with Secure Boot on) is
-# installer/test-installer-sb-recovery.sh.
+# in the PR that added this file. It is not a suite: it needs KVM, a lab
+# OVMF image and hand-driven key presses in shim's MokManager.
 #
 # RIME_SBK_UNDER_TEST=<path> runs the same cases against another copy of the
 # helper, which is how the mutants in the PR were checked.
@@ -226,11 +227,15 @@ cmp -s "$CERT" "$M/root/boot/efi/EFI/rime/rime-mok.der" && ok "certificate on /b
 if pipe_has -E 'mount -o (ro|rw) /dev/' "$M/mount.log"; then bad "mounted a device although /boot/efi was mounted"; else ok "no device mounted"; fi
 
 sec "ensure: machines it must leave alone"
+# LoaderInfo as efivarfs holds it: 4 attribute bytes, then UTF-16LE text.
+loader_info() { printf '\x07\x00\x00\x00'; printf '%s' "$2" | iconv -f UTF-8 -t UTF-16LE; printf '\x00\x00'; } 2>/dev/null
+loader_info_to() { loader_info "" "$2" > "$1/root/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"; }
+
 for case in no-efi sdboot no-grub unsigned; do
   M="$TMP/m-$case"; mk_machine "$M"
   case "$case" in
     no-efi)   rm -rf "$M/root/sys/firmware/efi" ;;
-    sdboot)   : > "$M/root/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f" ;;
+    sdboot)   loader_info_to "$M" "systemd-boot 258.11-1.fc45" ;;
     no-grub)  rm "$M/root/boot/grub2/grub.cfg" ;;
     unsigned) echo unsigned > "$M/root/usr/share/rime-os/secureboot/kernel-signed" ;;
   esac
@@ -241,6 +246,13 @@ for case in no-efi sdboot no-grub unsigned; do
     bad "$case: rc $rc, mounts: $(tr '\n' ' ' < "$M/mount.log")"
   fi
 done
+
+sec "ensure: Fedora's GRUB sets LoaderInfo too (\"GRUB 2.12\", seen in the VM)"
+M="$TMP/m-grub-bli"; mk_machine "$M"
+loader_info_to "$M" "GRUB 2.12"
+run_ensure "$M" 2>/dev/null && ok "exits 0" || bad "failed"
+pipe_has -F 'rime-enrol-key' "$M/root/boot/grub2/custom.cfg" && ok "entry written on a GRUB machine with LoaderInfo" \
+  || bad "a GRUB machine was mistaken for systemd-boot: no entry"
 
 # ─────────────────────────────────────────────────────────────────────────────
 sec "the unit and the image"

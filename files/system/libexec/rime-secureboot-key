@@ -71,7 +71,10 @@ CERT_SRC="$P/usr/share/rime-os/secureboot/rime-mok.der"
 KSTATE_FILE="$P/usr/share/rime-os/secureboot/kernel-signed"
 STATE_DIR="$P/var/lib/rime/secureboot-key"
 ESP_TYPE_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
-# systemd-boot sets this; a machine it booted has no GRUB menu to add to.
+# The Boot Loader Interface variable. systemd-boot writes "systemd-boot <ver>"
+# here, and a machine it booted has no GRUB menu to add to. Fedora's GRUB
+# writes it too ("GRUB 2.12", measured in a VM), so its mere presence says
+# nothing: only the name in it counts.
 LOADER_INFO="$P/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 BEGIN_MARK='### BEGIN rime-secureboot-key ###'
 END_MARK='### END rime-secureboot-key ###'
@@ -287,14 +290,19 @@ mount_esp() {  # $1 = mount point to use; prints the ESP directory to use
   printf '%s\n' "$mp"
 }
 
+booted_loader() {  # the LoaderInfo string ("GRUB 2.12", "systemd-boot 258.x"), or nothing
+  [ -r "$LOADER_INFO" ] || return 0
+  tr -d '\0' <"$LOADER_INFO" 2>/dev/null | tr -cd '[:print:]'
+}
+
 cmd_ensure() {
   local kstate want esp="" mp rc=0 remounted=0
   if [ ! -d "$P/sys/firmware/efi" ]; then
     log "not booted with UEFI: nothing to do"; return 0
   fi
-  if [ -e "$LOADER_INFO" ]; then
-    log "booted by systemd-boot: no GRUB menu to add to"; return 0
-  fi
+  case "$(booted_loader)" in
+    *systemd-boot*) log "booted by systemd-boot: no GRUB menu to add to"; return 0 ;;
+  esac
   if [ ! -f "$P/boot/grub2/grub.cfg" ]; then
     log "no /boot/grub2/grub.cfg: not a GRUB machine"; return 0
   fi
@@ -316,9 +324,11 @@ cmd_ensure() {
   fi
 
   if [ "${RIME_SBK_NO_UNSHARE:-0}" != 1 ] && [ "${RIME_SBK_IN_NS:-0}" != 1 ]; then
-    # /boot is read-only on a bootc machine. A private mount namespace lets
-    # this remount it read-write without anyone else seeing a writable /boot,
-    # and every mount made here disappears with the process.
+    # /boot is read-only on a bootc machine. The ESP mount made here lives
+    # only in this private mount namespace and goes with the process. The
+    # remount of /boot is NOT fully private: it clears the read-only flag of
+    # the filesystem itself, which every namespace shares, so it is put back
+    # to read-only before this exits.
     RIME_SBK_IN_NS=1 exec unshare --mount --propagation private -- "$0" ensure
   fi
 
