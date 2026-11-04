@@ -15,6 +15,14 @@ owner of the machine, not for a script.
    **Unallocated**. The installer never touches NTFS, so the shrink is done
    by Windows' own tool, which knows how to move files out of the way.
 2. Run `rime-windows-installer.exe` (it asks for administrator rights).
+   An empty partition made there in Disk Management works too, with or without
+   a drive letter, as long as it was never formatted: the installer offers it
+   as "Empty partition", says it will be replaced, and puts Rime in exactly
+   its space. A partition with a filesystem on it (NTFS, FAT, exFAT, ReFS,
+   BitLocker) is never offered; delete it in Disk Management first.
+   An encrypted container with no visible header (VeraCrypt, for example)
+   looks exactly like an empty partition, so the installer cannot tell them
+   apart: if the partition it offers holds one, cancel.
 3. Choose the free space. Read the confirmation, which names the disk by
    model, serial and size (never by "Disk 1": disk numbers change between
    restarts). Install.
@@ -40,10 +48,13 @@ write API, a write IOCTL or a firmware variable name appears anywhere else.
 | zeroes 3 MiB of the new root partition (old signatures) | the rest of the free space | nothing to undo |
 | adds **two GPT entries**: Rime's ESP and an empty Linux root | the partition table, edited in place, primary header last | `undo` (and a byte copy of both tables is saved first) |
 | creates one firmware entry, **"Rime OS Setup"**, and sets **BootNext** to it | UEFI NVRAM; BootOrder untouched | the firmware consumes BootNext; Rime's installer removes the entry after a successful install; `undo` removes it otherwise |
+| only when an empty partition was chosen: takes Windows' volume for it (exclusive lock, dismount, the bytes read again under the lock), removes its drive letter, and deletes its GPT entry; Rime's two partitions fill exactly its space | that partition | not undone: it was empty, and its entry is replaced by Rime's two |
 | suspends BitLocker for **one** restart, only if its TPM profile binds PCR 5 (the partition table) | C: | resumes by itself |
 
 It never writes Windows' ESP, Windows' BCD, C:, or any other partition, and
-never reorders boot entries.
+never reorders boot entries. Rime's root stays the size it was given: a
+partition install switches off the image's first-boot "grow the root into the
+free space after it" service, so space left after Rime's partition stays free.
 
 The ISO is **pinned**: its URL, size and SHA-256 are compiled into the .exe
 (`src/pin.rs`) by the workflow that publishes that ISO

@@ -286,19 +286,99 @@ intention written in a comment.
 
 ---
 
-## Exclusivity: there is nothing to lock, and that changes the write path
+## Exclusivity: one volume is locked, and only one shape of it
 
-The obvious design is to take `FSCTL_LOCK_VOLUME` on the target and write
-through the locked volume handle, which confines the writes to the extent by
-construction instead of by arithmetic. It does not work here, and a
-measurement says why.
+> **Changed 2026-11-04.** Until v3.2.1 this section said "there is nothing to
+> lock", and the program refused every partition any Windows volume
+> overlapped. The Windows lab on v3.2.1 measured why that rule was wrong for
+> the case a person actually creates: **Windows keeps a volume for every
+> basic-data partition, lettered or not.** Shrink C:, make a new partition in
+> Disk Management, leave it unformatted, even with no drive letter, and Windows
+> still has `\\?\Volume{…}` over it, with no filesystem ("RAW"). Every empty
+> partition a Windows user can make was therefore refused "Windows is using
+> it", and the only way through was a diskpart step (re-type it, or set the GPT
+> "hidden" attribute) no ordinary user would take. The original reasoning is
+> kept below, because its measurements still hold.
 
-**Windows creates no volume object for a Linux-filesystem-type partition.**
-Measured in the lab on both eligible fixtures: no volume, no drive letter, no
-`\\?\Volume{…}` name, nothing to open and therefore nothing to lock. And this
-program has already refused any partition that *does* have a volume, because an
-overlapping volume is what "in use by Windows" means. So a lock call could only
-ever run on a partition that was already refused.
+The original reasoning: the obvious design is to take `FSCTL_LOCK_VOLUME` on
+the target and write through the locked volume handle. It does not work for
+the partitions this program first targeted, because **Windows creates no
+volume object for a Linux-filesystem-type partition** (measured in the lab on
+both eligible fixtures: no volume, no drive letter, no `\\?\Volume{…}` name,
+nothing to open and therefore nothing to lock). That is still true, and free
+space and Linux-typed partitions still go through the path described in the
+rest of this section with nothing to lock.
+
+### The rule for an existing partition (`src/replace.rs`)
+
+`replace::verdict` decides, in this order (first match wins):
+
+| the partition, and what Windows has over it | verdict |
+|---|---|
+| ESP, Microsoft reserved, Windows recovery | not offered |
+| any volume Windows names a filesystem for (NTFS, FAT, exFAT, ReFS, …), mounted or not | not offered |
+| no volume at all | go on below (the path that existed before) |
+| exactly **one** volume Windows names **no** filesystem for (RAW), whose single extent is **exactly** this partition, and the partition is **basic data** | go on below, and remember that volume: it is taken from Windows before any write |
+| any other volume shape (several volumes, a spanned/striped volume, a RAW volume over a non-basic-data type) | refused: "Windows is using it … delete it in Disk Management" |
+| type is not basic data or Linux filesystem | refused |
+| GPT attribute bit 0 ("required partition") | refused |
+| smaller than Rime needs | refused |
+| a filesystem signature in its bytes (NTFS, FAT, exFAT, ReFS, BitLocker, ext, btrfs, xfs, LUKS, swap, …) | refused: "it holds X data. Rime never overwrites a filesystem; … delete it in Disk Management, then refresh" |
+| none of the above | **usable**: "Empty partition … Rime deletes it and puts its own two partitions in exactly its space (its drive letter G:\ goes away)" |
+
+The confirmation then names the partition being replaced: its GPT name, GUID,
+size, byte range and drive letter (or "no drive letter").
+
+At install time, after a fresh survey and a fresh verdict, `replace::take_over`
+does four things, in this order, and writes nothing until all four succeed:
+
+1. **lock**: opens the volume with **no sharing** and takes
+   `FSCTL_LOCK_VOLUME` through that handle (`winwrite::VolumeLock`). If
+   either fails the install is refused: "something is using it … Close
+   whatever has it open, or restart Windows, then try again; nothing was
+   changed";
+2. **dismount**: `FSCTL_DISMOUNT_VOLUME` through the locked handle;
+3. **read again under the lock**: the same signature probe, from the disk,
+   now. A filesystem that appeared since the survey is refused ("it changed
+   after it was checked, and nothing was written");
+4. **remove its drive letter or mount points**, last, only once 1-3 passed.
+
+The lock is held through the partition-table write, so the write-time
+re-enumeration (below) excuses exactly the one volume this program holds and
+no other; it is released once the new table is committed, before Windows is
+asked to re-read the disk.
+
+**Measured 2026-11-04** (Windows Server 2022, OVMF Secure Boot, the branch
+build of the .exe and the published v3.2.1 installer image; evidence in
+`/var/lab/winlab/evidence-replace-fix/` on the lab host):
+
+| measurement | result |
+|---|---|
+| `GetVolumeInformationW` on a RAW volume, nothing else open | fails, ERROR_UNRECOGNIZED_VOLUME (1005) |
+| the same, while another process holds a read handle on the volume | fails, **ERROR_INVALID_PARAMETER (87)**; so "Windows names no filesystem" is any failure with no filesystem, and the bytes decide |
+| `FSCTL_LOCK_VOLUME` on a RAW volume, nothing else open | succeeds |
+| the lock through a shared handle, while another process holds a read handle (sharing read+write) | fails, ERROR_ACCESS_DENIED (5) |
+| an open that shares nothing, same contention | fails, ERROR_SHARING_VIOLATION (32), before the lock is tried |
+| the app under that contention | refused "something is using it"; drive letter kept; partition table unchanged; the partition's 23.6 GB read back from the host all zero |
+| the app on a lettered RAW partition | locked, dismounted, read again (no signature), letter removed, staged; Rime's two partitions exactly over the old partition's sectors (host GPT) |
+| the app on an unlettered RAW partition (New-Partition, never formatted) | offered "Empty partition", replaced; full four-boot install (see VALIDATION.md) |
+| an NTFS partition with a letter | not offered; `install` on it refused ("no such candidate") |
+| after the lock is released, the GPT update and Windows' re-read | worked: "Adding Rime's partitions" and the boot entry both completed |
+
+**Why the RAW write measurement below no longer makes this unsafe.** The
+2026-09-21 run showed Windows lets a `\\.\PhysicalDriveN` write land inside a
+lettered RAW volume. That was why refusing every RAW volume was load-bearing.
+The new rule does not lean on the platform either: it writes into a RAW
+volume only once this program holds that volume locked and dismounted (so
+nothing else can have it open, and nothing new can open it), and only after a
+read of the bytes **taken under that lock** found no filesystem. A partition
+Windows recognises a filesystem on is never offered at all. Three mutants of
+`src/replace.rs` (lock skipped, re-probe skipped, recognised filesystem
+allowed), plus two more (no volume remembered to lock, every volume excused at
+write time), each fail its unit tests: `tests/mutate-replace.sh`, run by
+`tests/test-windows-installer.sh`.
+
+### The write path, for every target
 
 What the write path gets instead, and what a reviewer should hold it to:
 
@@ -329,14 +409,13 @@ What the write path gets instead, and what a reviewer should hold it to:
   A drive letter and a live volume object alone buy nothing. FAT is
   unmeasured; assume nothing about it either.
 
-  **The consequence is a safety property.** `assess()` refuses that RAW
-  partition as "in use by Windows", and that refusal is **load-bearing**: it is
-  the only thing between a user and an overwritten partition, in the case a
-  user is most likely to create: shrink `C:`, leave the new volume unformatted,
-  and Windows letters it as RAW. For any partition with a recognised
-  filesystem the offset arithmetic has a second line behind it; for a RAW one
-  it is the only line. Do not weaken the ownership refusal on the theory that
-  the platform will catch it.
+  **The consequence is a safety property.** Until 2026-11-04 the refusal of
+  every RAW volume was **load-bearing**: it was the only thing between a user
+  and an overwritten partition. It is replaced, not weakened, by the lock and
+  the read under the lock described above: a RAW partition is written only
+  while this program holds its volume exclusively and has just read it
+  empty. Do not relax either step on the theory that the platform will catch
+  it; it does not.
 
 The `inspect` command already performs the re-enumeration and prints what it
 found, so the check exists and runs before any write does.
@@ -386,8 +465,9 @@ The priority order the work follows, and why it is that order:
    has reordered across three ordinary reboots; a tool that says "Disk 1" is a
    tool that erases the wrong disk on the fourth.
 3. **Ownership**: refuse anything Windows has mounted or is using, and name the
-   drive letter in the refusal. There is no volume to lock; see "Exclusivity"
-   above.
+   drive letter in the refusal, with one exception: an empty basic-data
+   partition whose only claim is one RAW volume, which is locked, dismounted
+   and read again before anything is written. See "Exclusivity" above.
 4. **Payload deployment**: through `\\.\PhysicalDriveN` at the verified offset,
    with every offset and length checked against the extent and a volume
    re-enumeration immediately before each write, as "Exclusivity" describes.
