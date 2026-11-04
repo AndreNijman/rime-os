@@ -193,11 +193,19 @@ cmp -s "$CERT" "$M/devs/fakedisk2/EFI/rime/rime-mok.der" && ok "certificate on t
 pipe_has -F 'mount -o remount,rw' "$M/mount.log" && ok "/boot remounted read-write (it is ro on bootc)" || bad "no remount rw"
 pipe_has -F 'mount -o remount,ro' "$M/mount.log" && ok "and back to read-only" || bad "no remount ro"
 cmp -s "$B" "$M/root/boot/grub2/custom.cfg" && ok "custom.cfg holds the block" || bad "custom.cfg wrong"
-[[ -s "$M/root/var/lib/rime/secureboot-key/stamp" ]] && ok "stamp written" || bad "no stamp"
+if pipe_has -xE '[0-9a-f]{128}' "$M/root/var/lib/rime/secureboot-key/stamp"; then ok "stamp written (two sha256s)"
+else bad "stamp missing or not two sha256s: '$(cat "$M/root/var/lib/rime/secureboot-key/stamp" 2>/dev/null)'"; fi
 [[ -d "$M/root/run/rime-secureboot-key/esp" && ! -L "$M/root/run/rime-secureboot-key/esp" ]] && ok "ESP unmounted afterwards" || bad "ESP left mounted"
 : > "$M/mount.log"
 run_ensure "$M" 2>/dev/null && ok "second boot exits 0" || bad "second boot failed"
 [[ ! -s "$M/mount.log" ]] && ok "second boot mounts nothing (stamp + custom.cfg match)" || bad "second boot mounted: $(cat "$M/mount.log")"
+
+sec "ensure: first boot after the installer (custom.cfg right, no stamp yet) still checks the ESP"
+M="$TMP/m-installed"; mk_machine "$M"
+cp "$B" "$M/root/boot/grub2/custom.cfg"
+run_ensure "$M" 2>/dev/null && ok "exits 0" || bad "failed"
+cmp -s "$CERT" "$M/devs/fakedisk2/EFI/rime/rime-mok.der" && ok "ESP checked and the certificate placed" \
+  || bad "no stamp yet, but the ESP was never looked at"
 
 sec "ensure: custom.cfg lost its block -> put back"
 : > "$M/root/boot/grub2/custom.cfg"

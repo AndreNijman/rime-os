@@ -213,7 +213,8 @@ place_cert() {  # $1 = mounted ESP  $2 = certificate
 }
 
 stamp_value() {
-  { sha256sum <"$CERT_SRC"; block | sha256sum; } 2>/dev/null | tr -d ' -\n'
+  # The '-' goes last: in ' -\n' tr reads a reversed range and fails.
+  { sha256sum <"$CERT_SRC"; block | sha256sum; } 2>/dev/null | tr -d ' \n-'
 }
 
 # ── ensure: the booted machine ───────────────────────────────────────────────
@@ -317,7 +318,7 @@ cmd_ensure() {
   want=$(stamp_value)
   # Cheap path for every boot after the first: no mounts at all. The ESP half
   # is trusted from the stamp; the /boot half is checked, since it is readable.
-  if [ "$(cat "$STATE_DIR/stamp" 2>/dev/null)" = "$want" ] \
+  if [ -n "$want" ] && [ "$(cat "$STATE_DIR/stamp" 2>/dev/null)" = "$want" ] \
      && [ -f "$P/boot/grub2/custom.cfg" ] \
      && custom_cfg_with_block "$P/boot/grub2/custom.cfg" | cmp -s - "$P/boot/grub2/custom.cfg"; then
     return 0
