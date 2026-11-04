@@ -26,6 +26,8 @@ A GitHub runner has them.)
 - **The checks of this machinery** are `ci` and `ci-userns` (`nix/tests/ci.nix`): the plan, the summary,
   check-suites and the rimed test report against mutants that must be refused, actionlint, ci/runner/check-workflows.py,
   and bubblewrap's user namespace inside the build sandbox.
+- **Not CI: the development VM.** `nix/dev/dev-vm` (`nix run path:.#dev-vm`) is a persistent VM to try changes in
+  (`docs/nixos/dev-vm.md`). It gates nothing; CI runs only `checks.dev-vm`, which tests the script without a VM.
 
 ## integrate/: what an integrator runs locally
 

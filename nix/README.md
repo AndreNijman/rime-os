@@ -22,6 +22,7 @@ nix/modules/packages-catalogue.nix  rime.catalogue  `rime install` catalogue and
 nix/hosts/vm.nix             nixosConfigurations.rime-vm (QEMU; test user rime/rime lives ONLY here)
 nix/tests/default.nix        checks.x86_64-linux.<name>, one file per test
 nix/tests/vm-boot.nix        the full system test: rime-vm + Rime's kernel, greeter login, Shell, rimed, sshd, firewall
+nix/dev/                     the persistent development VM: apps.dev-vm, checks.dev-vm (docs/nixos/dev-vm.md)
 ```
 
 Outputs: `packages.x86_64-linux.{rimed,rime-shell,rime-libexec,rime-kernel}`, `overlays.default`,
