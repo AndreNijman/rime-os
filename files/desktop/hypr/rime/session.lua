@@ -17,6 +17,15 @@ hl.env("PATH", home .. "/.local/bin:/usr/local/bin:/usr/bin:/usr/local/sbin")
 
 hl.env("XCURSOR_SIZE", "24")
 hl.env("HYPRCURSOR_SIZE", "24")
+-- Hyprland loads the XCursor theme named by XCURSOR_THEME, or one called
+-- "default" when it is unset (CursorManager.cpp). Nothing provides an
+-- icons/default theme on NixOS, so every shape fell back to Hyprland's built-in
+-- arrow with a warning each (951 in one VM session). Adwaita ships in the image
+-- (adwaita-icon-theme); a theme the user set before login is kept. hl.env runs
+-- while the config loads, which is before the cursor manager is created.
+if not os.getenv("XCURSOR_THEME") then
+    hl.env("XCURSOR_THEME", "Adwaita")
+end
 
 -- ── Autostart ────────────────────────────────────────────────────────────────
 -- There is no `exec-once` keyword in the Lua config. The replacement is a

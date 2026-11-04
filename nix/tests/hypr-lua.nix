@@ -14,7 +14,13 @@
 #             Hyprland fall back to us, so the devices check can tell;
 #   probe     a hyprland.lua without Rime's modules, reloaded: the Shell logs "Hyprland config problem
 #             (modules-missing)" and names rime-hypr-migrate; Rime's file back: "loaded again";
-#   end       `hyprctl configerrors` is empty again.
+#   dispatch  rime-project-windows moves a real window (foot) to workspace 7 without following it (follow =
+#             false), rime-agent-focus's hyprland_focus brings it to the front, and rime-project-windows
+#             switches back: every call an hl.dsp form, each checked against `hyprctl -j` state;
+#   firstrun  the per-login refresh of ~/.config/hypr/rime/ puts a changed session.lua back (control: it ran)
+#             and leaves matugen's colors.lua byte for byte;
+#   end       `hyprctl configerrors` is empty again, and Hyprland logged no XCursor shape fallback (session.lua
+#             names the Adwaita cursor theme; without it every shape fell back, 951 lines in one session).
 #
 # Results (every reply the asserts read) are in the VM's /tmp/hl-out, copied out as hl-out.tar,
 # with screenshots (start, display-snapped, input-refused, probe-modules-missing).png.
@@ -70,7 +76,7 @@ pkgs.testers.runNixOSTest {
       RIME_RELEASE_JSON = "/nonexistent";
       RIME_RELEASE_OPENER = "/bin/false";
     };
-    environment.systemPackages = [ pkgs.jq ];
+    environment.systemPackages = [ pkgs.jq pkgs.foot ];
 
     virtualisation = {
       memorySize = 4096;
@@ -276,8 +282,76 @@ pkgs.testers.runNixOSTest {
             machine.wait_until_succeeds(u("qs -c ${shellDir} log 2>&1 | grep -q \"Hyprland's Lua config is loaded again\""), timeout=30)
             machine.succeed("cat > /tmp/hl-out/probe-shell.log <<'HLEOF'\n" + shell_log() + "\nHLEOF")
 
-        with subtest("end: no config errors"):
+        with subtest("dispatch: the window helpers move and focus a real window through hl.dsp"):
+            run("dispatch-spawn", "hyprctl dispatch 'hl.dsp.exec_cmd(\"foot -a rime-dispatch-test\")'")
+            addr = None
+            for _ in range(60):
+                mine = [c for c in j("dispatch-clients", "hyprctl -j clients") if c.get("class") == "rime-dispatch-test"]
+                if mine:
+                    addr = mine[0]["address"]
+                    break
+                time.sleep(0.5)
+            assert addr, "foot never mapped a window"
+            ws0 = j("dispatch-ws-before", "hyprctl -j activeworkspace")["id"]
+            rc, out = run("dispatch-place", "${libexec}/rime-project-windows place " + addr + " 7")
+            assert rc == 0, "rime-project-windows place: exit " + str(rc) + ": " + out
+            machine.sleep(1)
+            c = [c for c in j("dispatch-clients-placed", "hyprctl -j clients") if c["address"] == addr][0]
+            assert c["workspace"]["id"] == 7, "the window is on " + repr(c["workspace"])
+            assert j("dispatch-ws-placed", "hyprctl -j activeworkspace")["id"] == ws0, "place followed the window"
+            # rime-agent-focus has no verb that takes a window directly (it maps a session to one), so its
+            # hyprland_focus is called as the module, with the script's own interpreter.
+            rc, out = run("dispatch-focus",
+                "py=$(head -n1 ${libexec}/rime-agent-focus | cut -c3-); $py -c '"
+                "import importlib.machinery as M, importlib.util as U, sys\n"
+                "s = U.spec_from_loader(\"f\", M.SourceFileLoader(\"f\", sys.argv[1]))\n"
+                "f = U.module_from_spec(s); s.loader.exec_module(f)\n"
+                "print(f.hyprland_focus(sys.argv[2]))' ${libexec}/rime-agent-focus " + addr)
+            assert rc == 0 and out.strip().endswith("True"), "hyprland_focus: " + out
+            machine.sleep(1)
+            assert j("dispatch-active-window", "hyprctl -j activewindow").get("address") == addr, "focus missed the window"
+            assert j("dispatch-ws-focused", "hyprctl -j activeworkspace")["id"] == 7, "focus did not bring its workspace"
+            rc, out = run("dispatch-workspace", "${libexec}/rime-project-windows workspace " + str(ws0))
+            assert rc == 0, "rime-project-windows workspace: exit " + str(rc) + ": " + out
+            machine.sleep(1)
+            assert j("dispatch-ws-back", "hyprctl -j activeworkspace")["id"] == ws0, "workspace switch did nothing"
+            run("dispatch-close", "hyprctl dispatch 'hl.dsp.window.close({ window = \"address:" + addr + "\" })'")
+
+        with subtest("firstrun: the per-login refresh leaves matugen's colors.lua alone"):
+            colors = "~/.config/hypr/rime/colors.lua"
+            # matugen may not have run in a VM with no wallpaper change; a file in its place is what
+            # a refresh would overwrite if it overwrote it.
+            machine.succeed(u("test -f " + colors + " || printf -- '-- matugen stand-in\\n' > " + colors))
+            machine.succeed(u("printf -- '-- rime-test marker\\n' >> " + colors))
+            before = machine.succeed(u("sha256sum " + colors)).split()[0]
+            machine.succeed(u("printf -- '-- stale\\n' >> ~/.config/hypr/rime/session.lua"))
+            run("firstrun-run", "systemctl --user start rime-shell-firstrun.service; "
+                "systemctl --user show -p Result,ExecMainStatus rime-shell-firstrun.service")
+            after = machine.succeed(u("sha256sum " + colors)).split()[0]
+            assert after == before, "firstrun rewrote colors.lua"
+            # Control: the refresh did run, so "unchanged" is not just "never touched".
+            rc, _ = machine.execute(u("grep -q -- '-- stale' ~/.config/hypr/rime/session.lua"))
+            assert rc != 0, "firstrun did not refresh session.lua, so the colors.lua check proves nothing"
+            run("firstrun-reload", "hyprctl reload")
+            machine.sleep(3)
+            configerrors("firstrun-configerrors")
+
+        with subtest("end: no config errors, no cursor fallbacks"):
             configerrors("end-configerrors")
+            hl = hyprlog()
+            shapes = len(re.findall(r"XCursor (failed to find a shape|couldn't find shape)", hl))
+            run("end-cursor", "hyprctl -j getoption cursor:enable_hyprcursor; "
+                "tr '\\0' '\\n' < /proc/$(pgrep -u 1000 -x .Hyprland-wrapp | head -n1)/environ | grep '^XCURSOR' || true")
+            assert "XCursor librarypath is empty" not in hl, "Hyprland found no cursor theme directory"
+            assert shapes == 0, str(shapes) + " XCursor shape fallbacks in hyprland.log"
+            # The config probe: "loaded again" only for the one problem -> ok the probe subtest made
+            # (every other reload in this run, from a good config, says nothing), and no answer with an
+            # empty detail, which is what a probe killed by a restart while it ran used to print.
+            log = shell_log()
+            again = log.count("Hyprland's Lua config is loaded again")
+            assert again == 1, str(again) + " 'loaded again' lines for one problem -> ok transition"
+            empty = re.findall(r"could not ask Hyprland about its config: *$", log, re.M)
+            assert not empty, str(len(empty)) + " probe answers with no detail (a probe killed mid-run)"
     except Exception:
         dump()
         raise
