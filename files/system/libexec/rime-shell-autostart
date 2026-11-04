@@ -59,7 +59,97 @@ ENTRY="${SHELL_DIR}/shell.qml"
 # more, so this is now only a sanity bound on a broken image or a bad override.
 TIMEOUT="${RIME_SHELL_WAIT_TIMEOUT:-15}"
 
-log() { printf '[rime-shell-autostart] %s\n' "$*" >&2; }
+# Every line goes to stderr AND to the journal (tag rime-shell-autostart).
+# stderr alone was not enough: a compositor's exec hands its children a stdio
+# nobody reads (Hyprland: its tty), so the one line that explained a login with
+# no bar ("already running — skipping") was written nowhere anyone could find.
+#   journalctl -b -t rime-shell-autostart
+journal() {
+    local prio="$1"; shift
+    command -v systemd-cat >/dev/null 2>&1 || return 0
+    printf '%s\n' "$*" | systemd-cat -t rime-shell-autostart -p "$prio" >/dev/null 2>&1 || true
+}
+log()  { printf '[rime-shell-autostart] %s\n' "$*" >&2; journal info "$*"; }
+warn() { printf '[rime-shell-autostart] %s\n' "$*" >&2; journal warning "$*"; }
+
+# ── Starts that are confirmed, retried, and reported ────────────────────────
+# A launcher that execs quickshell and walks away cannot tell a desktop with a
+# bar from one without. So before the exec (below) a detached watcher starts:
+# it asks the shell over IPC until it answers. If quickshell exits before it
+# ever answers, the watcher runs this launcher again, up to
+# RIME_SHELL_START_ATTEMPTS starts in all; when every start failed, or a shell
+# runs but never answers within RIME_SHELL_CONFIRM_SECS, it says so in the
+# journal at priority err AND on screen (report_failure).
+ATTEMPT="${RIME_SHELL_START_ATTEMPT:-1}"
+case "$ATTEMPT" in ''|*[!0-9]*) ATTEMPT=1 ;; esac
+MAX_ATTEMPTS="${RIME_SHELL_START_ATTEMPTS:-3}"
+case "$MAX_ATTEMPTS" in ''|*[!0-9]*|0) MAX_ATTEMPTS=3 ;; esac
+CONFIRM_SECS="${RIME_SHELL_CONFIRM_SECS:-90}"
+case "$CONFIRM_SECS" in ''|*[!0-9]*|0) CONFIRM_SECS=90 ;; esac
+# Absolute: a retry runs this file again from wherever the watcher stands.
+SELF="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")"
+
+# Does the shell at SHELL_DIR answer IPC? Asked in the subcommand-first form
+# (`quickshell ipc -c <dir> show`), which SHELL_RE below never takes for the
+# shell, and bounded: a shell that accepts the connection and hangs costs 5 s.
+shell_answers() {
+    local out
+    out="$(timeout 5 quickshell ipc -c "${SHELL_DIR}" show 2>/dev/null)" || return 1
+    grep -q '^target ' <<<"$out"
+}
+
+# Alive and not a zombie: the compositor may not reap an exited child at once,
+# and `kill -0` succeeds on a zombie.
+alive() {
+    local st
+    st="$(sed -n 's/^.*) \(.\).*$/\1/p' "/proc/$1/stat" 2>/dev/null)"
+    [ -n "$st" ] && [ "$st" != Z ] && [ "$st" != X ]
+}
+
+# The Shell did not come up: the journal at err, and the screen. Hyprland draws
+# its own notifications, so `hyprctl notify` needs no Shell; elsewhere
+# notify-send reaches whatever notification daemon the session has.
+report_failure() {
+    local why="$1"
+    printf '[rime-shell-autostart] %s\n' "$why" >&2
+    journal err "$why"
+    local msg="Rime Shell did not start: ${why}. Start it with rime-shell-autostart; details: journalctl -b -t rime-shell-autostart"
+    if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && command -v hyprctl >/dev/null 2>&1; then
+        timeout 5 hyprctl notify 3 60000 0 "$msg" >/dev/null 2>&1 \
+            || journal warning "hyprctl notify failed; the message above is only in the journal"
+    elif command -v notify-send >/dev/null 2>&1; then
+        timeout 5 notify-send -u critical -a "Rime OS" "Rime Shell did not start" "$msg" >/dev/null 2>&1 || true
+    fi
+}
+
+# Runs detached (see the exec below). $1 = the pid that becomes quickshell.
+watch_start() {
+    local pid="$1" t0="$SECONDS"
+    while [ $(( SECONDS - t0 )) -lt "$CONFIRM_SECS" ]; do
+        if shell_answers; then
+            log "Rime Shell is up (pid ${pid}, start ${ATTEMPT} of ${MAX_ATTEMPTS}, answered after $(( SECONDS - t0 )) s)"
+            return 0
+        fi
+        if ! alive "$pid"; then
+            # quickshell -n exits when another instance has the config, and that
+            # instance may answer only now.
+            if shell_answers; then
+                log "Rime Shell is up (another instance answers; this start, pid ${pid}, was a duplicate)"
+                return 0
+            fi
+            if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then
+                warn "quickshell (pid ${pid}) exited before the Rime Shell answered; starting it again (start $(( ATTEMPT + 1 )) of ${MAX_ATTEMPTS})"
+                sleep "$ATTEMPT"
+                RIME_SHELL_START_ATTEMPT=$(( ATTEMPT + 1 )) exec "${BASH:-bash}" "$SELF"
+            fi
+            report_failure "quickshell exited before the shell answered, ${MAX_ATTEMPTS} starts in a row (its log: qs -c ${SHELL_DIR} log)"
+            return 1
+        fi
+        sleep 0.5
+    done
+    report_failure "quickshell (pid ${pid}) is running but the shell has not answered in ${CONFIRM_SECS} s (its log: qs -c ${SHELL_DIR} log)"
+    return 1
+}
 
 # ── Sanity-check the shell tree is really there ──────────────────────────────
 # Normally passes on the first iteration: /usr/share/rime-shell ships in the image.
@@ -157,9 +247,18 @@ fi
 # that mentioned the shell's path, an editor, a grep — and this launcher then
 # skipped the start and left the desktop without a shell (katana, 2026-10-07:
 # about 30 s with no bar during a restart, until it was started again).
-SHELL_RE="^([^ ]*/)?(quickshell|qs) -(c|p) ${SHELL_DIR}/?( |$)"
+#
+# And ONLY OPTIONS may follow the config path. `qs -c <dir> ipc show`,
+# `qs -p <dir> ipc call …` (what `rime shell ipc …` runs) and hypridle's
+# lock_cmd name the config first and the subcommand after it, so the old
+# `<dir>( |$)` took every one of them for the shell. One alive at the instant
+# of this check (a keybind, a lock, a test polling for the shell) and the
+# launcher exited 0 with the desktop empty, logged nowhere: 1 boot in 6 of the
+# shell-kept VM check (docs/nixos/open-items.md). A bare word after the path is
+# a subcommand, and a subcommand is a client, never the shell.
+SHELL_RE="^([^ ]*/)?(quickshell|qs)( -[^ ]+)* -(c|p) ${SHELL_DIR}/?( -[^ ]+)*$"
 if pgrep -f "${SHELL_RE}" >/dev/null 2>&1; then
-    log "Rime Shell already running — skipping"
+    log "Rime Shell already running — skipping (pid $(pgrep -f "${SHELL_RE}" | head -n 1))"
     exit 0
 fi
 
@@ -185,15 +284,25 @@ fi
 # than the shell gives an English desktop rather than no desktop.
 RIME_QML_DIR="${RIME_QML_DIR:-/usr/lib64/rime-shell/qml}"  # NixOS: the session wrapper points this at the package
 if [ -d "${RIME_QML_DIR}" ]; then
-    export QML_IMPORT_PATH="${RIME_QML_DIR}${QML_IMPORT_PATH:+:${QML_IMPORT_PATH}}"
-    export QML2_IMPORT_PATH="${RIME_QML_DIR}${QML2_IMPORT_PATH:+:${QML2_IMPORT_PATH}}"
+    # Once: a retried start (watch_start) inherits this run's environment.
+    case ":${QML_IMPORT_PATH:-}:" in *":${RIME_QML_DIR}:"*) ;; *)
+        export QML_IMPORT_PATH="${RIME_QML_DIR}${QML_IMPORT_PATH:+:${QML_IMPORT_PATH}}" ;; esac
+    case ":${QML2_IMPORT_PATH:-}:" in *":${RIME_QML_DIR}:"*) ;; *)
+        export QML2_IMPORT_PATH="${RIME_QML_DIR}${QML2_IMPORT_PATH:+:${QML2_IMPORT_PATH}}" ;; esac
 else
     log "no ${RIME_QML_DIR} in this image — the shell will run untranslated"
 fi
 
-log "starting quickshell -c ${SHELL_DIR}"
+log "starting quickshell -c ${SHELL_DIR} -n (start ${ATTEMPT} of ${MAX_ATTEMPTS})"
+# The watcher, detached: the inner subshell is orphaned the moment the outer
+# one exits (the launcher waits for that), so it is nobody's zombie after the
+# exec below. $$ is this process, which the exec turns into quickshell.
+( watch_start "$$" </dev/null & )
+# -n (--no-duplicate): quickshell itself refuses a second instance of this
+# config, by its own instance lock. pgrep above only saves a start; two
+# launchers racing each other (a login and a repair) both pass it.
 # No LD_PRELOAD: the argc shim existed only because Chromium treats Quickshell's
 # argc=0 as fatal, and the shell no longer loads Qt WebEngine. The library is
 # still in the image (removing it rebuilds the core tier and costs the fleet a
 # full-size update) but nothing loads it any more.
-exec quickshell -c "${SHELL_DIR}"
+exec quickshell -c "${SHELL_DIR}" -n

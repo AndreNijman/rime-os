@@ -151,7 +151,7 @@ let
     rime-secrets-start = [ systemd glib util-linux ];
     rime-session-logout = [ procps systemd ];
     rime-session-watchdog = [ ];
-    rime-shell-autostart = [ procps ];
+    rime-shell-autostart = [ procps systemd libnotify ]; # systemd-cat (journal), notify-send (a Shell that never started)
     rime-shell-firstrun = [ python3 util-linux systemd diffutils libxkbcommon ];
     rime-storage-notice = [ libnotify ];
     rime-switch-greeter = [ getent ];

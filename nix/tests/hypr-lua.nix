@@ -170,23 +170,23 @@ pkgs.testers.runNixOSTest {
             border = option("shell-border", "general:col.active_border")
             assert "8d748c" not in json.dumps(border), "the accent never replaced the config's gradient: " + repr(border)
             wait_gaps("shell-gaps-start", 5, 10)
-            # Focus mode's IPC handler lives in QuickSettings, which is built only
-            # when the dashboard's home page is first shown: before that the
-            # toggle is a no-op (measured in this VM: rc 0, gaps stay 5/10;
-            # open-items.md). Show the page once, close it, then toggle.
-            run("shell-dashboard-open", "qs -c ${shellDir} ipc call dashboard-home toggle")
-            machine.sleep(2)
-            run("shell-dashboard-close", "qs -c ${shellDir} ipc call dashboard-home toggle")
-            machine.sleep(2)
+            # Focus Mode before the dashboard has ever been shown (rime-shell's
+            # FocusMode singleton; it used to live in QuickSettings, built with the
+            # dashboard, and the first presses did nothing).
             run("shell-focus-on", "qs -c ${shellDir} ipc call focus-toggle toggle")
             wait_gaps("shell-gaps-focus", 0, 6)
-            # QuickSettings ignores a toggle while its gaps write runs and for 250 ms
-            # after (_gapsBusy: a fast double-press must not save the shrunken gaps).
-            # Hyprland shows 0/6 before that settles; one press too early is dropped
-            # (seen once, vm-run10-locked.log). Wait it out, as a person would.
-            time.sleep(1.5)
+            # The next press at once, no waiting out the 250 ms settle window: a
+            # press inside it is queued now, not dropped (it once was:
+            # vm-run10-locked.log).
             run("shell-focus-off", "qs -c ${shellDir} ipc call focus-toggle toggle")
             wait_gaps("shell-gaps-restored", 5, 10)
+            # Two presses back to back (the second lands while the first's gaps
+            # read is out): they cancel out, gaps stay the user's, Focus Mode off.
+            run("shell-focus-double", "qs -c ${shellDir} ipc call focus-toggle toggle; "
+                "qs -c ${shellDir} ipc call focus-toggle toggle")
+            # Exactly "off": not "on", and not "off queued" (quickshell may print a locale warning too).
+            machine.wait_until_succeeds(u("qs -c ${shellDir} ipc call focus-toggle state 2>&1 | grep -qx off"), timeout=10)
+            wait_gaps("shell-gaps-double", 5, 10)
             # A reload drops runtime values; the Shell pushes the accent again on configreloaded.
             run("shell-reload", "hyprctl reload")
             machine.sleep(4)
@@ -220,8 +220,10 @@ pkgs.testers.runNixOSTest {
                 + str(round(m["refreshRate"])) + "\", position = \"0x0\", scale = 1.1 })'")
             # A rule is applied on the next rendered frame (MonitorRuleManager.cpp: the
             # render.preChecks listener runs ensureMonitorStatus); an idle screen draws
-            # none, so move the cursor to get one.
-            for _ in range(20):
+            # none, so move the cursor to get one. On katana the log line shows after 9-10
+            # rounds (~5-7 s) and one sandboxed build needed more than 20: 60 rounds, so a
+            # slower hosted runner does not fail this control on pace alone.
+            for _ in range(60):
                 run("display-control-frame", "hyprctl dispatch 'hl.dsp.cursor.move({ x = 100, y = 100 })'; "
                     "hyprctl dispatch 'hl.dsp.cursor.move({ x = 400, y = 300 })'")
                 if hyprlog().count("Invalid scale passed to monitor") > after:
