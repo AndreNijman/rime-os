@@ -99,3 +99,6 @@
 # hypr-lua (Hyprland driven in Lua only; display scale snap, XKB refusal, the Shell's eval writes and config probe;
 # nix/tests/hypr-lua.nix)
 // { hypr-lua = import ./hypr-lua.nix { inherit pkgs self; }; }
+# shell-start (the Shell starts at login despite IPC clients naming its config; a dead start is retried, then
+# reported; + .mutants; nix/tests/shell-start.nix)
+// { shell-start = import ./shell-start.nix { inherit pkgs self; }; }
