@@ -20,6 +20,9 @@ owner of the machine, not for a script.
    as "Empty partition", says it will be replaced, and puts Rime in exactly
    its space. A partition with a filesystem on it (NTFS, FAT, exFAT, ReFS,
    BitLocker) is never offered; delete it in Disk Management first.
+   An encrypted container with no visible header (VeraCrypt, for example)
+   looks exactly like an empty partition, so the installer cannot tell them
+   apart: if the partition it offers holds one, cancel.
 3. Choose the free space. Read the confirmation, which names the disk by
    model, serial and size (never by "Disk 1": disk numbers change between
    restarts). Install.

@@ -176,7 +176,7 @@ pub fn usable_text(p: &PartitionFacts, release: Option<&VolumeClaim>, disk: &str
     let name = if p.name.is_empty() { "(unnamed)".to_string() } else { format!("{:?}", p.name) };
     let letters = release.map(|v| v.mount_points.join(", ")).unwrap_or_default();
     format!(
-        "Empty partition {name} on {disk}. It holds no filesystem; Rime deletes it and puts its own two partitions in exactly its space{}",
+        "Empty partition {name} on {disk}. It holds no filesystem Rime can recognise; Rime deletes it and puts its own two partitions in exactly its space{}",
         if letters.is_empty() { String::new() } else { format!(" (its drive letter {letters} goes away)") }
     )
 }
@@ -192,7 +192,8 @@ pub fn replaces_text(p: &PartitionFacts, release: Option<&VolumeClaim>) -> Strin
         p.offset,
         p.offset + p.length,
         if letters.is_empty() { ", no drive letter".to_string() } else { format!(", drive letter {letters}") }
-    )
+    ) + ". Anything still on it is lost. An encrypted container (VeraCrypt, for example) shows no filesystem and \
+         looks empty here: if this partition holds one, cancel"
 }
 
 #[cfg(test)]
@@ -382,7 +383,8 @@ mod tests {
         assert!(line.starts_with("Empty partition \"Basic data partition\""), "{line}");
         assert!(line.contains("Rime deletes it") && line.contains("G:\\"), "{line}");
         let c = replaces_text(&p, Some(&raw(&[])));
-        for must in ["empty partition", "49588608-1111-2222-3333-444455556666", "36.5 GB", "30063722496", "no drive letter"] {
+        assert!(line.contains("no filesystem Rime can recognise"), "{line}");
+        for must in ["empty partition", "49588608-1111-2222-3333-444455556666", "36.5 GB", "30063722496", "no drive letter", "is lost", "VeraCrypt", "cancel"] {
             assert!(c.contains(must), "{must} missing: {c}");
         }
         assert!(line.is_ascii() && c.is_ascii());
