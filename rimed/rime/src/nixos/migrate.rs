@@ -16,7 +16,7 @@ use std::process::Command;
 /// `rime migrate finish` on a migrated NixOS machine (nix/modules/rootfs.nix).
 pub const FINISH: &str = "/run/current-system/sw/bin/rime-migrate-finish";
 /// The bridge on the old (bootc) system (rime-os main, `nixos_bridge::MIGRATE_ENGINE`).
-pub const BOOTC_ENGINE: &str = "/usr/libexec/rime-migrate";
+pub const BOOTC_ENGINE: &str = rime_paths::RIME_MIGRATE;
 
 /// What `rime migrate ARGS` does on this system.
 #[derive(Debug, PartialEq, Eq)]

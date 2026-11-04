@@ -83,6 +83,7 @@ let
     RIME_FIREWALL = engine "rime-firewall";
     RIME_DEVICES = engine "rime-devices";
     RIME_BOOT_MIGRATE = engine "rime-boot-migrate";
+    RIME_MIGRATE = engine "rime-migrate";
     RIME_LIVE_SESSION = engine "rime-live-session";
     RIME_PROJECT_WINDOWS = engine "rime-project-windows";
     RIME_MUX = engine "rime-mux";

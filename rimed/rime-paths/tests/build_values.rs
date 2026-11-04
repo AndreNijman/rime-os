@@ -38,6 +38,7 @@ const BOOTC: &[(&str, &str)] = &[
     ("RIME_FIREWALL", "/usr/libexec/rime-firewall"),
     ("RIME_DEVICES", "/usr/libexec/rime-devices"),
     ("RIME_BOOT_MIGRATE", "/usr/libexec/rime-boot-migrate"),
+    ("RIME_MIGRATE", "/usr/libexec/rime-migrate"),
     ("RIME_LIVE_SESSION", "/usr/libexec/rime-live-session"),
     ("RIME_PROJECT_WINDOWS", "/usr/libexec/rime-project-windows"),
     ("RIME_MUX", "/usr/libexec/rime-mux"),

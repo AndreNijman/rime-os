@@ -125,6 +125,9 @@ fixed_paths! {
     RIME_DEVICES = "/usr/libexec/rime-devices";
     /// The GRUB to systemd-boot migration engine (bootc only).
     RIME_BOOT_MIGRATE = "/usr/libexec/rime-boot-migrate";
+    /// The bootc -> NixOS bridge, `rime migrate` on bootc (bootc only; on NixOS only `finish` runs, from
+    /// /run/current-system).
+    RIME_MIGRATE = "/usr/libexec/rime-migrate";
     /// The per-session live-update helper (bootc only).
     RIME_LIVE_SESSION = "/usr/libexec/rime-live-session";
     /// The compositor adapter for project windows.
