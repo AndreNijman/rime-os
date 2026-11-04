@@ -533,7 +533,7 @@ merged into their `feat/nixos` at the wave-5 integration. Evidence in `/var/lab/
 Hyprland 0.57.0 (the pin) reads `hyprland.lua` only: no .conf parser, `hyprctl keyword` refused ("Use eval."),
 `hyprctl dispatch X` evaluates `return hl.dispatch(X)` (src/ipc/s1/Commands.cpp). Design and checks: `desktops.md`
 §12.11. Evidence root `/var/lab/rime-nix/artifacts/hypr-lua/` (`mutants-os/`, `os-suites/`, `shell-checks/`,
-`shell-runtime/`, `vm/` + `vm-run9.log`, `libexec-run2.log`). rime-shell = `nix/hypr-lua-only` e5eb240d; rime-os code
+`shell-runtime/`, `vm/` (from the locked run `vm-run11-locked.log`; also `vm-run9.log`, `vm-run12-locked.log`), `libexec-run2.log`). rime-shell = `nix/hypr-lua-only` e5eb240d; rime-os code
 = 60f7ea261 + 6360cd8ad.
 
 | Item | State | Owner / what is needed |
@@ -560,3 +560,4 @@ Hyprland 0.57.0 (the pin) reads `hyprland.lua` only: no .conf parser, `hyprctl k
 | rime-shell `tests/check-desktop-launch.sh` fails locally, the same on the base tree (802ad676); `shellcheck -S warning` flags SC2034 in the untouched `tests/run-power-profile-service-test.sh` | STILL OPEN (pre-existing, unrelated) | rime-shell owner |
 | `checks.hypr-lua` is not in CI | DECIDED: listed in `nix/ci/checks-not-in-ci.txt`: it waits on the same Shell start as shell-kept (1 of 6 boots no Shell in 180 s, cause unknown; here the Shell started in 8 of 8 booted runs); the display/input logic runs in CI through `checks.libexec` (self-tests with Hyprland + xkbcli, asserted to have run) | joins CI with shell-kept |
 | Port to main | STILL OPEN: none of this is on bootc main. Port as a separate PR with a `## Release note`; main's Hyprland takes the same Lua-only config, so the same keyword/dispatch refusals apply there | P2 merge / rime-os + rime-shell owners |
+| A focus-mode toggle that arrives while the previous gaps write runs, or within 250 ms after it (`QuickSettings._gapsBusy`), is dropped with no sign. This is deliberate: it stops a double-press saving the shrunken gaps. `checks.hypr-lua` hit it once against the pushed lock (`artifacts/hypr-lua/vm-run10-locked.log`: off sent as soon as Hyprland showed 0/6, gaps stayed 0/6) | STILL OPEN (accepted for now): the check now waits 1.5 s before the second press (runs 11 and 12 PASS). A queued toggle would keep the protection and lose no press | rime-shell owner |

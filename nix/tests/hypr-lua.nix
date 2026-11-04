@@ -174,6 +174,11 @@ pkgs.testers.runNixOSTest {
             machine.sleep(2)
             run("shell-focus-on", "qs -c ${shellDir} ipc call focus-toggle toggle")
             wait_gaps("shell-gaps-focus", 0, 6)
+            # QuickSettings ignores a toggle while its gaps write runs and for 250 ms
+            # after (_gapsBusy: a fast double-press must not save the shrunken gaps).
+            # Hyprland shows 0/6 before that settles; one press too early is dropped
+            # (seen once, vm-run10-locked.log). Wait it out, as a person would.
+            time.sleep(1.5)
             run("shell-focus-off", "qs -c ${shellDir} ipc call focus-toggle toggle")
             wait_gaps("shell-gaps-restored", 5, 10)
             # A reload drops runtime values; the Shell pushes the accent again on configreloaded.
