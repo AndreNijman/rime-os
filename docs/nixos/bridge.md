@@ -145,8 +145,8 @@ headroom. Its home's names were not counted; the per-name estimate would pass up
 **Divergence is the user's, after the move, and gradual.** Every file changed or added on NixOS takes new space while the
 old side keeps its old blocks, so the free figure shrinks as home diverges; it comes back when the old side
 (`@pre-nixos`, `ostree/`, the old `var/home`) is removed. That is PLAN.md D2's reclaim step, `rime migrate finish`
-(planned, not built); `check --explain` says so in a `divergence:` line and names no verb that exists today. Until then
-the ostree entries still boot the old system with home as it was at the move ("Booting back to bootc").
+(below, nix/migrate-finish); `check --explain` says so in a `divergence:` line, naming `finish` and its `--dry-run`.
+Until then the ostree entries still boot the old system with home as it was at the move ("Booting back to bootc").
 
 **The full-home du stays.** The gate needs home's bytes only for the capped share and its names for the per-name
 estimate (both from ONE walk, `du_tree`), but `start`'s first step copies all of home off the disk and
@@ -300,6 +300,145 @@ rule above. Rust and `rime-update-check` already used it, so they do not change.
 `test_the_record_rule_is_the_readiness_release_rule` (both FAIL on the old bridge); mutants `record-failed-truthy`,
 `failed-text-empty-on-interrupt`, `record-done-not-first`, `record-done-truthy`, `record-steps-any-type` (each
 killed, `bridge-unit`: 56 mutants killed).
+
+### `rime migrate finish`: the reclaim step (nix/migrate-finish)
+
+PLAN.md D2's reclaim step. After a move the btrfs top level holds the new system (`@nixos`, `@nix`, `@home`, `boot/`)
+and the old one (`@pre-nixos`, the read-only snapshot `start` took, and `ostree/`, which holds the deployments, the
+repo and the old `var/home`). The old side keeps every block home had at the move, so the space home's changes take is
+never given back until it goes. `finish` removes it, on the user's word, once NixOS has proven itself.
+
+**Where it runs and what it is.** On the moved NixOS system only. `rime migrate finish` in the Rust CLI
+(`rimed/rime/src/nixos/migrate.rs`) execs `/run/current-system/sw/bin/rime-migrate-finish` by that constant path; on
+NixOS every other `rime migrate` verb is refused by name (they run on the old side before the move), and on bootc
+`finish` is refused (it runs after the move). The helper is Python beside the bridge (`nix/pkgs/rime-bridge/
+rime-migrate-finish.py`), not Rust: it reuses the bridge's record rule (`record_refusal`), btrfs usage parser,
+containment diff, mount table and runner by loading `rime-migrate` from its own directory, so the start record is read
+one way everywhere (above) without a second implementation, and `rime-bridge.py` itself stays byte-identical with
+main's `rime-migrate` (a text change there is the only main-side change). `rime.rootfs` installs only that binary, and
+only when `boot = "bootc"` (a moved machine); a fresh NixOS install has nothing to finish.
+
+**N = 3 good boots, and how they are counted.** `rime-migrate-good-boot.service` (oneshot, after and wanted by
+multi-user.target, skipped once `finish.json` exists) runs `rime-migrate-finish --record-boot`: a boot whose `/` is
+`@nixos` on btrfs, with `/etc/NIXOS` and no `/run/ostree-booted`, is recorded ONCE by its `boot_id` in
+`/var/lib/rime/nixos-bridge/good-boots.json` (the last 32 kept). Reaching multi-user.target means the initrd found the
+root, every fstab mount (`/`, `/nix`, `/var/home`, `/boot`) came up and the system's units started. Three because the
+first NixOS boot does what the chroot activation could not (it is the boot the move itself caused, observed only by the
+user); the second is the first ordinary one; the third shows the second was not luck, and three is also the try count
+bootc's own boot counter gave a new deployment (`recover.rs`). A reboot loop does not count: the same boot_id is
+recorded once, and a boot that never reaches multi-user.target records nothing. At the third boot the unit's journal
+line says `sudo rime migrate finish` can remove the old system now. No login notice or UI (optional in the brief; the
+journal line and the `check --explain` divergence line are the pointers).
+
+**Preconditions, each refused by name, exit 3** (all collected, so one run names every problem): `already-finished`
+(alone: finish.json says done); `booted-ostree` (`/run/ostree-booted` or `ostree=` on the command line) or `not-nixos`;
+`root-not-nixos-subvol`; `home-not-from-home-subvol` (`findmnt`'s view: `/var/home` must be btrfs subvol `/@home` of
+the root's own device); `too-few-good-boots`; `old-side-mounted` (the system's own top-level mount at /mnt/rime-top is
+allowed; a mount of `@pre-nixos`, `ostree/...`, `/boot/ostree` or anything mounted below them is not);
+`old-side-in-use` (any process with its cwd, root, exe, an open fd or a mapping under the old side; a loop device
+backed by a file there; swap there); `btrfs-stats-unreadable` / `btrfs-errors` (`btrfs device stats /`, every counter
+0); `nixos-menu-missing` (no `--id rime-generation-N` entry in `rime-nixos.cfg`, or custom.cfg does not source it:
+removing the ostree entries would leave GRUB nothing to boot); `grub-cfg-ostree-inline` (a grub.cfg that names
+`ostree=` itself instead of bootupd's static one: finish never rewrites grub.cfg); `custom-cfg-ostree-entry` (an
+ostree entry in custom.cfg outside the rime-boot block: finish never edits custom.cfg); then the start record, read in
+the top level (`ostree/deploy/*/var/lib/rime/nixos-bridge/state.json`, NOT copied to @nixos at the move) by the
+bridge's rule: `start-record-missing`, `start-record-ambiguous`, or anything but done (`start-unfinished` and the
+others, with the record's own text). Non-root exits 2 with the sudo line.
+
+**`--dry-run`, and the default without `--yes`, writes nothing.** It re-execs in a private mount namespace (unshare)
+and mounts the top level READ-ONLY there (gone when it exits), and prints: the ostree GRUB entries by title; bootc's
+kernels in /boot/ostree with their size; the top-level trees (`@pre-nixos` read-only snapshot, `ostree/` with the
+deployments and the old var/home) and any nested subvolumes (containers' storage); the space it should free; what
+stops working (those entries, booting the old system and the old home as it was at the move, `@pre-nixos` as a way
+back); and what stays (the Rime entries, everything else in custom.cfg, `@nixos`, `@nix`, `@home`, the ESP, the LUKS
+header and keys). **The estimate** is `btrfs filesystem du -s --raw` of the top level minus that of the kept trees
+(each argument's Exclusive + Set shared is its physical footprint): what only the old side references. It is labelled
+an estimate, in uncompressed bytes (du's unit); `btrfs filesystem usage` before and after is recorded in finish.json
+and printed by `--yes`.
+
+**`--yes`: the order, and why it survives an interruption.** finish.json (`/var/lib/rime/nixos-bridge`, on @nixos)
+records every step with an fsync'd write, and the start record is copied beside it FIRST (it lives in the old /var,
+which goes); a re-run resumes from whatever is left and every step is a no-op when its work is done.
+
+1. **boot entries**: unlink every BLS entry under `/boot/loader*/entries` whose options name `ostree=` or whose linux
+   is under `/ostree` or `/boot/ostree` (the `loader -> loader.N` link is followed once, by realpath), fsync the
+   directories, then `sync(2)`. First on purpose: once these are gone the old system cannot be booted, so a
+   half-deleted old system is never offered in the menu. The `sync` is what makes that hold across a power cut: GRUB
+   replays neither btrfs's log tree nor ext4's journal, and an fsync'd unlink lives only in the log until the next
+   transaction commit (about 30 s). The OVMF interrupt run (killed 1 s in, then the power cut) found GRUB still listing
+   `Rime OS (ostree:0)` while Linux, which replays the log, had it gone (`artifacts/migrate-finish/ovmf/A.try4-grub-stale-entry/A-finint2-grub-menu.txt`);
+   `sync` commits btrfs's transaction and, on ext4, the journal plus the metadata in place. Test
+   `test_boot_entries_go_first` checks the commit happens with no entry left and before the step is recorded; mutant
+   `entries-not-committed`.
+2. **old kernels**: clear ostree's immutable bit (FS_IMMUTABLE_FL, ioctl) and remove `/boot/ostree`.
+3. **move aside**: rename `ostree` into `.rime-finish-old/` in the top level (one atomic rename: the old tree is
+   never half there under its own name, and nothing else ever looks for that name). `@pre-nixos` is NOT moved: it is
+   the read-only snapshot `start` took, and btrfs refuses to move a read-only subvolume into another directory
+   (`EROFS`: its `..` entry lives inside it). The first OVMF run found this (the unit fixture's directories could be
+   renamed); the fixture now refuses it as btrfs does (`FakeSystem.readonly`), test
+   `test_read_only_snapshot_is_not_moved`, mutant `pre-nixos-moved`. It needs no move: a subvolume delete removes its
+   name in one step, and nothing boots it once the ostree entries are gone.
+4. **nested subvolumes** under `.rime-finish-old`, deepest first (`btrfs subvolume delete` refuses a subvolume with
+   children).
+5. **@pre-nixos**: `btrfs subvolume delete` of the snapshot, where it is (read-only subvolumes can be deleted).
+6. **old tree**: clear the immutable bits (directories first, then files if rm still fails) and `rm -rf
+   --one-file-system` what is left.
+7. **sync**: `btrfs subvolume sync` until the deleted subvolumes are cleaned.
+8. **containment**: the same snapshot taken before step 1 is compared (`containment_diff`): grub2/ (every file's
+   sha256), /boot/rime, the non-ostree BLS entries, the kept subvolumes' UUIDs, every other top-level name, every ESP
+   file and every LUKS header's `luksDump`; any difference fails (exit 10, recorded). Then nothing of the old side may
+   be left (entries, /boot/ostree, the three top-level names). Then `done`, and a second run is refused
+   `already-finished`.
+
+`never()` guards every delete and rename: `@nixos`, `@nix`, `@home`, `boot`, the top level itself or a path with `..`
+raise before anything happens (mutant `keep-guard-dropped`). An `OSError` in any step (a rename or unlink the kernel
+refuses) is recorded as `failed` and exits 10 like any other failure, never a traceback with no record (test
+`test_os_error_is_recorded_failure`). Nothing touches the ESP (shim, GRUB, MokManager), NVRAM,
+the LUKS header or any key.
+
+**The GRUB effect.** bootupd's static grub.cfg runs `blscfg` and sources custom.cfg; blscfg then finds no ostree
+entries, so the menu holds the Rime generations (custom.cfg's rime-boot block -> `rime-nixos.cfg`) and whatever else
+custom.cfg holds: the `rime-secureboot-key` block and, on a dual-boot machine, a Windows entry, all kept byte for byte
+(the containment check covers grub2/). `loader.N/` and the `loader` link stay (empty of ostree entries): bootupd's
+config and nothing else reads them.
+
+**Tests** (`bridge-unit`, `nix/pkgs/rime-bridge/tests/test_finish.py`, 36 tests on a fixture machine: a real top
+level with subvolumes emulated, a fake /proc, GRUB files as bootupd and rime-boot write them): every precondition;
+dry-run writes nothing and mounts read-only; `--yes` finishes; entries go first; interrupted after every step (and
+mid-delete, mid-rm) then re-run completes; a second run refused; home survives; a containment change and leftover
+entries exit 10; a menu on a /boot partition (`/rime/...` paths, the encrypted layout) counts; good-boot counting (once per boot_id, not from ostree, capped); the read-only @pre-nixos is not moved; an OSError is a recorded failure. 22 mutants, each killed:
+`booted-ostree-unchecked`, `home-subvol-unchecked`, `deletes-home`, `keep-guard-dropped`, `entries-left`,
+`rerun-refused`, `move-aside-not-idempotent`, `second-run-allowed`, `good-boots-ignored`, `in-use-ignored`,
+`mounted-ignored`, `stats-ignored`, `containment-dropped`, `record-not-saved`, `nested-shallow-first`,
+`dry-run-writable`, `menu-unchecked`, `menu-top-level-only`, `record-done-ignored`, `pre-nixos-moved`,
+`os-error-unrecorded`, `entries-not-committed`. The Rust routing has 3 tests in `rimed`.
+
+**OVMF proof (2026-11-04, Secure Boot on, PASS).** `nix/probe/ovmf/bridge/run.sh A --fresh --sb --phases
+bootc,nixos,finish` on plain A (the published image's disk from the bridge-space lab, booted through `\EFI\fedora\`),
+this branch's bridge and toplevel in the payload (signed with the lab's TEST key), the release-signed kernel, the
+varstore enrolling only the Rime MOK certificate. Evidence `/var/lab/rime-nix/artifacts/migrate-finish/ovmf/`
+(`run-A.log`, `A/`; nothing committed). Before `start`, phase bootc (`finish_seed`) appends the real
+`rime-secureboot-key` block and a Windows-like entry (`finish-custom.cfg`) to custom.cfg and writes 1 GiB under
+`~/lab-diverge`.
+
+| Step | Result | Record (`A/A-…`) |
+|---|---|---|
+| bootc → `check` → `start` → NixOS (graphical login, home sums) | PASS | `start.txt`, `nixos-checks.txt` |
+| NixOS boot 2: the 1 GiB rewritten (home diverges from the old copy); finish as the user exit 2; `--dry-run` refused `too-few-good-boots` (2 of 3), exit 3; `rime migrate start` on NixOS refused, exit 2 | PASS | `fin-diverge.txt`, `fin-too-few.txt`, `fin-bootc-verb.txt` |
+| NixOS boot 3: 3 good boots; `--dry-run` and the bare command exit 0, list the ostree entry, `@pre-nixos`, `ostree/` and "what stops working", should free about 5.89 GB; a hash of the state directory, subvolume list, top level, BLS entries, `/boot/ostree` and grub2 files is the same before and after, no finish.json. GRUB menu (serial) before: `Rime OS (ostree:0)`, UEFI Firmware Settings, the Enrol entry, `Windows Boot Manager (lab)`, `Rime (generation 1, …)` | PASS | `fin-dry-run.txt`, `fin-boot3-grub-menu.txt` |
+| Interrupted, on an overlay of that disk: `--yes` SIGKILLed once finish.json recorded `@pre-nixos` (exit 137, mid-way: the old tree moved aside, not yet removed), then qemu quit (power cut, nothing synced). Next boot: NixOS boots, GRUB lists no ostree entry, home sums OK; the re-run exits 0 ("done"), a third run refused `already-finished`, verdict ok; one more boot: menu and home sums OK | PASS | `finint-kill.txt`, `finint2-grub-menu.txt`, `finint-rerun.txt`, `finint3-*` |
+| NixOS boot 4: `--yes` exit 0 in 9.9 s, verdict ok (old side gone, `@nixos`/`@nix`/`@home`/`boot` there, the rime-boot block, the Enrol block and the Windows entry in custom.cfg); a second `--yes` and `--dry-run` refused `already-finished`, exit 3 | PASS | `fin-yes.txt`, `fin-after.txt`, `fin-second-run.txt` |
+| Space (`btrfs filesystem usage -b`, before/after on boot 4) | Used 18.38 GB → 12.92 GB: **5.46 GB freed** (5.09 GiB); Free (estimated) 37.88 → 42.76 GB. The dry run's estimate (5.89 GB, `btrfs filesystem du`, uncompressed) was within 8 % | `fin-space.txt`, `fin-usage-{before,after}.txt` |
+| NixOS boot 5: boots, home sums OK, GRUB menu: UEFI Firmware Settings, the Enrol entry, the Windows entry, `Rime (generation 1, …)`, no ostree entry; `SecureBoot efivar=1` | PASS | `fin-boot5-grub-menu.txt`, `fin-boot5-state.txt` |
+
+Good boots counted on this disk: 1 (phase nixos), 2, 3, 4 (the interrupt run's boots were on an overlay and are not
+counted on it). The OVMF runs found two product bugs and four lab bugs, each fixed on this branch before the passing
+run: (1) `@pre-nixos` is read-only and btrfs refuses to move it (`A.try2-erofs-fail/`), and the `OSError` escaped as
+a traceback with no failed record; (2) the entries' removal was invisible to GRUB after a power cut until a btrfs
+commit (`A.try4-grub-stale-entry/A-finint2-grub-menu.txt`). The lab ones: a check matched the serial echo of its own
+command, the GRUB menu parser expected "GNU GRUB" and escapes the reader had already stripped (an empty menu then passed
+the no-ostree check), the interrupt run powered off as the user, and the usage record failed on an absent
+`.rime-finish-old`.
 
 ## What the OVMF lab proved on E with the release kernel (topology-e, 2026-11-04, Secure Boot on)
 

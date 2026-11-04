@@ -5,6 +5,9 @@
 #                                          machine (Fedora's python, nothing from /nix), and what the OVMF lab copies
 #                                          into its VMs (nix/probe/ovmf/bridge)
 #   share/rime-bridge/payload-sign.sh       writes the payload's manifest.json.sig (the release pipeline; the lab)
+#   bin/rime-migrate-finish                 `rime migrate finish`, on the moved NixOS system: removes the old side
+#                                          (rime-migrate-finish.py; it loads bin/rime-migrate beside it for the start
+#                                          record's reading, so the record is read one way everywhere)
 #
 # One Python file, standard library only. checkPhase runs tests/test_bridge.py: the topology classifier (A-F, E over
 # A/B/D), every named refusal, the NVRAM load-option parser and the forbidden-tool scan.
@@ -15,6 +18,10 @@
   lib,
   stdenvNoCC,
   python3,
+  util-linux,
+  btrfs-progs,
+  coreutils,
+  cryptsetup,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -23,7 +30,7 @@ stdenvNoCC.mkDerivation {
 
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions [ ./rime-bridge.py ./payload-sign.sh ./tests ];
+    fileset = lib.fileset.unions [ ./rime-bridge.py ./rime-migrate-finish.py ./payload-sign.sh ./tests ];
   };
 
   buildInputs = [ python3 ];
@@ -40,6 +47,10 @@ stdenvNoCC.mkDerivation {
     install -Dm755 payload-sign.sh $out/share/rime-bridge/payload-sign.sh
     install -Dm755 rime-bridge.py $out/bin/rime-migrate
     substituteInPlace $out/bin/rime-migrate --replace-fail '#!/usr/bin/env python3' '#!${python3}/bin/python3 -I'
+    install -Dm755 rime-migrate-finish.py $out/bin/rime-migrate-finish
+    substituteInPlace $out/bin/rime-migrate-finish \
+      --replace-fail '#!/usr/bin/env python3' '#!${python3}/bin/python3 -I' \
+      --replace-fail 'TOOLS = ""' 'TOOLS = "${lib.makeBinPath [ util-linux btrfs-progs coreutils cryptsetup ]}"'
     runHook postInstall
   '';
 
@@ -49,14 +60,14 @@ stdenvNoCC.mkDerivation {
     head -n1 $out/share/rime-bridge/rime-migrate | grep -qx '#!/usr/bin/python3 -I' \
       || { echo "share/rime-bridge/rime-migrate does not start with #!/usr/bin/python3 -I"; exit 1; }
     # -B: the tests import $out/bin/rime-migrate; without it a __pycache__ lands in $out/bin (non-deterministic).
-    RIME_MIGRATE=$out/bin/rime-migrate ${python3}/bin/python3 -I -B -W error::ResourceWarning \
+    RIME_MIGRATE=$out/bin/rime-migrate RIME_MIGRATE_FINISH=$out/bin/rime-migrate-finish ${python3}/bin/python3 -I -B -W error::ResourceWarning \
       -m unittest discover -v -s tests -p 'test_*.py'
     if [ -e $out/bin/__pycache__ ]; then echo "bytecode written into \$out/bin"; exit 1; fi
     runHook postInstallCheck
   '';
 
   meta = {
-    description = "Rime OS bridge: rime migrate check, repair-e and start (bootc to NixOS)";
+    description = "Rime OS bridge: rime migrate check, repair-e and start (bootc to NixOS), and finish (on NixOS)";
     license = lib.licenses.mit;
     platforms = lib.platforms.linux;
     mainProgram = "rime-migrate";

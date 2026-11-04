@@ -12,6 +12,7 @@ pub mod delta;
 pub mod desktop;
 pub mod fetch;
 pub mod generations;
+pub mod migrate;
 pub mod pkg;
 pub mod store;
 pub mod translate;

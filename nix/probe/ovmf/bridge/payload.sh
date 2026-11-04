@@ -11,6 +11,8 @@
 #   rime-migrate               the bridge as it runs on bootc (share/rime-bridge/rime-migrate of BRIDGE, the lab build
 #                              that trusts the TEST key: lab-bridge.nix)
 #   guest-prep.sh, verb-probe.sh   the lab's guest helpers (README.md here)
+#   finish-custom.cfg   what phase finish adds to custom.cfg before start: the rime-secureboot-key block and a
+#                       Windows-like entry, both of which `rime migrate finish` must keep
 #
 # The bridge checks the signature, the three sha256s and, after --load-db, every path's narHash
 # (nix-store --verify --check-contents).
@@ -67,7 +69,7 @@ PY
 bash "$BRIDGE/share/rime-bridge/payload-sign.sh" "$SECRET" "$P/payload"
 cat "$P/payload/manifest.json.sig"
 install -m755 "$BRIDGE/share/rime-bridge/rime-migrate" "$P/rime-migrate"
-cp "$RIG/guest-prep.sh" "$RIG/verb-probe.sh" "$P/"
+cp "$RIG/guest-prep.sh" "$RIG/verb-probe.sh" "$RIG/finish-custom.cfg" "$P/"
 SZ=$(( $(du -sm "$P" | cut -f1) + 512 ))
 rm -f "$LAB/payload.img"; truncate -s "${SZ}M" "$LAB/payload.img"
 mkfs.ext4 -q -L rime-payload -d "$P" "$LAB/payload.img"

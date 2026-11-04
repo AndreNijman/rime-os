@@ -14,6 +14,13 @@ overlay of disks/KIND/disk.raw and the same varstore copy, ending with a guest p
             on the emulated keyboard: Hyprland starts for the user through greetd, the desktop is screenshotted
   back      pick the first GRUB entry (the ostree one) by key: bootc boots, the same login works, home intact;
             with --readiness every bootc verb must still refuse there (the record says done)
+  finish    `rime migrate finish` (docs/nixos/bridge.md): phase bootc first seeds what it must keep and what it must
+            free (finish-custom.cfg = the rime-secureboot-key block + a Windows-like entry appended to custom.cfg; 1 GiB
+            of random files in home that NixOS then rewrites, so their old copies are the old side's alone). NixOS
+            boot 2: refused too-few-good-boots; boot 3: --dry-run writes nothing; an overlay: --yes SIGKILLed mid-way
+            + power cut, NixOS still boots, a re-run completes, a third run is refused; boot 4: --dry-run, --yes,
+            `btrfs filesystem usage` before/after; boot 5: NixOS boots, home sums, no ostree entry in the GRUB menu
+            (read off the serial console), the Secure Boot key entry and the Windows-like entry still there
 
 The verb probes (--readiness, verb-probe.sh on the payload disk): every verb the readiness `rime` holds after a start
 (11 forms) plus rime-update-check, run against the guest's REAL start record with bootc/ostree/... stubbed in a private
@@ -299,6 +306,8 @@ def phase_bootc(a):
                " || mount -o ro /dev/vda2 /run/e; find /run/e -maxdepth 3 | sort; umount /run/e")
     vm.sh("mkfs.ext4 -q -F -L rime-backup /dev/disk/by-id/virtio-rime-backup && mkdir -p /run/backup"
           " && mount /dev/disk/by-id/virtio-rime-backup /run/backup")
+    if a.finish:
+        finish_seed(vm)
     # D2: the left-behind report BEFORE anything is written (--payload previews the new system's carry plan).
     if a.readiness:
         readiness_facts(vm)
@@ -703,6 +712,245 @@ def microcode_check(out):
     say(f"[nixos] microcode: host.toml {want}, menu and /boot/rime/nixos carry {want} only")
 
 
+FINISH = "rime migrate finish"
+FIN_STATE = "/var/lib/rime/nixos-bridge"
+DIVERGE = f"/var/home/{USER}/lab-diverge"
+# The old side's names in the top level (rime-migrate-finish.py OLD_TOP, TRASH) and the kept ones (KEEP_TOP).
+OLD_NAMES = ("@pre-nixos", "ostree", ".rime-finish-old")
+KEEP_NAMES = ("@nixos", "@nix", "@home", "boot")
+
+
+def finish_seed(vm):
+    """Phase bootc, before start (phase finish asked for): what finish must KEEP (the rime-secureboot-key block and a
+    Windows-like entry, appended to custom.cfg outside every Rime block) and what it must FREE once home diverges
+    (1 GiB of random files in home: start's @home shares their blocks, NixOS rewrites them, the old copies are then
+    the old side's alone)."""
+    record(vm, "finish-seed",
+           "d=$(findmnt -no SOURCE /sysroot | sed 's/\\[.*//'); mkdir -p /run/labtop && mount -o subvolid=5 $d /run/labtop"
+           " && cat /run/payload/finish-custom.cfg >> /run/labtop/boot/grub2/custom.cfg && sync"
+           " && grep -nE '^### |menuentry' /run/labtop/boot/grub2/custom.cfg; umount /run/labtop;"
+           f" install -d -o {USER} -g {USER} {DIVERGE} && for i in 1 2 3 4; do"
+           f" head -c 268435456 /dev/urandom > {DIVERGE}/f$i; done; chown {USER}:{USER} {DIVERGE}/*;"
+           f" (cd {DIVERGE} && sha256sum f* | tee /run/diverge-old.sums); sync; du -sh {DIVERGE}", timeout=600)
+
+
+def nixos_boot(a, name, work=None):
+    """Boot GRUB's default (the NixOS entry), log in on the serial console as the user, then root."""
+    vm = VM(a, name, work)
+    vm.unlock()
+    vm.expect(r"Welcome to (NixOS|Rime OS)", 900,
+              fail=r"Kernel panic|emergency mode|You are in emergency|Timed out waiting for device")
+    vm.login()
+    return vm
+
+
+def grub_menu(vm, name):
+    """The GRUB menu as this boot drew it on the serial console: from GRUB's banner (the last "GRUB" before its
+    "highlighted entry" help line; Fedora's banner has no "GNU") to `Booting`, cursor moves turned into line breaks.
+    The record lists the entries in the order the menu drew them, then the text."""
+    with vm.lock:
+        t = vm.buf.decode("utf-8", "replace")
+    h, j = t.find("highlighted entry"), t.find("Booting `")
+    i = t.rfind("GRUB", 0, h) if h >= 0 else -1
+    raw = t[i:j] if 0 <= i < j else ""
+    # vm.buf has the escapes stripped already (VM.reader): entries are padded to the box width, so 3+ spaces end one
+    menu = re.sub(r" {3,}", "\n", re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "\n", raw))
+    skip = ("GRUB", "Use the", "Press enter", "highlighted entry", "ESC to")
+    entries = list(dict.fromkeys(
+        ln.strip().lstrip("*").strip() for ln in menu.split("\n")
+        if len(ln.strip()) > 3 and ln.strip()[0] not in "\u2500\u2502\u250c\u2510\u2514\u2518"
+        and not any(k in ln for k in skip)))
+    with open(os.path.join(vm.a.logs, f"{vm.a.kind}-{name}-grub-menu.txt"), "w") as f:
+        f.write("entries, in menu order:\n" + "\n".join(entries) + "\n\nas drawn:\n"
+                + "\n".join(ln.rstrip() for ln in menu.split("\n") if ln.strip() not in ("", "\u2502")) + "\n")
+    return menu
+
+
+def menu_before(vm, name):
+    menu = grub_menu(vm, name)
+    if "Rime (generation" not in menu or "(ostree:" not in menu:
+        raise Timeout(f"[{name}] before finish the GRUB menu must show the Rime entries AND the ostree entry")
+    return menu
+
+
+def wait_good_boot(vm, name):
+    """Wait for multi-user.target (rime-migrate-good-boot runs after it), then show the count."""
+    return record(vm, name,
+                  "for i in $(seq 120); do systemctl is-active -q multi-user.target && break; sleep 1; done;"
+                  " for i in $(seq 60); do [ \"$(systemctl show -p ActiveState --value rime-migrate-good-boot)\" != activating ]"
+                  " && break; sleep 1; done; systemctl show -p Result -p ExecMainStatus rime-migrate-good-boot;"
+                  " journalctl -b -u rime-migrate-good-boot --no-pager -o cat | tail -n 3;"
+                  f" cat {FIN_STATE}/good-boots.json; echo; echo BOOTS=$(grep -c '\"boot_id\"' {FIN_STATE}/good-boots.json);"
+                  f" echo THIS-BOOT=$(grep -c \"$(cat /proc/sys/kernel/random/boot_id)\" {FIN_STATE}/good-boots.json);"
+                  " cat /proc/cmdline; for m in / /nix /var/home /boot /mnt/rime-top; do findmnt -no TARGET,SOURCE,FSTYPE,OPTIONS -M $m; done;"
+                  " ls -la /mnt/rime-top; btrfs subvolume list /mnt/rime-top | head -n 20; ls -la /boot/loader/entries/;"
+                  " grep -nE '^### |menuentry' /boot/grub2/custom.cfg; " + SB_STATE, timeout=240, ok=False)
+
+
+def boots_seen(out, want):
+    m = re.search(r"^BOOTS=(\d+)$", out, re.M)
+    if not m or int(m.group(1)) != want or not re.search(r"^THIS-BOOT=1$", out, re.M):
+        raise Timeout(f"good boots: want {want} with this boot counted: {m.group(0) if m else 'no count'}")
+
+
+def usage(vm, name):
+    # du per top-level name that exists (.rime-finish-old only while a finish is half done)
+    rc, out = record(vm, name, "btrfs filesystem usage -b /mnt/rime-top; btrfs filesystem df /mnt/rime-top;"
+                     " for d in /mnt/rime-top/* /mnt/rime-top/.rime-finish-old; do [ -e \"$d\" ] &&"
+                     " btrfs filesystem du -s \"$d\"; done; true", timeout=1200, ok=False)
+    used = re.search(r"^\s*Used:\s+(\d+)$", out, re.M)
+    free = re.search(r"^\s*Free \(estimated\):\s+(\d+)", out, re.M)
+    if not used or not free:
+        raise Timeout(f"[{vm.name}] {name}: no Used/Free (estimated) in btrfs filesystem usage")
+    return int(used.group(1)), int(free.group(1))
+
+
+DONE_CHECKS = (
+    # computed in the guest: the old side gone, the kept side and custom.cfg's other blocks there
+    "v=ok; for n in " + " ".join(OLD_NAMES) + "; do [ -e /mnt/rime-top/$n ] && v=left:$n; done;"
+    " for n in " + " ".join(KEEP_NAMES) + "; do [ -e /mnt/rime-top/$n ] || v=gone:$n; done;"
+    " ls /boot/loader/entries/ | grep -q '^ostree' && v=ostree-entry; [ -e /boot/ostree ] && v=old-kernels;"
+    " grep -qx '### BEGIN rime-secureboot-key ###' /boot/grub2/custom.cfg || v=sb-block;"
+    " grep -q -e '--id lab-windows' /boot/grub2/custom.cfg || v=windows-entry;"
+    " grep -q '^### BEGIN rime-boot ' /boot/grub2/custom.cfg || v=rime-boot-block;"
+    f" grep -q '\"done\"' {FIN_STATE}/finish.json || v=not-done; echo FINISH-VERDICT=$v"
+)
+
+
+def home_sums(vm, name):
+    rc, out = record(vm, name, f"cd ~{USER} && sha256sum -c .rime-lab/sums && (cd {DIVERGE} && sha256sum -c ../.rime-lab/diverge.sums)"
+                     " && echo HOME-SUMS=ok", timeout=300, ok=False)
+    if not re.search(r"^HOME-SUMS=ok$", out, re.M):
+        raise Timeout(f"[{vm.name}] home checksums")
+
+
+def menu_after(vm, name):
+    menu = grub_menu(vm, name)
+    if "Rime (generation" not in menu:
+        raise Timeout(f"[{name}] the serial console shows no GRUB menu with the Rime entries")
+    if "(ostree:" in menu:
+        raise Timeout(f"[{name}] the GRUB menu still has an ostree entry")
+    if "Enrol the Rime OS Secure Boot key" not in menu or "Windows Boot Manager (lab)" not in menu:
+        raise Timeout(f"[{name}] the GRUB menu lost the Secure Boot key entry or the Windows-like entry")
+
+
+def phase_finish(a):
+    # NixOS boot 2 (phase nixos was boot 1): home diverges; finish refuses (too few good boots); bootc verbs refused
+    vm = nixos_boot(a, "fin-boot2")
+    menu_before(vm, "fin-boot2")
+    record(vm, "fin-diverge", f"cd {DIVERGE} && for i in 1 2 3 4; do rm -f f$i; head -c 268435456 /dev/urandom > f$i; done;"
+           " sha256sum f* > ../.rime-lab/diverge.sums; cat ../.rime-lab/diverge.sums; sync", timeout=600)
+    rc, out = record(vm, "fin-not-root", f"{FINISH} --dry-run", ok=False)
+    if rc != 2:
+        raise Timeout(f"finish as the user: rc={rc}, want 2 (needs root)")
+    vm.root()
+    rc, out = wait_good_boot(vm, "fin-boot2-state")
+    boots_seen(out, 2)
+    rc, out = record(vm, "fin-too-few", f"{FINISH} --dry-run", timeout=300, ok=False)
+    if rc != 3 or "REFUSED [too-few-good-boots]" not in out:
+        raise Timeout(f"finish after 2 good boots: rc={rc}, want 3 REFUSED [too-few-good-boots]")
+    rc, out = record(vm, "fin-bootc-verb", "rime migrate start --yes", ok=False)
+    if rc != 2 or "only `rime migrate finish` is left" not in out:   # the serial echo holds the command: match its answer
+        raise Timeout(f"`rime migrate start` on NixOS: rc={rc}, want 2 refused by name")
+    poweroff(vm)
+
+    # NixOS boot 3: --dry-run (and the default) passes every precondition and writes nothing
+    vm = nixos_boot(a, "fin-boot3")
+    menu_before(vm, "fin-boot3")
+    vm.root()
+    rc, out = wait_good_boot(vm, "fin-boot3-state")
+    boots_seen(out, 3)
+    snap = (f"(ls -la --time-style=full-iso {FIN_STATE}; btrfs subvolume list /mnt/rime-top; ls -la --time-style=full-iso"
+            " /mnt/rime-top /boot/loader/entries/ /boot/ostree; sha256sum /boot/grub2/custom.cfg /boot/grub2/grub.cfg"
+            " /boot/grub2/rime-nixos.cfg) 2>&1 | sha256sum")
+    rc, out = record(vm, "fin-dry-run", f"a=$({snap}); {FINISH} --dry-run; r1=$?; {FINISH}; r2=$?; b=$({snap});"
+                     f" [ -e {FIN_STATE}/finish.json ] && echo FINISH-JSON=present; echo DRY-RC=$r1/$r2;"
+                     " [ \"$a\" = \"$b\" ] && echo DRY-WRITES=none", timeout=1200, ok=False)
+    if not re.search(r"^DRY-RC=0/0$", out, re.M) or not re.search(r"^DRY-WRITES=none$", out, re.M) \
+            or re.search(r"^FINISH-JSON=present$", out, re.M):   # anchored: the serial echo holds the command text
+        raise Timeout("finish --dry-run after 3 good boots: want rc 0 (with and without the flag) and nothing written")
+    for want in ("(ostree:", "@pre-nixos", "stops working"):
+        if want not in out:
+            raise Timeout(f"finish --dry-run does not name {want!r}")
+    poweroff(vm)
+
+    if a.finish_interrupt:
+        finish_interrupt(a)
+
+    # NixOS boot 4: the real finish
+    vm = nixos_boot(a, "fin-boot4")
+    vm.root()
+    rc, out = wait_good_boot(vm, "fin-boot4-state")
+    u0, f0 = usage(vm, "fin-usage-before")
+    record(vm, "fin-dry-run-2", f"{FINISH} --dry-run", timeout=1200)
+    rc, out = record(vm, "fin-yes", f"time {FINISH} --yes", timeout=3600, ok=False)
+    if rc != 0 or "done: the old system is gone" not in out:
+        raise Timeout(f"finish --yes: rc={rc}")
+    rc, out = record(vm, "fin-after", DONE_CHECKS + f"; cat {FIN_STATE}/finish.json; btrfs subvolume list /mnt/rime-top;"
+                     " ls -la /mnt/rime-top /boot /boot/loader/entries/; cat /boot/grub2/custom.cfg", ok=False)
+    if not re.search(r"^FINISH-VERDICT=ok$", out, re.M):
+        raise Timeout("after finish: " + (re.findall(r"FINISH-VERDICT=\S+", out) or ["no verdict"])[-1])
+    rc, out = record(vm, "fin-second-run", f"{FINISH} --yes; echo SECOND-RC=$?; {FINISH} --dry-run; echo DRY-RC=$?", ok=False)
+    if not re.search(r"^SECOND-RC=3$", out, re.M) or not re.search(r"^DRY-RC=3$", out, re.M) \
+            or "REFUSED [already-finished]" not in out:
+        raise Timeout("a second finish was not refused already-finished")
+    u1, f1 = usage(vm, "fin-usage-after")
+    say(f"[fin-boot4] btrfs Used {u0 / 2**30:.2f} -> {u1 / 2**30:.2f} GiB (freed {(u0 - u1) / 2**30:.2f} GiB);"
+        f" Free (estimated) {f0 / 2**30:.2f} -> {f1 / 2**30:.2f} GiB")
+    with open(os.path.join(a.logs, f"{a.kind}-fin-space.txt"), "w") as f:
+        f.write(f"used_before={u0}\nused_after={u1}\nfreed={u0 - u1}\nfree_est_before={f0}\nfree_est_after={f1}\n")
+    if u0 - u1 < 2**30:
+        raise Timeout("finish freed less than the 1 GiB of diverged home alone")
+    poweroff(vm)
+
+    # NixOS boot 5: boots, home intact, the menu as the firmware's GRUB draws it
+    vm = nixos_boot(a, "fin-boot5")
+    menu_after(vm, "fin-boot5")
+    home_sums(vm, "fin-boot5-home")
+    vm.root()
+    rc, out = record(vm, "fin-boot5-state", DONE_CHECKS + "; cat /proc/cmdline; findmnt -M /var/home; " + SB_STATE, ok=False)
+    if not re.search(r"^FINISH-VERDICT=ok$", out, re.M):
+        raise Timeout("boot 5: " + (re.findall(r"FINISH-VERDICT=\S+", out) or ["no verdict"])[-1])
+    if a.sb and "SecureBoot efivar=1" not in out:
+        raise Timeout("[fin-boot5] the guest does not report Secure Boot on")
+    poweroff(vm)
+
+
+def finish_interrupt(a):
+    """On a throwaway overlay: `finish --yes` SIGKILLed once it has deleted @pre-nixos (mid-way through the old tree),
+    then the power cut (qemu quits, nothing synced). NixOS must boot, a re-run must complete, a third run refuse."""
+    w = overlay(a, "finint")
+    vm = nixos_boot(a, "finint1", w)
+    vm.root()
+    rc, out = record(vm, "finint-kill",
+                     f"{FINISH} --yes > /run/fin.log 2>&1 & p=$!; for i in $(seq 12000); do"
+                     f" grep -q '\"{a.finish_kill_at}\"' {FIN_STATE}/finish.json 2>/dev/null && break;"
+                     " kill -0 $p 2>/dev/null || break; sleep 0.05; done;"
+                     " kill -9 $p; wait $p; echo KILL-RC=$?; cat /run/fin.log; cat " + FIN_STATE + "/finish.json; echo;"
+                     " ls -la /mnt/rime-top", timeout=1800, ok=False)
+    if not re.search(r"^KILL-RC=137$", out, re.M) or '"done"' in out:
+        raise Timeout(f"interrupt: the finish was not killed mid-way (rc, or it finished first): see {a.kind}-finint-kill.txt")
+    vm.qmp("quit")      # the power cut: no sync, no unmount
+    vm.wait_off()
+    vm = nixos_boot(a, "finint2", w)
+    menu_after(vm, "finint2")     # the entries went first, so a killed finish already left no ostree entry
+    home_sums(vm, "finint2-home")
+    vm.root()
+    rc, out = record(vm, "finint-rerun", f"cat {FIN_STATE}/finish.json; echo; ls -la /mnt/rime-top; {FINISH} --yes; echo RERUN-RC=$?;"
+                     f" {FINISH} --yes; echo THIRD-RC=$?; " + DONE_CHECKS, timeout=3600, ok=False)
+    if not re.search(r"^RERUN-RC=0$", out, re.M) or not re.search(r"^THIRD-RC=3$", out, re.M) \
+            or not re.search(r"^FINISH-VERDICT=ok$", out, re.M):
+        raise Timeout("interrupt: the re-run did not complete, or a third run was not refused")
+    poweroff(vm)
+    vm = nixos_boot(a, "finint3", w)
+    menu_after(vm, "finint3")
+    home_sums(vm, "finint3-home")
+    vm.root()
+    poweroff(vm)
+    shutil.rmtree(w, ignore_errors=True)
+    say(f"[finint] killed after {a.finish_kill_at!r} + power cut: NixOS boots, the re-run completes, a third run refuses")
+
+
 def phase_back(a):
     vm = VM(a, "back")
     # GRUB's menu reads the PS/2 keyboard through the firmware: from the first firmware line until the kernel starts,
@@ -762,7 +1010,12 @@ def main():
                     help="(readiness) on an overlay: a start SIGKILLed after the masks; every verb must refuse")
     ap.add_argument("--interrupt-probe", action="store_true",
                     help="(readiness) on an overlay: a start interrupted by Ctrl-C rolls back; every verb allowed")
+    ap.add_argument("--no-finish-interrupt", dest="finish_interrupt", action="store_false",
+                    help="(finish) skip the overlay where finish --yes is SIGKILLed mid-way, then re-run")
+    ap.add_argument("--finish-kill-at", default="@pre-nixos",
+                    help="(finish) the finish.json step after which the interrupted finish is SIGKILLed")
     a = ap.parse_args()
+    a.finish = "finish" in a.phases.split(",")
     a.bridge = "/usr/libexec/rime-migrate" if a.readiness else "/run/payload/rime-migrate"
     a.migrate = "rime migrate" if a.readiness else a.bridge
     if a.sb:
@@ -791,7 +1044,7 @@ def main():
         os.makedirs(a.logs, exist_ok=True)
         seen.add(ph)
         say(f"== phase {ph}" + (f" (records in {a.logs})" if a.logs != base else ""))
-        {"bootc": phase_bootc, "nixos": phase_nixos, "back": phase_back}[ph](a)
+        {"bootc": phase_bootc, "nixos": phase_nixos, "back": phase_back, "finish": phase_finish}[ph](a)
         say(f"== phase {ph} PASS")
     say(f"BRIDGE OVMF {a.kind}: PASS")
 

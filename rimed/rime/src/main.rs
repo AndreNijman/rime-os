@@ -325,6 +325,17 @@ enum Cmd {
     /// services) are activated without a restart when that is safe; the rest
     /// waits in the staged deployment. `--plan` shows which is which.
     Update(UpdateArgs),
+    /// Move this machine to Rime OS on NixOS: `check`, `repair-e`, `key-export`, `start` (on bootc); `finish` (on
+    /// NixOS).
+    ///
+    /// On bootc, runs /usr/libexec/rime-migrate with these arguments. On
+    /// NixOS only `finish` is left: it removes the old system once NixOS has
+    /// booted three times (`rime migrate finish --dry-run` writes nothing).
+    Migrate {
+        /// Everything after `migrate`, passed on as it is.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// The live-update engine: what is active, what waits and why.
     Live {
         #[command(subcommand)]
@@ -1781,6 +1792,9 @@ async fn main() {
             no_deltas: args.no_deltas,
             download_only: args.download_only,
         }),
+        // Not root-gated here: the bridge and finish refuse a non-root run
+        // themselves, with the sudo line to type (so `--help` works).
+        Cmd::Migrate { args } => nixos::migrate::run(&args),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Live { cmd } => match cmd {
             LiveCmd::Status { json } => live::status(json),
@@ -3375,6 +3389,21 @@ mod tests {
         let cli =
             Cli::try_parse_from(["rime", "channel", "set", "stable", "--dry-run"]).expect("parses");
         assert_eq!(privileged_verb(&cli.command), Some("channel set"));
+    }
+
+    #[test]
+    fn migrate_passes_everything_after_it_on() {
+        match Cli::try_parse_from(["rime", "migrate", "finish", "--dry-run"]).expect("parses").command {
+            Cmd::Migrate { args } => assert_eq!(args, ["finish", "--dry-run"]),
+            _ => panic!("not migrate"),
+        }
+        match Cli::try_parse_from(["rime", "migrate", "check", "--explain", "--disk", "/dev/vdb"])
+            .expect("parses")
+            .command
+        {
+            Cmd::Migrate { args } => assert_eq!(args, ["check", "--explain", "--disk", "/dev/vdb"]),
+            _ => panic!("not migrate"),
+        }
     }
 
     #[test]
