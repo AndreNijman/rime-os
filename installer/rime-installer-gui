@@ -1846,11 +1846,14 @@ class Installer(Adw.Application):
         Enrolling from here works because `mokutil --import` writes MokNew and
         MokAuth to UEFI NVRAM. That is firmware state, not filesystem state: it
         belongs to the machine, not to the OS on the disk, and it survives the
-        install. shim picks it up on the next boot and runs MokManager. The
-        request also persists until it is processed, so queueing it while
-        Secure Boot is off is safe — if the firmware does not present
-        MokManager until Secure Boot is switched on, the pending request is
-        still there waiting when it is.
+        install. shim picks it up on the next boot and runs MokManager, and it
+        does that with Secure Boot OFF too (shim 16.1 mok.c; measured on
+        OVMF), so queueing it here works on any machine. What does NOT happen
+        is the request waiting: MokManager deletes it when it reads it, so a
+        blue screen nobody answers uses it up. The engine therefore also sets
+        MokTimeout to -1 (the screen waits for a key instead of counting down
+        10 seconds), and a missed or skipped enrolment can be done later from
+        the "Enrol the Rime OS Secure Boot key" boot menu entry.
 
         Three things must hold:
           * we booted UEFI — no efivars means no Secure Boot and no NVRAM to
@@ -1912,10 +1915,9 @@ class Installer(Adw.Application):
                      else "Secure Boot is currently OFF in this machine's firmware.",
                      "rime-mono"))
         if on:
-            i.append(lbl("Rime OS ships its own kernel. Microsoft does not sign it — "
-                         "it is signed with the Rime key. Until your firmware is told "
-                         "to trust that key, it will refuse to boot the installed "
-                         "system.", "rime-dim"))
+            i.append(lbl("Rime OS ships its own kernel, signed with the Rime key "
+                         "rather than by Microsoft. Until your firmware trusts that "
+                         "key, it refuses to start Rime OS.", "rime-dim"))
         else:
             i.append(lbl("Rime OS installs and boots fine as things stand — you do "
                          "not have to do anything here. But Rime ships its own "
@@ -1925,11 +1927,12 @@ class Installer(Adw.Application):
                          "effect on the next boot; doing it later means booting the "
                          "installed system, running mokutil by hand and rebooting "
                          "again.", "rime-dim"))
-        i.append(lbl("Enrolling the key happens once. Choose a password now. On "
-                     "the next boot a blue \"MOK management\" screen appears — "
-                     "choose \"Enroll MOK\" and type this password. That screen "
-                     "is the firmware checking a person is physically present. "
-                     "After that the password is never needed again.", "rime-dim"))
+        i.append(lbl("Choose a one-time password. On the next boot a blue \"MOK "
+                     "management\" screen appears; if it says \"Press any key\", "
+                     "press one within 10 seconds. Then choose \"Enroll MOK\", "
+                     "\"Continue\", \"Yes\", type this password and choose "
+                     "\"Reboot\". Missed it? \"Enrol the Rime OS Secure Boot "
+                     "key\" in the boot menu does the same.", "rime-dim"))
         if getattr(self, "_sb_state_stamp", "") == "unknown":
             i.append(lbl("This installer downloads Rime OS, so whether the kernel "
                          "it fetches carries the Rime signature is confirmed during "
@@ -1956,8 +1959,10 @@ class Installer(Adw.Application):
         self.mok_err = lbl("", "rime-danger")
         body.append(self.mok_err)
         body.append(lbl(
-            "If you skip, the installed system will not boot until you turn "
-            "Secure Boot off in firmware setup." if on else
+            "If you skip, Rime OS will not start while Secure Boot is on. When "
+            "it stops at \"bad shim signature\", press a key twice and choose "
+            "\"Enrol the Rime OS Secure Boot key\", or turn Secure Boot off in "
+            "firmware setup." if on else
             "If you skip, nothing changes — the system installs and boots "
             "normally. You would only need this if you later switch Secure "
             "Boot on.", "rime-dim"))
@@ -1966,8 +1971,8 @@ class Installer(Adw.Application):
             p1, p2 = self.e_mok1.get_text(), self.e_mok2.get_text()
             if not p1:
                 self.mok_err.set_text(
-                    "Choose a password, or skip if you will turn Secure Boot "
-                    "off instead.")
+                    "Choose a password, or skip and enrol the key later from "
+                    "the boot menu.")
                 return
             if not 8 <= len(p1) <= 256:
                 self.mok_err.set_text(
@@ -1989,11 +1994,11 @@ class Installer(Adw.Application):
         # and offering to "turn Secure Boot off instead" offers to turn off
         # something already off. Small strings, but this is the screen before the
         # one that erases a disk and it does not get to say false things.
-        sub = ("This machine will not boot Rime OS until the Rime signing key "
-               "is enrolled." if on else
+        sub = ("Rime OS will not start on this machine until its key is "
+               "enrolled. Skip, and you can enrol it from the boot menu." if on else
                "Optional. Enrol now and you can switch Secure Boot on later "
                "without reinstalling.")
-        skip_label = ("Skip — I'll turn Secure Boot off instead" if on
+        skip_label = ("Skip — enrol later from the boot menu" if on
                       else "Skip — I don't use Secure Boot")
         sb_back = "encrypt" if self.answers["mode"] == "disk" else "account"
         return self.frame("STEP 6 OF 7", "Secure Boot", sub, self.scrolled(body),

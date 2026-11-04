@@ -564,6 +564,117 @@ else
     printf 'FAIL  %-30s %s\n' "Secure Boot reads before umount" \
         "reads at ${_sbread_ln:-none}, unmount at ${_umnt_ln:-?}, \$deploy inside 5b: ${_5b_deploy:-none}"; fail=$((fail+1))
 fi
+echo "── Secure Boot: the boot-menu way back, and honest words ──────────────"
+# With Secure Boot on and the Rime key not enrolled, every boot ends at "bad
+# shim signature". run_bootc_install puts the key on the ESP and an "Enrol the
+# Rime OS Secure Boot key" entry in custom.cfg by running the new system's own
+# /usr/libexec/rime-secureboot-key (tests/test-rime-secureboot-key.sh covers
+# that file; installer/test-installer-sb-recovery.sh boots it).
+_rbi=$(sed -n '/^run_bootc_install() {/,/^}/p' "$ENGINE")
+if grep -A2 -F 'if [ "$brc" = 0 ]; then' <<<"$_rbi" | grep -qF 'place_secureboot_key "$root"'; then
+    printf 'PASS  %-30s\n' "key entry placed after install"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "key entry placed after install" "run_bootc_install does not call place_secureboot_key on success"; fail=$((fail+1))
+fi
+_SBK="$(cd .. && pwd)/files/system/libexec/rime-secureboot-key"
+_sbfns=$(mktemp /tmp/rime-sbkey-fns.XXXXXX)
+# add_windows_entry holds a heredoc with a `}` in column 0, so it is cut at
+# the comment that follows it, not at the first `}`.
+{ sed -n '/^place_secureboot_key()/,/^}/p' "$ENGINE"
+  sed -n '/^add_windows_entry()/,/^# Where the neighbour/p' "$ENGINE" | sed '$d'; } > "$_sbfns"
+if [ "$(grep -c '^[a-z_]*() {' "$_sbfns")" != 2 ] || ! bash -n "$_sbfns"; then
+    printf 'FAIL  %-30s could not extract the functions from %s\n' "key entry functions" "$ENGINE"; fail=$((fail+1))
+else
+(
+    set +u
+    # shellcheck disable=SC1090
+    . "$_sbfns"
+    _p=0; _f=0
+    _ok()  { printf 'PASS  %-30s\n' "$1"; _p=$((_p+1)); }
+    _bad() { printf 'FAIL  %-30s %s\n' "$1" "$2"; _f=$((_f+1)); }
+    _t=$(mktemp -d /tmp/rime-sbkey-test.XXXXXX)
+    LOG="$_t/log"; log() { echo "$*" >> "$LOG"; }
+    mkroot() {  # $1 = root, $2 = kernel-signed value, $3 = 1 to ship the helper
+        local d="$1/ostree/deploy/default/deploy/abc.0"
+        mkdir -p "$d/usr/share/rime-os/secureboot" "$d/usr/libexec" "$1/boot/grub2" "$1/boot/efi/EFI/fedora"
+        printf 'MokManager' > "$1/boot/efi/EFI/fedora/mmx64.efi"
+        head -c 600 /dev/urandom > "$d/usr/share/rime-os/secureboot/rime-mok.der"
+        echo "$2" > "$d/usr/share/rime-os/secureboot/kernel-signed"
+        [ "$3" = 1 ] && cp "$_SBK" "$d/usr/libexec/"
+        echo "$d"
+    }
+    SB_KEY_FLAG="$_t/flag"
+    _d=$(mkroot "$_t/r1" signed 1); rm -f "$SB_KEY_FLAG"
+    place_secureboot_key "$_t/r1"
+    if [ -e "$SB_KEY_FLAG" ] && cmp -s "$_d/usr/share/rime-os/secureboot/rime-mok.der" "$_t/r1/boot/efi/EFI/rime/rime-mok.der" \
+       && grep -qF -- '--id rime-enrol-key' "$_t/r1/boot/grub2/custom.cfg"; then
+        _ok "install: key + entry in place"
+    else
+        _bad "install: key + entry in place" "flag/cert/custom.cfg missing; log: $(tr '\n' ' ' < "$LOG")"
+    fi
+    _d=$(mkroot "$_t/r2" unsigned 1); rm -f "$SB_KEY_FLAG"
+    place_secureboot_key "$_t/r2"; _rc=$?
+    if [ "$_rc" = 0 ] && [ ! -e "$SB_KEY_FLAG" ] && [ ! -e "$_t/r2/boot/grub2/custom.cfg" ]; then
+        _ok "unsigned kernel: no entry"
+    else
+        _bad "unsigned kernel: no entry" "rc $_rc"
+    fi
+    _d=$(mkroot "$_t/r3" signed 0); rm -f "$SB_KEY_FLAG"
+    place_secureboot_key "$_t/r3"; _rc=$?
+    if [ "$_rc" = 0 ] && [ ! -e "$SB_KEY_FLAG" ]; then
+        _ok "older image: skipped, not fatal"
+    else
+        _bad "older image: skipped, not fatal" "rc $_rc"
+    fi
+    # The Windows entry is added AFTER the key entry (partition mode, post-
+    # install). It used to `cat >` custom.cfg, which would delete the key entry.
+    other_esps() { echo /dev/fake-win-esp; }
+    windows_bitlocker() { return 1; }
+    blkid() { echo 1234-ABCD; }
+    mount() { mkdir -p "${*: -1}/EFI/Microsoft/Boot"; : > "${*: -1}/EFI/Microsoft/Boot/bootmgfw.efi"; }
+    umount() { rm -rf "${1:?}/EFI"; }
+    cp "$_t/r1/boot/grub2/custom.cfg" "$_t/key.cfg"
+    add_windows_entry "$_t/r1"
+    _cfg="$_t/r1/boot/grub2/custom.cfg"
+    if grep -qF "menuentry 'Windows'" "$_cfg" && tail -n "$(wc -l < "$_t/key.cfg")" "$_cfg" | cmp -s - "$_t/key.cfg" \
+       && [ "$(head -1 "$_cfg")" = "# Rime OS: Windows is installed beside Rime on this machine." ]; then
+        _ok "Windows entry keeps key entry"
+    else
+        _bad "Windows entry keeps key entry" "$(head -3 "$_cfg" | tr '\n' '|')"
+    fi
+    # …and the image's helper, run again on the next boot, finds nothing to change.
+    cp "$_cfg" "$_t/both.cfg"
+    bash "$_SBK" place --boot "$_t/r1/boot" --esp "$_t/r1/boot/efi" \
+        --cert "$_t/r1/ostree/deploy/default/deploy/abc.0/usr/share/rime-os/secureboot/rime-mok.der" 2>/dev/null
+    if cmp -s "$_cfg" "$_t/both.cfg"; then _ok "next boot leaves both alone"; else _bad "next boot leaves both alone" "custom.cfg changed"; fi
+    rm -rf "$_t"
+    exit $(( _f > 0 ? 100 + _f : _p ))
+)
+_rc=$?
+if [ "$_rc" -gt 100 ]; then fail=$((fail + _rc - 100)); else pass=$((pass + _rc)); fi
+fi
+rm -f "$_sbfns"
+_5b=$(sed -n '/^# ── 5b\. Secure Boot/,/^# ── 6\. done/p' "$ENGINE" | grep -v '^[[:space:]]*#')
+# MokManager deletes the request when its countdown runs out, and it runs
+# whether or not Secure Boot is on: the old note promised the opposite.
+if grep -qiE 'stays queued|will be offered the first time you enable' <<<"$_5b"; then
+    printf 'FAIL  %-30s\n' "no 'request stays queued' claim"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "no 'request stays queued' claim"; pass=$((pass+1))
+fi
+# MokTimeout -1 only after the import succeeded, and never with the password.
+_imp=$(grep -n 'mokutil --import "\$cert"' <<<"$_5b" | head -1 | cut -d: -f1)
+_tmo=$(grep -n 'mokutil --timeout -1' <<<"$_5b" | head -1 | cut -d: -f1)
+if [ -n "$_imp" ] && [ -n "$_tmo" ] && [ "$_tmo" -gt "$_imp" ] && ! grep -q 'MOKPW.*--timeout\|--timeout.*MOKPW' <<<"$_5b"; then
+    printf 'PASS  %-30s\n' "MokManager told to wait"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s import at %s, timeout at %s\n' "MokManager told to wait" "${_imp:-none}" "${_tmo:-none}"; fail=$((fail+1))
+fi
+if grep -qF 'Enrol the Rime OS Secure Boot key' <<<"$_5b" && grep -qF 'you chose to skip' <<<"$_5b"; then
+    printf 'PASS  %-30s\n' "skip names the way back"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s\n' "skip names the way back"; fail=$((fail+1))
+fi
 echo "── one engine at a time, and a front end that died can reattach ───────"
 # A VT switch can take cage (and so the GUI) down mid-install while the engine
 # keeps writing. The fresh front end must never start a second engine, and a
@@ -697,6 +808,11 @@ SIZES="1024x600 1366x768"
 # added — the secureboot page appeared exactly that way.
 PAGES=$(sed -n '/for name, build in (/,/):/p' "$GUI" \
         | grep -oE '"[a-z]+"' | tr -d '"' | awk '!seen[$0]++' | xargs)
+# The Secure Boot page has two texts, chosen by what the firmware reports, and
+# the Secure-Boot-ON one is what a machine that will not boot without the key
+# shows. Both are drawn and measured: "secureboot-on" is the same page with a
+# stub mokutil reporting Secure Boot enabled.
+case " $PAGES " in *" secureboot "*) PAGES="$PAGES secureboot-on" ;; esac
 
 gui_skip=0
 case " $PAGES " in
@@ -793,6 +909,12 @@ STUB
     # Exec bits matter: a non-executable stub is silently SKIPPED by the PATH
     # search and the REAL lsblk answers instead — measured: the disk page came
     # back listing this machine's actual drives through the container's /sys.
+    # mokutil: Secure Boot on only for the secureboot-on render (see PAGES).
+    cat > "$WORK/stub/mokutil" <<'STUB'
+#!/usr/bin/env bash
+if [ -n "${RIME_TEST_SB_ON:-}" ]; then echo "SecureBoot enabled"; else echo "SecureBoot disabled"; fi
+exit 0
+STUB
     chmod +x "$WORK/stub/"*
 
     # Measures every screenshot. One line per PNG:
@@ -879,6 +1001,12 @@ def measure(_app):
         for w in widths:
             print("MEASURE", name, w, page.measure(Gtk.Orientation.VERTICAL, w)[0],
                   flush=True)
+    if "secureboot" in app.builders:
+        app._sb_state = True            # the Secure-Boot-ON text (see PAGES)
+        page = app.builders["secureboot"]()
+        for w in widths:
+            print("MEASURE", "secureboot-on", w,
+                  page.measure(Gtk.Orientation.VERTICAL, w)[0], flush=True)
     app.quit()
 
 app.connect("activate", measure)
@@ -907,7 +1035,9 @@ export RIME_GUI_MODE=partition RIME_GUI_DISK=/dev/vda \
 for size in $sizes; do
   for p in $pages; do
     rm -f "$XDG_RUNTIME_DIR"/wayland*   # fresh socket → grim finds wayland-0
-    RIME_GUI_PAGE=$p timeout 30 cage -- bash -c \
+    gp=$p sbon=""
+    if [ "$p" = secureboot-on ]; then gp=secureboot sbon=1; fi
+    RIME_TEST_SB_ON=$sbon RIME_GUI_PAGE=$gp timeout 30 cage -- bash -c \
       "wlr-randr --output HEADLESS-1 --custom-mode $size >/dev/null 2>&1; sleep 1; exec python3 /out/gui/rime-installer-gui" \
       2>/dev/null &
     cpid=$!
