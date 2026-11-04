@@ -87,6 +87,61 @@ printf '%s\n' "$st" | has '^FAIL' \
     && bad "every installed compositor accepts the generated config" \
     || ok "every installed compositor accepts the generated config"
 
+section "a keyboard layout xkbcommon cannot build is refused, the last one kept"
+# Hyprland drops a keyboard it cannot compile to `us` with an error overlay
+# (IKeyboard.cpp:100-116), so the generator asks xkbcommon first. A FAKE
+# xkbcli here, prepended to PATH, so the refusal path is deterministic on any
+# host; --self-test runs the same cases against the real one where it exists.
+XKBFAKE="${WORK}/xkb-bin"; mkdir -p "$XKBFAKE"
+cat > "${XKBFAKE}/xkbcli" <<'SH'
+#!/bin/sh
+case "$1" in
+    list) printf 'models:\n- name: pc105\n  vendor: Generic\nlayouts:\n- layout: us\n' ;;
+    compile-keymap)
+        case " $* " in
+            *" --layout xx "*)
+                echo 'xkbcommon: ERROR: Couldn'"'"'t find file "symbols/xx"' >&2; exit 1 ;;
+        esac ;;
+esac
+exit 0
+SH
+chmod +x "${XKBFAKE}/xkbcli"
+h="${WORK}/xkb"; mkhome "$h"
+printf '{"keyboard":{"layout":"de","variant":"nodeadkeys"}}\n' > "$h/.config/rime-shell/input.json"
+PATH="${XKBFAKE}:$PATH" run_gen "$h" >/dev/null 2>&1
+H="$h/.config/hypr/rime/input.lua"
+grep -q 'kb_layout *= "de",' "$H" && grep -q 'kb_variant *= "nodeadkeys",' "$H" \
+    && ok "an accepted layout is written to Hyprland" || bad "an accepted layout is written to Hyprland"
+grep -q '^-- rime-keyboard: {.*"layout": "de"' "$H" \
+    && ok "the accepted layout is recorded for the next refusal" \
+    || bad "the accepted layout is recorded for the next refusal"
+grep -q 'layout "de"' "$h/.config/rime-shell/RimeShellInput.kdl" \
+    && ok "an accepted layout is written to niri" || bad "an accepted layout is written to niri"
+printf '{"keyboard":{"layout":"xx"}}\n' > "$h/.config/rime-shell/input.json"
+out="$(PATH="${XKBFAKE}:$PATH" run_gen "$h" 2>&1)"
+printf '%s' "$out" | has 'keyboard layout layout=xx was refused (xkbcommon cannot build it: .*symbols/xx' \
+    && ok "the refusal is reported with xkbcommon's reason" \
+    || bad "the refusal is reported with xkbcommon's reason (${out})"
+printf '%s' "$out" | has 'keeping layout=de variant=nodeadkeys' \
+    && ok "the refusal names the layout that stays" || bad "the refusal names the layout that stays"
+grep -q 'kb_layout *= "de",' "$H" && ! grep -q '"xx"' "$H" \
+    && ok "the previous layout is still what Hyprland loads" \
+    || bad "the previous layout is still what Hyprland loads"
+grep -q '"xx"' "$h/.config/rime-shell/RimeShellInput.kdl" \
+    && bad "the refused layout never reaches niri" || ok "the refused layout never reaches niri"
+printf '{"keyboard":{"layout":"us\\" os.exit() --"}}\n' > "$h/.config/rime-shell/input.json"
+out="$(PATH="${XKBFAKE}:$PATH" run_gen "$h" 2>&1)"
+printf '%s' "$out" | has 'is not an XKB name' && ! grep -q 'os.exit' "$H" \
+    && ok "a layout with a quote is refused before anything sees it" \
+    || bad "a layout with a quote is refused before anything sees it"
+nox="${WORK}/noxkb"; mkdir -p "$nox"
+for t in python3 Hyprland niri; do p="$(command -v "$t")" && ln -sf "$p" "$nox/$t"; done
+printf '{"keyboard":{"layout":"fr"}}\n' > "$h/.config/rime-shell/input.json"
+out="$(PATH="$nox" HOME="$h" RIME_INPUT_DEVICES="$NODEV" "$(command -v python3)" "$GEN" --no-reload 2>&1)"
+printf '%s' "$out" | has 'xkbcli is not installed' && grep -q 'kb_layout *= "de",' "$H" \
+    && ok "with no xkbcli a new layout is refused, not written unchecked" \
+    || bad "with no xkbcli a new layout is refused, not written unchecked (${out})"
+
 section "defaults are a no-op against the shipped config"
 h="${WORK}/defaults"; mkhome "$h"
 cp "$h/.config/labwc/rc.xml" "${WORK}/rc.orig"

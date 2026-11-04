@@ -349,6 +349,117 @@ PATH="$NPBIN" HOME="$NP" "$PY" "$GEN" --help 2>&1 | pipe_has -- '--no-persist' \
     && ok "--no-persist is discoverable in --help (the shell probes for it)" \
     || bad "--no-persist is discoverable in --help (the shell probes for it)"
 
+section "Hyprland: eval only, checked against the live modes, refusals reported"
+# Hyprland 0.57 has no `keyword` request; eval is the only way in. The fake
+# answers `-j monitors` with one 1920x1080@60 output and `eval` with whatever
+# HL_EVAL_REPLY says, and records every call so "keyword was never invoked" is
+# an assertion about argv, not about the code's intent.
+HLBIN="${WORK}/hl-bin"; mkdir -p "$HLBIN"
+cat > "${HLBIN}/hyprctl" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$HL_CALLED"
+case "$1 $2" in
+    "-j monitors")
+        # printf, not cat: PATH holds nothing but these fakes.
+        printf '%s\n' '[{"name": "DP-1", "width": 1920, "height": 1080,' \
+            '"refreshRate": 60.0, "x": 0, "y": 0, "scale": 1.0, "transform": 0,' \
+            '"disabled": false, "availableModes": ["1920x1080@60.00Hz", "1280x720@60.00Hz"]}]'
+        ;;
+    eval*) printf '%s\n' "${HL_EVAL_REPLY:-ok}" ;;
+    *) echo "unknown request" ;;
+esac
+SH
+# A Hyprland whose --verify-config rejects everything, for the persist refusal.
+printf '#!/bin/sh\necho "Config parsing result: error"\nexit 1\n' > "${HLBIN}/Hyprland.reject"
+printf '#!/bin/sh\nexit 0\n' > "${HLBIN}/pkill"
+chmod +x "${HLBIN}"/hyprctl "${HLBIN}"/pkill "${HLBIN}"/Hyprland.reject
+export HL_CALLED="${WORK}/hl-called"
+hl_run() {
+    local h="$1"; shift
+    rm -f "$HL_CALLED"
+    env -u RIME_DISPLAY_NO_LIVE PATH="$HLBIN" HOME="$h" \
+        XDG_CURRENT_DESKTOP=Hyprland "$PY" "$GEN" "$@" 2>&1
+}
+hl_home() {
+    local h="${WORK}/$1"; mkdir -p "$h/.config/rime-shell"
+    printf '%s\n' "$2" > "$h/.config/rime-shell/display.json"
+    printf '%s' "$h"
+}
+no_keyword() { ! grep -q 'keyword' "$HL_CALLED" 2>/dev/null; }
+
+K1="$(hl_home hl-snap '{"outputs": [{"name": "DP-1", "enabled": true, "x": 0, "y": 0,
+  "scale": 1.1, "mode": {"width": 1920, "height": 1080, "refresh": 60}}]}')"
+out="$(hl_run "$K1" apply)"; rc=$?
+[ "$rc" -eq 0 ] && ok "a Hyprland apply with an eval reply of ok succeeds" \
+    || bad "a Hyprland apply with an eval reply of ok succeeds (rc=${rc}: ${out})"
+grep -q '^eval hl.monitor({ output = "DP-1", mode = "1920x1080@60", position = "0x0", scale = 1.2 })$' \
+    "$HL_CALLED" \
+    && ok "scale 1.1 on 1920x1080 is applied as 1.2, Hyprland's own choice" \
+    || bad "scale 1.1 on 1920x1080 is applied as 1.2 ($(cat "$HL_CALLED"))"
+printf '%s' "$out" | pipe_has 'using 1.2, the nearest scale Hyprland accepts' \
+    && ok "the snap is reported in words" || bad "the snap is reported in words (${out})"
+grep -q 'scale = 1.2 })' "$K1/.config/hypr/rime/monitors.lua" 2>/dev/null \
+    && ok "the persisted module carries the snapped scale" \
+    || bad "the persisted module carries the snapped scale"
+no_keyword && ok "hyprctl keyword is never invoked (apply)" \
+    || bad "hyprctl keyword is never invoked (apply): $(cat "$HL_CALLED")"
+
+K2="$(hl_home hl-mode '{"outputs": [{"name": "DP-1", "enabled": true, "x": 0, "y": 0,
+  "scale": 1.0, "mode": {"width": 1234, "height": 567, "refresh": 60}}]}')"
+out="$(hl_run "$K2" apply)"
+grep -q 'mode = "1920x1080@60"' "$HL_CALLED" \
+    && ok "a mode the display does not list is replaced by its current mode" \
+    || bad "a mode the display does not list is replaced ($(cat "$HL_CALLED"))"
+printf '%s' "$out" | pipe_has '1234x567@60Hz is not a mode this display offers' \
+    && ok "the unknown mode is reported" || bad "the unknown mode is reported (${out})"
+grep -q '1234x567' "$K2/.config/hypr/rime/monitors.lua" 2>/dev/null \
+    && bad "the unknown mode is never persisted" || ok "the unknown mode is never persisted"
+
+K3="$(hl_home hl-refuse '{"outputs": [{"name": "DP-1", "enabled": true, "scale": 1.0}]}')"
+out="$(HL_EVAL_REPLY='[string "hl.monitor"]:1: bad argument' hl_run "$K3" apply)"; rc=$?
+[ "$rc" -eq 1 ] && ok "an eval reply other than ok exits 1" \
+    || bad "an eval reply other than ok exits 1 (rc=${rc})"
+printf '%s' "$out" | pipe_has 'Hyprland refused the layout for DP-1: \[string' \
+    && ok "the refusal names the output and carries Hyprland's reply" \
+    || bad "the refusal names the output and carries Hyprland's reply (${out})"
+no_keyword && ok "a refused eval does not fall back to hyprctl keyword" \
+    || bad "a refused eval does not fall back to hyprctl keyword: $(cat "$HL_CALLED")"
+[ -e "$K3/.config/hypr/rime/monitors.lua" ] \
+    && bad "a refused live apply persists nothing" || ok "a refused live apply persists nothing"
+
+K4="$(hl_home hl-types '{"outputs": [{"name": "DP-1", "enabled": true, "scale": true,
+  "x": 1e400, "y": 0}]}')"
+out="$(hl_run "$K4" apply)"
+printf '%s' "$out" | pipe_has 'scale True is not a number' \
+    && ok "scale true is refused, not read as 1" || bad "scale true is refused (${out})"
+grep -q 'position = "auto", scale = 1.0' "$HL_CALLED" \
+    && ok "an infinite x places the output automatically" \
+    || bad "an infinite x places the output automatically ($(cat "$HL_CALLED"))"
+
+K5="$(hl_home hl-nan '{"outputs": [{"name": "DP-1", "enabled": true, "scale": NaN}]}')"
+out="$(hl_run "$K5" apply)"
+{ printf '%s' "$out" | pipe_has 'NaN is not a number'; } && ! grep -q '^eval' "$HL_CALLED" 2>/dev/null \
+    && ok "a model holding NaN applies nothing" || bad "a model holding NaN applies nothing (${out})"
+
+K6="$(hl_home hl-inject '{"outputs": [{"name": "DP-1\"}) hl.exec_cmd(\"x\") --", "enabled": true},
+  {"name": "DP-1\nhl.exec_cmd(\"x\")", "enabled": true}]}')"
+out="$(hl_run "$K6" apply)"
+! grep -q 'exec_cmd' "$HL_CALLED" 2>/dev/null && [ ! -e "$K6/.config/hypr/rime/monitors.lua" ] \
+    && ok "output names with a quote or newline never reach eval or the module" \
+    || bad "output names with a quote or newline never reach eval or the module"
+
+# Persist refusal is a non-zero exit. Before, `save` printed the refusal and
+# exited 0, so Settings reported a layout saved that was not.
+K7="$(hl_home hl-persist '{"outputs": [{"name": "DP-1", "enabled": true, "scale": 1.0}]}')"
+cp "${HLBIN}/Hyprland.reject" "${HLBIN}/Hyprland"
+out="$(hl_run "$K7" save)"; rc=$?
+rm -f "${HLBIN}/Hyprland"
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | pipe_has 'previous layout is untouched'; } \
+    && ok "a rejected monitor module makes save exit 1" \
+    || bad "a rejected monitor module makes save exit 1 (rc=${rc}: ${out})"
+[ -e "$K7/.config/hypr/rime/monitors.lua" ] \
+    && bad "the rejected module is not written" || ok "the rejected module is not written"
+
 section "colour management"
 # colord is the store; this program is the adapter. The suite never talks to the
 # real colord and never creates a real device — `colormgr create-device` at

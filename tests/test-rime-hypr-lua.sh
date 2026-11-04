@@ -49,6 +49,42 @@ finish() {
     [ "$fail" -eq 0 ]
 }
 
+# ── lua_str is one function in two files ─────────────────────────────────────
+# rime-display-apply and rime-input-apply both quote untrusted text (connector
+# names, kernel device names) into Lua. Two copies that drift is how one of them
+# ends up escaping a newline and the other not, so the bodies must be
+# byte-identical and must agree on a battery of hostile strings. Runs before the
+# compositor check: it needs only python3.
+sec "lua_str is identical in both generators"
+DISP="${root}/files/system/libexec/rime-display-apply"
+INP="${root}/files/system/libexec/rime-input-apply"
+lua_block() { sed -n '/^# ── lua_str/,/^# ── end lua_str/p' "$1" | tail -n +2; }
+if [ -n "$(lua_block "$DISP")" ] && [ "$(lua_block "$DISP")" = "$(lua_block "$INP")" ]; then
+    ok "the lua_str bodies are byte-identical"
+else
+    bad "the lua_str bodies are byte-identical"
+fi
+python3 - "$DISP" "$INP" <<'PY' && ok "both escape the same hostile strings the same way"     || bad "both escape the same hostile strings the same way"
+import importlib.machinery, importlib.util, sys
+mods = []
+for i, path in enumerate(sys.argv[1:3]):
+    loader = importlib.machinery.SourceFileLoader(f"gen{i}", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    mods.append(mod)
+cases = ['plain', 'a"b', 'back\\slash', 'new\nline', 'tab\there', ']]', '--[[', '\x00\x01\x7f',
+         '\x1b[31m', 'é ü 日本', 'x\n1', '\\"', '"\n hl.exec_cmd("x") --']
+bad = 0
+for c in cases:
+    a, b = mods[0].lua_str(c), mods[1].lua_str(c)
+    raw = any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in a)
+    if a != b or raw or not (a.startswith('"') and a.endswith('"')):
+        print(f"      {c!r}: {a!r} vs {b!r}")
+        bad = 1
+sys.exit(bad)
+PY
+
 for tool in labwc Hyprland hyprctl; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         skip "$tool is not installed; cannot run a nested compositor"

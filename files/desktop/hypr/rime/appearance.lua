@@ -10,10 +10,11 @@ hl.config({
         gaps_out    = 10,
         border_size = 2,
 
-        -- The active border is re-tinted from the wallpaper by Rime Shell's
-        -- matugen pipeline (WallpaperService.updateBorders), which pushes the
-        -- new colour over `hyprctl keyword` at runtime. These are the values a
-        -- session starts with before any wallpaper has been picked.
+        -- The active border is re-tinted from the wallpaper by Rime Shell:
+        -- live through `hyprctl eval` (WallpaperService.updateBorders), and on
+        -- disk as rime/colors.lua, which matugen writes and the end of this
+        -- file loads. These are the values a session starts with before any
+        -- wallpaper has been picked.
         --
         -- The hyprlang spelling was one string with a trailing `45deg`:
         --     col.active_border = rgba(a1c999ee) rgba(8d748cee) 45deg
@@ -185,3 +186,16 @@ hl.layer_rule({
 
     no_anim = true,
 })
+
+-- ── The wallpaper's accent, if Rime Shell has written one ───────────────────
+-- matugen renders ~/.config/hypr/rime/colors.lua from the wallpaper
+-- (rime-shell src/config/matugen.toml.in). Loaded here, after the defaults
+-- above, rather than from hyprland.lua: hyprland.lua is the user's file and is
+-- seeded once, so a line added to its template would never reach an existing
+-- home, while this module is refreshed at every login. Absent until the first
+-- wallpaper is picked. An error in it propagates, so hyprland.lua's loader
+-- reports it as this module's failure with the file named; everything above
+-- has applied by then.
+if package.searchpath("rime.colors", package.path) then
+    require("rime.colors")
+end

@@ -24,13 +24,18 @@ of connected outputs and reapplies the matching profile when one is plugged in
 or removed. Hyprland has that built in via monitor rules, so its persistence is
 a generated module hyprland.lua requires.
 
-`hl.monitor` calls, not `monitor=` lines: hyprlang was deprecated in Hyprland
-0.55 and the image ships 0.56.2 (P0-025). The LIVE half moved with it. Being
-IPC rather than config did NOT make `hyprctl keyword` immune: it refuses
-against a Lua config with "keyword can't work with non-legacy parsers. Use
-eval." and changes nothing, so `apply` would have reported success and moved no
-display. `hyprctl eval` takes a Lua chunk, so the live call and the persisted
-module are now the same expression.
+`hl.monitor` calls, not `monitor=` lines: Rime ships Hyprland 0.57, whose only
+config manager is Lua (hyprlang is gone, and so is the `keyword` request). The
+live half is `hyprctl eval` with the same Lua chunk the persisted module holds;
+a reply other than "ok" is a refusal, reported and exited non-zero.
+
+## The model is checked, not trusted
+
+Names, positions, modes and scales are validated before any generator sees
+them (no NaN/Infinity, no bool-as-number, no control characters), the mode
+must be one the connected display lists, and the scale is snapped exactly the
+way Hyprland would snap it (hypr_scale), so what is applied is what was asked
+for or a note says why not.
 
 ## Enumeration is never guessed
 
@@ -63,8 +68,11 @@ persistence with no hardware write. See ROADMAP/design/P0-018-display-recovery.m
 import argparse
 import glob
 import json
+import math
 import os
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -183,18 +191,25 @@ def outputs_hypr():
     out = []
     for m in raw:
         modes = []
+        # The top-level width/height/refreshRate ARE the current mode; the
+        # availableModes strings carry no flag, so the current one is found by
+        # the same 1 px / 1 Hz tolerance Hyprland matches a requested mode with.
+        cur = (m.get("width"), m.get("height"), m.get("refreshRate"))
         for spec in m.get("availableModes", []):
             # "1920x1080@60.00Hz"
             try:
                 dims, _, rate = spec.partition("@")
                 w, _, h = dims.partition("x")
-                modes.append({
+                mode = {
                     "width": int(w), "height": int(h),
                     "refresh": round(float(rate.rstrip("Hz")), 3),
                     "preferred": False, "current": False,
-                })
-            except ValueError:
+                }
+            except (ValueError, AttributeError):
                 continue
+            if all(is_number(v) for v in cur):
+                mode["current"] = mode_matches((cur[0], cur[1], cur[2]), mode)
+            modes.append(mode)
         inv = {v: k for k, v in HYPR_TRANSFORM.items()}
         out.append({
             "name": m.get("name"),
@@ -219,46 +234,290 @@ def outputs():
 
 
 # ── model ───────────────────────────────────────────────────────────────────
+# Everything in the model ends up inside a Lua chunk (monitors.lua, hyprctl
+# eval), a kanshi config and a wlr-randr argv, so nothing reaches a generator
+# unchecked. Python's json takes NaN and Infinity (and 1e400 parses to inf), and
+# bool is a subclass of int, so `isinstance(v, (int, float))` alone lets
+# `"scale": true` and `"x": NaN` through: both are refused by name here.
+POS_LIMIT = 32767            # a layout coordinate, either sign
+NAME_MAX = 256
+MODE_RE = re.compile(r"^(\d{1,5})x(\d{1,5})(?:@(\d{1,4}(?:\.\d{1,3})?))?(?:Hz)?$")
+
+
+def _reject_constant(name):
+    raise ValueError(f"{name} is not a number")
+
+
+def is_number(v):
+    """A finite int or float that is not a bool."""
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
+
+
+def is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def name_problem(name):
+    """Why an output name is unusable, or None.
+
+    The name is quoted into kanshi (`output "NAME"`, which has no escape for a
+    quote or backslash) and into Lua (lua_str escapes, but a control character
+    in a connector name is never real and is the shape an injection takes).
+    """
+    if not isinstance(name, str) or not name:
+        return "has no name"
+    if len(name) > NAME_MAX:
+        return f"has a name longer than {NAME_MAX} characters"
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in name):
+        return "has a control character in its name"
+    if '"' in name or "\\" in name:
+        return "has a quote or backslash in its name"
+    return None
+
+
+def parse_mode(mode):
+    """(width, height, refresh or None) for a valid mode, else None."""
+    if isinstance(mode, str):
+        m = MODE_RE.match(mode)
+        if not m:
+            return None
+        w, h = int(m.group(1)), int(m.group(2))
+        r = float(m.group(3)) if m.group(3) else None
+    elif isinstance(mode, dict):
+        w, h, r = mode.get("width"), mode.get("height"), mode.get("refresh")
+        if not (is_int(w) and is_int(h)):
+            return None
+        if r is not None and not (is_number(r) and r > 0):
+            return None
+        if r is not None and r > 1000:
+            return None
+    else:
+        return None
+    if not (0 < w <= 16384 and 0 < h <= 16384):
+        return None
+    return (w, h, r or None)
+
+
+def mode_matches(want, mode):
+    """Hyprland's own test for "this is the mode you asked for".
+
+    src/output/Monitor.cpp:778-780 (0.57.0): the best available mode counts as
+    the requested one only within DELTALESSTHAN(…, 1) on width, height and Hz
+    (src/macros.hpp:35). Anything further off is tried as a CUSTOM mode, which
+    is how a typo becomes a black screen. A request with no refresh matches on
+    size alone.
+    """
+    w, h, r = want
+    try:
+        if abs(mode["width"] - w) >= 1 or abs(mode["height"] - h) >= 1:
+            return False
+        return r is None or abs(mode["refresh"] - r) < 1
+    except (KeyError, TypeError):
+        return False
+
+
 def load_model(path):
     """The desired layout: {"outputs": [{name, enabled, mode, x, y, ...}]}."""
     try:
         with open(path, encoding="utf-8") as fh:
-            model = json.load(fh)
+            model = json.load(fh, parse_constant=_reject_constant)
     except FileNotFoundError:
         return {"outputs": []}, []
-    except (json.JSONDecodeError, OSError) as e:
+    except (ValueError, OSError) as e:   # JSONDecodeError is a ValueError
         return {"outputs": []}, [f"{path} is not usable ({e}); nothing to apply"]
+    if not isinstance(model, dict) or not isinstance(model.get("outputs", []), list):
+        return {"outputs": []}, [f"{path} is not a display model; nothing to apply"]
 
     notes = []
     clean = []
     for o in model.get("outputs", []):
-        if not o.get("name"):
-            notes.append("skipping an output entry with no name")
+        if not isinstance(o, dict):
+            notes.append("skipping an output entry that is not an object")
             continue
+        why = name_problem(o.get("name"))
+        if why:
+            notes.append(f"skipping an output entry that {why}")
+            continue
+        name = o["name"]
+        for key, default in (("enabled", True), ("adaptive_sync", False)):
+            if key in o and not isinstance(o[key], bool):
+                notes.append(f"{name}: {key} {o[key]!r} is not true or false, using {default}")
+                o[key] = default
         t = o.get("transform", "normal")
-        if t not in TRANSFORMS:
-            notes.append(f"{o['name']}: unknown transform {t!r}, using normal")
+        if not isinstance(t, str) or t not in TRANSFORMS:
+            notes.append(f"{name}: unknown transform {t!r}, using normal")
             o["transform"] = "normal"
         s = o.get("scale", 1.0)
-        if not isinstance(s, (int, float)) or not 0.25 <= s <= 5.0:
-            notes.append(f"{o['name']}: scale {s!r} out of range, using 1.0")
+        if not is_number(s) or not 0.25 <= s <= 5.0:
+            notes.append(f"{name}: scale {s!r} is not a number from 0.25 to 5, using 1.0")
             o["scale"] = 1.0
+        if "x" in o or "y" in o:
+            x, y = o.get("x"), o.get("y")
+            if not (is_int(x) and is_int(y)
+                    and -POS_LIMIT <= x <= POS_LIMIT and -POS_LIMIT <= y <= POS_LIMIT):
+                notes.append(f"{name}: position {x!r},{y!r} is not a pair of whole "
+                             f"numbers within ±{POS_LIMIT}; placing it automatically")
+                o.pop("x", None)
+                o.pop("y", None)
+        if o.get("mode") and parse_mode(o["mode"]) is None:
+            notes.append(f"{name}: mode {o['mode']!r} is not WIDTHxHEIGHT[@HZ]; "
+                         "using its preferred mode")
+            o.pop("mode", None)
         clean.append(o)
     return {"outputs": clean}, notes
 
 
 def mode_string(o):
     """`1920x1080@60Hz`, or None to leave the mode alone."""
-    mode = o.get("mode")
-    if not mode:
+    parsed = parse_mode(o.get("mode"))
+    if not parsed:
         return None
-    if isinstance(mode, str):
-        return mode
-    w, h = mode.get("width"), mode.get("height")
-    if not (w and h):
-        return None
-    hz = mode.get("refresh")
-    return f"{w}x{h}@{hz}Hz" if hz else f"{w}x{h}"
+    w, h, hz = parsed
+    if hz is None:
+        return f"{w}x{h}"
+    return f"{w}x{h}@{hz:g}Hz"
+
+
+def has_position(o):
+    return is_int(o.get("x")) and is_int(o.get("y"))
+
+
+# ── Hyprland's scale check, replicated ───────────────────────────────────────
+def _f32(x):
+    """The value a C++ `float` holds for x (CMonitorRule::m_scale is a float)."""
+    return struct.unpack("f", struct.pack("f", x))[0]
+
+
+def _is_whole(v):
+    # std::round(inf) == inf, so a division by a zero scale "passes" in C++.
+    return math.isinf(v) or v == math.floor(v)
+
+
+def _divides(w, h, scale):
+    if scale == 0:
+        return True  # w / 0.0 is inf in C++, and inf == round(inf)
+    return _is_whole(w / scale) and _is_whole(h / scale)
+
+
+def _cround(x):
+    """std::round: half away from zero (Python's round() is half to even)."""
+    f = math.floor(abs(x))
+    r = f + (1 if abs(x) - f >= 0.5 else 0)
+    return math.copysign(r, x)
+
+
+def hypr_scale(width, height, scale):
+    """What Hyprland 0.57.0 does with `scale` on a WIDTHxHEIGHT mode.
+
+    A line-for-line replica of src/output/Monitor.cpp:939-985 (CMonitor::
+    applyMonitorRule, hyprwm/Hyprland v0.57.0), so Settings can apply the
+    value Hyprland would end up with instead of letting it substitute one and
+    show a red "Invalid scale" notification:
+
+    - the rule's scale is a float (MonitorRule.hpp:45); the check divides the
+      UNTRANSFORMED mode size (m_pixelSize) on both axes and wants whole numbers;
+    - otherwise searchScale = round(scale * 120), and if size / (searchScale /
+      120) is whole that is used silently;
+    - otherwise it walks i = 1..89, trying (searchScale + i) / 120 before
+      (searchScale - i) / 120, and takes the first that divides — with the
+      notification;
+    - nothing found: an error overlay and the monitor's default scale.
+
+    Returns (scale, kind), kind one of "clean", "silent", "suggested", "none".
+    """
+    s = _f32(scale)
+    if _divides(width, height, s):
+        return scale, "clean"
+    search = _f32(_cround(s * 120.0))
+    zero = search / 120.0
+    if _divides(width, height, zero):
+        return zero, "silent"
+    for i in range(1, 90):
+        up = _f32(search + i) / 120.0
+        down = _f32(search - i) / 120.0
+        if _divides(width, height, up):
+            return up, "suggested"
+        if _divides(width, height, down):
+            return down, "suggested"
+    return None, "none"
+
+
+def _fmt_scale(v):
+    return f"{v:.2f}".rstrip("0").rstrip(".")
+
+
+def fit_to_live(model, live):
+    """Make the model something the connected hardware will take as asked.
+
+    Two things Hyprland would otherwise substitute behind the user's back:
+
+    - a mode the display does not list. Hyprland tries it as a custom mode
+      (Monitor.cpp:777-782), which on a real panel is the black screen this
+      page exists to avoid. It is replaced by the display's current mode (or
+      its preferred one) and the user is told.
+    - a scale that does not divide the mode. Snapped here exactly as Hyprland
+      would (hypr_scale) so the value applied, persisted and shown agrees, and
+      no compositor notification fires. A scale with no clean neighbour is
+      refused: the current scale stays if it is clean, else 1.
+
+    An output that is not connected is left as saved: there is nothing live to
+    check it against, and kanshi / the monitor rule apply it when it appears.
+    """
+    notes = []
+    by_name = {o.get("name"): o for o in (live or []) if isinstance(o, dict)}
+    for o in model["outputs"]:
+        if not o.get("enabled", True):
+            continue
+        lo = by_name.get(o["name"])
+        if lo is None:
+            continue
+        modes = [m for m in (lo.get("modes") or [])
+                 if isinstance(m, dict) and is_int(m.get("width"))
+                 and is_int(m.get("height")) and is_number(m.get("refresh"))]
+        current = next((m for m in modes if m.get("current")), None)
+        want = parse_mode(o.get("mode"))
+        if want:
+            if not modes:
+                notes.append(f"{o['name']}: the display reported no modes, so "
+                             f"{mode_string(o)} could not be checked")
+            elif not any(mode_matches(want, m) for m in modes):
+                asked = mode_string(o)
+                if current:
+                    o["mode"] = {"width": current["width"], "height": current["height"],
+                                 "refresh": current["refresh"]}
+                    notes.append(f"{o['name']}: {asked} is not a mode this display "
+                                 f"offers; keeping {mode_string(o)}")
+                else:
+                    o.pop("mode", None)
+                    notes.append(f"{o['name']}: {asked} is not a mode this display "
+                                 "offers; using its preferred mode")
+        size = parse_mode(o.get("mode"))
+        if size is None:
+            pref = next((m for m in modes if m.get("preferred")), None) or current
+            if pref:
+                size = (pref["width"], pref["height"], pref["refresh"])
+            elif is_int(lo.get("width")) and is_int(lo.get("height")):
+                size = (lo["width"], lo["height"], None)
+        scale = o.get("scale", 1.0)
+        if not size or not is_number(scale):
+            continue
+        w, h, _ = size
+        snapped, kind = hypr_scale(w, h, scale)
+        if kind == "silent":
+            o["scale"] = snapped
+        elif kind == "suggested":
+            o["scale"] = snapped
+            notes.append(f"{o['name']}: scale {_fmt_scale(scale)} does not divide "
+                         f"{w}x{h} evenly; using {_fmt_scale(snapped)}, the nearest "
+                         "scale Hyprland accepts")
+        elif kind == "none":
+            was = lo.get("scale")
+            keep = was if is_number(was) and hypr_scale(w, h, was)[1] == "clean" else 1.0
+            o["scale"] = keep
+            notes.append(f"{o['name']}: scale {_fmt_scale(scale)} has no clean value "
+                         f"near it for {w}x{h}; keeping {_fmt_scale(keep)}")
+    return notes
 
 
 # ── live apply ──────────────────────────────────────────────────────────────
@@ -278,7 +537,7 @@ def wlr_args(model):
         ms = mode_string(o)
         if ms:
             args += ["--mode", ms]
-        if "x" in o and "y" in o:
+        if has_position(o):
             args += ["--pos", f"{o['x']},{o['y']}"]
         if o.get("scale") is not None:
             args += ["--scale", str(o["scale"])]
@@ -298,39 +557,16 @@ def apply_wlr(model, dry_run):
     return []
 
 
-def hypr_monitor_line(o):
-    """A Hyprland `monitor=` value for one output."""
-    if not o.get("enabled", True):
-        return f"monitor={o['name']},disable"
-    ms = mode_string(o) or "preferred"
-    ms = ms.replace("Hz", "")
-    pos = f"{o.get('x', 0)}x{o.get('y', 0)}"
-    scale = o.get("scale", 1.0)
-    line = f"monitor={o['name']},{ms},{pos},{scale}"
-    t = HYPR_TRANSFORM.get(o.get("transform", "normal"), 0)
-    if t:
-        line += f",transform,{t}"
-    if o.get("adaptive_sync"):
-        line += ",vrr,1"
-    return line
-
-
 def apply_hypr(model, dry_run, icc=None):
-    """Apply the layout to the RUNNING Hyprland.
+    """Apply the layout to the RUNNING Hyprland, through `hyprctl eval` only.
 
-    `hyprctl eval`, not `hyprctl keyword`. keyword refuses outright against a
-    Lua config — it answers
-
-        keyword can't work with non-legacy parsers. Use eval.
-
-    and changes nothing, so every "Apply" in Settings → Display would report
-    success and move no display. eval takes a Lua chunk, which means the live
-    call and the persisted module are now the same `hl.monitor` expression
-    instead of two spellings of one layout that could drift.
-
-    Both forms are still emitted, because this script also runs on machines
-    whose hyprland.conf has not been migrated yet: eval first, and keyword only
-    if eval is not understood.
+    Hyprland 0.57 has no hyprlang parser left (its config manager enum has one
+    member, CONFIG_LUA) and no `keyword` request at all, so the old fallback to
+    `hyprctl keyword monitor …` could only ever fail. eval takes a Lua chunk,
+    which makes the live call and the persisted module the same `hl.monitor`
+    expression. Its reply is exactly "ok" when the chunk ran
+    (src/ipc/s1/Commands.cpp evalRequest); anything else is the error, and the
+    output is reported as refused — never as applied.
     """
     notes = []
     icc = icc or {}
@@ -340,14 +576,10 @@ def apply_hypr(model, dry_run, icc=None):
             notes.append(f"would run: hyprctl eval {call}")
             continue
         res = run(["hyprctl", "eval", call])
-        if res.returncode == 0 and "ok" in res.stdout.lower():
+        if res.returncode == 0 and res.stdout.strip() == "ok":
             continue
-        # A pre-P0-025 hyprlang session: eval exists but the Lua state does not.
-        legacy = run(["hyprctl", "keyword", "monitor",
-                      hypr_monitor_line(o).split("=", 1)[1]])
-        if legacy.returncode != 0 or "ok" not in legacy.stdout.lower():
-            notes.append(f"hyprctl rejected {o['name']}: "
-                         f"{(res.stdout + res.stderr).strip()[:160]}")
+        why = (res.stdout + res.stderr).strip()[:160] or f"exit {res.returncode}"
+        notes.append(f"Hyprland refused the layout for {o['name']}: {why}")
     return notes
 
 
@@ -389,7 +621,8 @@ def gen_kanshi(model, live):
         ms = mode_string(o)
         if ms:
             body.append(f"        mode {ms.replace('Hz', '')}")
-        body.append(f"        position {o.get('x', 0)},{o.get('y', 0)}")
+        if has_position(o):
+            body.append(f"        position {o['x']},{o['y']}")
         body.append(f"        scale {o.get('scale', 1.0)}")
         body.append(f"        transform {o.get('transform', 'normal')}")
         body.append(f"        adaptive_sync {'on' if o.get('adaptive_sync') else 'off'}")
@@ -400,8 +633,29 @@ def gen_kanshi(model, live):
     return "\n".join(lines)
 
 
+# ── lua_str: byte-identical in rime-input-apply (tests/test-rime-hypr-lua.sh compares) ──
 def lua_str(value):
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """A double-quoted Lua string literal for any text.
+
+    Backslash and the quote are escaped, and so is every control character (C0
+    and DEL) as a three-digit decimal escape (\\010 for a newline): a raw
+    newline in a name would end a `--` comment line or split the literal, and
+    zero-padding to three digits stops a following digit extending the escape.
+    `]]` needs nothing: it is only special inside a long bracket string.
+    """
+    out = []
+    for ch in str(value):
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif code < 0x20 or code == 0x7f:
+            out.append("\\%03d" % code)
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+# ── end lua_str ──
 
 
 def hypr_monitor_call(o, icc=None):
@@ -416,12 +670,15 @@ def hypr_monitor_call(o, icc=None):
         return f'hl.monitor({{ output = {lua_str(o["name"])}, disabled = true }})'
 
     mode = (mode_string(o) or "preferred").replace("Hz", "")
-    position = "{}x{}".format(o.get("x", 0), o.get("y", 0))
+    position = "{}x{}".format(o["x"], o["y"]) if has_position(o) else "auto"
+    scale = o.get("scale", 1.0)
+    if not is_number(scale):
+        scale = 1.0
     fields = [
         "output = " + lua_str(o["name"]),
         "mode = " + lua_str(mode),
         "position = " + lua_str(position),
-        "scale = " + repr(o.get("scale", 1.0)),
+        "scale = " + repr(float(scale)),
     ]
     t = HYPR_TRANSFORM.get(o.get("transform", "normal"), 0)
     if t:
@@ -441,10 +698,12 @@ def gen_hypr(model, icc=None):
         "-- wlr-output-management, so it gets monitor rules from the same model that",
         "-- drives wlr-randr and kanshi on the other sessions.",
         "",
-        "-- The catch-all comes FIRST and is always emitted. Later rules win, so a",
-        "-- named output below overrides it, and a display that is not in the model",
-        "-- at all — one plugged in after these settings were saved — still gets",
-        "-- configured instead of coming up dark.",
+        "-- The catch-all is always emitted. An empty output never matches a",
+        "-- connector by name, and Hyprland falls back to the first empty-name rule",
+        "-- for any display no rule names (MonitorRuleManager.cpp:94-105, 0.57.0), so",
+        "-- a display plugged in after these settings were saved still comes up",
+        "-- instead of dark. It goes first only for readability: named rules match",
+        "-- by name, not by order.",
         "--",
         "-- It lived in the seeded hyprland.conf before P0-025. It has to be here",
         "-- now: this module is what Settings rewrites, and a fallback in a file",
@@ -531,26 +790,27 @@ def atomic_write(path, text):
 
 
 def persist(model, live, dry_run, icc=None):
+    """Write kanshi + the Hyprland module. Returns (ok, notes)."""
     notes = []
     kanshi = gen_kanshi(model, live)
     hypr = gen_hypr(model, icc)
     if dry_run:
         print(f"--- {KANSHI_OUT} ---\n{kanshi}")
         print(f"--- {HYPR_OUT} ---\n{hypr}")
-        return notes
+        return True, notes
     # Validate before replacing anything. A rejected module would be skipped by
     # hyprland.lua's loader rather than taking the config down, but skipped means
     # the saved layout silently does not apply — so refuse to write it instead.
     if validate_hyprland(hypr) is False:
-        return ["the generated Hyprland monitor module was rejected; "
-                "the previous layout is untouched"]
+        return False, ["the generated Hyprland monitor module was rejected; "
+                       "the previous layout is untouched"]
     atomic_write(KANSHI_OUT, kanshi)
     atomic_write(HYPR_OUT, hypr)
     # kanshi reloads on SIGHUP; if it is not running the profile applies at the
     # next login, which is the same outcome as any other config change.
     if shutil.which("pkill"):
         run(["pkill", "-HUP", "-x", "kanshi"])
-    return notes
+    return True, notes
 
 
 # ── colour management ───────────────────────────────────────────────────────
@@ -1162,12 +1422,12 @@ def hypr_push_icc(name, filename, model_path):
         model = {"outputs": model["outputs"] + [entry]}
     icc = assigned_icc([o["name"] for o in model["outputs"]])
     icc[name] = filename
-    notes = []
+    notes = fit_to_live(model, live)
     if os.environ.get("RIME_DISPLAY_NO_LIVE"):
         notes.append("RIME_DISPLAY_NO_LIVE is set; the live screen was not changed")
     else:
         notes += apply_hypr({"outputs": [entry]}, False, icc)
-    notes += persist(model, live, False, icc)
+    notes += persist(model, live, False, icc)[1]
     return notes
 
 
@@ -1292,6 +1552,161 @@ def self_test():
     else:
         print("FAIL  the layout is not a single wlr-randr invocation")
         rc = 1
+    rc |= self_test_hardening()
+    return rc
+
+
+def _model_from(text):
+    """load_model on a JSON text, through a real file like the CLI reads."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write(text)
+    try:
+        return load_model(fh.name)
+    finally:
+        os.unlink(fh.name)
+
+
+def self_test_hardening():
+    """The Lua-only / validated-model contract. Each case names what it guards."""
+    rc = 0
+
+    def check(label, ok, got=None):
+        nonlocal rc
+        if ok:
+            print(f"PASS  {label}")
+        else:
+            print(f"FAIL  {label}" + (f" (got {got!r})" if got is not None else ""))
+            rc = 1
+
+    # lua_str: quote, backslash, newline, ]], DEL, a digit right after an escape.
+    nasty = 'a"b\\c\nd]]e\x7f1'
+    want = '"a\\"b\\\\c\\010d]]e\\1271"'
+    check("lua_str escapes quote, backslash, newline and DEL as \\ddd",
+          lua_str(nasty) == want, lua_str(nasty))
+    check("lua_str leaves no raw control character",
+          not any(ord(c) < 0x20 or ord(c) == 0x7f for c in lua_str("x\r\n\t\x00\x1b")))
+    # The escaped literal must survive Hyprland's own Lua parser: a module whose
+    # comment and string carry a newline-injection attempt still loads clean.
+    inj = 'DP-1"})\nhl.exec_cmd("touch /tmp/pwned")\n--]]'
+    mod = gen_hypr({"outputs": [{"name": inj, "enabled": True, "scale": 1.0}]})
+    check("an injected name stays one string literal", mod.count("\n") ==
+          gen_hypr({"outputs": [{"name": "DP-1", "enabled": True, "scale": 1.0}]}).count("\n")
+          and "hl.exec_cmd" not in mod.replace(lua_str(inj), ""))
+    valid = validate_hyprland(mod)
+    if valid is None:
+        print("SKIP  Hyprland not installed; cannot parse the injection module")
+    else:
+        check("Hyprland parses the injection module as data, not code", valid)
+
+    # The model: names, bools, NaN/Infinity, positions, modes.
+    m, notes = _model_from('{"outputs": [{"name": "A\\nB"}, {"name": "q\\"x"}, '
+                           '{"name": "DP-1"}]}')
+    check("output names with a control character or quote are refused",
+          [o["name"] for o in m["outputs"]] == ["DP-1"] and len(notes) == 2, notes)
+    m, notes = _model_from('{"outputs": [{"name": "DP-1", "scale": true, "x": true, '
+                           '"y": 0, "enabled": "false"}]}')
+    o = m["outputs"][0]
+    check("a bool is not a number: scale true is refused", o["scale"] == 1.0
+          and any("scale" in n for n in notes), notes)
+    check("a bool is not a coordinate: x true places the output automatically",
+          "x" not in o and "y" not in o and 'position = "auto"' in hypr_monitor_call(o))
+    check("enabled must be a bool, not the string \"false\"", o["enabled"] is True
+          and any("enabled" in n for n in notes), notes)
+    m, notes = _model_from('{"outputs": [{"name": "DP-1", "scale": NaN}]}')
+    check("NaN anywhere refuses the whole model", m["outputs"] == [] and notes, notes)
+    m, notes = _model_from('{"outputs": [{"name": "DP-1", "x": Infinity, "y": 0}]}')
+    check("Infinity anywhere refuses the whole model", m["outputs"] == [] and notes, notes)
+    m, notes = _model_from('{"outputs": [{"name": "DP-1", "scale": 1e400, "x": 0, '
+                           '"y": 1e400}]}')
+    o = m["outputs"][0]
+    check("1e400 (inf after parsing) is refused as scale and coordinate",
+          o["scale"] == 1.0 and "y" not in o and len(notes) == 2, notes)
+    for bad in ('"10"', "1.5", "99999", "-40000"):
+        m, notes = _model_from('{"outputs": [{"name": "DP-1", "x": %s, "y": 0}]}' % bad)
+        check(f"x = {bad} is not a usable coordinate", "x" not in m["outputs"][0]
+              and notes, notes)
+    m, notes = _model_from('{"outputs": [{"name": "DP-1", "x": -1920, "y": 0}]}')
+    check("a negative coordinate in range is kept", m["outputs"][0].get("x") == -1920
+          and not notes, notes)
+    m, notes = _model_from('{"outputs": [{"name": "DP-1", '
+                           '"mode": "1920x1080@60\\", x = 1"}]}')
+    check("a mode string that is not WIDTHxHEIGHT[@HZ] is refused",
+          "mode" not in m["outputs"][0] and notes, notes)
+    m, notes = _model_from('{"outputs": [{"name": "DP-1", "mode": {"width": 1920, '
+                           '"height": true, "refresh": 60}}]}')
+    check("a bool mode height is refused", "mode" not in m["outputs"][0] and notes, notes)
+
+    # The live check: a mode the display does not list is never applied.
+    live = [{"name": "DP-1", "width": 1920, "height": 1080, "scale": 1.0,
+             "modes": [{"width": 1920, "height": 1080, "refresh": 60.0,
+                        "preferred": False, "current": True},
+                       {"width": 1280, "height": 720, "refresh": 60.0,
+                        "preferred": False, "current": False}]}]
+    model = {"outputs": [{"name": "DP-1", "enabled": True, "scale": 1.0,
+                          "mode": {"width": 1234, "height": 567, "refresh": 60}}]}
+    notes = fit_to_live(model, live)
+    check("an unknown mode falls back to the current mode, with a note",
+          mode_string(model["outputs"][0]) == "1920x1080@60Hz" and len(notes) == 1, notes)
+    model = {"outputs": [{"name": "DP-1", "enabled": True, "scale": 1.0,
+                          "mode": {"width": 1920, "height": 1080, "refresh": 59.94}}]}
+    check("a listed mode within 1 Hz is accepted silently",
+          fit_to_live(model, live) == [] and model["outputs"][0]["mode"]["refresh"] == 59.94)
+    model = {"outputs": [{"name": "HDMI-A-9", "enabled": True, "scale": 1.0,
+                          "mode": {"width": 1234, "height": 567, "refresh": 60}}]}
+    check("an output that is not connected is left as saved",
+          fit_to_live(model, live) == [] and model["outputs"][0]["mode"]["width"] == 1234)
+
+    # Scale: Hyprland's own snap, replicated (Monitor.cpp:939-985).
+    for w, h, asked, want_scale, kind in (
+            (1920, 1080, 1.5, 1.5, "clean"),
+            (2560, 1600, 1.6, 1.6, "silent"),
+            (1920, 1080, 1.249, 1.25, "silent"),
+            (1920, 1080, 1.1, 1.2, "suggested"),
+            (1280, 800, 1.1, 128 / 120, "suggested"),
+            (1366, 768, 1.3, 1.0, "suggested"),
+            (1367, 769, 2.0, None, "none")):
+        got = hypr_scale(w, h, asked)
+        check(f"hypr_scale {w}x{h} @ {asked} -> {want_scale} ({kind})",
+              got == (want_scale if kind != "clean" else asked, kind), got)
+        if got[0] is not None:
+            again = hypr_scale(w, h, got[0])
+            check(f"the snapped {w}x{h} scale {got[0]:.4f} raises no notification",
+                  again[1] in ("clean", "silent") and abs(again[0] - got[0]) < 1e-9, again)
+    model = {"outputs": [{"name": "DP-1", "enabled": True, "scale": 1.1,
+                          "mode": {"width": 1920, "height": 1080, "refresh": 60}}]}
+    notes = fit_to_live(model, live)
+    check("an unclean scale is snapped to Hyprland's choice, with a note",
+          model["outputs"][0]["scale"] == 1.2 and len(notes) == 1 and "1.2" in notes[0], notes)
+    model = {"outputs": [{"name": "DP-1", "enabled": True, "scale": 1.1}]}
+    fit_to_live(model, live)
+    check("with no mode in the model the current mode decides the snap",
+          model["outputs"][0]["scale"] == 1.2, model)
+
+    # apply_hypr: eval only, and a refusal is reported, never a fallback.
+    global run
+    real_run = run
+    calls = []
+    try:
+        for reply, expect_notes in (("ok\n", 0), ("[string]:1: attempt to call nil", 1)):
+            calls.clear()
+
+            def fake(cmd, _reply=reply, **_kw):
+                calls.append(list(cmd))
+
+                class R:
+                    returncode = 0
+                    stdout = _reply
+                    stderr = ""
+                return R()
+            run = fake
+            notes = apply_hypr(SAMPLE, False)
+            check(f"apply_hypr reply {reply.strip()[:20]!r}: "
+                  f"{'applied' if not expect_notes else 'reported as refused'}",
+                  len(notes) == expect_notes * len(SAMPLE["outputs"]), notes)
+            check("apply_hypr never runs `hyprctl keyword`",
+                  calls and all(c[:2] == ["hyprctl", "eval"] for c in calls), calls)
+    finally:
+        run = real_run
     return rc
 
 
@@ -1364,6 +1779,10 @@ def main(argv=None):
     live = outputs()
     which = compositor()
     icc = assigned_icc([o["name"] for o in model["outputs"]])
+    # Checked against what is connected now, before anything is applied or
+    # written: the live call, kanshi and monitors.lua all get the same answer.
+    for n in fit_to_live(model, live):
+        print(f"rime-display: {n}", file=sys.stderr)
 
     if args.action == "apply":
         # RIME_DISPLAY_NO_LIVE is a hard refusal, not a hint. `apply` reaches the
@@ -1392,9 +1811,10 @@ def main(argv=None):
         print("rime-display: --no-persist; the live layout changed and nothing "
               "was written", file=sys.stderr)
         return 0
-    for n in persist(model, live, args.dry_run, icc):
+    ok, pnotes = persist(model, live, args.dry_run, icc)
+    for n in pnotes:
         print(f"rime-display: {n}", file=sys.stderr)
-    return 0
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

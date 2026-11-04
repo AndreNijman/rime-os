@@ -75,6 +75,7 @@ usage:
 """
 import argparse
 import json
+import math
 import re
 import os
 import shutil
@@ -138,8 +139,24 @@ DEFAULTS = {
     "keyboard": {
         "repeat_rate": 25,
         "repeat_delay": 600,
+        # XKB rules/model/layout/variant/options. Empty means "Settings has not
+        # chosen one": nothing is generated and the layout rime-shell-firstrun
+        # seeded into rime/input-defaults.lua (from the installer's choice)
+        # stands. A non-empty layout is checked with xkbcommon itself before
+        # anything is written — see check_keyboard_layout.
+        "layout": "",
+        "variant": "",
+        "model": "",
+        "options": "",
     },
 }
+
+XKB_KEYS = ("layout", "variant", "model", "options")
+# What an RMLVO name is made of in xkeyboard-config: `us`, `de,us`,
+# `colemak_dh`, `pc105`, `grp:alt_shift_toggle,ctrl:nocaps`, `mac(intl)`.
+# Anything else (a quote, a space, a control character) is not a layout and is
+# refused before xkbcommon or a generator sees it.
+XKB_TEXT = re.compile(r"^[A-Za-z0-9_+:,()./-]{0,256}$")
 
 TAP_BUTTON_MAPS = ("lrm", "lmr")
 ACCEL_PROFILES = ("adaptive", "flat")
@@ -424,6 +441,10 @@ CAPABILITIES = {
     "pointer.middle_emulation": {
         "hyprland": "hyprland-pointer-device",
     },
+    **{f"keyboard.{key}": {
+        "labwc": ("labwc takes the keyboard layout from its environment file "
+                  "when the session starts, which Rime Settings does not write"),
+    } for key in ("layout", "variant", "model", "options")},
 }
 
 # Filled in from the live enumeration, because whether Hyprland can do these
@@ -513,9 +534,15 @@ def load_model(path):
         # configuration at all; fall back to defaults and say so.
         return model, [f"{path} is not usable ({e}); using defaults"]
 
+    if not isinstance(user, dict):
+        return model, [f"{path} is not an input model; using defaults"]
     notes = []
     for section in model:
-        for key, value in (user.get(section) or {}).items():
+        given = user.get(section) or {}
+        if not isinstance(given, dict):
+            notes.append(f"ignoring {section}: not a table of settings")
+            continue
+        for key, value in given.items():
             if key not in model[section]:
                 notes.append(f"ignoring unknown {section}.{key}")
                 continue
@@ -531,7 +558,15 @@ def load_model(path):
     # generation time from the live enumeration, because its tie-break suffix
     # depends on what else is plugged in and cannot be stored.
     model["devices"] = {}
-    for name, settings in (user.get("devices") or {}).items():
+    given = user.get("devices") or {}
+    if not isinstance(given, dict):
+        notes.append("ignoring devices: not a table of devices")
+        given = {}
+    for name, settings in given.items():
+        why = name_problem(name)
+        if why:
+            notes.append(f"ignoring a device that {why}: {name!r}")
+            continue
         if not isinstance(settings, dict):
             notes.append(f"ignoring devices.{name}: not a table of settings")
             continue
@@ -558,6 +593,8 @@ def load_model(path):
 
     notes += validate(model)
     notes += validate_devices(model)
+    # A device left with nothing but its type after validation has nothing to say.
+    model["devices"] = {n: d for n, d in model["devices"].items() if len(d) > 1}
     return model, notes
 
 
@@ -570,15 +607,16 @@ def validate_devices(model):
             settings.pop(key, None)
 
         if "speed" in settings and (
-                not isinstance(settings["speed"], (int, float))
-                or isinstance(settings["speed"], bool)
+                not is_number(settings["speed"])
                 or not -1.0 <= settings["speed"] <= 1.0):
             fix("speed", None, "must be between -1.0 and 1.0")
         if "scroll_factor" in settings and (
-                not isinstance(settings["scroll_factor"], (int, float))
-                or isinstance(settings["scroll_factor"], bool)
+                not is_number(settings["scroll_factor"])
                 or not 0.1 <= settings["scroll_factor"] <= 10.0):
             fix("scroll_factor", None, "must be between 0.1 and 10.0")
+        for key in [k for k in settings if k in DEVICE_BOOL_KEYS]:
+            if not isinstance(settings[key], bool):
+                fix(key, None, "must be true or false")
         for key, allowed in (("accel_profile", ACCEL_PROFILES),
                              ("click_method", CLICK_METHODS),
                              ("scroll_method", SCROLL_METHODS),
@@ -586,6 +624,35 @@ def validate_devices(model):
             if key in settings and settings[key] not in allowed:
                 fix(key, None, f"must be one of {allowed}")
     return notes
+
+
+def is_number(v):
+    """A finite int or float that is not a bool (True is an int in Python, and
+    json takes NaN, Infinity and 1e400)."""
+    return (isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v))
+
+
+def is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def name_problem(name):
+    """Why a device name cannot be used, or None. Kernel names come from USB
+    descriptors, so a control character in one is never real."""
+    if not isinstance(name, str) or not name:
+        return "has no name"
+    if len(name) > 256:
+        return "has a name longer than 256 characters"
+    if any(ord(c) < 0x20 or ord(c) == 0x7f for c in name):
+        return "has a control character in its name"
+    return None
+
+
+# Device keys whose value is a switch. Everything else is a number or a word.
+DEVICE_BOOL_KEYS = ("natural_scroll", "left_handed", "middle_emulation", "enabled",
+                    "tap", "tap_and_drag", "drag_lock", "disable_while_typing",
+                    "three_finger_drag")
 
 
 def validate(model):
@@ -596,13 +663,20 @@ def validate(model):
         notes.append(f"{section}.{key}: {reason}, using {value}")
         model[section][key] = value
 
+    # Switches are switches: "false" (a string) is truthy, and lua_value would
+    # have written it as the Lua string "false", which Hyprland rejects.
+    for section in ("touchpad", "pointer"):
+        for key, default in DEFAULTS[section].items():
+            if isinstance(default, bool) and not isinstance(model[section].get(key), bool):
+                fix(section, key, default, "must be true or false")
+
     for section in ("touchpad", "pointer"):
         s = model[section]
-        if not isinstance(s.get("speed"), (int, float)) or not -1.0 <= s["speed"] <= 1.0:
+        if not is_number(s.get("speed")) or not -1.0 <= s["speed"] <= 1.0:
             fix(section, "speed", DEFAULTS[section]["speed"], "must be between -1.0 and 1.0")
         if s.get("accel_profile") not in ACCEL_PROFILES:
             fix(section, "accel_profile", "adaptive", f"must be one of {ACCEL_PROFILES}")
-        if not isinstance(s.get("scroll_factor"), (int, float)) or not 0.1 <= s["scroll_factor"] <= 10.0:
+        if not is_number(s.get("scroll_factor")) or not 0.1 <= s["scroll_factor"] <= 10.0:
             fix(section, "scroll_factor", 1.0, "must be between 0.1 and 10.0")
 
     t = model["touchpad"]
@@ -614,12 +688,142 @@ def validate(model):
         fix("touchpad", "scroll_method", "twofinger", f"must be one of {SCROLL_METHODS}")
 
     k = model["keyboard"]
-    if not isinstance(k.get("repeat_rate"), int) or not 1 <= k["repeat_rate"] <= 100:
+    if not is_int(k.get("repeat_rate")) or not 1 <= k["repeat_rate"] <= 100:
         fix("keyboard", "repeat_rate", 25, "must be between 1 and 100")
-    if not isinstance(k.get("repeat_delay"), int) or not 100 <= k["repeat_delay"] <= 2000:
+    if not is_int(k.get("repeat_delay")) or not 100 <= k["repeat_delay"] <= 2000:
         fix("keyboard", "repeat_delay", 600, "must be between 100 and 2000")
+    # Shape only here; whether xkbcommon can build a keymap from it is
+    # check_keyboard_layout's question, asked on the apply path. A bad shape
+    # becomes None, which that check refuses like any other unbuildable layout
+    # (so the last accepted one stays), and which no generator writes.
+    for key in XKB_KEYS:
+        if not isinstance(k.get(key), str) or not XKB_TEXT.match(k[key]):
+            notes.append(f"keyboard.{key}: {k.get(key)!r} is not an XKB name")
+            k[key] = None
 
     return notes
+
+
+# ── keyboard layout: checked by xkbcommon before it is written ─────────────
+# Hyprland compiles kb_layout/kb_variant/kb_model/kb_options with
+# xkb_keymap_new_from_names2 (src/devices/IKeyboard.cpp:60-117, 0.57.0). When
+# that fails it shows "Invalid keyboard layout passed" and drops the keyboard
+# to rules "", model "", variant "", options "" and layout "us" — so one typo
+# in Settings would turn a German keyboard into a US one with an error overlay.
+# xkbcli compile-keymap runs the same libxkbcommon compile against the same
+# default include paths, so it is asked first, and a layout it cannot build is
+# never written.
+#
+# Two of the four fail QUIETLY in xkbcommon, measured with libxkbcommon 1.13.2:
+# an unknown option compiles with exit 0 and "Unrecognized RMLVO option …
+# was ignored" on stderr, and an unknown model compiles with exit 0 and no
+# message at all. The first is caught by its message, the second against the
+# model list `xkbcli list` reads from the same xkeyboard-config.
+KEYBOARD_MARK = "-- rime-keyboard: "
+
+
+def _xkb_model_names():
+    try:
+        out = subprocess.run(["xkbcli", "list"], capture_output=True, text=True,
+                             timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    names, in_models = set(), False
+    for line in out.stdout.splitlines():
+        if line and not line.startswith((" ", "-")):
+            in_models = line.strip() == "models:"
+            continue
+        if in_models and line.startswith("- name: "):
+            names.add(line[len("- name: "):].strip())
+    return names or None
+
+
+def xkb_problem(kb):
+    """Why xkbcommon would refuse this layout, or None when it compiles clean.
+
+    `kb` holds the four XKB_KEYS. Only called with a non-empty layout.
+    """
+    if not which("xkbcli"):
+        return "xkbcli is not installed, so the layout could not be checked"
+    cmd = ["xkbcli", "compile-keymap", "--test", "--rules", "evdev",
+           "--layout", kb["layout"]]
+    for key in ("variant", "model", "options"):
+        if kb[key]:
+            cmd += [f"--{key}", kb[key]]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        return f"xkbcli could not run ({e})"
+    errors = [ln.strip() for ln in out.stderr.splitlines() if ln.strip()]
+    if out.returncode != 0:
+        # The most specific line xkbcommon printed: "Couldn't find file …".
+        detail = next((ln for ln in errors if "Couldn't find" in ln or "not find" in ln),
+                      errors[0] if errors else f"exit {out.returncode}")
+        return f"xkbcommon cannot build it: {detail}"
+    ignored = [ln for ln in errors if "Unrecognized RMLVO option" in ln]
+    if ignored:
+        return f"xkbcommon does not know an option: {ignored[0]}"
+    if kb["model"]:
+        models = _xkb_model_names()
+        if models is not None and kb["model"] not in models:
+            return f"xkbcommon has no keyboard model {kb['model']!r}"
+    return None
+
+
+def previous_keyboard(path=None):
+    """The layout the last accepted generation wrote, from its marker line."""
+    path = path or HYPR_OUT
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith(KEYBOARD_MARK):
+                    prev = json.loads(line[len(KEYBOARD_MARK):])
+                    if (isinstance(prev, dict)
+                            and all(isinstance(prev.get(k), str) and XKB_TEXT.match(prev[k])
+                                    for k in XKB_KEYS)):
+                        return {k: prev[k] for k in XKB_KEYS}
+    except (OSError, ValueError):
+        pass
+    return {k: "" for k in XKB_KEYS}
+
+
+def _kb_text(kb):
+    if not kb["layout"]:
+        return "the system layout"
+    return " ".join(f"{k}={kb[k]}" for k in XKB_KEYS if kb[k])
+
+
+def check_keyboard_layout(model, previous=None):
+    """Refuse a layout xkbcommon cannot build; keep the last good one instead.
+
+    Returns notes. The model's four XKB keys are replaced by the previous
+    accepted values (or emptied, which leaves the seeded layout in charge) when
+    the new ones are refused.
+    """
+    k = model["keyboard"]
+    kb = {key: k[key] for key in XKB_KEYS}
+    if any(v is None for v in kb.values()):
+        prev = previous if previous is not None else previous_keyboard()
+        for key in XKB_KEYS:
+            k[key] = prev[key]
+        return [f"the keyboard layout was refused (not an XKB name); keeping {_kb_text(prev)}"]
+    if not kb["layout"]:
+        if any(kb.values()):
+            for key in XKB_KEYS:
+                k[key] = ""
+            return ["keyboard: a variant, model or options without a layout is "
+                    "ignored; the system layout stands"]
+        return []
+    why = xkb_problem(kb)
+    if why is None:
+        return []
+    prev = previous if previous is not None else previous_keyboard()
+    for key in XKB_KEYS:
+        k[key] = prev[key]
+    return [f"keyboard layout {_kb_text(kb)} was refused ({why}); "
+            f"keeping {_kb_text(prev)}"]
 
 
 def yn(value):
@@ -627,9 +831,29 @@ def yn(value):
 
 
 # ── Hyprland ────────────────────────────────────────────────────────────────
+# ── lua_str: byte-identical in rime-display-apply (tests/test-rime-hypr-lua.sh compares) ──
 def lua_str(value):
-    """A Lua double-quoted string literal."""
-    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    """A double-quoted Lua string literal for any text.
+
+    Backslash and the quote are escaped, and so is every control character (C0
+    and DEL) as a three-digit decimal escape (\\010 for a newline): a raw
+    newline in a name would end a `--` comment line or split the literal, and
+    zero-padding to three digits stops a following digit extending the escape.
+    `]]` needs nothing: it is only special inside a long bracket string.
+    """
+    out = []
+    for ch in str(value):
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif code < 0x20 or code == 0x7f:
+            out.append("\\%03d" % code)
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
+# ── end lua_str ──
 
 
 def lua_value(value):
@@ -738,6 +962,11 @@ def gen_hyprland(model, devices=None):
         "--",
         "-- Required by hyprland.lua as `rime.input`. Values come from",
         "-- ~/.config/rime-shell/input.json.",
+        # The last layout xkbcommon accepted, read back when a new one is
+        # refused (previous_keyboard). JSON with ensure_ascii and XKB_TEXT-only
+        # values, so it is one comment line whatever it holds.
+        KEYBOARD_MARK + json.dumps({key: k.get(key) or "" for key in XKB_KEYS},
+                                   sort_keys=True),
         "",
         "hl.config({",
         "    input = {",
@@ -748,6 +977,14 @@ def gen_hyprland(model, devices=None):
         f"        scroll_factor  = {lua_value(p['scroll_factor'])},",
         f"        repeat_rate    = {lua_value(k['repeat_rate'])},",
         f"        repeat_delay   = {lua_value(k['repeat_delay'])},",
+    ]
+    # The layout only when Settings chose one, and then all four: a new layout
+    # must clear the seeded variant (gb's `extd` is not a German variant), which
+    # leaving kb_variant out would not. check_keyboard_layout has already had
+    # xkbcommon build exactly this keymap.
+    if k.get("layout"):
+        lines += [f"        kb_{key:<12} = {lua_str(k.get(key) or '')}," for key in XKB_KEYS]
+    lines += [
         "",
         "        touchpad = {",
         f"            natural_scroll          = {lua_value(t['natural_scroll'])},",
@@ -811,7 +1048,10 @@ def gen_hyprland(model, devices=None):
             emitted.append(f"    {field} = {literal},")
         if not emitted:
             continue
-        lines.append(f"-- {name}" + ("" if dev is None else f"  ({dev['type']})"))
+        # The kernel name goes into a comment, and kernel names come from USB
+        # descriptors: escaped like any other string, so a newline in one
+        # cannot end the comment and start Lua.
+        lines.append(f"-- device {lua_str(name)}" + ("" if dev is None else f" ({dev['type']})"))
         lines.append("hl.device({")
         lines.append(f"    name = {lua_str(hypr_name)},")
         lines += emitted
@@ -843,6 +1083,14 @@ def gen_niri(model):
         "    keyboard {",
         f"        repeat-delay {k['repeat_delay']}",
         f"        repeat-rate {k['repeat_rate']}",
+    ]
+    if k.get("layout"):
+        # XKB_TEXT allows no quote or backslash, so the KDL strings need no
+        # escaping; all four are written so a new layout clears an old variant.
+        lines.append("        xkb {")
+        lines += [f'            {key} "{k.get(key) or ""}"' for key in XKB_KEYS]
+        lines.append("        }")
+    lines += [
         "    }",
         "",
         "    touchpad {",
@@ -1245,6 +1493,10 @@ HYPR_GETOPTION = {
     "pointer.scroll_factor":         "input:scroll_factor",
     "keyboard.repeat_rate":          "input:repeat_rate",
     "keyboard.repeat_delay":         "input:repeat_delay",
+    "keyboard.layout":               "input:kb_layout",
+    "keyboard.variant":              "input:kb_variant",
+    "keyboard.model":                "input:kb_model",
+    "keyboard.options":              "input:kb_options",
 }
 
 BOOL_CONTROLS = {f"{s}.{k}" for s in DEFAULTS for k, v in DEFAULTS[s].items()
@@ -1487,6 +1739,10 @@ def read_back(model_path):
         # not a mismatch to shout about.
         if seen is None or seen["value"] is None:
             continue
+        # An empty layout means Settings never chose one; the seeded layout is
+        # in effect by design, not diverged from it.
+        if control.startswith("keyboard.") and control[9:] in XKB_KEYS and want == "":
+            continue
         cap = caps["controls"].get(control, {}).get(comp or "", {})
         if not cap.get("supported", True):
             continue
@@ -1606,6 +1862,118 @@ def self_test():
             rc = 1
         else:
             print(f"PASS  all {len(used)} labwc element names are implemented")
+    rc |= self_test_hardening()
+    return rc
+
+
+def _model_from(text):
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        fh.write(text)
+    try:
+        return load_model(fh.name)
+    finally:
+        os.unlink(fh.name)
+
+
+def self_test_hardening():
+    """Injection, type confusion and the keyboard-layout refusal."""
+    rc = 0
+
+    def check(label, ok, got=None):
+        nonlocal rc
+        if ok:
+            print(f"PASS  {label}")
+        else:
+            print(f"FAIL  {label}" + (f" (got {got!r})" if got is not None else ""))
+            rc = 1
+
+    nasty = 'a"b\\c\nd]]e\x7f1'
+    want = '"a\\"b\\\\c\\010d]]e\\1271"'
+    check("lua_str escapes quote, backslash, newline and DEL as \\ddd",
+          lua_str(nasty) == want, lua_str(nasty))
+
+    # A device whose KERNEL name carries a newline (USB descriptors are
+    # attacker-supplied) must not turn its comment line into Lua.
+    model = {k: dict(v) for k, v in DEFAULTS.items()}
+    model["devices"] = {}
+    evil = 'Evil Mouse\nhl.exec_cmd("touch /tmp/pwned") --]]'
+    hypr = gen_hyprland(model, [{"name": evil, "type": "mouse",
+                                 "hypr_name": "evil-mouse", "hypr_name_source": "derived"}])
+    check("a newline in a device name stays inside the escaped comment",
+          not any(line.startswith("hl.exec_cmd") for line in hypr.splitlines())
+          and lua_str(evil) in hypr, hypr)
+    valid = validate_hyprland(hypr)
+    if valid is None:
+        print("SKIP  Hyprland not installed; cannot parse the injection module")
+    else:
+        check("Hyprland parses the device-name injection as a comment", valid)
+
+    m, notes = _model_from('{"touchpad": {"speed": true, "tap": "false", '
+                           '"scroll_factor": NaN}, "pointer": {"speed": 1e400}, '
+                           '"keyboard": {"repeat_rate": true, "repeat_delay": Infinity}}')
+    check("a bool is not a speed", m["touchpad"]["speed"] == 0.0, m["touchpad"])
+    check("the string \"false\" is not a switch", m["touchpad"]["tap"] is True, m["touchpad"])
+    check("NaN is refused per key", m["touchpad"]["scroll_factor"] == 1.0, m["touchpad"])
+    check("1e400 (inf) is refused", m["pointer"]["speed"] == 0.0, m["pointer"])
+    check("repeat_rate true is not 1", m["keyboard"]["repeat_rate"] == 25, m["keyboard"])
+    check("Infinity is refused per key", m["keyboard"]["repeat_delay"] == 600, m["keyboard"])
+    check("each refusal is reported", len(notes) == 6, notes)
+    m, notes = _model_from('{"devices": {"Pad\\nX": {"type": "touchpad", "tap": true}, '
+                           '"Pad": {"type": "touchpad", "tap": "yes", "speed": false}}}')
+    check("a device name with a control character is refused",
+          list(m["devices"]) == [] and len(notes) == 3, (m["devices"], notes))
+    m, notes = _model_from('{"keyboard": {"layout": "us\\"; os.execute(\\"x\\") --"}}')
+    prev = {"layout": "de", "variant": "", "model": "", "options": ""}
+    notes += check_keyboard_layout(m, previous=dict(prev))
+    check("a layout that is not an XKB name is refused before xkbcommon, previous kept",
+          {k: m["keyboard"][k] for k in XKB_KEYS} == prev and len(notes) == 2, notes)
+
+    # xkbcommon decides; the previous accepted layout is what stays.
+    if not which("xkbcli"):
+        print("SKIP  xkbcli not installed; cannot check keyboard layouts")
+        return rc
+    prev = {"layout": "de", "variant": "nodeadkeys", "model": "", "options": ""}
+    for label, kb, accepted in (
+            ("layout us", {"layout": "us"}, True),
+            ("layouts us,de with a second-layout variant",
+             {"layout": "us,de", "variant": ",nodeadkeys"}, True),
+            ("layout gb variant extd, model pc105, options ctrl:nocaps",
+             {"layout": "gb", "variant": "extd", "model": "pc105",
+              "options": "ctrl:nocaps"}, True),
+            ("unknown layout xx", {"layout": "xx"}, False),
+            ("unknown variant", {"layout": "us", "variant": "bogus"}, False),
+            ("unknown option (xkbcommon only warns)",
+             {"layout": "us", "options": "bogus:opt"}, False),
+            ("unknown model (xkbcommon says nothing)",
+             {"layout": "us", "model": "nosuchmodel"}, False)):
+        model = {k: dict(v) for k, v in DEFAULTS.items()}
+        model["keyboard"].update(kb)
+        notes = check_keyboard_layout(model, previous=dict(prev))
+        got = {k: model["keyboard"][k] for k in XKB_KEYS}
+        if accepted:
+            check(f"xkb: {label} is accepted", not notes
+                  and all(got[k] == kb.get(k, "") for k in XKB_KEYS), (got, notes))
+        else:
+            check(f"xkb: {label} is refused and the previous layout kept",
+                  got == prev and len(notes) == 1 and "refused" in notes[0], (got, notes))
+    model = {k: dict(v) for k, v in DEFAULTS.items()}
+    model["keyboard"].update({"layout": "gb", "variant": "extd"})
+    hypr = gen_hyprland(model, [])
+    check("an accepted layout is written as all four kb_ options",
+          'kb_layout       = "gb",' in hypr and 'kb_variant      = "extd",' in hypr
+          and 'kb_options      = "",' in hypr, hypr)
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "input.lua")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(hypr)
+        check("the marker line gives the accepted layout back",
+              previous_keyboard(path) == {"layout": "gb", "variant": "extd",
+                                          "model": "", "options": ""})
+    valid = validate_hyprland(hypr)
+    if valid is None:
+        print("SKIP  Hyprland not installed; cannot validate the kb_ options")
+    else:
+        check("Hyprland accepts the generated kb_ options", valid)
     return rc
 
 
@@ -1662,6 +2030,9 @@ def main(argv=None):
         return 0
 
     model, notes = load_model(args.model)
+    # Before anything is generated: a layout xkbcommon cannot build is replaced
+    # by the last accepted one, so neither compositor is handed it.
+    notes += check_keyboard_layout(model)
     devices, device_notes = enumerate_devices()
     notes += device_notes
     for note in notes:

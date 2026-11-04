@@ -60,6 +60,7 @@
   glib,
   dbus,
   libnotify,
+  libxkbcommon,
   getent,
   xprop,
   libcap,
@@ -135,7 +136,7 @@ let
     rime-greetd = [ ];
     rime-guest-wipe = [ getent systemd ];
     rime-hypr-migrate = [ util-linux ];
-    rime-input-apply = [ procps util-linux systemd ];
+    rime-input-apply = [ procps util-linux systemd libxkbcommon ]; # xkbcli: a layout is compiled before it is written
     rime-keyring-login = [ ];
     rime-labwc-keybinds = [ ];
     rime-luks-enroll = [ python3 tpm2-tools cryptsetup systemd ];
@@ -151,7 +152,7 @@ let
     rime-session-logout = [ procps systemd ];
     rime-session-watchdog = [ ];
     rime-shell-autostart = [ procps ];
-    rime-shell-firstrun = [ python3 util-linux systemd diffutils ];
+    rime-shell-firstrun = [ python3 util-linux systemd diffutils libxkbcommon ];
     rime-storage-notice = [ libnotify ];
     rime-switch-greeter = [ getent ];
     rime-switch-user = [ getent ];
