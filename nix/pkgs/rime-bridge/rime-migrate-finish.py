@@ -162,6 +162,13 @@ class System:
     def subvol_sync(self, top):
         run(["btrfs", "subvolume", "sync", top])
 
+    def commit(self, path):
+        """Make what is under PATH what GRUB reads. GRUB replays neither btrfs's log tree nor ext4's journal: an
+        fsync'd unlink is only in the log until the next commit (~30 s), so after a power cut GRUB still listed the
+        ostree entry Linux had removed (OVMF interrupt run). sync(2) commits btrfs's transaction and, on ext4,
+        commits the journal and writes the metadata back to its place."""
+        os.sync()
+
     def usage(self, top):
         r = run(["btrfs", "filesystem", "usage", "-b", top], check=False)
         u = B.parse_btrfs_usage(r.stdout or "") or {}
@@ -615,6 +622,7 @@ def cmd_yes(sx, facts):
                 os.fsync(fd)
             finally:
                 os.close(fd)
+        sx.commit(sx.boot)      # before any data goes: GRUB must not offer the old system after a power cut
         step("boot entries")
         kdir = os.path.join(sx.boot, "ostree")
         if os.path.lexists(kdir):

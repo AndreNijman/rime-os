@@ -100,6 +100,7 @@ class FakeSystem(F.System):
         self.hook = None
         self.mounted = []
         self.deleted = []
+        self.commits = []
         # read-only subvolumes: btrfs refuses (EROFS) to move one into another directory, as the OVMF run found
         self.readonly = {"@pre-nixos"}
         self.build()
@@ -181,6 +182,10 @@ class FakeSystem(F.System):
 
     def subvol_sync(self, top):
         pass
+
+    def commit(self, path):
+        # what GRUB would read after a power cut from here on: the ostree entries left under /boot at this commit
+        self.commits.append((os.path.relpath(path, self.top), [os.path.basename(f) for f, _ in F.ostree_entries(path)]))
 
     def usage(self, top):
         n = sum(os.path.getsize(os.path.join(d, f)) for d, _, fs in os.walk(top) for f in fs)
@@ -502,10 +507,13 @@ class FinishTest(unittest.TestCase):
                 seen["entries"] = F.ostree_entries(sx.boot)
                 seen["ostree"] = os.path.isdir(os.path.join(sx.top, "ostree"))
                 seen["pre"] = os.path.isdir(os.path.join(sx.top, "@pre-nixos"))
+            if name == "boot entries":
+                seen["commits"] = list(sx.commits)
         self.sx.hook = hook
         rc, out = run(self.sx, "--yes")
         self.assertEqual(rc, 0, out)
-        self.assertEqual(seen, {"entries": [], "ostree": True, "pre": True})
+        # ...and the removal is committed (GRUB replays no btrfs log or ext4 journal) before the step is recorded
+        self.assertEqual(seen, {"entries": [], "ostree": True, "pre": True, "commits": [("boot", [])]})
 
     def test_second_run_refused(self):
         rc, out = run(self.sx, "--yes")

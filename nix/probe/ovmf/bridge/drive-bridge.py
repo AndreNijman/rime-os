@@ -753,7 +753,8 @@ def grub_menu(vm, name):
     h, j = t.find("highlighted entry"), t.find("Booting `")
     i = t.rfind("GRUB", 0, h) if h >= 0 else -1
     raw = t[i:j] if 0 <= i < j else ""
-    menu = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "\n", raw)
+    # vm.buf has the escapes stripped already (VM.reader): entries are padded to the box width, so 3+ spaces end one
+    menu = re.sub(r" {3,}", "\n", re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "\n", raw))
     skip = ("GRUB", "Use the", "Press enter", "highlighted entry", "ESC to")
     entries = list(dict.fromkeys(
         ln.strip().lstrip("*").strip() for ln in menu.split("\n")
