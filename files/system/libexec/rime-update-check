@@ -12,6 +12,20 @@
 #
 #      state=available|none
 #      digest=sha256:…          (the published image; empty when unknown)
+#      release=2026.11.04.4     (that image's release ID; empty when unknown)
+#      running=2026.11.03       (the release this machine booted; empty: "dev")
+#
+#  release= and running= are the keys the NixOS checker writes (rimed/rime/src/
+#  nixos/update.rs), so Rime Shell builds the same "What's in this update" link
+#  (rimeos.com/updates/<release>?from=<running>) on both. Readers that predate
+#  them ignore unknown keys. The release ID is the image's
+#  org.rimeos.release.id label (Containerfile.rime), read without a second
+#  registry request where it can be: `bootc upgrade --check` already fetched
+#  the image config and ostree keeps it with the booted image's ref
+#  (ostree-ext.cached.*). Only where that cache is not there (another bootc
+#  backend, an older bootc) is the config fetched again, once per new digest,
+#  by that digest, so the label is the published image's and nothing else's.
+#  It is display data: a value that is not a release ID is written as empty.
 #
 #  The user-side half (rime-update-notice) is woken by a systemd .path unit
 #  when this file changes — nothing polls — and says it once per digest.
@@ -26,16 +40,91 @@
 set -uo pipefail
 
 BOOTC="${RIME_BOOTC_BIN:-/usr/bin/bootc}"
+OSTREE="${RIME_OSTREE_BIN:-/usr/bin/ostree}"
+OSTREE_REPO="${RIME_OSTREE_REPO:-/ostree/repo}"
+SKOPEO="${RIME_SKOPEO_BIN:-/usr/bin/skopeo}"
+RELEASE_JSON="${RIME_RELEASE_JSON:-/usr/share/rime/release.json}"
 DIR="${RIME_UPDATE_DIR:-/run/rime-update}"
 STATE="$DIR/state"
+# files/scripts/stamp-release's rule: YYYY.MM.DD, or YYYY.MM.DD.N with N >= 2.
+RELEASE_RE='^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.([2-9]|[1-9][0-9]+))?$'
 
 log() { printf 'rime-update-check: %s\n' "$*" >&2; }
 
 [[ -x "$BOOTC" ]] || { log "no bootc at $BOOTC"; exit 0; }
 
+# A release ID, or nothing: whatever else a file or a label says is dropped.
+release_id() {
+    [[ "${1:-}" =~ $RELEASE_RE ]] && printf '%s' "$1"
+    return 0
+}
+
+# The release this machine booted: the image's own release.json (a "dev" build
+# has none worth naming).
+running_release() {
+    [[ -r "$RELEASE_JSON" ]] || return 0
+    release_id "$(python3 -I -c 'import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(d.get("id", "") if isinstance(d, dict) else "")
+except Exception:
+    pass' "$RELEASE_JSON" 2>/dev/null)"
+}
+
+# org.rimeos.release.id from an image config, given as JSON on stdin, or as the
+# GVariant string `ostree show --print-detached-metadata-key` prints around it.
+label_from_config() {
+    python3 -I -c 'import ast, json, sys
+t = sys.stdin.read().strip()
+try:
+    if t[:1] in ("\x27", "\x22"):
+        t = ast.literal_eval(t)
+    d = json.loads(t)
+    labels = (d.get("config") or {}).get("Labels") or d.get("Labels") or {}
+    v = labels.get("org.rimeos.release.id", "")
+    print(v if isinstance(v, str) else "")
+except Exception:
+    pass' 2>/dev/null
+}
+
+# The release ID of the image `bootc upgrade --check` just found, by its digest.
+#   1. ostree's cache: the check stored the image's manifest digest and config
+#      on the booted image's ref. Used only when that digest is this one.
+#   2. Otherwise the config itself, fetched by digest (a few KB, no layers).
+# $1 digest, $2 the image reference from the check ("docker://host/repo:tag").
+available_release() {
+    local digest="$1" ref="$2" r md
+    if [[ -x "$OSTREE" && -d "$OSTREE_REPO" ]]; then
+        while IFS= read -r r; do
+            [[ -n "$r" ]] || continue
+            md="$("$OSTREE" --repo="$OSTREE_REPO" show \
+                    --print-detached-metadata-key=ostree-ext.cached.manifest-digest \
+                    "ostree/container/image/$r" 2>/dev/null)" || continue
+            [[ "$md" == "'$digest'" ]] || continue
+            release_id "$("$OSTREE" --repo="$OSTREE_REPO" show \
+                    --print-detached-metadata-key=ostree-ext.cached.config \
+                    "ostree/container/image/$r" 2>/dev/null | label_from_config)"
+            return 0
+        done < <("$OSTREE" --repo="$OSTREE_REPO" refs ostree/container/image 2>/dev/null)
+    fi
+    # By digest, so the label is this image's: the repository without its tag.
+    [[ "$ref" == docker://* && -x "$SKOPEO" ]] || return 0
+    local repo="${ref#docker://}" last
+    repo="${repo%%@*}"
+    last="${repo##*/}"
+    [[ "$last" == *:* ]] && repo="${repo%/*}/${last%%:*}"
+    [[ "$repo" == */* ]] || return 0
+    local auth=()
+    [[ -r /etc/ostree/auth.json ]] && auth=(--authfile /etc/ostree/auth.json)
+    [[ -r /run/ostree/auth.json ]] && auth=(--authfile /run/ostree/auth.json)
+    release_id "$("$SKOPEO" inspect --no-tags --retry-times 1 --command-timeout 30s "${auth[@]}" \
+            --config "docker://$repo@$digest" 2>/dev/null | label_from_config)"
+}
+
 write_state() {
     local body
-    body="$(printf 'state=%s\ndigest=%s\n' "$1" "${2:-}")"
+    body="$(printf 'state=%s\ndigest=%s\nrelease=%s\nrunning=%s\n' \
+        "$1" "${2:-}" "${3:-}" "$(running_release)")"
     mkdir -p "$DIR"
     # Rewrite only on a change: the notice unit wakes on every write.
     if [[ -f "$STATE" && "$(cat "$STATE")" == "$body" ]]; then
@@ -61,7 +150,17 @@ elif printf '%s\n' "$out" | grep '^Update available for:' >/dev/null; then
     # bootc builds that omit the digest line: fall back to the text's own hash
     # so a later, different update still counts as new.
     [[ -n "$digest" ]] || digest="text:$(printf '%s' "$out" | sha256sum | cut -d' ' -f1)"
-    write_state available "$digest"
+    # Its release ID, looked up once per digest: an answer already written
+    # for this digest is kept rather than asked for again every six hours.
+    release=""
+    if [[ -f "$STATE" ]] && grep -Fx "digest=$digest" "$STATE" >/dev/null; then
+        release="$(release_id "$(sed -n 's/^release=//p' "$STATE" | head -n1)")"
+    fi
+    if [[ -z "$release" && "$digest" == sha256:* ]]; then
+        imgref="$(printf '%s\n' "$out" | sed -n 's/^Update available for:[[:space:]]*\([^[:space:]]*\).*/\1/p' | head -n1)"
+        release="$(available_release "$digest" "$imgref")"
+    fi
+    write_state available "$digest" "$release"
 else
     log "unrecognised bootc output; keeping the last answer"
 fi
