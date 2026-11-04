@@ -18,13 +18,10 @@
 # four release systems (measured 2026-11-03 as the NAR size of their union: GNOME 10.1 GB, KDE 11.4 GB, COSMIC 11.5 GB)
 # in the build store, then the server VM's cache holds them again and the client VM's disk installs them; a hosted
 # runner has about 14 GB free. They run on katana or the self-hosted runner (docs/nixos/desktops.md §12).
-# shell-kept (nix/tests/shell-kept.nix) fits a hosted runner (4 GB VM, about 4 min) but is not a dependable gate yet:
-# measured 2026-11-04 on katana, 6 boots of this check, in one of them the Shell never started within 180 s (no log of why; the
-# failure dump now prints processes and the journal), and its pacing numbers come from llvmpipe on whatever the
-# runner shares. The integrator runs it (nix/ci/integrate/drive.sh) until a run of hosted builds shows it steady.
-# hypr-lua (nix/tests/hypr-lua.nix) boots the same Hyprland + Rime Shell session and waits on the same Shell start
-# (180 s), so it carries the same unknown; its display/input logic also runs in CI through checks.libexec's
-# --self-tests and the hosted shell suites. It joins CI together with shell-kept.
+# shell-kept and hypr-lua left this list on 2026-11-04: their "Shell never started" was rime-shell-autostart taking a
+# running IPC client (`qs -c <dir> ipc show`, the checks' own poll) for the Shell and exiting (fixed; checks.shell-start
+# forces it). Both fit a hosted runner: a 4 GB VM, the same desktop closure as checks.desktop (9.2 GiB), 1-4 min on
+# katana; shell-kept's pacing table is printed, not asserted, so llvmpipe on a shared runner cannot fail it.
 vm-boot             needs the Rime binary cache (TODO(handover) R2): the system test boots the Rime kernel
 kernel-gate         needs the Rime binary cache (TODO(handover) R2): it reads the built Rime vmlinux
 kernel-vm           needs the Rime binary cache (TODO(handover) R2): it boots the Rime kernel and its signed modules
@@ -37,5 +34,3 @@ update-variants     needs the Rime binary cache (TODO(handover) R2): it publishe
 desktops-install-gnome  does not fit a hosted runner's disk: four release systems (10.1 GB of store paths), cached again in the server VM and installed in the client VM
 desktops-install-kde    does not fit a hosted runner's disk: four release systems (11.4 GB of store paths), cached again in the server VM and installed in the client VM
 desktops-install-cosmic does not fit a hosted runner's disk: four release systems (11.5 GB of store paths), cached again in the server VM and installed in the client VM
-shell-kept              not yet a dependable gate: 1 of 6 boots the Shell did not start in 180 s (cause unknown); llvmpipe pacing on a shared runner
-hypr-lua                waits on the same Shell start as shell-kept (1 of 6 boots no Shell in 180 s, cause unknown); joins CI with it

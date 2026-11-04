@@ -57,6 +57,7 @@ let
           cp -r /run/current-system/sw/share/rime/hypr/. $h/.config/hypr/
           grep -rl '@KB_' $h/.config/hypr | xargs -r sed -i -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g'
           chown -R ${user}:users $h/.config $h/.local
+          chmod -R u+w $h/.config/hypr   # cp -r keeps the store's read-only modes; firstrun renders into this tree
         '';
       };
 
