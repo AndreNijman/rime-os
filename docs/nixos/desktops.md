@@ -849,7 +849,8 @@ Hyprland 0.57.0 (the pin) has no `.conf` parser: it reads `~/.config/hypr/hyprla
   rule in the Shell's `_luaStr` and rime-os's `lua_str` (the two Python copies are byte-identical, tested).
 - **The Shell asks Hyprland whether Rime's config loaded**, rather than looking for a file: `hyprctl eval` that raises
   unless `package.loaded["rime.keybindings"]` exists. `ok`, `no-config`, `not-lua`, `modules-missing` or `unknown`
-  (hyprctl unreachable: retried, not a verdict). Anything but `ok` is logged as "Hyprland config problem" and posted as
+  (hyprctl unreachable: retried, not a verdict: it changes neither the state nor the one-notice-per-problem guard,
+  and "loaded again" is logged only when a problem clears; a check while the probe runs is queued, never a restart). Anything but `ok` is logged as "Hyprland config problem" and posted as
   a critical notice naming `rime-hypr-migrate`; asked 3 s after start (the Shell is the notification server) and on
   every `configreloaded`. Why Hyprland and not the file: firstrun seeds `hyprland.lua` and reloads Hyprland after the
   session starts, and a file that exists but fails to load is the same silent no-op the old default produced.
@@ -881,7 +882,13 @@ Hyprland 0.57.0 (the pin) has no `.conf` parser: it reads `~/.config/hypr/hyprla
 | `checks.hypr-lua` (VM, about 65 s of test script; not in CI, `nix/ci/checks-not-in-ci.txt`) | a real Hyprland + Rime Shell session: kept layout, rounding, accent (also after reload) and focus-mode gaps land through eval; 1.1 on 1280x800 → 1.0666667 in `hyprctl -j monitors`, no "Invalid scale" in Hyprland's log, `monitors.lua` carries it; layout `xx` refused with the note, `hyprctl -j devices` still `gb`; a `hyprland.lua` without Rime's modules opens the notice toast (`vm/probe-modules-missing.png`) and a restored one says "loaded again"; `configerrors` empty at start, after each subtest and at the end (`vm-run11-locked.log` + `vm-run12-locked.log` against the pushed flake.lock, `vm-run9.log` with the path override; `vm/`) | controls in the check itself: raw 1.1 by eval does log "Invalid scale"; `xx` written straight into `input.lua` moves the keyboard off `gb` |
 
 Not proven here: a real login through rime-greet on hardware (VM only); bootc main (nothing of this is ported, see
-the open-items row); the other hyprlang dispatch words in rime-os outside display/input (open-items).
+the open-items row); `install-arch.sh` does not verify the `hyprland.lua` it appended to (open-items).
+
+After the independent review (open-items "Independent review of `nix/hypr-lua-only`"): one eval chunk per layout with a
+rollback from the live snapshot, an ICC refusal is not persisted and exits 1, only the closest refresh is current, the
+scale snap is Hyprland-only, pgrep is per user, write failures are refusals, the self-tests detect a payload that runs,
+the window helpers and rime-live-session speak `hl.dsp`, `session.lua` names the Adwaita cursor theme, and saved
+keybind combos must be key names. 19 rime-os mutants, all FAIL (`artifacts/hypr-lua/review-fixes/os-mutants/`).
 
 ## 13. Settings piece: decisions taken while building
 
