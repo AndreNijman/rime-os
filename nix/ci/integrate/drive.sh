@@ -4,7 +4,10 @@
 # Evaluates each check's drvPath in its own process (2 at a time: one evaluator never holds every VM test), then
 # builds the .drv files P at a time (--max-jobs 6 each).
 #   tree   the checkout this script is in (RIME_TREE overrides)
-#   logs   $RIME_ART/<TAG>/<check>.log, summary <TAG>/summary.txt (PASS|FAIL <check> <outPath> <seconds>);
+#   logs   $RIME_ART/<TAG>/<check>.log, summary <TAG>/summary.txt (PASS|REUSED|FAIL <check> <outPath> <seconds>);
+#          REUSED = the check's output was already valid in the store BEFORE this build (it passed earlier on these
+#          exact inputs: Nix registers a check's output only when it passed), so nothing ran now. Not a PASS of
+#          this tree's run: say "already passed", never "ran".
 #          RIME_ART defaults to /work/artifacts/<the tree's directory name>
 #   builds RIME_BUILD_DIR (default /work/scratch/<the tree's directory name>/builds, made root 0700). When /var/lab
 #          is short of space, point it at the container's overlay (e.g. /root/builds).
@@ -26,9 +29,12 @@ one() {
   c=$1 d=$2; read -r _ drv < "$d/$c.drv"
   if [ "$drv" = EVALFAIL ]; then echo "FAIL $c eval" >> "$d/summary.txt"; return; fi
   start=$(date +%s)
+  pre=$(nix-store -q --outputs "$drv" 2>/dev/null | head -1); was=0
+  [ -n "$pre" ] && nix path-info "$pre" >/dev/null 2>&1 && was=1
   nix build "$drv^*" -L --max-jobs 6 --option cores 3 --option build-dir "$bd" --no-link --print-out-paths > "$d/$c.log" 2>&1
   rc=$?; o=$(tail -2 "$d/$c.log" | grep '^/nix/store' | tail -1)
-  if [ "$rc" = 0 ]; then echo "PASS $c $o $(( $(date +%s) - start ))s" >> "$d/summary.txt"; else echo "FAIL $c rc=$rc $(( $(date +%s) - start ))s" >> "$d/summary.txt"; fi
+  if [ "$rc" = 0 ] && [ "$was" = 1 ]; then echo "REUSED $c $o $(( $(date +%s) - start ))s (already in the store: passed earlier on the same inputs, nothing ran)" >> "$d/summary.txt"
+  elif [ "$rc" = 0 ]; then echo "PASS $c $o $(( $(date +%s) - start ))s" >> "$d/summary.txt"; else echo "FAIL $c rc=$rc $(( $(date +%s) - start ))s" >> "$d/summary.txt"; fi
 }
 export -f one
 printf '%s\n' "$@" | xargs -P "$P" -I{} bash -c "one {} $d"

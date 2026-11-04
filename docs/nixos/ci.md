@@ -2,8 +2,12 @@
 
 `.github/workflows/nix.yml` on `ubuntu-24.04` hosted runners (4 vCPU, 16 GB, an empty Nix store every job, no Rime
 binary cache yet, R2). Jobs: **plan** (evaluate every flake output one per process with `nix/ci/eval-each.sh`, then
-pick the checks), **packages** (rimed with its whole cargo test, rime-shell, rime-libexec), one **check** leg per flake
-check (`nix/ci/run-checks.sh build`), and **summary** (every check RAN or SKIPPED).
+pick the checks, leaving out the ones that PASSED EARLIER on the same inputs), **packages** (what many legs would
+each compile, `nix/ci/prebuild.txt`: rimed with its whole cargo test, Rime's other packages, the desktop's and
+COSMIC's overrides, built ONCE and kept as the dev cache), one **check** leg per flake check (`nix/ci/run-checks.sh
+build`, substituting from the dev cache), and **summary** (every check RAN, REUSED or SKIPPED; the metrics table;
+the results cache). How the two caches work and their limits: `nix/ci/README.md` "Dev cache and reuse"; measured
+before/after: "Build once, reuse everywhere (11-04)" below.
 
 ## Measured (11-02)
 
@@ -18,6 +22,16 @@ Per-job wall time, from the GitHub API (`completed_at - started_at`), of the las
 | median check leg | about 1100 s | 1044 s |
 
 A check leg is mostly setup and download: a VM check that takes 2-5 min on katana takes 20-30 min on the runner.
+
+## Build once, reuse everywhere (11-04)
+
+Before (run 41732071922, 82 legs, cancelled at 95.7 min): 1,347 runner-minutes, 39 jobs waited > 1 min for a runner
+(max 22.5: the hosted concurrent-job limit), rimed compiled in 45 legs (15-40 min each), COSMIC's initial setup in 2
+(~35 min), the desktop overrides in 22. After: see the three measured runs below (`nix/ci/ci-timings.py run ID`;
+evidence `/var/lab/rime-nix/artifacts/ci-accel/`).
+
+Dev cache size measured from the rime-nix store (11-04): the 12 items' unsigned runtime closure is 16 paths, 337 MB
+of NAR, 177 MB zstd with cosmic-initial-setup's `-debug` output (133 MB NAR), which the export now leaves out.
 
 ## Timeouts (11-02, from these figures)
 
