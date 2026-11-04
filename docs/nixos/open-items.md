@@ -592,3 +592,17 @@ bfa52ca4 keybinds); rime-os see STATE.md. Evidence `/var/lab/rime-nix/artifacts/
 | The `rime-nix` container's PID 1 is `sleep infinity`, which never reaps: every process whose parent dies before it becomes a zombie there for the container's life (counted 2026-11-04: ~810, among them 390 virtiofsd, 293 git, 15 qemu-system-x86 from VM checks and agents). They hold PIDs against the container's pids.max (2048). dev-vm reaps its own through a subreaper (`nix/dev/launch.py`) | STILL OPEN (container setup, not repository code) | coordinator: recreate the container with `--init` (catatonit as PID 1) at a quiet moment; nothing in the repository depends on the current PID 1 |
 | Dev VM by autologin (greetd `initial_session`): logind's `Desktop=` is empty for the session (seen on GNOME, KDE and COSMIC: `artifacts/dev-vm/{gnome,kde,cosmic}-session.txt`); on GNOME fcitx5 also shows a "Wayland Diagnose: install kimpanel" notification (`artifacts/dev-vm/gnome-session.{png,txt}`). Not checked through a rime-greet login, which is what users get | STILL OPEN (dev VM only as far as measured) | desktops owner: log into GNOME through rime-greet (`dev-vm --desktop gnome start --greeter`, then `type`) and see whether the notification shows there; if it does, ship the GNOME kimpanel extension or turn the diagnose off |
 | Dev VM display is virtio-vga (software rendering in the guest); a virgl/`egl-headless` option for GPU-accelerated guests is not done | STILL OPEN (not needed for the proofs; the Shell renders and is usable) | dev-VM owner: add `--gl` once the container has a render node passed through |
+
+## Opened by wave 6: what's in this update (`nix/update-whats-new`, 2026-11-04)
+
+The bar's update icon and Settings → Updates link to `https://rimeos.com/updates/<release>?from=<running>` (rime-shell
+`nix/update-whats-new`, same change as main's `feat/update-whats-new`). On NixOS the inputs already exist: the update client
+writes `release=`/`running=` to `/run/rime-update/state` (`rimed/rime/src/nixos/update.rs` `check_state`) and
+`status.json` has `booted.release`/`target.release`; there is no `/usr/share/rime/release.json`, so `from` comes from
+`booted.release`, then `running=` (rime-shell `tests/liveupdate-test.js` NixOS cases, mutant "no running= fallback": 4 FAIL).
+The bootc `rime-update-check` change is carried here only so the file does not drift from main; NixOS does not ship it
+(`nix/pkgs/rime-libexec.nix`).
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| rimeos.com has no page for a NixOS release: rime-website `scripts/sync-releases.mjs` builds release pages only from `build-image.yml` runs on rime-os main, and NixOS releases come from `nix-release.yml`. A NixOS machine's "What's in this update" would open a 404 for the release on offer (the `?from=` range likewise misses NixOS-only releases) | STILL OPEN (website, not this repository) | rime-website owner, before the first NixOS release ships: read `nix-release.yml` runs (or the channel document) into release records with the same ID rule, or have the Shell link the list (`https://rimeos.com/updates`) when `status.json` says `"product": "nixos"` until then |
