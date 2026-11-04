@@ -514,7 +514,7 @@ fn goto(p: Page) {
             let c = u.chosen.clone().expect("chosen");
             set_text(u.title, "Check this before you continue");
             set_text(u.body, "Nothing has been changed yet.");
-            set_text(u.text, &plan::install_confirmation(&c.disk, &c.what, c.bytes));
+            set_text(u.text, &plan::install_confirmation(&c.disk, &c.what, c.bytes, c.replaces.as_deref()));
             unsafe { SendMessageW(u.check, BM_SETCHECK, 0, 0) };
             for h in [u.text, u.check, u.back, u.next] {
                 show(h, true);

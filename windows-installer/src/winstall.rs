@@ -12,6 +12,7 @@
 use crate::bootentry::{self, HardDrive};
 use crate::gptwrite::{self, GptSnapshot};
 use crate::plan::{self, Claim, DiskIdentity, PartitionFacts};
+use crate::replace::{self, Takeover, VolumeClaim};
 use crate::stage::{self, Phase, Plan, Space};
 use crate::windows as w;
 use crate::winwrite;
@@ -41,6 +42,11 @@ impl Volumes {
             .filter(|v| v.overlaps(disk, offset, length))
             .map(|v| Claim { what: v.describe_use() })
             .collect()
+    }
+
+    /// Every volume over the partition, with the facts the replace rules need.
+    pub fn volume_claims(&self, disk: u32, offset: u64, length: u64) -> Vec<VolumeClaim> {
+        self.0.iter().filter(|v| v.overlaps(disk, offset, length)).map(|v| v.claim(disk, offset, length)).collect()
     }
 }
 
@@ -149,6 +155,8 @@ pub struct Candidate {
     pub bytes: u64,
     pub what: String,
     pub refusal: Option<String>,
+    /// For an existing partition: what the confirmation names as replaced.
+    pub replaces: Option<String>,
 }
 
 /// The space Rime needs: its own ESP (sized for the pinned image, which is
@@ -225,20 +233,22 @@ pub fn candidates() -> (Vec<Candidate>, Vec<String>) {
                 bytes,
                 what: format!("Unallocated space on {}{on_os_disk}", describe_disk(&d.identity)),
                 refusal: (bytes < need).then(|| format!("{} is too small; Rime needs {}", plan::human(bytes), plan::human(need))),
+                replaces: None,
             });
         }
         for p in &d.partitions {
-            let claims = vols.claims(d.number, p.offset, p.length);
             // Partitions Windows needs, and volumes holding a filesystem
-            // Windows recognises, are not offered at all: listing C: or a
-            // USB stick as "refused" only invites the question. What is
-            // listed with a refusal is the near-miss a person may have
-            // made on purpose: an unformatted partition Windows lettered.
-            let mounted_fs = vols.0.iter().any(|v| v.overlaps(d.number, p.offset, p.length) && !v.filesystem.is_empty());
-            if matches!(p.type_guid.as_str(), plan::EFI_SYSTEM | plan::MICROSOFT_RESERVED | plan::WINDOWS_RECOVERY) || mounted_fs {
-                continue;
-            }
-            let refusal = replace_refusal(p, &claims, need, || probe(&mut dev, p.offset, p.length));
+            // Windows recognises, are not offered at all (replace::verdict).
+            // An empty partition is offered even when Windows keeps a RAW
+            // volume over it, lettered or not: install() takes that volume
+            // over under an exclusive lock before writing. This only reads.
+            let claims = vols.volume_claims(d.number, p.offset, p.length);
+            let (refusal, release) = match replace::verdict(p, &claims, need, || probe(&mut dev, p.offset, p.length)) {
+                replace::Verdict::NotOffered => continue,
+                replace::Verdict::Refused(r) => (Some(r), None),
+                replace::Verdict::Usable { release } => (None, release),
+            };
+            let disk_text = format!("{}{on_os_disk}", describe_disk(&d.identity));
             out.push(Candidate {
                 id: format!("part:{}", p.id),
                 disk: d.identity.clone(),
@@ -246,50 +256,20 @@ pub fn candidates() -> (Vec<Candidate>, Vec<String>) {
                 disk_number: d.number,
                 space: Space::Replace { partition_guid: p.id.clone() },
                 bytes: p.length,
-                what: format!(
-                    "{} partition {} on {}{on_os_disk}",
-                    if refusal.is_none() { "Empty" } else { "Unformatted" },
-                    if p.name.is_empty() { "(unnamed)".to_string() } else { format!("{:?}", p.name) },
-                    describe_disk(&d.identity)
-                ),
+                what: if refusal.is_none() {
+                    replace::usable_text(p, release.as_ref(), &disk_text)
+                } else {
+                    format!(
+                        "Unformatted partition {} on {disk_text}",
+                        if p.name.is_empty() { "(unnamed)".to_string() } else { format!("{:?}", p.name) }
+                    )
+                },
+                replaces: refusal.is_none().then(|| replace::replaces_text(p, release.as_ref())),
                 refusal,
             });
         }
     }
     (out, problems)
-}
-
-/// Whether an existing partition may be replaced by Rime's two. `None` = yes.
-pub fn replace_refusal(
-    p: &PartitionFacts,
-    claims: &[Claim],
-    need: u64,
-    probe: impl FnOnce() -> io::Result<Option<&'static str>>,
-) -> Option<String> {
-    if !claims.is_empty() {
-        return Some(format!(
-            "Windows is using it ({}). If it is empty, delete it in Disk Management so it becomes unallocated space, then refresh",
-            claims.iter().map(|c| c.what.as_str()).collect::<Vec<_>>().join("; ")
-        ));
-    }
-    match p.type_guid.as_str() {
-        plan::WINDOWS_BASIC_DATA | plan::LINUX_FILESYSTEM => {}
-        other => return Some(format!("its type ({}) is not one Rime replaces", plan::type_name(other))),
-    }
-    // Bit 0 is "required partition": the platform said it needs this.
-    if p.attributes & 1 != 0 {
-        return Some("it is marked as required by the platform".to_string());
-    }
-    if p.length < need {
-        return Some(format!("{} is too small; Rime needs {}", plan::human(p.length), plan::human(need)));
-    }
-    match probe() {
-        Ok(None) => None,
-        Ok(Some(fs)) => Some(format!(
-            "it holds {fs} data. Rime never overwrites a filesystem; if you no longer need it, delete it in Disk Management, then refresh"
-        )),
-        Err(e) => Some(format!("it could not be read to check it is empty ({e})")),
-    }
 }
 
 /// Where the program keeps the image it downloaded, its journal and the
@@ -528,6 +508,10 @@ pub fn install(c: &Candidate, iso: Option<&Path>, ev: &mut dyn FnMut(Event)) -> 
     disk.agreement.clone().map_err(io::Error::other)?;
     let mut dev = w::Device::open(&disk.path)?;
     let before = GptSnapshot::read(&mut dev, disk.identity.length)?;
+    // Held from here until the partition table no longer has the partition:
+    // the RAW volume Windows kept over the chosen empty partition, locked so
+    // that nothing else can open it while it is checked and written.
+    let mut held: Option<winwrite::VolumeLock> = None;
     if let Space::Replace { partition_guid } = &c.space {
         let p = disk
             .partitions
@@ -538,11 +522,24 @@ pub fn install(c: &Candidate, iso: Option<&Path>, ev: &mut dyn FnMut(Event)) -> 
         if !vp.is_empty() {
             return Err(io::Error::other(format!("the volume list could not be read completely: {}", vp.join("; "))));
         }
-        let claims = Volumes(vols).claims(disk.number, p.offset, p.length);
-        if let Some(r) = replace_refusal(p, &claims, needed_bytes(), || probe(&mut dev, p.offset, p.length)) {
-            return Err(io::Error::other(r));
+        let claims = Volumes(vols).volume_claims(disk.number, p.offset, p.length);
+        match replace::verdict(p, &claims, needed_bytes(), || probe(&mut dev, p.offset, p.length)) {
+            replace::Verdict::NotOffered => return Err(io::Error::other("Windows is using the chosen partition; it cannot be replaced")),
+            replace::Verdict::Refused(r) => return Err(io::Error::other(r)),
+            replace::Verdict::Usable { release: None } => {}
+            replace::Verdict::Usable { release: Some(v) } => {
+                ev(Event::Step("Taking the empty partition from Windows".into()));
+                let mut t = WinTakeover { dev: &mut dev, offset: p.offset, length: p.length, ev: &mut *ev };
+                let lock = replace::take_over(&v, &mut t).map_err(|e| io::Error::other(format!("that partition cannot be used: {e}")))?;
+                ev(Event::Note(format!(
+                    "the volume {} is locked by this program and dismounted, and a fresh read under the lock found no filesystem",
+                    lock.name
+                )));
+                held = Some(lock);
+            }
         }
     }
+    let ours = held.as_ref().map(|l| l.name.clone());
 
     // 4. BitLocker, before the partition table changes.
     let bl = bitlocker();
@@ -594,7 +591,7 @@ pub fn install(c: &Candidate, iso: Option<&Path>, ev: &mut dyn FnMut(Event)) -> 
         // 7. Payload into space nothing describes yet, then read it all back.
         let mut wr = winwrite::DiskWriter::open(&disk.path, plan.write_windows())?;
         stage::table_unchanged(&plan, &mut wr)?;
-        exclusive(&disk, &plan)?;
+        exclusive(&disk, &plan, ours.as_deref())?;
         ev(Event::Step("Writing the Rime OS installer to its partition".into()));
         let hashes = stage::write_payload(&plan, &mut wr, &mut iso, &mut pr_of(ev))?;
         ev(Event::Step("Reading it back".into()));
@@ -603,9 +600,16 @@ pub fn install(c: &Candidate, iso: Option<&Path>, ev: &mut dyn FnMut(Event)) -> 
         // 8. The commit: the partition table, after one more fresh comparison.
         ev(Event::Step("Adding Rime's partitions to the partition table".into()));
         stage::table_unchanged(&plan, &mut wr)?;
-        exclusive(&disk, &plan)?;
+        exclusive(&disk, &plan, ours.as_deref())?;
         stage::write_table(&plan, &mut wr, &mut pr_of(ev))?;
         stage::table_committed(&plan, &mut wr)?;
+        // The table on disk no longer has the replaced partition; let go of
+        // its volume before Windows is told to re-read the table, so the
+        // volume can go away with it.
+        if let Some(l) = held.take() {
+            ev(Event::Note(format!("released the lock on {}", l.name)));
+            drop(l);
+        }
         wr.update_properties()?;
         drop(wr);
         windows_sees(&disk, &plan)?;
@@ -652,15 +656,18 @@ fn phase_name(p: Phase) -> &'static str {
 }
 
 /// Nothing Windows mounts may overlap anything this plan writes, asked
-/// again immediately before the writes rather than remembered.
-fn exclusive(disk: &Surveyed, plan: &Plan) -> io::Result<()> {
+/// again immediately before the writes rather than remembered. `ours` is the
+/// volume this program holds locked (a dismounted volume object still
+/// lists its extents); it, and only it, is excused.
+fn exclusive(disk: &Surveyed, plan: &Plan, ours: Option<&str>) -> io::Result<()> {
     let (vols, problems) = w::volumes();
     if !problems.is_empty() {
         return Err(io::Error::other(format!("the volume list could not be read completely: {}", problems.join("; "))));
     }
     let v = Volumes(vols);
     for (o, l) in [(plan.esp_offset(), plan.esp_bytes()), (plan.root_offset(), plan.root_bytes())] {
-        let c = v.claims(disk.number, o, l);
+        let all = v.volume_claims(disk.number, o, l);
+        let c = replace::foreign(&all, ours);
         if !c.is_empty() {
             return Err(io::Error::other(format!(
                 "Windows is now using part of the chosen space: {}",
@@ -669,6 +676,42 @@ fn exclusive(disk: &Surveyed, plan: &Plan) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `replace::take_over`'s Windows calls. The re-probe reads through the
+/// physical-drive handle, at the partition's verified offset.
+struct WinTakeover<'a> {
+    dev: &'a mut w::Device,
+    offset: u64,
+    length: u64,
+    ev: &'a mut dyn FnMut(Event),
+}
+
+impl Takeover for WinTakeover<'_> {
+    type Held = winwrite::VolumeLock;
+    fn lock(&mut self, volume: &str) -> io::Result<winwrite::VolumeLock> {
+        let l = winwrite::VolumeLock::lock(volume)?;
+        (self.ev)(Event::Note(format!("locked {volume} (exclusive volume lock)")));
+        Ok(l)
+    }
+    fn dismount(&mut self, held: &mut winwrite::VolumeLock) -> io::Result<()> {
+        held.dismount()?;
+        (self.ev)(Event::Note(format!("dismounted {}", held.name)));
+        Ok(())
+    }
+    fn reprobe(&mut self) -> io::Result<Option<&'static str>> {
+        let r = probe(self.dev, self.offset, self.length)?;
+        (self.ev)(Event::Note(format!(
+            "read again under the lock: {}",
+            r.map_or("no filesystem signature".to_string(), |f| format!("{f} signature"))
+        )));
+        Ok(r)
+    }
+    fn remove_mount_point(&mut self, m: &str) -> io::Result<()> {
+        winwrite::remove_mount_point(m)?;
+        (self.ev)(Event::Note(format!("removed the drive letter or mount point {m}")));
+        Ok(())
+    }
 }
 
 /// Windows' own description of the disk must now include Rime's two

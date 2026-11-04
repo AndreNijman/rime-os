@@ -312,7 +312,13 @@ There is no free space for Rime OS yet. To make some:
 
 /// The confirmation for installing into a chosen space. Names the disk by
 /// model, serial and size, never by number (see `confirmation_text`).
-pub fn install_confirmation(disk: &DiskIdentity, what: &str, bytes: u64) -> String {
+/// `replaces` names the existing partition that is deleted, when the space
+/// is one (`replace::replaces_text`).
+pub fn install_confirmation(disk: &DiskIdentity, what: &str, bytes: u64, replaces: Option<&str>) -> String {
+    let replaced = match replaces {
+        Some(r) => format!("This REPLACES {r}: that partition is deleted, and Rime's two partitions take exactly its space.\n\n"),
+        None => String::new(),
+    };
     format!(
         "INSTALL RIME OS -- read this before continuing.\n\n\
          Rime will be installed into:\n\
@@ -321,6 +327,7 @@ pub fn install_confirmation(disk: &DiskIdentity, what: &str, bytes: u64) -> Stri
          \x20   disk             {model}\n\
          \x20   serial number    {serial}\n\
          \x20   disk GUID        {dguid}\n\n\
+         {replaced}\
          This creates two partitions there: Rime's own boot partition and Rime's \
          system partition. Anything in that space is overwritten. Windows, its \
          partitions and its boot files are not changed.\n\n\

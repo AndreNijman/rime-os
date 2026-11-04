@@ -314,7 +314,7 @@ mod win {
 
         // Exclusivity, re-asked rather than remembered.
         //
-        // There is deliberately no FSCTL_LOCK_VOLUME here, and the reason is
+        // `inspect` is read-only and takes no volume lock, and the reason is
         // a finding rather than an omission: Windows creates NO VOLUME OBJECT
         // for a Linux-filesystem-type partition. Measured in the lab — the
         // eligible fixture partitions have no volume, no drive letter and
@@ -323,7 +323,8 @@ mod win {
         // volume is a Claim. So a lock call on this path could only ever run
         // on a partition that was already refused: it would be safety code
         // that never executes, which reads as coverage and is worse than
-        // none.
+        // none. (`install` does lock one volume: the RAW volume over an empty
+        // basic-data partition, src/replace.rs. `inspect` never writes.)
         //
         // What this does instead is re-enumerate the volumes NOW, immediately
         // before the content is read, rather than trusting the survey's
@@ -443,7 +444,7 @@ mod cli {
         if let Some(r) = &pick.refusal {
             return Err(format!("that space cannot be used: {r}").into());
         }
-        println!("{}", plan::install_confirmation(&pick.disk, &pick.what, pick.bytes));
+        println!("{}", plan::install_confirmation(&pick.disk, &pick.what, pick.bytes, pick.replaces.as_deref()));
         if !args.iter().any(|a| a == "--yes") {
             print!("Type INSTALL to continue: ");
             std::io::stdout().flush()?;
