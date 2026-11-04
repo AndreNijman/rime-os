@@ -139,9 +139,12 @@ def compositor():
     if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return "hyprland"
     # A session started outside the normal path; fall back to what is running.
+    # Only this user's processes: another user's compositor on the same machine
+    # (a second seat, a greeter) is not the session this layout is for.
+    uid = str(os.getuid())
     for proc, name in (("Hyprland", "hyprland"), (".Hyprland-wrapp", "hyprland"),
                        ("niri", "niri"), ("labwc", "labwc")):
-        if run(["pgrep", "-x", proc]).returncode == 0:
+        if run(["pgrep", "-u", uid, "-x", proc]).returncode == 0:
             return name
     return "unknown"
 
@@ -201,8 +204,10 @@ def outputs_hypr():
     for m in raw:
         modes = []
         # The top-level width/height/refreshRate ARE the current mode; the
-        # availableModes strings carry no flag, so the current one is found by
-        # the same 1 px / 1 Hz tolerance Hyprland matches a requested mode with.
+        # availableModes strings carry no flag, so the current one is the
+        # listed mode of that size whose refresh is CLOSEST to refreshRate.
+        # Not every mode within 1 Hz: a panel listing 60.00 and 59.94 would
+        # report both as current, and fit_to_live takes the first it finds.
         cur = (m.get("width"), m.get("height"), m.get("refreshRate"))
         for spec in m.get("availableModes", []):
             # "1920x1080@60.00Hz"
@@ -216,9 +221,11 @@ def outputs_hypr():
                 }
             except (ValueError, AttributeError):
                 continue
-            if all(is_number(v) for v in cur):
-                mode["current"] = mode_matches((cur[0], cur[1], cur[2]), mode)
             modes.append(mode)
+        if all(is_number(v) for v in cur):
+            near = [md for md in modes if mode_matches((cur[0], cur[1], cur[2]), md)]
+            if near:
+                min(near, key=lambda md: abs(md["refresh"] - cur[2]))["current"] = True
         inv = {v: k for k, v in HYPR_TRANSFORM.items()}
         out.append({
             "name": m.get("name"),
@@ -249,6 +256,7 @@ def outputs():
 # bool is a subclass of int, so `isinstance(v, (int, float))` alone lets
 # `"scale": true` and `"x": NaN` through: both are refused by name here.
 POS_LIMIT = 32767            # a layout coordinate, either sign
+REFRESH_MAX = 1000           # Hz; the same bound for "WxH@R" strings and {refresh: R}
 NAME_MAX = 256
 MODE_RE = re.compile(r"^(\d{1,5})x(\d{1,5})(?:@(\d{1,4}(?:\.\d{1,3})?))?(?:Hz)?$")
 
@@ -297,13 +305,13 @@ def parse_mode(mode):
         w, h, r = mode.get("width"), mode.get("height"), mode.get("refresh")
         if not (is_int(w) and is_int(h)):
             return None
-        if r is not None and not (is_number(r) and r > 0):
-            return None
-        if r is not None and r > 1000:
+        if r is not None and not is_number(r):
             return None
     else:
         return None
     if not (0 < w <= 16384 and 0 < h <= 16384):
+        return None
+    if r is not None and not (0 < r <= REFRESH_MAX):
         return None
     return (w, h, r or None)
 
@@ -456,7 +464,7 @@ def _fmt_scale(v):
     return f"{v:.2f}".rstrip("0").rstrip(".")
 
 
-def fit_to_live(model, live):
+def fit_to_live(model, live, snap_scale=True):
     """Make the model something the connected hardware will take as asked.
 
     Two things Hyprland would otherwise substitute behind the user's back:
@@ -472,6 +480,10 @@ def fit_to_live(model, live):
 
     An output that is not connected is left as saved: there is nothing live to
     check it against, and kanshi / the monitor rule apply it when it appears.
+
+    snap_scale is Hyprland's rule and only Hyprland's: niri and labwc take a
+    fractional scale as given, so there the mode check runs and the scale is
+    left alone (snap_scale=False).
     """
     notes = []
     by_name = {o.get("name"): o for o in (live or []) if isinstance(o, dict)}
@@ -509,7 +521,7 @@ def fit_to_live(model, live):
             elif is_int(lo.get("width")) and is_int(lo.get("height")):
                 size = (lo["width"], lo["height"], None)
         scale = o.get("scale", 1.0)
-        if not size or not is_number(scale):
+        if not snap_scale or not size or not is_number(scale):
             continue
         w, h, _ = size
         snapped, kind = hypr_scale(w, h, scale)
@@ -566,7 +578,41 @@ def apply_wlr(model, dry_run):
     return []
 
 
-def apply_hypr(model, dry_run, icc=None):
+def _live_as_model(live, names):
+    """The connected outputs among `names`, as they are right now, as a model.
+
+    What a refused apply rolls back to. Only outputs Hyprland reports (it lists
+    enabled monitors); one the refused chunk would have enabled is not in it,
+    and a rule for it is not guessed at.
+    """
+    out = []
+    for lo in live or []:
+        if not isinstance(lo, dict) or lo.get("name") not in names:
+            continue
+        o = {"name": lo["name"], "enabled": True,
+             "transform": lo.get("transform", "normal"),
+             "adaptive_sync": bool(lo.get("adaptive_sync"))}
+        if is_int(lo.get("x")) and is_int(lo.get("y")):
+            o["x"], o["y"] = lo["x"], lo["y"]
+        if is_number(lo.get("scale")):
+            o["scale"] = lo["scale"]
+        cur = next((m for m in lo.get("modes") or [] if m.get("current")), None)
+        if cur:
+            o["mode"] = {"width": cur["width"], "height": cur["height"],
+                         "refresh": cur["refresh"]}
+        out.append(o)
+    return {"outputs": out}
+
+
+def _eval(chunk):
+    """(True, "") when Hyprland ran the chunk, else (False, why)."""
+    res = run(["hyprctl", "eval", chunk])
+    if res.returncode == 0 and res.stdout.strip() == "ok":
+        return True, ""
+    return False, (res.stdout + res.stderr).strip()[:160] or f"exit {res.returncode}"
+
+
+def apply_hypr(model, dry_run, icc=None, live=None):
     """Apply the layout to the RUNNING Hyprland, through `hyprctl eval` only.
 
     Hyprland 0.57 has no hyprlang parser left (its config manager enum has one
@@ -576,19 +622,40 @@ def apply_hypr(model, dry_run, icc=None):
     expression. Its reply is exactly "ok" when the chunk ran
     (src/ipc/s1/Commands.cpp evalRequest); anything else is the error, and the
     output is reported as refused — never as applied.
+
+    All outputs go in ONE chunk: one reply for the whole layout, no window in
+    which some outputs have moved and others have not. A Lua error part-way
+    still leaves the calls before it run, so a refused chunk of two or more
+    outputs is followed by a second chunk putting every named output that is
+    connected back as `live` showed it before this apply (a refused single
+    call added no rule, so there is nothing to undo); the caller persists
+    nothing.
     """
-    notes = []
     icc = icc or {}
-    for o in model["outputs"]:
-        call = hypr_monitor_call(o, icc.get(o["name"]))
-        if dry_run:
-            notes.append(f"would run: hyprctl eval {call}")
-            continue
-        res = run(["hyprctl", "eval", call])
-        if res.returncode == 0 and res.stdout.strip() == "ok":
-            continue
-        why = (res.stdout + res.stderr).strip()[:160] or f"exit {res.returncode}"
-        notes.append(f"Hyprland refused the layout for {o['name']}: {why}")
+    if not model["outputs"]:
+        return []
+    chunk = "\n".join(hypr_monitor_call(o, icc.get(o["name"])) for o in model["outputs"])
+    if dry_run:
+        return [f"would run: hyprctl eval {chunk}"]
+    ok, why = _eval(chunk)
+    if ok:
+        return []
+    names = [o["name"] for o in model["outputs"]]
+    notes = [f"Hyprland refused the layout for {', '.join(names)}: {why}"]
+    if len(names) == 1:
+        # One call, refused: it raised before adding its rule, so nothing moved.
+        return notes
+    back = _live_as_model(live, set(names))
+    if not back["outputs"]:
+        notes.append("nothing to put back: none of these outputs was on before")
+        return notes
+    rb = "\n".join(hypr_monitor_call(o, icc.get(o["name"])) for o in back["outputs"])
+    ok, why = _eval(rb)
+    if ok:
+        notes.append("the screens were put back as they were: "
+                     + ", ".join(o["name"] for o in back["outputs"]))
+    else:
+        notes.append(f"putting the screens back was refused too: {why}")
     return notes
 
 
@@ -767,6 +834,12 @@ def validate_hyprland(text):
 
     Returns True/False, or None when Hyprland is not installed.
     """
+    res = verify_hyprland(text)
+    return None if res is None else res[0]
+
+
+def verify_hyprland(text):
+    """(ok, everything Hyprland printed) for the module, or None without Hyprland."""
     if not shutil.which("Hyprland"):
         return None
     env = dict(os.environ)
@@ -787,15 +860,23 @@ def validate_hyprland(text):
                 shutil.rmtree(scratch, ignore_errors=True)
         # Everything Hyprland has to say lands under "Config parsing result:",
         # and only a clean config prints "config ok" there.
-        return "config ok" in (res.stdout + res.stderr)
+        out = res.stdout + res.stderr
+        return "config ok" in out, out
 
 
 def atomic_write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".rime-display.")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def persist(model, live, dry_run, icc=None):
@@ -813,8 +894,14 @@ def persist(model, live, dry_run, icc=None):
     if validate_hyprland(hypr) is False:
         return False, ["the generated Hyprland monitor module was rejected; "
                        "the previous layout is untouched"]
-    atomic_write(KANSHI_OUT, kanshi)
-    atomic_write(HYPR_OUT, hypr)
+    for path, text in ((KANSHI_OUT, kanshi), (HYPR_OUT, hypr)):
+        try:
+            atomic_write(path, text)
+        except OSError as e:
+            # A read-only file or directory (a store copy, a full disk) is a
+            # refusal the page can show, not a traceback.
+            return False, [f"could not write {path}: {e.strerror or e}; "
+                           "the layout was not saved"]
     # kanshi reloads on SIGHUP; if it is not running the profile applies at the
     # next login, which is the same outcome as any other config change.
     if shutil.which("pkill"):
@@ -1403,8 +1490,8 @@ def colour_assign(name, profile, dry_run=False, model_path=None):
         notes.append("you can apply this, but your panel does not properly support "
                      "it: it can show about %d%% of %s's colours, so colours will "
                      "look duller or shifted" % (round(cov * 100), wanted["title"]))
-    notes += hypr_push_icc(name, wanted["filename"], model_path or MODEL_PATH)
-    return 0, notes
+    ok, pnotes = hypr_push_icc(name, wanted["filename"], model_path or MODEL_PATH)
+    return (0 if ok else 1), notes + pnotes
 
 
 def hypr_push_icc(name, filename, model_path):
@@ -1414,10 +1501,14 @@ def hypr_push_icc(name, filename, model_path):
     (an `icc` monitor rule, lcms2). The live call is the output's FULL rule —
     a bare `hl.monitor({ output, icc })` replaces the rule and would reset the
     mode, position and scale to defaults.
+
+    Returns (ok, notes). A refused live rule is not persisted (the login would
+    then apply what the screen just refused) and, like a refused persist, is
+    a failure the caller exits 1 on, the same as `apply`.
     """
     if compositor() != "hyprland":
-        return ["on this session nothing applies an ICC profile to the screen; "
-                "it is recorded for applications that read colord"]
+        return True, ["on this session nothing applies an ICC profile to the screen; "
+                      "it is recorded for applications that read colord"]
     model, _ = load_model(model_path)
     live = outputs()
     entry = next((o for o in model["outputs"] if o["name"] == name), None)
@@ -1426,7 +1517,7 @@ def hypr_push_icc(name, filename, model_path):
         # to what is persisted so the profile survives a login too.
         entry = next((dict(o) for o in live if o.get("name") == name), None)
         if entry is None:
-            return ["%s is not connected; the profile applies when it is" % name]
+            return True, ["%s is not connected; the profile applies when it is" % name]
         entry.pop("modes", None)
         model = {"outputs": model["outputs"] + [entry]}
     icc = assigned_icc([o["name"] for o in model["outputs"]])
@@ -1435,9 +1526,12 @@ def hypr_push_icc(name, filename, model_path):
     if os.environ.get("RIME_DISPLAY_NO_LIVE"):
         notes.append("RIME_DISPLAY_NO_LIVE is set; the live screen was not changed")
     else:
-        notes += apply_hypr({"outputs": [entry]}, False, icc)
-    notes += persist(model, live, False, icc)[1]
-    return notes
+        refused = apply_hypr({"outputs": [entry]}, False, icc, live)
+        if refused:
+            return False, notes + refused + [
+                "the profile is assigned in colord but was not applied or saved for Hyprland"]
+    ok, pnotes = persist(model, live, False, icc)
+    return ok, notes + pnotes
 
 
 # ── self-test ───────────────────────────────────────────────────────────────
@@ -1596,16 +1690,28 @@ def self_test_hardening():
           not any(ord(c) < 0x20 or ord(c) == 0x7f for c in lua_str("x\r\n\t\x00\x1b")))
     # The escaped literal must survive Hyprland's own Lua parser: a module whose
     # comment and string carry a newline-injection attempt still loads clean.
-    inj = 'DP-1"})\nhl.exec_cmd("touch /tmp/pwned")\n--]]'
+    # The payload raises a Lua error carrying a marker: if it ever ran as code,
+    # Hyprland would print the marker and refuse the config. "config ok" alone
+    # cannot tell, because a payload that ran without error prints it too.
+    marker = "RIME-INJECTED-" + os.urandom(4).hex()
+    payload = f'error("{marker}")'
+    inj = 'DP-1"})\n' + payload + '\n--]]'
     mod = gen_hypr({"outputs": [{"name": inj, "enabled": True, "scale": 1.0}]})
     check("an injected name stays one string literal", mod.count("\n") ==
           gen_hypr({"outputs": [{"name": "DP-1", "enabled": True, "scale": 1.0}]}).count("\n")
           and "hl.exec_cmd" not in mod.replace(lua_str(inj), ""))
-    valid = validate_hyprland(mod)
-    if valid is None:
+    safe = gen_hypr({"outputs": [{"name": "DP-1", "enabled": True, "scale": 1.0}]})
+    control = verify_hyprland(safe + "\n" + payload + "\n")
+    got = verify_hyprland(mod)
+    if control is None or got is None:
         print("SKIP  Hyprland not installed; cannot parse the injection module")
     else:
-        check("Hyprland parses the injection module as data, not code", valid)
+        # The control proves the detector: the same payload, unescaped, runs,
+        # and Hyprland says so by the marker.
+        check("the unescaped payload runs and Hyprland reports its marker (control)",
+              not control[0] and marker in control[1], control[1][-300:])
+        check("the escaped injection module loads and the payload never runs",
+              got[0] and marker not in got[1], got[1][-300:])
 
     # The model: names, bools, NaN/Infinity, positions, modes.
     m, notes = _model_from('{"outputs": [{"name": "A\\nB"}, {"name": "q\\"x"}, '
@@ -1696,7 +1802,7 @@ def self_test_hardening():
     real_run = run
     calls = []
     try:
-        for reply, expect_notes in (("ok\n", 0), ("[string]:1: attempt to call nil", 1)):
+        for reply, expect_notes in (("ok\n", 0), ("[string]:1: attempt to call nil", 2)):
             calls.clear()
 
             def fake(cmd, _reply=reply, **_kw):
@@ -1711,7 +1817,7 @@ def self_test_hardening():
             notes = apply_hypr(SAMPLE, False)
             check(f"apply_hypr reply {reply.strip()[:20]!r}: "
                   f"{'applied' if not expect_notes else 'reported as refused'}",
-                  len(notes) == expect_notes * len(SAMPLE["outputs"]), notes)
+                  len(notes) == expect_notes, notes)
             check("apply_hypr never runs `hyprctl keyword`",
                   calls and all(c[:2] == ["hyprctl", "eval"] for c in calls), calls)
     finally:
@@ -1790,7 +1896,7 @@ def main(argv=None):
     icc = assigned_icc([o["name"] for o in model["outputs"]])
     # Checked against what is connected now, before anything is applied or
     # written: the live call, kanshi and monitors.lua all get the same answer.
-    for n in fit_to_live(model, live):
+    for n in fit_to_live(model, live, snap_scale=(which == "hyprland")):
         print(f"rime-display: {n}", file=sys.stderr)
 
     if args.action == "apply":
@@ -1806,7 +1912,7 @@ def main(argv=None):
                   "live compositor (use `save` to write persistence only)",
                   file=sys.stderr)
             return 2
-        problems = apply_hypr(model, args.dry_run, icc) if which == "hyprland" \
+        problems = apply_hypr(model, args.dry_run, icc, live) if which == "hyprland" \
             else apply_wlr(model, args.dry_run)
         for p in problems:
             print(f"rime-display: {p}", file=sys.stderr)

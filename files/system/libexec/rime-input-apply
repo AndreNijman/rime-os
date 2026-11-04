@@ -483,10 +483,14 @@ def running_compositor():
     # down the wlr-randr path Hyprland does not implement.
     if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return "hyprland"
+    # Only this user's processes: a greeter's or another seat's compositor is
+    # not the session these settings are for.
+    uid = str(os.getuid())
     for proc, known in (("Hyprland", "hyprland"), (".Hyprland-wrapp", "hyprland"),
                         ("niri", "niri"), ("labwc", "labwc")):
         try:
-            if subprocess.run(["pgrep", "-x", proc], capture_output=True).returncode == 0:
+            if subprocess.run(["pgrep", "-u", uid, "-x", proc],
+                              capture_output=True).returncode == 0:
                 return known
         except OSError:   # no pgrep (a minimal container): no answer, not a traceback
             return None
@@ -1383,6 +1387,12 @@ def validate_hyprland(text):
 
     Returns True/False, or None when Hyprland is not installed.
     """
+    res = verify_hyprland(text)
+    return None if res is None else res[0]
+
+
+def verify_hyprland(text):
+    """(ok, everything Hyprland printed) for the module, or None without Hyprland."""
     if not which("Hyprland"):
         return None
     env = dict(os.environ)
@@ -1408,7 +1418,8 @@ def validate_hyprland(text):
         # the four ways this file can be wrong — an unknown config key, a value
         # of the wrong type, an unparseable bind string and a Lua error — and
         # none of them print it. So the banner's presence is the whole test.
-        return "config ok" in (out.stdout + out.stderr)
+        text_out = out.stdout + out.stderr
+        return "config ok" in text_out, text_out
 
 
 def validate_niri(path):
@@ -1780,9 +1791,27 @@ def read_back(model_path):
 def atomic_write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".rime-input.")
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_or_refuse(path, text):
+    """atomic_write, with a read-only file or directory reported, not raised."""
+    try:
+        atomic_write(path, text)
+        return True
+    except OSError as e:
+        print(f"rime-input: could not write {path}: {e.strerror or e}; "
+              "the previous one is left in place", file=sys.stderr)
+        return False
 
 
 # ── entry points ────────────────────────────────────────────────────────────
@@ -1915,17 +1944,27 @@ def self_test_hardening():
     # attacker-supplied) must not turn its comment line into Lua.
     model = {k: dict(v) for k, v in DEFAULTS.items()}
     model["devices"] = {}
-    evil = 'Evil Mouse\nhl.exec_cmd("touch /tmp/pwned") --]]'
+    # The payload raises a Lua error carrying a marker: had it run as code,
+    # Hyprland would print the marker. "config ok" alone cannot tell, since a
+    # payload that ran without error prints it too.
+    marker = "RIME-INJECTED-" + os.urandom(4).hex()
+    payload = f'error("{marker}")'
+    evil = 'Evil Mouse\n' + payload + ' --]]'
     hypr = gen_hyprland(model, [{"name": evil, "type": "mouse",
                                  "hypr_name": "evil-mouse", "hypr_name_source": "derived"}])
     check("a newline in a device name stays inside the escaped comment",
-          not any(line.startswith("hl.exec_cmd") for line in hypr.splitlines())
+          not any(line.startswith("error(") for line in hypr.splitlines())
           and lua_str(evil) in hypr, hypr)
-    valid = validate_hyprland(hypr)
-    if valid is None:
+    clean = gen_hyprland(model, [])
+    control = verify_hyprland(clean + "\n" + payload + "\n")
+    got = verify_hyprland(hypr)
+    if control is None or got is None:
         print("SKIP  Hyprland not installed; cannot parse the injection module")
     else:
-        check("Hyprland parses the device-name injection as a comment", valid)
+        check("the unescaped payload runs and Hyprland reports its marker (control)",
+              not control[0] and marker in control[1], control[1][-300:])
+        check("the device-name injection loads and the payload never runs",
+              got[0] and marker not in got[1], got[1][-300:])
 
     m, notes = _model_from('{"touchpad": {"speed": true, "tap": "false", '
                            '"scroll_factor": NaN}, "pointer": {"speed": 1e400}, '
@@ -2096,9 +2135,9 @@ def main(argv=None):
         return 1
 
     if hypr_ok:
-        atomic_write(HYPR_OUT, hypr)
+        hypr_ok = write_or_refuse(HYPR_OUT, hypr)
     if niri_ok:
-        atomic_write(NIRI_OUT, niri)
+        niri_ok = write_or_refuse(NIRI_OUT, niri)
     for note in write_labwc(LABWC_RC, model, args.dry_run):
         print(f"rime-input: {note}", file=sys.stderr)
 

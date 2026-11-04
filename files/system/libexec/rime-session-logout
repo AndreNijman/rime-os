@@ -28,10 +28,10 @@ esac
 # The signature before the process name: NixOS's wrapped Hyprland is
 # ".Hyprland-wrapp" to `pgrep -x` (see rime-compositor-reload).
 if   [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then exec hyprctl dispatch 'hl.dsp.exit()'
-elif pgrep -x labwc    >/dev/null 2>&1; then exec labwc --exit
-elif pgrep -x Hyprland >/dev/null 2>&1 \
-  || pgrep -x .Hyprland-wrapp >/dev/null 2>&1; then exec hyprctl dispatch 'hl.dsp.exit()'
-elif pgrep -x niri     >/dev/null 2>&1; then exec niri msg action quit --skip-confirmation
+elif pgrep -u "$(id -u)" -x labwc    >/dev/null 2>&1; then exec labwc --exit
+elif pgrep -u "$(id -u)" -x Hyprland >/dev/null 2>&1 \
+  || pgrep -u "$(id -u)" -x .Hyprland-wrapp >/dev/null 2>&1; then exec hyprctl dispatch 'hl.dsp.exit()'
+elif pgrep -u "$(id -u)" -x niri     >/dev/null 2>&1; then exec niri msg action quit --skip-confirmation
 fi
 
 echo "rime: could not determine how to end this session" >&2

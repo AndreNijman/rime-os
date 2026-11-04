@@ -50,6 +50,30 @@ def run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
 
 
+def lua_str(s):
+    """A Lua string literal for any text: quote, backslash and every control
+    character are escaped as \\ddd, so nothing in `s` can close the literal and
+    become code in the dispatch chunk."""
+    out = ['"']
+    for ch in str(s):
+        o = ord(ch)
+        if ch in '"\\' or o < 0x20 or o == 0x7f:
+            out.append("\\%03d" % o)
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def hypr_dispatch(call):
+    """`hyprctl dispatch` under Hyprland's Lua config (0.57): the argument is
+    evaluated as `return hl.dispatch(<call>)`, so it is a Lua expression, not
+    a hyprlang dispatcher word (those are refused). Success is the reply "ok";
+    hyprctl exits 0 on a refusal too."""
+    r = run(["hyprctl", "dispatch", call])
+    return r.returncode == 0 and r.stdout.strip() == "ok"
+
+
 def compositor():
     if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
         return "hyprland"
@@ -92,13 +116,15 @@ def hyprland_list():
 
 
 def hyprland_place(handle, workspace):
-    r = run(["hyprctl", "dispatch", "movetoworkspacesilent",
-             f"{workspace},address:{handle}"])
-    return r.returncode == 0
+    # hyprlang's `movetoworkspacesilent WS,address:X` is refused under Lua.
+    # follow = false is the "silent" part: the window moves, focus stays.
+    return hypr_dispatch("hl.dsp.window.move({ workspace = %s, follow = false, window = %s })"
+                         % (lua_str(workspace), lua_str(f"address:{handle}")))
 
 
 def hyprland_workspace(workspace):
-    return run(["hyprctl", "dispatch", "workspace", str(workspace)]).returncode == 0
+    # hyprlang's `workspace N` is hl.dsp.focus({ workspace = N }) under Lua.
+    return hypr_dispatch("hl.dsp.focus({ workspace = %s })" % lua_str(workspace))
 
 
 # ── niri ────────────────────────────────────────────────────────────────────

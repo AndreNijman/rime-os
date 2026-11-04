@@ -100,10 +100,12 @@ pkgs.testers.runNixOSTest {
         # with the desktop enabled, Hyprland (system profile) and xkbcli (rime-input-apply's own store PATH) must
         # both be found, and the injection / snap / layout-refusal cases must report PASS.
         for p, must in [
-            ("rime-display-apply --self-test", ["PASS  Hyprland parses the injection module as data, not code",
+            ("rime-display-apply --self-test", ["PASS  the unescaped payload runs and Hyprland reports its marker (control)",
+                                                 "PASS  the escaped injection module loads and the payload never runs",
                                                  "PASS  hypr_scale 1920x1080 @ 1.1 -> 1.2 (suggested)",
                                                  "PASS  apply_hypr never runs `hyprctl keyword`"]),
-            ("rime-input-apply --self-test", ["PASS  Hyprland parses the device-name injection as a comment",
+            ("rime-input-apply --self-test", ["PASS  the unescaped payload runs and Hyprland reports its marker (control)",
+                                               "PASS  the device-name injection loads and the payload never runs",
                                                "PASS  xkb: unknown layout xx is refused and the previous layout kept",
                                                "PASS  xkb: unknown model (xkbcommon says nothing) is refused and the previous layout kept",
                                                "PASS  Hyprland accepts the generated kb_ options"]),

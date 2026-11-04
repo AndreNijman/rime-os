@@ -27,6 +27,9 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 RELOAD="$root/files/system/libexec/rime-compositor-reload"
 LOGOUT="$root/files/system/libexec/rime-session-logout"
 INPUT="$root/files/system/libexec/rime-input-apply"
+DISPLAY_APPLY="$root/files/system/libexec/rime-display-apply"
+FOCUS="$root/files/system/libexec/rime-agent-focus"
+PROJWIN="$root/files/system/libexec/rime-project-windows"
 
 pass=0; fail=0
 ok()  { printf 'PASS  %s\n' "$1"; pass=$((pass + 1)); }
@@ -40,14 +43,23 @@ for tool in hyprctl labwc niri; do
     printf '#!/bin/sh\nprintf "%%s" "%s" >> "%s"; for a in "$@"; do printf " %%s" "$a" >> "%s"; done; echo >> "%s"\n' \
         "$tool" "$CALLS" "$CALLS" "$CALLS" > "$FAKE/$tool"
 done
-# pgrep -x NAME succeeds only for a name listed in $FAKE_PROCS (one per line).
+# Like real pgrep: `-x NAME` matches a process of ANY user ($FAKE_PROCS are
+# this user's, $FAKE_OTHER another user's, one name per line); `-u UID -x NAME`
+# matches only that user's. A helper that forgets -u then picks up a greeter's
+# or another seat's compositor, which these fakes make visible.
 cat > "$FAKE/pgrep" <<'EOF'
 #!/bin/sh
-[ "$1" = "-x" ] || exit 2
-printf '%s\n' "${FAKE_PROCS:-}" | grep -qxF -- "$2"
+me="$(id -u)"
+case "$1" in
+    -u) [ "$3" = "-x" ] || exit 2
+        [ "$2" = "$me" ] || exit 1
+        printf '%s\n' "${FAKE_PROCS:-}" | grep -qxF -- "$4" ;;
+    -x) printf '%s\n%s\n' "${FAKE_PROCS:-}" "${FAKE_OTHER:-}" | grep -qxF -- "$2" ;;
+    *)  exit 2 ;;
+esac
 EOF
 chmod +x "$FAKE"/*
-for t in bash sh grep tr printf cat; do
+for t in bash sh grep tr printf cat id; do
     p="$(command -v "$t")" && ln -sf "$p" "$FAKE/$t" 2>/dev/null
 done
 
@@ -73,6 +85,10 @@ run "$RELOAD" XDG_CURRENT_DESKTOP=niri HYPRLAND_INSTANCE_SIGNATURE=fixture_sig
 called "niri validate" \
     && ok "XDG_CURRENT_DESKTOP still wins over a stray signature" \
     || bad "XDG_CURRENT_DESKTOP still wins over a stray signature ($(tr '\n' ' ' < "$CALLS"))"
+run "$RELOAD" FAKE_OTHER=labwc
+called "rc=1" && ! grep -q '^labwc' "$CALLS" \
+    && ok "another user's labwc (a greeter, a second seat) is not reloaded" \
+    || bad "another user's labwc (a greeter, a second seat) is not reloaded ($(tr '\n' ' ' < "$CALLS"))"
 run "$RELOAD"
 called "rc=1" && ! grep -q '^hyprctl' "$CALLS" \
     && ok "with no compositor at all it fails and reloads nothing" \
@@ -91,10 +107,89 @@ run "$LOGOUT" FAKE_PROCS=.Hyprland-wrapp
 called "hyprctl dispatch hl.dsp.exit()" \
     && ok "a wrapped Hyprland is found by its process name" \
     || bad "a wrapped Hyprland is found by its process name ($(tr '\n' ' ' < "$CALLS"))"
+for other in Hyprland .Hyprland-wrapp; do
+    run "$LOGOUT" FAKE_OTHER=$other
+    ! grep -q '^hyprctl' "$CALLS" \
+        && ok "another user's $other is not asked to exit" \
+        || bad "another user's $other is not asked to exit ($(tr '\n' ' ' < "$CALLS"))"
+done
 if grep -nE "hyprctl dispatch +[a-z]" "$LOGOUT" "$RELOAD" | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' >/dev/null; then
     bad "no hyprlang dispatch word is left in either helper"
 else
     ok "no hyprlang dispatch word is left in either helper"
+fi
+
+section "the Python helpers look only at this user's compositor"
+PY3="$(command -v python3)"
+for helper in "$INPUT:running_compositor" "$DISPLAY_APPLY:compositor"; do
+    file="${helper%:*}"; fn="${helper##*:}"
+    for case_ in "FAKE_OTHER=labwc:none" "FAKE_PROCS=labwc:labwc"; do
+        assign="${case_%:*}"; want="${case_##*:}"
+        got="$(env -i PATH="$FAKE" "$assign" "$PY3" - "$file" "$fn" <<'PY' 2>&1
+import importlib.machinery, importlib.util, sys
+spec = importlib.util.spec_from_loader("h", importlib.machinery.SourceFileLoader("h", sys.argv[1]))
+h = importlib.util.module_from_spec(spec); spec.loader.exec_module(h)
+r = getattr(h, sys.argv[2])()
+print("none" if r in (None, "unknown") else r)
+PY
+)"
+        [ "$got" = "$want" ] \
+            && ok "$(basename "$file") $fn with $assign -> $want" \
+            || bad "$(basename "$file") $fn with $assign -> $want (got: $got)"
+    done
+done
+
+section "window helpers speak Lua dispatch"
+# Hyprland 0.57 evaluates `hyprctl dispatch X` as `return hl.dispatch(X)`, so
+# the hyprlang words (focuswindow, movetoworkspacesilent, workspace) are
+# refused, and hyprctl still exits 0 on a refusal. The fake answers "ok" only
+# to an hl.dsp call and logs every argv; the generated calls are then parsed
+# by Hyprland itself when it is installed (the VM test runs them for real).
+DBIN="$WORK/dbin"; mkdir -p "$DBIN"
+cat > "$DBIN/hyprctl" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$DCALLS"
+case "$2" in hl.dsp.*) echo ok ;; *) echo "invalid dispatcher" ;; esac
+EOF
+chmod +x "$DBIN/hyprctl"
+DCALLS="$WORK/dcalls"; export DCALLS
+dispatch_py() {
+    : > "$DCALLS"
+    PATH="$DBIN:$PATH" "$PY3" - "$@" <<'PY' 2>&1
+import importlib.machinery, importlib.util, sys
+def load(p):
+    spec = importlib.util.spec_from_loader("m", importlib.machinery.SourceFileLoader("m", p))
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+f, pw = load(sys.argv[1]), load(sys.argv[2])
+print(f.hyprland_focus("0x55d1"), pw.hyprland_place("0x55d1", "special:a\"b"),
+      pw.hyprland_workspace(4))
+PY
+}
+got="$(dispatch_py "$FOCUS" "$PROJWIN")"
+[ "$got" = "True True True" ] \
+    && ok "focus, place and workspace succeed only through hl.dsp calls" \
+    || bad "focus, place and workspace succeed only through hl.dsp calls (got: $got; $(cat "$DCALLS"))"
+grep -qxF 'dispatch hl.dsp.focus({ window = "address:0x55d1" })' "$DCALLS" \
+    && ok "rime-agent-focus focuses with hl.dsp.focus({ window = ... })" \
+    || bad "rime-agent-focus focuses with hl.dsp.focus ($(cat "$DCALLS"))"
+grep -qxF 'dispatch hl.dsp.window.move({ workspace = "special:a\034b", follow = false, window = "address:0x55d1" })' "$DCALLS" \
+    && ok "rime-project-windows moves silently with follow = false, the name escaped" \
+    || bad "rime-project-windows moves silently with follow = false ($(cat "$DCALLS"))"
+grep -qxF 'dispatch hl.dsp.focus({ workspace = "4" })' "$DCALLS" \
+    && ok "rime-project-windows switches workspace with hl.dsp.focus({ workspace = ... })" \
+    || bad "rime-project-windows switches workspace ($(cat "$DCALLS"))"
+# A refusal is a failure: the fake refuses anything but hl.dsp, so swap in one
+# that refuses everything with exit 0, as Hyprland does.
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$DCALLS"\necho "[string]:1: no such window"\n' > "$DBIN/hyprctl"
+got="$(dispatch_py "$FOCUS" "$PROJWIN")"
+[ "$got" = "False False False" ] \
+    && ok "a dispatch Hyprland refuses (exit 0, reply not ok) is reported as failed" \
+    || bad "a dispatch Hyprland refuses is reported as failed (got: $got)"
+if grep -nE '"dispatch", *"(focuswindow|movetoworkspace|movetoworkspacesilent|workspace|exec)"' \
+        "$FOCUS" "$PROJWIN" >/dev/null; then
+    bad "no hyprlang dispatcher word is left in the window helpers"
+else
+    ok "no hyprlang dispatcher word is left in the window helpers"
 fi
 
 section "rime-input-apply reports a failed reload"

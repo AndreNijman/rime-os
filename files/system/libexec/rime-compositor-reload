@@ -31,10 +31,10 @@ case "$desktop" in
     *niri*)     reload_niri ;;
     *)
         if   [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then reload_hypr
-        elif pgrep -x labwc    >/dev/null 2>&1; then reload_labwc
-        elif pgrep -x Hyprland >/dev/null 2>&1 \
-          || pgrep -x .Hyprland-wrapp >/dev/null 2>&1; then reload_hypr
-        elif pgrep -x niri     >/dev/null 2>&1; then reload_niri
+        elif pgrep -u "$(id -u)" -x labwc    >/dev/null 2>&1; then reload_labwc
+        elif pgrep -u "$(id -u)" -x Hyprland >/dev/null 2>&1 \
+          || pgrep -u "$(id -u)" -x .Hyprland-wrapp >/dev/null 2>&1; then reload_hypr
+        elif pgrep -u "$(id -u)" -x niri     >/dev/null 2>&1; then reload_niri
         else
             echo "rime: no known compositor is running (XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-unset})" >&2
             exit 1

@@ -68,7 +68,11 @@ cat > "$T/bin/hyprctl" <<STUB
 #!/bin/sh
 echo "\$*" >> "$T/hyprctl.log"
 case "\$1" in
-  dispatch) [ -f "$T/nospawn" ] || { sleep 300 >/dev/null 2>&1 </dev/null & echo \$! > "$T/pid.new"; cp "$T/pid.new" "$T/pid.cur"; }; echo ok ;;
+  dispatch)
+    # Like Hyprland 0.57 under Lua: a hyprlang dispatcher word is refused.
+    case "\$2" in hl.dsp.*) ;; *) echo "error: not a Lua dispatch"; exit 0 ;; esac
+    if [ -f "$T/refuse" ]; then echo "[string]:1: exec_cmd refused"; exit 0; fi
+    [ -f "$T/nospawn" ] || { sleep 300 >/dev/null 2>&1 </dev/null & echo \$! > "$T/pid.new"; cp "$T/pid.new" "$T/pid.cur"; }; echo ok ;;
   configerrors) cat "$T/configerrors" 2>/dev/null ;;
 esac
 STUB
@@ -88,7 +92,7 @@ chmod +x "$T"/bin/*
 
 reset() {
     for f in "$T"/pid.*; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done
-    rm -f "$T"/pid.* "$T"/*.log "$T/hint.n" "$T/nospawn" "$T/firstrun.fail" "$T/configerrors"
+    rm -f "$T"/pid.* "$T"/*.log "$T/hint.n" "$T/nospawn" "$T/refuse" "$T/firstrun.fail" "$T/configerrors"
     printf 'no\n' > "$T/hint"
     printf '{"revision":"old","locked":false,"lockSecure":false,"pid":1}' > "$T/state"
     printf 'new123' > "$T/rev"; printf 'old' > "$T/oldrev"
@@ -166,6 +170,21 @@ rc=$(run shell new123 4)
 reset; kill "$(cat "$T/pid.cur")"; sleep 0.1
 rc=$(run shell - 4)
 [ "$rc" = 0 ] && grep -q 'exec_cmd' "$T/hyprctl.log" && ok "rollback with no shell running starts one" || bad "rollback no shell" "rc=$rc $(cat "$T/out")"
+
+# 11c. The shell is started with the Lua dispatcher, and a refusal is a
+#      failure named at once, not a hyprlang retry and a silent wait.
+reset; kill "$(cat "$T/pid.cur")"; sleep 0.1
+rc=$(run shell - 4)
+grep -qx 'dispatch hl.dsp.exec_cmd("/bin/true")' "$T/hyprctl.log" \
+    && ! grep -q '^dispatch exec' "$T/hyprctl.log" \
+    && ok "the shell is started with hl.dsp.exec_cmd, never \`dispatch exec\`" \
+    || bad "Lua exec_cmd" "$(cat "$T/hyprctl.log" 2>/dev/null)"
+reset; kill "$(cat "$T/pid.cur")"; sleep 0.1; : > "$T/refuse"
+rc=$(run shell - 4)
+{ [ "$rc" = 1 ] && grep -q 'Hyprland refused to start the shell: \[string\]' "$T/out" \
+  && [ "$(grep -c '^dispatch' "$T/hyprctl.log")" = 1 ]; } \
+    && ok "a refused exec_cmd fails with Hyprland's reply and no second attempt" \
+    || bad "refused exec_cmd" "rc=$rc $(cat "$T/out") $(cat "$T/hyprctl.log" 2>/dev/null)"
 
 # 12. Session ids are validated.
 reset

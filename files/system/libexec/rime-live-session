@@ -92,17 +92,30 @@ compositor() {
     fi
 }
 
+# Its own scope, so it outlives this helper's transient unit (whose cgroup is
+# stopped when the helper exits).
+spawn_detached() {
+    systemd-run --user --scope --collect --quiet -- setsid -f "$AUTOSTART" >/dev/null 2>&1 </dev/null
+}
+
 spawn_shell() {
     case "$(compositor)" in
         hyprland)
-            # 0.56 takes Lua dispatch; older builds the hyprlang form.
-            out="$(hyprctl dispatch "hl.dsp.exec_cmd(\"${AUTOSTART}\")" 2>&1)"
-            [ "$out" = "ok" ] || hyprctl dispatch exec "$AUTOSTART" >/dev/null 2>&1
+            # Hyprland 0.57 takes Lua dispatch only (`dispatch exec` is
+            # refused). The path goes inside a Lua string literal, so one with
+            # a quote, backslash or control character is not spliced in: it is
+            # started with spawn_detached instead.
+            case "$AUTOSTART" in
+                *[!A-Za-z0-9/._+-]*) spawn_detached ;;
+                *) out="$(hyprctl dispatch "hl.dsp.exec_cmd(\"${AUTOSTART}\")" 2>&1)"
+                   [ "$out" = "ok" ] || {
+                       say "Hyprland refused to start the shell: ${out}"
+                       return 1
+                   } ;;
+            esac
             ;;
         niri) niri msg action spawn -- "$AUTOSTART" >/dev/null 2>&1 ;;
-        # Its own scope, so it outlives this helper's transient unit (whose
-        # cgroup is stopped when the helper exits).
-        *) systemd-run --user --scope --collect --quiet -- setsid -f "$AUTOSTART" >/dev/null 2>&1 </dev/null ;;
+        *) spawn_detached ;;
     esac
 }
 
@@ -122,7 +135,7 @@ swap_shell() {
             sleep 0.2
         fi
     fi
-    spawn_shell
+    spawn_shell || fail "the compositor did not start the shell"
     for _ in $(seq 1 $((WAIT * 4))); do
         sleep 0.25
         new="$(shell_pid)"

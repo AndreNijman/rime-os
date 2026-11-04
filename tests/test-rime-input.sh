@@ -1072,5 +1072,22 @@ else
     fi
 fi
 
+section "a target that cannot be written is a refusal, not a traceback"
+# Root ignores the mode bits, so this needs an ordinary user.
+if [ "$(id -u)" -ne 0 ]; then
+    h="${WORK}/ro"; mkhome "$h"
+    mkdir -p "$h/.config/hypr/rime" && chmod a-w "$h/.config/hypr/rime"
+    out="$(run_gen "$h" 2>&1)"; rc=$?
+    chmod u+w "$h/.config/hypr/rime"
+    { [ "$rc" -eq 1 ] && printf '%s' "$out" | has 'could not write .*input.lua'; } \
+        && ! printf '%s' "$out" | has 'Traceback' \
+        && ok "a read-only Hyprland module directory is refused in words and exits 1" \
+        || bad "a read-only Hyprland module directory is refused in words and exits 1 (rc=$rc: $out)"
+    ls -A "$h/.config/hypr/rime" | has '^\.rime-input\.' \
+        && bad "no temporary file is left behind" || ok "no temporary file is left behind"
+else
+    skp "running as root: a read-only directory does not stop root"
+fi
+
 printf '\nrime-input: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]

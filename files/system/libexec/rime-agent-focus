@@ -34,7 +34,7 @@ suppresses for callers that only want to know.
 
 COMPOSITORS
 -----------
-  hyprland  hyprctl -j clients   (has `pid`)      -> dispatch focuswindow
+  hyprland  hyprctl -j clients   (has `pid`)      -> hl.dsp.focus({ window })
   niri      niri msg --json windows (has `pid`)   -> action focus-window
   labwc     no IPC and no window query at all, by design. There is nothing to
             enumerate, so labwc always takes the spawn path. Saying so is more
@@ -52,6 +52,30 @@ TIMEOUT = 5
 
 def run(cmd, **kw):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, **kw)
+
+
+def lua_str(s):
+    """A Lua string literal for any text: quote, backslash and every control
+    character are escaped as \\ddd, so nothing in `s` can close the literal and
+    become code in the dispatch chunk."""
+    out = ['"']
+    for ch in str(s):
+        o = ord(ch)
+        if ch in '"\\' or o < 0x20 or o == 0x7f:
+            out.append("\\%03d" % o)
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def hypr_dispatch(call):
+    """`hyprctl dispatch` under Hyprland's Lua config (0.57): the argument is
+    evaluated as `return hl.dispatch(<call>)`, so it is a Lua expression, not
+    a hyprlang dispatcher word (those are refused). Success is the reply "ok";
+    hyprctl exits 0 on a refusal too."""
+    r = run(["hyprctl", "dispatch", call])
+    return r.returncode == 0 and r.stdout.strip() == "ok"
 
 
 def compositor():
@@ -150,7 +174,9 @@ def hyprland_windows():
 
 
 def hyprland_focus(handle):
-    return run(["hyprctl", "dispatch", "focuswindow", f"address:{handle}"]).returncode == 0
+    # hyprlang's `focuswindow address:X` is refused under Lua; the selector is
+    # the same string, given to hl.dsp.focus as its `window` field.
+    return hypr_dispatch("hl.dsp.focus({ window = %s })" % lua_str(f"address:{handle}"))
 
 
 def niri_windows():
