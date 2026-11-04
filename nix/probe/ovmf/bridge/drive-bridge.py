@@ -941,6 +941,7 @@ def finish_interrupt(a):
     vm = nixos_boot(a, "finint3", w)
     menu_after(vm, "finint3")
     home_sums(vm, "finint3-home")
+    vm.root()
     poweroff(vm)
     shutil.rmtree(w, ignore_errors=True)
     say(f"[finint] killed after {a.finish_kill_at!r} + power cut: NixOS boots, the re-run completes, a third run refuses")
