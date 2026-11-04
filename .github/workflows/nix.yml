@@ -15,9 +15,27 @@ name: Nix
 # the binary cache), with this hosted workflow kept as the fallback. Any job moved there must carry the fork guard
 # ci/runner/check-workflows.py enforces.
 #
-# No /nix cache between runs: the GitHub Actions cache is capped at 10 GB per repository and the legs below need
-# 5-13 GB of store each, so hit rates would be poor and evictions constant. Measure before adding one. The real
-# answer is the Rime binary cache (TODO(handover) R2, docs/nixos/updates-and-release.md).
+# Build once, reuse everywhere (nix/ci/README.md "Dev cache and reuse", docs/nixos/ci.md):
+# - The packages job builds what many legs would otherwise each compile (nix/ci/prebuild.txt: rimed with its cargo
+#   test, Rime's other packages, the desktop's overridden stock packages, COSMIC's) ONCE, and keeps the paths it built
+#   (never what cache.nixos.org serves) as a zstd file:// binary cache in the Actions cache, keyed by those
+#   derivations. Every leg restores it and adds it as a substituter, so a leg substitutes rimed instead of compiling
+#   it. The whole /nix store is NOT cached: the legs need 5-13 GB each against a 10 GB repository cap; the dev cache
+#   is the few hundred MB nothing upstream serves.
+# - A check that passed is kept, keyed by its output path (= its derivation = every input), in a small rolling
+#   results cache (one per ISO week). The plan job proves a prior pass with `nix path-info` on the output path it
+#   just evaluated, and does not build that check again: the summary shows it as REUSED, "PASSED EARLIER, same
+#   inputs, run N", never as a pass of this run. A check that did not pass is never kept.
+# - Fresh run (reuse nothing): push a branch named nix/fresh-*, put the trailer "Rime-CI: fresh" in the head commit's
+#   message, or run it by hand with the `fresh` input.
+# - Scope (GitHub's rule): a run restores caches saved on its own branch and on the default branch (main); a pull
+#   request also restores its base branch's (feat/nixos). So a new nix/* branch starts cold; a PR to feat/nixos
+#   starts from feat/nixos's caches. A pull request's saves stay in that PR's merge ref, so a fork can never write a
+#   cache any other run reads.
+# - NEVER in a release: nix-release.yml, nix-kernel-sign.yml and build-image.yml must not touch the dev cache, the
+#   results cache, or cache Nix paths in the Actions cache at all (nix/ci/check-cache-isolation.py, run by
+#   checks.ci). What ships is built from source or cache.nixos.org, never from a CI cache.
+# The real binary cache is still the Rime one (TODO(handover) R2, docs/nixos/updates-and-release.md).
 
 on:
   push:
@@ -25,6 +43,11 @@ on:
   pull_request:
     branches: [feat/nixos]
   workflow_dispatch:
+    inputs:
+      fresh:
+        description: Reuse nothing (build every check and package again)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -36,6 +59,10 @@ concurrency:
 env:
   # The same flake reference a local run uses (a worktree whose .git points outside the tree needs path:).
   FLAKE: path:.
+  # What `run-checks.sh fresh` reads: the branch, the head commit's message (a PR's head is HEAD^2 of the merge
+  # commit, hence fetch-depth 2 where it is asked) and the dispatch input.
+  RIME_REF: ${{ github.head_ref || github.ref_name }}
+  RIME_FRESH_INPUT: ${{ inputs.fresh || false }}
 
 jobs:
   plan:
@@ -47,11 +74,31 @@ jobs:
     timeout-minutes: 45
     outputs:
       run: ${{ steps.plan.outputs.run }}
+      week: ${{ steps.mode.outputs.week }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 2
       # Nix 2.35.4, the same as the build container the checks were proven in. It authenticates GitHub fetches
       # (the nixpkgs pin) with the job's own read-only github.token, for the rate limit; no other credential.
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - name: Fresh run? Which week?
+        id: mode
+        run: |
+          RIME_COMMIT_MSG=$(git log -1 --format=%B "$(git rev-parse -q --verify HEAD^2 || echo HEAD)")
+          export RIME_COMMIT_MSG
+          mode=$(nix/ci/run-checks.sh fresh)
+          echo "fresh: $mode"
+          echo "fresh=${mode%% *}" >> "$GITHUB_OUTPUT"
+          echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+      # The rolling results cache: the checks that passed before, by output path. Restored even on a fresh run, so a
+      # fresh failure of a check that passed on the same inputs says so (flake signal). Never written here.
+      - name: Restore the results cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/rime-results
+          key: rime-check-results-v1-${{ steps.mode.outputs.week }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: rime-check-results-v1-${{ steps.mode.outputs.week }}-
       - name: Evaluate every flake output, one process each
         # Every check (the skipped kernel ones included), package and configuration, so a broken expression fails
         # here. Not `nix flake check --no-build`: one evaluator for all checks peaked at 27.9 GB and the 16 GB
@@ -67,11 +114,15 @@ jobs:
                 "$(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s:%dM ", $2, $1/1024}')"
             done ) &
           mon=$!
-          rc=0; RIME_EVAL_JOBS=4 nix/ci/eval-each.sh "$FLAKE" || rc=$?
+          rc=0; RIME_EVAL_JOBS=4 RIME_EVAL_OUT="$RUNNER_TEMP/drvs.tsv" nix/ci/eval-each.sh "$FLAKE" || rc=$?
           kill "$mon" 2>/dev/null || true
           exit "$rc"
       - name: Plan the checks
         id: plan
+        env:
+          RIME_CHECK_DRVS: ${{ runner.temp }}/drvs.tsv
+          RIME_RESULTS: ${{ runner.temp }}/rime-results
+          RIME_CI_FRESH: ${{ steps.mode.outputs.fresh }}
         run: |
           nix/ci/run-checks.sh plan "$RUNNER_TEMP/plan"
           echo "run=$(cat "$RUNNER_TEMP/plan/run.json")" >> "$GITHUB_OUTPUT"
@@ -79,6 +130,10 @@ jobs:
             echo "### Flake checks this run skips ($(wc -l < "$RUNNER_TEMP/plan/skipped.tsv" | tr -d ' ') of $(wc -l < "$RUNNER_TEMP/plan/checks.txt" | tr -d ' '))"
             echo
             while IFS=$'\t' read -r name reason; do echo "- SKIPPED \`$name\`: $reason"; done < "$RUNNER_TEMP/plan/skipped.tsv"
+            echo
+            echo "### Flake checks not built again: PASSED EARLIER on the same inputs ($(wc -l < "$RUNNER_TEMP/plan/reused.tsv" | tr -d ' '))"
+            echo
+            while IFS=$'\t' read -r name outp run; do echo "- REUSED \`$name\`: run $run, \`$outp\`"; done < "$RUNNER_TEMP/plan/reused.tsv"
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Every suite and flake check has a CI home
         run: RIME_FLAKE_CHECKS_FILE="$RUNNER_TEMP/plan/checks.txt" ./tests/check-suites-run-in-ci.sh
@@ -89,13 +144,17 @@ jobs:
           retention-days: 7
 
   packages:
-    name: Packages (rimed, rime-shell, rime-libexec)
+    name: Packages (built once, reused by every leg)
     runs-on: ubuntu-24.04
-    # rimed compiles in 11 min on 20 threads (docs/nixos/p1-exit.md), then runs its whole cargo test: 18-24 min in
-    # all on the hosted runner (docs/nixos/ci.md). Twice the slowest, rounded up.
-    timeout-minutes: 50
+    # Cold (nothing in the dev cache): rimed (~25 min with its cargo test) and COSMIC's initial setup (~35 min) build
+    # side by side on 4 cores; measured on the hosted runner, nix/ci/README.md. Warm: a few minutes.
+    timeout-minutes: 100
+    outputs:
+      key: ${{ steps.items.outputs.key }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 2
       - uses: ./.github/actions/free-disk-space
         with:
           required-gb: "40"
@@ -104,33 +163,81 @@ jobs:
       - name: Allow user namespaces (bubblewrap in rimed's tests)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - name: Who may add a substituter
+        # The dev cache is passed per build as `--option extra-substituters file://...?trusted=1`, which Nix honours
+        # only for a trusted user (install-nix-action's set_as_trusted_user). Printed, so a change there is visible.
+        run: |
+          echo "runner user: $(id -un)"
+          nix config show trusted-users
+          nix config show require-sigs
       - name: Prove bubblewrap works inside the build sandbox
         # Seconds, and a named failure, instead of a mystery twenty minutes into rimed's checkPhase.
         run: nix build "$FLAKE#checks.x86_64-linux.ci-userns" -L --no-link
-      - name: Build rimed (and run its cargo tests), rime-shell, rime-libexec
-        run: nix build "$FLAKE#rimed" "$FLAKE#rime-shell" "$FLAKE#rime-libexec" -L --print-out-paths --out-link "$RUNNER_TEMP/pkg"
+      - name: Fresh run?
+        id: mode
+        run: |
+          RIME_COMMIT_MSG=$(git log -1 --format=%B "$(git rev-parse -q --verify HEAD^2 || echo HEAD)")
+          export RIME_COMMIT_MSG
+          mode=$(nix/ci/run-checks.sh fresh)
+          echo "fresh: $mode"
+          echo "fresh=${mode%% *}" >> "$GITHUB_OUTPUT"
+      - name: Evaluate what to build once (nix/ci/prebuild.txt)
+        id: items
+        run: |
+          nix/ci/run-checks.sh prebuild-plan "$RUNNER_TEMP/pre"
+          echo "key=$(cat "$RUNNER_TEMP/pre/key")" >> "$GITHUB_OUTPUT"
+      - name: Restore the dev cache
+        id: restore
+        if: ${{ steps.mode.outputs.fresh != '1' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/rime-dev-cache
+          key: ${{ steps.items.outputs.key }}
+          restore-keys: rime-dev-pkgs-v1-
+      - name: Build rimed (and run its cargo test), rime-shell, rime-libexec and the rest, once
+        env:
+          RIME_DEV_CACHE: ${{ runner.temp }}/rime-dev-cache
+          # An exact hit has nothing new to keep: realise only rimed, for its test report.
+          RIME_PREBUILD_ALL: ${{ steps.restore.outputs.cache-hit == 'true' && '0' || '1' }}
+        run: nix/ci/run-checks.sh prebuild "$RUNNER_TEMP/pre"
       - name: cargo test total
         if: ${{ !cancelled() }}
+        env:
+          RIME_DEV_CACHE: ${{ runner.temp }}/rime-dev-cache
         run: |
-          report="$RUNNER_TEMP/pkg/share/doc/rimed/cargo-tests.txt"
-          if [ -f "$report" ]; then
-            { echo '### rimed: cargo test --workspace --no-fail-fast'; echo; echo '```'; cat "$report"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-            cat "$report"
-          else
-            echo "::error::no cargo test report: rimed did not build"
-            exit 1
-          fi
+          nix/ci/run-checks.sh prebuild-report "$RUNNER_TEMP/pre" | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo; echo '| item | this job | derivation |'; echo '|---|---|---|'
+            while IFS=$'\t' read -r name state drv _; do echo "| $name | $state | \`$drv\` |"; done < "$RUNNER_TEMP/pre/status.tsv"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep what this job built (dev cache)
+        if: ${{ success() && steps.restore.outputs.cache-hit != 'true' }}
+        env:
+          RIME_DEV_CACHE: ${{ runner.temp }}/rime-dev-cache
+          RIME_RUN: ${{ github.run_id }}
+        run: |
+          nix/ci/run-checks.sh dev-cache-export "$RUNNER_TEMP/pre" "$RUNNER_TEMP/rime-dev-cache.new"
+          rm -rf "$RUNNER_TEMP/rime-dev-cache"
+          mv "$RUNNER_TEMP/rime-dev-cache.new" "$RUNNER_TEMP/rime-dev-cache"
+      - name: Save the dev cache
+        if: ${{ success() && steps.restore.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/rime-dev-cache
+          key: ${{ steps.items.outputs.key }}
 
   check:
     name: Check ${{ matrix.check }}
-    needs: plan
-    if: ${{ needs.plan.outputs.run != '[]' }}
+    # After the packages job, so its dev cache exists; but NOT only when it succeeded: a leg whose packages job
+    # failed still runs and builds what it needs itself (as every leg did before the dev cache).
+    needs: [plan, packages]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.run != '[]' }}
     runs-on: ubuntu-24.04
     # The build itself is stopped at RIME_CHECK_TIMEOUT (below), inside this, so a check that runs too long is
-    # recorded and shown as TIMED OUT with its time; this job limit only catches a hung setup step. Every leg starts
-    # from an empty store and the rimed, gaming, security and rimed-session legs compile the rimed workspace before
-    # their VM (no Rime binary cache yet, R2), so the budget is the packages job's plus a VM test. The slowest leg
-    # measured on the hosted runner took 54 min (terminal-look; docs/nixos/ci.md): the build limit is twice that.
+    # recorded and shown as TIMED OUT with its time; this job limit only catches a hung setup step. Each leg starts
+    # from an empty store plus the dev cache; without the dev cache (packages job failed) the rimed, gaming, security
+    # and rimed-session legs compile the rimed workspace before their VM, so the budget still allows for that. The
+    # slowest leg measured on the hosted runner took 54 min (terminal-look; docs/nixos/ci.md): the build limit is
+    # twice that.
     timeout-minutes: 125
     strategy:
       fail-fast: false
@@ -161,13 +268,30 @@ jobs:
           for f in kvm nixos-test; do
             case " $features " in *" $f "*) ;; *) echo "::error::Nix does not offer the $f system feature"; exit 1 ;; esac
           done
+      # The packages job's dev cache (exact key), else the newest older one (its matching paths still help).
+      - name: Restore the dev cache
+        id: devcache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/rime-dev-cache
+          key: ${{ needs.packages.outputs.key || 'rime-dev-pkgs-v1-none' }}
+          restore-keys: rime-dev-pkgs-v1-
       - name: Build ${{ matrix.check }}
         timeout-minutes: 115
         env:
           # 110 min; with run-checks.sh's 60 s kill grace it ends inside the step limit, so a result is recorded.
           RIME_CHECK_TIMEOUT: "6600"
           CHECK: ${{ matrix.check }}
+          RIME_DEV_CACHE: ${{ runner.temp }}/rime-dev-cache
+          RIME_DEV_CACHE_STATE: ${{ steps.devcache.outputs.cache-hit == 'true' && 'exact' || (steps.devcache.outputs.cache-matched-key != '' && format('fallback {0}', steps.devcache.outputs.cache-matched-key)) || 'none' }}
         run: nix/ci/run-checks.sh build "$CHECK" "$RUNNER_TEMP/results"
+      - name: Keep the pass for reuse
+        # Only a pass: export-result refuses anything else, and the summary refuses it again.
+        if: ${{ success() }}
+        env:
+          CHECK: ${{ matrix.check }}
+          RIME_RUN: ${{ github.run_id }}
+        run: nix/ci/run-checks.sh export-result "$CHECK" "$RUNNER_TEMP/results" "$RUNNER_TEMP/results/pass"
       - name: Record the result
         if: ${{ !cancelled() }}
         env:
@@ -182,7 +306,10 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           name: result-${{ matrix.check }}
-          path: ${{ runner.temp }}/results/${{ matrix.check }}.result
+          path: |
+            ${{ runner.temp }}/results/${{ matrix.check }}.result
+            ${{ runner.temp }}/results/${{ matrix.check }}.metrics.json
+            ${{ runner.temp }}/results/pass
           retention-days: 7
 
   summary:
@@ -206,6 +333,13 @@ jobs:
           pattern: result-*
           merge-multiple: true
           path: ${{ runner.temp }}/results
+      - name: Restore the results cache
+        if: ${{ needs.plan.result == 'success' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/rime-results
+          key: rime-check-results-v1-${{ needs.plan.outputs.week }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: rime-check-results-v1-${{ needs.plan.outputs.week }}-
       - name: Every flake check, RAN or SKIPPED
         env:
           PLAN_RESULT: ${{ needs.plan.result }}
@@ -231,3 +365,30 @@ jobs:
           [ "$PLAN_RESULT" = success ] || { echo "::error::the plan job did not succeed"; rc=1; }
           [ "$PACKAGES_RESULT" = success ] || { echo "::error::the packages job did not succeed"; rc=1; }
           exit "$rc"
+      - name: Where the time went (metrics)
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/metrics"
+          cp "$RUNNER_TEMP"/results/*.metrics.json "$RUNNER_TEMP"/plan/reused/*.metrics.json "$RUNNER_TEMP/metrics/" 2>/dev/null || true
+          python3 nix/ci/cihelp.py metrics-table "$RUNNER_TEMP/metrics" > "$RUNNER_TEMP/metrics/table.md"
+          { echo "### Nix: where each leg's time went"; echo; cat "$RUNNER_TEMP/metrics/table.md"; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        with:
+          name: metrics
+          path: ${{ runner.temp }}/metrics
+          retention-days: 30
+      # Keep this run's passes: only checks whose result here is pass (results-merge refuses the rest), and drop a
+      # prior pass whose check failed now on the same inputs. Saved under a new key each run (caches are immutable).
+      - name: Merge this run's passes into the results cache
+        id: merge
+        if: ${{ !cancelled() && needs.plan.result == 'success' }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/results/pass"
+          nix/ci/run-checks.sh results-merge "$RUNNER_TEMP/plan" "$RUNNER_TEMP/results" "$RUNNER_TEMP/results/pass" "$RUNNER_TEMP/rime-results" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Save the results cache
+        if: ${{ !cancelled() && steps.merge.outcome == 'success' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/rime-results
+          key: rime-check-results-v1-${{ needs.plan.outputs.week }}-${{ github.run_id }}-${{ github.run_attempt }}

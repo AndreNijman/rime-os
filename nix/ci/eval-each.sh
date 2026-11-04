@@ -10,6 +10,8 @@
 #        RIME_EVAL_HEAVY_MIB  an attribute NOT in nix/ci/eval-heavy.txt that peaks above this prints a warning
 #                       telling you to add it there (default 4096)
 #        SYSTEM          default x86_64-linux
+#        RIME_EVAL_OUT   write "<attr><TAB><value>" for every attribute that evaluated (the drvPaths) to this file:
+#                       the plan job's input for reusing checks that passed earlier (run-checks.sh plan, RIME_CHECK_DRVS)
 # Prints one line per attribute: OK|FAIL <attr> <seconds>s <max RSS MiB>. Exit 1 if any attribute fails.
 set -uo pipefail
 
@@ -32,6 +34,7 @@ names() { # names OUTPUT-PATH -> attribute names, one per line
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/val"
 
 {
     for n in $(names "checks.$SYSTEM"); do echo "checks.$SYSTEM.$n.drvPath"; done
@@ -66,7 +69,7 @@ one() {
     done
     t0=$(date +%s)
     # GNU time is not on every runner: poll the evaluator's own peak RSS (VmHWM) while it runs.
-    nix eval --raw "${NIX_ARGS[@]}" "$FLAKE#$attr" >/dev/null 2>"$work/${attr//\//_}.err" &
+    nix eval --raw "${NIX_ARGS[@]}" "$FLAKE#$attr" >"$work/val/${attr//\//_}" 2>"$work/${attr//\//_}.err" &
     local pid=$! peak=0 cur
     while kill -0 "$pid" 2>/dev/null; do
         cur=$(field VmHWM: "/proc/$pid/status")
@@ -109,5 +112,12 @@ GATE_MIB="$GATE" xargs -P "$JOBS" -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$
 # shellcheck disable=SC2016 # expanded by the inner bash, on purpose
 GATE_MIB=0 xargs -P 1 -I{} bash -c 'NIX_ARGS=($NIX_ARGS_STR); one "$@"' _ {} < "$work/alone"
 
+if [ -n "${RIME_EVAL_OUT:-}" ]; then
+    : > "$RIME_EVAL_OUT"
+    while read -r attr; do
+        f="$work/val/${attr//\//_}"
+        [ -s "$f" ] && printf '%s\t%s\n' "$attr" "$(cat "$f")" >> "$RIME_EVAL_OUT"
+    done < "$work/attrs"
+fi
 echo "eval-each: $(wc -l < "$work/attrs") attributes evaluated, $JOBS at a time; $(wc -l < "$work/alone") heavy ones alone"
 [ ! -e "$work/failed" ]

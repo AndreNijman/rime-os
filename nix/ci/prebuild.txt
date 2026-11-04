@@ -1,0 +1,32 @@
+# What the Nix workflow's packages job builds ONCE per run, and every check leg then substitutes from the run's dev
+# cache instead of compiling again (nix/ci/run-checks.sh prebuild-plan / prebuild / dev-cache-export, nix/ci/README.md).
+#
+# One item per line: NAME  FLAKE-ATTRIBUTE  [PNAME]
+#   NAME       what the packages job and the summary call it (unique)
+#   ATTRIBUTE  a flake attribute that evaluates to the derivation, or (with PNAME) to a list of packages
+#   PNAME      pick the one package with this pname out of that list
+# The attribute must evaluate to the SAME derivation the checks build (same drvPath), or nothing is reused: the
+# overrides below are reached through a check's own node, not rebuilt from pkgs.
+#
+# What belongs here (measured 2026-11-04: nix build --dry-run of all 83 CI checks against an empty store, and the
+# per-derivation times in the hosted logs of run 41732071922): a derivation cache.nixos.org does not serve that MANY
+# legs build, or one so slow that the legs which need it are the run's longest. Not here: rimed-weakened
+# (checks.security only; it rebuilds whenever rimed's source changes, so caching it saves nothing and the packages
+# job would hold every leg for it) and the per-test system closures (each test's are its own).
+#
+# Rime's own packages: rimed is 45 legs x ~25 min (8 min release build + ~17 min checkPhase with its cargo test).
+rimed                       packages.x86_64-linux.rimed
+rime-libexec                packages.x86_64-linux.rime-libexec
+rime-hostlayer              packages.x86_64-linux.rime-hostlayer
+rime-shell                  packages.x86_64-linux.rime-shell
+rime-terminal               packages.x86_64-linux.rime-terminal
+rime-kbd-xkb                nixosConfigurations.rime-vm.pkgs.rime.rime-kbd-xkb
+# The desktop's overrides of stock packages (nix/modules/desktop.nix): 22 legs, 1-3 min each.
+xwayland                    checks.x86_64-linux.desktop.nodes.machine.environment.systemPackages  xwayland
+speech-dispatcher           checks.x86_64-linux.desktop.nodes.machine.services.speechd.package
+plymouth                    checks.x86_64-linux.desktop.nodes.machine.boot.plymouth.package
+NetworkManager-openconnect  checks.x86_64-linux.desktop.nodes.machine.networking.networkmanager.plugins  NetworkManager-openconnect
+# COSMIC (nix/desktops/default.nix's patched initial setup, nix/integrations/cosmic): 2 legs, but 33 + 19 min, and
+# they change only with the nixpkgs pin or that source.
+cosmic-initial-setup        checks.x86_64-linux.desktop-lock-cosmic.nodes.machine.environment.systemPackages  cosmic-initial-setup
+cosmic-applet-rime          checks.x86_64-linux.desktop-lock-cosmic.nodes.machine.environment.systemPackages  cosmic-applet-rime
