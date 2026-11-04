@@ -641,6 +641,32 @@ UNIT
   log "handoff: the installed system removes the staged installer from its ESP on first boot"
 }
 
+# Rime's root keeps the size of the partition it was given. The fedora-bootc
+# base ships bootc-generic-growpart.service ("Bootc Fallback Root Filesystem
+# Grow", enabled from /usr/lib/systemd/system/local-fs.target.wants), which on
+# every boot runs growpart on the partition under /sysroot and then grows the
+# filesystem into whatever unallocated space FOLLOWS that partition. On a
+# disk Rime was handed whole, that is the point. In partition mode the user
+# chose ONE partition and may have left the space after it for something
+# else: measured in the Windows lab (installer v3.2.1), Rime's first boot
+# took the 2.1 GB of free space behind the partition it was installed into.
+# So a partition-mode install masks the unit in the new system's /etc: a
+# local /etc change survives every update (ostree's three-way /etc merge),
+# and the root never grows past what the user gave it. The user can still
+# grow it on purpose (growpart + btrfs filesystem resize, or unmask it).
+# Whole-disk mode leaves it alone: Rime owns that disk.
+#
+# Today the unit only runs in a virtual machine (ConditionVirtualization=vm)
+# and never on an encrypted root (it skips /dev/mapper), so bare metal is not
+# hit by it yet; that condition is bootc's to change, so the mask does not
+# depend on it.
+keep_root_partition_size_in() {  # $1 = deployment root
+  local d="$1"
+  mkdir -p "$d/etc/systemd/system"
+  ln -sfn /dev/null "$d/etc/systemd/system/bootc-generic-growpart.service"
+  log "growpart: bootc-generic-growpart.service masked; the root stays the size of the partition it was given"
+}
+
 # A boot menu entry for Windows. Rime's GRUB (bootupd's static config) sources
 # $prefix/custom.cfg, which lives on Rime's own root filesystem and is owned
 # by no package, so an update never rewrites it. Without it, a machine that
@@ -3281,6 +3307,7 @@ create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 if [ "$INSTALL_MODE" = partition ]; then
   configure_own_esp_in "$deploy"
   install_staged_cleanup_in "$deploy"
+  keep_root_partition_size_in "$deploy"
   add_windows_entry "$MNT"
 fi
 copy_network_to "$deploy"

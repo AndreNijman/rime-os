@@ -675,6 +675,61 @@ if grep -qF 'Enrol the Rime OS Secure Boot key' <<<"$_5b" && grep -qF 'you chose
 else
     printf 'FAIL  %-30s\n' "skip names the way back"; fail=$((fail+1))
 fi
+echo "── partition mode: the root never grows past its partition ───────────"
+# The fedora-bootc base grows the root into any free space AFTER its partition
+# (bootc-generic-growpart.service). Measured in the Windows lab: a partition-mode
+# install took the 2.1 GB the user had left behind its partition. The engine
+# masks the unit in the new system's /etc in partition mode only. _growpart_check
+# answers for one copy of the engine, so the same check is run against mutants
+# below: a check that passes them proves nothing.
+_growpart_check() {  # $1 = engine file; prints one reason per problem, exit 0 = all good
+    local eng="$1" t fn post rc=0
+    t=$(mktemp -d /tmp/rime-growpart-test.XXXXXX)
+    fn=$(sed -n '/^keep_root_partition_size_in()/,/^}/p' "$eng")
+    if [ -z "$fn" ] || ! bash -n <<<"$fn"; then
+        echo "keep_root_partition_size_in could not be extracted"; rm -rf "$t"; return 1
+    fi
+    ( log() { :; }; eval "$fn"; keep_root_partition_size_in "$t/deploy" ) >/dev/null 2>&1
+    if [ "$(readlink "$t/deploy/etc/systemd/system/bootc-generic-growpart.service" 2>/dev/null)" != /dev/null ]; then
+        echo "the unit is not masked (no /etc/systemd/system/bootc-generic-growpart.service -> /dev/null)"; rc=1
+    fi
+    # Called exactly once, inside the partition-mode post-install block (the one
+    # that also gives Rime its own ESP), and nowhere else: whole-disk keeps growing.
+    post=$(awk '/^if \[ "\$INSTALL_MODE" = partition \]; then$/ {inb=1; buf=""; next}
+                inb && /^fi$/ {inb=0; if (buf ~ /configure_own_esp_in "\$deploy"/) print buf; next}
+                inb {buf = buf $0 "\n"}' "$eng")
+    if ! grep -qx '  keep_root_partition_size_in "$deploy"' <<<"$post"; then
+        echo "not called in the partition-mode post-install block"; rc=1
+    fi
+    if [ "$(grep -c '^[^#]*keep_root_partition_size_in "' "$eng")" != 1 ]; then
+        echo "called $(grep -c '^[^#]*keep_root_partition_size_in "' "$eng") times (want once, partition mode only)"; rc=1
+    fi
+    rm -rf "$t"
+    return "$rc"
+}
+if _why=$(_growpart_check "$ENGINE"); then
+    printf 'PASS  %-30s\n' "growpart masked (partition)"; pass=$((pass+1))
+else
+    printf 'FAIL  %-30s %s\n' "growpart masked (partition)" "$(tr '\n' ';' <<<"$_why")"; fail=$((fail+1))
+fi
+_gm=$(mktemp /tmp/rime-growpart-mutant.XXXXXX)
+for _m in "drop the mask" "drop the call" "call it for every mode"; do
+    case "$_m" in
+        "drop the mask")  grep -v 'ln -sfn /dev/null "$d/etc/systemd/system/bootc-generic-growpart.service"' "$ENGINE" > "$_gm" ;;
+        "drop the call")  grep -vx '  keep_root_partition_size_in "$deploy"' "$ENGINE" > "$_gm" ;;
+        "call it for every mode")
+            grep -vx '  keep_root_partition_size_in "$deploy"' "$ENGINE" \
+              | sed 's/^copy_network_to "\$deploy"$/keep_root_partition_size_in "$deploy"\ncopy_network_to "$deploy"/' > "$_gm" ;;
+    esac
+    if cmp -s "$_gm" "$ENGINE"; then
+        printf 'FAIL  %-30s mutant no longer applies\n' "growpart mutant: $_m"; fail=$((fail+1))
+    elif _growpart_check "$_gm" >/dev/null; then
+        printf 'FAIL  %-30s the check passed a mutant\n' "growpart mutant: $_m"; fail=$((fail+1))
+    else
+        printf 'PASS  %-30s caught\n' "growpart mutant: $_m"; pass=$((pass+1))
+    fi
+done
+rm -f "$_gm"
 echo "── one engine at a time, and a front end that died can reattach ───────"
 # A VT switch can take cage (and so the GUI) down mid-install while the engine
 # keeps writing. The fresh front end must never start a second engine, and a
