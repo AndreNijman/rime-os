@@ -3,6 +3,7 @@
 
     drive.py LAYOUT FW        LAYOUT = bls | custom, FW = sb-mok | sb-off
     drive.py matrix CELL FW   the P2 boot matrix (matrix.nix): CELL = bls-plain | bls-luks | custom-plain | custom-luks
+    drive.py sbrecovery bls   Secure Boot recovery: the hook's "Enrol the Rime OS Secure Boot key" entry (SbRecovery)
 
 Five boots of one disk (a qcow2 overlay over $LAB/disks/LAYOUT/disk.raw, so every scenario starts from the same
 nixos-install'd generation 1), each a fresh QEMU with the same varstore copy:
@@ -473,6 +474,189 @@ class MatrixScenario(Scenario):
             os.unlink(f)
         return all(r.startswith("PASS") for r in self.results)
 
+ENROL_TITLE = "Enrol the Rime OS Secure Boot key (if Rime OS does not start)"
+# MokManager's console as mirrored to the serial port: every box is ┌──┐│ line ││ line │└──┘; a screen is its window
+# box (first line = the screen's title) followed by its list box.
+BOX = re.compile(r"┌─+┐((?:│[^│┌└┘]*│)+)└─+┘")
+
+
+def mok_screen(text, title, since):
+    """The list of the first MokManager screen titled TITLE drawn after offset SINCE, or None."""
+    found = False
+    for m in BOX.finditer(text, since):
+        lines = [x.strip() for x in m.group(1).strip("│").split("││")]
+        lines = [x for x in lines if x]
+        if found:
+            return lines
+        if lines and lines[0] == title:
+            found = True
+    return None
+
+
+class SbRecovery(Scenario):
+    """The NixOS port of the bootc Secure Boot recovery entry, on the bls disk (the hook ran with the TEST MOK's
+    certificate during nixos-install). One qcow2 overlay, one varstore copy:
+
+      0. SB on, key NOT enrolled (vars-secboot.raw): GRUB's default generation is refused ("bad shim signature").
+      1. Same: the menu lists the entry; End + Return picks it; its text and countdown show; GRUB chainloads
+         MokManager; "Enroll key from disk" -> the ESP -> EFI -> rime -> rime-mok.der -> Continue -> Yes -> Reboot,
+         every choice found by name in the list MokManager mirrors to the serial port. MokList is then read from the
+         varstore (virt-fw-vars).
+      2. Same varstore: GRUB's default generation boots with Secure Boot on and the kernel loads the TEST MOK.
+      3. SB off (vars-sb-off.fd), same disk: the entry is not in the menu; the default generation boots.
+    """
+
+    def __init__(self, layout):
+        self.layout, self.fw = layout, "secboot"
+        self.name = f"sbrecovery-{layout}"
+        self.dir = f"{OUT}/{self.name}"
+        os.makedirs(self.dir, exist_ok=True)
+        with open(f"{LAB}/gens.json") as f:
+            self.gens = json.load(f)[layout]
+        self.vars = f"/tmp/{self.name}.vars.fd"
+        self.disk = f"/tmp/{self.name}.qcow2"
+        subprocess.run(["cp", f"{LAB}/fw/vars-secboot.raw", self.vars], check=True)   # SB on, no MOK
+        subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw", "-b",
+                        f"{LAB}/disks/{layout}/disk.raw", self.disk], check=True)
+        self.results = []
+        self.want_sb = "enabled"
+        self.log = []
+        self._since = 0
+
+    def choose(self, b, label, title, want, timeout=60):
+        """Wait for MokManager's screen TITLE, read its list from the serial mirror, move to WANT and press Return."""
+        t = b.wait_for(lambda t: mok_screen(t, title, self._since), timeout)
+        if t is None:
+            b.qmp.shot(f"{b.base}-{label}-MISSING.png")
+            raise RuntimeError(f"{label}: screen {title!r} never came")
+        names = mok_screen(t, title, self._since)
+        time.sleep(0.8)
+        b.qmp.shot(f"{b.base}-{label}.png")
+        self.log.append(f"{label}: {title!r} lists {names}")
+        if callable(want):
+            want = want(names)
+        if want not in names:
+            raise RuntimeError(f"{label}: {want!r} not in {names}")
+        n = names.index(want)
+        for _ in range(n):
+            b.qmp.key("down")
+            time.sleep(0.3)
+        time.sleep(0.8)
+        self._since = len(b.text())   # the next screen is drawn after this Return
+        b.qmp.key("ret")
+        self.log.append(f"{label}: chose {want!r} (down x{n}, ret)")
+        return names
+
+    def moklist(self):
+        r = subprocess.run(["virt-fw-vars", "--input", self.vars, "--print", "--verbose"],
+                           capture_output=True, text=True)
+        with open(f"{self.dir}/varstore-after-enrol.txt", "w") as f:
+            f.write(r.stdout + r.stderr)
+        return r.stdout + r.stderr
+
+    def run(self):
+        # 0. SB on, nothing enrolled: the default generation is refused.
+        b = Boot(self, 0, timeout=90)
+        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 120)
+        if menu:
+            b.qmp.shot(b.base + "-menu.png")
+        t = b.wait_for(lambda t: "bad shim signature" in t, 80)
+        if t:
+            time.sleep(1)
+            b.qmp.shot(b.base + "-refused.png")
+        b.proc.kill()
+        rc, t = b.finish()
+        p = []
+        if "bad shim signature" not in t:
+            p.append("no 'bad shim signature' from GRUB")
+        if "RIME-BOOTHOOK: stage-2 reached" in t:
+            p.append("a generation reached stage 2 with the key not enrolled")
+        if ENROL_TITLE not in (menu or ""):
+            p.append("the enrol entry is not in the menu")
+        self.verdict(b, not p, "SB on, key not enrolled: menu lists the enrol entry; the default generation is refused",
+                     "; ".join(p) or "bad shim signature")
+
+        # 1. Pick the entry, chain to MokManager, enrol the key from disk.
+        b = Boot(self, 1, timeout=600)
+        p = []
+        names = []
+        menu = b.wait_for(lambda t: "automatically" in t and ENROL_TITLE in t, 120)
+        try:
+            if not menu:
+                raise RuntimeError("GRUB menu with the enrol entry never appeared")
+            b.qmp.shot(b.base + "-menu.png")
+            b.qmp.key("end")
+            time.sleep(1.0)
+            b.qmp.shot(b.base + "-picked.png")
+            self._since = len(b.text())
+            b.qmp.key("ret")
+            t = b.wait_for(lambda t: "Opening in 20 seconds" in t[self._since:], 30)
+            if t is None:
+                raise RuntimeError("the entry's text never showed (End did not pick it?)")
+            time.sleep(1.5)
+            b.qmp.shot(b.base + "-entry-text.png")
+            if "Enrol the Rime OS Secure Boot key" not in t[self._since:]:
+                p.append("entry heading not printed")
+            self._since = len(t)
+            # No key during GRUB's sleep: a key would interrupt it. Then MokManager.
+            t = b.wait_for(lambda t: "Press any key to perform MOK management" in t[self._since:], 60)
+            if t is None:
+                raise RuntimeError("MokManager never asked to press a key (chainload failed?)")
+            b.qmp.shot(b.base + "-mok-countdown.png")
+            self._since = len(b.text())
+            b.qmp.key("spc")
+            self.choose(b, "mok-main", "Perform MOK management", "Enroll key from disk")
+            names = self.choose(b, "volumes", "Select Key", lambda n: n[0] if len(n) == 1 else
+                                next((x for x in n if "RIME" in x.upper() or "EFI" in x.upper()), n[0]))
+            self.volumes = names
+            self.choose(b, "dir-root", "Select Key", "EFI/")
+            self.choose(b, "dir-efi", "Select Key", "rime/")
+            self.choose(b, "dir-rime", "Select Key", "rime-mok.der")
+            self.choose(b, "enroll-mok", "[Enroll MOK]", "Continue")
+            self.choose(b, "confirm", "Enroll the key(s)?", "Yes")
+            self.choose(b, "after-yes", "Perform MOK management", "Reboot")
+        except RuntimeError as e:
+            p.append(str(e))
+        rc, t = b.finish()
+        with open(f"{self.dir}/mokmanager-steps.txt", "w") as f:
+            f.write("\n".join(self.log) + "\n")
+        v = self.moklist()
+        if not p and "Rime boot-hook lab TEST MOK" not in v:
+            p.append("MokList in the varstore does not hold the TEST MOK")
+        self.verdict(b, not p, "entry chains to MokManager; key enrolled from disk (ESP/EFI/rime/rime-mok.der)",
+                     "; ".join(p) or f"volume list {getattr(self, 'volumes', names)}; MokList holds the TEST MOK")
+
+        # 2. Same varstore: the default generation boots with Secure Boot on.
+        b = Boot(self, 2)
+        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 120)
+        if menu:
+            b.qmp.shot(b.base + "-menu.png")
+        rc, t = b.finish()
+        p = self.good(t, 1)
+        self.verdict(b, not p, "after enrolling: gen1 boots with Secure Boot on, kernel loads the TEST MOK",
+                     "; ".join(p) or "stage 2, SecureBoot enabled, TEST MOK loaded")
+
+        # 3. SB off, same disk: the entry is hidden; the default generation boots.
+        subprocess.run(["cp", f"{LAB}/fw/vars-sb-off.fd", self.vars], check=True)
+        self.want_sb = "disabled"
+        b = Boot(self, 3)
+        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 120)
+        if menu:
+            time.sleep(1.0)
+            b.qmp.shot(b.base + "-menu.png")
+        rc, t = b.finish()
+        p = self.good(t, 1)
+        if not menu:
+            p.append("no GRUB menu")
+        if "Enrol the Rime OS" in t:
+            p.append("the enrol entry shows with Secure Boot off")
+        self.verdict(b, not p, "SB off: the enrol entry is not in the menu; gen1 boots",
+                     "; ".join(p) or f"menu {menu_order(menu or '')}, no enrol entry")
+
+        for f in (self.vars, self.disk):
+            os.unlink(f)
+        return all(r.startswith("PASS") for r in self.results)
+
 
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "matrix":
@@ -480,6 +664,10 @@ if __name__ == "__main__":
                 or sys.argv[3] not in ("sb-mok", "sb-off"):
             sys.exit("usage: drive.py matrix bls-plain|bls-luks|custom-plain|custom-luks sb-mok|sb-off")
         sys.exit(0 if MatrixScenario(sys.argv[2], sys.argv[3]).run() else 1)
+    if len(sys.argv) == 3 and sys.argv[1] == "sbrecovery":
+        if sys.argv[2] != "bls":
+            sys.exit("usage: drive.py sbrecovery bls")
+        sys.exit(0 if SbRecovery(sys.argv[2]).run() else 1)
     if len(sys.argv) != 3 or sys.argv[1] not in ("bls", "custom") or sys.argv[2] not in ("sb-mok", "sb-off"):
         sys.exit("usage: drive.py bls|custom sb-mok|sb-off")
     sys.exit(0 if Scenario(sys.argv[1], sys.argv[2]).run() else 1)

@@ -1,6 +1,6 @@
 # The boot-hook OVMF lab's NixOS generations (README.md here). Built with --impure from the rime-os flake:
 #   nix build --impure --expr '(import ./systems.nix { flake = builtins.getFlake "path:/work/wt-boothook";
-#                                signature = /path/to/kernel.sig; }).<layout>.<gen>'
+#                                signature = /path/to/kernel.sig; certificate = /path/to/test-mok.crt; }).<layout>.<gen>'
 #
 # For each layout (bls, custom) three generations of one minimal NixOS with Rime's boot hook (nix/modules/boot.nix):
 #   gen1  good: stage 2 prints RIME-BOOTHOOK markers, then does what fw_cfg opt/rime/action says
@@ -13,7 +13,7 @@
 # Every generation's <toplevel>/kernel is nixpkgs' linuxPackages_latest bzImage with a detached TEST-MOK signature
 # attached (sbattach), linked the way nix/modules/kernel.nix links the Rime kernel once CI has signed it. bootspec
 # still names the unsigned image: the hook must copy <toplevel>/kernel, or Secure Boot refuses the boot.
-{ flake, signature ? null }:
+{ flake, signature ? null, certificate ? null }:
 
 let
   nixpkgs = flake.inputs.nixpkgs;
@@ -40,6 +40,9 @@ let
       nixpkgs.overlays = [ flake.overlays.default ];
 
       rime.boot.enable = true;
+      # The TEST MOK's certificate (run.sh prep): the hook places it on the ESP with the Secure Boot recovery entry,
+      # as a Rime machine gets rime.kernel.signing.certificate (drive.py sbrecovery enrols it from that entry).
+      rime.boot.mokCertificate = lib.mkIf (certificate != null) certificate;
 
       # The same kernel the OVMF probe proved (nixpkgs' mainline at the A1 pin).
       boot.kernelPackages = pkgs.linuxPackages_latest;

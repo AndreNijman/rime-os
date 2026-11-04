@@ -6,7 +6,7 @@ LAB=${LAB:-/var/lab/rime-nix/scratch/boothook}
 WT=${WT:-/var/lab/rime-nix/wt-boothook}
 to_work() { echo "/work/${1#/var/lab/rime-nix/}"; }
 CLAB=$(to_work "$LAB") CWT=$(to_work "$WT")
-expr() { echo "(import $CWT/nix/probe/ovmf/boothook/systems.nix { flake = builtins.getFlake \"path:$CWT\"; signature = $CLAB/in/kernel.sig; }).$1"; }
+expr() { echo "(import $CWT/nix/probe/ovmf/boothook/systems.nix { flake = builtins.getFlake \"path:$CWT\"; signature = $CLAB/in/kernel.sig; certificate = $CLAB/keys/test-mok.crt; }).$1"; }
 json='{'
 for l in bls custom; do
   json+="\"$l\":{"

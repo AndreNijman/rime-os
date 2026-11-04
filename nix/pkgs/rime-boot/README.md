@@ -11,7 +11,8 @@ its NixOS initrd. shim and GRUB are put on the disk by the installer (fresh mach
 machines). NixOS's GRUB and systemd-boot modules are not used: both install loader binaries (PLAN 4.1).
 `boot.loader.external.installHook` is `rime-boot install`, which **runs no program at all** (the package's install
 check fails if it names `subprocess`, `exec`, `spawn`, `popen` or `system`): no `bootctl`, `grub-install`,
-`grub2-*`, `efibootmgr` or `mokutil`, no NVRAM write, no loader binary written.
+`grub2-*`, `efibootmgr` or `mokutil`, no NVRAM write, no loader binary written. (It does write one data file on the
+ESP, Rime's MOK certificate: see "The way back when Secure Boot refuses the kernel".)
 
 ## Layouts
 
@@ -70,6 +71,33 @@ There is no automatic fallback (boot counting) in v1, as D3 and D9 say. bootupd'
 Fedora's `grub.d` counting scripts, and GRUB cannot write its environment block on btrfs, which is where a migrated
 machine's `/boot/grub2` lives, so a `grubenv` counter could only work on the BLS layout. D3's later step (MOK-signed
 systemd-boot + UKI, `+N` boot counting written by this hook) is where automatic fallback belongs.
+
+## The way back when Secure Boot refuses the kernel
+
+shim refuses a kernel signed by Rime's MOK until that key is enrolled ("bad shim signature"). The installer imports
+the key (`mokutil --import` + `mokutil --timeout -1`), but a user who misses shim's prompt on the first boot would be
+stuck. So every run of the hook also writes the bootc images' recovery entry, the same bytes as rime-os's
+`rime-secureboot-key` helper (between `### BEGIN rime-secureboot-key ###` and `### END rime-secureboot-key ###` in
+`custom.cfg`, after this hook's own include block):
+
+- `rime.boot.mokCertificate` (default: `rime.kernel.signing.certificate` when the kernel is signed) is converted to DER
+  at build time (openssl in a derivation) and placed at `<ESP>/EFI/rime/rime-mok.der` (written atomically, skipped when
+  the same bytes are there).
+- The ESP is `/boot` in `bls`; in `custom-cfg` only a mounted FAT `/boot/efi` that is not a Windows ESP (the bootc
+  helper's rule). The ESP must hold `EFI/fedora/mmx64.efi` (MokManager), or no entry is written and the log says why.
+- The entry `Enrol the Rime OS Secure Boot key (if Rime OS does not start)` (`--id rime-enrol-key`) shows only when
+  GRUB's `$shim_lock` is `y` (Secure Boot on), explains the MokManager steps, and after 20 s (Esc goes back)
+  chainloads `mmx64.efi`, where "Enroll key from disk" -> the ESP -> EFI -> rime -> rime-mok.der enrols the key.
+- An existing block is replaced as a whole (never duplicated), an unterminated one is repaired, every other byte of
+  `custom.cfg` is kept (the Windows entry, this hook's include block). If the certificate or MokManager is missing
+  the existing block is left as it is.
+- No machine-specific value (UUID, hostname) is in the block: GRUB finds the ESP with `search --file`.
+- `systemctl start rime-secureboot-key.service` runs the hook again (the block's own advice when the file is gone).
+
+In `bls`, `custom.cfg` is the ESP's `grub2/custom.cfg`, and bootupd's static `grub2/grub.cfg` sources it through
+`41_custom.cfg` (`source $prefix/custom.cfg`, `$prefix` = the ESP's `/grub2`). Proven in OVMF (Secure Boot on, key
+not enrolled: entry -> MokManager -> enrol -> generation boots; Secure Boot off: no entry):
+`nix/probe/ovmf/boothook/run.sh sbrecovery`.
 
 ## LUKS / TPM / keymap (wave 2)
 
