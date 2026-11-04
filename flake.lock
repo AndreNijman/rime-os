@@ -19,11 +19,11 @@
     "rime-shell": {
       "flake": false,
       "locked": {
-        "lastModified": 1793746133,
-        "narHash": "sha256-dxVHJ4rCRgdMtzuHSEtBpXZ7DQOVr6/qIhl2y9CEBxE=",
+        "lastModified": 1793755169,
+        "narHash": "sha256-iYNEZuYL7YoTv2P1/wPYrWD5nTndWtyWm4FT4l9oH0Y=",
         "owner": "AndreNijman",
         "repo": "rime-shell",
-        "rev": "802ad67612ebfa923ada5a03d5f8ab2e64935486",
+        "rev": "e5eb240de7f62d922527945235ebe1dbdba38816",
         "type": "github"
       },
       "original": {
