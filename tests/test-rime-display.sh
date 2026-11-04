@@ -182,6 +182,27 @@ printf '%s' "$out" | pipe_has -E "Traceback|FileNotFoundError" \
     && ok "the layout is still written with no compositor and no pgrep" \
     || bad "the layout is still written with no compositor and no pgrep"
 
+section "a wrapped Hyprland is still Hyprland"
+# NixOS wraps bin/Hyprland (it execs .Hyprland-wrapped), so `pgrep -x Hyprland`
+# never matches the running compositor. A caller without XDG_CURRENT_DESKTOP is
+# still inside Hyprland when HYPRLAND_INSTANCE_SIGNATURE is set; PATH holds only
+# the fakes, so pgrep is absent and only the signature can decide.
+got="$(env -u NIRI_SOCKET -u XDG_CURRENT_DESKTOP PATH="$FAKE" HOME="$H6" \
+        HYPRLAND_INSTANCE_SIGNATURE=fixture_sig "$PY" "$GEN" compositor 2>&1)"
+[ "$got" = "hyprland" ] \
+    && ok "HYPRLAND_INSTANCE_SIGNATURE alone identifies Hyprland" \
+    || bad "HYPRLAND_INSTANCE_SIGNATURE alone identifies Hyprland (got '$got')"
+got="$(env -u NIRI_SOCKET -u XDG_CURRENT_DESKTOP -u HYPRLAND_INSTANCE_SIGNATURE \
+        PATH="$FAKE" HOME="$H6" "$PY" "$GEN" compositor 2>&1)"
+[ "$got" = "unknown" ] \
+    && ok "with no hint at all the compositor is unknown" \
+    || bad "with no hint at all the compositor is unknown (got '$got')"
+got="$(env -u NIRI_SOCKET PATH="$FAKE" HOME="$H6" XDG_CURRENT_DESKTOP=niri \
+        HYPRLAND_INSTANCE_SIGNATURE=fixture_sig "$PY" "$GEN" compositor 2>&1)"
+[ "$got" = "niri" ] \
+    && ok "XDG_CURRENT_DESKTOP still wins over a stray signature" \
+    || bad "XDG_CURRENT_DESKTOP still wins over a stray signature (got '$got')"
+
 section "an empty model does nothing"
 H3="${WORK}/home3"; mkdir -p "$H3/.config/rime-shell"
 echo '{"outputs":[]}' > "$H3/.config/rime-shell/display.json"

@@ -475,9 +475,21 @@ def running_compositor():
     for known in ("hyprland", "niri", "labwc"):
         if known in desktop:
             return known
-    for proc, known in (("Hyprland", "hyprland"), ("niri", "niri"), ("labwc", "labwc")):
-        if subprocess.run(["pgrep", "-x", proc], capture_output=True).returncode == 0:
-            return known
+    # hyprctl talks to the instance this names, and Hyprland sets it in every
+    # process it starts. Checked before the process name because on NixOS
+    # bin/Hyprland is a wrapper that execs .Hyprland-wrapped: the process is
+    # ".Hyprland-wrapp" to `pgrep -x` (15-character comm), so the name check
+    # never matched there and a session without XDG_CURRENT_DESKTOP was sent
+    # down the wlr-randr path Hyprland does not implement.
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return "hyprland"
+    for proc, known in (("Hyprland", "hyprland"), (".Hyprland-wrapp", "hyprland"),
+                        ("niri", "niri"), ("labwc", "labwc")):
+        try:
+            if subprocess.run(["pgrep", "-x", proc], capture_output=True).returncode == 0:
+                return known
+        except OSError:   # no pgrep (a minimal container): no answer, not a traceback
+            return None
     return None
 
 
@@ -1442,7 +1454,14 @@ def reload_compositor():
     helper = "/usr/libexec/rime-compositor-reload"
     if not os.path.exists(helper):
         return "no reload helper; the compositor will pick it up on next reload"
-    subprocess.run([helper], check=False)
+    try:
+        res = subprocess.run([helper], capture_output=True, text=True, check=False)
+    except OSError as e:
+        return f"the compositor was not reloaded: {e}"
+    if res.returncode != 0:
+        # Said, not swallowed: the settings are written but nothing re-read them.
+        why = (res.stderr or res.stdout).strip()[:160] or f"exit {res.returncode}"
+        return f"the compositor was not reloaded ({why}); the change applies at the next reload"
     note = f"reloaded via rime-compositor-reload ({desktop or 'unknown desktop'})"
     # A reload that returns 0 is not a config that loaded. Hyprland keeps its
     # complaints in `configerrors` and carries on with the last good values, so

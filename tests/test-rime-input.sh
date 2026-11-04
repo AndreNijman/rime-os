@@ -544,6 +544,22 @@ printf '%s\n' "$st" | has '^FAIL' \
 
 section "a control no compositor can honour is disabled with a reason"
 caps() { RIME_INPUT_DEVICES="$1" python3 "$GEN" --capabilities; }
+
+# NixOS wraps bin/Hyprland (it execs .Hyprland-wrapped), so `pgrep -x Hyprland`
+# never matches it; the instance signature must decide. PATH without pgrep.
+NOPG="${WORK}/nopgrep"; mkdir -p "$NOPG"; ln -sf "$(command -v python3)" "$NOPG/python3"
+running="$(env -u XDG_CURRENT_DESKTOP PATH="$NOPG" HYPRLAND_INSTANCE_SIGNATURE=fixture_sig \
+    RIME_INPUT_DEVICES="$DEVFIX" python3 "$GEN" --capabilities 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["running"])' 2>&1)"
+[ "$running" = "hyprland" ] \
+    && ok "HYPRLAND_INSTANCE_SIGNATURE alone identifies Hyprland" \
+    || bad "HYPRLAND_INSTANCE_SIGNATURE alone identifies Hyprland (got '$running')"
+running="$(env -u XDG_CURRENT_DESKTOP -u HYPRLAND_INSTANCE_SIGNATURE PATH="$NOPG" \
+    RIME_INPUT_DEVICES="$DEVFIX" python3 "$GEN" --capabilities 2>&1 \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["running"])' 2>&1)"
+[ "$running" = "None" ] \
+    && ok "with no hint and no pgrep the compositor is unknown, not a traceback" \
+    || bad "with no hint and no pgrep the compositor is unknown, not a traceback (got '$running')"
 NOPAD="${WORK}/nopad.json"
 echo '[{"name":"Fixture Mouse","type":"mouse","hypr_name":"fixture-mouse","hypr_name_source":"derived"}]' > "$NOPAD"
 

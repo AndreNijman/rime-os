@@ -94,3 +94,6 @@
 // { avahi-resolvconf = import ./avahi-resolvconf.nix { inherit pkgs self; }; }
 # shell-kept (the Shell's kept panel windows on Hyprland; phase "short"; nix/tests/shell-kept.nix)
 // { shell-kept = import ./shell-kept.nix { inherit pkgs self; }; }
+# hypr-lua (Hyprland driven in Lua only; display scale snap, XKB refusal, the Shell's eval writes and config probe;
+# nix/tests/hypr-lua.nix)
+// { hypr-lua = import ./hypr-lua.nix { inherit pkgs self; }; }

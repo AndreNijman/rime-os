@@ -3743,6 +3743,13 @@ jobs:
           RIME_DISPLAY_NO_LIVE: "1"
         run: ./tests/test-rime-display.sh
 
+      # rime-compositor-reload / rime-session-logout find Hyprland by its
+      # instance signature (NixOS's wrapped binary hides from `pgrep -x
+      # Hyprland`) and end it with the Lua dispatcher hl.dsp.exit().
+      - name: Run session-helper assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-session-helpers.sh
+
       # The prompt follows the wallpaper through a symlink firstrun maintains;
       # the suite cuts that block out of rime-shell-firstrun itself and checks
       # it migrates Rime's own seeds and never touches the user's file or link.

@@ -7,8 +7,13 @@
 # knowledge here rather than in the QML is what lets one menu serve all three
 # sessions.
 #
-# Detection is by XDG_CURRENT_DESKTOP, which every Rime session sets, with a
-# process check as the fallback for a session started outside the normal path.
+# Detection is by XDG_CURRENT_DESKTOP, which every Rime session sets, then by
+# HYPRLAND_INSTANCE_SIGNATURE (Hyprland sets it in everything it starts, and
+# hyprctl needs it anyway), with a process check as the last fallback. The
+# signature comes before the process name because on NixOS bin/Hyprland is a
+# wrapper that execs .Hyprland-wrapped, whose comm is ".Hyprland-wrapp": `pgrep
+# -x Hyprland` never matched it, so an apply from a shell without
+# XDG_CURRENT_DESKTOP reloaded nothing.
 
 set -uo pipefail
 
@@ -25,8 +30,10 @@ case "$desktop" in
     *hyprland*) reload_hypr ;;
     *niri*)     reload_niri ;;
     *)
-        if   pgrep -x labwc    >/dev/null 2>&1; then reload_labwc
-        elif pgrep -x Hyprland >/dev/null 2>&1; then reload_hypr
+        if   [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then reload_hypr
+        elif pgrep -x labwc    >/dev/null 2>&1; then reload_labwc
+        elif pgrep -x Hyprland >/dev/null 2>&1 \
+          || pgrep -x .Hyprland-wrapp >/dev/null 2>&1; then reload_hypr
         elif pgrep -x niri     >/dev/null 2>&1; then reload_niri
         else
             echo "rime: no known compositor is running (XDG_CURRENT_DESKTOP=${XDG_CURRENT_DESKTOP:-unset})" >&2

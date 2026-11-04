@@ -130,8 +130,17 @@ def compositor():
     for name in ("hyprland", "niri", "labwc"):
         if name in desktop:
             return name
+    # hyprctl talks to the instance this names, and Hyprland sets it in every
+    # process it starts. Checked before the process name because on NixOS
+    # bin/Hyprland is a wrapper that execs .Hyprland-wrapped: the process is
+    # ".Hyprland-wrapp" to `pgrep -x` (15-character comm), so the name check
+    # never matched there and a session without XDG_CURRENT_DESKTOP was sent
+    # down the wlr-randr path Hyprland does not implement.
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return "hyprland"
     # A session started outside the normal path; fall back to what is running.
-    for proc, name in (("Hyprland", "hyprland"), ("niri", "niri"), ("labwc", "labwc")):
+    for proc, name in (("Hyprland", "hyprland"), (".Hyprland-wrapp", "hyprland"),
+                       ("niri", "niri"), ("labwc", "labwc")):
         if run(["pgrep", "-x", proc]).returncode == 0:
             return name
     return "unknown"
