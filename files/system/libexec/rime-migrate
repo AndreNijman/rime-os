@@ -935,9 +935,10 @@ DIVERGENCE = (
     "  divergence: @home shares every data block with the old system's home and @pre-nixos shares everything, so "
     "start costs them no data space. After the move, each file changed or added on NixOS takes new space while the "
     "old side keeps its old blocks: the data free above shrinks as home diverges, gradually. The space comes back "
-    "when the old side (@pre-nixos, ostree/ and the old var/home) is removed; that reclaim step (`rime migrate "
-    "finish`) is planned and is not in this release. Until then the GRUB menu's ostree entries still boot the old "
-    "system, with home as it was at the move.")
+    "with `rime migrate finish`, run on NixOS once it has booted well three times: it removes the old side "
+    "(@pre-nixos, ostree/ and the old var/home) and the GRUB menu's ostree entries, and `rime migrate finish "
+    "--dry-run` first says what it would delete and the space it should free. Until then those entries still boot "
+    "the old system, with home as it was at the move.")
 
 
 def space_plan(facts):

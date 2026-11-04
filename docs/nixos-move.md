@@ -49,8 +49,13 @@ which refused a 1.3 TB home on a disk with 377 GB free.
 
 The space the copy shares is not free forever: each file changed or added on
 NixOS takes new space while the old system keeps its blocks. `check --explain`
-says so in a `divergence:` line. The space comes back when the old side is
-removed, a step (`rime migrate finish`) that is planned and not in this release.
+says so in a `divergence:` line. The space comes back with `rime migrate
+finish`, run on Rime OS on NixOS once it has started well three times: it removes
+the old side (@pre-nixos, ostree/ and the old var/home) and the GRUB menu's
+ostree entries. `sudo rime migrate finish --dry-run` (also what it does without
+`--yes`) first lists what it would delete, the space it should free and what
+stops working. Until then those entries still start the old system, with home
+as it was at the move.
 
 ## After a start, the bootc verbs refuse
 
