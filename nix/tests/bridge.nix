@@ -115,6 +115,8 @@ let
     [ "dry-run-writable" "rime-migrate-finish.py" ''s/writable=a.yes/writable=True/'' "the dry run mounts the top level read-write" ]
     [ "menu-unchecked" "rime-migrate-finish.py" ''s/    if not n:/    if False:/'' "the ostree entries removed with no NixOS menu to boot" ]
     [ "menu-top-level-only" "rime-migrate-finish.py" ''s|for p in ("/boot/rime/", "/rime/")|for p in ("/boot/rime/",)|'' "a machine with a /boot partition (the encrypted layout) refused for a menu it has" ]
+    [ "pre-nixos-moved" "rime-migrate-finish.py" ''s/^MOVE_ASIDE = ("ostree",)/MOVE_ASIDE = OLD_TOP/'' "the read-only @pre-nixos moved aside (btrfs refuses: EROFS)" ]
+    [ "os-error-unrecorded" "rime-migrate-finish.py" ''s/    except (Failed, OSError) as e:/    except Failed as e:/'' "a refused rename leaves a traceback and no failed record" ]
     [ "record-done-ignored" "rime-migrate-finish.py" ''s/    if r is None or r\[0\] != "already-moved":/    if False:/'' "finish over a start that did not finish" ]
   ];
   runFinishMutant = m:

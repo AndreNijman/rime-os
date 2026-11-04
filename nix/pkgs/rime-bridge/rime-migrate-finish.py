@@ -11,8 +11,9 @@ itself (docs/nixos/bridge.md "rime migrate finish").
                 namespace). Checks every precondition and prints what --yes would delete, the space it should free
                 and what stops working.
   --yes         Deletes the old side: the GRUB menu's ostree entries first (the old system stops being bootable before
-                any of its data goes), then bootc's kernels in /boot/ostree, then @pre-nixos and ostree/ (moved
-                aside into the top level's .rime-finish-old in one rename each, then deleted). Every step is
+                any of its data goes), then bootc's kernels in /boot/ostree, then ostree/ (moved aside into the
+                top level's .rime-finish-old in one rename, then deleted) and @pre-nixos (a read-only snapshot,
+                deleted where it is: btrfs refuses to move it). Every step is
                 idempotent and recorded in /var/lib/rime/nixos-bridge/finish.json, so a run that was interrupted is
                 completed by the next one. Never touches @nixos, @nix, @home, /boot/rime, /boot/grub2 (custom.cfg
                 with the rime-boot block, the Secure Boot key entry and anything else in it), any ESP or the LUKS
@@ -69,7 +70,11 @@ GOOD_BOOTS = 3
 GOOD_BOOTS_KEPT = 32
 KEEP_TOP = ("@nixos", "@nix", "@home", "boot")   # never deleted, whatever a list below says
 OLD_TOP = ("@pre-nixos", "ostree")               # the old side in the btrfs top level
-TRASH = ".rime-finish-old"                       # where OLD_TOP is moved before it is deleted
+TRASH = ".rime-finish-old"                       # where MOVE_ASIDE is moved before it is deleted
+# Only the old tree moves aside. @pre-nixos is a read-only snapshot, and btrfs refuses (EROFS) to move a read-only
+# subvolume into another directory (its `..` lives inside it; found by the OVMF run). It needs no move: deleting a
+# subvolume removes its name in one step, and nothing boots it once the ostree entries are gone.
+MOVE_ASIDE = ("ostree",)
 STEPS = ("boot entries", "old kernels", "move aside", "nested subvolumes", "@pre-nixos", "old tree", "sync",
          "containment")
 RECORD_GLOB = "ostree/deploy/*/var/lib/rime/nixos-bridge/state.json"
@@ -617,7 +622,7 @@ def cmd_yes(sx, facts):
             sx.remove_tree(kdir)
         step("old kernels")
         # 2. One rename each out of the top level: the old side is never half there under its own name.
-        for n in OLD_TOP:
+        for n in MOVE_ASIDE:
             src, dst = os.path.join(top, n), os.path.join(top, TRASH, n)
             never(n)
             if os.path.lexists(src):
@@ -634,9 +639,10 @@ def cmd_yes(sx, facts):
             if os.path.lexists(os.path.join(top, s)):
                 sx.subvol_delete(os.path.join(top, s))
         step("nested subvolumes")
-        never(trash_pre)
-        if os.path.lexists(os.path.join(top, trash_pre)):
-            sx.subvol_delete(os.path.join(top, trash_pre))
+        for pre in ("@pre-nixos", trash_pre):        # deleted where it is (read-only: see MOVE_ASIDE)
+            never(pre)
+            if os.path.lexists(os.path.join(top, pre)):
+                sx.subvol_delete(os.path.join(top, pre))
         step("@pre-nixos")
         t = os.path.join(top, TRASH)
         if os.path.lexists(t):
@@ -660,10 +666,13 @@ def cmd_yes(sx, facts):
         if left:
             raise Failed("the old side is still there after every step: " + ", ".join(left))
         step("containment")
-    except Failed as e:
+    except (Failed, OSError) as e:
+        # an OSError (a rename or unlink the kernel refused) is a failure like any other: recorded, exit 10, re-runnable
         fin["failed"] = str(e)
         write_json(path, fin)
-        raise
+        if isinstance(e, Failed):
+            raise
+        raise Failed(f"{e.strerror or e}: {e.filename or ''}{' -> ' + e.filename2 if e.filename2 else ''}") from e
     fin["usage_after"] = sx.usage(top)
     fin["done"] = now()
     write_json(path, fin)

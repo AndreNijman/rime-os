@@ -5,6 +5,7 @@ the package's installCheckPhase against the installed program (RIME_MIGRATE_FINI
 """
 
 import contextlib
+import errno
 import importlib.machinery
 import importlib.util
 import io
@@ -99,6 +100,8 @@ class FakeSystem(F.System):
         self.hook = None
         self.mounted = []
         self.deleted = []
+        # read-only subvolumes: btrfs refuses (EROFS) to move one into another directory, as the OVMF run found
+        self.readonly = {"@pre-nixos"}
         self.build()
 
     def build(self):
@@ -222,6 +225,24 @@ class FakeSystem(F.System):
 _rename = os.rename
 
 
+def fake_rename(sx):
+    """os.rename on the top level as btrfs does it: the emulated subvolume list follows a rename, and a read-only
+    subvolume cannot be moved into another directory (EROFS)."""
+    def rename(src, dst):
+        if src.startswith(sx.top + "/") and dst.startswith(sx.top + "/"):
+            a, b = os.path.relpath(src, sx.top), os.path.relpath(dst, sx.top)
+            if a in sx.readonly and os.path.dirname(a) != os.path.dirname(b):
+                raise OSError(errno.EROFS, os.strerror(errno.EROFS), src, None, dst)
+            _rename(src, dst)
+            for s in list(sx.subs):
+                if s == a or s.startswith(a + "/"):
+                    sx.subs[b + s[len(a):]] = sx.subs.pop(s)
+            sx.readonly = {(b + r[len(a):]) if r == a or r.startswith(a + "/") else r for r in sx.readonly}
+        else:
+            _rename(src, dst)
+    return rename
+
+
 def run(sx, *argv):
     out = io.StringIO()
     err = io.StringIO()
@@ -246,15 +267,7 @@ class FinishTest(unittest.TestCase):
         self.sx = FakeSystem(self.tmp)
         sx = self.sx
 
-        # btrfs renames carry their subvolumes: keep the emulated list in step with os.rename on the top level
-        def rename(src, dst, _sx=sx):
-            _rename(src, dst)
-            if src.startswith(_sx.top + "/") and dst.startswith(_sx.top + "/"):
-                a, b = os.path.relpath(src, _sx.top), os.path.relpath(dst, _sx.top)
-                for s in list(_sx.subs):
-                    if s == a or s.startswith(a + "/"):
-                        _sx.subs[b + s[len(a):]] = _sx.subs.pop(s)
-        F.os.rename = rename
+        F.os.rename = fake_rename(sx)
         self.addCleanup(setattr, F.os, "rename", _rename)
         self.addCleanup(shutil.rmtree, self.tmp)
 
@@ -441,13 +454,44 @@ class FinishTest(unittest.TestCase):
         nested = [d for d in self.sx.deleted if "containers" in d]
         self.assertEqual(len(nested), 2)
         self.assertTrue(nested[0].endswith("aaa/inner"), self.sx.deleted)
-        self.assertIn(os.path.join(F.TRASH, "@pre-nixos"), self.sx.deleted)
+        self.assertIn("@pre-nixos", self.sx.deleted)
         saved = jload(os.path.join(self.sx.state, "start-record.json"))
         self.assertEqual(saved["done"], DONE["done"])
         fin = jload(os.path.join(self.sx.state, "finish.json"))
         self.assertEqual(sorted(fin["removed_entries"]), ["Fedora Linux 45 (ostree:0)", "Fedora Linux 45 (ostree:1)",
                                                           "Old"])
         self.assertLess(fin["usage_after"]["data_used"], fin["usage_before"]["data_used"])
+
+    def test_read_only_snapshot_is_not_moved(self):
+        """@pre-nixos is read-only: it is deleted where it is, only ostree/ moves aside (btrfs: EROFS otherwise)."""
+        seen = {}
+
+        def hook(sx, name):
+            if name == "move aside":
+                seen["pre"] = os.path.isdir(os.path.join(sx.top, "@pre-nixos"))
+                seen["ostree"] = os.path.isdir(os.path.join(sx.top, F.TRASH, "ostree"))
+        self.sx.hook = hook
+        rc, out = run(self.sx, "--yes")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(seen, {"pre": True, "ostree": True})
+        self.assert_finished()
+
+    def test_os_error_is_recorded_failure(self):
+        """A rename the kernel refuses is a recorded failure (exit 10, re-runnable), never a bare traceback."""
+        self.sx.subs["ostree"] = "u-ostree"
+        self.sx.readonly.add("ostree")
+        rc, out = run(self.sx, "--yes")
+        self.assertEqual(rc, F.EXIT_FAILED, out)
+        self.assertIn("FAILED", out)
+        fin = jload(os.path.join(self.sx.state, "finish.json"))
+        self.assertIn("Read-only file system", fin.get("failed", ""))
+        self.assertIsNone(fin.get("done"))
+        self.assertEqual(F.rime_menu(self.sx.boot), (1, None))
+        self.sx.readonly.discard("ostree")
+        del self.sx.subs["ostree"]
+        rc, out = run(self.sx, "--yes")
+        self.assertEqual(rc, 0, out)
+        self.assert_finished()
 
     def test_boot_entries_go_first(self):
         """The old system stops being bootable before any of its data is deleted."""
@@ -498,16 +542,7 @@ class FinishTest(unittest.TestCase):
                 self.assert_finished()
 
     def setUp_rename(self):
-        sx = self.sx
-
-        def rename(src, dst, _sx=sx):
-            _rename(src, dst)
-            if src.startswith(_sx.top + "/") and dst.startswith(_sx.top + "/"):
-                a, b = os.path.relpath(src, _sx.top), os.path.relpath(dst, _sx.top)
-                for s in list(_sx.subs):
-                    if s == a or s.startswith(a + "/"):
-                        _sx.subs[b + s[len(a):]] = _sx.subs.pop(s)
-        F.os.rename = rename
+        F.os.rename = fake_rename(self.sx)
 
     def test_kept_trees_never_deleted(self):
         for rel in ("@home", "@nixos", "@nix", "boot", "", ".", F.TRASH, os.path.join(F.TRASH, "@home"),
