@@ -738,6 +738,273 @@ class HookTest(unittest.TestCase):
             self.assertEqual(HOOK.grub_path_of(f.cfg), want, text)
 
 
+# The bootc helper's custom_cfg_with_block (rime-os files/system/libexec/rime-secureboot-key), verbatim: what a
+# migrated machine's last bootc boot wrote. The hook's Python must produce what this does, so a machine that ran both
+# keeps exactly one block whichever ran last.
+BOOTC_AWK = r'''
+      $0 == b { skip = 1; next }
+      $0 == e { skip = 0; next }
+      !skip   { lines[++n] = $0 }
+      END {
+        while (n > 0 && lines[n] == "") n--
+        for (i = 1; i <= n; i++) print lines[i]
+        if (n > 0) print ""
+      }'''
+# sha256 of `rime-secureboot-key block` at rime-os 5861e11f (PR #147): the block text, byte for byte.
+BOOTC_BLOCK_SHA256 = "383086ae74dbd3f849058a976e3f865476c03cd5f3af02c65835fb2cce587f89"
+FAKE_DER = b"\x30\x82\x01\x0a" + bytes(range(256))  # DER SEQUENCE header; the hook only checks the first byte
+
+
+def bootc_custom_cfg(old):
+    """What the bootc helper writes for a custom.cfg holding `old` (None = no file)."""
+    import subprocess
+    head = ""
+    if old:  # the helper runs awk only on a non-empty file ([ -s ])
+        with tempfile.NamedTemporaryFile("w", delete=False) as fh:
+            fh.write(old)
+        try:
+            head = subprocess.run(
+                ["awk", "-v", "b=" + HOOK.SB_BEGIN, "-v", "e=" + HOOK.SB_END, BOOTC_AWK, fh.name],
+                check=True, capture_output=True).stdout.decode()  # bytes: text mode would turn \r\n into \n
+        finally:
+            os.unlink(fh.name)
+    return head + HOOK.SB_BLOCK
+
+
+class SecureBootKeyTest(unittest.TestCase):
+    """The way back when Secure Boot refuses the kernel: the Rime certificate on the ESP and the bootc helper's
+    "Enrol the Rime OS Secure Boot key" block in custom.cfg."""
+
+    def setUp(self):
+        self.f = Fixture(self)
+        self.addCleanup(self.f.cleanup)
+        self.cert = os.path.join(self.f.root, "rime-mok.der")
+        with open(self.cert, "wb") as fh:
+            fh.write(FAKE_DER)
+        self.f.cfg["mokCert"] = self.cert
+        self.f.generation(1)
+
+    def mokmanager(self, esp=None):
+        p = os.path.join(esp or self.f.boot, "EFI", "fedora", "mmx64.efi")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "wb") as fh:
+            fh.write(b"MZ mokmanager")
+
+    def esp_cert(self, esp=None):
+        return os.path.join(esp or self.f.boot, "EFI", "rime", "rime-mok.der")
+
+    def custom(self, text=None):
+        p = os.path.join(self.f.boot, "grub2", "custom.cfg")
+        if text is not None:
+            with open(p, "w") as fh:
+                fh.write(text)
+        return slurp(p, "r") if os.path.exists(p) else None
+
+    def test_block_is_the_bootc_helpers_byte_for_byte(self):
+        b = HOOK.SB_BLOCK
+        self.assertEqual(hashlib.sha256(b.encode()).hexdigest(), BOOTC_BLOCK_SHA256)
+        lines = b.splitlines()
+        self.assertEqual((lines[0], lines[-1]), (HOOK.SB_BEGIN, HOOK.SB_END))
+        self.assertEqual((HOOK.SB_BEGIN, HOOK.SB_END),
+                         ("### BEGIN rime-secureboot-key ###", "### END rime-secureboot-key ###"))
+        # Shown only when shim reports Secure Boot on: the menuentry sits inside the $shim_lock guard.
+        guard = lines.index('  if [ "$shim_lock" = "y" ]; then')
+        entry = next(i for i, l in enumerate(lines) if l.lstrip().startswith("menuentry "))
+        self.assertLess(guard, entry)
+        self.assertEqual(lines[-3:-1], ["  fi", "fi"])
+        # The certificate it searches for is the one the hook places; it chainloads the MokManager the hook requires.
+        self.assertIn("--set=rime_esp /" + "/".join(HOOK.SB_CERT_REL) + ";", b)
+        self.assertIn("chainloader ($rime_esp)/" + "/".join(HOOK.SB_MOKMANAGER_REL) + "\n", b)
+        # No machine-specific value: no UUID, no fs-uuid search, no hostname.
+        self.assertNotRegex(b, r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-|--fs-uuid|[0-9A-F]{4}-[0-9A-F]{4}")
+
+    def test_bls_places_the_certificate_and_the_entry(self):
+        f = self.f
+        self.mokmanager()
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(slurp(self.esp_cert()), FAKE_DER)
+        self.assertEqual(os.listdir(os.path.dirname(self.esp_cert())), ["rime-mok.der"])  # no temporary left
+        self.assertEqual(self.custom(), HOOK.INCLUDE_BLOCK + "\n" + HOOK.SB_BLOCK)
+        self.assertIn("certificate written to", f.stderr)
+        before = tree(f.boot)
+        time.sleep(0.02)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(tree(f.boot), before)  # identical certificate and custom.cfg: nothing rewritten
+        self.assertNotIn("certificate written to", f.stderr)
+
+    def test_a_different_certificate_is_replaced(self):
+        f = self.f
+        self.mokmanager()
+        os.makedirs(os.path.dirname(self.esp_cert()))
+        with open(self.esp_cert(), "wb") as fh:
+            fh.write(b"\x30 an older key")
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(slurp(self.esp_cert()), FAKE_DER)
+
+    def test_no_mokmanager_no_certificate_no_entry(self):
+        f = self.f
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertFalse(os.path.exists(os.path.join(f.boot, "EFI", "rime")))
+        self.assertNotIn(HOOK.SB_BEGIN, self.custom())
+        self.assertIn("has no EFI/fedora/mmx64.efi", f.stderr)
+        self.assertIn("boot menu entry not written", f.stderr)
+
+    def test_a_block_already_there_is_kept_when_the_hook_does_not_write_one(self):
+        f = self.f
+        old = "# mine\n\n" + HOOK.SB_BLOCK
+        for why in ("no mokmanager", "no certificate", "unreadable certificate"):
+            if why == "no certificate":
+                f.cfg["mokCert"] = None
+            elif why == "unreadable certificate":
+                f.cfg["mokCert"] = os.path.join(f.root, "missing.der")
+            self.custom(old)
+            self.assertEqual(f.run("install"), 0, f.stderr)
+            self.assertEqual(self.custom(), old + HOOK.INCLUDE_BLOCK, why)
+            self.assertEqual(self.custom().count(HOOK.SB_BEGIN), 1, why)
+            self.assertFalse(os.path.exists(self.esp_cert()), why)
+
+    def test_existing_block_is_replaced_whole_and_everything_else_kept(self):
+        f = self.f
+        self.mokmanager()
+        windows = "# Rime OS: Windows is installed beside Rime on this machine.\nmenuentry 'Windows' --id windows {\n}\n"
+        stale = HOOK.SB_BEGIN + "\n# an older version of the entry\nmenuentry 'old' {\n}\n" + HOOK.SB_END + "\n"
+        self.custom(windows + "\n" + stale + "\n" + HOOK.INCLUDE_BLOCK + "\n\n")
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        got = self.custom()
+        self.assertEqual(got.count(HOOK.SB_BEGIN), 1)
+        self.assertEqual(got.count(HOOK.SB_END), 1)
+        self.assertNotIn("an older version", got)
+        # The blank lines around the old block stay, as with the bootc helper (only the marked lines go).
+        self.assertEqual(got, windows + "\n\n" + HOOK.INCLUDE_BLOCK + "\n" + HOOK.SB_BLOCK)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(self.custom(), got)
+
+    def test_same_bytes_as_the_bootc_helper_and_a_fixed_point_of_both(self):
+        win = "menuentry 'Windows' --id windows {\n  chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n}\nset timeout=5\n"
+        unterminated = win + HOOK.SB_BEGIN + "\nunterminated\n" + win
+        cases = [None, "", "\n\n", win, win.rstrip("\n"), win + "\n\n\n",
+                 win + "\n" + HOOK.SB_BLOCK, HOOK.SB_BLOCK + win, HOOK.SB_BLOCK + HOOK.SB_BLOCK,
+                 unterminated, "a\r\n" + HOOK.SB_BEGIN + "\r\nb\n",
+                 HOOK.INCLUDE_BLOCK + "\n" + HOOK.SB_BLOCK + "\n" + win]
+        for old in cases:
+            mine = HOOK.with_secureboot_block(old)
+            self.assertEqual(mine, bootc_custom_cfg(old), repr(old))
+            self.assertEqual(mine.count(HOOK.SB_BLOCK), 1, repr(old))
+            self.assertTrue(mine.endswith(HOOK.SB_BLOCK), repr(old))
+            self.assertEqual(HOOK.with_secureboot_block(mine), mine, repr(old))
+            self.assertEqual(bootc_custom_cfg(mine), mine, repr(old))
+            # What the hook writes: one include block, one Secure Boot block.
+            new = HOOK.custom_cfg(old, True)
+            self.assertEqual(new.count(HOOK.INCLUDE_BLOCK), 1, repr(old))
+            self.assertEqual(new.split("\n").count(HOOK.SB_BEGIN), 1, repr(old))  # marker LINES ("...###\r" is none)
+            if old is unterminated:
+                # The unterminated BEGIN took the include block with it; it is put back, after the Secure Boot block,
+                # and the next run settles.
+                self.assertTrue(new.endswith(HOOK.SB_BLOCK + HOOK.INCLUDE_BLOCK), new)
+                new = HOOK.custom_cfg(new, True)
+            # A fixed point of the hook and of the bootc helper: a migrated machine never flips between the two.
+            self.assertEqual(HOOK.custom_cfg(new, True), new, repr(old))
+            self.assertEqual(bootc_custom_cfg(new), new, repr(old))
+            self.assertTrue(new.endswith(HOOK.SB_BLOCK), repr(old))
+
+    def test_custom_cfg_writes_only_a_mounted_fat_esp_at_boot_efi(self):
+        f = self.f
+        f.make_ostree_boot()
+        f.cfg["grubPath"] = "/boot"
+        esp = os.path.join(f.boot, "efi")
+        self.mokmanager(esp)
+        mi = os.path.join(f.root, "mountinfo")
+        f.cfg["mountinfo"] = mi
+        boot = os.path.realpath(f.boot)
+        base = "24 1 0:22 / / rw - btrfs /dev/vda3 rw\n31 24 0:31 /boot %s rw - btrfs /dev/vda3 rw\n" % boot
+        bootc_cfg = f.windows + "\n" + HOOK.SB_BLOCK  # what bootc's helper left there
+        self.custom(bootc_cfg)
+        # Not mounted (bootc never mounts it): the hook does not go looking for one; bootc's block stays.
+        with open(mi, "w") as fh:
+            fh.write(base)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertIn("not a mounted FAT filesystem", f.stderr)
+        self.assertFalse(os.path.exists(self.esp_cert(esp)))
+        self.assertEqual(self.custom(), bootc_cfg + HOOK.INCLUDE_BLOCK)
+        # A FAT filesystem mounted there that is Windows' ESP: never written.
+        os.makedirs(os.path.join(esp, "EFI", "Microsoft", "Boot"))
+        with open(os.path.join(esp, "EFI", "Microsoft", "Boot", "bootmgfw.efi"), "wb") as fh:
+            fh.write(b"MZ windows")
+        with open(mi, "w") as fh:
+            fh.write(base + "40 31 0:40 / %s/efi rw - vfat /dev/vda1 rw\n" % boot)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertIn("Windows Boot Manager", f.stderr)
+        self.assertFalse(os.path.exists(self.esp_cert(esp)))
+        # Rime's own ESP mounted at /boot/efi: certificate and entry, the Windows entry and the include kept.
+        shutil.rmtree(os.path.join(esp, "EFI", "Microsoft"))
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertEqual(slurp(self.esp_cert(esp)), FAKE_DER)
+        self.assertEqual(self.custom(), f.windows + "\n" + HOOK.INCLUDE_BLOCK + "\n" + HOOK.SB_BLOCK)
+
+    def test_a_failed_placement_writes_no_entry_and_does_not_fail_the_switch(self):
+        f = self.f
+        self.mokmanager()
+        real = HOOK.atomic_write
+
+        def fails_on_esp(path, data, mode=0o644):
+            if path.endswith("rime-mok.der"):
+                raise OSError(28, "No space left on device")
+            return real(path, data, mode)
+
+        HOOK.atomic_write = fails_on_esp
+        try:
+            self.assertEqual(f.run("install"), 0, f.stderr)
+        finally:
+            HOOK.atomic_write = real
+        self.assertIn("could not place", f.stderr)
+        self.assertNotIn(HOOK.SB_BEGIN, self.custom())
+        self.assertTrue(os.path.exists(os.path.join(f.boot, "loader", "entries", "rime-generation-1.conf")))
+
+    def test_not_a_der_certificate(self):
+        f = self.f
+        self.mokmanager()
+        with open(self.cert, "wb") as fh:
+            fh.write(b"-----BEGIN CERTIFICATE-----\n")
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertIn("is not a DER certificate", f.stderr)
+        self.assertFalse(os.path.exists(self.esp_cert()))
+        self.assertNotIn(HOOK.SB_BEGIN, self.custom())
+
+    def test_making_room_decides_once_and_both_menus_carry_the_entry(self):
+        f = self.f
+        self.mokmanager()
+        f.cfg["reserveMiB"] = 1
+        f.virtual_capacity(1 + 4.5)
+        for n in (1, 2):
+            f.generation(n, kernel=bytes([n]) * MiB, initrd=bytes([100 + n]) * MiB)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        os.symlink(os.path.realpath(os.path.join(f.profiles, "system-2-link")), f.cfg["bootedSystem"])
+        for n in (3, 4):
+            f.generation(n, kernel=bytes([n]) * MiB, initrd=bytes([100 + n]) * MiB)
+        calls, customs = [], []
+        real_place, real_write = HOOK.place_secureboot_key, HOOK.write_menus
+
+        def place(*a):
+            calls.append(a)
+            return real_place(*a)
+
+        def write(*a):
+            real_write(*a)
+            customs.append(self.custom())
+
+        HOOK.place_secureboot_key, HOOK.write_menus = place, write
+        try:
+            self.assertEqual(f.run("install"), 0, f.stderr)
+        finally:
+            HOOK.place_secureboot_key, HOOK.write_menus = real_place, real_write
+        self.assertIn("making room", f.stderr)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(customs), 2)
+        for c in customs:
+            self.assertTrue(c.endswith(HOOK.SB_BLOCK), c)
+            self.assertEqual(c.count(HOOK.SB_BEGIN), 1)
+
+
 if __name__ == "__main__":
     HOOK = load_hook(sys.argv.pop(1))
     unittest.main(verbosity=2)

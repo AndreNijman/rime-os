@@ -8,6 +8,7 @@ host: Nix in the `rime-nix` container, keys, firmware and QEMU in `rime-ovmf-pro
 ```
 nix/probe/ovmf/boothook/run.sh all          # prep, gens, disks, scenarios (each scenario 2.5-5 min of boots)
 nix/probe/ovmf/boothook/run.sh scenarios bls-sb-mok
+nix/probe/ovmf/boothook/run.sh sbrecovery   # after prep, gens, disks bls (about 80 s of boots)
 ```
 
 | file | what |
@@ -17,6 +18,19 @@ nix/probe/ovmf/boothook/run.sh scenarios bls-sb-mok
 | `mkdisk.sh` | one base disk per layout: gen1 through `nixos-install` (the hook runs in its chroot), gen2/gen3 copied into the disk's store only; reads the store back from a fresh mount before it is done |
 | `drive.py` | one scenario: five QEMU boots of a qcow2 overlay of that disk, the GRUB menu driven with QMP `sendkey`, screens via QMP `screendump`, a verdict per boot from positive markers only (a timeout is never a pass) |
 | `run.sh` | the whole lab from the host; evidence in `/var/lab/rime-nix/artifacts/boothook/` |
+
+## Secure Boot recovery (`run.sh sbrecovery`, drive.py `SbRecovery`)
+
+The generations carry the TEST MOK's certificate (`rime.boot.mokCertificate`), so the hook places
+`EFI/rime/rime-mok.der` on the bls disk's ESP and writes the `rime-secureboot-key` block during `nixos-install`. Four
+boots of one overlay, varstore `vars-secboot.raw` (Secure Boot on, the TEST MOK NOT enrolled):
+
+0. the menu lists "Enrol the Rime OS Secure Boot key"; the default generation is refused (`bad shim signature`).
+1. End + Return picks the entry; its text and countdown show; GRUB chainloads MokManager; Enroll key from disk ->
+   the ESP -> EFI -> rime -> rime-mok.der -> Continue -> Yes -> Reboot, each choice found by name in the list
+   MokManager mirrors to the serial port (`mokmanager-steps.txt`); MokList read back from the varstore.
+2. the same varstore: gen1 boots with Secure Boot on and the kernel loads the TEST MOK.
+3. `vars-sb-off.fd`, the same disk: the entry is not in the menu; gen1 boots.
 
 ## Layouts
 

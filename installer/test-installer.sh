@@ -685,6 +685,111 @@ else
     fail=$((fail+1))
 fi
 
+echo "── NixOS: Secure Boot notes say what shim does, and name the way back ──"
+# The NixOS path's own MOK step (rime-install-nixos.sh nixos_mok): the same
+# honest words as §5b, MokTimeout -1 only after a successful import, and the
+# boot hook's "Enrol the Rime OS Secure Boot key" entry named only when
+# nixos_sb_menu found it on the installed ESP (rime-boot writes it under
+# nixos-install; nix/tests/boot-hook-test.py covers the hook itself).
+_NX=./rime-install-nixos.sh
+_nxfns=$(mktemp /tmp/rime-nixos-mok-fns.XXXXXX)
+{ sed -n '/^nixos_sb_menu() {/,/^}/p' "$_NX"; sed -n '/^nixos_mok() {/,/^}/p' "$_NX"; } > "$_nxfns"
+if [ "$(grep -c '^[a-z_]*() {' "$_nxfns")" != 2 ] || ! bash -n "$_nxfns"; then
+    printf 'FAIL  %-30s could not extract nixos_sb_menu/nixos_mok from %s\n' "nixos mok functions" "$_NX"; fail=$((fail+1))
+else
+(
+    set +u
+    # shellcheck disable=SC1090
+    . "$_nxfns"
+    _p=0; _f=0
+    _ok()  { printf 'PASS  %-30s\n' "$1"; _p=$((_p+1)); }
+    _bad() { printf 'FAIL  %-30s %s\n' "$1" "$2"; _f=$((_f+1)); }
+    _t=$(mktemp -d /tmp/rime-nixos-mok.XXXXXX)
+    LOG="$_t/log"; log() { echo "$*" >> "$LOG"; }
+    note() { printf '%s\n' "$*" >> "$_t/notes"; }
+    have() { command -v "$1" >/dev/null 2>&1; }
+    NIXOS_STAMPS="$_t/stamps"; mkdir -p "$NIXOS_STAMPS"
+    echo signed > "$NIXOS_STAMPS/kernel-signed"
+    head -c 600 /dev/urandom > "$NIXOS_STAMPS/nixos-mok.der"
+    nixos_stamp() { { tr -d '\r\n' < "$NIXOS_STAMPS/$1"; } 2>/dev/null || true; }
+    mokutil() {
+        echo "$*" >> "$_t/mok.args"
+        case "$1" in
+            --sb-state) echo "SecureBoot $_SB" ;;
+            --test-key) echo "$NIXOS_STAMPS/nixos-mok.der is not enrolled"; return 1 ;;
+            --import) cat > /dev/null; return "$_IMPORT_RC" ;;
+            --timeout) return "$_TIMEOUT_RC" ;;
+        esac
+    }
+    run() {  # $1 = SB enabled|disabled  $2 = password or ""  $3 = import rc  $4 = timeout rc  $5 = menu 0|1
+        _SB=$1; MOKPW=$2; _IMPORT_RC=$3; _TIMEOUT_RC=$4; NIXOS_SB_MENU=$5
+        rm -f "$_t/notes" "$_t/mok.args"
+        nixos_mok
+        N=$(cat "$_t/notes" 2>/dev/null); A=$(cat "$_t/mok.args" 2>/dev/null)
+    }
+    # nixos_sb_menu: only the installed ESP's own certificate + entry count.
+    _r="$_t/root"; mkdir -p "$_r/boot/EFI/rime" "$_r/boot/grub2"
+    nixos_sb_menu "$_r"; _m0=$NIXOS_SB_MENU
+    cp "$NIXOS_STAMPS/nixos-mok.der" "$_r/boot/EFI/rime/rime-mok.der"
+    printf "menuentry 'Enrol the Rime OS Secure Boot key (if Rime OS does not start)' --id rime-enrol-key {\n}\n" \
+        > "$_r/boot/grub2/custom.cfg"
+    nixos_sb_menu "$_r"; _m1=$NIXOS_SB_MENU
+    head -c 10 /dev/urandom > "$_r/boot/EFI/rime/rime-mok.der"
+    nixos_sb_menu "$_r"; _m2=$NIXOS_SB_MENU
+    if [ "$_m0$_m1$_m2" = 010 ]; then _ok "nixos: menu entry detected"; else _bad "nixos: menu entry detected" "got $_m0$_m1$_m2, want 010"; fi
+
+    run enabled 'pw12345678' 0 0 1
+    _imp=$(grep -n '^--import' <<<"$A" | cut -d: -f1); _tmo=$(grep -n '^--timeout -1$' <<<"$A" | cut -d: -f1)
+    if [ -n "$_imp" ] && [ -n "$_tmo" ] && [ "$_tmo" -gt "$_imp" ] && ! grep -q pw12345678 <<<"$A" \
+       && grep -qF 'It waits for you.' <<<"$N" && grep -qF 'Enrol the Rime OS Secure Boot key' <<<"$N"; then
+        _ok "nixos: MokManager told to wait"
+    else
+        _bad "nixos: MokManager told to wait" "args [$(tr '\n' '|' <<<"$A")]"
+    fi
+    run enabled 'pw12345678' 0 1 1
+    if grep -qF 'within 10 seconds' <<<"$N" && ! grep -qF 'It waits for you.' <<<"$N"; then
+        _ok "nixos: no MokTimeout, says so"
+    else
+        _bad "nixos: no MokTimeout, says so" "$(head -2 <<<"$N" | tr '\n' '|')"
+    fi
+    run enabled 'pw12345678' 1 0 1
+    if ! grep -q '^--timeout' <<<"$A" && grep -qF 'Enrol the Rime OS Secure Boot key' <<<"$N"; then
+        _ok "nixos: failed import, way back"
+    else
+        _bad "nixos: failed import, way back" "args [$(tr '\n' '|' <<<"$A")]"
+    fi
+    run enabled '' 0 0 1
+    if grep -qF 'you chose to skip' <<<"$N" && grep -qF 'Enrol the Rime OS Secure Boot key' <<<"$N" && ! grep -q '^--import' <<<"$A"; then
+        _ok "nixos: skip names the way back"
+    else
+        _bad "nixos: skip names the way back" "$(head -3 <<<"$N" | tr '\n' '|')"
+    fi
+    run enabled '' 0 0 0
+    if grep -qF 'you chose to skip' <<<"$N" && ! grep -qF 'Enrol the Rime OS Secure Boot key' <<<"$N"; then
+        _ok "nixos: no entry, not promised"
+    else
+        _bad "nixos: no entry, not promised" "$(head -3 <<<"$N" | tr '\n' '|')"
+    fi
+    run disabled 'pw12345678' 0 0 1
+    if grep -qF 'even though Secure Boot is off' <<<"$N" && grep -qF 'The request is used up' <<<"$N"; then
+        _ok "nixos: SB off, request used up"
+    else
+        _bad "nixos: SB off, request used up" "$(head -2 <<<"$N" | tr '\n' '|')"
+    fi
+    rm -rf "$_t"
+    exit $(( _f > 0 ? 100 + _f : _p ))
+)
+_rc=$?
+if [ "$_rc" -gt 100 ]; then fail=$((fail + _rc - 100)); else pass=$((pass + _rc)); fi
+fi
+rm -f "$_nxfns"
+_nxmok=$(sed -n '/^nixos_mok() {/,/^}/p' ./rime-install-nixos.sh | grep -v '^[[:space:]]*#')
+if grep -qiE 'stays queued|will be offered the first time you enable' <<<"$_nxmok"; then
+    printf 'FAIL  %-30s\n' "nixos: no 'stays queued' claim"; fail=$((fail+1))
+else
+    printf 'PASS  %-30s\n' "nixos: no 'stays queued' claim"; pass=$((pass+1))
+fi
+
 echo "── GUI: every page must draw — it is the only front end there is ──────"
 
 GUI=./rime-installer-gui

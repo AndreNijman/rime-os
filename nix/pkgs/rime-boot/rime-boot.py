@@ -73,6 +73,54 @@ INCLUDE_BLOCK = (
     "fi\n" + BLOCK_END + "\n"
 )
 LAYOUTS = ("bls", "custom-cfg")
+# The Secure Boot key entry (README "The way back when Secure Boot refuses the kernel"). These markers and this text
+# are the bootc helper's (rime-os files/system/libexec/rime-secureboot-key, `block`), byte for byte: a machine that
+# moved from bootc keeps exactly one block whichever of the two wrote it last. boot-hook-unit pins its sha256.
+SB_BEGIN = "### BEGIN rime-secureboot-key ###"
+SB_END = "### END rime-secureboot-key ###"
+SB_BLOCK = r"""### BEGIN rime-secureboot-key ###
+# Rime OS: enrol Rime's Secure Boot key from this menu when Rime OS does not
+# start ("bad shim signature"). Written by Rime OS (rime-secureboot-key),
+# which replaces this block as a whole: edits inside it are lost.
+if [ "$grub_platform" = "efi" ]; then
+  if [ "$shim_lock" = "y" ]; then
+    menuentry 'Enrol the Rime OS Secure Boot key (if Rime OS does not start)' --id rime-enrol-key {
+      insmod part_gpt
+      insmod fat
+      insmod chain
+      if search --no-floppy --file --set=rime_esp /EFI/rime/rime-mok.der; then
+        echo "Enrol the Rime OS Secure Boot key"
+        echo ""
+        echo "Rime OS starts with Secure Boot on once its key is enrolled."
+        echo "A blue key manager opens next. On it:"
+        echo "  1. When it says \"Press any key\", press a key within 10 seconds."
+        echo "  2. Choose \"Enroll key from disk\"."
+        echo "  3. Choose the EFI partition (EFI-SYSTEM, RIME-ESP or RIMEESP; on an"
+        echo "     older install it can have another name), then EFI, rime,"
+        echo "     rime-mok.der."
+        echo "  4. Choose \"Continue\", then \"Yes\"."
+        echo "  5. Choose \"Reboot\". Rime OS then starts."
+        echo "If you miss a step you come back to this menu. Choose this again."
+        echo ""
+        echo "Opening in 20 seconds. Press Esc to go back to the menu."
+        if sleep --verbose --interruptible 20; then
+          chainloader ($rime_esp)/EFI/fedora/mmx64.efi
+        fi
+      else
+        echo "The Rime OS key file is not on this machine's EFI partition."
+        echo "Turn Secure Boot off in the firmware settings to start Rime OS,"
+        echo "then run: sudo systemctl start rime-secureboot-key.service"
+        sleep --interruptible 30
+      fi
+    }
+  fi
+fi
+### END rime-secureboot-key ###
+"""
+# Where the entry and MokManager look for the certificate, and the MokManager the entry chainloads: Fedora's, put on
+# the ESP by the installer (nixos_esp) or by bootupd. Its presence is what says "this is the ESP shim boots from".
+SB_CERT_REL = ("EFI", "rime", "rime-mok.der")
+SB_MOKMANAGER_REL = ("EFI", "fedora", "mmx64.efi")
 # host.toml [boot] microcode: which vendors' early-microcode cpios every entry carries. "both" (the default) is what
 # a generic install needs; the installer writes the CPU's own vendor.
 MICROCODE = {"both": ("intel", "amd"), "intel": ("intel",), "amd": ("amd",), "none": ()}
@@ -115,6 +163,9 @@ DEFAULTS = {
     "reserveMiB": 32,
     "grubPath": None,
     "mountinfo": "/proc/self/mountinfo",
+    # The DER certificate the kernel is signed with (nix/modules/boot.nix, rime.boot.mokCertificate), or None: no
+    # Rime-signed kernel, nothing to enrol, custom.cfg's Secure Boot block left as it is.
+    "mokCert": None,
 }
 
 
@@ -555,6 +606,116 @@ def with_include_block(old):
     return old + sep + INCLUDE_BLOCK
 
 
+def with_secureboot_block(old):
+    """custom.cfg with exactly one Secure Boot key block, at the end: the bootc helper's custom_cfg_with_block, line
+    for line. Every line from a BEGIN marker line through the next END marker line goes (an unterminated BEGIN takes
+    the rest of the file), then trailing empty lines, then one empty line and the block are added. Everything else
+    is kept as it is. The result is a fixed point of both this and the helper."""
+    lines = []
+    if old:
+        recs = old.split("\n")
+        if recs[-1] == "":
+            recs.pop()
+        skip = False
+        for line in recs:
+            if line == SB_BEGIN:
+                skip = True
+            elif line == SB_END:
+                skip = False
+            elif not skip:
+                lines.append(line)
+        while lines and lines[-1] == "":
+            lines.pop()
+    head = "".join(line + "\n" for line in lines) + ("\n" if lines else "")
+    return head + SB_BLOCK
+
+
+def custom_cfg(old, secureboot):
+    """The new custom.cfg: the include block in place (or appended), and with `secureboot` the Secure Boot block
+    moved to the end. The include block is put back once more afterwards: a BEGIN marker with no END (a damaged file)
+    makes the bootc rule drop everything after it, and the menu must never lose the line that sources it."""
+    new = with_include_block(old)
+    if secureboot:
+        new = with_include_block(with_secureboot_block(new))
+    return new
+
+
+def mounted_fstype(cfg, path):
+    """The filesystem type mounted exactly at `path` (from mountinfo), or None when `path` is not a mount point."""
+    want = os.path.realpath(path)
+    found = None
+    try:
+        with open(cfg["mountinfo"], encoding="utf-8") as f:
+            for line in f:
+                fields = line.split()
+                if "-" not in fields:
+                    continue
+                sep = fields.index("-")
+                if _unescape_mountinfo(fields[4]) == want and sep + 1 < len(fields):
+                    found = fields[sep + 1]  # the last mount at a path is the one that shows
+    except OSError:
+        return None
+    return found
+
+
+def secureboot_esp(cfg, boot, layout):
+    """(the ESP to put the certificate on, None) or (None, why not). As careful as the bootc helper: the ESP the hook
+    already writes (bls: /boot IS Rime's own ESP; the hook has refused a Windows ESP there before getting here), or
+    for custom-cfg only a FAT filesystem mounted at <boot>/efi that is not Windows' ESP. Never a guess between
+    several. Either way it must hold Fedora's MokManager, which the entry chainloads from the same partition."""
+    if layout == "bls":
+        esp = boot
+    else:
+        esp = os.path.join(boot, "efi")
+        fstype = mounted_fstype(cfg, esp)
+        if fstype != "vfat":
+            return None, (f"{esp} is not a mounted FAT filesystem ({fstype or 'not mounted'}), and on a {layout} "
+                          "machine that is the only ESP this hook will write")
+        if windows_boot_manager(esp):
+            return None, f"{esp} holds Windows Boot Manager: Rime never writes Windows' ESP"
+    if not os.path.isfile(os.path.join(esp, *SB_MOKMANAGER_REL)):
+        return None, f"{esp} has no {'/'.join(SB_MOKMANAGER_REL)}: not the ESP this machine boots shim from"
+    return esp, None
+
+
+def place_secureboot_key(cfg, boot, layout):
+    """Put the Rime certificate on the ESP at EFI/rime/rime-mok.der (tmp + fsync + rename, read back; nothing written
+    when an identical file is there). True = the menu entry may be written; False = the Secure Boot block in
+    custom.cfg is left exactly as it is, and the log says why. Never raises: a machine without the entry is what
+    every machine was before it existed, so this never fails a switch."""
+    src = cfg.get("mokCert")
+    if not src:
+        log("secure boot key: the kernel is not signed with a Rime key (rime.boot.mokCertificate unset): "
+            "nothing to enrol, no boot menu entry")
+        return False
+    try:
+        with open(src, "rb") as f:
+            cert = f.read()
+    except OSError as e:
+        log(f"secure boot key: cannot read the certificate {src}: {e}; no boot menu entry")
+        return False
+    if not cert.startswith(b"\x30"):
+        log(f"secure boot key: {src} is not a DER certificate; no boot menu entry")
+        return False
+    esp, why = secureboot_esp(cfg, boot, layout)
+    if esp is None:
+        log(f"secure boot key: {why}; certificate not placed, boot menu entry not written")
+        return False
+    dst = os.path.join(esp, *SB_CERT_REL)
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        if atomic_write(dst, cert):
+            log(f"secure boot key: certificate written to {dst}")
+        with open(dst, "rb") as f:
+            if f.read() != cert:
+                log(f"secure boot key: {dst} does not match {src} after writing it; boot menu entry not written")
+                return False
+    except OSError as e:
+        log(f"secure boot key: could not place {dst}: {e}; boot menu entry not written")
+        return False
+    return True
+
+
 # ── install ────────────────────────────────────────────────────────────────────
 
 def windows_boot_manager(boot):
@@ -651,6 +812,8 @@ def install(cfg, toplevel_arg):
         if name.startswith(TMP_PREFIX):
             os.unlink(os.path.join(rdir, name))
 
+    # Decided once per run (write_menus runs twice when making room): the certificate first, then the entry.
+    secureboot = None
     if room == "reclaim":
         # Make room without ever leaving a menu that names a missing file: list only kept generations whose files
         # are all on disk, remove everything else, then copy.
@@ -665,7 +828,8 @@ def install(cfg, toplevel_arg):
         interim = default if default in present else present[0]
         log(f"making room: menu of generation(s) {', '.join(str(g.number) for g in present)} "
             f"(default {interim.number}) while the unlisted files are removed")
-        write_menus(cfg, boot, grub2, layout, present, interim, files, grub_path, host_params, vendors)
+        secureboot = place_secureboot_key(cfg, boot, layout)
+        write_menus(cfg, boot, grub2, layout, present, interim, files, grub_path, host_params, vendors, secureboot)
         # Keep every file a KEPT generation names (some may be on disk for a generation not yet complete): exactly
         # the `reclaim` bytes space_plan counted go.
         collect_garbage(boot, rdir, layout, present, set(files.values()))
@@ -686,7 +850,9 @@ def install(cfg, toplevel_arg):
             f"{' (signed)' if pe_signed(g.kernel) else ' (no signature)'}, initrd "
             + " + ".join(files[i] for i in g.initrds(vendors))
         )
-    write_menus(cfg, boot, grub2, layout, kept, default, files, grub_path, host_params, vendors)
+    if secureboot is None:
+        secureboot = place_secureboot_key(cfg, boot, layout)
+    write_menus(cfg, boot, grub2, layout, kept, default, files, grub_path, host_params, vendors, secureboot)
     # Only now remove what nothing names any more.
     collect_garbage(boot, rdir, layout, kept, {files[p] for g in kept for p in [g.kernel] + g.initrds(vendors)})
     try:
@@ -736,8 +902,10 @@ def space_plan(gens, vendors, rdir, on_disk):
     return files, to_copy, need, reclaim
 
 
-def write_menus(cfg, boot, grub2, layout, gens, default, files, grub_path, host_params, vendors):
-    """Entries (bls), the menu file and custom.cfg's include block, each written atomically."""
+def write_menus(cfg, boot, grub2, layout, gens, default, files, grub_path, host_params, vendors, secureboot):
+    """Entries (bls), the menu file and custom.cfg's include block, each written atomically. `secureboot`: also put
+    the Secure Boot key block at the end of custom.cfg (place_secureboot_key placed the certificate); otherwise any
+    block already there is kept as it is."""
     if layout == "bls":
         edir = os.path.join(boot, "loader", "entries")
         os.makedirs(edir, exist_ok=True)
@@ -755,7 +923,7 @@ def write_menus(cfg, boot, grub2, layout, gens, default, files, grub_path, host_
         old = read_text(custom)
     except FileNotFoundError:
         old = None
-    atomic_write(custom, with_include_block(old))
+    atomic_write(custom, custom_cfg(old, secureboot))
 
 
 def collect_garbage(boot, rdir, layout, gens, referenced):

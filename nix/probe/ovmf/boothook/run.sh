@@ -5,6 +5,10 @@
 #   LAB  scratch (default /var/lab/rime-nix/scratch/boothook): TEST keys, varstores, generations, disks
 #   ART  evidence (default /var/lab/rime-nix/artifacts/boothook)
 #   run.sh [prep|gens|disks|scenarios|all] [SCENARIO...]   SCENARIO = bls-sb-mok, bls-sb-off, custom-sb-mok, custom-sb-off
+#   run.sh disks [LAYOUT...]  only these base disks (bls, custom)
+#   run.sh sbrecovery         Secure Boot recovery on the bls disk: SB on with the TEST MOK NOT enrolled, the hook's
+#                             "Enrol the Rime OS Secure Boot key" entry -> MokManager -> enrol from disk -> boots;
+#                             SB off -> no entry (drive.py SbRecovery)
 #
 # The P2 boot matrix (matrix.nix; docs/nixos/boot-matrix.md), with LAB/ART defaulting to .../bootmatrix:
 #   run.sh matrix-prep        firmware, Fedora's shim/GRUB, the TEST MOK, varstores
@@ -177,8 +181,9 @@ MATRIX_CELLS=(bls-plain bls-luks custom-plain custom-luks)
 step_gens() { LAB=$LAB WT=$WT "$HERE/gens.sh" | tee "$ART/gens.txt"; cp "$LAB/gens.json" "$ART/"; }
 
 step_disks() {
-  local l
-  for l in bls custom; do
+  local l list=("$@")
+  [[ ${#list[@]} -gt 0 ]] || list=(bls custom)
+  for l in "${list[@]}"; do
     sudo -n podman exec -e LAB="$(to_work "$LAB")" rime-nix nix shell \
       "github:NixOS/nixpkgs/$PIN#"{util-linux,dosfstools,mtools,e2fsprogs,btrfs-progs,nixos-install-tools,python3,gnused,findutils,coreutils} \
       -c bash "$(to_work "$HERE")/mkdisk.sh" "$l" > "$ART/mkdisk-$l.log" 2>&1 \
@@ -198,9 +203,16 @@ step_scenarios() {
   return "$rc"
 }
 
+step_sbrecovery() {
+  sudo -n rm -rf "${ART:?}/sbrecovery-bls"
+  [[ -f $ART/results.tsv ]] && sudo -n sed -i "/\tsbrecovery-bls\t/d" "$ART/results.tsv"
+  probe python3 -I /rig/drive.py sbrecovery bls
+}
+
 rc=0
 case "${1:-all}" in
-  prep) step_prep;; gens) step_gens;; disks) step_disks;;
+  prep) step_prep;; gens) step_gens;; disks) shift; step_disks "$@";;
+  sbrecovery) step_sbrecovery || rc=$?;;
   scenarios) shift; step_scenarios "$@" || rc=$?;;
   all) step_prep; step_gens; step_disks; step_scenarios || rc=$?;;
   matrix-prep) prep_firmware | tee "$ART/prep.txt";;
@@ -211,7 +223,7 @@ case "${1:-all}" in
   matrix-run) shift; step_matrix_run "$@" || rc=$?;;
   matrix) prep_firmware | tee "$ART/prep.txt"; step_matrix_sign; step_matrix_gens; step_matrix_disks
           step_matrix_run || rc=$?;;
-  *) echo "usage: run.sh prep|gens|disks|scenarios [SCENARIO...]|all|matrix-prep|matrix-sign|matrix-gens|matrix-disks|matrix-run|matrix" >&2; exit 2;;
+  *) echo "usage: run.sh prep|gens|disks [LAYOUT...]|scenarios|sbrecovery [SCENARIO...]|all|matrix-prep|matrix-sign|matrix-gens|matrix-disks|matrix-run|matrix" >&2; exit 2;;
 esac
 # Never into $LAB/disks: a disk being built there (another run.sh) holds a root-owned NixOS tree.
 sudo -n find "$LAB" "$ART" -path "$LAB/disks" -prune -o -exec chown "$(id -u):$(id -g)" {} +
