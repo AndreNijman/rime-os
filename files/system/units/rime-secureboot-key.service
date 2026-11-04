@@ -1,0 +1,29 @@
+[Unit]
+Description=Rime Secure Boot key entry in the boot menu
+Documentation=file:///usr/libexec/rime-secureboot-key
+# Puts Rime's Secure Boot certificate on the ESP and an "Enrol the Rime OS
+# Secure Boot key" entry in GRUB's custom.cfg, so a machine whose firmware
+# refuses the Rime kernel ("bad shim signature") can enrol the key from the
+# boot menu instead of turning Secure Boot off. Reaches every existing GRUB
+# install through an ordinary update; a fresh install gets both files from the
+# installer before its first boot. After the first run each boot costs one
+# file compare and no mounts.
+ConditionFirmware=uefi
+ConditionPathExists=/boot/grub2/grub.cfg
+ConditionPathExists=/usr/share/rime-os/secureboot/rime-mok.der
+After=local-fs.target
+# bootc writes /boot at shutdown (ostree-finalize-staged); keep clear of it.
+Before=shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-secureboot-key ensure
+# No SELinuxContext=: /usr/libexec is bin_t, which systemd runs as
+# unconfined_service_t, and that domain can write boot_t and the FAT ESP
+# (dosfs_t). The same reasoning as rime-boot-count.service.
+TimeoutStartSec=60s
+
+[Install]
+# WantedBy: a machine where this fails must still boot normally.
+WantedBy=multi-user.target

@@ -1414,6 +1414,42 @@ RUN set -eux; \
         /usr/lib/systemd/system/rime-boot-count.service \
         /usr/lib/systemd/system/systemd-bless-boot.service.d/10-rime-bless-boot-esp.conf
 
+# ── the way back when Secure Boot refuses the Rime kernel ───────────────────
+#
+# With Secure Boot on and the Rime key not enrolled (enrolment skipped in the
+# installer, or MokManager's 10-second prompt missed, which deletes the
+# request), GRUB stops at "bad shim signature" on every boot. This puts the
+# certificate on the ESP and an "Enrol the Rime OS Secure Boot key" entry in
+# /boot/grub2/custom.cfg, which chainloads Fedora-signed MokManager so the key
+# can be enrolled from disk. It runs on every boot (a no-op after the first)
+# so machines installed before it existed get it through an update. The
+# installer runs this same file out of the new deployment before first boot.
+COPY files/system/libexec/rime-secureboot-key /usr/libexec/rime-secureboot-key
+COPY files/system/units/rime-secureboot-key.service \
+     /usr/lib/systemd/system/rime-secureboot-key.service
+RUN set -eux; \
+    chmod 0755 /usr/libexec/rime-secureboot-key; \
+    bash -n /usr/libexec/rime-secureboot-key; \
+    : 'The entry chainloads MokManager from the ESP. bootupd copies it there'; \
+    : 'from the shim package on every install; if a shim update ever stops'; \
+    : 'shipping it, the entry would point at nothing.'; \
+    ls /usr/lib/efi/shim/*/EFI/fedora/mmx64.efi; \
+    : 'and the custom.cfg hook the entry relies on: bootupd static grub.cfg'; \
+    : 'sources $prefix/custom.cfg from configs.d/41_custom.cfg.'; \
+    grep -q 'source $prefix/custom.cfg' /usr/lib/bootupd/grub2-static/configs.d/*custom*.cfg; \
+    /usr/libexec/rime-secureboot-key block > /tmp/rime-sbk.cfg; \
+    grep -q -- "--id rime-enrol-key" /tmp/rime-sbk.cfg; \
+    grep -q 'chainloader ($rime_esp)/EFI/fedora/mmx64.efi' /tmp/rime-sbk.cfg; \
+    grep -q 'search --no-floppy --file --set=rime_esp /EFI/rime/rime-mok.der' /tmp/rime-sbk.cfg; \
+    rm -f /tmp/rime-sbk.cfg; \
+    systemctl enable rime-secureboot-key.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/rime-secureboot-key.service; \
+    : 'It must never write NVRAM or run a loader installer: matched on the'; \
+    : 'executable lines only, so the comments that name them do not count.'; \
+    ! grep -nE '^[^#]*\b(mokutil|efibootmgr|bootctl[[:space:]]+(install|update)|bootupctl|grub2-install|grub2-mkconfig)' \
+        /usr/libexec/rime-secureboot-key \
+        /usr/lib/systemd/system/rime-secureboot-key.service
+
 # ── §22: the in-place move to systemd-boot ──────────────────────────────────
 #
 # rime-boot-migrate is what `rime update` runs on a GRUB machine. It converts

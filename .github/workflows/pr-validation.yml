@@ -825,6 +825,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-boot-v2.sh
 
+      # The boot-menu way back when Secure Boot refuses the Rime kernel: the
+      # GRUB block, custom.cfg kept around the installer's Windows entry, the
+      # ESP chosen by bootuuid.cfg and never guessed, and the machines it must
+      # leave alone. Unprivileged (fake root, stubbed mount). The VM half with
+      # a real shim and MokManager is installer/test-installer-sb-recovery.sh.
+      - name: Secure Boot key entry in the boot menu
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-secureboot-key.sh
+
       # The in-place migration to systemd-boot. In `static` rather than `rust`
       # because what it guards is mostly a shell engine, a unit and a
       # Containerfile block, and the `rust` job's path filter would skip a PR
