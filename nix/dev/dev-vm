@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# dev-vm from the host (docs/nixos/dev-vm.md). The host has no Nix and no QEMU, so this runs the flake app
+# (nix/dev/dev-vm.sh) in the rime-nix container, from the checkout this file is in. Paths given to --flake, --shell
+# and `screenshot` are host paths: they are turned into the container's /work paths (only the lab directory is
+# shared with the container).
+set -euo pipefail
+LAB=${RIME_LAB:-/var/lab/rime-nix}
+CONTAINER=${RIME_NIX_CONTAINER:-rime-nix}
+
+die() { echo "dev-vm: $*" >&2; exit 1; }
+to_work() { # host path -> container path
+  local p=$1
+  case "$p" in /*) ;; *) p=$PWD/$p ;; esac
+  case "$p/" in "$LAB"/*) echo "/work${p#"$LAB"}" ;; *) die "$1 is not under $LAB, which is all the container sees" ;; esac
+}
+
+tree=$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)
+work=$(to_work "$tree")
+
+args=()
+prev=""
+for a in "$@"; do
+  case "$prev" in
+    --flake|--shell) if [ "$a" = locked ]; then args+=("$a"); else args+=("$(to_work "$a")"); fi ;;
+    screenshot) args+=("$(to_work "$a")") ;;
+    *) args+=("$a") ;;
+  esac
+  # only the first word after `screenshot` is its FILE
+  if [ "$prev" = screenshot ]; then prev=""; else prev=$a; fi
+done
+
+envs=()
+while IFS='=' read -r k _; do
+  case "$k" in RIME_DEVVM_*|NIX_BUILD_FLAGS) envs+=(-e "$k") ;; esac
+done < <(env)
+
+tty=(-i)
+if [ -t 0 ] && [ -t 1 ]; then tty=(-it); fi
+exec sudo -n podman exec "${tty[@]}" "${envs[@]}" -w "$work" "$CONTAINER" nix run "path:.#dev-vm" -- "${args[@]}"

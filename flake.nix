@@ -23,6 +23,8 @@
         # Same as nix/modules/base.nix: Rime ships NVIDIA, Steam and other unfree packages.
         config.allowUnfree = true;
       };
+
+      devVm = import ./nix/dev { inherit pkgs self; };
     in
     {
       # Every Rime package lives under pkgs.rime.* (nix/pkgs/default.nix). Modules use pkgs.rime.<name>, so
@@ -76,9 +78,21 @@
         ];
       };
 
+      # The persistent development VM (nix/dev, docs/nixos/dev-vm.md): `nix run path:.#dev-vm -- start` in the rime-nix
+      # container, or nix/dev/dev-vm on the host. The systems it boots are legacyPackages, so CI's per-output
+      # evaluation (nix/ci/eval-each.sh: checks and packages) does not evaluate four more full systems.
+      apps.${system}.dev-vm = {
+        type = "app";
+        program = "${devVm.app}/bin/dev-vm";
+        meta.description = "A persistent Rime NixOS VM for development: start, rebuild, ssh, screenshot, stop";
+      };
+      legacyPackages.${system}.dev-vm = devVm.vms;
+
       checks.${system} =
         import ./nix/tests { pkgs = import ./nix/tests/lib/test-pkgs.nix pkgs; inherit self; }
         // {
+          # No VM: the dev-vm app's shellcheck, its refusals (+ a mutant) and that the hyprland dev VM evaluates.
+          dev-vm = devVm.check;
           # Cheap: proves the rime-vm system evaluates without building or downloading it.
           eval = pkgs.runCommand "rime-vm-eval" { } ''
             echo ${builtins.unsafeDiscardStringContext self.nixosConfigurations.rime-vm.config.system.build.toplevel.drvPath} > $out
