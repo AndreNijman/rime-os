@@ -1,7 +1,8 @@
 # The bridge (nix/pkgs/rime-bridge, `rime migrate`; PLAN.md D1-D3, docs/nixos/p2-gates.md D1-D6, X1, X3, H9):
 #
 #   bridge-unit      the package's unit tests (classifier A-F, every named refusal, the NVRAM parser, the
-#                    forbidden-tool scan) and the hostlayer's [boot] table, then MUTANTS: each one breaks one rule
+#                    forbidden-tool scan, `rime migrate finish` on a fixture machine) and the hostlayer's [boot]
+#                    table, then MUTANTS: each one breaks one rule
 #                    in a copy of the program and the suite must fail (a check that passes them proves nothing).
 #   bridge-refusals  a NixOS VM with crafted bootc-shaped disks, one per case: B, C, D and F are refused by name,
 #                    an A without the renamed signer refuses [renamed-signer] (X3), an A whose data space is below
@@ -94,6 +95,48 @@ let
     [ "hostlayer-microcode-dropped" "rime-hostlayer.py" ''s/            boot\["microcode"\] = self.microcode/            pass/'' "carry drops the CPU vendor: a bridged machine loads both vendors' microcode" ]
     [ "hostlayer-microcode-swapped" "rime-hostlayer.py" ''s/"GenuineIntel": "intel", "AuthenticAMD": "amd"/"GenuineIntel": "amd", "AuthenticAMD": "intel"/'' "the vendors swapped: an Intel machine gets only AMD microcode" ]
   ];
+  # `rime migrate finish` (rime-migrate-finish.py): each mutant breaks one precondition or one property of --yes.
+  finishMutants = [
+    [ "booted-ostree-unchecked" "rime-migrate-finish.py" ''s/    if os.path.exists(sx.ostree_booted) or re.search(r"(^|\\s)ostree=", cmdline):/    if False:/'' "finish runs on the old (ostree) system" ]
+    [ "home-subvol-unchecked" "rime-migrate-finish.py" ''s/home\["root"\] != "\/@home"/False/'' "finish runs with /var/home not from @home" ]
+    [ "deletes-home" "rime-migrate-finish.py" ''s/^OLD_TOP = ("@pre-nixos", "ostree")/OLD_TOP = ("@pre-nixos", "ostree", "@home")/'' "@home on the delete list (the keep guard must stop it)" ]
+    [ "keep-guard-dropped" "rime-migrate-finish.py" ''s/    if not parts or parts\[0\] in KEEP_TOP or ".." in parts:/    if False:/'' "nothing stops a kept tree being deleted" ]
+    [ "entries-left" "rime-migrate-finish.py" ''s/^            os.unlink(f)$/            pass/'' "the GRUB ostree entries left behind (caught at the end, not recorded done)" ]
+    [ "rerun-refused" "rime-migrate-finish.py" ''s/    if fin.get("done") is not None:/    if fin:/'' "an interrupted finish can never be completed" ]
+    [ "move-aside-not-idempotent" "rime-migrate-finish.py" ''s/            if os.path.lexists(src):/            if True:/'' "a re-run after the move aside fails" ]
+    [ "second-run-allowed" "rime-migrate-finish.py" ''s/    if fin.get("done") is not None:/    if False:/'' "a finished machine runs finish again" ]
+    [ "good-boots-ignored" "rime-migrate-finish.py" ''s/    if len(boots) < GOOD_BOOTS:/    if False:/'' "finish before NixOS has booted three times" ]
+    [ "in-use-ignored" "rime-migrate-finish.py" ''s/    if users:/    if False:/'' "finish deletes files a process has open" ]
+    [ "mounted-ignored" "rime-migrate-finish.py" ''s/    if mounted:/    if False:/'' "finish deletes a mounted old side" ]
+    [ "stats-ignored" "rime-migrate-finish.py" ''s/    elif stats:/    elif False:/'' "finish deletes on a filesystem that reports errors" ]
+    [ "containment-dropped" "rime-migrate-finish.py" ''s/        if diff:/        if False:/'' "a change to custom.cfg, /boot/rime, an ESP or a kept subvolume not seen" ]
+    [ "record-not-saved" "rime-migrate-finish.py" ''s/^    if not os.path.exists(os.path.join(sx.state, "start-record.json")):/    if False:/'' "the start record deleted with ostree/: an interrupted run cannot resume" ]
+    [ "nested-shallow-first" "rime-migrate-finish.py" ''s/key=lambda s: (-s.count("\/"), s))/key=lambda s: (s.count("\/"), s))/'' "a nested subvolume deleted before the ones inside it" ]
+    [ "dry-run-writable" "rime-migrate-finish.py" ''s/writable=a.yes/writable=True/'' "the dry run mounts the top level read-write" ]
+    [ "menu-unchecked" "rime-migrate-finish.py" ''s/    if not n:/    if False:/'' "the ostree entries removed with no NixOS menu to boot" ]
+    [ "menu-top-level-only" "rime-migrate-finish.py" ''s|for p in ("/boot/rime/", "/rime/")|for p in ("/boot/rime/",)|'' "a machine with a /boot partition (the encrypted layout) refused for a menu it has" ]
+    [ "record-done-ignored" "rime-migrate-finish.py" ''s/    if r is None or r\[0\] != "already-moved":/    if False:/'' "finish over a start that did not finish" ]
+  ];
+  runFinishMutant = m:
+    let
+      name = builtins.elemAt m 0;
+      expr = builtins.elemAt m 2;
+      why = builtins.elemAt m 3;
+    in
+    ''
+      # finish loads the bridge beside it: each mutant gets a directory with both.
+      mkdir fm-${name}
+      sed "1s|^#!.*|#!$(command -v python3) -I|" ${src}/rime-bridge.py > fm-${name}/rime-migrate
+      sed "1s|^#!.*|#!$(command -v python3) -I|" ${src}/rime-migrate-finish.py > fm-${name}/base
+      cp fm-${name}/base fm-${name}/rime-migrate-finish
+      sed -i ${lib.escapeShellArg expr} fm-${name}/rime-migrate-finish
+      if cmp -s fm-${name}/base fm-${name}/rime-migrate-finish; then echo "mutant ${name}: sed changed nothing"; exit 1; fi
+      if RIME_MIGRATE_FINISH=$PWD/fm-${name}/rime-migrate-finish python3 -I -B -m unittest discover -s ${src}/tests \
+          -p 'test_finish*.py' > fm-${name}.log 2>&1; then
+        echo "mutant ${name} SURVIVED (${why})"; cat fm-${name}.log; exit 1
+      fi
+      echo "mutant ${name} killed (${why}): $(grep -cE '^(FAIL|ERROR):' fm-${name}.log) failing tests"
+    '';
   # The rime.rootfs /boot generator (nix/modules/rootfs/boot-generator.py) and its mutants.
   genSrc = ../modules/rootfs/boot-generator.py;
   genMutants = [
@@ -222,7 +265,7 @@ in
 {
   bridge-unit = pkgs.runCommand "rime-bridge-unit" { nativeBuildInputs = [ pkgs.python3 pkgs.openssl ]; } ''
     set -euo pipefail
-    RIME_MIGRATE=${bridge}/bin/rime-migrate python3 -I -W error::ResourceWarning \
+    RIME_MIGRATE=${bridge}/bin/rime-migrate RIME_MIGRATE_FINISH=${bridge}/bin/rime-migrate-finish python3 -I -B -W error::ResourceWarning \
       -m unittest discover -v -s ${src}/tests -p 'test_*.py' 2>&1 | tail -n 5
     ${lib.concatMapStrings (runMutant src "${src}/tests" "RIME_MIGRATE") mutants}
     # The hostlayer suite unmutated first: its mutants count only if it is green here.
@@ -232,6 +275,7 @@ in
     tail -n 3 hostlayer.log
     ${lib.concatMapStrings (runMutant ../pkgs/rime-hostlayer "${../pkgs/rime-hostlayer}/tests" "RIME_HOSTLAYER")
       hlMutants}
+    ${lib.concatMapStrings runFinishMutant finishMutants}
 
     # The payload signature end to end with OpenSSL, in the readiness release's format: payload-sign.sh (the
     # release's signer) signs with a Nix-format secret key; the signature verifies with OpenSSL (pkeyutl -verify
@@ -274,7 +318,7 @@ in
     fi
     grep 'does not belong' bad.err >/dev/null && echo "payload-sign.sh: a mismatched secret refused"
 
-    echo "bridge-unit: suite green, ${toString (builtins.length mutants + builtins.length hlMutants)} mutants killed" | tee $out
+    echo "bridge-unit: suite green, ${toString (builtins.length mutants + builtins.length hlMutants + builtins.length finishMutants)} mutants killed" | tee $out
   '';
 
   # rime.rootfs: the /boot generator against host.toml fixtures (+ mutants), and the option set evaluated both ways
