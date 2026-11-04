@@ -2522,6 +2522,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-plymouth-keyboard.sh
 
+      # gnome-keyring-daemon aborted when a property read raced the creation of
+      # the caller's client; the image ships Fedora's gnome-keyring rebuilt with
+      # the fix. Static: the patch, the one build recipe, and the base build's
+      # guards (pinned Fedora build, local packages only, Rime's build with the
+      # fix compiled in). The real-daemon race runs in the keyring job.
+      - name: Run keyring property-read fix assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-keyring-property-read.sh
+
       - name: Run input-settings assertions
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-input.sh
@@ -3369,6 +3378,54 @@ jobs:
           fi
           grep -qE '^keyring-session-start: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \
             || { echo "::error::keyring-session-start (oo7) must pass with nothing skipped"; exit 1; }
+
+      # The login keyring survives apps reading it. On Fedora 45, as a normal
+      # user, a real gnome-keyring-daemon on a private bus: the packages are
+      # built by the SAME recipe Containerfile.base runs (build-rpms.sh, at the
+      # NVR and sha256 pinned there). First the mutant: Fedora's stock daemon
+      # must die under the reads (stops at the first death; locally 9 of 10
+      # died within 5,000 reads). Then the rebuilt pair is installed and 10
+      # daemons x 5,000 reads must all survive, every read answered.
+      # exit 97 = dnf could not install the test's packages: a WARNING that the
+      # race did not run, as above. Anything else that fails is red, the build
+      # of the patched packages included.
+      - name: Run keyring property-read race (Fedora 45, stock vs rebuilt)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          rc=0
+          nvr="$(sed -n 's/^ARG GNOME_KEYRING_NVR=//p' Containerfile.base)"
+          sha="$(sed -n 's/^ARG GNOME_KEYRING_SRPM_SHA256=//p' Containerfile.base)"
+          out="$(docker run --rm -e NVR="$nvr" -e SHA="$sha" -v "$PWD":/w:ro -w /w fedora:45 bash -c '
+                dnf -y install --setopt=install_weak_deps=False --setopt=retries=5 \
+                    gnome-keyring dbus-daemon systemd procps-ng util-linux shadow-utils \
+                    rpm-build "dnf5-command(builddep)" curl \
+                    >/dev/null 2>&1 || exit 97
+                useradd -m rimetest || exit 98
+                echo "stock: $(rpm -q gnome-keyring)"
+                runuser -u rimetest -- env RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=die \
+                    ./tests/test-rime-keyring-property-read.sh > /tmp/stock.out 2>&1
+                cat /tmp/stock.out
+                grep -qE "^keyring-property-read: [0-9]+ passed, 0 failed, 0 skipped$" /tmp/stock.out || exit 95
+                files/system/src/gnome-keyring/build-rpms.sh "$NVR" "$SHA" /tmp/rime-gk || exit 94
+                dnf -y --nogpgcheck --disable-repo="*" install /tmp/rime-gk/*.rpm >/dev/null || exit 93
+                echo "rebuilt: $(rpm -q gnome-keyring gnome-keyring-pam | paste -sd " ")"
+                runuser -u rimetest -- env RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=survive \
+                    ./tests/test-rime-keyring-property-read.sh' 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          case "$rc" in
+              97) echo "::warning::could not install the race's packages in the container; the keyring property-read race did not run"; exit 0 ;;
+              98) echo "::error::could not create the throwaway user in the container"; exit 1 ;;
+              95) echo "::error::the STOCK gnome-keyring survived the reads: the race is not being measured (or Fedora fixed it: check, then drop the fix)"; exit 1 ;;
+              94) echo "::error::build-rpms.sh could not build the patched gnome-keyring"; exit 1 ;;
+              93) echo "::error::could not install the rebuilt gnome-keyring"; exit 1 ;;
+              0) ;;
+              *) echo "::error::the keyring property-read race exited $rc"; exit 1 ;;
+          esac
+          # Only the rebuilt run's summary counts: the stock run printed one too.
+          sed -n '/^rebuilt: /,$p' <<<"$out" \
+            | grep -E '^keyring-property-read: [0-9]+ passed, 0 failed, 0 skipped$' >/dev/null \
+            || { echo "::error::keyring-property-read (rebuilt) must pass with nothing skipped"; exit 1; }
 
       # rime-secrets-start's choices that one machine cannot show with real
       # daemons: the configured provider, the fallback, the systemd and direct
@@ -4739,6 +4796,8 @@ jobs:
             files/system/libexec/rime-shell-autostart \
             tests/test-rime-fstrim.sh files/system/libexec/rime-fstrim \
             tests/test-rime-plymouth-keyboard.sh \
+            tests/test-rime-keyring-property-read.sh \
+            files/system/src/gnome-keyring/build-rpms.sh \
             files/system/libexec/rime-secrets-start \
             tests/test-rime-secrets-start.sh tests/test-rime-secrets-guard.sh \
             tests/test-rime-keyring-session-start.sh \
