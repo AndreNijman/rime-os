@@ -750,8 +750,8 @@ BOOTC_AWK = r'''
         for (i = 1; i <= n; i++) print lines[i]
         if (n > 0) print ""
       }'''
-# sha256 of `rime-secureboot-key block` at rime-os e2c58aa19c (PR #145): the block text, byte for byte.
-BOOTC_BLOCK_SHA256 = "3c4271196ec96db34bc9f33518479c6276cdd37e1560913c53c5e3ecdcdd9068"
+# sha256 of `rime-secureboot-key block` at rime-os 5861e11f (PR #147): the block text, byte for byte.
+BOOTC_BLOCK_SHA256 = "383086ae74dbd3f849058a976e3f865476c03cd5f3af02c65835fb2cce587f89"
 FAKE_DER = b"\x30\x82\x01\x0a" + bytes(range(256))  # DER SEQUENCE header; the hook only checks the first byte
 
 
