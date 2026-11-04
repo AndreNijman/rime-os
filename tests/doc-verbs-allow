@@ -56,3 +56,11 @@ rime migrate check
 rime migrate repair-e
 rime migrate key-export
 rime migrate start
+
+# docs/nixos-move.md names the step that gives back the space the old system
+# keeps after a move. `rime migrate finish` runs on Rime OS on NixOS (the system
+# a move installs), not on this image: here `rime migrate` hands every verb to
+# rime-migrate, which has none by that name, so no parse check of this image's
+# `rime` can prove it. It is proved on the NixOS side (nix/pkgs/rime-bridge,
+# rime-migrate-finish).
+rime migrate finish

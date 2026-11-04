@@ -92,7 +92,7 @@ block() {
   cat <<'EOF'
 ### BEGIN rime-secureboot-key ###
 # Rime OS: enrol Rime's Secure Boot key from this menu when Rime OS does not
-# start ("bad shim signature"). Written by /usr/libexec/rime-secureboot-key,
+# start ("bad shim signature"). Written by Rime OS (rime-secureboot-key),
 # which replaces this block as a whole: edits inside it are lost.
 if [ "$grub_platform" = "efi" ]; then
   if [ "$shim_lock" = "y" ]; then
@@ -107,7 +107,9 @@ if [ "$grub_platform" = "efi" ]; then
         echo "A blue key manager opens next. On it:"
         echo "  1. When it says \"Press any key\", press a key within 10 seconds."
         echo "  2. Choose \"Enroll key from disk\"."
-        echo "  3. Choose EFI-SYSTEM (or RIMEESP), then EFI, rime, rime-mok.der."
+        echo "  3. Choose the EFI partition (EFI-SYSTEM, RIME-ESP or RIMEESP; on an"
+        echo "     older install it can have another name), then EFI, rime,"
+        echo "     rime-mok.der."
         echo "  4. Choose \"Continue\", then \"Yes\"."
         echo "  5. Choose \"Reboot\". Rime OS then starts."
         echo "If you miss a step you come back to this menu. Choose this again."
