@@ -56,3 +56,10 @@ rime migrate check
 rime migrate repair-e
 rime migrate key-export
 rime migrate start
+
+# docs/nixos-move.md names the step that gives back the space the old system
+# keeps after a move: "a step (`rime migrate finish`) that is planned and not in
+# this release". It is the NixOS plan's reclaim step (PLAN.md D2), named so a
+# user knows the space is not gone for good. It leaves this file the day the
+# verb ships.
+rime migrate finish
