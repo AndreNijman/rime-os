@@ -4,9 +4,11 @@
 #                    forbidden-tool scan) and the hostlayer's [boot] table, then MUTANTS: each one breaks one rule
 #                    in a copy of the program and the suite must fail (a check that passes them proves nothing).
 #   bridge-refusals  a NixOS VM with crafted bootc-shaped disks, one per case: B, C, D and F are refused by name,
-#                    an A without the renamed signer refuses [renamed-signer] (X3), an A whose free space is below
-#                    floor + home + old store refuses [free-space] (H9), and a complete A is accepted. Every disk's
-#                    sha256 is the same after `rime migrate check --disk` as before (check writes nothing).
+#                    an A without the renamed signer refuses [renamed-signer] (X3), an A whose data space is below
+#                    floor + old store refuses [free-space] (H9), an A whose metadata space cannot hold home's copied
+#                    metadata refuses [metadata-space] (H9), and a complete A is accepted. Every disk's sha256 is the
+#                    same after `rime migrate check --disk` as before (check writes nothing). H9's metadata estimate
+#                    is then held against a REAL `cp -a --reflink=always` of a home of 40,000 small files.
 #
 # The end-to-end proof (a disk made from the published image, check + repair-e + start in an OVMF guest, NixOS boots
 # with the old password and home, the ostree entry still boots) needs the published image and Fedora's firmware
@@ -22,8 +24,16 @@ let
   mutants = [
     [ "no-phase-failed" "rime-bridge.py" ''s/if mig.get("phase") == "failed":/if False:/'' "E (phase=failed) is classified as its base" ]
     [ "no-signer-check" "rime-bridge.py" ''s/if not (facts.get("signer") or {}).get("renamed_known"):/if False:/'' "X3 refusal gone" ]
-    [ "free-space-flipped" "rime-bridge.py" ''s/and free < need:/and free > need:/'' "H9 comparison inverted" ]
-    [ "floor-dropped" "rime-bridge.py" ''s/return FLOOR_BYTES + int(/return 0 + int(/'' "A11 floor not counted" ]
+    [ "free-space-flipped" "rime-bridge.py" ''s/    p\["data_ok"\] = not data_need > data_avail/    p["data_ok"] = not data_need < data_avail/'' "H9 data comparison inverted" ]
+    [ "floor-dropped" "rime-bridge.py" ''s/    data_need = FLOOR_BYTES + store/    data_need = 0 + store/'' "A11 floor not counted" ]
+    # bridge-space: H9 models what start consumes (data: floor + old store; metadata: home's, copied by the reflink).
+    [ "metadata-gate-dropped" "rime-bridge.py" ''s/        if not plan\["meta_ok"\]:/        if False:/'' "H9: a disk that cannot hold home's copied metadata accepted" ]
+    [ "metadata-ratio-ignored" "rime-bridge.py" ''s/    meta_ratio = float(u\["meta_ratio"\])/    meta_ratio = 1.0/'' "H9: DUP metadata counted once" ]
+    [ "home-as-data" "rime-bridge.py" ''s/    data_need = FLOOR_BYTES + store/    data_need = FLOOR_BYTES + store + hbytes/'' "H9: home charged as data again (the L16 refused)" ]
+    [ "global-reserve-dropped" "rime-bridge.py" ''s/    reserve = int(u\["global_reserve"\])/    reserve = 0/'' "H9: the kernel's global reserve counted as free metadata" ]
+    [ "share-uncapped" "rime-bridge.py" ''s/(min(1.0, hbytes \/ used) if used/((hbytes \/ used) if used/'' "H9: home's metadata share above all metadata (du counts uncompressed bytes)" ]
+    [ "per-name-dropped" "rime-bridge.py" ''s/    home_meta = max(share, per_name)/    home_meta = share/'' "H9: a home of small files on a disk of large ones underestimated" ]
+    [ "unallocated-twice" "rime-bridge.py" ''s/max(0, unalloc - data_draw_raw)/unalloc/'' "H9: unallocated space given to data and metadata both" ]
     [ "accept-B" "rime-bridge.py" ''s/^ACCEPTED = ("A", "E")/ACCEPTED = ("A", "B", "E")/'' "topology B bridged" ]
     [ "chain-no-configfile" "rime-bridge.py" ''s/    if not missing\["bootupd-static"\]:/    if True:/'' "D3 chain check gone (any grub.cfg read as bootupd's)" ]
     [ "chain-target-unchecked" "rime-bridge.py" ''s/    if target != (boot.get("uuid") or "").lower():/    if False:/'' "D3: a grub.cfg that reads another filesystem trusted" ]
@@ -176,6 +186,20 @@ device = "UUID=x y"
     }
   '';
 
+  # N small files under DIR, 100 per directory, 1-3000 bytes each (seeded): what a home of dotfiles and sources looks
+  # like to btrfs (under one sector: inline, in the metadata tree).
+  smallFiles = pkgs.writeText "small-files.py" ''
+    import os, random, sys
+    d, n = sys.argv[1], int(sys.argv[2])
+    rnd = random.Random(9)
+    for i in range(n):
+        sub = os.path.join(d, f"d{i // 100:04d}")
+        if i % 100 == 0:
+            os.makedirs(sub, exist_ok=True)
+        with open(os.path.join(sub, f"file-{i:06d}.txt"), "wb") as f:
+            f.write(rnd.randbytes(rnd.randint(1, 3000)))
+  '';
+
   runMutant = dir: tests: env: m:
     let
       name = builtins.elemAt m 0;
@@ -308,9 +332,11 @@ in
       virtualisation.emptyDiskImages = map (c: {
         size = 1024;
         driveConfig.deviceExtraOpts.serial = c;
-      }) [ "caseA" "caseB" "caseC" "caseD" "caseF" "caseX3" "caseH9" "caseL" "caseU" ];
+      }) [ "caseA" "caseB" "caseC" "caseD" "caseF" "caseX3" "caseH9" "caseL" "caseU" "caseM" ]
+      # H9's metadata estimate against a real reflink copy: a disk big enough for a home of 40,000 small files
+      ++ [ { size = 4096; driveConfig.deviceExtraOpts.serial = "caseR"; } ];
       environment.systemPackages = [ bridge pkgs.dosfstools pkgs.btrfs-progs pkgs.gptfdisk pkgs.util-linux
-        pkgs.cryptsetup pkgs.e2fsprogs ];
+        pkgs.cryptsetup pkgs.e2fsprogs pkgs.python3 ];
       boot.kernelModules = [ "dm_crypt" ];
     };
 
@@ -320,7 +346,7 @@ in
       DEP = "ostree/deploy/default/deploy/" + "ab" * 32 + ".0"
 
       def mk(case, esp_dirs, signer=True, phase=None, composefs=False, home_mb=1, store_mb=1, windows=False,
-             luks=False, grub_cfg="${bootupdStatic}"):
+             luks=False, grub_cfg="${bootupdStatic}", home_small=0, fill=False):
           d = f"/dev/disk/by-id/virtio-{case}"
           if luks:
               # The installer's LUKS layout (installer/rime-install): ESP, ext4 /boot (label rime-boot), LUKS2 root.
@@ -353,6 +379,16 @@ in
                               f" > /mnt/r/{DEP}/usr/bin/rime")
               machine.succeed(f"head -c {store_mb}M /dev/urandom > /mnt/r/ostree/repo/objects/blob")
           machine.succeed(f"head -c {home_mb}M /dev/urandom > {root}/var/home/alex/blob")
+          if home_small:
+              # a home of many small files (dotfiles, sources, caches): 100 per directory, 1-3000 bytes, seeded
+              machine.succeed(f"python3 ${smallFiles} {root}/var/home/alex/src {home_small}")
+          if fill:
+              # the rest of the disk taken by data outside home and the store, then every other 8 MiB file deleted:
+              # free space left INSIDE data chunks (they stay allocated), nothing unallocated for new metadata
+              machine.succeed("mkdir -p /mnt/r/fill && i=0; while dd if=/dev/zero of=/mnt/r/fill/$i bs=1M count=8"
+                              " status=none 2>/dev/null; do i=$((i+1)); done; rm -f /mnt/r/fill/$i; sync"
+                              " && for f in /mnt/r/fill/*[02468]; do rm -f $f; done; sync"
+                              " && btrfs filesystem sync /mnt/r")
           if phase:
               machine.succeed(f"mkdir -p {root}/var/lib/rime/boot-migrate && echo {phase} > {root}/var/lib/rime/boot-migrate/phase")
           b = "/mnt/b" if luks else "/mnt/r/boot"
@@ -397,9 +433,53 @@ in
       with subtest("X3: an A that never took the renamed-signer release"):
           check("X3", mk("caseX3", ["fedora"], signer=False), 3, ["topology: A", "REFUSED [renamed-signer]"], FLOOR)
 
-      with subtest("H9: free space below floor + home + old store"):
-          check("H9", mk("caseH9", ["fedora"], home_mb=300, store_mb=300), 3, ["topology: A", "REFUSED [free-space]"],
-                FLOOR)
+      with subtest("H9: data space below floor + old store (home is not charged: it is a reflink copy)"):
+          check("H9", mk("caseH9", ["fedora"], home_mb=300, store_mb=300), 3,
+                ["topology: A", "REFUSED [free-space] data:", "floor 0.3 + old store 0.3",
+                 "home is a reflink copy: no data at start"], FLOOR)
+
+      with subtest("H9: home's copied metadata does not fit (metadata chunks + unallocated) and is refused by name"):
+          check("M", mk("caseM", ["fedora"], home_small=60000, fill=True), 3,
+                ["topology: A", "REFUSED [metadata-space] metadata:", "global reserve"], 50 * 1000**2)
+          # The copy the gate refused, really run (the disk is a throwaway): printed, not asserted. The gate is meant
+          # to refuse before this point, with a margin; ENOSPC here says the refusal was needed, success that the
+          # margin was not all used.
+          d = "/dev/disk/by-id/virtio-caseM"
+          machine.succeed(f"mount {d}-part2 /mnt/r && btrfs subvolume create /mnt/r/@home")
+          rc, out = machine.execute("cp -a --reflink=always --one-file-system /mnt/r/ostree/deploy/default/var/home/."
+                                    " /mnt/r/@home 2>&1 | tail -n 3; sync; btrfs filesystem usage -b /mnt/r")
+          print(f"M: the refused copy, run anyway: rc={rc}\n{out}")
+          machine.succeed("umount /mnt/r")
+
+      with subtest("H9: the metadata estimate against a REAL reflink copy (start's snapshot + cp)"):
+          import json as _json, re
+          d = mk("caseR", ["fedora"], store_mb=1500, home_small=40000)
+          j = _json.loads(machine.succeed(f"RIME_MIGRATE_FLOOR_BYTES={FLOOR} rime-migrate check --json --disk {d}"))
+          sp = j["space"]
+          assert sp["data_ok"] and sp["meta_ok"], sp
+          def used(path):
+              t = machine.succeed(f"btrfs filesystem sync {path} && btrfs filesystem usage -b {path}")
+              found = {}
+              for m in re.finditer(r"^(Data|Metadata),[^:]*:\s*Size:\d+,\s*Used:(\d+)", t, re.M):
+                  found[m.group(1)] = int(m.group(2))
+              assert set(found) == {"Data", "Metadata"}, t
+              return found["Data"], found["Metadata"]
+          machine.succeed(f"mount {d}-part2 /mnt/r")
+          d0, m0 = used("/mnt/r")
+          machine.succeed("btrfs subvolume snapshot -r /mnt/r /mnt/r/@pre-nixos && btrfs subvolume create /mnt/r/@home")
+          d1, m1 = used("/mnt/r")
+          machine.succeed("cp -a --reflink=always --one-file-system /mnt/r/ostree/deploy/default/var/home/. /mnt/r/@home")
+          d2, m2 = used("/mnt/r")
+          machine.succeed("umount /mnt/r")
+          copied = m2 - m0
+          print(f"R: home {sp['home']} B, {sp['entries']} names, {sp['small_bytes']} B under 4 KiB; estimate: share "
+                f"{sp['share']}, per name {sp['per_name']}, home_meta {sp['home_meta']}, need {sp['meta_need']} "
+                f"(logical, before x ratio {sp['meta_ratio']})")
+          print(f"R: measured: snapshot + subvolume metadata {m1 - m0} B, data {d1 - d0} B; after the copy metadata "
+                f"+{copied} B ({copied / max(1, sp['entries']):.0f} B per name), data +{d2 - d0} B; estimate / measured "
+                f"= {sp['home_meta'] / max(1, copied):.2f} (before the {sp['margin']} margin)")
+          assert copied <= sp["home_meta"], f"the reflink copy took {copied} B of metadata, the estimate is {sp['home_meta']}"
+          assert d2 - d0 <= sp["home"] // 20 + 64 * 1024**2, f"the reflink copy took {d2 - d0} B of DATA"
 
       with subtest("D2: LUKS-A (the installer's encrypted layout, /boot on ext4) is bridged, the volume open"):
           check("L", mk("caseL", ["fedora"], luks=True), 0,
