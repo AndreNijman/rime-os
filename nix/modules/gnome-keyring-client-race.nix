@@ -17,11 +17,13 @@
 #     of the two idles no longer matters; the filter's own idle then finds it and does nothing;
 #   - the object lookup behind the collection and item property getters sets a D-Bus error when it has no
 #     session, so a getter that fails answers the caller with an error instead of aborting the daemon.
-# A carried patch, nothing sent upstream.
-{ config, lib, pkgs, ... }:
+# A carried patch, nothing sent upstream. Unconditional: gnome-keyring reaches a system through desktop.nix, nixpkgs'
+# GNOME/KDE modules and direct store paths (rime-secrets-start), and none of them may get the unpatched daemon. A
+# system that never uses gnome-keyring builds nothing more.
+{ pkgs, ... }:
 
 {
-  config = lib.mkIf config.services.gnome.gnome-keyring.enable {
+  config = {
     nixpkgs.overlays = [
       (_final: prev: {
         gnome-keyring = prev.gnome-keyring.overrideAttrs (o: {
