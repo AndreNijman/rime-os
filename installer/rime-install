@@ -3360,9 +3360,10 @@ kstate="${SB_KSTATE:-unknown}"
 # that the user is already sitting in front of the machine.
 sb_menu=0
 [ -e "$SB_KEY_FLAG" ] && sb_menu=1
-SB_MENU_STEPS="  Choose \"Enrol the Rime OS Secure Boot key\" in the boot menu, then on
-  the blue screen: Enroll key from disk → the disk → EFI → rime →
-  rime-mok.der → Continue → Yes → Reboot. No password is needed."
+SB_MENU_STEPS="  When it stops at 'bad shim signature', press a key twice to get the boot
+  menu. Choose \"Enrol the Rime OS Secure Boot key\". On the blue screen,
+  press a key, then: Enroll key from disk → EFI-SYSTEM (or RIMEESP) → EFI →
+  rime → rime-mok.der → Continue → Yes → Reboot. No password is needed."
 if [ -n "${MOKPW:-}" ] || [ "$sb_on" = 1 ]; then
   if [ "$kstate" = signed ] && [ -f "$cert" ] && have mokutil; then
     if [ -n "${MOKPW:-}" ]; then
@@ -3432,8 +3433,7 @@ start Rime OS with Secure Boot off and run
         note "Secure Boot is ON and the Rime key was NOT enrolled (you chose to skip).
 
 Rime OS is installed, but it will not start while Secure Boot is on until its
-key is enrolled. The boot menu shows 'bad shim signature', then the menu again.
-To enrol the key there:
+key is enrolled. To enrol it from the boot menu:
 
 $SB_MENU_STEPS
 

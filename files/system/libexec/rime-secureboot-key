@@ -107,7 +107,7 @@ if [ "$grub_platform" = "efi" ]; then
         echo "A blue key manager opens next. On it:"
         echo "  1. When it says \"Press any key\", press a key within 10 seconds."
         echo "  2. Choose \"Enroll key from disk\"."
-        echo "  3. Choose the disk, then EFI, then rime, then rime-mok.der."
+        echo "  3. Choose EFI-SYSTEM (or RIMEESP), then EFI, rime, rime-mok.der."
         echo "  4. Choose \"Continue\", then \"Yes\"."
         echo "  5. Choose \"Reboot\". Rime OS then starts."
         echo "If you miss a step you come back to this menu. Choose this again."

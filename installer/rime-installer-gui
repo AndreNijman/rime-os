@@ -1959,9 +1959,10 @@ class Installer(Adw.Application):
         self.mok_err = lbl("", "rime-danger")
         body.append(self.mok_err)
         body.append(lbl(
-            "If you skip, Rime OS will not start while Secure Boot is on. At "
-            "the first boot, choose \"Enrol the Rime OS Secure Boot key\" in "
-            "the boot menu, or turn Secure Boot off in firmware setup." if on else
+            "If you skip, Rime OS will not start while Secure Boot is on. When "
+            "it stops at \"bad shim signature\", press a key twice and choose "
+            "\"Enrol the Rime OS Secure Boot key\", or turn Secure Boot off in "
+            "firmware setup." if on else
             "If you skip, nothing changes — the system installs and boots "
             "normally. You would only need this if you later switch Secure "
             "Boot on.", "rime-dim"))
