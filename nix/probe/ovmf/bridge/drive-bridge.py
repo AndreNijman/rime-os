@@ -745,14 +745,30 @@ def nixos_boot(a, name, work=None):
 
 
 def grub_menu(vm, name):
-    """The GRUB menu as this boot drew it on the serial console (between GRUB's banner and `Booting`)."""
+    """The GRUB menu as this boot drew it on the serial console: from GRUB's banner (the last "GRUB" before its
+    "highlighted entry" help line; Fedora's banner has no "GNU") to `Booting`, cursor moves turned into line breaks.
+    The record lists the entries in the order the menu drew them, then the text."""
     with vm.lock:
         t = vm.buf.decode("utf-8", "replace")
-    i, j = t.find("GNU GRUB"), t.find("Booting `")
-    menu = t[i:j] if i >= 0 and j > i else ""
-    entries = sorted(set(m.strip() for m in re.findall(r"\*?([A-Z][^\n*]{3,90}?)\s{4,}", menu)))
+    h, j = t.find("highlighted entry"), t.find("Booting `")
+    i = t.rfind("GRUB", 0, h) if h >= 0 else -1
+    raw = t[i:j] if 0 <= i < j else ""
+    menu = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "\n", raw)
+    skip = ("GRUB", "Use the", "Press enter", "highlighted entry", "ESC to")
+    entries = list(dict.fromkeys(
+        ln.strip().lstrip("*").strip() for ln in menu.split("\n")
+        if len(ln.strip()) > 3 and ln.strip()[0] not in "\u2500\u2502\u250c\u2510\u2514\u2518"
+        and not any(k in ln for k in skip)))
     with open(os.path.join(vm.a.logs, f"{vm.a.kind}-{name}-grub-menu.txt"), "w") as f:
-        f.write("\n".join(entries) + "\n\n" + re.sub(r" {3,}", "\n", menu))
+        f.write("entries, in menu order:\n" + "\n".join(entries) + "\n\nas drawn:\n"
+                + "\n".join(ln.rstrip() for ln in menu.split("\n") if ln.strip() not in ("", "\u2502")) + "\n")
+    return menu
+
+
+def menu_before(vm, name):
+    menu = grub_menu(vm, name)
+    if "Rime (generation" not in menu or "(ostree:" not in menu:
+        raise Timeout(f"[{name}] before finish the GRUB menu must show the Rime entries AND the ostree entry")
     return menu
 
 
@@ -816,7 +832,7 @@ def menu_after(vm, name):
 def phase_finish(a):
     # NixOS boot 2 (phase nixos was boot 1): home diverges; finish refuses (too few good boots); bootc verbs refused
     vm = nixos_boot(a, "fin-boot2")
-    grub_menu(vm, "fin-boot2")
+    menu_before(vm, "fin-boot2")
     record(vm, "fin-diverge", f"cd {DIVERGE} && for i in 1 2 3 4; do rm -f f$i; head -c 268435456 /dev/urandom > f$i; done;"
            " sha256sum f* > ../.rime-lab/diverge.sums; cat ../.rime-lab/diverge.sums; sync", timeout=600)
     rc, out = record(vm, "fin-not-root", f"{FINISH} --dry-run", ok=False)
@@ -835,7 +851,7 @@ def phase_finish(a):
 
     # NixOS boot 3: --dry-run (and the default) passes every precondition and writes nothing
     vm = nixos_boot(a, "fin-boot3")
-    grub_menu(vm, "fin-boot3")
+    menu_before(vm, "fin-boot3")
     vm.root()
     rc, out = wait_good_boot(vm, "fin-boot3-state")
     boots_seen(out, 3)
@@ -912,9 +928,7 @@ def finish_interrupt(a):
     vm.qmp("quit")      # the power cut: no sync, no unmount
     vm.wait_off()
     vm = nixos_boot(a, "finint2", w)
-    menu = grub_menu(vm, "finint2")
-    if "(ostree:" in menu:
-        raise Timeout("interrupt: the ostree entries outlived a finish killed after its first step")
+    menu_after(vm, "finint2")     # the entries went first, so a killed finish already left no ostree entry
     home_sums(vm, "finint2-home")
     vm.root()
     rc, out = record(vm, "finint-rerun", f"cat {FIN_STATE}/finish.json; echo; ls -la /mnt/rime-top; {FINISH} --yes; echo RERUN-RC=$?;"
