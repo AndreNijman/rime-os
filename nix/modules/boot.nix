@@ -10,14 +10,38 @@
 # wins over rime.boot.layout, and "auto" detects ostree's /boot/loader symlink. Per-machine kernel arguments (LUKS
 # rd.luks.uuid=, rd.vconsole.keymap=, wave 2) come from host.toml `[boot] kernel_params = [ ... ]`.
 # host.toml `[boot] microcode = "intel" | "amd" | "both" | "none"` picks the early microcode every entry loads.
-{ config, lib, pkgs, ... }:
+#
+# With a Rime-signed kernel the hook also puts the MOK certificate on the ESP (EFI/rime/rime-mok.der) and an "Enrol
+# the Rime OS Secure Boot key" entry in custom.cfg, the same block bootc's rime-secureboot-key writes: the way back
+# when Secure Boot refuses the kernel because the key was never enrolled (nix/pkgs/rime-boot/README.md).
+{ config, lib, pkgs, options, ... }:
 
 let
   cfg = config.rime.boot;
+  # The certificate as DER, made at build time: MokManager's "Enroll key from disk" reads DER only. Input PEM or DER.
+  mokDer =
+    if cfg.mokCertificate == null then
+      null
+    else
+      pkgs.runCommand "rime-mok.der" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+        set -euo pipefail
+        if openssl x509 -in ${cfg.mokCertificate} -noout 2>/dev/null; then
+          openssl x509 -in ${cfg.mokCertificate} -outform DER -out $out
+        else
+          openssl x509 -inform DER -in ${cfg.mokCertificate} -outform DER -out $out
+        fi
+        openssl x509 -inform DER -in $out -noout -subject
+      '';
+  # boot.nix is also used without nix/modules/kernel.nix (nix/probe/ovmf/boothook): then there is no signed kernel.
+  kernelSigned =
+    lib.hasAttrByPath [ "rime" "kernel" "signing" "imageSignature" ] options
+    && config.rime.kernel.enable
+    && config.rime.kernel.signing.imageSignature != null;
   hookConfig = pkgs.writeText "rime-boot.json" (builtins.toJSON {
     inherit (cfg) layout configurationLimit timeout reserveMiB grubPath;
     bootDir = cfg.mountPoint;
     hostToml = cfg.hostToml;
+    mokCert = mokDer;
   });
   # The hook NixOS calls with the toplevel as $1, and the same program with the same configuration on PATH for
   # `rime-boot check` (D6 8.7) and for rime gc / rime rollback to re-run it.
@@ -94,6 +118,19 @@ in
       default = "/var/lib/rime/host.toml";
       description = "The host layer file (PLAN.md D2) whose [boot] table may set layout and kernel_params.";
     };
+
+    mokCertificate = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = if kernelSigned then config.rime.kernel.signing.certificate else null;
+      defaultText = lib.literalExpression ''
+        config.rime.kernel.signing.certificate when rime.kernel is on and its image is signed, else null'';
+      description = ''
+        The certificate (PEM or DER) the kernel is signed with. Set: every hook run puts it on the ESP as
+        EFI/rime/rime-mok.der and writes the "Enrol the Rime OS Secure Boot key" entry into custom.cfg (only on an
+        ESP that holds Fedora's MokManager, EFI/fedora/mmx64.efi). null: nothing to enrol; the hook leaves any such
+        entry already in custom.cfg as it is.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -136,7 +173,20 @@ in
       wantedBy = [ "multi-user.target" ];
     };
 
-    environment.systemPackages = [ cli ];
+    # What the Secure Boot entry's own text tells a user to run once they have started Rime OS with Secure Boot off
+    # and the key file was missing: the hook again, which puts the certificate and the entry in place.
+    systemd.services.rime-secureboot-key = {
+      description = "Put the Rime Secure Boot key and its boot menu entry in place";
+      unitConfig.RequiresMountsFor = cfg.mountPoint;
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${hook}";
+      };
+    };
+
+    # With Secure Boot off the entry is hidden, so a key is enrolled later the usual way: `sudo mokutil --import
+    # /var/lib/rime/secureboot/rime-mok.der` (the path the installer's notes give).
+    environment.systemPackages = [ cli ] ++ lib.optional (cfg.mokCertificate != null) pkgs.mokutil;
     system.build.rimeBootHook = hook;
   };
 }

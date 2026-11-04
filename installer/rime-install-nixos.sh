@@ -797,6 +797,9 @@ nixos_install() {
       || log "nvram: efibootmgr failed; the removable path EFI/BOOT/BOOTX64.EFI still boots"
   fi
 
+  # The Secure Boot way back the boot hook wrote under nixos-install, for nixos_mok's notes.
+  nixos_sb_menu "$TROOT"
+
   sync
   nixos_unmount
   if [ -n "${LUKS_MAPPER:-}" ]; then cryptsetup close "$LUKS_MAPPER" >>"$LOG" 2>&1 || true; fi
@@ -824,10 +827,34 @@ nixos_relabel_esp() {  # $1=ESP device — FAT label RIME-ESP (the live medium i
 }
 
 # ── Secure Boot: the same choice the bootc path offers ─────────────────────
+#
+# What shim does with a queued key, read in shim 16.1 (mok.c check_mok_request,
+# MokManager.c) and measured on OVMF: it starts MokManager on the next boot
+# whenever a request is pending, Secure Boot on or off, and MokManager deletes
+# the request as soon as it reads it. A blue screen nobody answers within its
+# 10-second countdown uses the request up. `mokutil --timeout -1` (MokTimeout)
+# makes it wait for a key instead. The way back when it is missed anyway is the
+# boot hook's "Enrol the Rime OS Secure Boot key" entry (rime-boot, written by
+# nixos-install when the release's kernel is Rime-signed): it enrols the key
+# from the ESP, no password. NIXOS_SB_MENU says whether this install has it.
+NIXOS_SB_MENU=0
+nixos_sb_menu() {  # $1 = the mounted target root, its ESP at $1/boot
+  NIXOS_SB_MENU=0
+  [ -f "$NIXOS_STAMPS/nixos-mok.der" ] || return 0
+  if cmp -s "$NIXOS_STAMPS/nixos-mok.der" "$1/boot/EFI/rime/rime-mok.der" \
+     && grep -qF -- '--id rime-enrol-key' "$1/boot/grub2/custom.cfg" 2>/dev/null; then
+    NIXOS_SB_MENU=1
+    log "secureboot: the key is on the ESP and 'Enrol the Rime OS Secure Boot key' is in the boot menu"
+  else
+    log "secureboot: no 'Enrol the Rime OS Secure Boot key' entry on $1/boot (the boot hook's log says why)"
+  fi
+}
+
 nixos_mok() {
-  local cert="$NIXOS_STAMPS/nixos-mok.der" kstate sb="unknown" test
+  local cert="$NIXOS_STAMPS/nixos-mok.der" kstate sb="unknown" sb_on=0 test sb_wait sb_missed steps
   kstate=$(nixos_stamp kernel-signed); [ -n "$kstate" ] || kstate=unknown
   have mokutil && sb=$(mokutil --sb-state 2>/dev/null | tr -d '\n' || true)
+  case "$sb" in *[Ee]nabled*) sb_on=1 ;; esac
   if [ "$kstate" != signed ] || [ ! -f "$cert" ] || ! have mokutil; then
     note "Secure Boot: nothing to enrol (kernel: $kstate). Secure Boot is ${sb:-unknown}."
     return 0
@@ -841,19 +868,90 @@ nixos_mok() {
       note "Secure Boot: the Rime key is already enrolled on this machine."
       return 0 ;;
   esac
+  steps="  When it stops at 'bad shim signature', press a key twice to get the boot
+  menu. Choose \"Enrol the Rime OS Secure Boot key\". On the blue screen,
+  press a key, then: Enroll key from disk → RIME-ESP → EFI → rime →
+  rime-mok.der → Continue → Yes → Reboot. No password is needed."
   if [ -z "${MOKPW:-}" ]; then
-    note "No MOK enrolment password was supplied — the Rime key was NOT enrolled. (Secure Boot is ${sb:-unknown}.)
-To enrol it later: mokutil --import /var/lib/rime/secureboot/rime-mok.der"
+    if [ "$sb_on" != 1 ]; then
+      note "No MOK enrolment password was supplied — the Rime key was NOT enrolled. (Secure Boot is ${sb:-unknown}.)
+Rime OS starts as things stand. To use Secure Boot later, enrol the key first:
+  sudo mokutil --import /var/lib/rime/secureboot/rime-mok.der
+then reboot and enrol it on the blue screen."
+    elif [ "$NIXOS_SB_MENU" = 1 ]; then
+      note "Secure Boot is ON and the Rime key was NOT enrolled (you chose to skip).
+
+Rime OS is installed, but it will not start while Secure Boot is on until its
+key is enrolled. To enrol it from the boot menu:
+
+$steps
+
+Or turn Secure Boot off in your firmware settings instead."
+    else
+      note "Secure Boot is ON and the Rime key was NOT enrolled (you chose to skip).
+
+Rime OS uses its own kernel, which Microsoft does not sign. It is signed with
+Rime's key instead, and with Secure Boot on the machine will not start Rime OS
+until that key is enrolled. Turn Secure Boot off in your firmware settings to
+start it."
+    fi
     return 0
   fi
   if printf '%s\n%s\n' "$MOKPW" "$MOKPW" | mokutil --import "$cert" >>"$LOG" 2>&1; then
     log "secureboot: MOK enrolment queued"
-    note "Secure Boot: enrolment queued. On the next boot, a blue 'MOK management' screen appears:
+    if mokutil --timeout -1 >>"$LOG" 2>&1; then
+      log "secureboot: MokTimeout set to -1 (MokManager waits for a key)"
+      sb_wait="It waits for you."
+    else
+      log "secureboot: could not set MokTimeout; MokManager keeps its 10-second countdown"
+      sb_wait="Press a key on it within 10 seconds, or it closes and boots on without the key."
+    fi
+    if [ "$NIXOS_SB_MENU" = 1 ]; then
+      sb_missed="If it does not appear, or the key does not get enrolled:
 
-  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot"
+$steps"
+    else
+      sb_missed="If it does not appear, or the key does not get enrolled, turn Secure Boot
+off in your firmware settings, start Rime OS, and run
+  sudo mokutil --import /var/lib/rime/secureboot/rime-mok.der
+then reboot and enrol it on the blue screen."
+    fi
+    if [ "$sb_on" = 1 ]; then
+      note "Secure Boot: enrolment queued. On the next boot, a blue 'MOK management' screen appears. $sb_wait
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+After that Rime OS boots normally with Secure Boot ON.
+
+$sb_missed"
+    else
+      note "Secure Boot: the Rime key is queued for enrolment. On the next boot, a blue 'MOK management' screen appears, even though Secure Boot is off. $sb_wait
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+Once the key is enrolled you can turn Secure Boot on in your firmware whenever
+you like and Rime OS will boot. No second install, no mokutil by hand.
+
+If you skip that screen nothing breaks: Secure Boot is off, so Rime OS starts
+either way. The request is used up, though; to enrol later, run
+  sudo mokutil --import /var/lib/rime/secureboot/rime-mok.der
+and reboot."
+    fi
+  elif [ "$sb_on" = 1 ] && [ "$NIXOS_SB_MENU" = 1 ]; then
+    note "Secure Boot: mokutil could not queue the key (see $LOG).
+
+Rime OS is installed, but with Secure Boot on it will not start until its key
+is enrolled. To enrol it at the first boot:
+
+$steps
+
+Or turn Secure Boot off in your firmware settings."
   else
-    note "Secure Boot: mokutil could not queue the key (see $LOG). To enrol it later:
-  mokutil --import /var/lib/rime/secureboot/rime-mok.der"
+    note "Secure Boot: mokutil could not queue the key (see $LOG).
+
+Rime OS is installed. To boot it with Secure Boot on, enrol the key first:
+start Rime OS with Secure Boot off and run
+  sudo mokutil --import /var/lib/rime/secureboot/rime-mok.der"
   fi
 }
 

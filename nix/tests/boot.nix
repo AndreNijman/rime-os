@@ -4,11 +4,15 @@
 #                   the profile's current generation, content-addressed copies of <toplevel>/kernel (the signed
 #                   image) and the initrd, GC, configurationLimit/pins/booted, the free-space floor refusing with
 #                   nothing written, a failure mid-copy leaving the old menu, custom.cfg kept byte for byte,
-#                   ostree's loader never written, host.toml layout and kernel_params, the read-only check mode.
+#                   ostree's loader never written, host.toml layout and kernel_params, the read-only check mode, and
+#                   the Secure Boot key block (the bootc helper's bytes and custom.cfg rule, checked against its awk).
 #   boot-hook-vm    a NixOS VM where switch-to-configuration boot runs the hook for real: generations 1 and 2 are
 #                   listed, the default follows nix-env --switch-generation (rime rollback), a deleted generation's
 #                   entry goes, a too-small /boot refuses by name and leaves it empty, and neither the activation
-#                   script nor the hook names bootctl, grub-install or efibootmgr (D3 gate).
+#                   script nor the hook names bootctl, grub-install or efibootmgr (D3 gate). Secure Boot key: no
+#                   certificate and no entry on an ESP without MokManager; with it, the DER of rime.boot.mokCertificate
+#                   at EFI/rime/rime-mok.der and one "Enrol the Rime OS Secure Boot key" block, which
+#                   rime-secureboot-key.service puts back.
 #
 # The OVMF end-to-end proof (Fedora shim + GRUB, Secure Boot on and off, a bad generation recovered through the
 # menu) needs Fedora's signed binaries and is nix/probe/ovmf/boothook/ (README there), not a flake check.
@@ -17,6 +21,14 @@
 let
   inherit (pkgs) lib;
   hook = pkgs.rime.rime-boot;
+  # A throwaway TEST certificate (its key is discarded here) standing in for the Rime MOK in boot-hook-vm: PEM for
+  # rime.boot.mokCertificate, and the DER openssl makes of it, which the hook must put on the ESP byte for byte.
+  testMok = pkgs.runCommand "rime-boot-test-mok" { nativeBuildInputs = [ pkgs.openssl ]; } ''
+    mkdir $out
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout /dev/null -days 3650 -subj "/CN=rime-boot hook TEST MOK" \
+      -out $out/cert.pem
+    openssl x509 -in $out/cert.pem -outform DER -out $out/cert.der
+  '';
 in
 {
   boot-hook-unit = pkgs.runCommand "rime-boot-hook-unit" { nativeBuildInputs = [ pkgs.python3 ]; } ''
@@ -32,6 +44,7 @@ in
     nodes.machine = { nodes, ... }: {
       imports = [ self.nixosModules.default ];
       rime.boot.enable = true;
+      rime.boot.mokCertificate = "${testMok}/cert.pem";
       system.switch.enable = true; # the test framework turns it off by default
       # Generation 2's closure, so nix-env can make it a generation of the system profile inside the VM.
       virtualisation.additionalPaths = [ nodes.next.system.build.toplevel ];
@@ -40,6 +53,7 @@ in
     nodes.next = { ... }: {
       imports = [ self.nixosModules.default ];
       rime.boot.enable = true;
+      rime.boot.mokCertificate = "${testMok}/cert.pem";
       system.switch.enable = true;
       environment.etc."rime-boot-test-generation".text = "2\n";
     };
@@ -77,6 +91,26 @@ in
             machine.succeed("grep -x 'options init=${gen1}/init .*' /boot/loader/entries/rime-generation-1.conf")
             rc, out = check()
             assert rc == 0 and out["default_generation"] == 1 and out["default_toplevel"] == "${gen1}", out
+
+        with subtest("Secure Boot key: an ESP without Fedora's MokManager gets neither the certificate nor the entry"):
+            machine.fail("test -e /boot/EFI/rime")
+            machine.fail("grep -F -- '--id rime-enrol-key' /boot/grub2/custom.cfg")
+            out = machine.succeed("${gen1}/bin/switch-to-configuration boot 2>&1")
+            assert "has no EFI/fedora/mmx64.efi" in out and "boot menu entry not written" in out, out
+
+        with subtest("Secure Boot key: with MokManager on the ESP, the DER certificate and exactly one entry"):
+            machine.succeed("mkdir -p /boot/EFI/fedora && printf 'MZ stub' > /boot/EFI/fedora/mmx64.efi")
+            machine.succeed("${gen1}/bin/switch-to-configuration boot")
+            machine.succeed("cmp /boot/EFI/rime/rime-mok.der ${testMok}/cert.der")
+            machine.succeed("test \"$(grep -cx '### BEGIN rime-secureboot-key ###' /boot/grub2/custom.cfg)\" = 1")
+            machine.succeed("test \"$(tail -n1 /boot/grub2/custom.cfg)\" = '### END rime-secureboot-key ###'")
+            machine.succeed("grep -F -- '--id rime-enrol-key' /boot/grub2/custom.cfg")
+            machine.succeed("grep -Fx '  source ''${prefix}/rime-nixos.cfg' /boot/grub2/custom.cfg")
+            before = machine.succeed("sha256sum /boot/grub2/custom.cfg /boot/EFI/rime/rime-mok.der")
+            # The unit the entry's own text names puts a missing certificate back.
+            machine.succeed("rm /boot/EFI/rime/rime-mok.der")
+            machine.succeed("systemctl start rime-secureboot-key.service")
+            assert machine.succeed("sha256sum /boot/grub2/custom.cfg /boot/EFI/rime/rime-mok.der") == before
 
         with subtest("generation 2 becomes the default, generation 1 stays listed, the kernel file is shared"):
             machine.succeed(f"nix-env -p {P} --set ${gen2}")
