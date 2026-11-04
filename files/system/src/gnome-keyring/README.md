@@ -1,8 +1,10 @@
 # gnome-keyring: one fix on top of Fedora's build
 
-`gnome-keyring-property-read-no-client.patch` is applied to Fedora's own
-`gnome-keyring` SRPM (pinned by NVR and sha256 in `Containerfile.base`,
-stage `gnome-keyring-builder`) by `build-rpms.sh`. The packages
+`build-rpms.sh` applies `gnome-keyring-property-read-no-client.patch` to
+Fedora's own `gnome-keyring` SRPM in `Containerfile.base`'s
+`gnome-keyring-builder` stage. It follows Fedora: it rebuilds whichever
+gnome-keyring core ships, and nothing of ours pins a version or checksum, so
+a Fedora gnome-keyring update never stops a release. The packages
 (`gnome-keyring`, `gnome-keyring-pam`) are marked `.rime1`, and the base
 build refuses to finish with any other gnome-keyring.
 `tests/test-rime-keyring-property-read.sh` keeps those pieces in place, and
@@ -62,20 +64,58 @@ client.
 |---|---|---|
 | 51.1-1.fc45 (Fedora) | 10 of 10 (after reads 27 to 1,186) | 4,185 |
 | 51.1-1.rime1.fc45 (this patch) | 0 of 10, every read answered | 50,000 |
+| 50.0-1.fc44 (Fedora 44) | 10 of 10 | 13,853 |
+| 50.0-1.rime1.fc44 (this patch, rebased by `build-rpms.sh`) | 0 of 10, every read answered | 50,000 |
 
 An earlier run of the same reads against Fedora's build: 9 of 10 died.
 
-## When Fedora ships a new gnome-keyring
+## How the build follows Fedora
 
-The base build stops: core's gnome-keyring is no longer `GNOME_KEYRING_NVR`.
-Check whether the new build fixes the abort (run the race against it:
-`RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=die` as a normal user with
-Fedora's package installed; the PR-validation step does exactly this).
+`build-rpms.sh OUTDIR`, run as root in a container FROM core:
 
-- Fixed: delete the `gnome-keyring-builder` stage, the install that uses it
-  (put back a plain `dnf5 -y install gnome-keyring-pam`), this directory and
-  the test.
-- Not fixed: set `GNOME_KEYRING_NVR` and `GNOME_KEYRING_SRPM_SHA256` to the
-  new build (the sha256 of Koji's src.rpm at the URL in `build-rpms.sh`) and
-  rebuild. `build-rpms.sh` stops if the patch no longer applies, or applies
-  and the prepared source lacks the fix.
+1. Reads core's installed `gnome-keyring` (NVR and source package).
+2. Fetches Fedora's SRPM for exactly that build and accepts it only when
+   `rpmkeys --checksig`, against a private keyring holding ONLY Fedora's
+   release key for that Fedora version, prints `digests signatures OK` (an
+   unsigned rpm prints `digests OK` and exits 0). It tries Fedora's source
+   repositories (`dnf5 download --source`), then Koji's signed copy, then
+   Koji's unsigned build with the signature header from Koji's sigcache
+   spliced in (the same splice as `rime-pkg`). Koji keeps every build, so
+   an older core still builds after the repositories move on.
+3. Prepares Fedora's source (`rpmbuild -bp`, Fedora's own patches applied)
+   and decides:
+
+| decision | when | what happens |
+|---|---|---|
+| `patched` | the patch applies (`git apply --check`) | patch added as `Patch9001`, release `.rime1`, the prepared source checked for both halves of the fix, rebuilt. A version other than `PROVEN` in `build-rpms.sh` is a GitHub `::warning::` ("rebased") |
+| `upstream` | the patch reverse-applies, or both halves are there in other words (the session lookup calls `gkd_secret_service_ensure_client`, and the object lookup no longer has `g_return_val_if_fail (session, ...)`) | Fedora's `gnome-keyring-pam` for that build is fetched and verified the same way; the image keeps Fedora's build; a `::warning::` says this directory can be dropped |
+| `fail` | neither | the build stops. The only case that needs a person |
+
+4. Writes `OUTDIR/result` (`MODE`, `NVR`, `BUILT`, `PROVEN`). The base build
+   installs from it, keeps it as `/usr/share/rime/gnome-keyring-fix`, and
+   build-image puts it in the run summary.
+
+`build-rpms.sh --classify SOURCE_ROOT` prints the decision for an unpacked
+source tree without touching it; the test uses it on trees made from the
+patch's own hunks.
+
+Checked for real (logs in the PR): Fedora 45 from the repositories, from
+Koji's signed copy and from the sigcache splice (all `patched`, `.rime1`);
+Fedora 44's 50.0-1.fc44 (different version and key: `patched`, rebased,
+`.rime1`, warning); the patch's post-image in place of the patch
+(`upstream`, Fedora's `gnome-keyring-pam` fetched and verified); a patch
+with one wrong context line (`fail`); and an unsigned copy served where
+the signed one should be (`digests SIGNATURES NOT OK`, refused).
+
+## When the build warns or stops
+
+- `rebased`: the patch applied to a new Fedora version and the markers are
+  in the prepared source. Run the race on it (`RIME_KEYRING_RACE=1` as a
+  normal user with the rebuilt packages installed; PR validation does this
+  against Fedora 45's current build) and set `PROVEN` to it.
+- `upstream`: confirm with the race (`RIME_KEYRING_RACE_EXPECT=survive
+  RIME_KEYRING_RACE_MARKER=0` on Fedora's build), then delete the
+  `gnome-keyring-builder` stage, the install that uses it (put back a plain
+  `dnf5 -y install gnome-keyring-pam`), this directory and the test.
+- `fail`: rebase the patch onto the new source, or confirm Fedora fixed it
+  another way (then extend the `upstream` markers in `build-rpms.sh`).

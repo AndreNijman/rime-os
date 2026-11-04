@@ -38,12 +38,6 @@
 # ─────────────────────────────────────────────────────────────────────────
 ARG CORE=ghcr.io/andrenijman/rime-os:core
 
-# Fedora's gnome-keyring build that core installs and that the
-# gnome-keyring-builder stage below rebuilds with Rime's fix. Read by both
-# stages and by PR validation (tests/test-rime-keyring-property-read.sh).
-ARG GNOME_KEYRING_NVR=gnome-keyring-51.1-1.fc45
-ARG GNOME_KEYRING_SRPM_SHA256=812563c8fae4b9cb1c1cd798a10ccd074890d7cddb11896b1975be8b296f96b4
-
 # ═══ rimed builder ═══════════════════════════════════════════════════════
 # Built FROM the core image rather than a bare fedora-bootc, so rimed links
 # against exactly the libraries the image ships. rust and cargo are installed
@@ -241,18 +235,22 @@ RUN set -eux; \
 # files/system/src/gnome-keyring/README.md has the evidence.
 #
 # The recipe is ONE script, build-rpms.sh, which PR validation also runs to
-# build the packages it races: Fedora's own SRPM at GNOME_KEYRING_NVR
-# (sha256-pinned, from Koji), the patch added, the release marked `.rime1`
-# (1.rime1.fc45 sorts above 1.fc45). It stops if the spec starts carrying
-# patches of its own, if the patch stops applying, or if the prepared source
-# lacks the fix.
-#
-# A Fedora update must never silently drop the fix: this stage, and the
-# install below, refuse a core whose gnome-keyring is not GNOME_KEYRING_NVR.
-# When that fires, Fedora shipped a new build: check whether it fixes the
-# abort (then delete this stage, the install and the patch), else set
-# GNOME_KEYRING_NVR and GNOME_KEYRING_SRPM_SHA256 to it (Koji's unsigned
-# src.rpm, the URL in build-rpms.sh) and rebuild.
+# build the packages it races. It FOLLOWS FEDORA: it rebuilds whatever
+# gnome-keyring core ships, from Fedora's own SRPM for that build, accepted
+# only when rpmkeys verifies it against Fedora's release key (source
+# repositories first, then Koji, which keeps every build). Nothing of ours is
+# pinned, so a Fedora gnome-keyring update never stops a release. Fedora's
+# prepared source then decides (the script's header has the detail):
+#   patched   the patch applies: rebuilt with it, release marked `.rime1`
+#             (1.rime1.fc45 sorts above 1.fc45). A version other than the one
+#             the race was last proven on is a GitHub warning ("rebased").
+#   upstream  Fedora's source already has the fix: Fedora's build is kept, a
+#             GitHub warning says the carried patch can be dropped.
+#   fail      the patch does not apply and the fix is not there: the build
+#             stops. The only case a human has to look at.
+# /out/gnome-keyring/result records the mode and versions; the install below
+# acts on it and copies it to /usr/share/rime/gnome-keyring-fix, which
+# build-image puts in its summary.
 #
 # Here, in base, and not in Containerfile.core, so the fix does not cost a core
 # rebuild (every user downloading core again). It breaks this file's "no dnf, no
@@ -261,20 +259,13 @@ RUN set -eux; \
 # links against exactly the libraries the image ships. The one dnf transaction
 # it adds to the image is the gnome-keyring-pam install that was already here.
 FROM ${CORE} AS gnome-keyring-builder
-ARG GNOME_KEYRING_NVR
-ARG GNOME_KEYRING_SRPM_SHA256
 COPY files/system/src/gnome-keyring/build-rpms.sh \
      files/system/src/gnome-keyring/gnome-keyring-property-read-no-client.patch /build/
 RUN set -eux; \
-    have="$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)" || true; \
-    [ "$have" = "${GNOME_KEYRING_NVR}" ] || { \
-        echo "FATAL: core's gnome-keyring is $have, which is not the pinned ${GNOME_KEYRING_NVR}."; \
-        echo "       Fedora shipped a new build. Check whether it fixes the property-read abort"; \
-        echo "       (files/system/src/gnome-keyring/README.md), then drop the fix or re-pin it."; \
-        exit 1; }; \
     sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
-    dnf5 -y install rpm-build 'dnf5-command(builddep)' >/dev/null; \
-    /build/build-rpms.sh "${GNOME_KEYRING_NVR}" "${GNOME_KEYRING_SRPM_SHA256}" /out/gnome-keyring; \
+    dnf5 -y install rpm-build git-core curl 'dnf5-command(builddep)' 'dnf5-command(download)' >/dev/null; \
+    /build/build-rpms.sh /out/gnome-keyring; \
+    grep -E '^MODE=(patched|upstream)$' /out/gnome-keyring/result >/dev/null; \
     rm -rf /build
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -3886,16 +3877,19 @@ RUN set -eux; \
 # cost a core rebuild. The login keyring still has to share the account's
 # password to open this way.
 #
-# Both packages are the gnome-keyring-builder stage's rebuild (the
-# property-read fix, see that stage), installed as local files with every
-# repository disabled, so dnf can neither pick Fedora's build of the same
-# version nor pull anything else in. gnome-keyring-pam requires gnome-keyring
-# at its own version-release, so the two always come from the same rebuild.
-# The install upgrades core's gnome-keyring in place (1.rime1.fc45 sorts above
-# 1.fc45), and refuses to when core's is not the build the fix was made for.
-# --nogpgcheck as for core's plymouth: local files this build made, with no
-# repository signature to check; what stands in for one is the SRPM's pinned
-# sha256 and the patch in this repository, both checked in the builder.
+# The packages come from the gnome-keyring-builder stage (the property-read
+# fix, see that stage), installed as local files with every repository
+# disabled, so dnf can neither pick another build nor pull anything else in.
+# MODE=patched: Rime's rebuild of gnome-keyring and gnome-keyring-pam; it
+# upgrades core's gnome-keyring in place (1.rime1.fc45 sorts above 1.fc45).
+# MODE=upstream: Fedora already fixed it, core's gnome-keyring stays and only
+# Fedora's own gnome-keyring-pam at the same version-release is added.
+# gnome-keyring-pam requires gnome-keyring at its own version-release, so the
+# two always match. --nogpgcheck as for core's plymouth: dnf has no repository
+# here to check against. What stands in for it: the builder accepted Fedora's
+# SRPM (and, upstream, Fedora's gnome-keyring-pam) only with rpmkeys reporting
+# "digests signatures OK" against Fedora's release key, and the patch is this
+# repository's.
 #
 # rime-pkg cannot put Fedora's build back at user level: a newer Fedora
 # gnome-keyring is an upgrade of an image package, which image_pin_excludes
@@ -3907,20 +3901,30 @@ RUN set -eux; \
 # edits below are made there, and an /etc/pam.d/greetd is refused: it would
 # replace the whole file, and these lines would not be the ones PAM reads.
 COPY --from=gnome-keyring-builder /out/gnome-keyring/ /tmp/rime-gnome-keyring/
-ARG GNOME_KEYRING_NVR
 RUN set -eux; \
+    MODE=; NVR=; BUILT=; \
+    . /tmp/rime-gnome-keyring/result; \
     have="$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)" || true; \
-    [ "$have" = "${GNOME_KEYRING_NVR}" ] || { \
-        echo "FATAL: core's gnome-keyring is $have, which is not the pinned ${GNOME_KEYRING_NVR} (see gnome-keyring-builder)"; exit 1; }; \
+    [ "$have" = "$NVR" ] || { \
+        echo "FATAL: core's gnome-keyring is $have, but gnome-keyring-builder followed $NVR"; exit 1; }; \
     dnf5 -y --nogpgcheck --disable-repo='*' install /tmp/rime-gnome-keyring/*.rpm; \
+    install -D -m 0644 /tmp/rime-gnome-keyring/result /usr/share/rime/gnome-keyring-fix; \
     rm -rf /tmp/rime-gnome-keyring; \
     dnf5 clean all; rm -rf /var/cache/libdnf5; \
-    for p in gnome-keyring gnome-keyring-pam; do \
-        rpm -q --qf '%{RELEASE}\n' "$p" | grep -E '\.rime[0-9]+\.fc[0-9]+$' >/dev/null \
-            || { echo "FATAL: $p is not Rime's gnome-keyring build: $(rpm -q "$p")"; exit 1; }; \
-    done; \
-    grep -aF 'No session for the caller to look up' /usr/bin/gnome-keyring-daemon >/dev/null \
-        || { echo "FATAL: /usr/bin/gnome-keyring-daemon does not carry the property-read fix"; exit 1; }
+    case "$MODE" in \
+    patched) \
+        for p in gnome-keyring gnome-keyring-pam; do \
+            rpm -q --qf '%{RELEASE}\n' "$p" | grep -E '\.rime[0-9]+\.fc[0-9]+$' >/dev/null \
+                || { echo "FATAL: $p is not Rime's gnome-keyring build: $(rpm -q "$p")"; exit 1; }; \
+        done; \
+        test "$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)" = "$BUILT"; \
+        grep -aF 'No session for the caller to look up' /usr/bin/gnome-keyring-daemon >/dev/null \
+            || { echo "FATAL: /usr/bin/gnome-keyring-daemon does not carry the property-read fix"; exit 1; } ;; \
+    upstream) \
+        echo "::warning title=gnome-keyring fix is upstream::Fedora's $NVR already contains the property-read fix: the image keeps Fedora's build, and files/system/src/gnome-keyring/ can be dropped."; \
+        test "$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)" = "$NVR" ;; \
+    *) echo "FATAL: gnome-keyring-builder's result has MODE='$MODE'"; exit 1 ;; \
+    esac
 RUN set -eux; \
     test -f /usr/lib64/security/pam_gnome_keyring.so; \
     test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' gnome-keyring-pam)" \
@@ -4511,17 +4515,25 @@ RUN set -eux; \
     rm -rf "$RIMEHOME"; \
     echo "rimed/rime/rime-agentd/rime-secretd/rime-aid installed and runnable; shell verbs and `a` intact"
 
-# ── gnome-keyring is still Rime's build ────────────────────────────────────
+# ── gnome-keyring is still the build the fix decided on ───────────────────
 # The install above checks it at the time; this checks nothing after it put
-# Fedora's build back (a later dnf transaction that upgrades it would drop the
-# property-read fix without failing anything else).
+# another build back (a later dnf transaction that upgrades gnome-keyring
+# would drop the property-read fix without failing anything else).
 RUN set -eu; \
-    for p in gnome-keyring gnome-keyring-pam; do \
-        rpm -q --qf '%{RELEASE}\n' "$p" | grep -E '\.rime[0-9]+\.fc[0-9]+$' >/dev/null \
-            || { echo "FATAL: a later step replaced Rime's gnome-keyring build: $(rpm -q "$p")"; exit 1; }; \
-    done; \
-    grep -aF 'No session for the caller to look up' /usr/bin/gnome-keyring-daemon >/dev/null \
-        || { echo "FATAL: a later step replaced Rime's gnome-keyring build: the daemon lacks the fix"; exit 1; }
+    MODE=; NVR=; BUILT=; \
+    . /usr/share/rime/gnome-keyring-fix; \
+    have="$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)"; \
+    [ "$have" = "$BUILT" ] \
+        || { echo "FATAL: a later step replaced gnome-keyring: $have, not $BUILT ($MODE)"; exit 1; }; \
+    [ "$(rpm -q --qf '%{VERSION}-%{RELEASE}' gnome-keyring-pam)" = "${BUILT#gnome-keyring-}" ] \
+        || { echo "FATAL: a later step replaced gnome-keyring-pam: $(rpm -q gnome-keyring-pam)"; exit 1; }; \
+    case "$MODE" in \
+    patched) \
+        grep -aF 'No session for the caller to look up' /usr/bin/gnome-keyring-daemon >/dev/null \
+            || { echo "FATAL: a later step replaced Rime's gnome-keyring build: the daemon lacks the fix"; exit 1; } ;; \
+    upstream) : ;; \
+    *) echo "FATAL: /usr/share/rime/gnome-keyring-fix has MODE='$MODE'"; exit 1 ;; \
+    esac
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true

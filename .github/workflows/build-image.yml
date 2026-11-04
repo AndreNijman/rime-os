@@ -1455,6 +1455,26 @@ jobs:
               || fail "base is stamped '$state' — the core it was built from is not signed. Re-run with force_core=true."
           fi
 
+          # ── gnome-keyring: which Fedora build the property-read fix followed
+          # gnome-keyring-builder (Containerfile.base) follows whatever core
+          # ships; the summary says what it did, so a rebase onto a new Fedora
+          # version or an upstream fix is seen without reading the build log.
+          gk="$(run 'cat /usr/share/rime/gnome-keyring-fix')" \
+            || fail "/usr/share/rime/gnome-keyring-fix missing: the gnome-keyring install step did not run"
+          gk_mode="$(sed -n 's/^MODE=//p' <<<"$gk")"; gk_nvr="$(sed -n 's/^NVR=//p' <<<"$gk")"
+          gk_built="$(sed -n 's/^BUILT=//p' <<<"$gk")"; gk_proven="$(sed -n 's/^PROVEN=//p' <<<"$gk")"
+          case "$gk_mode" in
+            patched)  gk_note="Rime's property-read fix applied to Fedora's \`$gk_nvr\`: image ships \`$gk_built\`." ;;
+            upstream) gk_note="Fedora's \`$gk_nvr\` already contains the property-read fix: image ships it unchanged. The carried patch can be dropped."
+                      echo "::warning::$gk_note" ;;
+            *) fail "gnome-keyring-fix has MODE='$gk_mode'" ;;
+          esac
+          if [ "$gk_mode" = patched ] && [ "$gk_nvr" != "$gk_proven" ]; then
+            gk_note="$gk_note **Rebased** onto a new Fedora version (race last proven on \`$gk_proven\`)."
+            echo "::warning::gnome-keyring fix rebased onto $gk_nvr (last proven on $gk_proven)"
+          fi
+          { echo "### gnome-keyring"; echo; echo "$gk_note"; } >> "$GITHUB_STEP_SUMMARY"
+
           echo "base image verified"
 
       # ── Push once, then tag in-registry ──────────────────────────────────

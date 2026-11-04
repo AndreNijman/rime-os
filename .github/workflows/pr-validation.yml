@@ -3391,23 +3391,33 @@ jobs:
       # of the patched packages included.
       - name: Run keyring property-read race (Fedora 45, stock vs rebuilt)
         if: ${{ !cancelled() }}
-        timeout-minutes: 30
+        timeout-minutes: 40
         run: |
           rc=0
-          nvr="$(sed -n 's/^ARG GNOME_KEYRING_NVR=//p' Containerfile.base)"
-          sha="$(sed -n 's/^ARG GNOME_KEYRING_SRPM_SHA256=//p' Containerfile.base)"
-          out="$(docker run --rm -e NVR="$nvr" -e SHA="$sha" -v "$PWD":/w:ro -w /w fedora:45 bash -c '
+          # build-rpms.sh follows the gnome-keyring Fedora 45 ships now, exactly
+          # as the image's builder follows core's: patched (stock must die,
+          # rebuilt must survive), or upstream (Fedora's own build must survive;
+          # a warning says the carried patch can be dropped).
+          out="$(docker run --rm -v "$PWD":/w:ro -w /w fedora:45 bash -c '
                 dnf -y install --setopt=install_weak_deps=False --setopt=retries=5 \
                     gnome-keyring dbus-daemon systemd procps-ng util-linux shadow-utils \
-                    rpm-build "dnf5-command(builddep)" curl \
+                    rpm-build git-core curl "dnf5-command(builddep)" "dnf5-command(download)" \
                     >/dev/null 2>&1 || exit 97
                 useradd -m rimetest || exit 98
                 echo "stock: $(rpm -q gnome-keyring)"
+                files/system/src/gnome-keyring/build-rpms.sh /tmp/rime-gk || exit 94
+                MODE=; NVR=; . /tmp/rime-gk/result
+                if [ "$MODE" = upstream ]; then
+                    echo "upstream: $NVR already contains the fix"
+                    dnf -y --nogpgcheck --disable-repo="*" install /tmp/rime-gk/*.rpm >/dev/null || exit 93
+                    echo "rebuilt: none, Fedora $(rpm -q gnome-keyring gnome-keyring-pam | paste -sd " ")"
+                    exec runuser -u rimetest -- env RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=survive \
+                        RIME_KEYRING_RACE_MARKER=0 ./tests/test-rime-keyring-property-read.sh
+                fi
                 runuser -u rimetest -- env RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=die \
                     ./tests/test-rime-keyring-property-read.sh > /tmp/stock.out 2>&1
                 cat /tmp/stock.out
                 grep -qE "^keyring-property-read: [0-9]+ passed, 0 failed, 0 skipped$" /tmp/stock.out || exit 95
-                files/system/src/gnome-keyring/build-rpms.sh "$NVR" "$SHA" /tmp/rime-gk || exit 94
                 dnf -y --nogpgcheck --disable-repo="*" install /tmp/rime-gk/*.rpm >/dev/null || exit 93
                 echo "rebuilt: $(rpm -q gnome-keyring gnome-keyring-pam | paste -sd " ")"
                 runuser -u rimetest -- env RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=survive \
@@ -3416,12 +3426,14 @@ jobs:
           case "$rc" in
               97) echo "::warning::could not install the race's packages in the container; the keyring property-read race did not run"; exit 0 ;;
               98) echo "::error::could not create the throwaway user in the container"; exit 1 ;;
-              95) echo "::error::the STOCK gnome-keyring survived the reads: the race is not being measured (or Fedora fixed it: check, then drop the fix)"; exit 1 ;;
-              94) echo "::error::build-rpms.sh could not build the patched gnome-keyring"; exit 1 ;;
-              93) echo "::error::could not install the rebuilt gnome-keyring"; exit 1 ;;
+              95) echo "::error::the STOCK gnome-keyring survived the reads although the patch still applies: the race is not being measured"; exit 1 ;;
+              94) echo "::error::build-rpms.sh stopped (its FATAL line above says why: the patch no longer applies, or Fedora's source could not be verified)"; exit 1 ;;
+              93) echo "::error::could not install the gnome-keyring packages build-rpms.sh made"; exit 1 ;;
               0) ;;
               *) echo "::error::the keyring property-read race exited $rc"; exit 1 ;;
           esac
+          grep -E '^upstream: ' <<<"$out" >/dev/null \
+            && echo "::warning::Fedora's gnome-keyring already contains the property-read fix: files/system/src/gnome-keyring/ can be dropped"
           # Only the rebuilt run's summary counts: the stock run printed one too.
           sed -n '/^rebuilt: /,$p' <<<"$out" \
             | grep -E '^keyring-property-read: [0-9]+ passed, 0 failed, 0 skipped$' >/dev/null \
