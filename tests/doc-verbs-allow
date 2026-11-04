@@ -58,8 +58,9 @@ rime migrate key-export
 rime migrate start
 
 # docs/nixos-move.md names the step that gives back the space the old system
-# keeps after a move: "a step (`rime migrate finish`) that is planned and not in
-# this release". It is the NixOS plan's reclaim step (PLAN.md D2), named so a
-# user knows the space is not gone for good. It leaves this file the day the
-# verb ships.
+# keeps after a move. `rime migrate finish` runs on Rime OS on NixOS (the system
+# a move installs), not on this image: here `rime migrate` hands every verb to
+# rime-migrate, which has none by that name, so no parse check of this image's
+# `rime` can prove it. It is proved on the NixOS side (nix/pkgs/rime-bridge,
+# rime-migrate-finish).
 rime migrate finish

@@ -467,6 +467,8 @@ class SpaceH9(unittest.TestCase):
         self.assertIn("each file changed or added on NixOS takes new space", text)
         self.assertIn("@pre-nixos, ostree/ and the old var/home", text)
         self.assertIn("rime migrate finish", text)
+        self.assertIn("rime migrate finish --dry-run", text)
+        self.assertNotIn("planned", text)   # finish exists (on NixOS): the text says how to get the space back
         self.assertNotIn("divergence:", B.report(f, c, r, n, False))
 
     def test_du_tree(self):
