@@ -179,7 +179,7 @@ fn probe(dev: &mut w::Device, offset: u64, length: u64) -> io::Result<Option<&'s
     let first = read_at(dev, offset, mib.min(length) as usize)?;
     let at64 = if length >= 64 * mib + 65536 { read_at(dev, offset + 64 * mib, 65536)? } else { Vec::new() };
     let last = if length >= 2 * mib { read_at(dev, offset + length - mib, mib as usize)? } else { Vec::new() };
-    Ok(plan::signature(&first, &at64, &last))
+    Ok(plan::signature(&first, &at64, &last, length))
 }
 
 pub fn candidates() -> (Vec<Candidate>, Vec<String>) {
@@ -518,6 +518,15 @@ pub fn install(c: &Candidate, iso: Option<&Path>, ev: &mut dyn FnMut(Event)) -> 
             .iter()
             .find(|p| &p.id == partition_guid)
             .ok_or_else(|| io::Error::other("the chosen partition is gone"))?;
+        // The table the new partitions are placed from must hold this same
+        // partition at the same bytes: what is probed and locked below is
+        // exactly what is written.
+        let same = before.layout()?.partitions.iter().any(|q| {
+            q.id.eq_ignore_ascii_case(&p.id) && q.offset == p.offset && q.length == p.length
+        });
+        if !same {
+            return Err(io::Error::other("the partition table changed while it was read; nothing was written"));
+        }
         let (vols, vp) = w::volumes();
         if !vp.is_empty() {
             return Err(io::Error::other(format!("the volume list could not be read completely: {}", vp.join("; "))));
