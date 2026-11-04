@@ -19,13 +19,19 @@ fi
 desktop="$(printf '%s' "${XDG_CURRENT_DESKTOP:-}" | tr '[:upper:]' '[:lower:]')"
 case "$desktop" in
     *labwc*)    exec labwc --exit ;;
-    *hyprland*) exec hyprctl dispatch exit ;;
+    # Under Lua, `hyprctl dispatch X` is `return hl.dispatch(X)` (Hyprland 0.57
+    # src/ipc/s1/Commands.cpp): the hyprlang word `exit` is refused.
+    *hyprland*) exec hyprctl dispatch 'hl.dsp.exit()' ;;
     *niri*)     exec niri msg action quit --skip-confirmation ;;
 esac
 
-if   pgrep -x labwc    >/dev/null 2>&1; then exec labwc --exit
-elif pgrep -x Hyprland >/dev/null 2>&1; then exec hyprctl dispatch exit
-elif pgrep -x niri     >/dev/null 2>&1; then exec niri msg action quit --skip-confirmation
+# The signature before the process name: NixOS's wrapped Hyprland is
+# ".Hyprland-wrapp" to `pgrep -x` (see rime-compositor-reload).
+if   [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then exec hyprctl dispatch 'hl.dsp.exit()'
+elif pgrep -u "$(id -u)" -x labwc    >/dev/null 2>&1; then exec labwc --exit
+elif pgrep -u "$(id -u)" -x Hyprland >/dev/null 2>&1 \
+  || pgrep -u "$(id -u)" -x .Hyprland-wrapp >/dev/null 2>&1; then exec hyprctl dispatch 'hl.dsp.exit()'
+elif pgrep -u "$(id -u)" -x niri     >/dev/null 2>&1; then exec niri msg action quit --skip-confirmation
 fi
 
 echo "rime: could not determine how to end this session" >&2

@@ -837,6 +837,59 @@ hold four systems twice over.
 Release note (for the PR that brings desktops): GNOME now locks the screen, from Super+L, Quick Settings, the idle
 timeout and before suspend; switching users from GNOME's lock screen is not available.
 
+### 12.11 Hyprland is configured in Lua only (wave 6, branch `nix/hypr-lua-only`)
+
+Hyprland 0.57.0 (the pin) has no `.conf` parser: it reads `~/.config/hypr/hyprland.lua`, `hyprctl keyword` answers
+"keyword can't work with non-legacy parsers. Use eval.", and `hyprctl dispatch X` evaluates `return hl.dispatch(X)`
+(src/ipc/s1/Commands.cpp), so a hyprlang word such as `exit` is refused. Rime Shell (e5eb240d) and rime-os (60f7ea261,
+6360cd8ad) now speak only Lua; rows and evidence in `open-items.md` "Lua-only Hyprland".
+
+- **Every live write is `hyprctl eval`, every dispatch an `hl.dsp.*` expression.** A value from outside (an output,
+  device or workspace name) goes in as a Lua string with `\`, `"` and every control byte (`\ddd`) escaped, by the same
+  rule in the Shell's `_luaStr` and rime-os's `lua_str` (the two Python copies are byte-identical, tested).
+- **The Shell asks Hyprland whether Rime's config loaded**, rather than looking for a file: `hyprctl eval` that raises
+  unless `package.loaded["rime.keybindings"]` exists. `ok`, `no-config`, `not-lua`, `modules-missing` or `unknown`
+  (hyprctl unreachable: retried, not a verdict: it changes neither the state nor the one-notice-per-problem guard,
+  and "loaded again" is logged only when a problem clears; a check while the probe runs is queued, never a restart). Anything but `ok` is logged as "Hyprland config problem" and posted as
+  a critical notice naming `rime-hypr-migrate`; asked 3 s after start (the Shell is the notification server) and on
+  every `configreloaded`. Why Hyprland and not the file: firstrun seeds `hyprland.lua` and reloads Hyprland after the
+  session starts, and a file that exists but fails to load is the same silent no-op the old default produced.
+- **Wallpaper colours** are a Lua module: matugen writes `~/.config/hypr/rime/colors.lua`, `appearance.lua` requires it
+  when present (missing = the static border), and the Shell pushes the accent live and again after every reload. The
+  old `rime-shell-colors.conf` was sourced by nothing. hyprlock/hypridle keep their own hyprlang files (not Hyprland's).
+- **Display apply** (`rime-display-apply`): eval only, a reply other than `ok` is a refusal. The model is validated
+  (no NaN/Infinity, no bool as a number, integer positions within ±32767, `WIDTHxHEIGHT[@HZ]` modes, names without
+  control characters). A mode the display does not list becomes its current mode with a note; an unclean scale is
+  snapped exactly as Hyprland does (Monitor.cpp:939-985: float32 scale, `round(scale*120)`, search +i before -i, an
+  integer logical size), so Hyprland never picks its own and never notifies. The catch-all `hl.monitor({ output = "" })`
+  is right: MonitorRuleManager.cpp:94-105 uses the first empty-named rule for a display no rule names.
+- **Input apply** (`rime-input-apply`): the keymap is compiled with `xkbcli compile-keymap` (libxkbcommon on the
+  script's store PATH) before anything is written; a layout, variant, model or option xkbcommon does not know is
+  refused and the last accepted layout is kept (recorded in a marker line of `rime/input.lua`). Without this a bad
+  layout makes Hyprland fall back to `us`. `Hyprland --verify-config` still checks the generated file before it replaces
+  the old one.
+- **Finding Hyprland on NixOS**: `bin/Hyprland` is a wrapper that execs `.Hyprland-wrapped`, so `pgrep -x Hyprland`
+  never matches. The tools and `rime-compositor-reload` / `rime-session-logout` decide by `XDG_CURRENT_DESKTOP`, then
+  `HYPRLAND_INSTANCE_SIGNATURE`, then the process names (`.Hyprland-wrapp` included).
+- **A home with only `hyprland.conf`** is refused by the Shell's installers, naming `rime-hypr-migrate`, which stays: it
+  is what makes dropping `.conf` safe.
+
+| Check | What it proves | Mutants (each observed failing; `artifacts/hypr-lua/mutants-os/`) |
+|---|---|---|
+| `checks.libexec` (in CI) | both `--self-test`s run with Hyprland 0.57 and xkbcli on PATH and the hardening cases are asserted to have run, not skipped (`libexec-run2.log`) | as the suites below |
+| `tests/test-rime-display.sh` 93/0, `test-rime-input.sh` 123/0, `test-rime-firstrun.sh` 75/0, `test-rime-hypr-lua.sh` 27/0, `test-rime-session-helpers.sh` 9/0 (`os-suites/`) | escaping, validation, snap, mode fit, xkb refusal, no keyword ever invoked, detection, logout/reload commands, colours module | 18: `display-keyword-fallback`, `display-lua_str-no-control-escape`, `display-scale-down-before-up`, `display-fit-skips-mode-check`, `display-accepts-nan`, `input-lua_str-no-control-escape`, `input-main-skips-layout-check`, `input-ignores-unknown-option`, `input-no-model-check`, `firstrun-xkb-always-compiles`, `appearance-no-colors-module`, `display-no-signature-check`, `input-no-signature-check`, `input-pgrep-missing-traceback`, `reload-no-signature-check`, `reload-no-wrapped-name`, `logout-hyprlang-exit`, `input-reload-failure-swallowed` |
+| rime-shell `tests/check-hypr-lua-only.sh` 51/0 (in ci.yml) | no conf dialect, no `hyprctl keyword` in `src/`, dispatch forms evaluated against a stub `hl.dsp`, installers Lua-only, colours output | its own self-test mutants, incl. hyprlang logout, hyprlang dpms, unknown dispatcher, hyprlang dpms action |
+| `checks.hypr-lua` (VM, about 65 s of test script; not in CI, `nix/ci/checks-not-in-ci.txt`) | a real Hyprland + Rime Shell session: kept layout, rounding, accent (also after reload) and focus-mode gaps land through eval; 1.1 on 1280x800 → 1.0666667 in `hyprctl -j monitors`, no "Invalid scale" in Hyprland's log, `monitors.lua` carries it; layout `xx` refused with the note, `hyprctl -j devices` still `gb`; a `hyprland.lua` without Rime's modules opens the notice toast (`vm/probe-modules-missing.png`) and a restored one says "loaded again"; `configerrors` empty at start, after each subtest and at the end (`vm-run11-locked.log` + `vm-run12-locked.log` against the pushed flake.lock, `vm-run9.log` with the path override; `vm/`) | controls in the check itself: raw 1.1 by eval does log "Invalid scale"; `xx` written straight into `input.lua` moves the keyboard off `gb` |
+
+Not proven here: a real login through rime-greet on hardware (VM only); bootc main (nothing of this is ported, see
+the open-items row); `install-arch.sh` does not verify the `hyprland.lua` it appended to (open-items).
+
+After the independent review (open-items "Independent review of `nix/hypr-lua-only`"): one eval chunk per layout with a
+rollback from the live snapshot, an ICC refusal is not persisted and exits 1, only the closest refresh is current, the
+scale snap is Hyprland-only, pgrep is per user, write failures are refusals, the self-tests detect a payload that runs,
+the window helpers and rime-live-session speak `hl.dsp`, `session.lua` names the Adwaita cursor theme, and saved
+keybind combos must be key names. 19 rime-os mutants, all FAIL (`artifacts/hypr-lua/review-fixes/os-mutants/`).
+
 ## 13. Settings piece: decisions taken while building
 
 Andre asked for no questions; each call below was made while building rime-shell `nix/settings-app` (ab8ca519) and

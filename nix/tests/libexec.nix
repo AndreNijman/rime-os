@@ -96,6 +96,25 @@ pkgs.testers.runNixOSTest {
                 if missing.search(l):
                     bad.append(f"{p}: {l}")
         assert not bad, "missing commands or wrong exits:\n" + "\n".join(bad)
+        # The hardening cases only count if they RAN: a self-test SKIPs a case whose tool is absent, so on a VM
+        # with the desktop enabled, Hyprland (system profile) and xkbcli (rime-input-apply's own store PATH) must
+        # both be found, and the injection / snap / layout-refusal cases must report PASS.
+        for p, must in [
+            ("rime-display-apply --self-test", ["PASS  the unescaped payload runs and Hyprland reports its marker (control)",
+                                                 "PASS  the escaped injection module loads and the payload never runs",
+                                                 "PASS  hypr_scale 1920x1080 @ 1.1 -> 1.2 (suggested)",
+                                                 "PASS  apply_hypr never runs `hyprctl keyword`"]),
+            ("rime-input-apply --self-test", ["PASS  the unescaped payload runs and Hyprland reports its marker (control)",
+                                               "PASS  the device-name injection loads and the payload never runs",
+                                               "PASS  xkb: unknown layout xx is refused and the previous layout kept",
+                                               "PASS  xkb: unknown model (xkbcommon says nothing) is refused and the previous layout kept",
+                                               "PASS  Hyprland accepts the generated kb_ options"]),
+        ]:
+            out = outputs[p]
+            skipped = [l for l in out.splitlines() if l.startswith("SKIP") and ("Hyprland" in l or "xkbcli" in l)]
+            assert not skipped, f"{p} skipped what CI is meant to prove: {skipped}"
+            absent = [m for m in must if m not in out]
+            assert not absent, f"{p} did not report: {absent}"
         # the session list is read from /etc/rime/wayland-sessions (bootc: /usr/share/wayland-sessions)
         listed = outputs["rime-session-select --list"].split()
         for sid in ["niri", "rime-labwc", "rime-safe-graphics"]:

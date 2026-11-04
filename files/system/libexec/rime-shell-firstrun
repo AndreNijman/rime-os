@@ -205,10 +205,34 @@ case "${KB_VARIANT}" in
     "(unset)"|"n/a") KB_VARIANT="" ;;
 esac
 
-# Belt-and-braces: validate whatever survived against the xkb database, so ANY
-# future unexpected value degrades to `us` here instead of landing in the user's
-# config and breaking their session. Skipped silently if base.lst is absent.
-if [ -n "${KB_LAYOUT}" ] && [ -r /usr/share/X11/xkb/rules/base.lst ]; then
+# Belt-and-braces: validate whatever survived, so ANY future unexpected value
+# degrades here instead of landing in the user's config. Hyprland cannot compile
+# a bad layout and drops the keyboard to `us` with an error overlay
+# (IKeyboard.cpp:100-116), so the best check is the same compile it does:
+# `xkbcli compile-keymap` builds the keymap with the same libxkbcommon and the
+# same default include paths, and checks the VARIANT and multi-layout lists
+# ("us,de") that a one-word base.lst lookup cannot. A variant that does not fit
+# is dropped before the layout is. base.lst stays as the fallback for a system
+# without xkbcli; skipped silently if that is absent too.
+xkb_compiles() {  # $1 layout, $2 variant (may be empty)
+    if [ -n "$2" ]; then
+        xkbcli compile-keymap --test --rules evdev --layout "$1" --variant "$2" >/dev/null 2>&1
+    else
+        xkbcli compile-keymap --test --rules evdev --layout "$1" >/dev/null 2>&1
+    fi
+}
+if [ -n "${KB_LAYOUT}" ] && command -v xkbcli >/dev/null 2>&1; then
+    if ! xkb_compiles "${KB_LAYOUT}" "${KB_VARIANT}"; then
+        if [ -n "${KB_VARIANT}" ] && xkb_compiles "${KB_LAYOUT}" ""; then
+            log "WARN: xkb variant '${KB_VARIANT}' does not fit layout '${KB_LAYOUT}' — dropping the variant"
+            KB_VARIANT=""
+        else
+            log "WARN: xkbcommon cannot build layout '${KB_LAYOUT}' — falling back to us"
+            KB_LAYOUT=""
+            KB_VARIANT=""
+        fi
+    fi
+elif [ -n "${KB_LAYOUT}" ] && [ -r /usr/share/X11/xkb/rules/base.lst ]; then
     if ! awk -v want="${KB_LAYOUT}" \
         '/^! layout/{f=1;next} /^!/{f=0} f && $1==want{found=1} END{exit !found}' \
         /usr/share/X11/xkb/rules/base.lst 2>/dev/null; then

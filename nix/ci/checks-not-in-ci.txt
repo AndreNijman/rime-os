@@ -22,6 +22,9 @@
 # measured 2026-11-04 on katana, 6 boots of this check, in one of them the Shell never started within 180 s (no log of why; the
 # failure dump now prints processes and the journal), and its pacing numbers come from llvmpipe on whatever the
 # runner shares. The integrator runs it (nix/ci/integrate/drive.sh) until a run of hosted builds shows it steady.
+# hypr-lua (nix/tests/hypr-lua.nix) boots the same Hyprland + Rime Shell session and waits on the same Shell start
+# (180 s), so it carries the same unknown; its display/input logic also runs in CI through checks.libexec's
+# --self-tests and the hosted shell suites. It joins CI together with shell-kept.
 vm-boot             needs the Rime binary cache (TODO(handover) R2): the system test boots the Rime kernel
 kernel-gate         needs the Rime binary cache (TODO(handover) R2): it reads the built Rime vmlinux
 kernel-vm           needs the Rime binary cache (TODO(handover) R2): it boots the Rime kernel and its signed modules
@@ -35,3 +38,4 @@ desktops-install-gnome  does not fit a hosted runner's disk: four release system
 desktops-install-kde    does not fit a hosted runner's disk: four release systems (11.4 GB of store paths), cached again in the server VM and installed in the client VM
 desktops-install-cosmic does not fit a hosted runner's disk: four release systems (11.5 GB of store paths), cached again in the server VM and installed in the client VM
 shell-kept              not yet a dependable gate: 1 of 6 boots the Shell did not start in 180 s (cause unknown); llvmpipe pacing on a shared runner
+hypr-lua                waits on the same Shell start as shell-kept (1 of 6 boots no Shell in 180 s, cause unknown); joins CI with it

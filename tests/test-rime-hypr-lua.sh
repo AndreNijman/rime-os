@@ -49,6 +49,42 @@ finish() {
     [ "$fail" -eq 0 ]
 }
 
+# ── lua_str is one function in two files ─────────────────────────────────────
+# rime-display-apply and rime-input-apply both quote untrusted text (connector
+# names, kernel device names) into Lua. Two copies that drift is how one of them
+# ends up escaping a newline and the other not, so the bodies must be
+# byte-identical and must agree on a battery of hostile strings. Runs before the
+# compositor check: it needs only python3.
+sec "lua_str is identical in both generators"
+DISP="${root}/files/system/libexec/rime-display-apply"
+INP="${root}/files/system/libexec/rime-input-apply"
+lua_block() { sed -n '/^# ── lua_str/,/^# ── end lua_str/p' "$1" | tail -n +2; }
+if [ -n "$(lua_block "$DISP")" ] && [ "$(lua_block "$DISP")" = "$(lua_block "$INP")" ]; then
+    ok "the lua_str bodies are byte-identical"
+else
+    bad "the lua_str bodies are byte-identical"
+fi
+python3 - "$DISP" "$INP" <<'PY' && ok "both escape the same hostile strings the same way"     || bad "both escape the same hostile strings the same way"
+import importlib.machinery, importlib.util, sys
+mods = []
+for i, path in enumerate(sys.argv[1:3]):
+    loader = importlib.machinery.SourceFileLoader(f"gen{i}", path)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    mods.append(mod)
+cases = ['plain', 'a"b', 'back\\slash', 'new\nline', 'tab\there', ']]', '--[[', '\x00\x01\x7f',
+         '\x1b[31m', 'é ü 日本', 'x\n1', '\\"', '"\n hl.exec_cmd("x") --']
+bad = 0
+for c in cases:
+    a, b = mods[0].lua_str(c), mods[1].lua_str(c)
+    raw = any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in a)
+    if a != b or raw or not (a.startswith('"') and a.endswith('"')):
+        print(f"      {c!r}: {a!r} vs {b!r}")
+        bad = 1
+sys.exit(bad)
+PY
+
 for tool in labwc Hyprland hyprctl; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         skip "$tool is not installed; cannot run a nested compositor"
@@ -89,6 +125,11 @@ render "$TMPL" > "$H/.config/hypr/hyprland.lua"
 for f in "$MODULES"/*.lua; do
     render "$f" > "$H/.config/hypr/rime/$(basename "$f")"
 done
+# What Rime Shell's matugen template writes (src/config/hypr-colors.lua.template
+# in rime-shell): appearance.lua must require it when it exists, or the
+# wallpaper accent is lost on every login and reload.
+printf '%s\n' 'hl.config({ general = { col = { active_border = { colors = { "rgb(123abc)" } } } } })' \
+    > "$H/.config/hypr/rime/colors.lua"
 
 # ── the headless host ────────────────────────────────────────────────────────
 env -i HOME="$H" PATH=/usr/bin:/bin XDG_RUNTIME_DIR="$RT" \
@@ -146,6 +187,10 @@ if [ -z "$errs" ] || [ "$errs" = "noerrors" ]; then
 else
     bad "hyprctl configerrors is empty — got: $(hc configerrors | head -5)"
 fi
+
+hc getoption general:col.active_border | pipe_has -i '123abc' \
+    && ok "appearance.lua loads rime/colors.lua (the wallpaper accent border)" \
+    || bad "appearance.lua loads rime/colors.lua (got: $(hc getoption general:col.active_border | head -2 | tr '\n' ' '))"
 
 # The bind count is the sharp end of the migration: a keybinds module that
 # loaded but bound nothing would still give a clean configerrors.
@@ -245,6 +290,20 @@ if hc eval 'hl.config({ general = { border_size = 7 } })' | pipe_has -i '^ok'; t
 else
     bad "hyprctl eval is accepted under a Lua config"
 fi
+
+# The same for dispatch. Under Lua `hyprctl dispatch X` is `return hl.dispatch(X)`
+# (src/ipc/s1/Commands.cpp dispatchRequest, 0.57.0), so the hyprlang form
+# `dispatch workspace 2` evaluates the undefined global `workspace` and does
+# nothing; only an hl.dsp.* expression dispatches. Both directions again.
+# (This nested session has no workspace to switch, "unsafe state", so the replies
+# are the evidence.)
+reply="$(hc dispatch exit)"
+printf '%s' "$reply" | pipe_has 'dispatch in lua is a shorthand' \
+    && ok "a hyprlang dispatch (\`dispatch exit\`) is refused under Lua" \
+    || bad "a hyprlang dispatch (\`dispatch exit\`) is refused under Lua — it answered: $(printf '%s' "$reply" | head -2)"
+hc dispatch 'hl.dsp.no_op()' | pipe_has -i '^ok' \
+    && ok "a Lua dispatch (hl.dsp.no_op()) is accepted" \
+    || bad "a Lua dispatch (hl.dsp.no_op()) is accepted"
 
 # The gradient form Rime Shell pushes on every wallpaper change.
 if hc eval 'hl.config({ general = { ["col.active_border"] = { colors = { "rgb(ff0000)" } } } })' \
