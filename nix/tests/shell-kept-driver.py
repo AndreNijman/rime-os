@@ -263,11 +263,18 @@ if phase in ("full", "short"):
         check("kept windows: every parked window sits at the top centre, 1x1, on the overlay layer",
               all((l[1], l[2]) == (640, 0) for l in pk), str(pk))
     check("closed: no panel at a real size", not full_open(), str(qlayers()))
-    sh(["grim", f"{out}/1-parked.png"])
-    px, bbox = png_diff(f"{out}/0-none.png", f"{out}/1-parked.png", f"{out}/diff-none-vs-parked.png")
-    clock = [p for p in px if p[0] >= 1150 and p[1] < 34]
-    other = [p for p in px if p not in set(clock)]
-    log(f"screenshot diff: {len(px)} px differ, bbox {bbox}; outside the clock: {len(other)} {other[:20]}")
+    # A parked window that draws stays on screen; a bar that is still repainting (an indicator, an icon fading
+    # in) does not. So a difference must survive a second picture taken a few seconds later (CI run 41788582748:
+    # 2,368 px across the bar once, then clean on the rerun).
+    for attempt in (1, 2, 3):
+        sh(["grim", f"{out}/1-parked.png"])
+        px, bbox = png_diff(f"{out}/0-none.png", f"{out}/1-parked.png", f"{out}/diff-none-vs-parked.png")
+        clock = [p for p in px if p[0] >= 1150 and p[1] < 34]
+        other = [p for p in px if p not in set(clock)]
+        log(f"screenshot diff (picture {attempt}): {len(px)} px differ, bbox {bbox}; outside the clock: {len(other)} {other[:20]}")
+        if not other:
+            break
+        time.sleep(3)
     check("parked: the screen matches the one with no panel ever opened (outside the clock)", not other,
           f"{len(px)} px differ, {len(clock)} in the clock")
 
