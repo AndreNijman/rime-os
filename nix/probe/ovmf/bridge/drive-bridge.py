@@ -829,7 +829,7 @@ def phase_finish(a):
     if rc != 3 or "REFUSED [too-few-good-boots]" not in out:
         raise Timeout(f"finish after 2 good boots: rc={rc}, want 3 REFUSED [too-few-good-boots]")
     rc, out = record(vm, "fin-bootc-verb", "rime migrate start --yes", ok=False)
-    if rc != 2 or "rime migrate start" not in out:
+    if rc != 2 or "only `rime migrate finish` is left" not in out:   # the serial echo holds the command: match its answer
         raise Timeout(f"`rime migrate start` on NixOS: rc={rc}, want 2 refused by name")
     poweroff(vm)
 
@@ -846,9 +846,9 @@ def phase_finish(a):
                      f" [ -e {FIN_STATE}/finish.json ] && echo FINISH-JSON=present; echo DRY-RC=$r1/$r2;"
                      " [ \"$a\" = \"$b\" ] && echo DRY-WRITES=none", timeout=1200, ok=False)
     if not re.search(r"^DRY-RC=0/0$", out, re.M) or not re.search(r"^DRY-WRITES=none$", out, re.M) \
-            or "FINISH-JSON=present" in out:
+            or re.search(r"^FINISH-JSON=present$", out, re.M):   # anchored: the serial echo holds the command text
         raise Timeout("finish --dry-run after 3 good boots: want rc 0 (with and without the flag) and nothing written")
-    for want in ("ostree", "@pre-nixos", "stops working"):
+    for want in ("(ostree:", "@pre-nixos", "stops working"):
         if want not in out:
             raise Timeout(f"finish --dry-run does not name {want!r}")
     poweroff(vm)
@@ -903,7 +903,8 @@ def finish_interrupt(a):
     vm.root()
     rc, out = record(vm, "finint-kill",
                      f"{FINISH} --yes > /run/fin.log 2>&1 & p=$!; for i in $(seq 12000); do"
-                     f" grep -q '\"{a.finish_kill_at}\"' {FIN_STATE}/finish.json 2>/dev/null && break; sleep 0.05; done;"
+                     f" grep -q '\"{a.finish_kill_at}\"' {FIN_STATE}/finish.json 2>/dev/null && break;"
+                     " kill -0 $p 2>/dev/null || break; sleep 0.05; done;"
                      " kill -9 $p; wait $p; echo KILL-RC=$?; cat /run/fin.log; cat " + FIN_STATE + "/finish.json; echo;"
                      " ls -la /mnt/rime-top", timeout=1800, ok=False)
     if not re.search(r"^KILL-RC=137$", out, re.M) or '"done"' in out:
