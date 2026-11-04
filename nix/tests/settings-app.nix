@@ -14,7 +14,11 @@
 #                          - `rime mode set gaming` / `daily` flips the extension's Gaming toggle (its report);
 #                          - Power -> performance in the app (its IPC test hook runs the Power page's own handler)
 #                            reaches rimed's Power.Tier, `powerprofilesctl get` and the power-profiles property GNOME
-#                            reads from inside the session.
+#                            reads from inside the session;
+#                          - with polkit refusing switch-profile (a test rule, while /run/rime-test-deny-power exists)
+#                            Power -> performance leaves rimed's tier alone, and the Power page shows why ("Not
+#                            allowed: ...") with the tier in force selected again; screenshot; the next press lands
+#                            and clears the reason.
 #
 #   settings-app-kde     Plasma enabled directly, logged in through rime-greet, then:
 #                          - the applet org.rimeos.quicksettings draws (its report) and is in the user's
@@ -40,6 +44,8 @@
 #   gnome  wrong-app-id             rime-settings starts the app with QS_APP_ID=org.rimeos.Wrong, so GNOME cannot
 #                                   match the window to org.rimeos.Settings.desktop.
 #          wrong-shell-version      metadata.json names shell-version 49 on GNOME 50: GNOME does not load it.
+#          power-refusal-silent     PowerProfileService writes through Quickshell's PowerProfiles.profile again (it
+#                                   only logs a refusal): the refused pick stays and no reason shows.
 #   kde    tray-not-adopted         the applet is not a notification-area applet, nor enabled by default.
 #          wrong-app-id             as GNOME's.
 #          apply-not-interactive    rimed checks Apply without AllowUserInteraction: no prompt, Apply refused.
@@ -173,11 +179,23 @@ let
         # The greeter preselects GNOME (rime-greet reads the session stem from last-session).
         systemd.tmpfiles.rules = [ "f+ /var/lib/rime-greet/last-session 0644 greetd greetd - gnome" ];
         environment.systemPackages = [ pkgs.gtk3 ];
+
+        # A refusal on demand: while /run/rime-test-deny-power exists polkit says no to switching the power profile
+        # (rimed asks polkit for every ActiveProfile write), as it would for someone not signed in at the seat.
+        security.polkit.extraConfig = ''
+          polkit.addRule(function (action, subject) {
+            if (action.id != "org.freedesktop.UPower.PowerProfiles.switch-profile") return undefined;
+            try { polkit.spawn(["${pkgs.coreutils}/bin/test", "-e", "/run/rime-test-deny-power"]); }
+            catch (e) { return undefined; }
+            return polkit.Result.NO;
+          });
+        '';
       };
 
       testScript = ''
         import json
         import shlex
+        import time
 
         def user(cmd):
             env = ("export XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus "
@@ -281,6 +299,33 @@ let
             gnome_reads = machine.succeed(user(f"gdbus call --system --dest {PPD} --object-path /org/freedesktop/UPower/PowerProfiles "
                                               f"--method org.freedesktop.DBus.Properties.Get {PPD} ActiveProfile"))
             assert "performance" in gnome_reads, gnome_reads
+
+        with subtest("a tier rimed refuses: the Power page says why and shows the tier in force again"):
+            # PowerProfileService writes ActiveProfile itself (busctl) because Quickshell's own write only logs a
+            # refusal: the page then showed the refused pick, or snapped back, and never said why.
+            TIER = "busctl get-property org.rimeos.Rimed1 /org/rimeos/Rimed1 org.rimeos.Rimed1.Power Tier"
+            def page():
+                # quickshell prints a locale warning on stdout first: the answer is the JSON line.
+                out = machine.succeed(user(f"{qs} -p {app} ipc call settings powerState"))
+                return json.loads([l for l in out.splitlines() if l.startswith("{")][-1])
+            machine.succeed("rime tier balanced")
+            machine.wait_until_succeeds(user(f"{qs} -p {app} ipc call settings powerState") + " | grep -F '\"tier\":\"balanced\"'", timeout=30)
+            machine.succeed("touch /run/rime-test-deny-power")
+            t0 = time.monotonic()
+            print("app answered:", machine.succeed(user(f"{qs} -p {app} ipc call settings power performance")))
+            machine.wait_until_succeeds(user(f"{qs} -p {app} ipc call settings powerState") + " | grep -F 'Not allowed'", timeout=10)
+            shown = page()
+            print(f"refused after {time.monotonic() - t0:.1f} s (1 s polling); the page shows:", shown)
+            machine.screenshot("settings-power-refused")
+            assert shown["tier"] == "balanced", f"the page still shows the refused pick: {shown}"
+            assert machine.succeed(TIER).strip() == 's "balanced"', machine.succeed(TIER)
+            print(machine.succeed("journalctl -b --no-pager -o cat -u rimed.service -u polkit.service | tail -n 6"))
+
+            machine.succeed("rm /run/rime-test-deny-power")
+            print("app answered:", machine.succeed(user(f"{qs} -p {app} ipc call settings power power-saver")))
+            machine.wait_until_succeeds(f"{TIER} | grep -F power-saver", timeout=30)
+            machine.wait_until_succeeds(user(f"{qs} -p {app} ipc call settings powerState") + " | grep -F '\"tier\":\"power-saver\"'", timeout=10)
+            assert page()["reason"] == "", f"the reason outlived the next press: {page()}"
 
         with subtest("no Rime Shell in the GNOME session"):
             procs = machine.succeed("ps -u rime -o args=")
@@ -639,6 +684,22 @@ in
                 # $out/bin/rime-settings is makeWrapper's; the script it runs is under share/.
                 sed -i 's/QS_APP_ID=org.rimeos.Settings/QS_APP_ID=org.rimeos.Wrong/' $out/share/rime-shell/bin/rime-settings
                 grep -F QS_APP_ID=org.rimeos.Wrong $out/share/rime-shell/bin/rime-settings
+              '';
+            });
+          };
+        };
+      };
+      power-refusal-silent = gnomeTest {
+        name = "rime-settings-app-gnome-power-refusal-silent";
+        overlay = _final: prev: {
+          rime = prev.rime // {
+            rime-shell = prev.rime.rime-shell.overrideAttrs (o: {
+              doInstallCheck = false;
+              postInstall = (o.postInstall or "") + ''
+                f=$out/share/rime-shell/src/services/system/PowerProfileService.qml
+                grep -F 'root._ppdWrite(id)' $f
+                sed -i -E 's/^( *)root\._ppdWrite\(id\)$/\1PowerProfiles.profile = (id === "performance" ? PowerProfile.Performance : id === "power-saver" ? PowerProfile.PowerSaver : PowerProfile.Balanced)/' $f
+                ! grep -F 'root._ppdWrite(id)' $f
               '';
             });
           };

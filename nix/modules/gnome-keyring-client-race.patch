@@ -1,0 +1,43 @@
+diff --git a/daemon/dbus/gkd-secret-objects.c b/daemon/dbus/gkd-secret-objects.c
+index af89601..7b02600 100644
+--- a/daemon/dbus/gkd-secret-objects.c
++++ b/daemon/dbus/gkd-secret-objects.c
+@@ -430,7 +430,15 @@ secret_objects_lookup_gck_object_for_path (GkdSecretObjects *self,
+ 
+ 	/* The session we're using to access the object */
+ 	session = gkd_secret_service_get_pkcs11_session (self->service, sender);
+-	g_return_val_if_fail (session, FALSE);
++	if (session == NULL) {
++		/* A property getter must set an error when it returns NULL: GDBus
++		 * aborts the daemon otherwise. */
++		g_set_error (error_out, G_DBUS_ERROR, G_DBUS_ERROR_FAILED,
++			     "No session for the caller to look up '%s'", path);
++		g_free (c_ident);
++		g_free (i_ident);
++		return NULL;
++	}
+ 
+ 	if (i_ident) {
+ 		gck_builder_add_ulong (&builder, CKA_CLASS, CKO_SECRET_KEY);
+diff --git a/daemon/dbus/gkd-secret-service.c b/daemon/dbus/gkd-secret-service.c
+index 7a44581..8bd6cb0 100644
+--- a/daemon/dbus/gkd-secret-service.c
++++ b/daemon/dbus/gkd-secret-service.c
+@@ -1245,6 +1245,9 @@ gkd_secret_service_get_pkcs11_session (GkdSecretService *self, const gchar *call
+ 	g_return_val_if_fail (GKD_SECRET_IS_SERVICE (self), NULL);
+ 	g_return_val_if_fail (caller, NULL);
+ 
++	/* The message filter creates the client from an idle callback, which can
++	 * run after the call it was meant to precede: create it here if so. */
++	gkd_secret_service_ensure_client (self, caller);
+ 	client = g_hash_table_lookup (self->clients, caller);
+ 	g_return_val_if_fail (client, NULL);
+ 
+@@ -1380,6 +1383,7 @@ gkd_secret_service_publish_dispatch (GkdSecretService *self, const gchar *caller
+ 	g_return_if_fail (GKD_SECRET_IS_DISPATCH (object));
+ 
+ 	/* Take ownership of the session */
++	gkd_secret_service_ensure_client (self, caller);
+ 	client = g_hash_table_lookup (self->clients, caller);
+ 	g_return_if_fail (client);
+ 	path = gkd_secret_dispatch_get_object_path (object);

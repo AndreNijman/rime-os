@@ -749,10 +749,14 @@ binds the fake `acpi` there, and its first assertion ("the fake sysfs ... is wha
 
 The Shell side (rime-shell `feat/nixos` e6fb6f98, which merges main's #51-#54 and `nix/settings-app`):
 PowerProfileService keeps `nix/settings-app`'s two backends (§13) and #54's "says why" (`error`, `errorDetail`,
-`explain()`, the 8 s message, no read while a set runs) on the `rime tier` path. On the power-profiles path Quickshell
-writes `ActiveProfile` itself: it keeps the value it wrote and only logs a refusal (`pushPropertyUpdate`, Quickshell
-0.3.2), so no message is shown there; rimed allows that write to the active local user, who is the one running the
-Shell. The Shell never reads the D-Bus `Profiles` list (its own list is high to low, `check-tier-parity`), so the
+`explain()`, the 8 s message, no read while a set runs) on the `rime tier` path. On the power-profiles path it
+writes `ActiveProfile` with one `busctl --system set-property` per press (rime-shell f6a56a7b, 2026-11-04), not through
+Quickshell, whose write keeps the value it set and only logs a refusal (`pushPropertyUpdate`, Quickshell 0.3.2). The
+pick shows at once; when rimed refuses (polkit, which busctl prints as "Access denied"), the label goes back to the
+profile in force and `error` says why, and Rime Settings' Power page shows it under the tier ("Not changed"). Reads
+still come from Quickshell's PowerProfiles (PropertiesChanged; no polling), and rimed's API is unchanged, so GNOME,
+KDE and COSMIC see a standard power-profiles daemon. `checks.settings-app-gnome` refuses one press through a test
+polkit rule and reads the page. The Shell never reads the D-Bus `Profiles` list (its own list is high to low, `check-tier-parity`), so the
 order change above does not reach it. The merge also drops a `busctl` read that was already on its way when a set
 started (it carried the old tier back under the press, about one run in five of `run-power-profile-test.sh`).
 rime-shell `nix/update-indicator`, `nix/settings-apply-bar` and `nix/smooth-motion` were the same changes as main's
