@@ -53,13 +53,13 @@ fi
 # why it exists. `help` is clap's own and is deliberately not listed.
 VERBS="
 status tier profile battery fan game mode workload perf gaming
-fingerprint pin rollback update live shell metrics doctor changelog
+fingerprint pin rollback gc update live shell metrics doctor changelog
 install remove resolve search repo pkg env devices firewall remote
 agent project request secret account mcp skill provenance backup
 blueprint apply sync plugin cloudflare
 ai host build send open
 task recover disposable boot migrate
-trust storage qualify firmware channel schema
+trust storage qualify firmware luks channel schema
 lid permissions user vm browser
 ui
 "
