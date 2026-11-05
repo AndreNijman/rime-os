@@ -3903,11 +3903,16 @@ jobs:
           skipped="$(printf '%s' "$summary" | awk '{print $7}')"
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
           [ "$failed" = 0 ] || { echo "::error::$failed rime hypr-lua assertions failed"; exit 1; }
-          if [ "$passed" -eq 0 ]; then
-              [ "$skipped" -gt 0 ] || { echo "::error::test-rime-hypr-lua.sh asserted nothing and did not say why"; exit 1; }
-              echo "::warning::test-rime-hypr-lua.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
+          # Two halves: the lua_str checks need only python3 and run everywhere
+          # (2 assertions, before the compositor probe); everything after needs
+          # a nested labwc + Hyprland, and the suite SKIPs (and stops) when it
+          # cannot start one. A skip therefore means the compositor half did not
+          # run, and only the static floor can be held.
+          if [ "$skipped" -gt 0 ]; then
+              [ "$passed" -ge 2 ] || { echo "::error::only $passed rime hypr-lua assertions ran; the static lua_str half alone is 2"; exit 1; }
+              echo "::warning::test-rime-hypr-lua.sh ran only its static half on this runner ($passed passed, $skipped skipped) — the compositor half needs a nested labwc and ubuntu-24.04 has none, so that half is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
           else
-              [ "$passed" -ge 22 ] || { echo "::error::only $passed rime hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+              [ "$passed" -ge 24 ] || { echo "::error::only $passed rime hypr-lua assertions ran; a full run is the 2 static ones plus the 22 compositor ones that ran on 2026-09-18, so some no longer execute"; exit 1; }
           fi
 
       # The compositor's motion classes (UI/UX roadmap v3 Phase 20) and the
