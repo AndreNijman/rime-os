@@ -111,6 +111,8 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     'for c in "$t"/catalogue/*; do args+=(--catalogue-out "$(readlink -f "$c")"); done' ""
   wmutant "the catalogue never built" '-L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue' '-L .#rime-release-plan'
   wmutant "no release-plan check" ".#checks.x86_64-linux.release-plan" ".#checks.x86_64-linux.release-unit"
+  wmutant "rimed built under the user-namespace restriction" \
+    "run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" "run: true"
   wmutant "publish on a self-hosted runner" \
     "    environment: nix-release
     permissions:" "    runs-on: [self-hosted, katana]

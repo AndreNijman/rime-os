@@ -148,6 +148,24 @@ def payload_order(steps):
     return bad
 
 
+def userns_first(steps):
+    """A hosted job that may build rimed from source (a release toplevel or the payload closure) lifts Ubuntu 24.04's
+    AppArmor user-namespace restriction first: rimed's checkPhase runs bubblewrap inside the Nix sandbox and fails
+    with "bwrap: setting up uid map: Permission denied" without it (the first main release, 2026-11-05)."""
+    runs = [s.get("run", "") for s in steps]
+    builds = [i for i, r in enumerate(runs)
+              if any("nix build" in ln and "--dry-run" not in ln
+                     and (".#rime-release-toplevels-hosted" in ln or ".#rime-bridge-payload-closure" in ln)
+                     for ln in r.splitlines())]
+    if not builds:
+        return []
+    lifted = [i for i, r in enumerate(runs) if re.search(r"sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0\b", r)]
+    if not lifted or min(lifted) >= builds[0]:
+        return ["builds rimed without lifting the user-namespace restriction first "
+                "(sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0)"]
+    return []
+
+
 def check(path):
     text = open(path).read()
     wf = yaml.safe_load(text)
@@ -219,6 +237,8 @@ def check(path):
             bad.append(f"{where}: a job naming a nix-release secret must be restricted to refs/heads/main in its if:")
         if path.endswith("nix-release.yml"):
             bad += [f"{where}: {b}" for b in payload_order(steps)]
+            if runs_on is not None and hosted(runs_on):
+                bad += [f"{where}: {b}" for b in userns_first(steps)]
     return bad
 
 

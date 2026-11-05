@@ -404,7 +404,12 @@ let
                                   r"|PM: Some devices failed to suspend, or early wake event detected"
                                   r"|Failed to put system to sleep\. System resumed again: Operation not supported"
                                   r"|Failed to start System Suspend\."
-                                  r"|ata\d+\.\d+: Check power mode failed \(err_mask=0x1\))")
+                                  r"|ata\d+\.\d+: Check power mode failed \(err_mask=0x1\)"
+            # The daemon-killed round above kill -9s rime-gnome-unlock under an open prompt. When its PAM worker had
+            # already entered pam_authenticate, the worker loses its conversation and logs exactly these two (CI on
+            # main, 158.9 s, 60 s before this round). A wrong password logs "authentication failure", never these.
+                                  r"|pam_unix\(rime-gnome-unlock:auth\): conversation failed"
+                                  r"|pam_unix\(rime-gnome-unlock:auth\): auth could not identify password for \[rime\])")
             errors = machine.succeed("journalctl -b -p err --no-pager -o cat | sort").splitlines()
             other = [line for line in sorted(set(errors) - set(ERRORS_BEFORE)) if not vm_abort.fullmatch(line)]
             assert not other, other
