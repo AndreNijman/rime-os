@@ -937,8 +937,10 @@ case "$1 $2" in
 esac
 SH
 chmod +x "$CROOT/bin-refuse/hyprctl"
+# CI exports RIME_DISPLAY_NO_LIVE for the whole suite; these cases are about
+# the live push, so they must not inherit it.
 colour_live() {
-    PATH="$CROOT/bin-refuse" HOME="$CROOT/home" \
+    env -u RIME_DISPLAY_NO_LIVE PATH="$CROOT/bin-refuse" HOME="$CROOT/home" \
         RIME_DISPLAY_DRM_ROOT="$CROOT/drm" \
         CM_STATE="$CM_STATE" CM_ICC="$CROOT/icc" \
         XDG_CURRENT_DESKTOP=Hyprland "$PY" "$GEN" "$@"
