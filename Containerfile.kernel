@@ -302,6 +302,12 @@ RUN set -eux; \
     done; \
     KVER="$(rpm -qp --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' /rpms/kernel-cachyos-core-*.rpm | head -1)"; \
     test -n "${KVER}" || { echo "FATAL: cannot read the kernel version off its own rpm"; exit 1; }; \
+    # The RPMs must be the pinned tree. The spec can fetch a different Source0
+    # by itself, and every sha256 check above still passes when it does.
+    case "${KVER}" in \
+        "${KERNEL_VERSION}-"*) echo "built kernel ${KVER} is the pinned ${KERNEL_VERSION}" ;; \
+        *) echo "FATAL: built ${KVER}, but the pinned KERNEL_VERSION is ${KERNEL_VERSION}"; exit 1 ;; \
+    esac; \
     # Containerfile.core finds the kernel with `ls -d /usr/lib/modules/*cachyos*`.
     # If a release-string change ever stopped matching that glob, core would
     # fail on an unset KVER with nothing saying why. Assert it here, where the
