@@ -33,6 +33,8 @@
   rime-hostlayer = callPackage ./rime-hostlayer { };
   rime-kbd-xkb = callPackage ./rime-kbd-xkb.nix { };
   rime-bridge = callPackage ./rime-bridge { };
+  # The release pipeline's payload tools (build, sign, check) with their tools on PATH.
+  rime-bridge-payload = callPackage ./rime-bridge/payload.nix { inherit (pkgs.rime) rime-bridge; };
   # GNOME Shell's screen lock under rime-greet: the org.gnome.DisplayManager password check (docs/nixos/desktops.md §12.4).
   rime-gnome-unlock = callPackage ./rime-gnome-unlock { };
   # Rime in each desktop's own quick settings (docs/nixos/desktops.md §6): nix/integrations.

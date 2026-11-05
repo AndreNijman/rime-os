@@ -2,6 +2,7 @@
 # payload.sh TOPLEVEL BRIDGE SECRET: the payload disk the lab VMs get as their third virtio disk (README.md here).
 # Runs INSIDE the rime-nix container (run.sh calls it under `nix shell` with the tools).
 #
+# The payload/ files are the product's payload-build.sh (share/rime-bridge of BRIDGE), the release pipeline's builder:
 #   payload/store.tar.zst      every store path of TOPLEVEL's closure (closureInfo), as nix/store/... entries
 #   payload/registration       the closure's nix-store --load-db input (narHash, narSize, references)
 #   payload/preview.tar        what `check --explain --payload` runs BEFORE start: the payload's own rime-hostlayer,
@@ -32,40 +33,8 @@ fi
 P=$LAB/payload-tree
 CI=$(nix build --no-link --print-out-paths --impure --expr \
   "(builtins.getFlake \"github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325\").legacyPackages.x86_64-linux.closureInfo { rootPaths = [ (builtins.storePath \"$TOP\") ]; }")
-NIX=$(dirname "$(dirname "$(readlink -f "$TOP/sw/bin/nix-store")")")
-HL=$(dirname "$(dirname "$(readlink -f "$TOP/sw/bin/rime-hostlayer")")")
-rm -rf "$P"; mkdir -p "$P/payload"
-echo ">> closure: $(wc -l < "$CI/store-paths") paths, nix $NIX, hostlayer $HL"
-sed 's|^/||' "$CI/store-paths" | tar -C / --owner=0 --group=0 --numeric-owner -cf - -T - | zstd -T0 -3 -q -o "$P/payload/store.tar.zst"
-cp "$CI/registration" "$P/payload/registration"
-
-V=$P/preview
-mkdir -p "$V/system/sw/bin"
-cp "$HL/bin/rime-hostlayer" "$V/rime-hostlayer"
-cp "$HL/share/rime-hostlayer/greetd-config.toml" "$V/greetd-config.toml"
-# /etc as the new system will have it (every file's contents: carry compares settings), dereferenced; a link to a file
-# only the running system makes (etc/cups, etc/fonts/2.11/fonts.conf) is skipped: tar says so and exits 1, not 2.
-# sw/bin: the command names.
-{ tar -C "$TOP" -h --owner=0 --group=0 --numeric-owner -cf - etc || [[ $? -eq 1 ]]; } | tar -C "$V/system" -xf -
-for b in "$TOP"/sw/bin/*; do : > "$V/system/sw/bin/$(basename "$b")"; done
-tar -C "$V" --owner=0 --group=0 --numeric-owner --sort=name -cf "$P/payload/preview.tar" rime-hostlayer greetd-config.toml system
-rm -rf "$V"
-
-python3 - "$P/payload" "$TOP" "$NIX" <<'PY'
-import hashlib, json, os, sys
-d, top, nix = sys.argv[1:]
-def sha(p):
-    h = hashlib.sha256()
-    with open(p, "rb") as f:
-        for b in iter(lambda: f.read(1 << 20), b""):
-            h.update(b)
-    return h.hexdigest()
-m = {"toplevel": top, "nix": nix}
-for k, f in (("store", "store.tar.zst"), ("registration", "registration"), ("preview", "preview.tar")):
-    m[k] = {"file": f, "sha256": sha(os.path.join(d, f))}
-json.dump(m, open(os.path.join(d, "manifest.json"), "w"), indent=1)
-print(json.dumps(m, indent=1))
-PY
+rm -rf "$P"; mkdir -p "$P"
+bash "$BRIDGE/share/rime-bridge/payload-build.sh" "$TOP" "$CI" "$P/payload"
 bash "$BRIDGE/share/rime-bridge/payload-sign.sh" "$SECRET" "$P/payload"
 cat "$P/payload/manifest.json.sig"
 install -m755 "$BRIDGE/share/rime-bridge/rime-migrate" "$P/rime-migrate"

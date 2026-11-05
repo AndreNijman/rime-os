@@ -122,7 +122,7 @@ step_toplevel() {
 step_payload() {
   local b
   b=$(NIX nix build --no-link --print-out-paths "${NIXJ[@]}" "path:$(work "$TREE")#rime-bridge")
-  NIX nix shell $PIN#{zstd,e2fsprogs,python3,gnutar,coreutils,gnused,bash,openssl,findutils,diffutils} -c \
+  NIX nix shell $PIN#{zstd,e2fsprogs,python3,gnutar,coreutils,gnused,gnugrep,bash,openssl,findutils,diffutils} -c \
     env LAB="$(work "$LAB")" bash nix/probe/ovmf/bridge/payload.sh "$(cat "$LAB/toplevel")" "$b" \
     "$(work "$LAB")/keys/payload-TEST.sec" 2>&1 | tee "$ART/payload.log"
 }

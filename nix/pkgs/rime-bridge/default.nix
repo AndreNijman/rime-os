@@ -5,6 +5,9 @@
 #                                          machine (Fedora's python, nothing from /nix), and what the OVMF lab copies
 #                                          into its VMs (nix/probe/ovmf/bridge)
 #   share/rime-bridge/payload-sign.sh       writes the payload's manifest.json.sig (the release pipeline; the lab)
+#   share/rime-bridge/payload-build.sh      builds a payload from a toplevel and its closureInfo (the release; the lab)
+#   share/rime-bridge/payload-release.sh    signs a payload, refuses a key other than the trusted one, checks it with
+#                                          the bridge's own verify_payload (the release; pkgs.rime.rime-bridge-payload)
 #   bin/rime-migrate-finish                 `rime migrate finish`, on the moved NixOS system: removes the old side
 #                                          (rime-migrate-finish.py; it loads bin/rime-migrate beside it for the start
 #                                          record's reading, so the record is read one way everywhere)
@@ -30,7 +33,7 @@ stdenvNoCC.mkDerivation {
 
   src = lib.fileset.toSource {
     root = ./.;
-    fileset = lib.fileset.unions [ ./rime-bridge.py ./rime-migrate-finish.py ./payload-sign.sh ./tests ];
+    fileset = lib.fileset.unions [ ./rime-bridge.py ./rime-migrate-finish.py ./payload-sign.sh ./payload-build.sh ./payload-release.sh ./tests ];
   };
 
   buildInputs = [ python3 ];
@@ -45,6 +48,9 @@ stdenvNoCC.mkDerivation {
     substituteInPlace $out/share/rime-bridge/rime-migrate --replace-fail '#!/usr/bin/env python3' '#!/usr/bin/python3 -I'
     # The release pipeline's signer of the payload manifest (docs/nixos/bridge.md); run with bash, needs openssl.
     install -Dm755 payload-sign.sh $out/share/rime-bridge/payload-sign.sh
+    # The payload's builder and the release's sign-and-check (payload.nix wraps both with their tools).
+    install -Dm755 payload-build.sh $out/share/rime-bridge/payload-build.sh
+    install -Dm755 payload-release.sh $out/share/rime-bridge/payload-release.sh
     install -Dm755 rime-bridge.py $out/bin/rime-migrate
     substituteInPlace $out/bin/rime-migrate --replace-fail '#!/usr/bin/env python3' '#!${python3}/bin/python3 -I'
     install -Dm755 rime-migrate-finish.py $out/bin/rime-migrate-finish

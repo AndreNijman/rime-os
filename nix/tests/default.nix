@@ -59,6 +59,8 @@
 // import ./hygiene.nix { inherit pkgs self; }
 # bridge-unit, bridge-refusals, rootfs-unit
 // import ./bridge.nix { inherit pkgs self; }
+# bridge-payload (the payload's builder and release signer, + mutants)
+// import ./bridge-payload.nix { inherit pkgs self; }
 # pkg-translate (+ .katana)
 // import ./pkg-translate.nix { inherit pkgs self; }
 # equibop
