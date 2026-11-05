@@ -7,7 +7,7 @@
 
     # rime-shell is source only; its own flake is retired (PLAN.md D8). The release job bumps this input (A15).
     rime-shell = {
-      url = "github:AndreNijman/rime-shell/feat/nixos";
+      url = "github:AndreNijman/rime-shell/main";
       flake = false;
     };
   };

@@ -19,16 +19,16 @@
     "rime-shell": {
       "flake": false,
       "locked": {
-        "lastModified": 1793875231,
-        "narHash": "sha256-cQTlN6pMaQxGhXPpcRYet3UDcxTwKfQ6qI2xXyy4qjM=",
+        "lastModified": 1793886031,
+        "narHash": "sha256-a2dnG3apHr856EM/h4zgs6z4d3wfyOza9XtVvQTjSm4=",
         "owner": "AndreNijman",
         "repo": "rime-shell",
-        "rev": "3f61e738c5178f5276502f804c329edc1a291ce5",
+        "rev": "2afae84c86f88e7457fb95931e4ab9479bcaaabd",
         "type": "github"
       },
       "original": {
         "owner": "AndreNijman",
-        "ref": "feat/nixos",
+        "ref": "main",
         "repo": "rime-shell",
         "type": "github"
       }

@@ -39,9 +39,9 @@ name: Nix
 
 on:
   push:
-    branches: [feat/nixos, 'nix/**']
+    branches: [main, feat/nixos, 'nix/**']
   pull_request:
-    branches: [feat/nixos]
+    branches: [main, feat/nixos]
   workflow_dispatch:
     inputs:
       fresh:
