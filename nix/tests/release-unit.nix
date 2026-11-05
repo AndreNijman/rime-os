@@ -112,7 +112,14 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
   wmutant "the catalogue never built" '-L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue' '-L .#rime-release-plan'
   wmutant "no release-plan check" ".#checks.x86_64-linux.release-plan" ".#checks.x86_64-linux.release-unit"
   wmutant "rimed built under the user-namespace restriction" \
-    "run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" "run: true"
+    "run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" "run: echo the restriction stays"
+  wmutant "the user-namespace sysctl allowed to fail" \
+    "run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" "run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true"
+  wmutant "the user-namespace sysctl behind an if:" \
+    "      - name: Allow user namespaces (bubblewrap in rimed's tests)
+        run:" "      - name: Allow user namespaces (bubblewrap in rimed's tests)
+        if: runner.debug == '1'
+        run:"
   wmutant "publish on a self-hosted runner" \
     "    environment: nix-release
     permissions:" "    runs-on: [self-hosted, katana]

@@ -132,7 +132,7 @@ def payload_order(steps):
     """A job that pushes with oras pushes the bridge payload: only after rime-bridge-payload-release signed it against
     the trusted key line (which also ran the bridge's verify_payload), and it checks the pulled-back copy with --verify
     after the push."""
-    runs = [s.get("run", "") for s in steps]
+    runs = [str(s.get("run", "")) for s in steps]
     push = [i for i, r in enumerate(runs) if PUSH_RE.search(r)]
     if not push:
         return []
@@ -152,14 +152,19 @@ def userns_first(steps):
     """A hosted job that may build rimed from source (a release toplevel or the payload closure) lifts Ubuntu 24.04's
     AppArmor user-namespace restriction first: rimed's checkPhase runs bubblewrap inside the Nix sandbox and fails
     with "bwrap: setting up uid map: Permission denied" without it (the first main release, 2026-11-05)."""
-    runs = [s.get("run", "") for s in steps]
+    runs = [str(s.get("run", "")) for s in steps]
     builds = [i for i, r in enumerate(runs)
               if any("nix build" in ln and "--dry-run" not in ln
                      and (".#rime-release-toplevels-hosted" in ln or ".#rime-bridge-payload-closure" in ln)
                      for ln in r.splitlines())]
     if not builds:
         return []
-    lifted = [i for i, r in enumerate(runs) if re.search(r"sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0\b", r)]
+    # An unconditional step that runs the sysctl as a command of its own: not a comment, not `|| true`, not behind if:
+    # or continue-on-error (each would let the build start under the restriction).
+    lifted = [i for i, s in enumerate(steps)
+              if "if" not in s and not s.get("continue-on-error")
+              and any(re.fullmatch(r"sudo sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0", ln.strip())
+                      for ln in runs[i].splitlines())]
     if not lifted or min(lifted) >= builds[0]:
         return ["builds rimed without lifting the user-namespace restriction first "
                 "(sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0)"]
@@ -186,7 +191,7 @@ def check(path):
             bad.append("concurrency must keep main in group nix-release and never cancel it there")
         # The class 2 catalogue ships with the release (§3.1): the closure step names every app build, and the
         # build step runs checks.release-plan, which fails when a buildable catalogue app has no build.
-        runs = [st.get("run", "") for job in (wf.get("jobs") or {}).values() for st in (job.get("steps") or [])]
+        runs = [str(st.get("run", "")) for job in (wf.get("jobs") or {}).values() for st in (job.get("steps") or [])]
         closure = [r for r in runs if "rime-nix-release\" closure" in r or "rime-nix-release closure" in r]
         if not closure or not all("--catalogue-out" in r for r in closure):
             bad.append("the closure step must pass every catalogue app build (--catalogue-out)")
@@ -206,7 +211,7 @@ def check(path):
             if not (u.startswith("./") or SHA_PIN.match(u)):
                 bad.append(f"{where}: {u} is not pinned by commit SHA")
         for s in steps:
-            run = s.get("run", "")
+            run = str(s.get("run", ""))
             if re.search(r"\$\{\{\s*(inputs\.|github\.event\.)", run):
                 bad.append(f"{where}: a run: script expands ${{{{ inputs/github.event }}}} (use env:)")
         perms = job.get("permissions") or {}

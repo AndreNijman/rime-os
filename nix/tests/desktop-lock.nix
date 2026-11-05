@@ -343,6 +343,15 @@ let
         def channels_opened():
             return int(machine.succeed("journalctl -b -u rime-gnome-unlock.service --no-pager -o cat | grep -c 'reauthentication channel for pid' || true").strip())
 
+        # The PAM worker of a daemon killed mid-prompt loses its conversation. Counted per round, not exempted
+        # journal-wide, so the same lines anywhere else still fail the suspend round.
+        KILLED_PROMPT_PAM = re.compile(r"pam_unix\(rime-gnome-unlock:auth\): (conversation failed"
+                                       r"|auth could not identify password for \[rime\])")
+
+        def killed_prompt_pam():
+            return [line for line in machine.succeed("journalctl -b -p err --no-pager -o cat").splitlines()
+                    if KILLED_PROMPT_PAM.fullmatch(line)]
+
         def kill_unlock():
             pid = unlock_pid()
             machine.succeed(f"kill -9 {pid}")
@@ -362,6 +371,8 @@ let
             machine.send_key("esc")
             machine.sleep(3)
             unlock_right("gnome-unlocked-after-kill")
+            PAM_AFTER_KILL = killed_prompt_pam()
+            print("PAM lines left by the killed prompt:", PAM_AFTER_KILL)
 
         with subtest("GNOME: a crash loop does not exhaust the unit; the lock still works"):
             before = int(machine.succeed("systemctl show -p NRestarts --value rime-gnome-unlock.service").strip())
@@ -404,14 +415,15 @@ let
                                   r"|PM: Some devices failed to suspend, or early wake event detected"
                                   r"|Failed to put system to sleep\. System resumed again: Operation not supported"
                                   r"|Failed to start System Suspend\."
-                                  r"|ata\d+\.\d+: Check power mode failed \(err_mask=0x1\)"
-            # The daemon-killed round above kill -9s rime-gnome-unlock under an open prompt. When its PAM worker had
-            # already entered pam_authenticate, the worker loses its conversation and logs exactly these two (CI on
-            # main, 158.9 s, 60 s before this round). A wrong password logs "authentication failure", never these.
-                                  r"|pam_unix\(rime-gnome-unlock:auth\): conversation failed"
-                                  r"|pam_unix\(rime-gnome-unlock:auth\): auth could not identify password for \[rime\])")
+                                  r"|ata\d+\.\d+: Check power mode failed \(err_mask=0x1\))")
             errors = machine.succeed("journalctl -b -p err --no-pager -o cat | sort").splitlines()
-            other = [line for line in sorted(set(errors) - set(ERRORS_BEFORE)) if not vm_abort.fullmatch(line)]
+            # The daemon-killed round can leave two pam_unix lines when its PAM worker had already entered
+            # pam_authenticate (CI on main: 158.9 s, 60 s before this round). Exactly the ones it left, counted;
+            # a wrong password logs "authentication failure", never these.
+            pam_now = killed_prompt_pam()
+            assert pam_now == PAM_AFTER_KILL, (pam_now, PAM_AFTER_KILL)
+            other = [line for line in sorted(set(errors) - set(ERRORS_BEFORE))
+                     if not vm_abort.fullmatch(line) and not KILLED_PROMPT_PAM.fullmatch(line)]
             assert not other, other
             assert locked_hint() == "yes", "the session was not locked after resume"
             machine.sleep(5)
