@@ -2530,6 +2530,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-fstrim.sh
 
+      # The LUKS key-slot enrolment, with cryptsetup and systemd-cryptenroll
+      # stubbed: when the TPM step declines after the recovery key went on,
+      # the retry it prints must work once the cause is fixed (the full path
+      # refuses a volume that already has a recovery key).
+      - name: Run LUKS enrolment retry assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-luks-enroll.sh
+
       # plymouthd crashed hiding the splash when the display driver came up
       # after the initramfs; the image ships Fedora's plymouth rebuilt with
       # the fix. Static: the patch, the build that applies it, and the guards
@@ -4873,7 +4881,8 @@ jobs:
             files/system/bin/steamos-update \
             files/system/libexec/rime-safe-graphics \
             files/system/libexec/rime-safe-graphics-terminal \
-            tests/test-rime-chaos.sh tests/test-rime-vm.sh
+            tests/test-rime-chaos.sh tests/test-rime-vm.sh \
+            tests/test-rime-luks-enroll.sh
           # The chaos harness separately, with -x so the driver's `. lib.sh`
           # is followed, and the cases as bash fragments because they are
           # sourced rather than executed and have no shebang of their own.

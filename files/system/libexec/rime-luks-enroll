@@ -408,6 +408,13 @@ mv -f "$rec_tmp" "$RECOVERY_OUT"
 trap - EXIT
 emit "recovery: enrolled file=$RECOVERY_OUT"
 say "  recovery key written to $RECOVERY_OUT"
+# From here the volume carries a recovery key, and the full path refuses a
+# volume that has one, so a decline below must hand the user the resumption that
+# keeps it: re-binding the TPM slot is all that is left to do.
+RETRY="$0 --tpm-only --device $DEVICE"
+(( ! WITH_PIN )) || RETRY+=" --with-pin"
+[[ "$WANT_POLICY" == auto ]] || RETRY+=" --policy $WANT_POLICY"
+[[ "$TPM2_DEVICE" == auto ]] || RETRY+=" --tpm2-device $TPM2_DEVICE"
 fi
 
 # assert_kept — the TPM-only promise, checked against the header itself.
@@ -623,7 +630,8 @@ if [[ "$setup_state" != "0" ]]; then
         "The firmware is in Secure Boot SETUP MODE: it has no platform key, so" \
         "anyone can enrol their own signing key and boot anything they like." \
         "Leave setup mode in the firmware setup (usually by restoring the" \
-        "default Secure Boot keys), then re-run this command."
+        "default Secure Boot keys), then run:" \
+        "  sudo $RETRY"
 fi
 
 [[ "$sb_state" == "1" ]] && SB_ENFORCING=1
