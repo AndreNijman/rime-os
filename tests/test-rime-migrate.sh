@@ -118,11 +118,9 @@ if [[ "$trust" == "None '/usr/share/rime-os/trust/nixos-bridge-payload.pub' 'man
 else
     bad "payload trust root changed" "$trust"
 fi
-# The key file. This image does not carry one yet (the release key is made in
-# the release environment: docs/nixos-move.md), so every start refuses
-# payload-key-missing. Once files/system/trust/nixos-bridge-payload.pub is
-# added it must be one "<name>:<base64 32-byte key>" line and the image must
-# install it where the bridge reads it.
+# The key file (rime-bridge-payload-1, docs/nixos-move.md): one
+# "<name>:<base64 32-byte key>" line, installed where the bridge reads it. The
+# branch below for an absent file covers an image released before the key.
 KEYSRC="$REPO/files/system/trust/nixos-bridge-payload.pub"
 if [[ -e "$KEYSRC" ]]; then
     if python3 -I -c 'import base64,sys; t=open(sys.argv[1]).read().strip(); n,_,b=t.partition(":"); assert n and len(t.splitlines())==1 and len(base64.b64decode(b, validate=True))==32' "$KEYSRC" 2>/dev/null \
