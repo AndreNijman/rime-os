@@ -195,8 +195,13 @@ in
                       "> /run/systemd/system/wpa_supplicant.service.d/rime-test-hold.conf",
                       "systemctl daemon-reload")
         WIFI_HOLDS.append(1)
-        m.succeed("touch /run/rime-test-wpa-hold", "systemctl stop wpa_supplicant.service",
-                  f"systemd-run --on-active={WIFI_HOLD}s --unit=rime-test-wpa-back-{len(WIFI_HOLDS)} "
+        m.succeed("touch /run/rime-test-wpa-hold")
+        # The stop can answer "Job for wpa_supplicant.service canceled." (exit 1) when NetworkManager asks for the
+        # unit at the same moment, although the unit still goes down (run 41850082101). The hold is the state, so
+        # wait for it rather than trusting the stop's exit code.
+        m.execute("systemctl stop wpa_supplicant.service")
+        m.wait_until_fails("systemctl is-active wpa_supplicant.service", timeout=30)
+        m.succeed(f"systemd-run --on-active={WIFI_HOLD}s --unit=rime-test-wpa-back-{len(WIFI_HOLDS)} "
                   "${pkgs.bash}/bin/sh -c '${pkgs.coreutils}/bin/rm -f /run/rime-test-wpa-hold && "
                   "/run/current-system/sw/bin/systemctl start wpa_supplicant.service'")
         m.fail("systemctl is-active wpa_supplicant.service")
