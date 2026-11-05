@@ -14,7 +14,10 @@ Refuses, for every workflow given:
     github.ref == 'refs/heads/main' itself, never a substring of an || or a negation;
   - a self-hosted job that lacks the fork-PR guard, or names the nix-release environment, RIME_NIX_CACHE_KEY,
     RIME_CACHE_TOKEN or the R2 secrets;
-  - any job outside the nix-release environment naming those secrets;
+  - any job outside the nix-release environment naming those secrets (RIME_BRIDGE_PAYLOAD_KEY too), or naming them
+    without being restricted to refs/heads/main;
+  - for nix-release.yml, an oras push (the bridge payload) before rime-bridge-payload-release signed the payload
+    against files/system/trust/nixos-bridge-payload.pub, or with no --verify of the pulled-back copy after it;
   - pull_request_target, a workflow-level permission grant, and the stand-in's test-only switches (--test-signing,
     --allow-test-variants, RIME_TEST_BEFORE_PUSH);
   - for nix-release.yml, a concurrency other than: group nix-release, never cancelled; or exactly PER_REF_GROUP and
@@ -32,7 +35,11 @@ import yaml
 
 SHA_PIN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+@[0-9a-f]{40}$")
 SECRETS = ("RIME_NIX_CACHE_KEY", "RIME_CACHE_TOKEN", "RIME_R2_ACCESS_KEY_ID", "RIME_R2_SECRET_ACCESS_KEY",
-           "RIME_R2_ENDPOINT")
+           "RIME_R2_ENDPOINT", "RIME_BRIDGE_PAYLOAD_KEY")
+# The bridge payload's release signer, and the trusted key line it must match (docs/nixos/bridge.md).
+PAYLOAD_RELEASE = "rime-bridge-payload-release"
+PAYLOAD_PUB = "files/system/trust/nixos-bridge-payload.pub"
+PUSH_RE = re.compile(r"oras\"?\s+push\b")
 # a test key, a test configuration (rime-vm's test account) and a shell hook from the environment
 TEST_ONLY = ("--test-signing", "--allow-test-variants", "RIME_TEST_BEFORE_PUSH")
 FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
@@ -121,6 +128,26 @@ def hosted(runs_on):
     return "self-hosted" not in labels and all(re.match(r"^(ubuntu|windows|macos)-[0-9a-z.]+$", x) for x in labels)
 
 
+def payload_order(steps):
+    """A job that pushes with oras pushes the bridge payload: only after rime-bridge-payload-release signed it against
+    the trusted key line (which also ran the bridge's verify_payload), and it checks the pulled-back copy with --verify
+    after the push."""
+    runs = [s.get("run", "") for s in steps]
+    push = [i for i, r in enumerate(runs) if PUSH_RE.search(r)]
+    if not push:
+        return []
+    bad = []
+    signed = [i for i, r in enumerate(runs)
+              if any(PAYLOAD_RELEASE in ln and PAYLOAD_PUB in ln and "--verify" not in ln for ln in r.splitlines())]
+    if not signed or min(signed) >= push[0]:
+        bad.append(f"the payload is pushed before {PAYLOAD_RELEASE} signs it against {PAYLOAD_PUB}")
+    after = "\n".join(runs[push[0]:])
+    after = after[PUSH_RE.search(after).end():]
+    if not re.search(re.escape(PAYLOAD_RELEASE) + r"\"?\s+--verify\s+" + re.escape(PAYLOAD_PUB), after):
+        bad.append(f"the pushed payload is not checked with {PAYLOAD_RELEASE} --verify after the push")
+    return bad
+
+
 def check(path):
     text = open(path).read()
     wf = yaml.safe_load(text)
@@ -188,6 +215,10 @@ def check(path):
                 bad.append(f"{where}: a self-hosted job must never name nix-release or its secrets")
         if names_secret and env != "nix-release":
             bad.append(f"{where}: names a nix-release secret outside the nix-release environment")
+        if names_secret and not main_only(cond):
+            bad.append(f"{where}: a job naming a nix-release secret must be restricted to refs/heads/main in its if:")
+        if path.endswith("nix-release.yml"):
+            bad += [f"{where}: {b}" for b in payload_order(steps)]
     return bad
 
 

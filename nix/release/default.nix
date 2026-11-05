@@ -102,6 +102,11 @@ let
     (lib.mapAttrsToList (name: v: { inherit name; path = v.system.config.system.build.toplevel; })
       (lib.filterAttrs (_: v: !lib.any (d: lib.elem d v.selected) (lib.attrNames (import ../desktops))) variants));
 
+  # The bridge payload's closure (docs/nixos/bridge.md "Where a payload comes from"; the workflow's payload job): a
+  # moved bootc machine installs `plain` (update.toml's base, and the bridge carries no rime-feature switch), so the
+  # payload is the plain toplevel's closure. Building it builds only closureInfo once that toplevel is realised.
+  rime-bridge-payload-closure = pkgs.closureInfo { rootPaths = [ variants.plain.system.config.system.build.toplevel ]; };
+
   # Building this builds every PUBLISHED class 2 app; `result/<name>` is each one. The release job passes each to
   # `rime-nix-release closure --catalogue-out`, so the apps' closures are signed and published with the release. A
   # device-built app (R14) is linked as its derivation, which builds nothing: the release carries the recipe only.
@@ -124,6 +129,6 @@ let
   };
 in
 {
-  inherit cosign rime-nix-release rime-release-plan rime-release-toplevels rime-release-toplevels-hosted rime-release-catalogue rime-release-standin fixtures variants;
+  inherit cosign rime-nix-release rime-release-plan rime-release-toplevels rime-release-toplevels-hosted rime-release-catalogue rime-release-standin fixtures variants rime-bridge-payload-closure;
   catalogue = { inherit published deviceBuilt; };
 }

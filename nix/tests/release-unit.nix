@@ -186,6 +186,28 @@ open("acc.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]))' \
     if: >-
       always() && needs.changes.result'
 
+  # the bridge payload job (RIME_BRIDGE_PAYLOAD_KEY): main only, in the environment, signed before the push against the
+  # trusted key line, and the pulled-back copy checked
+  wmutant "the payload job off main" \
+    "if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && needs.publish.outputs.state == 'published'" \
+    "if: needs.changes.outputs.action == 'release' && needs.publish.outputs.state == 'published'"
+  wmutant "the payload key outside the environment" \
+    "    environment: nix-release
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 180" \
+    "    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 180"
+  wmutant "the payload pushed unsigned" \
+    '"$RUNNER_TEMP/tools/bin/rime-bridge-payload-release" files/system/trust/nixos-bridge-payload.pub "$RUNNER_TEMP/payload"' 'true'
+  wmutant "the payload signed against another key line" \
+    'rime-bridge-payload-release" files/system/trust/nixos-bridge-payload.pub "$RUNNER_TEMP/payload"' \
+    'rime-bridge-payload-release" "$RUNNER_TEMP/any.pub" "$RUNNER_TEMP/payload"'
+  wmutant "the pulled-back payload not checked" \
+    '"$t/tools/bin/rime-bridge-payload-release" --verify files/system/trust/nixos-bridge-payload.pub "$t/back"' 'true'
   echo "== off main, the build job is a dry-run proof (the step's own script, nix and git stubbed)"
   python3 - wf/nix-release.yml > dry.sh <<'PY'
 import sys, yaml

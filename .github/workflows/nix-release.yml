@@ -17,6 +17,10 @@
 #            (nix-channels), signs and self-checks that. Fixed order (§3.3, §6.3, §18).
 #            The repository variable RIME_NIX_CACHE_BACKEND=s3 selects the fallback (an S3 bucket holding the
 #            whole closure, docs §6); unset or github is production.
+#   payload  main only, environment nix-release, after a publish that published: the bridge payload (what
+#            `rime migrate start --payload` installs on a bootc machine) of the release's plain toplevel, signed with
+#            rime-bridge-payload-1 (RIME_BRIDGE_PAYLOAD_KEY), checked with the bridge's own verify_payload, pushed to
+#            ghcr.io/andrenijman/rime-os-nixos-payload:<release ID> and :edge, pulled back and compared.
 #   refresh  daily: re-signs the channel document (serial + 1, 14-day expiry); fails loudly under 7 days left.
 #   promote  by hand: points one channel at a release; never at an older one.
 #
@@ -28,6 +32,8 @@
 # The GitHub environment `nix-release` (deployment branch: main) holds RIME_NIX_CACHE_KEY (the `rime-cache-1`
 # narinfo secret key; its public half is RIME_CACHE_PUBKEY below) and RIME_CACHE_TOKEN (a fine-grained PAT: the
 # rime-cache repository only, Contents read/write: release assets and pushes to main). Andre set both 2026-11-01.
+# It also holds RIME_BRIDGE_PAYLOAD_KEY (the rime-bridge-payload-1 secret; its public half is
+# files/system/trust/nixos-bridge-payload.pub), read only by the payload job.
 # The S3 fallback would also need RIME_R2_ACCESS_KEY_ID / RIME_R2_SECRET_ACCESS_KEY / RIME_R2_ENDPOINT (unset).
 # The variants are the generic installed system (D9, nixosConfigurations.rime) with each set of offered features:
 # plain, plain-gaming, plain-virtualization, plain-gaming-virtualization (nix/release/variants.nix). Every buildable
@@ -339,6 +345,9 @@ jobs:
       id-token: write
       packages: write
     timeout-minutes: 240
+    outputs:
+      state: ${{ steps.publish.outputs.state }}
+      release: ${{ steps.publish.outputs.release }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -395,6 +404,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Fill the cache and publish
+        id: publish
         env:
           OS_SHA: ${{ needs.changes.outputs.os }}
           SHELL_SHA: ${{ needs.changes.outputs.shell }}
@@ -438,6 +448,9 @@ jobs:
             --bootc-release-id "$BOOTC_ID" --bootc-revision "$BOOTC_REV" --bootc-shell "$BOOTC_SHELL" \
             --out "$t/out"
           cat "$t/out/published.json"
+          # The payload job runs only when this run published (state "exists" means the pair was released before).
+          python3 -c 'import json,sys; s = json.load(open(sys.argv[1])); print("state=" + s.get("state", "")); print("release=" + s.get("release", ""))' \
+            "$t/out/published.json" >> "$GITHUB_OUTPUT"
 
       - name: Publish the release page on rimeos.com
         continue-on-error: true
@@ -447,6 +460,130 @@ jobs:
           set -euo pipefail
           [ -n "$GH_TOKEN" ] || { echo "::warning::RIMEOS_SITE_DISPATCH_TOKEN is not set; the page waits for the site's schedule"; exit 0; }
           gh workflow run deploy.yml --repo AndreNijman/rime-website --ref main
+
+  # The bridge payload (docs/nixos/bridge.md "Where a payload comes from"): what `rime migrate start --payload DIR`
+  # installs on a bootc machine. A moved machine installs `plain` (update.toml's base; the bridge carries no feature
+  # switch), so one payload per release: the plain toplevel, realised from the caches publish just filled (never
+  # built here), packed by payload-build.sh, signed with rime-bridge-payload-1 and checked with the bridge's own
+  # verify_payload, then pushed as an OCI artifact (one layer per file, titled by its name) to
+  # ghcr.io/andrenijman/rime-os-nixos-payload:<release ID> and :edge, pulled back and compared.
+  payload:
+    name: build, sign and publish the bridge payload
+    needs: [changes, publish]
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && needs.publish.outputs.state == 'published'
+    runs-on: ubuntu-24.04
+    environment: nix-release
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 180
+    env:
+      PAYLOAD_REPO: ghcr.io/andrenijman/rime-os-nixos-payload
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      # The plain closure unpacked, its store.tar.zst and the pulled-back copy are on this disk at once.
+      - name: Free disk for the closure and the payload
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup /usr/share/swift /usr/local/share/boost
+          df -h / "$RUNNER_TEMP" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Nix (pinned, hash-checked; Rime's cache trusted)
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -fsSLo nix.tar.xz "https://releases.nixos.org/nix/nix-$NIX_VERSION/nix-$NIX_VERSION-x86_64-linux.tar.xz"
+          echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
+          tar -xf nix.tar.xz
+          ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
+          echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+
+      - name: The plain toplevel from the caches, and the unsigned payload
+        env:
+          SHELL_SHA: ${{ needs.changes.outputs.shell }}
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP"
+          o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
+          nix build "${o[@]}" --out-link "$t/plan" .#rime-release-plan
+          top="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["variants"]["plain"]["toplevel"])' "$t/plan")"
+          [[ "$top" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-rime-plain- ]] || { echo "::error::no plain toplevel in the plan ($top)"; exit 1; }
+          # An output path, not a derivation: realised by substitution only, so the payload is the published closure.
+          nix-store --realise "$top" >/dev/null
+          nix build "${o[@]}" --out-link "$t/closure" .#rime-bridge-payload-closure
+          nix build --out-link "$t/tools" .#rime-bridge-payload
+          "$t/tools/bin/rime-bridge-payload-build" "$top" "$(readlink -f "$t/closure")" "$t/payload"
+          ls -l "$t/payload"
+          df -h / | tail -n 1
+
+      - name: Sign with rime-bridge-payload-1 and check with the bridge
+        env:
+          RIME_BRIDGE_PAYLOAD_KEY: ${{ secrets.RIME_BRIDGE_PAYLOAD_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$RIME_BRIDGE_PAYLOAD_KEY" ] || { echo "::error::RIME_BRIDGE_PAYLOAD_KEY is not set in the nix-release environment"; exit 1; }
+          "$RUNNER_TEMP/tools/bin/rime-bridge-payload-release" files/system/trust/nixos-bridge-payload.pub "$RUNNER_TEMP/payload"
+
+      - name: Push to GHCR, pull back, compare
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+          RELEASE: ${{ needs.publish.outputs.release }}
+          OS_SHA: ${{ needs.changes.outputs.os }}
+        run: |
+          set -euo pipefail
+          t="$RUNNER_TEMP"
+          [[ "$RELEASE" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.([2-9]|[1-9][0-9]+))?$ ]] || { echo "::error::bad release ID ($RELEASE)"; exit 1; }
+          # oras from the flake's own nixpkgs pin, never a download.
+          nix build --inputs-from . --out-link "$t/oras" nixpkgs#oras
+          oras="$t/oras/bin/oras"
+          printf '%s' "$GH_TOKEN" | "$oras" login ghcr.io --username "$ACTOR" --password-stdin
+          if "$oras" manifest fetch --descriptor "$PAYLOAD_REPO:$RELEASE" >/dev/null 2>&1; then
+            echo "::error::$PAYLOAD_REPO:$RELEASE exists already; not overwriting it"; exit 1
+          fi
+          files=(manifest.json manifest.json.sig store.tar.zst registration preview.tar)
+          # Relative names: each layer's org.opencontainers.image.title is the file name, which is what
+          # `podman artifact extract` writes it back as.
+          (cd "$t/payload" && "$oras" push --format json \
+            --artifact-type application/vnd.rimeos.bridge-payload.v1 \
+            --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --annotation "org.opencontainers.image.revision=$OS_SHA" \
+            --annotation "org.rimeos.release.id=$RELEASE" \
+            "$PAYLOAD_REPO:$RELEASE,edge" "${files[@]}") > "$t/push.json"
+          digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["digest"])' "$t/push.json")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::oras push reported no digest"; exit 1; }
+          for tag in "$RELEASE" edge; do
+            got="$("$oras" manifest fetch --descriptor "$PAYLOAD_REPO:$tag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
+            [ "$got" = "$digest" ] || { echo "::error::$PAYLOAD_REPO:$tag is $got, not the pushed $digest"; exit 1; }
+          done
+          mkdir "$t/back"
+          "$oras" pull -o "$t/back" "$PAYLOAD_REPO@$digest"
+          (cd "$t/payload" && sha256sum "${files[@]}") > "$t/sums"
+          (cd "$t/back" && sha256sum -c "$t/sums")
+          [ "$(cd "$t/back" && find . -type f | sort | sed 's|^\./||' | tr '\n' ' ')" = "manifest.json manifest.json.sig preview.tar registration store.tar.zst " ] \
+            || { echo "::error::the pulled-back artifact holds other files"; ls -la "$t/back"; exit 1; }
+          "$t/tools/bin/rime-bridge-payload-release" --verify files/system/trust/nixos-bridge-payload.pub "$t/back"
+          # A new GHCR package is private until made public in its settings; a bootc machine pulls anonymously.
+          "$oras" logout ghcr.io
+          public=yes
+          "$oras" manifest fetch --descriptor "$PAYLOAD_REPO@$digest" >/dev/null 2>&1 || public=no
+          [ "$public" = yes ] || echo "::warning::$PAYLOAD_REPO is not readable anonymously: make the package public, or machines cannot pull it"
+          {
+            echo "### Bridge payload"
+            echo
+            echo "- reference: \`$PAYLOAD_REPO:$RELEASE\` (also \`:edge\`)"
+            echo "- digest: \`$PAYLOAD_REPO@$digest\`"
+            echo "- toplevel: \`$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["toplevel"])' "$t/payload/manifest.json")\`"
+            echo "- anonymous pull: $public"
+            echo
+            echo '~~~'
+            (cd "$t/payload" && ls -l "${files[@]}")
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   refresh:
     name: re-sign the channel document

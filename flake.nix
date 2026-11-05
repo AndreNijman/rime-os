@@ -35,8 +35,8 @@
 
       packages.${system} = {
         inherit (pkgs.rime) rimed rime-shell rime-libexec rime-kernel rime-kernel-config rime-scx rime-branding rime-plymouth rime-greeting rime-terminal;
-        inherit (pkgs.rime) rime-hostlayer rime-bridge rime-equibop rime-chatgpt rime-claude-desktop;
-        inherit (import ./nix/release { inherit pkgs self; }) rime-nix-release rime-release-plan rime-release-toplevels rime-release-toplevels-hosted rime-release-catalogue rime-release-standin;
+        inherit (pkgs.rime) rime-hostlayer rime-bridge rime-bridge-payload rime-equibop rime-chatgpt rime-claude-desktop;
+        inherit (import ./nix/release { inherit pkgs self; }) rime-nix-release rime-release-plan rime-release-toplevels rime-release-toplevels-hosted rime-release-catalogue rime-release-standin rime-bridge-payload-closure;
       };
 
       nixosModules = {
