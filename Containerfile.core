@@ -1470,7 +1470,8 @@ RUN set -eux; \
               /usr/share/xdg-desktop-portal/portals/oo7-portal.portal \
               /usr/share/applications/oo7-portal.desktop; \
         find /etc/systemd/user /usr/lib/systemd/user -lname '*oo7*' -print -delete; \
-        ! rpm -q pam_oo7 >/dev/null 2>&1; \
+        if rpm -q pam_oo7 >/dev/null 2>&1; then \
+            echo "FATAL: pam_oo7 is in the image; the login unlocks gnome-keyring"; exit 1; fi; \
         echo "oo7: present only for xdg-desktop-portal-gnome; units, bus activation and portal removed"; \
     fi; \
     : 'The accessibility fix is the whole reason quickshell-git is here, so the'; \
