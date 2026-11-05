@@ -164,6 +164,28 @@ the bootc side verifies a Nix channel document or closure through `rime trust`;
 the only Nix object it ever installs is the bridge payload, and that is checked
 by the key above. The identity belongs to the NixOS system's own `rime`.
 
+## Getting the payload
+
+Each Nix release publishes its payload as an OCI artifact:
+`ghcr.io/andrenijman/rime-os-nixos-payload:<release ID>`, and `:edge` for the
+newest. Each file of the payload is one layer named by its file name, so podman
+writes the files back as they were signed:
+
+```
+sudo podman artifact pull ghcr.io/andrenijman/rime-os-nixos-payload:edge
+sudo mkdir -p /var/tmp/rime-payload
+sudo podman artifact extract ghcr.io/andrenijman/rime-os-nixos-payload:edge /var/tmp/rime-payload
+sudo rime migrate check --explain --payload /var/tmp/rime-payload
+```
+
+The registry is not trusted: the bridge checks `manifest.json.sig` and every
+file's sha256 in `/var/tmp/rime-payload` before it reports on or installs
+anything (above). Podman keeps its own copy of the artifact until
+`sudo podman artifact rm ghcr.io/andrenijman/rime-os-nixos-payload:edge`.
+The payload is the release's `plain` system: a moved machine starts with no
+feature switched on. The release workflow (`payload` job in
+`.github/workflows/nix-release.yml` on the NixOS side) has not published one
+yet.
 ## Disk encryption docs
 
 `rime-luks-enroll --replace-recovery` is a NixOS-side change and does not ship

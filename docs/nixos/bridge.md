@@ -94,6 +94,51 @@ that string), but a separate key keeps the two authorities apart: rotating or re
 NixOS machine trusts for every update) does not touch the one-time bridge, and the bootc image trusts nothing that can
 sign a NixOS store path.
 
+### Where a payload comes from (the release pipeline)
+
+**Decision (2026-11-05).** Every Nix release on main publishes one payload, as an OCI artifact on GHCR:
+`ghcr.io/andrenijman/rime-os-nixos-payload:<release ID>` (for example `:2026.11.05`), and the moving tag `:edge` on
+the newest one. Each payload file is one layer whose `org.opencontainers.image.title` annotation is its file name
+(`manifest.json`, `manifest.json.sig`, `store.tar.zst`, `registration`, `preview.tar`); the manifest's artifact type
+is `application/vnd.rimeos.bridge-payload.v1` and it carries `org.rimeos.release.id` and
+`org.opencontainers.image.revision` (the rime-os commit). `podman artifact pull` + `podman artifact extract`
+(podman 6.1 on the bootc image) write the files back by their titles, byte for byte; a bootc machine needs nothing
+else (no oras). The signature, not the registry, is what the bridge trusts: `verify_payload` checks the files after
+they are extracted, wherever they came from.
+
+**One variant: `plain`.** A release builds several toplevels (`nix/release/variants.nix`), and a NixOS machine
+installs `plain` plus its switched-on features. A moved machine has no feature switched on: `rime-hostlayer carry`
+writes no `rime-feature@*` switch (the only switch it carries is a guest's wipe unit), and the variant base in
+`/etc/rime/update.toml` (`rime.update.variant`) defaults to `plain`. So the payload is the plain toplevel; a payload
+of another variant would be replaced by `plain` at the first update.
+
+**The job** (`payload` in `.github/workflows/nix-release.yml`; main only, environment `nix-release`, runs after
+`publish` and only when publish published a new release):
+
+1. Realises the release plan's `plain` toplevel with `nix-store --realise` of the output path: substitution only, from
+   cache.rimeos.com and cache.nixos.org, so the payload is exactly the published closure and nothing is built.
+2. Builds the flake output `rime-bridge-payload-closure` (`closureInfo` of that toplevel; only closureInfo itself is
+   built) and runs `rime-bridge-payload-build TOPLEVEL CLOSURE_INFO DIR` (`nix/pkgs/rime-bridge/payload-build.sh`,
+   the same script the OVMF lab's `payload.sh` calls). The store tarball is built in the job, never as a store path.
+3. `rime-bridge-payload-release files/system/trust/nixos-bridge-payload.pub DIR` (`payload-release.sh`) signs with
+   `payload-sign.sh` from `RIME_BRIDGE_PAYLOAD_KEY`, refuses unless the secret's public half is that file's line, then
+   runs the bridge's own `verify_payload` (share/rime-bridge/rime-migrate, the program bootc runs) against that file.
+   Any refusal removes the signature it wrote.
+4. Pushes with `oras` (nixpkgs' oras at the flake's pin, `nix build --inputs-from .`), refusing a release tag that
+   exists already; reads both tags back and checks they name the pushed digest; pulls the digest back and compares
+   every file's sha256; runs `rime-bridge-payload-release --verify` on the pulled copy. The job summary gets the
+   reference, the digest, the toplevel and whether an anonymous pull works.
+
+`check_workflow.py` (checks.release-unit) holds the shape: the payload key is a `nix-release` secret, a job naming any
+of those secrets is main only, and an `oras push` comes after the signing step and before a `--verify` of the pulled
+copy (5 workflow mutants). `checks.bridge-payload` builds a payload from a small toplevel-shaped fixture and proves the
+layout, a byte-identical second build, the builder's refusals, signing with a generated TEST key, the bridge accepting
+it, and the refusals (a changed byte in `store.tar.zst` or `manifest.json`, a secret that is not the trusted key's,
+an empty secret), with 5 mutants of the two scripts.
+
+Not proven yet: the job has not run on GitHub (it runs on the first Nix release from main); the size of a real
+plain payload was not measured; GHCR makes a new package private, so the package needs to be made public once (the job
+warns when an anonymous read of the digest fails).
 ### The left-behind report before `start`
 
 `check --payload P --explain` runs the payload's own `rime-hostlayer carry --plan` (from `preview.tar`, which the
@@ -554,9 +599,11 @@ exist yet).
   start record above), and `rime` refuses `update` and the other bootc verbs while the start record says so.
   Still open there: the release key file (`nixos-bridge-payload.pub`, made by the release environment) and a Rust
   `rime backup key export` verb that calls `rime-migrate key-export` (not needed: `rime migrate key-export` exists).
-- **Release pipeline:** generate `rime-bridge-payload-1` once (above), build `preview.tar` (the payload's
-  `rime-hostlayer`, the system's `etc/` and `sw/bin` names, greetd's config; `nix/probe/ovmf/bridge/payload.sh` shows
-  the layout) and run `payload-sign.sh` on every payload; the readiness release ships the public line.
+- **Release pipeline:** DONE in the workflow (2026-11-05, "Where a payload comes from" above): the `payload` job
+  builds `preview.tar` and the rest with `payload-build.sh`, signs with `payload-release.sh` and publishes the plain
+  payload of every Nix release on main. Still open: generate `rime-bridge-payload-1` once (above) and set it as
+  `RIME_BRIDGE_PAYLOAD_KEY` in the `nix-release` environment; the readiness release ships the public line. The job has
+  not run on GitHub.
 - **katana (P3):** read `\EFI\APEX\grub.cfg` with `rime migrate check --explain`.
 - **Readiness release, again:** DONE (bridge3). On a booted bootc VM of the readiness image (#137 at f26b97d17 as a
   layer on the published image, lab README) `rime update`, `rime update --check` and `rime boot migrate` each print
@@ -575,7 +622,8 @@ exist yet).
   `already-moved` first when `rec.get("done") is not None`, and allows when `"failed" in rec and last == "rolled
   back"`; `cmd_start`'s handler (line 1763) records `state["failed"] = str(e) or type(e).__name__`. Nothing changes in
   `rimed/rime/src/nixos_bridge.rs` or `files/system/libexec/rime-update-check`: they already read the record that way.
-- **Release pipeline, again:** `payload-sign.sh` needs `cmp` (diffutils) next to openssl.
+- **Release pipeline, again:** `payload-sign.sh` needs `cmp` (diffutils) next to openssl: DONE, the
+  `rime-bridge-payload-release` wrapper (`pkgs.rime.rime-bridge-payload`) puts both on its PATH.
 - **Desktop:** DONE (bridge3): the "updated" window is off (decision above).
 - **Lab host (not Rime):** RESOLVED by 2026-11-03: katana's `/proc/sys/kernel/modprobe` reads `/usr/sbin/modprobe`
   again (it had named a `/nix/store/...-kmod-31/bin/modprobe` written from inside the privileged `rime-nix`
