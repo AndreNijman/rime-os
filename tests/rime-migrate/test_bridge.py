@@ -11,6 +11,7 @@ import copy
 import importlib.machinery
 import importlib.util
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -546,6 +547,56 @@ class Chroot(unittest.TestCase):
         argv, path = seen[0]
         self.assertTrue(os.path.isabs(argv[0]) and argv[0].endswith("/chroot"), argv)
         self.assertNotIn(os.path.dirname(argv[0]), path.split(":"))
+
+
+class FirstActivation(unittest.TestCase):
+    """The chroot's activation must not leave the running (bootc) kernel's modprobe or firmware path in a store."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.root, self.t = os.path.join(self.d, "host"), os.path.join(self.d, "t")
+        for base, val in ((self.root, ("/usr/sbin/modprobe\n", "\n")), (self.t, ("x\n", "x\n"))):
+            for k, v in zip(B.HOST_KNOBS, val):
+                os.makedirs(os.path.dirname(os.path.join(base, k)), exist_ok=True)
+                with open(os.path.join(base, k), "w") as f:
+                    f.write(v)
+        os.makedirs(os.path.join(self.t, "run"))
+        self.mounts, self.umounts = [], []
+        self.old = (B.mount, B.run, B.chroot)
+        B.mount = lambda *a: self.mounts.append(a)
+        B.run = lambda cmd, **kw: self.umounts.append(cmd)
+
+    def tearDown(self):
+        B.mount, B.run, B.chroot = self.old
+        shutil.rmtree(self.d)
+
+    def activate_writes(self, base):
+        def fake(t, *cmd, **kw):
+            for k, v in zip(B.HOST_KNOBS, ("/nix/store/k-kmod-31/bin/modprobe", "/nix/store/f-firmware/lib/firmware")):
+                with open(os.path.join(base, k), "w") as f:
+                    f.write(v)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        B.chroot = fake
+
+    def host(self):
+        return [open(os.path.join(self.root, k)).read() for k in B.HOST_KNOBS]
+
+    def test_each_knob_is_shielded_and_the_host_keeps_its_values(self):
+        # With the shields bound, the activation's writes land in the target's (scratch) files.
+        self.activate_writes(self.t)
+        r = B.first_activation(self.t, "/nix/store/s-system", root=self.root)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(sorted(m[2] for m in self.mounts), sorted(os.path.join(self.t, k) for k in B.HOST_KNOBS))
+        self.assertTrue(all(m[0] == "--bind" for m in self.mounts), self.mounts)
+        self.assertEqual(sorted(u[1] for u in self.umounts), sorted(m[2] for m in self.mounts))
+        self.assertEqual(self.host(), ["/usr/sbin/modprobe\n", "\n"])
+
+    def test_a_write_that_reaches_the_host_is_put_back_and_fails_start(self):
+        self.activate_writes(self.root)
+        with self.assertRaises(B.Failed) as cm:
+            B.first_activation(self.t, "/nix/store/s-system", root=self.root)
+        self.assertIn("/proc/sys/kernel/modprobe", str(cm.exception))
+        self.assertEqual(self.host(), ["/usr/sbin/modprobe\n", "\n"])
 
 
 class Containment(unittest.TestCase):
