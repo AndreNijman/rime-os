@@ -397,12 +397,14 @@ let
             assert locks and locks[0] < entry[0], "the session was not locked before the system suspended"
             machine.succeed("systemctl stop lockmon")
             # The VM's virtio devices refuse s2idle (-95; virtio-fs: "suspend/resume not yet supported"), so the
-            # kernel aborts the sleep it had entered. The lock ordering above is the proof; the journal may gain only
-            # that abort, nothing else.
+            # kernel aborts the sleep it had entered. QEMU's emulated SATA disk can also refuse the ATA CHECK POWER MODE
+            # probe libata sends while suspending (seen on a CI run). The lock ordering above is the proof; the journal
+            # may gain only those, nothing else.
             vm_abort = re.compile(r"(virtio-pci \S+: PM: .*returns -95|virtio-pci \S+: PM: failed to suspend async: error -95"
                                   r"|PM: Some devices failed to suspend, or early wake event detected"
                                   r"|Failed to put system to sleep\. System resumed again: Operation not supported"
-                                  r"|Failed to start System Suspend\.)")
+                                  r"|Failed to start System Suspend\."
+                                  r"|ata\d+\.\d+: Check power mode failed \(err_mask=0x1\))")
             errors = machine.succeed("journalctl -b -p err --no-pager -o cat | sort").splitlines()
             other = [line for line in sorted(set(errors) - set(ERRORS_BEFORE)) if not vm_abort.fullmatch(line)]
             assert not other, other
