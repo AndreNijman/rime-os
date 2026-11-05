@@ -697,6 +697,12 @@ pub fn run(args: &[String]) -> i32 {
             _ => return usage(),
         }
     }
+    if do_write {
+        if let Some(why) = write_refusal(&root, super::is_nixos()) {
+            eprintln!("rime: {why}");
+            return 1;
+        }
+    }
     let cat = match fs::read_to_string(&catalogue)
         .map_err(|e| format!("cannot read the package catalogue {}: {e}", catalogue.display()))
         .and_then(|t| Catalogue::parse(&t))
@@ -733,6 +739,19 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
     0
+}
+
+/// `--write` against this machine's own root replaces the live requested list with the NixOS one. On a bootc
+/// machine that list is the one `rime-pkg` builds the system extension from, so it is refused there; a copy of
+/// the state under another root is always fine.
+fn write_refusal(root: &Path, nixos: bool) -> Option<String> {
+    let is_live_root = fs::canonicalize(root).map(|p| p == Path::new("/")).unwrap_or(root == Path::new("/"));
+    (is_live_root && !nixos).then(|| {
+        "refusing --write on / : this machine is not running NixOS, and its own requested list \
+         (/var/lib/rime/pkg/requested) is what its package engine installs from. Write into a copy of the \
+         state with --root DIR instead."
+            .to_string()
+    })
 }
 
 fn usage() -> i32 {
@@ -880,6 +899,18 @@ mod tests {
         // A second run keeps the first bootc copy.
         write(&c, &d, &translate(&c, &d)).unwrap();
         assert!(pkg::read_list(&d.join("var/lib/rime/pkg/requested.bootc")).contains(&"local:mytool".to_string()));
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn write_on_the_live_root_is_refused_off_nixos() {
+        for root in ["/", "//", "/.", "/var/.."] {
+            let why = write_refusal(Path::new(root), false).unwrap_or_else(|| panic!("{root} was not refused"));
+            assert!(why.contains("--root DIR"), "{why}");
+            assert_eq!(write_refusal(Path::new(root), true), None, "{root} on NixOS");
+        }
+        let d = tree();
+        assert_eq!(write_refusal(&d, false), None, "a copy of the state is always writable");
         fs::remove_dir_all(&d).unwrap();
     }
 }
