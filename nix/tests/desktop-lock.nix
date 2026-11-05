@@ -86,6 +86,10 @@ let
           QT_QUICK_BACKEND = "software";
         };
         systemd.services.rime-flathub-setup.enable = lib.mkForce false;
+        # The update check's timer fires at a random 2-22 min after boot; offline it exits 1 at error priority, which
+        # the suspend subtest's "nothing new at error priority" read as a failure when it landed inside it (run
+        # 41850082101). The check has its own tests (update-client, update-e2e).
+        systemd.timers.rime-update-check.enable = lib.mkForce false;
         systemd.tmpfiles.rules = [ "f+ /var/lib/rime-greet/last-session 0644 greetd greetd - ${d.session}" ];
         # Suspend as s2idle, woken by an RTC alarm (rtcwake), so the VM resumes by itself.
         systemd.sleep.settings.Sleep.SuspendState = "freeze";
