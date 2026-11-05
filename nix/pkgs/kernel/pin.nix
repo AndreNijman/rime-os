@@ -18,8 +18,8 @@ let
   need = k: pin.${k} or (throw "kernel.pin: ${k} is missing");
 in
 {
-  version = need "KERNEL_VERSION"; # 7.2.9
-  tag = need "KERNEL_TAG"; # cachyos-7.2.9-2
+  version = need "KERNEL_VERSION"; # 7.2.11
+  tag = need "KERNEL_TAG"; # cachyos-7.2.11-1
   src = {
     url = need "KERNEL_SRC_URL";
     sha256 = need "KERNEL_SRC_SHA256";

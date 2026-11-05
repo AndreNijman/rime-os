@@ -1,6 +1,6 @@
 # Rime's kernel on NixOS
 
-CachyOS `cachyos-7.2.9-2` + BORE + sched_ext, x86-64-v3, HZ 1000, BTF on: the same kernel the bootc kernel
+CachyOS `cachyos-7.2.11-1` + BORE + sched_ext, x86-64-v3, HZ 1000, BTF on: the same kernel the bootc kernel
 tier builds (`Containerfile.kernel`, `kernel/`), built with nixpkgs' `linuxManualConfig` (PLAN.md 4.6, D7).
 
 | File | What it is |
@@ -17,12 +17,12 @@ tier builds (`Containerfile.kernel`, `kernel/`), built with nixpkgs' `linuxManua
 Checks (`nix/tests/kernel.nix`): `kernel-config-fresh`, `kernel-gate`, `kernel-vm`, `kernel-boot-budget`.
 
 - `kernel-gate` also runs bootc's `files/system/src/scx/check-sched-ext-ops.sh`: every member of this kernel's
-  `struct sched_ext_ops` must exist in the scx pin's bundled BPF header (7.2.9: 45 kernel members, 53 in the
+  `struct sched_ext_ops` must exist in the scx pin's bundled BPF header (7.2.9 and 7.2.11: 45 kernel members, 53 in the
   header, 8 header-only). `rime-scx` asserts the scx source is the tarball bootc pinned (SCX_SHA256 efce300f…)
   and that scx_lavd carries the stall fix (upstream 6d31ddd89).
 - `kernel-boot-budget` ports bootc's initramfs budget (`files/scripts/check-initramfs-budget.sh`): on a
   laptop-shaped system with `rime.kernel`, boot image + initrd stay under 130 MiB per generation (measured
-  16 + 27 MiB) and the initrd holds no firmware-bearing KMS driver (nvidia*, nouveau, amdgpu, i915, xe, radeon)
+  16 + 28 MiB on 7.2.11) and the initrd holds no firmware-bearing KMS driver (nvidia*, nouveau, amdgpu, i915, xe, radeon)
   and no GPU firmware. The shipped host configuration replaces that stand-in once it exists.
 - `kernel-vm` also proves `modprobe nouveau` is refused (bootc's `install nouveau /bin/false`), and that
   nvidia and msi-ec, which cannot initialise without their hardware, still pass signature verification: a
@@ -49,13 +49,13 @@ kernels), so `nix/modules/kernel.nix` asserts it itself against this config.
 
 ## Every difference
 
-### Final Nix .config vs the bootc kernel's final .config (`/usr/lib/modules/7.2.9-cachyos1.apex1.fc45.x86_64/config`)
+### Final Nix .config vs the bootc kernel's final .config (`/usr/lib/modules/7.2.9-cachyos1.apex1.fc45.x86_64/config`, measured on 7.2.9)
 
 Value changes:
 
 | Option | bootc | Nix | Why |
 |---|---|---|---|
-| `LOCALVERSION` | `""` (release came from `EXTRAVERSION=-cachyos1.apex1.fc45.x86_64`) | `"-cachyos1-rime1"` | `uname -r` = `7.2.9-cachyos1-rime1`; `rime1` = kernel.pin `APEX_KERNEL_BUILD` |
+| `LOCALVERSION` | `""` (release came from `EXTRAVERSION=-cachyos1.apex1.fc45.x86_64`) | `"-cachyos1-rime1"` | `uname -r` = `7.2.11-cachyos1-rime1`; `rime1` = kernel.pin `APEX_KERNEL_BUILD` |
 | `LSM` | `lockdown,yama,integrity,selinux,bpf,landlock` | `lockdown,yama,integrity,bpf,landlock` | decision A2: no SELinux on NixOS (`SECURITY_SELINUX` stays built, inactive) |
 | `MODULE_SIG_KEY` | `"certs/signing_key.pem"` (ephemeral per build) | `""` | kmodigest signs modules deterministically (nixpkgs common-flags `cmd_sign`) |
 | `SYSTEM_EXTRA_CERTIFICATE` | unset | `y`, size 3120000 | slot `rebuildImage` fills with every module's kmodigest certificate |
