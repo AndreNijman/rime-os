@@ -1713,14 +1713,16 @@ RUN set -eux; \
 #
 # The payload's signature is checked by the program itself, where it reads the
 # payload: manifest.json.sig against the one key in
-# /usr/share/rime-os/trust/nixos-bridge-payload.pub. This image does not carry
-# that key yet (the release key is made in the release environment), so every
-# `start` refuses payload-key-missing until a release ships it; `check` and
-# `repair-e` are not affected. tests/test-rime-migrate.sh pins the path and
-# checks the key file once it is added (docs/nixos-move.md).
+# /usr/share/rime-os/trust/nixos-bridge-payload.pub: the public half of
+# rime-bridge-payload-1, whose secret half exists only in the nix-release
+# GitHub environment. tests/test-rime-migrate.sh pins the path and checks the
+# key line (docs/nixos-move.md).
 COPY --chmod=0755 files/system/libexec/rime-migrate /usr/libexec/rime-migrate
+COPY --chmod=0644 files/system/trust/nixos-bridge-payload.pub /usr/share/rime-os/trust/nixos-bridge-payload.pub
 RUN set -eux; \
     test -x /usr/libexec/rime-migrate; \
+    test "$(wc -l < /usr/share/rime-os/trust/nixos-bridge-payload.pub)" = 1; \
+    grep -Eqx 'rime-bridge-payload-1:[A-Za-z0-9+/]{43}=' /usr/share/rime-os/trust/nixos-bridge-payload.pub; \
     test "$(head -n1 /usr/libexec/rime-migrate)" = '#!/usr/bin/python3 -I'; \
     python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' /usr/libexec/rime-migrate; \
     /usr/libexec/rime-migrate --help >/dev/null; \

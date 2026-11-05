@@ -121,13 +121,15 @@ writes anything:
   `payload-signature-bad`, `payload-corrupt`. No option or environment variable
   skips the check.
 
-**The key is not shipped yet.** It is a dedicated `rime-bridge-payload-1` key
-made in the release environment (never on a workstation), so this image has no
-`nixos-bridge-payload.pub` and every `start` refuses `payload-key-missing`;
-`check` and `repair-e` are not affected. Shipping it is one file,
-`files/system/trust/nixos-bridge-payload.pub`, plus a `COPY` to that path in
-`Containerfile.base`; `tests/test-rime-migrate.sh` then checks it is one valid
-key line and that the image installs it.
+**The key** is a dedicated ed25519 key, `rime-bridge-payload-1` (not the
+NixOS update path's `rime-cache-1`). Its public line is
+`files/system/trust/nixos-bridge-payload.pub`, which `Containerfile.base`
+installs and checks. The secret half was generated in a pipe straight into the
+`RIME_BRIDGE_PAYLOAD_KEY` secret of the `nix-release` GitHub environment
+(deployment branch `main`): it was never written to a disk or shown.
+`tests/test-rime-migrate.sh` checks the file is one valid key line and that the
+image installs it. A machine on an image released before this key shipped
+refuses every `start` with `payload-key-missing`.
 
 `rime migrate` puts no check of its own in front: it passes every argument to
 the program unchanged.
