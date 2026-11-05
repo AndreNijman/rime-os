@@ -54,7 +54,7 @@ use std::process::Command;
 use serde_json::Value;
 
 /// The bridge program. A constant, like every engine path in `ops`.
-pub const MIGRATE_ENGINE: &str = "/usr/libexec/rime-migrate";
+pub const MIGRATE_ENGINE: &str = rime_paths::RIME_MIGRATE;
 
 /// What `rime migrate start` writes at every step (`STATE` in rime-migrate).
 pub const BRIDGE_STATE: &str = "/var/lib/rime/nixos-bridge/state.json";

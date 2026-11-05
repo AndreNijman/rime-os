@@ -20,6 +20,21 @@
 #    a listed suite now run by CI        -> fail, "delete the line"
 #
 #  The second arm is what stops the exemption list becoming permanent.
+#
+#  On a branch with a Nix flake (feat/nixos), a FLAKE CHECK is a CI home too:
+#  .github/workflows/nix.yml builds every check except the ones listed, with a
+#  reason, in nix/ci/checks-not-in-ci.txt (nix/ci/run-checks.sh plan). So:
+#
+#    a suite named in no workflow but run by a nix/tests/*.nix file -> run by
+#      CI, unless that file defines a check CI skips (counted as unrun then)
+#    a skip-list entry with no reason, or naming no check  -> fail
+#    nix.yml no longer running the plan                   -> every check unrun
+#
+#  The check names come from RIME_FLAKE_CHECKS_FILE (one per line; nix.yml's
+#  plan job writes it) or, failing that, from `nix eval` when nix is on PATH.
+#  With neither, the flake half is NOT verified and the script says so on a
+#  warning line rather than passing it silently. Without a flake.nix (main,
+#  the bootc product) the script behaves exactly as it did before.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 # grep -q exits at its first match; under pipefail a producer that is still
@@ -60,7 +75,74 @@ is_exempt() { local n; for n in ${exempt[@]+"${exempt[@]}"}; do [ "$n" = "$1" ] 
 # failed with it and the shell did not start at all. The gate written to stop
 # that recurring was itself never run. A gate this file cannot see is exactly
 # the defect this file exists to name, so the pattern is now `{test,check}-*`.
-missing=(); resurrected=(); run=0
+# ── flake checks: which ones CI runs, and which nix/tests files those are ────
+FLAKE_SKIP=nix/ci/checks-not-in-ci.txt
+NIX_WORKFLOW="$WORKFLOWS/nix.yml"
+flake_rc=0; flake_note=""; flake_checks=(); flake_skipped=(); skipped_files=()
+nix_runs_plan=0
+if [ -f flake.nix ]; then
+    # The plan is what turns "a flake check" into "a CI run". A workflow that
+    # mentions the script only in a comment runs nothing.
+    if [ -f "$NIX_WORKFLOW" ] && grep -hF 'nix/ci/run-checks.sh plan' "$NIX_WORKFLOW" | pipe_has -vE '^[[:space:]]*#'; then
+        nix_runs_plan=1
+    fi
+    checks_file=""
+    if [ -n "${RIME_FLAKE_CHECKS_FILE:-}" ]; then
+        checks_file=$RIME_FLAKE_CHECKS_FILE
+    elif command -v nix >/dev/null 2>&1; then
+        checks_file=$(mktemp)
+        trap 'rm -f "$checks_file"' EXIT
+        FLAKE=${FLAKE:-path:.} nix/ci/run-checks.sh list > "$checks_file" || { echo "FATAL: cannot list the flake checks"; exit 1; }
+    fi
+    if [ -z "$checks_file" ]; then
+        flake_note="NOT VERIFIED (no nix on PATH and RIME_FLAKE_CHECKS_FILE unset)"
+        echo "::warning::flake checks not verified here: no nix on PATH and RIME_FLAKE_CHECKS_FILE unset"
+    else
+        mapfile -t flake_checks < <(grep -vE '^\s*(#|$)' "$checks_file")
+        if [ -f "$FLAKE_SKIP" ]; then
+            while read -r name reason; do
+                case "$name" in ''|'#'*) continue ;; esac
+                if [ -z "$reason" ]; then
+                    echo "  FAIL — $FLAKE_SKIP skips $name with no reason"; flake_rc=1
+                fi
+                found=0
+                for c in ${flake_checks[@]+"${flake_checks[@]}"}; do [ "$c" = "$name" ] && found=1; done
+                if [ "$found" = 0 ]; then
+                    echo "  FAIL — $FLAKE_SKIP skips $name, which is not a flake check: delete the line"; flake_rc=1
+                fi
+                flake_skipped+=("$name")
+                # The file that defines the skipped check: `name = import ./file.nix` in
+                # nix/tests/default.nix, else a top-level `name =` in a nix/tests file.
+                f=$(sed -nE "s|^[[:space:]]*\"?$name\"?[[:space:]]*=[[:space:]]*import[[:space:]]+\./([A-Za-z0-9_./-]+\.nix).*|nix/tests/\1|p" nix/tests/default.nix 2>/dev/null | head -1)
+                [ -n "$f" ] || f=$(grep -lE "^[[:space:]]*\"?$name\"?[[:space:]]*=" nix/tests/*.nix 2>/dev/null | head -1)
+                [ -n "$f" ] && skipped_files+=("$f")
+            done < "$FLAKE_SKIP"
+        fi
+        if [ "$nix_runs_plan" = 0 ] && [ "${#flake_checks[@]}" -gt "${#flake_skipped[@]}" ]; then
+            echo "  FAIL — $NIX_WORKFLOW does not run nix/ci/run-checks.sh plan, so no flake check runs in CI"
+            flake_rc=1
+        fi
+        flake_note="$(( ${#flake_checks[@]} - ${#flake_skipped[@]} )) run by $NIX_WORKFLOW, ${#flake_skipped[@]} skipped with a reason"
+    fi
+fi
+is_skipped_file() { local f; for f in ${skipped_files[@]+"${skipped_files[@]}"}; do [ "$f" = "$1" ] && return 0; done; return 1; }
+
+# A suite run by a flake check that CI runs: named (not in a comment) in a nix/tests file, none of whose checks CI
+# skips. Conservative on purpose: a file defining one skipped check counts as skipped as a whole.
+run_by_flake_check() {
+    local base=$1 f
+    [ "$nix_runs_plan" = 1 ] && [ "${#flake_checks[@]}" -gt 0 ] || return 1
+    for f in nix/tests/*.nix; do
+        [ -f "$f" ] || continue
+        is_skipped_file "$f" && continue
+        if grep -hF "$base" "$f" | pipe_has -vE '^[[:space:]]*#'; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+missing=(); resurrected=(); run=0; run_flake=0
 for s in tests/test-*.sh tests/check-*.sh installer/test-*.sh installer/check-*.sh; do
     [ -f "$s" ] || continue
     base="${s##*/}"
@@ -74,6 +156,9 @@ for s in tests/test-*.sh tests/check-*.sh installer/test-*.sh installer/check-*.
     if grep -rhF "$base" "$WORKFLOWS"/ | pipe_has -vE '^[[:space:]]*#'; then
         run=$((run + 1))
         is_exempt "$s" && resurrected+=("$s")
+    elif run_by_flake_check "$base"; then
+        run=$((run + 1)); run_flake=$((run_flake + 1))
+        is_exempt "$s" && resurrected+=("$s")
     else
         is_exempt "$s" || missing+=("$s")
     fi
@@ -82,8 +167,11 @@ done
 total=$(ls tests/test-*.sh tests/check-*.sh installer/test-*.sh installer/check-*.sh 2>/dev/null | wc -l | tr -d ' ')
 printf '\nsuite coverage: %s suites, %d run by CI, %d exempt, %d unrun and undeclared\n' \
     "$total" "$run" "${#exempt[@]}" "${#missing[@]}"
+if [ -f flake.nix ]; then
+    printf 'flake checks: %s; %d suite(s) run through a flake check\n' "$flake_note" "$run_flake"
+fi
 
-rc=0
+rc=$flake_rc
 if [ "${#missing[@]}" -gt 0 ]; then
     echo "  FAIL — these suites are named in no workflow and are not in $EXEMPT:"
     printf '    %s\n' "${missing[@]}"
@@ -95,5 +183,11 @@ if [ "${#resurrected[@]}" -gt 0 ]; then
     printf '    %s\n' "${resurrected[@]}"
     rc=1
 fi
-[ "$rc" -eq 0 ] && echo "  every suite is either run by CI or a recorded, reasoned exception"
+if [ "$rc" -eq 0 ]; then
+    if [ -f flake.nix ]; then
+        echo "  every suite (and flake check) is either run by CI or a recorded, reasoned exception"
+    else
+        echo "  every suite is either run by CI or a recorded, reasoned exception"
+    fi
+fi
 exit "$rc"

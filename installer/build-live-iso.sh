@@ -74,12 +74,110 @@ if [ "$NETINSTALL" = 1 ]; then echo "build mode: NETWORK INSTALL (small ISO, pul
 if [ "$PRODUCTION" = 1 ]; then ALLOW_UNATTENDED=0; else ALLOW_UNATTENDED=1; fi
 echo "build mode: PRODUCTION=$PRODUCTION (ALLOW_UNATTENDED=$ALLOW_UNATTENDED)"
 
+# NIXOS_SYSTEM=/nix/store/...: the NixOS ISO (PLAN.md D9). The same Fedora live env, shim and GRUB (the only chain a
+# machine with Microsoft's keys alone boots), but rime-install installs THIS prebuilt system closure, copied from a
+# signed binary cache, instead of running bootc (rime-install-nixos.sh). Inputs, all checked here:
+#   NIXOS_RELEASE_DIR    the signed release record the system belongs to (skopeo dir: of the manifest as manifest/,
+#                        its cosign .sig as sig/, plus repo, signers, issuer, fulcio-root.pem), or
+#   NIXOS_RELEASE_REF    repo@sha256:… / repo:nix-<os>-<shell> of the published release: fetched with skopeo
+#                        (default repository, signers, issuer and the pinned Fulcio root)
+#   NIXOS_VARIANT        the release variant NIXOS_SYSTEM is (default plain)
+#   NIXOS_CHOICES        the systems an install may choose and their disk floors, as JSON (`nix eval --json --file
+#                        nix/installer/choices.nix`): stamped as nixos-choices.json; it must name NIXOS_VARIANT, and
+#                        every system it offers must be a variant of the signed release (the installer installs the
+#                        release's toplevel of the one chosen)
+#   NIXOS_CACHE_DIR      a file:// binary cache holding the WHOLE closure, embedded on the ISO as nix-cache/ (the lab's
+#                        offline ISO), with NIXOS_CACHE_PUB its public key file; or nothing, for the production
+#                        network install: Rime's paths from cache.rimeos.com, nixpkgs' from cache.nixos.org, the keys
+#                        of installer/nixos-production.env (= what `rime update` trusts; NIXOS_CACHE_URL /
+#                        NIXOS_CACHE_PUB / NIXOS_UPSTREAM_URL / NIXOS_UPSTREAM_PUB override them for a stand-in)
+#   NIXOS_MOK_CERT       the MOK certificate (DER) the system's kernel is signed with, offered for enrolment
+#   NIXOS_KERNEL_SIGNED  signed | unsigned (the system's kernel image; stamped as kernel-signed)
+# The release record is verified HERE (the build refuses an ISO it could not install from) and again by the
+# installer before it erases anything. No bootc inputs are carried and no OCI image is needed in this mode.
+NIXOS=0
+if [ -n "${NIXOS_SYSTEM:-}" ]; then
+  NIXOS=1
+  # shellcheck source=nixos-production.env
+  . "$HERE/nixos-production.env"
+  [[ "$NIXOS_SYSTEM" =~ ^/nix/store/[a-z0-9]{32}-[^/]+$ ]] || { echo "FATAL: NIXOS_SYSTEM '$NIXOS_SYSTEM' is not a store path" >&2; exit 1; }
+  NIXOS_VARIANT="${NIXOS_VARIANT:-plain}"
+  [[ "$NIXOS_VARIANT" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || { echo "FATAL: NIXOS_VARIANT '$NIXOS_VARIANT'" >&2; exit 1; }
+  NIXOS_UP_URL="" NIXOS_UP_PUB=""
+  if [ -n "${NIXOS_CACHE_DIR:-}" ]; then
+    # The lab's offline ISO: one cache on the ISO holds the whole closure.
+    [ "$NETINSTALL" != 1 ] || { echo "FATAL: NETINSTALL=1 with NIXOS_CACHE_DIR: a NixOS ISO with its cache on it installs offline" >&2; exit 1; }
+    [ -f "$NIXOS_CACHE_DIR/nix-cache-info" ] && [ -f "$NIXOS_CACHE_DIR/${NIXOS_SYSTEM:11:32}.narinfo" ] \
+      || { echo "FATAL: $NIXOS_CACHE_DIR is not a binary cache holding $NIXOS_SYSTEM" >&2; exit 1; }
+    grep -Eqx '[A-Za-z0-9._-]+:[A-Za-z0-9+/=]{44}' "${NIXOS_CACHE_PUB:-/nonexistent}" \
+      || { echo "FATAL: NIXOS_CACHE_DIR needs NIXOS_CACHE_PUB, a file holding the cache's public key" >&2; exit 1; }
+    NIXOS_PUB_TEXT=$(tr -d '\n' < "$NIXOS_CACHE_PUB")
+  else
+    # The production ISO: a network install from the release's own caches.
+    NETINSTALL=1
+    NIXOS_CACHE_URL="${NIXOS_CACHE_URL:-$NIXOS_DEFAULT_CACHE_URL}"
+    NIXOS_PUB_TEXT=$(if [ -n "${NIXOS_CACHE_PUB:-}" ]; then tr -d '\n' < "$NIXOS_CACHE_PUB"; else echo "$NIXOS_DEFAULT_CACHE_KEY"; fi)
+    NIXOS_UP_URL="${NIXOS_UPSTREAM_URL:-$NIXOS_DEFAULT_UPSTREAM_URL}"
+    NIXOS_UP_PUB=$(if [ -n "${NIXOS_UPSTREAM_PUB:-}" ]; then tr -d '\n' < "$NIXOS_UPSTREAM_PUB"; else echo "$NIXOS_DEFAULT_UPSTREAM_KEY"; fi)
+    [[ "$NIXOS_CACHE_URL" =~ ^https:// ]] && [[ "$NIXOS_UP_URL" =~ ^https:// ]] \
+      || { echo "FATAL: a network-install ISO fetches over https only ($NIXOS_CACHE_URL, $NIXOS_UP_URL)" >&2; exit 1; }
+    [[ "$NIXOS_UP_PUB" =~ ^[A-Za-z0-9._-]+:[A-Za-z0-9+/=]{44}$ ]] || { echo "FATAL: the upstream cache key is not a key" >&2; exit 1; }
+  fi
+  [[ "$NIXOS_PUB_TEXT" =~ ^[A-Za-z0-9._-]+:[A-Za-z0-9+/=]{44}$ ]] || { echo "FATAL: the cache key is not a key" >&2; exit 1; }
+  if [ -z "${NIXOS_RELEASE_DIR:-}" ]; then
+    [ -n "${NIXOS_RELEASE_REF:-}" ] || { echo "FATAL: set NIXOS_RELEASE_DIR or NIXOS_RELEASE_REF: an ISO installs a signed release" >&2; exit 1; }
+    NIXOS_RELEASE_DIR="$WORK/nixos-release"
+    rm -rf "$NIXOS_RELEASE_DIR"; mkdir -p "$NIXOS_RELEASE_DIR"
+    _repo="${NIXOS_RELEASE_REF%@*}"; _repo="${_repo%:nix-*}"
+    skopeo --insecure-policy copy "docker://$NIXOS_RELEASE_REF" "dir:$NIXOS_RELEASE_DIR/manifest" \
+      || { echo "FATAL: could not fetch $NIXOS_RELEASE_REF" >&2; exit 1; }
+    _d="sha256-$(sha256sum "$NIXOS_RELEASE_DIR/manifest/manifest.json" | cut -d' ' -f1)"
+    skopeo --insecure-policy copy "docker://$_repo:$_d.sig" "dir:$NIXOS_RELEASE_DIR/sig" \
+      || { echo "FATAL: $NIXOS_RELEASE_REF has no signature ($_repo:$_d.sig)" >&2; exit 1; }
+    echo "$_repo" > "$NIXOS_RELEASE_DIR/repo"
+    echo "https://github.com/AndreNijman/rime-os/.github/workflows/nix-release.yml@refs/heads/main" > "$NIXOS_RELEASE_DIR/signers"
+    echo "https://token.actions.githubusercontent.com" > "$NIXOS_RELEASE_DIR/issuer"
+    cp "$HERE/../files/system/trust/fulcio-root.pem" "$NIXOS_RELEASE_DIR/fulcio-root.pem"
+  fi
+  for _f in manifest/manifest.json sig/manifest.json repo signers issuer fulcio-root.pem; do
+    [ -f "$NIXOS_RELEASE_DIR/$_f" ] || { echo "FATAL: the release record $NIXOS_RELEASE_DIR has no $_f" >&2; exit 1; }
+  done
+  _keys=(--key "$NIXOS_PUB_TEXT"); [ -z "$NIXOS_UP_PUB" ] || _keys+=(--key "$NIXOS_UP_PUB")
+  [ -f "${NIXOS_CHOICES:-/nonexistent}" ] \
+    || { echo "FATAL: set NIXOS_CHOICES (nix eval --json --file nix/installer/choices.nix): the installer reads its disk floors from it" >&2; exit 1; }
+  # Every system the ISO offers: one line each, the base (NIXOS_VARIANT) among them.
+  mapfile -t _offer < <(python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); assert c["schema"] == 1
+for n, v in sorted(c["variants"].items()):
+    assert int(v["disk_gb"]) > 0 and int(v["partition_gb"]) > 0, n
+    assert all(f in c["features"] for f in v["features"]), n
+    print(n)' "$NIXOS_CHOICES") || { echo "FATAL: NIXOS_CHOICES $NIXOS_CHOICES is not the installer's choices JSON" >&2; exit 1; }
+  _offers=(); _base=0
+  for _o in "${_offer[@]}"; do _offers+=(--offer "$_o"); [ "$_o" != "$NIXOS_VARIANT" ] || _base=1; done
+  [ "$_base" = 1 ] || { echo "FATAL: NIXOS_CHOICES offers ${_offer[*]}, not this ISO's $NIXOS_VARIANT system" >&2; exit 1; }
+  _verified=$(RIME_NIXOS_RELEASE_LIB="$HERE/../nix/release/rime_nix_release.py" python3 -I "$HERE/rime-install-nixos-release.py" verify \
+      --release-dir "$NIXOS_RELEASE_DIR" --system "$NIXOS_SYSTEM" --variant "$NIXOS_VARIANT" "${_offers[@]}" "${_keys[@]}") \
+    || { echo "FATAL: $NIXOS_SYSTEM is not the $NIXOS_VARIANT system of the signed release in $NIXOS_RELEASE_DIR, or the release lacks a system NIXOS_CHOICES offers: $_verified" >&2; exit 1; }
+  echo "release record: $_verified"
+  if [ -n "${NIXOS_CACHE_DIR:-}" ]; then
+    # The offline ISO's cache must hold every system it offers, not only the stamped one.
+    for _t in $(python3 -I -c 'import json,sys; print(" ".join(json.loads(sys.argv[1])["offered"].values()))' "$_verified"); do
+      [ -f "$NIXOS_CACHE_DIR/${_t:11:32}.narinfo" ] || { echo "FATAL: $NIXOS_CACHE_DIR does not hold the offered system $_t" >&2; exit 1; }
+    done
+  fi
+  case "${NIXOS_KERNEL_SIGNED:-}" in signed|unsigned) ;; *) echo "FATAL: NIXOS_KERNEL_SIGNED must be signed or unsigned" >&2; exit 1;; esac
+  if [ "$NIXOS_KERNEL_SIGNED" = signed ]; then
+    openssl x509 -inform DER -in "${NIXOS_MOK_CERT:-/nonexistent}" -noout >/dev/null 2>&1 \
+      || { echo "FATAL: a signed kernel needs NIXOS_MOK_CERT (DER) to offer for enrolment" >&2; exit 1; }
+  fi
+  echo "build mode: NIXOS (installs $NIXOS_SYSTEM, variant $NIXOS_VARIANT, $([ "$NETINSTALL" = 1 ] && echo "network install from $NIXOS_CACHE_URL + $NIXOS_UP_URL" || echo "offline, cache on the ISO"))"
+fi
+
 mkdir -p "$WORK"
-if [ "$NETINSTALL" != 1 ]; then
+if [ "$NETINSTALL" != 1 ] && [ "$NIXOS" != 1 ]; then
   [ -f "$OCI" ] || { echo "ERROR: $OCI missing (run the skopeo export first)"; exit 1; }
 fi
 
-if [ "$NETINSTALL" = 1 ]; then
+if [ "$NETINSTALL" = 1 ] && [ "$NIXOS" != 1 ]; then
   echo "== 0. pin and verify the image this ISO installs =="
   # A netinstall ISO and the image it downloads are one release. Resolving
   # `:rime` at install time would make every ISO install whatever main pushed
@@ -118,7 +216,7 @@ fi
 echo "== 1. build the installer live-env image =="
 # --network host: dnf's metalink fetch hung for minutes on the default podman
 # network on this build host (DNS), and a hung build looks exactly like a slow one.
-sudo podman build --network host --build-arg "ALLOW_UNATTENDED=$ALLOW_UNATTENDED" \
+sudo podman build --network host --build-arg "ALLOW_UNATTENDED=$ALLOW_UNATTENDED" --build-arg "NIXOS=$NIXOS" \
   -f "$HERE/Containerfile.installer" -t "$IMG" "$HERE"
 
 echo "== 2. export the rootfs =="
@@ -151,6 +249,33 @@ echo "== 3. the installed image's own bootc inputs, carried into the live env ==
 #                                      image (bootc-dev/bootc#1400)
 #   /usr/libexec/rime-luks-enroll      the recovery-key helper the encrypted
 #                                      install runs
+if [ "$NIXOS" = 1 ]; then
+  # Nothing of bootc's is carried: the NixOS path labels nothing and runs the system's own tools. The recovery-key
+  # helper comes from this repository (the same file the bootc image ships).
+  sudo install -Dm0755 "$HERE/../files/system/libexec/rime-luks-enroll" "$WORK/rootfs/usr/libexec/rime-luks-enroll"
+  D="$WORK/rootfs/usr/lib/rime-installer"; sudo mkdir -p "$D"
+  printf '%s\n' "$NIXOS_SYSTEM" | sudo tee "$D/nixos-system" >/dev/null
+  printf '%s\n' "$NIXOS_VARIANT" | sudo tee "$D/nixos-variant" >/dev/null
+  sudo install -m0644 "$NIXOS_CHOICES" "$D/nixos-choices.json"
+  if [ -n "${NIXOS_CACHE_DIR:-}" ]; then echo iso; else echo "$NIXOS_CACHE_URL"; fi | sudo tee "$D/nixos-cache" >/dev/null
+  printf '%s\n' "$NIXOS_PUB_TEXT" | sudo tee "$D/nixos-cache.pub" >/dev/null
+  if [ -n "$NIXOS_UP_URL" ]; then
+    printf '%s\n' "$NIXOS_UP_URL" | sudo tee "$D/nixos-upstream-cache" >/dev/null
+    printf '%s\n' "$NIXOS_UP_PUB" | sudo tee "$D/nixos-upstream-cache.pub" >/dev/null
+    # The GUI's network page: the system is downloaded while it installs.
+    sudo install -Dm644 /dev/null "$D/netinstall"
+  fi
+  sudo rm -rf "$D/nixos-release"; sudo cp -r "$NIXOS_RELEASE_DIR" "$D/nixos-release"
+  # The checker and the verifier it shares with `rime update`'s port (nix/release), the ISO's own copies.
+  sudo install -m0755 "$HERE/rime-install-nixos-release.py" "$D/rime-install-nixos-release.py"
+  sudo install -m0644 "$HERE/../nix/release/rime_nix_release.py" "$D/rime_nix_release.py"
+  if [ -n "${NIXOS_MOK_CERT:-}" ]; then sudo install -m0644 "$NIXOS_MOK_CERT" "$D/nixos-mok.der"; fi
+  grep -qx "$NIXOS_SYSTEM" "$D/nixos-system" || { echo "FATAL: nixos-system stamp not written"; exit 1; }
+  sudo env RIME_NIXOS_RELEASE_LIB="$D/rime_nix_release.py" python3 -I "$D/rime-install-nixos-release.py" verify \
+      --release-dir "$D/nixos-release" --system "$NIXOS_SYSTEM" --variant "$NIXOS_VARIANT" "${_offers[@]}" --key "$NIXOS_PUB_TEXT" >/dev/null \
+    || { echo "FATAL: the release record stamped into the live env does not verify"; exit 1; }
+  echo "nixos stamped: system $NIXOS_SYSTEM ($NIXOS_VARIANT), cache $(cat "$D/nixos-cache") key ${NIXOS_PUB_TEXT%%:*}${NIXOS_UP_URL:+, upstream $NIXOS_UP_URL key ${NIXOS_UP_PUB%%:*}}, release record verified"
+else
 if [ "$NETINSTALL" = 1 ]; then
   SRC_IMAGE="$RELEASE_IMAGE"
   sudo install -Dm644 /dev/null "$WORK/rootfs/usr/lib/rime-installer/netinstall"
@@ -191,6 +316,7 @@ live_bootc=$(sudo podman run --rm "$IMG" rpm -q --qf '%{VERSION}-%{RELEASE}' boo
 [ "$(printf '%s\n%s\n' "$img_bootc" "$live_bootc" | sort -V | tail -1)" = "$live_bootc" ] \
   || { echo "FATAL: the live env's bootc $live_bootc is older than the image's $img_bootc" >&2; exit 1; }
 echo "bootc: live env $live_bootc, image $img_bootc"
+fi  # NIXOS
 
 # Stamp the edition so rime-install derives IMAGE and --target-imgref from it
 # rather than assuming daily. Asserted below, because a wrong or missing stamp
@@ -213,7 +339,9 @@ echo "edition stamped: $EDITION"
 # machine, whichever OS is on the disk. Doing it during the install is the whole
 # point: the alternative was installing, booting, running mokutil by hand and
 # rebooting again, which is a lot to ask of someone who just wanted an OS.
-if [ "$NETINSTALL" = 1 ]; then
+if [ "$NIXOS" = 1 ]; then
+  KSIGNED="$NIXOS_KERNEL_SIGNED"
+elif [ "$NETINSTALL" = 1 ]; then
   # A netinstall used to stamp "unknown" here, because it could not know which
   # image the registry would hand it — and "unknown" meant it never offered
   # Secure Boot enrolment at all. It knows now: step 0 pinned the exact digest
@@ -268,7 +396,15 @@ echo "== 5b. OCI dir on the ISO (bootc install source) =="
 # streams blobs directly off the ISO, so nothing is unpacked into the live
 # env's RAM-backed /var/tmp on the way to the disk.
 sudo rm -rf "$ISOROOT/container"
-if [ "$NETINSTALL" = 1 ]; then
+sudo rm -rf "$ISOROOT/nix-cache"
+if [ "$NIXOS" = 1 ]; then
+  if [ -n "${NIXOS_CACHE_DIR:-}" ]; then
+    sudo cp -a "$NIXOS_CACHE_DIR" "$ISOROOT/nix-cache"
+    echo "  nix-cache: $(sudo du -sh "$ISOROOT/nix-cache" | cut -f1) (the system closure, signed)"
+  else
+    echo "  (nixos: the closure comes from $NIXOS_CACHE_URL)"
+  fi
+elif [ "$NETINSTALL" = 1 ]; then
   echo "  (netinstall: no OCI dir on the ISO)"
 else
   sudo skopeo copy "oci-archive:$OCI" "oci:$ISOROOT/container"
@@ -686,7 +822,7 @@ ls -lh "$OUT"; cat "$OUT.sha256"
 # on, that digest is untagged, and a registry cleanup of untagged versions
 # would break this ISO for everyone who downloads it. Pinning is a release
 # step, run from CI where the token can write packages.
-if [ "$NETINSTALL" = 1 ] && [ "$PRODUCTION" = 1 ]; then
+if [ "$NETINSTALL" = 1 ] && [ "$PRODUCTION" = 1 ] && [ "$NIXOS" != 1 ]; then
   echo "== BEFORE PUBLISHING =="
   echo "This ISO downloads $RELEASE_IMAGE."
   echo "Give that digest a durable tag, so no GHCR cleanup can ever remove it:"

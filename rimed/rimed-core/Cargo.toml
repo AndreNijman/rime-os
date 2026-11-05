@@ -9,6 +9,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rime-paths = { path = "../rime-paths" }
 anyhow.workspace = true
 serde.workspace = true
 toml.workspace = true

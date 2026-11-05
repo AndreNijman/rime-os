@@ -8,6 +8,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rime-paths = { path = "../rime-paths" }
 rime-secret-core = { path = "../rime-secret-core" }
 anyhow.workspace = true
 serde.workspace = true

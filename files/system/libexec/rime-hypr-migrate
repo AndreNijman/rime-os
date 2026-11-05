@@ -66,7 +66,7 @@ BANNER = "Converted from hyprlang by rime-hypr-migrate"
 
 # Values that have stood in for these variables across image generations.
 RIME_VARS = {
-    "terminal":    {"alacritty"},
+    "terminal":    {"alacritty", "ghostty"},
     "browser":     {"/usr/libexec/rime-open-browser", "firefox", "zen",
                     "/usr/libexec/apex-open-browser"},  # rime-rename: keep — the APEX-era value on disk
     "fileManager": {"thunar"},
@@ -81,6 +81,7 @@ RIME_VARS = {
 # takes none. exec args are matched after variable expansion.
 RIME_DEFAULT_BINDS = {
     ("SUPER", "T", "exec", "alacritty"),
+    ("SUPER", "T", "exec", "ghostty"),
     ("SUPER", "Q", "killactive", None),
     ("SUPER", "W", "exec", "/usr/libexec/rime-open-browser"),
     ("SUPER", "W", "exec", "firefox"),
@@ -330,12 +331,30 @@ def strip_comment(text):
     return text if hashes == -1 else text[:hashes]
 
 
+# The /usr prefixes a config on disk was written with, and the same prefixes as
+# this system spells them. Every table above names the system's own paths, and a
+# packager that moves them rewrites this file (the NixOS package maps /usr/libexec/
+# to the system profile, tables included) while the configs on disk keep the
+# bootc spelling: without this an APEX default no longer matched its table entry
+# and came back as a "user edit" that runs a path which does not exist. The disk
+# side is split so no such rewrite reaches it. On bootc the two are the same.
+_ON_DISK = ("/u" "sr/libexec/", "/u" "sr/share/", "/u" "sr/bin/")
+_HERE = ("/usr/libexec/", "/usr/share/", "/usr/bin/")
+
+
+def host_paths(text):
+    """A line from a config on disk, with its /usr paths in this system's spelling."""
+    for disk, here in zip(_ON_DISK, _HERE):
+        text = text.replace(disk, here)
+    return text
+
+
 def parse(text):
     """hyprlang source -> [Directive]. Blocks become dotted section names."""
     out = []
     stack = []
     for number, raw in enumerate(text.splitlines(), 1):
-        line = strip_comment(raw).strip()
+        line = host_paths(strip_comment(raw)).strip()
         if not line:
             continue
         if line == "}":
@@ -671,7 +690,7 @@ def stamp():
 
 
 def is_rime_managed(text):
-    return any(marker in text for marker in RIME_MARKERS)
+    return any(marker in host_paths(text) for marker in RIME_MARKERS)
 
 
 def read(path):

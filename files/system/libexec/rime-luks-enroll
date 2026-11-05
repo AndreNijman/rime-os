@@ -47,6 +47,21 @@
 #     control. `--with-pin` is opt-in, and when it is used the lockout
 #     arithmetic is read off the part and shown.
 #
+#  ═══ THE TPM-ONLY PATH (--tpm-only), FOR A MACHINE THAT ALREADY HAS ITS KEYS ═══
+#
+#      rime-luks-enroll --tpm-only --device <dev>
+#
+#  Re-binds the TPM slot and nothing else (PLAN.md D3, S3: the NixOS move, a
+#  Secure Boot key change, a dbx update). The volume MUST already carry a
+#  recovery key; this path never adds, rotates or wipes one, and never touches a
+#  passphrase slot. Every keyslot and token that is not the TPM's is
+#  fingerprinted before and after, and a difference is a hard failure. The full
+#  path now refuses a volume that already has a recovery key (bootc's version
+#  wiped it and handed out a new one, which strands every printed copy of the
+#  old key): --tpm-only keeps it, --replace-recovery rotates it on purpose.
+#  Unlike the full path, a --tpm-only run that ends without a TPM slot (any
+#  decline) exits 3: re-binding the slot was the whole job.
+#
 #  ═══ WHAT IT DOES NOT DO ═══
 #
 #  It does not create, partition or format anything. The volume must already be
@@ -79,6 +94,7 @@ die()  { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 usage() {
     cat >&2 <<EOF
 usage: $PROG --device DEV --recovery-out PATH [options]
+       $PROG --tpm-only --device DEV [options]
        $PROG --check --device DEV
 
   --device DEV           the LUKS2 volume to add key slots to
@@ -94,12 +110,16 @@ usage: $PROG --device DEV --recovery-out PATH [options]
   --with-pin             also require a PIN to unlock (opt-in; it prints the
                          lockout arithmetic it commits you to)
   --check                do not enrol: read the volume's tokens back and report
+  --tpm-only             re-bind the TPM slot only: the volume's recovery key
+                         (required) and passphrase slots are kept unchanged
+  --replace-recovery     full path on a volume that already has a recovery key:
+                         wipe it and enrol a new one (without it, refused)
 EOF
     exit 1
 }
 
 DEVICE="" RECOVERY_OUT="" UNLOCK_KEY_FILE="" TPM2_DEVICE="auto"
-PROBE_ROOT="" WANT_POLICY="auto" WITH_PIN=0 CHECK_ONLY=0
+PROBE_ROOT="" WANT_POLICY="auto" WITH_PIN=0 CHECK_ONLY=0 TPM_ONLY=0 REPLACE_RECOVERY=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --device)          DEVICE="${2:-}"; shift 2;;
@@ -110,12 +130,22 @@ while [[ $# -gt 0 ]]; do
         --probe-root)      PROBE_ROOT="${2%/}"; shift 2;;
         --with-pin)        WITH_PIN=1; shift;;
         --check)           CHECK_ONLY=1; shift;;
+        --tpm-only)        TPM_ONLY=1; shift;;
+        --replace-recovery) REPLACE_RECOVERY=1; shift;;
         -h|--help)         usage;;
         *) die "unknown argument: $1";;
     esac
 done
 [[ -n "$DEVICE" ]] || usage
-(( CHECK_ONLY )) || [[ -n "$RECOVERY_OUT" ]] || usage
+(( CHECK_ONLY || TPM_ONLY )) || [[ -n "$RECOVERY_OUT" ]] || usage
+if (( TPM_ONLY )); then
+    [[ -z "$RECOVERY_OUT" ]] \
+        || die "--tpm-only never writes a recovery key; drop --recovery-out (the volume keeps the one it has)"
+    (( ! REPLACE_RECOVERY )) || die "--tpm-only and --replace-recovery contradict each other"
+    RETRY="$0 --tpm-only --device $DEVICE"
+else
+    RETRY="$0 --device $DEVICE --recovery-out $RECOVERY_OUT"
+fi
 
 readonly EFIVARS_DIR="$PROBE_ROOT/sys/firmware/efi/efivars"
 readonly TPM_SYSFS="$PROBE_ROOT/sys/class/tpm/tpm0"
@@ -214,6 +244,32 @@ print(len(json.load(sys.stdin).get("keyslots", {})))
 '
 }
 
+# kept_fingerprint DEV — "<sha256> <summary>" of every keyslot and token that is
+# NOT the systemd-tpm2 token or a keyslot it names: the recovery key, the
+# passphrase, anything else. The TPM-only path takes it before and after and
+# requires the two to be identical (the keyslot objects carry their salts and
+# key-material offsets, so any rewrite of a kept slot changes the digest).
+kept_fingerprint() {
+    luks_tokens_json "$1" | python3 -c '
+import hashlib, json, sys
+
+meta = json.load(sys.stdin)
+tokens = meta.get("tokens", {})
+tpm_slots = set()
+kept_tokens = {}
+for tid, t in tokens.items():
+    if t.get("type") == "systemd-tpm2":
+        tpm_slots |= {str(k) for k in t.get("keyslots", [])}
+    else:
+        kept_tokens[tid] = t
+kept_slots = {k: v for k, v in meta.get("keyslots", {}).items() if k not in tpm_slots}
+blob = json.dumps({"keyslots": kept_slots, "tokens": kept_tokens}, sort_keys=True).encode()
+summary = "slots=" + ",".join(sorted(kept_slots)) + " tokens=" + ",".join(
+    sorted(t.get("type", "?") + ":" + "+".join(map(str, t.get("keyslots", []))) for t in kept_tokens.values()))
+print(hashlib.sha256(blob).hexdigest(), summary)
+'
+}
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  --check: the gate on its own
 # ═════════════════════════════════════════════════════════════════════════════
@@ -276,8 +332,10 @@ esac
 "$CRYPTSETUP" isLuks --type luks2 "$DEVICE" \
     || die "$DEVICE is not a LUKS2 volume; Rime key slots need LUKS2 tokens"
 
-rec_dir="$(dirname "$RECOVERY_OUT")"
-[[ -d "$rec_dir" ]] || die "no such directory for --recovery-out: $rec_dir"
+if (( ! TPM_ONLY )); then
+    rec_dir="$(dirname "$RECOVERY_OUT")"
+    [[ -d "$rec_dir" ]] || die "no such directory for --recovery-out: $rec_dir"
+fi
 
 # The key that opens the volume, passed to every enrolment below. Without one,
 # systemd-cryptenroll reads $PASSWORD or prompts — which is right for a person
@@ -298,18 +356,36 @@ say "$PROG: enrolling key slots on $DEVICE"
 # path would make a firmware update a data-loss event, and the window in which
 # that is true is closed by never opening it.
 #
-# An existing recovery slot is WIPED rather than stacked. The caller is being
-# handed a new recovery key and will file that one; a second, older recovery key
-# that nobody can name is a credential in the wild, not a spare.
-if [[ "$(token_types "$DEVICE")" == *systemd-recovery* ]]; then
-    say "  removing the recovery key already on this volume (a second one nobody"
-    say "  holds is a loose credential, not a spare)"
+# The TPM-only path skips this section: the volume's recovery key is the one the
+# owner already holds (on paper, in a password manager), and it is the way back
+# if the new TPM binding does not unseal. It must exist, and it is fingerprinted
+# with every other non-TPM slot so the end of this program can prove it was not
+# touched.
+KEPT_BEFORE=""
+if (( TPM_ONLY )); then
+    [[ "$(token_types "$DEVICE")" == *systemd-recovery* ]] \
+        || die "$DEVICE has no recovery key. --tpm-only re-binds the TPM slot and never adds one; enrol one first with: $0 --device $DEVICE --recovery-out PATH"
+    KEPT_BEFORE="$(kept_fingerprint "$DEVICE")"
+    emit "recovery: kept ${KEPT_BEFORE#* }"
+    say "  keeping the recovery key and passphrase slots (${KEPT_BEFORE#* })"
+fi
+
+# An existing recovery slot is never replaced by accident. The bootc version
+# wiped it and printed a new one, which on a machine that is only re-binding
+# its TPM throws away the key the owner filed. Rotating it is --replace-recovery,
+# said on purpose; a second, older recovery key that nobody can name is a
+# credential in the wild, so a rotation wipes rather than stacks.
+if (( ! TPM_ONLY )) && [[ "$(token_types "$DEVICE")" == *systemd-recovery* ]]; then
+    (( REPLACE_RECOVERY )) \
+        || die "$DEVICE already has a recovery key. To re-bind only the TPM slot and keep it: $0 --tpm-only --device $DEVICE. To rotate it (the old key stops working): add --replace-recovery"
+    say "  --replace-recovery: removing the recovery key already on this volume"
     # Its own invocation. Measured on systemd 258.10: a wipe combined with an
     # enrol in one command is a no-op that still exits 0.
     "$CRYPTENROLL" --wipe-slot=recovery "${unlock_args[@]}" "$DEVICE" >&2 \
         || die "could not remove the existing recovery key from $DEVICE"
 fi
 
+if (( ! TPM_ONLY )); then
 umask 077
 rec_tmp="$(mktemp "$rec_dir/.rime-recovery.XXXXXX")"
 trap 'rm -f "$rec_tmp"' EXIT
@@ -332,12 +408,33 @@ mv -f "$rec_tmp" "$RECOVERY_OUT"
 trap - EXIT
 emit "recovery: enrolled file=$RECOVERY_OUT"
 say "  recovery key written to $RECOVERY_OUT"
+# From here the volume carries a recovery key, and the full path refuses a
+# volume that has one, so a decline below must hand the user the resumption that
+# keeps it: re-binding the TPM slot is all that is left to do.
+RETRY="$0 --tpm-only --device $DEVICE"
+(( ! WITH_PIN )) || RETRY+=" --with-pin"
+[[ "$WANT_POLICY" == auto ]] || RETRY+=" --policy $WANT_POLICY"
+[[ "$TPM2_DEVICE" == auto ]] || RETRY+=" --tpm2-device $TPM2_DEVICE"
+fi
+
+# assert_kept — the TPM-only promise, checked against the header itself.
+assert_kept() {
+    (( TPM_ONLY )) || return 0
+    local now; now="$(kept_fingerprint "$DEVICE")"
+    [[ "$now" == "$KEPT_BEFORE" ]] \
+        || die "the recovery/passphrase slots of $DEVICE CHANGED during a TPM-only re-enrolment (before: $KEPT_BEFORE, after: $now)"
+    emit "kept: unchanged ${now%% *}"
+}
 
 # Every path from here on ends in one of these two, and both exit 0: the
 # recovery key is enrolled, so the volume is usable, and an installer must never
-# read "no TPM slot" as a failed install.
+# read "no TPM slot" as a failed install. The TPM-only path is the exception:
+# its whole job is the TPM slot, and a decline after the old slot was wiped
+# (tpm2-enrolment-failed, pcr-uninitialised) leaves the volume with none, so
+# rime-luks-tpm-reenrol@ must fail rather than report success.
 decline() {  # decline SLUG PROSE...
     local slug="$1"; shift
+    assert_kept
     emit "tpm2: declined reason=$slug"
     emit "tokens: $(token_types "$DEVICE")"
     emit "slots: $(keyslot_count "$DEVICE")"
@@ -346,8 +443,14 @@ decline() {  # decline SLUG PROSE...
     local line
     for line in "$@"; do note "$line"; done
     say ""
-    say "The disk still unlocks with your passphrase, and with the recovery key"
-    say "in $RECOVERY_OUT. Keep that key somewhere that is not this computer."
+    if (( TPM_ONLY )); then
+        say "The disk still unlocks with your passphrase, and with the recovery key"
+        say "you already hold."
+    else
+        say "The disk still unlocks with your passphrase, and with the recovery key"
+        say "in $RECOVERY_OUT. Keep that key somewhere that is not this computer."
+    fi
+    (( ! TPM_ONLY )) || exit 3
     exit 0
 }
 
@@ -519,7 +622,7 @@ if [[ -z "$sb_state" ]]; then
         "The firmware exposes no SecureBoot variable, so Rime cannot tell" \
         "whether the boot chain is verified." \
         "Turn Secure Boot on in the firmware setup, then run:" \
-        "  sudo $0 --device $DEVICE --recovery-out $RECOVERY_OUT"
+        "  sudo $RETRY"
 fi
 
 if [[ "$setup_state" != "0" ]]; then
@@ -527,7 +630,8 @@ if [[ "$setup_state" != "0" ]]; then
         "The firmware is in Secure Boot SETUP MODE: it has no platform key, so" \
         "anyone can enrol their own signing key and boot anything they like." \
         "Leave setup mode in the firmware setup (usually by restoring the" \
-        "default Secure Boot keys), then re-run this command."
+        "default Secure Boot keys), then run:" \
+        "  sudo $RETRY"
 fi
 
 [[ "$sb_state" == "1" ]] && SB_ENFORCING=1
@@ -549,7 +653,7 @@ if [[ "$TPM2_DEVICE" == auto ]]; then
             "$DEV_DIR/tpm0 is present). Some machines ship with the firmware TPM" \
             "disabled — look for 'PTT', 'fTPM' or 'Security Device' in the" \
             "firmware setup. If you turn it on, re-run:" \
-            "  sudo $0 --device $DEVICE --recovery-out $RECOVERY_OUT"
+            "  sudo $RETRY"
     fi
 fi
 
@@ -587,7 +691,7 @@ if (( ! policy_ok )); then
             "" \
             "To get TPM auto-unlock: turn Secure Boot on in the firmware setup," \
             "boot Rime again, and run:" \
-            "  sudo $0 --device $DEVICE --recovery-out $RECOVERY_OUT" \
+            "  sudo $RETRY" \
             "" \
             "If Secure Boot cannot be turned on here, --with-pin is the other" \
             "route: it puts a secret in front of the unseal that an attacker" \
@@ -651,8 +755,8 @@ if (( WITH_PIN )); then
         note "the TPM refuses every unseal for LOCKOUT_INTERVAL seconds, and"
         note "LOCKOUT_RECOVERY is how long a full lockout lasts. If another"
         note "operating system on this machine holds the TPM's lockout"
-        note "authorisation, Rime cannot clear it for you — the recovery key in"
-        note "$RECOVERY_OUT is then the only way in."
+        note "authorisation, Rime cannot clear it for you — the recovery key"
+        note "${RECOVERY_OUT:-you already hold} is then the only way in."
     fi
 fi
 
@@ -727,6 +831,7 @@ case "$fields" in
     *) die "the token reports '$fields', but Rime asked for binding=$POLICY_EXPECT" ;;
 esac
 
+assert_kept
 emit "tpm2: enrolled $fields"
 emit "tokens: $(token_types "$DEVICE")"
 emit "slots: $(keyslot_count "$DEVICE")"
@@ -740,4 +845,8 @@ say "keys — enrolling a new signing key, a dbx update from the firmware vendor
 say "or turning Secure Boot off — and after the TPM is cleared. That is the"
 say "binding working, not a fault."
 say ""
-say "Keep the recovery key in $RECOVERY_OUT somewhere that is not this computer."
+if (( TPM_ONLY )); then
+    say "The recovery key you already hold still opens it (checked: unchanged)."
+else
+    say "Keep the recovery key in $RECOVERY_OUT somewhere that is not this computer."
+fi

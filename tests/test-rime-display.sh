@@ -182,6 +182,27 @@ printf '%s' "$out" | pipe_has -E "Traceback|FileNotFoundError" \
     && ok "the layout is still written with no compositor and no pgrep" \
     || bad "the layout is still written with no compositor and no pgrep"
 
+section "a wrapped Hyprland is still Hyprland"
+# NixOS wraps bin/Hyprland (it execs .Hyprland-wrapped), so `pgrep -x Hyprland`
+# never matches the running compositor. A caller without XDG_CURRENT_DESKTOP is
+# still inside Hyprland when HYPRLAND_INSTANCE_SIGNATURE is set; PATH holds only
+# the fakes, so pgrep is absent and only the signature can decide.
+got="$(env -u NIRI_SOCKET -u XDG_CURRENT_DESKTOP PATH="$FAKE" HOME="$H6" \
+        HYPRLAND_INSTANCE_SIGNATURE=fixture_sig "$PY" "$GEN" compositor 2>&1)"
+[ "$got" = "hyprland" ] \
+    && ok "HYPRLAND_INSTANCE_SIGNATURE alone identifies Hyprland" \
+    || bad "HYPRLAND_INSTANCE_SIGNATURE alone identifies Hyprland (got '$got')"
+got="$(env -u NIRI_SOCKET -u XDG_CURRENT_DESKTOP -u HYPRLAND_INSTANCE_SIGNATURE \
+        PATH="$FAKE" HOME="$H6" "$PY" "$GEN" compositor 2>&1)"
+[ "$got" = "unknown" ] \
+    && ok "with no hint at all the compositor is unknown" \
+    || bad "with no hint at all the compositor is unknown (got '$got')"
+got="$(env -u NIRI_SOCKET PATH="$FAKE" HOME="$H6" XDG_CURRENT_DESKTOP=niri \
+        HYPRLAND_INSTANCE_SIGNATURE=fixture_sig "$PY" "$GEN" compositor 2>&1)"
+[ "$got" = "niri" ] \
+    && ok "XDG_CURRENT_DESKTOP still wins over a stray signature" \
+    || bad "XDG_CURRENT_DESKTOP still wins over a stray signature (got '$got')"
+
 section "an empty model does nothing"
 H3="${WORK}/home3"; mkdir -p "$H3/.config/rime-shell"
 echo '{"outputs":[]}' > "$H3/.config/rime-shell/display.json"
@@ -348,6 +369,228 @@ out="$(np_run "$S1" save --no-persist)"; rc=$?
 PATH="$NPBIN" HOME="$NP" "$PY" "$GEN" --help 2>&1 | pipe_has -- '--no-persist' \
     && ok "--no-persist is discoverable in --help (the shell probes for it)" \
     || bad "--no-persist is discoverable in --help (the shell probes for it)"
+
+section "Hyprland: eval only, checked against the live modes, refusals reported"
+# Hyprland 0.57 has no `keyword` request; eval is the only way in. The fake
+# answers `-j monitors` with one 1920x1080@60 output and `eval` with whatever
+# HL_EVAL_REPLY says, and records every call so "keyword was never invoked" is
+# an assertion about argv, not about the code's intent.
+HLBIN="${WORK}/hl-bin"; mkdir -p "$HLBIN"
+# HL_MONITORS replaces the monitor list; with HL_EVAL_REFUSE set, an eval whose
+# chunk contains that text is refused and every other eval answers ok (so a
+# refused layout and the rollback after it get different replies). Each eval is
+# also counted in $HL_CALLED.n: one chunk, one line, however many outputs.
+cat > "${HLBIN}/hyprctl" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$HL_CALLED"
+case "$1 $2" in
+    "-j monitors")
+        # printf, not cat: PATH holds nothing but these fakes.
+        if [ -n "${HL_MONITORS:-}" ]; then printf '%s\n' "$HL_MONITORS"; exit 0; fi
+        printf '%s\n' '[{"name": "DP-1", "width": 1920, "height": 1080,' \
+            '"refreshRate": 60.0, "x": 0, "y": 0, "scale": 1.0, "transform": 0,' \
+            '"disabled": false, "availableModes": ["1920x1080@60.00Hz", "1280x720@60.00Hz"]}]'
+        ;;
+    eval*)
+        printf 'eval\n' >> "$HL_CALLED.n"
+        if [ -n "${HL_EVAL_REFUSE:-}" ]; then
+            case "$*" in
+                *"$HL_EVAL_REFUSE"*) printf '%s\n' '[string "hl.monitor"]:2: refused' ;;
+                *) echo ok ;;
+            esac
+        else
+            printf '%s\n' "${HL_EVAL_REPLY:-ok}"
+        fi
+        ;;
+    *) echo "unknown request" ;;
+esac
+SH
+# A Hyprland whose --verify-config rejects everything, for the persist refusal.
+printf '#!/bin/sh\necho "Config parsing result: error"\nexit 1\n' > "${HLBIN}/Hyprland.reject"
+printf '#!/bin/sh\nexit 0\n' > "${HLBIN}/pkill"
+chmod +x "${HLBIN}"/hyprctl "${HLBIN}"/pkill "${HLBIN}"/Hyprland.reject
+export HL_CALLED="${WORK}/hl-called"
+hl_run() {
+    local h="$1"; shift
+    rm -f "$HL_CALLED" "$HL_CALLED.n"
+    env -u RIME_DISPLAY_NO_LIVE PATH="$HLBIN" HOME="$h" \
+        XDG_CURRENT_DESKTOP=Hyprland "$PY" "$GEN" "$@" 2>&1
+}
+hl_home() {
+    local h="${WORK}/$1"; mkdir -p "$h/.config/rime-shell"
+    printf '%s\n' "$2" > "$h/.config/rime-shell/display.json"
+    printf '%s' "$h"
+}
+no_keyword() { ! grep -q 'keyword' "$HL_CALLED" 2>/dev/null; }
+
+K1="$(hl_home hl-snap '{"outputs": [{"name": "DP-1", "enabled": true, "x": 0, "y": 0,
+  "scale": 1.1, "mode": {"width": 1920, "height": 1080, "refresh": 60}}]}')"
+out="$(hl_run "$K1" apply)"; rc=$?
+[ "$rc" -eq 0 ] && ok "a Hyprland apply with an eval reply of ok succeeds" \
+    || bad "a Hyprland apply with an eval reply of ok succeeds (rc=${rc}: ${out})"
+grep -q '^eval hl.monitor({ output = "DP-1", mode = "1920x1080@60", position = "0x0", scale = 1.2 })$' \
+    "$HL_CALLED" \
+    && ok "scale 1.1 on 1920x1080 is applied as 1.2, Hyprland's own choice" \
+    || bad "scale 1.1 on 1920x1080 is applied as 1.2 ($(cat "$HL_CALLED"))"
+printf '%s' "$out" | pipe_has 'using 1.2, the nearest scale Hyprland accepts' \
+    && ok "the snap is reported in words" || bad "the snap is reported in words (${out})"
+grep -q 'scale = 1.2 })' "$K1/.config/hypr/rime/monitors.lua" 2>/dev/null \
+    && ok "the persisted module carries the snapped scale" \
+    || bad "the persisted module carries the snapped scale"
+no_keyword && ok "hyprctl keyword is never invoked (apply)" \
+    || bad "hyprctl keyword is never invoked (apply): $(cat "$HL_CALLED")"
+
+K2="$(hl_home hl-mode '{"outputs": [{"name": "DP-1", "enabled": true, "x": 0, "y": 0,
+  "scale": 1.0, "mode": {"width": 1234, "height": 567, "refresh": 60}}]}')"
+out="$(hl_run "$K2" apply)"
+grep -q 'mode = "1920x1080@60"' "$HL_CALLED" \
+    && ok "a mode the display does not list is replaced by its current mode" \
+    || bad "a mode the display does not list is replaced ($(cat "$HL_CALLED"))"
+printf '%s' "$out" | pipe_has '1234x567@60Hz is not a mode this display offers' \
+    && ok "the unknown mode is reported" || bad "the unknown mode is reported (${out})"
+grep -q '1234x567' "$K2/.config/hypr/rime/monitors.lua" 2>/dev/null \
+    && bad "the unknown mode is never persisted" || ok "the unknown mode is never persisted"
+
+K3="$(hl_home hl-refuse '{"outputs": [{"name": "DP-1", "enabled": true, "scale": 1.0}]}')"
+out="$(HL_EVAL_REPLY='[string "hl.monitor"]:1: bad argument' hl_run "$K3" apply)"; rc=$?
+[ "$rc" -eq 1 ] && ok "an eval reply other than ok exits 1" \
+    || bad "an eval reply other than ok exits 1 (rc=${rc})"
+printf '%s' "$out" | pipe_has 'Hyprland refused the layout for DP-1: \[string' \
+    && ok "the refusal names the output and carries Hyprland's reply" \
+    || bad "the refusal names the output and carries Hyprland's reply (${out})"
+no_keyword && ok "a refused eval does not fall back to hyprctl keyword" \
+    || bad "a refused eval does not fall back to hyprctl keyword: $(cat "$HL_CALLED")"
+[ -e "$K3/.config/hypr/rime/monitors.lua" ] \
+    && bad "a refused live apply persists nothing" || ok "a refused live apply persists nothing"
+
+K4="$(hl_home hl-types '{"outputs": [{"name": "DP-1", "enabled": true, "scale": true,
+  "x": 1e400, "y": 0}]}')"
+out="$(hl_run "$K4" apply)"
+printf '%s' "$out" | pipe_has 'scale True is not a number' \
+    && ok "scale true is refused, not read as 1" || bad "scale true is refused (${out})"
+grep -q 'position = "auto", scale = 1.0' "$HL_CALLED" \
+    && ok "an infinite x places the output automatically" \
+    || bad "an infinite x places the output automatically ($(cat "$HL_CALLED"))"
+
+K5="$(hl_home hl-nan '{"outputs": [{"name": "DP-1", "enabled": true, "scale": NaN}]}')"
+out="$(hl_run "$K5" apply)"
+{ printf '%s' "$out" | pipe_has 'NaN is not a number'; } && ! grep -q '^eval' "$HL_CALLED" 2>/dev/null \
+    && ok "a model holding NaN applies nothing" || bad "a model holding NaN applies nothing (${out})"
+
+K6="$(hl_home hl-inject '{"outputs": [{"name": "DP-1\"}) hl.exec_cmd(\"x\") --", "enabled": true},
+  {"name": "DP-1\nhl.exec_cmd(\"x\")", "enabled": true}]}')"
+out="$(hl_run "$K6" apply)"
+! grep -q 'exec_cmd' "$HL_CALLED" 2>/dev/null && [ ! -e "$K6/.config/hypr/rime/monitors.lua" ] \
+    && ok "output names with a quote or newline never reach eval or the module" \
+    || bad "output names with a quote or newline never reach eval or the module"
+
+# Persist refusal is a non-zero exit. Before, `save` printed the refusal and
+# exited 0, so Settings reported a layout saved that was not.
+K7="$(hl_home hl-persist '{"outputs": [{"name": "DP-1", "enabled": true, "scale": 1.0}]}')"
+cp "${HLBIN}/Hyprland.reject" "${HLBIN}/Hyprland"
+out="$(hl_run "$K7" save)"; rc=$?
+rm -f "${HLBIN}/Hyprland"
+{ [ "$rc" -eq 1 ] && printf '%s' "$out" | pipe_has 'previous layout is untouched'; } \
+    && ok "a rejected monitor module makes save exit 1" \
+    || bad "a rejected monitor module makes save exit 1 (rc=${rc}: ${out})"
+[ -e "$K7/.config/hypr/rime/monitors.lua" ] \
+    && bad "the rejected module is not written" || ok "the rejected module is not written"
+
+# Two outputs, the second refused. One eval carries the whole layout, so there
+# is no reply after which DP-1 has moved and DP-2 has not; and because a Lua
+# error part-way still leaves the calls before it run, the refusal is followed
+# by a rollback chunk putting both back where they were. Nothing is persisted.
+TWO='[{"name": "DP-1", "width": 1920, "height": 1080, "refreshRate": 60.0, "x": 0, "y": 0,
+ "scale": 1.0, "transform": 0, "disabled": false, "availableModes": ["1920x1080@60.00Hz"]},
+ {"name": "DP-2", "width": 1920, "height": 1080, "refreshRate": 60.0, "x": 1920, "y": 0,
+ "scale": 1.0, "transform": 0, "disabled": false, "availableModes": ["1920x1080@60.00Hz"]}]'
+K8="$(hl_home hl-two '{"outputs": [
+  {"name": "DP-1", "enabled": true, "x": 1920, "y": 0, "scale": 1.0, "mode": {"width": 1920, "height": 1080, "refresh": 60}},
+  {"name": "DP-2", "enabled": true, "x": 0, "y": 0, "scale": 1.0, "mode": {"width": 1920, "height": 1080, "refresh": 60}}]}')"
+out="$(HL_MONITORS="$TWO" HL_EVAL_REFUSE='output = "DP-2", mode = "1920x1080@60", position = "0x0"' \
+       hl_run "$K8" apply)"; rc=$?
+[ "$rc" -eq 1 ] && ok "a layout refused on its second output exits 1" \
+    || bad "a layout refused on its second output exits 1 (rc=${rc}: ${out})"
+# In one chunk DP-2's rule is the chunk's second line, not an eval of its own.
+[ "$(wc -l < "$HL_CALLED.n" 2>/dev/null)" -eq 2 ] \
+    && grep -q '^hl.monitor({ output = "DP-2", mode = "1920x1080@60", position = "0x0"' "$HL_CALLED" \
+    && ok "the layout is one eval and the refusal is followed by exactly one rollback eval" \
+    || bad "the layout is one eval and the refusal is followed by exactly one rollback eval ($(cat "$HL_CALLED"))"
+# The new layout has DP-1 at 1920x0 and DP-2 at 0x0, so these two rules can
+# only come from the rollback chunk.
+rb="$(cat "$HL_CALLED")"
+printf '%s' "$rb" | pipe_has 'output = "DP-1", mode = "1920x1080@60", position = "0x0"' \
+    && printf '%s' "$rb" | pipe_has 'output = "DP-2", mode = "1920x1080@60", position = "1920x0"' \
+    && ok "the rollback puts every output back as it was live" \
+    || bad "the rollback puts every output back as it was live (${rb})"
+printf '%s' "$out" | pipe_has 'put back as they were: DP-1, DP-2' \
+    && ok "the rollback is reported" || bad "the rollback is reported (${out})"
+[ -e "$K8/.config/hypr/rime/monitors.lua" ] \
+    && bad "a refused two-output layout persists nothing" \
+    || ok "a refused two-output layout persists nothing"
+
+# A panel listing 60.00 and 59.94 while running 59.94: only 59.94 is current.
+# With every mode within 1 Hz flagged, an unknown mode fell back to the FIRST
+# flagged one, 60.00, which is not what the screen runs.
+NEAR='[{"name": "DP-1", "width": 1920, "height": 1080, "refreshRate": 59.94, "x": 0, "y": 0,
+ "scale": 1.0, "transform": 0, "disabled": false,
+ "availableModes": ["1920x1080@60.00Hz", "1920x1080@59.94Hz"]}]'
+K9="$(hl_home hl-near '{"outputs": [{"name": "DP-1", "enabled": true, "x": 0, "y": 0,
+  "scale": 1.0, "mode": {"width": 1234, "height": 567, "refresh": 60}}]}')"
+HL_MONITORS="$NEAR" hl_run "$K9" apply >/dev/null
+grep -q 'mode = "1920x1080@59.94"' "$HL_CALLED" \
+    && ok "only the closest listed refresh is the current mode" \
+    || bad "only the closest listed refresh is the current mode ($(cat "$HL_CALLED"))"
+cur="$(HL_MONITORS="$NEAR" hl_run "$K9" list | "$PY" -c 'import json,sys; d=json.load(sys.stdin)
+print([m["refresh"] for o in d for m in o["modes"] if m["current"]])')"
+[ "$cur" = "[59.94]" ] && ok "list flags exactly one current mode" \
+    || bad "list flags exactly one current mode (got $cur)"
+
+# Hyprland's scale snapping is Hyprland's rule. On niri the mode check still
+# runs, the scale 1.1 is left as asked.
+K10="$(hl_home hl-niri '{"outputs": [{"name": "DP-1", "enabled": true, "x": 0, "y": 0,
+  "scale": 1.1, "mode": {"width": 1234, "height": 567, "refresh": 60}}]}')"
+rm -f "$HL_CALLED"
+out="$(env -u RIME_DISPLAY_NO_LIVE -u NIRI_SOCKET PATH="$HLBIN" HOME="$K10" \
+       XDG_CURRENT_DESKTOP=niri "$PY" "$GEN" apply --no-persist 2>&1)"
+printf '%s' "$out" | pipe_has 'nearest scale Hyprland accepts' \
+    && bad "niri: the scale is not snapped to Hyprland's (${out})" \
+    || ok "niri: the scale is not snapped to Hyprland's"
+printf '%s' "$out" | pipe_has '1234x567@60Hz is not a mode this display offers' \
+    && ok "niri: the mode is still checked against the display" \
+    || bad "niri: the mode is still checked against the display (${out})"
+grep -q '^eval' "$HL_CALLED" 2>/dev/null \
+    && bad "niri: nothing is sent to hyprctl eval" || ok "niri: nothing is sent to hyprctl eval"
+
+# A target that cannot be written is a refusal with a reason and exit 1, not a
+# Python traceback. Root ignores the mode bits, so this case needs a user.
+if [ "$(id -u)" -ne 0 ]; then
+    K11="$(hl_home hl-ro '{"outputs": [{"name": "DP-1", "enabled": true, "scale": 1.0}]}')"
+    mkdir -p "$K11/.config/hypr/rime" && chmod a-w "$K11/.config/hypr/rime"
+    out="$(hl_run "$K11" save)"; rc=$?
+    chmod u+w "$K11/.config/hypr/rime"
+    { [ "$rc" -eq 1 ] && printf '%s' "$out" | pipe_has 'could not write .*monitors.lua'; } \
+        && ! printf '%s' "$out" | pipe_has 'Traceback' \
+        && ok "a read-only monitor directory is refused in words and exits 1" \
+        || bad "a read-only monitor directory is refused in words and exits 1 (rc=${rc}: ${out})"
+    ls -a "$K11/.config/hypr/rime" | pipe_has '^\.rime-display\.' \
+        && bad "no temporary file is left behind" || ok "no temporary file is left behind"
+else
+    skp "running as root: a read-only directory does not stop root"
+fi
+
+# REFRESH_MAX is one limit: a string mode above it is refused like a dict one.
+out="$("$PY" - "$GEN" <<'PY'
+import importlib.machinery, importlib.util, sys
+spec = importlib.util.spec_from_loader("g", importlib.machinery.SourceFileLoader("g", sys.argv[1]))
+g = importlib.util.module_from_spec(spec); spec.loader.exec_module(g)
+print(g.parse_mode("1920x1080@5000"), g.parse_mode({"width": 1920, "height": 1080, "refresh": 5000}),
+      g.parse_mode("1920x1080@1000") is not None, g.parse_mode({"width": 1920, "height": 1080, "refresh": 1000}) is not None)
+PY
+)"
+[ "$out" = "None None True True" ] \
+    && ok "a refresh above 1000 Hz is refused as a string and as a dict alike" \
+    || bad "a refresh above 1000 Hz is refused as a string and as a dict alike (got $out)"
 
 section "colour management"
 # colord is the store; this program is the adapter. The suite never talks to the
@@ -681,6 +924,49 @@ grep -qF "icc = \"$CROOT/icc/no-curve.icc\"" "$mod" 2>/dev/null \
 grep -F 'output = "eDP-1"' "$mod" 2>/dev/null | pipe_has -F 'scale = 1.5' \
     && ok "the rule keeps the saved layout around the profile" \
     || bad "the rule keeps the saved layout around the profile"
+# A refused live ICC rule: not persisted, and exit 1 like `apply`. Before,
+# the refusal was a note, the module was written anyway and the verb exited 0.
+mkdir -p "$CROOT/bin-refuse"
+for f in "$CROOT/bin"/*; do ln -sf "$f" "$CROOT/bin-refuse/"; done
+cat > "$CROOT/bin-refuse/hyprctl" <<'SH'
+#!/bin/sh
+case "$1 $2" in
+    "-j monitors") printf '%s\n' '[{"name": "eDP-1", "width": 2560, "height": 1600, "refreshRate": 165.0,
+        "x": 0, "y": 0, "scale": 1.5, "transform": 0, "disabled": false, "availableModes": ["2560x1600@165.00Hz"]}]' ;;
+    eval*) printf '%s\n' "${ICC_EVAL_REPLY:-ok}" ;;
+esac
+SH
+chmod +x "$CROOT/bin-refuse/hyprctl"
+# CI exports RIME_DISPLAY_NO_LIVE for the whole suite; these cases are about
+# the live push, so they must not inherit it.
+colour_live() {
+    env -u RIME_DISPLAY_NO_LIVE PATH="$CROOT/bin-refuse" HOME="$CROOT/home" \
+        RIME_DISPLAY_DRM_ROOT="$CROOT/drm" \
+        CM_STATE="$CM_STATE" CM_ICC="$CROOT/icc" \
+        XDG_CURRENT_DESKTOP=Hyprland "$PY" "$GEN" "$@"
+}
+printf '{"outputs":[{"name":"eDP-1","enabled":true,"x":0,"y":0,"scale":1.5}]}' \
+    > "$CROOT/home/.config/rime-shell/display.json"
+rm -f "$mod"
+out7="$(ICC_EVAL_REPLY='[string "hl.monitor"]:1: cannot load icc' colour_live color-assign eDP-1 icc-none 2>&1)"; rc7=$?
+[ "$rc7" -eq 1 ] && ok "a live ICC rule Hyprland refuses makes color-assign exit 1" \
+    || bad "a live ICC rule Hyprland refuses makes color-assign exit 1 (rc=$rc7: $out7)"
+printf '%s' "$out7" | pipe_has 'Hyprland refused the layout for eDP-1' \
+    && ok "the ICC refusal carries Hyprland's reply" || bad "the ICC refusal carries Hyprland's reply ($out7)"
+[ -e "$mod" ] && bad "a refused ICC rule is not persisted" || ok "a refused ICC rule is not persisted"
+out8="$(colour_live color-assign eDP-1 icc-none 2>&1)"; rc8=$?
+{ [ "$rc8" -eq 0 ] && grep -qF "icc = \"$CROOT/icc/no-curve.icc\"" "$mod" 2>/dev/null; } \
+    && ok "the same assignment, accepted live, is persisted and exits 0 (control)" \
+    || bad "the same assignment, accepted live, is persisted and exits 0 (control) (rc=$rc8: $out8)"
+if [ "$(id -u)" -ne 0 ]; then
+    rm -f "$mod"; chmod a-w "$(dirname "$mod")"
+    out9="$(colour_live color-assign eDP-1 icc-none 2>&1)"; rc9=$?
+    chmod u+w "$(dirname "$mod")"
+    { [ "$rc9" -eq 1 ] && printf '%s' "$out9" | pipe_has 'could not write'; } \
+        && ok "a persist that fails after an accepted live rule makes color-assign exit 1" \
+        || bad "a persist that fails after an accepted live rule makes color-assign exit 1 (rc=$rc9: $out9)"
+fi
+rm -f "$mod"
 colour labwc color-assign eDP-1 icc-with 2>&1 | pipe_has "nothing applies an ICC profile" \
     && ok "off Hyprland the page is told the profile does not reach the screen" \
     || bad "off Hyprland the page is told the profile does not reach the screen"

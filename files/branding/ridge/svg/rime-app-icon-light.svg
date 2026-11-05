@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Rime app icon (light tile)</title>
+  <rect x="4" y="4" width="1016" height="1016" rx="170.08" fill="#FAFAFB" stroke="#E2E4E6" stroke-width="8"/>
+  <g transform="translate(133.12 194.773) scale(3.157)"><polygon id="plane-1" fill="#212224" points="11,175 162.5,140 220,159 235.5,175"/><polygon id="plane-2" fill="#212224" points="0,175 153,108 212,91.5 194.5,139 160.5,128"/><polygon id="plane-3" fill="#91C2DC" points="47.5,136 149,75 231,45 217.5,76"/><polygon id="plane-4" fill="#212224" points="91.5,100 129.5,58 240,0 222,36 142.5,67"/></g>
+</svg>

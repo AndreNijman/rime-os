@@ -195,7 +195,7 @@ pub const STORE_ROOT: &str = "/var/lib/rime/ai";
 
 /// The curated catalogue, shipped in the image. Its integrity is the image's
 /// integrity: cosign-signed, digest-pinned in CI, rolled back with the OS.
-pub const CATALOGUE_PATH: &str = "/usr/share/rimeos/ai/catalogue.toml";
+pub const CATALOGUE_PATH: &str = rime_paths::AI_CATALOGUE;
 
 /// Directory under `$XDG_RUNTIME_DIR` holding the daemon's sockets. Created
 /// `0700`.
@@ -958,7 +958,7 @@ pub mod probe_paths {
     pub const NVIDIA_CONTROL: &str = "/dev/nvidiactl";
     /// The NVIDIA userspace driver. Verified present on the katana as
     /// `/usr/lib64/libcuda.so.1` (driver 580.178.04).
-    pub const LIBCUDA: &str = "/usr/lib64/libcuda.so.1";
+    pub const LIBCUDA: &str = rime_paths::LIBCUDA;
     /// AMD's compute device. The definitive ROCm signal: ROCm cannot run
     /// without `amdkfd`, and `/opt/rocm` existing proves only that somebody
     /// installed a package. Absent on the katana, which has no AMD GPU.
@@ -969,7 +969,7 @@ pub mod probe_paths {
     /// Where Mesa and the NVIDIA driver drop Vulkan ICD manifests. Verified on
     /// the katana: 26 files including `nvidia_icd.x86_64.json`,
     /// `radeon_icd.x86_64.json`, `intel_icd.x86_64.json` and `lvp_icd.x86_64.json`.
-    pub const VULKAN_ICD_DIR: &str = "/usr/share/vulkan/icd.d";
+    pub const VULKAN_ICD_DIR: &str = rime_paths::VULKAN_ICD_DIR;
 }
 
 /// ICD filename stems that are software rasterisers, not GPUs.

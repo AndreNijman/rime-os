@@ -27,7 +27,7 @@ by a PR touching the other side — and a skipped job counts as success. That is
 the exact bug this repository already recorded for test-rime-modes.sh, and the
 reason the language-parity check lives in `static` too.
 
-It needs no toolchain and no container: it reads four text files.
+It needs no toolchain and no container: it reads five text files.
 
 COMMENTS CANNOT SATISFY A CHECK HERE
 Every match runs against comment-stripped text. This repository has been bitten
@@ -53,8 +53,9 @@ AI_RS = "rimed/rimed-core/src/ai.rs"
 CLI_RS = "rimed/rime/src/ai.rs"
 UNIT = "files/system/units/rime-aid.service"
 CONTAINERFILE = "Containerfile.base"
+PATHS_RS = "rimed/rime-paths/src/lib.rs"
 
-FILES = (AI_RS, CLI_RS, UNIT, CONTAINERFILE)
+FILES = (AI_RS, CLI_RS, UNIT, CONTAINERFILE, PATHS_RS)
 
 
 def read(root: Path, rel: str) -> str:
@@ -92,16 +93,31 @@ def strip_hash_comments(text: str) -> str:
     )
 
 
-def const_str(text: str, name: str) -> str:
-    """The value of `pub const NAME: &str = "…";`."""
+def const_str(text: str, name: str, paths: str, rel: str = AI_RS) -> str:
+    """The value of `pub const NAME: &str = "…";`.
+
+    A fixed absolute path is `pub const NAME: &str = rime_paths::OTHER;`, chosen
+    at build time. The bootc image sets no RIME_PATH_* override, so the value
+    it ships is the default written in rime-paths' `OTHER = "…";` line.
+    """
     m = re.search(
         r"^\s*pub const " + re.escape(name) + r"\s*:\s*&str\s*=\s*\"([^\"]*)\"\s*;",
         text,
         re.M,
     )
+    if m:
+        return m.group(1)
+    m = re.search(
+        r"^\s*pub const " + re.escape(name) + r"\s*:\s*&str\s*=\s*rime_paths::([A-Z0-9_]+)\s*;",
+        text,
+        re.M,
+    )
     if not m:
-        raise SystemExit(f"FATAL: {AI_RS} no longer declares {name}")
-    return m.group(1)
+        raise SystemExit(f"FATAL: {rel} no longer declares {name}")
+    d = re.search(r"^\s*" + re.escape(m.group(1)) + r"\s*=\s*\"([^\"]*)\"\s*;", paths, re.M)
+    if not d:
+        raise SystemExit(f"FATAL: {PATHS_RS} has no default for {m.group(1)} ({rel}'s {name})")
+    return d.group(1)
 
 
 class Checker:
@@ -121,14 +137,23 @@ class Checker:
         cli = strip_rust_comments(cli_raw)
         unit = strip_hash_comments(read(self.root, UNIT))
         cf = strip_hash_comments(read(self.root, CONTAINERFILE))
+        paths = strip_rust_comments(read(self.root, PATHS_RS))
 
-        store = const_str(ai, "STORE_ROOT")
-        catalogue = const_str(ai, "CATALOGUE_PATH")
-        subdir = const_str(ai, "RUNTIME_SUBDIR")
-        api = const_str(ai, "API_SOCKET")
-        control = const_str(ai, "CONTROL_SOCKET")
-        backend = const_str(ai, "BACKEND_SOCKET")
-        daemon = const_str(cli, "DAEMON")
+        store = const_str(ai, "STORE_ROOT", paths)
+        catalogue = const_str(ai, "CATALOGUE_PATH", paths)
+        subdir = const_str(ai, "RUNTIME_SUBDIR", paths)
+        api = const_str(ai, "API_SOCKET", paths)
+        control = const_str(ai, "CONTROL_SOCKET", paths)
+        backend = const_str(ai, "BACKEND_SOCKET", paths)
+        daemon = const_str(cli, "DAEMON", paths, CLI_RS)
+
+        # The bootc build must take every rime_paths default; an override in
+        # the Containerfile would make the values above not what ships.
+        self.require(
+            "RIME_PATH_" not in cf,
+            f"{CONTAINERFILE} sets a RIME_PATH_* override, so the rime_paths "
+            f"defaults read here are not the paths the image's binaries use",
+        )
 
         # ── the store: /usr is read-only, so it must be under /var ───────────
         self.require(
@@ -312,7 +337,7 @@ class Checker:
 
 # ── the self-test ────────────────────────────────────────────────────────────
 #
-# Four mutations, each of which SHOULD be caught, plus two comment mutations
+# Six mutations, each of which SHOULD be caught, plus two comment mutations
 # which should NOT be — the inverse control this repository learned to need.
 #
 # Every mutation is verified to have actually changed the file before its result
@@ -344,6 +369,18 @@ MUTATIONS = [
         "COPY config/ai/catalogue.toml /usr/share/rimeos/ai/catalogue.toml",
         "COPY config/ai/catalogue.toml /usr/share/rimeos/catalogue.toml",
         "the catalogue installed where ai.rs does not look",
+    ),
+    (
+        PATHS_RS,
+        'AI_CATALOGUE = "/usr/share/rimeos/ai/catalogue.toml";',
+        'AI_CATALOGUE = "/usr/share/rimeos/catalogue.toml";',
+        "ai.rs looking for the catalogue where the image does not install it",
+    ),
+    (
+        PATHS_RS,
+        'RIME_AID = "/usr/bin/rime-aid";',
+        'RIME_AID = "/usr/bin/rime-inference";',
+        "the CLI naming a daemon the unit does not start",
     ),
 ]
 
@@ -433,7 +470,7 @@ def self_test(root: Path) -> int:
 
 
 def copy_tree(root: Path, dest: Path) -> None:
-    """Copy only the four files this checker reads, preserving their paths."""
+    """Copy only the files this checker reads, preserving their paths."""
     for rel in FILES:
         target = dest / rel
         target.parent.mkdir(parents=True, exist_ok=True)

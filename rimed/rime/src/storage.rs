@@ -52,7 +52,7 @@ use serde_json::{json, Value};
 /// smartctl, by absolute path. Never taken from `PATH`: this command may be
 /// run under sudo, and a `PATH` entry the invoking user controls would be a
 /// root shell.
-const SMARTCTL: &str = "/usr/sbin/smartctl";
+const SMARTCTL: &str = rime_paths::SMARTCTL;
 
 /// Where the report reads the machine from.
 ///
@@ -497,7 +497,7 @@ fn trim_timer(roots: &Roots) -> (Reading<bool>, Option<String>) {
             None => (Reading::Unavailable("no fstrim fixture".into()), None),
         };
     }
-    let out = Command::new("/usr/bin/systemctl")
+    let out = Command::new(rime_paths::SYSTEMCTL)
         .args(["is-enabled", "fstrim.timer"])
         .output();
     let enabled = match out {
@@ -513,7 +513,7 @@ fn trim_timer(roots: &Roots) -> (Reading<bool>, Option<String>) {
         },
         Err(e) => Reading::Unavailable(format!("systemctl: {e}")),
     };
-    let last = Command::new("/usr/bin/systemctl")
+    let last = Command::new(rime_paths::SYSTEMCTL)
         .args(["show", "fstrim.timer", "-p", "LastTriggerUSec", "--value"])
         .output()
         .ok()
@@ -748,7 +748,7 @@ fn warnings(as_json: bool) -> i32 {
 /// wipefs, by absolute path, for the same reason as [`SMARTCTL`]: this runs
 /// under sudo, and a `PATH` entry the invoking user controls would be a root
 /// shell — here one that erases disks.
-const WIPEFS: &str = "/usr/sbin/wipefs";
+const WIPEFS: &str = rime_paths::WIPEFS;
 
 /// Exit status for a refused erase, distinct from a failed one.
 ///

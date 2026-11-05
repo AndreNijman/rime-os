@@ -221,7 +221,7 @@ fn failed_units() -> (Vec<String>, Option<String>) {
             Err(e) => (Vec::new(), Some(format!("{}: {e}", p.display()))),
         };
     }
-    let out = match Command::new("/usr/bin/systemctl")
+    let out = match Command::new(rime_paths::SYSTEMCTL)
         .args(["--failed", "--no-legend", "--plain", "--no-pager"])
         .output()
     {

@@ -1718,7 +1718,7 @@ fn print_status(s: &Status) {
 // ── serve ────────────────────────────────────────────────────────────────────
 
 /// The daemon binary. A constant so the CLI and the unit cannot disagree.
-pub const DAEMON: &str = "/usr/bin/rime-aid";
+pub const DAEMON: &str = rime_paths::RIME_AID;
 
 fn serve(listen: Option<&str>, foreground: bool) -> i32 {
     if let Some(addr) = listen {

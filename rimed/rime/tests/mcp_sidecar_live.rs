@@ -26,7 +26,7 @@ use std::process::{Command, Stdio};
 /// Where `bwrap` is. The same fixed path the sandbox module uses, and for the
 /// same reason: a `PATH` lookup would let a shadowing binary decide what this
 /// test measured.
-const BWRAP: &str = "/usr/bin/bwrap";
+const BWRAP: &str = rime_paths::BWRAP;
 
 fn fixture(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(

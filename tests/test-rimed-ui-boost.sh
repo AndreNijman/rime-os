@@ -107,6 +107,18 @@ bindover() { # fake real
 bindover "$CF" /sys/devices/system/cpu/cpufreq
 bindover "$F/dmi" /sys/devices/virtual/dmi/id
 bindover "$F/ps" /sys/class/power_supply
+# A container may mask /sys/firmware (podman's default: an empty read-only
+# tmpfs, so /sys/firmware/acpi does not exist and bindover would skip it). In
+# our own mount namespace we may mount over the mask: an empty tree with an
+# acpi/ mount point goes on top, then the fake acpi on that.
+# RIME_TEST_MASK_FIRMWARE=1 masks it here first, as podman does (self-test).
+if [ "${RIME_TEST_MASK_FIRMWARE:-0}" = 1 ]; then
+    mount -t tmpfs -o ro,size=4k tmpfs /sys/firmware || { bad "mask /sys/firmware" "mount failed"; exit 1; }
+fi
+if [ -d /sys/firmware ] && [ ! -d /sys/firmware/acpi ]; then
+    mkdir -p "$F/firmware-root/acpi"
+    mount --bind "$F/firmware-root" /sys/firmware || bad "bind /sys/firmware" "mount --bind failed"
+fi
 bindover "$F/acpi" /sys/firmware/acpi
 for d in /sys/class/hwmon /sys/class/thermal /sys/class/powercap \
          /sys/devices/system/cpu/intel_pstate /sys/devices/platform/msi-ec \
@@ -121,6 +133,7 @@ bindover "$REPO/config/sysprofiles" /usr/share/rimeos/sysprofiles
 if [ "$(cat /sys/devices/system/cpu/cpufreq/policy0/energy_performance_preference 2>/dev/null)" = balance_power ] \
    && [ "$(cat /sys/devices/virtual/dmi/id/product_version 2>/dev/null)" = "ThinkPad L16 Gen 2" ] \
    && [ "$(cat /sys/class/power_supply/BAT0/status 2>/dev/null)" = Discharging ] \
+   && [ "$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)" = balanced ] \
    && [ ! -e /run/dbus/system_bus_socket ] \
    && { [ ! -d /usr/share/rimeos/sysprofiles ] \
         || cmp -s /usr/share/rimeos/sysprofiles/thinkpad-l16-g2.toml "$REPO/config/sysprofiles/thinkpad-l16-g2.toml"; }; then
@@ -348,9 +361,25 @@ if command -v powerprofilesctl >/dev/null && python3 -c 'import gi' 2>/dev/null;
         || bad "ppctl get" "$(powerprofilesctl get 2>&1)"
     powerprofilesctl list 2>&1 | grep '^\* balanced:' >/dev/null && ok "powerprofilesctl list marks balanced" \
         || bad "ppctl list" "$(powerprofilesctl list 2>&1)"
+    # A write is Power.SetTier, authorised by polkit (switch-profile) against
+    # the caller: refused for a user who is not the active session's...
+    echo 4242 > "$S/uid"
+    before=$(sysfs_hash)
     out=$(powerprofilesctl set performance 2>&1); rc=$?
-    [ "$rc" != 0 ] && [ "$(epp_all)" = balance_power ] && ok "powerprofilesctl set is refused and writes nothing" \
-        || bad "ppctl set" "rc=$rc epp=$(epp_all) $out"
+    echo 0 > "$S/uid"
+    [ "$rc" != 0 ] && [ "$(sysfs_hash)" = "$before" ] && [ ! -e "$T/state/tier" ] \
+        && ok "powerprofilesctl set from a user who is not the active session's is refused and writes nothing" \
+        || bad "refused ppctl set" "rc=$rc epp=$(epp_all) $out"
+    # ...and for the session user it is a tier pick, kept for this power source.
+    out=$(powerprofilesctl set performance 2>&1); rc=$?
+    if [ "$rc" = 0 ] && wait_epp performance 1500 && grep -x 'battery=performance' "$T/state/tier" >/dev/null; then
+        ok "powerprofilesctl set performance applies the tier and keeps it as the battery pick"
+    else
+        bad "ppctl set" "rc=$rc epp=$(epp_all) file=$(tr '\n' ' ' < "$T/state/tier" 2>&1) $out"
+    fi
+    powerprofilesctl set balanced >/dev/null 2>&1
+    wait_epp balance_power 1500 && grep -x 'battery=balanced' "$T/state/tier" >/dev/null \
+        && ok "powerprofilesctl set balanced puts the battery tier back" || bad "ppctl set balanced" "epp=$(epp_all)"
     powerprofilesctl launch -p power-saver -r test -i rime-test sleep 1.5 >/dev/null 2>&1 &
     L=$!
     if wait_epp power 1500; then

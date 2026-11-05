@@ -92,7 +92,7 @@ use crate::trust::{classify_skopeo_failure, cosign_tag, san_uri, Artifact, Roots
 /// file was taken from `sigstore/root-signing` and matches, fingerprint for
 /// fingerprint, the root the real ghcr.io signature carries — which is the
 /// check that makes pinning it safe rather than merely different.
-pub const FULCIO_ROOT: &str = "/usr/share/rime-os/trust/fulcio-root.pem";
+pub const FULCIO_ROOT: &str = rime_paths::TRUST_FULCIO_ROOT;
 
 /// An image-owned file that replaces [`crate::trust::EXPECTED_ISSUER`].
 ///
@@ -101,10 +101,10 @@ pub const FULCIO_ROOT: &str = "/usr/share/rime-os/trust/fulcio-root.pem";
 /// own identity, and a suite that could not say which issuer to expect would
 /// have to skip the identity check — which is one of the two arms that make
 /// this verification mean anything.
-const ISSUER_OVERRIDE: &str = "/usr/share/rime-os/trust/expected-issuer";
+const ISSUER_OVERRIDE: &str = rime_paths::TRUST_EXPECTED_ISSUER;
 
 /// Where the image ships its enforcement defaults.
-const DEFAULTS_PATH: &str = "/usr/share/rime-os/trust/enforcement.conf";
+const DEFAULTS_PATH: &str = rime_paths::TRUST_ENFORCEMENT;
 
 /// Where an administrator overrides them, per key.
 const OVERRIDE_PATH: &str = "/etc/rime/trust.conf";
@@ -695,8 +695,9 @@ pub fn fetch(roots: &Roots, repo: &str, tag: &str) -> Result<Fetched, Artifact> 
     }
 
     let tmp = TempDir::new(tag).map_err(Artifact::Unavailable)?;
-    let out = Command::new("/usr/bin/skopeo")
-        .args(["copy", "--quiet", &format!("docker://{repo}:{tag}")])
+    let out = Command::new(rime_paths::SKOPEO)
+        // A digest is addressed with `@` (the NixOS client reads release manifests by digest).
+        .args(["copy", "--quiet", &if tag.starts_with("sha256:") { format!("docker://{repo}@{tag}") } else { format!("docker://{repo}:{tag}") }])
         .arg(format!("dir:{}", tmp.path().display()))
         .output()
         .map_err(|e| Artifact::Unavailable(format!("could not run skopeo: {e}")))?;
@@ -756,8 +757,8 @@ pub fn artifact_layer_at(
 
 /// The sha256 of a file, lower-case hex, through the openssl this program
 /// already depends on rather than a second hashing crate.
-fn sha256_of(path: &Path) -> Result<String, String> {
-    let out = Command::new("/usr/bin/openssl")
+pub(crate) fn sha256_of(path: &Path) -> Result<String, String> {
+    let out = Command::new(rime_paths::OPENSSL)
         .args(["dgst", "-sha256", "-r"])
         .arg(path)
         .output()
@@ -827,7 +828,7 @@ pub fn resolve(roots: &Roots, reference: &str) -> Result<String, String> {
         }
         return Err("this fixture root resolves no tag".to_string());
     }
-    let out = Command::new("/usr/bin/skopeo")
+    let out = Command::new(rime_paths::SKOPEO)
         .args(["inspect", "--format", "{{.Digest}}", &format!("docker://{reference}")])
         .output()
         .map_err(|e| format!("could not run skopeo: {e}"))?;
@@ -854,7 +855,7 @@ struct Openssl {
 }
 
 fn openssl(args: &[&str], paths: &[&Path]) -> Openssl {
-    let mut cmd = Command::new("/usr/bin/openssl");
+    let mut cmd = Command::new(rime_paths::OPENSSL);
     cmd.args(args);
     for p in paths {
         cmd.arg(p);
@@ -933,6 +934,10 @@ pub struct Expect {
     /// Every identity accepted; a signature from any one of them verifies.
     pub signers: Vec<String>,
     pub issuer: String,
+    /// The CA the certificate must chain to; `None` = the pinned [`FULCIO_ROOT`]. The NixOS client sets it from
+    /// its root-owned configuration (`rime.update.fulcioRoot`, a store path), which is how a VM test verifies
+    /// through this same code against a throwaway CA.
+    pub fulcio_root: Option<String>,
 }
 
 fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Expect) -> Verdict {
@@ -995,7 +1000,7 @@ fn verify_signed_bytes(roots: &Roots, work: &Path, c: &Candidate<'_>, want: &Exp
         Ok(t) => t,
         Err(e) => return Verdict::Failed(format!("the certificate's start date is unreadable: {e}")),
     };
-    let root_pem = match roots.read(FULCIO_ROOT) {
+    let root_pem = match roots.read(want.fulcio_root.as_deref().unwrap_or(FULCIO_ROOT)) {
         Ok(s) => s,
         Err(e) => {
             return Verdict::CouldNotRun(format!(
@@ -1089,7 +1094,7 @@ pub fn expectations(roots: &Roots) -> Expect {
         Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
         _ => crate::trust::EXPECTED_ISSUER.to_string(),
     };
-    Expect { signers, issuer }
+    Expect { signers, issuer, fulcio_root: None }
 }
 
 /// Who this machine will accept a ROLLOUT DOCUMENT from.
@@ -1105,7 +1110,7 @@ pub fn rollout_expectations(roots: &Roots) -> Expect {
         Ok(Some(s)) if !s.trim().is_empty() => s.trim().to_string(),
         _ => crate::trust::EXPECTED_ISSUER.to_string(),
     };
-    Expect { signers: crate::trust::expected_rollout_signers(roots), issuer }
+    Expect { signers: crate::trust::expected_rollout_signers(roots), issuer, fulcio_root: None }
 }
 
 /// One layer's cosign annotations.
@@ -1143,7 +1148,7 @@ fn blob(fetched: &Fetched, layer: &Value) -> Result<Vec<u8>, String> {
     // `skopeo copy` already validates this on the way in, but the fixture path
     // does not go through skopeo, and a check that only runs in production is a
     // check nobody has ever seen run.
-    let out = Command::new("/usr/bin/openssl")
+    let out = Command::new(rime_paths::OPENSSL)
         .args(["dgst", "-sha256", "-r"])
         .arg(&path)
         .output()

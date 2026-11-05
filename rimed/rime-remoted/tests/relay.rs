@@ -37,6 +37,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod common;
+
 use rime_remote_core::noise::{Channel, Handshake};
 use rime_remote_core::pairing::{PairingOffer, PairingRequest};
 use rime_remote_core::relay::{
@@ -307,16 +309,26 @@ fn serve(
     // status the client can read rather than a close frame it has to guess at.
     match role {
         Role::Host => {
+            // The check and the claim are ONE critical section, and the claim
+            // comes before the 101: otherwise a second host that dials the
+            // instant the first one reads its 101 finds the room still empty
+            // (the CI flake "host number 2 was not treated as an intruder").
+            let taken = Arc::new(AtomicBool::new(false));
             {
-                let rooms = rooms.lock().expect("rooms");
+                let mut rooms = rooms.lock().expect("rooms");
                 if rooms.contains_key(rendezvous) {
                     drop(rooms);
                     return refuse(&mut stream, 409, "Conflict");
                 }
+                rooms.insert(rendezvous.to_string(), (stream.try_clone()?, Arc::clone(&taken)));
             }
             seen.lock().expect("seen").arrivals.push("host".into());
-            accept(&mut stream, &key)?;
-            send_text(&mut stream, Notice::Waiting.text().as_bytes())?;
+            let upgraded = accept(&mut stream, &key)
+                .and_then(|()| send_text(&mut stream, Notice::Waiting.text().as_bytes()));
+            if let Err(e) = upgraded {
+                rooms.lock().expect("rooms").remove(rendezvous);
+                return Err(e);
+            }
 
             // A REQUIREMENT, not double bookkeeping: a relay that parks a
             // waiting host and never notices when its socket dies answers the
@@ -330,7 +342,6 @@ fn serve(
             // `peek` rather than `read`: it blocks until there is something
             // to say and consumes nothing, so the session that may later run
             // over this socket still gets every byte.
-            let taken = Arc::new(AtomicBool::new(false));
             {
                 let watch = stream.try_clone()?;
                 let rooms = Arc::clone(&rooms);
@@ -344,11 +355,7 @@ fn serve(
                     }
                 });
             }
-            rooms
-                .lock()
-                .expect("rooms")
-                .insert(rendezvous.to_string(), (stream, taken));
-            // Parked. The guest that arrives next takes it and does the copy.
+            // Parked (the room already holds a clone of this socket). The guest that arrives next takes it and does the copy.
             Ok(())
         }
         Role::Guest => {
@@ -526,17 +533,13 @@ impl Harness {
             .spawn()
             .ok()?;
 
-        let port = {
-            let probe = TcpListener::bind(("127.0.0.1", 0)).ok()?;
-            let p = probe.local_addr().ok()?.port();
-            drop(probe);
-            p
-        };
-
+        // `--port 0`, and the port the daemon got read back from its log: see
+        // `common` for why a probed port handed over as `--port N` races.
+        let log = root.join("remoted.log");
         let remoted = Command::new(bin("rime-remoted"))
             .args([
                 "--port",
-                &port.to_string(),
+                "0",
                 "--relay",
                 &relay.url(),
                 "--allow-foreground",
@@ -551,19 +554,27 @@ impl Harness {
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(&log).ok()?)
             .spawn()
             .ok()?;
 
-        let h = Harness {
+        let mut h = Harness {
             agentd,
             remoted,
             root,
             agentd_socket: runtime.join("rime-agentd").join("control.sock"),
             remoted_socket: runtime.join("rime-remoted").join("control.sock"),
-            port,
+            port: 0,
             relay,
         };
+        let within = Duration::from_secs(20);
+        match common::remoted_port(&mut h.remoted, &h.remoted_socket, &log, within) {
+            Ok(port) => h.port = port,
+            Err(why) => {
+                eprintln!("{why}");
+                return None;
+            }
+        }
         h.wait_ready().then_some(h)
     }
 
@@ -1244,24 +1255,22 @@ fn no_relay_is_configured_unless_the_owner_configures_one() {
     let state = root.join("state");
     std::fs::create_dir_all(&runtime).expect("runtime");
     std::fs::create_dir_all(&state).expect("state");
-    let port = {
-        let probe = TcpListener::bind(("127.0.0.1", 0)).expect("probe");
-        let p = probe.local_addr().expect("addr").port();
-        drop(probe);
-        p
-    };
+    // `--port 0`: see `common` for why a probed port handed over races.
+    let log = root.join("remoted.log");
     let mut child = Command::new(bin("rime-remoted"))
-        .args(["--port", &port.to_string(), "--allow-foreground"])
+        .args(["--port", "0", "--allow-foreground"])
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("XDG_STATE_HOME", &state)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(&log).expect("log file"))
         .spawn()
         .expect("spawn");
     let socket = runtime.join("rime-remoted").join("control.sock");
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < deadline && UnixStream::connect(&socket).is_err() {
-        std::thread::sleep(Duration::from_millis(50));
+    if let Err(why) = common::remoted_port(&mut child, &socket, &log, Duration::from_secs(15)) {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&root);
+        panic!("{why}");
     }
     let reply = {
         let stream = UnixStream::connect(&socket).expect("connect");

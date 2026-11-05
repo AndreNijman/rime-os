@@ -1,0 +1,422 @@
+# Rime's helper scripts and the system data they read (bootc: /usr/libexec/rime-*, /usr/share/rime*, files/desktop).
+#
+# On NixOS there is no /usr. What this derivation does to the bootc files, and nothing else:
+#
+#  1. patchShebangs: every interpreter (bash, sh, python3, node) is a store path.
+#  2. One substitution table (`fhsRules` below) maps the bootc FHS paths. Rime's OWN files go to the system profile,
+#     /run/current-system/sw/{libexec,share,bin}, never to this store path: those strings are also written into
+#     users' configs (Hyprland/labwc/niri autostart, keybinds) and must survive a garbage collection. base.nix links
+#     /libexec and /share/rime into the profile; /share/rime-shell, /share/rime-greet and /share/backgrounds are
+#     linked by the desktop area. The session list is /etc/rime/wayland-sessions (desktop's display-manager session
+#     set, not a profile path), and the Rime.I18n QML module is under /run/current-system/sw/lib/qt-6/qml (the
+#     rime-shell package's layout).
+#     A tool whose absolute path is load-bearing (read as root, or a security check) gets its own store path.
+#  3. A PATH line, marked "# rime-libexec", is written into each script after its shebang (after the docstring for
+#     python): the store directories of that script's dependencies, then /run/wrappers/bin (sudo, su, unix_chkpwd)
+#     and /run/current-system/sw/bin (rime, the compositors, Steam: things the running system owns and a store path
+#     must not pin). Scripts that run as root drop the caller's PATH entirely ("closed"). The file is never renamed,
+#     so argv[0], BASH_SOURCE and `readlink -f $0` stay true (rime-tool-broker is symlinked as wrangler/terraform and
+#     reads its name from $0; rime-gamescope-steam finds its siblings through BASH_SOURCE).
+#  Identity: the bootc image keeps the chartreuse spark in files/**, so the terminal greeting comes from
+#  rime-ridge-files (the ridge version), and rime-shell-firstrun's default accent and last-resort terminal are swapped
+#  for Rime Blue and Ghostty in installPhase.
+#  4. installCheck proves it: rime-libexec-audit.py parses every shell script with shfmt and checks that each command
+#     resolves (builtin, own function, the injected store PATH, or the RUNTIME list below); python/node argv lists are
+#     scanned the same way. A command passed as an ARGUMENT to a script's own helper (rime-safe-graphics'
+#     `collect graphics.txt lspci -k`) is not seen; the VM test's probes are the backstop for those. Then a grep gate fails the build on any /usr/{bin,sbin,libexec,lib,lib64,share} left in
+#     the output; /usr/local/* is allowed (search-list entries that simply do not exist on NixOS).
+#
+# Scripts NOT shipped here (bootc-only; the update and package workers of a later phase replace them):
+#   rime-pkg               the RPM/systemd-sysext package engine (D5 replaces it with Nix)
+#   rime-boot-migrate      GRUB -> systemd-boot migration of a bootc /boot (bootupd, ostree deployments)
+#   rime-boot-count        counts bootc STAGED deployments (After=bootc-finalize-staged, /boot/loader/entries.srel)
+#   rime-live-session      the per-session activator of the bootc live-update sysext layer (/run/extensions/rime-live)
+#   rime-store-compact     recompresses /sysroot/ostree (ConditionPathExists=/run/ostree-booted)
+#   rime-update-check      `bootc upgrade --check`; the D6 client replaces it
+#   rime-update-notice     reads only what rime-update-check and the live engine write; the D6 client replaces both
+#   rime-migrate-from-apex APEX-OS -> Rime state renames on a bootc /var; a NixOS machine arrives from Rime (D2 bridge)
+#   rime-session-migrate   the per-user half of the same rename (firstrun calls it only when it is installed: -x test)
+#   rime-vconsole-guard    repairs a hand-edited /etc/vconsole.conf; NixOS generates that file from console.*
+#   rime-migrate           the D2 bridge's bootc half; a NixOS machine has already moved (rime-bridge is the NixOS half)
+#   rime-secureboot-key    bootc's MokManager way back; nix/modules/boot.nix's rime-secureboot-key unit runs rime-boot's port
+# rime-plymouth-accent runs from rime-greet-wallpaper / rime-greet-publish-all; desktop.nix makes plymouthd.conf a
+# real file and links the accent themes (the initrd half is TODO(handover) D3, see plymouthTheme there).
+# rime-luks-enroll: its --tpm-only path is wired by nix/modules/luks-tpm.nix (rime-luks-tpm-reenrol@); the installer
+# path (D9) is its owner's.
+# Shipped but NOT wired (their owner decides): rime-boot-health (boot chain, D3),
+# rime-vm (needs virtualisation.libvirtd; its install hint still names RPMs: TODO(handover) catalogue worker).
+{
+  lib,
+  stdenvNoCC,
+  bash,
+  python3,
+  nodejs-slim,
+  shfmt,
+  coreutils,
+  gnugrep,
+  gnused,
+  gawk,
+  findutils,
+  diffutils,
+  util-linux,
+  procps,
+  systemd,
+  jq,
+  glib,
+  dbus,
+  libnotify,
+  libxkbcommon,
+  getent,
+  xprop,
+  libcap,
+  efibootmgr,
+  tpm2-tools,
+  cryptsetup,
+  networkmanager,
+  iproute2,
+  iputils,
+  kmod,
+  gnutar,
+  mtools,
+  dosfstools,
+  xkeyboard_config,
+  at-spi2-core,
+  pciutils,
+  rime-ridge-files,
+}:
+
+let
+  root = ../..;
+
+  dropped = [
+    "rime-pkg"
+    "rime-boot-migrate"
+    "rime-boot-count"
+    "rime-live-session"
+    "rime-store-compact"
+    "rime-update-check"
+    "rime-update-notice"
+    "rime-migrate-from-apex"
+    "rime-session-migrate"
+    "rime-vconsole-guard"
+    # bootc's rime-sysext-rebuild failure notice: NixOS has no package extension to rebuild.
+    "rime-pkg-notice"
+    # the D2 bridge's bootc half (`rime migrate start` on the old system); NixOS ships nix/pkgs/rime-bridge instead.
+    "rime-migrate"
+    # bootc's MokManager way back; nix/modules/boot.nix runs rime-boot's port of it (same custom.cfg block).
+    "rime-secureboot-key"
+  ];
+
+  # Shipped by another Rime module, which owns the one copy on the system profile (buildEnv picks a winner
+  # silently on a collision, so a second copy here could shadow the tested one):
+  #   rime-firewall                       security.nix (rime.security.firewall.package; rime-firewall.service)
+  #   rime-session-select, rime-gaming-*, rime-gamescope-steam, rime-game-env, bin/steamos-*
+  #                                       gaming.nix (the switch tools carry the --finish-switch re-exec fix)
+  ownedElsewhere = [
+    "rime-firewall"
+    "rime-session-select"
+    "rime-gaming-session"
+    "rime-gaming-discord"
+    "rime-gamescope-steam"
+    "rime-game-env"
+  ];
+
+  # Every script gets these; they are in every NixOS system closure anyway.
+  common = [ coreutils gnugrep gnused gawk findutils ];
+
+  # What each script runs, beyond `common`. The audit fails the build when a script runs something that is neither
+  # here nor on `runtime`, so this list is checked, not trusted.
+  deps = {
+    rime-agent-focus = [ procps ];
+    rime-agent-review = [ util-linux ];
+    rime-boot-health = [ python3 systemd ];
+    rime-boot-windows = [ efibootmgr util-linux libnotify systemd ];
+    rime-browser = [ python3 ];
+    rime-compositor-reload = [ procps ];
+    rime-desktop-menu = [ libnotify systemd util-linux ];
+    rime-devices = [ ];
+    rime-display-apply = [ procps util-linux ];
+    rime-disposable = [ ];
+    rime-env = [ jq ];
+    rime-fstrim = [ util-linux ];
+    rime-gpu-notice = [ libnotify ];
+    rime-greet-publish-all = [ getent ];
+    rime-greet-session = [ dbus glib ];
+    rime-greet-wallpaper = [ getent util-linux ];
+    rime-greetd = [ ];
+    rime-guest-wipe = [ getent systemd ];
+    rime-hypr-migrate = [ util-linux ];
+    rime-input-apply = [ procps util-linux systemd libxkbcommon ]; # xkbcli: a layout is compiled before it is written
+    rime-keyring-login = [ ];
+    rime-labwc-keybinds = [ ];
+    rime-luks-enroll = [ python3 tpm2-tools cryptsetup systemd ];
+    rime-mux = [ ];
+    rime-open-browser = [ glib ];
+    rime-plugin = [ jq nodejs-slim ];
+    rime-plymouth-accent = [ util-linux bash ];
+    rime-project-windows = [ ];
+    rime-safe-graphics = [ gnutar pciutils ]; # pciutils: `collect graphics.txt lspci -k` (the audit cannot see it)
+    rime-safe-graphics-terminal = [ ];
+    rime-screen-reader = [ procps util-linux systemd ];
+    rime-secrets-start = [ systemd glib util-linux ];
+    rime-session-logout = [ procps systemd ];
+    rime-session-watchdog = [ ];
+    rime-shell-autostart = [ procps systemd libnotify ]; # systemd-cat (journal), notify-send (a Shell that never started)
+    rime-shell-firstrun = [ python3 util-linux systemd diffutils libxkbcommon ];
+    rime-storage-notice = [ libnotify ];
+    rime-switch-greeter = [ getent ];
+    rime-switch-user = [ getent ];
+    rime-switcher = [ ];
+    rime-tool-broker = [ ];
+    rime-user = [ getent ];
+    rime-vm = [ mtools dosfstools ];
+    rime-wifi-resume = [ iproute2 util-linux kmod networkmanager iputils systemd ];
+    # bin/
+    apex = [ ];
+  };
+
+  # Scripts that run as root (sudo targets, system units, pam_exec, the installer): their PATH never includes the
+  # caller's, so nothing a user puts on PATH can stand in for a command they run.
+  closed = [
+    "rime-boot-health"
+    "rime-boot-windows"
+    "rime-greet-publish-all"
+    "rime-greet-wallpaper"
+    "rime-greetd"
+    "rime-guest-wipe"
+    "rime-keyring-login"
+    "rime-luks-enroll"
+    "rime-plymouth-accent"
+    "rime-switch-greeter"
+    "rime-wifi-resume"
+  ];
+
+  # Commands the running system provides (found through /run/wrappers/bin or /run/current-system/sw/bin at run
+  # time). They are the system's choice (which Hyprland, which Steam), or setuid wrappers, so they are not pinned.
+  runtime = [
+    "sudo" "su" "rime" "Hyprland" "hyprctl" "niri" "labwc" "sway" "swaymsg" "quickshell" "qs" "hypridle"
+    "gamescope" "mangoapp" "steam" "equibop" "flatpak" "orca" "lswt" "zellij" "tmux" "virsh" "qemu-img" "lsusb"
+    "swtpm" "swtpm_setup" "wlr-randr" "colormgr" "podman" "rpm" "gtk-launch" "firefox" "greetd" "nmtui"
+    "wrangler" "terraform" "node"
+    # the host layer's switch tool (nix/modules/hostlayer.nix puts it on the system profile)
+    "rime-hostlayer"
+    # desktop-only tools with large closures (gcr/gtk3, perl Net-DBus): the desktop module installs them
+    "gnome-keyring-daemon" "xdg-mime" "xdg-settings"
+  ];
+
+  # The FHS table, applied in this order to every text file in $out. Longest and most specific first.
+  fhsRules = [
+    # Session PATH strings (hypr session.lua, labwc autostart): the NixOS equivalents of /usr/local/bin:/usr/bin.
+    [ "/usr/local/bin:/usr/bin:/usr/local/sbin" "/run/wrappers/bin:/run/current-system/sw/bin" ]
+    # Rime state bootc kept under /etc lives under /var/lib/rime on NixOS (PLAN.md D2, nix/modules/hostlayer.nix).
+    [ "/etc/rime/guest-accounts" "/var/lib/rime/guest-accounts" ]
+    [ "/etc/rime/firewall.d" "/var/lib/rime/firewall.d" ]
+    # Absolute paths that are load-bearing (root reads, security checks): pinned.
+    [ "/usr/bin/head" "${coreutils}/bin/head" ]
+    [ "/usr/bin/bootctl" "${systemd}/bin/bootctl" ]
+    [ "/usr/bin/systemd-cryptenroll" "${systemd}/bin/systemd-cryptenroll" ]
+    [ "/usr/sbin/cryptsetup" "${cryptsetup}/bin/cryptsetup" ]
+    [ "/usr/sbin/unix_chkpwd" "/run/wrappers/bin/unix_chkpwd" ]
+    [ "/usr/share/X11/xkb" "${xkeyboard_config}/share/X11/xkb" ]
+    [ "/usr/libexec/at-spi-bus-launcher" "${at-spi2-core}/libexec/at-spi-bus-launcher" ]
+    [ "/usr/libexec/at-spi2-registryd" "${at-spi2-core}/libexec/at-spi2-registryd" ]
+    # Where NixOS keeps what Fedora keeps under /usr/lib.
+    [ "/usr/lib/os-release" "/etc/os-release" ]
+    [ "/usr/lib/NetworkManager/VPN" "/etc/NetworkManager/VPN" ]
+    [ "/usr/lib/NetworkManager/conf.d" "/etc/NetworkManager/conf.d" ]
+    [ "/usr/lib/NetworkManager/dispatcher.d" "/etc/NetworkManager/dispatcher.d" ]
+    [ "/usr/lib64/NetworkManager" "${networkmanager}/lib/NetworkManager" ]
+    [ "/usr/libexec/virtiofsd" "/run/current-system/sw/bin/virtiofsd" ]
+    # Paths another area defines: the session set (desktop: the display manager's sessions, not a profile path)
+    # and the Rime.I18n module root (rime-shell package: lib/qt-6/qml, linked through the default /lib).
+    [ "/usr/share/wayland-sessions" "/etc/rime/wayland-sessions" ]
+    [ "/usr/lib64/rime-shell/qml" "/run/current-system/sw/lib/qt-6/qml" ]
+    [ "/usr/bin/qemu-system-x86_64" "/run/libvirt/nix-emulators/qemu-system-x86_64" ]
+    # Everything else of the system: the system profile.
+    [ "/usr/libexec/" "/run/current-system/sw/libexec/" ]
+    [ "/usr/share/" "/run/current-system/sw/share/" ]
+    [ "/usr/lib64/" "/run/current-system/sw/lib/" ]
+    [ "/usr/lib/" "/run/current-system/sw/lib/" ]
+    [ "/usr/sbin/" "/run/current-system/sw/bin/" ]
+    [ "/usr/bin/" "/run/current-system/sw/bin/" ]
+    # The bare directories (search lists, XDG_DATA_DIRS fallbacks, zsh's sudo completion path).
+    [ "/usr/libexec\\b" "/run/current-system/sw/libexec" ]
+    [ "/usr/share\\b" "/run/current-system/sw/share" ]
+    [ "/usr/sbin\\b" "/run/current-system/sw/bin" ]
+    [ "/usr/bin\\b" "/run/current-system/sw/bin" ]
+  ];
+
+  sedScript = lib.concatMapStrings (r: "s#${lib.elemAt r 0}#${lib.elemAt r 1}#g\n") fhsRules;
+
+  pathFor = name: lib.makeBinPath (common ++ (deps.${name} or (throw "rime-libexec: no deps entry for ${name}")));
+in
+stdenvNoCC.mkDerivation {
+  pname = "rime-libexec";
+  version = "0.1.0";
+
+  # Python bytecode is left out of the source: running the os suites (rime-input-apply, rime-labwc-keybinds are
+  # Python) writes files/system/libexec/__pycache__, git ignores it, but `path:.` copies ignored files, and a
+  # directory in libexec/ used to fail installPhase ("omitting directory"). The loop below also installs regular
+  # files only. checks.libexec-pycache builds this package from a source WITH a __pycache__ (and its mutant).
+  src = lib.fileset.toSource {
+    inherit root;
+    fileset = lib.fileset.difference
+      (lib.fileset.unions [
+        (root + "/files/system/libexec")
+        (root + "/files/system/bin")
+        (root + "/files/system/compat")
+        (root + "/files/system/system-sleep")
+        (root + "/files/system/profile.d")
+        (root + "/files/system/shared-machine")
+        (root + "/files/system/flatpak")
+        (root + "/files/desktop")
+      ])
+      (lib.fileset.fileFilter (f: f.hasExt "pyc" || f.hasExt "pyo") (root + "/files"));
+  };
+
+  dontBuild = true;
+  dontPatchShebangs = true; # done in installPhase, before the FHS table runs
+
+  buildInputs = [ bash python3 nodejs-slim ];
+  nativeInstallCheckInputs = [ shfmt python3 ];
+  doInstallCheck = true;
+
+  passthru = {
+    inherit dropped ownedElsewhere runtime;
+  };
+
+  installPhase = ''
+    runHook preInstall
+    S=files/system D=files/desktop
+
+    # ── scripts ───────────────────────────────────────────────────────────
+    mkdir -p $out/libexec/rime/tools $out/bin
+    for f in $S/libexec/*; do
+      [ -f "$f" ] || continue # a directory (__pycache__) is not a script
+      n=''${f##*/}
+      case " ${lib.concatStringsSep " " (dropped ++ ownedElsewhere)} " in *" $n "*) continue ;; esac
+      install -m0755 "$f" "$out/libexec/$n"
+    done
+    install -m0644 $S/libexec/rime-plugin-verdict.js $out/libexec/rime-plugin-verdict.js
+    install -m0755 $S/system-sleep/rime-wifi-resume $out/libexec/rime-wifi-resume
+    install -m0755 $S/compat/apex $out/bin/apex
+    # the agent-session shims: the broker reads which tool it is from its own name
+    ln -s ../../rime-tool-broker $out/libexec/rime/tools/wrangler
+    ln -s ../../rime-tool-broker $out/libexec/rime/tools/terraform
+
+    # ── data the scripts and sessions read (bootc: /usr/share/rime*, /etc) ──
+    mkdir -p $out/share/rime/shell $out/share/rime/zsh $out/share/rime/starship \
+      $out/share/rime/shared-machine $out/share/fish/vendor_conf.d \
+      $out/share/fish/vendor_completions.d $out/share/nushell/vendor/autoload $out/etc/profile.d \
+      $out/etc/mpv $out/etc/flatpak
+    cp $S/shared-machine/* $out/share/rime/shared-machine/
+    cp $S/profile.d/*.sh $out/etc/profile.d/
+    # NOT $out/etc/xdg or $out/share/polkit-1: system-path links /etc/xdg and polkit links /share/polkit-1 for
+    # every system package (polkit's datadir is /run/current-system/sw/share), so files there would be live on
+    # every machine, desktop or not. xdg-terminals.list and mimeapps.list are the desktop area's
+    # (xdg.terminal-exec, xdg.mime); the sing-box polkit rule is the security area's (security.polkit.extraConfig).
+    # Also the desktop area's, NOT copied here (one copy on the profile): share/rime/{hypr,labwc,safe-graphics},
+    # share/rime/secrets-provider, share/rime-greet, share/wayland-sessions (desktop.nix rimeDesktopData,
+    # rimeGreet, the display manager's sessions). The firewall's nftables and services are security.nix's.
+    cp $S/flatpak/flathub.flatpakrepo $out/etc/flatpak/
+    cp $D/zsh/zshrc $out/share/rime/zsh/zshrc
+    cp $D/starship/starship.toml $out/share/rime/starship/
+    cp ${rime-ridge-files}/share/rime/shell/greeting.sh $out/share/rime/shell/greeting.sh
+    # Rime Blue for a new user's seeded accent (prompt, labwc) and Ghostty in the last-resort Hyprland config, where
+    # the bootc image seeds chartreuse and opens Alacritty.
+    substituteInPlace $out/libexec/rime-shell-firstrun \
+      --replace-fail '*)       RIME_ACCENT="#D9F99D" ;;   # chartreuse' \
+                     '*)       RIME_ACCENT="#91C2DC" ;;   # Rime Blue, the layered ridge plane 3' \
+      --replace-fail 'hl.bind("SUPER + Return", hl.dsp.exec_cmd("alacritty"))' \
+                     'hl.bind("SUPER + Return", hl.dsp.exec_cmd("ghostty"))'
+    cp $D/shell/agent.sh $out/share/rime/shell/agent.sh
+    cp $D/bash/rime-starship.sh $D/zsh/rime-zsh-highlight.sh $out/etc/profile.d/
+    cp $D/fish/rime-agent.fish $out/share/fish/vendor_conf.d/
+    cp $D/fish/completions/*.fish $out/share/fish/vendor_completions.d/
+    cp $D/nushell/rime.nu $out/share/nushell/vendor/autoload/
+    cp $D/mpv/mpv.conf $out/etc/mpv/
+
+    # ── 1. interpreters ───────────────────────────────────────────────────
+    patchShebangs --host $out/libexec $out/bin
+
+    # ── 2. the FHS table, on every text file (comments too: they describe this system now) ──
+    cat > fhs.sed <<'RIME_SED'
+    ${sedScript}
+    RIME_SED
+    # rime-user names a login shell; /bin/zsh does not exist on NixOS, /run/current-system/sw/bin/zsh does.
+    sed -E -i 's#(^|[ "=])/bin/(zsh|bash)\b#\1/run/current-system/sw/bin/\2#g' $out/libexec/rime-user
+    # A guest's wipe unit is a runtime switch on NixOS (hostlayer.nix): `systemctl enable` of a unit with no
+    # [Install] into a read-only /etc/systemd/system is refused there.
+    sed -i -e 's#tool systemctl enable "$(guest_unit "$uid")"#tool rime-hostlayer switch on "$(guest_unit "$uid")"#' \
+      -e 's#tool systemctl disable "$(guest_unit "$uid")"#tool rime-hostlayer switch off "$(guest_unit "$uid")"#' \
+      $out/libexec/rime-user
+    test "$(grep -c 'tool rime-hostlayer switch o[nf]f* "$(guest_unit "$uid")"' $out/libexec/rime-user)" = 2 ||
+      { echo "rime-user: the guest unit is not switched through rime-hostlayer" >&2; exit 1; }
+    if grep -n 'systemctl \(enable\|disable\)' $out/libexec/rime-user; then echo "rime-user still enables a unit" >&2; exit 1; fi
+    grep -rIl . $out | while IFS= read -r f; do
+      [ -L "$f" ] && continue
+      sed -i -f fhs.sed "$f"
+    done
+
+    # ── 3. each script's PATH ────────────────────────────────────────────
+    ${lib.concatMapStrings (name: let
+        file = if name == "apex" then "$out/bin/${name}" else "$out/libexec/${name}";
+      in ''
+        ${python3}/bin/python3 ${./rime-libexec-audit.py} inject "${file}" "${pathFor name}" ${if lib.elem name closed then "closed" else "open"}
+      '') (lib.attrNames deps)}
+
+    # ── 4. what firstrun copies out of the store stays the user's to change ──
+    # Store files are 0444 and cp keeps the mode, where the image's /usr files were 0644. firstrun seeds files
+    # from the store and then appends to or replaces them (niri's config.kdl: "Permission denied", and the unit
+    # failed on the first login). A cp whose arguments name the store or the profile gets the default mode;
+    # every other cp in the script is unchanged.
+    sed -i '/# rime-libexec$/a cp() { local a; for a in "$@"; do case "$a" in /nix/store/*|/run/current-system/*) command cp "$@" --no-preserve=mode; return; esac; done; command cp "$@"; }' \
+      $out/libexec/rime-shell-firstrun
+    grep -q '^cp() { local a;' $out/libexec/rime-shell-firstrun
+
+    runHook postInstall
+  '';
+
+  installCheckPhase = ''
+    runHook preInstallCheck
+    shopt -s nullglob
+    scripts=()
+    for f in $out/libexec/* $out/bin/*; do
+      [ -f "$f" ] && [ ! -L "$f" ] && scripts+=("$f")
+    done
+    # every script in the deps table exists, and every script that exists is in the deps table
+    for f in "''${scripts[@]}"; do
+      n=''${f##*/}
+      case "$n" in rime-plugin-verdict.js) continue ;; esac
+      case " ${lib.concatStringsSep " " (lib.attrNames deps)} " in *" $n "*) ;; *) echo "FAIL: $n has no deps entry"; exit 1 ;; esac
+    done
+    # syntax
+    for f in "''${scripts[@]}"; do
+      case "$(head -c 200 "$f" | head -n1)" in
+        *python*) ${python3}/bin/python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$f" ;;
+        *node*)   ${nodejs-slim}/bin/node --check "$f" ;;
+        *)        ${bash}/bin/bash -n "$f" ;;
+      esac
+    done
+    # every command resolves
+    ${python3}/bin/python3 ${./rime-libexec-audit.py} audit --shfmt ${shfmt}/bin/shfmt --runtime "${lib.concatStringsSep "," runtime}" \
+      --report $out/share/rime/libexec-audit.json "''${scripts[@]}"
+    # no bootc path is left (/usr/local/* is allowed: search-list entries that are absent on NixOS)
+    left="$(grep -rInoE '/usr/(bin|sbin|libexec|lib64|lib|share)\b[^ "'"'"'):;]*' $out || true)"
+    if [ -n "$left" ]; then
+      echo "FAIL: FHS paths left in the output:"; echo "$left"; exit 1
+    fi
+    test "$(readlink -f $out/libexec/rime/tools/wrangler)" = "$(readlink -f $out/libexec/rime-tool-broker)"
+    # nothing under a directory NixOS links and reads for every system package (see the data section)
+    for d in etc/xdg share/polkit-1; do
+      if [ -e "$out/$d" ]; then echo "FAIL: $out/$d would be live on every machine"; exit 1; fi
+    done
+    runHook postInstallCheck
+  '';
+
+  meta = {
+    description = "Rime helper scripts and the system data they read";
+    license = lib.licenses.mit;
+    platforms = lib.platforms.linux;
+  };
+}

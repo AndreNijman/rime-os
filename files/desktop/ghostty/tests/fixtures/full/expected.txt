@@ -1,0 +1,232 @@
+font-family = JetBrainsMono Nerd Font
+font-style = Regular
+font-family-bold = JetBrainsMono Nerd Font
+font-style-bold = Bold
+font-style-italic = Italic
+font-size = 13
+adjust-cell-width = 1
+adjust-cell-height = 2
+background = #1e1e2e
+foreground = #cdd6f4
+cursor-color = #f5e0dc
+selection-background = #45475a
+selection-foreground = cell-foreground
+palette = 1=#f38ba8
+palette = 2=#a6e3a1
+palette = 3=#f9e2af
+palette = 4=#89b4fa
+palette = 5=#f5c2e7
+palette = 6=#94e2d5
+palette = 7=#bac2de
+palette = 8=#585b70
+palette = 9=#f38ba8
+palette = 10=#a6e3a1
+palette = 11=#f9e2af
+palette = 12=#89b4fa
+palette = 13=#f5c2e7
+palette = 14=#94e2d5
+bold-color = bright
+window-padding-x = 8
+window-padding-y = 5
+window-padding-balance = true
+background-opacity = 0.92
+background-blur = true
+window-decoration = none
+maximize = true
+window-width = 120
+window-height = 34
+title = Terminal
+window-theme = dark
+scrollback-limit-lines = 50000
+mouse-scroll-multiplier = discrete:5
+cursor-style = bar
+cursor-style-blink = true
+mouse-hide-while-typing = true
+copy-on-select = both
+working-directory = /srv/work
+clipboard-read = allow
+bell-features = no-title,border
+palette = 16=#fab387
+command = shell:/run/current-system/sw/bin/fish --login -C 'echo '"'"'hi there'"'"''
+env = EDITOR=nvim
+term = xterm-256color
+keybind = shift+enter=text:\x1b\r
+keybind = ctrl+shift+v=paste_from_clipboard
+keybind = ctrl+equal=increase_font_size:1
+keybind = ctrl+shift+plus=increase_font_size:1
+keybind = ctrl+0=reset_font_size
+keybind = shift+arrow_up=scroll_page_lines:-1
+keybind = super+n=new_window
+keybind = f11=toggle_fullscreen
+keybind = ctrl+tab=text:\t\"\\
+keybind = ctrl+shift+t=unbind
+----
+Rime: Alacritty settings carried over to Ghostty
+
+
+Carried over:
+  font.normal.family = "JetBrainsMono Nerd Font"
+    -> font-family = JetBrainsMono Nerd Font
+  font.normal.style = "Regular"
+    -> font-style = Regular
+  font.bold.family = "JetBrainsMono Nerd Font"
+    -> font-family-bold = JetBrainsMono Nerd Font
+  font.bold.style = "Bold"
+    -> font-style-bold = Bold
+  font.italic.style = "Italic"
+    -> font-style-italic = Italic
+  font.size = 13.0
+    -> font-size = 13
+  font.offset.x = 1
+    -> adjust-cell-width = 1
+  font.offset.y = 2
+    -> adjust-cell-height = 2
+  colors.primary.background = "0x1e1e2e"
+    -> background = #1e1e2e
+  colors.primary.foreground = "#CDD6F4"
+    -> foreground = #cdd6f4
+  colors.cursor.cursor = "#f5e0dc"
+    -> cursor-color = #f5e0dc
+  colors.selection.background = "#45475a"
+    -> selection-background = #45475a
+  colors.selection.text = "CellForeground"
+    -> selection-foreground = cell-foreground
+  colors.normal.red = "#f38ba8"
+    -> palette = 1=#f38ba8
+  colors.normal.green = "#a6e3a1"
+    -> palette = 2=#a6e3a1
+  colors.normal.yellow = "#f9e2af"
+    -> palette = 3=#f9e2af
+  colors.normal.blue = "#89b4fa"
+    -> palette = 4=#89b4fa
+  colors.normal.magenta = "#f5c2e7"
+    -> palette = 5=#f5c2e7
+  colors.normal.cyan = "#94e2d5"
+    -> palette = 6=#94e2d5
+  colors.normal.white = "#bac2de"
+    -> palette = 7=#bac2de
+  colors.bright.black = "#585b70"
+    -> palette = 8=#585b70
+  colors.bright.red = "#f38ba8"
+    -> palette = 9=#f38ba8
+  colors.bright.green = "#a6e3a1"
+    -> palette = 10=#a6e3a1
+  colors.bright.yellow = "#f9e2af"
+    -> palette = 11=#f9e2af
+  colors.bright.blue = "#89b4fa"
+    -> palette = 12=#89b4fa
+  colors.bright.magenta = "#f5c2e7"
+    -> palette = 13=#f5c2e7
+  colors.bright.cyan = "#94e2d5"
+    -> palette = 14=#94e2d5
+  colors.draw_bold_text_with_bright_colors = True
+    -> bold-color = bright
+  window.padding.x = 10
+    -> window-padding-x = 8
+  window.padding.y = 6
+    -> window-padding-y = 5
+  window.dynamic_padding = True
+    -> window-padding-balance = true
+  window.opacity = 0.92
+    -> background-opacity = 0.92
+  window.blur = True
+    -> background-blur = true
+  window.decorations = "None"
+    -> window-decoration = none
+  window.startup_mode = "Maximized"
+    -> maximize = true
+  window.dimensions.columns = 120
+    -> window-width = 120
+  window.dimensions.lines = 34
+    -> window-height = 34
+  window.title = "Terminal"
+    -> title = Terminal
+  window.decorations_theme_variant = "Dark"
+    -> window-theme = dark
+  scrolling.history = 50000
+    -> scrollback-limit-lines = 50000
+  scrolling.multiplier = 5
+    -> mouse-scroll-multiplier = discrete:5
+  cursor.style.shape = "Beam"
+    -> cursor-style = bar
+  cursor.style.blinking = "On"
+    -> cursor-style-blink = true
+  mouse.hide_when_typing = True
+    -> mouse-hide-while-typing = true
+  selection.save_to_clipboard = True
+    -> copy-on-select = both
+  general.working_directory = "/srv/work"
+    -> working-directory = /srv/work
+  terminal.osc52 = "CopyPaste"
+    -> clipboard-read = allow
+  bell.duration = 100
+    -> bell-features = no-title,border
+  colors.indexed_colors[0] = {'index': 16, 'color': '#fab387'}
+    -> palette = 16=#fab387
+  terminal.shell = {'program': '/run/current-system/sw/bin/fish', 'args': ['--login', '-C', "echo 'hi there'"]}
+    -> command = shell:/run/current-system/sw/bin/fish --login -C 'echo '"'"'hi there'"'"''
+  env.EDITOR = "nvim"
+    -> env = EDITOR=nvim
+  env.TERM = "xterm-256color"
+    -> term = xterm-256color
+  keyboard.bindings[0] key='Return' mods='Shift' chars='\x1b\r'
+    -> keybind = shift+enter=text:\x1b\r
+  keyboard.bindings[1] key='V' mods='Control|Shift' action='Paste'
+    -> keybind = ctrl+shift+v=paste_from_clipboard
+  keyboard.bindings[2] key='Equals' mods='Control' action='IncreaseFontSize'
+    -> keybind = ctrl+equal=increase_font_size:1
+  keyboard.bindings[3] key='Plus' mods='Control|Shift' action='IncreaseFontSize'
+    -> keybind = ctrl+shift+plus=increase_font_size:1
+  keyboard.bindings[4] key='Key0' mods='Control' action='ResetFontSize'
+    -> keybind = ctrl+0=reset_font_size
+  keyboard.bindings[6] key='ArrowUp' mods='Shift' mode='~Vi|~Search' action='ScrollLineUp'
+    -> keybind = shift+arrow_up=scroll_page_lines:-1
+  keyboard.bindings[7] key='N' mods='Super' action='CreateNewWindow'
+    -> keybind = super+n=new_window
+  keyboard.bindings[8] key='F11' action='ToggleFullscreen'
+    -> keybind = f11=toggle_fullscreen
+  keyboard.bindings[11] key='Tab' mods='Control' chars='\t"\\'
+    -> keybind = ctrl+tab=text:\t\"\\
+  keyboard.bindings[12] key='T' mods='Control|Shift' action='None'
+    -> keybind = ctrl+shift+t=unbind
+
+Same as Rime's default, so not copied:
+  colors.cursor.text = "CellBackground"
+  colors.normal.black = "#181818"
+  colors.bright.white = "#f8f8f8"
+  font.glyph_offset.x = 0
+  selection.semantic_escape_chars = ",│`|:"' ()[]{}<>	"
+
+Not carried over:
+  keyboard.bindings[5] key='PageUp' mods='Shift' mode='~Alt' action='ScrollPageUp'
+    mode '~Alt': Ghostty bindings cannot be limited to a terminal mode
+  keyboard.bindings[9] key='Space' mods='Shift|Control' action='ToggleViMode'
+    action 'ToggleViMode' has no Ghostty equivalent
+  keyboard.bindings[10] key='K' mods='Control|Shift' command={'program': 'notify-send', 'args': ['hi']}
+    bindings that run a program have no Ghostty equivalent
+  mouse.bindings[0] mouse='Middle' action='PasteSelection'
+    mouse bindings have no Ghostty equivalent
+  bell.command = {'program': 'paplay', 'args': ['/usr/share/sounds/bell.oga']}
+    Ghostty cannot run a program on the bell
+  colors.dim.black = "#45475a"
+    Ghostty has no dim palette; it dims faint text itself
+  colors.primary.dim_foreground = "#7f849c"
+    Ghostty has no dim foreground
+  cursor.unfocused_hollow = False
+    Ghostty always draws an unfocused cursor hollow
+  cursor.vi_mode_style.blinking = "Off"
+    Ghostty has no vi mode
+  cursor.vi_mode_style.shape = "Block"
+    Ghostty has no vi mode
+  font.glyph_offset.y = 1
+    no exact Ghostty equivalent (adjust-font-baseline moves the baseline only)
+  general.live_config_reload = False
+    Ghostty reloads with ctrl+shift+comma
+  window.class.general = "work"
+    Ghostty's class is its Wayland app id, which window rules match: not copied
+  window.class.instance = "work"
+    Ghostty's class is its Wayland app id, which window rules match: not copied
+  window.dynamic_title = False
+    no Ghostty equivalent (set title to fix the title)
+
+Alacritty is still installed and its files were not changed.

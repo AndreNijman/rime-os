@@ -286,6 +286,30 @@ sudo grub2-mkconfig -o /boot/grub2/grub.cfg
 Nothing in this repository runs those commands for you, and a test checks
 that.
 
+## When the Rime Shell does not start
+
+The compositor starts the Shell through `rime-shell-autostart`
+(`/usr/libexec/` on bootc, `/run/current-system/sw/libexec/` on NixOS). It
+writes every step to the journal under its own tag, and waits up to 90 s for
+the Shell to answer on IPC:
+
+- quickshell exits before the Shell answers: the launcher starts it again, up
+  to three starts in all;
+- three starts fail, or quickshell runs but never answers: an error in the
+  journal and a notification on screen ("Rime Shell did not start: …").
+  Hyprland draws that notification itself, so it shows with no Shell; other
+  sessions get it through `notify-send`.
+
+```sh
+journalctl -b -t rime-shell-autostart      # what the launcher saw
+qs -c /usr/share/rime-shell log            # quickshell's own log (the NixOS path: /run/current-system/sw/share/rime-shell)
+/usr/libexec/rime-shell-autostart          # start it again from a terminal
+```
+
+An IPC client already talking to the Shell's config (`qs -c <dir> ipc …`,
+the lock command, `rime shell`) is not taken for a running Shell. Until
+2026-11-04 it was, and the launcher exited with no Shell and no message.
+
 ## Rime Safe Graphics
 
 Roadmap P2-018. When the desktop does not paint (a GPU driver that stopped

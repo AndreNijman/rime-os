@@ -1,0 +1,14 @@
+[package]
+name = "cosmic-applet-rime"
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+description = "Rime's Gaming Mode and updates in COSMIC's panel"
+
+[dependencies]
+libcosmic.workspace = true
+rime-cosmic-model = { path = "../model" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zbus.workspace = true

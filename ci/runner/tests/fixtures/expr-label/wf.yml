@@ -1,0 +1,9 @@
+on: pull_request
+jobs:
+  matrix:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, katana-nix]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - run: true

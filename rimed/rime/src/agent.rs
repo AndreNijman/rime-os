@@ -2598,9 +2598,54 @@ fn enable() -> Result<i32> {
 fn enable_user() -> Result<i32> {
     let code = run_tool("systemctl", &["--user", "enable", "--now", "rime-agentd"], None)?;
     if code == 0 {
+        pin_wants_link_to_profile(&rime_agent_core::paths::config_home());
         println!("agent runtime enabled. `a` and `rime agent run` work now.");
     }
     Ok(code)
+}
+
+/// Where a NixOS system keeps its user units at a path that survives an update.
+const STABLE_USER_UNIT_DIRS: &[&str] = &["/etc/systemd/user"];
+
+/// On NixOS, `systemctl --user enable` links the `.wants/` entry to the unit's
+/// file in /nix/store, which the next update replaces and a garbage collection
+/// deletes. systemd still finds the unit by name, but the link then names a
+/// path that is gone (and `systemctl --user` reports the unit "linked", not
+/// "enabled"). Repoint every such link at the same unit in the system's
+/// stable unit directory. A Fedora link (/usr/lib/systemd/user) is never touched.
+fn pin_wants_link_to_profile(config_home: &Path) {
+    pin_wants_link_in(config_home, "rime-agentd.service", STABLE_USER_UNIT_DIRS);
+}
+
+fn pin_wants_link_in(config_home: &Path, unit: &str, stable_dirs: &[&str]) {
+    let Ok(dirs) = std::fs::read_dir(config_home.join("systemd/user")) else {
+        return;
+    };
+    for entry in dirs.flatten() {
+        let wants = entry.path();
+        if wants.extension().map_or(true, |e| e != "wants") {
+            continue;
+        }
+        let link = wants.join(unit);
+        let Ok(target) = std::fs::read_link(&link) else {
+            continue;
+        };
+        if !target.starts_with("/nix/store/") {
+            continue;
+        }
+        let Some(stable) = stable_dirs
+            .iter()
+            .map(|d| Path::new(d).join(unit))
+            .find(|s| s.exists())
+        else {
+            continue;
+        };
+        let tmp = wants.join(format!(".{unit}.rime-pin"));
+        let _ = std::fs::remove_file(&tmp);
+        if std::os::unix::fs::symlink(&stable, &tmp).is_ok() && std::fs::rename(&tmp, &link).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
 }
 
 /// Root has no `systemd --user` instance unless it lingers, and no
@@ -2640,6 +2685,9 @@ fn enable_root() -> Result<i32> {
         Some(("XDG_RUNTIME_DIR", "/run/user/0")),
     )?;
     if code == 0 {
+        if let Some(home) = rime_agent_core::paths::passwd_home_of(0) {
+            pin_wants_link_to_profile(&home.join(".config"));
+        }
         println!("agent runtime enabled for root.");
         println!();
         println!("note: agents started here run AS ROOT. The per-session sandbox keeps /");
@@ -3923,7 +3971,7 @@ pub fn project_cmd(cmd: ProjectCmd) -> i32 {
 /// Where the compositor adapter lives. A fixed path, like the sandbox's bwrap:
 /// resolving it through `PATH` would let a shadowing script decide what "the
 /// windows of this project" means.
-const WINDOW_ADAPTER: &str = "/usr/libexec/rime-project-windows";
+const WINDOW_ADAPTER: &str = rime_paths::RIME_PROJECT_WINDOWS;
 
 fn window_adapter() -> String {
     // Overridable for development only, and named so it is obvious in a process
@@ -4191,7 +4239,7 @@ fn layout_forget() -> Result<i32> {
 /// Where the multiplexer adapter lives. A fixed path, like the window adapter
 /// and the sandbox's bwrap: resolving it through `PATH` would let a shadowing
 /// script decide what "open my project layout" runs.
-const MUX_ADAPTER: &str = "/usr/libexec/rime-mux";
+const MUX_ADAPTER: &str = rime_paths::RIME_MUX;
 
 fn mux_adapter() -> String {
     std::env::var("RIME_MUX_ADAPTER").unwrap_or_else(|_| MUX_ADAPTER.to_string())
@@ -5659,5 +5707,35 @@ mod tests {
     #[test]
     fn paths_outside_home_are_left_alone() {
         assert_eq!(short_path("/usr/share/rime"), "/usr/share/rime");
+    }
+
+    #[test]
+    fn an_enable_link_into_the_nix_store_is_repointed_at_the_stable_unit() {
+        let root = std::env::temp_dir().join(format!("rime-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let stable = root.join("etc-systemd-user");
+        let config = root.join("config");
+        let wants = config.join("systemd/user/default.target.wants");
+        let other = config.join("systemd/user/graphical-session.target.wants");
+        std::fs::create_dir_all(&stable).unwrap();
+        std::fs::create_dir_all(&wants).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(stable.join("rime-agentd.service"), "[Service]\n").unwrap();
+        let store = Path::new("/nix/store/0000-unit-rime-agentd.service/rime-agentd.service");
+        std::os::unix::fs::symlink(store, wants.join("rime-agentd.service")).unwrap();
+        // A Fedora link is the system's own path already, and stays exactly as it is.
+        let fedora = Path::new("/usr/lib/systemd/user/rime-agentd.service");
+        std::os::unix::fs::symlink(fedora, other.join("rime-agentd.service")).unwrap();
+
+        let s = stable.display().to_string();
+        pin_wants_link_in(&config, "rime-agentd.service", &[s.as_str()]);
+
+        let got = std::fs::read_link(wants.join("rime-agentd.service")).unwrap();
+        let kept = std::fs::read_link(other.join("rime-agentd.service")).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(&wants).unwrap().flatten().map(|e| e.file_name()).collect();
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(got, stable.join("rime-agentd.service"));
+        assert_eq!(kept, fedora);
+        assert_eq!(leftovers.len(), 1, "a temporary link was left behind: {leftovers:?}");
     }
 }

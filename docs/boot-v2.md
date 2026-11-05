@@ -9,6 +9,34 @@ machine.** The next section is that decision and the design it forces. The rest
 of the document (the ESP layout, the measurements, the enrolment procedure,
 recovery) is the ground the decision is built on.
 
+> **Status after the NixOS pivot (2026-11).** Rime OS is moving from bootc to
+> NixOS (`~/Projects/rime/nixos-pivot/PLAN.md`), and that changes what this
+> document governs:
+>
+> - **The automatic migration is being paused on bootc** (PLAN A5, a bootc PR
+>   to main): `rime update` is to stop running `rime-boot-migrate` without a
+>   health gate. One real machine's run ended in `phase=failed`, and that
+>   pattern (an in-place boot migration nobody chose) is why the NixOS bridge is
+>   opt-in instead.
+> - **NixOS v1 does not boot this way.** It keeps the chain bootc machines boot
+>   today: shim → Fedora's signed GRUB → the Rime kernel signed with the Rime
+>   MOK. The `rime.boot` hook writes the entries (`grub2/custom.cfg`,
+>   `grub2/rime-nixos.cfg`, kernels under `/boot/rime/`) and never installs a
+>   loader or touches NVRAM (`docs/nixos/boot-matrix.md`). The UKIs, boot
+>   counting and measured-boot work below remain the design for the **later**
+>   step, shim → MOK-signed systemd-boot → UKI, which has its own gates
+>   (PLAN D3) and waits for a real Secure Boot laptop.
+> - **A machine where the trial already ran keeps its record.** `rime migrate`
+>   copies `/var/lib/rime/boot-migrate/` (with `phase=failed`) into the NixOS
+>   root and NixOS never runs `rime-boot-migrate`. `rime migrate repair-e
+>   --confirm` (topology E) removes the trial's ESP files and NVRAM entry and
+>   **archives**, not deletes, its top-level `/composefs` and `/state` under
+>   `/var/lib/rime/boot-migrate/archive-<time>/` (`docs/nixos/bridge.md`).
+> - **Encrypted machines**: unlock on NixOS comes from host.toml `[boot]
+>   kernel_params` through the same GRUB menu, and `rime-luks-enroll` refuses to
+>   rotate an existing recovery key without `--replace-recovery`
+>   (`docs/disk-encryption.md`, "On NixOS Rime").
+
 ## The pivot to systemd-boot — the decision, and what it costs
 
 **Decision, Andre, 2026-09-20: Rime moves to systemd-boot on every machine.**
@@ -1525,6 +1553,17 @@ It enrols a recovery key first, before anything else, on every path. A volume
 that has a TPM binding and no recovery path turns a firmware update into a
 data-loss event, so the script never opens that window. Move the key file off
 the encrypted disk before you reboot, not after.
+
+On a volume that **already has** a recovery key the full path refuses, unless
+`--replace-recovery` says to rotate it (every printed copy of the old key then
+stops working). Earlier versions wiped the old key and printed a new one
+without asking. To re-bind only the TPM slot, after a new Secure Boot key or a
+dbx update changed PCR 7, use `--tpm-only`: it keeps the recovery key and the
+passphrase and fingerprints every other keyslot before and after. On the NixOS
+system `sudo rime luks rebind` runs it for every volume whose slot no longer
+matches this boot's PCR values (`rime doctor` names them).
+The installer always runs the full path on a volume it has just formatted, so it
+never meets the refusal.
 
 It adds a TPM key slot only where this machine can enforce one, and when it
 declines it tells you why in words you can act on:

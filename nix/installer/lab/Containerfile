@@ -1,0 +1,11 @@
+# The installer lab's VM container: the OVMF probe's Fedora 45 qemu + Secure Boot OVMF (nix/probe/ovmf), plus
+# tesseract, which installer/iso-qualify.py needs to read the installer's first page off a screenshot.
+# Build: sudo podman build -t rime-installer-lab nix/installer/lab   (after rime-ovmf-probe)
+FROM localhost/rime-ovmf-probe:latest
+
+RUN dnf -y install --setopt=install_weak_deps=False tesseract tesseract-langpack-eng python3 \
+    && dnf clean all \
+    && tesseract --version | head -1
+
+WORKDIR /work
+ENTRYPOINT ["/bin/bash"]

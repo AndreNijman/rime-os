@@ -81,6 +81,8 @@ pub mod live;
 // `$XDG_STATE_HOME`.
 pub mod migrate;
 pub mod mode;
+// The NixOS release client's pure half (docs/nixos/updates-and-release.md, D6).
+pub mod nixrel;
 // Whether the NVIDIA driver branch in the image can drive this machine's
 // NVIDIA GPU (Maxwell/Pascal/Volta need the 580 legacy branch Rime does not ship).
 pub mod nvidia_support;
@@ -148,7 +150,7 @@ pub use workload::{Assessment, Signal, Signals, Vram, Workload};
 
 /// The default on-disk override directory for profiles. If present it wins
 /// over the embedded set.
-pub const PROFILE_DIR: &str = "/usr/share/rimeos/sysprofiles";
+pub const PROFILE_DIR: &str = rime_paths::SYSPROFILES_DIR;
 
 /// True when dry-run is forced via the environment (`RIMED_DRY_RUN=1`). The
 /// daemon also exposes a `--dry-run` flag; either turns every real write off.

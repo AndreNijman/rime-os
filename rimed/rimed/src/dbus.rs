@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rimed_core::mode::ModeId;
+use rimed_core::mode::{self, ModeId, ModeState};
 use rimed_core::tier::Tier;
 use zbus::message::Header;
 use zbus::{interface, Connection, SignalContext};
@@ -75,22 +75,16 @@ impl PowerIface {
         let t: Tier = tier
             .parse()
             .map_err(|e: rimed_core::UnknownTier| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
-        // The user's choice drops every power-profiles hold, as in PPD; only
-        // the auto-switch setting the first hold turned off comes back.
-        let released = self.ctx.ppd_holds.lock().await.clear();
-        if let Some(a) = released.auto_switch {
-            self.ctx.state.lock().await.auto_switch = a;
-        }
+        // A choice made here ends every power-profiles hold, as one made in a desktop's own control does.
+        let released = self.ctx.ppd_forget().await;
         self.ctx.apply_tier(t).await.map_err(to_fdo)?;
         // Remembered per power source, so an AC event or a restart does not
         // quietly put the profile's default back (choice.rs).
         self.ctx.record_choice(t).await;
         PowerIface::tier_changed_signal(&ctxt, t.as_str()).await?;
         self.tier_changed(&ctxt).await?;
-        if !released.cookies.is_empty() {
-            crate::ppd::settle(&self.ctx, conn, &released).await;
-        }
-        crate::ppd::emit_changed(conn).await;
+        crate::ppd::emit_released(conn, &released).await;
+        emit_others_changed(conn).await;
         Ok(())
     }
 
@@ -104,18 +98,15 @@ impl PowerIface {
         #[zbus(header)] hdr: Header<'_>,
     ) -> zbus::fdo::Result<()> {
         authorize(conn, &hdr, ACTION_POWER).await?;
-        {
-            let mut st = self.ctx.state.lock().await;
-            st.auto_switch = enabled;
-        }
+        // While power-profiles holds keep the tier, the tier auto-switch wants is where they return.
+        self.ctx.set_auto_switch(enabled).await.map_err(to_fdo)?;
         self.auto_switch_changed(&ctxt).await?;
         if enabled {
-            let target = self.ctx.auto_target().await;
-            self.ctx.apply_tier(target).await.map_err(to_fdo)?;
+            let target = self.ctx.state.lock().await.tier;
             PowerIface::tier_changed_signal(&ctxt, target.as_str()).await?;
             self.tier_changed(&ctxt).await?;
-            crate::ppd::emit_changed(conn).await;
         }
+        emit_others_changed(conn).await;
         Ok(())
     }
 
@@ -362,6 +353,68 @@ impl ModeIface {
         self.ctx.set_held(id).await.map_err(to_fdo)?;
         self.held_changed(&ctxt).await?;
         Ok(())
+    }
+
+    /// `daily` or `gaming`, derived from the levers as `rime mode status` derives it: `gaming` while the machine is
+    /// in exactly the state Gaming sets. Emits `PropertiesChanged` from every path that moves a lever.
+    #[zbus(property)]
+    async fn active(&self) -> String {
+        self.ctx.mode_active().await.to_string()
+    }
+
+    /// Set `mode` the way `rime mode set` composes it, here instead of in each client: hold it (so it survives a
+    /// restart, and so leaving Gaming releases game mode), then move the levers in the planner's order, stopping at
+    /// the first that fails. A mode change ends every power-profiles hold. polkit `manage-power`.
+    async fn set(
+        &self,
+        mode: String,
+        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> zbus::fdo::Result<()> {
+        authorize(conn, &hdr, ACTION_POWER).await?;
+        let id = mode
+            .trim()
+            .parse::<ModeId>()
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
+        let game_before = self.ctx.game_active().await;
+        let out = self.ctx.set_mode(id).await;
+        // Whatever happened, say so: the hold and some levers may have moved before a step failed.
+        self.held_changed(&ctxt).await?;
+        let game_after = self.ctx.game_active().await;
+        if game_before != game_after {
+            if let Err(e) = emit_game_mode_changed(conn, game_after).await {
+                eprintln!("rimed: mode: emitting the game mode change failed: {e}");
+            }
+        }
+        emit_state_changed(conn, &self.ctx).await;
+        let released = out.map_err(to_fdo)?;
+        crate::ppd::emit_released(conn, &released).await;
+        Ok(())
+    }
+}
+
+impl Ctx {
+    /// `Mode.Active`.
+    ///
+    /// A `power-saver` hold during game mode runs the machine at `power-saver`
+    /// (ppd.rs) and ends nothing else: Gaming is still on, so it is identified
+    /// by the tier game mode runs when no hold beats it.
+    pub async fn mode_active(&self) -> &'static str {
+        let game = self.game_tier_beaten().await;
+        let st = {
+            let s = self.state.lock().await;
+            let tier = match game {
+                Some((t, true)) => t,
+                _ => s.tier,
+            };
+            ModeState { tier, auto_switch: s.auto_switch, game_active: game.is_some() }
+        };
+        if mode::identify(&st).exact.contains(&ModeId::Gaming) {
+            "gaming"
+        } else {
+            "daily"
+        }
     }
 }
 
@@ -726,8 +779,29 @@ pub async fn emit_tier_changed(conn: &Connection, tier: Tier) -> zbus::Result<()
     let ctxt = iref.signal_context().clone();
     PowerIface::tier_changed_signal(&ctxt, tier.as_str()).await?;
     iref.get().await.tier_changed(&ctxt).await?;
-    crate::ppd::emit_changed(conn).await;
+    emit_others_changed(conn).await;
     Ok(())
+}
+
+/// What follows a tier, auto-switch or game mode change besides the Power interface: `Mode.Active` and every
+/// power-profiles property, on both of its objects.
+async fn emit_others_changed(conn: &Connection) {
+    if let Ok(iref) = conn.object_server().interface::<_, ModeIface>(OBJECT_PATH).await {
+        let _ = iref.get().await.active_changed(iref.signal_context()).await;
+    }
+    crate::ppd::emit_changed(conn).await;
+}
+
+/// After any change that may have moved the tier and auto-switch (a hold, a power-profiles write, `Mode.Set`):
+/// `TierChanged` + `Tier`, `AutoSwitch`, `Mode.Active` and the power-profiles properties.
+pub async fn emit_state_changed(conn: &Connection, ctx: &Arc<Ctx>) {
+    let tier = ctx.state.lock().await.tier;
+    if let Err(e) = emit_tier_changed(conn, tier).await {
+        eprintln!("rimed: emitting TierChanged failed: {e}");
+    }
+    if let Ok(iref) = conn.object_server().interface::<_, PowerIface>(OBJECT_PATH).await {
+        let _ = iref.get().await.auto_switch_changed(iref.signal_context()).await;
+    }
 }
 
 /// Emit the `OnAcPower` property change from the event loop.

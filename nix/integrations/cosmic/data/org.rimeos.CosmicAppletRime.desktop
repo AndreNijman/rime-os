@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Rime
+Comment=Gaming Mode and updates from Rime
+Type=Application
+Exec=cosmic-applet-rime
+Terminal=false
+Categories=COSMIC;
+Keywords=COSMIC;Applet;Rime;Gaming;Update;
+Icon=input-gaming-symbolic
+StartupNotify=true
+NoDisplay=true
+X-CosmicApplet=true
+X-HostWaylandDisplay=true

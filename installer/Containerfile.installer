@@ -167,6 +167,12 @@ RUN set -eux; \
 # had setfiles, so every one of those was silently skipped and left
 # unlabeled_t. MEASURED 2026-10-04 on a VM install from this ISO: 444 AVC
 # denials in the first minute, Rime Shell refused /etc/localtime.
+#
+# nix-core, bootupd, openssl and findutils ONLY on a NixOS ISO (build-live-iso.sh NIXOS_SYSTEM=… passes
+# --build-arg NIXOS=1): nix copies the prebuilt system from its binary cache, bootupd is there for its static
+# GRUB configuration, openssl verifies the release signature (rime-install-nixos-release), xargs feeds
+# `nix store verify`. A bootc ISO runs none of them, so it does not carry them (docs/nixos/installer.md).
+ARG NIXOS=0
 RUN dnf -y install --setopt=install_weak_deps=False \
         kernel systemd systemd-udev dracut dracut-live device-mapper \
         bootc podman skopeo tpm2-tools policycoreutils \
@@ -183,6 +189,7 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         abattis-cantarell-fonts \
         grub2-tools-extra grub2-efi-x64-modules grub2-pc-modules \
         shim-x64 grub2-efi-x64 mokutil efibootmgr xorriso \
+        $( [ "$NIXOS" = 1 ] && echo nix-core bootupd openssl findutils ) \
     && dnf clean all
 
 # The installer TUI.
@@ -191,14 +198,20 @@ RUN dnf -y install --setopt=install_weak_deps=False \
 # collects answers and drives `rime-install --headless`, so every disk guard and
 # safety check lives in exactly one place.
 COPY rime-install         /usr/bin/rime-install
+# The NixOS install path (PLAN.md D9): sourced by rime-install when the ISO was built with a NixOS system
+# (build-live-iso.sh NIXOS_SYSTEM=...). nix-core copies the prebuilt system closure from a signed binary cache;
+# bootupd only for its static GRUB configuration (/usr/lib/bootupd/grub2-static), which the NixOS ESP uses.
+COPY rime-install-nixos.sh /usr/lib/rime-installer/rime-install-nixos.sh
 COPY rime-installer-gui   /usr/bin/rime-installer-gui
+# The final page's "save the recovery key to another USB stick" (the boot stick is often read-only).
+COPY rime-install-save-key /usr/bin/rime-install-save-key
 COPY rime-installer-launch /usr/bin/rime-installer-launch
 # The session script owns the cage loop so the keyboard page can restart the
 # compositor (a wlroots keymap is compiled once, at startup, from
 # XKB_DEFAULT_LAYOUT). rime-installer-launch EXECS this path, so an image
 # missing it has no installer at all.
 COPY rime-installer-session /usr/bin/rime-installer-session
-RUN chmod 0755 /usr/bin/rime-install /usr/bin/rime-installer-gui \
+RUN chmod 0755 /usr/bin/rime-install /usr/bin/rime-installer-gui /usr/bin/rime-install-save-key \
                 /usr/bin/rime-installer-launch \
                 /usr/bin/rime-installer-session
 
@@ -236,6 +249,20 @@ RUN set -eu; \
     bash -n /usr/bin/rime-install \
         || { echo "FATAL: rime-install has a bash syntax error"; exit 1; }; \
     echo "OK: rime-install parses"; \
+    bash -n /usr/lib/rime-installer/rime-install-nixos.sh \
+        || { echo "FATAL: rime-install-nixos.sh has a bash syntax error"; exit 1; }; \
+    if [ "$NIXOS" = 1 ]; then \
+      command -v nix >/dev/null && command -v openssl >/dev/null && command -v xargs >/dev/null \
+        && [ -f /usr/lib/bootupd/grub2-static/grub-static-efi.cfg ] && ls /boot/efi/EFI/*/shimx64.efi >/dev/null \
+        || { echo "FATAL: the NixOS install path needs nix, openssl, xargs, bootupd's static GRUB config and shim"; exit 1; }; \
+      echo "OK: NixOS install path: rime-install-nixos.sh parses, $(nix --version), openssl, static GRUB config, shim"; \
+    else \
+      ! command -v nix >/dev/null && ! rpm -q bootupd >/dev/null \
+        || { echo "FATAL: a bootc ISO carries nix or bootupd (NIXOS=0)"; exit 1; }; \
+      echo "OK: bootc ISO: no nix-core, no bootupd"; \
+    fi; \
+    bash -n /usr/bin/rime-install-save-key \
+        || { echo "FATAL: rime-install-save-key has a bash syntax error"; exit 1; }; \
     command -v bootc >/dev/null \
         || { echo "FATAL: bootc is missing — rime-install installs with this environment's own bootc"; exit 1; }; \
     command -v setfiles >/dev/null \

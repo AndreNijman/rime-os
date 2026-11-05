@@ -1,0 +1,36 @@
+# Flake checks the GitHub-hosted Nix workflow (.github/workflows/nix.yml) does NOT run, and why. One check name,
+# then the reason, on one line.
+#
+# The workflow runs every check in `nix flake check`'s list EXCEPT these (nix/ci/run-checks.sh plan), so a new
+# check runs in CI the day it lands without anybody adding it anywhere. run-checks.sh refuses an entry naming a
+# check that no longer exists, and tests/check-suites-run-in-ci.sh refuses one with no reason, so this list can only
+# say what is true.
+#
+# The kernel six build the Rime kernel (linux-rime-7.2.9, measured with `nix build --dry-run` against an empty
+# store: the derivation is in the plan of exactly these six, re-measured at the wave-2 merge with `nix-store -qR` of every check drvPath; kernel-sign joined with nix/kernsign, kernel-vm-signed with nix/bootmatrix). Nothing Rime-built is in a binary cache yet, and a
+# kernel plus its module set on a 4-vCPU hosted runner is hours, not minutes.
+#
+# hostlayer-katana is listed for honesty, not cost: without RIME_KATANA_STATE (katana's sanitised /etc snapshot,
+# never in the repository, the store or CI) its test prints SKIP and boots nothing, so a CI "pass" would gate
+# nothing. It is run by hand on katana (nix/tests/hostlayer-katana.nix header); hostlayer runs the same gate on a
+# synthetic snapshot in CI.
+# The three desktops-install checks (nix/tests/desktops-install.nix) do not fit a hosted runner's disk: each holds
+# four release systems (measured 2026-11-03 as the NAR size of their union: GNOME 10.1 GB, KDE 11.4 GB, COSMIC 11.5 GB)
+# in the build store, then the server VM's cache holds them again and the client VM's disk installs them; a hosted
+# runner has about 14 GB free. They run on katana or the self-hosted runner (docs/nixos/desktops.md §12).
+# shell-kept and hypr-lua left this list on 2026-11-04: their "Shell never started" was rime-shell-autostart taking a
+# running IPC client (`qs -c <dir> ipc show`, the checks' own poll) for the Shell and exiting (fixed; checks.shell-start
+# forces it). Both fit a hosted runner: a 4 GB VM, the same desktop closure as checks.desktop (9.2 GiB), 1-4 min on
+# katana; shell-kept's pacing table is printed, not asserted, so llvmpipe on a shared runner cannot fail it.
+vm-boot             needs the Rime binary cache (TODO(handover) R2): the system test boots the Rime kernel
+kernel-gate         needs the Rime binary cache (TODO(handover) R2): it reads the built Rime vmlinux
+kernel-vm           needs the Rime binary cache (TODO(handover) R2): it boots the Rime kernel and its signed modules
+kernel-boot-budget  needs the Rime binary cache (TODO(handover) R2): it measures the Rime kernel image and initrd
+kernel-sign         needs the Rime binary cache (TODO(handover) R2): it signs and relinks the real Rime kernel image
+kernel-vm-signed    needs the Rime binary cache (TODO(handover) R2): it boots the signed Rime kernel (K1-K3)
+hostlayer-katana    needs katana's real state (RIME_KATANA_STATE, never in CI): without it the test boots nothing and would pass
+update-floors       needs the Rime binary cache (TODO(handover) R2): it installs the four release variants, which carry the Rime kernel
+update-variants     needs the Rime binary cache (TODO(handover) R2): it publishes and installs the four release variants, which carry the Rime kernel
+desktops-install-gnome  does not fit a hosted runner's disk: four release systems (10.1 GB of store paths), cached again in the server VM and installed in the client VM
+desktops-install-kde    does not fit a hosted runner's disk: four release systems (11.4 GB of store paths), cached again in the server VM and installed in the client VM
+desktops-install-cosmic does not fit a hosted runner's disk: four release systems (11.5 GB of store paths), cached again in the server VM and installed in the client VM

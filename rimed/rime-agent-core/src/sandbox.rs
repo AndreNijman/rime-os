@@ -176,7 +176,18 @@ const NEVER_WRITABLE: &[&str] = &[
     "/sysroot",
     "/var/lib/rime",
     "/var/lib/apex",  // rime-rename: keep (the pre-rename state directory)
+    "/nix",
 ];
+
+/// Absolute paths that may never be bound writable, and neither may anything
+/// below them.
+///
+/// `/nix` is a whole tree rather than one path. The store itself is mounted
+/// read-only, but `/nix/var/nix` is not: it holds the per-user profiles and GC
+/// roots (owned by the user, so a writable bind would let a session change what
+/// the user's next shell runs) and the daemon's state. Nothing under it is a
+/// project, so the rule is the tree. Absent on bootc, where it refuses nothing.
+const NEVER_WRITABLE_TREES: &[&str] = &["/nix"];
 
 /// The runtime directory masked for every confined session.
 const RUN_DIR: &str = "/run";
@@ -210,6 +221,49 @@ pub fn resolv_binds() -> Vec<PathBuf> {
     out
 }
 
+/// The running system's own trees under [`RUN_DIR`], bound back read-only.
+///
+/// On NixOS the system's programs are not under `/usr`: the login `PATH` is
+/// `/run/wrappers/bin:/run/current-system/sw/bin`, and the graphics driver is
+/// `/run/opengl-driver`. Masking `/run` took all of them, so a confined session
+/// had no system `PATH` at all. Each of these is a root-owned symlink into the
+/// read-only Nix store, which `--ro-bind / /` already shows, so binding them
+/// back adds no file a session could not read anyway, and no socket: the system
+/// bus (`/run/dbus`), the nix-daemon socket (`/run/nix`) and everything else
+/// under `/run` stay masked.
+///
+/// `/run/wrappers` is deliberately NOT here. It holds the setuid and
+/// file-capability wrappers (sudo, su, mount, ping), and a confined session runs
+/// with `no_new_privs`, so none of them could elevate anyway; leaving the
+/// directory masked keeps every privileged entry point out of the session's
+/// view instead of handing it a set of programs that only fail.
+///
+/// None of these exists on the bootc image, where this adds nothing.
+pub const SYSTEM_RUN_TREES: &[&str] = &[
+    "/run/current-system",
+    "/run/opengl-driver",
+    "/run/opengl-driver-32",
+];
+
+/// Everything bound back into the masked `/run`: the resolver configuration
+/// ([`resolv_binds`]) and the system trees that exist on this machine
+/// ([`SYSTEM_RUN_TREES`]). The logical path is both source and destination;
+/// `bwrap` resolves a source symlink on the host side before it binds it.
+pub fn run_binds() -> Vec<PathBuf> {
+    let mut out = resolv_binds();
+    out.extend(system_run_binds());
+    out
+}
+
+/// The [`SYSTEM_RUN_TREES`] that exist on this machine.
+pub fn system_run_binds() -> Vec<PathBuf> {
+    SYSTEM_RUN_TREES
+        .iter()
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .collect()
+}
+
 /// Why a sandbox could not be built. Every variant is fatal: a session is never
 /// silently downgraded to a weaker policy than the one that was asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,8 +289,9 @@ impl std::fmt::Display for SandboxError {
         match self {
             SandboxError::MissingBwrap => write!(
                 f,
-                "bubblewrap (/usr/bin/bwrap) is not installed, so an agent session cannot be \
-                 confined; re-run with `--sandbox unrestricted` to run without confinement"
+                "bubblewrap ({}) is not installed, so an agent session cannot be \
+                 confined; re-run with `--sandbox unrestricted` to run without confinement",
+                rime_paths::BWRAP
             ),
             SandboxError::TiocstiEnabled => write!(
                 f,
@@ -383,7 +438,7 @@ pub fn preflight(policy: SandboxPolicy) -> Result<(), SandboxError> {
 /// boundary and resolving it through a user-controlled `PATH` would let a
 /// shadowing binary decide what "confined" means.
 pub fn bwrap_path() -> PathBuf {
-    PathBuf::from("/usr/bin/bwrap")
+    PathBuf::from(rime_paths::BWRAP)
 }
 
 /// Resolve a mount target to a real, symlink-free path.
@@ -511,9 +566,9 @@ pub fn build_argv(
         push(&spec.runtime_dir.to_string_lossy());
     }
 
-    // 5. Bound back into the masked /run: the resolver configuration, and
-    //    nothing else. Without this every confined session loses DNS, because
-    //    /etc/resolv.conf is a symlink into /run.
+    // 5. Bound back into the masked /run: the resolver configuration (without
+    //    it every confined session loses DNS, because /etc/resolv.conf is a
+    //    symlink into /run) and, on NixOS, the system trees (run_binds).
     for p in &spec.run_ro {
         if p.as_os_str().is_empty() {
             continue;
@@ -715,6 +770,15 @@ fn check_writable(path: &Path, home: &Path) -> Result<(), SandboxError> {
             return Err(SandboxError::ForbiddenWritable(path.to_path_buf()));
         }
     }
+    for tree in NEVER_WRITABLE_TREES {
+        if normalised == *tree
+            || normalised
+                .strip_prefix(tree)
+                .is_some_and(|rest| rest.starts_with('/'))
+        {
+            return Err(SandboxError::ForbiddenWritable(path.to_path_buf()));
+        }
+    }
     // The home itself, which the tmpfs is masking. A subdirectory is fine.
     if !home.as_os_str().is_empty() && normalised == home.to_string_lossy().trim_end_matches('/') {
         return Err(SandboxError::ForbiddenWritable(path.to_path_buf()));
@@ -793,7 +857,7 @@ mod tests {
     #[test]
     fn confined_argv_starts_with_the_absolute_bwrap_path() {
         let a = argv(&spec());
-        assert_eq!(a[0], "/usr/bin/bwrap");
+        assert_eq!(a[0], rime_paths::BWRAP);
     }
 
     #[test]
@@ -1025,7 +1089,8 @@ mod tests {
         }
         let mut s = live_spec();
         s.policy.sandbox = SandboxPolicy::Strict;
-        let argv = build_argv(&s, "/usr/bin/true", &[]).expect("build");
+        // /bin/sh, not /usr/bin/true: the one program path both the bootc image and NixOS have.
+        let argv = build_argv(&s, "/bin/sh", &["-c".to_string(), "exit 0".to_string()]).expect("build");
         let out = std::process::Command::new(&argv[0])
             .args(&argv[1..])
             .output()
@@ -1047,6 +1112,32 @@ mod tests {
             assert!(p.is_absolute(), "{p:?}");
             assert!(p.starts_with("/run"), "{p:?}");
         }
+    }
+
+    #[test]
+    fn the_system_trees_bound_back_into_run_hold_no_socket_directory() {
+        // The NixOS system PATH comes back; the sockets under /run do not. A
+        // bind of /run, /run/dbus, /run/nix or /run/wrappers here would hand a
+        // session the system bus, the nix-daemon or the setuid wrappers.
+        for p in SYSTEM_RUN_TREES {
+            let p = Path::new(p);
+            assert!(p.starts_with("/run/") && p.components().count() == 3, "{p:?}");
+            for refused in ["/run", "/run/dbus", "/run/nix", "/run/wrappers", "/run/user"] {
+                assert_ne!(p, Path::new(refused));
+            }
+        }
+        for p in run_binds() {
+            assert!(p.starts_with("/run"), "{p:?}");
+        }
+        // Bound read-only, like every run_ro entry.
+        let mut s = spec();
+        s.run_ro = vec![PathBuf::from("/run/current-system")];
+        let argv = build_argv(&s, "claude", &[]).unwrap();
+        assert!(
+            argv.windows(3)
+                .any(|w| w == ["--ro-bind-try", "/run/current-system", "/run/current-system"]),
+            "{argv:?}"
+        );
     }
 
     #[test]
@@ -1597,6 +1688,29 @@ mod tests {
     }
 
     #[test]
+    fn nothing_under_nix_may_be_writable() {
+        for bad in [
+            "/nix",
+            "/nix/",
+            "/nix/store",
+            "/nix/var/nix/profiles/per-user/tester",
+            "/nix/var/nix/daemon-socket",
+        ] {
+            let mut s = spec();
+            s.rw = vec![PathBuf::from(bad)];
+            let err = build_argv(&s, "claude", &[]).unwrap_err();
+            assert!(
+                matches!(err, SandboxError::ForbiddenWritable(_)),
+                "{bad} was accepted as writable: {err:?}"
+            );
+        }
+        // A sibling that only shares the prefix is not under /nix.
+        let mut s = spec();
+        s.rw = vec![PathBuf::from("/nixos-config")];
+        assert!(build_argv(&s, "claude", &[]).is_ok());
+    }
+
+    #[test]
     fn a_subdirectory_of_home_is_still_allowed_to_be_writable() {
         let mut s = spec();
         s.rw = vec![PathBuf::from("/home/tester/Projects/demo")];
@@ -1655,6 +1769,15 @@ mod tests {
     #[test]
     fn preflight_is_a_no_op_for_unrestricted() {
         assert_eq!(preflight(SandboxPolicy::Unrestricted), Ok(()));
+    }
+
+    #[test]
+    fn the_missing_bwrap_message_names_the_path_this_build_runs() {
+        // The path is chosen at build time (rime-paths: /usr/bin/bwrap on bootc, a store path on NixOS), so
+        // the message must name that path and never a hard-coded one the machine does not use.
+        let msg = SandboxError::MissingBwrap.to_string();
+        assert!(msg.contains(&format!("({})", rime_paths::BWRAP)), "{msg}");
+        assert_eq!(bwrap_path(), PathBuf::from(rime_paths::BWRAP));
     }
 
     #[test]

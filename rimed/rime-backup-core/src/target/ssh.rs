@@ -75,7 +75,7 @@ use crate::format::SnapshotId;
 /// Not "ssh": a backup that ran whatever `ssh` a `PATH` picked up is a backup
 /// that can be redirected by an environment variable. The same reasoning
 /// `rime-secretd` applies to `curl`.
-pub const SSH: &str = "/usr/bin/ssh";
+pub const SSH: &str = rime_paths::SSH;
 
 /// How long to wait for the far side to answer at all.
 pub const CONNECT_TIMEOUT_SECS: u32 = 15;

@@ -83,7 +83,10 @@ local function bind(mods, key, dispatcher, opts)
 end
 
 local mod         = "SUPER"
-local terminal    = "alacritty"
+-- Not a terminal name either: xdg-terminal-exec opens the user's default terminal
+-- (xdg-terminals.list: Settings -> Misc -> Default terminal; Ghostty, then Alacritty
+-- on NixOS, Alacritty on bootc), the same launcher every Rime Shell launch uses.
+local terminal    = "xdg-terminal-exec"
 -- Not a browser name. `rime-open-browser` opens whatever the user has set as
 -- their default, so installing another browser and making it default changes
 -- this key too. It used to say `firefox`, which meant SUPER+W contradicted the

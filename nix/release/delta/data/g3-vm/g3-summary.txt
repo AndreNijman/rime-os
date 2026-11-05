@@ -1,0 +1,12 @@
+# G3 in VMs (docs/nixos/delta.md 5.2): the G3 lines of the run of nix/release/delta/lab/g3-vm.sh that exited 0, test drv kj1zlq9bn9baynzj2fgj6qfidix7v0yq-vm-test-run-rime-update-delta-g3.drv
+host load before: 1.18 2.90 5.24 2/1867 2171973
+exit 0 after 1705 s; host load after: 2.95 3.05 4.51 2/1874 2172608
+G3 setup: the old closure copied to the client in 38 s
+G3 setup: deltas + publish of the new release in 965 s
+G3 delta table: 153 deltas, 235865571 B
+G3: 156 paths of the new release are not on the client (161 not in the old release)
+G3: whole download of those, by the manifest: 641503083 B; NAR 2108821800 B
+G3 RESULT {"run": "deltas", "wall_s": 28.4, "download_phase_s": 25.8, "cpu_s": 34.6, "iowait_s": 19.6, "rx_bytes": 247843356, "github_files": 156, "github_bytes": 235562875, "delta_files": 150, "host_load": "2.09", "summary": ["rime: 156 new store paths, 0.24 GB to download with deltas (0.64 GB without; 2.11 GB unpacked)", "rime: 150 paths rebuilt from deltas (182.3 MB), 6 downloaded whole (53.3 MB)"], "refused": 0}
+G3 RESULT {"run": "whole", "wall_s": 11.4, "download_phase_s": 10.2, "cpu_s": 21.6, "iowait_s": 5.8, "rx_bytes": 671447406, "github_files": 156, "github_bytes": 641503083, "delta_files": 0, "host_load": "2.57", "summary": ["rime: 156 new store paths, 0.64 GB to download (2.11 GB unpacked)"], "refused": 0}
+G3 RESULT {"run": "deltas-100mbit", "wall_s": 35.1, "download_phase_s": 33.9, "cpu_s": 37.8, "iowait_s": 10.9, "rx_bytes": 247402743, "github_files": 156, "github_bytes": 235562875, "delta_files": 150, "host_load": "2.84", "summary": ["rime: 156 new store paths, 0.24 GB to download with deltas (0.64 GB without; 2.11 GB unpacked)", "rime: 150 paths rebuilt from deltas (182.3 MB), 6 downloaded whole (53.3 MB)"], "refused": 0}
+G3 RESULT {"run": "whole-100mbit", "wall_s": 55.8, "download_phase_s": 54.6, "cpu_s": 41.3, "iowait_s": 6.4, "rx_bytes": 671431836, "github_files": 156, "github_bytes": 641503083, "delta_files": 0, "host_load": "2.47", "summary": ["rime: 156 new store paths, 0.64 GB to download (2.11 GB unpacked)"], "refused": 0}

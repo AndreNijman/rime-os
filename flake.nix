@@ -1,0 +1,102 @@
+{
+  description = "Rime OS on NixOS: packages, NixOS modules, hosts and VM tests";
+
+  inputs = {
+    # Pinned nixos-unstable (decision A1). Moving the pin is a deliberate PR, never `nix flake update` by habit.
+    nixpkgs.url = "github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325";
+
+    # rime-shell is source only; its own flake is retired (PLAN.md D8). The release job bumps this input (A15).
+    rime-shell = {
+      url = "github:AndreNijman/rime-shell/main";
+      flake = false;
+    };
+  };
+
+  outputs = { self, nixpkgs, rime-shell }:
+    let
+      system = "x86_64-linux";
+      lib = nixpkgs.lib;
+
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [ self.overlays.default ];
+        # Same as nix/modules/base.nix: Rime ships NVIDIA, Steam and other unfree packages.
+        config.allowUnfree = true;
+      };
+
+      devVm = import ./nix/dev { inherit pkgs self; };
+    in
+    {
+      # Every Rime package lives under pkgs.rime.* (nix/pkgs/default.nix). Modules use pkgs.rime.<name>, so
+      # nothing but this file needs to know about flake inputs.
+      overlays.default = final: _prev: {
+        rime = final.callPackage ./nix/pkgs { rime-shell-src = rime-shell; };
+      };
+
+      packages.${system} = {
+        inherit (pkgs.rime) rimed rime-shell rime-libexec rime-kernel rime-kernel-config rime-scx rime-branding rime-plymouth rime-greeting rime-terminal;
+        inherit (pkgs.rime) rime-hostlayer rime-bridge rime-bridge-payload rime-equibop rime-chatgpt rime-claude-desktop;
+        inherit (import ./nix/release { inherit pkgs self; }) rime-nix-release rime-release-plan rime-release-toplevels rime-release-toplevels-hosted rime-release-catalogue rime-release-standin rime-bridge-payload-closure;
+      };
+
+      nixosModules = {
+        default = import ./nix/modules { overlay = self.overlays.default; };
+        base = ./nix/modules/base.nix;
+        desktop = ./nix/modules/desktop.nix;
+        services = ./nix/modules/services.nix;
+        kernel = ./nix/modules/kernel.nix;
+        gaming = ./nix/modules/gaming.nix;
+        security = ./nix/modules/security.nix;
+        packages-catalogue = ./nix/modules/packages-catalogue.nix;
+        hostlayer = ./nix/modules/hostlayer.nix;
+        greeting = ./nix/modules/greeting.nix;
+        terminal = ./nix/modules/terminal.nix;
+      };
+
+      # The generic system a fresh install gets (PLAN.md D9): installer/rime-install-nixos.sh copies this prebuilt
+      # toplevel from a signed binary cache and runs nixos-install --system on it; nothing is evaluated on the
+      # target. Every machine-specific value (LUKS UUID, keymap, hostname, timezone, locale) is in host.toml.
+      nixosConfigurations.rime = lib.nixosSystem {
+        modules = [
+          self.nixosModules.default
+          ./nix/hosts/profile.nix
+          ./nix/installer/target.nix
+          {
+            nixpkgs.hostPlatform = system;
+            rime.installTarget.enable = true;
+            rime.kernel.enable = true;
+          }
+        ];
+      };
+
+      nixosConfigurations.rime-vm = lib.nixosSystem {
+        modules = [
+          self.nixosModules.default
+          ./nix/hosts/vm.nix
+          # vm.nix sets no hostName (host.toml names the machine), which would name the toplevel "unnamed".
+          { system.name = "rime-vm"; }
+        ];
+      };
+
+      # The persistent development VM (nix/dev, docs/nixos/dev-vm.md): `nix run path:.#dev-vm -- start` in the rime-nix
+      # container, or nix/dev/dev-vm on the host. The systems it boots are legacyPackages, so CI's per-output
+      # evaluation (nix/ci/eval-each.sh: checks and packages) does not evaluate four more full systems.
+      apps.${system}.dev-vm = {
+        type = "app";
+        program = "${devVm.app}/bin/dev-vm";
+        meta.description = "A persistent Rime NixOS VM for development: start, rebuild, ssh, screenshot, stop";
+      };
+      legacyPackages.${system}.dev-vm = devVm.vms;
+
+      checks.${system} =
+        import ./nix/tests { pkgs = import ./nix/tests/lib/test-pkgs.nix pkgs; inherit self; }
+        // {
+          # No VM: the dev-vm app's shellcheck, its refusals (+ a mutant) and that the hyprland dev VM evaluates.
+          dev-vm = devVm.check;
+          # Cheap: proves the rime-vm system evaluates without building or downloading it.
+          eval = pkgs.runCommand "rime-vm-eval" { } ''
+            echo ${builtins.unsafeDiscardStringContext self.nixosConfigurations.rime-vm.config.system.build.toplevel.drvPath} > $out
+          '';
+        };
+    };
+}

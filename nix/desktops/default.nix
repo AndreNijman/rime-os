@@ -1,0 +1,130 @@
+# Rime's other desktops (docs/nixos/desktops.md §2): one entry per desktop, read by
+#
+#   nix/modules/desktops.nix      options rime.desktops.<id>.enable; applies `config` and the session packages
+#   nix/catalogue/catalogue.nix   one class 1 feature per entry (group "desktop") plus a toggle per id and alias
+#   nix/release/variants.nix      the release variants: every feature subset with at most one desktop (D3)
+#   nix/release/floors.nix        the disk floor of each published desktop variant (base + the measured delta, D14)
+#
+# Pure data at the top level (no pkgs): the catalogue imports this file and reads only title/summary/aliases.
+#
+#   title         what `rime` prints ("GNOME is installed")
+#   summary       one line for `rime search` / `rime info`
+#   aliases       more catalogue names for the same desktop
+#   sessions      pkgs -> the session packages for rime.desktop.extraSessions (desktop.nix mkForces the display
+#                 manager's sessionPackages, so a desktop module's own entry never reaches the greeter)
+#   sessionIds    the session file ids those packages provide (= passthru.providedSessions; checks.desktops-eval)
+#   desktopNames  the session file's DesktopNames, which rime-greet passes as XDG_CURRENT_DESKTOP
+#   delta         measured closure NAR bytes the desktop adds to its base system (2026-11-03, measure-sizes.txt);
+#                 floors.nix turns it into the variant's disk floor. An entry without one fails checks.release-plan.
+#   config        a NixOS module taking { config, lib, pkgs }, applied only while rime.desktops.<id>.enable is true
+#
+# Adding a desktop is one entry here plus its measured delta (the Xfce example in desktops.md §2).
+{
+  gnome = {
+    title = "GNOME";
+    summary = "the GNOME 50 desktop (GNOME Shell, Files, Settings), at the login screen beside Rime's sessions";
+    aliases = [ ];
+    sessions = pkgs: [ pkgs.gnome-session.sessions ];
+    sessionIds = [ "gnome" ];
+    desktopNames = [ "GNOME" ];
+    delta = 1110685288;
+    config =
+      { pkgs, lib, ... }@args:
+      lib.mkMerge [
+        # The screen lock under rime-greet (desktops.md §12.4).
+        (import ./gnome-lock.nix args)
+        {
+          services.desktopManager.gnome.enable = true;
+          # D15: no network sharing surfaces on a rime-firewall machine; Rime is the app store; no first-run wizard
+          # (the Rime installer already made the account).
+          services.gnome.gnome-initial-setup.enable = false;
+          services.gnome.gnome-remote-desktop.enable = false;
+          services.gnome.rygel.enable = false;
+          services.gnome.gnome-user-share.enable = false;
+          environment.gnome.excludePackages = with pkgs; [ gnome-tour epiphany gnome-software ];
+          # fcitx5 is Rime's one input method (i18n.inputMethod); GNOME shows its candidates through kimpanel.
+          environment.systemPackages = [ pkgs.gnomeExtensions.kimpanel ];
+          programs.dconf.profiles.user.databases = [
+            {
+              # rime@rimeos.org: Gaming and Update in Quick Settings (nix/integrations/gnome, nix/modules/integrations.nix).
+              settings."org/gnome/shell".enabled-extensions = [
+                pkgs.gnomeExtensions.kimpanel.extensionUuid
+                pkgs.rime.rime-gnome-extension.passthru.uuid
+              ];
+            }
+          ];
+        }
+      ];
+  };
+
+  kde = {
+    title = "KDE Plasma";
+    summary = "the KDE Plasma 6 desktop, at the login screen beside Rime's sessions";
+    aliases = [ "plasma" ];
+    sessions = pkgs: [ pkgs.kdePackages.plasma-workspace.sessions ];
+    sessionIds = [ "plasma" ];
+    desktopNames = [ "KDE" ];
+    delta = 2424402376;
+    config =
+      { config, lib, pkgs, ... }:
+      {
+        services.desktopManager.plasma6.enable = true;
+        environment.plasma6.excludePackages = [ pkgs.kdePackages.discover ];
+        # fcitx5 (Rime's i18n.inputMethod) as KWin's Wayland input method: KWin starts it, and Plasma's
+        # Virtual Keyboard settings show it as chosen. A user's own ~/.config/kwinrc still wins.
+        environment.etc."xdg/kwinrc".text = ''
+          [Wayland]
+          InputMethod=${config.i18n.inputMethod.package}/share/applications/org.fcitx.Fcitx5.desktop
+        '';
+        # D12: gnome-keyring is the one org.freedesktop.secrets; KWallet keeps its own API only.
+        environment.etc."xdg/kwalletrc".text = ''
+          [org.freedesktop.secrets]
+          apiEnabled=false
+        '';
+        # D12: no pam_kwallet at the greeter. plasma6 puts it in `login`, and greetd's PAM substacks `login`, so it
+        # started KWallet's daemon (ksecretd --pam-login) in every greetd login, Hyprland included. Plasma's own
+        # screen locker (`kde`) keeps it.
+        security.pam.services.login.kwallet.enable = lib.mkForce false;
+      };
+  };
+
+  cosmic = {
+    title = "COSMIC";
+    summary = "the COSMIC desktop from System76, at the login screen beside Rime's sessions";
+    aliases = [ ];
+    sessions = pkgs: [ pkgs.cosmic-session ];
+    sessionIds = [ "cosmic" ];
+    desktopNames = [ "COSMIC" ];
+    delta = 2519964376;
+    config =
+      { lib, pkgs, ... }:
+      {
+        services.desktopManager.cosmic.enable = true;
+        # D15: Rime installs apps; the COSMIC module adds its store only because Flatpak is on (not a core package).
+        environment.cosmic.excludePackages = [ pkgs.cosmic-store ];
+        # COSMIC Initial Setup (one of the module's core packages: kept, desktops.md §12.4) turned the screen reader
+        # ON at every start: when its accessibility subscription connects (src/page/a11y.rs, `Response::Init`) it
+        # sends `ScreenReaderEnabled(true)` whatever the current state, at-spi-bus-launcher stores that in the user's
+        # dconf (org.gnome.desktop.a11y.applications screen-reader-enabled) and cosmic-session starts orca for it
+        # (src/a11y.rs), in this login and every later one. Patched to send the state it found: its page still shows
+        # and toggles the screen reader, and a user who had it on keeps it on (desktops.md §12.9).
+        nixpkgs.overlays = [
+          (_final: prev: {
+            cosmic-initial-setup = prev.cosmic-initial-setup.overrideAttrs (o: {
+              postPatch = (o.postPatch or "") + ''
+                substituteInPlace src/page/a11y.rs --replace-fail \
+                  'return cosmic::Task::done(Message::ScreenReaderEnabled(true).into());' \
+                  'return cosmic::Task::done(Message::ScreenReaderEnabled(enabled).into());'
+              '';
+              passthru = (o.passthru or { }) // {
+                rimeScreenReaderPatch = true;
+                unpatched = prev.cosmic-initial-setup;
+              };
+            });
+          })
+        ];
+        # rimed owns the CPU policy (scx, cpusets, tiers); system76-scheduler would fight it.
+        services.system76-scheduler.enable = lib.mkForce false;
+      };
+  };
+}

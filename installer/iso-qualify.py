@@ -147,7 +147,7 @@ class Qmp:
         return "error" not in r
 
 
-def qemu_cmd(a, name, iso=None, media="cdrom", disk=None, firmware="uefi", display=True):
+def qemu_cmd(a, name, iso=None, media="cdrom", disk=None, firmware="uefi", display=True, vars_template=None):
     work = a.work
     cmd = ["qemu-system-x86_64", "-m", str(a.mem), "-smp", str(a.smp),
            "-nodefaults", "-no-user-config", "-display", "none",
@@ -160,7 +160,8 @@ def qemu_cmd(a, name, iso=None, media="cdrom", disk=None, firmware="uefi", displ
     else:
         vars_src = "OVMF_VARS.secboot.fd" if firmware == "uefi-sb" else "OVMF_VARS.fd"
         myvars = os.path.join(work, "%s.vars.fd" % name)
-        shutil.copyfile(os.path.join(OVMF, vars_src), myvars)
+        # vars_template: a prepared varstore (e.g. the NixOS lab's Microsoft keys + a TEST MOK), copied, never written.
+        shutil.copyfile(vars_template or os.path.join(OVMF, vars_src), myvars)
         cmd += ["-machine", "q35,smm=on,accel=%s" % a.accel,
                 "-global", "driver=cfi.pflash01,property=secure,value=on",
                 "-drive", "if=pflash,unit=0,format=raw,readonly=on,file=%s/OVMF_CODE.secboot.fd" % OVMF,
@@ -276,6 +277,8 @@ def mode_live(a):
 
 def mode_firstboot(a):
     name = a.name
+    if a.nixos:
+        return mode_firstboot_nixos(a)
     cmd = qemu_cmd(a, name, disk=a.disk, firmware="uefi", display=False)
     proc, ser, qmp = start(a, name, cmd)
     facts = {}
@@ -364,6 +367,201 @@ def mode_firstboot(a):
         stop(proc, qmp)
 
 
+# The key a character sits on, per keyboard layout, for the characters the lab's passphrases use: lowercase letters
+# and digits (the same keys on us and gb), plus the punctuation whose key differs between them. On gb `"` is
+# Shift+2 and `@` is Shift+'; on us it is the other way round.
+LAYOUT_SHIFTED = {
+    "us": {'"': "apostrophe", "@": "2", "#": "3"},
+    "gb": {'"': "2", "@": "apostrophe", "#": "backslash"},
+}
+
+
+def layout_keys(layout, ch):
+    if ch.isdigit() or (ch.isalpha() and ch.islower()):
+        return [ch]
+    if ch.isalpha():
+        return ["shift", ch.lower()]
+    if ch in LAYOUT_SHIFTED[layout]:
+        k = LAYOUT_SHIFTED[layout][ch]
+        return [k] if ch == "#" and layout == "gb" else ["shift", k]
+    raise ValueError("cannot type %r on a %s keyboard" % (ch, layout))
+
+
+def login(a, ser):
+    """Log in on the serial getty and leave a plain bash with echo off. None, or the failure reason."""
+    if not ser.wait(r"\S+ login: ", a.timeout):
+        return "no login prompt on the serial console"
+    time.sleep(5)
+    at = ser.mark()
+    ser.send(a.user + "\n")
+    if not ser.wait(r"[Pp]assword:", 60, since=at):
+        return "no password prompt"
+    at = ser.mark()
+    ser.send(a.password + "\n")
+    # zsh's default prompt ends in "% ".
+    m = ser.wait(r"\$ |# |> |% |Type one of the keys in parentheses", 90, since=at)
+    if not m:
+        return "login did not give a shell"
+    a.newuser_wizard = m.group(0).startswith("Type")
+    if a.newuser_wizard:
+        # zsh with no ~/.zshrc opens zsh-newuser-install on a first login; q leaves it without writing anything.
+        at = ser.mark()
+        ser.send("q")
+        if not ser.wait(r"\$ |# |> |% ", 30, since=at):
+            return "login did not give a shell (after leaving zsh-newuser-install)"
+    time.sleep(5)
+    ser.send("exec bash --norc --noprofile\n")
+    time.sleep(2)
+    ser.send("stty -echo; export TERM=dumb PS1='$ '\n")
+    time.sleep(1)
+    return None
+
+
+def mode_firstboot_nixos(a):
+    """First boot of a NixOS install (nix/installer/lab): Secure Boot as the varstore says, the system the ISO
+    installed, what host.toml asked for, the D2 layout, and the greeter on VT 1 (screenshotted with --display)."""
+    name = a.name
+    fw = "uefi-sb" if a.vars_template else "uefi"
+    cmd = qemu_cmd(a, name, disk=a.disk, firmware=fw, display=a.display, vars_template=a.vars_template)
+    proc, ser, qmp = start(a, name, cmd)
+    facts = {"firmware": fw, "varstore": a.vars_template}
+    try:
+        if a.luks_passphrase:
+            # The unlock prompt, typed on the guest's KEYBOARD as key positions of the --luks-layout keyboard: what
+            # the console keymap makes of them is the property under test (the serial line has no keymap).
+            m = ser.wait(r"Please enter passphrase", a.timeout, proc=proc)
+            facts["luks_prompt"] = bool(m)
+            if not m:
+                return report(a, name, "fail", reason="no LUKS passphrase prompt", tail=ser.text()[-3000:], **facts)
+            time.sleep(3)
+            at = ser.mark()
+            for ch in a.luks_passphrase:
+                keys = layout_keys(a.luks_layout, ch)
+                qmp.cmd("send-key", keys=[{"type": "qcode", "data": k} for k in keys], **{"hold-time": 80})
+                time.sleep(0.15)
+            qmp.key("ret")
+            facts["luks_layout_typed"] = a.luks_layout
+            m = ser.wait(r"Switching root|Failed to activate with specified passphrase|Please enter passphrase", 120,
+                         since=at, proc=proc)
+            facts["luks_result"] = m.group(0) if m else None
+            if not m or m.group(0) != "Switching root":
+                return report(a, name, "fail", reason="the passphrase did not unlock the disk (%s)" % facts["luks_result"],
+                              tail=ser.text()[-3000:], **facts)
+        why = login(a, ser)
+        if why:
+            return report(a, name, "fail", reason=why, tail=ser.text()[-3000:], **facts)
+        at = ser.mark()
+        greeter = ("loginctl list-sessions --no-legend | awk '$3==\"%s\"{print $1}' | "
+                   "xargs -r -I{} loginctl show-session {} -p VTNr -p Class | tr '\\n' ' '; echo" % a.greeter_user)
+        script = (
+            # As root (the account is in wheel): the ESP and efivars are not readable by a user. Before BEGIN and
+            # silenced: a fresh account's FIRST sudo prints the lecture, which landed inside the LANG section.
+            "echo '" + a.password + "' | sudo -S -p '' -v >/dev/null 2>&1; "
+            "printf '__RQ_%s__\\n' BEGIN; "
+            # The running hostname, then the static one (/etc/hostname, from host.toml by rime-hostlayer apply).
+            "printf '__RQ_%s__\\n' HOST; cat /proc/sys/kernel/hostname; "
+            "printf '__RQ_%s__\\n' STATIC; cat /etc/hostname; hostnamectl --static; "
+            "printf '__RQ_%s__\\n' SYSTEM; readlink /run/current-system; "
+            "printf '__RQ_%s__\\n' TZ; timedatectl show -p Timezone --value; "
+            "printf '__RQ_%s__\\n' LANG; localectl status | sed -n 's/.*LANG=//p'; "
+            "printf '__RQ_%s__\\n' SB; sudo -n od -An -t u1 /sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c 2>&1 | awk '{print $NF}'; "
+            "sudo -n bootctl status 2>&1 | grep -m1 'Secure Boot:' | sed 's/^ *//'; "
+            "printf '__RQ_%s__\\n' FS; findmnt -no FSTYPE,OPTIONS / | tr ',' ' '; findmnt -no OPTIONS /nix | tr ',' ' '; findmnt -no OPTIONS /var/home | tr ',' ' '; findmnt -no FSTYPE /boot; "
+            "printf '__RQ_%s__\\n' BLS; sudo -n ls /boot/loader/entries; "
+            "printf '__RQ_%s__\\n' CMDLINE; cat /proc/cmdline; "
+            "printf '__RQ_%s__\\n' STAGED; sudo -n test -e /boot/rimeinst && echo present || echo absent; "
+            "printf '__RQ_%s__\\n' WINDOWS; sudo -n cat /boot/grub2/custom.cfg 2>/dev/null | grep -c bootmgfw.efi; "
+            "printf '__RQ_%s__\\n' NVRAM; sudo -n efibootmgr -v 2>&1 | grep -E '^Boot(Current|Order)|Rime OS'; "
+            # systemd-journald's own record of this boot (installer2 item 8: one restart after the pivot).
+            "printf '__RQ_%s__\\n' JOURNALD; systemctl show systemd-journald.service -p NRestarts; "
+            "sudo -n journalctl -b -o short-monotonic --no-pager -u systemd-journald.service 2>&1 | head -n 15; "
+            "sudo -n journalctl -b -o short-monotonic --no-pager 2>&1 | grep -m3 -E 'Switching root|systemd-journald.service: (Main process exited|Scheduled restart)|Received SIGTERM'; "
+            # installer3: the gaming switch the installer writes when gaming is chosen, and the journal's No_COW.
+            "printf '__RQ_%s__\\n' GAMING; cat /var/lib/rime/switch/rime-feature@gaming.target.on 2>/dev/null || echo no-switch; "
+            "systemctl is-active rime-feature@gaming.target; command -v steam >/dev/null && echo steam || echo no-steam; "
+            # FS_IOC_GETFLAGS & FS_NOCOW_FL through the system's python3: e2fsprogs' lsattr is not on its PATH.
+            "printf '__RQ_%s__\\n' NOCOW; python3 -c 'import fcntl,os,struct; f=os.open(\"/var/log/journal\",os.O_RDONLY); "
+            "print(\"C\" if struct.unpack(\"<I\",fcntl.ioctl(f,0x80086601,bytes(8))[:4])[0] & 0x800000 else \"-\")' 2>&1 | tail -n 1; "
+            "sudo -n journalctl -b --no-pager 2>&1 | grep -c -i 'copy-on-write' || true; "
+            "printf '__RQ_%s__\\n' GREETER; for i in $(seq 60); do g=$(" + greeter + "); case $g in *VTNr=1*Class=greeter*) break;; esac; sleep 2; done; echo \"$g\"; systemctl is-active greetd.service; "
+            "printf '__RQ_%s__\\n' END\n"
+        )
+        ser.send(script)
+        if not ser.wait(r"__RQ_END__", 300, since=at):
+            return report(a, name, "fail", reason="the checks never finished", tail=ser.text()[-4000:], **facts)
+        out = ser.text()[at:]
+        out = out[out.index("__RQ_BEGIN__"):]
+
+        def section(tag, nxt):
+            m = re.search(r"__RQ_%s__\r?\n(.*?)__RQ_%s" % (tag, nxt), out, re.S)
+            return m.group(1).strip() if m else ""
+
+        facts.update(hostname=section("HOST", "STATIC"), static_hostname=section("STATIC", "SYSTEM").splitlines(),
+                     system=section("SYSTEM", "TZ"),
+                     timezone=section("TZ", "LANG"), lang=section("LANG", "SB"),
+                     secure_boot=section("SB", "FS"), mounts=section("FS", "BLS").splitlines(),
+                     bls_entries=section("BLS", "CMDLINE").split(), cmdline=section("CMDLINE", "STAGED"),
+                     staged=section("STAGED", "WINDOWS"), windows_entries=section("WINDOWS", "NVRAM"),
+                     nvram=section("NVRAM", "JOURNALD").splitlines(), journald=section("JOURNALD", "GAMING").splitlines(),
+                     gaming=section("GAMING", "NOCOW").splitlines(), journal_nocow=section("NOCOW", "GREETER").splitlines(),
+                     greeter=section("GREETER", "END"),
+                     zsh_newuser_wizard=bool(getattr(a, "newuser_wizard", False)))
+        if a.display:
+            time.sleep(8)  # let the greeter paint
+            png = os.path.join(a.work, name + ".png")
+            if qmp.screendump(png) and os.path.exists(png):
+                facts["screenshot"] = png
+                facts["screen_ocr"] = " ".join((ocr(png) or "").split())[:400]
+        problems = []
+        for key, want in (("system", a.expect_system), ("hostname", a.expect_host),
+                          ("timezone", a.expect_tz), ("lang", a.expect_lang)):
+            if want and facts[key] != want:
+                problems.append("%s is %r, expected %r" % (key, facts[key], want))
+        if a.expect_host and facts["static_hostname"] != [a.expect_host, a.expect_host]:
+            problems.append("the static hostname (/etc/hostname, hostnamectl --static) is %r, expected %r"
+                            % (facts["static_hostname"], a.expect_host))
+        n = facts["cmdline"].split().count("splash")
+        if n > 1:
+            problems.append("splash is on the kernel command line %d times" % n)
+        if facts["zsh_newuser_wizard"]:
+            problems.append("zsh-newuser-install ran on the account's first login (no ~/.zshrc)")
+        if a.expect_no_staged and facts["staged"] != "absent":
+            problems.append("the staged installer (/boot/rimeinst) is still on the ESP after the first boot: %r"
+                            % facts["staged"])
+        if a.expect_gaming == "yes" and facts["gaming"] != ["steam", "active", "steam"]:
+            problems.append("gaming was chosen, and the switch/target/steam read %r" % facts["gaming"])
+        if a.expect_gaming == "no" and facts["gaming"][:1] != ["no-switch"]:
+            problems.append("gaming was not chosen, and the switch reads %r" % facts["gaming"])
+        if a.expect_nocow and (facts["journal_nocow"][:1] == [] or "C" not in facts["journal_nocow"][0]
+                               or facts["journal_nocow"][1:] != ["0"]):
+            problems.append("/var/log/journal is not No_COW, or journald warned about copy-on-write: %r"
+                            % facts["journal_nocow"])
+        if a.expect_windows_entry and facts["windows_entries"] != "1":
+            problems.append("no Windows entry in /boot/grub2/custom.cfg (%r)" % facts["windows_entries"])
+        # The firmware's SecureBoot variable (1) and bootctl's reading of it, both.
+        sb = [x.strip() for x in facts["secure_boot"].splitlines()]
+        if a.vars_template and not (sb[:1] == ["1"] and any(x.startswith("Secure Boot: enabled") for x in sb)):
+            problems.append("Secure Boot is not on in the booted system (SecureBoot=%r)" % facts["secure_boot"])
+        m = facts["mounts"]
+        if len(m) < 4 or not m[0].startswith("btrfs") or "subvol=/@nixos" not in m[0] \
+                or "subvol=/@nix" not in m[1] or "subvol=/@home" not in m[2] or m[3] != "vfat":
+            problems.append("the D2 layout is not what is mounted: %r" % m)
+        if not any("compress" in x and "zstd" in x for x in m[:1]):
+            problems.append("/ is not zstd-compressed: %r" % m[:1])
+        if not facts["bls_entries"]:
+            problems.append("no BLS entries in /boot/loader/entries")
+        if not re.search(r"VTNr=1\s+Class=greeter", facts["greeter"]) or facts["greeter"].splitlines()[-1:] != ["active"]:
+            problems.append("no greeter session on VT 1: %r" % facts["greeter"])
+        return report(a, name, "fail" if problems else "pass", reason="; ".join(problems) or None, **facts)
+    finally:
+        try:
+            ser.send("echo '%s' | sudo -S -p '' systemctl poweroff\n" % a.password)
+            proc.wait(60)
+        except Exception:
+            pass
+        stop(proc, qmp)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("mode", choices=["live", "firstboot"])
@@ -381,6 +579,25 @@ def main():
     ap.add_argument("--password", default="testpass")
     ap.add_argument("--expect-image", default="ghcr.io/andrenijman/rime-os:rime")
     ap.add_argument("--expect-digest")
+    # firstboot of a NixOS install (nix/installer/lab/run.sh): no bootc, no trust gate; see mode_firstboot_nixos.
+    ap.add_argument("--nixos", action="store_true")
+    ap.add_argument("--vars-template", help="firstboot --nixos: boot with Secure Boot on from this varstore")
+    ap.add_argument("--display", action="store_true", help="firstboot --nixos: a display, and a screenshot")
+    ap.add_argument("--greeter-user", default="greetd")
+    ap.add_argument("--expect-system")
+    ap.add_argument("--expect-host")
+    ap.add_argument("--expect-tz")
+    ap.add_argument("--expect-lang")
+    ap.add_argument("--luks-passphrase", help="firstboot --nixos: type this at the LUKS prompt (on the keyboard)")
+    ap.add_argument("--luks-layout", default="us", choices=sorted(LAYOUT_SHIFTED),
+                    help="the keyboard the passphrase is typed on (key positions, not characters)")
+    ap.add_argument("--expect-no-staged", action="store_true", help="firstboot --nixos: /boot/rimeinst is gone")
+    ap.add_argument("--expect-windows-entry", action="store_true", help="firstboot --nixos: GRUB has a Windows entry")
+    ap.add_argument("--expect-gaming", choices=["yes", "no"],
+                    help="firstboot --nixos: the gaming switch holds `steam`, its target is active and steam is there "
+                         "(yes), or there is no switch (no)")
+    ap.add_argument("--expect-nocow", action="store_true",
+                    help="firstboot --nixos: /var/log/journal is No_COW (FS_NOCOW_FL) and journald did not warn")
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
     a.work = os.path.abspath(a.work)

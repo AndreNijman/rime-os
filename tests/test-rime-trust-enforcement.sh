@@ -356,8 +356,13 @@ else
     bad "no pinned Fulcio root at files/system/trust/fulcio-root.pem — every update would be refused"
 fi
 # The path in the source and the path in the image have to be the same string.
-# They are in two files, and nothing but this connects them.
-if grep -q 'FULCIO_ROOT: &str = "/usr/share/rime-os/trust/fulcio-root.pem"' "$VERIFYRS"; then
+# They are in different files, and nothing but this connects them. verify.rs
+# takes it from the rime_paths crate, whose default is what a bootc build gets
+# (the image sets no RIME_PATH_*).
+PATHS_RS="$REPO/rimed/rime-paths/src/lib.rs"
+if grep -qF 'FULCIO_ROOT: &str = rime_paths::TRUST_FULCIO_ROOT;' "$VERIFYRS" \
+    && grep -qF 'TRUST_FULCIO_ROOT = "/usr/share/rime-os/trust/fulcio-root.pem";' "$PATHS_RS" \
+    && ! grep -qF 'RIME_PATH_TRUST_FULCIO_ROOT' "$REPO/Containerfile.base"; then
     ok "verify.rs reads /usr/share/rime-os/trust/fulcio-root.pem"
 else
     bad "verify.rs's FULCIO_ROOT is not the path the image installs"

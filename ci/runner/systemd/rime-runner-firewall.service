@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep the isolated CI runner network off Andre's LAN and off katana's services
+After=network-pre.target
+Before=rime-runner-builder.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/rime-runner/nftables.conf
+ExecStop=-/usr/sbin/nft delete table inet rime_runner
+
+[Install]
+WantedBy=multi-user.target

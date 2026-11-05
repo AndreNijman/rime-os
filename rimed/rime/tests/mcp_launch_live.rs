@@ -46,7 +46,7 @@ const RIME: &str = env!("CARGO_BIN_EXE_rime");
 /// Where `bwrap` is: the fixed path the sandbox module uses, for the reason it
 /// gives — a `PATH` lookup would let a shadowing binary decide what this
 /// measured.
-const BWRAP: &str = "/usr/bin/bwrap";
+const BWRAP: &str = rime_paths::BWRAP;
 
 /// A fixture root under `/var/tmp`, and the location is load-bearing.
 ///

@@ -194,7 +194,13 @@ has 'a_blocker_is_matched_by_device_id_and_not_by_name' "$CORE" \
     "and blockers attach by DeviceId, because five rows share one name"
 
 sec "fwupdmgr is spawned by absolute path, and the image installs it"
-has 'const FWUPDMGR: &str = "/usr/bin/fwupdmgr"' "$CLI" "absolute, not from PATH"
+# Every absolute path in the Rust comes from the rime_paths crate, chosen at
+# build time; the bootc image sets no RIME_PATH_* and so gets the default there.
+PATHS_RS="$REPO/rimed/rime-paths/src/lib.rs"
+has 'const FWUPDMGR: &str = rime_paths::FWUPDMGR;' "$CLI" "absolute, not from PATH"
+has 'FWUPDMGR = "/usr/bin/fwupdmgr";' "$PATHS_RS" \
+    "and rime_paths' bootc value for it is /usr/bin/fwupdmgr"
+hasnt 'RIME_PATH_FWUPDMGR' "$REPO/Containerfile.base" "and the bootc image does not override it"
 # Measured: nothing in any Containerfile installed fwupd and no package
 # required it — it rode in from the base image, so `rime update`'s firmware
 # pass depended on a binary the image did not own.

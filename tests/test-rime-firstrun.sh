@@ -747,5 +747,40 @@ else
         || bad "a config with no stock waybar spawn is untouched"
 fi
 
+section "the seeded keyboard layout is one xkbcommon can build"
+# The block from XKB_CONF= to the `us` fallback, run with a fake xkbcli that
+# knows `de` (variant nodeadkeys) and nothing else, and an xorg.conf.d snippet
+# under WORK instead of /etc.
+KB="${WORK}/kb-block.sh"
+sed -n '/^XKB_CONF=/,/^\[ -n "\${KB_LAYOUT}" \] || KB_LAYOUT="us"$/p' "$SRC" \
+    | sed "s|^XKB_CONF=.*|XKB_CONF=\"\${KB_TEST_CONF}\"|" > "$KB"
+grep -q 'xkb_compiles' "$KB" || { printf 'could not extract the keyboard block\n' >&2; exit 1; }
+KBBIN="${WORK}/kb-bin"; mkdir -p "$KBBIN"
+cat > "${KBBIN}/xkbcli" <<'SH'
+#!/bin/sh
+case " $* " in
+    *" --layout de --variant nodeadkeys "*) exit 0 ;;
+    *" --variant "*) exit 1 ;;
+    *" --layout de "*) exit 0 ;;
+esac
+exit 1
+SH
+chmod +x "${KBBIN}/xkbcli"
+kb_seed() {  # $1 layout, $2 variant -> prints "layout|variant"
+    printf 'Section "InputClass"\n  Option "XkbLayout" "%s"\n  Option "XkbVariant" "%s"\nEndSection\n' \
+        "$1" "$2" > "${WORK}/00-keyboard.conf"
+    KB_TEST_CONF="${WORK}/00-keyboard.conf" PATH="${KBBIN}:$PATH" bash -c \
+        'log() { :; }; set -euo pipefail; . "$1"; printf "%s|%s" "$KB_LAYOUT" "$KB_VARIANT"' _ "$KB"
+}
+[ "$(kb_seed de nodeadkeys)" = "de|nodeadkeys" ] \
+    && ok "a layout + variant xkbcommon builds is seeded as is" \
+    || bad "a layout + variant xkbcommon builds is seeded as is ($(kb_seed de nodeadkeys))"
+[ "$(kb_seed de bogus)" = "de|" ] \
+    && ok "a variant that does not fit is dropped, the layout kept" \
+    || bad "a variant that does not fit is dropped, the layout kept ($(kb_seed de bogus))"
+[ "$(kb_seed xx '')" = "us|" ] \
+    && ok "a layout xkbcommon cannot build falls back to us" \
+    || bad "a layout xkbcommon cannot build falls back to us ($(kb_seed xx ''))"
+
 printf '\nrime-shell-firstrun: %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ]

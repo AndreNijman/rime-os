@@ -1,0 +1,129 @@
+copying path '/nix/store/fkv0c0b665q6ixm9syazddzrv8qwmh1n-util-linux-2.42.4-swap' from 'https://cache.nixos.org'...
+copying path '/nix/store/9xzvspslb052smabjvcipmpcsi7vjjb6-util-linux-2.42.4-mount' from 'https://cache.nixos.org'...
+building '/nix/store/10phknvbkvrw00jfl7ydqk49iqvx8yjz-extra-hosts.drv'...
+etc-xdg-xdg-terminals.list> structuredAttrs is enabled
+copying path '/nix/store/xbli898aqqqlcvfy5by2i2fy8cgg7vyw-libpcap-1.10.7-lib' from 'https://cache.nixos.org'...
+copying path '/nix/store/lrx5r0m05xhrcv1cnwh3xaln6spqb3sc-gnustep-libobjc-2.3' from 'https://cache.nixos.org'...
+copying path '/nix/store/567f5kxj1d50c18qhnxz8v5qpcjgc0zj-picotts-0-unstable-2021-05-06' from 'https://cache.nixos.org'...
+copying path '/nix/store/lfpmwdx9nf79msd5rz9nwdrkg9nv927z-wavpack-5.9.0' from 'https://cache.nixos.org'...
+warning: unable to download 'https://cache.nixos.org/nar/0203g6aw13d7y63b0870az2mp99xlmws8ji3hr4gj7mw40yd055p.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 32686044 in 0 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/0jzyji3id79y3amm5ads9fqarl7csj5gricxzrp5s6hgdr9bim67.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 2097152 in 86 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/0xvrzac8babhy52a44cn68gyfg2ms3pv4d6jvqpckdrjbx3vy4cf.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 12 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/1mg9n2pb4r2s4zfq62p96qnha56bflpj6nsk96a5rapvpyiyycmz.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 1096810 in 93 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/1rb88nx2i8w37h3w4wl5pdny1rwm48laj981k1gywgr6fbnxf0xj.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 715693 in 6 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/163ikcvla3rpl9f5sqkxxrahvkbrc1kbvfl4mbk3g52jgwrqcbgl.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 46 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/0jmsx1dlw20ic2pqhckm6hgz4zkszrp6bf6xlzd9dlv8v1ccdx28.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 50 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/1qnvggz3kvmwlgamg9krv8smmk4fciyc5xsqpghl3c3mscf790hd.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 8 ms (attempt 1/5)
+warning: unable to download 'https://cache.nixos.org/nar/16j5bxa65jz1f6ffnaf4vnx3anq59qxia1yhad9xak2mcilqhhgk.nar.zst': Failed sending data to the peer (55) Send failure: Broken pipe; retrying in 37 ms (attempt 1/5)
+building '/nix/store/qp73k36j47ibnh2h0pwagymqannfp4qw-fc-52-nixos-default-fonts.conf.drv'...
+warning: unable to download 'https://cache.nixos.org/nar/0cq5mqjs9c6gfa7lpblc8nc5f0yla29cdig1brr0m39z2p26f9fk.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 16125568 in 52 ms (attempt 1/5)
+building '/nix/store/iln0xgk0k9qkgwq8vf0jwr9cwxg2mc1s-initrd-fstab.drv'...
+extra-hosts> structuredAttrs is enabled
+fc> structuredAttrs is enabled
+copying path '/nix/store/fi98g122a3kzbschgvbvsqvpyxrmqvvl-binutils-wrapper-2.46' from 'https://cache.nixos.org'...
+building '/nix/store/4arp4mb1a9vp3c1n63j693sfajdfy2xv-initrd-hostname.drv'...
+warning: unable to download 'https://cache.nixos.org/nar/00qp7va6lq7h33dfc8y83l4zzx72s11q3wa890987f00jlml6hw2.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 10132800 in 39 ms (attempt 1/5)
+initrd-fstab> structuredAttrs is enabled
+building '/nix/store/dbcq6byxngi8409jfxarckb9fvdz857d-initrd-release.drv'...
+building '/nix/store/77yri7pb04x5hg614hg980sdf91im0b0-kmscon-config.drv'...
+error: unable to download 'https://cache.nixos.org/nar/1rb88nx2i8w37h3w4wl5pdny1rwm48laj981k1gywgr6fbnxf0xj.nar.zst': HTTP error 200 (curl error: Failed sending data to the peer)
+error: path '/nix/store/lb5ydbv0hjsgzyq7rdnky298agw7fq78-libexif-0.6.26' is required, but there is no substituter that can build it
+initrd-hostname> structuredAttrs is enabled
+initrd-release> structuredAttrs is enabled
+error: some references of path '/nix/store/ld26s11yw7vpj0wsvgg0b7104vbgs25a-libcupsfilters-2.1.1' could not be realised
+copying path '/nix/store/za20v1vwh492da54qj2mi71lf2m7k5ra-jq-1.8.2-dev' from 'https://cache.nixos.org'...
+error: some references of path '/nix/store/4ffm4p3j15gwc4id76fag4kl0nrxa4ha-libgphoto2-2.5.34' could not be realised
+error: some references of path '/nix/store/bnzc97pgnikwys19v74wwivf66d37cbj-thunar-4.20.10' could not be realised
+error: some references of path '/nix/store/cpnz2miv3955ks7jlz3pmyp3v53a3lvh-cups-browsed-2.1.1' could not be realised
+error: some references of path '/nix/store/lqzv9zr429v4h9bzwj0s5c5lgbylhzjl-cups-filters-2.0.1' could not be realised
+error: some references of path '/nix/store/h7pjc6hixicwvkic4d37w2scw4r8mhy6-gvfs-1.60.3' could not be realised
+error: some references of path '/nix/store/lgirkqd1y5w0sbf9c0d4yslqawjx22sm-sane-backends-1.4.0' could not be realised
+copying path '/nix/store/gar3j11kma6qrz31z6kfpn6sk6gwk16x-tcb-1.2' from 'https://cache.nixos.org'...
+error: some references of path '/nix/store/3151zfgyrcmncmn9daczfnaigrx21ymf-thunar-archive-plugin-0.6.0' could not be realised
+copying path '/nix/store/gl5a5n6xxcfjiw8vjkvk0klhdgpa3rcy-vde2-2.3.3' from 'https://cache.nixos.org'...
+building '/nix/store/v670k17sqy0yc03bhhygwayv74iccb4s-kmscon-config.drv'...
+error: some references of path '/nix/store/659l9q22ydygcv7qg5jwi3hk1c51wp5p-hplip-3.26.6' could not be realised
+error: some references of path '/nix/store/06nhq604wnc99vbagfhjdk1asp4yw6xy-simple-scan-50.0' could not be realised
+error: some substitutes for the outputs of derivation '/nix/store/g6fdcsqk59b4fqafh2ghkwwzv5cs4604-libcupsfilters-2.1.1.drv' failed (usually happens due to networking issues); try '--fallback' to build derivation from source
+error: some substitutes for the outputs of derivation '/nix/store/zlwviaq75xnpf899bg6629kr9qrvrl74-thunar-4.20.10.drv' failed (usually happens due to networking issues); try '--fallback' to build derivation from source
+error: some substitutes for the outputs of derivation '/nix/store/61g61m1dgixnz3x7wj6yqqjcgz1vhjqw-cups-browsed-2.1.1.drv' failed (usually happens due to networking issues); try '--fallback' to build derivation from source
+error: some substitutes for the outputs of derivation '/nix/store/kh03agi9rwwbhcizghgk0x7pd916gpia-gvfs-1.60.3.drv' failed (usually happens due to networking issues); try '--fallback' to build derivation from source
+error: some substitutes for the outputs of derivation '/nix/store/68vmfkzyhrap7n3s71f197zhal11jvs3-sane-backends-1.4.0.drv' failed (usually happens due to networking issues); try '--fallback' to build derivation from source
+error: some substitutes for the outputs of derivation '/nix/store/38c7g1553h1zgfhaigaqwz1dijwi61pc-hplip-3.26.6.drv' failed (usually happens due to networking issues); try '--fallback' to build derivation from source
+copying path '/nix/store/f9shc46n2300jbm0h60f6s4m69j0smyp-gnutar-1.35' from 'https://cache.nixos.org'...
+copying path '/nix/store/jnzd79phi9hwp4fvm5na4hl8hczw53pa-util-linux-2.42.4-lastlog' from 'https://cache.nixos.org'...
+error: Cannot build '/nix/store/5qdnvcnrz9fgm2nw91symzhav0pvfhgy-system-path.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/4rk8ivqwgxf6fqys1z2wrzqzy5r6njpk-system-path
+error: Cannot build '/nix/store/jj010b9ydgaly1fxf1gz64d9q9d17lpn-system-path.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/1fcrq88jbclvj670qgqk4sfv3lm4zrrg-system-path
+error: Cannot build '/nix/store/k8h1jnf5acph7njkszw70wbw806dmwd2-system-path.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/gnmg3vkciac7l5l1rwavm6c7z5ldl81c-system-path
+error: Cannot build '/nix/store/2n6fv5kvzzj7xd7z9lv09mbl9w72sgdh-dbus-1.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/8y8maj97hvw8hijvpv7gafdlg80q2ica-dbus-1
+error: Cannot build '/nix/store/jwl38d6b12gr8gs97jx2qgrxs20nfgw2-dbus-1.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/as1zz31bvrhxdz4fgkfh4zifg1n0aa63-dbus-1
+error: Cannot build '/nix/store/mzhi3qs09n6z9cnd9vx7jljm475qpw1z-dbus-1.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/b44glv71lzf1swxvcpqwqwsar9222gck-dbus-1
+error: Cannot build '/nix/store/34rw1ld9b3kmv0xwzzqgdfgn8shkiiqb-set-environment.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/5kjhzp58m09ilzd7wv9jp3mwk1xpghgk-set-environment
+error: Cannot build '/nix/store/g5fs3052k6kzzni6ivi3dipj1lwrf633-set-environment.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/k87v36p9vyipnwc4ydgmjm9smhfdhbwv-set-environment
+error: Cannot build '/nix/store/nmla3wlyvl4gyiqff5z28x59db73vsws-set-environment.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/jw0n60ymwn3li5zjilibailbl8xc7433-set-environment
+error: Cannot build '/nix/store/l3y5c1g9l70g11hbwr5njcv2wapcfp98-udev-rules.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/rk9v80zdzxnnc8a5n91m8dipy0msvyg7-udev-rules
+building '/nix/store/jw03l3ls4nkzrc6chclnwpv38rbfjdw0-initrd-system.conf.drv'...
+building '/nix/store/h1593pkfggrm79bn3iwj7frdd3y4w2a3-limits.conf.drv'...
+copying path '/nix/store/rszbxwc5p9kgiyb4n2rz5b5dn58qlg4m-acl-2.4.0-bin' from 'https://cache.nixos.org'...
+copying path '/nix/store/rnqbwa03knsv367mpjdrjvxvs3b0i8sk-cpio-2.15' from 'https://cache.nixos.org'...
+copying path '/nix/store/6a63xisb7didii1h4w4n82w6983p95ak-fribidi-1.0.17' from 'https://cache.nixos.org'...
+copying path '/nix/store/s3mk12jzr2dy37m3cksi3j66gzw60lbq-less-710' from 'https://cache.nixos.org'...
+building '/nix/store/pbsdwlil160pyjjfjl2jw19pzc7hksqn-plymouthd.conf.drv'...
+error: Cannot build '/nix/store/6y82vgvi0g3rv5sqp1yxkll0yi588ac1-nixos-system-rime-vm-test.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/chjiml1plwsss2m86p8ljl3rb64209hz-nixos-system-rime-vm-test
+error: Cannot build '/nix/store/bwayjp47pznszhcwj24r89wn1s08ln20-nixos-system-rime-vm-test.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/n8l257nx2dif8ac8vy62ggk7n0q2ymwh-nixos-system-rime-vm-test
+error: Cannot build '/nix/store/j9rwzybyg3hm2pdbhgc03c9dx90cscif-nixos-system-rime-vm-test.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/0vnvyyl1pmaxsjxx7qfsna5ijxnfvky4-nixos-system-rime-vm-test
+copying path '/nix/store/w31zgyvxajp9sxi12h57cyyqwk473w08-giflib-6.1.3' from 'https://cache.nixos.org'...
+copying path '/nix/store/1ay4bcfpqrfci746d0i01wwwxisdhciy-libmd-1.3.0' from 'https://cache.nixos.org'...
+error: Cannot build '/nix/store/2fw1cijk3lcrhpfbfms5a5qdkch9mria-nixos-vm.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/ykh1adhp2066gpqrgnkfvwbxaa1q9rr0-nixos-vm
+error: Cannot build '/nix/store/1y0mbx204c1ykkjlaw9f2pzgw9gvj4r4-driverConfiguration.json.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/6xw2gq5bwirisg1iw5f2rgrv8fswzmvc-driverConfiguration.json
+error: Cannot build '/nix/store/fp6xbh3qh4n2hs3pp30jvw9amn8m7xii-nixos-test-driver-rime-polish.drv'.
+       Reason: 1 dependency failed.
+       Output paths:
+         /nix/store/8bzk7mg4ybpliiynw64q5gp1iii21pfn-nixos-test-driver-rime-polish
+error: Cannot build '/nix/store/1vgsr3dz6rj8gjmzhm0bvs1sw40i8z4s-vm-test-run-rime-polish.drv'.
+       Reason: 1 dependency failed.

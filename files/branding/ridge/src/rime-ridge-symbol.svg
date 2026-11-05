@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 175" width="240" height="175">
+  <title>Rime layered ridge (master)</title>
+  <!-- Geometry master. Four sharp planes, bottom to top. Plane 3 is the accent and the ONLY plane whose
+       colour may change. Reconstructed from the raster brand pack (docs/branding.md). Grid: 0.5 units. -->
+  <polygon id="plane-1" data-role="base" fill="#212224" points="11,175 162.5,140 220,159 235.5,175"/>
+  <polygon id="plane-2" data-role="structure" fill="#212224" points="0,175 153,108 212,91.5 194.5,139 160.5,128"/>
+  <polygon id="plane-3" data-role="accent" fill="#91C2DC" points="47.5,136 149,75 231,45 217.5,76"/>
+  <polygon id="plane-4" data-role="peak" fill="#212224" points="91.5,100 129.5,58 240,0 222,36 142.5,67"/>
+</svg>

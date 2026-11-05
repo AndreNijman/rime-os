@@ -1,0 +1,16 @@
+# The MOK enrolment lab's image (README.md here): the TPM lab image (../tpm/Containerfile: Fedora 45's Secure Boot
+# OVMF, QEMU, virt-firmware, sbsigntools, busybox, Fedora's signed kernel-core RPM) plus mokutil, whose binary and
+# libraries go into the guest initrd that runs `mokutil --import` under Fedora's signed kernel, and gdb-headless, which
+# reads the early microcode loader's result over QEMU's gdbstub (drive.py split, boot U4). Not gdb-minimal: it is built
+# without expat, so it cannot read QEMU's target description and refuses the x86-64 register packet (measured).
+#
+# Build:  sudo podman build -t rime-ovmf-mok nix/probe/ovmf/mok     (after rime-ovmf-tpm exists)
+FROM localhost/rime-ovmf-tpm:latest
+
+RUN dnf -y install --setopt=install_weak_deps=False mokutil mtools gdb-headless \
+    && dnf clean all \
+    && mokutil --version \
+    && /usr/libexec/gdb --configuration | grep -- --with-expat
+
+WORKDIR /work
+ENTRYPOINT ["/bin/bash"]

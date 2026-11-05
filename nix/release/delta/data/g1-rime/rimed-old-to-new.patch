@@ -1,0 +1,649 @@
+diff --git b/rimed/rime-agent-core/src/request.rs a/rimed/rime-agent-core/src/request.rs
+index 9c6a729dd..ba9351ebe 100644
+--- b/rimed/rime-agent-core/src/request.rs
++++ a/rimed/rime-agent-core/src/request.rs
+@@ -246,11 +246,11 @@ impl Verb {
+     /// the set of verbs that exists.
+     pub fn kind_summary(&self) -> &'static str {
+         match self {
+-            Verb::Install { .. } => "add packages to the system extension",
+-            Verb::Remove { .. } => "remove packages from the system extension",
+-            Verb::PkgUpgrade => "re-resolve every installed package against the repositories",
+-            Verb::PkgRebuild => "rebuild the system extension for the running OS version",
+-            Verb::PkgRollback => "restore the previous system extension",
++            Verb::Install { .. } => "install packages on this machine",
++            Verb::Remove { .. } => "remove packages from this machine",
++            Verb::PkgUpgrade => "bring every installed package up to date",
++            Verb::PkgRebuild => "rebuild the installed packages for the running system",
++            Verb::PkgRollback => "go back to the previous set of installed packages",
+             Verb::Pin => "pin the current deployment so an update cannot garbage-collect it",
+             Verb::Rollback => "boot the previous deployment on the next restart",
+             Verb::Update => "update the OS image and firmware",
+@@ -262,18 +262,18 @@ impl Verb {
+     pub fn effect(&self) -> String {
+         match self {
+             Verb::Install { packages } => format!(
+-                "add {} to the system extension ({})",
++                "install {} on this machine ({})",
+                 plural(packages.len(), "package"),
+                 packages.join(", ")
+             ),
+             Verb::Remove { packages } => format!(
+-                "remove {} from the system extension ({})",
++                "remove {} from this machine ({})",
+                 plural(packages.len(), "package"),
+                 packages.join(", ")
+             ),
+-            Verb::PkgUpgrade => "re-resolve every installed package against the repositories".into(),
+-            Verb::PkgRebuild => "rebuild the system extension for the running OS version".into(),
+-            Verb::PkgRollback => "restore the previous system extension".into(),
++            Verb::PkgUpgrade => "bring every installed package up to date".into(),
++            Verb::PkgRebuild => "rebuild the installed packages for the running system".into(),
++            Verb::PkgRollback => "go back to the previous set of installed packages".into(),
+             Verb::Pin => "pin the current deployment so an update cannot garbage-collect it".into(),
+             Verb::Rollback => "boot the previous deployment on the next restart".into(),
+             Verb::Update => "update the OS image and firmware".into(),
+diff --git b/rimed/rime-agent-core/src/sandbox.rs a/rimed/rime-agent-core/src/sandbox.rs
+index 03efed83c..ef2a6e3b6 100644
+--- b/rimed/rime-agent-core/src/sandbox.rs
++++ a/rimed/rime-agent-core/src/sandbox.rs
+@@ -221,6 +221,49 @@ pub fn resolv_binds() -> Vec<PathBuf> {
+     out
+ }
+ 
++/// The running system's own trees under [`RUN_DIR`], bound back read-only.
++///
++/// On NixOS the system's programs are not under `/usr`: the login `PATH` is
++/// `/run/wrappers/bin:/run/current-system/sw/bin`, and the graphics driver is
++/// `/run/opengl-driver`. Masking `/run` took all of them, so a confined session
++/// had no system `PATH` at all. Each of these is a root-owned symlink into the
++/// read-only Nix store, which `--ro-bind / /` already shows, so binding them
++/// back adds no file a session could not read anyway, and no socket: the system
++/// bus (`/run/dbus`), the nix-daemon socket (`/run/nix`) and everything else
++/// under `/run` stay masked.
++///
++/// `/run/wrappers` is deliberately NOT here. It holds the setuid and
++/// file-capability wrappers (sudo, su, mount, ping), and a confined session runs
++/// with `no_new_privs`, so none of them could elevate anyway; leaving the
++/// directory masked keeps every privileged entry point out of the session's
++/// view instead of handing it a set of programs that only fail.
++///
++/// None of these exists on the bootc image, where this adds nothing.
++pub const SYSTEM_RUN_TREES: &[&str] = &[
++    "/run/current-system",
++    "/run/opengl-driver",
++    "/run/opengl-driver-32",
++];
++
++/// Everything bound back into the masked `/run`: the resolver configuration
++/// ([`resolv_binds`]) and the system trees that exist on this machine
++/// ([`SYSTEM_RUN_TREES`]). The logical path is both source and destination;
++/// `bwrap` resolves a source symlink on the host side before it binds it.
++pub fn run_binds() -> Vec<PathBuf> {
++    let mut out = resolv_binds();
++    out.extend(system_run_binds());
++    out
++}
++
++/// The [`SYSTEM_RUN_TREES`] that exist on this machine.
++pub fn system_run_binds() -> Vec<PathBuf> {
++    SYSTEM_RUN_TREES
++        .iter()
++        .map(PathBuf::from)
++        .filter(|p| p.exists())
++        .collect()
++}
++
+ /// Why a sandbox could not be built. Every variant is fatal: a session is never
+ /// silently downgraded to a weaker policy than the one that was asked for.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -246,8 +289,9 @@ impl std::fmt::Display for SandboxError {
+         match self {
+             SandboxError::MissingBwrap => write!(
+                 f,
+-                "bubblewrap (/usr/bin/bwrap) is not installed, so an agent session cannot be \
+-                 confined; re-run with `--sandbox unrestricted` to run without confinement"
++                "bubblewrap ({}) is not installed, so an agent session cannot be \
++                 confined; re-run with `--sandbox unrestricted` to run without confinement",
++                rime_paths::BWRAP
+             ),
+             SandboxError::TiocstiEnabled => write!(
+                 f,
+@@ -522,9 +566,9 @@ pub fn build_argv(
+         push(&spec.runtime_dir.to_string_lossy());
+     }
+ 
+-    // 5. Bound back into the masked /run: the resolver configuration, and
+-    //    nothing else. Without this every confined session loses DNS, because
+-    //    /etc/resolv.conf is a symlink into /run.
++    // 5. Bound back into the masked /run: the resolver configuration (without
++    //    it every confined session loses DNS, because /etc/resolv.conf is a
++    //    symlink into /run) and, on NixOS, the system trees (run_binds).
+     for p in &spec.run_ro {
+         if p.as_os_str().is_empty() {
+             continue;
+@@ -1070,6 +1114,32 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn the_system_trees_bound_back_into_run_hold_no_socket_directory() {
++        // The NixOS system PATH comes back; the sockets under /run do not. A
++        // bind of /run, /run/dbus, /run/nix or /run/wrappers here would hand a
++        // session the system bus, the nix-daemon or the setuid wrappers.
++        for p in SYSTEM_RUN_TREES {
++            let p = Path::new(p);
++            assert!(p.starts_with("/run/") && p.components().count() == 3, "{p:?}");
++            for refused in ["/run", "/run/dbus", "/run/nix", "/run/wrappers", "/run/user"] {
++                assert_ne!(p, Path::new(refused));
++            }
++        }
++        for p in run_binds() {
++            assert!(p.starts_with("/run"), "{p:?}");
++        }
++        // Bound read-only, like every run_ro entry.
++        let mut s = spec();
++        s.run_ro = vec![PathBuf::from("/run/current-system")];
++        let argv = build_argv(&s, "claude", &[]).unwrap();
++        assert!(
++            argv.windows(3)
++                .any(|w| w == ["--ro-bind-try", "/run/current-system", "/run/current-system"]),
++            "{argv:?}"
++        );
++    }
++
+     #[test]
+     fn the_ssh_agent_socket_is_unreachable() {
+         // §4: "protect SSH keys and API credentials from arbitrary file reads."
+diff --git b/rimed/rime-agentd/src/session.rs a/rimed/rime-agentd/src/session.rs
+index c1898d01c..d26d93c4e 100644
+--- b/rimed/rime-agentd/src/session.rs
++++ a/rimed/rime-agentd/src/session.rs
+@@ -460,8 +460,9 @@ pub fn start(daemon: &Arc<Daemon>, req: RunRequest, caller: &Caller) -> Result<S
+     // Build the sandbox.
+     let mut spec = SandboxSpec::new(policy, paths::home(), paths::runtime_dir());
+     // /run is masked, which takes the resolv.conf symlink target with it. Bind
+-    // the target back or the session has no DNS at all.
+-    spec.run_ro = sandbox::resolv_binds();
++    // the target back or the session has no DNS at all; and on NixOS the
++    // system's programs (/run/current-system), or it has no system PATH.
++    spec.run_ro = sandbox::run_binds();
+     spec.control_socket = paths::control_socket();
+     spec.scratch = scratch.clone();
+     spec.cwd = workdir.clone();
+diff --git b/rimed/rime-aid/src/main.rs a/rimed/rime-aid/src/main.rs
+index c6d2886e0..a2c47ddd4 100644
+--- b/rimed/rime-aid/src/main.rs
++++ a/rimed/rime-aid/src/main.rs
+@@ -653,9 +653,9 @@ fn status(daemon: &Arc<Daemon>) -> Status {
+         st.notes.push(format!(
+             "the backend is {} and has been up for {}s",
+             if r.confined {
+-                "confined with bwrap --unshare-net, so it has no network at all"
++                "confined with bwrap --unshare-net, so it has no network at all".to_string()
+             } else {
+-                "UNCONFINED because /usr/bin/bwrap is absent"
++                format!("UNCONFINED because {} is absent", rime_paths::BWRAP)
+             },
+             r.uptime().as_secs()
+         ));
+diff --git b/rimed/rime-aid/src/runtime.rs a/rimed/rime-aid/src/runtime.rs
+index 2e062d211..4b6ec9e82 100644
+--- b/rimed/rime-aid/src/runtime.rs
++++ a/rimed/rime-aid/src/runtime.rs
+@@ -129,6 +129,15 @@ pub fn device_nodes(backend: Backend) -> Vec<PathBuf> {
+         .collect()
+ }
+ 
++/// The NixOS system trees the backend sandbox binds read-only beside /usr and
++/// /etc (see [`confine_argv`]).
++pub const NIX_SYSTEM_TREES: &[&str] = &[
++    "/nix/store",
++    "/run/current-system",
++    "/run/opengl-driver",
++    "/run/opengl-driver-32",
++];
++
+ /// Build the `bwrap` argv that runs `plan` confined.
+ ///
+ /// Pure, so every flag can be asserted without a sandbox. The order matters and
+@@ -155,8 +164,10 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
+             // the system-extension merge is already applied, so a
+             // sysext-installed llama-server and its dependencies are both
+             // inside it. /etc carries ld.so.cache, without which nothing
+-            // dynamically linked starts.
+-            "--ro-bind",
++            // dynamically linked starts. `-try` for /usr: a NixOS build
++            // sandbox has none (a NixOS system keeps only /usr/bin/env there),
++            // and binding nothing can only show the backend less.
++            "--ro-bind-try",
+             "/usr",
+             "/usr",
+             "--ro-bind",
+@@ -171,6 +182,16 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
+         a.push(format!("usr/{link}"));
+         a.push(format!("/{link}"));
+     }
++    // NixOS keeps the system outside /usr: every program and library is under
++    // /nix/store, the system's PATH is /run/current-system/sw/bin, and the GPU
++    // userspace (libcuda, the Vulkan ICDs) is /run/opengl-driver. All
++    // READ-ONLY, and `-try` so a Fedora machine, which has none of them, is
++    // unchanged. /run itself is not bound: only these trees, never its sockets.
++    for dir in NIX_SYSTEM_TREES {
++        a.push("--ro-bind-try".into());
++        a.push(dir.to_string());
++        a.push(dir.to_string());
++    }
+     a.extend(
+         ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]
+             .iter()
+@@ -218,7 +239,8 @@ pub fn confine_argv(plan: &LaunchPlan, exposed: &Exposed<'_>) -> Vec<String> {
+ ///
+ /// Refuses to bind anything that would widen the sandbox meaningfully:
+ ///
+-/// * a program under `/usr` needs nothing — `--ro-bind /usr /usr` covers it;
++/// * a program under `/usr` needs nothing — `--ro-bind-try /usr /usr` covers it,
++///   and neither does one under a [`NIX_SYSTEM_TREES`] entry;
+ /// * a bare name (no `/`) is resolved by the sandbox's own `PATH`, which is
+ ///   `/usr/bin:/usr/sbin`, so it is also covered;
+ /// * `/`, `/home`, `/var` and the other broad roots are refused, because
+@@ -230,7 +252,11 @@ fn program_dir_to_bind(program: &str) -> Option<String> {
+     if !path.is_absolute() {
+         return None;
+     }
+-    if program.starts_with("/usr/") {
++    if program.starts_with("/usr/")
++        || NIX_SYSTEM_TREES
++            .iter()
++            .any(|t| program.starts_with(&format!("{t}/")))
++    {
+         return None;
+     }
+     let dir = path.parent()?;
+@@ -579,7 +605,7 @@ mod tests {
+     fn the_system_is_read_only_and_home_is_never_bound() {
+         let plan = a_plan();
+         let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
+-        assert!(argv.windows(3).any(|w| w == ["--ro-bind", "/usr", "/usr"]), "{argv:?}");
++        assert!(argv.windows(3).any(|w| w == ["--ro-bind-try", "/usr", "/usr"]), "{argv:?}");
+         assert!(argv.windows(3).any(|w| w == ["--ro-bind", "/etc", "/etc"]), "{argv:?}");
+         // The backend has no business in the user's home. It gets one model
+         // file and one socket directory.
+@@ -609,7 +635,7 @@ mod tests {
+     #[test]
+     fn a_runtime_under_usr_needs_no_extra_bind() {
+         // The shipped case: `sudo rime install llama-cpp` lands at /usr/bin,
+-        // which `--ro-bind /usr /usr` already covers. An extra bind here would
++        // which `--ro-bind-try /usr /usr` already covers. An extra bind here would
+         // be noise in every real launch.
+         assert_eq!(program_dir_to_bind("/usr/bin/llama-server"), None);
+         assert_eq!(program_dir_to_bind("/usr/local/bin/llama-server"), None);
+@@ -667,6 +693,80 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn the_nixos_system_trees_are_bound_read_only_and_never_writable() {
++        // On NixOS every program and library is under /nix/store and the GPU
++        // userspace is /run/opengl-driver: without these the backend cannot
++        // even be exec'd. `-try`, so a Fedora machine without them is unchanged.
++        let plan = a_plan();
++        let argv = confine_argv(&plan, &exposed(Path::new("/m.gguf"), Path::new("/run/x")));
++        for t in NIX_SYSTEM_TREES {
++            assert!(
++                argv.windows(3).any(|w| w == ["--ro-bind-try", t, t]),
++                "{t} is not bound read-only: {argv:?}"
++            );
++            assert!(
++                !argv.windows(2).any(|w| (w[0] == "--bind" || w[0] == "--bind-try") && w[1] == *t),
++                "{t} was bound writable: {argv:?}"
++            );
++        }
++        // /run itself never: its sockets (the nix-daemon, the system bus) stay out.
++        assert!(!argv.iter().any(|a| a == "/run"), "{argv:?}");
++        // A runtime in the store or the system profile needs no extra bind.
++        assert_eq!(program_dir_to_bind("/nix/store/abc-llama-cpp/bin/llama-server"), None);
++        assert_eq!(program_dir_to_bind("/run/current-system/sw/bin/llama-server"), None);
++    }
++
++    /// LIVE: a program that lives in /nix/store starts inside the confinement.
++    /// Skipped (with a line saying so) where there is no store or bwrap cannot
++    /// make its namespaces, which is a fact about the build host and not the code.
++    #[test]
++    fn a_store_program_runs_inside_the_real_sandbox() {
++        let Some(program) = std::env::var_os("PATH").and_then(|p| {
++            std::env::split_paths(&p)
++                .map(|d| d.join("true"))
++                .find(|c| c.is_file())
++        }) else {
++            eprintln!("skipped: no `true` on PATH");
++            return;
++        };
++        if !program.starts_with("/nix/store/") {
++            eprintln!("skipped: {} is not a store path", program.display());
++            return;
++        }
++        let probe = Command::new(BWRAP)
++            .args(["--ro-bind", "/", "/", "--unshare-net", "--", "/bin/sh", "-c", "exit 0"])
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .status();
++        if !matches!(probe, Ok(s) if s.success()) {
++            eprintln!("skipped: {BWRAP} cannot create a sandbox on this host ({probe:?})");
++            return;
++        }
++        let dir = std::env::temp_dir().join(format!("rime-aid-live-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).unwrap();
++        let plan = LaunchPlan {
++            program: program.display().to_string(),
++            argv: vec![],
++            env: vec![],
++            listen: Listen::Unix(dir.join("b.sock")),
++            notes: vec![],
++        };
++        let model = dir.join("m.gguf");
++        std::fs::write(&model, b"GGUF").unwrap();
++        let e = Exposed { model: &model, socket_dir: &dir, devices: vec![] };
++        let argv = confine_argv(&plan, &e);
++        let out = Command::new(&argv[0]).args(&argv[1..]).output().unwrap();
++        let _ = std::fs::remove_dir_all(&dir);
++        assert!(
++            out.status.success(),
++            "{} did not run confined: {:?}\n{}",
++            program.display(),
++            out.status,
++            String::from_utf8_lossy(&out.stderr)
++        );
++    }
++
+     #[test]
+     fn the_confinement_argv_is_pure() {
+         let plan = a_plan();
+diff --git b/rimed/rime-secretd/src/main.rs a/rimed/rime-secretd/src/main.rs
+index 5c70ee6d3..0eba417f5 100644
+--- b/rimed/rime-secretd/src/main.rs
++++ a/rimed/rime-secretd/src/main.rs
+@@ -564,20 +564,41 @@ mod tests {
+         std::fs::remove_dir_all(&dir).ok();
+     }
+ 
++    /// Set in the child that plays the dead daemon: bind this path, then exit.
++    const DEAD_DAEMON_ENV: &str = "RIME_SECRETD_TEST_BIND_AND_EXIT";
++
+     #[test]
+     fn a_stale_socket_from_a_dead_daemon_is_replaced() {
+-        let dir = temp_dir("stale");
+-        let socket = dir.join("control.sock");
+-        {
+-            let _listener = bind(&socket).expect("bind");
++        // The child half: be the daemon that dies. It binds and returns, and
++        // the process exits, which is what a killed daemon leaves behind.
++        if let Some(path) = std::env::var_os(DEAD_DAEMON_ENV) {
++            let _listener = bind(Path::new(&path)).expect("bind in the dead daemon");
++            return;
+         }
+-        // The file survives the listener being dropped, and connecting to it
+-        // now fails — which is what makes it stale rather than live.
+-        assert!(socket.exists());
+ 
+-        // Reported rather than merely asserted, because this failed once on a
+-        // GitHub runner and passed 52 times here — 40 in isolation and 12 full
+-        // parallel runs of all 180 — so the next failure has to arrive with
++        let dir = temp_dir("stale");
++        let socket = dir.join("control.sock");
++        // The predecessor is a separate PROCESS that binds and exits, never a
++        // listener dropped in this one. A listener created here could be
++        // copied into a child that another test thread is forking at that
++        // moment, and that copy keeps the socket accepting until the child
++        // execs: the stale socket then accepts, and this test failed once on a
++        // GitHub runner and once in a Nix build under load for exactly that
++        // reason. A process that has exited holds nothing, so the socket is
++        // dead every time.
++        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
++            .args(["--exact", "tests::a_stale_socket_from_a_dead_daemon_is_replaced", "--test-threads=1"])
++            .env(DEAD_DAEMON_ENV, &socket)
++            .stdout(std::process::Stdio::null())
++            .stderr(std::process::Stdio::null())
++            .status()
++            .expect("start the daemon that dies");
++        assert!(status.success(), "the dead daemon could not bind: {status}");
++        // The file survives the daemon, and connecting to it now fails, which
++        // is what makes it stale rather than live.
++        assert!(socket.exists(), "the dead daemon left no socket behind");
++
++        // Reported rather than merely asserted, so a failure arrives with
+         // enough to diagnose it instead of the bare word `false`. `bind()`'s
+         // staleness rule is exactly this connect, so a machine where it
+         // succeeds would silently refuse to start a daemon whose predecessor
+@@ -585,7 +606,7 @@ mod tests {
+         if let Ok(live) = UnixStream::connect(&socket) {
+             let meta = std::fs::symlink_metadata(&socket);
+             panic!(
+-                "connecting to a socket whose only listener was dropped SUCCEEDED.\n\
++                "connecting to a socket whose daemon has exited SUCCEEDED.\n\
+                  \x20 path:      {}\n\
+                  \x20 file type: {:?}\n\
+                  \x20 peer:      {:?}\n\
+diff --git b/rimed/rime/src/agent.rs a/rimed/rime/src/agent.rs
+index f902107f2..8297c4372 100644
+--- b/rimed/rime/src/agent.rs
++++ a/rimed/rime/src/agent.rs
+@@ -2598,11 +2598,56 @@ fn enable() -> Result<i32> {
+ fn enable_user() -> Result<i32> {
+     let code = run_tool("systemctl", &["--user", "enable", "--now", "rime-agentd"], None)?;
+     if code == 0 {
++        pin_wants_link_to_profile(&rime_agent_core::paths::config_home());
+         println!("agent runtime enabled. `a` and `rime agent run` work now.");
+     }
+     Ok(code)
+ }
+ 
++/// Where a NixOS system keeps its user units at a path that survives an update.
++const STABLE_USER_UNIT_DIRS: &[&str] = &["/etc/systemd/user"];
++
++/// On NixOS, `systemctl --user enable` links the `.wants/` entry to the unit's
++/// file in /nix/store, which the next update replaces and a garbage collection
++/// deletes. systemd still finds the unit by name, but the link then names a
++/// path that is gone (and `systemctl --user` reports the unit "linked", not
++/// "enabled"). Repoint every such link at the same unit in the system's
++/// stable unit directory. A Fedora link (/usr/lib/systemd/user) is never touched.
++fn pin_wants_link_to_profile(config_home: &Path) {
++    pin_wants_link_in(config_home, "rime-agentd.service", STABLE_USER_UNIT_DIRS);
++}
++
++fn pin_wants_link_in(config_home: &Path, unit: &str, stable_dirs: &[&str]) {
++    let Ok(dirs) = std::fs::read_dir(config_home.join("systemd/user")) else {
++        return;
++    };
++    for entry in dirs.flatten() {
++        let wants = entry.path();
++        if wants.extension().is_none_or(|e| e != "wants") {
++            continue;
++        }
++        let link = wants.join(unit);
++        let Ok(target) = std::fs::read_link(&link) else {
++            continue;
++        };
++        if !target.starts_with("/nix/store/") {
++            continue;
++        }
++        let Some(stable) = stable_dirs
++            .iter()
++            .map(|d| Path::new(d).join(unit))
++            .find(|s| s.exists())
++        else {
++            continue;
++        };
++        let tmp = wants.join(format!(".{unit}.rime-pin"));
++        let _ = std::fs::remove_file(&tmp);
++        if std::os::unix::fs::symlink(&stable, &tmp).is_ok() && std::fs::rename(&tmp, &link).is_err() {
++            let _ = std::fs::remove_file(&tmp);
++        }
++    }
++}
++
+ /// Root has no `systemd --user` instance unless it lingers, and no
+ /// `$XDG_RUNTIME_DIR` in a sudo shell, so the ordinary line fails with a bus
+ /// error. Give root a lingering instance, wait for its runtime directory to
+@@ -2640,6 +2685,9 @@ fn enable_root() -> Result<i32> {
+         Some(("XDG_RUNTIME_DIR", "/run/user/0")),
+     )?;
+     if code == 0 {
++        if let Some(home) = rime_agent_core::paths::passwd_home_of(0) {
++            pin_wants_link_to_profile(&home.join(".config"));
++        }
+         println!("agent runtime enabled for root.");
+         println!();
+         println!("note: agents started here run AS ROOT. The per-session sandbox keeps /");
+@@ -5660,4 +5708,34 @@ mod tests {
+     fn paths_outside_home_are_left_alone() {
+         assert_eq!(short_path("/usr/share/rime"), "/usr/share/rime");
+     }
++
++    #[test]
++    fn an_enable_link_into_the_nix_store_is_repointed_at_the_stable_unit() {
++        let root = std::env::temp_dir().join(format!("rime-pin-{}", std::process::id()));
++        let _ = std::fs::remove_dir_all(&root);
++        let stable = root.join("etc-systemd-user");
++        let config = root.join("config");
++        let wants = config.join("systemd/user/default.target.wants");
++        let other = config.join("systemd/user/graphical-session.target.wants");
++        std::fs::create_dir_all(&stable).unwrap();
++        std::fs::create_dir_all(&wants).unwrap();
++        std::fs::create_dir_all(&other).unwrap();
++        std::fs::write(stable.join("rime-agentd.service"), "[Service]\n").unwrap();
++        let store = Path::new("/nix/store/0000-unit-rime-agentd.service/rime-agentd.service");
++        std::os::unix::fs::symlink(store, wants.join("rime-agentd.service")).unwrap();
++        // A Fedora link is the system's own path already, and stays exactly as it is.
++        let fedora = Path::new("/usr/lib/systemd/user/rime-agentd.service");
++        std::os::unix::fs::symlink(fedora, other.join("rime-agentd.service")).unwrap();
++
++        let s = stable.display().to_string();
++        pin_wants_link_in(&config, "rime-agentd.service", &[s.as_str()]);
++
++        let got = std::fs::read_link(wants.join("rime-agentd.service")).unwrap();
++        let kept = std::fs::read_link(other.join("rime-agentd.service")).unwrap();
++        let leftovers: Vec<_> = std::fs::read_dir(&wants).unwrap().flatten().map(|e| e.file_name()).collect();
++        let _ = std::fs::remove_dir_all(&root);
++        assert_eq!(got, stable.join("rime-agentd.service"));
++        assert_eq!(kept, fedora);
++        assert_eq!(leftovers.len(), 1, "a temporary link was left behind: {leftovers:?}");
++    }
+ }
+diff --git b/rimed/rime/src/mcp/sidecar.rs a/rimed/rime/src/mcp/sidecar.rs
+index b501c4fb8..9c7fe480f 100644
+--- b/rimed/rime/src/mcp/sidecar.rs
++++ a/rimed/rime/src/mcp/sidecar.rs
+@@ -339,6 +339,8 @@ pub fn build(
+     if policy.network {
+         spec.run_ro = sandbox::resolv_binds();
+     }
++    // The system's own programs (NixOS: /run/current-system), network or not.
++    spec.run_ro.extend(sandbox::system_run_binds());
+     // The way into the broker is the agent runtime's control socket, under
+     // `$XDG_RUNTIME_DIR`, which `build_argv` masks with a tmpfs. Binding it
+     // back is the whole of the `broker` dimension: `rime secret use` and
+diff --git b/rimed/rime/src/nixos/mod.rs a/rimed/rime/src/nixos/mod.rs
+index dab99f686..d837cb76b 100644
+--- b/rimed/rime/src/nixos/mod.rs
++++ a/rimed/rime/src/nixos/mod.rs
+@@ -1,5 +1,6 @@
+ //! The NixOS backend of `rime update`, `rime rollback`, `rime pin`, `rime gc` and `rime trust --gate`
+-//! (docs/nixos/updates-and-release.md, D6; implementation notes in docs/nixos/update-client.md).
++//! (docs/nixos/updates-and-release.md, D6; implementation notes in docs/nixos/update-client.md), and of
++//! `rime install`/`remove`/`pkg` (`pkg`, D5).
+ //!
+ //! Selected at runtime by [`is_nixos`]; the bootc path in `ops.rs` is untouched when it says no. The decisions are
+ //! pure and live in `rimed_core::nixrel`; this module fetches, runs `nix` and measures the machine.
+@@ -9,6 +10,7 @@
+ 
+ pub mod fetch;
+ pub mod generations;
++pub mod pkg;
+ pub mod store;
+ pub mod trust;
+ pub mod update;
+diff --git b/rimed/rime/src/ops.rs a/rimed/rime/src/ops.rs
+index 18f2a4197..5e1025a75 100644
+--- b/rimed/rime/src/ops.rs
++++ a/rimed/rime/src/ops.rs
+@@ -75,8 +75,12 @@ fn root_required_message(verb: &str, argv: &[String]) -> String {
+         || verb.starts_with("remove")
+         || verb.starts_with("pkg")
+     {
+-        "it writes the system extension under /var/lib and asks systemd to \
+-         re-merge /usr"
++        if crate::nixos::is_nixos() {
++            crate::nixos::pkg::ROOT_WHY
++        } else {
++            "it writes the system extension under /var/lib and asks systemd to \
++             re-merge /usr"
++        }
+     } else {
+         "bootc writes to /ostree and /boot"
+     };
+@@ -574,6 +578,9 @@ pub fn vm(args: &[String]) -> i32 {
+ /// signature checking and the extension lifecycle, and duplicating any of that
+ /// here would just create two implementations to keep in sync.
+ pub fn pkg(args: &[String]) -> i32 {
++    if crate::nixos::is_nixos() {
++        return crate::nixos::pkg::run(args);
++    }
+     // No "rime: running: …" banner here, unlike the bootc/fwupd verbs: the
+     // engine narrates its own work, and echoing the invocation on top of that
+     // made read-only verbs like `rime pkg list` print noise before their output.
+diff --git b/rimed/rime/src/trust.rs a/rimed/rime/src/trust.rs
+index 5cc6a9311..bfefe780f 100644
+--- b/rimed/rime/src/trust.rs
++++ a/rimed/rime/src/trust.rs
+@@ -1018,9 +1018,16 @@ fn gate_main(roots: &Roots, json: bool) -> i32 {
+     i32::from(g.decision.refuses())
+ }
+ 
++/// The NixOS gate reads the live machine (`/run/current-system`, `/etc/rime/update.toml`); a fixture root
++/// (`$RIME_TRUST_ROOT`) describes a bootc deployment and is always read by the bootc gate, even on a NixOS host
++/// (nix/release/crosscheck-rime-trust.sh runs the bootc verifier inside a NixOS test VM).
++fn nixos_gate(roots: &Roots) -> bool {
++    roots.fixture.is_none() && crate::nixos::is_nixos()
++}
++
+ pub fn main(args: TrustArgs) -> i32 {
+     let roots = Roots::from_env();
+-    if args.gate && crate::nixos::is_nixos() {
++    if args.gate && nixos_gate(&roots) {
+         return crate::nixos::trust::gate(args.json);
+     }
+     if args.gate {
+@@ -1054,6 +1061,12 @@ pub fn main(args: TrustArgs) -> i32 {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn a_fixture_root_is_never_read_by_the_nixos_gate() {
++        let fixture = Roots { fixture: Some(PathBuf::from("/nonexistent-rime-trust-fixture")) };
++        assert!(!nixos_gate(&fixture), "a fixture root must reach the bootc gate, NixOS host or not");
++    }
++
+     #[test]
+     fn the_four_ostree_verification_prefixes_are_told_apart() {
+         let (p, r) = parse_origin_reference(
+diff --git b/rimed/rimed/src/main.rs a/rimed/rimed/src/main.rs
+index 594de44ec..4d3ffdfa8 100644
+--- b/rimed/rimed/src/main.rs
++++ a/rimed/rimed/src/main.rs
+@@ -16,6 +16,7 @@ mod hold;
+ mod metrics;
+ mod polkit;
+ mod state;
++mod switch;
+ 
+ use std::path::Path;
+ use std::sync::Arc;
+@@ -119,6 +120,7 @@ async fn main() -> Result<()> {
+         .serve_at(OBJECT_PATH, FanIface { ctx: ctx.clone() })?
+         .serve_at(OBJECT_PATH, GameModeIface { ctx: ctx.clone() })?
+         .serve_at(OBJECT_PATH, ModeIface { ctx: ctx.clone() })?
++        .serve_at(OBJECT_PATH, switch::SwitchIface::system())?
+         .build()
+         .await
+         .context("building the D-Bus service")?;

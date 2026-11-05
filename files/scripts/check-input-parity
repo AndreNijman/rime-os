@@ -51,6 +51,11 @@ DEFAULT_SERVICE = os.path.join(
 # reach, so each one needs an argument, not a shrug.
 INTENTIONALLY_UNEXPOSED = {
     # (section, key): why
+    **{
+        ("keyboard", k): "the installer chooses the XKB layout and firstrun seeds it; "
+        "Settings has no layout picker yet, and an empty value (the default) generates nothing"
+        for k in ("layout", "variant", "model", "options")
+    },
 }
 
 

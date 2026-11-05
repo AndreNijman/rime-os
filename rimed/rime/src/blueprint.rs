@@ -1103,7 +1103,7 @@ impl RealConverger {
     /// validates the id against the installed `.desktop` files itself, which
     /// is what makes it safe to hand a name to.
     fn select_session(&self, session: &str) -> Result<(), String> {
-        run("/usr/libexec/rime-session-select", &[session])
+        run(rime_paths::RIME_SESSION_SELECT, &[session])
     }
 
     /// Hand the whole list to the package engine.

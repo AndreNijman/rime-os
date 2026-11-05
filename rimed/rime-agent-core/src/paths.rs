@@ -318,7 +318,7 @@ pub const SCRATCH_ROOT_PREFIX: &str = "/tmp/rime-agent-";
 pub const SCRATCH_ROOT_ENV: &str = "RIME_AGENT_SCRATCH_ROOT";
 
 /// The shipped disposable-capsule engine (§19).
-pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/rime-disposable";
+pub const DISPOSABLE_ENGINE: &str = rime_paths::RIME_DISPOSABLE;
 
 /// Overrides [`DISPOSABLE_ENGINE`], for a suite that must not create capsules.
 ///

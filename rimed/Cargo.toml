@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["rimed-core", "rimed", "rime", "rime-agent-core", "rime-agentd", "rime-aid", "rime-secret-core", "rime-secretd", "rime-backup-core", "rime-perm-core", "rime-remote-core", "rime-remoted"]
+members = ["rimed-core", "rimed", "rime", "rime-agent-core", "rime-agentd", "rime-aid", "rime-secret-core", "rime-secretd", "rime-backup-core", "rime-perm-core", "rime-remote-core", "rime-remoted", "rime-paths"]
 
 [workspace.package]
 version = "0.1.0"

@@ -1,0 +1,20 @@
+[Unit]
+Description=Rime CI builder: nix-daemon for the isolated katana jobs
+Documentation=file:///usr/local/libexec/rime-runner/README.md
+After=network-online.target rime-runner-firewall.service
+Wants=network-online.target
+Requires=rime-runner-firewall.service
+RequiresMountsFor=/var/lab
+
+[Service]
+Type=simple
+Slice=rime-runner.slice
+ExecStart=/usr/local/libexec/rime-runner/bin/rime-runner-builder
+ExecStop=/usr/bin/env CONTAINERS_STORAGE_CONF=/var/lab/rime-runner/podman/storage.conf CONTAINERS_CONF_OVERRIDE=/var/lab/rime-runner/podman/containers.conf podman stop -t 30 rime-runner-builder
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

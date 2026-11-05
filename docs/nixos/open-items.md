@@ -1,0 +1,619 @@
+# Open items after wave 4 (integration, 2026-11-03)
+
+Every item the wave-2 workers, verifiers and integrator handed on (`/var/lab/rime-nix/artifacts/wave3-inputs.md`, 153
+items in 19 sections, each numbered as in the ledger), with its state on `feat/nixos` after the wave-3 integration. Then the
+items wave 3 itself opened. The wave-4 integration (2026-11-03: `nix/boot2`, `nix/bridge3`, `nix/installer3`,
+`nix/updates2`, `nix/ci2` merged) brought every row to its state after wave 4: the rows still STILL OPEN after wave 3
+were each fixed or given a final state at that integration (each says "wave-4 integration"), and the items wave 4
+opened are in "Opened by wave 4" at the end. Wave-4 integration evidence: `/var/lab/rime-nix/artifacts/integrate-wave4/`.
+The wave-5 integration (2026-11-03: rime-os main, `nix/desktops`, `nix/settings-pkg`, `nix/units-fix`; rime-shell main
+and `nix/settings-app`) updated the `build:desktops` and `build:settings` tables and added "Opened by wave 5" at the
+end. Evidence: `/var/lab/rime-nix/artifacts/integrate-wave5/`.
+
+States:
+
+- **FIXED**: done, with the commit and the check or log that shows it.
+- **DECIDED-NOT-TO**: deliberately not done, or nothing to act on; where the decision is written.
+- **P3/HARDWARE**: needs katana, real firmware, a real account, the release environment or Andre; what is needed.
+- **STILL OPEN**: agent work not done yet, and why.
+
+An item that repeats one already answered says "see" and the first answer, so the two cannot drift. "The integration
+check" means the wave-3 proof on the merged head: every `checks.x86_64-linux.*` outPath valid in the store
+(`/var/lab/rime-nix/artifacts/integrate-wave3/outs-final.txt`; how it was built: `docs/nixos/p2-gates.md`, "P2 status").
+
+## build:tpmkeymap
+
+1. *No gate open in scope; B10 is bootmatrix's.* DECIDED-NOT-TO: nothing to act on (B10 met, p2-gates.md).
+2. *katana's real PCR 7 under the real MOK and db/dbx not measured; MokManager / `mokutil --import` not exercised.*
+   Split. MokManager enrolment: FIXED in the lab by nix/secureboot (796e830eb, `nix/probe/ovmf/mok`: the real Rime
+   MOK enrolled screen by screen on a Microsoft-keys-only varstore). Real PCR 7 on katana: P3/HARDWARE (katana with
+   the real MOK and firmware; `docs/nixos/p3-katana-gates.md`).
+3. *`rime-luks-enroll` now refuses a volume with a recovery key unless `--replace-recovery`; bootc docs describe the old
+   behaviour.* FIXED: `docs/disk-encryption.md` (lines 87, 277) and `docs/boot-v2.md` (37, 1543) describe the refusal
+   and `--replace-recovery` (nix/secureboot, 0aa306d1a).
+4. *luks-tpm.nix consumes no `rime.luks.*` option.* DECIDED-NOT-TO: volumes are named by `rd.luks.*` from host.toml
+   (the carry and the installer write them; the encrypted-A bridge run L unlocks that way, p2-gates D2);
+   `boot.initrd.luks.forceLuksSupportInInitrd` (nix/modules/luks.nix) gives the generator without per-volume options.
+5. *Nothing starts `rime-luks-tpm-reenrol@`; nothing tells the owner after a Secure Boot or dbx change.* FIXED:
+   `rime luks status` / `rime luks rebind` and a boot check of each TPM slot (b5d4bca5f; `docs/disk-encryption.md`
+   269, `docs/boot-v2.md` 1548). The rebind succeeding under Secure Boot on real firmware is P3 (see "Opened by wave 3").
+6. *keymap-luks typed while vconsole-setup was activating.* FIXED: the test types only once plymouth holds the question
+   and a password agent reads the keyboard (9d13a72fe, 61a187318; `docs/nixos/ci.md` "keymap-luks under load", proven
+   on 2 pinned CPUs at load ~12).
+7. *tabrmd D-Bus warning in the TPM lab.* FIXED: `TPM2TOOLS_TCTI=device:/dev/tpmrm0` (f747d4fb9,
+   `nix/probe/ovmf/tpm/systems.nix`).
+8. *Lab disks deleted; remake with `run.sh disks`.* DECIDED-NOT-TO: a recipe, not a defect (`nix/probe/ovmf/tpm/README.md`).
+
+## build:hostgates
+
+1. *H9 free-space gate not in scope.* FIXED: H9 met (p2-gates.md H9, bridge refusals).
+2. *Re-running the katana gate needs the root-0700 runtime share.* DECIDED-NOT-TO: by design (katana state is never
+   committed). The share and recipe moved to `/var/lab/rime-nix/artifacts/hostgates/` (`kat-run.sh`); the wave-2
+   integration re-ran it (STATUS.md, wave 2).
+3. *H3: no OpenVPN profile brought up.* FIXED: hostgates brings up a WireGuard and an OpenVPN profile (de8535cd2;
+   `docs/nixos/ci.md` hostgates rows, "H3 (WireGuard, OpenVPN)").
+4. *H2: MAC-pinned 5 GHz profile only accepted.* FIXED: the pinned profile refuses a radio with another address, then
+   comes up on a radio whose permanent address it is (de8535cd2, `nix/tests/hostgates.nix` header, lib/hwsim-radio.py).
+5. *rpcbind forced off, NFSv3 locking untested.* FIXED: rpcbind on demand like Fedora, tested with a share (de8535cd2;
+   `nix/modules/hostlayer.nix` 95, `docs/nixos/fedora-defaults.md` 90).
+6. *DiskLab makes ext4 only.* FIXED: btrfs and xfs extra disks too (de8535cd2); the carried btrfs disk is scrubbed
+   (13b39689d).
+7. *No test that a machine without host.toml is called `rime`.* FIXED: `checks.hygiene` asserts `/etc/hostname`,
+   the kernel hostname and `hostnamectl --static` are `rime`, with a mutant (45c2c4ac1, `nix/tests/hygiene.nix` 81-83, 126).
+8. *Real hardware unproven (radios, disks, btrfs fsck).* P3/HARDWARE: katana after the move (p3-katana-gates.md).
+9. *hostgates.nix headers; the "work in progress" commit dd166b8de could be squashed.* DECIDED-NOT-TO: history on
+   `feat/nixos` is not rewritten; the headers are current.
+
+## rebrand-merge
+
+1. *No p2-gates rows in scope for the merge.* DECIDED-NOT-TO: nothing to act on.
+2. *rime-shell `run-config-agents-keys-test.sh` fails on feat/nixos.* FIXED: rime-shell nix/shell-keys 5e8635e6 (the
+   keys suite waits for state) merged as rime-shell `feat/nixos` 90f4d49a, locked in rime-os 2adce61a0; the shell
+   PR's CI ran it green (shell worker).
+3. *Suites write `files/system/libexec/__pycache__`; `path:.` copies it; rime-libexec fails.* FIXED: rime-libexec
+   ignores `__pycache__` (45c2c4ac1).
+4. *nix/rebrand branches and worktrees left for the orchestrator.* FIXED: deleted at the wave-2 integration (no
+   `nix/rebrand*` branch or worktree exists).
+5. *nix/rebrand-merge not pushed; STATUS.md line.* FIXED: merged at wave 2 (STATUS.md, wave 2) and `feat/nixos` was
+   pushed afterwards (hosted runs 41400977973 and 41450212626 ran on it, `docs/nixos/ci.md`).
+
+## verify:rebrand-merge
+
+1. *The whole `files/` tree (11 MiB) reaches the closure through 50-rime-keymap.* FIXED: 50-rime-keymap names its
+   script only (f732a192b).
+2. *niri's default config binds Mod+T to alacritty.* FIXED: Mod+T opens the default terminal (45c2c4ac1).
+3. *config-agents-keys still fails on its parent.* See rebrand-merge 2.
+4. *`__pycache__` fragility.* See rebrand-merge 3.
+
+## verify:hostgates
+
+1. *katana's real machine-id and disk UUIDs in committed files.* FIXED: made-up values (b40513bab, wave 2); `git grep`
+   at the wave-3 head finds them only in `ROADMAP/evidence/**`, which is never edited (CLAUDE.md).
+2. *Carried `rd.luks.*` cannot unlock: rime-vm has no LUKS in its initrd.* FIXED: `boot.initrd.luks.forceLuksSupportInInitrd`
+   (nix/modules/luks.nix) and the bridge's encrypted-A run L: the NixOS initrd asks for the passphrase and opens
+   `/dev/mapper/luks-<uuid>` from host.toml's `rd.luks.*` (7e4317651, c277c3c6d; p2-gates D2).
+3. *H2's "wpa_supplicant off fails" log was overwritten.* FIXED: H2 evidence re-recorded at the final content with
+   dated mutant runs (743dc2390; p2-gates H2).
+4. *Remaining hostgates handovers.* See build:hostgates 3-8.
+5. *`nix flake check --no-build` killed (137).* DECIDED-NOT-TO: superseded; every check is built by the integration check.
+
+## build:flakes
+
+1. *No gate row in scope; STATUS.md "G2 message" row stale.* FIXED: STATUS.md says "Done" for it (wave 2 integration).
+2. *Full `security` check (5 VMs) not run with its new asserts.* FIXED: built by the wave-2 and wave-3 integration
+   checks.
+3. *STATUS.md G2 row.* See 1.
+4. *Every VM check rehashes (rime-qemu wrapper).* FIXED: the integration checks rebuild all of them.
+5. *nix.yml time limits and the nix-release dry-run unproven until a hosted run.* FIXED: limits set from two measured
+   hosted runs (93ce0afbd; `docs/nixos/ci.md` "Timeouts"); the dry-run met `eval-each.sh` and was fixed (8bc447255),
+   passing in hosted run 41450212626.
+6. *`vm-harness-vm.stock` is built by hand.* DECIDED-NOT-TO: by design (it must hang; `docs/nixos/p1-exit.md`).
+7. *`listening()` scans /proc/net/unix with a bash loop, 1-4 s per VM start.* FIXED: one read per poll (22c7fbd5f).
+8. *unit-docs reads only rime-vm; boot-v2 units not installed on NixOS.* DECIDED-NOT-TO: the bootc-doc mutant makes
+   the check fail if one is added without its link.
+9. *rimed-session gives the VM a bootc-shaped /bin.* DECIDED-NOT-TO: test fixtures for rimed's tests; remove when they
+   stop assuming /bin paths.
+
+## verify:flakes
+
+1. *Only GitHub proves the time limits and the dry-run.* See build:flakes 5. The hosted runner's free disk for a full
+   release closure is not measured: see "Opened by wave 3".
+2. *`vm-harness-vm.stock` log is from an earlier tree.* DECIDED-NOT-TO: passthru illustration only.
+3. *The 6x concurrent stress not re-run.* DECIDED-NOT-TO: same driver hash as the stress run; the VM limit allows 2.
+4. *STATUS.md G2 row.* See build:flakes 1.
+5. *Every VM check rehashes.* See build:flakes 4.
+6. *nix-release's kernel-sign job runs on non-main refs when the variable is set.* FIXED: the release workflow calls
+   the kernel signer on main only (e04971196).
+7. *No p2-gates rows changed.* DECIDED-NOT-TO: nothing to act on.
+
+## build:g2
+
+1. *G3 "How proven" (client VM timing) not done; deltas not wired into `rime update`.* FIXED: nix/deltas wired deltas
+   into `rime update` and the release workflow (5820fd615, 0514ad2f8, c5e478817) and timed them in two VMs
+   (`checks.update-delta`, g3-vm runs; p2-gates G3 met).
+2. *P4: wire deltas (previous release only, fallback, streamed import, parallel, window cap) and time it.* FIXED: as
+   1 (`docs/nixos/delta.md` §5.2, §7).
+3. *Release pipeline: deltas at `zstd -19 --long=27`, skip a delta over ~80 %.* FIXED: c5e478817, 3df752039 (stage at
+   level 19).
+4. *Experiment: kernel with `CONFIG_MODULE_COMPRESS_NONE`.* DECIDED-NOT-TO (now): measured (7d14f7dfa,
+   `nix/release/delta/lab/modules-uncompressed.sh`); `docs/nixos/delta.md` 306 decides to ship it at the next
+   `kernel.pin` bump (`stripExclude = [ "*.ko" ]`), not here.
+5. *Measure `compression-level=19` without `--long` before raising the cache level.* FIXED: measured and adopted
+   (`delta.md` 23, §8.1; 7d14f7dfa, 3df752039).
+6. *A3: keep batching non-security mass rebuilds.* DECIDED-NOT-TO (yet): `delta.md` 361 "A3 (decided, not closed)":
+   at most once every 4 weeks; revisit with real 30-day numbers (P4).
+7. *STATUS.md not edited; `checks.delta` is new.* FIXED: STATUS.md lists it (wave-3 section).
+
+## verify:g2
+
+1. *G3 open as worded.* See build:g2 1.
+2. *Re-decode guard was never tested.* FIXED: b2fa4b6f8 (wave 2).
+3. *Fixtures have one candidate per path and empty References: "smallest of several candidates" and references-first
+   ordering are untested.* FIXED (wave-4 integration, c785bb235): `checks.delta` gives the old release a same-size
+   decoy of the package, tried first, and `measure` must keep the old out (tried 2, base = the smaller delta); the
+   server's narinfos make the path that sorts first reference the one that sorts last, and `apply-all` must import the
+   reference first (the machine's store records it). Mutants `first-candidate-wins` (FAILS: "delta 3145948 B is not
+   much smaller") and `no-references-first` (FAILS: nix copy "path ... is not valid") (`integrate-wave4/delta-*.log`).
+4. *scratch/g2 left untouched; STATUS.md.* FIXED: STATUS.md lists `checks.delta`; scratch removed at the wave-2/3
+   cleanups (no `scratch/g2`).
+
+## build:bootmatrix
+
+1. *R20/R22 have no row; recorded as decisions.* DECIDED-NOT-TO: `docs/nixos/boot-matrix.md` (timeout 5 with
+   `timeout_style=menu`; Windows ESP refused by name; `reserveMiB` 32).
+2. *p2-gates header still says "every line is not met yet".* FIXED: header and "P2 status" rewritten at this
+   integration (p2-gates.md).
+3. *(a) `rime.boot.enable` default for shipped profiles; vm-boot passes.* DECIDED-NOT-TO: information.
+4. *(b) Early microcode +15.5 MB per generation; a host that knows its vendor should turn the other off.* FIXED:
+   microcode loads as separate initrd files and the ESP stays in budget (aa6d0e637; `checks.boot-microcode`,
+   `docs/nixos/boot-matrix.md`). Per-vendor choice: see "Opened by wave 3" (bridged machines keep both).
+5. *(c) R22.* DECIDED-NOT-TO: as 1.
+6. *(d) R20.* DECIDED-NOT-TO: as 1.
+7. *(e) K2 attach window 60 s.* FIXED: the window is a parameter of the check (b23d79080) and the wording says what was
+   measured (1c3bbf84f; p2-gates K2).
+8. *tpmkeymap: `rime.luks.*` options.* DECIDED-NOT-TO: information; see build:tpmkeymap 4.
+9. *Probe image has no virtio-gpu-pci; probe runs `label=disable`.* DECIDED-NOT-TO: lab-only
+   (`docs/nixos/boot-matrix.md`).
+10. *Real hardware: Plymouth prompt on real GPUs, real MOK enrolment; APEX_SB_* untouched.* P3/HARDWARE: katana
+    (p3-katana-gates.md); MokManager in the lab: see build:tpmkeymap 2.
+
+## verify:d5
+
+1. *Latent: the release emits `catalogue = [ ]`, so after the move every `rime update` fails on a class-2 app.*
+   FIXED: `rime update` names an app the release builds no copy of instead of failing (a34782975, wave 2) and releases
+   now name their catalogue builds and feature variants (5468b6bf5; `checks.release-unit`, `.#rime-release-catalogue`
+   in the release dry-run).
+2. *No end-to-end update -> catalogue-outs -> install check.* FIXED: a real catalogue build in the release worker
+   (4ac69da4b) and `checks.catalogue` / `vendor-apps` (79f9fe911) install from release-named builds.
+3. *Translator and judge share a blind spot (deb/ dir, `deb_depends`, `.omitted`).* FIXED: the translator reports
+   cached .debs, `deb_depends` and saved /etc files (21e3c33a7); the judge sees computed state.json keys (fc1084a9e);
+   P1 names the fifth judge mutant (7fb9936a8).
+4. *P3 proves the native binary, not `rime install claude-code` (npm route).* FIXED: the npm route runs offline
+   (9b2fb6a1c).
+5. *P4 relies on a seeded Equicord asar; Equibop downloads at run time.* FIXED: Equibop takes Equicord from nixpkgs
+   and never downloads (02d4d075e; `checks.equibop`).
+6. *`rime.virtualization.enable` / gaming cannot reach a machine: only `plain` is published.* FIXED: releases publish
+   feature variants (5468b6bf5, `nix/release/variants.nix`). The installer installing them: see "Opened by wave 3".
+7. *P2 stays partly met.* FIXED: met by decision (nix/apps, ce99ac05a, 17bc4fded: compositing mutant); Steam's own
+   launch, sign-in, Proton and the real GPU are P3-S1..S4.
+8. *d5's cargo mutants never logged.* DECIDED-NOT-TO: rimed's in-build cargo report is the evidence (3770 passed, 0 failed
+   at the integration build, `/var/lab/rime-nix/artifacts/integrate-wave3/rimed-build.log`).
+9. *"Not problems" (attribution greps, host reads).* DECIDED-NOT-TO: nothing to act on.
+
+## verify:tpmkeymap
+
+1. *Two timing races in the lab and the check (serial-getty hang-up, 0.2 s ask polling).* FIXED (wave 2, by the
+   verifier); keymap-luks: see build:tpmkeymap 6.
+2. *M1's "How proven" said `console.keyMap = "uk"`; T1 reads PCR 7 from sysfs plus an event-log replay.* FIXED (wave
+   2): the column says `rd.vconsole.keymap=gb` from host.toml; T1 discloses its method (p2-gates T1).
+3. */var/lab hit 99 % (other workers' scratch).* FIXED as a host condition (wave-4 integration): /var/lab was at 55 %
+   (220 GB free) before every build batch of the wave-4 proof (`integrate-wave4/{A,B,C,D}/summary.txt`); each wave's
+   integrator deletes its scratch at the end.
+4. *`rime.luksTpm.enable` mostly restates nixpkgs defaults.* DECIDED-NOT-TO: not a defect (the module says so).
+5. *Carried forward:* real PCR 7 (P3, see build:tpmkeymap 2); MokManager (FIXED, same); luks-tpm options (see
+   build:tpmkeymap 4); the rebind hint (FIXED, build:tpmkeymap 5); the bootc docs (FIXED, build:tpmkeymap 3); the
+   `rime-luks-enroll` refusal changing bootc behaviour when it reaches main (DECIDED: documented in
+   `docs/disk-encryption.md`, a release note when it ships); `keymap_params` checks only the default generation's
+   keymap tree (DECIDED-NOT-TO at the wave-4 integration: `rd.vconsole.keymap=<name>` on an initrd that lacks the
+   map leaves `us` loaded, exactly what that older generation did without the argument, so a per-generation check
+   could only add a warning; the refusal exists to keep the DEFAULT generation's LUKS prompt typeable, and it does);
+   the lab's "bootc-era slot" is sealed by NixOS `systemd-cryptenroll` (P3/HARDWARE: katana's real bootc enrolment).
+6. *`tests/test-boot-v2.sh` 1 failure (the `tail -c +5` inverse control).* DECIDED-NOT-TO: it reads the host's real
+   efivarfs and fails the same on main on this machine (seen again at this integration: 154 passed, 1 failed, on #137).
+
+## build:d5
+
+1. *P2 partly met.* See verify:d5 7.
+2. *Equibop runtime self-update channel.* See verify:d5 5.
+3. *ChatGPT / Claude Desktop pins and catalogue packaging TODO.* FIXED: pinned, vendor-key checked, in the catalogue
+   (7c4444c5e, 0592c75bf, 2f48d135a). Their licences for redistribution through the cache: see "Opened by wave 3" (R14).
+4. *P2 on real hardware, `-applaunch`, login, Proton.* P3/HARDWARE: P3-S1..S4 (Andre's Steam account, katana).
+5. *Floors should count on-disk bytes (14/16 GB).* FIXED on the release side: floors count on-disk bytes (5468b6bf5,
+   3ad89d90c; `nix/release/floors.nix`: plain disk 16 GB / partition 14 GB, plain-gaming 18 / 16). The installer
+   reads the same figures since nix/installer3 (`nix/installer/choices.nix`; "Opened by wave 3" row 1).
+6. *Refuse `rime install steam` below the gaming floor.* FIXED for `rime install` (`variant.rs`
+   `steam_is_refused_by_name_below_the_gaming_floor`, 5468b6bf5). The installer refuses gaming below its floor by name
+   since nix/installer3 ("Opened by wave 3" row 1).
+7. *`appimage.enable` stays on.* DECIDED-NOT-TO: decided (d5; the translator's AppImage note assumes it).
+8. *virtualization check: pin `swtpm.enable`.* FIXED: the no-swtpm mutant now fails it (27ddb6fb9). An explicit
+   assertion line was not added: see "Opened by wave 3".
+9. *gaming-launch black frames / held frames.* FIXED: the cube is told apart by colour and shots retry for 90 s
+   (17bc4fded).
+
+## build:bridge
+
+1. *D1/D2 proven with Secure Boot off only.* FIXED: SB on with the Rime MOK chain (c277c3c6d; p2-gates D1, D2).
+2. *rime-os main needs the readiness PR.* FIXED (draft, by design not merged): rime-os #137 ships the bridge as
+   `/usr/libexec/rime-migrate` and `rime migrate`; refreshed at this integration to the merged bridge (f26b97d17).
+3. *Payload manifest unsigned.* FIXED: signed with a dedicated ed25519 key, `manifest.json.sig` checked against the
+   image's `nixos-bridge-payload.pub` (7e4317651, f03485259; `docs/nixos/bridge.md`). The release key itself: P3
+   (see "Opened by wave 3").
+4. *start uses the closure's own nix and chroot, no static nix.* DECIDED-NOT-TO: `docs/nixos/bridge.md` (bridge2
+   decisions, 9594161f9).
+5. *Old side only masks units; `rime update` still runs after start.* FIXED: #137's `rime` refuses `update`,
+   `rollback`, `pin`, `channel set`, `boot migrate`, `live …` by name once the start record exists
+   (`tests/test-rime-migrate.sh --with-binary` 98/0 on f26b97d17).
+6. *Bugs found by the OVMF runs and fixed.* FIXED (wave 2): each with a test and a mutant.
+7. *Untested: SB on, LUKS root, separate /boot, rollback log.* FIXED: run L (encrypted A, /boot ext4, SB on) and the
+   verifier's `--rollback-first` runs (c277c3c6d; p2-gates D2, H8).
+8. *repair-e leaves `/composefs` and `/state`.* DECIDED-NOT-TO: archived, decided in bridge2 (9594161f9,
+   `docs/nixos/bridge.md`).
+9. *Lab unit `rime-bridge-lab` reads degraded.* DECIDED-NOT-TO: lab-only.
+10. *The L16 was not used.* DECIDED-NOT-TO: information.
+11. *Reproduce via README.* DECIDED-NOT-TO: information (`nix/probe/ovmf/bridge/README.md`).
+
+## verify:bootmatrix
+
+1. *bootmatrix invalidated 8 checks; 9 more were unbuilt against the new rime-vm.* FIXED: the integration checks build
+   every check (wave 2 and this one; p2-gates "P2 status").
+2. *K2's 60 s window is 6x bootc's 10 s; the settle=10 mutant was never run.* FIXED: run on the signed derivation at
+   loads 58-93, it passes 17/17 four times (`docs/nixos/boot-matrix.md` 198-213; 36e88ec48, 1c3bbf84f), so the
+   wider window is margin for heavier load, not a hidden failure.
+3. *K2/K3 "How proven" said `kernel-vm`.* FIXED: both say `kernel-vm-signed` (p2-gates K2, K3).
+4. *Early microcode adds 15.5 MB per generation; check the ESP and generation limit.* FIXED: see build:bootmatrix 4.
+5. *Probe runs `label=disable`; the in-VM driver uses `pgrep -f`.* DECIDED-NOT-TO: lab-only, inside a throwaway guest.
+
+## verify:bridge
+
+1. *Nothing refuses `rime update` / `rime boot migrate` after start.* See build:bridge 5.
+2. *D2 was only partial (encrypted A refused).* FIXED: encrypted A migrates (bridge2, run L; p2-gates D2 met).
+3. *D1 rests on the lab ESP chain; katana's `\EFI\APEX\grub.cfg` is unknown.* P3/HARDWARE: run `rime migrate check
+   --explain` on katana (`docs/nixos/bridge.md` handover; p3-katana-gates.md).
+4. *Secure Boot off in every run.* See build:bridge 1.
+5. *Payload unsigned.* See build:bridge 3.
+6. *No static nix.* See build:bridge 4.
+7. *Left-behind report shown only after start.* FIXED: start always shows it first (627cb4f31).
+8. *Login proven over serial only.* FIXED: run L logs in through rime-greet into Hyprland (`artifacts/bridge2/L/L-nixos-desktop.png`).
+9. *repair-e leftovers.* See build:bridge 8.
+10. *`rime backup key export` not done.* DECIDED-NOT-TO for the recovery key (`docs/nixos/bridge.md` 145); the LUKS
+    header is backed up (`keys/luks-header.img`, run L) and `rime migrate key-export` exists.
+11. *H8 rollback evidence overwritten.* FIXED: the verifier's `--rollback-first` runs (p2-gates H8).
+
+## build:installer
+
+1. *Release MOK signature unproven; MokManager not clicked through.* Both FIXED. MokManager: in the lab (see
+   build:tpmkeymap 2). The release kernel signature: FIXED (see "Release MOK signature of the NixOS kernel" under
+   "Opened by wave 3": c78f412c1, realsig PASS).
+2. *Merge order with bootmatrix.* DECIDED-NOT-TO: obsolete (installer.md).
+3. *Production cache URL and key; real MOK signature; verification of the toplevel before install.* Split. Verifying
+   a signed release before install: FIXED (65f65b289: the NixOS path installs a verified signed release from the
+   production caches). The production cache and the real keys: P3/HARDWARE (release environment).
+4. *Partition mode refused (no Windows .exe flow); NETINSTALL refused.* FIXED: partition mode on the NixOS path
+   (65f65b289) and the .exe offers no root smaller than the installer accepts (945f6f694); the NixOS ISO is the
+   netinstall shape (c0e894866 tests the path with the netinstall marker on). A production netinstall ISO and a new
+   .exe: P3 (see "Opened by wave 3").
+5. *`rime.installTarget` and `rime.rootfs` overlap.* FIXED: one option set (ea835825d; `nix/installer/target.nix` maps
+   onto `rime.rootfs`).
+6. *Recovery key written to the boot USB fails read-only.* DECIDED-NOT-TO: pre-existing bootc behaviour; the GUI
+   handles `recovery_unsaved` (installer.md).
+7. *splash twice, journald restart, no static /etc/hostname, zsh-newuser-install.* FIXED: one `splash`, a stock
+   `/etc/skel/.zshrc`, hostnamed reads `/etc/hostname` (da24223c4, ab01f061f; `checks.installer-polish-eval`,
+   `checks.hygiene`; installer.md 177-199). The journald restart is explained in installer.md; the journal is No_COW
+   since nix/installer3 ("Opened by wave 3").
+8. *LUKS greeter session not probed.* FIXED: the greeter types in the machine keymap from host.toml (1ffc80fcd) and
+   the I3 firstboot run types a `gb` passphrase (installer.md 224).
+9. *Rerun recipe.* DECIDED-NOT-TO: information.
+10. *Write-up location.* DECIDED-NOT-TO: information (`docs/nixos/installer.md`).
+
+## verify:installer
+
+1. *`Containerfile.installer` adds nix-core and bootupd to every live ISO.* FIXED: only on a NixOS ISO
+   (`--build-arg NIXOS=1`, `installer/Containerfile.installer` 161-192).
+2. *Pre-wipe `nix store verify --recursive` cost against an https cache unmeasured.* FIXED: per-cache `nix store
+   verify` without `--recursive` under a deadline, timings measured (installer.md 62-77).
+3. *`installer/test-installer.sh` not re-run.* DECIDED-NOT-TO on katana: its engine half writes real loop devices as
+   root (installer.md "Decided not to"); CI runs it; its GUI half passed 24/24 (`artifacts/verify-installer2/gui-half/`).
+4. *Encrypted install with a non-US unlock keymap refused; lift once rime-boot passes `rd.vconsole.keymap`.* FIXED:
+   the refusal is gone (installer.md 151); I3's `gb` firstboot proves it.
+5. *Rime kernel under SB does not print "Kernel is locked down".* FIXED: the kernel's lockdown posture is gated
+   (b23d79080, `docs/nixos/boot-matrix.md`). Hibernation under lockdown: see "Opened by wave 3".
+6. *Production live ISO has `root:rime` on VT 2.* DECIDED-NOT-TO: installer.md "Decided not to".
+7. *`build-live-iso.sh` runs on the host under sudo.* DECIDED-NOT-TO: installer.md "Decided not to".
+8. *Handover list.* See build:installer 1, 3, 4, 5, 8.
+
+## integrate (wave 2)
+
+1. *D2 partial.* See verify:bridge 2.
+2. *G3 partial.* See build:g2 1.
+3. *P2 partial.* See verify:d5 7.
+4. *X4 partial: tampered narHash in a NAR and an unsigned manifest under a signed channel not tested.* FIXED: both are
+   `update-e2e` subtests with mutants (f6cf12503, 50d72dddb; p2-gates X4).
+5. *X5 partial: no rollback after a refusal.* FIXED: `update-e2e` rolls back after four refusals, with a mutant
+   (f6cf12503; p2-gates X5).
+6. *feat/nixos not pushed; hosted CI never ran on the merged head.* FIXED: pushed after wave 2; hosted runs
+   41400977973 and 41450212626 (`docs/nixos/ci.md`). The wave-3 head is not pushed yet (this integration's task).
+7. *nix/ci-hosted-fix not merged.* FIXED: merged (694ed2cb6).
+8. *Bridge gaps.* See build:bridge 1, 3, 5; verify:bridge 2, 3.
+9. *LUKS install with a non-US keymap refused.* See verify:installer 4.
+10. *Release must build every catalogue app.* FIXED: see verify:d5 1.
+11. *X4/X5 subtests owed; G3 wiring.* See 4, 5 and build:g2 1.
+12. *Every signing row used TEST keys.* P3/HARDWARE: the release MOK, cache key, Fulcio identity and payload key are
+    proven only by a real signed release (release environment; p2-gates "P2 status").
+13. *Hosted timings of the new VM checks unmeasured.* FIXED: measured in runs 41400977973 / 41450212626
+    (`docs/nixos/ci.md`); the kernel checks stay off hosted CI until the Rime cache exists (`nix/ci/checks-not-in-ci.txt`).
+14. *proof-final.txt taken one commit before HEAD.* DECIDED-NOT-TO: docs-only difference, outPaths re-checked equal.
+15. *os-release `ID=nixos` + `VARIANT_ID=rime` not done.* FIXED: adb063a79.
+16. *Kept on purpose: rb-website, relock, shellro, default.png.* DECIDED-NOT-TO: still kept (the website rebrand is
+    held; not wave-3 keys).
+
+## Opened by wave 3
+
+Items the wave-3 pieces and this integration found and did not close.
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| The installer still hardcodes `NIXOS_MIN_GB=19` / `NIXOS_PART_MIN_GB=17` (`installer/rime-install-nixos.sh` 93-98) while the release publishes per-variant floors (`nix/release/floors.nix`: plain 16 / 14, plain-gaming 18 / 16); it has no gaming-floor refusal, does not install the published `plain` / `plain-gaming` toplevel by choice, and does not write `/var/lib/rime/switch/rime-feature@gaming.target.on` | FIXED (nix/installer3) | The ISO stamps `nix/installer/choices.nix` (floors.nix's figures) as `nixos-choices.json`; the engine reads its floors only from it, refuses gaming below 18 / 16 GB by name, installs the release's `plain` or `plain-gaming` toplevel (`--install-variant`) and writes the switch with `steam`; the GUI offers the choice. `checks.installer-choices` (5 mutants killed) and `checks.installer-nixos` (both installs pass the installed system's own `rime trust --gate`); OVMF: `artifacts/installer3/lab/` (installer.md "Plain or gaming"). Verified independently (`artifacts/verify-installer3/`): a mutant recording the wrong system in `applied.json` fails the gaming install's own `rime trust --gate`; the gaming refusal is now also checked for a partition (14.5 GB: refused for gaming, plain dry run passes). |
+| Virtualization floors are estimates; the compressed 0.55 branch of the floor maths is unit-tested only | FIXED (wave 4 updates2): all four variants installed and measured in a VM, `nix/release/floors.nix` all `estimated = false`, virtualization floors 16 / 18 GB (closure.md §12, `checks.update-floors` + 4 mutants); the 0.55 branch refused and passed end to end on a btrfs `compress-force=zstd:3` store (`checks.update-variants`, mutants `ratio-one`, `compress-not-forced`) | — |
+| The hosted runner's free disk for a full release closure is not measured | FIXED in part (ci2, measured; verification 11-03: the fetched set and the free disk are measured, the outputs of the 762 derivations the release builds are not sized, and the release job's own `df` is not yet seen): same image ubuntu-24.04 20261025.353.1: the release dry run 41534111012 fetches 2422 paths, 17.1 GiB unpacked; 86 GB available on / before cleanup (run 41450212626). Fits with >60 GB to spare (`docs/nixos/updates-and-release.md` §18 "Hosted runner disk"); a full build's own `df` after the stage is printed by its first run | — |
+| virtualization check: no explicit `swtpm.enable` assertion (the mutant fails it through behaviour) | FIXED (wave 4, twice: updates2 80893d52f and ci2 a2845933e each added the assertion; the integration keeps ci2's line): `checks.virtualization` asserts `virtualisation.libvirtd.qemu.swtpm.enable` before any behaviour; mutant `no-swtpm` fails with "virtualisation.libvirtd.qemu.swtpm.enable is off" | — |
+| `release-standin` not re-run at the deltas head (3 VMs) | FIXED: built at the merged head (`outs-final.txt`) | — |
+| Uncompressed kernel modules | DECIDED-NOT-TO now: at the next `kernel.pin` bump (`docs/nixos/delta.md` 306) | kernel owner |
+| The mass-rebuild pair is timed VM-free only | DECIDED-NOT-TO: `delta.md` §5.2 says why (the weekly pair is VM-timed) | — |
+| A real internet link for the delta/update path | P3/HARDWARE | katana on the real cache |
+| Release MOK signature of the NixOS kernel | FIXED (c78f412c1): nix-kernel-sign run 41604595000 (host rime, source c54c25060) signed image hash 5r2srpcsqwk47dlmfc9pch2wy3rw9kfn with the release key on a hosted runner; `nix/pkgs/kernel/signing/signatures/5r2srpcsqwk47dlmfc9pch2wy3rw9kfn.{sig,json}` committed. `nix/probe/ovmf/mok/run.sh realsig` in the OVMF MOK lab: S1 PASS, the release-signed kernel boots with Secure Boot on, the Rime MOK in MokListRT and the kernel keyring (`/var/lab/rime-nix/artifacts/secureboot/mok-realsig/realsig/results.tsv`). Re-checked at nix/small-fixes (11-04): `rimeKernelSigning` evaluates imageHash 5r2srpcsqwk47dlmfc9pch2wy3rw9kfn, `signed = true`; 37da0abcb keeps checks.kernel-sign off the committed signatures. Any change to the kernel, its config or its module certificates is a new image hash: dispatch nix-kernel-sign.yml again and commit its .sig, or the system boots unsigned (refused under Secure Boot) | kernel owner, at every kernel change |
+| Real PCR 7; `rime luks rebind` succeeding under Secure Boot (T3 path on real firmware) | Split. Under Secure Boot after a real db change: FIXED in the OVMF TPM lab (wave 4, boot2: `run.sh run rebind-sb` 4/4, mutant fails; see "build:boot2"). Real firmware and katana's real PCR 7: P3/HARDWARE | katana |
+| Early-microcode loading not measured directly on hardware; ESP prune unit-tested only | Split. ESP prune on a real full ESP: FIXED (`boot-esp-prune`, e94b69c6a, 2 mutants). The early loader finding the separate Intel cpio: FIXED in a VM (mok `split` U4/U5, gdbstub). A revision being APPLIED: P3/HARDWARE (KVM ignores MSR 0x79) | katana: `dmesg` after the first NixOS boot (`docs/nixos/boot-matrix.md` "Early microcode") |
+| Bridged machines get no per-vendor `[boot]` microcode choice (both vendors by default) | FIXED (bridge3): `rime-hostlayer carry` writes `[boot] microcode` from `/proc/cpuinfo` `vendor_id`; unit tests + mutants `hostlayer-microcode-dropped`/`-swapped` in `bridge-unit`; OVMF A and L: host.toml `intel`, menu and `/boot` intel only | `docs/nixos/bridge.md`, `artifacts/bridge3/` |
+| P3-S1..S4 (Steam), P3-V1 (ChatGPT / Claude Desktop sign-in), P3-E1 (Equibop presence) | P3/HARDWARE | Andre's accounts, katana (`docs/nixos/p3-katana-gates.md`) |
+| R14: `nix/redistributable.nix` does not exist; the OpenAI / Anthropic binaries' redistribution licences are unchecked | FIXED (ci2, R14 commit): decided the public cache never carries them; `nix/redistributable.nix` lists chatgpt + claude-desktop as device-built (catalogue `"build": "device"`, `out` = the `.drv`), every other app is published only if its licence allows it; `manifest`/`publish` refuse a closure holding a vendor path. `checks.release-plan` 181/0 (mutants `publish-vendor-apps`, `unlisted` FAIL), `checks.release-unit` (2 tool mutants killed). `docs/nixos/updates-and-release.md` §6.3 step 3. Verification (11-03): the recipe closures carry no vendor bytes (`nix-store -qR` of each device `.drv`: 4658 and 4374 paths, none of the plan's 6 `non_redistributable` paths, no non-`.drv` path named chatgpt/claude/codex); removing the refusal at the top of `cmd_publish` (the one that runs BEFORE the fill) survived every test, since build_manifest refuses only after the upload: new unit test `test_publish_refuses_a_vendor_path_before_anything_is_uploaded` and release-unit mutant "publish uploads before its R14 refusal" (killed, `/var/lab/rime-nix/artifacts/ci2-verify/release-unit-b0e084013.log`) | — |
+| R14 follow-ups (final state at the wave-4 integration, per part: licence walk FIXED by `checks.release-licences` (1da079e8c: every variant re-evaluated with the unfree gate closed except redistributable licences; it found nixpkgs' `hardware.xone` dongle firmware, licence `unfree`, in all four variants, removed: see "Opened by wave 4"); the `.drv`-as-app defect FIXED (17bf3dcff: `rime recover` reads the output path from a device entry's `.drv` and asks whether THAT exists; test extended, mutant fails "a fetched .drv whose build is absent"); the recipe closure size DECIDED-NOT-TO (`.drv` text files, fetched only by a machine that installs the app); the vendor fetch on a VM: P3/HARDWARE): a device-built app installed on a VM from the recipe (the vendor fetch needs the internet: not VM-proven); a licence walk of the variants' whole system closures (NVIDIA and steam-unwrapped are `unfreeRedistributable` at the pin, read by hand); the recipe closure is ~4.5k small paths per app on the GitHub cache backend. Verification (11-03): the client reads a device entry's `out` (the `.drv`) as if it were the app, so `rime recover status` (recover.rs, `sys.exists(&outs[app])`) reports a device-built app installed at the release's build once its `.drv` is fetched, even when its build on the machine failed; the outs record should carry the derivation's output path (read from the `.drv`) for that check | FIXED (walk, recover) / DECIDED-NOT-TO (recipe size) / P3/HARDWARE (vendor fetch) | release owner: first release with a device entry, on katana or a networked VM |
+| Hosted run 41549507599 (nix/ci2 at ee8a24c59): `checks.luks-tpm-rebind` failed building rimed, rime-agentd test `a_phone_whose_connection_died_gives_the_desktop_its_size_back` ("the dead connection was not dropped"). Cause: tests in the same binary fork (pty's held spawns park a child pre-execve for >= 300 ms) and the child holds a copy of every fd, so dropping the peer left the socket open and the write succeeded | FIXED (ci2 verification, f3fa4ca0b): the test shuts the peer down before dropping it. Proof: with a fork injected right before the drop, the test FAILS the same way without the shutdown (`/var/lab/rime-nix/artifacts/ci2-verify/agentd-exp-fork-noshut.log`) and passes with it (`agentd-exp-fork-shut.log`); mechanism shown in `agentd-forkrace.txt`. Not changed: a held child still holds the daemon's other fds until it is released (production releases it right after the session is recorded) | — |
+| Production NixOS netinstall ISO, a new `.exe` (17 GB floor), rimeos.com's 16 → 17 GB text, a real Windows `stage-image` run | P3/HARDWARE | release environment + Windows lab (installer.md handover) |
+| Hibernation under lockdown | DECIDED-NOT-TO here | kernel owner's call (installer.md handover) |
+| journald files copy-on-write on btrfs (no nocow rule) | FIXED (nix/installer3) | the engine creates `/var/log/journal`, empty and `chattr +C`, before anything is written; `checks.installer-nixos` reads `lsattr` `C` (mutant: directory not created fails; `chattr` alone dropped survives because nixos-enter's tmpfiles `h ... +C` then sets it); the OVMF lab first boots show `C` and no copy-on-write line (installer2's had two) (installer.md "Polish found at first boot", Results installer3) |
+| `desktop` stalled once on the hosted runner (41450212626), not reproduced | FIXED as a mitigation (ci2): diagnosed as plymouthd not answering plymouth-read-write (the console log reproduced line for line by freezing plymouthd); the module now bounds the splash's units and stops plymouthd; `checks.desktop-plymouth-stuck` + mutants `no-bound` (fails as the runner did) and `no-kill` (`docs/nixos/ci.md`, "desktop: a splash that stops answering"). Why plymouthd stopped on the runner: unknown. Verification (11-03): this is a MITIGATION (a bound plus SIGKILL), not a state wait: the consequence is bounded and proven, the cause is not found (follow-up row below); mutant `no-kill` fails only because PID 1 loses the test backdoor after both units time out, not on an assertion | — |
+| Why plymouthd stopped answering plymouth-read-write on hosted run 41450212626 (in its log plymouthd started in the initrd at 4.9 s, `plymouth switch root` finished at 5.3 s, read-write started at 10.6 s and never finished; no drm or plymouth error in between) | STILL OPEN (after wave 4): it needs a recurrence to read; nothing in a VM reproduces it unforced | desktop owner: if `rime: plymouthd ... did not answer` ever appears in a hosted or machine journal, keep that boot's full journal and read plymouthd's state then; until then `checks.desktop-plymouth-stuck` proves the boot goes on |
+| rime-hostlayer `profile_files` should refuse a profile already managed by configuration | FIXED (ci2, 1eb8fc842): a file a carried profile names that the new system manages is not carried (reported), and a symlinked certificate is followed inside the old root; host tests 30/0, 2 mutants. Verification (11-03, 34aa3b646): a named LINK whose target the new system manages (ca= /etc/openvpn/client/ca.crt -> /etc/ssl/certs/ca-certificates.crt) was reported "the profile reads the new system's copy" while nothing was written at the named path, so the profile's file was missing on the new system; the link is now carried, absolute, to the managed target (test `test_a_profile_naming_a_link_to_a_managed_path_gets_the_link`; without the fix it errors: no link at the named path). Host tests 31/0; `checks.hostlayer` rebuilt at 34aa3b646 rc=0 (`/var/lab/rime-nix/artifacts/ci2-verify/hostlayer-34aa3b646.log`) | — |
+| `rime update --download-only` leaves `pending.json`; the `ops.rs` comment wording | FIXED (ci2, beccf4688) wording: `ops.rs` and `rime update --help` now say the download is kept safe from `rime gc` until the next `rime update` installs it. Leaving `pending.json` is the intended behaviour (DECIDED-NOT-TO change it) | — |
+| The delta stream test's 60 s deadline | DECIDED-NOT-TO: a hang fails instead of blocking (`delta.md` 355) | — |
+| Payload key `rime-bridge-payload-1` | P3/HARDWARE | release environment generates it; a bootc release ships `nixos-bridge-payload.pub` (`docs/nixos/bridge.md`) |
+| Plain topology A not re-run on the fixed bridge; the bridge changed again at this integration (223a0758d: every start step after the record rolls back, `check`/`start` read the record) | FIXED (bridge3): OVMF A (plain, `\EFI\fedora\`) and L re-run on the readiness image (#137 f26b97d17, its rime-migrate = this bridge byte for byte minus line 1), SB on, `--rollback-first`, NixOS, ostree, NixOS: both PASS; the bootc verbs refuse after `start` | `artifacts/bridge3/run-{A,L}.log`, `docs/nixos/bridge.md` |
+| LUKS recovery key export | DECIDED-NOT-TO | `docs/nixos/bridge.md` 145 |
+| katana `\EFI\APEX\grub.cfg` shape | P3/HARDWARE | `rime migrate check --explain` on katana |
+| rime-shell PR #49 open (not draft), CI green | DECIDED-NOT-TO here | Andre merges or not |
+| Hyprland "updated to 0.57.0" notice at the first NixOS login | FIXED (bridge3): `ecosystem.no_update_news = true` in Rime's appearance.lua; `desktop` subtest + mutant `desktop.mutants.update-news` (fails `bool: false`); the subtest's no-window check also reads the journal (verify-bridge3: in the test VM the window segfaults before `ps` sees it, so the `ps` check alone could not fail; a getoption-skipped mutant now fails on the journal line); OVMF A and L: lastVersion 0.56.2 -> 0.57.0 with no window (after a serial login); verify-bridge3: a first login straight through the greeter (A, SB on, readiness image) also shows no window (firstrun exits before Hyprland starts), and a negative control on that guest (table cut, firstrun masked) shows it, `artifacts/verify-bridge3/greeter-first/` | `docs/nixos/bridge.md` decision |
+
+## build:boot2 (wave 4)
+
+The wave-4 inputs' secureboot problems 3-6 and the open row above. Evidence under `/var/lab/rime-nix/artifacts/boot2/`
+(not committed).
+
+1. *The MokManager lab proves enrolment with the bootc kernel and a busybox `mokutil`; it does not prove the NixOS
+   installer's own mokutil path.* FIXED: `nix/probe/ovmf/mok/run.sh installer ILAB`. The NixOS installer ISO (the
+   installer lab's own build, TEST MOK) installed `plain` on a Microsoft-keys-only varstore with `mokpw` set
+   (`secureboot: MOK enrolment queued`); MI1 MokManager driven screen by screen on that disk and varstore; V MokList
+   = exactly the TEST MOK; MI2 the installed NixOS, kernel 7.2.9 signed by that TEST MOK, boots to the greeter with
+   Secure Boot on. Mutant `RIME_MOK_MUTANT=wrong-password`: FAILS, nothing enrolled. The release signature (real
+   MOK): P3/BLOCKED on Andre (`nix-kernel-sign.yml` not on main, no `RIME_NIX_KERNEL_HOST`).
+2. *Early microcode: `split` never asserted want_ucode; the early-cpio probe read none and nobody said why; nothing
+   shows the loader reading the separate cpio.* FIXED: U1/U2 assert both names in the image GRUB handed the kernel
+   and U3 none; the "none" was a rootfs probe, and nixpkgs' cpios carry no directory entries, so the names never
+   reach rootfs (`boot-matrix.md` "Early microcode"); U4 walks `find_microcode_in_initrd()` over the gdbstub and it
+   returns GenuineIntel.bin (15,228,928 B, first patch header = the file's), U5 (initrd alone) returns nothing.
+   5/5 PASS. Applied revision: P3/HARDWARE (KVM ignores the write; katana already runs 0x43b, the blob's newest).
+3. *ESP prune-to-fit only unit-tested (mocked free space).* FIXED: `checks.boot-esp-prune` (e94b69c6a), a real
+   256 MiB FAT32 ESP filled to the floor; mutants (no prune → ENOSPC; booted generation not protected; newest
+   first) FAIL. The piece's version never booted afterwards (the task asked for it); the wave-4 verification added
+   the boot: generation 5's entry is kexec'd off the pruned ESP and comes up as generation 5, and a same-size,
+   wrong-bytes initrd mutant that passes every size check FAILS it (kernel panic). A separate Secure Boot boot of
+   the pruned ESP: DECIDED-NOT-TO (`boot-matrix.md` "ESP budget").
+4. *The rebind exit-code branch has no mutant; a successful re-seal under Secure Boot only at T3/P3.* FIXED:
+   `checks.luks-tpm-rebind` (af5208599) tests each half of `failed == 0 && still.is_empty()`; the `||`, no-`failed`
+   and no-`still` mutants each FAIL it. Re-seal under Secure Boot after a db change: TPM lab `rebind-sb` 4/4 PASS,
+   `mutant-rebind-skipped` FAILS S3 and S4. katana's real PCR 7: P3/HARDWARE.
+5. *Checks nobody re-ran at the wave-3 head.* FIXED: at the boot2 head every listed check (desktop, fedora-parity,
+   hostlayer-katana, libexec, release-unit, security, update-client, update-e2e, gaming, polish, catalogue, ci,
+   shell, keymap-luks, luks-boot, boot-loader-scan) has a valid outPath. 14 already were; `release-unit` ("plan ok")
+   and `ci` ("ci: all passed") were built here. The doc-only commits do not move any check's drvPath.
+   Correction (wave-4 verification): the piece's `release-unit` and `ci` outPaths (`ingip0fd…`, `9v7airhh…`) were
+   built from a tree with untracked `__pycache__` directories in `nix/release/` and `nix/probe/ovmf/mok/`
+   (gitignored, but `path:.` copies them), so they are not the clean HEAD's. With those removed, `release-unit`
+   is `p3qm9pwn…` (valid) and `ci` is `x3w87n5a…`, built by the verification ("ci: all passed"); every other
+   listed check has the same outPath with or without them
+   (`/var/lab/rime-nix/artifacts/vboot2/{headcheck-clean.txt,build-ci-clean.log}`).
+
+## Opened by wave 4
+
+Items the wave-4 pieces (`nix/boot2`, `nix/bridge3`, `nix/installer3`, `nix/updates2`, `nix/ci2`), their
+verifications and the wave-4 integration found, each with its state on `feat/nixos` after that integration.
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| `check_workflow` refused a main-only `if:` written without spaces (`github.ref=='refs/heads/main'`) or with its operands swapped (ci2 verification) | FIXED (wave-4 integration, 1318549ac): `main_only` matches each `&&` term against both spellings, exactly; `checks.release-unit` accepts both rewrites; the old checker refuses both (`integrate-wave4/check-workflow-mutant.txt`) | — |
+| `rime recover` counted a device-built app installed once its `.drv` was fetched (ci2 verification) | FIXED (wave-4 integration, 17bf3dcff): see the R14 follow-ups row | — |
+| nixpkgs' `hardware.xone` pulled `xone-dongle-firmware` (licence `unfree`, not redistributable) into all four published variants; found by the new `checks.release-licences` on its first run | FIXED (wave-4 integration, 1da079e8c): `nix/modules/kernel.nix` ships the xone driver and `xpadneo` without nixpkgs' firmware option (bootc never shipped that firmware either: Containerfile.core, "dongle users run xone-get-firmware.sh once"); wired pads and Bluetooth pads unchanged; mutant `xone-dongle-firmware` FAILS the check | — |
+| The Xbox wireless DONGLE has no firmware on NixOS (the bootc image had the same gap; its users ran `xone-get-firmware.sh`) | STILL OPEN: a device-side fetch is the answer (a helper pinned to nixpkgs' URL and hash writing `/var/lib/rime/firmware`, which a firmware search path points at), like the device-built apps; it needs the internet to prove | kernel/gaming owner; P3/HARDWARE to prove with a real dongle on katana |
+| The installer GUI's "Include gaming (Steam)" box was not driven in the OVMF lab (the lab installs headless from an answers file) | DECIDED-NOT-TO for P2: the box only adds `gaming=yes` to the answers the engine reads, which the lab drives; its page is rendered with and without it and `checks.installer-choices` kills the "gaming dropped from the GUI's answers" mutant (`docs/nixos/installer.md` "Plain or gaming") | installer owner, at the first release ISO |
+| `build-live-iso.sh`'s `NIXOS_CHOICES` is not compared with `nix/installer/choices.nix` when the ISO is built | DECIDED-NOT-TO: the stamp IS `nix eval --json --file nix/installer/choices.nix` (installer.md table), so there is no second copy to drift | — |
+| `gaming=yes` refused on a bootc ISO is untested | STILL OPEN (low value): the bootc engine never reads `gaming`; the GUI shows the box only with the NixOS stamp (`installer.md` 277) | installer owner |
+| The `no-chattr` mutant survives (`chattr +C` alone dropped) | DECIDED-NOT-TO: nixos-enter's tmpfiles `h /var/log/journal ... +C` sets the attribute anyway; the directory-not-created mutant fails (`installer.md` 260) | — |
+| LUKS install I3 not re-run on installer3's engine | DECIDED-NOT-TO for P2: installer3's lab ran `install gb` and `firstboot gb` (I3, SB on) on its own ISO, PASS (`installer.md` Results installer3) | — |
+| Topology E not re-run on the readiness image or on bridge3's bridge (D1's evidence is bridge2's, SB on); the greeter-first login measured only by verify-bridge3 | FIXED (nix/topology-e, 383110a9d; evidence `/var/lab/rime-nix/artifacts/topo-e/`, `run-E.log` PASS): E end to end on the readiness image (#137 1a4070580 as a layer on 2026.11.03.5, rime-migrate = this bridge, `readiness-image.txt`), Secure Boot ON with the RELEASE-signed NixOS kernel (image hash 5r2srpc…, the committed signature; MokList = the Rime MOK only; `kernel-release.txt`): repair-e, check, a rolled-back start, start, the first NixOS login through rime-greet before any serial login (`E/E-nixos-greeter-before-login.png`, `E/E-nixos-desktop.png`), home checksums OK (`E/E-nixos-checks.txt`), back on ostree, NixOS again (`docs/nixos/bridge.md` "What the OVMF lab proved on E") | — |
+| bootc verbs not probed after booting back into ostree (bridge3 `--rollback-first`) | FIXED (nix/topology-e, 383110a9d; `artifacts/topo-e/{E,A}/*-probe-*.txt`): `verb-probe.sh` runs all 11 verb forms #137 holds plus `rime-update-check` on the guest's real record: allowed with no record, after a rolled-back start and after a reboot into ostree; refused after `done` (also booted back from NixOS), after a SIGKILLed start (also after a reboot; a second start refuses), `rime` and `rime-update-check` agree in every state. The probe found the bridge disagreeing after a Ctrl-C'd start (`failed: ""`): fixed in c69d44003 (decision "The start record is read one way everywhere", 5 mutants) | — |
+| Main's `rime-migrate` (#137, merged d97a26af19, release 2026.11.04) still has the old record reader (a Ctrl-C'd start leaves `failed: ""`; its `check`/`start` then refuse `[start-unfinished]` for ever while `rime` allows the bootc verbs; `artifacts/topo-e/A/A-int-check-readiness.txt`) | STILL OPEN (bootc side): fixed here in c69d44003; main needs the re-copy described in `docs/nixos/bridge.md` Handover "Readiness release, topology-e" (rime-migrate lines 1063-1068 and 1763, test_bridge_d2.py); Rust and rime-update-check need no change. Unreachable until the release payload key ships (`start` refuses `[payload-key-missing]`) | bootc owner: a follow-up PR to main, before the release payload key ships |
+| No test that GRUB parses the pruned ESP's menu | DECIDED-NOT-TO: `boot-esp-prune`'s verification boots generation 5's entry off the pruned ESP (kexec), and a wrong-bytes initrd mutant fails it; a Secure Boot boot of a pruned ESP: `boot-matrix.md` "ESP budget" | — |
+| AMD early microcode proven by unit tests only | P3/HARDWARE: the OVMF gdbstub run (U4/U5) is Intel; an AMD machine reading its cpio needs AMD hardware | an AMD Rime machine |
+| The hosted release job's own `df` after the stage | P3/HARDWARE (release environment): printed by the first full release run | release owner |
+| The Intel microcode revision APPLIED on katana | P3/HARDWARE | katana `dmesg` after the first NixOS boot |
+| `checks.hostlayer-katana` PASSES in the store without katana's snapshot (it prints SKIP), so its outPath says nothing about H1-H10: at this integration the store check passed while the real-snapshot run FAILED on bridge3's `[boot] microcode` carry | FIXED for wave 4 (d3825ed06, real-snapshot run EXIT 0); DECIDED: every integration re-runs `nix/ci/integrate/kat-run.sh` from its own checkout (until 11-04 a copy under `artifacts/integrate-wave<N>/`) (the snapshot is root 0700 and never committed), and the H rows cite only that run | integrator, at each integration |
+| `checks.release-licences` evaluates four release toplevels again; its hosted-runner time and memory are not measured (`docs/nixos/ci.md` measures the other checks) | STILL OPEN: measured by the first hosted CI run that includes it; if it does not fit, it moves to `nix/ci/checks-not-in-ci.txt` | CI owner |
+
+## build:desktops (piece 1, `nix/desktops`)
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| GNOME under rime-greet has no screen lock: gnome-shell creates its screen shield only when `org.gnome.DisplayManager` answers, and shows "Screen Lock disabled: Screen Locking requires the GNOME display manager" at login (`/var/lab/rime-nix/artifacts/desktops/vm/shots-gnome-6/gnome-session.png`) | FIXED (5ba9b6a68, branch `nix/desktop-lock`): `rime-gnome-unlock` owns `org.gnome.DisplayManager` (`docs/nixos/desktops.md` §12.4, §12.10); `checks.desktop-lock-gnome` PASS (`/var/lab/rime-nix/artifacts/lock/vm-gnome-4.log`, `shots-gnome-4/`: no notice, Super+L, Quick Settings button, ScreenSaver.Lock, idle, before suspend, wrong password refused, right one unlocks); `checks.gnome-unlock` 33/0; mutants pam-ignored, no-shim and four unit mutants FAIL; re-proved after the security review at 8fba04cf6 (`vm-gnome-9.log`, `shots-gnome-9/`; 48/0; 14 unit and 3 VM mutants FAIL, `review/`) | desktops owner: on real hardware with the P3 rows below |
+| greetd 0.10.3 joins the session argv with spaces and runs it under `sh -c`, so rime-greet's `["sh","-lc",cmd]` ran only the first word of a multi-word Exec (Plasma exited at once; bootc's `Exec=niri --session` starts niri without `--session`) | FIXED on `nix/desktops` (caaf7c8cd greeter quotes the command, `tests/test-rime-greet-sessions.sh` §9 + mutant `greet-argv-unquoted`; 5e223e061 Rime's session files carry a one-word Exec) for NixOS; bootc gets it when GreetContext.qml ships there (`desktops.md` §12.6) | bootc owner: ship the greeter change in a bootc release; niri under greetd not booted on bootc |
+| COSMIC's first login opens COSMIC Initial Setup with its screen reader on (orca runs as a child of cosmic-session; `/var/lab/rime-nix/artifacts/desktops/vm/shots-cosmic-2/cosmic-power-saver.png`, `cosmic-2.log`; again in `cosmic-3.log`, `shots-cosmic-3/cosmic-session.png`) | FIXED (d75c5d479, `nix/desktops-polish`): cosmic-initial-setup 1.11.0 sent `ScreenReaderEnabled(true)` on its a11y subscription's Init whatever it found, at-spi stored it in dconf, cosmic-session started orca (every login). Patched to send the state it found (desktops.md §12.9). `checks.desktops-eval` 353/0 (mutant `cosmic-setup-unpatched` 349/4 FAIL); `checks.settings-app-cosmic` PASS with Initial Setup open: no orca, ScreenReaderEnabled false, dconf key unset, on/off control starts/stops orca (`artifacts/polish6/cosmic-2.log`, `cosmic-pass/cosmic-initial-setup.png`); mutant `screen-reader-unpatched` FAILS | a nixpkgs bump that changes the line fails the build (`--replace-fail`): re-read `src/page/a11y.rs` then |
+| pam_kwallet ran at every greetd login on a KDE system (plasma6 adds it to `login`, greetd substacks `login`): `ksecretd --pam-login` in a Hyprland login (`/var/lab/rime-nix/artifacts/desktops/vm/kde-3.log`); the VM test looked for `kwalletd`, the daemon's old name | FIXED on `nix/desktops` (29e3fc0a5): off in `login`; `kde-4.log` PASS (no ksecretd in a Hyprland login); `desktops-eval` row (mutant kwallet-pam-login-eval) + VM mutant `kwallet-pam-login` (`mut-kde-kwallet-pam-login.log`, killed) (`docs/nixos/desktops.md` §12.1) | — |
+| The `rime-nix` container's `pids.max` is 2048: a two-VM desktop test died at `qemu_thread_create` EAGAIN (`cosmic-1.log`) when the container already ran other builds | FIXED 2026-11-05: the container now runs with `--pids-limit 8192` (and `--init`, so dead helpers no longer hold PIDs) | — |
+| `checks.polish` not re-run on `nix/desktops` (it boots three VMs at once) | FIXED at the wave-5 integration: run alone on the merged head, PASS, `/nix/store/xyw6l1hi…-vm-test-run-rime-polish` (`integrate-wave5/F-D/summary.txt`) | — |
+| `rime-update.service` (started by `Updates.Apply`) had no `restartIfChanged = false`: its ExecStart names rimed's store path, and switch-to-configuration-ng (source at the pin) restarts a changed unit that is activating, so an Apply whose release changes rimed would be classified `boot` by rule 3 and a live switch would stop the unit running it (read from the source, not observed) | FIXED on `nix/desktops` (`nix/modules/update.nix`, also `X-StopOnRemoval = false` as nixpkgs' nixos-upgrade.service; `desktops-eval` rows, mutant `mF-restart` fails all 16 variants, `/var/lab/rime-nix/artifacts/verify-desktops/mut-mF-restart.log`) (`docs/nixos/desktops.md` §12.1, §12.7); proven by evaluation only, no VM runs an Apply that changes rimed | desktops owner: a VM subtest when the update tests get two releases with different rimed |
+| GNOME, KDE Plasma and COSMIC on real hardware (NVIDIA, a laptop panel, a lid, a battery for COSMIC's battery applet) | P3/HARDWARE | katana after the P3 GO |
+
+## build:settings (desktops wave: Rime Settings and the quick-settings integrations)
+
+rime-shell `nix/settings-app` (pushed, ab8ca519; 0d5aac66 after verification) and rime-os `nix/settings-pkg`, both
+merged into their `feat/nixos` at the wave-5 integration. Evidence in `/var/lab/rime-nix/artifacts/settings/`, verification in `/var/lab/rime-nix/artifacts/settings-verify/`. Decisions: `docs/nixos/desktops.md` §13.
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| Rime Settings as an app (`settings.qml`, `rime-settings`, `org.rimeos.Settings`), Shell-only pages hidden, no `hyprctl` | FIXED (rime-shell 9ad74d73, 232dfe6b, ab8ca519): `tests/run-settings-app-test.sh` 28/0; mutants QS_APP_ID dropped, `-n`/IPC dropped, Display page left in each FAIL (`artifacts/settings/shell-tests/`, `mutants-shell/`) | — |
+| The Shell's power control follows the PPD API, falls back to `Rimed1.Power.Tier` | FIXED (rime-shell 147a2b4c): `tests/run-power-profile-service-test.sh` 15/0; mutants fallback removed, polling put back each FAIL | — |
+| PowerProfileService took the PPD path whenever the name had ANY owner: on bootc (power-profiles-daemon enabled in `Containerfile.core`, active on katana) the Shell would have set that daemon's profile instead of rimed's tier | FIXED in verification (rime-shell 0d5aac66): the owner check asks the power-profiles name for rimed's own object; test case "another daemon owns the API" + mutant owner-by-name (FAILS); `flake.lock` re-locked to 0d5aac66. Since rime-os #139 (main) bootc masks power-profiles-daemon and rimed owns the name there too, so the check now finds rimed on both systems; it stays as the guard for a system that runs the daemon on purpose | — |
+| Rime Settings packaged (rime-shell.nix: `rime-settings`, `.desktop`, icon, polkit `org.rimeos.rime.system`) and rime-shell locked at ab8ca519, re-locked at 0d5aac66 in verification | FIXED (ebfabd397, 9a6a5f5df, verification re-lock) | release owner: merge rime-shell `nix/settings-app` into `feat/nixos` before the release job re-locks the input (the lock's `original` is still `feat/nixos`) |
+| GNOME Quick Settings extension `rime@rimeos.org` | FIXED (ebfabd397): `checks.settings-quicksettings-gnome` 21/0 against the fake rimed; mutant `no-properties-changed` FAILS (11 failed) | — |
+| Plasma tray applet `org.rimeos.quicksettings` | FIXED (78b429abb): `checks.settings-quicksettings-kde` 7/0 (qmltestrunner, plasma-workspace's dbus module); mutant `no-properties-changed` FAILS (3 failed) | — |
+| COSMIC panel applet `cosmic-applet-rime` + panel default | FIXED (c0660e953): `checks.settings-quicksettings-cosmic` 19/0 (zbus model crate, cargo test); mutant `no-properties-changed` FAILS (9 failed); the applet builds (`.applet`), the panel default lists it before the power applet (`.panelDefaults`) | — |
+| Each integration installed exactly with its desktop; GNOME's dconf list | FIXED (723ea7e3b): `checks.settings-integrations-eval`, 16 variants, 0 problems | — |
+| KDE `Updates.Apply` cannot request interactive authorization (plasma's dbus module has no flag) | FIXED and proven on KDE (bf67a3b34, `nix/desktops-polish`): rimed asks polkit with AllowUserInteraction for `Apply` whatever the message flag (since 677034535). `checks.settings-app-kde`: Update pressed in the applet raises Plasma's polkit agent (`artifacts/polish6/kde-pass/polkit-prompt.png`); Escape refuses (`not authorized for org.rimeos.rimed.apply-update`, rime-update.service untouched); the admin password starts rime-update.service (`kde-3.log`). Mutant `apply-not-interactive` FAILS (no prompt). The press goes through the applet's test hook (desktops.md §13 wave 6), not a pointer click | none |
+| rimed `Mode.Active`/`Set`, `Updates`, the PPD API (§6.2, §7) | FIXED: `nix/desktops` (677034535) and `nix/settings-pkg` merged into `feat/nixos` at the wave-5 integration, with rime-os main's #139 power-profiles code reconciled into one implementation (`docs/nixos/desktops.md` §12.8) | — |
+| VM check `settings-app-gnome` (§8.2) | FIXED (35cb58943) on `nix/settings-pkg` + `nix/desktops`: passes on the temporary merge (`artifacts/settings/vm/gnome-merged-PASS.log`, `gnome-pass-screens/`); mutants wrong app id and wrong `shell-version` FAIL. Its `checks-not-in-ci.txt` line is deleted at the wave-5 merge, which runs it (result in `nixos-pivot/STATE.md`, wave-5 entry) | — |
+| VM checks `settings-app-kde`, `settings-app-cosmic` (§8.2; mutant panel default not found) | FIXED (bf67a3b34, `nix/desktops-polish`): both written and PASS (`artifacts/polish6/kde-3.log`, `cosmic-2.log`); mutants kde tray-not-adopted, wrong-app-id, apply-not-interactive and cosmic panel-default-not-found, screen-reader-unpatched each FAIL (`mut-*.log`); both run in CI (desktops.md §13 wave 6: closures 11.1/11.2 GB, test scripts 97-108/72 s) | none |
+| A Power change issued before PowerProfileService's owner check answers goes to the `rime tier` fallback | FIXED (rime-shell nix/ppd-queue 802ad676): the set is queued (latest wins) and applied on the backend the check finds; with no consumer (the IPC hook, page off screen) the set starts the check itself; a queued `performance` waits up to 2 s for Quickshell's PowerProfiles to read the Profiles list (on first use it refuses performance as "not present for this device", found by the new no-consumer case). run-power-profile-service-test.sh 29/0 (queued ppd, queued fallback, no consumer); mutate-settings-app.sh caught 10/10 incl. no-queue, no-kick, no-list-wait (`artifacts/small-fixes/ppd-queue/`). flake.lock not re-locked (coordinator) | — |
+| GNOME started by rime-greet has no lock screen ("Screen Locking requires the GNOME display manager") | FIXED (5ba9b6a68): same as build:desktops (`checks.desktop-lock-gnome`, `/var/lab/rime-nix/artifacts/lock/vm-gnome-4.log`) | desktops piece |
+
+## Opened by wave 5 (integration, 2026-11-03)
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| The Shell's power-profiles path shows no reason when rimed refuses a change: Quickshell 0.3.2 writes `ActiveProfile` itself (`PowerProfiles::setProfile` sets the value, then `pushPropertyUpdate` only logs an error), so the label keeps the refused pick until the next PropertiesChanged and `PowerProfileService.error` stays "" (`docs/nixos/desktops.md` §12.8). The `rime tier` path says why (#54) | FIXED (rime-shell nix/ppd-reason-keyring f6a56a7b; rime-os a456a645f): PowerProfileService writes `ActiveProfile` with one `busctl --system set-property` per press (reads stay on Quickshell's PowerProfiles: no polling, no process at rest). The pick shows at once; a refusal puts the label back on the profile in force and sets `error` from busctl's stderr (polkit's no prints as "Access denied"). Rime Settings' Power page shows the reason ("Not changed"). Not taken: a rimed "last refusal" property (a per-caller answer broadcast to every client of a standard API, racing GNOME's and KDE's writes) and a Quickshell patch (bootc runs an unpatched Quickshell); rimed unchanged. Proof: `run-power-profile-service-test.sh` 37/0 with a refused case (fake rimed `RefuseSets`), mutants quickshell-write, keep-pick, no-reason caught (12/12 in `mutate-settings-app.sh`); `checks.settings-app-gnome` with a polkit rule refusing switch-profile: page shows `balanced` + "Not allowed: ..." 0.3 s after the press, rimed's tier unchanged, screenshot; VM mutant power-refusal-silent FAILs (`artifacts/ppd-keyring/shell/`). The check needs the rime-shell input moved to f6a56a7b (`settings powerState`) | — |
+| The bootc rimed serves `Updates` and the power-profiles names, and the greeter change reaches bootc (`docs/nixos/desktops.md` §12.5a): `Updates.Apply` on bootc would start a `rime-update.service` the image does not ship; `GreetContext.qml` not booted on bootc | STILL OPEN: nothing of this reaches bootc before the P2 merge of `feat/nixos` into main | P2 merge: gate `Updates` on NixOS, boot the greeter on bootc |
+| Kept-panel Hyprland VM harness (`scratch/smooth-hypr/os/nix/tests/shell-kept{.nix,-driver.py}`, four phases) not in `nix/tests` | FIXED + DECIDED (nix/small-fixes): `checks.shell-kept` (`nix/tests/shell-kept{.nix,-driver.py}`, phase short; full/probe/input kept as phases). The driver used to exit 0 with FAILs (the scratch short runs reported rc=0 at 47/1); it now exits 1 and the check fails. Its Hyprland-log assertion never passed with the log really read (short-base 209, short-head 184 lines: Hyprland's own ERR/WARN noise, some from the harness's wev/fullscreen steps); it now counts only ERR/WARN naming a layer surface or the Shell plus any layer-rule complaint, and prints the rest (classifier checked on 45 real lines, 0 counted, and 3 synthetic layer lines, all counted: `artifacts/small-fixes/shell-kept/classifier-check.txt`). Measured on katana: 3/3 PASS 48/0, wall 233/224/222 s (test script 211 s), 4 GB VM; `--rebuild` reports "may not be deterministic" because the output carries timings (not a test failure). Was in `nix/ci/checks-not-in-ci.txt` for a Shell that sometimes never started; that cause is fixed (next row) and the check runs in hosted CI from nix/shell-start (2026-11-04: 15/15 unforced, plus 1 pinned to 4 CPUs and a `--rebuild`). The failure dump now prints processes and the journal. Evidence `artifacts/small-fixes/shell-kept/` (attempt1/, attempt2/, run1-3) | — |
+| avahi can die at boot and then fail a live switch: `resolvconf update` runs openresolv's `libc.d/avahi-daemon` hook (`kill -HUP $(cat /run/avahi-daemon/pid)`) while avahi has written its PID file but not yet installed its SIGHUP handler; avahi dies (systemd counts SIGHUP as a clean exit), the PID file stays, and every later start fails "Failed to create PID file: File exists" until a reboot. `checks.desktops-install-kde` hit it once at the integration: `rime install kde` started avahi live, the start failed, the install answered "applies at the next restart" and exited 1 (`integrate-wave5/F-J/desktops-install-kde.log`, boot lines 10.05 s and 637.8 s); the same `.drv` passed on its re-run (`F-L/`). In nixpkgs, not in the merge: every earlier run shows the same boot-time resolvconf update | FIXED (nix/small-fixes, `nix/modules/avahi-resolvconf.nix`): the hook's `avahi_daemon_pidfile` (set in /etc/resolvconf.conf) now names `/run/avahi-daemon/ready`, which the unit's ExecStartPost writes once avahi has its bus name (after `daemon_signal_init`), so a SIGHUP reloads instead of killing; the PID and ready files are removed with full privileges (`+`) before each start and after each stop (a plain `-rm` runs in nixpkgs' sandbox without CAP_DAC_OVERRIDE and fails exactly as avahi's own removal does). Ordering after resolvconf.service was not taken: NetworkManager runs resolvconf on every DNS change, not only at boot. `checks.avahi-resolvconf` (nixpkgs kernel, in CI): ten restarts each with the hook's kill fired the instant its file is non-empty, a real `resolvconf -u`, a SIGKILLed avahi and a planted dead PID file; mutants `no-ready-gate` (FAIL at restart 0: "avahi is inactive after the hook's SIGHUP") and `unprivileged-cleanup` (FAIL: "Failed to create PID file: File exists"). `checks.desktops-install-kde` PASS with the fix (`artifacts/small-fixes/avahi/`) | — |
+| rime-aid `a_bwrap_that_hangs_is_killed_and_refused` ran `exec sleep 5` through the probe's PATH (`AID_SANDBOX_PATH` = `/run/current-system/sw/bin`), which the Nix build sandbox does not have: the rimed package failed on main's test | FIXED (866426b77): the test names `sleep` by its path from the test's PATH | — |
+| The integration helpers `drive.sh`, `outs.sh`, `kat-run.sh` lived only as copies under `artifacts/integrate-wave<N>/`, defaulting to the removed `/work/wt-integrate5` (with no `set -e`, a failed `cd` ran them in whatever directory they were started from) | FIXED (nix/small-fixes): committed as `nix/ci/integrate/{drive,outs,kat-run}.sh`; the tree is the script's own checkout (RIME_TREE overrides; refused without a flake.nix), logs go to `artifacts/<checkout name>/` (RIME_ART), builds to RIME_BUILD_DIR; kat-run maps a checkout under /var/lab/rime-nix to /work. The wave-5 copies now refuse to run without RIME_TREE | integrator |
+| `tests/test-rimed-ui-boost.sh` under podman's default `/sys/firmware` mask skipped the fake ACPI bind silently and failed four assertions later (also on main; workaround `--security-opt unmask=/sys/firmware`) | FIXED (nix/small-fixes): it mounts its own tree over a masked `/sys/firmware` inside its namespace and binds the fake acpi there; the first assertion now includes `platform_profile`. In the rime-nix container with the real rimed/rime: 42/0 plain and 42/0 with `RIME_TEST_MASK_FIRMWARE=1` (podman's mask); mutant without the fallback FAILS "fake sysfs in place"; the old script under the same mask fails 4 (`artifacts/small-fixes/ui-boost/`) | — |
+| `checks.shell-kept`: in 1 of 6 boots (`artifacts/small-fixes/shell-kept/attempt2/run1.log`) Hyprland ran `rime-shell-autostart` but no Quickshell instance ever appeared (`qs ipc show`: "No running instances" after 180 s); the other 5 boots started it in seconds. That run had no process list or journal | FIXED (rime-os nix/shell-start 9dcd07ebc): the launcher's "already running" test (`pgrep -f '^…(quickshell|qs) -(c|p) <dir>( |$)'`) also matched IPC clients in the global-option form, `qs -c <dir> ipc show` (the checks' own 1 s poll), `qs -p <dir> ipc call …` (`rime shell`) and hypridle's lock command; one alive at that instant made it log "already running — skipping" to a stderr nobody reads and exit 0. Forced with a decoy client (`checks.shell-start`): before the fix the Shell never answered in 180 s and the journal has no launcher line (`runs/before-forced-1/log.txt`); after, 6/6 PASS. Now: only option tokens may follow the config path, quickshell's own `-n` is the second guard, every launcher line goes to the journal (`journalctl -b -t rime-shell-autostart`), a watcher retries a quickshell that exits before answering (3 starts) and otherwise reports at err plus a Hyprland notification (`runs/fix2-forced-r1-1/out/report-dead.png`); a hang is reported, not restarted. Unforced: 30/30 consecutive boots (15 shell-kept, 15 hypr-lua), every one up on start 1 in 4-5 s (`runs/unforced-summary.txt`). Mutants: VM `clients-count-as-shell` and `no-watcher` FAIL; unit `old-regex`, `no-dup-flag`, `no-watcher`, `journal-noop` FAIL (`tests/test-rime-shell-autostart.sh` 15/15). Not excluded: some other cause of the original run (it left no dump); the journal now names any future one. Evidence `artifacts/shell-start/` | — |
+| `rime-desktop-menu` (labwc) calls `rime-shell-autostart` synchronously to restart a Shell that did not answer, then polls; the launcher execs quickshell, so the call returns only when the Shell exits and the poll never runs while it lives (pre-existing; seen while fixing the Shell start, not run) | FIXED (rime-os #151, cherry-picked here): `setsid -f` with stdio closed, poll up to 10 s; `tests/test-rime-desktop-menu.sh` (launcher that blocks like the real one) 8/0, the foreground call fails 4 | — |
+| `checks.shell-kept`'s seed copies `share/rime/hypr` from the store with `cp -r`, which keeps read-only modes: `rime-shell-firstrun` fails "Permission denied" on `appearance.lua` in every shell-kept boot (test rig only; hypr-lua already does `chmod -R u+w`, shell-start now does) | FIXED: the seed runs `chmod -R u+w` on the copy, as hypr-lua and shell-start do | — |
+| Hyprland on NixOS logs "XCursor couldn't find shape default/left_ptr" in the shell-kept VM: Rime's `session.lua` sets `XCURSOR_SIZE` but no `XCURSOR_THEME`, and nothing provides `share/icons/default` | FIXED (nix/hypr-lua-only): `session.lua` sets `XCURSOR_THEME=Adwaita` (adwaita-icon-theme is installed) unless the session already names one; Hyprland reads the env after config init (Compositor.cpp: config 696, CursorManager 756). checks.hypr-lua asserts it: shape fallbacks 933 → 0, "librarypath is empty" 6 → 0 (`review-fixes/vm/hl-out/hyprland.log` vs `vm/hl-out/hyprland.log`). Left: 36 DEBUG lines "failed to find a legacy shape with name dnd-copy/plus, skipping" (alias names Adwaita does not ship; Hyprland skips them). Not checked on a real rime-greet login | — |
+| `checks.desktops-install-kde`, 1 of 3 runs with the avahi fix (`artifacts/small-fixes/avahi/kde-run2.log`): in the Plasma session the test's `busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets/collection/login …Collection Locked` made gnome-keyring-daemon 50.0 (the `--login` one) ABORT (`gkd_secret_service_get_pkcs11_session: assertion 'client' failed` → GLib `invoke_get_property_in_idle_cb: assertion failed: (error != NULL)`, core dumped), so the subtest "in KDE Plasma: … one secrets service" failed. avahi was fine in that run (the install and live switch passed). Runs 1 and 3 passed and show no such assertion | FIXED (rime-os nix/ppd-reason-keyring 2d48fb87f, `nix/modules/gnome-keyring-client-race.{nix,patch}`). A real-user risk, not a test artefact: the daemon creates its per-caller client from a message filter that only schedules an idle; when the property-get idle runs first, `gkd_secret_service_get_pkcs11_session` finds no client, the collection getter returns NULL without an error and GDBus aborts. Any session-bus program reading a collection property (libsecret's proxies do) can kill the `--login` daemon the password unlocked. Measured on a private bus, a fresh connection per read: unpatched 10 of 10 daemons died within 318-4308 reads, patched 0 of 10 in 50,000. The carried patch (nixpkgs overlay from a module, asserted on the shipped system) creates the client where it is needed and makes the object lookup set a D-Bus error. `checks.gnome-keyring-client-race` (console login → PAM `--login` daemon, `--start` as rime-secrets-start, 6000 reads): PASS; mutant `unpatched` FAILs 3 of 3 (reads 1415, 4320, 947). The test's read in desktops-install.nix stays as it is (a real client read; it found this). `checks.desktops-install-kde` with the patch (the installed system runs the patched store path): 3 of 3 PASS, each with the test's 4 `Locked` reads and no `assertion 'client'` (runs 2 and 3 with `--rebuild`, whose exit 1 is only "may not be deterministic": screenshots differ) (`artifacts/ppd-keyring/kde-patched-{1,2,3}.log`) | — |
+| bootc (the shipped product) has the same gnome-keyring abort: Fedora 45's gnome-keyring 51.1-1.fc45 (GLib 2.90) died in 9 of 10 daemons within 71-2796 plain `Locked` reads (the tenth lived through 5000) on a private bus, with the same `assertion 'client' failed` → `invoke_get_property_in_idle_cb: assertion failed: (error != NULL)` (`artifacts/ppd-keyring/keyring/fedora45-10x5000.log`, `fedora-repro.sh`, run as a non-root user: as container root 51.1 aborts earlier on dropping capabilities). The NixOS fix is an overlay and does not reach bootc | OPEN (bootc, base image): `nix/modules/gnome-keyring-client-race.patch` applies to 51.1 as it is (`patch -p1 --dry-run`: offsets only); carrying it means rebuilding the gnome-keyring RPM in the base image (a release), so it is Andre's/base owner's call against the pivot timeline. Nothing changed on bootc here | base owner |
+
+## Opened by wave 6: desktop lock (`nix/desktop-lock`, 2026-11-04)
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| Screen lock in KDE and COSMIC under rime-greet never exercised | FIXED (5ba9b6a68): `checks.desktop-lock-kde` and `checks.desktop-lock-cosmic` PASS (`/var/lab/rime-nix/artifacts/lock/vm-kde-4.log`, `vm-cosmic-4.log`, `shots-*-4/`): `loginctl lock-session` and the desktop's shortcut lock, a wrong password is refused (pam_unix failure logged, still locked), the right one unlocks, no session or seat added | desktops piece |
+| cosmic-greeter 1.11 never sets logind's LockedHint: it stays `no` while COSMIC is locked (`vm-cosmic-4.log`, both rounds); its own lock record is `$XDG_RUNTIME_DIR/cosmic-greeter-<session>.lock` (src/locker.rs). Anything asking logind whether a COSMIC session is locked is told no. Rule 6 (`desktops.md` §3.5) is not affected today: it asks only sessions that run Rime Shell | STILL OPEN (not Rime's code) | desktops owner: if a Rime component ever reads LockedHint for non-Rime sessions, read cosmic-greeter's file for COSMIC (as `checks.desktop-lock-cosmic` does), or carry a cosmic-greeter change that calls SetLockedHint |
+| Plasma's lock screen shows "Switch User", which asks the display manager for a second greeter; greetd cannot start one (`/var/lab/rime-nix/artifacts/lock/shots-kde-4/kde-wrong-password.png`). GNOME's is off (`disable-user-switching`) | STILL OPEN (not pressed in the VM; what it does under greetd is not measured) | desktops owner: press it in a VM; if it fails or misleads, turn user switching off for Plasma (kscreenlocker / KActionAuthorization `action/switch_user`) |
+| GNOME's Quick Settings lock button is shown (`shots-gnome-4/gnome-quick-settings.png`) but not clicked by the check; it calls the same lock as Super+L and `org.gnome.ScreenSaver.Lock`, which are tested | STILL OPEN (screenshot only) | desktops owner: click it in the VM if pointer coordinates become reliable |
+| A real suspend and resume while GNOME is locked: the VM's virtio devices refuse s2idle (-95), so the check proves the lock is set before `PM: suspend entry`, not a full sleep and wake | P3/HARDWARE | katana after the P3 GO |
+| pam_gnome_keyring does not get the unlock password from `rime-gnome-unlock` ("unable to locate daemon control file": the root daemon lacks the user's environment). Harmless today (the keyring is unlocked at login and a screen lock does not lock it) | STILL OPEN (accepted) | desktops owner: only if a keyring lock-on-screen-lock policy is ever added |
+| Security review of 1ef5856cc, item 1 (Medium): channel exhaustion (channels keyed by pid, no per-uid cap, idle channels live for ever, no `SessionRemoved` cleanup, no `LimitNOFILE`; a conversation stored before it started) | FIXED (8fba04cf6): keyed by uid, two per uid (oldest closed), 60 s idle timeout after connect, closed on `SessionRemoved`, `LimitNOFILE=1024` + exit-for-restart past 3/4 of it, conversation started before `return_value` and dropped if it failed; unit tests + mutants `channel-cap`, `no-idle-timeout`, `session-removed-ignored`, `stored-before-start`, `fd-watchdog-off` FAIL (`/var/lab/rime-nix/artifacts/lock/review/mutant-*.log`) | — |
+| Review item 2 (possibly High): any local user could connect to the 0666 private socket and hold a GDBusServer handshake thread open | FIXED (8fba04cf6): socket chmod 0600 + chown to the session uid before the server starts, server stops listening after its one client. GLib 2.88.3 checked: one thread per incoming connection, unbounded, handshake with no timeout (gdbusserver.c:1104, :995). VM: `nobody` gets "Permission denied", the user connects (`/var/lab/rime-nix/artifacts/lock/vm-gnome-9.log`); mutant `socket-world-connectable` FAILS | — |
+| Review item 3 (Medium-Low): gnome-shell asks `canLock` once at start-up; a crash loop (start limit) or a main loop blocked on sync logind/bus calls leaves that session with no lock | FIXED (8fba04cf6): `Restart=always`, `StartLimitIntervalSec=0`, lookups on a thread pool (`Version` answers in <1.5 s while logind takes 3 s: mutant `sync-lookup` FAILS); VM: daemon stopped before login, the shell's question bus-activates it; SIGKILL under an open prompt, then 8 kills (NRestarts 1 → 9), lock still works; VM mutant `start-limited` FAILS with `start-limit-hit` | — |
+| Review item 4 (Low): PAM in-process without `PAM_TTY`/`PAM_RHOST` | FIXED (8fba04cf6): each conversation in its own `--pam-worker` process (crash, hang, EOF = refusal; killed on cancel or after 60 s silent), `PAM_TTY` = the session's terminal (`/dev/tty1` in the VM, as gdm sets it); `PAM_RHOST` left unset as gdm does for a local display (gdm-session-worker.c:1220-1241), not `localhost` as the review suggested. Mutants `no-pam-tty`, `unbounded-pam-step`, `worker-eof-passes` FAIL | — |
+| Review item 5 (Low): unit hardening | FIXED (8fba04cf6): `CapabilityBoundingSet=CAP_CHOWN CAP_DAC_READ_SEARCH CAP_SETUID CAP_SETGID CAP_AUDIT_WRITE`, `SystemCallFilter=@system-service` (SIGSYS on violation), `ProtectProc=invisible`; VM reads `CapBnd 00000000200000c5`, `Seccomp: 2`, `NoNewPrivs: 1` from the running daemon and every unlock round passes (pam_unix + pam_gnome_keyring logged as before) | — |
+| Review item 6: `desktops.md` §12.4 gdm line refs wrong; same-uid and sandbox limits unstated | FIXED (8fba04cf6): refs re-read in gdm 50.2 (962, 930, start 2357/2370; the review's "2357-2383 is gdm_manager_stop" was itself off: stop is 2336); §12.4 says the session uid is not a boundary (`loginctl unlock-session`, `systemd-run --user` via the `Display` fallback) | — |
+| A sandboxed app of the session's user with system-bus access (Flatpak `--socket=system-bus`) can open a channel and test that user's password, as it can under GDM; rate-limited only by pam_unix's delay and pam_faillock where configured | STILL OPEN (accepted, documented in `desktops.md` §12.4): refusing sandboxes was weighed and not done (GNOME Shell's own caller is outside any session, pid/cgroup checks race, no reliable bwrap/snap marker; system-bus access already reaches logind and udisks) | desktops owner: revisit if Rime ever ships a policy that grants apps the system bus |
+| Same-uid processes can still start handshakes on their own session's channel socket; bounded by two channels per uid, one client per channel, `LimitNOFILE` and the fd watchdog's exit-for-restart, not by a handshake timeout (GLib has none) | STILL OPEN (accepted: same uid is not a boundary, see above) | — |
+| In the VM, a lock started right after the aborted s2idle hung GNOME Shell's main loop (`GetActive` unanswered 77 s, twice; nothing reached rime-gnome-unlock: `/var/lab/rime-nix/artifacts/lock/review/vm-gnome-5.log`, `review/vm-gnome-mutant-start-limited.log`). The check now ends with the suspend round | STILL OPEN (VM only, not investigated) | P3 hardware: lock right after a real resume on katana |
+
+## Opened by wave 6: Lua-only Hyprland (`nix/hypr-lua-only`, 2026-11-04)
+
+Hyprland 0.57.0 (the pin) reads `hyprland.lua` only: no .conf parser, `hyprctl keyword` refused ("Use eval."),
+`hyprctl dispatch X` evaluates `return hl.dispatch(X)` (src/ipc/s1/Commands.cpp). Design and checks: `desktops.md`
+§12.11. Evidence root `/var/lab/rime-nix/artifacts/hypr-lua/` (`mutants-os/`, `os-suites/`, `shell-checks/`,
+`shell-runtime/`, `vm/` (from the locked run `vm-run11-locked.log`; also `vm-run9.log`, `vm-run12-locked.log`), `libexec-run2.log`). rime-shell = `nix/hypr-lua-only` e5eb240d; rime-os code
+= 60f7ea261 + 6360cd8ad.
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| Rime Shell defaulted to a hyprlang dialect (`ShellState.configProvider` = "conf" unless `hyprland.lua` existed or `config_Provider.json` said lua) and went silently inert when the Lua config was missing | FIXED (rime-shell e5eb240d): one dialect; `ShellState.hyprConfig` from a probe that asks Hyprland (`hyprctl eval` raising unless `package.loaded["rime.keybindings"]`): anything but `ok` logs "Hyprland config problem (<state>)" and posts a notice naming `rime-hypr-migrate`, re-asked on every `configreloaded`. VM: a bare `hyprland.lua` → `modules-missing` named, restored → "loaded again" (`vm/hl-out/probe-shell.log`; `vm/probe-modules-missing.png` shows the toast "Hyprland config not loaded", and the check asserts it opened); `tests/check-hypr-lua-only.sh` 51/0 | — |
+| HyprlandBackend / KeybindService / MiscPage carried `_lua ? eval : keyword` pairs and "probe answers later" gates | FIXED (e5eb240d): eval only, hl.dsp.* dispatches, outside names escaped as Lua strings (`\ddd` for control bytes); VM: kept layout, rounding, accent (also after `hyprctl reload`) and focus-mode gaps land through eval (`vm/hl-out/shell-*`) | — |
+| `compositor.sh` grimblast keyword branch; Log Out sent the hyprlang `hyprctl dispatch exit`, DPMS `dispatch dpms on/off` (both refused by 0.57) | FIXED (e5eb240d): branch removed; `hl.dsp.exit()`, `hl.dsp.dpms({ action = "enable"/"disable" })`; check-hypr-lua-only evaluates them against a stub `hl.dsp` and has 4 mutants (hyprlang exit, hyprlang dpms, unknown dispatcher, hyprlang action word), each FAIL | — |
+| matugen wrote `~/.config/hypr/rime-shell-colors.conf`, a hyprlang file nothing sourced: the wallpaper accent never reached a fresh login's border | FIXED (e5eb240d + 60f7ea261): matugen writes `~/.config/hypr/rime/colors.lua`; `appearance.lua` requires it when present; the Shell also pushes it live and after every reload. `tests/test-rime-hypr-lua.sh` "appearance.lua loads rime/colors.lua" (mutant `appearance-no-colors-module` FAIL). `colors.conf.template` kept: hyprlock's own config uses it | — |
+| `install.sh`, `install-arch.sh`, `validate-install.sh` accepted a `.conf`-only home and appended exec-once lines to a file Hyprland does not read | FIXED (e5eb240d): `hyprland.lua` only; a `.conf`-only home is refused naming `rime-hypr-migrate`; `config_Provider.json` no longer written | — |
+| rime-shell CI allowed `hyprctl keyword` outside scripts | FIXED (e5eb240d): zero `hyprctl keyword` anywhere in `src/` (scripts included) + check-hypr-lua-only in ci.yml | — |
+| `rime-display-apply` fell back to `hyprctl keyword monitor` when eval failed | FIXED (60f7ea261): eval only, a reply other than `ok` is a refusal (exit 1); mutant `display-keyword-fallback` FAIL | — |
+| `lua_str` escaped only `\` and `"`; bools passed as numbers (`scale: true` → Lua error); x/y unchecked; NaN/Infinity accepted; output names unchecked | FIXED (60f7ea261): control bytes as `\ddd`, byte-identical in both tools (tested); bools refused first; x/y ints within ±32767; NaN/Infinity refuse the whole model; names without control characters. Mutants `display-lua_str-no-control-escape`, `input-lua_str-no-control-escape`, `display-accepts-nan` FAIL | — |
+| `rime-input-apply` verify before write | CONFIRMED (no change needed): at the base (68aaa0110) it already ran `Hyprland --verify-config` on the generated file (`validate_hyprland`) before `atomic_write` | — |
+| Keyboard layout/variant/model/options went to Hyprland unchecked (a bad layout makes Hyprland fall back to `us`) | FIXED (60f7ea261): compiled with `xkbcli compile-keymap` first (unknown options and models caught too); a refusal keeps the last accepted layout. `rime-shell-firstrun` checks the seeded layout. VM: `xx` refused with the note, `hyprctl -j devices` still `gb`; control (xx written straight into input.lua) moves the keyboard off gb (`vm/hl-out/input-*`, `vm/input-refused.png`). Mutants `input-main-skips-layout-check`, `input-ignores-unknown-option`, `input-no-model-check`, `firstrun-xkb-always-compiles` FAIL | — |
+| Display mode not checked against the monitor; an unclean scale made Hyprland pick its own and notify | FIXED (60f7ea261): a mode the display does not list becomes its current mode, with a note; the scale is snapped by an exact replica of Monitor.cpp:939-985. VM: 1.1 on 1280x800 → 1.0666667 in `hyprctl -j monitors`, no "Invalid scale" log line, `monitors.lua` carries it; control (raw 1.1 by eval) does log it (`vm/hl-out/display-*`, `vm/display-snapped.png`). Mutants `display-scale-down-before-up`, `display-fit-skips-mode-check` FAIL | — |
+| Is `hl.monitor({ output = "" … })` a catch-all? | CONFIRMED: MonitorRuleManager.cpp:94-105 (0.57.0) uses the first rule with an empty name for any display no rule names; cited in the generated file and the code | — |
+| `rime-hypr-migrate` depends on removed paths? | CONFIRMED kept and independent: it reads old `.conf` names only as conversion inputs | — |
+| On NixOS `bin/Hyprland` execs `.Hyprland-wrapped`, so `pgrep -x Hyprland` never matches: `rime-display-apply` took the wlr-randr path, `rime-input-apply`/`rime-compositor-reload` said "no known compositor is running", `rime-session-logout` could not find Hyprland, whenever `XDG_CURRENT_DESKTOP` was unset (found by the VM check) | FIXED (6360cd8ad): `HYPRLAND_INSTANCE_SIGNATURE` decides before the process name, and `.Hyprland-wrapp` is also looked for; `rime-input-apply` no longer tracebacks without pgrep. Tests: display 93/0, input 123/0, new `tests/test-rime-session-helpers.sh` 9/0 (in pr-validation). Mutants `display-no-signature-check`, `input-no-signature-check`, `input-pgrep-missing-traceback`, `reload-no-signature-check`, `reload-no-wrapped-name` FAIL | — |
+| `rime-session-logout` ended Hyprland with the hyprlang `hyprctl dispatch exit` (refused by 0.57: Log Out did nothing) | FIXED (6360cd8ad): `hl.dsp.exit()`; mutant `logout-hyprlang-exit` FAIL | — |
+| `rime-input-apply` said "reloaded" when `rime-compositor-reload` failed | FIXED (6360cd8ad): the helper's failure is the note ("the compositor was not reloaded (…); the change applies at the next reload"); mutant `input-reload-failure-swallowed` FAIL | — |
+| More hyprlang dispatch words in rime-os: `rime-agent-focus:153` (`dispatch focuswindow address:`), `rime-project-windows:95,101` (`movetoworkspacesilent`, `workspace N`), `rime-live-session:100` (`hyprctl dispatch exec "$AUTOSTART"`). All refused by 0.57 | FIXED (nix/hypr-lua-only): `hl.dsp.focus({ window = … })`, `hl.dsp.window.move({ workspace = …, follow = false, window = … })`, `hl.dsp.focus({ workspace = … })`, values through `lua_str`; success = reply `ok` (hyprctl exits 0 on a refusal). rime-live-session: `hl.dsp.exec_cmd`, the hyprlang fallback removed, a refusal fails the swap; a path with characters outside `[A-Za-z0-9/._+-]` is started through systemd-run instead of spliced into Lua. Tests: session-helpers "window helpers speak Lua dispatch", live-session 11c; VM subtest `dispatch` moves, focuses and switches a real foot window. Mutants `focus-ignores-reply`, `place-follows`, `live-session-refusal-ignored` FAIL | — |
+| Focus mode (Super+B / `focus-toggle` IPC) does nothing until the dashboard's home page has been opened once: its IPC handler lives in `QuickSettings`, built lazily (LazyPage). Measured in the VM: rc 0, gaps unchanged; pre-existing | FIXED (rime-shell nix/shell-start 4407452c): `state/FocusMode.qml`, a singleton built on the first press from the key, the tile or IPC; `focus-toggle` gains `state()`. `tests/run-focus-mode-test.sh` 20/20 (harness holds only IpcManager), mutant `not-routed` FAIL (`tests/mutate-focus-mode.sh`). `checks.hypr-lua` no longer opens the dashboard first (rime-os nix/shell-start): old lock FAILS `shell-gaps-focus: gaps (5, 10), want (0, 6)` (`runs/focus-before-1`), new rime-shell 3/3 + 2 pinned + 1 sandboxed PASS. Needs flake.lock → rime-shell ≥ 4407452c in the same integration step | — |
+| `rime-display-apply`/`rime-input-apply` atomic_write raise a traceback on a read-only target (seen once: a store copy seeded without `u+w`) instead of a refusal note | FIXED (nix/hypr-lua-only): a write that fails is "could not write <path>: <reason>", exit 1, and the temp file is removed (display K11, input "a target that cannot be written"); mutants `display-persist-oserror-raises`, `input-write-raises` FAIL | — |
+| rime-shell `tests/check-desktop-launch.sh` fails locally, the same on the base tree (802ad676); `shellcheck -S warning` flags SC2034 in the untouched `tests/run-power-profile-service-test.sh` | STILL OPEN (pre-existing, unrelated) | rime-shell owner |
+| `checks.hypr-lua` is not in CI | FIXED (rime-os nix/shell-start): removed from `nix/ci/checks-not-in-ci.txt` with shell-kept (the Shell-start cause is fixed). Fits a hosted runner: 4 GB VM, the desktop closure (9.2 GiB, as `checks.desktop`), 72-84 s on katana incl. pinned to 4 CPUs. Its display control (raw scale 1.1 must log "Invalid scale") waited 20 cursor rounds; it needs 4-16 in driver runs and needed 33 in one sandboxed build, so it now waits up to 60 | — |
+| Port to main | STILL OPEN: none of this is on bootc main. Port as a separate PR with a `## Release note`; main's Hyprland takes the same Lua-only config, so the same keyword/dispatch refusals apply there | P2 merge / rime-os + rime-shell owners |
+| A focus-mode toggle that arrives while the previous gaps write runs, or within 250 ms after it (`QuickSettings._gapsBusy`), is dropped with no sign. This is deliberate: it stops a double-press saving the shrunken gaps. `checks.hypr-lua` hit it once against the pushed lock (`artifacts/hypr-lua/vm-run10-locked.log`: off sent as soon as Hyprland showed 0/6, gaps stayed 0/6) | FIXED (rime-shell nix/shell-start 4407452c): a press while busy (also while the read before a shrink is out) is queued and logged ("press queued until the gaps settle"), shown by `focus-toggle state` as `queued`; two inside the window cancel out; a read that never answers frees the queue after 3 s; off restores gaps only if Focus Mode shrank them. Headless 20/20; mutants `drop-press`, `no-deadline`, `restore-always` FAIL. `checks.hypr-lua` presses off with no wait and twice back to back (log shows the queued press) | — |
+
+Independent review of `nix/hypr-lua-only` (2026-11-04), fixed on the same branches: rime-shell bfa52ca4 (ec01f4da probe,
+bfa52ca4 keybinds); rime-os see STATE.md. Evidence `/var/lab/rime-nix/artifacts/hypr-lua/review-fixes/` (`os-mutants/summary.txt`: 19 mutants, all FAIL;
+`vm/` from `vm-run13-review.log` (path override) and `vm-run14-review-locked.log` (pushed lock); `shell-*.log`; `libexec.log`).
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| `hypr_push_icc`/`colour_assign`: a refused ICC monitor rule was only a note, persist still ran and its flag was dropped, exit 0 | FIXED: a refusal returns before persist, persist's flag is the result, either failure exits 1. Tests: refused rule → exit 1 + Hyprland's reply + nothing written; accepted → written; read-only target → exit 1. Mutants `icc-refusal-still-persists`, `icc-exit-0-always`, `icc-persist-flag-dropped` FAIL | — |
+| Shell config probe: `unknown` handled as `ok` ("loaded again" logged, notice guard cleared → repeated critical toasts); a check during a running probe restarted (killed) it | FIXED (ec01f4da): `src/state/hyprConfig.js` decides: unknown changes nothing, "loaded again" only on problem → ok, a check while the probe runs is queued once. `tests/hypr-config-test.js` 15/0 in CI; 5 mutants FAIL (`unknown-is-ok` is equivalent: the guard above it already returns). VM: exactly 1 "loaded again" for the one transition, 0 empty-detail probe lines (previously 3) | — |
+| `apply_hypr`: one eval per output, so a refusal of output 2 left output 1 moved and nothing saved | FIXED: one eval chunk for all outputs; on a refusal of a multi-output chunk the outputs are put back from the live snapshot (one rollback eval) and that is reported. Test K8; mutants `apply-one-eval-per-output`, `apply-no-rollback` FAIL | — |
+| `outputs_hypr` flagged every mode within 1 Hz of the current refresh (60.00 and 59.94) | FIXED: only the closest. K9; mutant `modes-all-near-current` FAIL | — |
+| `fit_to_live` snapped the scale to Hyprland's rule on niri/labwc too | FIXED: snap only on Hyprland, the mode check stays for all. K10; mutant `snap-on-every-compositor` FAIL | — |
+| pgrep fallbacks (display, input, rime-compositor-reload, rime-session-logout) matched other users' compositors | FIXED: `pgrep -u "$(id -u)"`. session-helpers: another user's labwc/Hyprland/.Hyprland-wrapp is ignored; mutants `*-pgrep-any-user` (4) FAIL | — |
+| Self-test labels "parses the injection module as data, not code" / "device-name injection as a comment" only checked `config ok` | FIXED: the payload is `error("RIME-INJECTED-<hex>")`; a control (unescaped) must make Hyprland report the marker, the escaped module must load without it. `nix/tests/libexec.nix` asserts the new labels. Mutants `display-lua_str-identity`, `input-lua_str-identity` FAIL in the self-test | — |
+| `parse_mode` refresh limit 9999 (string) vs 1000 (dict) | FIXED: `REFRESH_MAX = 1000` for both; mutant `refresh-string-max-9999` FAIL | — |
+| Self-check: KeybindService keybind generation | FIXED (bfa52ca4): user data reaching the files is only mods/key from the saved keybinds JSON (commands, dispatchers and args are built in). `_luaStr` left newlines raw (one bad key failed the whole module; no execution, Lua refuses an unfinished string), one `--` comment spliced the key raw, and niri's KDL takes the key as a bare node name. Now combos must be key names or the default is kept (load, `updateBinding`, `applyEdits`), and literals escape control bytes as `\ddd`. `tests/keybind-text-test.js` 18/0 (compiles with luajit when present), 4 mutants FAIL; the real generator under quickshell + Hyprland verify: run-hypr-configerrors 25/0, switcher 24/0, niri 5/0 | — |
+| Self-check: `syncWindowCorners` NaN | CONFIRMED no: inputs are parseInt-filtered for NaN and `cornerRadius`/`borderWidth` are QML `int` (NaN → 0), so the eval value is a finite integer ≥ 0 | — |
+| Self-check: firstrun's per-login refresh vs matugen's `colors.lua` | CONFIRMED not overwritten: `seed_hypr_modules` rewrites only the shipped modules; VM subtest `firstrun` changes `session.lua` (put back: the refresh ran) and `colors.lua` keeps its sha | — |
+| Self-check: `install.sh` / `install-arch.sh` / `validate-install.sh` | CONFIRMED (no change): Lua only; the appended block uses `hl.on("hyprland.start")` and `hl.exec_cmd` (both in 0.57's LuaBindingsToplevel.cpp / LuaEventHandler.cpp) and reads `$HOME` at runtime (`os.getenv`), so nothing is spliced. Not done: the appended file is not run through `Hyprland --verify-config` (a `hyprland.lua` ending in `return` would stop loading); Arch installs only | rime-shell owner (optional) |
+
+## Opened by wave 6: development VM (`nix/dev-vm`, 2026-11-04)
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| A persistent interactive VM to try changes in (rebuild without a fresh image, ssh, headless screenshots) | DONE (nix/dev-vm): `nix/dev/dev-vm` / `nix run path:.#dev-vm`, `docs/nixos/dev-vm.md`; `checks.dev-vm` in CI (mutant `owns_pid` trusts any PID: FAIL "stop killed an unrelated process"); cold boot to login 9.5 s, desktop 12.9 s; one-line module rebuild 7.4 s build + 1.6 s stop + 11.2 s to desktop (`/var/lab/rime-nix/artifacts/dev-vm/`) | — |
+| The `rime-nix` container's PID 1 is `sleep infinity`, which never reaps: every process whose parent dies before it becomes a zombie there for the container's life (counted 2026-11-04: ~810, among them 390 virtiofsd, 293 git, 15 qemu-system-x86 from VM checks and agents). They hold PIDs against the container's pids.max (2048). dev-vm reaps its own through a subreaper (`nix/dev/launch.py`) | FIXED 2026-11-05 (container setup): recreated with `--init --pids-limit 8192`; PID 1 is podman-init, the ~800 zombies went with the old container | — |
+| Dev VM by autologin (greetd `initial_session`): logind's `Desktop=` is empty for the session (seen on GNOME, KDE and COSMIC: `artifacts/dev-vm/{gnome,kde,cosmic}-session.txt`); on GNOME fcitx5 also shows a "Wayland Diagnose: install kimpanel" notification (`artifacts/dev-vm/gnome-session.{png,txt}`). Not checked through a rime-greet login, which is what users get | STILL OPEN (dev VM only as far as measured) | desktops owner: log into GNOME through rime-greet (`dev-vm --desktop gnome start --greeter`, then `type`) and see whether the notification shows there; if it does, ship the GNOME kimpanel extension or turn the diagnose off |
+| Dev VM display is virtio-vga (software rendering in the guest); a virgl/`egl-headless` option for GPU-accelerated guests is not done | STILL OPEN (not needed for the proofs; the Shell renders and is usable) | dev-VM owner: add `--gl` once the container has a render node passed through |
+
+## Opened by wave 6: what's in this update (`nix/update-whats-new`, 2026-11-04)
+
+The bar's update icon and Settings → Updates link to `https://rimeos.com/updates/<release>?from=<running>` (rime-shell
+`nix/update-whats-new`, same change as main's `feat/update-whats-new`). On NixOS the inputs already exist: the update client
+writes `release=`/`running=` to `/run/rime-update/state` (`rimed/rime/src/nixos/update.rs` `check_state`) and
+`status.json` has `booted.release`/`target.release`; there is no `/usr/share/rime/release.json`, so `from` comes from
+`booted.release`, then `running=` (rime-shell `tests/liveupdate-test.js` NixOS cases, mutant "no running= fallback": 4 FAIL).
+The bootc `rime-update-check` change is carried here only so the file does not drift from main; NixOS does not ship it
+(`nix/pkgs/rime-libexec.nix`).
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| rimeos.com has no page for a NixOS release: rime-website `scripts/sync-releases.mjs` builds release pages only from `build-image.yml` runs on rime-os main, and NixOS releases come from `nix-release.yml`. A NixOS machine's "What's in this update" would open a 404 for the release on offer (the `?from=` range likewise misses NixOS-only releases) | STILL OPEN (website, not this repository) | rime-website owner, before the first NixOS release ships: read `nix-release.yml` runs (or the channel document) into release records with the same ID rule, or have the Shell link the list (`https://rimeos.com/updates`) when `status.json` says `"product": "nixos"` until then |
+
+## Opened by nix/migrate-finish (2026-11-04)
+
+| Item | State | Owner / what is needed |
+|---|---|---|
+| `rime migrate finish`: the reclaim step after a move (delete `@pre-nixos`, `ostree/` and the old /var/home copy, the GRUB menu's ostree entries and `/boot/ostree`; keep the rime-boot block, the Secure Boot key entry and everything else in custom.cfg) | DONE (nix/migrate-finish): `nix/pkgs/rime-bridge/rime-migrate-finish.py`, routed by `rime migrate finish` on NixOS; N = 3 good boots counted by `rime-migrate-good-boot.service`; 36 tests, 22 mutants in `bridge-unit`; OVMF SB-on proof incl. a kill + power cut and a re-run, 5.46 GB freed (`docs/nixos/bridge.md`, `/var/lab/rime-nix/artifacts/migrate-finish/ovmf/`) | — |
+| A login notice after the third good boot ("the old system can be removed: `sudo rime migrate finish --dry-run`") | DECIDED NOT TO (for now): the move's own report and the divergence line already name the command; the counter writes one journal line per counted boot. No UI was in scope | Shell owner, if wanted: read `/var/lib/rime/nixos-bridge/good-boots.json` (count >= 3) and the absence of `finish.json` `done` |
+| The bootc side's text names `finish` as available: rime-os main `files/system/libexec/rime-migrate` (byte-identical to `rime-bridge.py` apart from line 1) | PR #149 on main (`fix/migrate-finish-text`, retargeted to main after #146 merged) | coordinator: merge once its checks pass |
+| The encrypted layout (L: `/boot` an ext4 partition, kernel paths `/rime/…`) is unit-tested only (`test_menu_on_a_boot_partition_counts`, mutant `menu-top-level-only`); the OVMF proof ran on plain A | STILL OPEN | lab owner: `run.sh L --fresh --sb --phases bootc,nixos,finish` (the L disk from `prepare.sh disk-L`; `finish_seed` already handles a separate /boot) |
+| A disk moved with an older bridge keeps that bridge's `rime-migrate` (its divergence line still says the step is planned) until the image updates; `finish` itself ships with the NixOS system, so it is available either way | ACCEPTED (text only) | — |
+| GRUB reads neither btrfs's log tree nor ext4's journal: any tool that changes `/boot` and must be seen by GRUB after a power cut needs a commit (`sync`), as finish now does. Whether `rime-boot`'s writes of custom.cfg and rime-nixos.cfg survive a power cut as GRUB sees them was not checked | STILL OPEN (not checked) | boot owner: check rime-boot's writes against a power cut the way `finish_interrupt` does |

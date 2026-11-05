@@ -23,9 +23,11 @@ mod gitshim;
 mod host;
 mod lid;
 mod live;
+mod luks;
 mod mcp;
 mod migrate;
 mod mode;
+mod nixos;
 mod nixos_bridge;
 mod oauth_device;
 mod ops;
@@ -211,6 +213,14 @@ enum Cmd {
         #[command(subcommand)]
         cmd: firmware::FirmwareCmd,
     },
+    /// LUKS volumes and their TPM slot (NixOS): `status` says whether each
+    /// slot still matches this boot's PCR values, so the volume unlocks
+    /// without asking; `rebind` re-seals the stale ones to PCR 7 (after a new
+    /// Secure Boot key or a dbx update), keeping the recovery key.
+    Luks {
+        #[command(subcommand)]
+        cmd: luks::LuksCmd,
+    },
     /// Persistent state: which schema each store is on, and what a rollback
     /// would do to it (§25).
     ///
@@ -308,20 +318,24 @@ enum Cmd {
     Pin,
     /// Roll back to the previous deployment (bootc rollback). Requires root.
     Rollback,
+    /// NixOS: remove old system generations, keeping the current, booted, previous and pinned ones. Requires root.
+    Gc,
     /// Update the OS image (bootc upgrade) and firmware (fwupdmgr). Requires root.
     ///
     /// Rime-owned parts of the new image (the shell, rime tools, Rime
     /// services) are activated without a restart when that is safe; the rest
     /// waits in the staged deployment. `--plan` shows which is which.
     Update(UpdateArgs),
-    /// Move this machine to Rime OS on NixOS: `check`, `repair-e`, `key-export`, `start`.
+    /// Move this machine to Rime OS on NixOS: `check`, `repair-e`, `key-export`, `start` (on bootc); `finish` (on
+    /// NixOS).
     ///
-    /// Runs /usr/libexec/rime-migrate with these arguments (`rime migrate
-    /// check --explain` first; it writes nothing). Once `start` has run, the
-    /// old system refuses `update`, `rollback`, `pin`, `channel set`, `boot
-    /// migrate` and the live-update verbs by name.
+    /// On bootc, runs /usr/libexec/rime-migrate with these arguments. On
+    /// NixOS only `finish` is left: it removes the old system once NixOS has
+    /// booted three times (`rime migrate finish --dry-run` writes nothing).
+    /// Once `start` has run, the old system refuses `update`, `rollback`,
+    /// `pin`, `channel set`, `boot migrate` and the live-update verbs by name.
     Migrate {
-        /// Everything after `migrate`, passed to the bridge as it is.
+        /// Everything after `migrate`, passed on as it is.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -952,6 +966,22 @@ enum PkgCmd {
     /// Convert rpm-ostree layered packages into Rime packages, so that OS
     /// updates work again without losing the software. Requires root.
     Adopt,
+    /// Report what every package a bootc Rime machine installed becomes on
+    /// Rime on NixOS, item by item; `--write` records it under the root.
+    Translate {
+        /// The root whose records to read (a copy of a machine's state).
+        #[arg(long, default_value = "/")]
+        root: String,
+        /// The package catalogue to translate against.
+        #[arg(long)]
+        catalogue: Option<String>,
+        /// The report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Write the NixOS requested list, feature switches and the report under the root.
+        #[arg(long)]
+        write: bool,
+    },
 }
 
 /// `rime env <verb>` — the capsule surface (§8).
@@ -1334,6 +1364,15 @@ struct UpdateArgs {
     /// durability if the machine loses power mid-update.
     #[arg(long)]
     fsync: bool,
+    /// NixOS: download every new store path whole, even where the release offers a
+    /// delta against a path this machine already has.
+    #[arg(long, conflicts_with_all = ["check", "firmware_only"])]
+    no_deltas: bool,
+    /// NixOS: download and verify the release, then stop. Nothing is installed or
+    /// activated, and Flatpak, firmware and packages are left alone. The download
+    /// is kept safe from `rime gc` until the next `rime update` installs it.
+    #[arg(long, conflicts_with_all = ["check", "plan", "firmware_only", "live_only", "no_live", "pin", "unpin"])]
+    download_only: bool,
     /// Download and verify the update, print what would activate live and
     /// what would wait, and change nothing.
     #[arg(long, conflicts_with_all = ["check", "firmware_only", "live_only", "no_live"])]
@@ -1345,8 +1384,15 @@ struct UpdateArgs {
     /// Stage the update for the next boot and activate nothing live.
     #[arg(long, conflicts_with_all = ["check", "firmware_only"])]
     no_live: bool,
+    /// NixOS: hold this machine on an installed release (`--unpin` releases it).
+    #[arg(long, value_name = "RELEASE", conflicts_with_all = ["check", "plan", "live_only", "no_live", "unpin"])]
+    pin: Option<String>,
+    /// NixOS: release a hold set with `--pin`.
+    #[arg(long)]
+    unpin: bool,
     /// Move this machine from GRUB to systemd-boot in place, instead of
     /// updating the image this time, if it is healthy and can be moved safely.
+    /// bootc only: a NixOS system refuses it and changes nothing.
     ///
     /// The same as `rime boot migrate`. Without it, an update never touches
     /// the boot path. A refusal is printed and the update goes ahead.
@@ -1535,6 +1581,7 @@ fn privileged_verb(cmd: &Cmd) -> Option<&'static str> {
         Cmd::Live { cmd: LiveCmd::Rollback } => Some("live rollback"),
         Cmd::Live { cmd: LiveCmd::SoftReboot { .. } } => Some("live soft-reboot"),
         Cmd::Rollback => Some("rollback"),
+        Cmd::Gc => Some("gc"),
         Cmd::Pin => Some("pin"),
         // Only `set`. It is `bootc switch`, which rewrites the deployment
         // origin, and on the backwards direction `ostree admin pin` as well.
@@ -1617,7 +1664,10 @@ async fn main() {
     // here is root-only, so the root gate below answers instead. Running
     // first is also what lets tests/test-rime-migrate.sh drive the real
     // binary against a fixture record without root.
-    if let Some(verb) = bridged_verb(&cli.command) {
+    // bootc only: the record is about leaving bootc, and a migrated NixOS
+    // machine keeps its own bridge state under the same directory, where a
+    // `done` record would refuse NixOS's own `rime update`.
+    if let Some(verb) = bridged_verb(&cli.command).filter(|_| !nixos::is_nixos()) {
         if let Err(code) = nixos_bridge::guard(verb) {
             std::process::exit(code);
         }
@@ -1726,6 +1776,7 @@ async fn main() {
         Cmd::Qualify { cmd } => qualify::main(cmd),
         Cmd::Storage { cmd } => storage::main(cmd),
         Cmd::Firmware { cmd } => firmware::main(cmd),
+        Cmd::Luks { cmd } => luks::main(cmd),
         Cmd::Schema { cmd } => schema::main(cmd),
         Cmd::Trust(args) => trust::main(args),
         // Read-only except for `add`/`remove`/`probe`, which write only the
@@ -1747,6 +1798,19 @@ async fn main() {
         Cmd::Fingerprint => cmd_fingerprint(),
         Cmd::Pin => ops::pin(),
         Cmd::Rollback => ops::rollback(),
+        Cmd::Gc if nixos::is_nixos() => nixos::generations::gc(),
+        Cmd::Gc => {
+            eprintln!("rime: gc is for NixOS systems; on this system bootc and ostree clean up after themselves");
+            1
+        }
+        Cmd::Update(args) if args.pin.is_some() || args.unpin => {
+            if nixos::is_nixos() {
+                nixos::generations::hold(args.pin.as_deref())
+            } else {
+                eprintln!("rime: update --pin/--unpin are for NixOS systems; `rime pin` keeps a deployment here");
+                1
+            }
+        }
         Cmd::Update(args) => ops::update(ops::UpdateOptions {
             check: args.check,
             live: live::LiveOptions {
@@ -1763,13 +1827,16 @@ async fn main() {
             force: args.force,
             migrate_boot: args.migrate_boot,
             allow_unverified: args.allow_unverified,
+            no_deltas: args.no_deltas,
+            download_only: args.download_only,
         }),
-        // Not root-gated here: the bridge refuses a non-root run itself, with
-        // the sudo line to type, after argument parsing (so `--help` works).
-        Cmd::Migrate { args } => nixos_bridge::migrate(&args),
+        // Not root-gated here: the bridge and finish refuse a non-root run
+        // themselves, with the sudo line to type (so `--help` works).
+        Cmd::Migrate { args } => nixos::migrate::run(&args),
         Cmd::Shell { cmd } => cmd_shell(cmd),
         Cmd::Live { cmd } => match cmd {
             LiveCmd::Status { json } => live::status(json),
+            LiveCmd::Apply { .. } | LiveCmd::Rollback if nixos::is_nixos() => nixos::live_refusal(),
             LiveCmd::Apply { only } => live::apply(&only),
             LiveCmd::Rollback => live::rollback(),
             LiveCmd::Doctor { json } => live::doctor(json),
@@ -1829,6 +1896,22 @@ async fn main() {
             };
             ops::pkg(&argv)
         }
+        // Both systems: it reads a bootc machine's records against a NixOS catalogue file.
+        Cmd::Pkg {
+            cmd: PkgCmd::Translate { root, catalogue, json, write },
+        } => {
+            let mut a = vec!["--root".to_string(), root];
+            if let Some(c) = catalogue {
+                a.extend(["--catalogue".to_string(), c]);
+            }
+            if json {
+                a.push("--json".into());
+            }
+            if write {
+                a.push("--write".into());
+            }
+            nixos::translate::run(&a)
+        }
         Cmd::Pkg { cmd } => {
             let argv: Vec<String> = match cmd {
                 PkgCmd::List => vec!["list".into()],
@@ -1845,6 +1928,7 @@ async fn main() {
                 PkgCmd::Rollback => vec!["rollback".into()],
                 PkgCmd::Verify => vec!["verify".into()],
                 PkgCmd::Adopt => vec!["adopt".into()],
+                PkgCmd::Translate { .. } => unreachable!("routed above"),
             };
             ops::pkg(&argv)
         }
@@ -2598,7 +2682,7 @@ async fn cmd_game(cmd: GameCmd) -> i32 {
 }
 
 /// Where the shell is vendored inside the image.
-const SHELL_DIR_DEFAULT: &str = "/usr/share/rime-shell";
+const SHELL_DIR_DEFAULT: &str = rime_paths::SHELL_DIR;
 
 /// The shell config directory to address over IPC.
 ///
@@ -3168,6 +3252,14 @@ async fn cmd_doctor(json: bool) -> i32 {
         checks.push(recover::Check { ok, what });
     }
 
+    // A LUKS volume whose TPM slot no longer matches PCR 7 (a new Secure Boot
+    // key, a dbx update) asks for its passphrase at every boot, and nothing
+    // else says why. rime-luks-tpm-status.service measures it at boot; a
+    // stale slot is a WARN naming the volume and `sudo rime luks rebind`.
+    for (ok, what) in luks::doctor_lines() {
+        checks.push(recover::Check { ok, what });
+    }
+
     // An NVIDIA GPU older than the driver branch in the image (Maxwell,
     // Pascal, Volta and earlier) gets no driver at all on Rime, and nothing
     // else on the machine says so. A machine with no NVIDIA GPU gets no line.
@@ -3335,6 +3427,21 @@ mod tests {
         let cli =
             Cli::try_parse_from(["rime", "channel", "set", "stable", "--dry-run"]).expect("parses");
         assert_eq!(privileged_verb(&cli.command), Some("channel set"));
+    }
+
+    #[test]
+    fn migrate_passes_everything_after_it_on() {
+        match Cli::try_parse_from(["rime", "migrate", "finish", "--dry-run"]).expect("parses").command {
+            Cmd::Migrate { args } => assert_eq!(args, ["finish", "--dry-run"]),
+            _ => panic!("not migrate"),
+        }
+        match Cli::try_parse_from(["rime", "migrate", "check", "--explain", "--disk", "/dev/vdb"])
+            .expect("parses")
+            .command
+        {
+            Cmd::Migrate { args } => assert_eq!(args, ["check", "--explain", "--disk", "/dev/vdb"]),
+            _ => panic!("not migrate"),
+        }
     }
 
     #[test]
@@ -3548,7 +3655,7 @@ mod tests {
     fn shell_dir_is_overridable_for_development() {
         // Not asserting the env var here (tests share a process); asserting the
         // default, which is the contract keybinds rely on.
-        assert_eq!(SHELL_DIR_DEFAULT, "/usr/share/rime-shell");
+        assert_eq!(SHELL_DIR_DEFAULT, rime_paths::SHELL_DIR);
     }
 
     fn metrics(argv: &[&str]) -> MetricsArgs {

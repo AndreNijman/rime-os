@@ -95,6 +95,27 @@ def run(cmd, timeout=15):
         return 1, ""
 
 
+SAVE_KEY = "/usr/bin/rime-install-save-key"
+
+
+def key_sticks(exclude_disk=""):
+    """USB sticks and cards a recovery key could be copied to: removable whole
+    disks other than the install target, as (device, description). Only a
+    menu: rime-install-save-key refuses the installed disk, the live medium and
+    anything it cannot write, whatever is chosen here."""
+    rc, txt = run(["lsblk", "-dnP", "-e", "7,11", "-o", "NAME,TYPE,RM,TRAN,SIZE,MODEL"])
+    out = []
+    for line in txt.splitlines() if rc == 0 else []:
+        f = dict(re.findall(r'(\w+)="([^"]*)"', line))
+        if f.get("TYPE") != "disk" or (f.get("RM") != "1" and f.get("TRAN") != "usb"):
+            continue
+        dev = "/dev/" + f.get("NAME", "")
+        if dev == exclude_disk:
+            continue
+        out.append((dev, f"{f.get('MODEL', '').strip() or 'USB stick'} ({f.get('SIZE', '?')}, {dev})"))
+    return out
+
+
 # ── hardware enumeration ─────────────────────────────────────────────────────
 # A front end presenting choices. The engine re-validates everything it is
 # handed, including refusing the live USB via its "currently mounted" guard, so
@@ -329,6 +350,31 @@ def read_result():
     except OSError:
         return None
     return out if out.get("status") in ("ok", "failed") else None
+
+
+NIXOS_CHOICES = os.environ.get("RIME_NIXOS_CHOICES",
+                               "/usr/lib/rime-installer/nixos-choices.json")
+
+
+def gaming_offer():
+    """The NixOS ISO's gaming choice, or None when it offers none.
+
+    build-live-iso.sh stamps nix/installer/choices.nix as nixos-choices.json;
+    the engine (rime-install-nixos.sh nixos_choose) reads the same file and is
+    the one that refuses a disk below a floor. This front end only shows the
+    floors, so it never states a number of its own. Returns
+    {"plain": (disk_gb, partition_gb), "gaming": (disk_gb, partition_gb),
+     "summary": str} when the file offers both plain and plain-gaming."""
+    try:
+        with open(NIXOS_CHOICES) as f:
+            c = json.load(f)
+        v = c["variants"]
+        floors = {k: (int(v[n]["disk_gb"]), int(v[n]["partition_gb"]))
+                  for k, n in (("plain", "plain"), ("gaming", "plain-gaming"))}
+        summary = str(c["features"]["gaming"]["summary"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return dict(floors, summary=summary)
 
 
 def netinstall():
@@ -1491,11 +1537,28 @@ class Installer(Adw.Application):
         body.append(sc)
         body.append(lbl("The disk you booted from is not listed.", "rime-dim"))
 
+        # NixOS ISOs only: install the gaming system (Steam, Gaming Mode) from
+        # the start. Its disk floor is higher, so the choice sits beside the
+        # disk it has to fit on. The engine refuses a disk below the floor.
+        offer = gaming_offer()
+        self.cb_gaming = None
+        if offer:
+            self.cb_gaming = Gtk.CheckButton(label="Include gaming (Steam)")
+            self.cb_gaming.set_active(self.answers.get("gaming") == "yes")
+            a11y(self.cb_gaming, "Include gaming (Steam)", offer["summary"])
+            body.append(self.cb_gaming)
+            body.append(lbl(f"{offer['summary']}. Needs a disk of at least "
+                            f"{offer['gaming'][0]} GB ({offer['plain'][0]} GB without "
+                            "gaming). You can add it later with rime install steam.",
+                            "rime-dim"))
+
         def nxt(_b):
             row = self.disk_list.get_selected_row()
             if row is None:
                 return
             self.disk = self._disks[row.get_index()]["dev"]
+            if self.cb_gaming is not None:
+                self.answers["gaming"] = "yes" if self.cb_gaming.get_active() else "no"
             self.go("mode")
 
         return self.frame("STEP 4 OF 7", "Select a disk",
@@ -2115,6 +2178,8 @@ class Installer(Adw.Application):
 
         summary = (f"{self.answers['username']} @ {self.answers['hostname']}"
                    f"   ·   {self.ed}   ·   btrfs")
+        if self.answers.get("gaming") == "yes":
+            summary += "   ·   gaming (Steam)"
         rest.append(lbl(summary, "rime-mono rime-dim"))
         # The encryption decision belongs on the page where the disk is
         # confirmed, not only on the page where it was made. A user who ticked
@@ -2324,7 +2389,7 @@ class Installer(Adw.Application):
                           "hostname", "rootfs", "mokpw", "encrypt", "lukspass",
                           "keymap", "keyvariant", "timezone", "confirmed",
                           "confirm_target", "confirm_disk_id",
-                          "confirm_target_id", "confirm_esp_id"):
+                          "confirm_target_id", "confirm_esp_id", "gaming"):
                     if a.get(k):
                         f.write(f"{k}={a[k]}\n")
         except OSError as e:
@@ -2433,6 +2498,53 @@ class Installer(Adw.Application):
         return "\n".join(text.splitlines()[-lines:])
 
     # ── 8. done ──────────────────────────────────────────────────────────────
+    def key_save_box(self):
+        """A copy of the recovery key on ANOTHER USB stick (docs/nixos/installer.md
+        "Recovery key"). The stick the installer booted from is often read-only
+        (written from the ISO image), and it travels with the laptop anyway."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP)
+        box.append(lbl("Save a copy to another USB stick — one you keep away "
+                       "from this computer. Plug it in, then choose it:", "rime-dim"))
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=SP)
+        drop = Gtk.DropDown(model=Gtk.StringList.new([]))
+        drop.set_hexpand(True)
+        a11y(drop, "USB stick for the recovery key")
+        status = lbl("", "rime-dim")
+        sticks = []
+
+        def refresh(*_):
+            sticks[:] = key_sticks(getattr(self, "disk", "") or "")
+            drop.set_model(Gtk.StringList.new([d for _, d in sticks] or ["No USB stick found"]))
+            save.set_sensitive(bool(sticks))
+
+        def save_(*_):
+            i = drop.get_selected()
+            if not sticks or i >= len(sticks):
+                return
+            dev = sticks[i][0]
+            try:
+                p = subprocess.run([SAVE_KEY, dev, self.answers.get("hostname") or "rime"],
+                                   input=self.recovery_key + "\n", capture_output=True,
+                                   text=True, timeout=120)
+                line = (p.stdout.strip().splitlines() or [""])[-1]
+            except (subprocess.SubprocessError, OSError) as e:
+                line = f"RIME-RECOVERY-SAVE-FAILED: {e}"
+            if line.startswith("RIME-RECOVERY-SAVED: "):
+                status.set_text("Saved as " + line[len("RIME-RECOVERY-SAVED: "):]
+                                + ". You can unplug the stick.")
+            else:
+                status.set_text("Not saved: " + (line.split(": ", 1)[1] if ": " in line
+                                                 else "the copy failed"))
+
+        refresh_btn = Gtk.Button(label="Refresh")
+        refresh_btn.connect("clicked", refresh)
+        save = Gtk.Button(label="Save the key")
+        save.connect("clicked", save_)
+        row.append(drop); row.append(refresh_btn); row.append(save)
+        box.append(row); box.append(status)
+        refresh()
+        return box
+
     def p_done(self):
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=SP * 3)
         ok = getattr(self, "ok", False)
@@ -2520,6 +2632,7 @@ class Installer(Adw.Application):
                 ri.append(lbl("It could NOT be saved to the USB stick, so this "
                               "screen is the only copy. Write it down now.",
                               "rime-danger"))
+            ri.append(self.key_save_box())
             ack = Gtk.CheckButton(label="I have written down the recovery key")
             a11y(ack, "I have written down the recovery key",
                  "Rebooting is enabled once this is ticked.")

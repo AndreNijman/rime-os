@@ -116,7 +116,7 @@ impl Tools {
             let candidate = self.dir.join(program.binary());
             return candidate.exists().then_some(candidate);
         }
-        ["/usr/local/bin", "/usr/bin"]
+        [rime_paths::LOCAL_BIN_DIR, rime_paths::SYSTEM_BIN_DIR]
             .iter()
             .map(|dir| Path::new(dir).join(program.binary()))
             .find(|path| path.exists())

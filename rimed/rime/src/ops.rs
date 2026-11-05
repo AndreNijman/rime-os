@@ -75,8 +75,12 @@ fn root_required_message(verb: &str, argv: &[String]) -> String {
         || verb.starts_with("remove")
         || verb.starts_with("pkg")
     {
-        "it writes the system extension under /var/lib and asks systemd to \
-         re-merge /usr"
+        if crate::nixos::is_nixos() {
+            crate::nixos::pkg::ROOT_WHY
+        } else {
+            "it writes the system extension under /var/lib and asks systemd to \
+             re-merge /usr"
+        }
     } else {
         "bootc writes to /ostree and /boot"
     };
@@ -127,6 +131,9 @@ fn capture(program: &str, args: &[&str]) -> Option<String> {
 /// `rime pin` -> pin the current (booted) deployment so an update can't garbage
 /// collect the rollback target.
 pub fn pin() -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::generations::pin(None);
+    }
     match run("ostree", &["admin", "pin", "0"]) {
         Ok(code) => code,
         Err(e) => {
@@ -138,6 +145,9 @@ pub fn pin() -> i32 {
 
 /// `rime rollback` -> boot the previous deployment next reboot.
 pub fn rollback() -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::generations::rollback();
+    }
     match run("bootc", &["rollback"]) {
         Ok(code) => code,
         Err(e) => {
@@ -319,12 +329,19 @@ pub struct UpdateOptions {
     /// questions, and a machine whose last update left it broken is not a
     /// machine that should also stop checking who signed the next one.
     pub allow_unverified: bool,
+    /// NixOS: download every path whole even where the release offers a delta (docs/nixos/delta.md §7).
+    pub no_deltas: bool,
+    /// NixOS: download and verify the release, then stop: nothing is installed or activated, and no generation,
+    /// boot entry or applied-release record is written. One record stays: `pending.json` (written when the download
+    /// starts, removed only by an install), so `rime gc` keeps the downloaded paths until the next `rime update`
+    /// installs them (nixos/generations.rs `pending_closure`).
+    pub download_only: bool,
 }
 
 /// The system-extension package engine behind `rime install`/`remove`/`pkg`.
 /// A constant so the CLI, `rime update` and rime-sysext-rebuild.service can
 /// never disagree about where it lives.
-pub const PKG_ENGINE: &str = "/usr/libexec/rime-pkg";
+pub const PKG_ENGINE: &str = rime_paths::RIME_PKG;
 
 /// State file written by the engine. Its absence means "this machine has no
 /// user packages", which is the common case and must cost nothing.
@@ -342,7 +359,7 @@ const PKG_APPIMAGE_DIR: &str = "/var/lib/rime/appimage";
 /// The capsule engine behind `rime env` (§8). Same shape as `PKG_ENGINE`: the
 /// policy lives in one shipped program so the CLI, the resolver and anything
 /// the shell drives cannot disagree about what a capsule is.
-pub const ENV_ENGINE: &str = "/usr/libexec/rime-env";
+pub const ENV_ENGINE: &str = rime_paths::RIME_ENV;
 
 /// The disposable-capsule engine behind `rime disposable` (§19).
 ///
@@ -352,7 +369,7 @@ pub const ENV_ENGINE: &str = "/usr/libexec/rime-env";
 /// of the same mechanism*: every environment it makes is an ordinary capsule
 /// created through `rime-env`, so `rime env list` sees it and `podman ps` sees
 /// it, and Rime has not grown a second container runtime.
-pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/rime-disposable";
+pub const DISPOSABLE_ENGINE: &str = rime_paths::RIME_DISPOSABLE;
 
 /// The account engine behind `rime user` (P2-016).
 ///
@@ -360,7 +377,7 @@ pub const DISPOSABLE_ENGINE: &str = "/usr/libexec/rime-disposable";
 /// it runs `useradd`, `userdel` and `systemctl enable` as root, so a
 /// caller-controlled variable naming it would be a way to have `sudo rime
 /// user` execute somebody else's program.
-pub const USER_ENGINE: &str = "/usr/libexec/rime-user";
+pub const USER_ENGINE: &str = rime_paths::RIME_USER;
 
 /// The virtualization engine behind `rime vm` (P2-008).
 ///
@@ -368,10 +385,10 @@ pub const USER_ENGINE: &str = "/usr/libexec/rime-user";
 /// caller-controlled variable naming a program is a hole. This one defines
 /// libvirt domains and deletes disk images, so it is the last one that should
 /// be reachable through the environment.
-pub const VM_ENGINE: &str = "/usr/libexec/rime-vm";
+pub const VM_ENGINE: &str = rime_paths::RIME_VM;
 
 /// P2-012's browser capsule engine.
-pub const BROWSER_ENGINE: &str = "/usr/libexec/rime-browser";
+pub const BROWSER_ENGINE: &str = rime_paths::RIME_BROWSER;
 
 /// The plugin CLI behind `rime plugin` (§16).
 ///
@@ -379,7 +396,7 @@ pub const BROWSER_ENGINE: &str = "/usr/libexec/rime-browser";
 /// and [`ENV_ENGINE`]. Unlike `rime apply`'s capsule step there is no test that
 /// needs to redirect this one: `tests/test-rime-plugin.sh` drives the shipped
 /// script directly, the way the capsule and package suites do.
-pub const PLUGIN_ENGINE: &str = "/usr/libexec/rime-plugin";
+pub const PLUGIN_ENGINE: &str = rime_paths::RIME_PLUGIN;
 
 /// `rime plugin …`.
 ///
@@ -395,7 +412,7 @@ pub const PLUGIN_ENGINE: &str = "/usr/libexec/rime-plugin";
 /// whatever the program does. The default-drop policy itself is a shipped
 /// nftables file this helper does not edit — it manages the exception list in
 /// front of it, so a malformed exception cannot take the base policy with it.
-pub const FIREWALL_ENGINE: &str = "/usr/libexec/rime-firewall";
+pub const FIREWALL_ENGINE: &str = rime_paths::RIME_FIREWALL;
 
 /// The device enumeration behind `rime devices`.
 ///
@@ -403,7 +420,7 @@ pub const FIREWALL_ENGINE: &str = "/usr/libexec/rime-firewall";
 /// This one is never run under sudo — it reads, and every verb it has is
 /// unprivileged — but a caller-controlled variable naming a program is a hole
 /// whatever the program does, and the rule is worth more than the exception.
-pub const DEVICES_ENGINE: &str = "/usr/libexec/rime-devices";
+pub const DEVICES_ENGINE: &str = rime_paths::RIME_DEVICES;
 
 /// `rime devices …`.
 ///
@@ -573,6 +590,9 @@ pub fn vm(args: &[String]) -> i32 {
 /// signature checking and the extension lifecycle, and duplicating any of that
 /// here would just create two implementations to keep in sync.
 pub fn pkg(args: &[String]) -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::pkg::run(args);
+    }
     // No "rime: running: …" banner here, unlike the bootc/fwupd verbs: the
     // engine narrates its own work, and echoing the invocation on top of that
     // made read-only verbs like `rime pkg list` print noise before their output.
@@ -981,7 +1001,7 @@ pub(crate) fn boot_migration(asked: bool) -> i32 {
 /// engine's: 0 migrated, 3 nothing to do, 10 refused (and it said why, at
 /// length, on stderr), anything else failed (likewise).
 fn run_migration_engine() -> i32 {
-    const ENGINE: &str = "/usr/libexec/rime-boot-migrate";
+    const ENGINE: &str = rime_paths::RIME_BOOT_MIGRATE;
     if !Path::new(ENGINE).exists() {
         eprintln!("rime: this image has no boot-path migration engine ({ENGINE})");
         return 1;
@@ -1018,6 +1038,10 @@ fn run_migration_engine() -> i32 {
 /// --migrate-boot` returns early after migrating: one invocation, one change
 /// to what the next boot runs.
 pub(crate) fn boot_migrate_command() -> i32 {
+    if crate::nixos::is_nixos() {
+        eprintln!("rime: the boot-path migration moves a bootc machine from GRUB to systemd-boot; a NixOS system has no such move. Nothing was changed.");
+        return 2;
+    }
     match boot_migration(true) {
         0 => 0,
         MIGRATION_NOTHING_DONE => {
@@ -1103,6 +1127,13 @@ fn rename_target() -> Option<String> {
 }
 
 pub fn update(opts: UpdateOptions) -> i32 {
+    if crate::nixos::is_nixos() {
+        return crate::nixos::update::update(opts);
+    }
+    if opts.no_deltas || opts.download_only {
+        eprintln!("rime: --no-deltas and --download-only are for NixOS systems; nothing was changed");
+        return 2;
+    }
     let started = Instant::now();
     let mut worst = 0;
 
@@ -1296,7 +1327,7 @@ pub fn update(opts: UpdateOptions) -> i32 {
 ///
 /// Never fatal: a flatpak that cannot reach Flathub must not fail an OS update.
 fn flatpak_pass() -> i32 {
-    if !Path::new("/usr/bin/flatpak").exists() {
+    if !Path::new(rime_paths::FLATPAK).exists() {
         return 0;
     }
     match run(PKG_ENGINE, &["flatpak-upgrade"]) {
@@ -1337,7 +1368,7 @@ fn advise_on_layering() {
 
 /// The firmware half of `rime update`. Best-effort throughout: a machine may
 /// have no fwupd, no LVFS-covered devices, or no network.
-fn firmware_pass() -> i32 {
+pub(crate) fn firmware_pass() -> i32 {
     // No `--force`. fwupd refreshes its metadata at most once every 24h by
     // design and reports "nothing to do" (2) inside that window; forcing it
     // re-downloaded the whole index on every invocation for no benefit.

@@ -1,0 +1,7 @@
+on:
+  pull_request:
+jobs:
+  nix:
+    runs-on: [self-hosted, katana-nix]
+    steps:
+      - run: nix build .#rimed

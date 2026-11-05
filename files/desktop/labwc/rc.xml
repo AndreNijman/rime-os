@@ -294,7 +294,7 @@
       <action name="Execute" command="thunar"/>
     </keybind>
     <keybind key="W-t">
-      <action name="Execute" command="alacritty"/>
+      <action name="Execute" command="xdg-terminal-exec"/>
     </keybind>
     <keybind key="W-A-i">
       <action name="Execute" command="rime shell audio in"/>

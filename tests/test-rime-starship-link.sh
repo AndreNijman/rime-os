@@ -54,7 +54,7 @@ grep -q '{{' "$H/.cache/rime-shell/starship.toml" 2>/dev/null \
     || ok "the seeded cache has no unrendered matugen tag"
 
 # ── an earlier release's untouched seed, either edition: migrated ──────────
-for accent in "#D9F99D" "#FDE047"; do
+for accent in "#91C2DC" "#D9F99D" "#FDE047"; do
     H="$(home)"; sed "s|@ACCENT@|${accent}|g" "$SEED" > "$H/.config/starship.toml"
     run "$H" >/dev/null
     [ -L "$H/.config/starship.toml" ] && [ -f "$H/.config/starship.toml.rime-seed" ] \

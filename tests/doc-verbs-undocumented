@@ -49,6 +49,11 @@
 #             the ratchet is here to stop. The number goes UP because these
 #             four did not exist when 132 was measured, not because the
 #             ratchet slipped: the 132 the docs owed is 117 now.
+# 2026-11-05: three NixOS verbs declared: `rime gc`, `rime luks status` and
+#             `rime pkg translate`. Each is written up under docs/nixos/
+#             (update-client.md, boot-matrix.md, p2-gates.md), which this
+#             checker does not read, and in no doc under docs/ itself.
+#             `rime backup` left: docs/ names it now.
 
 rime profile
 
@@ -77,6 +82,12 @@ rime storage erase
 
 rime firmware
 rime firmware status
+
+rime luks status
+
+rime gc
+
+rime pkg translate
 
 rime build
 
@@ -163,7 +174,6 @@ rime request grants
 rime cloudflare status
 rime cloudflare preview
 
-rime backup
 rime backup key
 rime backup targets
 rime backup init

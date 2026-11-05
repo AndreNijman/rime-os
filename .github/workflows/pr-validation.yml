@@ -2530,6 +2530,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-fstrim.sh
 
+      # The LUKS key-slot enrolment, with cryptsetup and systemd-cryptenroll
+      # stubbed: when the TPM step declines after the recovery key went on,
+      # the retry it prints must work once the cause is fixed (the full path
+      # refuses a volume that already has a recovery key).
+      - name: Run LUKS enrolment retry assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-luks-enroll.sh
+
       # plymouthd crashed hiding the splash when the display driver came up
       # after the initramfs; the image ships Fedora's plymouth rebuilt with
       # the fix. Static: the patch, the build that applies it, and the guards
@@ -3853,12 +3861,26 @@ jobs:
           RIME_DISPLAY_NO_LIVE: "1"
         run: ./tests/test-rime-display.sh
 
+      # rime-compositor-reload / rime-session-logout find Hyprland by its
+      # instance signature (NixOS's wrapped binary hides from `pgrep -x
+      # Hyprland`) and end it with the Lua dispatcher hl.dsp.exit().
+      - name: Run session-helper assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-session-helpers.sh
+
       # The prompt follows the wallpaper through a symlink firstrun maintains;
       # the suite cuts that block out of rime-shell-firstrun itself and checks
       # it migrates Rime's own seeds and never touches the user's file or link.
       - name: Run starship prompt-link assertions
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-starship-link.sh
+
+      # The bootc image keeps the chartreuse spark: the shared greeter, greeting,
+      # fastfetch and firstrun files carry it, and nix/branding/ridge.patch (the
+      # NixOS ridge) still applies to them with no fuzz.
+      - name: Run bootc-keeps-spark assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-bootc-keeps-spark.sh
 
       # The seeded Hyprland Lua tree in a REAL Hyprland, not just through
       # --verify-config. Three things only a running instance can answer:
@@ -3896,11 +3918,16 @@ jobs:
           skipped="$(printf '%s' "$summary" | awk '{print $7}')"
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
           [ "$failed" = 0 ] || { echo "::error::$failed rime hypr-lua assertions failed"; exit 1; }
-          if [ "$passed" -eq 0 ]; then
-              [ "$skipped" -gt 0 ] || { echo "::error::test-rime-hypr-lua.sh asserted nothing and did not say why"; exit 1; }
-              echo "::warning::test-rime-hypr-lua.sh asserted NOTHING on this runner ($skipped skipped) — it needs a nested labwc and ubuntu-24.04 has none, so this step is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
+          # Two halves: the lua_str checks need only python3 and run everywhere
+          # (2 assertions, before the compositor probe); everything after needs
+          # a nested labwc + Hyprland, and the suite SKIPs (and stops) when it
+          # cannot start one. A skip therefore means the compositor half did not
+          # run, and only the static floor can be held.
+          if [ "$skipped" -gt 0 ]; then
+              [ "$passed" -ge 2 ] || { echo "::error::only $passed rime hypr-lua assertions ran; the static lua_str half alone is 2"; exit 1; }
+              echo "::warning::test-rime-hypr-lua.sh ran only its static half on this runner ($passed passed, $skipped skipped) — the compositor half needs a nested labwc and ubuntu-24.04 has none, so that half is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
           else
-              [ "$passed" -ge 22 ] || { echo "::error::only $passed rime hypr-lua assertions ran; 22 ran on 2026-09-18, so some no longer execute"; exit 1; }
+              [ "$passed" -ge 24 ] || { echo "::error::only $passed rime hypr-lua assertions ran; a full run is the 2 static ones plus the 22 compositor ones that ran on 2026-09-18, so some no longer execute"; exit 1; }
           fi
 
       # The compositor's motion classes (UI/UX roadmap v3 Phase 20) and the
@@ -4861,7 +4888,8 @@ jobs:
             files/system/bin/steamos-update \
             files/system/libexec/rime-safe-graphics \
             files/system/libexec/rime-safe-graphics-terminal \
-            tests/test-rime-chaos.sh tests/test-rime-vm.sh
+            tests/test-rime-chaos.sh tests/test-rime-vm.sh \
+            tests/test-rime-luks-enroll.sh
           # The chaos harness separately, with -x so the driver's `. lib.sh`
           # is followed, and the cases as bash fragments because they are
           # sourced rather than executed and have no shebang of their own.

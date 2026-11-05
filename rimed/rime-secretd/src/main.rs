@@ -564,20 +564,41 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// Set in the child that plays the dead daemon: bind this path, then exit.
+    const DEAD_DAEMON_ENV: &str = "RIME_SECRETD_TEST_BIND_AND_EXIT";
+
     #[test]
     fn a_stale_socket_from_a_dead_daemon_is_replaced() {
+        // The child half: be the daemon that dies. It binds and returns, and
+        // the process exits, which is what a killed daemon leaves behind.
+        if let Some(path) = std::env::var_os(DEAD_DAEMON_ENV) {
+            let _listener = bind(Path::new(&path)).expect("bind in the dead daemon");
+            return;
+        }
+
         let dir = temp_dir("stale");
         let socket = dir.join("control.sock");
-        {
-            let _listener = bind(&socket).expect("bind");
-        }
-        // The file survives the listener being dropped, and connecting to it
-        // now fails — which is what makes it stale rather than live.
-        assert!(socket.exists());
+        // The predecessor is a separate PROCESS that binds and exits, never a
+        // listener dropped in this one. A listener created here could be
+        // copied into a child that another test thread is forking at that
+        // moment, and that copy keeps the socket accepting until the child
+        // execs: the stale socket then accepts, and this test failed once on a
+        // GitHub runner and once in a Nix build under load for exactly that
+        // reason. A process that has exited holds nothing, so the socket is
+        // dead every time.
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "tests::a_stale_socket_from_a_dead_daemon_is_replaced", "--test-threads=1"])
+            .env(DEAD_DAEMON_ENV, &socket)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("start the daemon that dies");
+        assert!(status.success(), "the dead daemon could not bind: {status}");
+        // The file survives the daemon, and connecting to it now fails, which
+        // is what makes it stale rather than live.
+        assert!(socket.exists(), "the dead daemon left no socket behind");
 
-        // Reported rather than merely asserted, because this failed once on a
-        // GitHub runner and passed 52 times here — 40 in isolation and 12 full
-        // parallel runs of all 180 — so the next failure has to arrive with
+        // Reported rather than merely asserted, so a failure arrives with
         // enough to diagnose it instead of the bare word `false`. `bind()`'s
         // staleness rule is exactly this connect, so a machine where it
         // succeeds would silently refuse to start a daemon whose predecessor
@@ -585,7 +606,7 @@ mod tests {
         if let Ok(live) = UnixStream::connect(&socket) {
             let meta = std::fs::symlink_metadata(&socket);
             panic!(
-                "connecting to a socket whose only listener was dropped SUCCEEDED.\n\
+                "connecting to a socket whose daemon has exited SUCCEEDED.\n\
                  \x20 path:      {}\n\
                  \x20 file type: {:?}\n\
                  \x20 peer:      {:?}\n\

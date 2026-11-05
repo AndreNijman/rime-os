@@ -1,0 +1,34 @@
+paths added 161, NAR 2.111 GB
+full zstd -3 (shipped)    0.746 GB
+full zstd -19 --long=27   0.589 GB
+delta (--patch-from)      0.231 GB  (39.2 % of full)
+  same-name        121 paths  full 0.091 GB  delta 0.004 GB
+  same-package      36 paths  full 0.496 GB  delta 0.225 GB
+  none               4 paths  full 0.002 GB  delta 0.002 GB
+largest 25 after delta (MB full -> MB delta, window log):
+      133.8 ->      92.0  w28  same-package  linux-6.18.59-modules
+      104.0 ->      38.8  w29  same-package  firefox-unwrapped-159.0
+       36.0 ->      32.1  w27  same-package  initrd-linux-6.18.59
+       14.8 ->      13.7  w27  same-package  linux-6.18.59
+       34.7 ->      10.7  w29  same-package  mesa-26.2.6
+       32.3 ->      10.2  w29  same-package  mesa-26.2.6
+       27.3 ->      10.0  w27  same-package  sing-box-1.14.4
+       36.8 ->       9.6  w28  same-package  deno-2.9.8
+       51.8 ->       3.8  w27  same-package  hyprland-0.57.0
+       38.3 ->       3.5  w28  same-name     openvino-2026.4.0-lib
+        1.6 ->       1.6  w27  none          aws-lc-5.12.0
+        5.9 ->       1.2  w27  same-package  resvg-0.49.0
+        2.4 ->       0.7  w27  same-package  fwupd-2.1.9
+        0.7 ->       0.7  w27  none          hyprtoolkit-0.6.0
+        2.4 ->       0.5  w27  same-package  gamescope-3.17.0
+        0.7 ->       0.4  w27  same-package  btop-1.4.8
+        0.6 ->       0.3  w27  same-package  strace-7.3
+        0.5 ->       0.2  w27  same-package  xdg-desktop-portal-hyprland-1.5.0
+        0.2 ->       0.2  w27  none          hyprland-guiutils-0.2.2
+        5.0 ->       0.1  w27  same-package  yt-dlp-2026.10.21
+        1.5 ->       0.1  w27  same-package  nss-3.132
+        1.4 ->       0.1  w27  same-package  kmscon-10.1.0
+        0.3 ->       0.1  w27  same-package  firefox-159.0
+        0.7 ->       0.0  w27  same-package  fwupd-2.1.9-lib
+        0.2 ->       0.0  w27  same-package  hyprutils-0.14.3
+paths with more than one candidate tried: 10; max window log: 29

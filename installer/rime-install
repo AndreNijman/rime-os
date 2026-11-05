@@ -206,6 +206,18 @@ NETINSTALL=0
 # ISO, and those guards run before anything is written.
 [ -n "${RIME_NETINSTALL:-}" ] && NETINSTALL="$RIME_NETINSTALL"
 
+# The NixOS install path (PLAN.md D9; rime-install-nixos.sh): active only on an
+# ISO built with a NixOS system (it stamps nixos-system), which installs that
+# prebuilt system instead of running bootc. RIME_NIXOS_LIB is a test seam.
+NIXOS=0
+for _nl in "${RIME_NIXOS_LIB:-/usr/lib/rime-installer/rime-install-nixos.sh}" "$(dirname "$0")/rime-install-nixos.sh"; do
+  if [ -r "$_nl" ]; then
+    # shellcheck source=rime-install-nixos.sh
+    . "$_nl"
+    break
+  fi
+done
+
 # ── Where the OS comes from, and why bootc runs HERE ────────────────────────
 #
 # bootc runs in this live environment, not inside a container of the image it
@@ -619,6 +631,30 @@ live_esp_readonly() {
 # deleted by the installed system on its first boot, once nothing runs from
 # it. A oneshot with a path condition: after it has run once it never runs
 # again, and on a machine that was not installed from Windows it never runs.
+# A staged Windows install cleans up after itself, and only on success (both
+# install paths call this last). The entry is removed only when it is provably
+# the one the app made: its number comes from the hand-off file, and its label
+# and loader path must both match.
+remove_setup_entry() {
+  local _bn
+  [ "${ESP_IS_LIVE:-0}" = 1 ] && [ -f /run/initramfs/live/rimeinst/handoff.cfg ] || return 0
+  _bn=$(sed -n 's/^bootnum=\([0-9A-Fa-f]\{4\}\)$/\1/p' /run/initramfs/live/rimeinst/handoff.cfg | head -1)
+  if [ -n "$_bn" ] && have efibootmgr \
+     && efibootmgr -v 2>/dev/null | grep -i "^Boot${_bn}\*\? Rime OS Setup" | grep -i 'rimeinst' >/dev/null; then
+    efibootmgr -q -b "$_bn" -B >>"$LOG" 2>&1 \
+      && log "handoff: removed the one-shot setup entry Boot$_bn" \
+      || log "handoff: could not remove Boot$_bn (harmless: it is not in BootOrder)"
+  else
+    log "handoff: setup entry ${_bn:-?} not found or not ours; left alone"
+  fi
+  # The staged files themselves are NOT deleted here: this session runs from
+  # the squashfs among them, and a file deleted while open keeps the ESP from
+  # going back to read-only, which leaves its FAT marked dirty. The installed
+  # system deletes them on its first boot (install_staged_cleanup_in; on the
+  # NixOS path, rime.boot's rime-staged-cleanup unit).
+  return 0
+}
+
 install_staged_cleanup_in() {  # $1 = deployment root
   local d="$1"
   [ "$ESP_IS_LIVE" = 1 ] || return 0
@@ -1025,6 +1061,7 @@ restore_console() {
 # disk with no way forward. Deepest mount first. Safe to call at any time.
 TROOT=/run/rime-target
 unmount_target() {
+  if [ "${NIXOS:-0}" = 1 ]; then nixos_unmount; fi
   umount "$TROOT/boot/efi" 2>/dev/null || true
   umount "$TROOT"          2>/dev/null || true
   [ -n "${DEPLOY_MNT:-}" ] && { umount "$DEPLOY_MNT/proc" 2>/dev/null || true; umount "$DEPLOY_MNT/var" 2>/dev/null || true; }
@@ -1151,8 +1188,9 @@ quiet_console
 unmount_target
 # bootc installs from THIS environment (see "Where the OS comes from"), so its
 # absence is a refusal here and not a "command not found" after the disk is
-# prepared. --check-passphrase is exempt: it reads no image and no disk.
-if [ "${1:-}" != --check-passphrase ]; then
+# prepared. --check-passphrase is exempt: it reads no image and no disk, and so
+# is the NixOS path, which runs no bootc (nixos_preflight checks its own tools).
+if [ "${1:-}" != --check-passphrase ] && [ "$NIXOS" != 1 ]; then
   have "$BOOTC" || die "bootc is missing from the live environment, so Rime OS cannot be installed from it.
 
 Nothing has been erased — your disks are untouched.
@@ -1203,10 +1241,13 @@ elif [ "${1:-}" = --check-passphrase ]; then
   # `Run installer disk-encryption suite` were this one refusal. Measured:
   # 62 passed / 0 failed here, 24 passed / 7 failed there, same commit.
   :
+elif [ "$NIXOS" = 1 ]; then
+  # No image: the NixOS path copies a system closure (nixos_preflight checks it).
+  :
 elif [ ! -d "$OCI_DIR" ] && ! { have podman && podman image exists "$IMAGE" 2>/dev/null; }; then
   die "The Rime OS image is not present in the live environment (no OCI directory at $OCI_DIR and no $IMAGE in its container storage)."
 fi
-[ "${1:-}" = --check-passphrase ] || choose_source_imgref
+[ "${1:-}" = --check-passphrase ] || [ "$NIXOS" = 1 ] || choose_source_imgref
 
 # ── shared post-install: create the admin account inside the new system ──────
 # useradd/chpasswd via --root against the ostree deployment's /etc. The stateroot
@@ -1605,7 +1646,9 @@ set_locale_keymap_in() {  # $1=deploy dir
   fi
   [ -n "$layout" ] || layout=us
 
-  lang=$(sed -n 's/^LANG=//p' /etc/locale.conf 2>/dev/null | tr -d '"' | head -1)
+  # An answered locale (answers `locale=`) beats the live environment's.
+  lang="${LOCALE:-}"
+  [ -n "$lang" ] || lang=$(sed -n 's/^LANG=//p' /etc/locale.conf 2>/dev/null | tr -d '"' | head -1)
   # C.UTF-8 is systemd's fallback, not a choice — do not propagate it as one.
   case "$lang" in ""|"C.UTF-8"|"C.utf8"|"C") lang="en_US.UTF-8" ;; esac
 
@@ -1936,6 +1979,20 @@ answers file carrying encrypt=yes and lukspass=." ;;
   esac
   [ -b "$DISK" ] || die "unattended: rime.disk=$DISK is not a block device."
   log "UNATTENDED install: DISK=$DISK USER=$USERNAME HOST=$HOSTNAME"
+  if [ "$NIXOS" = 1 ]; then
+    INSTALL_MODE=disk; TARGET="$DISK"; ENCRYPT=no
+    TIMEZONE=$(kv rime.tz); LOCALE=$(kv rime.lang)
+    NIXOS_EXTRA_KARGS=$(kvall rime.karg | tr '\n' ' ')
+    nixos_preflight
+    trap - ERR
+    set +e
+    nixos_install
+    nixos_mok
+    nixos_finish
+    echo "RIME-INSTALL-UNATTENDED-OK"; log "unattended install complete (nixos)"
+    if echo "$CMD" | grep -qw rime.poweroff; then sync; poweroff; fi
+    exit 0
+  fi
   echo "Rime OS unattended install to $DISK …"
   EXTRA_KARGS=()
   for k in $(kvall rime.karg); do EXTRA_KARGS+=(--karg "$k"); done
@@ -2087,13 +2144,16 @@ USERNAME=""; P1=""; HOSTNAME=""; MOKPW=""
 # come from the answers file or not at all. A stale value here would silently
 # install a layout nobody picked, and a wrong layout is a password that cannot
 # be typed on first boot.
-KEYMAP=""; KEYVARIANT=""; TIMEZONE=""
+KEYMAP=""; KEYVARIANT=""; TIMEZONE=""; LOCALE=""
 # Encryption is a DECISION, and a decision that goes missing must not be made
 # silently in either direction — see the `encrypt` validation below.
 ENCRYPT=""; LUKSPASS=""
 # The typed ERASE and the identity of every device it was typed against. See
 # the confirmation binding immediately before the dry-run stop.
 CONFIRMED=""; CONFIRM_TARGET=""; CONFIRM_DISK_ID=""; CONFIRM_TARGET_ID=""; CONFIRM_ESP_ID=""
+# The NixOS ISO's one system choice (rime-install-nixos.sh nixos_choose): absent is "no", the plain system, which
+# is also what a machine that never runs `rime install steam` keeps. It sets the disk floor.
+GAMING=""
 
 while IFS= read -r line || [ -n "$line" ]; do
   case "$line" in
@@ -2114,8 +2174,10 @@ while IFS= read -r line || [ -n "$line" ]; do
     keymap)    KEYMAP="$v" ;;
     keyvariant) KEYVARIANT="$v" ;;
     timezone)  TIMEZONE="$v" ;;
+    locale)    LOCALE="$v" ;;
     encrypt)   ENCRYPT="$v" ;;
     lukspass)  LUKSPASS="$v" ;;
+    gaming)    GAMING="$v" ;;
     confirmed) CONFIRMED="$v" ;;
     confirm_target)    CONFIRM_TARGET="$v" ;;
     confirm_disk_id)   CONFIRM_DISK_ID="$v" ;;
@@ -2137,6 +2199,11 @@ done < "$ANSWERS"
 [ -n "${HOSTNAME:-}" ]     || die "answers: hostname missing"
 [ -n "${P1:-}" ] || die "answers: password missing"
 case "$INSTALL_MODE" in disk|partition) : ;; *) die "answers: bad mode '$INSTALL_MODE'" ;; esac
+case "$GAMING" in
+  ''|no) : ;;
+  yes) [ "$NIXOS" = 1 ] || die "answers: gaming=yes, and this ISO installs one Rime OS image with no gaming choice. Nothing has been erased." ;;
+  *) die "answers: bad gaming '$GAMING' (expected yes or no). Nothing has been erased." ;;
+esac
 
 # ── Encryption: explicit, or refuse ─────────────────────────────────────────
 # Rime OS encrypts the disk BY DEFAULT. "By default" is a property of the
@@ -2541,6 +2608,14 @@ else
 fi
 log "headless: MODE=$INSTALL_MODE TARGET=$TARGET ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME"
 
+# The NixOS path refuses next, by its own rules, with every generic guard above
+# already passed (a partition of DISK, a real ESP on it, nothing mounted): its
+# floors, a timezone, Rime's own ESP (never Windows'), the labels it boots by,
+# the network, and the system proven a signed release present in its caches.
+if [ "$NIXOS" = 1 ]; then
+  nixos_preflight
+fi
+
 # ── The encryption helper has to EXIST before the disk is destroyed ─────────
 # An encrypted disk whose recovery key was never created is the stranding case
 # this whole item exists to prevent, so a missing helper is a refusal, never a
@@ -2756,6 +2831,16 @@ fi
 # destruction at that point is a lie in the frightening direction. Each branch
 # sets it at the exact moment data actually starts being destroyed.
 log "install start: MODE=$INSTALL_MODE TARGET=$TARGET DISK=$DISK ESP=${ESP_DEV:-n/a} USER=$USERNAME HOST=$HOSTNAME FS=$ROOTFS_TYPE"
+
+if [ "$NIXOS" = 1 ]; then
+  # Every step checks itself and dies with its own reason (nixos_fail).
+  trap - ERR
+  set +e
+  nixos_install
+  nixos_mok
+  nixos_finish
+  exit 0
+fi
 
 # Disarm the ERR trap around the install: the trap fires even under `set +e`, and
 # with pipefail a failing `bootc … | tee` pipeline would hit it BEFORE we can
@@ -3554,21 +3639,7 @@ Full log: $LOG"
 # the disk they are dead weight (1.8 GB of the ESP), so they go. The entry is
 # removed only when it is provably the one the app made: its number comes from
 # the hand-off file, and its label and loader path must both match.
-if [ "$ESP_IS_LIVE" = 1 ] && [ -f /run/initramfs/live/rimeinst/handoff.cfg ]; then
-  _bn=$(sed -n 's/^bootnum=\([0-9A-Fa-f]\{4\}\)$/\1/p' /run/initramfs/live/rimeinst/handoff.cfg | head -1)
-  if [ -n "$_bn" ] && have efibootmgr \
-     && efibootmgr -v 2>/dev/null | grep -i "^Boot${_bn}\*\? Rime OS Setup" | grep -qi 'rimeinst'; then
-    efibootmgr -q -b "$_bn" -B >>"$LOG" 2>&1 \
-      && log "handoff: removed the one-shot setup entry Boot$_bn" \
-      || log "handoff: could not remove Boot$_bn (harmless: it is not in BootOrder)"
-  else
-    log "handoff: setup entry ${_bn:-?} not found or not ours; left alone"
-  fi
-  # The staged files themselves are NOT deleted here: this session runs from
-  # the squashfs among them, and a file deleted while open keeps the ESP from
-  # going back to read-only, which leaves its FAT marked dirty. The installed
-  # system deletes them on its first boot (install_staged_cleanup_in).
-fi
+remove_setup_entry
 log "install complete"
 write_result ok ""
 # The machine-readable success sentinel. It MUST be the very last line on

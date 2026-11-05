@@ -1,0 +1,6 @@
+# pull_request_target calling a local workflow that only uses hosted runners: allowed.
+on:
+  pull_request_target:
+jobs:
+  call:
+    uses: ./.github/workflows/callee.yml

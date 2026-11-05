@@ -13,6 +13,7 @@ name = "rime"
 path = "src/main.rs"
 
 [dependencies]
+rime-paths = { path = "../rime-paths" }
 rime-secret-core = { path = "../rime-secret-core" }
 rime-backup-core = { path = "../rime-backup-core" }
 rime-perm-core = { path = "../rime-perm-core" }
@@ -31,3 +32,5 @@ zbus.workspace = true
 zvariant.workspace = true
 tokio.workspace = true
 clap.workspace = true
+# Deltas (src/nixos/delta.rs) hash the delta file and the rebuilt NAR; already in the tree via rime-backup-core.
+sha2 = "0.10.9"

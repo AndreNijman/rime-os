@@ -13,6 +13,7 @@ name = "rime-agentd"
 path = "src/main.rs"
 
 [dependencies]
+rime-paths = { path = "../rime-paths" }
 rime-agent-core = { path = "../rime-agent-core" }
 rime-secret-core = { path = "../rime-secret-core" }
 anyhow.workspace = true

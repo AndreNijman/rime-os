@@ -392,7 +392,7 @@ pub fn locate_in(roots: &Roots, runtime: Runtime) -> Option<Located> {
             );
         }
     }
-    let sysext = roots.at("/usr/bin").join(runtime.program());
+    let sysext = roots.at(rime_paths::SYSTEM_BIN_DIR).join(runtime.program());
     if sysext.is_file() {
         return Some(Located { runtime, path: sysext });
     }
@@ -1032,7 +1032,7 @@ mod tests {
         // it as `_fake`: nothing could ever find it, `resolve` returned Err on
         // any machine without a real llama-server, and the three tests written
         // as `if let Ok(r) = …` asserted nothing at all.
-        let bin = root.join("usr/bin");
+        let bin = root.join(rime_paths::SYSTEM_BIN_DIR.trim_start_matches('/'));
         std::fs::create_dir_all(&bin).unwrap();
         let fake = bin.join("llama-server");
         std::fs::write(&fake, b"#!/bin/sh\nexit 0\n").unwrap();

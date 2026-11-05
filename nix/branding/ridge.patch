@@ -1,0 +1,350 @@
+diff --git a/desktop/rime-greet/GreetSurface.qml b/desktop/rime-greet/GreetSurface.qml
+index 467a69f43..f80e0598c 100644
+--- a/desktop/rime-greet/GreetSurface.qml
++++ b/desktop/rime-greet/GreetSurface.qml
+@@ -1,5 +1,6 @@
+ import QtQuick
+ import QtQuick.Effects
++import QtQuick.Shapes
+ 
+ // ─────────────────────────────────────────────────────────────
+ // GreetSurface — the per-output visual.
+@@ -162,29 +163,39 @@ Item {
+         spacing: 14
+         transform: Translate { x: root.shakeOffset }
+ 
+-        // Spark logo, centred above the username. Tinted to the user's accent
+-        // when one is published; drawn as-is (the edition spark) otherwise.
+-        // Wrapped in an Item because the Column positions its children and
+-        // MultiEffect must overlay the Image rather than sit below it.
++        // The layered-ridge lockup, centred above the username: the neutral
++        // planes and wordmark as an image, plane 3 as a polygon in the accent
++        // (the user's published accent, or the edition's). The polygon is the
++        // template's own plane 3 (files/branding/ridge/templates, viewBox
++        // 553.16 x 175, the symbol at scale 1), scaled with the image.
+         Item {
++            id: logoBox
+             anchors.horizontalCenter: parent.horizontalCenter
+-            width:  logo.implicitWidth
+-            height: logo.implicitHeight
++            readonly property real unit: height / 175
++            height: 56
++            width:  Math.round(553.16 * unit)
+             Image {
+                 id: logo
++                anchors.fill:      parent
+                 source:            root.theme.logoSource
+-                sourceSize.height: 84
+                 fillMode:          Image.PreserveAspectFit
+                 smooth:            true
++                mipmap:            true
+                 asynchronous:      true
+-                visible:           !root.theme.tintLogo
+             }
+-            MultiEffect {
+-                anchors.fill:      logo
+-                source:            logo
+-                visible:           root.theme.tintLogo && logo.status === Image.Ready
+-                colorization:      1.0
+-                colorizationColor: root.theme.active
++            Shape {
++                anchors.fill: parent
++                visible:      logo.status === Image.Ready
++                antialiasing: true
++                ShapePath {
++                    strokeWidth: -1
++                    fillColor:   root.theme.active
++                    startX: 47.5 * logoBox.unit; startY: 136 * logoBox.unit
++                    PathLine { x: 149   * logoBox.unit; y: 75 * logoBox.unit }
++                    PathLine { x: 231   * logoBox.unit; y: 45 * logoBox.unit }
++                    PathLine { x: 217.5 * logoBox.unit; y: 76 * logoBox.unit }
++                    PathLine { x: 47.5  * logoBox.unit; y: 136 * logoBox.unit }
++                }
+             }
+         }
+ 
+diff --git a/desktop/rime-greet/README.md b/desktop/rime-greet/README.md
+index 848a827b6..d6a7648c0 100644
+--- a/desktop/rime-greet/README.md
++++ b/desktop/rime-greet/README.md
+@@ -15,7 +15,8 @@ dots without it.
+ | `shell.qml` | Entry point. Inlined palette (`ThemeGreet`), the fullscreen layer-shell window model, wires `GreetContext` to `GreetSurface`. |
+ | `GreetContext.qml` | Non-visual shared state and the greetd auth backend: edition detection, session list, last-user/last-session memory, the published wallpaper, accent and motion settings, keyboard layout, recovery preselection. |
+ | `GreetSurface.qml` | The per-output visuals: clock, wallpaper/gradient, logo, username pill, keyboard-layout pill, password pill with its shapes, spinner, error shake, status line, session picker. |
+-| `assets/spark-{gold,chartreuse,white}.png` | Edition spark logos (256px). |
++| `assets/ridge-lockup-base.png` | The layered-ridge lockup without plane 3 (off-white, 168 px tall), rendered from rime-branding's template by `make-logo-assets.sh`. `GreetSurface` draws plane 3 over it in the accent. |
++| `make-logo-assets.sh` | Re-renders the asset (resvg); the `branding-surfaces` check fails if the committed PNG drifts from it. |
+ | `greetd-config.toml` | The image's `/etc/greetd/config.toml`: launches sway through `/usr/libexec/rime-greet-session`. |
+ | `sway-greet.conf` | The sway host config. Hosts quickshell as its only client and binds one key, the screen reader. |
+ | `labwc-greet/` | Fallback host: labwc config dir (`rc.xml`, `autostart`, `environment`) + note. |
+@@ -106,18 +107,19 @@ shape animation at the login screen either.
+    not updated past the three-edition split.
+ 3. Fallback `mono` (dev box / unset).
+ 
+-The edition drives the spark logo **and** the accent colour:
++The edition drives the accent colour, which the layered-ridge logo carries on
++plane 3 only (brand pack page 4; the other planes and the wordmark stay
++off-white):
+ 
+-| Edition | Logo | Accent |
+-|---|---|---|
+-| `rime` | chartreuse spark | `#d9f99d` |
+-| `gaming` | gold spark | `#fde047` |
+-| `daily` | chartreuse spark | `#d9f99d` |
+-| `mono` (fallback) | white spark | `#a6d0f7` (the Brain_Shell blue, so off-target the greeter matches the Brain_Shell lock screen pixel for pixel) |
++| Edition | Accent (plane 3, focus rings) |
++|---|---|
++| `rime` | `#91c2dc` (Rime Blue) |
++| `gaming` | `#fde047` (legacy three-edition machines) |
++| `daily` | `#91c2dc` (Rime Blue) |
++| `mono` (fallback) | `#a6d0f7` (the Brain_Shell blue, so off-target the greeter matches the Brain_Shell lock screen pixel for pixel) |
+ 
+-A user's published accent overrides the edition colour. The greeter then draws
+-the white spark and tints it to that accent, so the login screen matches the
+-desktop.
++A user's published accent overrides the edition colour, so the login screen
++matches the desktop.
+ 
+ ### Sessions & memory
+ 
+@@ -395,7 +397,7 @@ and `session-bus` (the wrapper's buses). `tests/mutate-greet-atspi.sh` and
+ | Palette | `Theme`/`Colors` singletons (live, from colors.json) | inlined `ThemeGreet` (colors.json fallbacks); the user's published accent, else the edition accent |
+ | Wallpaper | `WallpaperService.currentWall` | the last user's published wallpaper, else `/usr/share/backgrounds/rime/default.jpg` |
+ | Username | display only (`$USER`); PAM resolves the auth user | editable field, prefilled from `last-user`, passed to `createSession` |
+-| Extra UI | none | edition spark logo, keyboard-layout pill, session picker, recovery notice |
++| Extra UI | none | layered-ridge logo (plane 3 in the accent), keyboard-layout pill, session picker, recovery notice |
+ | State | per-surface | shared `GreetContext` across surfaces |
+ | Clock, pill geometry, spinner, shake, caps heuristic, Escape-clears | n/a | **identical** |
+ 
+diff --git a/desktop/rime-greet/shell.qml b/desktop/rime-greet/shell.qml
+index 83330a53c..3c09cdb05 100644
+--- a/desktop/rime-greet/shell.qml
++++ b/desktop/rime-greet/shell.qml
+@@ -29,9 +29,9 @@ ShellRoot {
+     // ── Inlined palette (ThemeGreet) ──────────────────────────────
+     // Values lifted verbatim from Brain_Shell's colours.json fallbacks
+     // (src/theme/ColorLoader.qml) — the same defaults the Lockscreen
+-    // paints with before any live theme is loaded. `active` and the
+-    // spark logo are edition-derived so gaming / daily / dev each get
+-    // their own accent.
++    // paints with before any live theme is loaded. `active` (the logo's
++    // plane 3 and the focus rings) is edition-derived so gaming / daily /
++    // dev each get their own accent.
+     QtObject {
+         id: greetTheme
+         readonly property string fontFamily: "JetBrainsMono Nerd Font"
+@@ -41,31 +41,25 @@ ShellRoot {
+         readonly property color border:     "#ffffff"
+         readonly property color errorColor: "#ff5c5c"
+ 
+-        // Edition accent: rime (the one published image) and the legacy
+-        // daily → chartreuse, legacy gaming → gold, anything else (dev box
+-        // / VARIANT_ID unset) → the Brain_Shell blue so the greeter is
+-        // pixel-identical to the Lockscreen off-target.
+-        // The user's own accent when Rime Shell has published one, so the
+-        // login screen matches the desktop; the edition colour otherwise.
++        // Accent: the user's own when Rime Shell has published one, so the
++        // login screen matches the desktop; otherwise Rime Blue (the layered
++        // ridge's plane 3) on rime / daily, gold on a legacy gaming machine,
++        // and the Brain_Shell blue off-target (dev box / VARIANT_ID unset) so
++        // the greeter is pixel-identical to the Lockscreen there.
+         readonly property color active:
+             greetCtx.accent !== ""        ? greetCtx.accent
+           : greetCtx.edition === "gaming" ? "#fde047"
+-          : greetCtx.edition === "rime"   ? "#d9f99d"
+-          : greetCtx.edition === "daily"  ? "#d9f99d"
++          : greetCtx.edition === "rime"   ? "#91c2dc"
++          : greetCtx.edition === "daily"  ? "#91c2dc"
+           : "#a6d0f7"
+ 
+-        // Assets ship alongside this file, so Qt.resolvedUrl works both
+-        // in-tree (dev) and installed at /usr/share/rime-greet/.
+-        // With a published accent the WHITE spark is used and tinted to it in
+-        // GreetSurface — white keeps full luminance, so the tint is the accent
+-        // itself rather than a darkened version of it.
+-        readonly property bool tintLogo: greetCtx.accent !== ""
+-        readonly property url logoSource:
+-            greetCtx.accent !== ""        ? Qt.resolvedUrl("assets/spark-white.png")
+-          : greetCtx.edition === "gaming" ? Qt.resolvedUrl("assets/spark-gold.png")
+-          : greetCtx.edition === "rime"   ? Qt.resolvedUrl("assets/spark-chartreuse.png")
+-          : greetCtx.edition === "daily"  ? Qt.resolvedUrl("assets/spark-chartreuse.png")
+-          : Qt.resolvedUrl("assets/spark-white.png")
++        // The layered-ridge lockup. Planes 1, 2, 4 and the wordmark are this
++        // off-white image (make-logo-assets.sh); GreetSurface draws plane 3
++        // over it as a polygon in `active`, so only plane 3 takes the accent
++        // (brand pack page 4) and no shader is needed for the tint. The asset
++        // ships alongside this file, so Qt.resolvedUrl works in-tree and
++        // installed.
++        readonly property url logoSource: Qt.resolvedUrl("assets/ridge-lockup-base.png")
+     }
+ 
+     // ── Shared greeter state + auth backend ───────────────────────
+diff --git a/desktop/shell/rime-greeting.sh b/desktop/shell/rime-greeting.sh
+index 81076e9c6..386234a62 100644
+--- a/desktop/shell/rime-greeting.sh
++++ b/desktop/shell/rime-greeting.sh
+@@ -54,17 +54,50 @@ command -v fastfetch >/dev/null 2>&1 || _rime_greet=0
+ if [ "${_rime_greet}" = 1 ]; then
+     RIME_GREETED=1
+     export RIME_GREETED
+-    # The logo is drawn in the foreground colour, so it has to invert with the
+-    # desktop theme or it disappears against the background on a light scheme.
+-    _rime_logo_color=white
+-    case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)" in
+-        *light*) _rime_logo_color=black ;;
+-    esac
+-    # Accent colour, so the greeting tracks the desktop palette instead of the
+-    # static brand chartreuse it used to be built around. Rime Shell's matugen
+-    # pipeline rewrites this file on every wallpaper change, already formatted as
+-    # an SGR parameter string (38;2;R;G;B) — the greeting is POSIX sh and has no
+-    # business doing hex arithmetic to use a colour.
++
++    # Light or dark background picks the ink of the logo: off-white planes on a
++    # dark terminal, charcoal on a light one. Only a local session can ask the
++    # desktop; over SSH the remote desktop says nothing about this terminal.
++    _rime_variant=dark
++    if [ -z "${SSH_CONNECTION:-}${SSH_TTY:-}" ]; then
++        case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)" in
++            *light*) _rime_variant=light ;;
++        esac
++    fi
++
++    # The logo: the symbol Rime Shell recoloured from the wallpaper (matugen's
++    # post_hook runs rime-logo-render into ~/.cache/rime/logo), else the shipped
++    # Rime Blue one. Plane 3 carries the accent; the layered ridge never changes.
++    _rime_logo="${XDG_CACHE_HOME:-$HOME/.cache}/rime/logo/rime-symbol-${_rime_variant}.png"
++    [ -r "${_rime_logo}" ] || _rime_logo="/usr/share/rime/branding/png/symbol/rime-symbol-${_rime_variant}-512.png"
++
++    # Which image protocol this terminal speaks, and the logo's width in cells
++    # for 8 rows (rime-term-graphics: kitty-direct for a local Ghostty or kitty,
++    # a single bounded query for everything else, `none` when nothing answers).
++    # The answer is kept for this terminal in RIME_TERM_GRAPHICS.
++    _rime_proto=none
++    _rime_cols=0
++    _rime_rows=8
++    if [ -r "${_rime_logo}" ] && [ -x /usr/libexec/rime-term-graphics ]; then
++        _rime_graphics="$(/usr/libexec/rime-term-graphics --rows "${_rime_rows}" --image "${_rime_logo}" 2>/dev/null)" || _rime_graphics=""
++        case "${_rime_graphics}" in
++            "kitty-direct "*|"kitty "*|"sixel "*|"iterm "*|"none "*)
++                _rime_proto="${_rime_graphics%% *}"
++                _rime_graphics="${_rime_graphics#* }"
++                _rime_cols="${_rime_graphics%% *}"
++                RIME_TERM_GRAPHICS="${_rime_graphics##* }"
++                export RIME_TERM_GRAPHICS
++                ;;
++        esac
++        case "${_rime_cols}" in
++            ""|*[!0-9]*) _rime_proto=none ;;
++        esac
++    fi
++
++    # Accent colour, so the greeting tracks the desktop palette. Rime Shell's
++    # matugen pipeline rewrites this file on every wallpaper change, already
++    # formatted as an SGR parameter string (38;2;R;G;B): the greeting is POSIX
++    # sh and has no business doing hex arithmetic to use a colour.
+     _rime_accent_file="${XDG_CACHE_HOME:-$HOME/.cache}/rime-shell/accent-ansi"
+     _rime_accent=""
+     if [ -r "${_rime_accent_file}" ]; then
+@@ -77,27 +110,37 @@ if [ "${_rime_greet}" = 1 ]; then
+         ""|*[!0-9\;]*) _rime_accent="" ;;
+     esac
+ 
+-    # The accent also replaces the "low" colour of percentages (memory, disk):
+-    # fastfetch's own green there was the last green left in the greeting.
+-    # Yellow and red stay, because those are warnings and mean something.
+-    #
+-    # No accent yet — a first login before any wallpaper has been picked — means
+-    # no --color at all, leaving the config's own default rather than forcing
+-    # some colour that may not suit the scheme. Spelled out as four branches
+-    # because this file is SOURCED: building the argument list with `set --`
+-    # would overwrite the calling shell's positional parameters.
+-    if [ -r /etc/fastfetch/config.jsonc ] && [ -n "${_rime_accent}" ]; then
+-        fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_rime_logo_color}" --color "${_rime_accent}" --percent-color-green "${_rime_accent}"
+-    elif [ -r /etc/fastfetch/config.jsonc ]; then
+-        fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_rime_logo_color}"
+-    elif [ -n "${_rime_accent}" ]; then
+-        # Config missing (a partial image, or a user deleted it): still greet
++    # The arguments are built in a subshell: this file is SOURCED, and `set --`
++    # out here would overwrite the calling shell's positional parameters.
++    (
++        set --
++        # Config missing (a partial install, or a user deleted it): still greet
+         # rather than silently printing nothing at all.
+-        fastfetch --logo-color-1 "${_rime_logo_color}" --color "${_rime_accent}" --percent-color-green "${_rime_accent}"
+-    else
+-        fastfetch --logo-color-1 "${_rime_logo_color}"
+-    fi
+-    unset _rime_logo_color _rime_accent _rime_accent_file
++        [ -r /etc/fastfetch/config.jsonc ] && set -- --config /etc/fastfetch/config.jsonc
++        # The accent also replaces the "low" colour of percentages (memory,
++        # disk): fastfetch's own green there was the last green left. Yellow and
++        # red stay, because those are warnings and mean something. No accent yet
++        # (a first login before any wallpaper) leaves the config's Rime Blue.
++        [ -n "${_rime_accent}" ] && set -- "$@" --color "${_rime_accent}" --percent-color-green "${_rime_accent}"
++        case "${_rime_proto}" in
++            kitty-direct|kitty|sixel|iterm)
++                # Width AND height, always: given only a width, fastfetch clears
++                # the screen and the scrollback before drawing an image logo.
++                set -- "$@" --logo-type "${_rime_proto}" --logo "${_rime_logo}" \
++                    --logo-width "${_rime_cols}" --logo-height "${_rime_rows}" \
++                    --logo-padding-top 1 --logo-preserve-aspect-ratio true
++                ;;
++            *)
++                # No image protocol (Alacritty, the Linux console, kmscon, an
++                # unknown or silent terminal): a plain label, never ASCII art.
++                # shellcheck disable=SC2016 # $1 is fastfetch's colour slot, not a shell parameter
++                set -- "$@" --logo-type data --logo '$1RIME OS' \
++                    --logo-color-1 "1;${_rime_accent:-38;2;145;194;220}" --logo-padding-top 1
++                ;;
++        esac
++        exec fastfetch "$@"
++    )
++    unset _rime_variant _rime_logo _rime_proto _rime_cols _rime_rows _rime_graphics _rime_accent _rime_accent_file
+ fi
+ 
+ unset _rime_greet
+diff --git a/system/fastfetch/config.jsonc b/system/fastfetch/config.jsonc
+index 7da64c766..5c62a70a6 100644
+--- a/system/fastfetch/config.jsonc
++++ b/system/fastfetch/config.jsonc
+@@ -1,24 +1,30 @@
+ {
+     "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+     // Rime OS system fastfetch config (rime-logs 33-fastfetch-terminal.md).
+-    // Invoked from /usr/share/rime/shell/greeting.sh (sourced by both /etc/bashrc
+-    // and the seeded ~/.zshrc) as `fastfetch --config /etc/fastfetch/config.jsonc
+-    // --logo-color-1 <white|black> [--color <accent>]` so the logo colour tracks
+-    // the colour scheme and the accent tracks the wallpaper.
++    // Invoked from /usr/share/rime/shell/greeting.sh (sourced by bash and by the
++    // seeded ~/.zshrc) as `fastfetch --config /etc/fastfetch/config.jsonc
++    // [--color <accent>] --logo-type <protocol> --logo <png> ...`: the greeting
++    // picks the image (the symbol Rime Shell recoloured from the wallpaper, else
++    // the shipped Rime Blue one) and the protocol the terminal speaks.
++    //
++    // The logo below is what a bare `fastfetch --config` shows, and what the
++    // greeting shows in a terminal without image support: a plain "RIME OS"
++    // label in the accent, never ASCII art.
+     //
+     // Every accent below is `{#keys}` — a reference to display.color.keys — and
+     // never a literal escape, because that is the one thing `--color` can
+     // override at runtime. The value set here is only what a session shows
+-    // before matugen has extracted a palette from a wallpaper, so it stays the
+-    // Rime brand chartreuse.
++    // before matugen has extracted a palette from a wallpaper: Rime Blue
++    // (#91C2DC, docs/branding.md).
+     "logo": {
+-        "type": "file",
+-        "source": "/etc/fastfetch/rime-logo.txt",
+-        "padding": { "top": 0, "left": 2, "right": 3 }
++        "type": "data",
++        "source": "$1RIME OS",
++        "color": { "1": "1;38;2;145;194;220" },
++        "padding": { "top": 1, "left": 2, "right": 3 }
+     },
+     "display": {
+         "separator": "  ",
+-        "color": { "keys": "38;2;161;201;153" }
++        "color": { "keys": "38;2;145;194;220" }
+     },
+     "modules": [
+         // Leading blank line vertically centres the info block against the taller
