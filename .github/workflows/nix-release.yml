@@ -215,6 +215,10 @@ jobs:
             /usr/local/.ghcup /usr/share/swift /usr/local/share/boost
           df -h / "$RUNNER_TEMP" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; rimed's checkPhase runs its tests under
+      # bubblewrap inside the Nix build sandbox (nix.yml has the same step). A throwaway hosted VM.
+      - name: Allow user namespaces (bubblewrap in rimed's tests)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install Nix (pinned, hash-checked)
         run: |
           set -euo pipefail
@@ -491,6 +495,10 @@ jobs:
             /usr/local/.ghcup /usr/share/swift /usr/local/share/boost
           df -h / "$RUNNER_TEMP" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor; rimed's checkPhase runs its tests under
+      # bubblewrap inside the Nix build sandbox (nix.yml has the same step). A throwaway hosted VM.
+      - name: Allow user namespaces (bubblewrap in rimed's tests)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Install Nix (pinned, hash-checked; Rime's cache trusted)
         run: |
           set -euo pipefail
