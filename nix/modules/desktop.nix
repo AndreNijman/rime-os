@@ -143,10 +143,11 @@ let
 
   # ── rime-greet: Rime's Quickshell greeter (files/desktop/rime-greet) ────────────────────────────
   # Read in place by the greeter, so its own files are store paths; helpers it calls use the stable
-  # profile like everything else.
+  # profile like everything else. The tree is rime-ridge-files' copy: files/desktop/rime-greet with the
+  # layered ridge in place of the bootc image's spark.
   rimeGreet = pkgs.runCommand "rime-greet" { } ''
     mkdir -p $out/share
-    cp -r ${files}/desktop/rime-greet $out/share/rime-greet
+    cp -r ${pkgs.rime.rime-ridge-files}/share/rime-greet $out/share/rime-greet
     chmod -R u+w $out
     g=$out/share/rime-greet
     substituteInPlace $g/sway-greet.conf \

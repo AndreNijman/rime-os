@@ -3875,6 +3875,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-starship-link.sh
 
+      # The bootc image keeps the chartreuse spark: the shared greeter, greeting,
+      # fastfetch and firstrun files carry it, and nix/branding/ridge.patch (the
+      # NixOS ridge) still applies to them with no fuzz.
+      - name: Run bootc-keeps-spark assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-bootc-keeps-spark.sh
+
       # The seeded Hyprland Lua tree in a REAL Hyprland, not just through
       # --verify-config. Three things only a running instance can answer:
       # `hyprctl configerrors` is clean; `hyprctl reload` re-reads a generated

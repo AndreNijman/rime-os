@@ -54,50 +54,17 @@ command -v fastfetch >/dev/null 2>&1 || _rime_greet=0
 if [ "${_rime_greet}" = 1 ]; then
     RIME_GREETED=1
     export RIME_GREETED
-
-    # Light or dark background picks the ink of the logo: off-white planes on a
-    # dark terminal, charcoal on a light one. Only a local session can ask the
-    # desktop; over SSH the remote desktop says nothing about this terminal.
-    _rime_variant=dark
-    if [ -z "${SSH_CONNECTION:-}${SSH_TTY:-}" ]; then
-        case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)" in
-            *light*) _rime_variant=light ;;
-        esac
-    fi
-
-    # The logo: the symbol Rime Shell recoloured from the wallpaper (matugen's
-    # post_hook runs rime-logo-render into ~/.cache/rime/logo), else the shipped
-    # Rime Blue one. Plane 3 carries the accent; the layered ridge never changes.
-    _rime_logo="${XDG_CACHE_HOME:-$HOME/.cache}/rime/logo/rime-symbol-${_rime_variant}.png"
-    [ -r "${_rime_logo}" ] || _rime_logo="/usr/share/rime/branding/png/symbol/rime-symbol-${_rime_variant}-512.png"
-
-    # Which image protocol this terminal speaks, and the logo's width in cells
-    # for 8 rows (rime-term-graphics: kitty-direct for a local Ghostty or kitty,
-    # a single bounded query for everything else, `none` when nothing answers).
-    # The answer is kept for this terminal in RIME_TERM_GRAPHICS.
-    _rime_proto=none
-    _rime_cols=0
-    _rime_rows=8
-    if [ -r "${_rime_logo}" ] && [ -x /usr/libexec/rime-term-graphics ]; then
-        _rime_graphics="$(/usr/libexec/rime-term-graphics --rows "${_rime_rows}" --image "${_rime_logo}" 2>/dev/null)" || _rime_graphics=""
-        case "${_rime_graphics}" in
-            "kitty-direct "*|"kitty "*|"sixel "*|"iterm "*|"none "*)
-                _rime_proto="${_rime_graphics%% *}"
-                _rime_graphics="${_rime_graphics#* }"
-                _rime_cols="${_rime_graphics%% *}"
-                RIME_TERM_GRAPHICS="${_rime_graphics##* }"
-                export RIME_TERM_GRAPHICS
-                ;;
-        esac
-        case "${_rime_cols}" in
-            ""|*[!0-9]*) _rime_proto=none ;;
-        esac
-    fi
-
-    # Accent colour, so the greeting tracks the desktop palette. Rime Shell's
-    # matugen pipeline rewrites this file on every wallpaper change, already
-    # formatted as an SGR parameter string (38;2;R;G;B): the greeting is POSIX
-    # sh and has no business doing hex arithmetic to use a colour.
+    # The logo is drawn in the foreground colour, so it has to invert with the
+    # desktop theme or it disappears against the background on a light scheme.
+    _rime_logo_color=white
+    case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null)" in
+        *light*) _rime_logo_color=black ;;
+    esac
+    # Accent colour, so the greeting tracks the desktop palette instead of the
+    # static brand chartreuse it used to be built around. Rime Shell's matugen
+    # pipeline rewrites this file on every wallpaper change, already formatted as
+    # an SGR parameter string (38;2;R;G;B) — the greeting is POSIX sh and has no
+    # business doing hex arithmetic to use a colour.
     _rime_accent_file="${XDG_CACHE_HOME:-$HOME/.cache}/rime-shell/accent-ansi"
     _rime_accent=""
     if [ -r "${_rime_accent_file}" ]; then
@@ -110,37 +77,27 @@ if [ "${_rime_greet}" = 1 ]; then
         ""|*[!0-9\;]*) _rime_accent="" ;;
     esac
 
-    # The arguments are built in a subshell: this file is SOURCED, and `set --`
-    # out here would overwrite the calling shell's positional parameters.
-    (
-        set --
-        # Config missing (a partial install, or a user deleted it): still greet
+    # The accent also replaces the "low" colour of percentages (memory, disk):
+    # fastfetch's own green there was the last green left in the greeting.
+    # Yellow and red stay, because those are warnings and mean something.
+    #
+    # No accent yet — a first login before any wallpaper has been picked — means
+    # no --color at all, leaving the config's own default rather than forcing
+    # some colour that may not suit the scheme. Spelled out as four branches
+    # because this file is SOURCED: building the argument list with `set --`
+    # would overwrite the calling shell's positional parameters.
+    if [ -r /etc/fastfetch/config.jsonc ] && [ -n "${_rime_accent}" ]; then
+        fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_rime_logo_color}" --color "${_rime_accent}" --percent-color-green "${_rime_accent}"
+    elif [ -r /etc/fastfetch/config.jsonc ]; then
+        fastfetch --config /etc/fastfetch/config.jsonc --logo-color-1 "${_rime_logo_color}"
+    elif [ -n "${_rime_accent}" ]; then
+        # Config missing (a partial image, or a user deleted it): still greet
         # rather than silently printing nothing at all.
-        [ -r /etc/fastfetch/config.jsonc ] && set -- --config /etc/fastfetch/config.jsonc
-        # The accent also replaces the "low" colour of percentages (memory,
-        # disk): fastfetch's own green there was the last green left. Yellow and
-        # red stay, because those are warnings and mean something. No accent yet
-        # (a first login before any wallpaper) leaves the config's Rime Blue.
-        [ -n "${_rime_accent}" ] && set -- "$@" --color "${_rime_accent}" --percent-color-green "${_rime_accent}"
-        case "${_rime_proto}" in
-            kitty-direct|kitty|sixel|iterm)
-                # Width AND height, always: given only a width, fastfetch clears
-                # the screen and the scrollback before drawing an image logo.
-                set -- "$@" --logo-type "${_rime_proto}" --logo "${_rime_logo}" \
-                    --logo-width "${_rime_cols}" --logo-height "${_rime_rows}" \
-                    --logo-padding-top 1 --logo-preserve-aspect-ratio true
-                ;;
-            *)
-                # No image protocol (Alacritty, the Linux console, kmscon, an
-                # unknown or silent terminal): a plain label, never ASCII art.
-                # shellcheck disable=SC2016 # $1 is fastfetch's colour slot, not a shell parameter
-                set -- "$@" --logo-type data --logo '$1RIME OS' \
-                    --logo-color-1 "1;${_rime_accent:-38;2;145;194;220}" --logo-padding-top 1
-                ;;
-        esac
-        exec fastfetch "$@"
-    )
-    unset _rime_variant _rime_logo _rime_proto _rime_cols _rime_rows _rime_graphics _rime_accent _rime_accent_file
+        fastfetch --logo-color-1 "${_rime_logo_color}" --color "${_rime_accent}" --percent-color-green "${_rime_accent}"
+    else
+        fastfetch --logo-color-1 "${_rime_logo_color}"
+    fi
+    unset _rime_logo_color _rime_accent _rime_accent_file
 fi
 
 unset _rime_greet

@@ -5,9 +5,12 @@
 {
   rimed = callPackage ./rimed.nix { };
   rime-shell = callPackage ./rime-shell.nix { src = rime-shell-src; };
-  rime-libexec = callPackage ./rime-libexec.nix { };
+  rime-libexec = callPackage ./rime-libexec.nix { inherit (pkgs.rime) rime-ridge-files; };
   # The layered-ridge identity: masters, exports, hicolor icons (files/branding/ridge).
   rime-branding = callPackage ./rime-branding.nix { };
+  # The ridge versions of the shared files that show the identity (greeter, terminal greeting, fastfetch): files/**
+  # keeps the bootc image's spark, nix/branding/ridge.patch turns them into the ridge for NixOS.
+  rime-ridge-files = callPackage ./rime-ridge-files.nix { };
   # The boot splash built from it: rime-os + 24 accent themes (files/branding/plymouth/ridge).
   rime-plymouth = callPackage ./rime-plymouth.nix { inherit (pkgs.rime) rime-branding; };
   # The terminal greeting's helpers: image protocol detection and the wallpaper-recoloured logo.

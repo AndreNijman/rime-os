@@ -120,9 +120,9 @@ run_labwc() {
         KB_LAYOUT=us
         KB_VARIANT=
         # The real script derives this from VARIANT_ID before reaching the
-        # labwc block (Rime Blue on Daily, gold on Gaming). The block only
+        # labwc block (chartreuse on Daily, gold on Gaming). The block only
         # consumes it, so the harness supplies the Daily value.
-        RIME_ACCENT="#91C2DC"
+        RIME_ACCENT="#D9F99D"
         render_hypr_tmpl() {
             sed -e "s|@HOME@|${HOME}|g" \
                 -e "s|@KB_LAYOUT@|${KB_LAYOUT}|g" \
@@ -318,7 +318,7 @@ else
     HOME="${WORK}/mighome" bash -c '
         set -euo pipefail
         log() { :; }
-        KB_LAYOUT=us; KB_VARIANT=; RIME_ACCENT="#91C2DC"
+        KB_LAYOUT=us; KB_VARIANT=; RIME_ACCENT="#D9F99D"
         render_hypr_tmpl() { cat "$1"; }
         HYPR_LEGACY_CONF="$2"
         mkdir -p "$(dirname "$2")"

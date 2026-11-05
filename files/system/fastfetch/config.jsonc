@@ -1,30 +1,24 @@
 {
     "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
     // Rime OS system fastfetch config (rime-logs 33-fastfetch-terminal.md).
-    // Invoked from /usr/share/rime/shell/greeting.sh (sourced by bash and by the
-    // seeded ~/.zshrc) as `fastfetch --config /etc/fastfetch/config.jsonc
-    // [--color <accent>] --logo-type <protocol> --logo <png> ...`: the greeting
-    // picks the image (the symbol Rime Shell recoloured from the wallpaper, else
-    // the shipped Rime Blue one) and the protocol the terminal speaks.
-    //
-    // The logo below is what a bare `fastfetch --config` shows, and what the
-    // greeting shows in a terminal without image support: a plain "RIME OS"
-    // label in the accent, never ASCII art.
+    // Invoked from /usr/share/rime/shell/greeting.sh (sourced by both /etc/bashrc
+    // and the seeded ~/.zshrc) as `fastfetch --config /etc/fastfetch/config.jsonc
+    // --logo-color-1 <white|black> [--color <accent>]` so the logo colour tracks
+    // the colour scheme and the accent tracks the wallpaper.
     //
     // Every accent below is `{#keys}` — a reference to display.color.keys — and
     // never a literal escape, because that is the one thing `--color` can
     // override at runtime. The value set here is only what a session shows
-    // before matugen has extracted a palette from a wallpaper: Rime Blue
-    // (#91C2DC, docs/branding.md).
+    // before matugen has extracted a palette from a wallpaper, so it stays the
+    // Rime brand chartreuse.
     "logo": {
-        "type": "data",
-        "source": "$1RIME OS",
-        "color": { "1": "1;38;2;145;194;220" },
-        "padding": { "top": 1, "left": 2, "right": 3 }
+        "type": "file",
+        "source": "/etc/fastfetch/rime-logo.txt",
+        "padding": { "top": 0, "left": 2, "right": 3 }
     },
     "display": {
         "separator": "  ",
-        "color": { "keys": "38;2;145;194;220" }
+        "color": { "keys": "38;2;161;201;153" }
     },
     "modules": [
         // Leading blank line vertically centres the info block against the taller

@@ -1,11 +1,13 @@
 # The terminal greeting: fastfetch with the Rime symbol, in the image protocol the terminal speaks, recoloured
 # from the wallpaper (docs/branding.md "Terminal greeting").
 #
-#   files/desktop/shell/rime-greeting.sh   the greeting itself, POSIX sh (rime-libexec installs it at
-#                                          share/rime/shell/greeting.sh). zsh reaches it from the seeded ~/.zshrc;
-#                                          bash from here (bootc: /etc/bashrc).
-#   files/system/fastfetch/config.jsonc    /etc/fastfetch/config.jsonc: Rime's modules, Rime Blue keys, and the
-#                                          "RIME OS" label for terminals with no image protocol.
+#   rime-ridge-files greeting.sh           the greeting itself, POSIX sh: files/desktop/shell/rime-greeting.sh with
+#                                          nix/branding/ridge.patch (the bootc file keeps the spark). rime-libexec
+#                                          installs it at share/rime/shell/greeting.sh. zsh reaches it from the
+#                                          seeded ~/.zshrc; bash from here (bootc: /etc/bashrc).
+#   rime-ridge-files config.jsonc          /etc/fastfetch/config.jsonc: files/system/fastfetch/config.jsonc with the
+#                                          same patch: Rime's modules, Rime Blue keys, and the "RIME OS" label for
+#                                          terminals with no image protocol.
 #   pkgs.rime.rime-greeting                libexec/rime-term-graphics (protocol choice) and libexec/rime-logo-render
 #                                          (Rime Shell's matugen post_hook: ~/.cache/rime/logo/rime-symbol-*.png).
 #   pkgs.rime.rime-branding                share/rime/branding/png/symbol/rime-symbol-{dark,light}-512.png, the logo
@@ -40,7 +42,7 @@ in
     # on that).
     environment.pathsToLink = [ "/libexec" "/share/rime" ];
 
-    environment.etc."fastfetch/config.jsonc".source = ../../files/system/fastfetch/config.jsonc;
+    environment.etc."fastfetch/config.jsonc".source = "${pkgs.rime.rime-ridge-files}/etc/fastfetch/config.jsonc";
 
     # bash: last in /etc/bashrc's interactive part, as bootc appended it to /etc/bashrc. The file checks for itself
     # that the shell is interactive, on a terminal, and not already greeted (RIME_GREETED).

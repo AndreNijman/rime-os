@@ -32,7 +32,9 @@ pkgs.runCommandCC "rime-greeting-check"
   }
   ''
     set -eu
-    cp ${shellDirFiles}/rime-greeting.sh ${shellDirFiles}/rime-term-graphics.c ${shellDirFiles}/rime-logo-render .
+    # The greeting NixOS ships: the bootc file with nix/branding/ridge.patch (rime-ridge-files).
+    cp ${pkgs.rime.rime-ridge-files}/share/rime/shell/greeting.sh rime-greeting.sh
+    cp ${shellDirFiles}/rime-term-graphics.c ${shellDirFiles}/rime-logo-render .
     chmod u+w rime-greeting.sh rime-term-graphics.c rime-logo-render
     tg=${greeting}/libexec/rime-term-graphics
     render=${greeting}/libexec/rime-logo-render

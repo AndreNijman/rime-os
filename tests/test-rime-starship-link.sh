@@ -36,7 +36,7 @@ sed 's|@ACCENT@|{{colors.primary.default.hex}}|g' "$SEED" > "${SHELL_SRC}/src/co
 
 run() {
     env -i PATH="$PATH" HOME="$1" SRC_DIR="$SHELL_SRC" STARSHIP_TMPL="$SEED" \
-        RIME_ACCENT="#91C2DC" RIME_VARIANT=daily \
+        RIME_ACCENT="#D9F99D" RIME_VARIANT=daily \
         bash -c 'log(){ echo "log: $*"; }; . "$1"' _ "$BLOCK"
 }
 home() { local h; h="$(mktemp -d -p "$WORK")"; mkdir -p "$h/.config"; printf '%s' "$h"; }
@@ -46,7 +46,7 @@ H="$(home)"; run "$H" >/dev/null
 [ "$(readlink "$H/.config/starship.toml")" = "$H/.cache/rime-shell/starship.toml" ] \
     && ok "a fresh account gets a link to the wallpaper-themed prompt" \
     || bad "a fresh account gets a link to the wallpaper-themed prompt"
-grep -q 'bold #91C2DC' "$H/.cache/rime-shell/starship.toml" 2>/dev/null \
+grep -q 'bold #D9F99D' "$H/.cache/rime-shell/starship.toml" 2>/dev/null \
     && ok "until matugen runs, the cache carries the edition accent" \
     || bad "until matugen runs, the cache carries the edition accent"
 grep -q '{{' "$H/.cache/rime-shell/starship.toml" 2>/dev/null \

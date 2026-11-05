@@ -27,7 +27,8 @@ let
   branding = pkgs.rime.rime-branding;
   themes = pkgs.rime.rime-plymouth;
   python = pkgs.python3.withPackages (p: [ p.pillow ]);
-  greet = files + "/desktop/rime-greet";
+  # The NixOS greeter tree (files/desktop/rime-greet keeps the bootc image's spark).
+  greet = "${pkgs.rime.rime-ridge-files}/share/rime-greet";
 in
 {
   branding-surfaces-static =

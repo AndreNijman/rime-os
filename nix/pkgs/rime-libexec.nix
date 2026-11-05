@@ -17,6 +17,9 @@
 #     must not pin). Scripts that run as root drop the caller's PATH entirely ("closed"). The file is never renamed,
 #     so argv[0], BASH_SOURCE and `readlink -f $0` stay true (rime-tool-broker is symlinked as wrangler/terraform and
 #     reads its name from $0; rime-gamescope-steam finds its siblings through BASH_SOURCE).
+#  Identity: the bootc image keeps the chartreuse spark in files/**, so the terminal greeting comes from
+#  rime-ridge-files (the ridge version), and rime-shell-firstrun's default accent and last-resort terminal are swapped
+#  for Rime Blue and Ghostty in installPhase.
 #  4. installCheck proves it: rime-libexec-audit.py parses every shell script with shfmt and checks that each command
 #     resolves (builtin, own function, the injected store PATH, or the RUNTIME list below); python/node argv lists are
 #     scanned the same way. A command passed as an ARGUMENT to a script's own helper (rime-safe-graphics'
@@ -79,6 +82,7 @@
   xkeyboard_config,
   at-spi2-core,
   pciutils,
+  rime-ridge-files,
 }:
 
 let
@@ -317,7 +321,14 @@ stdenvNoCC.mkDerivation {
     cp $S/flatpak/flathub.flatpakrepo $out/etc/flatpak/
     cp $D/zsh/zshrc $out/share/rime/zsh/zshrc
     cp $D/starship/starship.toml $out/share/rime/starship/
-    cp $D/shell/rime-greeting.sh $out/share/rime/shell/greeting.sh
+    cp ${rime-ridge-files}/share/rime/shell/greeting.sh $out/share/rime/shell/greeting.sh
+    # Rime Blue for a new user's seeded accent (prompt, labwc) and Ghostty in the last-resort Hyprland config, where
+    # the bootc image seeds chartreuse and opens Alacritty.
+    substituteInPlace $out/libexec/rime-shell-firstrun \
+      --replace-fail '*)       RIME_ACCENT="#D9F99D" ;;   # chartreuse' \
+                     '*)       RIME_ACCENT="#91C2DC" ;;   # Rime Blue, the layered ridge plane 3' \
+      --replace-fail 'hl.bind("SUPER + Return", hl.dsp.exec_cmd("alacritty"))' \
+                     'hl.bind("SUPER + Return", hl.dsp.exec_cmd("ghostty"))'
     cp $D/shell/agent.sh $out/share/rime/shell/agent.sh
     cp $D/bash/rime-starship.sh $D/zsh/rime-zsh-highlight.sh $out/etc/profile.d/
     cp $D/fish/rime-agent.fish $out/share/fish/vendor_conf.d/

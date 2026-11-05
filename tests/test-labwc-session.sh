@@ -101,7 +101,7 @@ fi
 CFG="${WORK}/.config"
 mkdir -p "${CFG}/labwc"
 cp "${TMPL}/rc.xml" "${TMPL}/menu.xml" "${CFG}/labwc/"
-sed 's/@ACCENT@/#91C2DC/g' "${TMPL}/themerc-override" > "${CFG}/labwc/themerc-override"
+sed 's/@ACCENT@/#D9F99D/g' "${TMPL}/themerc-override" > "${CFG}/labwc/themerc-override"
 
 # Run a probe script inside a nested labwc and return its output.
 run_nested() {

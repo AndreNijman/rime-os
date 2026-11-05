@@ -2,7 +2,7 @@
 
     python3 greeting_table_test.py GREETING_SH SHELL... [--expect-fail]
 
-GREETING_SH is files/desktop/shell/rime-greeting.sh (or a mutant of it). It is copied with its system paths
+GREETING_SH is NixOS's greeting, rime-ridge-files' share/rime/shell/greeting.sh (or a mutant of it). It is copied with its system paths
 pointed into a temporary root, the way rime-libexec's FHS table points them at the profile:
 
     /usr/libexec/  -> ROOT/libexec/    rime-term-graphics: a stub that prints $STUB_GRAPHICS

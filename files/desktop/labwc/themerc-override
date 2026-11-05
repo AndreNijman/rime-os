@@ -10,7 +10,7 @@
 # would be the grey Openbox-descended chrome that the whole Floating-mode pass
 # exists to get rid of — before the user has changed any wallpaper.
 #
-# @ACCENT@ is substituted at seed time: Rime Blue on Daily, gold on Gaming,
+# @ACCENT@ is substituted at seed time: chartreuse on Daily, gold on Gaming,
 # the same rule the prompt and the greeter follow (docs/branding.md).
 #
 # Geometry matches the Floating-mode spec and must stay in step with rc.xml:

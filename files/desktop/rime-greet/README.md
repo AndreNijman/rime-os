@@ -15,8 +15,7 @@ dots without it.
 | `shell.qml` | Entry point. Inlined palette (`ThemeGreet`), the fullscreen layer-shell window model, wires `GreetContext` to `GreetSurface`. |
 | `GreetContext.qml` | Non-visual shared state and the greetd auth backend: edition detection, session list, last-user/last-session memory, the published wallpaper, accent and motion settings, keyboard layout, recovery preselection. |
 | `GreetSurface.qml` | The per-output visuals: clock, wallpaper/gradient, logo, username pill, keyboard-layout pill, password pill with its shapes, spinner, error shake, status line, session picker. |
-| `assets/ridge-lockup-base.png` | The layered-ridge lockup without plane 3 (off-white, 168 px tall), rendered from rime-branding's template by `make-logo-assets.sh`. `GreetSurface` draws plane 3 over it in the accent. |
-| `make-logo-assets.sh` | Re-renders the asset (resvg); the `branding-surfaces` check fails if the committed PNG drifts from it. |
+| `assets/spark-{gold,chartreuse,white}.png` | Edition spark logos (256px). |
 | `greetd-config.toml` | The image's `/etc/greetd/config.toml`: launches sway through `/usr/libexec/rime-greet-session`. |
 | `sway-greet.conf` | The sway host config. Hosts quickshell as its only client and binds one key, the screen reader. |
 | `labwc-greet/` | Fallback host: labwc config dir (`rc.xml`, `autostart`, `environment`) + note. |
@@ -107,19 +106,18 @@ shape animation at the login screen either.
    not updated past the three-edition split.
 3. Fallback `mono` (dev box / unset).
 
-The edition drives the accent colour, which the layered-ridge logo carries on
-plane 3 only (brand pack page 4; the other planes and the wordmark stay
-off-white):
+The edition drives the spark logo **and** the accent colour:
 
-| Edition | Accent (plane 3, focus rings) |
-|---|---|
-| `rime` | `#91c2dc` (Rime Blue) |
-| `gaming` | `#fde047` (legacy three-edition machines) |
-| `daily` | `#91c2dc` (Rime Blue) |
-| `mono` (fallback) | `#a6d0f7` (the Brain_Shell blue, so off-target the greeter matches the Brain_Shell lock screen pixel for pixel) |
+| Edition | Logo | Accent |
+|---|---|---|
+| `rime` | chartreuse spark | `#d9f99d` |
+| `gaming` | gold spark | `#fde047` |
+| `daily` | chartreuse spark | `#d9f99d` |
+| `mono` (fallback) | white spark | `#a6d0f7` (the Brain_Shell blue, so off-target the greeter matches the Brain_Shell lock screen pixel for pixel) |
 
-A user's published accent overrides the edition colour, so the login screen
-matches the desktop.
+A user's published accent overrides the edition colour. The greeter then draws
+the white spark and tints it to that accent, so the login screen matches the
+desktop.
 
 ### Sessions & memory
 
@@ -397,7 +395,7 @@ and `session-bus` (the wrapper's buses). `tests/mutate-greet-atspi.sh` and
 | Palette | `Theme`/`Colors` singletons (live, from colors.json) | inlined `ThemeGreet` (colors.json fallbacks); the user's published accent, else the edition accent |
 | Wallpaper | `WallpaperService.currentWall` | the last user's published wallpaper, else `/usr/share/backgrounds/rime/default.jpg` |
 | Username | display only (`$USER`); PAM resolves the auth user | editable field, prefilled from `last-user`, passed to `createSession` |
-| Extra UI | none | layered-ridge logo (plane 3 in the accent), keyboard-layout pill, session picker, recovery notice |
+| Extra UI | none | edition spark logo, keyboard-layout pill, session picker, recovery notice |
 | State | per-surface | shared `GreetContext` across surfaces |
 | Clock, pill geometry, spinner, shake, caps heuristic, Escape-clears | n/a | **identical** |
 
