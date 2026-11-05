@@ -123,7 +123,7 @@ let
     rime-boot-windows = [ efibootmgr util-linux libnotify systemd ];
     rime-browser = [ python3 ];
     rime-compositor-reload = [ procps ];
-    rime-desktop-menu = [ libnotify systemd ];
+    rime-desktop-menu = [ libnotify systemd util-linux ];
     rime-devices = [ ];
     rime-display-apply = [ procps util-linux ];
     rime-disposable = [ ];
