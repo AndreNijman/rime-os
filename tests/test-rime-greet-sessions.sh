@@ -574,9 +574,21 @@ else
 printf '[Desktop Entry]\nName=GNOME\nExec=gnome-session\nType=Application\nDesktopNames=GNOME\n' > "$STAGE/gnome.desktop"
 printf '[Desktop Entry]\nName=Plasma (Wayland)\nExec=startplasma-wayland\nDesktopNames=KDE\n' > "$STAGE/plasma.desktop"
 printf '[Desktop Entry]\nName=Something Else\nExec=something\n' > "$STAGE/plain-no-names.desktop"
-printf '#!/bin/sh\nexit 0\n' > "$STUBS/gamescope"; chmod +x "$STUBS/gamescope"
+# Both Rime entries gate on absolute TryExec paths (/usr/bin/gamescope,
+# /usr/libexec/rime-safe-graphics), so a PATH stub alone answers nothing and the
+# runner's own filesystem would decide whether they are listed. Point them at
+# private stubs for this enumeration, as §3 does, and put the real gates back.
+env_saved="$WORK/env-saved"; mkdir -p "$env_saved"
+for id in rime-gaming rime-safe-graphics; do
+    cp "$STAGE/$id.desktop" "$env_saved/"
+    printf '#!/bin/sh\nexit 0\n' > "$STUBS/$id-probe"; chmod +x "$STUBS/$id-probe"
+    sed -i "s|^TryExec=.*|TryExec=$id-probe|" "$STAGE/$id.desktop"
+done
 env_lines="$(run_enum "$STUBS")"
-rm -f "$STAGE/gnome.desktop" "$STAGE/plasma.desktop" "$STAGE/plain-no-names.desktop" "$STUBS/gamescope"
+for id in rime-gaming rime-safe-graphics; do
+    cp "$env_saved/$id.desktop" "$STAGE/"; rm -f "$STUBS/$id-probe"
+done
+rm -f "$STAGE/gnome.desktop" "$STAGE/plasma.desktop" "$STAGE/plain-no-names.desktop"
 ENV_JS="$WORK/sessionenv.js"
 python3 - "$GREETER" "$ENV_JS" <<'PY'
 import re, sys
