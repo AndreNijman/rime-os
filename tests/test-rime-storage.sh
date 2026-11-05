@@ -198,8 +198,15 @@ else
 fi
 
 sec "wipefs is spawned by absolute path and with an explicit backup directory"
-has 'const WIPEFS: &str = "/usr/sbin/wipefs"' "$CLI" \
+# Every absolute path in the Rust comes from the rime_paths crate, chosen at
+# build time; the bootc image sets no RIME_PATH_* and so gets the default there.
+PATHS_RS="$REPO/rimed/rime-paths/src/lib.rs"
+has 'const WIPEFS: &str = rime_paths::WIPEFS;' "$CLI" \
     "a PATH entry the caller controls would be a root shell that erases disks"
+has 'WIPEFS = "/usr/sbin/wipefs";' "$PATHS_RS" \
+    "and rime_paths' bootc value for it is /usr/sbin/wipefs"
+hasnt 'RIME_PATH_WIPEFS' "$REPO/Containerfile.base" \
+    "and the bootc image does not override it"
 # Measured: `wipefs --backup` with no directory writes into $HOME, and $HOME
 # under sudo is /root. The file a user is told to keep would land somewhere
 # they will not look and may not be able to read.
