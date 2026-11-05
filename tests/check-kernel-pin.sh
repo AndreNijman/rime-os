@@ -177,6 +177,31 @@ if [ -n "$bb" ]; then
     fi
 fi
 
+# The spec names the tree it builds on its own (Version, %{_tag}), and
+# rpmbuild fetches Source0 by that name when the pinned tarball's name differs.
+# A pin bump that leaves the spec behind therefore compiles the OLD kernel with
+# every sha256 above still passing (kernel-build 41966562281: pin 7.2.11-1,
+# RPMs 7.2.9). The pin and the spec must name the same tree.
+SPEC=kernel/kernel-cachyos.spec
+if [ -f "$SPEC" ]; then
+    sbase="$(sed -n 's/^%define _basekver[[:space:]]\+//p' "$SPEC")"
+    sstable="$(sed -n 's/^%define _stablekver[[:space:]]\+//p' "$SPEC")"
+    stagrel="$(sed -n 's/^%define _tag cachyos-%{_tarkver}-\([0-9]\+\)$/\1/p' "$SPEC")"
+    sver="$sbase.$sstable"
+    if [ "$sver" = "${VAL[KERNEL_VERSION]:-}" ]; then
+        ok "$SPEC builds $sver, the pin's KERNEL_VERSION"
+    else
+        err "$SPEC builds '$sver' but $PIN says KERNEL_VERSION=${VAL[KERNEL_VERSION]:-}"
+    fi
+    if [ -n "$stagrel" ] && [ "cachyos-$sver-$stagrel" = "${VAL[KERNEL_TAG]:-}" ]; then
+        ok "$SPEC's Source0 tag is cachyos-$sver-$stagrel, the pin's KERNEL_TAG"
+    else
+        err "$SPEC's Source0 tag is 'cachyos-$sver-$stagrel' but $PIN says KERNEL_TAG=${VAL[KERNEL_TAG]:-}"
+    fi
+else
+    err "$SPEC does not exist"
+fi
+
 echo
 if [ "$fail" -gt 0 ]; then
     echo "kernel pin: $fail problem(s)"
