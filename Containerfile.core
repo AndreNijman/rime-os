@@ -1451,6 +1451,28 @@ RUN set -eux; \
     dnf5 -y copr disable sdegler/hyprland; \
     dnf5 -y copr disable errornointernet/quickshell; \
     dnf5 clean all; \
+    : 'Fedora 45 xdg-desktop-portal-gnome 51.0-2 REQUIRES oo7-portal, which'; \
+    : 'requires oo7-daemon: a second Secret Service beside gnome-keyring (see'; \
+    : 'base, "Exactly one Secret Service"). niri screen capture needs the gnome'; \
+    : 'portal, so the packages stay and only what would start or select them is'; \
+    : 'deleted. Any other dependent is a new decision, so the build stops.'; \
+    if rpm -q oo7-daemon >/dev/null 2>&1 || rpm -q oo7-portal >/dev/null 2>&1; then \
+        for pkg in oo7-daemon oo7-portal; do \
+            deps="$(rpm -q --whatrequires "$pkg" --qf '%{NAME}\n' 2>/dev/null | sort -u | grep -vxE 'oo7-daemon|oo7-portal|xdg-desktop-portal-gnome' || true)"; \
+            if [ -n "$deps" ]; then \
+                echo "FATAL: $pkg is required by $(printf '%s ' $deps), not only xdg-desktop-portal-gnome"; exit 1; fi; \
+        done; \
+        rm -f /usr/lib/systemd/user/oo7-daemon.service \
+              /usr/lib/systemd/user/oo7-portal.service \
+              /usr/lib/systemd/user/dbus-org.freedesktop.secrets.service \
+              /usr/lib/systemd/user/dbus-org.freedesktop.impl.portal.desktop.oo7.service \
+              /usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.oo7.service \
+              /usr/share/xdg-desktop-portal/portals/oo7-portal.portal \
+              /usr/share/applications/oo7-portal.desktop; \
+        find /etc/systemd/user /usr/lib/systemd/user -lname '*oo7*' -print -delete; \
+        ! rpm -q pam_oo7 >/dev/null 2>&1; \
+        echo "oo7: present only for xdg-desktop-portal-gnome; units, bus activation and portal removed"; \
+    fi; \
     : 'The accessibility fix is the whole reason quickshell-git is here, so the'; \
     : 'build refuses a quickshell that predates it. Released 0.3.1 reports an'; \
     : 'EMPTY revision -- "Quickshell 0.3.1 (revision , distributed by ...)" --'; \
