@@ -243,8 +243,22 @@ if phase in ("full", "short"):
     check("before any open: a click at (640,0) reaches the probe", probe_clicks() >= 1, f"{probe_clicks()} clicks")
     cursor(640, 400); time.sleep(1)
 
-    # 1. The picture with no panel ever opened, and the notch click with no window parked.
+    # 1. The picture with no panel ever opened, and the notch click with no window parked. The reference must be a
+    #    settled bar: one taken while the bar still repaints its left side makes every later picture "differ" by the
+    #    same pixels (CI: 765 px in (38,3)-(155,34), identical across all three retries). So it is retaken until two
+    #    pictures a few seconds apart agree outside the clock.
     sh(["grim", f"{out}/0-none.png"])
+    for _ in range(8):
+        time.sleep(3)
+        sh(["grim", f"{out}/0-none-again.png"])
+        px, bbox = png_diff(f"{out}/0-none.png", f"{out}/0-none-again.png", f"{out}/diff-none-settle.png")
+        moving = [p for p in px if not (p[0] >= 1150 and p[1] < 34)]
+        os.replace(f"{out}/0-none-again.png", f"{out}/0-none.png")
+        if not moving:
+            break
+        log(f"reference not settled yet: {len(moving)} px moved outside the clock, bbox {bbox}")
+    check("before any open: the bar settles within 24 s (two pictures agree outside the clock)", not moving,
+          f"{len(moving)} px still moving")
     check("before any open: no parked window", not parked(), str(qlayers()))
     cursor(640, 14); click()
     check("before any open: a click on the notch opens the Dashboard", wait_for(lambda: full_open()), str(qlayers()))
