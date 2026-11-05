@@ -186,6 +186,11 @@ stdenv.mkDerivation (finalAttrs: {
     fi
     # The path contract: lock_cmd names exactly the directory the session starts quickshell with.
     grep -F 'lock_cmd = qs -c ${shellDir} ipc call lockscreen lock' src/config/hypridle.conf
+    # Rime on NixOS draws the layered ridge in the bar and About; the same source on the bootc image keeps the
+    # spark (src/state/Brand.qml). A revision from before the switch draws the ridge unconditionally.
+    if [ -f src/state/Brand.qml ]; then
+      substituteInPlace src/state/Brand.qml --replace-fail 'property bool ridge: false' 'property bool ridge: true'
+    fi
     # PR 10: matugen writes nothing into the (read-only) tree.
     if grep -E "^output_path = '@SRCDIR@" src/config/matugen.toml.in; then
       echo "rime-shell: matugen still renders into the shell tree" >&2
