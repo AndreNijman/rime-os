@@ -49,6 +49,8 @@ pkgs.testers.runNixOSTest {
         h=/home/${user}
         install -d -o ${user} -g users $h/.config $h/.config/hypr $h/.local $h/.local/share $h/.local/share/hyprland
         cp -r /run/current-system/sw/share/rime/hypr/. $h/.config/hypr/
+        # The store copy is read-only; rime-shell-firstrun rewrites appearance.lua in place.
+        chmod -R u+w $h/.config/hypr
         grep -rl '@KB_' $h/.config/hypr | xargs -r sed -i -e 's|@KB_LAYOUT@|us|g' -e 's|@KB_VARIANT@||g'
         # Hyprland's file log stops at config load unless asked to keep it (debug.disable_logs defaults to true).
         echo 'hl.config({ debug = { disable_logs = false } })' >> $h/.config/hypr/hyprland.lua
