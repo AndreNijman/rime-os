@@ -911,6 +911,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-update-notice.sh
 
+      # Right-click on the desktop with the Shell down: the helper restarts the
+      # Shell detached and opens the menu once it answers, instead of waiting on
+      # a launcher that only returns when the Shell exits.
+      - name: Desktop menu — a dead Shell is restarted and the menu opens
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-desktop-menu.sh
+
       # §P2-015's firmware readout, structural half. fwupdmgr's exit status
       # means "nothing to do" when non-zero and accompanies an explicit error
       # document when zero, so a caller that trusts it reads a current machine
