@@ -119,11 +119,25 @@ pub fn derive(check: Option<&str>, status: Option<&str>, status_newer: bool) -> 
 pub struct Paths {
     pub check: PathBuf,
     pub status: PathBuf,
+    /// `/etc/NIXOS` and `/run/current-system`: the same test as `rime`'s `nixos::is_nixos`.
+    pub nixos_marker: PathBuf,
+    pub current_system: PathBuf,
 }
 
 impl Paths {
     pub fn system() -> Paths {
-        Paths { check: CHECK_STATE.into(), status: LIVE_STATUS.into() }
+        Paths {
+            check: CHECK_STATE.into(),
+            status: LIVE_STATUS.into(),
+            nixos_marker: "/etc/NIXOS".into(),
+            current_system: "/run/current-system".into(),
+        }
+    }
+
+    /// Rime on NixOS: the marker exists and the current system points into the store.
+    pub fn on_nixos(&self) -> bool {
+        self.nixos_marker.exists()
+            && std::fs::read_link(&self.current_system).map(|p| p.starts_with("/nix/store")).unwrap_or(false)
     }
 
     pub fn read(&self) -> View {
@@ -201,7 +215,14 @@ impl UpdatesIface {
 
     /// Install the update (rime-update.service, `rime update`). polkit `apply-update`, which asks for an
     /// administrator's password through the caller's agent.
+    /// Refused before polkit off NixOS: [`APPLY_UNIT`] exists only there, and asking for a password to then fail
+    /// to start a unit that is not installed tells the user nothing.
     async fn apply(&self, #[zbus(connection)] conn: &Connection, #[zbus(header)] hdr: Header<'_>) -> zbus::fdo::Result<()> {
+        if !self.paths.on_nixos() {
+            return Err(zbus::fdo::Error::NotSupported(format!(
+                "Apply installs updates on Rime on NixOS only ({APPLY_UNIT}); on this system run `sudo rime update`"
+            )));
+        }
         authorize_interactive(conn, &hdr, ACTION_APPLY).await?;
         start_unit(conn, APPLY_UNIT).await
     }

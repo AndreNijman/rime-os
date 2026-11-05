@@ -363,7 +363,8 @@ On `org.rimeos.Rimed1`, `/org/rimeos/Rimed1`, all additive (the frozen interface
 - New `org.rimeos.Rimed1.Updates`: properties `State` (s: `up-to-date|available|downloading|installing|deferred|restart|failed|unknown`),
   `Available` (s, release id or ""), `Running` (s), `Message` (s); methods `Check()` (starts `rime-update-check.service`,
   allow_active yes) and `Apply()` (starts a new `rime-update.service` = `rime update`, polkit
-  `org.rimeos.rimed.apply-update`, `auth_admin_keep`). rimed fills it from `/run/rime-update/state` and
+  `org.rimeos.rimed.apply-update`, `auth_admin_keep`; off NixOS it fails with `NotSupported` before polkit is asked,
+  because the unit exists only there). rimed fills it from `/run/rime-update/state` and
   `/run/rime-live/status.json` (the files `rime update` writes, mod.rs:36-38 **(checked)**) by inotify.
 
 ### 6.3 Where they live and how they are enabled (settings piece, rime-os `nix/integrations/`)

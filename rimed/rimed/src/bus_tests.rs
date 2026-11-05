@@ -231,7 +231,12 @@ async fn rig(tag: &str) -> Rig {
         .build()
         .await
         .unwrap();
-    let upd = updates::Paths { check: root.join("run/rime-update/state"), status: root.join("run/rime-live/status.json") };
+    let upd = updates::Paths {
+        check: root.join("run/rime-update/state"),
+        status: root.join("run/rime-live/status.json"),
+        nixos_marker: root.join("etc/NIXOS"),
+        current_system: root.join("run/current-system"),
+    };
     std::fs::create_dir_all(root.join("run")).unwrap();
     let rimed = crate::serve(zbus::connection::Builder::address(bus.addr.as_str()).unwrap(), ctx.clone(), upd.clone(), true)
         .await
@@ -656,6 +661,7 @@ async fn updates_follow_the_files_and_start_the_units() {
     assert_eq!(get_s(&c, RIMED, RIMED_PATH, u, "Running").await, "2026.11.01");
 
     c.call_method(Some(RIMED), RIMED_PATH, Some(u), "Check", &()).await.unwrap();
+    nixos(&r.upd);
     c.call_method(Some(RIMED), RIMED_PATH, Some(u), "Apply", &()).await.unwrap();
     {
         let rec = r.record.lock().unwrap();
@@ -667,4 +673,30 @@ async fn updates_follow_the_files_and_start_the_units() {
     let e = c.call_method(Some(RIMED), RIMED_PATH, Some(u), "Apply", &()).await.unwrap_err();
     assert!(error_name(&e).contains("AccessDenied"), "{e}");
     assert_eq!(r.record.lock().unwrap().units.len(), 2, "a refused Apply starts nothing");
+}
+
+/// Make the rig's root look like Rime on NixOS (`/etc/NIXOS`, `/run/current-system` into the store).
+fn nixos(upd: &updates::Paths) {
+    std::fs::create_dir_all(upd.nixos_marker.parent().unwrap()).unwrap();
+    std::fs::write(&upd.nixos_marker, "").unwrap();
+    std::os::unix::fs::symlink("/nix/store/00000000000000000000000000000000-nixos-system", &upd.current_system).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn updates_apply_is_refused_before_polkit_off_nixos() {
+    let r = rig("updates-bootc").await;
+    let c = client(&r.bus).await;
+    let u = "org.rimeos.Rimed1.Updates";
+    // A marker without a store system is not NixOS either.
+    std::fs::create_dir_all(r.upd.nixos_marker.parent().unwrap()).unwrap();
+    std::fs::write(&r.upd.nixos_marker, "").unwrap();
+    for _ in 0..2 {
+        let e = c.call_method(Some(RIMED), RIMED_PATH, Some(u), "Apply", &()).await.unwrap_err();
+        assert!(error_name(&e).contains("NotSupported"), "{e}");
+        assert!(e.to_string().contains("sudo rime update"), "{e}");
+        std::fs::remove_file(&r.upd.nixos_marker).unwrap_or(());
+    }
+    let rec = r.record.lock().unwrap();
+    assert!(rec.units.is_empty(), "Apply started a unit off NixOS: {:?}", rec.units);
+    assert!(!rec.checks.iter().any(|(a, _)| a == updates::ACTION_APPLY), "polkit was asked first: {:?}", rec.checks);
 }
