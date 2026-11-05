@@ -825,6 +825,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-boot-v2.sh
 
+      # The boot-menu way back when Secure Boot refuses the Rime kernel: the
+      # GRUB block, custom.cfg kept around the installer's Windows entry, the
+      # ESP chosen by bootuuid.cfg and never guessed, and the machines it must
+      # leave alone. Unprivileged (fake root, stubbed mount). The VM half with
+      # a real shim and MokManager is installer/test-installer-sb-recovery.sh.
+      - name: Secure Boot key entry in the boot menu
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-secureboot-key.sh
+
       # The in-place migration to systemd-boot. In `static` rather than `rust`
       # because what it guards is mostly a shell engine, a unit and a
       # Containerfile block, and the `rust` job's path filter would skip a PR
@@ -837,6 +846,15 @@ jobs:
       - name: §22 migration — one commit point, every refusal, no re-arming a failure
         if: ${{ !cancelled() }}
         run: ./tests/test-boot-migrate.sh
+
+      # The move to Rime OS on NixOS, bootc side: the bridge program the image
+      # ships (its own unit suite, stdlib only, Fedora's python) and the update
+      # timer's refusal after `rime migrate start`. In `static` for the reason
+      # the step above is: a PR touching only files/system/libexec/rime-migrate
+      # must not be able to skip it. The `rime` binary half runs in `rust`.
+      - name: NixOS move — the bridge program, and no update check after a start
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-migrate.sh
 
       # The efivars guard. In `static` for the same reason as the step above:
       # the scan it ends with walks EVERY tracked file, so a PR adding a
@@ -1431,6 +1449,22 @@ jobs:
           # A missing binary must be a hard failure, not a skip.
           test -x "$RIME_BIN"
           ./tests/test-boot-v2.sh --with-binary
+
+      # The NixOS move's binary half: every bootc verb refused by name once a
+      # fixture record says `rime migrate start` ran, allowed again after a
+      # start that rolled back, and `rime migrate` handing its arguments to
+      # the bridge unchanged. RIME_BRIDGE_ROOT relocates only what is READ; a
+      # stub bootc on PATH proves none of it reached bootc.
+      - name: NixOS move — rime refuses the bootc verbs after a start
+        if: ${{ !cancelled() }}
+        working-directory: ${{ github.workspace }}
+        env:
+          RIME_BIN: ${{ github.workspace }}/rimed/target/debug/rime
+        run: |
+          set -euo pipefail
+          cargo build -p rime --locked --manifest-path rimed/Cargo.toml
+          test -x "$RIME_BIN"
+          ./tests/test-rime-migrate.sh --with-binary
 
       # §27's binary half: `rime trust` and `rime status` against fixture
       # machines — an unverified pull on a permissive policy (what every Rime
@@ -2504,6 +2538,15 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-plymouth-keyboard.sh
 
+      # gnome-keyring-daemon aborted when a property read raced the creation of
+      # the caller's client; the image ships Fedora's gnome-keyring rebuilt with
+      # the fix. Static: the patch, the one build recipe, and the base build's
+      # guards (pinned Fedora build, local packages only, Rime's build with the
+      # fix compiled in). The real-daemon race runs in the keyring job.
+      - name: Run keyring property-read fix assertions
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-keyring-property-read.sh
+
       - name: Run input-settings assertions
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-input.sh
@@ -3351,6 +3394,66 @@ jobs:
           fi
           grep -qE '^keyring-session-start: [0-9]+ passed, 0 failed, 0 skipped$' <<<"$out" \
             || { echo "::error::keyring-session-start (oo7) must pass with nothing skipped"; exit 1; }
+
+      # The login keyring survives apps reading it. On Fedora 45, as a normal
+      # user, a real gnome-keyring-daemon on a private bus: the packages are
+      # built by the SAME recipe Containerfile.base runs (build-rpms.sh, at the
+      # NVR and sha256 pinned there). First the mutant: Fedora's stock daemon
+      # must die under the reads (stops at the first death; locally 9 of 10
+      # died within 5,000 reads). Then the rebuilt pair is installed and 10
+      # daemons x 5,000 reads must all survive, every read answered.
+      # exit 97 = dnf could not install the test's packages: a WARNING that the
+      # race did not run, as above. Anything else that fails is red, the build
+      # of the patched packages included.
+      - name: Run keyring property-read race (Fedora 45, stock vs rebuilt)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 40
+        run: |
+          rc=0
+          # build-rpms.sh follows the gnome-keyring Fedora 45 ships now, exactly
+          # as the image's builder follows core's: patched (stock must die,
+          # rebuilt must survive), or upstream (Fedora's own build must survive;
+          # a warning says the carried patch can be dropped).
+          out="$(docker run --rm -v "$PWD":/w:ro -w /w fedora:45 bash -c '
+                dnf -y install --setopt=install_weak_deps=False --setopt=retries=5 \
+                    gnome-keyring dbus-daemon systemd procps-ng util-linux shadow-utils \
+                    rpm-build git-core curl "dnf5-command(builddep)" "dnf5-command(download)" \
+                    >/dev/null 2>&1 || exit 97
+                useradd -m rimetest || exit 98
+                echo "stock: $(rpm -q gnome-keyring)"
+                files/system/src/gnome-keyring/build-rpms.sh /tmp/rime-gk || exit 94
+                MODE=; NVR=; . /tmp/rime-gk/result
+                if [ "$MODE" = upstream ]; then
+                    echo "upstream: $NVR already contains the fix"
+                    dnf -y --nogpgcheck --disable-repo="*" install /tmp/rime-gk/*.rpm >/dev/null || exit 93
+                    echo "rebuilt: none, Fedora $(rpm -q gnome-keyring gnome-keyring-pam | paste -sd " ")"
+                    exec runuser -u rimetest -- env RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=survive \
+                        RIME_KEYRING_RACE_MARKER=0 ./tests/test-rime-keyring-property-read.sh
+                fi
+                runuser -u rimetest -- env RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=die \
+                    ./tests/test-rime-keyring-property-read.sh > /tmp/stock.out 2>&1
+                cat /tmp/stock.out
+                grep -qE "^keyring-property-read: [0-9]+ passed, 0 failed, 0 skipped$" /tmp/stock.out || exit 95
+                dnf -y --nogpgcheck --disable-repo="*" install /tmp/rime-gk/*.rpm >/dev/null || exit 93
+                echo "rebuilt: $(rpm -q gnome-keyring gnome-keyring-pam | paste -sd " ")"
+                runuser -u rimetest -- env RIME_KEYRING_RACE=1 RIME_KEYRING_RACE_EXPECT=survive \
+                    ./tests/test-rime-keyring-property-read.sh' 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          case "$rc" in
+              97) echo "::warning::could not install the race's packages in the container; the keyring property-read race did not run"; exit 0 ;;
+              98) echo "::error::could not create the throwaway user in the container"; exit 1 ;;
+              95) echo "::error::the STOCK gnome-keyring survived the reads although the patch still applies: the race is not being measured"; exit 1 ;;
+              94) echo "::error::build-rpms.sh stopped (its FATAL line above says why: the patch no longer applies, or Fedora's source could not be verified)"; exit 1 ;;
+              93) echo "::error::could not install the gnome-keyring packages build-rpms.sh made"; exit 1 ;;
+              0) ;;
+              *) echo "::error::the keyring property-read race exited $rc"; exit 1 ;;
+          esac
+          grep -E '^upstream: ' <<<"$out" >/dev/null \
+            && echo "::warning::Fedora's gnome-keyring already contains the property-read fix: files/system/src/gnome-keyring/ can be dropped"
+          # Only the rebuilt run's summary counts: the stock run printed one too.
+          sed -n '/^rebuilt: /,$p' <<<"$out" \
+            | grep -E '^keyring-property-read: [0-9]+ passed, 0 failed, 0 skipped$' >/dev/null \
+            || { echo "::error::keyring-property-read (rebuilt) must pass with nothing skipped"; exit 1; }
 
       # rime-secrets-start's choices that one machine cannot show with real
       # daemons: the configured provider, the fallback, the systemd and direct
@@ -4714,6 +4817,7 @@ jobs:
             tests/test-rime-sysext-boot-wait.sh \
             files/system/libexec/rime-update-check \
             files/system/libexec/rime-update-notice \
+            tests/test-rime-migrate.sh \
             files/system/libexec/rime-live-session \
             tests/test-rime-live.sh tests/test-rime-live-session.sh \
             tests/test-rimed-ui-boost.sh \
@@ -4727,6 +4831,8 @@ jobs:
             files/system/libexec/rime-shell-autostart \
             tests/test-rime-fstrim.sh files/system/libexec/rime-fstrim \
             tests/test-rime-plymouth-keyboard.sh \
+            tests/test-rime-keyring-property-read.sh \
+            files/system/src/gnome-keyring/build-rpms.sh \
             files/system/libexec/rime-secrets-start \
             tests/test-rime-secrets-start.sh tests/test-rime-secrets-guard.sh \
             tests/test-rime-keyring-session-start.sh \

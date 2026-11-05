@@ -19,7 +19,9 @@
 //! Nothing in this module opens a handle for writing, and nothing dismounts,
 //! offlines or force-unlocks anything. It asks Windows what it is using and
 //! accepts the answer; a refusal is a refusal, not a thing to retry with more
-//! force.
+//! force. The one volume this program ever locks and dismounts (the RAW
+//! volume Windows keeps over an empty partition the user chose) is locked in
+//! `winwrite.rs`, and only after `replace::verdict` allowed it.
 
 #![cfg(windows)]
 
@@ -44,16 +46,17 @@ const IOCTL_DISK_GET_DRIVE_LAYOUT_EX: u32 = 0x0007_0050;
 const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
 const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D_1400;
 const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x0056_0000;
-// FSCTL_LOCK_VOLUME (0x00090018) is deliberately ABSENT. Windows creates no
-// volume object for a Linux-filesystem-type partition — measured in the lab —
-// and a partition that does have one is refused before any lock would be
-// attempted. A lock call here could only ever run on a partition already
-// refused, and safety code that never executes reads as coverage. The write
-// path's exclusivity mechanism is described in ARCHITECTURE.md.
+// The volume lock and dismount codes are not here: they need a handle
+// opened for writing, so they live in winwrite.rs. They run on one
+// volume only, the RAW volume over an empty basic-data partition the user
+// chose (ARCHITECTURE.md, "Exclusivity").
 
 const ERROR_FILE_NOT_FOUND: u32 = 2;
 const ERROR_PATH_NOT_FOUND: u32 = 3;
 const ERROR_NO_MORE_FILES: u32 = 18;
+/// GetVolumeInformationW's answer for a volume with no filesystem Windows
+/// recognises: "The volume does not contain a recognized file system."
+pub const ERROR_UNRECOGNIZED_VOLUME: u32 = 1005;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -456,6 +459,10 @@ pub struct Volume {
     pub mount_points: Vec<String>,
     pub filesystem: String,
     pub label: String,
+    /// Why GetVolumeInformationW gave no filesystem, when it gave none.
+    /// ERROR_UNRECOGNIZED_VOLUME is what a RAW volume answers; measured, it
+    /// answers ERROR_INVALID_PARAMETER while another handle is open on it.
+    pub fs_error: Option<u32>,
     /// (physical drive number, offset, length) — a volume can span several.
     pub extents: Vec<(u32, u64, u64)>,
 }
@@ -511,7 +518,7 @@ fn describe_volume(name: &str) -> io::Result<Volume> {
     }
 
     // Label and filesystem. GetVolumeInformationW wants a trailing backslash.
-    let (mut label, mut filesystem) = (String::new(), String::new());
+    let (mut label, mut filesystem, mut fs_error) = (String::new(), String::new(), None);
     let root = if name.ends_with('\\') { name.to_string() } else { format!("{name}\\") };
     let mut lbuf = [0u16; 256];
     let mut fbuf = [0u16; 64];
@@ -530,6 +537,8 @@ fn describe_volume(name: &str) -> io::Result<Volume> {
     if ok != 0 {
         label = from_wide(&lbuf);
         filesystem = from_wide(&fbuf);
+    } else {
+        fs_error = Some(unsafe { GetLastError() });
     }
 
     // Extents. The device path for a volume drops the trailing backslash.
@@ -553,7 +562,7 @@ fn describe_volume(name: &str) -> io::Result<Volume> {
             extents.push((u32at(&b, o), u64at(&b, o + 8), u64at(&b, o + 16)));
         }
     }
-    Ok(Volume { name: name.to_string(), mount_points, filesystem, label, extents })
+    Ok(Volume { name: name.to_string(), mount_points, filesystem, label, fs_error, extents })
 }
 
 impl Volume {
@@ -567,13 +576,35 @@ impl Volume {
         })
     }
 
+    /// These facts for the replace rules (`replace::verdict`), about the
+    /// partition at `offset`/`length` on physical drive `disk`.
+    pub fn claim(&self, disk: u32, offset: u64, length: u64) -> crate::replace::VolumeClaim {
+        crate::replace::VolumeClaim {
+            name: self.name.clone(),
+            mount_points: self.mount_points.clone(),
+            filesystem: self.filesystem.clone(),
+            // Windows names no filesystem for it. Measured in the lab: a RAW
+            // volume answers ERROR_UNRECOGNIZED_VOLUME (1005) normally, and
+            // ERROR_INVALID_PARAMETER (87) while another process holds a
+            // handle on it. Either way the bytes decide: `verdict` probes
+            // them, and `take_over` locks the volume and probes them again.
+            unrecognised: self.filesystem.eq_ignore_ascii_case("RAW") || self.filesystem.is_empty(),
+            exactly_this_partition: self.extents.len() == 1 && self.extents[0] == (disk, offset, length),
+            what: self.describe_use(),
+        }
+    }
+
     pub fn describe_use(&self) -> String {
         let where_ = if self.mount_points.is_empty() {
             "no drive letter or mount point".to_string()
         } else {
             format!("mounted at {}", self.mount_points.join(", "))
         };
-        let fs = if self.filesystem.is_empty() { "unrecognised filesystem".to_string() } else { self.filesystem.clone() };
+        let fs = match (self.filesystem.is_empty(), self.fs_error) {
+            (false, _) => self.filesystem.clone(),
+            (true, Some(ERROR_UNRECOGNIZED_VOLUME) | None) => "unrecognised filesystem".to_string(),
+            (true, Some(e)) => format!("unrecognised filesystem (Windows error {e})"),
+        };
         let label =
             if self.label.is_empty() { String::new() } else { format!(", label {:?}", self.label) };
         format!("{} -- {}{}, volume {}", where_, fs, label, self.name)

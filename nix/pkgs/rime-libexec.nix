@@ -34,6 +34,8 @@
 #   rime-migrate-from-apex APEX-OS -> Rime state renames on a bootc /var; a NixOS machine arrives from Rime (D2 bridge)
 #   rime-session-migrate   the per-user half of the same rename (firstrun calls it only when it is installed: -x test)
 #   rime-vconsole-guard    repairs a hand-edited /etc/vconsole.conf; NixOS generates that file from console.*
+#   rime-migrate           the D2 bridge's bootc half; a NixOS machine has already moved (rime-bridge is the NixOS half)
+#   rime-secureboot-key    bootc's MokManager way back; nix/modules/boot.nix's rime-secureboot-key unit runs rime-boot's port
 # rime-plymouth-accent runs from rime-greet-wallpaper / rime-greet-publish-all; desktop.nix makes plymouthd.conf a
 # real file and links the accent themes (the initrd half is TODO(handover) D3, see plymouthTheme there).
 # rime-luks-enroll: its --tpm-only path is wired by nix/modules/luks-tpm.nix (rime-luks-tpm-reenrol@); the installer
@@ -95,6 +97,10 @@ let
     "rime-vconsole-guard"
     # bootc's rime-sysext-rebuild failure notice: NixOS has no package extension to rebuild.
     "rime-pkg-notice"
+    # the D2 bridge's bootc half (`rime migrate start` on the old system); NixOS ships nix/pkgs/rime-bridge instead.
+    "rime-migrate"
+    # bootc's MokManager way back; nix/modules/boot.nix runs rime-boot's port of it (same custom.cfg block).
+    "rime-secureboot-key"
   ];
 
   # Shipped by another Rime module, which owns the one copy on the system profile (buildEnv picks a winner

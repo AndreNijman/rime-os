@@ -156,6 +156,22 @@ print("installing (downloads Rime OS; this takes a while) ...")
 # in seconds, before NetworkManager has a route. Wait the way a person would.
 out, _ = run("for i in $(seq 1 90); do ip route | grep -q '^default' && break; sleep 2; done; ip route | head -2", timeout=240)
 check("the live session has a network route before the install starts", "default" in out, out)
+# TEST-ONLY, opt-in: run a newer engine than the one inside the installer image,
+# to prove an engine change on the published image without rebuilding it. The
+# lab puts the file on the transport disk (label APEXLAB); its sha256 is given
+# on the command line and must match before it is bind-mounted over the
+# image's /usr/bin/rime-install. Both hashes are logged.
+if "--engine-from-transport" in sys.argv and not RESUME:
+    want = sys.argv[sys.argv.index("--engine-from-transport") + 1]
+    out, _ = run("d=$(blkid -L APEXLAB); mkdir -p /run/tr && mount -o ro \"$d\" /run/tr "
+                 "&& cp /run/tr/rime-install /run/rime-install.lab && umount /run/tr; chmod 0755 /run/rime-install.lab; "
+                 "echo IMAGE-ENGINE $(sha256sum < /usr/bin/rime-install); "
+                 f"echo '{want}  /run/rime-install.lab' | sha256sum -c - && mount --bind /run/rime-install.lab /usr/bin/rime-install; "
+                 "echo RUN-ENGINE $(sha256sum < /usr/bin/rime-install)", timeout=120)
+    print(out.strip())
+    check("the lab's engine replaced the image's (sha256 checked)", f"RUN-ENGINE {want}" in out, out)
+    if fails:
+        sys.exit(1)
 if not RESUME:
     run("(/usr/bin/rime-install --headless /run/rime-answers-staged > /run/engine.log 2>&1; echo ENGINE-RC=$? >> /run/engine.log) &")
 end = time.time() + 3600

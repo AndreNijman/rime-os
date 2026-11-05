@@ -220,6 +220,54 @@ RUN set -eux; \
     fi; \
     rm -rf /b
 
+# ═══ gnome-keyring-builder: Fedora's gnome-keyring, rebuilt with one fix ═══
+# gnome-keyring-daemon creates its record of each caller from a message filter
+# that only SCHEDULES the work as an idle. Now and then the idle GDBus queued
+# for a property read runs first: the PKCS#11 session lookup finds no client,
+# the collection getter returns NULL without setting an error, and GDBus aborts
+# the whole daemon ("invoke_get_property_in_idle_cb: assertion failed: (error
+# != NULL)"). A plain read of the login collection's Locked property is enough,
+# and libsecret proxies make that read. The daemon that dies is the --login one
+# the login password unlocked, so the user's keyring is gone (locked, or a
+# fresh password prompt) until they log in again. Measured on Fedora 45's
+# gnome-keyring 51.1 as a normal user on a private bus: 9 of 10 daemons died
+# within 5,000 reads each; rebuilt with the patch, 0 of 10.
+# files/system/src/gnome-keyring/README.md has the evidence.
+#
+# The recipe is ONE script, build-rpms.sh, which PR validation also runs to
+# build the packages it races. It FOLLOWS FEDORA: it rebuilds whatever
+# gnome-keyring core ships, from Fedora's own SRPM for that build, accepted
+# only when rpmkeys verifies it against Fedora's release key (source
+# repositories first, then Koji, which keeps every build). Nothing of ours is
+# pinned, so a Fedora gnome-keyring update never stops a release. Fedora's
+# prepared source then decides (the script's header has the detail):
+#   patched   the patch applies: rebuilt with it, release marked `.rime1`
+#             (1.rime1.fc45 sorts above 1.fc45). A version other than the one
+#             the race was last proven on is a GitHub warning ("rebased").
+#   upstream  Fedora's source already has the fix: Fedora's build is kept, a
+#             GitHub warning says the carried patch can be dropped.
+#   fail      the patch does not apply and the fix is not there: the build
+#             stops. The only case a human has to look at.
+# /out/gnome-keyring/result records the mode and versions; the install below
+# acts on it and copies it to /usr/share/rime/gnome-keyring-fix, which
+# build-image puts in its summary.
+#
+# Here, in base, and not in Containerfile.core, so the fix does not cost a core
+# rebuild (every user downloading core again). It breaks this file's "no dnf, no
+# compiling third-party programs" rule the way the rimed builder and the
+# translation stage do: in a stage that is thrown away, built FROM core so it
+# links against exactly the libraries the image ships. The one dnf transaction
+# it adds to the image is the gnome-keyring-pam install that was already here.
+FROM ${CORE} AS gnome-keyring-builder
+COPY files/system/src/gnome-keyring/build-rpms.sh \
+     files/system/src/gnome-keyring/gnome-keyring-property-read-no-client.patch /build/
+RUN set -eux; \
+    sed -i '/^\[main\]/a max_parallel_downloads=20' /etc/dnf/dnf.conf; \
+    dnf5 -y install rpm-build git-core curl 'dnf5-command(builddep)' 'dnf5-command(download)' >/dev/null; \
+    /build/build-rpms.sh /out/gnome-keyring; \
+    grep -E '^MODE=(patched|upstream)$' /out/gnome-keyring/result >/dev/null; \
+    rm -rf /build
+
 # ─────────────────────────────────────────────────────────────────────────
 FROM ${CORE}
 
@@ -1374,6 +1422,42 @@ RUN set -eux; \
         /usr/lib/systemd/system/rime-boot-count.service \
         /usr/lib/systemd/system/systemd-bless-boot.service.d/10-rime-bless-boot-esp.conf
 
+# ── the way back when Secure Boot refuses the Rime kernel ───────────────────
+#
+# With Secure Boot on and the Rime key not enrolled (enrolment skipped in the
+# installer, or MokManager's 10-second prompt missed, which deletes the
+# request), GRUB stops at "bad shim signature" on every boot. This puts the
+# certificate on the ESP and an "Enrol the Rime OS Secure Boot key" entry in
+# /boot/grub2/custom.cfg, which chainloads Fedora-signed MokManager so the key
+# can be enrolled from disk. It runs on every boot (a no-op after the first)
+# so machines installed before it existed get it through an update. The
+# installer runs this same file out of the new deployment before first boot.
+COPY files/system/libexec/rime-secureboot-key /usr/libexec/rime-secureboot-key
+COPY files/system/units/rime-secureboot-key.service \
+     /usr/lib/systemd/system/rime-secureboot-key.service
+RUN set -eux; \
+    chmod 0755 /usr/libexec/rime-secureboot-key; \
+    bash -n /usr/libexec/rime-secureboot-key; \
+    : 'The entry chainloads MokManager from the ESP. bootupd copies it there'; \
+    : 'from the shim package on every install; if a shim update ever stops'; \
+    : 'shipping it, the entry would point at nothing.'; \
+    ls /usr/lib/efi/shim/*/EFI/fedora/mmx64.efi; \
+    : 'and the custom.cfg hook the entry relies on: bootupd static grub.cfg'; \
+    : 'sources $prefix/custom.cfg from configs.d/41_custom.cfg.'; \
+    grep -q 'source $prefix/custom.cfg' /usr/lib/bootupd/grub2-static/configs.d/*custom*.cfg; \
+    /usr/libexec/rime-secureboot-key block > /tmp/rime-sbk.cfg; \
+    grep -q -- "--id rime-enrol-key" /tmp/rime-sbk.cfg; \
+    grep -q 'chainloader ($rime_esp)/EFI/fedora/mmx64.efi' /tmp/rime-sbk.cfg; \
+    grep -q 'search --no-floppy --file --set=rime_esp /EFI/rime/rime-mok.der' /tmp/rime-sbk.cfg; \
+    rm -f /tmp/rime-sbk.cfg; \
+    systemctl enable rime-secureboot-key.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/rime-secureboot-key.service; \
+    : 'It must never write NVRAM or run a loader installer: matched on the'; \
+    : 'executable lines only, so the comments that name them do not count.'; \
+    ! grep -nE '^[^#]*\b(mokutil|efibootmgr|bootctl[[:space:]]+(install|update)|bootupctl|grub2-install|grub2-mkconfig)' \
+        /usr/libexec/rime-secureboot-key \
+        /usr/lib/systemd/system/rime-secureboot-key.service
+
 # ── §22: the in-place move to systemd-boot ──────────────────────────────────
 #
 # rime-boot-migrate is what `rime update` runs on a GRUB machine. It converts
@@ -1626,6 +1710,33 @@ RUN set -eux; \
     test -L /etc/systemd/user/paths.target.wants/rime-update-notice.path; \
     test -L /etc/systemd/user/default.target.wants/rime-update-notice.service; \
     echo "rime-update-check + rime-update-notice enabled"
+
+# ── the move to Rime OS on NixOS: `rime migrate` (PLAN.md D1, D2) ─────────────
+# The bridge program, from the NixOS branch's nix/pkgs/rime-bridge (its
+# share/rime-bridge/rime-migrate): one Python file, standard library only, run
+# by this image's own python with -I, nothing from /nix. `rime migrate` execs
+# it. `check` writes nothing; `start` installs a signed payload beside the
+# ostree deployments, and from then on `rime update` and the other bootc verbs
+# refuse by name (rimed/rime/src/nixos_bridge.rs).
+#
+# The payload's signature is checked by the program itself, where it reads the
+# payload: manifest.json.sig against the one key in
+# /usr/share/rime-os/trust/nixos-bridge-payload.pub: the public half of
+# rime-bridge-payload-1, whose secret half exists only in the nix-release
+# GitHub environment. tests/test-rime-migrate.sh pins the path and checks the
+# key line (docs/nixos-move.md).
+COPY --chmod=0755 files/system/libexec/rime-migrate /usr/libexec/rime-migrate
+COPY --chmod=0644 files/system/trust/nixos-bridge-payload.pub /usr/share/rime-os/trust/nixos-bridge-payload.pub
+RUN set -eux; \
+    test -x /usr/libexec/rime-migrate; \
+    test "$(wc -l < /usr/share/rime-os/trust/nixos-bridge-payload.pub)" = 1; \
+    grep -Eqx 'rime-bridge-payload-1:[A-Za-z0-9+/]{43}=' /usr/share/rime-os/trust/nixos-bridge-payload.pub; \
+    test "$(head -n1 /usr/libexec/rime-migrate)" = '#!/usr/bin/python3 -I'; \
+    python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' /usr/libexec/rime-migrate; \
+    /usr/libexec/rime-migrate --help >/dev/null; \
+    : '── what the bridge runs on the old side ──'; \
+    command -v btrfs lsblk findmnt mount umount unshare chroot tar zstd cp systemctl ostree cryptsetup; \
+    echo "rime-migrate installed"
 
 # ── shared-machine recipes: guest disposability and kiosk (P2-016) ──────────
 #
@@ -3809,15 +3920,57 @@ RUN set -eux; \
 # notes, so the first thing after an update was a keyring dialog.
 #
 # Here and not beside gnome-keyring in Containerfile.core, so the fix does not
-# cost a core rebuild; dnf pins it to the installed gnome-keyring's version.
-# The login keyring still has to share the account's password to open this way.
+# cost a core rebuild. The login keyring still has to share the account's
+# password to open this way.
+#
+# The packages come from the gnome-keyring-builder stage (the property-read
+# fix, see that stage), installed as local files with every repository
+# disabled, so dnf can neither pick another build nor pull anything else in.
+# MODE=patched: Rime's rebuild of gnome-keyring and gnome-keyring-pam; it
+# upgrades core's gnome-keyring in place (1.rime1.fc45 sorts above 1.fc45).
+# MODE=upstream: Fedora already fixed it, core's gnome-keyring stays and only
+# Fedora's own gnome-keyring-pam at the same version-release is added.
+# gnome-keyring-pam requires gnome-keyring at its own version-release, so the
+# two always match. --nogpgcheck as for core's plymouth: dnf has no repository
+# here to check against. What stands in for it: the builder accepted Fedora's
+# SRPM (and, upstream, Fedora's gnome-keyring-pam) only with rpmkeys reporting
+# "digests signatures OK" against Fedora's release key, and the patch is this
+# repository's.
+#
+# rime-pkg cannot put Fedora's build back at user level: a newer Fedora
+# gnome-keyring is an upgrade of an image package, which image_pin_excludes
+# keeps out of every resolution and guard_rpms refuses to overlay.
 #
 # That file is /usr/lib/pam.d/greetd: since Fedora 45 (greetd 0.10.3-10) the
 # package ships its PAM files in /usr, and libpam reads /etc/pam.d/<service>
 # when there is one and the copy in /usr/lib/pam.d when there is not. So the
 # edits below are made there, and an /etc/pam.d/greetd is refused: it would
 # replace the whole file, and these lines would not be the ones PAM reads.
-RUN dnf5 -y install gnome-keyring-pam && dnf5 clean all && rm -rf /var/cache/libdnf5
+COPY --from=gnome-keyring-builder /out/gnome-keyring/ /tmp/rime-gnome-keyring/
+RUN set -eux; \
+    MODE=; NVR=; BUILT=; \
+    . /tmp/rime-gnome-keyring/result; \
+    have="$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)" || true; \
+    [ "$have" = "$NVR" ] || { \
+        echo "FATAL: core's gnome-keyring is $have, but gnome-keyring-builder followed $NVR"; exit 1; }; \
+    dnf5 -y --nogpgcheck --disable-repo='*' install /tmp/rime-gnome-keyring/*.rpm; \
+    install -D -m 0644 /tmp/rime-gnome-keyring/result /usr/share/rime/gnome-keyring-fix; \
+    rm -rf /tmp/rime-gnome-keyring; \
+    dnf5 clean all; rm -rf /var/cache/libdnf5; \
+    case "$MODE" in \
+    patched) \
+        for p in gnome-keyring gnome-keyring-pam; do \
+            rpm -q --qf '%{RELEASE}\n' "$p" | grep -E '\.rime[0-9]+\.fc[0-9]+$' >/dev/null \
+                || { echo "FATAL: $p is not Rime's gnome-keyring build: $(rpm -q "$p")"; exit 1; }; \
+        done; \
+        test "$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)" = "$BUILT"; \
+        grep -aF 'No session for the caller to look up' /usr/bin/gnome-keyring-daemon >/dev/null \
+            || { echo "FATAL: /usr/bin/gnome-keyring-daemon does not carry the property-read fix"; exit 1; } ;; \
+    upstream) \
+        echo "::warning title=gnome-keyring fix is upstream::Fedora's $NVR already contains the property-read fix: the image keeps Fedora's build, and files/system/src/gnome-keyring/ can be dropped."; \
+        test "$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)" = "$NVR" ;; \
+    *) echo "FATAL: gnome-keyring-builder's result has MODE='$MODE'"; exit 1 ;; \
+    esac
 RUN set -eux; \
     test -f /usr/lib64/security/pam_gnome_keyring.so; \
     test "$(rpm -q --qf '%{VERSION}-%{RELEASE}' gnome-keyring-pam)" \
@@ -4407,6 +4560,26 @@ RUN set -eux; \
     env -i HOME="$RIMEHOME" TERM=xterm PATH=/usr/bin:/bin zsh -ic 'whence -w a >/dev/null' </dev/null; \
     rm -rf "$RIMEHOME"; \
     echo "rimed/rime/rime-agentd/rime-secretd/rime-aid installed and runnable; shell verbs and `a` intact"
+
+# ── gnome-keyring is still the build the fix decided on ───────────────────
+# The install above checks it at the time; this checks nothing after it put
+# another build back (a later dnf transaction that upgrades gnome-keyring
+# would drop the property-read fix without failing anything else).
+RUN set -eu; \
+    MODE=; NVR=; BUILT=; \
+    . /usr/share/rime/gnome-keyring-fix; \
+    have="$(rpm -q --qf '%{NAME}-%{VERSION}-%{RELEASE}' gnome-keyring)"; \
+    [ "$have" = "$BUILT" ] \
+        || { echo "FATAL: a later step replaced gnome-keyring: $have, not $BUILT ($MODE)"; exit 1; }; \
+    [ "$(rpm -q --qf '%{VERSION}-%{RELEASE}' gnome-keyring-pam)" = "${BUILT#gnome-keyring-}" ] \
+        || { echo "FATAL: a later step replaced gnome-keyring-pam: $(rpm -q gnome-keyring-pam)"; exit 1; }; \
+    case "$MODE" in \
+    patched) \
+        grep -aF 'No session for the caller to look up' /usr/bin/gnome-keyring-daemon >/dev/null \
+            || { echo "FATAL: a later step replaced Rime's gnome-keyring build: the daemon lacks the fix"; exit 1; } ;; \
+    upstream) : ;; \
+    *) echo "FATAL: /usr/share/rime/gnome-keyring-fix has MODE='$MODE'"; exit 1 ;; \
+    esac
 
 # ── Stage 7: bootc container sanity lint (informational) ───────────────────
 RUN bootc container lint || true

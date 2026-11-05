@@ -80,7 +80,7 @@ W=windows-installer/src
 writers=0
 for api in GENERIC_WRITE GENERIC_ALL FILE_WRITE_DATA WriteFile \
            SetFirmwareEnvironmentVariable SetEndOfFile FlushFileBuffers \
-           DeleteFile MoveFile SetFileAttributes ExitWindowsEx; do
+           DeleteFile MoveFile SetFileAttributes ExitWindowsEx DeleteVolumeMountPoint; do
     hits="$(grep -rln --include='*.rs' "\\b$api" "$W" | grep -v "^$W/winwrite.rs$" || true)"
     if [ -n "$hits" ]; then
         bad "$api appears outside src/winwrite.rs: $hits"
@@ -101,9 +101,13 @@ fi
 #    0x002d1400  IOCTL_STORAGE_QUERY_PROPERTY
 #    0x00560000  IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS
 #    0x00070140  IOCTL_DISK_UPDATE_PROPERTIES   (winwrite.rs only)
+#    0x00090018  FSCTL_LOCK_VOLUME              (winwrite.rs only)
+#    0x00090020  FSCTL_DISMOUNT_VOLUME          (winwrite.rs only)
+#  The two FSCTLs act on one volume: the RAW volume Windows keeps over an
+#  empty basic-data partition the user chose to replace (src/replace.rs).
 declared="$(grep -rhoE 'const (IOCTL|FSCTL)_[A-Z_0-9]+: u32 = 0x[0-9A-Fa-f_]+' "$W" |
             sed 's/.*= //' | tr -d '_' | tr '[:upper:]' '[:lower:]' | sort -u)"
-allowed="$(printf '0x00070000\n0x00070050\n0x0007405c\n0x002d1400\n0x00560000\n0x00070140\n' | sort)"
+allowed="$(printf '0x00070000\n0x00070050\n0x0007405c\n0x002d1400\n0x00560000\n0x00070140\n0x00090018\n0x00090020\n' | sort)"
 unexpected="$(comm -23 <(printf '%s\n' "$declared") <(printf '%s\n' "$allowed"))"
 missing="$(comm -13 <(printf '%s\n' "$declared") <(printf '%s\n' "$allowed"))"
 if [ -n "$unexpected" ]; then
@@ -113,10 +117,10 @@ elif [ -n "$missing" ]; then
 else
     ok "every declared IOCTL code ($(printf '%s\n' "$declared" | wc -l)) is on the allowlist"
 fi
-if grep -rlE 'IOCTL_DISK_UPDATE_PROPERTIES' "$W" | pipe_has -v "^$W/winwrite.rs$"; then
-    bad "IOCTL_DISK_UPDATE_PROPERTIES appears outside winwrite.rs"
+if grep -rlE 'IOCTL_DISK_UPDATE_PROPERTIES|FSCTL_LOCK_VOLUME|FSCTL_DISMOUNT_VOLUME' "$W" | pipe_has -v "^$W/winwrite.rs$"; then
+    bad "a write-side IOCTL/FSCTL (update properties, lock, dismount) appears outside winwrite.rs"
 else
-    ok "the one write-side IOCTL is confined to winwrite.rs"
+    ok "the write-side IOCTL and the volume lock/dismount FSCTLs are confined to winwrite.rs"
 fi
 if grep -rqnE '\.ioctl\(\s*0x|DeviceIoControl\([^,]+,\s*0x' "$W"; then
     bad "an IOCTL code is passed as a bare numeric literal, bypassing the allowlist"
@@ -223,6 +227,17 @@ if grep -q 'the_confirmation_names_the_disk_by_serial_and_never_by_index' "$unit
     ok "the 'never identify a disk by index' rule is among the tests that ran"
 else
     bad "the index-identification test did not run; the rule is unguarded"
+fi
+
+# The replace-a-partition safety steps (lock, re-probe under the lock, never a
+# recognised filesystem, only the locked volume excused) each have a mutant
+# the unit tests must kill.
+mut_log="$OUT/mutants.log"
+if RIME_WIN_BUILD_IMAGE="$IMAGE" windows-installer/tests/mutate-replace.sh >"$mut_log" 2>&1; then
+    ok "every replace safety mutant is killed ($(grep -c '^PASS  mutant killed' "$mut_log") mutants)"
+else
+    bad "a replace safety mutant survived or could not be applied"
+    grep -E '^(FAIL|PASS)' "$mut_log" | sed 's/^/        /'
 fi
 
 # ── 4. it RUNS, and the words are its own ────────────────────────────────────

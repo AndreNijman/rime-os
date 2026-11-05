@@ -21,8 +21,15 @@
 //!   program made) and `BootNext` (a one-shot request). `BootOrder` is
 //!   rewritten only by `remove_option`, to take out a number this program
 //!   deleted; nothing else in it moves.
-//! * nothing else. No volume is locked, dismounted or formatted, and no file
-//!   on any Windows volume is touched except this program's own journal.
+//! * one volume's lock, mount state and drive letters, through `VolumeLock`
+//!   and `remove_mount_point`: the RAW volume Windows keeps over an empty
+//!   basic-data partition the user chose to replace, and only once
+//!   `replace::verdict` allowed it. FSCTL_LOCK_VOLUME gives this program the
+//!   volume to itself (it fails while anything else has it open), and the
+//!   lock lasts until the partition table no longer has the partition.
+//! * nothing else. No other volume is locked or dismounted, nothing is
+//!   formatted, and no file on any Windows volume is touched except this
+//!   program's own journal.
 
 #![cfg(windows)]
 
@@ -44,6 +51,12 @@ const FILE_FLAG_WRITE_THROUGH: u32 = 0x8000_0000;
 // table was written underneath it. Measured in the lab: without it Windows
 // keeps describing the old table; with it, the new one (ok=True err=0).
 const IOCTL_DISK_UPDATE_PROPERTIES: u32 = 0x0007_0140;
+// CTL_CODE(FILE_DEVICE_FILE_SYSTEM 0x09, 6, METHOD_BUFFERED, FILE_ANY_ACCESS)
+// and (…, 8, …). Lock: nothing else may open the volume while this handle
+// holds it, and it fails if anything already has it open. Dismount: the
+// filesystem (RAW, here) lets go of it. Closing the handle unlocks.
+const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
+const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
 
 const ERROR_ENVVAR_NOT_FOUND: u32 = 203;
 const ERROR_NOT_ALL_ASSIGNED: u32 = 1300;
@@ -96,6 +109,10 @@ unsafe extern "system" {
 #[link(name = "user32")]
 unsafe extern "system" {
     fn ExitWindowsEx(flags: u32, reason: u32) -> i32;
+}
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn DeleteVolumeMountPointW(mount_point: *const u16) -> i32;
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -218,6 +235,84 @@ impl Seek for DiskWriter {
         self.pos = out as u64;
         Ok(self.pos)
     }
+}
+
+/// The exclusive lock on one volume. Dropping it closes the handle, which
+/// releases the lock.
+pub struct VolumeLock {
+    h: Handle,
+    pub name: String,
+}
+
+impl Drop for VolumeLock {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.h) };
+    }
+}
+
+impl VolumeLock {
+    fn fsctl(&self, code: u32) -> io::Result<()> {
+        let mut r = 0u32;
+        let ok = unsafe { DeviceIoControl(self.h, code, std::ptr::null(), 0, std::ptr::null_mut(), 0, &mut r, std::ptr::null_mut()) };
+        if ok == 0 { Err(last_error()) } else { Ok(()) }
+    }
+
+    /// Open `\\?\Volume{...}` with NO sharing, then take FSCTL_LOCK_VOLUME.
+    ///
+    /// Both halves refuse when something else has the volume open. Measured
+    /// in the lab (Windows Server 2022, a lettered RAW partition, another
+    /// process holding a read handle on `\\.\F:` that shares read and
+    /// write): the lock through a shared handle fails with
+    /// ERROR_ACCESS_DENIED, and an open that shares nothing fails first with
+    /// ERROR_SHARING_VIOLATION. With nothing else open, both succeed. The
+    /// no-sharing open is kept as well as the lock because it also stops a
+    /// new handle being opened between this open and the lock. A few tries
+    /// over a second ride out a transient look by Explorer or the volume
+    /// service, and no more than that.
+    pub fn lock(volume: &str) -> io::Result<VolumeLock> {
+        let device = volume.trim_end_matches('\\');
+        if !device.starts_with("\\\\?\\Volume{") || device.contains('/') {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "only a volume GUID path can be locked"));
+        }
+        let mut last = None;
+        for attempt in 0..5 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            let h = unsafe {
+                CreateFileW(
+                    wide(device).as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null_mut(),
+                    OPEN_EXISTING,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            if h == INVALID_HANDLE {
+                last = Some(last_error());
+                continue;
+            }
+            let v = VolumeLock { h, name: volume.to_string() };
+            match v.fsctl(FSCTL_LOCK_VOLUME) {
+                Ok(()) => return Ok(v),
+                Err(e) => last = Some(e), // dropping v closes the handle
+            }
+        }
+        Err(last.unwrap_or_else(|| io::Error::other("the volume lock failed")))
+    }
+
+    /// FSCTL_DISMOUNT_VOLUME, through the locked handle.
+    pub fn dismount(&mut self) -> io::Result<()> {
+        self.fsctl(FSCTL_DISMOUNT_VOLUME)
+    }
+}
+
+/// Remove one drive letter or folder mount point (`G:\\`).
+pub fn remove_mount_point(mount_point: &str) -> io::Result<()> {
+    let m = if mount_point.ends_with('\\') { mount_point.to_string() } else { format!("{mount_point}\\") };
+    if unsafe { DeleteVolumeMountPointW(wide(&m).as_ptr()) } == 0 { Err(last_error()) } else { Ok(()) }
 }
 
 fn enable_privilege(name: &str) -> io::Result<()> {

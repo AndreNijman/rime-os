@@ -1,0 +1,386 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-secureboot-key — a way back into Rime OS when Secure Boot refuses it.
+#
+#  THE FAILURE THIS IS FOR
+#
+#  The Rime kernel is signed with Rime's own key (the MOK), not by Microsoft.
+#  With Secure Boot on, shim accepts it only once that key is enrolled, and
+#  enrolment happens on shim's blue MokManager screen, which needs a key press
+#  within 10 seconds. Skip enrolment in the installer, or miss those 10
+#  seconds, and every boot ends in GRUB with
+#
+#    error: ../../grub-core/kern/efi/sb.c:shim_lock_verifier_init:192:bad shim signature.
+#    error: ../../grub-core/loader/i386/efi/linux.c:grub_cmd_initrd:260:you need to load the kernel first.
+#
+#  A missed countdown does not leave the request waiting. MokManager deletes
+#  MokNew the moment it reads it and MokAuth when it exits (shim 16.1
+#  MokManager.c, check_mok_request), so the request is gone and the next boot
+#  goes straight to the error. Until now the only way out was to turn Secure
+#  Boot off in the firmware, and some firmware drops its boot entries when you
+#  do that, which strands the machine a second time.
+#
+#  WHAT THIS DOES
+#
+#  Two files, both outside anything a package or bootupd owns:
+#
+#   1. The ESP gets \EFI\rime\rime-mok.der, the public certificate shipped at
+#      /usr/share/rime-os/secureboot/rime-mok.der. MokManager's "Enroll key
+#      from disk" can only browse FAT volumes, and the ESP is the one FAT
+#      volume every Rime machine has. The ESP must already hold
+#      \EFI\fedora\mmx64.efi (bootupd puts it there on every install).
+#
+#   2. /boot/grub2/custom.cfg gets a marked block with one menu entry, "Enrol
+#      the Rime OS Secure Boot key (if Rime OS does not start)". It chainloads
+#      MokManager from the ESP. MokManager is signed by Fedora, so shim lets
+#      GRUB start it with Secure Boot on and the Rime key NOT enrolled; that is
+#      exactly the state the entry is for. The entry shows only when shim
+#      reports Secure Boot on (GRUB sets $shim_lock=y then and leaves it unset
+#      otherwise, measured on OVMF). bootupd's static grub.cfg already sources
+#      custom.cfg (configs.d/41_custom.cfg) and never rewrites it, so nothing
+#      here edits a bootupd-managed file. The rest of custom.cfg (the
+#      installer's Windows entry) is kept as it is.
+#
+#  The entry finds the ESP at boot time with `search --file
+#  /EFI/rime/rime-mok.der`, so the block holds no UUID and is the same text on
+#  every machine.
+#
+#  Usage:
+#    rime-secureboot-key place --boot DIR --esp DIR --cert FILE
+#        The installer: DIR are the new install's mounted /boot and ESP.
+#    rime-secureboot-key ensure
+#        A booted machine (rime-secureboot-key.service, every boot). Finds the
+#        ESP itself, remounts /boot read-write in a private mount namespace, and
+#        exits early when both files are already in place.
+#    rime-secureboot-key block
+#        Print the GRUB block, change nothing.
+#
+#  Exit 0 = in place (or nothing to do on this machine), 1 = could not place
+#  it, 2 = usage. `ensure` never fails the boot: the unit is WantedBy.
+#
+#  It never runs mokutil, never writes NVRAM and never touches a loader file.
+#
+#  TEST HOOKS (tests/test-rime-secureboot-key.sh only): RIME_SBK_PREFIX is put
+#  in front of every absolute path `ensure` reads or writes, and
+#  RIME_SBK_NO_UNSHARE=1 skips the private mount namespace.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+P="${RIME_SBK_PREFIX:-}"
+CERT_SRC="$P/usr/share/rime-os/secureboot/rime-mok.der"
+KSTATE_FILE="$P/usr/share/rime-os/secureboot/kernel-signed"
+STATE_DIR="$P/var/lib/rime/secureboot-key"
+ESP_TYPE_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+# The Boot Loader Interface variable. systemd-boot writes "systemd-boot <ver>"
+# here, and a machine it booted has no GRUB menu to add to. Fedora's GRUB
+# writes it too ("GRUB 2.12", measured in a VM), so its mere presence says
+# nothing: only the name in it counts.
+LOADER_INFO="$P/sys/firmware/efi/efivars/LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
+BEGIN_MARK='### BEGIN rime-secureboot-key ###'
+END_MARK='### END rime-secureboot-key ###'
+ESP_CERT_REL=EFI/rime/rime-mok.der
+MOKMANAGER_REL=EFI/fedora/mmx64.efi
+
+log() { printf 'rime-secureboot-key: %s\n' "$*" >&2; }
+
+# The GRUB block. No machine-specific value anywhere in it, on purpose.
+# GRUB script has no `&&`, hence the nested ifs. `read` is not built into
+# Fedora's signed grubx64.efi and nothing can be insmod'ed under Secure Boot,
+# so the text waits with `sleep --interruptible` (Esc returns to the menu).
+# Every line stays inside 80 columns, GRUB's text console on most firmware.
+block() {
+  cat <<'EOF'
+### BEGIN rime-secureboot-key ###
+# Rime OS: enrol Rime's Secure Boot key from this menu when Rime OS does not
+# start ("bad shim signature"). Written by Rime OS (rime-secureboot-key),
+# which replaces this block as a whole: edits inside it are lost.
+if [ "$grub_platform" = "efi" ]; then
+  if [ "$shim_lock" = "y" ]; then
+    menuentry 'Enrol the Rime OS Secure Boot key (if Rime OS does not start)' --id rime-enrol-key {
+      insmod part_gpt
+      insmod fat
+      insmod chain
+      if search --no-floppy --file --set=rime_esp /EFI/rime/rime-mok.der; then
+        echo "Enrol the Rime OS Secure Boot key"
+        echo ""
+        echo "Rime OS starts with Secure Boot on once its key is enrolled."
+        echo "A blue key manager opens next. On it:"
+        echo "  1. When it says \"Press any key\", press a key within 10 seconds."
+        echo "  2. Choose \"Enroll key from disk\"."
+        echo "  3. Choose the EFI partition (EFI-SYSTEM, RIME-ESP or RIMEESP; on an"
+        echo "     older install it can have another name), then EFI, rime,"
+        echo "     rime-mok.der."
+        echo "  4. Choose \"Continue\", then \"Yes\"."
+        echo "  5. Choose \"Reboot\". Rime OS then starts."
+        echo "If you miss a step you come back to this menu. Choose this again."
+        echo ""
+        echo "Opening in 20 seconds. Press Esc to go back to the menu."
+        if sleep --verbose --interruptible 20; then
+          chainloader ($rime_esp)/EFI/fedora/mmx64.efi
+        fi
+      else
+        echo "The Rime OS key file is not on this machine's EFI partition."
+        echo "Turn Secure Boot off in the firmware settings to start Rime OS,"
+        echo "then run: sudo systemctl start rime-secureboot-key.service"
+        sleep --interruptible 30
+      fi
+    }
+  fi
+fi
+### END rime-secureboot-key ###
+EOF
+}
+
+# ── custom.cfg: replace our block, keep everything else ──────────────────────
+# Prints the new file to stdout: the old file without our block (and without
+# the blank line we put before it), then the block.
+custom_cfg_with_block() {  # $1 = existing custom.cfg (may not exist)
+  local f="$1"
+  if [ -s "$f" ]; then
+    awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+      $0 == b { skip = 1; next }
+      $0 == e { skip = 0; next }
+      !skip   { lines[++n] = $0 }
+      END {
+        while (n > 0 && lines[n] == "") n--
+        for (i = 1; i <= n; i++) print lines[i]
+        if (n > 0) print ""
+      }' "$f"
+  fi
+  block
+}
+
+# Writes $1/grub2/custom.cfg. 0 = in place (written or already right).
+place_block() {  # $1 = /boot directory
+  local boot="$1" cfg tmp
+  cfg="$boot/grub2/custom.cfg"
+  if [ ! -d "$boot/grub2" ]; then
+    log "no $boot/grub2: not a GRUB /boot"
+    return 1
+  fi
+  tmp=$(mktemp "$boot/grub2/.custom.cfg.XXXXXX") || { log "cannot write in $boot/grub2"; return 1; }
+  if ! custom_cfg_with_block "$cfg" >"$tmp"; then
+    rm -f "$tmp"; log "could not build $cfg"; return 1
+  fi
+  if [ -f "$cfg" ] && cmp -s "$tmp" "$cfg"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  chmod 0644 "$tmp"
+  sync -f "$tmp" 2>/dev/null || true
+  if ! mv -f "$tmp" "$cfg"; then
+    rm -f "$tmp"; log "could not replace $cfg"; return 1
+  fi
+  sync -f "$cfg" 2>/dev/null || true
+  # Read back: the entry is only real if GRUB will find it.
+  if ! grep -qxF "$BEGIN_MARK" "$cfg" || ! grep -qF -- "--id rime-enrol-key" "$cfg"; then
+    log "$cfg does not hold the entry after writing it"
+    return 1
+  fi
+  log "boot menu entry written to $cfg"
+}
+
+# ── the certificate on the ESP ───────────────────────────────────────────────
+place_cert() {  # $1 = mounted ESP  $2 = certificate
+  local esp="$1" cert="$2" dst tmp
+  dst="$esp/$ESP_CERT_REL"
+  if [ ! -s "$cert" ]; then
+    log "no certificate at $cert"
+    return 1
+  fi
+  # The entry chainloads MokManager from the ESP that holds the cert. An ESP
+  # without it would get a cert nothing can use.
+  if [ ! -f "$esp/$MOKMANAGER_REL" ]; then
+    log "$esp has no $MOKMANAGER_REL: not the ESP this machine boots shim from"
+    return 1
+  fi
+  if [ -f "$dst" ] && cmp -s "$cert" "$dst"; then
+    return 0
+  fi
+  mkdir -p "$esp/EFI/rime" || { log "cannot create $esp/EFI/rime"; return 1; }
+  tmp="$esp/EFI/rime/.rime-mok.der.new"
+  if ! cp "$cert" "$tmp"; then
+    rm -f "$tmp"; log "could not copy the certificate to $esp"; return 1
+  fi
+  sync -f "$tmp" 2>/dev/null || true
+  if ! mv -f "$tmp" "$dst"; then
+    rm -f "$tmp"; log "could not place $dst"; return 1
+  fi
+  sync -f "$dst" 2>/dev/null || true
+  if ! cmp -s "$cert" "$dst"; then
+    log "$dst does not match $cert after copying"
+    return 1
+  fi
+  log "certificate written to $dst"
+}
+
+stamp_value() {
+  # The '-' goes last: in ' -\n' tr reads a reversed range and fails.
+  { sha256sum <"$CERT_SRC"; block | sha256sum; } 2>/dev/null | tr -d ' \n-'
+}
+
+# ── ensure: the booted machine ───────────────────────────────────────────────
+
+# Every ESP-typed partition on the disk that holds /boot. Walks up from the
+# /boot filesystem's source, so a LUKS root or a separate /boot partition both
+# land on the physical disk.
+esp_candidates() {
+  local src cur parent type i=0 disk part t
+  src=$(findmnt -n -o SOURCE --target "$P/boot" 2>/dev/null | head -1)
+  src="${src%%[*}"
+  [ -n "$src" ] || return 1
+  cur="$src"
+  while [ "$i" -lt 8 ]; do
+    type=$(lsblk -ndo TYPE "$cur" 2>/dev/null | head -1)
+    if [ "$type" = disk ]; then disk="$cur"; break; fi
+    parent=$(lsblk -no PKNAME "$cur" 2>/dev/null | head -1)
+    [ -n "$parent" ] || return 1
+    cur="/dev/$parent"
+    i=$((i + 1))
+  done
+  [ -n "${disk:-}" ] || return 1
+  for part in $(lsblk -lno NAME "$disk" 2>/dev/null); do
+    [ "/dev/$part" = "$disk" ] && continue
+    t=$(lsblk -dno PARTTYPE "/dev/$part" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    [ "$t" = "$ESP_TYPE_GUID" ] && printf '/dev/%s\n' "$part"
+  done
+  return 0
+}
+
+# Picks the ESP this machine boots from and mounts it read-write at $1.
+# 1. /boot/efi when it is a mount point (installs on a disk with more than one
+#    ESP get an fstab line for it).
+# 2. Otherwise the ESP on the /boot disk whose EFI/fedora/bootuuid.cfg names
+#    this /boot filesystem: bootupd writes that file, and it is what GRUB
+#    reads to find /boot, so it identifies this install's ESP exactly.
+# 3. Otherwise the only ESP on that disk that holds MokManager.
+# Anything else is ambiguous, and this does nothing rather than guess.
+mount_esp() {  # $1 = mount point to use; prints the ESP directory to use
+  local mp="$1" bootuuid dev hit="" with_mm=() probe
+  if mountpoint -q "$P/boot/efi" 2>/dev/null && [ -f "$P/boot/efi/$MOKMANAGER_REL" ]; then
+    printf '%s\n' "$P/boot/efi"
+    return 0
+  fi
+  bootuuid=$(findmnt -n -o UUID --target "$P/boot" 2>/dev/null | head -1)
+  probe="$mp.probe"
+  mkdir -p "$probe" || return 1
+  while read -r dev; do
+    [ -n "$dev" ] || continue
+    mount -o ro "$dev" "$probe" 2>/dev/null || continue
+    if [ -f "$probe/$MOKMANAGER_REL" ]; then
+      with_mm+=("$dev")
+      if [ -n "$bootuuid" ] && grep -qiF "$bootuuid" "$probe/EFI/fedora/bootuuid.cfg" 2>/dev/null; then
+        hit="$dev"
+      fi
+    fi
+    umount "$probe" 2>/dev/null || true
+    [ -n "$hit" ] && break
+  done < <(esp_candidates)
+  rmdir "$probe" 2>/dev/null || true
+  if [ -z "$hit" ]; then
+    if [ "${#with_mm[@]}" = 1 ]; then
+      hit="${with_mm[0]}"
+    else
+      log "found ${#with_mm[@]} ESPs with MokManager on the /boot disk and none names /boot ($bootuuid): not choosing"
+      return 1
+    fi
+  fi
+  mkdir -p "$mp" || return 1
+  if ! mount -o rw "$hit" "$mp"; then
+    log "could not mount the ESP $hit"
+    return 1
+  fi
+  printf '%s\n' "$mp"
+}
+
+booted_loader() {  # the LoaderInfo string ("GRUB 2.12", "systemd-boot 258.x"), or nothing
+  [ -r "$LOADER_INFO" ] || return 0
+  tr -d '\0' <"$LOADER_INFO" 2>/dev/null | tr -cd '[:print:]'
+}
+
+cmd_ensure() {
+  local kstate want esp="" mp rc=0 remounted=0
+  if [ ! -d "$P/sys/firmware/efi" ]; then
+    log "not booted with UEFI: nothing to do"; return 0
+  fi
+  case "$(booted_loader)" in
+    *systemd-boot*) log "booted by systemd-boot: no GRUB menu to add to"; return 0 ;;
+  esac
+  if [ ! -f "$P/boot/grub2/grub.cfg" ]; then
+    log "no /boot/grub2/grub.cfg: not a GRUB machine"; return 0
+  fi
+  kstate=$(cat "$KSTATE_FILE" 2>/dev/null || echo unknown)
+  if [ "$kstate" != signed ]; then
+    log "this image's kernel is not signed with the Rime key ($kstate): nothing to enrol"
+    return 0
+  fi
+  if [ ! -s "$CERT_SRC" ]; then
+    log "no $CERT_SRC in this image"; return 0
+  fi
+  want=$(stamp_value)
+  # Cheap path for every boot after the first: no mounts at all. The ESP half
+  # is trusted from the stamp; the /boot half is checked, since it is readable.
+  if [ -n "$want" ] && [ "$(cat "$STATE_DIR/stamp" 2>/dev/null)" = "$want" ] \
+     && [ -f "$P/boot/grub2/custom.cfg" ] \
+     && custom_cfg_with_block "$P/boot/grub2/custom.cfg" | cmp -s - "$P/boot/grub2/custom.cfg"; then
+    return 0
+  fi
+
+  if [ "${RIME_SBK_NO_UNSHARE:-0}" != 1 ] && [ "${RIME_SBK_IN_NS:-0}" != 1 ]; then
+    # /boot is read-only on a bootc machine. The ESP mount made here lives
+    # only in this private mount namespace and goes with the process. The
+    # remount of /boot is NOT fully private: it clears the read-only flag of
+    # the filesystem itself, which every namespace shares, so it is put back
+    # to read-only before this exits.
+    RIME_SBK_IN_NS=1 exec unshare --mount --propagation private -- "$0" ensure
+  fi
+
+  case ",$(findmnt -n -o OPTIONS --target "$P/boot" 2>/dev/null)," in
+    *,ro,*)
+      mount -o remount,rw "$P/boot" || { log "could not remount /boot read-write"; return 1; }
+      remounted=1 ;;
+  esac
+  mp="$P/run/rime-secureboot-key/esp"
+  if ! esp=$(mount_esp "$mp"); then
+    rc=1
+  fi
+  if [ "$rc" = 0 ]; then
+    place_cert "$esp" "$CERT_SRC" || rc=1
+  fi
+  # The menu entry is written even when the ESP half failed: its own text
+  # says what to do when it cannot find the key file.
+  place_block "$P/boot" || rc=1
+  [ "$esp" = "$mp" ] && umount "$mp" 2>/dev/null
+  [ "$remounted" = 1 ] && mount -o remount,ro "$P/boot" 2>/dev/null
+  if [ "$rc" = 0 ]; then
+    mkdir -p "$STATE_DIR" && printf '%s\n' "$want" >"$STATE_DIR/stamp"
+    log "the Secure Boot key entry is in place"
+  fi
+  return "$rc"
+}
+
+cmd_place() {
+  local boot="" esp="" cert="" rc=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --boot) boot="${2:-}"; shift 2 ;;
+      --esp)  esp="${2:-}"; shift 2 ;;
+      --cert) cert="${2:-}"; shift 2 ;;
+      *) log "unknown argument: $1"; return 2 ;;
+    esac
+  done
+  if [ -z "$boot" ] || [ -z "$esp" ] || [ -z "$cert" ]; then
+    log "usage: rime-secureboot-key place --boot DIR --esp DIR --cert FILE"
+    return 2
+  fi
+  place_cert "$esp" "$cert" || rc=1
+  place_block "$boot" || rc=1
+  return "$rc"
+}
+
+case "${1:-}" in
+  ensure) shift; cmd_ensure "$@" ;;
+  place)  shift; cmd_place "$@" ;;
+  block)  block ;;
+  *) log "usage: rime-secureboot-key ensure | place --boot DIR --esp DIR --cert FILE | block"; exit 2 ;;
+esac

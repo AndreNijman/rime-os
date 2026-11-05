@@ -10,6 +10,7 @@ pub mod gptwrite;
 pub mod payload;
 pub mod pin;
 pub mod plan;
+pub mod replace;
 pub mod stage;
 #[cfg(windows)]
 pub mod winwrite;

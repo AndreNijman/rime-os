@@ -8,7 +8,9 @@ once Rime runs:
 
   * Rime's own ESP is mounted at /boot/efi (the fstab line the installer
     wrote), and it is not the first ESP on the disk;
-  * bootloader-update.service ran with that mount in place and succeeded;
+  * bootloader-update.service ran with that mount in place and succeeded
+    (read only once it has finished: queued, it already says Result=success);
+  * bootc-generic-growpart.service is masked and did not run;
   * `bootupctl update`, run by hand, succeeds and writes to /boot/efi;
   * the firmware's "Rime OS" entry points at that ESP.
 
@@ -33,9 +35,32 @@ src_dev = out.split()[0] if out.split() else ""
 check("/boot/efi is mounted, vfat", "vfat" in out, out)
 first, _ = run("d=$(lsblk -no PKNAME " + src_dev + "); lsblk -rnpo NAME,PARTTYPE /dev/$d | awk 'tolower($2)==\"c12a7328-f81f-11d2-ba4b-00a0c93ec93b\"{print $1; exit}'")
 check("the ESP at /boot/efi is Rime's, not the disk's first ESP", src_dev and first.strip() and first.strip() != src_dev, f"{src_dev} vs first {first}")
-out, _ = run("systemctl show bootloader-update.service -p ActiveState -p Result -p ExecMainStatus --no-pager; journalctl -b -u bootloader-update --no-pager | tail -n 8")
+# Wait for the unit to be FINISHED before reading its result. The debug shell
+# answers early in the boot, and a oneshot that has not started yet (or is
+# still queued) already reads Result=success: the v3.2.1 lab read that before
+# bootloader-update had run. So: no job queued for it, not activating, and a
+# real start timestamp from this boot.
+out, _ = run(
+    "for i in $(seq 1 150); do "
+    "j=$(systemctl list-jobs --no-legend 2>/dev/null | grep -c 'bootloader-update.service'); "
+    "a=$(systemctl show -p ActiveState --value bootloader-update.service); "
+    "if [ \"$j\" = 0 ] && [ \"$a\" != activating ] && [ \"$a\" != deactivating ]; then break; fi; sleep 2; done; "
+    "echo WAITED=$((i*2))s; "
+    "systemctl show bootloader-update.service -p ActiveState -p Result -p ExecMainStatus -p ExecMainStartTimestampMonotonic --no-pager; "
+    "journalctl -b -u bootloader-update --no-pager | tail -n 8", timeout=360)
 print(out.strip())
-check("bootloader-update.service ran and succeeded", "Result=success" in out and "ExecMainStatus=0" in out, out)
+ran = any(l.startswith("ExecMainStartTimestampMonotonic=") and l.split("=", 1)[1].strip() not in ("", "0") for l in out.splitlines())
+check("bootloader-update.service finished, ran this boot and succeeded",
+      ran and "Result=success" in out and "ExecMainStatus=0" in out and "ActiveState=activating" not in out, out)
+# A partition-mode install keeps its root the size of its partition: the
+# installer masks bootc-generic-growpart.service in /etc (rime-install,
+# keep_root_partition_size_in). The host compares the GPT itself.
+out, _ = run("systemctl show bootc-generic-growpart.service -p LoadState -p UnitFileState -p ExecMainStartTimestampMonotonic --no-pager; "
+             "readlink /etc/systemd/system/bootc-generic-growpart.service; "
+             "journalctl -b -u bootc-generic-growpart --no-pager | tail -n 4")
+print(out.strip())
+check("bootc-generic-growpart.service is masked and did not run",
+      "LoadState=masked" in out and "/dev/null" in out and "ExecMainStartTimestampMonotonic=0" in out, out)
 out, rc = run("bootupctl status 2>&1; bootupctl update 2>&1; echo UPDATE-RC=$?", timeout=300)
 print(out.strip())
 check("bootupctl update, run by hand, succeeds", "UPDATE-RC=0" in out, out)

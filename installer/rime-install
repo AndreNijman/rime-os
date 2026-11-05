@@ -470,7 +470,60 @@ run_bootc_install() {  # $1=target disk  $2=mounted target root  [$@=extra bootc
     log "compressed: $(wc -l < "$list") objects; target now uses $(df -B1M --output=used "$root" 2>/dev/null | tail -1 | tr -d ' ') MB"
     rm -f "$list" "$list.stop"
   fi
+  if [ "$brc" = 0 ]; then
+    place_secureboot_key "$root"
+  fi
   return "$brc"
+}
+
+# ── The way back when Secure Boot refuses the Rime kernel ───────────────────
+#
+# With Secure Boot on and the Rime key not enrolled (the user skipped
+# enrolment, or MokManager's 10-second prompt went by, which DELETES the
+# request: shim 16.1 MokManager.c check_mok_request), every boot ends in GRUB
+# with "bad shim signature". This puts Rime's certificate on the ESP at
+# \EFI\rime\rime-mok.der and an "Enrol the Rime OS Secure Boot key" entry in
+# /boot/grub2/custom.cfg, which chainloads MokManager so the key can be
+# enrolled from disk without turning Secure Boot off.
+#
+# It runs the NEW SYSTEM'S OWN /usr/libexec/rime-secureboot-key, the same
+# file its rime-secureboot-key.service runs on every boot, so the installer
+# and an updated machine write exactly the same thing. It runs here, while
+# the target's /boot and ESP are both still mounted at $root/boot and
+# $root/boot/efi on every install path (whole disk, partition, encrypted).
+#
+# Never fatal: the install has succeeded by now, and a machine without the
+# entry is exactly what every machine was before it existed. SB_KEY_FLAG
+# tells §5b whether it can point the user at the entry: a file, because
+# run_bootc_install runs on the left of `| tee`, in a subshell, where a
+# variable set here would vanish.
+SB_KEY_FLAG=/run/rime-install-secureboot-key.placed
+rm -f "$SB_KEY_FLAG" 2>/dev/null || true
+place_secureboot_key() {  # $1 = mounted target root
+  local root="$1" dep helper cert kstate
+  dep=$(ls -d "$root"/ostree/deploy/*/deploy/*.0 2>/dev/null | head -1 || true)
+  if [ -z "$dep" ]; then
+    log "secureboot-key: no deployment under $root; boot menu entry not added"
+    return 0
+  fi
+  kstate=$(cat "$dep/usr/share/rime-os/secureboot/kernel-signed" 2>/dev/null || echo unknown)
+  if [ "$kstate" != signed ]; then
+    log "secureboot-key: kernel is not Rime-signed ($kstate); nothing to enrol, no entry"
+    return 0
+  fi
+  helper="${RIME_SB_KEY_HELPER:-$dep/usr/libexec/rime-secureboot-key}"
+  cert="$dep/usr/share/rime-os/secureboot/rime-mok.der"
+  if [ ! -f "$helper" ]; then
+    log "secureboot-key: this image has no rime-secureboot-key; boot menu entry not added"
+    return 0
+  fi
+  if bash "$helper" place --boot "$root/boot" --esp "$root/boot/efi" --cert "$cert" >>"$LOG" 2>&1; then
+    : > "$SB_KEY_FLAG"
+    log "secureboot-key: certificate on the ESP and 'Enrol the Rime OS Secure Boot key' in the boot menu"
+  else
+    log "secureboot-key: WARNING could not add the boot menu entry (see above); the install is unaffected"
+  fi
+  return 0
 }
 
 # ── A disk with more than one ESP ───────────────────────────────────────────
@@ -624,6 +677,32 @@ UNIT
   log "handoff: the installed system removes the staged installer from its ESP on first boot"
 }
 
+# Rime's root keeps the size of the partition it was given. The fedora-bootc
+# base ships bootc-generic-growpart.service ("Bootc Fallback Root Filesystem
+# Grow", enabled from /usr/lib/systemd/system/local-fs.target.wants), which on
+# every boot runs growpart on the partition under /sysroot and then grows the
+# filesystem into whatever unallocated space FOLLOWS that partition. On a
+# disk Rime was handed whole, that is the point. In partition mode the user
+# chose ONE partition and may have left the space after it for something
+# else: measured in the Windows lab (installer v3.2.1), Rime's first boot
+# took the 2.1 GB of free space behind the partition it was installed into.
+# So a partition-mode install masks the unit in the new system's /etc: a
+# local /etc change survives every update (ostree's three-way /etc merge),
+# and the root never grows past what the user gave it. The user can still
+# grow it on purpose (growpart + btrfs filesystem resize, or unmask it).
+# Whole-disk mode leaves it alone: Rime owns that disk.
+#
+# Today the unit only runs in a virtual machine (ConditionVirtualization=vm)
+# and never on an encrypted root (it skips /dev/mapper), so bare metal is not
+# hit by it yet; that condition is bootc's to change, so the mask does not
+# depend on it.
+keep_root_partition_size_in() {  # $1 = deployment root
+  local d="$1"
+  mkdir -p "$d/etc/systemd/system"
+  ln -sfn /dev/null "$d/etc/systemd/system/bootc-generic-growpart.service"
+  log "growpart: bootc-generic-growpart.service masked; the root stays the size of the partition it was given"
+}
+
 # A boot menu entry for Windows. Rime's GRUB (bootupd's static config) sources
 # $prefix/custom.cfg, which lives on Rime's own root filesystem and is owned
 # by no package, so an update never rewrites it. Without it, a machine that
@@ -658,7 +737,11 @@ add_windows_entry() {  # $1 = mounted physical root of the new install
     if mount -o ro "$p" "$probe" 2>/dev/null; then
       if [ -f "$probe/EFI/Microsoft/Boot/bootmgfw.efi" ]; then
         umount "$probe" 2>/dev/null || true
-        cat >"$root/boot/grub2/custom.cfg" <<EOF
+        # Written FIRST in the file, and whatever is already there is kept
+        # after it: run_bootc_install has already put the Secure Boot key
+        # entry (place_secureboot_key) in this file, and a plain `cat >` here
+        # would silently delete it on every machine that also has Windows.
+        { cat <<EOF
 # Rime OS: Windows is installed beside Rime on this machine.
 menuentry 'Windows' --class windows --id windows {
   insmod part_gpt
@@ -669,6 +752,12 @@ menuentry 'Windows' --class windows --id windows {
 }
 set timeout=5
 EOF
+          if [ -s "$root/boot/grub2/custom.cfg" ]; then
+            echo
+            cat "$root/boot/grub2/custom.cfg"
+          fi
+        } >"$root/boot/grub2/custom.cfg.new" \
+          && mv -f "$root/boot/grub2/custom.cfg.new" "$root/boot/grub2/custom.cfg"
         WINDOWS_ENTRY=1
         log "grub: Windows entry added (ESP $p, fs uuid $uuid)"
         break
@@ -3303,6 +3392,7 @@ create_user_in "$deploy" "$USERNAME" "$P1" "$HOSTNAME" "post-install"
 if [ "$INSTALL_MODE" = partition ]; then
   configure_own_esp_in "$deploy"
   install_staged_cleanup_in "$deploy"
+  keep_root_partition_size_in "$deploy"
   add_windows_entry "$MNT"
 fi
 copy_network_to "$deploy"
@@ -3357,56 +3447,117 @@ kstate="${SB_KSTATE:-unknown}"
 # Enrol whenever a password was supplied and the kernel is signed — NOT only
 # when Secure Boot is already on. `mokutil --import` writes MokNew/MokAuth to
 # UEFI NVRAM, which is firmware state belonging to the MACHINE, not to the OS on
-# the disk. So a key queued here from the live environment is picked up by shim
-# on the next boot regardless, and the request persists in NVRAM until it is
-# processed — queueing it with Secure Boot off is safe and it is still waiting
-# if the user switches Secure Boot on afterwards.
+# the disk, so a key queued here from the live environment is picked up by shim
+# on the next boot.
+#
+# What shim then does is NOT "wait until Secure Boot is on", which this file
+# used to claim. Read in shim 16.1 (mok.c check_mok_request, MokManager.c) and
+# measured on OVMF: shim starts MokManager on the next boot whenever a request
+# is pending, Secure Boot on or off. MokManager deletes MokNew as soon as it
+# reads it and MokAuth when it exits, so a request nobody acts on is GONE: let
+# its 10-second "Press any key" countdown run out and the machine boots on
+# with nothing enrolled. With Secure Boot on that is the "bad shim signature"
+# a user then sees on every boot.
+#
+# Two things answer that. `mokutil --timeout -1` writes MokTimeout, which
+# MokManager reads (and deletes) before its countdown: a negative value skips
+# the countdown and opens the menu, which waits for a key. And the boot menu
+# entry place_secureboot_key added is the way back if the screen is missed or
+# was never queued: it enrols the key from the ESP, no password.
 #
 # Gating this on sb_on was wrong and made the feature nearly unreachable: most
 # machines ship with Secure Boot off, so the front end never offered enrolment,
 # so the only route to a Secure Boot system was install, boot, run mokutil by
 # hand, reboot, then toggle the firmware. The whole point of doing it here is
 # that the user is already sitting in front of the machine.
+sb_menu=0
+[ -e "$SB_KEY_FLAG" ] && sb_menu=1
+SB_MENU_STEPS="  When it stops at 'bad shim signature', press a key twice to get the boot
+  menu. Choose \"Enrol the Rime OS Secure Boot key\". On the blue screen,
+  press a key, then: Enroll key from disk → EFI-SYSTEM (or RIMEESP) → EFI →
+  rime → rime-mok.der → Continue → Yes → Reboot. No password is needed."
 if [ -n "${MOKPW:-}" ] || [ "$sb_on" = 1 ]; then
   if [ "$kstate" = signed ] && [ -f "$cert" ] && have mokutil; then
     if [ -n "${MOKPW:-}" ]; then
       if printf '%s\n%s\n' "$MOKPW" "$MOKPW" | mokutil --import "$cert" >>"$LOG" 2>&1; then
         log "secureboot: MOK enrolment queued"
-        if [ "$sb_on" = 1 ]; then
-          note "Secure Boot: enrolment queued. On the next boot, a blue 'MOK management' screen appears:
-
-  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
-
-After that Rime OS boots normally with Secure Boot ON."
+        if mokutil --timeout -1 >>"$LOG" 2>&1; then
+          log "secureboot: MokTimeout set to -1 (MokManager waits for a key)"
+          sb_wait="It waits for you."
         else
-          note "Secure Boot: the Rime key is queued for enrolment. On the next boot, a blue 'MOK management' screen appears:
+          log "secureboot: could not set MokTimeout; MokManager keeps its 10-second countdown"
+          sb_wait="Press a key on it within 10 seconds, or it closes and boots on without the key."
+        fi
+        if [ "$sb_menu" = 1 ]; then
+          sb_missed="If it does not appear, or the key does not get enrolled:
+
+$SB_MENU_STEPS"
+        else
+          sb_missed="If it does not appear, or the key does not get enrolled, turn Secure Boot
+off in your firmware settings, start Rime OS, and run
+  sudo mokutil --import /usr/share/rime-os/secureboot/rime-mok.der
+then reboot and enrol it on the blue screen."
+        fi
+        if [ "$sb_on" = 1 ]; then
+          note "Secure Boot: enrolment queued. On the next boot, a blue 'MOK management' screen appears. $sb_wait
 
   Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
 
-Secure Boot is currently OFF, so nothing about this install depends on it — but
-once the key is enrolled you can turn Secure Boot on in your firmware whenever
+After that Rime OS boots normally with Secure Boot ON.
+
+$sb_missed"
+        else
+          note "Secure Boot: the Rime key is queued for enrolment. On the next boot, a blue 'MOK management' screen appears, even though Secure Boot is off. $sb_wait
+
+  Enroll MOK  →  Continue  →  Yes  →  enter that password  →  Reboot
+
+Once the key is enrolled you can turn Secure Boot on in your firmware whenever
 you like and Rime OS will boot. No second install, no mokutil by hand.
 
-If the blue screen does not appear because Secure Boot is off, the request stays
-queued in firmware and will be offered the first time you enable it."
+If you skip that screen nothing breaks: Secure Boot is off, so Rime OS starts
+either way. The request is used up, though; to enrol later, run
+  sudo mokutil --import /usr/share/rime-os/secureboot/rime-mok.der
+and reboot."
         fi
       else
-        note "Secure Boot: mokutil could not queue the key (see $LOG).
+        if [ "$sb_on" = 1 ] && [ "$sb_menu" = 1 ]; then
+          note "Secure Boot: mokutil could not queue the key (see $LOG).
 
-Rime OS is installed. To boot it, either turn Secure Boot off in firmware, or
-run this from a live session later:
-  mokutil --import /usr/share/rime-os/secureboot/rime-mok.der"
+Rime OS is installed, but with Secure Boot on it will not start until its key
+is enrolled. To enrol it at the first boot:
+
+$SB_MENU_STEPS
+
+Or turn Secure Boot off in your firmware settings."
+        else
+          note "Secure Boot: mokutil could not queue the key (see $LOG).
+
+Rime OS is installed. To boot it with Secure Boot on, enrol the key first:
+start Rime OS with Secure Boot off and run
+  sudo mokutil --import /usr/share/rime-os/secureboot/rime-mok.der"
+        fi
       fi
     else
-      note "No MOK enrolment password was supplied — the Rime key was NOT enrolled. (Secure Boot is currently ${SB_STATE:-unknown}.)
+      # Only reached with Secure Boot ON (the condition above): the user chose
+      # Skip on a machine that will refuse this kernel. That is their call, and
+      # it is honoured; what it must not be is a surprise.
+      if [ "$sb_menu" = 1 ]; then
+        note "Secure Boot is ON and the Rime key was NOT enrolled (you chose to skip).
 
-Rime OS uses a custom (CachyOS) kernel, which Microsoft does not sign. It is
-signed with Rime's own key instead — that key has to be enrolled once, or the
-machine will refuse to boot Rime.
+Rime OS is installed, but it will not start while Secure Boot is on until its
+key is enrolled. To enrol it from the boot menu:
 
-Declining is fine — you can either enrol later with
-  mokutil --import /usr/share/rime-os/secureboot/rime-mok.der
-or turn Secure Boot off in firmware."
+$SB_MENU_STEPS
+
+Or turn Secure Boot off in your firmware settings instead."
+      else
+        note "Secure Boot is ON and the Rime key was NOT enrolled (you chose to skip).
+
+Rime OS uses its own kernel, which Microsoft does not sign. It is signed with
+Rime's key instead, and with Secure Boot on the machine will not start Rime OS
+until that key is enrolled. Turn Secure Boot off in your firmware settings to
+start it."
+      fi
     fi
   else
     # Reached when the deployed kernel is not signed. With a network install the

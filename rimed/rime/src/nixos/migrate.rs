@@ -58,6 +58,7 @@ pub fn route(args: &[String], nixos: bool) -> Route {
 /// line to type, after argument parsing (so `--help` works).
 pub fn run(args: &[String]) -> i32 {
     match route(args, super::is_nixos()) {
+        Route::Exec(BOOTC_ENGINE, a) => crate::nixos_bridge::migrate(&a),
         Route::Exec(prog, a) => {
             let err = Command::new(prog).args(&a).exec();
             eprintln!("rime: cannot run {prog}: {err}");

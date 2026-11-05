@@ -177,14 +177,35 @@ printf '%s\n' "$*" >> /tmp/mv.log
 exec /usr/bin/mv "$@"
 WRAP
 # `rime repo enable-copr/disable-copr` call `dnf5 copr …` (no repository is
-# touched here) and curl for the key, which this serves from $CURL_KEY.
+# touched here) and curl for the key, which this serves from $CURL_KEY
+# (CURL_FAIL=1: the download fails the way curl --fail does). The COPRs dnf5
+# knows live in /tmp/copr.state, one "OWNER/PROJECT on|off" line each;
+# `copr list` prints them the way dnf5 5.4 does, and COPR_LIST_FAIL=1 makes it
+# fail. Not `mv`: /wrap/mv counts the keyring's renames.
 cat > /wrap/dnf5 <<'WRAP'
 #!/bin/bash
-[ "$2" = copr ] && { printf '%s\n' "$*" >> /tmp/dnf5.log; exit 0; }
-exec /usr/bin/dnf5 "$@"
+a=("$@"); [ "${a[0]}" = -y ] && a=("${a[@]:1}")
+[ "${a[0]:-}" = copr ] || exec /usr/bin/dnf5 "$@"
+printf '%s\n' "$*" >> /tmp/dnf5.log
+S=/tmp/copr.state; touch "$S"
+case "${a[1]:-}" in
+    list)
+        [ "${COPR_LIST_FAIL:-0}" = 1 ] && { echo "stub: copr list failed" >&2; exit 1; }
+        while read -r p st; do
+            if [ "$st" = off ]; then printf 'copr.fedorainfracloud.org/%s [multilib] (disabled)\n' "$p"
+            else printf 'copr.fedorainfracloud.org/%s\n' "$p"; fi
+        done < "$S" ;;
+    enable|disable)
+        st=on; [ "${a[1]}" = disable ] && st=off
+        keep=""
+        while read -r p x; do [ "$p" = "${a[2]}" ] || keep+="$p $x"$'\n'; done < "$S"
+        printf '%s%s %s\n' "$keep" "${a[2]}" "$st" > "$S" ;;
+esac
+exit 0
 WRAP
 cat > /wrap/curl <<'WRAP'
 #!/bin/bash
+[ "${CURL_FAIL:-0}" = 1 ] && { echo "curl: (22) The requested URL returned error: 404" >&2; exit 22; }
 out=""; prev=""
 for a in "$@"; do [ "$prev" = -o ] && out=$a; prev=$a; done
 cp -- "$CURL_KEY" "$out"
@@ -375,7 +396,7 @@ PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
 # ── re-enabling a COPR whose new key cannot be imported ─────────────────────
 # The COPR keeps the key it had and stays enabled: the failed command changes
 # nothing, and the next refresh still trusts the previous key.
-: > /tmp/dnf5.log
+: > /tmp/dnf5.log; printf 'owner/project on\n' > /tmp/copr.state
 ( CURL_KEY=/tmp/broken PATH=/wrap:$PATH cmd_repo_enable_copr owner/project ) 2>"$E"; rc=$?
 PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
 [ "$rc" != 0 ] && cmp -s "$COPR_KEYS/owner/project.gpg" "$K/copr.asc" \
@@ -392,6 +413,78 @@ PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
     && ok "control: a first enable with an unreadable key is disabled again, no key kept" \
     || bad "control: a first enable with an unreadable key is disabled again, no key kept" "rc=$rc dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
 [ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] || PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
+
+# ── a failed enable-copr puts the repository back the way it was ────────────
+# Re-running enable-copr while the key cannot be downloaded (COPR down, no
+# network) used to DISABLE a COPR that was enabled and working. Every failure
+# path must leave dnf5's enabled/disabled state as it found it.
+state_of() { PATH=/wrap:$PATH copr_state "$1"; }
+printf 'owner/project-x on\n@grp/proj off\nowner/project on\n' > /tmp/copr.state
+[ "$(state_of owner/project)" = enabled ] && [ "$(state_of owner/projec)" = absent ] \
+    && [ "$(state_of @grp/proj)" = disabled ] && [ "$(state_of grp/proj)" = absent ] \
+    && ok "copr_state reads dnf5's list: exact names, '(disabled)' after the flags" \
+    || bad "copr_state reads dnf5's list: exact names, '(disabled)' after the flags" \
+        "owner/project=$(state_of owner/project) owner/projec=$(state_of owner/projec) @grp/proj=$(state_of @grp/proj) grp/proj=$(state_of grp/proj)"
+
+# Enabled, with a working key, download fails: stays enabled, key and trust kept.
+: > /tmp/dnf5.log; printf 'owner/project on\n' > /tmp/copr.state
+( CURL_FAIL=1 PATH=/wrap:$PATH cmd_repo_enable_copr owner/project ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && ! grep -F "copr disable" /tmp/dnf5.log >/dev/null \
+    && [ "$(state_of owner/project)" = enabled ] && cmp -s "$COPR_KEYS/owner/project.gpg" "$K/copr.asc" \
+    && [ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] \
+    && grep -F "could not download the signing key for COPR 'owner/project'; it stays enabled, as it was" "$E" >/dev/null \
+    && ok "enable-copr on an enabled COPR whose key download fails: still enabled, key and trust kept" \
+    || bad "enable-copr on an enabled COPR whose key download fails: still enabled, key and trust kept" \
+        "rc=$rc state=$(state_of owner/project) rimecopr: $(sig "$f_copr" | cut -d'|' -f1) dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
+
+# Disabled before, download fails: disabled again (not left enabled).
+: > /tmp/dnf5.log; printf 'off/one off\n' > /tmp/copr.state
+( CURL_FAIL=1 PATH=/wrap:$PATH cmd_repo_enable_copr off/one ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && [ "$(state_of off/one)" = disabled ] && [ ! -e "$COPR_KEYS/off/one.gpg" ] \
+    && grep -F "could not download the signing key for COPR 'off/one'; repository disabled" "$E" >/dev/null \
+    && ok "enable-copr on a disabled COPR whose key download fails: disabled again" \
+    || bad "enable-copr on a disabled COPR whose key download fails: disabled again" \
+        "rc=$rc state=$(state_of off/one) dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
+
+# Never configured, download fails: disabled, as before this change.
+: > /tmp/dnf5.log; : > /tmp/copr.state
+( CURL_FAIL=1 PATH=/wrap:$PATH cmd_repo_enable_copr fresh/two ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && grep -Fx -- "-y copr disable fresh/two" /tmp/dnf5.log >/dev/null \
+    && [ "$(state_of fresh/two)" = disabled ] && [ ! -e "$COPR_KEYS/fresh/two.gpg" ] \
+    && ok "control: a first enable whose key download fails is disabled again" \
+    || bad "control: a first enable whose key download fails is disabled again" \
+        "rc=$rc state=$(state_of fresh/two) dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
+
+# Disabled but keyed (switched off with dnf5 by hand), new key unreadable: the
+# previous key is kept AND the COPR is switched off again.
+: > /tmp/dnf5.log; printf 'owner/project off\n' > /tmp/copr.state
+( CURL_KEY=/tmp/broken PATH=/wrap:$PATH cmd_repo_enable_copr owner/project ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && [ "$(state_of owner/project)" = disabled ] && cmp -s "$COPR_KEYS/owner/project.gpg" "$K/copr.asc" \
+    && grep -F "keeps its previous key and stays disabled" "$E" >/dev/null \
+    && ok "re-enable-copr of a disabled COPR with an unreadable new key: previous key, still disabled" \
+    || bad "re-enable-copr of a disabled COPR with an unreadable new key: previous key, still disabled" \
+        "rc=$rc state=$(state_of owner/project) dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
+[ "$(sig "$f_copr" | cut -d'|' -f1)" = 0 ] || PATH=/wrap:$PATH refresh_copr_keyring 2>/dev/null
+
+# Enabled by hand with no Rime key, new key unreadable: stays enabled, no key.
+: > /tmp/dnf5.log; printf 'hand/made on\n' > /tmp/copr.state
+( CURL_KEY=/tmp/broken PATH=/wrap:$PATH cmd_repo_enable_copr hand/made ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && ! grep -F "copr disable" /tmp/dnf5.log >/dev/null && [ "$(state_of hand/made)" = enabled ] \
+    && [ ! -e "$COPR_KEYS/hand/made.gpg" ] \
+    && grep -F "could not import the signing key for COPR 'hand/made'; it stays enabled, as it was" "$E" >/dev/null \
+    && ok "enable-copr on a keyless COPR enabled by hand, key unreadable: still enabled, no key kept" \
+    || bad "enable-copr on a keyless COPR enabled by hand, key unreadable: still enabled, no key kept" \
+        "rc=$rc state=$(state_of hand/made) dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
+
+# dnf5 cannot list its COPRs: refuse before changing anything.
+: > /tmp/dnf5.log; printf 'owner/project on\n' > /tmp/copr.state
+( COPR_LIST_FAIL=1 CURL_KEY="$K/copr.asc" PATH=/wrap:$PATH cmd_repo_enable_copr owner/project ) 2>"$E"; rc=$?
+[ "$rc" != 0 ] && [ "$(grep -cv '^copr list$' /tmp/dnf5.log)" = 0 ] && [ "$(state_of owner/project)" = enabled ] \
+    && grep -F "nothing was changed" "$E" >/dev/null \
+    && ok "enable-copr refuses, changing nothing, when dnf5 cannot list its COPRs" \
+    || bad "enable-copr refuses, changing nothing, when dnf5 cannot list its COPRs" \
+        "rc=$rc state=$(state_of owner/project) dnf5: $(one /tmp/dnf5.log) stderr: $(one "$E")"
+: > /tmp/copr.state
 
 # ── guard_rpms, then extract_rpms, under %_pkgverify_level all ──────────────
 D=/dl; mkdir -p "$D"; cp "$f_sys" "$f_copr" "$D/"

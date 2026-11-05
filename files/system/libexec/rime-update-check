@@ -135,6 +135,31 @@ write_state() {
     chmod 0644 "$STATE"
 }
 
+# The move to Rime OS on NixOS. Once `rime migrate start` has run, this machine
+# takes no more bootc updates (`rime update` refuses them by name), so it must
+# not be told one is waiting: say "none" and never ask the registry. The start
+# also masks this timer; this is the same answer for a machine where something
+# unmasked it. Allowed again only after a start that rolled itself back: the
+# table in rimed/rime/src/nixos_bridge.rs, which this predicate matches.
+BRIDGE_STATE="${RIME_BRIDGE_STATE:-/var/lib/rime/nixos-bridge/state.json}"
+if [[ -e "$BRIDGE_STATE" ]]; then
+    if ! python3 -I -c '
+import json, sys
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+steps = s.get("steps") if isinstance(s, dict) else None
+rolled_back = (isinstance(steps, list) and steps and steps[-1] == "rolled back"
+               and "failed" in s and s.get("done") is None)
+sys.exit(0 if rolled_back else 1)
+' "$BRIDGE_STATE" 2>/dev/null; then
+        log "REFUSED [nixos-migration-started] this machine has started its move to Rime OS on NixOS ($BRIDGE_STATE); no bootc update is checked"
+        write_state none
+        exit 0
+    fi
+fi
+
 status="$("$BOOTC" status --format=json 2>/dev/null)" || status=""
 if printf '%s' "$status" | grep -Eq '"staged"[[:space:]]*:[[:space:]]*\{'; then
     write_state none

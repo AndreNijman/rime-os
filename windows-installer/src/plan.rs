@@ -113,8 +113,11 @@ pub fn assess(p: &PartitionFacts, claims: &[Claim]) -> Verdict {
                 claims.iter().map(|c| c.what.as_str()).collect::<Vec<_>>().join("; ")
             ),
             Some(
-                "choose a partition Windows is not using. This program will not \
-                 dismount, offline or force a volume closed."
+                "choose a partition Windows is not using. This survey is the old, \
+                 strict rule: `candidates` and the installer also offer an empty \
+                 partition whose only claim is one unrecognised (RAW) volume, and \
+                 take that one volume from Windows (exclusive lock, dismount) \
+                 before writing. Nothing forces a volume something else has open."
                     .to_string(),
             ),
         );
@@ -219,7 +222,7 @@ pub fn assess(p: &PartitionFacts, claims: &[Claim]) -> Verdict {
 /// filesystem, an encrypted volume or a member of something larger, and each
 /// of those announces itself where blkid looks for it: these are its
 /// offsets for every type it knows that can live on a Windows machine.
-pub fn signature(first: &[u8], at64: &[u8], last: &[u8]) -> Option<&'static str> {
+pub fn signature(first: &[u8], at64: &[u8], last: &[u8], length: u64) -> Option<&'static str> {
     let at = |b: &[u8], o: usize, m: &[u8]| b.len() >= o + m.len() && &b[o..o + m.len()] == m;
     let checks: [(&[u8], usize, &[u8], &'static str); 17] = [
         (first, 3, b"NTFS    ", "NTFS"),
@@ -245,6 +248,9 @@ pub fn signature(first: &[u8], at64: &[u8], last: &[u8]) -> Option<&'static str>
             return Some(name);
         }
     }
+    if let Some(name) = backup_boot_sector(first, last, length) {
+        return Some(name);
+    }
     // MD RAID 0.90/1.0 keep their superblock near the END.
     // Superblocks are 4 KiB aligned there, so only those offsets are read: a
     // match anywhere in a megabyte of old data would refuse partitions at
@@ -255,6 +261,48 @@ pub fn signature(first: &[u8], at64: &[u8], last: &[u8]) -> Option<&'static str>
     // An MBR boot signature with a partition table behind it.
     if at(first, 510, &[0x55, 0xaa]) && first.len() >= 512 && first[446..510].iter().any(|v| *v != 0) {
         return Some("a nested partition table");
+    }
+    None
+}
+
+/// A filesystem whose first sector is damaged (Windows then shows the
+/// volume as RAW and offers to format it) still has its backup boot sector:
+/// NTFS in the partition's last sector, FAT32 in sector 6, exFAT in sector
+/// 12 (its backup boot region). Such a partition holds data and must never
+/// read as empty. A backup counts only when the size it records fits this
+/// partition: a partition made in space freed by shrinking C: can end exactly
+/// where C:'s old backup boot sector was, and that stale copy records the old,
+/// larger C:.
+fn backup_boot_sector(first: &[u8], last: &[u8], length: u64) -> Option<&'static str> {
+    let le = |b: &[u8], o: usize, n: usize| b[o..o + n].iter().rev().fold(0u64, |v, x| (v << 8) | *x as u64);
+    let fits = |bytes: u64| bytes > 0 && bytes <= length;
+    let sector_size = |v: u64| matches!(v, 512 | 1024 | 2048 | 4096);
+    for size in [512usize, 4096] {
+        if last.len() >= size {
+            let b = &last[last.len() - size..];
+            let bps = le(b, 11, 2);
+            if &b[3..11] == b"NTFS    " && sector_size(bps) && fits(le(b, 40, 8).saturating_mul(bps)) {
+                return Some("NTFS (only its backup boot sector is intact)");
+            }
+        }
+        let o = 6 * size;
+        if first.len() >= o + 512 {
+            let b = &first[o..o + 512];
+            let bps = le(b, 11, 2);
+            if &b[82..90] == b"FAT32   " && sector_size(bps) && fits(le(b, 32, 4).saturating_mul(bps)) {
+                return Some("FAT32 (only its backup boot sector is intact)");
+            }
+        }
+        let o = 12 * size;
+        if first.len() >= o + 512 {
+            let b = &first[o..o + 512];
+            let shift = le(b, 108, 1);
+            if &b[3..11] == b"EXFAT   " && (9..=12).contains(&shift) && 1u64 << shift == size as u64
+                && fits(le(b, 72, 8).saturating_mul(1 << shift))
+            {
+                return Some("exFAT (only its backup boot region is intact)");
+            }
+        }
     }
     None
 }
@@ -312,7 +360,13 @@ There is no free space for Rime OS yet. To make some:
 
 /// The confirmation for installing into a chosen space. Names the disk by
 /// model, serial and size, never by number (see `confirmation_text`).
-pub fn install_confirmation(disk: &DiskIdentity, what: &str, bytes: u64) -> String {
+/// `replaces` names the existing partition that is deleted, when the space
+/// is one (`replace::replaces_text`).
+pub fn install_confirmation(disk: &DiskIdentity, what: &str, bytes: u64, replaces: Option<&str>) -> String {
+    let replaced = match replaces {
+        Some(r) => format!("This REPLACES {r}: that partition is deleted, and Rime's two partitions take exactly its space.\n\n"),
+        None => String::new(),
+    };
     format!(
         "INSTALL RIME OS -- read this before continuing.\n\n\
          Rime will be installed into:\n\
@@ -321,6 +375,7 @@ pub fn install_confirmation(disk: &DiskIdentity, what: &str, bytes: u64) -> Stri
          \x20   disk             {model}\n\
          \x20   serial number    {serial}\n\
          \x20   disk GUID        {dguid}\n\n\
+         {replaced}\
          This creates two partitions there: Rime's own boot partition and Rime's \
          system partition. Anything in that space is overwritten. Windows, its \
          partitions and its boot files are not changed.\n\n\
@@ -583,30 +638,72 @@ mod tests {
 
     #[test]
     fn signatures_are_found_where_blkid_looks_and_old_noise_is_not_one() {
+        const L: u64 = 30_000_000_000;
         let mib = || vec![0u8; 1 << 20];
-        assert_eq!(signature(&mib(), &[0; 65536], &mib()), None);
+        assert_eq!(signature(&mib(), &[0; 65536], &mib(), L), None);
         let mut f = mib();
         f[3..11].copy_from_slice(b"NTFS    ");
-        assert_eq!(signature(&f, &[], &mib()), Some("NTFS"));
+        assert_eq!(signature(&f, &[], &mib(), L), Some("NTFS"));
         let mut f = mib();
         f[3..11].copy_from_slice(b"-FVE-FS-");
-        assert_eq!(signature(&f, &[], &mib()), Some("BitLocker"));
+        assert_eq!(signature(&f, &[], &mib(), L), Some("BitLocker"));
         let mut f = mib();
         f[1080..1082].copy_from_slice(&[0x53, 0xef]);
-        assert_eq!(signature(&f, &[], &mib()), Some("ext2/3/4"));
+        assert_eq!(signature(&f, &[], &mib(), L), Some("ext2/3/4"));
         let mut b = vec![0u8; 65536];
         b[64..72].copy_from_slice(b"_BHRfS_M");
-        assert_eq!(signature(&mib(), &b, &mib()), Some("btrfs"));
+        assert_eq!(signature(&mib(), &b, &mib(), L), Some("btrfs"));
         let mut l = mib();
         l[(1 << 20) - 65536..][..4].copy_from_slice(&[0xfc, 0x4e, 0x2b, 0xa9]);
-        assert_eq!(signature(&mib(), &[], &l), Some("Linux RAID"));
+        assert_eq!(signature(&mib(), &[], &l, L), Some("Linux RAID"));
         // The same bytes at an unaligned offset are noise, not a superblock.
         let mut l = mib();
         l[1234..1238].copy_from_slice(&[0xfc, 0x4e, 0x2b, 0xa9]);
-        assert_eq!(signature(&mib(), &[], &l), None);
+        assert_eq!(signature(&mib(), &[], &l, L), None);
         let mut f = mib();
         f[0..6].copy_from_slice(b"LUKS\xba\xbe");
-        assert_eq!(signature(&f, &[], &mib()), Some("LUKS"));
+        assert_eq!(signature(&f, &[], &mib(), L), Some("LUKS"));
+    }
+
+    #[test]
+    fn a_damaged_first_sector_does_not_hide_a_filesystem_but_a_stale_backup_is_noise() {
+        const L: u64 = 30_000_000_000;
+        let mib = || vec![0u8; 1 << 20];
+        let put = |b: &mut [u8], o: usize, v: u64, n: usize| {
+            for i in 0..n {
+                b[o + i] = (v >> (8 * i)) as u8;
+            }
+        };
+        // NTFS: backup in the last sector, for 512 and 4096 byte sectors.
+        for size in [512usize, 4096] {
+            let mut l = mib();
+            let o = l.len() - size;
+            l[o + 3..o + 11].copy_from_slice(b"NTFS    ");
+            put(&mut l, o + 11, size as u64, 2);
+            put(&mut l, o + 40, L / size as u64 - 1, 8);
+            assert_eq!(signature(&mib(), &[], &l, L), Some("NTFS (only its backup boot sector is intact)"));
+            // The old C:'s backup, left where a shrink freed the space: it
+            // records a volume larger than this partition.
+            put(&mut l, o + 40, 4 * L / size as u64, 8);
+            assert_eq!(signature(&mib(), &[], &l, L), None);
+        }
+        // FAT32: backup boot sector in sector 6.
+        let mut f = mib();
+        f[3072 + 82..3072 + 90].copy_from_slice(b"FAT32   ");
+        put(&mut f, 3072 + 11, 512, 2);
+        put(&mut f, 3072 + 32, L / 512 - 8, 4);
+        assert_eq!(signature(&f, &[], &mib(), L), Some("FAT32 (only its backup boot sector is intact)"));
+        put(&mut f, 3072 + 11, 3, 2);
+        assert_eq!(signature(&f, &[], &mib(), L), None);
+        // exFAT: backup boot region from sector 12, 4096-byte sectors.
+        let mut f = mib();
+        let o = 12 * 4096;
+        f[o + 3..o + 11].copy_from_slice(b"EXFAT   ");
+        f[o + 108] = 12;
+        put(&mut f, o + 72, L / 4096, 8);
+        assert_eq!(signature(&f, &[], &mib(), L), Some("exFAT (only its backup boot region is intact)"));
+        put(&mut f, o + 72, L, 8);
+        assert_eq!(signature(&f, &[], &mib(), L), None);
     }
 
     #[test]

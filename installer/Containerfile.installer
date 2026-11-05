@@ -12,7 +12,17 @@
 #
 # Plain fedora base (not fedora-bootc) so the rootfs is a simple mutable tree.
 # Built into a live ISO by build-live-iso.sh.
-FROM registry.fedoraproject.org/fedora:45
+#
+# Pinned by digest, like Containerfile.kernel's builder: the same commit builds
+# the same live env, and a moved tag cannot change it between a PR's tests and
+# the release ISO. The digest is the multi-arch index that
+# registry.fedoraproject.org/fedora:45 named on 2026-11-03 (the Fedora 45
+# release image). Nothing below runs `dnf upgrade`, so the base packages stay
+# at this image's versions until the pin moves. To move it:
+#   skopeo inspect --format '{{.Digest}}' docker://registry.fedoraproject.org/fedora:45
+# installer/test-installer-console.sh runs against this same FROM, and refuses
+# a FROM that is not a digest.
+FROM registry.fedoraproject.org/fedora@sha256:c15d8d6067038f1d6b10d8e1b8440f787a474fe6dc641ef77a5c74b1bf01a05d
 
 # ── Firmware: its OWN transaction, with weak deps ENABLED on purpose ─────────
 # The live env shipped with /lib/firmware absent entirely, so i915/amdgpu could
