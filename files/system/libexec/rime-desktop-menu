@@ -23,7 +23,7 @@
 
 set -uo pipefail
 
-readonly AUTOSTART=/usr/libexec/rime-shell-autostart
+readonly AUTOSTART=${RIME_SHELL_AUTOSTART:-/usr/libexec/rime-shell-autostart}
 readonly LOG_TAG=rime-desktop-menu
 
 log() { command -v systemd-cat >/dev/null 2>&1 && printf '%s\n' "$*" | systemd-cat -t "$LOG_TAG" -p info || true; }
@@ -42,12 +42,16 @@ log "Rime Shell did not answer; attempting a restart before giving up"
 
 if [ -x "$AUTOSTART" ]; then
     # Idempotent by design: it refuses to start a second instance, so calling it
-    # when the shell is actually alive is harmless.
-    "$AUTOSTART" >/dev/null 2>&1 || true
+    # when the shell is actually alive is harmless. It execs quickshell and so
+    # returns only when the Shell exits: start it detached, or the poll below
+    # would never run while the restarted Shell lives.
+    if ! setsid -f "$AUTOSTART" </dev/null >/dev/null 2>&1; then
+        log "could not start $AUTOSTART"
+    fi
 
-    # The shell needs a moment to claim its IPC socket. Poll briefly rather than
-    # sleeping a fixed amount, so the common case stays fast.
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+    # The shell needs a moment to claim its IPC socket. Poll (up to 10 s) rather
+    # than sleeping a fixed amount, so the common case stays fast.
+    for _ in $(seq 40); do
         sleep 0.25
         if open_menu; then
             log "Rime Shell restarted and the menu opened"
