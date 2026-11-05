@@ -1748,6 +1748,49 @@ def chroot(t, *cmd, env=None, stdin=None, check=True):
     return r
 
 
+# NixOS activation writes knobs of the RUNNING kernel (nixpkgs modprobe.nix: /proc/sys/kernel/modprobe; udev.nix:
+# /sys/module/firmware_class/parameters/path). In start's chroot the running kernel is the bootc machine's, so its
+# module autoload would exec a /nix/store path that machine does not have until it reboots (found on a host whose
+# kernel.modprobe had been left pointing into a store). Each knob gets a scratch file bound over it inside the target
+# for the activation, and the host's values are read again afterwards.
+HOST_KNOBS = ("proc/sys/kernel/modprobe", "sys/module/firmware_class/parameters/path")
+
+
+def first_activation(t, toplevel, root="/"):
+    before = {k: read(os.path.join(root, k)) for k in HOST_KNOBS}
+    shields = []
+    try:
+        for k in HOST_KNOBS:
+            dst = os.path.join(t, k)
+            if before[k] is None or not os.path.exists(dst):
+                continue
+            src = os.path.join(t, "run", "rime-knob-" + k.replace("/", "-"))
+            with open(src, "w") as f:
+                f.write(before[k])
+            mount("--bind", src, dst)
+            shields.append(dst)
+        # As nixos-enter does: activation in a chroot may fail parts that need the running system (it runs again
+        # at the first boot); its rc is recorded, not fatal.
+        r = chroot(t, f"{toplevel}/activate", check=False,
+                   env={"IN_NIXOS_ENTER": "1", "LOCALE_ARCHIVE": f"{toplevel}/sw/lib/locale/locale-archive"})
+    finally:
+        for dst in reversed(shields):
+            run(["umount", dst], check=False)
+    changed = []
+    for k in HOST_KNOBS:
+        p = os.path.join(root, k)
+        if before[k] is not None and read(p) != before[k]:
+            changed.append("/" + k)
+            try:
+                with open(p, "w") as f:
+                    f.write(before[k] if before[k].strip() else "\n")
+            except OSError as e:
+                log(f"could not put {p} back: {e}")
+    if changed:
+        raise Failed(f"the first activation changed the running kernel's {', '.join(changed)} (put back)")
+    return r
+
+
 def mount(*args):
     run(["mount", *args])
 
@@ -1902,10 +1945,8 @@ def cmd_start(a):
         if os.path.lexists(os.path.join(t, "etc/mtab")):
             os.unlink(os.path.join(t, "etc/mtab"))
         os.symlink("/proc/mounts", os.path.join(t, "etc/mtab"))
-        # As nixos-enter does: activation in a chroot may fail parts that need the running system (it runs again
-        # at the first boot); its rc is recorded, not fatal. switch-to-configuration boot below is.
-        r = chroot(t, f"{man['toplevel']}/activate", check=False,
-                   env={"IN_NIXOS_ENTER": "1", "LOCALE_ARCHIVE": f"{man['toplevel']}/sw/lib/locale/locale-archive"})
+        # switch-to-configuration boot below is fatal; the activation's rc is not (first_activation).
+        r = first_activation(t, man["toplevel"])
         state["activate_rc"] = r.returncode
         print(f"first activation rc={r.returncode}", flush=True)
         chroot(t, "/nix/var/nix/profiles/system/bin/switch-to-configuration", "boot",
