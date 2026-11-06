@@ -225,6 +225,9 @@ open("acc.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]))' \
 " \
     "curl -fsS --retry 5 \"\$CACHE_URL/nix-cache-info\" >/dev/null || true
 "
+  wmutant "the payload job gives up on Rime's cache after Nix's default attempts" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\n"
   wmutant "the build falls back to building when a download fails" \
     "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\n" \
     "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\n"

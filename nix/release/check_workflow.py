@@ -173,19 +173,22 @@ def _logical_lines(run):
 
 
 _SUBST = "extra-substituters = %s\\n"
+_ATTEMPTS_RE = re.compile(r"download-attempts = (\d+)\\n")
 _PREFLIGHT_RE = re.compile(r'curl -fsS( --retry \d+)? "\$CACHE_URL/nix-cache-info"( >/dev/null)?')
 
 
 def _installs_rime_cache(steps, i):
     """Step i installs Nix trusting Rime's cache at its own priority (behind cache.nixos.org, as on a machine: no
-    ?priority= override), with fallback off, and fails when the cache cannot be reached."""
+    ?priority= override), with fallback off and at least 12 download attempts, and fails when the cache cannot be
+    reached."""
     if "if" in steps[i] or steps[i].get("continue-on-error"):
         return False
     lines = _logical_lines(steps[i].get("run", ""))
     inst = [n for n, ln in enumerate(lines) if "/install --daemon" in ln and "--nix-extra-conf-file" in ln]
     for n in inst:
         ln = lines[n]
-        if not (_SUBST in ln and "extra-trusted-public-keys = %s\\n" in ln
+        tries = _ATTEMPTS_RE.search(ln)
+        if not (_SUBST in ln and "extra-trusted-public-keys = %s\\n" in ln and tries and int(tries.group(1)) >= 12
                 and "fallback = false\\n" in ln
                 and ln.find("extra-substituters") < ln.find("extra-trusted-public-keys")
                 and ln.rstrip().endswith("' \"$CACHE_URL\" \"$RIME_CACHE_PUBKEY\")")):
@@ -207,7 +210,7 @@ def substitutes_published(steps):
     if not ok or min(ok) >= builds[0]:
         return ["builds a release closure without substituting from Rime's cache first (an unconditional step "
                 "before it: the Nix installer's --nix-extra-conf-file sets extra-substituters $CACHE_URL (no "
-                "?priority= override), extra-trusted-public-keys $RIME_CACHE_PUBKEY and fallback = false, "
+                "?priority= override), extra-trusted-public-keys $RIME_CACHE_PUBKEY, fallback = false and download-attempts >= 12, "
                 "then curl -fsS \"$CACHE_URL/nix-cache-info\" checks the cache answers)"]
     return []
 
