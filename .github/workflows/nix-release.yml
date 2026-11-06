@@ -219,7 +219,11 @@ jobs:
       # bubblewrap inside the Nix build sandbox (nix.yml has the same step). A throwaway hosted VM.
       - name: Allow user namespaces (bubblewrap in rimed's tests)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Install Nix (pinned, hash-checked)
+      # Rime's cache before anything is built (updates-and-release.md §6.3 step 1): a path it holds is substituted,
+      # never rebuilt, because a non-reproducible rebuild (steam-run's fhsenv rootfs) is refused at publish. Priority
+      # 30 puts it ahead of cache.nixos.org (40; its own nix-cache-info says 50) for a path both hold; fallback off and
+      # the reachability check stop a cache outage from turning into hours of rebuilding.
+      - name: Install Nix (pinned, hash-checked; Rime's cache trusted)
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
@@ -227,8 +231,9 @@ jobs:
           echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
           tar -xf nix.tar.xz
           ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
-            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nmax-jobs = auto\n')
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nmax-jobs = auto\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
           echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+          curl -fsS --retry 5 "$CACHE_URL/nix-cache-info" >/dev/null
 
       - name: Off main, the dry-run proof (only when the release toplevels moved)
         if: needs.changes.outputs.build == 'dry-run'
@@ -303,17 +308,14 @@ jobs:
           cosign-release: v2.5.2
 
       # Deltas (docs/nixos/delta.md §7): one per changed path against the channel's previous release, verified with
-      # cosign like a client verifies it. The toplevels are built by now, so only from here does the daemon also
-      # substitute from Rime's cache (the previous release's paths, the delta bases). A failure here ships the release
-      # without deltas: clients then download whole paths, as before deltas existed.
+      # cosign like a client verifies it. The bases (the previous release's paths) come from Rime's cache, which the
+      # daemon trusts since the Nix install. A failure here ships the release without deltas: clients then download
+      # whole paths, as before deltas existed.
       - name: Deltas against the previous release (github backend)
         if: needs.changes.outputs.build == 'full' && (vars.RIME_NIX_CACHE_BACKEND || 'github') == 'github'
         run: |
           set -euo pipefail
           t="$RUNNER_TEMP"
-          printf 'extra-substituters = %s\nextra-trusted-public-keys = %s\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY" \
-            | sudo tee -a /etc/nix/nix.conf >/dev/null
-          sudo systemctl restart nix-daemon
           # The bases are the previous release's paths (a mass rebuild: ~10 GB of NAR into the store beside the new
           # closure), so a runner without the room skips deltas instead of failing the release. --jobs 4: zstd -19
           # is one thread per path; the mass rebuild's 8,262 CPU-s is ~35 min on 4 cores (delta.md §6). The time
@@ -508,8 +510,9 @@ jobs:
           echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
           tar -xf nix.tar.xz
           ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
-            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
           echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
+          curl -fsS --retry 5 "$CACHE_URL/nix-cache-info" >/dev/null
 
       - name: The plain toplevel from the caches, and the unsigned payload
         env:

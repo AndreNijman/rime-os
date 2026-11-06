@@ -148,15 +148,77 @@ def payload_order(steps):
     return bad
 
 
+def _release_builds(runs):
+    return [i for i, r in enumerate(runs)
+            if any("nix build" in ln and "--dry-run" not in ln
+                   and (".#rime-release-toplevels-hosted" in ln or ".#rime-bridge-payload-closure" in ln)
+                   for ln in r.splitlines())]
+
+
+def _logical_lines(run):
+    """A run: script's commands: comment lines dropped, backslash continuations joined."""
+    out, cur = [], ""
+    for ln in str(run).splitlines():
+        s = ln.strip()
+        if not cur and (not s or s.startswith("#")):
+            continue
+        if s.endswith("\\"):
+            cur += s[:-1] + " "
+            continue
+        out.append(cur + s)
+        cur = ""
+    if cur:
+        out.append(cur)
+    return out
+
+
+_SUBST_RE = re.compile(r"extra-substituters = %s\?priority=(\d+)\\n")
+_PREFLIGHT_RE = re.compile(r'curl -fsS( --retry \d+)? "\$CACHE_URL/nix-cache-info"( >/dev/null)?')
+
+
+def _installs_rime_cache(steps, i):
+    """Step i installs Nix trusting Rime's cache AHEAD of cache.nixos.org (priority below its 40: the cache's own
+    nix-cache-info says 50), with fallback off, and fails when the cache cannot be reached."""
+    if "if" in steps[i] or steps[i].get("continue-on-error"):
+        return False
+    lines = _logical_lines(steps[i].get("run", ""))
+    inst = [n for n, ln in enumerate(lines) if "/install --daemon" in ln and "--nix-extra-conf-file" in ln]
+    for n in inst:
+        ln = lines[n]
+        m = _SUBST_RE.search(ln)
+        if not (m and int(m.group(1)) < 40 and "extra-trusted-public-keys = %s\\n" in ln
+                and "fallback = false\\n" in ln
+                and ln.find("extra-substituters") < ln.find("extra-trusted-public-keys")
+                and ln.rstrip().endswith("' \"$CACHE_URL\" \"$RIME_CACHE_PUBKEY\")")):
+            continue
+        if any(_PREFLIGHT_RE.fullmatch(later) for later in lines[n + 1:]):
+            return True
+    return False
+
+def substitutes_published(steps):
+    """A job that builds a release closure substitutes from cache.rimeos.com, ahead of cache.nixos.org, from its Nix
+    install on (§6.3 step 1).
+    The cache holds one narHash per path forever; a path rebuilt non-reproducibly instead is refused at publish
+    ("published already with another content"). The second main release rebuilt steam-run's fhsenv rootfs and was
+    refused there (2026-11-06): the cache was added only after the toplevels were built."""
+    runs = [str(s.get("run", "")) for s in steps]
+    builds = _release_builds(runs)
+    if not builds:
+        return []
+    ok = [i for i in range(len(steps)) if _installs_rime_cache(steps, i)]
+    if not ok or min(ok) >= builds[0]:
+        return ["builds a release closure without substituting from Rime's cache first (an unconditional step "
+                "before it: the Nix installer's --nix-extra-conf-file sets extra-substituters $CACHE_URL?priority=N "
+                "with N below cache.nixos.org's 40, extra-trusted-public-keys $RIME_CACHE_PUBKEY and fallback = false, "
+                "then curl -fsS \"$CACHE_URL/nix-cache-info\" checks the cache answers)"]
+    return []
+
 def userns_first(steps):
     """A hosted job that may build rimed from source (a release toplevel or the payload closure) lifts Ubuntu 24.04's
     AppArmor user-namespace restriction first: rimed's checkPhase runs bubblewrap inside the Nix sandbox and fails
     with "bwrap: setting up uid map: Permission denied" without it (the first main release, 2026-11-05)."""
     runs = [str(s.get("run", "")) for s in steps]
-    builds = [i for i, r in enumerate(runs)
-              if any("nix build" in ln and "--dry-run" not in ln
-                     and (".#rime-release-toplevels-hosted" in ln or ".#rime-bridge-payload-closure" in ln)
-                     for ln in r.splitlines())]
+    builds = _release_builds(runs)
     if not builds:
         return []
     # An unconditional step that runs the sysctl as a command of its own: not a comment, not `|| true`, not behind if:
@@ -285,6 +347,7 @@ def check(path):
             bad += [f"{where}: {b}" for b in payload_order(steps)]
             if runs_on is not None and hosted(runs_on):
                 bad += [f"{where}: {b}" for b in userns_first(steps)]
+            bad += [f"{where}: {b}" for b in substitutes_published(steps)]
     return bad
 
 
