@@ -148,15 +148,37 @@ def payload_order(steps):
     return bad
 
 
+def _release_builds(runs):
+    return [i for i, r in enumerate(runs)
+            if any("nix build" in ln and "--dry-run" not in ln
+                   and (".#rime-release-toplevels-hosted" in ln or ".#rime-bridge-payload-closure" in ln)
+                   for ln in r.splitlines())]
+
+
+def substitutes_published(steps):
+    """A job that builds a release closure substitutes from cache.rimeos.com from its Nix install on (§6.3 step 1).
+    The cache holds one narHash per path forever; a path rebuilt non-reproducibly instead is refused at publish
+    ("published already with another content"). The second main release rebuilt steam-run's fhsenv rootfs and was
+    refused there (2026-11-06): the cache was added only after the toplevels were built."""
+    runs = [str(s.get("run", "")) for s in steps]
+    builds = _release_builds(runs)
+    if not builds:
+        return []
+    want = ("extra-substituters", "$CACHE_URL", "extra-trusted-public-keys", "$RIME_CACHE_PUBKEY")
+    ok = [i for i, r in enumerate(runs)
+          if "--nix-extra-conf-file" in r and "if" not in steps[i] and all(w in r for w in want)]
+    if not ok or min(ok) >= builds[0]:
+        return ["builds a release closure without substituting from Rime's cache first (the Nix install's "
+                "--nix-extra-conf-file must set extra-substituters $CACHE_URL and extra-trusted-public-keys "
+                "$RIME_CACHE_PUBKEY)"]
+    return []
+
 def userns_first(steps):
     """A hosted job that may build rimed from source (a release toplevel or the payload closure) lifts Ubuntu 24.04's
     AppArmor user-namespace restriction first: rimed's checkPhase runs bubblewrap inside the Nix sandbox and fails
     with "bwrap: setting up uid map: Permission denied" without it (the first main release, 2026-11-05)."""
     runs = [str(s.get("run", "")) for s in steps]
-    builds = [i for i, r in enumerate(runs)
-              if any("nix build" in ln and "--dry-run" not in ln
-                     and (".#rime-release-toplevels-hosted" in ln or ".#rime-bridge-payload-closure" in ln)
-                     for ln in r.splitlines())]
+    builds = _release_builds(runs)
     if not builds:
         return []
     # An unconditional step that runs the sysctl as a command of its own: not a comment, not `|| true`, not behind if:
@@ -285,6 +307,7 @@ def check(path):
             bad += [f"{where}: {b}" for b in payload_order(steps)]
             if runs_on is not None and hosted(runs_on):
                 bad += [f"{where}: {b}" for b in userns_first(steps)]
+            bad += [f"{where}: {b}" for b in substitutes_published(steps)]
     return bad
 
 

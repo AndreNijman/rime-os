@@ -206,6 +206,13 @@ open("acc.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]))' \
 
   # the bridge payload job (RIME_BRIDGE_PAYLOAD_KEY): main only, in the environment, signed before the push against the
   # trusted key line, and the pulled-back copy checked
+  # check_workflow.substitutes_published: each job building a release closure trusts Rime's cache from its Nix install.
+  wmutant "the build rebuilds what Rime's cache holds" \
+    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
+    "max-jobs = auto\n')"
+  wmutant "the payload job rebuilds what Rime's cache holds" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
+    "flakes\n')"
   wmutant "the payload job off main" \
     "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success'" \
     "if: always() && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success'"
