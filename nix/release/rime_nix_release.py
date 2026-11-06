@@ -64,6 +64,10 @@ KEY_RE = re.compile(r"^[A-Za-z0-9._-]+:[A-Za-z0-9+/]+={0,2}$")
 # Every binary-cache read: no narinfo answer is remembered between calls. Nix keeps positive lookups for 30 days by
 # default, which would let a check read a narinfo that was deleted or rewritten after the first lookup.
 FRESH = ["--option", "narinfo-cache-positive-ttl", "0", "--option", "narinfo-cache-negative-ttl", "0"]
+# A query, never a fetch: with a substituter configured (the release jobs trust Rime's cache), Nix 2.35 answers a path
+# the queried store lacks with "will be fetched" from that substituter, not "don't know how to build", and the
+# missing-path parser cannot tell it from a failure.
+QUERY_ONLY = ["--option", "substitute", "false"]
 NIX = ["nix", "--extra-experimental-features", "nix-command"]
 
 
@@ -251,7 +255,7 @@ def _path_info_chunk(chunk, store, recursive, out):
     call is repeated without them; any other failure, or a listed path that was not asked about, is a refusal."""
     chunk = list(chunk)
     while chunk:
-        cmd = NIX + ["path-info", "--json"] + FRESH + (["--store", store] if store else []) \
+        cmd = NIX + ["path-info", "--json"] + FRESH + QUERY_ONLY + (["--store", store] if store else []) \
             + (["-r"] if recursive else []) + chunk
         p = run(cmd, check=False, quiet=True)
         if p.returncode == 0:

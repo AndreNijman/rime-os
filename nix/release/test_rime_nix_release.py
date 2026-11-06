@@ -400,9 +400,13 @@ class PathInfo(unittest.TestCase):
             asked = [c for c in cmd if c.startswith("/nix/store/")]
             calls.append(asked)
             gone = [a for a in asked if a not in have]
+            # Real Nix 2.35, with a substituter that holds the paths (the release jobs trust Rime's cache): unless
+            # substitution is off, a path the queried store lacks "will be fetched" from it.
+            subst_off = any(cmd[i:i + 3] == ["--option", "substitute", "false"] for i in range(len(cmd)))
             if gone:
-                err = "don't know how to build these paths:\n" + "".join(f"  {g}\n" for g in gone) \
-                    + f"error: path '{gone[0]}' is not valid\n"
+                head = "don't know how to build these paths:\n" if subst_off else \
+                    f"these {len(gone)} paths will be fetched (0.2 KiB download, 0.3 KiB unpacked):\n"
+                err = head + "".join(f"  {g}\n" for g in gone) + f"error: path '{gone[0]}' is not valid\n"
                 return P(1, b"", err.encode())
             return P(0, json.dumps({a: {"narHash": nh(a), "narSize": 1, "references": []} for a in asked}).encode(), b"")
         return run, calls
