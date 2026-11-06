@@ -171,6 +171,33 @@ def userns_first(steps):
     return []
 
 
+def skip_safe(jobs):
+    """GitHub gives an if: without a status function an implicit success(), which is false when ANY upstream job was
+    skipped, even one a job only reaches through another. kernel-sign is optional (skipped with no signing host), so
+    publish and payload were skipped after a green build on the first main release (2026-11-06). A job downstream of
+    a job that can be skipped must say always() or !cancelled() and name the result of each job it needs."""
+    def deps(j):
+        n = (jobs.get(j) or {}).get("needs") or []
+        return [n] if isinstance(n, str) else list(n)
+    bad = []
+    for name in jobs:
+        seen, todo = set(), deps(name)
+        while todo:
+            d = todo.pop()
+            if d not in seen:
+                seen.add(d)
+                todo += deps(d)
+        if not any("if" in (jobs.get(d) or {}) for d in seen):
+            continue
+        cond = " ".join(str(jobs[name].get("if", "")).split())
+        if "always()" not in cond and "!cancelled()" not in cond:
+            bad.append(f"job {name}: downstream of a job that can be skipped, its if: needs always() or !cancelled()")
+        for d in deps(name):
+            if f"needs.{d}." not in cond:
+                bad.append(f"job {name}: with always() its if: must check needs.{d} itself")
+    return bad
+
+
 def check(path):
     text = open(path).read()
     wf = yaml.safe_load(text)
@@ -202,6 +229,7 @@ def check(path):
             bad.append("the build step must build .#rime-release-catalogue (an out-link, not a dry run)")
         if not any("checks.x86_64-linux.release-plan" in r for r in runs):
             bad.append("the build step must run checks.x86_64-linux.release-plan")
+        bad += skip_safe(wf.get("jobs") or {})
     for name, job in (wf.get("jobs") or {}).items():
         where = f"job {name}"
         steps = job.get("steps") or []

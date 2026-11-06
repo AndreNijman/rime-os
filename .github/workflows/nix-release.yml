@@ -341,7 +341,8 @@ jobs:
   publish:
     name: fill the cache, publish the manifest and the channel document
     needs: [changes, build]
-    if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release'
+    # always(): kernel-sign upstream is optional, and a skipped ancestor makes the implicit success() false.
+    if: always() && github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'
     runs-on: ubuntu-24.04
     environment: nix-release
     permissions:
@@ -474,7 +475,7 @@ jobs:
   payload:
     name: build, sign and publish the bridge payload
     needs: [changes, publish]
-    if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && needs.publish.outputs.state == 'published'
+    if: always() && github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success' && needs.publish.outputs.state == 'published'
     runs-on: ubuntu-24.04
     environment: nix-release
     permissions:
