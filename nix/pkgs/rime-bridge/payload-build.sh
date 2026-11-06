@@ -42,7 +42,44 @@ cp "$HL/share/rime-hostlayer/greetd-config.toml" "$V/greetd-config.toml"
 # /etc as the new system will have it (every file's contents: carry compares settings), dereferenced; a link to a file
 # only the running system makes (etc/cups, etc/fonts/2.11/fonts.conf) is skipped: tar says so and exits 1, not 2.
 # sw/bin: the command names.
-{ tar -C "$TOP" -h --owner=0 --group=0 --numeric-owner -cf - etc || [[ $? -eq 1 ]]; } | tar -C "$V/system" -xf -
+# A unit MASK is a link to /dev/null: dereferenced, it is the /dev/null character device, which an unprivileged tar
+# cannot make (Cannot mknod, exit 2). Masks stay out of the copy and are made again as links to /dev/null, the form
+# the bridge reads back (rime-bridge.py: preview extraction). The walk follows links as tar -h does, skips a dangling
+# one (tar leaves it out, exit 1) and a directory that loops back into its own ancestry; names are NUL-separated.
+python3 - "$TOP" > "$V/masks" <<'PY'
+import os, stat, sys
+top, out = os.fsencode(sys.argv[1]), sys.stdout.buffer
+def walk(rel, ancestry):
+    for name in sorted(os.listdir(os.path.join(top, rel))):
+        r = rel + b"/" + name
+        p = os.path.join(top, r)
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            real = os.path.realpath(p)
+            if real not in ancestry:
+                walk(r, ancestry | {real})
+        elif stat.S_ISCHR(st.st_mode):
+            if os.path.realpath(p) != b"/dev/null":
+                sys.exit(f"payload-build: {os.fsdecode(r)}: a device in etc/ that is not a unit mask")
+            out.write(r + b"\0")
+walk(b"etc", {os.path.realpath(os.path.join(top, b"etc"))})
+PY
+# One exact --exclude per mask: GNU tar 1.35 honours one entry of a --null -X list (measured: 1 of 16 excluded).
+mapfile -d '' -t masks < "$V/masks"
+ex=()
+for m in "${masks[@]}"; do ex+=("--exclude=$m"); done
+{ tar -C "$TOP" -h --owner=0 --group=0 --numeric-owner --anchored --no-wildcards "${ex[@]}" -cf - etc || [[ $? -eq 1 ]]; } | tar -C "$V/system" -xf -
+while IFS= read -r -d '' m; do
+  d="$V/system/$(dirname -- "$m")"
+  mkdir -p -- "$d"
+  mode=$(stat -c %a -- "$d")   # the copy keeps the store's read-only directory modes
+  chmod u+w -- "$d"
+  ln -s /dev/null "$V/system/$m"
+  chmod "$mode" -- "$d"
+done < "$V/masks"
 for b in "$TOP"/sw/bin/*; do : > "$V/system/sw/bin/$(basename "$b")"; done
 # --mtime: the copies and the sw/bin names are made now; with the store's own time, two builds of one system match.
 tar -C "$V" --owner=0 --group=0 --numeric-owner --sort=name --mtime=@1 -cf "$OUT/preview.tar" rime-hostlayer greetd-config.toml system

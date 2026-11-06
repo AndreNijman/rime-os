@@ -2,7 +2,7 @@
 # pipeline's `payload` job; docs/nixos/bridge.md "Where a payload comes from"), without a network or a VM:
 #
 #   bridge-payload   a payload built from a tiny toplevel-shaped fixture (sw/bin/nix-store, sw/bin/rime-hostlayer, an
-#                    etc/ with a link, a plain file and a link to nothing) has exactly the layout the bridge reads; a
+#                    etc/ with a link, a plain file, a link to nothing and a unit mask) has exactly the layout the bridge reads; a
 #                    second build is byte-identical; the builder refuses a closure that is not the toplevel's and a
 #                    non-empty OUTDIR. payload-release.sh signs it with a generated TEST key and the bridge's own
 #                    verify_payload accepts it; a byte changed in store.tar.zst or manifest.json is refused, a secret
@@ -35,6 +35,9 @@ let
     echo plain > $out/etc/sub/plain
     # a link to a file only the running system makes: left out of preview.tar (tar -h exits 1)
     ln -s /run/rime-fixture-never-there $out/etc/dangling
+    # a unit mask: dereferenced it is /dev/null, a device an unprivileged tar cannot make
+    ln -s /dev/null $out/etc/sub/masked.service
+    ln -s /dev/null $out/etc/masked.socket
   '';
   closure = pkgs.closureInfo { rootPaths = [ toplevel ]; };
   otherClosure = pkgs.closureInfo { rootPaths = [ fakeNix ]; };
@@ -45,6 +48,7 @@ let
     [ "release-unverified" "payload-release.sh" ''s/^verify$/true/'' "a payload the bridge refuses is released" ]
     [ "release-keeps-signature" "payload-release.sh" ''s/^  \[\[ \$signed == 1 \]\] || rm -f -- "\$dir\/manifest.json.sig"$/  true/'' "a refused payload left looking signed" ]
     [ "build-etc-links" "payload-build.sh" ''s/tar -C "\$TOP" -h /tar -C "$TOP" /'' "preview.tar's etc/ holds links into a store bootc does not have" ]
+    [ "build-masks-as-devices" "payload-build.sh" ''s/ --anchored --no-wildcards "[^"]*"//'' "a unit mask copied as /dev/null, which an unprivileged tar cannot make" ]
     [ "build-any-closure" "payload-build.sh" ''s/^grep -qxF -- "\$TOP" "\$CI\/store-paths" || die/true || die/'' "a closure that is not the toplevel's packed" ]
   ];
 
@@ -80,6 +84,9 @@ let
     grep -qx ID=rime "$W/pv/system/etc/os-release" || fail "preview: etc/os-release contents"
     grep -qx plain "$W/pv/system/etc/sub/plain" || fail "preview: etc/sub/plain"
     [ ! -e "$W/pv/system/etc/dangling" ] && [ ! -L "$W/pv/system/etc/dangling" ] || fail "preview: a dangling link kept"
+    [ -L "$W/pv/system/etc/sub/masked.service" ] && [ "$(readlink "$W/pv/system/etc/sub/masked.service")" = /dev/null ] \
+      || fail "preview: a unit mask is not a link to /dev/null"
+    [ "$(readlink "$W/pv/system/etc/masked.socket")" = /dev/null ] || fail "preview: the second unit mask"
     [ -f "$W/pv/system/sw/bin/nix-store" ] && [ ! -s "$W/pv/system/sw/bin/nix-store" ] || fail "preview: sw/bin names"
     sleep 1.1   # a second build in another second: nothing in the payload may carry the time it was made
     B ${toplevel} ${closure} "$W/p2" > /dev/null
@@ -138,7 +145,7 @@ in
     bash ${cases} good
     echo "cases green on the package's scripts"
     # The wrappers the release job runs reach the same scripts, with their tools.
-    ${tools}/bin/rime-bridge-payload-build ${toplevel} ${closure} wrapped > /dev/null
+    env -i PATH=/nonexistent ${tools}/bin/rime-bridge-payload-build ${toplevel} ${closure} wrapped > /dev/null
     k=$(mktemp -d)
     openssl genpkey -algorithm ed25519 -out $k/k.pem
     { openssl pkey -in $k/k.pem -outform DER | tail -c 32; openssl pkey -in $k/k.pem -pubout -outform DER | tail -c 32; } > $k/k.bin
