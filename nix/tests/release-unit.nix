@@ -132,21 +132,30 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     "if: needs.changes.outputs.action == 'release' && vars.RIME_NIX_KERNEL_HOST != '''"
   # The patterns end in the job's runs-on/environment lines: the kernel-sign job's if: starts with the same text.
   wmutant "publish not restricted to main" \
-    "if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release'
-    runs-on: ubuntu-24.04
-    environment: nix-release" \
-    "if: needs.changes.outputs.action == 'release'
-    runs-on: ubuntu-24.04
-    environment: nix-release"
+    "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'" \
+    "if: always() && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'"
+  # Each of the next four changes one guard of publish's if: and keeps every other term (check_workflow.skip_safe).
+  wmutant "publish skipped whenever kernel-sign is" \
+    "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'" \
+    "if: github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'"
+  wmutant "publish with a quoted always()" \
+    "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'" \
+    "if: github.ref == 'refs/heads/main' && 'always()' != ''' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'"
+  wmutant "publish runs after a failed build" \
+    "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'" \
+    "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result != 'cancelled'"
+  wmutant "publish reads build's outputs, not its result" \
+    "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.result == 'success'" \
+    "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.build.outputs.stage != '''"
   # "Restricted to main" is the exact term of a conjunction (check_workflow.main_only), not a substring: each of these
   # still holds the text github.ref == 'refs/heads/main', and each passed the substring rule.
   wmutant "the kernel signer called off main through an or" \
     "vars.RIME_NIX_KERNEL_HOST != '''" "vars.RIME_NIX_KERNEL_HOST != ''' || true"
   wmutant "publish off main through an or" \
-    "needs.changes.outputs.action == 'release'
+    "needs.build.result == 'success'
     runs-on: ubuntu-24.04
     environment: nix-release" \
-    "needs.changes.outputs.action == 'release' || github.event_name == 'push'
+    "needs.build.result == 'success' || github.event_name == 'push'
     runs-on: ubuntu-24.04
     environment: nix-release"
   wmutant "the refresh signer off main through an or" \
@@ -198,8 +207,8 @@ open("acc.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]))' \
   # the bridge payload job (RIME_BRIDGE_PAYLOAD_KEY): main only, in the environment, signed before the push against the
   # trusted key line, and the pulled-back copy checked
   wmutant "the payload job off main" \
-    "if: github.ref == 'refs/heads/main' && needs.changes.outputs.action == 'release' && needs.publish.outputs.state == 'published'" \
-    "if: needs.changes.outputs.action == 'release' && needs.publish.outputs.state == 'published'"
+    "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success'" \
+    "if: always() && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success'"
   wmutant "the payload key outside the environment" \
     "    environment: nix-release
     permissions:
