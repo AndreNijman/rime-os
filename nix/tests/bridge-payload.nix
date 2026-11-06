@@ -37,6 +37,7 @@ let
     ln -s /run/rime-fixture-never-there $out/etc/dangling
     # a unit mask: dereferenced it is /dev/null, a device an unprivileged tar cannot make
     ln -s /dev/null $out/etc/sub/masked.service
+    ln -s /dev/null $out/etc/masked.socket
   '';
   closure = pkgs.closureInfo { rootPaths = [ toplevel ]; };
   otherClosure = pkgs.closureInfo { rootPaths = [ fakeNix ]; };
@@ -47,7 +48,7 @@ let
     [ "release-unverified" "payload-release.sh" ''s/^verify$/true/'' "a payload the bridge refuses is released" ]
     [ "release-keeps-signature" "payload-release.sh" ''s/^  \[\[ \$signed == 1 \]\] || rm -f -- "\$dir\/manifest.json.sig"$/  true/'' "a refused payload left looking signed" ]
     [ "build-etc-links" "payload-build.sh" ''s/tar -C "\$TOP" -h /tar -C "$TOP" /'' "preview.tar's etc/ holds links into a store bootc does not have" ]
-    [ "build-masks-as-devices" "payload-build.sh" ''s/ --anchored --no-wildcards -X "\$V\/masks"//'' "a unit mask copied as /dev/null, which an unprivileged tar cannot make" ]
+    [ "build-masks-as-devices" "payload-build.sh" ''s/ --anchored --no-wildcards "[^"]*"//'' "a unit mask copied as /dev/null, which an unprivileged tar cannot make" ]
     [ "build-any-closure" "payload-build.sh" ''s/^grep -qxF -- "\$TOP" "\$CI\/store-paths" || die/true || die/'' "a closure that is not the toplevel's packed" ]
   ];
 
@@ -85,6 +86,7 @@ let
     [ ! -e "$W/pv/system/etc/dangling" ] && [ ! -L "$W/pv/system/etc/dangling" ] || fail "preview: a dangling link kept"
     [ -L "$W/pv/system/etc/sub/masked.service" ] && [ "$(readlink "$W/pv/system/etc/sub/masked.service")" = /dev/null ] \
       || fail "preview: a unit mask is not a link to /dev/null"
+    [ "$(readlink "$W/pv/system/etc/masked.socket")" = /dev/null ] || fail "preview: the second unit mask"
     [ -f "$W/pv/system/sw/bin/nix-store" ] && [ ! -s "$W/pv/system/sw/bin/nix-store" ] || fail "preview: sw/bin names"
     sleep 1.1   # a second build in another second: nothing in the payload may carry the time it was made
     B ${toplevel} ${closure} "$W/p2" > /dev/null
@@ -143,7 +145,7 @@ in
     bash ${cases} good
     echo "cases green on the package's scripts"
     # The wrappers the release job runs reach the same scripts, with their tools.
-    ${tools}/bin/rime-bridge-payload-build ${toplevel} ${closure} wrapped > /dev/null
+    env -i PATH=/nonexistent ${tools}/bin/rime-bridge-payload-build ${toplevel} ${closure} wrapped > /dev/null
     k=$(mktemp -d)
     openssl genpkey -algorithm ed25519 -out $k/k.pem
     { openssl pkey -in $k/k.pem -outform DER | tail -c 32; openssl pkey -in $k/k.pem -pubout -outform DER | tail -c 32; } > $k/k.bin

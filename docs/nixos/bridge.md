@@ -134,7 +134,7 @@ of those secrets is main only, and an `oras push` comes after the signing step a
 copy (5 workflow mutants). `checks.bridge-payload` builds a payload from a small toplevel-shaped fixture and proves the
 layout, a byte-identical second build, the builder's refusals, signing with a generated TEST key, the bridge accepting
 it, and the refusals (a changed byte in `store.tar.zst` or `manifest.json`, a secret that is not the trusted key's,
-an empty secret), with 5 mutants of the two scripts.
+an empty secret), with 6 mutants of the two scripts.
 
 Not proven yet: the job has not run on GitHub (it runs on the first Nix release from main); the size of a real
 plain payload was not measured; GHCR makes a new package private, so the package needs to be made public once (the job
