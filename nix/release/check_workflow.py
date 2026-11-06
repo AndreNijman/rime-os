@@ -172,21 +172,20 @@ def _logical_lines(run):
     return out
 
 
-_SUBST_RE = re.compile(r"extra-substituters = %s\?priority=(\d+)\\n")
+_SUBST = "extra-substituters = %s\\n"
 _PREFLIGHT_RE = re.compile(r'curl -fsS( --retry \d+)? "\$CACHE_URL/nix-cache-info"( >/dev/null)?')
 
 
 def _installs_rime_cache(steps, i):
-    """Step i installs Nix trusting Rime's cache AHEAD of cache.nixos.org (priority below its 40: the cache's own
-    nix-cache-info says 50), with fallback off, and fails when the cache cannot be reached."""
+    """Step i installs Nix trusting Rime's cache at its own priority (behind cache.nixos.org, as on a machine: no
+    ?priority= override), with fallback off, and fails when the cache cannot be reached."""
     if "if" in steps[i] or steps[i].get("continue-on-error"):
         return False
     lines = _logical_lines(steps[i].get("run", ""))
     inst = [n for n, ln in enumerate(lines) if "/install --daemon" in ln and "--nix-extra-conf-file" in ln]
     for n in inst:
         ln = lines[n]
-        m = _SUBST_RE.search(ln)
-        if not (m and int(m.group(1)) < 40 and "extra-trusted-public-keys = %s\\n" in ln
+        if not (_SUBST in ln and "extra-trusted-public-keys = %s\\n" in ln
                 and "fallback = false\\n" in ln
                 and ln.find("extra-substituters") < ln.find("extra-trusted-public-keys")
                 and ln.rstrip().endswith("' \"$CACHE_URL\" \"$RIME_CACHE_PUBKEY\")")):
@@ -196,8 +195,7 @@ def _installs_rime_cache(steps, i):
     return False
 
 def substitutes_published(steps):
-    """A job that builds a release closure substitutes from cache.rimeos.com, ahead of cache.nixos.org, from its Nix
-    install on (§6.3 step 1).
+    """A job that builds a release closure substitutes from cache.rimeos.com from its Nix install on (§6.3 step 1).
     The cache holds one narHash per path forever; a path rebuilt non-reproducibly instead is refused at publish
     ("published already with another content"). The second main release rebuilt steam-run's fhsenv rootfs and was
     refused there (2026-11-06): the cache was added only after the toplevels were built."""
@@ -208,8 +206,8 @@ def substitutes_published(steps):
     ok = [i for i in range(len(steps)) if _installs_rime_cache(steps, i)]
     if not ok or min(ok) >= builds[0]:
         return ["builds a release closure without substituting from Rime's cache first (an unconditional step "
-                "before it: the Nix installer's --nix-extra-conf-file sets extra-substituters $CACHE_URL?priority=N "
-                "with N below cache.nixos.org's 40, extra-trusted-public-keys $RIME_CACHE_PUBKEY and fallback = false, "
+                "before it: the Nix installer's --nix-extra-conf-file sets extra-substituters $CACHE_URL (no "
+                "?priority= override), extra-trusted-public-keys $RIME_CACHE_PUBKEY and fallback = false, "
                 "then curl -fsS \"$CACHE_URL/nix-cache-info\" checks the cache answers)"]
     return []
 
