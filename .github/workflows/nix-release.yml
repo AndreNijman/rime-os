@@ -220,9 +220,11 @@ jobs:
       - name: Allow user namespaces (bubblewrap in rimed's tests)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # Rime's cache before anything is built (updates-and-release.md §6.3 step 1): a path it holds is substituted,
-      # never rebuilt, because a non-reproducible rebuild (steam-run's fhsenv rootfs) is refused at publish. Priority
-      # 30 puts it ahead of cache.nixos.org (40; its own nix-cache-info says 50) for a path both hold; fallback off and
-      # the reachability check stop a cache outage from turning into hours of rebuilding.
+      # never rebuilt, because a non-reproducible rebuild (steam-run's fhsenv rootfs) is refused at publish. It keeps
+      # its own priority (nix-cache-info: 50, behind cache.nixos.org's 40), as on a machine: asked first, GitHub Pages
+      # answered ~5,500 of the build's narinfo lookups with HTTP 429 and a failed lookup is a build. A path both hold
+      # comes from upstream, so split records it as upstream. Fallback off, more attempts and the reachability check
+      # keep an outage or a burst from turning into hours of rebuilding.
       - name: Install Nix (pinned, hash-checked; Rime's cache trusted)
         run: |
           set -euo pipefail
@@ -231,7 +233,7 @@ jobs:
           echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
           tar -xf nix.tar.xz
           ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
-            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nmax-jobs = auto\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nmax-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
           echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
           curl -fsS --retry 5 "$CACHE_URL/nix-cache-info" >/dev/null
 
@@ -510,7 +512,7 @@ jobs:
           echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
           tar -xf nix.tar.xz
           ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
-            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
           echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
           curl -fsS --retry 5 "$CACHE_URL/nix-cache-info" >/dev/null
 

@@ -207,27 +207,30 @@ open("acc.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]))' \
   # the bridge payload job (RIME_BRIDGE_PAYLOAD_KEY): main only, in the environment, signed before the push against the
   # trusted key line, and the pulled-back copy checked
   # check_workflow.substitutes_published: each job building a release closure trusts Rime's cache from its Nix install,
-  # ahead of cache.nixos.org, with fallback off and a reachability check. Each mutant changes one of those.
+  # at the cache's own priority, with fallback off and a reachability check. Each mutant changes one of those.
   wmutant "the build rebuilds what Rime's cache holds" \
-    "max-jobs = auto\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
+    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
     "max-jobs = auto\n')"
   wmutant "the payload job rebuilds what Rime's cache holds" \
-    "flakes\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
     "flakes\n')"
-  wmutant "the build prefers cache.nixos.org over Rime's cache" \
-    "max-jobs = auto\nextra-substituters = %s?priority=30" "max-jobs = auto\nextra-substituters = %s?priority=50"
+  wmutant "the build puts Rime's cache ahead of cache.nixos.org" \
+    "max-jobs = auto\nextra-substituters = %s\n" "max-jobs = auto\nextra-substituters = %s?priority=30\n"
   wmutant "the build trusts Rime's cache only in a comment" \
-    "max-jobs = auto\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
+    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
     "max-jobs = auto\n')
-          # ./install --daemon --nix-extra-conf-file <(printf 'max-jobs = auto\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")"
+          # ./install --daemon --nix-extra-conf-file <(printf 'max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")"
   wmutant "the build carries on without Rime's cache" \
     "curl -fsS --retry 5 \"\$CACHE_URL/nix-cache-info\" >/dev/null
 " \
     "curl -fsS --retry 5 \"\$CACHE_URL/nix-cache-info\" >/dev/null || true
 "
+  wmutant "the payload job gives up on Rime's cache after Nix's default attempts" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\n"
   wmutant "the build falls back to building when a download fails" \
-    "max-jobs = auto\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\nfallback = false\n'" \
-    "max-jobs = auto\nextra-substituters = %s?priority=30\nextra-trusted-public-keys = %s\n'"
+    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\n" \
+    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\n"
   wmutant "the payload job off main" \
     "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success'" \
     "if: always() && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success'"

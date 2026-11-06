@@ -454,14 +454,19 @@ not the daemon's `nix.conf`.
    rimed, rime-shell, the Hyprland rebuild, about 0.71 GB compressed in the probe) are exported with `nix copy --to
    file://$out?compression=zstd` (as built: `nix-store --export` and a local import, §18) and handed to the publish job as a workflow artifact. The build job holds only
    `GITHUB_TOKEN` with `contents: read`; no `id-token`, no environment secrets.
-   - **Substitute, never rebuild, what is already published.** The build host's substituters are
-     `https://cache.rimeos.com` (trusting `rime-cache-*`) first, then cache.nixos.org. R2 is append-only, so a path it
-     already holds has one narHash forever; if the build host rebuilt it non-reproducibly instead, `closure.json`
-     would carry a second narHash, the public-side check below would never match, and no release could publish until
-     someone noticed why.
+   - **Substitute, never rebuild, what is already published.** The build host's substituters are cache.nixos.org and
+     `https://cache.rimeos.com` (trusting `rime-cache-*`), set by the Nix install before anything builds. On the
+     GitHub backend Rime's cache keeps its own priority (50, behind cache.nixos.org's 40), the order a machine uses: it
+     is asked only about paths upstream lacks. Asked first, GitHub Pages answered about 5,500 of one build's narinfo
+     lookups with HTTP 429, and a lookup that fails is a build. `fallback = false`, `download-attempts = 12` and a
+     `curl` of `nix-cache-info` before the build keep an outage or a burst from becoming hours of rebuilding. The
+     cache is append-only, so a path it already holds has one narHash forever; if the build host rebuilt it
+     non-reproducibly instead, `closure.json` would carry a second narHash and the publish job refuses the release
+     (`published already with another content`).
    - **Upstream paths with a different local narHash.** A path cache.nixos.org has, but which the build host built
-     itself first (and non-reproducibly), is treated as a Rime path: exported from the build host and uploaded, so
-     `closure.json`, R2 and the manifest agree.
+     itself (upstream lacked it when the build ran, and the rebuild was non-reproducible), is treated as a Rime path:
+     exported from the build host and uploaded, so `closure.json`, the cache and the manifest agree. A path both caches
+     hold comes from upstream on the build host and on a machine alike, so `split` records it as upstream.
    - **The kernel's MOK signature** is not made here. D7 signs the kernel image in a separate hosted job holding the
      `APEX_SB_*` secrets (`sbsign` detached, `sbattach` inside a derivation); the build job consumes that detached
      signature as an input. Those secrets are not in the `nix-release` environment, and `nix-release.yml` never names
