@@ -171,11 +171,22 @@ def userns_first(steps):
     return []
 
 
+def _result_ok(term, d):
+    """needs.<d>.result == 'success', or a parenthesised || of success/skipped comparisons on that same job."""
+    t = _bare(term)
+    one = rf"needs\.{re.escape(d)}\.result\s*==\s*'(success|skipped)'"
+    alts = [_bare(x) for x in _top_level(t, "||")]
+    return (all(re.fullmatch(one, a) for a in alts)
+            and any(re.fullmatch(rf"needs\.{re.escape(d)}\.result\s*==\s*'success'", a) for a in alts))
+
+
 def skip_safe(jobs):
     """GitHub gives an if: without a status function an implicit success(), which is false when ANY upstream job was
     skipped, even one a job only reaches through another. kernel-sign is optional (skipped with no signing host), so
     publish and payload were skipped after a green build on the first main release (2026-11-06). A job downstream of
-    a job that can be skipped must say always() or !cancelled() and name the result of each job it needs."""
+    a job that can be skipped must be a conjunction with a top-level always() or !cancelled() term and, for each job
+    it needs, a top-level term requiring that job's result to be success (parsed terms, not substrings: a quoted
+    'always()' or a needs.<job>.outputs reference does not count)."""
     def deps(j):
         n = (jobs.get(j) or {}).get("needs") or []
         return [n] if isinstance(n, str) else list(n)
@@ -189,12 +200,14 @@ def skip_safe(jobs):
                 todo += deps(d)
         if not any("if" in (jobs.get(d) or {}) for d in seen):
             continue
-        cond = " ".join(str(jobs[name].get("if", "")).split())
-        if "always()" not in cond and "!cancelled()" not in cond:
-            bad.append(f"job {name}: downstream of a job that can be skipped, its if: needs always() or !cancelled()")
+        e = _bare(jobs[name].get("if", ""))
+        terms = [_bare(t) for t in _top_level(e, "&&")] if e and _balanced(e) and len(_top_level(e, "||")) == 1 else []
+        if not any(t in ("always()", "!cancelled()") for t in terms):
+            bad.append(f"job {name}: downstream of a job that can be skipped, its if: needs a top-level always() "
+                       "or !cancelled() term")
         for d in deps(name):
-            if f"needs.{d}." not in cond:
-                bad.append(f"job {name}: with always() its if: must check needs.{d} itself")
+            if not any(_result_ok(t, d) for t in terms):
+                bad.append(f"job {name}: with always() its if: must require needs.{d}.result == 'success'")
     return bad
 
 
