@@ -320,11 +320,13 @@ def phase_bootc(a):
     # greeter-first run below proves the NixOS side wins whatever this is.
     record(vm, "bootc-hypr-config", f"ls -la --time-style=full-iso /var/home/{USER}/.config/hypr/rime/;"
            f" echo BOOTC-KNOB=$(grep -c no_update_news /var/home/{USER}/.config/hypr/rime/appearance.lua)", ok=False)
-    rc, out = record(vm, "check", f"{a.migrate} check --explain --backup /run/backup"
+    rc, out = record(vm, "check", f"{a.migrate} check --explain{a.backup_arg}"
                      " --payload /run/payload/payload", ok=False)
     if "left behind" not in out.lower():
         raise Timeout("check --explain --payload printed no left-behind report")
-    rc, out = record(vm, "check-json", f"{a.migrate} check --json --backup /run/backup", ok=False)
+    if a.no_backup and "backup: none" not in out:
+        raise Timeout("check without --backup did not say what the restore point is")
+    rc, out = record(vm, "check-json", f"{a.migrate} check --json{a.backup_arg}", ok=False)
     if "CPU vendor" not in out and "microcode" not in out:
         say("[bootc2] note: check --json names no CPU vendor (the carry preview is in check --explain)")
     if a.readiness:
@@ -345,10 +347,12 @@ def phase_bootc(a):
         if a.interrupt_probe:
             interrupt_probe(a)
         vm = boot_for_probe(a, "bootc4", None)
-    rc, out = record(vm, "start", f"time {a.migrate} start --backup /run/backup"
+    rc, out = record(vm, "start", f"time {a.migrate} start{a.backup_arg}"
                      " --payload /run/payload/payload --yes", timeout=5400, ok=False)
     if rc != 0:
         raise Timeout(f"start failed rc={rc}")
+    if a.no_backup and "restore point: " not in out:
+        raise Timeout("start without --backup ran no restore test on @pre-nixos")
     record(vm, "after-start", "btrfs subvolume list /sysroot; findmnt /boot; for b in /sysroot/boot /boot; do echo \"== $b\";"
            " cat $b/grub2/custom.cfg; ls -la $b $b/rime/nixos 2>/dev/null; cat $b/grub2/rime-nixos.cfg 2>/dev/null; done;"
            " ls -la /run/backup /run/backup/*; cat /var/lib/rime/nixos-bridge/state.json", ok=False)
@@ -1012,12 +1016,15 @@ def main():
                     help="(readiness) on an overlay: a start interrupted by Ctrl-C rolls back; every verb allowed")
     ap.add_argument("--no-finish-interrupt", dest="finish_interrupt", action="store_false",
                     help="(finish) skip the overlay where finish --yes is SIGKILLed mid-way, then re-run")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="(bootc) check and start without --backup: the restore point is @pre-nixos (no drive)")
     ap.add_argument("--finish-kill-at", default="@pre-nixos",
                     help="(finish) the finish.json step after which the interrupted finish is SIGKILLed")
     a = ap.parse_args()
     a.finish = "finish" in a.phases.split(",")
     a.bridge = "/usr/libexec/rime-migrate" if a.readiness else "/run/payload/rime-migrate"
     a.migrate = "rime migrate" if a.readiness else a.bridge
+    a.backup_arg = "" if a.no_backup else " --backup /run/backup"
     if a.sb:
         a.vars = os.path.join(a.lab, "fw", "vars-sb-bridge.fd")
     a.work = os.path.join(a.lab, f"run-{a.kind}")

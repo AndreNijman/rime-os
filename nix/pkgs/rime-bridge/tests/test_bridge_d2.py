@@ -852,7 +852,7 @@ class StartRecord(unittest.TestCase):
 
     NAMES = ("gather", "PAYLOAD_KEY_FILE", "mount", "run", "STATE", "RUN_DIR", "wait_units", "do_backup",
              "mask_old_side", "unmask_old_side", "fsck_gate", "containment_snapshot", "carry_preview", "boot_had",
-             "undo_boot")
+             "undo_boot", "test_restore_point")
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -890,8 +890,8 @@ class StartRecord(unittest.TestCase):
         state.setdefault("masked", []).append("rime-update-check.timer")
 
     def start(self):
-        a = B.argparse.Namespace(cmd="start", yes=True, backup=self.facts["backup"]["path"], payload=self.payload,
-                                 disk=[])
+        a = B.argparse.Namespace(cmd="start", yes=True, backup=(self.facts.get("backup") or {}).get("path"),
+                                 payload=self.payload, disk=[])
         with contextlib.redirect_stdout(io.StringIO()):
             return B.cmd_start(a)
 
@@ -933,6 +933,47 @@ class StartRecord(unittest.TestCase):
         with self.assertRaises(B.Failed):
             self.start()
         self.assert_rolled_back(["rime-update-check.timer"])
+
+    def no_backup(self):
+        del self.facts["backup"]
+        self.facts["home"]["in_top_level"] = True
+        B.do_backup = self.fails_in("do_backup (there is no --backup)")
+        B.mask_old_side = self.masks
+        B.fsck_gate = lambda *a, **k: {}
+
+    def test_start_without_backup_tests_the_snapshot_as_its_restore_point(self):
+        # No drive: start goes on with no backup step; the read-only @pre-nixos snapshot is restore-tested right after
+        # it is taken, and a failed restore test removes it and rolls back like any other failure.
+        self.no_backup()
+        tested = []
+
+        def restore_test(snap, var_fsroot, live_home):
+            tested.append((snap, var_fsroot, live_home))
+            raise B.Failed("TEST failure in the restore test")
+        B.test_restore_point = restore_test
+        with self.assertRaises(B.Failed):
+            self.start()
+        self.assert_rolled_back(["rime-update-check.timer"])
+        rec = self.record()
+        self.assertEqual(rec["steps"][0], "old side", rec["steps"])
+        self.assertNotIn("backup", rec["steps"])
+        self.assertIsNone(rec["backup"])
+        top = os.path.join(B.RUN_DIR, "top")
+        self.assertEqual(tested, [(os.path.join(top, "@pre-nixos"), self.facts["var_fsroot"],
+                                   os.path.join(top, self.facts["var_fsroot"].lstrip("/"), "home"))])
+        cmds = [c[1] for c in self.calls if c[0] == "run"]
+        snap = ("btrfs", "subvolume", "snapshot", "-r", top, os.path.join(top, "@pre-nixos"))
+        self.assertIn(snap, cmds)
+        self.assertIn(("btrfs", "subvolume", "delete", os.path.join(top, "@pre-nixos")), cmds)
+        self.assertLess(cmds.index(snap), len(cmds) - 1)
+
+    def test_start_without_backup_refuses_a_home_subvolume(self):
+        self.no_backup()
+        self.facts["home"]["in_top_level"] = False
+        before = self.calls[:]
+        self.assertEqual(self.start(), B.EXIT_REFUSED)
+        self.assertEqual(self.calls, before, "start touched the machine")
+        self.assertIsNone(B.start_record())
 
     def write_record(self, rec):
         os.makedirs(B.STATE, exist_ok=True)
@@ -1005,6 +1046,75 @@ class StartRecord(unittest.TestCase):
             got = B.record_refusal(rec)
             self.assertIsNotNone(got, rec)
             self.assertEqual(got[0], name, rec)
+
+
+class RestorePoint(unittest.TestCase):
+    """test_restore_point: the restore test start runs on @pre-nixos when there is no off-disk backup."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.snap = os.path.join(self.d, "@pre-nixos")
+        self.var = "/ostree/deploy/default/var"
+        self.snap_home = os.path.join(self.snap, self.var.lstrip("/"), "home")
+        self.live = os.path.join(self.d, "live-home")
+        for i in range(10):
+            for base in (self.snap_home, self.live):
+                p = os.path.join(base, "u", f"d{i % 3}", f"f{i}")
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                pathlib.Path(p).write_bytes(f"file {i}\n".encode() * 50)
+                os.utime(p, ns=(10**18, 10**18 + i))
+        self.saved = B.same_subvolume
+
+    def tearDown(self):
+        B.same_subvolume = self.saved
+        shutil.rmtree(self.d)
+
+    def restore_test(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return B.test_restore_point(self.snap, self.var, self.live)
+
+    def test_equal_home_passes(self):
+        got = self.restore_test()
+        self.assertEqual((got["files"], got["sampled"], got["equal"], got["changed_since"]), (10, 10, 10, 0))
+
+    def test_files_changed_since_are_not_failures(self):
+        # The machine is in use while start runs: a file written after the snapshot has another size or mtime.
+        p = os.path.join(self.live, "u", "d0", "f0")
+        pathlib.Path(p).write_bytes(b"new content")
+        os.unlink(os.path.join(self.live, "u", "d1", "f1"))
+        got = self.restore_test()
+        self.assertEqual((got["equal"], got["changed_since"]), (8, 2))
+
+    def test_a_snapshot_that_reads_back_different_fails(self):
+        p = os.path.join(self.snap_home, "u", "d2", "f2")
+        st = os.stat(p)
+        pathlib.Path(p).write_bytes(pathlib.Path(p).read_bytes().replace(b"file", b"FILE"))
+        os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        with self.assertRaisesRegex(B.Failed, "1 of 10 files differ"):
+            self.restore_test()
+
+    def test_nothing_compared_fails(self):
+        for root, _, fs in os.walk(self.live):
+            for n in fs:
+                os.utime(os.path.join(root, n), ns=(1, 1))
+        with self.assertRaisesRegex(B.Failed, "none of 10 sampled files could be compared"):
+            self.restore_test()
+
+    def test_a_snapshot_without_home_fails(self):
+        shutil.rmtree(self.snap_home)
+        with self.assertRaisesRegex(B.Failed, "does not hold home"):
+            self.restore_test()
+
+    def test_an_empty_placeholder_home_fails(self):
+        # A nested subvolume shows as an empty directory in a snapshot of its parent, in another subvolume's place.
+        B.same_subvolume = lambda top, path: not path.rstrip("/").endswith("/home")
+        with self.assertRaisesRegex(B.Failed, "does not hold home"):
+            self.restore_test()
+
+    def test_an_empty_home_passes(self):
+        shutil.rmtree(self.snap_home)
+        os.makedirs(self.snap_home)
+        self.assertEqual(self.restore_test()["files"], 0)
 
 
 if __name__ == "__main__":

@@ -562,7 +562,11 @@ def plan_text(facts, p):
             f"  now: {gb(u.get('data_used'))} data used, {gb(u.get('free_estimated'))} free (estimated)",
             "", "what stops working:",
             "  the GRUB menu's ostree entries: the old system, and home as it was at the move, can no longer be booted",
-            "  from this disk. The backup `rime migrate start` took (off this disk) is the only copy left; keep it.",
+            "  from this disk. " + (
+                f"The backup `rime migrate start` took (off this disk, {rec['backup']}) is the only copy left; keep it."
+                if rec.get("backup") else
+                "`rime migrate start` took no backup off this disk, so @home is then the only copy of home: copy it "
+                "off the disk first if you want one (@pre-nixos, its restore point, is deleted here)."),
             "", "what stays (never touched; compared before and after):",
             "  @nixos, @nix, @home; /boot/rime (NixOS's kernels); /boot/grub2 (custom.cfg with the rime-boot block,",
             "  the Secure Boot key entry and anything else in it, rime-nixos.cfg, grub.cfg); every ESP (shim, GRUB,",

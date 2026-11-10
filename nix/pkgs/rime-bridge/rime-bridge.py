@@ -21,13 +21,16 @@
   key-export --to DIR
       The machine's keys, off the disk: the LUKS2 header (luksHeaderBackup, read back with luksDump) and the rime
       backup keys and recipients (/var/lib/rime-backup/{keys,recipients}). start runs it into its backup.
-  start --backup DIR --payload DIR --yes
-      Topologies A and E only. Backup (off the disk, restore-tested, key-export), the payload's signature, old side
-      masked, a read-only @pre-nixos snapshot, new subvolumes @nixos (/), @nix (/nix), @home (/var/home, a reflink
+  start [--backup DIR] --payload DIR --yes
+      Topologies A and E only. The payload's signature, old side masked, a read-only @pre-nixos snapshot (the restore
+      point: it holds the old system and home as they were, and is restore-tested), new subvolumes @nixos (/), @nix (/nix), @home (/var/home, a reflink
       copy), the payload's closure installed and registered, the /etc carry (rime-hostlayer carry), [boot] in
       host.toml (layout custom-cfg, and the /boot partition when /boot is one), the first activation, and the boot
       entry through the Rime boot hook in custom.cfg. The ostree entries stay; nothing is written to any ESP or NVRAM.
       The fsck containment gate (H8) runs before and after, and a failure removes what the bridge made.
+      Needs no space beyond the disk itself: --backup DIR is OPTIONAL, an extra copy off the disk (home restore-tested,
+      key-export) taken first, for anyone who wants one. Without it the restore point is @pre-nixos, which does not
+      survive the disk failing and which `rime migrate finish` deletes.
 
 Exit codes: 0 ok, 2 usage, 3 refused (by name: "REFUSED [name] ..."), 10 failed.
 Never runs bootctl, grub2-install or efibootmgr, and never uses NIXOS_LUSTRATE.
@@ -1090,6 +1093,10 @@ def evaluate(facts, backup=None):
         elif int(b.get("free_bytes", 0)) < int((facts.get("home") or {}).get("bytes", 0)) + GB:
             refusals.append(("backup-too-small", f"backup destination has {b['free_bytes'] / GB:.1f} GB free, home "
                              f"is {facts['home']['bytes'] / GB:.1f} GB"))
+    if backup is None and (facts.get("home") or {}).get("in_top_level") is False:
+        refusals.append(("home-subvolume-needs-backup", "home is its own btrfs subvolume, so the @pre-nixos snapshot "
+                         "(the restore point when there is no --backup) would not hold it: give --backup DIR off "
+                         "this disk"))
     if t == "E":
         lo = trial_leftovers(facts)
         if lo["files"] or lo["nvram"] or lo["top"]:
@@ -1161,11 +1168,13 @@ def report(facts, c, refusals, notes, explain):
         lines.append(f"space: metadata {meta_line}")
     if explain and plan is not None and not plan.get("unmeasured"):
         lines.append(DIVERGENCE)
-    # The backup (start's first step) copies all of home off the disk: its destination is checked against this.
+    # With --backup, start's first step copies all of home off the disk: its destination is checked against this.
     lines.append(f"home: {facts.get('home', {}).get('bytes', 0) / GB:.2f} GB")
     if facts.get("backup"):
         b = facts["backup"]
         lines.append(f"backup: {b['path']} on {b.get('disk')}, {b.get('free_bytes', 0) / GB:.1f} GB free")
+    else:
+        lines.append(f"backup: none (optional: --backup DIR, off this disk). {RESTORE_POINT}")
     for n in notes:
         lines.append(f"note: {n}")
     for name, text in refusals:
@@ -1187,10 +1196,17 @@ def in_private_namespace(argv):
                            sys.executable, "-I", os.path.abspath(__file__), *argv], env)
 
 
+RESTORE_POINT = ("The restore point is the read-only @pre-nixos snapshot start takes of the old system and home, on "
+                 "this disk, restore-tested after it is taken. It costs no space at the move, it does not survive "
+                 "the disk failing, and `rime migrate finish` deletes it.")
+
+
 def gather(a):
     facts = collect_disks(a.disk) if a.disk else collect_live()
     if facts.get("root", {}).get("fstype") == "btrfs" and not a.disk:
         facts["existing_subvols"] = existing_subvols(facts["root"]["device"])
+        if facts.get("var_fsroot") and isinstance(facts.get("home"), dict):
+            facts["home"]["in_top_level"] = home_in_top_level(facts["root"]["device"], facts["var_fsroot"])
     if getattr(a, "backup", None):
         facts["backup"] = backup_facts(a.backup)
     return facts
@@ -1203,6 +1219,25 @@ def existing_subvols(dev):
         return [s for s in SUBVOLS + ("@pre-nixos",) if top and os.path.exists(os.path.join(top, s))]
     finally:
         m.close()
+
+
+def home_in_top_level(dev, var_fsroot):
+    """True when home is in the btrfs top level's own subvolume (so a snapshot of the top level holds it), False when
+    it, /var or anything between is a subvolume of its own, None when it cannot be read."""
+    m = Mounts()
+    try:
+        top = m.ro(dev, "btrfs", "subvolid=5")
+        return None if not top else same_subvolume(top, os.path.join(top, var_fsroot.lstrip("/"), "home"))
+    finally:
+        m.close()
+
+
+def same_subvolume(top, path):
+    """Every btrfs subvolume has its own st_dev: PATH is in TOP's subvolume when they share it."""
+    try:
+        return os.stat(path).st_dev == os.stat(top).st_dev
+    except OSError:
+        return None
 
 
 def start_record():
@@ -1603,6 +1638,48 @@ def do_backup(dest, facts, var_home):
     return d
 
 
+def test_restore_point(snap, var_fsroot, live_home, sample=64):
+    """The restore test when there is no off-disk backup: home in the read-only snapshot SNAP is real (in the
+    snapshot's own subvolume, not an empty placeholder left by a nested subvolume) and reads back equal to the live
+    home. The live home keeps changing while start runs (the machine is in use), so a sampled file is compared only
+    when its size and mtime are still the snapshot's; others count as changed since, not as failures. At least one
+    file must compare equal when home has any."""
+    snap_home = os.path.join(snap, var_fsroot.lstrip("/"), "home")
+    if not os.path.isdir(snap_home) or not same_subvolume(snap, snap_home):
+        raise Failed(f"the restore point {snap} does not hold home ({snap_home})")
+    files = []
+    for root, dirs, fs in os.walk(snap_home):
+        dirs[:] = [d for d in dirs if same_subvolume(snap, os.path.join(root, d))]
+        for n in fs:
+            p = os.path.join(root, n)
+            if stat.S_ISREG(os.lstat(p).st_mode):
+                files.append(p)
+    files.sort()
+    picked = files[::max(1, len(files) // sample)][:sample]
+    equal, changed, bad = 0, 0, []
+    for p in picked:
+        live = os.path.join(live_home, os.path.relpath(p, snap_home))
+        a = os.lstat(p)
+        try:
+            b = os.lstat(live)
+        except FileNotFoundError:
+            changed += 1
+            continue
+        if not stat.S_ISREG(b.st_mode) or (a.st_size, a.st_mtime_ns) != (b.st_size, b.st_mtime_ns):
+            changed += 1
+        elif sha256_file(p) == sha256_file(live):
+            equal += 1
+        else:
+            bad.append(p)
+    if bad:
+        raise Failed(f"restore test of {snap}: {len(bad)} of {len(picked)} files differ from home: {bad[:3]}")
+    if files and not equal:
+        raise Failed(f"restore test of {snap}: none of {len(picked)} sampled files could be compared")
+    print(f"restore point: {snap} holds home; {equal} of {len(picked)} sampled files ({len(files)} in all) read back "
+          f"equal, {changed} changed since the snapshot", flush=True)
+    return {"path": snap, "files": len(files), "sampled": len(picked), "equal": equal, "changed_since": changed}
+
+
 def mask_old_side(state):
     # Recorded as it goes: a failure half way through still unmasks exactly what was masked (unmask_old_side).
     masked = state.setdefault("masked", [])
@@ -1825,8 +1902,6 @@ def cmd_start(a):
     c, refusals, notes = evaluate(facts, facts.get("backup"))
     if facts.get("mode") != "live":
         raise Refused("not-live", "start runs on the booted bootc system only")
-    if not a.backup:
-        refusals.append(("backup-missing", "start needs --backup DIR off the disk being migrated"))
     if c["topology"] == "E":
         lo = trial_leftovers(facts)
         if lo["files"] or lo["nvram"] or lo["top"]:
@@ -1869,8 +1944,11 @@ def cmd_start(a):
     # old side or at the first fsck gate used to leave a record with neither `failed` nor `rolled back`, units masked,
     # and the bootc verbs refused for good. Now it unmasks what it masked and records `rolled back` like any other.
     try:
-        step("backup")
-        state["backup"] = do_backup(a.backup, facts, os.path.join(top, facts["var_fsroot"].lstrip("/"), "home"))
+        if a.backup:
+            step("backup")
+            state["backup"] = do_backup(a.backup, facts, os.path.join(top, facts["var_fsroot"].lstrip("/"), "home"))
+        else:
+            state["backup"] = None
         step("old side")
         wait_units()
         mask_old_side(state)
@@ -1880,6 +1958,14 @@ def cmd_start(a):
         step("snapshot @pre-nixos")
         run(["btrfs", "subvolume", "snapshot", "-r", top, os.path.join(top, "@pre-nixos")])
         made.append("@pre-nixos")
+        if not a.backup:
+            # No copy off the disk: the snapshot is the restore point, so it is tested like a backup would be.
+            state["restore_point"] = test_restore_point(os.path.join(top, "@pre-nixos"), facts["var_fsroot"],
+                                                        os.path.join(top, facts["var_fsroot"].lstrip("/"), "home"))
+            if (root.get("luks") or os.path.isdir(BACKUP_KEYS_ROOT)):
+                print("keys: no --backup, so nothing left this disk; `sudo rime migrate key-export --to DIR` "
+                      "(a few MB, e.g. a USB stick) copies the LUKS header and rime backup's keys off it at any time",
+                      flush=True)
         for s in SUBVOLS:
             run(["btrfs", "subvolume", "create", os.path.join(top, s)])
             made.append(s)
@@ -1998,7 +2084,7 @@ def main(argv=None):
     k = sub.add_parser("key-export")
     k.add_argument("--to", required=True)
     s = sub.add_parser("start")
-    s.add_argument("--backup", required=True)
+    s.add_argument("--backup")
     s.add_argument("--payload", required=True)
     s.add_argument("--yes", action="store_true")
     s.set_defaults(disk=[])

@@ -448,6 +448,18 @@ class FinishTest(unittest.TestCase):
         self.assertIn("can no longer be booted", out)
         self.assertIn("nothing was changed", out)
 
+    def test_dry_run_says_whether_an_off_disk_backup_exists(self):
+        # start without --backup (the default since no drive is needed): after finish @home is the only copy of home.
+        rc, out = run(self.sx, "--dry-run")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("took no backup off this disk, so @home is then the only copy of home", out)
+        self.assertNotIn("only copy left; keep it", out)
+        p = os.path.join(self.sx.top, "ostree/deploy/default/var/lib/rime/nixos-bridge/state.json")
+        w(p, json.dumps(dict(DONE, backup="/run/media/usb/rime-migrate-backup-20261104T100000Z")))
+        rc, out = run(self.sx, "--dry-run")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("(off this disk, /run/media/usb/rime-migrate-backup-20261104T100000Z) is the only copy left", out)
+
     # ── --yes ──
 
     def test_yes_finishes(self):

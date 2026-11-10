@@ -284,6 +284,28 @@ class Refusals(unittest.TestCase):
         self.assertEqual(B.evaluate(f, ok)[1], [])
         self.assertEqual(names(B.evaluate(f, {"path": "/nope", "exists": False})[1]), ["backup-missing"])
 
+    def test_backup_is_optional(self):
+        # A move needs no space beyond the disk (Andre, 2026-11-10): with no --backup the restore point is @pre-nixos.
+        f = base_facts()
+        f["home"]["in_top_level"] = True
+        c, r, n = B.evaluate(f)
+        self.assertEqual(r, [])
+        text = B.report(f, c, r, n, True)
+        self.assertIn("backup: none (optional", text)
+        self.assertIn("@pre-nixos", text)
+        self.assertIn("does not survive the disk failing", text)
+
+    def test_home_subvolume_needs_backup(self):
+        # A snapshot of the top level does not hold a nested subvolume: with no off-disk copy that home would have
+        # no restore point, so start is refused by name; --backup lifts it; unknown (offline facts) does not refuse.
+        f = base_facts()
+        f["home"]["in_top_level"] = False
+        self.assertEqual(names(B.evaluate(f)[1]), ["home-subvolume-needs-backup"])
+        ok = {"path": "/mnt/usb", "exists": True, "disk": "/dev/sdb", "free_bytes": 100 * GB}
+        self.assertEqual(B.evaluate(f, ok)[1], [])
+        f["home"].pop("in_top_level")
+        self.assertEqual(B.evaluate(f)[1], [])
+
     def test_already_started(self):
         f = base_facts()
         f["existing_subvols"] = ["@nixos"]
@@ -714,10 +736,11 @@ class UndoBoot(unittest.TestCase):
 
 class Cli(unittest.TestCase):
     def test_needs_root_or_refuses_usage(self):
-        r = subprocess.run([PROG, "start", "--backup", "/x", "--payload", "/y"], capture_output=True, text=True)
-        if os.geteuid() != 0:
-            self.assertEqual(r.returncode, 2)
-            self.assertIn("needs root", r.stderr)
+        for args in (["--backup", "/x", "--payload", "/y"], ["--payload", "/y"]):   # --backup is optional
+            r = subprocess.run([PROG, "start", *args], capture_output=True, text=True)
+            if os.geteuid() != 0:
+                self.assertEqual(r.returncode, 2)
+                self.assertIn("needs root", r.stderr)
 
     def test_no_forbidden_tools(self):
         with open(PROG) as f:

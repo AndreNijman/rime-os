@@ -14,20 +14,40 @@ through unchanged, so its own `--help` is the reference:
 | `sudo rime migrate check [--explain] [--payload DIR]` | read-only: can this machine move, and if not, what blocks it; with `--payload`, also what will not come across |
 | `sudo rime migrate repair-e --confirm` | topology E only: moves an earlier boot trial's leftovers that block a start aside (archived, never deleted) |
 | `sudo rime migrate key-export --to DIR` | copies the LUKS header backup and the backup tool's keys to DIR |
-| `sudo rime migrate start --backup DIR --payload DIR` | backs up, installs the NixOS closure beside bootc, adds the GRUB entry; on any failure it removes what it made and records `rolled back` |
+| `sudo rime migrate start --payload DIR [--backup DIR]` | takes a read-only snapshot of the old system as its restore point, installs the NixOS closure beside bootc, adds the GRUB entry; on any failure it removes what it made and records `rolled back`. `--backup DIR` (optional) also copies home off the disk first |
 
 The copy here is taken byte for byte from the NixOS side's `rime-bridge.py`
 (first line changed to `#!/usr/bin/python3 -I`), at the NixOS branch's bridge
-commit 5edb2bd22 (branch nix/bridge-space; sha256 of the file without its first line:
-`6c8219e94ccd8fc0309fcee02a607344115a777ce5ec6993e3f9fc21e54213e3`). Its tests
+branch feat/migrate-without-drive (sha256 of the file without its first line:
+`0389f3252ee3b7b32545056fa7e7da771ab4a868d125dcc295c715aba6820813`). Its tests
 (`test_bridge.py`, `test_bridge_d2.py`) are in `tests/rime-migrate/` and run
 from `tests/test-rime-migrate.sh`. The fixture uses a synthetic root UUID
 (`0b0b0b0b-…`), never a real machine's. Compare again, by that hash, before
-this release ships. Since the previous copy (223a0758d) it changed one thing:
-the free-space check.
+this release ships. Since the previous copy it changed one thing: the move
+needs no drive (below).
 
 On a system older than this release `rime migrate` does not exist; on one where
 the program is missing, `rime migrate` says so and points at `sudo rime update`.
+
+## The move needs no drive
+
+`start` needs no space beyond the disk being moved, and no external drive.
+Its restore point is the read-only `@pre-nixos` snapshot it takes of the old
+system with home: it costs no space when made, and `start` restore-tests it
+(a sample of home's files must read back equal from the snapshot; a file
+written after the snapshot, because the machine is in use, counts as changed,
+not as a failure). The old system also stays bootable from the GRUB menu until
+`rime migrate finish`.
+
+What it does not cover: the disk itself failing, and the time after `finish`,
+which deletes `@pre-nixos` and the old system (its dry run then says `@home` is
+the only copy of home). `--backup DIR` on another disk adds a copy off the disk
+(home, restore-tested, and the keys); `sudo rime migrate key-export --to DIR`
+copies just the LUKS header and `rime backup`'s keys (a few MB) at any time.
+
+When home is a btrfs subvolume of its own, a snapshot of the top level does not
+hold it, so `start` without `--backup` is refused as
+`home-subvolume-needs-backup`. A Rime install never makes one.
 
 ## How much free space the move needs
 
@@ -80,7 +100,7 @@ NixOS GRUB entry, "Rime (generation …)". `boot status`,
 | permission denied as a normal user | left to the root check, which runs next |
 
 **A start that fails at any step undoes itself.** The bridge writes the record
-at its first step (`backup`), and every step after that is inside its
+at its first step (`backup` with `--backup`, `old side` without), and every step after that is inside its
 rollback: a start that fails in the backup, while masking the old side's units
 (each one is recorded as it is masked), at an fsck gate or later unmasks what it
 masked, removes what it made and records `failed` with `rolled back`, which
