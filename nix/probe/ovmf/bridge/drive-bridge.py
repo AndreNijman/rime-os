@@ -86,8 +86,9 @@ class VM:
         drives = [("rime-disk", f"file={self.w}/disk.qcow2,format=qcow2")]
         if a.kind == "E":
             drives.append(("win-disk", f"file={self.w}/win.qcow2,format=qcow2"))
-        drives += [("rime-payload", f"file={a.payload},format=raw,readonly=on"),
-                   ("rime-backup", f"file={self.w}/backup.qcow2,format=qcow2")]
+        drives.append(("rime-payload", f"file={a.payload},format=raw,readonly=on"))
+        if not a.no_backup:  # --no-backup: the guest has no second disk to lean on
+            drives.append(("rime-backup", f"file={self.w}/backup.qcow2,format=qcow2"))
         cmd = ["qemu-system-x86_64", "-machine", "q35,smm=on,accel=kvm", "-cpu", "host", "-m", "6144", "-smp", "4",
                "-global", "driver=cfi.pflash01,property=secure,value=on", "-global", "ICH9-LPC.disable_s3=1",
                "-drive", f"if=pflash,unit=0,format=raw,readonly=on,file={a.code}",
@@ -304,8 +305,11 @@ def phase_bootc(a):
         record(vm, "after-repair", "efibootmgr -v; ls -la /var/lib/rime/boot-migrate/ /var/lib/rime/boot-migrate/archive-*/;"
                " cat /var/lib/rime/boot-migrate/phase; mkdir -p /run/e && mount -o ro LABEL=EFI-SYSTEM /run/e 2>/dev/null"
                " || mount -o ro /dev/vda2 /run/e; find /run/e -maxdepth 3 | sort; umount /run/e")
-    vm.sh("mkfs.ext4 -q -F -L rime-backup /dev/disk/by-id/virtio-rime-backup && mkdir -p /run/backup"
-          " && mount /dev/disk/by-id/virtio-rime-backup /run/backup")
+    if a.no_backup:
+        vm.sh("! test -e /dev/disk/by-id/virtio-rime-backup && ! findmnt /run/backup")
+    else:
+        vm.sh("mkfs.ext4 -q -F -L rime-backup /dev/disk/by-id/virtio-rime-backup && mkdir -p /run/backup"
+              " && mount /dev/disk/by-id/virtio-rime-backup /run/backup")
     if a.finish:
         finish_seed(vm)
     # D2: the left-behind report BEFORE anything is written (--payload previews the new system's carry plan).
@@ -320,11 +324,13 @@ def phase_bootc(a):
     # greeter-first run below proves the NixOS side wins whatever this is.
     record(vm, "bootc-hypr-config", f"ls -la --time-style=full-iso /var/home/{USER}/.config/hypr/rime/;"
            f" echo BOOTC-KNOB=$(grep -c no_update_news /var/home/{USER}/.config/hypr/rime/appearance.lua)", ok=False)
-    rc, out = record(vm, "check", f"{a.migrate} check --explain --backup /run/backup"
+    rc, out = record(vm, "check", f"{a.migrate} check --explain{a.backup_arg}"
                      " --payload /run/payload/payload", ok=False)
     if "left behind" not in out.lower():
         raise Timeout("check --explain --payload printed no left-behind report")
-    rc, out = record(vm, "check-json", f"{a.migrate} check --json --backup /run/backup", ok=False)
+    if a.no_backup and "backup: none" not in out:
+        raise Timeout("check without --backup did not say what the restore point is")
+    rc, out = record(vm, "check-json", f"{a.migrate} check --json{a.backup_arg}", ok=False)
     if "CPU vendor" not in out and "microcode" not in out:
         say("[bootc2] note: check --json names no CPU vendor (the carry preview is in check --explain)")
     if a.readiness:
@@ -345,10 +351,12 @@ def phase_bootc(a):
         if a.interrupt_probe:
             interrupt_probe(a)
         vm = boot_for_probe(a, "bootc4", None)
-    rc, out = record(vm, "start", f"time {a.migrate} start --backup /run/backup"
+    rc, out = record(vm, "start", f"time {a.migrate} start{a.backup_arg}"
                      " --payload /run/payload/payload --yes", timeout=5400, ok=False)
     if rc != 0:
         raise Timeout(f"start failed rc={rc}")
+    if a.no_backup and "restore point: " not in out:
+        raise Timeout("start without --backup ran no restore test on @pre-nixos")
     record(vm, "after-start", "btrfs subvolume list /sysroot; findmnt /boot; for b in /sysroot/boot /boot; do echo \"== $b\";"
            " cat $b/grub2/custom.cfg; ls -la $b $b/rime/nixos 2>/dev/null; cat $b/grub2/rime-nixos.cfg 2>/dev/null; done;"
            " ls -la /run/backup /run/backup/*; cat /var/lib/rime/nixos-bridge/state.json", ok=False)
@@ -372,7 +380,7 @@ def rollback_probe(a, vm):
     vm.sh("sed 's/^        step(\"fsck gate after\")$/        raise Failed(\"lab fault injection: after the boot entry\")/'"
           f" {a.bridge} > /run/rime-migrate-fault && chmod 755 /run/rime-migrate-fault"
           f" && ! cmp -s {a.bridge} /run/rime-migrate-fault")
-    rc, out = record(vm, "rollback-start", "/run/rime-migrate-fault start --backup /run/backup"
+    rc, out = record(vm, "rollback-start", f"/run/rime-migrate-fault start{a.backup_arg}"
                      " --payload /run/payload/payload --yes", timeout=5400, ok=False)
     if rc != 10 or "FAILED: lab fault injection" not in out or "== rolled back" not in out:
         raise Timeout(f"rollback probe: rc={rc}, want 10 with the injected fault and '== rolled back'")
@@ -1012,12 +1020,17 @@ def main():
                     help="(readiness) on an overlay: a start interrupted by Ctrl-C rolls back; every verb allowed")
     ap.add_argument("--no-finish-interrupt", dest="finish_interrupt", action="store_false",
                     help="(finish) skip the overlay where finish --yes is SIGKILLed mid-way, then re-run")
+    ap.add_argument("--no-backup", action="store_true",
+                    help="(bootc) check and start without --backup: the restore point is @pre-nixos (no drive)")
     ap.add_argument("--finish-kill-at", default="@pre-nixos",
                     help="(finish) the finish.json step after which the interrupted finish is SIGKILLed")
     a = ap.parse_args()
     a.finish = "finish" in a.phases.split(",")
     a.bridge = "/usr/libexec/rime-migrate" if a.readiness else "/run/payload/rime-migrate"
     a.migrate = "rime migrate" if a.readiness else a.bridge
+    a.backup_arg = "" if a.no_backup else " --backup /run/backup"
+    if a.no_backup and (a.kill_probe or a.interrupt_probe):
+        ap.error("--no-backup: the kill and interrupt probes start with --backup on a second disk")
     if a.sb:
         a.vars = os.path.join(a.lab, "fw", "vars-sb-bridge.fd")
     a.work = os.path.join(a.lab, f"run-{a.kind}")
@@ -1032,7 +1045,8 @@ def main():
         if a.kind == "E":
             subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", "-F", "raw", "-b", f"{d}/win.raw",
                             f"{a.work}/win.qcow2"], check=True)
-        subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", f"{a.work}/backup.qcow2", "40G"], check=True)
+        if not a.no_backup:
+            subprocess.run(["qemu-img", "create", "-q", "-f", "qcow2", f"{a.work}/backup.qcow2", "40G"], check=True)
         shutil.copy(a.vars, os.path.join(a.work, "vars.fd"))
     say(f"bridge OVMF proof {a.kind}: Secure Boot {'ON' if a.sb else 'OFF'} ({os.path.basename(a.code)}"
         f" + {os.path.basename(a.vars)})")
