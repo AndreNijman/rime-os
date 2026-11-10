@@ -103,6 +103,8 @@ let
     [ "restore-test-no-recheck" "rime-bridge.py" ''s/^        if c is None or (c.st_size, c.st_mtime_ns, c.st_ino) != (b.st_size, b.st_mtime_ns, b.st_ino):$/        if False:/'' "a file written while read fails the move" ]
     [ "sample-misses-the-end" "rime-bridge.py" ''s/^    return \[items\[i \* (n - 1) \/\/ (k - 1)\] for i in range(k)\]$/    return items[::max(1, n \/\/ k)][:k]/'' "the restore sample never reaches the end of home" ]
     [ "names-unescaped" "rime-bridge.py" ''s/c if c.isprintable() else/c if True else/'' "a file name writes control characters to the terminal" ]
+    # The L16's first real start: absolute links in a container layer in home taken for nested subvolumes.
+    [ "restore-test-follows-links" "rime-bridge.py" ''s/^        for d in \[d for d in dirs if not os.path.islink(os.path.join(root, d))$/        for d in [d for d in dirs if True/'' "a link to a directory elsewhere taken for a nested subvolume" ]
   ];
   hlMutants = [
     [ "hostlayer-no-boot" "rime-hostlayer.py" ''s/"mount", "luks", "boot"}/"mount", "luks"}/'' "[boot] table refused" ]

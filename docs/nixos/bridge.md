@@ -239,6 +239,9 @@ the L16. It is now optional. Without it the restore point is the read-only `@pre
 (it holds the old system and home as they were), and `start` restore-tests it right after taking it
 (`test_restore_point`): home in the snapshot must be in the snapshot's own subvolume, and so must every directory under
 it (a nested subvolume leaves an empty placeholder, inode 2, in a snapshot: measured on 7.2, its st_dev differs too).
+A link to a directory is never taken for one: it is a name in the snapshot itself, and followed it lands wherever it
+points (the first real move refused on the absolute links inside a container layer in home, `etc/ssl/certs ->
+/etc/pki/tls/certs`, which reach the running system's /etc).
 Up to 64 files spread evenly over the whole sorted list, first and last included, must read back equal from the live
 home. The machine is in use while `start` runs, so a file whose size or mtime changed since the snapshot, or changed
 while it was read, counts as changed, not as a failure; at least one must compare equal when home has any, and an empty
@@ -257,13 +260,14 @@ same layout while it has the disk mounted; facts that cannot say are noted, and 
 
 **Proof.** `bridge-unit`: `RestorePoint` (equal, changed since, a snapshot that reads back different, nothing comparable,
 no home, a placeholder home, an empty home, an empty snapshot of a full home, a subvolume nested in home, a file written
-while it is read, an escaped file name), `home_layout`/`subvolume_paths`/`same_subvolume`/`spread`/`shown`, `StartRecord` (no backup step, the restore test runs on `@pre-nixos` and its
+while it is read, an escaped file name, a link to a directory on another filesystem), `home_layout`/`subvolume_paths`/`same_subvolume`/`spread`/`shown`, `StartRecord` (no backup step, the restore test runs on `@pre-nixos` and its
 failure deletes it and rolls back; a home subvolume refused before anything is touched), `test_backup_is_optional`,
 `test_home_subvolume_needs_backup`, `test_home_nested_subvolume_refused`, the finish dry-run text. Mutants killed:
 `backup-required-again`, `restore-point-untested`, `restore-test-placeholder-trusted`, `restore-test-compares-nothing`,
 `restore-test-no-mtime-guard`, `home-subvolume-allowed`, `finish-claims-a-backup`, and after review `home-nested-allowed`,
 `home-layout-ancestor-ignored`, `placeholder-inode-trusted`, `restore-test-nested-trusted`,
-`restore-test-empty-snapshot-trusted`, `restore-test-no-recheck`, `sample-misses-the-end`, `names-unescaped`. On a
+`restore-test-empty-snapshot-trusted`, `restore-test-no-recheck`, `sample-misses-the-end`, `names-unescaped`,
+and `restore-test-follows-links`. On a
 real btrfs image (loop, 7.2): `home_layout` names a subvolume made in home, and `test_restore_point` passes a snapshot
 taken before it (64 of 100 files equal) and fails the one taken after ("1 subvolume(s) nested in it are empty
 placeholders"). The OVMF lab's `--no-backup` run attaches no backup disk at all (the guest asserts it has none).
