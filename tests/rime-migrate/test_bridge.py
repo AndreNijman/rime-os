@@ -284,6 +284,108 @@ class Refusals(unittest.TestCase):
         self.assertEqual(B.evaluate(f, ok)[1], [])
         self.assertEqual(names(B.evaluate(f, {"path": "/nope", "exists": False})[1]), ["backup-missing"])
 
+    def test_backup_is_optional(self):
+        # A move needs no space beyond the disk (Andre, 2026-11-10): with no --backup the restore point is @pre-nixos.
+        f = base_facts()
+        f["home"].update(in_top_level=True, nested_subvolumes=[])
+        c, r, n = B.evaluate(f)
+        self.assertEqual(r, [])
+        self.assertFalse([x for x in n if "could not read how home sits" in x], n)
+        text = B.report(f, c, r, n, True)
+        self.assertIn("backup: none (optional", text)
+        self.assertIn("@pre-nixos", text)
+        self.assertIn("does not survive the disk failing", text)
+
+    def test_home_subvolume_needs_backup(self):
+        # A snapshot of the top level does not hold a nested subvolume: with no off-disk copy that home would have
+        # no restore point, so start is refused by name; --backup lifts it; unknown (offline facts) does not refuse.
+        f = base_facts()
+        f["home"]["in_top_level"] = False
+        self.assertEqual(names(B.evaluate(f)[1]), ["home-subvolume-needs-backup"])
+        ok = {"path": "/mnt/usb", "exists": True, "disk": "/dev/sdb", "free_bytes": 100 * GB}
+        self.assertEqual(B.evaluate(f, ok)[1], [])
+        f["home"].pop("in_top_level")
+        self.assertEqual(B.evaluate(f)[1], [])
+
+    def test_unknown_home_layout_is_noted(self):
+        # Facts that could not say how home sits (no btrfs tool, an unreadable top level): no refusal, but the check
+        # says so; start's restore test then decides.
+        f = base_facts()
+        c, r, n = B.evaluate(f)
+        self.assertEqual(r, [])
+        self.assertTrue([x for x in n if "could not read how home sits" in x], n)
+
+    def test_home_nested_subvolume_refused(self):
+        # Neither the reflink copy nor a backup (both cp --one-file-system) enters a subvolume nested in home, and a
+        # snapshot holds only an empty placeholder for it: refused with or without --backup, names escaped.
+        f = base_facts()
+        f["home"].update(in_top_level=True, nested_subvolumes=["/ostree/deploy/default/var/home/u/box\x1b[2J"])
+        _, r, _ = B.evaluate(f)
+        self.assertEqual(names(r), ["home-nested-subvolume"])
+        self.assertNotIn("\x1b", r[0][1])
+        self.assertIn("/u/box\\x1b[2J", r[0][1])
+        ok = {"path": "/mnt/usb", "exists": True, "disk": "/dev/sdb", "free_bytes": 100 * GB}
+        self.assertEqual(names(B.evaluate(f, ok)[1]), ["home-nested-subvolume"])
+
+    def test_home_layout(self):
+        saved = (B.subvolume_paths, B.same_subvolume)
+        try:
+            B.same_subvolume = lambda top, path: True
+            var = "/ostree/deploy/default/var"
+            B.subvolume_paths = lambda top: ["@pre", "ostree/deploy/default/var/homeless",
+                                             "ostree/deploy/default/var/home/u/a b", "ostree/deploy/default/var/home/v"]
+            self.assertEqual(B.home_layout("/top", var), {"in_top_level": True, "nested_subvolumes": [
+                var + "/home/u/a b", var + "/home/v"]})
+            for anc in ("ostree", "ostree/deploy/default/var", "ostree/deploy/default/var/home"):
+                B.subvolume_paths = lambda top, anc=anc: [anc]
+                self.assertEqual(B.home_layout("/top", var), {"in_top_level": False, "nested_subvolumes": []}, anc)
+            B.subvolume_paths = lambda top: None
+            self.assertEqual(B.home_layout("/top", var), {"in_top_level": True, "nested_subvolumes": None})
+        finally:
+            B.subvolume_paths, B.same_subvolume = saved
+
+    def test_subvolume_paths_reads_btrfs_list(self):
+        saved = B.run
+        try:
+            out = ("ID 256 gen 9 top level 5 path var/home\n"
+                   "ID 257 gen 9 top level 5 path ostree/deploy/default/var/home/u/my path\n")
+            B.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, out, "")
+            self.assertEqual(B.subvolume_paths("/t"), ["var/home", "ostree/deploy/default/var/home/u/my path"])
+            B.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, "", "not btrfs")
+            self.assertIsNone(B.subvolume_paths("/t"))
+        finally:
+            B.run = saved
+
+    def test_same_subvolume_knows_btrfs_inodes(self):
+        # Every subvolume has its own st_dev, and a snapshot's placeholder for a nested one is inode 2 whatever st_dev.
+        def st(dev, ino):
+            return os.stat_result((0o40755, ino, dev, 1, 0, 0, 0, 0, 0, 0))
+        table = {"/t": st(40, 256), "/t/home": st(40, 300), "/t/ph": st(40, 2), "/t/sub": st(42, 256),
+                 "/t/other": st(41, 300)}
+        saved = B.os.stat
+        try:
+            B.os.stat = lambda p, *a, **kw: table[p]
+            self.assertTrue(B.same_subvolume("/t", "/t"))
+            self.assertTrue(B.same_subvolume("/t", "/t/home"))
+            self.assertFalse(B.same_subvolume("/t", "/t/ph"))
+            self.assertFalse(B.same_subvolume("/t", "/t/sub"))
+            self.assertFalse(B.same_subvolume("/t", "/t/other"))
+        finally:
+            B.os.stat = saved
+
+    def test_spread_reaches_the_end(self):
+        for n in (0, 1, 64, 65, 100, 127, 128, 1000):
+            got = B.spread(list(range(n)), 64)
+            self.assertEqual(len(got), min(n, 64), n)
+            self.assertEqual(len(set(got)), len(got), n)
+            if n:
+                self.assertEqual((got[0], got[-1]), (0, n - 1), n)
+        self.assertEqual(B.spread([5, 6, 7], 1), [5])
+
+    def test_shown_escapes_control_characters(self):
+        self.assertEqual(B.shown("a\x1b[2Jb\nc\u202ed"), "a\\x1b[2Jb\\x0ac\\u202ed")
+        self.assertEqual(B.shown("/home/ü/ok file"), "/home/ü/ok file")
+
     def test_already_started(self):
         f = base_facts()
         f["existing_subvols"] = ["@nixos"]
@@ -714,10 +816,11 @@ class UndoBoot(unittest.TestCase):
 
 class Cli(unittest.TestCase):
     def test_needs_root_or_refuses_usage(self):
-        r = subprocess.run([PROG, "start", "--backup", "/x", "--payload", "/y"], capture_output=True, text=True)
-        if os.geteuid() != 0:
-            self.assertEqual(r.returncode, 2)
-            self.assertIn("needs root", r.stderr)
+        for args in (["--backup", "/x", "--payload", "/y"], ["--payload", "/y"]):   # --backup is optional
+            r = subprocess.run([PROG, "start", *args], capture_output=True, text=True)
+            if os.geteuid() != 0:
+                self.assertEqual(r.returncode, 2)
+                self.assertIn("needs root", r.stderr)
 
     def test_no_forbidden_tools(self):
         with open(PROG) as f:
