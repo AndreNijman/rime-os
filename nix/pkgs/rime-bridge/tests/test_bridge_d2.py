@@ -1129,6 +1129,16 @@ class RestorePoint(unittest.TestCase):
         with self.assertRaisesRegex(B.Failed, "1 subvolume.s. nested in it are empty placeholders"):
             self.restore_test()
 
+    def test_a_link_to_a_directory_elsewhere_is_not_a_placeholder(self):
+        # A container layer in home holds absolute links to directories (etc/ssl/certs -> /etc/pki/tls/certs).
+        # Followed, they land on another filesystem; the link itself is a name in the snapshot's own subvolume.
+        for base in (self.snap_home, self.live):
+            os.symlink("/proc", os.path.join(base, "u", "elsewhere"))
+        link = os.path.join(self.snap_home, "u", "elsewhere")
+        self.assertIs(B.same_subvolume(self.snap, link), False)  # the real check, followed, says "elsewhere"
+        got = self.restore_test()
+        self.assertEqual((got["files"], got["equal"]), (10, 10))
+
     def test_a_file_written_while_it_is_read_is_changed_since(self):
         live = os.path.join(self.live, "u", "d2", "f5")
         real = B.sha256_file

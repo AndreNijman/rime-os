@@ -1709,7 +1709,11 @@ def test_restore_point(snap, var_fsroot, live_home, sample=64):
         raise Failed(f"the restore point {snap} does not hold home ({snap_home})")
     files, nested = [], []
     for root, dirs, fs in os.walk(snap_home):
-        for d in [d for d in dirs if not same_subvolume(snap, os.path.join(root, d))]:
+        # os.walk lists a link to a directory with the directories (and does not enter it). The link is a name in
+        # the snapshot's own subvolume, never a placeholder; followed, it lands wherever it points (an absolute
+        # link in a container layer, etc/ssl/certs -> /etc/pki/tls/certs, reaches the running system's /etc).
+        for d in [d for d in dirs if not os.path.islink(os.path.join(root, d))
+                  and not same_subvolume(snap, os.path.join(root, d))]:
             dirs.remove(d)
             nested.append(os.path.join(root, d))
         for n in fs:
