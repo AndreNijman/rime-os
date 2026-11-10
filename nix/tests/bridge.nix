@@ -93,7 +93,16 @@ let
     [ "restore-test-placeholder-trusted" "rime-bridge.py" ''s/    if not os.path.isdir(snap_home) or not same_subvolume(snap, snap_home):/    if not os.path.isdir(snap_home):/'' "a nested home's empty placeholder taken for home" ]
     [ "restore-test-compares-nothing" "rime-bridge.py" ''s/^    if files and not equal:$/    if False:/'' "a restore test that compared no file passes" ]
     [ "restore-test-no-mtime-guard" "rime-bridge.py" ''s/        if not stat.S_ISREG(b.st_mode) or (a.st_size, a.st_mtime_ns) != (b.st_size, b.st_mtime_ns):/        if not stat.S_ISREG(b.st_mode):/'' "a file written after the snapshot fails the move" ]
-    [ "home-subvolume-allowed" "rime-bridge.py" ''s/    if backup is None and (facts.get("home") or {}).get("in_top_level") is False:/    if False:/'' "a home subvolume moved with no restore point" ]
+    [ "home-subvolume-allowed" "rime-bridge.py" ''s/^    if backup is None and home.get("in_top_level") is False:$/    if False:/'' "a home subvolume moved with no restore point" ]
+    # PR #161 review: nested subvolumes, placeholders, sampling, concurrent writes, escaped names.
+    [ "home-nested-allowed" "rime-bridge.py" ''s/^    if home.get("nested_subvolumes"):$/    if False:/'' "a subvolume nested in home left behind by the copy" ]
+    [ "home-layout-ancestor-ignored" "rime-bridge.py" ''s/^    if any(home_rel == p or home_rel.startswith(p + "\/") for p in paths):$/    if False:/'' "a subvolume /var or home taken for the top level" ]
+    [ "placeholder-inode-trusted" "rime-bridge.py" ''s/^    return a.st_dev == b.st_dev and b.st_ino != BTRFS_EMPTY_SUBVOL_INO$/    return a.st_dev == b.st_dev/'' "a snapshot's empty placeholder taken for the directory" ]
+    [ "restore-test-nested-trusted" "rime-bridge.py" ''s/^    if nested:$/    if False:/'' "a restore point missing a nested part of home passes" ]
+    [ "restore-test-empty-snapshot-trusted" "rime-bridge.py" ''s/^    if not files and has_regular_file(live_home):$/    if False:/'' "an empty snapshot of a full home passes" ]
+    [ "restore-test-no-recheck" "rime-bridge.py" ''s/^        if c is None or (c.st_size, c.st_mtime_ns, c.st_ino) != (b.st_size, b.st_mtime_ns, b.st_ino):$/        if False:/'' "a file written while read fails the move" ]
+    [ "sample-misses-the-end" "rime-bridge.py" ''s/^    return \[items\[i \* (n - 1) \/\/ (k - 1)\] for i in range(k)\]$/    return items[::max(1, n \/\/ k)][:k]/'' "the restore sample never reaches the end of home" ]
+    [ "names-unescaped" "rime-bridge.py" ''s/c if c.isprintable() else/c if True else/'' "a file name writes control characters to the terminal" ]
   ];
   hlMutants = [
     [ "hostlayer-no-boot" "rime-hostlayer.py" ''s/"mount", "luks", "boot"}/"mount", "luks"}/'' "[boot] table refused" ]

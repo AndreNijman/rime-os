@@ -1112,9 +1112,50 @@ class RestorePoint(unittest.TestCase):
             self.restore_test()
 
     def test_an_empty_home_passes(self):
+        for h in (self.snap_home, self.live):
+            shutil.rmtree(h)
+            os.makedirs(h)
+        self.assertEqual(self.restore_test()["files"], 0)
+
+    def test_an_empty_snapshot_of_a_full_home_fails(self):
         shutil.rmtree(self.snap_home)
         os.makedirs(self.snap_home)
-        self.assertEqual(self.restore_test()["files"], 0)
+        with self.assertRaisesRegex(B.Failed, "holds an empty home, and home is not empty"):
+            self.restore_test()
+
+    def test_a_subvolume_nested_in_home_fails(self):
+        # Its place in the snapshot is an empty placeholder (inode 2): the snapshot does not hold that part of home.
+        B.same_subvolume = lambda top, path: not path.rstrip("/").endswith("/u/d1")
+        with self.assertRaisesRegex(B.Failed, "1 subvolume.s. nested in it are empty placeholders"):
+            self.restore_test()
+
+    def test_a_file_written_while_it_is_read_is_changed_since(self):
+        live = os.path.join(self.live, "u", "d2", "f5")
+        real = B.sha256_file
+
+        def sha(p):
+            h = real(p)
+            if p == live:
+                pathlib.Path(p).write_bytes(b"written while read\n")
+                return "0" * 64
+            return h
+        B.sha256_file, saved = sha, B.sha256_file
+        try:
+            got = self.restore_test()
+        finally:
+            B.sha256_file = saved
+        self.assertEqual((got["equal"], got["changed_since"]), (9, 1))
+
+    def test_a_differing_file_name_is_escaped(self):
+        name = os.path.join(self.snap_home, "u", "d0", "evil\x1b]0;x\x07")
+        for base in (self.snap_home, self.live):
+            p = os.path.join(base, os.path.relpath(name, self.snap_home))
+            pathlib.Path(p).write_bytes(b"A" if base == self.snap_home else b"B")
+            os.utime(p, ns=(10**18, 10**18))
+        with self.assertRaises(B.Failed) as e:
+            self.restore_test()
+        self.assertNotIn("\x1b", str(e.exception))
+        self.assertIn("evil\\x1b]0;x\\x07", str(e.exception))
 
 
 if __name__ == "__main__":

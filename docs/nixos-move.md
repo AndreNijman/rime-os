@@ -19,7 +19,7 @@ through unchanged, so its own `--help` is the reference:
 The copy here is taken byte for byte from the NixOS side's `rime-bridge.py`
 (first line changed to `#!/usr/bin/python3 -I`), at the NixOS branch's bridge
 branch feat/migrate-without-drive (sha256 of the file without its first line:
-`0389f3252ee3b7b32545056fa7e7da771ab4a868d125dcc295c715aba6820813`). Its tests
+`afde9ce7d06149818be8db4f69243159850fc3234eebef76547421522a6c2019`). Its tests
 (`test_bridge.py`, `test_bridge_d2.py`) are in `tests/rime-migrate/` and run
 from `tests/test-rime-migrate.sh`. The fixture uses a synthetic root UUID
 (`0b0b0b0b-…`), never a real machine's. Compare again, by that hash, before
@@ -47,7 +47,10 @@ copies just the LUKS header and `rime backup`'s keys (a few MB) at any time.
 
 When home is a btrfs subvolume of its own, a snapshot of the top level does not
 hold it, so `start` without `--backup` is refused as
-`home-subvolume-needs-backup`. A Rime install never makes one.
+`home-subvolume-needs-backup`. A Rime install never makes one. A btrfs
+subvolume inside home (containers' btrfs storage, for one) is refused as
+`home-nested-subvolume`, with or without `--backup`, naming each: neither the
+copy of home nor a backup enters it, so its files would be left behind.
 
 ## How much free space the move needs
 
