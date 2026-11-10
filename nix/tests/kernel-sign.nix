@@ -190,6 +190,10 @@ assert !(mkSystem { }).system.build.rimeKernelSigning.signed;
 assert
   (mkSystem { signatureDir = ../pkgs/kernel/signing/signatures; }).system.build.rimeKernelSigning.signed
   == builtins.pathExists (../pkgs/kernel/signing/signatures + "/${info.imageHash}.sig");
+# The shipped system refuses an unsigned kernel, and its kernel is signed. 2026.11.07 shipped 7.2.11 unsigned:
+# the kernel moved, no signature was committed, and nothing required one.
+assert self.nixosConfigurations.rime.config.rime.kernel.signing.require;
+assert self.nixosConfigurations.rime.config.system.build.rimeKernelSigning.signed;
 {
   kernel-sign = pkgs.runCommand "rime-kernel-sign" { nativeBuildInputs = tools; } ''
     set -euo pipefail
@@ -217,6 +221,13 @@ assert
     echo "--- stripping the signature leaves an image that fails verification"
     cp "$img" stripped; chmod u+w stripped; sbattach --remove stripped
     if sbverify --cert ${keyA}/cert.pem stripped; then echo "FAIL: stripped image still verifies"; exit 1; fi
+
+    echo "--- the SHIPPED kernel (nixosConfigurations.rime) verifies against the committed Rime MOK, one signature"
+    shipped=${self.nixosConfigurations.rime.config.system.build.rimeKernelBootImage}/${target}
+    sbverify --cert ${../pkgs/kernel/signing/rime-mok.pem} "$shipped"
+    sbverify --list "$shipped" | tee shipped-list
+    test "$(grep -cE '^signature [0-9]+' shipped-list)" = 1
+    if sbverify --cert ${keyA}/cert.pem "$shipped"; then echo "FAIL: shipped kernel verified against the test key"; exit 1; fi
 
     ${lib.concatStrings (
       lib.mapAttrsToList (n: f: ''
