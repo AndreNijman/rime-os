@@ -232,7 +232,9 @@ jobs:
           fi
           signed=$(nix eval --raw "path:.#nixosConfigurations.$HOST.config.system.build.rimeKernelSigning.signed" --apply 'b: if b then "yes" else "no"')
           [[ $signed == yes ]] || { echo "::error::the module did not pick up ${{ steps.eval.outputs.sigfile }}"; exit 1; }
-          nix build -L --no-link --print-out-paths \
+          # The attach + sbverify derivation is new (it contains this run's signature), so it is built here even
+          # with source=cache (max-jobs = 0): the image it attaches to was realised and path-checked above.
+          nix build -L --no-link --print-out-paths --max-jobs 1 \
             "path:.#nixosConfigurations.$HOST.config.system.build.rimeKernelBootImage"
 
       - name: Result
