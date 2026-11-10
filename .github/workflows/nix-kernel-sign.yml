@@ -232,8 +232,18 @@ jobs:
           fi
           signed=$(nix eval --raw "path:.#nixosConfigurations.$HOST.config.system.build.rimeKernelSigning.signed" --apply 'b: if b then "yes" else "no"')
           [[ $signed == yes ]] || { echo "::error::the module did not pick up ${{ steps.eval.outputs.sigfile }}"; exit 1; }
-          nix build -L --no-link --print-out-paths \
-            "path:.#nixosConfigurations.$HOST.config.system.build.rimeKernelBootImage"
+          # The attach + sbverify derivation is new (it contains this run's signature), so it is built here even
+          # with source=cache (max-jobs = 0). Its inputs are realised first under this run's own max-jobs, so with
+          # source=cache a missing input fails here instead of being built: the one local build is that derivation.
+          drv=$(nix eval --raw "path:.#nixosConfigurations.$HOST.config.system.build.rimeKernelBootImage.drvPath")
+          # The exact outputs it uses, as drv^out,dev (Nix 2.35 JSON: .derivations / .inputs.drvs, no store prefix).
+          mapfile -t inputs < <(nix derivation show "$drv" | jq -r '(.derivations // .) | to_entries[0].value
+            | (.inputs.drvs // .inputDrvs) | to_entries[]
+            | (if (.key | startswith("/")) then .key else "/nix/store/" + .key end) + "^" + (.value.outputs | join(","))')
+          if (( ${#inputs[@]} )); then
+            nix build --no-link "${inputs[@]}"
+          fi
+          nix build -L --no-link --print-out-paths --max-jobs 1 "$drv^*"
 
       - name: Result
         id: result
