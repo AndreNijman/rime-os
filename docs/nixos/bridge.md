@@ -308,6 +308,16 @@ step), an unreadable one `start-record-unreadable`. `check --json` carries the r
 each end in `rolled back` with the masks undone; check and start refuse over each kind of record and start touches
 nothing; a rolled-back record allows); mutants `start-early-steps-outside-rollback` and `check-ignores-start-record`.
 
+**A rollback leaves the old system's units as it found them (2026-11-11).** The first real move rolled back (the
+restore test, fixed separately) and left `rime-update-check.timer` and `rime-store-compact.timer` FAILED: `mask_old_side`
+masked their services while the timers ran ("Unit to trigger vanished", result `resources`), stopped them only after,
+and the undo only unmasked. A failed unit holds the next `rime update`, so the machine stopped updating until a reboot.
+Now `mask_old_side` stops the timers before it masks anything and records which were running (`timers_running` in the
+record); `unmask_old_side` resets the units it masked to not-failed and starts those timers again. Proof:
+`bridge-unit`'s `OldSide` tests (timers stop before the reload that applies the masks; a rollback resets the masked
+units and starts only the timer that was running; a mask made by someone else is kept and left alone); mutants
+`timers-not-stopped-first`, `rollback-leaves-failed`, `rollback-timers-not-started`.
+
 ### `[boot] microcode` comes from the moved machine's CPU (bridge3)
 
 **Decision.** `rime-hostlayer carry` writes `[boot] microcode = "intel"` or `"amd"` into host.toml from the

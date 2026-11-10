@@ -1048,6 +1048,63 @@ class StartRecord(unittest.TestCase):
             self.assertEqual(got[0], name, rec)
 
 
+class OldSide(unittest.TestCase):
+    """mask_old_side / unmask_old_side: start masks the old side's timers and services; a rollback puts it back."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.saved = (B.run, B.SYSTEMD_ETC)
+        B.SYSTEMD_ETC = self.d
+        self.calls = []
+
+        def run(cmd, check=True, capture=True, **kw):
+            self.calls.append(list(cmd))
+            # Only the update timer is running (the compactor's timer, say, was stopped by hand).
+            rc = 0 if cmd[:3] != ["systemctl", "is-active", "--quiet"] or cmd[3] == "rime-update-check.timer" else 3
+            return B.subprocess.CompletedProcess(cmd, rc, "", "")
+        B.run = run
+
+    def tearDown(self):
+        B.run, B.SYSTEMD_ETC = self.saved
+        shutil.rmtree(self.d)
+
+    def mask(self, state):
+        with contextlib.redirect_stdout(io.StringIO()):
+            B.mask_old_side(state)
+
+    def test_timers_stop_before_their_services_are_masked(self):
+        # Masking the service a running timer triggers fails the timer ("Unit to trigger vanished").
+        state = {}
+        self.mask(state)
+        stops = [i for i, c in enumerate(self.calls) if c[:2] == ["systemctl", "stop"]]
+        reload = self.calls.index(["systemctl", "daemon-reload"])
+        self.assertEqual(len(stops), 2)
+        self.assertLess(max(stops), reload)
+        self.assertEqual(sorted(state["masked"]), sorted(B.MASK_UNITS))
+        self.assertEqual(state["timers_running"], ["rime-update-check.timer"])
+        self.assertEqual(os.readlink(os.path.join(self.d, "rime-update-check.service")), "/dev/null")
+
+    def test_a_rollback_leaves_nothing_failed_and_restarts_the_running_timers(self):
+        state = {}
+        self.mask(state)
+        self.calls.clear()
+        B.unmask_old_side(state)
+        self.assertEqual(os.listdir(self.d), [])
+        self.assertIn(["systemctl", "reset-failed", *state["masked"]], self.calls)
+        self.assertIn(["systemctl", "start", "rime-update-check.timer"], self.calls)
+        self.assertNotIn(["systemctl", "start", "rime-store-compact.timer"], self.calls)
+        self.assertLess(self.calls.index(["systemctl", "daemon-reload"]),
+                        self.calls.index(["systemctl", "start", "rime-update-check.timer"]))
+
+    def test_a_mask_made_by_someone_else_is_kept(self):
+        os.symlink("/dev/null", os.path.join(self.d, "bootloader-update.service"))
+        state = {}
+        self.mask(state)
+        B.unmask_old_side(state)
+        self.assertEqual(os.listdir(self.d), ["bootloader-update.service"])
+        self.assertNotIn("bootloader-update.service", next(c for c in self.calls if c[1] == "reset-failed"))
+
+
 class RestorePoint(unittest.TestCase):
     """test_restore_point: the restore test start runs on @pre-nixos when there is no off-disk backup."""
 

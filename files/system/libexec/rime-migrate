@@ -82,6 +82,8 @@ OLD_LABELS = ("rime-root", "apex-root")
 # Old-side units masked at start (D2): the update timer, the store compactor, bootupd's own update, boot-v2.
 MASK_UNITS = ("rime-update-check.timer", "rime-update-check.service", "rime-store-compact.timer",
               "rime-store-compact.service", "bootloader-update.service", "rime-boot-migrate-confirm.service")
+OLD_SIDE_TIMERS = ("rime-update-check.timer", "rime-store-compact.timer")
+SYSTEMD_ETC = "/etc/systemd/system"
 WAIT_UNITS = ("rime-store-compact.service", "rime-migrate-from-apex.service")
 TRIAL_LEFTOVERS = ("EFI/systemd", "EFI/Linux", "loader")
 # The trial's trees in the btrfs top level (rime-boot-migrate's composefs repository and its deployment state).
@@ -1774,25 +1776,36 @@ def has_regular_file(top):
 
 def mask_old_side(state):
     # Recorded as it goes: a failure half way through still unmasks exactly what was masked (unmask_old_side).
+    # The timers stop FIRST: masking the service a running timer triggers fails that timer ("Unit to trigger
+    # vanished", result 'resources'), and after a rollback a failed unit holds the next update (the first real move
+    # left both timers failed until a reboot). The ones that were running are recorded, so a rollback starts them.
     masked = state.setdefault("masked", [])
+    running = state.setdefault("timers_running", [])
+    for u in OLD_SIDE_TIMERS:
+        if u not in running and run(["systemctl", "is-active", "--quiet", u], check=False).returncode == 0:
+            running.append(u)
+        run(["systemctl", "stop", u], check=False)
     for u in MASK_UNITS:
-        p = os.path.join("/etc/systemd/system", u)
+        p = os.path.join(SYSTEMD_ETC, u)
         if os.path.lexists(p):
             continue
         os.symlink("/dev/null", p)
         masked.append(u)
     run(["systemctl", "daemon-reload"], check=False)
-    for u in ("rime-update-check.timer", "rime-store-compact.timer"):
-        run(["systemctl", "stop", u], check=False)
     print(f"old side: masked {', '.join(masked) or 'nothing new'}", flush=True)
 
 
 def unmask_old_side(state):
     for u in state.get("masked", []):
-        p = os.path.join("/etc/systemd/system", u)
+        p = os.path.join(SYSTEMD_ETC, u)
         if os.path.islink(p) and os.readlink(p) == "/dev/null":
             os.unlink(p)
     run(["systemctl", "daemon-reload"], check=False)
+    # Leave the old system as start found it: nothing failed, and the timers that were running, running again.
+    if state.get("masked"):
+        run(["systemctl", "reset-failed", *state["masked"]], check=False)
+    for u in state.get("timers_running", []):
+        run(["systemctl", "start", u], check=False)
 
 
 def unit_busy(show):

@@ -105,6 +105,10 @@ let
     [ "names-unescaped" "rime-bridge.py" ''s/c if c.isprintable() else/c if True else/'' "a file name writes control characters to the terminal" ]
     # The L16's first real start: absolute links in a container layer in home taken for nested subvolumes.
     [ "restore-test-follows-links" "rime-bridge.py" ''s/^        for d in \[d for d in dirs if not os.path.islink(os.path.join(root, d))$/        for d in [d for d in dirs if True/'' "a link to a directory elsewhere taken for a nested subvolume" ]
+    # The first real move's rollback left both timers failed: the next update was held until a reboot.
+    [ "timers-not-stopped-first" "rime-bridge.py" ''s/^        run(\["systemctl", "stop", u\], check=False)$/        pass/'' "a running timer fails when its service is masked" ]
+    [ "rollback-leaves-failed" "rime-bridge.py" ''s/^    if state.get("masked"):$/    if False:/'' "a rollback leaves the masked units failed (the next update is held)" ]
+    [ "rollback-timers-not-started" "rime-bridge.py" ''s/^    for u in state.get("timers_running", \[\]):$/    for u in []:/'' "a rollback leaves the update timer stopped" ]
   ];
   hlMutants = [
     [ "hostlayer-no-boot" "rime-hostlayer.py" ''s/"mount", "luks", "boot"}/"mount", "luks"}/'' "[boot] table refused" ]
