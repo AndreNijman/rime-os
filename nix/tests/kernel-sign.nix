@@ -222,6 +222,13 @@ assert self.nixosConfigurations.rime.config.system.build.rimeKernelSigning.signe
     cp "$img" stripped; chmod u+w stripped; sbattach --remove stripped
     if sbverify --cert ${keyA}/cert.pem stripped; then echo "FAIL: stripped image still verifies"; exit 1; fi
 
+    echo "--- the SHIPPED kernel (nixosConfigurations.rime) verifies against the committed Rime MOK, one signature"
+    shipped=${self.nixosConfigurations.rime.config.system.build.rimeKernelBootImage}/${target}
+    sbverify --cert ${../pkgs/kernel/signing/rime-mok.pem} "$shipped"
+    sbverify --list "$shipped" | tee shipped-list
+    test "$(grep -cE '^signature [0-9]+' shipped-list)" = 1
+    if sbverify --cert ${keyA}/cert.pem "$shipped"; then echo "FAIL: shipped kernel verified against the test key"; exit 1; fi
+
     ${lib.concatStrings (
       lib.mapAttrsToList (n: f: ''
         echo "--- must fail: ${n}"
