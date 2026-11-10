@@ -190,6 +190,10 @@ assert !(mkSystem { }).system.build.rimeKernelSigning.signed;
 assert
   (mkSystem { signatureDir = ../pkgs/kernel/signing/signatures; }).system.build.rimeKernelSigning.signed
   == builtins.pathExists (../pkgs/kernel/signing/signatures + "/${info.imageHash}.sig");
+# The shipped system refuses an unsigned kernel, and its kernel is signed. 2026.11.07 shipped 7.2.11 unsigned:
+# the kernel moved, no signature was committed, and nothing required one.
+assert self.nixosConfigurations.rime.config.rime.kernel.signing.require;
+assert self.nixosConfigurations.rime.config.system.build.rimeKernelSigning.signed;
 {
   kernel-sign = pkgs.runCommand "rime-kernel-sign" { nativeBuildInputs = tools; } ''
     set -euo pipefail

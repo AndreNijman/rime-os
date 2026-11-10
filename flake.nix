@@ -65,6 +65,9 @@
             nixpkgs.hostPlatform = system;
             rime.installTarget.enable = true;
             rime.kernel.enable = true;
+            # This system is what a release ships (payload, installer, channel): under Secure Boot shim refuses an
+            # unsigned kernel, so a kernel change without a committed MOK signature must fail evaluation here.
+            rime.kernel.signing.require = true;
           }
         ];
       };
