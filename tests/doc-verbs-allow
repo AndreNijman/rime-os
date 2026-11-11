@@ -56,6 +56,7 @@ rime migrate check
 rime migrate repair-e
 rime migrate key-export
 rime migrate start
+rime migrate undo
 
 # docs/nixos-move.md names the step that gives back the space the old system
 # keeps after a move. `rime migrate finish` runs on Rime OS on NixOS (the system
