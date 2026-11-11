@@ -308,6 +308,31 @@ step), an unreadable one `start-record-unreadable`. `check --json` carries the r
 each end in `rolled back` with the masks undone; check and start refuse over each kind of record and start touches
 nothing; a rolled-back record allows); mutants `start-early-steps-outside-rollback` and `check-ignores-start-record`.
 
+**A rollback leaves the old system's units as it found them (2026-11-11).** The first real move rolled back (the
+restore test, fixed separately) and left `rime-update-check.timer` and `rime-store-compact.timer` FAILED: `mask_old_side`
+masked their services while the timers ran ("Unit to trigger vanished", result `resources`), stopped them only after,
+and the undo only unmasked. A failed unit holds the next `rime update`, so the machine stopped updating until a reboot.
+Now `mask_old_side` stops the timers before it masks anything and records which were running (`timers_running` in the
+record); `unmask_old_side` resets the units it masked to not-failed and starts those timers again. Proof:
+`bridge-unit`'s `OldSide` tests (timers stop before the reload that applies the masks; a rollback resets the masked
+units and starts only the timer that was running; a mask made by someone else is kept and left alone); mutants
+`timers-not-stopped-first`, `rollback-leaves-failed`, `rollback-timers-not-started`.
+
+After review (PR #164):
+- A unit that was already failed before `start` is recorded (`failed_before`), and a rollback does not reset it. The
+  health gate still sees a failure the move did not cause.
+- A timer that is still active after its `systemctl stop` fails the step, which rolls back; nothing is masked under it.
+  The check is the postcondition (`is-active`), not stop's exit code: stop exits 5 for a timer the image does not have.
+- The record is saved before each change: a timer's "was running" before its stop, each mask before its link. A power
+  loss leaves a `start-unfinished` record that names every timer stopped and every mask made.
+- `unmask_old_side` tries every step. A systemctl that fails is named on the output and kept in the record
+  (`old_side_left`); the disk's rollback is still complete.
+- One `start` at a time: a lock on `/run/rime-migrate/start.lock` (refused `start-running`), held from before the
+  record is read until the start finishes or rolls back.
+
+Proof: new `OldSide` tests and mutants `rollback-resets-old-failures`, `timer-stop-unchecked`,
+`timer-recorded-after-stop`, `mask-recorded-after-link`, `rollback-stops-at-first-failure`, `start-not-locked`.
+
 ### `[boot] microcode` comes from the moved machine's CPU (bridge3)
 
 **Decision.** `rime-hostlayer carry` writes `[boot] microcode = "intel"` or `"amd"` into host.toml from the

@@ -105,6 +105,17 @@ let
     [ "names-unescaped" "rime-bridge.py" ''s/c if c.isprintable() else/c if True else/'' "a file name writes control characters to the terminal" ]
     # The L16's first real start: absolute links in a container layer in home taken for nested subvolumes.
     [ "restore-test-follows-links" "rime-bridge.py" ''s/^        for d in \[d for d in dirs if not os.path.islink(os.path.join(root, d))$/        for d in [d for d in dirs if True/'' "a link to a directory elsewhere taken for a nested subvolume" ]
+    # The first real move's rollback left both timers failed: the next update was held until a reboot.
+    [ "timers-not-stopped-first" "rime-bridge.py" ''s/^        r = run(\["systemctl", "stop", u\], check=False)$/        r = run(["true"], check=False)/'' "a running timer fails when its service is masked" ]
+    [ "rollback-leaves-failed" "rime-bridge.py" ''s/^    if reset:$/    if False:/'' "a rollback leaves the masked units failed (the next update is held)" ]
+    [ "rollback-timers-not-started" "rime-bridge.py" ''s/^    for u in state.get("timers_running", \[\]):$/    for u in []:/'' "a rollback leaves the update timer stopped" ]
+    # PR #164 review: failures from before start, unchecked systemctl, a record saved after the change, two starts.
+    [ "rollback-resets-old-failures" "rime-bridge.py" ''s/^    reset = \[u for u in state.get("masked", \[\]) if u not in state.get("failed_before", \[\])\]$/    reset = list(state.get("masked", []))/'' "a rollback hides a failure start did not cause" ]
+    [ "timer-stop-unchecked" "rime-bridge.py" ''s/^        if run(\["systemctl", "is-active", "--quiet", u\], check=False).returncode == 0:$/        if False:/'' "a service masked under a timer that did not stop" ]
+    [ "timer-recorded-after-stop" "rime-bridge.py" ''/^    for u in OLD_SIDE_TIMERS:$/,/^        r = run/s/^        save()$/        pass/'' "a power loss after the stop forgets the timer was running" ]
+    [ "mask-recorded-after-link" "rime-bridge.py" ''/^        masked.append(u)$/{n;s/^        save()$/        pass/}'' "a power loss leaves a mask the record does not name" ]
+    [ "rollback-stops-at-first-failure" "rime-bridge.py" ''s/^        r = run(cmd, check=False)$/        r = run(cmd)/'' "a failed systemctl ends the rollback half way" ]
+    [ "start-not-locked" "rime-bridge.py" ''s/^        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)$/        pass/'' "two starts run at once" ]
   ];
   hlMutants = [
     [ "hostlayer-no-boot" "rime-hostlayer.py" ''s/"mount", "luks", "boot"}/"mount", "luks"}/'' "[boot] table refused" ]
