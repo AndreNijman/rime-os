@@ -585,6 +585,14 @@ class Preview(unittest.TestCase):
         self.assertEqual(cm.exception.name, "payload-boot-from-build")
         self.assertIn("RIME-ESP", str(cm.exception))
 
+    def test_boot_spelled_otherwise_refused(self):
+        """mount reads `/boot/`, `//boot`, `/./boot` as /boot (review of the first fix: only `/boot` was matched)."""
+        for where in ("/boot/", "//boot", "/./boot", "/boot//"):
+            self.assertEqual(B.fstab_mounts_boot(f"LABEL=RIME-ESP {where} vfat umask=0077 0 2\n"), "LABEL=RIME-ESP", where)
+        for where in ("/bootx", "/boot/efi", "/boot\\040x", "/mnt/boot"):
+            self.assertIsNone(B.fstab_mounts_boot(f"LABEL=X {where} vfat defaults 0 2\n"), where)
+        self.assertIsNone(B.fstab_mounts_boot("#LABEL=RIME-ESP /boot vfat umask=0077 0 2\n/boot\n"))
+
     def test_boot_from_host_accepted(self):
         """A system whose fstab has no /boot line (rime.rootfs's generator mounts it from host.toml) is shown."""
         man = self._with_fstab("# /dev/disk/by-label/RIME-ESP /boot vfat umask=0077 0 2\n"
@@ -884,7 +892,7 @@ class StartRecord(unittest.TestCase):
 
     NAMES = ("gather", "PAYLOAD_KEY_FILE", "mount", "run", "STATE", "RUN_DIR", "wait_units", "do_backup",
              "mask_old_side", "unmask_old_side", "fsck_gate", "containment_snapshot", "carry_preview", "boot_had",
-             "undo_boot", "test_restore_point")
+             "undo_boot", "test_restore_point", "chroot", "first_activation")
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -972,6 +980,33 @@ class StartRecord(unittest.TestCase):
         B.do_backup = self.fails_in("do_backup (there is no --backup)")
         B.mask_old_side = self.masks
         B.fsck_gate = lambda *a, **k: {}
+
+    def test_the_installed_system_is_checked_for_a_boot_mount(self):
+        # The preview is not the bytes start installs (review of the first fix): after `nix-env --set`, the installed
+        # toplevel's own etc/fstab is read in the target, and a /boot line there rolls the start back by name.
+        self.no_backup()
+        B.test_restore_point = lambda *a: {"sampled": 0}
+        man = json.load(open(os.path.join(self.payload, "manifest.json")))
+        chroots = []
+
+        def chroot(t, *cmd, **kw):
+            chroots.append(cmd)
+            out = ""
+            if cmd[:2] == (f"{man['toplevel']}/sw/bin/sh", "-c"):
+                out = "/dev/disk/by-label/RIME-ESP /boot/ vfat umask=0077 0 2\n"
+            return B.subprocess.CompletedProcess(cmd, 0, out, "")
+        B.chroot = chroot
+        B.first_activation = lambda *a, **k: self.fail("activated a system that mounts /boot from its build")
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(B.Refused) as cm:
+            self.start()
+        self.assertEqual(cm.exception.name, "payload-boot-from-build")
+        rec = self.record()
+        self.assertEqual(rec["steps"][-2:], ["install closure", "rolled back"], rec["steps"])
+        self.assertIn("RIME-ESP", rec["failed"])
+        sets = [i for i, c in enumerate(chroots) if "--set" in c]
+        checks = [i for i, c in enumerate(chroots) if c[:2] == (f"{man['toplevel']}/sw/bin/sh", "-c")]
+        self.assertEqual(len(checks), 1)
+        self.assertLess(sets[0], checks[0], "the check ran before the system was installed")
 
     def test_start_without_backup_tests_the_snapshot_as_its_restore_point(self):
         # No drive: start goes on with no backup step; the read-only @pre-nixos snapshot is restore-tested right after

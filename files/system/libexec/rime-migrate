@@ -1921,25 +1921,50 @@ def preview_extract(tar, dest):
     return masks, skipped
 
 
+def fstab_mounts_boot(text):
+    """The source of the first line of fstab TEXT that mounts /boot, or None. The mount point is read the way mount
+    reads it: \\040-style escapes decoded and the path normalised (`/boot/`, `//boot` and `/./boot` are /boot)."""
+    for ln in text.splitlines():
+        f = ln.split()
+        if not f or f[0].startswith("#") or len(f) < 2:
+            continue
+        where = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), f[1])
+        if "/" + "/".join(p for p in where.split("/") if p not in ("", ".")) == "/boot":
+            return f[0]
+    return None
+
+
+def boot_refused(source):
+    return Refused("payload-boot-from-build",
+                   f"this payload's system mounts /boot from {source} (its /etc/fstab). That is a fresh install's "
+                   "/boot, which this machine does not have: its first boot would stop waiting for it. Use the "
+                   "payload of a newer release (one that reads /boot from host.toml at boot)")
+
+
 def boot_from_build(system):
     """Refuse a payload whose system mounts /boot from its own etc/fstab (SYSTEM: the preview's copy of the new
     system's /etc parent). That is a fresh install's toplevel: its /boot is Rime's ESP (label RIME-ESP), which a moved
     machine does not have, so its first boot stops in emergency mode waiting for it (the payload of 2026.11.10.x did
-    exactly this). A system start may install takes /boot from host.toml at boot (rime.rootfs's generator)."""
+    exactly this). A system start may install takes /boot from host.toml at boot (rime.rootfs's generator). start
+    reads the INSTALLED system's fstab again (installed_boot_from_build): the preview is not the bytes it installs."""
     try:
         with open(os.path.join(system, "etc", "fstab"), errors="replace") as f:
-            lines = f.read().splitlines()
+            text = f.read()
     except FileNotFoundError:
         return
-    for ln in lines:
-        f = ln.split()
-        if not f or f[0].startswith("#"):
-            continue
-        if len(f) >= 2 and f[1] == "/boot":
-            raise Refused("payload-boot-from-build",
-                          f"this payload's system mounts /boot from {f[0]} (its /etc/fstab). That is a fresh "
-                          "install's /boot, which this machine does not have: its first boot would stop waiting for "
-                          "it. Use the payload of a newer release (one that reads /boot from host.toml at boot)")
+    src = fstab_mounts_boot(text)
+    if src is not None:
+        raise boot_refused(src)
+
+
+def installed_boot_from_build(t, toplevel):
+    """boot_from_build on what start installed into the target T (inside the rollback): the toplevel's etc/fstab read
+    through the target's own cat, since its etc is a link into T's /nix/store. A toplevel with no fstab mounts nothing."""
+    r = chroot(t, f"{toplevel}/sw/bin/sh", "-c", f'test ! -e {toplevel}/etc/fstab || exec {toplevel}/sw/bin/cat '
+               f'{toplevel}/etc/fstab', quiet=True)
+    src = fstab_mounts_boot(r.stdout)
+    if src is not None:
+        raise boot_refused(src)
 
 
 def carry_preview(payload, man, src="/", cmdline="/proc/cmdline"):
@@ -1965,13 +1990,14 @@ def carry_preview(payload, man, src="/", cmdline="/proc/cmdline"):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def chroot(t, *cmd, env=None, stdin=None, check=True):
+def chroot(t, *cmd, env=None, stdin=None, check=True, quiet=False):
     e = {"PATH": "/run/current-system/sw/bin:/nix/var/nix/profiles/system/sw/bin", "HOME": "/root", "LANG": "C.UTF-8"}
     e.update(env or {})
     # The host's chroot by absolute path: with env= given, the child's PATH (the target's) is what exec searches.
     r = subprocess.run([shutil.which("chroot") or "/usr/sbin/chroot", t, *cmd], env=e, stdin=stdin, text=True, stdout=subprocess.PIPE,
                        stderr=subprocess.STDOUT)
-    sys.stdout.write("".join(f"  | {ln}\n" for ln in r.stdout.splitlines()[-40:]))
+    if not quiet:
+        sys.stdout.write("".join(f"  | {ln}\n" for ln in r.stdout.splitlines()[-40:]))
     if r.returncode and check:
         raise Failed(f"chroot {' '.join(cmd)} exited {r.returncode}")
     return r
@@ -2172,6 +2198,7 @@ def cmd_start(a):
             chroot(t, f"{nix}/bin/nix-store", "--load-db", stdin=reg)
         chroot(t, f"{nix}/bin/nix-store", "--verify", "--check-contents")
         chroot(t, f"{nix}/bin/nix-env", "-p", "/nix/var/nix/profiles/system", "--set", man["toplevel"])
+        installed_boot_from_build(t, man["toplevel"])
         step("carry /etc (rime-hostlayer)")
         os.makedirs(os.path.join(t, "run/rime-src"), exist_ok=True)
         for d in ("etc", "usr", "var"):

@@ -64,8 +64,12 @@ held either: the update client installs the same variants after the move.
 
 **Now.** The option is gone (`rime.rootfs.boot` is a removed option: setting it fails evaluation and says why). Every
 `rime.rootfs` machine has no `/boot` in `fileSystems` and runs the generator, which reads host.toml `[boot]` at every
-boot: `layout = "bls"` (the installer writes it) is Rime's ESP, `vfat`, `umask=0077`, with its fsck unit; anything else
-(the bridge writes `layout = "custom-cfg"`) is the moved machine's partition or bind, as before. `vfat` and `ext4` are
+boot: `layout = "bls"` (the installer writes it) is Rime's ESP, `vfat`, `umask=0077`, with its fsck unit;
+`layout = "custom-cfg"` or a `device` (the bridge writes them) is the moved machine's partition or bind, as before. Both
+are required by `local-fs.target`. A host.toml that names neither (missing, unparsable, `layout = "auto"`) gets a guess
+the boot never waits on (`local-fs.target` only wants it): Rime's ESP when `RIME-ESP` is present, as rime-boot's `auto`
+picks bls, otherwise the top level's `/boot` only if it is a directory. A generator run that stopped after writing
+`boot.mount` gets its link on the next run (review of #165). `vfat` and `ext4` are
 supported on every machine. `rime-migrate-good-boot.service` runs only where the old side is (`/mnt/rime-top/ostree`,
 until finish removes it); `rime migrate finish` is on PATH everywhere and refuses on a fresh install (no old side).
 
@@ -75,7 +79,10 @@ variant's own generator on a moved machine's host.toml (the L16's, as the bridge
 mutant (plain with the fresh-install line back) must be flagged. `rootfs-unit` adds both host.toml cases and two
 generator mutants (`gen-bls-binds`, `gen-esp-everywhere`). On the bootc side, `start` and `check --explain` refuse a
 payload whose system's `/etc/fstab` mounts `/boot` (`payload-boot-from-build`, read from `preview.tar` before anything
-is written; mutant `payload-boot-unchecked`): the payloads published before this change are refused by name.
+is written; mutants `payload-boot-unchecked`, `payload-boot-literal`: `/boot/`, `//boot` and `/./boot` are /boot): the
+payloads published before this change are refused by name. The preview is not the bytes start installs, so `start` reads
+the INSTALLED toplevel's `etc/fstab` again right after `nix-env --set`, inside the rollback (mutant
+`installed-boot-unchecked`).
 
 **Not covered.** A fresh NixOS install made BEFORE this change that updates live (`switch-to-configuration test`) sees
 its `/boot` fstab line disappear and unmounts `/boot`; the generator's `boot.mount` mounts it again when
