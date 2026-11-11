@@ -15,6 +15,7 @@ through unchanged, so its own `--help` is the reference:
 | `sudo rime migrate repair-e --confirm` | topology E only: moves an earlier boot trial's leftovers that block a start aside (archived, never deleted) |
 | `sudo rime migrate key-export --to DIR` | copies the LUKS header backup and the backup tool's keys to DIR |
 | `sudo rime migrate start --payload DIR [--backup DIR]` | takes a read-only snapshot of the old system as its restore point, installs the NixOS closure beside bootc, adds the GRUB entry; on any failure it removes what it made and records `rolled back`. `--backup DIR` (optional) also copies home off the disk first |
+| `sudo rime migrate undo [--yes]` | on the old system, after a start that finished but whose NixOS was never used: takes the move back (the NixOS GRUB entry, `@nixos`, `@nix`, `@home`, `@pre-nixos`, the masks), so `rime update` works again. Without `--yes` it only prints what it would do |
 
 The copy here is taken byte for byte from the NixOS side's `rime-bridge.py`
 (first line changed to `#!/usr/bin/python3 -I`), at the NixOS branch's bridge
@@ -119,6 +120,21 @@ with the same rule: while it refuses, it never asks the registry and reports
 `state=none`, so Settings → Updates does not offer a bootc update the machine
 would then refuse. The start also masks that timer; this covers a machine where
 something unmasked it.
+
+**A finished start can be taken back while NixOS was never used.**
+`sudo rime migrate undo` runs on the old system (booted from its ostree entry).
+It refuses by name when the move cannot be undone safely: `finished` (`rime
+migrate finish` ran), `nixos-used` (NixOS reached multi-user.target at least
+once), `home-changed-since-move` (something wrote the new home after the move;
+it names the file), `subvolume-in-use`, and `start-unfinished` or
+`start-record-unreadable` as above. Otherwise it removes the NixOS GRUB entry
+(only the `rime-boot` block in custom.cfg; other blocks, such as the Secure Boot
+key entry, stay), deletes `@nixos`, `@nix` and `@home` (with the subvolumes a
+NixOS boot made inside them) and `@pre-nixos` last, puts the old filesystem
+label back, unmasks the old side and starts its update timers. The record then
+reads `failed` with `rolled back` (`done` is kept as `done_before_undo`), so the
+verbs above are allowed again and a new `start` may run. An undo that stops half
+way keeps the record as moved; running it again continues.
 
 Not wrapped: `bootc upgrade` typed directly. The bridge masks the update timers
 and `bootc-fetch-apply-updates` is already masked in the image, so nothing on
