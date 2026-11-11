@@ -2499,11 +2499,18 @@ def cmd_undo(a):
             save()
             if label_back:
                 run(["btrfs", "filesystem", "label", top, label_back])
-            if "timers_running" not in rec:
-                # Records from before 2026-11-11 (#164) do not say which timers ran: start the ones enabled.
+            legacy = "timers_running" not in rec
+            # (a legacy record names no timer: this starts none)
+            unmask_old_side(rec)
+            if legacy:
+                # Records from before 2026-11-11 (#164) do not say which timers ran: start the ones enabled. Asked only
+                # once the masks are gone: systemd answers `masked`, never `enabled`, for a masked unit.
                 rec["timers_running"] = [u for u in OLD_SIDE_TIMERS if run(
                     ["systemctl", "is-enabled", "--quiet", u], check=False).returncode == 0]
-            unmask_old_side(rec)
+                for u in rec["timers_running"]:
+                    if run(["systemctl", "start", u], check=False).returncode != 0:
+                        rec.setdefault("old_side_left", []).append(f"systemctl start {u} failed")
+                        log(f"old side not fully restored: `systemctl start {u}` failed; run it again by hand")
         except BaseException as e:
             raise Failed(f"undo stopped ({e or type(e).__name__}); the record still says moved: run "
                          "`rime migrate undo --yes` again to continue") from e

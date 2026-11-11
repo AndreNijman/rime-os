@@ -986,6 +986,9 @@ def phase_undo(a):
     vm.sh("mkdir -p /run/t && mount -o subvolid=5 LABEL=rime-root /run/t && for d in srv var/lib/machines var/lib/portables"
           " var/tmp; do mkdir -p /run/t/@nixos/$(dirname $d); [ -d /run/t/@nixos/$d ] && rmdir /run/t/@nixos/$d;"
           " btrfs subvolume create /run/t/@nixos/$d; done; touch /run/t/@nixos/var/tmp/left-by-boot; umount /run/t")
+    # The L16's record came from a bridge before #164: it names no timers_running (undo then starts the enabled ones).
+    vm.sh("python3 -I -c 'import json; p=\"/var/lib/rime/nixos-bridge/state.json\"; r=json.load(open(p));"
+          " r.pop(\"timers_running\", None); json.dump(r, open(p, \"w\"), indent=1, sort_keys=True)'")
     record(vm, "undo-before", UNDO_STATE + "; (sha256sum < /sysroot/boot/grub2/custom.cfg) > /run/u-custom", ok=False)
     rc, out = record(vm, "undo-update-before", "rime update --check 2>&1 | tail -n 20", ok=False, timeout=120)
     if MOVED not in out:
@@ -1020,6 +1023,9 @@ def phase_undo(a):
                        " else 1)' || v=record; echo VERDICT=$v", ok=False)
     if not re.search(r"VERDICT=clean\b", after):
         raise Timeout("undo: " + (re.findall(r"VERDICT=\S+", after) or ["no verdict"])[-1])
+    rc, out = record(vm, "undo-timers", "systemctl is-active rime-update-check.timer rime-store-compact.timer", ok=False)
+    if rc != 0:
+        raise Timeout("undo: the old side's update timers are not running after the undo (no reboot)")
     rc, out = record(vm, "undo-update-after", "rime update --check 2>&1 | tail -n 20", ok=False, timeout=300)
     if MOVED in out or "REFUSED [nixos-migration" in out:
         raise Timeout("undo: `rime update` is still refused by the move")

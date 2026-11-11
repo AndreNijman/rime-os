@@ -1472,7 +1472,9 @@ class Undo(unittest.TestCase):
                 else:
                     shutil.rmtree(cmd[3])
         elif cmd[:3] == ["systemctl", "is-enabled", "--quiet"]:
-            rc = 0 if cmd[3] in self.enabled else 1
+            # as systemd answers: a masked unit is `masked` (exit 1), whatever its wants links say
+            masked = os.path.islink(os.path.join(B.SYSTEMD_ETC, cmd[3]))
+            rc = 0 if cmd[3] in self.enabled and not masked else 1
         if check and rc:
             raise B.subprocess.CalledProcessError(rc, cmd)
         return B.subprocess.CompletedProcess(cmd, rc, out, "")
