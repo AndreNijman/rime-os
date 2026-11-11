@@ -735,9 +735,11 @@ class Commands(unittest.TestCase):
         self.keyfile = os.path.join(self.d, "nixos-bridge-payload.pub")
         pathlib.Path(self.keyfile).write_text(TEST_KEY + "\n")
         self.saved = {n: getattr(B, n) for n in ("gather", "collect_live", "backup_facts", "PAYLOAD_KEY_FILE",
-                                                  "mount", "run", "STATE", "BACKUP_KEYS_ROOT", "wait_units")}
+                                                  "mount", "run", "STATE", "BACKUP_KEYS_ROOT", "wait_units",
+                                                  "RUN_DIR")}
         B.PAYLOAD_KEY_FILE = self.keyfile
         B.STATE = os.path.join(self.d, "state")
+        B.RUN_DIR = os.path.join(self.d, "run")
         B.BACKUP_KEYS_ROOT = os.path.join(self.d, "no-backup-keys")
         self.facts = luks_a()
         self.facts["existing_subvols"] = []
@@ -886,7 +888,7 @@ class StartRecord(unittest.TestCase):
             setattr(B, n, v)
         shutil.rmtree(self.d)
 
-    def masks(self, state):
+    def masks(self, state, save=lambda: None):
         state.setdefault("masked", []).append("rime-update-check.timer")
 
     def start(self):
@@ -919,7 +921,7 @@ class StartRecord(unittest.TestCase):
         self.assert_rolled_back([])
 
     def test_a_failure_while_masking_unmasks_what_was_masked(self):
-        def half(state):
+        def half(state, save=lambda: None):
             self.masks(state)
             raise B.Failed("TEST failure half way through the masks")
         B.mask_old_side = half
@@ -1056,11 +1058,30 @@ class OldSide(unittest.TestCase):
         self.saved = (B.run, B.SYSTEMD_ETC)
         B.SYSTEMD_ETC = self.d
         self.calls = []
+        self.failed_units = set()   # units `systemctl is-failed` reports failed
+        self.refuse = {}            # (verb, unit) -> the exit code of that systemctl (the unit is left as it was)
+        # Only the update timer is running (the compactor's timer, say, was stopped by hand).
+        self.active = {"rime-update-check.timer"}
+        self.records = []           # every start record mask_old_side saved, in order
+        self.on_stop = None
 
         def run(cmd, check=True, capture=True, **kw):
             self.calls.append(list(cmd))
-            # Only the update timer is running (the compactor's timer, say, was stopped by hand).
-            rc = 0 if cmd[:3] != ["systemctl", "is-active", "--quiet"] or cmd[3] == "rime-update-check.timer" else 3
+            verb, unit = cmd[1], cmd[-1]
+            if cmd[:3] == ["systemctl", "is-active", "--quiet"]:
+                rc = 0 if unit in self.active else 3
+            elif cmd[:3] == ["systemctl", "is-failed", "--quiet"]:
+                rc = 0 if unit in self.failed_units else 1
+            else:
+                rc = self.refuse.get((verb, unit), 0)
+                if verb == "stop" and not rc:
+                    self.active.discard(unit)
+                if verb == "start" and not rc:
+                    self.active.add(unit)
+            if verb == "stop" and self.on_stop:
+                self.on_stop(unit)
+            if check and rc:
+                raise B.Failed(f"{' '.join(cmd)} exited {rc}")
             return B.subprocess.CompletedProcess(cmd, rc, "", "")
         B.run = run
 
@@ -1068,9 +1089,92 @@ class OldSide(unittest.TestCase):
         B.run, B.SYSTEMD_ETC = self.saved
         shutil.rmtree(self.d)
 
+    def save(self, state):
+        self.records.append(json.loads(json.dumps(state)))
+
     def mask(self, state):
         with contextlib.redirect_stdout(io.StringIO()):
-            B.mask_old_side(state)
+            B.mask_old_side(state, lambda: self.save(state))
+
+    def unmask(self, state):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            B.unmask_old_side(state)
+        return err.getvalue()
+
+    def test_a_unit_failed_before_start_is_left_failed_by_a_rollback(self):
+        # The health gate must still see a failure start did not cause.
+        self.failed_units.add("bootloader-update.service")
+        state = {}
+        self.mask(state)
+        self.calls.clear()
+        self.unmask(state)
+        self.assertEqual(state["failed_before"], ["bootloader-update.service"])
+        reset = next(c for c in self.calls if c[1] == "reset-failed")
+        self.assertNotIn("bootloader-update.service", reset)
+        self.assertIn("rime-update-check.timer", reset)
+
+    def test_a_timer_that_does_not_stop_is_not_masked_under(self):
+        self.refuse[("stop", "rime-update-check.timer")] = 1
+        state = {}
+        with self.assertRaises(B.Failed):
+            self.mask(state)
+        self.assertEqual(os.listdir(self.d), [])
+        self.assertNotIn(["systemctl", "daemon-reload"], self.calls)
+
+    def test_a_timer_the_image_does_not_have_does_not_stop_the_move(self):
+        # `systemctl stop` exits 5 for a unit that is not loaded; it is not running, so nothing is masked under it.
+        self.refuse[("stop", "rime-store-compact.timer")] = 5
+        state = {}
+        self.mask(state)
+        self.assertEqual(sorted(state["masked"]), sorted(B.MASK_UNITS))
+        self.assertEqual(state["timers_running"], ["rime-update-check.timer"])
+
+    def test_the_record_names_a_running_timer_before_it_is_stopped(self):
+        # A power loss right after the stop: the saved record must already say the timer was running.
+        state = {}
+        self.on_stop = lambda u: self.stops.append((u, list(self.records[-1]["timers_running"]) if self.records else []))
+        self.stops = []
+        self.mask(state)
+        self.assertIn(("rime-update-check.timer", ["rime-update-check.timer"]), self.stops)
+
+    def test_the_record_names_each_mask_before_it_is_made(self):
+        # A power loss while saving the record: every link on disk is named by the last record that was saved.
+        state, count = {}, []
+
+        def save():
+            count.append(1)
+            if len(count) == len(B.OLD_SIDE_TIMERS) + 3:
+                raise KeyboardInterrupt  # the machine stops while the record is written
+            self.save(state)
+        with self.assertRaises(KeyboardInterrupt), contextlib.redirect_stdout(io.StringIO()):
+            B.mask_old_side(state, save)
+        links = set(os.listdir(self.d))
+        self.assertEqual(len(links), 2)
+        self.assertLessEqual(links, set(self.records[-1]["masked"]))
+
+    def test_a_rollback_whose_systemctl_fails_finishes_and_says_so(self):
+        state = {}
+        self.mask(state)
+        self.refuse[("start", "rime-update-check.timer")] = 1
+        self.calls.clear()
+        err = self.unmask(state)
+        self.assertEqual(os.listdir(self.d), [])
+        self.assertTrue(any(c[1] == "reset-failed" for c in self.calls))
+        self.assertEqual(state["old_side_left"], ["systemctl start rime-update-check.timer exited 1"])
+        self.assertIn("systemctl start rime-update-check.timer", err)
+
+    def test_a_second_start_is_refused_while_one_runs(self):
+        saved = B.RUN_DIR
+        B.RUN_DIR = os.path.join(self.d, "run")
+        try:
+            first = B.start_lock()
+            with self.assertRaises(B.Refused) as e:
+                B.start_lock()
+            self.assertEqual(e.exception.name, "start-running")
+            first.close()
+            B.start_lock().close()
+        finally:
+            B.RUN_DIR = saved
 
     def test_timers_stop_before_their_services_are_masked(self):
         # Masking the service a running timer triggers fails the timer ("Unit to trigger vanished").

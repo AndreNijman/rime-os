@@ -318,6 +318,21 @@ record); `unmask_old_side` resets the units it masked to not-failed and starts t
 units and starts only the timer that was running; a mask made by someone else is kept and left alone); mutants
 `timers-not-stopped-first`, `rollback-leaves-failed`, `rollback-timers-not-started`.
 
+After review (PR #164):
+- A unit that was already failed before `start` is recorded (`failed_before`), and a rollback does not reset it. The
+  health gate still sees a failure the move did not cause.
+- A timer that is still active after its `systemctl stop` fails the step, which rolls back; nothing is masked under it.
+  The check is the postcondition (`is-active`), not stop's exit code: stop exits 5 for a timer the image does not have.
+- The record is saved before each change: a timer's "was running" before its stop, each mask before its link. A power
+  loss leaves a `start-unfinished` record that names every timer stopped and every mask made.
+- `unmask_old_side` tries every step. A systemctl that fails is named on the output and kept in the record
+  (`old_side_left`); the disk's rollback is still complete.
+- One `start` at a time: a lock on `/run/rime-migrate/start.lock` (refused `start-running`), held from before the
+  record is read until the start finishes or rolls back.
+
+Proof: new `OldSide` tests and mutants `rollback-resets-old-failures`, `timer-stop-unchecked`,
+`timer-recorded-after-stop`, `mask-recorded-after-link`, `rollback-stops-at-first-failure`, `start-not-locked`.
+
 ### `[boot] microcode` comes from the moved machine's CPU (bridge3)
 
 **Decision.** `rime-hostlayer carry` writes `[boot] microcode = "intel"` or `"amd"` into host.toml from the

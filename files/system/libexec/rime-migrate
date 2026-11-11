@@ -1774,38 +1774,63 @@ def has_regular_file(top):
     return False
 
 
-def mask_old_side(state):
-    # Recorded as it goes: a failure half way through still unmasks exactly what was masked (unmask_old_side).
-    # The timers stop FIRST: masking the service a running timer triggers fails that timer ("Unit to trigger
+def mask_old_side(state, save=lambda: None):
+    # Recorded BEFORE each change and saved (SAVE writes the start record): a failure half way through, or a power
+    # loss, leaves a record that names every timer stopped and every mask made, and unmask_old_side undoes exactly
+    # those. The timers stop FIRST: masking the service a running timer triggers fails that timer ("Unit to trigger
     # vanished", result 'resources'), and after a rollback a failed unit holds the next update (the first real move
     # left both timers failed until a reboot). The ones that were running are recorded, so a rollback starts them.
+    # A unit already failed before start is recorded too: a rollback leaves that failure for the health gate to see.
+    # A timer that is still active after its stop is not masked under (Failed = the rollback). The postcondition is
+    # checked, not stop's exit code: stop exits 5 for a timer this image does not have, which is already stopped.
     masked = state.setdefault("masked", [])
     running = state.setdefault("timers_running", [])
+    failed = state.setdefault("failed_before", [])
+    for u in MASK_UNITS:
+        if u not in failed and run(["systemctl", "is-failed", "--quiet", u], check=False).returncode == 0:
+            failed.append(u)
     for u in OLD_SIDE_TIMERS:
         if u not in running and run(["systemctl", "is-active", "--quiet", u], check=False).returncode == 0:
             running.append(u)
-        run(["systemctl", "stop", u], check=False)
+        save()
+        r = run(["systemctl", "stop", u], check=False)
+        if run(["systemctl", "is-active", "--quiet", u], check=False).returncode == 0:
+            raise Failed(f"{u} is still active after `systemctl stop` (exit {r.returncode}); nothing is masked under it")
     for u in MASK_UNITS:
         p = os.path.join(SYSTEMD_ETC, u)
         if os.path.lexists(p):
             continue
-        os.symlink("/dev/null", p)
         masked.append(u)
-    run(["systemctl", "daemon-reload"], check=False)
+        save()
+        os.symlink("/dev/null", p)
+    run(["systemctl", "daemon-reload"])
     print(f"old side: masked {', '.join(masked) or 'nothing new'}", flush=True)
 
 
 def unmask_old_side(state):
+    """Undo mask_old_side from what STATE records. It runs inside the rollback, so it never stops half way: every
+    step is tried, and a systemctl that fails is recorded in STATE['old_side_left'] and named on the output (the
+    rollback of the disk is still complete; the health gate and `rime doctor` show the unit)."""
+    left = state.setdefault("old_side_left", [])
+
+    def must(cmd):
+        r = run(cmd, check=False)
+        if r.returncode != 0:
+            left.append(f"{' '.join(cmd)} exited {r.returncode}")
+            log(f"old side not fully restored: `{' '.join(cmd)}` exited {r.returncode}; run it again by hand")
+
     for u in state.get("masked", []):
         p = os.path.join(SYSTEMD_ETC, u)
         if os.path.islink(p) and os.readlink(p) == "/dev/null":
             os.unlink(p)
-    run(["systemctl", "daemon-reload"], check=False)
-    # Leave the old system as start found it: nothing failed, and the timers that were running, running again.
-    if state.get("masked"):
-        run(["systemctl", "reset-failed", *state["masked"]], check=False)
+    must(["systemctl", "daemon-reload"])
+    # Leave the old system as start found it: nothing failed that was not failed before, and the timers that were
+    # running, running again.
+    reset = [u for u in state.get("masked", []) if u not in state.get("failed_before", [])]
+    if reset:
+        must(["systemctl", "reset-failed", *reset])
     for u in state.get("timers_running", []):
-        run(["systemctl", "start", u], check=False)
+        must(["systemctl", "start", u])
 
 
 def unit_busy(show):
@@ -2000,9 +2025,25 @@ def undo_boot(bdir, old_custom, had):
         shutil.rmtree(kdir)
 
 
+def start_lock():
+    """One start at a time, from before the record is read until it finishes or rolls back: a second start that read
+    no record yet would take the first one's masks for someone else's, and the first one's rollback would then unmask
+    and start the timers under it. The lock is on /run (gone at a reboot) and is released when the returned file is
+    closed, at the latest when the process ends."""
+    os.makedirs(RUN_DIR, exist_ok=True)
+    lock = open(os.path.join(RUN_DIR, "start.lock"), "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock.close()
+        raise Refused("start-running", "another `rime migrate start` is running on this machine; nothing was done")
+    return lock
+
+
 def cmd_start(a):
     if not a.yes:
         raise Refused("not-confirmed", "start needs --yes (read `rime migrate check --explain` first)")
+    _lock = start_lock()  # held (open) until cmd_start returns
     facts = gather(a)
     c, refusals, notes = evaluate(facts, facts.get("backup"))
     if facts.get("mode") != "live":
@@ -2029,13 +2070,15 @@ def cmd_start(a):
     state = {"started": datetime.datetime.now(datetime.timezone.utc).isoformat(), "topology": c, "steps": []}
     os.makedirs(STATE, mode=0o700, exist_ok=True)
 
-    def step(s):
-        state["steps"].append(s)
+    def save():
         with open(os.path.join(STATE, "state.json"), "w") as f:
             json.dump(state, f, indent=1, sort_keys=True)
+
+    def step(s):
+        state["steps"].append(s)
+        save()
         print(f"== {s}", flush=True)
 
-    os.makedirs(RUN_DIR, exist_ok=True)
     top = os.path.join(RUN_DIR, "top")
     os.makedirs(top, exist_ok=True)
     mount("-o", "subvolid=5", dev, top)
@@ -2056,7 +2099,7 @@ def cmd_start(a):
             state["backup"] = None
         step("old side")
         wait_units()
-        mask_old_side(state)
+        mask_old_side(state, save)
         step("fsck gate before")
         state["fsck_before"] = fsck_gate(top, facts, "before")
         before = containment_snapshot(top, facts)
