@@ -130,8 +130,11 @@ in
     grep -x '/ /dev/disk/by-label/rime-root btrfs x-initrd.mount,subvol=@nixos,compress-force=zstd:3' $out
     grep -x '/nix /dev/disk/by-label/rime-root btrfs x-initrd.mount,subvol=@nix,compress-force=zstd:3' $out
     grep -x '/var/home /dev/disk/by-label/rime-root btrfs subvol=@home,compress-force=zstd:3' $out
-    grep -x '/boot /dev/disk/by-label/RIME-ESP vfat umask=0077' $out
-    test "${self.nixosConfigurations.rime.config.rime.boot.layout}" = bls
+    # /boot is the generator's (host.toml [boot] layout = "bls" -> RIME-ESP), never a build-time fstab line: the same
+    # toplevel boots a machine moved from bootc (nix/tests/bridge.nix published-boot).
+    if grep '^/boot ' $out; then echo "/boot is in fileSystems"; exit 1; fi
+    test -n "${self.nixosConfigurations.rime.config.systemd.generators.rime-rootfs-boot or ""}"
+    test "${self.nixosConfigurations.rime.config.rime.boot.layout}" = auto
     cat $out
   '';
 

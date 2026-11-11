@@ -12,8 +12,9 @@
 # Everything per machine (LUKS UUID, keymap, hostname, timezone, locale) comes from /var/lib/rime/host.toml.
 #
 # The mounts themselves are rime.rootfs's (nix/modules/rootfs.nix), the ONE option set a fresh and a migrated machine
-# share; a fresh install is rime.rootfs with boot = "esp". This file keeps the installer's names working:
-#   rime.installTarget.enable     = rime.rootfs.enable + rime.rootfs.boot = "esp"
+# share; a fresh install differs from a moved machine only in host.toml ([boot] layout = "bls", which the installer
+# writes and rime.rootfs's /boot generator reads at boot). This file keeps the installer's names working:
+#   rime.installTarget.enable     = rime.rootfs.enable
 #   rime.installTarget.rootLabel  is rime.rootfs.label     (an alias: setting either sets both)
 #   rime.installTarget.espLabel   is rime.rootfs.espLabel  (an alias)
 { config, lib, ... }:
@@ -27,9 +28,6 @@
   options.rime.installTarget.enable = lib.mkEnableOption "the fresh-install disk layout the Rime installer writes (D9)";
 
   config = lib.mkIf config.rime.installTarget.enable {
-    rime.rootfs = {
-      enable = true;
-      boot = "esp";
-    };
+    rime.rootfs.enable = true;
   };
 }

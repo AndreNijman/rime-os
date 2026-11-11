@@ -409,7 +409,7 @@ sudo -n podman exec -w /work/<worktree> rime-nix nix build path:.#checks.x86_64-
   environment's serial console (Fedora's kernel, every earlier I1 and install log) is that kernel's Secure Boot
   lockdown, not an installer fault. Whether the Rime kernel should allow hibernation under Secure Boot is the kernel
   owner's call.
-* **Bridge:** done (nix/bridge2): `rime.rootfs` is the one option set for a fresh install (`boot = "esp"`) and a
-  migrated machine (`boot = "bootc"`); `nix/installer/target.nix` maps `rime.installTarget` onto it
-  (docs/nixos/bridge.md).
+* **Bridge:** done (nix/bridge2): `rime.rootfs` is the one option set for a fresh install and a migrated machine;
+  where `/boot` is comes from host.toml `[boot]` at every boot (`layout = "bls"`: Rime's ESP), never from the build;
+  `nix/installer/target.nix` maps `rime.installTarget` onto it (docs/nixos/bridge.md).
 * **Obsolete:** the merge order with bootmatrix (its luks.nix and tpmkeymap's keymap work are on main now).

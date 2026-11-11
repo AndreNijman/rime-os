@@ -10,6 +10,11 @@
 #                    metadata refuses [metadata-space] (H9), and a complete A is accepted. Every disk's sha256 is the
 #                    same after `rime migrate check --disk` as before (check writes nothing). H9's metadata estimate
 #                    is then held against a REAL `cp -a --reflink=always` of a home of 40,000 small files.
+#   rootfs-unit      rime.rootfs's /boot generator on host.toml fixtures (+ mutants), the option set evaluated.
+#   rootfs-boot-vm   the generator in a VM: a moved machine with no ESP disk binds /boot from the top level and boots;
+#                    a fresh install mounts Rime's ESP through its fsck unit.
+#   bridge-published-boot  every system a release publishes (nix/release/variants.nix) has no build-time /boot; its
+#                    generator mounts a moved machine's /boot and a fresh install's ESP from host.toml (+ a mutant).
 #
 # The end-to-end proof (a disk made from the published image, check + repair-e + start in an OVMF guest, NixOS boots
 # with the old password and home, the ostree entry still boots) needs the published image and Fedora's firmware
@@ -73,6 +78,9 @@ let
     [ "trial-top-not-pending" "rime-bridge.py" ''s/        m\["trial_top"\] = \[n for n in TRIAL_TOP if os.path.lexists(os.path.join(top, n))\]/        m["trial_top"] = []/; s/"top": list((facts.get("migration") or {}).get("trial_top", \[\]))/"top": []/'' "start runs with the trial's trees still in the top level" ]
     # verify-bridge2: the commands call their gates (not only the helpers), and the verifier compares x as well as y.
     [ "start-unverified" "rime-bridge.py" ''s/^    man = verify_payload(a.payload)$/    man = json.load(open(os.path.join(a.payload, "manifest.json")))/'' "start installs an unsigned or tampered payload" ]
+    [ "payload-boot-unchecked" "rime-bridge.py" ''s/^        if "\/" + "\/".join(p for p in where.split("\/") if p not in ("", ".")) == "\/boot":$/        if False:/'' "a payload whose system mounts a fresh install's /boot is started (the L16, 2026-11-11)" ]
+    [ "payload-boot-literal" "rime-bridge.py" ''s/^        if "\/" + "\/".join(p for p in where.split("\/") if p not in ("", ".")) == "\/boot":$/        if where == "\/boot":/'' "a payload whose fstab spells it /boot/ is started" ]
+    [ "installed-boot-unchecked" "rime-bridge.py" ''s/^        installed_boot_from_build(t, man\["toplevel"\])$/        pass/'' "start activates an installed system that mounts /boot from its build (the preview said otherwise)" ]
     [ "start-without-preview" "rime-bridge.py" ''s/^    rc, text = carry_preview(a.payload, man)$/    rc, text = carry_preview(a.payload, man) if "preview" in man else (0, "")/'' "start begins without showing the left-behind report" ]
     [ "check-carry-refusal-dropped" "rime-bridge.py" ''s/                if rc:$/                if False:/'' "check says bridgeable when the carry plan fails" ]
     [ "key-export-same-disk" "rime-bridge.py" ''s/    if b.get("disk") and b\["disk"\] == (facts.get("root") or {}).get("disk"):/    if False:/'' "key-export writes the keys onto the disk they unlock" ]
@@ -175,21 +183,45 @@ let
   genMutants = [
     [ "gen-always-bind" "boot-generator.py" ''s/    if dev is not None:/    if False:/'' "a /boot partition bound from the top level's empty /boot" ]
     [ "gen-overwrites" "boot-generator.py" ''s/    if os.path.lexists(target):/    if False:/'' "an fstab boot.mount overwritten" ]
-    [ "gen-not-required" "boot-generator.py" ''s/local-fs.target.requires/local-fs.target.wants/'' "/boot not required by local-fs.target" ]
+    [ "gen-not-required" "boot-generator.py" ''s/("requires" if required else "wants")/"wants"/'' "/boot not required by local-fs.target" ]
+    [ "gen-guess-required" "boot-generator.py" ''s/^    return text, False$/    return text, True/'' "a guessed bind (no host.toml) is required: a machine whose top level has no /boot stops in emergency mode" ]
+    [ "gen-auto-binds" "boot-generator.py" ''s/^    if os.path.exists(os.path.join(BY_LABEL, ESP_LABEL)):$/    if False:/'' "layout auto on a fresh install binds the top level's /boot (rime-boot picks the ESP)" ]
+    [ "gen-no-relink" "boot-generator.py" ''s/^        text = None  # ours.*/        return 0/'' "an interrupted run's boot.mount never gets its local-fs.target link" ]
     [ "gen-fsck-unescaped" "boot-generator.py" ''s/            out.append("\\\\x%02x" % ord(c))/            out.append(c)/'' "the fsck unit name unescaped" ]
+    [ "gen-bls-binds" "boot-generator.py" ''s/    if layout == "bls":/    if False:/'' "a fresh install's ESP never mounted (/boot bound from the top level)" ]
+    [ "gen-esp-everywhere" "boot-generator.py" ''s/    if layout == "bls":/    if True:/'' "a moved machine waits for an ESP it does not have (the L16, 2026-11-11)" ]
   ];
   genTest = mut: ''
     set -euo pipefail
     G=${"$"}{1:-gen.py}
     t=$(mktemp -d)
-    run() { rm -rf "$t/n"; RIME_HOST_TOML="$t/host.toml" python3 -I "$G" "$t/n" "$t/e" "$t/l" 2>"$t/err"; }
+    mkdir -p "$t/by-label"
+    run() { rm -rf "$t/n"; RIME_DEV_BY_LABEL="$t/by-label" RIME_HOST_TOML="$t/host.toml" python3 -I "$G" "$t/n" "$t/e" "$t/l" 2>"$t/err"; }
     fail() { echo "FAIL: $*"; exit 1; }
-    # no host.toml: the plain layout, /boot bound from the top level
+    req() { [ "$(readlink "$t/n/local-fs.target.requires/boot.mount")" = ../boot.mount ] && [ ! -e "$t/n/local-fs.target.wants/boot.mount" ]; }
+    wants() { [ "$(readlink "$t/n/local-fs.target.wants/boot.mount")" = ../boot.mount ] && [ ! -e "$t/n/local-fs.target.requires/boot.mount" ]; }
+    # no host.toml and no RIME-ESP: a guess, the top level's /boot bound only when it is a directory, never required
     rm -f "$t/host.toml"; run
     grep -qx 'What=/mnt/rime-top/boot' "$t/n/boot.mount" || fail "no bind without host.toml"
     grep -qx 'Options=bind' "$t/n/boot.mount" || fail "bind options"
     grep -qx 'RequiresMountsFor=/mnt/rime-top' "$t/n/boot.mount" || fail "top mount dependency"
-    [ "$(readlink "$t/n/local-fs.target.requires/boot.mount")" = ../boot.mount ] || fail "not required by local-fs.target"
+    grep -qx 'ConditionPathIsDirectory=/mnt/rime-top/boot' "$t/n/boot.mount" || fail "guessed bind without its condition"
+    wants || fail "a guess is required by local-fs.target"
+    # layout auto with Rime's ESP present (a fresh install's, as rime-boot's auto picks bls): the ESP, not required
+    printf '[boot]
+layout = "auto"
+' > "$t/host.toml"; touch "$t/by-label/RIME-ESP"; run
+    grep -qx 'What=/dev/disk/by-label/RIME-ESP' "$t/n/boot.mount" || fail "auto + RIME-ESP: no ESP"
+    wants || fail "auto + RIME-ESP is required"
+    rm -f "$t/by-label/RIME-ESP"
+    # an interrupted earlier run (its boot.mount, no link): the link is made again, the unit left as it is
+    rm -rf "$t/n"; mkdir -p "$t/n"; printf '# Generated by rime-rootfs-boot from x\nkept\n' > "$t/n/boot.mount"
+    printf '[boot]
+layout = "custom-cfg"
+' > "$t/host.toml"
+    RIME_DEV_BY_LABEL="$t/by-label" RIME_HOST_TOML="$t/host.toml" python3 -I "$G" "$t/n" 2>/dev/null
+    grep -qx kept "$t/n/boot.mount" || fail "interrupted run: unit rewritten"
+    req || fail "interrupted run: link not made again"
     # the installer's LUKS layout: [boot] device + fstype from the bridge
     printf '[boot]
 layout = "custom-cfg"
@@ -199,6 +231,30 @@ fstype = "ext4"
     grep -qx 'What=/dev/disk/by-uuid/b007b007-0000-4000-8000-000000000b00' "$t/n/boot.mount" || fail "partition What"
     grep -qx 'Type=ext4' "$t/n/boot.mount" || fail "partition Type"
     grep -qxF 'Requires=systemd-fsck@dev-disk-by\x2duuid-b007b007\x2d0000\x2d4000\x2d8000\x2d000000000b00.service' "$t/n/boot.mount"       || fail "fsck unit name ($(grep Requires= "$t/n/boot.mount"))"
+    # a moved machine's plain layout as the bridge wrote it (the L16's host.toml [boot], 2026-11-11): the bind
+    printf '[boot]
+layout = "custom-cfg"
+microcode = "amd"
+' > "$t/host.toml"; run
+    grep -qx 'What=/mnt/rime-top/boot' "$t/n/boot.mount" || fail "moved plain layout: no bind"
+    if grep -q RIME-ESP "$t/n/boot.mount"; then fail "moved plain layout: waits for RIME-ESP"; fi
+    if grep -q ConditionPath "$t/n/boot.mount"; then fail "moved plain layout: a condition on a known /boot"; fi
+    req || fail "moved plain layout: not required"
+    touch "$t/by-label/RIME-ESP"; run
+    grep -qx 'What=/mnt/rime-top/boot' "$t/n/boot.mount" || fail "moved plain layout with a RIME-ESP label around: no bind"
+    rm -f "$t/by-label/RIME-ESP"
+    # a fresh install as the installer writes it (installer/rime-install-nixos.sh nixos_host_toml): Rime's ESP
+    printf '[boot]
+layout = "bls"
+microcode = "both"
+kernel_params = []
+' > "$t/host.toml"; run
+    grep -qx 'What=/dev/disk/by-label/RIME-ESP' "$t/n/boot.mount" || fail "fresh install: no ESP"
+    grep -qx 'Type=vfat' "$t/n/boot.mount" || fail "fresh install: ESP type"
+    grep -qx 'Options=umask=0077' "$t/n/boot.mount" || fail "fresh install: ESP options"
+    req || fail "fresh install: ESP not required"
+    grep -qxF 'Requires=systemd-fsck@dev-disk-by\x2dlabel-RIME\x2dESP.service' "$t/n/boot.mount" || fail "ESP fsck unit ($(grep Requires= "$t/n/boot.mount"))"
+    [ "$(readlink "$t/n/local-fs.target.requires/boot.mount")" = ../boot.mount ] || fail "ESP not required by local-fs.target"
     # an invalid device writes nothing (and says why); a broken host.toml falls back to the bind
     printf '[boot]
 device = "UUID=x y"
@@ -208,6 +264,7 @@ device = "UUID=x y"
     printf '[boot
 ' > "$t/host.toml"; run
     grep -qx 'Options=bind' "$t/n/boot.mount" || fail "broken host.toml: no fallback bind"
+    wants || fail "broken host.toml: the guess is required"
     # an existing boot.mount (an fstab line) stays
     rm -rf "$t/n"; mkdir -p "$t/n"; echo mine > "$t/n/boot.mount"
     RIME_HOST_TOML="$t/host.toml" python3 -I "$G" "$t/n" 2>/dev/null
@@ -354,8 +411,8 @@ in
     echo "bridge-unit: suite green, ${toString (builtins.length mutants + builtins.length hlMutants + builtins.length finishMutants)} mutants killed" | tee $out
   '';
 
-  # rime.rootfs: the /boot generator against host.toml fixtures (+ mutants), and the option set evaluated both ways
-  # (boot = "bootc" has no /boot in fileSystems and installs the generator; installTarget is boot = "esp").
+  # rime.rootfs: the /boot generator against host.toml fixtures (+ mutants), and the option set evaluated on its own and
+  # through installTarget: neither puts /boot in fileSystems, both install the generator (host.toml decides at boot).
   rootfs-unit =
     let
       eval = mods: (self.inputs.nixpkgs.lib.nixosSystem {
@@ -369,17 +426,20 @@ in
         migrated_top = migrated.fileSystems."/mnt/rime-top".options;
         migrated_generator = migrated.systemd.generators.rime-rootfs-boot or null;
         migrated_luks = migrated.rime.luks.enable;
-        fresh_boot = fresh.fileSystems."/boot".device;
+        migrated_vfat_ext4 = (migrated.boot.supportedFilesystems.vfat or false) && (migrated.boot.supportedFilesystems.ext4 or false);
+        good_boot_conditions = migrated.systemd.services.rime-migrate-good-boot.unitConfig.ConditionPathExists;
+        fresh_boot_in_fstab = fresh.fileSystems ? "/boot";
         fresh_layout = fresh.rime.boot.layout;
         fresh_label = fresh.fileSystems."/".device;
-        fresh_rootfs = fresh.rime.rootfs.boot;
         fresh_generator = fresh.systemd.generators ? rime-rootfs-boot;
         compress = map (m: builtins.elem "compress-force=zstd:3" migrated.fileSystems.${m}.options) [ "/" "/nix" "/var/home" ];
       };
       ok = facts.migrated_boot_in_fstab == false && facts.migrated_top == [ "subvolid=5" ]
-        && facts.migrated_generator == "${gen}" && facts.migrated_luks && facts.fresh_boot == "/dev/disk/by-label/RIME-ESP"
-        && facts.fresh_layout == "bls" && facts.fresh_label == "/dev/disk/by-label/rime-other" && facts.fresh_rootfs == "esp"
-        && facts.fresh_generator == false && facts.compress == [ true true true ];
+        && facts.migrated_generator == "${gen}" && facts.migrated_luks && facts.migrated_vfat_ext4
+        && facts.good_boot_conditions == [ "/mnt/rime-top/ostree" "!/var/lib/rime/nixos-bridge/finish.json" ]
+        && facts.fresh_boot_in_fstab == false && facts.fresh_layout == "auto"
+        && facts.fresh_label == "/dev/disk/by-label/rime-other" && facts.fresh_generator
+        && facts.compress == [ true true true ];
     in
     assert lib.assertMsg ok "rime.rootfs evaluates wrong: ${builtins.toJSON facts}";
     pkgs.runCommand "rime-rootfs-unit" { nativeBuildInputs = [ pkgs.python3 ]; } ''
@@ -387,7 +447,7 @@ in
       echo '${builtins.toJSON facts}'
       cp ${gen} gen.py
       bash ${pkgs.writeText "gen-test.sh" (genTest null)} gen.py
-      echo "generator: plain bind, LUKS-A partition, invalid device, broken host.toml, existing unit: all as specified"
+      echo "generator: plain bind, LUKS-A partition, the L16's moved host.toml, a fresh install's ESP, invalid device, broken host.toml, existing unit: all as specified"
       ${lib.concatMapStrings (m:
         let name = builtins.elemAt m 0; expr = builtins.elemAt m 2; why = builtins.elemAt m 3; in ''
           cp gen.py mut-${name}.py; chmod u+w mut-${name}.py
@@ -400,6 +460,117 @@ in
         '') genMutants}
       echo "rootfs-unit: evaluation as specified, generator green, ${toString (builtins.length genMutants)} mutants killed" | tee $out
     '';
+
+  # published-boot: the systems a release PUBLISHES (nix/release/variants.nix: the payload job packs `plain`, the update
+  # client installs any of them) never mount /boot from the build. On 2026-11-11 the payload's toplevel was the
+  # fresh-install one (/boot = RIME-ESP in its fstab) and a moved machine stopped in emergency mode waiting for that
+  # ESP; the bridge's own tests had built a "moved" system of their own. Every variant: no /boot in fileSystems or in
+  # the etc/fstab it ships, the generator installed. Then the plain variant's OWN generator, run on the host.toml a
+  # moved machine has (the L16's [boot], as the bridge wrote it) and the one the installer writes. Mutant: the plain
+  # variant with the fresh-install /boot line back must be flagged.
+  bridge-published-boot =
+    let
+      variants = import ../release/variants.nix { inherit self; };
+      bootFacts = sys:
+        let
+          c = sys.config;
+          fstabBoot = lib.any (l: builtins.match "[^#[:space:]][^[:space:]]*[[:space:]]+/boot[[:space:]].*" l != null)
+            (lib.splitString "\n" c.environment.etc.fstab.text);
+        in
+        {
+          boot_in_fileSystems = c.fileSystems ? "/boot";
+          fstab_boot = fstabBoot;
+          generator = c.systemd.generators.rime-rootfs-boot or null;
+        };
+      good = f: !f.boot_in_fileSystems && !f.fstab_boot && f.generator != null;
+      facts = lib.mapAttrs (_: v: bootFacts v.system) variants;
+      bad = lib.filterAttrs (_: f: !(good f)) facts;
+      mutant = bootFacts (variants.plain.system.extendModules {
+        modules = [ { fileSystems."/boot" = { device = "/dev/disk/by-label/RIME-ESP"; fsType = "vfat"; options = [ "umask=0077" ]; }; } ];
+      });
+      gen = variants.plain.system.config.systemd.generators.rime-rootfs-boot;
+    in
+    assert lib.assertMsg (bad == { }) "published variants mount /boot from the build: ${builtins.toJSON bad}";
+    assert lib.assertMsg (!(good mutant)) "published-boot mutant SURVIVED (the fresh-install /boot line not flagged): ${builtins.toJSON mutant}";
+    pkgs.runCommand "rime-bridge-published-boot" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+      set -euo pipefail
+      echo "variants: ${lib.concatStringsSep " " (lib.attrNames variants)}: no /boot in fileSystems or etc/fstab, generator ${gen}"
+      echo "mutant (plain + the fresh-install /boot line) flagged: ${builtins.toJSON mutant}"
+      t=$(mktemp -d)
+      printf '[boot]\nlayout = "custom-cfg"\nmicrocode = "amd"\n' > "$t/moved.toml"
+      printf '[boot]\nlayout = "bls"\nmicrocode = "both"\nkernel_params = []\n' > "$t/fresh.toml"
+      RIME_HOST_TOML="$t/moved.toml" ${gen} "$t/moved"
+      grep -qx 'What=/mnt/rime-top/boot' "$t/moved/boot.mount"
+      if grep -q RIME-ESP "$t/moved/boot.mount"; then echo "moved machine: /boot waits for RIME-ESP"; exit 1; fi
+      RIME_HOST_TOML="$t/fresh.toml" ${gen} "$t/fresh"
+      grep -qx 'What=/dev/disk/by-label/RIME-ESP' "$t/fresh/boot.mount"
+      echo "plain's generator: moved machine -> bind of /mnt/rime-top/boot; fresh install -> RIME-ESP" | tee $out
+    '';
+
+  # rootfs-boot-vm: the generator in a real systemd, both machines the one toplevel serves. `moved` has the btrfs
+  # top level of a machine moved from bootc (its /boot a directory there) and NO ESP disk at all, as the L16 had: with
+  # its host.toml [boot] as the bridge wrote it, /boot is the bind and the boot reaches multi-user.target without ever
+  # asking for RIME-ESP. `fresh` has Rime's ESP (FAT, RIME-ESP): with the installer's host.toml, /boot is that ESP,
+  # through its fsck unit. qemu-vm replaces fileSystems, so the top level is given back as virtualisation.fileSystems.
+  rootfs-boot-vm =
+    let
+      topImg = pkgs.runCommand "rime-root-top.img" { nativeBuildInputs = [ pkgs.btrfs-progs ]; } ''
+        mkdir -p top/boot
+        echo moved > top/boot/rime-marker
+        truncate -s 256M $out
+        mkfs.btrfs -q -L rime-root --rootdir top $out
+      '';
+      espImg = pkgs.runCommand "rime-esp.img" { nativeBuildInputs = [ pkgs.dosfstools pkgs.mtools ]; } ''
+        truncate -s 64M $out
+        mkfs.vfat -F 32 -n RIME-ESP $out
+        echo esp > marker
+        mcopy -i $out marker ::/rime-marker
+      '';
+      drive = img: "-drive file=${img},format=raw,if=virtio,snapshot=on";
+      node = imgs: { ... }: {
+        imports = [ ../modules/rootfs.nix ../modules/luks.nix ];
+        rime.rootfs.enable = true;
+        rime.luks.enable = false;
+        virtualisation.fileSystems."/mnt/rime-top" = { device = "/dev/disk/by-label/rime-root"; fsType = "btrfs"; options = [ "subvolid=5" ]; };
+        virtualisation.qemu.options = map drive imgs;
+        environment.systemPackages = [ pkgs.util-linux ];
+      };
+    in
+    pkgs.testers.runNixOSTest {
+      name = "rime-rootfs-boot";
+      nodes.moved = node [ topImg ];
+      nodes.fresh = node [ topImg espImg ];
+      testScript = ''
+        def host_toml(m, text):
+            m.succeed("mkdir -p /var/lib/rime && cat > /var/lib/rime/host.toml <<'EOF'\n" + text + "EOF\nsync")
+            m.shutdown()
+            m.start()
+            m.wait_for_unit("multi-user.target")
+
+        start_all()
+        moved.wait_for_unit("multi-user.target")
+        fresh.wait_for_unit("multi-user.target")
+
+        with subtest("moved from bootc (the L16's host.toml [boot]): /boot is the top level's, no ESP asked for"):
+            host_toml(moved, '[boot]\nlayout = "custom-cfg"\nmicrocode = "amd"\n')
+            assert moved.succeed("cat /boot/rime-marker").strip() == "moved"
+            src = moved.succeed("findmnt -no SOURCE,FSTYPE /boot").strip()
+            assert "[/boot]" in src and src.endswith("btrfs"), src
+            moved.succeed("systemctl show -p FragmentPath boot.mount | grep -x 'FragmentPath=/run/systemd/generator/boot.mount'")
+            unit = moved.succeed("systemctl cat boot.mount")
+            assert "RIME-ESP" not in unit, unit
+            moved.succeed("systemctl is-active local-fs.target")
+            moved.fail("systemctl list-units --all --plain --no-legend | grep -F 'RIME\\x2dESP'")
+
+        with subtest("fresh install (the installer's host.toml [boot]): /boot is Rime's ESP, through its fsck"):
+            host_toml(fresh, '[boot]\nlayout = "bls"\nmicrocode = "both"\nkernel_params = []\n')
+            assert fresh.succeed("cat /boot/rime-marker").strip() == "esp"
+            assert fresh.succeed("findmnt -no FSTYPE /boot").strip() == "vfat"
+            assert fresh.succeed("stat -c %a /boot").strip() == "700"
+            fresh.succeed("systemctl show -p Result 'systemd-fsck@dev-disk-by\\x2dlabel-RIME\\x2dESP.service' | grep -x Result=success")
+            fresh.succeed("systemctl is-active local-fs.target")
+      '';
+    };
 
   bridge-refusals = pkgs.testers.runNixOSTest {
     name = "rime-bridge-refusals";
