@@ -1816,10 +1816,11 @@ def mask_old_side(state, save=lambda: None):
     print(f"old side: masked {', '.join(masked) or 'nothing new'}", flush=True)
 
 
-def unmask_old_side(state):
+def unmask_old_side(state, start_timers=True):
     """Undo mask_old_side from what STATE records. It runs inside the rollback, so it never stops half way: every
     step is tried, and a systemctl that fails is recorded in STATE['old_side_left'] and named on the output (the
-    rollback of the disk is still complete; the health gate and `rime doctor` show the unit)."""
+    rollback of the disk is still complete; the health gate and `rime doctor` show the unit). Undo passes
+    start_timers=False and starts them itself, once its record no longer says moved."""
     left = state.setdefault("old_side_left", [])
 
     def must(cmd):
@@ -1838,8 +1839,20 @@ def unmask_old_side(state):
     reset = [u for u in state.get("masked", []) if u not in state.get("failed_before", [])]
     if reset:
         must(["systemctl", "reset-failed", *reset])
+    if start_timers:
+        start_old_timers(state)
+
+
+def start_old_timers(state):
+    """Start the timers STATE says were running; a failure is recorded like unmask_old_side's. Returns the failures."""
+    failed = []
     for u in state.get("timers_running", []):
-        must(["systemctl", "start", u])
+        r = run(["systemctl", "start", u], check=False)
+        if r.returncode != 0:
+            failed.append(u)
+            state.setdefault("old_side_left", []).append(f"systemctl start {u} exited {r.returncode}")
+            log(f"old side not fully restored: `systemctl start {u}` exited {r.returncode}; run it again by hand")
+    return failed
 
 
 def unit_busy(show):
@@ -2261,8 +2274,8 @@ def cmd_start(a):
         undo_boot(bdir, old_custom, had)
         for s in reversed(made):
             run(["btrfs", "subvolume", "delete", os.path.join(top, s)], check=False)
-        if state.get("relabelled_from"):
-            run(["btrfs", "filesystem", "label", top, state["relabelled_from"]], check=False)
+        if "relabelled_from" in state:  # None: the filesystem had no label, and gets none back
+            run(["btrfs", "filesystem", "label", top, state["relabelled_from"] or ""], check=False)
         unmask_old_side(state)
         state["failed"] = str(e) or type(e).__name__   # a Ctrl-C's text is "": the record names it
         step("rolled back")
@@ -2276,7 +2289,8 @@ def cmd_start(a):
 
 
 UNDO_SUBVOLS = SUBVOLS + ("@pre-nixos",)  # the restore point goes last: until then the move is still recoverable
-HOOK_BLOCK_RX = re.compile(r"### BEGIN rime-boot.*?### END rime-boot ###\n?", re.S)
+HOOK_BEGIN = "### BEGIN rime-boot"   # rime-boot.py BLOCK_BEGIN starts with this
+HOOK_END = "### END rime-boot ###"  # rime-boot.py BLOCK_END
 UNDONE = "undone by `rime migrate undo`"
 
 
@@ -2298,10 +2312,15 @@ def undo_record_refusal(rec):
     return None
 
 
+class Unreadable(Exception):
+    """A safety check could not read what it must read: the caller refuses, never assumes "nothing there"."""
+
+
 def newest_change(root, after):
     """The first path under ROOT (ROOT included) whose ctime is later than AFTER (epoch seconds), or None. The kernel
     sets ctime on every write, create, delete, rename, chmod and chown (a directory's on every entry added or removed
-    in it), and nothing in userspace can set it back: a later ctime anywhere means the tree was written after AFTER."""
+    in it), and nothing in userspace can set it back: a later ctime anywhere means the tree was written after AFTER.
+    A directory or name it cannot read raises Unreadable: a tree not read whole is not a tree unchanged."""
     try:
         if os.lstat(root).st_ctime > after:
             return root
@@ -2312,14 +2331,14 @@ def newest_change(root, after):
         d = stack.pop()
         try:
             it = os.scandir(d)
-        except OSError:
-            continue
+        except OSError as e:
+            raise Unreadable(f"{shown(d)}: {e.strerror or e}") from e
         with it:
             for e in it:
                 try:
                     st = e.stat(follow_symlinks=False)
-                except OSError:
-                    continue
+                except OSError as err:
+                    raise Unreadable(f"{shown(e.path)}: {err.strerror or err}") from err
                 if st.st_ctime > after:
                     return e.path
                 if stat.S_ISDIR(st.st_mode):
@@ -2329,13 +2348,13 @@ def newest_change(root, after):
 
 def mounted_subvols(dev_paths, names, mountinfo="/proc/self/mountinfo"):
     """Mount points of NAMES (top-level subvolumes, or anything inside them) on the btrfs DEV_PATHS, from mountinfo:
-    [(name, mount point)]."""
+    [(name, mount point)]. Raises Unreadable when mountinfo cannot be read: no answer is not "nothing mounted"."""
     found = []
     try:
         with open(mountinfo) as f:
             lines = f.read().splitlines()
-    except OSError:
-        return found
+    except OSError as e:
+        raise Unreadable(f"{mountinfo}: {e.strerror or e}") from e
     for ln in lines:
         fields = ln.split()
         if "-" not in fields:
@@ -2350,23 +2369,66 @@ def mounted_subvols(dev_paths, names, mountinfo="/proc/self/mountinfo"):
     return found
 
 
+def hook_block_span(text):
+    """(start, end) of the boot hook's include block in custom.cfg TEXT, or None when it has none. The block is whole
+    lines: one line starting HOOK_BEGIN, through the HOOK_END line after it, with no other `### BEGIN`/`### END`
+    marker line between them. One empty line after it goes too when the block starts the file or follows an empty
+    line: the Secure Boot block's writer puts one empty line before itself, and without the hook's block it would be
+    a stray second one (2026-11-12: the first real undo left custom.cfg one empty line longer than before the move).
+    Anything else (two blocks, a BEGIN with no END, an END with no BEGIN, another block's marker inside) raises
+    Refused: undo takes nothing out of a file it cannot read exactly."""
+    lines = text.splitlines(keepends=True)
+    begins = [i for i, ln in enumerate(lines) if ln.startswith(HOOK_BEGIN)]
+    ends = [i for i, ln in enumerate(lines) if ln.rstrip("\n") == HOOK_END]
+    if not begins and not ends:
+        return None
+    unclear = None
+    if len(begins) != 1 or len(ends) != 1 or ends[0] < begins[0]:
+        unclear = f"{len(begins)} BEGIN and {len(ends)} END line(s) of the rime-boot block"
+    else:
+        inner = [ln for ln in lines[begins[0] + 1:ends[0]] if ln.startswith(("### BEGIN", "### END"))]
+        if inner:
+            unclear = f"another block's marker inside the rime-boot block: {inner[0].strip()!r}"
+    if unclear:
+        raise Refused("boot-hook-block-unclear", f"custom.cfg: {unclear}; nothing was changed. Take the rime-boot "
+                      "block out by hand (keep a copy first), then run undo again")
+    b, e = begins[0], ends[0]
+    start = sum(len(ln) for ln in lines[:b])
+    end = start + sum(len(ln) for ln in lines[b:e + 1])
+    if e + 1 < len(lines) and lines[e + 1] == "\n" and (b == 0 or lines[b - 1] == "\n"):
+        end += 1
+    return start, end
+
+
+def read_whole(p):
+    """The whole of text file P (read() stops at 1 MiB), or None when it does not exist."""
+    try:
+        with open(p, "rb") as f:
+            return f.read().decode()
+    except FileNotFoundError:
+        return None
+
+
 def undo_boot_hook(bdir):
-    """The boot hook's entry out of GRUB: its include block out of custom.cfg (everything else in it kept byte for
-    byte, checked), its menu file and its kernel directory (<boot>/rime/nixos; <boot>/rime only if then empty).
-    Returns what it removed. Idempotent."""
+    """The boot hook's entry out of GRUB: its include block out of custom.cfg (hook_block_span; everything else in it
+    kept byte for byte, checked by reading the whole file back; the old file kept beside it as custom.cfg.pre-undo),
+    its menu file and its kernel directory (<boot>/rime/nixos; <boot>/rime only if then empty). Returns what it
+    removed. Idempotent."""
     removed = []
     p = os.path.join(bdir, "grub2/custom.cfg")
-    old = read(p)
-    if old is not None and HOOK_BLOCK_RX.search(old):
-        new = HOOK_BLOCK_RX.sub("", old)
-        tmp = p + ".rime-undo"
-        with open(tmp, "w") as f:
-            f.write(new)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, p)
-        if custom_outside_block(read(p, "")) != custom_outside_block(old):
-            raise Failed(f"{p}: the text outside the rime-boot block changed while the block was removed")
+    old = read_whole(p)
+    span = hook_block_span(old) if old is not None else None
+    if span:
+        new = old[:span[0]] + old[span[1]:]
+        for path, text in ((p + ".pre-undo", old), (p + ".rime-undo", new)):
+            with open(path, "w") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+        os.replace(p + ".rime-undo", p)
+        if read_whole(p) != new:
+            raise Failed(f"{p}: read back, it is not the old file without the rime-boot block "
+                         f"(the old file is {p}.pre-undo)")
         removed.append("custom.cfg rime-boot block")
     menu = os.path.join(bdir, "grub2/rime-nixos.cfg")
     if os.path.lexists(menu):
@@ -2400,7 +2462,8 @@ def undo_targets(top):
 def undo_facts():
     """What undo needs of the running system, and no more (collect_live reads the whole home): booted from ostree,
     the root btrfs device (its LUKS mapping when it has one), its label, and whether /boot is the top level's
-    directory or a partition."""
+    directory or a partition, and whether /boot is mounted at all (ostree mounts it in both layouts: a /boot that is
+    not a mount point is a boot partition missing, and findmnt would then answer for the root)."""
     if not os.path.exists("/run/ostree-booted"):
         return {"mode": "not-ostree"}
     devs = lsblk()
@@ -2414,7 +2477,7 @@ def undo_facts():
     bf = json.loads(run(["findmnt", "-n", "-J", "-o", "UUID", "--target", "/boot"]).stdout)["filesystems"][0]
     same = (bf.get("uuid") or "").lower() == (fm.get("uuid") or "").lower()
     return {"mode": "live", "root": {"device": rdev["name"], "label": rdev.get("label"), "luks": luks_of(devs, rdev)},
-            "boot": {"kind": "top-level-dir" if same else "partition"}}
+            "boot": {"kind": "top-level-dir" if same else "partition", "mounted": os.path.ismount("/boot")}}
 
 
 def cmd_undo(a):
@@ -2449,27 +2512,44 @@ def cmd_undo(a):
                              f"({nb}/good-boots.json): its home may hold work the old one does not have"))
         done = datetime.datetime.fromisoformat(rec["done"]).timestamp()
         print("reading @home for anything written after the move (one stat per name; minutes for millions)", flush=True)
-        changed = newest_change(os.path.join(top, "@home"), done)
-        if changed:
-            refusals.append(("home-changed-since-move", f"{shown(changed)} changed after the move finished "
-                             f"({rec['done']}): something wrote NixOS's home; undo would delete it"))
-        busy = mounted_subvols({root["device"], dev, os.path.realpath(dev)}, UNDO_SUBVOLS)
-        if busy:
-            refusals.append(("subvolume-in-use", "mounted: " + ", ".join(f"{n} at {shown(m)}" for n, m in busy)))
+        try:
+            changed = newest_change(os.path.join(top, "@home"), done)
+            if changed:
+                refusals.append(("home-changed-since-move", f"{shown(changed)} changed after the move finished "
+                                 f"({rec['done']}): something wrote NixOS's home; undo would delete it"))
+        except Unreadable as e:
+            refusals.append(("home-unreadable", f"{e}: @home was not read whole, so undo cannot say nothing wrote it"))
+        try:
+            busy = mounted_subvols({root["device"], dev, os.path.realpath(dev)}, UNDO_SUBVOLS)
+            if busy:
+                refusals.append(("subvolume-in-use", "mounted: " + ", ".join(f"{n} at {shown(m)}" for n, m in busy)))
+        except Unreadable as e:
+            refusals.append(("mounts-unreadable", f"{e}: undo cannot tell whether a subvolume it deletes is mounted"))
         targets = undo_targets(top)
         if targets is None:
             refusals.append(("subvolumes-unlisted", f"`btrfs subvolume list {top}` failed"))
+        bdir = os.path.join(top, "boot") if facts["boot"]["kind"] == "top-level-dir" else "/boot"
+        if not facts["boot"].get("mounted"):
+            refusals.append(("boot-unmounted", "/boot is not mounted: the NixOS entry is on the boot filesystem, "
+                             "and undo would leave it there. Mount /boot (`sudo mount /boot`) and run undo again"))
+        else:
+            try:
+                hook_block_span(read_whole(os.path.join(bdir, "grub2/custom.cfg")) or "")
+            except Refused as e:
+                refusals.append((e.name, str(e)))
         if refusals:
             for name, text in refusals:
                 print(f"REFUSED [{name}] {text}")
             return EXIT_REFUSED
-        bdir = os.path.join(top, "boot") if facts["boot"]["kind"] == "top-level-dir" else "/boot"
-        label_back = rec.get("relabelled_from") if root.get("label") == ROOT_LABEL else None
+        # `relabelled_from` present = start relabelled; its value None = there was no label (put back: none)
+        label_back = (rec["relabelled_from"] or "") if ("relabelled_from" in rec
+                                                         and root.get("label") == ROOT_LABEL) else None
         print(f"undo of the move finished {rec['done']}:")
         print(f"  boot: the NixOS entry out of {bdir}/grub2 (custom.cfg's rime-boot block, rime-nixos.cfg) and "
               f"{bdir}/rime/nixos; the ostree entries and custom.cfg's other blocks stay")
         print("  delete: " + (", ".join(targets) or "nothing (already gone)"))
-        print(f"  label: {f'{ROOT_LABEL} -> {label_back}' if label_back else 'unchanged'}")
+        label_text = "unchanged" if label_back is None else f"{ROOT_LABEL} -> {label_back or '(none)'}"
+        print(f"  label: {label_text}")
         print(f"  old side: unmask {', '.join(rec.get('masked', [])) or 'nothing'}; start its update timers")
         print("  the old system and its home are not touched; @pre-nixos (the restore point) goes last")
         if not a.yes:
@@ -2477,8 +2557,19 @@ def cmd_undo(a):
             return EXIT_OK
 
         def save():
-            with open(os.path.join(STATE, "state.json"), "w") as f:
+            # atomic: a power cut mid-save must leave the old record or the new one, never half of one (an
+            # unreadable record is refused, and the undo could not be continued)
+            p = os.path.join(STATE, "state.json")
+            with open(p + ".tmp", "w") as f:
                 json.dump(rec, f, indent=1, sort_keys=True)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(p + ".tmp", p)
+            dfd = os.open(STATE, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
 
         def step(s):
             rec["steps"].append(s)
@@ -2497,20 +2588,18 @@ def cmd_undo(a):
                 run(["btrfs", "subvolume", "delete", os.path.join(top, p)])
             rec["undo_deleted"] = targets
             save()
-            if label_back:
+            if label_back is not None:
                 run(["btrfs", "filesystem", "label", top, label_back])
-            legacy = "timers_running" not in rec
-            # (a legacy record names no timer: this starts none)
-            unmask_old_side(rec)
-            if legacy:
+            left = len(rec.get("old_side_left", []))
+            unmask_old_side(rec, start_timers=False)
+            if len(rec["old_side_left"]) > left:
+                save()
+                raise Failed("the old side's units were not all restored: " + "; ".join(rec["old_side_left"][left:]))
+            if "timers_running" not in rec:
                 # Records from before 2026-11-11 (#164) do not say which timers ran: start the ones enabled. Asked only
                 # once the masks are gone: systemd answers `masked`, never `enabled`, for a masked unit.
                 rec["timers_running"] = [u for u in OLD_SIDE_TIMERS if run(
                     ["systemctl", "is-enabled", "--quiet", u], check=False).returncode == 0]
-                for u in rec["timers_running"]:
-                    if run(["systemctl", "start", u], check=False).returncode != 0:
-                        rec.setdefault("old_side_left", []).append(f"systemctl start {u} failed")
-                        log(f"old side not fully restored: `systemctl start {u}` failed; run it again by hand")
         except BaseException as e:
             raise Failed(f"undo stopped ({e or type(e).__name__}); the record still says moved: run "
                          "`rime migrate undo --yes` again to continue") from e
@@ -2519,6 +2608,14 @@ def cmd_undo(a):
         rec["done"] = None
         rec["failed"] = UNDONE
         step("rolled back")
+        # The timers start only now: one that fires at once (rime-update-check's OnBootSec passed long ago) must read
+        # a record that no longer says moved, or its check is refused and the unit left failed.
+        bad = start_old_timers(rec)
+        if bad:
+            save()
+            print(f"{PROG}: undone, but {', '.join(bad)} did not start: run `sudo systemctl start {' '.join(bad)}` "
+                  "(they are enabled, so the next boot starts them too)", file=sys.stderr)
+            return EXIT_FAILED
         print("undone: the old system is as it was before the move; `rime update` works again. The disk space comes "
               "back over the next minutes (btrfs frees deleted subvolumes in the background)")
         return EXIT_OK

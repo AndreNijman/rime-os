@@ -1044,6 +1044,10 @@ def phase_undo(a):
         raise Timeout("undo: the boot after the undo, with no key pressed, is not ostree")
     if rc != 0:
         raise Timeout("undo: home sums differ after the undo")
+    # (the grep's status is hidden behind sha256sum's: look for both timers in the output itself)
+    for t in ("rime-update-check.timer", "rime-store-compact.timer"):
+        if t not in out:
+            raise Timeout(f"undo: {t} is not scheduled on the boot after the undo")
     rc, out = record(vm, "redo-start", f"time {a.migrate} start{a.backup_arg} --payload /run/payload/payload --yes",
                      timeout=5400, ok=False)
     if rc != 0:

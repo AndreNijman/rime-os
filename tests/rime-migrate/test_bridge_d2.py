@@ -1400,7 +1400,7 @@ class Undo(unittest.TestCase):
     nested subvolumes a NixOS boot makes, custom.cfg with the hook's block AND the Secure Boot key block. Mutants
     undo-* (nix/tests/bridge.nix)."""
 
-    NAMES = ("run", "mount", "STATE", "RUN_DIR", "SYSTEMD_ETC", "undo_facts", "mounted_subvols")
+    NAMES = ("run", "mount", "STATE", "RUN_DIR", "SYSTEMD_ETC", "undo_facts", "mounted_subvols", "newest_change")
     SB = "### BEGIN rime-secureboot-key ###\nmenuentry 'Enrol the Rime OS Secure Boot key' {\n}\n### END rime-secureboot-key ###\n"
     HOOK = ("### BEGIN rime-boot (written by rime-boot; do not edit inside this block) ###\n"
             "if [ -f ${prefix}/rime-nixos.cfg ]; then\n  source ${prefix}/rime-nixos.cfg\nfi\n### END rime-boot ###\n")
@@ -1440,11 +1440,13 @@ class Undo(unittest.TestCase):
                     "topology": {"topology": "A"}, "backup": None}
         self.write_record()
         self.facts = {"mode": "live", "root": {"device": "/dev/nvme0n1p3", "label": "rime-root", "luks": None},
-                      "boot": {"kind": "top-level-dir"}}
+                      "boot": {"kind": "top-level-dir", "mounted": True}}
         B.undo_facts = lambda: copy.deepcopy(self.facts)
         B.mounted_subvols = lambda *a, **k: []
         self.calls, self.mounts = [], []
         self.fail_delete = None
+        self.fail_cmd = None      # a systemctl command (as a list) that exits 1
+        self.timer_saw = {}       # timer -> the record's `done` when it was started
         self.enabled = {"rime-update-check.timer", "rime-store-compact.timer"}
         B.mount = lambda *a: self.mounts.append(a)
         B.run = self.fake_run
@@ -1471,6 +1473,10 @@ class Undo(unittest.TestCase):
                     rc = 1  # btrfs refuses a subvolume that still holds one
                 else:
                     shutil.rmtree(cmd[3])
+        elif cmd == self.fail_cmd:
+            rc = 1
+        elif cmd[:2] == ["systemctl", "start"]:
+            self.timer_saw.setdefault(cmd[2], self.record().get("done"))  # the first start counts
         elif cmd[:3] == ["systemctl", "is-enabled", "--quiet"]:
             # as systemd answers: a masked unit is `masked` (exit 1), whatever its wants links say
             masked = os.path.islink(os.path.join(B.SYSTEMD_ETC, cmd[3]))
@@ -1504,7 +1510,13 @@ class Undo(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(self.top, s)), s)
         self.assertIn(self.HOOK, pathlib.Path(self.top, "boot/grub2/custom.cfg").read_text())
         self.assertTrue(os.path.exists(os.path.join(self.top, "boot/grub2/rime-nixos.cfg")))
+        self.assertFalse(os.path.lexists(os.path.join(self.top, "boot/grub2/custom.cfg.pre-undo")))
         self.assertEqual(self.deleted(), [])
+        # the old side stays masked: no unmask, no reload, no timer started
+        for u in self.masked:
+            self.assertEqual(os.readlink(os.path.join(B.SYSTEMD_ETC, u)), "/dev/null", u)
+        self.assertEqual([c for c in self.calls if c[:1] == ["systemctl"]], [])
+        self.assertFalse([c for c in self.calls if c[:3] == ["btrfs", "filesystem", "label"]])
 
     def test_plan_changes_nothing(self):
         rc, out = self.undo(yes=False)
@@ -1539,6 +1551,10 @@ class Undo(unittest.TestCase):
             self.assertFalse(os.path.lexists(os.path.join(B.SYSTEMD_ETC, u)), u)
         for u in B.OLD_SIDE_TIMERS:
             self.assertIn(["systemctl", "start", u], self.calls)
+            # started only once the record no longer says moved (a timer that fires at once reads it)
+            self.assertIsNone(self.timer_saw[u], u)
+        self.assertEqual(pathlib.Path(self.top, "boot/grub2/custom.cfg.pre-undo").read_text(),
+                         self.user + self.HOOK + "\n" + self.SB)
         # the record: rolled back, so every bootc verb and a new start are allowed again
         rec = self.record()
         self.assertIsNone(rec["done"])
@@ -1561,6 +1577,7 @@ class Undo(unittest.TestCase):
         self.undo()
         self.assertIn(["systemctl", "start", "rime-store-compact.timer"], self.calls)
         self.assertNotIn(["systemctl", "start", "rime-update-check.timer"], self.calls)
+        self.assertEqual(self.timer_saw, {"rime-store-compact.timer": None}, "a timer started while the record said moved")
 
     def test_a_stop_half_way_still_reads_as_moved_and_continues(self):
         self.fail_delete = "@home"
@@ -1643,6 +1660,127 @@ class Undo(unittest.TestCase):
         with self.assertRaises(B.Refused) as e:
             self.undo()
         self.assertEqual(e.exception.name, "start-unfinished")
+
+    def set_custom(self, text):
+        pathlib.Path(self.top, "boot/grub2/custom.cfg").write_text(text)
+
+    def custom(self):
+        return pathlib.Path(self.top, "boot/grub2/custom.cfg").read_text()
+
+    def test_hook_block_alone_before_the_secure_boot_block_leaves_no_empty_line(self):
+        # the first real move: custom.cfg held only the Secure Boot block; the hook's block went in front of it, and
+        # the Secure Boot writer put one empty line between them
+        self.set_custom(self.HOOK + "\n" + self.SB)
+        rc, out = self.undo()
+        self.assertEqual(rc, B.EXIT_OK, out)
+        self.assertEqual(self.custom(), self.SB)
+
+    def test_an_empty_line_the_user_wrote_stays(self):
+        self.set_custom(self.user + "\n" + self.HOOK + "\n" + self.SB)
+        self.assertEqual(self.undo()[0], B.EXIT_OK)
+        self.assertEqual(self.custom(), self.user + "\n" + self.SB)
+        self.set_custom(self.user + self.HOOK + "\n\n" + self.SB)
+        self.assertEqual(B.hook_block_span(self.custom()), (len(self.user), len(self.user + self.HOOK)))
+
+    def test_a_large_custom_cfg_is_kept_whole(self):
+        tail = "".join(f"menuentry 'entry {i}' {{\n  echo {'x' * 60}\n}}\n" for i in range(20000))
+        self.assertGreater(len(tail), 1 << 20)
+        self.set_custom(self.user + self.HOOK + tail)
+        self.assertEqual(self.undo()[0], B.EXIT_OK)
+        self.assertEqual(self.custom(), self.user + tail)
+
+    def test_refused_when_the_hook_block_is_unclear(self):
+        begin, end = self.HOOK.splitlines(keepends=True)[0], "### END rime-boot ###\n"
+        cases = {
+            "no END": self.user + begin + "  source x\n" + self.SB,
+            "no BEGIN": self.user + "  source x\n" + end + self.SB,
+            "two blocks": self.HOOK + self.user + self.HOOK,
+            "END before BEGIN": end + self.user + begin,
+            "another block inside": begin + self.SB + end,
+        }
+        for why, text in cases.items():
+            with self.subTest(why):
+                self.set_custom(text)
+                self.calls = []
+                rc, out = self.undo()
+                self.assertEqual(rc, B.EXIT_REFUSED, out)
+                self.assertIn("REFUSED [boot-hook-block-unclear]", out)
+                self.assertEqual(self.custom(), text)
+                self.assertEqual(self.deleted(), [])
+                self.assertEqual(self.record(), self.rec)
+
+    def test_refused_when_boot_is_not_mounted(self):
+        self.facts["boot"]["mounted"] = False
+        self.refused("boot-unmounted")
+
+    def test_refused_when_home_cannot_be_read_whole(self):
+        def unreadable(*a):
+            raise B.Unreadable("@home/alex: Permission denied")
+        B.newest_change = unreadable
+        self.refused("home-unreadable")
+
+    def test_newest_change_fails_closed(self):
+        home = os.path.join(self.top, "@home")
+        real = B.os.scandir
+        B.os.scandir = lambda d: (_ for _ in ()).throw(PermissionError(13, "Permission denied")) \
+            if d.endswith("alex") else real(d)
+        try:
+            with self.assertRaises(B.Unreadable):
+                B.newest_change(home, datetime_now() + 60)
+        finally:
+            B.os.scandir = real
+
+    def test_refused_when_mountinfo_cannot_be_read(self):
+        with self.assertRaises(B.Unreadable):
+            self.saved["mounted_subvols"]({"/dev/x"}, B.UNDO_SUBVOLS, os.path.join(self.d, "no-such-mountinfo"))
+
+        def unreadable(*a, **k):
+            raise B.Unreadable("/proc/self/mountinfo: Permission denied")
+        B.mounted_subvols = unreadable
+        self.refused("mounts-unreadable")
+
+    def test_a_filesystem_that_had_no_label_gets_none_back(self):
+        self.rec["relabelled_from"] = None
+        self.write_record()
+        rc, out = self.undo(yes=False)
+        self.assertIn("rime-root -> (none)", out)
+        self.assertEqual(self.undo()[0], B.EXIT_OK)
+        self.assertIn(["btrfs", "filesystem", "label", self.top, ""], self.calls)
+
+    def test_a_record_that_never_relabelled_keeps_the_label(self):
+        del self.rec["relabelled_from"]
+        self.write_record()
+        self.assertEqual(self.undo()[0], B.EXIT_OK)
+        self.assertFalse([c for c in self.calls if c[:3] == ["btrfs", "filesystem", "label"]])
+
+    def test_an_unmask_that_fails_stops_the_undo_before_it_says_undone(self):
+        self.fail_cmd = ["systemctl", "daemon-reload"]
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(B.Failed):
+            self.undo()
+        rec = self.record()
+        self.assertEqual(rec["done"], self.rec["done"])
+        self.assertIn("systemctl daemon-reload exited 1", rec["old_side_left"])
+        self.assertFalse([c for c in self.calls if c[:2] == ["systemctl", "start"]])
+        self.fail_cmd, self.calls = None, []
+        rc, out = self.undo()
+        self.assertEqual(rc, B.EXIT_OK, out)
+        self.assertIsNone(self.record()["done"])
+
+    def test_a_timer_that_does_not_start_is_reported(self):
+        self.fail_cmd = ["systemctl", "start", "rime-store-compact.timer"]
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            rc, out = self.undo()
+        self.assertEqual(rc, B.EXIT_FAILED, out)
+        self.assertIn("sudo systemctl start rime-store-compact.timer", err.getvalue())
+        rec = self.record()
+        self.assertIsNone(rec["done"], "the disk is undone; the record says so")
+        self.assertEqual(rec["steps"][-1], "rolled back")
+        self.assertIn("systemctl start rime-store-compact.timer exited 1", rec["old_side_left"])
+
+    def test_the_record_is_replaced_whole(self):
+        self.undo()
+        self.assertEqual(sorted(os.listdir(B.STATE)), ["state.json"])
 
     def test_mounted_subvols_reads_mountinfo(self):
         mi = os.path.join(self.d, "mountinfo")
