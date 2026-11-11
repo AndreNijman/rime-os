@@ -565,6 +565,36 @@ class Preview(unittest.TestCase):
         self.assertIn("system/escape/x.service", skipped)
         self.assertEqual(os.listdir(outside), [])
 
+    def _with_fstab(self, text):
+        tree = os.path.join(self.d, "fstab-tree")
+        os.makedirs(os.path.join(tree, "system/etc"))
+        with open(os.path.join(tree, "system/etc/fstab"), "w") as f:
+            f.write(text)
+        with tarfile.open(self.tar, "a") as tf:
+            tf.add(os.path.join(tree, "system/etc/fstab"), "system/etc/fstab")
+        return make_payload(self.payload, preview=self.tar)
+
+    def test_fresh_install_boot_refused(self):
+        """The payload of 2026.11.10.x: its system was the fresh-install toplevel, /boot = Rime's ESP in its fstab;
+        a moved machine has no such partition and its first NixOS boot stopped in emergency mode."""
+        man = self._with_fstab("# This is a generated file.\n"
+                               "/dev/disk/by-label/rime-root / btrfs x-initrd.mount,subvol=@nixos,compress-force=zstd:3 0 0\n"
+                               "/dev/disk/by-label/RIME-ESP /boot vfat umask=0077 0 2\n")
+        with self.assertRaises(B.Refused) as cm:
+            B.carry_preview(self.payload, man, src="/nonexistent-src", cmdline="/nonexistent-cmdline")
+        self.assertEqual(cm.exception.name, "payload-boot-from-build")
+        self.assertIn("RIME-ESP", str(cm.exception))
+
+    def test_boot_from_host_accepted(self):
+        """A system whose fstab has no /boot line (rime.rootfs's generator mounts it from host.toml) is shown."""
+        man = self._with_fstab("# /dev/disk/by-label/RIME-ESP /boot vfat umask=0077 0 2\n"
+                               "/dev/disk/by-label/rime-root / btrfs x-initrd.mount,subvol=@nixos 0 0\n"
+                               "/dev/disk/by-label/rime-root /mnt/rime-top btrfs subvolid=5 0 0\n"
+                               "/dev/disk/by-label/rime-root /boot/efi btrfs subvolid=5 0 0\n")
+        rc, text = B.carry_preview(self.payload, man, src="/nonexistent-src", cmdline="/nonexistent-cmdline")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("LEFT BEHIND", text)
+
     def test_no_preview_refused_by_name(self):
         man = make_payload(self.payload)
         with self.assertRaises(B.Refused) as cm:

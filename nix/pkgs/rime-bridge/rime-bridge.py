@@ -1921,6 +1921,27 @@ def preview_extract(tar, dest):
     return masks, skipped
 
 
+def boot_from_build(system):
+    """Refuse a payload whose system mounts /boot from its own etc/fstab (SYSTEM: the preview's copy of the new
+    system's /etc parent). That is a fresh install's toplevel: its /boot is Rime's ESP (label RIME-ESP), which a moved
+    machine does not have, so its first boot stops in emergency mode waiting for it (the payload of 2026.11.10.x did
+    exactly this). A system start may install takes /boot from host.toml at boot (rime.rootfs's generator)."""
+    try:
+        with open(os.path.join(system, "etc", "fstab"), errors="replace") as f:
+            lines = f.read().splitlines()
+    except FileNotFoundError:
+        return
+    for ln in lines:
+        f = ln.split()
+        if not f or f[0].startswith("#"):
+            continue
+        if len(f) >= 2 and f[1] == "/boot":
+            raise Refused("payload-boot-from-build",
+                          f"this payload's system mounts /boot from {f[0]} (its /etc/fstab). That is a fresh "
+                          "install's /boot, which this machine does not have: its first boot would stop waiting for "
+                          "it. Use the payload of a newer release (one that reads /boot from host.toml at boot)")
+
+
 def carry_preview(payload, man, src="/", cmdline="/proc/cmdline"):
     """The left-behind report BEFORE start: the payload's own rime-hostlayer (preview.tar: the program, the NixOS
     system's etc/ and sw/bin names, the greeter's shipped config) run as `carry --plan` by this system's python,
@@ -1930,6 +1951,7 @@ def carry_preview(payload, man, src="/", cmdline="/proc/cmdline"):
     tmp = tempfile.mkdtemp(prefix="rime-migrate-preview-")
     try:
         masks, skipped = preview_extract(os.path.join(payload, man["preview"]["file"]), tmp)
+        boot_from_build(os.path.join(tmp, "system"))
         note = (f"preview: {len(masks)} unit mask(s) kept as links to /dev/null"
                 + (f", {len(skipped)} special file(s) left out: {', '.join(skipped[:5])}" if skipped else "") + "\n")
         root = os.path.join(tmp, "root")

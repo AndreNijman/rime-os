@@ -57,7 +57,7 @@
 // import ./hostgates.nix { inherit pkgs self; }
 # niri-default, libexec-pycache, hostname-default
 // import ./hygiene.nix { inherit pkgs self; }
-# bridge-unit, bridge-refusals, rootfs-unit
+# bridge-unit, bridge-refusals, rootfs-unit, rootfs-boot-vm, bridge-published-boot
 // import ./bridge.nix { inherit pkgs self; }
 # bridge-payload (the payload's builder and release signer, + mutants)
 // import ./bridge-payload.nix { inherit pkgs self; }

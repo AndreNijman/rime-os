@@ -24,7 +24,7 @@ encryption on by default):
 **Decision.** `check` finds the boot partition beside the root (an ext4 with `grub2/grub.cfg` and ostree's `loader`)
 and verifies the chain to it; `start` writes `[boot] device = "UUID=<ext4 uuid>"` and `fstype = "ext4"` into
 `/var/lib/rime/host.toml` (merged into the one `[boot]` table carry wrote, then `rime-hostlayer host validate` in the
-new root). On NixOS, `rime.rootfs` (`boot = "bootc"`) installs the generator `rime-rootfs-boot`
+new root). On NixOS, `rime.rootfs` installs the generator `rime-rootfs-boot`
 (`nix/modules/rootfs/boot-generator.py`), which writes `boot.mount` from that table at every boot: the partition (with
 its fsck unit), or a bind of the btrfs top level's `/boot` when there is no device (the plain layout).
 
@@ -47,11 +47,39 @@ check the carried host.toml after the first NixOS boot.
 ### One option set: `rime.rootfs`
 
 `rime.installTarget` (the installer's) and `rime.rootfs` (the bridge's) declared the same three subvolumes of the same
-label. Now `rime.rootfs` owns them with `boot = "bootc" | "esp"`; `nix/installer/target.nix` is a shim
-(`installTarget.enable` sets `rootfs.enable` + `boot = "esp"`, `rootLabel`/`espLabel` are aliases). The installer's
-`nixosConfigurations.rime` evaluates the same `fileSystems`, supported filesystems, generators, boot layout and LUKS
-setting before and after (only the order of two tmpfiles rules changed:
-`/var/lab/rime-nix/artifacts/bridge2/cfg-{head,wt-bridge2}.json`); `installer-target-eval` and `rootfs-unit` build.
+label. Now `rime.rootfs` owns them; `nix/installer/target.nix` is a shim (`installTarget.enable` sets
+`rootfs.enable`, `rootLabel`/`espLabel` are aliases).
+
+### One toplevel for a moved machine and a fresh install: /boot comes from host.toml, never the build
+
+**What happened (2026-11-11, the first real move).** `rime.rootfs` used to take `boot = "bootc" | "esp"` at BUILD
+time, and the installer's `nixosConfigurations.rime` (the one generic toplevel a release publishes, D9) set `"esp"`: a
+static `/boot` line for Rime's own ESP (label `RIME-ESP`). The bridge payload packs the release's `plain` variant, which
+is that system. So `start` installed a system whose fstab mounts a partition a moved machine does not have; every step
+of `start` passed, and its first boot stopped in emergency mode (`Timed out waiting for device
+/dev/disk/by-label/RIME-ESP`, `Dependency failed for /boot`), with the root account locked, so no shell. The old
+ostree entry still booted. No test caught it: `bridge-*` and the OVMF lab (`nix/probe/ovmf/bridge/system.nix`) build a
+"moved" system of their own with the default `"bootc"`, never the published one. A payload-only fix would not have
+held either: the update client installs the same variants after the move.
+
+**Now.** The option is gone (`rime.rootfs.boot` is a removed option: setting it fails evaluation and says why). Every
+`rime.rootfs` machine has no `/boot` in `fileSystems` and runs the generator, which reads host.toml `[boot]` at every
+boot: `layout = "bls"` (the installer writes it) is Rime's ESP, `vfat`, `umask=0077`, with its fsck unit; anything else
+(the bridge writes `layout = "custom-cfg"`) is the moved machine's partition or bind, as before. `vfat` and `ext4` are
+supported on every machine. `rime-migrate-good-boot.service` runs only where the old side is (`/mnt/rime-top/ostree`,
+until finish removes it); `rime migrate finish` is on PATH everywhere and refuses on a fresh install (no old side).
+
+**Checks.** `bridge-published-boot` evaluates every variant `nix/release/variants.nix` publishes (16 at the time of
+writing): no `/boot` in `fileSystems` or in the `etc/fstab` it ships, the generator installed; then runs the `plain`
+variant's own generator on a moved machine's host.toml (the L16's, as the bridge wrote it) and the installer's. Its
+mutant (plain with the fresh-install line back) must be flagged. `rootfs-unit` adds both host.toml cases and two
+generator mutants (`gen-bls-binds`, `gen-esp-everywhere`). On the bootc side, `start` and `check --explain` refuse a
+payload whose system's `/etc/fstab` mounts `/boot` (`payload-boot-from-build`, read from `preview.tar` before anything
+is written; mutant `payload-boot-unchecked`): the payloads published before this change are refused by name.
+
+**Not covered.** A fresh NixOS install made BEFORE this change that updates live (`switch-to-configuration test`) sees
+its `/boot` fstab line disappear and unmounts `/boot`; the generator's `boot.mount` mounts it again when
+`local-fs.target` starts in the same run. No such install exists outside the labs; not run in a VM.
 
 ### The payload is signed (ed25519, the bootc image's `nixos-bridge-payload.pub`)
 
@@ -426,8 +454,9 @@ NixOS every other `rime migrate` verb is refused by name (they run on the old si
 rime-migrate-finish.py`), not Rust: it reuses the bridge's record rule (`record_refusal`), btrfs usage parser,
 containment diff, mount table and runner by loading `rime-migrate` from its own directory, so the start record is read
 one way everywhere (above) without a second implementation, and `rime-bridge.py` itself stays byte-identical with
-main's `rime-migrate` (a text change there is the only main-side change). `rime.rootfs` installs only that binary, and
-only when `boot = "bootc"` (a moved machine); a fresh NixOS install has nothing to finish.
+main's `rime-migrate` (a text change there is the only main-side change). `rime.rootfs` installs only that binary, on
+every machine (one toplevel); on a fresh NixOS install it refuses, there is nothing to finish, and the good-boot
+counter does not run there (no `/mnt/rime-top/ostree`).
 
 **N = 3 good boots, and how they are counted.** `rime-migrate-good-boot.service` (oneshot, after and wanted by
 multi-user.target, skipped once `finish.json` exists) runs `rime-migrate-finish --record-boot`: a boot whose `/` is
