@@ -1394,5 +1394,271 @@ class RestorePoint(unittest.TestCase):
         self.assertIn("evil\\x1b]0;x\\x07", str(e.exception))
 
 
+class Undo(unittest.TestCase):
+    """`undo`: takes back a finished move from the old (ostree) side, shaped like the first real move (2026-11-11): a
+    pre-#164 record (no timers_running), the top level relabelled from apex-root, six units masked, @nixos holding the
+    nested subvolumes a NixOS boot makes, custom.cfg with the hook's block AND the Secure Boot key block. Mutants
+    undo-* (nix/tests/bridge.nix)."""
+
+    NAMES = ("run", "mount", "STATE", "RUN_DIR", "SYSTEMD_ETC", "undo_facts", "mounted_subvols")
+    SB = "### BEGIN rime-secureboot-key ###\nmenuentry 'Enrol the Rime OS Secure Boot key' {\n}\n### END rime-secureboot-key ###\n"
+    HOOK = ("### BEGIN rime-boot (written by rime-boot; do not edit inside this block) ###\n"
+            "if [ -f ${prefix}/rime-nixos.cfg ]; then\n  source ${prefix}/rime-nixos.cfg\nfi\n### END rime-boot ###\n")
+    SUBS = ["@pre-nixos", "@nixos", "@nix", "@home", "@nixos/srv", "@nixos/var/lib/portables",
+            "@nixos/var/lib/machines", "@nixos/var/tmp"]
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.saved = {n: getattr(B, n) for n in self.NAMES}
+        B.STATE = os.path.join(self.d, "state")
+        B.RUN_DIR = os.path.join(self.d, "run")
+        B.SYSTEMD_ETC = os.path.join(self.d, "etc-systemd")
+        os.makedirs(B.SYSTEMD_ETC)
+        self.top = os.path.join(B.RUN_DIR, "top")
+        for s in self.SUBS:
+            os.makedirs(os.path.join(self.top, s), exist_ok=True)
+        pathlib.Path(self.top, "@home/alex").mkdir()
+        pathlib.Path(self.top, "@home/alex/notes.txt").write_text("before the move\n")
+        g = os.path.join(self.top, "boot/grub2")
+        os.makedirs(g)
+        self.user = "menuentry 'Windows' {\n  chainloader /EFI/Microsoft/Boot/bootmgfw.efi\n}\n"
+        pathlib.Path(g, "custom.cfg").write_text(self.user + self.HOOK + "\n" + self.SB)
+        pathlib.Path(g, "rime-nixos.cfg").write_text("menuentry 'Rime (NixOS)' {}\n")
+        pathlib.Path(g, "grub.cfg").write_text("ostree's\n")
+        os.makedirs(os.path.join(self.top, "boot/rime/nixos"))
+        pathlib.Path(self.top, "boot/rime/nixos/bzImage").write_text("k")
+        pathlib.Path(self.top, "boot/loader").mkdir()
+        self.masked = list(B.MASK_UNITS)
+        for u in self.masked:
+            os.symlink("/dev/null", os.path.join(B.SYSTEMD_ETC, u))
+        # `done` a little in the future: everything the fixture made is from "before the move finished".
+        self.done = (datetime_now() + 30)
+        self.rec = {"started": iso(self.done - 600), "done": iso(self.done), "relabelled_from": "apex-root",
+                    "masked": self.masked, "steps": ["old side", "fsck gate before", "snapshot @pre-nixos",
+                                                     "home (reflink copy)", "install closure", "carry /etc (rime-hostlayer)",
+                                                     "first activation and boot entry", "fsck gate after", "done"],
+                    "topology": {"topology": "A"}, "backup": None}
+        self.write_record()
+        self.facts = {"mode": "live", "root": {"device": "/dev/nvme0n1p3", "label": "rime-root", "luks": None},
+                      "boot": {"kind": "top-level-dir"}}
+        B.undo_facts = lambda: copy.deepcopy(self.facts)
+        B.mounted_subvols = lambda *a, **k: []
+        self.calls, self.mounts = [], []
+        self.fail_delete = None
+        self.enabled = {"rime-update-check.timer", "rime-store-compact.timer"}
+        B.mount = lambda *a: self.mounts.append(a)
+        B.run = self.fake_run
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(B, n, v)
+        shutil.rmtree(self.d)
+
+    def fake_run(self, cmd, check=True, capture=True, **kw):
+        cmd = list(cmd)
+        self.calls.append(cmd)
+        out, rc = "", 0
+        if cmd[:3] == ["btrfs", "subvolume", "list"]:
+            have = [s for s in self.SUBS if os.path.isdir(os.path.join(self.top, s))]
+            out = "".join(f"ID {256 + i} gen 9 top level 5 path {s}\n" for i, s in enumerate(have))
+        elif cmd[:3] == ["btrfs", "subvolume", "delete"]:
+            rel = os.path.relpath(cmd[3], self.top)
+            if rel == self.fail_delete:
+                rc = 1
+            else:
+                kids = [s for s in self.SUBS if s.startswith(rel + "/") and os.path.isdir(os.path.join(self.top, s))]
+                if kids:
+                    rc = 1  # btrfs refuses a subvolume that still holds one
+                else:
+                    shutil.rmtree(cmd[3])
+        elif cmd[:3] == ["systemctl", "is-enabled", "--quiet"]:
+            rc = 0 if cmd[3] in self.enabled else 1
+        if check and rc:
+            raise B.subprocess.CalledProcessError(rc, cmd)
+        return B.subprocess.CompletedProcess(cmd, rc, out, "")
+
+    def write_record(self):
+        os.makedirs(B.STATE, exist_ok=True)
+        with open(os.path.join(B.STATE, "state.json"), "w") as f:
+            json.dump(self.rec, f)
+
+    def record(self):
+        with open(os.path.join(B.STATE, "state.json")) as f:
+            return json.load(f)
+
+    def undo(self, yes=True):
+        a = B.argparse.Namespace(cmd="undo", yes=yes, disk=[], backup=None, payload=None)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = B.cmd_undo(a)
+        return rc, out.getvalue()
+
+    def deleted(self):
+        return [os.path.relpath(c[3], self.top) for c in self.calls if c[:3] == ["btrfs", "subvolume", "delete"]]
+
+    def assert_untouched(self):
+        self.assertEqual(self.record(), self.rec)
+        for s in self.SUBS:
+            self.assertTrue(os.path.isdir(os.path.join(self.top, s)), s)
+        self.assertIn(self.HOOK, pathlib.Path(self.top, "boot/grub2/custom.cfg").read_text())
+        self.assertTrue(os.path.exists(os.path.join(self.top, "boot/grub2/rime-nixos.cfg")))
+        self.assertEqual(self.deleted(), [])
+
+    def test_plan_changes_nothing(self):
+        rc, out = self.undo(yes=False)
+        self.assertEqual(rc, B.EXIT_OK)
+        self.assertIn("nothing was changed", out)
+        self.assertIn("rime-root -> apex-root", out)
+        self.assertEqual(self.mounts[0][:2], ("-o", "ro,subvolid=5"), "a plan mounts the top level read-only")
+        self.assert_untouched()
+        self.assertTrue(all(os.path.islink(os.path.join(B.SYSTEMD_ETC, u)) for u in self.masked))
+
+    def test_undo_of_the_l16_shaped_move(self):
+        rc, out = self.undo()
+        self.assertEqual(rc, B.EXIT_OK, out)
+        self.assertEqual(self.mounts[0][:2], ("-o", "subvolid=5"))
+        # every subvolume, nested ones before the one holding them, the restore point last
+        order = self.deleted()
+        self.assertEqual(sorted(order), sorted(self.SUBS))
+        self.assertEqual(order[-1], "@pre-nixos")
+        for kid in ("@nixos/srv", "@nixos/var/lib/portables", "@nixos/var/lib/machines", "@nixos/var/tmp"):
+            self.assertLess(order.index(kid), order.index("@nixos"))
+        for s in self.SUBS:
+            self.assertFalse(os.path.exists(os.path.join(self.top, s)), s)
+        # GRUB: the hook's block, menu file and kernels gone; the user's entry and the Secure Boot block byte for byte
+        self.assertEqual(pathlib.Path(self.top, "boot/grub2/custom.cfg").read_text(), self.user + "\n" + self.SB)
+        self.assertFalse(os.path.lexists(os.path.join(self.top, "boot/grub2/rime-nixos.cfg")))
+        self.assertFalse(os.path.lexists(os.path.join(self.top, "boot/rime")))
+        self.assertTrue(os.path.isdir(os.path.join(self.top, "boot/loader")))
+        self.assertEqual(pathlib.Path(self.top, "boot/grub2/grub.cfg").read_text(), "ostree's\n")
+        # label, masks, timers
+        self.assertIn(["btrfs", "filesystem", "label", self.top, "apex-root"], self.calls)
+        for u in self.masked:
+            self.assertFalse(os.path.lexists(os.path.join(B.SYSTEMD_ETC, u)), u)
+        for u in B.OLD_SIDE_TIMERS:
+            self.assertIn(["systemctl", "start", u], self.calls)
+        # the record: rolled back, so every bootc verb and a new start are allowed again
+        rec = self.record()
+        self.assertIsNone(rec["done"])
+        self.assertEqual(rec["done_before_undo"], self.rec["done"])
+        self.assertEqual(rec["failed"], B.UNDONE)
+        self.assertEqual(rec["steps"][-2:], ["undo", "rolled back"])
+        self.assertIsNone(B.record_refusal(B.start_record()))
+        self.assertEqual(B.undo_record_refusal(rec)[0], "nothing-to-undo")
+        self.assertIn(["umount", self.top], self.calls)
+
+    def test_only_enabled_timers_start_for_an_old_record(self):
+        self.enabled = {"rime-update-check.timer"}
+        self.undo()
+        self.assertIn(["systemctl", "start", "rime-update-check.timer"], self.calls)
+        self.assertNotIn(["systemctl", "start", "rime-store-compact.timer"], self.calls)
+
+    def test_a_record_naming_its_timers_is_followed(self):
+        self.rec["timers_running"] = ["rime-store-compact.timer"]
+        self.write_record()
+        self.undo()
+        self.assertIn(["systemctl", "start", "rime-store-compact.timer"], self.calls)
+        self.assertNotIn(["systemctl", "start", "rime-update-check.timer"], self.calls)
+
+    def test_a_stop_half_way_still_reads_as_moved_and_continues(self):
+        self.fail_delete = "@home"
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(B.Failed) as e:
+            self.undo()
+        self.assertIn("run `rime migrate undo --yes` again", str(e.exception))
+        rec = self.record()
+        self.assertEqual(rec["done"], self.rec["done"], "the record said not-moved before the undo finished")
+        self.assertEqual(rec["steps"][-1], "undo")
+        self.assertEqual(B.record_refusal(rec)[0], "already-moved")
+        self.assertTrue(os.path.isdir(os.path.join(self.top, "@pre-nixos")), "restore point deleted before the rest")
+        self.assertTrue(all(os.path.islink(os.path.join(B.SYSTEMD_ETC, u)) for u in self.masked))
+        self.fail_delete, self.calls = None, []
+        rc, out = self.undo()
+        self.assertEqual(rc, B.EXIT_OK, out)
+        self.assertEqual(self.deleted(), ["@home", "@pre-nixos"])
+        self.assertEqual(self.record()["steps"][-3:], ["undo", "undo", "rolled back"])
+        self.assertIsNone(B.record_refusal(B.start_record()))
+
+    def refused(self, name):
+        rc, out = self.undo()
+        self.assertEqual(rc, B.EXIT_REFUSED, out)
+        self.assertIn(f"REFUSED [{name}]", out)
+        self.assert_untouched()
+        return out
+
+    def test_refused_when_nixos_was_used(self):
+        nb = os.path.join(self.top, "@nixos/var/lib/rime/nixos-bridge")
+        os.makedirs(nb)
+        pathlib.Path(nb, "good-boots.json").write_text(json.dumps({"boots": [{"boot_id": "a"}]}))
+        self.refused("nixos-used")
+
+    def test_refused_when_home_changed_after_the_move(self):
+        self.rec["done"] = iso(datetime_now() - 3600)
+        self.write_record()
+        out = self.refused("home-changed-since-move")
+        self.assertIn("@home", out)
+
+    def test_a_deleted_file_counts_as_a_change(self):
+        home = os.path.join(self.top, "@home")
+        B.time.sleep(0.02)
+        t = datetime_now()
+        B.time.sleep(0.02)
+        self.assertIsNone(B.newest_change(home, t))
+        p = pathlib.Path(home, "alex/notes.txt")
+        os.utime(p, (0, 0))  # mtime can be set back; ctime cannot, and the utime itself is a change
+        self.assertEqual(B.newest_change(home, t), str(p))
+        p.unlink()
+        self.assertEqual(B.newest_change(home, t), os.path.join(home, "alex"))
+
+    def test_refused_after_finish(self):
+        nb = os.path.join(self.top, "@nixos/var/lib/rime/nixos-bridge")
+        os.makedirs(nb)
+        pathlib.Path(nb, "finish.json").write_text("{}")
+        self.refused("finished")
+
+    def test_refused_while_a_subvolume_is_mounted(self):
+        B.mounted_subvols = lambda *a, **k: [("@home", "/mnt/x")]
+        self.refused("subvolume-in-use")
+
+    def test_refused_off_ostree(self):
+        self.facts = {"mode": "not-ostree"}
+        with self.assertRaises(B.Refused) as e:
+            self.undo()
+        self.assertEqual(e.exception.name, "not-live")
+
+    def test_records_undo_does_not_take(self):
+        os.unlink(os.path.join(B.STATE, "state.json"))
+        with self.assertRaises(B.Refused) as e:
+            self.undo()
+        self.assertEqual(e.exception.name, "nothing-to-undo")
+        self.rec.update(done=None, failed="", steps=["old side", "rolled back"])
+        self.write_record()
+        with self.assertRaises(B.Refused) as e:
+            self.undo()
+        self.assertEqual(e.exception.name, "nothing-to-undo")
+        self.rec.update(steps=["old side", "install closure"])
+        del self.rec["failed"]
+        self.write_record()
+        with self.assertRaises(B.Refused) as e:
+            self.undo()
+        self.assertEqual(e.exception.name, "start-unfinished")
+
+    def test_mounted_subvols_reads_mountinfo(self):
+        mi = os.path.join(self.d, "mountinfo")
+        pathlib.Path(mi).write_text(
+            "29 1 0:26 /ostree/deploy/default/deploy/abc.0 /sysroot rw - btrfs /dev/nvme0n1p3 rw\n"
+            "30 1 0:26 /@home/alex /mnt/a\\040b rw - btrfs /dev/nvme0n1p3 rw\n"
+            "31 1 0:26 /@homework /mnt/c rw - btrfs /dev/nvme0n1p3 rw\n"
+            "32 1 0:27 /@nixos /mnt/d rw - btrfs /dev/sdb1 rw\n")
+        self.assertEqual(self.saved["mounted_subvols"]({"/dev/nvme0n1p3"}, B.UNDO_SUBVOLS, mi), [("@home", "/mnt/a\\040b")])
+
+
+def datetime_now():
+    return B.time.time()
+
+
+def iso(t):
+    return B.datetime.datetime.fromtimestamp(t, B.datetime.timezone.utc).isoformat()
+
+
 if __name__ == "__main__":
     unittest.main()

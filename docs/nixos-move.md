@@ -19,7 +19,7 @@ through unchanged, so its own `--help` is the reference:
 The copy here is taken byte for byte from the NixOS side's `rime-bridge.py`
 (first line changed to `#!/usr/bin/python3 -I`), at the NixOS branch's bridge
 branch feat/migrate-without-drive (sha256 of the file without its first line:
-`5859bfd6876bc63d108664c9fd7c29284757eb4a23b73ab0799e75adca1b4304`). Its tests
+`6084f8e1f017c731be3b50d64ebcabcd6d45d8a286761ff294750782657cd176`). Its tests
 (`test_bridge.py`, `test_bridge_d2.py`) are in `tests/rime-migrate/` and run
 from `tests/test-rime-migrate.sh`. The fixture uses a synthetic root UUID
 (`0b0b0b0b-…`), never a real machine's. Compare again, by that hash, before

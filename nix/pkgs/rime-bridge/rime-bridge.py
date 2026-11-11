@@ -31,6 +31,15 @@
       Needs no space beyond the disk itself: --backup DIR is OPTIONAL, an extra copy off the disk (home restore-tested,
       key-export) taken first, for anyone who wants one. Without it the restore point is @pre-nixos, which does not
       survive the disk failing and which `rime migrate finish` deletes.
+  undo [--yes]
+      Takes back a FINISHED move while the old system is still there (booted from its ostree entry, before
+      `rime migrate finish`): the NixOS entry out of GRUB (custom.cfg's rime-boot block, rime-nixos.cfg, <boot>/rime/nixos),
+      @nixos, @nix, @home (with every subvolume nested in them) and last @pre-nixos deleted, the label back, the old
+      side unmasked and its update timers started, and the record marked rolled back (so `rime update` and a new
+      `start` work again). Refused by name when NixOS reached multi-user.target (good-boots.json), when anything in
+      @home changed after the move finished (its home could hold work the old one does not), when finish ran, or when
+      one of those subvolumes is mounted. Without --yes it says what it would do and changes nothing (the top level
+      mounted read-only). The old system and its home are never touched.
 
 Exit codes: 0 ok, 2 usage, 3 refused (by name: "REFUSED [name] ..."), 10 failed.
 Never runs bootctl, grub2-install or efibootmgr, and never uses NIXOS_LUSTRATE.
@@ -2266,6 +2275,250 @@ def cmd_start(a):
     return EXIT_OK
 
 
+UNDO_SUBVOLS = SUBVOLS + ("@pre-nixos",)  # the restore point goes last: until then the move is still recoverable
+HOOK_BLOCK_RX = re.compile(r"### BEGIN rime-boot.*?### END rime-boot ###\n?", re.S)
+UNDONE = "undone by `rime migrate undo`"
+
+
+def undo_record_refusal(rec):
+    """The refusal undo's record check means, or None. Undo is for a FINISHED move (`done` set), or an undo that
+    stopped half way (its last step "undo": the record still says done until the very end, so re-running it
+    continues). Anything else is not a move undo can take back."""
+    p = os.path.join(STATE, "state.json")
+    if rec is None:
+        return ("nothing-to-undo", f"{p} does not exist: this machine was never moved")
+    if "unreadable" in rec:
+        return ("start-record-unreadable", f"{p} cannot be read ({rec['unreadable']}); look at it before anything else")
+    if rec.get("done") is None:
+        why = record_refusal(rec)
+        if why is None:
+            return ("nothing-to-undo", f"{p}: the last start rolled itself back; there is no move to undo")
+        return ("start-unfinished", f"{p}: the start never finished (last step "
+                f"{(rec.get('steps') or ['none'])[-1]!r}); undo only takes back a finished move")
+    return None
+
+
+def newest_change(root, after):
+    """The first path under ROOT (ROOT included) whose ctime is later than AFTER (epoch seconds), or None. The kernel
+    sets ctime on every write, create, delete, rename, chmod and chown (a directory's on every entry added or removed
+    in it), and nothing in userspace can set it back: a later ctime anywhere means the tree was written after AFTER."""
+    try:
+        if os.lstat(root).st_ctime > after:
+            return root
+    except FileNotFoundError:
+        return None
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            it = os.scandir(d)
+        except OSError:
+            continue
+        with it:
+            for e in it:
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if st.st_ctime > after:
+                    return e.path
+                if stat.S_ISDIR(st.st_mode):
+                    stack.append(e.path)
+    return None
+
+
+def mounted_subvols(dev_paths, names, mountinfo="/proc/self/mountinfo"):
+    """Mount points of NAMES (top-level subvolumes, or anything inside them) on the btrfs DEV_PATHS, from mountinfo:
+    [(name, mount point)]."""
+    found = []
+    try:
+        with open(mountinfo) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return found
+    for ln in lines:
+        fields = ln.split()
+        if "-" not in fields:
+            continue
+        sep = fields.index("-")
+        if len(fields) < sep + 3 or fields[sep + 1] != "btrfs" or fields[sep + 2] not in dev_paths:
+            continue
+        fsroot = fields[3].replace("\\040", " ")
+        for n in names:
+            if fsroot == "/" + n or fsroot.startswith("/" + n + "/"):
+                found.append((n, fields[4]))
+    return found
+
+
+def undo_boot_hook(bdir):
+    """The boot hook's entry out of GRUB: its include block out of custom.cfg (everything else in it kept byte for
+    byte, checked), its menu file and its kernel directory (<boot>/rime/nixos; <boot>/rime only if then empty).
+    Returns what it removed. Idempotent."""
+    removed = []
+    p = os.path.join(bdir, "grub2/custom.cfg")
+    old = read(p)
+    if old is not None and HOOK_BLOCK_RX.search(old):
+        new = HOOK_BLOCK_RX.sub("", old)
+        tmp = p + ".rime-undo"
+        with open(tmp, "w") as f:
+            f.write(new)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+        if custom_outside_block(read(p, "")) != custom_outside_block(old):
+            raise Failed(f"{p}: the text outside the rime-boot block changed while the block was removed")
+        removed.append("custom.cfg rime-boot block")
+    menu = os.path.join(bdir, "grub2/rime-nixos.cfg")
+    if os.path.lexists(menu):
+        os.unlink(menu)
+        removed.append("grub2/rime-nixos.cfg")
+    kdir = os.path.join(bdir, "rime", "nixos")
+    if os.path.isdir(kdir) and not os.path.islink(kdir):
+        shutil.rmtree(kdir)
+        removed.append("rime/nixos")
+    try:
+        os.rmdir(os.path.join(bdir, "rime"))
+    except OSError:
+        pass
+    os.sync()
+    return removed
+
+
+def undo_targets(top):
+    """Every subvolume undo deletes, deepest first within each of UNDO_SUBVOLS (a NixOS boot makes nested ones, e.g.
+    @nixos/var/lib/machines), in UNDO_SUBVOLS order. None when the subvolumes cannot be listed."""
+    paths = subvolume_paths(top)
+    if paths is None:
+        return None
+    out = []
+    for n in UNDO_SUBVOLS:
+        mine = [p for p in paths if p == n or p.startswith(n + "/")]
+        out += sorted(mine, key=lambda p: (-p.count("/"), p))
+    return out
+
+
+def undo_facts():
+    """What undo needs of the running system, and no more (collect_live reads the whole home): booted from ostree,
+    the root btrfs device (its LUKS mapping when it has one), its label, and whether /boot is the top level's
+    directory or a partition."""
+    if not os.path.exists("/run/ostree-booted"):
+        return {"mode": "not-ostree"}
+    devs = lsblk()
+    sysroot = "/sysroot" if os.path.ismount("/sysroot") else "/"
+    fm = json.loads(run(["findmnt", "-n", "-J", "-o", "SOURCE,FSTYPE,UUID", "--target", sysroot]).stdout)
+    fm = fm["filesystems"][0]
+    src = re.sub(r"\[.*\]$", "", fm["source"])
+    rdev = next((d for d in devs if d["name"] == src or os.path.realpath(d["name"]) == os.path.realpath(src)), None)
+    if rdev is None or fm["fstype"] != "btrfs":
+        raise Failed(f"the root {src} is not a btrfs block device lsblk knows")
+    bf = json.loads(run(["findmnt", "-n", "-J", "-o", "UUID", "--target", "/boot"]).stdout)["filesystems"][0]
+    same = (bf.get("uuid") or "").lower() == (fm.get("uuid") or "").lower()
+    return {"mode": "live", "root": {"device": rdev["name"], "label": rdev.get("label"), "luks": luks_of(devs, rdev)},
+            "boot": {"kind": "top-level-dir" if same else "partition"}}
+
+
+def cmd_undo(a):
+    _lock = start_lock()  # no start (or second undo) while this runs
+    rec = start_record()
+    why = undo_record_refusal(rec)
+    if why:
+        raise Refused(*why)
+    facts = undo_facts()
+    if facts.get("mode") != "live":
+        raise Refused("not-live", "undo runs on the booted bootc system only")
+    root = facts["root"]
+    dev = root["luks"]["mapper"] if root.get("luks") else root["device"]
+    top = os.path.join(RUN_DIR, "top")
+    os.makedirs(top, exist_ok=True)
+    # A plan (no --yes) mounts the top level read-only: it changes nothing, not even an atime.
+    mount("-o", "subvolid=5" if a.yes else "ro,subvolid=5", dev, top)
+    try:
+        refusals = []
+        nb = os.path.join(top, "@nixos", "var/lib/rime/nixos-bridge")
+        if os.path.exists(os.path.join(nb, "finish.json")):
+            refusals.append(("finished", "`rime migrate finish` ran on NixOS: the old system is gone, nothing to undo"))
+        try:
+            with open(os.path.join(nb, "good-boots.json")) as f:
+                boots = json.load(f).get("boots") or []
+        except FileNotFoundError:
+            boots = []
+        except (OSError, ValueError, AttributeError) as e:
+            boots = [f"unreadable: {e}"]
+        if boots:
+            refusals.append(("nixos-used", f"NixOS reached multi-user.target {len(boots)} time(s) since the move "
+                             f"({nb}/good-boots.json): its home may hold work the old one does not have"))
+        done = datetime.datetime.fromisoformat(rec["done"]).timestamp()
+        print("reading @home for anything written after the move (one stat per name; minutes for millions)", flush=True)
+        changed = newest_change(os.path.join(top, "@home"), done)
+        if changed:
+            refusals.append(("home-changed-since-move", f"{shown(changed)} changed after the move finished "
+                             f"({rec['done']}): something wrote NixOS's home; undo would delete it"))
+        busy = mounted_subvols({root["device"], dev, os.path.realpath(dev)}, UNDO_SUBVOLS)
+        if busy:
+            refusals.append(("subvolume-in-use", "mounted: " + ", ".join(f"{n} at {shown(m)}" for n, m in busy)))
+        targets = undo_targets(top)
+        if targets is None:
+            refusals.append(("subvolumes-unlisted", f"`btrfs subvolume list {top}` failed"))
+        if refusals:
+            for name, text in refusals:
+                print(f"REFUSED [{name}] {text}")
+            return EXIT_REFUSED
+        bdir = os.path.join(top, "boot") if facts["boot"]["kind"] == "top-level-dir" else "/boot"
+        label_back = rec.get("relabelled_from") if root.get("label") == ROOT_LABEL else None
+        print(f"undo of the move finished {rec['done']}:")
+        print(f"  boot: the NixOS entry out of {bdir}/grub2 (custom.cfg's rime-boot block, rime-nixos.cfg) and "
+              f"{bdir}/rime/nixos; the ostree entries and custom.cfg's other blocks stay")
+        print("  delete: " + (", ".join(targets) or "nothing (already gone)"))
+        print(f"  label: {f'{ROOT_LABEL} -> {label_back}' if label_back else 'unchanged'}")
+        print(f"  old side: unmask {', '.join(rec.get('masked', [])) or 'nothing'}; start its update timers")
+        print("  the old system and its home are not touched; @pre-nixos (the restore point) goes last")
+        if not a.yes:
+            print("nothing was changed; run again with --yes to undo the move")
+            return EXIT_OK
+
+        def save():
+            with open(os.path.join(STATE, "state.json"), "w") as f:
+                json.dump(rec, f, indent=1, sort_keys=True)
+
+        def step(s):
+            rec["steps"].append(s)
+            save()
+            print(f"== {s}", flush=True)
+
+        rec.setdefault("steps", [])
+        rec.setdefault("undo_started", datetime.datetime.now(datetime.timezone.utc).isoformat())
+        # The record keeps `done` until the very end: an undo that stops half way still reads as moved (every bootc
+        # verb refused) and `undo` continues it; each step below is idempotent.
+        step("undo")
+        try:
+            rec["undo_boot"] = undo_boot_hook(bdir)
+            save()
+            for p in targets:
+                run(["btrfs", "subvolume", "delete", os.path.join(top, p)])
+            rec["undo_deleted"] = targets
+            save()
+            if label_back:
+                run(["btrfs", "filesystem", "label", top, label_back])
+            if "timers_running" not in rec:
+                # Records from before 2026-11-11 (#164) do not say which timers ran: start the ones enabled.
+                rec["timers_running"] = [u for u in OLD_SIDE_TIMERS if run(
+                    ["systemctl", "is-enabled", "--quiet", u], check=False).returncode == 0]
+            unmask_old_side(rec)
+        except BaseException as e:
+            raise Failed(f"undo stopped ({e or type(e).__name__}); the record still says moved: run "
+                         "`rime migrate undo --yes` again to continue") from e
+        rec["undone"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        rec["done_before_undo"] = rec["done"]
+        rec["done"] = None
+        rec["failed"] = UNDONE
+        step("rolled back")
+        print("undone: the old system is as it was before the move; `rime update` works again. The disk space comes "
+              "back over the next minutes (btrfs frees deleted subvolumes in the background)")
+        return EXIT_OK
+    finally:
+        run(["umount", top], check=False)
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     ap = argparse.ArgumentParser(prog=PROG, description=__doc__.split("\n\n")[0])
@@ -2285,6 +2538,9 @@ def main(argv=None):
     s.add_argument("--payload", required=True)
     s.add_argument("--yes", action="store_true")
     s.set_defaults(disk=[])
+    u = sub.add_parser("undo")
+    u.add_argument("--yes", action="store_true")
+    u.set_defaults(disk=[], backup=None, payload=None)
     a = ap.parse_args(argv)
     if os.geteuid() != 0:
         print(f"{PROG}: needs root (sudo rime migrate {a.cmd})", file=sys.stderr)
@@ -2292,7 +2548,7 @@ def main(argv=None):
     in_private_namespace(argv)
     try:
         return {"check": cmd_check, "repair-e": cmd_repair_e, "key-export": cmd_key_export,
-                "start": cmd_start}[a.cmd](a)
+                "start": cmd_start, "undo": cmd_undo}[a.cmd](a)
     except Refused as e:
         print(f"REFUSED [{e.name}] {e}")
         return EXIT_REFUSED
