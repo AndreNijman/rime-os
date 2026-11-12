@@ -426,6 +426,39 @@ if [ -f "${HOME}/.zshrc" ] && grep -qxF "${ZSHRC_BAD_STYLE}" "${HOME}/.zshrc"; t
     fi
     rm -f "${ZSHRC_TMP}"
 fi
+
+# Point an inherited ~/.zshrc at this system's greeting and agent hooks.
+# The seeded zshrc sources them by absolute path, spelled as the system that
+# seeded it: /usr/share/rime/shell/ on bootc, /usr/share/apex/shell/ before the
+# rename. A home carried to another system (`rime migrate` to NixOS, where they
+# live under /run/current-system/sw) keeps that spelling, the `[[ -r ]]` guard
+# skips the line, and every new terminal opens with no fastfetch and no Rime
+# logo, silently. A line is rewritten only when the path it names does not
+# exist here and this system's own file does, so on the system that seeded it
+# nothing changes. The on-disk spellings are split so a packager's /usr rewrite
+# (the NixOS FHS table) cannot reach them; this system's are written plainly
+# so it does.
+ZSHRC_HOOKS_HERE="/usr/share/rime/shell"
+if [ -f "${HOME}/.zshrc" ]; then
+    for ZSHRC_HOOKS_OLD in "/u""sr/share/rime/shell" "/u""sr/share/apex/shell"; do  # rime-rename: keep — the paths homes were seeded with
+        [ "${ZSHRC_HOOKS_OLD}" = "${ZSHRC_HOOKS_HERE}" ] && continue
+        for ZSHRC_HOOK in greeting.sh agent.sh; do
+            [ -e "${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK}" ] && continue
+            [ -r "${ZSHRC_HOOKS_HERE}/${ZSHRC_HOOK}" ] || continue
+            grep -qF "${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK}" "${HOME}/.zshrc" || continue
+            ZSHRC_TMP="$(mktemp "${HOME}/.zshrc.rime.XXXXXX")"
+            if awk -v old="${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK}" -v new="${ZSHRC_HOOKS_HERE}/${ZSHRC_HOOK}" '
+                   { out = ""; rest = $0
+                     while ((i = index(rest, old)) > 0) { out = out substr(rest, 1, i - 1) new; rest = substr(rest, i + length(old)) }
+                     print out rest }' "${HOME}/.zshrc" > "${ZSHRC_TMP}" \
+               && [ -s "${ZSHRC_TMP}" ]; then
+                cat "${ZSHRC_TMP}" > "${HOME}/.zshrc"
+                log "repointed ~/.zshrc: ${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK} is not on this system, it now sources ${ZSHRC_HOOKS_HERE}/${ZSHRC_HOOK}"
+            fi
+            rm -f "${ZSHRC_TMP}"
+        done
+    done
+fi
 # The prompt follows the wallpaper. Rime Shell's matugen renders
 # ~/.cache/rime-shell/starship.toml from the shell's own template on every
 # wallpaper change, and ~/.config/starship.toml is a SYMLINK to it — starship
