@@ -30,7 +30,7 @@ READINESS=${READINESS:-/var/lab/rime-nix/wt-readiness}
 BASE=${BASE:-ghcr.io/andrenijman/rime-os@sha256:0ace1f6dad51597d79a7d0d84135dd2896fc89d748ec74b9ecfc7c98c92df9bf}
 OVMF_WORK=${OVMF_WORK:-/var/lab/rime-nix/artifacts/ovmf/work}
 PIN=github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325
-NIXJ=(--max-jobs "${RIME_LAB_JOBS:-2}" --option cores 4)
+NIXJ=(--max-jobs "${RIME_LAB_JOBS:-2}" --option cores "${RIME_LAB_CORES:-4}")
 KERNEL=${RIME_LAB_KERNEL:-test}
 [[ $KERNEL == test || $KERNEL == release ]] || { echo "prepare: RIME_LAB_KERNEL is test or release" >&2; exit 2; }
 work() { echo "/work/${1#/var/lab/rime-nix/}"; }   # host path under /var/lab/rime-nix -> the rime-nix container's

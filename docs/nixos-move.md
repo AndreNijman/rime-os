@@ -15,11 +15,12 @@ through unchanged, so its own `--help` is the reference:
 | `sudo rime migrate repair-e --confirm` | topology E only: moves an earlier boot trial's leftovers that block a start aside (archived, never deleted) |
 | `sudo rime migrate key-export --to DIR` | copies the LUKS header backup and the backup tool's keys to DIR |
 | `sudo rime migrate start --payload DIR [--backup DIR]` | takes a read-only snapshot of the old system as its restore point, installs the NixOS closure beside bootc, adds the GRUB entry; on any failure it removes what it made and records `rolled back`. `--backup DIR` (optional) also copies home off the disk first |
+| `sudo rime migrate undo [--yes]` | on the old system, after a start that finished but whose NixOS was never used: takes the move back (the NixOS GRUB entry, `@nixos`, `@nix`, `@home`, `@pre-nixos`, the masks), so `rime update` works again. Without `--yes` it only prints what it would do |
 
 The copy here is taken byte for byte from the NixOS side's `rime-bridge.py`
 (first line changed to `#!/usr/bin/python3 -I`), at the NixOS branch's bridge
 branch feat/migrate-without-drive (sha256 of the file without its first line:
-`5859bfd6876bc63d108664c9fd7c29284757eb4a23b73ab0799e75adca1b4304`). Its tests
+`a766cb9c34a7b08f32ae4e5b8d6bd6ee7756e8adbbd04970f8a221c5760c1f46`). Its tests
 (`test_bridge.py`, `test_bridge_d2.py`) are in `tests/rime-migrate/` and run
 from `tests/test-rime-migrate.sh`. The fixture uses a synthetic root UUID
 (`0b0b0b0b-…`), never a real machine's. Compare again, by that hash, before
@@ -119,6 +120,38 @@ with the same rule: while it refuses, it never asks the registry and reports
 `state=none`, so Settings → Updates does not offer a bootc update the machine
 would then refuse. The start also masks that timer; this covers a machine where
 something unmasked it.
+
+**A finished start can be taken back while NixOS was never used.**
+`sudo rime migrate undo` runs on the old system (booted from its ostree entry).
+It refuses by name, before it writes anything, when the move cannot be undone
+safely: `finished` (`rime migrate finish` ran), `nixos-used` (NixOS reached
+multi-user.target at least once), `home-changed-since-move` (something wrote the
+new home after the move; it names the file), `home-unreadable` (a name in the
+new home could not be read, so "nothing wrote it" cannot be said),
+`subvolume-in-use`, `mounts-unreadable`, `boot-unmounted` (/boot is not
+mounted, so the NixOS entry could not be removed), `boot-hook-block-unclear`
+(custom.cfg's `rime-boot` block is not exactly one BEGIN line through one END
+line with no other block's marker between them), and `start-unfinished` or
+`start-record-unreadable` as above. Otherwise it removes the NixOS GRUB entry
+(only the `rime-boot` block in custom.cfg; other blocks, such as the Secure Boot
+key entry, stay, and the old file is kept beside it as `custom.cfg.pre-undo`),
+deletes `@nixos`, `@nix` and `@home` (with the subvolumes a NixOS boot made
+inside them) and `@pre-nixos` last, puts the old filesystem label back (none,
+when it had none), and unmasks the old side. The record then reads `failed` with
+`rolled back` (`done` is kept as `done_before_undo`), so the verbs above are
+allowed again and a new `start` may run; only then are the update timers
+started, so one that fires at once never sees the move. An undo that stops half
+way keeps the record as moved; running it again continues. A timer that does
+not start is named, with the command to start it; the undo itself is complete.
+
+A machine moved by a release from before `undo` existed has no `undo` in its
+`rime migrate`, and cannot take an update while it is moved. Run a newer
+release's bridge from a copy: `sudo podman run --rm --entrypoint cat
+ghcr.io/andrenijman/rime-os:daily /usr/libexec/rime-migrate >
+/var/tmp/rime-migrate`, then `sudo python3 -I /var/tmp/rime-migrate undo` (the
+plan) and `… undo --yes`. The record format is the same; a record from before
+2026-11-11 that does not say which timers ran gets the enabled ones started.
+That is how the first moved machine was taken back (2026-11-12).
 
 Not wrapped: `bootc upgrade` typed directly. The bridge masks the update timers
 and `bootc-fetch-apply-updates` is already masked in the image, so nothing on

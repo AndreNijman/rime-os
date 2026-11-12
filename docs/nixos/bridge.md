@@ -587,6 +587,64 @@ command, the GRUB menu parser expected "GNU GRUB" and escapes the reader had alr
 the no-ostree check), the interrupt run powered off as the user, and the usage record failed on an absent
 `.rime-finish-old`.
 
+### `rime migrate undo`: a finished move taken back from the old side (2026-11-12)
+
+The first real move (a ThinkPad, 2026-11-11) finished `start` and then its first NixOS boot failed (/boot from the
+build, fixed separately). The owner went back to the ostree entry. The record said `done`, so every bootc verb was
+refused and the update timers stayed masked. The only way forward was hand edits, and the copy of home in `@home`
+was going stale while the owner kept working in the old one.
+
+`undo` is the tested way back. It runs from the old side only (`/run/ostree-booted`, the same facts as `check`) and
+takes the start lock.
+- **Refusals before any write:** `finished`, `nixos-used` (good-boots.json lists a boot), `home-changed-since-move`
+  (the first name under `@home` whose ctime is after `done`: the walk is a stat per name, minutes for millions of
+  names; a directory or name it cannot read refuses `home-unreadable`, never "unchanged"), `subvolume-in-use`
+  (/proc/self/mountinfo shows one of the five subvolumes mounted from the root device; an unreadable mountinfo
+  refuses `mounts-unreadable`), `subvolumes-unlisted`, `boot-unmounted` (ostree mounts /boot in both layouts, so an
+  unmounted /boot is a boot partition missing, and findmnt would answer for the root), `boot-hook-block-unclear`
+  (custom.cfg's block is parsed by whole lines: one BEGIN line, the END line after it, no other `### BEGIN`/`### END`
+  between; anything else, e.g. a BEGIN with no END, would have let a non-greedy DOTALL regex take the user's entries
+  with it).
+- **The plan mounts the top level read-only.** Without `--yes`, nothing on the disk changes, not even an atime.
+- **The order, each step idempotent:**
+  1. The boot hook's block is cut out of custom.cfg, read whole (not read()'s first MiB). The old file is kept as
+     custom.cfg.pre-undo, the new one is read back and must equal the old one without the block, so the
+     `rime-secureboot-key` block stays. When the block starts the file or follows an empty line, the one empty line
+     after it goes too: the Secure Boot writer put it there, and the first real undo left it as a stray line.
+  2. rime-nixos.cfg and `<boot>/rime/nixos` are deleted.
+  3. The subvolumes are deleted, deepest first within `@nixos`, `@nix`, `@home`, and `@pre-nixos` last. A NixOS
+     boot makes subvolumes inside `@nixos` (systemd's `/var/lib/machines`, `/var/lib/portables`), which a plain
+     delete refuses.
+  4. The label goes back to the record's `relabelled_from` (the key present = start relabelled; None = there was no
+     label, so none goes back).
+  5. The masks are undone. A daemon-reload or reset-failed that fails stops the undo here, record still moved.
+  6. The record is marked: `done` → `done_before_undo`, `failed` = "undone by `rime migrate undo`", last step
+     `rolled back`. That reads as allowed everywhere (the table in docs/nixos-move.md) and lets a new `start` run.
+     Every save is a temporary file, fsync and rename.
+  7. Last, the update timers are started: the record's `timers_running`, or, in records from before #164, the ones
+     enabled (asked after the unmask: systemd answers `masked` for a masked unit). They start after the record is
+     marked, because rime-update-check.timer's OnBootSec passed long ago and it can fire at once: it must not read
+     a record that still says moved. A timer that does not start exits 1 with the command to run; the units are
+     enabled, so the next boot starts them anyway.
+- **An undo that stops part way keeps `done`.** The machine still reads as moved, and the next `undo --yes`
+  continues.
+
+Proof: 26 unit tests (`Undo` in test_bridge_d2.py) and 18 mutants in `bridge-unit`: undo-pre-nixos-first,
+undo-shallow-first, undo-plan-writes, undo-ignores-good-boots, undo-ignores-home-changes, undo-flips-early,
+undo-strips-secureboot, undo-no-unmask, undo-timers-asked-masked, undo-timers-before-flip,
+undo-unmask-failure-ignored, undo-home-unreadable-ignored, undo-mountinfo-unreadable-ignored,
+undo-boot-unmounted-ignored, undo-block-across-markers, undo-reads-1mib, undo-stray-empty-line,
+undo-label-none-kept. The OVMF lab's `undo` phase (`--no-backup --phases bootc,undo,nixos`) runs
+these steps in order on a real moved disk:
+1. Pick the ostree entry by key.
+2. Add the nested subvolumes a NixOS boot makes.
+3. Run the plan, which changes nothing.
+4. Run `undo --yes`: nothing of the move is left, and `rime update` is no longer refused.
+5. Run a second undo, which is refused `nothing-to-undo`.
+6. Reboot with no key: the machine boots ostree with home intact.
+7. Run `start` again.
+8. Boot the redone move into NixOS.
+
 ## What the OVMF lab proved on E with the release kernel (topology-e, 2026-11-04, Secure Boot on)
 
 Evidence `/var/lab/rime-nix/artifacts/topo-e/` (`run-E.log`, `run-A.log`, `E/`, `A/`, `kernel-release.txt`,

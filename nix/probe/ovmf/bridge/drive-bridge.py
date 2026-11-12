@@ -12,6 +12,9 @@ overlay of disks/KIND/disk.raw and the same varstore copy, ending with a guest p
   nixos     GRUB's default is the NixOS entry the bridge added: a serial login with the OLD password (mounts,
             carried state, home checksums), then a GRAPHICAL login through rime-greet with the same old password typed
             on the emulated keyboard: Hyprland starts for the user through greetd, the desktop is screenshotted
+  undo      (after bootc) pick the ostree entry by key, add the subvolumes a failed NixOS boot makes inside @nixos,
+            `rime migrate undo` (plan: nothing changed) then --yes: nothing of the move left, `rime update` no longer
+            refused, a second undo refused; boot again with no key (ostree, home intact) and start again
   back      pick the first GRUB entry (the ostree one) by key: bootc boots, the same login works, home intact;
             with --readiness every bootc verb must still refuse there (the record says done)
   finish    `rime migrate finish` (docs/nixos/bridge.md): phase bootc first seeds what it must keep and what it must
@@ -959,10 +962,103 @@ def finish_interrupt(a):
     say(f"[finint] killed after {a.finish_kill_at!r} + power cut: NixOS boots, the re-run completes, a third run refuses")
 
 
-def phase_back(a):
-    vm = VM(a, "back")
-    # GRUB's menu reads the PS/2 keyboard through the firmware: from the first firmware line until the kernel starts,
-    # keep pressing Up (the first entry is the newest ostree deployment), then Return.
+MOVED = "this machine has moved to Rime OS on NixOS"
+# The verdict is computed in the guest (the echoed command line holds VERDICT=$v, never VERDICT=clean).
+UNDO_STATE = ("btrfs subvolume list /sysroot; echo label=$(btrfs filesystem label /sysroot);"
+              " ls -la /etc/systemd/system | grep /dev/null; ls /sysroot/boot /sysroot/boot/grub2;"
+              " cat /sysroot/boot/grub2/custom.cfg 2>&1; cat /var/lib/rime/nixos-bridge/state.json; echo")
+
+
+def phase_undo(a):
+    """`rime migrate undo` on a finished move, from the old side (the L16 of 2026-11-11: its first NixOS boot failed, the
+    user went back to ostree by hand). Phase bootc ran start; here GRUB's default is still NixOS, so the ostree entry
+    is picked by key. The failed NixOS boot is reproduced where it matters to undo: systemd made subvolumes INSIDE
+    @nixos (srv, var/lib/machines, var/lib/portables, var/tmp), which a plain delete of @nixos refuses. Then: the plan
+    changes nothing; --yes leaves no subvolume, no hook file, no mask, custom.cfg without the rime-boot block (its
+    other blocks kept) and a record that lets every bootc verb run; the machine boots ostree with NO key pressed; and
+    start runs again on the same disk (phase nixos then boots the redone move)."""
+    vm = VM(a, "undo1")
+    pick_ostree(vm)
+    boot_bootc(a, vm, False)
+    rc, out = record(vm, "undo-booted", "cat /proc/cmdline", ok=False)
+    if "ostree=" not in out:
+        raise Timeout("undo: not an ostree boot")
+    vm.sh("mkdir -p /run/t && mount -o subvolid=5 LABEL=rime-root /run/t && for d in srv var/lib/machines var/lib/portables"
+          " var/tmp; do mkdir -p /run/t/@nixos/$(dirname $d); [ -d /run/t/@nixos/$d ] && rmdir /run/t/@nixos/$d;"
+          " btrfs subvolume create /run/t/@nixos/$d; done; touch /run/t/@nixos/var/tmp/left-by-boot; umount /run/t")
+    # The L16's record came from a bridge before #164: it names no timers_running (undo then starts the enabled ones).
+    vm.sh("python3 -I -c 'import json; p=\"/var/lib/rime/nixos-bridge/state.json\"; r=json.load(open(p));"
+          " r.pop(\"timers_running\", None); json.dump(r, open(p, \"w\"), indent=1, sort_keys=True)'")
+    record(vm, "undo-before", UNDO_STATE + "; (sha256sum < /sysroot/boot/grub2/custom.cfg) > /run/u-custom", ok=False)
+    rc, out = record(vm, "undo-update-before", "rime update --check 2>&1 | tail -n 20", ok=False, timeout=120)
+    if MOVED not in out:
+        raise Timeout("undo: before the undo, `rime update` was not refused by the move")
+    # the plan: rc 0, the plan printed, nothing changed (the same state, byte for byte)
+    vm.sh("(" + UNDO_STATE + ") > /run/u-state-1 2>&1")
+    rc, out = record(vm, "undo-plan", f"{a.migrate} undo", ok=False, timeout=600)
+    if rc != 0 or "nothing was changed" not in out or "@nixos/var/lib/machines" not in out:
+        raise Timeout(f"undo plan: rc={rc}, want 0, the plan and the nested subvolumes in it")
+    rc, out = record(vm, "undo-plan-changed-nothing", "(" + UNDO_STATE + ") > /run/u-state-2 2>&1;"
+                     " cmp /run/u-state-1 /run/u-state-2 && echo PLAN-WROTE-NOTHING", ok=False)
+    if not re.search(r"PLAN-WROTE-NOTHING\s*$", out, re.M):  # (an OSC 3008 marker may lead the line)
+        raise Timeout("undo plan: the state differs after a plan without --yes")
+    rc, out = record(vm, "undo-yes", f"time {a.migrate} undo --yes", ok=False, timeout=1800)
+    if rc != 0 or "== rolled back" not in out:
+        raise Timeout(f"undo --yes: rc={rc}, want 0 and '== rolled back'")
+    rc, after = record(vm, "undo-after", UNDO_STATE + "; v=clean;"
+                       " for s in @nixos @nix @home @pre-nixos; do btrfs subvolume list /sysroot | awk '{print $NF}'"
+                       " | grep -x -- $s >/dev/null && v=subvol:$s; done;"
+                       " btrfs subvolume list /sysroot | awk '{print $NF}' | grep -E '^@(nixos|nix|home|pre-nixos)/' >/dev/null"
+                       " && v=nested;"
+                       " [ \"$(btrfs filesystem label /sysroot)\" = rime-root ] || v=label;"
+                       # the units start masks (the image masks others itself: bootc-fetch-apply-updates, ...)
+                       " ls /etc/systemd/system | grep -E '^(rime-update-check|rime-store-compact|bootloader-update|rime-boot-migrate)'"
+                       " >/dev/null && v=masks;"
+                       " [ -e /sysroot/boot/rime ] && v=boot-rime; [ -e /sysroot/boot/grub2/rime-nixos.cfg ] && v=menu;"
+                       " grep -F 'BEGIN rime-boot' /sysroot/boot/grub2/custom.cfg >/dev/null && v=hook-block;"
+                       " for t in rime-update-check.timer rime-store-compact.timer; do systemctl is-enabled $t | grep -x masked"
+                       " >/dev/null && v=masked:$t; done;"
+                       " python3 -I -c 'import json,sys; r=json.load(open(\"/var/lib/rime/nixos-bridge/state.json\"));"
+                       " sys.exit(0 if r.get(\"done\") is None and r[\"steps\"][-1] == \"rolled back\" and r.get(\"undone\")"
+                       " else 1)' || v=record; echo VERDICT=$v", ok=False)
+    if not re.search(r"VERDICT=clean\b", after):
+        raise Timeout("undo: " + (re.findall(r"VERDICT=\S+", after) or ["no verdict"])[-1])
+    rc, out = record(vm, "undo-timers", "systemctl is-active rime-update-check.timer rime-store-compact.timer", ok=False)
+    if rc != 0:
+        raise Timeout("undo: the old side's update timers are not running after the undo (no reboot)")
+    rc, out = record(vm, "undo-update-after", "rime update --check 2>&1 | tail -n 20", ok=False, timeout=300)
+    if MOVED in out or "REFUSED [nixos-migration" in out:
+        raise Timeout("undo: `rime update` is still refused by the move")
+    rc, out = record(vm, "undo-again", f"{a.migrate} undo --yes", ok=False, timeout=600)
+    if rc != 3 or "REFUSED [nothing-to-undo]" not in out:
+        raise Timeout(f"undo: a second undo was not refused nothing-to-undo (rc={rc})")
+    record(vm, "undo-check", f"{a.migrate} check --explain{a.backup_arg} --payload /run/payload/payload", ok=False)
+    poweroff(vm)
+    # no key: custom.cfg no longer sends GRUB to NixOS
+    vm = VM(a, "undo2")
+    boot_bootc(a, vm, False)
+    rc, out = record(vm, "undo2-booted", "cat /proc/cmdline; systemctl --failed --no-legend; systemctl list-timers --all"
+                     " --no-pager | grep -E 'rime-update-check|rime-store-compact'; cd /var/home/" + USER
+                     + " && sha256sum -c .rime-lab/sums", ok=False, timeout=300)
+    if "ostree=" not in out:
+        raise Timeout("undo: the boot after the undo, with no key pressed, is not ostree")
+    if rc != 0:
+        raise Timeout("undo: home sums differ after the undo")
+    # (the grep's status is hidden behind sha256sum's: look for both timers in the output itself)
+    for t in ("rime-update-check.timer", "rime-store-compact.timer"):
+        if t not in out:
+            raise Timeout(f"undo: {t} is not scheduled on the boot after the undo")
+    rc, out = record(vm, "redo-start", f"time {a.migrate} start{a.backup_arg} --payload /run/payload/payload --yes",
+                     timeout=5400, ok=False)
+    if rc != 0:
+        raise Timeout(f"undo: start again after the undo failed rc={rc}")
+    record(vm, "redo-after-start", UNDO_STATE, ok=False)
+    poweroff(vm)
+
+
+def pick_ostree(vm):
+    """GRUB's menu reads the PS/2 keyboard through the firmware: from the first firmware line until the kernel starts,
+    keep pressing Up (the first entry is the newest ostree deployment), then Return."""
     t0 = time.time()
     picked = False
     while time.time() - t0 < 120:
@@ -979,7 +1075,12 @@ def phase_back(a):
             break
         vm.key("up")
         time.sleep(0.3)
-    say(f"[back] menu text seen and Return pressed: {picked}")
+    say(f"[{vm.name}] menu text seen and Return pressed: {picked}")
+
+
+def phase_back(a):
+    vm = VM(a, "back")
+    pick_ostree(vm)
     vm.unlock()
     vm.login()
     rc, out = record(vm, "back-checks", "cat /proc/cmdline; id; cd ~ && sha256sum -c .rime-lab/sums; rpm-ostree status 2>&1 | head -n 20; " + SB_STATE,
@@ -1058,7 +1159,8 @@ def main():
         os.makedirs(a.logs, exist_ok=True)
         seen.add(ph)
         say(f"== phase {ph}" + (f" (records in {a.logs})" if a.logs != base else ""))
-        {"bootc": phase_bootc, "nixos": phase_nixos, "back": phase_back, "finish": phase_finish}[ph](a)
+        {"bootc": phase_bootc, "nixos": phase_nixos, "back": phase_back, "finish": phase_finish,
+         "undo": phase_undo}[ph](a)
         say(f"== phase {ph} PASS")
     say(f"BRIDGE OVMF {a.kind}: PASS")
 
