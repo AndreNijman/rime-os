@@ -101,6 +101,9 @@ TRIAL_TOP = ("composefs", "state")
 BOOT_PART_FSTYPES = ("ext4",)
 # rime backup's key store (rimed/rime-backup-core/src/keys.rs SYSTEM_ROOT): keys/<uid>.key, recipients/<uid>.pub.
 BACKUP_KEYS_ROOT = "/var/lib/rime-backup"
+# The system's Flatpak apps and runtimes, relative to the old /var (start reflink-copies them into the new system:
+# NixOS's /var/lib/flatpak is its own, so without the copy every system Flatpak was gone after the move).
+FLATPAK_REL = "lib/flatpak"
 # The payload's manifest is signed (docs/nixos/bridge.md "The payload is signed"). This program is the only verifier
 # (the readiness release's `rime migrate`, rimed/rime/src/nixos_bridge.rs, execs it with no check of its own); the
 # format is what payload-sign.sh writes and `openssl pkeyutl -verify -rawin` accepts:
@@ -594,6 +597,7 @@ def collect_live():
         v = json.loads(run(["findmnt", "-n", "-J", "-o", "FSROOT", "--target", "/var"]).stdout)["filesystems"][0]
         facts["var_fsroot"] = v["fsroot"]
         facts["home"] = dict(du_tree("/var/home"), path="/var/home")
+        facts["flatpak"] = du_tree(os.path.join("/var", FLATPAK_REL))
         facts["migration"] = migration_facts("/var", top)
         facts["signer"] = signer_facts(["/"])
         facts["keymap"] = keymap_of("/etc")
@@ -642,6 +646,7 @@ def collect_disks(disks):
             var = os.path.join(top, "ostree/deploy", sr[0], "var") if sr else os.path.join(top, "state/os/default/var")
             facts["var_fsroot"] = "/" + os.path.relpath(var, top)
             facts["home"] = dict(du_tree(os.path.join(var, "home")), path=facts["var_fsroot"] + "/home")
+            facts["flatpak"] = du_tree(os.path.join(var, FLATPAK_REL))
             if rdev.get("fstype") == "btrfs":
                 facts["home"].update(home_layout(top, facts["var_fsroot"]))
             facts["migration"] = migration_facts(var, top)
@@ -970,7 +975,8 @@ def space_plan(facts):
     first H9) refused every machine whose home fills more than about half its disk. Available: unused space in data
     chunks + unallocated / data ratio (= statfs free on a single-profile filesystem).
 
-    METADATA. The reflink copy is not free in metadata: every name in home gets a new inode, directory entries and
+    METADATA. The reflink copies (home, and /var/lib/flatpak with it: an ostree repository of many small files, so
+    counted the same way) are not free in metadata: every name in home gets a new inode, directory entries and
     file extent items in @home, every shared extent one more back-reference, and a file under one sector keeps its
     data inline in the metadata tree, so it is copied there. Metadata ENOSPC is btrfs's real failure mode (a full
     metadata space with free data). Home's metadata is estimated two ways, the larger kept:
@@ -989,7 +995,10 @@ def space_plan(facts):
     if not u:
         return {"unmeasured": True}
     home = facts.get("home") or {}
-    hbytes, entries, small = int(home.get("bytes", 0)), int(home.get("entries", 0)), int(home.get("small_bytes", 0))
+    fp = facts.get("flatpak") or {}
+    hbytes = int(home.get("bytes", 0)) + int(fp.get("bytes", 0))
+    entries = int(home.get("entries", 0)) + int(fp.get("entries", 0))
+    small = int(home.get("small_bytes", 0)) + int(fp.get("small_bytes", 0))
     store = int((facts.get("ostree") or {}).get("store_bytes", 0))
     data_ratio = float(u["data_ratio"])
     meta_ratio = float(u["meta_ratio"])
@@ -1036,7 +1045,7 @@ def space_lines(p):
         return None, None
     d = (f"{p['data_avail'] / GB:.1f} GB free, {p['data_need'] / GB:.1f} GB needed: floor {p['floor'] / GB:.1f} + "
          f"old store {p['store'] / GB:.1f} (home is a reflink copy: no data at start)")
-    est = (f"home's metadata {p['home_meta'] / GB:.2f} GB (share {p['share'] / GB:.2f}, per name "
+    est = (f"home's and the Flatpak apps' metadata {p['home_meta'] / GB:.2f} GB (share {p['share'] / GB:.2f}, per name "
            f"{p['per_name'] / GB:.2f}: {p['entries']} names) x margin {p['margin']:g}")
     if p["mixed"]:
         m = (f"{p['meta_avail'] / GB:.2f} GB left in the mixed data+metadata pool after data, "
@@ -2068,6 +2077,25 @@ def first_activation(t, toplevel, root="/"):
     return r
 
 
+def carry_flatpak(src, dst):
+    """Reflink-copy the old system's Flatpak installation (apps, runtimes, the Flathub remote, the exported launchers)
+    into the new system, and say what happened. A copy that fails is removed and the move goes on: a half-copied
+    repository is worse than none, and the apps can be installed again, but a move rolled back over them cannot be
+    redone the same night. --reflink=always: a full copy would be data space_plan never charged."""
+    if not os.path.isdir(src):
+        return "none on the old system"
+    if os.path.lexists(dst) and (not os.path.isdir(dst) or os.listdir(dst)):
+        return f"not carried: {dst} already exists on the new system"
+    os.makedirs(dst, mode=0o755, exist_ok=True)
+    try:
+        run(["cp", "-a", "--reflink=always", "--one-file-system", src + "/.", dst])
+    except (Failed, OSError) as e:
+        log(f"the Flatpak apps were not carried: {e}")
+        shutil.rmtree(dst, ignore_errors=True)
+        return f"not carried: {e}"
+    return "carried"
+
+
 def mount(*args):
     run(["mount", *args])
 
@@ -2241,6 +2269,9 @@ def cmd_start(a):
             # reflink: repair-e's archive (the trial's /composefs and /state) can be large; same btrfs, no copy
             run(["cp", "-a", "--reflink=auto", bm + "/.", os.path.join(t, "var/lib/rime/boot-migrate")])
             state["boot_migrate_carried"] = sorted(os.listdir(bm))
+        state["flatpak_carried"] = carry_flatpak(os.path.join(top, facts["var_fsroot"].lstrip("/"), FLATPAK_REL),
+                                                 os.path.join(t, "var", FLATPAK_REL))
+        print(f"flatpak: {state['flatpak_carried']}", flush=True)
         ht = os.path.join(t, "var/lib/rime/host.toml")
         state["boot_table"] = boot_table(facts)
         write_boot_table(ht, state["boot_table"])

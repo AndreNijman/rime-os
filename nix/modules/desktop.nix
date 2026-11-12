@@ -428,6 +428,11 @@ in
         # wallpaper and accent to the greeter account at each boot. Parents are processed first, so
         # this runs after the Z above. (The directory itself is created by the libexec area.)
         "Z /var/lib/rime-greet/wallpapers - root root -"
+        # Flatpak writes its own path into every launcher it exports: Exec=/usr/bin/flatpak run … on bootc Rime and
+        # Fedora. A machine moved from bootc keeps those launchers (/var/lib/flatpak, and every home's
+        # ~/.local/share/flatpak), NixOS has no /usr/bin/flatpak, and so the launcher, the dock and the menu started
+        # nothing. One link makes every launcher work, whichever system wrote it.
+        "L+ /usr/bin/flatpak - - - - /run/current-system/sw/bin/flatpak"
       ];
       # VARIANT_ID=rime (it picks the greeter's edition accent, GreetContext.qml:313-320) is set in branding.nix.
 
@@ -648,6 +653,7 @@ in
 
       # ── Flatpak + Flathub (files/system/units/rime-flathub-setup.service) ─────────────────────────
       services.flatpak.enable = true;
+      # (/usr/bin/flatpak, for launchers exported on bootc Rime, is linked in systemd.tmpfiles.rules above.)
       environment.etc."flatpak/flathub.flatpakrepo".source = files + "/system/flatpak/flathub.flatpakrepo";
       systemd.services.rime-flathub-setup = {
         description = "Rime OS: register the Flathub Flatpak remote (first boot)";

@@ -55,17 +55,18 @@ copy of home nor a backup enters it, so its files would be left behind.
 
 ## How much free space the move needs
 
-`start` makes a reflink copy of `/var/home` and a read-only snapshot of the old
-system. Both share their data blocks with what is already on the disk, so they
-cost no data space when made; the copy does duplicate the files' btrfs
+`start` makes reflink copies of `/var/home` and of `/var/lib/flatpak` (the
+system's Flatpak apps, which keep working on NixOS: their launchers' `Exec=/usr/bin/flatpak`
+is linked there) and a read-only snapshot of the old system. They share their data blocks with what is already on the disk, so they
+cost no data space when made; the copies do duplicate the files' btrfs
 metadata. `check` therefore asks two things, each refused by its own name:
 
 | refusal | needed | counted against |
 |---|---|---|
 | `free-space` (data) | 19 GB (the NixOS system plus room for one full rebuild) + the size of the old ostree store | unused space in data chunks + unallocated space |
-| `metadata-space` | home's metadata x 1.25 x the metadata profile's copies (2 on DUP) | (unused metadata space - the kernel's global reserve) x copies + the unallocated space data does not take |
+| `metadata-space` | home's and the Flatpak apps' metadata x 1.25 x the metadata profile's copies (2 on DUP) | (unused metadata space - the kernel's global reserve) x copies + the unallocated space data does not take |
 
-Home's metadata is the larger of its share of all metadata used (by home's
+Their metadata is the larger of its share of all metadata used (by their
 size against all data used, at most all of it) and 1 KiB per file or directory
 plus the bytes of files under 4 KiB. A btrfs root whose usage cannot be read is
 refused `space-unmeasured`. Earlier copies charged home's full size as data,

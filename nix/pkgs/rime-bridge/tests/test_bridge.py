@@ -522,6 +522,22 @@ class SpaceH9(unittest.TestCase):
         self.assertEqual(p["home_meta"], p["per_name"])
         self.assertLess(p["share"], GB // 10)
 
+    def test_flatpak_names_are_charged_with_home(self):
+        # start reflink-copies /var/lib/flatpak too (carry_flatpak): an ostree repository of small files, charged like
+        # home. A small home passes alone; 6 M names and 3 GB of inline files in the Flatpak repo take it over.
+        def disk(flatpak):
+            f = space(u=dict(data_size=900 * GB, data_used=800 * GB, meta_size=5 * GB, meta_used=4 * GB,
+                             unallocated=15 * GB, reserve=GB // 2),
+                      home={"bytes": GB, "entries": 1000, "small_bytes": 0}, store=9 * GB)
+            if flatpak:
+                f["flatpak"] = {"bytes": 8 * GB, "entries": 6_000_000, "small_bytes": 3 * GB}
+            return f
+        self.assertEqual(B.evaluate(disk(False))[1], [])                       # positive control
+        _, r, _ = B.evaluate(disk(True))
+        self.assertEqual(names(r), ["metadata-space"])
+        self.assertIn("home's and the Flatpak apps' metadata", r[0][1])
+        self.assertEqual(B.space_plan(disk(True))["entries"], 6_001_000)
+
     def test_unallocated_shared(self):
         # Data has 5 GB in its chunks and needs 25: it takes 20 of the 30 GB unallocated. Metadata (no free in its
         # chunks after the reserve) needs 5.5 x 1.25 x 2 = 13.75 GB raw from the 10 left: refused. Giving metadata all

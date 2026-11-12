@@ -40,6 +40,12 @@ let
     [ "share-uncapped" "rime-bridge.py" ''s/(min(1.0, hbytes \/ used) if used/((hbytes \/ used) if used/'' "H9: home's metadata share above all metadata (du counts uncompressed bytes)" ]
     [ "per-name-dropped" "rime-bridge.py" ''s/    home_meta = max(share, per_name)/    home_meta = share/'' "H9: a home of small files on a disk of large ones underestimated" ]
     [ "unallocated-twice" "rime-bridge.py" ''s/max(0, unalloc - data_draw_raw)/unalloc/'' "H9: unallocated space given to data and metadata both" ]
+    # The system Flatpaks go with the move (carry_flatpak): a reflink copy into the new /var/lib/flatpak, charged as metadata.
+    [ "flatpak-not-carried" "rime-bridge.py" ''s/        state\["flatpak_carried"\] = carry_flatpak(/        state["flatpak_carried"] = False and carry_flatpak(/'' "the system Flatpaks left behind (L16, 2026-11-13)" ]
+    [ "flatpak-copy-kept-on-failure" "rime-bridge.py" ''s/        shutil.rmtree(dst, ignore_errors=True)/        pass/'' "a half-copied Flatpak repository left in the new system" ]
+    [ "flatpak-reflink-auto" "rime-bridge.py" ''s/run(\["cp", "-a", "--reflink=always", "--one-file-system", src/run(["cp", "-a", "--reflink=auto", "--one-file-system", src/'' "a silent full copy H9 never charged" ]
+    [ "flatpak-uncharged" "rime-bridge.py" ''s/    fp = facts.get("flatpak") or {}/    fp = {}/'' "H9: the Flatpak repository's metadata not counted" ]
+    [ "flatpak-overwrites" "rime-bridge.py" ''s/    if os.path.lexists(dst) and (not os.path.isdir(dst) or os.listdir(dst)):/    if False:/'' "copied over an installation already in the new system" ]
     [ "accept-B" "rime-bridge.py" ''s/^ACCEPTED = ("A", "E")/ACCEPTED = ("A", "B", "E")/'' "topology B bridged" ]
     [ "chain-no-configfile" "rime-bridge.py" ''s/    if not missing\["bootupd-static"\]:/    if True:/'' "D3 chain check gone (any grub.cfg read as bootupd's)" ]
     [ "chain-target-unchecked" "rime-bridge.py" ''s/    if target != (boot.get("uuid") or "").lower():/    if False:/'' "D3: a grub.cfg that reads another filesystem trusted" ]
