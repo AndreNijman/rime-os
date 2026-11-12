@@ -123,10 +123,30 @@ grep -qxF "alias ll='eza -l'" "${h}/.zshrc" && grep -qxF '# user header' "${h}/.
     && ok "the file keeps its inode and mode" || bad "the file keeps its inode and mode"
 [ -z "$(find "$h" -maxdepth 1 -name '.zshrc.rime.*')" ] \
     && ok "no temporary file is left behind" || bad "no temporary file is left behind"
+seeded_lines "$OLD_APEX" > "${WORK}/hooks-apex.orig"
+cmp -s "${h}/.zshrc.pre-hooks.bak" "${WORK}/hooks-apex.orig" \
+    && ok "the original is kept as ~/.zshrc.pre-hooks.bak" || bad "the original is kept as ~/.zshrc.pre-hooks.bak"
 cp "${h}/.zshrc" "${WORK}/hooks-apex.once"
 run_hooks "$h"
 cmp -s "${h}/.zshrc" "${WORK}/hooks-apex.once" \
     && ok "re-running changes nothing" || bad "re-running changes nothing"
+cmp -s "${h}/.zshrc.pre-hooks.bak" "${WORK}/hooks-apex.orig" \
+    && ok "re-running keeps the first backup" || bad "re-running keeps the first backup"
+
+# An edit that lands between the snapshot and the write wins: cmp (the block's
+# last look before writing) sees the file changed and nothing is written.
+h="${WORK}/hooks-raced"; mkdir -p "$h"
+seeded_lines "$OLD_APEX" > "${h}/.zshrc"
+HOME="$h" bash -c 'set -euo pipefail; log() { :; }
+    cmp() { printf "%s\n" "# edited meanwhile" >> "$HOME/.zshrc"; command cmp "$@"; }
+    source "$1"' -- "${WORK}/hooks-block.sh"
+{ seeded_lines "$OLD_APEX"; printf '%s\n' "# edited meanwhile"; } > "${WORK}/hooks-raced.want"
+cmp -s "${h}/.zshrc" "${WORK}/hooks-raced.want" \
+    && ok "an edit made during the rewrite is kept, nothing overwrites it" \
+    || bad "an edit made during the rewrite is kept, nothing overwrites it"
+[ -z "$(find "$h" -maxdepth 1 -name '.zshrc.rime.*')" ] && [ ! -e "${h}/.zshrc.pre-hooks.bak" ] \
+    && ok "a skipped rewrite leaves no temporary file and no backup" \
+    || bad "a skipped rewrite leaves no temporary file and no backup"
 
 h="${WORK}/hooks-rime"; mkdir -p "$h"
 seeded_lines "$OLD_RIME" > "${h}/.zshrc"

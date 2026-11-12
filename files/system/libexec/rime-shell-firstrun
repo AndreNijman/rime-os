@@ -440,24 +440,49 @@ fi
 # so it does.
 ZSHRC_HOOKS_HERE="/usr/share/rime/shell"
 if [ -f "${HOME}/.zshrc" ]; then
+    # Tab-separated "old<TAB>new" per line, for every hook that needs it: one rewrite for all of them.
+    ZSHRC_HOOK_SUBST=""
+    ZSHRC_TAB="$(printf '\t')"
     for ZSHRC_HOOKS_OLD in "/u""sr/share/rime/shell" "/u""sr/share/apex/shell"; do  # rime-rename: keep — the paths homes were seeded with
         [ "${ZSHRC_HOOKS_OLD}" = "${ZSHRC_HOOKS_HERE}" ] && continue
         for ZSHRC_HOOK in greeting.sh agent.sh; do
             [ -e "${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK}" ] && continue
             [ -r "${ZSHRC_HOOKS_HERE}/${ZSHRC_HOOK}" ] || continue
             grep -qF "${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK}" "${HOME}/.zshrc" || continue
-            ZSHRC_TMP="$(mktemp "${HOME}/.zshrc.rime.XXXXXX")"
-            if awk -v old="${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK}" -v new="${ZSHRC_HOOKS_HERE}/${ZSHRC_HOOK}" '
-                   { out = ""; rest = $0
-                     while ((i = index(rest, old)) > 0) { out = out substr(rest, 1, i - 1) new; rest = substr(rest, i + length(old)) }
-                     print out rest }' "${HOME}/.zshrc" > "${ZSHRC_TMP}" \
-               && [ -s "${ZSHRC_TMP}" ]; then
-                cat "${ZSHRC_TMP}" > "${HOME}/.zshrc"
-                log "repointed ~/.zshrc: ${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK} is not on this system, it now sources ${ZSHRC_HOOKS_HERE}/${ZSHRC_HOOK}"
-            fi
-            rm -f "${ZSHRC_TMP}"
+            ZSHRC_HOOK_SUBST="${ZSHRC_HOOK_SUBST}${ZSHRC_HOOKS_OLD}/${ZSHRC_HOOK}${ZSHRC_TAB}${ZSHRC_HOOKS_HERE}/${ZSHRC_HOOK}
+"
         done
     done
+    if [ -n "${ZSHRC_HOOK_SUBST}" ]; then
+        # Rewritten from a snapshot and written back only if ~/.zshrc is still the snapshot (an edit made meanwhile
+        # wins, and the next login tries again). The snapshot is kept once as ~/.zshrc.pre-hooks.bak and put back if
+        # the write fails. Every occurrence is rewritten, comments included: the old path does not exist here, so no
+        # line that names it can mean anything on this system.
+        ZSHRC_SNAP="$(mktemp "${HOME}/.zshrc.rime.XXXXXX")"
+        ZSHRC_TMP="$(mktemp "${HOME}/.zshrc.rime.XXXXXX")"
+        if cp -p "${HOME}/.zshrc" "${ZSHRC_SNAP}" \
+           && printf '%s' "${ZSHRC_HOOK_SUBST}" | awk -F '\t' '
+                  NR == FNR { if (NF == 2) { n++; old[n] = $1; new[n] = $2 }; next }
+                  { line = $0
+                    for (k = 1; k <= n; k++) {
+                        out = ""; rest = line
+                        while ((i = index(rest, old[k])) > 0) { out = out substr(rest, 1, i - 1) new[k]; rest = substr(rest, i + length(old[k])) }
+                        line = out rest
+                    }
+                    print line }' - "${ZSHRC_SNAP}" > "${ZSHRC_TMP}" \
+           && [ -s "${ZSHRC_TMP}" ] && cmp -s "${ZSHRC_SNAP}" "${HOME}/.zshrc"; then
+            [ -e "${HOME}/.zshrc.pre-hooks.bak" ] || cp -p "${ZSHRC_SNAP}" "${HOME}/.zshrc.pre-hooks.bak"
+            # Copied back into the existing file rather than renamed over it, like the colour repair above: the
+            # user's ~/.zshrc keeps its inode, mode and ACL, and a symlink into a dotfiles repository stays one.
+            if cat "${ZSHRC_TMP}" > "${HOME}/.zshrc"; then
+                log "repointed ~/.zshrc at this system's greeting and agent hooks (before: ~/.zshrc.pre-hooks.bak): $(printf '%s' "${ZSHRC_HOOK_SUBST}" | tr '\t\n' '> ')"
+            else
+                cat "${ZSHRC_SNAP}" > "${HOME}/.zshrc" || true
+                log "could not rewrite ~/.zshrc; it is as it was"
+            fi
+        fi
+        rm -f "${ZSHRC_SNAP}" "${ZSHRC_TMP}"
+    fi
 fi
 # The prompt follows the wallpaper. Rime Shell's matugen renders
 # ~/.cache/rime-shell/starship.toml from the shell's own template on every
