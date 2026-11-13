@@ -82,6 +82,10 @@ let
           # the hook sits after the password check, never before it
           machine.succeed("awk '/^auth substack login/{s=NR} /rime-keyring-login/{h=NR} END{exit !(s && h > s)}' /etc/pam.d/greetd")
 
+      with subtest("a Flatpak launcher written on bootc Rime starts flatpak (Exec=/usr/bin/flatpak run …)"):
+          machine.succeed("test \"$(readlink /usr/bin/flatpak)\" = /run/current-system/sw/bin/flatpak")
+          machine.succeed("/usr/bin/flatpak --version | grep -E '^Flatpak [0-9]'")
+
       with subtest("sessions: only Rime's, under their product names"):
           out = machine.succeed("grep -h '^Name=' /etc/rime/wayland-sessions/*.desktop | sort")
           print(out)

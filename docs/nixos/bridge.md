@@ -213,7 +213,9 @@ ioctls; `--disk` mode reads its read-only mount the same way), and refuses each 
 Home's metadata is estimated two ways and the larger is kept: its **share** (metadata used x min(1, home bytes / data
 used); capped because du counts uncompressed bytes and Used on-disk ones, and home's metadata cannot exceed all of it)
 and **per name** (names x `ENTRY_META_BYTES` (1 KiB) + bytes of files under 4 KiB; the share alone misses a home of many
-small files on a disk of large ones). Data takes its unallocated first; metadata gets what is left (unallocated is
+small files on a disk of large ones). `/var/lib/flatpak`, reflink-copied into the new system with home
+(`carry_flatpak`, during the /etc carry), is added to home's bytes, names and small files: an ostree repository is many
+small files. A failed Flatpak copy is removed and the move goes on (the record's `flatpak_carried` says why). Data takes its unallocated first; metadata gets what is left (unallocated is
 counted once). Mixed block groups (tiny filesystems only) are one pool, per-name estimate only. A btrfs root whose usage
 cannot be read is refused `space-unmeasured`, never guessed.
 

@@ -1034,6 +1034,30 @@ class StartRecord(unittest.TestCase):
         self.assertIn(("btrfs", "subvolume", "delete", os.path.join(top, "@pre-nixos")), cmds)
         self.assertLess(cmds.index(snap), len(cmds) - 1)
 
+    def test_start_carries_the_flatpak_apps_in_the_carry_step(self):
+        # The old /var/lib/flatpak (in the btrfs top level, beside the old home) is copied into the target's
+        # /var/lib/flatpak during "carry /etc", after the closure is installed, and the record says so.
+        self.no_backup()
+        B.test_restore_point = lambda *a: {"sampled": 0}
+        B.chroot = lambda t, *cmd, **kw: B.subprocess.CompletedProcess(cmd, 0, "", "")
+        top = os.path.join(B.RUN_DIR, "top")
+        old = os.path.join(top, self.facts["var_fsroot"].lstrip("/"), B.FLATPAK_REL)
+        os.makedirs(os.path.join(old, "repo"))
+        saved = B.boot_table
+        B.boot_table = self.fails_in("the boot table, right after the carry")
+        try:
+            with self.assertRaises(B.Failed):
+                self.start()
+        finally:
+            B.boot_table = saved
+        rec = self.record()
+        self.assertEqual(rec["steps"][-2:], ["carry /etc (rime-hostlayer)", "rolled back"], rec["steps"])
+        self.assertEqual(rec["flatpak_carried"], "carried")
+        cp = ("cp", "-a", "--reflink=always", "--one-file-system", old + "/.",
+              os.path.join(B.RUN_DIR, "target", "var", B.FLATPAK_REL))
+        cmds = [c[1] for c in self.calls if c[0] == "run"]
+        self.assertIn(cp, cmds)
+
     def test_start_without_backup_refuses_a_home_subvolume(self):
         self.no_backup()
         self.facts["home"]["in_top_level"] = False
@@ -1113,6 +1137,67 @@ class StartRecord(unittest.TestCase):
             got = B.record_refusal(rec)
             self.assertIsNotNone(got, rec)
             self.assertEqual(got[0], name, rec)
+
+
+class FlatpakCarry(unittest.TestCase):
+    """start reflink-copies the old /var/lib/flatpak into the new system (carry_flatpak): the system Flatpaks and their
+    launchers were gone after the first real move (L16, 2026-11-13). A failed copy is removed, the move goes on.
+    Mutants flatpak-not-carried, flatpak-copy-kept-on-failure, flatpak-reflink-auto (nix/tests/bridge.nix)."""
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        self.saved_run = B.run
+        self.src = os.path.join(self.d, "old/var/lib/flatpak")
+        self.dst = os.path.join(self.d, "new/var/lib/flatpak")
+        os.makedirs(os.path.join(self.src, "exports/share/applications"))
+        pathlib.Path(self.src, "exports/share/applications/app.zen_browser.zen.desktop").write_text(
+            "[Desktop Entry]\nExec=/usr/bin/flatpak run app.zen_browser.zen\n")
+        pathlib.Path(self.src, ".rime-flathub-added").touch()
+        self.cmds = []
+
+    def tearDown(self):
+        B.run = self.saved_run
+        shutil.rmtree(self.d)
+
+    def copying_run(self, cmd, **k):
+        self.cmds.append(list(cmd))
+        shutil.copytree(cmd[-2].rstrip(".").rstrip("/"), cmd[-1], symlinks=True, dirs_exist_ok=True)
+
+    def test_copied_by_reflink_into_the_new_system(self):
+        B.run = self.copying_run
+        self.assertEqual(B.carry_flatpak(self.src, self.dst), "carried")
+        self.assertEqual(self.cmds, [["cp", "-a", "--reflink=always", "--one-file-system", self.src + "/.", self.dst]])
+        self.assertTrue(os.path.isfile(os.path.join(self.dst, "exports/share/applications/app.zen_browser.zen.desktop")))
+        self.assertTrue(os.path.exists(os.path.join(self.dst, ".rime-flathub-added")))
+
+    def test_an_empty_target_is_used(self):
+        os.makedirs(self.dst)
+        B.run = self.copying_run
+        self.assertEqual(B.carry_flatpak(self.src, self.dst), "carried")
+
+    def test_a_failed_copy_is_removed_and_the_move_goes_on(self):
+        def half(cmd, **k):
+            os.makedirs(os.path.join(cmd[-1], "repo/objects"), exist_ok=True)
+            raise B.Failed("cp exited 1: No space left on device")
+        B.run = half
+        got = B.carry_flatpak(self.src, self.dst)
+        self.assertTrue(got.startswith("not carried: "), got)
+        self.assertIn("No space left", got)
+        self.assertFalse(os.path.lexists(self.dst), "a half-copied repository was left in the new system")
+
+    def test_a_target_with_content_is_left_alone(self):
+        os.makedirs(self.dst)
+        pathlib.Path(self.dst, "keep").write_text("x")
+        B.run = lambda *a, **k: self.fail("copied over an existing installation")
+        got = B.carry_flatpak(self.src, self.dst)
+        self.assertTrue(got.startswith("not carried: "), got)
+        self.assertEqual(os.listdir(self.dst), ["keep"])
+
+    def test_none_on_the_old_system(self):
+        shutil.rmtree(self.src)
+        B.run = lambda *a, **k: self.fail("ran a copy of nothing")
+        self.assertEqual(B.carry_flatpak(self.src, self.dst), "none on the old system")
+        self.assertFalse(os.path.lexists(self.dst))
 
 
 class OldSide(unittest.TestCase):

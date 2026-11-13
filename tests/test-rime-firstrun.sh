@@ -84,6 +84,99 @@ run_zshrc "$h"
 [ ! -e "${h}/.zshrc" ] \
     && ok "no ~/.zshrc is invented" || bad "no ~/.zshrc is invented"
 
+section "zsh greeting hooks in an inherited ~/.zshrc"
+# A home carried to another system keeps the seeding system's absolute paths;
+# the block repoints them only where they do not exist and this system's do.
+# The block's paths are redirected at throwaway directories: OLD_APEX and
+# OLD_RIME stand for the spellings homes were seeded with, HERE for this system.
+extract '# Point an inherited ~\/.zshrc' "${WORK}/hooks-block.sh" ZSHRC_HOOKS_HERE
+OLD_APEX="${WORK}/old-apex/shell"; OLD_RIME="${WORK}/old-rime/shell"; HERE="${WORK}/here/shell"
+mkdir -p "$HERE"; : > "${HERE}/greeting.sh"; : > "${HERE}/agent.sh"
+sed -i -e "s|^ZSHRC_HOOKS_HERE=.*|ZSHRC_HOOKS_HERE=\"${HERE}\"|" \
+       -e "s|\"/u\"\"sr/share/rime/shell\" \"/u\"\"sr/share/apex/shell\"|\"${OLD_RIME}\" \"${OLD_APEX}\"|" \
+       "${WORK}/hooks-block.sh"
+grep -qF "\"${OLD_RIME}\" \"${OLD_APEX}\"" "${WORK}/hooks-block.sh" \
+    || { printf 'could not redirect the on-disk spellings in the extracted block\n' >&2; exit 1; }
+run_hooks() { HOME="$1" bash -c 'set -euo pipefail; log() { :; }; source "$1"' -- "${WORK}/hooks-block.sh"; }
+seeded_lines() {
+    printf '%s\n' '# user header' \
+        "[[ -r $1/agent.sh ]] && source $1/agent.sh" \
+        "[[ -r $1/greeting.sh ]] && source $1/greeting.sh" \
+        "alias ll='eza -l'"
+}
+
+h="${WORK}/hooks-apex"; mkdir -p "$h"
+seeded_lines "$OLD_APEX" > "${h}/.zshrc"
+chmod 0640 "${h}/.zshrc"
+inode="$(stat -c %i "${h}/.zshrc")"
+run_hooks "$h"
+grep -qxF "[[ -r ${HERE}/greeting.sh ]] && source ${HERE}/greeting.sh" "${h}/.zshrc" \
+    && ok "an APEX-era greeting line sources this system's greeting" \
+    || bad "an APEX-era greeting line sources this system's greeting"
+grep -qxF "[[ -r ${HERE}/agent.sh ]] && source ${HERE}/agent.sh" "${h}/.zshrc" \
+    && ok "the agent hook line is repointed too" || bad "the agent hook line is repointed too"
+! pipe_has -F "$OLD_APEX" < "${h}/.zshrc" \
+    && ok "no old spelling is left" || bad "no old spelling is left"
+grep -qxF "alias ll='eza -l'" "${h}/.zshrc" && grep -qxF '# user header' "${h}/.zshrc" \
+    && ok "the user's own lines survive" || bad "the user's own lines survive"
+[ "$(stat -c %i "${h}/.zshrc")" = "$inode" ] && [ "$(stat -c %a "${h}/.zshrc")" = 640 ] \
+    && ok "the file keeps its inode and mode" || bad "the file keeps its inode and mode"
+[ -z "$(find "$h" -maxdepth 1 -name '.zshrc.rime.*')" ] \
+    && ok "no temporary file is left behind" || bad "no temporary file is left behind"
+seeded_lines "$OLD_APEX" > "${WORK}/hooks-apex.orig"
+cmp -s "${h}/.zshrc.pre-hooks.bak" "${WORK}/hooks-apex.orig" \
+    && ok "the original is kept as ~/.zshrc.pre-hooks.bak" || bad "the original is kept as ~/.zshrc.pre-hooks.bak"
+cp "${h}/.zshrc" "${WORK}/hooks-apex.once"
+run_hooks "$h"
+cmp -s "${h}/.zshrc" "${WORK}/hooks-apex.once" \
+    && ok "re-running changes nothing" || bad "re-running changes nothing"
+cmp -s "${h}/.zshrc.pre-hooks.bak" "${WORK}/hooks-apex.orig" \
+    && ok "re-running keeps the first backup" || bad "re-running keeps the first backup"
+
+# An edit that lands between the snapshot and the write wins: cmp (the block's
+# last look before writing) sees the file changed and nothing is written.
+h="${WORK}/hooks-raced"; mkdir -p "$h"
+seeded_lines "$OLD_APEX" > "${h}/.zshrc"
+HOME="$h" bash -c 'set -euo pipefail; log() { :; }
+    cmp() { printf "%s\n" "# edited meanwhile" >> "$HOME/.zshrc"; command cmp "$@"; }
+    source "$1"' -- "${WORK}/hooks-block.sh"
+{ seeded_lines "$OLD_APEX"; printf '%s\n' "# edited meanwhile"; } > "${WORK}/hooks-raced.want"
+cmp -s "${h}/.zshrc" "${WORK}/hooks-raced.want" \
+    && ok "an edit made during the rewrite is kept, nothing overwrites it" \
+    || bad "an edit made during the rewrite is kept, nothing overwrites it"
+[ -z "$(find "$h" -maxdepth 1 -name '.zshrc.rime.*')" ] && [ ! -e "${h}/.zshrc.pre-hooks.bak" ] \
+    && ok "a skipped rewrite leaves no temporary file and no backup" \
+    || bad "a skipped rewrite leaves no temporary file and no backup"
+
+h="${WORK}/hooks-rime"; mkdir -p "$h"
+seeded_lines "$OLD_RIME" > "${h}/.zshrc"
+run_hooks "$h"
+grep -qxF "[[ -r ${HERE}/greeting.sh ]] && source ${HERE}/greeting.sh" "${h}/.zshrc" \
+    && ok "a bootc-Rime greeting line is repointed (the move to NixOS)" \
+    || bad "a bootc-Rime greeting line is repointed (the move to NixOS)"
+
+h="${WORK}/hooks-present"; mkdir -p "$h" "$OLD_RIME"
+: > "${OLD_RIME}/greeting.sh"; : > "${OLD_RIME}/agent.sh"
+seeded_lines "$OLD_RIME" > "${h}/.zshrc"; cp "${h}/.zshrc" "${WORK}/hooks-present.orig"
+run_hooks "$h"
+cmp -s "${h}/.zshrc" "${WORK}/hooks-present.orig" \
+    && ok "a path that exists on this system is left alone" \
+    || bad "a path that exists on this system is left alone"
+rm -rf "${WORK}/old-rime"
+
+h="${WORK}/hooks-nohere"; mkdir -p "$h"
+seeded_lines "$OLD_APEX" > "${h}/.zshrc"; cp "${h}/.zshrc" "${WORK}/hooks-nohere.orig"
+mv "$HERE" "${HERE}.away"
+run_hooks "$h"
+mv "${HERE}.away" "$HERE"
+cmp -s "${h}/.zshrc" "${WORK}/hooks-nohere.orig" \
+    && ok "nothing is repointed at a greeting this system lacks" \
+    || bad "nothing is repointed at a greeting this system lacks"
+
+h="${WORK}/hooks-none"; mkdir -p "$h"
+run_hooks "$h"
+[ ! -e "${h}/.zshrc" ] && ok "no ~/.zshrc is invented" || bad "no ~/.zshrc is invented"
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  labwc config seeding
 #
