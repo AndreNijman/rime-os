@@ -38,6 +38,7 @@ runCommand "rime-ridge-files" { nativeBuildInputs = [ gnugrep ]; } ''
   grep -q 'assets/ridge-lockup-base.png' $g/shell.qml
   grep -q '"#91c2dc"' $g/shell.qml
   grep -q 'ShapePath.OddEvenFill' $g/GreetSurface.qml
+  grep -q 'Shape.GeometryRenderer' $g/GreetSurface.qml
   if grep -n 'PathLine' $g/GreetSurface.qml; then echo "the NixOS greeter still draws the old ridge's plane 3" >&2; exit 1; fi
   if grep -rn 'spark\|d9f99d' $g/*.qml; then echo "the NixOS greeter still names the spark" >&2; exit 1; fi
   grep -q '/usr/libexec/rime-term-graphics' work/desktop/shell/rime-greeting.sh

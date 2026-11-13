@@ -4,7 +4,7 @@
 #   - the Shell's matugen post_hook rendered ~/.cache/rime/logo/rime-mark-{dark,light}.png in the wallpaper's
 #     colours (no hand-run step);
 #   - Ghostty (from nixpkgs; in this test node only, Rime ships Alacritty): the greeting picks kitty-direct and
-#     draws the recoloured symbol (its accent and foreground pixels are counted where the logo sits);
+#     draws the recoloured mark (its accent pixels are counted where the logo sits, and no ink there);
 #   - Alacritty (the shipped terminal, no image protocol): the greeting prints the "RIME OS" label, and no logo
 #     pixels are drawn there;
 #   - a new wallpaper (matugen with the Shell's config) recolours the logo the next Ghostty shows.
@@ -185,7 +185,8 @@ pkgs.testers.runNixOSTest {
         g, token, size = open_terminal("ghostty --gtk-single-instance=false", "ghostty")
         assert token.startswith("kitty-direct@"), token
         acc, fg = logo_pixels(g, size, "ghostty", [first[f"accent_{variant}"], first[f"fg_{variant}"]])
-        assert acc > 1000 and fg > 3000, f"no symbol drawn in Ghostty (accent {acc} px, foreground {fg} px)"
+        # the Origin mark is one colour: the accent fills it and no ink is drawn where it sits
+        assert acc > 3000 and fg < 200, f"no one-colour mark drawn in Ghostty (accent {acc} px, foreground {fg} px)"
         machine.succeed(f"kill {g['pid']}")
 
     with subtest("Alacritty: no image protocol, the RIME OS label"):

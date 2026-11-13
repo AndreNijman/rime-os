@@ -76,7 +76,11 @@ in
         drawn = [tuple(float(v) for v in c) for c in re.findall(r"\[([0-9.]+), ([0-9.]+), ([0-9.]+)\]", m.group(1))]
         drawn = [(round(x, 3), round(y, 3), r) for x, y, r in drawn]
         assert drawn == tpl, f"GreetSurface draws the circles {drawn}, the template has {tpl}"
-        assert qml.count("PathAngleArc {") == 5 and "ShapePath.OddEvenFill" in qml, "GreetSurface does not draw five circles even-odd"
+        assert qml.count("PathSvg { path: logoBox.arcs(") == 3 and qml.count("ShapePath.OddEvenFill") == 3, "GreetSurface does not draw three bodies even-odd"
+        for k in ("arcs(0, 1)", "arcs(2, 3)", "arcs(4, 4)"):
+            assert k in qml, f"GreetSurface does not draw the body {k}"
+        # the curve renderer fills tangent contours wrongly under even-odd (a solid disc): the geometry renderer, multisampled
+        assert "Shape.GeometryRenderer" in qml and "layer.samples: 8" in qml and "CurveRenderer" not in qml, "GreetSurface must use the geometry renderer"
         assert "294.475 * unit" in qml and "height / 84" in qml, "GreetSurface scales the mark by a different box"
         assert "assets/ridge-lockup-base.png" in open("${greet}/shell.qml").read()
         print("greeter mark: the template's circles", tpl)
@@ -194,7 +198,7 @@ in
     testScript =
       { nodes, ... }:
       ''
-      import os
+      import math, os
       from PIL import Image
 
       def shot(m, name):
@@ -218,6 +222,15 @@ in
           print(f"{name}: {accent} px of the mark in {want}, {white} px of the wordmark")
           assert accent >= 150, f"{name}: the mark is not {want} ({accent} px)"
           assert white >= 500, f"{name}: the wordmark is missing ({white} px)"
+          # the three bodies, not a solid disc: inside the mark's square the accent covers what even-odd leaves,
+          # (42^2 - 33^2 + 26^2 - 20^2 + 15^2) / 42^2 = 2/3 of the disc (antialiased edges, not counted, pull it lower)
+          xs = [i % img.width for i, p in enumerate(px) if sum((a - b) ** 2 for a, b in zip(p, w)) <= 400]
+          ys = [i // img.width for i, p in enumerate(px) if sum((a - b) ** 2 for a, b in zip(p, w)) <= 400]
+          dw, dh = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+          cover = accent / (math.pi * dw * dh / 4)
+          print(f"{name}: the mark is {dw} x {dh} px, the accent covers {cover:.2f} of its disc")
+          assert abs(dw - dh) <= 3, f"{name}: the mark is not round ({dw} x {dh})"
+          assert 0.45 <= cover <= 0.80, f"{name}: the accent covers {cover:.2f} of the disc, not the three bodies (2/3)"
 
       # ── the splash ────────────────────────────────────────────────────────────────────────────────
       splash.start()

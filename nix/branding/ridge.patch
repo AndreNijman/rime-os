@@ -1,5 +1,5 @@
 diff --git a/desktop/rime-greet/GreetSurface.qml b/desktop/rime-greet/GreetSurface.qml
-index 467a69f..90eeebd 100644
+index 467a69f..3af8636 100644
 --- a/desktop/rime-greet/GreetSurface.qml
 +++ b/desktop/rime-greet/GreetSurface.qml
 @@ -1,5 +1,6 @@
@@ -9,7 +9,7 @@ index 467a69f..90eeebd 100644
  
  // ─────────────────────────────────────────────────────────────
  // GreetSurface — the per-output visual.
-@@ -162,29 +163,47 @@ Item {
+@@ -162,29 +163,73 @@ Item {
          spacing: 14
          transform: Translate { x: root.shakeOffset }
  
@@ -54,19 +54,45 @@ index 467a69f..90eeebd 100644
 -                visible:           root.theme.tintLogo && logo.status === Image.Ready
 -                colorization:      1.0
 -                colorizationColor: root.theme.active
++            // circles i..j in item pixels, as SVG subpaths (two half-arcs each)
++            function arcs(i, j) {
++                let d = ""
++                for (let k = i; k <= j; k++) {
++                    const x = circles[k][0] * unit, y = circles[k][1] * unit, r = circles[k][2] * unit
++                    d += "M" + (x - r) + " " + y + "a" + r + " " + r + " 0 1 0 " + (2 * r) + " 0"
++                       + "a" + r + " " + r + " 0 1 0 " + (-2 * r) + " 0Z"
++                }
++                return d
++            }
 +            Shape {
 +                anchors.fill: parent
 +                visible:      logo.status === Image.Ready
-+                preferredRendererType: Shape.CurveRenderer
++                // Not the curve renderer: it resolves even-odd wrongly where contours are tangent, as every circle
++                // here is at the origin (a solid disc or torn shards). The geometry renderer triangulates them
++                // correctly; the multisampled layer gives the edge its anti-aliasing. One PathSvg per body.
++                preferredRendererType: Shape.GeometryRenderer
++                layer.enabled: true
++                layer.samples: 8
 +                ShapePath {
 +                    strokeWidth: -1
++                    strokeColor: "transparent"
 +                    fillColor:   root.theme.active
 +                    fillRule:    ShapePath.OddEvenFill
-+                    PathAngleArc { moveToStart: true; sweepAngle: 360; centerX: logoBox.circles[0][0] * logoBox.unit; centerY: logoBox.circles[0][1] * logoBox.unit; radiusX: logoBox.circles[0][2] * logoBox.unit; radiusY: radiusX }
-+                    PathAngleArc { moveToStart: true; sweepAngle: 360; centerX: logoBox.circles[1][0] * logoBox.unit; centerY: logoBox.circles[1][1] * logoBox.unit; radiusX: logoBox.circles[1][2] * logoBox.unit; radiusY: radiusX }
-+                    PathAngleArc { moveToStart: true; sweepAngle: 360; centerX: logoBox.circles[2][0] * logoBox.unit; centerY: logoBox.circles[2][1] * logoBox.unit; radiusX: logoBox.circles[2][2] * logoBox.unit; radiusY: radiusX }
-+                    PathAngleArc { moveToStart: true; sweepAngle: 360; centerX: logoBox.circles[3][0] * logoBox.unit; centerY: logoBox.circles[3][1] * logoBox.unit; radiusX: logoBox.circles[3][2] * logoBox.unit; radiusY: radiusX }
-+                    PathAngleArc { moveToStart: true; sweepAngle: 360; centerX: logoBox.circles[4][0] * logoBox.unit; centerY: logoBox.circles[4][1] * logoBox.unit; radiusX: logoBox.circles[4][2] * logoBox.unit; radiusY: radiusX }
++                    PathSvg { path: logoBox.arcs(0, 1) }
++                }
++                ShapePath {
++                    strokeWidth: -1
++                    strokeColor: "transparent"
++                    fillColor:   root.theme.active
++                    fillRule:    ShapePath.OddEvenFill
++                    PathSvg { path: logoBox.arcs(2, 3) }
++                }
++                ShapePath {
++                    strokeWidth: -1
++                    strokeColor: "transparent"
++                    fillColor:   root.theme.active
++                    fillRule:    ShapePath.OddEvenFill
++                    PathSvg { path: logoBox.arcs(4, 4) }
 +                }
              }
          }
