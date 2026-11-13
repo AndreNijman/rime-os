@@ -198,7 +198,7 @@ in
     testScript =
       { nodes, ... }:
       ''
-      import math, os
+      import collections, math, os
       from PIL import Image
 
       def shot(m, name):
@@ -223,14 +223,24 @@ in
           assert accent >= 150, f"{name}: the mark is not {want} ({accent} px)"
           assert white >= 500, f"{name}: the wordmark is missing ({white} px)"
           # the three bodies, not a solid disc: inside the mark's square the accent covers what even-odd leaves,
-          # (42^2 - 33^2 + 26^2 - 20^2 + 15^2) / 42^2 = 2/3 of the disc (antialiased edges, not counted, pull it lower)
-          xs = [i % img.width for i, p in enumerate(px) if sum((a - b) ** 2 for a, b in zip(p, w)) <= 400]
-          ys = [i // img.width for i, p in enumerate(px) if sum((a - b) ** 2 for a, b in zip(p, w)) <= 400]
-          dw, dh = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
-          cover = accent / (math.pi * dw * dh / 4)
-          print(f"{name}: the mark is {dw} x {dh} px, the accent covers {cover:.2f} of its disc")
+          # (42^2 - 33^2 + 26^2 - 20^2 + 15^2) / 42^2 = 2/3 of the disc (measured 0.68-0.71 with antialiased edges;
+          # a solid disc is about 1)
+          # (the splash's wave may be dimming a body, and the greeter's ground is a tinted blur: count every pixel
+          # that is coloured and far from the crop's border colour; the mark is the tallest thing in the lockup and
+          # square, so the wordmark's antialiased edges beyond one mark-height from the left are not counted)
+          W, H = img.size
+          edge = [px[i] for i in range(len(px)) if i % W in (0, W - 1) or i // W in (0, H - 1)]
+          bg = collections.Counter(edge).most_common(1)[0][0]
+          tinted = [i for i, p in enumerate(px) if sum((a - c) ** 2 for a, c in zip(p, bg)) >= 60 ** 2 and max(p) - min(p) >= 24]
+          ys = [i // W for i in tinted]
+          dh, x0 = max(ys) - min(ys) + 1, min(i % W for i in tinted)
+          tinted = [i for i in tinted if i % W < x0 + dh + 2]
+          xs = [i % W for i in tinted]
+          dw = max(xs) - min(xs) + 1
+          cover = len(tinted) / (math.pi * dw * dh / 4)
+          print(f"{name}: the mark is {dw} x {dh} px and covers {cover:.2f} of its disc")
           assert abs(dw - dh) <= 3, f"{name}: the mark is not round ({dw} x {dh})"
-          assert 0.45 <= cover <= 0.80, f"{name}: the accent covers {cover:.2f} of the disc, not the three bodies (2/3)"
+          assert 0.50 <= cover <= 0.85, f"{name}: the mark covers {cover:.2f} of its disc, not the three bodies (2/3)"
 
       # ── the splash ────────────────────────────────────────────────────────────────────────────────
       splash.start()
