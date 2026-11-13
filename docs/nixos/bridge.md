@@ -30,7 +30,14 @@ its fsck unit), or a bind of the btrfs top level's `/boot` when there is no devi
 
 **Why.** Where `/boot` lives is a per-machine fact, and the toplevel is one generic build (D9): it cannot be in
 `fileSystems`. The generator is the only owner of `/boot`; an existing `boot.mount` (an fstab line someone added) is
-left alone, and an invalid device writes nothing and says why, so a bad table never stops a boot. Only ext4 is
+left alone, and an invalid device writes nothing and says why, so a bad table never stops a boot. Next to its own
+`boot.mount` it masks `boot.automount`: `systemd-gpt-auto-generator` (a late generator, so lower priority) hung an
+automount with a 120 s idle timeout over `/boot` when it saw an ESP and no fstab line. `/boot` then came and went, and
+`rime migrate finish`, which runs in a private mount namespace, saw an empty `/boot` whenever it started while `/boot`
+was idle, and refused with `nixos-menu-missing` (the L16, 2026-11-13). Reproduced in the OVMF lab on the published
+payload (shim + GRUB, Secure Boot on) and gone with the mask: `/boot` the bind only, `boot.automount` masked, finish
+passes after any idle time (`/var/lab/rime-nix/artifacts/autofs/`). Finish also touches `/boot` before it makes its
+namespace and refuses `boot-not-mounted` by name if `/boot` is still a bare automount there. Only ext4 is
 accepted (`BOOT_PART_FSTYPES`), because that is all the installer writes; xfs would add a module and an fsck tool to
 every closure for no machine. Anything else is refused by name: `boot-partition-fstype`, `boot-unknown`.
 

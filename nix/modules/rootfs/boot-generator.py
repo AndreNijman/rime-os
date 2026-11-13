@@ -19,7 +19,8 @@ local-fs.target only WANTS: Rime's ESP when /dev/disk/by-label/ESPLABEL exists w
 "auto" picks bls on a /boot without ostree), otherwise the bind, only if TOPMOUNT/boot is a directory. rime-boot reads
 the same host.toml and refuses to write a menu it cannot place.
 
-It writes NORMAL/boot.mount and hangs it from local-fs.target, once: when another generator already wrote boot.mount
+It writes NORMAL/boot.mount and hangs it from local-fs.target (and masks boot.automount there, so
+systemd-gpt-auto-generator's automount does not cover it), once: when another generator already wrote boot.mount
 (an fstab line), that one stays. When boot.mount is its own (an earlier, interrupted run), the link is made again. A
 generator never fails the boot: every problem is said in the journal.
 """
@@ -142,6 +143,12 @@ def main(argv):
         os.makedirs(d, exist_ok=True)
         if not os.path.lexists(os.path.join(d, "boot.mount")):
             os.symlink("../boot.mount", os.path.join(d, "boot.mount"))
+        # systemd-gpt-auto-generator (late, lower priority than this directory) also hangs an automount with a 120 s
+        # idle timeout on /boot when it sees an ESP and no fstab line. Over this mount it made /boot come and go, and
+        # a private mount namespace made while it was idle saw an empty /boot (rime migrate finish refused on the
+        # L16, 2026-11-13). Masked here, so /boot is this mount only.
+        if not os.path.lexists(os.path.join(normal, "boot.automount")):
+            os.symlink("/dev/null", os.path.join(normal, "boot.automount"))
     except OSError as e:
         log(f"could not write boot.mount: {e}")
     return 0

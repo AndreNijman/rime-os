@@ -39,15 +39,15 @@ let
   # ratio); measured, they are smaller on disk than estimated (plain-virtualization 5,564,084,224 B against
   # 5,800,374,254 B), and their published floors drop by 1 GB. Decision: publish the measurement.
   # Re-measured 2026-11-13 (fedora-parity: the shell and developer tools bootc ships, +630 MB unpacked): all four within
-  # 3 % again; plain and plain-gaming keep their published floors, the virtualization and desktop floors rise by 1 GB
-  # where the new figure needs it.
+  # 3 % again; plain keeps its published floors; plain-gaming's disk floor (18.006 GB needed), the virtualization and
+  # desktop floors rise by 1 GB where the new figure needs it.
   # `virtualizationDelta` stays as a record: the measured NAR delta of plain-virtualization over plain (unchanged).
   virtualizationDelta = 650429872;
   measured = {
-    plain = { unpacked = 11059897872; onDisk = 5674496000; estimated = false; };
-    plain-gaming = { unpacked = 13254832552; onDisk = 6559870976; estimated = false; };
-    plain-virtualization = { unpacked = 11710327800; onDisk = 5818982400; estimated = false; };
-    plain-gaming-virtualization = { unpacked = 13905262472; onDisk = 6708637696; estimated = false; };
+    plain = { unpacked = 11059897872; onDisk = 5679607808; estimated = false; };
+    plain-gaming = { unpacked = 13254832552; onDisk = 6566043648; estimated = false; };
+    plain-virtualization = { unpacked = 11710327800; onDisk = 5813190656; estimated = false; };
+    plain-gaming-virtualization = { unpacked = 13905262472; onDisk = 6701510656; estimated = false; };
   };
 
   # Desktops (docs/nixos/desktops.md §9, D14): each desktop on each base above, ESTIMATED like virtualization: the
@@ -98,7 +98,7 @@ in
   # (checks.release-plan recomputes them), not as a silent new floor.
   published = {
     plain = 16;
-    plain-gaming = 18;
+    plain-gaming = 19;
     plain-virtualization = 17;
     plain-gaming-virtualization = 19;
     # desktops.md §9
