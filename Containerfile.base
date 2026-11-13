@@ -770,6 +770,17 @@ COPY files/desktop/starship/starship.toml /usr/share/rime/starship/starship.toml
 # working and keeps improving across updates.
 COPY files/desktop/bash/rime-starship.sh /etc/profile.d/rime-starship.sh
 
+# Ghostty (NixOS Rime's default terminal) says TERM=xterm-ghostty. Fedora's
+# ncurses-term ships the entry only as `ghostty`, so an ssh session from Ghostty
+# into a bootc machine had no terminfo: tmux, zsh's line editor and every TUI
+# misbehaved. The alias names the same entry under the name Ghostty sends.
+RUN set -eux; \
+    infocmp -x ghostty >/dev/null; \
+    printf 'xterm-ghostty|Ghostty terminal (the ncurses ghostty entry),\n\tuse=ghostty,\n' \
+        | tic -x -o /usr/share/terminfo -; \
+    TERM=xterm-ghostty tput colors; \
+    infocmp -x xterm-ghostty | grep -F 'xterm-ghostty|'
+
 # zsh-syntax-highlighting in the wallpaper accent instead of its built-in green.
 # Fedora's /etc/zshrc sources /etc/profile.d/*.sh before ~/.zshrc, and the plugin
 # only fills styles that are unset, so this reaches existing accounts without

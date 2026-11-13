@@ -296,7 +296,9 @@ def rime_menu(boot):
     """The NixOS menu GRUB reads (custom.cfg's rime-boot block sourcing rime-nixos.cfg, at least one entry whose kernel
     is on /boot), or the reason there is none."""
     custom = read(os.path.join(boot, "grub2/custom.cfg"))
-    if custom is None or not re.search(r"### BEGIN rime-boot.*?### END rime-boot ###", custom, re.S):
+    if custom is None:
+        return None, f"{boot}/grub2/custom.cfg is missing or cannot be read"
+    if not re.search(r"### BEGIN rime-boot.*?### END rime-boot ###", custom, re.S):
         return None, "custom.cfg has no rime-boot block"
     menu = read(os.path.join(boot, "grub2/rime-nixos.cfg"))
     if menu is None:
@@ -467,9 +469,21 @@ def preconditions(sx, writable):
                          "(`sudo btrfs device stats /`, a scrub); finish deletes nothing on a filesystem that reports "
                          "errors"))
 
-    n, why = rime_menu(sx.boot)
+    # A moved machine's /boot has had systemd-gpt-auto-generator's automount over it (idle timeout 120 s). Finish runs
+    # in a private mount namespace: when /boot was idle at that moment, the namespace holds the bare autofs, and its
+    # trigger mounts /boot only outside. Then custom.cfg cannot be read and the menu looks missing (the L16,
+    # 2026-11-13: the dry run passed, `--yes` minutes later refused). main() touches /boot before the namespace is
+    # made; this says so plainly if it still is not there.
+    vis = mount_at(mounts, "/boot")
+    if vis and vis["fstype"] == "autofs":
+        refusals.append(("boot-not-mounted", "/boot is an automount with nothing mounted on it where finish runs "
+                         "(its private mount namespace was made while /boot was idle): run finish again; if this "
+                         "repeats, show `findmnt -R /boot`"))
+        n, why = None, None
+    else:
+        n, why = rime_menu(sx.boot)
     facts["rime_menu"] = n
-    if not n:
+    if not n and why:
         refusals.append(("nixos-menu-missing", f"{why}: without it, removing the ostree entries leaves GRUB nothing to "
                          "boot"))
     if re.search(r"\bostree=", read(os.path.join(sx.boot, "grub2/grub.cfg"), "") or ""):
@@ -558,6 +572,7 @@ def plan_text(facts, p):
     out += ["", "space:",
             f"  should free about {gb(p['estimate'])} of data (btrfs filesystem du: what only the old side holds; "
             "uncompressed bytes, so on a compressed disk somewhat less comes back)" if p["estimate"] is not None
+            else "  should free: measured below, after this plan" if p.get("measure_after")
             else "  should free: not measured",
             f"  now: {gb(u.get('data_used'))} data used, {gb(u.get('free_estimated'))} free (estimated)",
             "", "what stops working:",
@@ -735,6 +750,12 @@ def in_private_namespace(argv):
     """Re-run in a private mount namespace: the top-level mount goes away when this exits."""
     if os.environ.get("RIME_MIGRATE_FINISH_NS") == "1":
         return
+    # Mount /boot first (an automount's trigger, see preconditions): the namespace copies the mount table as it is
+    # now, and a private copy stays mounted for the whole run whatever the automount does outside.
+    try:
+        os.stat("/boot/grub2")
+    except OSError:
+        pass
     env = dict(os.environ, RIME_MIGRATE_FINISH_NS="1")
     os.execvpe("unshare", ["unshare", "--mount", "--propagation", "private", "--",
                            sys.executable, "-I", os.path.realpath(__file__), *argv], env)
@@ -768,8 +789,24 @@ def main(argv=None, sx=None):
             return EXIT_REFUSED
         if a.yes:
             return cmd_yes(sx, facts)
-        sys.stdout.write(plan_text(facts, plan(sx, facts)))
+        # The plan first, the measurement last: `btrfs filesystem du` over a whole disk reads every name in it (a
+        # 1.3 TB home of 7.7 M names took hours), and until 2026-11-13 nothing was printed before it finished, so
+        # the first person to run it stopped it with Ctrl+C, never having seen the plan.
+        p = plan(sx, facts, measure=False)
+        p["measure_after"] = bool(p["trees"])
+        sys.stdout.write(plan_text(facts, p))
         print("nothing was changed (dry run). To delete the old side: sudo rime migrate finish --yes")
+        if p["measure_after"]:
+            print("", "measuring what it should free (btrfs filesystem du over the whole disk: on a big home this takes "
+                  "a long time; Ctrl+C is safe, the dry run changes nothing, and --yes does not measure) ...",
+                  sep="\n", flush=True)
+            try:
+                est = sx.estimate(facts["top"], KEEP_TOP)
+            except KeyboardInterrupt:
+                print("measurement stopped; nothing was changed")
+                return EXIT_OK
+            print(f"should free about {gb(est)} of data (what only the old side holds; uncompressed bytes, so on a "
+                  "compressed disk somewhat less comes back)" if est is not None else "should free: could not be measured")
         return EXIT_OK
     except Refused as e:
         print(f"REFUSED [{e.name}] {e}")

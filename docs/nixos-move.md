@@ -78,9 +78,10 @@ says so in a `divergence:` line. The space comes back with `rime migrate
 finish`, run on Rime OS on NixOS once it has started well three times: it removes
 the old side (@pre-nixos, ostree/ and the old var/home) and the GRUB menu's
 ostree entries. `sudo rime migrate finish --dry-run` (also what it does without
-`--yes`) first lists what it would delete, the space it should free and what
-stops working. Until then those entries still start the old system, with home
-as it was at the move.
+`--yes`) first lists what it would delete and what stops working, then measures
+the space it should free. On a big home that measurement can take hours; Ctrl+C
+stops it safely, and `--yes` does not measure. Until then those entries still
+start the old system, with home as it was at the move.
 
 ## After a start, the bootc verbs refuse
 

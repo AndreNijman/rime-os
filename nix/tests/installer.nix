@@ -236,7 +236,7 @@ in
         cores = 4;
         diskSize = 12288;
         # vdb: the whole-disk target (21.5 GB, above every floor); vdc: 16 GiB = 17.2 GB, above the plain floor
-        # (16 GB) and below the gaming one (18 GB); vdd: a Windows-shaped disk for partition mode; vde: a small stick
+        # (16 GB) and below the gaming one (19 GB); vdd: a Windows-shaped disk for partition mode; vde: a small stick
         # for the recovery key; vdf: 14 GiB = 15.0 GB, below the plain floor.
         emptyDiskImages = [ 20480 16384 24576 64 14336 ];
         additionalPaths = [ target targetGaming ];

@@ -981,8 +981,8 @@ for `plain`, closure.md §10-§11) plus a margin. The ratio applies only when th
 longest mount in `/proc/self/mounts`) is btrfs mounted with `compress-force=zstd`; anything else counts unpacked bytes
 (ratio 1.0), and with the 1 GB reserve a machine on ext4 is not told an update fits when it does not (see below:
 the ratio alone does not hold that). The same gate runs before
-`rime install <class 2 app>` downloads. The disk floors follow: **16 GB plain, 18 GB gaming** (the same with
-virtual machines, measured in wave 4; 17 and 19 were wave 3's estimate), with the NixOS installer's 2 GiB ESP counted; a root partition alone needs **14 GB plain,
+`rime install <class 2 app>` downloads. The disk floors follow: **16 GB plain, 19 GB gaming** (18 GB until the 2026-11-13 re-measure; with virtual
+machines 17 and 19 GB, closure.md), with the NixOS installer's 2 GiB ESP counted; a root partition alone needs **14 GB plain,
 16 GB gaming** (closure.md §11). Every floor is held to a VM install of the
 real variant by `checks.update-floors` (closure.md §12). How it is proven: the compressed branch (btrfs
 `compress-force=zstd` → 0.55) by rimed unit tests and killed mutants (`variant.rs`), and end to end by

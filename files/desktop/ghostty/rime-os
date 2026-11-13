@@ -16,6 +16,8 @@ cursor-style-blink = false
 shell-integration-features = no-cursor
 scrollback-limit-lines = 10000
 bell-features = no-title
+# A new window opens in your home folder, not in the directory of the window you had focused.
+window-inherit-working-directory = false
 cursor-color = cell-foreground
 cursor-text = cell-background
 selection-foreground = cell-background

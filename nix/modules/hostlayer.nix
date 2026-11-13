@@ -78,6 +78,33 @@ in
       SYSTEMD_ETC_MACHINE_INFO = lib.mkForce "/etc/machine-info";
     };
     i18n.imperativeLocale = true;
+    # imperativeLocale also takes LANG out of NixOS's session variables (/etc/pam/environment): only units systemd
+    # starts read /etc/locale.conf. Every login (the desktop through greetd, the console, su -, ssh) then had NO
+    # LANG: btop refused to start ("No UTF-8 locale detected!") in the L16's terminal (2026-11-13). Fedora read the
+    # file for every login shell (/etc/profile.d/lang.sh). Here PAM reads it for every session, right after the
+    # environment step (order 10000), so a `localectl set-locale` reaches the next login. checks.fedora-parity.
+    security.pam.services =
+      let
+        rule = {
+          rules.session.rime-locale = {
+            order = 10050;
+            control = "optional";
+            modulePath = "${config.security.pam.package}/lib/security/pam_env.so";
+            settings = {
+              conffile = "${pkgs.writeText "rime-pam-env-empty.conf" ""}";
+              readenv = 1;
+              envfile = "/etc/locale.conf";
+              user_readenv = 0;
+            };
+          };
+        };
+      in
+      {
+        login = rule;
+        su = rule;
+        sshd = lib.mkIf config.services.openssh.enable rule;
+        greetd = lib.mkIf config.services.greetd.enable rule;
+      };
     # graphical-desktop.nix writes this file from services.xserver.xkb; here it is the machine's (host.toml), and
     # the configuration's text is only the default `apply` writes when host.toml names no X11 layout.
     environment.etc."X11/xorg.conf.d/00-keyboard.conf".enable = lib.mkForce false;

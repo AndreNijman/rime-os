@@ -21,8 +21,8 @@ this measurement.
 | **A4** | **gaming is opt-in** (`rime.gaming.enable` stays `false`; installs ship `plain`) | 10-04 decision kept |
 | **A11 disk floor** (install + one mass rebuild + boot), as built in wave 3 (§11: the gate counts on-disk bytes) | **16 GB** whole disk (2 GiB ESP counted), **14 GB** root partition; nix/release/floors.nix. Was 19 GB while the gate counted unpacked bytes (§9) | bootc 12 GB, which holds its 5.4 GB install plus one core update, barely (§6) |
 | A11 install-only minimum (no update headroom), recomputed (§9) | 7 GB (6 GB before linux-firmware) | no bootc counterpart published |
-| A11 floor **with gaming** (§10, §11) | **18 GB** whole disk, **16 GB** root partition (was 22 GB under the unpacked gate); 8 GB install-only | |
-| A11 floor **with virtual machines** (§12, measured; was estimated in §11) | **16 GB** whole disk / **14 GB** root partition (`plain-virtualization`, was 17 / 14 estimated); **18 GB** / **16 GB** with gaming too (was 19 / 16) | |
+| A11 floor **with gaming** (§10, §11; re-measured 2026-11-13) | **19 GB** whole disk, **16 GB** root partition (18 GB disk before the bootc shell and developer tools came back: the re-measure needs 18.006 GB; was 22 GB under the unpacked gate); 8 GB install-only | |
+| A11 floor **with virtual machines** (§12, measured; was estimated in §11; re-measured 2026-11-13) | **17 GB** whole disk / **15 GB** root partition (`plain-virtualization`; 16 / 14 before the bootc shell and developer tools came back, +630 MB unpacked); **19 GB** / **17 GB** with gaming too (was 18 / 16). Plain keeps 16 / 14 | |
 
 `plain` is the shape a fresh install ships (D9's generic rime-plain toplevel): every Rime area on, Rime's kernel with
 NVIDIA 615, no gaming, no test account. `rime-vm` is `nixosConfigurations.rime-vm` (gaming on, nixpkgs' kernel, no

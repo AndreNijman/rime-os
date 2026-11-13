@@ -422,6 +422,23 @@ class FinishTest(unittest.TestCase):
         os.unlink(os.path.join(self.sx.boot, "rime/nixos/k-bzImage.efi"))
         self.refused("nixos-menu-missing")
 
+    def test_boot_automount_with_nothing_mounted_refused_by_name(self):
+        # The L16 (2026-11-13): systemd-gpt-auto-generator's automount on /boot, idle when finish made its private
+        # namespace, so /boot there was the bare autofs. Said as such, not as a missing menu.
+        autofs = ("/", "/boot", "autofs", "systemd-1")
+        w(self.sx.mountinfo, mountinfo(GOOD_MOUNTS[:4] + [autofs]))
+        out = self.refused("boot-not-mounted")
+        self.assertNotIn("nixos-menu-missing", out)
+        # the automount with /boot mounted over it (what main() makes sure of before the namespace) is fine
+        w(self.sx.mountinfo, mountinfo(GOOD_MOUNTS[:4] + [autofs, GOOD_MOUNTS[4]]))
+        rc, out = run(self.sx, "--dry-run")
+        self.assertEqual(rc, 0, out)
+
+    def test_unreadable_custom_cfg_named_as_such(self):
+        os.unlink(os.path.join(self.sx.boot, "grub2/custom.cfg"))
+        out = self.refused("nixos-menu-missing")
+        self.assertIn("grub2/custom.cfg is missing or cannot be read", out)
+
     def test_ostree_entries_finish_would_leave_refused(self):
         w(os.path.join(self.sx.boot, "grub2/custom.cfg"), RIME_BOOT + "menuentry 'old' {\n  linux /ostree/x ostree=/y\n}\n")
         self.refused("custom-cfg-ostree-entry")
@@ -447,6 +464,29 @@ class FinishTest(unittest.TestCase):
         self.assertIn("what stops working", out)
         self.assertIn("can no longer be booted", out)
         self.assertIn("nothing was changed", out)
+
+    def test_dry_run_prints_the_plan_before_it_measures(self):
+        # btrfs filesystem du over a whole disk can take hours: the plan, and that nothing changed, come first, and a
+        # Ctrl+C during the measurement ends the dry run cleanly (2026-11-13: it printed nothing before measuring).
+        seen = {}
+        buf = io.StringIO()
+
+        def interrupted(top, kept):
+            seen["before"] = buf.getvalue()
+            raise KeyboardInterrupt
+        self.sx.estimate = interrupted
+        before = snapshot(self.tmp)
+        with contextlib.redirect_stdout(buf):
+            rc = F.main(["--dry-run"], sx=self.sx)
+        out = buf.getvalue()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(snapshot(self.tmp), before)
+        self.assertIn("will be deleted, in this order:", seen["before"])
+        self.assertIn("should free: measured below, after this plan", seen["before"])
+        self.assertIn("nothing was changed (dry run)", seen["before"])
+        self.assertIn("Ctrl+C is safe", seen["before"])
+        self.assertIn("measurement stopped; nothing was changed", out)
+        self.assertNotIn("should free about", out)
 
     def test_dry_run_says_whether_an_off_disk_backup_exists(self):
         # start without --backup (the default since no drive is needed): after finish @home is the only copy of home.

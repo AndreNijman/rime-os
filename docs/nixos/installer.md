@@ -87,7 +87,7 @@ reported as a network problem, not as a forged release.
 * a root filesystem other than btrfs;
 * a disk below the chosen system's floor in whole-disk mode, or a root partition below it in partition mode. The
   floors are `nix/release/floors.nix`'s, stamped as `nixos-choices.json`: **16 GB** disk / **14 GB** partition for
-  `plain`, **18 GB** / **16 GB** for `plain-gaming` (a fresh system and one update staged beside it, the figures
+  `plain`, **19 GB** / **16 GB** for `plain-gaming` (18 GB disk before 2026-11-13's re-measure) (a fresh system and one update staged beside it, the figures
   `rime update`'s space gate and `rime install steam` use). The refusal names the choice: "/dev/vdc is too small for
   Rime OS with gaming (Steam): 17 GB. ... Without gaming Rime OS needs 16 GB: go back and leave gaming off". The
   engine states no number of its own (`checks.installer-choices`);

@@ -175,13 +175,15 @@ let
     [ "record-not-saved" "rime-migrate-finish.py" ''s/^    if not os.path.exists(os.path.join(sx.state, "start-record.json")):/    if False:/'' "the start record deleted with ostree/: an interrupted run cannot resume" ]
     [ "nested-shallow-first" "rime-migrate-finish.py" ''s/key=lambda s: (-s.count("\/"), s))/key=lambda s: (s.count("\/"), s))/'' "a nested subvolume deleted before the ones inside it" ]
     [ "dry-run-writable" "rime-migrate-finish.py" ''s/writable=a.yes/writable=True/'' "the dry run mounts the top level read-write" ]
-    [ "menu-unchecked" "rime-migrate-finish.py" ''s/    if not n:/    if False:/'' "the ostree entries removed with no NixOS menu to boot" ]
+    [ "menu-unchecked" "rime-migrate-finish.py" ''s/    if not n and why:/    if False:/'' "the ostree entries removed with no NixOS menu to boot" ]
     [ "menu-top-level-only" "rime-migrate-finish.py" ''s|for p in ("/boot/rime/", "/rime/")|for p in ("/boot/rime/",)|'' "a machine with a /boot partition (the encrypted layout) refused for a menu it has" ]
     [ "pre-nixos-moved" "rime-migrate-finish.py" ''s/^MOVE_ASIDE = ("ostree",)/MOVE_ASIDE = OLD_TOP/'' "the read-only @pre-nixos moved aside (btrfs refuses: EROFS)" ]
     [ "entries-not-committed" "rime-migrate-finish.py" ''s/^        sx.commit(sx.boot)      # before/        pass  # before/'' "the entries' removal only in btrfs's log: GRUB lists the old system after a power cut" ]
     [ "os-error-unrecorded" "rime-migrate-finish.py" ''s/    except (Failed, OSError) as e:/    except Failed as e:/'' "a refused rename leaves a traceback and no failed record" ]
     [ "record-done-ignored" "rime-migrate-finish.py" ''s/    if r is None or r\[0\] != "already-moved":/    if False:/'' "finish over a start that did not finish" ]
     [ "finish-claims-a-backup" "rime-migrate-finish.py" ''s/^                if rec.get("backup") else$/                if True else/'' "finish points at an off-disk backup start never took" ]
+    [ "boot-autofs-unchecked" "rime-migrate-finish.py" ''s/    if vis and vis\["fstype"\] == "autofs":/    if False:/'' "a bare /boot automount in finish's namespace reported as a missing NixOS menu (the L16, 2026-11-13)" ]
+    [ "dry-run-measures-first" "rime-migrate-finish.py" ''s/^        p = plan(sx, facts, measure=False)$/        p = plan(sx, facts)/'' "the dry run measures the whole disk (hours) before it prints its plan" ]
   ];
   runFinishMutant = m:
     let
@@ -215,6 +217,7 @@ let
     [ "gen-fsck-unescaped" "boot-generator.py" ''s/            out.append("\\\\x%02x" % ord(c))/            out.append(c)/'' "the fsck unit name unescaped" ]
     [ "gen-bls-binds" "boot-generator.py" ''s/    if layout == "bls":/    if False:/'' "a fresh install's ESP never mounted (/boot bound from the top level)" ]
     [ "gen-esp-everywhere" "boot-generator.py" ''s/    if layout == "bls":/    if True:/'' "a moved machine waits for an ESP it does not have (the L16, 2026-11-11)" ]
+    [ "gen-automount-unmasked" "boot-generator.py" ''s/^            os.symlink("\/dev\/null", os.path.join(normal, "boot.automount"))$/            pass/'' "gpt-auto's 120 s automount left over /boot (finish refused on the L16, 2026-11-13)" ]
   ];
   genTest = mut: ''
     set -euo pipefail
@@ -264,6 +267,7 @@ microcode = "amd"
     grep -qx 'What=/mnt/rime-top/boot' "$t/n/boot.mount" || fail "moved plain layout: no bind"
     if grep -q RIME-ESP "$t/n/boot.mount"; then fail "moved plain layout: waits for RIME-ESP"; fi
     if grep -q ConditionPath "$t/n/boot.mount"; then fail "moved plain layout: a condition on a known /boot"; fi
+    [ "$(readlink "$t/n/boot.automount")" = /dev/null ] || fail "moved plain layout: gpt-auto's boot.automount not masked"
     req || fail "moved plain layout: not required"
     touch "$t/by-label/RIME-ESP"; run
     grep -qx 'What=/mnt/rime-top/boot' "$t/n/boot.mount" || fail "moved plain layout with a RIME-ESP label around: no bind"
@@ -280,6 +284,7 @@ kernel_params = []
     req || fail "fresh install: ESP not required"
     grep -qxF 'Requires=systemd-fsck@dev-disk-by\x2dlabel-RIME\x2dESP.service' "$t/n/boot.mount" || fail "ESP fsck unit ($(grep Requires= "$t/n/boot.mount"))"
     [ "$(readlink "$t/n/local-fs.target.requires/boot.mount")" = ../boot.mount ] || fail "ESP not required by local-fs.target"
+    [ "$(readlink "$t/n/boot.automount")" = /dev/null ] || fail "fresh install: gpt-auto's boot.automount not masked"
     # an invalid device writes nothing (and says why); a broken host.toml falls back to the bind
     printf '[boot]
 device = "UUID=x y"
@@ -294,6 +299,7 @@ device = "UUID=x y"
     rm -rf "$t/n"; mkdir -p "$t/n"; echo mine > "$t/n/boot.mount"
     RIME_HOST_TOML="$t/host.toml" python3 -I "$G" "$t/n" 2>/dev/null
     [ "$(cat "$t/n/boot.mount")" = mine ] || fail "existing boot.mount overwritten"
+    [ ! -L "$t/n/boot.automount" ] || fail "an fstab /boot: boot.automount masked by a generator that wrote no boot.mount"
     rm -rf "$t"
   '';
   # A payload manifest naming two small files by sha256 (the openssl cross-check in bridge-unit signs it).

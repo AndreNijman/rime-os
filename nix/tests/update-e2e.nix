@@ -380,7 +380,7 @@ pkgs.testers.runNixOSTest {
           code, out = client.execute("rime install steam 2>&1")
           print(out)
           assert code != 0, out
-          assert "steam: Rime's Gaming system needs a disk of at least 18 GB" in out, out
+          assert "steam: Rime's Gaming system needs a disk of at least 19 GB" in out, out
           assert "Nothing was changed" in out, out
           client.fail("test -e /var/lib/rime/switch/rime-feature@gaming.target.on")
 
