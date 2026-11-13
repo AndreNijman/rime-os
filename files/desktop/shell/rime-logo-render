@@ -1,24 +1,25 @@
 #!/bin/sh
-# rime-logo-render — recolour the Rime symbol from the wallpaper's palette.
+# rime-logo-render — recolour the Rime mark (Origin) from the wallpaper's palette.
 #
 #   rime-logo-render [DIR [TEMPLATE]]
 #
 # Rime Shell's matugen config (rime-shell src/config/matugen.toml.in, [templates.rime_logo]) writes four
 # colours to DIR/colors on every wallpaper change and then runs this as its post_hook:
 #
-#   accent_dark=#RRGGBB    plane 3 on a dark background   (matugen primary, dark scheme)
-#   fg_dark=#RRGGBB        planes 1, 2 and 4               (matugen on_surface, dark scheme)
-#   accent_light=#RRGGBB   plane 3 on a light background  (matugen primary, light scheme)
-#   fg_light=#RRGGBB       planes 1, 2 and 4               (matugen on_surface, light scheme)
+#   accent_dark=#RRGGBB    the mark on a dark background   (matugen primary, dark scheme)
+#   fg_dark=#RRGGBB        ink on a dark background        (matugen on_surface, dark scheme)
+#   accent_light=#RRGGBB   the mark on a light background  (matugen primary, light scheme)
+#   fg_light=#RRGGBB       ink on a light background       (matugen on_surface, light scheme)
 #
 # Each pair is substituted into the shipped adaptive symbol (TEMPLATE, default the rime-branding
-# templates/rime-symbol.svg.in: {{accent}} is plane 3 only, {{fg}} the other three, so the layer order and the
-# shape never change) and rendered to DIR/rime-symbol-dark.png and DIR/rime-symbol-light.png, 512 px wide,
+# templates/rime-symbol.svg.in: the mark is one colour, {{accent}}; {{fg}} is filled too, for a template that
+# carries ink) and rendered to DIR/rime-mark-dark.png and DIR/rime-mark-light.png, 512 px wide,
 # beside the recoloured SVGs. Every file is written to a temporary name in DIR and renamed over the old one,
 # so a terminal opening mid-render reads either the old logo or the new one, never half a file.
 #
 # DIR defaults to ${XDG_CACHE_HOME:-~/.cache}/rime/logo. The greeting (files/desktop/shell/rime-greeting.sh)
-# uses these PNGs when they exist and the shipped Rime Blue ones otherwise.
+# uses these PNGs when they exist and the shipped Rime Blue ones otherwise. (They were rime-symbol-*.png while
+# the mark was the layered ridge; the new names leave those stale renders unread.)
 set -eu
 
 dir=${1:-${XDG_CACHE_HOME:-$HOME/.cache}/rime/logo}
@@ -65,16 +66,16 @@ trap 'cleanup; exit 143' TERM
 
 # render VARIANT ACCENT FG
 render() {
-    tmp_svg=$(mktemp "$dir/.rime-symbol-$1.svg.XXXXXX")
-    tmp_png=$(mktemp "$dir/.rime-symbol-$1.png.XXXXXX")
+    tmp_svg=$(mktemp "$dir/.rime-mark-$1.svg.XXXXXX")
+    tmp_png=$(mktemp "$dir/.rime-mark-$1.png.XXXXXX")
     sed -e "s/{{accent}}/$2/g" -e "s/{{fg}}/$3/g" "$template" >"$tmp_svg"
     if grep -F '{{' "$tmp_svg" >/dev/null; then
         die "$template has a token other than {{accent}} and {{fg}}"
     fi
     "$resvg" -w "$size" "$tmp_svg" "$tmp_png"
     chmod 0644 "$tmp_svg" "$tmp_png"
-    mv -f "$tmp_png" "$dir/rime-symbol-$1.png"
-    mv -f "$tmp_svg" "$dir/rime-symbol-$1.svg"
+    mv -f "$tmp_png" "$dir/rime-mark-$1.png"
+    mv -f "$tmp_svg" "$dir/rime-mark-$1.svg"
     tmp_svg='' tmp_png=''
 }
 

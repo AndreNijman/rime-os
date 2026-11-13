@@ -186,8 +186,8 @@ stdenv.mkDerivation (finalAttrs: {
     fi
     # The path contract: lock_cmd names exactly the directory the session starts quickshell with.
     grep -F 'lock_cmd = qs -c ${shellDir} ipc call lockscreen lock' src/config/hypridle.conf
-    # Rime on NixOS draws the layered ridge in the bar and About; the same source on the bootc image keeps the
-    # spark (src/state/Brand.qml). A revision from before the switch draws the ridge unconditionally.
+    # Rime on NixOS draws the Origin mark in the bar and About; the same source on the bootc image keeps the
+    # spark (src/state/Brand.qml). (The flag keeps its old name, `ridge`.)
     if [ -f src/state/Brand.qml ]; then
       substituteInPlace src/state/Brand.qml --replace-fail 'property bool ridge: false' 'property bool ridge: true'
     fi

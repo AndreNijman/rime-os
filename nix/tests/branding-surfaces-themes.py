@@ -4,10 +4,11 @@
     branding-surfaces-themes.py <themes dir> <accents.json> <ridge script source>
 
 * 25 themes: rime-os and rime-os-accent-00..23, each a script theme naming its images under /etc/plymouth/themes/<name>.
-* Only plane 3 takes a colour: rime-os's lockup-base has no saturated pixel, an accent theme's neutral images are
-  links into rime-os (so no theme can recolour plane 1, 2, 4 or the wordmark), every lockup-accent has exactly the
-  same coverage (plane 3's shape) and is painted in that theme's colour, and plane 3 does not sit on another plane.
-* The dots and bullets are the theme's colour; every PNG carries transparency.
+* The mark is the accent, the wordmark is neutral: rime-os's lockup-base (the wordmark) has no saturated pixel, an
+  accent theme's neutral images are links into rime-os (so no theme can recolour the wordmark), each body image
+  (lockup-core, -ring, -coat) has exactly rime-os's coverage and is painted in that theme's colour, and no body sits
+  on the wordmark or on another body (the even-odd gaps stay open).
+* The bullets are the theme's colour; every PNG carries transparency.
 * Every theme runs the same script; only the HI_ line differs. The refresh function does no Image work (the engine
   rule from bootc's script: scale once, then move opacity), there is no SetUpdateStatusFunction, refresh is 60 Hz.
 """
@@ -40,8 +41,9 @@ names = sorted(os.listdir(THEMES))
 if names != sorted(colours):
     fail(f"themes are {names}, expected rime-os + rime-os-accent-00..23")
 
-NEUTRAL = ["lockup-base", "dot-off", "prompt"]
-COLOURED = ["lockup-accent", "dot-on", "bullet"]
+NEUTRAL = ["lockup-base", "prompt"]
+BODIES = ["lockup-core", "lockup-ring", "lockup-coat"]
+COLOURED = BODIES + ["bullet"]
 SUFFIXES = ["", "-hd"]
 
 src = open(SCRIPT).read()
@@ -66,21 +68,27 @@ def alpha_mask(im, cut=128):
 base_dir = os.path.join(THEMES, "rime-os")
 ref_cov = {}
 for s in SUFFIXES:
-    ref_cov[s] = alpha_mask(load(os.path.join(base_dir, f"lockup-accent{s}.png")))
     base = load(os.path.join(base_dir, f"lockup-base{s}.png"))
-    # plane 3 is left out of the base: no saturated ink anywhere in it (off-white #FAFAFA only)
+    # the base is the wordmark alone: no saturated ink anywhere in it (off-white #FAFAFA only)
     bad = sum(1 for (r, g, b, a) in base.getdata() if a >= 64 and (max(r, g, b) - min(r, g, b) > 12 or min(r, g, b) < 200))
     if bad:
-        fail(f"rime-os/lockup-base{s}.png has {bad} coloured or dark pixels: a plane other than 3 took a colour")
-    # plane 3 is not painted over another plane: the two images barely touch (antialiased edges only)
-    bmask = alpha_mask(base, 200)
-    overlap = sum(1 for x, y in zip(bmask, alpha_mask(load(os.path.join(base_dir, f"lockup-accent{s}.png")), 200)) if x and y)
-    if overlap:
-        fail(f"rime-os lockup{s}: plane 3 covers {overlap} pixels of the other planes")
-    if base.size != Image.open(os.path.join(base_dir, f"lockup-accent{s}.png")).size:
-        fail(f"rime-os lockup{s}: base and accent are not one canvas")
-    if sum(ref_cov[s]) < 200:
-        fail(f"rime-os/lockup-accent{s}.png is nearly empty ({sum(ref_cov[s])} px): plane 3 is missing")
+        fail(f"rime-os/lockup-base{s}.png has {bad} coloured or dark pixels: the mark must not be baked into the base")
+    masks = {"lockup-base": alpha_mask(base, 200)}
+    for bd in BODIES:
+        im = load(os.path.join(base_dir, f"{bd}{s}.png"))
+        ref_cov[bd + s] = alpha_mask(im)
+        masks[bd] = alpha_mask(im, 200)
+        if im.size != base.size:
+            fail(f"rime-os {bd}{s}: not on the base's canvas")
+        if sum(ref_cov[bd + s]) < 200:
+            fail(f"rime-os/{bd}{s}.png is nearly empty ({sum(ref_cov[bd + s])} px)")
+    # no two parts share a pixel (antialiased edges only): the gaps between the bodies stay open
+    keys = list(masks)
+    for i, k1 in enumerate(keys):
+        for k2 in keys[i + 1:]:
+            overlap = sum(1 for x, y in zip(masks[k1], masks[k2]) if x and y)
+            if overlap:
+                fail(f"rime-os lockup{s}: {k2} covers {overlap} pixels of {k1}")
 
 ref_script_lines = None
 for name, hexc in sorted(colours.items()):
@@ -107,13 +115,13 @@ for name, hexc in sorted(colours.items()):
             for s in SUFFIXES:
                 p = os.path.join(d, f"{i}{s}.png")
                 if not os.path.islink(p) or os.readlink(p) != f"../rime-os/{i}{s}.png":
-                    fail(f"{name}/{i}{s}.png must be a link to ../rime-os/{i}{s}.png (only plane 3 may change colour)")
+                    fail(f"{name}/{i}{s}.png must be a link to ../rime-os/{i}{s}.png (only the mark may change colour)")
 
     for s in SUFFIXES:
-        acc_img = load(os.path.join(d, f"lockup-accent{s}.png"))
-        if alpha_mask(acc_img) != ref_cov[s]:
-            fail(f"{name}/lockup-accent{s}.png does not cover exactly plane 3 (coverage differs from rime-os)")
-        for img in (f"lockup-accent{s}.png", f"dot-on{s}.png", f"bullet{s}.png"):
+        for bd in BODIES:
+            if alpha_mask(load(os.path.join(d, f"{bd}{s}.png"))) != ref_cov[bd + s]:
+                fail(f"{name}/{bd}{s}.png does not cover exactly rime-os's {bd} (a different shape)")
+        for img in [f"{bd}{s}.png" for bd in BODIES] + [f"bullet{s}.png"]:
             px = [(r, g, b) for (r, g, b, a) in load(os.path.join(d, img)).getdata() if a == 255]
             off = [p for p in px if max(abs(p[k] - want[k]) for k in range(3)) > 2]
             if not px or off:

@@ -1,8 +1,8 @@
-# The layered-ridge assets (files/branding/ridge). Not a VM test: a build-time check.
+# The Origin mark's assets (files/branding/ridge). Not a VM test: a build-time check.
 #  1. make-ridge-assets.sh, run with the flake's resvg and python3, reproduces every committed export (PNGs compared
 #     by pixels, everything else by bytes), so a master edited without regenerating fails here.
-#  2. check-ridge-assets.py holds the brand rules: four planes in the masters, only plane 3 takes an accent, the
-#     adaptive templates carry {{accent}} once and {{fg}} on every other ink, transparent exports, opaque tiles,
+#  2. check-ridge-assets.py holds the brand rules: five circles tangent at one point in the masters, the whole mark
+#     in {{accent}} and {{fg}} only on the wordmark, light accents darkened, transparent exports, opaque tiles,
 #     the full size ladder, a 16/32/48 .ico.
 #  3. pkgs.rime.rime-branding installs the app icon and its aliases into hicolor.
 { pkgs, self }:

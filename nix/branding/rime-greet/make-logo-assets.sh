@@ -1,8 +1,8 @@
 #!/bin/sh
-# Render the NixOS greeter's logo from the layered-ridge adaptive template (files/branding/ridge/templates):
-# assets/ridge-lockup-base.png = the horizontal lockup with planes 1, 2, 4 and the wordmark in off-white and plane 3
-# left out. GreetSurface.qml draws plane 3 itself, as a polygon in the accent colour (Rime Blue, or the user's
-# published accent), so only plane 3 ever changes colour and no shader is needed to tint it.
+# Render the NixOS greeter's logo from the Origin adaptive template (files/branding/ridge/templates):
+# assets/ridge-lockup-base.png = the horizontal lockup's wordmark in off-white, on the lockup's canvas, with the mark
+# left out. GreetSurface.qml draws the mark itself, as vectors in the accent colour (Rime Blue, or the user's
+# published accent), so no shader is needed to tint it. (The file name is the one it had under the layered ridge.)
 #
 # The bootc image's greeter keeps the spark (files/desktop/rime-greet); nix/pkgs/rime-ridge-files.nix puts this
 # asset into the NixOS greeter tree. Needs resvg pinned to the flake's nixpkgs:

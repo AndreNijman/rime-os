@@ -10,7 +10,7 @@
 #                             "RIME OS" in the accent or Rime Blue, never ASCII art), quiet when it must be, the
 #                             caller's positional parameters untouched.
 #  3. logo_render_test.py     the BUILT Rime Shell's matugen config on two wallpapers: rime-logo-render's PNGs carry the
-#                             wallpaper's accent on plane 3 only; a bad colours file keeps the old logo.
+#                             wallpaper's accent over the whole mark; a bad colours file keeps the old logo.
 #  4. POSIX and lint: greeting.sh parses in sh/bash/zsh/dash and has no bash-only test brackets (Containerfile.base
 #     asserts the same); shellcheck on greeting.sh and rime-logo-render.
 #  5. Mutants, each must make its test FAIL: rime-term-graphics that never restores the terminal; greeting.sh without

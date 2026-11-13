@@ -5,7 +5,8 @@
 GREETING_SH is NixOS's greeting, rime-ridge-files' share/rime/shell/greeting.sh (or a mutant of it). It is copied with its system paths
 pointed into a temporary root, the way rime-libexec's FHS table points them at the profile:
 
-    /usr/libexec/  -> ROOT/libexec/    rime-term-graphics: a stub that prints $STUB_GRAPHICS
+    /usr/libexec/  -> ROOT/libexec/    rime-term-graphics: a stub that prints $STUB_GRAPHICS; rime-logo-render: a stub
+                                       that writes its argv to $LR_LOG
     /usr/share/    -> ROOT/share/      the shipped rime-symbol-{dark,light}-512.png
     /etc/fastfetch/ -> ROOT/etc/fastfetch/
 
@@ -48,7 +49,9 @@ def setup(root):
         f.write('#!/bin/sh\necho "${STUB_SCHEME:-default}"\n')
     with open(f"{root}/libexec/rime-term-graphics", "w") as f:
         f.write('#!/bin/sh\necho "$*" > "$TG_LOG"\nprintf "%s\\n" "$STUB_GRAPHICS"\n')
-    for p in ("bin/fastfetch", "bin/gsettings", "libexec/rime-term-graphics"):
+    with open(f"{root}/libexec/rime-logo-render", "w") as f:
+        f.write('#!/bin/sh\necho "$*" > "$LR_LOG"\n')
+    for p in ("bin/fastfetch", "bin/gsettings", "libexec/rime-term-graphics", "libexec/rime-logo-render"):
         os.chmod(f"{root}/{p}", 0o755)
     text = open(GREETING).read()
     text = text.replace("/usr/libexec/", f"{root}/libexec/").replace("/usr/share/", f"{root}/share/")
@@ -66,7 +69,7 @@ def shell_cmd(shell, interactive=True):
 
 
 def run_case(root, shell, env_extra, interactive=True, tty=True):
-    logs = {k: f"{root}/{k}.log" for k in ("ff", "tg", "out")}
+    logs = {k: f"{root}/{k}.log" for k in ("ff", "tg", "out", "lr")}
     for p in logs.values():
         if os.path.exists(p):
             os.remove(p)
@@ -78,6 +81,7 @@ def run_case(root, shell, env_extra, interactive=True, tty=True):
         "FF_LOG": logs["ff"],
         "TG_LOG": logs["tg"],
         "OUT_LOG": logs["out"],
+        "LR_LOG": logs["lr"],
         "STUB_GRAPHICS": "kitty-direct 22 8 kitty-direct@/dev/pts/0,xterm-256color,-",
     }
     env.update(env_extra)
@@ -101,6 +105,9 @@ def run_case(root, shell, env_extra, interactive=True, tty=True):
                              stderr=subprocess.STDOUT, env=env)
         p.communicate(timeout=20)
     p.wait(timeout=5)
+    deadline = time.monotonic() + 2  # a background re-render is detached: give it a moment to write its log
+    while env_extra.get("WAIT_LR") and not os.path.exists(logs["lr"]) and time.monotonic() < deadline:
+        time.sleep(0.02)
 
     def read(k):
         return open(logs[k]).read() if os.path.exists(logs[k]) else None
@@ -110,6 +117,7 @@ def run_case(root, shell, env_extra, interactive=True, tty=True):
         "ff": ff.splitlines() if ff is not None else None,
         "tg": read("tg"),
         "out": read("out") or "",
+        "lr": read("lr"),
     }
 
 
@@ -143,16 +151,16 @@ def cases(root, shell):
 
     # 1. recoloured logo in the cache, local Ghostty-like answer
     clean_cache()
-    put(f"{cache}/rime-symbol-dark.png", "cached dark")
+    put(f"{cache}/rime-mark-dark.png", "cached dark")
     put(accent_file, "38;2;10;20;30\n")
     r = run_case(root, shell, {})
     ff = r["ff"]
     expect(f"[{sh}] image: protocol from rime-term-graphics", arg(ff, "--logo-type") == "kitty-direct", ff)
-    expect(f"[{sh}] image: the cache's recoloured logo", arg(ff, "--logo") == f"{cache}/rime-symbol-dark.png", ff)
+    expect(f"[{sh}] image: the cache's recoloured logo", arg(ff, "--logo") == f"{cache}/rime-mark-dark.png", ff)
     expect(f"[{sh}] image: width AND height (no screen clear)",
            arg(ff, "--logo-width") == "22" and arg(ff, "--logo-height") == "8", ff)
     expect(f"[{sh}] image: helper asked for 8 rows of that image",
-           (r["tg"] or "").split() == ["--rows", "8", "--image", f"{cache}/rime-symbol-dark.png"], r["tg"])
+           (r["tg"] or "").split() == ["--rows", "8", "--image", f"{cache}/rime-mark-dark.png"], r["tg"])
     expect(f"[{sh}] accent passed to fastfetch",
            arg(ff, "--color") == "38;2;10;20;30" and arg(ff, "--percent-color-green") == "38;2;10;20;30", ff)
     expect(f"[{sh}] system config used", arg(ff, "--config") == f"{root}/etc/fastfetch/config.jsonc", ff)
@@ -168,13 +176,26 @@ def cases(root, shell):
            r["ff"])
     expect(f"[{sh}] no accent yet: no --color", r["ff"] is not None and "--color" not in r["ff"], r["ff"])
 
+    expect(f"[{sh}] no cache: no re-render (nothing to render from)", r["lr"] is None, r["lr"])
+
+    # 2b. a cache from the layered ridge (colours, rime-symbol-*.png, no rime-mark-*.png): the shipped logo now,
+    #     and the mark rendered from those colours in the background for the next terminal
+    put(f"{cache}/colors", "accent_dark=#112233\n")
+    put(f"{cache}/rime-symbol-dark.png", "the old ridge")
+    r = run_case(root, shell, {"WAIT_LR": "1"})
+    expect(f"[{sh}] old cache: shipped logo, not the stale ridge",
+           arg(r["ff"], "--logo") == f"{shipped}/rime-symbol-dark-512.png", r["ff"])
+    expect(f"[{sh}] old cache: rime-logo-render run on the cache", (r["lr"] or "").strip() == cache, r["lr"])
+    expect(f"[{sh}] old cache: no job-control noise", "POS=first second arg" in r["out"], r["out"])
+    clean_cache()
+
     # 3. light desktop: the light variant, cached or shipped
     r = run_case(root, shell, {"STUB_SCHEME": "'prefer-light'"})
     expect(f"[{sh}] light desktop: shipped light logo",
            arg(r["ff"], "--logo") == f"{shipped}/rime-symbol-light-512.png", r["ff"])
-    put(f"{cache}/rime-symbol-light.png", "cached light")
+    put(f"{cache}/rime-mark-light.png", "cached light")
     r = run_case(root, shell, {"STUB_SCHEME": "'prefer-light'"})
-    expect(f"[{sh}] light desktop: cached light logo", arg(r["ff"], "--logo") == f"{cache}/rime-symbol-light.png",
+    expect(f"[{sh}] light desktop: cached light logo", arg(r["ff"], "--logo") == f"{cache}/rime-mark-light.png",
            r["ff"])
     r = run_case(root, shell, {"STUB_SCHEME": "'prefer-light'", "SSH_CONNECTION": "192.0.2.1 1 192.0.2.2 22"})
     expect(f"[{sh}] over SSH the remote desktop's scheme is ignored (dark)",

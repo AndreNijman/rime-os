@@ -1,8 +1,8 @@
-# The layered-ridge boot splash: rime-os (the default, plane 3 in Rime Blue) and rime-os-accent-00..23 (plane 3 in
+# The Origin boot splash: rime-os (the default, the mark in Rime Blue) and rime-os-accent-00..23 (the mark in
 # the owner's accent bucket), generated at build time from rime-branding's adaptive lockup template
 # (files/branding/plymouth/ridge/make-ridge-themes.py). Nothing raster is committed for these.
 #
-#   $out/share/plymouth/themes/rime-os/                 lockup-base, lockup-accent, dots, bullet, prompt, script
+#   $out/share/plymouth/themes/rime-os/                 lockup-base (wordmark), lockup-core/ring/coat, bullet, prompt, script
 #   $out/share/plymouth/themes/rime-os-accent-NN/       the accent images + script; neutral images link to ../rime-os
 #
 # Theme files name their images under /etc/plymouth/themes/<theme>: NixOS links that path to the theme set both in
@@ -43,7 +43,7 @@ stdenvNoCC.mkDerivation {
   passthru.defaultTheme = "rime-os";
 
   meta = {
-    description = "Rime OS boot splash (layered ridge) and its 24 per-owner accent themes";
+    description = "Rime OS boot splash (the Origin mark) and its 24 per-owner accent themes";
     platforms = lib.platforms.linux;
   };
 }

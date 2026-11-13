@@ -38,9 +38,9 @@ merge keep updating and their owners have nothing to do. Every build is also
 published under the pre-rebrand name, `ghcr.io/andrenijman/apex-os`, with the <!-- rime-rename: keep -->
 same tags, for machines that have not moved to the new name yet.
 
-The mark is the **layered ridge**: four planes rising to a peak, the third in
-the accent colour (Rime Blue, `#91C2DC`, unless the owner's wallpaper picks
-another). The bootc image still ships the older "spark" mark. See
+The mark is **Origin**: five circles that all touch at one point, filled in
+turn to make a coat, a ring and a core, in the accent colour (Rime Blue,
+`#91C2DC`, unless the owner's wallpaper picks another). The bootc image still ships the older "spark" mark. See
 [docs/branding.md](docs/branding.md).
 
 ## The desktop
@@ -66,9 +66,9 @@ You log in to Hyprland running Rime Shell. The login screen also offers niri
   closing window shrinks away over 200 ms. SUPER + left-drag moves a window and
   SUPER + right-drag resizes it. The settings live in
   `files/desktop/hypr/rime/appearance.lua`.
-- **Boot splash.** On the NixOS-based Rime the ridge lockup rises onto a
-  charcoal screen above a row of progress dots, its third plane in the owner's
-  accent. On the bootc image the Rime spark comes into focus out of its own
+- **Boot splash.** On the NixOS-based Rime the Origin lockup grows onto a
+  charcoal screen, core first, in the owner's accent, and a slow wave runs
+  through its three parts while the system starts. On the bootc image the Rime spark comes into focus out of its own
   glow on a black screen and the wordmark fades in. On an encrypted disk the passphrase prompt
   appears on the splash, with a dot for each character you type and the
   keyboard layout in use.

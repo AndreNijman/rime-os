@@ -9,7 +9,7 @@
 #                                          same patch: Rime's modules, Rime Blue keys, and the "RIME OS" label for
 #                                          terminals with no image protocol.
 #   pkgs.rime.rime-greeting                libexec/rime-term-graphics (protocol choice) and libexec/rime-logo-render
-#                                          (Rime Shell's matugen post_hook: ~/.cache/rime/logo/rime-symbol-*.png).
+#                                          (Rime Shell's matugen post_hook: ~/.cache/rime/logo/rime-mark-*.png).
 #   pkgs.rime.rime-branding                share/rime/branding/png/symbol/rime-symbol-{dark,light}-512.png, the logo
 #                                          before any wallpaper, and the adaptive template rime-logo-render fills.
 #

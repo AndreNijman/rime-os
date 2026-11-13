@@ -1,7 +1,7 @@
 # The terminal greeting on the real desktop: log in through rime-greet into Rime Tiling (Hyprland), let Rime
 # Shell's first wallpaper run its own matugen config, then open terminals the way a user does (Hyprland's exec):
 #
-#   - the Shell's matugen post_hook rendered ~/.cache/rime/logo/rime-symbol-{dark,light}.png in the wallpaper's
+#   - the Shell's matugen post_hook rendered ~/.cache/rime/logo/rime-mark-{dark,light}.png in the wallpaper's
 #     colours (no hand-run step);
 #   - Ghostty (from nixpkgs; in this test node only, Rime ships Alacritty): the greeting picks kitty-direct and
 #     draws the recoloured symbol (its accent and foreground pixels are counted where the logo sits);
@@ -170,12 +170,12 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_succeeds(quickshell, timeout=120)
 
     with subtest("the Shell's first wallpaper recoloured the logo"):
-        machine.wait_until_succeeds(f"test -s {logo}/rime-symbol-dark.png -a -s {logo}/rime-symbol-light.png",
+        machine.wait_until_succeeds(f"test -s {logo}/rime-mark-dark.png -a -s {logo}/rime-mark-light.png",
                                     timeout=240)
         first = colours()
         print("logo colours from the Shell's own matugen run:", first)
-        print(machine.succeed(f"ls -l {logo}; stat -c '%U %a %n' {logo}/rime-symbol-dark.png"))
-        machine.succeed(f"${py}/bin/python3 -c \"from PIL import Image; im=Image.open('{logo}/rime-symbol-dark.png'); "
+        print(machine.succeed(f"ls -l {logo}; stat -c '%U %a %n' {logo}/rime-mark-dark.png"))
+        machine.succeed(f"${py}/bin/python3 -c \"from PIL import Image; im=Image.open('{logo}/rime-mark-dark.png'); "
                         "assert im.size[0]==512, im.size; print(im.size, im.mode)\"")
         variant = "light" if "light" in machine.execute(
             in_session("gsettings get org.gnome.desktop.interface color-scheme"))[1] else "dark"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The bootc image keeps the chartreuse spark; the layered ridge in Rime Blue is NixOS's (AGENTS.md "Branding").
+# The bootc image keeps the chartreuse spark; the Origin mark in Rime Blue is NixOS's (AGENTS.md "Branding").
 # Containerfile.base copies these shared files as they are, so they must carry the spark, and the NixOS build turns
-# them into the ridge with nix/branding/ridge.patch (nix/pkgs/rime-ridge-files.nix). This suite checks both halves:
+# them into the Origin mark with nix/branding/ridge.patch (nix/pkgs/rime-ridge-files.nix). This suite checks both halves:
 # the files the bootc image ships still show the spark, and the patch still applies to them with no fuzz.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -16,12 +16,12 @@ lacks() { if has "$1" "$2"; then bad "$3"; else ok "$3"; fi; }
 g=files/desktop/rime-greet
 check $g/shell.qml 'greetCtx.edition === "rime"   ? "#d9f99d"' "greeter: the edition accent is chartreuse"
 check $g/shell.qml 'assets/spark-chartreuse.png' "greeter: the logo is the spark"
-lacks $g/shell.qml 'ridge-lockup-base.png' "greeter: no ridge lockup"
-lacks $g/GreetSurface.qml 'ShapePath' "greeter: no ridge plane polygon"
+lacks $g/shell.qml 'ridge-lockup-base.png' "greeter: no Origin lockup"
+lacks $g/GreetSurface.qml 'ShapePath' "greeter: no Origin mark shape"
 for c in chartreuse gold white; do
     if [ -s "$g/assets/spark-$c.png" ]; then ok "greeter: assets/spark-$c.png ships"; else bad "greeter: assets/spark-$c.png ships"; fi
 done
-if [ -e "$g/assets/ridge-lockup-base.png" ]; then bad "greeter: the ridge asset is not in the bootc tree"; else ok "greeter: the ridge asset is not in the bootc tree"; fi
+if [ -e "$g/assets/ridge-lockup-base.png" ]; then bad "greeter: the Origin asset is not in the bootc tree"; else ok "greeter: the Origin asset is not in the bootc tree"; fi
 
 check files/desktop/shell/rime-greeting.sh '--logo-color-1 "${_rime_logo_color}"' "greeting: fastfetch draws its logo (the ASCII spark)"
 lacks files/desktop/shell/rime-greeting.sh 'rime-term-graphics' "greeting: no image-protocol symbol"

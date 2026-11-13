@@ -5,7 +5,7 @@
 #   rime-term-graphics   C: which image protocol the terminal speaks (kitty-direct|kitty|sixel|iterm|none) and the
 #                        logo's width in cells. C because it runs before every terminal's first prompt.
 #   rime-logo-render     sh: Rime Shell's matugen post_hook; recolours the adaptive symbol from rime-branding and
-#                        renders ~/.cache/rime/logo/rime-symbol-{dark,light}.png with resvg.
+#                        renders ~/.cache/rime/logo/rime-mark-{dark,light}.png with resvg.
 #
 # resvg (not librsvg's rsvg-convert): both were already in the rime-vm closure, resvg is the one the branding
 # exports are rendered with, so the recoloured logo is drawn by the same renderer as the shipped one.

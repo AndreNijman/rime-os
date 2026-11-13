@@ -144,7 +144,7 @@ let
   # ── rime-greet: Rime's Quickshell greeter (files/desktop/rime-greet) ────────────────────────────
   # Read in place by the greeter, so its own files are store paths; helpers it calls use the stable
   # profile like everything else. The tree is rime-ridge-files' copy: files/desktop/rime-greet with the
-  # layered ridge in place of the bootc image's spark.
+  # Origin mark in place of the bootc image's spark.
   rimeGreet = pkgs.runCommand "rime-greet" { } ''
     mkdir -p $out/share
     cp -r ${pkgs.rime.rime-ridge-files}/share/rime-greet $out/share/rime-greet
@@ -298,7 +298,7 @@ let
   '';
 in
 {
-  # The layered-ridge identity: os-release, icons, the boot splash artwork and its per-owner accent.
+  # The Origin-mark identity: os-release, icons, the boot splash artwork and its per-owner accent.
   imports = [ ./branding.nix ];
 
   options.rime.desktop = {
@@ -629,7 +629,7 @@ in
       systemd.services.greetd.conflicts = lib.mkIf config.services.greetd.enable [ "kmsconvt@tty1.service" ];
 
       # ── Boot splash (Containerfile.rime:265-312; bootc kargs.d `quiet splash`) ────────────────────
-      # The theme (the layered ridge and its accents) is chosen in branding.nix.
+      # The theme (the Origin mark and its accents) is chosen in branding.nix.
       boot.plymouth.enable = true;
       # A splash that stops answering must not hold the boot. plymouth-read-write (Before=sysinit.target) has no
       # timeout of its own, plymouth-quit-wait has none at all (TimeoutSec=0) and greetd starts after it: a plymouthd

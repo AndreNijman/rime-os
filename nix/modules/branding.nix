@@ -1,4 +1,4 @@
-# Branding: the layered ridge on every OS surface Rime owns outside the Shell and the terminal greeting
+# Branding: the Origin mark on every OS surface Rime owns outside the Shell and the terminal greeting
 # (docs/branding.md). Imported by desktop.nix; on by default wherever the module set is.
 #
 #   os-release      NAME/PRETTY_NAME "Rime OS", ID=nixos + VARIANT_ID=rime, DEFAULT_HOSTNAME=rime,
@@ -7,11 +7,11 @@
 #                   rimed's VARIANT_ID reads match on both products (decision 2026-11-02, brand review REVIEW.md).
 #   icons           pkgs.rime.rime-branding: hicolor apps/rime-os (+ distributor-logo, start-here, rime-os-logo),
 #                   share/rime/branding, and share/pixmaps/rime-os*.png.
-#   boot splash     pkgs.rime.rime-plymouth: rime-os (plane 3 in Rime Blue) is the theme; rime-os-accent-00..23 recolour
-#                   only plane 3 and follow the owner's accent, at shutdown/reboot (rime-plymouth-accent rewrites
+#   boot splash     pkgs.rime.rime-plymouth: rime-os (the mark in Rime Blue) is the theme; rime-os-accent-00..23 recolour
+#                   only the mark and follow the owner's accent, at shutdown/reboot (rime-plymouth-accent rewrites
 #                   /etc/plymouth/plymouthd.conf) and at boot (the initrd unit below reads the ESP credential
 #                   loader/credentials/rime.accent.cred, as bootc's dracut module rime-plymouth-accent does).
-#   plymouth logo   /etc/plymouth/logo.png (the bgrt/spinner fallback, also in the initrd): the ridge, not the snowflake.
+#   plymouth logo   /etc/plymouth/logo.png (the bgrt/spinner fallback, also in the initrd): the Origin mark, not the snowflake.
 #
 # Splash enablement (boot.plymouth.enable, kernel args) stays in desktop.nix; this module only picks the artwork.
 { config, lib, pkgs, ... }:
@@ -53,7 +53,7 @@ in
     enable = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Rime's identity (the layered ridge) on os-release, icons, the boot splash and the Plymouth logo.";
+      description = "Rime's identity (the Origin mark) on os-release, icons, the boot splash and the Plymouth logo.";
     };
     plymouthTheme = lib.mkOption {
       type = lib.types.str;

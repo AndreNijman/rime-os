@@ -1,11 +1,11 @@
-# The layered ridge on Rime's OS surfaces (nix/modules/branding.nix, docs/branding.md "Where the ridge shows").
+# The Origin mark on Rime's OS surfaces (nix/modules/branding.nix, docs/branding.md "Where the mark shows").
 #
 # branding-surfaces-static (build-time, no VM):
-#   1. the greeter's logo asset is what make-logo-assets.sh renders from the ridge template (pixels), and the plane-3
-#      polygon GreetSurface.qml draws is the template's own plane 3;
-#   2. the 25 splash themes keep the brand rules (branding-surfaces-themes.py: only plane 3 changes colour, every
+#   1. the greeter's logo asset is what make-logo-assets.sh renders from the brand template (pixels), and the five
+#      circles GreetSurface.qml draws are the template's own;
+#   2. the 25 splash themes keep the brand rules (branding-surfaces-themes.py: only the mark changes colour, every
 #      image exists with transparency, one script, the engine rules);
-#   3. rime-plymouth-accent picks rime-os-accent-NN for a coloured accent and the ridge's rime-os for none or grey,
+#   3. rime-plymouth-accent picks rime-os-accent-NN for a coloured accent and the default rime-os for none or grey,
 #      and the initrd picker (files/dracut/rime-plymouth-accent/rime-plymouth-theme) starts the theme the
 #      credential names, against the real theme set.
 #
@@ -15,7 +15,7 @@
 #   initrd starts plymouth-accent.png in rime-os-accent-00. os-release, the icons, the Plymouth logo and the initrd's
 #   theme set are checked on the running system. A second machine with the desktop shows the greeter in Rime Blue
 #   (greeter-default.png) and in a user's published accent (greeter-accent.png). Every one of these screenshots is read
-#   back (plane3()): plane 3 must be on screen in the colour named, next to the neutral planes.
+#   back (mark()): the mark must be on screen in the colour named, next to the off-white wordmark.
 { pkgs, self }:
 
 let
@@ -58,24 +58,28 @@ in
         assert ImageChops.difference(a, b).getbbox() is None, "assets/ridge-lockup-base.png drifted from the template: rerun make-logo-assets.sh"
         assert min(a.getchannel("A").getdata()) == 0, "the greeter logo has no transparency"
         bad = sum(1 for (r, g, bl, al) in a.getdata() if al >= 64 and (max(r, g, bl) - min(r, g, bl) > 12 or min(r, g, bl) < 200))
-        assert bad == 0, f"{bad} coloured pixels in the neutral lockup: plane 3 must be drawn by the greeter, not baked in"
+        assert bad == 0, f"{bad} coloured pixels in the neutral lockup: the mark must be drawn by the greeter, not baked in"
         print("greeter logo: reproducible, transparent, neutral", a.size)
         PY
         shellcheck ${greet}/make-logo-assets.sh
         python3 - $b/templates/rime-lockup-horizontal.svg.in ${greet}/GreetSurface.qml <<'PY'
         import re, sys
         svg, qml = (open(p).read() for p in sys.argv[1:3])
-        assert 'viewBox="0 0 553.16 175"' in svg and 'transform="translate(0 0) scale(1)"' in svg, "the lockup template moved: update GreetSurface"
-        pts = re.search(r'fill="\{\{accent\}\}" points="([^"]+)"', svg).group(1)
-        tpl = [tuple(float(v) for v in p.split(",")) for p in pts.split()]
-        start = re.search(r"startX: ([0-9.]+) \* logoBox.unit; startY: ([0-9.]+) \* logoBox.unit", qml)
-        lines = re.findall(r"PathLine \{ x: ([0-9.]+)\s*\* logoBox.unit; y: ([0-9.]+) \* logoBox.unit \}", qml)
-        drawn = [tuple(float(v) for v in start.groups())] + [tuple(float(v) for v in l) for l in lines]
-        assert drawn[-1] == drawn[0], "the greeter's plane 3 is not closed"
-        assert drawn[:-1] == tpl, f"GreetSurface draws plane 3 at {drawn[:-1]}, the template has {tpl}"
-        assert "553.16 * unit" in qml and "height / 175" in qml, "GreetSurface scales plane 3 by a different box"
+        assert 'viewBox="0 0 294.475 84"' in svg and 'transform="translate(0 0) scale(1)"' in svg, "the lockup template moved: update GreetSurface"
+        # the template's bodies, as the circles they are drawn from: "M{cx - r} {cy}a{r} {r} 0 1 0 {2r} 0a... Z"
+        tpl = []
+        for body in ("coat", "ring", "core"):
+            d = re.search(rf'<path id="{body}" fill="\{{\{{accent\}}\}}" fill-rule="evenodd" d="([^"]+)"', svg).group(1)
+            for x, y, r in re.findall(r"M([0-9.]+) ([0-9.]+)a([0-9.]+) ", d):
+                tpl.append((round(float(x) + float(r), 3), round(float(y), 3), float(r)))
+        m = re.search(r"readonly property var circles: \[(.*?)\n\s*\]", qml, re.S)
+        drawn = [tuple(float(v) for v in c) for c in re.findall(r"\[([0-9.]+), ([0-9.]+), ([0-9.]+)\]", m.group(1))]
+        drawn = [(round(x, 3), round(y, 3), r) for x, y, r in drawn]
+        assert drawn == tpl, f"GreetSurface draws the circles {drawn}, the template has {tpl}"
+        assert qml.count("PathAngleArc {") == 5 and "ShapePath.OddEvenFill" in qml, "GreetSurface does not draw five circles even-odd"
+        assert "294.475 * unit" in qml and "height / 84" in qml, "GreetSurface scales the mark by a different box"
         assert "assets/ridge-lockup-base.png" in open("${greet}/shell.qml").read()
-        print("greeter plane 3: the template's polygon", tpl)
+        print("greeter mark: the template's circles", tpl)
         PY
 
         echo "== 2. the splash themes"
@@ -105,7 +109,7 @@ in
         RIME_PLYMOUTH_THEMES=$T RIME_PLYMOUTH_CONF=$PWD/initrd.conf RIME_ESP_DIRS=$PWD/sel/esp \
           sh ${initrdPicker}
         grep -qx 'Theme=rime-os-accent-00' initrd.conf || { echo "FAIL: the initrd picker did not start the accent"; cat initrd.conf; exit 1; }
-        # no credential: the ridge default stays
+        # no credential: the default theme stays
         printf '[Daemon]\nTheme=rime-os\n' > initrd.conf; mkdir -p empty-esp
         RIME_PLYMOUTH_THEMES=$T RIME_PLYMOUTH_CONF=$PWD/initrd.conf RIME_ESP_DIRS=$PWD/empty-esp \
           sh ${initrdPicker}
@@ -119,7 +123,7 @@ in
     name = "rime-branding-surfaces";
 
     node.pkgsReadOnly = false;
-    # Reads the screenshots back: each one must show plane 3 in the colour it claims (plane3() below).
+    # Reads the screenshots back: each one must show the mark in the colour it claims (mark() below).
     extraPythonPackages = p: [ p.pillow ];
 
     nodes = {
@@ -197,22 +201,23 @@ in
           m.screenshot(name)
           print("screenshot:", name + ".png")
 
-      # The pixels, not only the journal: in the logo's box of screenshot `name` (1280x800), plane 3 is `want` (at least
-      # 150 px within 20 of it; the proof screenshots measure 278 in the greeter, 504-513 on the splash, and 0 for any
-      # other accent) and the neutral planes and wordmark are there (at least 500 near-white px; measured 1091-1659).
-      GREETER_LOGO = (550, 372, 640, 440)  # above the username field, whose ring is also the accent
-      SPLASH_LOGO = (520, 325, 630, 410)   # above the progress dots, one of which is also the accent
+      # The pixels, not only the journal: in the lockup's box of screenshot `name` (1280x800), the mark is `want` (at
+      # least 150 px within 20 of it; it covers about 1,600 px in the greeter and 2,800 on the splash, where the boot
+      # wave dims at most one body, leaving at least the core and the ring, about 1,200 px) and the off-white wordmark
+      # is there (at least 500 near-white px).
+      GREETER_LOGO = (536, 372, 744, 440)  # the 196 x 56 lockup, above the username field (whose ring is the accent)
+      SPLASH_LOGO = (500, 325, 780, 410)   # the 262 x 75 lockup at 46 % of the screen's height
 
-      def plane3(m, name, box, want):
+      def mark(m, name, box, want):
           img = Image.open(os.path.join(m.out_dir, name + ".png")).convert("RGB").crop(box)
           w = tuple(int(want[i:i + 2], 16) for i in (1, 3, 5))
           raw = img.tobytes()  # RGB, three bytes a pixel
           px = [tuple(raw[i:i + 3]) for i in range(0, len(raw), 3)]
           accent = sum(1 for p in px if sum((a - b) ** 2 for a, b in zip(p, w)) <= 400)
           white = sum(1 for p in px if min(p) >= 235)
-          print(f"{name}: {accent} px of plane 3 in {want}, {white} px of the neutral planes")
-          assert accent >= 150, f"{name}: plane 3 is not {want} ({accent} px)"
-          assert white >= 500, f"{name}: the neutral planes are missing ({white} px)"
+          print(f"{name}: {accent} px of the mark in {want}, {white} px of the wordmark")
+          assert accent >= 150, f"{name}: the mark is not {want} ({accent} px)"
+          assert white >= 500, f"{name}: the wordmark is missing ({white} px)"
 
       # ── the splash ────────────────────────────────────────────────────────────────────────────────
       splash.start()
@@ -241,10 +246,10 @@ in
           print(splash.succeed("ls -lL /run/booted-system/initrd " + initrd))
           listing = splash.succeed(f"zstd -dc {initrd} > /tmp/initrd.cpio && cpio -it --quiet < /tmp/initrd.cpio")
           for want in ["rime-os/rime-os.plymouth", "rime-os-accent-00/rime-os-accent-00.plymouth",
-                       "rime-os-accent-23/lockup-accent-hd.png", "rime-plymouth-theme-initrd", "vfat.ko"]:
+                       "rime-os-accent-23/lockup-coat-hd.png", "rime-plymouth-theme-initrd", "vfat.ko"]:
               assert want in listing, f"initrd lacks {want}"
 
-      with subtest("the boot splash is the ridge (rime-os)"):
+      with subtest("the boot splash is the Origin lockup (rime-os)"):
           splash.succeed("plymouth --ping")
           j = splash.succeed("journalctl -b -o cat -u rime-plymouth-theme.service --no-pager")
           print(j)
@@ -253,7 +258,7 @@ in
           splash.succeed("grep -qx 'Theme=rime-os' /etc/plymouth/plymouthd.conf")
           splash.sleep(3)
           shot(splash, "plymouth-default")
-          plane3(splash, "plymouth-default", SPLASH_LOGO, "#91C2DC")  # Rime Blue
+          mark(splash, "plymouth-default", SPLASH_LOGO, "#91C2DC")  # Rime Blue
 
       with subtest("the passphrase prompt, with three bullets"):
           splash.execute("plymouth ask-for-password --prompt='Enter passphrase for root' >/tmp/pw 2>&1 &")
@@ -283,18 +288,18 @@ in
           splash.succeed("plymouth --ping")
           splash.sleep(3)
           shot(splash, "plymouth-accent")
-          plane3(splash, "plymouth-accent", SPLASH_LOGO, "#DC9191")  # accents.json slot 00
+          mark(splash, "plymouth-accent", SPLASH_LOGO, "#DC9191")  # accents.json slot 00
 
       # ── the greeter ───────────────────────────────────────────────────────────────────────────────
       desktop.start()
       desktop.wait_for_unit("greetd.service")
       desktop.wait_until_succeeds("pgrep -u greetd -f 'qs -p .*/rime-greet/shell.qml'")
 
-      with subtest("the greeter shows the ridge in Rime Blue"):
+      with subtest("the greeter shows the Origin mark in Rime Blue"):
           desktop.sleep(10)
           shot(desktop, "greeter-default")
           # greetd's journal never carries the greeter's QML output, so a QML error shows here as missing pixels.
-          plane3(desktop, "greeter-default", GREETER_LOGO, "#91C2DC")  # Rime Blue
+          mark(desktop, "greeter-default", GREETER_LOGO, "#91C2DC")  # Rime Blue
 
       with subtest("the greeter follows the user's published accent"):
           desktop.succeed("install -d /var/lib/rime-greet/accents && printf rime > /var/lib/rime-greet/last-user"
@@ -303,7 +308,7 @@ in
           desktop.wait_until_succeeds("pgrep -u greetd -f 'qs -p .*/rime-greet/shell.qml'")
           desktop.sleep(10)
           shot(desktop, "greeter-accent")
-          plane3(desktop, "greeter-accent", GREETER_LOGO, "#FA98A0")  # the published accent itself
+          mark(desktop, "greeter-accent", GREETER_LOGO, "#FA98A0")  # the published accent itself
     '';
   };
 }
