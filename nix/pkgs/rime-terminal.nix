@@ -67,6 +67,15 @@ stdenvNoCC.mkDerivation {
     python3 rime-terminal-migrate --theme rime-os
     test -f $HOME/.config/ghostty/themes/rime-os
     validate $HOME/.config/ghostty/config.ghostty "a migrated config.ghostty with theme = rime-os"
+    # Ctrl+Enter reaches the program in the terminal: the theme unbinds Ghostty's toggle_fullscreen default.
+    # ctrl+shift+enter (another default) must still be listed, or an empty listing would pass.
+    keys="$(ghostty +list-keybinds --plain)"
+    if printf '%s\n' "$keys" | grep '^keybind = ctrl+enter='; then
+      echo "FAIL: Ctrl+Enter is still bound with theme = rime-os"; exit 1
+    fi
+    printf '%s\n' "$keys" | grep -x 'keybind = ctrl+shift+enter=toggle_split_zoom' >/dev/null \
+      || { echo "FAIL: +list-keybinds did not list Ghostty's defaults:"; echo "$keys"; exit 1; }
+    echo "Ctrl+Enter is unbound with theme = rime-os"
     # a missing theme must be an error, or the check above proves nothing
     mv $HOME/.config/ghostty/themes $HOME/.config/ghostty/themes.away
     if ghostty +validate-config --config-file=$HOME/.config/ghostty/config.ghostty >/dev/null 2>&1; then

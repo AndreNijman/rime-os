@@ -18,6 +18,8 @@ scrollback-limit-lines = 10000
 bell-features = no-title
 # A new window opens in your home folder, not in the directory of the window you had focused.
 window-inherit-working-directory = false
+# Ctrl+Enter reaches the program in the terminal. Ghostty's own default makes it toggle fullscreen.
+keybind = ctrl+enter=unbind
 cursor-color = cell-foreground
 cursor-text = cell-background
 selection-foreground = cell-background
