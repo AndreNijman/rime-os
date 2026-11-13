@@ -38,13 +38,16 @@ let
   # Before this, the two virtualization systems were ESTIMATED (plain's measurement + the NAR delta at the gate's
   # ratio); measured, they are smaller on disk than estimated (plain-virtualization 5,564,084,224 B against
   # 5,800,374,254 B), and their published floors drop by 1 GB. Decision: publish the measurement.
+  # Re-measured 2026-11-13 (fedora-parity: the shell and developer tools bootc ships, +630 MB unpacked): all four within
+  # 3 % again; plain and plain-gaming keep their published floors, the virtualization and desktop floors rise by 1 GB
+  # where the new figure needs it.
   # `virtualizationDelta` stays as a record: the measured NAR delta of plain-virtualization over plain (unchanged).
   virtualizationDelta = 650429872;
   measured = {
-    plain = { unpacked = 10433745168; onDisk = 5423476736; estimated = false; };
-    plain-gaming = { unpacked = 12631031056; onDisk = 6309990400; estimated = false; };
-    plain-virtualization = { unpacked = 11084175040; onDisk = 5564084224; estimated = false; };
-    plain-gaming-virtualization = { unpacked = 13281460928; onDisk = 6455635968; estimated = false; };
+    plain = { unpacked = 11059897872; onDisk = 5674496000; estimated = false; };
+    plain-gaming = { unpacked = 13254832552; onDisk = 6559870976; estimated = false; };
+    plain-virtualization = { unpacked = 11710327800; onDisk = 5818982400; estimated = false; };
+    plain-gaming-virtualization = { unpacked = 13905262472; onDisk = 6708637696; estimated = false; };
   };
 
   # Desktops (docs/nixos/desktops.md §9, D14): each desktop on each base above, ESTIMATED like virtualization: the
@@ -96,38 +99,38 @@ in
   published = {
     plain = 16;
     plain-gaming = 18;
-    plain-virtualization = 16;
-    plain-gaming-virtualization = 18;
+    plain-virtualization = 17;
+    plain-gaming-virtualization = 19;
     # desktops.md §9
-    plain-gnome = 17;
-    plain-kde = 18;
+    plain-gnome = 18;
+    plain-kde = 19;
     plain-cosmic = 19;
-    plain-gaming-gnome = 19;
+    plain-gaming-gnome = 20;
     plain-gaming-kde = 21;
     plain-cosmic-gaming = 21;
     plain-gnome-virtualization = 18;
-    plain-kde-virtualization = 19;
-    plain-cosmic-virtualization = 19;
+    plain-kde-virtualization = 20;
+    plain-cosmic-virtualization = 20;
     plain-gaming-gnome-virtualization = 20;
-    plain-gaming-kde-virtualization = 21;
-    plain-cosmic-gaming-virtualization = 21;
+    plain-gaming-kde-virtualization = 22;
+    plain-cosmic-gaming-virtualization = 22;
   };
   publishedPartition = {
     plain = 14;
     plain-gaming = 16;
-    plain-virtualization = 14;
-    plain-gaming-virtualization = 16;
+    plain-virtualization = 15;
+    plain-gaming-virtualization = 17;
     plain-gnome = 15;
-    plain-kde = 16;
-    plain-cosmic = 16;
-    plain-gaming-gnome = 17;
-    plain-gaming-kde = 18;
+    plain-kde = 17;
+    plain-cosmic = 17;
+    plain-gaming-gnome = 18;
+    plain-gaming-kde = 19;
     plain-cosmic-gaming = 19;
-    plain-gnome-virtualization = 15;
+    plain-gnome-virtualization = 16;
     plain-kde-virtualization = 17;
-    plain-cosmic-virtualization = 17;
-    plain-gaming-gnome-virtualization = 17;
-    plain-gaming-kde-virtualization = 19;
-    plain-cosmic-gaming-virtualization = 19;
+    plain-cosmic-virtualization = 18;
+    plain-gaming-gnome-virtualization = 18;
+    plain-gaming-kde-virtualization = 20;
+    plain-cosmic-gaming-virtualization = 20;
   };
 }

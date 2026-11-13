@@ -14,6 +14,10 @@ let
   files = ../../files;
   nm = config.networking.networkmanager.enable;
   desktop = config.rime.desktop.enable;
+  # setuid/setcap programs (security.wrappers): /usr/bin/<name> must reach the wrapper, not sw/bin's plain copy.
+  wrappers = builtins.attrNames config.security.wrappers;
+  wrapperNames = lib.concatMapStringsSep " " lib.escapeShellArg wrappers;
+  wrapperCase = lib.concatMapStringsSep "|" lib.escapeShellArg ([ "rime-fhs-no-wrapper" ] ++ wrappers);
 in
 {
   options.rime.fedoraParity.enable = lib.mkOption {
@@ -49,6 +53,16 @@ in
       boot.tmp.useTmpfs = lib.mkDefault true;
       systemd.services.nix-daemon.environment.TMPDIR = lib.mkIf config.nix.enable (lib.mkDefault "/var/tmp");
 
+      # glibc-langpack-en (Containerfile.core:1450): every English locale. NixOS builds only C.UTF-8 and
+      # defaultLocale, so a machine moved with LANG=en_AU.UTF-8 (or a `localectl set-locale` to en_GB) got the C
+      # locale: no UTF-8, wrong dates and units. The UTF-8 English locales glibc knows (localedata/SUPPORTED).
+      i18n.supportedLocales = lib.mkDefault (lib.unique (
+        [ "C.UTF-8/UTF-8" "${config.i18n.defaultLocale}/UTF-8" ]
+        ++ map (l: "en_${l}.UTF-8/UTF-8") [ "AU" "BW" "CA" "DK" "GB" "HK" "IE" "NZ" "PH" "SC" "SG" "US" "ZA" "ZW" ]
+        # UTF-8 only in glibc, so named without the codeset (LANG=en_IN.UTF-8 still finds them)
+        ++ map (l: "en_${l}/UTF-8") [ "AG" "IL" "IN" "NG" "ZM" ]
+      ));
+
       # zsh is the default login shell for accounts created from here on (Containerfile.core:2569-2591): the
       # useradd DEFAULT, not existing or declared accounts. The installer and `useradd` read /etc/default/useradd;
       # `rime user` names its shell itself. programs.zsh puts zsh in /etc/shells and writes /etc/zshrc, which
@@ -79,6 +93,96 @@ in
           setopt COMPLETE_IN_WORD
         '';
       };
+    }
+
+    {
+      # The shell and developer tools bootc Rime ships on every machine (Containerfile.core stage 5b, "node/gcc for
+      # Rime's own tools", gh by Andre's 2026-10-14 call, sing-box; stage 5b2, the zsh stack, starship and zellij;
+      # stage 1746, the editors). The NixOS port carried the desktop's packages but none of these, so a moved home's
+      # zshrc lost its prompt, its ls/cat/grep/cd aliases and its plugins without a word, and anything a user had
+      # built on them (an ssh route through sing-box, a status line) stopped. socat, lsof, file, pciutils, usbutils
+      # and xxd are the small tools a Fedora machine always had on its PATH.
+      environment.systemPackages = with pkgs; [
+        # stage 5b2: zsh + the interactive stack (zsh itself is programs.zsh above)
+        zsh-autosuggestions
+        zsh-syntax-highlighting
+        fish
+        nushell
+        tmux
+        eza
+        bat
+        zoxide
+        fzf
+        ripgrep
+        fd
+        starship
+        zellij
+        # stage 5b: the developer floor
+        nodejs
+        gcc
+        binutils
+        gnumake
+        gh
+        sing-box
+        # stage 1746: the editors
+        neovim
+        nano
+        # what every Fedora machine had on its PATH
+        socat
+        lsof
+        file
+        pciutils
+        usbutils
+        smartmontools
+        unixtools.xxd
+      ];
+      # The seeded zshrc sources the plugins from ${sw}/share/zsh-{autosuggestions,syntax-highlighting}; NixOS links
+      # no share/ subtree it is not told about.
+      environment.pathsToLink = [ "/share/zsh-autosuggestions" "/share/zsh-syntax-highlighting" ];
+
+      # A terminal's own terminfo entry wherever it is used from: ssh into a Rime machine from Ghostty (TERM
+      # xterm-ghostty), kitty or WezTerm otherwise leaves tmux, zsh's line editor and every TUI guessing.
+      environment.enableAllTerminfo = lib.mkDefault true;
+
+      # Paths a home written on bootc Rime names literally. A moved ~/.zshrc sources the plugins from /usr/share;
+      # user units, scripts and #! lines name /usr/bin/<program> and /bin/bash (Fedora: /bin -> usr/bin), and
+      # NixOS has only /usr/bin/env and /bin/sh. Without these a moved machine's user units failed with 203/EXEC
+      # and #!/bin/bash scripts (a Claude Code status line, ~/.local/bin helpers) did not start.
+      systemd.tmpfiles.rules = [
+        "L+ /usr/share/zsh-autosuggestions - - - - /run/current-system/sw/share/zsh-autosuggestions"
+        "L+ /usr/share/zsh-syntax-highlighting - - - - /run/current-system/sw/share/zsh-syntax-highlighting"
+      ];
+      # Every program of the system profile under /usr/bin, /usr/sbin and /bin, as a link to its
+      # /run/current-system/sw/bin name (so it follows every generation). A setuid/setcap program (sudo, su, ping,
+      # mount, passwd ...) links to its /run/wrappers/bin wrapper instead: sw/bin's copy has no setuid bit, so
+      # /usr/bin/sudo would otherwise refuse to run. Runs at boot and at every switch. Never replaces an entry it
+      # did not make (/usr/bin/env, /bin/sh, anything an admin put there); its own links are removed or repointed
+      # when the new system no longer has that program or now wraps it.
+      system.activationScripts.rimeFhsPrograms = lib.stringAfter [ "binsh" "usrbinenv" ] ''
+        rime_fhs_bin="$systemConfig/sw/bin"
+        rime_fhs_target() {
+          case "$1" in
+            ${wrapperCase}) echo "/run/wrappers/bin/$1" ;;
+            *) [ -e "$rime_fhs_bin/$1" ] && echo "/run/current-system/sw/bin/$1" ;;
+          esac
+        }
+        for rime_fhs_dir in /usr/bin /usr/sbin /bin; do
+          mkdir -p "$rime_fhs_dir"
+          for rime_fhs_link in "$rime_fhs_dir"/*; do
+            [ -L "$rime_fhs_link" ] || continue
+            rime_fhs_to="$(readlink "$rime_fhs_link")"
+            case "$rime_fhs_to" in
+              /run/current-system/sw/bin/*|/run/wrappers/bin/*)
+                [ "$(rime_fhs_target "''${rime_fhs_link##*/}")" = "$rime_fhs_to" ] || rm -f "$rime_fhs_link"
+                ;;
+            esac
+          done
+          for rime_fhs_name in ${wrapperNames} $(ls "$rime_fhs_bin"); do
+            [ -e "$rime_fhs_dir/$rime_fhs_name" ] || [ -L "$rime_fhs_dir/$rime_fhs_name" ] && continue
+            ln -s "$(rime_fhs_target "$rime_fhs_name")" "$rime_fhs_dir/$rime_fhs_name"
+          done
+        done
+      '';
     }
 
     (lib.mkIf nm {
@@ -126,6 +230,26 @@ in
       # and usbmuxd (iPhone USB: tethering, files; 39-usbmuxd.rules).
       services.ipp-usb.enable = lib.mkDefault true;
       services.usbmuxd.enable = lib.mkDefault true;
+    })
+
+    (lib.mkIf config.services.fwupd.enable {
+      # Fedora's fwupd names no ESP: it finds the EFI System Partition itself through UDisks2 (mounted or not; katana
+      # with nothing mounted: uefi_capsule "ready"). The nixpkgs module pins EspLocation to efiSysMountPoint (/boot).
+      # Where the ESP is, is a fact about the MACHINE (rootfs.nix): /boot is the ESP on a fresh install, but bootc's
+      # own /boot (ext4, or a directory of the top level) on a machine moved from bootc, where the pin made fwupd
+      # report "UEFI ESP partition not detected or configured" and never offer a UEFI capsule update (the L16,
+      # 2026-11-13). The same file without the pin; the module's other settings are kept as they are.
+      environment.etc."fwupd/fwupd.conf".source = lib.mkForce (
+        (pkgs.formats.ini {
+          listToValue = l: lib.concatStringsSep ";" (map (s: lib.generators.mkValueStringDefault { } s) l);
+          mkKeyValue = lib.generators.mkKeyValueDefault { } "=";
+        }).generate "fwupd.conf" (
+          { fwupd = removeAttrs config.services.fwupd.daemonSettings [ "EspLocation" ]; }
+          // lib.optionalAttrs (config.services.fwupd.uefiCapsuleSettings != { }) {
+            uefi_capsule = config.services.fwupd.uefiCapsuleSettings;
+          }
+        )
+      );
     })
 
     (lib.mkIf config.hardware.bluetooth.enable {

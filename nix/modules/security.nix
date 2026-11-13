@@ -138,6 +138,16 @@ in
       '';
     };
 
+    passwordlessSudo = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Administrators (the wheel group) use sudo without typing their password. Rime's own guest accounts
+        and every other non-wheel account still get no sudo at all, and agent sessions still run with
+        no_new_privs, which stops sudo whatever this says.
+      '';
+    };
+
     firewall.package = lib.mkOption {
       type = lib.types.package;
       default = firewall;
@@ -188,6 +198,12 @@ in
   };
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
+    {
+      # Admins never type a password for sudo (Andre, 2026-11-13: "passwordless sudo fully for everyone on rime
+      # nix", for machines moved from bootc and for machines installed on NixOS). One setting covers both: a moved
+      # machine's admin is in wheel, as on Fedora. NixOS writes it as `%wheel ALL=(ALL:ALL) NOPASSWD: SETENV: ALL`.
+      security.sudo.wheelNeedsPassword = lib.mkDefault (!cfg.passwordlessSudo);
+    }
     {
       warnings = lib.optional (cfg.testing.weaken != [ ])
         "rime.security.testing.weaken is set (${lib.concatStringsSep ", " cfg.testing.weaken}): this machine's security gates are deliberately broken";

@@ -69,6 +69,8 @@
 // { vendor-apps = import ./vendor-apps.nix { inherit pkgs self; }; }
 # claude-code-npm (+ .mutants.bad-integrity)
 // { claude-code-npm = import ./claude-code-npm.nix { inherit pkgs self; }; }
+# fwupd-esp (+ .mutants.esp-pinned)
+// { fwupd-esp = import ./fwupd-esp.nix { inherit pkgs self; }; }
 # virtualization
 // { virtualization = import ./virtualization.nix { inherit pkgs self; }; }
 # vendor-verify, vendor-fetch-refuses
