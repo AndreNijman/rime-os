@@ -440,6 +440,67 @@ class Split(unittest.TestCase):
         self.assertEqual(asked, [sorted([a, b, c, d])])
 
 
+class VerifySignatures(unittest.TestCase):
+    """verify_signatures: a path that did not verify is asked about again; the refusal quotes Nix, not its progress."""
+
+    def verify(self, bad_per_try, paths):
+        """bad_per_try: per call, {path: "untrusted" | "missing"} (the last repeats); "other" fails with no path named."""
+        calls = []
+
+        class P:
+            def __init__(self, rc, err):
+                self.returncode, self.stdout, self.stderr = rc, b"", err.encode()
+
+        def run(cmd, **kw):
+            asked = [c for c in cmd if c.startswith("/nix/store/")]
+            bad = bad_per_try[min(len(calls), len(bad_per_try) - 1)]
+            calls.append(asked)
+            err = "".join(f"checking '{a}'...\n" for a in asked)
+            if bad == "other":
+                return P(1, err + "error: unable to download 'https://cache/x.narinfo': HTTP error 429\n")
+            gone = [a for a in asked if bad.get(a) == "missing"]
+            if gone:
+                return P(1, "don't know how to build these paths:\n" + "".join(f"  {g}\n" for g in gone)
+                         + f"error: path '{gone[0]}' is not valid\n")
+            untrusted = [a for a in asked if bad.get(a) == "untrusted"]
+            return P(2 if untrusted else 0, err + "".join(f"path '{u}' is untrusted\n" for u in untrusted))
+
+        saved = r.run, r.time.sleep, r.VERIFY_WAIT
+        r.run, r.time.sleep, r.VERIFY_WAIT = run, lambda s: None, 0
+        try:
+            r.verify_signatures("https://cache", ["k"], paths, "public check: narinfo signatures")
+            return calls, None
+        except r.Refused as e:
+            return calls, str(e)
+        finally:
+            r.run, r.time.sleep, r.VERIFY_WAIT = saved
+
+    def test_an_untrusted_path_is_asked_again(self):
+        a, b, c = sp(1, "a"), sp(2, "b"), sp(3, "c")
+        calls, err = self.verify([{b: "untrusted"}, {}], [a, b, c])
+        self.assertIsNone(err)
+        self.assertEqual(calls, [[a, b, c], [b]])
+
+    def test_a_missing_narinfo_is_asked_again(self):
+        a, b = sp(1, "a"), sp(2, "b")
+        calls, err = self.verify([{a: "missing"}, {}], [a, b])
+        self.assertIsNone(err)
+        self.assertEqual(calls[1], [a])
+
+    def test_an_unnamed_failure_asks_about_everything_again(self):
+        a, b = sp(1, "a"), sp(2, "b")
+        calls, err = self.verify(["other", {}], [a, b])
+        self.assertIsNone(err)
+        self.assertEqual(calls, [[a, b], [a, b]])
+
+    def test_a_path_that_never_verifies_refuses_with_nix_s_words(self):
+        a, b = sp(1, "a"), sp(2, "b")
+        calls, err = self.verify([{b: "untrusted"}], [a, b])
+        self.assertEqual(len(calls), r.VERIFY_TRIES)
+        self.assertIn(f"path '{b}' is untrusted", err)
+        self.assertNotIn("checking", err)
+
+
 class PathInfo(unittest.TestCase):
     """Nix 2.35 fails `path-info` for a path a binary cache lacks instead of answering null (seen in release-standin)."""
 

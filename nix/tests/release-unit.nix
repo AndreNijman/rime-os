@@ -54,6 +54,9 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "split refuses on the first answer" 'while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS:' 'while False:'
   mutant "split asks again but keeps nothing" 'up_set |= found' 'pass'
   mutant "split adds an unserved reference" 'found = {g for g in gaps if served(again.get(g), g)}' 'found = set(gaps)'
+  mutant "verify gives up on the first failure" 'if n == VERIFY_TRIES:' 'if True:'
+  mutant "verify passes after its last try" 'if p.returncode == 0:' 'if p.returncode == 0 or n == VERIFY_TRIES:'
+  mutant "verify quotes its progress" 'if ln.strip() and not ln.startswith("checking '"'"'")]' 'if ln.strip()]'
   mutant "SigV4 signing key without its terminator" \
     'for part in (date, region, service, "aws4_request"):' 'for part in (date, region, service):'
   # the GitHub backend

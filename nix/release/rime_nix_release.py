@@ -559,6 +559,34 @@ def http_status(url, method="HEAD"):
         return e.code
 
 
+# `nix store verify` of narinfo signatures (verify_signatures): how many times in all, and the wait before a retry
+# (seconds, times the try).
+VERIFY_TRIES = 4
+VERIFY_WAIT = 20
+
+
+def verify_signatures(store, keys, paths, what):
+    """`nix store verify --no-contents --sigs-needed 1` of every path's narinfo. A narinfo lookup that failed (GitHub
+    Pages answers a burst of lookups with 429) reads like a missing or untrusted path, so the paths Nix names are asked
+    about again, VERIFY_TRIES times in all. A refusal quotes Nix's own lines, not its "checking" progress."""
+    todo = list(paths)
+    for n in range(1, VERIFY_TRIES + 1):
+        p = run(NIX + ["store", "verify", "--store", store, "--no-contents", "--sigs-needed", "1",
+                       "--trusted-public-keys", " ".join(keys)] + FRESH + todo, check=False)
+        if p.returncode == 0:
+            return
+        lines = [ln for ln in p.stderr.decode(errors="replace").splitlines()
+                 if ln.strip() and not ln.startswith("checking '")]
+        if n == VERIFY_TRIES:
+            raise Refused(f"{what}: " + "\n".join(lines)[-1500:])
+        named = {m for ln in lines for m in re.findall(r"/nix/store/[0-9a-z]{32}-[^'\s]+", ln)} & set(todo)
+        if named:
+            todo = sorted(named)
+        log(f"{what}: {len(todo)} paths did not verify ({(lines or ['no message'])[0][:200]}); "
+            f"asking again in {VERIFY_WAIT * n} s (try {n + 1} of {VERIFY_TRIES})")
+        time.sleep(VERIFY_WAIT * n)
+
+
 def check_public(closure, public, keys, report=None):
     """Read the whole closure back through the public URL with no credentials. Returns {path: file_size}."""
     clo = closure if isinstance(closure, dict) else load_json(closure)
@@ -576,10 +604,7 @@ def check_public(closure, public, keys, report=None):
             problems.append(f"{p}: the public narinfo has no FileSize")
     if problems:
         raise Refused("public check: " + "; ".join(problems[:10]) + (f" (+{len(problems) - 10} more)" if len(problems) > 10 else ""))
-    p = run(NIX + ["store", "verify", "--store", public, "--no-contents", "--sigs-needed", "1",
-                   "--trusted-public-keys", " ".join(keys)] + FRESH + paths, check=False)
-    if p.returncode != 0:
-        raise Refused("public check: narinfo signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+    verify_signatures(public, keys, paths, "public check: narinfo signatures")
     # A narinfo whose NAR is gone is what a client would hit as a download failure. HEAD every NAR.
     base = public.split("?", 1)[0].rstrip("/")
     info = http_get(f"{base}/nix-cache-info")
@@ -1067,10 +1092,7 @@ def check_public_github(closure, split, public, keys, upstream, upstream_keys, r
             log("public check: Pages does not serve the pushed narinfos yet; retrying in 20 s")
             time.sleep(20)
     if rime:
-        p = run(NIX + ["store", "verify", "--store", public, "--no-contents", "--sigs-needed", "1",
-                       "--trusted-public-keys", " ".join(keys)] + FRESH + rime, check=False)
-        if p.returncode != 0:
-            raise Refused("public check: narinfo signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+        verify_signatures(public, keys, rime, "public check: narinfo signatures")
     gone = []
     for path in rime:
         url = pub[path].get("url") or ""
@@ -1093,10 +1115,7 @@ def check_public_github(closure, split, public, keys, upstream, upstream_keys, r
             if i is None or i["nar_hash"] != clo["paths"][p]["nar_hash"] or not i.get("file_size"):
                 raise Refused(f"public check: {upstream} no longer serves {p} as closure.json names it")
             sizes[p] = i["file_size"]
-        p = run(NIX + ["store", "verify", "--store", upstream, "--no-contents", "--sigs-needed", "1",
-                       "--trusted-public-keys", " ".join(upstream_keys)] + FRESH + up, check=False)
-        if p.returncode != 0:
-            raise Refused("public check: upstream signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+        verify_signatures(upstream, upstream_keys, up, "public check: upstream signatures")
     if report:
         write_json(report, sizes)
     log(f"public check: {len(rime)} Rime paths at {public} (NARs on another origin), {len(up)} at {upstream}")
