@@ -340,25 +340,47 @@ def cmd_closure(a):
     log(f"closure: {len(doc['paths'])} paths, variants {sorted(variants)}")
 
 
+# How often split asks upstream again about the references of upstream paths that looked unserved, and how long it
+# waits first (seconds, times the round). A single lookup can miss a path upstream serves (a query that failed or
+# timed out answers like a missing path); every round that finds nothing more counts against the limit.
+SPLIT_RECHECKS = 3
+SPLIT_RECHECK_WAIT = 20
+
+
 def cmd_split(a):
     clo = load_json(a.closure)
     paths = sorted(clo["paths"])
-    upstream = []
+    up_set = set()
+
+    def served(info, p):
+        # Same path, different narHash upstream: this build host built it itself, non-reproducibly. It is treated as
+        # a Rime path, so closure.json, the cache and the manifest agree (§6.3).
+        return info is not None and info["nar_hash"] == clo["paths"][p]["nar_hash"]
+
+    def unserved_refs():
+        return sorted({r for p in up_set for r in clo["paths"][p]["references"] if r not in up_set})
+
     if a.upstream:
         up = nix_path_info(paths, store=a.upstream)
-        for p in paths:
-            i = up.get(p)
-            # Same path, different narHash upstream: this build host built it itself, non-reproducibly. It is
-            # treated as a Rime path, so closure.json, the cache and the manifest agree (§6.3).
-            if i is not None and i["nar_hash"] == clo["paths"][p]["nar_hash"]:
-                upstream.append(p)
-    up_set = set(upstream)
-    rime = [p for p in paths if p not in up_set]
+        up_set = {p for p in paths if served(up.get(p), p)}
+        misses = 0
+        while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS:
+            misses += 1
+            log(f"split: upstream paths reference {len(gaps)} paths the first answer said upstream lacks; "
+                f"asking again (try {misses} of {SPLIT_RECHECKS})")
+            time.sleep(SPLIT_RECHECK_WAIT * misses)
+            again = nix_path_info(gaps, store=a.upstream)
+            found = {g for g in gaps if served(again.get(g), g)}
+            if found:
+                log(f"split: upstream does serve {len(found)} of them")
+                up_set |= found
+                misses = 0
     # An upstream path's references are upstream paths; anything else means the upstream answer is inconsistent.
-    for p in upstream:
-        for r in clo["paths"][p]["references"]:
-            if r not in up_set:
-                raise Refused(f"upstream path {p} references {r}, which upstream does not serve")
+    for r in unserved_refs():
+        p = next(p for p in sorted(up_set) if r in clo["paths"][p]["references"])
+        raise Refused(f"upstream path {p} references {r}, which upstream does not serve")
+    upstream = [p for p in paths if p in up_set]
+    rime = [p for p in paths if p not in up_set]
     write_json(a.out, {"upstream": upstream, "rime": rime})
     log(f"split: {len(upstream)} upstream, {len(rime)} Rime-built")
 

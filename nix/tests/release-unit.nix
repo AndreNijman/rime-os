@@ -51,6 +51,9 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "nix32 bit order" 'out[i] |= (d << j) & 0xFF' 'out[i] |= (d << (7 - j)) & 0xFF'
   mutant "a path the cache lacks fails the whole query" \
     'if recursive or not absent or not absent <= set(chunk):' 'if True:'
+  mutant "split refuses on the first answer" 'while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS:' 'while False:'
+  mutant "split asks again but keeps nothing" 'up_set |= found' 'pass'
+  mutant "split adds an unserved reference" 'found = {g for g in gaps if served(again.get(g), g)}' 'found = set(gaps)'
   mutant "SigV4 signing key without its terminator" \
     'for part in (date, region, service, "aws4_request"):' 'for part in (date, region, service):'
   # the GitHub backend

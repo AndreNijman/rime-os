@@ -383,6 +383,63 @@ class Signature(unittest.TestCase):
 
 
 
+class Split(unittest.TestCase):
+    """cmd_split: a path the first upstream answer missed is asked about again before the split refuses."""
+
+    # d (Rime's) -> a -> b -> c, the shape of the refusal on 2026-11-14 (a .drv upstream serves, and one it references)
+    a, b, c, d = sp(1, "hadrian.drv"), sp(2, "UserSettings.hs.drv"), sp(3, "bash.drv"), sp(4, "rime-shell")
+
+    def run_split(self, answers):
+        """answers: one set per nix_path_info call, the paths upstream serves in that answer (the last repeats)."""
+        a, b, c, d = self.a, self.b, self.c, self.d
+        clo = {"paths": {a: {"nar_hash": nh(a), "references": [b]}, b: {"nar_hash": nh(b), "references": [c]},
+                         c: {"nar_hash": nh(c), "references": []}, d: {"nar_hash": nh(d), "references": [a]}}}
+        asked = []
+
+        def path_info(paths, store=None, recursive=False):
+            have = answers[min(len(asked), len(answers) - 1)]
+            asked.append(sorted(paths))
+            return {p: ({"nar_hash": nh(p)} if p in have else None) for p in paths}
+
+        saved = r.nix_path_info, r.time.sleep, r.SPLIT_RECHECK_WAIT
+        r.nix_path_info, r.time.sleep, r.SPLIT_RECHECK_WAIT = path_info, lambda s: None, 0
+        try:
+            with tempfile.TemporaryDirectory() as t:
+                with open(os.path.join(t, "closure.json"), "w") as f:
+                    json.dump(clo, f)
+                args = type("A", (), {"closure": os.path.join(t, "closure.json"), "upstream": "http://cache",
+                                      "out": os.path.join(t, "split.json")})
+                r.cmd_split(args)
+                with open(args.out) as f:
+                    return (a, b, c, d), json.load(f), asked
+        finally:
+            r.nix_path_info, r.time.sleep, r.SPLIT_RECHECK_WAIT = saved
+
+    def test_a_missed_reference_is_asked_again(self):
+        a, b, c, d = self.a, self.b, self.c, self.d
+        _, split, asked = self.run_split([{a, c}, {a, b, c}])
+        self.assertEqual(split, {"upstream": sorted([a, b, c]), "rime": [d]})
+        self.assertEqual(asked[1], [b])
+
+    def test_a_reference_found_late_brings_its_own_references(self):
+        # b answers on the second try; c, which only b references, on the third
+        a, b, c, d = self.a, self.b, self.c, self.d
+        _, split, asked = self.run_split([{a}, {a, b}, {a, b, c}])
+        self.assertEqual(split["upstream"], sorted([a, b, c]))
+        self.assertEqual(asked[1:3], [[b], [c]])
+
+    def test_a_reference_upstream_never_serves_refuses(self):
+        a, b, c = self.a, self.b, self.c
+        with self.assertRaises(r.Refused) as e:
+            self.run_split([{a, c}])
+        self.assertIn(f"upstream path {a} references {b}", str(e.exception))
+
+    def test_without_an_upstream_everything_is_rime(self):
+        (a, b, c, d), split, asked = self.run_split([set()])
+        self.assertEqual(split["upstream"], [])
+        self.assertEqual(asked, [sorted([a, b, c, d])])
+
+
 class PathInfo(unittest.TestCase):
     """Nix 2.35 fails `path-info` for a path a binary cache lacks instead of answering null (seen in release-standin)."""
 
