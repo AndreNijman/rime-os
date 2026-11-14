@@ -340,25 +340,53 @@ def cmd_closure(a):
     log(f"closure: {len(doc['paths'])} paths, variants {sorted(variants)}")
 
 
+# How often split asks upstream again about the references of upstream paths that looked unserved, and how long it
+# waits first (seconds, times the round). A single lookup can miss a path upstream serves (a query that failed or
+# timed out answers like a missing path); every round that finds nothing more counts against the limit, and no split
+# asks more than SPLIT_ROUNDS times in all (a round that finds something resets only the first count).
+SPLIT_RECHECKS = 3
+SPLIT_ROUNDS = 10
+SPLIT_RECHECK_WAIT = 20
+
+
 def cmd_split(a):
     clo = load_json(a.closure)
     paths = sorted(clo["paths"])
-    upstream = []
+    up_set = set()
+
+    def served(info, p):
+        # Same path, different narHash upstream: this build host built it itself, non-reproducibly. It is treated as
+        # a Rime path, so closure.json, the cache and the manifest agree (§6.3).
+        return info is not None and info["nar_hash"] == clo["paths"][p]["nar_hash"]
+
+    def unserved_refs():
+        return sorted({r for p in up_set for r in clo["paths"][p]["references"] if r not in up_set})
+
     if a.upstream:
         up = nix_path_info(paths, store=a.upstream)
-        for p in paths:
-            i = up.get(p)
-            # Same path, different narHash upstream: this build host built it itself, non-reproducibly. It is
-            # treated as a Rime path, so closure.json, the cache and the manifest agree (§6.3).
-            if i is not None and i["nar_hash"] == clo["paths"][p]["nar_hash"]:
-                upstream.append(p)
-    up_set = set(upstream)
-    rime = [p for p in paths if p not in up_set]
+        up_set = {p for p in paths if served(up.get(p), p)}
+        misses = rounds = 0
+        while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS and rounds < SPLIT_ROUNDS:
+            misses, rounds = misses + 1, rounds + 1
+            log(f"split: upstream paths reference {len(gaps)} paths the first answer said upstream lacks; "
+                f"asking again (try {misses} of {SPLIT_RECHECKS}, round {rounds} of {SPLIT_ROUNDS})")
+            time.sleep(SPLIT_RECHECK_WAIT * misses)
+            try:
+                again = nix_path_info(gaps, store=a.upstream)
+            except Refused as e:  # a failed query (HTTP error, timeout) is one more miss, not the end of the split
+                log(f"split: the query failed: {str(e)[-300:]}")
+                continue
+            found = {g for g in gaps if served(again.get(g), g)}
+            if found:
+                log(f"split: upstream does serve {len(found)} of them")
+                up_set |= found
+                misses = 0
     # An upstream path's references are upstream paths; anything else means the upstream answer is inconsistent.
-    for p in upstream:
-        for r in clo["paths"][p]["references"]:
-            if r not in up_set:
-                raise Refused(f"upstream path {p} references {r}, which upstream does not serve")
+    for r in unserved_refs():
+        p = next(p for p in sorted(up_set) if r in clo["paths"][p]["references"])
+        raise Refused(f"upstream path {p} references {r}, which upstream does not serve")
+    upstream = [p for p in paths if p in up_set]
+    rime = [p for p in paths if p not in up_set]
     write_json(a.out, {"upstream": upstream, "rime": rime})
     log(f"split: {len(upstream)} upstream, {len(rime)} Rime-built")
 
@@ -537,6 +565,34 @@ def http_status(url, method="HEAD"):
         return e.code
 
 
+# `nix store verify` of narinfo signatures (verify_signatures): how many times in all, and the wait before a retry
+# (seconds, times the try).
+VERIFY_TRIES = 4
+VERIFY_WAIT = 20
+
+
+def verify_signatures(store, keys, paths, what):
+    """`nix store verify --no-contents --sigs-needed 1` of every path's narinfo. A narinfo lookup that failed (GitHub
+    Pages answers a burst of lookups with 429) reads like a missing or untrusted path, so the paths Nix names are asked
+    about again, VERIFY_TRIES times in all. A refusal quotes Nix's own lines, not its "checking" progress."""
+    todo = list(paths)
+    for n in range(1, VERIFY_TRIES + 1):
+        p = run(NIX + ["store", "verify", "--store", store, "--no-contents", "--sigs-needed", "1",
+                       "--trusted-public-keys", " ".join(keys)] + FRESH + todo, check=False)
+        if p.returncode == 0:
+            return
+        lines = [ln for ln in p.stderr.decode(errors="replace").splitlines()
+                 if ln.strip() and not ln.startswith("checking '")]
+        if n == VERIFY_TRIES:
+            raise Refused(f"{what}: " + "\n".join(lines)[-1500:])
+        named = {m for ln in lines for m in re.findall(r"/nix/store/[0-9a-z]{32}-[^'\s]+", ln)} & set(todo)
+        if named:
+            todo = sorted(named)
+        log(f"{what}: {len(todo)} paths did not verify ({(lines or ['no message'])[0][:200]}); "
+            f"asking again in {VERIFY_WAIT * n} s (try {n + 1} of {VERIFY_TRIES})")
+        time.sleep(VERIFY_WAIT * n)
+
+
 def check_public(closure, public, keys, report=None):
     """Read the whole closure back through the public URL with no credentials. Returns {path: file_size}."""
     clo = closure if isinstance(closure, dict) else load_json(closure)
@@ -554,10 +610,7 @@ def check_public(closure, public, keys, report=None):
             problems.append(f"{p}: the public narinfo has no FileSize")
     if problems:
         raise Refused("public check: " + "; ".join(problems[:10]) + (f" (+{len(problems) - 10} more)" if len(problems) > 10 else ""))
-    p = run(NIX + ["store", "verify", "--store", public, "--no-contents", "--sigs-needed", "1",
-                   "--trusted-public-keys", " ".join(keys)] + FRESH + paths, check=False)
-    if p.returncode != 0:
-        raise Refused("public check: narinfo signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+    verify_signatures(public, keys, paths, "public check: narinfo signatures")
     # A narinfo whose NAR is gone is what a client would hit as a download failure. HEAD every NAR.
     base = public.split("?", 1)[0].rstrip("/")
     info = http_get(f"{base}/nix-cache-info")
@@ -1045,10 +1098,7 @@ def check_public_github(closure, split, public, keys, upstream, upstream_keys, r
             log("public check: Pages does not serve the pushed narinfos yet; retrying in 20 s")
             time.sleep(20)
     if rime:
-        p = run(NIX + ["store", "verify", "--store", public, "--no-contents", "--sigs-needed", "1",
-                       "--trusted-public-keys", " ".join(keys)] + FRESH + rime, check=False)
-        if p.returncode != 0:
-            raise Refused("public check: narinfo signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+        verify_signatures(public, keys, rime, "public check: narinfo signatures")
     gone = []
     for path in rime:
         url = pub[path].get("url") or ""
@@ -1071,10 +1121,7 @@ def check_public_github(closure, split, public, keys, upstream, upstream_keys, r
             if i is None or i["nar_hash"] != clo["paths"][p]["nar_hash"] or not i.get("file_size"):
                 raise Refused(f"public check: {upstream} no longer serves {p} as closure.json names it")
             sizes[p] = i["file_size"]
-        p = run(NIX + ["store", "verify", "--store", upstream, "--no-contents", "--sigs-needed", "1",
-                       "--trusted-public-keys", " ".join(upstream_keys)] + FRESH + up, check=False)
-        if p.returncode != 0:
-            raise Refused("public check: upstream signatures: " + p.stderr.decode(errors="replace").strip()[-1500:])
+        verify_signatures(upstream, upstream_keys, up, "public check: upstream signatures")
     if report:
         write_json(report, sizes)
     log(f"public check: {len(rime)} Rime paths at {public} (NARs on another origin), {len(up)} at {upstream}")

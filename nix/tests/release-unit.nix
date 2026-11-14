@@ -51,6 +51,15 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "nix32 bit order" 'out[i] |= (d << j) & 0xFF' 'out[i] |= (d << (7 - j)) & 0xFF'
   mutant "a path the cache lacks fails the whole query" \
     'if recursive or not absent or not absent <= set(chunk):' 'if True:'
+  mutant "split refuses on the first answer" \
+    'while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS and rounds < SPLIT_ROUNDS:' 'while False:'
+  mutant "split rechecks without a round limit" 'and rounds < SPLIT_ROUNDS:' ':'
+  mutant "a failed recheck stops the split" 'except Refused as e:  # a failed query' 'except KeyError as e:  # a failed query'
+  mutant "split asks again but keeps nothing" 'up_set |= found' 'pass'
+  mutant "split adds an unserved reference" 'found = {g for g in gaps if served(again.get(g), g)}' 'found = set(gaps)'
+  mutant "verify gives up on the first failure" 'if n == VERIFY_TRIES:' 'if True:'
+  mutant "verify passes after its last try" 'if p.returncode == 0:' 'if p.returncode == 0 or n == VERIFY_TRIES:'
+  mutant "verify quotes its progress" 'if ln.strip() and not ln.startswith("checking '"'"'")]' 'if ln.strip()]'
   mutant "SigV4 signing key without its terminator" \
     'for part in (date, region, service, "aws4_request"):' 'for part in (date, region, service):'
   # the GitHub backend
