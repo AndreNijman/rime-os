@@ -51,7 +51,10 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "nix32 bit order" 'out[i] |= (d << j) & 0xFF' 'out[i] |= (d << (7 - j)) & 0xFF'
   mutant "a path the cache lacks fails the whole query" \
     'if recursive or not absent or not absent <= set(chunk):' 'if True:'
-  mutant "split refuses on the first answer" 'while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS:' 'while False:'
+  mutant "split refuses on the first answer" \
+    'while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS and rounds < SPLIT_ROUNDS:' 'while False:'
+  mutant "split rechecks without a round limit" 'and rounds < SPLIT_ROUNDS:' ':'
+  mutant "a failed recheck stops the split" 'except Refused as e:  # a failed query' 'except KeyError as e:  # a failed query'
   mutant "split asks again but keeps nothing" 'up_set |= found' 'pass'
   mutant "split adds an unserved reference" 'found = {g for g in gaps if served(again.get(g), g)}' 'found = set(gaps)'
   mutant "verify gives up on the first failure" 'if n == VERIFY_TRIES:' 'if True:'

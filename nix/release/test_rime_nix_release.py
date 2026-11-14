@@ -389,16 +389,19 @@ class Split(unittest.TestCase):
     # d (Rime's) -> a -> b -> c, the shape of the refusal on 2026-11-14 (a .drv upstream serves, and one it references)
     a, b, c, d = sp(1, "hadrian.drv"), sp(2, "UserSettings.hs.drv"), sp(3, "bash.drv"), sp(4, "rime-shell")
 
-    def run_split(self, answers):
-        """answers: one set per nix_path_info call, the paths upstream serves in that answer (the last repeats)."""
+    def run_split(self, answers, upstream="http://cache", clo=None):
+        """answers: one per nix_path_info call (the last repeats): the set of paths upstream serves in that answer, or
+        "fail" for a query that fails (nix_path_info refuses)."""
         a, b, c, d = self.a, self.b, self.c, self.d
-        clo = {"paths": {a: {"nar_hash": nh(a), "references": [b]}, b: {"nar_hash": nh(b), "references": [c]},
-                         c: {"nar_hash": nh(c), "references": []}, d: {"nar_hash": nh(d), "references": [a]}}}
+        clo = clo or {"paths": {a: {"nar_hash": nh(a), "references": [b]}, b: {"nar_hash": nh(b), "references": [c]},
+                                c: {"nar_hash": nh(c), "references": []}, d: {"nar_hash": nh(d), "references": [a]}}}
         asked = []
 
         def path_info(paths, store=None, recursive=False):
             have = answers[min(len(asked), len(answers) - 1)]
             asked.append(sorted(paths))
+            if have == "fail":
+                raise r.Refused("nix path-info failed (1): HTTP error 503")
             return {p: ({"nar_hash": nh(p)} if p in have else None) for p in paths}
 
         saved = r.nix_path_info, r.time.sleep, r.SPLIT_RECHECK_WAIT
@@ -407,7 +410,7 @@ class Split(unittest.TestCase):
             with tempfile.TemporaryDirectory() as t:
                 with open(os.path.join(t, "closure.json"), "w") as f:
                     json.dump(clo, f)
-                args = type("A", (), {"closure": os.path.join(t, "closure.json"), "upstream": "http://cache",
+                args = type("A", (), {"closure": os.path.join(t, "closure.json"), "upstream": upstream,
                                       "out": os.path.join(t, "split.json")})
                 r.cmd_split(args)
                 with open(args.out) as f:
@@ -434,10 +437,25 @@ class Split(unittest.TestCase):
             self.run_split([{a, c}])
         self.assertIn(f"upstream path {a} references {b}", str(e.exception))
 
+    def test_a_failed_recheck_is_one_more_miss(self):
+        a, b, c, d = self.a, self.b, self.c, self.d
+        _, split, asked = self.run_split([{a, c}, "fail", {a, b, c}])
+        self.assertEqual(split["upstream"], sorted([a, b, c]))
+        self.assertEqual(asked[1:], [[b], [b]])
+
+    def test_a_long_chain_stops_after_the_round_limit(self):
+        # p0 -> p1 -> ... -> p11; each answer serves one more path, so every round makes progress
+        ps = [sp(10 + i, f"p{i}.drv") for i in range(12)]
+        clo = {"paths": {p: {"nar_hash": nh(p), "references": ps[i + 1:i + 2]} for i, p in enumerate(ps)}}
+        answers = [set(ps[:i + 1]) for i in range(len(ps))]
+        with self.assertRaises(r.Refused):
+            self.run_split(answers, clo=clo)
+
     def test_without_an_upstream_everything_is_rime(self):
-        (a, b, c, d), split, asked = self.run_split([set()])
-        self.assertEqual(split["upstream"], [])
-        self.assertEqual(asked, [sorted([a, b, c, d])])
+        a, b, c, d = self.a, self.b, self.c, self.d
+        _, split, asked = self.run_split([{a, b, c, d}], upstream=None)
+        self.assertEqual(split, {"upstream": [], "rime": sorted([a, b, c, d])})
+        self.assertEqual(asked, [])
 
 
 class VerifySignatures(unittest.TestCase):

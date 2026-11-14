@@ -342,8 +342,10 @@ def cmd_closure(a):
 
 # How often split asks upstream again about the references of upstream paths that looked unserved, and how long it
 # waits first (seconds, times the round). A single lookup can miss a path upstream serves (a query that failed or
-# timed out answers like a missing path); every round that finds nothing more counts against the limit.
+# timed out answers like a missing path); every round that finds nothing more counts against the limit, and no split
+# asks more than SPLIT_ROUNDS times in all (a round that finds something resets only the first count).
 SPLIT_RECHECKS = 3
+SPLIT_ROUNDS = 10
 SPLIT_RECHECK_WAIT = 20
 
 
@@ -363,13 +365,17 @@ def cmd_split(a):
     if a.upstream:
         up = nix_path_info(paths, store=a.upstream)
         up_set = {p for p in paths if served(up.get(p), p)}
-        misses = 0
-        while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS:
-            misses += 1
+        misses = rounds = 0
+        while (gaps := unserved_refs()) and misses < SPLIT_RECHECKS and rounds < SPLIT_ROUNDS:
+            misses, rounds = misses + 1, rounds + 1
             log(f"split: upstream paths reference {len(gaps)} paths the first answer said upstream lacks; "
-                f"asking again (try {misses} of {SPLIT_RECHECKS})")
+                f"asking again (try {misses} of {SPLIT_RECHECKS}, round {rounds} of {SPLIT_ROUNDS})")
             time.sleep(SPLIT_RECHECK_WAIT * misses)
-            again = nix_path_info(gaps, store=a.upstream)
+            try:
+                again = nix_path_info(gaps, store=a.upstream)
+            except Refused as e:  # a failed query (HTTP error, timeout) is one more miss, not the end of the split
+                log(f"split: the query failed: {str(e)[-300:]}")
+                continue
             found = {g for g in gaps if served(again.get(g), g)}
             if found:
                 log(f"split: upstream does serve {len(found)} of them")
