@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
-"""Regenerate every layered-ridge export from the masters in src/.
+"""Regenerate every Rime brand export (the Origin mark) from the masters in src/.
+
+(The directory is still called ridge/: it held the layered ridge, Origin's predecessor, and every package,
+module and test reads it by that path.)
 
 Inputs (src/):
-  rime-ridge-symbol.svg        geometry master: four <polygon id="plane-N"> (N = 1 base .. 4 peak)
-  rime-ridge-symbol-small.svg  the same planes thinned for 32 px and below
-  rime-wordmark.svg            "rime" as outlined paths (data-baseline, data-xheight)
-  rime-os-wordmark.svg         "RIME OS" as outlined paths (data-baseline, data-capheight)
-  palette.json                 the sampled colours and the six named accents
+  rime-origin-symbol.svg        geometry master: five <circle>s c1..c5, all tangent at ONE point on c1 (the origin)
+  rime-origin-symbol-small.svg  the same construction with wider gaps, for 24 px and below
+  rime-wordmark.svg             "rime" as outlined paths (data-baseline, data-xheight)
+  palette.json                  the brand colours and the six named accents
+
+The circles are filled even-odd: c1 ink, c2 open, c3 ink, c4 open, c5 ink, which leaves three bodies:
+coat (c1 - c2), ring (c3 - c4) and core (c5). Exports draw each body as its own <path>, so the boot splash can
+fade them in one by one.
 
 Outputs (under OUT, default: this directory): svg/ templates/ png/ icons/ favicon/ accents/.
 Those six directories are deleted and rebuilt, so nothing stale survives.
@@ -29,27 +35,43 @@ OUT = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else HERE
 GENERATED = ["svg", "templates", "png", "icons", "favicon", "accents"]
 
 ICON_SIZES = [16, 24, 32, 48, 64, 128, 256, 512, 1024]
-SMALL_MAX = 32  # sizes at or below this use the small-size master
+SMALL_MAX = 24  # sizes at or below this use the small-size master
 ACCENT_SIZES = [256, 512]
 FAVICON_SIZES = [16, 32, 48]
 # Lockup heights at 1x, in px (2x doubles them). Clear-space exports keep the same scale.
-LOCKUP_1X = {"lockup-horizontal": 96, "lockup-stacked": 192, "wordmark": 96, "lockup-os": 64}
+LOCKUP_1X = {"lockup-horizontal": 96, "lockup-stacked": 192, "wordmark": 96}
 
-# Layout ratios, measured on the brand pack (docs/branding.md, "Lockups").
-XH_PER_SYMBOL = 0.46       # wordmark x-height (RIME OS: cap height) / symbol height
-H_GAP_PER_XH = 0.22        # horizontal lockup: symbol to wordmark gap / x-height
-S_SYMBOL_PER_WORD = 0.87   # stacked lockup: symbol width / wordmark width
-S_GAP_PER_XH = 0.20        # stacked lockup: symbol bottom to tittle top / x-height
-OS_GAP_PER_CAP = 0.45      # RIME OS lockup: symbol to R / cap height
-OS_DROP_PER_SYMBOL = 0.08  # RIME OS lockup: caps centre sits this far below the symbol centre
-TILE_RADIUS = 0.17         # app icon corner radius / side
-TILE_MARK_WIDTH = 0.74     # app icon mark width / side
-TILE_MARK_CY = 0.46        # app icon mark centre / side (the mark is bottom-heavy)
+# Layout ratios (docs/branding.md, "Lockups"). The wordmark is Golos Text, 1000 units per em, x-height 530.
+EM = 1000.0
+XH_PER_SYMBOL = 0.53 / 0.92  # horizontal: the symbol is 0.92 em tall, so x-height / symbol height = 0.576
+H_GAP_EM = 0.36              # horizontal: symbol to wordmark gap, in em
+S_SYMBOL_PER_WORD = 0.62     # stacked: symbol width / wordmark width
+S_GAP_PER_XH = 0.60          # stacked: symbol bottom to tittle top / x-height
+CLEAR_PER_SYMBOL = 15 / 84   # clear space = the core's radius (15 of the 84-unit disc)
+TILE_RADIUS = 0.17           # app icon corner radius / side
+TILE_MARK_WIDTH = 0.62       # app icon mark diameter / side
+TILE_MARK_CY = 0.5           # app icon mark centre / side
 SQUARE_MARK_WIDTH = 15 / 16  # transparent square symbol: mark width / side
+BODIES = (("coat", 0, 1), ("ring", 2, 3), ("core", 4, None))  # (id, filled circle, open circle)
 
 PAL = json.load(open(os.path.join(SRC, "palette.json")))
-VARIANTS = {  # name: (planes 1/2/4, plane 3, wordmark)
-    "light": (PAL["charcoal"], PAL["rime_blue"], PAL["charcoal"]),
+
+
+def on_light(hexv):
+    """The accent as drawn on a light ground: the same hue and saturation, lightness capped at Rime Blue Deep's,
+    so a pale accent never washes out on white and a dark one is left alone."""
+    r, g, b = (int(hexv[i:i + 2], 16) / 255 for i in (1, 3, 5))
+    h, l, s = colorsys.rgb_to_hls(r, g, b)
+    dr, dg, db = (int(PAL["rime_blue_deep"][i:i + 2], 16) / 255 for i in (1, 3, 5))
+    cap = colorsys.rgb_to_hls(dr, dg, db)[1]
+    if l <= cap:
+        return hexv.upper()
+    rr, gg, bb = colorsys.hls_to_rgb(h, cap, s)
+    return "#%02X%02X%02X" % tuple(round(v * 255) for v in (rr, gg, bb))
+
+
+VARIANTS = {  # name: (ink, mark, wordmark)
+    "light": (PAL["charcoal"], PAL["rime_blue_deep"], PAL["charcoal"]),
     "dark": (PAL["off_white"], PAL["rime_blue"], PAL["off_white"]),
     "mono-black": (PAL["mono_black"], PAL["mono_black"], PAL["mono_black"]),
     "mono-white": (PAL["mono_white"], PAL["mono_white"], PAL["mono_white"]),
@@ -67,12 +89,12 @@ def read(name):
         return f.read()
 
 
-def planes(name):
+def circles(name):
     text = read(name)
-    found = re.findall(r'<polygon id="plane-(\d)"[^>]*\bpoints="([^"]+)"', text)
-    if [n for n, _ in found] != ["1", "2", "3", "4"] or text.count("<polygon") != 4:
-        sys.exit(f"{name}: expected exactly four polygons plane-1..plane-4 in order")
-    return [[tuple(float(c) for c in pt.split(",")) for pt in pts.split()] for _, pts in found]
+    found = re.findall(r'<circle id="c(\d)" cx="([^"]+)" cy="([^"]+)" r="([^"]+)"', text)
+    if [n for n, *_ in found] != ["1", "2", "3", "4", "5"] or text.count("<circle") != 5:
+        sys.exit(f"{name}: expected exactly five circles c1..c5 in order")
+    return [tuple(float(v) for v in c) for _, *c in found]
 
 
 def viewbox(text):
@@ -87,11 +109,19 @@ def wordmark(name, metric):
             "paths": re.findall(r'<path d="([^"]+)"', text)}
 
 
-SYMBOL = planes("rime-ridge-symbol.svg")
-SYMBOL_SMALL = planes("rime-ridge-symbol-small.svg")
-SW, SH = viewbox(read("rime-ridge-symbol.svg"))[2:]
+SYMBOL = circles("rime-origin-symbol.svg")
+SYMBOL_SMALL = circles("rime-origin-symbol-small.svg")
+SW, SH = viewbox(read("rime-origin-symbol.svg"))[2:]
 WORD = wordmark("rime-wordmark.svg", "xheight")
-WORD_OS = wordmark("rime-os-wordmark.svg", "capheight")
+
+
+def circle_d(c):
+    x, y, r = c
+    return f"M{fmt(x - r)} {fmt(y)}a{fmt(r)} {fmt(r)} 0 1 0 {fmt(2 * r)} 0a{fmt(r)} {fmt(r)} 0 1 0 {fmt(-2 * r)} 0Z"
+
+
+def body_d(cs, filled, hole):
+    return circle_d(cs[filled]) + (circle_d(cs[hole]) if hole is not None else "")
 
 
 def g(tx, ty, s, inner, fill=None):
@@ -99,13 +129,12 @@ def g(tx, ty, s, inner, fill=None):
     return f'<g transform="translate({fmt(tx)} {fmt(ty)}) scale({fmt(s)})"{f}>{inner}</g>'
 
 
-def symbol_svg(colours, small=False, tx=0.0, ty=0.0, s=1.0):
-    fg, acc, _ = colours
-    out = []
-    for i, pts in enumerate(SYMBOL_SMALL if small else SYMBOL, start=1):
-        fill = acc if i == 3 else fg
-        p = " ".join(f"{fmt(x)},{fmt(y)}" for x, y in pts)
-        out.append(f'<polygon id="plane-{i}" fill="{fill}" points="{p}"/>')
+def symbol_svg(colours, small=False, tx=0.0, ty=0.0, s=1.0, only=None):
+    """The three bodies, each its own even-odd path in the mark colour. `only` keeps one body (boot splash)."""
+    cs = SYMBOL_SMALL if small else SYMBOL
+    mark = colours[1]
+    out = [f'<path id="{n}" fill="{mark}" fill-rule="evenodd" d="{body_d(cs, a, b)}"/>'
+           for n, a, b in BODIES if only in (None, n)]
     return g(tx, ty, s, "".join(out))
 
 
@@ -119,10 +148,10 @@ class Layout:
     def __init__(self, parts, box, unit):
         self.parts, self.box, self.unit = parts, box, unit
 
-    def svg(self, colours, title, small=False, pad=0.0):
+    def svg(self, colours, title, small=False, pad=0.0, only=None):
         x0, y0, x1, y1 = self.box
         x0, y0, x1, y1 = x0 - pad, y0 - pad, x1 + pad, y1 + pad
-        body = "".join(p(colours, small) for p in self.parts)
+        body = "".join(p(colours, small, only) for p in self.parts)
         w, h = x1 - x0, y1 - y0
         return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{fmt(x0)} {fmt(y0)} {fmt(w)} {fmt(h)}" '
                 f'width="{fmt(w)}" height="{fmt(h)}">\n  <title>{title}</title>\n  {body}\n</svg>\n')
@@ -133,37 +162,30 @@ class Layout:
 
 
 def sym_part(tx=0.0, ty=0.0, s=1.0):
-    return lambda c, small: symbol_svg(c, small, tx, ty, s)
+    return lambda c, small, only: "" if only == "word" else symbol_svg(c, small, tx, ty, s, only)
 
 
 def word_part(word, tx, ty, s):
-    return lambda c, small: word_svg(word, c, tx, ty, s)
+    return lambda c, small, only: word_svg(word, c, tx, ty, s) if only in (None, "word") else ""
 
 
 def layouts():
-    out = {"symbol": Layout([sym_part()], (0, 0, SW, SH), XH_PER_SYMBOL * SH)}
-    # horizontal: wordmark x-height = 0.46 symbol height; tittle-top..baseline centred on the symbol
+    clear = CLEAR_PER_SYMBOL * SH
+    out = {"symbol": Layout([sym_part()], (0, 0, SW, SH), clear)}
+    # horizontal: x-height = 0.576 symbol height (symbol = 0.92 em); tittle-top..baseline centred on the symbol
     k = XH_PER_SYMBOL * SH / WORD["unit"]
-    xh = WORD["unit"] * k
-    tx, ty = SW + H_GAP_PER_XH * xh, SH / 2 - WORD["baseline"] * k / 2
+    tx, ty = SW + H_GAP_EM * EM * k, SH / 2 - WORD["baseline"] * k / 2
     out["lockup-horizontal"] = Layout([sym_part(), word_part(WORD, tx, ty, k)],
-                                      (0, min(0, ty), tx + WORD["w"] * k, max(SH, ty + WORD["h"] * k)), xh)
-    # stacked: symbol width = 0.87 wordmark width, centred over it
+                                      (0, min(0, ty), tx + WORD["w"] * k, max(SH, ty + WORD["h"] * k)), clear)
+    # stacked: symbol width = 0.62 wordmark width, centred over it
     k = SW / (S_SYMBOL_PER_WORD * WORD["w"])
     xh = WORD["unit"] * k
     tx, ty = (SW - WORD["w"] * k) / 2, SH + S_GAP_PER_XH * xh
     out["lockup-stacked"] = Layout([sym_part(), word_part(WORD, tx, ty, k)],
-                                   (tx, 0, tx + WORD["w"] * k, ty + WORD["h"] * k), xh)
+                                   (tx, 0, tx + WORD["w"] * k, ty + WORD["h"] * k), clear)
     # wordmark only, at the horizontal lockup's scale
     k = XH_PER_SYMBOL * SH / WORD["unit"]
     out["wordmark"] = Layout([word_part(WORD, 0, 0, k)], (0, 0, WORD["w"] * k, WORD["h"] * k), WORD["unit"] * k)
-    # RIME OS: cap height = 0.46 symbol height
-    k = XH_PER_SYMBOL * SH / WORD_OS["unit"]
-    cap = WORD_OS["unit"] * k
-    tx = SW + OS_GAP_PER_CAP * cap
-    ty = SH / 2 + OS_DROP_PER_SYMBOL * SH - WORD_OS["baseline"] * k / 2
-    out["lockup-os"] = Layout([sym_part(), word_part(WORD_OS, tx, ty, k)],
-                              (0, min(0, ty), tx + WORD_OS["w"] * k, max(SH, ty + WORD_OS["h"] * k)), cap)
     return out
 
 
@@ -236,7 +258,7 @@ def main():
         shutil.rmtree(os.path.join(OUT, d), ignore_errors=True)
     L = layouts()
     names = {"symbol": "symbol", "lockup-horizontal": "horizontal lockup", "lockup-stacked": "stacked lockup",
-             "wordmark": "wordmark", "lockup-os": "RIME OS lockup"}
+             "wordmark": "wordmark"}
 
     # vector variants, clear-space variants and the adaptive templates
     for key, lay in L.items():
@@ -245,7 +267,7 @@ def main():
             write(f"svg/clearspace/rime-{key}-{var}-clearspace.svg",
                   lay.svg(colours, f"Rime {names[key]} ({var}, with clear-space)", pad=lay.unit))
         write(f"templates/rime-{key}.svg.in",
-              lay.svg(TEMPLATE, f"Rime {names[key]} (adaptive template, plane 3 takes the accent token)"))
+              lay.svg(TEMPLATE, f"Rime {names[key]} (adaptive template: the mark takes the accent token)"))
     for var, colours in VARIANTS.items():
         write(f"svg/rime-symbol-small-{var}.svg",
               L["symbol"].svg(colours, f"Rime symbol, small-size master ({var})", small=True))
@@ -293,26 +315,31 @@ def main():
                             else "svg/square/rime-symbol-square-light.svg"), f"favicon/favicon-{n}.png", width=n)
         fav.append((n, os.path.join(OUT, f"favicon/favicon-{n}.png")))
     ico(fav, os.path.join(OUT, "favicon/favicon.ico"))
-    style = ("  <style>polygon:not(#plane-3){fill:%s}@media (prefers-color-scheme: dark)"
-             "{polygon:not(#plane-3){fill:%s}}</style>\n" % (PAL["charcoal"], PAL["off_white"]))
+    style = ("  <style>path{fill:%s}@media (prefers-color-scheme: dark){path{fill:%s}}</style>\n"
+             % (PAL["rime_blue_deep"], PAL["rime_blue"]))
     write("favicon/favicon.svg", square_symbol(VARIANTS["light"], True, "Rime", style))
 
-    # accents: the six named ones and the 24 per-owner slots. Only plane 3 changes colour.
+    # accents: the six named ones and the 24 per-owner slots. Only the mark changes colour; on a light ground
+    # it is drawn at on_light() so a pale accent keeps its contrast.
     slots, base_hue = slot_colours()
     named = PAL["accents"]
     jobs = [(f"accents/named/rime-symbol-{a}", hexv) for a, hexv in named.items()]
     jobs += [(f"accents/slots/rime-symbol-slot-{n:02d}", hexv) for n, hexv in enumerate(slots)]
     for stem, hexv in jobs:
         for mode in ("light", "dark"):
-            colours = (VARIANTS[mode][0], hexv, VARIANTS[mode][2])
-            path = write(f"{stem}-{mode}.svg", square_symbol(colours, False, f"Rime symbol, accent {hexv} ({mode})"))
+            mark = on_light(hexv) if mode == "light" else hexv
+            colours = (VARIANTS[mode][0], mark, VARIANTS[mode][2])
+            path = write(f"{stem}-{mode}.svg", square_symbol(colours, False, f"Rime symbol, accent {mark} ({mode})"))
             for n in ACCENT_SIZES:
                 render(path, f"{stem}-{mode}-{n}.png", width=n)
     write("accents/accents.json", json.dumps({
-        "_comment": "Plane-3 colours. Slot n = hue n*15 deg at Rime Blue's HLS lightness and saturation; "
-                    "the same 24 buckets rime-plymouth-accent picks from the owner's matugen accent.",
-        "base": PAL["rime_blue"], "base_hue_deg": round(base_hue, 2), "base_slot": round(base_hue / 15) % 24,
+        "_comment": "Mark colours. Slot n = hue n*15 deg at Rime Blue's HLS lightness and saturation; "
+                    "the same 24 buckets rime-plymouth-accent picks from the owner's matugen accent. "
+                    "slots_on_light: the same slot drawn on a light ground (lightness capped at Rime Blue Deep's).",
+        "base": PAL["rime_blue"], "base_on_light": PAL["rime_blue_deep"],
+        "base_hue_deg": round(base_hue, 2), "base_slot": round(base_hue / 15) % 24,
         "named": named, "slots": {f"{n:02d}": hexv for n, hexv in enumerate(slots)},
+        "slots_on_light": {f"{n:02d}": on_light(hexv) for n, hexv in enumerate(slots)},
     }, indent=2) + "\n")
 
 

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 84" width="84" height="84">
+  <title>Rime Origin mark (master)</title>
+  <!-- Geometry master. Five circles, every one tangent to the outer disc at ONE point, the origin
+       (12.302, 71.698), 135 degrees (lower left). Filled even-odd: c1 ink, c2 open, c3 ink, c4 open, c5 ink,
+       which leaves three bodies: coat (c1 - c2), ring (c3 - c4) and core (c5). Radii 42/33/26/20/15.
+       Gaps between the bodies, at their widest: 14 then 10 units. Used above 24 px. -->
+  <g fill="#212224" fill-rule="evenodd">
+  <circle id="c1" cx="42.000" cy="42.000" r="42"/>
+  <circle id="c2" cx="35.636" cy="48.364" r="33"/>
+  <circle id="c3" cx="30.686" cy="53.314" r="26"/>
+  <circle id="c4" cx="26.444" cy="57.556" r="20"/>
+  <circle id="c5" cx="22.908" cy="61.092" r="15"/>
+  </g>
+</svg>

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Outline the two wordmarks into src/*.svg so no font is needed at runtime.
+"""Outline the wordmark into src/*.svg so no font is needed at runtime.
 
 Run once when the typeface or the tracking changes (make-ridge-assets.sh never needs the fonts):
 
@@ -25,7 +25,6 @@ FONTS = sys.argv[1:] or ["."]
 # text, font file, variation axes, tracking (em, between letters), extra word space (em), metric, output
 WORDMARKS = [
     ("rime", "GolosText[wght].ttf", {"wght": 600}, -0.025, 0.0, "xheight", "rime-wordmark.svg"),
-    ("RIME OS", "Archivo[wdth,wght].ttf", {"wght": 700, "wdth": 125}, 0.045, -0.16, "capheight", "rime-os-wordmark.svg"),
 ]
 
 

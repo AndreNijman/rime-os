@@ -1,5 +1,5 @@
 diff --git a/desktop/rime-greet/GreetSurface.qml b/desktop/rime-greet/GreetSurface.qml
-index 467a69f43..f80e0598c 100644
+index 467a69f..3af8636 100644
 --- a/desktop/rime-greet/GreetSurface.qml
 +++ b/desktop/rime-greet/GreetSurface.qml
 @@ -1,5 +1,6 @@
@@ -9,7 +9,7 @@ index 467a69f43..f80e0598c 100644
  
  // ─────────────────────────────────────────────────────────────
  // GreetSurface — the per-output visual.
-@@ -162,29 +163,39 @@ Item {
+@@ -162,29 +163,73 @@ Item {
          spacing: 14
          transform: Translate { x: root.shakeOffset }
  
@@ -17,19 +17,26 @@ index 467a69f43..f80e0598c 100644
 -        // when one is published; drawn as-is (the edition spark) otherwise.
 -        // Wrapped in an Item because the Column positions its children and
 -        // MultiEffect must overlay the Image rather than sit below it.
-+        // The layered-ridge lockup, centred above the username: the neutral
-+        // planes and wordmark as an image, plane 3 as a polygon in the accent
-+        // (the user's published accent, or the edition's). The polygon is the
-+        // template's own plane 3 (files/branding/ridge/templates, viewBox
-+        // 553.16 x 175, the symbol at scale 1), scaled with the image.
++        // The Origin lockup, centred above the username: the wordmark as an
++        // off-white image, the mark drawn over it as vectors in the accent
++        // (the user's published accent, or the edition's). The mark is five
++        // circles tangent at one point, filled even-odd into three bodies
++        // (coat, ring, core): the template's own geometry
++        // (files/branding/ridge/templates/rime-lockup-horizontal.svg.in,
++        // viewBox 294.475 x 84, the symbol at scale 1), scaled with the image.
          Item {
 +            id: logoBox
              anchors.horizontalCenter: parent.horizontalCenter
 -            width:  logo.implicitWidth
 -            height: logo.implicitHeight
-+            readonly property real unit: height / 175
++            readonly property real unit: height / 84
 +            height: 56
-+            width:  Math.round(553.16 * unit)
++            width:  Math.round(294.475 * unit)
++            // [cx, cy, r] in template units: c1 ink, c2 open, c3 ink, c4 open, c5 ink
++            readonly property var circles: [
++                [42, 42, 42], [35.636, 48.364, 33], [30.686, 53.314, 26],
++                [26.444, 57.556, 20], [22.908, 61.092, 15]
++            ]
              Image {
                  id: logo
 +                anchors.fill:      parent
@@ -47,24 +54,51 @@ index 467a69f43..f80e0598c 100644
 -                visible:           root.theme.tintLogo && logo.status === Image.Ready
 -                colorization:      1.0
 -                colorizationColor: root.theme.active
++            // circles i..j in item pixels, as SVG subpaths (two half-arcs each)
++            function arcs(i, j) {
++                let d = ""
++                for (let k = i; k <= j; k++) {
++                    const x = circles[k][0] * unit, y = circles[k][1] * unit, r = circles[k][2] * unit
++                    d += "M" + (x - r) + " " + y + "a" + r + " " + r + " 0 1 0 " + (2 * r) + " 0"
++                       + "a" + r + " " + r + " 0 1 0 " + (-2 * r) + " 0Z"
++                }
++                return d
++            }
 +            Shape {
 +                anchors.fill: parent
 +                visible:      logo.status === Image.Ready
-+                antialiasing: true
++                // Not the curve renderer: it resolves even-odd wrongly where contours are tangent, as every circle
++                // here is at the origin (a solid disc or torn shards). The geometry renderer triangulates them
++                // correctly; the multisampled layer gives the edge its anti-aliasing. One PathSvg per body.
++                preferredRendererType: Shape.GeometryRenderer
++                layer.enabled: true
++                layer.samples: 8
 +                ShapePath {
 +                    strokeWidth: -1
++                    strokeColor: "transparent"
 +                    fillColor:   root.theme.active
-+                    startX: 47.5 * logoBox.unit; startY: 136 * logoBox.unit
-+                    PathLine { x: 149   * logoBox.unit; y: 75 * logoBox.unit }
-+                    PathLine { x: 231   * logoBox.unit; y: 45 * logoBox.unit }
-+                    PathLine { x: 217.5 * logoBox.unit; y: 76 * logoBox.unit }
-+                    PathLine { x: 47.5  * logoBox.unit; y: 136 * logoBox.unit }
++                    fillRule:    ShapePath.OddEvenFill
++                    PathSvg { path: logoBox.arcs(0, 1) }
++                }
++                ShapePath {
++                    strokeWidth: -1
++                    strokeColor: "transparent"
++                    fillColor:   root.theme.active
++                    fillRule:    ShapePath.OddEvenFill
++                    PathSvg { path: logoBox.arcs(2, 3) }
++                }
++                ShapePath {
++                    strokeWidth: -1
++                    strokeColor: "transparent"
++                    fillColor:   root.theme.active
++                    fillRule:    ShapePath.OddEvenFill
++                    PathSvg { path: logoBox.arcs(4, 4) }
 +                }
              }
          }
  
 diff --git a/desktop/rime-greet/README.md b/desktop/rime-greet/README.md
-index 848a827b6..d6a7648c0 100644
+index 848a827..dcbd261 100644
 --- a/desktop/rime-greet/README.md
 +++ b/desktop/rime-greet/README.md
 @@ -15,7 +15,8 @@ dots without it.
@@ -72,19 +106,18 @@ index 848a827b6..d6a7648c0 100644
  | `GreetContext.qml` | Non-visual shared state and the greetd auth backend: edition detection, session list, last-user/last-session memory, the published wallpaper, accent and motion settings, keyboard layout, recovery preselection. |
  | `GreetSurface.qml` | The per-output visuals: clock, wallpaper/gradient, logo, username pill, keyboard-layout pill, password pill with its shapes, spinner, error shake, status line, session picker. |
 -| `assets/spark-{gold,chartreuse,white}.png` | Edition spark logos (256px). |
-+| `assets/ridge-lockup-base.png` | The layered-ridge lockup without plane 3 (off-white, 168 px tall), rendered from rime-branding's template by `make-logo-assets.sh`. `GreetSurface` draws plane 3 over it in the accent. |
++| `assets/ridge-lockup-base.png` | The Origin lockup's wordmark alone (off-white, 168 px tall, on the lockup's canvas), rendered from rime-branding's template by `make-logo-assets.sh`. `GreetSurface` draws the mark over it in the accent. (The file keeps the name it had under the layered ridge.) |
 +| `make-logo-assets.sh` | Re-renders the asset (resvg); the `branding-surfaces` check fails if the committed PNG drifts from it. |
  | `greetd-config.toml` | The image's `/etc/greetd/config.toml`: launches sway through `/usr/libexec/rime-greet-session`. |
  | `sway-greet.conf` | The sway host config. Hosts quickshell as its only client and binds one key, the screen reader. |
  | `labwc-greet/` | Fallback host: labwc config dir (`rc.xml`, `autostart`, `environment`) + note. |
-@@ -106,18 +107,19 @@ shape animation at the login screen either.
+@@ -106,18 +107,18 @@ shape animation at the login screen either.
     not updated past the three-edition split.
  3. Fallback `mono` (dev box / unset).
  
 -The edition drives the spark logo **and** the accent colour:
-+The edition drives the accent colour, which the layered-ridge logo carries on
-+plane 3 only (brand pack page 4; the other planes and the wordmark stay
-+off-white):
++The edition drives the accent colour, which the Origin mark carries (the
++wordmark stays off-white):
  
 -| Edition | Logo | Accent |
 -|---|---|---|
@@ -92,7 +125,7 @@ index 848a827b6..d6a7648c0 100644
 -| `gaming` | gold spark | `#fde047` |
 -| `daily` | chartreuse spark | `#d9f99d` |
 -| `mono` (fallback) | white spark | `#a6d0f7` (the Brain_Shell blue, so off-target the greeter matches the Brain_Shell lock screen pixel for pixel) |
-+| Edition | Accent (plane 3, focus rings) |
++| Edition | Accent (the mark, focus rings) |
 +|---|---|
 +| `rime` | `#91c2dc` (Rime Blue) |
 +| `gaming` | `#fde047` (legacy three-edition machines) |
@@ -107,17 +140,17 @@ index 848a827b6..d6a7648c0 100644
  
  ### Sessions & memory
  
-@@ -395,7 +397,7 @@ and `session-bus` (the wrapper's buses). `tests/mutate-greet-atspi.sh` and
+@@ -395,7 +396,7 @@ and `session-bus` (the wrapper's buses). `tests/mutate-greet-atspi.sh` and
  | Palette | `Theme`/`Colors` singletons (live, from colors.json) | inlined `ThemeGreet` (colors.json fallbacks); the user's published accent, else the edition accent |
  | Wallpaper | `WallpaperService.currentWall` | the last user's published wallpaper, else `/usr/share/backgrounds/rime/default.jpg` |
  | Username | display only (`$USER`); PAM resolves the auth user | editable field, prefilled from `last-user`, passed to `createSession` |
 -| Extra UI | none | edition spark logo, keyboard-layout pill, session picker, recovery notice |
-+| Extra UI | none | layered-ridge logo (plane 3 in the accent), keyboard-layout pill, session picker, recovery notice |
++| Extra UI | none | Origin logo (the mark in the accent), keyboard-layout pill, session picker, recovery notice |
  | State | per-surface | shared `GreetContext` across surfaces |
  | Clock, pill geometry, spinner, shake, caps heuristic, Escape-clears | n/a | **identical** |
  
 diff --git a/desktop/rime-greet/shell.qml b/desktop/rime-greet/shell.qml
-index 83330a53c..3c09cdb05 100644
+index 83330a5..39efb16 100644
 --- a/desktop/rime-greet/shell.qml
 +++ b/desktop/rime-greet/shell.qml
 @@ -29,9 +29,9 @@ ShellRoot {
@@ -128,12 +161,12 @@ index 83330a53c..3c09cdb05 100644
 -    // spark logo are edition-derived so gaming / daily / dev each get
 -    // their own accent.
 +    // paints with before any live theme is loaded. `active` (the logo's
-+    // plane 3 and the focus rings) is edition-derived so gaming / daily /
++    // mark and the focus rings) is edition-derived so gaming / daily /
 +    // dev each get their own accent.
      QtObject {
          id: greetTheme
          readonly property string fontFamily: "JetBrainsMono Nerd Font"
-@@ -41,31 +41,25 @@ ShellRoot {
+@@ -41,31 +41,24 @@ ShellRoot {
          readonly property color border:     "#ffffff"
          readonly property color errorColor: "#ff5c5c"
  
@@ -144,8 +177,8 @@ index 83330a53c..3c09cdb05 100644
 -        // The user's own accent when Rime Shell has published one, so the
 -        // login screen matches the desktop; the edition colour otherwise.
 +        // Accent: the user's own when Rime Shell has published one, so the
-+        // login screen matches the desktop; otherwise Rime Blue (the layered
-+        // ridge's plane 3) on rime / daily, gold on a legacy gaming machine,
++        // login screen matches the desktop; otherwise Rime Blue (the Origin
++        // mark's colour) on rime / daily, gold on a legacy gaming machine,
 +        // and the Brain_Shell blue off-target (dev box / VARIANT_ID unset) so
 +        // the greeter is pixel-identical to the Lockscreen there.
          readonly property color active:
@@ -169,21 +202,20 @@ index 83330a53c..3c09cdb05 100644
 -          : greetCtx.edition === "rime"   ? Qt.resolvedUrl("assets/spark-chartreuse.png")
 -          : greetCtx.edition === "daily"  ? Qt.resolvedUrl("assets/spark-chartreuse.png")
 -          : Qt.resolvedUrl("assets/spark-white.png")
-+        // The layered-ridge lockup. Planes 1, 2, 4 and the wordmark are this
-+        // off-white image (make-logo-assets.sh); GreetSurface draws plane 3
-+        // over it as a polygon in `active`, so only plane 3 takes the accent
-+        // (brand pack page 4) and no shader is needed for the tint. The asset
-+        // ships alongside this file, so Qt.resolvedUrl works in-tree and
-+        // installed.
++        // The Origin lockup. The wordmark is this off-white image
++        // (make-logo-assets.sh); GreetSurface draws the mark over it as
++        // vectors in `active`, so the mark takes the accent and no shader is
++        // needed for the tint. The asset ships alongside this file, so
++        // Qt.resolvedUrl works in-tree and installed.
 +        readonly property url logoSource: Qt.resolvedUrl("assets/ridge-lockup-base.png")
      }
  
      // ── Shared greeter state + auth backend ───────────────────────
 diff --git a/desktop/shell/rime-greeting.sh b/desktop/shell/rime-greeting.sh
-index 81076e9c6..386234a62 100644
+index 81076e9..ea39d51 100644
 --- a/desktop/shell/rime-greeting.sh
 +++ b/desktop/shell/rime-greeting.sh
-@@ -54,17 +54,50 @@ command -v fastfetch >/dev/null 2>&1 || _rime_greet=0
+@@ -54,17 +54,58 @@ command -v fastfetch >/dev/null 2>&1 || _rime_greet=0
  if [ "${_rime_greet}" = 1 ]; then
      RIME_GREETED=1
      export RIME_GREETED
@@ -199,8 +231,8 @@ index 81076e9c6..386234a62 100644
 -    # an SGR parameter string (38;2;R;G;B) — the greeting is POSIX sh and has no
 -    # business doing hex arithmetic to use a colour.
 +
-+    # Light or dark background picks the ink of the logo: off-white planes on a
-+    # dark terminal, charcoal on a light one. Only a local session can ask the
++    # Light or dark background picks the logo: Rime Blue on a dark terminal,
++    # Rime Blue Deep on a light one (the mark is one colour). Only a local session can ask the
 +    # desktop; over SSH the remote desktop says nothing about this terminal.
 +    _rime_variant=dark
 +    if [ -z "${SSH_CONNECTION:-}${SSH_TTY:-}" ]; then
@@ -211,9 +243,17 @@ index 81076e9c6..386234a62 100644
 +
 +    # The logo: the symbol Rime Shell recoloured from the wallpaper (matugen's
 +    # post_hook runs rime-logo-render into ~/.cache/rime/logo), else the shipped
-+    # Rime Blue one. Plane 3 carries the accent; the layered ridge never changes.
-+    _rime_logo="${XDG_CACHE_HOME:-$HOME/.cache}/rime/logo/rime-symbol-${_rime_variant}.png"
-+    [ -r "${_rime_logo}" ] || _rime_logo="/usr/share/rime/branding/png/symbol/rime-symbol-${_rime_variant}-512.png"
++    # Rime Blue one. The whole mark carries the accent; its shape never changes.
++    _rime_cache="${XDG_CACHE_HOME:-$HOME/.cache}/rime/logo"
++    _rime_logo="${_rime_cache}/rime-mark-${_rime_variant}.png"
++    if [ ! -r "${_rime_logo}" ]; then
++        # Colours but no mark: a cache from before the Origin mark (its renders were rime-symbol-*.png). Render
++        # the mark from those colours once, in the background, and greet with the shipped one this time.
++        if [ -r "${_rime_cache}/colors" ] && [ -x /usr/libexec/rime-logo-render ]; then
++            (/usr/libexec/rime-logo-render "${_rime_cache}" >/dev/null 2>&1 &)
++        fi
++        _rime_logo="/usr/share/rime/branding/png/symbol/rime-symbol-${_rime_variant}-512.png"
++    fi
 +
 +    # Which image protocol this terminal speaks, and the logo's width in cells
 +    # for 8 rows (rime-term-graphics: kitty-direct for a local Ghostty or kitty,
@@ -245,7 +285,7 @@ index 81076e9c6..386234a62 100644
      _rime_accent_file="${XDG_CACHE_HOME:-$HOME/.cache}/rime-shell/accent-ansi"
      _rime_accent=""
      if [ -r "${_rime_accent_file}" ]; then
-@@ -77,27 +110,37 @@ if [ "${_rime_greet}" = 1 ]; then
+@@ -77,27 +118,37 @@ if [ "${_rime_greet}" = 1 ]; then
          ""|*[!0-9\;]*) _rime_accent="" ;;
      esac
  
@@ -299,12 +339,12 @@ index 81076e9c6..386234a62 100644
 +        esac
 +        exec fastfetch "$@"
 +    )
-+    unset _rime_variant _rime_logo _rime_proto _rime_cols _rime_rows _rime_graphics _rime_accent _rime_accent_file
++    unset _rime_variant _rime_cache _rime_logo _rime_proto _rime_cols _rime_rows _rime_graphics _rime_accent _rime_accent_file
  fi
  
  unset _rime_greet
 diff --git a/system/fastfetch/config.jsonc b/system/fastfetch/config.jsonc
-index 7da64c766..5c62a70a6 100644
+index 7da64c7..5c62a70 100644
 --- a/system/fastfetch/config.jsonc
 +++ b/system/fastfetch/config.jsonc
 @@ -1,24 +1,30 @@

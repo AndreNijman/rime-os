@@ -182,9 +182,9 @@ pkgs.testers.runNixOSTest {
         return ok, seen
 
     def plymouth_accent(node, themes=None):
-        """The owner's accent picks the ridge theme for its hue slot (accents.json: slot n = hue n*15 deg, #3B82F6 is
+        """The owner's accent picks the Origin theme for its hue slot (accents.json: slot n = hue n*15 deg, #3B82F6 is
         217 deg -> 14), rewrites the real-file conf the shutdown splash reads and leaves the ESP credential the initrd
-        reads; the theme is a RIDGE theme (plane 3 recoloured: lockup-accent.png, the ridge script), not the spark."""
+        reads; the theme is an Origin theme (the bodies recoloured: lockup-core.png, the Grow script), not the spark."""
         env = "RIME_GREET_VAR=/tmp/pa/g RIME_PLYMOUTH_CONF=/tmp/pa/p.conf RIME_ESP_DIRS=/tmp/pa/esp"
         if themes:
             env += " RIME_PLYMOUTH_THEMES=" + themes
@@ -195,13 +195,13 @@ pkgs.testers.runNixOSTest {
         cred = node.execute("cat /tmp/pa/esp/loader/credentials/rime.accent.cred")[1]
         t = "/etc/plymouth/themes/rime-os-accent-14"
         ok = ("Theme=rime-os-accent-14\n" in conf and cred == "14"
-              and node.execute(f"test -f {t}/rime-os-accent-14.plymouth && test -f {t}/lockup-accent.png "
+              and node.execute(f"test -f {t}/rime-os-accent-14.plymouth && test -f {t}/lockup-core.png "
                                f"&& grep -x 'ScriptFile={t}/rime-os.script' {t}/rime-os-accent-14.plymouth")[0] == 0)
         return ok, conf + " cred=" + cred
 
     def plymouth_default(node, themes=None):
-        """After plymouth_accent: the owner's accent goes away (unset) and the splash goes back to the default ridge,
-        rime-os (plane 3 in Rime Blue), and the ESP credential is removed so the next boot starts rime-os too."""
+        """After plymouth_accent: the owner's accent goes away (unset) and the splash goes back to the default Origin
+        splash, rime-os (the mark in Rime Blue), and the ESP credential is removed so the next boot starts rime-os too."""
         env = "RIME_GREET_VAR=/tmp/pa/g RIME_PLYMOUTH_CONF=/tmp/pa/p.conf RIME_ESP_DIRS=/tmp/pa/esp"
         if themes:
             env += " RIME_PLYMOUTH_THEMES=" + themes
@@ -211,7 +211,7 @@ pkgs.testers.runNixOSTest {
         cred = node.execute("test -e /tmp/pa/esp/loader/credentials/rime.accent.cred && echo present || echo gone")[1]
         ok = ("Theme=rime-os\n" in conf and cred.strip() == "gone"
               and node.execute("test -f /etc/plymouth/themes/rime-os/rime-os.plymouth "
-                               "&& test -f /etc/plymouth/themes/rime-os/lockup-accent.png")[0] == 0)
+                               "&& test -f /etc/plymouth/themes/rime-os/lockup-core.png")[0] == 0)
         return ok, conf + " cred " + cred
 
     def expect(label, result, want=True):
@@ -274,7 +274,7 @@ pkgs.testers.runNixOSTest {
     # the real conf, after the session published the owner's accent (rime-greet-wallpaper -> rime-plymouth-accent)
     machine.wait_until_succeeds("grep -E '^Theme=rime-os-accent-[0-9]{2}$' /etc/plymouth/plymouthd.conf", timeout=90)
     theme = machine.succeed("sed -n 's/^Theme=//p' /etc/plymouth/plymouthd.conf").strip()
-    machine.succeed(f"test -f /etc/plymouth/themes/{theme}/{theme}.plymouth && test -f /etc/plymouth/themes/{theme}/lockup-accent.png")
+    machine.succeed(f"test -f /etc/plymouth/themes/{theme}/{theme}.plymouth && test -f /etc/plymouth/themes/{theme}/lockup-core.png")
     print("live plymouth theme: " + theme + " from accent " + machine.succeed("cat /var/lib/rime-greet/accents/rime"))
 
     # the Shell's Qt: right-to-left for Arabic and Hebrew, left-to-right for English and for Urdu (Qt ships no

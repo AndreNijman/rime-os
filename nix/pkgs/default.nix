@@ -6,7 +6,7 @@
   rimed = callPackage ./rimed.nix { };
   rime-shell = callPackage ./rime-shell.nix { src = rime-shell-src; };
   rime-libexec = callPackage ./rime-libexec.nix { inherit (pkgs.rime) rime-ridge-files; };
-  # The layered-ridge identity: masters, exports, hicolor icons (files/branding/ridge).
+  # The Origin identity: masters, exports, hicolor icons (files/branding/ridge).
   rime-branding = callPackage ./rime-branding.nix { };
   # The ridge versions of the shared files that show the identity (greeter, terminal greeting, fastfetch): files/**
   # keeps the bootc image's spark, nix/branding/ridge.patch turns them into the ridge for NixOS.

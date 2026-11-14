@@ -1,9 +1,10 @@
-# Rime's identity on NixOS: the layered ridge with plane 3 in Rime Blue (#91C2DC). The bootc image keeps the
+# Rime's identity on NixOS: the Origin mark in Rime Blue (#91C2DC). The bootc image keeps the
 # chartreuse spark, so the files both systems share (files/**, which Containerfile.base copies as they are) hold the
-# spark, and this package is where NixOS gets the ridge versions of the ones that show it:
+# spark, and this package is where NixOS gets the Origin versions of the ones that show it (the package and patch
+# keep the names they had under the layered ridge, Origin's predecessor):
 #
 #   share/rime-greet/              the greeter tree: shell.qml, GreetSurface.qml and README.md with nix/branding/ridge.patch,
-#                                  the neutral lockup (assets/ridge-lockup-base.png) instead of the spark PNGs, and the
+#                                  the neutral wordmark (assets/ridge-lockup-base.png) instead of the spark PNGs, and the
 #                                  script that renders it (make-logo-assets.sh)
 #   share/rime/shell/greeting.sh   the terminal greeting: the symbol through rime-term-graphics, or a "RIME OS" label
 #   etc/fastfetch/config.jsonc     fastfetch's config: the label logo and Rime Blue keys
@@ -33,10 +34,12 @@ runCommand "rime-ridge-files" { nativeBuildInputs = [ gnugrep ]; } ''
   install -m0644 ${branding + "/rime-greet/assets/ridge-lockup-base.png"} $g/assets/ridge-lockup-base.png
   install -m0755 ${branding + "/rime-greet/make-logo-assets.sh"} $g/make-logo-assets.sh
 
-  # What a user sees: the ridge and Rime Blue, and nothing of the spark.
+  # What a user sees: the Origin mark and Rime Blue, and nothing of the spark or the ridge.
   grep -q 'assets/ridge-lockup-base.png' $g/shell.qml
   grep -q '"#91c2dc"' $g/shell.qml
-  grep -q 'ShapePath' $g/GreetSurface.qml
+  grep -q 'ShapePath.OddEvenFill' $g/GreetSurface.qml
+  grep -q 'Shape.GeometryRenderer' $g/GreetSurface.qml
+  if grep -n 'PathLine' $g/GreetSurface.qml; then echo "the NixOS greeter still draws the old ridge's plane 3" >&2; exit 1; fi
   if grep -rn 'spark\|d9f99d' $g/*.qml; then echo "the NixOS greeter still names the spark" >&2; exit 1; fi
   grep -q '/usr/libexec/rime-term-graphics' work/desktop/shell/rime-greeting.sh
   if grep -n 'rime-logo.txt\|--logo-color-1 "''${_rime_logo_color}"' work/desktop/shell/rime-greeting.sh; then

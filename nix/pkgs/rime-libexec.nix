@@ -326,7 +326,7 @@ stdenvNoCC.mkDerivation {
     # the bootc image seeds chartreuse and opens Alacritty.
     substituteInPlace $out/libexec/rime-shell-firstrun \
       --replace-fail '*)       RIME_ACCENT="#D9F99D" ;;   # chartreuse' \
-                     '*)       RIME_ACCENT="#91C2DC" ;;   # Rime Blue, the layered ridge plane 3' \
+                     '*)       RIME_ACCENT="#91C2DC" ;;   # Rime Blue, the Origin mark' \
       --replace-fail 'hl.bind("SUPER + Return", hl.dsp.exec_cmd("alacritty"))' \
                      'hl.bind("SUPER + Return", hl.dsp.exec_cmd("ghostty"))'
     cp $D/shell/agent.sh $out/share/rime/shell/agent.sh

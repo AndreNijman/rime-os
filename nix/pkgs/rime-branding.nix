@@ -1,4 +1,4 @@
-# The layered-ridge identity (files/branding/ridge): masters, every export, and the app icon in hicolor.
+# The Origin identity (files/branding/ridge): masters, every export, and the app icon in hicolor.
 #
 #   $out/share/rime/branding/{src,svg,templates,png,icons,favicon,accents}   as committed (docs/branding.md)
 #   $out/share/icons/hicolor/<N>x<N>/apps/rime-os.png                        the dark app-icon tile, 16..512
@@ -49,7 +49,7 @@ stdenvNoCC.mkDerivation {
   '';
 
   meta = {
-    description = "Rime OS layered-ridge logo, lockups, app icons, favicons and accent exports";
+    description = "Rime OS Origin logo, lockups, app icons, favicons and accent exports";
     platforms = lib.platforms.all;
   };
 }

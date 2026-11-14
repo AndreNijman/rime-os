@@ -1,10 +1,11 @@
-# Rime OS boot splash -- the layered ridge ("Rise")
+# Rime OS boot splash -- the Origin mark ("Grow")
 #
-# The ridge lockup (symbol + "rime") rises out of the charcoal: the three
-# neutral planes and the wordmark first, the accent plane (plane 3) a beat
-# later, then a row of six progress dots in which one dot of light travels
-# while the machine boots (brand pack page 2, "Boot splash"). Shutdown, reboot
-# and update modes show the settled splash from the first frame.
+# The Origin lockup (the mark + "rime") grows out of the charcoal the way rime
+# ice does, from its point of contact: the core first, then the ring, then the
+# coat, 350 ms apart, with the wordmark. While the machine boots a slow wave
+# runs outward through the mark (core, ring, coat), one body dimming at a time,
+# so the screen says it is alive without anything moving. Shutdown, reboot and
+# update modes show the settled splash from the first frame.
 #
 # The engine is the one the spark splash ("Focus") was rebuilt around, for the
 # same measured reasons (files/branding/plymouth/README.md): plymouth has no
@@ -12,18 +13,17 @@
 # every Image.Scale/Rotate and redraws a sprite only when its opacity moves by
 # more than 0.01. So every image is scaled ONCE, below, nothing moves, and each
 # refresh (60 Hz) only changes opacities on curves of real elapsed time that
-# start and end at rest. The travelling light is opacity too: each dot has a
-# lit twin over it whose opacity follows a smooth pulse.
+# start and end at rest. The wave is opacity too.
 #
-# Per-owner accent: only plane 3 changes colour (brand pack page 4). Each
+# Per-owner accent: the mark is one colour, the owner's accent. Each
 # rime-os-accent-NN theme is this script with its own HI_ line, its own
-# lockup-accent / dot-on / bullet images, and the neutral images shared with
-# rime-os (nix/pkgs/rime-plymouth.nix builds all 25).
+# lockup-core / lockup-ring / lockup-coat / bullet images, and the neutral
+# images shared with rime-os (nix/pkgs/rime-plymouth.nix builds all 25).
 #
 # The background is one flat charcoal: equal top and bottom colours take
 # plymouth's plain fill path, not its dithered gradient.
 
-HI_R = 0.569; HI_G = 0.761; HI_B = 0.863;   # #91C2DC (Rime Blue, plane 3)
+HI_R = 0.569; HI_G = 0.761; HI_B = 0.863;   # #91C2DC (Rime Blue, the mark)
 
 RATE = 60;
 Plymouth.SetRefreshRate(RATE);
@@ -89,18 +89,20 @@ fun fit (img, ref) {
   return img.Scale(local.nw, local.nh);
 }
 
+# body 0 = core, 1 = ring, 2 = coat: the order they grow in, from the origin out
+body_img[0] = NULL;                    # declared here so it is global
 if (hd) {
   base_img = fit(Image("lockup-base-hd.png"), 2400);
-  accent_img = fit(Image("lockup-accent-hd.png"), 2400);
-  dot_off_img = fit(Image("dot-off-hd.png"), 2400);
-  dot_on_img = fit(Image("dot-on-hd.png"), 2400);
+  body_img[0] = fit(Image("lockup-core-hd.png"), 2400);
+  body_img[1] = fit(Image("lockup-ring-hd.png"), 2400);
+  body_img[2] = fit(Image("lockup-coat-hd.png"), 2400);
   bullet_img = fit(Image("bullet-hd.png"), 2400);
   prompt_fallback = fit(Image("prompt-hd.png"), 2400);
 } else {
   base_img = fit(Image("lockup-base.png"), 1200);
-  accent_img = fit(Image("lockup-accent.png"), 1200);
-  dot_off_img = fit(Image("dot-off.png"), 1200);
-  dot_on_img = fit(Image("dot-on.png"), 1200);
+  body_img[0] = fit(Image("lockup-core.png"), 1200);
+  body_img[1] = fit(Image("lockup-ring.png"), 1200);
+  body_img[2] = fit(Image("lockup-coat.png"), 1200);
   bullet_img = fit(Image("bullet.png"), 1200);
   prompt_fallback = fit(Image("prompt.png"), 1200);
 }
@@ -110,35 +112,22 @@ LH = base_img.GetHeight();
 lx = cx - Math.Int(LW / 2);
 ly = cy - Math.Int(LH / 2);
 
-# ── sprites (z: lockup < accent plane < dots < prompt) ────────────────────
+# ── sprites (z: wordmark < bodies < prompt) ────────────────────────────────
 base = Sprite(base_img);
 base.SetPosition(lx, ly, 1);
 base.SetOpacity(0);
 
-accent = Sprite(accent_img);          # the same canvas as the base: same position
-accent.SetPosition(lx, ly, 2);
-accent.SetOpacity(0);
-
-NDOTS = 6;
-DS = dot_off_img.GetWidth();
-DP = Math.Int(DS * 2.6);               # dot pitch
-dots_y = ly + LH + Math.Int(h * 0.075);
-dot_x0 = cx - Math.Int(((NDOTS - 1) * DP + DS) / 2);
-dot_off[0] = NULL;                     # declared here so they are global
-dot_on[0] = NULL;
+body[0] = NULL;                        # declared here so it is global
 i = 0;
-while (i < NDOTS) {
-  dot_off[i] = Sprite(dot_off_img);
-  dot_off[i].SetPosition(dot_x0 + i * DP, dots_y, 10);
-  dot_off[i].SetOpacity(0);
-  dot_on[i] = Sprite(dot_on_img);
-  dot_on[i].SetPosition(dot_x0 + i * DP, dots_y, 11);
-  dot_on[i].SetOpacity(0);
+while (i < 3) {
+  body[i] = Sprite(body_img[i]);       # the same canvas as the base: same position
+  body[i].SetPosition(lx, ly, 2 + i);
+  body[i].SetOpacity(0);
   i++;
 }
 
 # ── password prompt (LUKS) ────────────────────────────────────────────────
-# The prompt takes the dots' place, the bullets sit under it and any message
+# The prompt sits under the lockup, the bullets under it and any message
 # (keyboard layout, "use your recovery key") under them. Nothing the user
 # types is ever drawn: display_password() is only told how many.
 prompt_y = ly + LH + Math.Int(h * 0.06);
@@ -212,7 +201,11 @@ fun advance_clock () {
 }
 
 T0 = 0.12;                             # a beat of charcoal after the firmware hands over
-DOT_PERIOD = 1.8;                      # one pass of the light along the row, seconds
+GROW_STEP = 0.35;                      # core, ring, coat: each starts this long after the one inside it
+GROW_FADE = 0.6;                       # how long each body takes to come in
+WAVE_START = 2.0;                      # the wave begins once the mark has settled
+WAVE_PERIOD = 2.4;                     # one pass outward, then a rest, seconds
+WAVE_DIP = 0.45;                       # how far a body dims as the wave passes (to 55 %)
 
 # ── the frame ─────────────────────────────────────────────────────────────
 fun refresh () {
@@ -222,13 +215,11 @@ fun refresh () {
 
   if (intro) { local.t = global.clock - T0; } else { local.t = global.clock + 10; }
 
-  # the ridge rises: neutral planes + wordmark, then the accent plane
-  local.a_base = smooth(local.t / 0.7);
-  local.a_accent = smooth((local.t - 0.3) / 0.7);
-  local.a_dots = smooth((local.t - 0.9) / 0.5);
+  # the mark grows from its origin: core, ring, coat; the wordmark with the ring
+  local.a_base = smooth((local.t - GROW_STEP) / 0.7);
 
-  # password prompt, over 0.4 s either way: the splash dims, the dots go in
-  # the first half and the prompt comes in the second (they share a line)
+  # password prompt, over 0.4 s either way: the splash dims, the wave stops
+  # and the prompt comes in the second half
   if (global.pw_target) { global.pw_p = Math.Min(global.pw_p + local.fdt / 0.4, 1); }
   else { global.pw_p = Math.Max(global.pw_p - local.fdt / 0.4, 0); }
   if (global.msg_target) { global.msg_p = Math.Min(global.msg_p + local.fdt / 0.3, 1); }
@@ -237,16 +228,18 @@ fun refresh () {
   local.g = 1 - 0.3 * local.pw;
 
   base.SetOpacity(local.a_base * local.g);
-  accent.SetOpacity(local.a_accent * local.g);
 
-  # the travelling light: position p runs from just before dot 0 to just past
-  # the last dot, and each lit twin follows a smooth pulse around p
-  local.dv = local.a_dots * (1 - smooth(global.pw_p / 0.5));
-  local.p = frac(Math.Max(local.t - 1.1, 0) / DOT_PERIOD) * (NDOTS + 1) - 1;
+  # the wave: position p runs from inside the core (-1) to past the coat (4,
+  # a rest), and the body at p dips on a smooth pulse a little over half a body
+  # wide: one body dims at a time (a neighbour by at most 6 % on the hand-over)
+  # and the rest of the mark stays at full colour
+  local.wv = smooth((local.t - WAVE_START) / 0.6) * (1 - smooth(global.pw_p / 0.5));
+  local.p = frac(Math.Max(local.t - WAVE_START, 0) / WAVE_PERIOD) * 5 - 1;
   local.k = 0;
-  while (local.k < NDOTS) {
-    dot_off[local.k].SetOpacity(local.dv);
-    dot_on[local.k].SetOpacity(local.dv * smooth(1 - absv(local.p - local.k)));
+  while (local.k < 3) {
+    local.grow = smooth((local.t - local.k * GROW_STEP) / GROW_FADE);
+    local.dip = WAVE_DIP * local.wv * smooth(1 - absv(local.p - local.k) * 1.6);
+    body[local.k].SetOpacity(local.grow * (1 - local.dip) * local.g);
     local.k++;
   }
 

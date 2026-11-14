@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 175" width="240" height="175">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 84 84" width="84" height="84">
   <title>Rime symbol (dark)</title>
-  <g transform="translate(0 0) scale(1)"><polygon id="plane-1" fill="#FAFAFA" points="11,175 162.5,140 220,159 235.5,175"/><polygon id="plane-2" fill="#FAFAFA" points="0,175 153,108 212,91.5 194.5,139 160.5,128"/><polygon id="plane-3" fill="#91C2DC" points="47.5,136 149,75 231,45 217.5,76"/><polygon id="plane-4" fill="#FAFAFA" points="91.5,100 129.5,58 240,0 222,36 142.5,67"/></g>
+  <g transform="translate(0 0) scale(1)"><path id="coat" fill="#91C2DC" fill-rule="evenodd" d="M0 42a42 42 0 1 0 84 0a42 42 0 1 0 -84 0ZM2.636 48.364a33 33 0 1 0 66 0a33 33 0 1 0 -66 0Z"/><path id="ring" fill="#91C2DC" fill-rule="evenodd" d="M4.686 53.314a26 26 0 1 0 52 0a26 26 0 1 0 -52 0ZM6.444 57.556a20 20 0 1 0 40 0a20 20 0 1 0 -40 0Z"/><path id="core" fill="#91C2DC" fill-rule="evenodd" d="M7.908 61.092a15 15 0 1 0 30 0a15 15 0 1 0 -30 0Z"/></g>
 </svg>

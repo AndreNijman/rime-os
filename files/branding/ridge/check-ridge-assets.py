@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Check the committed ridge exports against a fresh regeneration and the brand rules.
+"""Check the committed brand exports (the Origin mark) against a fresh regeneration and the brand rules.
 
   check-ridge-assets.py <committed ridge dir> <regenerated dir>
 
 Needs python3 with Pillow. Run by checks.x86_64-linux.branding (nix/tests/branding.nix).
 """
+import colorsys
 import json
+import math
 import os
 import re
 import struct
@@ -49,54 +51,85 @@ for rel in sorted(a & b):
     if not same:
         fail(f"out of date (differs from a regeneration): {rel}")
 
-# 2. The masters: exactly four planes, in order, each a polygon of at least four points.
-for m in ["rime-ridge-symbol.svg", "rime-ridge-symbol-small.svg"]:
+# 2. The masters: five circles c1..c5, radii falling, every one tangent to c1 at the SAME point (the origin).
+BODIES = ("coat", "ring", "core")
+for m in ["rime-origin-symbol.svg", "rime-origin-symbol-small.svg"]:
     text = open(os.path.join(COMMITTED, "src", m)).read()
-    ids = re.findall(r'<polygon id="plane-(\d)"', text)
-    if ids != ["1", "2", "3", "4"] or text.count("<polygon") != 4 or "<path" in text:
-        fail(f"src/{m}: must be exactly four <polygon> planes, plane-1..plane-4 in order (got {ids})")
-    for n, pts in re.findall(r'<polygon id="plane-(\d)"[^>]*\bpoints="([^"]+)"', text):
-        if len(pts.split()) < 4:
-            fail(f"src/{m}: plane-{n} has fewer than four points")
+    found = re.findall(r'<circle id="c(\d)" cx="([^"]+)" cy="([^"]+)" r="([^"]+)"', text)
+    if [n for n, *_ in found] != ["1", "2", "3", "4", "5"] or text.count("<circle") != 5 or "<path" in text:
+        fail(f"src/{m}: must be exactly five <circle>s, c1..c5 in order (got {[n for n, *_ in found]})")
+        continue
+    if 'fill-rule="evenodd"' not in text:
+        fail(f"src/{m}: the circles must be filled even-odd")
+    cs = [tuple(float(v) for v in c) for _, *c in found]
+    (x1, y1, r1), origins = cs[0], []
+    for i, (x, y, r) in enumerate(cs[1:], 2):
+        if not cs[i - 2][2] - r >= 4:
+            fail(f"src/{m}: c{i} must be at least 4 units smaller than c{i - 1} (an open gap or body)")
+        d = math.hypot(x - x1, y - y1)
+        if abs(d - (r1 - r)) > 0.01:
+            fail(f"src/{m}: c{i} is not tangent to c1 (centre distance {d:.3f}, radii differ by {r1 - r})")
+        if d:
+            origins.append((x1 + r1 * (x - x1) / d, y1 + r1 * (y - y1) / d))
+    if origins and max(math.hypot(ox - origins[0][0], oy - origins[0][1]) for ox, oy in origins) > 0.02:
+        fail(f"src/{m}: the circles touch c1 at different points, not one origin: {origins}")
 
-# 3. Adaptive templates: plane 3 (and only plane 3) takes {{accent}}; every other ink is {{fg}}; no literal colour.
+# 3. Adaptive templates: each symbol is three bodies (coat, ring, core) in {{accent}}, the wordmark is {{fg}},
+#    and no literal colour.
 for t in sorted(os.listdir(os.path.join(COMMITTED, "templates"))):
     text = open(os.path.join(COMMITTED, "templates", t)).read()
-    fills = re.findall(r'<polygon id="plane-(\d)" fill="([^"]+)"', text)
-    symbols = len(fills) // 4
+    fills = re.findall(r'<path id="(coat|ring|core)" fill="([^"]+)"', text)
+    symbols = text.count('id="core"')
     if "wordmark" not in t and symbols != 1:
-        fail(f"templates/{t}: expected one symbol, found {len(fills)} planes")
+        fail(f"templates/{t}: expected one symbol, found {symbols}")
+    if [n for n, _ in fills] != list(BODIES) * symbols:
+        fail(f"templates/{t}: the bodies must be coat, ring, core in that order (got {[n for n, _ in fills]})")
     for n, f in fills:
-        want = "{{accent}}" if n == "3" else "{{fg}}"
-        if f != want:
-            fail(f"templates/{t}: plane-{n} fill is {f}, must be {want}")
-    if text.count("{{accent}}") != symbols:
-        fail(f"templates/{t}: {{{{accent}}}} appears {text.count('{{accent}}')} times, expected {symbols}")
-    words = 1 if re.search(r"<path ", text) else 0
-    if text.count("{{fg}}") != 3 * symbols + words:
-        fail(f"templates/{t}: {{{{fg}}}} appears {text.count('{{fg}}')} times, expected {3 * symbols + words}")
+        if f != "{{accent}}":
+            fail(f"templates/{t}: {n} fill is {f}, must be {{{{accent}}}}")
+    if text.count("{{accent}}") != 3 * symbols:
+        fail(f"templates/{t}: {{{{accent}}}} appears {text.count('{{accent}}')} times, expected {3 * symbols}")
+    words = 1 if re.search(r"<path d=", text) else 0
+    if text.count("{{fg}}") != words:
+        fail(f"templates/{t}: {{{{fg}}}} appears {text.count('{{fg}}')} times, expected {words}")
     if re.search(r"#[0-9A-Fa-f]{6}", text):
         fail(f"templates/{t}: contains a literal colour")
 
 
-# 4. Accent exports change plane 3 only.
-def strip3(text):
-    return re.sub(r'(<polygon id="plane-3" fill=")[^"]+"', r'\1X"', re.sub(r"<title>.*?</title>", "", text))
+# 4. Accent exports change the mark's colour only; on a light ground a pale accent is darkened to Rime Blue
+#    Deep's lightness, keeping its hue.
+def strip_mark(text):
+    return re.sub(r'(<path id="(?:coat|ring|core)" fill=")[^"]+"', r'\1X"', re.sub(r"<title>.*?</title>", "", text))
+
+
+def hls(hexv):
+    return colorsys.rgb_to_hls(*(int(hexv[i:i + 2], 16) / 255 for i in (1, 3, 5)))
 
 
 acc = json.load(open(os.path.join(COMMITTED, "accents", "accents.json")))
-if len(acc["slots"]) != 24:
-    fail("accents/accents.json: expected 24 slots")
+cap = hls(acc["base_on_light"])[1]
+if len(acc["slots"]) != 24 or set(acc["slots_on_light"]) != set(acc["slots"]):
+    fail("accents/accents.json: expected 24 slots, each with an on-light colour")
 for mode in ("light", "dark"):
-    ref = strip3(open(os.path.join(COMMITTED, f"svg/square/rime-symbol-square-{mode}.svg")).read())
+    ref = strip_mark(open(os.path.join(COMMITTED, f"svg/square/rime-symbol-square-{mode}.svg")).read())
     for kind, table in (("named", acc["named"]), ("slots", acc["slots"])):
         for key, hexv in table.items():
             stem = f"rime-symbol-{key}" if kind == "named" else f"rime-symbol-slot-{key}"
             text = open(os.path.join(COMMITTED, f"accents/{kind}/{stem}-{mode}.svg")).read()
-            if strip3(text) != ref:
-                fail(f"accents/{kind}/{stem}-{mode}.svg: differs from the {mode} symbol outside plane 3")
-            if f'<polygon id="plane-3" fill="{hexv}"' not in text:
-                fail(f"accents/{kind}/{stem}-{mode}.svg: plane 3 is not {hexv}")
+            if strip_mark(text) != ref:
+                fail(f"accents/{kind}/{stem}-{mode}.svg: differs from the {mode} symbol outside the mark's colour")
+            marks = set(re.findall(r'<path id="(?:coat|ring|core)" fill="([^"]+)"', text))
+            want = hexv
+            if mode == "light":
+                # slots: accents.json names the on-light colour; named accents: whatever single colour was drawn
+                want = acc["slots_on_light"][key] if kind == "slots" else (next(iter(marks)) if len(marks) == 1 else "")
+                h0, l0, s0 = hls(hexv)
+                h1, l1, s1 = hls(want) if want else (0, 1, 0)
+                if l1 > cap + 0.005 or (l0 <= cap and want.upper() != hexv.upper()) or \
+                        (s0 > 0.05 and min(abs(h1 - h0), 1 - abs(h1 - h0)) * 360 > 1.5):
+                    fail(f"accents/{kind}/{stem}-light.svg: {want} is not {hexv} at a lightness of at most {cap:.3f}")
+            if marks != {want}:
+                fail(f"accents/{kind}/{stem}-{mode}.svg: the mark is {sorted(marks)}, not {want}")
 
 
 # 5. Sizes, transparency and tiles.
@@ -149,5 +182,5 @@ if kind != 1 or dims != [16, 32, 48]:
 
 for f in fails:
     print("FAIL:", f)
-print(f"ridge assets: {len(a)} exports checked, {len(fails)} failures")
+print(f"brand assets: {len(a)} exports checked, {len(fails)} failures")
 sys.exit(1 if fails else 0)

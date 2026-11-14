@@ -1,6 +1,7 @@
 {
-  "_comment": "Plane-3 colours. Slot n = hue n*15 deg at Rime Blue's HLS lightness and saturation; the same 24 buckets rime-plymouth-accent picks from the owner's matugen accent.",
+  "_comment": "Mark colours. Slot n = hue n*15 deg at Rime Blue's HLS lightness and saturation; the same 24 buckets rime-plymouth-accent picks from the owner's matugen accent. slots_on_light: the same slot drawn on a light ground (lightness capped at Rime Blue Deep's).",
   "base": "#91C2DC",
+  "base_on_light": "#3682AA",
   "base_hue_deg": 200.8,
   "base_slot": 13,
   "named": {
@@ -36,5 +37,31 @@
     "21": "#DC91C9",
     "22": "#DC91B7",
     "23": "#DC91A4"
+  },
+  "slots_on_light": {
+    "00": "#AA3636",
+    "01": "#AA5336",
+    "02": "#AA6F36",
+    "03": "#AA8D36",
+    "04": "#AAAA36",
+    "05": "#8DAA36",
+    "06": "#71AA36",
+    "07": "#53AA36",
+    "08": "#36AA36",
+    "09": "#36AA53",
+    "10": "#36AA71",
+    "11": "#36AA8D",
+    "12": "#36AAAA",
+    "13": "#368DAA",
+    "14": "#366FAA",
+    "15": "#3653AA",
+    "16": "#3636AA",
+    "17": "#5336AA",
+    "18": "#6F36AA",
+    "19": "#8D36AA",
+    "20": "#AA36AA",
+    "21": "#AA368D",
+    "22": "#AA3671",
+    "23": "#AA3653"
   }
 }

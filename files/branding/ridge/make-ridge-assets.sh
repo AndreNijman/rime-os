@@ -1,5 +1,5 @@
 #!/bin/sh
-# Regenerate every layered-ridge export (svg/ templates/ png/ icons/ favicon/ accents/) from the masters in src/.
+# Regenerate every Rime brand export (the Origin mark) (svg/ templates/ png/ icons/ favicon/ accents/) from the masters in src/.
 # Needs resvg and python3 (standard library only), pinned to the flake's nixpkgs. From this directory:
 #
 #   nix shell github:NixOS/nixpkgs/1c89083e451e891152365b799595cf7790a43325#resvg \
