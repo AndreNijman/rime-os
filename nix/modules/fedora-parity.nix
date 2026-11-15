@@ -200,6 +200,19 @@ in
       # 24-clat-auto.conf, IPv4 over IPv6-only networks with NAT64 (nixpkgs builds NetworkManager with clat).
       networking.networkmanager.wifi.macAddress = lib.mkDefault "stable-ssid";
       networking.networkmanager.settings."connection-24-clat-auto"."ipv4.clat" = lib.mkDefault 1;
+
+      # Fedora's NetworkManager package also ships /usr/share/polkit-1/rules.d/org.freedesktop.NetworkManager.rules:
+      # an administrator (wheel) at the machine adds or changes a system-wide connection (joining a new Wi-Fi network
+      # from the Shell) without a password. NixOS ships no such rule, so a moved Fedora admin was asked for a password
+      # Fedora never asked for, and joining a network failed when the prompt was dismissed.
+      security.polkit.extraConfig = ''
+        polkit.addRule(function(action, subject) {
+            if (action.id == "org.freedesktop.NetworkManager.settings.modify.system" &&
+                subject.isInGroup("wheel") && subject.local) {
+                return polkit.Result.YES;
+            }
+        });
+      '';
     })
 
     (lib.mkIf desktop {
