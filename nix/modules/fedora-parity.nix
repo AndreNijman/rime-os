@@ -204,11 +204,13 @@ in
       # Fedora's NetworkManager package also ships /usr/share/polkit-1/rules.d/org.freedesktop.NetworkManager.rules:
       # an administrator (wheel) at the machine adds or changes a system-wide connection (joining a new Wi-Fi network
       # from the Shell) without a password. NixOS ships no such rule, so a moved Fedora admin was asked for a password
-      # Fedora never asked for, and joining a network failed when the prompt was dismissed.
+      # Fedora never asked for, and joining a network failed when the prompt was dismissed. One step narrower than
+      # Fedora's rule: the session must also be the ACTIVE one (the seat's foreground), so a background session of the
+      # same admin (another VT, a lingering login) is still asked.
       security.polkit.extraConfig = ''
         polkit.addRule(function(action, subject) {
             if (action.id == "org.freedesktop.NetworkManager.settings.modify.system" &&
-                subject.isInGroup("wheel") && subject.local) {
+                subject.isInGroup("wheel") && subject.local && subject.active) {
                 return polkit.Result.YES;
             }
         });

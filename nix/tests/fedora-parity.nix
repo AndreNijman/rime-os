@@ -63,9 +63,10 @@ pkgs.testers.runNixOSTest {
 
     with subtest("an administrator at the machine joins a Wi-Fi network without a password; others are asked"):
         # pkcheck from a local login session (PAM login on a VT, as the greeter's session is): 0 = authorized,
-        # anything else = not (2/3: authentication needed). Fedora: org.freedesktop.NetworkManager.rules.
+        # 1 = refused outright, 2 = authentication needed (pkcheck(1)). A session is active only while its VT is the
+        # foreground one, hence chvt. Fedora: org.freedesktop.NetworkManager.rules (Rime also requires active).
         machine.succeed("printf '%s\\n' '#!/bin/sh' "
-                        "'loginctl show-session \"$XDG_SESSION_ID\" -p Remote -p TTY -p Name >&2' "
+                        "'loginctl show-session \"$XDG_SESSION_ID\" -p Remote -p Active -p TTY -p Name >&2' "
                         "'exec pkcheck --action-id org.freedesktop.NetworkManager.settings.modify.system --process $$' "
                         "> /tmp/pk.sh && chmod 755 /tmp/pk.sh")
 
@@ -74,8 +75,13 @@ pkgs.testers.runNixOSTest {
             return machine.execute(
                 f"systemd-run --wait --collect -p PAMName=login -p User={user} -p TTYPath=/dev/tty{vt} "
                 "-p StandardInput=tty -p StandardOutput=journal -p StandardError=journal -- /tmp/pk.sh")[0]
+        machine.succeed("chvt 5")
         assert pk("admin", 5) == 0, "a wheel user at the machine is asked for a password to add a connection"
-        assert pk("plain", 6) != 0, "a user outside wheel adds a system-wide connection without a password"
+        r = pk("admin", 7)
+        assert r == 2, f"a wheel user's background session: pkcheck {r}, expected 2 (asked for a password)"
+        machine.succeed("chvt 6")
+        r = pk("plain", 6)
+        assert r == 2, f"a user outside wheel: pkcheck {r}, expected 2 (asked for a password)"
 
     with subtest("new accounts get zsh; declared ones keep theirs"):
         machine.succeed("grep -x /run/current-system/sw/bin/zsh /etc/shells")
