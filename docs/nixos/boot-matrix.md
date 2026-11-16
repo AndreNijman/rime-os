@@ -68,7 +68,7 @@ Amended 2026-11-16 (`rime.boot.hideMenu`, default on): the 5 s menu cost every s
 start that follows one that did not reach the greeter (and always when custom.cfg holds another system's entry);
 after a good start GRUB waits 1 s with the menu hidden, Esc shows it. A bad generation never reaches the greeter, so
 the start after it shows the menu: recovery is unchanged. The flag is a GRUB environment block on the ESP GRUB was
-loaded from (nix/pkgs/rime-boot/README.md, "Hiding the menu"). The matrix: boot 2 presses Esc to show the hidden menu
+loaded from (nix/pkgs/rime-boot/README.md, "Hiding the menu"). The matrix: boot 2 presses F4 to show the hidden menu
 and boots the default (the bad generation), boot 3 (B9/B10) finds the 5 s menu as before.
 
 ### ESP rules (R20)

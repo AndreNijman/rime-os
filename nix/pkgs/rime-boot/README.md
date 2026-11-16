@@ -85,7 +85,10 @@ there the first time one does not.
   `rime_boot_ok=1` there, writes `rime_boot_ok=0` back with `save_env` and only if that worked sets
   `timeout_style=hidden`, `timeout=1`. Esc (or F4, or a held Shift) during
   that second shows the menu, with no countdown. Every command is guarded: a missing file, a failed write or no
-  device leaves the 5 s menu, and prints nothing.
+  device leaves the 5 s menu, and prints nothing. One press is enough: the menu is drawn inside bootupd's
+  `configfile`, so Esc AT the menu returns to the ESP's own `grub.cfg`, whose `boot` then fails and leaves the
+  `grub>` prompt (true of every bootc-layout menu, hidden or not). A restart gets out of it: the flag was cleared
+  when the menu was hidden, so that start shows the 5 s menu.
 - **`rime-boot mark-good`** (`rime-boot-good.service`, after `multi-user.target` and the greeter, wanted by
   `multi-user.target` and required by nothing, so it never holds up a start) sets `rime_boot_ok=1`. It finds the ESP
   by the `LoaderDevicePartUUID` EFI variable (the Boot Loader Interface; Fedora's GRUB sets it to the partition it
@@ -99,7 +102,7 @@ there the first time one does not.
 - **A start that never reached the greeter** (a bad generation, a kernel panic, a power cut) left the flag at 0, so
   the next start shows the menu for 5 s, the way it always did. Proven in OVMF with Fedora's shim and GRUB, both
   layouts, Secure Boot on and off (`nix/probe/ovmf/boothook/`): shown at the first start, hidden after a good one,
-  shown after the bad generation, Esc shows the hidden menu.
+  shown after the bad generation, F4 shows the hidden menu (and one Esc does, in the GRUB rig).
 
 ## The way back when Secure Boot refuses the kernel
 

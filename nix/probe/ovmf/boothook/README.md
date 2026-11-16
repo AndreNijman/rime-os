@@ -52,6 +52,16 @@ boots of one overlay, varstore `vars-secboot.raw` (Secure Boot on, the TEST MOK 
 4. gen3 is the default and boots; the profile is rolled back to gen1.
 5. gen1 is the default again, picked by its GRUB id (in the bls layout blscfg lists it last) and boots.
 
+With `rime.boot.hideMenu` (2026-11-16): boots 2, 4 and 5 follow a start that reached `rime-boot-good.service`, so in
+the bls layout the menu is hidden there (no countdown, no Rime entry on the console before the system's first
+marker) and boot 5 presses F4 to show it; boot 3 follows the failed boot 2 and finds the 5 s menu. The lab's
+custom.cfg holds the bootc installer's Windows entry, so in the custom layout the menu is shown with its countdown
+after every start and the hook says why. Every good boot also checks that `rime-boot-good.service` succeeded and
+that the flag says `rime_boot_ok=1` on the ESP GRUB was loaded from. F4, not Esc: Esc AT the menu returns to the
+ESP's `grub.cfg` (the menu is drawn inside its `configfile`), whose `boot` fails into the `grub>` prompt, and under
+Secure Boot shim's debug output makes the serial console lag the screen, so a key sent "before the menu appeared"
+can land on it.
+
 A good boot must show: the stage-2 marker naming the expected generation and toplevel, `mokutil --sb-state` as
 expected, with Secure Boot on the kernel's `Loaded X.509 cert 'Rime boot-hook lab TEST MOK`, `BOOT_IMAGE` = the
 hook's content-addressed signed copy, the driver's last line.
@@ -84,6 +94,16 @@ grub2-efi from Fedora 45 as `../lab.sh rpms` extracted them, GRUB 2.12):
 | PASS | custom-sb-off | boot3 | menu driven to gen1 (keys: down ret), boots, installs gen3 | 26s | menu [2, 1] |
 | PASS | custom-sb-off | boot4 | GOOD gen3 is the default and boots; rollback to gen1 rewrites the default | 28s | menu [3, 2, 1] |
 | PASS | custom-sb-off | boot5 | after the rollback gen1 is the default (by id) and boots | 28s | menu [1, 3, 2] (gen1 at position 0) |
+
+### With `rime.boot.hideMenu` (2026-11-16, katana, same firmware, shim and GRUB)
+
+All 20 scenario boots and the 4 sbrecovery boots PASS (`/var/lab/rime-nix/artifacts/boothook-hide2.log` for bls and
+sbrecovery, `boothook-hide3.log` for custom): bls boots 2 and 4 "menu hidden", boot 5 F4 → menu [3, 2, 1] without a
+countdown; boot 3 (after the failed boot 2) the 5 s menu [2, 1]; custom boots 2, 4, 5 "menu shown" (Windows in
+custom.cfg); every good boot found `rime_boot_ok=1` on the loader's ESP (mounted at /boot in bls, mounted nowhere in
+custom: rime-boot-good mounted it itself). The first run's bls-sb-mok boot 5 FAILED at the `grub>` prompt: the
+driver pressed Esc every 0.25 s until the serial showed the menu, the menu had appeared seconds earlier on screen
+(shim's debug output), and an Esc at the menu returned to the ESP's grub.cfg. The driver now presses F4.
 
 ## Findings
 
