@@ -90,11 +90,17 @@ ENVBLK_HEADER = "# GRUB Environment Block\n"
 ENVBLK_SIZE = 1024
 LOADER_GUID = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"  # the Boot Loader Interface's vendor GUID (LoaderInfo, ...)
 PARTUUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-# After `set default=` (custom-cfg: after every entry). GRUB's own device is $cmdpath's "(hdX,gptY)" part; every
-# command is guarded, so a missing or unwritable flag file leaves the menu shown and prints nothing. The flag is
-# cleared BEFORE the menu is hidden: if GRUB cannot write it, the menu stays.
+# After `set default=` (custom-cfg: after every entry). GRUB's own device is the "(hdX,gptY)" part of $cmdpath
+# (upstream GRUB) or of $fw_path (Fedora's GRUB, where $cmdpath is empty: measured in OVMF); every command is guarded,
+# so a missing or unwritable flag file leaves the menu shown and prints nothing. The flag is cleared BEFORE the menu
+# is hidden: if GRUB cannot write it, the menu stays.
 HIDE_BLOCK = r"""# The last start went well (rime-boot mark-good set the flag): wait 1 s with the menu hidden; Esc shows it.
-if regexp --set=1:rime_boot_esp '^(\([^)]+\))/' "${cmdpath}"; then
+set rime_boot_esp=
+regexp --set=1:rime_boot_esp '^(\([^)]+\))/' "${cmdpath}"
+if [ -z "${rime_boot_esp}" ]; then
+  regexp --set=1:rime_boot_esp '^(\([^)]+\))/' "${fw_path}"
+fi
+if [ -n "${rime_boot_esp}" ]; then
   if [ -f ${rime_boot_esp}/EFI/rime/boot.env ]; then
     set rime_boot_ok=
     load_env --file ${rime_boot_esp}/EFI/rime/boot.env rime_boot_ok

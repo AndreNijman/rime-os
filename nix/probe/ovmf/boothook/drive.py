@@ -170,6 +170,16 @@ def menu_order(text):
     return seen
 
 
+def boot_good_ok(t, prefix):
+    """rime-boot-good.service finished with success (systemctl show prints its properties in its own order)."""
+    m = re.search(re.escape(prefix) + r": boot-good: (.*)", t)
+    if not m:
+        return False
+    props = dict(kv.split("=", 1) for kv in m.group(1).split() if "=" in kv)
+    return (props.get("Result") == "success" and props.get("ExecMainStatus") == "0"
+            and props.get("ExecMainExitTimestampMonotonic", "0") not in ("", "0"))
+
+
 def hidden(t):
     """The menu was never drawn (hideMenu after a good start): no countdown and no Rime entry before the first marker
     the booted system printed."""
@@ -231,7 +241,7 @@ class Scenario:
             problems.append("driver did not finish")
         # hideMenu: rime-boot-good.service ran on its own after multi-user.target and set the flag on the ESP GRUB
         # came from; on the custom disk that ESP is mounted nowhere (a moved machine), so it mounted it itself.
-        if not re.search(r"RIME-BOOTHOOK: boot-good: Result=success ExecMainStatus=0 ExecMainExitTimestampMonotonic=[1-9]", t):
+        if not boot_good_ok(t, "RIME-BOOTHOOK"):
             problems.append("rime-boot-good.service did not run and succeed")
         if "RIME-BOOTHOOK: flag: rime_boot_ok=1" not in t:
             problems.append("the flag is not set on the loader's ESP")
@@ -443,7 +453,7 @@ class MatrixScenario(Scenario):
                 problems.append("root not on the LUKS2 volume named by rd.luks.uuid")
         if "RIME-LAB: DONE, powering off" not in t:
             problems.append("driver did not finish")
-        if not re.search(r"RIME-LAB: boot-good: Result=success ExecMainStatus=0 ExecMainExitTimestampMonotonic=[1-9]", t):
+        if not boot_good_ok(t, "RIME-LAB"):
             problems.append("rime-boot-good.service did not run and succeed")
         if not re.search(r"RIME-LAB: boot-good\| rime-boot: mark-good: EFI/rime/boot.env on \S+: rime_boot_ok=1 ", t):
             problems.append("rime-boot-good.service did not set the flag")

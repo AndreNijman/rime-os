@@ -59,8 +59,9 @@ it names is there; 1 = not (an interrupted update); 2 = error; 3 = refused.
 
 ## Recovery from a bad generation (v1): manual, through the menu
 
-The menu is always shown (`timeout_style=menu`, `rime.boot.timeout` = 5 s; bootupd's static config shows it for 1 s)
-and lists every kept generation as `Rime (generation N, <date>)`: in `custom-cfg` the default first, then newest
+The menu (`timeout_style=menu`, `rime.boot.timeout` = 5 s; bootupd's static config shows it for 1 s) is shown at
+every start that follows one that did not go well, and always when `rime.boot.hideMenu` is off; after a good start it
+waits 1 s hidden and Esc shows it (see "Hiding the menu" below). It lists every kept generation as `Rime (generation N, <date>)`: in `custom-cfg` the default first, then newest
 first; in `bls` in blscfg's order (by the entry's `version`, which is the generation number: newest first), with
 the default chosen by its id (`set default=rime-generation-N`), so after a rollback it is not the first line. A user
 whose new generation does
@@ -68,9 +69,37 @@ not boot restarts and picks the previous one; `rime rollback` (or `nix-env --swi
 then makes it the default. Proven in OVMF for both layouts, Secure Boot on and off (`nix/probe/ovmf/boothook/`).
 
 There is no automatic fallback (boot counting) in v1, as D3 and D9 say. bootupd's static config ships none of
-Fedora's `grub.d` counting scripts, and GRUB cannot write its environment block on btrfs, which is where a migrated
-machine's `/boot/grub2` lives, so a `grubenv` counter could only work on the BLS layout. D3's later step (MOK-signed
-systemd-boot + UKI, `+N` boot counting written by this hook) is where automatic fallback belongs.
+Fedora's `grub.d` counting scripts. D3's later step (MOK-signed systemd-boot + UKI, `+N` boot counting written by this
+hook) is where automatic fallback belongs.
+
+## Hiding the menu (`rime.boot.hideMenu`, default on)
+
+Fedora's `menu_auto_hide`, adapted to Rime's layouts: the menu stays out of the way while starts go well, and is
+there the first time one does not.
+
+- **The flag** is `EFI/rime/boot.env` on the ESP GRUB was loaded from: a GRUB environment block (1024 bytes,
+  `grub-editenv`'s format) holding `rime_boot_ok`. It is on the ESP because GRUB can write an environment block on
+  FAT but not on btrfs, where a migrated machine's `/boot/grub2` lives; so the same file works for both layouts.
+- **GRUB** (the block at the end of `rime-nixos.cfg`, after `set default=`): takes its own device from `$cmdpath`, or
+  from `$fw_path` in Fedora's GRUB, where `$cmdpath` is empty (`regexp`, built into Fedora's signed GRUB), and if
+  `rime_boot_ok=1` there, writes `rime_boot_ok=0` back with `save_env` and only if that worked sets
+  `timeout_style=hidden`, `timeout=1`. Esc (or F4, or a held Shift) during
+  that second shows the menu, with no countdown. Every command is guarded: a missing file, a failed write or no
+  device leaves the 5 s menu, and prints nothing.
+- **`rime-boot mark-good`** (`rime-boot-good.service`, after `multi-user.target` and the greeter, wanted by
+  `multi-user.target` and required by nothing, so it never holds up a start) sets `rime_boot_ok=1`. It finds the ESP
+  by the `LoaderDevicePartUUID` EFI variable (the Boot Loader Interface; Fedora's GRUB sets it to the partition it
+  was loaded from, the device `$fw_path` names), uses a read-write vfat mount of it if there is one and otherwise
+  mounts it itself in the unit's private mount namespace (`mount(2)`; a moved machine's ESP is mounted nowhere). A
+  block GRUB wrote is rewritten in place, keeping any other variable; nothing is written when it already says 1. It
+  never writes an ESP that holds Windows Boot Manager, and every failure exits 0 with a log line: the next start
+  then shows the menu.
+- **Never hidden** when `custom.cfg` holds a menu entry that is not Rime's (the bootc installer's Windows entry):
+  the menu is then a choice between systems, not only recovery.
+- **A start that never reached the greeter** (a bad generation, a kernel panic, a power cut) left the flag at 0, so
+  the next start shows the menu for 5 s, the way it always did. Proven in OVMF with Fedora's shim and GRUB, both
+  layouts, Secure Boot on and off (`nix/probe/ovmf/boothook/`): shown at the first start, hidden after a good one,
+  shown after the bad generation, Esc shows the hidden menu.
 
 ## The way back when Secure Boot refuses the kernel
 

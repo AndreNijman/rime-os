@@ -1033,6 +1033,15 @@ class HideMenuTest(unittest.TestCase):
         self.loader_uuid(self.UUID.upper())  # GRUB writes it upper case
         self.mounts(f"40 24 0:40 / {self.esp} rw,relatime - vfat {self.devfile} rw\n")
 
+    def test_block_finds_the_esp_in_fedoras_grub(self):
+        # Fedora's GRUB leaves $cmdpath empty and names its own directory in $fw_path (measured in OVMF): a block
+        # that read $cmdpath alone never hid the menu on a real Rime machine.
+        b = HOOK.HIDE_BLOCK
+        self.assertIn('"${cmdpath}"', b)
+        self.assertIn('"${fw_path}"', b)
+        self.assertLess(b.index('"${cmdpath}"'), b.index('"${fw_path}"'))
+        self.assertIn('if [ -n "${rime_boot_esp}" ]; then', b)
+
     def loader_uuid(self, text):
         p = os.path.join(self.efivars, f"LoaderDevicePartUUID-{HOOK.LOADER_GUID}")
         if text is None:
