@@ -372,6 +372,9 @@ class ManagerTest(unittest.TestCase):
         third.answer(PASSWORD)
         third.wait("verification-complete")
         third.wait_closed()
+        # The unlock reaches logind on its own D-Bus call: wait for it here, or it lands in the NEXT test's count
+        # (test_answer_without_a_question_is_an_error saw ['s1'] in CI).
+        self.assertTrue(iterate_until(lambda: self.new_unlocks() == ["s1"]), self.new_unlocks())
 
     def test_connected_channel_with_no_conversation_closes_when_idle(self):
         c = Client()
@@ -461,7 +464,7 @@ class ManagerTest(unittest.TestCase):
                     self.assertNotIn("secret-info-query", c.names())
                     c.verifier.call_cancel_sync(None)
                     c.wait_closed()
-        self.assertEqual(self.new_unlocks(), ["s1", "s1", "s1"])
+        self.assertTrue(iterate_until(lambda: self.new_unlocks() == ["s1", "s1", "s1"]), self.new_unlocks())
 
     def test_fallback_to_the_users_graphical_session(self):
         # GNOME Shell runs as a systemd user unit: its pid is in no session.
