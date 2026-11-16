@@ -143,6 +143,10 @@ in
             f"cat {src}/etc/NetworkManager/system-connections/*.nmconnection | sed -n 's/^id=//p'").splitlines())
         print("carried connection names:", sorted(old))
         assert old and old <= names, f"missing connections: {old - names}"
+        # NetworkManager kept the old secret (the Wi-Fi MAC per network, the DHCP client id) and did not make its own
+        key = f"{src}/var/lib/NetworkManager/secret_key"
+        if m.execute(f"test -f {key}")[0] == 0:
+            m.succeed(f"cmp {key} /var/lib/NetworkManager/secret_key")
 
     def check_mounts(m):
         print(m.succeed(f"{HL} host show"))

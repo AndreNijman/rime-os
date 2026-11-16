@@ -1253,6 +1253,12 @@ class Carry:
                     self.put_file(f"{nm}/{fn}", f"{nm}/{fn}", 0o600)
                     self.profile_files(f"{nm}/{fn}")
             self.copied.add(nm)
+        # NetworkManager's per-machine secret: with the machine id it derives the Wi-Fi MAC on every network
+        # (wifi.cloned-mac-address=stable-ssid), the IPv6 stable-privacy addresses and the DHCP client id. A move
+        # without it showed every network a new MAC: a new lease and IP, and a network that admits by MAC no longer
+        # knew the machine.
+        if s.is_file("var/lib/NetworkManager/secret_key"):
+            self.put_file("var/lib/NetworkManager/secret_key", "var/lib/NetworkManager/secret_key", 0o600)
         if s.is_dir("etc/ssh"):
             for fn in sorted(os.listdir(s.p("etc/ssh"))):
                 if re.fullmatch(r"ssh_host_\w+_key(\.pub)?", fn) and s.is_file(f"etc/ssh/{fn}"):

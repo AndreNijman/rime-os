@@ -137,6 +137,7 @@ class Fixture(unittest.TestCase):
         os.symlink("/usr/lib/systemd/system/rime-guest-session@.service",
                    f"{e}/systemd/system/user-runtime-dir@1001.service.wants/rime-guest-session@1001.service")
         write(f"{self.src}/var/lib/bluetooth/70:1A/settings", "[General]\n", 0o600)
+        write(f"{self.src}/var/lib/NetworkManager/secret_key", "TEST-nm-secret-key-0123456789abcdef\n", 0o600)
         write(f"{self.src}/var/lib/rime-greet/last-desktop", "hyprland")
         os.symlink("rime", f"{self.src}/var/lib/apex")
 
@@ -202,6 +203,9 @@ class CarryTest(Fixture):
         self.assertEqual(self.read("etc/machine-id"), "0f1a70000000400080000000c0ffee01\n")
         nm = f"{self.dest}/etc/NetworkManager/system-connections/Home Wi-Fi.nmconnection"
         self.assertEqual(oct(os.stat(nm).st_mode & 0o777), "0o600")
+        # the same Wi-Fi MAC on every network after the move (stable-ssid is derived from this key)
+        self.assertEqual(self.read("var/lib/NetworkManager/secret_key"), "TEST-nm-secret-key-0123456789abcdef\n")
+        self.assertEqual(oct(os.stat(f"{self.dest}/var/lib/NetworkManager/secret_key").st_mode & 0o777), "0o600")
         self.assertEqual(self.read("etc/ssh/ssh_host_ed25519_key"), "PRIVATE-TEST\n")
         self.assertFalse(os.path.exists(f"{self.dest}/etc/ssh/sshd_config"))
         self.assertEqual(self.read("var/lib/cups/printers.conf"), "# printers\n")
