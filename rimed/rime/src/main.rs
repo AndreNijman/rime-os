@@ -2519,7 +2519,7 @@ fn fan_restore_locally() -> i32 {
     let writer = rimed_core::RealWriter::new(dry);
     let n = rimed_core::fan::restore_to_firmware(Path::new("/sys"), &cfg, &writer);
     if n == 0 {
-        println!("rime: no controllable fan found — nothing to restore");
+        println!("rime: no fan to hand back — none found, or the firmware already controls them");
     } else {
         println!(
             "rime: fans handed back to firmware control ({n} action(s){})",

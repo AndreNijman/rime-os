@@ -32,6 +32,7 @@ let
 in
 {
   boot-hook-unit = pkgs.runCommand "rime-boot-hook-unit" { nativeBuildInputs = [ pkgs.python3 ]; } ''
+    export GRUB_EDITENV=${pkgs.grub2}/bin/grub-editenv
     python3 -I -W error::ResourceWarning ${./boot-hook-test.py} ${hook}/bin/rime-boot > $out 2>&1 \
       || { cat $out; exit 1; }
     cat $out

@@ -170,6 +170,59 @@ def menu_order(text):
     return seen
 
 
+def boot_good_ok(t, prefix):
+    """rime-boot-good.service finished with success (systemctl show prints its properties in its own order)."""
+    m = re.search(re.escape(prefix) + r": boot-good: (.*)", t)
+    if not m:
+        return False
+    props = dict(kv.split("=", 1) for kv in m.group(1).split() if "=" in kv)
+    return (props.get("Result") == "success" and props.get("ExecMainStatus") == "0"
+            and props.get("ExecMainExitTimestampMonotonic", "0") not in ("", "0"))
+
+
+def hidden(t):
+    """The menu was never drawn (hideMenu after a good start): no countdown and no Rime entry before the first marker
+    the booted system printed."""
+    return "automatically" not in t and not MENU_TITLE.search(t.split("RIME-BOOTHOOK:")[0])
+
+
+def key_to_menu(b, want=1, timeout=20, key="f4"):
+    """Press F4 from the moment the firmware starts the loader until GRUB draws the menu (hidden: F4, Esc or a held
+    Shift shows it, with no countdown). Never before "BdsDxe: starting": a key there opens OVMF's setup.
+
+    F4, not Esc: the menu is drawn inside bootupd's configfile, and Esc AT the menu returns to the outer, empty menu
+    (GRUB says "ESC to return previous menu"), which drops to the grub> prompt. Under Secure Boot shim's debug output
+    makes the serial console lag the screen by seconds, so a key sent after the menu appeared but before the serial
+    shows it lands on the menu. F4 is unbound there."""
+    if not b.wait_for(lambda t: "BdsDxe: starting" in t, 120):
+        return None
+    end = time.time() + timeout
+    while time.time() < end:
+        b.qmp.key(key)
+        time.sleep(0.25)
+        t = b.text()
+        if len(menu_order(t)) >= want:
+            time.sleep(1.0)
+            return b.text()
+    return None
+
+
+def open_menu(b, want, hides, timeout=30):
+    """The menu after a start that went well. Hidden (hides): F4 shows it, without a countdown. Not hidden (another
+    system's entry in custom.cfg): it is drawn by itself with its countdown. Returns (menu text or None, problems)."""
+    if hides:
+        menu = key_to_menu(b, want=want, timeout=timeout)
+        if not menu:
+            return None, ["F4 did not show the hidden menu"]
+        if "automatically" in menu:
+            return menu, ["the menu was drawn with a countdown: it was not hidden"]
+        return menu, []
+    menu = b.wait_for(lambda t: "automatically" in t and len(menu_order(t)) >= want, 180)
+    if not menu:
+        return None, ["the menu with its countdown never appeared (Windows in custom.cfg)"]
+    return menu, []
+
+
 class Scenario:
     def __init__(self, layout, fw):
         self.layout, self.fw = layout, fw
@@ -185,6 +238,9 @@ class Scenario:
                         f"{LAB}/disks/{layout}/disk.raw", self.disk], check=True)
         self.results = []
         self.want_sb = "enabled" if fw == "sb-mok" else "disabled"
+        # The lab's custom.cfg has the bootc installer's Windows entry, so on that disk the menu is never hidden:
+        # rime-boot keeps it with its countdown after every start (the dual-boot user picks a system there).
+        self.hides = self.layout != "custom"
 
     def verdict(self, boot, ok, what, detail=""):
         row = "\t".join([("PASS" if ok else "FAIL"), self.name, f"boot{boot.n}", what,
@@ -207,6 +263,19 @@ class Scenario:
             problems.append("kernel not the hook's content-addressed signed copy")
         if "RIME-BOOTHOOK: DONE, powering off" not in t:
             problems.append("driver did not finish")
+        # hideMenu: rime-boot-good.service ran on its own after multi-user.target and set the flag on the ESP GRUB
+        # came from; on the custom disk that ESP is mounted nowhere (a moved machine), so it mounted it itself.
+        if not boot_good_ok(t, "RIME-BOOTHOOK"):
+            problems.append("rime-boot-good.service did not run and succeed")
+        if "RIME-BOOTHOOK: flag: rime_boot_ok=1" not in t:
+            problems.append("the flag is not set on the loader's ESP")
+        want_at = "[/boot]" if self.layout == "bls" else "[]"
+        if not re.search(r"RIME-BOOTHOOK: loader partition: [0-9a-f-]{36} mounted at: " + re.escape(want_at), t):
+            problems.append(f"the loader's ESP is not mounted at {want_at}")
+        # (only a boot that ran the hook: an install or a rollback)
+        if (not self.hides and "hook| rime-boot:" in t
+                and "custom.cfg has an entry for another system: the menu is always shown" not in t):
+            problems.append("the hook did not say why the menu stays shown (Windows in custom.cfg)")
         if self.layout == "custom":
             with open(f"{LAB}/disks/custom/ostree-before.sha256") as f:
                 want = f.read().split()[0]
@@ -215,6 +284,12 @@ class Scenario:
             if "custom.cfg windows entry: 1" not in t:
                 problems.append("custom.cfg's Windows entry not kept exactly once")
         return problems
+
+    def menu_after_good_start(self, t):
+        """After a start that reached rime-boot-good: hidden, unless custom.cfg holds another system's entry."""
+        if self.hides:
+            return [] if hidden(t) else ["the menu was drawn after a good start"]
+        return [] if "automatically" in t else ["the menu was hidden although custom.cfg has a Windows entry"]
 
     def run(self):
         g = self.gens
@@ -232,23 +307,21 @@ class Scenario:
         self.verdict(b, not p, "gen1 boots by default, switch-to-configuration boot makes BAD gen2 the default",
                      "; ".join(p) or f"menu {menu_order(menu or '')}")
 
-        # 2. generation 2 by default, and it fails.
+        # 2. generation 2 by default, and it fails. Boot 1 went well: the menu stays hidden.
         b = Boot(self, 2, timeout=240)
-        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 120)
-        order = menu_order(menu or "")
-        if menu:
-            b.qmp.shot(b.base + "-menu.png")
         rc, t = b.finish()
         p = []
         if "RIME-BOOTHOOK: BAD generation 2 reached initrd emergency mode" not in t:
             p.append("no bad-generation marker")
         if "RIME-BOOTHOOK: stage-2 reached" in t:
             p.append("something reached stage 2")
-        if order[:1] != [2] and self.layout == "custom":
-            p.append(f"custom menu does not list the default first: {order}")
-        self.verdict(b, not p, "BAD gen2 is the default and fails at boot", "; ".join(p) or f"menu {order}")
+        p += self.menu_after_good_start(t)
+        self.verdict(b, not p, "BAD gen2 is the default and fails at boot; menu " +
+                     ("hidden (boot 1 went well)" if self.hides else "shown (Windows in custom.cfg)"),
+                     "; ".join(p) or ("menu hidden" if hidden(t) else "menu shown"))
 
-        # 3. pick generation 1 in the GRUB menu by keyboard; it boots and installs generation 3.
+        # 3. boot 2 never got to rime-boot-good: the menu is shown with its countdown. Pick generation 1 by keyboard;
+        # it boots and installs generation 3.
         b = Boot(self, 3, action=f"install:{g['gen3']}")
         menu = b.wait_for(lambda t: "automatically" in t and {1, 2} <= set(menu_order(t)), 120)
         p = []
@@ -277,14 +350,13 @@ class Scenario:
         self.verdict(b, not p, "menu driven to gen1 (keys: " + " ".join(keys + ["ret"]) + "), boots, installs gen3",
                      "; ".join(p) or f"menu {menu_order(menu or '')}")
 
-        # 4. generation 3 by default, and it boots; then roll the profile back to generation 1 (D6).
+        # 4. generation 3 by default, and it boots (menu hidden: boot 3 went well); then roll the profile back to
+        # generation 1 (D6).
         b = Boot(self, 4, action="rollback:1")
-        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 120)
-        order4 = menu_order(menu or "")
-        if menu:
-            b.qmp.shot(b.base + "-menu.png")
         rc, t = b.finish()
+        order4 = "hidden" if hidden(t) else "shown"
         p = self.good(t, 3)
+        p += self.menu_after_good_start(t)
         if "RIME-BOOTHOOK: rollback rc=0" not in t:
             p.append("rollback to generation 1 failed")
         chk = check_json(t)
@@ -294,19 +366,24 @@ class Scenario:
         self.verdict(b, not p, "GOOD gen3 is the default and boots; rollback to gen1 rewrites the default",
                      "; ".join(p) or f"menu {order4}")
 
-        # 5. generation 1 by default (by GRUB id: in the BLS layout it is not the first entry).
+        # 5. generation 1 by default (by GRUB id: in the BLS layout it is not the first entry). The menu is hidden
+        # (boot 4 went well): F4 shows it, without a countdown; Return boots the default.
         b = Boot(self, 5)
-        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 120)
+        menu, p = open_menu(b, 3, self.hides)
         order = menu_order(menu or "")
         if menu:
             b.qmp.shot(b.base + "-menu.png")
+            b.qmp.key("ret")
         rc, t = b.finish()
-        p = self.good(t, 1)
+        p += self.good(t, 1)
         if "RIME-BOOTHOOK: menu| set default=rime-generation-1" not in t:
             p.append("menu default is not generation 1")
         if sorted(order) != [1, 2, 3]:
             p.append(f"menu does not list generations 1-3: {order}")
-        self.verdict(b, not p, "after the rollback gen1 is the default (by id) and boots",
+        if order[:1] != [1] and self.layout == "custom":
+            p.append(f"custom menu does not list the default first: {order}")
+        self.verdict(b, not p, "after the rollback gen1 is the default (by id) and boots; " +
+                     ("F4 shows the hidden menu" if self.hides else "the menu is shown (Windows in custom.cfg)"),
                      "; ".join(p) or f"menu {order} (gen1 at position {order.index(1) if 1 in order else '?'})")
 
         for f in (self.vars, self.disk):
@@ -346,6 +423,9 @@ class MatrixScenario(Scenario):
                         f"{LAB}/disks/{cell}/disk.raw", self.disk], check=True)
         self.results = []
         self.want_sb = "enabled" if fw == "sb-mok" else "disabled"
+        # The lab's custom.cfg has the bootc installer's Windows entry, so on that disk the menu is never hidden:
+        # rime-boot keeps it with its countdown after every start (the dual-boot user picks a system there).
+        self.hides = self.layout != "custom"
         self.luks_uuid = None
         if self.luks:
             with open(f"{LAB}/disks/{cell}/luks.env") as f:
@@ -405,6 +485,10 @@ class MatrixScenario(Scenario):
                 problems.append("root not on the LUKS2 volume named by rd.luks.uuid")
         if "RIME-LAB: DONE, powering off" not in t:
             problems.append("driver did not finish")
+        if not boot_good_ok(t, "RIME-LAB"):
+            problems.append("rime-boot-good.service did not run and succeed")
+        if not re.search(r"RIME-LAB: boot-good\| rime-boot: mark-good: EFI/rime/boot.env on \S+: rime_boot_ok=1 ", t):
+            problems.append("rime-boot-good.service did not set the flag")
         if self.layout == "custom":
             with open(f"{LAB}/disks/{self.cell}/ostree-before.sha256") as f:
                 want = f.read().split()[0]
@@ -432,19 +516,25 @@ class MatrixScenario(Scenario):
         self.verdict(b, not p, "gen1 (default) reaches the greeter; switch-to-configuration boot makes BAD gen2 the default",
                      "; ".join(p) or f"menu {menu_order(menu or '')}")
 
-        # 2. generation 2 by default fails.
+        # 2. generation 2 by default fails. Boot 1 reached the greeter, so the menu is hidden (hideMenu): F4 shows
+        # it, without a countdown; Return boots the default.
         b = self.boot(2)
-        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 180)
+        menu, p = open_menu(b, 2, self.hides)
         order = menu_order(menu or "")
         if menu:
             b.qmp.shot(b.base + "-menu.png")
-        p = self.type_passphrase(b, "")
+            b.qmp.key("ret")
+        p += self.type_passphrase(b, "")
         rc, t = b.finish()
         if "RIME-LAB: BAD generation 2 reached initrd emergency mode" not in t:
             p.append("no bad-generation marker")
         if "RIME-LAB: stage-2 reached" in t:
             p.append("something reached stage 2")
-        self.verdict(b, not p, "BAD gen2 is the default and fails at boot", "; ".join(p) or f"menu {order}")
+        if order[:1] != [2] and self.layout == "custom":
+            p.append(f"custom menu does not list the default first: {order}")
+        self.verdict(b, not p, "BAD gen2 is the default and fails at boot; " +
+                     ("F4 shows the hidden menu" if self.hides else "the menu is shown (Windows in custom.cfg)"),
+                     "; ".join(p) or f"menu {order}")
 
         # 3. pick generation 1 in the GRUB menu by keyboard; it reaches the greeter (B9 plain, B10 LUKS).
         b = self.boot(3)
@@ -520,6 +610,7 @@ class SbRecovery(Scenario):
                         f"{LAB}/disks/{layout}/disk.raw", self.disk], check=True)
         self.results = []
         self.want_sb = "enabled"
+        self.hides = self.layout != "custom"
         self.log = []
         self._since = 0
 
@@ -639,15 +730,14 @@ class SbRecovery(Scenario):
         # 3. SB off, same disk: the entry is hidden; the default generation boots.
         subprocess.run(["cp", f"{LAB}/fw/vars-sb-off.fd", self.vars], check=True)
         self.want_sb = "disabled"
+        # Boot 2 went well, so the menu is hidden (hideMenu): F4 shows it, Return boots the default.
         b = Boot(self, 3)
-        menu = b.wait_for(lambda t: "automatically" in t and menu_order(t), 120)
+        menu, shown = open_menu(b, 1, self.hides)
         if menu:
-            time.sleep(1.0)
             b.qmp.shot(b.base + "-menu.png")
+            b.qmp.key("ret")
         rc, t = b.finish()
-        p = self.good(t, 1)
-        if not menu:
-            p.append("no GRUB menu")
+        p = self.good(t, 1) + shown
         if "Enrol the Rime OS" in t:
             p.append("the enrol entry shows with Secure Boot off")
         self.verdict(b, not p, "SB off: the enrol entry is not in the menu; gen1 boots",

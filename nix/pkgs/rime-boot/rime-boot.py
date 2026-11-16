@@ -33,10 +33,20 @@ Space: when the new files fit only after the files of generations no longer list
 writes a menu of the kept generations whose files are already on disk (bootable as it stands), removes what that
 menu does not name, and only then copies; a power cut in between boots one of those generations.
 
-Recovery in v1 is manual (D3, D9): the menu is always shown (timeout_style=menu, `timeout` seconds) and every kept
-generation is listed, so a user whose new generation does not boot picks an older one. There is no boot counting:
-bootupd's static GRUB config has no counting scripts, and GRUB cannot write its environment block on btrfs (the
-/boot of a migrated machine), so a counter would work on one layout only. See nix/pkgs/rime-boot/README.md.
+Recovery in v1 is manual (D3, D9): every kept generation is listed, so a user whose new generation does not boot
+picks an older one. The menu is shown (timeout_style=menu, `timeout` seconds) unless the previous start went well
+(`hideMenu`, the default): then GRUB waits 1 s with the menu hidden, Esc shows it. "Went well" is a flag on the ESP
+GRUB was loaded from (EFI/rime/boot.env, a GRUB environment block: GRUB can write one on FAT, not on btrfs). GRUB
+clears it on every start before booting; `rime-boot mark-good` (rime-boot-good.service, once the system reached
+multi-user.target and the greeter) sets it again. A start that never gets there leaves it cleared, so the next
+start shows the menu. Every failure (no flag file, GRUB cannot write it, no ESP found, an entry for another system
+in custom.cfg) ends in the menu being shown. There is no boot counting (no automatic fallback): bootupd's static
+GRUB config has no counting scripts. See nix/pkgs/rime-boot/README.md.
+
+`rime-boot mark-good` finds the ESP by the LoaderDevicePartUUID EFI variable (the Boot Loader Interface; Fedora's
+GRUB sets it to the partition it was loaded from, the same device as GRUB's $cmdpath), mounts it in the unit's
+private mount namespace when it is not mounted already, and writes only EFI/rime/boot.env there. It never writes
+an ESP that holds Windows Boot Manager.
 
 `rime-boot check` is read-only: it prints (JSON) which generation the menu boots by default and whether that is the
 profile's current generation with every file in place (exit 0), or not (exit 1). Exit 2 = error, 3 = refused.
@@ -73,6 +83,37 @@ INCLUDE_BLOCK = (
     "fi\n" + BLOCK_END + "\n"
 )
 LAYOUTS = ("bls", "custom-cfg")
+# Hiding the menu after a good start (hideMenu; see the module docstring and README "Hiding the menu").
+GOOD_ENV_REL = ("EFI", "rime", "boot.env")
+GOOD_VAR = "rime_boot_ok"
+ENVBLK_HEADER = "# GRUB Environment Block\n"
+ENVBLK_SIZE = 1024
+LOADER_GUID = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"  # the Boot Loader Interface's vendor GUID (LoaderInfo, ...)
+PARTUUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# After `set default=` (custom-cfg: after every entry). GRUB's own device is the "(hdX,gptY)" part of $cmdpath
+# (upstream GRUB) or of $fw_path (Fedora's GRUB, where $cmdpath is empty: measured in OVMF); every command is guarded,
+# so a missing or unwritable flag file leaves the menu shown and prints nothing. The flag is cleared BEFORE the menu
+# is hidden: if GRUB cannot write it, the menu stays.
+HIDE_BLOCK = r"""# The last start went well (rime-boot mark-good set the flag): wait 1 s with the menu hidden; Esc shows it.
+set rime_boot_esp=
+regexp --set=1:rime_boot_esp '^(\([^)]+\))/' "${cmdpath}"
+if [ -z "${rime_boot_esp}" ]; then
+  regexp --set=1:rime_boot_esp '^(\([^)]+\))/' "${fw_path}"
+fi
+if [ -n "${rime_boot_esp}" ]; then
+  if [ -f ${rime_boot_esp}/EFI/rime/boot.env ]; then
+    set rime_boot_ok=
+    load_env --file ${rime_boot_esp}/EFI/rime/boot.env rime_boot_ok
+    if [ "${rime_boot_ok}" = "1" ]; then
+      set rime_boot_ok=0
+      if save_env --file ${rime_boot_esp}/EFI/rime/boot.env rime_boot_ok; then
+        set timeout_style=hidden
+        set timeout=1
+      fi
+    fi
+  fi
+fi
+"""
 # The Secure Boot key entry (README "The way back when Secure Boot refuses the kernel"). These markers and this text
 # are the bootc helper's (rime-os files/system/libexec/rime-secureboot-key, `block`), byte for byte: a machine that
 # moved from bootc keeps exactly one block whichever of the two wrote it last. boot-hook-unit pins its sha256.
@@ -166,6 +207,11 @@ DEFAULTS = {
     # The DER certificate the kernel is signed with (nix/modules/boot.nix, rime.boot.mokCertificate), or None: no
     # Rime-signed kernel, nothing to enrol, custom.cfg's Secure Boot block left as it is.
     "mokCert": None,
+    # Hide the menu after a good start (see the module docstring). efivars/devDir/espMountDir: where mark-good looks.
+    "hideMenu": True,
+    "efivars": "/sys/firmware/efi/efivars",
+    "devDir": "/dev/disk/by-partuuid",
+    "espMountDir": "/run/rime-boot/esp",
 }
 
 
@@ -572,7 +618,7 @@ def bls_entry(g, files, grub_path, host_params, vendors):
     )
 
 
-def menu_file(layout, gens, default, files, grub_path, host_params, timeout, vendors):
+def menu_file(layout, gens, default, files, grub_path, host_params, timeout, vendors, hide=False):
     lines = [
         "# Rime boot menu, written by rime-boot (boot.loader.external). Do not edit: every",
         "# switch-to-configuration boot rewrites it. Sourced from custom.cfg (bootupd's 41_custom.cfg).",
@@ -591,7 +637,17 @@ def menu_file(layout, gens, default, files, grub_path, host_params, timeout, ven
                 "}",
             ]
     lines.append(f"set default={default.entry_id}")
-    return "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n" + (HIDE_BLOCK if hide else "")
+
+
+def other_entries(custom):
+    """True when custom.cfg has a menu entry that is not Rime's (outside the rime-boot and Secure Boot key blocks),
+    e.g. the bootc installer's Windows entry: then the menu is a choice between systems and is never hidden."""
+    if not custom:
+        return False
+    rest = re.sub(re.escape(BLOCK_BEGIN) + r".*?" + re.escape(BLOCK_END), "", custom, flags=re.S)
+    rest = re.sub(re.escape(SB_BEGIN) + r".*?(" + re.escape(SB_END) + r"|\Z)", "", rest, flags=re.S)
+    return re.search(r"^\s*(menuentry|submenu)\b", rest, re.M) is not None
 
 
 def with_include_block(old):
@@ -914,15 +970,19 @@ def write_menus(cfg, boot, grub2, layout, gens, default, files, grub_path, host_
                 os.unlink(os.path.join(edir, name))
         for g in gens:
             atomic_write(os.path.join(edir, g.entry_id + ".conf"), bls_entry(g, files, grub_path, host_params, vendors))
-    atomic_write(
-        os.path.join(grub2, MENU_FILE),
-        menu_file(layout, gens, default, files, grub_path, host_params, cfg["timeout"], vendors),
-    )
     custom = os.path.join(grub2, "custom.cfg")
     try:
         old = read_text(custom)
     except FileNotFoundError:
         old = None
+    hide = bool(cfg.get("hideMenu"))
+    if hide and other_entries(old):
+        log("custom.cfg has an entry for another system: the menu is always shown")
+        hide = False
+    atomic_write(
+        os.path.join(grub2, MENU_FILE),
+        menu_file(layout, gens, default, files, grub_path, host_params, cfg["timeout"], vendors, hide),
+    )
     atomic_write(custom, custom_cfg(old, secureboot))
 
 
@@ -944,6 +1004,142 @@ def collect_garbage(boot, rdir, layout, gens, referenced):
                 log(f"remove unreferenced {p}")
                 os.unlink(p)
         fsync_dir(rdir)
+
+
+# ── mark-good: this start went well, hide the menu at the next one ─────────────
+
+def envblock(values):
+    """A GRUB environment block (grub-editenv's format): the header, name=value lines, '#' up to 1024 bytes."""
+    body = ENVBLK_HEADER + "".join(f"{k}={v}\n" for k, v in values.items())
+    if len(body) > ENVBLK_SIZE:
+        raise HookError("environment block too large")
+    return (body + "#" * (ENVBLK_SIZE - len(body))).encode()
+
+
+def parse_envblock(data):
+    """{name: value} of a GRUB environment block, or None when `data` is not one."""
+    if len(data) != ENVBLK_SIZE or not data.startswith(ENVBLK_HEADER.encode()):
+        return None
+    out = {}
+    for line in data[len(ENVBLK_HEADER):].decode("utf-8", "replace").split("\n"):
+        if line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        out[k] = v
+    return out
+
+
+def loader_partuuid(cfg):
+    """The partition GRUB was loaded from (LoaderDevicePartUUID, UTF-16), lower case, or None."""
+    p = os.path.join(cfg["efivars"], f"LoaderDevicePartUUID-{LOADER_GUID}")
+    try:
+        with open(p, "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    s = raw[4:].decode("utf-16-le", "replace").rstrip("\0").strip().lower()
+    return s if PARTUUID_RE.match(s) else None
+
+
+def mount_of_device(cfg, dev):
+    """A read-write vfat mount of block device `dev` (from mountinfo), or None."""
+    want = os.path.realpath(dev)
+    try:
+        with open(cfg["mountinfo"], encoding="utf-8") as f:
+            for line in f:
+                fields = line.split()
+                if "-" not in fields:
+                    continue
+                sep = fields.index("-")
+                if len(fields) < sep + 3 or fields[sep + 1] != "vfat":
+                    continue
+                if os.path.realpath(_unescape_mountinfo(fields[sep + 2])) != want:
+                    continue
+                if "rw" in fields[5].split(",") and os.path.isdir(_unescape_mountinfo(fields[4])):
+                    return _unescape_mountinfo(fields[4])
+    except OSError:
+        return None
+    return None
+
+
+# How mark-good mounts an ESP that is mounted nowhere (a moved machine). None here: this program is the boot hook and
+# must not be able to run a program, so it never imports ctypes (nix/tests/boot-loader-scan.py refuses it). The
+# service's own program, rime-boot-good (rime-boot-good.py), sets it to a mount(2) call before calling main().
+# MOUNT_FAT(dev, where) mounts `dev` (vfat) read-write at `where` and returns the unmount; raises OSError.
+MOUNT_FAT = None
+
+
+def write_flag(esp):
+    """Set GOOD_VAR=1 in the ESP's EFI/rime/boot.env. An existing block is rewritten in place (GRUB's save_env writes
+    the same 1024 bytes in place), keeping its other variables; a missing or damaged one is replaced whole.
+    Returns what happened, for the log."""
+    path = os.path.join(esp, *GOOD_ENV_REL)
+    try:
+        with open(path, "rb") as f:
+            old = f.read()
+    except FileNotFoundError:
+        old = None
+    values = parse_envblock(old) if old is not None else None
+    if values is not None and values.get(GOOD_VAR) == "1":
+        return "already set"
+    new = envblock({**(values or {}), GOOD_VAR: "1"})
+    if values is not None:
+        with open(path, "r+b") as f:
+            f.write(new)
+            f.flush()
+            os.fsync(f.fileno())
+    else:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        atomic_write(path, new)
+    with open(path, "rb") as f:
+        if f.read() != new:
+            raise OSError(errno.EIO, "read back differs", path)
+    return "set"
+
+
+def mark_good(cfg):
+    """rime-boot-good.service: this start went well. Never fails the unit over a missing piece (exit 0 and a log
+    line saying why the menu will be shown); every way out leaves the menu shown at the next start."""
+    if not cfg.get("hideMenu"):
+        log("mark-good: hideMenu is off; nothing to do")
+        return 0
+    uuid = loader_partuuid(cfg)
+    if uuid is None:
+        log("mark-good: the boot loader did not say which partition it started from (no LoaderDevicePartUUID): "
+            "the menu stays shown")
+        return 0
+    dev = os.path.join(cfg["devDir"], uuid)
+    if not os.path.exists(dev):
+        log(f"mark-good: {dev} does not exist: the menu stays shown")
+        return 0
+    esp = mount_of_device(cfg, dev)
+    unmount = None
+    if esp is None and MOUNT_FAT is None:
+        log(f"mark-good: the ESP {dev} is not mounted read-write and `rime-boot` does not mount (rime-boot-good "
+            "does): the menu stays shown")
+        return 0
+    if esp is None:
+        try:
+            unmount = MOUNT_FAT(dev, cfg["espMountDir"])
+            esp = cfg["espMountDir"]
+        except OSError as e:
+            log(f"mark-good: could not mount the ESP {dev}: {e}: the menu stays shown")
+            return 0
+    try:
+        if windows_boot_manager(esp):
+            log(f"mark-good: the ESP {dev} holds Windows Boot Manager; Rime never writes Windows' ESP: the menu stays "
+                "shown")
+            return 0
+        try:
+            what = write_flag(esp)
+        except OSError as e:
+            log(f"mark-good: could not write {'/'.join(GOOD_ENV_REL)} on {dev}: {e}: the menu stays shown")
+            return 0
+        log(f"mark-good: {'/'.join(GOOD_ENV_REL)} on {dev}: {GOOD_VAR}=1 ({what}); the next start hides the menu")
+        return 0
+    finally:
+        if unmount is not None:
+            unmount()
 
 
 # ── check (read-only) ──────────────────────────────────────────────────────────
@@ -1009,11 +1205,14 @@ def main(argv=None):
     pi = sub.add_parser("install", help="write the boot menu (what switch-to-configuration runs)")
     pi.add_argument("toplevel", nargs="?")
     sub.add_parser("check", help="read-only: which generation the menu boots by default")
+    sub.add_parser("mark-good", help="this start went well: hide the menu at the next one (rime-boot-good.service)")
     args = ap.parse_args(argv)
     try:
         cfg = load_config(args.config)
         if args.cmd == "check":
             return check(cfg)
+        if args.cmd == "mark-good":
+            return mark_good(cfg)
         if args.cmd in (None, "install"):
             return install(cfg, getattr(args, "toplevel", None))
     except Refusal as e:

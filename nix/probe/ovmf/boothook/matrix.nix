@@ -106,7 +106,8 @@ let
       systemd.services.rime-bootmatrix-lab = {
         description = "Rime boot matrix lab: stage-2 markers, greeter wait, driver";
         wantedBy = [ "multi-user.target" ];
-        after = [ "systemd-user-sessions.service" ];
+        # After multi-user.target (as rime-boot-good.service is), so it can report what that unit did this start.
+        after = [ "systemd-user-sessions.service" "multi-user.target" "rime-boot-good.service" ];
         path = [
           config.nix.package
           pkgs.coreutils
@@ -182,6 +183,8 @@ let
               say "install rc=$rc profile now $(readlink /nix/var/nix/profiles/system)"
               ;;
           esac
+          say "boot-good: $(systemctl show -p Result -p ExecMainStatus -p ExecMainExitTimestampMonotonic rime-boot-good.service | tr '\n' ' ')"
+          journalctl -b -o cat -u rime-boot-good.service | grep 'rime-boot:' | sed 's/^/RIME-LAB: boot-good| /' || true
           say "rime-boot check: $(/run/current-system/sw/bin/rime-boot check 2>&1 | tr -s ' \n' ' ')"
           if [ -d /boot/loader/entries ] && [ ! -L /boot/loader ]; then
             for e in /boot/loader/entries/*.conf; do sed "s#^#RIME-LAB: entry $(basename "$e")| #" "$e"; done
