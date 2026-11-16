@@ -521,6 +521,10 @@ in
         # size: 32-bit ALSA (pkgsi686Linux.pipewire) is gaming.nix's; bootc's image had no i686 audio (docs/nixos/closure.md).
         pulse.enable = true;
         wireplumber.enable = true;
+        # No X11 bell. nixpkgs builds libpipewire-module-x11-bell and pipewire.conf loads it whenever an X display
+        # answers (Xwayland). When Xwayland goes away at logout the module's X I/O error handler crashes pipewire
+        # (SEGV in libspa-support, a core dump at every shutdown). The bootc image never installed the module.
+        extraConfig.pipewire."90-rime-no-x11-bell"."context.properties"."module.x11.bell" = false;
       };
 
       # ── Input methods: fcitx5 (Containerfile.core:1786-1814) ──────────────────────────────────────

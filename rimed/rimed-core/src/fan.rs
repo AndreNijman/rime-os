@@ -552,12 +552,25 @@ pub fn plan_firmware_restore(inv: &FanInventory) -> Vec<Action> {
 /// `rime fan restore --local`, and therefore the `ExecStopPost=` hook that runs
 /// after a crash, when no in-process restore could possibly have happened.
 /// Returns how many actions were attempted.
+///
+/// A fan whose `pwm*_enable` already reads `2` (firmware automatic) is skipped:
+/// that is the state the ladder's second rung writes, so there is nothing to hand
+/// back. Some drivers refuse every write while the firmware owns the fan
+/// (thinkpad_acpi without `fan_control=1`), and asking them anyway printed two
+/// "Operation not permitted" lines at every shutdown of a machine whose fan Rime
+/// had never touched.
 pub fn restore_to_firmware(
     sys_root: &Path,
     cfg: &FanConfig,
     writer: &dyn crate::syswriter::SysWriter,
 ) -> usize {
-    let inv = FanInventory::discover(sys_root, cfg);
+    let mut inv = FanInventory::discover(sys_root, cfg);
+    inv.controls.retain(|c| {
+        c.enable_path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map_or(true, |v| v.trim() != "2")
+    });
     let plan = plan_firmware_restore(&inv);
     for a in &plan {
         if let Err(e) = writer.apply(a) {

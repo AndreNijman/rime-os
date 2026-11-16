@@ -230,6 +230,10 @@ let
       with subtest("the session's user services"):
           machine.wait_until_succeeds(as_rime("systemctl --user is-active pipewire.socket"))
           machine.wait_until_succeeds(as_rime("systemctl --user is-active wireplumber.service"))
+          # no X11 bell module (it crashes pipewire when Xwayland exits at logout): the merged config says so
+          bell = machine.succeed(as_rime("pw-config merge context.properties"))
+          print("pipewire context.properties:", bell)
+          assert re.search(r'"module\.x11\.bell"\s*:\s*false', bell), "pipewire still loads the X11 bell module"
           machine.succeed("test -e /etc/xdg/xdg-desktop-portal/hyprland-portals.conf")
           machine.succeed("grep -x 'org.freedesktop.impl.portal.Secret=gnome-keyring' /etc/xdg/xdg-desktop-portal/hyprland-portals.conf")
           machine.succeed("fc-list | grep 'JetBrainsMono Nerd Font'")
