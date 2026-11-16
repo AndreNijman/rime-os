@@ -59,10 +59,17 @@ passphrase reaches that VM on `fw_cfg`, not on the command line. Log: `$ART/luks
 
 ### Menu (R22)
 
-`rime.boot.timeout = 5`, `timeout_style=menu`: v1 recovery from a bad generation is manual, through the GRUB menu,
-so the menu is always drawn. bootupd's static config shows it for 1 s, too short to read the list and press a key;
-5 s is long enough to read and press an arrow key (any key stops the countdown) and short enough not to slow every
-boot. The matrix drives exactly that: recovery boots press the arrow key within the 5 s, the countdown stops.
+`rime.boot.timeout = 5`, `timeout_style=menu`: v1 recovery from a bad generation is manual, through the GRUB menu.
+bootupd's static config shows it for 1 s, too short to read the list and press a key; 5 s is long enough to read and
+press an arrow key (any key stops the countdown). The matrix drives exactly that: recovery boots press the arrow key
+within the 5 s, the countdown stops.
+
+Amended 2026-11-16 (`rime.boot.hideMenu`, default on): the 5 s menu cost every start 5 s. It is now drawn only at a
+start that follows one that did not reach the greeter (and always when custom.cfg holds another system's entry);
+after a good start GRUB waits 1 s with the menu hidden, Esc shows it. A bad generation never reaches the greeter, so
+the start after it shows the menu: recovery is unchanged. The flag is a GRUB environment block on the ESP GRUB was
+loaded from (nix/pkgs/rime-boot/README.md, "Hiding the menu"). The matrix: boot 2 presses F4 to show the hidden menu
+and boots the default (the bad generation), boot 3 (B9/B10) finds the 5 s menu as before.
 
 ### ESP rules (R20)
 

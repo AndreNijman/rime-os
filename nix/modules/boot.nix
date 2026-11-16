@@ -38,7 +38,7 @@ let
     && config.rime.kernel.enable
     && config.rime.kernel.signing.imageSignature != null;
   hookConfig = pkgs.writeText "rime-boot.json" (builtins.toJSON {
-    inherit (cfg) layout configurationLimit timeout reserveMiB grubPath;
+    inherit (cfg) layout configurationLimit timeout reserveMiB grubPath hideMenu;
     bootDir = cfg.mountPoint;
     hostToml = cfg.hostToml;
     mokCert = mokDer;
@@ -89,9 +89,23 @@ in
       default = 5;
       description = ''
         Seconds GRUB shows the menu (timeout_style=menu). v1 recovery from a bad generation is manual, through
-        this menu (D3, R22), so it is always shown; bootupd's static config would show it for 1 s. 5 s: long
-        enough to read the list and press an arrow key (any key stops the countdown), short enough not to slow
-        every boot (docs/nixos/boot-matrix.md, "Menu").
+        this menu (D3, R22), so it is shown whenever the previous start did not go well (see hideMenu), and
+        always when hideMenu is off; bootupd's static config would show it for 1 s. 5 s: long enough to read the
+        list and press an arrow key (any key stops the countdown), short enough not to slow every boot
+        (docs/nixos/boot-matrix.md, "Menu").
+      '';
+    };
+
+    hideMenu = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        After a start that went well (rime-boot-good.service ran: multi-user.target and the greeter were reached),
+        the next start waits 1 s with the menu hidden instead of showing it for `timeout` seconds; Esc shows it.
+        A start that never got there shows the menu at the next one, so a bad generation is still recovered
+        through the menu. The flag is EFI/rime/boot.env on the ESP GRUB was loaded from; any failure (no ESP
+        found, GRUB cannot write the flag, an entry for another system such as Windows in custom.cfg) shows the
+        menu (docs/nixos/boot-matrix.md, "Menu").
       '';
     };
 
@@ -181,6 +195,22 @@ in
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${hook}";
+      };
+    };
+
+    # The menu stays hidden at the next start once this one went well (hideMenu; nix/pkgs/rime-boot README "Hiding
+    # the menu"). Ordered after multi-user.target and the greeter, wanted by nothing that has to wait for it: it
+    # never holds up a start, and a failure here only means the menu is shown next time.
+    systemd.services.rime-boot-good = lib.mkIf cfg.hideMenu {
+      description = "Hide the boot menu at the next start (this one went well)";
+      wantedBy = [ "multi-user.target" ];
+      after = [ "multi-user.target" "display-manager.service" "greetd.service" ];
+      unitConfig.ConditionPathExists = "/sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${cli}/bin/rime-boot mark-good";
+        PrivateMounts = true;
+        PrivateNetwork = true;
       };
     };
 

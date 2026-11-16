@@ -68,7 +68,8 @@ let
     systemd.services.rime-boothook-lab = {
       description = "Rime boot-hook lab: stage-2 marker and driver";
       wantedBy = [ "multi-user.target" ];
-      after = [ "systemd-user-sessions.service" ];
+      # After multi-user.target (as rime-boot-good.service is), so it can report what that unit did this start.
+      after = [ "systemd-user-sessions.service" "multi-user.target" "rime-boot-good.service" ];
       path = [ config.nix.package pkgs.coreutils pkgs.util-linux pkgs.mokutil pkgs.kmod pkgs.gnugrep pkgs.gnused
         pkgs.findutils pkgs.systemd ];
       serviceConfig = { Type = "oneshot"; StandardOutput = "tty"; StandardError = "tty"; TTYPath = "/dev/ttyS0"; };
@@ -80,6 +81,16 @@ let
         say "profile: $(readlink /nix/var/nix/profiles/system) -> $(readlink -f /nix/var/nix/profiles/system)"
         say "boot mount: $(findmnt -no SOURCE,FSROOT,FSTYPE /boot | tr '\n' ' ')"
         dmesg | grep -E "Loaded X.509 cert 'Rime boot-hook lab TEST MOK" | sed 's/^/RIME-BOOTHOOK: /' || true
+        # hideMenu: what rime-boot-good.service did this start (it ran on its own, after multi-user.target), where
+        # the ESP GRUB came from is mounted (on the custom disk: nowhere, as on a moved machine), and the flag.
+        say "boot-good: $(systemctl show -p Result -p ExecMainStatus -p ExecMainExitTimestampMonotonic rime-boot-good.service | tr '\n' ' ')"
+        journalctl -b -o cat -u rime-boot-good.service | grep 'rime-boot:' | sed 's/^/RIME-BOOTHOOK: boot-good| /' || true
+        esp=$(tail -c +5 /sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f | tr -d '\0' | tr 'A-F' 'a-f' | tr -cd '0-9a-f-')
+        at=$(findmnt -rno TARGET "/dev/disk/by-partuuid/$esp" | head -1)
+        say "loader partition: $esp mounted at: [$at]"
+        if [ -z "$at" ]; then mkdir -p /run/lab-esp && mount -o ro "/dev/disk/by-partuuid/$esp" /run/lab-esp && at=/run/lab-esp; fi
+        say "flag: $(head -c 1024 "$at/EFI/rime/boot.env" 2>/dev/null | grep -a '^rime_boot_ok=' || echo none)"
+        [ "$at" = /run/lab-esp ] && umount /run/lab-esp || true
         if [ -L /boot/loader ]; then
           say "ostree: loader -> $(readlink /boot/loader); $(sha256sum /boot/loader.1/entries/ostree-1.conf)"
           say "custom.cfg windows entry: $(grep -c "menuentry 'Windows (lab)'" /boot/grub2/custom.cfg)"
