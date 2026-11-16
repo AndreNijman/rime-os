@@ -41,23 +41,29 @@ phase="${1:-}"
 
 log() { logger -t rime-wifi-resume -- "$*"; }
 
+SYSFS="${RIME_SYSFS:-/sys}"
+
 # A glob, not `ls | grep`. This runs as root out of the system-sleep directory,
 # and an interface name is attacker-influenced in the sense that matters: a USB
 # adapter names itself. `ls` would hand a name containing a newline to the
 # capture as two names.
-dev=""
-for _d in /sys/class/net/wl*; do
-    [ -e "$_d" ] || continue          # the unmatched glob itself
-    dev="${_d##*/}"
-    break
-done
-[ -n "${dev:-}" ] || exit 0
-
+#
 # Only this driver. The images run on more than one machine, and cycling the
 # radio on hardware that does not have this fault would be a regression
-# invented by a fix for someone else's laptop.
-drv="$(basename "$(readlink -f "/sys/class/net/$dev/device/driver" 2>/dev/null)" 2>/dev/null)"
-[ "$drv" = "mt7925e" ] || exit 0
+# invented by a fix for someone else's laptop. The driver picks the interface,
+# not the glob order: a USB Wi-Fi adapter (wlp197s0f3u1) sorts before the
+# built-in card (wlp3s0), and taking the first name skipped the repair for as
+# long as the adapter was plugged in.
+dev=""
+for _d in "$SYSFS"/class/net/wl*; do
+    [ -e "$_d" ] || continue          # the unmatched glob itself
+    _drv="$(readlink -f "$_d/device/driver" 2>/dev/null)"
+    if [ "${_drv##*/}" = "mt7925e" ]; then
+        dev="${_d##*/}"
+        break
+    fi
+done
+[ -n "${dev:-}" ] || exit 0
 
 # Hand the rest to a transient unit and return, so the session thaws now. A
 # second lid-open while a probe is still running finds the unit name taken and
@@ -71,22 +77,25 @@ if [ "$phase" = "post" ]; then
 fi
 
 # Give the radio a chance to re-associate on its own before judging it. This
-# now runs with NetworkManager awake, so a route can actually arrive.
+# now runs with NetworkManager awake, so a route can actually arrive. The route
+# and the probe are this card's own: with a second adapter (USB Wi-Fi,
+# Ethernet) the default route may leave through it, and a ping that way would
+# judge the wrong link in both directions.
 for _ in $(seq 1 20); do
-    gw="$(ip route show default 2>/dev/null | awk '/default/{print $3; exit}')"
+    gw="$(ip route show default dev "$dev" 2>/dev/null | awk '/default/{print $3; exit}')"
     [ -n "${gw:-}" ] && break
     sleep 1
 done
-[ -n "${gw:-}" ] || { log "no default route after resume; leaving it alone"; exit 0; }
+[ -n "${gw:-}" ] || { log "no default route on $dev after resume; leaving it alone"; exit 0; }
 
 # Three packets is enough to tell "wedged" from "fine": the failure mode loses
 # a third to two thirds of them, and a healthy link loses none.
-if ping -c 3 -W 2 -q "$gw" >/dev/null 2>&1; then
-    log "link to $gw is healthy after resume; no repair needed"
+if ping -I "$dev" -c 3 -W 2 -q "$gw" >/dev/null 2>&1; then
+    log "link to $gw on $dev is healthy after resume; no repair needed"
     exit 0
 fi
 
-log "link to $gw is failing after resume; reloading mt7925e"
+log "link to $gw on $dev is failing after resume; reloading mt7925e"
 nmcli radio wifi off >/dev/null 2>&1
 sleep 2
 modprobe -r mt7925e mt7925_common mt792x_lib mt76_connac_lib mt76 >/dev/null 2>&1
