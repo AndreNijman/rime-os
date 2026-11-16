@@ -1164,15 +1164,15 @@ class HideMenuTest(unittest.TestCase):
     def test_mark_good_mounts_the_esp_when_it_is_not_mounted_read_write(self):
         f = self.f
         calls = []
-        real = HOOK.mount_fat
+        real = HOOK.MOUNT_FAT
 
         def fake_mount(dev, where):
             calls.append(("mount", dev, where))
             os.makedirs(where, exist_ok=True)
             return lambda: calls.append(("umount", where))
 
-        HOOK.mount_fat = fake_mount
-        self.addCleanup(setattr, HOOK, "mount_fat", real)
+        HOOK.MOUNT_FAT = fake_mount
+        self.addCleanup(setattr, HOOK, "MOUNT_FAT", real)
         # Mounted read-only only (or an autofs at /efi): not used.
         self.mounts(f"40 24 0:40 / {self.esp} ro,relatime - vfat {self.devfile} ro\n"
                     "41 24 0:41 / /efi rw,relatime - autofs systemd-1 rw\n")
@@ -1187,9 +1187,20 @@ class HideMenuTest(unittest.TestCase):
         def failing(dev, where):
             raise OSError(errno.EROFS, "Read-only file system", dev)
 
-        HOOK.mount_fat = failing
+        HOOK.MOUNT_FAT = failing
         self.assertEqual(f.run("mark-good"), 0, f.stderr)
         self.assertIn("could not mount the ESP", f.stderr)
+
+    def test_the_hook_program_itself_never_mounts(self):
+        """`rime-boot` is the boot hook: it cannot mount (no ctypes, boot-loader-scan). Only rime-boot-good, the
+        service's program, hands it a mount; without one an unmounted ESP means the menu stays shown."""
+        f = self.f
+        self.assertIsNone(HOOK.MOUNT_FAT)
+        self.mounts(f"40 24 0:40 / {self.esp} ro,relatime - vfat {self.devfile} ro\n")
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertIn("does not mount", f.stderr)
+        self.assertIsNone(self.flag())
+        self.assertIsNone(self.flag(f.cfg["espMountDir"]))
 
     @unittest.skipUnless(os.environ.get("GRUB_EDITENV"), "GRUB_EDITENV not set")
     def test_grub_editenv_reads_and_writes_the_same_block(self):
