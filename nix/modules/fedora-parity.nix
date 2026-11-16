@@ -158,28 +158,36 @@ in
       # /usr/bin/sudo would otherwise refuse to run. Runs at boot and at every switch. Never replaces an entry it
       # did not make (/usr/bin/env, /bin/sh, anything an admin put there); its own links are removed or repointed
       # when the new system no longer has that program or now wraps it.
+      #
+      # It runs in the initrd on every boot, over ~1,350 links per directory: no process per link. A version that
+      # ran readlink and a $(...) per link started ~8,000 processes and added 9 s to every boot of a ThinkPad L16.
+      # Now: one find per directory, everything else bash builtins; ln only for a link that is missing.
       system.activationScripts.rimeFhsPrograms = lib.stringAfter [ "binsh" "usrbinenv" ] ''
         rime_fhs_bin="$systemConfig/sw/bin"
+        # sets rime_fhs_t to where NAME's link should point ("" = nowhere); a function, not $(...): no fork
         rime_fhs_target() {
           case "$1" in
-            ${wrapperCase}) echo "/run/wrappers/bin/$1" ;;
-            *) [ -e "$rime_fhs_bin/$1" ] && echo "/run/current-system/sw/bin/$1" ;;
+            ${wrapperCase}) rime_fhs_t="/run/wrappers/bin/$1" ;;
+            *) if [ -e "$rime_fhs_bin/$1" ]; then rime_fhs_t="/run/current-system/sw/bin/$1"; else rime_fhs_t=""; fi ;;
           esac
         }
         for rime_fhs_dir in /usr/bin /usr/sbin /bin; do
           mkdir -p "$rime_fhs_dir"
-          for rime_fhs_link in "$rime_fhs_dir"/*; do
-            [ -L "$rime_fhs_link" ] || continue
-            rime_fhs_to="$(readlink "$rime_fhs_link")"
-            case "$rime_fhs_to" in
-              /run/current-system/sw/bin/*|/run/wrappers/bin/*)
-                [ "$(rime_fhs_target "''${rime_fhs_link##*/}")" = "$rime_fhs_to" ] || rm -f "$rime_fhs_link"
-                ;;
-            esac
-          done
-          for rime_fhs_name in ${wrapperNames} $(ls "$rime_fhs_bin"); do
+          # name and target of every link, NUL-separated (one process for the whole directory)
+          find "$rime_fhs_dir" -mindepth 1 -maxdepth 1 -type l -printf '%f\0%l\0' |
+            while IFS= read -r -d "" rime_fhs_name && IFS= read -r -d "" rime_fhs_to; do
+              case "$rime_fhs_to" in
+                /run/current-system/sw/bin/*|/run/wrappers/bin/*)
+                  rime_fhs_target "$rime_fhs_name"
+                  [ "$rime_fhs_t" = "$rime_fhs_to" ] || rm -f "$rime_fhs_dir/$rime_fhs_name"
+                  ;;
+              esac
+            done
+          for rime_fhs_name in ${wrapperNames} "$rime_fhs_bin"/*; do
+            rime_fhs_name="''${rime_fhs_name##*/}"
             [ -e "$rime_fhs_dir/$rime_fhs_name" ] || [ -L "$rime_fhs_dir/$rime_fhs_name" ] && continue
-            ln -s "$(rime_fhs_target "$rime_fhs_name")" "$rime_fhs_dir/$rime_fhs_name"
+            rime_fhs_target "$rime_fhs_name"
+            [ -n "$rime_fhs_t" ] && ln -s "$rime_fhs_t" "$rime_fhs_dir/$rime_fhs_name"
           done
         done
       '';

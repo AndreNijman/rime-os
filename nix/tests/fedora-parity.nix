@@ -157,6 +157,14 @@ pkgs.testers.runNixOSTest {
             target = machine.succeed(f"readlink /usr/bin/{prog}").strip()
             assert target == f"/run/wrappers/bin/{prog}", f"/usr/bin/{prog} -> {target}"
         machine.succeed("su - admin -c '/usr/bin/sudo -n true'")
+        # It runs in the initrd on every boot: no process per link. /proc/loadavg's last field is the newest PID, so
+        # the difference counts the processes one activation started (the whole script: a few hundred; one per
+        # link for three directories of ~1,350 would be thousands).
+        n = int(machine.succeed("ls /run/current-system/sw/bin | wc -l"))
+        started = int(machine.succeed(
+            "a=$(cut -d' ' -f5 /proc/loadavg); /run/current-system/activate >/dev/null 2>&1; "
+            "b=$(cut -d' ' -f5 /proc/loadavg); echo $((b - a))"))
+        assert started < n, f"one activation started {started} processes for {n} programs: a process per link?"
 
     with subtest("the shell and developer tools bootc Rime ships are on every machine"):
         for prog in ["starship", "zoxide", "fzf", "eza", "bat", "rg", "fd", "tmux", "fish", "nu", "zellij",
