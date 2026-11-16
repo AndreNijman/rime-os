@@ -88,6 +88,9 @@ pkgs.runCommand "rime-hostlayer-fixture"
 
     # ── files carried as they are ──
     echo 5e1f0c0ffee04a11b0071e5500ddba11 > $r/etc/machine-id
+    mkdir -p $r/var/lib/NetworkManager
+    printf 'TEST-fixture-nm-secret-key-5e1f0c0ffee04a11' > $r/var/lib/NetworkManager/secret_key
+    chmod 600 $r/var/lib/NetworkManager/secret_key
     for t in ed25519 ecdsa rsa; do
       ssh-keygen -q -N "" -t $t $([ $t = rsa ] && echo -b 2048) -C "TEST fixture host key" -f $r/etc/ssh/ssh_host_''${t}_key
     done
