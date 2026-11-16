@@ -1083,8 +1083,16 @@ fn the_relay_carries_the_session_and_can_read_none_of_it() {
     );
     // And the structural half of the same claim: nothing the device sent was
     // JSON, or a frame tag, or anything but sealed bytes. `list_sessions` is
-    // the word that would appear if the Noise channel were not there.
-    for word in [b"hello".as_slice(), b"cmd".as_slice(), b"reply".as_slice()] {
+    // the word that would appear if the Noise channel were not there. Each is
+    // searched for as JSON spells it (quotes, and the key's colon): six or
+    // seven bytes, which sealed bytes hold by chance about once in 2^48
+    // positions. The bare three-byte `cmd` turned up in ciphertext by chance
+    // (about once in 2^24 positions) and failed CI.
+    for word in [
+        br#""hello""#.as_slice(),
+        br#""cmd":"#.as_slice(),
+        br#""reply""#.as_slice(),
+    ] {
         assert!(
             !window_contains(&everything, word),
             "the relay saw {:?} in the clear",

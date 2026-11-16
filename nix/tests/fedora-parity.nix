@@ -70,18 +70,26 @@ pkgs.testers.runNixOSTest {
                         "'exec pkcheck --action-id org.freedesktop.NetworkManager.settings.modify.system --process $$' "
                         "> /tmp/pk.sh && chmod 755 /tmp/pk.sh")
 
-        def pk(user, vt):
+        def pk(user, vt, front):
             # the script's lines go to the journal (the VM console); --wait returns its exit status
-            return machine.execute(
+            r = machine.execute(
                 f"systemd-run --wait --collect -p PAMName=login -p User={user} -p TTYPath=/dev/tty{vt} "
                 "-p StandardInput=tty -p StandardOutput=journal -p StandardError=journal -- /tmp/pk.sh")[0]
+            # a VT switch during the run would make the answer about a different session state
+            now = machine.succeed("cat /sys/class/tty/tty0/active").strip()
+            assert now == f"tty{front}", f"the foreground VT moved to {now} while asking (expected tty{front})"
+            return r
+        # The greeter restarts when its first instance exits and takes the foreground VT back, which once made the
+        # tty5 session inactive mid-check (CI). Nothing else switches VTs.
+        machine.succeed("systemctl stop greetd.service")
         machine.succeed("chvt 5")
-        assert pk("admin", 5) == 0, "a wheel user at the machine is asked for a password to add a connection"
-        r = pk("admin", 7)
+        assert pk("admin", 5, 5) == 0, "a wheel user at the machine is asked for a password to add a connection"
+        r = pk("admin", 7, 5)
         assert r == 2, f"a wheel user's background session: pkcheck {r}, expected 2 (asked for a password)"
         machine.succeed("chvt 6")
-        r = pk("plain", 6)
+        r = pk("plain", 6, 6)
         assert r == 2, f"a user outside wheel: pkcheck {r}, expected 2 (asked for a password)"
+        machine.succeed("systemctl start greetd.service")
 
     with subtest("new accounts get zsh; declared ones keep theirs"):
         machine.succeed("grep -x /run/current-system/sw/bin/zsh /etc/shells")
