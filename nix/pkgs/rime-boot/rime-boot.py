@@ -1062,17 +1062,11 @@ def mount_of_device(cfg, dev):
     return None
 
 
-def mount_fat(dev, where):
-    """Mount `dev` (vfat) read-write at `where` with mount(2) (rime-boot runs no programs) and return the unmount.
-    rime-boot-good.service has PrivateMounts=yes: the mount is never seen outside it, and goes with it."""
-    import ctypes
-    libc = ctypes.CDLL(None, use_errno=True)
-    os.makedirs(where, exist_ok=True)
-    ms_nosuid, ms_nodev, ms_noexec = 2, 4, 8
-    if libc.mount(dev.encode(), where.encode(), b"vfat", ms_nosuid | ms_nodev | ms_noexec, b"umask=0077") != 0:
-        e = ctypes.get_errno()
-        raise OSError(e, os.strerror(e), dev)
-    return lambda: libc.umount2(where.encode(), 0)
+# How mark-good mounts an ESP that is mounted nowhere (a moved machine). None here: this program is the boot hook and
+# must not be able to run a program, so it never imports ctypes (nix/tests/boot-loader-scan.py refuses it). The
+# service's own program, rime-boot-good (rime-boot-good.py), sets it to a mount(2) call before calling main().
+# MOUNT_FAT(dev, where) mounts `dev` (vfat) read-write at `where` and returns the unmount; raises OSError.
+MOUNT_FAT = None
 
 
 def write_flag(esp):
@@ -1120,9 +1114,13 @@ def mark_good(cfg):
         return 0
     esp = mount_of_device(cfg, dev)
     unmount = None
+    if esp is None and MOUNT_FAT is None:
+        log(f"mark-good: the ESP {dev} is not mounted read-write and `rime-boot` does not mount (rime-boot-good "
+            "does): the menu stays shown")
+        return 0
     if esp is None:
         try:
-            unmount = mount_fat(dev, cfg["espMountDir"])
+            unmount = MOUNT_FAT(dev, cfg["espMountDir"])
             esp = cfg["espMountDir"]
         except OSError as e:
             log(f"mark-good: could not mount the ESP {dev}: {e}: the menu stays shown")

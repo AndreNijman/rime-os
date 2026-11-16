@@ -93,7 +93,9 @@ there the first time one does not.
   `multi-user.target` and required by nothing, so it never holds up a start) sets `rime_boot_ok=1`. It finds the ESP
   by the `LoaderDevicePartUUID` EFI variable (the Boot Loader Interface; Fedora's GRUB sets it to the partition it
   was loaded from, the device `$fw_path` names), uses a read-write vfat mount of it if there is one and otherwise
-  mounts it itself in the unit's private mount namespace (`mount(2)`; a moved machine's ESP is mounted nowhere). A
+  mounts it in the unit's private mount namespace (a moved machine's ESP is mounted nowhere). The unit runs
+  `rime-boot-good`, which is `mark-good` plus that `mount(2)` (through ctypes): the hook program `rime-boot` itself
+  must not be able to run a program, so it imports no ctypes (boot-loader-scan) and alone never mounts. A
   block GRUB wrote is rewritten in place, keeping any other variable; nothing is written when it already says 1. It
   never writes an ESP that holds Windows Boot Manager, and every failure exits 0 with a log line: the next start
   then shows the menu.

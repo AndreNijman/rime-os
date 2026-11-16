@@ -208,7 +208,8 @@ in
       unitConfig.ConditionPathExists = "/sys/firmware/efi/efivars/LoaderDevicePartUUID-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${cli}/bin/rime-boot mark-good";
+        # rime-boot-good = mark-good + mount(2) for an ESP mounted nowhere (the hook program itself cannot mount).
+        ExecStart = "${pkgs.rime.rime-boot}/bin/rime-boot-good --config ${hookConfig}";
         PrivateMounts = true;
         PrivateNetwork = true;
       };
