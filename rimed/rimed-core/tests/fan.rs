@@ -326,6 +326,21 @@ fn firmware_restore_needs_no_prior_state() {
 }
 
 #[test]
+fn firmware_restore_leaves_a_fan_the_firmware_already_owns() {
+    // A ThinkPad without fan_control=1 refuses every pwm1_enable write; its fan
+    // reads 2 because nothing ever took it away from the firmware. Nothing to do.
+    let f = hwmon_fixture("firmware-owned");
+    let cfg = FanConfig::default();
+    let writer = RealWriter::new(false);
+    fs::write(f.path().join("class/hwmon/hwmon0/pwm1_enable"), "2\n").unwrap();
+    fs::write(f.path().join("class/hwmon/hwmon0/pwm1"), "77").unwrap();
+
+    assert_eq!(fan::restore_to_firmware(f.path(), &cfg, &writer), 0);
+    assert_eq!(f.read("class/hwmon/hwmon0/pwm1_enable"), "2");
+    assert_eq!(f.read("class/hwmon/hwmon0/pwm1"), "77", "a firmware-owned fan is not written");
+}
+
+#[test]
 fn safe_restore_falls_back_to_full_speed_when_auto_is_refused() {
     // A driver that rejects everything except 0/1: writing "2" fails, so the
     // ladder must end with the fan at full speed, never stopped.
