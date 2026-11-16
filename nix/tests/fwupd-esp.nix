@@ -38,7 +38,9 @@ let
       with subtest("an ESP partition that is not mounted, and a /boot that is not an ESP (a moved machine)"):
           d = "/dev/disk/by-id/virtio-esp"
           machine.succeed(f"sgdisk -Z {d} -n 1:2048:0 -t 1:ef00 {d} && udevadm settle")
-          machine.succeed(f"mkfs.vfat -F 32 {d}-part1 && mkdir -p /mnt/esp && mount {d}-part1 /mnt/esp"
+          # -t vfat: right after mkfs, mount's blkid probe can still miss the new filesystem and fall back to the
+          # loaded filesystems (ext4 only: vfat is a module), which failed once on CI.
+          machine.succeed(f"mkfs.vfat -F 32 {d}-part1 && mkdir -p /mnt/esp && mount -t vfat {d}-part1 /mnt/esp"
                           " && mkdir -p /mnt/esp/EFI/BOOT /mnt/esp/EFI/fedora && umount /mnt/esp && udevadm settle")
           # bootc's own /boot, mounted (the installer's LUKS layout: an ext4 partition; the plain layout binds a
           # directory of the top level), as the rime-rootfs-boot generator mounts it on a moved machine.
