@@ -5,6 +5,7 @@ Run by checks.x86_64-linux.boot-hook-unit (nix/tests/boot.nix) as
 and runnable by hand the same way. Every test builds its own tree under a temporary directory.
 """
 import contextlib
+import errno
 import hashlib
 import importlib.machinery
 import importlib.util
@@ -1003,6 +1004,200 @@ class SecureBootKeyTest(unittest.TestCase):
         for c in customs:
             self.assertTrue(c.endswith(HOOK.SB_BLOCK), c)
             self.assertEqual(c.count(HOOK.SB_BEGIN), 1)
+
+
+class HideMenuTest(unittest.TestCase):
+    """hideMenu: the menu waits 1 s hidden after a start that went well (EFI/rime/boot.env on the ESP GRUB was
+    loaded from, set by `rime-boot mark-good`, cleared by GRUB at every start) and is shown otherwise."""
+
+    UUID = "1c417de2-5766-455f-9318-198610885424"
+
+    def setUp(self):
+        self.f = Fixture(self)
+        self.addCleanup(self.f.cleanup)
+        f = self.f
+        f.generation(1)
+        self.esp = os.path.join(f.root, "esp")
+        os.makedirs(os.path.join(self.esp, "EFI", "fedora"))
+        self.devfile = os.path.join(f.root, "dev-nvme0n1p1")  # stands in for the block device
+        with open(self.devfile, "wb"):
+            pass
+        devdir = os.path.join(f.root, "by-partuuid")
+        os.makedirs(devdir)
+        os.symlink(self.devfile, os.path.join(devdir, self.UUID))
+        self.efivars = os.path.join(f.root, "efivars")
+        os.makedirs(self.efivars)
+        self.mi = os.path.join(f.root, "mountinfo")
+        f.cfg.update(efivars=self.efivars, devDir=devdir, mountinfo=self.mi,
+                     espMountDir=os.path.join(f.root, "run-esp"))
+        self.loader_uuid(self.UUID.upper())  # GRUB writes it upper case
+        self.mounts(f"40 24 0:40 / {self.esp} rw,relatime - vfat {self.devfile} rw\n")
+
+    def loader_uuid(self, text):
+        p = os.path.join(self.efivars, f"LoaderDevicePartUUID-{HOOK.LOADER_GUID}")
+        if text is None:
+            os.unlink(p)
+            return
+        with open(p, "wb") as fh:
+            fh.write(b"\x06\x00\x00\x00" + (text + "\0").encode("utf-16-le"))
+
+    def mounts(self, text):
+        with open(self.mi, "w") as fh:
+            fh.write("24 1 0:22 / / rw - btrfs /dev/vda3 rw\n" + text)
+
+    def flag(self, esp=None):
+        p = os.path.join(esp or self.esp, "EFI", "rime", "boot.env")
+        return slurp(p) if os.path.exists(p) else None
+
+    def menu(self):
+        return self.f.read("grub2/rime-nixos.cfg")
+
+    def test_bls_menu_ends_with_the_block_after_the_default(self):
+        f = self.f
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        m = self.menu()
+        self.assertTrue(m.endswith(HOOK.HIDE_BLOCK), m)
+        self.assertLess(m.index("\nset default=rime-generation-1\n"), m.index(HOOK.HIDE_BLOCK))
+        self.assertIn("set timeout_style=menu\nset timeout=5\n", m)  # the menu is still the default
+        # The flag is cleared before the menu is hidden, and hiding needs the write to have worked.
+        self.assertLess(HOOK.HIDE_BLOCK.index("set rime_boot_ok=0"), HOOK.HIDE_BLOCK.index("save_env"))
+        self.assertLess(HOOK.HIDE_BLOCK.index("if save_env"), HOOK.HIDE_BLOCK.index("timeout_style=hidden"))
+        self.assertEqual(f.run("check"), 0, f.stdout + f.stderr)  # check still finds the default
+        self.assertEqual(json.loads(f.stdout)["default_generation"], 1)
+
+    def test_custom_cfg_block_after_every_entry_and_never_with_another_system(self):
+        f = self.f
+        f.make_ostree_boot()  # custom.cfg holds the bootc installer's Windows entry
+        f.cfg["grubPath"] = "/boot"
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertNotIn("rime_boot_ok", self.menu())
+        self.assertIn("entry for another system", f.stderr)
+        # Only Rime's blocks left (the Secure Boot key entry is Rime's): the menu hides after a good start.
+        with open(os.path.join(f.boot, "grub2", "custom.cfg"), "w") as fh:
+            fh.write(HOOK.SB_BLOCK)
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        m = self.menu()
+        self.assertTrue(m.endswith(HOOK.HIDE_BLOCK), m)
+        self.assertLess(m.rindex("menuentry "), m.index(HOOK.HIDE_BLOCK))
+        self.assertEqual(f.run("check"), 0, f.stdout + f.stderr)
+
+    def test_other_entries(self):
+        self.assertFalse(HOOK.other_entries(None))
+        self.assertFalse(HOOK.other_entries(HOOK.INCLUDE_BLOCK + "\n" + HOOK.SB_BLOCK))
+        self.assertTrue(HOOK.other_entries("menuentry 'Windows' {\n}\n" + HOOK.INCLUDE_BLOCK))
+        self.assertTrue(HOOK.other_entries(HOOK.SB_BLOCK + "  submenu 'More' {\n}\n"))
+        self.assertTrue(HOOK.other_entries(HOOK.SB_BEGIN + "\n" + HOOK.SB_END + "\nmenuentry x {\n}\n"))
+
+    def test_off(self):
+        f = self.f
+        f.cfg["hideMenu"] = False
+        self.assertEqual(f.run("install"), 0, f.stderr)
+        self.assertNotIn("rime_boot_ok", self.menu())
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertIsNone(self.flag())
+
+    def test_mark_good_creates_the_block(self):
+        f = self.f
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        data = self.flag()
+        self.assertEqual(len(data), 1024)
+        self.assertEqual(HOOK.parse_envblock(data), {"rime_boot_ok": "1"})
+        self.assertTrue(data.startswith(b"# GRUB Environment Block\nrime_boot_ok=1\n#"))
+        self.assertIn("the next start hides the menu", f.stderr)
+
+    def test_mark_good_rewrites_grubs_block_in_place_and_keeps_its_other_variables(self):
+        f = self.f
+        p = os.path.join(self.esp, "EFI", "rime", "boot.env")
+        os.makedirs(os.path.dirname(p))
+        with open(p, "wb") as fh:  # what GRUB's save_env left: cleared, plus a variable of someone else's
+            fh.write(HOOK.envblock({"other": "kept", "rime_boot_ok": "0"}))
+        ino = os.stat(p).st_ino
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertEqual(os.stat(p).st_ino, ino)  # in place: the blocks GRUB writes stay the same
+        self.assertEqual(HOOK.parse_envblock(self.flag()), {"other": "kept", "rime_boot_ok": "1"})
+        before = os.stat(p).st_mtime_ns
+        time.sleep(0.01)
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertIn("already set", f.stderr)
+        self.assertEqual(os.stat(p).st_mtime_ns, before)  # nothing written the second time
+
+    def test_mark_good_replaces_a_damaged_block(self):
+        f = self.f
+        p = os.path.join(self.esp, "EFI", "rime", "boot.env")
+        os.makedirs(os.path.dirname(p))
+        with open(p, "wb") as fh:
+            fh.write(b"rime_boot_ok=1\n")  # not a 1024-byte block: GRUB would refuse it
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertEqual(HOOK.parse_envblock(self.flag()), {"rime_boot_ok": "1"})
+
+    def test_mark_good_never_guesses(self):
+        f = self.f
+        self.loader_uuid(None)  # not started by a boot loader that says where from
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertIn("no LoaderDevicePartUUID", f.stderr)
+        self.loader_uuid("not-a-uuid")
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.loader_uuid("00000000-0000-0000-0000-000000000000")  # a partition that is not here
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertIn("does not exist", f.stderr)
+        self.assertIsNone(self.flag())
+
+    def test_mark_good_never_writes_windows_esp(self):
+        f = self.f
+        d = os.path.join(self.esp, "EFI", "Microsoft", "Boot")
+        os.makedirs(d)
+        with open(os.path.join(d, "bootmgfw.efi"), "wb") as fh:
+            fh.write(b"MZ windows")
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertIn("Windows Boot Manager", f.stderr)
+        self.assertIsNone(self.flag())
+
+    def test_mark_good_mounts_the_esp_when_it_is_not_mounted_read_write(self):
+        f = self.f
+        calls = []
+        real = HOOK.mount_fat
+
+        def fake_mount(dev, where):
+            calls.append(("mount", dev, where))
+            os.makedirs(where, exist_ok=True)
+            return lambda: calls.append(("umount", where))
+
+        HOOK.mount_fat = fake_mount
+        self.addCleanup(setattr, HOOK, "mount_fat", real)
+        # Mounted read-only only (or an autofs at /efi): not used.
+        self.mounts(f"40 24 0:40 / {self.esp} ro,relatime - vfat {self.devfile} ro\n"
+                    "41 24 0:41 / /efi rw,relatime - autofs systemd-1 rw\n")
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        run_esp = f.cfg["espMountDir"]
+        dev = os.path.join(f.cfg["devDir"], self.UUID)
+        self.assertEqual(calls, [("mount", dev, run_esp), ("umount", run_esp)])
+        self.assertEqual(HOOK.parse_envblock(self.flag(run_esp)), {"rime_boot_ok": "1"})
+        self.assertIsNone(self.flag())
+        # The mount fails (a write-protected ESP): exit 0, the menu stays shown.
+
+        def failing(dev, where):
+            raise OSError(errno.EROFS, "Read-only file system", dev)
+
+        HOOK.mount_fat = failing
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        self.assertIn("could not mount the ESP", f.stderr)
+
+    @unittest.skipUnless(os.environ.get("GRUB_EDITENV"), "GRUB_EDITENV not set")
+    def test_grub_editenv_reads_and_writes_the_same_block(self):
+        """The block is GRUB's own format: grub-editenv (GRUB's code) reads what mark-good writes, and mark-good
+        reads and rewrites what GRUB writes."""
+        import subprocess
+        f = self.f
+        ed = os.environ["GRUB_EDITENV"]
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        p = os.path.join(self.esp, "EFI", "rime", "boot.env")
+        out = subprocess.run([ed, p, "list"], check=True, capture_output=True, text=True).stdout
+        self.assertEqual(out.split(), ["rime_boot_ok=1"])
+        subprocess.run([ed, p, "set", "rime_boot_ok=0", "other=x"], check=True)
+        self.assertEqual(HOOK.parse_envblock(self.flag()), {"rime_boot_ok": "0", "other": "x"})
+        self.assertEqual(f.run("mark-good"), 0, f.stderr)
+        out = subprocess.run([ed, p, "list"], check=True, capture_output=True, text=True).stdout
+        self.assertEqual(sorted(out.split()), ["other=x", "rime_boot_ok=1"])
 
 
 if __name__ == "__main__":
