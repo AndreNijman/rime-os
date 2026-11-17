@@ -219,6 +219,81 @@ listed in `remote_approve`. Every write is recorded with actor
   connected, dials it first, waits up to 60 s for a hello that lists `nex`, and
   stays on the Agent Center if the hello lacks it.
 
+### 2.4 The machine itself: status, lock, media and volume
+
+Five verbs, answered by rime-remoted itself and never forwarded. They work on
+the machine the phone is paired with, as the user rime-remoted runs as, and
+need no grant: they are what the person could do at the keyboard, and none of
+them can unlock anything. `remote_hello.features` lists `machine_status`,
+`machine_lock` and `media` on every build that has them; there is no live
+probe in the hello.
+
+Each verb has one 2 s budget for everything it asks the machine (the control
+worker answers requests in order, so a hung `wpctl` must not stall the link).
+Backends that do not answer in time give `null` fields, not an error.
+
+```json
+{"cmd":"machine_status"}
+→ {"reply":"machine_status",
+   "battery":{"percent":81,"state":"charging"},
+   "on_ac":true,
+   "power_mode":"balanced",
+   "locked":false,
+   "update":"available"}
+```
+
+- `battery` is `null` on a machine without one. `state` is the kernel's
+  status, lower case: `charging`, `discharging`, `full`, `not charging` or
+  `unknown`. Read from `/sys/class/power_supply`.
+- `on_ac` and `power_mode` (rimed's `Power.OnAcPower` and `Power.Tier`) and
+  `update` (rimed's `Updates.State`: `up-to-date`, `available`, `downloading`,
+  `installing`, `deferred`, `restart`, `failed` or `unknown`) are `null` when
+  rimed does not answer. Cached state only: nothing here checks for an update.
+- `locked` is logind's `LockedHint` for the user's graphical session, which the
+  Shell sets once the compositor confirms the lock. `null` when there is no
+  graphical session or it cannot be read.
+
+```json
+{"cmd":"machine_lock"}
+→ {"reply":"machine_lock","locked":true}
+```
+
+- Runs `loginctl lock-session` on the user's graphical session, then reads
+  `LockedHint` back until it says locked or the budget runs out. `locked` is
+  what was read, so `false` means "asked, and the screen did not confirm".
+- No graphical session: `{"reply":"error","kind":"unavailable","message":"there
+  is no screen to lock on this computer"}`.
+- There is no unlock verb, and there will not be one.
+
+```json
+{"cmd":"media"}
+→ {"reply":"media",
+   "player":{"name":"spotify","status":"playing","title":"…","artist":"…"},
+   "volume":{"percent":40,"muted":false}}
+{"cmd":"media_control","action":"play_pause"}   (or "next", "previous")
+{"cmd":"volume","percent":55}                    (0 to 100)
+{"cmd":"volume","muted":true}
+→ the same "media" reply, read after the change
+```
+
+- `player` is the player `playerctl` picks (the one playing, else the last
+  active), `null` when none is running. `status` is `playing`, `paused` or
+  `stopped`. `title` and `artist` are capped at 200 characters each and may be
+  empty.
+- `volume` is the default output (`wpctl … @DEFAULT_AUDIO_SINK@`), `null` when
+  it cannot be read. `percent` above 100 is refused (`bad_request`), as is an
+  unknown `action` or a `volume` line with neither field.
+- An action that fails (no player, `wpctl` missing) is
+  `{"reply":"error","kind":"unavailable","message":…}` in the tool's own words.
+
+**Tests never touch the real desktop.** Every session of one user shares one
+D-Bus user bus and one graphical session, so a test daemon running as the
+developer would pause their music and lock their screen. With
+`RIME_REMOTED_MACHINE_STUB=<dir>` rime-remoted uses no real backend at all: it
+answers from `<dir>/state.json` (the same shape as the replies above) and
+appends every action to `<dir>/actions.jsonl`. `run-device-suite.sh` always
+sets it.
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in
