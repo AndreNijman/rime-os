@@ -39,6 +39,12 @@ object Phone {
     /** The word in `can` that says this phone takes files and text the computer sends. */
     const val CAN_RECEIVE: String = "receive"
 
+    /**
+     * The word in `can` that says this phone dismisses a notification it
+     * mirrored once the person dismisses it on the computer (contract §2.7).
+     */
+    const val CAN_DISMISS: String = "dismiss"
+
     /** The channel, and the feature, a sent file or text is taken on. */
     const val TAKE: String = "take_offer"
 
@@ -154,6 +160,7 @@ object Phone {
                 val len = o.long("len")?.takeIf { kind.fits(it) } ?: return null
                 DeviceEvent.Offer(id, at, (o.text("machine") ?: "").take(MACHINE_CAP), kind, cleanName(o.text("name")), len)
             }
+            "notification_dismissed" -> o.text("key")?.takeIf { Mirror.validKey(it) }?.let { DeviceEvent.Dismissed(it) }
             else -> null
         }
     }
@@ -192,6 +199,9 @@ object Phone {
 sealed interface DeviceEvent {
     /** Ring, asked for by [machine] at [at] (its clock, unix seconds). */
     data class Ring(val id: Long, val at: Long, val machine: String) : DeviceEvent
+
+    /** The person dismissed, on the computer, the mirrored notification with this [key]. */
+    data class Dismissed(val key: String) : DeviceEvent
 
     /** [machine] sent this phone a file or text of [len] bytes; take it with `take_offer`. */
     data class Offer(

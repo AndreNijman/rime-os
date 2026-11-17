@@ -27,11 +27,34 @@ import com.rimeos.remote.link.LinkHub
  * the apps the person chose. What survives is an app name, a title and a
  * text, handed to [LinkHub], which sends it over the connections already
  * open. Nothing here is logged or written down.
+ *
+ * When the person dismisses one of them on a computer, [dismiss] cancels it
+ * here, as a swipe would; Android then reports the removal, which closes it
+ * on the other computers too.
  */
 class MirrorService : NotificationListenerService() {
     /** App labels by package, so a busy chat does not ask the package manager each time. */
     private val labels = object : LinkedHashMap<String, String>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 64
+    }
+
+    /** Android's key for each notification handed to the hub, by the key computers know it by. */
+    private val sent = object : LinkedHashMap<String, String>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 256
+    }
+
+    override fun onListenerConnected() {
+        live = this
+    }
+
+    override fun onListenerDisconnected() {
+        if (live === this) live = null
+        synchronized(sent) { sent.clear() }
+    }
+
+    override fun onDestroy() {
+        if (live === this) live = null
+        super.onDestroy()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -57,15 +80,19 @@ class MirrorService : NotificationListenerService() {
         val text = extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT)
         val content = Content.of(label(sbn.packageName), title, text)
         if (content.empty) return
-        hub.onPhoneNotification(Mirror.key(sbn.key), content)
+        val key = Mirror.key(sbn.key)
+        synchronized(sent) { sent[key] = sbn.key }
+        hub.onPhoneNotification(key, content)
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        val key = Mirror.key(sbn.key)
+        synchronized(sent) { sent.remove(key) }
         val hub = LinkHub.get(this)
         if (!hub.mirroring) return
         // Sent for every removal; the hub's outboxes act only on notifications
         // they actually sent, so another app's dismissal reaches nothing.
-        hub.onPhoneNotificationRemoved(Mirror.key(sbn.key))
+        hub.onPhoneNotificationRemoved(key)
     }
 
     private fun label(pkg: String): String = synchronized(labels) {
@@ -76,7 +103,21 @@ class MirrorService : NotificationListenerService() {
     }
 
     companion object {
+        /** The listener Android has bound, if any. */
+        @Volatile private var live: MirrorService? = null
+
         fun component(context: Context) = ComponentName(context, MirrorService::class.java)
+
+        /**
+         * Cancel the notification computers know as [key], if this listener
+         * handed it to them and it is still up. False when there is nothing
+         * to cancel (unbound, never sent, already gone).
+         */
+        fun dismiss(key: String): Boolean {
+            val service = live ?: return false
+            val androidKey = synchronized(service.sent) { service.sent[key] } ?: return false
+            return runCatching { service.cancelNotification(androidKey) }.isSuccess
+        }
 
         /**
          * Whether the person granted this app notification access. Asked of

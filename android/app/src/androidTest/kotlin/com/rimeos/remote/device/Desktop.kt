@@ -202,6 +202,16 @@ object Desktop {
         return (0 until a.length()).map { a.getJSONObject(it) }
     }
 
+    /**
+     * The stub notification server closes notification [id] with [reason]
+     * (2: the person dismissed it, 1: it timed out), as a real one would say
+     * in `NotificationClosed`.
+     */
+    fun notifyClosed(id: Int, reason: Int) {
+        val reply = ask(JSONObject().put("cmd", "notify_closed").put("id", id).put("reason", reason).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not close the stub notification: $reply" }
+    }
+
     private fun requestReply(line: String): JSONObject {
         val reply = ask(line)
         check(reply.optString("reply") == "request") {

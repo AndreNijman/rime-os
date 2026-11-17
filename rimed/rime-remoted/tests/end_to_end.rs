@@ -1920,3 +1920,86 @@ fn a_phones_notifications_show_here_update_in_place_close_and_go_with_revoke() {
         after.iter().skip(3 + shown).filter(|l| l["op"] == "close").map(|l| l["id"].clone()).collect();
     assert_eq!(closed, open, "{after:?}");
 }
+
+/// `NotificationClosed` as the stub reads it: one complete line.
+fn close_here(h: &Harness, id: &serde_json::Value, reason: u32) {
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(h.root.join("notify/closed.jsonl"))
+        .expect("closed.jsonl");
+    std::io::Write::write_all(&mut f, format!("{{\"id\":{id},\"reason\":{reason}}}\n").as_bytes()).expect("write");
+}
+
+#[test]
+fn a_notification_dismissed_here_is_dismissed_on_a_phone_that_says_it_can() {
+    let h = harness!("dismiss");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+    session.send(Frame::Open {
+        channel: 9,
+        request: br#"{"cmd":"device_events"}"#.to_vec(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "events", "{v}");
+        }
+        other => panic!("expected the events reply, got {other:?}"),
+    }
+    let post = |session: &mut Session, key: &str| {
+        let r = session.call(&format!(r#"{{"cmd":"phone_notification","key":"{key}","app":"Signal","title":"{key}"}}"#));
+        assert_eq!(r["reply"], "ok", "{r}");
+    };
+
+    // A phone that never said "dismiss" is not told: an older app would not
+    // know the event. Posting the key again is the fence: the id is gone, so
+    // it is a new notification.
+    assert_eq!(session.call(r#"{"cmd":"phone_report","battery":50,"can":["ring"]}"#)["reply"], "ok");
+    post(&mut session, "a1");
+    let a1 = notify_lines(&h, 1)[0]["id"].clone();
+    close_here(&h, &a1, 2);
+    // The stub reads its file every 100 ms.
+    std::thread::sleep(Duration::from_millis(1000));
+    post(&mut session, "a1");
+    assert_eq!(notify_lines(&h, 2)[1]["replaces"], 0, "the dismissed id was kept");
+
+    // It says it can now. Timed out (1) on this machine: not a dismissal.
+    assert_eq!(session.call(r#"{"cmd":"phone_report","battery":50,"can":["ring","dismiss"]}"#)["reply"], "ok");
+    post(&mut session, "b1");
+    let b1 = notify_lines(&h, 3)[2]["id"].clone();
+    close_here(&h, &b1, 1);
+    // Another machine's id, dismissed: not this phone's.
+    close_here(&h, &serde_json::json!(4242), 2);
+
+    // Dismissed by the person: the phone hears that key, and it is the
+    // first thing on the channel, so nothing above was sent.
+    post(&mut session, "c1");
+    let c1 = notify_lines(&h, 4)[3]["id"].clone();
+    close_here(&h, &c1, 2);
+    // Lines that came in while a call waited for its reply were parked;
+    // they count too, and come first.
+    let mut parked = Vec::new();
+    session.pending.retain(|f| match f {
+        Frame::Data { channel: 9, bytes } => {
+            parked.extend_from_slice(bytes);
+            false
+        }
+        _ => true,
+    });
+    let mut told: Vec<serde_json::Value> =
+        String::from_utf8(parked).expect("utf-8").lines().map(|l| serde_json::from_str(l).expect("json")).collect();
+    if told.is_empty() {
+        told = session.lines_on(9, 1);
+    }
+    assert_eq!(told, vec![serde_json::json!({"event": "notification_dismissed", "key": "c1"})]);
+
+    // The phone then says it is gone there; that closes nothing here.
+    assert_eq!(session.call(r#"{"cmd":"phone_notification_removed","key":"c1"}"#)["reply"], "ok");
+    post(&mut session, "fence");
+    let after = notify_lines(&h, 5);
+    assert_eq!(after.len(), 5, "{after:?}");
+    assert!(after.iter().all(|l| l["op"] == "notify"), "{after:?}");
+}

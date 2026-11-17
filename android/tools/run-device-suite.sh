@@ -478,6 +478,15 @@ def notify_log():
         pass
     return json.dumps({"reply": "ok", "entries": entries})
 
+def notify_closed(nid, reason):
+    """The stub notification server's NotificationClosed: one complete line
+    rime-remoted's stub reads, as if the person (2) or a timeout (1) closed it."""
+    if not isinstance(nid, int) or not isinstance(reason, int):
+        return json.dumps({"reply": "error", "message": "id and reason must be numbers"})
+    with open(os.path.join(ROOT, "notify", "closed.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"id": nid, "reason": reason}) + "\n")
+    return json.dumps({"reply": "ok"})
+
 class H(socketserver.StreamRequestHandler):
     timeout = 120
     def handle(self):
@@ -516,6 +525,8 @@ class H(socketserver.StreamRequestHandler):
                 out = desk_reset()
             elif cmd == "notify_log":
                 out = notify_log()
+            elif cmd == "notify_closed":
+                out = notify_closed(req.get("id"), req.get("reason"))
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:
