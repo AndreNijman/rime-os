@@ -59,6 +59,9 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "split adds an unserved reference" 'found = {g for g in gaps if served(again.get(g), g)}' 'found = set(gaps)'
   mutant "verify gives up on the first failure" 'if n == VERIFY_TRIES:' 'if True:'
   mutant "verify passes after its last try" 'if p.returncode == 0:' 'if p.returncode == 0 or n == VERIFY_TRIES:'
+  mutant "served signatures asked of the public cache again" '"--store", f"file://{d}",' '"--store", "https://cache.rimeos.com",'
+  mutant "served narinfos lose their Sig lines" '[f"Sig: {sig}" for sig in info.get("signatures") or []]' '[]'
+  mutant "a narinfo never read is passed over" 'missing = [p for p in paths if not info.get(p)]' 'missing = []'
   mutant "verify quotes its progress" 'if ln.strip() and not ln.startswith("checking '"'"'")]' 'if ln.strip()]'
   mutant "SigV4 signing key without its terminator" \
     'for part in (date, region, service, "aws4_request"):' 'for part in (date, region, service):'
