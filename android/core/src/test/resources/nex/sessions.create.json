@@ -2,14 +2,14 @@
  "jsonrpc": "2.0",
  "id": 5,
  "result": {
-  "base_revision": "980cda7f732e506d8273b2de8cde429fe76553b7",
+  "base_revision": "a560986f38ba94c26ae3cd640837698fc93f9529",
   "mode": "build",
   "model": "scripted-1",
   "provider": "scripted",
   "repo": true,
-  "root": "/tmp/nexcap-ebr3ub2l/ws",
+  "root": "/tmp/nexcap-pn8k9u0z/ws",
   "runtime": "nex",
-  "session_id": "session_01m7ksgp3d3wmhxwts6mwy0g4c",
+  "session_id": "session_01m7kt8n1df3m6a1dajzcvvq20",
   "title": "Second look"
  }
 }

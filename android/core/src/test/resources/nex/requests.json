@@ -1,0 +1,236 @@
+[
+ {
+  "method": "system.hello",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "models.list",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.create",
+  "params": [
+   "mode",
+   "provider",
+   "request_id",
+   "root",
+   "title"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.create",
+  "params": [
+   "mode",
+   "provider",
+   "request_id",
+   "root"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "turns.submit",
+  "params": [
+   "request_id",
+   "session_id",
+   "text"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.stream",
+  "params": [
+   "after",
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.stream",
+  "params": [
+   "after",
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "tools.pending",
+  "params": [
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "tools.pending",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.list",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.get",
+  "params": [
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "tools.approve",
+  "params": [
+   "approval_id",
+   "fingerprint",
+   "request_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.stream",
+  "params": [
+   "after",
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.stream",
+  "params": [
+   "after",
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.stream",
+  "params": [
+   "after",
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.stream",
+  "params": [
+   "after",
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.list",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.get",
+  "params": [
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.diff",
+  "params": [
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "missions.plan",
+  "params": [
+   "request_id",
+   "root",
+   "spec"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "missions.list",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "missions.get",
+  "params": [
+   "mission_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "projects.list",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "connections.list",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "usage.list",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "budgets.list",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "turns.cancel",
+  "params": [
+   "request_id",
+   "session_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "tools.approve",
+  "params": [
+   "approval_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "system.doctor",
+  "params": [],
+  "invalid_params": false
+ },
+ {
+  "method": "tools.deny",
+  "params": [
+   "approval_id",
+   "request_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "missions.approve",
+  "params": [
+   "mission_id",
+   "request_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "missions.cancel",
+  "params": [
+   "mission_id",
+   "request_id"
+  ],
+  "invalid_params": false
+ },
+ {
+  "method": "sessions.set_mode",
+  "params": [
+   "mode",
+   "request_id",
+   "session_id"
+  ],
+  "invalid_params": false
+ }
+]

@@ -17,11 +17,11 @@ class NexFeedTest {
         val a = f.feed("$first\n".toByteArray())
         assertTrue(a.startedNow)
         assertTrue(a.events.isEmpty())
-        assertEquals(24, f.lastGseq)
+        assertEquals(Fixtures.feedStart, f.lastGseq)
         val b = f.feed("$event\n".toByteArray())
         assertFalse(b.startedNow)
         val e = b.events.single()
-        assertEquals(25, e.gseq)
+        assertEquals(Fixtures.feedStart + 1, e.gseq)
         assertEquals("session.state_changed", e.kind)
         assertTrue(e.stream!!.startsWith("session_"))
         assertEquals("plan", (e.payload["mode"] as kotlinx.serialization.json.JsonPrimitive).content)
@@ -33,7 +33,7 @@ class NexFeedTest {
         val f = NexFeed()
         val bytes = "$first\n$event\n".toByteArray()
         val got = bytes.flatMap { f.feed(byteArrayOf(it)).events }
-        assertEquals(listOf(25L), got.map { it.gseq })
+        assertEquals(listOf(Fixtures.feedEvent), got.map { it.gseq })
     }
 
     @Test
@@ -71,6 +71,6 @@ class NexFeedTest {
         f.feed("$first\n".toByteArray())
         val noise = "not json\n{\"jsonrpc\":\"2.0\",\"method\":\"other\",\"params\":{}}\n" +
             "{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":{\"kind\":\"x\"}}\n$event\n"
-        assertEquals(listOf(25L), f.feed(noise.toByteArray()).events.map { it.gseq })
+        assertEquals(listOf(Fixtures.feedEvent), f.feed(noise.toByteArray()).events.map { it.gseq })
     }
 }

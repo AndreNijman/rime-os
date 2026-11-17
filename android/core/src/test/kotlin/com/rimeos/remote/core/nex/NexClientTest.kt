@@ -139,8 +139,8 @@ class NexClientTest {
                 },
             )
             assertTrue(started.await(5, TimeUnit.SECONDS))
-            assertEquals(25L, got.poll(5, TimeUnit.SECONDS)?.gseq)
-            assertEquals(25L, sub.lastGseq)
+            assertEquals(Fixtures.feedEvent, got.poll(5, TimeUnit.SECONDS)?.gseq)
+            assertEquals(Fixtures.feedEvent, sub.lastGseq)
             sub.close()
             val open = machine.requests.single { it.contains("nex_events") }
             assertEquals(Nex.json.parseToJsonElement(Nex.events(null, tail = true)), Nex.json.parseToJsonElement(open))

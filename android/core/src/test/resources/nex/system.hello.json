@@ -3,10 +3,10 @@
  "id": 2,
  "result": {
   "daemon_version": "0.1.0",
-  "data_dir": "/tmp/nexcap-ebr3ub2l/data",
+  "data_dir": "/tmp/nexcap-pn8k9u0z/data",
   "kill_switch": false,
   "minimum_client_version": "0.1.0",
-  "pid": 1325388,
+  "pid": 1341889,
   "protocol_version": "1.0"
  }
 }

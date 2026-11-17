@@ -107,4 +107,9 @@ internal object Fixtures {
 
     /** The `result` of a recorded response. */
     fun result(name: String) = Nex.response(Nex.json.parseToJsonElement(text(name)))
+
+    /** Where the recorded feed starts, and the gseq of the one event it then saw. */
+    val feedStart: Long get() = result("feed.first.json").jsonObject["last_gseq"]!!.jsonPrimitive.content.toLong()
+    val feedEvent: Long get() = Nex.json.parseToJsonElement(text("feed.event.json"))
+        .jsonObject["params"]!!.jsonObject["gseq"]!!.jsonPrimitive.content.toLong()
 }

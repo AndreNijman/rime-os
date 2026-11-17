@@ -3,10 +3,10 @@
  "id": 23,
  "result": [
   {
-   "mission_id": "mission_01m7ksgpke86ycczc6bxav5gmw",
+   "mission_id": "mission_01m7kt8ngpe9t67kxda3bwwzav",
    "objective": "Add a subtract() helper",
    "state": "planned",
-   "updated_at": "2026-11-17T03:41:23.950Z"
+   "updated_at": "2026-11-17T03:54:29.270Z"
   }
  ]
 }
