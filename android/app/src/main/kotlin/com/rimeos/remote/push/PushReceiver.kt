@@ -11,6 +11,7 @@ import com.rimeos.remote.core.PairedMachine
 import com.rimeos.remote.core.PushRegistration
 import com.rimeos.remote.core.agent.Alert
 import com.rimeos.remote.core.agent.Push
+import com.rimeos.remote.phone.Ringer
 import com.rimeos.remote.core.agent.UnifiedPush
 import com.rimeos.remote.ui.Notifier
 import com.rimeos.remote.data.MachineRepository
@@ -100,6 +101,14 @@ class PushReceiver : BroadcastReceiver() {
             val m = current.find(machine.deviceId) ?: return@updateBlocking current
             val seen = m.push ?: return@updateBlocking current
             current.with(m.copy(push = seen.copy(lastSeq = maxOf(seen.lastSeq, body.seq))))
+        }
+
+        if (body.kind == Alert.Kind.RING) {
+            // `rime remote ring`, by push because the link was not open or the
+            // ack was lost (contract §2.5). A late push does not ring, and the
+            // same ring already rung over the link does not ring twice.
+            Ringer(context).ringFromPush(machine.deviceId, machine.machine, body.started, System.currentTimeMillis() / 1000)
+            return
         }
 
         val notifier = Notifier(context)

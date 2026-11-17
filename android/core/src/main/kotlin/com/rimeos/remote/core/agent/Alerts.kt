@@ -143,6 +143,13 @@ data class Alert(
          * would do never reaches the shade.
          */
         NEX_APPROVAL("nex needs a decision", "Open nex to approve or deny what it wants to do."),
+
+        /**
+         * The computer asked this phone to ring, so somebody can find it
+         * (`rime remote ring`, contract §2.5). Never a shade notification of
+         * the ordinary kind: the app's ringer plays it as an alarm.
+         */
+        RING("Ringing", "Your computer asked this phone to ring so you can find it."),
     }
 
     /**

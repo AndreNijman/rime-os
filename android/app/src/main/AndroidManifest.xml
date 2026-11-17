@@ -223,6 +223,12 @@
             </intent-filter>
         </receiver>
 
+        <!-- The Stop button on "Ring my phone". Not exported and no filter:
+             only this app's own notification sends it, by explicit intent. -->
+        <receiver
+            android:name=".phone.RingStopReceiver"
+            android:exported="false" />
+
         <!-- Where a UnifiedPush distributor delivers (P1-058).
 
              `exported="true"` is required and is not a hole. A distributor is

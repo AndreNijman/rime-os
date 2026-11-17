@@ -367,7 +367,11 @@ uses neither with a machine whose hello lacks them.
 - Answered by rime-remoted, under the handshake's device id. `battery` is a
   whole number from 0 to 100, `charging` a boolean, `can` at most 8 words; any
   of them may be left out. A value outside those is `bad_request` and nothing
-  is stored. Of `can`, only `"ring"` is kept.
+  is stored. Of `can`, only `"ring"` is kept. The phone leaves `"ring"` out
+  while its notifications or its "Ring my phone" channel are switched off.
+  It reports when it connects, and again when charging starts or stops, the
+  level moves 5 points, or 10 minutes pass.
+- A phone acknowledges a ring only once its notification is posted.
 - The last report per device is in `phones.json` beside `devices.json` (0600,
   written whole). `rime remote devices` lists it; the control reply carries it
   as `phones`, keyed by device id; `--json` puts it on each paired device as
@@ -395,8 +399,11 @@ lines are forwarded to rime-agentd, which does not know them.
    can ring, it has no push registration, the push service refused, or the
    device is revoked.
 
-The phone drops a ring whose `at` or `started` is more than 60 s old, so a push
-delivered late does not ring.
+The phone drops a push ring whose `started` is more than 60 s old, so a push
+delivered late does not ring. A ring on the channel is live and is not checked
+against the phone's clock. A push ring whose `started` equals the `at` of a
+ring the phone already rang from that machine is the same ring (its ack was
+lost) and is dropped too.
 
 ## 3. The phone
 

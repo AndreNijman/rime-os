@@ -275,7 +275,7 @@ impl NotRung {
     pub fn sentence(&self, name: &str) -> String {
         match self {
             NotRung::CannotRing => format!(
-                "{name} has not said it can ring. Update Rime Remote on it and open it once, then try again"
+                "{name} has not said it can ring. Open an up-to-date Rime Remote on it once, with its notifications allowed, then try again"
             ),
             NotRung::NoPush => format!(
                 "{name} is not connected, and it has no push service to wake it. Open Rime Remote on it, \
@@ -464,7 +464,7 @@ mod tests {
             ring(&events, "d", "l16", Reach { report: Some(&report(&["ring"])), has_push: true }, 1, ACK_WAIT, |_| Err("503".into())),
             Err(NotRung::PushFailed("503".into()))
         );
-        assert!(NotRung::CannotRing.sentence("Pixel").contains("Update Rime Remote"));
+        assert!(NotRung::CannotRing.sentence("Pixel").contains("notifications allowed"));
         assert!(NotRung::NoPush.sentence("Pixel").contains("ntfy"));
     }
 

@@ -240,6 +240,45 @@ Test daemons write into a stub: `run-device-suite.sh` refuses to start
 `rime-agentd` without `RIME_AGENTD_DESKTOP_STUB`, so a test run cannot replace
 the developer's clipboard or write into their Downloads.
 
+## `rime remote ring <device>`: find your phone
+
+```
+$ rime remote ring "Pixel 8"
+rime: Pixel 8 is ringing.
+```
+
+The phone plays its alarm sound until someone taps **Stop** on the
+notification, or for 30 seconds. The argument is a device id, or a name that
+fits exactly one device, as for `revoke`. Only the computer's own user can
+ring a phone. A paired phone cannot ring anything.
+
+- If the app is connected, the ring goes straight to the phone, and `rime`
+  reports that it is ringing only after the phone confirms it.
+- If the app is not connected, the ring goes through the phone's push service
+  (see below). `rime` then says it asked, because nothing confirms it. A push
+  that arrives more than a minute late does not ring.
+- If it cannot ring the phone, `rime` says why and exits 1. Three causes: an
+  older app, notifications switched off, or no push service and no connection.
+
+Because the phone plays the ring as an alarm, it rings in silent and vibrate
+mode and through Do Not Disturb, unless Do Not Disturb is set to total silence
+(measured on Android 16). The alarm volume controls how loud it is, and at zero
+it makes no sound.
+
+### The phone's battery
+
+While the app is connected, it reports the phone's battery level and whether
+it is charging. It sends a new report when it connects, when charging starts or
+stops, when the level changes by 5 points, and at least every 10 minutes.
+`rime remote devices` shows the last report under the table:
+
+```
+Pixel 8: battery 62%, charging, reported 3m ago
+```
+
+With `--json`, a paired device that has reported carries a `phone` field
+(`battery`, `charging`, `can`, `reported_ms`). Revoking the device deletes it.
+
 ## Notifications when the app is closed
 
 An agent that needs you at two in the morning has to be able to reach a phone

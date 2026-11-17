@@ -245,6 +245,16 @@ class ManifestTest {
     }
 
     @Test
+    fun `the ring stop receiver is not exported and adds no permission`() {
+        // Stopping a ring is harmless, but an exported receiver is one any app
+        // can poke; the Stop button reaches it by explicit intent.
+        val name = "\".phone.RingStopReceiver\""
+        assertTrue(manifest.contains(name), "the ring stop receiver is not declared, so Stop does nothing")
+        val receiver = manifest.substringAfter(name).substringBefore("/>")
+        assertTrue(receiver.contains("android:exported=\"false\""), "the ring stop receiver is exported")
+    }
+
+    @Test
     fun `send to rime takes shares on the one activity, with no permission added for them`() {
         // The read grant arrives with the share (FLAG_GRANT_READ_URI_PERMISSION),
         // which is the whole reason "Send to Rime" needs no storage permission;

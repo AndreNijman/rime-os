@@ -64,6 +64,7 @@ import kotlinx.coroutines.launch
 class LinkService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var network: ConnectivityManager.NetworkCallback? = null
+    private var battery: android.content.BroadcastReceiver? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -81,6 +82,7 @@ class LinkService : Service() {
             }
         }
         watchNetwork(hub)
+        watchBattery(hub)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -106,6 +108,8 @@ class LinkService : Service() {
             runCatching { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(cb) }
         }
         network = null
+        battery?.let { runCatching { unregisterReceiver(it) } }
+        battery = null
         scope.cancel()
         super.onDestroy()
     }
@@ -130,6 +134,24 @@ class LinkService : Service() {
         }
         runCatching { manager.registerDefaultNetworkCallback(callback) }
             .onSuccess { network = callback }
+    }
+
+    /**
+     * The phone's battery, for the machines it is connected to (contract
+     * §2.5). Android sends this broadcast often while charging; the hub only
+     * passes on a change worth reporting ([com.rimeos.remote.core.phone.BatteryThrottle]).
+     * Registered here, not in the manifest: it cannot be declared there, and
+     * there is nobody to tell while no connection is held.
+     */
+    private fun watchBattery(hub: LinkHub) {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: Intent) {
+                val (level, charging) = com.rimeos.remote.phone.Ringer.reading(intent)
+                hub.onBattery(level, charging)
+            }
+        }
+        runCatching { registerReceiver(receiver, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED)) }
+            .onSuccess { battery = receiver }
     }
 
     private fun goForeground(names: List<String>, connected: Boolean) {

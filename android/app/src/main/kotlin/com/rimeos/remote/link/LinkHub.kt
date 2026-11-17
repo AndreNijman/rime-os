@@ -7,7 +7,13 @@ import com.rimeos.remote.core.Session
 import com.rimeos.remote.core.StaticKey
 import com.rimeos.remote.core.agent.Hello
 import com.rimeos.remote.core.agent.MachineLink
+import com.rimeos.remote.core.agent.Features
 import com.rimeos.remote.core.agent.RemoteHello
+import com.rimeos.remote.core.phone.BatteryThrottle
+import com.rimeos.remote.core.phone.DeviceEvent
+import com.rimeos.remote.core.phone.Phone
+import com.rimeos.remote.core.phone.PhoneLink
+import com.rimeos.remote.phone.Ringer
 import com.rimeos.remote.core.link.Route
 import com.rimeos.remote.data.MachineRepository
 import com.rimeos.remote.pairing.PairingService
@@ -89,6 +95,13 @@ class LinkHub private constructor(private val app: Context) {
 
     /** How each link's current connection was made, set by the connect lambda. */
     private val lastDial = ConcurrentHashMap<String, Dial>()
+
+    // The phone's own side of each connection (contract §2.5): its battery
+    // report, and the event channel a machine rings it on. One of each per
+    // machine; a new connection replaces both.
+    private val batteryThrottles = ConcurrentHashMap<String, BatteryThrottle>()
+    private val eventChannels = ConcurrentHashMap<String, java.io.Closeable>()
+    private val ringer by lazy { Ringer(app) }
 
     private class Dial(val route: Route?, val ms: Long, val relay: Boolean)
 
@@ -261,6 +274,8 @@ class LinkHub private constructor(private val app: Context) {
         links.clear()
         identities.clear()
         lastDial.clear()
+        batteryThrottles.clear()
+        eventChannels.clear()
         _states.value = emptyMap()
         LinkService.stop(app)
         scope.launch { closing.forEach { runCatching { it.close() } } }
@@ -272,6 +287,8 @@ class LinkHub private constructor(private val app: Context) {
         reconnects.remove(deviceId)?.cancel()
         identities.remove(deviceId)
         lastDial.remove(deviceId)
+        batteryThrottles.remove(deviceId)
+        eventChannels.remove(deviceId)?.let { runCatching { it.close() } }
         _states.update { it - deviceId }
         val link = links.remove(deviceId)
         if (held.isEmpty()) LinkService.stop(app)
@@ -336,12 +353,71 @@ class LinkHub private constructor(private val app: Context) {
         setState(machine.deviceId, machine.machine) {
             it.copy(hello = h ?: it.hello, remote = r ?: it.remote, hellos = it.hellos + 1)
         }
+        r?.let { phoneSide(machine, link, it) }
         runCatching {
             repository.updateBlocking { store ->
                 var next = store
                 dial?.route?.let { next = next.connected(machine.deviceId, it.key, System.currentTimeMillis()) }
                 r?.let { next = next.withLan(machine.deviceId, it.lanHints()) }
                 next
+            }
+        }
+    }
+
+    /**
+     * The phone's side of a new connection: report the battery, and open the
+     * channel the machine rings this phone on. Only what the machine's hello
+     * offers is sent; an older machine gets nothing it does not know.
+     */
+    private fun phoneSide(machine: PairedMachine, link: MachineLink, remote: RemoteHello) {
+        val id = machine.deviceId
+        val phone = PhoneLink(link)
+        if (remote.has(Phone.REPORT)) {
+            val throttle = batteryThrottles.computeIfAbsent(id) { BatteryThrottle() }
+            throttle.reset()
+            report(phone, throttle, Ringer.battery(app))
+        }
+        eventChannels.remove(id)?.let { runCatching { it.close() } }
+        if (remote.has(Phone.EVENTS) && remote.has(Features.MUX_ATTACH)) {
+            runCatching {
+                phone.subscribe(
+                    listener = { event -> onDeviceEvent(machine, phone, event) },
+                    onEnd = { cause -> Log.i(TAG, "${machine.machine}: event channel ended: ${cause?.message}") },
+                )
+            }.onSuccess { eventChannels[id] = it }
+                .onFailure { Log.w(TAG, "${machine.machine}: event channel did not open: ${it.message}") }
+        }
+    }
+
+    private fun report(phone: PhoneLink, throttle: BatteryThrottle, reading: Pair<Int?, Boolean?>) {
+        val (level, charging) = reading
+        val now = System.currentTimeMillis()
+        if (!throttle.due(level, charging, now)) return
+        val can = if (ringer.canRing) listOf(Phone.CAN_RING) else emptyList()
+        runCatching { phone.report(level, charging, can) }
+            .onSuccess { throttle.sent(level, charging, now) }
+            .onFailure { Log.i(TAG, "battery report not taken: ${it.message}") }
+    }
+
+    /** The phone's battery changed; tell each connected machine that wants to know, when it is worth it. */
+    fun onBattery(level: Int?, charging: Boolean?) {
+        if (!_unlocked.value) return
+        for ((id, throttle) in batteryThrottles) {
+            val link = links[id] ?: continue
+            if (!link.connected) continue
+            if (state(id)?.remote?.has(Phone.REPORT) != true) continue
+            if (!throttle.due(level, charging, System.currentTimeMillis())) continue
+            scope.launch { report(PhoneLink(link), throttle, level to charging) }
+        }
+    }
+
+    private fun onDeviceEvent(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent) {
+        when (event) {
+            is DeviceEvent.Ring -> scope.launch {
+                // A repeat of a ring already rung is acknowledged again, not
+                // rung again: the machine only learns it worked from the ack.
+                val rang = if (Ringer.rings.first(machine.deviceId, event.at)) ringer.ring(machine.machine) else true
+                if (rang) runCatching { phone.ack(event.id) }
             }
         }
     }

@@ -268,6 +268,18 @@ object Help {
                         "file may or may not be there. Check before sending it again. The " +
                         "computer deletes any file you stop part way.",
                 ),
+                h("Finding this phone"),
+                p(
+                    "On the computer, rime remote ring makes this phone play its alarm " +
+                        "sound so you can find it. Tap Stop on the notification, or it stops " +
+                        "by itself after 30 seconds. It rings in silent mode and through Do " +
+                        "Not Disturb, unless Do Not Disturb is set to total silence.",
+                ),
+                note(
+                    "While connected, this app also tells the computer its battery level and " +
+                        "whether it is charging, so rime remote devices can show it. Nothing " +
+                        "else about the phone is sent.",
+                ),
                 h("Taking this phone's access away"),
                 p(
                     "Forget the computer here, or remove this device at the computer. Either " +
