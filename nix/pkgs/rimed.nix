@@ -215,6 +215,7 @@ let
       "a_narrowed_session_runs_under_its_own_allowlist_and_not_the_runtimes"
       "a_network_change_costs_the_session_and_costs_nothing_else"
       "a_paired_device_reaches_the_agent_runtime_through_the_proxy"
+      "a_paired_phone_reaches_nex_through_the_running_service"
       "a_payload_with_quotes_and_backslashes_arrives_unchanged"
       "a_phone_registers_for_push_over_the_real_session_and_the_key_lands_in_its_own_file"
       "a_phone_that_leaves_gives_the_desktop_its_size_back"
