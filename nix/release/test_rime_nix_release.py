@@ -519,6 +519,76 @@ class VerifySignatures(unittest.TestCase):
         self.assertNotIn("checking", err)
 
 
+class VerifyServedSignatures(unittest.TestCase):
+    """verify_served_signatures: Nix checks the narinfos already read, from a local copy; the public cache is not
+    asked again (GitHub Pages answered that second pass with 429: nix-release 44028935235, 44046948160)."""
+
+    def setUp(self):
+        self.a, self.b = sp(1, "a"), sp(2, "b")
+        self.info = {
+            self.a: {"nar_hash": nh("a"), "nar_size": 120, "references": [self.b, self.a], "url": "nar/x.nar",
+                     "signatures": ["rime-1:c2lnYQ==", "other-1:c2lnYg=="], "file_size": 9},
+            self.b: {"nar_hash": nh("b"), "nar_size": 64, "references": [], "url": None,
+                     "signatures": ["rime-1:c2lnYw=="], "file_size": 4},
+        }
+
+    def verify(self, rc=0, err="", info=None):
+        seen = {}
+
+        class P:
+            def __init__(self):
+                self.returncode, self.stdout, self.stderr = rc, b"", err.encode()
+
+        def run(cmd, **kw):
+            store = cmd[cmd.index("--store") + 1]
+            d = store[len("file://"):] if store.startswith("file://") else None
+            seen["cmd"], seen["store"] = cmd, store
+            if d:
+                seen["files"] = {}
+                for f in sorted(os.listdir(d)):
+                    with open(os.path.join(d, f)) as fh:
+                        seen["files"][f] = fh.read()
+            return P()
+
+        saved = r.run
+        r.run = run
+        try:
+            r.verify_served_signatures(self.info if info is None else info, ["rime-1:k"], [self.a, self.b], "public check")
+            return seen, None
+        except r.Refused as e:
+            return seen, str(e)
+        finally:
+            r.run = saved
+
+    def test_the_narinfos_already_read_are_checked_locally(self):
+        seen, err = self.verify()
+        self.assertIsNone(err)
+        self.assertTrue(seen["store"].startswith("file:///"), seen["store"])
+        cmd = seen["cmd"]
+        self.assertEqual(cmd[cmd.index("--sigs-needed") + 1], "1")
+        self.assertIn("--no-contents", cmd)
+        self.assertEqual(cmd[cmd.index("--trusted-public-keys") + 1], "rime-1:k")
+        self.assertEqual(cmd[-2:], [self.a, self.b])
+        files = seen["files"]
+        self.assertEqual(files["nix-cache-info"], "StoreDir: /nix/store\n")
+        for p in (self.a, self.b):
+            ni = r.parse_narinfo(files[os.path.basename(p)[:32] + ".narinfo"])
+            self.assertIsNone(r.narinfo_binds(ni, p, self.info[p]))
+            self.assertEqual(ni["Sig"], self.info[p]["signatures"])
+            self.assertTrue(ni["NarHash"].startswith("sha256:") and len(ni["NarHash"]) == 59, ni["NarHash"])
+            self.assertTrue(ni["URL"])
+
+    def test_a_refusal_quotes_nix_and_not_its_progress(self):
+        _, err = self.verify(1, f"checking '{self.a}'...\npath '{self.a}' is untrusted\n")
+        self.assertIn(f"path '{self.a}' is untrusted", err)
+        self.assertNotIn("checking", err)
+
+    def test_a_narinfo_never_read_is_refused_without_asking_nix(self):
+        seen, err = self.verify(info=dict(self.info, **{self.b: None}))
+        self.assertIn(f"no narinfo was read for {self.b}", err)
+        self.assertEqual(seen, {})
+
+
 class PathInfo(unittest.TestCase):
     """Nix 2.35 fails `path-info` for a path a binary cache lacks instead of answering null (seen in release-standin)."""
 

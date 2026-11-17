@@ -593,6 +593,38 @@ def verify_signatures(store, keys, paths, what):
         time.sleep(VERIFY_WAIT * n)
 
 
+def served_narinfo(path, info):
+    """A narinfo carrying exactly the signed fields of `info` as `nix path-info --json` read them from a cache:
+    StorePath, NarHash, NarSize, References and the Sig lines (URL is not signed; see the GitHub backend notes)."""
+    refs = " ".join(r[len(STORE_DIR) + 1:] for r in sorted(info["references"]))
+    lines = [f"StorePath: {path}", f"URL: {info.get('url') or 'nar/unused.nar'}", "Compression: none",
+             f"NarHash: {nar_hash_nix32(info['nar_hash'])}", f"NarSize: {int(info['nar_size'])}", f"References: {refs}"]
+    return "\n".join(lines + [f"Sig: {sig}" for sig in info.get("signatures") or []]) + "\n"
+
+
+def verify_served_signatures(info, keys, paths, what):
+    """Nix's own signature check (`nix store verify --no-contents --sigs-needed 1`) of the narinfos a public check
+    has already read, from a local copy of them. Asking the public cache for every narinfo a second time made GitHub
+    Pages answer with 429 until Nix gave up (nix-release runs 44028935235 and 44046948160, 2026-11-17), and a signature
+    read in that second pass is no better than the one already read: both are what the cache serves."""
+    paths = list(paths)
+    missing = [p for p in paths if not info.get(p)]
+    if missing:
+        raise Refused(f"{what}: no narinfo was read for {missing[0]}" + (f" (+{len(missing) - 1} more)" if len(missing) > 1 else ""))
+    with tempfile.TemporaryDirectory(prefix="rime-served-narinfo-") as d:
+        with open(os.path.join(d, "nix-cache-info"), "w") as f:
+            f.write(f"StoreDir: {STORE_DIR}\n")
+        for p in paths:
+            with open(os.path.join(d, os.path.basename(p)[:32] + ".narinfo"), "w") as f:
+                f.write(served_narinfo(p, info[p]))
+        proc = run(NIX + ["store", "verify", "--store", f"file://{d}", "--no-contents", "--sigs-needed", "1",
+                          "--trusted-public-keys", " ".join(keys)] + FRESH + paths, check=False)
+    if proc.returncode != 0:
+        lines = [ln for ln in proc.stderr.decode(errors="replace").splitlines()
+                 if ln.strip() and not ln.startswith("checking '")]
+        raise Refused(f"{what}: " + ("\n".join(lines)[-1500:] or f"nix store verify exited {proc.returncode}"))
+
+
 def check_public(closure, public, keys, report=None):
     """Read the whole closure back through the public URL with no credentials. Returns {path: file_size}."""
     clo = closure if isinstance(closure, dict) else load_json(closure)
@@ -610,7 +642,7 @@ def check_public(closure, public, keys, report=None):
             problems.append(f"{p}: the public narinfo has no FileSize")
     if problems:
         raise Refused("public check: " + "; ".join(problems[:10]) + (f" (+{len(problems) - 10} more)" if len(problems) > 10 else ""))
-    verify_signatures(public, keys, paths, "public check: narinfo signatures")
+    verify_served_signatures(pub, keys, paths, "public check: narinfo signatures")
     # A narinfo whose NAR is gone is what a client would hit as a download failure. HEAD every NAR.
     base = public.split("?", 1)[0].rstrip("/")
     info = http_get(f"{base}/nix-cache-info")
@@ -1098,7 +1130,7 @@ def check_public_github(closure, split, public, keys, upstream, upstream_keys, r
             log("public check: Pages does not serve the pushed narinfos yet; retrying in 20 s")
             time.sleep(20)
     if rime:
-        verify_signatures(public, keys, rime, "public check: narinfo signatures")
+        verify_served_signatures(pub, keys, rime, "public check: narinfo signatures")
     gone = []
     for path in rime:
         url = pub[path].get("url") or ""
