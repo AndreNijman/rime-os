@@ -2076,16 +2076,16 @@ fn a_reply_typed_here_goes_to_a_phone_that_says_it_can_and_is_not_a_dismissal() 
     }
 
     // Each post's reply comes after its line is written.
-    let mut lines = 0;
-    let mut post_id = |session: &mut Session, key: &str, reply: Option<&str>| {
+    let lines = std::cell::Cell::new(0);
+    let post_id = |session: &mut Session, key: &str, reply: Option<&str>| {
         let mut body = serde_json::json!({"cmd": "phone_notification", "key": key, "app": "Signal", "title": key});
         if let Some(label) = reply {
             body["reply"] = label.into();
         }
         let r = session.call(&body.to_string());
         assert_eq!(r["reply"], "ok", "{r}");
-        lines += 1;
-        let line = notify_lines(&h, lines)[lines - 1].clone();
+        lines.set(lines.get() + 1);
+        let line = notify_lines(&h, lines.get())[lines.get() - 1].clone();
         assert_eq!(line["summary"], key, "{line}");
         line
     };
@@ -2095,14 +2095,21 @@ fn a_reply_typed_here_goes_to_a_phone_that_says_it_can_and_is_not_a_dismissal() 
     assert!(plain["reply"].is_null(), "{plain}");
 
     // A phone that never said "reply" hears nothing of a reply, and the close
-    // after it is no dismissal either, though it said "dismiss". As in the
-    // dismiss test, the gate is read when the reply is handled: posting a1
-    // again shows it once a1's close has been handled.
+    // after it is no dismissal either, though it said "dismiss". The card is
+    // gone here, so this computer says the reply was not sent and gives the
+    // words back. As in the dismiss test, the gate is read when the reply is
+    // handled: posting a1 again shows it once a1's close has been handled.
     assert_eq!(session.call(r#"{"cmd":"phone_report","battery":50,"can":["dismiss"]}"#)["reply"], "ok");
     let first = post_id(&mut session, "a1", Some("Re\u{7}ply\u{202e}"));
     assert_eq!(first["reply"], "Reply", "{first}");
     let a1 = first["id"].clone();
     reply_here(&h, &a1, "not for you");
+    lines.set(lines.get() + 1);
+    let notice = notify_lines(&h, lines.get())[lines.get() - 1].clone();
+    assert_eq!((notice["summary"].as_str(), notice["replaces"].as_u64()), (Some("Reply not sent"), Some(0)), "{notice}");
+    assert!(notice["reply"].is_null(), "{notice}");
+    let text = notice["body"].as_str().unwrap();
+    assert!(text.contains("is off on your phone") && text.ends_with("What you typed:\nnot for you"), "{text}");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         // The stub reads its file every 100 ms.
@@ -2137,7 +2144,29 @@ fn a_reply_typed_here_goes_to_a_phone_that_says_it_can_and_is_not_a_dismissal() 
         ]
     );
 
+    // The phone goes away with its cards still here. A reply to one now has
+    // nowhere to go: this computer says so. The session's end reaches the
+    // daemon a little later, so a reply may still go into the closing
+    // channel; the next card is tried until the notice comes. (Two: the
+    // phone's rate allows ten posts at once and the test has used most.)
+    let waiting: Vec<_> = (0..2).map(|i| post_id(&mut session, &format!("f{i}"), Some("Reply"))["id"].clone()).collect();
+    drop(session);
+    let mut said = None;
+    for (i, id) in waiting.iter().enumerate() {
+        reply_here(&h, id, &format!("still there {i}"));
+        let got = notify_lines(&h, lines.get() + 1);
+        if got.len() > lines.get() {
+            lines.set(lines.get() + 1);
+            said = Some(got[lines.get() - 1].clone());
+            break;
+        }
+    }
+    let said = said.expect("no reply to a phone that went away was said not to have gone");
+    assert_eq!(said["summary"], "Reply not sent", "{said}");
+    let text = said["body"].as_str().unwrap();
+    assert!(text.contains("not connected") && text.contains("What you typed:\nstill there"), "{text}");
+
     // Nothing here was closed by the daemon itself: the Shell closed them.
-    let after = notify_lines(&h, lines);
+    let after = notify_lines(&h, lines.get());
     assert!(after.iter().all(|l| l["op"] == "notify"), "{after:?}");
 }

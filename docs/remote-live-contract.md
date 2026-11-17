@@ -550,6 +550,14 @@ its line breaks, loses other control and bidirectional-override characters,
 and is cut to 2,000 characters; a reply that is empty after that is not sent.
 The server closes the notification after a reply (reason 2); that close is not
 a dismissal, so the phone keeps it, and this holds for any reply, sent or not.
+A non-empty reply that is not sent, because the phone's report does not list
+`"reply"` or the phone has no `device_events` channel open, makes rime-remoted
+post its own notification here: app `Rime Remote`, summary `Reply not sent`,
+a body that says why and ends `What you typed:` and the text. It belongs to no
+phone, so closing it sends nothing, and it has no reply field. A reply written
+into the channel counts as sent: the phone does not acknowledge it, so one
+written just as the connection drops, or one the phone then fails to send, is
+not reported here.
 The phone acts only on a key it sent to that machine and that machine still
 shows, and only while unlocked. It fills the reply action's `RemoteInput` and
 sends that action's `PendingIntent`, as Android's own reply field would: the

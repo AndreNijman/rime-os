@@ -560,8 +560,34 @@ pub enum Job {
 /// Told `(device, key)` when the person dismissed a phone's notification here.
 pub type Dismissed = Box<dyn Fn(&str, &str) + Send + Sync>;
 
-/// Told `(device, key, text)` when the person replied to one here.
-pub type Replied = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
+/// Told `(device, key, text)` when the person replied to one here; answers
+/// whether it went to the phone.
+pub type Replied = Box<dyn Fn(&str, &str, &str) -> Result<(), NotSent> + Send + Sync>;
+
+/// Why a reply typed here did not go to the phone. The card it was typed
+/// into is already closed, so the computer says so and gives the words back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotSent {
+    /// The phone has no live connection to this computer.
+    Offline,
+    /// The phone's latest report does not list `"reply"`: replying is off.
+    Off,
+}
+
+/// The notice for a reply that did not go: posted here, kept by no phone,
+/// so closing it tells nobody, and it has no reply field of its own.
+pub fn not_sent(why: NotSent, text: &str) -> Shown {
+    let reason = match why {
+        NotSent::Offline => "Your phone is not connected, so it could not send this reply.",
+        NotSent::Off => "Replying from this computer is off on your phone, so it did not send this reply.",
+    };
+    Shown {
+        app_name: "Rime Remote".into(),
+        summary: "Reply not sent".into(),
+        body: format!("{reason} What you typed:\n{text}"),
+        reply: None,
+    }
+}
 
 #[derive(Default)]
 struct Phone {
@@ -685,8 +711,10 @@ impl Mirror {
                 if text.is_empty() {
                     return;
                 }
-                if let Some(tell) = self.replied.get() {
-                    tell(&device, &key, &text);
+                if let Some(Err(why)) = self.replied.get().map(|tell| tell(&device, &key, &text)) {
+                    if let Err(e) = self.backend.notify(&not_sent(why, &text), 0) {
+                        eprintln!("rime-remoted: a reply was not sent and saying so failed: {e}");
+                    }
                 }
             }
             Job::Heard(Heard::Closed { id, reason }) => {
@@ -1087,7 +1115,10 @@ mod tests {
         let (dtx, drx) = std::sync::mpsc::channel();
         m.on_dismissed(Box::new(move |d, k| dtx.send((d.to_string(), k.to_string())).unwrap()));
         let (rtx, rrx) = std::sync::mpsc::channel();
-        m.on_replied(Box::new(move |d, k, t| rtx.send((d.to_string(), k.to_string(), t.to_string())).unwrap()));
+        m.on_replied(Box::new(move |d, k, t| {
+            rtx.send((d.to_string(), k.to_string(), t.to_string())).unwrap();
+            Ok(())
+        }));
         let post = |dev: &str, key: &str| {
             let (_, shown) = shown("P", &json!({"key": key, "app": "A", "title": "t", "reply": "Reply"})).unwrap();
             Job::Post { device: dev.into(), key: key.into(), shown }
@@ -1118,6 +1149,45 @@ mod tests {
         std::fs::write(s.0.join("owner"), ":1.99").unwrap();
         m.handle(post("a", "y")); // new server: id 4
         assert!(m.answered().is_empty(), "{:?}", m.answered());
+    }
+
+    #[test]
+    fn a_reply_that_did_not_go_is_said_here_with_the_words_and_closing_that_tells_nobody() {
+        let s = scratch("notsent");
+        let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
+        let (dtx, drx) = std::sync::mpsc::channel();
+        m.on_dismissed(Box::new(move |d, k| dtx.send((d.to_string(), k.to_string())).unwrap()));
+        let outcome = std::sync::Arc::new(Mutex::new(Err(NotSent::Offline)));
+        let o = std::sync::Arc::clone(&outcome);
+        m.on_replied(Box::new(move |_, _, _| *o.lock().unwrap()));
+        let post = |key: &str| {
+            let (_, shown) = shown("P", &json!({"key": key, "app": "A", "title": "t", "reply": "Reply"})).unwrap();
+            Job::Post { device: "a".into(), key: key.into(), shown }
+        };
+        m.handle(post("k1")); // id 1
+        m.handle(Job::Heard(Heard::Replied { id: 1, text: "on my way\u{7}\nsoon".into() }));
+        m.handle(Job::Heard(Heard::Closed { id: 1, reason: DISMISSED }));
+        let l = lines(&s.0);
+        assert_eq!(l.len(), 2, "{l:?}");
+        assert_eq!((l[1]["op"].as_str(), l[1]["id"].as_u64(), l[1]["replaces"].as_u64()), (Some("notify"), Some(2), Some(0)));
+        assert_eq!(l[1]["summary"], "Reply not sent");
+        assert_eq!(l[1]["reply"], Value::Null, "the notice has a reply field");
+        let body = l[1]["body"].as_str().unwrap();
+        assert!(body.contains("not connected") && body.ends_with("What you typed:\non my way\nsoon"), "{body}");
+
+        // The notice belongs to no phone: closing it tells nobody.
+        m.handle(Job::Heard(Heard::Closed { id: 2, reason: DISMISSED }));
+        assert!(drx.try_recv().is_err());
+
+        // Replying turned off says so; a reply that went posts nothing.
+        *outcome.lock().unwrap() = Err(NotSent::Off);
+        m.handle(post("k2")); // id 3
+        m.handle(Job::Heard(Heard::Replied { id: 3, text: "x".into() }));
+        assert!(lines(&s.0)[3]["body"].as_str().unwrap().contains("is off on your phone"));
+        *outcome.lock().unwrap() = Ok(());
+        m.handle(post("k3")); // id 5
+        m.handle(Job::Heard(Heard::Replied { id: 5, text: "y".into() }));
+        assert_eq!(lines(&s.0).len(), 5, "a reply that went was also said not to have");
     }
 
     #[test]
@@ -1259,7 +1329,10 @@ mod tests {
         // phone and the close is not a dismissal. Ten in a row, so a reply
         // and its close handled out of order (two streams) would show.
         let (rtx, rrx) = std::sync::mpsc::channel();
-        m.on_replied(Box::new(move |d, k, t| rtx.send((d.to_string(), k.to_string(), t.to_string())).unwrap()));
+        m.on_replied(Box::new(move |d, k, t| {
+            rtx.send((d.to_string(), k.to_string(), t.to_string())).unwrap();
+            Ok(())
+        }));
         for i in 0..10 {
             let key = format!("r{i}");
             let (_, s) = shown("Pixel 8", &json!({"key": key, "app": "Signal", "title": "R", "reply": "Reply"})).unwrap();

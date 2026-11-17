@@ -338,6 +338,8 @@ reply field on the computer.
 What you type there is sent from the phone by the app that posted the
 notification, as you, exactly as if you had used the reply field on the phone.
 The notification closes on the computer and stays on the phone.
+If the phone is not connected, or replying has been turned off on it since,
+the computer shows **Reply not sent** with what you typed.
 
 - Only the app's name, the title and the text cross, plus whether it can be
   replied to. Pictures and other actions do not, and the computer keeps
