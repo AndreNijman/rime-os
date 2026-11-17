@@ -16,6 +16,7 @@ import com.rimeos.remote.core.phone.Mirror
 import com.rimeos.remote.core.phone.MirrorOutbox
 import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
+import com.rimeos.remote.phone.MirrorService
 import com.rimeos.remote.phone.Receiver
 import com.rimeos.remote.phone.Ringer
 import com.rimeos.remote.core.link.Route
@@ -423,6 +424,7 @@ class LinkHub private constructor(private val app: Context) {
         val can = buildList {
             if (ringer.canRing) add(Phone.CAN_RING)
             if (receiver.canReceive) add(Phone.CAN_RECEIVE)
+            if (MirrorService.granted(app)) add(Phone.CAN_DISMISS)
         }
         runCatching { phone.report(level, charging, can) }
             .onSuccess { throttle.sent(level, charging, now) }
@@ -518,6 +520,13 @@ class LinkHub private constructor(private val app: Context) {
                 if (rang) runCatching { phone.ack(event.id) }
             }
             is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
+            is DeviceEvent.Dismissed -> {
+                // Only what this machine was sent, and only while unlocked:
+                // a locked app sends nothing and takes nothing back.
+                val lane = mirrorLanes[machine.deviceId] ?: return
+                if (!_unlocked.value) return
+                if (synchronized(lane.outbox) { lane.outbox.dismissedThere(event.key) }) MirrorService.dismiss(event.key)
+            }
         }
     }
 

@@ -67,6 +67,10 @@ class PhoneTest {
         assertNull(Phone.event("""{"event":"ring","id":"3","at":1}"""))
         assertNull(Phone.event("""{"event":"ring","id":3}"""))
         assertNull(Phone.event("garbage"))
+        val key = Mirror.key("0|org.example.chat|1|tag|10001")
+        assertEquals(DeviceEvent.Dismissed(key), Phone.event("""{"event":"notification_dismissed","key":"$key"}"""))
+        assertNull(Phone.event("""{"event":"notification_dismissed","key":"../etc"}"""))
+        assertNull(Phone.event("""{"event":"notification_dismissed"}"""))
     }
 
     @Test

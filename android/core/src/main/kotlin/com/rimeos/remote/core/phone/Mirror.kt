@@ -53,6 +53,9 @@ object Mirror {
             .take(16)
             .joinToString("") { "%02x".format(it) }
 
+    /** Whether [key] has the shape [key] gives: what a computer names back must. */
+    fun validKey(key: String): Boolean = key.length == 32 && key.all { it in '0'..'9' || it in 'a'..'f' }
+
     /** At most [cap] characters, cut on a character, never inside a surrogate pair. */
     fun clip(raw: CharSequence?, cap: Int): String {
         val s = raw?.toString()?.trim() ?: return ""
@@ -197,6 +200,17 @@ class MirrorOutbox(
     /** [item] did not get there. Nothing is retried: the next update replaces it. */
     fun failed(item: MirrorItem) {
         if (inflight == item.key) inflight = null
+    }
+
+    /**
+     * The person dismissed [key] on this computer. True when this computer
+     * was sent it and shows it still; it then no longer does, so the phone's
+     * own removal that follows is not sent back to it. A key it was never
+     * sent is false: a computer dismisses only what it was given.
+     */
+    fun dismissedThere(key: String): Boolean {
+        waiting.remove(key)
+        return shown.remove(key) != null
     }
 
     /** The computer took [item]. */

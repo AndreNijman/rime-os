@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# rime-remoted's real notification backend (busctl --user) against a fake
-# notification server on a PRIVATE session bus: post, replace, close.
+# rime-remoted's real notification backend (zbus, src/mirror.rs `Bus`) against
+# a fake notification server on a PRIVATE session bus: post, replace, close,
+# and the server's NotificationClosed (dismissed, expired, a stranger's fake).
 #
-#   tests/test-remoted-notify-busctl.sh <rime-remoted unit-test binary>
+#   tests/test-remoted-notify-bus.sh <rime-remoted unit-test binary>
 #
 # The binary's own test is #[ignore]d and refuses to run unless RIME_REMOTED_FAKE_NOTIFY_BUS=1,
 # which only this script sets, inside dbus-run-session with a config that has
@@ -27,18 +28,21 @@ dbus-run-session --config-file="$work/bus.conf" -- bash -c '
   python3 "$here/fake-notify-server.py" "$work/log.jsonl" >"$work/ready" &
   server=$!
   read -r -t 10 line <"$work/ready" && [ "$line" = ready ] || { echo "FAIL: fake server never ready" >&2; exit 1; }
-  RIME_REMOTED_FAKE_NOTIFY_BUS=1 "$bin" --ignored --exact mirror::tests::the_real_backend_posts_replaces_and_closes_on_a_fake_server >"$work/out" 2>&1 \
+  RIME_REMOTED_FAKE_NOTIFY_BUS=1 "$bin" --ignored --exact mirror::tests::the_real_backend_posts_replaces_closes_and_hears_dismissals_on_a_fake_server >"$work/out" 2>&1 \
     || { cat "$work/out" >&2; kill "$server"; exit 1; }
   kill "$server"
 '
 python3 - "$work/log.jsonl" <<'PY'
 import json, sys
 got = [json.loads(l) for l in open(sys.argv[1])]
-ops = [(g["op"], g["id"], g.get("replaces")) for g in got]
-assert ops == [("notify", 1, 0), ("notify", 1, 1), ("close", 1, None)], ops
+ops = [(g["op"], g["id"], g.get("replaces", g.get("reason"))) for g in got]
+assert ops == [("notify", 1, 0), ("notify", 1, 1), ("close", 1, None), ("closed", 1, 3),
+               ("notify", 3, 0), ("closed", 3, 1), ("notify", 4, 0), ("closed", 4, 2),
+               ("notify", 5, 0), ("closed", 5, 2)], ops  # the fake's counter also moves on a replace
 n = got[0]
 assert n["app"] == "Pixel 8 · Signal" and n["icon"] == "phone", n
 assert n["summary"] == "-x ‹b›" and n["body"] == "a &amp; b", n
 assert n["actions"] == [] and n["hints"] == {"urgency": "1"} and n["expire"] == -1, n
-print("PASS: posted, replaced and closed through busctl; nothing but the safe fields reached the server")
+print("PASS: posted, replaced and closed over D-Bus; nothing but the safe fields reached the server; "
+      "only the server's own dismissals reached the phone")
 PY

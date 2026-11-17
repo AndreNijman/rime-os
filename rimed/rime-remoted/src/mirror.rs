@@ -30,22 +30,39 @@
 //! The control worker answers a connection's requests in order, so a stalled
 //! session bus must not stall the phone. Requests go to one worker thread
 //! through a bounded queue; a full queue drops the notification. The worker
-//! posts with `busctl --user` (`org.freedesktop.Notifications.Notify`), the
-//! same tool `machine.rs` reads rimed with, and keeps the id the server
-//! returns per `(device, key)`, so an update replaces its notification and a
-//! removal closes it.
+//! keeps the id the server returns per `(device, key)`, so an update replaces
+//! its notification and a removal closes it.
+//!
+//! [`Bus`] is the desktop: one thread of its own with a single-threaded tokio
+//! runtime owns the session-bus connection (made when first needed, made again
+//! after it breaks). It answers the worker's calls, each within
+//! [`POST_BUDGET`] counted from the ask, connecting included, and hears `NotificationClosed` from the current owner of
+//! `org.freedesktop.Notifications` only. The text goes over the bus in the
+//! message, never on a command line.
+//!
+//! ## Dismissed here, gone there
+//!
+//! A close with reason 2 ("dismissed by the user") for an id this process
+//! posted goes back to the phone as `notification_dismissed` on its events
+//! channel, if the phone said it `can` "dismiss" (contract §2.7). Expired
+//! (1), closed by a call (3, which includes this process's own closes) and
+//! anything else only forget the id. The signal is queued behind the job that
+//! posted the id, so a notification closed the moment it was shown is still
+//! known when its close is read.
 //!
 //! ## Tests never reach the real desktop
 //!
 //! [`STUB_ENV`] points the worker at a directory: each post and close is a
-//! JSON line in `<dir>/notifications.jsonl`. A unit-test build never gets the
-//! real backend from [`mirror`], whatever the environment says.
+//! JSON line in `<dir>/notifications.jsonl`, and a line `{"id":N,"reason":R}`
+//! appended to `<dir>/closed.jsonl` stands for the server's
+//! `NotificationClosed`. A unit-test build never gets the real backend from
+//! [`mirror`], whatever the environment says.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -86,6 +103,12 @@ pub const POST_BUDGET: Duration = Duration::from_secs(3);
 
 /// The icon every mirrored notification carries.
 pub const ICON: &str = "phone";
+
+/// `NotificationClosed`'s reason when the person dismissed it.
+pub const DISMISSED: u32 = 2;
+
+/// What a phone is told when the person dismissed one of its notifications here.
+pub const DISMISSED_EVENT: &str = "notification_dismissed";
 
 // ── Text ────────────────────────────────────────────────────────────────────
 
@@ -219,46 +242,186 @@ pub trait Backend: Send + Sync {
     fn owner(&self) -> Option<String>;
 }
 
-/// The desktop's notification server, through `busctl --user`.
-pub struct Real;
+/// Called with `(id, reason)` for each `NotificationClosed` the server sends.
+pub type Closer = Box<dyn Fn(u32, u32) + Send + Sync>;
 
-impl Real {
-    fn call(args: &[&str]) -> Result<String, String> {
-        let mut all = vec!["--user", "--json=short", "--", "call", "org.freedesktop.Notifications",
-                           "/org/freedesktop/Notifications", "org.freedesktop.Notifications"];
-        all.extend_from_slice(args);
-        match crate::machine::run_until("busctl", &all, Instant::now() + POST_BUDGET) {
-            Some((Some(0), out, _)) => Ok(out),
-            Some((_, _, err)) => Err(err.trim().lines().last().unwrap_or("busctl failed").to_string()),
-            None => Err("the notification server did not answer in time".into()),
+const NAME: &str = "org.freedesktop.Notifications";
+const PATH: &str = "/org/freedesktop/Notifications";
+
+enum Call {
+    Notify(Shown, u32, SyncSender<Result<u32, String>>),
+    Close(u32, SyncSender<Result<(), String>>),
+    Owner(SyncSender<Option<String>>),
+}
+
+/// The desktop's notification server, over the session bus.
+pub struct Bus {
+    /// Each call with the moment its asker stops waiting.
+    calls: tokio::sync::mpsc::Sender<(Call, std::time::Instant)>,
+}
+
+struct Link {
+    notifications: zbus::Proxy<'static>,
+    dbus: zbus::fdo::DBusProxy<'static>,
+    closed: zbus::proxy::SignalStream<'static>,
+}
+
+/// Whether an error means the connection is gone (so the next call makes a
+/// new one) rather than a refusal from the other end.
+fn broken(e: &zbus::Error) -> bool {
+    !matches!(e, zbus::Error::MethodError(..) | zbus::Error::FDO(..))
+}
+
+impl Bus {
+    /// Start the bus thread. Nothing touches the bus until the first call.
+    pub fn start(closer: Closer) -> std::io::Result<Bus> {
+        let (calls, rx) = tokio::sync::mpsc::channel(4);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        std::thread::Builder::new()
+            .name("phone-notifications-bus".into())
+            .spawn(move || runtime.block_on(Bus::serve(rx, closer)))?;
+        Ok(Bus { calls })
+    }
+
+    /// One call, answered within the budget or not at all. Connecting and
+    /// calling share the one deadline, so nothing reaches the server after
+    /// the asker has given up: a post it gave up on would show with no id
+    /// kept, and never be replaced or closed.
+    fn ask<T>(&self, call: impl FnOnce(SyncSender<T>) -> Call) -> Option<T> {
+        let (tx, rx) = sync_channel(1);
+        let by = std::time::Instant::now() + POST_BUDGET;
+        self.calls.try_send((call(tx), by)).ok()?;
+        // The slack is for the reply's trip back, not for more work.
+        rx.recv_timeout(POST_BUDGET + Duration::from_millis(500)).ok()
+    }
+
+    async fn connect() -> zbus::Result<Link> {
+        let conn = zbus::Connection::session().await?;
+        let notifications: zbus::Proxy<'static> = zbus::ProxyBuilder::new(&conn)
+            .destination(NAME)?
+            .path(PATH)?
+            .interface(NAME)?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await?;
+        let dbus = zbus::fdo::DBusProxy::builder(&conn)
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .await?;
+        // A proxy for a well-known name hears that name's owner only, so a
+        // client that sends its own NotificationClosed is not believed.
+        let closed = notifications.receive_signal("NotificationClosed").await?;
+        Ok(Link { notifications, dbus, closed })
+    }
+
+    async fn serve(mut calls: tokio::sync::mpsc::Receiver<(Call, std::time::Instant)>, closer: Closer) {
+        use zbus::export::futures_util::StreamExt;
+        enum Next {
+            Call(Option<(Call, std::time::Instant)>),
+            Closed(Option<zbus::Message>),
+        }
+        let mut link: Option<Link> = None;
+        loop {
+            let next = match link.as_mut() {
+                Some(l) => tokio::select! {
+                    c = calls.recv() => Next::Call(c),
+                    m = l.closed.next() => Next::Closed(m),
+                },
+                None => Next::Call(calls.recv().await),
+            };
+            match next {
+                Next::Call(None) => return,
+                Next::Call(Some((call, by))) => {
+                    let by = tokio::time::Instant::from_std(by);
+                    if link.is_none() && by > tokio::time::Instant::now() {
+                        match tokio::time::timeout_at(by, Bus::connect()).await {
+                            Ok(Ok(l)) => link = Some(l),
+                            Ok(Err(e)) => eprintln!("rime-remoted: no session bus for phone notifications: {e}"),
+                            Err(_) => eprintln!("rime-remoted: the session bus did not answer in time"),
+                        }
+                    }
+                    if Bus::answer(call, by, link.as_ref()).await {
+                        link = None;
+                    }
+                }
+                Next::Closed(Some(m)) => {
+                    if let Ok((id, reason)) = m.body().deserialize::<(u32, u32)>() {
+                        closer(id, reason);
+                    }
+                }
+                // The stream ends with the connection.
+                Next::Closed(None) => link = None,
+            }
+        }
+    }
+
+    /// `f` by `by`; the error says whether the connection broke.
+    async fn within<T, E: Into<zbus::Error>>(
+        by: tokio::time::Instant,
+        f: impl std::future::Future<Output = Result<T, E>>,
+    ) -> Result<T, (String, bool)> {
+        match tokio::time::timeout_at(by, f).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => {
+                let e: zbus::Error = e.into();
+                Err((e.to_string(), broken(&e)))
+            }
+            Err(_) => Err(("the notification server did not answer in time".into(), false)),
+        }
+    }
+
+    /// Answer one call. True when the connection broke doing it.
+    async fn answer(call: Call, by: tokio::time::Instant, link: Option<&Link>) -> bool {
+        let late = by <= tokio::time::Instant::now();
+        let Some(l) = link.filter(|_| !late) else {
+            let why = if late { "the notification server did not answer in time" } else { "no session bus" };
+            match call {
+                Call::Notify(_, _, r) => drop(r.send(Err(why.into()))),
+                Call::Close(_, r) => drop(r.send(Err(why.into()))),
+                Call::Owner(r) => drop(r.send(None)),
+            }
+            return false;
+        };
+        match call {
+            Call::Notify(s, replaces, reply) => {
+                let actions: Vec<&str> = Vec::new();
+                let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
+                    HashMap::from([("urgency", zbus::zvariant::Value::U8(1))]);
+                let body = (&s.app_name, replaces, ICON, &s.summary, &s.body, actions, hints, -1i32);
+                let got = Bus::within(by, l.notifications.call::<_, _, u32>("Notify", &body)).await;
+                let gone = matches!(got, Err((_, true)));
+                let _ = reply.send(got.map_err(|(e, _)| e));
+                gone
+            }
+            Call::Close(id, reply) => {
+                let got = Bus::within(by, l.notifications.call::<_, _, ()>("CloseNotification", &(id,))).await;
+                let gone = matches!(got, Err((_, true)));
+                let _ = reply.send(got.map_err(|(e, _)| e));
+                gone
+            }
+            Call::Owner(reply) => {
+                let Ok(name) = zbus::names::BusName::from_static_str(NAME) else { return false };
+                let got = Bus::within(by, l.dbus.get_name_owner(name)).await;
+                let gone = matches!(got, Err((_, true)));
+                let _ = reply.send(got.ok().map(|o| o.to_string()));
+                gone
+            }
         }
     }
 }
 
-impl Backend for Real {
+impl Backend for Bus {
     fn notify(&self, s: &Shown, replaces: u32) -> Result<u32, String> {
-        let replaces = replaces.to_string();
-        let out = Real::call(&[
-            "Notify", "susssasa{sv}i", &s.app_name, &replaces, ICON, &s.summary, &s.body,
-            "0", "1", "urgency", "y", "1", "-1",
-        ])?;
-        let v: Value = serde_json::from_str(out.trim()).map_err(|e| format!("busctl printed {out:?}: {e}"))?;
-        v["data"][0].as_u64().map(|id| id as u32).ok_or_else(|| format!("busctl printed no id: {out}"))
+        self.ask(|r| Call::Notify(s.clone(), replaces, r))
+            .unwrap_or_else(|| Err("the notification server did not answer in time".into()))
     }
 
     fn close(&self, id: u32) -> Result<(), String> {
-        Real::call(&["CloseNotification", "u", &id.to_string()]).map(|_| ())
+        self.ask(|r| Call::Close(id, r)).unwrap_or_else(|| Err("the notification server did not answer in time".into()))
     }
 
     fn owner(&self) -> Option<String> {
-        let args = ["--user", "--json=short", "--", "call", "org.freedesktop.DBus", "/org/freedesktop/DBus",
-                    "org.freedesktop.DBus", "GetNameOwner", "s", "org.freedesktop.Notifications"];
-        match crate::machine::run_until("busctl", &args, Instant::now() + POST_BUDGET) {
-            Some((Some(0), out, _)) => serde_json::from_str::<Value>(out.trim())
-                .ok()
-                .and_then(|v| v["data"][0].as_str().map(str::to_string)),
-            _ => None,
-        }
+        self.ask(Call::Owner).flatten()
     }
 }
 
@@ -317,7 +480,12 @@ pub enum Job {
     Remove { device: String, key: String },
     /// Revoke: close what the phone posted and forget it.
     Forget { device: String },
+    /// The server's `NotificationClosed`.
+    Closed { id: u32, reason: u32 },
 }
+
+/// Told `(device, key)` when the person dismissed a phone's notification here.
+pub type Dismissed = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 #[derive(Default)]
 struct Phone {
@@ -332,11 +500,23 @@ pub struct Mirror {
     queue: Mutex<Option<SyncSender<Job>>>,
     /// The notification server the ids in [`Phone::ids`] came from.
     server: Mutex<Option<String>>,
+    dismissed: OnceLock<Dismissed>,
 }
 
 impl Mirror {
     pub fn new(backend: Box<dyn Backend>) -> Mirror {
-        Mirror { backend, phones: Mutex::new(HashMap::new()), queue: Mutex::new(None), server: Mutex::new(None) }
+        Mirror {
+            backend,
+            phones: Mutex::new(HashMap::new()),
+            queue: Mutex::new(None),
+            server: Mutex::new(None),
+            dismissed: OnceLock::new(),
+        }
+    }
+
+    /// Where dismissals go (once; later calls are ignored).
+    pub fn on_dismissed(&self, f: Dismissed) {
+        let _ = self.dismissed.set(f);
     }
 
     fn phones(&self) -> std::sync::MutexGuard<'_, HashMap<String, Phone>> {
@@ -396,6 +576,21 @@ impl Mirror {
                     let _ = self.backend.close(id);
                 }
             }
+            Job::Closed { id, reason } => {
+                // Gone from the desktop, whatever the reason: the id is dead.
+                let owner = {
+                    let mut phones = self.phones();
+                    phones.iter_mut().find_map(|(device, p)| {
+                        let at = p.ids.iter().position(|(_, i)| *i == id)?;
+                        p.ids.remove(at).map(|(key, _)| (device.clone(), key))
+                    })
+                };
+                if let (Some((device, key)), DISMISSED) = (owner, reason) {
+                    if let Some(tell) = self.dismissed.get() {
+                        tell(&device, &key);
+                    }
+                }
+            }
         }
     }
 
@@ -437,28 +632,84 @@ impl Mirror {
     }
 }
 
+/// A mirror with its worker running, and the closes `make`'s backend hears
+/// queued for that worker.
+fn running(make: impl FnOnce(Closer) -> std::io::Result<Box<dyn Backend>>) -> std::io::Result<&'static Mirror> {
+    let cell: Arc<OnceLock<&'static Mirror>> = Arc::new(OnceLock::new());
+    let to = cell.clone();
+    // Through the queue, never handled here: the worker owns the order, so a
+    // close always comes after the post that gave out its id.
+    let closer: Closer = Box::new(move |id, reason| {
+        if let Some(m) = to.get() {
+            m.submit(Job::Closed { id, reason });
+        }
+    });
+    let m: &'static Mirror = Box::leak(Box::new(Mirror::new(make(closer)?)));
+    let _ = cell.set(m);
+    let rx = m.open_queue();
+    std::thread::Builder::new().name("phone-notifications".into()).spawn(move || {
+        for job in rx {
+            m.handle(job);
+        }
+    })?;
+    Ok(m)
+}
+
+/// The stub's stand-in for `NotificationClosed`: complete lines appended to
+/// `<dir>/closed.jsonl`, read every 100 ms.
+fn watch_closed(dir: PathBuf, closer: Closer) -> std::io::Result<()> {
+    std::thread::Builder::new().name("phone-notifications-stub".into()).spawn(move || {
+        let path = dir.join("closed.jsonl");
+        let mut at = 0u64;
+        let mut partial = String::new();
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            let Ok(mut f) = std::fs::File::open(&path) else { continue };
+            if f.seek(std::io::SeekFrom::Start(at)).is_err() {
+                continue;
+            }
+            let mut more = String::new();
+            let Ok(n) = f.read_to_string(&mut more) else { continue };
+            at += n as u64;
+            partial.push_str(&more);
+            while let Some(i) = partial.find('\n') {
+                let line: String = partial.drain(..=i).collect();
+                if let Ok(v) = serde_json::from_str::<Value>(&line) {
+                    if let (Some(id), Some(reason)) = (v["id"].as_u64(), v["reason"].as_u64()) {
+                        closer(id as u32, reason as u32);
+                    }
+                }
+            }
+        }
+    })?;
+    Ok(())
+}
+
 /// The mirror this process uses, with its worker running.
 pub fn mirror() -> &'static Mirror {
     static CHOSEN: OnceLock<&'static Mirror> = OnceLock::new();
     CHOSEN.get_or_init(|| {
-        let backend: Box<dyn Backend> = match std::env::var_os(STUB_ENV) {
-            Some(dir) if !dir.is_empty() => Box::new(Stub::new(PathBuf::from(dir))),
-            _ if cfg!(test) => Box::new(Stub::new(
-                std::env::temp_dir().join(format!("rime-remoted-mirror-unit-{}", std::process::id())),
-            )),
-            _ => Box::new(Real),
-        };
-        let m: &'static Mirror = Box::leak(Box::new(Mirror::new(backend)));
-        let rx = m.open_queue();
-        let spawned = std::thread::Builder::new().name("phone-notifications".into()).spawn(move || {
-            for job in rx {
-                m.handle(job);
+        let stub = match std::env::var_os(STUB_ENV) {
+            Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
+            _ if cfg!(test) => {
+                Some(std::env::temp_dir().join(format!("rime-remoted-mirror-unit-{}", std::process::id())))
             }
+            _ => None,
+        };
+        let started = running(|closer| -> std::io::Result<Box<dyn Backend>> {
+            Ok(match stub {
+                Some(dir) => {
+                    watch_closed(dir.clone(), closer)?;
+                    Box::new(Stub::new(dir))
+                }
+                None => Box::new(Bus::start(closer)?),
+            })
         });
-        if let Err(e) = spawned {
+        started.unwrap_or_else(|e| {
             eprintln!("rime-remoted: phone notifications are off: no worker thread ({e})");
-        }
-        m
+            // No queue: every post answers `busy`.
+            Box::leak(Box::new(Mirror::new(Box::new(Stub::new(PathBuf::from("/nonexistent"))))))
+        })
     })
 }
 
@@ -705,24 +956,138 @@ mod tests {
         assert!(!unopened.submit(job()));
     }
 
+    #[test]
+    fn only_a_dismissal_of_an_id_posted_here_reaches_the_phone_and_every_close_forgets_the_id() {
+        let s = scratch("closed");
+        let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
+        let (tx, rx) = std::sync::mpsc::channel();
+        m.on_dismissed(Box::new(move |d, k| tx.send((d.to_string(), k.to_string())).unwrap()));
+        let post = |dev: &str, key: &str| Job::Post {
+            device: dev.into(),
+            key: key.into(),
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new() },
+        };
+        m.handle(post("a", "expired")); // id 1
+        m.handle(post("a", "closed-by-call")); // id 2
+        m.handle(post("b", "dismissed")); // id 3
+        m.handle(Job::Closed { id: 1, reason: 1 });
+        m.handle(Job::Closed { id: 2, reason: 3 });
+        m.handle(Job::Closed { id: 99, reason: DISMISSED });
+        m.handle(Job::Closed { id: 3, reason: DISMISSED });
+        // A second close of the same id finds nothing.
+        m.handle(Job::Closed { id: 3, reason: DISMISSED });
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![("b".to_string(), "dismissed".to_string())]);
+        for (dev, key) in [("a", "expired"), ("a", "closed-by-call"), ("b", "dismissed")] {
+            assert_eq!(m.id_of(dev, key), None, "{dev}/{key} kept a dead id");
+        }
+        // So the next post of that key is a new notification, not a replace
+        // of an id the server may have given someone else.
+        m.handle(post("a", "expired"));
+        assert_eq!(lines(&s.0).last().unwrap()["replaces"], 0);
+    }
+
+    #[test]
+    fn the_stub_reads_closes_from_its_file_through_the_worker() {
+        let s = scratch("stubclosed");
+        std::fs::create_dir_all(&s.0).unwrap();
+        let dir = s.0.clone();
+        let m = running(|closer| -> std::io::Result<Box<dyn Backend>> {
+            watch_closed(dir.clone(), closer)?;
+            Ok(Box::new(Stub::new(dir)))
+        })
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        m.on_dismissed(Box::new(move |d, k| tx.send((d.to_string(), k.to_string())).unwrap()));
+        assert!(m.submit(Job::Post {
+            device: "dev".into(),
+            key: "k".into(),
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new() },
+        }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while m.id_of("dev", "k").is_none() {
+            assert!(Instant::now() < deadline, "never posted");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Written in two pieces: half a line is not read as a close.
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(s.0.join("closed.jsonl")).unwrap();
+        f.write_all(br#"{"id":1,"#).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(m.id_of("dev", "k").is_some());
+        f.write_all(b"\"reason\":2}\n").unwrap();
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), ("dev".to_string(), "k".to_string()));
+    }
+
     /// The real backend against a fake notification server on a PRIVATE bus,
-    /// run by `tests/test-remoted-notify-busctl.sh` with `--ignored`. It posts
+    /// run by `tests/test-remoted-notify-bus.sh` with `--ignored`. It posts
     /// through whatever `DBUS_SESSION_BUS_ADDRESS` names, so it refuses to run
     /// unless `RIME_REMOTED_FAKE_NOTIFY_BUS=1` says that bus is a throwaway one:
     /// a failure, not a skip, so it never reads as a pass.
     #[test]
-    #[ignore = "posts on the session bus; run by tests/test-remoted-notify-busctl.sh on a private one"]
-    fn the_real_backend_posts_replaces_and_closes_on_a_fake_server() {
+    #[ignore = "posts on the session bus; run by tests/test-remoted-notify-bus.sh on a private one"]
+    fn the_real_backend_posts_replaces_closes_and_hears_dismissals_on_a_fake_server() {
         assert_eq!(
             std::env::var_os("RIME_REMOTED_FAKE_NOTIFY_BUS").as_deref(),
             Some(std::ffi::OsStr::new("1")),
-            "refusing to post on a session bus that is not a throwaway one: run tests/test-remoted-notify-busctl.sh"
+            "refusing to post on a session bus that is not a throwaway one: run tests/test-remoted-notify-bus.sh"
         );
-        let (_, s) = shown("Pixel 8", &json!({"key": "k", "app": "Signal", "title": "-x <b>", "text": "a & b"})).unwrap();
-        assert!(Real.owner().is_some_and(|o| o.starts_with(":1.")), "{:?}", Real.owner());
-        let id = Real.notify(&s, 0).expect("posted");
+        let m = running(|closer| -> std::io::Result<Box<dyn Backend>> { Ok(Box::new(Bus::start(closer)?)) }).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        m.on_dismissed(Box::new(move |d, k| tx.send((d.to_string(), k.to_string())).unwrap()));
+        let posted = |key: &str, title: &str, text: &str| -> u32 {
+            let (_, shown) = shown("Pixel 8", &json!({"key": key, "app": "Signal", "title": title, "text": text})).unwrap();
+            assert!(m.submit(Job::Post { device: "dev".into(), key: key.into(), shown }));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(id) = m.id_of("dev", key) {
+                    return id;
+                }
+                assert!(Instant::now() < deadline, "{key} was never posted");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let gone = |key: &str| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while m.id_of("dev", key).is_some() {
+                assert!(Instant::now() < deadline, "{key} was never forgotten");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        // The test's own connection: it asks the fake server to emit, and it
+        // emits as a stranger.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let conn = rt.block_on(zbus::Connection::session()).unwrap();
+        let emit = |id: u32, reason: u32| {
+            rt.block_on(conn.call_method(Some(NAME), "/test", Some("org.rimeos.Test"), "Emit", &(id, reason))).unwrap();
+        };
+
+        // Posted, replaced, then closed by this process: a close with reason
+        // 3 that is not a dismissal.
+        let id = posted("k", "-x <b>", "a & b");
+        assert!(m.backend.owner().is_some_and(|o| o.starts_with(":1.")), "{:?}", m.backend.owner());
+        let (_, again) = shown("Pixel 8", &json!({"key": "k", "app": "Signal", "title": "-x <b>", "text": "a & b"})).unwrap();
+        assert!(m.submit(Job::Post { device: "dev".into(), key: "k".into(), shown: again }));
+        assert!(m.submit(Job::Remove { device: "dev".into(), key: "k".into() }));
+        gone("k");
         assert!(id > 0);
-        assert_eq!(Real.notify(&s, id).expect("replaced"), id);
-        Real.close(id).expect("closed");
+
+        // A stranger's NotificationClosed is not believed; the server's
+        // expiry (1) forgets the id and tells the phone nothing.
+        let a = posted("a", "A", "");
+        rt.block_on(conn.emit_signal(None::<&str>, PATH, NAME, "NotificationClosed", &(a, DISMISSED))).unwrap();
+        emit(a, 1);
+        gone("a");
+
+        // The server's dismissal (2) reaches the phone.
+        let b = posted("b", "B", "");
+        emit(b, DISMISSED);
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), ("dev".to_string(), "b".to_string()));
+        gone("b");
+
+        // Closed before Notify even returned (the server emits first): still
+        // known when the close is read, because the close waits behind the post.
+        let (_, at_once) = shown("Pixel 8", &json!({"key": "c", "app": "Signal", "title": "close-at-once"})).unwrap();
+        assert!(m.submit(Job::Post { device: "dev".into(), key: "c".into(), shown: at_once }));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), ("dev".to_string(), "c".to_string()));
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "a close was told to the phone that should not be");
     }
 }

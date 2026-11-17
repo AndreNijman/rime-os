@@ -14,6 +14,11 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc.workspace = true
+# The phone-notification backend (src/mirror.rs) talks to the desktop's
+# notification server over D-Bus and hears its NotificationClosed signal.
+# Both are already in the lock through rimed.
+zbus.workspace = true
+tokio.workspace = true
 
 # The end-to-end suite drives both daemons over their real sockets and reads
 # the replies as the daemon's own types, so `claude-remote-control` and the

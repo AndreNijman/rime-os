@@ -1100,6 +1100,8 @@ dependencies = [
  "rustls-pki-types",
  "serde",
  "serde_json",
+ "tokio",
+ "zbus",
 ]
 
 [[package]]

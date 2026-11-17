@@ -107,6 +107,29 @@ class MirrorOnDeviceTest {
     }
 
     @Test
+    fun dismissed_on_the_computer_it_leaves_the_phone_and_timed_out_there_it_stays() {
+        // Timed out on the computer (1): the phone keeps it.
+        val stays = tag("stays")
+        post(stays, "Stays", "timed-out-there")
+        val kept = awaitEntry("the first notification on the computer") { it.optString("summary") == "Stays" }.getInt("id")
+        Desktop.notifyClosed(kept, 1)
+
+        // Dismissed on the computer (2): gone from the phone, as a swipe.
+        val goes = tag("goes")
+        post(goes, "Goes", "dismissed-there")
+        val shown = awaitEntry("the second notification on the computer") { it.optString("summary") == "Goes" }.getInt("id")
+        Desktop.notifyClosed(shown, 2)
+        awaitValue(15_000, "the phone to cancel the dismissed notification") { if (keyOf(goes) == null) true else null }
+        assertTrue("timed out on the computer, it left the phone too", keyOf(stays) != null)
+        // The phone's own removal is not sent back to the computer that dismissed it.
+        Thread.sleep(1_000)
+        assertFalse(
+            "the computer that dismissed it was sent a close for it",
+            Desktop.notifyLog().drop(before).any { it.optString("op") == "close" && it.getInt("id") == shown },
+        )
+    }
+
+    @Test
     fun an_app_not_chosen_and_this_app_itself_reach_nothing() {
         // This app chosen too, which the screen never offers: the listener
         // must still leave its own notifications on the phone.

@@ -228,6 +228,17 @@ fn run(args: &[String]) -> Result<(), String> {
         state.set_nexd(PathBuf::from(p));
     }
 
+    // A phone notification the person dismissed here is cancelled on the
+    // phone, if the phone said it does that; otherwise it stays there.
+    {
+        let state = Arc::clone(&state);
+        mirror::mirror().on_dismissed(Box::new(move |device, key| {
+            if state.phones().get(device).is_some_and(|r| r.can_dismiss()) {
+                state.events.send(device, &serde_json::json!({"event": mirror::DISMISSED_EVENT, "key": key}));
+            }
+        }));
+    }
+
     let control_path = crate::state::control_socket();
     let control = bind_control(&control_path)?;
     {
