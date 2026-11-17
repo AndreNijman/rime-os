@@ -238,6 +238,16 @@ fn run(args: &[String]) -> Result<(), String> {
             }
         }));
     }
+    {
+        // Only to a phone whose person turned replying on: the phone sends
+        // it as them, through the app's own reply action.
+        let state = Arc::clone(&state);
+        mirror::mirror().on_replied(Box::new(move |device, key, text| {
+            if state.phones().get(device).is_some_and(|r| r.can_reply()) {
+                state.events.send(device, &serde_json::json!({"event": mirror::REPLY_EVENT, "key": key, "text": text}));
+            }
+        }));
+    }
 
     let control_path = crate::state::control_socket();
     let control = bind_control(&control_path)?;

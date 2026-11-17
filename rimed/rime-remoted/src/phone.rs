@@ -66,8 +66,13 @@ pub const CAN_RECEIVE: &str = "receive";
 /// mirrored here once the person dismisses it here (contract §2.7).
 pub const CAN_DISMISS: &str = "dismiss";
 
+/// The capability a phone declares when the person turned on replying from
+/// the computer: it sends a reply typed here through the notification's own
+/// reply action (contract §2.7).
+pub const CAN_REPLY: &str = "reply";
+
 /// Every capability word kept from a report.
-const KEPT: [&str; 3] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS];
+const KEPT: [&str; 4] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY];
 
 /// The largest file `send` hands a phone: the same cap as `save_file`.
 pub const MAX_SEND_BYTES: u64 = 256 * 1024 * 1024;
@@ -115,6 +120,10 @@ impl PhoneReport {
 
     pub fn can_dismiss(&self) -> bool {
         self.can.iter().any(|c| c == CAN_DISMISS)
+    }
+
+    pub fn can_reply(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_REPLY)
     }
 
     /// A report from a `phone_report` line, or why it was refused.

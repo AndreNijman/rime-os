@@ -71,7 +71,7 @@ use serde_json::{json, Value};
 pub const VERBS: [&str; 2] = ["phone_notification", "phone_notification_removed"];
 
 /// What `remote_hello` gains.
-pub const FEATURES: [&str; 1] = ["phone_notifications"];
+pub const FEATURES: [&str; 2] = ["phone_notifications", REPLY_FEATURE];
 
 /// The environment variable that selects [`Stub`].
 pub const STUB_ENV: &str = "RIME_REMOTED_NOTIFY_STUB";
@@ -109,6 +109,23 @@ pub const DISMISSED: u32 = 2;
 
 /// What a phone is told when the person dismissed one of its notifications here.
 pub const DISMISSED_EVENT: &str = "notification_dismissed";
+
+/// What a phone is told when the person replied to one of its notifications here.
+pub const REPLY_EVENT: &str = "notification_reply";
+
+/// The `remote_hello` feature that says `phone_notification` takes `reply`.
+pub const REPLY_FEATURE: &str = "phone_notification_reply";
+
+/// The action a server that lists the `inline-reply` capability shows as a
+/// text field (KDE's extension, which Quickshell implements).
+pub const INLINE_REPLY: &str = "inline-reply";
+
+/// The longest reply label shown, and the longest reply text sent on.
+pub const REPLY_LABEL_CAP: usize = 40;
+pub const REPLY_TEXT_CAP: usize = 2000;
+
+/// How many ids replied to here are remembered until their close arrives.
+const REPLIED_KEPT: usize = 16;
 
 // ── Text ────────────────────────────────────────────────────────────────────
 
@@ -182,6 +199,8 @@ pub struct Shown {
     pub app_name: String,
     pub summary: String,
     pub body: String,
+    /// The reply field's label when the phone can take a reply to this one.
+    pub reply: Option<String>,
 }
 
 /// Turn a `phone_notification` body into what is posted, or refuse it.
@@ -197,7 +216,20 @@ pub fn shown(phone: &str, v: &Value) -> Result<(String, Shown), String> {
     let phone = if phone.is_empty() { "Phone".to_string() } else { phone };
     let app_name = if app.is_empty() { phone } else { format!("{phone} · {app}") };
     let summary = if title.is_empty() { app.clone() } else { title };
-    Ok((key, Shown { app_name, summary, body: text }))
+    let reply = clean(field(v, "reply")?, REPLY_LABEL_CAP, 0, false);
+    let reply = (!reply.is_empty()).then_some(reply);
+    Ok((key, Shown { app_name, summary, body: text, reply }))
+}
+
+/// A reply typed here, as the phone gets it: the person's own words, so
+/// line breaks stay; control and bidi characters go, and it is capped.
+pub fn reply_text(raw: &str) -> String {
+    let kept: String = raw
+        .chars()
+        .filter(|&c| c == '\n' || !(c.is_control() || is_bidi_control(c) || c == '\u{2028}' || c == '\u{2029}'))
+        .take(REPLY_TEXT_CAP)
+        .collect();
+    kept.trim().to_string()
 }
 
 // ── Rate ────────────────────────────────────────────────────────────────────
@@ -242,8 +274,17 @@ pub trait Backend: Send + Sync {
     fn owner(&self) -> Option<String>;
 }
 
-/// Called with `(id, reason)` for each `NotificationClosed` the server sends.
-pub type Closer = Box<dyn Fn(u32, u32) + Send + Sync>;
+/// A signal from the notification server's current owner.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Heard {
+    /// `NotificationClosed(id, reason)`.
+    Closed { id: u32, reason: u32 },
+    /// `NotificationReplied(id, text)`: the person typed into the inline-reply field.
+    Replied { id: u32, text: String },
+}
+
+/// Called with each signal the server sends, in the order it sent them.
+pub type Hear = Box<dyn Fn(Heard) + Send + Sync>;
 
 const NAME: &str = "org.freedesktop.Notifications";
 const PATH: &str = "/org/freedesktop/Notifications";
@@ -263,7 +304,12 @@ pub struct Bus {
 struct Link {
     notifications: zbus::Proxy<'static>,
     dbus: zbus::fdo::DBusProxy<'static>,
-    closed: zbus::proxy::SignalStream<'static>,
+    /// Every signal of the interface, in one stream: a reply and the close
+    /// that follows it must be handled in the order the server sent them.
+    signals: zbus::proxy::SignalStream<'static>,
+    /// The owner whose capabilities [`Link::inline_reply`] describes.
+    caps_for: Option<String>,
+    inline_reply: bool,
 }
 
 /// Whether an error means the connection is gone (so the next call makes a
@@ -274,7 +320,7 @@ fn broken(e: &zbus::Error) -> bool {
 
 impl Bus {
     /// Start the bus thread. Nothing touches the bus until the first call.
-    pub fn start(closer: Closer) -> std::io::Result<Bus> {
+    pub fn start(closer: Hear) -> std::io::Result<Bus> {
         let (calls, rx) = tokio::sync::mpsc::channel(4);
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         std::thread::Builder::new()
@@ -310,22 +356,22 @@ impl Bus {
             .await?;
         // A proxy for a well-known name hears that name's owner only, so a
         // client that sends its own NotificationClosed is not believed.
-        let closed = notifications.receive_signal("NotificationClosed").await?;
-        Ok(Link { notifications, dbus, closed })
+        let signals = notifications.receive_all_signals().await?;
+        Ok(Link { notifications, dbus, signals, caps_for: None, inline_reply: false })
     }
 
-    async fn serve(mut calls: tokio::sync::mpsc::Receiver<(Call, std::time::Instant)>, closer: Closer) {
+    async fn serve(mut calls: tokio::sync::mpsc::Receiver<(Call, std::time::Instant)>, closer: Hear) {
         use zbus::export::futures_util::StreamExt;
         enum Next {
             Call(Option<(Call, std::time::Instant)>),
-            Closed(Option<zbus::Message>),
+            Heard(Option<zbus::Message>),
         }
         let mut link: Option<Link> = None;
         loop {
             let next = match link.as_mut() {
                 Some(l) => tokio::select! {
                     c = calls.recv() => Next::Call(c),
-                    m = l.closed.next() => Next::Closed(m),
+                    m = l.signals.next() => Next::Heard(m),
                 },
                 None => Next::Call(calls.recv().await),
             };
@@ -340,17 +386,28 @@ impl Bus {
                             Err(_) => eprintln!("rime-remoted: the session bus did not answer in time"),
                         }
                     }
-                    if Bus::answer(call, by, link.as_ref()).await {
+                    if Bus::answer(call, by, link.as_mut()).await {
                         link = None;
                     }
                 }
-                Next::Closed(Some(m)) => {
-                    if let Ok((id, reason)) = m.body().deserialize::<(u32, u32)>() {
-                        closer(id, reason);
+                Next::Heard(Some(m)) => {
+                    let header = m.header();
+                    match header.member().map(|n| n.as_str()) {
+                        Some("NotificationClosed") => {
+                            if let Ok((id, reason)) = m.body().deserialize::<(u32, u32)>() {
+                                closer(Heard::Closed { id, reason });
+                            }
+                        }
+                        Some("NotificationReplied") => {
+                            if let Ok((id, text)) = m.body().deserialize::<(u32, String)>() {
+                                closer(Heard::Replied { id, text });
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 // The stream ends with the connection.
-                Next::Closed(None) => link = None,
+                Next::Heard(None) => link = None,
             }
         }
     }
@@ -371,7 +428,7 @@ impl Bus {
     }
 
     /// Answer one call. True when the connection broke doing it.
-    async fn answer(call: Call, by: tokio::time::Instant, link: Option<&Link>) -> bool {
+    async fn answer(call: Call, by: tokio::time::Instant, link: Option<&mut Link>) -> bool {
         let late = by <= tokio::time::Instant::now();
         let Some(l) = link.filter(|_| !late) else {
             let why = if late { "the notification server did not answer in time" } else { "no session bus" };
@@ -384,9 +441,15 @@ impl Bus {
         };
         match call {
             Call::Notify(s, replaces, reply) => {
-                let actions: Vec<&str> = Vec::new();
-                let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
+                // A reply field only where the server draws one: anywhere
+                // else "inline-reply" would be a button that does nothing.
+                let label = s.reply.as_deref().filter(|_| l.inline_reply);
+                let actions: Vec<&str> = label.map(|label| vec![INLINE_REPLY, label]).unwrap_or_default();
+                let mut hints: HashMap<&str, zbus::zvariant::Value<'_>> =
                     HashMap::from([("urgency", zbus::zvariant::Value::U8(1))]);
+                if let Some(label) = label {
+                    hints.insert("x-kde-reply-placeholder-text", zbus::zvariant::Value::from(label));
+                }
                 let body = (&s.app_name, replaces, ICON, &s.summary, &s.body, actions, hints, -1i32);
                 let got = Bus::within(by, l.notifications.call::<_, _, u32>("Notify", &body)).await;
                 let gone = matches!(got, Err((_, true)));
@@ -403,7 +466,15 @@ impl Bus {
                 let Ok(name) = zbus::names::BusName::from_static_str(NAME) else { return false };
                 let got = Bus::within(by, l.dbus.get_name_owner(name)).await;
                 let gone = matches!(got, Err((_, true)));
-                let _ = reply.send(got.ok().map(|o| o.to_string()));
+                let owner = got.ok().map(|o| o.to_string());
+                // Asked once per owner: the worker asks for the owner before
+                // every job, so a new Shell is asked before its first post.
+                if owner.is_some() && owner != l.caps_for {
+                    let caps = Bus::within(by, l.notifications.call::<_, _, Vec<String>>("GetCapabilities", &())).await;
+                    l.inline_reply = caps.as_ref().is_ok_and(|c| c.iter().any(|c| c == INLINE_REPLY));
+                    l.caps_for = if caps.is_ok() { owner.clone() } else { None };
+                }
+                let _ = reply.send(owner);
                 gone
             }
         }
@@ -458,7 +529,9 @@ impl Backend for Stub {
             *n
         };
         self.record(json!({"op": "notify", "id": id, "replaces": replaces, "app": s.app_name,
-                           "icon": ICON, "summary": s.summary, "body": s.body}))?;
+                           "icon": ICON, "summary": s.summary, "body": s.body,
+                           // A stand-in for a server that draws reply fields.
+                           "reply": s.reply}))?;
         Ok(id)
     }
 
@@ -480,12 +553,15 @@ pub enum Job {
     Remove { device: String, key: String },
     /// Revoke: close what the phone posted and forget it.
     Forget { device: String },
-    /// The server's `NotificationClosed`.
-    Closed { id: u32, reason: u32 },
+    /// The server's `NotificationClosed` or `NotificationReplied`.
+    Heard(Heard),
 }
 
 /// Told `(device, key)` when the person dismissed a phone's notification here.
 pub type Dismissed = Box<dyn Fn(&str, &str) + Send + Sync>;
+
+/// Told `(device, key, text)` when the person replied to one here.
+pub type Replied = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 #[derive(Default)]
 struct Phone {
@@ -501,6 +577,10 @@ pub struct Mirror {
     /// The notification server the ids in [`Phone::ids`] came from.
     server: Mutex<Option<String>>,
     dismissed: OnceLock<Dismissed>,
+    replied: OnceLock<Replied>,
+    /// Ids replied to here whose close has not come yet: the server closes a
+    /// notification once it is answered, and that close is not a dismissal.
+    answered: Mutex<VecDeque<u32>>,
 }
 
 impl Mirror {
@@ -511,12 +591,23 @@ impl Mirror {
             queue: Mutex::new(None),
             server: Mutex::new(None),
             dismissed: OnceLock::new(),
+            replied: OnceLock::new(),
+            answered: Mutex::new(VecDeque::new()),
         }
     }
 
     /// Where dismissals go (once; later calls are ignored).
     pub fn on_dismissed(&self, f: Dismissed) {
         let _ = self.dismissed.set(f);
+    }
+
+    /// Where replies go (once; later calls are ignored).
+    pub fn on_replied(&self, f: Replied) {
+        let _ = self.replied.set(f);
+    }
+
+    fn answered(&self) -> std::sync::MutexGuard<'_, VecDeque<u32>> {
+        self.answered.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn phones(&self) -> std::sync::MutexGuard<'_, HashMap<String, Phone>> {
@@ -541,6 +632,7 @@ impl Mirror {
             for p in self.phones().values_mut() {
                 p.ids.clear();
             }
+            self.answered().clear();
             *server = now;
         }
     }
@@ -576,7 +668,36 @@ impl Mirror {
                     let _ = self.backend.close(id);
                 }
             }
-            Job::Closed { id, reason } => {
+            Job::Heard(Heard::Replied { id, text }) => {
+                let owner = self.phones().iter().find_map(|(device, p)| {
+                    p.ids.iter().find(|(_, i)| *i == id).map(|(key, _)| (device.clone(), key.clone()))
+                });
+                let Some((device, key)) = owner else { return };
+                {
+                    let mut answered = self.answered();
+                    answered.retain(|i| *i != id);
+                    answered.push_back(id);
+                    while answered.len() > REPLIED_KEPT {
+                        answered.pop_front();
+                    }
+                }
+                let text = reply_text(&text);
+                if text.is_empty() {
+                    return;
+                }
+                if let Some(tell) = self.replied.get() {
+                    tell(&device, &key, &text);
+                }
+            }
+            Job::Heard(Heard::Closed { id, reason }) => {
+                // Answered here, then closed by the server: the reply went to
+                // the phone, whose app updates or clears it there.
+                let answered = {
+                    let mut answered = self.answered();
+                    let had = answered.contains(&id);
+                    answered.retain(|i| *i != id);
+                    had
+                };
                 // Gone from the desktop, whatever the reason: the id is dead.
                 let owner = {
                     let mut phones = self.phones();
@@ -585,7 +706,7 @@ impl Mirror {
                         p.ids.remove(at).map(|(key, _)| (device.clone(), key))
                     })
                 };
-                if let (Some((device, key)), DISMISSED) = (owner, reason) {
+                if let (Some((device, key)), DISMISSED, false) = (owner, reason, answered) {
                     if let Some(tell) = self.dismissed.get() {
                         tell(&device, &key);
                     }
@@ -634,14 +755,14 @@ impl Mirror {
 
 /// A mirror with its worker running, and the closes `make`'s backend hears
 /// queued for that worker.
-fn running(make: impl FnOnce(Closer) -> std::io::Result<Box<dyn Backend>>) -> std::io::Result<&'static Mirror> {
+fn running(make: impl FnOnce(Hear) -> std::io::Result<Box<dyn Backend>>) -> std::io::Result<&'static Mirror> {
     let cell: Arc<OnceLock<&'static Mirror>> = Arc::new(OnceLock::new());
     let to = cell.clone();
     // Through the queue, never handled here: the worker owns the order, so a
     // close always comes after the post that gave out its id.
-    let closer: Closer = Box::new(move |id, reason| {
+    let closer: Hear = Box::new(move |heard| {
         if let Some(m) = to.get() {
-            m.submit(Job::Closed { id, reason });
+            m.submit(Job::Heard(heard));
         }
     });
     let m: &'static Mirror = Box::leak(Box::new(Mirror::new(make(closer)?)));
@@ -657,7 +778,7 @@ fn running(make: impl FnOnce(Closer) -> std::io::Result<Box<dyn Backend>>) -> st
 
 /// The stub's stand-in for `NotificationClosed`: complete lines appended to
 /// `<dir>/closed.jsonl`, read every 100 ms.
-fn watch_closed(dir: PathBuf, closer: Closer) -> std::io::Result<()> {
+fn watch_closed(dir: PathBuf, closer: Hear) -> std::io::Result<()> {
     std::thread::Builder::new().name("phone-notifications-stub".into()).spawn(move || {
         let path = dir.join("closed.jsonl");
         let mut at = 0u64;
@@ -675,8 +796,11 @@ fn watch_closed(dir: PathBuf, closer: Closer) -> std::io::Result<()> {
             while let Some(i) = partial.find('\n') {
                 let line: String = partial.drain(..=i).collect();
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
-                    if let (Some(id), Some(reason)) = (v["id"].as_u64(), v["reason"].as_u64()) {
-                        closer(id as u32, reason as u32);
+                    let Some(id) = v["id"].as_u64() else { continue };
+                    if let Some(reason) = v["reason"].as_u64() {
+                        closer(Heard::Closed { id: id as u32, reason: reason as u32 });
+                    } else if let Some(text) = v["reply"].as_str() {
+                        closer(Heard::Replied { id: id as u32, text: text.to_string() });
                     }
                 }
             }
@@ -851,7 +975,7 @@ mod tests {
         let post = |key: &str, title: &str| Job::Post {
             device: "dev".into(),
             key: key.into(),
-            shown: Shown { app_name: "P · A".into(), summary: title.into(), body: String::new() },
+            shown: Shown { app_name: "P · A".into(), summary: title.into(), body: String::new(), reply: None },
         };
         m.handle(post("k1", "first"));
         m.handle(post("k2", "other"));
@@ -872,7 +996,7 @@ mod tests {
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
         for (dev, key) in [("a", "k1"), ("b", "k1"), ("a", "k2")] {
             m.handle(Job::Post { device: dev.into(), key: key.into(),
-                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new() } });
+                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None } });
         }
         m.handle(Job::Forget { device: "a".into() });
         assert!(m.phones().get("a").is_none());
@@ -887,7 +1011,7 @@ mod tests {
         let post = |key: &str| Job::Post {
             device: "dev".into(),
             key: key.into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new() },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None },
         };
         m.handle(post("k1"));
         m.handle(post("k2"));
@@ -911,7 +1035,7 @@ mod tests {
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
         for i in 0..(KEPT_IDS + 5) {
             m.handle(Job::Post { device: "d".into(), key: format!("k{i}"),
-                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new() } });
+                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None } });
         }
         assert_eq!(m.phones().get("d").unwrap().ids.len(), KEPT_IDS);
         assert_eq!(m.id_of("d", "k0"), None);
@@ -957,6 +1081,46 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_reaches_the_phone_and_the_close_after_it_is_not_a_dismissal() {
+        let s = scratch("replied");
+        let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
+        let (dtx, drx) = std::sync::mpsc::channel();
+        m.on_dismissed(Box::new(move |d, k| dtx.send((d.to_string(), k.to_string())).unwrap()));
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        m.on_replied(Box::new(move |d, k, t| rtx.send((d.to_string(), k.to_string(), t.to_string())).unwrap()));
+        let post = |dev: &str, key: &str| {
+            let (_, shown) = shown("P", &json!({"key": key, "app": "A", "title": "t", "reply": "Reply"})).unwrap();
+            Job::Post { device: dev.into(), key: key.into(), shown }
+        };
+        m.handle(post("a", "chat")); // id 1
+        m.handle(post("a", "other")); // id 2
+        assert_eq!(lines(&s.0)[0]["reply"], "Reply");
+
+        // Answered: the phone gets the text, cleaned; then the server closes
+        // it as dismissed, which tells the phone nothing.
+        m.handle(Job::Heard(Heard::Replied { id: 1, text: "on my way\u{202E}\u{7}\nsoon".into() }));
+        m.handle(Job::Heard(Heard::Closed { id: 1, reason: DISMISSED }));
+        assert_eq!(rrx.try_iter().collect::<Vec<_>>(), vec![("a".into(), "chat".into(), "on my way\nsoon".into())]);
+        assert!(drx.try_recv().is_err(), "the close after a reply was told as a dismissal");
+        assert_eq!(m.id_of("a", "chat"), None, "the closed id was kept");
+
+        // A reply to an id not posted here, or one of nothing but control
+        // characters, goes nowhere; and only the answered id is spared.
+        m.handle(Job::Heard(Heard::Replied { id: 77, text: "hi".into() }));
+        m.handle(Job::Heard(Heard::Replied { id: 2, text: "\u{7}".into() }));
+        m.handle(Job::Heard(Heard::Closed { id: 2, reason: DISMISSED }));
+        assert!(rrx.try_recv().is_err());
+        assert!(drx.try_recv().is_err(), "an empty reply still counts as answered: the person used the field");
+
+        // A new server forgets what was answered on the old one.
+        m.handle(post("a", "x")); // id 3
+        m.handle(Job::Heard(Heard::Replied { id: 3, text: "ok".into() }));
+        std::fs::write(s.0.join("owner"), ":1.99").unwrap();
+        m.handle(post("a", "y")); // new server: id 4
+        assert!(m.answered().is_empty(), "{:?}", m.answered());
+    }
+
+    #[test]
     fn only_a_dismissal_of_an_id_posted_here_reaches_the_phone_and_every_close_forgets_the_id() {
         let s = scratch("closed");
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
@@ -965,17 +1129,17 @@ mod tests {
         let post = |dev: &str, key: &str| Job::Post {
             device: dev.into(),
             key: key.into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new() },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None },
         };
         m.handle(post("a", "expired")); // id 1
         m.handle(post("a", "closed-by-call")); // id 2
         m.handle(post("b", "dismissed")); // id 3
-        m.handle(Job::Closed { id: 1, reason: 1 });
-        m.handle(Job::Closed { id: 2, reason: 3 });
-        m.handle(Job::Closed { id: 99, reason: DISMISSED });
-        m.handle(Job::Closed { id: 3, reason: DISMISSED });
+        m.handle(Job::Heard(Heard::Closed { id: 1, reason: 1 }));
+        m.handle(Job::Heard(Heard::Closed { id: 2, reason: 3 }));
+        m.handle(Job::Heard(Heard::Closed { id: 99, reason: DISMISSED }));
+        m.handle(Job::Heard(Heard::Closed { id: 3, reason: DISMISSED }));
         // A second close of the same id finds nothing.
-        m.handle(Job::Closed { id: 3, reason: DISMISSED });
+        m.handle(Job::Heard(Heard::Closed { id: 3, reason: DISMISSED }));
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![("b".to_string(), "dismissed".to_string())]);
         for (dev, key) in [("a", "expired"), ("a", "closed-by-call"), ("b", "dismissed")] {
             assert_eq!(m.id_of(dev, key), None, "{dev}/{key} kept a dead id");
@@ -1001,7 +1165,7 @@ mod tests {
         assert!(m.submit(Job::Post {
             device: "dev".into(),
             key: "k".into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new() },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None },
         }));
         let deadline = Instant::now() + Duration::from_secs(5);
         while m.id_of("dev", "k").is_none() {
@@ -1089,5 +1253,30 @@ mod tests {
         assert!(m.submit(Job::Post { device: "dev".into(), key: "c".into(), shown: at_once }));
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), ("dev".to_string(), "c".to_string()));
         assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "a close was told to the phone that should not be");
+
+        // Answered in the reply field: the server sends NotificationReplied
+        // and NotificationClosed(id, 2) back to back. The reply reaches the
+        // phone and the close is not a dismissal. Ten in a row, so a reply
+        // and its close handled out of order (two streams) would show.
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        m.on_replied(Box::new(move |d, k, t| rtx.send((d.to_string(), k.to_string(), t.to_string())).unwrap()));
+        for i in 0..10 {
+            let key = format!("r{i}");
+            let (_, s) = shown("Pixel 8", &json!({"key": key, "app": "Signal", "title": "R", "reply": "Reply"})).unwrap();
+            assert!(m.submit(Job::Post { device: "dev".into(), key: key.clone(), shown: s }));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let id = loop {
+                if let Some(id) = m.id_of("dev", &key) {
+                    break id;
+                }
+                assert!(Instant::now() < deadline, "{key} was never posted");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let text = format!("on my way {i}");
+            rt.block_on(conn.call_method(Some(NAME), "/test", Some("org.rimeos.Test"), "Reply", &(id, &text))).unwrap();
+            assert_eq!(rrx.recv_timeout(Duration::from_secs(5)).unwrap(), ("dev".to_string(), key.clone(), text));
+            gone(&key);
+        }
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "an answered notification was told to the phone as dismissed");
     }
 }
