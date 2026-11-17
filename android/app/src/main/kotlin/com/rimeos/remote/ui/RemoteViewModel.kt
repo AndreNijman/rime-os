@@ -1914,6 +1914,13 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(settings = store.settings) }
     }
 
+    /** Send replies typed on a computer from this phone, or stop (contract §2.7). */
+    fun setMirrorReply(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(mirrorReply = on))
+        hub.setMirrorReply(store.settings.mirrorReply)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
     fun setDynamicColour(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(dynamicColour = on))
         _state.update { it.copy(settings = store.settings) }

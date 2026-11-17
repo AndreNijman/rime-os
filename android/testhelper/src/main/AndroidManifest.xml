@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application android:label="Rime reply helper">
+        <!-- Started by the device suite with `am start`, so exported; it shows nothing. -->
+        <activity
+            android:name=".PostActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" />
+        <!-- Reached only through this app's own PendingIntent. -->
+        <receiver
+            android:name=".ReplyReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

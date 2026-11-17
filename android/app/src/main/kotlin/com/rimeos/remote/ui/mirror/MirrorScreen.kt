@@ -73,6 +73,8 @@ fun launcherApps(context: Context): List<ChoosableApp> {
 fun MirrorScreen(
     chosen: Set<String>,
     onChoose: (pkg: String, on: Boolean) -> Unit,
+    reply: Boolean,
+    onReply: (Boolean) -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -98,7 +100,8 @@ fun MirrorScreen(
                     Text(
                         "Notifications from the apps you turn on below appear on your paired computers " +
                             "while this app is unlocked and connected. The computer gets the app's name, " +
-                            "the title and the text, nothing else, and keeps nothing after you dismiss it. " +
+                            "the title and the text (and, with replying on, the name of the app's reply " +
+                            "button), nothing else, and keeps nothing after you dismiss it. " +
                             "Removing one here removes it there.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
@@ -135,6 +138,26 @@ fun MirrorScreen(
                         }
                     }
                     HorizontalDivider(Modifier.padding(top = 16.dp))
+                    // Without notification access there is nothing to answer, so it cannot be turned on.
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .toggleable(value = reply && granted, enabled = granted, role = Role.Switch, onValueChange = onReply)
+                            .padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Reply from your computer", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "Replies you type on the computer are sent from this phone by the app that " +
+                                    "posted the notification, as you.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = reply && granted, onCheckedChange = null, enabled = granted)
+                    }
+                    HorizontalDivider()
                     Text(
                         "Apps",
                         style = MaterialTheme.typography.titleSmall,

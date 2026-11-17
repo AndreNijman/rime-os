@@ -292,6 +292,13 @@ data class Settings(
      * stored, here or anywhere.
      */
     @SerialName("mirror_apps") val mirrorApps: Set<String> = emptySet(),
+
+    /**
+     * Whether a reply typed on a computer to one of those notifications is
+     * sent from this phone, through the app's own reply action, as the person
+     * (§2.7). Off by default: it lets a computer speak for them in their apps.
+     */
+    @SerialName("mirror_reply") val mirrorReply: Boolean = false,
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }

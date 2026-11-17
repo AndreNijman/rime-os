@@ -64,31 +64,31 @@ class MirrorTest {
     @Test
     fun `the newest state per notification wins and an unchanged one is not sent`() {
         val o = MirrorOutbox(0)
-        o.offer("a", c("1"))
-        o.offer("a", c("2"))
-        o.offer("b", c("x"))
-        o.offer("a", c("3"))
+        o.offer("a", c("1"), 0)
+        o.offer("a", c("2"), 0)
+        o.offer("b", c("x"), 0)
+        o.offer("a", c("3"), 0)
         assertEquals(listOf(MirrorItem.Post("b", c("x")), MirrorItem.Post("a", c("3"))), drain(o, 0))
-        o.offer("a", c("3"))
+        o.offer("a", c("3"), 0)
         assertEquals(0, o.pending)
-        o.offer("a", c("4"))
-        o.offer("a", c("3"))
+        o.offer("a", c("4"), 0)
+        o.offer("a", c("3"), 0)
         assertEquals(emptyList<MirrorItem>(), drain(o, 0))
     }
 
     @Test
     fun `a removal goes only for what was sent, cancels a waiting post, and is free`() {
         val o = MirrorOutbox(0, burst = 1, refillMs = 1000)
-        o.offer("never-sent", c("x"))
+        o.offer("never-sent", c("x"), 0)
         o.remove("never-sent")
         assertEquals(0, o.pending)
         o.remove("unknown")
         assertEquals(0, o.pending)
 
-        o.offer("a", c("1"))
+        o.offer("a", c("1"), 0)
         assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", c("1"))), drain(o, 0))
         // The allowance is spent, and the removal still goes.
-        o.offer("b", c("2"))
+        o.offer("b", c("2"), 0)
         o.remove("a")
         assertEquals(listOf<MirrorItem>(MirrorItem.Removed("a")), drain(o, 0))
         o.remove("a")
@@ -99,7 +99,7 @@ class MirrorTest {
     @Test
     fun `posts are allowed a burst, then one per refill, never faster than the computer takes`() {
         val o = MirrorOutbox(0)
-        repeat(20) { o.offer("k$it", c("$it")) }
+        repeat(20) { o.offer("k$it", c("$it"), 0) }
         assertEquals(8, drain(o, 0).size)
         assertEquals(4_000, o.waitMs(0))
         assertEquals(1, o.waitMs(3_999))
@@ -119,7 +119,7 @@ class MirrorTest {
     @Test
     fun `only so many wait, oldest dropped first`() {
         val o = MirrorOutbox(0, capacity = 3)
-        repeat(5) { o.offer("k$it", c("$it")) }
+        repeat(5) { o.offer("k$it", c("$it"), 0) }
         assertEquals(3, o.pending)
         assertEquals(listOf("k2", "k3", "k4"), drain(o, 0).map { it.key })
     }
@@ -127,16 +127,16 @@ class MirrorTest {
     @Test
     fun `a removal while its post is on the wire still goes, and a dropped link waits for nothing`() {
         val o = MirrorOutbox(0)
-        o.offer("a", c("1"))
+        o.offer("a", c("1"), 0)
         val post = o.next(0)!!
         o.remove("a")
         o.sent(post)
         assertEquals(listOf<MirrorItem>(MirrorItem.Removed("a")), drain(o, 0))
 
-        o.offer("b", c("2"))
-        o.offer("c", c("3"))
+        o.offer("b", c("2"), 0)
+        o.offer("c", c("3"), 0)
         drain(o, 0)
-        o.offer("b", c("2b"))
+        o.offer("b", c("2b"), 0)
         o.drop()
         assertEquals(0, o.pending)
         // What the computer shows survived the drop: its removal still goes.
@@ -147,10 +147,10 @@ class MirrorTest {
     @Test
     fun `a computer dismisses only what it was sent, and is not sent the removal back`() {
         val o = MirrorOutbox(0)
-        o.offer("a", c("1"))
-        o.offer("b", c("2"))
+        o.offer("a", c("1"), 0)
+        o.offer("b", c("2"), 0)
         drain(o, 0)
-        o.offer("w", c("waiting"))
+        o.offer("w", c("waiting"), 0)
         assertTrue(o.dismissedThere("a"))
         assertTrue(!o.dismissedThere("a"), "dismissed twice")
         assertTrue(!o.dismissedThere("never-sent"))
@@ -170,5 +170,99 @@ class MirrorTest {
         for (bad in listOf("", "A".repeat(32), "0".repeat(31), "0".repeat(33), "../" + "0".repeat(29))) {
             assertTrue(!Mirror.validKey(bad), bad)
         }
+    }
+
+    @Test
+    fun `the reply label comes from a free-form reply action, clipped, or says Reply`() {
+        assertNull(Mirror.replyLabel(emptyList()))
+        // Canned choices only: nothing a computer can type into.
+        assertNull(Mirror.replyLabel(listOf(ReplyAction("Mark read", false), ReplyAction("Yes / No", false))))
+        assertEquals("Answer", Mirror.replyLabel(listOf(ReplyAction("Mark read", false), ReplyAction("  Answer ", true))))
+        assertEquals(Mirror.REPLY_LABEL, Mirror.replyLabel(listOf(ReplyAction("   ", true))))
+        assertEquals(Mirror.REPLY_LABEL, Mirror.replyLabel(listOf(ReplyAction(null, true))))
+        val long = Mirror.replyLabel(listOf(ReplyAction("😀".repeat(50), true)))!!
+        assertEquals(Mirror.REPLY_LABEL_CAP + 1, long.codePointCount(0, long.length))
+        assertTrue(long.endsWith("😀…"))
+    }
+
+    @Test
+    fun `the reply label is sent only when there is one, and changing it alone is a change`() {
+        val bare = Json.parseToJsonElement(Mirror.post("ab12", Content("Chat", "Sam", "hi"))).jsonObject
+        assertTrue("reply" !in bare.keys)
+        val withReply = Json.parseToJsonElement(Mirror.post("ab12", Content("Chat", "Sam", "hi", "Reply"))).jsonObject
+        assertEquals("Reply", withReply["reply"]!!.jsonPrimitive.content)
+
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Sam", "hi"), 0)
+        drain(o, 0)
+        o.offer("a", Content("Chat", "Sam", "hi", "Reply"), 0)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", Content("Chat", "Sam", "hi", "Reply"))), drain(o, 0))
+    }
+
+    @Test
+    fun `after a reply the app's first update within five seconds is shown there already`() {
+        val o = MirrorOutbox(0)
+        val asked = Content("Chat", "Ann", "Hi there", "Reply")
+        o.offer("a", asked, 0)
+        o.offer("plain", c("no reply field"), 0)
+        drain(o, 0)
+        // Only what this computer shows, and only with a reply field.
+        assertTrue(!o.repliedThere("never-sent", 1_000))
+        assertTrue(!o.repliedThere("plain", 1_000))
+        assertTrue(o.repliedThere("a", 1_000))
+
+        // The app shows the reply: taken as shown, not sent, and no allowance spent.
+        val answered = Content("Chat", "Ann", "You: on my way", "Reply")
+        o.offer("a", answered, 1_000 + Mirror.ABSORB_MS)
+        assertEquals(0, o.pending)
+        assertEquals(emptyList<MirrorItem>(), drain(o, 1_000 + Mirror.ABSORB_MS))
+        // The same again is unchanged; a new message goes as news.
+        o.offer("a", answered, 7_000)
+        assertEquals(0, o.pending)
+        val next = Content("Chat", "Ann", "See you", "Reply")
+        o.offer("a", next, 7_000)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", next)), drain(o, 7_000))
+        // A removal after it still goes.
+        o.remove("a")
+        assertEquals(listOf<MirrorItem>(MirrorItem.Removed("a")), drain(o, 7_000))
+    }
+
+    @Test
+    fun `after five seconds nothing is absorbed`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        drain(o, 0)
+        assertTrue(o.repliedThere("a", 0))
+        val late = Content("Chat", "Ann", "You: late", "Reply")
+        o.offer("a", late, Mirror.ABSORB_MS + 1)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", late)), drain(o, Mirror.ABSORB_MS + 1))
+    }
+
+    @Test
+    fun `an absorbed update is only the first, and a reply leaves other notifications alone`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        o.offer("b", Content("Chat", "Bob", "Yo", "Reply"), 0)
+        drain(o, 0)
+        assertTrue(o.repliedThere("a", 0))
+        // Another notification updates meanwhile: it goes.
+        val bob = Content("Chat", "Bob", "Yo again", "Reply")
+        o.offer("b", bob, 100)
+        o.offer("a", Content("Chat", "Ann", "You: ok", "Reply"), 200)
+        val second = Content("Chat", "Ann", "Ann: great", "Reply")
+        o.offer("a", second, 300)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("b", bob), MirrorItem.Post("a", second)), drain(o, 300))
+    }
+
+    @Test
+    fun `a reply that found nothing to answer holds no update back`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        drain(o, 0)
+        assertTrue(o.repliedThere("a", 0))
+        o.replyFailed("a")
+        val news = Content("Chat", "Ann", "Still there?", "Reply")
+        o.offer("a", news, 100)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 100))
     }
 }
