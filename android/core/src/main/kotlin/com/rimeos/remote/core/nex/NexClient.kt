@@ -30,7 +30,7 @@ import java.util.concurrent.TimeoutException
  */
 class NexClient(
     private val link: MachineLink,
-    private val shared: Boolean,
+    val shared: Boolean,
     private val oneShotTimeoutMs: Long = ONE_SHOT_TIMEOUT_MS,
 ) {
     /** Whether [subscribe] can work against this machine. */

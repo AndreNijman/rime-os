@@ -13,6 +13,11 @@ data class NexEvent(
     val stream: String?,
     val payload: JsonObject,
 ) {
+    /** The words a `message.delta` carries, or null for any other event. */
+    val deltaText: String?
+        get() = if (kind != "message.delta") null
+        else (payload["text"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+
     /** Changes what a list of sessions, approvals or missions shows. */
     val changesLists: Boolean
         get() = kind.startsWith("session.") || kind.startsWith("turn.") ||

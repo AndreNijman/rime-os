@@ -37,6 +37,11 @@ import com.rimeos.remote.ui.agent.SessionScreen
 import com.rimeos.remote.ui.agent.WorktreesScreen
 import com.rimeos.remote.ui.agent.StartAgentScreen
 import com.rimeos.remote.ui.agent.knownDirectories
+import com.rimeos.remote.ui.nex.NexNewSessionScreen
+import com.rimeos.remote.ui.nex.NexScreen
+import com.rimeos.remote.ui.nex.NexSessionScreen
+import com.rimeos.remote.ui.nex.NexViewModel
+import com.rimeos.remote.core.nex.Nex
 import com.rimeos.remote.ui.term.TerminalScreen
 import com.rimeos.remote.ui.theme.RimeRemoteTheme
 import android.content.Intent
@@ -74,6 +79,15 @@ object Destinations {
 
     /** The guide (P1-060), whose words live in `:core`. */
     const val HELP = "help"
+
+    /** nex on the connected machine: approvals, sessions, missions, usage. */
+    const val NEX = "nex"
+
+    /** One nex session's transcript and composer. */
+    const val NEX_SESSION = "nex_session"
+
+    /** Starting a nex session from the phone. */
+    const val NEX_NEW = "nex_new"
 }
 
 @Composable
@@ -93,8 +107,10 @@ fun RimeRemoteApp(
     /** Bumped each time the permission dialog is answered, whichever way. */
     notificationsAnswered: Int = 0,
     viewModel: RemoteViewModel = viewModel(),
+    nexModel: NexViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val nex by nexModel.state.collectAsStateWithLifecycle()
     val appContext = LocalContext.current.applicationContext
     // The APPLICATION context, not the activity's. This object outlives a
     // rotation and an install prompt, and holding an activity across either is
@@ -262,6 +278,17 @@ fun RimeRemoteApp(
                     onProjects = { navigation.navigate(Destinations.WORKTREES) },
                     onApprovals = { navigation.navigate(Destinations.APPROVALS) },
                     onHelp = { navigation.navigate(Destinations.HELP) },
+                    // Offered only when the machine's bridge says it reaches a
+                    // nexd: a button that always answered "not running" would
+                    // be noise on every Rime without nex.
+                    onNex = state.agents.machine
+                        ?.takeIf { state.links[it.deviceId]?.remote?.has(Nex.FEATURE) == true }
+                        ?.let { machine ->
+                            {
+                                nexModel.open(machine)
+                                navigation.navigate(Destinations.NEX)
+                            }
+                        },
                     onCopyFromMachine = { viewModel.pullMachineClipboard() },
                     clipboardPull = state.agents.clipboardPull,
                     onClipboardCopied = { viewModel.clipboardPullConsumed() },
@@ -374,6 +401,66 @@ fun RimeRemoteApp(
 
             composable(Destinations.HELP) {
                 HelpScreen(onBack = { navigation.popBackStack() })
+            }
+
+            composable(Destinations.NEX) {
+                NexScreen(
+                    machine = state.agents.machine?.machine ?: "",
+                    state = nex,
+                    onOpen = {
+                        nexModel.select(it)
+                        navigation.navigate(Destinations.NEX_SESSION)
+                    },
+                    onNew = { navigation.navigate(Destinations.NEX_NEW) },
+                    onApprove = { nexModel.approve(it) },
+                    onDeny = { nexModel.deny(it) },
+                    onMission = { verb, mission -> nexModel.mission(verb, mission) },
+                    onToggleMission = { nexModel.toggleMission(it) },
+                    onRefresh = { nexModel.refresh() },
+                    onDismiss = { nexModel.dismiss() },
+                    onBack = {
+                        // The feed is held only while nex is on screen.
+                        nexModel.leave()
+                        navigation.popBackStack()
+                    },
+                )
+            }
+
+            composable(Destinations.NEX_SESSION) {
+                val session = nex.selected
+                if (session == null) {
+                    LaunchedEffect(Unit) { navigation.popBackStack() }
+                } else {
+                    NexSessionScreen(
+                        session = session,
+                        state = nex,
+                        onSend = { text, sent -> nexModel.send(session, text, sent) },
+                        onStop = { nexModel.stop(session) },
+                        onApprove = { nexModel.approve(it) },
+                        onDeny = { nexModel.deny(it) },
+                        onRefresh = { nexModel.refresh() },
+                        onDismiss = { nexModel.dismiss() },
+                        onBack = {
+                            nexModel.unselect()
+                            navigation.popBackStack()
+                        },
+                    )
+                }
+            }
+
+            composable(Destinations.NEX_NEW) {
+                NexNewSessionScreen(
+                    state = nex,
+                    onCreate = { root, provider, title, message -> nexModel.create(root, provider, title, message) },
+                    onCreated = {
+                        nexModel.createdConsumed()
+                        navigation.navigate(Destinations.NEX_SESSION) {
+                            popUpTo(Destinations.NEX)
+                        }
+                    },
+                    onDismiss = { nexModel.dismiss() },
+                    onBack = { navigation.popBackStack() },
+                )
             }
 
             composable(Destinations.START) {

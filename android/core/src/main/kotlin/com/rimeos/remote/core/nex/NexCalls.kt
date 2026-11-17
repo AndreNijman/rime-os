@@ -56,6 +56,9 @@ object NexCalls {
         p("root" to root, "mode" to "build", "provider" to provider, "title" to title?.takeIf { it.isNotBlank() }),
     )
 
+    /** The id of the session a [create] made, from nexd's answer. */
+    fun createdSession(result: JsonElement): String? = (result as? JsonObject)?.str("session_id")
+
     /** One of [NexMission.actions] for a mission. Anything else is refused here. */
     fun mission(verb: String, id: String): NexCall {
         require(verb in MISSION_VERBS) { "$verb is not a mission action" }
