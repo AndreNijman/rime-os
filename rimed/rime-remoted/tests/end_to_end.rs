@@ -2020,3 +2020,124 @@ fn a_notification_dismissed_here_is_dismissed_on_a_phone_that_says_it_can() {
     assert_eq!(after.len(), lines, "{after:?}");
     assert!(after.iter().all(|l| l["op"] == "notify"), "{after:?}");
 }
+
+/// `n` lines from `channel`: first those parked while a call waited for its
+/// reply, then fresh ones.
+fn events_on(session: &mut Session, channel: u32, n: usize) -> Vec<serde_json::Value> {
+    let mut parked = Vec::new();
+    session.pending.retain(|f| match f {
+        Frame::Data { channel: c, bytes } if *c == channel => {
+            parked.extend_from_slice(bytes);
+            false
+        }
+        _ => true,
+    });
+    let mut got: Vec<serde_json::Value> =
+        String::from_utf8(parked).expect("utf-8").lines().map(|l| serde_json::from_str(l).expect("json")).collect();
+    if got.len() < n {
+        got.extend(session.lines_on(channel, n - got.len()));
+    }
+    got
+}
+
+/// What the Shell's reply field does: `NotificationReplied`, then the close
+/// (reason 2) that follows it.
+fn reply_here(h: &Harness, id: &serde_json::Value, text: &str) {
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(h.root.join("notify/closed.jsonl"))
+        .expect("closed.jsonl");
+    let line = serde_json::json!({"id": id, "reply": text});
+    std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()).expect("write");
+    drop(f);
+    close_here(h, id, 2);
+}
+
+#[test]
+fn a_reply_typed_here_goes_to_a_phone_that_says_it_can_and_is_not_a_dismissal() {
+    let h = harness!("reply");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+    let hello = session.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_notification_reply"), "{hello}");
+    session.send(Frame::Open {
+        channel: 9,
+        request: br#"{"cmd":"device_events"}"#.to_vec(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "events", "{v}");
+        }
+        other => panic!("expected the events reply, got {other:?}"),
+    }
+
+    // Each post's reply comes after its line is written.
+    let mut lines = 0;
+    let mut post_id = |session: &mut Session, key: &str, reply: Option<&str>| {
+        let mut body = serde_json::json!({"cmd": "phone_notification", "key": key, "app": "Signal", "title": key});
+        if let Some(label) = reply {
+            body["reply"] = label.into();
+        }
+        let r = session.call(&body.to_string());
+        assert_eq!(r["reply"], "ok", "{r}");
+        lines += 1;
+        let line = notify_lines(&h, lines)[lines - 1].clone();
+        assert_eq!(line["summary"], key, "{line}");
+        line
+    };
+
+    // The label is cleaned like a title; a post without one has none.
+    let plain = post_id(&mut session, "plain", None);
+    assert!(plain["reply"].is_null(), "{plain}");
+
+    // A phone that never said "reply" hears nothing of a reply, and the close
+    // after it is no dismissal either, though it said "dismiss". As in the
+    // dismiss test, the gate is read when the reply is handled: posting a1
+    // again shows it once a1's close has been handled.
+    assert_eq!(session.call(r#"{"cmd":"phone_report","battery":50,"can":["dismiss"]}"#)["reply"], "ok");
+    let first = post_id(&mut session, "a1", Some("Re\u{7}ply\u{202e}"));
+    assert_eq!(first["reply"], "Reply", "{first}");
+    let a1 = first["id"].clone();
+    reply_here(&h, &a1, "not for you");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // The stub reads its file every 100 ms.
+        std::thread::sleep(Duration::from_millis(150));
+        let again = post_id(&mut session, "a1", Some("Reply"));
+        if again["replaces"] == 0 {
+            break;
+        }
+        assert_eq!(again["replaces"], a1, "{again}");
+        assert!(Instant::now() < deadline, "a1's close was never handled");
+    }
+
+    // It says it can now. The text keeps its line break; control characters
+    // go. A reply that is nothing once cleaned is not sent, and its close is
+    // still no dismissal.
+    assert_eq!(session.call(r#"{"cmd":"phone_report","battery":50,"can":["dismiss","reply"]}"#)["reply"], "ok");
+    let b1 = post_id(&mut session, "b1", Some("Reply"))["id"].clone();
+    reply_here(&h, &b1, "on my way\u{7}\nsee you");
+    let d1 = post_id(&mut session, "d1", Some("Reply"))["id"].clone();
+    reply_here(&h, &d1, " \u{202e} ");
+    // A plain dismissal after them, as a fence: closes are handled in file
+    // order by one worker, so a dismissal sent for b1 or d1 would come
+    // before c1's.
+    let c1 = post_id(&mut session, "c1", None)["id"].clone();
+    close_here(&h, &c1, 2);
+    let told = events_on(&mut session, 9, 2);
+    assert_eq!(
+        told,
+        vec![
+            serde_json::json!({"event": "notification_reply", "key": "b1", "text": "on my way\nsee you"}),
+            serde_json::json!({"event": "notification_dismissed", "key": "c1"}),
+        ]
+    );
+
+    // Nothing here was closed by the daemon itself: the Shell closed them.
+    let after = notify_lines(&h, lines);
+    assert!(after.iter().all(|l| l["op"] == "notify"), "{after:?}");
+}
