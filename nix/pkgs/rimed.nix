@@ -222,6 +222,7 @@ let
       "a_name_given_at_run_is_on_the_session_the_list_and_the_record"
       "a_narrowed_session_runs_under_its_own_allowlist_and_not_the_runtimes"
       "a_network_change_costs_the_session_and_costs_nothing_else"
+      "a_notification_dismissed_here_is_dismissed_on_a_phone_that_says_it_can"
       "a_paired_device_reaches_the_agent_runtime_through_the_proxy"
       "a_paired_phone_reaches_nex_through_the_running_service"
       "a_payload_with_quotes_and_backslashes_arrives_unchanged"

@@ -61,4 +61,4 @@ installer/test-installer-live-paths.sh  needs root, a loop device, /dev/kvm, the
 # (none. 2026-09-13: the last eight were wired in or, for firewall-ssh, moved
 #  above with the reason it cannot run here. Add a line only with a reason,
 #  and expect the next person to delete it.)
-tests/test-remoted-notify-busctl.sh  needs a rime-remoted unit-test binary and python3-gi; CI builds rimed only through Nix, which keeps no test binary
+tests/test-remoted-notify-bus.sh     needs a rime-remoted unit-test binary and python3-gi; CI builds rimed only through Nix, which keeps no test binary

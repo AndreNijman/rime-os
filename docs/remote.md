@@ -327,8 +327,10 @@ computers screen and choose **Notifications on your computer**:
 
 From then on, while the app is unlocked and connected, a notification from one
 of those apps appears on the computer as "Pixel 8 · Signal", with its title and
-text. When it updates on the phone it updates on the computer; when you
-dismiss it on the phone it goes from the computer too.
+text. When it updates on the phone it updates on the computer. Dismiss it on
+either side and it goes from both: dismissed on one computer, it leaves the
+phone and every other computer too. One that times out on the computer stays
+on the phone.
 
 - Only the app's name, the title and the text cross. Pictures, actions and
   replies do not, and the computer keeps nothing once it is closed.

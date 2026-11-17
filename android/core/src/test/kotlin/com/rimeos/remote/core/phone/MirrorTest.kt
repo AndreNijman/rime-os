@@ -143,4 +143,32 @@ class MirrorTest {
         o.remove("c")
         assertEquals(listOf<MirrorItem>(MirrorItem.Removed("c")), drain(o, 0))
     }
+
+    @Test
+    fun `a computer dismisses only what it was sent, and is not sent the removal back`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", c("1"))
+        o.offer("b", c("2"))
+        drain(o, 0)
+        o.offer("w", c("waiting"))
+        assertTrue(o.dismissedThere("a"))
+        assertTrue(!o.dismissedThere("a"), "dismissed twice")
+        assertTrue(!o.dismissedThere("never-sent"))
+        // Waiting, never shown there: not this computer's to dismiss, and the
+        // post no longer goes.
+        assertTrue(!o.dismissedThere("w"))
+        // The phone's own removal follows; the computer that dismissed it
+        // is not told, another one that shows it still is.
+        o.remove("a")
+        o.remove("b")
+        assertEquals(listOf<MirrorItem>(MirrorItem.Removed("b")), drain(o, 0))
+    }
+
+    @Test
+    fun `a key named back must have the shape this phone gives`() {
+        assertTrue(Mirror.validKey(Mirror.key("0|org.example.chat|1|tag|10001")))
+        for (bad in listOf("", "A".repeat(32), "0".repeat(31), "0".repeat(33), "../" + "0".repeat(29))) {
+            assertTrue(!Mirror.validKey(bad), bad)
+        }
+    }
 }

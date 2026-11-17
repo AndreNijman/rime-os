@@ -411,7 +411,7 @@ The other direction of §1.8: a file, or some text for the phone's clipboard,
 from somebody at this computer onto their phone. `remote_hello.features` gains
 `"take_offer"`. A phone puts `"receive"` in its report's `can` when it will
 take what is sent (notifications allowed, so the person is told what arrived);
-of `can`, `"ring"` and `"receive"` are kept.
+of `can`, `"ring"`, `"receive"` and `"dismiss"` (§2.7) are kept.
 
 **Send** is a control-socket request (`rime remote send`), and like `pair` it is
 refused unless the caller is a human at this machine (a local terminal or the
@@ -482,8 +482,10 @@ verb to a machine whose hello lacks it.
 
 - Answered by rime-remoted, under the handshake's device id. `"ok"` means
   accepted for showing, not shown: one worker thread posts to the desktop's
-  `org.freedesktop.Notifications` (`busctl --user`, 3 s per call), behind a
-  queue of 32. A post that finds it full answers
+  `org.freedesktop.Notifications` over the session bus (a D-Bus library on
+  its own thread, one 3 s deadline per call that connecting shares, so
+  nothing reaches the server after the worker gave up on it; the text travels in the message, never on a
+  command line), behind a queue of 32. A post that finds it full answers
   `{"reply":"error","code":"busy"}`; a removal is `"ok"` either way.
 - `key` is 1 to 64 characters of `[A-Za-z0-9_-]`: the phone's hash of
   Android's key (the first 16 bytes of SHA-256, as hex), never the key itself.
@@ -505,6 +507,28 @@ verb to a machine whose hello lacks it.
 - Posts are limited per phone to 10 at once, then one every 3 s; past that,
   `{"reply":"error","code":"rate_limited"}`. Removals are not limited.
 
+**Dismissed on the computer, gone from the phone.** rime-remoted listens for
+`NotificationClosed` from the current owner of
+`org.freedesktop.Notifications` only (a signal any other client sends is not
+believed). Any close of an id it posted forgets that id. Only reason 2, "the
+person dismissed it", goes back to the phone, on its `device_events` channel
+(§2.5), and only if the phone's latest `phone_report` lists `"dismiss"` in
+`can`:
+
+```json
+{"event":"notification_dismissed","key":"9f2c…"}
+```
+
+Expired (1), closed by a call (3, which includes rime-remoted's own closes)
+and anything else are not sent. The phone acts only on a key it sent to that
+machine and that machine still shows, and only while unlocked; it cancels the
+notification as a swipe would. Android then reports the removal, so every
+other computer it was sent to closes it with `phone_notification_removed`; the
+machine that dismissed it is not sent that removal. A phone that does not list
+`"dismiss"` (an older app) is never sent the event and keeps the notification.
+The phone lists it while it holds notification access, from its next
+connection.
+
 **What the phone sends.** Nothing until the person grants notification access
 and turns apps on one by one in "Notifications on your computer" (none are on
 by default). Then only while the app is unlocked and a connection to a machine
@@ -519,11 +543,6 @@ phone keeps only the newest state of each notification, sends nothing
 identical to what is shown, sends a removal only for one it sent, and posts at
 most 8 at once and one every 4 s, inside the computer's limit.
 
-**Known limit.** `busctl` takes the title and text as arguments, so for the
-few milliseconds of each call they are in that process's `/proc/<pid>/cmdline`,
-readable by other processes that can see it. Moving the backend to a D-Bus
-library closes it.
-
 **The lock screen.** The Shell's notification toasts are a layer surface, which
 `ext-session-lock` hides while the session is locked, and the lock screen
 shows no notifications, so a phone's messages are not readable on a locked
@@ -532,9 +551,13 @@ computer.
 **Tests never touch the real desktop's notifications.** With
 `RIME_REMOTED_NOTIFY_STUB=<dir>`, rime-remoted appends each call to
 `<dir>/notifications.jsonl` (`{"op":"notify",…}` / `{"op":"close","id":N}`)
-instead of the bus; a test build always uses the stub. The device suite sets it
-and its broker reads it back with `notify_log`. The bus path is proven against
-a fake server on a private bus by `tests/test-remoted-notify-busctl.sh`.
+instead of the bus, and reads each complete line `{"id":N,"reason":R}`
+appended to `<dir>/closed.jsonl` as the server's `NotificationClosed`; a test
+build always uses the stub. The device suite sets it; its broker reads the
+calls back with `notify_log` and closes with `notify_closed`. The bus path is
+proven against a fake server on a private bus by
+`tests/test-remoted-notify-bus.sh` (post, replace, close, a dismissal, an
+expiry, a close sent before the post's reply, and a stranger's fake signal).
 
 ## 3. The phone
 
