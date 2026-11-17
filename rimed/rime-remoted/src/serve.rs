@@ -732,7 +732,17 @@ impl Worker {
                 return;
             }
         }
-        match DaemonChannel::open(&self.agentd, &self.device_id, request) {
+        // A nex channel goes to nexd and is read-only; everything else is a
+        // rime-agentd takeover. nex's refusal travels as a reply then a
+        // close, exactly like a takeover the daemon refused.
+        let opened = if crate::nex::is_channel(request) {
+            crate::nex::open_channel(&self.state.nexd(), &self.device_id, request)
+                .map(|(stream, reply, buffered)| (DaemonChannel { stream, read_only: true }, reply, buffered))
+                .map_err(|e| crate::proxy::ProxyError::NotTakenOver(e.reply()))
+        } else {
+            DaemonChannel::open(&self.agentd, &self.device_id, request)
+        };
+        match opened {
             Ok((pty, reply, buffered)) => {
                 // The reply, then the bytes that arrived with it, THEN the
                 // pump. The pump used to start inside `open`, before the
@@ -811,6 +821,9 @@ fn answered_here(state: &State, device_id: &str, line: &[u8]) -> Option<Vec<u8>>
         // Through the list, so "which verbs does this file take" has one
         // answer a test can read — the same rule `push::control` keeps.
         Some(c) if VERBS.contains(&c) => Some(remote_hello(state)),
+        // The bridge to nex: the line goes to nexd, never to rime-agentd, and
+        // only after this connection's device has been declared as its origin.
+        Some(c) if crate::nex::VERBS.contains(&c) => Some(crate::nex::control(&state.nexd(), device_id, line)),
         _ => crate::push::control(state, device_id, line),
     }
 }
@@ -828,10 +841,17 @@ fn answered_here(state: &State, device_id: &str, line: &[u8]) -> Option<Vec<u8>>
 /// changed, refreshes its stored list from this instead of dialling
 /// addresses that stopped being this machine's.
 fn remote_hello(state: &State) -> Vec<u8> {
+    // `nex` only while nexd answers: a phone that shows nex screens for a
+    // machine without it would show nothing but errors. Asked each time, so
+    // starting nexd after the phone connected is seen on its next hello.
+    let mut features: Vec<&str> = FEATURES.to_vec();
+    if crate::nex::available(&state.nexd()) {
+        features.push("nex");
+    }
     serde_json::json!({
         "reply": "remote",
         "version": rime_remote_core::REMOTE_PROTOCOL_VERSION,
-        "features": FEATURES,
+        "features": features,
         "lan": state.lan_addresses(),
     })
     .to_string()
@@ -990,6 +1010,10 @@ fn control(agentd: &Path, device_id: &str, line: &[u8]) -> Vec<u8> {
 /// handle to go detaches.
 struct DaemonChannel {
     stream: std::os::unix::net::UnixStream,
+    /// A nex channel: what the device sends on it is dropped, never written
+    /// to nexd. The feed is for reading; every write goes through `nex` on
+    /// the control channel, where it is one request with one reply.
+    read_only: bool,
 }
 
 impl DaemonChannel {
@@ -1018,7 +1042,14 @@ impl DaemonChannel {
         if !taken {
             return Err(crate::proxy::ProxyError::NotTakenOver(reply));
         }
-        Ok((DaemonChannel { stream }, reply, buffered))
+        Ok((
+            DaemonChannel {
+                stream,
+                read_only: false,
+            },
+            reply,
+            buffered,
+        ))
     }
 
     /// Start copying the daemon's side of the channel to the device.
@@ -1058,6 +1089,9 @@ impl DaemonChannel {
     }
 
     fn write(&self, bytes: &[u8]) -> std::io::Result<()> {
+        if self.read_only {
+            return Ok(());
+        }
         (&self.stream).write_all(bytes)?;
         (&self.stream).flush()
     }
@@ -1149,6 +1183,9 @@ mod tests {
             PING_INTERVAL,
         )
         .expect("state");
+        // Never the machine's own nexd: what a test sees must not depend on
+        // whether one happens to be running.
+        state.set_nexd(dir.join("no-nexd.sock"));
         (state, dir)
     }
 
@@ -1187,7 +1224,11 @@ mod tests {
         // silently lost, so the set it takes is pinned: this file's own and
         // push registration's, and nothing that merely resembles them.
         let (state, dir) = a_state("verbs");
-        for cmd in VERBS.iter().chain(crate::push::VERBS.iter()) {
+        for cmd in VERBS
+            .iter()
+            .chain(crate::push::VERBS.iter())
+            .chain(crate::nex::VERBS.iter())
+        {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
             assert!(
                 answered_here(&state, "pixel-8", line.as_bytes()).is_some(),
@@ -1210,7 +1251,35 @@ mod tests {
             );
         }
         assert_eq!(VERBS, ["remote_hello"]);
+        assert_eq!(crate::nex::VERBS, ["nex", "nex_events"]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn nex_is_a_feature_only_while_nexd_answers() {
+        let (state, dir) = a_state("nexfeature");
+        let hello = |s: &State| -> serde_json::Value { serde_json::from_slice(&remote_hello(s)).expect("json") };
+        assert!(!hello(&state)["features"].as_array().unwrap().iter().any(|f| f == "nex"));
+        let sock = dir.join("nexd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        state.set_nexd(sock);
+        assert_eq!(hello(&state)["features"].as_array().unwrap().last().unwrap(), "nex");
+        drop(listener);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_nex_channel_drops_what_the_device_writes() {
+        let (a, mut b) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let ch = DaemonChannel {
+            stream: a,
+            read_only: true,
+        };
+        ch.write(b"{\"method\":\"system.shutdown\"}\n").expect("dropped, not failed");
+        drop(ch); // shuts the stream down: b now reads end-of-file
+        let mut got = Vec::new();
+        b.read_to_end(&mut got).expect("read");
+        assert!(got.is_empty(), "{}", String::from_utf8_lossy(&got));
     }
 
     #[test]
@@ -1274,7 +1343,7 @@ mod tests {
         assert!(matches!(c.route(7), Route::Worker));
         // The worker finishes the Open and publishes the channel...
         let (ours, _theirs) = std::os::unix::net::UnixStream::pair().expect("pair");
-        c.open.insert(7, Arc::new(DaemonChannel { stream: ours }));
+        c.open.insert(7, Arc::new(DaemonChannel { stream: ours, read_only: false }));
         c.done(7);
         // ...but two Data frames are still queued behind it, so a third must
         // queue too rather than overtake them.
