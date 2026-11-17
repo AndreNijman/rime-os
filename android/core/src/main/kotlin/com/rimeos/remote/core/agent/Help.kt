@@ -235,6 +235,23 @@ object Help {
                         "eight kilobytes it says so instead of handing over part of what " +
                         "you copied.",
                 ),
+                h("The computer itself"),
+                p(
+                    "Computer, on the agent list, shows how the computer is: its battery, " +
+                        "its power mode, whether its lock screen is up, and whether an update " +
+                        "is waiting. It also shows what is playing there, with play, pause, " +
+                        "skip and volume.",
+                ),
+                p(
+                    "Lock the screen locks it the way the keyboard shortcut would, and the " +
+                        "button says so only once the computer confirms it. Unlocking is " +
+                        "only ever done at the computer.",
+                ),
+                note(
+                    "The screen checks on the computer a few times a minute while it is " +
+                        "open, and not at all while the app is in the background. A line the computer " +
+                        "could not read is left out rather than guessed.",
+                ),
                 h("Taking this phone's access away"),
                 p(
                     "Forget the computer here, or remove this device at the computer. Either " +

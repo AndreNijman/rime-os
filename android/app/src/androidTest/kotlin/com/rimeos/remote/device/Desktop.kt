@@ -139,6 +139,24 @@ object Desktop {
         check(reply.optString("reply") == "ok") { "nexd did not take the message at the computer: $reply" }
     }
 
+    /**
+     * Set what the stub machine will report next (the runner always starts
+     * rime-remoted with `RIME_REMOTED_MACHINE_STUB`, so the machine verbs
+     * never touch the desktop the suite runs on).
+     */
+    fun machineStubSeed(state: JSONObject) {
+        val reply = ask(JSONObject().put("cmd", "machine_stub_seed").put("state", state).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not seed the stub machine: $reply" }
+    }
+
+    /** Every action the stub machine was asked to take, oldest first. */
+    fun machineStubActions(): List<JSONObject> {
+        val reply = ask(JSONObject().put("cmd", "machine_stub_actions").toString())
+        check(reply.optString("reply") == "ok") { "the broker did not read the stub machine's actions: $reply" }
+        val a = reply.getJSONArray("actions")
+        return (0 until a.length()).map { a.getJSONObject(it) }
+    }
+
     private fun requestReply(line: String): JSONObject {
         val reply = ask(line)
         check(reply.optString("reply") == "request") {

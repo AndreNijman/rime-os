@@ -43,6 +43,12 @@ import com.rimeos.remote.ui.nex.NexScreen
 import com.rimeos.remote.ui.nex.NexSessionScreen
 import com.rimeos.remote.ui.nex.NexViewModel
 import com.rimeos.remote.core.nex.Nex
+import com.rimeos.remote.core.machine.Machine
+import com.rimeos.remote.ui.machine.MachineScreen
+import com.rimeos.remote.ui.machine.MachineViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import com.rimeos.remote.link.LinkHub
 import com.rimeos.remote.ui.term.TerminalScreen
 import com.rimeos.remote.ui.theme.RimeRemoteTheme
@@ -90,6 +96,9 @@ object Destinations {
 
     /** Starting a nex session from the phone. */
     const val NEX_NEW = "nex_new"
+
+    /** The computer itself: status, lock, media and volume. */
+    const val MACHINE = "machine"
 }
 
 @Composable
@@ -110,9 +119,11 @@ fun RimeRemoteApp(
     notificationsAnswered: Int = 0,
     viewModel: RemoteViewModel = viewModel(),
     nexModel: NexViewModel = viewModel(),
+    machineModel: MachineViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val nex by nexModel.state.collectAsStateWithLifecycle()
+    val computer by machineModel.state.collectAsStateWithLifecycle()
     val appContext = LocalContext.current.applicationContext
     // The APPLICATION context, not the activity's. This object outlives a
     // rotation and an install prompt, and holding an activity across either is
@@ -292,6 +303,16 @@ fun RimeRemoteApp(
                                 navigation.navigate(Destinations.NEX)
                             }
                         },
+                    // Offered when the machine's rime-remoted answers the
+                    // machine verbs, which every build since they shipped does.
+                    onComputer = state.agents.machine
+                        ?.takeIf { state.links[it.deviceId]?.remote?.has(Machine.STATUS) == true }
+                        ?.let { machine ->
+                            {
+                                machineModel.open(machine)
+                                navigation.navigate(Destinations.MACHINE)
+                            }
+                        },
                     onCopyFromMachine = { viewModel.pullMachineClipboard() },
                     clipboardPull = state.agents.clipboardPull,
                     onClipboardCopied = { viewModel.clipboardPullConsumed() },
@@ -426,6 +447,25 @@ fun RimeRemoteApp(
                         nexModel.leave()
                         navigation.popBackStack()
                     },
+                )
+            }
+
+            composable(Destinations.MACHINE) {
+                // Read only while this screen is started: nothing is asked of
+                // the computer while the phone is in a pocket.
+                val lifecycle = LocalLifecycleOwner.current.lifecycle
+                LaunchedEffect(lifecycle) {
+                    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { machineModel.watch() }
+                }
+                MachineScreen(
+                    state = computer,
+                    onLock = { machineModel.lock() },
+                    onMedia = { machineModel.control(it) },
+                    onVolume = { machineModel.volume(it) },
+                    onMute = { machineModel.mute(it) },
+                    onRefresh = { machineModel.refresh() },
+                    onDismiss = { machineModel.dismiss() },
+                    onBack = { navigation.popBackStack() },
                 )
             }
 

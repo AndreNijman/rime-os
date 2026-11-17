@@ -155,7 +155,9 @@ two verbs on the control channel, `attach` and `receive`, because both take the
 connection over and would wedge it. It hands everything else to `rime-agentd`
 under the origin `claude-remote-control`. So `rime-agentd`'s own per-verb rules
 decide what a phone can do, in one place, and no denylist here can drift from
-them.
+them. (The exceptions are verbs `rime-remoted` answers itself
+and never forwards: its hello, nex, and the five machine verbs in
+[The computer itself](#the-computer-itself-status-lock-and-media).)
 
 Three verbs serve the phone's pickers, and the first two are cheap:
 
@@ -192,6 +194,27 @@ WebAuthn assertion from a key the owner enrolled with `rime agent key add`,
 over a nonce the daemon issued and bound to that one session, grant kind and
 window. If remote approval of a root operation is ever built, it has to take
 that shape; a relaxed origin check would not do.
+
+## The computer itself: status, lock and media
+
+Five verbs never reach `rime-agentd`: `rime-remoted` answers them itself, as
+the user it runs as (`docs/remote-live-contract.md` §2.4). A phone reads the
+battery, the power mode, whether the screen is locked and whether an update is
+waiting (`machine_status`); locks the screen (`machine_lock`); and reads and
+drives the player and the default output's volume (`media`, `media_control`,
+`volume`). The app's **Computer** screen, reached from the agent list, is built
+on them.
+
+They need no grant because they are what the person could do at the keyboard,
+and none of them can unlock anything: there is no unlock verb, and there will
+not be one. A lock is reported as done only once logind's `LockedHint` confirms
+it. Each verb has one two-second budget, and anything not read in
+that time comes back as unknown rather than as a guess. Nothing here checks for
+an update; `update` is rimed's cached state.
+
+Test daemons use stub backends only. `run-device-suite.sh` refuses to
+start `rime-remoted` without `RIME_REMOTED_MACHINE_STUB`, so a test run cannot
+lock the developer's screen or pause their music.
 
 ## Notifications when the app is closed
 

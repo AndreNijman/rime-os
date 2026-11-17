@@ -201,7 +201,21 @@ fi
 # reporting success for a leg it never touched.
 relay=${RIME_DEVICE_SUITE_RELAY-wss://apex-relay.andrenijman.com}  # rime-rename: keep (the deployed relay)
 
+# The machine verbs (status, lock, media, volume) act on whatever desktop the
+# daemon can reach, and this rime-remoted runs as the developer, on the
+# developer's session bus and logind session: a real backend here would lock
+# their screen and pause their music. Every rime-remoted this script starts,
+# including the broker's replacement after `restart_remoted`, answers them from
+# the stub instead. The stub keeps its state in machine/state.json and logs
+# every action to machine/actions.jsonl, which the broker hands to the tests.
+export RIME_REMOTED_MACHINE_STUB=$root/machine
+mkdir -p "$root/machine"
+
 start_remoted() {
+  if [ "${RIME_REMOTED_MACHINE_STUB:-}" != "$root/machine" ]; then
+    echo "FAIL: refusing to start rime-remoted without the machine stub: it would act on this desktop"
+    exit 1
+  fi
   local extra=()
   [ -n "$relay" ] && extra=(--relay "$relay")
   XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
@@ -241,6 +255,10 @@ done
 # "forward anything to rime-agentd", which would be a way for a test to borrow a
 # local origin for any request at all — and this suite's whole value is that the
 # phone's own origin is real.
+#
+# `machine_stub_seed` and `machine_stub_actions` set and read the stub machine
+# (see RIME_REMOTED_MACHINE_STUB above): what the phone will find, and what it
+# asked the computer to do. Neither reaches a daemon.
 cat > "$root/broker.py" <<'PY'
 import json, os, socket, socketserver, subprocess, sys, time
 
@@ -312,6 +330,9 @@ def restart():
             os.kill(old, 0); time.sleep(0.05)
         except ProcessLookupError:
             break
+    if os.environ.get("RIME_REMOTED_MACHINE_STUB") != os.path.join(ROOT, "machine"):
+        return json.dumps({"reply": "error",
+                           "message": "refusing to start rime-remoted without the machine stub"})
     env = dict(os.environ,
                XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
                XDG_STATE_HOME=os.path.join(ROOT, "state"))
@@ -333,6 +354,27 @@ def restart():
         except OSError:
             time.sleep(0.05)
     return json.dumps({"reply": "error", "message": "rime-remoted did not come back"})
+
+STUB = os.path.join(ROOT, "machine")
+
+def machine_stub_seed(state):
+    """Replace the stub machine's state: what the phone will read next."""
+    if not isinstance(state, dict):
+        return json.dumps({"reply": "error", "message": "state must be an object"})
+    tmp = os.path.join(STUB, "state.json.new")
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, os.path.join(STUB, "state.json"))
+    return json.dumps({"reply": "ok"})
+
+def machine_stub_actions():
+    """Every action the stub machine was asked to take, oldest first."""
+    try:
+        with open(os.path.join(STUB, "actions.jsonl")) as f:
+            actions = [json.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        actions = []
+    return json.dumps({"reply": "ok", "actions": actions})
 
 class H(socketserver.StreamRequestHandler):
     timeout = 120
@@ -358,6 +400,10 @@ class H(socketserver.StreamRequestHandler):
                 out = nex_session_at_computer(str(req["title"]))
             elif cmd == "nex_submit_at_computer":
                 out = nex_submit_at_computer(str(req["session"]), str(req["text"]))
+            elif cmd == "machine_stub_seed":
+                out = machine_stub_seed(req.get("state"))
+            elif cmd == "machine_stub_actions":
+                out = machine_stub_actions()
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:
