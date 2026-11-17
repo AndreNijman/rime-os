@@ -131,6 +131,18 @@ data class Alert(
 
         /** A deployment finished with a non-zero exit code. */
         DEPLOY_FAILED("Deployment failed", "A deployment on the machine did not complete."),
+
+        /**
+         * nex is waiting for somebody to approve or deny what it wants to do.
+         *
+         * Raised only by the machine's push watcher: the in-app watcher has
+         * no need of it, because the nex screen follows nexd live while it is
+         * open. A nex session id is a string the push body has no room for,
+         * so this alert names no session; tapping it opens the nex screen,
+         * which reads what is waiting over the paired link. What the tool
+         * would do never reaches the shade.
+         */
+        NEX_APPROVAL("nex needs a decision", "Open nex to approve or deny what it wants to do."),
     }
 
     /**

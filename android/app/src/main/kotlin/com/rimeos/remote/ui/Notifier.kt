@@ -154,6 +154,7 @@ class Notifier(private val context: Context) {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(EXTRA_MACHINE, content.machine)
             putExtra(EXTRA_SESSION, content.session)
+            putExtra(EXTRA_NEX, content.opensNex)
         }
         return PendingIntent.getActivity(
             context,
@@ -168,5 +169,6 @@ class Notifier(private val context: Context) {
         const val ACTION_OPEN_ALERT: String = "com.rimeos.remote.OPEN_ALERT"
         const val EXTRA_MACHINE: String = "machine"
         const val EXTRA_SESSION: String = "session"
+        const val EXTRA_NEX: String = "nex"
     }
 }

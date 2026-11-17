@@ -112,6 +112,10 @@ pub struct Observation {
     /// test state and re-raise it on the next real poll.
     pub worktrees: Option<Vec<WorktreeStatus>>,
     pub requests: Vec<PrivilegeRequest>,
+    /// The approvals nexd is waiting on, by id. `None` when nexd was not
+    /// asked or did not answer, which is not the same as "nothing is
+    /// waiting", for the reason given on [`Observation::worktrees`].
+    pub nex: Option<BTreeSet<String>>,
 }
 
 /// Turns successive observations into things worth pushing.
@@ -133,6 +137,12 @@ pub struct Watcher {
     announced: BTreeSet<u32>,
     /// Deployment requests already announced as having finished.
     executed: BTreeSet<u32>,
+    /// Whether nexd has answered yet. Separate from [`Watcher::seen`]: nexd
+    /// may start long after this service, and the approvals waiting when it
+    /// is first heard from did not just happen.
+    seen_nex: bool,
+    /// nex approvals known to be waiting.
+    nex_waiting: BTreeSet<String>,
 }
 
 impl Watcher {
@@ -233,6 +243,26 @@ impl Watcher {
         self.announced.retain(|id| known.contains(id));
         self.executed.retain(|id| known.contains(id));
 
+        if let Some(waiting) = &o.nex {
+            let first_nex = !self.seen_nex;
+            self.seen_nex = true;
+            let new = waiting.iter().any(|id| !self.nex_waiting.contains(id));
+            // Kept as exactly what nexd says is waiting: an approval answered
+            // or cancelled leaves, so if nexd ever reuses an id, it is news.
+            self.nex_waiting = waiting.clone();
+            // One alert however many arrived since the last poll. The phone
+            // shows one notification per machine for nex anyway, and its nex
+            // screen lists every one of them; two pushes would only buzz twice.
+            if new && !first_nex {
+                out.push(Raised {
+                    kind: Kind::NexApproval,
+                    session: NO_SESSION,
+                    started: 0,
+                    adapter: Adapter::Unknown,
+                });
+            }
+        }
+
         out
     }
 }
@@ -319,7 +349,7 @@ pub fn ask(agentd: &std::path::Path, request: &str) -> Option<Response> {
 }
 
 /// One full observation of the daemon.
-pub fn observe(agentd: &std::path::Path, with_worktrees: bool) -> Observation {
+pub fn observe(agentd: &std::path::Path, nexd: &std::path::Path, with_worktrees: bool) -> Observation {
     let sessions = match ask(agentd, r#"{"cmd":"list"}"#) {
         Some(Response::Sessions { sessions }) => sessions,
         _ => Vec::new(),
@@ -339,7 +369,10 @@ pub fn observe(agentd: &std::path::Path, with_worktrees: bool) -> Observation {
     } else {
         None
     };
-    Observation { sessions, worktrees, requests }
+    // Asked even when nexd is not running: the failed connect is the whole
+    // cost, and it is what lets nexd start later and be heard from.
+    let nex = crate::nex::pending_approvals(nexd);
+    Observation { sessions, worktrees, requests, nex }
 }
 
 /// Post one envelope, and say what the server said.
@@ -466,7 +499,7 @@ pub fn supervise(state: Arc<State>, agentd: std::path::PathBuf) {
                 if with_worktrees {
                     last_worktrees = std::time::Instant::now();
                 }
-                let raised = watcher.observe(&observe(&agentd, with_worktrees));
+                let raised = watcher.observe(&observe(&agentd, &state.nexd(), with_worktrees));
                 fan_out(&state, &raised, trust.as_ref());
             }
         }
@@ -606,7 +639,7 @@ mod tests {
     }
 
     fn obs(sessions: Vec<SessionInfo>) -> Observation {
-        Observation { sessions, worktrees: None, requests: Vec::new() }
+        Observation { sessions, worktrees: None, requests: Vec::new(), nex: None }
     }
 
     #[test]
@@ -1032,6 +1065,13 @@ mod tests {
                 raised.insert(r.kind.code());
             }
         }
+        {
+            let mut w = Watcher::new();
+            w.observe(&nex(&[]));
+            for r in w.observe(&nex(&["ap-1"])) {
+                raised.insert(r.kind.code());
+            }
+        }
         let want: BTreeSet<u8> = Kind::ALL.iter().map(|k| k.code()).collect();
         assert_eq!(
             raised, want,
@@ -1231,5 +1271,59 @@ mod tests {
         for id in [i32::MAX as u32 + 1, u32::MAX - 1, 0x8000_0000] {
             assert!(session_id(id) >= 0, "{id} became a negative session");
         }
+    }
+
+    fn nex(ids: &[&str]) -> Observation {
+        Observation {
+            nex: Some(ids.iter().map(|s| s.to_string()).collect()),
+            ..Observation::default()
+        }
+    }
+
+    #[test]
+    fn a_new_nex_approval_raises_one_alert_that_names_nothing() {
+        let mut w = Watcher::new();
+        // What was waiting when nexd was first heard from did not just happen.
+        assert!(w.observe(&nex(&["ap-old"])).is_empty());
+        assert!(w.observe(&nex(&["ap-old"])).is_empty(), "nothing changed");
+        let out = w.observe(&nex(&["ap-old", "ap-1", "ap-2"]));
+        assert_eq!(out.len(), 1, "two approvals in one poll are one buzz: {out:?}");
+        assert_eq!(out[0].kind, Kind::NexApproval);
+        // No session number, no start time, no adapter: the body says only
+        // "nex needs a decision", and the phone reads the rest over its link.
+        assert_eq!(out[0].session, NO_SESSION);
+        assert_eq!(out[0].started, 0);
+        assert_eq!(out[0].adapter, Adapter::Unknown);
+        assert!(w.observe(&nex(&["ap-1", "ap-2"])).is_empty(), "an answer is not news");
+        assert_eq!(w.observe(&nex(&["ap-2", "ap-3"])).len(), 1, "a later one is");
+    }
+
+    #[test]
+    fn nexd_not_answering_forgets_nothing_and_its_first_answer_raises_nothing() {
+        let mut w = Watcher::new();
+        // nexd not running yet: sessions are watched as before.
+        assert!(w.observe(&Observation::default()).is_empty());
+        // nexd starts with an approval already waiting: not news.
+        assert!(w.observe(&nex(&["ap-1"])).is_empty());
+        // One poll where nexd did not answer must not empty the set, or the
+        // next answer would announce ap-1 again.
+        assert!(w.observe(&Observation::default()).is_empty());
+        assert!(
+            w.observe(&nex(&["ap-1"])).is_empty(),
+            "an approval was announced again after nexd missed one poll"
+        );
+    }
+
+    #[test]
+    fn a_nex_alert_seals_into_the_same_fifty_one_bytes_as_every_other() {
+        let mut w = Watcher::new();
+        w.observe(&nex(&[]));
+        let out = w.observe(&nex(&["ap-secret-run-rm-rf"]));
+        let key = [7u8; 32];
+        let sealed = Envelope::seal(&key, &out[0].body(1)).expect("seal");
+        assert_eq!(sealed.as_bytes().len(), rime_remote_core::push::ENVELOPE_LEN);
+        let opened = Envelope::open(&key, sealed.as_bytes()).expect("open");
+        assert_eq!(opened.kind, Kind::NexApproval);
+        assert_eq!(opened.session, NO_SESSION);
     }
 }

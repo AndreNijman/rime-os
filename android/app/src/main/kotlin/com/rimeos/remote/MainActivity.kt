@@ -13,6 +13,7 @@ import androidx.fragment.app.FragmentActivity
 import com.rimeos.remote.core.Device
 import com.rimeos.remote.core.Pairing
 import com.rimeos.remote.core.agent.Alert
+import com.rimeos.remote.core.agent.AlertTap
 import com.rimeos.remote.ui.RimeRemoteApp
 import com.rimeos.remote.ui.Notifier
 import com.rimeos.remote.core.CrashReport
@@ -37,7 +38,7 @@ class MainActivity : FragmentActivity() {
      * unique across machines either — two paired laptops both have a session
      * 1. A tap carrying only a number could open a stranger's agent.
      */
-    private var alertTap by mutableStateOf<Pair<String, Int>?>(null)
+    private var alertTap by mutableStateOf<AlertTap?>(null)
 
     /**
      * Asks for `POST_NOTIFICATIONS`, which API 33 made a runtime permission.
@@ -128,11 +129,11 @@ class MainActivity : FragmentActivity() {
      * connected one and that the session still exists before it opens
      * anything.
      */
-    private fun alertTarget(intent: Intent?): Pair<String, Int>? {
+    private fun alertTarget(intent: Intent?): AlertTap? {
         if (intent?.action != Notifier.ACTION_OPEN_ALERT) return null
         val machine = intent.getStringExtra(Notifier.EXTRA_MACHINE) ?: return null
         val session = intent.getIntExtra(Notifier.EXTRA_SESSION, Alert.NO_SESSION)
-        return machine to session
+        return AlertTap(machine, session, nex = intent.getBooleanExtra(Notifier.EXTRA_NEX, false))
     }
 
     private fun pairingPayload(intent: Intent?): String? {

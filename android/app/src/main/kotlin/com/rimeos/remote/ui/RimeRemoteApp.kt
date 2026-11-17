@@ -27,6 +27,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.rimeos.remote.core.agent.AlertTap
 import com.rimeos.remote.update.AppUpdater
 import com.rimeos.remote.update.UpdateBanner
 import com.rimeos.remote.update.UpdateUi
@@ -98,8 +99,8 @@ fun RimeRemoteApp(
     launchPayload: String? = null,
     /** Called once the payload has been handed to a screen, so it fires once. */
     onPayloadConsumed: () -> Unit = {},
-    /** The (machine, session) a tapped notification named, if this is one. */
-    alertTarget: Pair<String, Int>? = null,
+    /** Where a tapped notification asks to go, if this is one. */
+    alertTarget: AlertTap? = null,
     /** Called once the tap has been acted on, so it fires once. */
     onAlertConsumed: () -> Unit = {},
     /** Ask Android for `POST_NOTIFICATIONS`. Owned by the activity. */
@@ -512,8 +513,16 @@ fun RimeRemoteApp(
             // not be retried on the next recomposition: the session is not
             // coming back, and the user would be unable to navigate away.
             onAlertConsumed()
-            val (machine, session) = target
-            if (viewModel.openAlerted(machine, session)) {
+            val connected = state.agents.machine
+            val goes = target.goesTo(
+                connected = connected?.deviceId,
+                nexOffered = state.links[target.machine]?.remote?.has(Nex.FEATURE) == true,
+            )
+            if (goes == AlertTap.GoesTo.NEX && connected != null) {
+                // nex names no session in a push: its screen lists what waits.
+                nexModel.open(connected)
+                navigation.navigate(Destinations.NEX) { launchSingleTop = true }
+            } else if (goes == AlertTap.GoesTo.SESSION && viewModel.openAlerted(target.machine, target.session)) {
                 navigation.navigate(Destinations.SESSION) { launchSingleTop = true }
             } else {
                 // The session is gone, or it belongs to a machine this phone

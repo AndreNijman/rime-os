@@ -63,9 +63,11 @@ data class NotificationContent(
     val session: Int,
     /** Grouped per machine, so two laptops do not interleave in the shade. */
     val group: String,
+    /** Whether tapping this opens the machine's nex screen. */
+    val opensNex: Boolean = false,
 ) {
     /** Whether tapping this can open a session, or only the Agent Center. */
-    val opensSession: Boolean get() = session != Alert.NO_SESSION
+    val opensSession: Boolean get() = session != Alert.NO_SESSION && !opensNex
 
     companion object {
         /**
@@ -78,7 +80,9 @@ data class NotificationContent(
          *   phone has no name for it, and then the title carries no machine.
          */
         fun of(alert: Alert, machineName: String = ""): NotificationContent {
-            val agent = AgentNames.of(alert.agent)
+            // nex is the agent, and its title says so; "Agent on" before the
+            // machine would be a second, vaguer name for the same thing.
+            val agent = if (alert.kind == Alert.Kind.NEX_APPROVAL) "" else AgentNames.of(alert.agent)
             // "Waiting for you · claude" rather than a sentence, because the
             // shade truncates hard and the first two words have to carry it.
             val who = when {
@@ -94,6 +98,7 @@ data class NotificationContent(
                 machine = alert.machine,
                 session = alert.session,
                 group = GROUP_PREFIX + alert.machine,
+                opensNex = alert.kind == Alert.Kind.NEX_APPROVAL,
             )
         }
 
@@ -131,5 +136,30 @@ data class NotificationContent(
          * turn off the one that matters and forget.
          */
         const val CHANNEL: String = "rime.agents"
+    }
+}
+
+/**
+ * Where a tapped notification asks to go: a session on a machine, or that
+ * machine's nex screen. A hint only; the app checks the machine is the
+ * connected one before it opens anything.
+ */
+data class AlertTap(val machine: String, val session: Int, val nex: Boolean = false) {
+    enum class GoesTo { NEX, SESSION, ELSEWHERE }
+
+    /**
+     * Where this tap may go, given the machine the phone is connected to and
+     * whether that machine offers nex.
+     *
+     * Anything for another machine goes to the machine list or the Agent
+     * Center: opening it on the connected machine would show the wrong
+     * computer's work. A nex tap on a machine whose bridge no longer reaches
+     * nexd has nothing to open either. A session tap may still find its
+     * session gone; the caller checks that.
+     */
+    fun goesTo(connected: String?, nexOffered: Boolean): GoesTo = when {
+        connected != machine -> GoesTo.ELSEWHERE
+        nex -> if (nexOffered) GoesTo.NEX else GoesTo.ELSEWHERE
+        else -> GoesTo.SESSION
     }
 }

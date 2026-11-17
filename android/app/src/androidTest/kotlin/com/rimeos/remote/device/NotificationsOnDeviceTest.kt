@@ -6,6 +6,7 @@ import android.content.pm.PackageManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
+import com.rimeos.remote.MainActivity
 import com.rimeos.remote.core.agent.Alert
 import com.rimeos.remote.core.agent.NotificationContent
 import com.rimeos.remote.ui.Notifier
@@ -189,6 +190,40 @@ class NotificationsOnDeviceTest {
         val posted = shadeOf(1).single()
         val extras = posted.notification.contentIntent
         assertNotNull("a notification with no tap target opens nothing", extras)
+    }
+
+    @Test
+    fun a_nex_alert_reads_as_nex_and_its_tap_asks_for_the_nex_screen() {
+        // What PushReceiver posts for a push from rime-remoted's nex watcher.
+        val notifier = Notifier(context)
+        notifier.ensureChannel()
+        notifier.post(
+            Alert(machine = "abcdef0123456789", session = Alert.NO_SESSION, kind = Alert.Kind.NEX_APPROVAL, agent = "", atMs = 1L),
+            "l16",
+        )
+        val posted = shadeOf(1).single()
+        assertEquals("nex needs a decision · l16", posted.notification.extras.getCharSequence("android.title")?.toString())
+        assertEquals(
+            "Open nex to approve or deny what it wants to do.",
+            posted.notification.extras.getCharSequence("android.text")?.toString(),
+        )
+        // The real PendingIntent, sent: the activity it opens is handed the
+        // machine and the nex flag, which is what routes it to the nex screen.
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val monitor = instrumentation.addMonitor(MainActivity::class.java.name, null, false)
+        try {
+            posted.notification.contentIntent.send()
+            val opened = instrumentation.waitForMonitorWithTimeout(monitor, 10_000)
+            assertNotNull("the tap opened nothing", opened)
+            val intent = opened!!.intent
+            assertEquals(Notifier.ACTION_OPEN_ALERT, intent.action)
+            assertEquals("abcdef0123456789", intent.getStringExtra(Notifier.EXTRA_MACHINE))
+            assertTrue("the tap did not ask for nex", intent.getBooleanExtra(Notifier.EXTRA_NEX, false))
+            assertEquals(Alert.NO_SESSION, intent.getIntExtra(Notifier.EXTRA_SESSION, 0))
+            opened.finish()
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
     }
 
     @Test

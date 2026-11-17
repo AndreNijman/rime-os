@@ -168,6 +168,14 @@ pub enum Kind {
     Deployed = 7,
     /// A deployment operation completed with a non-zero exit code.
     DeployFailed = 8,
+    /// nex is waiting for somebody to approve or deny a tool call.
+    ///
+    /// nex sessions are named by strings this body has no room for, so the
+    /// alert carries [`NO_SESSION`] and the phone opens its nex screen, which
+    /// reads what is waiting over the paired link. What the tool would do
+    /// (the command, the file) never goes into an envelope: the body has
+    /// nowhere to put it.
+    NexApproval = 9,
 }
 
 impl Kind {
@@ -185,6 +193,7 @@ impl Kind {
             6 => Some(Kind::Approval),
             7 => Some(Kind::Deployed),
             8 => Some(Kind::DeployFailed),
+            9 => Some(Kind::NexApproval),
             _ => None,
         }
     }
@@ -195,7 +204,7 @@ impl Kind {
 
     /// Every kind, so a test can walk the vocabulary rather than a list
     /// somebody has to remember to extend.
-    pub const ALL: [Kind; 8] = [
+    pub const ALL: [Kind; 9] = [
         Kind::Waiting,
         Kind::Permission,
         Kind::Failed,
@@ -204,6 +213,7 @@ impl Kind {
         Kind::Approval,
         Kind::Deployed,
         Kind::DeployFailed,
+        Kind::NexApproval,
     ];
 
     /// Whether this kind reports a deployment.
@@ -1054,12 +1064,13 @@ mod tests {
             assert_ne!(kind.code(), 0, "0 must stay free as 'not a kind'");
         }
         assert_eq!(Kind::from_code(0), None);
-        assert_eq!(Kind::from_code(9), None);
+        assert_eq!(Kind::from_code(10), None);
         // The discriminants are the wire: a variant inserted rather than
         // appended would renumber the ones after it and a phone built before
         // the change would render the wrong sentence.
         assert_eq!(Kind::Waiting.code(), 1);
         assert_eq!(Kind::DeployFailed.code(), 8);
+        assert_eq!(Kind::NexApproval.code(), 9);
     }
 
     #[test]
