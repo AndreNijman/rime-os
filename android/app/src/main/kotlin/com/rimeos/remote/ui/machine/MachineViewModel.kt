@@ -57,11 +57,16 @@ data class MachineUiState(
         away = null,
     )
 
+    /**
+     * Not confirmed is a notice, not a failure: the lock was asked for, and
+     * some lockers never tell logind (COSMIC's does not). The next read shows
+     * what logind says.
+     */
     fun locked(confirmed: Boolean): MachineUiState = copy(
         acting = null,
         status = if (confirmed) status?.copy(locked = true) else status,
-        notice = if (confirmed) "Locked" else null,
-        failure = if (confirmed) null else "The computer was asked to lock, but its screen did not confirm it",
+        notice = if (confirmed) "Locked" else "Asked the computer to lock. Its screen has not confirmed it",
+        failure = null,
     )
 
     fun dismissed(): MachineUiState = copy(failure = null, notice = null)

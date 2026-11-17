@@ -41,7 +41,7 @@ class MachineUiStateTest {
     }
 
     @Test
-    fun `a confirmed lock shows as locked, an unconfirmed one says so and changes nothing`() {
+    fun `a confirmed lock shows as locked, an unconfirmed one says it asked and changes nothing`() {
         val asking = MachineUiState(status = status, acting = MachineUiState.LOCK)
         val yes = asking.locked(true)
         assertNull(yes.acting)
@@ -51,8 +51,8 @@ class MachineUiStateTest {
         val no = asking.locked(false)
         assertNull(no.acting)
         assertEquals(false, no.status?.locked)
-        assertEquals("The computer was asked to lock, but its screen did not confirm it", no.failure)
-        assertNull(no.notice)
+        assertEquals("Asked the computer to lock. Its screen has not confirmed it", no.notice)
+        assertNull(no.failure, "some lockers never confirm: not a failure")
     }
 
     @Test

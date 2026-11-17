@@ -21,7 +21,10 @@
 //! The control worker answers requests in order, so a hung `wpctl` would
 //! stall every request behind it. Every verb gets [`BUDGET`] for all it asks
 //! the machine, the status reads run side by side, and a reader that runs out
-//! of time gives `null`, not an error.
+//! of time gives `null`, not an error. The one exception is the lock, which
+//! gets [`LOCK_BUDGET`]: its confirmation goes through hypridle, the Shell and
+//! the compositor before logind's `LockedHint` says so, and a person pressed a
+//! button and is waiting for exactly that answer.
 
 use serde_json::{json, Value};
 use std::io::Read;
@@ -38,6 +41,9 @@ pub const FEATURES: [&str; 3] = ["machine_status", "machine_lock", "media"];
 
 /// Everything one request may spend asking the machine.
 pub const BUDGET: Duration = Duration::from_secs(2);
+
+/// What `machine_lock` may spend, the request and its confirmation together.
+pub const LOCK_BUDGET: Duration = Duration::from_secs(5);
 
 /// The longest title or artist a reply carries, in characters.
 pub const TEXT_CAP: usize = 200;
@@ -156,7 +162,7 @@ pub fn control(backend: &dyn Backend, line: &[u8]) -> Vec<u8> {
     };
     let reply = match v.get("cmd").and_then(Value::as_str) {
         Some("machine_status") => status_reply(&backend.status(deadline)),
-        Some("machine_lock") => match backend.lock(deadline) {
+        Some("machine_lock") => match backend.lock(Instant::now() + LOCK_BUDGET) {
             Ok(locked) => json!({"reply": "machine_lock", "locked": locked}),
             Err(LockError::NoScreen) => return error("unavailable", "there is no screen to lock on this computer"),
             Err(LockError::Failed(why)) => return error("unavailable", &why),
@@ -790,5 +796,56 @@ mod tests {
     fn a_line_this_module_does_not_take_is_refused() {
         let (_d, s) = stub(json!({}));
         assert_eq!(ask(&s, r#"{"cmd":"hello"}"#)["kind"], "bad_request");
+    }
+
+    /// The real backend's READ half against the machine running the test,
+    /// compared with what the tools say when asked directly. Never the lock,
+    /// never a media action, never a volume change. Run by hand on a Rime
+    /// machine: `cargo test -p rime-remoted -- --ignored the_real_backend`.
+    #[test]
+    #[ignore = "reads this machine's real status, player and volume"]
+    fn the_real_backend_reads_this_machine_as_its_tools_do() {
+        fn raw(program: &str, args: &[&str]) -> Option<String> {
+            let out = std::process::Command::new(program).args(args).output().ok()?;
+            out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+        }
+        let real = Real::new();
+        let status = real.status(Instant::now() + BUDGET);
+        eprintln!("status: {status:?}");
+
+        let battery_dir = Path::new("/sys/class/power_supply");
+        assert_eq!(status.battery, battery_in(battery_dir), "the battery is read from sysfs directly");
+
+        match raw("busctl", &["--system", "get-property", "org.rimeos.Rimed1", "/org/rimeos/Rimed1", "org.rimeos.Rimed1.Power", "Tier"]) {
+            Some(tier) => {
+                let tier = tier.trim().strip_prefix("s ").map(|t| t.trim_matches('"').to_string());
+                assert_eq!(status.power_mode, tier, "rimed's tier, as busctl reads it");
+                assert!(status.on_ac.is_some(), "rimed answers, so OnAcPower is known");
+            }
+            None => assert_eq!(status.power_mode, None, "rimed does not answer, so the tier is unknown"),
+        }
+        match raw("busctl", &["--system", "get-property", "org.rimeos.Rimed1", "/org/rimeos/Rimed1", "org.rimeos.Rimed1.Updates", "State"]) {
+            Some(state) => assert_eq!(status.update, state.trim().strip_prefix("s ").map(|t| t.trim_matches('"').to_string())),
+            None => assert_eq!(status.update, None),
+        }
+        let uid = unsafe { libc::getuid() }.to_string();
+        let display = raw("loginctl", &["show-user", &uid, "-p", "Display", "--value"]).map(|d| d.trim().to_string());
+        if display.as_deref().is_some_and(|d| !d.is_empty()) {
+            assert!(status.locked.is_some(), "a graphical session exists, so its LockedHint is known");
+        }
+
+        let player = real.player(Instant::now() + BUDGET);
+        eprintln!("player: {player:?}");
+        let direct = raw("playerctl", &["metadata", "--format", "{{playerName}}\u{1f}{{lc(status)}}\u{1f}{{xesam:title}}\u{1f}{{xesam:artist}}"])
+            .and_then(|o| parse_player(&o));
+        assert_eq!(player.map(|p| p.name), direct.map(|p| p.name), "the same player as playerctl picks");
+
+        let volume = real.volume(Instant::now() + BUDGET);
+        eprintln!("volume: {volume:?}");
+        let direct = raw("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"]).and_then(|o| parse_volume(&o));
+        assert_eq!(volume, direct, "the same volume as wpctl reads");
+        if let Some(v) = &volume {
+            assert!(v.percent <= 100);
+        }
     }
 }

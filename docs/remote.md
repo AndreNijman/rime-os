@@ -208,8 +208,9 @@ on them.
 They need no grant because they are what the person could do at the keyboard,
 and none of them can unlock anything: there is no unlock verb, and there will
 not be one. A lock is reported as done only once logind's `LockedHint` confirms
-it. Each verb has one two-second budget, and anything not read in
-that time comes back as unknown rather than as a guess. Nothing here checks for
+it, within five seconds; otherwise the phone says it asked. Every other verb
+has a two-second budget, and anything not read in that time comes back as
+unknown rather than as a guess. Nothing here checks for
 an update; `update` is rimed's cached state.
 
 Test daemons use stub backends only. `run-device-suite.sh` refuses to

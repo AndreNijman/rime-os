@@ -231,6 +231,8 @@ probe in the hello.
 Each verb has one 2 s budget for everything it asks the machine (the control
 worker answers requests in order, so a hung `wpctl` must not stall the link).
 Backends that do not answer in time give `null` fields, not an error.
+`machine_lock` alone has 5 s, because its confirmation passes through
+hypridle, the Shell and the compositor before logind records it.
 
 ```json
 {"cmd":"machine_status"}
@@ -261,6 +263,8 @@ Backends that do not answer in time give `null` fields, not an error.
 - Runs `loginctl lock-session` on the user's graphical session, then reads
   `LockedHint` back until it says locked or the budget runs out. `locked` is
   what was read, so `false` means "asked, and the screen did not confirm".
+  That is not a failure: some lockers never set `LockedHint` (COSMIC's does
+  not), and the phone says it asked rather than that it failed.
 - No graphical session: `{"reply":"error","kind":"unavailable","message":"there
   is no screen to lock on this computer"}`.
 - There is no unlock verb, and there will not be one.

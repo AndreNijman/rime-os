@@ -211,6 +211,9 @@ impl Harness {
             .args(extra)
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
+            // No machine verb is sent here, but if one ever is, it must reach
+            // a stub and not the developer's screen and music.
+            .env("RIME_REMOTED_MACHINE_STUB", root.join("machine"))
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).ok()?)
             .spawn()
