@@ -117,6 +117,28 @@ object Desktop {
     fun decideLocally(id: Int, decision: String): JSONObject =
         requestReply("""{"cmd":"decide_locally","id":$id,"decision":"$decision"}""")
 
+    /** The folder the runner's nexd works in, on the computer. */
+    fun nexRoot(): String = arg("nexroot")
+
+    /**
+     * A nex session in [nexRoot], made at the computer. nexd lets a phone
+     * start sessions only in a folder somebody at the computer already chose,
+     * so this is that choice; everything after it is the phone's.
+     */
+    fun nexSessionAtComputer(title: String): String {
+        val reply = ask(JSONObject().put("cmd", "nex_session_at_computer").put("title", title).toString())
+        check(reply.optString("reply") == "ok") { "nexd did not make a session at the computer: $reply" }
+        return reply.getString("session_id")
+    }
+
+    /** Type [text] into [session] at the computer: nothing the phone sent. */
+    fun nexSubmitAtComputer(session: String, text: String) {
+        val reply = ask(
+            JSONObject().put("cmd", "nex_submit_at_computer").put("session", session).put("text", text).toString(),
+        )
+        check(reply.optString("reply") == "ok") { "nexd did not take the message at the computer: $reply" }
+    }
+
     private fun requestReply(line: String): JSONObject {
         val reply = ask(line)
         check(reply.optString("reply") == "request") {
