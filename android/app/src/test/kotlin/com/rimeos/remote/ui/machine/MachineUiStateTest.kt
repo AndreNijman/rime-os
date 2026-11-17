@@ -23,6 +23,8 @@ class MachineUiStateTest {
         assertFalse(none.offersStatus || none.offersLock || none.offersMedia)
         val all = MachineUiState().offering(listOf("machine_status", "machine_lock", "media"))
         assertTrue(all.offersStatus && all.offersLock && all.offersMedia)
+        assertFalse(all.offersClipboard, "the clipboard is rime-agentd's, not rime-remoted's")
+        assertTrue(MachineUiState().offering(emptyList(), listOf("clipboard_write")).offersClipboard)
         val some = MachineUiState().offering(listOf("machine_status"))
         assertTrue(some.offersStatus)
         assertFalse(some.offersLock || some.offersMedia)

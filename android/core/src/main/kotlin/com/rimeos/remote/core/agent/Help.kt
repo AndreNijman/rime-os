@@ -252,6 +252,22 @@ object Help {
                         "open, and not at all while the app is in the background. A line the computer " +
                         "could not read is left out rather than guessed.",
                 ),
+                h("Sending to the computer"),
+                p(
+                    "Share a photo, a file or some text from any app and pick Rime Remote. " +
+                        "Nothing is sent until you choose the computer and tap Send. Files go " +
+                        "to its Downloads folder, and text goes to its clipboard, ready to paste.",
+                ),
+                p(
+                    "A file with the same name as one already there does not replace it: the computer " +
+                        "keeps both and tells you the name it used. Send this phone's " +
+                        "clipboard, on the Computer screen, does the same for what you copied here.",
+                ),
+                note(
+                    "If the connection drops after the whole file went over, the app says the " +
+                        "file may or may not be there. Check before sending it again. The " +
+                        "computer deletes any file you stop part way.",
+                ),
                 h("Taking this phone's access away"),
                 p(
                     "Forget the computer here, or remove this device at the computer. Either " +

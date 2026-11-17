@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rimeos.remote.core.PairedMachine
 import com.rimeos.remote.core.agent.AgentError
+import com.rimeos.remote.core.agent.Features
 import com.rimeos.remote.core.link.Disconnected
 import com.rimeos.remote.core.machine.Machine
 import com.rimeos.remote.core.machine.MachineControls
@@ -12,6 +13,7 @@ import com.rimeos.remote.core.machine.MachineStatus
 import com.rimeos.remote.core.machine.MediaAction
 import com.rimeos.remote.core.machine.MediaState
 import com.rimeos.remote.link.LinkHub
+import com.rimeos.remote.ui.send.SendUiState
 import java.util.concurrent.TimeoutException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -31,11 +33,13 @@ data class MachineUiState(
     val offersStatus: Boolean = false,
     val offersLock: Boolean = false,
     val offersMedia: Boolean = false,
+    /** rime-agentd takes text for its clipboard from a phone (`clipboard_write`). */
+    val offersClipboard: Boolean = false,
     val status: MachineStatus? = null,
     val media: MediaState? = null,
     /** True once the first read came back, so "nothing playing" is not drawn before anything was asked. */
     val loaded: Boolean = false,
-    /** Which action is waiting on the computer: [LOCK], [MEDIA] or [VOLUME]. */
+    /** Which action is waiting on the computer: [LOCK], [MEDIA], [VOLUME] or [CLIPBOARD]. */
     val acting: String? = null,
     /** Why the last read failed. Cleared by the next read that works. */
     val away: String? = null,
@@ -44,10 +48,12 @@ data class MachineUiState(
     /** An action that worked and that the person has to be told about. */
     val notice: String? = null,
 ) {
-    fun offering(features: Collection<String>): MachineUiState = copy(
+    /** [features] are rime-remoted's; [agentFeatures] are rime-agentd's, from its own hello. */
+    fun offering(features: Collection<String>, agentFeatures: Collection<String> = emptyList()): MachineUiState = copy(
         offersStatus = Machine.STATUS in features,
         offersLock = Machine.LOCK in features,
         offersMedia = Machine.MEDIA in features,
+        offersClipboard = Features.CLIPBOARD_WRITE in agentFeatures,
     )
 
     fun read(status: MachineStatus?, media: MediaState?): MachineUiState = copy(
@@ -75,6 +81,7 @@ data class MachineUiState(
         const val LOCK = "lock"
         const val MEDIA = "media"
         const val VOLUME = "volume"
+        const val CLIPBOARD = "clipboard"
 
         /**
          * One failure in words. [moved] is whether the request was one that
@@ -129,6 +136,9 @@ class MachineViewModel(application: Application) : AndroidViewModel(application)
     private fun features(): List<String> =
         machine?.let { hub.state(it.deviceId)?.remote?.features } ?: emptyList()
 
+    private fun agentFeatures(): List<String> =
+        machine?.let { hub.state(it.deviceId)?.hello?.features } ?: emptyList()
+
     /** Read now, then every [POLL_MS] until cancelled. */
     suspend fun watch() {
         while (true) {
@@ -143,7 +153,7 @@ class MachineViewModel(application: Application) : AndroidViewModel(application)
 
     private suspend fun readOnce() {
         val name = machine?.machine ?: return
-        _state.update { it.offering(features()) }
+        _state.update { it.offering(features(), agentFeatures()) }
         val c = controls() ?: return
         val s = _state.value
         try {
@@ -174,6 +184,35 @@ class MachineViewModel(application: Application) : AndroidViewModel(application)
     fun mute(muted: Boolean) = act(MachineUiState.VOLUME, moved = false) { c ->
         val media = c.mute(muted)
         _state.update { it.copy(media = media, acting = null) }
+    }
+
+    /**
+     * Put [text], what this phone has copied, on the computer's clipboard.
+     * Read by the screen at the tap: Android lets an app read the clipboard
+     * only while it has focus.
+     */
+    fun sendClipboard(text: String?) {
+        val m = machine ?: return
+        val refusal = if (text.isNullOrEmpty()) {
+            "This phone's clipboard has no text to send."
+        } else {
+            SendUiState.textRefusal(text)
+        }
+        if (refusal != null || text == null) {
+            _state.update { it.copy(notice = null, failure = refusal) }
+            return
+        }
+        if (_state.value.acting != null || hub.identity(m.deviceId) == null) return
+        _state.update { it.copy(acting = MachineUiState.CLIPBOARD, failure = null, notice = null) }
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) { hub.link(m).clipboardWrite(text) }
+                _state.update { it.copy(acting = null, notice = "Sent this phone's clipboard to ${m.machine}.") }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                _state.update { it.copy(acting = null, failure = MachineUiState.failureOf(e, m.machine)) }
+            }
+        }
     }
 
     fun dismiss() = _state.update { it.dismissed() }

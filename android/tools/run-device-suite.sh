@@ -140,6 +140,19 @@ rm -rf "$root"; mkdir -p "$root"/run "$root"/state "$root"/scratch
 port=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
 brokerport=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
 
+# "Send to Rime" (clipboard_write, save_file) writes to this machine's
+# clipboard and Downloads folder, and this rime-agentd runs as the developer,
+# with their HOME and on their compositor: a real backend here would replace
+# what they copied and drop files into their Downloads. With the stub set it
+# writes desk/clipboard and desk/Downloads/ instead, which the broker reads back
+# for the tests (`desk_clipboard`, `desk_downloads`). The broker never restarts
+# rime-agentd, so this is the only place it starts.
+export RIME_AGENTD_DESKTOP_STUB=$root/desk
+mkdir -p "$root/desk"
+if [ "${RIME_AGENTD_DESKTOP_STUB:-}" != "$root/desk" ]; then
+  echo "FAIL: refusing to start rime-agentd without the desktop stub: it would write to this desktop"
+  exit 1
+fi
 XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
   RIME_AGENT_SCRATCH_ROOT=$root/scratch \
   "$bin/rime-agentd" >"$root/agentd.log" 2>&1 &
@@ -376,6 +389,47 @@ def machine_stub_actions():
         actions = []
     return json.dumps({"reply": "ok", "actions": actions})
 
+DESK = os.path.join(ROOT, "desk")
+
+def desk_clipboard():
+    """What the stub desktop's clipboard holds, or null when nothing was written."""
+    try:
+        with open(os.path.join(DESK, "clipboard"), encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = None
+    return json.dumps({"reply": "ok", "text": text})
+
+def desk_downloads():
+    """Every finished file in the stub Downloads folder, with its size and sha256."""
+    import hashlib
+    d = os.path.join(DESK, "Downloads")
+    files = []
+    try:
+        names = sorted(os.listdir(d))
+    except FileNotFoundError:
+        names = []
+    for n in names:
+        p = os.path.join(d, n)
+        if not os.path.isfile(p):
+            continue
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+        files.append({"name": n, "size": os.path.getsize(p), "sha256": h.hexdigest()})
+    return json.dumps({"reply": "ok", "dir": d, "files": files})
+
+def desk_reset():
+    """Empty the stub clipboard and Downloads folder, so a test sees only its own writes."""
+    import shutil
+    shutil.rmtree(os.path.join(DESK, "Downloads"), ignore_errors=True)
+    try:
+        os.remove(os.path.join(DESK, "clipboard"))
+    except FileNotFoundError:
+        pass
+    return json.dumps({"reply": "ok"})
+
 class H(socketserver.StreamRequestHandler):
     timeout = 120
     def handle(self):
@@ -404,6 +458,12 @@ class H(socketserver.StreamRequestHandler):
                 out = machine_stub_seed(req.get("state"))
             elif cmd == "machine_stub_actions":
                 out = machine_stub_actions()
+            elif cmd == "desk_clipboard":
+                out = desk_clipboard()
+            elif cmd == "desk_downloads":
+                out = desk_downloads()
+            elif cmd == "desk_reset":
+                out = desk_reset()
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:

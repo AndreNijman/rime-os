@@ -840,6 +840,14 @@ object Agentd {
         require(reply, "clipboard")["text"]?.jsonPrimitive?.content.orEmpty()
 
     /**
+     * How many bytes the computer's clipboard now holds, from a
+     * `clipboard_written` reply (contract §1.8). Throws [AgentError] on a
+     * refusal, like every parser here.
+     */
+    fun readClipboardWritten(reply: String): Int =
+        require(reply, "clipboard_written")["bytes"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
+
+    /**
      * The worktree rows, from a `worktrees` reply.
      *
      * Throws [AgentError] like every other parser here, with one case given a

@@ -27,6 +27,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import android.content.ClipboardManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -56,7 +58,10 @@ fun MachineScreen(
     onRefresh: () -> Unit,
     onDismiss: () -> Unit,
     onBack: () -> Unit,
+    /** Called with what this phone has copied, read at the tap. */
+    onSendClipboard: (String?) -> Unit = {},
 ) {
+    val context = LocalContext.current
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
@@ -102,6 +107,24 @@ fun MachineScreen(
                     }
                     Line("Unlocking is only ever done at the computer.", quiet = true)
                 }
+            }
+
+            if (state.offersClipboard) {
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                Heading("Clipboard")
+                OutlinedButton(
+                    onClick = {
+                        val clip = context.getSystemService(ClipboardManager::class.java)?.primaryClip
+                        val text = clip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+                        onSendClipboard(text)
+                    },
+                    enabled = state.acting == null,
+                    shape = RoundedCornerShape(6.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                ) {
+                    Text(if (state.acting == MachineUiState.CLIPBOARD) "Sending…" else "Send this phone's clipboard")
+                }
+                Line("It replaces what the computer has copied. To send a file, share it to Rime Remote.", quiet = true)
             }
 
             if (state.offersMedia && state.loaded) {

@@ -217,6 +217,29 @@ Test daemons use stub backends only. `run-device-suite.sh` refuses to
 start `rime-remoted` without `RIME_REMOTED_MACHINE_STUB`, so a test run cannot
 lock the developer's screen or pause their music.
 
+## Send to Rime: from the phone onto the computer
+
+Share text or files to Rime Remote from any Android app. The app opens a Send
+screen that shows what was shared and asks which computer it goes to; nothing
+is sent until the person taps Send. Text goes to the computer's clipboard
+(`clipboard_write`), files to its Downloads folder (`save_file`), contract
+§1.8. The Computer screen also has **Send this phone's clipboard**.
+
+- A file is saved under its own name, never over another file: a clash becomes
+  `name (2).ext`, and the phone shows the name the computer chose.
+- Up to 256 MB per file and 8 KB of text. Longer text is refused, never cut.
+- The app reads only what was shared to it, through the read grant that comes
+  with the share. It asks for no storage permission, and it refuses `file://`
+  links and its own content.
+- A file stopped or cut off part way is never kept. If the connection drops
+  after the last byte, the phone says the file may or may not be there.
+- A managed agent session may not use either verb: only a person at the
+  computer or on a paired phone may.
+
+Test daemons write into a stub: `run-device-suite.sh` refuses to start
+`rime-agentd` without `RIME_AGENTD_DESKTOP_STUB`, so a test run cannot replace
+the developer's clipboard or write into their Downloads.
+
 ## Notifications when the app is closed
 
 An agent that needs you at two in the morning has to be able to reach a phone

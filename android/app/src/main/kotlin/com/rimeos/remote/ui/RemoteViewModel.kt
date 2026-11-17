@@ -1793,6 +1793,30 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         terminal = null
     }
 
+    /**
+     * Open [machine]'s key (one prompt, unless it is already open), then run
+     * [then]. For screens that dial the machine themselves, like "Send to
+     * Rime"; a refusal goes to [onFailure] in words.
+     */
+    fun withKey(
+        activity: FragmentActivity,
+        machine: PairedMachine,
+        onFailure: (String) -> Unit,
+        then: () -> Unit,
+    ) = viewModelScope.launch {
+        try {
+            openIdentity(activity, machine)
+        } catch (e: AppLockRefused) {
+            onFailure(e.message ?: "The key for ${machine.machine} was not opened.")
+            return@launch
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            onFailure(describeConnectFailure(machine, e))
+            return@launch
+        }
+        then()
+    }
+
     private suspend fun openIdentity(activity: FragmentActivity, machine: PairedMachine): StaticKey {
         hub.identity(machine.deviceId)?.let { return it }
         val box = KeystoreSecretBox.forDevice(machine.deviceId)

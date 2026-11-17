@@ -93,6 +93,16 @@ class AgentdRequestWireTest {
     }
 
     @Test
+    fun `send to rime puts the phone's clipboard and files onto the computer itself`() {
+        // Contract §1.8. `clipboard_write` is a control frame; `save_file` is
+        // the third takeover verb, and like `receive` its name crosses as the
+        // share sheet gave it: the daemon reduces and numbers it.
+        expect("clipboard_write", Agentd.clipboardWrite("two\nlines \"quoted\""))
+        expect("save_file", Agentd.saveFile("IMG_2041.jpg", 2_097_152))
+        expect("save_file_hostile_name", Agentd.saveFile("../../.bashrc", 5))
+    }
+
+    @Test
     fun `input is a verb, and it is the shape write_input reads`() {
         // The reply carries its own CR: `session::write_input` writes raw bytes
         // and appends nothing, so a reply without one is never submitted.
@@ -324,7 +334,7 @@ class AgentdRequestWireTest {
             setOf(
                 "hello", "list", "info", "attach", "resize", "signal", "input",
                 "input_submit", "input_bare", "rename", "rename_clear", "peek",
-                "clipboard",
+                "clipboard", "clipboard_write", "save_file", "save_file_hostile_name",
                 "receive", "receive_hostile_name",
                 "run_minimal", "run_full", "run_generic_with_args",
                 "worktrees_all", "worktrees_one",

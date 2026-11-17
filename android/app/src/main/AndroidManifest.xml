@@ -177,6 +177,16 @@
                 <!-- rime-rename: keep: Pairing.SCHEME, the scheme every desktop prints -->
                 <data android:scheme="apex-remote" /> <!-- rime-rename: keep -->
             </intent-filter>
+
+            <!-- "Send to Rime": text and files from another app's share sheet.
+                 Arriving only opens the Send screen; a tap there sends. The
+                 read grant comes with the share, so no storage permission. -->
+            <intent-filter android:label="@string/send_to_rime">
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
 
         <!-- The connection keeper. `specialUse`, because no named type fits:

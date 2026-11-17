@@ -245,6 +245,19 @@ class ManifestTest {
     }
 
     @Test
+    fun `send to rime takes shares on the one activity, with no permission added for them`() {
+        // The read grant arrives with the share (FLAG_GRANT_READ_URI_PERMISSION),
+        // which is the whole reason "Send to Rime" needs no storage permission;
+        // the permission tests above keep that true.
+        val filter = manifest.substringAfter("@string/send_to_rime").substringBefore("</intent-filter>")
+        assertTrue(filter.contains("android.intent.action.SEND\""), "no SEND action in the share filter")
+        assertTrue(filter.contains("android.intent.action.SEND_MULTIPLE"), "no SEND_MULTIPLE in the share filter")
+        assertTrue(filter.contains("android.intent.category.DEFAULT"), "a share filter without DEFAULT is never offered")
+        assertTrue(filter.contains("android:mimeType=\"*/*\""), "the share filter takes only some types")
+        assertFalse(manifest.contains("<provider"), "a provider would be an authority Shared.acceptable must refuse")
+    }
+
+    @Test
     fun `backup stays off, so the sealed device key is never copied anywhere`() {
         assertTrue(manifest.contains("""android:allowBackup="false""""))
         assertTrue(manifest.contains("""android:fullBackupContent="false""""))

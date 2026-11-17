@@ -247,4 +247,97 @@ class UploadTest {
         assertEquals(bytes.size.toLong(), seen.last())
         assertEquals(seen.sorted(), seen, "progress went backwards: $seen")
     }
+
+    // --- save_file: "Send to Rime" (contract §1.8) ---
+
+    private val savedReply: (ByteArray) -> String = {
+        """{"reply":"saved","name":"IMG_2041 (2).jpg","path":"/home/u/Downloads/IMG_2041 (2).jpg"}"""
+    }
+
+    @Test
+    fun `a shared file crosses on its own channel and comes back with the name the computer chose`() {
+        val bytes = body(200_000)
+        val machine = FakeMachine(
+            receiveReply = { """{"reply":"saving","len":200000}""" },
+            injectedReply = savedReply,
+            replyChunkBytes = 7,
+        )
+        val saved = Upload.save(
+            connect = { machine.open() },
+            name = "IMG_2041.jpg",
+            len = bytes.size.toLong(),
+            source = { ByteArrayInputStream(bytes) },
+        )
+        assertEquals("IMG_2041 (2).jpg", saved.name, "the numbered name is the daemon's, and the screen shows it")
+        assertEquals("/home/u/Downloads/IMG_2041 (2).jpg", saved.path)
+        assertArrayEquals(bytes, machine.uploadedBytes())
+        val sent = machine.requests.single { it.contains(""""cmd":"save_file"""") }
+        assertTrue(sent.contains(""""name":"IMG_2041.jpg"""") && sent.contains(""""len":200000"""), sent)
+        assertTrue(machine.requests.none { it.contains(""""cmd":"receive"""") }, "a save went out as a receive")
+    }
+
+    @Test
+    fun `a save answered with receiving is not taken for a save`() {
+        // Each verb accepts only its own reply: a machine that answered
+        // `receiving` to a `save_file` is not one this phone understands.
+        val machine = FakeMachine(receiveReply = { """{"reply":"receiving","id":7,"len":5}""" })
+        assertThrows(Upload.Refused::class.java) {
+            Upload.save(connect = { machine.open() }, name = "a.txt", len = 5, source = { ByteArrayInputStream(body(5)) })
+        }
+    }
+
+    @Test
+    fun `a refused save carries the machine's words and sends no bytes`() {
+        val machine = FakeMachine(
+            receiveReply = { """{"reply":"error","kind":"bad_request","message":"not enough free space for 2.0 MB"}""" },
+        )
+        val e = assertThrows(Upload.Refused::class.java) {
+            Upload.save(connect = { machine.open() }, name = "a.bin", len = 4096, source = { ByteArrayInputStream(body(4096)) })
+        }
+        assertTrue(e.message!!.contains("not enough free space"), "${e.message}")
+        assertEquals(0, machine.uploadedBytes().size)
+    }
+
+    @Test
+    fun `an error after the bytes is a refusal, never a saved file`() {
+        val machine = FakeMachine(
+            receiveReply = { """{"reply":"saving","len":64}""" },
+            injectedReply = { """{"reply":"error","kind":"internal","message":"could not write the file"}""" },
+        )
+        val e = assertThrows(Upload.Refused::class.java) {
+            Upload.save(connect = { machine.open() }, name = "a.bin", len = 64, source = { ByteArrayInputStream(body(64)) })
+        }
+        assertTrue(e.message!!.contains("could not write"), "${e.message}")
+    }
+
+    @Test
+    fun `the save cap is the daemon's and is applied before a connection opens`() {
+        val machine = FakeMachine()
+        assertThrows(IllegalArgumentException::class.java) {
+            Upload.save(
+                connect = { machine.open() },
+                name = "big.bin",
+                len = Upload.SAVE_MAX_BYTES + 1,
+                source = { ByteArrayInputStream(ByteArray(0)) },
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            Upload.save(connect = { machine.open() }, name = "e", len = 0, source = { ByteArrayInputStream(ByteArray(0)) })
+        }
+        assertEquals(0, machine.connections.get())
+        // Larger than a session hand-off may be: a video is the point of this verb.
+        assertTrue(Upload.SAVE_MAX_BYTES > Handoff.Files.MAX_BYTES)
+    }
+
+    @Test
+    fun `a source longer than it declared is refused, and its last chunk is never sent`() {
+        // A stale SIZE column. Sending `len` bytes and stopping would leave a
+        // cut file on the computer that the phone called saved.
+        val machine = FakeMachine(receiveReply = { """{"reply":"saving","len":4096}""" }, injectedReply = savedReply)
+        val e = assertThrows(Upload.Refused::class.java) {
+            Upload.save(connect = { machine.open() }, name = "a.bin", len = 4096, source = { ByteArrayInputStream(body(5000)) })
+        }
+        assertTrue(e.message!!.contains("longer than the 4096 bytes"), "${e.message}")
+        assertTrue(machine.uploaded.isEmpty(), "the machine got every declared byte, so it would have saved a cut file")
+    }
 }

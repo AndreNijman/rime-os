@@ -338,6 +338,14 @@ class MachineLink(
      */
     fun clipboard(): String = Agentd.readClipboard(request(Agentd.clipboard()))
 
+    /**
+     * Put [text] on the computer's clipboard ("Send to Rime", contract §1.8).
+     * Retried after a drop like a read: writing the same text twice leaves the
+     * same clipboard. Returns the bytes the daemon says it wrote.
+     */
+    fun clipboardWrite(text: String): Int =
+        Agentd.readClipboardWritten(request(Agentd.clipboardWrite(text)))
+
     // ---- push (P1-058) ---------------------------------------------------
     //
     // The only two verbs here that `rime-agentd` never sees: `rime-remoted`

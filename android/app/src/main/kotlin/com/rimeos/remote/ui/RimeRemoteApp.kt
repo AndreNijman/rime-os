@@ -28,6 +28,9 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.rimeos.remote.core.agent.AlertTap
+import com.rimeos.remote.share.Shared
+import com.rimeos.remote.ui.send.SendScreen
+import com.rimeos.remote.ui.send.SendViewModel
 import com.rimeos.remote.update.AppUpdater
 import com.rimeos.remote.update.UpdateBanner
 import com.rimeos.remote.update.UpdateUi
@@ -99,6 +102,9 @@ object Destinations {
 
     /** The computer itself: status, lock, media and volume. */
     const val MACHINE = "machine"
+
+    /** "Send to Rime": what another app shared, before it is sent. */
+    const val SEND = "send"
 }
 
 @Composable
@@ -113,6 +119,10 @@ fun RimeRemoteApp(
     alertTarget: AlertTap? = null,
     /** Called once the tap has been acted on, so it fires once. */
     onAlertConsumed: () -> Unit = {},
+    /** What another app shared, if this launch is a share. */
+    share: Shared? = null,
+    /** Called once the Send screen has the share, so it is offered once. */
+    onShareConsumed: () -> Unit = {},
     /** Ask Android for `POST_NOTIFICATIONS`. Owned by the activity. */
     onAskNotifications: () -> Unit = {},
     /** Bumped each time the permission dialog is answered, whichever way. */
@@ -120,10 +130,12 @@ fun RimeRemoteApp(
     viewModel: RemoteViewModel = viewModel(),
     nexModel: NexViewModel = viewModel(),
     machineModel: MachineViewModel = viewModel(),
+    sendModel: SendViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val nex by nexModel.state.collectAsStateWithLifecycle()
     val computer by machineModel.state.collectAsStateWithLifecycle()
+    val sending by sendModel.state.collectAsStateWithLifecycle()
     val appContext = LocalContext.current.applicationContext
     // The APPLICATION context, not the activity's. This object outlives a
     // rotation and an install prompt, and holding an activity across either is
@@ -466,6 +478,26 @@ fun RimeRemoteApp(
                     onRefresh = { machineModel.refresh() },
                     onDismiss = { machineModel.dismiss() },
                     onBack = { navigation.popBackStack() },
+                    onSendClipboard = { machineModel.sendClipboard(it) },
+                )
+            }
+
+            composable(Destinations.SEND) {
+                val leave = {
+                    sendModel.clear()
+                    if (!navigation.popBackStack()) navigation.navigate(Destinations.MACHINES)
+                }
+                SendScreen(
+                    state = sending,
+                    onChoose = { sendModel.choose(it) },
+                    onSend = {
+                        state.machines.firstOrNull { it.deviceId == sending.chosen }?.let { m ->
+                            viewModel.withKey(activity, m, onFailure = { sendModel.failed(it) }) { sendModel.send(m) }
+                        }
+                    },
+                    onStop = { sendModel.stop() },
+                    onDismiss = { sendModel.dismiss() },
+                    onDone = { leave() },
                 )
             }
 
@@ -542,6 +574,15 @@ fun RimeRemoteApp(
                 navigation.popBackStack()
                 navigation.navigate(Destinations.SESSION)
             }
+        }
+
+        // A share opens the Send screen and sends nothing: only a tap there
+        // does. Inside the graph for the same reason as the effects below.
+        LaunchedEffect(share) {
+            val shared = share ?: return@LaunchedEffect
+            onShareConsumed()
+            sendModel.offer(shared, state.machines)
+            navigation.navigate(Destinations.SEND) { launchSingleTop = true }
         }
 
         // A tapped notification opens the exact session it named, when this

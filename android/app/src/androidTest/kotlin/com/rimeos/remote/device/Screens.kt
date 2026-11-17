@@ -31,6 +31,10 @@ import com.rimeos.remote.core.machine.MediaState
 import com.rimeos.remote.core.machine.Player
 import com.rimeos.remote.core.machine.Volume
 import com.rimeos.remote.ui.machine.MachineScreen
+import com.rimeos.remote.ui.send.SendChoice
+import com.rimeos.remote.ui.send.SendFile
+import com.rimeos.remote.ui.send.SendScreen
+import com.rimeos.remote.ui.send.SendUiState
 import com.rimeos.remote.ui.machine.MachineUiState
 
 /**
@@ -139,6 +143,7 @@ object Screens {
                     offersStatus = true,
                     offersLock = true,
                     offersMedia = true,
+                    offersClipboard = true,
                     loaded = true,
                     status = MachineStatus(Battery(81, "charging"), true, "balanced", false, "restart"),
                     media = MediaState(
@@ -148,6 +153,34 @@ object Screens {
                 ),
                 onLock = {}, onMedia = {}, onVolume = {}, onMute = {},
                 onRefresh = {}, onDismiss = {}, onBack = {},
+            )
+        },
+        "Send text" to {
+            SendScreen(
+                state = SendUiState(
+                    text = "A copied paragraph long enough to wrap onto a second and a third line on a phone held upright",
+                    machines = listOf(SendChoice("d1", "l16"), SendChoice("d2", "a desktop with a long name")),
+                    chosen = "d1",
+                ),
+                onChoose = {}, onSend = {}, onStop = {}, onDismiss = {}, onDone = {},
+            )
+        },
+        "Send files" to {
+            SendScreen(
+                state = SendUiState(
+                    files = listOf(
+                        SendFile("IMG_20261117_081530_holiday_photo_with_a_long_name.jpg", 3_400_000, null),
+                        SendFile("notes.pdf", 220_000, null),
+                        SendFile(null, null, "The app that shared it did not say how big it is, so it cannot be sent."),
+                    ),
+                    refused = 1,
+                    machines = listOf(SendChoice("d1", "l16")),
+                    chosen = "d1",
+                    sending = true,
+                    current = 0,
+                    sent = 1_200_000,
+                ),
+                onChoose = {}, onSend = {}, onStop = {}, onDismiss = {}, onDone = {},
             )
         },
         "Agent Center" to {
