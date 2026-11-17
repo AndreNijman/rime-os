@@ -162,6 +162,52 @@ features". `lan` is the current list of addresses this machine listens on
   re-dial); re-dial backoff capped at **10 s** (was 60); a `409` meaning "a host
   is already waiting" is not counted as a failure.
 
+### 2.3 `nex`: the agent harness, through the same pairing
+
+nex's daemon (`nexd`) listens on a local socket only
+(`$XDG_RUNTIME_DIR/nex/nexd.sock`, or `rime-remoted --nexd <path>`). A paired
+phone reaches it through rime-remoted, so there is no second pairing, listener
+or revocation. `remote_hello.features` gains `"nex"` while nexd answers (asked
+on every hello).
+
+Every connection rime-remoted opens to nexd first sends
+`system.declare_origin {"kind":"device","id":<the authenticated device id>}`
+and reads its reply. If the declaration is refused, times out or is malformed,
+the phone's request is never sent. A declared device only loses authority in
+nexd. It cannot call local-only methods (-32002), it can work only in a
+workspace that already has a session, and it can approve only the scopes
+listed in `remote_approve`. Every write is recorded with actor
+`device:<id>`. The phone cannot declare an origin itself (`bad_request`).
+
+```json
+{"cmd":"nex","request":{"method":"sessions.list","params":{}}}
+→ {"reply":"nex","response":{"jsonrpc":"2.0","id":1,"result":[...]}}
+```
+
+- nexd's own errors stay inside `response.error`. `{"reply":"error","kind":"unavailable"}`
+  means nexd could not be reached; `forbidden` means the declaration was refused.
+- `params.request_id` is nexd's idempotency key. rime-remoted passes it through
+  and never adds one, so a phone that re-sends a write after a lost reply gets
+  nexd's recorded answer and the write is not done twice.
+- An answer bigger than one control frame comes back as `kind: "too_large"`.
+  To get it, send the same line as a channel `Open`: the reply is
+  `{"reply":"streaming"}`, the response line follows as `Data`, and then the
+  channel closes.
+- `Open` with `{"cmd":"nex_events","after_gseq":N}` (or `"tail":true`) is nex's
+  global event feed. It carries one response line (the backlog after `N`, at
+  most 10,000 events, and `last_gseq`), then one `event` notification per line,
+  each with `params.gseq`, for as long as the channel is open. The response
+  always arrives before the notifications. A backlog over the cap continues in
+  notifications without waiting for a new event. The channel is read-only:
+  `Data` from the phone is dropped.
+- Each request has one 30 s deadline, from connecting through the declaration
+  to the reply, because the control worker handles requests in order. Running
+  out of time is `kind: "unavailable"` with "nex did not answer within 30 s".
+- `after_gseq` that is not a whole number is refused (`bad_request`), not read
+  as 0.
+- A one-shot `nex` channel ends by itself after its answer. The phone does not
+  need to close it.
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in
