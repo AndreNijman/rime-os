@@ -584,7 +584,9 @@ pub fn not_sent(why: NotSent, text: &str) -> Shown {
     Shown {
         app_name: "Rime Remote".into(),
         summary: "Reply not sent".into(),
-        body: format!("{reason} What you typed:\n{text}"),
+        // The words go back as a body, so they are made safe like one: a
+        // reply of "a < b & c" must not become markup or vanish in it.
+        body: format!("{reason} What you typed:\n{}", clean(text, REPLY_TEXT_CAP, usize::MAX, true)),
         reply: None,
     }
 }
@@ -1184,10 +1186,14 @@ mod tests {
         m.handle(post("k2")); // id 3
         m.handle(Job::Heard(Heard::Replied { id: 3, text: "x".into() }));
         assert!(lines(&s.0)[3]["body"].as_str().unwrap().contains("is off on your phone"));
+        m.handle(post("k4")); // id 5
+        m.handle(Job::Heard(Heard::Replied { id: 5, text: "a < b & <b>c</b>".into() }));
+        let markup = lines(&s.0)[5]["body"].as_str().unwrap().to_string();
+        assert!(markup.ends_with("What you typed:\na ‹ b &amp; ‹b›c‹/b›"), "{markup}");
         *outcome.lock().unwrap() = Ok(());
-        m.handle(post("k3")); // id 5
-        m.handle(Job::Heard(Heard::Replied { id: 5, text: "y".into() }));
-        assert_eq!(lines(&s.0).len(), 5, "a reply that went was also said not to have");
+        m.handle(post("k3")); // id 7
+        m.handle(Job::Heard(Heard::Replied { id: 7, text: "y".into() }));
+        assert_eq!(lines(&s.0).len(), 7, "a reply that went was also said not to have");
     }
 
     #[test]
