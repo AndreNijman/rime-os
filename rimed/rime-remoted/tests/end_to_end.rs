@@ -160,6 +160,11 @@ impl Drop for Harness {
 
 impl Harness {
     fn start(tag: &str) -> Option<Harness> {
+        Harness::start_with(tag, &[])
+    }
+
+    /// The same, with extra arguments for `rime-remoted`.
+    fn start_with(tag: &str, extra: &[&std::ffi::OsStr]) -> Option<Harness> {
         let root = std::env::temp_dir().join(format!(
             "rime-remote-e2e-{}-{tag}-{}",
             std::process::id(),
@@ -203,6 +208,7 @@ impl Harness {
                 "--handshake-timeout-ms",
                 "1000",
             ])
+            .args(extra)
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .stdout(Stdio::null())
@@ -1323,4 +1329,233 @@ fn read_when_it_appears(path: &std::path::Path) -> Option<String> {
         std::thread::sleep(Duration::from_millis(20));
     }
     None
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  nex, through the same pairing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A stand-in for nexd: records every line, answers the declaration (or
+/// refuses it while `refuse` is set), echoes requests, and answers
+/// `sessions.stream` with a backlog and then one live event.
+struct FakeNexd {
+    dir: PathBuf,
+    socket: PathBuf,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    refuse: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drop for FakeNexd {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+impl FakeNexd {
+    fn start() -> FakeNexd {
+        use serde_json::json;
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+        let dir = std::env::temp_dir().join(format!(
+            "rime-fake-nexd-{}-{}",
+            std::process::id(),
+            rime_remote_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let socket = dir.join("nexd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let refuse = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s2, r2) = (Arc::clone(&seen), Arc::clone(&refuse));
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(conn) = conn else { return };
+                let (seen, refuse) = (Arc::clone(&s2), Arc::clone(&r2));
+                std::thread::spawn(move || {
+                    let mut w = conn.try_clone().expect("clone");
+                    for l in BufReader::new(conn).lines() {
+                        let Ok(l) = l else { return };
+                        let v: serde_json::Value =
+                            serde_json::from_str(&l).unwrap_or(json!({"raw": l}));
+                        seen.lock().unwrap().push(v.clone());
+                        let id = v["id"].clone();
+                        let out = match v["method"].as_str() {
+                            Some("system.declare_origin") if refuse.load(Ordering::SeqCst) => {
+                                vec![json!({"jsonrpc": "2.0", "id": id,
+                                            "error": {"code": -32002, "message": "refused"}})]
+                            }
+                            Some("system.declare_origin") => {
+                                vec![json!({"jsonrpc": "2.0", "id": id, "result": {"origin": v["params"]}})]
+                            }
+                            Some("sessions.stream") => vec![
+                                json!({"jsonrpc": "2.0", "id": id,
+                                       "result": {"events": [], "last_gseq": 3}}),
+                                json!({"jsonrpc": "2.0", "method": "event",
+                                       "params": {"gseq": 4, "kind": "turn.started"}}),
+                            ],
+                            Some(m) => vec![json!({"jsonrpc": "2.0", "id": id,
+                                                   "result": {"method": m}})],
+                            None => vec![],
+                        };
+                        for o in out {
+                            if writeln!(w, "{o}").is_err() {
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        FakeNexd {
+            dir,
+            socket,
+            seen,
+            refuse,
+        }
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|v| v["method"].as_str().unwrap_or("?").to_string())
+            .collect()
+    }
+}
+
+impl Session {
+    /// The next frame that is not `Data` on `skip`.
+    fn recv_skipping(&mut self, skip: u32) -> Frame {
+        loop {
+            match self.recv() {
+                Frame::Data { channel, .. } if channel == skip => {}
+                f => return f,
+            }
+        }
+    }
+
+    /// `Data` on `channel` until `lines` complete lines have arrived.
+    fn lines_on(&mut self, channel: u32, lines: usize) -> Vec<serde_json::Value> {
+        let mut text = Vec::new();
+        while text.iter().filter(|b| **b == b'\n').count() < lines {
+            match self.recv() {
+                Frame::Data { channel: c, bytes } if c == channel => text.extend(bytes),
+                other => self.pending.push(other),
+            }
+        }
+        String::from_utf8(text)
+            .expect("utf-8")
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("a JSON line"))
+            .collect()
+    }
+}
+
+#[test]
+fn a_paired_phone_reaches_nex_through_the_running_service() {
+    let nexd = FakeNexd::start();
+    let h = match Harness::start_with(
+        "nex",
+        &[std::ffi::OsStr::new("--nexd"), nexd.socket.as_os_str()],
+    ) {
+        Some(h) => h,
+        None => {
+            eprintln!("SKIP: the daemons did not come up in this environment");
+            return;
+        }
+    };
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let id = rime_remote_core::device::Device::id_for(&device.key());
+    let mut session = device.connect(&h).expect("a session");
+
+    // `--nexd` reached the service, so the feature is advertised.
+    let hello = session.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(
+        hello["features"].as_array().unwrap().iter().any(|f| f == "nex"),
+        "{hello}"
+    );
+
+    // A control request: declared as this device first, then forwarded.
+    let r = session.call(r#"{"cmd":"nex","request":{"method":"sessions.list","params":{}}}"#);
+    assert_eq!(r["reply"], "nex", "{r}");
+    assert_eq!(r["response"]["result"]["method"], "sessions.list", "{r}");
+    {
+        let seen = nexd.seen.lock().unwrap();
+        assert_eq!(seen[0]["method"], "system.declare_origin", "{seen:?}");
+        assert_eq!(seen[0]["params"]["id"], id.as_str(), "{seen:?}");
+        assert_eq!(seen[1]["method"], "sessions.list", "{seen:?}");
+    }
+
+    // The feed: `streaming`, then the backlog and a live event as Data.
+    session.send(Frame::Open {
+        channel: 5,
+        request: br#"{"cmd":"nex_events","after_gseq":0}"#.to_vec(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "streaming", "{v}");
+        }
+        other => panic!("expected streaming, got {other:?}"),
+    }
+    let lines = session.lines_on(5, 2);
+    assert_eq!(lines[0]["result"]["last_gseq"], 3, "{lines:?}");
+    assert_eq!(lines[1]["params"]["gseq"], 4, "{lines:?}");
+
+    // What the phone writes on the feed never reaches nexd. The control call
+    // after it is handled by the same in-order worker, so once it is answered
+    // the Data has been dealt with.
+    session.send(Frame::Data {
+        channel: 5,
+        bytes: b"{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"system.shutdown\"}\n".to_vec(),
+    });
+    let _ = session.call(r#"{"cmd":"nex","request":{"method":"sessions.list"}}"#);
+    assert!(!nexd.methods().contains(&"system.shutdown".to_string()), "{:?}", nexd.methods());
+
+    // A one-shot request as a channel: streaming, the response, then Close.
+    session.send(Frame::Open {
+        channel: 7,
+        request: br#"{"cmd":"nex","request":{"method":"missions.list"}}"#.to_vec(),
+    });
+    match session.recv_skipping(5) {
+        Frame::Control(line) => assert!(String::from_utf8_lossy(&line).contains("streaming")),
+        other => panic!("expected streaming, got {other:?}"),
+    }
+    let lines = session.lines_on(7, 1);
+    assert_eq!(lines[0]["result"]["method"], "missions.list", "{lines:?}");
+    let closed = loop {
+        match session.recv_skipping(5) {
+            Frame::Close { channel: 7, .. } => break true,
+            Frame::Data { channel: 7, .. } => panic!("more than one answer on a one-shot channel"),
+            _ => {}
+        }
+    };
+    assert!(closed);
+
+    // A refused declaration: the refusal as a reply, then Close, and the
+    // request never reaches nexd.
+    nexd.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = nexd.methods().len();
+    session.send(Frame::Open {
+        channel: 6,
+        request: br#"{"cmd":"nex_events","after_gseq":0}"#.to_vec(),
+    });
+    match session.recv_skipping(5) {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["kind"], "forbidden", "{v}");
+        }
+        other => panic!("expected the refusal, got {other:?}"),
+    }
+    assert_eq!(
+        session.recv_skipping(5),
+        Frame::Close {
+            channel: 6,
+            reason: String::new()
+        }
+    );
+    assert_eq!(nexd.methods()[before..], ["system.declare_origin".to_string()]);
 }

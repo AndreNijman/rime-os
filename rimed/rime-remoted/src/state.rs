@@ -89,6 +89,8 @@ pub struct State {
     pub offer: Mutex<Option<Offer>>,
     live: Mutex<Vec<Live>>,
     push: Mutex<PushStore>,
+    /// nexd's socket, when `--nexd` moved it; see [`State::nexd`].
+    nexd: Mutex<Option<PathBuf>>,
 }
 
 impl State {
@@ -138,7 +140,22 @@ impl State {
             offer: Mutex::new(None),
             live: Mutex::new(Vec::new()),
             push: Mutex::new(push),
+            nexd: Mutex::new(None),
         }))
+    }
+
+    /// Where nexd listens: `--nexd`, else the path nexd itself uses.
+    pub fn nexd(&self) -> PathBuf {
+        self.nexd
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .unwrap_or_else(crate::nex::default_socket)
+    }
+
+    /// Point the bridge at another nexd: `--nexd` at start, or a test.
+    pub fn set_nexd(&self, path: PathBuf) {
+        *self.nexd.lock().unwrap_or_else(|p| p.into_inner()) = Some(path);
     }
 
     /// The device store, locked.

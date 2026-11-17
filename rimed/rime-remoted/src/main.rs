@@ -29,6 +29,7 @@
 mod control;
 mod discovery;
 mod net;
+mod nex;
 mod peer;
 mod proxy;
 mod push;
@@ -84,6 +85,8 @@ rime-remoted — the desktop service for Rime Remote
   --relay <url>       the rendezvous to fall back to when no LAN path works
   --ping-interval-ms  how often an open connection is measured (default 15000);
                       three unanswered in a row close it
+  --nexd <path>       nex's socket (default $XDG_RUNTIME_DIR/nex/nexd.sock);
+                      paired devices reach nex through this service only
   --no-announce       do not advertise this machine over mDNS on this network
   --allow-foreground  run outside a systemd user unit (see below)
   --help
@@ -218,6 +221,9 @@ fn run(args: &[String]) -> Result<(), String> {
     let port = local.port();
     let state = State::new(identity, machine, port, bound, relay, store_path, ping_interval)
         .map_err(|e| format!("the paired-device store is unusable: {e}"))?;
+    if let Some(p) = flag(args, "--nexd") {
+        state.set_nexd(PathBuf::from(p));
+    }
 
     let control_path = crate::state::control_socket();
     let control = bind_control(&control_path)?;

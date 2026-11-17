@@ -2,8 +2,8 @@
 #
 # rime-agentd decides who a client is from /proc/<pid>/cgroup and refuses one in neither a login session nor a user
 # service. Every process in the Nix build sandbox is in "/", so rimed.nix skips 26 tests by name
-# (skips.needsLoginSessionCgroup) and accepts 50 that print SKIP and return (selfSkipOk.noLoginSessionCgroup). This
-# check runs exactly those 76, from the same release test binaries, as a user logged in on tty1 (getty autologin:
+# (skips.needsLoginSessionCgroup) and accepts 51 that print SKIP and return (selfSkipOk.noLoginSessionCgroup). This
+# check runs exactly those 77, from the same release test binaries, as a user logged in on tty1 (getty autologin:
 # session-N.scope under user-1000.slice), and requires every one to have run, passed and printed no SKIP line.
 #
 # The negative control: the same runner as the same user from the driver's root shell (runuser, so the process is
@@ -70,7 +70,7 @@ let
   # sleep as its own program, not a link to the multi-call coreutils (see the node's /bin below).
   sleepProgram = (pkgs.coreutils.override { singleBinary = false; }).overrideAttrs { doCheck = false; };
 
-  # Runs every test binary with the 76 names as filters (libtest runs a test matching any of them), each in its
+  # Runs every test binary with the 77 names as filters (libtest runs a test matching any of them), each in its
   # package directory as cargo would, with the environment rimed's preCheck gives (a fresh HOME, git identity, CA
   # file). $1 = the output file.
   runner = pkgs.writeShellScript "rimed-session-run" ''
