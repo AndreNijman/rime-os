@@ -1093,7 +1093,7 @@ mod tests {
         };
         let r = owner(1, "sessions.create",
             json!({"root": ws, "mode": "build", "title": "owner", "request_id": "own-1"}));
-        let sid = r["result"]["session_id"].as_str().expect(&r.to_string()).to_string();
+        let sid = r["result"]["session_id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
 
         let mut w = crate::push::Watcher::new();
         let observe = |w: &mut crate::push::Watcher| {
