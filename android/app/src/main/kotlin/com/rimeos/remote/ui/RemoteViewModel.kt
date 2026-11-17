@@ -486,7 +486,7 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      * curtain and a key is a lock, and Rime Remote has both — in that order of
      * importance.
      */
-    fun unlockApp(activity: FragmentActivity) = viewModelScope.launch {
+    fun unlockApp(activity: FragmentActivity, prefer: String? = null) = viewModelScope.launch {
         // Not before [refresh] has answered. A phone that cannot authenticate
         // at all sets `unlocked` there; prompting first would error instantly,
         // leave a failure notice on screen, and then be overruled a moment
@@ -495,7 +495,10 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         // ONE prompt, where there used to be two: the front door and the key
         // of the machine used last, together. See `AppLock.unlockApp` for why
         // that is no weaker, and why it is one machine and not all of them.
-        val target = repository.load().lastUsed()
+        // The machine a tapped notification names, when there is one: that
+        // is the machine the person is about to open.
+        val store = repository.load()
+        val target = prefer?.let { id -> store.machines.firstOrNull { it.deviceId == id } } ?: store.lastUsed()
         val box = target?.let { runCatching { KeystoreSecretBox.forDevice(it.deviceId) }.getOrNull() }
         val sealed = target?.let { com.rimeos.remote.core.Base64Url.decode(it.sealed) }
         try {

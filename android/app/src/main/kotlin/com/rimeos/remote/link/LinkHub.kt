@@ -106,6 +106,13 @@ class LinkHub private constructor(private val app: Context) {
         val hello: Hello? = null,
         /** What `rime-remoted` can do, from `remote_hello` on this connection. */
         val remote: RemoteHello = RemoteHello.NONE,
+        /**
+         * How many times [remote] and [hello] have been asked on a new
+         * connection in this process. [remote] keeps the last connection's
+         * answer through a drop and until the next answer lands, so a screen
+         * waiting for THIS connection's hello waits for this to move.
+         */
+        val hellos: Int = 0,
         /** Why the last attempt failed, while reconnecting. */
         val failure: String? = null,
     )
@@ -327,7 +334,7 @@ class LinkHub private constructor(private val app: Context) {
         val r = remote.await()
         val h = hello.await()
         setState(machine.deviceId, machine.machine) {
-            it.copy(hello = h ?: it.hello, remote = r ?: it.remote)
+            it.copy(hello = h ?: it.hello, remote = r ?: it.remote, hellos = it.hellos + 1)
         }
         runCatching {
             repository.updateBlocking { store ->

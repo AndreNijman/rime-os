@@ -176,6 +176,21 @@ data class AlertTap(val machine: String, val session: Int, val nex: Boolean = fa
     /** What a nex tap that had to connect first does next. */
     enum class Then { WAIT, OPEN_NEX, STAY, GIVE_UP }
 
+    /**
+     * A nex tap waiting for its connection: the machine, how many hellos that
+     * machine's link had answered when the tap arrived, and whether the link
+     * was already up with a real hello then.
+     *
+     * A link keeps its last hello through a drop and until the new connection
+     * answers, so features read before then may be an earlier connection's:
+     * one made before nexd started would send the tap to the Agent Center for
+     * good. Only a hello answered after the tap, or one already standing on a
+     * live link, is believed.
+     */
+    data class Pending(val machine: String, val hellosAtTap: Int, val upAtTap: Boolean) {
+        fun fresh(hellosNow: Int): Boolean = upAtTap || hellosNow > hellosAtTap
+    }
+
     companion object {
         /** How long a nex tap waits for its connection before it is forgotten. */
         const val CONNECT_WAIT_MS = 60_000L

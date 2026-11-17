@@ -43,6 +43,7 @@ import com.rimeos.remote.ui.nex.NexScreen
 import com.rimeos.remote.ui.nex.NexSessionScreen
 import com.rimeos.remote.ui.nex.NexViewModel
 import com.rimeos.remote.core.nex.Nex
+import com.rimeos.remote.link.LinkHub
 import com.rimeos.remote.ui.term.TerminalScreen
 import com.rimeos.remote.ui.theme.RimeRemoteTheme
 import android.content.Intent
@@ -128,13 +129,14 @@ fun RimeRemoteApp(
         if (!state.unlocked) {
             LockScreen(
                 failure = state.failure,
-                onUnlock = { viewModel.unlockApp(activity) },
+                onUnlock = { viewModel.unlockApp(activity, prefer = alertTarget?.machine) },
             )
             // Asked once the state is known, rather than behind a button nobody
             // would choose to press. Keyed on `loading` because the view model
             // refuses to prompt before it has decided whether this phone can
             // authenticate at all — so the effect has to run again once it has.
-            LaunchedEffect(state.loading) { viewModel.unlockApp(activity) }
+            // A notification's machine first, so its tap needs no second prompt.
+            LaunchedEffect(state.loading) { viewModel.unlockApp(activity, prefer = alertTarget?.machine) }
             // And nothing below this line runs while locked, which is why the
             // deep-link effect is inside the graph rather than out here:
             // `NavController.navigate` before a `NavHost` has composed throws
@@ -508,7 +510,7 @@ fun RimeRemoteApp(
         // throws, and a cold launch from a notification is exactly that
         // moment.
         // A nex tap that had to connect first: the machine it is waiting for.
-        var pendingNex by remember { mutableStateOf<String?>(null) }
+        var pendingNex by remember { mutableStateOf<AlertTap.Pending?>(null) }
         LaunchedEffect(alertTarget) {
             val target = alertTarget ?: return@LaunchedEffect
             // Consumed whatever happens. A tap that could not be honoured must
@@ -523,7 +525,12 @@ fun RimeRemoteApp(
             )
             val tapped = state.machines.firstOrNull { it.deviceId == target.machine }
             if (goes == AlertTap.GoesTo.CONNECT_FOR_NEX && tapped != null) {
-                pendingNex = tapped.deviceId
+                val link = state.links[tapped.deviceId]
+                pendingNex = AlertTap.Pending(
+                    machine = tapped.deviceId,
+                    hellosAtTap = link?.hellos ?: 0,
+                    upAtTap = link?.status == LinkHub.Status.CONNECTED && link.remote.features.isNotEmpty(),
+                )
                 viewModel.connect(activity, tapped)
                 navigation.navigate(Destinations.AGENTS) { launchSingleTop = true }
             } else if (goes == AlertTap.GoesTo.NEX && connected != null) {
@@ -546,11 +553,12 @@ fun RimeRemoteApp(
 
         // The connection a nex tap asked for (AlertTap.afterConnect says what
         // happens once it lands), forgotten after AlertTap.CONNECT_WAIT_MS.
-        val pendingFeatures = pendingNex?.let { state.links[it]?.remote?.features }
+        val pendingLink = pendingNex?.let { state.links[it.machine] }
+        val pendingFeatures = pendingLink?.remote?.features?.takeIf { pendingNex?.fresh(pendingLink.hellos) == true }
         LaunchedEffect(pendingNex, state.agents.machine?.deviceId, pendingFeatures) {
             val want = pendingNex ?: return@LaunchedEffect
             val connected = state.agents.machine
-            when (AlertTap.afterConnect(want, connected?.deviceId, pendingFeatures)) {
+            when (AlertTap.afterConnect(want.machine, connected?.deviceId, pendingFeatures)) {
                 AlertTap.Then.WAIT -> Unit
                 AlertTap.Then.GIVE_UP, AlertTap.Then.STAY -> pendingNex = null
                 AlertTap.Then.OPEN_NEX -> {

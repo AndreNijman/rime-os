@@ -477,7 +477,7 @@ args=(-e lan "$lan" -e broker "$brokeraddr" -e machine "$(cat /proc/sys/kernel/h
 if [ -n "$nexroot" ]; then
   args+=(-e nexroot "$nexroot")
 else
-  args+=(-e notClass com.rimeos.remote.device.NexOnDeviceTest)
+  args+=(-e notClass com.rimeos.remote.device.NexOnDeviceTest,com.rimeos.remote.device.NexColdTapOnDeviceTest)
 fi
 
 # ── TalkBack ────────────────────────────────────────────────────────────────
