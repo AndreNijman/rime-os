@@ -12,9 +12,11 @@ import org.junit.jupiter.api.Test
 class NexModelsTest {
     @Test
     fun `sessions list with their state and the folder they work in`() {
-        // The first made on the computer, the second by the phone in the same folder.
+        // The first made on the computer; the others by the phone in the same
+        // folder, one with no name, which nexd calls "untitled" and the list
+        // calls by its folder.
         val list = NexSession.list(Fixtures.result("sessions.list.waiting.json"))
-        assertEquals(setOf("Fix add()", "Second look"), list.map { it.label }.toSet())
+        assertEquals(setOf("Fix add()", "Second look", "ws"), list.map { it.label }.toSet())
         val s = list.single { it.label == "Fix add()" }
         assertTrue(s.id.startsWith("session_"))
         assertTrue(s.running)
@@ -28,6 +30,7 @@ class NexModelsTest {
         val s = NexSession("session_x", null, "idle", null, null, "/home/u/src/rime-os/", null)
         assertEquals("rime-os", s.label)
         assertEquals("session_x", s.copy(root = null).label)
+        assertEquals("rime-os", s.copy(title = NexSession.UNTITLED).label)
     }
 
     @Test

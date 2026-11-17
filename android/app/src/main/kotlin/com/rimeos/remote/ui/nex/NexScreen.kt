@@ -1,5 +1,6 @@
 package com.rimeos.remote.ui.nex
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -64,6 +65,9 @@ fun NexScreen(
     onDismiss: () -> Unit,
     onBack: () -> Unit,
 ) {
+    // The system back gesture does what Back does, so leaving this way also
+    // closes the feed and the open transcript rather than leaving them held.
+    BackHandler(onBack = onBack)
     // Cancelling a mission ends its work and cannot be undone, so it is asked.
     var cancelling by remember { mutableStateOf<NexMission?>(null) }
     val labels = state.sessions.associate { it.id to it.label }

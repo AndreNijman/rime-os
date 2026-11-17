@@ -3,6 +3,7 @@ package com.rimeos.remote.ui.nex
 import com.rimeos.remote.core.agent.AgentError
 import com.rimeos.remote.core.link.Disconnected
 import com.rimeos.remote.core.nex.NexApproval
+import com.rimeos.remote.core.nex.NexCalls
 import com.rimeos.remote.core.nex.NexEvent
 import com.rimeos.remote.core.nex.NexMission
 import com.rimeos.remote.core.nex.NexRefused
@@ -97,6 +98,20 @@ class NexUiStateTest {
         assertEquals(NexTrouble.Refused("not from a phone"), NexTrouble.of(NexRefused(-32002, "not from a phone")))
         assertEquals(NexTrouble.Refused("too big"), NexTrouble.of(AgentError("too_large", "too big")))
         assertTrue(NexTrouble.of(Disconnected("gone")) is NexTrouble.Dropped)
+    }
+
+    @Test
+    fun `after a drop the same tap sends the same request, and after an answer a new one`() {
+        val w = UnsureWrites()
+        val first = w.call("submit:s1:fix it") { NexCalls.submit("s1", "fix it") }
+        w.lost("submit:s1:fix it", first)
+        // Pressed again after the drop: the same line, so the same request_id.
+        assertEquals(first.line, w.call("submit:s1:fix it") { NexCalls.submit("s1", "fix it") }.line)
+        // A different message is a different request.
+        assertTrue(first.line != w.call("submit:s1:other") { NexCalls.submit("s1", "other") }.line)
+        w.settled("submit:s1:fix it")
+        // Answered: sending the same words again is meant as a second message.
+        assertTrue(first.line != w.call("submit:s1:fix it") { NexCalls.submit("s1", "fix it") }.line)
     }
 
     @Test

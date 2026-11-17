@@ -1,6 +1,6 @@
 {
  "jsonrpc": "2.0",
- "id": 20,
+ "id": 21,
  "result": {
   "last_sequence": 22,
   "messages": [
@@ -14,9 +14,9 @@
      ],
      "role": "user"
     },
-    "message_id": "msg_01m7kt8n1dxp30tqf52gv2ydjv",
+    "message_id": "msg_01m7kv49apfrxqhrs99dbgx5dk",
     "seq": 0,
-    "turn_id": "turn_01m7kt8n1d1knzwnnqt9yydbht"
+    "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
    },
    {
     "message": {
@@ -38,9 +38,9 @@
      ],
      "role": "assistant"
     },
-    "message_id": "msg_01m7kt8n1e7mxy5g8chsth6g5h",
+    "message_id": "msg_01m7kv49aqwqg0dt9ye5wfzp16",
     "seq": 1,
-    "turn_id": "turn_01m7kt8n1d1knzwnnqt9yydbht"
+    "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
    },
    {
     "message": {
@@ -54,9 +54,9 @@
      ],
      "role": "tool"
     },
-    "message_id": "msg_01m7kt8n1pjshj26h2kwda976y",
+    "message_id": "msg_01m7kv49ay4h0r36h6j3cgm099",
     "seq": 2,
-    "turn_id": "turn_01m7kt8n1d1knzwnnqt9yydbht"
+    "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
    },
    {
     "message": {
@@ -76,9 +76,9 @@
      ],
      "role": "assistant"
     },
-    "message_id": "msg_01m7kt8n1pnpfr2wa7jpp0p60k",
+    "message_id": "msg_01m7kv49ayf3ak012prhg88zmr",
     "seq": 3,
-    "turn_id": "turn_01m7kt8n1d1knzwnnqt9yydbht"
+    "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
    },
    {
     "message": {
@@ -92,9 +92,9 @@
      ],
      "role": "tool"
     },
-    "message_id": "msg_01m7kt8n9s1sw3szgan6qcfbvv",
+    "message_id": "msg_01m7kv49k7h8rtccy46vn10mnm",
     "seq": 4,
-    "turn_id": "turn_01m7kt8n1d1knzwnnqt9yydbht"
+    "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
    },
    {
     "message": {
@@ -106,34 +106,34 @@
      ],
      "role": "assistant"
     },
-    "message_id": "msg_01m7kt8n9semd1edefg9xce8mh",
+    "message_id": "msg_01m7kv49k8j7rkw8048pc4bcj7",
     "seq": 5,
-    "turn_id": "turn_01m7kt8n1d1knzwnnqt9yydbht"
+    "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
    }
   ],
   "pending_approvals": [],
   "session": {
-   "created_at": "2026-11-17T03:54:28.757Z",
+   "created_at": "2026-11-17T04:09:34.263Z",
    "data": {
-    "base_revision": "a560986f38ba94c26ae3cd640837698fc93f9529",
+    "base_revision": "27e42ff49162dfdef773aeddab56acd4d621e0b2",
     "mode": "build",
     "model": "scripted-1",
     "provider": "scripted",
     "repo": true,
-    "root": "/tmp/nexcap-pn8k9u0z/ws",
+    "root": "/tmp/nexcap-9jv0w967/ws",
     "runtime": "nex",
     "title": "Fix add()"
    },
-   "id": "session_01m7kt8n0nbtk28fxchrt3mn37",
+   "id": "session_01m7kv499q28bcmakbkhvw27fv",
    "kind": "session",
    "scope": "global",
    "state": "idle",
-   "updated_at": "2026-11-17T03:54:29.058Z",
+   "updated_at": "2026-11-17T04:09:34.582Z",
    "version": 3
   },
   "tool_calls": [
    {
-    "created_at": "2026-11-17T03:54:28.783Z",
+    "created_at": "2026-11-17T04:09:34.296Z",
     "data": {
      "args": {
       "new_text": "$1 + $2",
@@ -146,8 +146,8 @@
      "decision": "allow",
      "duration_ms": 0,
      "exit_code": null,
-     "fingerprint": "9e4f3a9753d3eb31df9daeeb1b7f2bed9e55b18a5c46ba75f32c2ff37d9ba796",
-     "log_artifact": "art_01m7kt8n1fmxjfzgmrb8z5ybzg",
+     "fingerprint": "6bd12a578b057806ac777670774dc9011ad5413cd57899b016076e33793d90e0",
+     "log_artifact": "art_01m7kv49art8z88bqjgr9dht3j",
      "mode": "build",
      "provider_call_id": "toolu_s0_0",
      "reasons": [
@@ -160,32 +160,32 @@
      "scopes": [
       "fs.write"
      ],
-     "started_at": "2026-11-17T03:54:28.783Z",
+     "started_at": "2026-11-17T04:09:34.296Z",
      "status": "exited",
      "tool": "edit_file",
-     "tree": "f50668f8695a8982d2fc77309e95e3d5bfda2f3227767d879ac18f7f08e9ed40",
-     "turn_id": "turn_01m7kt8n1d1knzwnnqt9yydbht"
+     "tree": "1178b0ed4c61340861720f5c939af99d2ee59c0f5c8e2b6ce6dbbd03c9136867",
+     "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
     },
-    "id": "call_ca36bdf0a3428e2e34b912eec8",
+    "id": "call_a441a7ae6d2d3cec40402206b7",
     "kind": "tool_call",
-    "scope": "session_01m7kt8n0nbtk28fxchrt3mn37",
+    "scope": "session_01m7kv499q28bcmakbkhvw27fv",
     "state": "succeeded",
-    "updated_at": "2026-11-17T03:54:28.789Z",
+    "updated_at": "2026-11-17T04:09:34.302Z",
     "version": 3
    },
    {
-    "created_at": "2026-11-17T03:54:28.791Z",
+    "created_at": "2026-11-17T04:09:34.303Z",
     "data": {
-     "approval_id": "appr_01m7kt8n1qx0jn4yjh1hq3dzws",
+     "approval_id": "appr_01m7kv49azhjjynd7z9qyp5k3r",
      "args": {
       "command": "bash test.sh"
      },
      "changed_paths": [],
      "decision": "ask",
-     "duration_ms": 28,
+     "duration_ms": 26,
      "exit_code": 0,
-     "fingerprint": "ea1c216b5cece74d3e08cebfdd9f328dc883a9ee03605c6c3ccf5bfb138ea041",
-     "log_artifact": "art_01m7kt8n9j4vh1mrdyhvqt0afq",
+     "fingerprint": "197d99a2621b05920705a85e9cc7271e146f69b8ef11db5be6a3cc0da7028afc",
+     "log_artifact": "art_01m7kv49jjn6xv74jd32wsv3p4",
      "mode": "build",
      "provider_call_id": "toolu_s1_0",
      "reasons": [
@@ -198,25 +198,25 @@
      "scopes": [
       "process.exec"
      ],
-     "started_at": "2026-11-17T03:54:29.010Z",
+     "started_at": "2026-11-17T04:09:34.516Z",
      "status": "exited",
      "tool": "run_command",
-     "tree": "f50668f8695a8982d2fc77309e95e3d5bfda2f3227767d879ac18f7f08e9ed40",
-     "turn_id": "turn_01m7kt8n1d1knzwnnqt9yydbht"
+     "tree": "1178b0ed4c61340861720f5c939af99d2ee59c0f5c8e2b6ce6dbbd03c9136867",
+     "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
     },
-    "id": "call_9f3981b304b950e546caa42365",
+    "id": "call_964a0c4c17c5660d48b7044f3c",
     "kind": "tool_call",
-    "scope": "session_01m7kt8n0nbtk28fxchrt3mn37",
+    "scope": "session_01m7kv499q28bcmakbkhvw27fv",
     "state": "succeeded",
-    "updated_at": "2026-11-17T03:54:29.049Z",
+    "updated_at": "2026-11-17T04:09:34.566Z",
     "version": 4
    }
   ],
   "turns": [
    {
-    "created_at": "2026-11-17T03:54:28.782Z",
+    "created_at": "2026-11-17T04:09:34.294Z",
     "data": {
-     "finished_at": "2026-11-17T03:54:29.058Z",
+     "finished_at": "2026-11-17T04:09:34.581Z",
      "outcome": {
       "outcome": "completed",
       "steps": 3,
@@ -229,27 +229,27 @@
        "tests": [
         {
          "artifact_verified": true,
-         "call_id": "call_9f3981b304b950e546caa42365",
+         "call_id": "call_964a0c4c17c5660d48b7044f3c",
          "command": "bash test.sh",
          "current_tree": true,
          "exit_code": 0,
-         "log_artifact": "art_01m7kt8n9j4vh1mrdyhvqt0afq",
+         "log_artifact": "art_01m7kv49jjn6xv74jd32wsv3p4",
          "state": "succeeded",
-         "tree": "f50668f8695a8982d2fc77309e95e3d5bfda2f3227767d879ac18f7f08e9ed40"
+         "tree": "1178b0ed4c61340861720f5c939af99d2ee59c0f5c8e2b6ce6dbbd03c9136867"
         }
        ],
-       "tree": "f50668f8695a8982d2fc77309e95e3d5bfda2f3227767d879ac18f7f08e9ed40"
+       "tree": "1178b0ed4c61340861720f5c939af99d2ee59c0f5c8e2b6ce6dbbd03c9136867"
       }
      },
-     "started_at": "2026-11-17T03:54:28.782Z",
+     "started_at": "2026-11-17T04:09:34.294Z",
      "started_seq": 1,
-     "user_message_id": "msg_01m7kt8n1dxp30tqf52gv2ydjv"
+     "user_message_id": "msg_01m7kv49apfrxqhrs99dbgx5dk"
     },
-    "id": "turn_01m7kt8n1d1knzwnnqt9yydbht",
+    "id": "turn_01m7kv49apcrp5d9htcqt98k8p",
     "kind": "turn",
-    "scope": "session_01m7kt8n0nbtk28fxchrt3mn37",
+    "scope": "session_01m7kv499q28bcmakbkhvw27fv",
     "state": "completed",
-    "updated_at": "2026-11-17T03:54:29.058Z",
+    "updated_at": "2026-11-17T04:09:34.581Z",
     "version": 2
    }
   ]

@@ -2,7 +2,6 @@ package com.rimeos.remote.core.nex
 
 import com.rimeos.remote.core.agent.AgentStates
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -15,17 +14,19 @@ import org.junit.jupiter.api.Test
 /**
  * The requests the screens send, against requests a real nexd took.
  *
- * `requests.json` is what the recorder sent as a declared device, with the
- * parameter names of each and whether nexd answered "invalid params". A
- * builder here that names a parameter nexd never accepted fails, which a
- * test comparing a builder to a string written beside it could not catch.
+ * `requests.json` is what the recorder sent as a declared device: each
+ * request's parameter names and the error code nexd answered, null for
+ * success. Every builder must match a request nexd carried out for a phone.
+ * A builder that names a parameter nexd never took fails here, and so does one
+ * whose only recorded match was refused (forbidden, missing key). A test that
+ * compared a builder with a string written beside it could catch neither.
  */
 class NexCallsTest {
     /** method → every parameter-name set nexd accepted for it. */
     private val accepted: Map<String, Set<Set<String>>> =
         Nex.json.parseToJsonElement(Fixtures.text("requests.json")).jsonArray
             .map { it.jsonObject }
-            .filter { !it["invalid_params"]!!.jsonPrimitive.boolean }
+            .filter { it["error"] is kotlinx.serialization.json.JsonNull }
             .groupBy({ it["method"]!!.jsonPrimitive.content }) { r ->
                 r["params"]!!.jsonArray.map { it.jsonPrimitive.content }.toSet()
             }
@@ -35,8 +36,9 @@ class NexCallsTest {
         Nex.json.parseToJsonElement(c.line).jsonObject["request"]!!.jsonObject["params"]!!.jsonObject.keys
 
     private fun assertTaken(c: NexCall) {
-        val sets = accepted[c.method] ?: error("the recorder never sent ${c.method}: add it to tools/record-nex-fixtures.py")
-        assertTrue(keys(c) in sets, "${c.method} ${keys(c)} is not a request nexd took: $sets")
+        val sets = accepted[c.method]
+            ?: error("no successful ${c.method} from a device on record: add it to tools/record-nex-fixtures.py")
+        assertTrue(keys(c) in sets, "${c.method} ${keys(c)} is not a request nexd carried out: $sets")
     }
 
     private val approval = NexApproval.pending(Fixtures.result("tools.pending.json")).single()
@@ -49,8 +51,11 @@ class NexCallsTest {
             NexCalls.approve(approval), NexCalls.deny(approval),
             NexCalls.submit("s", "go on"), NexCalls.cancel("s"),
             NexCalls.create("/r", "scripted", "A title"), NexCalls.create("/r", "scripted", null),
-            NexCalls.mission("missions.approve", "m"), NexCalls.mission("missions.cancel", "m"),
         ).forEach(::assertTaken)
+        // Every mission action the screen can offer, from every state.
+        listOf("draft", "planned", "approved", "active", "paused", "blocked", "verifying")
+            .flatMap(NexMission::actions).toSet()
+            .forEach { assertTaken(NexCalls.mission(it, "m")) }
     }
 
     @Test

@@ -2,12 +2,12 @@
  {
   "method": "system.hello",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "models.list",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.create",
@@ -18,7 +18,7 @@
    "root",
    "title"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.create",
@@ -28,7 +28,17 @@
    "request_id",
    "root"
   ],
-  "invalid_params": false
+  "error": null
+ },
+ {
+  "method": "sessions.create",
+  "params": [
+   "mode",
+   "provider",
+   "request_id",
+   "root"
+  ],
+  "error": -32002
  },
  {
   "method": "turns.submit",
@@ -37,7 +47,7 @@
    "session_id",
    "text"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.stream",
@@ -45,7 +55,7 @@
    "after",
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.stream",
@@ -53,31 +63,31 @@
    "after",
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "tools.pending",
   "params": [
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "tools.pending",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.list",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.get",
   "params": [
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "tools.approve",
@@ -86,7 +96,7 @@
    "fingerprint",
    "request_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.stream",
@@ -94,7 +104,7 @@
    "after",
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.stream",
@@ -102,7 +112,7 @@
    "after",
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.stream",
@@ -110,7 +120,7 @@
    "after",
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.stream",
@@ -118,26 +128,26 @@
    "after",
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.list",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.get",
   "params": [
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.diff",
   "params": [
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "missions.plan",
@@ -146,39 +156,39 @@
    "root",
    "spec"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "missions.list",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "missions.get",
   "params": [
    "mission_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "projects.list",
   "params": [],
-  "invalid_params": false
+  "error": -32601
  },
  {
   "method": "connections.list",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "usage.list",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "budgets.list",
   "params": [],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "turns.cancel",
@@ -186,19 +196,19 @@
    "request_id",
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "tools.approve",
   "params": [
    "approval_id"
   ],
-  "invalid_params": false
+  "error": -32009
  },
  {
   "method": "system.doctor",
   "params": [],
-  "invalid_params": false
+  "error": -32002
  },
  {
   "method": "tools.deny",
@@ -206,7 +216,47 @@
    "approval_id",
    "request_id"
   ],
-  "invalid_params": false
+  "error": -32004
+ },
+ {
+  "method": "turns.submit",
+  "params": [
+   "request_id",
+   "session_id",
+   "text"
+  ],
+  "error": null
+ },
+ {
+  "method": "sessions.stream",
+  "params": [
+   "after",
+   "session_id"
+  ],
+  "error": null
+ },
+ {
+  "method": "sessions.stream",
+  "params": [
+   "after",
+   "session_id"
+  ],
+  "error": null
+ },
+ {
+  "method": "tools.pending",
+  "params": [
+   "session_id"
+  ],
+  "error": null
+ },
+ {
+  "method": "tools.deny",
+  "params": [
+   "approval_id",
+   "request_id"
+  ],
+  "error": null
  },
  {
   "method": "missions.approve",
@@ -214,7 +264,31 @@
    "mission_id",
    "request_id"
   ],
-  "invalid_params": false
+  "error": null
+ },
+ {
+  "method": "missions.start",
+  "params": [
+   "mission_id",
+   "request_id"
+  ],
+  "error": null
+ },
+ {
+  "method": "missions.pause",
+  "params": [
+   "mission_id",
+   "request_id"
+  ],
+  "error": null
+ },
+ {
+  "method": "missions.resume",
+  "params": [
+   "mission_id",
+   "request_id"
+  ],
+  "error": null
  },
  {
   "method": "missions.cancel",
@@ -222,7 +296,7 @@
    "mission_id",
    "request_id"
   ],
-  "invalid_params": false
+  "error": null
  },
  {
   "method": "sessions.set_mode",
@@ -231,6 +305,6 @@
    "request_id",
    "session_id"
   ],
-  "invalid_params": false
+  "error": null
  }
 ]

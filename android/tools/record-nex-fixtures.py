@@ -49,13 +49,13 @@ def call(m, params=None, write=False, save=None, local=False):
         if r.get("id") == n[0]: break
     if not local:
         err = r.get("error", {}).get("code")
-        sent.append({"method": m, "params": sorted(params), "invalid_params": err == -32602})
+        sent.append({"method": m, "params": sorted(params), "error": err})
     if save: (OUT/f"{save}.json").write_text(json.dumps(r, indent=1))
     return r
-def wait(pred, t=30):
+def wait(pred, t=30, session=None):
     end=time.time()+t
     while time.time()<end:
-        r = call("sessions.stream",{"session_id":sid,"after":0})["result"]
+        r = call("sessions.stream",{"session_id":session or sid,"after":0})["result"]
         if any(pred(e) for e in r["events"]): return r
         time.sleep(0.2)
     raise SystemExit("timeout")
@@ -64,7 +64,8 @@ print("declare", df.readline().strip())
 call("system.hello", save="system.hello")
 call("models.list", save="models.list")
 sid = call("sessions.create",{"root":str(ws),"mode":"build","title":"Fix add()","provider":"scripted"},write=True,local=True)["result"]["session_id"]
-call("sessions.create",{"root":str(ws),"mode":"build","title":"Second look","provider":"scripted"},write=True,save="sessions.create")
+sid2 = call("sessions.create",{"root":str(ws),"mode":"build","title":"Second look","provider":"scripted"},write=True,save="sessions.create")["result"]["session_id"]
+call("sessions.create",{"root":str(ws),"mode":"build","provider":"scripted"},write=True)
 call("sessions.create",{"root":"/tmp","mode":"build","provider":"scripted"},write=True,save="error.sessions.create.unknown_root")
 call("turns.submit",{"session_id":sid,"text":"add() subtracts; fix it and run the tests"},write=True,save="turns.submit")
 wait(lambda e: e["kind"]=="tool.approval_requested")
@@ -91,8 +92,14 @@ call("turns.cancel",{"session_id":sid},write=True,save="turns.cancel.idle")
 call("tools.approve",{"approval_id":"nope"},save="error.missing_request_id")
 call("system.doctor",{},save="error.local_only")
 call("tools.deny",{"approval_id":"appr_none"},write=True,save="error.tools.deny.not_found")
-call("missions.approve",{"mission_id":mid},write=True)
-call("missions.cancel",{"mission_id":mid},write=True)
+# A phone's no: the second session asks to run the tests and is denied.
+call("turns.submit",{"session_id":sid2,"text":"run the tests"},write=True)
+wait(lambda e: e["kind"]=="tool.approval_requested", session=sid2)
+a2 = call("tools.pending",{"session_id":sid2})["result"][-1]
+call("tools.deny",{"approval_id":a2["approval_id"]},write=True)
+# Every mission action a phone is offered, in the order a mission allows them.
+for verb in ("approve","start","pause","resume","cancel"):
+    call(f"missions.{verb}",{"mission_id":mid},write=True)
 # one live notification on a following feed
 fs, ff = conn()
 ff.write(json.dumps({"jsonrpc":"2.0","id":"declare","method":"system.declare_origin","params":{"kind":"device","id":"phone-fixture"}})+"\n"); ff.flush(); ff.readline()

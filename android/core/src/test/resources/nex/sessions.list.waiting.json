@@ -1,26 +1,36 @@
 {
  "jsonrpc": "2.0",
- "id": 12,
+ "id": 13,
  "result": [
   {
-   "created_at": "2026-11-17T03:54:28.757Z",
+   "created_at": "2026-11-17T04:09:34.263Z",
    "mode": "build",
    "provider": "scripted",
-   "root": "/tmp/nexcap-pn8k9u0z/ws",
+   "root": "/tmp/nexcap-9jv0w967/ws",
    "runtime": "nex",
-   "session_id": "session_01m7kt8n0nbtk28fxchrt3mn37",
+   "session_id": "session_01m7kv499q28bcmakbkhvw27fv",
    "state": "running",
    "title": "Fix add()"
   },
   {
-   "created_at": "2026-11-17T03:54:28.781Z",
+   "created_at": "2026-11-17T04:09:34.290Z",
    "mode": "build",
    "provider": "scripted",
-   "root": "/tmp/nexcap-pn8k9u0z/ws",
+   "root": "/tmp/nexcap-9jv0w967/ws",
    "runtime": "nex",
-   "session_id": "session_01m7kt8n1df3m6a1dajzcvvq20",
+   "session_id": "session_01m7kv49ajz1t6vrma7crp3t08",
    "state": "idle",
    "title": "Second look"
+  },
+  {
+   "created_at": "2026-11-17T04:09:34.293Z",
+   "mode": "build",
+   "provider": "scripted",
+   "root": "/tmp/nexcap-9jv0w967/ws",
+   "runtime": "nex",
+   "session_id": "session_01m7kv49anxfy0698r0s78vqay",
+   "state": "idle",
+   "title": "untitled"
   }
  ]
 }

@@ -1,14 +1,14 @@
 {
  "jsonrpc": "2.0",
- "id": 11,
+ "id": 12,
  "result": [
   {
-   "approval_id": "appr_01m7kt8n1qx0jn4yjh1hq3dzws",
+   "approval_id": "appr_01m7kv49azhjjynd7z9qyp5k3r",
    "args": {
     "command": "bash test.sh"
    },
-   "expires_at": "2026-11-17T04:54:28.791Z",
-   "fingerprint": "ea1c216b5cece74d3e08cebfdd9f328dc883a9ee03605c6c3ccf5bfb138ea041",
+   "expires_at": "2026-11-17T05:09:34.303Z",
+   "fingerprint": "197d99a2621b05920705a85e9cc7271e146f69b8ef11db5be6a3cc0da7028afc",
    "native": false,
    "reasons": [
     "mode build default: Ask"
@@ -16,7 +16,7 @@
    "scopes": [
     "process.exec"
    ],
-   "session_id": "session_01m7kt8n0nbtk28fxchrt3mn37",
+   "session_id": "session_01m7kv499q28bcmakbkhvw27fv",
    "summary": "run `bash test.sh`",
    "tool": "run_command"
   }

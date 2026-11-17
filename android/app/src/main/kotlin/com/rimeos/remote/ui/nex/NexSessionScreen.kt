@@ -1,5 +1,6 @@
 package com.rimeos.remote.ui.nex
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -61,6 +62,9 @@ fun NexSessionScreen(
     onDismiss: () -> Unit,
     onBack: () -> Unit,
 ) {
+    // The system back gesture does what Back does, so leaving this way also
+    // closes the feed and the open transcript rather than leaving them held.
+    BackHandler(onBack = onBack)
     val transcript = state.transcript?.takeIf { it.session.id == session }
     val listed = state.sessions.firstOrNull { it.id == session }
     val title = transcript?.session?.label ?: listed?.label ?: "Session"
@@ -145,7 +149,9 @@ fun NexSessionScreen(
                 OutlinedTextField(
                     value = draft,
                     onValueChange = { draft = it },
-                    label = { Text(if (running) "Say something when it is done" else "Message") },
+                    // nex takes one turn at a time and refuses a message while one
+                    // runs, so the box says so instead of sending into a refusal.
+                    label = { Text(if (running) "Wait for this turn, or Stop it" else "Message") },
                     modifier = Modifier.weight(1f),
                     maxLines = 6,
                     enabled = state.away == null,
@@ -153,7 +159,7 @@ fun NexSessionScreen(
                 Spacer(Modifier.width(8.dp))
                 Button(
                     onClick = { onSend(draft) { draft = "" } },
-                    enabled = draft.isNotBlank() && !state.sending && state.away == null,
+                    enabled = draft.isNotBlank() && !running && !state.sending && state.away == null,
                 ) { Text(if (state.sending) "Sending…" else "Send") }
             }
         }

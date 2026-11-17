@@ -1,12 +1,12 @@
 {
  "jsonrpc": "2.0",
- "id": 23,
+ "id": 24,
  "result": [
   {
-   "mission_id": "mission_01m7kt8ngpe9t67kxda3bwwzav",
+   "mission_id": "mission_01m7kv49rv28c22ajtw2rrsy8x",
    "objective": "Add a subtract() helper",
    "state": "planned",
-   "updated_at": "2026-11-17T03:54:29.270Z"
+   "updated_at": "2026-11-17T04:09:34.747Z"
   }
  ]
 }

@@ -70,6 +70,7 @@ class NexViewModel(application: Application) : AndroidViewModel(application) {
     private var follow: Job? = null
     private var subscription: NexClient.Subscription? = null
     private var reloads = Channel<NexUiState.Reload>(Channel.UNLIMITED)
+    private val unsure = UnsureWrites()
 
     /** Start showing [machine]'s nex. Opening the same machine again only reloads. */
     fun open(machine: PairedMachine) {
@@ -270,18 +271,17 @@ class NexViewModel(application: Application) : AndroidViewModel(application) {
 
     fun unselect() = _state.update { it.copy(selected = null, transcript = null, typing = "") }
 
-    fun approve(a: NexApproval) = decide(a, NexCalls.approve(a), "Approved")
+    fun approve(a: NexApproval) = decide(a, "approve:${a.id}", "Approved") { NexCalls.approve(a) }
 
-    fun deny(a: NexApproval) = decide(a, NexCalls.deny(a), "Denied")
+    fun deny(a: NexApproval) = decide(a, "deny:${a.id}", "Denied") { NexCalls.deny(a) }
 
-    private fun decide(a: NexApproval, call: NexCall, done: String) {
+    private fun decide(a: NexApproval, what: String, done: String, build: () -> NexCall) {
         if (a.id in _state.value.deciding) return
+        val call = unsure.call(what, build)
         _state.update { it.copy(deciding = it.deciding + a.id, failure = null) }
         viewModelScope.launch {
-            val c = client()
             try {
-                if (c == null) error("this phone is locked; unlock it and try again")
-                withContext(Dispatchers.IO) { c.call(call) }
+                send(call, what)
                 _state.update { s ->
                     s.copy(
                         deciding = s.deciding - a.id,
@@ -297,30 +297,44 @@ class NexViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Send [text] to [session]; [onSent] runs once nexd has taken it, so the box clears then. */
-    fun send(session: String, text: String, onSent: () -> Unit) = write(NexCalls.submit(session, text), "Sent") {
-        onSent()
+    /**
+     * One write, on IO. A dropped answer keeps [call] under [what] so the
+     * same tap resends it; any answer, yes or no, lets it go.
+     */
+    private suspend fun send(call: NexCall, what: String): JsonElement {
+        val c = client() ?: error("this phone is locked; unlock it and try again")
+        return try {
+            withContext(Dispatchers.IO) { c.call(call) }.also { unsure.settled(what) }
+        } catch (e: Exception) {
+            if (NexTrouble.of(e) is NexTrouble.Dropped) unsure.lost(what, call) else unsure.settled(what)
+            throw e
+        }
     }
 
+    /** Send [text] to [session]; [onSent] runs once nexd has taken it, so the box clears then. */
+    fun send(session: String, text: String, onSent: () -> Unit) =
+        write("submit:$session:$text", "Sent", onSent) { NexCalls.submit(session, text) }
+
     /** Stop [session]'s running turn. */
-    fun stop(session: String) = write(NexCalls.cancel(session), "Stopped")
+    fun stop(session: String) = write("cancel:$session", "Stopped") { NexCalls.cancel(session) }
 
     /**
      * A new session in [root], then its first message if there is one. The
      * screen opens the session when [NexUiState.created] is set.
      */
     fun create(root: String, provider: String?, title: String?, firstMessage: String) {
-        val create = NexCalls.create(root, provider, title)
+        val what = "create:$root:$provider:$title"
+        val create = unsure.call(what) { NexCalls.create(root, provider, title) }
         val message = firstMessage.trim()
         if (_state.value.sending) return
         _state.update { it.copy(sending = true, failure = null) }
         viewModelScope.launch {
             var id: String? = null
             try {
-                val c = client() ?: error("this phone is locked; unlock it and try again")
-                withContext(Dispatchers.IO) {
-                    id = NexCalls.createdSession(c.call(create)) ?: error("nex made a session and did not say which")
-                    if (message.isNotEmpty()) c.call(NexCalls.submit(id!!, message))
+                id = NexCalls.createdSession(send(create, what)) ?: error("nex made a session and did not say which")
+                if (message.isNotEmpty()) {
+                    val first = "submit:$id:$message"
+                    send(unsure.call(first) { NexCalls.submit(id!!, message) }, first)
                 }
             } catch (e: Exception) {
                 fail(e, write = true)
@@ -338,7 +352,8 @@ class NexViewModel(application: Application) : AndroidViewModel(application) {
     fun createdConsumed() = _state.update { it.copy(created = null) }
 
     /** One of [NexMission.actions]. */
-    fun mission(verb: String, mission: NexMission) = write(NexCalls.mission(verb, mission.id), null)
+    fun mission(verb: String, mission: NexMission) =
+        write("$verb:${mission.id}", null) { NexCalls.mission(verb, mission.id) }
 
     /** Show or hide a mission's tasks. */
     fun toggleMission(id: String) {
@@ -359,13 +374,13 @@ class NexViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun write(call: NexCall, done: String?, onDone: () -> Unit = {}) {
+    private fun write(what: String, done: String?, onDone: () -> Unit = {}, build: () -> NexCall) {
         if (_state.value.sending) return
+        val call = unsure.call(what, build)
         _state.update { it.copy(sending = true, failure = null) }
         viewModelScope.launch {
             try {
-                val c = client() ?: error("this phone is locked; unlock it and try again")
-                withContext(Dispatchers.IO) { c.call(call) }
+                send(call, what)
                 _state.update { it.copy(sending = false, notice = done ?: it.notice) }
                 onDone()
             } catch (e: Exception) {
@@ -384,8 +399,8 @@ class NexViewModel(application: Application) : AndroidViewModel(application) {
             is NexTrouble.Dropped -> _state.update {
                 it.copy(
                     failure = if (write) {
-                        "The connection dropped, so this may or may not have arrived. Trying again is " +
-                            "safe: nex answers a repeat with its first answer."
+                        "The connection dropped, so this may or may not have arrived. Press it again " +
+                            "to send the same request: nex answers a repeat once, with its first answer."
                     } else {
                         "Could not reach the computer: ${t.why}"
                     },

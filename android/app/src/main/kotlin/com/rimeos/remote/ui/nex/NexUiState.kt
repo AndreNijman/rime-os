@@ -129,6 +129,33 @@ data class NexUiState(
     }
 }
 
+/**
+ * Writes whose answer was lost with the connection, by what they were for.
+ *
+ * A tap builds a request with a fresh `request_id`, and nexd treats a new key
+ * as a new request. So after a drop, pressing Send again would post the
+ * message twice if it built a new one. Instead the lost request is kept under
+ * what it was for ("submit to s1: fix it"), and the same tap sends that same
+ * line: nexd answers a repeated key with its first answer, once.
+ */
+class UnsureWrites {
+    private val lost = java.util.concurrent.ConcurrentHashMap<String, com.rimeos.remote.core.nex.NexCall>()
+
+    /** The request to send for [what]: the lost one if there is one, else a new one. */
+    fun call(what: String, build: () -> com.rimeos.remote.core.nex.NexCall): com.rimeos.remote.core.nex.NexCall =
+        lost[what] ?: build()
+
+    /** The answer did not come back: keep the request for the next try. */
+    fun lost(what: String, call: com.rimeos.remote.core.nex.NexCall) {
+        lost[what] = call
+    }
+
+    /** An answer came back, yes or no: the next tap is a new request. */
+    fun settled(what: String) {
+        lost.remove(what)
+    }
+}
+
 /** What went wrong with a nex request, in the place the screen shows it. */
 sealed interface NexTrouble {
     /** nex is not there: the bridge has no nexd, or nexd is down. Replaces the screen. */

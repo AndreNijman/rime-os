@@ -13,15 +13,22 @@ data class NexSession(
     val root: String?,
     val createdAt: String?,
 ) {
-    /** What a list shows: the title, else the folder's name, else the id. */
+    /**
+     * What a list shows: the title, else the folder's name, else the id.
+     * "untitled" is nexd's stand-in for no title (`server.rs`), so it counts
+     * as none: a list of three "untitled" rows says nothing.
+     */
     val label: String
-        get() = title?.takeIf { it.isNotBlank() }
+        get() = title?.takeIf { it.isNotBlank() && it != UNTITLED }
             ?: root?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotEmpty() }
             ?: id
 
     val running: Boolean get() = state == "running"
 
     companion object {
+        /** nexd's title for a session made without one. */
+        const val UNTITLED = "untitled"
+
         fun list(result: JsonElement): List<NexSession> = result.objects().mapNotNull(::row)
 
         internal fun row(o: JsonObject): NexSession? {
