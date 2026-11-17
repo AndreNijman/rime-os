@@ -14,6 +14,17 @@ import com.rimeos.remote.ui.agent.ApprovalsScreen
 import com.rimeos.remote.ui.agent.HelpScreen
 import com.rimeos.remote.ui.agent.StartAgentScreen
 import com.rimeos.remote.ui.agent.WorktreesScreen
+import com.rimeos.remote.core.nex.NexApproval
+import com.rimeos.remote.core.nex.NexConnection
+import com.rimeos.remote.core.nex.NexMission
+import com.rimeos.remote.core.nex.NexMissionDetail
+import com.rimeos.remote.core.nex.NexSession
+import com.rimeos.remote.core.nex.NexTranscript
+import com.rimeos.remote.core.nex.NexUsage
+import com.rimeos.remote.ui.nex.NexNewSessionScreen
+import com.rimeos.remote.ui.nex.NexScreen
+import com.rimeos.remote.ui.nex.NexSessionScreen
+import com.rimeos.remote.ui.nex.NexUiState
 
 /**
  * Every screen this app has that can be composed without a live socket, with
@@ -63,6 +74,47 @@ object Screens {
         ),
     )
 
+    // nex, with every section showing: an approval waiting, a running and an
+    // idle session, an open mission, usage, and an open transcript with a
+    // reply being written. Long names on purpose, for the large-text walk.
+    private val nexRoot = "/home/andre/Projects/rime/a-folder-with-a-long-name"
+    private val nexSessions = listOf(
+        NexSession("s1", "Fix the failing operator test in lib.sh", "running", "build", "scripted", nexRoot, "2026-11-17T04:00:00Z"),
+        NexSession("s2", null, "idle", "build", "claude-code", nexRoot, "2026-11-16T04:00:00Z"),
+    )
+    private val nexApproval = NexApproval(
+        "a1", "s1", "run_command", "run `bash test.sh && git diff --stat -- lib.sh`", listOf("process.exec"),
+        listOf("mode build default: Ask"), "fp", "2026-11-17T05:00:00Z", false,
+    )
+    private val nexMission = NexMission("m1", "Add a subtract() helper with tests", "active", "2026-11-17T04:10:00Z")
+    private val nexTranscript = NexTranscript(
+        nexSessions[0],
+        listOf(
+            NexTranscript.Entry.Said("user", "add() subtracts; fix it and run the tests", "t1"),
+            NexTranscript.Entry.Said("assistant", "Fixing the operator.", "t1"),
+            NexTranscript.Entry.ToolUse("edit_file", "{\"path\":\"lib.sh\"}", "succeeded", null, false, "edited lib.sh", "t1"),
+            NexTranscript.Entry.TurnEnd("completed", "Fixed.", "verified", null, "t0"),
+        ),
+        listOf(nexApproval),
+        12,
+    )
+    private val nexState = NexUiState(
+        machine = machine.deviceId,
+        loaded = true,
+        live = true,
+        sessions = nexSessions,
+        pending = listOf(nexApproval),
+        missions = listOf(nexMission),
+        missionDetails = mapOf(
+            "m1" to NexMissionDetail(nexMission, listOf(NexMissionDetail.Task("impl", "running", 1, null, "s1")), null, listOf("bash test.sh")),
+        ),
+        usage = listOf(NexUsage("claude-code", listOf(NexUsage.Tokens("input", 12_345.0, false)), listOf(NexUsage.Quota("5-hour window", 42.0, "5h", null, false)))),
+        connections = listOf(NexConnection("scripted", "scripted", true, false), NexConnection("claude-code", "claude-code", true, true)),
+        selected = "s1",
+        transcript = nexTranscript,
+        typing = "Running the tests now, then I will",
+    )
+
     /** Every screen, as (name, composable). */
     val all: List<Pair<String, @Composable () -> Unit>> = listOf(
         "Machines" to {
@@ -82,6 +134,7 @@ object Screens {
                 failure = null,
                 onRefresh = {}, onOpen = {}, onStart = {}, onProjects = {},
                 onApprovals = {}, onHelp = {}, onBack = {}, onDismiss = {},
+                onNex = {},
             )
         },
         "Start an agent" to {
@@ -116,5 +169,21 @@ object Screens {
             )
         },
         "Guide" to { HelpScreen(onBack = {}) },
+        "nex" to {
+            NexScreen(
+                machine = "l16", state = nexState,
+                onOpen = {}, onNew = {}, onApprove = {}, onDeny = {}, onMission = { _, _ -> },
+                onToggleMission = {}, onRefresh = {}, onDismiss = {}, onBack = {},
+            )
+        },
+        "nex session" to {
+            NexSessionScreen(
+                session = "s1", state = nexState,
+                onSend = { _, _ -> }, onStop = {}, onApprove = {}, onDeny = {}, onRefresh = {}, onDismiss = {}, onBack = {},
+            )
+        },
+        "New nex session" to {
+            NexNewSessionScreen(state = nexState, onCreate = { _, _, _, _ -> }, onCreated = {}, onDismiss = {}, onBack = {})
+        },
     )
 }

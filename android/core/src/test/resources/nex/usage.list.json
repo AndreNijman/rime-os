@@ -1,0 +1,132 @@
+{
+ "jsonrpc": "2.0",
+ "id": 28,
+ "result": [
+  {
+   "connection_id": "reviewer",
+   "quota": [
+    {
+     "connection_id": "reviewer",
+     "label": "unknown (this connection does not report quota)",
+     "observed_at": null,
+     "reset_at": null,
+     "source": null,
+     "stale": false,
+     "used_percent": null,
+     "window": "-"
+    }
+   ],
+   "rate_limits": [
+    {
+     "label": "unknown (no rate-limit data received)",
+     "value": null
+    }
+   ],
+   "tokens": []
+  },
+  {
+   "connection_id": "scripted",
+   "quota": [
+    {
+     "connection_id": "scripted",
+     "label": "unknown (this connection does not report quota)",
+     "observed_at": null,
+     "reset_at": null,
+     "source": null,
+     "stale": false,
+     "used_percent": null,
+     "window": "-"
+    }
+   ],
+   "rate_limits": [
+    {
+     "label": "unknown (no rate-limit data received)",
+     "value": null
+    }
+   ],
+   "tokens": [
+    {
+     "metric": "cached_input_tokens",
+     "source_kind": "local_estimate",
+     "total": 0.0
+    },
+    {
+     "metric": "input_tokens",
+     "source_kind": "local_estimate",
+     "total": 1726.0
+    },
+    {
+     "metric": "output_tokens",
+     "source_kind": "local_estimate",
+     "total": 17.0
+    }
+   ]
+  },
+  {
+   "connection_id": "codex-app-server",
+   "quota": [
+    {
+     "connection_id": "codex-app-server",
+     "label": "unknown (no quota observed yet)",
+     "observed_at": null,
+     "reset_at": null,
+     "source": null,
+     "stale": false,
+     "used_percent": null,
+     "window": "-"
+    }
+   ],
+   "rate_limits": [
+    {
+     "label": "unknown (no rate-limit data received)",
+     "value": null
+    }
+   ],
+   "tokens": []
+  },
+  {
+   "connection_id": "claude-code",
+   "quota": [
+    {
+     "connection_id": "claude-code",
+     "label": "unknown (no quota observed yet)",
+     "observed_at": null,
+     "reset_at": null,
+     "source": null,
+     "stale": false,
+     "used_percent": null,
+     "window": "-"
+    }
+   ],
+   "rate_limits": [
+    {
+     "label": "unknown (no rate-limit data received)",
+     "value": null
+    }
+   ],
+   "tokens": []
+  },
+  {
+   "connection_id": "droid",
+   "quota": [
+    {
+     "connection_id": "droid",
+     "label": "unknown (this connection does not report quota)",
+     "observed_at": null,
+     "reset_at": null,
+     "source": null,
+     "stale": false,
+     "used_percent": null,
+     "window": "-"
+    }
+   ],
+   "rate_limits": [
+    {
+     "label": "unknown (no rate-limit data received)",
+     "value": null
+    }
+   ],
+   "tokens": []
+  }
+ ]
+}

@@ -17,6 +17,14 @@
 # Usage:
 #   android/tools/run-device-suite.sh [-s <adb serial>] [-c <test class>]
 #
+# With RIME_DEVICE_SUITE_NEXD=<path to a nexd binary> it also starts a nexd of
+# its own (a scripted provider, a scratch git folder, its socket inside this
+# run's XDG_RUNTIME_DIR, where rime-remoted looks by default), and the nex
+# tests run. Without it they are left out BY NAME and the verdict says so: nex
+# lives in its own repository, so this tree cannot build one, and a run that
+# reported nex as tested when no nexd was there would be the defect this
+# header warns about below.
+#
 # A device is required and its absence is a FAILURE, not a skip: a suite that
 # reports success when it could not look is the defect this program has
 # shipped more than once.
@@ -58,7 +66,7 @@ mkdir -p "$state"
 # `root` is declared here and set further down, so the EXIT trap below can
 # read it even when the script fails before the daemon root exists.
 root=""
-agentd_pid=""; remoted_pid=""; broker_pid=""; talkback_on=""
+agentd_pid=""; remoted_pid=""; broker_pid=""; nexd_pid=""; talkback_on=""
 
 # TalkBack, when this run turned it on, goes back off no matter how the script
 # ends. `settings delete` and not `settings put … null`, which writes the
@@ -87,7 +95,7 @@ cleanup() {
   if [ -n "$root" ] && [ -r "$root/remoted.pid" ]; then
     current=$(cat "$root/remoted.pid" 2>/dev/null) || current=""
   fi
-  for p in "$current" "$remoted_pid" "$agentd_pid"; do
+  for p in "$current" "$remoted_pid" "$agentd_pid" "$nexd_pid"; do
     [ -n "$p" ] && kill "$p" 2>/dev/null || true
   done
   wait 2>/dev/null || true
@@ -136,6 +144,44 @@ XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
   RIME_AGENT_SCRATCH_ROOT=$root/scratch \
   "$bin/rime-agentd" >"$root/agentd.log" 2>&1 &
 agentd_pid=$!
+
+# nex, when a nexd was named: started BEFORE rime-remoted so its first hello
+# already offers `nex`. The socket is the path rime-remoted uses when it is not
+# given `--nexd` ($XDG_RUNTIME_DIR/nex/nexd.sock), so a restarted rime-remoted
+# finds it the same way the installed one does, with no argument to forget.
+#
+# The folder is a scratch git repository with one failing test. A phone may
+# only start sessions in a folder that already has one, so the broker's
+# `nex_session_at_computer` verb below makes them there, as the person at this
+# computer.
+nexd=${RIME_DEVICE_SUITE_NEXD:-}
+nexsock=""; nexroot=""
+if [ -n "$nexd" ]; then
+  [ -x "$nexd" ] || { echo "FAIL: RIME_DEVICE_SUITE_NEXD=$nexd is not an executable"; exit 1; }
+  nexhome=$root/nex
+  nexroot=$nexhome/ws
+  mkdir -p "$nexroot" "$root/run/nex"
+  printf 'add() { echo $(( $1 - $2 )); }\n' > "$nexroot/lib.sh"
+  printf '. ./lib.sh\n[ "$(add 2 3)" = 5 ]\n' > "$nexroot/test.sh"
+  git -C "$nexroot" init -q -b main
+  git -C "$nexroot" add -A
+  git -C "$nexroot" -c user.name=suite -c user.email=suite@invalid commit -q -m init
+  cat > "$nexhome/script.json" <<'JSON'
+{"steps":[
+ {"text":"Fixing the operator.","tool_calls":[{"name":"edit_file","args":{"path":"lib.sh","old_text":"$1 - $2","new_text":"$1 + $2"}}]},
+ {"text":"Running the tests.","tool_calls":[{"name":"run_command","args":{"command":"bash test.sh"}}]},
+ {"text":"Fixed add(); all tests pass."}]}
+JSON
+  printf '{"providers":[{"id":"scripted","kind":"scripted","script":"%s"}],"policy":{},"base_backoff_ms":20}\n' \
+    "$nexhome/script.json" > "$nexhome/config.json"
+  nexsock=$root/run/nex/nexd.sock
+  "$nexd" --data-dir "$nexhome/data" --socket "$nexsock" --config "$nexhome/config.json" \
+    >"$root/nexd.log" 2>&1 &
+  nexd_pid=$!
+  for _ in $(seq 1 80); do [ -S "$nexsock" ] && break; sleep 0.25; done
+  [ -S "$nexsock" ] || { echo "FAIL: nexd did not come up"; tail -20 "$root/nexd.log"; exit 1; }
+  echo "nex: $nexd ($(stat -c %y "$nexd" | cut -d. -f1)), folder $nexroot"
+fi
 
 # The relay the daemon holds a rendezvous at, so the RELAY LEG is exercised by
 # this suite and not only the LAN one.
@@ -201,6 +247,8 @@ import json, os, socket, socketserver, subprocess, sys, time
 SOCK, PORT, ROOT, BIN = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 DPORT, AGENTD = sys.argv[5], sys.argv[6]
 RELAY = sys.argv[7] if len(sys.argv) > 7 else ""
+NEXD = sys.argv[8] if len(sys.argv) > 8 else ""
+NEXROOT = sys.argv[9] if len(sys.argv) > 9 else ""
 
 def control(line):
     s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(SOCK)
@@ -214,6 +262,42 @@ def agentd(request):
     s.sendall((json.dumps(request) + "\n").encode())
     f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
     return out
+
+def nexd_at_computer(method, params):
+    """One write to nexd from THIS process: a local origin, the person at the
+    computer. Only the two fixed shapes below call it."""
+    if not NEXD:
+        return {"error": {"message": "this run has no nexd"}}
+    import uuid
+    s = socket.socket(socket.AF_UNIX); s.settimeout(30); s.connect(NEXD)
+    params = dict(params, request_id=str(uuid.uuid4()))
+    s.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}) + "\n").encode())
+    f = s.makefile("rb")
+    while True:
+        r = json.loads(f.readline())
+        if r.get("id") == 1:
+            break
+    s.close()
+    return r
+
+def nex_reply(r, field=None):
+    if "error" in r:
+        return json.dumps({"reply": "error", "message": r["error"].get("message", "")})
+    out = {"reply": "ok"}
+    if field:
+        out[field] = r["result"][field]
+    return json.dumps(out)
+
+def nex_session_at_computer(title):
+    """A nex session in the suite's folder: the person at the computer choosing
+    a folder, which nexd does not let a phone do."""
+    return nex_reply(nexd_at_computer("sessions.create", {
+        "root": NEXROOT, "mode": "build", "title": title, "provider": "scripted"}), "session_id")
+
+def nex_submit_at_computer(session, text):
+    """A message typed at the computer, so whatever the phone sees next came to
+    it by itself and not as the answer to something it sent."""
+    return nex_reply(nexd_at_computer("turns.submit", {"session_id": session, "text": text}))
 
 def restart():
     pidfile = os.path.join(ROOT, "remoted.pid")
@@ -270,6 +354,10 @@ class H(socketserver.StreamRequestHandler):
                               "verb": req["verb"],
                               "args": req.get("args", []),
                               "reason": req["reason"]})
+            elif cmd == "nex_session_at_computer":
+                out = nex_session_at_computer(str(req["title"]))
+            elif cmd == "nex_submit_at_computer":
+                out = nex_submit_at_computer(str(req["session"]), str(req["text"]))
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:
@@ -283,7 +371,7 @@ class S(socketserver.ThreadingTCPServer):
 S(("0.0.0.0", PORT), H).serve_forever()
 PY
 python3 "$root/broker.py" "$root/run/rime-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
-  "$root/run/rime-agentd/control.sock" "$relay" >"$root/broker.log" 2>&1 &
+  "$root/run/rime-agentd/control.sock" "$relay" "$nexsock" "$nexroot" >"$root/broker.log" 2>&1 &
 broker_pid=$!
 
 # Which of this machine's addresses the PHONE can actually reach. Measured from
@@ -386,6 +474,11 @@ args=(-e lan "$lan" -e broker "$brokeraddr" -e machine "$(cat /proc/sys/kernel/h
 # rather than passing while asserting nothing.
 [ -n "$relay" ] && args+=(-e relay "$relay")
 [ -n "$classes" ] && args+=(-e class "$classes")
+if [ -n "$nexroot" ]; then
+  args+=(-e nexroot "$nexroot")
+else
+  args+=(-e notClass com.rimeos.remote.device.NexOnDeviceTest)
+fi
 
 # ── TalkBack ────────────────────────────────────────────────────────────────
 #
@@ -438,3 +531,4 @@ if ! grep -qE '^OK \([0-9]+ tests?\)' "$out"; then
 fi
 count=$(grep -oE '^OK \([0-9]+ tests?\)' "$out" | grep -oE '[0-9]+')
 echo "DEVICE SUITE: $count tests passed on $serial"
+[ -n "$nexroot" ] || echo "DEVICE SUITE: nex NOT tested (no RIME_DEVICE_SUITE_NEXD)"

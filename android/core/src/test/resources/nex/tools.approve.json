@@ -1,0 +1,8 @@
+{
+ "jsonrpc": "2.0",
+ "id": 15,
+ "result": {
+  "approval_id": "appr_01m7kv49azhjjynd7z9qyp5k3r",
+  "state": "approved"
+ }
+}

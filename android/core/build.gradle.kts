@@ -29,7 +29,8 @@ java {
 
 dependencies {
     implementation(libs.bouncycastle.provider)
-    implementation(libs.kotlinx.serialization.json)
+    // `api`: the nex client hands JsonElement across its public surface.
+    api(libs.kotlinx.serialization.json)
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
 }

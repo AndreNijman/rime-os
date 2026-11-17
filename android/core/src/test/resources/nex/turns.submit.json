@@ -1,0 +1,9 @@
+{
+ "jsonrpc": "2.0",
+ "id": 8,
+ "result": {
+  "message_id": "msg_01m7kv49apfrxqhrs99dbgx5dk",
+  "session_id": "session_01m7kv499q28bcmakbkhvw27fv",
+  "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+ }
+}

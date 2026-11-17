@@ -1,0 +1,12 @@
+{
+ "jsonrpc": "2.0",
+ "id": 2,
+ "result": {
+  "daemon_version": "0.1.0",
+  "data_dir": "/tmp/nexcap-9jv0w967/data",
+  "kill_switch": false,
+  "minimum_client_version": "0.1.0",
+  "pid": 1359907,
+  "protocol_version": "1.0"
+ }
+}

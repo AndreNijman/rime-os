@@ -1,0 +1,63 @@
+{
+ "jsonrpc": "2.0",
+ "id": 25,
+ "result": {
+  "base": "27e42ff49162dfdef773aeddab56acd4d621e0b2",
+  "evidence": null,
+  "integration_branch": "nex/mission_01m7kv49rv28c22ajtw2rrsy8x/_integration",
+  "mission_id": "mission_01m7kv49rv28c22ajtw2rrsy8x",
+  "objective": "Add a subtract() helper",
+  "reason": null,
+  "repo": "/tmp/nexcap-9jv0w967/ws",
+  "review": null,
+  "spec": {
+   "max_attempts": 2,
+   "max_parallel": 3,
+   "objective": "Add a subtract() helper",
+   "review": {
+    "agent": {
+     "model": "scripted-1",
+     "provider": "reviewer",
+     "runtime": "nex"
+    },
+    "prompt": ""
+   },
+   "tasks": [
+    {
+     "agent": {
+      "model": "scripted-1",
+      "provider": "scripted",
+      "runtime": "nex"
+     },
+     "deps": [],
+     "id": "impl",
+     "prompt": "write sub",
+     "role": "implementer",
+     "title": "",
+     "touches": [
+      "lib.sh"
+     ]
+    }
+   ],
+   "verify": [
+    "true"
+   ]
+  },
+  "stage": null,
+  "state": "planned",
+  "tasks": [
+   {
+    "attempt": 0,
+    "base": null,
+    "blocked": null,
+    "branch": null,
+    "handoff": null,
+    "head": null,
+    "last_error": null,
+    "session_id": null,
+    "state": "planned",
+    "task_id": "impl"
+   }
+  ]
+ }
+}

@@ -1,0 +1,665 @@
+{
+ "jsonrpc": "2.0",
+ "id": 19,
+ "result": {
+  "events": [
+   {
+    "event": {
+     "actor": {
+      "id": "uid:1000",
+      "type": "user"
+     },
+     "event_id": "evt_01m7kv49af9cfqgg2gejt9h3vs",
+     "kind": "session.created",
+     "occurred_at": "2026-11-17T04:09:34.287Z",
+     "payload": {
+      "mode": "build",
+      "model": "scripted-1",
+      "provider": "scripted",
+      "root": "/tmp/nexcap-9jv0w967/ws",
+      "runtime": "nex",
+      "session_id": "session_01m7kv499q28bcmakbkhvw27fv",
+      "title": "Fix add()"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 1,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 1
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "device:phone-fixture",
+      "type": "remote"
+     },
+     "event_id": "evt_01m7kv49ajp49rr1gt3g5ve5ef",
+     "kind": "session.created",
+     "occurred_at": "2026-11-17T04:09:34.290Z",
+     "payload": {
+      "mode": "build",
+      "model": "scripted-1",
+      "provider": "scripted",
+      "root": "/tmp/nexcap-9jv0w967/ws",
+      "runtime": "nex",
+      "session_id": "session_01m7kv49ajz1t6vrma7crp3t08",
+      "title": "Second look"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 1,
+     "stream_id": "session_01m7kv49ajz1t6vrma7crp3t08"
+    },
+    "gseq": 2
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "device:phone-fixture",
+      "type": "remote"
+     },
+     "event_id": "evt_01m7kv49antbye2hdk9zpv5ep8",
+     "kind": "session.created",
+     "occurred_at": "2026-11-17T04:09:34.293Z",
+     "payload": {
+      "mode": "build",
+      "model": "scripted-1",
+      "provider": "scripted",
+      "root": "/tmp/nexcap-9jv0w967/ws",
+      "runtime": "nex",
+      "session_id": "session_01m7kv49anxfy0698r0s78vqay",
+      "title": "untitled"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 1,
+     "stream_id": "session_01m7kv49anxfy0698r0s78vqay"
+    },
+    "gseq": 3
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "device:phone-fixture",
+      "type": "remote"
+     },
+     "event_id": "evt_01m7kv49aq4z0rfjn9cdaqxq7r",
+     "kind": "message.completed",
+     "occurred_at": "2026-11-17T04:09:34.295Z",
+     "payload": {
+      "message_id": "msg_01m7kv49apfrxqhrs99dbgx5dk",
+      "role": "user",
+      "text": "add() subtracts; fix it and run the tests",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 2,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 4
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49aq9qwfh70gk9jn7na4",
+     "kind": "turn.started",
+     "occurred_at": "2026-11-17T04:09:34.295Z",
+     "payload": {
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p",
+      "user_message_id": "msg_01m7kv49apfrxqhrs99dbgx5dk"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 3,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 5
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "scripted",
+      "type": "agent"
+     },
+     "event_id": "evt_01m7kv49aqzbnf9c5a2ghcshpc",
+     "kind": "message.delta",
+     "occurred_at": "2026-11-17T04:09:34.295Z",
+     "payload": {
+      "attempt": 0,
+      "message_id": "msg_01m7kv49aqwqg0dt9ye5wfzp16",
+      "text": "Fixing the operator.",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 4,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 6
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "scripted",
+      "type": "agent"
+     },
+     "event_id": "evt_01m7kv49ar8s3ww5hdjxw0tjfh",
+     "kind": "message.completed",
+     "occurred_at": "2026-11-17T04:09:34.296Z",
+     "payload": {
+      "message_id": "msg_01m7kv49aqwqg0dt9ye5wfzp16",
+      "role": "assistant",
+      "text": "Fixing the operator.",
+      "tool_calls": [
+       {
+        "args": {
+         "new_text": "$1 + $2",
+         "old_text": "$1 - $2",
+         "path": "lib.sh"
+        },
+        "id": "toolu_s0_0",
+        "name": "edit_file"
+       }
+      ],
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p",
+      "usage": {
+       "cached_input_tokens": 0,
+       "input_tokens": 550,
+       "output_tokens": 5,
+       "source": "local_estimate"
+      }
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 5,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 7
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "scripted",
+      "type": "agent"
+     },
+     "event_id": "evt_01m7kv49arharytxcrwytamepr",
+     "kind": "tool.requested",
+     "occurred_at": "2026-11-17T04:09:34.296Z",
+     "payload": {
+      "args": {
+       "new_text": "$1 + $2",
+       "old_text": "$1 - $2",
+       "path": "lib.sh"
+      },
+      "call_id": "call_a441a7ae6d2d3cec40402206b7",
+      "decision": "allow",
+      "reasons": [
+       "mode build default: Allow"
+      ],
+      "scopes": [
+       "fs.write"
+      ],
+      "tool": "edit_file",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 6,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 8
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49arrhdtb4fm3m542nkk",
+     "kind": "tool.started",
+     "occurred_at": "2026-11-17T04:09:34.296Z",
+     "payload": {
+      "args": {
+       "new_text": "$1 + $2",
+       "old_text": "$1 - $2",
+       "path": "lib.sh"
+      },
+      "call_id": "call_a441a7ae6d2d3cec40402206b7",
+      "tool": "edit_file"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 7,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 9
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49asbb0mnfghydgbhcwv",
+     "kind": "artifact.created",
+     "occurred_at": "2026-11-17T04:09:34.297Z",
+     "payload": {
+      "artifact_id": "art_01m7kv49art8z88bqjgr9dht3j",
+      "name": "call_a441a7ae6d2d3cec40402206b7.log",
+      "provenance": "tool_log",
+      "sha256": "63ba0ea1ddf19f323aaca7ee81b10054d0766869c21c7c2a4cb1606c6a47f921",
+      "size": 13
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 8,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 10
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49ayy9kr6s4gx313y9vq",
+     "kind": "tool.completed",
+     "occurred_at": "2026-11-17T04:09:34.302Z",
+     "payload": {
+      "call_id": "call_a441a7ae6d2d3cec40402206b7",
+      "changed_paths": [
+       "lib.sh"
+      ],
+      "duration_ms": 0,
+      "exit_code": null,
+      "is_error": false,
+      "log_artifact": "art_01m7kv49art8z88bqjgr9dht3j",
+      "status": "exited",
+      "tool": "edit_file",
+      "tree": "1178b0ed4c61340861720f5c939af99d2ee59c0f5c8e2b6ce6dbbd03c9136867"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 9,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 11
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49aycbdshc57h1t93na2",
+     "kind": "message.completed",
+     "occurred_at": "2026-11-17T04:09:34.302Z",
+     "payload": {
+      "message_id": "msg_01m7kv49ay4h0r36h6j3cgm099",
+      "results": [
+       {
+        "id": "toolu_s0_0",
+        "is_error": false
+       }
+      ],
+      "role": "tool",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 10,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 12
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "scripted",
+      "type": "agent"
+     },
+     "event_id": "evt_01m7kv49ayjrsmjdfwxaje26w2",
+     "kind": "message.delta",
+     "occurred_at": "2026-11-17T04:09:34.302Z",
+     "payload": {
+      "attempt": 0,
+      "message_id": "msg_01m7kv49ayf3ak012prhg88zmr",
+      "text": "Running the tests.",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 11,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 13
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "scripted",
+      "type": "agent"
+     },
+     "event_id": "evt_01m7kv49az2e3p1886bybx2jx4",
+     "kind": "message.completed",
+     "occurred_at": "2026-11-17T04:09:34.303Z",
+     "payload": {
+      "message_id": "msg_01m7kv49ayf3ak012prhg88zmr",
+      "role": "assistant",
+      "text": "Running the tests.",
+      "tool_calls": [
+       {
+        "args": {
+         "command": "bash test.sh"
+        },
+        "id": "toolu_s1_0",
+        "name": "run_command"
+       }
+      ],
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p",
+      "usage": {
+       "cached_input_tokens": 0,
+       "input_tokens": 578,
+       "output_tokens": 5,
+       "source": "local_estimate"
+      }
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 12,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 14
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "scripted",
+      "type": "agent"
+     },
+     "event_id": "evt_01m7kv49az680a1q6v8zsyts97",
+     "kind": "tool.requested",
+     "occurred_at": "2026-11-17T04:09:34.303Z",
+     "payload": {
+      "args": {
+       "command": "bash test.sh"
+      },
+      "call_id": "call_964a0c4c17c5660d48b7044f3c",
+      "decision": "ask",
+      "reasons": [
+       "mode build default: Ask"
+      ],
+      "scopes": [
+       "process.exec"
+      ],
+      "tool": "run_command",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 13,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 15
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49azdf77p945acc5q5n0",
+     "kind": "tool.approval_requested",
+     "occurred_at": "2026-11-17T04:09:34.303Z",
+     "payload": {
+      "approval_id": "appr_01m7kv49azhjjynd7z9qyp5k3r",
+      "args": {
+       "command": "bash test.sh"
+      },
+      "call_id": "call_964a0c4c17c5660d48b7044f3c",
+      "expires_at": "2026-11-17T05:09:34.303Z",
+      "fingerprint": "197d99a2621b05920705a85e9cc7271e146f69b8ef11db5be6a3cc0da7028afc",
+      "reasons": [
+       "mode build default: Ask"
+      ],
+      "scopes": [
+       "process.exec"
+      ],
+      "summary": "run `bash test.sh`",
+      "tool": "run_command"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 14,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 16
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "device:phone-fixture",
+      "type": "remote"
+     },
+     "event_id": "evt_01m7kv49hg4stk0cmfzttqmqna",
+     "kind": "tool.approved",
+     "occurred_at": "2026-11-17T04:09:34.512Z",
+     "payload": {
+      "approval_id": "appr_01m7kv49azhjjynd7z9qyp5k3r",
+      "by": "device:phone-fixture",
+      "call_id": "call_964a0c4c17c5660d48b7044f3c",
+      "fingerprint": "197d99a2621b05920705a85e9cc7271e146f69b8ef11db5be6a3cc0da7028afc",
+      "reason": ""
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 15,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 17
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49hmqymz67sa1fddga1x",
+     "kind": "tool.started",
+     "occurred_at": "2026-11-17T04:09:34.516Z",
+     "payload": {
+      "args": {
+       "command": "bash test.sh"
+      },
+      "call_id": "call_964a0c4c17c5660d48b7044f3c",
+      "tool": "run_command"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 16,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 18
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49jkshrm508fjmphztqh",
+     "kind": "artifact.created",
+     "occurred_at": "2026-11-17T04:09:34.547Z",
+     "payload": {
+      "artifact_id": "art_01m7kv49jjn6xv74jd32wsv3p4",
+      "name": "call_964a0c4c17c5660d48b7044f3c.log",
+      "provenance": "tool_log",
+      "sha256": "2f4819fb3a623994b89a3adeb2dae7f0f8eeafe7522ed551e9048fdf2afa6088",
+      "size": 59
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 17,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 19
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49k6e8jmj3h1d60fdywq",
+     "kind": "tool.completed",
+     "occurred_at": "2026-11-17T04:09:34.566Z",
+     "payload": {
+      "call_id": "call_964a0c4c17c5660d48b7044f3c",
+      "changed_paths": [],
+      "duration_ms": 26,
+      "exit_code": 0,
+      "is_error": false,
+      "log_artifact": "art_01m7kv49jjn6xv74jd32wsv3p4",
+      "status": "exited",
+      "tool": "run_command",
+      "tree": "1178b0ed4c61340861720f5c939af99d2ee59c0f5c8e2b6ce6dbbd03c9136867"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 18,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 20
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49k8d4vnrr5yv9h81817",
+     "kind": "message.completed",
+     "occurred_at": "2026-11-17T04:09:34.568Z",
+     "payload": {
+      "message_id": "msg_01m7kv49k7h8rtccy46vn10mnm",
+      "results": [
+       {
+        "id": "toolu_s1_0",
+        "is_error": false
+       }
+      ],
+      "role": "tool",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 19,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 21
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "scripted",
+      "type": "agent"
+     },
+     "event_id": "evt_01m7kv49k9ngzw9wjq0qg3pd27",
+     "kind": "message.delta",
+     "occurred_at": "2026-11-17T04:09:34.569Z",
+     "payload": {
+      "attempt": 0,
+      "message_id": "msg_01m7kv49k8j7rkw8048pc4bcj7",
+      "text": "Fixed add(); all tests pass.",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 20,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 22
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "scripted",
+      "type": "agent"
+     },
+     "event_id": "evt_01m7kv49kafvnz1bvvjxtk1kqf",
+     "kind": "message.completed",
+     "occurred_at": "2026-11-17T04:09:34.570Z",
+     "payload": {
+      "message_id": "msg_01m7kv49k8j7rkw8048pc4bcj7",
+      "role": "assistant",
+      "text": "Fixed add(); all tests pass.",
+      "tool_calls": [],
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p",
+      "usage": {
+       "cached_input_tokens": 0,
+       "input_tokens": 598,
+       "output_tokens": 7,
+       "source": "local_estimate"
+      }
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 21,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 23
+   },
+   {
+    "event": {
+     "actor": {
+      "id": "nexd",
+      "type": "system"
+     },
+     "event_id": "evt_01m7kv49kqrx9zzkhvqvr8gf1f",
+     "kind": "turn.completed",
+     "occurred_at": "2026-11-17T04:09:34.583Z",
+     "payload": {
+      "outcome": {
+       "outcome": "completed",
+       "steps": 3,
+       "text": "Fixed add(); all tests pass.",
+       "verification": {
+        "claim_without_evidence": false,
+        "claims_success": true,
+        "reason": "bash test.sh exited 0 on the current tree",
+        "status": "verified",
+        "tests": [
+         {
+          "artifact_verified": true,
+          "call_id": "call_964a0c4c17c5660d48b7044f3c",
+          "command": "bash test.sh",
+          "current_tree": true,
+          "exit_code": 0,
+          "log_artifact": "art_01m7kv49jjn6xv74jd32wsv3p4",
+          "state": "succeeded",
+          "tree": "1178b0ed4c61340861720f5c939af99d2ee59c0f5c8e2b6ce6dbbd03c9136867"
+         }
+        ],
+        "tree": "1178b0ed4c61340861720f5c939af99d2ee59c0f5c8e2b6ce6dbbd03c9136867"
+       }
+      },
+      "state": "completed",
+      "turn_id": "turn_01m7kv49apcrp5d9htcqt98k8p"
+     },
+     "protocol_version": "1.0",
+     "redaction_level": "normal",
+     "sequence": 22,
+     "stream_id": "session_01m7kv499q28bcmakbkhvw27fv"
+    },
+    "gseq": 24
+   }
+  ],
+  "last_gseq": 24
+ }
+}

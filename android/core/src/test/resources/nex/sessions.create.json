@@ -1,0 +1,15 @@
+{
+ "jsonrpc": "2.0",
+ "id": 5,
+ "result": {
+  "base_revision": "27e42ff49162dfdef773aeddab56acd4d621e0b2",
+  "mode": "build",
+  "model": "scripted-1",
+  "provider": "scripted",
+  "repo": true,
+  "root": "/tmp/nexcap-9jv0w967/ws",
+  "runtime": "nex",
+  "session_id": "session_01m7kv49ajz1t6vrma7crp3t08",
+  "title": "Second look"
+ }
+}

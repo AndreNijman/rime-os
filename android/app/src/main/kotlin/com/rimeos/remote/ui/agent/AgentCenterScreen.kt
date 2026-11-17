@@ -80,6 +80,8 @@ fun AgentCenterScreen(
     onApprovals: () -> Unit,
     /** Open the guide. */
     onHelp: () -> Unit,
+    /** Open nex on this machine, or null when its bridge reaches no nexd. */
+    onNex: (() -> Unit)? = null,
     /**
      * Ask the machine for its clipboard (P1-059 criterion 3, receive half).
      *
@@ -188,6 +190,7 @@ fun AgentCenterScreen(
             // row wraps instead, so every action stays on the screen at every
             // font scale. Measured by `LayoutOnDeviceTest` at scale 2.0.
             FlowRow(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+                onNex?.let { TextButton(onClick = it) { Text("nex") } }
                 TextButton(onClick = onProjects) { Text("Projects") }
                 TextButton(onClick = onApprovals) {
                     Text(
