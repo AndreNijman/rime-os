@@ -507,6 +507,8 @@ fun RimeRemoteApp(
         // pairing effect below: `navigate` before the `NavHost` has composed
         // throws, and a cold launch from a notification is exactly that
         // moment.
+        // A nex tap that had to connect first: the machine it is waiting for.
+        var pendingNex by remember { mutableStateOf<String?>(null) }
         LaunchedEffect(alertTarget) {
             val target = alertTarget ?: return@LaunchedEffect
             // Consumed whatever happens. A tap that could not be honoured must
@@ -517,8 +519,14 @@ fun RimeRemoteApp(
             val goes = target.goesTo(
                 connected = connected?.deviceId,
                 nexOffered = state.links[target.machine]?.remote?.has(Nex.FEATURE) == true,
+                paired = state.machines.any { it.deviceId == target.machine },
             )
-            if (goes == AlertTap.GoesTo.NEX && connected != null) {
+            val tapped = state.machines.firstOrNull { it.deviceId == target.machine }
+            if (goes == AlertTap.GoesTo.CONNECT_FOR_NEX && tapped != null) {
+                pendingNex = tapped.deviceId
+                viewModel.connect(activity, tapped)
+                navigation.navigate(Destinations.AGENTS) { launchSingleTop = true }
+            } else if (goes == AlertTap.GoesTo.NEX && connected != null) {
                 // nex names no session in a push: its screen lists what waits.
                 nexModel.open(connected)
                 navigation.navigate(Destinations.NEX) { launchSingleTop = true }
@@ -534,6 +542,28 @@ fun RimeRemoteApp(
                     if (state.agents.machine != null) Destinations.AGENTS else Destinations.MACHINES,
                 ) { launchSingleTop = true }
             }
+        }
+
+        // The connection a nex tap asked for (AlertTap.afterConnect says what
+        // happens once it lands), forgotten after AlertTap.CONNECT_WAIT_MS.
+        val pendingFeatures = pendingNex?.let { state.links[it]?.remote?.features }
+        LaunchedEffect(pendingNex, state.agents.machine?.deviceId, pendingFeatures) {
+            val want = pendingNex ?: return@LaunchedEffect
+            val connected = state.agents.machine
+            when (AlertTap.afterConnect(want, connected?.deviceId, pendingFeatures)) {
+                AlertTap.Then.WAIT -> Unit
+                AlertTap.Then.GIVE_UP, AlertTap.Then.STAY -> pendingNex = null
+                AlertTap.Then.OPEN_NEX -> {
+                    pendingNex = null
+                    nexModel.open(connected!!)
+                    navigation.navigate(Destinations.NEX) { launchSingleTop = true }
+                }
+            }
+        }
+        LaunchedEffect(pendingNex) {
+            if (pendingNex == null) return@LaunchedEffect
+            kotlinx.coroutines.delay(AlertTap.CONNECT_WAIT_MS)
+            pendingNex = null
         }
 
         // A link that carries a pairing code opens the screen that can explain

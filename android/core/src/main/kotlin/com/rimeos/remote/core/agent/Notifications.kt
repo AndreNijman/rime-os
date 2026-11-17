@@ -1,5 +1,7 @@
 package com.rimeos.remote.core.agent
 
+import com.rimeos.remote.core.nex.Nex
+
 /**
  * What a notification says, decided where a test can read it.
  *
@@ -145,7 +147,7 @@ data class NotificationContent(
  * connected one before it opens anything.
  */
 data class AlertTap(val machine: String, val session: Int, val nex: Boolean = false) {
-    enum class GoesTo { NEX, SESSION, ELSEWHERE }
+    enum class GoesTo { NEX, CONNECT_FOR_NEX, SESSION, ELSEWHERE }
 
     /**
      * Where this tap may go, given the machine the phone is connected to and
@@ -156,10 +158,47 @@ data class AlertTap(val machine: String, val session: Int, val nex: Boolean = fa
      * computer's work. A nex tap on a machine whose bridge no longer reaches
      * nexd has nothing to open either. A session tap may still find its
      * session gone; the caller checks that.
+     *
+     * A nex tap while no machine is connected (the app was closed, which is
+     * the case a push exists for) connects to the machine it names, when
+     * that machine is paired, and opens nex once the machine says it offers
+     * it. Connecting asks for the device key, and the person has just asked
+     * to see that machine, so the prompt is the one they expect. A tap for
+     * another machine while one is connected does not switch machines.
      */
-    fun goesTo(connected: String?, nexOffered: Boolean): GoesTo = when {
+    fun goesTo(connected: String?, nexOffered: Boolean, paired: Boolean = false): GoesTo = when {
+        nex && connected == null && paired -> GoesTo.CONNECT_FOR_NEX
         connected != machine -> GoesTo.ELSEWHERE
         nex -> if (nexOffered) GoesTo.NEX else GoesTo.ELSEWHERE
         else -> GoesTo.SESSION
+    }
+
+    /** What a nex tap that had to connect first does next. */
+    enum class Then { WAIT, OPEN_NEX, STAY, GIVE_UP }
+
+    companion object {
+        /** How long a nex tap waits for its connection before it is forgotten. */
+        const val CONNECT_WAIT_MS = 60_000L
+
+        /**
+         * After [GoesTo.CONNECT_FOR_NEX]: the phone asked to connect to
+         * [waitingFor]; [connected] is the machine it is connected to now (or
+         * null), and [features] is what that machine's hello offered (empty
+         * until the real hello arrives, null when there is no link yet).
+         *
+         * Opens nex only on the machine the tap named, and only once that
+         * machine has said it offers nex. A machine whose hello lacks nex
+         * leaves the person on the Agent Center they were taken to. Connected
+         * to some other machine means the person chose it: the tap is dropped.
+         * The caller drops it too after [CONNECT_WAIT_MS], so a refused key
+         * prompt or a machine that is off does not jump to nex much later.
+         */
+        fun afterConnect(waitingFor: String, connected: String?, features: List<String>?): Then = when {
+            connected == null -> Then.WAIT
+            connected != waitingFor -> Then.GIVE_UP
+            features.isNullOrEmpty() -> Then.WAIT
+            Nex.FEATURE in features -> Then.OPEN_NEX
+            else -> Then.STAY
+        }
     }
 }

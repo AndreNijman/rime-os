@@ -205,6 +205,21 @@ is open. When the app is closed, `rime-remoted` watches the runtime itself and
 posts an **encrypted 51-byte envelope** to a push server, which a UnifiedPush
 distributor on the phone turns into a notification.
 
+### nex approvals wake the phone too
+
+A nex approval on a machine (Rime's agent harness asking before it runs
+something) sends the same kind of alert: **"nex needs a decision ·
+<machine>"**. The alert holds no command text; the nex screen shows that once
+the app unlocks. A tap opens nex on that machine and connects to it first if
+the app had stopped. A machine that no longer offers nex opens the Agent Center
+instead.
+
+While a phone holds a push registration, the watcher asks nexd what waits, at
+four-second intervals, as a device named `rime-remote-push`. One alert goes out
+per approval it has not seen. nexd's first answer raises nothing, and an
+approval you already heard about stays quiet when nexd comes back after a
+restart.
+
 ### What you have to do: one thing
 
 **Install a UnifiedPush distributor on the phone.** [ntfy][ntfy] is the usual

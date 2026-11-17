@@ -207,6 +207,17 @@ listed in `remote_approve`. Every write is recorded with actor
   as 0.
 - A one-shot `nex` channel ends by itself after its answer. The phone does not
   need to close it.
+- Push kind **9** (`NexApproval`) means "nex has an approval you have not been
+  told about". Session -1, adapter 0, start 0: the envelope names nothing. While
+  a phone holds a push registration, each poll of the push loop opens its own
+  connection, declares `{"kind":"device","id":"rime-remote-push"}`, calls
+  `tools.pending` and closes, within 5 s. Kind 9 goes out when an `approval_id`
+  appears that the previous answer lacked. The first answer raises nothing.
+  While nexd is silent the loop keeps the last answer, so an approval it already
+  knew about raises nothing when nexd answers again. The phone shows "nex needs
+  a decision · <machine>". A tap opens nex on that machine and, with no machine
+  connected, dials it first, waits up to 60 s for a hello that lists `nex`, and
+  stays on the Agent Center if the hello lacks it.
 
 ## 3. The phone
 
