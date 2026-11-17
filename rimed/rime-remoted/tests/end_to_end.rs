@@ -1562,3 +1562,79 @@ fn a_paired_phone_reaches_nex_through_the_running_service() {
     );
     assert_eq!(nexd.methods()[before..], ["system.declare_origin".to_string()]);
 }
+
+#[test]
+fn a_phone_reports_its_battery_rings_over_its_link_and_revoke_forgets_both() {
+    let h = harness!("ring");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let id = rime_remote_core::device::Device::id_for(&device.key());
+    let mut session = device.connect(&h).expect("a session");
+
+    let hello = session.call(r#"{"cmd":"remote_hello"}"#);
+    let features = hello["features"].as_array().expect("features").clone();
+    for f in ["device_events", "phone_report"] {
+        assert!(features.iter().any(|x| x == f), "{f} not offered: {hello}");
+    }
+
+    // Before the phone has said it can ring, and with no channel and no push,
+    // a ring is refused in words, and quickly: nothing waits for an ack.
+    let started = Instant::now();
+    let r = h.control(r#"{"cmd":"ring","device":"pixel-8"}"#);
+    assert_eq!(r["reply"], "error", "{r}");
+    assert!(r["message"].as_str().unwrap().contains("has not said it can ring"), "{r}");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+
+    // The report, then the listing shows it under the handshake's id.
+    let ok = session.call(r#"{"cmd":"phone_report","battery":62,"charging":true,"can":["ring"]}"#);
+    assert_eq!(ok["reply"], "ok", "{ok}");
+    let refused = session.call(r#"{"cmd":"phone_report","battery":140}"#);
+    assert_eq!(refused["reply"], "error", "{refused}");
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    assert_eq!(listed["phones"][&id]["battery"], 62, "{listed}");
+    assert_eq!(listed["phones"][&id]["charging"], true, "{listed}");
+    assert_eq!(listed["phones"][&id]["can"], serde_json::json!(["ring"]), "{listed}");
+
+    // The channel, then a ring the phone acks: "link".
+    session.send(Frame::Open {
+        channel: 9,
+        request: br#"{"cmd":"device_events"}"#.to_vec(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "events", "{v}");
+        }
+        other => panic!("expected the events reply, got {other:?}"),
+    }
+    let socket = h.remoted_socket.clone();
+    let asked = std::thread::spawn(move || one_line(&socket, r#"{"cmd":"ring","device":"pixel-8"}"#));
+    let ring = session.lines_on(9, 1).remove(0);
+    assert_eq!(ring["event"], "ring", "{ring}");
+    let now_s = rime_remote_core::now_ms() / 1000;
+    let at = ring["at"].as_u64().expect("at");
+    assert!(at <= now_s && now_s - at < 10, "{ring}");
+    let ack = session.call(&format!(r#"{{"cmd":"ring_ack","id":{}}}"#, ring["id"]));
+    assert_eq!(ack["reply"], "ok", "{ack}");
+    let rang = asked.join().expect("ring");
+    assert_eq!(rang["reply"], "rang", "{rang}");
+    assert_eq!(rang["path"], "link", "{rang}");
+    assert_eq!(rang["device"], "pixel-8", "{rang}");
+
+    // A ring nobody acks is not reported as rung. This phone has no push
+    // registration, so it ends in the sentence that says how to fix that.
+    let r = h.control(r#"{"cmd":"ring","device":"pixel-8"}"#);
+    assert_eq!(r["reply"], "error", "{r}");
+    assert!(r["message"].as_str().unwrap().contains("no push service"), "{r}");
+
+    // Revoke: the report is gone from the listing, and the events channel
+    // with it.
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    assert!(listed["phones"].get(&id).is_none(), "{listed}");
+    let r = h.control(r#"{"cmd":"ring","device":"pixel-8"}"#);
+    assert!(r["message"].as_str().unwrap().contains("revoked"), "{r}");
+    let phones = std::fs::read_to_string(h.root.join("state/rime/remote/phones.json")).unwrap_or_default();
+    assert!(!phones.contains(&id), "{phones}");
+}

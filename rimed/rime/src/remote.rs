@@ -52,6 +52,15 @@ pub enum RemoteCmd {
         /// Device id, or its name when that names exactly one.
         device: String,
     },
+    /// Make a paired phone ring, to find it.
+    ///
+    /// Goes over its connection when Rime Remote is open on it, and through
+    /// its push service when it is not. Says which, and says "asked" when
+    /// nothing came back to prove the phone heard it.
+    Ring {
+        /// Device id, or its name when that names exactly one.
+        device: String,
+    },
     /// Whether the service is running, and how a device would reach it.
     ///
     /// Including every connection open right now: which path it came in on,
@@ -81,6 +90,19 @@ enum Request {
     Pair,
     Devices,
     Revoke { device: String },
+    Ring { device: String },
+}
+
+/// A phone's last report, as `rime-remoted` keeps it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Phone {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    battery: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    charging: Option<bool>,
+    #[serde(default)]
+    can: Vec<String>,
+    reported_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +126,12 @@ enum Reply {
     },
     Devices {
         devices: Vec<rime_remote_core::device::Device>,
+        #[serde(default)]
+        phones: std::collections::BTreeMap<String, Phone>,
+    },
+    Rang {
+        device: String,
+        path: String,
     },
     Ok,
     Error {
@@ -120,6 +148,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         RemoteCmd::Pair { text } => pair(text),
         RemoteCmd::Devices { json } => devices(json),
         RemoteCmd::Revoke { device } => revoke(&device),
+        RemoteCmd::Ring { device } => ring(&device),
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
     };
@@ -234,11 +263,11 @@ fn pair(text: bool) -> Result<i32> {
 }
 
 fn devices(json: bool) -> Result<i32> {
-    let Reply::Devices { devices } = call(&Request::Devices)? else {
+    let Reply::Devices { devices, phones } = call(&Request::Devices)? else {
         return unexpected();
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&devices)?);
+        println!("{}", serde_json::to_string_pretty(&with_phones(&devices, &phones)?)?);
         return Ok(0);
     }
     if devices.is_empty() {
@@ -271,7 +300,70 @@ fn devices(json: bool) -> Result<i32> {
             gated.join(", ")
         );
     }
+    let reported: Vec<String> = devices
+        .iter()
+        .filter(|d| d.is_active())
+        .filter_map(|d| phones.get(&d.id).and_then(|p| battery_line(&d.name, p)))
+        .collect();
+    if !reported.is_empty() {
+        println!();
+        for line in reported {
+            println!("{line}");
+        }
+    }
     Ok(0)
+}
+
+/// The device list as JSON, each paired phone with its last report under
+/// `phone`. Added to each device rather than beside the list, so a reader of
+/// the old array keeps working.
+fn with_phones(
+    devices: &[rime_remote_core::device::Device],
+    phones: &std::collections::BTreeMap<String, Phone>,
+) -> Result<serde_json::Value> {
+    let mut out = Vec::with_capacity(devices.len());
+    for d in devices {
+        let mut v = serde_json::to_value(d)?;
+        if let (Some(p), Some(obj)) = (phones.get(&d.id).filter(|_| d.is_active()), v.as_object_mut()) {
+            obj.insert("phone".into(), serde_json::to_value(p)?);
+        }
+        out.push(v);
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+/// "Pixel 8: battery 62%, charging, reported 3m ago", or nothing when the phone
+/// reported no battery.
+fn battery_line(name: &str, p: &Phone) -> Option<String> {
+    let battery = p.battery?;
+    let charging = match p.charging {
+        Some(true) => ", charging",
+        _ => "",
+    };
+    Some(format!("{name}: battery {battery}%{charging}, reported {}", ago(p.reported_ms)))
+}
+
+fn ring(device: &str) -> Result<i32> {
+    match call(&Request::Ring {
+        device: device.to_string(),
+    })? {
+        Reply::Rang { device, path } if path == "link" => {
+            eprintln!("rime: {device} is ringing.");
+            Ok(0)
+        }
+        Reply::Rang { device, .. } => {
+            eprintln!(
+                "rime: asked {device} to ring through its push service. It rings if it is \
+                 switched on and online."
+            );
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
 }
 
 fn revoke(device: &str) -> Result<i32> {
@@ -507,6 +599,9 @@ mod tests {
             Request::Revoke {
                 device: "pixel-8".into(),
             },
+            Request::Ring {
+                device: "pixel-8".into(),
+            },
         ] {
             let text = serde_json::to_string(&r).expect("serialise");
             assert!(!text.contains('\n'), "{text}");
@@ -523,10 +618,39 @@ mod tests {
             r#"{"reply":"error","message":"nope"}"#,
             r#"{"reply":"offer","qr":"apex-remote:abc","expires_ms":1}"#,  // rime-rename: keep (SCHEME)
             r#"{"reply":"devices","devices":[]}"#,
+            r#"{"reply":"devices","devices":[],"phones":{"d":{"battery":5,"can":["ring"],"reported_ms":1}}}"#,
+            r#"{"reply":"rang","device":"Pixel","path":"push"}"#,
             r#"{"reply":"status","version":1,"key":"k","machine":"l16","lan":[],"relay":null,"rendezvous":"r","paired":0,"offer_ms_left":null}"#,
         ] {
             serde_json::from_str::<Reply>(text).unwrap_or_else(|e| panic!("{text}: {e}"));
         }
+    }
+
+    #[test]
+    fn ring_is_its_own_request_on_the_wire() {
+        let text = serde_json::to_string(&Request::Ring { device: "Pixel".into() }).expect("serialise");
+        assert_eq!(text, r#"{"cmd":"ring","device":"Pixel"}"#);
+    }
+
+    #[test]
+    fn a_phone_report_rides_on_its_device_and_only_while_it_is_paired() {
+        let devices: Vec<rime_remote_core::device::Device> = serde_json::from_str(
+            r#"[{"id":"aaaa","name":"Pixel","public_key":"k","paired_ms":1},
+                {"id":"bbbb","name":"Old","public_key":"k2","paired_ms":2,"revoked_ms":3},
+                {"id":"cccc","name":"Tab","public_key":"k3","paired_ms":4}]"#,
+        )
+        .expect("devices");
+        let phone = Phone { battery: Some(62), charging: Some(true), can: vec!["ring".into()], reported_ms: 0 };
+        let phones: std::collections::BTreeMap<String, Phone> =
+            [("aaaa".to_string(), phone.clone()), ("bbbb".to_string(), phone.clone())].into();
+        let v = with_phones(&devices, &phones).expect("json");
+        assert_eq!(v[0]["phone"]["battery"], 62);
+        assert!(v[1].get("phone").is_none(), "a revoked device's report must not show");
+        assert!(v[2].get("phone").is_none(), "a device that never reported has none");
+        assert_eq!(v[0]["name"], "Pixel", "the device's own fields are kept");
+        let line = battery_line("Pixel", &phone).expect("line");
+        assert!(line.starts_with("Pixel: battery 62%, charging, reported "), "{line}");
+        assert_eq!(battery_line("Pixel", &Phone { battery: None, ..phone }), None);
     }
 
     #[test]

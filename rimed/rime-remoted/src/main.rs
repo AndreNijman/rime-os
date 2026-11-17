@@ -32,6 +32,7 @@ mod machine;
 mod net;
 mod nex;
 mod peer;
+mod phone;
 mod proxy;
 mod push;
 mod relay;

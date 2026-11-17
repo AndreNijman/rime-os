@@ -354,6 +354,50 @@ answers from `<dir>/state.json` (the same shape as the replies above) and
 appends every action to `<dir>/actions.jsonl`. `run-device-suite.sh` always
 sets it.
 
+### 2.5 The phone itself: its report, and ring
+
+`remote_hello.features` gains `"device_events"` and `"phone_report"`. A phone
+uses neither with a machine whose hello lacks them.
+
+```json
+{"cmd":"phone_report","battery":62,"charging":true,"can":["ring"]}
+→ {"reply":"ok"}
+```
+
+- Answered by rime-remoted, under the handshake's device id. `battery` is a
+  whole number from 0 to 100, `charging` a boolean, `can` at most 8 words; any
+  of them may be left out. A value outside those is `bad_request` and nothing
+  is stored. Of `can`, only `"ring"` is kept.
+- The last report per device is in `phones.json` beside `devices.json` (0600,
+  written whole). `rime remote devices` lists it; the control reply carries it
+  as `phones`, keyed by device id; `--json` puts it on each paired device as
+  `phone`. Revoke deletes it.
+- `Open` with `{"cmd":"device_events"}` answers `{"reply":"events"}` and stays
+  open. It is read-only: `Data` from the phone is dropped. Opening it again
+  replaces the device's previous channel, which closes. It carries one JSON
+  object per line. The only event today is
+  `{"event":"ring","id":N,"at":<unix seconds>,"machine":"<name>"}`.
+- The phone answers a ring with `{"cmd":"ring_ack","id":N}` → `{"reply":"ok"}`.
+
+**Ring** is a control-socket request (`rime remote ring <device>`, by id or
+name, as `revoke`), so only the machine's own user can send one. A paired phone
+has no verb that rings anything: `ring` and `device_events` sent as control
+lines are forwarded to rime-agentd, which does not know them.
+
+1. With a `device_events` channel open, the event is written there. An ack
+   within 4 s answers `{"reply":"rang","device":<name>,"path":"link"}`.
+2. Otherwise, or with no ack, push kind **10** (`Ring`) goes to that one device,
+   never to every registered phone. Session -1, adapter 0, `started` = the
+   ring's `at`. Sent only to a phone whose last report has `"ring"` in `can`,
+   because a build without kind 10 drops it unseen. The push service accepting
+   it answers `{"reply":"rang",…,"path":"push"}`: asked, not confirmed.
+3. Otherwise `{"reply":"error","message":…}` says why: the phone never said it
+   can ring, it has no push registration, the push service refused, or the
+   device is revoked.
+
+The phone drops a ring whose `at` or `started` is more than 60 s old, so a push
+delivered late does not ring.
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in

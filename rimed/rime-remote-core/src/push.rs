@@ -176,6 +176,15 @@ pub enum Kind {
     /// (the command, the file) never goes into an envelope: the body has
     /// nowhere to put it.
     NexApproval = 9,
+    /// Somebody at this machine asked the phone to ring (`rime remote ring`).
+    ///
+    /// Sent to ONE device, never fanned out, and only to a phone that said in
+    /// its `phone_report` that it can ring: a build from before this kind
+    /// drops a code it does not know, and the computer would otherwise report
+    /// a ring that made no sound. `started` carries the moment it was asked,
+    /// in unix seconds, so a push that a distributor delivers late is dropped
+    /// by the phone instead of ringing an hour after nobody wanted it.
+    Ring = 10,
 }
 
 impl Kind {
@@ -194,6 +203,7 @@ impl Kind {
             7 => Some(Kind::Deployed),
             8 => Some(Kind::DeployFailed),
             9 => Some(Kind::NexApproval),
+            10 => Some(Kind::Ring),
             _ => None,
         }
     }
@@ -204,7 +214,7 @@ impl Kind {
 
     /// Every kind, so a test can walk the vocabulary rather than a list
     /// somebody has to remember to extend.
-    pub const ALL: [Kind; 9] = [
+    pub const ALL: [Kind; 10] = [
         Kind::Waiting,
         Kind::Permission,
         Kind::Failed,
@@ -214,6 +224,7 @@ impl Kind {
         Kind::Deployed,
         Kind::DeployFailed,
         Kind::NexApproval,
+        Kind::Ring,
     ];
 
     /// Whether this kind reports a deployment.
@@ -1064,13 +1075,14 @@ mod tests {
             assert_ne!(kind.code(), 0, "0 must stay free as 'not a kind'");
         }
         assert_eq!(Kind::from_code(0), None);
-        assert_eq!(Kind::from_code(10), None);
+        assert_eq!(Kind::from_code(11), None);
         // The discriminants are the wire: a variant inserted rather than
         // appended would renumber the ones after it and a phone built before
         // the change would render the wrong sentence.
         assert_eq!(Kind::Waiting.code(), 1);
         assert_eq!(Kind::DeployFailed.code(), 8);
         assert_eq!(Kind::NexApproval.code(), 9);
+        assert_eq!(Kind::Ring.code(), 10);
     }
 
     #[test]

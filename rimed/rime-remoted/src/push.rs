@@ -467,6 +467,47 @@ pub fn fan_out(state: &State, raised: &[Raised], trust: Option<&Trust>) -> usize
     sent
 }
 
+/// Deliver one alert to ONE device: a ring, which is about one phone and is
+/// never fanned out.
+///
+/// Same bookkeeping as [`fan_out`] (sequence drawn and persisted, failures
+/// counted, a gone subscription retired), but the outcome is returned in words
+/// for the person who asked, since somebody is waiting on this one.
+pub fn push_one(state: &State, device_id: &str, raised: Raised, trust: &Trust) -> Result<(), String> {
+    let (endpoint, key) = {
+        let store = state.push_store();
+        let r = store
+            .registrations
+            .get(device_id)
+            .ok_or("it has no push registration")?;
+        (r.endpoint.clone(), r.key.clone())
+    };
+    let parsed = Endpoint::parse(&endpoint).map_err(|e| e.to_string())?;
+    let raw = rime_remote_core::b64_decode(&key).ok_or("its push key is unreadable")?;
+    let seq = state
+        .push_next_seq(device_id)
+        .ok_or("it has no push registration")?;
+    let envelope = Envelope::seal(&raw, &raised.body(seq)).map_err(|e| e.to_string())?;
+    let failed = |why: String| {
+        if state.push_failed(device_id) >= MAX_FAILURES {
+            state.push_forget(device_id);
+        }
+        Err(why)
+    };
+    match deliver(&parsed, &envelope, trust) {
+        Ok(Delivery::Accepted) => {
+            state.push_delivered(device_id);
+            Ok(())
+        }
+        Ok(Delivery::Gone) => {
+            state.push_forget(device_id);
+            Err("its push service no longer knows it; open Rime Remote on it to register again".into())
+        }
+        Ok(Delivery::Retry(code)) => failed(format!("its push service answered {code}")),
+        Err(e) => failed(e),
+    }
+}
+
 /// The loop. Never returns.
 pub fn supervise(state: Arc<State>, agentd: std::path::PathBuf) {
     // One trust store for the life of the daemon, like the relay's. Reading
@@ -1072,7 +1113,14 @@ mod tests {
                 raised.insert(r.kind.code());
             }
         }
-        let want: BTreeSet<u8> = Kind::ALL.iter().map(|k| k.code()).collect();
+        // Ring is the one kind the watcher never raises: somebody at this
+        // machine asks for it (`rime remote ring`), it goes to one device
+        // through `push_one`, and `phone.rs` tests that path.
+        let want: BTreeSet<u8> = Kind::ALL
+            .iter()
+            .filter(|k| **k != Kind::Ring)
+            .map(|k| k.code())
+            .collect();
         assert_eq!(
             raised, want,
             "a kind in the vocabulary has no observation that raises it"

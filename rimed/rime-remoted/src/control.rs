@@ -49,6 +49,8 @@ pub enum Request {
     Devices,
     /// Take a device's access away.
     Revoke { device: String },
+    /// Make a paired phone ring, by id or name.
+    Ring { device: String },
 }
 
 /// What it answers.
@@ -84,7 +86,15 @@ pub enum Reply {
     Offer { qr: String, expires_ms: u64 },
     Devices {
         devices: Vec<rime_remote_core::device::Device>,
+        /// Each phone's last `phone_report`, by device id. Absent from an
+        /// older daemon, so a newer `rime` reads none.
+        #[serde(default)]
+        phones: std::collections::BTreeMap<String, crate::phone::PhoneReport>,
     },
+    /// A ring went out. `path` is `link` when the app said it is ringing, or
+    /// `push` when the push service took the request (the phone rings if it
+    /// is on and online, which nobody here can see).
+    Rang { device: String, path: String },
     Ok,
     Error { message: String },
 }
@@ -152,10 +162,12 @@ fn dispatch(req: Request, peer: Option<crate::peer::Peer>, state: &State) -> Rep
         Request::Devices => match state.devices() {
             Ok(store) => Reply::Devices {
                 devices: store.list().into_iter().cloned().collect(),
+                phones: state.phones(),
             },
             Err(e) => Reply::error(e.to_string()),
         },
         Request::Revoke { device } => revoke(state, &device),
+        Request::Ring { device } => ring(state, &device),
     }
 }
 
@@ -310,7 +322,56 @@ fn revoke(state: &State, device: &str) -> Reply {
     // the one direction of "revoke, eventually" that survives losing the
     // connection, because push needs no connection by construction.
     state.push_forget(&revoked.id);
+    // And what it reported, with its events channel: a revoked phone's
+    // battery has no business staying in the Shell.
+    state.phone_forget(&revoked.id);
     Reply::Ok
+}
+
+fn ring(state: &State, device: &str) -> Reply {
+    let (id, name) = match state.devices() {
+        Ok(store) => match store.find(device) {
+            Ok(d) if d.is_active() => (d.id.clone(), d.name.clone()),
+            Ok(d) => return Reply::error(format!("{} was revoked; it cannot be rung", d.name)),
+            Err(e) => return Reply::error(e.to_string()),
+        },
+        Err(e) => return Reply::error(e.to_string()),
+    };
+    let report = state.phones().remove(&id);
+    let has_push = state.push_store().registrations.contains_key(&id);
+    let now_s = rime_remote_core::now_ms() / 1000;
+    let got = crate::phone::ring(
+        &state.events,
+        &id,
+        &state.machine,
+        crate::phone::Reach {
+            report: report.as_ref(),
+            has_push,
+        },
+        now_s,
+        crate::phone::ACK_WAIT,
+        |started| {
+            let trust = rime_remote_core::tls::Trust::system().map_err(|e| e.to_string())?;
+            let raised = crate::push::Raised {
+                kind: rime_remote_core::push::Kind::Ring,
+                session: rime_remote_core::push::NO_SESSION,
+                started,
+                adapter: rime_remote_core::push::Adapter::Unknown,
+            };
+            crate::push::push_one(state, &id, raised, &trust)
+        },
+    );
+    match got {
+        Ok(rang) => Reply::Rang {
+            device: name,
+            path: match rang {
+                crate::phone::Rang::Link => "link",
+                crate::phone::Rang::Push => "push",
+            }
+            .into(),
+        },
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
 }
 
 /// The origins this socket accepts a pairing request from.
@@ -505,6 +566,9 @@ mod tests {
             Request::Revoke {
                 device: "pixel-8".into(),
             },
+            Request::Ring {
+                device: "pixel-8".into(),
+            },
         ];
         for r in &requests {
             let text = serde_json::to_string(r).expect("serialise");
@@ -518,7 +582,8 @@ mod tests {
                 qr: "apex-remote:abc".into(),  // rime-rename: keep (SCHEME)
                 expires_ms: 1,
             },
-            Reply::Devices { devices: vec![] },
+            Reply::Devices { devices: vec![], phones: Default::default() },
+            Reply::Rang { device: "Pixel".into(), path: "link".into() },
             Reply::Status {
                 version: 1,
                 key: "k".into(),
