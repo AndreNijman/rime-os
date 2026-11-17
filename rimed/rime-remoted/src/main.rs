@@ -28,6 +28,7 @@
 
 mod control;
 mod discovery;
+mod machine;
 mod net;
 mod nex;
 mod peer;

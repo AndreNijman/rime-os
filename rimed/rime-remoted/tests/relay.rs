@@ -537,6 +537,7 @@ impl Harness {
         // `common` for why a probed port handed over as `--port N` races.
         let log = root.join("remoted.log");
         let remoted = Command::new(bin("rime-remoted"))
+            .env("RIME_REMOTED_MACHINE_STUB", "/nonexistent/rime-remoted-machine-stub")
             .args([
                 "--port",
                 "0",
@@ -1266,6 +1267,7 @@ fn no_relay_is_configured_unless_the_owner_configures_one() {
     // `--port 0`: see `common` for why a probed port handed over races.
     let log = root.join("remoted.log");
     let mut child = Command::new(bin("rime-remoted"))
+            .env("RIME_REMOTED_MACHINE_STUB", "/nonexistent/rime-remoted-machine-stub")
         .args(["--port", "0", "--allow-foreground"])
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("XDG_STATE_HOME", &state)

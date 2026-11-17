@@ -833,6 +833,8 @@ fn answered_here(state: &State, device_id: &str, line: &[u8]) -> Option<Vec<u8>>
         // The bridge to nex: the line goes to nexd, never to rime-agentd, and
         // only after this connection's device has been declared as its origin.
         Some(c) if crate::nex::VERBS.contains(&c) => Some(crate::nex::control(&state.nexd(), device_id, line)),
+        // The computer itself: status, lock, media and volume.
+        Some(c) if crate::machine::VERBS.contains(&c) => Some(crate::machine::control(crate::machine::backend(), line)),
         _ => crate::push::control(state, device_id, line),
     }
 }
@@ -854,6 +856,7 @@ fn remote_hello(state: &State) -> Vec<u8> {
     // machine without it would show nothing but errors. Asked each time, so
     // starting nexd after the phone connected is seen on its next hello.
     let mut features: Vec<&str> = FEATURES.to_vec();
+    features.extend(crate::machine::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
     }
@@ -1206,11 +1209,12 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&reply).expect("json");
         assert_eq!(v["reply"], "remote", "{v}");
         assert_eq!(v["version"], rime_remote_core::REMOTE_PROTOCOL_VERSION, "{v}");
-        // Exactly the contract's four, in its order: a phone keys behaviour
+        // Exactly the contract's names, in its order: a phone keys behaviour
         // off these strings, so a typo is a feature it silently never uses.
         assert_eq!(
             v["features"],
-            serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness"]),
+            serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
+                               "machine_status", "machine_lock", "media"]),
             "{v}"
         );
         // The pairing code's list, with the port this listener has — and
@@ -1237,6 +1241,7 @@ mod tests {
             .iter()
             .chain(crate::push::VERBS.iter())
             .chain(crate::nex::VERBS.iter())
+            .chain(crate::machine::VERBS.iter())
         {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
             assert!(
@@ -1261,6 +1266,7 @@ mod tests {
         }
         assert_eq!(VERBS, ["remote_hello"]);
         assert_eq!(crate::nex::VERBS, ["nex", "nex_events"]);
+        assert_eq!(crate::machine::VERBS, ["machine_status", "machine_lock", "media", "media_control", "volume"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
