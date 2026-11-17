@@ -1,5 +1,7 @@
 package com.rimeos.remote.core.agent
 
+import com.rimeos.remote.core.nex.Nex
+
 /**
  * What a notification says, decided where a test can read it.
  *
@@ -63,9 +65,11 @@ data class NotificationContent(
     val session: Int,
     /** Grouped per machine, so two laptops do not interleave in the shade. */
     val group: String,
+    /** Whether tapping this opens the machine's nex screen. */
+    val opensNex: Boolean = false,
 ) {
     /** Whether tapping this can open a session, or only the Agent Center. */
-    val opensSession: Boolean get() = session != Alert.NO_SESSION
+    val opensSession: Boolean get() = session != Alert.NO_SESSION && !opensNex
 
     companion object {
         /**
@@ -78,7 +82,9 @@ data class NotificationContent(
          *   phone has no name for it, and then the title carries no machine.
          */
         fun of(alert: Alert, machineName: String = ""): NotificationContent {
-            val agent = AgentNames.of(alert.agent)
+            // nex is the agent, and its title says so; "Agent on" before the
+            // machine would be a second, vaguer name for the same thing.
+            val agent = if (alert.kind == Alert.Kind.NEX_APPROVAL) "" else AgentNames.of(alert.agent)
             // "Waiting for you · claude" rather than a sentence, because the
             // shade truncates hard and the first two words have to carry it.
             val who = when {
@@ -94,6 +100,7 @@ data class NotificationContent(
                 machine = alert.machine,
                 session = alert.session,
                 group = GROUP_PREFIX + alert.machine,
+                opensNex = alert.kind == Alert.Kind.NEX_APPROVAL,
             )
         }
 
@@ -131,5 +138,82 @@ data class NotificationContent(
          * turn off the one that matters and forget.
          */
         const val CHANNEL: String = "rime.agents"
+    }
+}
+
+/**
+ * Where a tapped notification asks to go: a session on a machine, or that
+ * machine's nex screen. A hint only; the app checks the machine is the
+ * connected one before it opens anything.
+ */
+data class AlertTap(val machine: String, val session: Int, val nex: Boolean = false) {
+    enum class GoesTo { NEX, CONNECT_FOR_NEX, SESSION, ELSEWHERE }
+
+    /**
+     * Where this tap may go, given the machine the phone is connected to and
+     * whether that machine offers nex.
+     *
+     * Anything for another machine goes to the machine list or the Agent
+     * Center: opening it on the connected machine would show the wrong
+     * computer's work. A nex tap on a machine whose bridge no longer reaches
+     * nexd has nothing to open either. A session tap may still find its
+     * session gone; the caller checks that.
+     *
+     * A nex tap while no machine is connected (the app was closed, which is
+     * the case a push exists for) connects to the machine it names, when
+     * that machine is paired, and opens nex once the machine says it offers
+     * it. Connecting asks for the device key, and the person has just asked
+     * to see that machine, so the prompt is the one they expect. A tap for
+     * another machine while one is connected does not switch machines.
+     */
+    fun goesTo(connected: String?, nexOffered: Boolean, paired: Boolean = false): GoesTo = when {
+        nex && connected == null && paired -> GoesTo.CONNECT_FOR_NEX
+        connected != machine -> GoesTo.ELSEWHERE
+        nex -> if (nexOffered) GoesTo.NEX else GoesTo.ELSEWHERE
+        else -> GoesTo.SESSION
+    }
+
+    /** What a nex tap that had to connect first does next. */
+    enum class Then { WAIT, OPEN_NEX, STAY, GIVE_UP }
+
+    /**
+     * A nex tap waiting for its connection: the machine, how many hellos that
+     * machine's link had answered when the tap arrived, and whether the link
+     * was already up with a real hello then.
+     *
+     * A link keeps its last hello through a drop and until the new connection
+     * answers, so features read before then may be an earlier connection's:
+     * one made before nexd started would send the tap to the Agent Center for
+     * good. Only a hello answered after the tap, or one already standing on a
+     * live link, is believed.
+     */
+    data class Pending(val machine: String, val hellosAtTap: Int, val upAtTap: Boolean) {
+        fun fresh(hellosNow: Int): Boolean = upAtTap || hellosNow > hellosAtTap
+    }
+
+    companion object {
+        /** How long a nex tap waits for its connection before it is forgotten. */
+        const val CONNECT_WAIT_MS = 60_000L
+
+        /**
+         * After [GoesTo.CONNECT_FOR_NEX]: the phone asked to connect to
+         * [waitingFor]; [connected] is the machine it is connected to now (or
+         * null), and [features] is what that machine's hello offered (empty
+         * until the real hello arrives, null when there is no link yet).
+         *
+         * Opens nex only on the machine the tap named, and only once that
+         * machine has said it offers nex. A machine whose hello lacks nex
+         * leaves the person on the Agent Center they were taken to. Connected
+         * to some other machine means the person chose it: the tap is dropped.
+         * The caller drops it too after [CONNECT_WAIT_MS], so a refused key
+         * prompt or a machine that is off does not jump to nex much later.
+         */
+        fun afterConnect(waitingFor: String, connected: String?, features: List<String>?): Then = when {
+            connected == null -> Then.WAIT
+            connected != waitingFor -> Then.GIVE_UP
+            features.isNullOrEmpty() -> Then.WAIT
+            Nex.FEATURE in features -> Then.OPEN_NEX
+            else -> Then.STAY
+        }
     }
 }

@@ -352,6 +352,8 @@ pub const FEATURES: &[&str] = &[
     "session_name",
     "session_title",
     "size_restore",
+    "clipboard_write",
+    "save_file",
 ];
 
 /// What a session is doing. The five user-facing values come straight from the
@@ -982,6 +984,40 @@ pub enum Request {
     /// machine is too old, and nothing has been read. The failure loses a
     /// feature, never a restriction.
     Clipboard,
+    /// Set the machine's clipboard to text a person sent from a paired phone
+    /// (`docs/remote-live-contract.md` §1.8).
+    ///
+    /// The opposite direction from [`Request::Clipboard`], and refused to the
+    /// same callers: a managed session, and a connection that cannot be
+    /// classified. An agent that could set the clipboard could change what a
+    /// person pastes into a terminal a moment later, outside every sandbox.
+    ///
+    /// `text` is at most `clipboard::MAX_BYTES` (`rime-agentd`) and may not be
+    /// empty. It is carried verbatim; nothing is trimmed or appended.
+    ///
+    /// Not a protocol bump, by [`Request::Event`]'s criterion: a daemon that
+    /// predates it answers "unparseable request" and the clipboard is as it
+    /// was. The phone offers it only when `hello.features` has
+    /// `clipboard_write`.
+    ClipboardWrite { text: String },
+    /// Save a file a person shared from a paired phone into the machine's
+    /// Downloads folder (`docs/remote-live-contract.md` §1.8).
+    ///
+    /// The third takeover verb, shaped like [`Request::Receive`]: the daemon
+    /// answers [`Response::Saving`], reads exactly `len` bytes from the same
+    /// connection, then answers [`Response::Saved`]. `rime-agentd` routes it
+    /// out of the request loop beside `Receive`, and `rime-remoted` refuses it
+    /// on channel zero.
+    ///
+    /// `name` is a name, never a path, and the caller chooses nothing else:
+    /// not the folder, not whether an existing file is replaced (it never
+    /// is). Refused to the callers [`Request::ClipboardWrite`] is refused to.
+    SaveFile {
+        /// What the file should be called. Reduced, never used as a path.
+        name: String,
+        /// How many bytes follow the takeover reply.
+        len: u64,
+    },
     /// Deliver a signal by name (`int`, `term`, `kill`, `stop`, `cont`).
     Signal { id: u32, signal: String },
     /// Publish a state transition. This is the open event protocol: any client
@@ -1775,6 +1811,19 @@ pub enum Response {
     /// disagree with the first — which is the reason
     /// [`Response::Injected`]'s `path` is one field and not two.
     Clipboard { text: String },
+    /// [`Request::ClipboardWrite`] set the clipboard. `bytes` is how much
+    /// text it now holds, so a phone can say so without trusting its own
+    /// count of what it sent.
+    ClipboardWritten { bytes: usize },
+    /// [`Request::SaveFile`] accepted; the connection is now a byte sink for
+    /// exactly `len` bytes. Everything refusable was refused before this.
+    Saving { len: u64 },
+    /// A shared file is in the Downloads folder.
+    ///
+    /// `name` is what it is called there, which differs from the name asked
+    /// for when that one was reduced or already taken; `path` is the whole
+    /// path, for a client that shows where it went.
+    Saved { name: String, path: String },
     /// Per-worktree status, main tree first, projects in listing order.
     Worktrees {
         worktrees: Vec<crate::worktree::WorktreeStatus>,
@@ -2220,6 +2269,12 @@ mod tests {
                 text: "line one\nline two \"quoted\"\n".into(),
             },
             Response::Clipboard { text: String::new() },
+            Response::ClipboardWritten { bytes: 12 },
+            Response::Saving { len: 2048 },
+            Response::Saved {
+                name: "IMG_2041 (2).jpg".into(),
+                path: "/home/t/Downloads/IMG_2041 (2).jpg".into(),
+            },
             // Response::Request is the riskiest shape in this enum: an
             // internally-tagged variant wrapping a struct that itself
             // #[serde(flatten)]s an internally-tagged enum. Both layers use a
@@ -2563,6 +2618,13 @@ mod tests {
     fn every_request_variant_round_trips() {
         let variants = vec![
             Request::Hello,
+            Request::ClipboardWrite {
+                text: "two\nlines \"quoted\"".into(),
+            },
+            Request::SaveFile {
+                name: "../IMG_2041.jpg".into(),
+                len: 2048,
+            },
             Request::Inject {
                 id: 3,
                 source: "/home/t/Pictures/Screenshots/shot.png".into(),
@@ -3011,14 +3073,24 @@ mod tests {
         // that silently stops using the feature.
         assert_eq!(
             FEATURES,
-            &["input_submit", "rename", "peek", "session_name", "session_title", "size_restore"]
+            &[
+                "input_submit",
+                "rename",
+                "peek",
+                "session_name",
+                "session_title",
+                "size_restore",
+                "clipboard_write",
+                "save_file",
+            ]
         );
     }
 
     #[test]
     fn the_contracts_hello_reply_parses_and_an_old_one_means_no_features() {
         let line = r#"{"reply":"hello","version":11,"agents":["claude"],"default_agent":"claude",
- "features":["input_submit","rename","peek","session_name","session_title","size_restore"]}"#;
+ "features":["input_submit","rename","peek","session_name","session_title","size_restore",
+ "clipboard_write","save_file"]}"#;
         match serde_json::from_str::<Response>(line).expect("the contract's hello") {
             Response::Hello { version, agents, default_agent, features } => {
                 assert_eq!(version, 11);

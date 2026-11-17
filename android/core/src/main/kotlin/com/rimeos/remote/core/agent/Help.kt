@@ -235,6 +235,51 @@ object Help {
                         "eight kilobytes it says so instead of handing over part of what " +
                         "you copied.",
                 ),
+                h("The computer itself"),
+                p(
+                    "Computer, on the agent list, shows how the computer is: its battery, " +
+                        "its power mode, whether its lock screen is up, and whether an update " +
+                        "is waiting. It also shows what is playing there, with play, pause, " +
+                        "skip and volume.",
+                ),
+                p(
+                    "Lock the screen locks it the way the keyboard shortcut would, and the " +
+                        "button says so only once the computer confirms it. Unlocking is " +
+                        "only ever done at the computer.",
+                ),
+                note(
+                    "The screen checks on the computer a few times a minute while it is " +
+                        "open, and not at all while the app is in the background. A line the computer " +
+                        "could not read is left out rather than guessed.",
+                ),
+                h("Sending to the computer"),
+                p(
+                    "Share a photo, a file or some text from any app and pick Rime Remote. " +
+                        "Nothing is sent until you choose the computer and tap Send. Files go " +
+                        "to its Downloads folder, and text goes to its clipboard, ready to paste.",
+                ),
+                p(
+                    "A file with the same name as one already there does not replace it: the computer " +
+                        "keeps both and tells you the name it used. Send this phone's " +
+                        "clipboard, on the Computer screen, does the same for what you copied here.",
+                ),
+                note(
+                    "If the connection drops after the whole file went over, the app says the " +
+                        "file may or may not be there. Check before sending it again. The " +
+                        "computer deletes any file you stop part way.",
+                ),
+                h("Finding this phone"),
+                p(
+                    "On the computer, rime remote ring makes this phone play its alarm " +
+                        "sound so you can find it. Tap Stop on the notification, or it stops " +
+                        "by itself after 30 seconds. It rings in silent mode and through Do " +
+                        "Not Disturb, unless Do Not Disturb is set to total silence.",
+                ),
+                note(
+                    "While connected, this app also tells the computer its battery level and " +
+                        "whether it is charging, so rime remote devices can show it. Nothing " +
+                        "else about the phone is sent.",
+                ),
                 h("Taking this phone's access away"),
                 p(
                     "Forget the computer here, or remove this device at the computer. Either " +

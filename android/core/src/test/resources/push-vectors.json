@@ -81,6 +81,36 @@
       "seq": 8,
       "session": 49,
       "started": 1726000007
+    },
+    {
+      "adapter": 0,
+      "envelope_hex": "01090909090909090909090909295ad19c4023b0045b307c4f572028310d1a6ed3536ce4b289554a2db8cfbdcb3ff18cfd1233",
+      "kind": 9,
+      "nonce_hex": "090909090909090909090909",
+      "plaintext_hex": "0900000000380000000066e0ab880000000000000009",
+      "seq": 9,
+      "session": 56,
+      "started": 1726000008
+    },
+    {
+      "adapter": 0,
+      "envelope_hex": "010a0a0a0a0a0a0a0a0a0a0a0ac1742d8fc2128b61a9fc93107c81c6ba7e87d9489377bc3b54e2f39eb5b56bbabbc403ccc20b",
+      "kind": 10,
+      "nonce_hex": "0a0a0a0a0a0a0a0a0a0a0a0a",
+      "plaintext_hex": "0a000000003f0000000066e0ab89000000000000000a",
+      "seq": 10,
+      "session": 63,
+      "started": 1726000009
+    },
+    {
+      "adapter": 0,
+      "envelope_hex": "010b0b0b0b0b0b0b0b0b0b0b0bca38176265cc482c0cb49ae19b77882ff65c20b06ff7d03458dabe7cc5642ecbd27594650a7c",
+      "kind": 11,
+      "nonce_hex": "0b0b0b0b0b0b0b0b0b0b0b0b",
+      "plaintext_hex": "0b00000000460000000066e0ab8a000000000000000b",
+      "seq": 11,
+      "session": 70,
+      "started": 1726000010
     }
   ],
   "envelope_len": 51,

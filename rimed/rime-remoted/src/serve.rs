@@ -737,7 +737,45 @@ impl Worker {
         // close, exactly like a takeover the daemon refused.
         // `keep`: whether the channel goes in the map. A one-shot nex answer
         // ends by itself once its bytes are out, so it is never kept.
-        let opened = if crate::nex::is_channel(request) {
+        let opened = if crate::phone::is_channel(request) {
+            // The one channel this machine writes to unprompted: its other end
+            // stays in `state.events`, and a ring is a line written there.
+            self.state
+                .events
+                .open(&self.device_id)
+                .map(|(stream, _)| {
+                    // What was sent while the phone was away, written now:
+                    // the lines wait in the socketpair and the pump, which
+                    // starts after the reply, forwards them behind it.
+                    for line in self.state.outbox.pending(&self.device_id, &self.state.machine) {
+                        self.state.events.send(&self.device_id, &line);
+                    }
+                    let ch = DaemonChannel {
+                        stream,
+                        read_only: true,
+                    };
+                    (ch, crate::phone::opened_reply(), Vec::new(), true)
+                })
+                .map_err(|e| {
+                    crate::proxy::ProxyError::NotTakenOver(
+                        serde_json::json!({"reply": "error", "code": "unavailable", "message": e.to_string()})
+                            .to_string()
+                            .into_bytes(),
+                    )
+                })
+        } else if crate::phone::is_take(request) {
+            // What somebody here sent this phone, by id, under this
+            // connection's device id; the channel closes after the last byte.
+            crate::phone::open_take(&self.state.outbox, &self.device_id, request)
+                .map(|(stream, reply)| {
+                    let ch = DaemonChannel {
+                        stream,
+                        read_only: true,
+                    };
+                    (ch, reply, Vec::new(), true)
+                })
+                .map_err(crate::proxy::ProxyError::NotTakenOver)
+        } else if crate::nex::is_channel(request) {
             crate::nex::open_channel(&self.state.nexd(), &self.device_id, request)
                 .map(|o| {
                     let ch = DaemonChannel {
@@ -833,6 +871,16 @@ fn answered_here(state: &State, device_id: &str, line: &[u8]) -> Option<Vec<u8>>
         // The bridge to nex: the line goes to nexd, never to rime-agentd, and
         // only after this connection's device has been declared as its origin.
         Some(c) if crate::nex::VERBS.contains(&c) => Some(crate::nex::control(&state.nexd(), device_id, line)),
+        // The computer itself: status, lock, media and volume.
+        Some(c) if crate::machine::VERBS.contains(&c) => Some(crate::machine::control(crate::machine::backend(), line)),
+        // The phone's own report and its ring acks.
+        Some(c) if crate::phone::VERBS.contains(&c) => crate::phone::control(state, device_id, line),
+        // The phone's notifications, shown on this desktop. The name on them
+        // is the device store's, never one the phone puts in the body.
+        Some(c) if crate::mirror::VERBS.contains(&c) => {
+            let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
+            Some(crate::mirror::control(crate::mirror::mirror(), device_id, name.as_deref().unwrap_or(""), line))
+        }
         _ => crate::push::control(state, device_id, line),
     }
 }
@@ -854,6 +902,9 @@ fn remote_hello(state: &State) -> Vec<u8> {
     // machine without it would show nothing but errors. Asked each time, so
     // starting nexd after the phone connected is seen on its next hello.
     let mut features: Vec<&str> = FEATURES.to_vec();
+    features.extend(crate::machine::FEATURES);
+    features.extend(crate::phone::FEATURES);
+    features.extend(crate::mirror::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
     }
@@ -988,7 +1039,7 @@ fn control(agentd: &Path, device_id: &str, line: &[u8]) -> Vec<u8> {
         return serde_json::json!({
             "reply": "error",
             "kind": "bad_request",
-            "message": "attach and receive do not travel on the control channel; open a channel for them",
+            "message": "attach, receive and save_file do not travel on the control channel; open a channel for them",
         })
         .to_string()
         .into_bytes();
@@ -1206,11 +1257,14 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&reply).expect("json");
         assert_eq!(v["reply"], "remote", "{v}");
         assert_eq!(v["version"], rime_remote_core::REMOTE_PROTOCOL_VERSION, "{v}");
-        // Exactly the contract's four, in its order: a phone keys behaviour
+        // Exactly the contract's names, in its order: a phone keys behaviour
         // off these strings, so a typo is a feature it silently never uses.
         assert_eq!(
             v["features"],
-            serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness"]),
+            serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
+                               "machine_status", "machine_lock", "media",
+                               "device_events", "phone_report", "take_offer",
+                               "phone_notifications"]),
             "{v}"
         );
         // The pairing code's list, with the port this listener has — and
@@ -1237,6 +1291,9 @@ mod tests {
             .iter()
             .chain(crate::push::VERBS.iter())
             .chain(crate::nex::VERBS.iter())
+            .chain(crate::machine::VERBS.iter())
+            .chain(crate::phone::VERBS.iter())
+            .chain(crate::mirror::VERBS.iter())
         {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
             assert!(
@@ -1249,6 +1306,14 @@ mod tests {
             br#"{"cmd":"list"}"#.to_vec(),
             br#"{"cmd":"remote"}"#.to_vec(),
             br#"{"cmd":"remote_hello_again"}"#.to_vec(),
+            // A paired phone may not ring anything: ring is the control
+            // socket's, for somebody at this machine.
+            br#"{"cmd":"ring"}"#.to_vec(),
+            br#"{"cmd":"device_events"}"#.to_vec(),
+            // Nor send anything to itself or another phone: `send` is the
+            // control socket's too, and `take_offer` is a channel, not a line.
+            br#"{"cmd":"send"}"#.to_vec(),
+            br#"{"cmd":"take_offer"}"#.to_vec(),
             br#"{"remote_hello":true}"#.to_vec(),
             b"remote_hello".to_vec(),
         ] {
@@ -1261,6 +1326,9 @@ mod tests {
         }
         assert_eq!(VERBS, ["remote_hello"]);
         assert_eq!(crate::nex::VERBS, ["nex", "nex_events"]);
+        assert_eq!(crate::machine::VERBS, ["machine_status", "machine_lock", "media", "media_control", "volume"]);
+        assert_eq!(crate::phone::VERBS, ["phone_report", "ring_ack", "offer_ack", "offer_done"]);
+        assert_eq!(crate::mirror::VERBS, ["phone_notification", "phone_notification_removed"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -151,14 +151,19 @@ pub struct Seat {
 /// session, a session this daemon cannot see, or a runtime directory that is
 /// not there at all.
 pub fn display() -> Result<Seat, String> {
+    display_for("read")
+}
+
+/// [`display`], with the refusal saying what was being done (`read`, or
+/// `set` for `clipboard_write`).
+pub fn display_for(verb: &str) -> Result<Seat, String> {
     let runtime_dir = match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(d) if !d.is_empty() => PathBuf::from(d),
         _ => {
-            return Err(
-                "cannot read this machine's clipboard: the agent runtime has no \
+            return Err(format!(
+                "cannot {verb} this machine's clipboard: the agent runtime has no \
                  XDG_RUNTIME_DIR, so there is nowhere to look for a compositor"
-                    .to_string(),
-            )
+            ))
         }
     };
     for name in candidates(&runtime_dir) {
@@ -170,7 +175,7 @@ pub fn display() -> Result<Seat, String> {
         }
     }
     Err(format!(
-        "cannot read this machine's clipboard: no Wayland compositor is listening in {}. \
+        "cannot {verb} this machine's clipboard: no Wayland compositor is listening in {}. \
          The agent runtime starts before a graphical session and does not inherit \
          WAYLAND_DISPLAY, so this is what a machine with no desktop session looks like \
          — log in at the machine and ask again",

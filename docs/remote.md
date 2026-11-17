@@ -155,7 +155,9 @@ two verbs on the control channel, `attach` and `receive`, because both take the
 connection over and would wedge it. It hands everything else to `rime-agentd`
 under the origin `claude-remote-control`. So `rime-agentd`'s own per-verb rules
 decide what a phone can do, in one place, and no denylist here can drift from
-them.
+them. (The exceptions are verbs `rime-remoted` answers itself
+and never forwards: its hello, nex, and the five machine verbs in
+[The computer itself](#the-computer-itself-status-lock-and-media).)
 
 Three verbs serve the phone's pickers, and the first two are cheap:
 
@@ -193,6 +195,154 @@ over a nonce the daemon issued and bound to that one session, grant kind and
 window. If remote approval of a root operation is ever built, it has to take
 that shape; a relaxed origin check would not do.
 
+## The computer itself: status, lock and media
+
+Five verbs never reach `rime-agentd`: `rime-remoted` answers them itself, as
+the user it runs as (`docs/remote-live-contract.md` §2.4). A phone reads the
+battery, the power mode, whether the screen is locked and whether an update is
+waiting (`machine_status`); locks the screen (`machine_lock`); and reads and
+drives the player and the default output's volume (`media`, `media_control`,
+`volume`). The app's **Computer** screen, reached from the agent list, is built
+on them.
+
+They need no grant because they are what the person could do at the keyboard,
+and none of them can unlock anything: there is no unlock verb, and there will
+not be one. A lock is reported as done only once logind's `LockedHint` confirms
+it, within five seconds; otherwise the phone says it asked. Every other verb
+has a two-second budget, and anything not read in that time comes back as
+unknown rather than as a guess. Nothing here checks for
+an update; `update` is rimed's cached state.
+
+Test daemons use stub backends only. `run-device-suite.sh` refuses to
+start `rime-remoted` without `RIME_REMOTED_MACHINE_STUB`, so a test run cannot
+lock the developer's screen or pause their music.
+
+## Send to Rime: from the phone onto the computer
+
+Share text or files to Rime Remote from any Android app. The app opens a Send
+screen that shows what was shared and asks which computer it goes to; nothing
+is sent until the person taps Send. Text goes to the computer's clipboard
+(`clipboard_write`), files to its Downloads folder (`save_file`), contract
+§1.8. The Computer screen also has **Send this phone's clipboard**.
+
+- A file is saved under its own name, never over another file: a clash becomes
+  `name (2).ext`, and the phone shows the name the computer chose.
+- Up to 256 MB per file and 8 KB of text. Longer text is refused, never cut.
+- The app reads only what was shared to it, through the read grant that comes
+  with the share. It asks for no storage permission, and it refuses `file://`
+  links and its own content.
+- A file stopped or cut off part way is never kept. If the connection drops
+  after the last byte, the phone says the file may or may not be there.
+- A managed agent session may not use either verb: only a person at the
+  computer or on a paired phone may.
+
+Test daemons write into a stub: `run-device-suite.sh` refuses to start
+`rime-agentd` without `RIME_AGENTD_DESKTOP_STUB`, so a test run cannot replace
+the developer's clipboard or write into their Downloads.
+
+## `rime remote ring <device>`: find your phone
+
+```
+$ rime remote ring "Pixel 8"
+rime: Pixel 8 is ringing.
+```
+
+The phone plays its alarm sound until someone taps **Stop** on the
+notification, or for 30 seconds. The argument is a device id, or a name that
+fits exactly one device, as for `revoke`. Only the computer's own user can
+ring a phone. A paired phone cannot ring anything.
+
+- If the app is connected, the ring goes straight to the phone, and `rime`
+  reports that it is ringing only after the phone confirms it.
+- If the app is not connected, the ring goes through the phone's push service
+  (see below). `rime` then says it asked, because nothing confirms it. A push
+  that arrives more than a minute late does not ring.
+- If it cannot ring the phone, `rime` says why and exits 1. Three causes: an
+  older app, notifications switched off, or no push service and no connection.
+
+Because the phone plays the ring as an alarm, it rings in silent and vibrate
+mode and through Do Not Disturb, unless Do Not Disturb is set to total silence
+(measured on Android 16). The alarm volume controls how loud it is, and at zero
+it makes no sound.
+
+### The phone's battery
+
+While the app is connected, it reports the phone's battery level and whether
+it is charging. It sends a new report when it connects, when charging starts or
+stops, when the level changes by 5 points, and at least every 10 minutes.
+`rime remote devices` shows the last report under the table:
+
+```
+Pixel 8: battery 62%, charging, reported 3m ago
+```
+
+With `--json`, a paired device that has reported carries a `phone` field
+(`battery`, `charging`, `can`, `reported_ms`). Revoking the device deletes it.
+
+## `rime remote send <device>`: files and text to your phone
+
+```
+$ rime remote send "Pixel 8" holiday.jpg notes.pdf
+rime: Pixel 8 has holiday.jpg and is taking it now.
+rime: Pixel 8 has notes.pdf and is taking it now.
+$ rime remote send "Pixel 8" --clipboard
+rime: Pixel 8 has the text and is taking it now.
+$ echo "door code 4417" | rime remote send "Pixel 8" --text -
+```
+
+The phone takes what you send without asking. Text goes onto its clipboard,
+and a notification says so without showing the text. A file goes into its
+Downloads folder, and a notification opens it. A file whose name is already
+taken there gets a numbered name: nothing is replaced. The phone refuses a
+file it has no room for and leaves 64 MiB free. Files need Android 10 or
+later; on Android 9 the phone refuses a file and says so in a notification,
+and text still works.
+
+Because the phone does not ask, **only you can send**: `rime-remoted` refuses
+a `send` that does not come from a terminal or Rime Settings, so an agent
+cannot send anything to your phone. `--clipboard` reads this computer's
+clipboard with `wl-paste`, and only as text. At most 8,192 bytes of text and
+256 MiB per file can be sent at once.
+
+- If the app is connected, the phone gets the offer straight away and takes it
+  over the same connection.
+- If it is not, what you send waits on this computer for 15 minutes, and the
+  phone is asked through its push service to come and take it. Opening the
+  app also takes it. After 15 minutes, or if you revoke the phone, it is gone.
+- The phone has to have told this computer that it can receive (an app with
+  notifications allowed). Until then, `send` is refused and says why.
+
+## Your phone's notifications on the computer
+
+Rime Remote can show your phone's notifications on the computers it is paired
+with, the way a Mac shows an iPhone's. In the app, open the settings on the
+computers screen and choose **Notifications on your computer**:
+
+1. **Allow notification access.** Android asks for it in Settings. On Android
+   13 and later, an app installed from a file is "restricted" at first: open
+   App info from the same screen, tap the menu in the corner, choose
+   **Allow restricted settings**, then allow access.
+2. **Turn on the apps** whose notifications you want on the computer. None are
+   on until you turn them on.
+
+From then on, while the app is unlocked and connected, a notification from one
+of those apps appears on the computer as "Pixel 8 · Signal", with its title and
+text. When it updates on the phone it updates on the computer; when you
+dismiss it on the phone it goes from the computer too.
+
+- Only the app's name, the title and the text cross. Pictures, actions and
+  replies do not, and the computer keeps nothing once it is closed.
+- Never shown: Rime Remote's own notifications, a work profile's, ones an app
+  marks as private to the phone or hidden on the lock screen, ongoing ones
+  (downloads, navigation, a call in progress) and media controls.
+- Nothing waits for a computer that is not connected, and connecting does not
+  replay what you missed.
+- A locked computer does not show them: the Shell's notifications stay behind
+  the lock screen.
+- A phone can show 10 at once and then one every 3 seconds; anything faster is
+  refused, so a noisy app cannot flood the desktop. Revoking the phone closes
+  every notification it has open.
+
 ## Notifications when the app is closed
 
 An agent that needs you at two in the morning has to be able to reach a phone
@@ -204,6 +354,21 @@ Two paths now raise the same alerts. The poll loop still does it while the app
 is open. When the app is closed, `rime-remoted` watches the runtime itself and
 posts an **encrypted 51-byte envelope** to a push server, which a UnifiedPush
 distributor on the phone turns into a notification.
+
+### nex approvals wake the phone too
+
+A nex approval on a machine (Rime's agent harness asking before it runs
+something) sends the same kind of alert: **"nex needs a decision ·
+<machine>"**. The alert holds no command text; the nex screen shows that once
+the app unlocks. A tap opens nex on that machine and connects to it first if
+the app had stopped. A machine that no longer offers nex opens the Agent Center
+instead.
+
+While a phone holds a push registration, the watcher asks nexd what waits, at
+four-second intervals, as a device named `rime-remote-push`. One alert goes out
+per approval it has not seen. nexd's first answer raises nothing, and an
+approval you already heard about stays quiet when nexd comes back after a
+restart.
 
 ### What you have to do: one thing
 

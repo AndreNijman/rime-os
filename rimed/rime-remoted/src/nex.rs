@@ -287,6 +287,38 @@ fn call(socket: &Path, device_id: &str, line: &[u8], limit: Duration) -> Result<
     d.call(&method, params)
 }
 
+/// The origin the push watcher declares to nexd.
+///
+/// A device, like a phone: the watcher only reads what is waiting, and it
+/// must not be a more powerful caller than the phones it serves. nexd files
+/// it as `device:rime-remote-push`, which is also what its audit trail shows.
+pub const PUSH_ORIGIN: &str = "rime-remote-push";
+
+/// How long the push watcher waits for nexd. Short: it asks every few
+/// seconds, and a slow answer is simply asked again.
+pub const PUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The ids of the approvals nexd is waiting on, or `None` when nexd did not
+/// answer.
+///
+/// `None` is not "nothing is waiting": an empty set would make the watcher
+/// forget every approval it has announced and announce them all again on the
+/// next answer.
+pub fn pending_approvals(socket: &Path) -> Option<std::collections::BTreeSet<String>> {
+    pending_within(socket, PUSH_TIMEOUT)
+}
+
+fn pending_within(socket: &Path, limit: Duration) -> Option<std::collections::BTreeSet<String>> {
+    let mut d = Declared::open(socket, PUSH_ORIGIN, limit).ok()?;
+    let reply = d.call("tools.pending", json!({})).ok()?;
+    let list = reply.get("result")?.as_array()?;
+    Some(
+        list.iter()
+            .filter_map(|a| a["approval_id"].as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
 /// An opened nex channel.
 pub struct Opened {
     /// The nexd connection, to pump to the device.
@@ -940,6 +972,164 @@ mod tests {
             "the retried turn should run exactly once: {all:?}"
         );
         assert!(all.iter().any(|e| ours(e, "turn.completed")), "{all:?}");
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_push_watcher_reads_what_is_waiting_as_a_device_and_nothing_else() {
+        let f = fake(|v: &Value| {
+            let id = v["id"].clone();
+            match v["method"].as_str() {
+                Some("system.declare_origin") => {
+                    vec![json!({"jsonrpc": "2.0", "id": id, "result": {"origin": v["params"]}})]
+                }
+                // tools.pending, shaped as nexd answers it.
+                Some("tools.pending") => vec![json!({"jsonrpc": "2.0", "id": id, "result": [
+                    {"approval_id": "ap-1", "session_id": "s-1", "tool": "run_command",
+                     "summary": "run `bash test.sh`", "scopes": ["process.exec"]},
+                    {"approval_id": "ap-2", "session_id": "s-2", "tool": "edit_file"},
+                ]})],
+                _ => vec![json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "no"}})],
+            }
+        });
+        let got = pending_approvals(&f.socket).expect("an answer");
+        assert_eq!(got.into_iter().collect::<Vec<_>>(), vec!["ap-1", "ap-2"]);
+        let seen = f.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!(seen[0]["method"], "system.declare_origin");
+        assert_eq!(seen[0]["params"], json!({"kind": "device", "id": PUSH_ORIGIN}));
+        assert_eq!(seen[1]["method"], "tools.pending");
+    }
+
+    #[test]
+    fn a_refusal_or_no_nexd_is_no_answer_not_an_empty_list() {
+        let gone = std::env::temp_dir().join("rime-nex-no-such-socket.sock");
+        assert_eq!(pending_approvals(&gone), None);
+        let refuses = fake(|v: &Value| {
+            vec![json!({"jsonrpc": "2.0", "id": v["id"], "error": {"code": -32002, "message": "no"}})]
+        });
+        assert_eq!(pending_approvals(&refuses.socket), None);
+        let errs = fake(|v: &Value| match v["method"].as_str() {
+            Some("system.declare_origin") => {
+                vec![json!({"jsonrpc": "2.0", "id": v["id"], "result": {"origin": v["params"]}})]
+            }
+            _ => vec![json!({"jsonrpc": "2.0", "id": v["id"], "error": {"code": -32603, "message": "x"}})],
+        });
+        assert_eq!(pending_approvals(&errs.socket), None);
+    }
+
+    #[test]
+    fn a_nexd_that_never_answers_costs_the_push_loop_one_short_wait() {
+        let mute = fake(|_: &Value| vec![]);
+        let t = Instant::now();
+        assert_eq!(pending_within(&mute.socket, Duration::from_millis(300)), None);
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+
+    /// The push watcher's read against a REAL nexd: a turn that asks before it
+    /// runs a command shows up as waiting, and goes when the turn is stopped.
+    ///
+    /// ```text
+    /// RIME_NEXD_BIN=/path/to/nexd cargo test -p rime-remoted real_nexd -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs RIME_NEXD_BIN"]
+    fn real_nexd_shows_the_push_watcher_an_approval_until_the_turn_ends() {
+        let Some(bin) = std::env::var_os("RIME_NEXD_BIN") else {
+            panic!("set RIME_NEXD_BIN to a nexd binary");
+        };
+        let dir = std::env::temp_dir().join(format!("rime-nex-push-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ws = dir.join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            json!({"providers": [{"id": "scripted", "kind": "scripted",
+                                  "script": dir.join("script.json")}], "policy": {}})
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("script.json"),
+            json!({"steps": [
+                {"text": "Running it.", "tool_calls": [{"name": "run_command", "args": {"command": "true"}}]},
+                {"text": "Done."}]})
+            .to_string(),
+        )
+        .unwrap();
+        let socket = dir.join("nexd.sock");
+        let mut child = std::process::Command::new(bin)
+            .arg("--data-dir")
+            .arg(dir.join("data"))
+            .arg("--socket")
+            .arg(&socket)
+            .arg("--config")
+            .arg(dir.join("config.json"))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(dir.join("nexd.log")).unwrap())
+            .spawn()
+            .unwrap();
+        let t = Instant::now();
+        while !available(&socket) {
+            assert!(t.elapsed() < Duration::from_secs(15), "nexd did not start");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let local = UnixStream::connect(&socket).unwrap();
+        let mut lr = BufReader::new(local.try_clone().unwrap());
+        let mut lw = local;
+        let mut owner = |n: u32, method: &str, params: Value| -> Value {
+            writeln!(lw, "{}", json!({"jsonrpc": "2.0", "id": n, "method": method, "params": params}))
+                .unwrap();
+            loop {
+                let mut l = String::new();
+                lr.read_line(&mut l).unwrap();
+                let v: Value = serde_json::from_str(&l).unwrap();
+                if v["id"] == n {
+                    return v;
+                }
+            }
+        };
+        let r = owner(1, "sessions.create",
+            json!({"root": ws, "mode": "build", "title": "owner", "request_id": "own-1"}));
+        let sid = r["result"]["session_id"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+
+        let mut w = crate::push::Watcher::new();
+        let observe = |w: &mut crate::push::Watcher| {
+            w.observe(&crate::push::Observation { nex: pending_approvals(&socket), ..Default::default() })
+        };
+        assert!(observe(&mut w).is_empty());
+        assert_eq!(pending_approvals(&socket), Some(Default::default()));
+
+        let r = owner(2, "turns.submit",
+            json!({"session_id": sid, "text": "go", "request_id": "own-2"}));
+        assert!(r.get("result").is_some(), "{r}");
+        let t = Instant::now();
+        let waiting = loop {
+            let p = pending_approvals(&socket).expect("nexd answers");
+            if !p.is_empty() {
+                break p;
+            }
+            assert!(t.elapsed() < Duration::from_secs(10), "no approval appeared");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let r = owner(3, "tools.pending", json!({}));
+        let theirs: std::collections::BTreeSet<String> = r["result"].as_array().unwrap().iter()
+            .map(|a| a["approval_id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(waiting, theirs, "the watcher sees what the owner sees");
+        let raised = observe(&mut w);
+        assert_eq!(raised.len(), 1, "{raised:?}");
+        assert_eq!(raised[0].kind, rime_remote_core::push::Kind::NexApproval);
+
+        let r = owner(4, "turns.cancel", json!({"session_id": sid, "request_id": "own-4"}));
+        assert!(r.get("result").is_some(), "{r}");
+        let t = Instant::now();
+        while pending_approvals(&socket) != Some(Default::default()) {
+            assert!(t.elapsed() < Duration::from_secs(10), "the approval outlived its turn");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(observe(&mut w).is_empty(), "an answer is not news");
         let _ = child.kill();
         let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);

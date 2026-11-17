@@ -75,6 +75,17 @@ object Upload {
         val bracketed: Boolean,
     )
 
+    /**
+     * What came back from a `save_file`: the file is in the computer's
+     * Downloads folder (contract §1.8).
+     */
+    data class Saved(
+        /** The name it was saved under, numbered when another file had it. */
+        val name: String,
+        /** The full path on the computer, for the screen to show. */
+        val path: String,
+    )
+
     /** The machine refused, in its own words. */
     class Refused(message: String) : Exception(message)
 
@@ -98,6 +109,19 @@ object Upload {
         val text = reply.toString(Charsets.UTF_8)
         return text.contains("\"reply\"") && text.contains("\"receiving\"")
     }
+
+    /** `rime-agentd` said `saving`: the `save_file` counterpart of [receivingAccepted]. */
+    fun savingAccepted(reply: ByteArray): Boolean {
+        val text = reply.toString(Charsets.UTF_8)
+        return text.contains("\"reply\"") && text.contains("\"saving\"")
+    }
+
+    /**
+     * The largest file "Send to Rime" sends, the daemon's `MAX_SAVE_BYTES`.
+     * Checked here for the same reason as [Handoff.Files.MAX_BYTES]: a phone
+     * should not pay a round trip to learn a number it already has.
+     */
+    const val SAVE_MAX_BYTES: Long = 256L * 1024 * 1024
 
     /**
      * Send [len] bytes read from [source] to session [id] as [name].
@@ -126,6 +150,55 @@ object Upload {
                 "to a session"
         }
 
+        return transfer(connect, Agentd.receive(id, name, len), ::receivingAccepted, len, source, onProgress, ::read)
+    }
+
+    /**
+     * Save [len] bytes read from [source] into the computer's Downloads folder
+     * as [name] ("Send to Rime", contract §1.8).
+     *
+     * The same connection, channel and byte loop as [send]; only the request
+     * and its two replies differ. The name crosses as the share sheet gave
+     * it: the daemon reduces it and numbers it on a clash, and the [Saved]
+     * reply says what it chose. Never retried by this class: after a drop
+     * nobody knows whether the file landed, and a second send would save a
+     * second copy.
+     *
+     * @throws Refused when the machine answered anything but `saving`, or
+     *   refused after the bytes arrived (a full disk, a name clash it could
+     *   not number past).
+     * @throws Disconnected when the connection ended mid-upload.
+     * @throws IllegalArgumentException when [len] is past [SAVE_MAX_BYTES] or zero.
+     */
+    @Throws(Refused::class, Disconnected::class)
+    fun save(
+        connect: () -> FrameChannel,
+        name: String,
+        len: Long,
+        source: () -> InputStream,
+        onProgress: (Long) -> Unit = {},
+    ): Saved {
+        require(len > 0) { "an upload of no bytes is not a file" }
+        require(len <= SAVE_MAX_BYTES) {
+            "$len bytes is past the $SAVE_MAX_BYTES-byte limit for sending a file to a computer"
+        }
+        return transfer(connect, Agentd.saveFile(name, len), ::savingAccepted, len, source, onProgress, ::readSaved)
+    }
+
+    /**
+     * The takeover both verbs share: open [CHANNEL] with [request], check the
+     * first reply with [accepted], send exactly [len] bytes, then read the
+     * closing reply off the channel with [parse] (null while incomplete).
+     */
+    private fun <T : Any> transfer(
+        connect: () -> FrameChannel,
+        request: String,
+        accepted: (ByteArray) -> Boolean,
+        len: Long,
+        source: () -> InputStream,
+        onProgress: (Long) -> Unit,
+        parse: (String) -> T?,
+    ): T {
         val replies = java.util.concurrent.LinkedBlockingQueue<Any>()
         val listener = object : Mux.Listener {
             override fun onData(channel: UInt, bytes: ByteArray) {
@@ -141,7 +214,7 @@ object Upload {
             }
         }
 
-        val mux = Mux(connect(), listener, ::receivingAccepted)
+        val mux = Mux(connect(), listener, accepted)
         val pump = Thread({ mux.pump() }, "rime-upload")
         pump.isDaemon = true
         pump.start()
@@ -151,7 +224,7 @@ object Upload {
             // `openChannel` turns that into `ChannelRefused` because
             // `receivingAccepted` said no.
             val opened = try {
-                mux.openChannel(CHANNEL, Agentd.receive(id, name, len).toByteArray(Charsets.UTF_8))
+                mux.openChannel(CHANNEL, request.toByteArray(Charsets.UTF_8))
             } catch (e: ChannelRefused) {
                 throw Refused(e.message ?: "the machine refused the upload")
             }
@@ -163,7 +236,7 @@ object Upload {
             // came out as an `IllegalStateException` carrying a JSON blob.
             // `ChannelRefused` covers only the other shape, a `Close` with no
             // reply at all.
-            if (!receivingAccepted(opened)) throw Refused(refusal(opened))
+            if (!accepted(opened)) throw Refused(refusal(opened))
 
             var sent = 0L
             source().use { stream ->
@@ -178,6 +251,17 @@ object Upload {
                         // corrupted file it was told was a screenshot.
                         throw Refused(
                             "the file ended after $sent of $len bytes; nothing was handed over"
+                        )
+                    }
+                    // The last chunk is held until the source is seen to
+                    // END. A source longer than it said (a provider whose
+                    // SIZE column was stale) would otherwise arrive cut at
+                    // `len` and be reported as delivered. Closing without the
+                    // last chunk leaves the daemon an early end, and it keeps
+                    // nothing.
+                    if (sent + n == len && stream.read() != -1) {
+                        throw Refused(
+                            "the file is longer than the $len bytes it said it was; nothing was handed over"
                         )
                     }
                     // Only the SEND is wrapped. A phone that walked out of
@@ -217,8 +301,8 @@ object Upload {
                     )
                 }
                 answer.append((item as ByteArray).toString(Charsets.UTF_8))
-                val landed = read(answer.toString())
-                if (landed != null) return landed
+                val done = parse(answer.toString())
+                if (done != null) return done
             }
         } finally {
             runCatching { mux.close() }
@@ -250,6 +334,25 @@ object Upload {
         val bracketed = (obj["bracketed"] as? kotlinx.serialization.json.JsonPrimitive)
             ?.content?.toBooleanStrictOrNull() ?: false
         return Landed(id, path, bracketed)
+    }
+
+    /** Parse `save_file`'s closing reply, or `null` while it is still incomplete. */
+    internal fun readSaved(text: String): Saved? {
+        val value = runCatching {
+            Agentd.json.parseToJsonElement(text)
+        }.getOrNull() ?: return null
+        val obj = value as? kotlinx.serialization.json.JsonObject ?: return null
+        val reply = (obj["reply"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+        if (reply == "error") {
+            val message = (obj["message"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+            throw Refused(message ?: "the machine refused the file after receiving it")
+        }
+        if (reply != "saved") return null
+        val name = (obj["name"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+            ?: throw Refused("the machine saved the file and did not say under what name")
+        val path = (obj["path"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+            ?: throw Refused("the machine saved the file and did not say where")
+        return Saved(name, path)
     }
 
     /**

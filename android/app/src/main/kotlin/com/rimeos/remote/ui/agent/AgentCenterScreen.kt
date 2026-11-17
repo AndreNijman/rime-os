@@ -82,6 +82,8 @@ fun AgentCenterScreen(
     onHelp: () -> Unit,
     /** Open nex on this machine, or null when its bridge reaches no nexd. */
     onNex: (() -> Unit)? = null,
+    /** Open the computer's own screen (status, lock, media), or null when it offers none. */
+    onComputer: (() -> Unit)? = null,
     /**
      * Ask the machine for its clipboard (P1-059 criterion 3, receive half).
      *
@@ -191,6 +193,7 @@ fun AgentCenterScreen(
             // font scale. Measured by `LayoutOnDeviceTest` at scale 2.0.
             FlowRow(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
                 onNex?.let { TextButton(onClick = it) { Text("nex") } }
+                onComputer?.let { TextButton(onClick = it) { Text("Computer") } }
                 TextButton(onClick = onProjects) { Text("Projects") }
                 TextButton(onClick = onApprovals) {
                     Text(

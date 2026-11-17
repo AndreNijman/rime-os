@@ -39,6 +39,7 @@
 //! because what this forwards is that same `Response`.
 
 pub mod device;
+pub mod fdpass;
 pub mod identity;
 pub mod noise;
 pub mod pairing;

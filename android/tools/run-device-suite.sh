@@ -140,6 +140,19 @@ rm -rf "$root"; mkdir -p "$root"/run "$root"/state "$root"/scratch
 port=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
 brokerport=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
 
+# "Send to Rime" (clipboard_write, save_file) writes to this machine's
+# clipboard and Downloads folder, and this rime-agentd runs as the developer,
+# with their HOME and on their compositor: a real backend here would replace
+# what they copied and drop files into their Downloads. With the stub set it
+# writes desk/clipboard and desk/Downloads/ instead, which the broker reads back
+# for the tests (`desk_clipboard`, `desk_downloads`). The broker never restarts
+# rime-agentd, so this is the only place it starts.
+export RIME_AGENTD_DESKTOP_STUB=$root/desk
+mkdir -p "$root/desk"
+if [ "${RIME_AGENTD_DESKTOP_STUB:-}" != "$root/desk" ]; then
+  echo "FAIL: refusing to start rime-agentd without the desktop stub: it would write to this desktop"
+  exit 1
+fi
 XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
   RIME_AGENT_SCRATCH_ROOT=$root/scratch \
   "$bin/rime-agentd" >"$root/agentd.log" 2>&1 &
@@ -201,7 +214,29 @@ fi
 # reporting success for a leg it never touched.
 relay=${RIME_DEVICE_SUITE_RELAY-wss://apex-relay.andrenijman.com}  # rime-rename: keep (the deployed relay)
 
+# The machine verbs (status, lock, media, volume) act on whatever desktop the
+# daemon can reach, and this rime-remoted runs as the developer, on the
+# developer's session bus and logind session: a real backend here would lock
+# their screen and pause their music. Every rime-remoted this script starts,
+# including the broker's replacement after `restart_remoted`, answers them from
+# the stub instead. The stub keeps its state in machine/state.json and logs
+# every action to machine/actions.jsonl, which the broker hands to the tests.
+export RIME_REMOTED_MACHINE_STUB=$root/machine
+mkdir -p "$root/machine"
+# The same for the phone's notifications (contract §2.7): they go to
+# notify/notifications.jsonl, never to this desktop's notification server.
+export RIME_REMOTED_NOTIFY_STUB=$root/notify
+mkdir -p "$root/notify"
+
 start_remoted() {
+  if [ "${RIME_REMOTED_MACHINE_STUB:-}" != "$root/machine" ]; then
+    echo "FAIL: refusing to start rime-remoted without the machine stub: it would act on this desktop"
+    exit 1
+  fi
+  if [ "${RIME_REMOTED_NOTIFY_STUB:-}" != "$root/notify" ]; then
+    echo "FAIL: refusing to start rime-remoted without the notification stub: it would post on this desktop"
+    exit 1
+  fi
   local extra=()
   [ -n "$relay" ] && extra=(--relay "$relay")
   XDG_RUNTIME_DIR=$root/run XDG_STATE_HOME=$root/state \
@@ -241,8 +276,18 @@ done
 # "forward anything to rime-agentd", which would be a way for a test to borrow a
 # local origin for any request at all — and this suite's whole value is that the
 # phone's own origin is real.
+#
+# `send_file_at_computer` is `rime remote send <device> <file>` as the CLI does
+# it: the request line with the open file passed beside it (SCM_RIGHTS). The
+# file is one the broker writes into this run's own directory from the bytes
+# the test gives it; nothing of the developer's is read. A text send needs no
+# verb of its own: `{"cmd":"send",...,"kind":"text"}` is forwarded like ring.
+#
+# `machine_stub_seed` and `machine_stub_actions` set and read the stub machine
+# (see RIME_REMOTED_MACHINE_STUB above): what the phone will find, and what it
+# asked the computer to do. Neither reaches a daemon.
 cat > "$root/broker.py" <<'PY'
-import json, os, socket, socketserver, subprocess, sys, time
+import base64, json, os, socket, socketserver, subprocess, sys, time
 
 SOCK, PORT, ROOT, BIN = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 DPORT, AGENTD = sys.argv[5], sys.argv[6]
@@ -255,6 +300,24 @@ def control(line):
     s.sendall((line + "\n").encode())
     f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
     return out
+
+def send_file_at_computer(device, name, data_b64):
+    """`rime remote send DEVICE FILE`, from THIS process: the person at the
+    computer. The file lives in the run directory and is gone once sent: the
+    service holds its own descriptor."""
+    path = os.path.join(ROOT, "send-" + str(time.time_ns()))
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(data_b64))
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.unlink(path)
+        s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(SOCK)
+        line = json.dumps({"cmd": "send", "device": device, "kind": "file", "name": name}) + "\n"
+        socket.send_fds(s, [line.encode()], [fd])
+        f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
+        return out
+    finally:
+        os.close(fd)
 
 def agentd(request):
     """One request to rime-agentd, from THIS process — a local origin."""
@@ -312,6 +375,12 @@ def restart():
             os.kill(old, 0); time.sleep(0.05)
         except ProcessLookupError:
             break
+    if os.environ.get("RIME_REMOTED_MACHINE_STUB") != os.path.join(ROOT, "machine"):
+        return json.dumps({"reply": "error",
+                           "message": "refusing to start rime-remoted without the machine stub"})
+    if os.environ.get("RIME_REMOTED_NOTIFY_STUB") != os.path.join(ROOT, "notify"):
+        return json.dumps({"reply": "error",
+                           "message": "refusing to start rime-remoted without the notification stub"})
     env = dict(os.environ,
                XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
                XDG_STATE_HOME=os.path.join(ROOT, "state"))
@@ -333,6 +402,81 @@ def restart():
         except OSError:
             time.sleep(0.05)
     return json.dumps({"reply": "error", "message": "rime-remoted did not come back"})
+
+STUB = os.path.join(ROOT, "machine")
+
+def machine_stub_seed(state):
+    """Replace the stub machine's state: what the phone will read next."""
+    if not isinstance(state, dict):
+        return json.dumps({"reply": "error", "message": "state must be an object"})
+    tmp = os.path.join(STUB, "state.json.new")
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, os.path.join(STUB, "state.json"))
+    return json.dumps({"reply": "ok"})
+
+def machine_stub_actions():
+    """Every action the stub machine was asked to take, oldest first."""
+    try:
+        with open(os.path.join(STUB, "actions.jsonl")) as f:
+            actions = [json.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        actions = []
+    return json.dumps({"reply": "ok", "actions": actions})
+
+DESK = os.path.join(ROOT, "desk")
+
+def desk_clipboard():
+    """What the stub desktop's clipboard holds, or null when nothing was written."""
+    try:
+        with open(os.path.join(DESK, "clipboard"), encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        text = None
+    return json.dumps({"reply": "ok", "text": text})
+
+def desk_downloads():
+    """Every finished file in the stub Downloads folder, with its size and sha256."""
+    import hashlib
+    d = os.path.join(DESK, "Downloads")
+    files = []
+    try:
+        names = sorted(os.listdir(d))
+    except FileNotFoundError:
+        names = []
+    for n in names:
+        p = os.path.join(d, n)
+        if not os.path.isfile(p):
+            continue
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+        files.append({"name": n, "size": os.path.getsize(p), "sha256": h.hexdigest()})
+    return json.dumps({"reply": "ok", "dir": d, "files": files})
+
+def desk_reset():
+    """Empty the stub clipboard and Downloads folder, so a test sees only its own writes."""
+    import shutil
+    shutil.rmtree(os.path.join(DESK, "Downloads"), ignore_errors=True)
+    try:
+        os.remove(os.path.join(DESK, "clipboard"))
+    except FileNotFoundError:
+        pass
+    return json.dumps({"reply": "ok"})
+
+def notify_log():
+    """What rime-remoted posted to the stub notification server, complete lines only."""
+    entries = []
+    try:
+        with open(os.path.join(ROOT, "notify", "notifications.jsonl"), encoding="utf-8") as f:
+            for l in f:
+                if not l.endswith("\n"):
+                    break
+                entries.append(json.loads(l))
+    except FileNotFoundError:
+        pass
+    return json.dumps({"reply": "ok", "entries": entries})
 
 class H(socketserver.StreamRequestHandler):
     timeout = 120
@@ -358,6 +502,20 @@ class H(socketserver.StreamRequestHandler):
                 out = nex_session_at_computer(str(req["title"]))
             elif cmd == "nex_submit_at_computer":
                 out = nex_submit_at_computer(str(req["session"]), str(req["text"]))
+            elif cmd == "send_file_at_computer":
+                out = send_file_at_computer(str(req["device"]), str(req["name"]), str(req["data"]))
+            elif cmd == "machine_stub_seed":
+                out = machine_stub_seed(req.get("state"))
+            elif cmd == "machine_stub_actions":
+                out = machine_stub_actions()
+            elif cmd == "desk_clipboard":
+                out = desk_clipboard()
+            elif cmd == "desk_downloads":
+                out = desk_downloads()
+            elif cmd == "desk_reset":
+                out = desk_reset()
+            elif cmd == "notify_log":
+                out = notify_log()
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:
@@ -477,7 +635,7 @@ args=(-e lan "$lan" -e broker "$brokeraddr" -e machine "$(cat /proc/sys/kernel/h
 if [ -n "$nexroot" ]; then
   args+=(-e nexroot "$nexroot")
 else
-  args+=(-e notClass com.rimeos.remote.device.NexOnDeviceTest)
+  args+=(-e notClass "com.rimeos.remote.device.NexOnDeviceTest,com.rimeos.remote.device.NexColdTapOnDeviceTest")
 fi
 
 # ── TalkBack ────────────────────────────────────────────────────────────────

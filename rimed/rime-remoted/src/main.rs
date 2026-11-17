@@ -28,9 +28,12 @@
 
 mod control;
 mod discovery;
+mod machine;
+mod mirror;
 mod net;
 mod nex;
 mod peer;
+mod phone;
 mod proxy;
 mod push;
 mod relay;

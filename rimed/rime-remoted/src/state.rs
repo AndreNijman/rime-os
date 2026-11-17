@@ -81,6 +81,12 @@ pub struct State {
     /// Where the push registrations live: a **different** file, because they
     /// carry a secret and `devices.json` is asserted not to.
     pub push_path: PathBuf,
+    /// Where each phone's last `phone_report` lives, beside the device store.
+    pub phones_path: PathBuf,
+    /// The open `device_events` channels and the rings waiting on an ack.
+    pub events: crate::phone::Events,
+    /// What somebody here sent a phone, until it takes it (contract §2.6).
+    pub outbox: crate::phone::Outbox,
     /// How often an open connection is measured.
     pub ping_interval: std::time::Duration,
     devices: Mutex<DeviceStore>,
@@ -89,6 +95,7 @@ pub struct State {
     pub offer: Mutex<Option<Offer>>,
     live: Mutex<Vec<Live>>,
     push: Mutex<PushStore>,
+    phones: Mutex<crate::phone::PhoneStore>,
     /// nexd's socket, when `--nexd` moved it; see [`State::nexd`].
     nexd: Mutex<Option<PathBuf>>,
 }
@@ -126,6 +133,19 @@ impl State {
             );
             PushStore::default()
         });
+        let phones_path = store_path
+            .parent()
+            .map(|d| d.join("phones.json"))
+            .unwrap_or_else(|| PathBuf::from("phones.json"));
+        // Unreadable is not fatal either: the phones report again on their
+        // next connection, and until then the Shell shows no battery.
+        let phones = crate::phone::PhoneStore::load(&phones_path).unwrap_or_else(|e| {
+            eprintln!(
+                "rime-remoted: {} is unreadable ({e}); phone reports start empty",
+                phones_path.display()
+            );
+            crate::phone::PhoneStore::default()
+        });
         Ok(Arc::new(State {
             identity,
             machine,
@@ -134,12 +154,16 @@ impl State {
             relay,
             store_path,
             push_path,
+            phones_path,
+            events: crate::phone::Events::default(),
+            outbox: crate::phone::Outbox::default(),
             ping_interval,
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
             offer: Mutex::new(None),
             live: Mutex::new(Vec::new()),
             push: Mutex::new(push),
+            phones: Mutex::new(phones),
             nexd: Mutex::new(None),
         }))
     }
@@ -200,6 +224,34 @@ impl State {
 
 
 
+
+    /// Record a phone's report. The id is the handshake's.
+    pub fn phone_report(&self, device_id: &str, report: crate::phone::PhoneReport) {
+        let mut store = self.phones.lock().unwrap_or_else(|e| e.into_inner());
+        store.phones.insert(device_id.to_string(), report);
+        if let Err(e) = store.save(&self.phones_path) {
+            eprintln!("rime-remoted: could not write {}: {e}", self.phones_path.display());
+        }
+    }
+
+    /// Every phone's last report.
+    pub fn phones(&self) -> std::collections::BTreeMap<String, crate::phone::PhoneReport> {
+        self.phones.lock().unwrap_or_else(|e| e.into_inner()).phones.clone()
+    }
+
+    /// Forget what a phone reported, close its events channel and drop what was
+    /// waiting for it: revoke.
+    pub fn phone_forget(&self, device_id: &str) {
+        self.events.forget(device_id);
+        self.outbox.forget(device_id);
+        crate::mirror::mirror().forget(device_id);
+        let mut store = self.phones.lock().unwrap_or_else(|e| e.into_inner());
+        if store.phones.remove(device_id).is_some() {
+            if let Err(e) = store.save(&self.phones_path) {
+                eprintln!("rime-remoted: could not write {}: {e}", self.phones_path.display());
+            }
+        }
+    }
 
     /// The push registrations, locked.
     pub fn push_store(&self) -> std::sync::MutexGuard<'_, PushStore> {

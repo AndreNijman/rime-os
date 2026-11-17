@@ -13,6 +13,8 @@ import androidx.fragment.app.FragmentActivity
 import com.rimeos.remote.core.Device
 import com.rimeos.remote.core.Pairing
 import com.rimeos.remote.core.agent.Alert
+import com.rimeos.remote.core.agent.AlertTap
+import com.rimeos.remote.share.Shared
 import com.rimeos.remote.ui.RimeRemoteApp
 import com.rimeos.remote.ui.Notifier
 import com.rimeos.remote.core.CrashReport
@@ -37,7 +39,16 @@ class MainActivity : FragmentActivity() {
      * unique across machines either — two paired laptops both have a session
      * 1. A tap carrying only a number could open a stranger's agent.
      */
-    private var alertTap by mutableStateOf<Pair<String, Int>?>(null)
+    private var alertTap by mutableStateOf<AlertTap?>(null)
+
+    /**
+     * What another app shared ("Send to Rime"), until the Send screen has it.
+     *
+     * Read only from a fresh intent: not after a recreation (the screen
+     * already has it) and not from Recents, which replays the old intent
+     * after the read grant that came with it is gone.
+     */
+    private var share by mutableStateOf<Shared?>(null)
 
     /**
      * Asks for `POST_NOTIFICATIONS`, which API 33 made a runtime permission.
@@ -69,6 +80,7 @@ class MainActivity : FragmentActivity() {
         enableEdgeToEdge()
         payload = pairingPayload(intent)
         alertTap = alertTarget(intent)
+        if (savedInstanceState == null) share = sharedIn(intent)
         setContent {
             RimeRemoteApp(
                 activity = this,
@@ -76,6 +88,8 @@ class MainActivity : FragmentActivity() {
                 launchPayload = payload,
                 alertTarget = alertTap,
                 onAlertConsumed = { alertTap = null },
+                share = share,
+                onShareConsumed = { share = null },
                 onAskNotifications = {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         askNotifications.launch(Notifier.PERMISSION)
@@ -107,6 +121,14 @@ class MainActivity : FragmentActivity() {
         // must clear a tap that has already been acted on, or going back to
         // the machines list would bounce straight into the old session again.
         alertTap = alertTarget(intent)
+        // A share while the app is open replaces one not yet taken; anything
+        // else leaves it alone, so a relaunch does not drop a share mid-unlock.
+        sharedIn(intent)?.let { share = it }
+    }
+
+    private fun sharedIn(intent: Intent?): Shared? {
+        if (intent == null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return null
+        return Shared.of(intent, packageName)
     }
 
     /**
@@ -128,11 +150,11 @@ class MainActivity : FragmentActivity() {
      * connected one and that the session still exists before it opens
      * anything.
      */
-    private fun alertTarget(intent: Intent?): Pair<String, Int>? {
+    private fun alertTarget(intent: Intent?): AlertTap? {
         if (intent?.action != Notifier.ACTION_OPEN_ALERT) return null
         val machine = intent.getStringExtra(Notifier.EXTRA_MACHINE) ?: return null
         val session = intent.getIntExtra(Notifier.EXTRA_SESSION, Alert.NO_SESSION)
-        return machine to session
+        return AlertTap(machine, session, nex = intent.getBooleanExtra(Notifier.EXTRA_NEX, false))
     }
 
     private fun pairingPayload(intent: Intent?): String? {

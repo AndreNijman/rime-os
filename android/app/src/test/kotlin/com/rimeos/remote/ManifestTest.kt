@@ -193,6 +193,25 @@ class ManifestTest {
     }
 
     @Test
+    fun `the notification listener only the system can bind, and no package-wide visibility`() {
+        val service = manifest.substringAfter("\".phone.MirrorService\"").substringBefore("</service>")
+        assertTrue(manifest.contains("\".phone.MirrorService\""), "the notification listener is not declared")
+        assertTrue(
+            service.contains("android:permission=\"android.permission.BIND_NOTIFICATION_LISTENER_SERVICE\""),
+            "the notification listener is exported without the permission only the system holds",
+        )
+        assertTrue(service.contains("android.service.notification.NotificationListenerService"))
+        // Listing the person's apps needs the launcher entry in <queries>, not
+        // a permission to see every package on the phone.
+        assertFalse(declares("android.permission.QUERY_ALL_PACKAGES"))
+        assertTrue(
+            manifest.substringAfter("<queries>").substringBefore("</queries>")
+                .contains("android.intent.category.LAUNCHER"),
+            "the launcher apps are not visible, so the app list would be empty on Android 11 and later",
+        )
+    }
+
+    @Test
     fun `the activity is not locked to one orientation and survives a rotation`() {
         // P1-060 asks for rotation and tablets/foldables. Neither is testable
         // without a device, but the two declarations that decide the outcome
@@ -242,6 +261,29 @@ class ManifestTest {
             receiver.contains("com.rimeos.remote.UPDATE_STATUS"),
             "the receiver does not listen for the action the updater sends",
         )
+    }
+
+    @Test
+    fun `the ring stop receiver is not exported and adds no permission`() {
+        // Stopping a ring is harmless, but an exported receiver is one any app
+        // can poke; the Stop button reaches it by explicit intent.
+        val name = "\".phone.RingStopReceiver\""
+        assertTrue(manifest.contains(name), "the ring stop receiver is not declared, so Stop does nothing")
+        val receiver = manifest.substringAfter(name).substringBefore("/>")
+        assertTrue(receiver.contains("android:exported=\"false\""), "the ring stop receiver is exported")
+    }
+
+    @Test
+    fun `send to rime takes shares on the one activity, with no permission added for them`() {
+        // The read grant arrives with the share (FLAG_GRANT_READ_URI_PERMISSION),
+        // which is the whole reason "Send to Rime" needs no storage permission;
+        // the permission tests above keep that true.
+        val filter = manifest.substringAfter("@string/send_to_rime").substringBefore("</intent-filter>")
+        assertTrue(filter.contains("android.intent.action.SEND\""), "no SEND action in the share filter")
+        assertTrue(filter.contains("android.intent.action.SEND_MULTIPLE"), "no SEND_MULTIPLE in the share filter")
+        assertTrue(filter.contains("android.intent.category.DEFAULT"), "a share filter without DEFAULT is never offered")
+        assertTrue(filter.contains("android:mimeType=\"*/*\""), "the share filter takes only some types")
+        assertFalse(manifest.contains("<provider"), "a provider would be an authority Shared.acceptable must refuse")
     }
 
     @Test

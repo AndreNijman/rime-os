@@ -282,6 +282,12 @@ impl DeviceStore {
         }
     }
 
+    /// A device by id or name, the same way `revoke` resolves one.
+    pub fn find(&self, id_or_name: &str) -> Result<&Device, StoreError> {
+        let id = self.resolve(id_or_name)?;
+        Ok(self.devices.get(&id).expect("resolved"))
+    }
+
     /// Devices, newest pairing last.
     pub fn list(&self) -> Vec<&Device> {
         let mut v: Vec<&Device> = self.devices.values().collect();

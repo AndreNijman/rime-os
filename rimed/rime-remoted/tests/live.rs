@@ -203,8 +203,15 @@ impl Harness {
             "1000".into(),
         ];
         args.extend(extra.iter().map(|s| s.to_string()));
+        // Never the real machine: this daemon runs as the developer, in their
+        // session, and a machine verb would lock their screen.
+        let machine = root.join("machine");
+        std::fs::create_dir_all(&machine).expect("machine stub");
         let remoted = Command::new(env!("CARGO_BIN_EXE_rime-remoted"))
             .args(&args)
+            .env("RIME_REMOTED_MACHINE_STUB", &machine)
+            // A phone's notifications go to a file, never onto this desktop.
+            .env("RIME_REMOTED_NOTIFY_STUB", root.join("notify"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .stdout(Stdio::null())
@@ -339,7 +346,10 @@ fn remote_hello_is_answered_by_the_service_and_never_reaches_the_daemon() {
     assert_eq!(hello["version"], V, "{hello}");
     assert_eq!(
         hello["features"],
-        serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness"]),
+        serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
+                           "machine_status", "machine_lock", "media",
+                           "device_events", "phone_report", "take_offer",
+                           "phone_notifications"]),
         "{hello}"
     );
     // The same list a pairing code carries, read the same way at the same
@@ -358,6 +368,51 @@ fn remote_hello_is_answered_by_the_service_and_never_reaches_the_daemon() {
     assert!(
         !saw.iter().any(|c| c == "remote_hello"),
         "remote_hello was forwarded to the daemon: {saw:?}"
+    );
+}
+
+#[test]
+fn the_machine_verbs_are_answered_by_the_service_from_the_stub_and_never_reach_the_daemon() {
+    let h = Harness::start("machine", &[]);
+    let machine = h.root.join("machine");
+    std::fs::write(
+        machine.join("state.json"),
+        serde_json::json!({
+            "machine_status": {"battery": {"percent": 64, "state": "discharging"}, "on_ac": false,
+                               "power_mode": "low-power", "locked": false, "update": "up-to-date"},
+            "media": {"player": {"name": "mpv", "status": "playing", "title": "t", "artist": "a"},
+                      "volume": {"percent": 20, "muted": false}},
+        })
+        .to_string(),
+    )
+    .expect("state");
+    let mut s = h.connect();
+    let status = s.call(r#"{"cmd":"machine_status"}"#);
+    assert_eq!(status["reply"], "machine_status", "{status}");
+    assert_eq!(status["battery"], serde_json::json!({"percent": 64, "state": "discharging"}));
+    assert_eq!(status["power_mode"], "low-power");
+    assert_eq!(s.call(r#"{"cmd":"machine_lock"}"#), serde_json::json!({"reply": "machine_lock", "locked": true}));
+    assert_eq!(s.call(r#"{"cmd":"media_control","action":"play_pause"}"#)["player"]["status"], "paused");
+    assert_eq!(s.call(r#"{"cmd":"volume","percent":70}"#)["volume"]["percent"], 70);
+    assert_eq!(s.call(r#"{"cmd":"volume","percent":700}"#)["kind"], "bad_request");
+
+    let actions: Vec<serde_json::Value> = std::fs::read_to_string(machine.join("actions.jsonl"))
+        .expect("actions")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json"))
+        .collect();
+    assert_eq!(
+        actions,
+        vec![
+            serde_json::json!({"action": "lock"}),
+            serde_json::json!({"action": "play_pause"}),
+            serde_json::json!({"action": "volume", "percent": 70}),
+        ]
+    );
+    let saw = h.daemon_saw.lock().expect("seen").clone();
+    assert!(
+        !saw.iter().any(|c| c.starts_with("machine") || c == "media" || c == "media_control" || c == "volume"),
+        "a machine verb was forwarded to the daemon: {saw:?}"
     );
 }
 

@@ -441,6 +441,33 @@ pub fn viewer(who: &Origin) -> rime_agent_core::session::Viewer {
     }
 }
 
+/// Refuse `clipboard_write` and `save_file` (contract §1.8) to the callers
+/// [`refuse_clipboard`] refuses, for the reverse reason: a session that could
+/// set the clipboard could change what a person pastes into a terminal a
+/// moment later, and one that could drop files in Downloads could leave
+/// something there for a person to open. `doing` finishes "may not …".
+pub fn refuse_desktop(who: &Origin, doing: &str) -> Option<Response> {
+    if let Some(caller) = who.session {
+        return Some(Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "session {caller} may not {doing}; only a person at this machine or on a phone \
+                 paired with it may"
+            ),
+        ));
+    }
+    if let Some(why) = who.origin_unreadable.as_deref() {
+        return Some(Response::error(
+            ErrorKind::PermissionDenied,
+            format!(
+                "refusing to {doing}: this connection could not be classified, so there is no \
+                 way to tell it is not a session asking ({why})"
+            ),
+        ));
+    }
+    None
+}
+
 /// Whether a connection may read what is on the machine's clipboard.
 ///
 /// `None` means it may. A [`Response`] means it may not, and says why.

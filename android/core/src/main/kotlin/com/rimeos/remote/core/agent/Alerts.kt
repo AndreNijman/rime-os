@@ -131,6 +131,32 @@ data class Alert(
 
         /** A deployment finished with a non-zero exit code. */
         DEPLOY_FAILED("Deployment failed", "A deployment on the machine did not complete."),
+
+        /**
+         * nex is waiting for somebody to approve or deny what it wants to do.
+         *
+         * Raised only by the machine's push watcher: the in-app watcher has
+         * no need of it, because the nex screen follows nexd live while it is
+         * open. A nex session id is a string the push body has no room for,
+         * so this alert names no session; tapping it opens the nex screen,
+         * which reads what is waiting over the paired link. What the tool
+         * would do never reaches the shade.
+         */
+        NEX_APPROVAL("nex needs a decision", "Open nex to approve or deny what it wants to do."),
+
+        /**
+         * The computer asked this phone to ring, so somebody can find it
+         * (`rime remote ring`, contract §2.5). Never a shade notification of
+         * the ordinary kind: the app's ringer plays it as an alarm.
+         */
+        RING("Ringing", "Your computer asked this phone to ring so you can find it."),
+
+        /**
+         * The computer sent this phone a file or text while the app was not
+         * connected (`rime remote send`, contract §2.6). The push carries no
+         * name and no content: it only says to open the app, which takes it.
+         */
+        SENT("Sent to this phone", "Your computer sent you something. Open Rime Remote to take it."),
     }
 
     /**

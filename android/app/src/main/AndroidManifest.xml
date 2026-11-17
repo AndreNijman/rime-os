@@ -135,6 +135,15 @@
         <intent>
             <action android:name="org.unifiedpush.android.distributor.REGISTER" />
         </intent>
+
+        <!-- The apps a person can see in their launcher, for "Notifications on
+             your computer" to list and to name (contract §2.7). Narrower than
+             QUERY_ALL_PACKAGES, which this app does not declare: an app with
+             no launcher icon is not one a person picks from a list. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
 
     <application
@@ -177,6 +186,16 @@
                 <!-- rime-rename: keep: Pairing.SCHEME, the scheme every desktop prints -->
                 <data android:scheme="apex-remote" /> <!-- rime-rename: keep -->
             </intent-filter>
+
+            <!-- "Send to Rime": text and files from another app's share sheet.
+                 Arriving only opens the Send screen; a tap there sends. The
+                 read grant comes with the share, so no storage permission. -->
+            <intent-filter android:label="@string/send_to_rime">
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
 
         <!-- The connection keeper. `specialUse`, because no named type fits:
@@ -196,6 +215,23 @@
                 android:value="Keeps an end-to-end encrypted session open to the user's own paired computer while the app is unlocked, so the coding agents running there can be seen and answered at once." />
         </service>
 
+        <!-- This phone's notifications on the paired computers (contract §2.7).
+
+             Android binds it only after the person turns on notification
+             access for this app in Settings, and only the system can bind it
+             (BIND_NOTIFICATION_LISTENER_SERVICE). Exported because the
+             system is outside this app; that permission is the gate. What
+             it forwards is limited to the apps picked in the app, none by
+             default, and only while the app is unlocked and connected. -->
+        <service
+            android:name=".phone.MirrorService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
         <!-- Where `PackageInstaller` answers, and where the user's install
              prompt is actually raised: `commit()` shows nothing by itself, it
              broadcasts STATUS_PENDING_USER_ACTION carrying the intent that
@@ -212,6 +248,12 @@
                 <action android:name="com.rimeos.remote.UPDATE_STATUS" />
             </intent-filter>
         </receiver>
+
+        <!-- The Stop button on "Ring my phone". Not exported and no filter:
+             only this app's own notification sends it, by explicit intent. -->
+        <receiver
+            android:name=".phone.RingStopReceiver"
+            android:exported="false" />
 
         <!-- Where a UnifiedPush distributor delivers (P1-058).
 

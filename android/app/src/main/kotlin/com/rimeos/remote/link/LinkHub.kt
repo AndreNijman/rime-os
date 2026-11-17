@@ -7,7 +7,17 @@ import com.rimeos.remote.core.Session
 import com.rimeos.remote.core.StaticKey
 import com.rimeos.remote.core.agent.Hello
 import com.rimeos.remote.core.agent.MachineLink
+import com.rimeos.remote.core.agent.Features
 import com.rimeos.remote.core.agent.RemoteHello
+import com.rimeos.remote.core.phone.BatteryThrottle
+import com.rimeos.remote.core.phone.Content
+import com.rimeos.remote.core.phone.DeviceEvent
+import com.rimeos.remote.core.phone.Mirror
+import com.rimeos.remote.core.phone.MirrorOutbox
+import com.rimeos.remote.core.phone.Phone
+import com.rimeos.remote.core.phone.PhoneLink
+import com.rimeos.remote.phone.Receiver
+import com.rimeos.remote.phone.Ringer
 import com.rimeos.remote.core.link.Route
 import com.rimeos.remote.data.MachineRepository
 import com.rimeos.remote.pairing.PairingService
@@ -18,7 +28,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -90,6 +102,25 @@ class LinkHub private constructor(private val app: Context) {
     /** How each link's current connection was made, set by the connect lambda. */
     private val lastDial = ConcurrentHashMap<String, Dial>()
 
+    // The phone's own side of each connection (contract §2.5): its battery
+    // report, and the event channel a machine rings it on. One of each per
+    // machine; a new connection replaces both.
+    private val batteryThrottles = ConcurrentHashMap<String, BatteryThrottle>()
+    private val eventChannels = ConcurrentHashMap<String, java.io.Closeable>()
+    // This phone's notifications on each machine (contract §2.7): what waits
+    // for it and what it shows, and the one sender that writes them in order.
+    // A launch per notification on the IO pool could let a removal overtake
+    // its own post, which would leave it on the computer for good.
+    private class MirrorLane(val outbox: MirrorOutbox, val wake: Channel<Unit>, var sender: Job? = null)
+
+    private val mirrorLanes = ConcurrentHashMap<String, MirrorLane>()
+
+    /** The apps the person chose, read from the store on a connection and set by the screen. */
+    @Volatile
+    private var mirrorApps: Set<String> = emptySet()
+    private val ringer by lazy { Ringer(app) }
+    private val receiver by lazy { Receiver(app) }
+
     private class Dial(val route: Route?, val ms: Long, val relay: Boolean)
 
     /** Where a machine's link stands, for the machines list and the notification. */
@@ -106,6 +137,13 @@ class LinkHub private constructor(private val app: Context) {
         val hello: Hello? = null,
         /** What `rime-remoted` can do, from `remote_hello` on this connection. */
         val remote: RemoteHello = RemoteHello.NONE,
+        /**
+         * How many times [remote] and [hello] have been asked on a new
+         * connection in this process. [remote] keeps the last connection's
+         * answer through a drop and until the next answer lands, so a screen
+         * waiting for THIS connection's hello waits for this to move.
+         */
+        val hellos: Int = 0,
         /** Why the last attempt failed, while reconnecting. */
         val failure: String? = null,
     )
@@ -254,6 +292,10 @@ class LinkHub private constructor(private val app: Context) {
         links.clear()
         identities.clear()
         lastDial.clear()
+        batteryThrottles.clear()
+        eventChannels.clear()
+        mirrorLanes.values.forEach { it.sender?.cancel() }
+        mirrorLanes.clear()
         _states.value = emptyMap()
         LinkService.stop(app)
         scope.launch { closing.forEach { runCatching { it.close() } } }
@@ -265,6 +307,9 @@ class LinkHub private constructor(private val app: Context) {
         reconnects.remove(deviceId)?.cancel()
         identities.remove(deviceId)
         lastDial.remove(deviceId)
+        batteryThrottles.remove(deviceId)
+        eventChannels.remove(deviceId)?.let { runCatching { it.close() } }
+        mirrorLanes.remove(deviceId)?.sender?.cancel()
         _states.update { it - deviceId }
         val link = links.remove(deviceId)
         if (held.isEmpty()) LinkService.stop(app)
@@ -304,6 +349,11 @@ class LinkHub private constructor(private val app: Context) {
                 setState(id, machine.machine) {
                     it.copy(status = if (keep) Status.RECONNECTING else Status.IDLE, via = null, connectMs = null)
                 }
+                mirrorLanes[id]?.let { lane ->
+                    lane.sender?.cancel()
+                    lane.sender = null
+                    synchronized(lane.outbox) { lane.outbox.drop() }
+                }
                 if (keep) scheduleReconnect(machine)
             }
         }
@@ -327,8 +377,9 @@ class LinkHub private constructor(private val app: Context) {
         val r = remote.await()
         val h = hello.await()
         setState(machine.deviceId, machine.machine) {
-            it.copy(hello = h ?: it.hello, remote = r ?: it.remote)
+            it.copy(hello = h ?: it.hello, remote = r ?: it.remote, hellos = it.hellos + 1)
         }
+        r?.let { phoneSide(machine, link, it) }
         runCatching {
             repository.updateBlocking { store ->
                 var next = store
@@ -337,6 +388,166 @@ class LinkHub private constructor(private val app: Context) {
                 next
             }
         }
+    }
+
+    /**
+     * The phone's side of a new connection: report the battery, and open the
+     * channel the machine rings this phone on. Only what the machine's hello
+     * offers is sent; an older machine gets nothing it does not know.
+     */
+    private fun phoneSide(machine: PairedMachine, link: MachineLink, remote: RemoteHello) {
+        val id = machine.deviceId
+        val phone = PhoneLink(link)
+        if (remote.has(Phone.REPORT)) {
+            val throttle = batteryThrottles.computeIfAbsent(id) { BatteryThrottle() }
+            throttle.reset()
+            report(phone, throttle, Ringer.battery(app))
+        }
+        if (remote.has(Mirror.FEATURE)) startMirror(machine, phone) else mirrorLanes.remove(id)?.sender?.cancel()
+        eventChannels.remove(id)?.let { runCatching { it.close() } }
+        if (remote.has(Phone.EVENTS) && remote.has(Features.MUX_ATTACH)) {
+            runCatching {
+                phone.subscribe(
+                    listener = { event -> onDeviceEvent(machine, phone, event) },
+                    onEnd = { cause -> Log.i(TAG, "${machine.machine}: event channel ended: ${cause?.message}") },
+                )
+            }.onSuccess { eventChannels[id] = it }
+                .onFailure { Log.w(TAG, "${machine.machine}: event channel did not open: ${it.message}") }
+        }
+    }
+
+    private fun report(phone: PhoneLink, throttle: BatteryThrottle, reading: Pair<Int?, Boolean?>) {
+        val (level, charging) = reading
+        val now = System.currentTimeMillis()
+        if (!throttle.due(level, charging, now)) return
+        val can = buildList {
+            if (ringer.canRing) add(Phone.CAN_RING)
+            if (receiver.canReceive) add(Phone.CAN_RECEIVE)
+        }
+        runCatching { phone.report(level, charging, can) }
+            .onSuccess { throttle.sent(level, charging, now) }
+            .onFailure { Log.i(TAG, "battery report not taken: ${it.message}") }
+    }
+
+    /** The phone's battery changed; tell each connected machine that wants to know, when it is worth it. */
+    fun onBattery(level: Int?, charging: Boolean?) {
+        if (!_unlocked.value) return
+        for ((id, throttle) in batteryThrottles) {
+            val link = links[id] ?: continue
+            if (!link.connected) continue
+            if (state(id)?.remote?.has(Phone.REPORT) != true) continue
+            if (!throttle.due(level, charging, System.currentTimeMillis())) continue
+            scope.launch { report(PhoneLink(link), throttle, level to charging) }
+        }
+    }
+
+    /**
+     * Whether a notification could go anywhere now: unlocked, and at least one
+     * machine connected that takes them. The listener asks this before it
+     * reads anything off a notification.
+     */
+    val mirroring: Boolean get() = _unlocked.value && mirrorLanes.values.any { it.sender?.isActive == true }
+
+    fun mirrorApps(): Set<String> = mirrorApps
+
+    /** The person changed which apps are shown; the store was already written. */
+    fun setMirrorApps(apps: Set<String>) {
+        mirrorApps = apps
+    }
+
+    /**
+     * A notification from a chosen app was posted or updated: every machine
+     * connected now gets its newest state, at its own pace. Called on the
+     * listener's thread, in the order Android reports, which is the order
+     * each outbox keeps.
+     */
+    fun onPhoneNotification(key: String, content: Content) = toLanes { it.offer(key, content) }
+
+    /** A notification went away on this phone; a machine that was sent it closes it too. */
+    fun onPhoneNotificationRemoved(key: String) = toLanes { it.remove(key) }
+
+    private fun toLanes(block: (MirrorOutbox) -> Unit) {
+        if (!_unlocked.value) return
+        for (lane in mirrorLanes.values) {
+            if (lane.sender?.isActive != true) continue
+            synchronized(lane.outbox) { block(lane.outbox) }
+            lane.wake.trySend(Unit)
+        }
+    }
+
+    /**
+     * The sender for one machine's new connection. The outbox outlives the
+     * connection (so a removal after a reconnect still closes what was
+     * shown); what waited when the old one dropped was already discarded.
+     */
+    private fun startMirror(machine: PairedMachine, phone: PhoneLink) {
+        runCatching { mirrorApps = repository.loadBlocking().settings.mirrorApps }
+        val lane = mirrorLanes.compute(machine.deviceId) { _, old ->
+            old?.sender?.cancel()
+            MirrorLane(old?.outbox ?: MirrorOutbox(System.currentTimeMillis()), Channel(Channel.CONFLATED))
+        }!!
+        lane.sender = scope.launch {
+            val outbox = lane.outbox
+            while (isActive) {
+                lane.wake.receive()
+                while (isActive) {
+                    val now = System.currentTimeMillis()
+                    val item = synchronized(outbox) { outbox.next(now) }
+                    if (item == null) {
+                        val wait = synchronized(outbox) { outbox.waitMs(now) }
+                        if (wait == 0L) break
+                        delay(wait)
+                        continue
+                    }
+                    // Never the content in a log: it is somebody's message.
+                    val ok = runCatching { phone.mirror(item) }
+                        .onFailure { Log.i(TAG, "${machine.machine}: a notification was not shown: ${it.message}") }
+                        .isSuccess
+                    synchronized(outbox) { if (ok) outbox.sent(item) else outbox.failed(item) }
+                }
+            }
+        }
+    }
+
+    private fun onDeviceEvent(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent) {
+        when (event) {
+            is DeviceEvent.Ring -> scope.launch {
+                // A repeat of a ring already rung is acknowledged again, not
+                // rung again: the machine only learns it worked from the ack.
+                val rang = if (Ringer.rings.first(machine.deviceId, event.at)) ringer.ring(machine.machine) else true
+                if (rang) runCatching { phone.ack(event.id) }
+            }
+            is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
+        }
+    }
+
+    /**
+     * Something the computer sent (contract §2.6): say it arrived, take it,
+     * say it is done. An offer already taken (a replay after a lost
+     * `offer_done`) is only said done again. One whose take failed on the
+     * link is left for the next replay; one refused for good is done.
+     */
+    private fun onOffer(machine: PairedMachine, phone: PhoneLink, offer: DeviceEvent.Offer) {
+        val id = machine.deviceId
+        runCatching { phone.offerAck(offer.id) }
+        receiver.clearWaiting()
+        if (Receiver.offers.wasTaken(id, offer.id, offer.at)) {
+            runCatching { phone.offerDone(offer.id) }
+            return
+        }
+        if (!Receiver.offers.claim(id, offer.id, offer.at)) return
+        val finished = try {
+            receiver.receive(machine.machine, phone, offer)
+            true
+        } catch (e: Receiver.Refused) {
+            Log.i(TAG, "${machine.machine}: offer ${offer.id} refused: ${e.message}")
+            true
+        } catch (e: Throwable) {
+            Log.w(TAG, "${machine.machine}: offer ${offer.id} not taken: ${e.message}")
+            false
+        }
+        Receiver.offers.finish(id, offer.id, offer.at, finished)
+        if (finished) runCatching { phone.offerDone(offer.id) }
     }
 
     private fun scheduleReconnect(machine: PairedMachine) {

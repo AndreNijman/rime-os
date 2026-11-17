@@ -1,5 +1,6 @@
 package com.rimeos.remote.ui
 
+import com.rimeos.remote.ui.mirror.MirrorScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -27,6 +28,10 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.rimeos.remote.core.agent.AlertTap
+import com.rimeos.remote.share.Shared
+import com.rimeos.remote.ui.send.SendScreen
+import com.rimeos.remote.ui.send.SendViewModel
 import com.rimeos.remote.update.AppUpdater
 import com.rimeos.remote.update.UpdateBanner
 import com.rimeos.remote.update.UpdateUi
@@ -42,6 +47,13 @@ import com.rimeos.remote.ui.nex.NexScreen
 import com.rimeos.remote.ui.nex.NexSessionScreen
 import com.rimeos.remote.ui.nex.NexViewModel
 import com.rimeos.remote.core.nex.Nex
+import com.rimeos.remote.core.machine.Machine
+import com.rimeos.remote.ui.machine.MachineScreen
+import com.rimeos.remote.ui.machine.MachineViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import com.rimeos.remote.link.LinkHub
 import com.rimeos.remote.ui.term.TerminalScreen
 import com.rimeos.remote.ui.theme.RimeRemoteTheme
 import android.content.Intent
@@ -88,6 +100,15 @@ object Destinations {
 
     /** Starting a nex session from the phone. */
     const val NEX_NEW = "nex_new"
+
+    /** The computer itself: status, lock, media and volume. */
+    const val MACHINE = "machine"
+
+    /** "Send to Rime": what another app shared, before it is sent. */
+    const val SEND = "send"
+
+    /** "Notifications on your computer": access, and which apps. */
+    const val MIRROR = "mirror"
 }
 
 @Composable
@@ -98,19 +119,27 @@ fun RimeRemoteApp(
     launchPayload: String? = null,
     /** Called once the payload has been handed to a screen, so it fires once. */
     onPayloadConsumed: () -> Unit = {},
-    /** The (machine, session) a tapped notification named, if this is one. */
-    alertTarget: Pair<String, Int>? = null,
+    /** Where a tapped notification asks to go, if this is one. */
+    alertTarget: AlertTap? = null,
     /** Called once the tap has been acted on, so it fires once. */
     onAlertConsumed: () -> Unit = {},
+    /** What another app shared, if this launch is a share. */
+    share: Shared? = null,
+    /** Called once the Send screen has the share, so it is offered once. */
+    onShareConsumed: () -> Unit = {},
     /** Ask Android for `POST_NOTIFICATIONS`. Owned by the activity. */
     onAskNotifications: () -> Unit = {},
     /** Bumped each time the permission dialog is answered, whichever way. */
     notificationsAnswered: Int = 0,
     viewModel: RemoteViewModel = viewModel(),
     nexModel: NexViewModel = viewModel(),
+    machineModel: MachineViewModel = viewModel(),
+    sendModel: SendViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val nex by nexModel.state.collectAsStateWithLifecycle()
+    val computer by machineModel.state.collectAsStateWithLifecycle()
+    val sending by sendModel.state.collectAsStateWithLifecycle()
     val appContext = LocalContext.current.applicationContext
     // The APPLICATION context, not the activity's. This object outlives a
     // rotation and an install prompt, and holding an activity across either is
@@ -127,13 +156,14 @@ fun RimeRemoteApp(
         if (!state.unlocked) {
             LockScreen(
                 failure = state.failure,
-                onUnlock = { viewModel.unlockApp(activity) },
+                onUnlock = { viewModel.unlockApp(activity, prefer = alertTarget?.machine) },
             )
             // Asked once the state is known, rather than behind a button nobody
             // would choose to press. Keyed on `loading` because the view model
             // refuses to prompt before it has decided whether this phone can
             // authenticate at all — so the effect has to run again once it has.
-            LaunchedEffect(state.loading) { viewModel.unlockApp(activity) }
+            // A notification's machine first, so its tap needs no second prompt.
+            LaunchedEffect(state.loading) { viewModel.unlockApp(activity, prefer = alertTarget?.machine) }
             // And nothing below this line runs while locked, which is why the
             // deep-link effect is inside the graph rather than out here:
             // `NavController.navigate` before a `NavHost` has composed throws
@@ -161,6 +191,7 @@ fun RimeRemoteApp(
                     onPing = { viewModel.ping(activity, it) },
                     onForget = { viewModel.forget(it) },
                     onDynamicColour = { viewModel.setDynamicColour(it) },
+                    onMirror = { navigation.navigate(Destinations.MIRROR) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
                         // ACTION_SEND with the text in the intent, so the user
@@ -289,6 +320,16 @@ fun RimeRemoteApp(
                                 navigation.navigate(Destinations.NEX)
                             }
                         },
+                    // Offered when the machine's rime-remoted answers the
+                    // machine verbs, which every build since they shipped does.
+                    onComputer = state.agents.machine
+                        ?.takeIf { state.links[it.deviceId]?.remote?.has(Machine.STATUS) == true }
+                        ?.let { machine ->
+                            {
+                                machineModel.open(machine)
+                                navigation.navigate(Destinations.MACHINE)
+                            }
+                        },
                     onCopyFromMachine = { viewModel.pullMachineClipboard() },
                     clipboardPull = state.agents.clipboardPull,
                     onClipboardCopied = { viewModel.clipboardPullConsumed() },
@@ -399,6 +440,13 @@ fun RimeRemoteApp(
                 )
             }
 
+            composable(Destinations.MIRROR) {
+                MirrorScreen(
+                    chosen = state.settings.mirrorApps,
+                    onChoose = { pkg, on -> viewModel.setMirrorApp(pkg, on) },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
             composable(Destinations.HELP) {
                 HelpScreen(onBack = { navigation.popBackStack() })
             }
@@ -423,6 +471,45 @@ fun RimeRemoteApp(
                         nexModel.leave()
                         navigation.popBackStack()
                     },
+                )
+            }
+
+            composable(Destinations.MACHINE) {
+                // Read only while this screen is started: nothing is asked of
+                // the computer while the phone is in a pocket.
+                val lifecycle = LocalLifecycleOwner.current.lifecycle
+                LaunchedEffect(lifecycle) {
+                    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { machineModel.watch() }
+                }
+                MachineScreen(
+                    state = computer,
+                    onLock = { machineModel.lock() },
+                    onMedia = { machineModel.control(it) },
+                    onVolume = { machineModel.volume(it) },
+                    onMute = { machineModel.mute(it) },
+                    onRefresh = { machineModel.refresh() },
+                    onDismiss = { machineModel.dismiss() },
+                    onBack = { navigation.popBackStack() },
+                    onSendClipboard = { machineModel.sendClipboard(it) },
+                )
+            }
+
+            composable(Destinations.SEND) {
+                val leave = {
+                    sendModel.clear()
+                    if (!navigation.popBackStack()) navigation.navigate(Destinations.MACHINES)
+                }
+                SendScreen(
+                    state = sending,
+                    onChoose = { sendModel.choose(it) },
+                    onSend = {
+                        state.machines.firstOrNull { it.deviceId == sending.chosen }?.let { m ->
+                            viewModel.withKey(activity, m, onFailure = { sendModel.failed(it) }) { sendModel.send(m) }
+                        }
+                    },
+                    onStop = { sendModel.stop() },
+                    onDismiss = { sendModel.dismiss() },
+                    onDone = { leave() },
                 )
             }
 
@@ -501,19 +588,49 @@ fun RimeRemoteApp(
             }
         }
 
+        // A share opens the Send screen and sends nothing: only a tap there
+        // does. Inside the graph for the same reason as the effects below.
+        LaunchedEffect(share) {
+            val shared = share ?: return@LaunchedEffect
+            onShareConsumed()
+            sendModel.offer(shared, state.machines)
+            navigation.navigate(Destinations.SEND) { launchSingleTop = true }
+        }
+
         // A tapped notification opens the exact session it named, when this
         // phone still has it. Inside the graph for the same reason as the
         // pairing effect below: `navigate` before the `NavHost` has composed
         // throws, and a cold launch from a notification is exactly that
         // moment.
+        // A nex tap that had to connect first: the machine it is waiting for.
+        var pendingNex by remember { mutableStateOf<AlertTap.Pending?>(null) }
         LaunchedEffect(alertTarget) {
             val target = alertTarget ?: return@LaunchedEffect
             // Consumed whatever happens. A tap that could not be honoured must
             // not be retried on the next recomposition: the session is not
             // coming back, and the user would be unable to navigate away.
             onAlertConsumed()
-            val (machine, session) = target
-            if (viewModel.openAlerted(machine, session)) {
+            val connected = state.agents.machine
+            val goes = target.goesTo(
+                connected = connected?.deviceId,
+                nexOffered = state.links[target.machine]?.remote?.has(Nex.FEATURE) == true,
+                paired = state.machines.any { it.deviceId == target.machine },
+            )
+            val tapped = state.machines.firstOrNull { it.deviceId == target.machine }
+            if (goes == AlertTap.GoesTo.CONNECT_FOR_NEX && tapped != null) {
+                val link = state.links[tapped.deviceId]
+                pendingNex = AlertTap.Pending(
+                    machine = tapped.deviceId,
+                    hellosAtTap = link?.hellos ?: 0,
+                    upAtTap = link?.status == LinkHub.Status.CONNECTED && link.remote.features.isNotEmpty(),
+                )
+                viewModel.connect(activity, tapped)
+                navigation.navigate(Destinations.AGENTS) { launchSingleTop = true }
+            } else if (goes == AlertTap.GoesTo.NEX && connected != null) {
+                // nex names no session in a push: its screen lists what waits.
+                nexModel.open(connected)
+                navigation.navigate(Destinations.NEX) { launchSingleTop = true }
+            } else if (goes == AlertTap.GoesTo.SESSION && viewModel.openAlerted(target.machine, target.session)) {
                 navigation.navigate(Destinations.SESSION) { launchSingleTop = true }
             } else {
                 // The session is gone, or it belongs to a machine this phone
@@ -525,6 +642,29 @@ fun RimeRemoteApp(
                     if (state.agents.machine != null) Destinations.AGENTS else Destinations.MACHINES,
                 ) { launchSingleTop = true }
             }
+        }
+
+        // The connection a nex tap asked for (AlertTap.afterConnect says what
+        // happens once it lands), forgotten after AlertTap.CONNECT_WAIT_MS.
+        val pendingLink = pendingNex?.let { state.links[it.machine] }
+        val pendingFeatures = pendingLink?.remote?.features?.takeIf { pendingNex?.fresh(pendingLink.hellos) == true }
+        LaunchedEffect(pendingNex, state.agents.machine?.deviceId, pendingFeatures) {
+            val want = pendingNex ?: return@LaunchedEffect
+            val connected = state.agents.machine
+            when (AlertTap.afterConnect(want.machine, connected?.deviceId, pendingFeatures)) {
+                AlertTap.Then.WAIT -> Unit
+                AlertTap.Then.GIVE_UP, AlertTap.Then.STAY -> pendingNex = null
+                AlertTap.Then.OPEN_NEX -> {
+                    pendingNex = null
+                    nexModel.open(connected!!)
+                    navigation.navigate(Destinations.NEX) { launchSingleTop = true }
+                }
+            }
+        }
+        LaunchedEffect(pendingNex) {
+            if (pendingNex == null) return@LaunchedEffect
+            kotlinx.coroutines.delay(AlertTap.CONNECT_WAIT_MS)
+            pendingNex = null
         }
 
         // A link that carries a pairing code opens the screen that can explain
