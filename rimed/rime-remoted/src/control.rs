@@ -735,9 +735,11 @@ mod tests {
                     local_caller(Some(me)).is_ok(),
                     "Pair stopped asking the origin rule"
                 ),
+                // An origin that cannot be classified (a build sandbox's
+                // cgroup) refuses, as `sending_caller` does.
                 Request::Send { .. } => assert_eq!(
                     verdict.is_ok(),
-                    may_send(rime_agent_core::origin::observe_pid(me.pid).expect("classify")).is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_send(o).is_ok()),
                     "Send stopped asking the origin rule"
                 ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
