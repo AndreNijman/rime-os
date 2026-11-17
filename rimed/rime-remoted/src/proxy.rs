@@ -204,8 +204,9 @@ impl Agentd {
 /// Whether a control payload is a verb that takes the connection over, and so
 /// needs a channel rather than a reply.
 ///
-/// Two of them. `attach` turns the daemon's connection into the session's PTY;
-/// `receive` turns it into a sink for the file being handed over. Both stop
+/// Three of them. `attach` turns the daemon's connection into the session's
+/// PTY; `receive` turns it into a sink for a file handed to a session, and
+/// `save_file` into a sink for a file saved in Downloads. All three stop
 /// being control channels the moment the daemon answers, so both are wrong on
 /// channel zero for the same reason — the proxy would be left expecting reply
 /// lines from something that is now a byte pipe, and the device's bytes would
@@ -216,7 +217,7 @@ impl Agentd {
 /// opens a channel.
 pub fn takes_over_the_channel(payload: &[u8]) -> bool {
     serde_json::from_slice::<serde_json::Value>(payload)
-        .map(|v| v["cmd"] == "attach" || v["cmd"] == "receive")
+        .map(|v| v["cmd"] == "attach" || v["cmd"] == "receive" || v["cmd"] == "save_file")
         .unwrap_or(false)
 }
 
@@ -226,7 +227,7 @@ pub fn takes_over_the_channel(payload: &[u8]) -> bool {
 /// and a proxy that recognised only the older one would open a channel onto a
 /// `receive` and then treat the daemon's refusal line as the first bytes of a
 /// terminal.
-pub const TAKEOVER_REPLIES: [&str; 2] = ["attached", "receiving"];
+pub const TAKEOVER_REPLIES: [&str; 3] = ["attached", "receiving", "saving"];
 
 #[cfg(test)]
 mod tests {
@@ -246,6 +247,14 @@ mod tests {
         // Key order is not fixed on the wire.
         assert!(takes_over_the_channel(br#"{"id":1,"cmd":"attach"}"#));
         assert!(takes_over_the_channel(br#"{"len":1,"cmd":"receive"}"#));
+        // The third, contract §1.8. On channel zero it would wedge the same way.
+        assert!(takes_over_the_channel(
+            br#"{"cmd":"save_file","name":"IMG.jpg","len":2048}"#
+        ));
+        assert!(takes_over_the_channel(br#"{"len":1,"cmd":"save_file"}"#));
+        // Its sibling is an ordinary request: a phone sends it through
+        // `MachineLink.request`, and as a takeover it would never be answered.
+        assert!(!takes_over_the_channel(br#"{"cmd":"clipboard_write","text":"x"}"#));
         assert!(!takes_over_the_channel(br#"{"cmd":"list"}"#));
         // `clipboard` is the verb this list was most recently checked against,
         // and the answer has to be NO. The phone builds it as an ordinary

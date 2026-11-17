@@ -991,7 +991,7 @@ fn control(agentd: &Path, device_id: &str, line: &[u8]) -> Vec<u8> {
         return serde_json::json!({
             "reply": "error",
             "kind": "bad_request",
-            "message": "attach and receive do not travel on the control channel; open a channel for them",
+            "message": "attach, receive and save_file do not travel on the control channel; open a channel for them",
         })
         .to_string()
         .into_bytes();

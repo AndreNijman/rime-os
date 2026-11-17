@@ -166,6 +166,14 @@ let
       "a_session_that_names_no_agent_gets_the_bound_one_and_not_the_users_default"
       "a_session_naming_an_agent_this_project_did_not_bind_is_refused"
       "a_session_with_a_parent_death_signal_survives_its_client_hanging_up"
+      "hello_offers_both_verbs"
+      "with_the_stub_the_clipboard_is_a_file_and_wl_copy_never_runs"
+      "without_the_stub_the_text_goes_to_wl_copy_on_stdin_never_in_argv"
+      "an_empty_or_oversize_clipboard_write_is_refused_and_nothing_runs"
+      "a_file_is_saved_whole_under_its_own_name_and_never_over_another"
+      "without_the_stub_files_go_to_the_users_download_folder"
+      "an_oversize_or_empty_file_is_refused_before_the_takeover"
+      "an_upload_that_stops_half_way_leaves_nothing"
     ];
     # rime/tests/mcp_{launch,sidecar}_live.rs start real confined MCP servers that are host programs:
     # /usr/bin/python3, probe scripts run through /usr/bin:/bin, a run-user mount point created under the fixture
@@ -226,6 +234,7 @@ let
       "a_second_device_cannot_reuse_the_first_ones_code"
       "a_session_cannot_ask_for_a_grant_or_renew_one_however_it_asks"
       "a_session_may_not_read_this_machines_clipboard"
+      "a_session_may_not_set_the_clipboard_or_save_a_file"
       "a_session_reports_a_graph_even_when_it_has_delegated_nothing"
       "a_session_that_narrows_nothing_still_gets_the_whole_runtime_allowlist"
       "a_status_line_with_nothing_to_report_publishes_nothing"

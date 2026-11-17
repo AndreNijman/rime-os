@@ -20,6 +20,7 @@ mod broker;
 mod browser_ca;
 mod budget;
 mod clipboard;
+mod desktop;
 mod disposable;
 mod egress;
 mod elevation;
@@ -643,6 +644,12 @@ fn serve(daemon: &Arc<Daemon>, stream: UnixStream) -> Result<()> {
             return inject::handle_receive(daemon, &caller, writer, reader, id, &name, len);
         }
 
+        // `SaveFile` is the third: a sink for a file a phone shared, written
+        // into Downloads rather than a session's inbox (contract §1.8).
+        if let Request::SaveFile { name, len } = request {
+            return desktop::handle_save(daemon, &caller, writer, reader, &name, len);
+        }
+
         let response = dispatch(daemon, request, &mut caller);
         respond(&mut writer, &response)?;
     }
@@ -708,6 +715,11 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
         Request::Receive { .. } => Response::error(
             ErrorKind::Internal,
             "receive is handled before dispatch and must never reach it",
+        ),
+
+        Request::SaveFile { .. } => Response::error(
+            ErrorKind::Internal,
+            "save_file is handled before dispatch and must never reach it",
         ),
 
         Request::Resize { id, cols, rows } => {
@@ -788,6 +800,7 @@ fn dispatch(daemon: &Arc<Daemon>, request: Request, caller: &mut privilege::Call
         // so there is nothing to look up, and the whole of the decision is
         // who is asking. See `clipboard.rs`.
         Request::Clipboard => clipboard::handle(daemon, caller),
+        Request::ClipboardWrite { text } => desktop::handle_clipboard_write(daemon, caller, &text),
 
         // §1.5. Only a person names a session: `refuse_input`'s callers, with
         // a sentence of its own. The name is checked after the caller and

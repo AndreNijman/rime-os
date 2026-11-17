@@ -43,6 +43,12 @@ object Features {
     /** A phone's attach no longer leaves the desktop's terminal at the phone's size. */
     const val SIZE_RESTORE: String = "size_restore"
 
+    /** `clipboard_write` exists: the phone can set the computer's clipboard. */
+    const val CLIPBOARD_WRITE: String = "clipboard_write"
+
+    /** `save_file` exists: the phone can save a shared file into the computer's Downloads. */
+    const val SAVE_FILE: String = "save_file"
+
     // ---- rime-remoted, in `remote_hello` ----------------------------------
 
     /** `TCP_NODELAY` on every socket, one write per frame. */

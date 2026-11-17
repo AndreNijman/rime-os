@@ -455,6 +455,26 @@ object Agentd {
     fun clipboard(): String = """{"cmd":"clipboard"}"""
 
     /**
+     * Set the computer's clipboard to [text] (contract §1.8).
+     *
+     * The phone-to-computer direction, and not a session verb: it names no
+     * id. Only against a daemon whose `hello.features` has
+     * [Features.CLIPBOARD_WRITE].
+     */
+    fun clipboardWrite(text: String): String =
+        """{"cmd":"clipboard_write","text":"${escape(text)}"}"""
+
+    /**
+     * Save a file from this phone into the computer's Downloads folder.
+     *
+     * A takeover verb like [receive], so it travels as a `Frame.Open` payload
+     * ([com.rimeos.remote.core.link.Upload.save]). The daemon picks the folder
+     * and the final name; [name] is only asked for.
+     */
+    fun saveFile(name: String, len: Long): String =
+        """{"cmd":"save_file","name":"${escape(name)}","len":$len}"""
+
+    /**
      * Hand a file to a session whose bytes are on this phone.
      *
      * `Request::Receive { id, name, len }` is the second verb that takes a

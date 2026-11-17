@@ -20,7 +20,8 @@ leaves the desktop terminal shrunk to the phone's size.
 
 ```json
 {"reply":"hello","version":11,"agents":["claude"],"default_agent":"claude",
- "features":["input_submit","rename","peek","session_name","session_title","size_restore"]}
+ "features":["input_submit","rename","peek","session_name","session_title","size_restore",
+             "clipboard_write","save_file"]}
 ```
 
 A client uses a feature only when its string is present. An absent `features`
@@ -130,6 +131,61 @@ puts it back. New rule (`size_restore` feature):
 Attribute by `privilege::origin` class, never by socket identity:
 rime-remoted opens a fresh agentd connection per control frame, so a phone's
 `resize` does not arrive on its attach socket.
+
+### 1.8 From the phone to the computer: `clipboard_write` and `save_file`
+
+Two verbs that carry something the person is holding on the phone onto the
+computer itself, not into a session. `hello.features` lists `clipboard_write`
+and `save_file`. Both are refused to the callers `refuse_clipboard` refuses: a
+managed session (an agent that could set the clipboard could change what a
+person pastes into a terminal, and one that could drop files in Downloads
+could leave things for a person to open), and a connection that cannot be
+classified. A local client and a paired phone may use them.
+
+```json
+{"cmd":"clipboard_write","text":"…"}
+→ {"reply":"clipboard_written","bytes":12}
+```
+
+- Sets the computer's clipboard to `text`, verbatim, as
+  `text/plain;charset=utf-8` (`wl-copy`, the text on stdin, never in argv).
+- `text` is at most 8192 bytes of UTF-8 (the same cap as `clipboard`), and
+  must not be empty. Larger is `bad_request` with the limit named.
+- No graphical session: `{"reply":"error","kind":"internal","message":…}` in
+  the same words `clipboard` uses. One 5 s budget for the whole write.
+
+```json
+{"cmd":"save_file","name":"IMG_2041.jpg","len":2097152}
+→ {"reply":"saving","len":2097152}
+   … exactly len bytes …
+→ {"reply":"saved","name":"IMG_2041.jpg","path":"/home/u/Downloads/IMG_2041.jpg"}
+```
+
+- A takeover verb like `receive`: it travels as a `Frame.Open` payload, and
+  rime-remoted refuses it on channel zero. Everything refusable (the caller,
+  the name, `len`, the free space) is refused BEFORE `saving`, so no byte
+  crosses the link to be thrown away.
+- The folder is the user's Downloads folder (`XDG_DOWNLOAD_DIR` from
+  `~/.config/user-dirs.dirs`, else `~/Downloads`), created if missing.
+- `name` is a name, never a path: everything up to the last `/` or `\` is
+  dropped, leading dots and spaces are dropped (no hidden files), and it is
+  cut to 200 bytes keeping the extension. A name with a control character is
+  refused. A name that is empty after that becomes `shared file`.
+- A file of that name already there is never replaced: the copy becomes
+  `IMG_2041 (2).jpg`, and so on. `name` in the reply is what it became.
+- The bytes go to a hidden temporary file in the same folder, created with
+  `O_EXCL|O_NOFOLLOW` and mode 0644, which is renamed into place only once
+  every byte has arrived. An upload that stops half-way leaves nothing.
+- `len` is at most 256 MiB and at least 1, and the folder's file system must
+  have `len` plus 64 MiB free. Nothing arriving for 30 s ends the upload, and
+  so does the whole upload taking longer than 300 s plus one second per
+  128 KiB.
+
+**Tests never touch the real desktop.** With `RIME_AGENTD_DESKTOP_STUB=<dir>`
+rime-agentd writes the clipboard to `<dir>/clipboard` and saves files into
+`<dir>/Downloads`, and never runs `wl-copy` or reads `user-dirs.dirs`. Unit
+tests always use a stub. `run-device-suite.sh` always sets it and refuses to
+start rime-agentd without it.
 
 ## 2. rime-remoted additions
 
