@@ -30,3 +30,6 @@ NetworkManager-openconnect  checks.x86_64-linux.desktop.nodes.machine.networking
 # they change only with the nixpkgs pin or that source.
 cosmic-initial-setup        checks.x86_64-linux.desktop-lock-cosmic.nodes.machine.environment.systemPackages  cosmic-initial-setup
 cosmic-applet-rime          checks.x86_64-linux.desktop-lock-cosmic.nodes.machine.environment.systemPackages  cosmic-applet-rime
+# Rime's 3.5.1 pin (nix/modules/desktop.nix): cache.nixos.org has only nixpkgs' 3.5.0, so every leg that boots the
+# desktop fetched it from GitHub release assets, which answered the hosted runner 403 (run 44029109145, twice).
+nerd-fonts-jetbrains-mono   checks.x86_64-linux.desktop.nodes.machine.fonts.packages  nerd-fonts-jetbrains-mono
