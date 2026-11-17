@@ -538,6 +538,7 @@ impl Harness {
         let log = root.join("remoted.log");
         let remoted = Command::new(bin("rime-remoted"))
             .env("RIME_REMOTED_MACHINE_STUB", "/nonexistent/rime-remoted-machine-stub")
+            .env("RIME_REMOTED_NOTIFY_STUB", "/nonexistent/rime-remoted-notify-stub")
             .args([
                 "--port",
                 "0",
@@ -1268,6 +1269,7 @@ fn no_relay_is_configured_unless_the_owner_configures_one() {
     let log = root.join("remoted.log");
     let mut child = Command::new(bin("rime-remoted"))
             .env("RIME_REMOTED_MACHINE_STUB", "/nonexistent/rime-remoted-machine-stub")
+            .env("RIME_REMOTED_NOTIFY_STUB", "/nonexistent/rime-remoted-notify-stub")
         .args(["--port", "0", "--allow-foreground"])
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("XDG_STATE_HOME", &state)

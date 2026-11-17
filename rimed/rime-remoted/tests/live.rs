@@ -210,6 +210,8 @@ impl Harness {
         let remoted = Command::new(env!("CARGO_BIN_EXE_rime-remoted"))
             .args(&args)
             .env("RIME_REMOTED_MACHINE_STUB", &machine)
+            // A phone's notifications go to a file, never onto this desktop.
+            .env("RIME_REMOTED_NOTIFY_STUB", root.join("notify"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .stdout(Stdio::null())
@@ -346,7 +348,8 @@ fn remote_hello_is_answered_by_the_service_and_never_reaches_the_daemon() {
         hello["features"],
         serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
                            "machine_status", "machine_lock", "media",
-                           "device_events", "phone_report", "take_offer"]),
+                           "device_events", "phone_report", "take_offer",
+                           "phone_notifications"]),
         "{hello}"
     );
     // The same list a pairing code carries, read the same way at the same

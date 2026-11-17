@@ -1,5 +1,6 @@
 package com.rimeos.remote.ui
 
+import com.rimeos.remote.ui.mirror.MirrorScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -105,6 +106,9 @@ object Destinations {
 
     /** "Send to Rime": what another app shared, before it is sent. */
     const val SEND = "send"
+
+    /** "Notifications on your computer": access, and which apps. */
+    const val MIRROR = "mirror"
 }
 
 @Composable
@@ -187,6 +191,7 @@ fun RimeRemoteApp(
                     onPing = { viewModel.ping(activity, it) },
                     onForget = { viewModel.forget(it) },
                     onDynamicColour = { viewModel.setDynamicColour(it) },
+                    onMirror = { navigation.navigate(Destinations.MIRROR) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
                         // ACTION_SEND with the text in the intent, so the user
@@ -435,6 +440,13 @@ fun RimeRemoteApp(
                 )
             }
 
+            composable(Destinations.MIRROR) {
+                MirrorScreen(
+                    chosen = state.settings.mirrorApps,
+                    onChoose = { pkg, on -> viewModel.setMirrorApp(pkg, on) },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
             composable(Destinations.HELP) {
                 HelpScreen(onBack = { navigation.popBackStack() })
             }

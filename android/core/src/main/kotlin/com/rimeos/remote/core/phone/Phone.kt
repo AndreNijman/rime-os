@@ -349,6 +349,20 @@ class PhoneLink(private val link: MachineLink) {
     /** Tell the machine this phone has an offer, so it reports "link". Not retried, as for [ack]. */
     fun offerAck(id: Long) = Phone.readOk(link.request(Phone.offerAck(id), retry = false))
 
+    /**
+     * One notification, or its removal, for the computer (§2.7). Not retried:
+     * a notification that missed its connection is not news on the next one.
+     */
+    fun mirror(item: MirrorItem) = Phone.readOk(
+        link.request(
+            when (item) {
+                is MirrorItem.Post -> Mirror.post(item.key, item.content)
+                is MirrorItem.Removed -> Mirror.removed(item.key)
+            },
+            retry = false,
+        ),
+    )
+
     /** The offer is taken (or never will be): the machine forgets it. */
     fun offerDone(id: Long) = Phone.readOk(link.request(Phone.offerDone(id), retry = true))
 

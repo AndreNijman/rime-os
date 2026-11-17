@@ -875,6 +875,12 @@ fn answered_here(state: &State, device_id: &str, line: &[u8]) -> Option<Vec<u8>>
         Some(c) if crate::machine::VERBS.contains(&c) => Some(crate::machine::control(crate::machine::backend(), line)),
         // The phone's own report and its ring acks.
         Some(c) if crate::phone::VERBS.contains(&c) => crate::phone::control(state, device_id, line),
+        // The phone's notifications, shown on this desktop. The name on them
+        // is the device store's, never one the phone puts in the body.
+        Some(c) if crate::mirror::VERBS.contains(&c) => {
+            let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
+            Some(crate::mirror::control(crate::mirror::mirror(), device_id, name.as_deref().unwrap_or(""), line))
+        }
         _ => crate::push::control(state, device_id, line),
     }
 }
@@ -898,6 +904,7 @@ fn remote_hello(state: &State) -> Vec<u8> {
     let mut features: Vec<&str> = FEATURES.to_vec();
     features.extend(crate::machine::FEATURES);
     features.extend(crate::phone::FEATURES);
+    features.extend(crate::mirror::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
     }
@@ -1256,7 +1263,8 @@ mod tests {
             v["features"],
             serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
                                "machine_status", "machine_lock", "media",
-                               "device_events", "phone_report", "take_offer"]),
+                               "device_events", "phone_report", "take_offer",
+                               "phone_notifications"]),
             "{v}"
         );
         // The pairing code's list, with the port this listener has — and
@@ -1285,6 +1293,7 @@ mod tests {
             .chain(crate::nex::VERBS.iter())
             .chain(crate::machine::VERBS.iter())
             .chain(crate::phone::VERBS.iter())
+            .chain(crate::mirror::VERBS.iter())
         {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
             assert!(
@@ -1319,6 +1328,7 @@ mod tests {
         assert_eq!(crate::nex::VERBS, ["nex", "nex_events"]);
         assert_eq!(crate::machine::VERBS, ["machine_status", "machine_lock", "media", "media_control", "volume"]);
         assert_eq!(crate::phone::VERBS, ["phone_report", "ring_ack", "offer_ack", "offer_done"]);
+        assert_eq!(crate::mirror::VERBS, ["phone_notification", "phone_notification_removed"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

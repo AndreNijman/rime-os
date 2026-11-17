@@ -312,6 +312,37 @@ clipboard with `wl-paste`, and only as text. At most 8,192 bytes of text and
 - The phone has to have told this computer that it can receive (an app with
   notifications allowed). Until then, `send` is refused and says why.
 
+## Your phone's notifications on the computer
+
+Rime Remote can show your phone's notifications on the computers it is paired
+with, the way a Mac shows an iPhone's. In the app, open the settings on the
+computers screen and choose **Notifications on your computer**:
+
+1. **Allow notification access.** Android asks for it in Settings. On Android
+   13 and later, an app installed from a file is "restricted" at first: open
+   App info from the same screen, tap the menu in the corner, choose
+   **Allow restricted settings**, then allow access.
+2. **Turn on the apps** whose notifications you want on the computer. None are
+   on until you turn them on.
+
+From then on, while the app is unlocked and connected, a notification from one
+of those apps appears on the computer as "Pixel 8 · Signal", with its title and
+text. When it updates on the phone it updates on the computer; when you
+dismiss it on the phone it goes from the computer too.
+
+- Only the app's name, the title and the text cross. Pictures, actions and
+  replies do not, and the computer keeps nothing once it is closed.
+- Never shown: Rime Remote's own notifications, a work profile's, ones an app
+  marks as private to the phone or hidden on the lock screen, ongoing ones
+  (downloads, navigation, a call in progress) and media controls.
+- Nothing waits for a computer that is not connected, and connecting does not
+  replay what you missed.
+- A locked computer does not show them: the Shell's notifications stay behind
+  the lock screen.
+- A phone can show 10 at once and then one every 3 seconds; anything faster is
+  refused, so a noisy app cannot flood the desktop. Revoking the phone closes
+  every notification it has open.
+
 ## Notifications when the app is closed
 
 An agent that needs you at two in the morning has to be able to reach a phone

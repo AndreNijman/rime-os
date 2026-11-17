@@ -223,10 +223,18 @@ relay=${RIME_DEVICE_SUITE_RELAY-wss://apex-relay.andrenijman.com}  # rime-rename
 # every action to machine/actions.jsonl, which the broker hands to the tests.
 export RIME_REMOTED_MACHINE_STUB=$root/machine
 mkdir -p "$root/machine"
+# The same for the phone's notifications (contract §2.7): they go to
+# notify/notifications.jsonl, never to this desktop's notification server.
+export RIME_REMOTED_NOTIFY_STUB=$root/notify
+mkdir -p "$root/notify"
 
 start_remoted() {
   if [ "${RIME_REMOTED_MACHINE_STUB:-}" != "$root/machine" ]; then
     echo "FAIL: refusing to start rime-remoted without the machine stub: it would act on this desktop"
+    exit 1
+  fi
+  if [ "${RIME_REMOTED_NOTIFY_STUB:-}" != "$root/notify" ]; then
+    echo "FAIL: refusing to start rime-remoted without the notification stub: it would post on this desktop"
     exit 1
   fi
   local extra=()
@@ -370,6 +378,9 @@ def restart():
     if os.environ.get("RIME_REMOTED_MACHINE_STUB") != os.path.join(ROOT, "machine"):
         return json.dumps({"reply": "error",
                            "message": "refusing to start rime-remoted without the machine stub"})
+    if os.environ.get("RIME_REMOTED_NOTIFY_STUB") != os.path.join(ROOT, "notify"):
+        return json.dumps({"reply": "error",
+                           "message": "refusing to start rime-remoted without the notification stub"})
     env = dict(os.environ,
                XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
                XDG_STATE_HOME=os.path.join(ROOT, "state"))
@@ -454,6 +465,19 @@ def desk_reset():
         pass
     return json.dumps({"reply": "ok"})
 
+def notify_log():
+    """What rime-remoted posted to the stub notification server, complete lines only."""
+    entries = []
+    try:
+        with open(os.path.join(ROOT, "notify", "notifications.jsonl"), encoding="utf-8") as f:
+            for l in f:
+                if not l.endswith("\n"):
+                    break
+                entries.append(json.loads(l))
+    except FileNotFoundError:
+        pass
+    return json.dumps({"reply": "ok", "entries": entries})
+
 class H(socketserver.StreamRequestHandler):
     timeout = 120
     def handle(self):
@@ -490,6 +514,8 @@ class H(socketserver.StreamRequestHandler):
                 out = desk_downloads()
             elif cmd == "desk_reset":
                 out = desk_reset()
+            elif cmd == "notify_log":
+                out = notify_log()
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:

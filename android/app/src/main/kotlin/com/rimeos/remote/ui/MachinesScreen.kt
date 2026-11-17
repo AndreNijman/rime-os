@@ -86,6 +86,8 @@ fun MachinesScreen(
      * before.
      */
     updateBanner: @Composable () -> Unit = {},
+    /** "Notifications on your computer". A default, as for [updateBanner], so existing callers keep compiling. */
+    onMirror: () -> Unit = {},
 ) {
     var forgetting by remember { mutableStateOf<PairedMachine?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
@@ -216,6 +218,13 @@ fun MachinesScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+
+                    HorizontalDivider(Modifier.padding(vertical = 14.dp))
+
+                    TextButton(onClick = {
+                        settingsOpen = false
+                        onMirror()
+                    }) { Text("Notifications on your computer") }
 
                     HorizontalDivider(Modifier.padding(vertical = 14.dp))
 

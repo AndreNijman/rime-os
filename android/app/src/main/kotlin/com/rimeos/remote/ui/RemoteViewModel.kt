@@ -1906,6 +1906,14 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** Show [pkg]'s notifications on the paired computers, or stop (contract §2.7). */
+    fun setMirrorApp(pkg: String, on: Boolean) = viewModelScope.launch {
+        val apps = _state.value.settings.mirrorApps.let { if (on) it + pkg else it - pkg }
+        val store = repository.settings(_state.value.settings.copy(mirrorApps = apps))
+        hub.setMirrorApps(store.settings.mirrorApps)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
     fun setDynamicColour(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(dynamicColour = on))
         _state.update { it.copy(settings = store.settings) }

@@ -193,6 +193,25 @@ class ManifestTest {
     }
 
     @Test
+    fun `the notification listener only the system can bind, and no package-wide visibility`() {
+        val service = manifest.substringAfter("\".phone.MirrorService\"").substringBefore("</service>")
+        assertTrue(manifest.contains("\".phone.MirrorService\""), "the notification listener is not declared")
+        assertTrue(
+            service.contains("android:permission=\"android.permission.BIND_NOTIFICATION_LISTENER_SERVICE\""),
+            "the notification listener is exported without the permission only the system holds",
+        )
+        assertTrue(service.contains("android.service.notification.NotificationListenerService"))
+        // Listing the person's apps needs the launcher entry in <queries>, not
+        // a permission to see every package on the phone.
+        assertFalse(declares("android.permission.QUERY_ALL_PACKAGES"))
+        assertTrue(
+            manifest.substringAfter("<queries>").substringBefore("</queries>")
+                .contains("android.intent.category.LAUNCHER"),
+            "the launcher apps are not visible, so the app list would be empty on Android 11 and later",
+        )
+    }
+
+    @Test
     fun `the activity is not locked to one orientation and survives a rotation`() {
         // P1-060 asks for rotation and tablets/foldables. Neither is testable
         // without a device, but the two declarations that decide the outcome

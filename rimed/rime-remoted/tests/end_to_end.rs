@@ -215,6 +215,8 @@ impl Harness {
             // No machine verb is sent here, but if one ever is, it must reach
             // a stub and not the developer's screen and music.
             .env("RIME_REMOTED_MACHINE_STUB", root.join("machine"))
+            // A phone's notifications land in a file, never on this desktop.
+            .env("RIME_REMOTED_NOTIFY_STUB", root.join("notify"))
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).ok()?)
             .spawn()
@@ -1839,4 +1841,82 @@ fn something_sent_waits_for_its_phone_and_is_taken_whole_over_the_link() {
     assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
     let r = h.control(r#"{"cmd":"send","device":"pixel-8","kind":"text","text":"x"}"#);
     assert!(r["message"].as_str().unwrap_or("").contains("revoked"), "{r}");
+}
+
+/// Every line the notification stub has, once it has at least `n`.
+fn notify_lines(h: &Harness, n: usize) -> Vec<serde_json::Value> {
+    let path = h.root.join("notify/notifications.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        // Complete lines only.
+        let got: Vec<serde_json::Value> = text[..text.rfind('\n').map_or(0, |i| i + 1)]
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("json"))
+            .collect();
+        if got.len() >= n || Instant::now() > deadline {
+            return got;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_phones_notifications_show_here_update_in_place_close_and_go_with_revoke() {
+    let h = harness!("mirror");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+
+    let hello = session.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_notifications"), "{hello}");
+
+    // The name on it is the store's ("pixel-8"), not the body's; markup in
+    // it cannot become a tag; the body keeps its ampersand as an entity.
+    let ok = session.call(
+        r#"{"cmd":"phone_notification","key":"a1","app":"Signal","title":"Sam <img src=x>","text":"lunch & a walk?","device":"Not me"}"#,
+    );
+    assert_eq!(ok["reply"], "ok", "{ok}");
+    let first = notify_lines(&h, 1);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert_eq!(first[0]["op"], "notify");
+    assert_eq!(first[0]["app"], "pixel-8 · Signal", "{first:?}");
+    assert_eq!(first[0]["summary"], "Sam ‹img src=x›");
+    assert_eq!(first[0]["body"], "lunch &amp; a walk?");
+    assert_eq!(first[0]["icon"], "phone");
+    let id = first[0]["id"].clone();
+
+    // The same key again replaces that notification; a removal closes it.
+    assert_eq!(session.call(r#"{"cmd":"phone_notification","key":"a1","app":"Signal","title":"Sam","text":"2 messages"}"#)["reply"], "ok");
+    assert_eq!(session.call(r#"{"cmd":"phone_notification_removed","key":"a1"}"#)["reply"], "ok");
+    let got = notify_lines(&h, 3);
+    assert_eq!(got[1]["replaces"], id, "{got:?}");
+    assert_eq!(got[2], serde_json::json!({"op": "close", "id": id}), "{got:?}");
+
+    // Refused in words: a bad key, nothing to show.
+    let r = session.call(r#"{"cmd":"phone_notification","key":"../x","title":"t"}"#);
+    assert_eq!(r["code"], "bad_request", "{r}");
+    let r = session.call(r#"{"cmd":"phone_notification","key":"b"}"#);
+    assert_eq!(r["code"], "bad_request", "{r}");
+
+    // A flood: ten at once, then dropped, and the link still answers.
+    let replies: Vec<serde_json::Value> = (0..12)
+        .map(|i| session.call(&format!(r#"{{"cmd":"phone_notification","key":"f{i}","app":"Spam","title":"{i}"}}"#)))
+        .collect();
+    // One token went to the replacement above, one to the first post.
+    let shown = replies.iter().filter(|r| r["reply"] == "ok").count();
+    assert_eq!(shown, 8, "{replies:?}");
+    assert!(replies.iter().skip(shown).all(|r| r["code"] == "rate_limited"), "{replies:?}");
+    assert_eq!(session.call(r#"{"cmd":"remote_hello"}"#)["reply"], "remote");
+
+    // Revoke closes everything the phone still has up here.
+    let before = notify_lines(&h, 3 + shown);
+    let open: Vec<serde_json::Value> = before.iter().skip(3).map(|l| l["id"].clone()).collect();
+    assert_eq!(open.len(), shown, "{before:?}");
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
+    let after = notify_lines(&h, 3 + 2 * shown);
+    let closed: Vec<serde_json::Value> =
+        after.iter().skip(3 + shown).filter(|l| l["op"] == "close").map(|l| l["id"].clone()).collect();
+    assert_eq!(closed, open, "{after:?}");
 }

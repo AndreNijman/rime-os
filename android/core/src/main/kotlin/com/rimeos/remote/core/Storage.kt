@@ -280,6 +280,18 @@ data class Settings(
      * that `InsecureStorageTest` can account for every byte in it.
      */
     @SerialName("crash_reports") val crashReports: Boolean = false,
+
+    /**
+     * The apps whose notifications are shown on paired computers
+     * (`docs/remote-live-contract.md` §2.7), by package name.
+     *
+     * Empty by default, and the default is the point: granting this app
+     * notification access lets it read every notification on the phone, and
+     * this list is what decides that only the ones the person picked, app by
+     * app, ever leave it. Package names only; no notification content is ever
+     * stored, here or anywhere.
+     */
+    @SerialName("mirror_apps") val mirrorApps: Set<String> = emptySet(),
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }

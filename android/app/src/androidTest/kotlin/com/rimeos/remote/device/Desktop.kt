@@ -189,6 +189,19 @@ object Desktop {
         check(reply.optString("reply") == "ok") { "the broker did not reset the stub desktop: $reply" }
     }
 
+    /**
+     * Every call rime-remoted made on the stub notification server
+     * (`RIME_REMOTED_NOTIFY_STUB`), oldest first: `{"op":"notify",...}` or
+     * `{"op":"close","id":N}`. The suite never reaches this desktop's own
+     * notifications.
+     */
+    fun notifyLog(): List<JSONObject> {
+        val reply = ask(JSONObject().put("cmd", "notify_log").toString())
+        check(reply.optString("reply") == "ok") { "the broker did not read the stub notifications: $reply" }
+        val a = reply.getJSONArray("entries")
+        return (0 until a.length()).map { a.getJSONObject(it) }
+    }
+
     private fun requestReply(line: String): JSONObject {
         val reply = ask(line)
         check(reply.optString("reply") == "request") {

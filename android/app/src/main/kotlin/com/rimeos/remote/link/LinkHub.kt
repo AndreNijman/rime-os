@@ -10,7 +10,10 @@ import com.rimeos.remote.core.agent.MachineLink
 import com.rimeos.remote.core.agent.Features
 import com.rimeos.remote.core.agent.RemoteHello
 import com.rimeos.remote.core.phone.BatteryThrottle
+import com.rimeos.remote.core.phone.Content
 import com.rimeos.remote.core.phone.DeviceEvent
+import com.rimeos.remote.core.phone.Mirror
+import com.rimeos.remote.core.phone.MirrorOutbox
 import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
 import com.rimeos.remote.phone.Receiver
@@ -25,7 +28,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -102,6 +107,17 @@ class LinkHub private constructor(private val app: Context) {
     // machine; a new connection replaces both.
     private val batteryThrottles = ConcurrentHashMap<String, BatteryThrottle>()
     private val eventChannels = ConcurrentHashMap<String, java.io.Closeable>()
+    // This phone's notifications on each machine (contract §2.7): what waits
+    // for it and what it shows, and the one sender that writes them in order.
+    // A launch per notification on the IO pool could let a removal overtake
+    // its own post, which would leave it on the computer for good.
+    private class MirrorLane(val outbox: MirrorOutbox, val wake: Channel<Unit>, var sender: Job? = null)
+
+    private val mirrorLanes = ConcurrentHashMap<String, MirrorLane>()
+
+    /** The apps the person chose, read from the store on a connection and set by the screen. */
+    @Volatile
+    private var mirrorApps: Set<String> = emptySet()
     private val ringer by lazy { Ringer(app) }
     private val receiver by lazy { Receiver(app) }
 
@@ -278,6 +294,8 @@ class LinkHub private constructor(private val app: Context) {
         lastDial.clear()
         batteryThrottles.clear()
         eventChannels.clear()
+        mirrorLanes.values.forEach { it.sender?.cancel() }
+        mirrorLanes.clear()
         _states.value = emptyMap()
         LinkService.stop(app)
         scope.launch { closing.forEach { runCatching { it.close() } } }
@@ -291,6 +309,7 @@ class LinkHub private constructor(private val app: Context) {
         lastDial.remove(deviceId)
         batteryThrottles.remove(deviceId)
         eventChannels.remove(deviceId)?.let { runCatching { it.close() } }
+        mirrorLanes.remove(deviceId)?.sender?.cancel()
         _states.update { it - deviceId }
         val link = links.remove(deviceId)
         if (held.isEmpty()) LinkService.stop(app)
@@ -329,6 +348,11 @@ class LinkHub private constructor(private val app: Context) {
                 val keep = id in held && _unlocked.value
                 setState(id, machine.machine) {
                     it.copy(status = if (keep) Status.RECONNECTING else Status.IDLE, via = null, connectMs = null)
+                }
+                mirrorLanes[id]?.let { lane ->
+                    lane.sender?.cancel()
+                    lane.sender = null
+                    synchronized(lane.outbox) { lane.outbox.drop() }
                 }
                 if (keep) scheduleReconnect(machine)
             }
@@ -379,6 +403,7 @@ class LinkHub private constructor(private val app: Context) {
             throttle.reset()
             report(phone, throttle, Ringer.battery(app))
         }
+        if (remote.has(Mirror.FEATURE)) startMirror(machine, phone) else mirrorLanes.remove(id)?.sender?.cancel()
         eventChannels.remove(id)?.let { runCatching { it.close() } }
         if (remote.has(Phone.EVENTS) && remote.has(Features.MUX_ATTACH)) {
             runCatching {
@@ -413,6 +438,74 @@ class LinkHub private constructor(private val app: Context) {
             if (state(id)?.remote?.has(Phone.REPORT) != true) continue
             if (!throttle.due(level, charging, System.currentTimeMillis())) continue
             scope.launch { report(PhoneLink(link), throttle, level to charging) }
+        }
+    }
+
+    /**
+     * Whether a notification could go anywhere now: unlocked, and at least one
+     * machine connected that takes them. The listener asks this before it
+     * reads anything off a notification.
+     */
+    val mirroring: Boolean get() = _unlocked.value && mirrorLanes.values.any { it.sender?.isActive == true }
+
+    fun mirrorApps(): Set<String> = mirrorApps
+
+    /** The person changed which apps are shown; the store was already written. */
+    fun setMirrorApps(apps: Set<String>) {
+        mirrorApps = apps
+    }
+
+    /**
+     * A notification from a chosen app was posted or updated: every machine
+     * connected now gets its newest state, at its own pace. Called on the
+     * listener's thread, in the order Android reports, which is the order
+     * each outbox keeps.
+     */
+    fun onPhoneNotification(key: String, content: Content) = toLanes { it.offer(key, content) }
+
+    /** A notification went away on this phone; a machine that was sent it closes it too. */
+    fun onPhoneNotificationRemoved(key: String) = toLanes { it.remove(key) }
+
+    private fun toLanes(block: (MirrorOutbox) -> Unit) {
+        if (!_unlocked.value) return
+        for (lane in mirrorLanes.values) {
+            if (lane.sender?.isActive != true) continue
+            synchronized(lane.outbox) { block(lane.outbox) }
+            lane.wake.trySend(Unit)
+        }
+    }
+
+    /**
+     * The sender for one machine's new connection. The outbox outlives the
+     * connection (so a removal after a reconnect still closes what was
+     * shown); what waited when the old one dropped was already discarded.
+     */
+    private fun startMirror(machine: PairedMachine, phone: PhoneLink) {
+        runCatching { mirrorApps = repository.loadBlocking().settings.mirrorApps }
+        val lane = mirrorLanes.compute(machine.deviceId) { _, old ->
+            old?.sender?.cancel()
+            MirrorLane(old?.outbox ?: MirrorOutbox(System.currentTimeMillis()), Channel(Channel.CONFLATED))
+        }!!
+        lane.sender = scope.launch {
+            val outbox = lane.outbox
+            while (isActive) {
+                lane.wake.receive()
+                while (isActive) {
+                    val now = System.currentTimeMillis()
+                    val item = synchronized(outbox) { outbox.next(now) }
+                    if (item == null) {
+                        val wait = synchronized(outbox) { outbox.waitMs(now) }
+                        if (wait == 0L) break
+                        delay(wait)
+                        continue
+                    }
+                    // Never the content in a log: it is somebody's message.
+                    val ok = runCatching { phone.mirror(item) }
+                        .onFailure { Log.i(TAG, "${machine.machine}: a notification was not shown: ${it.message}") }
+                        .isSuccess
+                    synchronized(outbox) { if (ok) outbox.sent(item) else outbox.failed(item) }
+                }
+            }
         }
     }
 

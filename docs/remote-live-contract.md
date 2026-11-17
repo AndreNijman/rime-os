@@ -469,6 +469,68 @@ can read.
 `rime remote send --clipboard` reads the clipboard with `wl-paste`; the device
 suite never uses it, and sends text and files through its broker.
 
+### 2.7 From the phone to the computer: its notifications
+
+`remote_hello.features` gains `"phone_notifications"`. A phone sends neither
+verb to a machine whose hello lacks it.
+
+```json
+{"cmd":"phone_notification","key":"9f2c…","app":"Signal","title":"Mia","text":"Lunch at 12?"}
+{"cmd":"phone_notification_removed","key":"9f2c…"}
+→ {"reply":"ok"}
+```
+
+- Answered by rime-remoted, under the handshake's device id. `"ok"` means
+  accepted for showing, not shown: one worker thread posts to the desktop's
+  `org.freedesktop.Notifications` (`busctl --user`, 3 s per call), behind a
+  queue of 32. A post that finds it full answers
+  `{"reply":"error","code":"busy"}`; a removal is `"ok"` either way.
+- `key` is 1 to 64 characters of `[A-Za-z0-9_-]`: the phone's hash of
+  Android's key (the first 16 bytes of SHA-256, as hex), never the key itself.
+  A missing or other key, or a post with neither title nor text, is
+  `bad_request`.
+- The computer cleans what it shows: control and bidirectional-override
+  characters go, app and title become one line, the text keeps at most 6 line
+  breaks, and each is cut to 60, 120 and 1,000 characters (with "…"). `<` and
+  `>` become `‹` and `›` everywhere and the body's `&` is escaped, so a
+  message never reads as markup. It is shown with the app name
+  `"<device name> · <app>"`, the icon `phone`, normal urgency, no actions, and
+  the server's own timeout.
+- A post with a key already shown replaces that notification in place;
+  `phone_notification_removed` closes it, and a key not shown is `"ok"` and
+  does nothing. The key-to-id map is in memory, at most 64 per phone, and is
+  cleared when the notification server's bus owner changes (a Shell restart
+  starts its ids again). Revoke closes everything the phone has open and
+  forgets it.
+- Posts are limited per phone to 10 at once, then one every 3 s; past that,
+  `{"reply":"error","code":"rate_limited"}`. Removals are not limited.
+
+**What the phone sends.** Nothing until the person grants notification access
+and turns apps on one by one in "Notifications on your computer" (none are on
+by default). Then only while the app is unlocked and a connection to a machine
+offering the feature is open: nothing is queued for a machine that is not
+connected, nothing is replayed when one connects, and nothing is written to
+the phone's storage. Never sent: this app's own notifications, a work profile's
+or another user's, `FLAG_LOCAL_ONLY`, `VISIBILITY_SECRET`, group summaries,
+ongoing and foreground-service notifications, and media controls. What is
+sent is the app's label, `EXTRA_TITLE_BIG` or `EXTRA_TITLE`, and
+`EXTRA_BIG_TEXT` or `EXTRA_TEXT`, cut to the computer's caps. Per machine the
+phone keeps only the newest state of each notification, sends nothing
+identical to what is shown, sends a removal only for one it sent, and posts at
+most 8 at once and one every 4 s, inside the computer's limit.
+
+**The lock screen.** The Shell's notification toasts are a layer surface, which
+`ext-session-lock` hides while the session is locked, and the lock screen
+shows no notifications, so a phone's messages are not readable on a locked
+computer.
+
+**Tests never touch the real desktop's notifications.** With
+`RIME_REMOTED_NOTIFY_STUB=<dir>`, rime-remoted appends each call to
+`<dir>/notifications.jsonl` (`{"op":"notify",…}` / `{"op":"close","id":N}`)
+instead of the bus; a test build always uses the stub. The device suite sets it
+and its broker reads it back with `notify_log`. The bus path is proven against
+a fake server on a private bus by `tests/test-remoted-notify-busctl.sh`.
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in

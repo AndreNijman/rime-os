@@ -228,6 +228,7 @@ let
       "a_phone_registers_for_push_over_the_real_session_and_the_key_lands_in_its_own_file"
       "a_phone_reports_its_battery_rings_over_its_link_and_revoke_forgets_both"
       "a_phone_that_leaves_gives_the_desktop_its_size_back"
+      "a_phones_notifications_show_here_update_in_place_close_and_go_with_revoke"
       "a_project_grant_is_reported_as_inherited_and_a_session_grant_is_not"
       "a_push_endpoint_the_machine_cannot_use_is_refused_and_nothing_is_stored"
       "a_relayed_session_is_recorded_as_relayed_and_a_direct_one_is_not"
