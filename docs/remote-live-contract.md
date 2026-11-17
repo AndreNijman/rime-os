@@ -200,8 +200,13 @@ listed in `remote_approve`. Every write is recorded with actor
   always arrives before the notifications. A backlog over the cap continues in
   notifications without waiting for a new event. The channel is read-only:
   `Data` from the phone is dropped.
-- Each request has a 30 s limit (connect to reply), because the control worker
-  handles requests in order.
+- Each request has one 30 s deadline, from connecting through the declaration
+  to the reply, because the control worker handles requests in order. Running
+  out of time is `kind: "unavailable"` with "nex did not answer within 30 s".
+- `after_gseq` that is not a whole number is refused (`bad_request`), not read
+  as 0.
+- A one-shot `nex` channel ends by itself after its answer. The phone does not
+  need to close it.
 
 ## 3. The phone
 

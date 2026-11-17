@@ -46,11 +46,12 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-/// How long one request may take, from connecting to its reply.
+/// How long one request may take, from connecting to its reply: one deadline
+/// for the declaration and the request together, not a clock per read.
 ///
 /// The control worker is serial, so a nexd that stopped answering would
 /// otherwise hold up every control request of that phone behind it.
@@ -84,8 +85,10 @@ pub enum NexError {
     BadDevice,
     /// What the device sent is not a request this bridge forwards.
     BadRequest(String),
-    /// nexd is not running, or stopped answering.
+    /// nexd is not running, or the connection to it failed.
     Unavailable(String),
+    /// nexd is running and did not answer in time.
+    Slow(Duration),
     /// nexd refused the declaration. Its JSON-RPC error, verbatim.
     Refused(Value),
     /// nexd answered with something that is not its protocol.
@@ -98,6 +101,7 @@ impl std::fmt::Display for NexError {
             NexError::BadDevice => write!(f, "this device's id is not one nex accepts"),
             NexError::BadRequest(m) => write!(f, "{m}"),
             NexError::Unavailable(m) => write!(f, "nex is not running on this machine ({m})"),
+            NexError::Slow(t) => write!(f, "nex did not answer within {} s", t.as_secs_f32()),
             NexError::Refused(e) => write!(
                 f,
                 "nex refused this device: {}",
@@ -113,7 +117,7 @@ impl NexError {
         match self {
             NexError::BadDevice | NexError::Refused(_) => "forbidden",
             NexError::BadRequest(_) => "bad_request",
-            NexError::Unavailable(_) => "unavailable",
+            NexError::Unavailable(_) | NexError::Slow(_) => "unavailable",
             NexError::Protocol(_) => "internal",
         }
     }
@@ -160,21 +164,22 @@ fn request(line: &Value) -> Result<(String, Value), NexError> {
 /// A connection to nexd that has declared the device as its origin.
 struct Declared {
     reader: BufReader<UnixStream>,
+    deadline: Instant,
+    limit: Duration,
 }
 
 impl Declared {
-    fn open(socket: &Path, device_id: &str) -> Result<Declared, NexError> {
+    fn open(socket: &Path, device_id: &str, limit: Duration) -> Result<Declared, NexError> {
         if !valid_device(device_id) {
             return Err(NexError::BadDevice);
         }
+        let deadline = Instant::now() + limit;
         let stream =
             UnixStream::connect(socket).map_err(|e| NexError::Unavailable(e.to_string()))?;
-        stream
-            .set_read_timeout(Some(CALL_TIMEOUT))
-            .and_then(|_| stream.set_write_timeout(Some(CALL_TIMEOUT)))
-            .map_err(|e| NexError::Unavailable(e.to_string()))?;
         let mut d = Declared {
             reader: BufReader::new(stream),
+            deadline,
+            limit,
         };
         d.send(
             &json!({"jsonrpc": "2.0", "id": DECLARE_ID, "method": "system.declare_origin",
@@ -192,23 +197,46 @@ impl Declared {
         Ok(d)
     }
 
+    /// What is left of the deadline, put on the socket for the next read or
+    /// write; `Slow` once nothing is left.
+    fn arm(&mut self) -> Result<(), NexError> {
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(NexError::Slow(self.limit));
+        }
+        let s = self.reader.get_ref();
+        s.set_read_timeout(Some(left))
+            .and_then(|_| s.set_write_timeout(Some(left)))
+            .map_err(|e| NexError::Unavailable(e.to_string()))
+    }
+
+    fn io(&self, e: std::io::Error) -> NexError {
+        match e.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                NexError::Slow(self.limit)
+            }
+            _ => NexError::Unavailable(e.to_string()),
+        }
+    }
+
     fn send(&mut self, v: &Value) -> Result<(), NexError> {
         let mut line = v.to_string().into_bytes();
         line.push(b'\n');
+        self.arm()?;
         let s = self.reader.get_mut();
-        s.write_all(&line)
-            .and_then(|_| s.flush())
-            .map_err(|e| NexError::Unavailable(e.to_string()))
+        let r = s.write_all(&line).and_then(|_| s.flush());
+        r.map_err(|e| self.io(e))
     }
 
     /// The response with this id; notifications before it are skipped.
     fn response(&mut self, id: &Value) -> Result<Value, NexError> {
         loop {
+            self.arm()?;
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => return Err(NexError::Unavailable("nexd closed the connection".into())),
                 Ok(_) => {}
-                Err(e) => return Err(NexError::Unavailable(e.to_string())),
+                Err(e) => return Err(self.io(e)),
             }
             let v: Value = serde_json::from_str(line.trim_end())
                 .map_err(|e| NexError::Protocol(format!("not JSON: {e}")))?;
@@ -226,7 +254,11 @@ impl Declared {
 
 /// The control-channel `nex` verb: one request, its whole JSON-RPC response.
 pub fn control(socket: &Path, device_id: &str, line: &[u8]) -> Vec<u8> {
-    let reply = match call(socket, device_id, line) {
+    control_within(socket, device_id, line, CALL_TIMEOUT)
+}
+
+fn control_within(socket: &Path, device_id: &str, line: &[u8], limit: Duration) -> Vec<u8> {
+    let reply = match call(socket, device_id, line, limit) {
         Ok(response) => json!({"reply": "nex", "response": response})
             .to_string()
             .into_bytes(),
@@ -242,7 +274,7 @@ pub fn control(socket: &Path, device_id: &str, line: &[u8]) -> Vec<u8> {
     reply
 }
 
-fn call(socket: &Path, device_id: &str, line: &[u8]) -> Result<Value, NexError> {
+fn call(socket: &Path, device_id: &str, line: &[u8], limit: Duration) -> Result<Value, NexError> {
     let v: Value =
         serde_json::from_slice(line).map_err(|e| NexError::BadRequest(format!("not JSON: {e}")))?;
     if v["cmd"] == "nex_events" {
@@ -251,24 +283,45 @@ fn call(socket: &Path, device_id: &str, line: &[u8]) -> Result<Value, NexError> 
         ));
     }
     let (method, params) = request(&v)?;
-    let mut d = Declared::open(socket, device_id)?;
+    let mut d = Declared::open(socket, device_id, limit)?;
     d.call(&method, params)
 }
 
-/// A channel `Open` for `nex` or `nex_events`: the nexd connection to pump to
-/// the device, the reply that says it is open, and bytes already read past it.
+/// An opened nex channel.
+pub struct Opened {
+    /// The nexd connection, to pump to the device.
+    pub stream: UnixStream,
+    /// The reply that says the channel is open.
+    pub reply: Vec<u8>,
+    /// Bytes already read past the reply, to send before the pump starts.
+    pub buffered: Vec<u8>,
+    /// A feed stays open until the device closes it; a one-shot answer is
+    /// over once its bytes are sent and is not kept in the channel map.
+    pub feed: bool,
+}
+
+/// A channel `Open` for `nex` or `nex_events`.
 pub fn open_channel(
     socket: &Path,
     device_id: &str,
     request_line: &[u8],
-) -> Result<(UnixStream, Vec<u8>, Vec<u8>), NexError> {
+) -> Result<Opened, NexError> {
+    open_channel_within(socket, device_id, request_line, CALL_TIMEOUT)
+}
+
+fn open_channel_within(
+    socket: &Path,
+    device_id: &str,
+    request_line: &[u8],
+    limit: Duration,
+) -> Result<Opened, NexError> {
     let v: Value = serde_json::from_slice(request_line)
         .map_err(|e| NexError::BadRequest(format!("not JSON: {e}")))?;
     let streaming = json!({"reply": "streaming"}).to_string().into_bytes();
     match v["cmd"].as_str() {
         Some("nex") => {
             let (method, params) = request(&v)?;
-            let mut d = Declared::open(socket, device_id)?;
+            let mut d = Declared::open(socket, device_id, limit)?;
             let response = d.call(&method, params)?;
             let mut bytes = response.to_string().into_bytes();
             bytes.push(b'\n');
@@ -276,12 +329,29 @@ pub fn open_channel(
             // channel once the response has gone out.
             let stream = d.reader.into_inner();
             let _ = stream.shutdown(std::net::Shutdown::Both);
-            Ok((stream, streaming, bytes))
+            Ok(Opened {
+                stream,
+                reply: streaming,
+                buffered: bytes,
+                feed: false,
+            })
         }
         Some("nex_events") => {
-            let after = v["after_gseq"].as_u64().unwrap_or(0);
-            let tail = v["tail"].as_bool().unwrap_or(false);
-            let mut d = Declared::open(socket, device_id)?;
+            // Refused rather than read as 0: 0 means "everything", and a typo
+            // would quietly send the phone the whole 10,000-event backlog.
+            let after = match &v["after_gseq"] {
+                Value::Null => 0,
+                g => g.as_u64().ok_or_else(|| {
+                    NexError::BadRequest("after_gseq must be a whole number".into())
+                })?,
+            };
+            let tail = match &v["tail"] {
+                Value::Null => false,
+                t => t
+                    .as_bool()
+                    .ok_or_else(|| NexError::BadRequest("tail must be true or false".into()))?,
+            };
+            let mut d = Declared::open(socket, device_id, limit)?;
             d.send(&json!({"jsonrpc": "2.0", "id": 1, "method": "sessions.stream",
                            "params": {"session_id": "*", "after": after, "follow": true, "tail": tail}}))?;
             let buffered = d.reader.buffer().to_vec();
@@ -290,8 +360,14 @@ pub fn open_channel(
             // above was on a clock.
             stream
                 .set_read_timeout(None)
+                .and_then(|_| stream.set_write_timeout(None))
                 .map_err(|e| NexError::Unavailable(e.to_string()))?;
-            Ok((stream, streaming, buffered))
+            Ok(Opened {
+                stream,
+                reply: streaming,
+                buffered,
+                feed: true,
+            })
         }
         _ => Err(NexError::BadRequest("not a nex channel".into())),
     }
@@ -358,6 +434,11 @@ mod tests {
                         let v: Value = serde_json::from_str(&line).unwrap_or(json!({"raw": line}));
                         seen.lock().unwrap().push(v.clone());
                         for out in answer(&v) {
+                            // A pause in the answer, so a test can trickle lines.
+                            if let Some(ms) = out["__sleep_ms"].as_u64() {
+                                std::thread::sleep(Duration::from_millis(ms));
+                                continue;
+                            }
                             if writeln!(w, "{out}").is_err() {
                                 return;
                             }
@@ -450,30 +531,58 @@ mod tests {
 
     #[test]
     fn an_unanswered_declaration_never_sends_the_request() {
-        // Answers the declaration with a different id and nothing else, so
-        // the bridge must wait for its own and give up — not proceed.
+        // Answers the declaration with a notification and nothing else, so
+        // the bridge must wait for its own reply and give up, not proceed.
         let f = fake(|v| match v["method"].as_str() {
             Some("system.declare_origin") => {
                 vec![json!({"jsonrpc": "2.0", "method": "event", "params": {}})]
             }
             _ => vec![],
         });
-        // Close the connection by hand: the fake keeps it open, so this is
-        // proved with a short-lived socket in place of the 30 s clock.
-        let s = f.socket.clone();
-        let handle = std::thread::spawn(move || {
-            control(
-                &s,
-                "phone",
-                &line(json!({"cmd": "nex", "request": {"method": "turns.submit"}})),
-            )
-        });
-        std::thread::sleep(Duration::from_millis(300));
+        let t = Instant::now();
+        let r = reply(control_within(
+            &f.socket,
+            "phone",
+            &line(json!({"cmd": "nex", "request": {"method": "turns.submit"}})),
+            Duration::from_millis(200),
+        ));
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        assert_eq!(r["kind"], "unavailable", "{r}");
+        assert!(
+            r["message"].as_str().unwrap().contains("did not answer"),
+            "{r}"
+        );
         let seen = f.seen.lock().unwrap().clone();
         assert_eq!(seen.len(), 1, "{seen:?}");
         assert_eq!(seen[0]["method"], "system.declare_origin");
-        drop(f); // removes the socket dir; the call ends on its timeout
-        drop(handle);
+    }
+
+    #[test]
+    fn the_deadline_covers_the_whole_call_not_each_read() {
+        // A nexd that trickles notifications, each well inside the limit,
+        // and never answers: a clock per read would wait forever.
+        let f = fake(|v| match v["method"].as_str() {
+            Some("system.declare_origin") => {
+                vec![json!({"jsonrpc": "2.0", "id": v["id"], "result": {}})]
+            }
+            _ => (0..40)
+                .flat_map(|_| {
+                    [
+                        json!({"__sleep_ms": 50}),
+                        json!({"jsonrpc": "2.0", "method": "event", "params": {}}),
+                    ]
+                })
+                .collect(),
+        });
+        let t = Instant::now();
+        let r = reply(control_within(
+            &f.socket,
+            "phone",
+            &line(json!({"cmd": "nex", "request": {"method": "sessions.list"}})),
+            Duration::from_millis(300),
+        ));
+        assert_eq!(r["kind"], "unavailable", "{r}");
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
     }
 
     #[test]
@@ -581,7 +690,12 @@ mod tests {
         );
         let r = reply(control(&f.socket, "phone", &req));
         assert_eq!(r["kind"], "too_large", "{r}");
-        let (stream, open, buffered) = open_channel(&f.socket, "phone", &req).unwrap();
+        let Opened {
+            stream,
+            reply: open,
+            buffered,
+            ..
+        } = open_channel(&f.socket, "phone", &req).unwrap();
         assert_eq!(reply(open)["reply"], "streaming");
         let mut all = String::from_utf8(buffered).unwrap();
         all.push_str(&drain(stream));
@@ -593,9 +707,61 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_of_exactly_one_frame_goes_on_the_control_channel_and_one_byte_more_does_not() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let size = Arc::new(AtomicUsize::new(0));
+        let s2 = Arc::clone(&size);
+        let f = fake(move |v| match v["method"].as_str() {
+            Some("system.declare_origin") => {
+                vec![json!({"jsonrpc": "2.0", "id": v["id"], "result": {}})]
+            }
+            _ => vec![json!({"jsonrpc": "2.0", "id": v["id"],
+                             "result": {"blob": "x".repeat(s2.load(Ordering::SeqCst))}})],
+        });
+        let req = line(json!({"cmd": "nex", "request": {"method": "sessions.list"}}));
+        let fixed = control(&f.socket, "phone", &req).len();
+        size.store(
+            rime_remote_core::wire::MAX_PAYLOAD - fixed,
+            Ordering::SeqCst,
+        );
+        let exact = control(&f.socket, "phone", &req);
+        assert_eq!(exact.len(), rime_remote_core::wire::MAX_PAYLOAD);
+        assert_eq!(reply(exact.clone())["reply"], "nex");
+        // The same check the frame loop's `send` makes, which drops what fails it.
+        rime_remote_core::wire::Frame::Control(exact)
+            .encode()
+            .expect("a reply this module lets through always fits a control frame");
+        size.fetch_add(1, Ordering::SeqCst);
+        let over = control(&f.socket, "phone", &req);
+        assert_eq!(reply(over.clone())["kind"], "too_large");
+        rime_remote_core::wire::Frame::Control(over)
+            .encode()
+            .expect("the refusal fits too");
+    }
+
+    #[test]
+    fn a_feed_position_that_is_not_a_number_is_refused_not_read_as_zero() {
+        let f = fake(nexd_like);
+        for bad in [json!("5"), json!(-1), json!(1.5)] {
+            let r = open_channel(
+                &f.socket,
+                "phone",
+                &line(json!({"cmd": "nex_events", "after_gseq": bad})),
+            );
+            assert!(matches!(r, Err(NexError::BadRequest(_))), "{bad}");
+        }
+        assert!(f.seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn the_event_feed_is_the_global_stream_after_the_devices_position() {
         let f = fake(nexd_like);
-        let (stream, open, buffered) = open_channel(
+        let Opened {
+            stream,
+            reply: open,
+            buffered,
+            ..
+        } = open_channel(
             &f.socket,
             "phone",
             &line(json!({"cmd": "nex_events", "after_gseq": 5})),
@@ -723,7 +889,12 @@ mod tests {
         );
 
         // The feed: the backlog, carrying the device as the actor of its turn.
-        let (stream, open, buffered) = open_channel(
+        let Opened {
+            stream,
+            reply: open,
+            buffered,
+            ..
+        } = open_channel(
             &socket,
             dev,
             &line(json!({"cmd": "nex_events", "after_gseq": 0})),

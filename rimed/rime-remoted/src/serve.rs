@@ -735,15 +735,24 @@ impl Worker {
         // A nex channel goes to nexd and is read-only; everything else is a
         // rime-agentd takeover. nex's refusal travels as a reply then a
         // close, exactly like a takeover the daemon refused.
+        // `keep`: whether the channel goes in the map. A one-shot nex answer
+        // ends by itself once its bytes are out, so it is never kept.
         let opened = if crate::nex::is_channel(request) {
             crate::nex::open_channel(&self.state.nexd(), &self.device_id, request)
-                .map(|(stream, reply, buffered)| (DaemonChannel { stream, read_only: true }, reply, buffered))
+                .map(|o| {
+                    let ch = DaemonChannel {
+                        stream: o.stream,
+                        read_only: true,
+                    };
+                    (ch, o.reply, o.buffered, o.feed)
+                })
                 .map_err(|e| crate::proxy::ProxyError::NotTakenOver(e.reply()))
         } else {
             DaemonChannel::open(&self.agentd, &self.device_id, request)
+                .map(|(ch, reply, buffered)| (ch, reply, buffered, true))
         };
         match opened {
-            Ok((pty, reply, buffered)) => {
+            Ok((pty, reply, buffered, keep)) => {
                 // The reply, then the bytes that arrived with it, THEN the
                 // pump. The pump used to start inside `open`, before the
                 // reply had been sent, so the first burst of scrollback could
@@ -774,7 +783,7 @@ impl Worker {
                 // A channel with the same number already open is replaced and
                 // detached; the old loop kept both and wrote to the first.
                 let mut c = lock(&self.channels);
-                if pumping && !c.ended {
+                if pumping && keep && !c.ended {
                     c.open.insert(channel, pty);
                 }
                 c.done(channel);
