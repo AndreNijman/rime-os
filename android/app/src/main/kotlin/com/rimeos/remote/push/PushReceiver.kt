@@ -111,6 +111,14 @@ class PushReceiver : BroadcastReceiver() {
             return
         }
 
+        if (body.kind == Alert.Kind.SENT) {
+            // `rime remote send` while the link was down (contract §2.6). The
+            // push carries nothing of what was sent; taking it needs the link,
+            // which needs the person to unlock the app.
+            com.rimeos.remote.phone.Receiver(context).waiting(machine.machine)
+            return
+        }
+
         val notifier = Notifier(context)
         // The channel may never have been created: this process may not have
         // run since the app was installed, and `MainActivity` is where it is

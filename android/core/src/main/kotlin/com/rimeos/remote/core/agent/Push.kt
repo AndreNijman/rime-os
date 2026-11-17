@@ -206,6 +206,7 @@ object Push {
         8 to Alert.Kind.DEPLOY_FAILED,
         9 to Alert.Kind.NEX_APPROVAL,
         10 to Alert.Kind.RING,
+        11 to Alert.Kind.SENT,
     )
 
     fun kindOf(code: Int): Alert.Kind? = KINDS[code]

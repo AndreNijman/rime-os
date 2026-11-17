@@ -21,13 +21,18 @@
 //! `session-N.scope` and classifies as `local-terminal`. Neither can move
 //! itself between the two.
 //!
+//! `send` is gated the same way: the phone takes what is sent without asking,
+//! so an agent that could send would choose what a person pastes on their
+//! phone (contract §2.6).
+//!
 //! Listing and revoking are *not* gated that way. Revoking a device is the
 //! safe direction — an agent that revokes the owner's phone is a nuisance,
 //! not an escalation, and the owner is the only one who can pair it back.
 //! Refusing a revoke from a non-local caller would mean a script cannot
 //! respond to a lost phone, which is the case where speed matters most.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
+use std::os::fd::OwnedFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Arc;
 
@@ -51,6 +56,17 @@ pub enum Request {
     Revoke { device: String },
     /// Make a paired phone ring, by id or name.
     Ring { device: String },
+    /// Send a phone a file (`kind` "file": the open file rides the request
+    /// line as a descriptor, `name` is what the phone is offered) or text
+    /// for its clipboard (`kind` "text").
+    Send {
+        device: String,
+        kind: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        text: Option<String>,
+    },
 }
 
 /// What it answers.
@@ -95,6 +111,17 @@ pub enum Reply {
     /// `push` when the push service took the request (the phone rings if it
     /// is on and online, which nobody here can see).
     Rang { device: String, path: String },
+    /// Something was sent. `path`: `link` when the app said it is taking it,
+    /// `push` when the push service took the request to tell the phone, or
+    /// `waiting` when it waits for the phone to connect. `push_error` says
+    /// why push failed, when it was tried and did.
+    Sent {
+        device: String,
+        path: String,
+        id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        push_error: Option<String>,
+    },
     Ok,
     Error { message: String },
 }
@@ -122,36 +149,68 @@ pub fn serve(listener: UnixListener, state: Arc<State>) {
     }
 }
 
+/// The longest request line read. A `send` of the most text, every byte
+/// escaped, is well under it.
+const MAX_REQUEST: usize = 1024 * 1024;
+
 fn handle(stream: UnixStream, state: &State) -> std::io::Result<()> {
     // Peer credentials once, from the accepted socket, before a request is
     // parsed. The kernel filled them in at `connect(2)`; anything in a request
     // line is whatever the client chose to send.
     let peer = crate::peer::credentials(&stream);
     let mut writer = stream.try_clone()?;
-    let mut reader = BufReader::new(stream);
+    // Read with recvmsg, never through a BufReader: a descriptor passed with a
+    // `send` arrives beside the bytes, and a plain read(2) would close it.
+    let mut pending: Vec<u8> = Vec::new();
+    let mut fds: Vec<OwnedFd> = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
     loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            return Ok(());
-        }
-        let line = line.trim();
+        let line = loop {
+            if let Some(i) = pending.iter().position(|b| *b == b'\n') {
+                break pending.drain(..=i).collect::<Vec<u8>>();
+            }
+            if pending.len() > MAX_REQUEST {
+                return Ok(());
+            }
+            let n = match rime_remote_core::fdpass::recv(&stream, &mut buf, &mut fds) {
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    let _ = reply(&mut writer, &Reply::error(e.to_string()));
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
+            if n == 0 {
+                return Ok(());
+            }
+            pending.extend_from_slice(&buf[..n]);
+        };
+        let text = String::from_utf8_lossy(&line);
+        let line = text.trim();
         if line.is_empty() {
             continue;
         }
-        let reply = match serde_json::from_str::<Request>(line) {
-            Ok(req) => dispatch(req, peer, state),
+        // The descriptors that came with this line go to this request and no
+        // other; a request that takes none drops them, which closes them.
+        let carried = std::mem::take(&mut fds);
+        let answer = match serde_json::from_str::<Request>(line) {
+            Ok(req) => dispatch(req, carried, peer, state),
             Err(e) => Reply::error(format!("unparseable request: {e}")),
         };
-        let mut out = serde_json::to_string(&reply).unwrap_or_else(|e| {
-            format!(r#"{{"reply":"error","message":"could not serialise a reply: {e}"}}"#)
-        });
-        out.push('\n');
-        writer.write_all(out.as_bytes())?;
-        writer.flush().ok();
+        reply(&mut writer, &answer)?;
     }
 }
 
-fn dispatch(req: Request, peer: Option<crate::peer::Peer>, state: &State) -> Reply {
+fn reply(writer: &mut UnixStream, reply: &Reply) -> std::io::Result<()> {
+    let mut out = serde_json::to_string(reply).unwrap_or_else(|e| {
+        format!(r#"{{"reply":"error","message":"could not serialise a reply: {e}"}}"#)
+    });
+    out.push('\n');
+    writer.write_all(out.as_bytes())?;
+    writer.flush()
+}
+
+fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, state: &State) -> Reply {
     // WHO is asking, before WHAT is asked.
     if let Err(why) = authorized(&req, peer) {
         return Reply::error(why);
@@ -168,6 +227,12 @@ fn dispatch(req: Request, peer: Option<crate::peer::Peer>, state: &State) -> Rep
         },
         Request::Revoke { device } => revoke(state, &device),
         Request::Ring { device } => ring(state, &device),
+        Request::Send {
+            device,
+            kind,
+            name,
+            text,
+        } => send(state, &device, &kind, name, text, fds),
     }
 }
 
@@ -202,6 +267,7 @@ fn dispatch(req: Request, peer: Option<crate::peer::Peer>, state: &State) -> Rep
 fn authorized(req: &Request, peer: Option<crate::peer::Peer>) -> Result<(), String> {
     match req {
         Request::Pair => local_caller(peer),
+        Request::Send { .. } => sending_caller(peer),
         _ => own_user(peer),
     }
 }
@@ -237,6 +303,33 @@ fn local_caller(peer: Option<crate::peer::Peer>) -> Result<(), String> {
     };
     own_user(Some(peer))?;
     may_pair(rime_agent_core::origin::observe_pid(peer.pid)?)
+}
+
+/// Refuse a `send` from anything but a human at this machine: the same two
+/// origins as pairing, with a refusal in `send`'s words.
+fn sending_caller(peer: Option<crate::peer::Peer>) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell whether a human is at this machine — and sending to a phone is reserved \
+             for one"
+                .to_string(),
+        );
+    };
+    own_user(Some(peer))?;
+    may_send(rime_agent_core::origin::observe_pid(peer.pid)?)
+}
+
+/// `send`'s rule over a value, for the same reason [`may_pair`] is one.
+pub fn may_send(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot send to a phone: the phone takes what is sent without asking, so \
+         only a person at this machine may send. Run `rime remote send` from a terminal, or use \
+         Rime Settings"
+    ))
 }
 
 /// The rule, over a value.
@@ -374,6 +467,86 @@ fn ring(state: &State, device: &str) -> Reply {
     }
 }
 
+fn send(
+    state: &State,
+    device: &str,
+    kind: &str,
+    name: Option<String>,
+    text: Option<String>,
+    mut fds: Vec<OwnedFd>,
+) -> Reply {
+    let (id, device_name) = match state.devices() {
+        Ok(store) => match store.find(device) {
+            Ok(d) if d.is_active() => (d.id.clone(), d.name.clone()),
+            Ok(d) => return Reply::error(format!("{} was revoked; nothing can be sent to it", d.name)),
+            Err(e) => return Reply::error(e.to_string()),
+        },
+        Err(e) => return Reply::error(e.to_string()),
+    };
+    let body = match kind {
+        "file" => {
+            if fds.len() != 1 {
+                return Reply::error(format!(
+                    "a file is sent as one open descriptor passed with the request (`rime remote send <device> <file>`); \
+                     this request carried {}",
+                    fds.len()
+                ));
+            }
+            let file = std::fs::File::from(fds.remove(0));
+            crate::phone::Outgoing::file(file, name.as_deref().unwrap_or(""))
+        }
+        "text" if fds.is_empty() => crate::phone::Outgoing::text(text.unwrap_or_default()),
+        "text" => Err("text is sent in the request, with no descriptor".to_string()),
+        other => Err(format!("kind must be \"file\" or \"text\", not {other:?}")),
+    };
+    let body = match body {
+        Ok(b) => b,
+        Err(why) => return Reply::error(why),
+    };
+    let report = state.phones().remove(&id);
+    let has_push = state.push_store().registrations.contains_key(&id);
+    let now_s = rime_remote_core::now_ms() / 1000;
+    let got = crate::phone::send(
+        &state.events,
+        &state.outbox,
+        &id,
+        &state.machine,
+        crate::phone::Reach {
+            report: report.as_ref(),
+            has_push,
+        },
+        body,
+        now_s,
+        crate::phone::ACK_WAIT,
+        |started| {
+            let trust = rime_remote_core::tls::Trust::system().map_err(|e| e.to_string())?;
+            let raised = crate::push::Raised {
+                kind: rime_remote_core::push::Kind::Sent,
+                session: rime_remote_core::push::NO_SESSION,
+                started,
+                adapter: rime_remote_core::push::Adapter::Unknown,
+            };
+            crate::push::push_one(state, &id, raised, &trust)
+        },
+    );
+    match got {
+        Ok((path, offer)) => {
+            let (path, push_error) = match path {
+                crate::phone::SentPath::Link => ("link", None),
+                crate::phone::SentPath::Push => ("push", None),
+                crate::phone::SentPath::Waiting { push } => ("waiting", push),
+            };
+            Reply::Sent {
+                device: device_name,
+                path: path.into(),
+                id: offer,
+                push_error,
+            }
+        }
+        Err(why) => Reply::error(why.sentence(&device_name)),
+    }
+}
+
 /// The origins this socket accepts a pairing request from.
 ///
 /// Written out and matched against, rather than left implicit in
@@ -432,6 +605,30 @@ mod tests {
             }
         }
         assert_eq!(allowed, 2, "the wrong number of origins may pair");
+    }
+
+    #[test]
+    fn exactly_the_two_local_origins_may_send_and_the_refusal_says_send() {
+        // `send` is gated like pairing because the phone takes what arrives
+        // without asking; an agent (a scheduled-job) must be refused, by name,
+        // in words about sending rather than pairing.
+        let mut allowed = 0;
+        for o in RequestOrigin::ALL {
+            match may_send(*o) {
+                Ok(()) => {
+                    assert!(o.is_local(), "{o} was allowed to send to a phone");
+                    allowed += 1;
+                }
+                Err(why) => {
+                    assert!(!o.is_local(), "{o} was refused");
+                    assert!(why.contains(o.as_str()), "{why} does not name {o}");
+                    assert!(why.contains("rime remote send"), "{why}");
+                    assert!(!why.contains("pair"), "{why}");
+                }
+            }
+        }
+        assert_eq!(allowed, 2);
+        assert!(may_send(RequestOrigin::ScheduledJob).is_err());
     }
 
     #[test]
@@ -500,6 +697,15 @@ mod tests {
             Request::Revoke {
                 device: "somebody-elses-phone".into(),
             },
+            Request::Ring {
+                device: "somebody-elses-phone".into(),
+            },
+            Request::Send {
+                device: "somebody-elses-phone".into(),
+                kind: "text".into(),
+                name: None,
+                text: Some("x".into()),
+            },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -528,6 +734,11 @@ mod tests {
                     verdict.is_ok(),
                     local_caller(Some(me)).is_ok(),
                     "Pair stopped asking the origin rule"
+                ),
+                Request::Send { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    may_send(rime_agent_core::origin::observe_pid(me.pid).expect("classify")).is_ok(),
+                    "Send stopped asking the origin rule"
                 ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
@@ -569,6 +780,12 @@ mod tests {
             Request::Ring {
                 device: "pixel-8".into(),
             },
+            Request::Send {
+                device: "pixel-8".into(),
+                kind: "text".into(),
+                name: None,
+                text: Some("line one\nline two".into()),
+            },
         ];
         for r in &requests {
             let text = serde_json::to_string(r).expect("serialise");
@@ -584,6 +801,7 @@ mod tests {
             },
             Reply::Devices { devices: vec![], phones: Default::default() },
             Reply::Rang { device: "Pixel".into(), path: "link".into() },
+            Reply::Sent { device: "Pixel".into(), path: "waiting".into(), id: 3, push_error: Some("503".into()) },
             Reply::Status {
                 version: 1,
                 key: "k".into(),

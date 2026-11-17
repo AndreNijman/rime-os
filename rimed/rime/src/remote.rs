@@ -61,6 +61,26 @@ pub enum RemoteCmd {
         /// Device id, or its name when that names exactly one.
         device: String,
     },
+    /// Send files or text to a paired phone.
+    ///
+    /// The phone takes it without asking: text goes onto its clipboard, a
+    /// file into its Downloads. That is why only you, at this machine, can
+    /// send; an agent cannot. When Rime Remote is not open on the phone, what
+    /// you send waits here for 15 minutes and the phone is asked, through its
+    /// push service, to come and take it.
+    #[command(group(clap::ArgGroup::new("what").required(true).args(["files", "clipboard", "text"])))]
+    Send {
+        /// Device id, or its name when that names exactly one.
+        device: String,
+        /// Files to send, each on its own.
+        files: Vec<PathBuf>,
+        /// Send what is on this computer's clipboard, as text.
+        #[arg(long)]
+        clipboard: bool,
+        /// Send this text. `-` reads it from standard input.
+        #[arg(long, value_name = "TEXT")]
+        text: Option<String>,
+    },
     /// Whether the service is running, and how a device would reach it.
     ///
     /// Including every connection open right now: which path it came in on,
@@ -91,6 +111,14 @@ enum Request {
     Devices,
     Revoke { device: String },
     Ring { device: String },
+    Send {
+        device: String,
+        kind: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
 }
 
 /// A phone's last report, as `rime-remoted` keeps it.
@@ -133,6 +161,14 @@ enum Reply {
         device: String,
         path: String,
     },
+    Sent {
+        device: String,
+        path: String,
+        #[allow(dead_code)]
+        id: u64,
+        #[serde(default)]
+        push_error: Option<String>,
+    },
     Ok,
     Error {
         message: String,
@@ -149,6 +185,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         RemoteCmd::Devices { json } => devices(json),
         RemoteCmd::Revoke { device } => revoke(&device),
         RemoteCmd::Ring { device } => ring(&device),
+        RemoteCmd::Send { device, files, clipboard, text } => send(&device, &files, clipboard, text),
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
     };
@@ -168,6 +205,13 @@ fn socket_path() -> PathBuf {
 }
 
 fn call(req: &Request) -> Result<Reply> {
+    call_with(req, None)
+}
+
+/// One request, with `fd` passed beside its line when there is one (the
+/// file `send` offers: the service reads it through this descriptor, never
+/// by its path, so it needs no access to where the file lives).
+fn call_with(req: &Request, fd: Option<std::os::fd::RawFd>) -> Result<Reply> {
     let path = socket_path();
     let stream = UnixStream::connect(&path).with_context(|| {
         format!(
@@ -184,7 +228,11 @@ fn call(req: &Request) -> Result<Reply> {
     let mut reader = BufReader::new(stream);
     let mut line = serde_json::to_string(req)?;
     line.push('\n');
-    writer.write_all(line.as_bytes())?;
+    match fd {
+        Some(fd) => rime_remote_core::fdpass::send_with_fd(&writer, line.as_bytes(), fd)
+            .context("sending the request")?,
+        None => writer.write_all(line.as_bytes())?,
+    }
     writer.flush()?;
     let mut reply = String::new();
     reader.read_line(&mut reply).context("reading the reply")?;
@@ -363,6 +411,140 @@ fn ring(device: &str) -> Result<i32> {
             Ok(1)
         }
         _ => unexpected(),
+    }
+}
+
+/// The most text one send carries; the service holds the same limit.
+const MAX_TEXT_BYTES: usize = 8192;
+
+/// How long `wl-paste` gets to answer: a clipboard owner that hangs must not
+/// hang the command.
+const PASTE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn send(device: &str, files: &[PathBuf], clipboard: bool, text: Option<String>) -> Result<i32> {
+    if clipboard || text.is_some() {
+        let text = match text {
+            Some(t) if t == "-" => read_capped(std::io::stdin().lock())?,
+            Some(t) => t,
+            None => paste()?,
+        };
+        text_fits(&text)?;
+        let reply = call(&Request::Send { device: device.to_string(), kind: "text", name: None, text: Some(text) })?;
+        return Ok(report_sent(reply, "the text"));
+    }
+    let mut code = 0;
+    for path in files {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("rime: could not open {}: {e}", path.display());
+                code = 1;
+                continue;
+            }
+        };
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let req = Request::Send { device: device.to_string(), kind: "file", name: Some(name.clone()), text: None };
+        use std::os::fd::AsRawFd;
+        let reply = call_with(&req, Some(file.as_raw_fd()))?;
+        if report_sent(reply, &name) != 0 {
+            code = 1;
+        }
+    }
+    Ok(code)
+}
+
+fn text_fits(text: &str) -> Result<()> {
+    if text.is_empty() {
+        bail!("there is no text to send");
+    }
+    if text.len() > MAX_TEXT_BYTES {
+        bail!(
+            "that text is {} bytes, and a phone is sent at most {MAX_TEXT_BYTES} at a time; \
+             put it in a file and send the file",
+            text.len()
+        );
+    }
+    Ok(())
+}
+
+/// Up to one byte past the limit, so an over-long text is refused in words
+/// rather than read whole.
+fn read_capped(r: impl std::io::Read) -> Result<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    r.take(MAX_TEXT_BYTES as u64 + 1).read_to_end(&mut bytes).context("reading the text")?;
+    String::from_utf8(bytes).context("the text is not UTF-8")
+}
+
+/// This computer's clipboard, as text, from `wl-paste`.
+fn paste() -> Result<String> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("wl-paste")
+        .args(["--no-newline", "--type", "text"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not run wl-paste to read the clipboard")?;
+    let out = child.stdout.take().expect("piped");
+    let reader = std::thread::spawn(move || read_capped(out));
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() > PASTE_DEADLINE {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("the clipboard did not answer within {} seconds", PASTE_DEADLINE.as_secs());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let text = reader.join().map_err(|_| anyhow::anyhow!("reading the clipboard failed"))??;
+    if !status.success() {
+        bail!("the clipboard holds no text");
+    }
+    Ok(text)
+}
+
+/// Says what became of one send, and returns its exit code.
+fn report_sent(reply: Reply, what: &str) -> i32 {
+    match reply {
+        Reply::Sent { device, path, push_error, .. } => {
+            eprintln!("rime: {}", sent_sentence(&device, &path, what, push_error.as_deref()));
+            0
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            1
+        }
+        other => {
+            eprintln!("rime: rime-remoted sent a reply this build does not expect: {other:?}");
+            1
+        }
+    }
+}
+
+fn sent_sentence(device: &str, path: &str, what: &str, push_error: Option<&str>) -> String {
+    match path {
+        "link" => format!("{device} has {what} and is taking it now."),
+        "push" => format!(
+            "{device} is not connected, so it was asked through its push service to take {what}. \
+             It waits here for 15 minutes."
+        ),
+        _ => {
+            // `what` starts a sentence here, so "the text" becomes "The text".
+            let mut chars = what.chars();
+            let what: String = chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default();
+            let mut s = format!(
+                "{device} is not connected. {what} waits here for 15 minutes: open Rime Remote on \
+                 the phone to take it."
+            );
+            if let Some(e) = push_error {
+                s.push_str(&format!(" (Its push service could not be reached: {e}.)"));
+            }
+            s
+        }
     }
 }
 
@@ -623,6 +805,61 @@ mod tests {
             r#"{"reply":"status","version":1,"key":"k","machine":"l16","lan":[],"relay":null,"rendezvous":"r","paired":0,"offer_ms_left":null}"#,
         ] {
             serde_json::from_str::<Reply>(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+    }
+
+    #[test]
+    fn send_is_its_own_request_on_the_wire_and_a_file_carries_no_text() {
+        let file = Request::Send { device: "Pixel".into(), kind: "file", name: Some("a.jpg".into()), text: None };
+        assert_eq!(
+            serde_json::to_string(&file).expect("serialise"),
+            r#"{"cmd":"send","device":"Pixel","kind":"file","name":"a.jpg"}"#
+        );
+        let text = Request::Send { device: "Pixel".into(), kind: "text", name: None, text: Some("a\nb".into()) };
+        let line = serde_json::to_string(&text).expect("serialise");
+        assert_eq!(line, r#"{"cmd":"send","device":"Pixel","kind":"text","text":"a\nb"}"#);
+        assert!(!line.contains('\n'));
+        for reply in [
+            r#"{"reply":"sent","device":"Pixel","path":"link","id":3}"#,
+            r#"{"reply":"sent","device":"Pixel","path":"waiting","id":4,"push_error":"gone"}"#,
+        ] {
+            assert!(matches!(serde_json::from_str::<Reply>(reply), Ok(Reply::Sent { .. })), "{reply}");
+        }
+    }
+
+    #[test]
+    fn each_way_a_send_goes_says_so() {
+        assert_eq!(sent_sentence("Pixel", "link", "a.jpg", None), "Pixel has a.jpg and is taking it now.");
+        assert!(sent_sentence("Pixel", "push", "a.jpg", None).contains("push service"));
+        let w = sent_sentence("Pixel", "waiting", "the text", Some("410 Gone"));
+        assert!(w.starts_with("Pixel is not connected. The text waits here for 15 minutes"), "{w}");
+        assert!(w.ends_with("(Its push service could not be reached: 410 Gone.)"), "{w}");
+    }
+
+    #[test]
+    fn text_over_the_limit_is_refused_before_it_is_read_whole() {
+        let long = "x".repeat(MAX_TEXT_BYTES * 4);
+        let read = read_capped(long.as_bytes()).expect("read");
+        assert_eq!(read.len(), MAX_TEXT_BYTES + 1, "read past the cap");
+        assert!(text_fits(&read).unwrap_err().to_string().contains("send the file"));
+        assert!(text_fits("").is_err());
+        assert!(text_fits(&"y".repeat(MAX_TEXT_BYTES)).is_ok());
+    }
+
+    #[test]
+    fn send_needs_something_to_send_and_only_one_kind() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        assert!(Cli::try_parse_from(["r", "send", "Pixel"]).is_err(), "nothing to send was accepted");
+        assert!(Cli::try_parse_from(["r", "send", "Pixel", "a.jpg", "--clipboard"]).is_err());
+        assert!(Cli::try_parse_from(["r", "send", "Pixel", "--text", "x", "--clipboard"]).is_err());
+        match Cli::try_parse_from(["r", "send", "Pixel", "a.jpg", "b.pdf"]).expect("files").cmd {
+            RemoteCmd::Send { files, clipboard: false, text: None, .. } => assert_eq!(files.len(), 2),
+            other => panic!("{other:?}"),
         }
     }
 

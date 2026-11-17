@@ -744,6 +744,12 @@ impl Worker {
                 .events
                 .open(&self.device_id)
                 .map(|(stream, _)| {
+                    // What was sent while the phone was away, written now:
+                    // the lines wait in the socketpair and the pump, which
+                    // starts after the reply, forwards them behind it.
+                    for line in self.state.outbox.pending(&self.device_id, &self.state.machine) {
+                        self.state.events.send(&self.device_id, &line);
+                    }
                     let ch = DaemonChannel {
                         stream,
                         read_only: true,
@@ -757,6 +763,18 @@ impl Worker {
                             .into_bytes(),
                     )
                 })
+        } else if crate::phone::is_take(request) {
+            // What somebody here sent this phone, by id, under this
+            // connection's device id; the channel closes after the last byte.
+            crate::phone::open_take(&self.state.outbox, &self.device_id, request)
+                .map(|(stream, reply)| {
+                    let ch = DaemonChannel {
+                        stream,
+                        read_only: true,
+                    };
+                    (ch, reply, Vec::new(), true)
+                })
+                .map_err(crate::proxy::ProxyError::NotTakenOver)
         } else if crate::nex::is_channel(request) {
             crate::nex::open_channel(&self.state.nexd(), &self.device_id, request)
                 .map(|o| {
@@ -1238,7 +1256,7 @@ mod tests {
             v["features"],
             serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
                                "machine_status", "machine_lock", "media",
-                               "device_events", "phone_report"]),
+                               "device_events", "phone_report", "take_offer"]),
             "{v}"
         );
         // The pairing code's list, with the port this listener has — and
@@ -1283,6 +1301,10 @@ mod tests {
             // socket's, for somebody at this machine.
             br#"{"cmd":"ring"}"#.to_vec(),
             br#"{"cmd":"device_events"}"#.to_vec(),
+            // Nor send anything to itself or another phone: `send` is the
+            // control socket's too, and `take_offer` is a channel, not a line.
+            br#"{"cmd":"send"}"#.to_vec(),
+            br#"{"cmd":"take_offer"}"#.to_vec(),
             br#"{"remote_hello":true}"#.to_vec(),
             b"remote_hello".to_vec(),
         ] {
@@ -1296,7 +1318,7 @@ mod tests {
         assert_eq!(VERBS, ["remote_hello"]);
         assert_eq!(crate::nex::VERBS, ["nex", "nex_events"]);
         assert_eq!(crate::machine::VERBS, ["machine_status", "machine_lock", "media", "media_control", "volume"]);
-        assert_eq!(crate::phone::VERBS, ["phone_report", "ring_ack"]);
+        assert_eq!(crate::phone::VERBS, ["phone_report", "ring_ack", "offer_ack", "offer_done"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

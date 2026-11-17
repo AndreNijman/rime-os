@@ -150,6 +150,13 @@ data class Alert(
          * the ordinary kind: the app's ringer plays it as an alarm.
          */
         RING("Ringing", "Your computer asked this phone to ring so you can find it."),
+
+        /**
+         * The computer sent this phone a file or text while the app was not
+         * connected (`rime remote send`, contract §2.6). The push carries no
+         * name and no content: it only says to open the app, which takes it.
+         */
+        SENT("Sent to this phone", "Your computer sent you something. Open Rime Remote to take it."),
     }
 
     /**

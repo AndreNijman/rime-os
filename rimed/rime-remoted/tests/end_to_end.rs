@@ -105,6 +105,7 @@ fn refuse_if_stale(path: &std::path::Path, name: &str) {
     let sources: &[&str] = match name {
         "rime-agentd" => &["rime-agentd", "rime-agent-core"],
         "rime-remoted" => &["rime-remoted", "rime-remote-core"],
+        "rime" => &["rime", "rime-remote-core", "rime-agent-core"],
         _ => return,
     };
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -1453,6 +1454,18 @@ impl Session {
             .map(|l| serde_json::from_str(l).expect("a JSON line"))
             .collect()
     }
+
+    /// Every byte that arrives on `channel` until it closes.
+    fn bytes_until_close(&mut self, channel: u32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            match self.recv() {
+                Frame::Data { channel: c, bytes: b } if c == channel => bytes.extend(b),
+                Frame::Close { channel: c, .. } if c == channel => return bytes,
+                other => self.pending.push(other),
+            }
+        }
+    }
 }
 
 #[test]
@@ -1637,4 +1650,193 @@ fn a_phone_reports_its_battery_rings_over_its_link_and_revoke_forgets_both() {
     assert!(r["message"].as_str().unwrap().contains("revoked"), "{r}");
     let phones = std::fs::read_to_string(h.root.join("state/rime/remote/phones.json")).unwrap_or_default();
     assert!(!phones.contains(&id), "{phones}");
+}
+
+/// `rime remote send <device> <file>`, as the CLI sends it: the request line
+/// with the open file passed beside it.
+fn send_file(socket: &std::path::Path, device: &str, path: &std::path::Path, name: &str) -> serde_json::Value {
+    use std::os::fd::AsRawFd;
+    let stream = UnixStream::connect(socket).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    let file = std::fs::File::open(path).expect("open the file to send");
+    let line = format!("{}\n", serde_json::json!({"cmd": "send", "device": device, "kind": "file", "name": name}));
+    rime_remote_core::fdpass::send_with_fd(&stream, line.as_bytes(), file.as_raw_fd()).expect("send");
+    drop(file);
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).expect("read");
+    serde_json::from_str(reply.trim()).unwrap_or_else(|e| panic!("{e}: {reply}"))
+}
+
+/// The `rime` CLI against this harness's daemon: `rime remote <args>`, with
+/// [stdin] fed to it. Returns its exit code and what it said.
+fn rime_remote(h: &Harness, args: &[&str], stdin: &[u8]) -> (i32, String) {
+    let mut child = Command::new(bin("rime"))
+        .arg("remote")
+        .args(args)
+        .env("XDG_RUNTIME_DIR", h.root.join("run"))
+        .env("XDG_STATE_HOME", h.root.join("state"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rime");
+    child.stdin.take().expect("stdin").write_all(stdin).expect("feed stdin");
+    let out = child.wait_with_output().expect("rime");
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+#[test]
+fn something_sent_waits_for_its_phone_and_is_taken_whole_over_the_link() {
+    let h = harness!("send");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+    let hello = session.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(
+        hello["features"].as_array().expect("features").iter().any(|f| f == "take_offer"),
+        "{hello}"
+    );
+
+    // Refused, quickly, before the phone says it receives.
+    let started = Instant::now();
+    let r = h.control(r#"{"cmd":"send","device":"pixel-8","kind":"text","text":"hello"}"#);
+    assert_eq!(r["reply"], "error", "{r}");
+    assert!(r["message"].as_str().unwrap().contains("has not said it can receive"), "{r}");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+
+    let ok = session.call(r#"{"cmd":"phone_report","battery":50,"can":["ring","receive"]}"#);
+    assert_eq!(ok["reply"], "ok", "{ok}");
+
+    // Not connected on its events channel and no push: it waits. Sent by
+    // the CLI, from standard input, the way a person pipes text to it.
+    let (code, said) = rime_remote(&h, &["send", "pixel-8", "--text", "-"], b"hello");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("pixel-8 is not connected. The text waits here for 15 minutes"), "{said}");
+
+    // A file request with no descriptor is refused in words.
+    let r = h.control(r#"{"cmd":"send","device":"pixel-8","kind":"file","name":"x.txt"}"#);
+    assert!(r["message"].as_str().unwrap_or("").contains("one open descriptor"), "{r}");
+
+    // Opening the channel offers what waited.
+    session.send(Frame::Open {
+        channel: 9,
+        request: br#"{"cmd":"device_events"}"#.to_vec(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "events", "{v}");
+        }
+        other => panic!("expected the events reply, got {other:?}"),
+    }
+    let replayed = session.lines_on(9, 1).remove(0);
+    assert_eq!(replayed["event"], "offer", "{replayed}");
+    let waiting = replayed["id"].as_u64().expect("id");
+    assert_eq!((replayed["kind"].as_str(), replayed["len"].as_u64()), (Some("text"), Some(5)), "{replayed}");
+
+    // A file, over the open channel, acked: "link".
+    let body: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+    let path = h.root.join("to-send.bin");
+    std::fs::write(&path, &body).expect("write");
+    let socket = h.remoted_socket.clone();
+    let p = path.clone();
+    let asked = std::thread::spawn(move || send_file(&socket, "pixel-8", &p, "../../holiday photo.bin"));
+    let offered = session.lines_on(9, 1).remove(0);
+    assert_eq!(offered["event"], "offer", "{offered}");
+    assert_eq!(offered["name"], "holiday photo.bin", "the name must be reduced: {offered}");
+    assert_eq!(offered["len"].as_u64(), Some(body.len() as u64), "{offered}");
+    let id = offered["id"].as_u64().expect("id");
+    let ack = session.call(&format!(r#"{{"cmd":"offer_ack","id":{id}}}"#));
+    assert_eq!(ack["reply"], "ok", "{ack}");
+    let sent = asked.join().expect("send");
+    assert_eq!((sent["reply"].as_str(), sent["path"].as_str()), (Some("sent"), Some("link")), "{sent}");
+    assert_eq!(sent["id"].as_u64(), Some(id), "{sent}");
+    // The file on disk can change now: the phone takes what was sent.
+    std::fs::remove_file(&path).expect("unlink");
+
+    // Take it, whole.
+    session.send(Frame::Open {
+        channel: 11,
+        request: format!(r#"{{"cmd":"take_offer","id":{id}}}"#).into_bytes(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v, serde_json::json!({"reply":"offer","kind":"file","name":"holiday photo.bin","len":body.len()}));
+        }
+        other => panic!("expected the offer reply, got {other:?}"),
+    }
+    assert_eq!(session.bytes_until_close(11), body, "the phone did not get the file whole");
+
+    // The CLI with a file, over the open link: the descriptor goes beside the
+    // request, and the person is told the phone has it.
+    let small = h.root.join("note.txt");
+    std::fs::write(&small, b"from the cli").expect("write");
+    let cli_path = small.to_str().expect("utf-8").to_string();
+    let cli = {
+        let h_root = h.root.clone();
+        std::thread::spawn(move || {
+            let out = Command::new(bin("rime"))
+                .args(["remote", "send", "pixel-8", &cli_path])
+                .env("XDG_RUNTIME_DIR", h_root.join("run"))
+                .env("XDG_STATE_HOME", h_root.join("state"))
+                .stdin(Stdio::null())
+                .output()
+                .expect("rime");
+            (out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).into_owned())
+        })
+    };
+    let offered = session.lines_on(9, 1).remove(0);
+    assert_eq!((offered["name"].as_str(), offered["len"].as_u64()), (Some("note.txt"), Some(12)), "{offered}");
+    let cli_id = offered["id"].as_u64().expect("id");
+    assert_eq!(session.call(&format!(r#"{{"cmd":"offer_ack","id":{cli_id}}}"#))["reply"], "ok");
+    let (code, said) = cli.join().expect("cli");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("pixel-8 has note.txt and is taking it now."), "{said}");
+    session.send(Frame::Open {
+        channel: 17,
+        request: format!(r#"{{"cmd":"take_offer","id":{cli_id}}}"#).into_bytes(),
+    });
+    match session.recv() {
+        Frame::Control(line) => assert!(String::from_utf8_lossy(&line).contains(r#""reply":"offer""#)),
+        other => panic!("expected the offer reply, got {other:?}"),
+    }
+    assert_eq!(session.bytes_until_close(17), b"from the cli");
+
+    // Done drops it; the text is still there until it is done too.
+    assert_eq!(session.call(&format!(r#"{{"cmd":"offer_done","id":{id}}}"#))["reply"], "ok");
+    session.send(Frame::Open {
+        channel: 13,
+        request: format!(r#"{{"cmd":"take_offer","id":{id}}}"#).into_bytes(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["code"], "not_found", "{v}");
+        }
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    match session.recv() {
+        Frame::Close { channel: 13, .. } => {}
+        other => panic!("the refused channel was not closed: {other:?}"),
+    }
+    session.send(Frame::Open {
+        channel: 15,
+        request: format!(r#"{{"cmd":"take_offer","id":{waiting}}}"#).into_bytes(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["kind"], "text", "{v}");
+        }
+        other => panic!("expected the text offer, got {other:?}"),
+    }
+    assert_eq!(session.bytes_until_close(15), b"hello");
+
+    // Revoked: nothing can be sent.
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
+    let r = h.control(r#"{"cmd":"send","device":"pixel-8","kind":"text","text":"x"}"#);
+    assert!(r["message"].as_str().unwrap_or("").contains("revoked"), "{r}");
 }

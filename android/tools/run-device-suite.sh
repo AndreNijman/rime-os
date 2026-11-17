@@ -269,11 +269,17 @@ done
 # local origin for any request at all — and this suite's whole value is that the
 # phone's own origin is real.
 #
+# `send_file_at_computer` is `rime remote send <device> <file>` as the CLI does
+# it: the request line with the open file passed beside it (SCM_RIGHTS). The
+# file is one the broker writes into this run's own directory from the bytes
+# the test gives it; nothing of the developer's is read. A text send needs no
+# verb of its own: `{"cmd":"send",...,"kind":"text"}` is forwarded like ring.
+#
 # `machine_stub_seed` and `machine_stub_actions` set and read the stub machine
 # (see RIME_REMOTED_MACHINE_STUB above): what the phone will find, and what it
 # asked the computer to do. Neither reaches a daemon.
 cat > "$root/broker.py" <<'PY'
-import json, os, socket, socketserver, subprocess, sys, time
+import base64, json, os, socket, socketserver, subprocess, sys, time
 
 SOCK, PORT, ROOT, BIN = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 DPORT, AGENTD = sys.argv[5], sys.argv[6]
@@ -286,6 +292,24 @@ def control(line):
     s.sendall((line + "\n").encode())
     f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
     return out
+
+def send_file_at_computer(device, name, data_b64):
+    """`rime remote send DEVICE FILE`, from THIS process: the person at the
+    computer. The file lives in the run directory and is gone once sent: the
+    service holds its own descriptor."""
+    path = os.path.join(ROOT, "send-" + str(time.time_ns()))
+    with open(path, "wb") as f:
+        f.write(base64.b64decode(data_b64))
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.unlink(path)
+        s = socket.socket(socket.AF_UNIX); s.settimeout(60); s.connect(SOCK)
+        line = json.dumps({"cmd": "send", "device": device, "kind": "file", "name": name}) + "\n"
+        socket.send_fds(s, [line.encode()], [fd])
+        f = s.makefile("rb"); out = f.readline().decode().strip(); s.close()
+        return out
+    finally:
+        os.close(fd)
 
 def agentd(request):
     """One request to rime-agentd, from THIS process — a local origin."""
@@ -454,6 +478,8 @@ class H(socketserver.StreamRequestHandler):
                 out = nex_session_at_computer(str(req["title"]))
             elif cmd == "nex_submit_at_computer":
                 out = nex_submit_at_computer(str(req["session"]), str(req["text"]))
+            elif cmd == "send_file_at_computer":
+                out = send_file_at_computer(str(req["device"]), str(req["name"]), str(req["data"]))
             elif cmd == "machine_stub_seed":
                 out = machine_stub_seed(req.get("state"))
             elif cmd == "machine_stub_actions":

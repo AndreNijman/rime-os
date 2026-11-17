@@ -345,7 +345,8 @@ fn remote_hello_is_answered_by_the_service_and_never_reaches_the_daemon() {
     assert_eq!(
         hello["features"],
         serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
-                           "machine_status", "machine_lock", "media"]),
+                           "machine_status", "machine_lock", "media",
+                           "device_events", "phone_report", "take_offer"]),
         "{hello}"
     );
     // The same list a pairing code carries, read the same way at the same

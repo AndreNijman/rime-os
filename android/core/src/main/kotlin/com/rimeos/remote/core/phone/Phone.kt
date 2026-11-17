@@ -17,8 +17,9 @@ import java.io.Closeable
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * The phone itself, as the paired computer sees it: its battery, and ring
- * (`docs/remote-live-contract.md` §2.5).
+ * The phone itself, as the paired computer sees it: its battery, ring
+ * (`docs/remote-live-contract.md` §2.5), and what the computer sends it
+ * (§2.6).
  *
  * The phone tells the machine its battery and what it can do with
  * `phone_report`, and keeps a read-only `device_events` channel open so the
@@ -34,6 +35,19 @@ object Phone {
 
     /** The word in `can` that lets the machine ring this phone through its push service. */
     const val CAN_RING: String = "ring"
+
+    /** The word in `can` that says this phone takes files and text the computer sends. */
+    const val CAN_RECEIVE: String = "receive"
+
+    /** The channel, and the feature, a sent file or text is taken on. */
+    const val TAKE: String = "take_offer"
+
+    /** The most text one offer carries, and the largest file (contract §2.6). */
+    const val MAX_TEXT_BYTES: Long = 8192
+    const val MAX_FILE_BYTES: Long = 256L * 1024 * 1024
+
+    /** The longest file name an offer carries, in characters. */
+    const val NAME_CAP: Int = 200
 
     /** A push ring older than this is dropped: a late push must not ring a phone. */
     const val STALE_PUSH_S: Long = 60
@@ -60,6 +74,47 @@ object Phone {
             put("cmd", "ring_ack")
             put("id", id)
         }.toString()
+
+    fun offerAck(id: Long): String =
+        buildJsonObject {
+            put("cmd", "offer_ack")
+            put("id", id)
+        }.toString()
+
+    fun offerDone(id: Long): String =
+        buildJsonObject {
+            put("cmd", "offer_done")
+            put("id", id)
+        }.toString()
+
+    fun take(id: Long): String =
+        buildJsonObject {
+            put("cmd", TAKE)
+            put("id", id)
+        }.toString()
+
+    /** Whether the machine accepted a `take_offer` channel. */
+    fun taking(reply: ByteArray): Boolean =
+        (parse(reply.toString(Charsets.UTF_8)) as? JsonObject)?.text("reply") == "offer"
+
+    /**
+     * The machine's answer to `take_offer`: what is coming. Throws
+     * [AgentError] for a refusal (an offer that expired, or was taken back)
+     * and for an answer that does not describe something an offer may carry.
+     */
+    fun taken(reply: ByteArray): Taken {
+        val text = reply.toString(Charsets.UTF_8)
+        val o = parse(text) as? JsonObject
+            ?: throw AgentError("internal", "the computer sent something that is not a reply: ${text.take(200)}")
+        if (o.text("reply") != "offer") {
+            readOk(text)
+            throw AgentError("internal", "expected an `offer` reply")
+        }
+        val kind = OfferKind.of(o.text("kind")) ?: throw AgentError("internal", "the computer offered a kind this phone does not take")
+        val len = o.long("len") ?: throw AgentError("internal", "the offer did not say how long it is")
+        if (!kind.fits(len)) throw AgentError("too_large", "the computer offered ${len} bytes, more than a phone takes")
+        return Taken(kind, cleanName(o.text("name")), len)
+    }
 
     /** Whether the machine accepted the `device_events` channel. */
     fun opened(reply: ByteArray): Boolean =
@@ -92,6 +147,13 @@ object Phone {
                 val at = o.long("at") ?: return null
                 DeviceEvent.Ring(id, at, (o.text("machine") ?: "").take(MACHINE_CAP))
             }
+            "offer" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                val at = o.long("at") ?: return null
+                val kind = OfferKind.of(o.text("kind")) ?: return null
+                val len = o.long("len")?.takeIf { kind.fits(it) } ?: return null
+                DeviceEvent.Offer(id, at, (o.text("machine") ?: "").take(MACHINE_CAP), kind, cleanName(o.text("name")), len)
+            }
             else -> null
         }
     }
@@ -107,6 +169,17 @@ object Phone {
 
     private const val MACHINE_CAP = 120
 
+    /**
+     * A name from the computer, made safe to show and to save under: no path,
+     * no control characters, at most [NAME_CAP] characters. The computer
+     * already reduces it; this phone does not rely on that.
+     */
+    fun cleanName(raw: String?): String {
+        val base = (raw ?: "").substringAfterLast('/').substringAfterLast('\\')
+        val clean = base.filter { !it.isISOControl() && it != '\u2028' && it != '\u2029' }.trim().trimStart('.')
+        return clean.take(NAME_CAP).ifEmpty { "shared file" }
+    }
+
     private fun parse(text: String) = runCatching { json.parseToJsonElement(text) }.getOrNull()
 
     private fun JsonObject.prim(key: String): JsonPrimitive? = (this[key] as? JsonPrimitive)?.takeIf { it !is JsonNull }
@@ -119,6 +192,68 @@ object Phone {
 sealed interface DeviceEvent {
     /** Ring, asked for by [machine] at [at] (its clock, unix seconds). */
     data class Ring(val id: Long, val at: Long, val machine: String) : DeviceEvent
+
+    /** [machine] sent this phone a file or text of [len] bytes; take it with `take_offer`. */
+    data class Offer(
+        val id: Long,
+        val at: Long,
+        val machine: String,
+        val kind: OfferKind,
+        val name: String,
+        val len: Long,
+    ) : DeviceEvent
+}
+
+enum class OfferKind(val wire: String, private val max: Long) {
+    FILE("file", Phone.MAX_FILE_BYTES),
+    TEXT("text", Phone.MAX_TEXT_BYTES),
+    ;
+
+    fun fits(len: Long): Boolean = len in 1..max
+
+    companion object {
+        fun of(wire: String?): OfferKind? = entries.firstOrNull { it.wire == wire }
+    }
+}
+
+/** What a `take_offer` channel is about to carry. */
+data class Taken(val kind: OfferKind, val name: String, val len: Long)
+
+/**
+ * Which offers this phone has taken, so the same offer arriving again (the
+ * machine replays what is not done each time the channel opens, and a lost
+ * `offer_done` leaves one not done) is not saved twice.
+ *
+ * An offer is claimed while it is being taken and kept once it is. One that
+ * failed is let go, so the next replay tries it again.
+ */
+class OfferMemory(private val capacity: Int = 256) {
+    private val taken = LinkedHashSet<String>()
+    private val busy = HashSet<String>()
+
+    private fun key(deviceId: String, id: Long, at: Long) = "$deviceId/$id/$at"
+
+    /** True when this offer is new: the caller takes it and then calls [finish]. */
+    @Synchronized
+    fun claim(deviceId: String, id: Long, at: Long): Boolean {
+        val k = key(deviceId, id, at)
+        if (k in taken || k in busy) return false
+        busy += k
+        return true
+    }
+
+    /** True when it was taken already, so the caller only says it is done. */
+    @Synchronized
+    fun wasTaken(deviceId: String, id: Long, at: Long): Boolean = key(deviceId, id, at) in taken
+
+    @Synchronized
+    fun finish(deviceId: String, id: Long, at: Long, ok: Boolean) {
+        val k = key(deviceId, id, at)
+        busy -= k
+        if (!ok) return
+        taken += k
+        while (taken.size > capacity) taken.remove(taken.first())
+    }
 }
 
 /**
@@ -210,6 +345,92 @@ class PhoneLink(private val link: MachineLink) {
      * for the machine, which has already tried the push.
      */
     fun ack(id: Long) = Phone.readOk(link.request(Phone.ringAck(id), retry = false))
+
+    /** Tell the machine this phone has an offer, so it reports "link". Not retried, as for [ack]. */
+    fun offerAck(id: Long) = Phone.readOk(link.request(Phone.offerAck(id), retry = false))
+
+    /** The offer is taken (or never will be): the machine forgets it. */
+    fun offerDone(id: Long) = Phone.readOk(link.request(Phone.offerDone(id), retry = true))
+
+    /**
+     * Take offer [id]: open a `take_offer` channel and hand each piece of it
+     * to [sink], in order, on the connection's own thread, until the machine
+     * closes it. Blocks until then.
+     *
+     * The bytes must be exactly as many as the reply said: fewer is a
+     * connection that ended part way, more is a machine that lied about the
+     * length, and either throws. [quietMs] is how long the channel may carry
+     * nothing before it is given up on.
+     */
+    fun take(id: Long, sink: (ByteArray) -> Unit, quietMs: Long = 30_000): Taken {
+        val mux = link.shared()
+        val channel = mux.nextChannelId()
+        val done = java.util.concurrent.CompletableFuture<Unit>()
+        val got = java.util.concurrent.atomic.AtomicLong(0)
+        val expected = java.util.concurrent.atomic.AtomicLong(-1)
+        val lastData = java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis())
+        val listener = object : Mux.Listener {
+            override fun onData(channel: UInt, bytes: ByteArray) {
+                if (done.isDone) return
+                lastData.set(System.currentTimeMillis())
+                val total = got.addAndGet(bytes.size.toLong())
+                val limit = expected.get().takeIf { it >= 0 } ?: Phone.MAX_FILE_BYTES
+                if (total > limit) {
+                    done.completeExceptionally(AgentError("too_large", "the computer sent more than it offered"))
+                    return
+                }
+                try {
+                    sink(bytes)
+                } catch (e: Throwable) {
+                    done.completeExceptionally(e)
+                }
+            }
+
+            override fun onClose(channel: UInt, reason: String) {
+                if (reason.isEmpty()) done.complete(Unit) else done.completeExceptionally(Disconnected(reason))
+            }
+
+            override fun onDisconnect(cause: Throwable?) {
+                done.completeExceptionally(cause ?: Disconnected("the connection ended"))
+            }
+        }
+        val reply = mux.openChannel(
+            channel,
+            Phone.take(id).toByteArray(Charsets.UTF_8),
+            channelListener = listener,
+            // Read the length as the reply arrives, on the connection's thread,
+            // so it bounds the very first piece that follows it.
+            accepted = { r ->
+                Phone.taking(r).also { ok -> if (ok) runCatching { expected.set(Phone.taken(r).len) } }
+            },
+        )
+        val taken = try {
+            Phone.taken(reply)
+        } catch (e: Throwable) {
+            mux.closeChannel(channel)
+            throw e
+        }
+        expected.set(taken.len)
+        try {
+            while (true) {
+                try {
+                    done.get(1_000, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    break
+                } catch (_: java.util.concurrent.TimeoutException) {
+                    if (System.currentTimeMillis() - lastData.get() > quietMs) {
+                        throw Disconnected("the computer stopped sending part way")
+                    }
+                }
+            }
+        } catch (e: java.util.concurrent.ExecutionException) {
+            throw e.cause ?: e
+        } finally {
+            mux.closeChannel(channel)
+        }
+        if (got.get() > taken.len) throw AgentError("too_large", "the computer sent more than it offered")
+        if (got.get() < taken.len) throw Disconnected("the computer sent ${got.get()} of ${taken.len} bytes")
+        return taken
+    }
 
     fun interface Listener {
         fun onEvent(event: DeviceEvent)

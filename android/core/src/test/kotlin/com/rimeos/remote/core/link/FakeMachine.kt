@@ -209,9 +209,10 @@ class FakeMachine(
                         }
                         val reply = attachReply(request)
                         toClient.put(Frame.Control(reply.toByteArray(Charsets.UTF_8)))
-                        // `streaming` is a nex channel's "open": not a PTY, but
-                        // bytes follow exactly as a scrollback does.
-                        if (!reply.contains("\"attached\"") && !reply.contains("\"streaming\"")) {
+                        // `streaming` is a nex channel's "open", and `offer` a
+                        // `take_offer` channel's: not a PTY, but bytes follow
+                        // exactly as a scrollback does.
+                        if (!reply.contains("\"attached\"") && !reply.contains("\"streaming\"") && !reply.contains("\"offer\"")) {
                             toClient.put(Frame.Close(frame.channel, ""))
                             continue
                         }

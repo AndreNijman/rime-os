@@ -13,6 +13,7 @@ import com.rimeos.remote.core.phone.BatteryThrottle
 import com.rimeos.remote.core.phone.DeviceEvent
 import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
+import com.rimeos.remote.phone.Receiver
 import com.rimeos.remote.phone.Ringer
 import com.rimeos.remote.core.link.Route
 import com.rimeos.remote.data.MachineRepository
@@ -102,6 +103,7 @@ class LinkHub private constructor(private val app: Context) {
     private val batteryThrottles = ConcurrentHashMap<String, BatteryThrottle>()
     private val eventChannels = ConcurrentHashMap<String, java.io.Closeable>()
     private val ringer by lazy { Ringer(app) }
+    private val receiver by lazy { Receiver(app) }
 
     private class Dial(val route: Route?, val ms: Long, val relay: Boolean)
 
@@ -393,7 +395,10 @@ class LinkHub private constructor(private val app: Context) {
         val (level, charging) = reading
         val now = System.currentTimeMillis()
         if (!throttle.due(level, charging, now)) return
-        val can = if (ringer.canRing) listOf(Phone.CAN_RING) else emptyList()
+        val can = buildList {
+            if (ringer.canRing) add(Phone.CAN_RING)
+            if (receiver.canReceive) add(Phone.CAN_RECEIVE)
+        }
         runCatching { phone.report(level, charging, can) }
             .onSuccess { throttle.sent(level, charging, now) }
             .onFailure { Log.i(TAG, "battery report not taken: ${it.message}") }
@@ -419,7 +424,37 @@ class LinkHub private constructor(private val app: Context) {
                 val rang = if (Ringer.rings.first(machine.deviceId, event.at)) ringer.ring(machine.machine) else true
                 if (rang) runCatching { phone.ack(event.id) }
             }
+            is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
         }
+    }
+
+    /**
+     * Something the computer sent (contract §2.6): say it arrived, take it,
+     * say it is done. An offer already taken (a replay after a lost
+     * `offer_done`) is only said done again. One whose take failed on the
+     * link is left for the next replay; one refused for good is done.
+     */
+    private fun onOffer(machine: PairedMachine, phone: PhoneLink, offer: DeviceEvent.Offer) {
+        val id = machine.deviceId
+        runCatching { phone.offerAck(offer.id) }
+        receiver.clearWaiting()
+        if (Receiver.offers.wasTaken(id, offer.id, offer.at)) {
+            runCatching { phone.offerDone(offer.id) }
+            return
+        }
+        if (!Receiver.offers.claim(id, offer.id, offer.at)) return
+        val finished = try {
+            receiver.receive(machine.machine, phone, offer)
+            true
+        } catch (e: Receiver.Refused) {
+            Log.i(TAG, "${machine.machine}: offer ${offer.id} refused: ${e.message}")
+            true
+        } catch (e: Throwable) {
+            Log.w(TAG, "${machine.machine}: offer ${offer.id} not taken: ${e.message}")
+            false
+        }
+        Receiver.offers.finish(id, offer.id, offer.at, finished)
+        if (finished) runCatching { phone.offerDone(offer.id) }
     }
 
     private fun scheduleReconnect(machine: PairedMachine) {

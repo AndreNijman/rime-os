@@ -253,6 +253,7 @@ let
       "rename_names_a_live_session_clears_it_and_refuses_what_it_should"
       "revoking_a_device_also_stops_it_being_woken"
       "revoking_a_device_ends_the_connection_it_is_already_holding"
+      "something_sent_waits_for_its_phone_and_is_taken_whole_over_the_link"
       "submit_turns_text_into_a_line_the_program_acts_on"
       "text_reaches_a_live_session_and_a_terminator_makes_it_a_line"
       "the_desktop_measures_the_connection_and_a_device_cannot_invent_the_answer"

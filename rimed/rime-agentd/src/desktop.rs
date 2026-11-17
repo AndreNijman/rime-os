@@ -48,11 +48,9 @@ pub const MAX_SAVE_BYTES: u64 = 256 * 1024 * 1024;
 /// Space the folder's file system must still have after the file.
 pub const FREE_MARGIN: u64 = 64 * 1024 * 1024;
 
-/// The longest name a saved file is given, in bytes, before numbering.
-pub const MAX_NAME: usize = 200;
-
-/// What a name that is empty after reduction becomes.
-pub const FALLBACK_NAME: &str = "shared file";
+// The name rules are shared with rime-remoted, which reduces the name of a
+// file it sends to a phone the same way (contract §2.6).
+pub use rime_agent_core::filename::{file_name, numbered};
 
 /// The whole budget for setting the clipboard. The control worker answers in
 /// order, so a `wl-copy` that never returns must not hold the link.
@@ -278,58 +276,6 @@ pub fn plan(desk: &Desk, name: &str, len: u64) -> Result<Plan, String> {
     Ok(Plan { dir, name })
 }
 
-/// Reduce a name a phone sent to one safe to create in Downloads.
-///
-/// Never a path: everything up to the last `/` or `\` goes. Never hidden:
-/// leading dots and spaces go. Refused, not cleaned, when it holds a control
-/// character, because a person who sent one did not mean to.
-pub fn file_name(raw: &str) -> Result<String, String> {
-    if let Some(b) = raw.bytes().find(|b| *b < 0x20 || *b == 0x7f) {
-        return Err(format!(
-            "that file's name contains a control character (0x{b:02x}), so it was not saved"
-        ));
-    }
-    let base = raw.rsplit(['/', '\\']).next().unwrap_or("");
-    let base = base.trim_start_matches(['.', ' ']).trim_end_matches(' ');
-    if base.is_empty() {
-        return Ok(FALLBACK_NAME.to_string());
-    }
-    Ok(cap(base, MAX_NAME))
-}
-
-/// Cut `name` to at most `max` bytes on a character boundary, keeping a short
-/// extension.
-fn cap(name: &str, max: usize) -> String {
-    if name.len() <= max {
-        return name.to_string();
-    }
-    let (stem, ext) = split_ext(name);
-    let ext = if ext.len() <= 20 { ext } else { "" };
-    let mut keep = max - ext.len();
-    while !stem.is_char_boundary(keep.min(stem.len())) {
-        keep -= 1;
-    }
-    format!("{}{ext}", &stem[..keep.min(stem.len())])
-}
-
-/// `("IMG_2041", ".jpg")`. A name that is only an extension has no stem to
-/// split off, so it is all stem.
-fn split_ext(name: &str) -> (&str, &str) {
-    match name.rfind('.') {
-        Some(i) if i > 0 => (&name[..i], &name[i..]),
-        _ => (name, ""),
-    }
-}
-
-/// The `n`th name for a file: `IMG_2041.jpg`, then `IMG_2041 (2).jpg`.
-pub fn numbered(name: &str, n: u32) -> String {
-    if n <= 1 {
-        return name.to_string();
-    }
-    let (stem, ext) = split_ext(name);
-    format!("{stem} ({n}){ext}")
-}
-
 /// The Downloads folder: the stub's, or `XDG_DOWNLOAD_DIR` from
 /// `user-dirs.dirs`, or `~/Downloads`.
 pub fn downloads(desk: &Desk) -> Result<PathBuf, String> {
@@ -544,6 +490,7 @@ fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rime_agent_core::filename::{FALLBACK_NAME, MAX_NAME};
 
     /// A fresh directory, removed when dropped.
     struct Scratch(PathBuf);

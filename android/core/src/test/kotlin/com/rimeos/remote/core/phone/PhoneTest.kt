@@ -118,6 +118,6 @@ class PhoneTest {
     fun `push kind 10 is a ring`() {
         assertEquals(Alert.Kind.RING, Push.kindOf(10))
         assertEquals(10, Push.codeOf(Alert.Kind.RING))
-        assertNull(Push.kindOf(11))
+        assertNull(Push.kindOf(12))
     }
 }

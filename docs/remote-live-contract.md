@@ -405,6 +405,70 @@ against the phone's clock. A push ring whose `started` equals the `at` of a
 ring the phone already rang from that machine is the same ring (its ack was
 lost) and is dropped too.
 
+### 2.6 From the computer to the phone: `send`, `take_offer`
+
+The other direction of §1.8: a file, or some text for the phone's clipboard,
+from somebody at this computer onto their phone. `remote_hello.features` gains
+`"take_offer"`. A phone puts `"receive"` in its report's `can` when it will
+take what is sent (notifications allowed, so the person is told what arrived);
+of `can`, `"ring"` and `"receive"` are kept.
+
+**Send** is a control-socket request (`rime remote send`), and like `pair` it is
+refused unless the caller is a human at this machine (a local terminal or the
+Rime Shell, by `origin::observe_pid`). The phone takes what arrives without
+asking, so the gate is here: an agent in a managed session could otherwise
+put text on the clipboard a person pastes from, or leave files for them to
+open, the reason §1.8 refuses `clipboard_write` and `save_file` to managed
+sessions.
+
+```json
+{"cmd":"send","device":"Pixel 8","kind":"file","name":"report.pdf"}   + the open file, SCM_RIGHTS
+{"cmd":"send","device":"Pixel 8","kind":"text","text":"…"}
+→ {"reply":"sent","device":"Pixel 8","path":"link"|"push"|"waiting","id":7}
+```
+
+- A file travels as a descriptor passed with the request line (one
+  `SCM_RIGHTS` descriptor, on the same `sendmsg` as the line's first byte),
+  never as a path: rime-remoted has a private `/tmp`, and a descriptor is what
+  the person could read when they asked. It must be a regular file of 1 byte
+  to 256 MiB. `name` is reduced as §1.8 reduces it (and the phone reduces it
+  again). `text` is 1 to 8192 bytes of UTF-8.
+- What is sent waits in an outbox, in memory, for 15 minutes or until the phone
+  says it has it. A restart of rime-remoted empties it.
+- With a `device_events` channel open, `{"event":"offer","id":N,"at":<unix s>,
+  "machine":…,"kind":"file"|"text","name":…,"len":L}` is written there (`name`
+  is empty for text), and the phone answers `{"cmd":"offer_ack","id":N}` →
+  `{"reply":"ok"}` once it has started taking it. An ack within 4 s is
+  `"path":"link"`.
+- Otherwise, to a phone whose report has `"receive"` in `can`: push kind **11**
+  (`Sent`) to that one device, session -1, adapter 0, `started` = `at`, no
+  text, and `"path":"push"`. A phone without push gets `"path":"waiting"`:
+  it is offered the next time it opens `device_events` within the 15 minutes.
+  A phone that never said `"receive"` is refused with a sentence, and so is a
+  revoked one.
+- Every offer still waiting is written to a device's `device_events` channel
+  right after it opens, oldest first.
+
+**Take.** `Open` with `{"cmd":"take_offer","id":N}` answers
+`{"reply":"offer","kind":…,"name":…,"len":L}`, then exactly `L` bytes, then the
+channel closes. An offer is taken only under the device id it was sent to; an
+unknown, expired or other device's id is `{"reply":"error","code":"not_found"}`
+and a close. Taking again (after a dropped link) starts from byte 0. Then
+`{"cmd":"offer_done","id":N}` → `{"reply":"ok"}` drops it from the outbox.
+
+The phone drops an offer whose `(machine, id, at)` it has already taken. Text
+goes onto its clipboard, with a notification that says from where and not
+what. A file is saved into Downloads through MediaStore, never replacing one
+there, with a notification that opens it. A file larger than the phone's free
+space less 64 MiB is not taken. On Android 9 (no MediaStore Downloads) a file
+is refused with a notification, and finished with `offer_done`: the only
+folder writable there without a storage permission is app storage other apps
+can read.
+
+**Tests never touch the real desktop or phone storage outside the app's.**
+`rime remote send --clipboard` reads the clipboard with `wl-paste`; the device
+suite never uses it, and sends text and files through its broker.
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in

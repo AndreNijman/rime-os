@@ -1113,12 +1113,12 @@ mod tests {
                 raised.insert(r.kind.code());
             }
         }
-        // Ring is the one kind the watcher never raises: somebody at this
+        // Ring and Sent are the kinds the watcher never raises: somebody at this
         // machine asks for it (`rime remote ring`), it goes to one device
         // through `push_one`, and `phone.rs` tests that path.
         let want: BTreeSet<u8> = Kind::ALL
             .iter()
-            .filter(|k| **k != Kind::Ring)
+            .filter(|k| !matches!(**k, Kind::Ring | Kind::Sent))
             .map(|k| k.code())
             .collect();
         assert_eq!(

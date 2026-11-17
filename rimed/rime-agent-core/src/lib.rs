@@ -53,6 +53,7 @@ pub mod checkpoint;
 pub mod client;
 pub mod config;
 pub mod destination;
+pub mod filename;
 pub mod git;
 pub mod grant;
 pub mod graph;

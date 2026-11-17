@@ -1,5 +1,5 @@
 //! The phone's half of the pairing: what it tells this machine about itself,
-//! and the one thing this machine may ask of it (ring).
+//! and what this machine may ask of it (ring) or hand it (send).
 //!
 //! ## Three pieces
 //!
@@ -18,6 +18,11 @@
 //!   ack. Without one the ring goes through push, and the reply says the
 //!   phone was ASKED, not that it rang.
 //!
+//! - `send` and `take_offer` (contract §2.6): a file or some text somebody
+//!   here sent the phone waits in the [`Outbox`]; an `offer` line on the
+//!   events channel tells the phone, and the phone takes it on a channel of
+//!   its own, by id, under its own device id.
+//!
 //! ## What a ring may not do
 //!
 //! Ring is a control-socket request, so only somebody at this machine can
@@ -27,28 +32,48 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
+use std::os::unix::fs::FileExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Verbs a phone sends that this module answers.
-pub const VERBS: [&str; 2] = ["phone_report", "ring_ack"];
+pub const VERBS: [&str; 4] = ["phone_report", "ring_ack", "offer_ack", "offer_done"];
 
 /// The channel a phone opens to hear from this machine.
 pub const CHANNEL: &str = "device_events";
 
 /// What `remote_hello` adds, so a phone talks to a machine that has these and
 /// leaves an older one alone.
-pub const FEATURES: [&str; 2] = ["device_events", "phone_report"];
+pub const FEATURES: [&str; 3] = ["device_events", "phone_report", TAKE];
+
+/// The channel a phone opens to take what was sent to it.
+pub const TAKE: &str = "take_offer";
 
 /// The capability a phone declares when it can ring. Anything else a phone
 /// claims is dropped, so the store holds only words this machine acts on.
 pub const CAN_RING: &str = "ring";
+
+/// The capability a phone declares when it takes what this machine sends.
+pub const CAN_RECEIVE: &str = "receive";
+
+/// Every capability word kept from a report.
+const KEPT: [&str; 2] = [CAN_RING, CAN_RECEIVE];
+
+/// The largest file `send` hands a phone: the same cap as `save_file`.
+pub const MAX_SEND_BYTES: u64 = 256 * 1024 * 1024;
+
+/// The most text `send` puts on a phone's clipboard: the same cap as
+/// `clipboard_write`.
+pub const MAX_TEXT_BYTES: usize = 8192;
+
+/// How long something sent waits for its phone.
+pub const OFFER_LIFE: Duration = Duration::from_secs(15 * 60);
 
 /// How long a ring sent over the link waits for the phone's ack before it
 /// goes through push instead. A round trip over the relay is well under a
@@ -68,7 +93,7 @@ pub struct PhoneReport {
     /// Whether it was charging, when the phone said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub charging: Option<bool>,
-    /// What it can do. Only [`CAN_RING`] means anything today.
+    /// What it can do: [`CAN_RING`] and [`CAN_RECEIVE`] mean something.
     #[serde(default)]
     pub can: Vec<String>,
     /// Unix milliseconds at which this machine received it.
@@ -78,6 +103,10 @@ pub struct PhoneReport {
 impl PhoneReport {
     pub fn can_ring(&self) -> bool {
         self.can.iter().any(|c| c == CAN_RING)
+    }
+
+    pub fn can_receive(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_RECEIVE)
     }
 
     /// A report from a `phone_report` line, or why it was refused.
@@ -99,7 +128,7 @@ impl PhoneReport {
                 let mut can: Vec<String> = Vec::new();
                 for c in a {
                     let c = c.as_str().ok_or("can must be a list of words")?;
-                    if c == CAN_RING && !can.iter().any(|x| x == c) {
+                    if KEPT.contains(&c) && !can.iter().any(|x| x == c) {
                         can.push(c.to_string());
                     }
                 }
@@ -213,7 +242,8 @@ impl Events {
         }
     }
 
-    /// A fresh ring id.
+    /// A fresh id for a ring or an offer. One counter for both, so an ack
+    /// names exactly one thing.
     pub fn next_ring(&self) -> u64 {
         self.ring_id.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -326,7 +356,7 @@ pub fn ring(
     push(now_s).map(|()| Rang::Push).map_err(NotRung::PushFailed)
 }
 
-/// Answer `phone_report` and `ring_ack`. `None` for a line this module does
+/// Answer `phone_report`, the acks and `offer_done`. `None` for a line this module does
 /// not own. The device is the handshake's, never a body field.
 pub fn control(state: &crate::state::State, device_id: &str, line: &[u8]) -> Option<Vec<u8>> {
     let v: Value = serde_json::from_slice(line).ok()?;
@@ -342,15 +372,303 @@ pub fn control(state: &crate::state::State, device_id: &str, line: &[u8]) -> Opt
             }
             Err(why) => error(&why),
         },
-        "ring_ack" => match v["id"].as_u64() {
+        "ring_ack" | "offer_ack" => match v["id"].as_u64() {
             Some(id) => {
                 state.events.acknowledge(id);
                 ok()
             }
             None => error("id must be a whole number"),
         },
+        // Idempotent: a second `offer_done`, or one for an offer that has
+        // expired, has nothing left to drop and is not an error.
+        "offer_done" => match v["id"].as_u64() {
+            Some(id) => {
+                state.outbox.done(device_id, id);
+                ok()
+            }
+            None => error("id must be a whole number"),
+        },
         _ => return None,
     })
+}
+
+/// Something somebody here sent a phone (contract §2.6).
+#[derive(Debug)]
+pub enum Outgoing {
+    /// A regular file, open, and the name the phone is offered.
+    File { file: std::fs::File, name: String, len: u64 },
+    /// Text for the phone's clipboard.
+    Text(Vec<u8>),
+}
+
+impl Outgoing {
+    /// A file to send: regular, 1 byte to [`MAX_SEND_BYTES`], its name
+    /// reduced as `save_file` reduces one.
+    pub fn file(file: std::fs::File, raw_name: &str) -> Result<Outgoing, String> {
+        let meta = file.metadata().map_err(|e| format!("could not read that file: {e}"))?;
+        if !meta.is_file() {
+            return Err("only a regular file can be sent".into());
+        }
+        let len = meta.len();
+        if len == 0 {
+            return Err("that file is empty; there is nothing to send".into());
+        }
+        if len > MAX_SEND_BYTES {
+            return Err(format!(
+                "that file is {len} bytes, and a phone is sent at most {MAX_SEND_BYTES} ({} MiB)",
+                MAX_SEND_BYTES / 1024 / 1024
+            ));
+        }
+        let name = rime_agent_core::filename::file_name(raw_name)?;
+        Ok(Outgoing::File { file, name, len })
+    }
+
+    /// Text to send: 1 to [`MAX_TEXT_BYTES`] bytes.
+    pub fn text(text: String) -> Result<Outgoing, String> {
+        if text.is_empty() {
+            return Err("there is no text to send".into());
+        }
+        if text.len() > MAX_TEXT_BYTES {
+            return Err(format!(
+                "that text is {} bytes, and a phone's clipboard is sent at most {MAX_TEXT_BYTES}",
+                text.len()
+            ));
+        }
+        Ok(Outgoing::Text(text.into_bytes()))
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Outgoing::File { .. } => "file",
+            Outgoing::Text(_) => "text",
+        }
+    }
+
+    pub fn len(&self) -> u64 {
+        match self {
+            Outgoing::File { len, .. } => *len,
+            Outgoing::Text(t) => t.len() as u64,
+        }
+    }
+
+    /// The offered name; empty for text.
+    pub fn name(&self) -> &str {
+        match self {
+            Outgoing::File { name, .. } => name,
+            Outgoing::Text(_) => "",
+        }
+    }
+
+    /// Write every byte, from the start, into `out`. Reads the file by
+    /// offset, so a second take (after a dropped link) does not share a
+    /// position with the first.
+    pub fn write_to(&self, out: &mut impl Write) -> std::io::Result<()> {
+        match self {
+            Outgoing::Text(t) => out.write_all(t),
+            Outgoing::File { file, len, .. } => {
+                let mut buf = vec![0u8; 64 * 1024];
+                let mut at = 0u64;
+                while at < *len {
+                    let want = buf.len().min((*len - at) as usize);
+                    let n = file.read_at(&mut buf[..want], at)?;
+                    if n == 0 {
+                        // Shorter than it was when it was sent: the phone
+                        // sees a channel that closed early and keeps nothing.
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "the file got shorter after it was sent",
+                        ));
+                    }
+                    out.write_all(&buf[..n])?;
+                    at += n as u64;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The `offer` event for something waiting.
+pub fn offer_line(id: u64, at_s: u64, machine: &str, body: &Outgoing) -> Value {
+    json!({
+        "event": "offer",
+        "id": id,
+        "at": at_s,
+        "machine": machine,
+        "kind": body.kind(),
+        "name": body.name(),
+        "len": body.len(),
+    })
+}
+
+struct Offer {
+    id: u64,
+    device_id: String,
+    at_s: u64,
+    expires: Instant,
+    body: Arc<Outgoing>,
+}
+
+/// What was sent and not yet taken, in memory, oldest first.
+#[derive(Default)]
+pub struct Outbox {
+    offers: Mutex<Vec<Offer>>,
+}
+
+impl Outbox {
+    fn live(offers: &mut Vec<Offer>) {
+        let now = Instant::now();
+        offers.retain(|o| o.expires > now);
+    }
+
+    pub fn put(&self, id: u64, device_id: &str, at_s: u64, body: Outgoing, life: Duration) {
+        let mut offers = lock(&self.offers);
+        Self::live(&mut offers);
+        offers.push(Offer {
+            id,
+            device_id: device_id.to_string(),
+            at_s,
+            expires: Instant::now() + life,
+            body: Arc::new(body),
+        });
+    }
+
+    /// The `offer` line of everything still waiting for `device_id`.
+    pub fn pending(&self, device_id: &str, machine: &str) -> Vec<Value> {
+        let mut offers = lock(&self.offers);
+        Self::live(&mut offers);
+        offers
+            .iter()
+            .filter(|o| o.device_id == device_id)
+            .map(|o| offer_line(o.id, o.at_s, machine, &o.body))
+            .collect()
+    }
+
+    /// Offer `id`, if it is still waiting and was sent to `device_id`.
+    pub fn take(&self, device_id: &str, id: u64) -> Option<Arc<Outgoing>> {
+        let mut offers = lock(&self.offers);
+        Self::live(&mut offers);
+        offers
+            .iter()
+            .find(|o| o.id == id && o.device_id == device_id)
+            .map(|o| Arc::clone(&o.body))
+    }
+
+    /// The phone has it: drop it. Only `device_id`'s own.
+    pub fn done(&self, device_id: &str, id: u64) {
+        lock(&self.offers).retain(|o| !(o.id == id && o.device_id == device_id));
+    }
+
+    /// Drop everything waiting for `device_id`: revoke.
+    pub fn forget(&self, device_id: &str) {
+        lock(&self.offers).retain(|o| o.device_id != device_id);
+    }
+}
+
+/// How something sent went out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SentPath {
+    /// The app said it is taking it.
+    Link,
+    /// The push service accepted the request to tell the phone.
+    Push,
+    /// Not connected and not reachable by push: it waits, and is offered when
+    /// the phone next opens its events channel. `push` is why push failed,
+    /// when it was tried.
+    Waiting { push: Option<String> },
+}
+
+/// Why nothing was sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotSent {
+    /// The phone has never said it takes what is sent.
+    CannotReceive,
+}
+
+impl NotSent {
+    pub fn sentence(&self, name: &str) -> String {
+        match self {
+            NotSent::CannotReceive => format!(
+                "{name} has not said it can receive files or text. Open an up-to-date Rime Remote on it once, \
+                 with its notifications allowed, then try again"
+            ),
+        }
+    }
+}
+
+/// Send `body` to `device_id`: an offer on its open channel when the app
+/// acks, else a push asking the person to open the app, else it waits. It
+/// waits in every case until the phone says `offer_done` or
+/// [`OFFER_LIFE`] passes. Returns the path and the offer's id.
+#[allow(clippy::too_many_arguments)]
+pub fn send(
+    events: &Events,
+    outbox: &Outbox,
+    device_id: &str,
+    machine: &str,
+    reach: Reach<'_>,
+    body: Outgoing,
+    now_s: u64,
+    ack_wait: Duration,
+    push: impl FnOnce(u64) -> Result<(), String>,
+) -> Result<(SentPath, u64), NotSent> {
+    // Asked first, channel or not: an older app drops an `offer` line it does
+    // not know, and the person would be told it was delivered.
+    if !reach.report.is_some_and(PhoneReport::can_receive) {
+        return Err(NotSent::CannotReceive);
+    }
+    let id = events.next_ring();
+    let line = offer_line(id, now_s, machine, &body);
+    outbox.put(id, device_id, now_s, body, OFFER_LIFE);
+    if events.is_open(device_id) && events.send(device_id, &line) && events.wait_ack(id, ack_wait) {
+        return Ok((SentPath::Link, id));
+    }
+    if !reach.has_push {
+        return Ok((SentPath::Waiting { push: None }, id));
+    }
+    match push(now_s) {
+        Ok(()) => Ok((SentPath::Push, id)),
+        Err(why) => Ok((SentPath::Waiting { push: Some(why) }, id)),
+    }
+}
+
+/// Whether a channel request is `take_offer`.
+pub fn is_take(request_line: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(request_line)
+        .ok()
+        .and_then(|v| v["cmd"].as_str().map(|c| c == TAKE))
+        .unwrap_or(false)
+}
+
+/// Open a `take_offer` channel: the end the pump reads, and the reply. The
+/// bytes are written into the other end by a thread of their own, which ends
+/// when they are all out or the channel closes. `Err` is the reply that
+/// refuses it.
+pub fn open_take(outbox: &Outbox, device_id: &str, request_line: &[u8]) -> Result<(UnixStream, Vec<u8>), Vec<u8>> {
+    let id = serde_json::from_slice::<Value>(request_line)
+        .ok()
+        .and_then(|v| v["id"].as_u64())
+        .ok_or_else(|| error("id must be a whole number"))?;
+    let body = outbox.take(device_id, id).ok_or_else(|| {
+        json!({"reply": "error", "code": "not_found",
+               "message": format!("nothing is waiting under id {id}: it was taken, it expired, or it was never sent to this phone")})
+            .to_string()
+            .into_bytes()
+    })?;
+    let (theirs, mut ours) = UnixStream::pair().map_err(|e| {
+        json!({"reply": "error", "code": "unavailable", "message": e.to_string()})
+            .to_string()
+            .into_bytes()
+    })?;
+    let reply = json!({"reply": "offer", "kind": body.kind(), "name": body.name(), "len": body.len()})
+        .to_string()
+        .into_bytes();
+    std::thread::spawn(move || {
+        // A failed write is the channel closing under it: nothing to report
+        // to anybody, and dropping `ours` ends the pump.
+        let _ = body.write_to(&mut ours);
+    });
+    Ok((theirs, reply))
 }
 
 /// Whether a channel request is `device_events`.
@@ -392,11 +710,12 @@ mod tests {
 
     #[test]
     fn a_report_keeps_only_what_this_machine_acts_on() {
-        let r = PhoneReport::parse(&json!({"battery": 62, "charging": true, "can": ["ring", "fly", "ring"]}), 5)
+        let r = PhoneReport::parse(&json!({"battery": 62, "charging": true, "can": ["ring", "fly", "receive", "ring"]}), 5)
             .expect("parse");
         assert_eq!(r.battery, Some(62));
         assert_eq!(r.charging, Some(true));
-        assert_eq!(r.can, vec!["ring".to_string()]);
+        assert_eq!(r.can, vec!["ring".to_string(), "receive".to_string()]);
+        assert!(r.can_ring() && r.can_receive());
         assert_eq!(r.reported_ms, 5);
         let empty = PhoneReport::parse(&json!({}), 5).expect("an empty report is a report");
         assert_eq!((empty.battery, empty.charging, empty.can.len()), (None, None, 0));
@@ -502,4 +821,150 @@ mod tests {
         assert_eq!(PhoneStore::load(&path).expect("load").phones["dev-a"], report(&["ring"]));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A scratch file holding `bytes`, opened for reading, already unlinked.
+    fn scratch(bytes: &[u8]) -> std::fs::File {
+        let path = std::env::temp_dir().join(format!(
+            "phone-send-{}-{:?}-{}",
+            std::process::id(),
+            std::thread::current().id(),
+            bytes.len()
+        ));
+        std::fs::write(&path, bytes).expect("write");
+        let f = std::fs::File::open(&path).expect("open");
+        std::fs::remove_file(&path).expect("unlink");
+        f
+    }
+
+    fn read_all(mut s: UnixStream) -> Vec<u8> {
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut s, &mut out).expect("read");
+        out
+    }
+
+    #[test]
+    fn what_can_be_sent_is_a_nonempty_regular_file_or_text_within_the_caps() {
+        let ok = Outgoing::file(scratch(b"pdf"), "../../.report.pdf").expect("a small file");
+        assert_eq!((ok.kind(), ok.name(), ok.len()), ("file", "report.pdf", 3));
+        assert!(Outgoing::file(scratch(b""), "empty.txt").unwrap_err().contains("empty"));
+        let dir = std::fs::File::open(std::env::temp_dir()).expect("open dir");
+        assert!(Outgoing::file(dir, "dir").unwrap_err().contains("regular file"));
+        // One byte over the cap, sparse, so the test writes nothing.
+        let path = std::env::temp_dir().join(format!("phone-send-big-{}", std::process::id()));
+        let w = std::fs::File::create(&path).expect("create");
+        w.set_len(MAX_SEND_BYTES + 1).expect("sparse");
+        let r = std::fs::File::open(&path).expect("open");
+        std::fs::remove_file(&path).expect("unlink");
+        assert!(Outgoing::file(r, "big.bin").unwrap_err().contains("at most"));
+        assert!(Outgoing::file(scratch(b"x"), "a\nb").is_err(), "a control character in a name is refused");
+
+        let t = Outgoing::text("hello".into()).expect("text");
+        assert_eq!((t.kind(), t.name(), t.len()), ("text", "", 5));
+        assert!(Outgoing::text(String::new()).is_err());
+        assert!(Outgoing::text("x".repeat(MAX_TEXT_BYTES)).is_ok());
+        assert!(Outgoing::text("x".repeat(MAX_TEXT_BYTES + 1)).is_err());
+    }
+
+    #[test]
+    fn nothing_is_sent_to_a_phone_that_never_said_it_receives_even_with_its_channel_open() {
+        let events = Events::default();
+        let outbox = Outbox::default();
+        let (_theirs, _) = events.open("dev-a").expect("open");
+        let never = |_| -> Result<(), String> { panic!("must not push") };
+        for reach in [Reach { report: None, has_push: true }, Reach { report: Some(&report(&["ring"])), has_push: true }] {
+            let got = send(&events, &outbox, "dev-a", "l16", reach, Outgoing::text("x".into()).unwrap(), 1, ACK_WAIT, never);
+            assert_eq!(got, Err(NotSent::CannotReceive));
+        }
+        assert!(outbox.pending("dev-a", "l16").is_empty(), "a refused send must leave nothing waiting");
+        assert!(NotSent::CannotReceive.sentence("Pixel 8").contains("Pixel 8"));
+    }
+
+    #[test]
+    fn a_send_over_the_link_counts_once_the_phone_acks_and_waits_until_done() {
+        let events = Arc::new(Events::default());
+        let outbox = Outbox::default();
+        let (theirs, _) = events.open("dev-a").expect("open");
+        let phone = Arc::clone(&events);
+        let t = std::thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(theirs).read_line(&mut line).expect("read");
+            let v: Value = serde_json::from_str(&line).expect("json");
+            phone.acknowledge(v["id"].as_u64().expect("id"));
+            v
+        });
+        let receives = report(&["receive"]);
+        let got = send(&events, &outbox, "dev-a", "l16", Reach { report: Some(&receives), has_push: true },
+            Outgoing::file(scratch(b"0123456789"), "notes.txt").unwrap(), 777, ACK_WAIT,
+            |_| -> Result<(), String> { panic!("an acked send must not push") });
+        let v = t.join().expect("phone");
+        let (path, id) = got.expect("sent");
+        assert_eq!(path, SentPath::Link);
+        assert_eq!(v, json!({"event":"offer","id":id,"at":777,"machine":"l16","kind":"file","name":"notes.txt","len":10}));
+        // Waiting until the phone says it has it, and only for this phone.
+        assert_eq!(outbox.pending("dev-a", "l16"), vec![v]);
+        assert!(outbox.pending("dev-b", "l16").is_empty());
+        assert!(outbox.take("dev-b", id).is_none(), "another phone took an offer that was not sent to it");
+        outbox.done("dev-b", id);
+        assert!(outbox.take("dev-a", id).is_some(), "another phone's done dropped this one's offer");
+        outbox.done("dev-a", id);
+        assert!(outbox.take("dev-a", id).is_none());
+    }
+
+    #[test]
+    fn with_no_ack_a_send_pushes_and_otherwise_waits_and_says_why() {
+        let events = Events::default();
+        let outbox = Outbox::default();
+        let receives = report(&["receive"]);
+        let at = std::cell::Cell::new(0);
+        let got = send(&events, &outbox, "dev-a", "l16", Reach { report: Some(&receives), has_push: true },
+            Outgoing::text("a".into()).unwrap(), 55, Duration::from_millis(20), |s| { at.set(s); Ok(()) });
+        assert_eq!(got.expect("sent").0, SentPath::Push);
+        assert_eq!(at.get(), 55, "push carries the moment it was sent");
+        let got = send(&events, &outbox, "dev-a", "l16", Reach { report: Some(&receives), has_push: true },
+            Outgoing::text("b".into()).unwrap(), 56, Duration::from_millis(20), |_| Err("503".into()));
+        assert_eq!(got.expect("sent").0, SentPath::Waiting { push: Some("503".into()) });
+        let got = send(&events, &outbox, "dev-a", "l16", Reach { report: Some(&receives), has_push: false },
+            Outgoing::text("c".into()).unwrap(), 57, Duration::from_millis(20), |_| -> Result<(), String> { panic!("no push to try") });
+        assert_eq!(got.expect("sent").0, SentPath::Waiting { push: None });
+        // All three wait, oldest first, for the next time the phone opens its channel.
+        let at: Vec<u64> = outbox.pending("dev-a", "l16").iter().map(|v| v["at"].as_u64().unwrap()).collect();
+        assert_eq!(at, vec![55, 56, 57]);
+    }
+
+    #[test]
+    fn an_offer_expires_and_revoke_drops_what_was_waiting() {
+        let outbox = Outbox::default();
+        outbox.put(1, "dev-a", 1, Outgoing::text("x".into()).unwrap(), Duration::ZERO);
+        assert!(outbox.pending("dev-a", "l16").is_empty(), "an expired offer was offered");
+        assert!(outbox.take("dev-a", 1).is_none());
+        outbox.put(2, "dev-a", 1, Outgoing::text("x".into()).unwrap(), OFFER_LIFE);
+        outbox.put(3, "dev-b", 1, Outgoing::text("x".into()).unwrap(), OFFER_LIFE);
+        outbox.forget("dev-a");
+        assert!(outbox.pending("dev-a", "l16").is_empty());
+        assert_eq!(outbox.pending("dev-b", "l16").len(), 1);
+    }
+
+    #[test]
+    fn take_offer_streams_every_byte_from_the_start_each_time_and_only_to_its_phone() {
+        let outbox = Outbox::default();
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        outbox.put(9, "dev-a", 1, Outgoing::file(scratch(&body), "data.bin").unwrap(), OFFER_LIFE);
+        for _ in 0..2 {
+            let (stream, reply) = open_take(&outbox, "dev-a", br#"{"cmd":"take_offer","id":9}"#).expect("take");
+            let r: Value = serde_json::from_slice(&reply).expect("reply");
+            assert_eq!(r, json!({"reply":"offer","kind":"file","name":"data.bin","len":200000}));
+            assert_eq!(read_all(stream), body, "a take must carry the whole file from byte 0");
+        }
+        let refused = open_take(&outbox, "dev-b", br#"{"cmd":"take_offer","id":9}"#).expect_err("another phone");
+        let r: Value = serde_json::from_slice(&refused).expect("reply");
+        assert_eq!(r["code"], "not_found");
+        assert!(open_take(&outbox, "dev-a", br#"{"cmd":"take_offer"}"#).is_err());
+        assert!(is_take(br#"{"cmd":"take_offer","id":9}"#) && !is_take(br#"{"cmd":"device_events"}"#));
+
+        outbox.put(10, "dev-a", 1, Outgoing::text("clip".into()).unwrap(), OFFER_LIFE);
+        let (stream, reply) = open_take(&outbox, "dev-a", br#"{"cmd":"take_offer","id":10}"#).expect("take text");
+        assert_eq!(serde_json::from_slice::<Value>(&reply).unwrap()["kind"], "text");
+        assert_eq!(read_all(stream), b"clip");
+    }
+
 }

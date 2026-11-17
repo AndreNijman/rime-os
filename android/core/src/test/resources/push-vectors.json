@@ -101,6 +101,16 @@
       "seq": 10,
       "session": 63,
       "started": 1726000009
+    },
+    {
+      "adapter": 0,
+      "envelope_hex": "010b0b0b0b0b0b0b0b0b0b0b0bca38176265cc482c0cb49ae19b77882ff65c20b06ff7d03458dabe7cc5642ecbd27594650a7c",
+      "kind": 11,
+      "nonce_hex": "0b0b0b0b0b0b0b0b0b0b0b0b",
+      "plaintext_hex": "0b00000000460000000066e0ab8a000000000000000b",
+      "seq": 11,
+      "session": 70,
+      "started": 1726000010
     }
   ],
   "envelope_len": 51,

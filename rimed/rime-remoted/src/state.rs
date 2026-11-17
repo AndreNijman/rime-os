@@ -85,6 +85,8 @@ pub struct State {
     pub phones_path: PathBuf,
     /// The open `device_events` channels and the rings waiting on an ack.
     pub events: crate::phone::Events,
+    /// What somebody here sent a phone, until it takes it (contract §2.6).
+    pub outbox: crate::phone::Outbox,
     /// How often an open connection is measured.
     pub ping_interval: std::time::Duration,
     devices: Mutex<DeviceStore>,
@@ -154,6 +156,7 @@ impl State {
             push_path,
             phones_path,
             events: crate::phone::Events::default(),
+            outbox: crate::phone::Outbox::default(),
             ping_interval,
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
@@ -236,9 +239,11 @@ impl State {
         self.phones.lock().unwrap_or_else(|e| e.into_inner()).phones.clone()
     }
 
-    /// Forget what a phone reported and close its events channel: revoke.
+    /// Forget what a phone reported, close its events channel and drop what was
+    /// waiting for it: revoke.
     pub fn phone_forget(&self, device_id: &str) {
         self.events.forget(device_id);
+        self.outbox.forget(device_id);
         let mut store = self.phones.lock().unwrap_or_else(|e| e.into_inner());
         if store.phones.remove(device_id).is_some() {
             if let Err(e) = store.save(&self.phones_path) {

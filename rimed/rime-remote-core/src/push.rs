@@ -185,6 +185,14 @@ pub enum Kind {
     /// in unix seconds, so a push that a distributor delivers late is dropped
     /// by the phone instead of ringing an hour after nobody wanted it.
     Ring = 10,
+    /// Somebody at this machine sent the phone a file or some text
+    /// (`rime remote send`) while it was not connected.
+    ///
+    /// Like [`Kind::Ring`]: one device, only a phone whose `phone_report`
+    /// says it can receive, and no text. What was sent waits on the machine
+    /// and is offered when the phone next opens its event channel; the
+    /// notification only asks the person to open Rime Remote.
+    Sent = 11,
 }
 
 impl Kind {
@@ -204,6 +212,7 @@ impl Kind {
             8 => Some(Kind::DeployFailed),
             9 => Some(Kind::NexApproval),
             10 => Some(Kind::Ring),
+            11 => Some(Kind::Sent),
             _ => None,
         }
     }
@@ -214,7 +223,7 @@ impl Kind {
 
     /// Every kind, so a test can walk the vocabulary rather than a list
     /// somebody has to remember to extend.
-    pub const ALL: [Kind; 10] = [
+    pub const ALL: [Kind; 11] = [
         Kind::Waiting,
         Kind::Permission,
         Kind::Failed,
@@ -225,6 +234,7 @@ impl Kind {
         Kind::DeployFailed,
         Kind::NexApproval,
         Kind::Ring,
+        Kind::Sent,
     ];
 
     /// Whether this kind reports a deployment.
@@ -1075,7 +1085,7 @@ mod tests {
             assert_ne!(kind.code(), 0, "0 must stay free as 'not a kind'");
         }
         assert_eq!(Kind::from_code(0), None);
-        assert_eq!(Kind::from_code(11), None);
+        assert_eq!(Kind::from_code(12), None);
         // The discriminants are the wire: a variant inserted rather than
         // appended would renumber the ones after it and a phone built before
         // the change would render the wrong sentence.
@@ -1083,6 +1093,7 @@ mod tests {
         assert_eq!(Kind::DeployFailed.code(), 8);
         assert_eq!(Kind::NexApproval.code(), 9);
         assert_eq!(Kind::Ring.code(), 10);
+        assert_eq!(Kind::Sent.code(), 11);
     }
 
     #[test]

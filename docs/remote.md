@@ -279,6 +279,39 @@ Pixel 8: battery 62%, charging, reported 3m ago
 With `--json`, a paired device that has reported carries a `phone` field
 (`battery`, `charging`, `can`, `reported_ms`). Revoking the device deletes it.
 
+## `rime remote send <device>`: files and text to your phone
+
+```
+$ rime remote send "Pixel 8" holiday.jpg notes.pdf
+rime: Pixel 8 has holiday.jpg and is taking it now.
+rime: Pixel 8 has notes.pdf and is taking it now.
+$ rime remote send "Pixel 8" --clipboard
+rime: Pixel 8 has the text and is taking it now.
+$ echo "door code 4417" | rime remote send "Pixel 8" --text -
+```
+
+The phone takes what you send without asking. Text goes onto its clipboard,
+and a notification says so without showing the text. A file goes into its
+Downloads folder, and a notification opens it. A file whose name is already
+taken there gets a numbered name: nothing is replaced. The phone refuses a
+file it has no room for and leaves 64 MiB free. Files need Android 10 or
+later; on Android 9 the phone refuses a file and says so in a notification,
+and text still works.
+
+Because the phone does not ask, **only you can send**: `rime-remoted` refuses
+a `send` that does not come from a terminal or Rime Settings, so an agent
+cannot send anything to your phone. `--clipboard` reads this computer's
+clipboard with `wl-paste`, and only as text. At most 8,192 bytes of text and
+256 MiB per file can be sent at once.
+
+- If the app is connected, the phone gets the offer straight away and takes it
+  over the same connection.
+- If it is not, what you send waits on this computer for 15 minutes, and the
+  phone is asked through its push service to come and take it. Opening the
+  app also takes it. After 15 minutes, or if you revoke the phone, it is gone.
+- The phone has to have told this computer that it can receive (an app with
+  notifications allowed). Until then, `send` is refused and says why.
+
 ## Notifications when the app is closed
 
 An agent that needs you at two in the morning has to be able to reach a phone
