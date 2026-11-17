@@ -483,7 +483,8 @@ verb to a machine whose hello lacks it.
 - Answered by rime-remoted, under the handshake's device id. `"ok"` means
   accepted for showing, not shown: one worker thread posts to the desktop's
   `org.freedesktop.Notifications` over the session bus (a D-Bus library on
-  its own thread, 3 s per call; the text travels in the message, never on a
+  its own thread, one 3 s deadline per call that connecting shares, so
+  nothing reaches the server after the worker gave up on it; the text travels in the message, never on a
   command line), behind a queue of 32. A post that finds it full answers
   `{"reply":"error","code":"busy"}`; a removal is `"ok"` either way.
 - `key` is 1 to 64 characters of `[A-Za-z0-9_-]`: the phone's hash of

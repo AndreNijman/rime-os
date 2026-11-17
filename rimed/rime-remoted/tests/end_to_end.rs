@@ -1954,30 +1954,47 @@ fn a_notification_dismissed_here_is_dismissed_on_a_phone_that_says_it_can() {
         assert_eq!(r["reply"], "ok", "{r}");
     };
 
+    // Each post's reply comes after its line is written.
+    let mut lines = 0;
+    let mut post_id = |session: &mut Session, key: &str| {
+        post(session, key);
+        lines += 1;
+        let line = notify_lines(&h, lines)[lines - 1].clone();
+        assert_eq!(line["summary"], key, "{line}");
+        line
+    };
+
     // A phone that never said "dismiss" is not told: an older app would not
-    // know the event. Posting the key again is the fence: the id is gone, so
-    // it is a new notification.
+    // know the event. The gate is read when the close is handled, so the
+    // phone must not say "dismiss" until a1's close is: posting a1 again
+    // shows it, as the id is forgotten and the post is new. Until then a post
+    // replaces a1, whose close then forgets it all the same.
     assert_eq!(session.call(r#"{"cmd":"phone_report","battery":50,"can":["ring"]}"#)["reply"], "ok");
-    post(&mut session, "a1");
-    let a1 = notify_lines(&h, 1)[0]["id"].clone();
+    let a1 = post_id(&mut session, "a1")["id"].clone();
     close_here(&h, &a1, 2);
-    // The stub reads its file every 100 ms.
-    std::thread::sleep(Duration::from_millis(1000));
-    post(&mut session, "a1");
-    assert_eq!(notify_lines(&h, 2)[1]["replaces"], 0, "the dismissed id was kept");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // The stub reads its file every 100 ms.
+        std::thread::sleep(Duration::from_millis(150));
+        let again = post_id(&mut session, "a1");
+        if again["replaces"] == 0 {
+            break;
+        }
+        assert_eq!(again["replaces"], a1, "{again}");
+        assert!(Instant::now() < deadline, "a1's close was never handled");
+    }
 
     // It says it can now. Timed out (1) on this machine: not a dismissal.
     assert_eq!(session.call(r#"{"cmd":"phone_report","battery":50,"can":["ring","dismiss"]}"#)["reply"], "ok");
-    post(&mut session, "b1");
-    let b1 = notify_lines(&h, 3)[2]["id"].clone();
+    let b1 = post_id(&mut session, "b1")["id"].clone();
     close_here(&h, &b1, 1);
     // Another machine's id, dismissed: not this phone's.
     close_here(&h, &serde_json::json!(4242), 2);
 
-    // Dismissed by the person: the phone hears that key, and it is the
-    // first thing on the channel, so nothing above was sent.
-    post(&mut session, "c1");
-    let c1 = notify_lines(&h, 4)[3]["id"].clone();
+    // Dismissed by the person: the phone hears that key. Closes are handled
+    // in file order by one worker, so when it is the first thing on the
+    // channel, nothing above was sent.
+    let c1 = post_id(&mut session, "c1")["id"].clone();
     close_here(&h, &c1, 2);
     // Lines that came in while a call waited for its reply were parked;
     // they count too, and come first.
@@ -1998,8 +2015,8 @@ fn a_notification_dismissed_here_is_dismissed_on_a_phone_that_says_it_can() {
 
     // The phone then says it is gone there; that closes nothing here.
     assert_eq!(session.call(r#"{"cmd":"phone_notification_removed","key":"c1"}"#)["reply"], "ok");
-    post(&mut session, "fence");
-    let after = notify_lines(&h, 5);
-    assert_eq!(after.len(), 5, "{after:?}");
+    post_id(&mut session, "fence");
+    let after = notify_lines(&h, lines);
+    assert_eq!(after.len(), lines, "{after:?}");
     assert!(after.iter().all(|l| l["op"] == "notify"), "{after:?}");
 }

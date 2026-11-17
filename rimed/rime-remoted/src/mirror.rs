@@ -36,7 +36,7 @@
 //! [`Bus`] is the desktop: one thread of its own with a single-threaded tokio
 //! runtime owns the session-bus connection (made when first needed, made again
 //! after it breaks). It answers the worker's calls, each within
-//! [`POST_BUDGET`], and hears `NotificationClosed` from the current owner of
+//! [`POST_BUDGET`] counted from the ask, connecting included, and hears `NotificationClosed` from the current owner of
 //! `org.freedesktop.Notifications` only. The text goes over the bus in the
 //! message, never on a command line.
 //!
@@ -256,7 +256,8 @@ enum Call {
 
 /// The desktop's notification server, over the session bus.
 pub struct Bus {
-    calls: tokio::sync::mpsc::Sender<Call>,
+    /// Each call with the moment its asker stops waiting.
+    calls: tokio::sync::mpsc::Sender<(Call, std::time::Instant)>,
 }
 
 struct Link {
@@ -282,10 +283,15 @@ impl Bus {
         Ok(Bus { calls })
     }
 
-    /// One call, answered within the budget or not at all.
+    /// One call, answered within the budget or not at all. Connecting and
+    /// calling share the one deadline, so nothing reaches the server after
+    /// the asker has given up: a post it gave up on would show with no id
+    /// kept, and never be replaced or closed.
     fn ask<T>(&self, call: impl FnOnce(SyncSender<T>) -> Call) -> Option<T> {
         let (tx, rx) = sync_channel(1);
-        self.calls.try_send(call(tx)).ok()?;
+        let by = std::time::Instant::now() + POST_BUDGET;
+        self.calls.try_send((call(tx), by)).ok()?;
+        // The slack is for the reply's trip back, not for more work.
         rx.recv_timeout(POST_BUDGET + Duration::from_millis(500)).ok()
     }
 
@@ -308,10 +314,10 @@ impl Bus {
         Ok(Link { notifications, dbus, closed })
     }
 
-    async fn serve(mut calls: tokio::sync::mpsc::Receiver<Call>, closer: Closer) {
+    async fn serve(mut calls: tokio::sync::mpsc::Receiver<(Call, std::time::Instant)>, closer: Closer) {
         use zbus::export::futures_util::StreamExt;
         enum Next {
-            Call(Option<Call>),
+            Call(Option<(Call, std::time::Instant)>),
             Closed(Option<zbus::Message>),
         }
         let mut link: Option<Link> = None;
@@ -325,15 +331,16 @@ impl Bus {
             };
             match next {
                 Next::Call(None) => return,
-                Next::Call(Some(call)) => {
-                    if link.is_none() {
-                        match tokio::time::timeout(POST_BUDGET, Bus::connect()).await {
+                Next::Call(Some((call, by))) => {
+                    let by = tokio::time::Instant::from_std(by);
+                    if link.is_none() && by > tokio::time::Instant::now() {
+                        match tokio::time::timeout_at(by, Bus::connect()).await {
                             Ok(Ok(l)) => link = Some(l),
                             Ok(Err(e)) => eprintln!("rime-remoted: no session bus for phone notifications: {e}"),
                             Err(_) => eprintln!("rime-remoted: the session bus did not answer in time"),
                         }
                     }
-                    if Bus::answer(call, link.as_ref()).await {
+                    if Bus::answer(call, by, link.as_ref()).await {
                         link = None;
                     }
                 }
@@ -348,24 +355,29 @@ impl Bus {
         }
     }
 
-    /// Answer one call. True when the connection broke doing it.
-    async fn answer(call: Call, link: Option<&Link>) -> bool {
-        async fn within<T, E: Into<zbus::Error>>(
-            f: impl std::future::Future<Output = Result<T, E>>,
-        ) -> Result<T, (String, bool)> {
-            match tokio::time::timeout(POST_BUDGET, f).await {
-                Ok(Ok(v)) => Ok(v),
-                Ok(Err(e)) => {
-                    let e: zbus::Error = e.into();
-                    Err((e.to_string(), broken(&e)))
-                }
-                Err(_) => Err(("the notification server did not answer in time".into(), false)),
+    /// `f` by `by`; the error says whether the connection broke.
+    async fn within<T, E: Into<zbus::Error>>(
+        by: tokio::time::Instant,
+        f: impl std::future::Future<Output = Result<T, E>>,
+    ) -> Result<T, (String, bool)> {
+        match tokio::time::timeout_at(by, f).await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => {
+                let e: zbus::Error = e.into();
+                Err((e.to_string(), broken(&e)))
             }
+            Err(_) => Err(("the notification server did not answer in time".into(), false)),
         }
-        let Some(l) = link else {
+    }
+
+    /// Answer one call. True when the connection broke doing it.
+    async fn answer(call: Call, by: tokio::time::Instant, link: Option<&Link>) -> bool {
+        let late = by <= tokio::time::Instant::now();
+        let Some(l) = link.filter(|_| !late) else {
+            let why = if late { "the notification server did not answer in time" } else { "no session bus" };
             match call {
-                Call::Notify(_, _, r) => drop(r.send(Err("no session bus".into()))),
-                Call::Close(_, r) => drop(r.send(Err("no session bus".into()))),
+                Call::Notify(_, _, r) => drop(r.send(Err(why.into()))),
+                Call::Close(_, r) => drop(r.send(Err(why.into()))),
                 Call::Owner(r) => drop(r.send(None)),
             }
             return false;
@@ -376,20 +388,20 @@ impl Bus {
                 let hints: HashMap<&str, zbus::zvariant::Value<'_>> =
                     HashMap::from([("urgency", zbus::zvariant::Value::U8(1))]);
                 let body = (&s.app_name, replaces, ICON, &s.summary, &s.body, actions, hints, -1i32);
-                let got = within(l.notifications.call::<_, _, u32>("Notify", &body)).await;
+                let got = Bus::within(by, l.notifications.call::<_, _, u32>("Notify", &body)).await;
                 let gone = matches!(got, Err((_, true)));
                 let _ = reply.send(got.map_err(|(e, _)| e));
                 gone
             }
             Call::Close(id, reply) => {
-                let got = within(l.notifications.call::<_, _, ()>("CloseNotification", &(id,))).await;
+                let got = Bus::within(by, l.notifications.call::<_, _, ()>("CloseNotification", &(id,))).await;
                 let gone = matches!(got, Err((_, true)));
                 let _ = reply.send(got.map_err(|(e, _)| e));
                 gone
             }
             Call::Owner(reply) => {
                 let Ok(name) = zbus::names::BusName::from_static_str(NAME) else { return false };
-                let got = within(l.dbus.get_name_owner(name)).await;
+                let got = Bus::within(by, l.dbus.get_name_owner(name)).await;
                 let gone = matches!(got, Err((_, true)));
                 let _ = reply.send(got.ok().map(|o| o.to_string()));
                 gone
