@@ -420,9 +420,13 @@ prebuild_plan() {
         if [ -z "$attr" ] || [ -n "$rest" ]; then echo "run-checks: $PREBUILD_FILE: bad line for '$name'" >&2; rc=1; continue; fi
         if cut -f1 "$out/items.tsv" | grep -qxF "$name"; then echo "run-checks: $PREBUILD_FILE: '$name' listed twice" >&2; rc=1; continue; fi
         if [ -n "$pick" ]; then
-            apply="ps: let m = builtins.filter (p: (p.pname or (builtins.parseDrvName p.name).name) == \"$pick\") ps; in
-                   if builtins.length m == 1 then (builtins.head m).drvPath
-                   else throw \"prebuild: \${toString (builtins.length m)} packages named $pick in $attr\""
+            # Distinct derivations: a module list can hold the same package twice (desktop.nix adds the Nerd Font pin
+            # from two places); two DIFFERENT packages with this pname are still refused.
+            apply="ps: let m = builtins.filter (p: (p.pname or (builtins.parseDrvName p.name).name) == \"$pick\") ps;
+                           d = builtins.attrNames (builtins.listToAttrs
+                                 (map (p: { name = builtins.unsafeDiscardStringContext p.drvPath; value = null; }) m)); in
+                   if builtins.length d == 1 then (builtins.head m).drvPath
+                   else throw \"prebuild: \${toString (builtins.length d)} packages named $pick in $attr\""
         else
             apply="x: x.drvPath"
         fi
