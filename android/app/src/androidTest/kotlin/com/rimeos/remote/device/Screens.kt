@@ -5,6 +5,7 @@ import com.rimeos.remote.core.PairedMachine
 import com.rimeos.remote.core.agent.AgentSession
 import com.rimeos.remote.core.agent.Hello
 import com.rimeos.remote.ui.ApprovalsUiState
+import com.rimeos.remote.ui.PickerUiState
 import com.rimeos.remote.ui.MachinesScreen
 import com.rimeos.remote.ui.UiState
 import com.rimeos.remote.ui.WorktreesUiState
@@ -92,8 +93,10 @@ object Screens {
                     defaultAgent = "claude",
                 ),
                 knownDirectories = listOf("/home/andre/Projects/rime"),
+                picker = PickerUiState(),
                 busy = null,
                 failure = null,
+                onLoad = {}, onProject = {},
                 onStart = { _, _, _, _, _, _ -> }, onBack = {}, onDismiss = {},
             )
         },

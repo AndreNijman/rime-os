@@ -307,7 +307,7 @@ class TerminalOnDeviceTest {
         )
         val status = term.status
         assertTrue("a live terminal names the machine it is on: $status", status is TerminalStatus.Live)
-        assertEquals("rime", (status as TerminalStatus.Live).machine)
+        assertEquals(Desktop.arg("machine"), (status as TerminalStatus.Live).machine)
     }
 
     private companion object {

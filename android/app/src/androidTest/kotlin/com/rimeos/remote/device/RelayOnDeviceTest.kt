@@ -80,7 +80,7 @@ class RelayOnDeviceTest {
                 nowMs = System.currentTimeMillis(),
             )
         }
-        assertEquals("the desktop names itself in the answer", "rime", machine.machine)
+        assertEquals("the desktop names itself in the answer", Desktop.arg("machine"), machine.machine)
         // The record carries the relay and no LAN hint, so every later
         // connection from this record goes the same way with no second trick.
         assertEquals(emptyList<String>(), machine.lan)
@@ -104,7 +104,7 @@ class RelayOnDeviceTest {
         val identity = MachineStore().identityFor(machine, Paired.PlainBox())
         val connected = runBlocking { Paired.service.open(machine, identity) }
         connected.session.use { session ->
-            assertEquals("rime", session.machine)
+            assertEquals(Desktop.arg("machine"), session.machine)
             // A frame all the way to the daemon and back, through the relay.
             // `measureRoundTrip` sends a `Ping` and waits for the answer, so a
             // number here is a byte that was encrypted on this phone, copied by

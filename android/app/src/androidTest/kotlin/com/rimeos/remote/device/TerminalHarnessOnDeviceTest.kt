@@ -56,13 +56,11 @@ import java.util.concurrent.CountDownLatch
  * useless here: it would start the reconnect backoff and fill the run with
  * `Lost` events that have nothing to do with what is being asserted.
  *
- * ## NOT RUN when this was written
+ * ## Run on a device
  *
- * No phone was attached to the machine this landed from, and the emulator on
- * it has never booted (four SIGSEGVs in SwiftShader's JIT, measured in round
- * 3). The JVM suites carry the proof that the two causes above are fixed; this
- * file is what turns that into a claim about Android, and it is unverified
- * until somebody runs `connectedDebugAndroidTest` with a phone plugged in.
+ * First run on a device on 2026-11-17 (Android 36 emulator): green, after
+ * fixing a terminal resize that dropped the prompt and a hidden field that was
+ * a stop for screen readers. TalkBack itself was not installed on that image.
  */
 @RunWith(AndroidJUnit4::class)
 @LargeTest
@@ -144,7 +142,10 @@ class TerminalHarnessOnDeviceTest {
         val term = show()
         term.terminal.feed("prompt$ ")
         compose.waitForIdle()
-        compose.onAllNodes(hasText("prompt$ ", substring = true) and hasClickAction())
+        // `prompt$` and not `prompt$ `: the reading trims each row's trailing
+        // blanks (a row is padded to the full width), so the space the shell
+        // printed is not in it.
+        compose.onAllNodes(hasText("prompt$", substring = true) and hasClickAction())
             .onFirst()
             .assertIsDisplayed()
     }

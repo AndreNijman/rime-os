@@ -59,6 +59,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
@@ -335,6 +336,14 @@ fun TerminalScreen(
                     },
                     modifier = Modifier
                         .size(1.dp)
+                        // Hidden from screen readers: the terminal node above is
+                        // what a reader activates, and its double tap focuses
+                        // this field. Visible to them, this one-dp field became
+                        // a 48 dp touch target centred on the screen's left edge
+                        // and clipped to 25 dp (ATF TouchTargetSizeCheck, on an
+                        // emulator, 2026-11-17), offering a reader an unlabelled
+                        // stop that does what the terminal already does.
+                        .semantics { hideFromAccessibility() }
                         .focusRequester(focus)
                         .onPreviewKeyEvent { event -> handleKey(event, controller, armed) { armed = Mods.NONE } },
                     // No autocorrect and no capitalisation: a terminal is not

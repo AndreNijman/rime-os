@@ -5151,6 +5151,12 @@ jobs:
       - name: Assemble the debug APK
         run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
 
+      # The instrumentation suite needs a device to RUN, but not to compile.
+      # It was never compiled here, so a changed screen signature broke it
+      # unnoticed until the first emulator run (2026-11-17).
+      - name: Compile the device suite
+        run: ./gradlew --no-daemon --stacktrace :app:assembleDebugAndroidTest
+
       - name: An APK exists
         run: |
           set -euo pipefail

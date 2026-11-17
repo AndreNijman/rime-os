@@ -52,7 +52,7 @@ class LanEndToEndTest {
     @Test
     fun a_phone_pairs_over_the_lan_and_the_desktop_records_it() {
         val machine = pair("pairing-test")
-        assertEquals("the desktop names itself in the answer", "rime", machine.machine)
+        assertEquals("the desktop names itself in the answer", Desktop.arg("machine"), machine.machine)
 
         val recorded = Desktop.device(machine.deviceId)
         assertNotNull(
@@ -213,7 +213,7 @@ class LanEndToEndTest {
         } catch (e: SessionRefused) {
             assertTrue(
                 "the refusal must not distinguish revoked from never-paired: ${e.message}",
-                e.message!!.contains("not paired, or it has been revoked"),
+                e.message!!.contains("unpaired or revoked"),
             )
         }
         val after = Desktop.device(machine.deviceId)

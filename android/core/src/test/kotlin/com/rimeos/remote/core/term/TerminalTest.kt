@@ -388,5 +388,41 @@ class TerminalTest {
         t.resize(8, 2)
         assertEquals("three\nfour", t.screen.visibleText())
         assertEquals(2, t.screen.scrollbackSize)
+        t.feed("!")
+        assertEquals("four!", t.screen.row(1).text().trimEnd())
+    }
+
+    @Test
+    fun `shrinking with the cursor near the top keeps the prompt where it is`() {
+        // A fresh shell, and the keyboard opening takes three rows.
+        val t = term(cols = 10, rows = 5)
+        t.feed("prompt$ ")
+        t.resize(10, 2)
+        assertEquals("prompt$", t.screen.row(0).text().trimEnd())
+        assertEquals(0, t.screen.scrollbackSize)
+        t.feed("ls")
+        assertEquals("prompt$ ls", t.screen.row(0).text().trimEnd())
+    }
+
+    @Test
+    fun `shrinking drops the blank rows below the cursor before the top`() {
+        val t = term(cols = 8, rows = 5)
+        t.feed("a\r\nb\r\nc")
+        t.resize(8, 2)
+        assertEquals("b\nc", t.screen.visibleText())
+        assertEquals(1, t.screen.scrollbackSize)
+        t.feed("!")
+        assertEquals("c!", t.screen.row(1).text().trimEnd())
+    }
+
+    @Test
+    fun `a written row below the cursor goes to history rather than being lost`() {
+        val t = term(cols = 8, rows = 4)
+        // Cursor back on the top row with text written below it, as a
+        // full-screen program leaves things.
+        t.feed("top\r\nmid\r\nlow${esc}[1;1H")
+        t.resize(8, 2)
+        assertEquals("mid\nlow", t.screen.visibleText())
+        assertEquals(1, t.screen.scrollbackSize)
     }
 }
