@@ -705,16 +705,19 @@ mod tests {
         assert!(!unopened.submit(job()));
     }
 
-    /// The real backend against a fake notification server on a PRIVATE bus.
-    /// Runs only when `RIME_REMOTED_FAKE_NOTIFY_BUS=1` says the session bus in
-    /// the environment is a throwaway one (see `tests/test-remoted-notify-busctl.sh`),
-    /// because it posts through whatever `DBUS_SESSION_BUS_ADDRESS` names.
+    /// The real backend against a fake notification server on a PRIVATE bus,
+    /// run by `tests/test-remoted-notify-busctl.sh` with `--ignored`. It posts
+    /// through whatever `DBUS_SESSION_BUS_ADDRESS` names, so it refuses to run
+    /// unless `RIME_REMOTED_FAKE_NOTIFY_BUS=1` says that bus is a throwaway one:
+    /// a failure, not a skip, so it never reads as a pass.
     #[test]
+    #[ignore = "posts on the session bus; run by tests/test-remoted-notify-busctl.sh on a private one"]
     fn the_real_backend_posts_replaces_and_closes_on_a_fake_server() {
-        if std::env::var_os("RIME_REMOTED_FAKE_NOTIFY_BUS").as_deref() != Some(std::ffi::OsStr::new("1")) {
-            eprintln!("skipped: RIME_REMOTED_FAKE_NOTIFY_BUS is not set");
-            return;
-        }
+        assert_eq!(
+            std::env::var_os("RIME_REMOTED_FAKE_NOTIFY_BUS").as_deref(),
+            Some(std::ffi::OsStr::new("1")),
+            "refusing to post on a session bus that is not a throwaway one: run tests/test-remoted-notify-busctl.sh"
+        );
         let (_, s) = shown("Pixel 8", &json!({"key": "k", "app": "Signal", "title": "-x <b>", "text": "a & b"})).unwrap();
         assert!(Real.owner().is_some_and(|o| o.starts_with(":1.")), "{:?}", Real.owner());
         let id = Real.notify(&s, 0).expect("posted");

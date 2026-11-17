@@ -4,7 +4,7 @@
 #
 #   tests/test-remoted-notify-busctl.sh <rime-remoted unit-test binary>
 #
-# The binary's own test refuses to run unless RIME_REMOTED_FAKE_NOTIFY_BUS=1,
+# The binary's own test is #[ignore]d and refuses to run unless RIME_REMOTED_FAKE_NOTIFY_BUS=1,
 # which only this script sets, inside dbus-run-session with a config that has
 # no service directories, so nothing on this machine can be activated or reached.
 set -euo pipefail
@@ -27,7 +27,7 @@ dbus-run-session --config-file="$work/bus.conf" -- bash -c '
   python3 "$here/fake-notify-server.py" "$work/log.jsonl" >"$work/ready" &
   server=$!
   read -r -t 10 line <"$work/ready" && [ "$line" = ready ] || { echo "FAIL: fake server never ready" >&2; exit 1; }
-  RIME_REMOTED_FAKE_NOTIFY_BUS=1 "$bin" --exact mirror::tests::the_real_backend_posts_replaces_and_closes_on_a_fake_server >"$work/out" 2>&1 \
+  RIME_REMOTED_FAKE_NOTIFY_BUS=1 "$bin" --ignored --exact mirror::tests::the_real_backend_posts_replaces_and_closes_on_a_fake_server >"$work/out" 2>&1 \
     || { cat "$work/out" >&2; kill "$server"; exit 1; }
   kill "$server"
 '

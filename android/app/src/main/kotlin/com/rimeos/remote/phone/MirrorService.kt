@@ -80,9 +80,10 @@ class MirrorService : NotificationListenerService() {
 
         /**
          * Whether the person granted this app notification access. Asked of
-         * NotificationManager (API 27+): `NotificationManagerCompat`'s package
-         * list reads a hidden Secure setting that an app targeting Android 12
-         * or later cannot read, so it always said no (found on the emulator).
+         * NotificationManager (API 27+), about this exact component. MEASURED
+         * on the Android 16 emulator: with access granted (and the listener
+         * bound), `NotificationManagerCompat.getEnabledListenerPackages` did
+         * not list this app, so the screen said access was off.
          */
         fun granted(context: Context): Boolean =
             context.getSystemService(NotificationManager::class.java).isNotificationListenerAccessGranted(component(context))

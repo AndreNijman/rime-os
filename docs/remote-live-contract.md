@@ -519,6 +519,12 @@ phone keeps only the newest state of each notification, sends nothing
 identical to what is shown, sends a removal only for one it sent, and posts at
 most 8 at once and one every 4 s, inside the computer's limit.
 
+**Known limit.** `busctl` takes the title and text as arguments, so for the
+few milliseconds of each call they are in that process's `/proc/<pid>/cmdline`,
+readable by other processes that can see it. The same text is on screen and
+held by the notification server, which any client of the session bus can ask
+for. Moving the backend to a D-Bus library would close it.
+
 **The lock screen.** The Shell's notification toasts are a layer surface, which
 `ext-session-lock` hides while the session is locked, and the lock screen
 shows no notifications, so a phone's messages are not readable on a locked
