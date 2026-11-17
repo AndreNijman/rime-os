@@ -1,0 +1,8 @@
+{
+ "jsonrpc": "2.0",
+ "id": 30,
+ "error": {
+  "code": -32009,
+  "message": "tools.approve changes state and needs a `request_id` (idempotency key)"
+ }
+}

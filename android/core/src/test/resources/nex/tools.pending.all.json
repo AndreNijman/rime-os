@@ -1,0 +1,24 @@
+{
+ "jsonrpc": "2.0",
+ "id": 11,
+ "result": [
+  {
+   "approval_id": "appr_01m7ksgp3rae83z2pk56kgqgfr",
+   "args": {
+    "command": "bash test.sh"
+   },
+   "expires_at": "2026-11-17T04:41:23.448Z",
+   "fingerprint": "5ac3c01ac2af7bf82066c27b5cbab065342643e17c3d8efd5f9d30fd40cb5705",
+   "native": false,
+   "reasons": [
+    "mode build default: Ask"
+   ],
+   "scopes": [
+    "process.exec"
+   ],
+   "session_id": "session_01m7ksgp2kcty4kfqfab4sm5jq",
+   "summary": "run `bash test.sh`",
+   "tool": "run_command"
+  }
+ ]
+}

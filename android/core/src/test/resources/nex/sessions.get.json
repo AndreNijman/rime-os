@@ -1,0 +1,257 @@
+{
+ "jsonrpc": "2.0",
+ "id": 20,
+ "result": {
+  "last_sequence": 22,
+  "messages": [
+   {
+    "message": {
+     "parts": [
+      {
+       "text": "add() subtracts; fix it and run the tests",
+       "type": "text"
+      }
+     ],
+     "role": "user"
+    },
+    "message_id": "msg_01m7ksgp3fenzksh4xcefqpkbz",
+    "seq": 0,
+    "turn_id": "turn_01m7ksgp3f3dy961bkmhzpy7b0"
+   },
+   {
+    "message": {
+     "parts": [
+      {
+       "text": "Fixing the operator.",
+       "type": "text"
+      },
+      {
+       "args": {
+        "new_text": "$1 + $2",
+        "old_text": "$1 - $2",
+        "path": "lib.sh"
+       },
+       "id": "toolu_s0_0",
+       "name": "edit_file",
+       "type": "tool_call"
+      }
+     ],
+     "role": "assistant"
+    },
+    "message_id": "msg_01m7ksgp3fq5m45y7btva32hbm",
+    "seq": 1,
+    "turn_id": "turn_01m7ksgp3f3dy961bkmhzpy7b0"
+   },
+   {
+    "message": {
+     "parts": [
+      {
+       "content": "edited lib.sh",
+       "id": "toolu_s0_0",
+       "is_error": false,
+       "type": "tool_result"
+      }
+     ],
+     "role": "tool"
+    },
+    "message_id": "msg_01m7ksgp3q13k7cv9kd7vfwmrg",
+    "seq": 2,
+    "turn_id": "turn_01m7ksgp3f3dy961bkmhzpy7b0"
+   },
+   {
+    "message": {
+     "parts": [
+      {
+       "text": "Running the tests.",
+       "type": "text"
+      },
+      {
+       "args": {
+        "command": "bash test.sh"
+       },
+       "id": "toolu_s1_0",
+       "name": "run_command",
+       "type": "tool_call"
+      }
+     ],
+     "role": "assistant"
+    },
+    "message_id": "msg_01m7ksgp3qq1wv6yhzcpq96bq1",
+    "seq": 3,
+    "turn_id": "turn_01m7ksgp3f3dy961bkmhzpy7b0"
+   },
+   {
+    "message": {
+     "parts": [
+      {
+       "content": "exit code: 0\n",
+       "id": "toolu_s1_0",
+       "is_error": false,
+       "type": "tool_result"
+      }
+     ],
+     "role": "tool"
+    },
+    "message_id": "msg_01m7ksgpbhe941hgn10m24fm4j",
+    "seq": 4,
+    "turn_id": "turn_01m7ksgp3f3dy961bkmhzpy7b0"
+   },
+   {
+    "message": {
+     "parts": [
+      {
+       "text": "Fixed add(); all tests pass.",
+       "type": "text"
+      }
+     ],
+     "role": "assistant"
+    },
+    "message_id": "msg_01m7ksgpbjvz1kkzn9n4g2rwge",
+    "seq": 5,
+    "turn_id": "turn_01m7ksgp3f3dy961bkmhzpy7b0"
+   }
+  ],
+  "pending_approvals": [],
+  "session": {
+   "created_at": "2026-11-17T03:41:23.411Z",
+   "data": {
+    "base_revision": "980cda7f732e506d8273b2de8cde429fe76553b7",
+    "mode": "build",
+    "model": "scripted-1",
+    "provider": "scripted",
+    "repo": true,
+    "root": "/tmp/nexcap-ebr3ub2l/ws",
+    "runtime": "nex",
+    "title": "Fix add()"
+   },
+   "id": "session_01m7ksgp2kcty4kfqfab4sm5jq",
+   "kind": "session",
+   "scope": "global",
+   "state": "idle",
+   "updated_at": "2026-11-17T03:41:23.707Z",
+   "version": 3
+  },
+  "tool_calls": [
+   {
+    "created_at": "2026-11-17T03:41:23.440Z",
+    "data": {
+     "args": {
+      "new_text": "$1 + $2",
+      "old_text": "$1 - $2",
+      "path": "lib.sh"
+     },
+     "changed_paths": [
+      "lib.sh"
+     ],
+     "decision": "allow",
+     "duration_ms": 0,
+     "exit_code": null,
+     "fingerprint": "17193688b7347552f3232142725a79c46e073d71ac7736568604c841e38e082f",
+     "log_artifact": "art_01m7ksgp3hjnna6eac3r4dcrkg",
+     "mode": "build",
+     "provider_call_id": "toolu_s0_0",
+     "reasons": [
+      "mode build default: Allow"
+     ],
+     "result": {
+      "content": "edited lib.sh",
+      "is_error": false
+     },
+     "scopes": [
+      "fs.write"
+     ],
+     "started_at": "2026-11-17T03:41:23.440Z",
+     "status": "exited",
+     "tool": "edit_file",
+     "tree": "bc4ce3d565f33033e2a6c87c85392801f5df46c78d4383e3a7dc9d6bf724d3b2",
+     "turn_id": "turn_01m7ksgp3f3dy961bkmhzpy7b0"
+    },
+    "id": "call_72bf788e2698ba0733efc66903",
+    "kind": "tool_call",
+    "scope": "session_01m7ksgp2kcty4kfqfab4sm5jq",
+    "state": "succeeded",
+    "updated_at": "2026-11-17T03:41:23.446Z",
+    "version": 3
+   },
+   {
+    "created_at": "2026-11-17T03:41:23.448Z",
+    "data": {
+     "approval_id": "appr_01m7ksgp3rae83z2pk56kgqgfr",
+     "args": {
+      "command": "bash test.sh"
+     },
+     "changed_paths": [],
+     "decision": "ask",
+     "duration_ms": 19,
+     "exit_code": 0,
+     "fingerprint": "5ac3c01ac2af7bf82066c27b5cbab065342643e17c3d8efd5f9d30fd40cb5705",
+     "log_artifact": "art_01m7ksgpb9vznhsv1qr193abc4",
+     "mode": "build",
+     "provider_call_id": "toolu_s1_0",
+     "reasons": [
+      "mode build default: Ask"
+     ],
+     "result": {
+      "content": "exit code: 0\n",
+      "is_error": false
+     },
+     "scopes": [
+      "process.exec"
+     ],
+     "started_at": "2026-11-17T03:41:23.669Z",
+     "status": "exited",
+     "tool": "run_command",
+     "tree": "bc4ce3d565f33033e2a6c87c85392801f5df46c78d4383e3a7dc9d6bf724d3b2",
+     "turn_id": "turn_01m7ksgp3f3dy961bkmhzpy7b0"
+    },
+    "id": "call_2011fa550d61bdab423ceb4482",
+    "kind": "tool_call",
+    "scope": "session_01m7ksgp2kcty4kfqfab4sm5jq",
+    "state": "succeeded",
+    "updated_at": "2026-11-17T03:41:23.697Z",
+    "version": 4
+   }
+  ],
+  "turns": [
+   {
+    "created_at": "2026-11-17T03:41:23.439Z",
+    "data": {
+     "finished_at": "2026-11-17T03:41:23.707Z",
+     "outcome": {
+      "outcome": "completed",
+      "steps": 3,
+      "text": "Fixed add(); all tests pass.",
+      "verification": {
+       "claim_without_evidence": false,
+       "claims_success": true,
+       "reason": "bash test.sh exited 0 on the current tree",
+       "status": "verified",
+       "tests": [
+        {
+         "artifact_verified": true,
+         "call_id": "call_2011fa550d61bdab423ceb4482",
+         "command": "bash test.sh",
+         "current_tree": true,
+         "exit_code": 0,
+         "log_artifact": "art_01m7ksgpb9vznhsv1qr193abc4",
+         "state": "succeeded",
+         "tree": "bc4ce3d565f33033e2a6c87c85392801f5df46c78d4383e3a7dc9d6bf724d3b2"
+        }
+       ],
+       "tree": "bc4ce3d565f33033e2a6c87c85392801f5df46c78d4383e3a7dc9d6bf724d3b2"
+      }
+     },
+     "started_at": "2026-11-17T03:41:23.439Z",
+     "started_seq": 1,
+     "user_message_id": "msg_01m7ksgp3fenzksh4xcefqpkbz"
+    },
+    "id": "turn_01m7ksgp3f3dy961bkmhzpy7b0",
+    "kind": "turn",
+    "scope": "session_01m7ksgp2kcty4kfqfab4sm5jq",
+    "state": "completed",
+    "updated_at": "2026-11-17T03:41:23.707Z",
+    "version": 2
+   }
+  ]
+ }
+}

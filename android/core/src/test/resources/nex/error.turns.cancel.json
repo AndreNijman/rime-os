@@ -1,0 +1,8 @@
+{
+ "jsonrpc": "2.0",
+ "id": 29,
+ "result": {
+  "cancelled": false,
+  "turn_id": null
+ }
+}

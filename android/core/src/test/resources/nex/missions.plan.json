@@ -1,0 +1,14 @@
+{
+ "jsonrpc": "2.0",
+ "id": 22,
+ "result": {
+  "base": "980cda7f732e506d8273b2de8cde429fe76553b7",
+  "mission_id": "mission_01m7ksgpke86ycczc6bxav5gmw",
+  "note": "the repository has uncommitted changes; they are not part of the mission, which branches from HEAD",
+  "order": [
+   "impl"
+  ],
+  "repo": "/tmp/nexcap-ebr3ub2l/ws",
+  "state": "planned"
+ }
+}

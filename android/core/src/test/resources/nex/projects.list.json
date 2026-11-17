@@ -1,0 +1,8 @@
+{
+ "jsonrpc": "2.0",
+ "id": 25,
+ "error": {
+  "code": -32601,
+  "message": "projects.list is in the protocol but not implemented in this build"
+ }
+}

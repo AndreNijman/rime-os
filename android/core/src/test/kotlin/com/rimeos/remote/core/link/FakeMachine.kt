@@ -79,6 +79,11 @@ class FakeMachine(
      */
     private val pingEveryMs: Long = 0,
     /**
+     * Close the channel once its bytes are sent, as a one-shot `nex` channel
+     * does: one answer, then `Close(channel, "")`.
+     */
+    private val closeAfterScrollback: Boolean = false,
+    /**
      * How an `Open` carrying a `receive` is answered.
      *
      * `receiving` takes the channel over the way `attached` does; anything
@@ -204,7 +209,9 @@ class FakeMachine(
                         }
                         val reply = attachReply(request)
                         toClient.put(Frame.Control(reply.toByteArray(Charsets.UTF_8)))
-                        if (!reply.contains("\"attached\"")) {
+                        // `streaming` is a nex channel's "open": not a PTY, but
+                        // bytes follow exactly as a scrollback does.
+                        if (!reply.contains("\"attached\"") && !reply.contains("\"streaming\"")) {
                             toClient.put(Frame.Close(frame.channel, ""))
                             continue
                         }
@@ -224,6 +231,10 @@ class FakeMachine(
                             dataFramesSent.incrementAndGet()
                             at = end
                             if (chunkDelayMs > 0) Thread.sleep(chunkDelayMs)
+                        }
+                        if (closeAfterScrollback && !drop) {
+                            toClient.put(Frame.Close(frame.channel, ""))
+                            continue
                         }
                         if (drop) {
                             // The plug. A dead socket, not a polite close: the

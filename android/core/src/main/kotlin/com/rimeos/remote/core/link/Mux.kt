@@ -88,6 +88,8 @@ class Mux(
         /** Non-null when this is an `Open`, so a `Close` can resolve it. */
         val channel: UInt?,
         val future: CompletableFuture<ByteArray>,
+        /** For an `Open`: which reply means the channel is now open. */
+        val accepted: ((ByteArray) -> Boolean)? = null,
     )
 
     private val lock = Any()
@@ -201,7 +203,7 @@ class Mux(
             // desktop sends the scrollback immediately after the reply: the
             // first `Data` frame can arrive before the caller has woken up.
             if (reply != null && head.channel != null) {
-                if (accepted(reply)) {
+                if ((head.accepted ?: accepted)(reply)) {
                     open.add(head.channel)
                 } else {
                     // Refused: the `Close("")` that follows belongs to nobody,
@@ -303,11 +305,20 @@ class Mux(
          * the pump thread — possibly before this call has returned.
          */
         channelListener: Listener? = null,
+        /**
+         * Which reply means this channel is open, when it is not a PTY.
+         *
+         * A per-channel rule rather than a looser default: a nex channel opens
+         * with `{"reply":"streaming"}`, and a terminal that took "streaming"
+         * for "attached" would draw whatever followed as terminal output.
+         * Null keeps this connection's own rule.
+         */
+        accepted: ((ByteArray) -> Boolean)? = null,
     ): ByteArray {
         require(id != Frame.CONTROL_CHANNEL) { "channel 0 is the control channel" }
         if (channelListener != null) synchronized(lock) { channelListeners[id] = channelListener }
         try {
-            val future = enqueueAndSend(id, Frame.Open(id, attach))
+            val future = enqueueAndSend(id, Frame.Open(id, attach), accepted)
             return await(future, timeoutMs)
         } catch (e: Throwable) {
             synchronized(lock) { channelListeners.remove(id) }
@@ -324,9 +335,13 @@ class Mux(
      * would resolve it — every reply after that one behind. (The connection
      * is almost certainly going anyway; this makes that the only outcome.)
      */
-    private fun enqueueAndSend(forChannel: UInt?, frame: Frame): CompletableFuture<ByteArray> {
+    private fun enqueueAndSend(
+        forChannel: UInt?,
+        frame: Frame,
+        accepted: ((ByteArray) -> Boolean)? = null,
+    ): CompletableFuture<ByteArray> {
         val future = CompletableFuture<ByteArray>()
-        val slot = Pending(forChannel, future)
+        val slot = Pending(forChannel, future, accepted)
         synchronized(sendOrder) {
             synchronized(lock) {
                 if (disconnected || closed) {

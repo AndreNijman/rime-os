@@ -1,0 +1,47 @@
+{
+ "jsonrpc": "2.0",
+ "id": 26,
+ "result": [
+  {
+   "api_key_env": null,
+   "available": true,
+   "base_url": null,
+   "credential": "none",
+   "error": null,
+   "id": "reviewer",
+   "kind": "scripted",
+   "local": false
+  },
+  {
+   "api_key_env": null,
+   "available": true,
+   "base_url": null,
+   "credential": "none",
+   "error": null,
+   "id": "scripted",
+   "kind": "scripted",
+   "local": false
+  },
+  {
+   "available": true,
+   "binary": "codex",
+   "disconnected": null,
+   "id": "codex-app-server",
+   "kind": "native"
+  },
+  {
+   "available": true,
+   "binary": "claude",
+   "disconnected": null,
+   "id": "claude-code",
+   "kind": "native"
+  },
+  {
+   "available": true,
+   "binary": "droid",
+   "disconnected": null,
+   "id": "droid",
+   "kind": "native"
+  }
+ ]
+}

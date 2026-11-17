@@ -1,0 +1,17 @@
+{
+ "jsonrpc": "2.0",
+ "id": 21,
+ "result": {
+  "additions": 1,
+  "base": "980cda7f732e506d8273b2de8cde429fe76553b7",
+  "deletions": 1,
+  "diff": "diff --git a/lib.sh b/lib.sh\nindex 60d55ba..8217b3c 100644\n--- a/lib.sh\n+++ b/lib.sh\n@@ -1 +1 @@\n-add() { echo $(( $1 - $2 )); }\n+add() { echo $(( $1 + $2 )); }\n",
+  "fallback_text": "1 file(s) changed, +1 -1 against 980cda7f732e",
+  "files": [
+   "lib.sh"
+  ],
+  "head": "980cda7f732e506d8273b2de8cde429fe76553b7",
+  "session_id": "session_01m7ksgp2kcty4kfqfab4sm5jq",
+  "tree": "bc4ce3d565f33033e2a6c87c85392801f5df46c78d4383e3a7dc9d6bf724d3b2"
+ }
+}

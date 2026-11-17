@@ -1,0 +1,26 @@
+{
+ "jsonrpc": "2.0",
+ "id": 12,
+ "result": [
+  {
+   "created_at": "2026-11-17T03:41:23.411Z",
+   "mode": "build",
+   "provider": "scripted",
+   "root": "/tmp/nexcap-ebr3ub2l/ws",
+   "runtime": "nex",
+   "session_id": "session_01m7ksgp2kcty4kfqfab4sm5jq",
+   "state": "running",
+   "title": "Fix add()"
+  },
+  {
+   "created_at": "2026-11-17T03:41:23.437Z",
+   "mode": "build",
+   "provider": "scripted",
+   "root": "/tmp/nexcap-ebr3ub2l/ws",
+   "runtime": "nex",
+   "session_id": "session_01m7ksgp3d3wmhxwts6mwy0g4c",
+   "state": "idle",
+   "title": "Second look"
+  }
+ ]
+}
