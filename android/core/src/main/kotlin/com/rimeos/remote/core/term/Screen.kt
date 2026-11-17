@@ -277,18 +277,33 @@ class Screen(cols: Int, rows: Int, val scrollbackLimit: Int = DEFAULT_SCROLLBACK
         scrollback.clear()
     }
 
-    fun resize(newCols: Int, newRows: Int, bg: Int) {
-        if (newCols == cols && newRows == rows) return
+    /**
+     * Resize the grid; returns how many lines left the TOP for history, so the
+     * caller can move its cursor with the text it was on.
+     *
+     * A shrink first drops blank rows below [cursorRow] and only then moves
+     * lines off the top. Taking every removed row off the top was right only
+     * with the cursor on the last row; with it near the top (a fresh shell, or
+     * after `clear`) the software keyboard opening pushed the prompt into
+     * history and left the cursor on a blank row (measured on an emulator,
+     * 2026-11-17). xterm does the same: the blank tail goes first.
+     */
+    fun resize(newCols: Int, newRows: Int, bg: Int, cursorRow: Int = rows - 1): Int {
+        if (newCols == cols && newRows == rows) return 0
+        var pushed = 0
         if (newCols != cols) {
             for (l in grid) l.resize(newCols)
             for (l in scrollback) l.resize(newCols)
             cols = newCols
         }
         if (newRows != rows) {
+            while (grid.size > newRows && grid.size - 1 > cursorRow && grid.last().text().isBlank()) {
+                grid.removeAt(grid.size - 1)
+            }
             while (grid.size > newRows) {
-                // Shrinking takes lines off the TOP and keeps them, which is
-                // what every terminal does: the cursor is usually near the
-                // bottom and the recent output is what the reader wants kept.
+                // What is left to remove comes off the TOP and is kept, so no
+                // written line is lost: the recent output stays on screen.
+                pushed++
                 val leaving = grid.removeAt(0)
                 scrollback.addLast(leaving)
                 while (scrollback.size > scrollbackLimit) {
@@ -303,6 +318,7 @@ class Screen(cols: Int, rows: Int, val scrollbackLimit: Int = DEFAULT_SCROLLBACK
             }
             rows = newRows
         }
+        return pushed
     }
 
     /**

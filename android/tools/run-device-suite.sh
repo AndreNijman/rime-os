@@ -376,7 +376,9 @@ export ANDROID_HOME=${ANDROID_HOME:-/var/tmp/android-sdk}
 "${A[@]}" install -r "$android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" >/dev/null
 
 brokeraddr=$(echo "$lan" | sed "s/:[0-9]*\$/:$brokerport/")
-args=(-e lan "$lan" -e broker "$brokeraddr")
+# The name rime-remoted answers with is the kernel hostname (`machine_name`
+# in rime-remoted's main.rs), so the tests are told it rather than assuming one.
+args=(-e lan "$lan" -e broker "$brokeraddr" -e machine "$(cat /proc/sys/kernel/hostname)")
 # Only when there is one. `am instrument -e relay ""` is not an empty argument:
 # it makes `am` print its usage and exit, so the whole run produces no verdict —
 # measured, and it cost a run to find. Absent instead, which `Desktop.arg` turns

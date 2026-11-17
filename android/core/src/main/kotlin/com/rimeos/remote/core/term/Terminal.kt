@@ -1016,8 +1016,12 @@ class Terminal(
     private fun resizeLocked(newCols: Int, newRows: Int) = synchronized(lock) {
         if (newCols <= 0 || newRows <= 0) return@synchronized
         if (newCols == cols && newRows == rows) return@synchronized
-        normal.resize(newCols, newRows, bg)
-        alternate.resize(newCols, newRows, bg)
+        // Only the screen being shown has the cursor; the other keeps the
+        // last-row rule, and its saved cursor is clamped as before.
+        val shownNormal = !onAlternate
+        val n = normal.resize(newCols, newRows, bg, if (shownNormal) cursorRow else normal.rows - 1)
+        val a = alternate.resize(newCols, newRows, bg, if (shownNormal) alternate.rows - 1 else cursorRow)
+        cursorRow -= if (shownNormal) n else a
         tabs = BooleanArray(newCols) { it % TAB_WIDTH == 0 }
         scrollTop = 0
         scrollBottom = newRows - 1

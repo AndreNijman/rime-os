@@ -270,26 +270,36 @@ silence. That limit is a choice: the buffer stays there to read, and an
 announcer that read out each repaint of Claude Code's interface would make the
 app unusable with TalkBack on.
 
-## What has NOT been proved here
+## What the device suite proves, and what it does not
 
-No device is attached to this project, so no test executes anything below the
-download:
+`android/tools/run-device-suite.sh` ran green, 39 of 39, twice in a row on
+2026-11-17. It ran on an Android 36 emulator (google_apis x86_64, KVM, host GPU)
+against a throwaway `rime-agentd` + `rime-remoted` built from the same tree,
+with the relay served locally by `wrangler dev` in `relay/`
+(`RIME_DEVICE_SUITE_RELAY=ws://<lan-ip>:8787`), never the deployed one. Pairing
+needs a real logind session, so the run goes through `tests/in-login-session.sh`
+(the script prints the exact line when it is started from anywhere else).
 
-* The `PackageInstaller` session, the permission, and the install prompt are
-  Android API glue. The half that can be quietly wrong (which release to read,
-  whether a build is newer, whether the bytes are the published ones) is in
-  `:core` and is tested on a JVM. The glue is deliberately thin so the untested
-  part stays small.
-* No release has ever been cut, and nobody has dispatched `release-android.yml`,
-  even as a dry run: its run list is empty (checked 2026-09-28). Local tests
-  exercise the workflow as far as a machine without the signing secrets can go;
-  `dry_run` exists so the rest can be proved without publishing.
-* JVM tests assert the terminal's semantics on the values handed to Android (a
-  `SemanticsPropertyReceiver` is one method, so a JVM test implements it and
-  reads back what was set), and not on what TalkBack says with them.
-  `TerminalHarnessOnDeviceTest` asserts that the standard Compose harness can
-  host the screen and that the grid reaches the tree on a real phone. Nobody has
-  run it: no device, and the emulator on this machine has never booted.
+That run found and fixed four things the JVM suites could not:
+
+* the suite no longer compiled (a screen signature changed under it); CI now
+  compiles it on every PR;
+* shrinking the terminal (the keyboard opening) pushed a prompt near the top
+  into history and left the cursor on a blank row;
+* the hidden keyboard field was a 25 dp unlabelled stop for screen readers;
+* the tests assumed the desktop's hostname; the runner now passes it.
+
+Still not proved here:
+
+* **TalkBack.** The google_apis image has no TalkBack, so the run says
+  "TalkBack: not installed" and the screen-reader assertions run against the
+  semantics tree only. A phone with TalkBack (GrapheneOS ships it) closes this.
+* **A real phone on real Wi-Fi and mobile data.** The emulator's NAT is one
+  network path.
+* **The updater's install step.** The `PackageInstaller` session, the permission
+  and the install prompt are Android API glue. The half that can be quietly
+  wrong (which release to read, whether a build is newer, whether the bytes are
+  the published ones) is in `:core` and tested on a JVM.
 
 ## The signing key
 
