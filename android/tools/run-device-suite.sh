@@ -28,7 +28,10 @@
 # The SMS tests (MessagesOnDeviceTest) run only on an emulator: they inject a
 # message with `adb emu sms send` and send real SMS to emulator numbers. On any
 # other serial they are left out BY NAME and the verdict says so, and the
-# broker's `emu_sms` verb refuses a serial that is not `emulator-*`.
+# broker's `emu_sms` verb refuses a serial that is not `emulator-*`. The call
+# tests (CallsOnDeviceTest) are the same: they ring the emulator with `adb emu
+# gsm call` from an emulator number and dial emulator numbers only, so they
+# are left out by name elsewhere and `emu_gsm` refuses a serial that is not one.
 #
 # A device is required and its absence is a FAILURE, not a skip: a suite that
 # reports success when it could not look is the defect this program has
@@ -542,6 +545,37 @@ def emu_sms(number, text):
         return json.dumps({"reply": "error", "message": (r.stdout + r.stderr).strip()[:300]})
     return json.dumps({"reply": "ok"})
 
+EMU_GSM_ACTIONS = {"call", "accept", "cancel", "busy", "hold"}
+
+def emu_gsm(action, number):
+    """A call on the EMULATOR's modem, through its console (`adb emu gsm
+    <action> <number>`): an incoming call from [number] (call), or that call
+    answered, ended, refused busy or held by the far end. Refused unless this
+    run's serial is an emulator and the number is an emulator number. argv,
+    never a shell string."""
+    serial = os.environ.get("RIME_SUITE_SERIAL", "")
+    adb = os.environ.get("RIME_SUITE_ADB", "")
+    if not serial.startswith("emulator-") or not adb:
+        return json.dumps({"reply": "error", "message": "emu_gsm runs only on an emulator"})
+    if action not in EMU_GSM_ACTIONS:
+        return json.dumps({"reply": "error", "message": "emu_gsm takes call, accept, cancel, busy or hold"})
+    if number not in EMU_NUMBERS:
+        return json.dumps({"reply": "error", "message": "emu_gsm takes emulator numbers only"})
+    r = subprocess.run([adb, "-s", serial, "emu", "gsm", action, number], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0 or "OK" not in r.stdout:
+        return json.dumps({"reply": "error", "message": (r.stdout + r.stderr).strip()[:300]})
+    return json.dumps({"reply": "ok"})
+
+def notify_action(nid, key):
+    """The stub notification server's ActionInvoked: the person pressed the
+    button [key] on notification [nid]. A real server closes it after, which
+    the test sends itself with notify_closed."""
+    if not isinstance(nid, int) or not isinstance(key, str):
+        return json.dumps({"reply": "error", "message": "id must be a number and action a string"})
+    with open(os.path.join(ROOT, "notify", "closed.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"id": nid, "action": key}) + "\n")
+    return json.dumps({"reply": "ok"})
+
 def notify_closed(nid, reason):
     """The stub notification server's NotificationClosed: one complete line
     rime-remoted's stub reads, as if the person (2) or a timeout (1) closed it."""
@@ -632,6 +666,10 @@ class H(socketserver.StreamRequestHandler):
                 out = focus_file()
             elif cmd == "emu_sms":
                 out = emu_sms(str(req.get("number")), req.get("text"))
+            elif cmd == "emu_gsm":
+                out = emu_gsm(str(req.get("action")), str(req.get("number")))
+            elif cmd == "notify_action":
+                out = notify_action(req.get("id"), req.get("action"))
             elif cmd == "notify_closed":
                 out = notify_closed(req.get("id"), req.get("reason"))
             elif cmd == "notify_reply":
@@ -768,7 +806,7 @@ fi
 # SMS only on an emulator (see the header): never a real phone's messages or number.
 case $serial in
   emulator-*) ;;
-  *) skip+=(com.rimeos.remote.device.MessagesOnDeviceTest) ;;
+  *) skip+=(com.rimeos.remote.device.MessagesOnDeviceTest com.rimeos.remote.device.CallsOnDeviceTest) ;;
 esac
 if [ ${#skip[@]} -gt 0 ]; then
   args+=(-e notClass "$(IFS=,; echo "${skip[*]}")")
@@ -828,5 +866,5 @@ echo "DEVICE SUITE: $count tests passed on $serial"
 [ -n "$nexroot" ] || echo "DEVICE SUITE: nex NOT tested (no RIME_DEVICE_SUITE_NEXD)"
 case $serial in
   emulator-*) ;;
-  *) echo "DEVICE SUITE: SMS NOT tested (not an emulator)" ;;
+  *) echo "DEVICE SUITE: SMS and calls NOT tested (not an emulator)" ;;
 esac
