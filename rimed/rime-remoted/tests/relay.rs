@@ -497,6 +497,9 @@ struct Harness {
     remoted_socket: PathBuf,
     port: u16,
     relay: Relay,
+    /// Whether the daemon waits on `relay` (false when `start_on` pointed it
+    /// at another harness's, which that harness then sees).
+    on_own_relay: bool,
 }
 
 impl Drop for Harness {
@@ -511,9 +514,18 @@ impl Drop for Harness {
 
 impl Harness {
     fn start(tag: &str) -> Option<Harness> {
+        Harness::start_on(tag, None)
+    }
+
+    /// [`Harness::start`], with the daemon pointed at `relay_url` instead of
+    /// its own relay double (which still starts, unused): two computers that
+    /// share one relay.
+    fn start_on(tag: &str, relay_url: Option<&str>) -> Option<Harness> {
         // The relay comes up first, so the daemon's very first dial succeeds
         // and the suite is not measuring the backoff.
         let relay = Relay::start();
+        let on_own_relay = relay_url.is_none();
+        let relay_url = relay_url.map(str::to_string).unwrap_or_else(|| relay.url());
 
         let root = std::env::temp_dir().join(format!(
             "rime-relay-e2e-{}-{tag}-{}",
@@ -544,7 +556,7 @@ impl Harness {
                 "--port",
                 "0",
                 "--relay",
-                &relay.url(),
+                &relay_url,
                 "--allow-foreground",
                 "--handshake-timeout-ms",
                 "1000",
@@ -569,6 +581,7 @@ impl Harness {
             remoted_socket: runtime.join("rime-remoted").join("control.sock"),
             port: 0,
             relay,
+            on_own_relay,
         };
         let within = Duration::from_secs(20);
         match common::remoted_port(&mut h.remoted, &h.remoted_socket, &log, within) {
@@ -590,6 +603,10 @@ impl Harness {
             // And the relay leg: the desktop has to have dialled out and be
             // waiting before a device can be joined to it. Waiting for this
             // rather than sleeping is what makes the suite deterministic.
+            if up && !self.on_own_relay {
+                // Another harness's relay: that harness waits for it.
+                return true;
+            }
             if up {
                 let parked = if self.relay.is_external() {
                     self.relay.host_is_parked(&self.rendezvous())
@@ -1463,18 +1480,20 @@ fn wait_for(
 
 /// Two computers paired over the LAN reach each other through the relay when
 /// asked (docs/remote-live-contract.md §2.15, "Dialling"): the dialler joins
-/// the other computer's rendezvous on the relay that computer named, as a
-/// guest, and runs the same session it would over the LAN.
+/// the other computer's rendezvous on its OWN relay (both are configured with
+/// A's here), as a guest, and runs the same session it would over the LAN.
 #[test]
 fn two_paired_computers_reach_each_other_through_the_relay() {
     let Some(a) = Harness::start("computer-a") else {
         eprintln!("SKIP: the daemons did not come up in this environment");
         return;
     };
-    let Some(b) = Harness::start("computer-b") else {
+    let Some(b) = Harness::start_on("computer-b", Some(&a.relay.url())) else {
         eprintln!("SKIP: the daemons did not come up in this environment");
         return;
     };
+    // B waits on A's relay, so A's relay holds both computers' hosts.
+    assert!(a.hosts_seen(2), "B never waited on the relay it shares with A");
 
     // "Add a computer" on A, held open on this connection.
     let stream = UnixStream::connect(&a.remoted_socket).expect("connect");

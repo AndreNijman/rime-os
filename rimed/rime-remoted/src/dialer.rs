@@ -8,9 +8,15 @@
 //!
 //! Where: each stored address in turn (the one the owner typed first, then
 //! the ones the computer listed, then wherever it last answered), then the
-//! relay as a guest, at the other computer's rendezvous on the relay it said
-//! it uses (or this computer's own relay). mDNS is not browsed: a `.local`
-//! name the owner typed resolves through the system resolver like any other.
+//! relay as a guest, at the other computer's rendezvous on **this computer's
+//! own relay**. The relay the other computer named at pairing is kept for
+//! the listing and never dialled: a paired computer must not be able to
+//! choose where this one connects (and what it reveals there). Two computers
+//! meet on the relay only when both are configured with the same one. The
+//! addresses it listed were checked at pairing (`About::checked`: no
+//! loopback, unspecified, multicast, broadcast or port 0). mDNS is not
+//! browsed: a `.local` name the owner typed resolves through the system
+//! resolver like any other.
 //!
 //! One request, one connection, no held link: presence (a held link and its
 //! power cost) is the next step and is not here.
@@ -96,8 +102,8 @@ pub fn open(state: &State, computer: &Device, via: Via) -> Result<Link, String> 
         }
     }
     if via != Via::Lan {
-        match computer.relay.clone().or_else(|| state.relay.clone()) {
-            Some(url) => match relay_pipe(&url, &key) {
+        match relay_for(state, computer) {
+            Ok(url) => match relay_pipe(&url, &key) {
                 Ok(pipe) => match handshake(Box::new(pipe), &secret, &key) {
                     Ok((stream, channel)) => {
                         return Ok(Link {
@@ -111,10 +117,26 @@ pub fn open(state: &State, computer: &Device, via: Via) -> Result<Link, String> 
                 },
                 Err(e) => why.push(format!("relay: {e}")),
             },
-            None => why.push("no relay is configured on either computer".into()),
+            Err(e) => why.push(e),
         }
     }
     Err(format!("could not reach '{}': {}", computer.name, why.join("; ")))
+}
+
+/// The relay a dial to `computer` may use: this computer's own, never one
+/// the other computer named. When they differ, the error says so, since the
+/// other computer is then not waiting where this one looks.
+fn relay_for(state: &State, computer: &Device) -> Result<String, String> {
+    match (&state.relay, &computer.relay) {
+        (Some(own), _) => Ok(own.clone()),
+        (None, Some(theirs)) => Err(format!(
+            "this computer has no relay configured; '{}' waits on {}, which is not dialled because a paired \
+             computer does not choose where this one connects",
+            printable(&computer.name),
+            printable(theirs)
+        )),
+        (None, None) => Err("no relay is configured on this computer".into()),
+    }
 }
 
 /// Whether a dial to this key is refused: it is this computer's own.
@@ -334,6 +356,78 @@ mod tests {
         let r = open(&state, &me, Via::Lan);
         assert!(r.as_ref().err().is_some_and(|e| e.contains("own Rime Remote key")), "{:?}", r.err());
         assert!(listener.accept().is_err(), "the copied key was dialled");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A listener that counts connections and hangs up on each at once:
+    /// what a relay the other computer named would see if this one dialled
+    /// it. Hanging up keeps a dial that reached it from waiting for a relay
+    /// that never answers.
+    fn counting() -> (Arc<std::sync::atomic::AtomicUsize>, String) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("ws://{}", l.local_addr().expect("addr"));
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(s);
+            }
+        });
+        (count, url)
+    }
+
+    fn a_computer(state: &State, relay: Option<String>) -> Device {
+        let other = rime_remote_core::identity::Identity::generate().expect("identity");
+        assert_ne!(other.public_bytes(), state.identity.public_bytes());
+        Device {
+            id: Device::id_for(&other.public_key()),
+            name: "desk".into(),
+            public_key: other.public_key(),
+            paired_ms: 0,
+            last_seen_ms: None,
+            revoked_ms: None,
+            requires_user_verification: false,
+            last_path: None,
+            companion_key: None,
+            retired_companion_keys: Vec::new(),
+            addresses: Vec::new(),
+            relay,
+        }
+    }
+
+    #[test]
+    fn the_relay_another_computer_named_is_never_dialled() {
+        // No relay here: the one the other computer named is refused, and
+        // says why, without a connection to it.
+        let (state, dir) = crate::serve::tests::a_state("dial-their-relay");
+        let (theirs, url) = counting();
+        let r = open(&state, &a_computer(&state, Some(url.clone())), Via::Relay);
+        assert!(r.as_ref().err().is_some_and(|e| e.contains("not dialled")), "{:?}", r.err());
+        assert_eq!(theirs.load(std::sync::atomic::Ordering::SeqCst), 0, "the relay the other computer named was dialled");
+        let _ = std::fs::remove_dir_all(dir);
+
+        // A relay here: that one is dialled, and still never theirs.
+        let own = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let own_url = format!("ws://{}", own.local_addr().expect("addr"));
+        let dir = std::env::temp_dir().join(format!("rime-dial-own-relay-{}-{}", std::process::id(), rime_remote_core::now_ms()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let state = State::new(
+            rime_remote_core::identity::Identity::generate().expect("identity"),
+            "test-machine".into(),
+            47717,
+            std::net::IpAddr::from([0u8; 16]),
+            Some(own_url),
+            dir.join("devices.json"),
+            crate::serve::PING_INTERVAL,
+        )
+        .expect("state");
+        // Accept and hang up, so the dial fails at once rather than waiting.
+        let reached = std::thread::spawn(move || own.accept().is_ok());
+        let r = open(&state, &a_computer(&state, Some(url)), Via::Relay);
+        assert!(r.is_err(), "a hung-up relay answered");
+        assert!(reached.join().expect("thread"), "this computer's own relay was not dialled");
+        assert_eq!(theirs.load(std::sync::atomic::Ordering::SeqCst), 0, "the relay the other computer named was dialled");
         let _ = std::fs::remove_dir_all(dir);
     }
 

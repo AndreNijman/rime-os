@@ -167,9 +167,12 @@ fn still_open(slot: &Mutex<Option<Showing>>, id: u64) -> bool {
     lock(slot).as_ref().is_some_and(|s| s.id == id)
 }
 
-/// What this computer tells another about itself.
+/// What this computer tells another about itself: only addresses the other
+/// side's [`About::checked`] accepts, since it refuses a whole list over one
+/// bad entry.
 fn own_about(state: &State) -> About {
     let mut lan = state.lan_addresses();
+    lan.retain(|a| a.parse().is_ok_and(|a| computer::dialable(&a)));
     lan.truncate(MAX_ADDRESSES);
     About {
         name: state.machine.clone(),
@@ -564,6 +567,14 @@ mod tests {
         for bad in ["", "a b", "x\ny"] {
             assert!(typed_address(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn what_this_computer_says_about_itself_passes_the_other_sides_check() {
+        let (state, dir) = crate::serve::tests::a_state("own-about");
+        let about = own_about(&state);
+        assert!(about.clone().checked().is_ok(), "{about:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

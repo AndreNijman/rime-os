@@ -67,6 +67,35 @@ pub const MAX_ADDRESSES: usize = 8;
 const MAX_ADDRESS: usize = 64;
 const MAX_RELAY: usize = 512;
 
+/// Whether an address another computer listed may be dialled.
+///
+/// A paired computer names where it can be reached, and this computer dials
+/// those addresses later with its own key; so a peer must not be able to
+/// point that dial at this machine itself or at nothing. Refused: loopback,
+/// the unspecified address, multicast, the IPv4 broadcast address, IPv6
+/// link-local (unusable without the receiver's scope id, and never
+/// advertised by `rime-remoted`), and port 0. IPv4-mapped IPv6 is judged as
+/// the IPv4 address it carries.
+///
+/// IPv4 link-local (`169.254.0.0/16`) is allowed: it is how two computers on
+/// a bare cable reach each other, `rime-remoted` advertises it, and what is
+/// dialled is one `Noise_IK` message to a key proved at pairing, which an
+/// HTTP service on such an address cannot act on. Refusing it here would
+/// make [`About::checked`], which refuses rather than trims, reject a real
+/// computer's own account of itself.
+pub fn dialable(addr: &std::net::SocketAddr) -> bool {
+    use std::net::IpAddr;
+    if addr.port() == 0 {
+        return false;
+    }
+    match addr.ip().to_canonical() {
+        IpAddr::V4(v4) => !(v4.is_loopback() || v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast()),
+        IpAddr::V6(v6) => {
+            !(v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || v6.segments()[0] & 0xffc0 == 0xfe80)
+        }
+    }
+}
+
 /// The showing side's code, and until when it is accepted.
 ///
 /// Held in memory by `rime-remoted` and never written down: a code that
@@ -232,12 +261,22 @@ impl About {
             )));
         }
         for a in &self.lan {
-            if a.len() > MAX_ADDRESS || a.parse::<std::net::SocketAddr>().is_err() {
+            let parsed = if a.len() > MAX_ADDRESS { None } else { a.parse::<std::net::SocketAddr>().ok() };
+            let Some(parsed) = parsed else {
                 return Err(PairError::Protocol(format!(
                     "the other computer listed {:?}, which is not an address and port",
                     a.escape_debug().to_string()
                 )));
+            };
+            if !dialable(&parsed) {
+                return Err(PairError::Protocol(format!(
+                    "the other computer listed {parsed}, which is not an address another computer can be \
+                     dialled at (loopback, unspecified, multicast, broadcast, IPv6 link-local or port 0)"
+                )));
             }
+        }
+        if self.port == Some(0) {
+            return Err(PairError::Protocol("the other computer said it listens on port 0".into()));
         }
         if let Some(r) = &self.relay {
             if r.len() > MAX_RELAY || crate::relay::Endpoint::parse(r).is_err() {
@@ -771,8 +810,37 @@ mod tests {
             About { name: "x".into(), lan: vec!["not an address".into()], relay: None, port: None },
             About { name: "x".into(), lan: vec!["10.0.0.1:1".into(); MAX_ADDRESSES + 1], relay: None, port: None },
             About { name: "x".into(), lan: vec![], relay: Some("ftp://nope".into()), port: None },
+            About { name: "x".into(), lan: vec![], relay: None, port: Some(0) },
         ] {
             assert!(bad.clone().checked().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_computer_may_not_list_an_address_that_points_the_dial_at_nothing_or_at_this_machine() {
+        let listing = |a: &str| About { name: "x".into(), lan: vec![a.into()], relay: None, port: Some(7717) };
+        for bad in [
+            "127.0.0.1:7717",
+            "127.8.9.10:22",
+            "[::1]:7717",
+            "[::ffff:127.0.0.1]:7717",
+            "0.0.0.0:7717",
+            "[::]:7717",
+            "224.0.0.251:5353",
+            "[ff02::1]:7717",
+            "255.255.255.255:7717",
+            "[fe80::1]:7717",
+            "10.0.0.2:0",
+        ] {
+            let r = listing(bad).checked();
+            assert!(
+                matches!(&r, Err(PairError::Protocol(m)) if m.contains("dialled at")),
+                "{bad} was accepted: {r:?}"
+            );
+            assert!(!dialable(&bad.parse().expect("parses")), "{bad}");
+        }
+        for good in ["10.0.0.2:7717", "192.168.1.9:47717", "169.254.10.20:7717", "[fd00::5]:7717", "[2001:db8::1]:1"] {
+            assert!(listing(good).checked().is_ok(), "{good} was refused");
         }
     }
 }
