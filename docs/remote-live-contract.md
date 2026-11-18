@@ -574,8 +574,8 @@ usually post the notification again after a reply ("You: …"); the phone does
 not send the first such update of that key within 5 s to the machine that
 replied, so the reply does not pop up there again. Every other machine it
 sent that key to gets `phone_notification_removed` for it, and that same first
-update within 5 s is not sent to them either: answered on one machine, it is
-not news on the others. The phone lists `"reply"`
+update within 5 s, or a repeat of it, is not sent to them either: answered on
+one machine, it is not news on the others. The phone lists `"reply"`
 while it holds notification access and the switch is on.
 
 **What the phone sends.** Nothing until the person grants notification access
