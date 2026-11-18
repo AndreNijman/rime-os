@@ -73,6 +73,8 @@ use crate::state::{Live, State};
 /// be steered towards.
 pub const HELLO_PAIR: u8 = b'P';
 pub const HELLO_SESSION: u8 = b'S';
+/// Another Rime computer pairing with a code (`computers.rs`).
+pub const HELLO_COMPUTER: u8 = b'C';
 
 /// How often the desktop measures an open connection.
 ///
@@ -192,6 +194,7 @@ pub fn connection(mut socket: TcpStream, state: Arc<State>, agentd: std::path::P
     let outcome = match hello[0] {
         HELLO_PAIR => pair(&mut socket, &state),
         HELLO_SESSION => session(socket.try_clone().ok(), socket, &state, &agentd),
+        HELLO_COMPUTER => crate::computers::accept(&mut socket, &state, peer),
         other => Err(ServeError::Protocol(format!(
             "a connection opened with {other:#04x}, which is neither a pairing nor a session"
         ))),
@@ -282,6 +285,12 @@ fn session(
     let device_key = hs
         .remote_static()
         .ok_or_else(|| ServeError::Handshake("the device sent no static key".into()))?;
+    // This machine's own key, presented by somebody else: a copied home.
+    // Refused before the store is asked, whatever it holds, and with the same
+    // words as any key this machine does not accept.
+    if refuses_own_key(state, &device_key) {
+        return Err(ServeError::NotPaired);
+    }
 
     // Identified, then authorised, in that order and both before a frame is
     // read. The lookup is on the full key: an id is a prefix and prefixes are
@@ -368,14 +377,25 @@ fn session(
     result
 }
 
+/// Whether a key presented to the session responder is this machine's own.
+fn refuses_own_key(state: &State, key: &[u8; 32]) -> bool {
+    *key == state.identity.public_bytes()
+}
+
 /// Whether a session of this scope may open a channel with this request. A
 /// full session may open any (what is behind it decides); a companion session
 /// only a request the allow list names AND the phone routers' own predicates
-/// claim, so nothing it opens can fall through to nex or `rime-agentd`.
+/// claim, so nothing it opens can fall through to nex or `rime-agentd`; a
+/// peer session (another computer) none at all.
 fn may_open(scope: Scope, request: &[u8]) -> bool {
-    scope == Scope::Full
-        || (crate::companion::channel_allowed(scope, request)
-            && (crate::phone::is_channel(request) || crate::phone::is_take(request)))
+    match scope {
+        Scope::Full => true,
+        Scope::Peer => false,
+        Scope::Companion => {
+            crate::companion::channel_allowed(scope, request)
+                && (crate::phone::is_channel(request) || crate::phone::is_take(request))
+        }
+    }
 }
 
 /// Put this connection on the live list, then ask the store again whether
@@ -985,6 +1005,11 @@ impl Worker {
 /// The reply to one control line from a session of this scope; see
 /// [`Worker::control`].
 fn reply_to(state: &State, agentd: &Path, device_id: &str, scope: Scope, connection: u64, line: &[u8]) -> Vec<u8> {
+    // Another computer first, and only: its own short list, answered here,
+    // never routed and never forwarded. Membership is not authority.
+    if scope == Scope::Peer {
+        return crate::computers::peer_reply(state, line);
+    }
     let cmd = crate::companion::verb_of(line);
     if !crate::companion::allowed(scope, cmd.as_deref()) {
         return crate::companion::refusal(cmd.as_deref().unwrap_or("that request"));
@@ -1343,7 +1368,7 @@ impl Drop for DaemonChannel {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1353,6 +1378,7 @@ mod tests {
         // look up.
         assert_ne!(HELLO_PAIR, HELLO_SESSION);
         assert!(HELLO_PAIR.is_ascii_graphic() && HELLO_SESSION.is_ascii_graphic());
+        assert!(HELLO_COMPUTER.is_ascii_graphic() && ![HELLO_PAIR, HELLO_SESSION].contains(&HELLO_COMPUTER));
     }
 
     #[test]
@@ -1402,7 +1428,7 @@ mod tests {
         assert!(!reply.contains(&b'\n'));
     }
 
-    fn a_state(tag: &str) -> (Arc<State>, std::path::PathBuf) {
+    pub(crate) fn a_state(tag: &str) -> (Arc<State>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "rime-serve-state-{}-{tag}-{}",
             std::process::id(),
@@ -1892,4 +1918,111 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// Every control verb `rime remote` sends this daemon's own socket: none
+    /// of them may be reached from a peer session either.
+    const CONTROL_VERBS: [&str; 10] = [
+        "pair",
+        "revoke",
+        "devices",
+        "status",
+        "computer_show",
+        "computer_add",
+        "computer_remove",
+        "computer_ping",
+        "computers",
+        "send",
+    ];
+
+    #[test]
+    fn a_peer_line_is_refused_before_routing_and_never_reaches_rime_agentd() {
+        let (state, dir) = a_state("peer-gate");
+        let (agentd, count) = counting_agentd(&dir);
+        let refused = every_reserved_verb()
+            .into_iter()
+            .chain(CONTROL_VERBS)
+            .filter(|v| !crate::computers::PEER_VERBS.contains(v))
+            .map(|v| format!(r#"{{"cmd":"{v}"}}"#))
+            .chain(AGENTD_AND_GARBAGE.iter().map(|l| l.to_string()))
+            .collect::<Vec<_>>();
+        assert!(refused.len() >= 60, "the candidate list shrank: {}", refused.len());
+        for line in &refused {
+            let r = reply_to(&state, &agentd, "desk", Scope::Peer, 0, line.as_bytes());
+            let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
+            assert_eq!(v["kind"], crate::computers::REFUSAL, "{line}: {v}");
+            assert!(
+                v["message"].as_str().unwrap_or_default().contains("between paired computers"),
+                "{line} was not answered by the peer list: {v}"
+            );
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 0, "a peer line reached rime-agentd");
+        // The two verbs it may send are answered here, in the peer's words.
+        let r = reply_to(&state, &agentd, "desk", Scope::Peer, 0, br#"{"cmd":"remote_hello"}"#);
+        let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
+        assert_eq!((v["reply"].as_str(), v["scope"].as_str()), (Some("remote"), Some("peer")), "{v}");
+        assert!(v.get("lan").is_none(), "a peer's hello carries the phone hello's addresses: {v}");
+        let r = reply_to(&state, &agentd, "desk", Scope::Peer, 0, br#"{"cmd":"peer_hello"}"#);
+        let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
+        assert_eq!(v["reply"], "peer_hello", "{v}");
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+        // The control arm: a full session on the same daemon is reached.
+        let r = reply_to(&state, &agentd, "pixel-8", Scope::Full, 0, br#"{"cmd":"list"}"#);
+        let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
+        assert_eq!(v["reply"], "sessions", "{v}");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_peer_opens_no_channel_and_the_companion_list_refuses_it_too() {
+        let mut names: Vec<&str> = every_reserved_verb();
+        names.extend(crate::companion::ALLOWED_CHANNELS);
+        names.extend([crate::phone::CHANNEL, crate::phone::TAKE, crate::photos::UPLOAD, "attach", "receive", "save_file"]);
+        let mut requests: Vec<Vec<u8>> =
+            names.iter().map(|n| format!(r#"{{"cmd":"{n}","id":1,"cols":80,"rows":24}}"#).into_bytes()).collect();
+        requests.extend(AGENTD_AND_GARBAGE.iter().map(|l| l.as_bytes().to_vec()));
+        for r in &requests {
+            let shown = String::from_utf8_lossy(r);
+            assert!(!may_open(Scope::Peer, r), "a peer opens {shown}");
+            // The second lock, for a path that forgot the first.
+            assert!(!crate::companion::channel_allowed(Scope::Peer, r), "{shown}");
+            assert!(!crate::companion::allowed(Scope::Peer, crate::companion::verb_of(r).as_deref()), "{shown}");
+        }
+        assert!(!crate::companion::allowed(Scope::Peer, None));
+    }
+
+    #[test]
+    fn a_session_presenting_this_machines_own_key_is_refused_whatever_the_store_says() {
+        let (state, dir) = a_state("own-key");
+        // The worst case: the store accepts the key (a copied home's
+        // devices.json, or a phone paired with it). Refused anyway.
+        state
+            .devices()
+            .expect("store")
+            .pair(&state.identity.public_key(), "copied", 1, false)
+            .expect("pair");
+        assert!(refuses_own_key(&state, &state.identity.public_bytes()));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let served = Arc::clone(&state);
+        let agentd = dir.join("agentd.sock");
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("accept");
+            socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            connection(socket, served, agentd);
+        });
+        let mut c = TcpStream::connect(addr).expect("connect");
+        c.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        c.write_all(&[HELLO_SESSION]).expect("hello");
+        let secret = state.identity.secret_bytes_for_handshake();
+        let mut hs = Handshake::session_initiator(&secret, &state.identity.public_bytes(), rime_remote_core::REMOTE_PROTOCOL_VERSION)
+            .expect("hs");
+        crate::net::write_message(&mut c, &hs.write(b"").expect("m1")).expect("send");
+        let mut len = [0u8; 4];
+        assert!(c.read_exact(&mut len).is_err(), "a copied home got an answer");
+        server.join().expect("server");
+        assert!(state.connections().is_empty(), "a copied home was listed");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
 }

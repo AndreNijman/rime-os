@@ -29,7 +29,9 @@
 mod calls;
 mod clipboard;
 mod companion;
+mod computers;
 mod control;
+mod dialer;
 mod discovery;
 mod machine;
 mod media;
