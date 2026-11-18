@@ -285,6 +285,27 @@ object Help {
                     "Forget the computer here, or remove this device at the computer. Either " +
                         "way the key is gone and the other end stops answering it.",
                 ),
+                h("After the phone restarts"),
+                p(
+                    "The key this app uses with a computer sits behind the phone's lock, so " +
+                        "after a restart the computer hears nothing until you unlock the app. " +
+                        "Keep working after the phone restarts, in Display, changes that. Each " +
+                        "computer gets a second key from this phone that opens without you, and " +
+                        "it can only carry the phone's own features: its battery, its " +
+                        "notifications, what is playing, ringing it and sending it files.",
+                ),
+                p(
+                    "With it on, locking the app keeps those running instead of ending the " +
+                        "link, and after a restart they come back at the phone's first unlock. " +
+                        "Replying to a notification, controlling what plays, agents, terminals " +
+                        "and the computer's controls still wait until you unlock.",
+                ),
+                note(
+                    "Turning it on asks once to leave this app out of battery optimisation, " +
+                        "so Android does not hold the link off while the phone is idle. You can " +
+                        "say no; the link still works, later. Turning it off, or forgetting the " +
+                        "computer, deletes the second key here and tells the computer to forget it.",
+                ),
                 h("App lock"),
                 p(
                     "The lock on this app is the phone's own biometric or device credential, " +

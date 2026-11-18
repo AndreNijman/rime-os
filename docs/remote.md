@@ -133,6 +133,21 @@ touch the clipboard, or change where push notifications go (pushes carry what
 your agents are doing, so only the unlocked phone may register for them). Anything else is refused with
 `not_allowed`. Unlocking the phone brings back the full connection.
 
+On the phone, the switch is in **Display**, next to Notifications and Media on
+your computer, and it is off until you turn it on. Turning it on also asks,
+once, to leave the app out of battery optimisation, because otherwise Android
+can hold the connection off for long stretches while the phone is idle. You
+can say no; the link still works, just later. With the switch on, locking the
+app no longer ends the link: the phone drops to the second key and keeps
+sending its battery, notifications and what is playing, and you can still ring
+it and send it files. Replying to a notification, controlling what plays,
+agents, terminals and the computer's controls wait until you unlock. After a
+restart the link comes back at the phone's first unlock, without opening the
+app; the app's notification then says it is locked and what keeps reaching
+the computer. Turning the switch off, or forgetting the computer, deletes the
+key on the phone and tells the computer to forget it (straight away if it is
+connected, otherwise the next time the phone connects normally).
+
 Revoking the device ends both keys at once, including a connection the second
 key already holds. Pairing the phone again starts without one, and a second
 key the phone gave up (by pairing again, or by the switch) is never accepted
