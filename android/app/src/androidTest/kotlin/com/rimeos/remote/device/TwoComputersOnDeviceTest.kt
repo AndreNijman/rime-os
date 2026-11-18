@@ -3,6 +3,8 @@ package com.rimeos.remote.device
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
+import android.os.Bundle
+import android.provider.CallLog
 import android.os.ParcelFileDescriptor
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.filters.LargeTest
@@ -141,17 +143,41 @@ class TwoComputersOnDeviceTest {
         setCalls(true)
         awaitBoth("the computers to learn they may show calls") { can(it).contains(Phone.CAN_CALLS_ANSWER) }
 
-        Desktop.emuGsm("call", "5556")
-        val ringA = awaitNotify(Desktop, "A to show the ringing call") { isRinging(it) }
-        val ringB = awaitNotify(SecondDesktop, "B to show the ringing call") { isRinging(it) }
-        val idA = ringA.getInt("id")
-        val idB = ringB.getInt("id")
-        assertEquals("ringing", Desktop.calls(a.deviceId).optJSONObject("current")?.optString("state"))
-        assertEquals("ringing", SecondDesktop.calls(b.deviceId).optJSONObject("current")?.optString("state"))
+        var idA = 0
+        var idB = 0
+        var attempt = 1
+        while (true) {
+            Desktop.emuGsm("call", "5556")
+            idA = awaitNotify(Desktop, "A to show the ringing call") { isRinging(it) }.getInt("id")
+            idB = awaitNotify(SecondDesktop, "B to show the ringing call") { isRinging(it) }.getInt("id")
+            assertEquals("ringing", Desktop.calls(a.deviceId).optJSONObject("current")?.optString("state"))
+            assertEquals("ringing", SecondDesktop.calls(b.deviceId).optJSONObject("current")?.optString("state"))
 
-        // The person presses Answer on A's notification.
-        Desktop.notifyAction(idA, "answer")
-        awaitValue(15_000, "the phone to answer") { phoneState().takeIf { it == Calls.ACTIVE } }
+            // The person presses Answer on A's notification.
+            shell("logcat -c")
+            Desktop.notifyAction(idA, "answer")
+            val end = System.currentTimeMillis() + 15_000
+            while (phoneState() != Calls.ACTIVE && System.currentTimeMillis() < end) Thread.sleep(250)
+            if (phoneState() == Calls.ACTIVE) break
+            // The emulator's modem sometimes drops a call as it is answered:
+            // ANSWER acknowledged, then no call listed (measured with no Rime
+            // at all: 2 of 40 answers 1 to 2 s after the ring). Retried once,
+            // only on that signature: the phone took A's answer, A shows no
+            // "Call not answered", and Android logged the call as missed.
+            val took = "${a.machine}: answer from the computer: done" in shell("logcat -d -s RimeRemote")
+            val notice = notifyLog(Desktop).any { it.optString("summary") == "Call not answered" }
+            val missed = newestCallType() == Calls.TYPE_MISSED
+            if (attempt > 1 || !took || notice || !missed || phoneState() != Calls.IDLE) {
+                throw AssertionError("timed out after 15000 ms waiting for the phone to answer (took=$took notice=$notice missed=$missed)")
+            }
+            say("MODEM-DROP-RETRY: the emulator's modem dropped the answered call; ringing once more")
+            runCatching { Desktop.emuGsm("cancel", "5556") }
+            awaitNotify(Desktop, "A to close the dropped call") { isClose(it, idA) }
+            awaitNotify(SecondDesktop, "B to close the dropped call") { isClose(it, idB) }
+            notifyA = Desktop.notifyLog().size
+            notifyB = SecondDesktop.notifyLog().size
+            attempt += 1
+        }
         awaitNotify(Desktop, "A to close its ringing notification") { isClose(it, idA) }
         awaitNotify(SecondDesktop, "B to close its ringing notification once A answered") { isClose(it, idB) }
         awaitValue(15_000, "B to see the call active") {
@@ -536,6 +562,16 @@ class TwoComputersOnDeviceTest {
 
     private fun awaitNotify(c: Computer, what: String, match: (JSONObject) -> Boolean): JSONObject =
         awaitValue(20_000, what) { notifyLog(c).firstOrNull(match) }
+
+    /** The type of the newest entry in this phone's call log, or null. */
+    private fun newestCallType(): Int? =
+        context.contentResolver.query(CallLog.Calls.CONTENT_URI, arrayOf(CallLog.Calls.TYPE), null, null, "${CallLog.Calls.DATE} DESC")
+            ?.use { c -> if (c.moveToFirst()) c.getInt(0) else null }
+
+    /** A line in the run's output (am instrument's stream). */
+    private fun say(line: String) {
+        InstrumentationRegistry.getInstrumentation().sendStatus(0, Bundle().apply { putString("stream", "$line\n") })
+    }
 
     private fun isRinging(e: JSONObject): Boolean = e.optString("op") == "notify" && e.optString("summary").startsWith("Call from")
 
