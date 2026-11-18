@@ -524,16 +524,21 @@ fn authorized_by(
         Request::Messages { .. } | Request::MessagesSend { .. } => messages_caller(peer, observe),
         Request::Calls { .. } | Request::Call { .. } => calls_caller(peer, observe),
         Request::Photos { .. } | Request::PhotosSave { .. } => photos_caller(peer, observe),
-        Request::ComputerShow | Request::ComputerAdd { .. } => computers_caller(peer, observe),
+        Request::ComputerShow | Request::ComputerAdd { .. } => computers_caller(peer, observe, may_add_computer),
+        // A removal is permanent (the same key can never pair again), so an
+        // agent or a scheduled job could break a pair for good: a person only.
+        Request::ComputerRemove { .. } => computers_caller(peer, observe, may_remove_computer),
         _ => own_user(peer),
     }
 }
 
-/// Refuse showing or typing a computer-pairing code from anything but a
-/// human at this machine: the same two origins as pairing a phone.
+/// Refuse showing or typing a computer-pairing code, or removing a paired
+/// computer, from anything but a human at this machine: the same two origins
+/// as pairing a phone. `rule` words the refusal for the request.
 fn computers_caller(
     peer: Option<crate::peer::Peer>,
     observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+    rule: fn(RequestOrigin) -> Result<(), String>,
 ) -> Result<(), String> {
     let Some(peer) = peer else {
         return Err(
@@ -544,7 +549,7 @@ fn computers_caller(
         );
     };
     own_user(Some(peer))?;
-    may_add_computer(observe(peer.pid)?)
+    rule(observe(peer.pid)?)
 }
 
 /// The computer-pairing rule over a value, for the same reason [`may_pair`]
@@ -556,6 +561,19 @@ pub fn may_add_computer(origin: RequestOrigin) -> Result<(), String> {
     Err(format!(
         "a {origin} request cannot pair another computer: only a person at this machine may show \
          or type a code. Run `rime remote computers add` from a terminal"
+    ))
+}
+
+/// The computer-removal rule over a value: a removal is never undone, so it
+/// is a person's decision, like pairing.
+pub fn may_remove_computer(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot remove a paired computer: a removal is permanent (that computer can \
+         never pair again with the same key), so only a person at this machine may do it. Run \
+         `rime remote computers remove` from a terminal"
     ))
 }
 
@@ -1487,6 +1505,11 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_add_computer(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
+                Request::ComputerRemove { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_remove_computer(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
@@ -1519,7 +1542,7 @@ mod tests {
     }
 
     #[test]
-    fn a_scheduled_job_may_neither_show_nor_type_a_computer_pairing_code() {
+    fn a_scheduled_job_may_not_show_or_type_a_computer_pairing_code_or_remove_a_computer() {
         // Injected origins, so this fails on any machine if the gate goes.
         let me = crate::peer::Peer {
             pid: std::process::id() as libc::pid_t,
@@ -1545,10 +1568,25 @@ mod tests {
             assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());
             assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
         }
-        // Listing, pinging and removing are this account's, like devices.
+        // Removing is permanent, so it is a person's too.
+        let remove = Request::ComputerRemove { computer: "desk".into() };
+        for o in RequestOrigin::ALL {
+            let verdict = authorized_by(&remove, Some(me), |_| Ok(*o));
+            assert_eq!(verdict.is_ok(), o.is_local(), "{o} remove: {verdict:?}");
+            if let Err(why) = verdict {
+                assert!(why.contains(o.as_str()) && why.contains("rime remote computers remove"), "{why}");
+            }
+        }
+        assert!(
+            authorized_by(&remove, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_err(),
+            "a scheduled job may remove a computer for good"
+        );
+        assert!(authorized_by(&remove, Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&remove, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        // Listing and pinging are this account's, like devices: a ping is
+        // one hello, and a list changes nothing.
         for req in [
             Request::Computers,
-            Request::ComputerRemove { computer: "desk".into() },
             Request::ComputerPing { computer: "desk".into(), via: Some("lan".into()) },
         ] {
             assert!(authorized_by(&req, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_ok(), "{req:?}");
