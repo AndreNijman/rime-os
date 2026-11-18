@@ -510,15 +510,21 @@ impl Events {
     /// it. A line that still did not fit is a stalled link: the channel is
     /// forgotten, its pump reads end-of-file and closes it, and the phone
     /// drops the unfinished line with it (a line counts only at its newline).
+    ///
+    /// Only to a full session's channel: the clipboard lands on a phone "while
+    /// the app is unlocked" (§2.14), and a companion link is a locked phone.
     pub fn send_whole(&self, device_id: &str, line: &Value, limit: Duration) -> bool {
         let mut writers = lock(&self.writers);
-        let Some((generation, stream)) = writers.get_mut(device_id) else {
+        let Some(w) = writers.get_mut(device_id) else {
             return false;
         };
-        let generation = *generation;
+        if !w.full {
+            return false;
+        }
+        let generation = w.generation;
         let mut bytes = line.to_string().into_bytes();
         bytes.push(b'\n');
-        let ok = write_by(stream, &bytes, Instant::now() + limit) && stream.set_nonblocking(true).is_ok();
+        let ok = write_by(&mut w.stream, &bytes, Instant::now() + limit) && w.stream.set_nonblocking(true).is_ok();
         if !ok {
             self.forget_generation(&mut writers, device_id, generation);
         }
