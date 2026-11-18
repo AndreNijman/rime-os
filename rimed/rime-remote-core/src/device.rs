@@ -423,7 +423,7 @@ struct PhonesFile<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Introduced {
     /// Recorded, introduced and not allowed yet.
-    Added(Device),
+    Added(Box<Device>),
     /// Already paired here (or introduced before): nothing changed.
     AlreadyPaired,
     /// Removed here, and not forgotten: nothing changed.
@@ -686,6 +686,7 @@ impl DeviceStore {
         name: &str,
         by: Introducer,
         now_ms: u64,
+        requires_user_verification: bool,
     ) -> Result<Device, StoreError> {
         let raw = check_key(public_key)?;
         let name = check_name(name)?;
@@ -700,7 +701,7 @@ impl DeviceStore {
             paired_ms: now_ms,
             last_seen_ms: None,
             revoked_ms: None,
-            requires_user_verification: false,
+            requires_user_verification,
             last_path: None,
             companion_key: None,
             retired_companion_keys: Vec::new(),
@@ -803,7 +804,7 @@ impl DeviceStore {
             allowed_ms: None,
         };
         self.computers.insert(id, computer.clone());
-        Ok(Introduced::Added(computer))
+        Ok(Introduced::Added(Box::new(computer)))
     }
 
     /// `rime remote computers allow`: trust an introduced computer like one
@@ -2093,7 +2094,7 @@ mod tests {
     #[test]
     fn an_introduced_phone_opens_a_companion_session_until_a_person_allows_it() {
         let mut s = DeviceStore::default();
-        let p = s.pair_introduced(&key(1), "pixel", by("desk"), 10).expect("introduced");
+        let p = s.pair_introduced(&key(1), "pixel", by("desk"), 10, false).expect("introduced");
         assert!(!p.trusted());
         assert_eq!(s.authenticate(&key(1)).map(|(_, sc)| sc), Some(Scope::Companion));
         let allowed = s.allow_phone("pixel", 20).expect("allow");
@@ -2121,11 +2122,11 @@ mod tests {
         s.pair_computer(&raw(5), &own, "desk", vec![], None, 1).expect("computer");
         let old = s.pair_computer(&raw(6), &own, "old", vec![], None, 1).expect("computer");
         s.revoke_computer(&old.id, 2).expect("remove");
-        let once = s.pair_introduced(&key(7), "brought", by("desk"), 3).expect("brought");
+        let once = s.pair_introduced(&key(7), "brought", by("desk"), 3, false).expect("brought");
         s.revoke(&once.id, 4).expect("revoke");
         for k in 1u8..=7 {
             assert!(
-                matches!(s.pair_introduced(&key(k), "x", by("desk"), 5), Err(StoreError::KeyInUse)),
+                matches!(s.pair_introduced(&key(k), "x", by("desk"), 5, false), Err(StoreError::KeyInUse)),
                 "known key {k} was paired by an introduction"
             );
         }
@@ -2139,9 +2140,9 @@ mod tests {
         let own = raw(99);
         let mut s = DeviceStore::default();
         let c = s.pair_computer(&raw(50), &own, "desk", vec![], None, 100).expect("computer");
-        let a = s.pair_introduced(&key(1), "a", by(&c.id), 110).expect("a");
-        s.pair_introduced(&key(2), "b", by(&c.id), 120).expect("b");
-        s.pair_introduced(&key(3), "other", by("someone-else"), 120).expect("other");
+        let a = s.pair_introduced(&key(1), "a", by(&c.id), 110, false).expect("a");
+        s.pair_introduced(&key(2), "b", by(&c.id), 120, false).expect("b");
+        s.pair_introduced(&key(3), "other", by("someone-else"), 120, false).expect("other");
         s.revoke(&a.id, 130).expect("revoke");
         s.allow_phone("b", 140).expect("allow");
         assert_eq!(s.introduced_by_count(&c.id, c.paired_ms), 2, "revoked and allowed phones count");
@@ -2222,7 +2223,7 @@ mod tests {
         s.pair(&key(1), "phone", 1, false).expect("phone");
         s.save(&path).expect("save");
         assert!(!introduced.exists(), "a machine with no introduced phone got the file");
-        let p = s.pair_introduced(&key(2), "brought", by("desk"), 2).expect("brought");
+        let p = s.pair_introduced(&key(2), "brought", by("desk"), 2, false).expect("brought");
         s.save(&path).expect("save");
         let text = std::fs::read_to_string(&path).expect("devices.json");
         assert!(!text.contains(&p.id), "devices.json carries an introduced phone: {text}");
