@@ -29,6 +29,7 @@
 mod control;
 mod discovery;
 mod machine;
+mod media;
 mod mirror;
 mod net;
 mod nex;

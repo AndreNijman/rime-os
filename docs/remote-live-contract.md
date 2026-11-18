@@ -601,6 +601,78 @@ A stub line `{"id":N,"reply":"text"}` in `closed.jsonl` is read as
 `NotificationReplied`; the stub records a post's `reply` label as given, and
 the device suite's broker writes one with `notify_reply`.
 
+### 2.8 From the phone to the computer: what it is playing
+
+`remote_hello.features` gains `"phone_media"`. A phone sends `phone_media` to
+no machine whose hello lacks it.
+
+```json
+{"cmd":"phone_media","playing":{"app":"Spotify","state":"playing","title":"Song","artist":"Band","album":"LP","duration_ms":215000,"position_ms":42000,"rate":1.0}}
+{"cmd":"phone_media","playing":null}
+→ {"reply":"ok"}
+```
+
+- Answered by rime-remoted, under the handshake's device id; never forwarded.
+  `playing: null` means nothing the phone may show is playing.
+- `state` is `playing`, `paused` or `stopped`; `title` must not be empty after
+  cleaning. `duration_ms` and `position_ms` are whole milliseconds up to 7 days
+  (absent: 0, "unknown"); a position past the duration is the duration.
+  `rate` is 0 to 8 (absent: 1). Anything else is `bad_request`.
+- Cleaned like a notification title (§2.7): one line, control and bidi
+  characters removed, `<` `>` replaced, app 60 characters, title, artist and
+  album 120.
+- Each phone gets one MPRIS player on the session bus,
+  `org.mpris.MediaPlayer2.rime_phone.d<hex>`, where `<hex>` is the device id's
+  bytes in hex (so no two phones share a name). `Identity` is
+  `"<device name> · <app>"` with the store's name, never one from the body.
+  `Metadata` has `mpris:trackid` (new per track), `xesam:title`, and
+  `xesam:artist` (one entry), `xesam:album` and `mpris:length` when known. No
+  artwork.
+- **Display only.** `CanControl` is false and every method (`PlayPause`,
+  `Next`, `Seek`, `Raise`, …) answers `NotSupported`. `playerctl` does not act
+  on a player that cannot be controlled, so the media keys and rime-remoted's
+  own `media` verb (§2.4) stay on the computer's players; `media` also passes
+  `--ignore-player=rime_phone`, which leaves out every phone by one name.
+- **Position.** The phone sends where playback was when it sent, and only when
+  something changes (never a ticking stream). rime-remoted stamps the moment
+  it read the line; `Position` is that plus the time since, times the rate,
+  while playing, and stops at the duration. A report more than 1.5 s from where
+  the last one says playback should be is a seek: `Seeked` is emitted, as it
+  is for a new track.
+- The latest report per phone wins: reports are kept, not queued, and applied
+  at most every 200 ms per phone, so a burst becomes a few changes and never
+  delays the link.
+- **Lifetime.** The player belongs to the connection that last described it.
+  It is removed when that connection ends, when the phone is revoked, and on
+  `playing: null`. A reconnect that describes it before the old connection is
+  noticed gone keeps it.
+
+**What the phone sends.** Nothing until the person grants notification access
+(the same listener reads media sessions) and turns on "Media on your computer"
+and then each app whose playback may show (none by default). Then, while
+unlocked and connected to a machine offering the feature: the newest state of
+the app's active media session that is playing (or, if none is, the one that
+paused most recently), on connect and on each change of state, track, speed or
+position jump, at most every 500 ms (a change inside that wait is sent when it
+ends, as the newest state); `playing: null` when nothing allowed is active or
+the switch is turned off. A session that is buffering is sent as `playing` at
+rate 0; a stopped one is not shown, so the phone never sends `stopped`. `app`
+is the app's label, or its package name where Android does not let this app
+read the label (an app with no launcher icon). Never sent: artwork, URIs,
+queue, and anything from an app not turned on.
+
+**Tests never put a player on the real desktop.** With
+`RIME_REMOTED_MEDIA_STUB=<dir>`, rime-remoted appends each change to
+`<dir>/media.jsonl` (`{"op":"show","player":…,"identity":…,"status":…,
+"title":…,…}` / `{"op":"gone","player":…}`) instead of the bus; a test build
+always uses the stub. Every harness sets it; the device suite refuses to start
+rime-remoted without it and its broker reads the lines back with `media_log`
+(`MediaOnDeviceTest`, driving the test helper app's media session).
+The bus path is proven on a private bus by `tests/test-remoted-media-bus.sh`
+(properties read back with `busctl`, the position moving with the clock,
+control refused, `playerctl -l` with and without `--ignore-player=rime_phone`,
+an update, removal).
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in

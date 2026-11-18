@@ -373,9 +373,10 @@ impl Backend for Real {
     }
 
     fn player(&self, deadline: Instant) -> Option<Player> {
+        // A phone's player (media.rs) is never the computer's own.
         let (code, out, _) = run_until(
             "playerctl",
-            &["metadata", "--format", "{{playerName}}\u{1f}{{lc(status)}}\u{1f}{{xesam:title}}\u{1f}{{xesam:artist}}"],
+            &[IGNORE_PHONES, "metadata", "--format", "{{playerName}}\u{1f}{{lc(status)}}\u{1f}{{xesam:title}}\u{1f}{{xesam:artist}}"],
             deadline,
         )?;
         if code != Some(0) {
@@ -398,7 +399,7 @@ impl Backend for Real {
             Action::Next => "next",
             Action::Previous => "previous",
         };
-        match run_until("playerctl", &[verb], deadline) {
+        match run_until("playerctl", &[IGNORE_PHONES, verb], deadline) {
             Some((Some(0), _, _)) => Ok(()),
             Some((_, _, err)) => Err(first_line(&err, "no media player is running")),
             None => Err("playerctl did not answer".into()),
@@ -454,6 +455,11 @@ pub fn parse_volume(out: &str) -> Option<Volume> {
     let level: f64 = rest.split_whitespace().next()?.parse().ok()?;
     Some(Volume { percent: (level * 100.0).round().clamp(0.0, 100.0) as u8, muted: rest.contains("[MUTED]") })
 }
+
+/// Every `playerctl` call leaves the phones' players out: the `media` verb
+/// describes and controls this computer, and a phone's player shown here is
+/// the phone's (`media.rs`).
+pub const IGNORE_PHONES: &str = "--ignore-player=rime_phone";
 
 /// The `playerctl metadata --format` line [`Real::player`] asks for.
 pub fn parse_player(out: &str) -> Option<Player> {
@@ -836,7 +842,7 @@ mod tests {
 
         let player = real.player(Instant::now() + BUDGET);
         eprintln!("player: {player:?}");
-        let direct = raw("playerctl", &["metadata", "--format", "{{playerName}}\u{1f}{{lc(status)}}\u{1f}{{xesam:title}}\u{1f}{{xesam:artist}}"])
+        let direct = raw("playerctl", &[IGNORE_PHONES, "metadata", "--format", "{{playerName}}\u{1f}{{lc(status)}}\u{1f}{{xesam:title}}\u{1f}{{xesam:artist}}"])
             .and_then(|o| parse_player(&o));
         assert_eq!(player.map(|p| p.name), direct.map(|p| p.name), "the same player as playerctl picks");
 

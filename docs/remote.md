@@ -355,6 +355,25 @@ the computer shows **Reply not sent** with what you typed.
   refused, so a noisy app cannot flood the desktop. Revoking the phone closes
   every notification it has open.
 
+## What your phone is playing, on the computer
+
+The song or podcast playing on your phone can show in the Shell's player, next
+to the computer's own players, the way a Mac shows what an iPhone is playing.
+In the app, open **Media on your computer** in the computers screen's settings
+(it needs the same notification access as above), turn it on, and turn on each
+app whose playback may show. None are on until you turn them on.
+
+The computer shows "Pixel 8 · Spotify" with the title, artist, album and how
+far in it is, and it follows the phone: pause, skip or seek there and it
+changes here. When the phone stops playing, disconnects or is revoked, it goes.
+
+- This first version only shows. Play, pause and skip on the computer stay on
+  the computer's own players; the media keys never act on the phone.
+- No artwork, links or queue cross: only the app's name, title, artist, album,
+  length, position and whether it is playing.
+- Nothing is sent while the app is locked or for an app you have not turned on.
+
+
 ## Notifications when the app is closed
 
 An agent that needs you at two in the morning has to be able to reach a phone
