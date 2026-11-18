@@ -1203,7 +1203,7 @@ fn pictures_dir_in(text: &str, home: &std::path::Path) -> Option<PathBuf> {
     let line = text.lines().map(str::trim).find(|l| l.starts_with("XDG_PICTURES_DIR="))?;
     let value = line["XDG_PICTURES_DIR=".len()..].trim().strip_prefix('"')?.strip_suffix('"')?;
     let path = match value.strip_prefix("$HOME") {
-        Some(rest) if rest.is_empty() => return None,
+        Some("") => return None,
         Some(rest) => home.join(rest.trim_start_matches('/')),
         None if value.starts_with('/') => PathBuf::from(value),
         None => return None,
