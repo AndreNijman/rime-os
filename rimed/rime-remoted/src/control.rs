@@ -32,6 +32,15 @@
 //! always classify. It is still this account's alone, and a paired phone has
 //! no verb that sends it.
 //!
+//! `clipboard` (contract §2.10) is not gated that way either. The Shell sends
+//! it for every copy while "Send my clipboard to my phone" is on, from a
+//! process the origin rule cannot always classify, and the text is the
+//! computer's own clipboard, which any process of this account can already
+//! set. That switch is the Shell's and is not enforced here: any process of
+//! this account may ask, and a phone takes the text only while the person
+//! has "Get the computer's clipboard" on there and the app is unlocked. It is
+//! still this account's alone, and a paired phone has no verb that sends it.
+//!
 //! Listing and revoking are *not* gated that way. Revoking a device is the
 //! safe direction — an agent that revokes the owner's phone is a nuisance,
 //! not an escalation, and the owner is the only one who can pair it back.
@@ -66,6 +75,14 @@ pub enum Request {
     /// Set Do Not Disturb on every connected phone that said it follows this
     /// machine's (`can` has "focus").
     Focus { dnd: bool },
+    /// Put this text on the clipboard of every connected phone that asked
+    /// for the computer's clipboard (`can` has "clipboard"). `sensitive`
+    /// marks it as a password or the like, so the phone hides it.
+    Clipboard {
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sensitive: bool,
+    },
     /// Send a phone a file (`kind` "file": the open file rides the request
     /// line as a descriptor, `name` is what the phone is offered) or text
     /// for its clipboard (`kind` "text").
@@ -120,6 +137,10 @@ pub enum Reply {
     /// A `focus` line went to this many phones' open events channels. Zero
     /// is an answer, not an error: no phone connected, or none said "focus".
     Focused { reached: usize },
+    /// A `clipboard` line went to this many phones. Zero is an answer: no
+    /// phone connected, none asked for the clipboard, or the only one that
+    /// did put this very text here itself a moment ago.
+    ClipboardSent { reached: usize },
     /// A ring went out. `path` is `link` when the app said it is ringing, or
     /// `push` when the push service took the request (the phone rings if it
     /// is on and online, which nobody here can see).
@@ -241,6 +262,7 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::Revoke { device } => revoke(state, &device),
         Request::Ring { device } => ring(state, &device),
         Request::Focus { dnd } => focus(state, dnd),
+        Request::Clipboard { text, sensitive } => clipboard(state, &text, sensitive),
         Request::Send {
             device,
             kind,
@@ -452,6 +474,27 @@ fn focus(state: &State, dnd: bool) -> Reply {
         .filter(|(id, _)| state.events.send(id, &line))
         .count();
     Reply::Focused { reached }
+}
+
+/// Put `text` on every connected phone that asked for this computer's
+/// clipboard, except one that put this very text here itself a moment ago
+/// (`clipboard.rs`'s loop guard).
+///
+/// Only phones with an events channel open, as for [`focus`]: a clipboard is
+/// not worth waking a phone for, and it would be stale by the time it woke.
+fn clipboard(state: &State, text: &str, sensitive: bool) -> Reply {
+    let line = match crate::clipboard::line(text, sensitive) {
+        Ok(line) => line,
+        Err(why) => return Reply::error(why),
+    };
+    let reached = state
+        .phones()
+        .iter()
+        .filter(|(_, report)| report.can_clipboard())
+        .filter(|(id, _)| !state.clip_echo.is_echo(id, text))
+        .filter(|(id, _)| state.events.send_whole(id, &line, crate::clipboard::WRITE_LIMIT))
+        .count();
+    Reply::ClipboardSent { reached }
 }
 
 fn ring(state: &State, device: &str) -> Reply {
@@ -734,6 +777,7 @@ mod tests {
                 device: "somebody-elses-phone".into(),
             },
             Request::Focus { dnd: true },
+            Request::Clipboard { text: "x".into(), sensitive: false },
             Request::Send {
                 device: "somebody-elses-phone".into(),
                 kind: "text".into(),
@@ -817,6 +861,7 @@ mod tests {
                 device: "pixel-8".into(),
             },
             Request::Focus { dnd: false },
+            Request::Clipboard { text: "two\nlines".into(), sensitive: true },
             Request::Send {
                 device: "pixel-8".into(),
                 kind: "text".into(),
@@ -827,6 +872,20 @@ mod tests {
         // The wire shape `rime remote focus` and the Shell's call depend on.
         assert_eq!(serde_json::to_string(&Request::Focus { dnd: true }).unwrap(), r#"{"cmd":"focus","dnd":true}"#);
         assert_eq!(serde_json::to_string(&Reply::Focused { reached: 2 }).unwrap(), r#"{"reply":"focused","reached":2}"#);
+        // `rime remote clipboard`'s wire: `sensitive` only when true, and
+        // absent reads as false.
+        assert_eq!(
+            serde_json::to_string(&Request::Clipboard { text: "a".into(), sensitive: false }).unwrap(),
+            r#"{"cmd":"clipboard","text":"a"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Clipboard { text: "a".into(), sensitive: true }).unwrap(),
+            r#"{"cmd":"clipboard","text":"a","sensitive":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::ClipboardSent { reached: 1 }).unwrap(),
+            r#"{"reply":"clipboard_sent","reached":1}"#
+        );
         for r in &requests {
             let text = serde_json::to_string(r).expect("serialise");
             assert!(!text.contains('\n'), "{text}");
@@ -842,6 +901,7 @@ mod tests {
             Reply::Devices { devices: vec![], phones: Default::default() },
             Reply::Rang { device: "Pixel".into(), path: "link".into() },
             Reply::Focused { reached: 0 },
+            Reply::ClipboardSent { reached: 0 },
             Reply::Sent { device: "Pixel".into(), path: "waiting".into(), id: 3, push_error: Some("503".into()) },
             Reply::Status {
                 version: 1,

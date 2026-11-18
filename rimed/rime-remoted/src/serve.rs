@@ -708,6 +708,14 @@ impl Worker {
         for work in queue {
             match work {
                 Work::Control(line) => {
+                    // A phone setting this computer's clipboard (§1.8) is
+                    // remembered BEFORE it is forwarded: the Shell sees the
+                    // new clipboard as soon as rime-agentd writes it, and its
+                    // `rime remote clipboard` must find the text already
+                    // known, or it goes straight back to this phone (§2.10).
+                    if let Some(text) = crate::clipboard::phone_wrote(&line) {
+                        self.state.clip_echo.wrote(&self.device_id, text);
+                    }
                     let reply = answered_here(&self.state, &self.device_id, self.connection, &line)
                         .unwrap_or_else(|| control(&self.agentd, &self.device_id, &line));
                     let _ = send(&self.sealer, Frame::Control(reply));
@@ -1277,7 +1285,7 @@ mod tests {
             v["features"],
             serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
                                "machine_status", "machine_lock", "media",
-                               "device_events", "phone_report", "take_offer", "phone_focus",
+                               "device_events", "phone_report", "take_offer", "phone_focus", "phone_clipboard",
                                "phone_notifications", "phone_notification_reply",
                                "phone_media", "phone_media_control"]),
             "{v}"

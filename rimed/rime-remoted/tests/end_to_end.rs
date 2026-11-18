@@ -186,6 +186,9 @@ impl Harness {
             // `paths::SCRATCH_ROOT_ENV`. It is also what lets the upload test
             // below read back the file the daemon wrote.
             .env("RIME_AGENT_SCRATCH_ROOT", root.join("scratch"))
+            // A phone's `clipboard_write` and `save_file` land here, never on
+            // the developer's clipboard or in their Downloads.
+            .env("RIME_AGENTD_DESKTOP_STUB", root.join("desk"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -2354,6 +2357,113 @@ fn open_events(session: &mut Session, channel: u32) {
         }
         other => panic!("expected the events reply, got {other:?}"),
     }
+}
+
+#[test]
+fn a_phones_clipboard_follows_this_computers_only_where_it_asked_and_never_comes_straight_back() {
+    let h = harness!("clipboard");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&h) else { return };
+    let tablet = Device::new();
+    assert_eq!(tablet.pair(&h, &offer, "tablet-9")["ok"], true);
+    let mut p = phone.connect(&h).expect("the phone's session");
+    let mut t = tablet.connect(&h).expect("the tablet's session");
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_clipboard"), "{hello}");
+    open_events(&mut p, 9);
+    open_events(&mut t, 9);
+
+    // Nobody asked: nothing is sent, and that is not an error.
+    let (code, said) = rime_remote(&h, &["clipboard"], b"hello");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("No phone"), "{said}");
+
+    // The phone asks, the tablet does not. The text goes from standard input
+    // to the phone verbatim, spaces and line breaks kept; sensitive only
+    // when the caller says so.
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["clipboard"]}"#)["reply"], "ok");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring"]}"#)["reply"], "ok");
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    let pid = rime_remote_core::device::Device::id_for(&phone.key());
+    assert_eq!(listed["phones"][&pid]["can"], serde_json::json!(["clipboard"]), "{listed}");
+    let (code, said) = rime_remote(&h, &["clipboard"], b" two\nlines ");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 phone"), "{said}");
+    let (code, said) = rime_remote(&h, &["clipboard", "--sensitive"], b"hunter2");
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        events_on(&mut p, 9, 2),
+        vec![
+            serde_json::json!({"event": "clipboard", "text": " two\nlines "}),
+            serde_json::json!({"event": "clipboard", "text": "hunter2", "sensitive": true}),
+        ]
+    );
+
+    // Refused in words: nothing, over the cap, too long once escaped.
+    let (code, said) = rime_remote(&h, &["clipboard"], b"");
+    assert_ne!(code, 0, "{said}");
+    let over = serde_json::json!({"cmd": "clipboard", "text": "a".repeat(64 * 1024 + 1)});
+    let r = h.control(&over.to_string());
+    assert_eq!(r["reply"], "error", "{r}");
+    let controls = serde_json::json!({"cmd": "clipboard", "text": "\u{1}".repeat(64 * 1024)});
+    let r = h.control(&controls.to_string());
+    assert!(r["reply"] == "error" && r["message"].as_str().unwrap().contains("escaped"), "{r}");
+
+    // Both ask now. The phone sets this computer's clipboard (into the stub);
+    // the Shell sees the change and sends it on: the tablet gets it, the
+    // phone that wrote it does not. Its next line is the next text, so the
+    // echo never went into its channel.
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring","clipboard"]}"#)["reply"], "ok");
+    let wrote = p.call(r#"{"cmd":"clipboard_write","text":"from the phone"}"#);
+    assert_ne!(wrote["reply"], "error", "{wrote}");
+    assert_eq!(std::fs::read_to_string(h.root.join("desk/clipboard")).expect("the stub clipboard"), "from the phone");
+    let r = h.control(r#"{"cmd":"clipboard","text":"from the phone"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 1}));
+    let r = h.control(r#"{"cmd":"clipboard","text":"copied here"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 2}));
+    assert_eq!(
+        events_on(&mut t, 9, 2),
+        vec![
+            serde_json::json!({"event": "clipboard", "text": "from the phone"}),
+            serde_json::json!({"event": "clipboard", "text": "copied here"}),
+        ]
+    );
+    assert_eq!(events_on(&mut p, 9, 1), vec![serde_json::json!({"event": "clipboard", "text": "copied here"})]);
+
+    // The largest line there is (every byte of the cap a quote, so twice that
+    // once escaped), twice, and then a small one: each arrives whole on both,
+    // and the channel is still there after them. Sent from another thread
+    // while this one reads, as a phone would.
+    let big = "\"".repeat(64 * 1024);
+    let socket = h.remoted_socket.clone();
+    let line = serde_json::json!({"cmd": "clipboard", "text": big}).to_string();
+    let sender = std::thread::spawn(move || {
+        let mut replies: Vec<serde_json::Value> = (0..2).map(|_| one_line(&socket, &line)).collect();
+        replies.push(one_line(&socket, r#"{"cmd":"clipboard","text":"after"}"#));
+        replies
+    });
+    let want = vec![
+        serde_json::json!({"event": "clipboard", "text": big}),
+        serde_json::json!({"event": "clipboard", "text": big}),
+        serde_json::json!({"event": "clipboard", "text": "after"}),
+    ];
+    assert!(events_on(&mut p, 9, 3) == want, "the phone did not get the big lines whole");
+    assert!(events_on(&mut t, 9, 3) == want, "the tablet did not get the big lines whole");
+    for r in sender.join().expect("sender") {
+        assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 2}));
+    }
+
+    // Revoked, a phone is sent nothing more.
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
+    let r = h.control(r#"{"cmd":"clipboard","text":"just the tablet"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 1}));
+    assert_eq!(events_on(&mut t, 9, 1), vec![serde_json::json!({"event": "clipboard", "text": "just the tablet"})]);
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"tablet-9"}"#)["reply"], "ok");
+    let (code, said) = rime_remote(&h, &["clipboard"], b"nobody");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("No phone"), "{said}");
 }
 
 #[test]

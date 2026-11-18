@@ -349,7 +349,7 @@ fn remote_hello_is_answered_by_the_service_and_never_reaches_the_daemon() {
         hello["features"],
         serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
                            "machine_status", "machine_lock", "media",
-                           "device_events", "phone_report", "take_offer", "phone_focus",
+                           "device_events", "phone_report", "take_offer", "phone_focus", "phone_clipboard",
                            "phone_notifications", "phone_notification_reply",
                            "phone_media", "phone_media_control"]),
         "{hello}"

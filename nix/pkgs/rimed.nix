@@ -230,6 +230,7 @@ let
       "a_phone_reports_its_battery_rings_over_its_link_and_revoke_forgets_both"
       "a_phone_that_allows_control_gets_each_call_on_its_events_channel_and_nothing_it_did_not_allow"
       "a_phone_that_leaves_gives_the_desktop_its_size_back"
+      "a_phones_clipboard_follows_this_computers_only_where_it_asked_and_never_comes_straight_back"
       "a_phones_do_not_disturb_reaches_the_shell_on_a_change_and_the_computers_reaches_the_phones_that_follow_it"
       "a_phones_media_shows_here_as_a_player_that_goes_with_the_connection_and_with_revoke"
       "a_phones_notifications_show_here_update_in_place_close_and_go_with_revoke"

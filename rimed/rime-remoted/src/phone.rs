@@ -28,6 +28,9 @@
 //!   remote focus on|off` puts a `focus` line on each phone's events channel
 //!   ([`focus_line`]). Each side acts only when the state differs from its
 //!   own, so a change echoed back changes nothing and nothing loops.
+//! - The clipboard (contract §2.10): `rime remote clipboard` puts a
+//!   `clipboard` line on the events channel of each connected phone whose
+//!   report says [`CAN_CLIPBOARD`]; see `clipboard.rs`.
 //!
 //! ## What a ring may not do
 //!
@@ -56,7 +59,7 @@ pub const CHANNEL: &str = "device_events";
 
 /// What `remote_hello` adds, so a phone talks to a machine that has these and
 /// leaves an older one alone.
-pub const FEATURES: [&str; 4] = ["device_events", "phone_report", TAKE, FOCUS_FEATURE];
+pub const FEATURES: [&str; 5] = ["device_events", "phone_report", TAKE, FOCUS_FEATURE, crate::clipboard::FEATURE];
 
 /// What `remote_hello` adds once this machine both writes a phone's Do Not
 /// Disturb for the Shell and can send the Shell's to the phone (§2.9). A
@@ -88,8 +91,13 @@ pub const CAN_REPLY: &str = "reply";
 /// `focus` line from this machine to its own (contract §2.9).
 pub const CAN_FOCUS: &str = "focus";
 
+/// The capability a phone declares while the person has "Get the computer's
+/// clipboard" on and the app is unlocked: it puts the text of a `clipboard`
+/// line on its own clipboard (contract §2.10).
+pub const CAN_CLIPBOARD: &str = "clipboard";
+
 /// Every capability word kept from a report.
-const KEPT: [&str; 5] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY, CAN_FOCUS];
+const KEPT: [&str; 6] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY, CAN_FOCUS, CAN_CLIPBOARD];
 
 /// The network kinds a phone may report. Anything else is refused rather than
 /// stored, so `rime remote devices` and the Shell only ever print words they
@@ -160,6 +168,10 @@ impl PhoneReport {
 
     pub fn can_focus(&self) -> bool {
         self.can.iter().any(|c| c == CAN_FOCUS)
+    }
+
+    pub fn can_clipboard(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_CLIPBOARD)
     }
 
     /// A report from a `phone_report` line, or why it was refused.
@@ -393,6 +405,32 @@ impl Events {
         ok
     }
 
+    /// Write one event line that may be larger than the socketpair holds,
+    /// whole or not at all as far as the phone can tell (contract §2.10).
+    ///
+    /// [`Events::send`] fails a write that would block, which is right for a
+    /// ring (one short line into a buffer the pump keeps empty) and wrong for
+    /// a clipboard line of up to [`crate::clipboard::MAX_LINE`] bytes, which
+    /// can be larger than the buffer itself. So this one waits for the pump,
+    /// up to `limit`, under the same lock, so no other line can land inside
+    /// it. A line that still did not fit is a stalled link: the channel is
+    /// forgotten, its pump reads end-of-file and closes it, and the phone
+    /// drops the unfinished line with it (a line counts only at its newline).
+    pub fn send_whole(&self, device_id: &str, line: &Value, limit: Duration) -> bool {
+        let mut writers = lock(&self.writers);
+        let Some((generation, stream)) = writers.get_mut(device_id) else {
+            return false;
+        };
+        let generation = *generation;
+        let mut bytes = line.to_string().into_bytes();
+        bytes.push(b'\n');
+        let ok = write_by(stream, &bytes, Instant::now() + limit) && stream.set_nonblocking(true).is_ok();
+        if !ok {
+            self.forget_generation(&mut writers, device_id, generation);
+        }
+        ok
+    }
+
     fn forget_generation(
         &self,
         writers: &mut HashMap<String, (u64, UnixStream)>,
@@ -442,6 +480,28 @@ impl Events {
                 .0;
         }
     }
+}
+
+/// Every byte of `bytes` into `stream`, blocking, by `deadline` for the whole
+/// line rather than for each `write(2)`.
+fn write_by(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> bool {
+    if stream.set_nonblocking(false).is_err() {
+        return false;
+    }
+    let mut off = 0;
+    while off < bytes.len() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_write_timeout(Some(left)).is_err() {
+            return false;
+        }
+        match stream.write(&bytes[off..]) {
+            Ok(0) => return false,
+            Ok(n) => off += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
