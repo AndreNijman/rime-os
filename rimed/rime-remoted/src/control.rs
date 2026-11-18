@@ -87,6 +87,9 @@ pub enum Request {
     Devices,
     /// Take a device's access away.
     Revoke { device: String },
+    /// Give a phone another computer brought (introduced) the full scope.
+    /// A person at this machine only.
+    DeviceAllow { device: String },
     /// Make a paired phone ring, by id or name.
     Ring { device: String },
     /// Set Do Not Disturb on every connected phone that said it follows this
@@ -181,6 +184,9 @@ pub enum Request {
     ComputerRemove { computer: String },
     /// Stop holding a removal against a computer, so a code pairs it again.
     ComputerForget { computer: String },
+    /// Trust a computer a phone introduced like one paired here: its
+    /// removals apply and it may bring a phone. A person at this machine only.
+    ComputerAllow { computer: String },
     /// Dial another computer and say `peer_hello`. `via` is `lan`, `relay`
     /// or `any` (absent).
     ComputerPing {
@@ -304,6 +310,8 @@ pub enum Reply {
     Computers { computers: Vec<rime_remote_core::peer::Listed> },
     ComputerRemoved { id: String, name: String },
     ComputerForgotten { id: String, name: String },
+    ComputerAllowed { id: String, name: String },
+    DeviceAllowed { id: String, name: String },
     /// Another computer answered `peer_hello`: what it calls itself, its
     /// protocol and build, the path and the time the whole dial took.
     ComputerPong {
@@ -422,6 +430,7 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
             Err(e) => Reply::error(e.to_string()),
         },
         Request::Revoke { device } => revoke(state, &device),
+        Request::DeviceAllow { device } => allow_device(state, &device),
         Request::Ring { device } => ring(state, &device),
         Request::Focus { dnd } => focus(state, dnd),
         Request::Clipboard { text, sensitive } => clipboard(state, &text, sensitive),
@@ -453,6 +462,7 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::Computers => crate::computers::list(state),
         Request::ComputerRemove { computer } => crate::computers::remove(state, &computer),
         Request::ComputerForget { computer } => crate::computers::forget(state, &computer),
+        Request::ComputerAllow { computer } => crate::computers::allow(state, &computer),
         Request::ComputerPing { computer, via } => crate::computers::ping(state, &computer, via.as_deref()),
     }
 }
@@ -535,6 +545,9 @@ fn authorized_by(
         // a person only. Forgetting lets a computer pair again: the same.
         Request::ComputerRemove { .. } => computers_caller(peer, observe, may_remove_computer),
         Request::ComputerForget { .. } => computers_caller(peer, observe, may_forget_computer),
+        // Allowing gives an introduced device the authority of one paired
+        // here: a person's decision, like pairing.
+        Request::DeviceAllow { .. } | Request::ComputerAllow { .. } => computers_caller(peer, observe, may_allow),
         _ => own_user(peer),
     }
 }
@@ -593,6 +606,19 @@ pub fn may_forget_computer(origin: RequestOrigin) -> Result<(), String> {
     Err(format!(
         "a {origin} request cannot forget a removed computer: that lets it pair again, so only a person \
          at this machine may do it. Run `rime remote computers forget` from a terminal"
+    ))
+}
+
+/// The allow rule over a value: allowing an introduced phone or computer
+/// gives it what one paired here has, so it is a person's decision.
+pub fn may_allow(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot allow an introduced device: that gives it what a device paired here has, so \
+         only a person at this machine may do it. Run `rime remote devices allow` or `rime remote computers allow` \
+         from a terminal"
     ))
 }
 
@@ -806,7 +832,26 @@ fn pair(state: &State) -> Reply {
     }
 }
 
-fn revoke(state: &State, device: &str) -> Reply {
+/// `rime remote devices allow <phone>`: the phone's own key opens a Full
+/// session from now on. Its connections end, so it reconnects with it.
+fn allow_device(state: &State, device: &str) -> Reply {
+    let mut store = match state.devices() {
+        Ok(s) => s,
+        Err(e) => return Reply::error(e.to_string()),
+    };
+    let d = match store.allow_phone(device, rime_remote_core::now_ms()) {
+        Ok(d) => d,
+        Err(e) => return Reply::error(e.to_string()),
+    };
+    if let Err(e) = state.save_devices(&store) {
+        return Reply::error(format!("the device was not written: {e}"));
+    }
+    drop(store);
+    state.drop_connections_for(&d.id);
+    Reply::DeviceAllowed { id: d.id, name: d.name }
+}
+
+pub fn revoke(state: &State, device: &str) -> Reply {
     let mut store = match state.devices() {
         Ok(s) => s,
         Err(e) => return Reply::error(e.to_string()),
@@ -1475,6 +1520,8 @@ mod tests {
             Request::ComputerRemove { computer: "desk".into() },
             Request::ComputerForget { computer: "desk".into() },
             Request::ComputerPing { computer: "desk".into(), via: None },
+            Request::ComputerAllow { computer: "laptop".into() },
+            Request::DeviceAllow { device: "pixel".into() },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1539,6 +1586,11 @@ mod tests {
                 Request::ComputerForget { .. } => assert_eq!(
                     verdict.is_ok(),
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_forget_computer(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
+                Request::ComputerAllow { .. } | Request::DeviceAllow { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_allow(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
@@ -1628,6 +1680,20 @@ mod tests {
         }
         assert!(authorized_by(&forget, Some(me), |_| Err("no cgroup".into())).is_err());
         assert!(authorized_by(&forget, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        // Allowing an introduced phone or computer gives it what one paired
+        // here has: a person's too.
+        for allow in [Request::DeviceAllow { device: "pixel".into() }, Request::ComputerAllow { computer: "laptop".into() }] {
+            for o in RequestOrigin::ALL {
+                let verdict = authorized_by(&allow, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} allow: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("allow"), "{why}");
+                }
+            }
+            assert!(authorized_by(&allow, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_err(), "a job may allow");
+            assert!(authorized_by(&allow, Some(me), |_| Err("no cgroup".into())).is_err());
+            assert!(authorized_by(&allow, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
         // Listing and pinging are this account's, like devices: a ping is
         // one hello, and a list changes nothing.
         for req in [
@@ -1846,6 +1912,22 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Reply::ComputerForgotten { id: "i".into(), name: "d".into() }).unwrap(),
             r#"{"reply":"computer_forgotten","id":"i","name":"d"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::ComputerAllow { computer: "d".into() }).unwrap(),
+            r#"{"cmd":"computer_allow","computer":"d"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::ComputerAllowed { id: "i".into(), name: "d".into() }).unwrap(),
+            r#"{"reply":"computer_allowed","id":"i","name":"d"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::DeviceAllow { device: "p".into() }).unwrap(),
+            r#"{"cmd":"device_allow","device":"p"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::DeviceAllowed { id: "i".into(), name: "p".into() }).unwrap(),
+            r#"{"reply":"device_allowed","id":"i","name":"p"}"#
         );
         assert_eq!(
             serde_json::to_string(&Reply::ComputerCode { code: "012345".into(), expires_ms: 1, machine: "m".into() })

@@ -33,6 +33,7 @@ mod computers;
 mod control;
 mod dialer;
 mod discovery;
+mod intro;
 mod machine;
 mod media;
 mod messages;
@@ -280,6 +281,10 @@ fn run(args: &[String]) -> Result<(), String> {
         // not wait on it. What did not happen is said in a notice.
         let state = Arc::clone(&state);
         mirror::mirror().on_action(Box::new(move |device, key, action| {
+            // Remove on a "joined" notification (intro.rs): it only takes away.
+            if intro::on_action(&state, device, key, action) {
+                return;
+            }
             if key != calls::CALL_KEY || !matches!(action, "answer" | "decline") {
                 return;
             }
@@ -308,6 +313,13 @@ fn run(args: &[String]) -> Result<(), String> {
         // with no channel open makes the method an error, not a success.
         let state = Arc::clone(&state);
         media::media().on_control(Box::new(move |device, line| state.events.send(device, line)));
+    }
+
+    // Flow B (intro.rs): a phone that says join is brought to this
+    // computer's other computers, off the connection threads.
+    {
+        let state = Arc::clone(&state);
+        std::thread::spawn(move || intro::supervise(state));
     }
 
     let control_path = crate::state::control_socket();
