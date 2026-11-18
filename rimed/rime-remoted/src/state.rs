@@ -52,6 +52,9 @@ pub struct Live {
     /// had to be pushed somewhere on every ping would be a lock held across
     /// a write.
     pub rtt_ms: Arc<Mutex<Option<u64>>>,
+    /// Which of the device's keys opened it: what this connection may do,
+    /// and which connections a forgotten or replaced companion key ends.
+    pub scope: rime_remote_core::device::Scope,
 }
 
 pub struct State {
@@ -394,6 +397,24 @@ impl State {
         }
     }
 
+    /// End a device's companion-scope connections and leave its full ones.
+    ///
+    /// For `companion_forget` and a replaced companion key: the key that
+    /// opened them no longer opens anything, so neither should the sessions
+    /// it already opened.
+    pub fn drop_companion_connections_for(&self, device_id: &str) {
+        if let Ok(mut v) = self.live.lock() {
+            v.retain(|l| {
+                if l.device_id == device_id && l.scope == rime_remote_core::device::Scope::Companion {
+                    let _ = l.socket.shutdown(std::net::Shutdown::Both);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
     /// Every connection open right now, with its path and its round trip.
     ///
     /// P1-052's last criterion. Live only: nothing here is read back from the
@@ -687,6 +708,7 @@ mod tests {
             path: RemotePath::Lan,
             since_ms: 0,
             rtt_ms: Arc::new(Mutex::new(None)),
+            scope: rime_remote_core::device::Scope::Full,
         };
         let live = Mutex::new(vec![sample(p1, s1), sample(p2, s2)]);
         // Exercised through the same predicate the daemon uses, over a
@@ -712,5 +734,53 @@ mod tests {
         let mine = control_socket_in(dir);
         assert!(mine.ends_with("rime-remoted/control.sock"), "{mine:?}");
         assert_ne!(mine, rime_agent_core::paths::control_socket());
+    }
+
+    #[test]
+    fn forgetting_a_companion_key_ends_its_sessions_and_leaves_the_full_one() {
+        use rime_remote_core::device::Scope;
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!(
+            "rime-state-companion-{}-{}",
+            std::process::id(),
+            rime_remote_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let state = State::new(
+            rime_remote_core::identity::Identity::generate().expect("identity"),
+            "m".into(),
+            47717,
+            std::net::IpAddr::from([0u8; 16]),
+            None,
+            dir.join("devices.json"),
+            crate::serve::PING_INTERVAL,
+        )
+        .expect("state");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut far = Vec::new();
+        for (id, scope) in [("d", Scope::Full), ("d", Scope::Companion), ("e", Scope::Companion)] {
+            let c = std::net::TcpStream::connect(addr).expect("connect");
+            let (s, _) = listener.accept().expect("accept");
+            state.register(Live {
+                device_id: id.into(),
+                peer: s.peer_addr().ok(),
+                socket: s,
+                device_name: "a phone".into(),
+                path: RemotePath::Lan,
+                since_ms: 0,
+                rtt_ms: Arc::new(Mutex::new(None)),
+                scope,
+            });
+            c.set_read_timeout(Some(std::time::Duration::from_millis(300))).ok();
+            far.push(c);
+        }
+        state.drop_companion_connections_for("d");
+        let left: Vec<String> = state.connections().into_iter().map(|c| c.device_id).collect();
+        assert_eq!(left, ["d", "e"], "the wrong connections survived");
+        let mut b = [0u8; 1];
+        assert!(matches!(far[1].read(&mut b), Ok(0)), "the companion connection is still open");
+        assert!(far[0].read(&mut b).is_err(), "the full connection was closed");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

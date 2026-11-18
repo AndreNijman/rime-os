@@ -26,6 +26,7 @@
 //! this refuses to rely on one guard for it. `--allow-foreground` is there
 //! for a developer running it by hand, and it says what it is giving up.
 
+mod companion;
 mod control;
 mod discovery;
 mod machine;
