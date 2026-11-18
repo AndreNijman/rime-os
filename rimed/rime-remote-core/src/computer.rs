@@ -212,6 +212,10 @@ pub struct About {
     pub lan: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
+    /// The port it listens on, so the other side can dial it back at the
+    /// address the connection came from even when `lan` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 impl About {
@@ -244,6 +248,7 @@ impl About {
             name,
             lan: self.lan,
             relay: self.relay,
+            port: self.port,
         })
     }
 }
@@ -391,14 +396,19 @@ fn remote_key(hs: &Handshake) -> Result<[u8; 32], PairError> {
 
 /// The computer the code is typed into. The caller has connected `stream` and
 /// written the computer-pairing hello byte; this runs the rest.
+///
+/// `may_store` is asked as soon as the other computer has shown its key, so a
+/// key this side would refuse to store (one it removed, one that is a phone)
+/// ends the attempt before the other side stores anything.
 pub fn dial<S: Read + Write>(
     stream: &mut S,
     own_secret: &[u8; 32],
     code: &str,
     about: &About,
     version: u32,
+    may_store: impl FnOnce(&[u8; 32]) -> Result<(), PairError>,
 ) -> Result<Paired, PairError> {
-    dial_checked(stream, own_secret, code, about, version, true)
+    dial_checked(stream, own_secret, code, about, version, may_store, true)
 }
 
 /// [`dial`], with the copied-home check switchable so a test can reach the
@@ -409,6 +419,7 @@ fn dial_checked<S: Read + Write>(
     code: &str,
     about: &About,
     version: u32,
+    may_store: impl FnOnce(&[u8; 32]) -> Result<(), PairError>,
     refuse_own_key: bool,
 ) -> Result<Paired, PairError> {
     let code = normalize_code(code)?;
@@ -427,6 +438,7 @@ fn dial_checked<S: Read + Write>(
     if refuse_own_key && theirs == own {
         return Err(PairError::OwnKey);
     }
+    may_store(&theirs)?;
     write_message(stream, &hs.write(b"").map_err(noise)?)?;
     let hash = hs.handshake_hash();
     let mut channel = hs.into_transport().map_err(noise)?;
@@ -564,7 +576,7 @@ mod tests {
     }
 
     fn about(name: &str) -> About {
-        About { name: name.into(), lan: vec!["192.168.1.9:7717".into()], relay: None }
+        About { name: name.into(), lan: vec!["192.168.1.9:7717".into()], relay: None, port: None }
     }
 
     struct Run {
@@ -610,7 +622,7 @@ mod tests {
             drop(b);
             r
         });
-        let dialer = dial_checked(&mut a, &dialer_secret, typed, &about("laptop"), V, refuse_own_key);
+        let dialer = dial_checked(&mut a, &dialer_secret, typed, &about("laptop"), V, |_| Ok(()), refuse_own_key);
         drop(a);
         let shower = shower.join().expect("shower thread");
         Run { dialer, shower, commits: commits.load(Ordering::SeqCst), spent: spent.load(Ordering::SeqCst) }
@@ -700,7 +712,7 @@ mod tests {
             // Whatever the dialler sends next, if anything.
             recv(&mut b, &mut ch, || PairError::NoCode).ok()
         });
-        let r = dial(&mut a, &secret(), "123456", &about("laptop"), V);
+        let r = dial(&mut a, &secret(), "123456", &about("laptop"), V, |_| Ok(()));
         drop(a);
         assert!(matches!(r, Err(PairError::WrongCode)), "{r:?}");
         let next = forged.join().expect("forger thread");
@@ -754,11 +766,11 @@ mod tests {
     fn what_the_other_computer_says_about_itself_is_checked() {
         assert!(about("desk").checked().is_ok());
         for bad in [
-            About { name: "a\nb".into(), lan: vec![], relay: None },
-            About { name: String::new(), lan: vec![], relay: None },
-            About { name: "x".into(), lan: vec!["not an address".into()], relay: None },
-            About { name: "x".into(), lan: vec!["10.0.0.1:1".into(); MAX_ADDRESSES + 1], relay: None },
-            About { name: "x".into(), lan: vec![], relay: Some("ftp://nope".into()) },
+            About { name: "a\nb".into(), lan: vec![], relay: None, port: None },
+            About { name: String::new(), lan: vec![], relay: None, port: None },
+            About { name: "x".into(), lan: vec!["not an address".into()], relay: None, port: None },
+            About { name: "x".into(), lan: vec!["10.0.0.1:1".into(); MAX_ADDRESSES + 1], relay: None, port: None },
+            About { name: "x".into(), lan: vec![], relay: Some("ftp://nope".into()), port: None },
         ] {
             assert!(bad.clone().checked().is_err(), "{bad:?}");
         }
