@@ -61,6 +61,18 @@ pub enum RemoteCmd {
         /// Device id, or its name when that names exactly one.
         device: String,
     },
+    /// Turn Do Not Disturb on or off on every phone that follows this
+    /// computer's.
+    ///
+    /// Reaches each connected phone that has Focus turned on in Rime Remote,
+    /// and says how many; none is not an error. It sets a state rather than
+    /// flipping one, so a phone already there is left as it is. Rime Shell
+    /// runs this when you toggle Do Not Disturb, if "Do Not Disturb follows
+    /// your phone" is on.
+    Focus {
+        /// `on` or `off`.
+        state: FocusState,
+    },
     /// Send files or text to a paired phone.
     ///
     /// The phone takes it without asking: text goes onto its clipboard, a
@@ -99,6 +111,13 @@ pub enum RemoteCmd {
     Enable,
 }
 
+/// What `rime remote focus` sets.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusState {
+    On,
+    Off,
+}
+
 // The control protocol, duplicated here as the client half. Kept in step by
 // `rime-remoted`'s own round-trip tests plus the shape assertions below; a
 // shared crate for four request variants would be a crate to keep in step
@@ -111,6 +130,7 @@ enum Request {
     Devices,
     Revoke { device: String },
     Ring { device: String },
+    Focus { dnd: bool },
     Send {
         device: String,
         kind: &'static str,
@@ -130,7 +150,21 @@ struct Phone {
     charging: Option<bool>,
     #[serde(default)]
     can: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    network: Option<Network>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dnd: Option<bool>,
     reported_ms: u64,
+}
+
+/// How the phone said it is connected (contract §2.5): `type` is one of
+/// wifi, cellular, ethernet, none, other; `signal` 0 to 4 when known.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Network {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    signal: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,6 +195,9 @@ enum Reply {
         device: String,
         path: String,
     },
+    Focused {
+        reached: usize,
+    },
     Sent {
         device: String,
         path: String,
@@ -185,6 +222,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         RemoteCmd::Devices { json } => devices(json),
         RemoteCmd::Revoke { device } => revoke(&device),
         RemoteCmd::Ring { device } => ring(&device),
+        RemoteCmd::Focus { state } => focus(state == FocusState::On),
         RemoteCmd::Send { device, files, clipboard, text } => send(&device, &files, clipboard, text),
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
@@ -351,7 +389,7 @@ fn devices(json: bool) -> Result<i32> {
     let reported: Vec<String> = devices
         .iter()
         .filter(|d| d.is_active())
-        .filter_map(|d| phones.get(&d.id).and_then(|p| battery_line(&d.name, p)))
+        .filter_map(|d| phones.get(&d.id).and_then(|p| phone_line(&d.name, p)))
         .collect();
     if !reported.is_empty() {
         println!();
@@ -380,15 +418,64 @@ fn with_phones(
     Ok(serde_json::Value::Array(out))
 }
 
-/// "Pixel 8: battery 62%, charging, reported 3m ago", or nothing when the phone
-/// reported no battery.
-fn battery_line(name: &str, p: &Phone) -> Option<String> {
-    let battery = p.battery?;
-    let charging = match p.charging {
-        Some(true) => ", charging",
-        _ => "",
+/// "Pixel 8: battery 62%, charging, Wi-Fi signal 3/4, Do Not Disturb,
+/// reported 3m ago": whatever the phone reported, or nothing when it reported
+/// none of it. Do Not Disturb is named only while it is on; off is the
+/// ordinary state and a word for it on every line would be noise.
+fn phone_line(name: &str, p: &Phone) -> Option<String> {
+    let mut said: Vec<String> = Vec::new();
+    if let Some(battery) = p.battery {
+        let charging = if p.charging == Some(true) { ", charging" } else { "" };
+        said.push(format!("battery {battery}%{charging}"));
+    }
+    if let Some(n) = &p.network {
+        said.push(network_words(n));
+    }
+    if p.dnd == Some(true) {
+        said.push("Do Not Disturb".into());
+    }
+    if said.is_empty() {
+        return None;
+    }
+    Some(format!("{name}: {}, reported {}", said.join(", "), ago(p.reported_ms)))
+}
+
+/// "Wi-Fi signal 3/4", "mobile data", "no network".
+fn network_words(n: &Network) -> String {
+    let kind = match n.kind.as_str() {
+        "wifi" => "Wi-Fi",
+        "cellular" => "mobile data",
+        "ethernet" => "Ethernet",
+        "none" => "no network",
+        _ => "online",
     };
-    Some(format!("{name}: battery {battery}%{charging}, reported {}", ago(p.reported_ms)))
+    match n.signal {
+        Some(s) => format!("{kind} signal {s}/4"),
+        None => kind.to_string(),
+    }
+}
+
+fn focus(dnd: bool) -> Result<i32> {
+    let state = if dnd { "on" } else { "off" };
+    match call(&Request::Focus { dnd })? {
+        Reply::Focused { reached: 0 } => {
+            eprintln!(
+                "rime: No phone follows this computer's Do Not Disturb right now: none is connected \
+                 with Focus turned on in Rime Remote."
+            );
+            Ok(0)
+        }
+        Reply::Focused { reached } => {
+            let phones = if reached == 1 { "phone" } else { "phones" };
+            eprintln!("rime: told {reached} {phones} to turn Do Not Disturb {state}.");
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
 }
 
 fn ring(device: &str) -> Result<i32> {
@@ -802,6 +889,8 @@ mod tests {
             r#"{"reply":"devices","devices":[]}"#,
             r#"{"reply":"devices","devices":[],"phones":{"d":{"battery":5,"can":["ring"],"reported_ms":1}}}"#,
             r#"{"reply":"rang","device":"Pixel","path":"push"}"#,
+            r#"{"reply":"focused","reached":0}"#,
+            r#"{"reply":"devices","devices":[],"phones":{"d":{"battery":5,"can":["focus"],"network":{"type":"wifi","signal":3},"dnd":true,"reported_ms":1}}}"#,
             r#"{"reply":"status","version":1,"key":"k","machine":"l16","lan":[],"relay":null,"rendezvous":"r","paired":0,"offer_ms_left":null}"#,
         ] {
             serde_json::from_str::<Reply>(text).unwrap_or_else(|e| panic!("{text}: {e}"));
@@ -877,7 +966,14 @@ mod tests {
                 {"id":"cccc","name":"Tab","public_key":"k3","paired_ms":4}]"#,
         )
         .expect("devices");
-        let phone = Phone { battery: Some(62), charging: Some(true), can: vec!["ring".into()], reported_ms: 0 };
+        let phone = Phone {
+            battery: Some(62),
+            charging: Some(true),
+            can: vec!["ring".into()],
+            network: None,
+            dnd: None,
+            reported_ms: 0,
+        };
         let phones: std::collections::BTreeMap<String, Phone> =
             [("aaaa".to_string(), phone.clone()), ("bbbb".to_string(), phone.clone())].into();
         let v = with_phones(&devices, &phones).expect("json");
@@ -885,9 +981,55 @@ mod tests {
         assert!(v[1].get("phone").is_none(), "a revoked device's report must not show");
         assert!(v[2].get("phone").is_none(), "a device that never reported has none");
         assert_eq!(v[0]["name"], "Pixel", "the device's own fields are kept");
-        let line = battery_line("Pixel", &phone).expect("line");
+        let line = phone_line("Pixel", &phone).expect("line");
         assert!(line.starts_with("Pixel: battery 62%, charging, reported "), "{line}");
-        assert_eq!(battery_line("Pixel", &Phone { battery: None, ..phone }), None);
+        assert_eq!(phone_line("Pixel", &Phone { battery: None, ..phone.clone() }), None);
+    }
+
+    #[test]
+    fn a_phones_network_and_do_not_disturb_show_on_its_line_and_in_its_json() {
+        let wifi = Some(Network { kind: "wifi".into(), signal: Some(3) });
+        let phone = Phone {
+            battery: Some(62),
+            charging: Some(false),
+            can: vec!["focus".into()],
+            network: wifi.clone(),
+            dnd: Some(true),
+            reported_ms: 0,
+        };
+        let line = phone_line("Pixel", &phone).expect("line");
+        assert!(line.starts_with("Pixel: battery 62%, Wi-Fi signal 3/4, Do Not Disturb, reported "), "{line}");
+        // No battery is no longer no line: the network alone is worth saying.
+        let mobile = Phone {
+            battery: None,
+            network: Some(Network { kind: "cellular".into(), signal: None }),
+            dnd: Some(false),
+            ..phone.clone()
+        };
+        let line = phone_line("Pixel", &mobile).expect("line");
+        assert!(line.starts_with("Pixel: mobile data, reported "), "{line}");
+        assert_eq!(network_words(&Network { kind: "none".into(), signal: None }), "no network");
+        assert_eq!(network_words(&Network { kind: "ethernet".into(), signal: None }), "Ethernet");
+        // `--json` re-serialises through this struct, so a field it lacked
+        // would vanish from the output without a word.
+        let v = serde_json::to_value(&phone).expect("json");
+        assert_eq!(v["network"], serde_json::json!({"type": "wifi", "signal": 3}));
+        assert_eq!(v["dnd"], true);
+    }
+
+    #[test]
+    fn focus_is_its_own_request_on_the_wire_and_takes_on_or_off() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        assert_eq!(serde_json::to_string(&Request::Focus { dnd: true }).unwrap(), r#"{"cmd":"focus","dnd":true}"#);
+        assert!(matches!(Cli::try_parse_from(["r", "focus", "on"]).expect("on").cmd, RemoteCmd::Focus { state: FocusState::On }));
+        assert!(matches!(Cli::try_parse_from(["r", "focus", "off"]).expect("off").cmd, RemoteCmd::Focus { state: FocusState::Off }));
+        assert!(Cli::try_parse_from(["r", "focus", "toggle"]).is_err(), "focus sets a state; it does not flip one");
+        assert!(Cli::try_parse_from(["r", "focus"]).is_err());
     }
 
     #[test]

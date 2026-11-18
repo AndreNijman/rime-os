@@ -228,6 +228,10 @@ fn run(args: &[String]) -> Result<(), String> {
     if let Some(p) = flag(args, "--nexd") {
         state.set_nexd(PathBuf::from(p));
     }
+    // A phone's Do Not Disturb, for the Shell to follow (contract §2.9).
+    // Every harness gives this daemon a private XDG_RUNTIME_DIR, so a test
+    // never writes where the real Shell is watching.
+    state.set_focus_file(phone::focus_file_in(&rime_agent_core::paths::runtime_dir()));
 
     // A phone notification the person dismissed here is cancelled on the
     // phone, if the phone said it does that; otherwise it stays there.

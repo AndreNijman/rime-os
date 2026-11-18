@@ -25,6 +25,13 @@
 //! so an agent that could send would choose what a person pastes on their
 //! phone (contract §2.6).
 //!
+//! `focus` (contract §2.9) is not gated that way either, for the same reason
+//! `ring` is not: it changes how a phone of the owner's interrupts them, which
+//! the owner can change back on the phone, and the Shell sends it every time
+//! the person toggles Do Not Disturb, from a process the origin rule cannot
+//! always classify. It is still this account's alone, and a paired phone has
+//! no verb that sends it.
+//!
 //! Listing and revoking are *not* gated that way. Revoking a device is the
 //! safe direction — an agent that revokes the owner's phone is a nuisance,
 //! not an escalation, and the owner is the only one who can pair it back.
@@ -56,6 +63,9 @@ pub enum Request {
     Revoke { device: String },
     /// Make a paired phone ring, by id or name.
     Ring { device: String },
+    /// Set Do Not Disturb on every connected phone that said it follows this
+    /// machine's (`can` has "focus").
+    Focus { dnd: bool },
     /// Send a phone a file (`kind` "file": the open file rides the request
     /// line as a descriptor, `name` is what the phone is offered) or text
     /// for its clipboard (`kind` "text").
@@ -107,6 +117,9 @@ pub enum Reply {
         #[serde(default)]
         phones: std::collections::BTreeMap<String, crate::phone::PhoneReport>,
     },
+    /// A `focus` line went to this many phones' open events channels. Zero
+    /// is an answer, not an error: no phone connected, or none said "focus".
+    Focused { reached: usize },
     /// A ring went out. `path` is `link` when the app said it is ringing, or
     /// `push` when the push service took the request (the phone rings if it
     /// is on and online, which nobody here can see).
@@ -227,6 +240,7 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         },
         Request::Revoke { device } => revoke(state, &device),
         Request::Ring { device } => ring(state, &device),
+        Request::Focus { dnd } => focus(state, dnd),
         Request::Send {
             device,
             kind,
@@ -419,6 +433,25 @@ fn revoke(state: &State, device: &str) -> Reply {
     // battery has no business staying in the Shell.
     state.phone_forget(&revoked.id);
     Reply::Ok
+}
+
+/// Tell every connected phone that follows this machine's Do Not Disturb what
+/// it is now. A state, not a toggle: a phone already there changes nothing,
+/// and the report it sends back matches what the Shell already shows, so
+/// nothing comes round again.
+///
+/// Only phones with an events channel open: a phone that is not connected
+/// takes the computer's state from nothing, and pushing it to wake one would
+/// be a notification for a setting. Revoked devices have no channel.
+fn focus(state: &State, dnd: bool) -> Reply {
+    let line = crate::phone::focus_line(dnd);
+    let reached = state
+        .phones()
+        .iter()
+        .filter(|(_, report)| report.can_focus())
+        .filter(|(id, _)| state.events.send(id, &line))
+        .count();
+    Reply::Focused { reached }
 }
 
 fn ring(state: &State, device: &str) -> Reply {
@@ -700,6 +733,7 @@ mod tests {
             Request::Ring {
                 device: "somebody-elses-phone".into(),
             },
+            Request::Focus { dnd: true },
             Request::Send {
                 device: "somebody-elses-phone".into(),
                 kind: "text".into(),
@@ -782,6 +816,7 @@ mod tests {
             Request::Ring {
                 device: "pixel-8".into(),
             },
+            Request::Focus { dnd: false },
             Request::Send {
                 device: "pixel-8".into(),
                 kind: "text".into(),
@@ -789,6 +824,9 @@ mod tests {
                 text: Some("line one\nline two".into()),
             },
         ];
+        // The wire shape `rime remote focus` and the Shell's call depend on.
+        assert_eq!(serde_json::to_string(&Request::Focus { dnd: true }).unwrap(), r#"{"cmd":"focus","dnd":true}"#);
+        assert_eq!(serde_json::to_string(&Reply::Focused { reached: 2 }).unwrap(), r#"{"reply":"focused","reached":2}"#);
         for r in &requests {
             let text = serde_json::to_string(r).expect("serialise");
             assert!(!text.contains('\n'), "{text}");
@@ -803,6 +841,7 @@ mod tests {
             },
             Reply::Devices { devices: vec![], phones: Default::default() },
             Reply::Rang { device: "Pixel".into(), path: "link".into() },
+            Reply::Focused { reached: 0 },
             Reply::Sent { device: "Pixel".into(), path: "waiting".into(), id: 3, push_error: Some("503".into()) },
             Reply::Status {
                 version: 1,
