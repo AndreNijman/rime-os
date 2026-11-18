@@ -93,6 +93,34 @@ pub enum RemoteCmd {
         #[arg(long, value_name = "TEXT")]
         text: Option<String>,
     },
+    /// Read a phone's SMS conversations, or send one from it.
+    ///
+    /// The phone must have "Messages on your computer" turned on in Rime
+    /// Remote and be connected. Nothing is kept on this computer: each run asks
+    /// the phone again. Only you, at this machine, can read or send; an agent
+    /// cannot, because messages carry sign-in codes.
+    ///
+    /// Without --thread it lists the newest conversations; with it, that
+    /// conversation's newest messages. `--json` is how Rime Shell reads them.
+    #[command(args_conflicts_with_subcommands = true)]
+    Messages {
+        #[command(subcommand)]
+        action: Option<MessagesCmd>,
+        /// Device id or name. May be left out when one phone has Messages on.
+        #[arg(long)]
+        device: Option<String>,
+        /// Show this conversation's messages (its id from the list).
+        #[arg(long, value_name = "ID")]
+        thread: Option<u64>,
+        /// Only what is older than this, in Unix milliseconds: the next page.
+        #[arg(long, value_name = "MS")]
+        before: Option<u64>,
+        /// How many conversations or messages, from 1 to 50 (default 20).
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Whether the service is running, and how a device would reach it.
     ///
     /// Including every connection open right now: which path it came in on,
@@ -109,6 +137,31 @@ pub enum RemoteCmd {
     /// LAN access needs `rime firewall allow rime-remote`, which is root, and
     /// is a separate decision because the relay path works without it.
     Enable,
+}
+
+/// What `rime remote messages` can do besides reading.
+#[derive(Subcommand, Debug)]
+pub enum MessagesCmd {
+    /// Send one SMS from the phone. The text is read from standard input,
+    /// never from the command line, so it stays out of your shell history and
+    /// the process list.
+    ///
+    /// Sent only while Rime Remote is unlocked on the phone. Waits until the
+    /// phone's mobile network takes it, and says if it did not.
+    #[command(group(clap::ArgGroup::new("whom").required(true).args(["to", "thread"])))]
+    Send {
+        /// Device id or name. May be left out when one phone has Messages on.
+        #[arg(long)]
+        device: Option<String>,
+        /// The phone number to send to.
+        #[arg(long, value_name = "NUMBER")]
+        to: Option<String>,
+        /// The conversation to send into (its id from the list).
+        #[arg(long, value_name = "ID")]
+        thread: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// What `rime remote focus` sets.
@@ -139,6 +192,48 @@ enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
+    Messages {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    MessagesSend {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread: Option<u64>,
+        text: String,
+    },
+}
+
+/// One SMS conversation, as the phone described it (contract §2.11).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SmsThread {
+    id: u64,
+    addresses: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    snippet: String,
+    date_ms: u64,
+    unread: u32,
+    count: u32,
+}
+
+/// One SMS in a conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Sms {
+    id: u64,
+    date_ms: u64,
+    from_me: bool,
+    body: String,
+    status: String,
 }
 
 /// A phone's last report, as `rime-remoted` keeps it.
@@ -210,6 +305,20 @@ enum Reply {
         #[serde(default)]
         push_error: Option<String>,
     },
+    Messages {
+        device: String,
+        #[serde(default)]
+        threads: Option<Vec<SmsThread>>,
+        #[serde(default)]
+        thread: Option<u64>,
+        #[serde(default)]
+        messages: Option<Vec<Sms>>,
+        #[serde(default)]
+        changed_ms: Option<u64>,
+    },
+    MessageSent {
+        device: String,
+    },
     Ok,
     Error {
         message: String,
@@ -228,6 +337,12 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         RemoteCmd::Ring { device } => ring(&device),
         RemoteCmd::Focus { state } => focus(state == FocusState::On),
         RemoteCmd::Send { device, files, clipboard, text } => send(&device, &files, clipboard, text),
+        RemoteCmd::Messages { action: Some(MessagesCmd::Send { device, to, thread, json }), .. } => {
+            messages_send(device, to, thread, json)
+        }
+        RemoteCmd::Messages { action: None, device, thread, before, limit, json } => {
+            messages(Request::Messages { device, thread, before, limit }, json)
+        }
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
     };
@@ -250,10 +365,18 @@ fn call(req: &Request) -> Result<Reply> {
     call_with(req, None)
 }
 
+/// How long `rime remote messages send` waits: the service waits up to 35 s
+/// for the phone's mobile network, so this is longer.
+const SEND_SMS_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+
 /// One request, with `fd` passed beside its line when there is one (the
 /// file `send` offers: the service reads it through this descriptor, never
 /// by its path, so it needs no access to where the file lives).
 fn call_with(req: &Request, fd: Option<std::os::fd::RawFd>) -> Result<Reply> {
+    call_for(req, fd, std::time::Duration::from_secs(20))
+}
+
+fn call_for(req: &Request, fd: Option<std::os::fd::RawFd>, wait: std::time::Duration) -> Result<Reply> {
     let path = socket_path();
     let stream = UnixStream::connect(&path).with_context(|| {
         format!(
@@ -264,7 +387,7 @@ fn call_with(req: &Request, fd: Option<std::os::fd::RawFd>) -> Result<Reply> {
         )
     })?;
     stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .set_read_timeout(Some(wait))
         .ok();
     let mut writer = stream.try_clone().context("cloning the control socket")?;
     let mut reader = BufReader::new(stream);
@@ -570,6 +693,130 @@ fn send(device: &str, files: &[PathBuf], clipboard: bool, text: Option<String>) 
         }
     }
     Ok(code)
+}
+
+/// The most a message read from standard input may be, in bytes: 2,000
+/// characters of four bytes each, and one more so a longer one is refused in
+/// words rather than read whole. The service counts characters.
+const MAX_SMS_BYTES: u64 = 2000 * 4 + 1;
+
+fn messages(req: Request, json: bool) -> Result<i32> {
+    match call(&req)? {
+        Reply::Messages { device, threads, thread, messages, changed_ms } => {
+            if json {
+                let mut v = serde_json::json!({"device": device});
+                if let Some(t) = &threads {
+                    v["threads"] = serde_json::to_value(t)?;
+                }
+                if let Some(id) = thread {
+                    v["thread"] = id.into();
+                    v["messages"] = serde_json::to_value(messages.as_deref().unwrap_or_default())?;
+                }
+                if let Some(c) = changed_ms {
+                    v["changed_ms"] = c.into();
+                }
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(0);
+            }
+            if let Some(threads) = threads {
+                print!("{}", threads_table(&device, &threads));
+            } else {
+                print!("{}", thread_text(&device, thread.unwrap_or_default(), messages.as_deref().unwrap_or_default()));
+            }
+            Ok(0)
+        }
+        Reply::Error { message } => messages_error(&message, json),
+        _ => unexpected(),
+    }
+}
+
+fn messages_error(message: &str, json: bool) -> Result<i32> {
+    if json {
+        println!("{}", serde_json::json!({"error": message}));
+    }
+    eprintln!("rime: {message}");
+    Ok(1)
+}
+
+fn threads_table(device: &str, threads: &[SmsThread]) -> String {
+    if threads.is_empty() {
+        return format!("{device} has no SMS conversations.\n");
+    }
+    let mut out = format!("{:<8} {:<26} {:<9} {:<7} LAST\n", "ID", "WITH", "WHEN", "UNREAD");
+    for t in threads {
+        let with = match &t.name {
+            Some(n) => n.clone(),
+            None => t.addresses.join(", "),
+        };
+        let unread = if t.unread > 0 { t.unread.to_string() } else { "-".into() };
+        out.push_str(&format!(
+            "{:<8} {:<26} {:<9} {:<7} {}\n",
+            t.id,
+            truncate(&with, 26),
+            ago(t.date_ms),
+            unread,
+            truncate(&t.snippet, 60)
+        ));
+    }
+    out.push_str(&format!("(from {device}. `rime remote messages --thread ID` shows one.)\n"));
+    out
+}
+
+/// One conversation, oldest first so it reads down like a chat.
+fn thread_text(device: &str, thread: u64, messages: &[Sms]) -> String {
+    if messages.is_empty() {
+        return format!("conversation {thread} on {device} has no messages.\n");
+    }
+    let mut out = String::new();
+    for m in messages.iter().rev() {
+        let who = if m.from_me { "me" } else { "them" };
+        let status = match m.status.as_str() {
+            "received" | "sent" | "delivered" => String::new(),
+            s => format!(" [{s}]"),
+        };
+        out.push_str(&format!("{who}, {}{status}:\n", ago(m.date_ms)));
+        for line in m.body.lines() {
+            out.push_str(&format!("  {line}\n"));
+        }
+    }
+    out
+}
+
+fn messages_send(device: Option<String>, to: Option<String>, thread: Option<u64>, json: bool) -> Result<i32> {
+    use std::io::IsTerminal;
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        eprintln!("rime: type the message, then press Ctrl-D on a new line.");
+    }
+    let text = read_sms(stdin.lock())?;
+    let reply = call_for(&Request::MessagesSend { device, to, thread, text }, None, SEND_SMS_WAIT)?;
+    match reply {
+        Reply::MessageSent { device } => {
+            if json {
+                println!("{}", serde_json::json!({"sent": true, "device": device}));
+            }
+            eprintln!("rime: {device} sent the message.");
+            Ok(0)
+        }
+        Reply::Error { message } => messages_error(&message, json),
+        _ => unexpected(),
+    }
+}
+
+/// A message from standard input, capped. The service checks it again.
+fn read_sms(r: impl std::io::Read) -> Result<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    r.take(MAX_SMS_BYTES).read_to_end(&mut bytes).context("reading the message")?;
+    if bytes.len() as u64 == MAX_SMS_BYTES {
+        bail!("a message is at most 2000 characters");
+    }
+    let text = String::from_utf8(bytes).context("the message is not UTF-8")?;
+    let text = text.trim_end_matches(['\n', '\r']).to_string();
+    if text.trim().is_empty() {
+        bail!("there is no message to send: write it to standard input");
+    }
+    Ok(text)
 }
 
 fn text_fits(text: &str) -> Result<()> {
@@ -1155,5 +1402,72 @@ mod tests {
         let text = v.to_string();
         assert!(!text.contains("SECRETISH") && !text.contains("companion_key"), "{text}");
         assert_eq!(companion_names(&devices, &companions), ["Pixel"]);
+    }
+
+    #[test]
+    fn messages_parses_and_the_send_text_never_comes_from_argv() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        match Cli::try_parse_from(["r", "messages", "--thread", "12", "--json", "--limit", "5"]).expect("read").cmd {
+            RemoteCmd::Messages { action: None, thread: Some(12), json: true, limit: Some(5), device: None, before: None } => {}
+            other => panic!("{other:?}"),
+        }
+        match Cli::try_parse_from(["r", "messages", "send", "--to", "5556", "--device", "Pixel"]).expect("send").cmd {
+            RemoteCmd::Messages { action: Some(MessagesCmd::Send { to: Some(t), device: Some(d), thread: None, json: false }), .. } => {
+                assert_eq!((t.as_str(), d.as_str()), ("5556", "Pixel"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(Cli::try_parse_from(["r", "messages", "send"]).is_err(), "a send with nobody to send to");
+        assert!(Cli::try_parse_from(["r", "messages", "send", "--to", "5556", "--thread", "3"]).is_err());
+        // There is no way to put the text on the command line.
+        assert!(Cli::try_parse_from(["r", "messages", "send", "--to", "5556", "hello"]).is_err());
+        assert!(Cli::try_parse_from(["r", "messages", "send", "--to", "5556", "--text", "hello"]).is_err());
+        assert!(Cli::try_parse_from(["r", "messages", "--thread", "3", "send", "--to", "5556"]).is_err());
+
+        assert_eq!(
+            serde_json::to_string(&Request::Messages { device: None, thread: Some(3), before: None, limit: None }).unwrap(),
+            r#"{"cmd":"messages","thread":3}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::MessagesSend { device: None, to: Some("5556".into()), thread: None, text: "a\nb".into() })
+                .unwrap(),
+            r#"{"cmd":"messages_send","to":"5556","text":"a\nb"}"#
+        );
+    }
+
+    #[test]
+    fn a_message_from_standard_input_is_capped_and_trimmed() {
+        assert_eq!(read_sms("hello\nthere\n".as_bytes()).unwrap(), "hello\nthere");
+        assert!(read_sms("  \n".as_bytes()).is_err());
+        assert!(read_sms("x".repeat(MAX_SMS_BYTES as usize).as_bytes()).is_err());
+        assert_eq!(read_sms("é".repeat(2000).as_bytes()).unwrap().chars().count(), 2000);
+        assert!(read_sms(&[0xff, 0xfe][..]).is_err());
+    }
+
+    #[test]
+    fn a_messages_reply_reads_as_a_table_and_a_conversation() {
+        let reply: Reply = serde_json::from_str(
+            r#"{"reply":"messages","device":"Pixel","threads":[{"id":7,"addresses":["+15555215556"],"snippet":"hi there",
+               "date_ms":1,"unread":2,"count":5},{"id":8,"addresses":["5556"],"name":"Test Name","snippet":"x","date_ms":1,
+               "unread":0,"count":1}]}"#,
+        )
+        .expect("reply");
+        let Reply::Messages { device, threads: Some(threads), .. } = reply else { panic!() };
+        let table = threads_table(&device, &threads);
+        assert!(table.contains("+15555215556") && table.contains("hi there") && table.contains("Test Name"), "{table}");
+        let msgs = vec![
+            Sms { id: 2, date_ms: 2, from_me: true, body: "second".into(), status: "failed".into() },
+            Sms { id: 1, date_ms: 1, from_me: false, body: "first\nline".into(), status: "received".into() },
+        ];
+        let text = thread_text("Pixel", 7, &msgs);
+        assert!(text.find("first").unwrap() < text.find("second").unwrap(), "oldest first: {text}");
+        assert!(text.contains("[failed]") && text.contains("  line"), "{text}");
+        let reply: Reply = serde_json::from_str(r#"{"reply":"message_sent","device":"Pixel"}"#).expect("sent");
+        assert!(matches!(reply, Reply::MessageSent { .. }));
     }
 }
