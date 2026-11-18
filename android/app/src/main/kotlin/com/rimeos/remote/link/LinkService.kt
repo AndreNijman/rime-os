@@ -65,6 +65,9 @@ class LinkService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var network: ConnectivityManager.NetworkCallback? = null
     private var battery: android.content.BroadcastReceiver? = null
+    private var focus: android.content.BroadcastReceiver? = null
+    /** The `TelephonyCallback` while one is registered: `Any`, because the type is Android 12's. */
+    private var signal: Any? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -83,6 +86,7 @@ class LinkService : Service() {
         }
         watchNetwork(hub)
         watchBattery(hub)
+        watchFocus(hub)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -110,6 +114,9 @@ class LinkService : Service() {
         network = null
         battery?.let { runCatching { unregisterReceiver(it) } }
         battery = null
+        focus?.let { runCatching { unregisterReceiver(it) } }
+        focus = null
+        watchSignal(LinkHub.get(this), false)
         scope.cancel()
         super.onDestroy()
     }
@@ -120,16 +127,28 @@ class LinkService : Service() {
      * a word. The hub probes each link and reconnects the ones that did not
      * answer, at once rather than after the forty-second watchdog.
      *
-     * `onAvailable` only. `onCapabilitiesChanged` fires on every change of
-     * signal strength, and probing on each would be a ping a second in a
-     * moving car. The callback runs on a system thread, and the hub does its
-     * socket work on its own IO dispatcher, never here.
+     * The probe is on `onAvailable` only. `onCapabilitiesChanged` fires on
+     * every change of signal strength, and probing on each would be a ping a
+     * second in a moving car; it, and `onLost`, only tell the hub that what a
+     * report says may have changed (§2.9), which its throttle weighs. The
+     * callback runs on a system thread, and the hub does its socket work on
+     * its own IO dispatcher, never here.
      */
     private fun watchNetwork(hub: LinkHub) {
         val manager = getSystemService(ConnectivityManager::class.java) ?: return
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
                 hub.onNetworkChanged()
+            }
+
+            override fun onCapabilitiesChanged(network: Network, caps: android.net.NetworkCapabilities) {
+                watchSignal(hub, caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR))
+                hub.onPhoneChanged()
+            }
+
+            override fun onLost(network: Network) {
+                watchSignal(hub, false)
+                hub.onPhoneChanged()
             }
         }
         runCatching { manager.registerDefaultNetworkCallback(callback) }
@@ -139,19 +158,60 @@ class LinkService : Service() {
     /**
      * The phone's battery, for the machines it is connected to (contract
      * §2.5). Android sends this broadcast often while charging; the hub only
-     * passes on a change worth reporting ([com.rimeos.remote.core.phone.BatteryThrottle]).
+     * passes on a change worth reporting ([com.rimeos.remote.core.phone.ReportThrottle]).
      * Registered here, not in the manifest: it cannot be declared there, and
      * there is nobody to tell while no connection is held.
      */
     private fun watchBattery(hub: LinkHub) {
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: android.content.Context, intent: Intent) {
-                val (level, charging) = com.rimeos.remote.phone.Ringer.reading(intent)
-                hub.onBattery(level, charging)
+                hub.onPhoneChanged()
             }
         }
         runCatching { registerReceiver(receiver, android.content.IntentFilter(Intent.ACTION_BATTERY_CHANGED)) }
             .onSuccess { battery = receiver }
+    }
+
+    /**
+     * Do Not Disturb turning on or off here, from the shade, a schedule or a
+     * computer's `focus` line, for the machines' reports (§2.9). The
+     * broadcast and not the listener's own callback, because `dnd` is
+     * reported without notification access too. A system broadcast, sent
+     * only to receivers registered at run time, as this one is.
+     */
+    private fun watchFocus(hub: LinkHub) {
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context, intent: Intent) {
+                hub.onPhoneChanged()
+            }
+        }
+        runCatching { registerReceiver(receiver, android.content.IntentFilter(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)) }
+            .onSuccess { focus = receiver }
+    }
+
+    /**
+     * The cellular bars, heard while the default network is cellular and only
+     * then: the modem reports every step, and on Wi-Fi none of them is in a
+     * report. Android 12 and later; before that the bars are read whenever
+     * something else sends a report. `SignalStrengthsListener` needs no
+     * permission; a phone that refuses it anyway simply sends no bars.
+     */
+    private fun watchSignal(hub: LinkHub, on: Boolean) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val manager = getSystemService(android.telephony.TelephonyManager::class.java) ?: return
+        synchronized(this) {
+            if (on && signal == null) {
+                val callback = object : android.telephony.TelephonyCallback(), android.telephony.TelephonyCallback.SignalStrengthsListener {
+                    override fun onSignalStrengthsChanged(strength: android.telephony.SignalStrength) {
+                        hub.onPhoneChanged()
+                    }
+                }
+                runCatching { manager.registerTelephonyCallback(mainExecutor, callback) }.onSuccess { signal = callback }
+            } else if (!on) {
+                (signal as? android.telephony.TelephonyCallback)?.let { runCatching { manager.unregisterTelephonyCallback(it) } }
+                signal = null
+            }
+        }
     }
 
     private fun goForeground(names: List<String>, connected: Boolean) {

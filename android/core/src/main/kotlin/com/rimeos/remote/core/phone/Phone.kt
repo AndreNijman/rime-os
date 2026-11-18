@@ -8,6 +8,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
@@ -18,8 +19,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * The phone itself, as the paired computer sees it: its battery, ring
- * (`docs/remote-live-contract.md` §2.5), and what the computer sends it
- * (§2.6).
+ * (`docs/remote-live-contract.md` §2.5), what the computer sends it (§2.6),
+ * and its network and Do Not Disturb (§2.9).
  *
  * The phone tells the machine its battery and what it can do with
  * `phone_report`, and keeps a read-only `device_events` channel open so the
@@ -52,6 +53,20 @@ object Phone {
      */
     const val CAN_REPLY: String = "reply"
 
+    /**
+     * The feature a machine offers once it follows this phone's Do Not
+     * Disturb and sends its own (contract §2.9). Only such a machine is sent
+     * `dnd`, and only to it does the report say [CAN_FOCUS].
+     */
+    const val FOCUS: String = "phone_focus"
+
+    /**
+     * The word in `can` that says the person turned on "Do Not Disturb
+     * follows your computer": this phone applies a `focus` line, and the
+     * machine may follow its `dnd` (contract §2.9).
+     */
+    const val CAN_FOCUS: String = "focus"
+
     /** The channel, and the feature, a sent file or text is taken on. */
     const val TAKE: String = "take_offer"
 
@@ -74,12 +89,33 @@ object Phone {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun report(battery: Int?, charging: Boolean?, can: List<String>): String {
+    /**
+     * The report (§2.5), with how the phone is connected and its Do Not
+     * Disturb when known (§2.9). A field that is not known is left out, never
+     * guessed: a signal left out is not a signal of 0.
+     */
+    fun report(
+        battery: Int?,
+        charging: Boolean?,
+        can: List<String>,
+        network: NetworkState? = null,
+        dnd: Boolean? = null,
+    ): String {
         require(battery == null || battery in 0..100) { "a battery level is 0 to 100, not $battery" }
         return buildJsonObject {
             put("cmd", REPORT)
             battery?.let { put("battery", it) }
             charging?.let { put("charging", it) }
+            network?.let { n ->
+                put(
+                    "network",
+                    buildJsonObject {
+                        put("type", n.type)
+                        n.signal?.let { put("signal", it) }
+                    },
+                )
+            }
+            dnd?.let { put("dnd", it) }
             putJsonArray("can") { can.forEach { add(JsonPrimitive(it)) } }
         }.toString()
     }
@@ -179,6 +215,8 @@ object Phone {
                     ?: return null
                 DeviceEvent.Replied(key, text)
             }
+            // A real boolean only: a quoted "true" is not one.
+            "focus" -> o.prim("dnd")?.takeIf { !it.isString }?.booleanOrNull?.let { DeviceEvent.Focus(it) }
             else -> null
         }
     }
@@ -220,6 +258,9 @@ sealed interface DeviceEvent {
 
     /** The person dismissed, on the computer, the mirrored notification with this [key]. */
     data class Dismissed(val key: String) : DeviceEvent
+
+    /** The computer asks this phone's Do Not Disturb to be on ([dnd]) or off (§2.9). */
+    data class Focus(val dnd: Boolean) : DeviceEvent
 
     /** The person replied [text], on the computer, to the mirrored notification with this [key]. */
     data class Replied(val key: String, val text: String) : DeviceEvent {
@@ -313,39 +354,54 @@ class EventLines {
 }
 
 /**
- * When the phone tells the machine its battery again.
+ * When the phone tells the machine its report again: its battery (§2.5), and
+ * how it is connected and its Do Not Disturb (§2.9).
  *
- * The first report always goes. After that, a report goes when charging
- * starts or stops, when the level moved by [step] points or more since the
- * last one sent, or when [maxAgeMs] passed. Android sends a battery broadcast
- * every few seconds while charging; a report for each would be traffic for
- * nothing.
+ * The first report always goes. After that, a report goes at once when
+ * charging starts or stops, when Do Not Disturb turns on or off, or when the
+ * kind of network changes; when the level moved by [step] points or more
+ * since the last one sent; when only the signal's bars moved and
+ * [signalGapMs] passed since the last report; or when [maxAgeMs] passed.
+ * Android sends a battery broadcast every few seconds while charging, and a
+ * new signal reading with each step in a moving car; a report for each would
+ * be traffic for nothing.
  */
-class BatteryThrottle(private val step: Int = 5, private val maxAgeMs: Long = 10 * 60_000L) {
+class ReportThrottle(
+    private val step: Int = 5,
+    private val maxAgeMs: Long = 10 * 60_000L,
+    private val signalGapMs: Long = 60_000L,
+) {
     private var level: Int? = null
     private var charging: Boolean? = null
+    private var network: NetworkState? = null
+    private var dnd: Boolean? = null
     private var atMs: Long = 0
     private var sentOnce = false
 
     @Synchronized
-    fun due(level: Int?, charging: Boolean?, nowMs: Long): Boolean {
+    fun due(level: Int?, charging: Boolean?, nowMs: Long, network: NetworkState? = null, dnd: Boolean? = null): Boolean {
         if (!sentOnce) return true
         if (charging != this.charging) return true
+        if (dnd != this.dnd) return true
+        if (network?.type != this.network?.type) return true
         val last = this.level
         if ((level == null) != (last == null)) return true
         if (level != null && last != null && kotlin.math.abs(level - last) >= step) return true
+        if (network?.signal != this.network?.signal && nowMs - atMs >= signalGapMs) return true
         return nowMs - atMs >= maxAgeMs
     }
 
     @Synchronized
-    fun sent(level: Int?, charging: Boolean?, nowMs: Long) {
+    fun sent(level: Int?, charging: Boolean?, nowMs: Long, network: NetworkState? = null, dnd: Boolean? = null) {
         this.level = level
         this.charging = charging
+        this.network = network
+        this.dnd = dnd
         atMs = nowMs
         sentOnce = true
     }
 
-    /** A new connection: its machine has heard nothing from this one yet. */
+    /** A new connection, or a change to `can`: its machine is told everything again. */
     @Synchronized
     fun reset() {
         sentOnce = false
@@ -371,8 +427,8 @@ class RingMemory {
 /** The phone's two verbs and its event channel, on one machine's link. */
 class PhoneLink(private val link: MachineLink) {
     /** Not retried: a newer report goes out on the next connection anyway. */
-    fun report(battery: Int?, charging: Boolean?, can: List<String>) =
-        Phone.readOk(link.request(Phone.report(battery, charging, can), retry = false))
+    fun report(battery: Int?, charging: Boolean?, can: List<String>, network: NetworkState? = null, dnd: Boolean? = null) =
+        Phone.readOk(link.request(Phone.report(battery, charging, can, network, dnd), retry = false))
 
     /**
      * Acknowledge a ring. Not retried: an ack after a reconnect is too late

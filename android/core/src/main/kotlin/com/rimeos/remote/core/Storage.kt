@@ -314,6 +314,14 @@ data class Settings(
      * only; nothing about what played is ever stored.
      */
     @SerialName("media_apps") val mediaApps: Set<String> = emptySet(),
+
+    /**
+     * "Do Not Disturb follows your computer" (`docs/remote-live-contract.md`
+     * §2.9): a paired computer may turn this phone's Do Not Disturb on and
+     * off, and may follow it. Off by default: it lets a computer change a
+     * setting on the phone.
+     */
+    @SerialName("focus_on") val focusOn: Boolean = false,
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }
