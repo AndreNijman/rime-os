@@ -87,7 +87,7 @@ class MachineLink(
      * against the device-feature lists before it is sent ([CompanionLink]), and a
      * refused one throws [AgentError] `not_allowed` without touching the wire.
      */
-    dialled: Scope = Scope.FULL,
+    private val dialled: Scope = Scope.FULL,
 ) : Closeable {
     /** What a caller is told about the connection underneath. */
     sealed class LinkEvent {
@@ -132,9 +132,13 @@ class MachineLink(
         private set
 
     /**
-     * What this link may do. Starts as the dialled key's scope and can only
-     * narrow: a hello that says `"scope":"companion"` makes a full-key link a
-     * companion one ([CompanionLink.effective]); nothing makes it wider.
+     * What this link may do: the dialled key's scope, narrowed by the last
+     * hello. A hello that says `"scope":"companion"` makes a full-key link a
+     * companion one ([CompanionLink.effective]), and nothing makes a
+     * companion KEY's link wider. Read from [dialled] on every hello, not
+     * from the last answer: a phone a computer was introduced to opens
+     * companion there until a person allows it, and the same link, on its
+     * next connection, is then full.
      */
     @Volatile
     var scope: Scope = dialled
@@ -178,7 +182,7 @@ class MachineLink(
      */
     fun remoteHello(): RemoteHello = try {
         Agentd.readRemoteHello(request(Agentd.remoteHello())).also {
-            scope = CompanionLink.effective(scope, it.scope)
+            scope = CompanionLink.effective(dialled, it.scope)
         }
     } catch (_: AgentError) {
         RemoteHello.NONE

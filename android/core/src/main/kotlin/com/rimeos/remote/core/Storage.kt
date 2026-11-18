@@ -122,6 +122,12 @@ data class PairedMachine(
      * the next full connection.
      */
     @SerialName("companion_forget_owed") val companionForgetOwed: Boolean = false,
+    /**
+     * The computer that brought this phone here (§2.15, `join_offer`), as
+     * this phone calls it, or null for a pairing made with a code. Wording
+     * only: whether this phone is allowed there yet is read from each hello.
+     */
+    @SerialName("joined_by") val joinedBy: String? = null,
 ) {
     /** The rendezvous this machine is reachable at through a relay. */
     fun rendezvousId(): String = Rendezvous.idFor(Device.checkKey(desktopKey))
@@ -414,6 +420,15 @@ data class Settings(
      * person would paste next.
      */
     @SerialName("clipboard_on") val clipboardOn: Boolean = false,
+
+    /**
+     * "Join my other computers automatically" (§2.15): this phone introduces
+     * the computers it holds to each other, and joins a computer one of them
+     * brings it to. Null on an install that predates the switch, which is
+     * off; the first pairing made by hand turns it on (the setup flow,
+     * `Introductions.afterPairing`).
+     */
+    @SerialName("auto_join") val autoJoin: Boolean? = null,
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }
