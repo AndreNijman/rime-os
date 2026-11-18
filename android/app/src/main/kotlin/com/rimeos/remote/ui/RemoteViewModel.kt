@@ -106,6 +106,12 @@ data class UiState(
      * screen, now that the phone connects on unlock without being asked.
      */
     val links: Map<String, LinkHub.LinkState> = emptyMap(),
+    /**
+     * Companion mode is running: the app is locked and the device features
+     * keep reaching the computers with the companion keys (contract §2.10).
+     * The lock screen says so.
+     */
+    val companion: Boolean = false,
 )
 
 /**
@@ -420,6 +426,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         refresh()
         viewModelScope.launch {
             hub.states.collect { links -> _state.update { it.copy(links = links) } }
+        }
+        viewModelScope.launch {
+            hub.companion.collect { on -> _state.update { it.copy(companion = on) } }
         }
         viewModelScope.launch {
             // Locked from somewhere else — the notification's Lock action —
@@ -1894,6 +1903,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 linkOf(machine)?.pushUnregister()
             }
         }
+        // The companion key too: the machine is told to forget it while the
+        // link is up, and its keystore key goes either way.
+        runCatching { withContext(Dispatchers.IO) { hub.unpairCompanion(machine.deviceId) } }
         hub.forget(machine.deviceId)
         PushRegistrar.forget(getApplication<Application>(), machine)
         val store = repository.forget(machine)
@@ -1922,6 +1934,19 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** Let the paired computers turn Do Not Disturb on and off here and follow it, or stop (contract §2.9). */
+    /**
+     * "Keep working after the phone restarts" (contract §2.10). On mints a
+     * companion key for each machine and registers it with every one
+     * connected now; off forgets where it can and deletes every key here at
+     * once. The store is read back afterwards, so a later settings write from
+     * this screen does not put the old switch back.
+     */
+    fun setCompanionOn(on: Boolean) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { hub.setCompanionOn(on) }
+        val store = repository.load()
+        _state.update { it.copy(settings = store.settings, machines = store.machines) }
+    }
+
     fun setFocusOn(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(focusOn = on))
         hub.setFocusOn(store.settings.focusOn)

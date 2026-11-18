@@ -161,6 +161,7 @@ fun RimeRemoteApp(
             LockScreen(
                 failure = state.failure,
                 onUnlock = { viewModel.unlockApp(activity, prefer = alertTarget?.machine) },
+                companion = state.companion,
             )
             // Asked once the state is known, rather than behind a button nobody
             // would choose to press. Keyed on `loading` because the view model
@@ -197,6 +198,7 @@ fun RimeRemoteApp(
                     onDynamicColour = { viewModel.setDynamicColour(it) },
                     onMirror = { navigation.navigate(Destinations.MIRROR) },
                     onMedia = { navigation.navigate(Destinations.MEDIA) },
+                    onCompanion = { viewModel.setCompanionOn(it) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
                         // ACTION_SEND with the text in the intent, so the user
@@ -721,7 +723,16 @@ fun RimeRemoteApp(
  * telling somebody what computers its owner has.
  */
 @Composable
-private fun LockScreen(failure: String?, onUnlock: () -> Unit) {
+private fun LockScreen(
+    failure: String?,
+    onUnlock: () -> Unit,
+    /**
+     * Companion mode is running (contract §2.10). Said without machine names:
+     * this screen exists so a phone picked up off a table does not tell
+     * anybody what computers its owner has.
+     */
+    companion: Boolean = false,
+) {
     Column(
         Modifier
             .fillMaxSize()
@@ -737,6 +748,15 @@ private fun LockScreen(failure: String?, onUnlock: () -> Unit) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (companion) {
+            Spacer(Modifier.height(16.dp))
+            Text(
+                COMPANION_LOCKED,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
         failure?.let {
             Spacer(Modifier.height(16.dp))
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -752,3 +772,8 @@ private fun LockScreen(failure: String?, onUnlock: () -> Unit) {
         ) { Text("Unlock") }
     }
 }
+
+/** What the lock screen says while companion mode runs. */
+const val COMPANION_LOCKED: String =
+    "Locked. This phone's battery, notifications and what is playing keep reaching your computers, " +
+        "and they can still ring it and send it files. Unlock for agents, terminals and computer controls."

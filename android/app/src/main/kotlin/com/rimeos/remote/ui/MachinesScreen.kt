@@ -50,6 +50,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.text.font.FontFamily
 import com.rimeos.remote.core.CrashReport
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import androidx.compose.ui.platform.LocalContext
 
 /**
  * The list of computers this phone is paired with, which is the app's home.
@@ -89,9 +94,30 @@ fun MachinesScreen(
     /** "Notifications on your computer". A default, as for [updateBanner], so existing callers keep compiling. */
     onMirror: () -> Unit = {},
     onMedia: () -> Unit = {},
+    /** "Keep working after the phone restarts" (contract §2.10). */
+    onCompanion: (Boolean) -> Unit = {},
 ) {
     var forgetting by remember { mutableStateOf<PairedMachine?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var askBattery by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    if (askBattery) {
+        BatteryAsk(
+            onAllow = {
+                askBattery = false
+                runCatching {
+                    context.startActivity(
+                        Intent(
+                            android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:${context.packageName}"),
+                        ),
+                    )
+                }
+            },
+            onNotNow = { askBattery = false },
+        )
+    }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -198,7 +224,7 @@ fun MachinesScreen(
             onDismissRequest = { settingsOpen = false },
             title = { Text("Display") },
             text = {
-                Column {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Use this phone's colours")
@@ -230,6 +256,27 @@ fun MachinesScreen(
                         settingsOpen = false
                         onMedia()
                     }) { Text("Media on your computer") }
+
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Keep working after the phone restarts")
+                            Text(
+                                COMPANION_EXPLANATION,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.companionOn,
+                            onCheckedChange = { on ->
+                                onCompanion(on)
+                                // The exemption is asked for once, when the
+                                // switch goes on, and only if not already held.
+                                if (on && !ignoresBatteryOptimisation(context)) askBattery = true
+                            },
+                        )
+                    }
 
                     HorizontalDivider(Modifier.padding(vertical = 14.dp))
 
@@ -283,6 +330,39 @@ fun MachinesScreen(
             confirmButton = { TextButton(onClick = { settingsOpen = false }) { Text("Done") } },
         )
     }
+}
+
+/** What the companion switch does, beside it. */
+const val COMPANION_EXPLANATION: String =
+    "While the app is locked, and after a restart, your computers keep getting this phone's " +
+        "battery, notifications and what is playing, and can still ring it and send it files. " +
+        "Agents, terminals and computer controls wait until you unlock."
+
+private fun ignoresBatteryOptimisation(context: Context): Boolean =
+    runCatching {
+        context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) == true
+    }.getOrDefault(false)
+
+/**
+ * Asks to leave the app out of battery optimisation, and says why. Optional:
+ * "Not now" keeps the switch on, and the link still works, later.
+ */
+@Composable
+private fun BatteryAsk(onAllow: () -> Unit, onNotNow: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onNotNow,
+        title = { Text("Let Rime Remote run in the background?") },
+        text = {
+            Text(
+                "To save battery, Android can hold this app's connection off for long stretches " +
+                    "while the phone is idle, and your computers would then hear nothing until it wakes. " +
+                    "Leaving Rime Remote out of battery optimisation keeps notifications and status " +
+                    "arriving promptly. You can say no: the link still works, just later.",
+            )
+        },
+        confirmButton = { TextButton(onClick = onAllow) { Text("Allow") } },
+        dismissButton = { TextButton(onClick = onNotNow) { Text("Not now") } },
+    )
 }
 
 @Composable
