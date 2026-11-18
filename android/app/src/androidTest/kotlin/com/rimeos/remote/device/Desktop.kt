@@ -281,6 +281,32 @@ object Desktop {
         return (0 until a.length()).map { a.getJSONObject(it) }
     }
 
+    /**
+     * An SMS arriving on the EMULATOR from [number] (an emulator number:
+     * 5554, 5556, 15555215556), through its console. The broker refuses on
+     * any serial that is not an emulator.
+     */
+    fun emuSms(number: String, text: String) {
+        val reply = ask(JSONObject().put("cmd", "emu_sms").put("number", number).put("text", text).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not inject the SMS: $reply" }
+    }
+
+    /**
+     * `rime remote messages` against this run's rime-remoted, asked by the
+     * broker, which runs at the computer's login session: the conversation
+     * list, or one conversation's messages when [thread] is set. The reply
+     * as the daemon gave it, `messages` or `error`.
+     */
+    fun messages(device: String, thread: Long? = null, limit: Int = 20): JSONObject {
+        val req = JSONObject().put("cmd", "messages").put("device", device).put("limit", limit)
+        if (thread != null) req.put("thread", thread)
+        return ask(req.toString())
+    }
+
+    /** `rime remote messages send --to [to]` with [text] on its input. The reply as given. */
+    fun messagesSend(device: String, to: String, text: String): JSONObject =
+        ask(JSONObject().put("cmd", "messages_send").put("device", device).put("to", to).put("text", text).toString())
+
     private fun requestReply(line: String): JSONObject {
         val reply = ask(line)
         check(reply.optString("reply") == "request") {

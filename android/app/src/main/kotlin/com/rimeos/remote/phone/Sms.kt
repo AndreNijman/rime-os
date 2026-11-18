@@ -135,7 +135,9 @@ class SmsSender(private val app: Context) {
     suspend fun send(number: String, text: String): String? {
         if (!lock.tryLock()) return Messages.BUSY
         try {
-            return withTimeoutOrNull(Messages.SEND_WAIT_MS) { sendNow(number, text) } ?: Messages.TIMEOUT
+            // Wrapped, because null is "sent" and must not also mean "timed out".
+            val outcome = withTimeoutOrNull(Messages.SEND_WAIT_MS) { Outcome(sendNow(number, text)) }
+            return outcome?.error ?: if (outcome == null) Messages.TIMEOUT else null
         } finally {
             lock.unlock()
         }
@@ -196,6 +198,8 @@ class SmsSender(private val app: Context) {
             runCatching { app.unregisterReceiver(receiver) }
         }
     }
+
+    private class Outcome(val error: String?)
 
     companion object {
         private const val TAG = "RimeRemote"

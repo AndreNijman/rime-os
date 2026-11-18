@@ -25,6 +25,11 @@
 # reported nex as tested when no nexd was there would be the defect this
 # header warns about below.
 #
+# The SMS tests (MessagesOnDeviceTest) run only on an emulator: they inject a
+# message with `adb emu sms send` and send real SMS to emulator numbers. On any
+# other serial they are left out BY NAME and the verdict says so, and the
+# broker's `emu_sms` verb refuses a serial that is not `emulator-*`.
+#
 # A device is required and its absence is a FAILURE, not a skip: a suite that
 # reports success when it could not look is the defect this program has
 # shipped more than once.
@@ -515,6 +520,28 @@ def focus_file():
     except FileNotFoundError:
         return json.dumps({"reply": "ok", "focus": None})
 
+# Emulator numbers only: the emulator's own console ports and the number it
+# gives itself. A message is never injected from, or about, a real number.
+EMU_NUMBERS = {"5554", "5556", "15555215556", "+15555215556"}
+
+def emu_sms(number, text):
+    """An SMS arriving on the EMULATOR from [number], through its console
+    (`adb emu sms send`). Refused unless this run's serial is an emulator,
+    the number is an emulator number, and the text is short plain words.
+    argv, never a shell string."""
+    serial = os.environ.get("RIME_SUITE_SERIAL", "")
+    adb = os.environ.get("RIME_SUITE_ADB", "")
+    if not serial.startswith("emulator-") or not adb:
+        return json.dumps({"reply": "error", "message": "emu_sms runs only on an emulator"})
+    if number not in EMU_NUMBERS:
+        return json.dumps({"reply": "error", "message": "emu_sms takes emulator numbers only"})
+    if not isinstance(text, str) or not (0 < len(text) <= 120) or not all(c.isalnum() or c == " " for c in text):
+        return json.dumps({"reply": "error", "message": "emu_sms takes short plain text only"})
+    r = subprocess.run([adb, "-s", serial, "emu", "sms", "send", number, text], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0 or "OK" not in r.stdout:
+        return json.dumps({"reply": "error", "message": (r.stdout + r.stderr).strip()[:300]})
+    return json.dumps({"reply": "ok"})
+
 def notify_closed(nid, reason):
     """The stub notification server's NotificationClosed: one complete line
     rime-remoted's stub reads, as if the person (2) or a timeout (1) closed it."""
@@ -603,6 +630,8 @@ class H(socketserver.StreamRequestHandler):
                 out = media_call(req.get("call"))
             elif cmd == "focus_file":
                 out = focus_file()
+            elif cmd == "emu_sms":
+                out = emu_sms(str(req.get("number")), req.get("text"))
             elif cmd == "notify_closed":
                 out = notify_closed(req.get("id"), req.get("reason"))
             elif cmd == "notify_reply":
@@ -619,7 +648,7 @@ class S(socketserver.ThreadingTCPServer):
 
 S(("0.0.0.0", PORT), H).serve_forever()
 PY
-python3 "$root/broker.py" "$root/run/rime-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
+RIME_SUITE_SERIAL="$serial" RIME_SUITE_ADB="$adb" python3 "$root/broker.py" "$root/run/rime-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
   "$root/run/rime-agentd/control.sock" "$relay" "$nexsock" "$nexroot" >"$root/broker.log" 2>&1 &
 broker_pid=$!
 
@@ -730,10 +759,19 @@ args=(-e lan "$lan" -e broker "$brokeraddr" -e machine "$(cat /proc/sys/kernel/h
 # rather than passing while asserting nothing.
 [ -n "$relay" ] && args+=(-e relay "$relay")
 [ -n "$classes" ] && args+=(-e class "$classes")
+skip=()
 if [ -n "$nexroot" ]; then
   args+=(-e nexroot "$nexroot")
 else
-  args+=(-e notClass "com.rimeos.remote.device.NexOnDeviceTest,com.rimeos.remote.device.NexColdTapOnDeviceTest")
+  skip+=(com.rimeos.remote.device.NexOnDeviceTest com.rimeos.remote.device.NexColdTapOnDeviceTest)
+fi
+# SMS only on an emulator (see the header): never a real phone's messages or number.
+case $serial in
+  emulator-*) ;;
+  *) skip+=(com.rimeos.remote.device.MessagesOnDeviceTest) ;;
+esac
+if [ ${#skip[@]} -gt 0 ]; then
+  args+=(-e notClass "$(IFS=,; echo "${skip[*]}")")
 fi
 
 # ── TalkBack ────────────────────────────────────────────────────────────────
@@ -788,3 +826,7 @@ fi
 count=$(grep -oE '^OK \([0-9]+ tests?\)' "$out" | grep -oE '[0-9]+')
 echo "DEVICE SUITE: $count tests passed on $serial"
 [ -n "$nexroot" ] || echo "DEVICE SUITE: nex NOT tested (no RIME_DEVICE_SUITE_NEXD)"
+case $serial in
+  emulator-*) ;;
+  *) echo "DEVICE SUITE: SMS NOT tested (not an emulator)" ;;
+esac
