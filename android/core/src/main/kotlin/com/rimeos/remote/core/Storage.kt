@@ -105,6 +105,23 @@ data class PairedMachine(
      * [MachineStore.lastUsed].
      */
     @SerialName("last_used_ms") val lastUsedMs: Long = 0,
+    /**
+     * This phone's companion key for this machine (contract §2.10), or null.
+     *
+     * Present only while "Keep working after the phone restarts" is on. Sealed
+     * like [sealed], but by a keystore key that needs NO user authentication,
+     * under an alias of its own: it has to open after a restart, before
+     * anybody has unlocked the app. That is why the machine lets it do so
+     * little. See [CompanionKey].
+     */
+    val companion: CompanionKey? = null,
+    /**
+     * A companion key existed and this machine has not yet been told to
+     * forget it. Set when the switch goes off (or the key is replaced) while
+     * the machine is not connected; cleared once `companion_forget` lands on
+     * the next full connection.
+     */
+    @SerialName("companion_forget_owed") val companionForgetOwed: Boolean = false,
 ) {
     /** The rendezvous this machine is reachable at through a relay. */
     fun rendezvousId(): String = Rendezvous.idFor(Device.checkKey(desktopKey))
@@ -117,6 +134,30 @@ data class PairedMachine(
      */
     override fun toString(): String =
         "PairedMachine(machine=$machine, deviceId=$deviceId, sealed=<${sealed.length} chars>)"
+}
+
+/**
+ * One machine's companion key: the public half, and the private half sealed.
+ *
+ * The private half is wrapped by a keystore key with no authentication gate,
+ * so a restarted phone can dial with it from a boot receiver. What that
+ * weaker gate costs is bounded by the machine, not by this phone: a companion
+ * session may send the phone's report, notifications and what is playing, and
+ * receive ring, offers and focus, and nothing else (`rime-remoted`'s
+ * `companion.rs`). It cannot reach an agent, a terminal, nex or the machine's
+ * controls, and the phone never asks it to (`phone/CompanionLink.kt`).
+ */
+@Serializable
+data class CompanionKey(
+    /** The public key, base64url, as sent in `companion_register`. */
+    @SerialName("public_key") val publicKey: String,
+    /** The private key after the ungated [SecretBox] had it. Never the key. */
+    @SerialName("sealed_secret") val sealed: String,
+    /** The machine answered ok to `companion_register` for this key. */
+    val registered: Boolean = false,
+) {
+    override fun toString(): String =
+        "CompanionKey(public=$publicKey, registered=$registered, sealed=<${sealed.length} chars>)"
 }
 
 
@@ -331,6 +372,15 @@ data class Settings(
      * setting on the phone.
      */
     @SerialName("focus_on") val focusOn: Boolean = false,
+
+    /**
+     * "Keep working after the phone restarts" (`docs/remote-live-contract.md`
+     * §2.10): each paired computer holds a second, companion key for this
+     * phone, and after a restart, or while the app is locked, the phone keeps
+     * the device features running with it. Off by default: it leaves a key
+     * on the phone that opens without the person.
+     */
+    @SerialName("companion_on") val companionOn: Boolean = false,
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }
@@ -363,6 +413,13 @@ data class MachineStore(
         copy(machines = machines.filterNot { it.deviceId == deviceId })
 
     fun find(deviceId: String): PairedMachine? = machines.firstOrNull { it.deviceId == deviceId }
+
+    /** Change one machine's record, or return this store when it is not here. */
+    fun edit(deviceId: String, change: (PairedMachine) -> PairedMachine): MachineStore =
+        if (find(deviceId) == null) this else copy(machines = machines.map { if (it.deviceId == deviceId) change(it) else it })
+
+    /** The machines a restarted phone can reach with a companion key. */
+    fun companions(): List<PairedMachine> = machines.filter { it.companion?.registered == true }
 
     /**
      * The machine to connect on unlock: the one used most recently, else the
@@ -439,8 +496,9 @@ data class MachineStore(
         /**
          * Build the record for a machine that has just been paired.
          *
-         * The only place a device secret is ever handed to a [SecretBox], and
-         * the only place `exportSecretForSealing` is called in shipped code.
+         * One of the two places a device secret is ever handed to a
+         * [SecretBox] and `exportSecretForSealing` is called in shipped code.
+         * The other is `CompanionKeys.mint`, for the companion key.
          */
         fun record(
             identity: InMemoryStaticKey,
