@@ -185,11 +185,14 @@ pub enum RemoteCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Your other Rime computers: pair one with a code, list, ping, remove.
+    /// Your other Rime computers: pair one with a code, list, ping, remove,
+    /// forget a removal.
     ///
-    /// A paired computer may only say hello. It can run nothing here, open
-    /// nothing and read nothing: pairing two computers makes them known to
-    /// each other, it gives neither authority over the other.
+    /// A paired computer may only say hello, pass on the computers it
+    /// removed, and say how it is doing (battery, power mode, lock, network,
+    /// uptime). It can run nothing here, open nothing and read nothing:
+    /// pairing two computers makes them known to each other, it gives neither
+    /// authority over the other.
     Computers {
         #[command(subcommand)]
         action: ComputersCmd,
@@ -230,13 +233,22 @@ pub enum ComputersCmd {
         /// read from the terminal or standard input, never from the command line.
         address: Option<String>,
     },
-    /// Every other computer this one has paired, and which were removed.
+    /// Every other computer this one has paired, and which were removed,
+    /// with how each paired one was doing when it was last reached.
     List {
         #[arg(long)]
         json: bool,
     },
-    /// Remove a paired computer. A removal is never undone.
+    /// Remove a paired computer. It is told, and removes this one too.
     Remove {
+        /// Computer id, or its name when that names exactly one.
+        computer: String,
+    },
+    /// Let a removed computer pair again with a code.
+    ///
+    /// Run it on both computers, then pair them with `add`. A removal passed
+    /// on by another computer later still counts if it is newer than this.
+    Forget {
         /// Computer id, or its name when that names exactly one.
         computer: String,
     },
@@ -444,6 +456,9 @@ enum Request {
     ComputerRemove {
         computer: String,
     },
+    ComputerForget {
+        computer: String,
+    },
     ComputerPing {
         computer: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -639,9 +654,13 @@ enum Reply {
         name: String,
     },
     Computers {
-        computers: Vec<rime_remote_core::device::Device>,
+        computers: Vec<rime_remote_core::peer::Listed>,
     },
     ComputerRemoved {
+        id: String,
+        name: String,
+    },
+    ComputerForgotten {
         id: String,
         name: String,
     },
@@ -700,6 +719,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
             ComputersCmd::Add { address: None, .. } => computers_show(),
             ComputersCmd::List { json } => computers_list(json),
             ComputersCmd::Remove { computer } => computers_remove(&computer),
+            ComputersCmd::Forget { computer } => computers_forget(&computer),
             ComputersCmd::Ping { computer, via, json } => computers_ping(&computer, via, json),
         },
         RemoteCmd::Status { json } => status(json),
@@ -1768,12 +1788,13 @@ fn computers_list(json: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn computers_table(computers: &[rime_remote_core::device::Device]) -> String {
+fn computers_table(computers: &[rime_remote_core::peer::Listed]) -> String {
     if computers.is_empty() {
         return "no other computers paired. `rime remote computers add --show-code` shows a code.\n".into();
     }
     let mut out = format!("{:<18} {:<20} {:<9} {:<8} {:<10} ADDRESSES\n", "ID", "NAME", "STATE", "PATH", "LAST SEEN");
-    for c in computers {
+    for l in computers {
+        let c = &l.computer;
         out.push_str(&format!(
             "{:<18} {:<20} {:<9} {:<8} {:<10} {}\n",
             c.id,
@@ -1783,16 +1804,75 @@ fn computers_table(computers: &[rime_remote_core::device::Device]) -> String {
             c.last_seen_ms.map(ago).unwrap_or_else(|| "never".into()),
             if c.addresses.is_empty() { "-".to_string() } else { c.addresses.join(" ") },
         ));
+        if let (Some(p), Some(at)) = (&l.presence, l.presence_ms) {
+            out.push_str(&format!("{:<18} {} ({})\n", "", presence_words(p), ago(at)));
+        }
     }
     out
+}
+
+/// One line for how a computer said it was doing.
+fn presence_words(p: &rime_remote_core::peer::Presence) -> String {
+    let mut parts = Vec::new();
+    match (&p.battery, p.on_ac) {
+        (Some(b), _) if b.charging => parts.push(format!("battery {}% charging", b.percent)),
+        (Some(b), Some(true)) => parts.push(format!("battery {}% on AC", b.percent)),
+        (Some(b), _) => parts.push(format!("battery {}%", b.percent)),
+        (None, Some(true)) => parts.push("on AC".into()),
+        (None, _) => {}
+    }
+    if let Some(m) = &p.power_mode {
+        parts.push(m.clone());
+    }
+    match p.locked {
+        Some(true) => parts.push("locked".into()),
+        Some(false) => parts.push("unlocked".into()),
+        None => {}
+    }
+    match p.network.as_deref() {
+        Some("wired") => parts.push("wired".into()),
+        Some("wifi") => parts.push("Wi-Fi".into()),
+        Some("none") => parts.push("no network".into()),
+        _ => {}
+    }
+    if let Some(u) = p.uptime_s {
+        parts.push(match u {
+            0..=3599 => format!("up {}m", u / 60),
+            3600..=86399 => format!("up {}h", u / 3600),
+            _ => format!("up {}d", u / 86400),
+        });
+    }
+    if parts.is_empty() {
+        "said nothing about itself".into()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn computers_remove(computer: &str) -> Result<i32> {
     match call(&Request::ComputerRemove { computer: computer.to_string() })? {
         Reply::ComputerRemoved { id, name } => {
             eprintln!(
-                "rime: {name} ({id}) removed. Any connection it held was dropped, and its key is \
-                 refused from now on: a removal is never undone."
+                "rime: {name} ({id}) removed. Any connection it held was dropped and its key is \
+                 refused from now on. It is being told, and removes this computer too. To pair \
+                 them again, run `rime remote computers forget` on both, then `add`."
+            );
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
+fn computers_forget(computer: &str) -> Result<i32> {
+    match call(&Request::ComputerForget { computer: computer.to_string() })? {
+        Reply::ComputerForgotten { id, name } => {
+            eprintln!(
+                "rime: {name} ({id}) may pair with this computer again. Run `rime remote computers \
+                 forget` on it too, then pair them with `add`."
             );
             Ok(0)
         }
@@ -2389,6 +2469,11 @@ mod tests {
             parse(&["computers", "remove", "desk"]).expect("remove").cmd,
             RemoteCmd::Computers { action: ComputersCmd::Remove { .. } }
         ));
+        match parse(&["computers", "forget", "desk"]).expect("forget").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Forget { computer } } => assert_eq!(computer, "desk"),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["computers", "forget"]).is_err(), "forget names a computer");
 
         // The wire, as rime-remoted's own tests spell it.
         let wire = |r: &Request| serde_json::to_string(r).unwrap();
@@ -2399,6 +2484,7 @@ mod tests {
         );
         assert_eq!(wire(&Request::Computers), r#"{"cmd":"computers"}"#);
         assert_eq!(wire(&Request::ComputerRemove { computer: "d".into() }), r#"{"cmd":"computer_remove","computer":"d"}"#);
+        assert_eq!(wire(&Request::ComputerForget { computer: "d".into() }), r#"{"cmd":"computer_forget","computer":"d"}"#);
         assert_eq!(wire(&Request::ComputerPing { computer: "d".into(), via: Via::Any.wire() }), r#"{"cmd":"computer_ping","computer":"d"}"#);
         assert_eq!(
             wire(&Request::ComputerPing { computer: "d".into(), via: Via::Lan.wire() }),
@@ -2409,6 +2495,7 @@ mod tests {
             r#"{"reply":"computer_paired","id":"i","name":"n"}"#,
             r#"{"reply":"computers","computers":[]}"#,
             r#"{"reply":"computer_removed","id":"i","name":"n"}"#,
+            r#"{"reply":"computer_forgotten","id":"i","name":"n"}"#,
             r#"{"reply":"computer_pong","id":"i","name":"n","machine":"m","version":1,"build":"b","path":"lan","rtt_ms":3}"#,
         ] {
             serde_json::from_str::<Reply>(text).unwrap_or_else(|e| panic!("{text}: {e}"));
@@ -2428,6 +2515,22 @@ mod tests {
     #[test]
     fn the_computers_table_says_how_to_start_when_it_is_empty() {
         assert!(computers_table(&[]).contains("add --show-code"));
+    }
+
+    #[test]
+    fn the_computers_table_shows_the_last_presence_under_a_paired_computer() {
+        let text = r#"{"reply":"computers","computers":[
+            {"id":"aaaa","name":"desk","public_key":"k","paired_ms":1,"addresses":["10.0.0.2:7717"],
+             "presence":{"name":"desk","battery":{"percent":81,"charging":false},"on_ac":false,
+                         "power_mode":"balanced","locked":true,"network":"wifi","uptime_s":7200},
+             "presence_ms":1},
+            {"id":"bbbb","name":"old","public_key":"k2","paired_ms":1,"revoked_ms":5}]}"#;
+        let Reply::Computers { computers } = serde_json::from_str::<Reply>(text).expect("reply") else {
+            panic!("not computers")
+        };
+        let table = computers_table(&computers);
+        assert!(table.contains("battery 81%, balanced, locked, Wi-Fi, up 2h"), "{table}");
+        assert_eq!(table.lines().count(), 4, "{table}");
     }
 
     #[test]

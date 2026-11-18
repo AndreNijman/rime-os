@@ -20,7 +20,7 @@
 //!   closes; a new attempt needs a new screen.
 //! * Both ends of the request are a person: the screen and the typed code are
 //!   refused to anything but a local terminal or Rime Shell (`control.rs`),
-//!   and so is a removal, which is permanent.
+//!   and so are removing and forgetting a removal.
 //! * Over the LAN only: a pairing that arrives through the relay is refused
 //!   before the handshake ([`accept`]).
 //!
@@ -38,7 +38,8 @@
 //! ## Asking
 //!
 //! Each computer dials the other for its own requests (`dialer.rs`); there is
-//! no held link yet. `rime remote computers ping` is the one request.
+//! no held link yet. `rime remote computers ping` and the background refresh
+//! (`presence.rs`) dial, and every dial exchanges removals and presence.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
