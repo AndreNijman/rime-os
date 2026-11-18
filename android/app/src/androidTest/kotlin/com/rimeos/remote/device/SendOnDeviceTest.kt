@@ -154,7 +154,7 @@ class SendOnDeviceTest {
         assertEquals(name, saved.name)
         val (dir, files) = Desktop.deskDownloads()
         assertTrue("saved outside the stub: ${saved.path} vs $dir", saved.path.startsWith("$dir/"))
-        assertEquals(listOf(Desktop.DeskFile(name, 300_000, sha256(bytes))), files)
+        assertEquals(listOf(Computer.DeskFile(name, 300_000, sha256(bytes))), files)
 
         // The same share again: the computer keeps both.
         model.clear()

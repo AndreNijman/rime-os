@@ -47,7 +47,7 @@ class PhotosOnDeviceTest {
     private val hub = LinkHub.get(context)
     private val repository = MachineRepository(context)
     private lateinit var machine: PairedMachine
-    private lateinit var pushed: List<Desktop.TestPhoto>
+    private lateinit var pushed: List<Computer.TestPhoto>
 
     @Before
     fun setUp() {

@@ -265,4 +265,63 @@ class MirrorTest {
         o.offer("a", news, 100)
         assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 100))
     }
+    @Test
+    fun `a reply from another computer closes the copy here and the app's answer is not sent`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        o.offer("b", Content("Chat", "Bob", "Yo", "Reply"), 0)
+        drain(o, 0)
+        // Nothing of it here: nothing to close.
+        assertTrue(!o.repliedElsewhere("never-sent", 1_000))
+        assertTrue(o.repliedElsewhere("a", 1_000))
+        assertEquals(listOf<MirrorItem>(MirrorItem.Removed("a")), drain(o, 1_000))
+        // The app shows the reply: not news here, not sent; Bob's update still goes.
+        o.offer("a", Content("Chat", "Ann", "You: on my way", "Reply"), 1_000 + Mirror.ABSORB_MS)
+        val bob = Content("Chat", "Bob", "Yo again", "Reply")
+        o.offer("b", bob, 1_000 + Mirror.ABSORB_MS)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("b", bob)), drain(o, 1_000 + Mirror.ABSORB_MS))
+        // Only the first update: a new message after it is news again.
+        val next = Content("Chat", "Ann", "See you", "Reply")
+        o.offer("a", next, 7_000)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", next)), drain(o, 7_000))
+    }
+
+    @Test
+    fun `a reply from another computer cancels a waiting post, and after five seconds nothing is held back`() {
+        val o = MirrorOutbox(0, burst = 0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        assertTrue(o.repliedElsewhere("a", 0))
+        assertEquals(0, o.pending)
+        val late = Content("Chat", "Ann", "You: late", "Reply")
+        o.offer("a", late, Mirror.ABSORB_MS + 1)
+        assertEquals(1, o.pending)
+    }
+
+    @Test
+    fun `a reply elsewhere that found nothing to answer holds no update back`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        drain(o, 0)
+        assertTrue(o.repliedElsewhere("a", 0))
+        drain(o, 0)
+        o.replyFailed("a")
+        val news = Content("Chat", "Ann", "Still there?", "Reply")
+        o.offer("a", news, 100)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 100))
+    }
+    @Test
+    fun `a repeat of the app's answer is held back on the other computer too, a different update is not`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        drain(o, 0)
+        assertTrue(o.repliedElsewhere("a", 0))
+        drain(o, 0)
+        val answer = Content("Chat", "Ann", "You: ok", "Reply")
+        o.offer("a", answer, 100)
+        o.offer("a", answer, 200)
+        assertEquals(emptyList<MirrorItem>(), drain(o, 200))
+        val news = Content("Chat", "Ann", "Ann: great", "Reply")
+        o.offer("a", news, 300)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 300))
+    }
 }

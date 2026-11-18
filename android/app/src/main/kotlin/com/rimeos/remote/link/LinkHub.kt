@@ -1484,8 +1484,18 @@ class LinkHub private constructor(private val app: Context) {
                 if (companion || !_unlocked.value || !mirrorReply) return
                 val now = System.currentTimeMillis()
                 if (synchronized(lane.outbox) { lane.outbox.repliedThere(event.key, now) }) {
+                    // Every other computer closes its copy too: answered on
+                    // one, the conversation is not news on the others. Told
+                    // before the reply goes, like this lane, so the app's
+                    // update that follows finds them ready.
+                    val others = mirrorLanes.values.filter { it !== lane }
+                    for (other in others) {
+                        synchronized(other.outbox) { other.outbox.repliedElsewhere(event.key, now) }
+                        other.wake.trySend(Unit)
+                    }
                     if (!MirrorService.reply(event.key, event.text)) {
                         synchronized(lane.outbox) { lane.outbox.replyFailed(event.key) }
+                        for (other in others) synchronized(other.outbox) { other.outbox.replyFailed(event.key) }
                         Log.i(TAG, "${machine.machine}: a reply found nothing to answer")
                     }
                 }

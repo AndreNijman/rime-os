@@ -48,8 +48,8 @@ object Paired {
     val service = PairingService()
 
     /** Pair this phone with the desktop, using an offer the daemon just minted. */
-    fun machine(name: String): PairedMachine = runBlocking {
-        val offer = Pairing.decodeOffer(Desktop.offerPayload())
+    fun machine(name: String, from: Computer = Desktop): PairedMachine = runBlocking {
+        val offer = Pairing.decodeOffer(from.offerPayload())
         service.pair(
             offer = offer,
             deviceName = name,

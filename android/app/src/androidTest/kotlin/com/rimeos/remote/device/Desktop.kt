@@ -20,7 +20,17 @@ import org.json.JSONObject
  * green run asserting nothing, which is the failure mode this whole program
  * has shipped more than once.
  */
-object Desktop {
+object Desktop : Computer("broker", "lan")
+
+/**
+ * The second computer (TwoComputersOnDeviceTest): its own rime-agentd,
+ * rime-remoted and broker, started by the runner in a login session of its
+ * own, reached with `-e broker2` / `-e lan2`.
+ */
+object SecondDesktop : Computer("broker2", "lan2")
+
+/** One computer the suite can reach: [Desktop] is the first, [SecondDesktop] the second. */
+open class Computer(private val brokerArg: String, private val lanArg: String) {
 
     /** An instrumentation argument, or a failure that names it. */
     fun arg(name: String): String {
@@ -34,11 +44,11 @@ object Desktop {
     }
 
     /** `host:port` of the daemon's LAN listener, as the runner measured it. */
-    fun lanAddress(): String = arg("lan")
+    fun lanAddress(): String = arg(lanArg)
 
     /** The broker: `host:port`. */
     private fun broker(): Pair<String, Int> {
-        val a = arg("broker")
+        val a = arg(brokerArg)
         return a.substringBeforeLast(':') to a.substringAfterLast(':').toInt()
     }
 
@@ -61,6 +71,18 @@ object Desktop {
                 ?: error("the broker closed without answering $request")
             return JSONObject(line)
         }
+    }
+
+    /** This computer going away: its rime-remoted killed and not started again. */
+    fun stopRemoted() {
+        val reply = ask("""{"cmd":"stop_remoted"}""")
+        check(reply.optString("reply") == "ok") { "the broker did not stop rime-remoted: $reply" }
+    }
+
+    /** rime-remoted (re)started on the same port with the same state, as `systemctl --user restart` does. */
+    fun restartRemoted() {
+        val reply = ask("""{"cmd":"restart_remoted"}""", readTimeoutMs = 60_000)
+        check(reply.optString("reply") == "ok") { "the broker did not restart rime-remoted: $reply" }
     }
 
     /** A fresh pairing offer, minted by the real daemon. */
