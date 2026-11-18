@@ -18,6 +18,7 @@ import com.rimeos.remote.core.phone.MediaOutbox
 import com.rimeos.remote.core.phone.MediaState
 import com.rimeos.remote.core.phone.Mirror
 import com.rimeos.remote.core.phone.MirrorOutbox
+import com.rimeos.remote.core.phone.OwnDnd
 import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
 import com.rimeos.remote.core.phone.ReportThrottle
@@ -148,6 +149,9 @@ class LinkHub private constructor(private val app: Context) {
     /** "Do Not Disturb follows your computer" (§2.9); read and set as [mirrorApps] is. */
     @Volatile
     private var focusOn: Boolean = false
+
+    /** A Do Not Disturb this app turned on for a computer, to take back when the switch goes off or the app locks. */
+    private val ownDnd = OwnDnd()
 
     // What this phone is playing, on each machine (contract §2.8): one
     // outbox and one sender per CONNECTION, because the machine removes the
@@ -339,6 +343,8 @@ class LinkHub private constructor(private val app: Context) {
      */
     fun lock() {
         _unlocked.value = false
+        // A locked app follows no computer: what it turned on for one ends here.
+        releaseOwnDnd("locked")
         held.clear()
         reconnects.values.forEach { it.cancel() }
         reconnects.clear()
@@ -599,7 +605,30 @@ class LinkHub private constructor(private val app: Context) {
      */
     fun setFocusOn(on: Boolean) {
         focusOn = on
+        if (!on) releaseOwnDnd("switched off")
         reportAgain()
+    }
+
+    /**
+     * Android says the phone's Do Not Disturb changed, by any path. Off means
+     * nothing this app turned on is left to take back; then every machine
+     * hears the new state.
+     */
+    fun onFocusChanged() {
+        ownDnd.observed(PhoneStatus.dnd(app))
+        onPhoneChanged()
+    }
+
+    /**
+     * Take back a Do Not Disturb this app turned on for a computer, and only
+     * that: never one the person turned on at the phone. It needs the
+     * listener; without notification access it stays on, and is taken back
+     * when access returns ([onListenerChanged]) or ended at the phone.
+     */
+    private fun releaseOwnDnd(why: String) {
+        if (!ownDnd.owed(PhoneStatus.dnd(app))) return
+        if (MirrorService.focus(false)) ownDnd.applied(false)
+        else Log.i(TAG, "Do Not Disturb this app turned on stays on ($why): no listener")
     }
 
     /**
@@ -683,6 +712,7 @@ class LinkHub private constructor(private val app: Context) {
      * what it allows (dismiss, reply, focus), so every machine is told again.
      */
     fun onListenerChanged() {
+        if (!focusOn || !_unlocked.value) releaseOwnDnd("access back")
         syncMediaWatcher()
         reportAgain()
     }
@@ -780,7 +810,8 @@ class LinkHub private constructor(private val app: Context) {
                 // every machine as `dnd`, which is how the others follow.
                 val switchOn = focusOn && MirrorService.granted(app)
                 if (!Focus.apply(switchOn, _unlocked.value, PhoneStatus.dnd(app), event.dnd)) return
-                if (!MirrorService.focus(event.dnd)) Log.i(TAG, "${machine.machine}: Do Not Disturb not changed: no listener")
+                if (MirrorService.focus(event.dnd)) ownDnd.applied(event.dnd)
+                else Log.i(TAG, "${machine.machine}: Do Not Disturb not changed: no listener")
             }
             is DeviceEvent.Dismissed -> {
                 // Only what this machine was sent, and only while unlocked:

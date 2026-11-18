@@ -175,7 +175,43 @@ class FocusOnDeviceTest {
         )
     }
 
+    @Test
+    fun turning_the_switch_off_ends_a_do_not_disturb_the_computer_turned_on() {
+        computerTurnsDndOn()
+        setFocus(false)
+        awaitValue(15_000, "the switch going off to end the computer's Do Not Disturb") { if (!dnd()) true else null }
+    }
+
+    @Test
+    fun locking_ends_a_do_not_disturb_the_computer_turned_on() {
+        computerTurnsDndOn()
+        hub.lock()
+        awaitValue(15_000, "locking to end the computer's Do Not Disturb") { if (!dnd()) true else null }
+    }
+
+    @Test
+    fun the_persons_own_do_not_disturb_survives_the_switch_going_off() {
+        computerTurnsDndOn()
+        // The person turns theirs on too, at the phone.
+        shell("cmd notification set_dnd on")
+        setFocus(false)
+        Thread.sleep(2_000)
+        assertTrue("the switch going off ended the person's own Do Not Disturb", dnd())
+        // The shell's `off` ends only the person's (see the class comment): the
+        // phone leaves Do Not Disturb only if the app's own was ended already.
+        shell("cmd notification set_dnd off")
+        awaitValue(15_000, "the phone out of Do Not Disturb, the app's own ended by the switch") { if (!dnd()) true else null }
+    }
+
     // ---- helpers --------------------------------------------------------
+
+    /** The switch on, the computer told, and its `rime remote focus on` applied here. */
+    private fun computerTurnsDndOn() {
+        setFocus(true)
+        awaitValue(15_000, "the computer to learn this phone follows it") { report()?.takeIf { can(it).contains(Phone.CAN_FOCUS) } }
+        assertTrue("the focus line reached no phone", Desktop.focus(true) >= 1)
+        awaitValue(15_000, "Do Not Disturb on the phone") { if (dnd()) true else null }
+    }
 
     /** "Do Not Disturb follows your computer", turned on or off as the screen does. */
     private fun setFocus(on: Boolean) {

@@ -182,7 +182,7 @@ class LinkService : Service() {
     private fun watchFocus(hub: LinkHub) {
         val receiver = object : android.content.BroadcastReceiver() {
             override fun onReceive(context: android.content.Context, intent: Intent) {
-                hub.onPhoneChanged()
+                hub.onFocusChanged()
             }
         }
         runCatching { registerReceiver(receiver, android.content.IntentFilter(NotificationManager.ACTION_INTERRUPTION_FILTER_CHANGED)) }

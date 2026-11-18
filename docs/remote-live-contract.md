@@ -791,14 +791,31 @@ wrong order.
   computer ends only that mode, never one the person turned on at the phone
   (the phone keeps its Do Not Disturb, sends nothing, and the two sides stay
   apart until the next change). `cmd notification set_dnd off` does not end
-  the app's mode either. Not measured: the phone's own Do Not Disturb tile
-  and the Modes page on a real phone.
+  the app's mode either.
+- Never left stranded: the app remembers that it turned Do Not Disturb on
+  for a computer (a `focus` line applied `PRIORITY`), and forgets it when a
+  line applies `ALL` or when Android reports the filter back at `ALL` by any
+  path. While it remembers, turning the switch off or locking the app asks
+  the listener for `INTERRUPTION_FILTER_ALL`. A Do Not Disturb the person
+  turned on at the phone is never asked off this way. The memory is the
+  process's: a process Android ended forgets it.
+- Without notification access the listener cannot ask anything, and the
+  app's mode stays on (measured, Android 16 emulator: revoking access left
+  `implicit_com.rimeos.remote` active, filter `PRIORITY`). It is taken back
+  when access returns with the switch off or the app locked. Until then the
+  person ends it at the phone: the Quick Settings "Modes" tile shows
+  "Modes · Do Not Disturb (Rime Remote)"; tapping it opens a list with
+  "Do Not Disturb (Rime Remote) · On · Managed by Rime Remote", and tapping
+  that entry turned it off (measured). Settings → Modes lists the same
+  entry, whose page has a "Turn off" button (seen, not pressed). Not
+  measured on a real phone.
 - Proven on the emulator by `FocusOnDeviceTest` (the record carries
   `network` and `dnd`, and `"focus"` only once switched on; `rime remote
   focus on|off` turns the emulator's Do Not Disturb on and off;
   `set_dnd on|off` reaches `focus.json`, read by the broker's `focus_file`
   from the run's own runtime directory; with the switch off, `reached` is 0
-  and `focus.json` is not written). The cellular path is not exercised there:
+  and `focus.json` is not written; turning the switch off or locking ends a
+  Do Not Disturb a computer turned on, and leaves the person's own on). The cellular path is not exercised there:
   the emulator's default network is Wi-Fi.
 
 **State, not toggles: why nothing loops.** Each side acts only when the state

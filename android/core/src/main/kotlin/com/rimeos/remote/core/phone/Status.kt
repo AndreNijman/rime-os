@@ -94,3 +94,40 @@ object Focus {
     fun apply(switchOn: Boolean, unlocked: Boolean, current: Boolean?, wanted: Boolean): Boolean =
         switchOn && unlocked && current != wanted
 }
+
+/**
+ * Whether a Do Not Disturb this app turned on for a computer is still on, so
+ * that turning the switch off or locking the app can take it back and never
+ * leave it stranded (`docs/remote-live-contract.md` §2.9). Only one this app
+ * turned on: a Do Not Disturb the person turned on at the phone is theirs,
+ * and nothing here ever ends it.
+ *
+ * Kept in memory only: a process Android ends forgets it, and the person
+ * then ends that Do Not Disturb at the phone.
+ */
+class OwnDnd {
+    private var on = false
+
+    /** A `focus` line was applied: [dnd] true turned it on, false off. */
+    @Synchronized
+    fun applied(dnd: Boolean) {
+        on = dnd
+    }
+
+    /**
+     * The phone's Do Not Disturb as Android now says it is. Off, by any path
+     * (the person, the Modes tile, a computer), means nothing is left to take
+     * back; on, or unknown, changes nothing.
+     */
+    @Synchronized
+    fun observed(dnd: Boolean?) {
+        if (dnd == false) on = false
+    }
+
+    /** Whether there is one to take back, given the phone's state now. */
+    @Synchronized
+    fun owed(current: Boolean?): Boolean {
+        observed(current)
+        return on
+    }
+}

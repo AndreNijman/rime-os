@@ -324,6 +324,12 @@ and `off` from the computer ends only that one (measured on Android 16). If
 you turned Do Not Disturb on at the phone, the computer cannot turn it off,
 and the phone stays as it is.
 
+Turning "Do Not Disturb follows your computer" off on the phone, or locking
+the app, ends a Do Not Disturb a computer turned on, and leaves one you turned
+on yourself. If you take the app's notification access away first, it cannot:
+end it from the Quick Settings "Modes" tile, where it is listed as "Do Not
+Disturb (Rime Remote)".
+
 ## `rime remote send <device>`: files and text to your phone
 
 ```

@@ -135,7 +135,10 @@ fun MirrorScreen(
                         title = "Do Not Disturb follows your computer",
                         text = "Turning Do Not Disturb on or off on a paired computer does the same here, " +
                             "and the other way round, when that computer follows this phone too. " +
-                            "A computer can turn off only a Do Not Disturb it turned on.",
+                            "A computer can turn off only a Do Not Disturb it turned on. " +
+                            "Turning this off, or locking the app, ends one a computer turned on. " +
+                            "If you take notification access away first, it stays on: end it from " +
+                            "Modes in Quick Settings, under \"Do Not Disturb (Rime Remote)\".",
                         on = focus && granted,
                         enabled = granted,
                         onChange = onFocus,

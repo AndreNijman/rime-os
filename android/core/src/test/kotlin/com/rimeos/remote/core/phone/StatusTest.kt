@@ -142,4 +142,29 @@ class StatusTest {
         assertTrue(t.due(80, false, 1_000, null, false, listOf("ring", "focus")))
         assertFalse(t.due(80, false, 1_000, null, false, listOf("ring")))
     }
+
+    @Test
+    fun `only a Do Not Disturb this app turned on is owed back`() {
+        val own = OwnDnd()
+        // The person turned it on at the phone: nothing is owed.
+        assertFalse(own.owed(true), "a Do Not Disturb the person set was taken for the app's")
+        own.applied(true)
+        assertTrue(own.owed(true))
+        assertTrue(own.owed(null), "an unknown filter forgot the app's Do Not Disturb")
+        // A computer's `false` took it back.
+        own.applied(false)
+        assertFalse(own.owed(true))
+    }
+
+    @Test
+    fun `a Do Not Disturb ended at the phone is no longer owed, even after the person turns their own on`() {
+        val own = OwnDnd()
+        own.applied(true)
+        // Ended from the Modes tile: Android says "all".
+        own.observed(false)
+        assertFalse(own.owed(true), "the person's own Do Not Disturb would be taken back")
+        own.applied(true)
+        assertFalse(own.owed(false), "a phone already out of Do Not Disturb was owed one")
+        assertFalse(own.owed(true))
+    }
 }
