@@ -211,6 +211,7 @@ let
     # test binaries inside a logged-in VM session, where each must pass without a SKIP line.
     noLoginSessionCgroup = [
       "a_channel_onto_a_session_that_does_not_exist_is_refused_with_the_daemons_own_words"
+      "a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_not_the_runtime"
       "a_confined_session_is_judged_against_the_confinement_it_actually_has"
       "a_confined_session_is_told_where_its_runtime_directory_is"
       "a_declared_remote_origin_reaches_both_verbs"

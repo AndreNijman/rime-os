@@ -36,6 +36,7 @@ use std::net::TcpStream;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -67,13 +68,20 @@ fn scrollback() -> Vec<u8> {
 /// * `{"cmd":"attach","id":N}` — `attached`, the scrollback, then echoes
 ///   every byte it is sent, like `cat` in a PTY.
 /// * anything else — the daemon's `bad_request`.
-fn stand_in_agentd(socket: &Path) -> Arc<Mutex<Vec<String>>> {
+///
+/// The second value counts connections, each counted when it is accepted: a
+/// connection that only declares its origin is a contact `daemon_saw` would
+/// miss.
+fn stand_in_agentd(socket: &Path) -> (Arc<Mutex<Vec<String>>>, Arc<AtomicUsize>) {
     std::fs::create_dir_all(socket.parent().expect("a directory")).expect("mkdir");
     let listener = UnixListener::bind(socket).expect("bind the stand-in daemon");
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
     let record = Arc::clone(&seen);
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&connections);
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
+            counted.fetch_add(1, Ordering::SeqCst);
             let record = Arc::clone(&record);
             std::thread::spawn(move || {
                 let mut writer = stream.try_clone().expect("clone");
@@ -131,7 +139,7 @@ fn stand_in_agentd(socket: &Path) -> Arc<Mutex<Vec<String>>> {
             });
         }
     });
-    seen
+    (seen, connections)
 }
 
 struct Harness {
@@ -142,6 +150,8 @@ struct Harness {
     log: PathBuf,
     /// Every request line the stand-in daemon received, by verb.
     daemon_saw: Arc<Mutex<Vec<String>>>,
+    /// How many connections the stand-in daemon accepted.
+    daemon_connections: Arc<AtomicUsize>,
     device: Device,
 }
 
@@ -189,7 +199,7 @@ impl Harness {
             .expect("pair into the store");
         store.save(&store_path).expect("save the store");
 
-        let daemon_saw = stand_in_agentd(&runtime.join("rime-agentd").join("control.sock"));
+        let (daemon_saw, daemon_connections) = stand_in_agentd(&runtime.join("rime-agentd").join("control.sock"));
 
         // `--port 0`, and the port the daemon got read back from its log: see
         // `common` for why a probed port handed over as `--port N` races.
@@ -226,6 +236,7 @@ impl Harness {
             control: runtime.join("rime-remoted").join("control.sock"),
             log,
             daemon_saw,
+            daemon_connections,
             device,
         };
         match common::remoted_port(&mut h.remoted, &h.control, &h.log, Duration::from_secs(15)) {
@@ -238,17 +249,29 @@ impl Harness {
     }
 
     fn status(&self) -> serde_json::Value {
+        self.control(r#"{"cmd":"status"}"#)
+    }
+
+    /// One request on the daemon's local control socket.
+    fn control(&self, line: &str) -> serde_json::Value {
         let stream = UnixStream::connect(&self.control).expect("connect");
         stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
         let mut writer = stream.try_clone().expect("clone");
         let mut reader = BufReader::new(stream);
-        writeln!(writer, r#"{{"cmd":"status"}}"#).expect("write");
+        writeln!(writer, "{line}").expect("write");
         let mut reply = String::new();
         reader.read_line(&mut reply).expect("read");
         serde_json::from_str(reply.trim()).unwrap_or_else(|e| panic!("{e}: {reply}"))
     }
 
     fn connect(&self) -> Session {
+        self.connect_with(&self.device.secret)
+            .expect("the desktop refused the seeded device")
+    }
+
+    /// A session on any key, or `None` when the desktop refuses it (it closes
+    /// the connection instead of finishing the handshake).
+    fn connect_with(&self, secret: &[u8; 32]) -> Option<Session> {
         let desktop: [u8; 32] =
             rime_remote_core::b64_decode(self.status()["key"].as_str().expect("a key"))
                 .expect("base64")
@@ -258,14 +281,14 @@ impl Harness {
         let mut socket = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
         socket.set_read_timeout(Some(Duration::from_secs(15))).ok();
         socket.write_all(&[HELLO_SESSION]).expect("hello");
-        let mut hs = Handshake::session_initiator(&self.device.secret, &desktop, V).expect("ik");
+        let mut hs = Handshake::session_initiator(secret, &desktop, V).expect("ik");
         write_message(&mut socket, &hs.write(b"").expect("m1"));
-        let m2 = read_message(&mut socket).expect("the desktop refused the seeded device");
+        let m2 = read_message(&mut socket)?;
         hs.read(&m2).expect("m2");
-        Session {
+        Some(Session {
             socket,
             channel: hs.into_transport().expect("transport"),
-        }
+        })
     }
 
     fn log(&self) -> String {
@@ -351,9 +374,10 @@ fn remote_hello_is_answered_by_the_service_and_never_reaches_the_daemon() {
                            "machine_status", "machine_lock", "media",
                            "device_events", "phone_report", "take_offer", "phone_focus",
                            "phone_notifications", "phone_notification_reply",
-                           "phone_media", "phone_media_control"]),
+                           "phone_media", "phone_media_control", "companion_link"]),
         "{hello}"
     );
+    assert_eq!(hello["scope"], "full", "{hello}");
     // The same list a pairing code carries, read the same way at the same
     // moment — so a phone that refreshes its stored addresses from this gets
     // exactly what it would get by pairing again.
@@ -566,4 +590,194 @@ fn a_device_that_stops_answering_pings_is_let_go_and_one_that_answers_is_kept() 
         Some(1),
         "the silent connection was left in the live list: {connections}"
     );
+}
+
+/// A fresh X25519 keypair: (secret, public as base64url).
+fn keypair() -> ([u8; 32], String) {
+    let kp = rime_remote_core::noise::builder()
+        .generate_keypair()
+        .expect("keypair");
+    (
+        kp.private.as_slice().try_into().expect("32"),
+        rime_remote_core::b64_encode(&kp.public),
+    )
+}
+
+/// Whether the desktop closes this session within a few seconds, answering
+/// its pings on the way. A read that merely timed out is not a close.
+fn closed_soon(s: &mut Session) -> bool {
+    s.socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let started = Instant::now();
+    loop {
+        match s.raw() {
+            None => return started.elapsed() < Duration::from_secs(5),
+            Some(Frame::Ping { token }) => s.send(Frame::Pong { token }),
+            Some(_) => {}
+        }
+    }
+}
+
+/// Every line a companion session sends that must be refused: the verbs this
+/// service answers outside the allow list, `rime-agentd`'s verbs (the
+/// stand-in's own and real ones), and lines with no readable verb.
+const COMPANION_REFUSED: [&str; 22] = [
+    r#"{"cmd":"machine_status"}"#,
+    r#"{"cmd":"machine_lock"}"#,
+    r#"{"cmd":"media"}"#,
+    r#"{"cmd":"media_control","action":"play_pause"}"#,
+    r#"{"cmd":"volume","level":0}"#,
+    r#"{"cmd":"nex","request":{"method":"session.list","params":{}}}"#,
+    r#"{"cmd":"nex_events"}"#,
+    r#"{"cmd":"companion_register","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+    r#"{"cmd":"companion_forget"}"#,
+    r#"{"cmd":"echo","n":1}"#,
+    r#"{"cmd":"slow","ms":1}"#,
+    r#"{"cmd":"hello"}"#,
+    r#"{"cmd":"list"}"#,
+    r#"{"cmd":"input","id":1,"text":"x"}"#,
+    r#"{"cmd":"clipboard_write","text":"x"}"#,
+    r#"{"cmd":"privilege_request","verb":"install","args":["x"],"reason":"y"}"#,
+    r#"{"cmd":"decide","id":1,"decision":"allow"}"#,
+    r#"{"cmd":"attach","id":1,"cols":80,"rows":24}"#,
+    r#"{"cmd":"device_events"}"#,
+    r#"{"cmd":7}"#,
+    r#"{"remote_hello":true}"#,
+    "not json",
+];
+
+#[test]
+fn a_companion_key_reaches_the_device_features_and_nothing_that_reaches_the_daemon() {
+    let h = Harness::start("companion", &[]);
+    let mut full = h.connect();
+    let (secret, public) = keypair();
+
+    // An unregistered key is refused at the handshake, like any stranger.
+    assert!(h.connect_with(&secret).is_none(), "an unregistered companion key opened a session");
+
+    let hello = full.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().expect("features").iter().any(|f| f == "companion_link"), "{hello}");
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{public}"}}"#));
+    assert_eq!(r["reply"], "ok", "{r}");
+
+    let mut c = h.connect_with(&secret).expect("the registered companion key was refused");
+    let hello = c.call(r#"{"cmd":"remote_hello"}"#);
+    assert_eq!(hello["reply"], "remote", "{hello}");
+    assert_eq!(hello["scope"], "companion", "{hello}");
+
+    // The device features work.
+    let r = c.call(r#"{"cmd":"phone_report","battery":40,"charging":false,"can":["ring"]}"#);
+    assert_eq!(r["reply"], "ok", "{r}");
+    let r = c.call(r#"{"cmd":"ring_ack","id":1}"#);
+    assert_ne!(r["kind"], "not_allowed", "{r}");
+    let r = c.call(r#"{"cmd":"push_unregister"}"#);
+    assert_ne!(r["kind"], "not_allowed", "{r}");
+    c.send(Frame::Open { channel: 9, request: br#"{"cmd":"device_events"}"#.to_vec() });
+    match c.next() {
+        Frame::Control(line) => assert_eq!(json(&line)["reply"], "events"),
+        other => panic!("expected the events reply, got {other:?}"),
+    }
+    // `take_offer` is let through to the phone channels, which have nothing
+    // under that id: their own refusal, not the companion one.
+    c.send(Frame::Open { channel: 10, request: br#"{"cmd":"take_offer","id":424242}"#.to_vec() });
+    match c.next() {
+        Frame::Control(line) => {
+            let v = json(&line);
+            assert_eq!(v["code"], "not_found", "{v}");
+        }
+        other => panic!("expected the take reply, got {other:?}"),
+    }
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    let id = listed["devices"][0]["id"].as_str().expect("an id").to_string();
+    assert_eq!(listed["phones"][&id]["battery"], 40, "{listed}");
+    assert_eq!(listed["companions"], serde_json::json!([id]), "{listed}");
+    assert!(!listed.to_string().contains(&public), "the device list carried the companion key");
+
+    // Everything else is refused in so many words.
+    for line in COMPANION_REFUSED {
+        let r = c.call(line);
+        assert_eq!(r["reply"], "error", "{line}: {r}");
+        assert_eq!(r["kind"], "not_allowed", "{line}: {r}");
+    }
+    // And no channel but the two: a terminal, an upload, nex's feed.
+    for (n, request) in [
+        (11u32, &br#"{"cmd":"attach","id":1,"cols":80,"rows":24}"#[..]),
+        (12, br#"{"cmd":"receive","id":1,"name":"a","len":1}"#),
+        (13, br#"{"cmd":"nex_events"}"#),
+        (14, br#"{"cmd":"save_file","name":"a","len":1}"#),
+    ] {
+        c.send(Frame::Open { channel: n, request: request.to_vec() });
+        match c.next() {
+            Frame::Control(line) => assert_eq!(json(&line)["kind"], "not_allowed"),
+            other => panic!("channel {n}: expected the refusal, got {other:?}"),
+        }
+        loop {
+            match c.next() {
+                Frame::Close { channel, .. } if channel == n => break,
+                Frame::Close { .. } => {}
+                other => panic!("channel {n}: expected its close, got {other:?}"),
+            }
+        }
+        // Bytes for a refused channel go nowhere.
+        c.send(Frame::Data { channel: n, bytes: b"echo pwned\n".to_vec() });
+    }
+    // Still in order and still alive after all that.
+    assert_eq!(c.call(r#"{"cmd":"remote_hello"}"#)["scope"], "companion");
+
+    // The stand-in daemon was never contacted. The control arm: the full
+    // session, same daemon, reaches it — so zero is a measurement.
+    assert_eq!(h.daemon_connections.load(Ordering::SeqCst), 0, "{:?}", h.daemon_saw.lock().expect("seen"));
+    assert_eq!(full.call(r#"{"cmd":"echo","n":2}"#)["reply"], "echo");
+    assert_eq!(h.daemon_connections.load(Ordering::SeqCst), 1);
+    assert_eq!(*h.daemon_saw.lock().expect("seen"), ["echo"]);
+
+    // The companion key is still the one registered: its own attempts above
+    // changed nothing.
+    assert!(h.connect_with(&secret).is_some(), "a companion session's register/forget took effect");
+
+    // Forgetting it from the full session ends the companion session now
+    // and refuses the key; the full session goes on.
+    let r = full.call(r#"{"cmd":"companion_forget"}"#);
+    assert_eq!(r["reply"], "ok", "{r}");
+    assert!(closed_soon(&mut c), "a forgotten companion key's session stayed open");
+    assert!(h.connect_with(&secret).is_none(), "a forgotten companion key still opens a session");
+    assert_eq!(full.call(r#"{"cmd":"remote_hello"}"#)["scope"], "full");
+
+    // Replacing a key ends the old key's session too.
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{public}"}}"#));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let mut old = h.connect_with(&secret).expect("re-registered");
+    let (secret2, public2) = keypair();
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{public2}"}}"#));
+    assert_eq!(r["reply"], "ok", "{r}");
+    assert!(closed_soon(&mut old), "a replaced companion key's session stayed open");
+    assert!(h.connect_with(&secret).is_none(), "a replaced companion key still opens a session");
+    let mut c2 = h.connect_with(&secret2).expect("the new companion key");
+
+    // Revoke from the computer drops both live connections, and both keys
+    // are refused exactly as a stranger's.
+    let r = h.control(&format!(r#"{{"cmd":"revoke","device":"{id}"}}"#));
+    assert_eq!(r["reply"], "ok", "{r}");
+    assert!(closed_soon(&mut c2), "revoke left the companion connection open");
+    assert!(closed_soon(&mut full), "revoke left the full connection open");
+    assert!(h.connect_with(&secret2).is_none(), "a revoked device's companion key opened a session");
+    assert!(h.connect_with(&h.device.secret).is_none(), "a revoked device's key opened a session");
+    let log = h.log();
+    let refusals = log.matches("that device is not paired with this machine").count();
+    assert!(refusals >= 2, "the refusals were not the unpaired words: {log}");
+    assert!(!log.contains("revoked"), "a refusal said revoked: {log}");
+}
+
+#[test]
+fn a_companion_key_that_is_already_known_is_refused_and_a_bad_one_is_a_bad_request() {
+    let h = Harness::start("companion-refusals", &[]);
+    let mut full = h.connect();
+    // Its own full key, read back from the store the daemon wrote.
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    let own = listed["devices"][0]["public_key"].as_str().expect("a key").to_string();
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{own}"}}"#));
+    assert_eq!(r["kind"], "key_in_use", "{r}");
+    for bad in [r#"{"cmd":"companion_register"}"#, r#"{"cmd":"companion_register","public_key":"short"}"#] {
+        assert_eq!(full.call(bad)["kind"], "bad_request", "{bad}");
+    }
+    assert_eq!(h.control(r#"{"cmd":"devices"}"#)["companions"], serde_json::json!([]));
 }

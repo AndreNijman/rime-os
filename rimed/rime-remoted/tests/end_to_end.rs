@@ -2442,3 +2442,108 @@ fn a_phones_do_not_disturb_reaches_the_shell_on_a_change_and_the_computers_reach
     assert_eq!(code, 0, "{said}");
     assert!(said.contains("No phone"), "{said}");
 }
+
+#[test]
+fn a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_not_the_runtime() {
+    let h = harness!("companion");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    let paired = device.pair(&h, &offer, "pixel-8");
+    assert_eq!(paired["ok"], true, "{paired}");
+    let id = paired["device"].as_str().expect("an id").to_string();
+    let mut full = device.connect(&h).expect("a session");
+
+    // Minted over the full session, with the real store behind it.
+    let companion = Device::new();
+    assert!(companion.connect(&h).is_none(), "an unregistered key opened a session");
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    assert_eq!(listed["companions"], serde_json::json!([id]), "{listed}");
+    assert!(!listed.to_string().contains(&companion.key()), "the device list carried the companion key");
+    let (code, text) = rime_remote(&h, &["devices", "--json"], b"");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains(r#""companion": true"#), "{text}");
+    assert!(!text.contains(&companion.key()), "{text}");
+    let (code, text) = rime_remote(&h, &["devices"], b"");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("keeps working after a restart"), "{text}");
+
+    let mut c = companion.connect(&h).expect("the companion key opened no session");
+    let hello = c.call(r#"{"cmd":"remote_hello"}"#);
+    assert_eq!(hello["scope"], "companion", "{hello}");
+    assert!(hello["features"].as_array().expect("features").iter().any(|f| f == "companion_link"), "{hello}");
+    let r = c.call(r#"{"cmd":"phone_report","battery":51,"charging":true,"can":["ring"]}"#);
+    assert_eq!(r["reply"], "ok", "{r}");
+    assert_eq!(h.control(r#"{"cmd":"devices"}"#)["phones"][&id]["battery"], 51);
+    open_events(&mut c, 9);
+
+    // The real runtime: a root request from the companion session is refused
+    // here and nothing is filed in rime-agentd — read back from the daemon
+    // itself.
+    let before = h.direct(r#"{"cmd":"requests"}"#);
+    assert_eq!(before["reply"], "requests", "{before}");
+    for line in [
+        r#"{"cmd":"privilege_request","verb":"install","args":["clang"],"reason":"filed from a companion link"}"#,
+        r#"{"cmd":"hello"}"#,
+        r#"{"cmd":"list"}"#,
+        r#"{"cmd":"clipboard_write","text":"x"}"#,
+        r#"{"cmd":"companion_register","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        r#"{"cmd":"companion_forget"}"#,
+        r#"{"cmd":"machine_lock"}"#,
+    ] {
+        let r = c.call(line);
+        assert_eq!(r["kind"], "not_allowed", "{line}: {r}");
+    }
+    c.send(Frame::Open {
+        channel: 11,
+        request: br#"{"cmd":"attach","id":1,"cols":80,"rows":24}"#.to_vec(),
+    });
+    match c.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["kind"], "not_allowed", "{v}");
+        }
+        other => panic!("expected the refusal, got {other:?}"),
+    }
+    let after = h.direct(r#"{"cmd":"requests"}"#);
+    assert_eq!(after["requests"], before["requests"], "a companion session filed a request");
+    assert!(!after.to_string().contains("filed from a companion link"), "{after}");
+    // The control arm: the full session does reach the daemon.
+    assert_eq!(full.call(r#"{"cmd":"list"}"#)["reply"], "sessions");
+    // Its own register/forget changed nothing.
+    assert_eq!(h.control(r#"{"cmd":"devices"}"#)["companions"], serde_json::json!([id]));
+
+    // Revoke ends both live connections, and both keys are refused.
+    let revoked = h.control(&format!(r#"{{"cmd":"revoke","device":"{id}"}}"#));
+    assert_eq!(revoked["reply"], "ok", "{revoked}");
+    for (name, s) in [("companion", &mut c), ("full", &mut full)] {
+        let frame = Frame::Control(b"{\"cmd\":\"remote_hello\"}".to_vec()).encode().expect("encode");
+        let sealed = s.channel.seal(&frame).expect("seal");
+        let _ = write_all(&mut s.socket, &sealed);
+        s.socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let mut closed = false;
+        for _ in 0..8 {
+            let mut len = [0u8; 4];
+            if s.socket.read_exact(&mut len).is_err() {
+                closed = true;
+                break;
+            }
+            let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+            if s.socket.read_exact(&mut buf).is_err() {
+                closed = true;
+                break;
+            }
+        }
+        assert!(closed, "the {name} connection survived revoke");
+    }
+    assert!(companion.connect(&h).is_none(), "a revoked device's companion key reconnected");
+    assert!(device.connect(&h).is_none(), "a revoked device reconnected");
+
+    // Pairing the same phone again starts with no companion key.
+    let Some(offer) = open_offer(&h) else { return };
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    assert!(device.connect(&h).is_some(), "the re-paired device was refused");
+    assert!(companion.connect(&h).is_none(), "re-pairing brought the old companion key back");
+    assert_eq!(h.control(r#"{"cmd":"devices"}"#)["companions"], serde_json::json!([]));
+}
