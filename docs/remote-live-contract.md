@@ -1456,8 +1456,11 @@ scope, `peer_hello`, and dialling. Presence, tombstone exchange and
 introductions are not in it.
 
 **Pairing (LAN listener, hello byte `C`).** A computer dials the other's LAN
-port and sends `C` (phones send `P` to pair and `S` for a session). Then, all
-framed as `u32` big-endian length + body:
+port and sends `C` (phones send `P` to pair and `S` for a session). Over the
+LAN only: a `C` connection that arrived through a relay splice, or whose
+address is unknown, is ended before message 1 is read, so nothing reached
+through the relay learns the showing side's key (and from it its rendezvous
+id) or spends its code. Then, all framed as `u32` big-endian length + body:
 
 1. `Noise_XX_25519_ChaChaPoly_BLAKE2s`, prologue `rime-computer-pair/<version>`.
    The showing side ends the connection before its message 2 (which carries
@@ -1477,9 +1480,13 @@ framed as `u32` big-endian length + body:
    (dialler) or `S` (shower). A relayed exchange has two handshake hashes and
    fails here even with the right code.
 4. `about` = `{"name", "lan": ["host:port", …] (≤ 8), "relay"?, "port"?}`,
-   checked (name by the device-name rule, each address parses, relay parses).
-   The showing side also stores the address the connection came from, with
-   the dialler's `port`, when it came over the LAN.
+   checked, refused whole rather than trimmed: name by the device-name rule;
+   each address parses as `ip:port` and is dialable (not loopback,
+   unspecified, multicast, the IPv4 broadcast address or IPv6 link-local, and
+   not port 0; IPv4-mapped addresses judged as IPv4; IPv4 link-local
+   allowed); `port` not 0; relay parses. Each side lists only addresses that
+   pass. The showing side also stores the address the connection came from,
+   with the dialler's `port`.
 
 Either side refuses a static key equal to its own `identity.key` (a copied
 home) before it sends anything that depends on the code. A key held by a phone
@@ -1506,27 +1513,34 @@ removed computer is refused as a computer.
 → {"reply":"computer_pong","id","name","machine","version","build","path":"lan"|"relay","rtt_ms"}
 ```
 
-- `computer_show` and `computer_add` need a §7 local origin (a terminal or
-  Rime Shell, the `pair` rule); a scheduled job, an agent, or another account
-  is refused. Closing the `computer_show` connection withdraws the code. One
-  screen at a time: a new one replaces the old.
+- `computer_show`, `computer_add` and `computer_remove` need a §7 local
+  origin (a terminal or Rime Shell, the `pair` rule); a scheduled job, an
+  agent, or another account is refused. Removal is gated like pairing because
+  it is permanent. Closing the `computer_show` connection withdraws the code.
+  One screen at a time: a new one replaces the old.
 - The code is accepted with spaces or dashes (`012 345`). Anything that is not
   six digits after that is an error before any connection.
-- `computers`, `computer_remove`, `computer_ping`: own user, any origin.
-  Removing is idempotent and never undone; it drops the computer's live
-  connections.
+- `computers`, `computer_ping`: own user, any origin. Removing is idempotent
+  and never undone; it drops the computer's live connections.
 
-**Stored.** `devices.json` gains a separate `computers` map (same record as a
-device, plus `addresses` and `relay`). An older rime-remoted ignores the map,
-so after a rollback no computer can connect (fails closed). A removed
-computer keeps its record with `revoked_ms`: its key never authenticates and
-never pairs again.
+**Stored.** `computers.json` beside `devices.json` (0600, same directory),
+`{"computers": {<id>: <device record, plus "addresses" and "relay">}}`,
+written only once there is a computer. Not in `devices.json`: an older
+rime-remoted rewrites that file with only `devices` on every pairing and
+handshake, and would drop a map it does not know. It never opens
+`computers.json`, so after a rollback no computer can connect (fails closed),
+and after the roll forward every computer and removal is still there. A
+removed computer keeps its record with `revoked_ms`: its key never
+authenticates and never pairs again. A key that is both a computer's and a
+phone's key or companion key (an older daemon paired it in between)
+authenticates as nothing.
 
 **Dialling.** Each computer dials the other for its own requests. The dialler
-tries the stored addresses (2 s connect, 10 s per read), then the relay the
-other computer named (or this computer's own) as a `guest` at
-`rendezvous_id(<its key>)`, then runs the ordinary IK session (§2.1) with its
-own `identity.key` in the device's place. It refuses to dial its own key.
+tries the stored addresses (2 s connect, 10 s per read), then **this
+computer's own relay** as a `guest` at `rendezvous_id(<its key>)` (the relay
+the other computer named is stored and listed, never dialled), then runs the
+ordinary IK session (§2.1) with its own `identity.key` in the device's place.
+It refuses to dial its own key.
 
 **The peer scope: an allow list, checked before routing.** A session whose key
 is a paired, not removed computer is scope `peer`.
@@ -1547,7 +1561,7 @@ nex, the machine verbs, the phone verbs, the companion verbs, push, a line
 with no readable `cmd`, and every channel. A peer session reaches
 `rime-agentd` never. The companion allow list refuses `peer` too, as a second
 lock. A session presenting this machine's own key is refused at the handshake
-whatever `devices.json` says.
+whatever `devices.json` or `computers.json` says.
 
 ## 3. The phone
 

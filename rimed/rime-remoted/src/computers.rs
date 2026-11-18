@@ -19,7 +19,10 @@
 //!   uses it up, right or wrong. The screen is then told how it ended and
 //!   closes; a new attempt needs a new screen.
 //! * Both ends of the request are a person: the screen and the typed code are
-//!   refused to anything but a local terminal or Rime Shell (`control.rs`).
+//!   refused to anything but a local terminal or Rime Shell (`control.rs`),
+//!   and so is a removal, which is permanent.
+//! * Over the LAN only: a pairing that arrives through the relay is refused
+//!   before the handshake ([`accept`]).
 //!
 //! ## Membership is not authority
 //!

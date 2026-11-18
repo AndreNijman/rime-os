@@ -278,14 +278,23 @@ in shell history or `ps`.
   gets one guess, and nothing it learns lets it test a second guess offline.
 - Both halves must be you at the computer. An agent, a scheduled job, or a
   session from a phone or another computer is refused both.
-- Pairing goes over the local network: the two computers do not know each
-  other's keys until it finishes, so they cannot meet on the relay yet.
-  Afterwards `ping` tries the stored addresses first and then the relay.
+- Pairing goes over the local network only. A pairing attempt that arrives
+  through the relay is refused before the computer says anything about
+  itself. Afterwards `ping` tries the stored addresses first, then this
+  computer's own relay; two computers meet there only when both are set up
+  with the same relay. A computer never dials a relay the other one named.
 - A computer with this computer's own Rime Remote key (a home folder copied
-  from it) is refused, when pairing and on every later connection. Give the
-  copy its own key: stop rime-remoted there, delete
-  `~/.local/state/rime/remote/identity.key`, start it again, and pair its
-  phones again (they were paired with the old key).
+  from it) is refused, when pairing and on every later connection. Fix it on
+  the **copy**, never on the original: the copy is the one that gets a new
+  key. Everything in the copy's `~/.local/state/rime/remote/` came from the
+  original: its key (`identity.key`), its paired phones (`devices.json`), its
+  paired computers (`computers.json`), where its notifications are pushed
+  (`push.json`) and its phones' last reports (`phones.json`). On the copy,
+  run `systemctl --user stop rime-remoted`, delete that whole folder with
+  `rm -r ~/.local/state/rime/remote`, and run
+  `systemctl --user start rime-remoted`. The copy then starts with a new key
+  and no phones or computers; pair them with it as new. The original keeps
+  its key, and its phones and computers keep working.
 
 **`list`** shows every computer this one has paired, removed ones included,
 with the path it was last reached on and the addresses it is dialled at.
@@ -296,8 +305,9 @@ path (`lan` or `relay`) and how long the whole dial took. `--via lan` or
 requests; nothing stays connected between them.
 
 **`remove`** drops any connection the computer holds and refuses its key from
-then on. **A removal is never undone in this release:** the removed computer
-cannot be added again. Do not give it a new key to get round that (that
+then on. Like pairing, it must be you at the computer: an agent or a scheduled
+job is refused. **A removal is never undone in this release:** the removed
+computer cannot be added again. Do not give it a new key to get round that (that
 unpairs every phone it has); a way to add a removed computer back is coming.
 
 The wire is `docs/remote-live-contract.md` §2.15.
