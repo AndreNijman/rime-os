@@ -319,9 +319,7 @@ pub fn exchange(state: &State, link: &mut crate::dialer::Link, c: &rime_remote_c
         if reply["reply"] != "peer_tombstones" {
             return Err(format!("'{}' did not take the removals: {}", c.name, crate::dialer::printable(&reply.to_string())));
         }
-        let theirs = peer::checked_tombstones(&reply["tombstones"], rime_remote_core::now_ms())
-            .map_err(|e| format!("'{}' passed on removals that were refused: {e}", crate::dialer::printable(&c.name)))?;
-        record(state, &c.id, &theirs, None);
+        take_their_removals(state, c, &reply["tombstones"])?;
         if names_them {
             let mut store = state.devices().map_err(|e| e.to_string())?;
             store.computer_told(&c.id, rime_remote_core::now_ms());
@@ -340,6 +338,20 @@ pub fn exchange(state: &State, link: &mut crate::dialer::Link, c: &rime_remote_c
             .map_err(|e| format!("'{}' gave presence that was refused: {e}", crate::dialer::printable(&c.name)))?;
         state.presence.set(&c.id, theirs, rime_remote_core::now_ms());
     }
+    Ok(())
+}
+
+/// The removals computer `c` answered with, recorded only while it is still
+/// paired here. A computer this one removed is dialled only to be told: what
+/// it answers is never read, or a removed (perhaps stolen) machine could
+/// remove every computer still paired here.
+fn take_their_removals(state: &State, c: &rime_remote_core::device::Device, list: &Value) -> Result<(), String> {
+    if !c.is_active() || !state.computer_active(&c.id) {
+        return Ok(());
+    }
+    let theirs = peer::checked_tombstones(list, rime_remote_core::now_ms())
+        .map_err(|e| format!("'{}' passed on removals that were refused: {e}", crate::dialer::printable(&c.name)))?;
+    record(state, &c.id, &theirs, None);
     Ok(())
 }
 
@@ -374,7 +386,7 @@ fn targets(state: &State, now_ms: u64) -> (BTreeSet<String>, BTreeSet<String>) {
     let untold = store
         .computers
         .values()
-        .filter(|c| c.is_tombstone() && c.told_ms.is_none())
+        .filter(|c| c.is_tombstone() && c.told_ms.is_none() && !c.learned)
         .filter(|c| c.revoked_ms.is_some_and(|r| r.saturating_add(TELL_FOR_MS) > now_ms))
         .filter(|c| !c.addresses.is_empty() || state.relay.is_some())
         .map(|c| c.id.clone())
@@ -529,6 +541,57 @@ mod tests {
         let mine = own(&state);
         let v = serde_json::to_value(&mine).expect("json");
         assert_eq!(Presence::checked(&v).expect("checked"), mine);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_removed_computer_dialled_to_be_told_removes_nothing_here_and_learned_ones_are_never_dialled() {
+        let (state, dir) = crate::serve::tests::a_state("peer-told");
+        let own = state.identity.public_bytes();
+        let (b, c) = {
+            let mut store = state.devices().expect("store");
+            let b = store.pair_computer(&[7u8; 32], &own, "b", vec![], None, 1).expect("b");
+            let c = store.pair_computer(&[8u8; 32], &own, "c", vec!["192.0.2.8:1".into()], None, 1).expect("c");
+            (b, c)
+        };
+        let now = rime_remote_core::now_ms();
+        // c's answer names b and a stranger.
+        let answer = json!([
+            {"key": rime_remote_core::b64_encode(&[7u8; 32]), "removed_ms": now, "name": "b"},
+            {"key": rime_remote_core::b64_encode(&[9u8; 32]), "removed_ms": now, "name": "s"},
+        ]);
+        // c is removed here, so it is dialled only to be told.
+        let removed = {
+            let mut store = state.devices().expect("store");
+            let removed = store.revoke_computer(&c.id, now).expect("removed");
+            state.save_devices(&store).expect("saved");
+            removed
+        };
+        take_their_removals(&state, &removed, &answer).expect("told");
+        assert!(state.computer_active(&b.id), "a removed computer removed one still paired here");
+        assert_eq!(state.devices().expect("store").computers.len(), 2, "a removed computer's list was recorded");
+        assert_eq!(targets(&state, now).1, BTreeSet::from([c.id.clone()]));
+
+        // From b, still paired, the same kind of list counts: the stranger is
+        // learned and never dialled.
+        let answer = json!([{"key": rime_remote_core::b64_encode(&[9u8; 32]), "removed_ms": now, "name": "s"}]);
+        take_their_removals(&state, &b, &answer).expect("taken");
+        assert_eq!(state.devices().expect("store").computers.len(), 3);
+        assert_eq!(targets(&state, now).1, BTreeSet::from([c.id.clone()]), "a learned removal is dialled");
+        // Forgotten here, then removed again by a newer list: still never
+        // dialled, though the new removal waits to be told.
+        let stranger = rime_remote_core::device::Device::id_for(&rime_remote_core::b64_encode(&[9u8; 32]));
+        state.devices().expect("store").forget_computer(&stranger, now + 1).expect("forgotten");
+        let again = json!([{"key": rime_remote_core::b64_encode(&[9u8; 32]), "removed_ms": now + 2, "name": "s"}]);
+        take_their_removals(&state, &b, &again).expect("taken");
+        {
+            // Even one with an address to dial (none is ever learned with one).
+            let mut store = state.devices().expect("store");
+            let s = store.computers.get_mut(&stranger).expect("learned");
+            assert!(s.is_tombstone() && s.told_ms.is_none());
+            s.addresses = vec!["192.0.2.9:1".into()];
+        }
+        assert_eq!(targets(&state, now + 2).1, BTreeSet::from([c.id.clone()]), "a learned removal is dialled after a forget");
         let _ = std::fs::remove_dir_all(dir);
     }
 

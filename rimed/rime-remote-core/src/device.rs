@@ -161,6 +161,12 @@ pub struct Device {
     /// that named it, so it knows it was removed here and stops dialling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub told_ms: Option<u64>,
+    /// For a removed computer only: never paired here, recorded from a list
+    /// a member passed on. Never dialled (there is nothing to tell it) and
+    /// passed on after this computer's own removals, so a member that floods
+    /// the list cannot push out a removal made here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub learned: bool,
 }
 
 impl Device {
@@ -487,6 +493,7 @@ impl DeviceStore {
             relay: None,
             forgotten_ms: None,
             told_ms: None,
+            learned: false,
         };
         self.devices.insert(id, device.clone());
         Ok(device)
@@ -607,6 +614,7 @@ impl DeviceStore {
             relay,
             forgotten_ms,
             told_ms: None,
+            learned: false,
         };
         self.computers.insert(id, computer.clone());
         Ok(computer)
@@ -668,9 +676,17 @@ impl DeviceStore {
                 name: c.name.clone(),
             })
             .collect();
-        // The newest, at most what a receiver takes: one more and every
-        // exchange would be refused whole.
-        list.sort_by(|x, y| y.removed_ms.cmp(&x.removed_ms).then_with(|| x.key.cmp(&y.key)));
+        // This computer's own removals first, then the newest, at most what a
+        // receiver takes: one more and every exchange would be refused whole.
+        // A member choosing future times for keys this one never knew cannot
+        // push out a removal made here.
+        let learned = |key: &str| self.computers.get(&Device::id_for(key)).is_some_and(|c| c.learned);
+        list.sort_by(|x, y| {
+            learned(&x.key)
+                .cmp(&learned(&y.key))
+                .then_with(|| y.removed_ms.cmp(&x.removed_ms))
+                .then_with(|| x.key.cmp(&y.key))
+        });
         list.truncate(crate::peer::MAX_TOMBSTONES);
         list
     }
@@ -746,7 +762,10 @@ impl DeviceStore {
                             addresses: Vec::new(),
                             relay: None,
                             forgotten_ms: None,
-                            told_ms: None,
+                            // There is nothing to tell a computer this one
+                            // never paired: it is never dialled.
+                            told_ms: Some(now_ms),
+                            learned: true,
                         },
                     );
                 }
@@ -1465,6 +1484,44 @@ mod tests {
         assert_eq!(sent.len(), crate::peer::MAX_TOMBSTONES);
         assert_eq!(sent[0].key, key(7));
         assert!(crate::peer::checked_tombstones(&serde_json::to_value(&sent).expect("json"), 6_000).is_ok());
+    }
+
+    #[test]
+    fn a_flood_of_learned_removals_never_pushes_out_one_made_here_and_none_is_told() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
+        let x = s.pair_computer(&raw(8), &own, "x", vec![], None, 1).expect("x");
+        // a passes on the most a list may hold, all keys this computer never
+        // knew, dated as far ahead as the check allows.
+        let flood: Vec<_> = (0..crate::peer::MAX_TOMBSTONES)
+            .map(|i| crate::peer::Tombstone {
+                key: crate::b64_encode(&{
+                    let mut k = [0x40u8; 32];
+                    k[0] = (i >> 8) as u8;
+                    k[1] = i as u8;
+                    k
+                }),
+                removed_ms: 1_000 + 600_000,
+                name: "x".into(),
+            })
+            .collect();
+        assert!(s.apply_tombstones(&a.id, &own, &flood, 1_000).changed);
+        // Every learned record is marked and needs no telling.
+        let learned: Vec<_> = s.computers.values().filter(|c| c.learned).collect();
+        assert_eq!(learned.len(), crate::peer::MAX_TOMBSTONES);
+        assert!(learned.iter().all(|c| c.told_ms.is_some() && c.is_tombstone()), "a learned removal waits to be told");
+        // A removal made here a moment later is still passed on.
+        s.revoke_computer(&x.id, 2_000).expect("removed");
+        let sent = s.computer_tombstones();
+        assert_eq!(sent.len(), crate::peer::MAX_TOMBSTONES);
+        assert_eq!(sent[0].key, key(8), "the removal made here was pushed out of the list");
+        assert!(!s.computers[&x.id].learned);
+        // A learned key forgotten and then paired is an ordinary computer.
+        let first = s.computers.values().find(|c| c.learned).expect("one").id.clone();
+        s.forget_computer(&first, 3_000).expect("forgotten");
+        let raw_first: [u8; 32] = crate::b64_decode(&s.computers[&first].public_key).expect("key").try_into().expect("32");
+        assert!(!s.pair_computer(&raw_first, &own, "back", vec![], None, 4_000).expect("paired").learned);
     }
 
     #[test]

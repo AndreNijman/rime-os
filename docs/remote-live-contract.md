@@ -1593,7 +1593,9 @@ fails; the responder answers `bad_request`.
 
 - **Tombstones** are every computer record that is removed and not
   forgotten: `{key, removed_ms, name}`, the removal time passed on unchanged.
-  Computers only, never phones. A list is refused whole when it is not an
+  Computers only, never phones. Removals this computer made (or applied to a
+  computer it paired) come first, then the newest; at most 128 are sent, so a
+  member that floods the list cannot push out a removal made here. A list is refused whole when it is not an
   array, has more than 128 entries, or has an entry whose key is not 32
   bytes, whose name fails the device-name rule, or whose `removed_ms` is 0 or
   more than 10 minutes after the receiver's clock.
@@ -1603,12 +1605,17 @@ fails; the responder answers `bad_request`.
   a key held by a phone (either key, retired companion keys included) or
   equal to a phone's id is skipped; a known computer is removed (keeping the
   original `removed_ms`) unless it is already a tombstone; an unknown key is
-  recorded as a removed computer with the entry's name and no address. A
+  recorded as a removed computer with the entry's name and no address,
+  marked `learned` (never dialled, needs no telling), unless 128 removed
+  computers are already held. A
   removal counts only when `removed_ms` > the record's `forgotten_ms`.
   Connections of every computer removed this way end; the responder ends S's
   own session right after its reply.
 - The responder records the dialler's list before it answers with its own.
-  The dialler sets `told_ms` on S's record when its list named S.
+  The dialler sets `told_ms` on S's record when its list named S. When S is
+  itself removed on the dialler (a tell), the dialler checks only that S
+  answered `peer_tombstones` and **never applies S's list**: a removed (perhaps
+  stolen) computer cannot remove the computers still paired with this one.
 - **Presence**: `{name, battery?: {percent, charging}, on_ac?, power_mode?,
   locked?, network?, uptime_s?}`. Checked: name by the device-name rule,
   percent 0-100, `power_mode` one of `power-saver`, `balanced`,
@@ -1621,7 +1628,7 @@ fails; the responder answers `bad_request`.
 refused, so A tells B: `computer_remove` wakes A's refresh thread, which
 dials B at once (whatever the power mode) and sends the list naming B; B
 removes A. A record that is a tombstone with no `told_ms`, removed less than
-30 days ago, with an address or a relay to try, is dialled again once when
+30 days ago, not `learned`, with an address or a relay to try, is dialled again once when
 the daemon starts and whenever the refresh dials a paired computer. Nothing
 dials it on its own timer. A refused handshake is never taken as a removal.
 
