@@ -86,6 +86,14 @@ object Phone {
     const val CAN_CALLS_ANSWER: String = "calls_answer"
     const val CAN_CALLS_DIAL: String = "calls_dial"
 
+    /**
+     * The word in `can` that says the person turned on "Photos on your
+     * computer", Android lets the app read images, and the link is a full one
+     * on an unlocked app (§2.13): the computer may list this phone's recent
+     * photos and fetch one. Never on a companion link.
+     */
+    const val CAN_PHOTOS: String = "photos"
+
     /** The channel, and the feature, a sent file or text is taken on. */
     const val TAKE: String = "take_offer"
 
@@ -281,6 +289,18 @@ object Phone {
                 val limit = o.long("limit")?.takeIf { it >= 1 } ?: return null
                 DeviceEvent.CallHistoryRequest(id, before, limit.coerceAtMost(Calls.MAX_LIMIT.toLong()).toInt())
             }
+            "photos_request" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                // A page that is not a whole number is not quietly read as "the newest".
+                val before = if (o.containsKey("before")) o.long("before")?.takeIf { it >= 0 } ?: return null else null
+                val limit = o.long("limit")?.takeIf { it >= 1 } ?: return null
+                DeviceEvent.PhotosRequest(id, before, limit.coerceAtMost(Photos.MAX_LIMIT.toLong()).toInt())
+            }
+            "photos_fetch" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                val photo = o.long("photo")?.takeIf { it >= 0 } ?: return null
+                DeviceEvent.PhotosFetch(id, photo)
+            }
             else -> null
         }
     }
@@ -360,6 +380,12 @@ sealed interface DeviceEvent {
 
     /** The newest [limit] calls of the history older than [before] (§2.12). */
     data class CallHistoryRequest(val id: Long, val before: Long?, val limit: Int) : DeviceEvent
+
+    /** The newest [limit] photos taken before [before] (unix ms, exclusive) when it is set (§2.13). */
+    data class PhotosRequest(val id: Long, val before: Long?, val limit: Int) : DeviceEvent
+
+    /** Send the original of [photo], an id from a listing, on a `photos_upload` channel (§2.13). */
+    data class PhotosFetch(val id: Long, val photo: Long) : DeviceEvent
 
     data class Offer(
         val id: Long,
@@ -561,6 +587,13 @@ class PhoneLink(private val link: MachineLink) {
      * was asked on, and a new connection is told the call as it is then.
      */
     fun calls(line: String) = Phone.readOk(link.request(line, retry = false))
+
+    /**
+     * A `photos_reply` or `photos_fetch_reply` line (§2.13), as [Photos]
+     * wrote it. Not retried: the computer's request belongs to the connection
+     * it was asked on, and dies with it.
+     */
+    fun photos(line: String) = Phone.readOk(link.request(line, retry = false))
 
     /** Tell the machine this phone has an offer, so it reports "link". Not retried, as for [ack]. */
     fun offerAck(id: Long) = Phone.readOk(link.request(Phone.offerAck(id), retry = false))

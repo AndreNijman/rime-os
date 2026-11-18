@@ -198,7 +198,9 @@ class FakeMachine(
                     is Frame.Open -> {
                         val request = frame.request.toString(Charsets.UTF_8)
                         requests.add(request)
-                        if (request.contains(""""cmd":"receive"""") || request.contains(""""cmd":"save_file"""")) {
+                        if (request.contains(""""cmd":"receive"""") || request.contains(""""cmd":"save_file"""") ||
+                            request.contains(""""cmd":"photos_upload"""")
+                        ) {
                             serveUpload(frame.channel, request, toClient, toMachine)
                             continue
                         }
@@ -274,7 +276,7 @@ class FakeMachine(
         uploadsStarted.incrementAndGet()
         val reply = receiveReply(request)
         toClient.put(Frame.Control(reply.toByteArray(Charsets.UTF_8)))
-        if (!reply.contains(""""receiving"""") && !reply.contains(""""saving"""")) {
+        if (!reply.contains(""""receiving"""") && !reply.contains(""""saving"""") && !reply.contains(""""uploading"""")) {
             toClient.put(Frame.Close(channel, ""))
             return
         }

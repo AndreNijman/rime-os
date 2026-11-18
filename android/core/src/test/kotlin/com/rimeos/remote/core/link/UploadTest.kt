@@ -340,4 +340,74 @@ class UploadTest {
         assertTrue(e.message!!.contains("longer than the 4096 bytes"), "${e.message}")
         assertTrue(machine.uploaded.isEmpty(), "the machine got every declared byte, so it would have saved a cut file")
     }
+    @Test
+    fun `a photo crosses on its own channel as photos_upload and the computer says how much it took`() {
+        val bytes = body(150_000)
+        val machine = FakeMachine(
+            receiveReply = { """{"reply":"uploading","len":150000}""" },
+            injectedReply = { """{"reply":"uploaded","len":${it.size}}""" },
+            replyChunkBytes = 5,
+        )
+        val took = Upload.photo(
+            connect = { machine.open() },
+            id = 9,
+            name = "PXL_20261118_0412.jpg",
+            len = bytes.size.toLong(),
+            source = { ByteArrayInputStream(bytes) },
+        )
+        assertEquals(150_000L, took)
+        assertArrayEquals(bytes, machine.uploadedBytes())
+        assertEquals(
+            """{"cmd":"photos_upload","id":9,"name":"PXL_20261118_0412.jpg","len":150000}""",
+            machine.requests.single { it.contains("photos_upload") },
+        )
+    }
+
+    @Test
+    fun `a photo upload answered with anything but uploading sends no bytes`() {
+        for (reply in listOf(
+            """{"reply":"error","code":"unknown_id","message":"no photo fetch 9 is waiting"}""",
+            """{"reply":"saving","len":64}""",
+        )) {
+            val machine = FakeMachine(receiveReply = { reply })
+            assertThrows(Upload.Refused::class.java) {
+                Upload.photo(connect = { machine.open() }, id = 9, name = "a.jpg", len = 64, source = { ByteArrayInputStream(body(64)) })
+            }
+            assertEquals(0, machine.uploadedBytes().size, reply)
+        }
+    }
+
+    @Test
+    fun `a photo the computer took short, or refused after the bytes, is not taken`() {
+        val short = FakeMachine(receiveReply = { """{"reply":"uploading","len":64}""" }, injectedReply = { """{"reply":"uploaded","len":10}""" })
+        assertThrows(Upload.Refused::class.java) {
+            Upload.photo(connect = { short.open() }, id = 1, name = "a.jpg", len = 64, source = { ByteArrayInputStream(body(64)) })
+        }
+        val failed = FakeMachine(
+            receiveReply = { """{"reply":"uploading","len":64}""" },
+            injectedReply = { """{"reply":"error","kind":"internal","message":"could not write the photo"}""" },
+        )
+        val e = assertThrows(Upload.Refused::class.java) {
+            Upload.photo(connect = { failed.open() }, id = 1, name = "a.jpg", len = 64, source = { ByteArrayInputStream(body(64)) })
+        }
+        assertTrue(e.message!!.contains("could not write"), "${e.message}")
+    }
+
+    @Test
+    fun `the photo cap is the computer's 64 MiB and is applied before a connection opens`() {
+        val machine = FakeMachine()
+        assertThrows(IllegalArgumentException::class.java) {
+            Upload.photo(
+                connect = { machine.open() },
+                id = 1,
+                name = "big.jpg",
+                len = com.rimeos.remote.core.phone.Photos.MAX_PHOTO_BYTES + 1,
+                source = { ByteArrayInputStream(ByteArray(0)) },
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            Upload.photo(connect = { machine.open() }, id = 1, name = "e.jpg", len = 0, source = { ByteArrayInputStream(ByteArray(0)) })
+        }
+        assertEquals(0, machine.connections.get())
+    }
 }

@@ -4,6 +4,7 @@ import com.rimeos.remote.core.Frame
 import com.rimeos.remote.core.FrameChannel
 import com.rimeos.remote.core.agent.Agentd
 import com.rimeos.remote.core.agent.Handoff
+import com.rimeos.remote.core.phone.Photos
 import java.io.InputStream
 
 /**
@@ -185,6 +186,57 @@ object Upload {
         return transfer(connect, Agentd.saveFile(name, len), ::savingAccepted, len, source, onProgress, ::readSaved)
     }
 
+    /** `rime-remoted` said `uploading`: the `photos_upload` counterpart of [receivingAccepted]. */
+    fun uploadingAccepted(reply: ByteArray): Boolean {
+        val text = reply.toString(Charsets.UTF_8)
+        return text.contains("\"reply\"") && text.contains("\"uploading\"")
+    }
+
+    /**
+     * Send the original of photo fetch [id] to the computer that asked for
+     * it ("Photos on your computer", contract §2.13): [len] bytes read from
+     * [source], named [name]. [id] is the `photos_fetch` request's id, which
+     * is what the computer matches the upload to, never the photo's own id.
+     * Returns the length the computer says it took.
+     *
+     * The same connection, channel and byte loop as [save]. `rime-remoted`
+     * answers it itself, takes it only while that fetch waits, and refuses
+     * anything refusable (the id, the length, the name) before `uploading`,
+     * so no byte crosses to be thrown away. Never retried by this class: the
+     * computer takes a fetch's upload once.
+     *
+     * @throws Refused when the machine answered anything but `uploading`, or
+     *   refused after the bytes arrived, or took a length other than [len].
+     * @throws Disconnected when the connection ended mid-upload.
+     * @throws IllegalArgumentException when [len] is past
+     *   [Photos.MAX_PHOTO_BYTES] or zero.
+     */
+    @Throws(Refused::class, Disconnected::class)
+    fun photo(
+        connect: () -> FrameChannel,
+        id: Long,
+        name: String,
+        len: Long,
+        source: () -> InputStream,
+        onProgress: (Long) -> Unit = {},
+    ): Long {
+        require(len > 0) { "an upload of no bytes is not a photo" }
+        require(len <= Photos.MAX_PHOTO_BYTES) {
+            "$len bytes is past the ${Photos.MAX_PHOTO_BYTES}-byte limit for a photo"
+        }
+        val took = transfer(
+            connect,
+            Photos.uploadRequest(id, name, len),
+            ::uploadingAccepted,
+            len,
+            source,
+            onProgress,
+            ::readUploaded,
+        )
+        if (took != len) throw Refused("the computer took $took of the photo's $len bytes")
+        return took
+    }
+
     /**
      * The takeover both verbs share: open [CHANNEL] with [request], check the
      * first reply with [accepted], send exactly [len] bytes, then read the
@@ -353,6 +405,22 @@ object Upload {
         val path = (obj["path"] as? kotlinx.serialization.json.JsonPrimitive)?.content
             ?: throw Refused("the machine saved the file and did not say where")
         return Saved(name, path)
+    }
+
+    /** Parse `photos_upload`'s closing reply (the length taken), or `null` while it is still incomplete. */
+    internal fun readUploaded(text: String): Long? {
+        val value = runCatching {
+            Agentd.json.parseToJsonElement(text)
+        }.getOrNull() ?: return null
+        val obj = value as? kotlinx.serialization.json.JsonObject ?: return null
+        val reply = (obj["reply"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+        if (reply == "error") {
+            val message = (obj["message"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+            throw Refused(message ?: "the computer refused the photo after receiving it")
+        }
+        if (reply != "uploaded") return null
+        return (obj["len"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
+            ?: throw Refused("the computer took the photo and did not say how much of it")
     }
 
     /**

@@ -391,6 +391,14 @@ data class Settings(
     @SerialName("calls_on") val callsOn: Boolean = false,
 
     /**
+     * "Photos on your computer" (`docs/remote-live-contract.md` §2.13): a
+     * paired computer lists this phone's newest photos as small thumbnails
+     * and saves one the person chooses, while the app is unlocked. Off by
+     * default: it shows a computer the person's camera roll.
+     */
+    @SerialName("photos_on") val photosOn: Boolean = false,
+
+    /**
      * "Keep working after the phone restarts" (`docs/remote-live-contract.md`
      * §2.10): each paired computer holds a second, companion key for this
      * phone, and after a restart, or while the app is locked, the phone keeps

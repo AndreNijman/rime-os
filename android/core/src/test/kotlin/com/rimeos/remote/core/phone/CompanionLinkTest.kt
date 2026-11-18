@@ -54,6 +54,9 @@ class CompanionLinkTest {
         "machine_lock" to { it.request(Machine.lock(), retry = false) },
         "machine_status" to { it.request(Machine.status()) },
         "nex" to { it.request("""{"cmd":"nex","method":"session.list"}""") },
+        // Photos need an unlocked phone (§2.13): neither answer goes on a companion link.
+        "photos_reply" to { it.request(Photos.refused(1, Photos.LOCKED), retry = false) },
+        "photos_fetch_reply" to { it.request(Photos.fetchRefused(1, Photos.LOCKED), retry = false) },
         "no cmd" to { it.request("""{"verb":"list"}""") },
     )
 
@@ -100,8 +103,12 @@ class CompanionLinkTest {
         assertThrows(AgentError::class.java) {
             mux.openChannel(mux.nextChannelId(), """{"cmd":"nex","method":"feed"}""".toByteArray())
         }
+        // A photo's upload channel is refused the same way, before it is written.
+        assertThrows(AgentError::class.java) {
+            mux.openChannel(mux.nextChannelId(), Photos.uploadRequest(1, "a.jpg", 10).toByteArray())
+        }
         mux.openChannel(mux.nextChannelId(), """{"cmd":"${Phone.EVENTS}"}""".toByteArray())
-        assertEquals(2, link.refused)
+        assertEquals(3, link.refused)
         assertEquals(listOf(Phone.EVENTS), fake.requests.map { CompanionLink.cmdOf(it.toByteArray()) })
         link.close()
     }

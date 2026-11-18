@@ -64,6 +64,9 @@ object CompanionLink {
         "call_state",
         "call_done",
         "call_history_reply",
+        // Not `photos_reply` or `photos_fetch_reply`, nor the `photos_upload`
+        // channel: a photo is more than a battery level, so a phone that was
+        // restarted and not yet unlocked shows the computer none (§2.13).
     )
 
     /** The channels a companion session may open. */
