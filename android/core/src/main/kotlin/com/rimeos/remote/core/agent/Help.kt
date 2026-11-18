@@ -287,6 +287,26 @@ object Help {
                         "SMS permission without asking. Open App info, use the menu at the top " +
                         "right to allow restricted settings, then allow SMS there.",
                 ),
+                h("Calls on the computer"),
+                p(
+                    "Calls on your computer, in Display, shows a call on your computers while " +
+                        "it rings on this phone, with Answer and Decline. It is off until you " +
+                        "turn it on, and Android asks you to allow calls first. On the " +
+                        "computer, rime remote calls lists recent calls, and rime remote calls " +
+                        "answer, decline, hangup and dial do what they say.",
+                ),
+                p(
+                    "The sound stays on the phone: talk on it or on a headset paired with it. " +
+                        "You can answer and end a call with the app locked, as you can on the " +
+                        "phone's lock screen. Calling a number needs the app unlocked, and " +
+                        "a person at the computer. The phone refuses to dial an emergency " +
+                        "number for the computer: make that call on the phone.",
+                ),
+                note(
+                    "If this app came from a file rather than a store, Android may block the " +
+                        "call log permission without asking. Allow restricted settings in App " +
+                        "info, as for SMS.",
+                ),
                 h("Finding this phone"),
                 p(
                     "On the computer, rime remote ring makes this phone play its alarm " +
@@ -311,13 +331,14 @@ object Help {
                         "Keep working after the phone restarts, in Display, changes that. Each " +
                         "computer gets a second key from this phone that opens without you, and " +
                         "it can only carry the phone's own features: its battery, its " +
-                        "notifications, what is playing, its messages, ringing it and sending " +
-                        "it files.",
+                        "notifications, what is playing, its messages, its calls, ringing it " +
+                        "and sending it files.",
                 ),
                 p(
                     "With it on, locking the app keeps those running instead of ending the " +
                         "link, and after a restart they come back at the phone's first unlock. " +
-                        "Replying to a notification, sending an SMS, controlling what plays, agents, terminals " +
+                        "Replying to a notification, sending an SMS, calling a number, controlling what " +
+                        "plays, agents, terminals " +
                         "and the computer's controls still wait until you unlock.",
                 ),
                 note(

@@ -122,7 +122,7 @@ class ManifestTest {
     }
 
     @Test
-    fun `the permissions this app does declare are the twelve it can justify`() {
+    fun `the permissions this app does declare are the sixteen it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
         // moment anybody reads the list.
@@ -175,6 +175,16 @@ class ManifestTest {
                 "android.permission.READ_SMS",
                 "android.permission.SEND_SMS",
                 "android.permission.READ_CONTACTS",
+                // Added deliberately with "Calls on your computer" (contract
+                // §2.12), off by default: seeing that a call rings and who it
+                // is from, the call history, answering, declining and ending
+                // a call, and placing one while the app is unlocked. Each a
+                // runtime prompt, asked when the person turns the feature on.
+                // No audio: RECORD_AUDIO and MANAGE_OWN_CALLS stay absent.
+                "android.permission.READ_PHONE_STATE",
+                "android.permission.READ_CALL_LOG",
+                "android.permission.ANSWER_PHONE_CALLS",
+                "android.permission.CALL_PHONE",
             ),
             "the declared permissions changed: $declared",
         )

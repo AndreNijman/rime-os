@@ -105,6 +105,21 @@
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
+    <!-- "Calls on your computer" (contract §2.12), off by default. A paired
+         computer shows a call while it rings, may answer, decline and end it
+         and read the call history, and, while the app is unlocked, place a
+         call from this phone. Each is asked for at the moment the person
+         turns the feature on, never at install, and the app works without
+         them. READ_CALL_LOG also gives the number of a ringing call. There is
+         no audio: the call stays on the phone, so no microphone permission
+         and no self-managed calls. Nothing read is stored, here or there.
+         On a phone that installed this app from a file, Android 13 and later
+         block READ_CALL_LOG until restricted settings are allowed. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+
     <!-- Push-to-talk, and what is NOT here is the point of it.
 
          RECORD_AUDIO is absent, deliberately. Speech reaches this app through

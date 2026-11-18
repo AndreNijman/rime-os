@@ -96,6 +96,8 @@ fun MachinesScreen(
     onMedia: () -> Unit = {},
     /** "Messages on your computer" (contract §2.11). */
     onMessages: () -> Unit = {},
+    /** "Calls on your computer" (contract §2.12). */
+    onCalls: () -> Unit = {},
     /** "Keep working after the phone restarts" (contract §2.10). */
     onCompanion: (Boolean) -> Unit = {},
 ) {
@@ -262,6 +264,10 @@ fun MachinesScreen(
                         settingsOpen = false
                         onMessages()
                     }) { Text("Messages on your computer") }
+                    TextButton(onClick = {
+                        settingsOpen = false
+                        onCalls()
+                    }) { Text("Calls on your computer") }
 
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {

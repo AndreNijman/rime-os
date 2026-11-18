@@ -1960,6 +1960,18 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(settings = store.settings) }
     }
 
+    /** Let the paired computers see and handle this phone's calls, or stop (contract §2.12). */
+    fun setCallsOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(callsOn = on))
+        hub.setCallsOn(store.settings.callsOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** The call or contacts permissions may have changed: the machines hear the new `can`. */
+    fun onCallsPermissionChanged() {
+        hub.onCallsPermissionChanged()
+    }
+
     /** The SMS or contacts permissions may have changed: the machines hear the new `can`. */
     fun onSmsPermissionChanged() {
         hub.onSmsPermissionChanged()

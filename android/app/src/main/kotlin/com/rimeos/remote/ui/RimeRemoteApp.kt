@@ -1,6 +1,7 @@
 package com.rimeos.remote.ui
 
 import com.rimeos.remote.ui.mirror.MediaScreen
+import com.rimeos.remote.ui.mirror.CallsScreen
 import com.rimeos.remote.ui.mirror.MessagesScreen
 import com.rimeos.remote.ui.mirror.MirrorScreen
 import androidx.compose.foundation.background
@@ -117,6 +118,9 @@ object Destinations {
 
     /** "Messages on your computer": the permissions and the switch. */
     const val MESSAGES = "messages"
+
+    /** "Calls on your computer": the permissions and the switch. */
+    const val CALLS = "calls"
 }
 
 @Composable
@@ -203,6 +207,7 @@ fun RimeRemoteApp(
                     onMirror = { navigation.navigate(Destinations.MIRROR) },
                     onMedia = { navigation.navigate(Destinations.MEDIA) },
                     onMessages = { navigation.navigate(Destinations.MESSAGES) },
+                    onCalls = { navigation.navigate(Destinations.CALLS) },
                     onCompanion = { viewModel.setCompanionOn(it) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
@@ -479,6 +484,14 @@ fun RimeRemoteApp(
                     on = state.settings.messagesOn,
                     onOn = { viewModel.setMessagesOn(it) },
                     onPermissions = { viewModel.onSmsPermissionChanged() },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
+            composable(Destinations.CALLS) {
+                CallsScreen(
+                    on = state.settings.callsOn,
+                    onOn = { viewModel.setCallsOn(it) },
+                    onPermissions = { viewModel.onCallsPermissionChanged() },
                     onBack = { navigation.popBackStack() },
                 )
             }

@@ -108,7 +108,7 @@ object Sms {
     }
 
     /** Names from the person's contacts, looked up once per number per answer. */
-    private class Names(private val context: Context) {
+    internal class Names(private val context: Context) {
         private val seen = HashMap<String, String?>()
 
         fun of(number: String): String? = seen.getOrPut(number) {

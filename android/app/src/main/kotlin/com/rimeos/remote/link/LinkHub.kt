@@ -16,6 +16,7 @@ import com.rimeos.remote.core.phone.Content
 import com.rimeos.remote.core.phone.DeviceEvent
 import com.rimeos.remote.core.phone.Focus
 import com.rimeos.remote.core.phone.Media
+import com.rimeos.remote.core.phone.Calls
 import com.rimeos.remote.core.phone.Messages
 import com.rimeos.remote.core.phone.MediaOutbox
 import com.rimeos.remote.core.phone.MediaState
@@ -26,8 +27,10 @@ import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
 import com.rimeos.remote.core.phone.ReportThrottle
 import com.rimeos.remote.core.phone.Scope
+import com.rimeos.remote.phone.CallWatcher
 import com.rimeos.remote.phone.MediaWatcher
 import com.rimeos.remote.phone.MirrorService
+import com.rimeos.remote.phone.PhoneCalls
 import com.rimeos.remote.phone.PhoneStatus
 import com.rimeos.remote.phone.Receiver
 import com.rimeos.remote.phone.Ringer
@@ -173,6 +176,9 @@ class LinkHub private constructor(private val app: Context) {
         val phone: PhoneLink? = null,
     ) {
         val throttle = ReportThrottle()
+
+        /** The call this connection was last told of (§2.12); only its sender changes it. */
+        var toldCall: Calls.Now = Calls.Now.IDLE_NOW
     }
 
     private val reportLanes = ConcurrentHashMap<String, ReportLane>()
@@ -242,6 +248,12 @@ class LinkHub private constructor(private val app: Context) {
     /** "Messages on your computer" (§2.11): read from the store on a connection and set by the screen. */
     @Volatile
     private var messagesOn: Boolean = false
+
+    /** "Calls on your computer" (§2.12): read from the store on a connection and set by the screen. */
+    @Volatile
+    private var callsOn: Boolean = false
+
+    private val callWatcher by lazy { CallWatcher(app) { onCallChanged() } }
 
     private val smsSender by lazy { SmsSender(app) }
     private val smsWatcher by lazy { SmsWatcher(app) { onSmsChanged() } }
@@ -762,6 +774,8 @@ class LinkHub private constructor(private val app: Context) {
         mediaControl = settings.mediaControl
         messagesOn = settings.messagesOn
         syncSmsWatcher()
+        callsOn = settings.callsOn
+        syncCallWatcher()
     }
 
     private fun startReports(machine: PairedMachine, phone: PhoneLink, remote: RemoteHello, companion: Boolean) {
@@ -773,6 +787,8 @@ class LinkHub private constructor(private val app: Context) {
             while (isActive) {
                 lane.wake.receive()
                 report(machine, phone, lane)
+                // After the report, which is what lets the machine take it.
+                tellCall(machine, phone, lane)
             }
         }
         lane.wake.trySend(Unit)
@@ -800,6 +816,8 @@ class LinkHub private constructor(private val app: Context) {
             // Reading runs over a companion link too; whether a send may run
             // is decided when one arrives, by the link it arrives on.
             if (lane.remote.has(Messages.FEATURE) && Messages.offered(messagesOn, Sms.canRead(app))) add(Phone.CAN_MESSAGES)
+            // Never "calls_dial" on a companion link: a dial waits for an unlock.
+            if (lane.remote.has(Calls.FEATURE)) addAll(Calls.can(PhoneCalls.grants(app, callsOn), lane.companion))
         }
         if (!lane.throttle.due(level, charging, now, network, dnd, can)) return
         runCatching { phone.report(level, charging, can, network, dnd) }
@@ -890,6 +908,97 @@ class LinkHub private constructor(private val app: Context) {
         if (phones.isEmpty()) return
         scope.launch {
             for (phone in phones) runCatching { phone.messages(Messages.changed()) }
+        }
+    }
+
+    fun callsOn(): Boolean = callsOn
+
+    /**
+     * The person turned "Calls on your computer" on or off; the store was
+     * already written. Each connected machine is told at once, as for
+     * [setMessagesOn]: off refuses every action from here on, whatever an
+     * older report told the machine, and its ringing call closes there.
+     */
+    fun setCallsOn(on: Boolean) {
+        callsOn = on
+        syncCallWatcher()
+        reportAgain()
+    }
+
+    /** The person granted, or Android took back, a calls permission: every machine hears the new `can`. */
+    fun onCallsPermissionChanged() {
+        syncCallWatcher()
+        reportAgain()
+    }
+
+    /** Follow the phone's calls exactly while a machine may be told of them. */
+    private fun syncCallWatcher() {
+        callWatcher.sync(callsOn && PhoneCalls.canState(app))
+    }
+
+    /** The phone's call changed: each connected machine's sender tells it, after its report. */
+    private fun onCallChanged() {
+        if (!live) return
+        for (lane in reportLanes.values) lane.wake.trySend(Unit)
+    }
+
+    /**
+     * Tell this connection the phone's call, if it changed since it was last
+     * told and it may know. A machine whose report no longer says "calls" has
+     * already let go of what it was told; it hears nothing more.
+     */
+    private fun tellCall(machine: PairedMachine, phone: PhoneLink, lane: ReportLane) {
+        if (!lane.remote.has(Calls.FEATURE)) return
+        val offered = live && Calls.can(PhoneCalls.grants(app, callsOn), lane.companion).isNotEmpty()
+        if (!offered) {
+            lane.toldCall = Calls.Now.IDLE_NOW
+            return
+        }
+        val now = callWatcher.current
+        val told = lane.toldCall
+        if (now == told || (now.state == Calls.IDLE && told.state == Calls.IDLE)) return
+        // Never a number in a log: who calls the person is theirs.
+        runCatching { phone.calls(Calls.stateLine(now)) }
+            .onSuccess { lane.toldCall = now }
+            .onFailure { Log.i(TAG, "${machine.machine}: the call was not shown: ${it.message}") }
+    }
+
+    /**
+     * A computer presses one of the phone's buttons (§2.12). Answering,
+     * declining and ending run on a locked phone, as on its lock screen;
+     * dialling only over a full link on an unlocked app, because a dial is
+     * the phone speaking for the person. The computer refuses a companion
+     * link's dial before it asks; this side does not rely on that.
+     */
+    private fun onCallAction(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent.CallAction, companion: Boolean) {
+        val unlocked = !companion && _unlocked.value
+        val state = Calls.stateOf(PhoneCalls.telephonyState(app))
+        val dial = if (event.action == Calls.DIAL) Calls.dialNumber(event.number) { PhoneCalls.emergency(app, it) } else null
+        val word = Calls.refusal(PhoneCalls.grants(app, callsOn), unlocked, event.action, state)
+            ?: (if (!live) Calls.LOCKED else null)
+            ?: dial?.exceptionOrNull()?.let { (it as Messages.Refused).word }
+        val result = word ?: PhoneCalls.act(app, event.action, dial?.getOrNull())
+        Log.i(TAG, "${machine.machine}: ${event.action} from the computer: ${result ?: "done"}")
+        runCatching { phone.calls(Calls.done(event.id, result)) }
+            .onFailure { Log.i(TAG, "${machine.machine}: a call action's result was not taken: ${it.message}") }
+    }
+
+    /** A computer asks for the call history (§2.12); it runs over a companion link too. */
+    private fun onCallHistory(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent.CallHistoryRequest) {
+        val word = Calls.historyRefusal(PhoneCalls.grants(app, callsOn), live)
+        val lines = if (word != null) {
+            listOf(Calls.refused(event.id, word))
+        } else {
+            runCatching { Calls.historyReply(event.id, PhoneCalls.history(app, event.before, event.limit)) }.getOrElse {
+                Log.i(TAG, "${machine.machine}: the call history was not read: ${it.javaClass.simpleName}")
+                listOf(Calls.refused(event.id, Calls.FAILED))
+            }
+        }
+        for (line in lines) {
+            val ok = runCatching { phone.calls(line) }
+                .onFailure { Log.i(TAG, "${machine.machine}: a history answer was not taken: ${it.message}") }
+                .isSuccess
+            if (!ok) return
         }
     }
 
@@ -1187,6 +1296,8 @@ class LinkHub private constructor(private val app: Context) {
             is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
             is DeviceEvent.MessagesRequest -> scope.launch { onMessagesRequest(machine, phone, event) }
             is DeviceEvent.MessagesSend -> scope.launch { onMessagesSend(machine, phone, event, companion) }
+            is DeviceEvent.CallAction -> scope.launch { onCallAction(machine, phone, event, companion) }
+            is DeviceEvent.CallHistoryRequest -> scope.launch { onCallHistory(machine, phone, event) }
             // Never over a companion link: it acts for the person.
             is DeviceEvent.MediaControl -> if (!companion) onMediaControl(machine, event)
             is DeviceEvent.Focus -> {

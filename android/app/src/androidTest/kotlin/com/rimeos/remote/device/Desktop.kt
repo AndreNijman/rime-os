@@ -307,6 +307,42 @@ object Desktop {
     fun messagesSend(device: String, to: String, text: String): JSONObject =
         ask(JSONObject().put("cmd", "messages_send").put("device", device).put("to", to).put("text", text).toString())
 
+    /**
+     * The EMULATOR's modem: an incoming call from [number] (`call`), or that
+     * call answered, ended or refused by the far end (`accept`, `cancel`,
+     * `busy`), through its console. Emulator numbers only; the broker refuses
+     * on any serial that is not an emulator.
+     */
+    fun emuGsm(action: String, number: String) {
+        val reply = ask(JSONObject().put("cmd", "emu_gsm").put("action", action).put("number", number).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not $action the emulator's call: $reply" }
+    }
+
+    /**
+     * The person pressed button [action] on stub notification [id], as a real
+     * server says in `ActionInvoked`. A real server then closes it; the
+     * caller says so with [notifyClosed].
+     */
+    fun notifyAction(id: Int, action: String) {
+        val reply = ask(JSONObject().put("cmd", "notify_action").put("id", id).put("action", action).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not press the stub notification's button: $reply" }
+    }
+
+    /**
+     * `rime remote calls` against this run's rime-remoted: the phone's call
+     * now and its recent calls. The reply as the daemon gave it, `calls` or
+     * `error`.
+     */
+    fun calls(device: String, limit: Int = 20): JSONObject =
+        ask(JSONObject().put("cmd", "calls").put("device", device).put("limit", limit).toString())
+
+    /** `rime remote calls answer|decline|hangup|dial NUMBER`. The reply as given, `call_done` or `error`. */
+    fun call(device: String, action: String, number: String? = null): JSONObject {
+        val req = JSONObject().put("cmd", "call").put("device", device).put("action", action)
+        if (number != null) req.put("number", number)
+        return ask(req.toString())
+    }
+
     private fun requestReply(line: String): JSONObject {
         val reply = ask(line)
         check(reply.optString("reply") == "request") {
