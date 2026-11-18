@@ -81,7 +81,10 @@ class CompanionOnDeviceTest {
     fun tidy() {
         // Off first, while the full link may still be up, so the computer is
         // told to forget; the record and both keystore keys go after.
-        runCatching { if (repository.loadBlocking().settings.companionOn) hub.setCompanionOn(false) }
+        runCatching {
+            val store = repository.loadBlocking()
+            if (store.settings.companionOn || store.find(machine.deviceId)?.companion != null) hub.setCompanionOn(false)
+        }
         hub.shutdown()
         assertFalse("after the test, companion mode still runs", hub.companion.value)
         shell("dumpsys battery reset")
@@ -117,6 +120,12 @@ class CompanionOnDeviceTest {
         assertFalse("shutdown left companion mode running", hub.companion.value)
         assertNull(hub.companionLinkOf(machine.deviceId))
         assertNull("shutdown left the full key in memory", hub.identity(machine.deviceId))
+        // A fresh process knows nothing it did not read: the chosen apps and
+        // the reply setting are wiped from memory (the store keeps them), so
+        // the notification below reaches the computer only if the boot start
+        // read them back from the store.
+        hub.setMirrorApps(emptySet())
+        hub.setMirrorReply(false)
         val reportedBefore = report()?.optLong("reported_ms") ?: 0L
         val out = shell("su 0 am broadcast -a android.intent.action.BOOT_COMPLETED -p ${context.packageName}")
         assertTrue("the boot broadcast was not delivered: $out", "Broadcast completed" in out)
@@ -203,10 +212,14 @@ class CompanionOnDeviceTest {
     }
 
     @Test
-    fun with_the_switch_off_a_restart_starts_nothing() {
+    fun with_the_switch_off_a_restart_starts_nothing_even_with_a_key_left() {
         hub.setCompanionOn(true)
-        hub.setCompanionOn(false)
-        assertEquals(0, hub.companionKeys())
+        assertEquals(1, hub.companionKeys())
+        // The switch alone off, the registered key left in place: turning it
+        // off for real deletes the key, which would hide a boot start that
+        // looked only at the keys.
+        runBlocking { repository.settings(repository.loadBlocking().settings.copy(companionOn = false)) }
+        assertEquals(1, hub.companionKeys())
         hub.shutdown()
         val out = shell("su 0 am broadcast -a android.intent.action.BOOT_COMPLETED -p ${context.packageName}")
         assertTrue("the boot broadcast was not delivered: $out", "Broadcast completed" in out)
