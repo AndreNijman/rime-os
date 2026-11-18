@@ -324,4 +324,37 @@ class MirrorTest {
         o.offer("a", news, 300)
         assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 300))
     }
+
+    @Test
+    fun `a reply elsewhere that fails takes nothing away from this computer`() {
+        val o = MirrorOutbox(0)
+        val hi = Content("Chat", "Ann", "Hi", "Reply")
+        o.offer("a", hi, 0)
+        drain(o, 0)
+        assertTrue(o.holdElsewhere("a", 0))
+        // Armed only: nothing is closed before the reply has gone.
+        assertEquals(emptyList<MirrorItem>(), drain(o, 0))
+        o.replyFailed("a")
+        assertEquals(emptyList<MirrorItem>(), drain(o, 100))
+        val news = Content("Chat", "Ann", "Still there?", "Reply")
+        o.offer("a", news, 200)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 200))
+    }
+
+    @Test
+    fun `the app's answer before the reply is confirmed stays held, and a new message after it is sent`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        drain(o, 0)
+        assertTrue(o.holdElsewhere("a", 0))
+        val answer = Content("Chat", "Ann", "You: ok", "Reply")
+        o.offer("a", answer, 10)
+        assertTrue(o.repliedElsewhere("a", 20))
+        assertEquals(listOf<MirrorItem>(MirrorItem.Removed("a")), drain(o, 20))
+        o.offer("a", answer, 30)
+        assertEquals(emptyList<MirrorItem>(), drain(o, 30))
+        val news = Content("Chat", "Ann", "Ann: great", "Reply")
+        o.offer("a", news, 40)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 40))
+    }
 }
