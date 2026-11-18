@@ -134,4 +134,20 @@ class SettingsTest {
         assertTrue(storage.load().settings.focusOn)
         assertTrue(file.readText().contains("\"focus_on\":true"), "the switch is not stored under its contract name")
     }
+
+    @Test
+    fun `getting the computer's clipboard is off until turned on, and survives a save`(@TempDir dir: Path) {
+        // Contract §2.10: nothing lands on this phone's clipboard until the
+        // person says so. A store from before the feature reads as off.
+        assertFalse(Settings().clipboardOn)
+        val file = dir.resolve("machines.json").toFile()
+        file.parentFile.mkdirs()
+        file.writeText("""{"v":1,"machines":[],"settings":{"focus_on":true}}""")
+        assertFalse(AppStorage(dir.toFile()).load().settings.clipboardOn)
+
+        val storage = AppStorage(dir.toFile())
+        storage.save(MachineStore(settings = Settings(clipboardOn = true)))
+        assertTrue(storage.load().settings.clipboardOn)
+        assertTrue(file.readText().contains("\"clipboard_on\":true"), "the switch is not stored under its contract name")
+    }
 }

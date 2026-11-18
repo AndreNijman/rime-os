@@ -197,6 +197,7 @@ fun RimeRemoteApp(
                     onDynamicColour = { viewModel.setDynamicColour(it) },
                     onMirror = { navigation.navigate(Destinations.MIRROR) },
                     onMedia = { navigation.navigate(Destinations.MEDIA) },
+                    onClipboard = { viewModel.setClipboardOn(it) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
                         // ACTION_SEND with the text in the intent, so the user

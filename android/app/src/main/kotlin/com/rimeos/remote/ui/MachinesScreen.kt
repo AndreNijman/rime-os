@@ -89,6 +89,8 @@ fun MachinesScreen(
     /** "Notifications on your computer". A default, as for [updateBanner], so existing callers keep compiling. */
     onMirror: () -> Unit = {},
     onMedia: () -> Unit = {},
+    /** "Get the computer's clipboard" (contract §2.10). A default, as for [updateBanner]. */
+    onClipboard: (Boolean) -> Unit = {},
 ) {
     var forgetting by remember { mutableStateOf<PairedMachine?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
@@ -230,6 +232,23 @@ fun MachinesScreen(
                         settingsOpen = false
                         onMedia()
                     }) { Text("Media on your computer") }
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Get the computer's clipboard")
+                            Text(
+                                "Text copied on a paired computer lands on this phone's clipboard while " +
+                                    "this app is unlocked. The computer sends it only once " +
+                                    "\"Send my clipboard to my phone\" is on there too.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.clipboardOn,
+                            onCheckedChange = onClipboard,
+                        )
+                    }
 
                     HorizontalDivider(Modifier.padding(vertical = 14.dp))
 
