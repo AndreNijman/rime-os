@@ -358,13 +358,13 @@
       <action name="Execute" command="rime shell network hotspot"/>
     </keybind>
     <keybind key="W-C-Right">
-      <action name="Execute" command="/usr/libexec/rime-media-key next"/>
+      <action name="Execute" command="bash /usr/share/rime-shell/src/scripts/media-key.sh next"/>
     </keybind>
     <keybind key="W-C-space">
-      <action name="Execute" command="/usr/libexec/rime-media-key play-pause"/>
+      <action name="Execute" command="bash /usr/share/rime-shell/src/scripts/media-key.sh play-pause"/>
     </keybind>
     <keybind key="W-C-Left">
-      <action name="Execute" command="/usr/libexec/rime-media-key previous"/>
+      <action name="Execute" command="bash /usr/share/rime-shell/src/scripts/media-key.sh previous"/>
     </keybind>
     <keybind key="W-S-Down">
       <action name="SnapToEdge" direction="down"/>
