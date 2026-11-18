@@ -101,6 +101,7 @@ ID                 NAME                 STATE     PATH     LAST SEEN
 | `revoked_ms` | Unix ms at which the owner revoked it, or absent |
 | `requires_user_verification` | whether this machine requires the device to have re-authenticated its user |
 | `last_path` | the transport the last completed handshake arrived over |
+| `companion` | whether the device has a companion key, so it keeps working after the phone restarts (see below). The key itself is never printed |
 
 The `STATE` column is **derived from `revoked_ms` alone**: `revoked` if it is
 set, `paired` if it is not. There is no third state and no stored status field
@@ -111,6 +112,29 @@ end, and not as a column. The desktop cannot see a fingerprint. What the flag
 buys is that the device holds its key in a keystore that will not sign without
 a biometric or device credential. That is the **device's own claim**, and a
 tick in a table would read as a fact this machine had verified.
+
+A device with a companion key is named in one more sentence at the end: it
+"keeps working after a restart".
+
+### Keeping the phone's features working after it restarts
+
+A phone keeps its pairing key behind its lock screen, so after the phone
+restarts nothing reaches this machine until somebody unlocks it: no battery,
+no notifications, no ring. If you turn on **Keep working after the phone
+restarts** in the app, the phone makes a second key that is not behind the
+lock screen and registers it over its normal connection. This machine stores
+it on the same device record.
+
+A connection on that second key gets the phone's own features and nothing
+else: its battery and network report, ring and Send to Rime acknowledgements,
+its notifications, what it is playing, and push registration. It cannot open
+a terminal, start or steer an agent, use nex, lock the computer, change its
+media or volume, or touch the clipboard. Anything else is refused with
+`not_allowed`. Unlocking the phone brings back the full connection.
+
+Revoking the device ends both keys at once, including a connection the second
+key already holds. Pairing the phone again starts without one. Turning the
+switch off in the app removes the key here too.
 
 ## `rime remote revoke <device>`
 
@@ -156,8 +180,13 @@ connection over and would wedge it. It hands everything else to `rime-agentd`
 under the origin `claude-remote-control`. So `rime-agentd`'s own per-verb rules
 decide what a phone can do, in one place, and no denylist here can drift from
 them. (The exceptions are verbs `rime-remoted` answers itself
-and never forwards: its hello, nex, and the five machine verbs in
-[The computer itself](#the-computer-itself-status-lock-and-media).)
+and never forwards: its hello, the companion key, nex, and the five machine
+verbs in [The computer itself](#the-computer-itself-status-lock-and-media).)
+
+A connection on a phone's **companion key** is the opposite: it forwards
+nothing to `rime-agentd` at all, and may use only the phone's own features
+([above](#keeping-the-phones-features-working-after-it-restarts);
+`docs/remote-live-contract.md` §2.10 has the list).
 
 Three verbs serve the phone's pickers, and the first two are cheap:
 

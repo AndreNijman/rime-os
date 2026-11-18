@@ -193,8 +193,12 @@ start rime-agentd without it.
 
 ```json
 {"cmd":"remote_hello"}
-→ {"reply":"remote","version":1,"features":["nodelay","control_worker","mux_attach","liveness"],"lan":["192.168.1.232:7717"]}
+→ {"reply":"remote","version":1,"features":["nodelay","control_worker","mux_attach","liveness"],"lan":["192.168.1.232:7717"],"scope":"full"}
 ```
+
+`scope` says which of the device's keys opened this session: `full` or
+`companion` (§2.10). A rime-remoted without the companion link sends no
+`scope`; read its absence as `full`.
 
 An old rime-remoted forwards it to agentd, which answers
 `{"reply":"error","kind":"bad_request",...}`: the phone reads that as "no
@@ -909,6 +913,76 @@ nothing, because the unit binary runs inside the developer's session, where
 `android/tools/run-device-suite.sh` and its broker's restart, starts the
 daemon with a private `XDG_RUNTIME_DIR`. So no `RIME_REMOTED_*_STUB` is needed
 for this file.
+
+### 2.10 The companion link: a second key, a smaller session
+
+Feature `companion_link`. A phone holds its device key behind its lock screen,
+so after a restart it cannot open a session until it is unlocked. The
+companion key is a second X25519 key the phone keeps without that gate; a
+session on it may use the device features below and nothing else.
+
+**Minted by a full session only.** No change to pairing:
+
+```json
+{"cmd":"companion_register","public_key":"<32-byte X25519 public key, base64url, no padding>"}
+→ {"reply":"ok"}
+{"cmd":"companion_forget"}
+→ {"reply":"ok"}
+```
+
+- The device is the handshake's; the body names none. One key per device: a
+  new one replaces the old.
+- `companion_register` errors: `kind` `bad_request` (no `public_key`, or not 32
+  bytes of base64url), `key_in_use` (the key is this device's own key, or
+  either key of any other device, revoked ones included; one message for every
+  case, so the answer does not say which device holds it).
+- Replacing a key, or `companion_forget`, ends that device's open companion
+  sessions at once; its full sessions go on. `companion_forget` with no key set
+  is `ok`.
+- Both verbs from a companion session: `not_allowed`.
+
+**Scope by key.** The handshake decides it: the device's own key opens a
+`full` session, its companion key a `companion` session. Nothing the phone
+sends changes it. `remote_hello` says which (§2.1).
+
+**What a companion session may do: an allow list, checked before routing.**
+
+| | allowed |
+| --- | --- |
+| control verbs | `remote_hello`, `phone_report`, `ring_ack`, `offer_ack`, `offer_done`, `phone_notification`, `phone_notification_removed`, `phone_media`, `push_register`, `push_unregister` |
+| channels (`Open`) | `device_events`, `take_offer` |
+
+Everything else is refused, whatever it is: `machine_status`, `machine_lock`,
+`media`, `media_control`, `volume`, `nex`, `nex_events`, `companion_register`,
+`companion_forget`, every `rime-agentd` verb (`hello`, `list`, `input`,
+`privilege_request`, `decide`, `clipboard_write`, …), a line with no readable
+`cmd`, and every other channel (`attach`, `receive`, `save_file`, nex's
+feed). A companion session reaches `rime-agentd` never, not even to be told
+no:
+
+```json
+→ {"reply":"error","kind":"not_allowed","message":"machine_lock is not allowed on a companion link; unlock the phone to use it"}
+```
+
+A refused `Open` gets that line on channel zero, then a `Close` for the
+channel, in order with the other replies. `Data` for a refused channel is
+dropped. A verb a later release adds to rime-remoted is refused on a
+companion session until it is added to this list on purpose (the list is
+`rimed/rime-remoted/src/companion.rs`; a unit test fails until every verb has
+a decision).
+
+`clipboard_write` (§1.8) stays refused: it is a `rime-agentd` verb, and a
+companion session forwards nothing there. If rime-remoted answers a clipboard
+verb itself one day, it joins the list (`CLIPBOARD_VERBS`).
+
+**Revoke** (`rime remote revoke`) refuses both keys and drops every live
+connection the device holds, companion ones included; a refused companion key
+gets the same handshake refusal as a key that was never paired. Pairing the
+device again starts with no companion key.
+
+**`rime remote devices`** says which devices have one ("keeps working after a
+restart"; `--json`: `"companion": true`). The control socket's `devices`
+reply carries a `companions` list of device ids and never the key.
 
 ## 3. The phone
 
