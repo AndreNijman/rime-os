@@ -65,7 +65,15 @@ pub const CLIPBOARD_VERBS: [&str; 0] = [];
 /// this computer and the phone's own switch decides (contract §2.11). Not
 /// `messages_sent`: sending needs the app unlocked, and the computer never
 /// writes `messages_send` to a companion session's channel.
-pub const ALLOWED_VERBS: [&str; 10] = [
+///
+/// `call_state`, `call_done` and `call_history_reply` are here (contract
+/// §2.12): a call rings on a locked phone, and its lock screen lets anyone
+/// holding it answer or decline, so the person at this computer may too; the
+/// history read is gated here like the SMS read. A dial is the exception: the
+/// computer never writes a `dial` action to a companion session's channel,
+/// and the phone refuses one on that lane, so `call_done` for a dial never
+/// comes from a companion session.
+pub const ALLOWED_VERBS: [&str; 13] = [
     "remote_hello",
     "phone_report",
     "ring_ack",
@@ -76,6 +84,9 @@ pub const ALLOWED_VERBS: [&str; 10] = [
     "phone_media",
     "messages_reply",
     "messages_changed",
+    "call_state",
+    "call_done",
+    "call_history_reply",
 ];
 
 /// Every channel a companion session may open: the events channel the

@@ -92,7 +92,32 @@ pub const CAN_FOCUS: &str = "focus";
 /// Its SMS threads may be read from this machine (contract §2.11).
 pub const CAN_MESSAGES: &str = "messages";
 
-const KEPT: [&str; 6] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY, CAN_FOCUS, CAN_MESSAGES];
+/// Its calls show on this machine (contract §2.12): the person turned "Calls
+/// on your computer" on and allowed the phone state. Without it the words
+/// below mean nothing.
+pub const CAN_CALLS: &str = "calls";
+
+/// A ringing call may be answered or declined, and a call hung up, from here.
+pub const CAN_CALLS_ANSWER: &str = "calls_answer";
+
+/// A number may be dialled from here (never on a companion session).
+pub const CAN_CALLS_DIAL: &str = "calls_dial";
+
+/// The call history may be read from here.
+pub const CAN_CALLS_HISTORY: &str = "calls_history";
+
+const KEPT: [&str; 10] = [
+    CAN_RING,
+    CAN_RECEIVE,
+    CAN_DISMISS,
+    CAN_REPLY,
+    CAN_FOCUS,
+    CAN_MESSAGES,
+    CAN_CALLS,
+    CAN_CALLS_ANSWER,
+    CAN_CALLS_DIAL,
+    CAN_CALLS_HISTORY,
+];
 
 /// The network kinds a phone may report. Anything else is refused rather than
 /// stored, so `rime remote devices` and the Shell only ever print words they
@@ -120,7 +145,7 @@ pub const OFFER_LIFE: Duration = Duration::from_secs(15 * 60);
 pub const ACK_WAIT: Duration = Duration::from_secs(4);
 
 /// How many capability words one report may list.
-const MAX_CAN: usize = 8;
+const MAX_CAN: usize = 16;
 
 /// One phone's last report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,6 +192,10 @@ impl PhoneReport {
 
     pub fn can_messages(&self) -> bool {
         self.can.iter().any(|c| c == CAN_MESSAGES)
+    }
+
+    pub fn can_calls(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_CALLS)
     }
 
     /// A report from a `phone_report` line, or why it was refused.
@@ -1066,10 +1095,17 @@ mod tests {
             json!({"charging": "yes"}),
             json!({"can": "ring"}),
             json!({"can": [1]}),
-            json!({"can": ["a","b","c","d","e","f","g","h","i"]}),
+            json!({"can": (0..17).map(|i| format!("w{i}")).collect::<Vec<_>>()}),
         ] {
             assert!(PhoneReport::parse(&bad, 5).is_err(), "{bad} was accepted");
         }
+        // Every word this machine keeps fits in one report, with room (§2.5):
+        // a phone with all of them on is never refused whole.
+        let every: Vec<&str> = KEPT.to_vec();
+        assert!(every.len() <= MAX_CAN);
+        let r = PhoneReport::parse(&json!({"can": every}), 5).expect("parse");
+        assert_eq!(r.can.len(), KEPT.len());
+        assert!(r.can_calls() && r.can_messages());
     }
 
     #[test]

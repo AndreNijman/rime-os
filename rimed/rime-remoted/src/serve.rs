@@ -541,6 +541,9 @@ fn frames(
     // A messages request dies with the connection it was asked on, and what
     // it had gathered goes with it (contract §2.11).
     state.messages.ended(device_id, connection);
+    // So does a calls request, and what the connection said about a call:
+    // a ringing notification closes rather than ring on for a phone gone.
+    state.calls.ended(device_id, connection, crate::mirror::mirror());
     state.events.ended(device_id, connection);
 
     if let Some(quiet) = silenced.lock().ok().and_then(|s| *s) {
@@ -994,6 +997,20 @@ fn answered_here(state: &State, device_id: &str, scope: Scope, connection: u64, 
         }
         // A phone's SMS threads, answering a request somebody here made.
         Some(c) if crate::messages::VERBS.contains(&c) => state.messages.control(device_id, connection, line),
+        // A phone's calls: its state, shown here while it rings, and the
+        // answers to what somebody here asked of it.
+        Some(c) if crate::calls::VERBS.contains(&c) => {
+            let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
+            let report = state.phones().get(device_id).cloned();
+            state.calls.control(
+                device_id,
+                name.as_deref().unwrap_or(""),
+                connection,
+                report.as_ref(),
+                crate::mirror::mirror(),
+                line,
+            )
+        }
         // What the phone is playing, shown here as a media player.
         Some(c) if crate::media::VERBS.contains(&c) => {
             let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
@@ -1028,6 +1045,7 @@ fn remote_hello(state: &State, scope: Scope) -> Vec<u8> {
     features.extend(crate::mirror::FEATURES);
     features.extend(crate::media::FEATURES);
     features.extend(crate::messages::FEATURES);
+    features.extend(crate::calls::FEATURES);
     features.extend(crate::companion::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
@@ -1390,7 +1408,8 @@ mod tests {
                                "machine_status", "machine_lock", "media",
                                "device_events", "phone_report", "take_offer", "phone_focus",
                                "phone_notifications", "phone_notification_reply",
-                               "phone_media", "phone_media_control", "phone_messages", "companion_link"]),
+                               "phone_media", "phone_media_control", "phone_messages", "phone_calls",
+                               "companion_link"]),
             "{v}"
         );
         assert_eq!(v["scope"], "full", "{v}");
@@ -1423,6 +1442,7 @@ mod tests {
             .chain(crate::mirror::VERBS.iter())
             .chain(crate::media::VERBS.iter())
             .chain(crate::messages::VERBS.iter())
+            .chain(crate::calls::VERBS.iter())
             .chain(crate::companion::VERBS.iter())
         {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
@@ -1461,6 +1481,7 @@ mod tests {
         assert_eq!(crate::mirror::VERBS, ["phone_notification", "phone_notification_removed"]);
         assert_eq!(crate::media::VERBS, ["phone_media"]);
         assert_eq!(crate::messages::VERBS, ["messages_reply", "messages_changed", "messages_sent"]);
+        assert_eq!(crate::calls::VERBS, ["call_state", "call_history_reply", "call_done"]);
         assert_eq!(crate::companion::VERBS, ["companion_register", "companion_forget"]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1590,6 +1611,7 @@ mod tests {
             .chain(crate::mirror::VERBS.iter())
             .chain(crate::media::VERBS.iter())
             .chain(crate::messages::VERBS.iter())
+            .chain(crate::calls::VERBS.iter())
             .chain(crate::companion::VERBS.iter())
             .copied()
             .collect()
@@ -1640,6 +1662,12 @@ mod tests {
             "phone_media",
             "messages_reply",
             "messages_changed",
+            // A call rings on a locked phone, and its own lock screen lets the
+            // person answer or decline it; a dial is refused by the computer
+            // and the phone on that lane (calls.rs, contract §2.12).
+            "call_state",
+            "call_done",
+            "call_history_reply",
         ];
         let refused = [
             "messages_sent",

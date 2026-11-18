@@ -104,6 +104,24 @@ pub enum Request {
         thread: Option<u64>,
         text: String,
     },
+    /// A phone's current call and its call history (contract §2.12).
+    /// `device` may be left out when exactly one phone has calls on.
+    Calls {
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        before: Option<u64>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Answer, decline or hang up the phone's call, or dial `number`.
+    Call {
+        #[serde(default)]
+        device: Option<String>,
+        action: String,
+        #[serde(default)]
+        number: Option<String>,
+    },
 }
 
 /// What it answers.
@@ -183,6 +201,20 @@ pub enum Reply {
     },
     /// The phone's radio took the message.
     MessageSent { device: String },
+    /// A phone's call now (`current`, absent when idle) and its history,
+    /// newest first. `history_error` says why there is no history when the
+    /// phone gave none; the current call is still true then.
+    Calls {
+        device: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current: Option<crate::calls::Call>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calls: Option<Vec<crate::calls::Entry>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_error: Option<String>,
+    },
+    /// The phone did what `call` asked.
+    CallDone { device: String, action: String },
     Ok,
     Error { message: String },
 }
@@ -304,6 +336,8 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
             thread,
             text,
         } => messages_send(state, device.as_deref(), to, thread, &text),
+        Request::Calls { device, before, limit } => calls(state, device.as_deref(), before, limit),
+        Request::Call { device, action, number } => call(state, device.as_deref(), &action, number.as_deref()),
     }
 }
 
@@ -377,8 +411,39 @@ fn authorized_by(
         Request::Pair => local_caller(peer),
         Request::Send { .. } => sending_caller(peer),
         Request::Messages { .. } | Request::MessagesSend { .. } => messages_caller(peer, observe),
+        Request::Calls { .. } | Request::Call { .. } => calls_caller(peer, observe),
         _ => own_user(peer),
     }
+}
+
+/// Refuse `calls` or `call` from anything but a human at this machine: a
+/// call history names who the person talks to, and answering or dialling
+/// acts as them on their phone.
+fn calls_caller(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell whether a human is at this machine — and a phone's calls are reserved \
+             for one"
+                .to_string(),
+        );
+    };
+    own_user(Some(peer))?;
+    may_use_calls(observe(peer.pid)?)
+}
+
+/// The calls rule over a value, for the same reason [`may_pair`] is one.
+pub fn may_use_calls(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot see, answer or place a phone's calls: only a person at this \
+         machine may. Run `rime remote calls` from a terminal, or use Rime Shell"
+    ))
 }
 
 /// Refuse a `messages` or `messages_send` from anything but a human at this
@@ -805,6 +870,88 @@ fn messages_send(state: &State, device: Option<&str>, to: Option<String>, thread
     }
 }
 
+/// The phone a calls request goes to: the one named, or the only phone that
+/// has calls on. Its id, name and last report.
+fn calls_phone(state: &State, device: Option<&str>) -> Result<(String, String, crate::phone::PhoneReport), String> {
+    let store = state.devices().map_err(|e| e.to_string())?;
+    let phones = state.phones();
+    let has = |id: &str| phones.get(id).is_some_and(crate::phone::PhoneReport::can_calls);
+    let (id, name) = match device {
+        Some(d) => match store.find(d) {
+            Ok(d) if d.is_active() => (d.id.clone(), d.name.clone()),
+            Ok(d) => return Err(format!("{} was revoked", d.name)),
+            Err(e) => return Err(e.to_string()),
+        },
+        None => {
+            let with: Vec<_> = store.list().into_iter().filter(|d| d.is_active() && has(&d.id)).collect();
+            match with.as_slice() {
+                [d] => (d.id.clone(), d.name.clone()),
+                [] => {
+                    return Err("no paired phone has turned on Calls on your computer. On the phone: \
+                                Rime Remote → Calls on your computer"
+                        .into())
+                }
+                many => {
+                    let names: Vec<&str> = many.iter().map(|d| d.name.as_str()).collect();
+                    return Err(format!(
+                        "more than one phone has calls on ({}); name one with --device",
+                        names.join(", ")
+                    ));
+                }
+            }
+        }
+    };
+    // Asked before anything is written: a phone that has not turned calls on
+    // gets no request at all.
+    match phones.get(&id) {
+        Some(r) if r.can_calls() => Ok((id, name, r.clone())),
+        _ => Err(format!(
+            "{name} has not turned on Calls on your computer. On the phone: Rime Remote → Calls on your computer"
+        )),
+    }
+}
+
+fn calls(state: &State, device: Option<&str>, before: Option<u64>, limit: Option<u32>) -> Reply {
+    let limit = limit.map_or(crate::calls::DEFAULT_LIMIT, |l| l as usize);
+    if limit == 0 || limit > crate::calls::MAX_LIMIT {
+        return Reply::error(format!("limit must be from 1 to {}", crate::calls::MAX_LIMIT));
+    }
+    let (id, name, report) = match calls_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    let current = state.calls.current(&id);
+    let (calls, history_error) =
+        match state.calls.history(&state.events, &id, &report, before, limit, crate::calls::HISTORY_WAIT) {
+            Ok(calls) => (Some(calls), None),
+            Err(why) => (None, Some(why.sentence(&name))),
+        };
+    Reply::Calls { device: name, current, calls, history_error }
+}
+
+fn call(state: &State, device: Option<&str>, action: &str, number: Option<&str>) -> Reply {
+    if !crate::calls::ACTIONS.contains(&action) {
+        return Reply::error("the action must be answer, decline, hangup or dial");
+    }
+    let number = match (action, number) {
+        ("dial", Some(n)) => match crate::messages::number(n) {
+            Ok(n) => Some(n),
+            Err(why) => return Reply::error(why),
+        },
+        ("dial", None) => return Reply::error("dial needs a number"),
+        (_, None) => None,
+        (_, Some(_)) => return Reply::error("only dial takes a number"),
+    };
+    let (id, name, report) = match calls_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    match state.calls.act(&state.events, &id, &report, action, number.as_deref(), crate::calls::ACTION_WAIT) {
+        Ok(()) => Reply::CallDone { device: name, action: action.to_string() },
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
 /// The origins this socket accepts a pairing request from.
 ///
 /// Written out and matched against, rather than left implicit in
@@ -977,6 +1124,8 @@ mod tests {
                 thread: None,
                 text: "x".into(),
             },
+            Request::Calls { device: None, before: None, limit: None },
+            Request::Call { device: None, action: "dial".into(), number: Some("5556".into()) },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1018,6 +1167,11 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_messages(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
+                Request::Calls { .. } | Request::Call { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_calls(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
@@ -1048,6 +1202,37 @@ mod tests {
         assert!(authorized_by(&read, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
         // And `status` is still a script's to ask.
         assert!(authorized_by(&Request::Status, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_ok());
+    }
+
+    #[test]
+    fn a_scheduled_job_may_neither_see_nor_handle_a_phones_calls() {
+        // Injected origins, as for messages: this fails on any machine if the
+        // gate is removed, a developer's login session included.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let list = Request::Calls { device: None, before: None, limit: None };
+        let every: Vec<Request> = std::iter::once(list)
+            .chain(["answer", "decline", "hangup"].into_iter().map(|a| Request::Call {
+                device: None,
+                action: a.into(),
+                number: None,
+            }))
+            .chain(std::iter::once(Request::Call { device: None, action: "dial".into(), number: Some("5556".into()) }))
+            .collect();
+        for o in RequestOrigin::ALL {
+            for req in &every {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote calls"), "{why}");
+                }
+            }
+        }
+        assert!(authorized_by(&every[4], Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&every[0], None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
     }
 
     #[test]
@@ -1105,6 +1290,20 @@ mod tests {
                 text: "line one\nline two".into(),
             },
         ];
+        // The wire shapes `rime remote calls` depends on.
+        assert_eq!(
+            serde_json::to_string(&Request::Call { device: None, action: "dial".into(), number: Some("5556".into()) })
+                .unwrap(),
+            r#"{"cmd":"call","device":null,"action":"dial","number":"5556"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Calls { device: Some("p".into()), before: None, limit: Some(5) }).unwrap(),
+            r#"{"cmd":"calls","device":"p","before":null,"limit":5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::CallDone { device: "Pixel".into(), action: "answer".into() }).unwrap(),
+            r#"{"reply":"call_done","device":"Pixel","action":"answer"}"#
+        );
         // The wire shapes `rime remote messages` and a Shell page depend on.
         assert_eq!(
             serde_json::to_string(&Request::MessagesSend { device: None, to: Some("5556".into()), thread: None, text: "x".into() })

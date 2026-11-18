@@ -92,6 +92,9 @@ pub struct State {
     pub outbox: crate::phone::Outbox,
     /// The messages requests waiting on phones (contract §2.11). Memory only.
     pub messages: crate::messages::Messages,
+    /// Each phone's current call and the calls requests waiting on phones
+    /// (contract §2.12). Memory only.
+    pub calls: crate::calls::Calls,
     /// How often an open connection is measured.
     pub ping_interval: std::time::Duration,
     devices: Mutex<DeviceStore>,
@@ -168,6 +171,7 @@ impl State {
             events: crate::phone::Events::default(),
             outbox: crate::phone::Outbox::default(),
             messages: crate::messages::Messages::default(),
+            calls: crate::calls::Calls::default(),
             ping_interval,
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
@@ -263,9 +267,16 @@ impl State {
                 }
             }
         }
+        // Calls switched off on the phone: what it said about a call goes,
+        // and a ringing notification closes, at once.
+        let calls_off = !report.can_calls();
         store.phones.insert(device_id.to_string(), report);
         if let Err(e) = store.save(&self.phones_path) {
             eprintln!("rime-remoted: could not write {}: {e}", self.phones_path.display());
+        }
+        drop(store);
+        if calls_off {
+            self.calls.off(device_id, crate::mirror::mirror());
         }
     }
 
@@ -280,6 +291,7 @@ impl State {
         self.events.forget(device_id);
         self.outbox.forget(device_id);
         self.messages.forget(device_id);
+        self.calls.forget(device_id);
         crate::mirror::mirror().forget(device_id);
         crate::media::media().forget(device_id);
         self.focus_seen.forget(device_id);
