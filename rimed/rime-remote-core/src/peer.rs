@@ -157,6 +157,18 @@ impl Presence {
     }
 }
 
+/// One computer as a listing shows it: its record, and the presence it last
+/// gave with when, which the listing computer keeps in memory only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Listed {
+    #[serde(flatten)]
+    pub computer: crate::device::Device,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<Presence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_ms: Option<u64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

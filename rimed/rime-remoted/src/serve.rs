@@ -341,7 +341,12 @@ fn session(
         // listener too, and a device list that called every session local
         // would be telling the owner nobody else was on the path.
         store.seen(&device_id, now, path.as_str());
-        let _ = state.save_devices(&store);
+        // Not for another computer: its refresh connects every few minutes,
+        // and writing the store each time would be a disk write per dial.
+        // The time is kept in memory and written with the next change.
+        if scope != Scope::Peer {
+            let _ = state.save_devices(&store);
+        }
     }
     // Shared with the frame loop, which is the only writer, and with anybody
     // asking for status, which is the only reader.
@@ -804,6 +809,12 @@ impl Worker {
                     }
                     let reply = self.control(&line);
                     let _ = send(&self.sealer, Frame::Control(reply));
+                    // A computer this line's tombstones made this one remove
+                    // (it removed this computer first) gets its answer, then
+                    // the session ends: the removal holds from the next byte.
+                    if self.scope == Scope::Peer && !self.state.computer_active(&self.device_id) {
+                        self.state.drop_connections_for(&self.device_id);
+                    }
                 }
                 Work::Open { channel, request } => self.open(channel, &request),
                 Work::Data { channel, bytes } => {
@@ -1008,7 +1019,7 @@ fn reply_to(state: &State, agentd: &Path, device_id: &str, scope: Scope, connect
     // Another computer first, and only: its own short list, answered here,
     // never routed and never forwarded. Membership is not authority.
     if scope == Scope::Peer {
-        return crate::computers::peer_reply(state, line);
+        return crate::computers::peer_reply(state, device_id, line);
     }
     let cmd = crate::companion::verb_of(line);
     if !crate::companion::allowed(scope, cmd.as_deref()) {
@@ -1968,7 +1979,7 @@ pub(crate) mod tests {
 
     /// Every control verb `rime remote` sends this daemon's own socket: none
     /// of them may be reached from a peer session either.
-    const CONTROL_VERBS: [&str; 10] = [
+    const CONTROL_VERBS: [&str; 11] = [
         "pair",
         "revoke",
         "devices",
@@ -1976,6 +1987,7 @@ pub(crate) mod tests {
         "computer_show",
         "computer_add",
         "computer_remove",
+        "computer_forget",
         "computer_ping",
         "computers",
         "send",
@@ -2011,6 +2023,16 @@ pub(crate) mod tests {
         let r = reply_to(&state, &agentd, "desk", Scope::Peer, 0, br#"{"cmd":"peer_hello"}"#);
         let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
         assert_eq!(v["reply"], "peer_hello", "{v}");
+        // The list is exactly these four: a verb added to it is a verb the
+        // refusals above stop trying, so it is named here and nowhere else.
+        assert_eq!(crate::computers::PEER_VERBS, ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence"]);
+        for (line, kind) in [
+            (&br#"{"cmd":"peer_tombstones","tombstones":[]}"#[..], "peer_tombstones"),
+            (br#"{"cmd":"peer_presence","presence":{"name":"desk"}}"#, "peer_presence"),
+        ] {
+            let v: serde_json::Value = serde_json::from_slice(&reply_to(&state, &agentd, "desk", Scope::Peer, 0, line)).expect("json");
+            assert_eq!(v["reply"], kind, "{v}");
+        }
         assert_eq!(count.load(Ordering::SeqCst), 0);
         // The control arm: a full session on the same daemon is reached.
         let r = reply_to(&state, &agentd, "pixel-8", Scope::Full, 0, br#"{"cmd":"list"}"#);

@@ -100,6 +100,10 @@ pub struct State {
     pub photos: Arc<crate::photos::Photos>,
     /// How often an open connection is measured.
     pub ping_interval: std::time::Duration,
+    /// The presence each paired computer last gave (§2.15). Memory only.
+    pub presence: crate::presence::Board,
+    /// Wakes the refresh thread when the paired computers change.
+    pub refresh: crate::presence::Wake,
     devices: Mutex<DeviceStore>,
     /// The pairing offer, when one is open. In memory only: a token that
     /// survived a restart would be one the owner did not ask to survive.
@@ -183,6 +187,8 @@ impl State {
             calls: crate::calls::Calls::default(),
             photos: Arc::new(crate::photos::Photos::default()),
             ping_interval,
+            presence: crate::presence::Board::default(),
+            refresh: crate::presence::Wake::default(),
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
             offer: Mutex::new(None),
@@ -195,6 +201,13 @@ impl State {
             focus_file: Mutex::new(None),
             nexd: Mutex::new(None),
         }))
+    }
+
+    /// Whether computer `id` is paired here and not removed.
+    pub fn computer_active(&self, id: &str) -> bool {
+        self.devices()
+            .map(|s| s.computers.get(id).is_some_and(|c| c.is_active()))
+            .unwrap_or(false)
     }
 
     /// Where nexd listens: `--nexd`, else the path nexd itself uses.

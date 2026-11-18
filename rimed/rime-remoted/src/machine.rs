@@ -130,6 +130,20 @@ pub trait Backend: Send + Sync {
     fn volume(&self, deadline: Instant) -> Option<Volume>;
     fn act(&self, action: Action, deadline: Instant) -> Result<(), String>;
     fn set_volume(&self, change: VolumeChange, deadline: Instant) -> Result<(), String>;
+    /// Battery, AC and power mode, and nothing slower: what the presence
+    /// refresh reads before it decides whether to dial (`presence.rs`).
+    /// `locked` and `update` may be left `None`.
+    fn power(&self, deadline: Instant) -> Status {
+        self.status(deadline)
+    }
+    /// How this computer is online: `wired`, `wifi` or `none`.
+    fn network(&self) -> Option<String> {
+        None
+    }
+    /// Seconds since boot.
+    fn uptime_s(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// The backend this process uses, chosen on first use from [`STUB_ENV`].
@@ -351,6 +365,26 @@ impl Backend for Real {
         })
     }
 
+    fn power(&self, deadline: Instant) -> Status {
+        let power = self.rimed("org.rimeos.Rimed1.Power", deadline);
+        Status {
+            battery: battery_in(&self.power_supply),
+            on_ac: power.as_ref().and_then(|p| p.get("OnAcPower")).and_then(Value::as_bool),
+            power_mode: power.as_ref().and_then(|p| p.get("Tier")).and_then(Value::as_str).map(str::to_string),
+            locked: None,
+            update: None,
+        }
+    }
+
+    fn network(&self) -> Option<String> {
+        let route = std::fs::read_to_string("/proc/net/route").unwrap_or_default();
+        Some(network_kind(Path::new("/sys/class/net"), &route).to_string())
+    }
+
+    fn uptime_s(&self) -> Option<u64> {
+        parse_uptime(&std::fs::read_to_string("/proc/uptime").ok()?)
+    }
+
     fn lock(&self, deadline: Instant) -> Result<bool, LockError> {
         let session = self.display(deadline)?;
         match run_until("loginctl", &["lock-session", &session], deadline) {
@@ -449,6 +483,56 @@ pub fn battery_in(dir: &Path) -> Option<Battery> {
     })
 }
 
+/// `/proc/uptime` → whole seconds since boot.
+pub fn parse_uptime(text: &str) -> Option<u64> {
+    let secs: f64 = text.split_whitespace().next()?.parse().ok()?;
+    (secs.is_finite() && secs >= 0.0).then_some(secs as u64)
+}
+
+/// How this computer is online, from sysfs (`/sys/class/net`) and the IPv4
+/// routing table (`/proc/net/route`): the interface the default route uses
+/// when it is a real device, else any real device that is up, wired before
+/// Wi-Fi. A default route through a tunnel (a VPN) says nothing about the
+/// link under it, so tunnels and other virtual interfaces are never the
+/// answer. `none` when no real device is up.
+pub fn network_kind(class_net: &Path, route: &str) -> &'static str {
+    let real = |name: &str| class_net.join(name).join("device").exists();
+    let wifi = |name: &str| class_net.join(name).join("wireless").exists() || class_net.join(name).join("phy80211").exists();
+    let up = |name: &str| {
+        std::fs::read_to_string(class_net.join(name).join("operstate")).is_ok_and(|s| matches!(s.trim(), "up" | "unknown"))
+    };
+    let kind = |name: &str| if wifi(name) { "wifi" } else { "wired" };
+    // Default routes, lowest metric first.
+    let mut defaults: Vec<(u64, &str)> = route
+        .lines()
+        .skip(1)
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let flags = u32::from_str_radix(f.get(3)?, 16).ok()?;
+            if f.get(1) != Some(&"00000000") || f.get(7) != Some(&"00000000") || flags & 1 == 0 {
+                return None;
+            }
+            Some((f.get(6)?.parse::<u64>().ok()?, f[0]))
+        })
+        .collect();
+    defaults.sort();
+    if let Some((_, name)) = defaults.iter().find(|(_, n)| real(n) && up(n)) {
+        return kind(name);
+    }
+    let mut names: Vec<String> = std::fs::read_dir(class_net)
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    names.sort();
+    let live: Vec<&String> = names.iter().filter(|n| n.as_str() != "lo" && real(n) && up(n)).collect();
+    if live.iter().any(|n| !wifi(n)) {
+        "wired"
+    } else if !live.is_empty() {
+        "wifi"
+    } else {
+        "none"
+    }
+}
+
 /// `wpctl get-volume` → "Volume: 0.40" or "Volume: 0.40 [MUTED]".
 pub fn parse_volume(out: &str) -> Option<Volume> {
     let rest = out.trim().strip_prefix("Volume:")?.trim();
@@ -524,6 +608,14 @@ impl Backend for Stub {
             locked: m["locked"].as_bool(),
             update: m["update"].as_str().map(str::to_string),
         }
+    }
+
+    fn network(&self) -> Option<String> {
+        self.state()["machine_status"]["network"].as_str().map(str::to_string)
+    }
+
+    fn uptime_s(&self) -> Option<u64> {
+        self.state()["machine_status"]["uptime_s"].as_u64()
     }
 
     fn lock(&self, _: Instant) -> Result<bool, LockError> {
@@ -653,6 +745,52 @@ mod tests {
         assert_eq!(r["kind"], "unavailable");
         assert_eq!(r["message"], "there is no screen to lock on this computer");
         assert!(actions(&d).is_empty());
+    }
+
+    #[test]
+    fn uptime_and_the_network_kind_are_read_from_proc_and_sysfs() {
+        assert_eq!(parse_uptime("12345.67 99999.00\n"), Some(12345));
+        assert_eq!(parse_uptime("garbage"), None);
+        assert_eq!(parse_uptime("-5 1"), None);
+
+        let d = tempdir::Dir::new();
+        let net = d.path();
+        let iface = |name: &str, real: bool, wifi: bool, state: &str| {
+            let dir = net.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            if real {
+                std::fs::create_dir_all(dir.join("device")).unwrap();
+            }
+            if wifi {
+                std::fs::create_dir_all(dir.join("wireless")).unwrap();
+            }
+            std::fs::write(dir.join("operstate"), format!("{state}\n")).unwrap();
+        };
+        let head = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n";
+        let route = |rows: &[(&str, u32)]| {
+            let mut t = head.to_string();
+            for (n, metric) in rows {
+                t.push_str(&format!("{n}\t00000000\t0101A8C0\t0003\t0\t0\t{metric}\t00000000\t0\t0\t0\n"));
+            }
+            t
+        };
+        assert_eq!(network_kind(net, ""), "none", "nothing at all");
+        iface("lo", false, false, "unknown");
+        iface("wg0", false, false, "unknown");
+        iface("wlan0", true, true, "up");
+        iface("eth0", true, false, "down");
+        // A VPN carries the default route: the Wi-Fi under it is the answer.
+        assert_eq!(network_kind(net, &route(&[("wg0", 0), ("wlan0", 600)])), "wifi");
+        assert_eq!(network_kind(net, &route(&[("wg0", 0)])), "wifi");
+        iface("eth0", true, false, "up");
+        // The default route's real device wins over another that is up.
+        assert_eq!(network_kind(net, &route(&[("wlan0", 100), ("eth0", 600)])), "wifi");
+        assert_eq!(network_kind(net, &route(&[("eth0", 100), ("wlan0", 600)])), "wired");
+        // No route: wired before Wi-Fi.
+        assert_eq!(network_kind(net, head), "wired");
+        iface("eth0", true, false, "down");
+        iface("wlan0", true, true, "down");
+        assert_eq!(network_kind(net, &route(&[("wg0", 0)])), "none");
     }
 
     #[test]

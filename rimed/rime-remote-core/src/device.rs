@@ -247,7 +247,7 @@ impl Device {
     /// Whether a removal at `removed_ms` blocks this record: it is newer than
     /// any forget recorded here.
     fn removal_counts(&self, removed_ms: u64) -> bool {
-        self.forgotten_ms.is_none_or(|f| removed_ms > f)
+        self.forgotten_ms.map_or(true, |f| removed_ms > f)
     }
 
     /// A removed computer whose removal still stands: what is passed on.
@@ -1413,7 +1413,7 @@ mod tests {
         let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 10).expect("a");
         let c = s.pair_computer(&raw(8), &own, "c", vec![], None, 10).expect("c");
         let applied = s.apply_tombstones(&a.id, &own, &[tomb(99, 50)], 60);
-        assert_eq!(applied.removed, [a.id.clone()], "the sender that removed this one is removed");
+        assert_eq!(applied.removed, std::slice::from_ref(&a.id), "the sender that removed this one is removed");
         assert!(applied.changed);
         assert!(s.authenticate(&key(7)).is_none());
         assert_eq!(s.find_computer(&a.id).expect("a").revoked_ms, Some(50), "the time travels unchanged");
@@ -1463,7 +1463,7 @@ mod tests {
         assert!(s.find_computer(&b.id).expect("b").is_active(), "an id prefix removed a computer");
 
         let applied = s.apply_tombstones(&a.id, &own, &[tomb(8, 5), tomb(9, 4)], 6);
-        assert_eq!(applied.removed, [b.id.clone()]);
+        assert_eq!(applied.removed, std::slice::from_ref(&b.id));
         assert!(s.authenticate(&key(8)).is_none());
         let unknown = s.find_computer(&Device::id_for(&key(9))).expect("recorded").clone();
         assert_eq!((unknown.revoked_ms, unknown.name.as_str()), (Some(4), "c9"));
@@ -1503,7 +1503,7 @@ mod tests {
         assert_eq!(s.authenticate(&key(8)).map(|(_, sc)| sc), Some(Scope::Peer), "an old removal came back");
         // A removal newer than the forget wins, with its own time.
         let applied = s.apply_tombstones(&a.id, &own, &[tomb(8, 101)], 260);
-        assert_eq!(applied.removed, [b.id.clone()]);
+        assert_eq!(applied.removed, std::slice::from_ref(&b.id));
         assert!(s.authenticate(&key(8)).is_none());
         assert_eq!(s.find_computer(&b.id).expect("b").revoked_ms, Some(101));
         // The same rule for the sender removing this one.
@@ -1511,7 +1511,7 @@ mod tests {
         s.forget_computer(&a.id, 400).expect("a forgotten");
         s.pair_computer(&raw(7), &own, "a", vec![], None, 500).expect("a again");
         assert!(!s.apply_tombstones(&a.id, &own, &[tomb(99, 350)], 600).changed, "an old 'you were removed'");
-        assert_eq!(s.apply_tombstones(&a.id, &own, &[tomb(99, 401)], 600).removed, [a.id.clone()]);
+        assert_eq!(s.apply_tombstones(&a.id, &own, &[tomb(99, 401)], 600).removed, std::slice::from_ref(&a.id));
     }
 
     #[test]
