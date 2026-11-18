@@ -382,6 +382,15 @@ data class Settings(
     @SerialName("messages_on") val messagesOn: Boolean = false,
 
     /**
+     * "Calls on your computer" (`docs/remote-live-contract.md` §2.12): a
+     * paired computer shows this phone's calls as they ring, may answer,
+     * decline and end them, read the call history and, while the app is
+     * unlocked, place a call. Off by default: it shows a computer who calls
+     * the person and lets it press the phone's buttons for them.
+     */
+    @SerialName("calls_on") val callsOn: Boolean = false,
+
+    /**
      * "Keep working after the phone restarts" (`docs/remote-live-contract.md`
      * §2.10): each paired computer holds a second, companion key for this
      * phone, and after a restart, or while the app is locked, the phone keeps

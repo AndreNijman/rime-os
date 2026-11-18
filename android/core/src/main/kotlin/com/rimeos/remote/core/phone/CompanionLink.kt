@@ -58,6 +58,12 @@ object CompanionLink {
         // send is the phone speaking for the person and waits for an unlock.
         "messages_reply",
         "messages_changed",
+        // A ringing call is answered, declined and ended from a locked phone's
+        // own lock screen, so from a computer too; a dial is refused on a
+        // companion session, by this phone and by the computer.
+        "call_state",
+        "call_done",
+        "call_history_reply",
     )
 
     /** The channels a companion session may open. */

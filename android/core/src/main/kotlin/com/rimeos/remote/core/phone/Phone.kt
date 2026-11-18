@@ -74,6 +74,18 @@ object Phone {
      */
     const val CAN_MESSAGES: String = "messages"
 
+    /**
+     * The words in `can` that say the person turned on "Calls on your
+     * computer" and the phone can see its calls (§2.12), and, each with its
+     * own permission, what the computer may do with them: read the history,
+     * answer, decline and hang up, and place a call. Dialling is never
+     * offered on a companion link.
+     */
+    const val CAN_CALLS: String = "calls"
+    const val CAN_CALLS_HISTORY: String = "calls_history"
+    const val CAN_CALLS_ANSWER: String = "calls_answer"
+    const val CAN_CALLS_DIAL: String = "calls_dial"
+
     /** The channel, and the feature, a sent file or text is taken on. */
     const val TAKE: String = "take_offer"
 
@@ -256,6 +268,19 @@ object Phone {
                 if ((to == null) == (thread == null)) return null
                 DeviceEvent.MessagesSend(id, to, thread, text)
             }
+            "call_action" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                val action = o.text("action")?.takeIf { it in Calls.ACTIONS } ?: return null
+                // A number only with a dial, and a dial always with one.
+                val number = if (action == Calls.DIAL) o.text("number") ?: return null else null
+                DeviceEvent.CallAction(id, action, number)
+            }
+            "call_history_request" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                val before = if (o.containsKey("before")) o.long("before")?.takeIf { it >= 0 } ?: return null else null
+                val limit = o.long("limit")?.takeIf { it >= 1 } ?: return null
+                DeviceEvent.CallHistoryRequest(id, before, limit.coerceAtMost(Calls.MAX_LIMIT.toLong()).toInt())
+            }
             else -> null
         }
     }
@@ -328,6 +353,14 @@ sealed interface DeviceEvent {
     }
 
     /** [machine] sent this phone a file or text of [len] bytes; take it with `take_offer`. */
+    /** Answer, decline, hang up or dial ([number]) the phone's call (§2.12). */
+    data class CallAction(val id: Long, val action: String, val number: String?) : DeviceEvent {
+        override fun toString(): String = "CallAction(id=$id, action=$action)"
+    }
+
+    /** The newest [limit] calls of the history older than [before] (§2.12). */
+    data class CallHistoryRequest(val id: Long, val before: Long?, val limit: Int) : DeviceEvent
+
     data class Offer(
         val id: Long,
         val at: Long,
@@ -521,6 +554,13 @@ class PhoneLink(private val link: MachineLink) {
      * belongs to the connection it was asked on, and dies with it.
      */
     fun messages(line: String) = Phone.readOk(link.request(line, retry = false))
+
+    /**
+     * A `call_state`, `call_done` or `call_history_reply` line (§2.12), as
+     * [Calls] wrote it. Not retried: an answer belongs to the connection it
+     * was asked on, and a new connection is told the call as it is then.
+     */
+    fun calls(line: String) = Phone.readOk(link.request(line, retry = false))
 
     /** Tell the machine this phone has an offer, so it reports "link". Not retried, as for [ack]. */
     fun offerAck(id: Long) = Phone.readOk(link.request(Phone.offerAck(id), retry = false))

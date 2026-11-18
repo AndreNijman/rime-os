@@ -199,6 +199,7 @@ class CompanionLinkTest {
                 "remote_hello", "phone_report", "ring_ack", "offer_ack", "offer_done",
                 "phone_notification", "phone_notification_removed", "phone_media",
                 "messages_reply", "messages_changed",
+                "call_state", "call_done", "call_history_reply",
             ),
             CompanionLink.VERBS,
         )
