@@ -131,6 +131,15 @@ class StatusTest {
         assertFalse(t.due(80, false, 61_000, wifi3, true))
         assertTrue(t.due(80, false, 61_000, wifi3, false), "Do Not Disturb turning off waited")
         t.reset()
-        assertTrue(t.due(80, false, 61_000, wifi3, true), "a change to `can` is told at once")
+        assertTrue(t.due(80, false, 61_000, wifi3, true), "a reset is told at once")
+    }
+
+    @Test
+    fun `a change to can is due even when a report in flight marked everything sent`() {
+        val t = ReportThrottle()
+        t.sent(80, false, 0, null, false, listOf("ring"))
+        // The switch went on while that report was on its way: same readings, new `can`.
+        assertTrue(t.due(80, false, 1_000, null, false, listOf("ring", "focus")))
+        assertFalse(t.due(80, false, 1_000, null, false, listOf("ring")))
     }
 }

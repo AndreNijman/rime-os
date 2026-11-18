@@ -529,7 +529,6 @@ class LinkHub private constructor(private val app: Context) {
         val focus = lane.remote.has(Phone.FOCUS)
         val dnd = if (focus) PhoneStatus.dnd(app) else null
         val now = System.currentTimeMillis()
-        if (!lane.throttle.due(level, charging, now, network, dnd)) return
         val can = buildList {
             if (ringer.canRing) add(Phone.CAN_RING)
             if (receiver.canReceive) add(Phone.CAN_RECEIVE)
@@ -539,8 +538,9 @@ class LinkHub private constructor(private val app: Context) {
             // The listener is what applies a computer's Do Not Disturb.
             if (focus && granted && focusOn) add(Phone.CAN_FOCUS)
         }
+        if (!lane.throttle.due(level, charging, now, network, dnd, can)) return
         runCatching { phone.report(level, charging, can, network, dnd) }
-            .onSuccess { lane.throttle.sent(level, charging, now, network, dnd) }
+            .onSuccess { lane.throttle.sent(level, charging, now, network, dnd, can) }
             .onFailure { Log.i(TAG, "${machine.machine}: report not taken: ${it.message}") }
     }
 

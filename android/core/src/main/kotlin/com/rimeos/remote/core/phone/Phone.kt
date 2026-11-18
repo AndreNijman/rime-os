@@ -358,10 +358,11 @@ class EventLines {
  * how it is connected and its Do Not Disturb (§2.9).
  *
  * The first report always goes. After that, a report goes at once when
- * charging starts or stops, when Do Not Disturb turns on or off, or when the
- * kind of network changes; when the level moved by [step] points or more
- * since the last one sent; when only the signal's bars moved and
- * [signalGapMs] passed since the last report; or when [maxAgeMs] passed.
+ * charging starts or stops, when Do Not Disturb turns on or off, when the
+ * kind of network changes, or when `can` changes; when the level moved by
+ * [step] points or more since the last one sent; when only the signal's
+ * bars moved and [signalGapMs] passed since the last report; or when
+ * [maxAgeMs] passed.
  * Android sends a battery broadcast every few seconds while charging, and a
  * new signal reading with each step in a moving car; a report for each would
  * be traffic for nothing.
@@ -375,13 +376,24 @@ class ReportThrottle(
     private var charging: Boolean? = null
     private var network: NetworkState? = null
     private var dnd: Boolean? = null
+    private var can: List<String> = emptyList()
     private var atMs: Long = 0
     private var sentOnce = false
 
     @Synchronized
-    fun due(level: Int?, charging: Boolean?, nowMs: Long, network: NetworkState? = null, dnd: Boolean? = null): Boolean {
+    fun due(
+        level: Int?,
+        charging: Boolean?,
+        nowMs: Long,
+        network: NetworkState? = null,
+        dnd: Boolean? = null,
+        can: List<String> = emptyList(),
+    ): Boolean {
         if (!sentOnce) return true
         if (charging != this.charging) return true
+        // Compared, not only reset for: a reset while a report is in flight
+        // is undone by that report's `sent`, and the new `can` would wait.
+        if (can != this.can) return true
         if (dnd != this.dnd) return true
         if (network?.type != this.network?.type) return true
         val last = this.level
@@ -392,7 +404,15 @@ class ReportThrottle(
     }
 
     @Synchronized
-    fun sent(level: Int?, charging: Boolean?, nowMs: Long, network: NetworkState? = null, dnd: Boolean? = null) {
+    fun sent(
+        level: Int?,
+        charging: Boolean?,
+        nowMs: Long,
+        network: NetworkState? = null,
+        dnd: Boolean? = null,
+        can: List<String> = emptyList(),
+    ) {
+        this.can = can
         this.level = level
         this.charging = charging
         this.network = network
