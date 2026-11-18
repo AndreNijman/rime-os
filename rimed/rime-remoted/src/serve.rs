@@ -1381,6 +1381,53 @@ pub(crate) mod tests {
         assert!(HELLO_COMPUTER.is_ascii_graphic() && ![HELLO_PAIR, HELLO_SESSION].contains(&HELLO_COMPUTER));
     }
 
+    /// Dial `state`'s `connection` with the computer-pairing hello and XX
+    /// message 1, from a loopback socket that is marked as a relay splice
+    /// when `relay`, and say whether message 2 (this computer's static key)
+    /// came back.
+    fn computer_hello_answered(state: &Arc<State>, dir: &Path, relay: bool) -> bool {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let mut client = TcpStream::connect(listener.local_addr().expect("addr")).expect("connect");
+        let (server, _) = listener.accept().expect("accept");
+        let source = client.local_addr().expect("local").port();
+        if relay {
+            state.relay_sources.arm(source);
+        }
+        let (st, agentd) = (state.clone(), dir.join("no-agentd.sock"));
+        let worker = std::thread::spawn(move || connection(server, st, agentd));
+        client.set_read_timeout(Some(Duration::from_secs(5))).expect("timeout");
+        let mut hs = Handshake::computer_pairing_initiator(&[7u8; 32], rime_remote_core::REMOTE_PROTOCOL_VERSION)
+            .expect("initiator");
+        let m1 = hs.write(b"").expect("m1");
+        client.write_all(&[HELLO_COMPUTER]).expect("hello");
+        crate::net::write_message(&mut client, &m1).expect("m1 sent");
+        let answered = crate::net::read_message(&mut client).is_ok_and(|m2| hs.read(&m2).is_ok());
+        drop(client);
+        worker.join().expect("connection thread");
+        if relay {
+            state.relay_sources.disarm(source);
+        }
+        answered
+    }
+
+    #[test]
+    fn a_computer_pairing_over_the_relay_is_refused_before_this_computer_shows_its_key() {
+        let (state, dir) = a_state("computer-relay");
+        let (_id, _offer, _hear) = crate::computers::open_screen(&state.showing, rime_remote_core::now_ms());
+        assert!(
+            !computer_hello_answered(&state, &dir, true),
+            "a pairing over the relay got message 2, and with it this computer's key"
+        );
+        assert!(
+            crate::computers::has_code(&state.showing, rime_remote_core::now_ms()),
+            "a refused relay pairing spent the code"
+        );
+        // The control arm: the same dial over the LAN is answered, so the
+        // refusal above is the path and not a broken dial.
+        assert!(computer_hello_answered(&state, &dir, false), "a LAN pairing got no message 2");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn an_unpaired_and_a_revoked_device_are_refused_with_the_same_words() {
         // A device that could tell them apart would have an oracle for which

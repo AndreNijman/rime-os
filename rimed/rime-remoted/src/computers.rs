@@ -221,13 +221,27 @@ fn screen_words(e: &PairError) -> String {
 
 /// A computer-pairing connection on the LAN listener (the computer hello).
 /// `peer` is where it came from.
+///
+/// **Over the LAN only**, refused before a byte of the handshake is read or
+/// written. Relay splices arrive on the same listener, and XX message 2
+/// carries this computer's static key, from which the relay rendezvous id is
+/// derived: a host on the LAN that dialled once while a code was shown could
+/// otherwise hand that id to anyone, who could then spend the code from
+/// anywhere on the internet. A connection whose address is unknown is refused
+/// too, since it cannot be shown to be on the LAN.
 pub fn accept(socket: &mut TcpStream, state: &State, peer: Option<SocketAddr>) -> Result<(), crate::serve::ServeError> {
+    let observed_ip = match (peer, state.path_of(peer)) {
+        (Some(p), RemotePath::Lan) => p.ip(),
+        _ => {
+            return Err(crate::serve::ServeError::Protocol(
+                "a computer pairing arrived over the relay or from an unknown address; computers pair over \
+                 the local network only"
+                    .into(),
+            ))
+        }
+    };
     let secret = crate::secret_of(state);
     let about = own_about(state);
-    let observed_ip = match state.path_of(peer) {
-        RemotePath::Lan => peer.map(|p| p.ip()),
-        RemotePath::Relay => None,
-    };
     let mut teller: Option<mpsc::Sender<Outcome>> = None;
     let mut stored: Option<Device> = None;
     let result = computer::show(
@@ -243,9 +257,7 @@ pub fn accept(socket: &mut TcpStream, state: &State, peer: Option<SocketAddr>) -
         },
         &about,
         |key, theirs| {
-            let observed = observed_ip
-                .zip(theirs.port)
-                .map(|(ip, port)| crate::state::advertise(ip, port));
+            let observed = theirs.port.map(|port| crate::state::advertise(observed_ip, port));
             stored = Some(store_computer(state, key, theirs, addresses_for(observed, theirs))?);
             Ok(())
         },
