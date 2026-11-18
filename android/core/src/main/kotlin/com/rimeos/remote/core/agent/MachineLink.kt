@@ -4,6 +4,8 @@ import com.rimeos.remote.core.FrameChannel
 import com.rimeos.remote.core.link.Disconnected
 import com.rimeos.remote.core.link.Mux
 import com.rimeos.remote.core.link.Upload
+import com.rimeos.remote.core.phone.CompanionLink
+import com.rimeos.remote.core.phone.Scope
 import java.io.Closeable
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.locks.ReentrantLock
@@ -79,6 +81,13 @@ class MachineLink(
     private val silenceMs: Long = SILENCE_MS,
     /** How often the watchdog looks. Injected so a test need not wait. */
     private val watchdogPollMs: Long = WATCHDOG_POLL_MS,
+    /**
+     * The scope of the key [connect] dials with. [Scope.COMPANION] for the
+     * companion key: every request and channel on this link is then checked
+     * against the device-feature lists before it is sent ([CompanionLink]), and a
+     * refused one throws [AgentError] `not_allowed` without touching the wire.
+     */
+    dialled: Scope = Scope.FULL,
 ) : Closeable {
     /** What a caller is told about the connection underneath. */
     sealed class LinkEvent {
@@ -122,6 +131,32 @@ class MachineLink(
     var connections: Int = 0
         private set
 
+    /**
+     * What this link may do. Starts as the dialled key's scope and can only
+     * narrow: a hello that says `"scope":"companion"` makes a full-key link a
+     * companion one ([CompanionLink.effective]); nothing makes it wider.
+     */
+    @Volatile
+    var scope: Scope = dialled
+        private set
+
+    /**
+     * How many requests or channels this link refused to send because its
+     * scope did not allow them. The gate's own evidence: a companion link
+     * whose phone side is right never refuses anything.
+     */
+    @Volatile
+    var refused: Int = 0
+        private set
+
+    private fun guard(line: ByteArray, open: Boolean) {
+        val allowed = if (open) CompanionLink.allowsOpen(scope, line) else CompanionLink.allowsRequest(scope, line)
+        if (!allowed) {
+            refused++
+            throw CompanionLink.refusal(line)
+        }
+    }
+
     /** Whether a connection is currently up. */
     val connected: Boolean get() = synchronized(lock) { current != null }
 
@@ -142,7 +177,9 @@ class MachineLink(
      * nothing new. A connection that dropped is not a refusal and still throws.
      */
     fun remoteHello(): RemoteHello = try {
-        Agentd.readRemoteHello(request(Agentd.remoteHello()))
+        Agentd.readRemoteHello(request(Agentd.remoteHello())).also {
+            scope = CompanionLink.effective(scope, it.scope)
+        }
     } catch (_: AgentError) {
         RemoteHello.NONE
     }
@@ -370,6 +407,23 @@ class MachineLink(
     /** Stop this machine pushing to this phone. Idempotent at the far end. */
     fun pushUnregister() = Agentd.readOk(request(Agentd.pushUnregister(), retry = false))
 
+    // ---- the companion link (contract §2.10) ------------------------------
+    //
+    // Full-key verbs, answered by `rime-remoted` itself. On a companion link
+    // both are refused here before they are sent, as on the computer.
+
+    /**
+     * Name [publicKey] as this phone's companion key on this machine.
+     *
+     * Retried after a drop: the machine answers ok to the key it already has,
+     * so sending the same key twice changes nothing. A key the machine has
+     * retired or that another device holds answers [CompanionLink.KEY_IN_USE].
+     */
+    fun companionRegister(publicKey: ByteArray) = Agentd.readOk(request(CompanionLink.register(publicKey)))
+
+    /** Retire this phone's companion key on this machine. Idempotent there. */
+    fun companionForget() = Agentd.readOk(request(CompanionLink.forget()))
+
     /**
      * Per-worktree status for every remembered project, or for one slug.
      *
@@ -405,7 +459,13 @@ class MachineLink(
         len: Long,
         source: () -> java.io.InputStream,
         onProgress: (Long) -> Unit = {},
-    ): Upload.Landed = Upload.send(connect, id, name, len, source, onProgress)
+    ): Upload.Landed {
+        if (scope == Scope.COMPANION) {
+            refused++
+            throw CompanionLink.refusal("""{"cmd":"receive"}""".toByteArray())
+        }
+        return Upload.send(connect, id, name, len, source, onProgress)
+    }
 
     fun worktrees(project: String? = null): List<WorktreeStatus> =
         Agentd.readWorktrees(request(Agentd.worktrees(project)))
@@ -572,7 +632,7 @@ class MachineLink(
             // other caller, including the one trying to close this link.
             val channel = connect()
             val listener = Listener()
-            val m = Mux(channel, listener)
+            val m = Mux(channel, listener, guard = ::guard)
             listener.mux = m
             val thread = Thread({ m.pump() }, "rime-link-${channel.machine}")
             thread.isDaemon = true
