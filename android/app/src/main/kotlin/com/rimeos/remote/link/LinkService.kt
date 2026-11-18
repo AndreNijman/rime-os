@@ -100,7 +100,6 @@ class LinkService : Service() {
         val hub = LinkHub.get(this)
         if (intent?.action == ACTION_LOCK) {
             // The notification's "Lock": the same lock as the app's button.
-            // It stops this service on its way out.
             // It stops this service on its way out, unless the companion link
             // takes over.
             hub.lock()
@@ -113,8 +112,12 @@ class LinkService : Service() {
             hub.startCompanion()
         }
         if (!hub.live) {
-            // Started with nothing to hold — a process Android recreated, say.
-            // There are no keys, so there is nothing to keep alive.
+            // Started with nothing to hold — a process Android recreated, say,
+            // or a boot start whose keys did not open. There are no keys, so
+            // there is nothing to keep alive. Foreground first all the same:
+            // a service started with startForegroundService that stops before
+            // calling startForeground is a crash Android blames on this app.
+            runCatching { goForeground(emptyList(), connected = false, companion = false) }
             stopSelf()
             return START_NOT_STICKY
         }
