@@ -530,6 +530,45 @@ $ rime remote calls dial +15555215556
 - `--json` prints `{"device":…,"current":…,"calls":[…]}` for the Shell or a
   script, and `{"error":…}` with exit status 1 when it fails.
 
+## `rime remote photos`: your phone's photos on the computer
+
+Your phone's newest photos and screenshots can be seen on the computer, and
+any one saved to it whole, the way Phone Link shows an Android phone's
+photos. In the app, open **Photos on your computer** in the computers
+screen's settings, tap **Allow photos**, and turn it on. It is off until you
+do. Videos are not shown.
+
+```
+$ rime remote photos
+ID         WHEN      SIZE      PIXELS      NAME
+1000123    2m ago    2.4 MB    4000x3000   PXL_20261118_101500.jpg
+1000119    1h ago    310 KB    1080x2400   Screenshot_20261118-091200.png
+(from Pixel 8. `rime remote photos save ID` saves one here.)
+$ rime remote photos save 1000123
+rime: saved /home/you/Pictures/Rime Remote/PXL_20261118_101500.jpg (2.4 MB) from Pixel 8.
+$ rime remote photos save 1000119 --to ~/Desktop
+```
+
+- A photo is saved into **Rime Remote** in your Pictures folder, or the folder
+  you give with `--to`, under the phone's name for it. A file already there is
+  never replaced: the new one is named `… (2).jpg`. A photo is at most 64 MiB.
+- If you let Rime Remote see only some photos (Android 14 and later offer
+  **Select photos**), only those are listed, and the computer says so.
+- The list needs the app unlocked on the phone; a phone that keeps working
+  after a restart (above) still shows nothing while the app is locked.
+- The small previews are kept under your runtime folder
+  (`$XDG_RUNTIME_DIR/rime-remote/photos`), readable by you alone, with the
+  camera's details and location taken out. They go when the phone
+  disconnects, when you turn the feature off, or when you revoke the phone.
+  A saved photo is the phone's file as it is.
+- **Only you can use it.** As for messages, `rime-remoted` answers `photos`
+  only to a terminal in your login session or Rime Settings, so an agent or a
+  scheduled job can neither see nor save your photos.
+- `--json` prints `{"device":…,"partial":…,"photos":[…]}` with each preview's
+  path in `thumb`, for the Shell or a script; `save --json` prints the saved
+  file's `path`. Both print `{"error":…}` with exit status 1 when they fail.
+  `--before MS` (a photo's `date_ms`) gets the next page.
+
 ## What your phone is playing, on the computer
 
 The song or podcast playing on your phone can show in the Shell's player, next
