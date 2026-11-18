@@ -1705,6 +1705,9 @@ fn rime_remote(h: &Harness, args: &[&str], stdin: &[u8]) -> (i32, String) {
         .args(args)
         .env("XDG_RUNTIME_DIR", h.root.join("run"))
         .env("XDG_STATE_HOME", h.root.join("state"))
+        // Some verbs start the service when its socket is down; that must
+        // never reach the developer's own user manager.
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3487,22 +3490,47 @@ fn a_wrong_code(code: &str) -> String {
 fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but_hello() {
     let a = harness!("computer-a");
     let b = harness!("computer-b");
-    let Some((mut screen, code)) = show_code(&a) else { return };
 
-    // B types A's code through the real CLI.
-    let (rc, said) = add_computer(&b, &a, &code);
+    // Both halves through the real CLI: A shows, B types.
+    let mut shower = Command::new(bin("rime"))
+        .args(["remote", "computers", "add", "--show-code"])
+        .env("XDG_RUNTIME_DIR", a.root.join("run"))
+        .env("XDG_STATE_HOME", a.root.join("state"))
+        .env_remove("DBUS_SESSION_BUS_ADDRESS")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run rime");
+    let mut first = String::new();
+    BufReader::new(shower.stdout.take().expect("stdout")).read_line(&mut first).expect("read the code");
+    if first.trim().is_empty() {
+        let out = shower.wait_with_output().expect("rime");
+        let why = String::from_utf8_lossy(&out.stderr).to_string();
+        refused_for_placement(&serde_json::json!({"reply": "error", "message": why}));
+        return;
+    }
+    let spaced = first.trim().to_string();
+    assert!(
+        spaced.len() == 7 && spaced.as_bytes()[3] == b' ' && spaced.replace(' ', "").bytes().all(|b| b.is_ascii_digit()),
+        "the code is printed as `012 345`: {spaced:?}"
+    );
+    // Typed as shown, space and all.
+    let (rc, said) = add_computer(&b, &a, &spaced);
     assert_eq!(rc, 0, "{said}");
     assert!(said.contains("paired with"), "{said}");
-    let shown = next_line(&mut screen);
-    assert_eq!(shown["reply"], "computer_paired", "{shown}");
+    let out = shower.wait_with_output().expect("rime");
+    let shown = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(out.status.code(), Some(0), "{shown}");
+    assert!(shown.contains("paired with"), "{shown}");
 
     // Each side holds the other's PROVEN key, and A can dial B back.
     let (on_a, on_b) = (computers(&a), computers(&b));
     assert_eq!((on_a.len(), on_b.len()), (1, 1), "{on_a:?} {on_b:?}");
     assert_eq!(on_a[0]["public_key"].as_str(), Some(identity_of(&b).key().as_str()));
     assert_eq!(on_b[0]["public_key"].as_str(), Some(identity_of(&a).key().as_str()));
-    assert_eq!(shown["id"], on_a[0]["id"]);
     let b_on_a = on_a[0]["id"].as_str().expect("id").to_string();
+    assert!(shown.contains(&format!("({b_on_a})")), "{shown}");
     let a_on_b = on_b[0]["id"].as_str().expect("id").to_string();
     assert!(
         on_a[0]["addresses"].as_array().expect("addresses").iter().any(|x| x == &format!("127.0.0.1:{}", b.port)),
@@ -3580,6 +3608,7 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
     let Some((_screen, code)) = show_code(&a) else { return };
     let (rc, said) = add_computer(&b, &a, &code);
     assert_ne!(rc, 0, "a removed computer paired again: {said}");
+    assert!(said.contains("cannot pair again with the same key"), "{said}");
     assert!(computers(&a)[0]["revoked_ms"].is_u64(), "the removal is kept");
 }
 
@@ -3587,7 +3616,17 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
 fn a_wrong_code_uses_the_code_up_and_with_no_screen_open_nothing_pairs() {
     let a = harness!("code-a");
     let b = harness!("code-b");
-    // No screen open: refused before A shows its key.
+    // No screen open. On the wire, A ends the connection instead of
+    // sending XX message 2, which would carry its static key.
+    let stranger = Device::new();
+    let mut hs = Handshake::computer_pairing_initiator(&stranger.secret, V).expect("initiator");
+    let m1 = hs.write(b"").expect("m1");
+    let mut socket = a.tcp();
+    socket.write_all(b"C").expect("hello");
+    write_message(&mut socket, &m1);
+    let mut len = [0u8; 4];
+    assert!(socket.read_exact(&mut len).is_err(), "A answered a pairing dial with no screen open");
+    // Through the CLI: refused, and says why.
     let (rc, said) = add_computer(&b, &a, "123456");
     assert_ne!(rc, 0, "{said}");
     if !said.contains("not showing a code") {
@@ -3605,6 +3644,7 @@ fn a_wrong_code_uses_the_code_up_and_with_no_screen_open_nothing_pairs() {
     // The right code, after a wrong one: already used up.
     let (rc, said) = add_computer(&b, &a, &code);
     assert_ne!(rc, 0, "the right code still worked after a wrong one: {said}");
+    assert!(said.contains("not showing a code"), "{said}");
     assert!(computers(&a).is_empty() && computers(&b).is_empty());
 
     // A screen closed by its client withdraws its code.
@@ -3613,6 +3653,7 @@ fn a_wrong_code_uses_the_code_up_and_with_no_screen_open_nothing_pairs() {
     std::thread::sleep(Duration::from_millis(500));
     let (rc, said) = add_computer(&b, &a, &code);
     assert_ne!(rc, 0, "a withdrawn code paired: {said}");
+    assert!(said.contains("not showing a code"), "{said}");
     assert!(computers(&a).is_empty() && computers(&b).is_empty());
 }
 
