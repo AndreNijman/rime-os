@@ -620,7 +620,9 @@ fn closed_soon(s: &mut Session) -> bool {
 /// Every line a companion session sends that must be refused: the verbs this
 /// service answers outside the allow list, `rime-agentd`'s verbs (the
 /// stand-in's own and real ones), and lines with no readable verb.
-const COMPANION_REFUSED: [&str; 22] = [
+const COMPANION_REFUSED: [&str; 24] = [
+    r#"{"cmd":"push_register","endpoint":"https://push.example/up","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM"}"#,
+    r#"{"cmd":"push_unregister"}"#,
     r#"{"cmd":"machine_status"}"#,
     r#"{"cmd":"machine_lock"}"#,
     r#"{"cmd":"media"}"#,
@@ -668,8 +670,6 @@ fn a_companion_key_reaches_the_device_features_and_nothing_that_reaches_the_daem
     let r = c.call(r#"{"cmd":"phone_report","battery":40,"charging":false,"can":["ring"]}"#);
     assert_eq!(r["reply"], "ok", "{r}");
     let r = c.call(r#"{"cmd":"ring_ack","id":1}"#);
-    assert_ne!(r["kind"], "not_allowed", "{r}");
-    let r = c.call(r#"{"cmd":"push_unregister"}"#);
     assert_ne!(r["kind"], "not_allowed", "{r}");
     c.send(Frame::Open { channel: 9, request: br#"{"cmd":"device_events"}"#.to_vec() });
     match c.next() {
@@ -742,15 +742,23 @@ fn a_companion_key_reaches_the_device_features_and_nothing_that_reaches_the_daem
     assert!(h.connect_with(&secret).is_none(), "a forgotten companion key still opens a session");
     assert_eq!(full.call(r#"{"cmd":"remote_hello"}"#)["scope"], "full");
 
-    // Replacing a key ends the old key's session too.
+    // A forgotten key is retired: it cannot be registered again.
     let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{public}"}}"#));
+    assert_eq!(r["kind"], "key_in_use", "{r}");
+    assert!(h.connect_with(&secret).is_none(), "a retired companion key opened a session");
+
+    // Replacing a key ends the old key's session too, and retires it.
+    let (secret1, public1) = keypair();
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{public1}"}}"#));
     assert_eq!(r["reply"], "ok", "{r}");
-    let mut old = h.connect_with(&secret).expect("re-registered");
+    let mut old = h.connect_with(&secret1).expect("a fresh companion key");
     let (secret2, public2) = keypair();
     let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{public2}"}}"#));
     assert_eq!(r["reply"], "ok", "{r}");
     assert!(closed_soon(&mut old), "a replaced companion key's session stayed open");
-    assert!(h.connect_with(&secret).is_none(), "a replaced companion key still opens a session");
+    assert!(h.connect_with(&secret1).is_none(), "a replaced companion key still opens a session");
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{public1}"}}"#));
+    assert_eq!(r["kind"], "key_in_use", "a replaced key came back: {r}");
     let mut c2 = h.connect_with(&secret2).expect("the new companion key");
 
     // Revoke from the computer drops both live connections, and both keys

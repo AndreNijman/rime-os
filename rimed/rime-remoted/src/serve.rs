@@ -337,17 +337,21 @@ fn session(
     // Shared with the frame loop, which is the only writer, and with anybody
     // asking for status, which is the only reader.
     let rtt_ms: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
-    if let Ok(s) = socket.try_clone() {
-        state.register(Live {
-            device_id: device_id.clone(),
-            peer,
-            socket: s,
-            device_name: device_name.clone(),
-            path,
-            since_ms: now,
-            rtt_ms: Arc::clone(&rtt_ms),
-            scope,
-        });
+    // A connection revoke cannot find is one revoke cannot end, so a socket
+    // that cannot be cloned for the list is not served at all.
+    let live = Live {
+        device_id: device_id.clone(),
+        peer,
+        socket: socket.try_clone()?,
+        device_name: device_name.clone(),
+        path,
+        since_ms: now,
+        rtt_ms: Arc::clone(&rtt_ms),
+        scope,
+    };
+    if !admit(state, live, &key_text) {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+        return Err(ServeError::NotPaired);
     }
 
     let result = frames(
@@ -362,6 +366,40 @@ fn session(
     );
     state.unregister(&device_id, peer);
     result
+}
+
+/// Whether a session of this scope may open a channel with this request. A
+/// full session may open any (what is behind it decides); a companion session
+/// only a request the allow list names AND the phone routers' own predicates
+/// claim, so nothing it opens can fall through to nex or `rime-agentd`.
+fn may_open(scope: Scope, request: &[u8]) -> bool {
+    scope == Scope::Full
+        || (crate::companion::channel_allowed(scope, request)
+            && (crate::phone::is_channel(request) || crate::phone::is_take(request)))
+}
+
+/// Put this connection on the live list, then ask the store again whether
+/// `key_text` still opens it, with the same device and scope.
+///
+/// A revoke, `companion_forget` or replaced companion key that lands between
+/// the handshake's lookup and the list ends the connections it finds on the
+/// list, so it would miss this one. Asked again AFTER it is listed, one of
+/// the two always sees the other: the change is in the store before this
+/// look, or this connection is on the list before the change ends what is
+/// there. `false`, with the connection taken off the list again, when it no
+/// longer opens.
+fn admit(state: &State, live: Live, key_text: &str) -> bool {
+    let (device_id, peer, scope) = (live.device_id.clone(), live.peer, live.scope);
+    state.register(live);
+    let still = state.devices().is_ok_and(|store| {
+        store
+            .authenticate(key_text)
+            .is_some_and(|(d, s)| d.id == device_id && s == scope)
+    });
+    if !still {
+        state.unregister(&device_id, peer);
+    }
+    still
 }
 
 /// The frame loop.
@@ -769,10 +807,7 @@ impl Worker {
         // request the list let through can still never fall to nex or to
         // `rime-agentd` below. Refused the way a refused takeover is: the
         // reply, then the close.
-        if self.scope != Scope::Full
-            && !(crate::companion::channel_allowed(self.scope, request)
-                && (crate::phone::is_channel(request) || crate::phone::is_take(request)))
-        {
+        if !may_open(self.scope, request) {
             let what = crate::companion::verb_of(request);
             let _ = send(
                 &self.sealer,
@@ -1527,6 +1562,15 @@ mod tests {
     }
 
     /// Every verb this process answers itself, from every module's own list.
+    /// Every control verb this process answers itself, from each module's
+    /// own list. A NEW MODULE that answers verbs in `answered_here` must add
+    /// its `VERBS` in three places: here, in the chain in
+    /// `only_the_reserved_verbs_are_answered_here_and_everything_else_is_forwarded`,
+    /// and as an allowed or refused entry in
+    /// `every_verb_this_process_answers_has_a_companion_decision_written_down`
+    /// (and in `companion::ALLOWED_VERBS` if a companion session may use it).
+    /// A module that adds a CHANNEL adds its request name to the candidates in
+    /// `every_channel_a_router_claims_is_decided_and_only_the_phones_open`.
     fn every_reserved_verb() -> Vec<&'static str> {
         VERBS
             .iter()
@@ -1584,10 +1628,10 @@ mod tests {
             "phone_notification",
             "phone_notification_removed",
             "phone_media",
-            "push_register",
-            "push_unregister",
         ];
         let refused = [
+            "push_register",
+            "push_unregister",
             "nex",
             "nex_events",
             "machine_status",
@@ -1641,6 +1685,93 @@ mod tests {
             }
         });
         (sock, count)
+    }
+
+    #[test]
+    fn every_channel_a_router_claims_is_decided_and_only_the_phones_open() {
+        // Candidates: every name a module answers or routes, `rime-agentd`'s
+        // channels, near misses and garbage. The decision is then read off
+        // the routers' OWN predicates, not a list kept beside them.
+        let mut names: Vec<&str> = every_reserved_verb();
+        names.extend(crate::companion::ALLOWED_CHANNELS);
+        names.extend([crate::phone::CHANNEL, crate::phone::TAKE]);
+        names.extend(["attach", "receive", "save_file", "device_events_and_more", "take_offer2", "DEVICE_EVENTS"]);
+        let mut requests: Vec<Vec<u8>> =
+            names.iter().map(|n| format!(r#"{{"cmd":"{n}","id":1,"cols":80,"rows":24}}"#).into_bytes()).collect();
+        requests.extend(AGENTD_AND_GARBAGE.iter().map(|l| l.as_bytes().to_vec()));
+        let mut opened = Vec::new();
+        for r in &requests {
+            let shown = String::from_utf8_lossy(r);
+            let phone = crate::phone::is_channel(r) || crate::phone::is_take(r);
+            let nex = crate::nex::is_channel(r);
+            assert!(!(phone && nex), "two routers claim {shown}");
+            assert_eq!(may_open(Scope::Companion, r), phone, "{shown}");
+            assert_eq!(crate::companion::channel_allowed(Scope::Companion, r), phone, "{shown}");
+            if nex {
+                assert!(!may_open(Scope::Companion, r), "a nex channel opens on a companion link: {shown}");
+            }
+            assert!(may_open(Scope::Full, r), "a full session lost {shown}");
+            if phone {
+                opened.push(crate::companion::verb_of(r).expect("a verb"));
+            }
+        }
+        opened.sort();
+        opened.dedup();
+        assert_eq!(opened, ["device_events", "take_offer"], "the phone routers claim a channel nobody decided");
+        for v in crate::nex::VERBS {
+            let r = format!(r#"{{"cmd":"{v}"}}"#);
+            assert!(crate::nex::is_channel(r.as_bytes()) && !may_open(Scope::Companion, r.as_bytes()), "{v}");
+        }
+    }
+
+    #[test]
+    fn a_connection_whose_key_stopped_opening_it_before_it_was_listed_is_not_admitted() {
+        let (state, _dir) = a_state("admit");
+        let key = |n: u8| rime_remote_core::b64_encode(&[n; 32]);
+        let id = {
+            let mut store = state.devices().expect("store");
+            let d = store.pair(&key(1), "phone", 1, false).expect("pair");
+            store.set_companion(&d.id, &key(2)).expect("companion");
+            d.id
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut held = Vec::new();
+        let mut live = |scope: Scope| {
+            held.push(TcpStream::connect(addr).expect("connect"));
+            let (socket, peer) = listener.accept().expect("accept");
+            Live {
+                device_id: id.clone(),
+                peer: crate::state::canonical(Some(peer)),
+                socket,
+                device_name: "phone".into(),
+                path: rime_remote_core::rendezvous::Path::Lan,
+                since_ms: 0,
+                rtt_ms: Arc::new(Mutex::new(None)),
+                scope,
+            }
+        };
+        let listed = |state: &State| state.connections().len();
+
+        // Still opens: listed.
+        assert!(admit(&state, live(Scope::Full), &key(1)));
+        assert!(admit(&state, live(Scope::Companion), &key(2)));
+        assert_eq!(listed(&state), 2);
+        // A key presented with the wrong scope (the store says the other one).
+        assert!(!admit(&state, live(Scope::Companion), &key(1)));
+        assert_eq!(listed(&state), 2, "a refused connection stayed on the list");
+
+        // The companion key is replaced after the handshake looked it up and
+        // before the connection was listed: refused, and not listed.
+        state.devices().expect("store").set_companion(&id, &key(3)).expect("replace");
+        assert!(!admit(&state, live(Scope::Companion), &key(2)), "a replaced key was admitted");
+        // Forgotten in that window.
+        state.devices().expect("store").forget_companion(&id);
+        assert!(!admit(&state, live(Scope::Companion), &key(3)), "a forgotten key was admitted");
+        // Revoked in that window: neither key.
+        state.devices().expect("store").revoke(&id, 2).expect("revoke");
+        assert!(!admit(&state, live(Scope::Full), &key(1)), "a revoked device was admitted");
+        assert_eq!(listed(&state), 2, "a refused connection stayed on the list");
     }
 
     #[test]

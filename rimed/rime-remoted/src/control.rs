@@ -268,6 +268,7 @@ fn devices_reply(
         .into_iter()
         .map(|d| rime_remote_core::device::Device {
             companion_key: None,
+            retired_companion_keys: Vec::new(),
             ..d.clone()
         })
         .collect();
@@ -897,12 +898,13 @@ mod tests {
         let a = store.pair(&k(1), "a", 1, false).expect("pair");
         let b = store.pair(&k(2), "b", 2, false).expect("pair");
         let gone = store.pair(&k(3), "gone", 3, false).expect("pair");
-        store.set_companion(&a.id, &k(11)).expect("set");
+        store.set_companion(&a.id, &k(10)).expect("set");
+        store.set_companion(&a.id, &k(11)).expect("replace: k(10) is retired");
         store.set_companion(&gone.id, &k(13)).expect("set");
         store.revoke(&gone.id, 4).expect("revoke");
         let reply = devices_reply(&store, Default::default());
         let text = serde_json::to_string(&reply).expect("serialise");
-        assert!(!text.contains(&k(11)) && !text.contains(&k(13)), "{text}");
+        assert!(!text.contains(&k(10)) && !text.contains(&k(11)) && !text.contains(&k(13)), "{text}");
         assert!(!text.contains("companion_key"), "{text}");
         let Reply::Devices { companions, devices, .. } = reply else { panic!("{text}") };
         assert_eq!(companions, vec![a.id.clone()], "a revoked device's key is no companion");

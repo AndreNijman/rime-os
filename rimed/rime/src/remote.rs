@@ -436,6 +436,7 @@ fn with_phones(
         let mut v = serde_json::to_value(d)?;
         if let Some(obj) = v.as_object_mut() {
             obj.remove("companion_key");
+            obj.remove("retired_companion_keys");
             obj.insert(
                 "companion".into(),
                 serde_json::Value::Bool(d.is_active() && companions.contains(&d.id)),

@@ -351,6 +351,9 @@ pub struct Events {
     writers: Mutex<HashMap<String, (u64, UnixStream)>>,
     generation: AtomicU64,
     ring_id: AtomicU64,
+    /// Ring or offer id to the device it was written to, while somebody waits
+    /// for its ack. An ack counts only from that device.
+    sent_to: Mutex<HashMap<u64, String>>,
     acked: Mutex<HashSet<u64>>,
     ack: Condvar,
 }
@@ -417,14 +420,32 @@ impl Events {
         self.ring_id.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// The phone saw ring `id`.
-    pub fn acknowledge(&self, id: u64) {
+    /// `device_id` saw ring or offer `id`. Counted only when `id` was written
+    /// to that device and somebody is still waiting for it; anything else
+    /// (another device's id, an id nobody waits for) is ignored, and the
+    /// phone is answered as for an unknown id. `true` when it counted.
+    pub fn acknowledge(&self, device_id: &str, id: u64) -> bool {
+        if lock(&self.sent_to).get(&id).map(String::as_str) != Some(device_id) {
+            return false;
+        }
         lock(&self.acked).insert(id);
         self.ack.notify_all();
+        true
+    }
+
+    /// Write ring or offer `line` (carrying `id`) to `device_id` and wait up
+    /// to `limit` for that device's ack. The id is forgotten again either
+    /// way, so a late ack, or one from another device, never counts.
+    pub fn deliver(&self, device_id: &str, id: u64, line: &Value, limit: Duration) -> bool {
+        lock(&self.sent_to).insert(id, device_id.to_string());
+        let acked = self.send(device_id, line) && self.wait_ack(id, limit);
+        lock(&self.sent_to).remove(&id);
+        lock(&self.acked).remove(&id);
+        acked
     }
 
     /// Wait up to `limit` for ring `id`'s ack.
-    pub fn wait_ack(&self, id: u64, limit: Duration) -> bool {
+    fn wait_ack(&self, id: u64, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
         let mut acked = lock(&self.acked);
         loop {
@@ -512,7 +533,7 @@ pub fn ring(
     if events.is_open(device_id) {
         let id = events.next_ring();
         let line = json!({"event": "ring", "id": id, "at": now_s, "machine": machine});
-        if events.send(device_id, &line) && events.wait_ack(id, ack_wait) {
+        if events.deliver(device_id, id, &line, ack_wait) {
             return Ok(Rang::Link);
         }
     }
@@ -543,7 +564,8 @@ pub fn control(state: &crate::state::State, device_id: &str, line: &[u8]) -> Opt
         },
         "ring_ack" | "offer_ack" => match v["id"].as_u64() {
             Some(id) => {
-                state.events.acknowledge(id);
+                // Another device's id is answered like an unknown one.
+                state.events.acknowledge(device_id, id);
                 ok()
             }
             None => error("id must be a whole number"),
@@ -789,7 +811,7 @@ pub fn send(
     let id = events.next_ring();
     let line = offer_line(id, now_s, machine, &body);
     outbox.put(id, device_id, now_s, body, OFFER_LIFE);
-    if events.is_open(device_id) && events.send(device_id, &line) && events.wait_ack(id, ack_wait) {
+    if events.is_open(device_id) && events.deliver(device_id, id, &line, ack_wait) {
         return Ok((SentPath::Link, id));
     }
     if !reach.has_push {
@@ -1012,7 +1034,7 @@ mod tests {
             assert_eq!(v["event"], "ring");
             assert_eq!(v["at"], 1000);
             assert_eq!(v["machine"], "l16");
-            phone.acknowledge(v["id"].as_u64().expect("id"));
+            assert!(phone.acknowledge("dev-a", v["id"].as_u64().expect("id")));
         });
         let pushed = std::cell::Cell::new(false);
         let got = ring(&events, "dev-a", "l16", Reach { report: None, has_push: true }, 1000, ACK_WAIT, |_| {
@@ -1022,6 +1044,35 @@ mod tests {
         t.join().expect("phone");
         assert_eq!(got, Ok(Rang::Link));
         assert!(!pushed.get(), "an acked ring must not also go through push");
+    }
+
+    #[test]
+    fn another_devices_ack_does_not_count_for_this_ones_ring() {
+        let events = std::sync::Arc::new(Events::default());
+        let (theirs, _) = events.open("dev-a").expect("open");
+        let other = std::sync::Arc::clone(&events);
+        // dev-b reads the id off the shared counter (here, off dev-a's line)
+        // and acks it from its own session.
+        let t = std::thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(theirs).read_line(&mut line).expect("read");
+            let id = serde_json::from_str::<Value>(&line).expect("json")["id"].as_u64().expect("id");
+            (id, other.acknowledge("dev-b", id))
+        });
+        let rings = report(&["ring"]);
+        let pushed = std::cell::Cell::new(false);
+        let got = ring(&events, "dev-a", "l16", Reach { report: Some(&rings), has_push: true }, 1000,
+            Duration::from_millis(400), |_| {
+                pushed.set(true);
+                Ok(())
+            });
+        let (id, counted) = t.join().expect("dev-b");
+        assert!(!counted, "dev-b's ack was counted");
+        assert_eq!(got, Ok(Rang::Push), "dev-b's ack made dev-a's ring count as rung");
+        assert!(pushed.get());
+        // Over, so its id is forgotten: not even dev-a's late ack counts.
+        assert!(!events.acknowledge("dev-a", id));
+        assert!(!events.acknowledge("dev-a", 999), "an id nobody sent counted");
     }
 
     #[test]
@@ -1156,7 +1207,7 @@ mod tests {
             let mut line = String::new();
             BufReader::new(theirs).read_line(&mut line).expect("read");
             let v: Value = serde_json::from_str(&line).expect("json");
-            phone.acknowledge(v["id"].as_u64().expect("id"));
+            assert!(phone.acknowledge("dev-a", v["id"].as_u64().expect("id")));
             v
         });
         let receives = report(&["receive"]);

@@ -387,6 +387,9 @@ uses neither with a machine whose hello lacks them.
   object per line. The only event today is
   `{"event":"ring","id":N,"at":<unix seconds>,"machine":"<name>"}`.
 - The phone answers a ring with `{"cmd":"ring_ack","id":N}` → `{"reply":"ok"}`.
+  An ack counts only from the device the ring (or offer, `offer_ack`) was
+  written to, while the computer still waits for it; any other ack, another
+  device's included, gets the same `ok` and changes nothing.
 
 **Ring** is a control-socket request (`rime remote ring <device>`, by id or
 name, as `revoke`), so only the machine's own user can send one. A paired phone
@@ -933,9 +936,13 @@ session on it may use the device features below and nothing else.
 - The device is the handshake's; the body names none. One key per device: a
   new one replaces the old.
 - `companion_register` errors: `kind` `bad_request` (no `public_key`, or not 32
-  bytes of base64url), `key_in_use` (the key is this device's own key, or
-  either key of any other device, revoked ones included; one message for every
-  case, so the answer does not say which device holds it).
+  bytes of base64url), `key_in_use` (the key is this device's own key, either
+  key of any other device, revoked ones included, or a companion key any
+  device ever gave up; one message for every case, so the answer does not say
+  which device holds it).
+- A companion key given up (replaced, forgotten, or dropped by pairing the
+  device again) is retired for good: it can never be registered again, by
+  any device, nor paired as a device key.
 - Replacing a key, or `companion_forget`, ends that device's open companion
   sessions at once; its full sessions go on. `companion_forget` with no key set
   is `ok`.
@@ -949,10 +956,12 @@ sends changes it. `remote_hello` says which (§2.1).
 
 | | allowed |
 | --- | --- |
-| control verbs | `remote_hello`, `phone_report`, `ring_ack`, `offer_ack`, `offer_done`, `phone_notification`, `phone_notification_removed`, `phone_media`, `push_register`, `push_unregister` |
+| control verbs | `remote_hello`, `phone_report`, `ring_ack`, `offer_ack`, `offer_done`, `phone_notification`, `phone_notification_removed`, `phone_media` |
 | channels (`Open`) | `device_events`, `take_offer` |
 
-Everything else is refused, whatever it is: `machine_status`, `machine_lock`,
+Everything else is refused, whatever it is: `push_register` and
+`push_unregister` (a push carries `rime-agentd`'s session kind, id and start
+time, so only the full key may say where pushes go), `machine_status`, `machine_lock`,
 `media`, `media_control`, `volume`, `nex`, `nex_events`, `companion_register`,
 `companion_forget`, every `rime-agentd` verb (`hello`, `list`, `input`,
 `privilege_request`, `decide`, `clipboard_write`, …), a line with no readable
@@ -978,7 +987,10 @@ verb itself one day, it joins the list (`CLIPBOARD_VERBS`).
 **Revoke** (`rime remote revoke`) refuses both keys and drops every live
 connection the device holds, companion ones included; a refused companion key
 gets the same handshake refusal as a key that was never paired. Pairing the
-device again starts with no companion key.
+device again starts with no companion key, and the old one stays retired. A
+connection is put on the live list and only then authorised a second time, so
+a revoke, `companion_forget` or replaced key that lands during its handshake
+still ends it.
 
 **`rime remote devices`** says which devices have one ("keeps working after a
 restart"; `--json`: `"companion": true`). The control socket's `devices`

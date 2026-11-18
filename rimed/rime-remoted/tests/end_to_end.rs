@@ -2491,6 +2491,8 @@ fn a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_
         r#"{"cmd":"companion_register","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
         r#"{"cmd":"companion_forget"}"#,
         r#"{"cmd":"machine_lock"}"#,
+        r#"{"cmd":"push_register","endpoint":"https://push.example/up","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM"}"#,
+        r#"{"cmd":"push_unregister"}"#,
     ] {
         let r = c.call(line);
         assert_eq!(r["kind"], "not_allowed", "{line}: {r}");
@@ -2543,7 +2545,11 @@ fn a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_
     // Pairing the same phone again starts with no companion key.
     let Some(offer) = open_offer(&h) else { return };
     assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
-    assert!(device.connect(&h).is_some(), "the re-paired device was refused");
+    let mut full = device.connect(&h).expect("the re-paired device was refused");
     assert!(companion.connect(&h).is_none(), "re-pairing brought the old companion key back");
     assert_eq!(h.control(r#"{"cmd":"devices"}"#)["companions"], serde_json::json!([]));
+    // And the old key stays retired: it cannot be registered again.
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["kind"], "key_in_use", "{r}");
+    assert!(companion.connect(&h).is_none(), "a retired companion key came back");
 }

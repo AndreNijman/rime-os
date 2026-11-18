@@ -52,9 +52,14 @@ pub const REFUSAL: &str = "not_allowed";
 pub const CLIPBOARD_VERBS: [&str; 0] = [];
 
 /// Every control verb a companion session may send. The device features and
-/// nothing else: its hello, its report and acks, its notifications, what it
-/// is playing, and how it is woken.
-pub const ALLOWED_VERBS: [&str; 10] = [
+/// nothing else: its hello, its report and acks, its notifications, and what
+/// it is playing.
+///
+/// Not `push_register` / `push_unregister`: a push carries what
+/// `rime-agentd` says about agent sessions (their kind, id and start time),
+/// so a lifted companion key that could register an endpoint could read
+/// those and silence the owner's phone. Registration stays with the full key.
+pub const ALLOWED_VERBS: [&str; 8] = [
     "remote_hello",
     "phone_report",
     "ring_ack",
@@ -63,8 +68,6 @@ pub const ALLOWED_VERBS: [&str; 10] = [
     "phone_notification",
     "phone_notification_removed",
     "phone_media",
-    "push_register",
-    "push_unregister",
 ];
 
 /// Every channel a companion session may open: the events channel the
@@ -145,7 +148,9 @@ fn register(state: &State, device_id: &str, key: &str) -> Vec<u8> {
             Ok(s) => s,
             Err(e) => return error("internal", &e.to_string()),
         };
-        let before = store.devices.get(device_id).and_then(|d| d.companion_key.clone());
+        // The whole record, so a failed write also takes back the key it
+        // retired.
+        let before = store.devices.get(device_id).cloned();
         let after = match store.set_companion(device_id, key) {
             Ok(d) => d.companion_key,
             Err(StoreError::BadKey(why)) => return error("bad_request", &why),
@@ -155,11 +160,12 @@ fn register(state: &State, device_id: &str, key: &str) -> Vec<u8> {
         if let Err(e) = state.save_devices(&store) {
             // Not kept in memory either: a key that works until the next
             // restart and then silently stops is worse than a refusal now.
-            if let Some(d) = store.devices.get_mut(device_id) {
-                d.companion_key = before;
+            if let Some(d) = before.clone() {
+                store.devices.insert(device_id.to_string(), d);
             }
             return error("internal", &format!("the companion key was not written: {e}"));
         }
+        let before = before.and_then(|d| d.companion_key);
         before.is_some() && before != after
     };
     // A replaced key's sessions end now, not at their next reconnect.
@@ -175,11 +181,11 @@ fn forget(state: &State, device_id: &str) -> Vec<u8> {
             Ok(s) => s,
             Err(e) => return error("internal", &e.to_string()),
         };
-        let before = store.devices.get(device_id).and_then(|d| d.companion_key.clone());
+        let before = store.devices.get(device_id).cloned();
         if store.forget_companion(device_id) {
             if let Err(e) = state.save_devices(&store) {
-                if let Some(d) = store.devices.get_mut(device_id) {
-                    d.companion_key = before;
+                if let Some(d) = before {
+                    store.devices.insert(device_id.to_string(), d);
                 }
                 return error("internal", &format!("the companion key was not removed: {e}"));
             }

@@ -127,13 +127,16 @@ it on the same device record.
 
 A connection on that second key gets the phone's own features and nothing
 else: its battery and network report, ring and Send to Rime acknowledgements,
-its notifications, what it is playing, and push registration. It cannot open
-a terminal, start or steer an agent, use nex, lock the computer, change its
-media or volume, or touch the clipboard. Anything else is refused with
+its notifications, and what it is playing. It cannot open a terminal, start
+or steer an agent, use nex, lock the computer, change its media or volume,
+touch the clipboard, or change where push notifications go (pushes carry what
+your agents are doing, so only the unlocked phone may register for them). Anything else is refused with
 `not_allowed`. Unlocking the phone brings back the full connection.
 
 Revoking the device ends both keys at once, including a connection the second
-key already holds. Pairing the phone again starts without one. Turning the
+key already holds. Pairing the phone again starts without one, and a second
+key the phone gave up (by pairing again, or by the switch) is never accepted
+again. Turning the
 switch off in the app removes the key here too.
 
 ## `rime remote revoke <device>`
