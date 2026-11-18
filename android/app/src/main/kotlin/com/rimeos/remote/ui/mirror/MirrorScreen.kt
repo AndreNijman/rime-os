@@ -106,37 +106,7 @@ fun MirrorScreen(
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Spacer(Modifier.height(16.dp))
-                    if (granted) {
-                        Text("Notification access is on.", style = MaterialTheme.typography.titleSmall)
-                        TextButton(onClick = { context.startActivity(MirrorService.settingsIntent(context)) }) {
-                            Text("Turn it off in Settings")
-                        }
-                    } else {
-                        Text("Notification access is off.", style = MaterialTheme.typography.titleSmall)
-                        Text(
-                            "Android asks you to allow it in Settings. Nothing is sent until you do, " +
-                                "and then only from the apps you turn on here.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        Button(onClick = { context.startActivity(MirrorService.settingsIntent(context)) }) {
-                            Text("Allow notification access")
-                        }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            Spacer(Modifier.height(10.dp))
-                            Text(
-                                "If Android says the setting is restricted: open App info, tap the menu " +
-                                    "in the corner, choose \"Allow restricted settings\", then come back " +
-                                    "and try again. Android does this for apps installed from a file.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            OutlinedButton(onClick = { context.startActivity(MirrorService.appInfoIntent(context)) }) {
-                                Text("Open App info")
-                            }
-                        }
-                    }
+                    NotificationAccess(granted)
                     HorizontalDivider(Modifier.padding(top = 16.dp))
                     // Without notification access there is nothing to answer, so it cannot be turned on.
                     Row(
@@ -182,6 +152,49 @@ fun MirrorScreen(
                         // The row is the control; the switch only shows its state.
                         Switch(checked = on, onCheckedChange = null)
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Whether this app holds notification access, and the way to grant it: the
+ * one grant behind both "Notifications on your computer" and "Media on your
+ * computer" (contract §2.7, §2.8).
+ */
+@Composable
+fun NotificationAccess(granted: Boolean) {
+    val context = LocalContext.current
+    Column {
+        if (granted) {
+            Text("Notification access is on.", style = MaterialTheme.typography.titleSmall)
+            TextButton(onClick = { context.startActivity(MirrorService.settingsIntent(context)) }) {
+                Text("Turn it off in Settings")
+            }
+        } else {
+            Text("Notification access is off.", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "Android asks you to allow it in Settings. Nothing is sent until you do, " +
+                    "and then only from the apps you turn on here.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            Button(onClick = { context.startActivity(MirrorService.settingsIntent(context)) }) {
+                Text("Allow notification access")
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "If Android says the setting is restricted: open App info, tap the menu " +
+                        "in the corner, choose \"Allow restricted settings\", then come back " +
+                        "and try again. Android does this for apps installed from a file.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = { context.startActivity(MirrorService.appInfoIntent(context)) }) {
+                    Text("Open App info")
                 }
             }
         }

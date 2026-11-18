@@ -50,11 +50,14 @@ class MirrorService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         live = this
+        // The same grant opens media sessions (§2.8).
+        LinkHub.get(this).onListenerChanged()
     }
 
     override fun onListenerDisconnected() {
         if (live === this) live = null
         synchronized(sent) { sent.clear() }
+        LinkHub.get(this).onListenerChanged()
     }
 
     override fun onDestroy() {
