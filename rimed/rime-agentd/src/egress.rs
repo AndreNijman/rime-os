@@ -931,12 +931,22 @@ mod tests {
 
     impl SecretService {
         fn start(dir: &Path, trust: &Path) -> SecretService {
-            let binary = std::env::current_exe()
-                .expect("the test's own path")
-                .parent()
-                .and_then(|deps| deps.parent())
-                .map(|target| target.join("rime-secretd"))
-                .expect("a target directory above this test");
+            // The workspace's binaries sit in the profile directory
+            // (`target/debug`). The test binary is in `target/debug/deps` on
+            // older Cargo and in `target/debug/build/<pkg>/<hash>/out` on
+            // newer Cargo, so look upwards rather than a fixed two levels.
+            let exe = std::env::current_exe().expect("the test's own path");
+            let binary = exe
+                .ancestors()
+                .skip(1)
+                .map(|dir| dir.join("rime-secretd"))
+                .find(|p| p.is_file())
+                .unwrap_or_else(|| {
+                    exe.parent()
+                        .and_then(|deps| deps.parent())
+                        .map(|target| target.join("rime-secretd"))
+                        .expect("a target directory above this test")
+                });
             assert!(
                 binary.exists(),
                 "{} is not built, so this test would assert nothing. Run `cargo build -p \

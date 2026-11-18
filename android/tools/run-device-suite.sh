@@ -1114,19 +1114,19 @@ B
 } > "$root2/start.sh"
 chmod +x "$root2/start.sh"
 second_unit=""
-second_pid=""
 if sudo -n true >/dev/null 2>&1 && [ -d /run/systemd/sessions ]; then
   second_unit=rime-suite-b-$$
+  # The log is written by this script, as the developer, on purpose: only
+  # systemd-run needs root, and its output belongs in the run's own folder.
+  # shellcheck disable=SC2024
   sudo -n env TERM=dumb systemd-run --quiet --wait --pty --collect --unit="$second_unit" \
     --uid="$(id -u)" --gid="$(id -g)" --property=PAMName=login --working-directory="$root2" \
     --setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=TERM=dumb \
     -- /bin/bash -c 'stty -onlcr 2>/dev/null; exec "$1" </dev/null' second "$root2/start.sh" \
     </dev/null >"$root2/session.log" 2>&1 &
-  second_pid=$!
 else
   echo "NOTE: no sudo -n here, so the second computer runs in THIS login session, not one of its own"
   "$root2/start.sh" </dev/null >"$root2/session.log" 2>&1 &
-  second_pid=$!
 fi
 for _ in $(seq 1 120); do
   if [ -e "$root2/up" ] && (exec 3<>"/dev/tcp/127.0.0.1/$port2") 2>/dev/null \
