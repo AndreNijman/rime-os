@@ -1613,8 +1613,9 @@ fails; the responder answers `bad_request`.
   own session right after its reply.
 - The responder records the dialler's list before it answers with its own.
   The dialler sets `told_ms` on S's record when its list named S. When S is
-  itself removed on the dialler (a tell), the dialler checks only that S
-  answered `peer_tombstones` and **never applies S's list**: a removed (perhaps
+  itself removed on the dialler (a tell), the dialler sends S **only the entry
+  naming S** (never the keys and names of the computers still paired), checks
+  only that S answered `peer_tombstones`, and **never applies S's list**: a removed (perhaps
   stolen) computer cannot remove the computers still paired with this one.
 - **Presence**: `{name, battery?: {percent, charging}, on_ac?, power_mode?,
   locked?, network?, uptime_s?}`. Checked: name by the device-name rule,

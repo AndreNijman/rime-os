@@ -313,7 +313,7 @@ pub fn exchange(state: &State, link: &mut crate::dialer::Link, c: &rime_remote_c
         hello["features"].as_array().is_some_and(|f| f.iter().any(|x| x.as_str() == Some(verb)))
     };
     if offers("peer_tombstones") {
-        let mine = state.devices().map_err(|e| e.to_string())?.computer_tombstones();
+        let mine = list_for(&*state.devices().map_err(|e| e.to_string())?, c);
         let names_them = mine.iter().any(|t| t.key == c.public_key);
         let reply = link.call(json!({"cmd": "peer_tombstones", "tombstones": mine}).to_string().as_bytes())?;
         if reply["reply"] != "peer_tombstones" {
@@ -339,6 +339,23 @@ pub fn exchange(state: &State, link: &mut crate::dialer::Link, c: &rime_remote_c
         state.presence.set(&c.id, theirs, rime_remote_core::now_ms());
     }
     Ok(())
+}
+
+/// The list sent to computer `c`. A paired computer gets every removal this
+/// one passes on; a removed one is told only that it was removed: the keys
+/// and names of the computers still paired here are none of its business, and
+/// its own entry can never be cut off the end of a full list.
+fn list_for(store: &rime_remote_core::device::DeviceStore, c: &rime_remote_core::device::Device) -> Vec<Tombstone> {
+    if c.is_active() {
+        return store.computer_tombstones();
+    }
+    store
+        .computers
+        .get(&c.id)
+        .filter(|r| r.is_tombstone() && r.public_key == c.public_key)
+        .map(|r| Tombstone { key: r.public_key.clone(), removed_ms: r.revoked_ms.unwrap_or(0), name: r.name.clone() })
+        .into_iter()
+        .collect()
 }
 
 /// The removals computer `c` answered with, recorded only while it is still
@@ -593,6 +610,32 @@ mod tests {
         }
         assert_eq!(targets(&state, now + 2).1, BTreeSet::from([c.id.clone()]), "a learned removal is dialled after a forget");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_removed_computer_is_told_only_its_own_removal_however_long_the_list() {
+        let own = [99u8; 32];
+        let mut store = rime_remote_core::device::DeviceStore::default();
+        // c removed first, then more computers removed here than a list holds.
+        let c = store.pair_computer(&[1u8; 32], &own, "c", vec![], None, 1).expect("c");
+        store.revoke_computer(&c.id, 10).expect("removed");
+        for i in 0..(peer::MAX_TOMBSTONES + 3) {
+            let mut k = [0x40u8; 32];
+            k[0] = (i >> 8) as u8;
+            k[1] = i as u8;
+            let o = store.pair_computer(&k, &own, "o", vec![], None, 1).expect("o");
+            store.revoke_computer(&o.id, 1_000 + i as u64).expect("removed");
+        }
+        let removed = store.computers[&c.id].clone();
+        let told = list_for(&store, &removed);
+        assert_eq!(told.len(), 1, "a removed computer was sent other computers' removals");
+        assert_eq!((told[0].key.as_str(), told[0].removed_ms), (c.public_key.as_str(), 10));
+        // A paired computer gets the full list, capped.
+        let p = store.pair_computer(&[2u8; 32], &own, "p", vec![], None, 1).expect("p");
+        assert_eq!(list_for(&store, &p).len(), peer::MAX_TOMBSTONES);
+        // A removal forgotten here tells nothing.
+        store.forget_computer(&c.id, 20).expect("forgotten");
+        assert!(list_for(&store, &store.computers[&c.id].clone()).is_empty());
     }
 
     #[test]
