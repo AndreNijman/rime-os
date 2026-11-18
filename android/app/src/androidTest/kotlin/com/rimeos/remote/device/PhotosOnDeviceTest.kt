@@ -123,9 +123,9 @@ class PhotosOnDeviceTest {
         assertEquals("the saved photo is not the phone's file: $saved", plain.sha256, saved.getJSONObject("saved").getString("sha256"))
 
         // What Android does with a location in an original this app reads
-        // without ACCESS_MEDIA_LOCATION. Either way it is written down; a
-        // location that came through is acceptable only in a file Android
-        // left untouched, which would mean it does not blank them at all.
+        // without ACCESS_MEDIA_LOCATION. From Android 10 on it must be gone:
+        // the docs and the in-app help say so. Before, Android hands the file
+        // over as it is, and a location may come through only untouched.
         val located = pushed.first { it.gps }
         val withGps = Desktop.photosSave(machine.deviceId, ids.getValue(located.name))
         assertEquals("the save of the image with a location failed: $withGps", 0, withGps.getInt("code"))
@@ -133,7 +133,11 @@ class PhotosOnDeviceTest {
         val identical = facts.getString("sha256") == located.sha256
         val gps = facts.getBoolean("gps")
         Log.i(TAG, "the image with a location came back ${if (identical) "byte for byte" else "changed"}, location ${if (gps) "present" else "absent"}")
-        assertTrue("a location came through in a file Android changed: $withGps", !gps || identical)
+        if (Build.VERSION.SDK_INT >= 29) {
+            assertFalse("Android ${Build.VERSION.SDK_INT} let a photo's location reach the computer: $withGps", gps)
+        } else {
+            assertTrue("a location came through in a file Android changed: $withGps", !gps || identical)
+        }
     }
 
     @Test
