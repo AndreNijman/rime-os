@@ -377,6 +377,9 @@ fn session(
 /// that channel is still behind the worker (see [`Channels`]); `Ping` is
 /// answered here and `Pong` is timed here, which is what keeps both working
 /// while a request is in flight.
+// The scope travels as its own argument, next to the device id it belongs
+// to, so a reader can follow it from the handshake to the worker.
+#[allow(clippy::too_many_arguments)]
 fn frames(
     mut inbound: TcpStream,
     outbound: TcpStream,
