@@ -3579,6 +3579,33 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
         }
         other => panic!("a peer's Open was answered with {other:?}"),
     }
+    // Nor the phone channels, where pushed events and rings travel.
+    for (channel, request) in [(8u32, r#"{"cmd":"device_events"}"#), (9, r#"{"cmd":"take_offer","id":1}"#)] {
+        peer.send(Frame::Open { channel, request: request.as_bytes().to_vec() });
+        loop {
+            match peer.recv() {
+                Frame::Control(line) => {
+                    let r: serde_json::Value = serde_json::from_slice(&line).expect("json");
+                    assert_eq!(r["kind"], "not_allowed", "{request}: {r}");
+                    break;
+                }
+                // The refused channels' own closes, in whatever order.
+                Frame::Close { channel: c, .. } if [7, 8, 9].contains(&c) => {}
+                other => panic!("a peer's {request} was answered with {other:?}"),
+            }
+        }
+    }
+    // What this computer sends to every phone reaches no peer: with the peer
+    // session open, a Do Not Disturb change and a clipboard reach nobody, and
+    // nothing but its own replies (and keepalives) comes down the session.
+    let focused = a.control(r#"{"cmd":"focus","dnd":true}"#);
+    assert_eq!(focused["reached"], 0, "{focused}");
+    let clipped = a.control(r#"{"cmd":"clipboard","text":"for the phones","sensitive":false}"#);
+    assert_eq!(clipped["reached"], 0, "{clipped}");
+    assert_eq!(peer.call(r#"{"cmd":"peer_hello"}"#)["reply"], "peer_hello");
+    let unasked: Vec<&Frame> =
+        peer.pending.iter().filter(|f| !matches!(f, Frame::Close { channel: 7..=9, .. })).collect();
+    assert!(unasked.is_empty(), "a peer session was sent something unasked: {unasked:?}");
     // rime-agentd saw no session from it: the only remote origin it could
     // have recorded is the proxy's, and nothing was proxied.
     let listed = a.direct(r#"{"cmd":"list"}"#);
