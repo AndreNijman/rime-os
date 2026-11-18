@@ -166,8 +166,38 @@ class KeystoreSecretBox private constructor(
          * itself, which is not always the gate that was asked for — a key
          * created by an older build of this app is the obvious case.
          */
-        fun forDevice(deviceId: String, requireAuthentication: Boolean = true): KeystoreSecretBox {
-            val alias = aliasFor(deviceId)
+        fun forDevice(deviceId: String, requireAuthentication: Boolean = true): KeystoreSecretBox =
+            load(aliasFor(deviceId), requireAuthentication)
+
+        /**
+         * The companion key's alias for a machine: never the device key's.
+         *
+         * Its own alias because [forDevice] returns whatever key already sits
+         * under an alias, gate and all: a companion key sealed under the
+         * device alias would either be gated (and never open after a restart)
+         * or would leave the device key ungated. Neither is acceptable.
+         */
+        fun companionAliasFor(deviceId: String): String = "rime-remote/companion/$deviceId"
+
+        /**
+         * The box for a machine's companion key: NO user authentication, by
+         * design, so a restarted phone can open it from a boot receiver before
+         * anyone has unlocked the app. Refuses to hand back a gated key.
+         */
+        fun forCompanion(deviceId: String): KeystoreSecretBox {
+            val box = load(companionAliasFor(deviceId), requireAuthentication = false)
+            check(!box.authenticationIsRequired) { "the companion key's alias holds a gated key" }
+            return box
+        }
+
+        /** Forget a machine's companion wrapping key. A sealed companion key becomes noise. */
+        fun forgetCompanion(deviceId: String) {
+            val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
+            val alias = companionAliasFor(deviceId)
+            if (store.containsAlias(alias)) store.deleteEntry(alias)
+        }
+
+        private fun load(alias: String, requireAuthentication: Boolean): KeystoreSecretBox {
             val store = KeyStore.getInstance(PROVIDER).apply { load(null) }
             val existing = store.getKey(alias, null) as SecretKey?
             if (existing != null) return KeystoreSecretBox(existing, gateOn(existing))
