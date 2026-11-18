@@ -418,8 +418,16 @@ The computer shows "Pixel 8 · Spotify" with the title, artist, album and how
 far in it is, and it follows the phone: pause, skip or seek there and it
 changes here. When the phone stops playing, disconnects or is revoked, it goes.
 
-- This first version only shows. Play, pause and skip on the computer stay on
-  the computer's own players; the media keys never act on the phone.
+- **Control from your computer** (on that screen, under the media switch; on
+  by default once media is on) lets the Shell's player play, pause, skip and
+  seek what the phone is playing, as far as the app on the phone allows: a
+  button the app does not offer stays dimmed. Turn it off and the computer
+  only shows. The phone acts only while it is unlocked, and only on what it
+  last showed you.
+- The media keys (and CTRL+SUPER+Space, Left and Right) go to the computer's
+  own players first. They reach the phone only when nothing on the computer
+  is a player at all, so a paused browser tab still keeps them on the
+  computer.
 - No artwork, links or queue cross: only the app's name, title, artist, album,
   length, position and whether it is playing.
 - Nothing is sent while the app is locked or for an app you have not turned on.
