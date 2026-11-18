@@ -145,6 +145,30 @@ pub enum RemoteCmd {
         #[arg(long)]
         json: bool,
     },
+    /// See a phone's recent photos and screenshots, and save one here.
+    ///
+    /// The phone must have "Photos on your computer" turned on in Rime Remote,
+    /// be connected, and be unlocked. Without a subcommand it lists the newest
+    /// photos; each one's small preview is kept under your runtime folder only
+    /// until the phone disconnects, and `--json` gives its path, which is how
+    /// Rime Shell shows a grid. Only you, at this machine, can do this; an
+    /// agent cannot.
+    #[command(args_conflicts_with_subcommands = true)]
+    Photos {
+        #[command(subcommand)]
+        action: Option<PhotosCmd>,
+        /// Device id or name. May be left out when one phone has Photos on.
+        #[arg(long)]
+        device: Option<String>,
+        /// Only photos older than this, in Unix milliseconds: the next page.
+        #[arg(long, value_name = "MS")]
+        before: Option<u64>,
+        /// How many photos, from 1 to 60 (default 30).
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Whether the service is running, and how a device would reach it.
     ///
     /// Including every connection open right now: which path it came in on,
@@ -230,6 +254,29 @@ pub enum CallsCmd {
     },
 }
 
+/// What `rime remote photos` can do besides listing them.
+#[derive(Subcommand, Debug)]
+pub enum PhotosCmd {
+    /// Save one photo, whole, from the phone to this computer.
+    ///
+    /// It goes into the Rime Remote folder in your Pictures folder, or the
+    /// folder given with --to, under the phone's name for it. A file already
+    /// there is never replaced: the new one gets a number. A photo is at
+    /// most 64 MiB.
+    Save {
+        /// The photo's id, from the list.
+        id: u64,
+        /// Device id or name. May be left out when one phone has Photos on.
+        #[arg(long)]
+        device: Option<String>,
+        /// The folder to save into. Made if it is missing.
+        #[arg(long, value_name = "DIR")]
+        to: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// What `rime remote focus` sets.
 #[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusState {
@@ -292,6 +339,34 @@ enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         number: Option<String>,
     },
+    Photos {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    PhotosSave {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        photo: u64,
+    },
+}
+
+/// One photo on the phone (contract §2.13). `thumb` is the path of its
+/// preview, a small JPEG with no metadata, while the phone stays connected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PhotoItem {
+    id: u64,
+    name: String,
+    date_ms: u64,
+    width: u32,
+    height: u32,
+    size: u64,
+    mime: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thumb: Option<String>,
 }
 
 /// The call a phone has now (contract §2.12).
@@ -436,6 +511,19 @@ enum Reply {
         device: String,
         action: String,
     },
+    Photos {
+        device: String,
+        photos: Vec<PhotoItem>,
+        #[serde(default)]
+        partial: bool,
+    },
+    PhotoSaved {
+        device: String,
+        #[allow(dead_code)]
+        photo: u64,
+        name: String,
+        len: u64,
+    },
     Ok,
     Error {
         message: String,
@@ -469,6 +557,12 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
                 CallsCmd::Dial { number, device, json } => ("dial", device, Some(number), json),
             };
             call_action(Request::Call { device, action, number }, json)
+        }
+        RemoteCmd::Photos { action: None, device, before, limit, json } => {
+            photos(Request::Photos { device, before, limit }, json)
+        }
+        RemoteCmd::Photos { action: Some(PhotosCmd::Save { id, device, to, json }), .. } => {
+            photos_save(id, device, to, json)
         }
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
@@ -1025,6 +1119,229 @@ fn call_action(req: Request, json: bool) -> Result<i32> {
         Reply::Error { message } => messages_error(&message, json),
         _ => unexpected(),
     }
+}
+
+/// How long `rime remote photos` waits: the service waits up to 30 s for the
+/// phone's answer.
+const PHOTOS_WAIT: std::time::Duration = std::time::Duration::from_secs(40);
+
+/// How long `rime remote photos save` waits: the service gives the phone
+/// 20 s to start, then 300 s plus one per 128 KiB of a 64 MiB photo, plus
+/// 30 s, and stops the save itself when that runs out.
+const SAVE_WAIT: std::time::Duration = std::time::Duration::from_secs(20 + 300 + 512 + 30 + 30);
+
+fn photos(req: Request, json: bool) -> Result<i32> {
+    match call_for(&req, None, PHOTOS_WAIT)? {
+        Reply::Photos { device, photos, partial } => {
+            if json {
+                let v = serde_json::json!({"device": device, "partial": partial, "photos": photos});
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(0);
+            }
+            print!("{}", photos_table(&device, &photos, partial));
+            Ok(0)
+        }
+        Reply::Error { message } => messages_error(&message, json),
+        _ => unexpected(),
+    }
+}
+
+fn photos_table(device: &str, photos: &[PhotoItem], partial: bool) -> String {
+    let mut out = String::new();
+    if photos.is_empty() {
+        out.push_str(&format!("{device} has no photos to show.\n"));
+    } else {
+        out.push_str(&format!("{:<10} {:<9} {:<9} {:<11} NAME\n", "ID", "WHEN", "SIZE", "PIXELS"));
+        for p in photos {
+            out.push_str(&format!(
+                "{:<10} {:<9} {:<9} {:<11} {}\n",
+                p.id,
+                ago(p.date_ms),
+                bytes_short(p.size),
+                format!("{}x{}", p.width, p.height),
+                truncate(&p.name, 60)
+            ));
+        }
+        out.push_str(&format!("(from {device}. `rime remote photos save ID` saves one here.)\n"));
+    }
+    if partial {
+        out.push_str(
+            "Only the photos you picked on the phone are shown. To show all of them, allow Rime Remote \
+             all photos in the phone's settings.\n",
+        );
+    }
+    out
+}
+
+/// A size in the unit a person would use.
+fn bytes_short(n: u64) -> String {
+    match n {
+        0..=1023 => format!("{n} B"),
+        1024..=1_048_575 => format!("{} KB", n / 1024),
+        _ => format!("{:.1} MB", n as f64 / 1_048_576.0),
+    }
+}
+
+/// Where a saved photo goes when no folder is given: "Rime Remote" in the
+/// Pictures folder `user-dirs.dirs` names, or in ~/Pictures.
+fn default_photos_dir() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?;
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    let pictures = std::fs::read_to_string(config.join("user-dirs.dirs"))
+        .ok()
+        .and_then(|text| pictures_dir_in(&text, &home))
+        .unwrap_or_else(|| home.join("Pictures"));
+    Ok(pictures.join("Rime Remote"))
+}
+
+/// `XDG_PICTURES_DIR` from a `user-dirs.dirs` file: `"$HOME/…"` or an
+/// absolute path, as xdg-user-dirs writes it. Anything else is not used.
+fn pictures_dir_in(text: &str, home: &std::path::Path) -> Option<PathBuf> {
+    let line = text.lines().map(str::trim).find(|l| l.starts_with("XDG_PICTURES_DIR="))?;
+    let value = line["XDG_PICTURES_DIR=".len()..].trim().strip_prefix('"')?.strip_suffix('"')?;
+    let path = match value.strip_prefix("$HOME") {
+        Some(rest) if rest.is_empty() => return None,
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None if value.starts_with('/') => PathBuf::from(value),
+        None => return None,
+    };
+    (path != home).then_some(path)
+}
+
+/// The name the photo is saved under: the service's name for it, checked
+/// again here, since a name is the one thing from the phone that becomes a
+/// path.
+fn saved_name(name: &str, photo: u64) -> String {
+    let ok = !name.is_empty()
+        && name.chars().count() <= 120
+        && !name.starts_with('.')
+        && !name.contains(['/', '\\', '\0'])
+        && !name.chars().any(char::is_control);
+    if ok {
+        name.to_string()
+    } else {
+        format!("photo-{photo}.jpg")
+    }
+}
+
+/// `name`, then `stem (2).ext`, `stem (3).ext`, …: the candidates for a file
+/// that must not replace one already there.
+fn numbered(name: &str, n: u32) -> String {
+    if n < 2 {
+        return name.to_string();
+    }
+    match name.rfind('.') {
+        Some(dot) if dot > 0 => format!("{} ({n}){}", &name[..dot], &name[dot..]),
+        _ => format!("{name} ({n})"),
+    }
+}
+
+/// Give the finished file `from` its name in `dir`, never replacing a file:
+/// an atomic no-replace rename, or a hard link where the folder's file
+/// system has no such rename. The path it got.
+fn place_without_replacing(from: &std::path::Path, dir: &std::path::Path, name: &str) -> Result<PathBuf> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &std::path::Path| CString::new(p.as_os_str().as_bytes()).context("a path with a NUL byte");
+    let src = c(from)?;
+    for n in 1..=999 {
+        let to = dir.join(numbered(name, n));
+        let dst = c(&to)?;
+        // SAFETY: two NUL-terminated paths, both relative to nothing.
+        let r = unsafe {
+            libc::renameat2(libc::AT_FDCWD, src.as_ptr(), libc::AT_FDCWD, dst.as_ptr(), libc::RENAME_NOREPLACE)
+        };
+        if r == 0 {
+            return Ok(to);
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EEXIST) => continue,
+            Some(libc::EINVAL) | Some(libc::ENOSYS) => match std::fs::hard_link(from, &to) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(from);
+                    return Ok(to);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e).with_context(|| format!("could not name the photo in {}", dir.display())),
+            },
+            _ => return Err(e).with_context(|| format!("could not name the photo in {}", dir.display())),
+        }
+    }
+    bail!("{} has 999 files named like {name}; nothing was saved", dir.display())
+}
+
+fn photos_save(photo: u64, device: Option<String>, to: Option<PathBuf>, json: bool) -> Result<i32> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let dir = match to {
+        Some(d) => d,
+        None => default_photos_dir()?,
+    };
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not make {}", dir.display()))?;
+    // The file is made here, by this account, in the folder it will stay in,
+    // and the service only fills it through the descriptor: it needs no
+    // access to the folder, and never chooses a path.
+    let mut part = None;
+    for attempt in 0..16u32 {
+        let candidate = dir.join(format!(".rime-photo-{}-{}-{attempt}.part", std::process::id(), photo));
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&candidate)
+        {
+            Ok(f) => {
+                part = Some((candidate, f));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("could not write in {}", dir.display())),
+        }
+    }
+    let Some((part_path, file)) = part else {
+        bail!("could not make a file in {}", dir.display());
+    };
+    let outcome = (|| -> Result<Result<(PathBuf, String, u64), String>> {
+        let reply = call_for(&Request::PhotosSave { device, photo }, Some(file.as_raw_fd()), SAVE_WAIT)?;
+        let (device, name, len) = match reply {
+            Reply::PhotoSaved { device, name, len, .. } => (device, name, len),
+            Reply::Error { message } => return Ok(Err(message)),
+            _ => return unexpected().map(|_| Err(String::new())),
+        };
+        let got = file.metadata()?.len();
+        if got != len {
+            return Ok(Err(format!("the photo arrived with {got} of {len} bytes; nothing was saved")));
+        }
+        std::fs::set_permissions(&part_path, std::fs::Permissions::from_mode(0o644))?;
+        let path = place_without_replacing(&part_path, &dir, &saved_name(&name, photo))?;
+        Ok(Ok((path, device, len)))
+    })();
+    let outcome = match outcome {
+        Ok(Ok(done)) => done,
+        Ok(Err(message)) => {
+            let _ = std::fs::remove_file(&part_path);
+            return messages_error(&message, json);
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&part_path);
+            return Err(e);
+        }
+    };
+    let (path, device, len) = outcome;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"saved": true, "device": device, "photo": photo, "path": path, "len": len})
+        );
+    }
+    eprintln!("rime: saved {} ({}) from {device}.", path.display(), bytes_short(len));
+    Ok(0)
 }
 
 /// A message from standard input, capped. The service checks it again.
@@ -1662,6 +1979,85 @@ mod tests {
                 .unwrap(),
             r#"{"cmd":"messages_send","to":"5556","text":"a\nb"}"#
         );
+    }
+
+    #[test]
+    fn photos_parses_and_its_wire_shapes_hold() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        match Cli::try_parse_from(["r", "photos", "--json", "--limit", "5", "--before", "9"]).expect("list").cmd {
+            RemoteCmd::Photos { action: None, json: true, limit: Some(5), before: Some(9), device: None } => {}
+            other => panic!("{other:?}"),
+        }
+        match Cli::try_parse_from(["r", "photos", "save", "42", "--to", "out", "--device", "Pixel"]).expect("save").cmd {
+            RemoteCmd::Photos { action: Some(PhotosCmd::Save { id: 42, to: Some(t), device: Some(d), json: false }), .. } => {
+                assert_eq!((t.to_str(), d.as_str()), (Some("out"), "Pixel"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(Cli::try_parse_from(["r", "photos", "save"]).is_err(), "a save of nothing");
+        assert!(Cli::try_parse_from(["r", "photos", "save", "x"]).is_err());
+        assert!(Cli::try_parse_from(["r", "photos", "--limit", "3", "save", "1"]).is_err());
+        assert_eq!(
+            serde_json::to_string(&Request::Photos { device: None, before: Some(9), limit: None }).unwrap(),
+            r#"{"cmd":"photos","before":9}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::PhotosSave { device: None, photo: 4 }).unwrap(),
+            r#"{"cmd":"photos_save","photo":4}"#
+        );
+        let reply: Reply = serde_json::from_str(
+            r#"{"reply":"photos","device":"Pixel","partial":true,"photos":[{"id":5,"name":"IMG_1.jpg","date_ms":1,
+               "width":4000,"height":3000,"size":2500000,"mime":"image/jpeg","thumb":"/run/user/1/rime-remote/photos/d/5.jpg"}]}"#,
+        )
+        .expect("photos");
+        let Reply::Photos { device, photos, partial } = reply else { panic!() };
+        let table = photos_table(&device, &photos, partial);
+        assert!(table.contains("IMG_1.jpg") && table.contains("4000x3000") && table.contains("2.4 MB"), "{table}");
+        assert!(table.contains("Only the photos you picked"), "{table}");
+        assert!(!photos_table("Pixel", &photos, false).contains("picked"));
+        serde_json::from_str::<Reply>(r#"{"reply":"photo_saved","device":"Pixel","photo":4,"name":"a.jpg","len":3}"#)
+            .expect("saved");
+    }
+
+    #[test]
+    fn a_saved_photos_name_is_checked_again_and_never_replaces_a_file() {
+        assert_eq!(saved_name("PXL_1.jpg", 3), "PXL_1.jpg");
+        for bad in ["", ".bashrc", "../x.jpg", "a/b.jpg", "a\\b", "a\nb", "a\0b"] {
+            assert_eq!(saved_name(bad, 3), "photo-3.jpg", "{bad:?}");
+        }
+        assert_eq!(numbered("a.jpg", 1), "a.jpg");
+        assert_eq!(numbered("a.jpg", 2), "a (2).jpg");
+        assert_eq!(numbered("noext", 3), "noext (3)");
+        let dir = std::env::temp_dir().join(format!("rime-photo-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"theirs").unwrap();
+        std::fs::write(dir.join("a (2).jpg"), b"theirs too").unwrap();
+        let part = dir.join(".part");
+        std::fs::write(&part, b"mine").unwrap();
+        let got = place_without_replacing(&part, &dir, "a.jpg").unwrap();
+        assert_eq!(got, dir.join("a (3).jpg"));
+        assert_eq!(std::fs::read(&got).unwrap(), b"mine");
+        assert_eq!(std::fs::read(dir.join("a.jpg")).unwrap(), b"theirs");
+        assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_pictures_folder_comes_from_user_dirs_or_home() {
+        let home = std::path::Path::new("/home/x");
+        let text = "# comment\nXDG_DESKTOP_DIR=\"$HOME/Desktop\"\nXDG_PICTURES_DIR=\"$HOME/Bilder\"\n";
+        assert_eq!(pictures_dir_in(text, home), Some(PathBuf::from("/home/x/Bilder")));
+        assert_eq!(pictures_dir_in("XDG_PICTURES_DIR=\"/data/pics\"", home), Some(PathBuf::from("/data/pics")));
+        assert_eq!(pictures_dir_in("XDG_PICTURES_DIR=\"$HOME/\"", home), None, "home itself");
+        assert_eq!(pictures_dir_in("XDG_PICTURES_DIR=\"$HOME\"", home), None);
+        assert_eq!(pictures_dir_in("XDG_PICTURES_DIR=relative", home), None);
+        assert_eq!(pictures_dir_in("", home), None);
     }
 
     #[test]
