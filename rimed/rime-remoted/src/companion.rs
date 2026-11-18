@@ -59,7 +59,13 @@ pub const CLIPBOARD_VERBS: [&str; 0] = [];
 /// `rime-agentd` says about agent sessions (their kind, id and start time),
 /// so a lifted companion key that could register an endpoint could read
 /// those and silence the owner's phone. Registration stays with the full key.
-pub const ALLOWED_VERBS: [&str; 8] = [
+///
+/// `messages_reply` and `messages_changed` are here: reading the phone's SMS
+/// threads works while the app is locked, because the person asking is at
+/// this computer and the phone's own switch decides (contract §2.11). Not
+/// `messages_sent`: sending needs the app unlocked, and the computer never
+/// writes `messages_send` to a companion session's channel.
+pub const ALLOWED_VERBS: [&str; 10] = [
     "remote_hello",
     "phone_report",
     "ring_ack",
@@ -68,6 +74,8 @@ pub const ALLOWED_VERBS: [&str; 8] = [
     "phone_notification",
     "phone_notification_removed",
     "phone_media",
+    "messages_reply",
+    "messages_changed",
 ];
 
 /// Every channel a companion session may open: the events channel the

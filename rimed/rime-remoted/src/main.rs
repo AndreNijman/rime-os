@@ -31,6 +31,7 @@ mod control;
 mod discovery;
 mod machine;
 mod media;
+mod messages;
 mod mirror;
 mod net;
 mod nex;

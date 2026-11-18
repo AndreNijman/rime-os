@@ -90,6 +90,8 @@ pub struct State {
     pub events: crate::phone::Events,
     /// What somebody here sent a phone, until it takes it (contract §2.6).
     pub outbox: crate::phone::Outbox,
+    /// The messages requests waiting on phones (contract §2.11). Memory only.
+    pub messages: crate::messages::Messages,
     /// How often an open connection is measured.
     pub ping_interval: std::time::Duration,
     devices: Mutex<DeviceStore>,
@@ -165,6 +167,7 @@ impl State {
             phones_path,
             events: crate::phone::Events::default(),
             outbox: crate::phone::Outbox::default(),
+            messages: crate::messages::Messages::default(),
             ping_interval,
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
@@ -276,6 +279,7 @@ impl State {
     pub fn phone_forget(&self, device_id: &str) {
         self.events.forget(device_id);
         self.outbox.forget(device_id);
+        self.messages.forget(device_id);
         crate::mirror::mirror().forget(device_id);
         crate::media::media().forget(device_id);
         self.focus_seen.forget(device_id);

@@ -538,6 +538,10 @@ fn frames(
     let _ = hangup.shutdown(std::net::Shutdown::Both);
     // What the phone was playing was true while it was here to say so.
     crate::media::media().ended(device_id, connection);
+    // A messages request dies with the connection it was asked on, and what
+    // it had gathered goes with it (contract §2.11).
+    state.messages.ended(device_id, connection);
+    state.events.ended(device_id, connection);
 
     if let Some(quiet) = silenced.lock().ok().and_then(|s| *s) {
         return Err(ServeError::Silent(quiet));
@@ -833,7 +837,7 @@ impl Worker {
             // stays in `state.events`, and a ring is a line written there.
             self.state
                 .events
-                .open(&self.device_id)
+                .open_for(&self.device_id, self.connection, self.scope == Scope::Full)
                 .map(|(stream, _)| {
                     // What was sent while the phone was away, written now:
                     // the lines wait in the socketpair and the pump, which
@@ -988,6 +992,8 @@ fn answered_here(state: &State, device_id: &str, scope: Scope, connection: u64, 
             let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
             Some(crate::mirror::control(crate::mirror::mirror(), device_id, name.as_deref().unwrap_or(""), line))
         }
+        // A phone's SMS threads, answering a request somebody here made.
+        Some(c) if crate::messages::VERBS.contains(&c) => state.messages.control(device_id, connection, line),
         // What the phone is playing, shown here as a media player.
         Some(c) if crate::media::VERBS.contains(&c) => {
             let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
@@ -1021,6 +1027,7 @@ fn remote_hello(state: &State, scope: Scope) -> Vec<u8> {
     features.extend(crate::phone::FEATURES);
     features.extend(crate::mirror::FEATURES);
     features.extend(crate::media::FEATURES);
+    features.extend(crate::messages::FEATURES);
     features.extend(crate::companion::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
@@ -1383,7 +1390,7 @@ mod tests {
                                "machine_status", "machine_lock", "media",
                                "device_events", "phone_report", "take_offer", "phone_focus",
                                "phone_notifications", "phone_notification_reply",
-                               "phone_media", "phone_media_control", "companion_link"]),
+                               "phone_media", "phone_media_control", "phone_messages", "companion_link"]),
             "{v}"
         );
         assert_eq!(v["scope"], "full", "{v}");
@@ -1415,6 +1422,7 @@ mod tests {
             .chain(crate::phone::VERBS.iter())
             .chain(crate::mirror::VERBS.iter())
             .chain(crate::media::VERBS.iter())
+            .chain(crate::messages::VERBS.iter())
             .chain(crate::companion::VERBS.iter())
         {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
@@ -1452,6 +1460,7 @@ mod tests {
         assert_eq!(crate::phone::VERBS, ["phone_report", "ring_ack", "offer_ack", "offer_done"]);
         assert_eq!(crate::mirror::VERBS, ["phone_notification", "phone_notification_removed"]);
         assert_eq!(crate::media::VERBS, ["phone_media"]);
+        assert_eq!(crate::messages::VERBS, ["messages_reply", "messages_changed", "messages_sent"]);
         assert_eq!(crate::companion::VERBS, ["companion_register", "companion_forget"]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1580,6 +1589,7 @@ mod tests {
             .chain(crate::phone::VERBS.iter())
             .chain(crate::mirror::VERBS.iter())
             .chain(crate::media::VERBS.iter())
+            .chain(crate::messages::VERBS.iter())
             .chain(crate::companion::VERBS.iter())
             .copied()
             .collect()
@@ -1628,8 +1638,11 @@ mod tests {
             "phone_notification",
             "phone_notification_removed",
             "phone_media",
+            "messages_reply",
+            "messages_changed",
         ];
         let refused = [
+            "messages_sent",
             "push_register",
             "push_unregister",
             "nex",

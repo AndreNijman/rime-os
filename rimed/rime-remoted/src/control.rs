@@ -25,6 +25,11 @@
 //! so an agent that could send would choose what a person pastes on their
 //! phone (contract §2.6).
 //!
+//! `messages` and `messages_send` (contract §2.11) are gated the same way,
+//! reading included: a phone's SMS carry one-time codes, so an agent that
+//! could read them could sign in as the owner. Rime Shell classifies as
+//! `rime-shell` and still may.
+//!
 //! `focus` (contract §2.9) is not gated that way either, for the same reason
 //! `ring` is not: it changes how a phone of the owner's interrupts them, which
 //! the owner can change back on the phone, and the Shell sends it every time
@@ -76,6 +81,28 @@ pub enum Request {
         name: Option<String>,
         #[serde(default)]
         text: Option<String>,
+    },
+    /// A phone's SMS threads, or one thread's messages (contract §2.11).
+    /// `device` may be left out when exactly one phone has Messages on.
+    Messages {
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        thread: Option<u64>,
+        #[serde(default)]
+        before: Option<u64>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Send one SMS from a phone: to a number, or into a thread.
+    MessagesSend {
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        thread: Option<u64>,
+        text: String,
     },
 }
 
@@ -140,6 +167,22 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         push_error: Option<String>,
     },
+    /// What a phone answered to `messages`: `threads`, or `thread` and its
+    /// `messages`, newest first. `changed_ms` is when the phone last said
+    /// something changed, while this daemon has been up.
+    Messages {
+        device: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threads: Option<Vec<crate::messages::Thread>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        messages: Option<Vec<crate::messages::Message>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changed_ms: Option<u64>,
+    },
+    /// The phone's radio took the message.
+    MessageSent { device: String },
     Ok,
     Error { message: String },
 }
@@ -249,6 +292,18 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
             name,
             text,
         } => send(state, &device, &kind, name, text, fds),
+        Request::Messages {
+            device,
+            thread,
+            before,
+            limit,
+        } => messages(state, device.as_deref(), thread, before, limit),
+        Request::MessagesSend {
+            device,
+            to,
+            thread,
+            text,
+        } => messages_send(state, device.as_deref(), to, thread, &text),
     }
 }
 
@@ -308,11 +363,52 @@ fn devices_reply(
 /// `rime remote` finds this socket through `$XDG_RUNTIME_DIR`, so under sudo it
 /// looks in root's and finds no daemon at all.
 fn authorized(req: &Request, peer: Option<crate::peer::Peer>) -> Result<(), String> {
+    authorized_by(req, peer, rime_agent_core::origin::observe_pid)
+}
+
+/// [`authorized`] with the origin observation passed in, so a test can be a
+/// scheduled job without being one.
+fn authorized_by(
+    req: &Request,
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> Result<(), String> {
     match req {
         Request::Pair => local_caller(peer),
         Request::Send { .. } => sending_caller(peer),
+        Request::Messages { .. } | Request::MessagesSend { .. } => messages_caller(peer, observe),
         _ => own_user(peer),
     }
+}
+
+/// Refuse a `messages` or `messages_send` from anything but a human at this
+/// machine: the same two origins as pairing and sending.
+fn messages_caller(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell whether a human is at this machine — and a phone's messages are reserved \
+             for one"
+                .to_string(),
+        );
+    };
+    own_user(Some(peer))?;
+    may_use_messages(observe(peer.pid)?)
+}
+
+/// The messages rule over a value, for the same reason [`may_pair`] is one.
+pub fn may_use_messages(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot read or send a phone's messages: they carry sign-in codes, so \
+         only a person at this machine may. Run `rime remote messages` from a terminal, or use \
+         Rime Shell"
+    ))
 }
 
 /// The account half: is this connection this user's?
@@ -609,6 +705,106 @@ fn send(
     }
 }
 
+/// The phone a messages request goes to: the one named, or the only phone
+/// that has Messages on. Its id and name.
+fn messages_phone(state: &State, device: Option<&str>) -> Result<(String, String), String> {
+    let store = state.devices().map_err(|e| e.to_string())?;
+    let phones = state.phones();
+    let has = |id: &str| phones.get(id).is_some_and(crate::phone::PhoneReport::can_messages);
+    let (id, name) = match device {
+        Some(d) => match store.find(d) {
+            Ok(d) if d.is_active() => (d.id.clone(), d.name.clone()),
+            Ok(d) => return Err(format!("{} was revoked", d.name)),
+            Err(e) => return Err(e.to_string()),
+        },
+        None => {
+            let with: Vec<_> = store.list().into_iter().filter(|d| d.is_active() && has(&d.id)).collect();
+            match with.as_slice() {
+                [d] => (d.id.clone(), d.name.clone()),
+                [] => {
+                    return Err("no paired phone has turned on Messages on your computer. On the phone: \
+                                Rime Remote → Messages"
+                        .into())
+                }
+                many => {
+                    let names: Vec<&str> = many.iter().map(|d| d.name.as_str()).collect();
+                    return Err(format!(
+                        "more than one phone has Messages on ({}); name one with --device",
+                        names.join(", ")
+                    ));
+                }
+            }
+        }
+    };
+    // Asked before anything is written: a phone that has not turned Messages
+    // on gets no request at all.
+    if !has(&id) {
+        return Err(format!(
+            "{name} has not turned on Messages on your computer. On the phone: Rime Remote → Messages"
+        ));
+    }
+    Ok((id, name))
+}
+
+fn messages(state: &State, device: Option<&str>, thread: Option<u64>, before: Option<u64>, limit: Option<u32>) -> Reply {
+    let limit = limit.map_or(crate::messages::DEFAULT_LIMIT, |l| l as usize);
+    if limit == 0 || limit > crate::messages::MAX_LIMIT {
+        return Reply::error(format!("limit must be from 1 to {}", crate::messages::MAX_LIMIT));
+    }
+    let (id, name) = match messages_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    let want = match thread {
+        Some(t) => crate::messages::Want::Thread { id: t, before, limit },
+        None => crate::messages::Want::Threads { before, limit },
+    };
+    let changed_ms = state.messages.changed_ms(&id);
+    match state.messages.ask(&state.events, &id, want, crate::messages::READ_WAIT) {
+        Ok(crate::messages::Answer::Threads(threads)) => Reply::Messages {
+            device: name,
+            threads: Some(threads),
+            thread: None,
+            messages: None,
+            changed_ms,
+        },
+        Ok(crate::messages::Answer::Messages { thread, messages }) => Reply::Messages {
+            device: name,
+            threads: None,
+            thread: Some(thread),
+            messages: Some(messages),
+            changed_ms,
+        },
+        Ok(crate::messages::Answer::Sent) => Reply::error("the phone answered a read as a send"),
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
+fn messages_send(state: &State, device: Option<&str>, to: Option<String>, thread: Option<u64>, text: &str) -> Reply {
+    let to = match (to, thread) {
+        (Some(to), None) => match crate::messages::number(&to) {
+            Ok(n) => Some(n),
+            Err(why) => return Reply::error(why),
+        },
+        (None, Some(_)) => None,
+        _ => return Reply::error("a message goes to one number (--to) or into one conversation (--thread)"),
+    };
+    let text = match crate::messages::text(text) {
+        Ok(t) => t,
+        Err(why) => return Reply::error(why),
+    };
+    let (id, name) = match messages_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    let want = crate::messages::Want::Send { to, thread, text };
+    match state.messages.ask(&state.events, &id, want, crate::messages::SEND_WAIT) {
+        Ok(crate::messages::Answer::Sent) => Reply::MessageSent { device: name },
+        Ok(_) => Reply::error("the phone answered a send as a read"),
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
 /// The origins this socket accepts a pairing request from.
 ///
 /// Written out and matched against, rather than left implicit in
@@ -769,6 +965,18 @@ mod tests {
                 name: None,
                 text: Some("x".into()),
             },
+            Request::Messages {
+                device: None,
+                thread: None,
+                before: None,
+                limit: None,
+            },
+            Request::MessagesSend {
+                device: None,
+                to: Some("5556".into()),
+                thread: None,
+                text: "x".into(),
+            },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -805,9 +1013,41 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_send(o).is_ok()),
                     "Send stopped asking the origin rule"
                 ),
+                Request::Messages { .. } | Request::MessagesSend { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_messages(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_scheduled_job_may_neither_read_nor_send_a_phones_messages() {
+        // The origin is injected, so this fails on any machine — a developer's
+        // login session included — if the gate is removed.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let read = Request::Messages { device: None, thread: None, before: None, limit: None };
+        let send = Request::MessagesSend { device: None, to: Some("5556".into()), thread: None, text: "x".into() };
+        for o in RequestOrigin::ALL {
+            for req in [&read, &send] {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote messages"), "{why}");
+                }
+            }
+        }
+        // An origin that cannot be observed is refused too.
+        assert!(authorized_by(&send, Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&read, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        // And `status` is still a script's to ask.
+        assert!(authorized_by(&Request::Status, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_ok());
     }
 
     #[test]
@@ -852,7 +1092,29 @@ mod tests {
                 name: None,
                 text: Some("line one\nline two".into()),
             },
+            Request::Messages {
+                device: Some("pixel-8".into()),
+                thread: Some(3),
+                before: Some(1),
+                limit: Some(20),
+            },
+            Request::MessagesSend {
+                device: None,
+                to: None,
+                thread: Some(3),
+                text: "line one\nline two".into(),
+            },
         ];
+        // The wire shapes `rime remote messages` and a Shell page depend on.
+        assert_eq!(
+            serde_json::to_string(&Request::MessagesSend { device: None, to: Some("5556".into()), thread: None, text: "x".into() })
+                .unwrap(),
+            r#"{"cmd":"messages_send","device":null,"to":"5556","thread":null,"text":"x"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"messages"}"#).map(|r| matches!(r, Request::Messages { .. })).ok(),
+            Some(true)
+        );
         // The wire shape `rime remote focus` and the Shell's call depend on.
         assert_eq!(serde_json::to_string(&Request::Focus { dnd: true }).unwrap(), r#"{"cmd":"focus","dnd":true}"#);
         assert_eq!(serde_json::to_string(&Reply::Focused { reached: 2 }).unwrap(), r#"{"reply":"focused","reached":2}"#);
@@ -871,6 +1133,20 @@ mod tests {
             Reply::Devices { devices: vec![], phones: Default::default(), companions: vec![] },
             Reply::Rang { device: "Pixel".into(), path: "link".into() },
             Reply::Focused { reached: 0 },
+            Reply::MessageSent { device: "Pixel".into() },
+            Reply::Messages {
+                device: "Pixel".into(),
+                threads: None,
+                thread: Some(3),
+                messages: Some(vec![crate::messages::Message {
+                    id: 1,
+                    date_ms: 2,
+                    from_me: false,
+                    body: "a\nb".into(),
+                    status: "received".into(),
+                }]),
+                changed_ms: None,
+            },
             Reply::Sent { device: "Pixel".into(), path: "waiting".into(), id: 3, push_error: Some("503".into()) },
             Reply::Status {
                 version: 1,

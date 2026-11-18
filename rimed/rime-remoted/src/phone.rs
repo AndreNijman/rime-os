@@ -89,7 +89,10 @@ pub const CAN_REPLY: &str = "reply";
 pub const CAN_FOCUS: &str = "focus";
 
 /// Every capability word kept from a report.
-const KEPT: [&str; 5] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY, CAN_FOCUS];
+/// Its SMS threads may be read from this machine (contract §2.11).
+pub const CAN_MESSAGES: &str = "messages";
+
+const KEPT: [&str; 6] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY, CAN_FOCUS, CAN_MESSAGES];
 
 /// The network kinds a phone may report. Anything else is refused rather than
 /// stored, so `rime remote devices` and the Shell only ever print words they
@@ -160,6 +163,10 @@ impl PhoneReport {
 
     pub fn can_focus(&self) -> bool {
         self.can.iter().any(|c| c == CAN_FOCUS)
+    }
+
+    pub fn can_messages(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_MESSAGES)
     }
 
     /// A report from a `phone_report` line, or why it was refused.
@@ -343,12 +350,23 @@ impl PhoneStore {
     }
 }
 
+/// One device's open `device_events` channel.
+struct Writer {
+    generation: u64,
+    stream: UnixStream,
+    /// The connection that opened it; 0 when none was named.
+    connection: u64,
+    /// Whether that connection is a full session rather than a companion one.
+    full: bool,
+}
+
 /// The open `device_events` channels, one per device, and the acks rings are
 /// waiting for.
 #[derive(Default)]
 pub struct Events {
-    /// Device id to (generation, this machine's end of the socketpair).
-    writers: Mutex<HashMap<String, (u64, UnixStream)>>,
+    /// Device id to its channel: generation, this machine's end of the
+    /// socketpair, and which connection opened it with what scope.
+    writers: Mutex<HashMap<String, Writer>>,
     generation: AtomicU64,
     ring_id: AtomicU64,
     /// Ring or offer id to the device it was written to, while somebody waits
@@ -362,15 +380,48 @@ impl Events {
     /// A new channel for `device_id`: the end the pump reads, and its
     /// generation. A channel the device already had is replaced, and its
     /// end dropped, so its pump reads end-of-file and closes it.
+    #[cfg(test)]
     pub fn open(&self, device_id: &str) -> std::io::Result<(UnixStream, u64)> {
+        self.open_for(device_id, 0, true)
+    }
+
+    /// [`Events::open`], recording the connection that opened the channel and
+    /// whether it is a full session (contract §2.11: a send is written only
+    /// to a full session's channel, and a request dies with its connection).
+    pub fn open_for(&self, device_id: &str, connection: u64, full: bool) -> std::io::Result<(UnixStream, u64)> {
         let (theirs, ours) = UnixStream::pair()?;
         // A ring is one short line into an empty buffer, so a write that
         // would block means nobody has read the last one for a long time. It
         // fails instead of holding the control socket's thread.
         ours.set_nonblocking(true)?;
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        lock(&self.writers).insert(device_id.to_string(), (generation, ours));
+        lock(&self.writers).insert(
+            device_id.to_string(),
+            Writer {
+                generation,
+                stream: ours,
+                connection,
+                full,
+            },
+        );
         Ok((theirs, generation))
+    }
+
+    /// Which connection holds `device_id`'s channel, and whether it is a full
+    /// session. `None` when no channel is open.
+    pub fn holder(&self, device_id: &str) -> Option<(u64, bool)> {
+        lock(&self.writers).get(device_id).map(|w| (w.connection, w.full))
+    }
+
+    /// `connection` ended: its channel goes, unless a newer connection opened
+    /// one since.
+    pub fn ended(&self, device_id: &str, connection: u64) {
+        let mut writers = lock(&self.writers);
+        if writers.get(device_id).is_some_and(|w| w.connection == connection && connection != 0) {
+            if let Some(w) = writers.remove(device_id) {
+                let _ = w.stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
     }
 
     /// Whether `device_id` has a channel open, as far as this machine knows.
@@ -383,13 +434,13 @@ impl Events {
     /// that opened a new channel in between keeps it.
     pub fn send(&self, device_id: &str, line: &Value) -> bool {
         let mut writers = lock(&self.writers);
-        let Some((generation, stream)) = writers.get_mut(device_id) else {
+        let Some(w) = writers.get_mut(device_id) else {
             return false;
         };
-        let generation = *generation;
+        let generation = w.generation;
         let mut bytes = line.to_string().into_bytes();
         bytes.push(b'\n');
-        let ok = stream.write_all(&bytes).is_ok();
+        let ok = w.stream.write_all(&bytes).is_ok();
         if !ok {
             self.forget_generation(&mut writers, device_id, generation);
         }
@@ -398,19 +449,19 @@ impl Events {
 
     fn forget_generation(
         &self,
-        writers: &mut HashMap<String, (u64, UnixStream)>,
+        writers: &mut HashMap<String, Writer>,
         device_id: &str,
         generation: u64,
     ) {
-        if writers.get(device_id).map(|(g, _)| *g) == Some(generation) {
+        if writers.get(device_id).map(|w| w.generation) == Some(generation) {
             writers.remove(device_id);
         }
     }
 
     /// Forget a device's channel, whatever its generation: revoke.
     pub fn forget(&self, device_id: &str) {
-        if let Some((_, s)) = lock(&self.writers).remove(device_id) {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+        if let Some(w) = lock(&self.writers).remove(device_id) {
+            let _ = w.stream.shutdown(std::net::Shutdown::Both);
         }
     }
 
