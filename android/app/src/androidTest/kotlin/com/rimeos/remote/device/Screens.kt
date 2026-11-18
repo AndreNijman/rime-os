@@ -32,6 +32,7 @@ import com.rimeos.remote.core.machine.Player
 import com.rimeos.remote.core.machine.Volume
 import com.rimeos.remote.ui.machine.MachineScreen
 import com.rimeos.remote.ui.mirror.MediaScreen
+import com.rimeos.remote.ui.mirror.MirrorScreen
 import com.rimeos.remote.ui.send.SendChoice
 import com.rimeos.remote.ui.send.SendFile
 import com.rimeos.remote.ui.send.SendScreen
@@ -229,6 +230,12 @@ object Screens {
             )
         },
         "Guide" to { HelpScreen(onBack = {}) },
+        "Notifications on your computer" to {
+            MirrorScreen(
+                chosen = setOf("org.example.chat"), onChoose = { _, _ -> },
+                reply = false, onReply = {}, focus = true, onFocus = {}, onBack = {},
+            )
+        },
         "Media on your computer" to {
             MediaScreen(on = true, onOn = {}, chosen = setOf("org.example.music"), onChoose = { _, _ -> }, onBack = {})
         },
