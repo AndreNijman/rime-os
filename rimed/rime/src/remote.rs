@@ -39,7 +39,15 @@ pub enum RemoteCmd {
         text: bool,
     },
     /// Every device this machine has paired, and which of them are revoked.
+    ///
+    /// A phone another of your computers brought here says "added by" that
+    /// computer, and "not allowed yet" until you allow it: until then it can
+    /// use phone features only (battery, notifications, ring), not run or
+    /// see anything on this computer.
+    #[command(args_conflicts_with_subcommands = true)]
     Devices {
+        #[command(subcommand)]
+        action: Option<DevicesCmd>,
         #[arg(long)]
         json: bool,
     },
@@ -215,6 +223,21 @@ pub enum RemoteCmd {
     Enable,
 }
 
+/// `rime remote devices`.
+#[derive(Subcommand, Debug)]
+pub enum DevicesCmd {
+    /// Trust a phone another of your computers brought here, as if you had
+    /// paired it here.
+    ///
+    /// Until then it can use phone features only. Its connection is dropped
+    /// so it comes back with full access. Only you, at this machine, can do
+    /// this; an agent cannot.
+    Allow {
+        /// Device id, or its name when that names exactly one.
+        device: String,
+    },
+}
+
 /// `rime remote computers`.
 #[derive(Subcommand, Debug)]
 pub enum ComputersCmd {
@@ -241,6 +264,16 @@ pub enum ComputersCmd {
     },
     /// Remove a paired computer. It is told, and removes this one too.
     Remove {
+        /// Computer id, or its name when that names exactly one.
+        computer: String,
+    },
+    /// Trust a computer your phone introduced, as if you had paired it here
+    /// with a code.
+    ///
+    /// Until then it may still say hello and how it is doing, but a removal
+    /// it passes on counts only for itself, and it may not bring a phone here.
+    /// Only you, at this machine, can do this; an agent cannot.
+    Allow {
         /// Computer id, or its name when that names exactly one.
         computer: String,
     },
@@ -389,6 +422,7 @@ enum Request {
     Status,
     Pair,
     Devices,
+    DeviceAllow { device: String },
     Revoke { device: String },
     Ring { device: String },
     Focus { dnd: bool },
@@ -457,6 +491,9 @@ enum Request {
         computer: String,
     },
     ComputerForget {
+        computer: String,
+    },
+    ComputerAllow {
         computer: String,
     },
     ComputerPing {
@@ -664,6 +701,14 @@ enum Reply {
         id: String,
         name: String,
     },
+    ComputerAllowed {
+        id: String,
+        name: String,
+    },
+    DeviceAllowed {
+        id: String,
+        name: String,
+    },
     ComputerPong {
         id: String,
         name: String,
@@ -686,7 +731,8 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
     // differently for no reason a user could see.
     let result = match cmd {
         RemoteCmd::Pair { text } => pair(text),
-        RemoteCmd::Devices { json } => devices(json),
+        RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device }), .. } => devices_allow(&device),
+        RemoteCmd::Devices { action: None, json } => devices(json),
         RemoteCmd::Revoke { device } => revoke(&device),
         RemoteCmd::Ring { device } => ring(&device),
         RemoteCmd::Focus { state } => focus(state == FocusState::On),
@@ -720,6 +766,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
             ComputersCmd::List { json } => computers_list(json),
             ComputersCmd::Remove { computer } => computers_remove(&computer),
             ComputersCmd::Forget { computer } => computers_forget(&computer),
+            ComputersCmd::Allow { computer } => computers_allow(&computer),
             ComputersCmd::Ping { computer, via, json } => computers_ping(&computer, via, json),
         },
         RemoteCmd::Status { json } => status(json),
@@ -876,6 +923,9 @@ fn devices(json: bool) -> Result<i32> {
             d.last_path.as_deref().unwrap_or("-"),
             d.last_seen_ms.map(ago).unwrap_or_else(|| "never".into()),
         );
+        if let Some(words) = introduced_words(d) {
+            println!("{:<18} {words}", "");
+        }
     }
     // Said once, at the end, rather than as a column: it is a property of the
     // device the desktop cannot check, and a tick in a table would read as a
@@ -1804,11 +1854,26 @@ fn computers_table(computers: &[rime_remote_core::peer::Listed]) -> String {
             c.last_seen_ms.map(ago).unwrap_or_else(|| "never".into()),
             if c.addresses.is_empty() { "-".to_string() } else { c.addresses.join(" ") },
         ));
+        if let Some(words) = introduced_words(c) {
+            out.push_str(&format!("{:<18} {words}\n", ""));
+        }
         if let (Some(p), Some(at)) = (&l.presence, l.presence_ms) {
             out.push_str(&format!("{:<18} {} ({})\n", "", presence_words(p), ago(at)));
         }
     }
     out
+}
+
+/// "added by Pixel 8, not allowed yet": for a device or computer another one
+/// introduced, who did, and whether a person here has allowed it since.
+/// Nothing for one paired here, or one revoked or removed (its state says it).
+fn introduced_words(d: &rime_remote_core::device::Device) -> Option<String> {
+    let by = d.introduced_by.as_ref().filter(|_| d.is_active())?;
+    Some(if d.allowed_ms.is_some() {
+        format!("added by {}, allowed", by.name)
+    } else {
+        format!("added by {}, not allowed yet", by.name)
+    })
 }
 
 /// One line for how a computer said it was doing.
@@ -1884,6 +1949,23 @@ fn computers_forget(computer: &str) -> Result<i32> {
     }
 }
 
+fn computers_allow(computer: &str) -> Result<i32> {
+    match call(&Request::ComputerAllow { computer: computer.to_string() })? {
+        Reply::ComputerAllowed { id, name } => {
+            eprintln!(
+                "rime: {name} ({id}) is allowed: it is trusted as if you had paired it here with a code, \
+                 so a removal it passes on now counts, and it may bring your phone here."
+            );
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
 fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
     let req = Request::ComputerPing { computer: computer.to_string(), via: via.wire() };
     match call_for(&req, None, COMPUTER_WAIT)? {
@@ -1903,6 +1985,23 @@ fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
             if json {
                 println!("{}", serde_json::json!({"error": message}));
             }
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
+fn devices_allow(device: &str) -> Result<i32> {
+    match call(&Request::DeviceAllow { device: device.to_string() })? {
+        Reply::DeviceAllowed { id, name } => {
+            eprintln!(
+                "rime: {name} ({id}) is allowed: it has the access of a phone paired here. Its \
+                 connection was dropped so it comes back with it."
+            );
+            Ok(0)
+        }
+        Reply::Error { message } => {
             eprintln!("rime: {message}");
             Ok(1)
         }
@@ -2531,6 +2630,70 @@ mod tests {
         let table = computers_table(&computers);
         assert!(table.contains("battery 81%, balanced, locked, Wi-Fi, up 2h"), "{table}");
         assert_eq!(table.lines().count(), 4, "{table}");
+    }
+
+    #[test]
+    fn allow_parses_its_wire_holds_and_an_introduced_device_says_who_added_it() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
+        match parse(&["devices", "allow", "pixel"]).expect("allow").cmd {
+            RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device }), json: false } => assert_eq!(device, "pixel"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse(&["devices", "--json"]).expect("list").cmd,
+            RemoteCmd::Devices { action: None, json: true }
+        ));
+        assert!(parse(&["devices", "allow"]).is_err(), "allow names a phone");
+        match parse(&["computers", "allow", "desk"]).expect("allow").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Allow { computer } } => assert_eq!(computer, "desk"),
+            other => panic!("{other:?}"),
+        }
+        let wire = |r: &Request| serde_json::to_string(r).unwrap();
+        assert_eq!(wire(&Request::DeviceAllow { device: "p".into() }), r#"{"cmd":"device_allow","device":"p"}"#);
+        assert_eq!(wire(&Request::ComputerAllow { computer: "d".into() }), r#"{"cmd":"computer_allow","computer":"d"}"#);
+        for text in [
+            r#"{"reply":"device_allowed","id":"p","name":"Pixel"}"#,
+            r#"{"reply":"computer_allowed","id":"d","name":"desk"}"#,
+        ] {
+            serde_json::from_str::<Reply>(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+
+        let text = r#"{"reply":"computers","computers":[
+            {"id":"aaaa","name":"desk","public_key":"k","paired_ms":1,"addresses":[]},
+            {"id":"bbbb","name":"lab","public_key":"k2","paired_ms":1,"introduced_by":{"id":"p","name":"Pixel 8"}},
+            {"id":"cccc","name":"den","public_key":"k3","paired_ms":1,"introduced_by":{"id":"p","name":"Pixel 8"},
+             "allowed_ms":5},
+            {"id":"dddd","name":"old","public_key":"k4","paired_ms":1,"introduced_by":{"id":"p","name":"Pixel 8"},
+             "revoked_ms":5}]}"#;
+        let Reply::Computers { computers } = serde_json::from_str::<Reply>(text).expect("reply") else {
+            panic!("not computers")
+        };
+        let table = computers_table(&computers);
+        assert!(table.contains("added by Pixel 8, not allowed yet"), "{table}");
+        assert!(table.contains("added by Pixel 8, allowed"), "{table}");
+        // One header, four rows, and a line under each active introduced one.
+        assert_eq!(table.lines().count(), 7, "{table}");
+        // `--json` is the record as the service sent it: who added it, and
+        // when it was allowed, if it was.
+        let json = serde_json::to_value(&computers).expect("json");
+        assert_eq!(json[1]["introduced_by"]["name"], "Pixel 8", "{json}");
+        assert!(json[1].get("allowed_ms").is_none(), "{json}");
+        assert_eq!(json[2]["allowed_ms"], 5, "{json}");
+        assert!(json[0].get("introduced_by").is_none(), "{json}");
+
+        let devices: Vec<rime_remote_core::device::Device> = serde_json::from_str(
+            r#"[{"id":"p","name":"Pixel","public_key":"k","paired_ms":1,"introduced_by":{"id":"d","name":"desk"}}]"#,
+        )
+        .expect("devices");
+        assert_eq!(introduced_words(&devices[0]).as_deref(), Some("added by desk, not allowed yet"));
+        let listed = with_phones(&devices, &Default::default(), &[]).expect("json");
+        assert_eq!(listed[0]["introduced_by"]["name"], "desk", "{listed}");
     }
 
     #[test]
