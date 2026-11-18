@@ -31,6 +31,7 @@ import com.rimeos.remote.core.machine.MediaState
 import com.rimeos.remote.core.machine.Player
 import com.rimeos.remote.core.machine.Volume
 import com.rimeos.remote.ui.machine.MachineScreen
+import com.rimeos.remote.ui.mirror.MediaScreen
 import com.rimeos.remote.ui.send.SendChoice
 import com.rimeos.remote.ui.send.SendFile
 import com.rimeos.remote.ui.send.SendScreen
@@ -228,6 +229,9 @@ object Screens {
             )
         },
         "Guide" to { HelpScreen(onBack = {}) },
+        "Media on your computer" to {
+            MediaScreen(on = true, onOn = {}, chosen = setOf("org.example.music"), onChoose = { _, _ -> }, onBack = {})
+        },
         "nex" to {
             NexScreen(
                 machine = "l16", state = nexState,

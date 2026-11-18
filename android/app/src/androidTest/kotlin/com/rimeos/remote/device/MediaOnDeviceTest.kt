@@ -127,6 +127,39 @@ class MediaOnDeviceTest {
         assertTrue("switched off, the phone still sent: $later", later.isEmpty())
     }
 
+    @Test
+    fun a_connection_made_while_something_plays_is_shown_it_at_once() {
+        choose(setOf(HELPER))
+        helper("play", 30_000)
+        val (at, first) = awaitEntry("the helper's song on the computer") {
+            it.optString("op") == "show" && mine(it) && it.optString("status") == "Playing"
+        }
+        val firstSeen = System.currentTimeMillis()
+        val player = first.getString("player")
+
+        // The connection ends: the computer drops the player, the watcher stops.
+        hub.lock()
+        val (goneAt, _) = awaitEntry("the player to go with the connection", from = at) {
+            it.optString("op") == "gone" && it.optString("player") == player
+        }
+        awaitValue(5_000, "the hub to stop watching") { if (!hub.mediaWatching) true else null }
+
+        // A new connection, the helper untouched: the watcher's first read of
+        // the sessions is all there is to go on, and it is sent at once.
+        hub.remember(machine.deviceId, Paired.identityOf(machine))
+        hub.markUnlocked()
+        hub.hold(machine)
+        val (_, again) = awaitEntry("the song on the new connection", from = goneAt) {
+            it.optString("op") == "show" && it.optString("player") == player && it.optString("status") == "Playing"
+        }
+        val elapsed = System.currentTimeMillis() - firstSeen
+        val moved = again.getLong("position_ms") - first.getLong("position_ms")
+        assertTrue(
+            "the new connection was not told where playback is now: moved $moved ms in $elapsed ms",
+            moved in (elapsed - 3_000)..(elapsed + 3_000),
+        )
+    }
+
     // ---- helpers --------------------------------------------------------
 
     /** Is [entry] about this test's phone? A `show` carries its name; `gone` only the player. */
