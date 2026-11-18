@@ -3008,3 +3008,286 @@ fn a_call_dies_with_the_phones_connection_and_revoke_and_a_locked_phone_answers_
     let shown = notify_lines(&h, n + 1);
     assert_eq!(shown.last().unwrap()["op"], "close", "{shown:?}");
 }
+
+/// A JPEG's segments with an EXIF block that carries a GPS position and a
+/// comment, as a camera writes one. The computer walks segments only, so the
+/// picture's tables need not decode.
+fn jpeg_with_location() -> Vec<u8> {
+    let mut j = vec![0xFF, 0xD8];
+    let mut seg = |marker: u8, body: &[u8]| {
+        j.extend([0xFF, marker]);
+        j.extend(((body.len() + 2) as u16).to_be_bytes());
+        j.extend_from_slice(body);
+    };
+    seg(0xE0, b"JFIF\0\x01\x02\0\0\x01\0\x01\0\0");
+    seg(0xE1, b"Exif\0\0MM\0\x2a\0\0\0\x08GPSLatitude-31.9523S115.8613E");
+    seg(0xFE, b"taken at home");
+    seg(0xDB, &[0u8; 65]);
+    seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0]);
+    seg(0xDA, &[1, 1, 0, 0, 0x3f, 0]);
+    j.extend([0x12, 0x34, 0x56, 0xFF, 0xD9]);
+    j
+}
+
+fn photo_entry(id: u64) -> serde_json::Value {
+    serde_json::json!({"id": id, "name": format!("IMG_{id}.jpg"), "date_ms": 1_700_000_000_000u64 - id,
+                       "width": 4000, "height": 3000, "size": 2_000_000 + id, "mime": "image/jpeg",
+                       "thumb": rime_remote_core::b64_encode(&jpeg_with_location())})
+}
+
+fn has_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The one device folder under the harness's thumbnail root, if any.
+fn thumb_folders(h: &Harness) -> Vec<PathBuf> {
+    std::fs::read_dir(h.root.join("run/rime-remote/photos"))
+        .map(|r| r.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default()
+}
+
+/// Wait up to five seconds for `cond`.
+fn soon(mut cond: impl FnMut() -> bool) -> bool {
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    cond()
+}
+
+/// Open `photos_upload` for save `id` on `channel` and give the reply line.
+fn open_upload(session: &mut Session, channel: u32, id: u64, name: &str, len: u64) -> serde_json::Value {
+    session.send(Frame::Open {
+        channel,
+        request: serde_json::json!({"cmd": "photos_upload", "id": id, "name": name, "len": len}).to_string().into_bytes(),
+    });
+    loop {
+        match session.recv() {
+            Frame::Control(line) => return serde_json::from_slice(&line).expect("json"),
+            other => session.pending.push(other),
+        }
+    }
+}
+
+#[test]
+fn a_phones_photos_are_listed_here_with_private_thumbnails_saved_whole_and_nothing_reaches_a_phone_that_did_not_turn_them_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness!("photos");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&h) else { return };
+    let tablet = Device::new();
+    assert_eq!(tablet.pair(&h, &offer, "tablet-9")["ok"], true);
+    let mut p = phone.connect(&h).expect("the phone's session");
+    let mut t = tablet.connect(&h).expect("the tablet's session");
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_photos"), "{hello}");
+    open_events(&mut p, 9);
+    open_events(&mut t, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["focus"]}"#)["reply"], "ok");
+    let saved = h.root.join("saved");
+
+    // A phone that did not turn Photos on is asked nothing.
+    let to = saved.to_str().unwrap();
+    for args in [&["photos", "--device", "tablet-9"][..], &["photos", "save", "1", "--device", "tablet-9", "--to", to][..]] {
+        let (code, said) = rime_remote(&h, args, b"");
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("has not turned on Photos"), "{said}");
+    }
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":true}"#)["reached"], 1);
+    assert_eq!(
+        events_on(&mut t, 9, 1),
+        vec![serde_json::json!({"event": "focus", "dnd": true})],
+        "the tablet was asked for its photos"
+    );
+    assert!(std::fs::read_dir(&saved).map(|r| r.count()).unwrap_or(0) == 0, "a refused save left a file");
+
+    // A listing with no device named, in two chunks; only the last finishes
+    // it, and the thumbnails land private and without their location.
+    let cli = rime_remote_bg(&h, &["photos", "--json", "--limit", "3"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!((ask["event"].as_str(), ask["limit"].as_u64()), (Some("photos_request"), Some(3)), "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    let first = serde_json::json!({"cmd": "photos_reply", "id": id, "more": true, "photos": [photo_entry(1), photo_entry(2)]});
+    assert_eq!(p.call(&first.to_string())["reply"], "ok");
+    let last = serde_json::json!({"cmd": "photos_reply", "id": id, "photos": [photo_entry(3)]});
+    assert_eq!(p.call(&last.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    let v: serde_json::Value = serde_json::from_str(&said).unwrap_or_else(|e| panic!("{e}: {said}"));
+    assert_eq!((v["device"].as_str(), v["partial"].as_bool()), (Some("pixel-8"), Some(false)), "{v}");
+    let listed = v["photos"].as_array().unwrap();
+    assert_eq!(listed.iter().map(|p| p["id"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3], "{v}");
+    let folders = thumb_folders(&h);
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    let folder = &folders[0];
+    assert_eq!(std::fs::metadata(folder).unwrap().permissions().mode() & 0o777, 0o700);
+    for photo in listed {
+        let path = PathBuf::from(photo["thumb"].as_str().unwrap_or_else(|| panic!("no thumbnail: {photo}")));
+        assert_eq!(path.parent(), Some(folder.as_path()), "{photo}");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "{photo}");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..2], [0xFF, 0xD8]);
+        for gone in [&b"Exif"[..], b"GPSLatitude", b"taken at home"] {
+            assert!(!has_bytes(&bytes, gone), "{gone:?} reached the disk in {}", path.display());
+        }
+    }
+    assert_eq!(p.call(&last.to_string())["code"], "unknown_id");
+
+    // Save: the phone uploads on a channel of another connection of its own,
+    // as the app does, and the computer's file holds exactly those bytes.
+    let body: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+    std::fs::create_dir_all(&saved).unwrap();
+    std::fs::write(saved.join("IMG_2.jpg"), b"a file of somebody else's").unwrap();
+    let mut up = phone.connect(&h).expect("the upload connection");
+    for round in 0..2 {
+        let cli = rime_remote_bg(&h, &["photos", "save", "2", "--to", to, "--json"], b"");
+        let ask = events_on(&mut p, 9, 1).remove(0);
+        assert_eq!((ask["event"].as_str(), ask["photo"].as_u64()), (Some("photos_fetch"), Some(2)), "{ask}");
+        let fetch = ask["id"].as_u64().unwrap();
+        let r = open_upload(&mut up, 12 + round, fetch, "IMG_2.jpg", body.len() as u64);
+        assert_eq!(r, serde_json::json!({"reply": "uploading", "len": body.len()}));
+        for part in body.chunks(40_000) {
+            up.send(Frame::Data { channel: 12 + round, bytes: part.to_vec() });
+        }
+        let said_on_channel = up.bytes_until_close(12 + round);
+        let line: serde_json::Value = serde_json::from_slice(said_on_channel.trim_ascii()).expect("json");
+        assert_eq!(line["reply"], "uploaded", "{line}");
+        let (code, said, _) = cli.join().unwrap();
+        assert_eq!(code, 0, "{said}");
+        let v: serde_json::Value = serde_json::from_str(said.lines().next().unwrap()).unwrap_or_else(|e| panic!("{e}: {said}"));
+        let path = PathBuf::from(v["path"].as_str().unwrap());
+        let want = if round == 0 { "IMG_2 (2).jpg" } else { "IMG_2 (3).jpg" };
+        assert_eq!(path, saved.join(want), "{v}");
+        assert_eq!(std::fs::read(&path).unwrap(), body, "the saved photo is not the phone's bytes");
+    }
+    assert_eq!(std::fs::read(saved.join("IMG_2.jpg")).unwrap(), b"a file of somebody else's", "a file was replaced");
+
+    // Too large: refused before a byte, and nothing is left behind.
+    let cli = rime_remote_bg(&h, &["photos", "save", "3", "--to", to], b"");
+    let fetch = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let r = open_upload(&mut up, 20, fetch, "IMG_3.jpg", 64 * 1024 * 1024 + 1);
+    assert_eq!(r["code"], "too_large", "{r}");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("larger than 64 MiB"), "{said}");
+    // The phone says it has no such photo.
+    let cli = rime_remote_bg(&h, &["photos", "save", "4", "--to", to], b"");
+    let fetch = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let no = format!(r#"{{"cmd":"photos_fetch_reply","id":{fetch},"error":"not_found"}}"#);
+    assert_eq!(up.call(&no)["code"], "unknown_id", "a fetch reply counted from a connection it was not asked on");
+    assert_eq!(p.call(&no)["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("no such photo"), "{said}");
+    let mut names: Vec<String> =
+        std::fs::read_dir(&saved).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["IMG_2 (2).jpg", "IMG_2 (3).jpg", "IMG_2.jpg"], "a failed save left a file");
+    let mode = std::fs::metadata(saved.join("IMG_2 (2).jpg")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644);
+
+    // The phone stops offering photos: the thumbnails go at once.
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["ring"]}"#)["reply"], "ok");
+    assert!(soon(|| thumb_folders(&h).is_empty()), "switching Photos off left the thumbnails");
+    let (code, said) = rime_remote(&h, &["photos"], b"");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("no paired phone has turned on Photos"), "{said}");
+
+    // On again: a new listing, then the listing's connection ends and its
+    // thumbnails go with it.
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    let cli = rime_remote_bg(&h, &["photos", "--json"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let reply = serde_json::json!({"cmd": "photos_reply", "id": id, "partial": true, "photos": [photo_entry(5)]});
+    assert_eq!(p.call(&reply.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(r#""partial": true"#), "{said}");
+    assert_eq!(thumb_folders(&h).len(), 1);
+    drop(up);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(thumb_folders(&h).len(), 1, "another connection's end took the listing's thumbnails");
+    drop(p);
+    assert!(soon(|| thumb_folders(&h).is_empty()), "the thumbnails outlived the phone's connection");
+}
+
+#[test]
+fn photos_are_refused_to_a_locked_phone_a_listing_dies_with_revoke_and_a_save_the_phone_never_starts_times_out() {
+    let h = harness!("photos-locked");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    let paired = phone.pair(&h, &offer, "pixel-8");
+    assert_eq!(paired["ok"], true);
+    let device_id = paired["device"].as_str().unwrap().to_string();
+    let mut p = phone.connect(&h).expect("the phone's session");
+    open_events(&mut p, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    let saved = h.root.join("saved");
+    let to = saved.to_str().unwrap();
+
+    // A save the phone never starts: the person is told within the start
+    // wait, and the hidden file is gone.
+    let cli = rime_remote_bg(&h, &["photos", "save", "1", "--to", to], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["event"], "photos_fetch", "{ask}");
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("did not answer in time"), "{said}");
+    assert!(took >= Duration::from_secs(19) && took < Duration::from_secs(30), "{took:?}");
+    assert_eq!(std::fs::read_dir(&saved).unwrap().count(), 0, "a timed-out save left a file");
+    // An upload that begins after that is for nobody.
+    let late = open_upload(&mut p, 12, ask["id"].as_u64().unwrap(), "IMG_1.jpg", 10);
+    assert_eq!(late["code"], "unknown_id", "{late}");
+
+    // Locked: the events channel is the companion session's. Nothing is
+    // written to it, and nothing it sends counts.
+    let companion = Device::new();
+    let r = p.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let mut c = companion.connect(&h).expect("the companion session");
+    open_events(&mut c, 9);
+    assert_eq!(c.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    for args in [&["photos"][..], &["photos", "save", "1", "--to", to][..]] {
+        let (code, said) = rime_remote(&h, args, b"");
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("locked"), "{said}");
+    }
+    for line in [r#"{"cmd":"photos_reply","id":1,"photos":[]}"#, r#"{"cmd":"photos_fetch_reply","id":1,"error":"off"}"#] {
+        assert_eq!(c.call(line)["kind"], "not_allowed", "{line}");
+    }
+    let r = open_upload(&mut c, 14, 1, "IMG_1.jpg", 10);
+    assert_eq!(r["kind"], "not_allowed", "{r}");
+    // What the companion channel got since it opened: only the focus line
+    // this writes now, so no photos request went to it.
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":false}"#)["reached"], 0);
+    assert_eq!(c.call(r#"{"cmd":"phone_report","can":["photos","focus"]}"#)["reply"], "ok");
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":true}"#)["reached"], 1);
+    assert_eq!(events_on(&mut c, 9, 1), vec![serde_json::json!({"event": "focus", "dnd": true})]);
+
+    // Unlocked again: a listing writes thumbnails, and revoke takes them and
+    // fails a listing that waits.
+    let mut p = phone.connect(&h).expect("the phone again");
+    open_events(&mut p, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    let cli = rime_remote_bg(&h, &["photos"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let reply = serde_json::json!({"cmd": "photos_reply", "id": id, "photos": [photo_entry(1)]});
+    assert_eq!(p.call(&reply.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("IMG_1.jpg"), "{said}");
+    assert_eq!(thumb_folders(&h).len(), 1);
+    let cli = rime_remote_bg(&h, &["photos"], b"");
+    events_on(&mut p, 9, 1);
+    assert_eq!(h.control(&format!(r#"{{"cmd":"revoke","device":"{device_id}"}}"#))["reply"], "ok");
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
+    assert!(soon(|| thumb_folders(&h).is_empty()), "revoke left the thumbnails");
+}

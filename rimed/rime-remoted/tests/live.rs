@@ -375,7 +375,7 @@ fn remote_hello_is_answered_by_the_service_and_never_reaches_the_daemon() {
                            "device_events", "phone_report", "take_offer", "phone_focus",
                            "phone_notifications", "phone_notification_reply",
                            "phone_media", "phone_media_control", "phone_messages", "phone_calls",
-                           "companion_link"]),
+                           "phone_photos", "companion_link"]),
         "{hello}"
     );
     assert_eq!(hello["scope"], "full", "{hello}");
