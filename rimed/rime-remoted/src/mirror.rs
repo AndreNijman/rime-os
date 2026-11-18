@@ -1497,5 +1497,37 @@ mod tests {
             gone(&key);
         }
         assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "an answered notification was told to the phone as dismissed");
+
+        // A ringing call's buttons (contract §2.12): a stranger's
+        // ActionInvoked is not believed; the server's reaches the callback,
+        // and the close after it is no dismissal to the phone.
+        let (atx, arx) = std::sync::mpsc::channel();
+        m.on_action(Box::new(move |d, k, a| atx.send((d.to_string(), k.to_string(), a.to_string())).unwrap()));
+        let ringing = Shown {
+            app_name: "Pixel 8 · Calls".into(),
+            summary: "Call from 5556".into(),
+            body: String::new(),
+            reply: None,
+            actions: vec![("answer".into(), "Answer".into()), ("decline".into(), "Decline".into())],
+            sticky: true,
+        };
+        assert!(m.submit(Job::Post { device: "dev".into(), key: "call:ringing".into(), shown: ringing }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let id = loop {
+            if let Some(id) = m.id_of("dev", "call:ringing") {
+                break id;
+            }
+            assert!(Instant::now() < deadline, "the ringing call was never posted");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        rt.block_on(conn.emit_signal(None::<&str>, PATH, NAME, "ActionInvoked", &(id, "answer"))).unwrap();
+        assert!(arx.recv_timeout(Duration::from_millis(500)).is_err(), "a stranger's button press was believed");
+        rt.block_on(conn.call_method(Some(NAME), "/test", Some("org.rimeos.Test"), "Invoke", &(id, "decline"))).unwrap();
+        assert_eq!(
+            arx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ("dev".to_string(), "call:ringing".to_string(), "decline".to_string())
+        );
+        gone("call:ringing");
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "a call notification was told to the phone as dismissed");
     }
 }
