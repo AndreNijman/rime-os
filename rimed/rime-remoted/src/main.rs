@@ -374,7 +374,11 @@ fn run(args: &[String]) -> Result<(), String> {
     // no timeout: no wakeups until a pairing, removal or forget.
     {
         let state = Arc::clone(&state);
-        std::thread::spawn(move || presence::supervise(state));
+        // Named, so `/proc/<pid>/task/*/comm` shows what it costs.
+        std::thread::Builder::new()
+            .name("rime-presence".into())
+            .spawn(move || presence::supervise(state))
+            .map_err(|e| format!("could not start the presence thread: {e}"))?;
     }
 
     // On the local network, for as long as this process runs. Deliberately
