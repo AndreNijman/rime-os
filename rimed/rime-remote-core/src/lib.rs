@@ -44,6 +44,7 @@ pub mod fdpass;
 pub mod identity;
 pub mod noise;
 pub mod pairing;
+pub mod peer;
 pub mod push;
 pub mod relay;
 pub mod rendezvous;
