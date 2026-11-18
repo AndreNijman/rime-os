@@ -296,10 +296,9 @@ path (`lan` or `relay`) and how long the whole dial took. `--via lan` or
 requests; nothing stays connected between them.
 
 **`remove`** drops any connection the computer holds and refuses its key from
-then on. **A removal is never undone**, and the same computer cannot pair
-again while it keeps the same key. To pair it again it needs a new key, which
-means re-pairing its phones too (the step above). A gentler way back is not in
-this release.
+then on. **A removal is never undone in this release:** the removed computer
+cannot be added again. Do not give it a new key to get round that (that
+unpairs every phone it has); a way to add a removed computer back is coming.
 
 The wire is `docs/remote-live-contract.md` §2.15.
 
