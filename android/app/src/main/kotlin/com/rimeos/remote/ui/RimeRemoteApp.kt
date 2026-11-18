@@ -1,5 +1,6 @@
 package com.rimeos.remote.ui
 
+import com.rimeos.remote.ui.mirror.MediaScreen
 import com.rimeos.remote.ui.mirror.MirrorScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -109,6 +110,9 @@ object Destinations {
 
     /** "Notifications on your computer": access, and which apps. */
     const val MIRROR = "mirror"
+
+    /** "Media on your computer": the switch, and which apps. */
+    const val MEDIA = "media"
 }
 
 @Composable
@@ -192,6 +196,7 @@ fun RimeRemoteApp(
                     onForget = { viewModel.forget(it) },
                     onDynamicColour = { viewModel.setDynamicColour(it) },
                     onMirror = { navigation.navigate(Destinations.MIRROR) },
+                    onMedia = { navigation.navigate(Destinations.MEDIA) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
                         // ACTION_SEND with the text in the intent, so the user
@@ -446,6 +451,15 @@ fun RimeRemoteApp(
                     onChoose = { pkg, on -> viewModel.setMirrorApp(pkg, on) },
                     reply = state.settings.mirrorReply,
                     onReply = { viewModel.setMirrorReply(it) },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
+            composable(Destinations.MEDIA) {
+                MediaScreen(
+                    on = state.settings.mediaOn,
+                    onOn = { viewModel.setMediaOn(it) },
+                    chosen = state.settings.mediaApps,
+                    onChoose = { pkg, on -> viewModel.setMediaApp(pkg, on) },
                     onBack = { navigation.popBackStack() },
                 )
             }

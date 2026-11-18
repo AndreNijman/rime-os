@@ -1,6 +1,7 @@
 package com.rimeos.remote.link
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import com.rimeos.remote.core.PairedMachine
 import com.rimeos.remote.core.Session
@@ -12,10 +13,14 @@ import com.rimeos.remote.core.agent.RemoteHello
 import com.rimeos.remote.core.phone.BatteryThrottle
 import com.rimeos.remote.core.phone.Content
 import com.rimeos.remote.core.phone.DeviceEvent
+import com.rimeos.remote.core.phone.Media
+import com.rimeos.remote.core.phone.MediaOutbox
+import com.rimeos.remote.core.phone.MediaState
 import com.rimeos.remote.core.phone.Mirror
 import com.rimeos.remote.core.phone.MirrorOutbox
 import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
+import com.rimeos.remote.phone.MediaWatcher
 import com.rimeos.remote.phone.MirrorService
 import com.rimeos.remote.phone.Receiver
 import com.rimeos.remote.phone.Ringer
@@ -130,6 +135,30 @@ class LinkHub private constructor(private val app: Context) {
     /** Whether the person turned on replying from a computer; read and set as [mirrorApps] is. */
     @Volatile
     private var mirrorReply: Boolean = false
+
+    // What this phone is playing, on each machine (contract §2.8): one
+    // outbox and one sender per CONNECTION, because the machine removes the
+    // phone's player when the connection that described it ends, so a new
+    // connection starts from "nothing shown".
+    private class MediaLane(val outbox: MediaOutbox, val wake: Channel<Unit>, var sender: Job? = null)
+
+    private val mediaLanes = ConcurrentHashMap<String, MediaLane>()
+
+    /** "Media on your computer", and its apps: read from the store on a connection and set by the screen. */
+    @Volatile
+    private var mediaOn: Boolean = false
+
+    @Volatile
+    private var mediaApps: Set<String> = emptySet()
+
+    /** What the watcher last said is playing, so a machine that connects is told at once. */
+    @Volatile
+    private var media: MediaState? = null
+
+    private val watcher by lazy { MediaWatcher(app) { onPhoneMedia(it) } }
+
+    /** Whether the watcher was last told to run; only [syncMediaWatcher] changes it. */
+    private var watching = false
     private val ringer by lazy { Ringer(app) }
     private val receiver by lazy { Receiver(app) }
 
@@ -308,6 +337,10 @@ class LinkHub private constructor(private val app: Context) {
         eventChannels.clear()
         mirrorLanes.values.forEach { it.sender?.cancel() }
         mirrorLanes.clear()
+        mediaLanes.values.forEach { it.sender?.cancel() }
+        mediaLanes.clear()
+        media = null
+        syncMediaWatcher()
         _states.value = emptyMap()
         LinkService.stop(app)
         scope.launch { closing.forEach { runCatching { it.close() } } }
@@ -322,6 +355,8 @@ class LinkHub private constructor(private val app: Context) {
         batteryThrottles.remove(deviceId)
         eventChannels.remove(deviceId)?.let { runCatching { it.close() } }
         mirrorLanes.remove(deviceId)?.sender?.cancel()
+        mediaLanes.remove(deviceId)?.sender?.cancel()
+        syncMediaWatcher()
         _states.update { it - deviceId }
         val link = links.remove(deviceId)
         if (held.isEmpty()) LinkService.stop(app)
@@ -366,6 +401,8 @@ class LinkHub private constructor(private val app: Context) {
                     lane.sender = null
                     synchronized(lane.outbox) { lane.outbox.drop() }
                 }
+                mediaLanes.remove(id)?.sender?.cancel()
+                syncMediaWatcher()
                 if (keep) scheduleReconnect(machine)
             }
         }
@@ -415,6 +452,8 @@ class LinkHub private constructor(private val app: Context) {
             val settings = repository.loadBlocking().settings
             mirrorApps = settings.mirrorApps
             mirrorReply = settings.mirrorReply
+            mediaOn = settings.mediaOn
+            mediaApps = settings.mediaApps
         }
         if (remote.has(Phone.REPORT)) {
             val throttle = batteryThrottles.computeIfAbsent(id) { BatteryThrottle() }
@@ -425,6 +464,12 @@ class LinkHub private constructor(private val app: Context) {
             startMirror(machine, phone, remote.has(Mirror.REPLY_FEATURE))
         } else {
             mirrorLanes.remove(id)?.sender?.cancel()
+        }
+        if (remote.has(Media.FEATURE)) {
+            startMedia(machine, phone)
+        } else {
+            mediaLanes.remove(id)?.sender?.cancel()
+            syncMediaWatcher()
         }
         eventChannels.remove(id)?.let { runCatching { it.close() } }
         if (remote.has(Phone.EVENTS) && remote.has(Features.MUX_ATTACH)) {
@@ -553,6 +598,108 @@ class LinkHub private constructor(private val app: Context) {
                 }
             }
         }
+    }
+
+    /** Whether the media watcher is running: something could be sent now. For the device suite. */
+    val mediaWatching: Boolean get() = synchronized(this) { watching }
+
+    /**
+     * The person turned "Media on your computer" on or off; the store was
+     * already written. Off takes back what every machine shows at once.
+     */
+    fun setMediaOn(on: Boolean) {
+        mediaOn = on
+        if (!on) onPhoneMedia(null)
+        syncMediaWatcher()
+    }
+
+    /** The person changed which apps' playback may show; what is shown is worked out again now. */
+    fun setMediaApps(apps: Set<String>) {
+        mediaApps = apps
+        synchronized(this) { if (watching) watcher.setAllowed(apps) }
+    }
+
+    /**
+     * Notification access was granted or taken away (the listener bound or
+     * unbound): media sessions are readable only with it.
+     */
+    fun onListenerChanged() = syncMediaWatcher()
+
+    /**
+     * Run the watcher exactly while something could be sent: unlocked, the
+     * switch on, notification access granted, and a machine connected that
+     * takes `phone_media`. When it stops, every machine is told nothing
+     * plays (a machine shown nothing is sent nothing).
+     */
+    private fun syncMediaWatcher() {
+        val want = _unlocked.value && mediaOn &&
+            mediaLanes.values.any { it.sender?.isActive == true } &&
+            runCatching { MirrorService.granted(app) }.getOrDefault(false)
+        val stopped = synchronized(this) {
+            if (want) {
+                watcher.start(mediaApps)
+                watching = true
+                false
+            } else {
+                val was = watching
+                if (was) watcher.stop()
+                watching = false
+                was
+            }
+        }
+        if (stopped) onPhoneMedia(null)
+    }
+
+    /**
+     * What is playing changed (or the watcher stopped: null). Every machine
+     * connected now gets it at its own pace; called on the watcher's thread.
+     * Locked or switched off, it is always nothing.
+     */
+    private fun onPhoneMedia(state: MediaState?) {
+        val s = if (_unlocked.value && mediaOn) state else null
+        media = s
+        for (lane in mediaLanes.values) {
+            if (lane.sender?.isActive != true) continue
+            synchronized(lane.outbox) { lane.outbox.offer(s) }
+            lane.wake.trySend(Unit)
+        }
+    }
+
+    /**
+     * The sender for one machine's new connection: it is told what plays
+     * now at once, then each change, at most every [Media.GAP_MS].
+     */
+    private fun startMedia(machine: PairedMachine, phone: PhoneLink) {
+        val lane = mediaLanes.compute(machine.deviceId) { _, old ->
+            old?.sender?.cancel()
+            MediaLane(MediaOutbox(), Channel(Channel.CONFLATED))
+        }!!
+        synchronized(lane.outbox) { lane.outbox.offer(if (_unlocked.value && mediaOn) media else null) }
+        lane.sender = scope.launch {
+            val outbox = lane.outbox
+            while (isActive) {
+                lane.wake.receive()
+                while (isActive) {
+                    val now = SystemClock.elapsedRealtime()
+                    val report = synchronized(outbox) { outbox.next(now) }
+                    if (report == null) {
+                        val wait = synchronized(outbox) { outbox.waitMs(now) }
+                        if (wait == 0L) break
+                        delay(wait)
+                        continue
+                    }
+                    // The position as of the moment the line is written.
+                    val at = SystemClock.elapsedRealtime()
+                    // Never the title in a log: what somebody listens to is theirs.
+                    val ok = runCatching { phone.media(Media.encode(report.state, at)) }
+                        .onFailure { Log.i(TAG, "${machine.machine}: what is playing was not shown: ${it.message}") }
+                        .isSuccess
+                    synchronized(outbox) { if (ok) outbox.sent(report, at) else outbox.failed(report, at) }
+                }
+            }
+        }
+        lane.wake.trySend(Unit)
+        syncMediaWatcher()
     }
 
     private fun onDeviceEvent(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent) {
