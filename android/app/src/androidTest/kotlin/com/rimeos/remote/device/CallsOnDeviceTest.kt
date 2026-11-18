@@ -193,8 +193,12 @@ class CallsOnDeviceTest {
 
     /** End whatever call a failed test left, from the far end, then here. */
     private fun endAnyCall() {
-        if (phoneState() == Calls.IDLE) return
+        // The far end always hangs up, even with the phone idle: a call the
+        // emulator's modem dropped as it was answered stays in the modem,
+        // which then ignores the next `gsm call` from that number until a
+        // `gsm cancel` (measured: the next test's call never rings).
         runCatching { Desktop.emuGsm("cancel", "5556") }
+        if (phoneState() == Calls.IDLE) return
         val end = System.currentTimeMillis() + 5_000
         while (phoneState() != Calls.IDLE && System.currentTimeMillis() < end) Thread.sleep(250)
         if (phoneState() != Calls.IDLE) PhoneCalls.act(context, Calls.HANGUP, null)
