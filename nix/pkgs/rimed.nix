@@ -210,6 +210,7 @@ let
     # that refusal, print SKIP and return. checks.rimed-session runs them (and needsLoginSessionCgroup) from the same
     # test binaries inside a logged-in VM session, where each must pass without a SKIP line.
     noLoginSessionCgroup = [
+      "a_call_dies_with_the_phones_connection_and_revoke_and_a_locked_phone_answers_but_never_dials"
       "a_channel_onto_a_session_that_does_not_exist_is_refused_with_the_daemons_own_words"
       "a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_not_the_runtime"
       "a_confined_session_is_judged_against_the_confinement_it_actually_has"
@@ -232,6 +233,7 @@ let
       "a_phone_reports_its_battery_rings_over_its_link_and_revoke_forgets_both"
       "a_phone_that_allows_control_gets_each_call_on_its_events_channel_and_nothing_it_did_not_allow"
       "a_phone_that_leaves_gives_the_desktop_its_size_back"
+      "a_phones_call_rings_here_is_answered_from_the_notification_and_history_hangup_and_dial_go_through_the_cli"
       "a_phones_do_not_disturb_reaches_the_shell_on_a_change_and_the_computers_reaches_the_phones_that_follow_it"
       "a_phones_media_shows_here_as_a_player_that_goes_with_the_connection_and_with_revoke"
       "a_phones_notifications_show_here_update_in_place_close_and_go_with_revoke"

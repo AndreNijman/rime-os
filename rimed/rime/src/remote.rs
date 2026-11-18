@@ -121,6 +121,30 @@ pub enum RemoteCmd {
         #[arg(long)]
         json: bool,
     },
+    /// See a phone's calls, answer or end them, and dial from it.
+    ///
+    /// The phone must have "Calls on your computer" turned on in Rime Remote
+    /// and be connected. Without a subcommand it shows the call the phone has
+    /// now and its newest calls. There is no sound: the call itself stays on
+    /// the phone. Nothing is kept on this computer, and only you, at this
+    /// machine, can do this; an agent cannot. `--json` is how Rime Shell
+    /// reads it.
+    #[command(args_conflicts_with_subcommands = true)]
+    Calls {
+        #[command(subcommand)]
+        action: Option<CallsCmd>,
+        /// Device id or name. May be left out when one phone has calls on.
+        #[arg(long)]
+        device: Option<String>,
+        /// Only calls older than this, in Unix milliseconds: the next page.
+        #[arg(long, value_name = "MS")]
+        before: Option<u64>,
+        /// How many calls, from 1 to 50 (default 20).
+        #[arg(long, value_name = "N")]
+        limit: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Whether the service is running, and how a device would reach it.
     ///
     /// Including every connection open right now: which path it came in on,
@@ -159,6 +183,48 @@ pub enum MessagesCmd {
         /// The conversation to send into (its id from the list).
         #[arg(long, value_name = "ID")]
         thread: Option<u64>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// What `rime remote calls` can do besides showing them.
+#[derive(Subcommand, Debug)]
+pub enum CallsCmd {
+    /// Answer the call ringing on the phone. It works while the phone is
+    /// locked, as it would on the phone's own lock screen.
+    Answer {
+        /// Device id or name. May be left out when one phone has calls on.
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Decline the call ringing on the phone.
+    Decline {
+        /// Device id or name. May be left out when one phone has calls on.
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// End the phone's call.
+    Hangup {
+        /// Device id or name. May be left out when one phone has calls on.
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Call a number from the phone. The phone places the call, and you talk
+    /// on the phone. Works only while Rime Remote is unlocked on the phone,
+    /// and never for emergency numbers: dial those on the phone itself.
+    Dial {
+        /// The number to call: digits, with an optional + in front.
+        number: String,
+        /// Device id or name. May be left out when one phone has calls on.
+        #[arg(long)]
+        device: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -211,6 +277,44 @@ enum Request {
         thread: Option<u64>,
         text: String,
     },
+    Calls {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        before: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    Call {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        action: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        number: Option<String>,
+    },
+}
+
+/// The call a phone has now (contract §2.12).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CallNow {
+    state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    number: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    since_ms: u64,
+}
+
+/// One call in the phone's history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CallEntry {
+    number: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(rename = "type")]
+    kind: String,
+    date_ms: u64,
+    duration_s: u64,
 }
 
 /// One SMS conversation, as the phone described it (contract §2.11).
@@ -319,6 +423,19 @@ enum Reply {
     MessageSent {
         device: String,
     },
+    Calls {
+        device: String,
+        #[serde(default)]
+        current: Option<CallNow>,
+        #[serde(default)]
+        calls: Option<Vec<CallEntry>>,
+        #[serde(default)]
+        history_error: Option<String>,
+    },
+    CallDone {
+        device: String,
+        action: String,
+    },
     Ok,
     Error {
         message: String,
@@ -342,6 +459,16 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         }
         RemoteCmd::Messages { action: None, device, thread, before, limit, json } => {
             messages(Request::Messages { device, thread, before, limit }, json)
+        }
+        RemoteCmd::Calls { action: None, device, before, limit, json } => calls(Request::Calls { device, before, limit }, json),
+        RemoteCmd::Calls { action: Some(action), .. } => {
+            let (action, device, number, json) = match action {
+                CallsCmd::Answer { device, json } => ("answer", device, None, json),
+                CallsCmd::Decline { device, json } => ("decline", device, None, json),
+                CallsCmd::Hangup { device, json } => ("hangup", device, None, json),
+                CallsCmd::Dial { number, device, json } => ("dial", device, Some(number), json),
+            };
+            call_action(Request::Call { device, action, number }, json)
         }
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
@@ -796,6 +923,103 @@ fn messages_send(device: Option<String>, to: Option<String>, thread: Option<u64>
                 println!("{}", serde_json::json!({"sent": true, "device": device}));
             }
             eprintln!("rime: {device} sent the message.");
+            Ok(0)
+        }
+        Reply::Error { message } => messages_error(&message, json),
+        _ => unexpected(),
+    }
+}
+
+fn calls(req: Request, json: bool) -> Result<i32> {
+    match call(&req)? {
+        Reply::Calls { device, current, calls, history_error } => {
+            if json {
+                let mut v = serde_json::json!({"device": device, "current": current});
+                if let Some(c) = &calls {
+                    v["calls"] = serde_json::to_value(c)?;
+                }
+                if let Some(e) = &history_error {
+                    v["history_error"] = e.clone().into();
+                }
+                println!("{}", serde_json::to_string_pretty(&v)?);
+                return Ok(0);
+            }
+            print!("{}", calls_text(&device, current.as_ref(), calls.as_deref()));
+            // The call now is still true when the history is not there.
+            if let Some(e) = history_error {
+                eprintln!("rime: no call history: {e}");
+            }
+            Ok(0)
+        }
+        Reply::Error { message } => messages_error(&message, json),
+        _ => unexpected(),
+    }
+}
+
+/// Who a call was with: the contact's name and the number, or what is known.
+fn caller(number: Option<&str>, name: Option<&str>) -> String {
+    match (name, number.filter(|n| !n.is_empty())) {
+        (Some(name), Some(n)) => format!("{name} ({n})"),
+        (Some(name), None) => name.to_string(),
+        (None, Some(n)) => n.to_string(),
+        (None, None) => "a withheld number".to_string(),
+    }
+}
+
+fn calls_text(device: &str, current: Option<&CallNow>, calls: Option<&[CallEntry]>) -> String {
+    let mut out = match current {
+        Some(c) => {
+            let state = match c.state.as_str() {
+                "ringing" => "a call is ringing",
+                "held" => "a call is on hold",
+                _ => "on a call",
+            };
+            let who = match (c.number.as_deref(), c.name.as_deref()) {
+                (None, None) => String::new(),
+                (number, name) => format!(" with {}", caller(number, name)),
+            };
+            format!("{device}: {state}{who}.\n")
+        }
+        None => format!("{device}: no call right now.\n"),
+    };
+    let Some(calls) = calls else { return out };
+    if calls.is_empty() {
+        out.push_str("No calls in its history.\n");
+        return out;
+    }
+    out.push_str(&format!("{:<9} {:<9} {:<34} LENGTH\n", "WHEN", "TYPE", "WITH"));
+    for c in calls {
+        let length = if c.duration_s == 0 {
+            "-".to_string()
+        } else if c.duration_s < 60 {
+            format!("{}s", c.duration_s)
+        } else {
+            format!("{}m {:02}s", c.duration_s / 60, c.duration_s % 60)
+        };
+        out.push_str(&format!(
+            "{:<9} {:<9} {:<34} {}\n",
+            ago(c.date_ms),
+            c.kind,
+            truncate(&caller(Some(&c.number), c.name.as_deref()), 34),
+            length
+        ));
+    }
+    out
+}
+
+fn call_action(req: Request, json: bool) -> Result<i32> {
+    match call(&req)? {
+        Reply::CallDone { device, action } => {
+            if json {
+                println!("{}", serde_json::json!({"done": true, "device": device, "action": action}));
+            }
+            let what = match action.as_str() {
+                "answer" => "answered the call",
+                "decline" => "declined the call",
+                "hangup" => "ended the call",
+                _ => "is calling the number; talk on the phone",
+            };
+            eprintln!("rime: {device} {what}.");
             Ok(0)
         }
         Reply::Error { message } => messages_error(&message, json),
@@ -1438,6 +1662,70 @@ mod tests {
                 .unwrap(),
             r#"{"cmd":"messages_send","to":"5556","text":"a\nb"}"#
         );
+    }
+
+    #[test]
+    fn calls_parses_and_its_wire_shapes_hold() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        match Cli::try_parse_from(["r", "calls", "--json", "--limit", "5", "--device", "Pixel"]).expect("list").cmd {
+            RemoteCmd::Calls { action: None, json: true, limit: Some(5), device: Some(d), before: None } => assert_eq!(d, "Pixel"),
+            other => panic!("{other:?}"),
+        }
+        for (verb, want) in [("answer", "answer"), ("decline", "decline"), ("hangup", "hangup")] {
+            match Cli::try_parse_from(["r", "calls", verb]).expect(verb).cmd {
+                RemoteCmd::Calls { action: Some(a), .. } => assert!(format!("{a:?}").to_lowercase().starts_with(want), "{a:?}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        match Cli::try_parse_from(["r", "calls", "dial", "+1 555 521 5556", "--json"]).expect("dial").cmd {
+            RemoteCmd::Calls { action: Some(CallsCmd::Dial { number, json: true, device: None }), .. } => {
+                assert_eq!(number, "+1 555 521 5556");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(Cli::try_parse_from(["r", "calls", "dial"]).is_err(), "a dial with no number");
+        assert!(Cli::try_parse_from(["r", "calls", "answer", "5556"]).is_err(), "answer takes no number");
+        assert!(Cli::try_parse_from(["r", "calls", "--limit", "3", "answer"]).is_err());
+        assert_eq!(
+            serde_json::to_string(&Request::Calls { device: None, before: Some(9), limit: None }).unwrap(),
+            r#"{"cmd":"calls","before":9}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Call { device: Some("Pixel".into()), action: "dial", number: Some("5556".into()) })
+                .unwrap(),
+            r#"{"cmd":"call","device":"Pixel","action":"dial","number":"5556"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Call { device: None, action: "answer", number: None }).unwrap(),
+            r#"{"cmd":"call","action":"answer"}"#
+        );
+    }
+
+    #[test]
+    fn a_calls_reply_reads_as_the_call_now_and_a_table() {
+        let reply: Reply = serde_json::from_str(
+            r#"{"reply":"calls","device":"Pixel","current":{"state":"ringing","number":"5556","since_ms":1},
+               "calls":[{"number":"5556","name":"Test Name","type":"missed","date_ms":1,"duration_s":0},
+                        {"number":"","type":"incoming","date_ms":1,"duration_s":75}]}"#,
+        )
+        .expect("reply");
+        let Reply::Calls { device, current, calls, history_error: None } = reply else { panic!() };
+        let text = calls_text(&device, current.as_ref(), calls.as_deref());
+        assert!(text.starts_with("Pixel: a call is ringing with 5556.\n"), "{text}");
+        assert!(text.contains("Test Name (5556)") && text.contains("missed") && text.contains("a withheld number"), "{text}");
+        assert!(text.contains("1m 15s"), "{text}");
+        let idle = calls_text("Pixel", None, None);
+        assert_eq!(idle, "Pixel: no call right now.\n");
+        let reply: Reply = serde_json::from_str(r#"{"reply":"call_done","device":"Pixel","action":"dial"}"#).expect("done");
+        assert!(matches!(reply, Reply::CallDone { .. }));
+        let reply: Reply =
+            serde_json::from_str(r#"{"reply":"calls","device":"Pixel","history_error":"not allowed"}"#).expect("no history");
+        assert!(matches!(reply, Reply::Calls { current: None, calls: None, history_error: Some(_), .. }));
     }
 
     #[test]

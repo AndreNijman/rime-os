@@ -2759,3 +2759,252 @@ fn a_messages_request_dies_with_the_phones_connection_and_revoke_and_a_locked_ph
     assert_eq!(code, 1, "{said}");
     assert!(took < Duration::from_secs(6), "{took:?}");
 }
+
+/// A button pressed on a notification the stub holds: `ActionInvoked`, then
+/// the close (reason 2) a server that is not resident sends after it.
+fn press_here(h: &Harness, id: &serde_json::Value, action: &str) {
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(h.root.join("notify/closed.jsonl"))
+        .expect("closed.jsonl");
+    let line = serde_json::json!({"id": id, "action": action});
+    std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()).expect("write");
+    drop(f);
+    close_here(h, id, 2);
+}
+
+fn call_state(state: &str, number: Option<&str>) -> String {
+    let mut v = serde_json::json!({"cmd": "call_state", "state": state, "since_ms": 1_700_000_000_000u64});
+    if let Some(n) = number {
+        v["number"] = n.into();
+    }
+    v.to_string()
+}
+
+fn call_entry(n: u64, kind: &str) -> serde_json::Value {
+    serde_json::json!({"number": "+15555215556", "type": kind, "date_ms": 1_700_000_000_000u64 - n, "duration_s": n})
+}
+
+#[test]
+fn a_phones_call_rings_here_is_answered_from_the_notification_and_history_hangup_and_dial_go_through_the_cli() {
+    let h = harness!("calls");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&h) else { return };
+    let tablet = Device::new();
+    assert_eq!(tablet.pair(&h, &offer, "tablet-9")["ok"], true);
+    let mut p = phone.connect(&h).expect("the phone's session");
+    let mut t = tablet.connect(&h).expect("the tablet's session");
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_calls"), "{hello}");
+    open_events(&mut p, 9);
+    open_events(&mut t, 9);
+    let all = r#"{"cmd":"phone_report","can":["ring","receive","dismiss","reply","focus","messages","calls","calls_answer","calls_dial","calls_history"]}"#;
+    assert_eq!(p.call(all)["reply"], "ok");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring","calls_answer","calls_dial"]}"#)["reply"], "ok");
+    // The report kept every word: ten is past the old cap of eight.
+    let devices = h.control(r#"{"cmd":"devices"}"#);
+    let kept = devices["phones"].as_object().unwrap().values().find(|r| r["can"].as_array().unwrap().len() == 10);
+    assert!(kept.is_some(), "{devices}");
+
+    // A phone that did not turn calls on shows nothing and is asked nothing.
+    assert_eq!(t.call(&call_state("ringing", Some("5556")))["code"], "off");
+    assert!(notify_lines(&h, 1).is_empty(), "the tablet's call was shown");
+    for args in [&["calls", "--device", "tablet-9"][..], &["calls", "answer", "--device", "tablet-9"][..]] {
+        let (code, said) = rime_remote(&h, args, b"");
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("has not turned on Calls"), "{said}");
+    }
+    // Nor may a paired phone ask for a call itself: `call` is the control
+    // socket's, for somebody at this machine.
+    let r = p.call(r#"{"cmd":"call","action":"dial","number":"5556"}"#);
+    assert_ne!(r["reply"], "call_done", "{r}");
+
+    // It rings: a notification with Answer and Decline, shown until it stops.
+    assert_eq!(p.call(&call_state("ringing", None))["reply"], "ok");
+    assert_eq!(p.call(&call_state("ringing", Some("+1 555 521 5556\u{202E}")))["reply"], "ok");
+    let shown = notify_lines(&h, 2);
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert_eq!(shown[0]["summary"], "Incoming call");
+    assert_eq!(shown[1]["summary"], "Call from +1 555 521 5556", "{shown:?}");
+    assert_eq!(shown[1]["replaces"], shown[0]["id"]);
+    assert_eq!(shown[1]["actions"], serde_json::json!([["answer", "Answer"], ["decline", "Decline"]]));
+    assert_eq!(shown[1]["sticky"], true);
+    let ringing_id = shown[0]["id"].clone();
+
+    // Answer pressed here: the phone is asked, says done, and says the call
+    // is active; the notification closes and nothing is a dismissal.
+    press_here(&h, &ringing_id, "answer");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!((ask["event"].as_str(), ask["action"].as_str()), (Some("call_action"), Some("answer")), "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":true}}"#))["reply"], "ok");
+    assert_eq!(p.call(&call_state("active", Some("5556")))["reply"], "ok");
+
+    // The call now and the history, in two chunks, through the CLI.
+    let cli = rime_remote_bg(&h, &["calls", "--json", "--limit", "3"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["event"], "call_history_request", "{ask}");
+    assert_eq!(ask["limit"], 3, "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    let first = serde_json::json!({"cmd": "call_history_reply", "id": id, "more": true,
+                                   "calls": [call_entry(1, "incoming"), call_entry(2, "missed")]});
+    assert_eq!(p.call(&first.to_string())["reply"], "ok");
+    let last = serde_json::json!({"cmd": "call_history_reply", "id": id, "calls": [call_entry(3, "rejected")]});
+    assert_eq!(p.call(&last.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    let v: serde_json::Value = serde_json::from_str(&said).unwrap_or_else(|e| panic!("{e}: {said}"));
+    assert_eq!(v["device"], "pixel-8", "{v}");
+    assert_eq!(v["current"]["state"], "active", "{v}");
+    let kinds: Vec<&str> = v["calls"].as_array().unwrap().iter().map(|c| c["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["incoming", "missed", "rejected"], "{v}");
+    assert_eq!(p.call(&last.to_string())["code"], "unknown_id");
+
+    // No answer: told within the deadline, the call now still shown.
+    let cli = rime_remote_bg(&h, &["calls"], b"");
+    events_on(&mut p, 9, 1);
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("pixel-8: on a call with 5556") && said.contains("did not answer in time"), "{said}");
+    assert!(took >= Duration::from_secs(9) && took < Duration::from_secs(19), "{took:?}");
+
+    // Hang up from here.
+    let cli = rime_remote_bg(&h, &["calls", "hangup"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["action"], "hangup", "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":true}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("pixel-8 ended the call"), "{said}");
+    assert_eq!(p.call(&call_state("idle", None))["reply"], "ok");
+
+    // Nothing to answer now: refused here, nothing written to the phone.
+    let (code, said) = rime_remote(&h, &["calls", "answer"], b"");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("no call for that"), "{said}");
+
+    // Dial: the number cleaned, and the phone's refusal read back in words.
+    let (code, said) = rime_remote(&h, &["calls", "dial", "5556;1"], b"");
+    assert_eq!(code, 1, "{said}");
+    let cli = rime_remote_bg(&h, &["calls", "dial", "+1 (555) 521-5556"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!((ask["action"].as_str(), ask["number"].as_str()), (Some("dial"), Some("+15555215556")), "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":false,"error":"emergency"}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("emergency"), "{said}");
+    let cli = rime_remote_bg(&h, &["calls", "dial", "5556", "--json"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":true}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(r#""done":true"#), "{said}");
+
+    // Ringing then idle, unanswered: the notification closes.
+    let before = notify_lines(&h, 0).len();
+    assert_eq!(p.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let shown = notify_lines(&h, before + 1);
+    let id = shown[before]["id"].clone();
+    assert_eq!(p.call(&call_state("idle", None))["reply"], "ok");
+    let shown = notify_lines(&h, before + 2);
+    assert_eq!(shown[before + 1], serde_json::json!({"op": "close", "id": id}), "{shown:?}");
+
+    // Decline pressed here, and the phone could not: a notice says so.
+    assert_eq!(p.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let shown = notify_lines(&h, before + 3);
+    press_here(&h, &shown[before + 2]["id"], "decline");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["action"], "decline", "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":false,"error":"no_permission"}}"#))["reply"], "ok");
+    let shown = notify_lines(&h, before + 4);
+    let notice = shown.last().unwrap();
+    assert_eq!(notice["summary"], "Call not declined", "{shown:?}");
+    assert!(notice["body"].as_str().unwrap().contains("not allowed"), "{notice}");
+
+    // The tablet heard nothing of any of this.
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["focus"]}"#)["reply"], "ok");
+    // Two: the phone follows Focus too.
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":true}"#)["reached"], 2);
+    assert_eq!(events_on(&mut t, 9, 1), vec![serde_json::json!({"event": "focus", "dnd": true})]);
+    // And turning calls off on the phone closes what still rings.
+    assert_eq!(p.call(&call_state("idle", None))["reply"], "ok");
+    let n = notify_lines(&h, 0).len();
+    assert_eq!(p.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let shown = notify_lines(&h, n + 1);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["ring"]}"#)["reply"], "ok");
+    let after = notify_lines(&h, n + 2);
+    assert_eq!(after[n + 1], serde_json::json!({"op": "close", "id": shown[n]["id"]}), "{after:?}");
+}
+
+#[test]
+fn a_call_dies_with_the_phones_connection_and_revoke_and_a_locked_phone_answers_but_never_dials() {
+    let h = harness!("calls-drop");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    let paired = phone.pair(&h, &offer, "pixel-8");
+    assert_eq!(paired["ok"], true);
+    let id_of_device = paired["device"].as_str().unwrap().to_string();
+    let mut p = phone.connect(&h).expect("the phone's session");
+    open_events(&mut p, 9);
+    let all = r#"{"cmd":"phone_report","can":["calls","calls_answer","calls_dial","calls_history"]}"#;
+    assert_eq!(p.call(all)["reply"], "ok");
+
+    // Ringing, then the connection goes: the notification closes.
+    assert_eq!(p.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let shown = notify_lines(&h, 1);
+    // Half a history, then the connection goes: told at once.
+    let cli = rime_remote_bg(&h, &["calls"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let first = serde_json::json!({"cmd": "call_history_reply", "id": id, "more": true, "calls": [call_entry(1, "missed")]});
+    assert_eq!(p.call(&first.to_string())["reply"], "ok");
+    drop(p);
+    let (code, said, took) = cli.join().unwrap();
+    assert!(said.contains("disconnected"), "{code} {said}");
+    assert!(took < Duration::from_secs(6), "the disconnect waited out the deadline: {took:?}");
+    let after = notify_lines(&h, 2);
+    assert_eq!(after[1], serde_json::json!({"op": "close", "id": shown[0]["id"]}), "{after:?}");
+    let mut p = phone.connect(&h).expect("reconnect");
+    open_events(&mut p, 9);
+    let last = serde_json::json!({"cmd": "call_history_reply", "id": id, "calls": []});
+    assert_eq!(p.call(&last.to_string())["code"], "unknown_id");
+
+    // Locked: the events channel is the companion session's. A call rings
+    // and is answered, as on the phone's own lock screen; a dial is refused
+    // here and never written, even to a phone that claims it can.
+    let companion = Device::new();
+    let r = p.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let mut c = companion.connect(&h).expect("the companion session");
+    open_events(&mut c, 9);
+    assert_eq!(c.call(all)["reply"], "ok");
+    let (code, said) = rime_remote(&h, &["calls", "dial", "5556"], b"");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("locked"), "{said}");
+    assert_eq!(c.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let cli = rime_remote_bg(&h, &["calls", "answer"], b"");
+    let ask = events_on(&mut c, 9, 1).remove(0);
+    assert_eq!(ask["action"], "answer", "the locked dial reached the phone: {ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(c.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":true}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("answered the call"), "{said}");
+
+    // Revoke while a history read waits and a call rings: both go at once.
+    assert_eq!(c.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let n = notify_lines(&h, 0).len();
+    let cli = rime_remote_bg(&h, &["calls"], b"");
+    events_on(&mut c, 9, 1);
+    assert_eq!(h.control(&format!(r#"{{"cmd":"revoke","device":"{id_of_device}"}}"#))["reply"], "ok");
+    let (_, said, took) = cli.join().unwrap();
+    assert!(said.contains("revoked"), "{said}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
+    let shown = notify_lines(&h, n + 1);
+    assert_eq!(shown.last().unwrap()["op"], "close", "{shown:?}");
+}
