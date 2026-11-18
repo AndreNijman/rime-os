@@ -363,9 +363,10 @@ clipboard with `wl-paste`, and only as text. At most 8,192 bytes of text and
 - The phone has to have told this computer that it can receive (an app with
   notifications allowed). Until then, `send` is refused and says why.
 
-There is no "Send to phone" in the file manager. Thunar runs as a background
-service (`thunar.service`), and `send` refuses anything that is not a
-terminal or Rime Settings. Use `rime remote send` in a terminal.
+There is no "Send to phone" in the file manager. Thunar is usually started
+as a background service (`thunar.service`, by D-Bus), so anything it runs is
+not a terminal or Rime Settings, and `send` refuses it. Use `rime remote send`
+in a terminal.
 
 ## Your clipboard on your phone
 

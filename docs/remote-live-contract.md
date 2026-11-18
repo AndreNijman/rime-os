@@ -939,8 +939,8 @@ belongs to the graphical session, and the Shell watches it.
 ```
 
 - `text` is sent verbatim: not trimmed, line breaks kept. It is at most
-  65,536 bytes of UTF-8. Larger text is `bad_request`, never cut. Empty text
-  is refused too.
+  65,536 bytes of UTF-8. Larger text is refused (`{"reply":"error",…}` with
+  the limit named), never cut. Empty text is refused the same way.
 - `sensitive` is optional and carried only when true. It means a password
   manager's copy, as the caller judged it.
 - `{"event":"clipboard","text":"…"}` (plus `"sensitive":true`) goes onto the
