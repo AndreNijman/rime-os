@@ -25,6 +25,27 @@
 # reported nex as tested when no nexd was there would be the defect this
 # header warns about below.
 #
+# The SMS tests (MessagesOnDeviceTest) run only on an emulator: they inject a
+# message with `adb emu sms send` and send real SMS to emulator numbers. On any
+# other serial they are left out BY NAME and the verdict says so, and the
+# broker's `emu_sms` verb refuses a serial that is not `emulator-*`. The call
+# tests (CallsOnDeviceTest) are the same: they ring the emulator with `adb emu
+# gsm call` from an emulator number and dial emulator numbers only, so they
+# are left out by name elsewhere and `emu_gsm` refuses a serial that is not one.
+# The photo tests (PhotosOnDeviceTest) are the same again: the broker makes
+# three test images with PIL on this computer, pushes them into the
+# emulator's Pictures/RimeTest folder and deletes them after, so they are left
+# out by name on any other serial and the `photos_*` verbs refuse one. No
+# photo of anybody's is ever read.
+#
+# A SECOND throwaway computer (rime-agentd + rime-remoted + a broker, with its
+# own state, runtime folder and machine key under $state/b) runs in a login
+# session of its own (minted with `sudo -n systemd-run --property=PAMName=login`;
+# without sudo it shares this one, and the run says so). The emulator pairs
+# with both in TwoComputersOnDeviceTest: one phone, two computers, no new
+# protocol. That class rings, texts and pushes photos to the emulator like the
+# three above, so it is left out by name on any other serial too.
+#
 # A device is required and its absence is a FAILURE, not a skip: a suite that
 # reports success when it could not look is the defect this program has
 # shipped more than once.
@@ -67,6 +88,7 @@ mkdir -p "$state"
 # read it even when the script fails before the daemon root exists.
 root=""
 agentd_pid=""; remoted_pid=""; broker_pid=""; nexd_pid=""; talkback_on=""
+root2=""
 
 # TalkBack, when this run turned it on, goes back off no matter how the script
 # ends. `settings delete` and not `settings put … null`, which writes the
@@ -98,13 +120,24 @@ cleanup() {
   for p in "$current" "$remoted_pid" "$agentd_pid" "$nexd_pid"; do
     [ -n "$p" ] && kill "$p" 2>/dev/null || true
   done
+  # The second computer: its session's command ends on the stop file and
+  # stops its own processes; their pids on disk are killed here as well, in
+  # case it never got the chance.
+  if [ -n "$root2" ] && [ -d "$root2" ]; then
+    touch "$root2/stop" 2>/dev/null || true
+    sleep 1
+    for f in broker remoted agentd; do
+      p=$(cat "$root2/$f.pid" 2>/dev/null) || p=""
+      [ -n "$p" ] && kill "$p" 2>/dev/null || true
+    done
+  fi
   wait 2>/dev/null || true
   exit $rc
 }
 trap cleanup EXIT
 
 bin=$repo/rimed/target/debug
-for b in rime-agentd rime-remoted; do
+for b in rime-agentd rime-remoted rime; do
   if [ ! -x "$bin/$b" ]; then
     echo "FAIL: $bin/$b is not built. Run: (cd $repo/rimed && cargo build --workspace)"
     exit 1
@@ -131,6 +164,7 @@ stale_against() {
 }
 stale_against "$bin/rime-agentd"  "$repo/rimed/rime-agentd/src"  "$repo/rimed/rime-agent-core/src"
 stale_against "$bin/rime-remoted" "$repo/rimed/rime-remoted/src" "$repo/rimed/rime-remote-core/src"
+stale_against "$bin/rime"         "$repo/rimed/rime/src"
 
 root=$state/daemons
 rm -rf "$root"; mkdir -p "$root"/run "$root"/state "$root"/scratch
@@ -414,6 +448,24 @@ def restart():
             time.sleep(0.05)
     return json.dumps({"reply": "error", "message": "rime-remoted did not come back"})
 
+def stop_remoted():
+    """The computer going away: its rime-remoted killed (SIGKILL, so nothing
+    is said goodbye) and NOT started again. `restart_remoted` brings it
+    back on the same port and state."""
+    pidfile = os.path.join(ROOT, "remoted.pid")
+    with open(pidfile) as f:
+        old = int(f.read().strip())
+    try:
+        os.kill(old, 9)
+    except ProcessLookupError:
+        pass
+    for _ in range(80):
+        try:
+            os.kill(old, 0); time.sleep(0.05)
+        except ProcessLookupError:
+            return json.dumps({"reply": "ok", "pid": old})
+    return json.dumps({"reply": "error", "message": "rime-remoted %d did not die" % old})
+
 STUB = os.path.join(ROOT, "machine")
 
 def machine_stub_seed(state):
@@ -514,6 +566,59 @@ def focus_file():
     except FileNotFoundError:
         return json.dumps({"reply": "ok", "focus": None})
 
+# Emulator numbers only: the emulator's own console ports and the number it
+# gives itself. A message is never injected from, or about, a real number.
+EMU_NUMBERS = {"5554", "5556", "15555215556", "+15555215556"}
+
+def emu_sms(number, text):
+    """An SMS arriving on the EMULATOR from [number], through its console
+    (`adb emu sms send`). Refused unless this run's serial is an emulator,
+    the number is an emulator number, and the text is short plain words.
+    argv, never a shell string."""
+    serial = os.environ.get("RIME_SUITE_SERIAL", "")
+    adb = os.environ.get("RIME_SUITE_ADB", "")
+    if not serial.startswith("emulator-") or not adb:
+        return json.dumps({"reply": "error", "message": "emu_sms runs only on an emulator"})
+    if number not in EMU_NUMBERS:
+        return json.dumps({"reply": "error", "message": "emu_sms takes emulator numbers only"})
+    if not isinstance(text, str) or not (0 < len(text) <= 120) or not all(c.isalnum() or c == " " for c in text):
+        return json.dumps({"reply": "error", "message": "emu_sms takes short plain text only"})
+    r = subprocess.run([adb, "-s", serial, "emu", "sms", "send", number, text], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0 or "OK" not in r.stdout:
+        return json.dumps({"reply": "error", "message": (r.stdout + r.stderr).strip()[:300]})
+    return json.dumps({"reply": "ok"})
+
+EMU_GSM_ACTIONS = {"call", "accept", "cancel", "busy", "hold"}
+
+def emu_gsm(action, number):
+    """A call on the EMULATOR's modem, through its console (`adb emu gsm
+    <action> <number>`): an incoming call from [number] (call), or that call
+    answered, ended, refused busy or held by the far end. Refused unless this
+    run's serial is an emulator and the number is an emulator number. argv,
+    never a shell string."""
+    serial = os.environ.get("RIME_SUITE_SERIAL", "")
+    adb = os.environ.get("RIME_SUITE_ADB", "")
+    if not serial.startswith("emulator-") or not adb:
+        return json.dumps({"reply": "error", "message": "emu_gsm runs only on an emulator"})
+    if action not in EMU_GSM_ACTIONS:
+        return json.dumps({"reply": "error", "message": "emu_gsm takes call, accept, cancel, busy or hold"})
+    if number not in EMU_NUMBERS:
+        return json.dumps({"reply": "error", "message": "emu_gsm takes emulator numbers only"})
+    r = subprocess.run([adb, "-s", serial, "emu", "gsm", action, number], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0 or "OK" not in r.stdout:
+        return json.dumps({"reply": "error", "message": (r.stdout + r.stderr).strip()[:300]})
+    return json.dumps({"reply": "ok"})
+
+def notify_action(nid, key):
+    """The stub notification server's ActionInvoked: the person pressed the
+    button [key] on notification [nid]. A real server closes it after, which
+    the test sends itself with notify_closed."""
+    if not isinstance(nid, int) or not isinstance(key, str):
+        return json.dumps({"reply": "error", "message": "id must be a number and action a string"})
+    with open(os.path.join(ROOT, "notify", "closed.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"id": nid, "action": key}) + "\n")
+    return json.dumps({"reply": "ok"})
+
 def notify_closed(nid, reason):
     """The stub notification server's NotificationClosed: one complete line
     rime-remoted's stub reads, as if the person (2) or a timeout (1) closed it."""
@@ -533,6 +638,18 @@ def notify_reply(nid, text):
         f.write(json.dumps({"id": nid, "reply": text}) + "\n")
     return json.dumps({"reply": "ok"})
 
+def remote_devices_json():
+    """`rime remote devices --json`, from THIS process: the person at the
+    computer asking what is paired, through the same CLI they would type.
+    It reaches this run's rime-remoted only: XDG_RUNTIME_DIR is the run's own."""
+    env = dict(os.environ, XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
+               XDG_STATE_HOME=os.path.join(ROOT, "state"))
+    p = subprocess.run([os.path.join(BIN, "rime"), "remote", "devices", "--json"],
+                       env=env, capture_output=True, timeout=60)
+    if p.returncode != 0:
+        return json.dumps({"reply": "error", "message": p.stderr.decode(errors="replace").strip()})
+    return json.dumps({"reply": "ok", "devices": json.loads(p.stdout)})
+
 def media_call(call):
     """A method call on a phone's stub media player (contract §2.8), as a
     reader on the computer's bus would make it: one complete line
@@ -543,6 +660,235 @@ def media_call(call):
     with open(os.path.join(ROOT, "media", "control.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(call) + "\n")
     return json.dumps({"reply": "ok"})
+
+# The photo tests' own folder on the EMULATOR, and the names its images carry.
+PHOTOS_DIR = "/sdcard/Pictures/RimeTest"
+PHOTOS_URI = "content://media/external/images/media"
+PHOTOS_PUSHED = {}
+
+def emulator():
+    """(adb, serial) when this run's serial is an emulator, else None."""
+    serial = os.environ.get("RIME_SUITE_SERIAL", "")
+    adb = os.environ.get("RIME_SUITE_ADB", "")
+    if not serial.startswith("emulator-") or not adb:
+        return None
+    return adb, serial
+
+def adb_shell(adb, serial, *argv, timeout=30):
+    return subprocess.run([adb, "-s", serial, "shell", *argv], capture_output=True, text=True, timeout=timeout)
+
+def photos_rows(adb, serial):
+    """The emulator's MediaStore rows under Pictures/RimeTest, by name:
+    {name: {"_size": ..., "width": ...}} with "NULL" kept as None."""
+    r = adb_shell(adb, serial, "content", "query", "--uri", PHOTOS_URI,
+                  "--projection", "_display_name:_size:width",
+                  "--where", "\"relative_path LIKE 'Pictures/RimeTest%'\"")
+    rows = {}
+    for line in r.stdout.splitlines():
+        if not line.startswith("Row:"):
+            continue
+        fields = {}
+        for part in line.split(" ", 2)[2].split(", "):
+            k, _, v = part.partition("=")
+            fields[k.strip()] = None if v == "NULL" else v
+        if fields.get("_display_name"):
+            rows[fields["_display_name"]] = fields
+    return rows
+
+def gps_of(data):
+    """Whether a JPEG still says where it was taken: a GPS latitude or
+    longitude with a finite, non-zero value. Android may keep the GPS block
+    and blank its values, which is no location; a blanked rational reads as
+    0/0, which PIL gives as NaN."""
+    import io, math
+    from PIL import Image
+    try:
+        gps = Image.open(io.BytesIO(data)).getexif().get_ifd(0x8825)
+    except Exception:
+        return False
+    for tag in (2, 4):
+        for v in gps.get(tag, ()) or ():
+            try:
+                f = float(v)
+            except Exception:
+                continue
+            if math.isfinite(f) and f != 0.0:
+                return True
+    return False
+
+def photos_push():
+    """Three test images made here with PIL, each different, the third with a
+    GPS location in its EXIF, pushed into the EMULATOR's Pictures/RimeTest and
+    indexed in its MediaStore. Old RimeTest images are deleted first. Returns
+    each one's name, length, sha256 and whether it carries GPS."""
+    emu = emulator()
+    if emu is None:
+        return json.dumps({"reply": "error", "message": "photos_push runs only on an emulator"})
+    adb, serial = emu
+    try:
+        import io, hashlib
+        from PIL import Image, ImageDraw
+        from PIL.TiffImagePlugin import IFDRational
+    except ImportError:
+        return json.dumps({"reply": "error", "message": "PIL (python3-pillow) is not installed on this computer, "
+                           "and the photos test needs it to make its test images"})
+    photos_cleanup()
+    outdir = os.path.join(ROOT, "photos-pushed")
+    os.makedirs(outdir, exist_ok=True)
+    tag = "%06d" % (int(time.time() * 1000) % 1_000_000)
+    made = []
+    for i, colour in enumerate([(200, 60, 40), (40, 160, 90), (50, 80, 200)]):
+        img = Image.new("RGB", (1600, 1200), colour)
+        draw = ImageDraw.Draw(img)
+        for x in range(0, 1600, 37 + i * 11):
+            draw.line([(x, 0), (1600 - x, 1200)], fill=((x * 3) % 256, 255 - colour[1], (x + 90 * i) % 256), width=5)
+        gps = i == 2
+        extra = {}
+        if gps:
+            # Only this one carries EXIF at all: a camera make and a location.
+            exif = Image.Exif()
+            exif[0x010F] = "RimeTest"
+            exif.get_ifd(0x8825).update({
+                1: "S", 2: (IFDRational(31, 1), IFDRational(57, 1), IFDRational(1234, 100)),
+                3: "E", 4: (IFDRational(115, 1), IFDRational(51, 1), IFDRational(7, 1)),
+            })
+            extra["exif"] = exif
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=88, **extra)
+        data = buf.getvalue()
+        if gps and not gps_of(data):
+            return json.dumps({"reply": "error", "message": "the GPS test image was made without a location"})
+        name = "RimeTest_%s_%d.jpg" % (tag, i)
+        local = os.path.join(outdir, name)
+        with open(local, "wb") as f:
+            f.write(data)
+        r = subprocess.run([adb, "-s", serial, "push", local, PHOTOS_DIR + "/" + name], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return json.dumps({"reply": "error", "message": "adb push failed: " + (r.stdout + r.stderr).strip()[:300]})
+        adb_shell(adb, serial, "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                  "-d", "file://" + PHOTOS_DIR + "/" + name)
+        item = {"name": name, "len": len(data), "sha256": hashlib.sha256(data).hexdigest(), "gps": gps}
+        PHOTOS_PUSHED[name] = item
+        made.append(item)
+    # A pushed file is in the store at once but without its size or
+    # dimensions until the scan reaches it; the phone lists neither.
+    end = time.time() + 30
+    while time.time() < end:
+        rows = photos_rows(adb, serial)
+        if all(rows.get(m["name"], {}).get("_size") and rows.get(m["name"], {}).get("width") for m in made):
+            return json.dumps({"reply": "ok", "photos": made})
+        time.sleep(0.5)
+    return json.dumps({"reply": "error", "message": "the test images were not indexed in 30 s: %s" % photos_rows(adb, serial)})
+
+def photos_cleanup():
+    """Delete the photo tests' folder on the EMULATOR, and wait for its
+    MediaStore rows to go."""
+    emu = emulator()
+    if emu is None:
+        return json.dumps({"reply": "error", "message": "photos_cleanup runs only on an emulator"})
+    adb, serial = emu
+    adb_shell(adb, serial, "rm", "-rf", PHOTOS_DIR)
+    end = time.time() + 15
+    while time.time() < end:
+        rows = photos_rows(adb, serial)
+        if not rows:
+            return json.dumps({"reply": "ok"})
+        # A row whose file is gone is removed by naming it to the scanner.
+        for name in rows:
+            adb_shell(adb, serial, "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                      "-d", "file://" + PHOTOS_DIR + "/" + name)
+        time.sleep(0.5)
+    return json.dumps({"reply": "error", "message": "RimeTest rows outlived their files: %s" % list(photos_rows(adb, serial))})
+
+def rime_cli(argv):
+    """`rime` from THIS process, at this run's rime-remoted (XDG_RUNTIME_DIR
+    is the run's own): (exit code, stdout parsed as JSON or None, stderr).
+    The JSON is kept on a failure too: `--json` prints {"error"} and exits 1."""
+    env = dict(os.environ, XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
+               XDG_STATE_HOME=os.path.join(ROOT, "state"))
+    p = subprocess.run([os.path.join(BIN, "rime"), *argv], env=env, capture_output=True, timeout=110)
+    try:
+        out = json.loads(p.stdout) if p.stdout.strip() else None
+    except Exception:
+        out = None
+    return p.returncode, out, p.stderr.decode(errors="replace").strip()[:600]
+
+def thumb_facts(path):
+    """What the test asserts about one thumbnail on this computer: where it
+    is, its mode, and whether any EXIF or APP1 segment survived in it."""
+    facts = {"path": path, "exists": False}
+    if not isinstance(path, str):
+        return facts
+    root = os.path.join(ROOT, "run", "rime-remote", "photos") + os.sep
+    facts["under_run"] = os.path.realpath(path).startswith(os.path.realpath(root[:-1]) + os.sep)
+    try:
+        st = os.lstat(path)
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return facts
+    facts.update({"exists": True, "mode": "%o" % (st.st_mode & 0o7777), "len": len(data),
+                  "jpeg": data[:2] == b"\xff\xd8", "exif": b"Exif" in data, "app1": False})
+    # Walk the header segments up to the image data, as a reader would.
+    i = 2
+    while i + 4 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xFF:
+            i += 1
+            continue
+        if marker == 0xE1:
+            facts["app1"] = True
+        if marker == 0xDA:
+            break
+        i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    return facts
+
+def photos_list(device, limit):
+    """`rime remote photos --device D --json --limit N` at the computer, with
+    the facts about every thumbnail it names."""
+    if not isinstance(device, str) or not isinstance(limit, int):
+        return json.dumps({"reply": "error", "message": "device must be a string and limit a number"})
+    code, out, err = rime_cli(["remote", "photos", "--device", device, "--json", "--limit", str(limit)])
+    thumbs = []
+    if isinstance(out, dict):
+        for p in out.get("photos") or []:
+            if p.get("thumb") is not None:
+                thumbs.append(dict(thumb_facts(p.get("thumb")), id=p.get("id")))
+    return json.dumps({"reply": "ok", "code": code, "out": out, "stderr": err, "thumbs": thumbs})
+
+def photos_save(device, photo):
+    """`rime remote photos save ID --device D --to <run>/saved --json` at the
+    computer, with the saved file's length, sha256 and whether it says where
+    it was taken. Which test image it was, and what Android did to the one
+    with a location, goes in broker.log."""
+    if not isinstance(device, str) or not isinstance(photo, int):
+        return json.dumps({"reply": "error", "message": "device must be a string and photo a number"})
+    import hashlib
+    code, out, err = rime_cli(["remote", "photos", "save", str(photo), "--device", device,
+                               "--to", os.path.join(ROOT, "saved"), "--json"])
+    saved = None
+    if code == 0 and isinstance(out, dict) and isinstance(out.get("path"), str):
+        try:
+            with open(out["path"], "rb") as f:
+                data = f.read()
+            saved = {"len": len(data), "sha256": hashlib.sha256(data).hexdigest(), "gps": gps_of(data)}
+            for item in PHOTOS_PUSHED.values():
+                if item["len"] == len(data) or item["sha256"] == saved["sha256"]:
+                    if item["gps"]:
+                        sys.stderr.write("photos: the image with a location came back %s, location %s\n" % (
+                            "byte for byte" if item["sha256"] == saved["sha256"] else "changed",
+                            "present" if saved["gps"] else "absent"))
+                        sys.stderr.flush()
+        except OSError as e:
+            saved = {"error": str(e)}
+    return json.dumps({"reply": "ok", "code": code, "out": out, "stderr": err, "saved": saved})
+
+def photos_thumbs_dir(device):
+    """Whether this run's rime-remoted holds a thumbnail folder for [device]."""
+    if not isinstance(device, str) or "/" in device or device in ("", ".", ".."):
+        return json.dumps({"reply": "error", "message": "device must be a plain id"})
+    d = os.path.join(ROOT, "run", "rime-remote", "photos", device)
+    return json.dumps({"reply": "ok", "exists": os.path.lexists(d)})
 
 class H(socketserver.StreamRequestHandler):
     timeout = 120
@@ -559,6 +905,8 @@ class H(socketserver.StreamRequestHandler):
                 continue
             if cmd == "restart_remoted":
                 out = restart()
+            elif cmd == "stop_remoted":
+                out = stop_remoted()
             elif cmd == "file_privilege_request":
                 out = agentd({"cmd": "privilege_request",
                               "verb": req["verb"],
@@ -584,14 +932,32 @@ class H(socketserver.StreamRequestHandler):
                 out = notify_log()
             elif cmd == "media_log":
                 out = media_log()
+            elif cmd == "remote_devices_json":
+                out = remote_devices_json()
             elif cmd == "media_call":
                 out = media_call(req.get("call"))
             elif cmd == "focus_file":
                 out = focus_file()
+            elif cmd == "emu_sms":
+                out = emu_sms(str(req.get("number")), req.get("text"))
+            elif cmd == "emu_gsm":
+                out = emu_gsm(str(req.get("action")), str(req.get("number")))
+            elif cmd == "notify_action":
+                out = notify_action(req.get("id"), req.get("action"))
             elif cmd == "notify_closed":
                 out = notify_closed(req.get("id"), req.get("reason"))
             elif cmd == "notify_reply":
                 out = notify_reply(req.get("id"), req.get("text"))
+            elif cmd == "photos_push":
+                out = photos_push()
+            elif cmd == "photos_cleanup":
+                out = photos_cleanup()
+            elif cmd == "photos_list":
+                out = photos_list(req.get("device"), req.get("limit"))
+            elif cmd == "photos_save":
+                out = photos_save(req.get("device"), req.get("photo"))
+            elif cmd == "photos_thumbs_dir":
+                out = photos_thumbs_dir(req.get("device"))
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:
@@ -604,7 +970,7 @@ class S(socketserver.ThreadingTCPServer):
 
 S(("0.0.0.0", PORT), H).serve_forever()
 PY
-python3 "$root/broker.py" "$root/run/rime-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
+RIME_SUITE_SERIAL="$serial" RIME_SUITE_ADB="$adb" python3 "$root/broker.py" "$root/run/rime-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
   "$root/run/rime-agentd/control.sock" "$relay" "$nexsock" "$nexroot" >"$root/broker.log" 2>&1 &
 broker_pid=$!
 
@@ -690,6 +1056,105 @@ if [[ "$preflight" != *'"qr"'* ]]; then
   exit 1
 fi
 
+# ── a second computer ───────────────────────────────────────────────────────
+#
+# TwoComputersOnDeviceTest pairs the phone with TWO computers at once (one
+# phone, two rime-remoted, no new protocol). The second is a whole stack of
+# its own from the same binaries: its own rime-agentd and rime-remoted, its
+# own state, runtime and scratch folders (so its own machine key), its own
+# stub desktop, machine, notifications and media, its own port, and its own
+# broker in front of it (the same broker.py, given the second root).
+#
+# It runs in a login session of its OWN, minted through PAM as
+# tests/in-login-session.sh does, because two computers are two logins and
+# its broker must be observed as a human there for its offers to be minted.
+# That wrapper cannot be used from here: inside a session it runs its
+# command in place. The command in the session keeps running until the
+# `stop` file appears, because the session's unit takes its processes with
+# it when the command ends. Without sudo it runs in this session instead,
+# and says so.
+#
+# The same rules as for the first: the stubs are checked before anything
+# starts, every process is stopped by its pid, nothing is looked up by name,
+# and nothing here touches the desktop's own runtime folder.
+root2=$state/b
+rm -rf "$root2"; mkdir -p "$root2"/run "$root2"/state "$root2"/scratch "$root2"/desk "$root2"/machine "$root2"/notify "$root2"/media
+port2=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
+brokerport2=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
+{
+  echo '#!/bin/bash'
+  echo 'set -u'
+  printf 'R=%q BIN=%q PORT=%q BPORT=%q RELAY=%q BROKER=%q\n' "$root2" "$bin" "$port2" "$brokerport2" "$relay" "$root/broker.py"
+  printf 'export RIME_SUITE_SERIAL=%q RIME_SUITE_ADB=%q\n' "$serial" "$adb"
+  cat <<'B'
+export RIME_AGENTD_DESKTOP_STUB=$R/desk RIME_REMOTED_MACHINE_STUB=$R/machine \
+  RIME_REMOTED_NOTIFY_STUB=$R/notify RIME_REMOTED_MEDIA_STUB=$R/media
+{ cat /proc/self/cgroup; echo "session ${XDG_SESSION_ID:-none}"; } > "$R/session.txt"
+XDG_RUNTIME_DIR=$R/run XDG_STATE_HOME=$R/state RIME_AGENT_SCRATCH_ROOT=$R/scratch \
+  "$BIN/rime-agentd" >>"$R/agentd.log" 2>&1 &
+echo $! > "$R/agentd.pid"
+extra=(); [ -n "$RELAY" ] && extra=(--relay "$RELAY")
+XDG_RUNTIME_DIR=$R/run XDG_STATE_HOME=$R/state \
+  "$BIN/rime-remoted" --port "$PORT" --allow-foreground "${extra[@]}" >>"$R/remoted.log" 2>&1 &
+echo $! > "$R/remoted.pid"
+for _ in $(seq 1 80); do
+  [ -S "$R/run/rime-agentd/control.sock" ] && [ -S "$R/run/rime-remoted/control.sock" ] && break
+  sleep 0.25
+done
+python3 "$BROKER" "$R/run/rime-remoted/control.sock" "$BPORT" "$R" "$BIN" "$PORT" \
+  "$R/run/rime-agentd/control.sock" "$RELAY" "" "" >"$R/broker.log" 2>&1 &
+echo $! > "$R/broker.pid"
+echo up > "$R/up"
+while [ ! -e "$R/stop" ]; do sleep 0.5; done
+for f in broker remoted agentd; do
+  p=$(cat "$R/$f.pid" 2>/dev/null) && [ -n "$p" ] && kill "$p" 2>/dev/null
+done
+wait
+B
+} > "$root2/start.sh"
+chmod +x "$root2/start.sh"
+second_unit=""
+if sudo -n true >/dev/null 2>&1 && [ -d /run/systemd/sessions ]; then
+  second_unit=rime-suite-b-$$
+  # The log is written by this script, as the developer, on purpose: only
+  # systemd-run needs root, and its output belongs in the run's own folder.
+  # shellcheck disable=SC2024
+  sudo -n env TERM=dumb systemd-run --quiet --wait --pty --collect --unit="$second_unit" \
+    --uid="$(id -u)" --gid="$(id -g)" --property=PAMName=login --working-directory="$root2" \
+    --setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=TERM=dumb \
+    -- /bin/bash -c 'stty -onlcr 2>/dev/null; exec "$1" </dev/null' second "$root2/start.sh" \
+    </dev/null >"$root2/session.log" 2>&1 &
+else
+  echo "NOTE: no sudo -n here, so the second computer runs in THIS login session, not one of its own"
+  "$root2/start.sh" </dev/null >"$root2/session.log" 2>&1 &
+fi
+for _ in $(seq 1 120); do
+  if [ -e "$root2/up" ] && (exec 3<>"/dev/tcp/127.0.0.1/$port2") 2>/dev/null \
+     && (exec 3<>"/dev/tcp/127.0.0.1/$brokerport2") 2>/dev/null; then break; fi
+  sleep 0.25
+done
+(exec 3<>"/dev/tcp/127.0.0.1/$brokerport2") 2>/dev/null || {
+  echo "FAIL: the second computer did not come up"; tail -20 "$root2"/*.log; exit 1; }
+echo "second computer: $(tr '\n' ' ' < "$root2/session.txt")"
+preflight2=$(python3 - "$brokerport2" <<'PY'
+import json, socket, sys
+try:
+    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 10)
+    s.sendall(b'{"cmd":"pair"}\n')
+    print(s.makefile("rb").readline().decode().strip())
+    s.close()
+except OSError as e:
+    print(json.dumps({"reply": "error", "message": f"the broker did not answer: {e}"}))
+PY
+)
+if [[ "$preflight2" != *'"qr"'* ]]; then
+  echo "FAIL: the second computer's rime-remoted will not mint a pairing offer: $preflight2"
+  exit 1
+fi
+lan2=$(echo "$lan" | sed "s/:[0-9]*\$/:$port2/")
+broker2=$(echo "$lan" | sed "s/:[0-9]*\$/:$brokerport2/")
+echo "second computer reachable from the phone at $lan2 (broker on $brokerport2)"
+
 # Build and install. Both APKs, every run: an instrumentation APK from a
 # previous build is the same stale-binary defect the Rust suite refuses.
 export ANDROID_HOME=${ANDROID_HOME:-/var/tmp/android-sdk}
@@ -714,11 +1179,22 @@ args=(-e lan "$lan" -e broker "$brokeraddr" -e machine "$(cat /proc/sys/kernel/h
 # into a failure that names the missing argument, so the relay tests fail loudly
 # rather than passing while asserting nothing.
 [ -n "$relay" ] && args+=(-e relay "$relay")
+args+=(-e lan2 "$lan2" -e broker2 "$broker2")
 [ -n "$classes" ] && args+=(-e class "$classes")
+skip=()
 if [ -n "$nexroot" ]; then
   args+=(-e nexroot "$nexroot")
 else
-  args+=(-e notClass "com.rimeos.remote.device.NexOnDeviceTest,com.rimeos.remote.device.NexColdTapOnDeviceTest")
+  skip+=(com.rimeos.remote.device.NexOnDeviceTest com.rimeos.remote.device.NexColdTapOnDeviceTest)
+fi
+# SMS, calls and photos only on an emulator (see the header): never a real
+# phone's messages, number or photos.
+case $serial in
+  emulator-*) ;;
+  *) skip+=(com.rimeos.remote.device.MessagesOnDeviceTest com.rimeos.remote.device.CallsOnDeviceTest com.rimeos.remote.device.PhotosOnDeviceTest com.rimeos.remote.device.TwoComputersOnDeviceTest) ;;
+esac
+if [ ${#skip[@]} -gt 0 ]; then
+  args+=(-e notClass "$(IFS=,; echo "${skip[*]}")")
 fi
 
 # ── TalkBack ────────────────────────────────────────────────────────────────
@@ -773,3 +1249,7 @@ fi
 count=$(grep -oE '^OK \([0-9]+ tests?\)' "$out" | grep -oE '[0-9]+')
 echo "DEVICE SUITE: $count tests passed on $serial"
 [ -n "$nexroot" ] || echo "DEVICE SUITE: nex NOT tested (no RIME_DEVICE_SUITE_NEXD)"
+case $serial in
+  emulator-*) ;;
+  *) echo "DEVICE SUITE: SMS, calls, photos and two computers NOT tested (not an emulator)" ;;
+esac

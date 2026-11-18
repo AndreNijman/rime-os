@@ -26,15 +26,20 @@
 //! this refuses to rely on one guard for it. `--allow-foreground` is there
 //! for a developer running it by hand, and it says what it is giving up.
 
+mod calls;
+mod clipboard;
+mod companion;
 mod control;
 mod discovery;
 mod machine;
 mod media;
+mod messages;
 mod mirror;
 mod net;
 mod nex;
 mod peer;
 mod phone;
+mod photos;
 mod proxy;
 mod push;
 mod relay;
@@ -232,6 +237,9 @@ fn run(args: &[String]) -> Result<(), String> {
     // Every harness gives this daemon a private XDG_RUNTIME_DIR, so a test
     // never writes where the real Shell is watching.
     state.set_focus_file(phone::focus_file_in(&rime_agent_core::paths::runtime_dir()));
+    // A phone's photo thumbnails, for the Shell's grid (contract §2.13). This
+    // removes whatever an earlier run of this process left there.
+    state.photos.set_dir(photos::dir_in(&rime_agent_core::paths::runtime_dir()));
 
     // A phone notification the person dismissed here is cancelled on the
     // phone, if the phone said it does that; otherwise it stays there.
@@ -257,6 +265,36 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             let line = serde_json::json!({"event": mirror::REPLY_EVENT, "key": key, "text": text});
             if state.events.send(device, &line) { Ok(()) } else { Err(mirror::NotSent::Offline) }
+        }));
+    }
+
+    {
+        // Answer or Decline pressed on a ringing call's notification (contract
+        // §2.12). Heard only from the notification server's current bus owner,
+        // the same trust as an inline reply (§2.7): whoever draws the desktop's
+        // notifications is the person at it. On a thread of its own, since the
+        // phone's `call_done` takes a round trip and the mirror's worker must
+        // not wait on it. What did not happen is said in a notice.
+        let state = Arc::clone(&state);
+        mirror::mirror().on_action(Box::new(move |device, key, action| {
+            if key != calls::CALL_KEY || !matches!(action, "answer" | "decline") {
+                return;
+            }
+            let (state, device, action) = (Arc::clone(&state), device.to_string(), action.to_string());
+            std::thread::spawn(move || {
+                let name = state
+                    .devices()
+                    .ok()
+                    .and_then(|s| s.find(&device).ok().map(|d| d.name.clone()))
+                    .unwrap_or_else(|| "Your phone".into());
+                let outcome = match state.phones().get(&device) {
+                    Some(report) => state.calls.act(&state.events, &device, report, &action, None, calls::ACTION_WAIT),
+                    None => Err(calls::Refusal::NotConnected),
+                };
+                if let Err(why) = outcome {
+                    mirror::mirror().submit(mirror::Job::Notice(calls::not_done(&action, &why, &name)));
+                }
+            });
         }));
     }
 

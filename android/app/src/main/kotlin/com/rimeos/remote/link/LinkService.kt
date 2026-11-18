@@ -20,6 +20,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
 
 /**
@@ -38,7 +39,13 @@ import kotlinx.coroutines.launch
  * It does not survive the app being locked — [LinkHub.lock] stops it — and it
  * is `START_NOT_STICKY`, so Android does not restart it after killing the
  * process: the keys died with the process, and a restarted service would be a
- * notification saying "connected" over nothing. Screen-off Doze can still
+ * notification saying "connected" over nothing.
+ *
+ * The one exception is companion mode (contract §2.10): with "Keep working
+ * after the phone restarts" on, a lock hands over to the companion keys
+ * instead of stopping, and [BootReceiver] starts this service again after a
+ * restart. Then the notification says the app is locked and what keeps
+ * reaching the computer, and has no Lock button. Screen-off Doze can still
  * suspend the network; what this buys is that coming back is a reconnect with
  * no prompt, not a fresh unlock.
  *
@@ -74,14 +81,14 @@ class LinkService : Service() {
     override fun onCreate() {
         super.onCreate()
         ensureChannel(this)
-        goForeground(emptyList(), connected = false)
         val hub = LinkHub.get(this)
+        goForeground(emptyList(), connected = false, companion = hub.companion.value)
         scope.launch {
-            hub.states.collect { states ->
+            hub.states.combine(hub.companion) { states, companion -> states to companion }.collect { (states, companion) ->
                 val held = states.values.toList()
                 val up = held.filter { it.status == LinkHub.Status.CONNECTED }
                 val names = (up.ifEmpty { held }).map { it.machine }.distinct()
-                notify(names, connected = up.isNotEmpty())
+                notify(names, connected = up.isNotEmpty(), companion = companion)
             }
         }
         watchNetwork(hub)
@@ -93,17 +100,28 @@ class LinkService : Service() {
         val hub = LinkHub.get(this)
         if (intent?.action == ACTION_LOCK) {
             // The notification's "Lock": the same lock as the app's button.
-            // It stops this service on its way out.
+            // It stops this service on its way out, unless the companion link
+            // takes over.
             hub.lock()
             return START_NOT_STICKY
         }
-        if (!hub.unlocked.value) {
-            // Started with nothing to hold — a process Android recreated, say.
-            // There are no keys, so there is nothing to keep alive.
+        if (intent?.action == ACTION_COMPANION) {
+            // The boot receiver: start companion mode if the switch and a key
+            // say so. The hub checks again; a phone unlocked since is left
+            // alone.
+            hub.startCompanion()
+        }
+        if (!hub.live) {
+            // Started with nothing to hold — a process Android recreated, say,
+            // or a boot start whose keys did not open. There are no keys, so
+            // there is nothing to keep alive. Foreground first all the same:
+            // a service started with startForegroundService that stops before
+            // calling startForeground is a crash Android blames on this app.
+            runCatching { goForeground(emptyList(), connected = false, companion = false) }
             stopSelf()
             return START_NOT_STICKY
         }
-        goForeground(hub.heldNames(), connected = false)
+        goForeground(hub.heldNames(), connected = false, companion = hub.companion.value)
         return START_NOT_STICKY
     }
 
@@ -214,8 +232,8 @@ class LinkService : Service() {
         }
     }
 
-    private fun goForeground(names: List<String>, connected: Boolean) {
-        val notification = build(this, names, connected)
+    private fun goForeground(names: List<String>, connected: Boolean, companion: Boolean) {
+        val notification = build(this, names, connected, companion)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceCompat.startForeground(
                 this,
@@ -230,22 +248,33 @@ class LinkService : Service() {
         }
     }
 
-    private fun notify(names: List<String>, connected: Boolean) {
+    private fun notify(names: List<String>, connected: Boolean, companion: Boolean) {
         runCatching {
             getSystemService(NotificationManager::class.java)
-                ?.notify(NOTIFICATION_ID, build(this, names, connected))
+                ?.notify(NOTIFICATION_ID, build(this, names, connected, companion))
         }
     }
 
     companion object {
         const val CHANNEL: String = "rime.connection"
         const val ACTION_LOCK: String = "com.rimeos.remote.LOCK"
+        const val ACTION_COMPANION: String = "com.rimeos.remote.COMPANION"
         private const val NOTIFICATION_ID: Int = 0x52494d45 // "RIME"
 
         fun start(context: Context) {
             runCatching {
                 ContextCompat.startForegroundService(context, Intent(context, LinkService::class.java))
             }
+        }
+
+        /** From the boot receiver: start, and start companion mode. */
+        fun startCompanion(context: Context) {
+            runCatching {
+                ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, LinkService::class.java).setAction(ACTION_COMPANION),
+                )
+            }.onFailure { android.util.Log.w("RimeRemote", "the companion link did not start: ${it.message}") }
         }
 
         fun stop(context: Context) {
@@ -258,7 +287,10 @@ class LinkService : Service() {
          * Separate so the rule is one function: nothing about a session can
          * reach it because nothing about a session is passed in.
          */
-        fun text(names: List<String>, connected: Boolean): String = when {
+        fun text(names: List<String>, connected: Boolean, companion: Boolean = false): String = when {
+            companion && names.isEmpty() -> "Locked. Notifications and status keep reaching your computers"
+            companion && connected -> "Locked. Notifications and status keep reaching ${names.joinToString(", ")}"
+            companion -> "Locked. Reaching ${names.joinToString(", ")}…"
             names.isEmpty() -> "Keeping your computers connected"
             connected -> "Connected to ${names.joinToString(", ")}"
             else -> "Connecting to ${names.joinToString(", ")}…"
@@ -279,7 +311,7 @@ class LinkService : Service() {
             context.getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
 
-        private fun build(context: Context, names: List<String>, connected: Boolean): Notification {
+        private fun build(context: Context, names: List<String>, connected: Boolean, companion: Boolean): Notification {
             val open = PendingIntent.getActivity(
                 context,
                 0,
@@ -297,7 +329,7 @@ class LinkService : Service() {
             return NotificationCompat.Builder(context, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentTitle("Rime Remote")
-                .setContentText(text(names, connected))
+                .setContentText(text(names, connected, companion))
                 .setOngoing(true)
                 .setSilent(true)
                 .setOnlyAlertOnce(true)
@@ -308,7 +340,8 @@ class LinkService : Service() {
                 // list, and nothing else is in the text.
                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setContentIntent(open)
-                .addAction(0, "Lock", lock)
+                // Already locked in companion mode: there is nothing to lock.
+                .apply { if (!companion) addAction(0, "Lock", lock) }
                 .build()
         }
     }

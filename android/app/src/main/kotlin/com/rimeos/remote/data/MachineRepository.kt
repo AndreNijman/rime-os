@@ -5,6 +5,7 @@ import com.rimeos.remote.core.AppStorage
 import com.rimeos.remote.core.MachineStore
 import com.rimeos.remote.core.PairedMachine
 import com.rimeos.remote.core.Settings
+import com.rimeos.remote.core.phone.CompanionVault
 import com.rimeos.remote.security.KeystoreSecretBox
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -119,6 +120,21 @@ class MachineRepository(context: Context) {
     suspend fun forget(machine: PairedMachine): MachineStore = withContext(Dispatchers.IO) {
         val after = storage.update { it.without(machine.deviceId) }
         KeystoreSecretBox.forget(machine.deviceId)
+        // And the companion key's, so a sealed companion key left in a backup
+        // or a stale copy of the store opens nothing.
+        KeystoreSecretBox.forgetCompanion(machine.deviceId)
         after
+    }
+
+    /**
+     * The companion keys' vault: this store and the ungated keystore aliases.
+     * The only way the companion lifecycle reaches storage, so the one write
+     * path stays this class's.
+     */
+    fun companionVault(): CompanionVault = object : CompanionVault {
+        override fun load(): MachineStore = storage.load()
+        override fun update(change: (MachineStore) -> MachineStore): MachineStore = storage.update(change)
+        override fun box(deviceId: String) = KeystoreSecretBox.forCompanion(deviceId)
+        override fun drop(deviceId: String) = KeystoreSecretBox.forgetCompanion(deviceId)
     }
 }

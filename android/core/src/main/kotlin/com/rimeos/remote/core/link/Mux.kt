@@ -66,6 +66,16 @@ class Mux(
      * as "the session ended" — a refusal dressed up as a bereavement.
      */
     private val accepted: (ByteArray) -> Boolean = ::attachAccepted,
+    /**
+     * Looks at every control line and every channel request BEFORE it is
+     * written, and throws to stop it: `open` is true for a channel request.
+     *
+     * The companion link's gate (`phone/CompanionLink.kt`): a session dialled with
+     * the companion key must never put a non-device verb on the wire, so the
+     * check sits here, under every caller, rather than in each of them. The
+     * default lets everything through.
+     */
+    private val guard: (line: ByteArray, open: Boolean) -> Unit = { _, _ -> },
 ) : Closeable {
     /** What the owner of a [Mux] is told about the channels on it. */
     interface Listener {
@@ -278,6 +288,7 @@ class Mux(
      */
     @Throws(Disconnected::class, TimeoutException::class)
     fun request(line: ByteArray, timeoutMs: Long = CONTROL_TIMEOUT_MS): ByteArray {
+        guard(line, false)
         val future = enqueueAndSend(null, Frame.Control(line))
         return await(future, timeoutMs)
     }
@@ -316,6 +327,7 @@ class Mux(
         accepted: ((ByteArray) -> Boolean)? = null,
     ): ByteArray {
         require(id != Frame.CONTROL_CHANNEL) { "channel 0 is the control channel" }
+        guard(attach, true)
         if (channelListener != null) synchronized(lock) { channelListeners[id] = channelListener }
         try {
             val future = enqueueAndSend(id, Frame.Open(id, attach), accepted)

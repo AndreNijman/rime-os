@@ -665,8 +665,9 @@ private fun ReplyBox(
     // Android-mediated selections, and nothing else. Neither of these needs a
     // permission: the picker returns a URI for the one item that was chosen,
     // and `Handoff.Files.FORBIDDEN_PERMISSIONS` plus `ManifestTest` are what
-    // stop somebody reaching for `READ_MEDIA_IMAGES` the next time a file is
-    // hard to read. Two launchers rather than one because the photo picker is
+    // stop somebody reaching for a storage permission the next time a file is
+    // hard to read. `READ_MEDIA_IMAGES` is declared now, for "Photos on your
+    // computer" only; a file sent from here never relies on it. Two launchers rather than one because the photo picker is
     // a better thing for a photo — it shows the camera roll — and
     // `OpenDocument` is the honest answer for everything else.
     val photos = rememberLauncherForActivityResult(

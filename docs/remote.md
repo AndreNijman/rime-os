@@ -101,6 +101,7 @@ ID                 NAME                 STATE     PATH     LAST SEEN
 | `revoked_ms` | Unix ms at which the owner revoked it, or absent |
 | `requires_user_verification` | whether this machine requires the device to have re-authenticated its user |
 | `last_path` | the transport the last completed handshake arrived over |
+| `companion` | whether the device has a companion key, so it keeps working after the phone restarts (see below). The key itself is never printed |
 
 The `STATE` column is **derived from `revoked_ms` alone**: `revoked` if it is
 set, `paired` if it is not. There is no third state and no stored status field
@@ -111,6 +112,48 @@ end, and not as a column. The desktop cannot see a fingerprint. What the flag
 buys is that the device holds its key in a keystore that will not sign without
 a biometric or device credential. That is the **device's own claim**, and a
 tick in a table would read as a fact this machine had verified.
+
+A device with a companion key is named in one more sentence at the end: it
+"keeps working after a restart".
+
+### Keeping the phone's features working after it restarts
+
+A phone keeps its pairing key behind its lock screen, so after the phone
+restarts nothing reaches this machine until somebody unlocks it: no battery,
+no notifications, no ring. If you turn on **Keep working after the phone
+restarts** in the app, the phone makes a second key that is not behind the
+lock screen and registers it over its normal connection. This machine stores
+it on the same device record.
+
+A connection on that second key gets the phone's own features and nothing
+else: its battery and network report, ring and Send to Rime acknowledgements,
+its notifications, what it is playing, and its SMS conversations when this
+machine asks for them. It cannot send an SMS, open a terminal, start
+or steer an agent, use nex, lock the computer, change its media or volume,
+touch the clipboard, or change where push notifications go (pushes carry what
+your agents are doing, so only the unlocked phone may register for them). Anything else is refused with
+`not_allowed`. Unlocking the phone brings back the full connection.
+
+On the phone, the switch is in **Display**, next to Notifications and Media on
+your computer, and it is off until you turn it on. Turning it on also asks,
+once, to leave the app out of battery optimisation, because otherwise Android
+can hold the connection off for long stretches while the phone is idle. You
+can say no; the link still works, just later. With the switch on, locking the
+app no longer ends the link: the phone drops to the second key and keeps
+sending its battery, notifications and what is playing, and you can still ring
+it and send it files. Replying to a notification, sending an SMS, controlling
+what plays, agents, terminals and the computer's controls wait until you unlock. After a
+restart the link comes back at the phone's first unlock, without opening the
+app; the app's notification then says it is locked and what keeps reaching
+the computer. Turning the switch off, or forgetting the computer, deletes the
+key on the phone and tells the computer to forget it (straight away if it is
+connected, otherwise the next time the phone connects normally).
+
+Revoking the device ends both keys at once, including a connection the second
+key already holds. Pairing the phone again starts without one, and a second
+key the phone gave up (by pairing again, or by the switch) is never accepted
+again. Turning the
+switch off in the app removes the key here too.
 
 ## `rime remote revoke <device>`
 
@@ -156,8 +199,13 @@ connection over and would wedge it. It hands everything else to `rime-agentd`
 under the origin `claude-remote-control`. So `rime-agentd`'s own per-verb rules
 decide what a phone can do, in one place, and no denylist here can drift from
 them. (The exceptions are verbs `rime-remoted` answers itself
-and never forwards: its hello, nex, and the five machine verbs in
-[The computer itself](#the-computer-itself-status-lock-and-media).)
+and never forwards: its hello, the companion key, nex, the phone's answers
+about its messages, and the five machine verbs in [The computer itself](#the-computer-itself-status-lock-and-media).)
+
+A connection on a phone's **companion key** is the opposite: it forwards
+nothing to `rime-agentd` at all, and may use only the phone's own features
+([above](#keeping-the-phones-features-working-after-it-restarts);
+`docs/remote-live-contract.md` §2.10 has the list).
 
 Three verbs serve the phone's pickers, and the first two are cheap:
 
@@ -363,6 +411,47 @@ clipboard with `wl-paste`, and only as text. At most 8,192 bytes of text and
 - The phone has to have told this computer that it can receive (an app with
   notifications allowed). Until then, `send` is refused and says why.
 
+There is no "Send to phone" in the file manager. Thunar is usually started
+as a background service (`thunar.service`, by D-Bus), so anything it runs is
+not a terminal or Rime Settings, and `send` refuses it. Use `rime remote send`
+in a terminal.
+
+## Your clipboard on your phone
+
+Text you copy on the computer can land on the phone's clipboard. It is off
+until you turn it on, and you turn it on separately on each side:
+
+- **On the phone:** in Rime Remote, open the settings dialog and turn on
+  **Get the computer's clipboard**. It works while the app is unlocked, and
+  needs no permission.
+- **On the computer:** in Rime Settings, open Paired devices and turn on
+  **Send my clipboard to my phone**.
+
+With both on, each text you copy goes to every connected phone that has the
+switch on. Android shows its own "copied" notice when it lands. These are
+never sent:
+
+- a password manager's copy (one it marks as sensitive);
+- images and other things that are not text;
+- an empty selection;
+- text over 64 KB.
+
+Text the phone itself just put on this computer's clipboard (with Send to
+Rime) is not sent back to that phone.
+
+The Shell hands each copy to `rime remote clipboard`, which you can use
+yourself. It reads the text from standard input:
+
+```
+$ printf 'door code 4417' | rime remote clipboard
+rime: put the text on the clipboard of 1 phone.
+$ pass show wifi | rime remote clipboard --sensitive
+```
+
+`--sensitive` keeps the text out of the phone's clipboard preview. Only this
+computer's own user can run it. A paired phone cannot ask for the computer's
+clipboard: it only receives what the computer sends.
+
 ## Your phone's notifications on the computer
 
 Rime Remote can show your phone's notifications on the computers it is paired
@@ -388,7 +477,9 @@ screen, and a message you can answer from the phone's own notification gets a
 reply field on the computer.
 What you type there is sent from the phone by the app that posted the
 notification, as you, exactly as if you had used the reply field on the phone.
-The notification closes on the computer and stays on the phone.
+The notification closes on the computer and stays on the phone. It also
+closes on every other computer the phone is paired with: answered on one, the
+conversation is not news on the others.
 If the phone is not connected, or replying has been turned off on it since,
 the computer shows **Reply not sent** with what you typed.
 
@@ -405,6 +496,122 @@ the computer shows **Reply not sent** with what you typed.
 - A phone can show 10 at once and then one every 3 seconds; anything faster is
   refused, so a noisy app cannot flood the desktop. Revoking the phone closes
   every notification it has open.
+
+## `rime remote messages`: your phone's SMS on the computer
+
+Rime Remote can show your phone's SMS conversations on the computer and send
+an SMS from the phone's number, the way Messages on a Mac does with an
+iPhone. In the app, open **Messages on your computer** in the computers
+screen's settings, tap **Allow SMS**, and turn it on. It is off until you do.
+On Android 13 and later, an app installed from a file may be refused SMS
+without a prompt: the screen says so, and **Allow restricted settings** in
+App info lets you allow it. **Names from your contacts** is a separate,
+optional permission; without it the computer shows numbers.
+
+```
+$ rime remote messages
+ID       WITH                       WHEN      UNREAD  LAST
+42       +15555215556               2m ago    1       see you there
+(from Pixel 8. `rime remote messages --thread ID` shows one.)
+$ rime remote messages --thread 42
+$ echo "on my way" | rime remote messages send --to +15555215556
+rime: Pixel 8 sent the message.
+$ rime remote messages send --thread 42 < reply.txt
+```
+
+- The computer asks the phone every time and keeps nothing. With the app
+  locked, reading still works if the phone keeps working after a restart
+  (above); sending needs the app unlocked.
+- **Only you can use it.** `rime-remoted` answers `messages` only to a
+  terminal in your login session or Rime Settings, so an agent, a scheduled
+  job or any other program of yours can neither read nor send. The text of a
+  send comes from standard input, never the command line, where other
+  programs could see it.
+- One number per send, at most 2,000 characters. A group conversation and
+  picture messages are not shown and cannot be sent to.
+- `--json` prints the conversations or messages for the Shell or a script,
+  and `{"error":…}` with exit status 1 when it fails.
+
+## `rime remote calls`: your phone's calls on the computer
+
+A call ringing on your phone can show on the computer, with **Answer** and
+**Decline**, the way a Mac shows an iPhone's calls. From the computer you can
+also hang up, call a number from the phone, and see recent calls. There is no
+sound on the computer: talk on the phone, or on a headset paired with it. In
+the app, open **Calls on your computer** in the computers screen's settings,
+tap **Allow calls**, and turn it on. It is off until you do. As for SMS, an
+app installed from a file may need **Allow restricted settings** in App info
+before Android lets it read the call log.
+
+```
+$ rime remote calls
+Pixel 8: a call is ringing with +15555215556.
+WHEN      TYPE      WITH                               LENGTH
+2m ago    missed    +15555215556                       -
+1h ago    outgoing  Pat (+15555215556)                 4m 12s
+$ rime remote calls answer
+rime: Pixel 8 answered the call.
+$ rime remote calls hangup
+$ rime remote calls dial +15555215556
+```
+
+- While a call rings, a notification shows who it is from, if the phone
+  knows. Press **Answer** or **Decline** there, or use `rime remote calls
+  answer` and `decline`. It closes when the call stops ringing.
+- Answering, declining and hanging up work while the app is locked, if the
+  phone keeps working after a restart (above), as they do on the phone's lock
+  screen. Calling a number needs the app unlocked. The phone does not dial an
+  emergency number for the computer.
+- Each part has its own Android permission (see calls, call log, answer
+  calls, make calls); the screen shows what is not allowed, and the computer
+  says so if you ask for it.
+- **Only you can use it.** As for messages, `rime-remoted` answers `calls` only
+  to a terminal in your login session or Rime Settings. The number you dial is
+  on the command line; a number is not a secret the way a message is.
+- The computer keeps nothing: the history is read from the phone each time,
+  and the call it shows goes when the phone disconnects.
+- `--json` prints `{"device":…,"current":…,"calls":[…]}` for the Shell or a
+  script, and `{"error":…}` with exit status 1 when it fails.
+
+## `rime remote photos`: your phone's photos on the computer
+
+Your phone's newest photos and screenshots can be seen on the computer, and
+any one saved to it whole, the way Phone Link shows an Android phone's
+photos. In the app, tap **Display** on the computers screen, open **Photos on
+your computer**, tap **Allow photos**, and turn it on. It is off until you
+do. Videos are not shown.
+
+```
+$ rime remote photos
+ID         WHEN      SIZE      PIXELS      NAME
+1000123    2m ago    2.4 MB    4000x3000   PXL_20261118_101500.jpg
+1000119    1h ago    310 KB    1080x2400   Screenshot_20261118-091200.png
+(from Pixel 8. `rime remote photos save ID` saves one here.)
+$ rime remote photos save 1000123
+rime: saved /home/you/Pictures/Rime Remote/PXL_20261118_101500.jpg (2.4 MB) from Pixel 8.
+$ rime remote photos save 1000119 --to ~/Desktop
+```
+
+- A photo is saved into **Rime Remote** in your Pictures folder, or the folder
+  you give with `--to`, under the phone's name for it. A file already there is
+  never replaced: the new one is named `… (2).jpg`. A photo is at most 64 MiB.
+- If you let Rime Remote see only some photos (Android 14 and later offer
+  **Select photos**), only those are listed, and the computer says so.
+- The list needs the app unlocked on the phone; a phone that keeps working
+  after a restart (above) still shows nothing while the app is locked.
+- The small previews are kept under your runtime folder
+  (`$XDG_RUNTIME_DIR/rime-remote/photos`), readable by you alone, with the
+  camera's details and location taken out. They go when the phone
+  disconnects, when you turn the feature off, or when you revoke the phone.
+  A saved photo is the phone's file as Android gives it to the app: from
+  Android 10 on, Android takes the location out of it first.
+- **Only you can use it.** As for messages, `rime-remoted` answers `photos`
+  only to a terminal in your login session or Rime Settings, so an agent or a
+  scheduled job can neither see nor save your photos.
+- `--json` prints `{"device":…,"partial":…,"photos":[…]}` with each preview's
+  path in `thumb`, for the Shell or a script; `save --json` prints the saved
+  file's `path`. Both print `{"error":…}` with exit status 1 when they fail.
+  `--before MS` (a photo's `date_ms`) gets the next page.
 
 ## What your phone is playing, on the computer
 

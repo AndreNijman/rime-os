@@ -9,7 +9,10 @@ BEFORE its reply goes out. org.rimeos.Test.Emit(id, reason) on /test makes it
 emit NotificationClosed, as a person dismissing it (2) or a timeout (1) would.
 org.rimeos.Test.Reply(id, text) emits NotificationReplied(id, text) and then
 NotificationClosed(id, 2) back to back, as Quickshell does when a person
-answers in the reply field. GetCapabilities lists inline-reply unless
+answers in the reply field. org.rimeos.Test.Invoke(id, key) emits
+ActionInvoked(id, key) and then NotificationClosed(id, 2), as a server does
+when a person presses a button on a notification that is not resident.
+GetCapabilities lists inline-reply and actions unless
 FAKE_NOTIFY_INLINE_REPLY=0.
 Never run it on a real session: it takes org.freedesktop.Notifications."""
 import sys, json, os
@@ -21,11 +24,13 @@ XML = """<node><interface name="org.freedesktop.Notifications">
 <method name="CloseNotification"><arg type="u" direction="in"/></method>
 <method name="GetCapabilities"><arg type="as" direction="out"/></method>
 <signal name="NotificationClosed"><arg type="u"/><arg type="u"/></signal>
-<signal name="NotificationReplied"><arg type="u"/><arg type="s"/></signal></interface>
+<signal name="NotificationReplied"><arg type="u"/><arg type="s"/></signal>
+<signal name="ActionInvoked"><arg type="u"/><arg type="s"/></signal></interface>
 <interface name="org.rimeos.Test"><method name="Emit"><arg type="u" direction="in"/><arg type="u" direction="in"/></method>
 <method name="Reply"><arg type="u" direction="in"/><arg type="s" direction="in"/></method>
+<method name="Invoke"><arg type="u" direction="in"/><arg type="s" direction="in"/></method>
 </interface></node>"""
-CAPS = ["body", "actions"] + ([] if os.environ.get("FAKE_NOTIFY_INLINE_REPLY") == "0" else ["inline-reply"])
+CAPS = ["body"] + ([] if os.environ.get("FAKE_NOTIFY_INLINE_REPLY") == "0" else ["actions", "inline-reply"])
 log = open(sys.argv[1], "a"); n = [0]
 def closed(conn, nid, reason):
     log.write(json.dumps({"op":"closed","id":nid,"reason":reason})+"\n"); log.flush()
@@ -38,6 +43,11 @@ def call(conn, sender, path, iface, method, params, inv):
     elif method == "Reply":
         log.write(json.dumps({"op":"replied","id":p[0],"text":p[1]})+"\n"); log.flush()
         conn.emit_signal(None, "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "NotificationReplied",
+                         GLib.Variant("(us)", (p[0], p[1])))
+        closed(conn, p[0], 2); inv.return_value(None)
+    elif method == "Invoke":
+        log.write(json.dumps({"op":"invoked","id":p[0],"key":p[1]})+"\n"); log.flush()
+        conn.emit_signal(None, "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "ActionInvoked",
                          GLib.Variant("(us)", (p[0], p[1])))
         closed(conn, p[0], 2); inv.return_value(None)
     elif method == "GetCapabilities":

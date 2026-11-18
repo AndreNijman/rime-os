@@ -268,6 +268,64 @@ object Help {
                         "file may or may not be there. Check before sending it again. The " +
                         "computer deletes any file you stop part way.",
                 ),
+                h("Messages on the computer"),
+                p(
+                    "Messages on your computer, in Display, lets your computers read this " +
+                        "phone's SMS conversations and send an SMS from its number. It is off " +
+                        "until you turn it on, and Android asks you to allow SMS first. On the " +
+                        "computer, rime remote messages lists them, and rime remote messages " +
+                        "send sends one.",
+                ),
+                p(
+                    "The computer asks the phone each time and keeps nothing. Sending needs " +
+                        "the app unlocked, and a person at the computer: a program running " +
+                        "there in the background cannot send. Group conversations and picture " +
+                        "messages are left out.",
+                ),
+                note(
+                    "If this app came from a file rather than a store, Android may block the " +
+                        "SMS permission without asking. Open App info, use the menu at the top " +
+                        "right to allow restricted settings, then allow SMS there.",
+                ),
+                h("Calls on the computer"),
+                p(
+                    "Calls on your computer, in Display, shows a call on your computers while " +
+                        "it rings on this phone, with Answer and Decline. It is off until you " +
+                        "turn it on, and Android asks you to allow calls first. On the " +
+                        "computer, rime remote calls lists recent calls, and rime remote calls " +
+                        "answer, decline, hangup and dial do what they say.",
+                ),
+                p(
+                    "The sound stays on the phone: talk on it or on a headset paired with it. " +
+                        "You can answer and end a call with the app locked, as you can on the " +
+                        "phone's lock screen. Calling a number needs the app unlocked, and " +
+                        "a person at the computer. The phone refuses to dial an emergency " +
+                        "number for the computer: make that call on the phone.",
+                ),
+                note(
+                    "If this app came from a file rather than a store, Android may block the " +
+                        "call log permission without asking. Allow restricted settings in App " +
+                        "info, as for SMS.",
+                ),
+                h("Photos on the computer"),
+                p(
+                    "Photos on your computer, in Display, lets your computers see this phone's " +
+                        "photos, newest first, with a small preview of each, and save the ones " +
+                        "you choose. It is off until you turn it on, and Android asks you to " +
+                        "allow photos first. On the computer, rime remote photos lists them, and " +
+                        "rime remote photos save copies one to the computer.",
+                ),
+                p(
+                    "The computer asks the phone each time, and only while you have the app " +
+                        "unlocked. The previews carry no location or camera details. From " +
+                        "Android 10 on, Android also removes the location from a saved photo. " +
+                        "Videos are left out.",
+                ),
+                note(
+                    "If you let Android show only some photos, the computer sees those and no " +
+                        "others, including photos you take later. To add more, or allow all, " +
+                        "open Photos on your computer again.",
+                ),
                 h("Finding this phone"),
                 p(
                     "On the computer, rime remote ring makes this phone play its alarm " +
@@ -284,6 +342,29 @@ object Help {
                 p(
                     "Forget the computer here, or remove this device at the computer. Either " +
                         "way the key is gone and the other end stops answering it.",
+                ),
+                h("After the phone restarts"),
+                p(
+                    "The key this app uses with a computer sits behind the phone's lock, so " +
+                        "after a restart the computer hears nothing until you unlock the app. " +
+                        "Keep working after the phone restarts, in Display, changes that. Each " +
+                        "computer gets a second key from this phone that opens without you, and " +
+                        "it can only carry the phone's own features: its battery, its " +
+                        "notifications, what is playing, its messages, its calls, ringing it " +
+                        "and sending it files.",
+                ),
+                p(
+                    "With it on, locking the app keeps those running instead of ending the " +
+                        "link, and after a restart they come back at the phone's first unlock. " +
+                        "Replying to a notification, sending an SMS, calling a number, controlling what " +
+                        "plays, photos, agents, terminals " +
+                        "and the computer's controls still wait until you unlock.",
+                ),
+                note(
+                    "Turning it on asks once to leave this app out of battery optimisation, " +
+                        "so Android does not hold the link off while the phone is idle. You can " +
+                        "say no; the link still works, later. Turning it off, or forgetting the " +
+                        "computer, deletes the second key here and tells the computer to forget it.",
                 ),
                 h("App lock"),
                 p(

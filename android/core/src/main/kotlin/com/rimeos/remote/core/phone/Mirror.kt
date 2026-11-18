@@ -170,6 +170,9 @@ sealed interface MirrorItem {
  *   that notification within [Mirror.ABSORB_MS] is the app showing the reply
  *   ("You: …"): it is taken as shown and not sent, because the computer
  *   already closed its copy and would pop it up again as news.
+ * - A reply from ANOTHER computer closes this computer's copy too (the
+ *   conversation was answered), and that same update of the app's within
+ *   [Mirror.ABSORB_MS] is not sent here either.
  *
  * Not thread-safe: one sender per computer owns one of these.
  */
@@ -187,12 +190,24 @@ class MirrorOutbox(
     private var inflight: String? = null
     /** Keys replied to from the computer, and until when their next update is the app's answer. */
     private val absorbing = LinkedHashMap<String, Long>()
+    /**
+     * Keys replied to from another computer and closed here: until when the
+     * app's answer is held back, and that answer once it came (a repeat of it
+     * is held back too).
+     */
+    private val answeredElsewhere = LinkedHashMap<String, Pair<Long, Content?>>()
     private var tokens = burst
     private var at = nowMs
 
     val pending: Int get() = waiting.size
 
     fun offer(key: String, content: Content, nowMs: Long) {
+        answeredElsewhere.remove(key)?.let { (until, answer) ->
+            if (nowMs <= until && (answer == null || answer == content)) {
+                answeredElsewhere[key] = until to content
+                return
+            }
+        }
         val until = absorbing.remove(key)
         if (until != null && nowMs <= until && key in shown) {
             waiting.remove(key)
@@ -211,6 +226,7 @@ class MirrorOutbox(
     fun remove(key: String) {
         waiting.remove(key)
         absorbing.remove(key)
+        answeredElsewhere.remove(key)
         if (key in shown || key == inflight) waiting[key] = MirrorItem.Removed(key)
     }
 
@@ -259,6 +275,7 @@ class MirrorOutbox(
     fun dismissedThere(key: String): Boolean {
         waiting.remove(key)
         absorbing.remove(key)
+        answeredElsewhere.remove(key)
         return shown.remove(key) != null
     }
 
@@ -276,9 +293,46 @@ class MirrorOutbox(
         return true
     }
 
+    /**
+     * The person replied to [key] on another computer at [nowMs]. This one
+     * closes its copy (a removal, when it was sent it or a post waits), and
+     * the app's update that follows within [Mirror.ABSORB_MS] is not sent,
+     * nor a repeat of it: it shows the reply, which is not news here. False
+     * when this computer has nothing of [key].
+     */
+    fun repliedElsewhere(key: String, nowMs: Long): Boolean {
+        val had = key in shown || key == inflight || waiting[key] is MirrorItem.Post
+        if (!had) return false
+        // Armed by [holdElsewhere] before the reply went: keep that window,
+        // and the app's answer if it already came, so only that answer and
+        // its repeats stay held back.
+        val armed = answeredElsewhere[key]
+        remove(key)
+        answeredElsewhere[key] = armed ?: ((nowMs + Mirror.ABSORB_MS) to null)
+        while (answeredElsewhere.size > ABSORBING_KEPT) answeredElsewhere.remove(answeredElsewhere.keys.first())
+        return true
+    }
+
+    /**
+     * A reply to [key] from another computer is about to be sent: the app's
+     * update that follows within [Mirror.ABSORB_MS] is held back here, but
+     * this computer's copy stays until the reply has gone
+     * ([repliedElsewhere]). A reply that fails ([replyFailed]) then leaves
+     * the notification here as it was. False when this computer has nothing
+     * of [key].
+     */
+    fun holdElsewhere(key: String, nowMs: Long): Boolean {
+        val had = key in shown || key == inflight || waiting[key] is MirrorItem.Post
+        if (!had) return false
+        answeredElsewhere[key] = (nowMs + Mirror.ABSORB_MS) to null
+        while (answeredElsewhere.size > ABSORBING_KEPT) answeredElsewhere.remove(answeredElsewhere.keys.first())
+        return true
+    }
+
     /** The reply to [key] found nothing to answer: no update of it is the app's answer, so none is held back. */
     fun replyFailed(key: String) {
         absorbing.remove(key)
+        answeredElsewhere.remove(key)
     }
 
     /** The computer took [item]. */

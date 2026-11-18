@@ -3,6 +3,7 @@ package com.rimeos.remote
 import com.rimeos.remote.core.agent.Handoff
 import com.rimeos.remote.core.agent.Push
 import com.rimeos.remote.core.agent.UnifiedPush
+import com.rimeos.remote.core.phone.Photos
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -22,6 +23,12 @@ import java.io.File
  *
  * The same shape covers the microphone: push-to-talk goes through the system's
  * own recogniser, so `RECORD_AUDIO` must never appear either.
+ *
+ * "Photos on your computer" (contract §2.13) reverses that criterion for one
+ * feature, deliberately: a computer browsing the library cannot be served by
+ * a picker. So exactly [Photos.PERMISSIONS] may appear, READ_EXTERNAL_STORAGE
+ * capped at Android 12, and every other storage or media permission is still
+ * checked absent.
  *
  * ## This test refuses to pass by failing to look
  *
@@ -57,14 +64,14 @@ class ManifestTest {
         manifest.contains("\"$permission\"")
 
     @Test
-    fun `no storage or media permission is declared`() {
+    fun `no storage or media permission is declared beyond the photos feature's`() {
         // The picker route needs none of these. `ACTION_PICK_IMAGES`
         // (androidx `PickVisualMedia`) returns a URI for the one item the user
         // chose and requires no permission at all; asking for one of these
         // instead would hand the app the whole library for the life of the
         // grant, which is the "automatic access beyond Android-granted
         // selections" the criterion forbids.
-        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS) {
+        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS - Photos.PERMISSIONS.toSet()) {
             assertFalse(
                 declares(p),
                 "$p is declared. The photo picker needs no permission, and this one grants " +
@@ -116,13 +123,28 @@ class ManifestTest {
         )
         // And the thing that must NOT have appeared alongside it. A picker is
         // the alternative to a permission, not a companion to one.
-        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS) {
+        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS - Photos.PERMISSIONS.toSet()) {
             assertFalse(declares(p), "$p was added alongside the picker")
         }
     }
 
     @Test
-    fun `the permissions this app does declare are the seven it can justify`() {
+    fun `the photos feature declares its three permissions, the old storage one capped at Android 12`() {
+        for (p in Photos.PERMISSIONS) assertTrue(declares(p), "$p is missing, so Photos on your computer cannot be allowed")
+        // Above Android 12 READ_EXTERNAL_STORAGE would be a second, broader
+        // way in; capped, it exists only where READ_MEDIA_IMAGES does not.
+        assertTrue(
+            Regex("<uses-permission\\s+android:name=\"android.permission.READ_EXTERNAL_STORAGE\"\\s+android:maxSdkVersion=\"32\"\\s*/>")
+                .containsMatchIn(manifest),
+            "READ_EXTERNAL_STORAGE is declared without android:maxSdkVersion=\"32\"",
+        )
+        // Location stays blanked by Android, and video is not part of it.
+        assertFalse(declares("android.permission.ACCESS_MEDIA_LOCATION"))
+        assertFalse(declares("android.permission.READ_MEDIA_VIDEO"))
+    }
+
+    @Test
+    fun `the permissions this app does declare are the nineteen it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
         // moment anybody reads the list.
@@ -157,6 +179,43 @@ class ManifestTest {
                 // notification, which the next test pins.
                 "android.permission.FOREGROUND_SERVICE",
                 "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+                // Added deliberately with the companion link (contract
+                // §2.10): "Keep working after the phone restarts", off by
+                // default. The boot receiver starts the device features after
+                // a restart only with that switch on and a companion key held
+                // (the next tests pin both). The second only lets the app ASK
+                // to leave battery optimisation, once, when the switch goes
+                // on; the person may refuse. Neither is a runtime prompt.
+                "android.permission.RECEIVE_BOOT_COMPLETED",
+                "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+                // Added deliberately with "Messages on your computer"
+                // (contract §2.11), off by default: reading the SMS store
+                // when a paired computer asks, and sending an SMS it asks for
+                // while the app is unlocked. Both runtime prompts, asked when
+                // the person turns the feature on. Contacts is a third,
+                // optional prompt, only to show names instead of numbers.
+                "android.permission.READ_SMS",
+                "android.permission.SEND_SMS",
+                "android.permission.READ_CONTACTS",
+                // Added deliberately with "Calls on your computer" (contract
+                // §2.12), off by default: seeing that a call rings and who it
+                // is from, the call history, answering, declining and ending
+                // a call, and placing one while the app is unlocked. Each a
+                // runtime prompt, asked when the person turns the feature on.
+                // No audio: RECORD_AUDIO and MANAGE_OWN_CALLS stay absent.
+                "android.permission.READ_PHONE_STATE",
+                "android.permission.READ_CALL_LOG",
+                "android.permission.ANSWER_PHONE_CALLS",
+                "android.permission.CALL_PHONE",
+                // Added deliberately with "Photos on your computer" (contract
+                // §2.13), off by default: listing the photo library, with a
+                // preview of each, for a paired computer while the app is
+                // unlocked, and sending a photo it asks for. A runtime prompt,
+                // asked when the person opens that screen; partial access is
+                // honoured. The first is capped at Android 12 (the test above).
+                "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.READ_MEDIA_IMAGES",
+                "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
             ),
             "the declared permissions changed: $declared",
         )
@@ -181,15 +240,25 @@ class ManifestTest {
             "a specialUse service with no stated reason",
         )
         // And nothing else that a service could have been used as an excuse
-        // for: it runs while the app is unlocked, not from boot, and it does
-        // not ask to be exempt from the battery rules everything else obeys.
-        for (p in listOf(
-            "android.permission.RECEIVE_BOOT_COMPLETED",
-            "android.permission.WAKE_LOCK",
-            "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
-        )) {
-            assertFalse(declares(p), "$p came in with the connection service")
-        }
+        // for: nothing holds the CPU awake. The boot start and the battery
+        // ask came with the companion link and are pinned below.
+        assertFalse(declares("android.permission.WAKE_LOCK"), "WAKE_LOCK came in with the connection service")
+    }
+
+    @Test
+    fun `the boot receiver is private and answers only the two system broadcasts`() {
+        val receiver = manifest.substringAfter("\".link.BootReceiver\"").substringBefore("</receiver>")
+        assertTrue(manifest.contains("\".link.BootReceiver\""), "the boot receiver is not declared")
+        assertTrue(receiver.contains("android:exported=\"false\""), "the boot receiver is exported")
+        val actions = Regex("""action android:name="([^"]+)"""").findAll(receiver).map { it.groupValues[1] }.toSet()
+        assertTrue(
+            actions == setOf("android.intent.action.BOOT_COMPLETED", "android.intent.action.MY_PACKAGE_REPLACED"),
+            "the boot receiver answers $actions",
+        )
+        // Not LOCKED_BOOT_COMPLETED: the store is credential-encrypted, so a
+        // receiver run before the first unlock would read nothing.
+        assertFalse(manifest.contains("LOCKED_BOOT_COMPLETED"))
+        assertFalse(manifest.contains("android:directBootAware=\"true\""))
     }
 
     @Test
@@ -391,6 +460,11 @@ class PushManifestTest {
         // that holds a connection open for push, and it is the one the user
         // chose to install for that.
         //
+        // RECEIVE_BOOT_COMPLETED and REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+        // left this list with the companion link (contract §2.10), which is
+        // not push either: push needs neither, and works with the companion
+        // switch off.
+        //
         // FOREGROUND_SERVICE used to be on this list and is not any more, and
         // the reason is not push: the remote-live change set holds the
         // connection to the COMPUTER open while the app is unlocked (the
@@ -398,8 +472,6 @@ class PushManifestTest {
         // the app closed and that service stopped, which is the point of it.
         for (permission in listOf(
             "android.permission.WAKE_LOCK",
-            "android.permission.RECEIVE_BOOT_COMPLETED",
-            "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
             "com.google.android.c2dm.permission.RECEIVE",
         )) {
             assertFalse(

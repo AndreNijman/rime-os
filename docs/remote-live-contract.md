@@ -193,8 +193,12 @@ start rime-agentd without it.
 
 ```json
 {"cmd":"remote_hello"}
-→ {"reply":"remote","version":1,"features":["nodelay","control_worker","mux_attach","liveness"],"lan":["192.168.1.232:7717"]}
+→ {"reply":"remote","version":1,"features":["nodelay","control_worker","mux_attach","liveness"],"lan":["192.168.1.232:7717"],"scope":"full"}
 ```
+
+`scope` says which of the device's keys opened this session: `full` or
+`companion` (§2.10). A rime-remoted without the companion link sends no
+`scope`; read its absence as `full`.
 
 An old rime-remoted forwards it to agentd, which answers
 `{"reply":"error","kind":"bad_request",...}`: the phone reads that as "no
@@ -365,10 +369,10 @@ uses neither with a machine whose hello lacks them.
 ```
 
 - Answered by rime-remoted, under the handshake's device id. `battery` is a
-  whole number from 0 to 100, `charging` a boolean, `can` at most 8 words; any
+  whole number from 0 to 100, `charging` a boolean, `can` at most 16 words; any
   of them may be left out. A value outside those is `bad_request` and nothing
   is stored. Of `can`, only `"ring"` is kept. (Later sections add `network`,
-  `dnd` and more `can` words: §2.6, §2.7, §2.9.) The phone leaves `"ring"` out
+  `dnd` and more `can` words: §2.6, §2.7, §2.9, §2.11, §2.12, §2.13.) The phone leaves `"ring"` out
   while its notifications or its "Ring my phone" channel are switched off.
   It reports when it connects, and again when charging starts or stops, the
   level moves 5 points, or 10 minutes pass.
@@ -383,6 +387,9 @@ uses neither with a machine whose hello lacks them.
   object per line. The only event today is
   `{"event":"ring","id":N,"at":<unix seconds>,"machine":"<name>"}`.
 - The phone answers a ring with `{"cmd":"ring_ack","id":N}` → `{"reply":"ok"}`.
+  An ack counts only from the device the ring (or offer, `offer_ack`) was
+  written to, while the computer still waits for it; any other ack, another
+  device's included, gets the same `ok` and changes nothing.
 
 **Ring** is a control-socket request (`rime remote ring <device>`, by id or
 name, as `revoke`), so only the machine's own user can send one. A paired phone
@@ -565,7 +572,10 @@ sends that action's `PendingIntent`, as Android's own reply field would: the
 app that posted the notification sends the message, as the person. Apps
 usually post the notification again after a reply ("You: …"); the phone does
 not send the first such update of that key within 5 s to the machine that
-replied, so the reply does not pop up there again. The phone lists `"reply"`
+replied, so the reply does not pop up there again. Every other machine it
+sent that key to gets `phone_notification_removed` for it, and that same first
+update within 5 s, or a repeat of it, is not sent to them either: answered on
+one machine, it is not news on the others. The phone lists `"reply"`
 while it holds notification access and the switch is on.
 
 **What the phone sends.** Nothing until the person grants notification access
@@ -909,6 +919,534 @@ nothing, because the unit binary runs inside the developer's session, where
 `android/tools/run-device-suite.sh` and its broker's restart, starts the
 daemon with a private `XDG_RUNTIME_DIR`. So no `RIME_REMOTED_*_STUB` is needed
 for this file.
+
+### 2.10 The companion link: a second key, a smaller session
+
+Feature `companion_link`. A phone holds its device key behind its lock screen,
+so after a restart it cannot open a session until it is unlocked. The
+companion key is a second X25519 key the phone keeps without that gate; a
+session on it may use the device features below and nothing else.
+
+**Minted by a full session only.** No change to pairing:
+
+```json
+{"cmd":"companion_register","public_key":"<32-byte X25519 public key, base64url, no padding>"}
+→ {"reply":"ok"}
+{"cmd":"companion_forget"}
+→ {"reply":"ok"}
+```
+
+- The device is the handshake's; the body names none. One key per device: a
+  new one replaces the old.
+- `companion_register` errors: `kind` `bad_request` (no `public_key`, or not 32
+  bytes of base64url), `key_in_use` (the key is this device's own key, either
+  key of any other device, revoked ones included, or a companion key any
+  device ever gave up; one message for every case, so the answer does not say
+  which device holds it).
+- A companion key given up (replaced, forgotten, or dropped by pairing the
+  device again) is retired for good: it can never be registered again, by
+  any device, nor paired as a device key.
+- Replacing a key, or `companion_forget`, ends that device's open companion
+  sessions at once; its full sessions go on. `companion_forget` with no key set
+  is `ok`.
+- Both verbs from a companion session: `not_allowed`.
+
+**Scope by key.** The handshake decides it: the device's own key opens a
+`full` session, its companion key a `companion` session. Nothing the phone
+sends changes it. `remote_hello` says which (§2.1).
+
+**What a companion session may do: an allow list, checked before routing.**
+
+| | allowed |
+| --- | --- |
+| control verbs | `remote_hello`, `phone_report`, `ring_ack`, `offer_ack`, `offer_done`, `phone_notification`, `phone_notification_removed`, `phone_media`, `messages_reply`, `messages_changed`, `call_state`, `call_done`, `call_history_reply` |
+| channels (`Open`) | `device_events`, `take_offer` |
+
+Everything else is refused, whatever it is: `push_register` and
+`push_unregister` (a push carries `rime-agentd`'s session kind, id and start
+time, so only the full key may say where pushes go), `machine_status`, `machine_lock`,
+`media`, `media_control`, `volume`, `nex`, `nex_events`, `messages_sent`
+(a send needs an unlocked phone, §2.11), `photos_reply` and
+`photos_fetch_reply` (photos need an unlocked phone, §2.13), `companion_register`,
+`companion_forget`, every `rime-agentd` verb (`hello`, `list`, `input`,
+`privilege_request`, `decide`, `clipboard_write`, …), a line with no readable
+`cmd`, and every other channel (`attach`, `receive`, `save_file`,
+`photos_upload`, nex's feed). A companion session reaches `rime-agentd` never, not even to be told
+no:
+
+```json
+→ {"reply":"error","kind":"not_allowed","message":"machine_lock is not allowed on a companion link; unlock the phone to use it"}
+```
+
+A refused `Open` gets that line on channel zero, then a `Close` for the
+channel, in order with the other replies. `Data` for a refused channel is
+dropped. A verb a later release adds to rime-remoted is refused on a
+companion session until it is added to this list on purpose (the list is
+`rimed/rime-remoted/src/companion.rs`; a unit test fails until every verb has
+a decision).
+
+`clipboard_write` (§1.8) stays refused: it is a `rime-agentd` verb, and a
+companion session forwards nothing there. If rime-remoted answers a clipboard
+verb itself one day, it joins the list (`CLIPBOARD_VERBS`).
+
+**Revoke** (`rime remote revoke`) refuses both keys and drops every live
+connection the device holds, companion ones included; a refused companion key
+gets the same handshake refusal as a key that was never paired. Pairing the
+device again starts with no companion key, and the old one stays retired. A
+connection is put on the live list and only then authorised a second time, so
+a revoke, `companion_forget` or replaced key that lands during its handshake
+still ends it.
+
+**`rime remote devices`** says which devices have one ("keeps working after a
+restart"; `--json`: `"companion": true`). The control socket's `devices`
+reply carries a `companions` list of device ids and never the key.
+
+### 2.11 Messages: the phone's SMS, read and sent from the computer
+
+Feature `phone_messages`. Like Messages on a Mac, or Phone Link's Messages:
+the computer lists the phone's SMS conversations, reads one, and sends an SMS
+from the phone's number. Nothing is stored on the computer: every answer is
+read from the phone when it is asked for, and held in memory only until the
+reply to the caller goes.
+
+**The phone offers it.** `can` (§2.5) has `"messages"` only while all hold:
+the person turned on "Messages on your computer" in the app (off by default),
+Android granted READ_SMS, and the app is unlocked or in companion mode. A
+machine never asks a phone without it. The phone checks its switch and
+permission again on every request, whatever an older report said.
+
+**Computer → phone**, on the phone's `device_events` channel:
+
+```json
+{"event":"messages_request","id":7,"limit":20}
+{"event":"messages_request","id":8,"thread":42,"before":1763452800000,"limit":20}
+{"event":"messages_send","id":9,"to":["+15555215556"],"text":"on my way"}
+{"event":"messages_send","id":10,"thread":42,"text":"on my way"}
+```
+
+- No `thread`: the conversation list. With `thread`: that conversation's
+  messages. `before` (unix ms) pages back; `limit` is 1 to 50.
+- A send names exactly one of `to` (one number) and `thread`. `text` is 1 to
+  2,000 characters, no control characters but newlines. A send goes only to
+  a phone whose connection is `full` (§2.10) and is refused on the computer,
+  before anything is written, for a companion connection.
+
+**Phone → computer**, control verbs:
+
+```json
+{"cmd":"messages_reply","id":7,"threads":[{"id":42,"addresses":["+15555215556"],"name":"Pat","snippet":"see you","date_ms":1763452800000,"unread":1,"count":12}],"more":true}
+{"cmd":"messages_reply","id":8,"thread":42,"messages":[{"id":901,"date_ms":1763452800000,"from_me":false,"body":"see you","status":"received"}]}
+{"cmd":"messages_reply","id":7,"error":"off"}
+{"cmd":"messages_sent","id":9,"ok":true}
+{"cmd":"messages_sent","id":10,"ok":false,"error":"no_service"}
+{"cmd":"messages_changed"}
+→ {"reply":"ok"}
+```
+
+- Newest first. An answer may come in several lines; every line but the last
+  has `"more":true`. At most 64 lines and 512 KiB for one answer, and no more
+  items than `limit`; past either, the request fails.
+- `status` is `received`, `sent`, `delivered`, `sending` or `failed`. Drafts
+  are never sent. `name` is a contact's name, only when the person allowed
+  contacts too. A thread has 1 to 10 addresses.
+- `error` words: `off`, `no_permission`, `locked`, `busy`, `no_thread`,
+  `group`, `too_long`, `failed`, `timeout`, `no_service`. An unknown word is
+  read as `failed`. A send into a thread with more than one address is
+  `group`: one SMS each would be several conversations, not that one.
+- `messages_sent` is `ok` only when Android reported every part of the
+  message sent.
+- `messages_changed` carries nothing: the phone's SMS store changed, and the
+  computer may ask again. The control socket's `messages` reply carries the
+  last one's time as `changed_ms`.
+- An answer whose `id` is not the open request of that device AND connection
+  gets `{"reply":"error","code":"unknown_id"}`; one that breaks a rule above
+  gets `bad_request`. The computer cleans every text again (control and bidi
+  characters out, a body capped at 2,000 characters and 40 lines, a snippet
+  at 160, a name at 60, an address at 40) and does not rely on the phone.
+
+**One request per phone at a time** (`busy`). A request belongs to the
+connection it was written on: when that connection ends, or the device is
+revoked, it fails at once and what had arrived is dropped. The computer waits
+10 s for an answer and 35 s for a send's result; the phone waits up to 25 s
+for Android to report a send.
+
+**The control socket.**
+
+```json
+{"cmd":"messages","device":"<id>","thread":42,"before":1763452800000,"limit":20}
+→ {"reply":"messages","device":"<id>","thread":42,"messages":[…],"changed_ms":1763452800000}
+{"cmd":"messages_send","device":"<id>","to":"+1 555 521 5556","text":"on my way"}
+→ {"reply":"message_sent","device":"<id>"}
+```
+
+`device` may be left out when exactly one connected phone offers messages.
+Both verbs are allowed only to a person at this machine: a terminal in the
+login session or Rime Settings, as for pairing. A scheduled job, an agent
+session or any other process of the user is refused, for reading as well as
+sending. `rime remote messages` and `rime remote messages send` are these
+two (`--json` prints the reply's fields, or `{"error":…}`).
+
+### 2.12 Calls: the phone's calls, seen and handled from the computer
+
+Feature `phone_calls`. Like calls on a Mac with an iPhone, or Phone Link's
+Calls, without the audio: a call ringing on the phone shows on the computer
+with Answer and Decline; from the computer the person answers, declines or
+hangs up the phone's call, dials a number from it, and reads its call history.
+The sound stays on the phone (or a headset paired with it). Nothing is stored
+on the computer: the current call is held in memory with the connection that
+reported it, and a history answer only until the reply to the caller goes.
+
+**The phone offers it.** `can` (§2.5) has `"calls"` only while the person
+turned on "Calls on your computer" in the app (off by default) and Android
+granted READ_PHONE_STATE. With it, each of these says what else the computer
+may do, and each needs its own permission:
+
+| word | permission | lets the computer |
+| --- | --- | --- |
+| `calls_history` | READ_CALL_LOG | ask for the history (and the phone can name a ringing caller) |
+| `calls_answer` | ANSWER_PHONE_CALLS | answer, decline and hang up |
+| `calls_dial` | CALL_PHONE | dial; never sent on a companion connection |
+
+The phone checks its switch and permissions again on every request, whatever
+an older report said.
+
+**Phone → computer**, control verbs:
+
+```json
+{"cmd":"call_state","state":"ringing","number":"+15555215556","name":"Pat","since_ms":1763452800000}
+{"cmd":"call_state","state":"idle","since_ms":1763452830000}
+→ {"reply":"ok"}
+{"cmd":"call_done","id":3,"ok":true}
+{"cmd":"call_done","id":4,"ok":false,"error":"no_call"}
+{"cmd":"call_history_reply","id":5,"calls":[{"number":"+15555215556","name":"Pat","type":"missed","date_ms":1763452800000,"duration_s":0}],"more":true}
+{"cmd":"call_history_reply","id":5,"error":"off"}
+→ {"reply":"ok"}
+```
+
+- `call_state`: `state` is `ringing`, `active`, `held` or `idle`; `since_ms`
+  (unix ms, the phone's clock) is when it entered that state. `number` and
+  `name` may be left out; `name` is a contact's, only when the person allowed
+  contacts. The phone says it when the state changes, and once on a new
+  connection while a call is going. A `call_state` from a phone whose report
+  lacks `"calls"` is refused (`code` `off`) and changes nothing. Android
+  reports a ringing call twice, once before the number is known: a numberless
+  `ringing` after one with a number keeps the number. Rime Remote on Android
+  never sends `held`, because Android does not tell an app that.
+- `call_done` answers one `call_action`: `ok`, or `error`.
+- `call_history_reply`: newest first, in one or more lines; every line but
+  the last has `"more":true`. At most 64 lines and 256 KiB for one answer, and
+  no more calls than `limit`. `type` is `incoming`, `outgoing`, `missed` or
+  `rejected`; voicemail is left out. `number` is empty for a withheld number.
+- `error` words: `off`, `no_permission`, `locked`, `busy`, `no_call`,
+  `emergency`, `failed`. An unknown word is read as `failed`. `emergency`: the
+  phone does not dial an emergency number for a computer; that call is made
+  on the phone.
+- As in §2.11: an answer whose `id` is not the open request of that device
+  AND connection gets `unknown_id`; one that breaks a rule above gets
+  `bad_request`; the computer cleans every text again (a number at 40
+  characters, a name at 60) and does not rely on the phone.
+
+**Computer → phone**, on the phone's `device_events` channel:
+
+```json
+{"event":"call_action","id":3,"action":"answer"}
+{"event":"call_action","id":6,"action":"dial","number":"+15555215556"}
+{"event":"call_history_request","id":5,"limit":20,"before":1763452800000}
+```
+
+- `action` is `answer`, `decline`, `hangup` or `dial`; only `dial` carries a
+  `number` (3 to 20 digits, an optional leading `+`). The computer checks the
+  phone's last report and call first: answer and decline need a ringing call,
+  hangup any call, dial none.
+- **Locked phones.** Answer, decline and hangup are sent on a companion
+  connection (§2.10) too, as the phone's own lock screen allows them. Dial is
+  not: on a companion connection the computer refuses it before anything is
+  written, and the phone refuses it too (`locked`).
+- `call_history_request`: `limit` 1 to 50, `before` (unix ms) pages back.
+
+**One request of each kind per phone at a time** (`busy`). A request belongs
+to the connection it was written on: when that connection ends, or the device
+is revoked, it fails at once. The computer waits 10 s for a history and 10 s
+for an action's `call_done`. When the connection that reported a call ends,
+the call goes with it.
+
+**The ringing notification.** While a phone's call rings, the computer shows a
+notification through the same server as §2.7: summary "Call from <name or
+number>" (or "Incoming call"), app name "<phone> · Calls", no timeout, and
+Answer and Decline buttons when the report has `calls_answer`. It closes when
+the phone says the call stopped ringing, its connection ends, the device is
+revoked, or the report loses `"calls"`. A press is heard only from the
+notification server's current owner of `org.freedesktop.Notifications`, and
+only on this notification, as for an inline reply (§2.7); a press whose action
+fails shows a short notice saying why. A fresh ringing call counts against
+the phone's notification rate (§2.7); an update does not.
+
+**The control socket.**
+
+```json
+{"cmd":"calls","device":"<id>","before":1763452800000,"limit":20}
+→ {"reply":"calls","device":"<name>","current":{"state":"ringing","number":"+15555215556","since_ms":1763452800000},"calls":[…]}
+{"cmd":"call","device":"<id>","action":"dial","number":"+1 555 521 5556"}
+→ {"reply":"call_done","device":"<name>","action":"dial"}
+```
+
+`device` may be left out when exactly one paired phone offers calls. When the
+history cannot be read, `calls` still answers with `current` and says why as
+`history_error`. Both verbs are allowed only to a person at this machine, as
+§2.11's. `rime remote calls` is the first; `rime remote calls answer`,
+`decline`, `hangup` and `dial NUMBER` are the second (`--json` prints the
+reply's fields, or `{"error":…}`).
+
+### 2.13 Photos: the phone's recent photos, browsed and saved from the computer
+
+Feature `phone_photos`. Like Phone Link's Photos: the computer lists the
+phone's newest photos and screenshots as small thumbnails, and one request
+saves a full photo onto the computer. Images only: no video. Nothing about a
+photo is kept on the computer except the thumbnails of the last listing, in
+memory-backed storage, and the photos the person chose to save.
+
+**The phone offers it.** `can` (§2.5) has `"photos"` only while all hold: the
+person turned on "Photos on your computer" in the app (off by default),
+Android lets the app read images (READ_MEDIA_IMAGES on Android 13 and later,
+the partial "selected photos" access on Android 14 and later, or
+READ_EXTERNAL_STORAGE before 13), and the connection is a full one with the
+app unlocked. Never on a companion connection (§2.10): a photo is more than a
+battery level, so a phone that was restarted and not yet unlocked shows none.
+The phone checks its switch, its access and its lock again on every request,
+whatever an older report said. A machine never asks a phone without the word.
+
+**Partial access.** When the person allowed only some photos, Android shows
+the app those and no others, and every `photos_reply` line says
+`"partial":true`; the computer says so with the list ("only the photos you
+picked on the phone are shown").
+
+**Computer → phone**, on the phone's `device_events` channel:
+
+```json
+{"event":"photos_request","id":7,"limit":30}
+{"event":"photos_request","id":8,"before":1763452800000,"limit":30}
+{"event":"photos_fetch","id":9,"photo":1000004211}
+```
+
+- `photos_request`: the newest photos, newest first; `before` (unix ms,
+  exclusive) pages back by `date_ms`; `limit` is 1 to 60.
+- `photos_fetch`: send the original of photo `photo` (an id from a listing)
+  over a `photos_upload` channel (below).
+- Both are written only to a full connection's channel: for a companion one
+  the computer refuses before anything is written.
+
+**Phone → computer**, control verbs:
+
+```json
+{"cmd":"photos_reply","id":7,"photos":[{"id":1000004211,"name":"PXL_20261118_0412.jpg","date_ms":1763452800000,"width":4080,"height":3072,"size":3145728,"mime":"image/jpeg","thumb":"<base64url JPEG>"}],"more":true}
+{"cmd":"photos_reply","id":7,"photos":[],"partial":true}
+{"cmd":"photos_reply","id":7,"error":"off"}
+{"cmd":"photos_fetch_reply","id":9,"error":"not_found"}
+→ {"reply":"ok"}
+```
+
+- `photos_reply`: newest first, in one or more lines; every line but the
+  last has `"more":true`. A line is at most 60,000 bytes (a wire frame holds
+  65,514), so the phone puts as many photos in a line as fit and one always
+  fits. At most 64 lines and 2.5 MiB for one answer, and no more photos than
+  `limit`; past either, the request fails.
+- A photo: `id` (a whole number, the phone's own), `name`, `date_ms` (when it
+  was taken, or added when the phone does not know), `width`, `height`,
+  `size` (bytes of the original), `mime` (`image/…`), and `thumb`: a JPEG,
+  base64url without padding, longest side at most 256 px, at most 24 KiB
+  (the computer accepts up to 32 KiB). The phone re-encodes every thumbnail
+  from pixels, so no EXIF, location or other metadata is in it; the computer
+  drops every APP1 to APP15 and COM segment again before it writes one, and
+  a thumbnail that is not a JPEG is left out (the photo stays in the list
+  without one). `thumb` may be left out when the phone could not make one.
+- `photos_fetch_reply` answers a `photos_fetch` only when the phone will not
+  send it; a photo it sends needs no line here.
+- `error` words: `off`, `no_permission`, `locked`, `busy`, `not_found`,
+  `too_large`, `failed`. An unknown word is read as `failed`. `not_found`: no
+  such photo, or not one the phone may show (partial access).
+- As in §2.11: an answer whose `id` is not the open request of that device
+  AND the connection it was written on gets `unknown_id`; one that breaks a
+  rule above gets `bad_request`; the computer cleans every text again (a name
+  at 120 characters, reduced as §1.8 reduces a file name; a mime type at 40
+  ASCII characters) and does not rely on the phone.
+
+**The upload.** `Open` with
+
+```json
+{"cmd":"photos_upload","id":9,"name":"PXL_20261118_0412.jpg","len":3145728}
+→ {"reply":"uploading","len":3145728}
+   … exactly len bytes, as Data …
+← {"reply":"uploaded","len":3145728}   (as Data on the channel, then Close)
+```
+
+- Answered by rime-remoted, not forwarded. Taken on any FULL connection of
+  the device the fetch was written to (the phone opens a connection of its
+  own for an upload, as for §1.8), only while that fetch waits, and once. An
+  unknown, finished or other device's id is
+  `{"reply":"error","code":"unknown_id",…}` and a close.
+- Everything refusable (the id, `len` of 1 byte to 64 MiB, the name) is
+  refused BEFORE `uploading`, so no byte crosses to be thrown away.
+- Nothing arriving for 30 s ends the upload, and so does the whole upload
+  taking longer than 300 s plus one second per 128 KiB. A channel closed
+  before `len` bytes fails the save and leaves no file.
+- The original is sent as Android gives it to the app. Rime Remote does not
+  ask for ACCESS_MEDIA_LOCATION, so on Android 10 and later Android blanks
+  the location in a photo's EXIF before the app reads it (measured on the
+  Android 16 emulator: a pushed photo with GPS tags is saved on the computer
+  without them, and a photo without a location is saved byte for byte).
+  Android 9 hands the file over as it is.
+
+**One list and one fetch per phone at a time** (`busy`). A list belongs to
+the connection it was written on, and fails at once when that connection ends
+or the device is revoked. A fetch fails at once on revoke, and when the
+connection it was written on ends before an upload began. The computer waits
+30 s for a whole list, 20 s for an upload to begin (or a refusal), then as
+above.
+
+**Thumbnails on the computer.** Each photo's thumbnail is written to
+`$XDG_RUNTIME_DIR/rime-remote/photos/<device id>/<photo id>.jpg` (the
+directory 0700, the file 0600; the runtime directory is memory-backed and
+the user's own, never the home directory). The file name is built from the
+whole number, never from a phone's text. A listing without `before` replaces
+the device's files; one with `before` adds a page to them, up to 600 files,
+past which it replaces them too. They are all removed when the connection that
+asked for the listing ends, when the device is revoked, when its report no
+longer has `"photos"`, and when rime-remoted starts.
+
+**Saving.** The person's own process opens the file: `rime remote photos
+save` creates a hidden file (`O_EXCL|O_NOFOLLOW`, 0600) in the folder, and
+passes it with the request as one `SCM_RIGHTS` descriptor, as `send` passes
+a file (§2.6): rime-remoted has a private `/tmp` and no view of the caller's
+working directory, so a path would be wrong. rime-remoted writes the photo's
+bytes into it and answers; the CLI then checks the length, gives the file
+mode 0644 and its name. A name already there is never replaced: the copy
+becomes `PXL_… (2).jpg`, and so on (a hard link, which fails rather than
+replaces; a rename where the file system has no hard links). A save that
+fails removes the hidden file. The folder is `--to DIR`, else
+`$XDG_PICTURES_DIR/Rime Remote` (from `~/.config/user-dirs.dirs`), else
+`~/Pictures/Rime Remote`, created if missing.
+
+**The control socket.**
+
+```json
+{"cmd":"photos","device":"<id>","before":1763452800000,"limit":30}
+→ {"reply":"photos","device":"<name>","photos":[{"id":…,"name":…,"date_ms":…,"width":…,"height":…,"size":…,"mime":…,"thumb":"/run/user/1000/rime-remote/photos/<device id>/<photo id>.jpg"}],"partial":false}
+{"cmd":"photos_save","device":"<id>","photo":1000004211}   + the open file, SCM_RIGHTS
+→ {"reply":"photo_saved","device":"<name>","photo":1000004211,"name":"PXL_20261118_0412.jpg","len":3145728}
+```
+
+`thumb` in the reply is the file's path, or absent when there is none.
+`device` may be left out when exactly one paired phone offers photos. Both
+verbs are allowed only to a person at this machine, as §2.11's: a scheduled
+job, an agent session or any other process of the user is refused, for
+listing as well as saving. `rime remote photos` is the first (`--json` prints
+the reply's fields, or `{"error":…}`); `rime remote photos save ID [--to
+DIR]` is the second (`--json`: `{"device","photo","path","len"}`).
+
+### 2.14 The computer's clipboard on the phone
+
+`remote_hello.features` gains `"phone_clipboard"`. A phone says `"clipboard"`
+in `can` only to a machine whose hello has it. This is the reverse of §1.8's
+`clipboard_write` (phone → computer).
+
+**Opt-in on both sides, off by default.**
+
+- On the phone, the switch "Get the computer's clipboard" (Rime Remote → the
+  settings dialog, stored as `clipboard_on`). While it is on and the app is
+  unlocked, the report's `can` has `"clipboard"`, and a change of the switch
+  sends a new report at once (§2.9's `can` rule).
+- On the computer, the Shell's switch "Send my clipboard to my phone"
+  (Settings → Paired devices → Clipboard, `phoneClipboard`). rime-remoted does
+  not know about it and does not enforce it. The switch only decides whether
+  the Shell watches the clipboard at all.
+
+**rime-remoted never reads the clipboard.** It is a service. The clipboard
+belongs to the graphical session, and the Shell watches it.
+
+**Computer → phone.** A control-socket request, own user only, as `ring` and
+`focus` are. A paired phone has no verb that causes a clipboard send.
+
+```json
+{"cmd":"clipboard","text":"…","sensitive":true}
+→ {"reply":"clipboard_sent","reached":1}
+```
+
+- `text` is sent verbatim: not trimmed, line breaks kept. It is at most
+  65,536 bytes of UTF-8. Larger text is refused (`{"reply":"error",…}` with
+  the limit named), never cut. Empty text is refused the same way.
+- `sensitive` is optional and carried only when true. It means a password
+  manager's copy, as the caller judged it.
+- `{"event":"clipboard","text":"…"}` (plus `"sensitive":true`) goes onto the
+  `device_events` channel of each connected phone whose last report has
+  `"clipboard"` in `can`. `reached` counts those phones. Zero is an answer,
+  not an error. There is no push and no outbox: a clipboard is worth nothing
+  later.
+- The encoded line, newline included, is at most 192 KiB. Text inside the
+  byte cap that escapes past that (mostly control characters, six bytes each)
+  is refused. Quotes and newlines escape to two bytes, so even text that is
+  all quotes fits: 128 KiB.
+- Each line is written whole within two seconds, or that phone's events
+  channel is given up. A line is never left half-written on the nonblocking
+  channel.
+- **Loop guard.** rime-remoted remembers the last `clipboard_write` text each
+  phone sent, for 10 seconds. A `clipboard` request with byte-for-byte that
+  text skips that phone, and other phones still get it. Without the guard,
+  the phone's own text would come straight back: the phone sets the clipboard
+  here, the Shell sees the change, and sends it on. The text is remembered
+  when the line passes, before rime-agentd decides on it. Revoke forgets it.
+- CLI: `rime remote clipboard [--sensitive]` reads the text from **stdin**
+  (it takes none in argv, because any process can read a command line). It
+  says how many phones took it and exits 0, also for none. It refuses empty
+  input, more than 65,536 bytes, and input that is not UTF-8.
+
+**Who can send.** Own user, not the §2.6 human-at-machine gate. The Shell
+runs this on every copy, from no terminal, and `send` refuses exactly that.
+So any process running as this user that can reach the control socket can
+put text on a phone that opted in. The phone's switch is that consent.
+rime-remoted does not check the Shell's switch.
+
+**The Shell's half** (rime-shell `PhoneClipboardService`). With the switch
+off, nothing watches the clipboard. With it on, the Shell runs
+`wl-paste --type text --watch sh -c <script>`. The script prints each text as
+base64, and the Shell pipes it into `base64 -d | rime remote clipboard`. The
+Shell never holds the text decoded, and the text never appears in argv.
+Measured on wl-clipboard 2.3.0, in a private headless labwc:
+
+- The watcher reports the clipboard once as it starts. That copy is not sent:
+  it is from before the switch went on, or before the Shell started.
+- `CLIPBOARD_STATE` is `data` (text on stdin), `nil` (nothing, or a non-text
+  offer such as an image, under `--type text`), `clear`, or `sensitive` (a
+  `wl-copy --sensitive` / `x-kde-passwordManagerHint` copy, with the data
+  still on stdin). Only `data` that is non-empty and at most 65,536 bytes is
+  sent. A sensitive copy is never sent, so the Shell itself never sets
+  `sensitive`; the flag is for other callers of the CLI.
+- `wl-copy --clear` ends the watcher (`wl_display_dispatch: Broken pipe`).
+  The Shell starts it again after 1 s, doubling to 30 s while it keeps
+  exiting with nothing read.
+- Copies close together: the first goes at once, then at most one per 500 ms,
+  and the latest wins. A copy that is not sent (sensitive, nothing, too long)
+  drops the text still waiting.
+
+**The phone.**
+
+- A `clipboard` line is applied only while the switch is on and the app is
+  unlocked. Both are checked again on receipt, so a machine holding an older
+  report is not obeyed.
+- The phone checks the text again: non-empty, at most 65,536 bytes of UTF-8,
+  and a `sensitive` that, if present, is a real boolean. A line failing any
+  of these is dropped.
+- It is applied with `ClipboardManager.setPrimaryClip`, plain text, labelled
+  "From <machine>". `sensitive` adds `ClipDescription.EXTRA_IS_SENSITIVE`
+  (`android.content.extra.IS_SENSITIVE`, honoured from Android 13), which
+  keeps the text out of Android's "copied" preview. No permission is needed.
+- The phone's event reader accepts lines up to 256 KiB (§2.5's events; it
+  was 16 KiB), above the computer's 192 KiB.
+- Proven on the emulator by `ClipboardOnDeviceTest`, with `rime remote
+  clipboard` as the broker-forwarded `clipboard` request:
+  - text lands verbatim, and `sensitive` sets the extra;
+  - with the switch off, `reached` is 0 and the clipboard is unchanged;
+  - text the phone just set with `clipboard_write` (into the stub desktop) is
+    not sent back, and the next copy is.
 
 ## 3. The phone
 

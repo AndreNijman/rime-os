@@ -52,6 +52,9 @@ pub struct Live {
     /// had to be pushed somewhere on every ping would be a lock held across
     /// a write.
     pub rtt_ms: Arc<Mutex<Option<u64>>>,
+    /// Which of the device's keys opened it: what this connection may do,
+    /// and which connections a forgotten or replaced companion key ends.
+    pub scope: rime_remote_core::device::Scope,
 }
 
 pub struct State {
@@ -87,6 +90,14 @@ pub struct State {
     pub events: crate::phone::Events,
     /// What somebody here sent a phone, until it takes it (contract §2.6).
     pub outbox: crate::phone::Outbox,
+    /// The messages requests waiting on phones (contract §2.11). Memory only.
+    pub messages: crate::messages::Messages,
+    /// Each phone's current call and the calls requests waiting on phones
+    /// (contract §2.12). Memory only.
+    pub calls: crate::calls::Calls,
+    /// The photos requests waiting on phones and the thumbnails written for
+    /// the Shell (contract §2.13).
+    pub photos: Arc<crate::photos::Photos>,
     /// How often an open connection is measured.
     pub ping_interval: std::time::Duration,
     devices: Mutex<DeviceStore>,
@@ -96,6 +107,9 @@ pub struct State {
     live: Mutex<Vec<Live>>,
     push: Mutex<PushStore>,
     phones: Mutex<crate::phone::PhoneStore>,
+    /// The text each phone last put on this computer's clipboard, so it is
+    /// not sent straight back (§2.14).
+    pub clip_echo: crate::clipboard::Echo,
     /// Which Do Not Disturb was last handed the Shell, per phone (§2.9).
     focus_seen: crate::phone::FocusSeen,
     /// Where a phone's Do Not Disturb is written for the Shell; see
@@ -162,6 +176,9 @@ impl State {
             phones_path,
             events: crate::phone::Events::default(),
             outbox: crate::phone::Outbox::default(),
+            messages: crate::messages::Messages::default(),
+            calls: crate::calls::Calls::default(),
+            photos: Arc::new(crate::photos::Photos::default()),
             ping_interval,
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
@@ -169,6 +186,7 @@ impl State {
             live: Mutex::new(Vec::new()),
             push: Mutex::new(push),
             phones: Mutex::new(phones),
+            clip_echo: crate::clipboard::Echo::default(),
             focus_seen: crate::phone::FocusSeen::default(),
             focus_file: Mutex::new(None),
             nexd: Mutex::new(None),
@@ -257,9 +275,21 @@ impl State {
                 }
             }
         }
+        // Calls switched off on the phone: what it said about a call goes,
+        // and a ringing notification closes, at once.
+        let calls_off = !report.can_calls();
+        // Photos switched off: the thumbnails written for it go too.
+        let photos_off = !report.can_photos();
         store.phones.insert(device_id.to_string(), report);
         if let Err(e) = store.save(&self.phones_path) {
             eprintln!("rime-remoted: could not write {}: {e}", self.phones_path.display());
+        }
+        drop(store);
+        if calls_off {
+            self.calls.off(device_id, crate::mirror::mirror());
+        }
+        if photos_off {
+            self.photos.off(device_id);
         }
     }
 
@@ -273,9 +303,13 @@ impl State {
     pub fn phone_forget(&self, device_id: &str) {
         self.events.forget(device_id);
         self.outbox.forget(device_id);
+        self.messages.forget(device_id);
+        self.calls.forget(device_id);
+        self.photos.forget(device_id);
         crate::mirror::mirror().forget(device_id);
         crate::media::media().forget(device_id);
         self.focus_seen.forget(device_id);
+        self.clip_echo.forget(device_id);
         let mut store = self.phones.lock().unwrap_or_else(|e| e.into_inner());
         if store.phones.remove(device_id).is_some() {
             if let Err(e) = store.save(&self.phones_path) {
@@ -385,6 +419,24 @@ impl State {
         if let Ok(mut v) = self.live.lock() {
             v.retain(|l| {
                 if l.device_id == device_id {
+                    let _ = l.socket.shutdown(std::net::Shutdown::Both);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+    }
+
+    /// End a device's companion-scope connections and leave its full ones.
+    ///
+    /// For `companion_forget` and a replaced companion key: the key that
+    /// opened them no longer opens anything, so neither should the sessions
+    /// it already opened.
+    pub fn drop_companion_connections_for(&self, device_id: &str) {
+        if let Ok(mut v) = self.live.lock() {
+            v.retain(|l| {
+                if l.device_id == device_id && l.scope == rime_remote_core::device::Scope::Companion {
                     let _ = l.socket.shutdown(std::net::Shutdown::Both);
                     false
                 } else {
@@ -687,6 +739,7 @@ mod tests {
             path: RemotePath::Lan,
             since_ms: 0,
             rtt_ms: Arc::new(Mutex::new(None)),
+            scope: rime_remote_core::device::Scope::Full,
         };
         let live = Mutex::new(vec![sample(p1, s1), sample(p2, s2)]);
         // Exercised through the same predicate the daemon uses, over a
@@ -712,5 +765,53 @@ mod tests {
         let mine = control_socket_in(dir);
         assert!(mine.ends_with("rime-remoted/control.sock"), "{mine:?}");
         assert_ne!(mine, rime_agent_core::paths::control_socket());
+    }
+
+    #[test]
+    fn forgetting_a_companion_key_ends_its_sessions_and_leaves_the_full_one() {
+        use rime_remote_core::device::Scope;
+        use std::io::Read;
+        let dir = std::env::temp_dir().join(format!(
+            "rime-state-companion-{}-{}",
+            std::process::id(),
+            rime_remote_core::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let state = State::new(
+            rime_remote_core::identity::Identity::generate().expect("identity"),
+            "m".into(),
+            47717,
+            std::net::IpAddr::from([0u8; 16]),
+            None,
+            dir.join("devices.json"),
+            crate::serve::PING_INTERVAL,
+        )
+        .expect("state");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut far = Vec::new();
+        for (id, scope) in [("d", Scope::Full), ("d", Scope::Companion), ("e", Scope::Companion)] {
+            let c = std::net::TcpStream::connect(addr).expect("connect");
+            let (s, _) = listener.accept().expect("accept");
+            state.register(Live {
+                device_id: id.into(),
+                peer: s.peer_addr().ok(),
+                socket: s,
+                device_name: "a phone".into(),
+                path: RemotePath::Lan,
+                since_ms: 0,
+                rtt_ms: Arc::new(Mutex::new(None)),
+                scope,
+            });
+            c.set_read_timeout(Some(std::time::Duration::from_millis(300))).ok();
+            far.push(c);
+        }
+        state.drop_companion_connections_for("d");
+        let left: Vec<String> = state.connections().into_iter().map(|c| c.device_id).collect();
+        assert_eq!(left, ["d", "e"], "the wrong connections survived");
+        let mut b = [0u8; 1];
+        assert!(matches!(far[1].read(&mut b), Ok(0)), "the companion connection is still open");
+        assert!(far[0].read(&mut b).is_err(), "the full connection was closed");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

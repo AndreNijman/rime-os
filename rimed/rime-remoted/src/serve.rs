@@ -12,7 +12,9 @@
 //!
 //! 1. Handshake. A session handshake yields the device's static key, which is
 //!    looked up in the store. An unknown or revoked key ends the connection
-//!    here, before a single frame is read.
+//!    here, before a single frame is read. Which of the device's keys it was
+//!    decides the session's scope: a companion key gets only
+//!    `companion::ALLOWED_VERBS` and `companion::ALLOWED_CHANNELS`.
 //! 2. Frames. Control frames are round-tripped through `rime-agentd` on a
 //!    connection that declared its origin first; `Open` starts a PTY channel;
 //!    `Data` goes to the PTY it names.
@@ -56,6 +58,7 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use rime_remote_core::device::Scope;
 use rime_remote_core::noise::{Channel, Handshake};
 use rime_remote_core::pairing::{PairingRequest, PairingError};
 use rime_remote_core::wire::Frame;
@@ -284,18 +287,18 @@ fn session(
     // read. The lookup is on the full key: an id is a prefix and prefixes are
     // how two keys become one device.
     let key_text = rime_remote_core::b64_encode(&device_key);
-    let (device_id, device_name) = {
+    let (device_id, device_name, scope) = {
         let store = state
             .devices()
             .map_err(|e| ServeError::Protocol(e.to_string()))?;
-        let Some(d) = store.authenticate(&key_text) else {
+        let Some((d, scope)) = store.authenticate(&key_text) else {
             // The handshake is deliberately NOT completed for an unpaired
             // key. Completing it and then refusing would confirm to the
             // caller that this machine's key is what they think it is, which
             // is exactly what a scanner sweeping for Rime machines wants.
             return Err(ServeError::NotPaired);
         };
-        (d.id.clone(), d.name.clone())
+        (d.id.clone(), d.name.clone(), scope)
     };
 
     let m2 = hs
@@ -334,16 +337,21 @@ fn session(
     // Shared with the frame loop, which is the only writer, and with anybody
     // asking for status, which is the only reader.
     let rtt_ms: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
-    if let Ok(s) = socket.try_clone() {
-        state.register(Live {
-            device_id: device_id.clone(),
-            peer,
-            socket: s,
-            device_name: device_name.clone(),
-            path,
-            since_ms: now,
-            rtt_ms: Arc::clone(&rtt_ms),
-        });
+    // A connection revoke cannot find is one revoke cannot end, so a socket
+    // that cannot be cloned for the list is not served at all.
+    let live = Live {
+        device_id: device_id.clone(),
+        peer,
+        socket: socket.try_clone()?,
+        device_name: device_name.clone(),
+        path,
+        since_ms: now,
+        rtt_ms: Arc::clone(&rtt_ms),
+        scope,
+    };
+    if !admit(state, live, &key_text) {
+        let _ = socket.shutdown(std::net::Shutdown::Both);
+        return Err(ServeError::NotPaired);
     }
 
     let result = frames(
@@ -353,10 +361,45 @@ fn session(
         state,
         agentd,
         &device_id,
+        scope,
         rtt_ms,
     );
     state.unregister(&device_id, peer);
     result
+}
+
+/// Whether a session of this scope may open a channel with this request. A
+/// full session may open any (what is behind it decides); a companion session
+/// only a request the allow list names AND the phone routers' own predicates
+/// claim, so nothing it opens can fall through to nex or `rime-agentd`.
+fn may_open(scope: Scope, request: &[u8]) -> bool {
+    scope == Scope::Full
+        || (crate::companion::channel_allowed(scope, request)
+            && (crate::phone::is_channel(request) || crate::phone::is_take(request)))
+}
+
+/// Put this connection on the live list, then ask the store again whether
+/// `key_text` still opens it, with the same device and scope.
+///
+/// A revoke, `companion_forget` or replaced companion key that lands between
+/// the handshake's lookup and the list ends the connections it finds on the
+/// list, so it would miss this one. Asked again AFTER it is listed, one of
+/// the two always sees the other: the change is in the store before this
+/// look, or this connection is on the list before the change ends what is
+/// there. `false`, with the connection taken off the list again, when it no
+/// longer opens.
+fn admit(state: &State, live: Live, key_text: &str) -> bool {
+    let (device_id, peer, scope) = (live.device_id.clone(), live.peer, live.scope);
+    state.register(live);
+    let still = state.devices().is_ok_and(|store| {
+        store
+            .authenticate(key_text)
+            .is_some_and(|(d, s)| d.id == device_id && s == scope)
+    });
+    if !still {
+        state.unregister(&device_id, peer);
+    }
+    still
 }
 
 /// The frame loop.
@@ -372,6 +415,9 @@ fn session(
 /// that channel is still behind the worker (see [`Channels`]); `Ping` is
 /// answered here and `Pong` is timed here, which is what keeps both working
 /// while a request is in flight.
+// The scope travels as its own argument, next to the device id it belongs
+// to, so a reader can follow it from the handshake to the worker.
+#[allow(clippy::too_many_arguments)]
 fn frames(
     mut inbound: TcpStream,
     outbound: TcpStream,
@@ -379,6 +425,7 @@ fn frames(
     state: &Arc<State>,
     agentd: &std::path::Path,
     device_id: &str,
+    scope: Scope,
     rtt_ms: Arc<Mutex<Option<u64>>>,
 ) -> Result<(), ServeError> {
     // The write half gets a deadline the read half never has. A read that
@@ -456,6 +503,7 @@ fn frames(
             state: Arc::clone(state),
             agentd: agentd.to_path_buf(),
             device_id: device_id.to_string(),
+            scope,
             connection,
             sealer: Arc::clone(&sealer),
             channels: Arc::clone(&channels),
@@ -490,6 +538,16 @@ fn frames(
     let _ = hangup.shutdown(std::net::Shutdown::Both);
     // What the phone was playing was true while it was here to say so.
     crate::media::media().ended(device_id, connection);
+    // A messages request dies with the connection it was asked on, and what
+    // it had gathered goes with it (contract §2.11).
+    state.messages.ended(device_id, connection);
+    // So does a calls request, and what the connection said about a call:
+    // a ringing notification closes rather than ring on for a phone gone.
+    state.calls.ended(device_id, connection, crate::mirror::mirror());
+    // A photos listing or save asked on it fails, and the thumbnails its
+    // listing wrote are removed (contract §2.13).
+    state.photos.ended(device_id, connection);
+    state.events.ended(device_id, connection);
 
     if let Some(quiet) = silenced.lock().ok().and_then(|s| *s) {
         return Err(ServeError::Silent(quiet));
@@ -683,6 +741,10 @@ struct Worker {
     state: Arc<State>,
     agentd: PathBuf,
     device_id: String,
+    /// Which key opened this connection. A companion session's lines and
+    /// channels are checked against `companion`'s lists here, before any
+    /// routing.
+    scope: Scope,
     /// This connection's number, unique in this process: what a phone's
     /// media player is tied to (`media.rs`).
     connection: u64,
@@ -708,8 +770,19 @@ impl Worker {
         for work in queue {
             match work {
                 Work::Control(line) => {
-                    let reply = answered_here(&self.state, &self.device_id, self.connection, &line)
-                        .unwrap_or_else(|| control(&self.agentd, &self.device_id, &line));
+                    // A phone setting this computer's clipboard (§1.8) is
+                    // remembered BEFORE it is forwarded: the Shell sees the
+                    // new clipboard as soon as rime-agentd writes it, and its
+                    // `rime remote clipboard` must find the text already
+                    // known, or it goes straight back to this phone (§2.14).
+                    // Only a full session may write it at all (a companion
+                    // one is refused below), so only a full one is remembered.
+                    if self.scope == Scope::Full {
+                        if let Some(text) = crate::clipboard::phone_wrote(&line) {
+                            self.state.clip_echo.wrote(&self.device_id, text);
+                        }
+                    }
+                    let reply = self.control(&line);
                     let _ = send(&self.sealer, Frame::Control(reply));
                 }
                 Work::Open { channel, request } => self.open(channel, &request),
@@ -732,6 +805,17 @@ impl Worker {
         }
     }
 
+    /// One control line's reply.
+    ///
+    /// The scope first, before anything is routed: a companion session's verb
+    /// that is not on the list is refused here and goes nowhere. And a
+    /// companion line that passed the list but that nothing in this process
+    /// answered is refused too, rather than forwarded: `control` (the road to
+    /// `rime-agentd`) is reachable from a full session only.
+    fn control(&self, line: &[u8]) -> Vec<u8> {
+        reply_to(&self.state, &self.agentd, &self.device_id, self.scope, self.connection, line)
+    }
+
     fn open(&self, channel: u32, request: &[u8]) {
         {
             let mut c = lock(&self.channels);
@@ -739,6 +823,27 @@ impl Worker {
                 c.done(channel);
                 return;
             }
+        }
+        // A companion session opens the phone channels and nothing else. The
+        // second half of the check is the router's own predicates, so a
+        // request the list let through can still never fall to nex or to
+        // `rime-agentd` below. Refused the way a refused takeover is: the
+        // reply, then the close.
+        if !may_open(self.scope, request) {
+            let what = crate::companion::verb_of(request);
+            let _ = send(
+                &self.sealer,
+                Frame::Control(crate::companion::refusal(what.as_deref().unwrap_or("that channel"))),
+            );
+            let _ = send(
+                &self.sealer,
+                Frame::Close {
+                    channel,
+                    reason: String::new(),
+                },
+            );
+            lock(&self.channels).done(channel);
+            return;
         }
         // A nex channel goes to nexd and is read-only; everything else is a
         // rime-agentd takeover. nex's refusal travels as a reply then a
@@ -750,7 +855,7 @@ impl Worker {
             // stays in `state.events`, and a ring is a line written there.
             self.state
                 .events
-                .open(&self.device_id)
+                .open_for(&self.device_id, self.connection, self.scope == Scope::Full)
                 .map(|(stream, _)| {
                     // What was sent while the phone was away, written now:
                     // the lines wait in the socketpair and the pump, which
@@ -779,6 +884,21 @@ impl Worker {
                     let ch = DaemonChannel {
                         stream,
                         read_only: true,
+                    };
+                    (ch, reply, Vec::new(), true)
+                })
+                .map_err(crate::proxy::ProxyError::NotTakenOver)
+        } else if crate::photos::is_upload(request) {
+            // A photo somebody here asked to save, uploaded into the file
+            // they opened; the channel closes after `uploaded`. Writable:
+            // the phone's Data is the photo.
+            self.state
+                .photos
+                .open_upload(&self.device_id, self.scope == Scope::Full, request)
+                .map(|(stream, reply)| {
+                    let ch = DaemonChannel {
+                        stream,
+                        read_only: false,
                     };
                     (ch, reply, Vec::new(), true)
                 })
@@ -862,20 +982,36 @@ impl Worker {
     }
 }
 
+/// The reply to one control line from a session of this scope; see
+/// [`Worker::control`].
+fn reply_to(state: &State, agentd: &Path, device_id: &str, scope: Scope, connection: u64, line: &[u8]) -> Vec<u8> {
+    let cmd = crate::companion::verb_of(line);
+    if !crate::companion::allowed(scope, cmd.as_deref()) {
+        return crate::companion::refusal(cmd.as_deref().unwrap_or("that request"));
+    }
+    match answered_here(state, device_id, scope, connection, line) {
+        Some(reply) => reply,
+        None if scope == Scope::Full => control(agentd, device_id, line),
+        None => crate::companion::refusal(cmd.as_deref().unwrap_or("that request")),
+    }
+}
+
 /// A control line this service answers itself, or `None` to forward it.
 ///
-/// `remote_hello` and push registration. Each is about the CONNECTION — what
+/// `remote_hello`, the companion key, and push registration. Each is about the CONNECTION — what
 /// this end of it can do, how the phone is reached — which `rime-agentd` has
 /// no concept of; see `push::control` for why this is the seam and not a new
 /// frame tag. Everything else is forwarded verbatim.
-fn answered_here(state: &State, device_id: &str, connection: u64, line: &[u8]) -> Option<Vec<u8>> {
+fn answered_here(state: &State, device_id: &str, scope: Scope, connection: u64, line: &[u8]) -> Option<Vec<u8>> {
     let cmd = serde_json::from_slice::<serde_json::Value>(line)
         .ok()
         .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_string));
     match cmd.as_deref() {
         // Through the list, so "which verbs does this file take" has one
         // answer a test can read — the same rule `push::control` keeps.
-        Some(c) if VERBS.contains(&c) => Some(remote_hello(state)),
+        Some(c) if VERBS.contains(&c) => Some(remote_hello(state, scope)),
+        // The companion key: minted and forgotten by a full session only.
+        Some(c) if crate::companion::VERBS.contains(&c) => crate::companion::control(state, device_id, scope, line),
         // The bridge to nex: the line goes to nexd, never to rime-agentd, and
         // only after this connection's device has been declared as its origin.
         Some(c) if crate::nex::VERBS.contains(&c) => Some(crate::nex::control(&state.nexd(), device_id, line)),
@@ -888,6 +1024,25 @@ fn answered_here(state: &State, device_id: &str, connection: u64, line: &[u8]) -
         Some(c) if crate::mirror::VERBS.contains(&c) => {
             let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
             Some(crate::mirror::control(crate::mirror::mirror(), device_id, name.as_deref().unwrap_or(""), line))
+        }
+        // A phone's SMS threads, answering a request somebody here made.
+        Some(c) if crate::messages::VERBS.contains(&c) => state.messages.control(device_id, connection, line),
+        // A phone's recent photos, answering a listing or a save somebody
+        // here asked for.
+        Some(c) if crate::photos::VERBS.contains(&c) => state.photos.control(device_id, connection, line),
+        // A phone's calls: its state, shown here while it rings, and the
+        // answers to what somebody here asked of it.
+        Some(c) if crate::calls::VERBS.contains(&c) => {
+            let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
+            let report = state.phones().get(device_id).cloned();
+            state.calls.control(
+                device_id,
+                name.as_deref().unwrap_or(""),
+                connection,
+                report.as_ref(),
+                crate::mirror::mirror(),
+                line,
+            )
         }
         // What the phone is playing, shown here as a media player.
         Some(c) if crate::media::VERBS.contains(&c) => {
@@ -910,7 +1065,10 @@ fn answered_here(state: &State, device_id: &str, connection: u64, line: &[u8]) -
 /// accepts. A phone that paired on another network, or before a DHCP lease
 /// changed, refreshes its stored list from this instead of dialling
 /// addresses that stopped being this machine's.
-fn remote_hello(state: &State) -> Vec<u8> {
+///
+/// `scope` is which of the device's keys opened this session, so a phone on
+/// its companion key knows what it may ask for.
+fn remote_hello(state: &State, scope: Scope) -> Vec<u8> {
     // `nex` only while nexd answers: a phone that shows nex screens for a
     // machine without it would show nothing but errors. Asked each time, so
     // starting nexd after the phone connected is seen on its next hello.
@@ -919,6 +1077,10 @@ fn remote_hello(state: &State) -> Vec<u8> {
     features.extend(crate::phone::FEATURES);
     features.extend(crate::mirror::FEATURES);
     features.extend(crate::media::FEATURES);
+    features.extend(crate::messages::FEATURES);
+    features.extend(crate::calls::FEATURES);
+    features.extend(crate::photos::FEATURES);
+    features.extend(crate::companion::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
     }
@@ -927,6 +1089,7 @@ fn remote_hello(state: &State) -> Vec<u8> {
         "version": rime_remote_core::REMOTE_PROTOCOL_VERSION,
         "features": features,
         "lan": state.lan_addresses(),
+        "scope": scope.as_str(),
     })
     .to_string()
     .into_bytes()
@@ -1266,7 +1429,7 @@ mod tests {
     #[test]
     fn remote_hello_is_answered_here_with_what_this_build_does() {
         let (state, dir) = a_state("hello");
-        let reply = answered_here(&state, "pixel-8", 0, br#"{"cmd":"remote_hello"}"#)
+        let reply = answered_here(&state, "pixel-8", Scope::Full, 0, br#"{"cmd":"remote_hello"}"#)
             .expect("remote_hello reached the daemon");
         let v: serde_json::Value = serde_json::from_slice(&reply).expect("json");
         assert_eq!(v["reply"], "remote", "{v}");
@@ -1277,11 +1440,13 @@ mod tests {
             v["features"],
             serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
                                "machine_status", "machine_lock", "media",
-                               "device_events", "phone_report", "take_offer", "phone_focus",
+                               "device_events", "phone_report", "take_offer", "phone_focus", "phone_clipboard",
                                "phone_notifications", "phone_notification_reply",
-                               "phone_media", "phone_media_control"]),
+                               "phone_media", "phone_media_control", "phone_messages", "phone_calls",
+                               "phone_photos", "companion_link"]),
             "{v}"
         );
+        assert_eq!(v["scope"], "full", "{v}");
         // The pairing code's list, with the port this listener has — and
         // `host:port` a phone can split, so an IPv6 entry is bracketed.
         let lan: Vec<String> = serde_json::from_value(v["lan"].clone()).expect("strings");
@@ -1310,10 +1475,14 @@ mod tests {
             .chain(crate::phone::VERBS.iter())
             .chain(crate::mirror::VERBS.iter())
             .chain(crate::media::VERBS.iter())
+            .chain(crate::messages::VERBS.iter())
+            .chain(crate::calls::VERBS.iter())
+            .chain(crate::photos::VERBS.iter())
+            .chain(crate::companion::VERBS.iter())
         {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
             assert!(
-                answered_here(&state, "pixel-8", 0, line.as_bytes()).is_some(),
+                answered_here(&state, "pixel-8", Scope::Full, 0, line.as_bytes()).is_some(),
                 "{cmd} was forwarded"
             );
         }
@@ -1334,7 +1503,7 @@ mod tests {
             b"remote_hello".to_vec(),
         ] {
             assert_eq!(
-                answered_here(&state, "pixel-8", 0, &line),
+                answered_here(&state, "pixel-8", Scope::Full, 0, &line),
                 None,
                 "{} never reached the daemon",
                 String::from_utf8_lossy(&line)
@@ -1346,13 +1515,17 @@ mod tests {
         assert_eq!(crate::phone::VERBS, ["phone_report", "ring_ack", "offer_ack", "offer_done"]);
         assert_eq!(crate::mirror::VERBS, ["phone_notification", "phone_notification_removed"]);
         assert_eq!(crate::media::VERBS, ["phone_media"]);
+        assert_eq!(crate::messages::VERBS, ["messages_reply", "messages_changed", "messages_sent"]);
+        assert_eq!(crate::calls::VERBS, ["call_state", "call_history_reply", "call_done"]);
+        assert_eq!(crate::photos::VERBS, ["photos_reply", "photos_fetch_reply"]);
+        assert_eq!(crate::companion::VERBS, ["companion_register", "companion_forget"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn nex_is_a_feature_only_while_nexd_answers() {
         let (state, dir) = a_state("nexfeature");
-        let hello = |s: &State| -> serde_json::Value { serde_json::from_slice(&remote_hello(s)).expect("json") };
+        let hello = |s: &State| -> serde_json::Value { serde_json::from_slice(&remote_hello(s, Scope::Full)).expect("json") };
         assert!(!hello(&state)["features"].as_array().unwrap().iter().any(|f| f == "nex"));
         let sock = dir.join("nexd.sock");
         let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
@@ -1452,5 +1625,271 @@ mod tests {
         // And `done` past zero cannot wrap into a channel stuck behind for ever.
         c.done(9);
         assert!(!c.is_behind(9));
+    }
+
+    /// Every verb this process answers itself, from every module's own list.
+    /// Every control verb this process answers itself, from each module's
+    /// own list. A NEW MODULE that answers verbs in `answered_here` must add
+    /// its `VERBS` in three places: here, in the chain in
+    /// `only_the_reserved_verbs_are_answered_here_and_everything_else_is_forwarded`,
+    /// and as an allowed or refused entry in
+    /// `every_verb_this_process_answers_has_a_companion_decision_written_down`
+    /// (and in `companion::ALLOWED_VERBS` if a companion session may use it).
+    /// A module that adds a CHANNEL adds its request name to the candidates in
+    /// `every_channel_a_router_claims_is_decided_and_only_the_phones_open`.
+    fn every_reserved_verb() -> Vec<&'static str> {
+        VERBS
+            .iter()
+            .chain(crate::push::VERBS.iter())
+            .chain(crate::nex::VERBS.iter())
+            .chain(crate::machine::VERBS.iter())
+            .chain(crate::phone::VERBS.iter())
+            .chain(crate::mirror::VERBS.iter())
+            .chain(crate::media::VERBS.iter())
+            .chain(crate::messages::VERBS.iter())
+            .chain(crate::calls::VERBS.iter())
+            .chain(crate::photos::VERBS.iter())
+            .chain(crate::companion::VERBS.iter())
+            .copied()
+            .collect()
+    }
+
+    /// `rime-agentd` verbs a phone sends, and a few lines that are not verbs
+    /// at all. None of them may pass on a companion session.
+    const AGENTD_AND_GARBAGE: [&str; 24] = [
+        r#"{"cmd":"hello"}"#,
+        r#"{"cmd":"list"}"#,
+        r#"{"cmd":"info","id":1}"#,
+        r#"{"cmd":"input","id":1,"text":"rm -rf ~"}"#,
+        r#"{"cmd":"inject","id":1,"source":"x"}"#,
+        r#"{"cmd":"run","agent":"claude"}"#,
+        r#"{"cmd":"signal","id":1,"signal":"KILL"}"#,
+        r#"{"cmd":"peek","id":1}"#,
+        r#"{"cmd":"clipboard"}"#,
+        r#"{"cmd":"clipboard_write","text":"x"}"#,
+        r#"{"cmd":"privilege_request","verb":"install","args":["x"],"reason":"y"}"#,
+        r#"{"cmd":"decide","id":1,"decision":"allow"}"#,
+        r#"{"cmd":"requests"}"#,
+        r#"{"cmd":"declare_origin","origin":"local-terminal","actor":"x"}"#,
+        r#"{"cmd":"attach","id":1,"cols":80,"rows":24}"#,
+        r#"{"cmd":"receive","id":1,"name":"a","len":1}"#,
+        r#"{"cmd":"save_file","name":"a","len":1}"#,
+        r#"{"cmd":"device_events"}"#,
+        r#"{"cmd":"phone_report_and_more"}"#,
+        r#"{"cmd":1}"#,
+        r#"{"cmd":null}"#,
+        r#"{"remote_hello":true}"#,
+        "remote_hello",
+        "",
+    ];
+
+    #[test]
+    fn every_verb_this_process_answers_has_a_companion_decision_written_down() {
+        // The allow list, and everything refused, spelled out here rather than
+        // read back from `companion`: a verb added to any module's list is not
+        // in either set below, and this test fails until somebody decides.
+        let allowed = [
+            "remote_hello",
+            "phone_report",
+            "ring_ack",
+            "offer_ack",
+            "offer_done",
+            "phone_notification",
+            "phone_notification_removed",
+            "phone_media",
+            "messages_reply",
+            "messages_changed",
+            // A call rings on a locked phone, and its own lock screen lets the
+            // person answer or decline it; a dial is refused by the computer
+            // and the phone on that lane (calls.rs, contract §2.12).
+            "call_state",
+            "call_done",
+            "call_history_reply",
+        ];
+        let refused = [
+            "messages_sent",
+            "push_register",
+            "push_unregister",
+            "nex",
+            "nex_events",
+            "machine_status",
+            "machine_lock",
+            "media",
+            "media_control",
+            "volume",
+            "companion_register",
+            "companion_forget",
+            // Photos are listed and saved from an unlocked phone only: the
+            // computer asks nothing of a companion session and takes no
+            // answer from one (photos.rs, contract §2.13).
+            "photos_reply",
+            "photos_fetch_reply",
+        ];
+        let all = every_reserved_verb();
+        for v in &all {
+            let a = allowed.contains(v);
+            let r = refused.contains(v);
+            assert!(a ^ r, "{v} needs exactly one companion decision in this test");
+            assert_eq!(crate::companion::allowed(Scope::Companion, Some(v)), a, "{v}");
+            assert!(crate::companion::allowed(Scope::Full, Some(v)), "a full session lost {v}");
+        }
+        for v in allowed.iter().chain(refused.iter()) {
+            assert!(all.contains(v), "{v} is decided here but nothing answers it");
+        }
+        assert_eq!(crate::companion::ALLOWED_VERBS, allowed);
+        assert!(crate::companion::CLIPBOARD_VERBS.is_empty());
+        for line in AGENTD_AND_GARBAGE {
+            let cmd = crate::companion::verb_of(line.as_bytes());
+            assert!(!crate::companion::allowed(Scope::Companion, cmd.as_deref()), "{line}");
+        }
+        assert!(!crate::companion::allowed(Scope::Companion, None));
+        assert!(crate::companion::allowed(Scope::Full, None), "a full session's garbage still goes to the daemon");
+    }
+
+    /// A stand-in `rime-agentd` socket that counts the connections it gets and
+    /// answers each like the daemon: `ok` to the declaration, then one reply.
+    fn counting_agentd(dir: &Path) -> (PathBuf, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::io::BufRead;
+        let sock = dir.join("agentd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = Arc::clone(&count);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                seen.fetch_add(1, Ordering::SeqCst);
+                let mut w = stream.try_clone().expect("clone");
+                let mut r = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                let _ = r.read_line(&mut line);
+                let _ = writeln!(w, r#"{{"reply":"ok"}}"#);
+                line.clear();
+                let _ = r.read_line(&mut line);
+                let _ = writeln!(w, r#"{{"reply":"sessions","sessions":[]}}"#);
+            }
+        });
+        (sock, count)
+    }
+
+    #[test]
+    fn every_channel_a_router_claims_is_decided_and_only_the_phones_open() {
+        // Candidates: every name a module answers or routes, `rime-agentd`'s
+        // channels, near misses and garbage. The decision is then read off
+        // the routers' OWN predicates, not a list kept beside them.
+        let mut names: Vec<&str> = every_reserved_verb();
+        names.extend(crate::companion::ALLOWED_CHANNELS);
+        names.extend([crate::phone::CHANNEL, crate::phone::TAKE, crate::photos::UPLOAD]);
+        names.extend(["attach", "receive", "save_file", "device_events_and_more", "take_offer2", "DEVICE_EVENTS"]);
+        let mut requests: Vec<Vec<u8>> =
+            names.iter().map(|n| format!(r#"{{"cmd":"{n}","id":1,"cols":80,"rows":24}}"#).into_bytes()).collect();
+        requests.extend(AGENTD_AND_GARBAGE.iter().map(|l| l.as_bytes().to_vec()));
+        let mut opened = Vec::new();
+        for r in &requests {
+            let shown = String::from_utf8_lossy(r);
+            let phone = crate::phone::is_channel(r) || crate::phone::is_take(r);
+            let nex = crate::nex::is_channel(r);
+            let upload = crate::photos::is_upload(r);
+            assert!([phone, nex, upload].iter().filter(|c| **c).count() <= 1, "two routers claim {shown}");
+            if upload {
+                assert!(!may_open(Scope::Companion, r), "a photo upload opens on a companion link: {shown}");
+            }
+            assert_eq!(may_open(Scope::Companion, r), phone, "{shown}");
+            assert_eq!(crate::companion::channel_allowed(Scope::Companion, r), phone, "{shown}");
+            if nex {
+                assert!(!may_open(Scope::Companion, r), "a nex channel opens on a companion link: {shown}");
+            }
+            assert!(may_open(Scope::Full, r), "a full session lost {shown}");
+            if phone {
+                opened.push(crate::companion::verb_of(r).expect("a verb"));
+            }
+        }
+        opened.sort();
+        opened.dedup();
+        assert_eq!(opened, ["device_events", "take_offer"], "the phone routers claim a channel nobody decided");
+        for v in crate::nex::VERBS {
+            let r = format!(r#"{{"cmd":"{v}"}}"#);
+            assert!(crate::nex::is_channel(r.as_bytes()) && !may_open(Scope::Companion, r.as_bytes()), "{v}");
+        }
+    }
+
+    #[test]
+    fn a_connection_whose_key_stopped_opening_it_before_it_was_listed_is_not_admitted() {
+        let (state, _dir) = a_state("admit");
+        let key = |n: u8| rime_remote_core::b64_encode(&[n; 32]);
+        let id = {
+            let mut store = state.devices().expect("store");
+            let d = store.pair(&key(1), "phone", 1, false).expect("pair");
+            store.set_companion(&d.id, &key(2)).expect("companion");
+            d.id
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut held = Vec::new();
+        let mut live = |scope: Scope| {
+            held.push(TcpStream::connect(addr).expect("connect"));
+            let (socket, peer) = listener.accept().expect("accept");
+            Live {
+                device_id: id.clone(),
+                peer: crate::state::canonical(Some(peer)),
+                socket,
+                device_name: "phone".into(),
+                path: rime_remote_core::rendezvous::Path::Lan,
+                since_ms: 0,
+                rtt_ms: Arc::new(Mutex::new(None)),
+                scope,
+            }
+        };
+        let listed = |state: &State| state.connections().len();
+
+        // Still opens: listed.
+        assert!(admit(&state, live(Scope::Full), &key(1)));
+        assert!(admit(&state, live(Scope::Companion), &key(2)));
+        assert_eq!(listed(&state), 2);
+        // A key presented with the wrong scope (the store says the other one).
+        assert!(!admit(&state, live(Scope::Companion), &key(1)));
+        assert_eq!(listed(&state), 2, "a refused connection stayed on the list");
+
+        // The companion key is replaced after the handshake looked it up and
+        // before the connection was listed: refused, and not listed.
+        state.devices().expect("store").set_companion(&id, &key(3)).expect("replace");
+        assert!(!admit(&state, live(Scope::Companion), &key(2)), "a replaced key was admitted");
+        // Forgotten in that window.
+        state.devices().expect("store").forget_companion(&id);
+        assert!(!admit(&state, live(Scope::Companion), &key(3)), "a forgotten key was admitted");
+        // Revoked in that window: neither key.
+        state.devices().expect("store").revoke(&id, 2).expect("revoke");
+        assert!(!admit(&state, live(Scope::Full), &key(1)), "a revoked device was admitted");
+        assert_eq!(listed(&state), 2, "a refused connection stayed on the list");
+    }
+
+    #[test]
+    fn a_companion_line_is_refused_before_routing_and_never_reaches_rime_agentd() {
+        let (state, dir) = a_state("companion-gate");
+        let (agentd, count) = counting_agentd(&dir);
+        let refused = every_reserved_verb()
+            .into_iter()
+            .filter(|v| !crate::companion::ALLOWED_VERBS.contains(v))
+            .map(|v| format!(r#"{{"cmd":"{v}"}}"#))
+            .chain(AGENTD_AND_GARBAGE.iter().map(|l| l.to_string()))
+            .collect::<Vec<_>>();
+        for line in &refused {
+            let r = reply_to(&state, &agentd, "pixel-8", Scope::Companion, 0, line.as_bytes());
+            let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
+            assert_eq!(v["kind"], "not_allowed", "{line}: {v}");
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 0, "a companion line reached rime-agentd");
+
+        // A companion session's hello says so.
+        let r = reply_to(&state, &agentd, "pixel-8", Scope::Companion, 0, br#"{"cmd":"remote_hello"}"#);
+        let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
+        assert_eq!(v["reply"], "remote", "{v}");
+        assert_eq!(v["scope"], "companion", "{v}");
+
+        // The control arm: the same daemon, a full session, is reached, so
+        // the zero above is a measurement and not a socket nobody could open.
+        let r = reply_to(&state, &agentd, "pixel-8", Scope::Full, 0, br#"{"cmd":"list"}"#);
+        let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
+        assert_eq!(v["reply"], "sessions", "{v}");
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

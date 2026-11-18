@@ -67,6 +67,50 @@ object Phone {
      */
     const val CAN_FOCUS: String = "focus"
 
+    /**
+     * The word in `can` that says the person turned on "Messages on your
+     * computer" and granted reading SMS (§2.11): the computer may ask for
+     * this phone's conversations, and, over an unlocked link, send one.
+     */
+    const val CAN_MESSAGES: String = "messages"
+
+    /**
+     * The words in `can` that say the person turned on "Calls on your
+     * computer" and the phone can see its calls (§2.12), and, each with its
+     * own permission, what the computer may do with them: read the history,
+     * answer, decline and hang up, and place a call. Dialling is never
+     * offered on a companion link.
+     */
+    const val CAN_CALLS: String = "calls"
+    const val CAN_CALLS_HISTORY: String = "calls_history"
+    const val CAN_CALLS_ANSWER: String = "calls_answer"
+    const val CAN_CALLS_DIAL: String = "calls_dial"
+
+    /**
+     * The word in `can` that says the person turned on "Photos on your
+     * computer", Android lets the app read images, and the link is a full one
+     * on an unlocked app (§2.13): the computer may list this phone's recent
+     * photos and fetch one. Never on a companion link.
+     */
+    const val CAN_PHOTOS: String = "photos"
+
+    /**
+     * The feature a machine offers once it sends its clipboard to phones that
+     * ask (contract §2.14). Only to such a machine does the report say
+     * [CAN_CLIPBOARD].
+     */
+    const val CLIPBOARD: String = "phone_clipboard"
+
+    /**
+     * The word in `can` that says the person turned on "Get the computer's
+     * clipboard" and the app is unlocked: this phone puts a `clipboard`
+     * line's text on its own clipboard (contract §2.14).
+     */
+    const val CAN_CLIPBOARD: String = "clipboard"
+
+    /** The most text one `clipboard` line carries, in bytes of UTF-8 (§2.14). */
+    const val MAX_CLIPBOARD_BYTES: Int = 64 * 1024
+
     /** The channel, and the feature, a sent file or text is taken on. */
     const val TAKE: String = "take_offer"
 
@@ -81,11 +125,11 @@ object Phone {
     const val STALE_PUSH_S: Long = 60
 
     /**
-     * The longest event line accepted. The longest event is a reply: 2000
-     * characters of up to four bytes each, a quote escaped to two, so about
-     * 8 KB with its key; twice that leaves room and still bounds the buffer.
+     * The longest event line accepted. The longest event is a clipboard
+     * (§2.14): the computer refuses one whose line, escaped, is over 192 KiB,
+     * so this leaves room and still bounds the buffer.
      */
-    const val MAX_LINE: Int = 16 * 1024
+    const val MAX_LINE: Int = 256 * 1024
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -217,6 +261,17 @@ object Phone {
             }
             // A real boolean only: a quoted "true" is not one.
             "focus" -> o.prim("dnd")?.takeIf { !it.isString }?.booleanOrNull?.let { DeviceEvent.Focus(it) }
+            "clipboard" -> {
+                val text = o.text("text")
+                    ?.takeIf { it.isNotEmpty() && it.toByteArray(Charsets.UTF_8).size <= MAX_CLIPBOARD_BYTES }
+                    ?: return null
+                // Absent is false; anything but a real boolean is not a line.
+                val sensitive = when (val p = o.prim("sensitive")) {
+                    null -> false
+                    else -> p.takeIf { !it.isString }?.booleanOrNull ?: return null
+                }
+                DeviceEvent.Clipboard(text, sensitive)
+            }
             "media_control" -> {
                 val action = o.text("action")?.takeIf { it in Media.CONTROL_ACTIONS } ?: return null
                 // A seek says where to; nothing else carries a position.
@@ -226,6 +281,53 @@ object Phone {
                     null
                 }
                 DeviceEvent.MediaControl(action, position)
+            }
+            "messages_request" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                // Anything present must be right; a thread or page that is
+                // not a whole number is not quietly read as "all of them".
+                val thread = if (o.containsKey("thread")) o.long("thread")?.takeIf { it >= 0 } ?: return null else null
+                val before = if (o.containsKey("before")) o.long("before")?.takeIf { it >= 0 } ?: return null else null
+                val limit = o.long("limit")?.takeIf { it >= 1 } ?: return null
+                DeviceEvent.MessagesRequest(id, thread, before, limit.coerceAtMost(Messages.MAX_LIMIT.toLong()).toInt())
+            }
+            "messages_send" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                // The text as typed: the sender checks it and says why it
+                // will not send it, rather than the event vanishing here.
+                val text = o.text("text") ?: return null
+                val to = o["to"]?.let { el ->
+                    val list = el as? kotlinx.serialization.json.JsonArray ?: return null
+                    list.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: return null }
+                }
+                val thread = if (o.containsKey("thread")) o.long("thread")?.takeIf { it >= 0 } ?: return null else null
+                if ((to == null) == (thread == null)) return null
+                DeviceEvent.MessagesSend(id, to, thread, text)
+            }
+            "call_action" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                val action = o.text("action")?.takeIf { it in Calls.ACTIONS } ?: return null
+                // A number only with a dial, and a dial always with one.
+                val number = if (action == Calls.DIAL) o.text("number") ?: return null else null
+                DeviceEvent.CallAction(id, action, number)
+            }
+            "call_history_request" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                val before = if (o.containsKey("before")) o.long("before")?.takeIf { it >= 0 } ?: return null else null
+                val limit = o.long("limit")?.takeIf { it >= 1 } ?: return null
+                DeviceEvent.CallHistoryRequest(id, before, limit.coerceAtMost(Calls.MAX_LIMIT.toLong()).toInt())
+            }
+            "photos_request" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                // A page that is not a whole number is not quietly read as "the newest".
+                val before = if (o.containsKey("before")) o.long("before")?.takeIf { it >= 0 } ?: return null else null
+                val limit = o.long("limit")?.takeIf { it >= 1 } ?: return null
+                DeviceEvent.PhotosRequest(id, before, limit.coerceAtMost(Photos.MAX_LIMIT.toLong()).toInt())
+            }
+            "photos_fetch" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                val photo = o.long("photo")?.takeIf { it >= 0 } ?: return null
+                DeviceEvent.PhotosFetch(id, photo)
             }
             else -> null
         }
@@ -278,13 +380,50 @@ sealed interface DeviceEvent {
     /** The computer asks this phone's Do Not Disturb to be on ([dnd]) or off (§2.9). */
     data class Focus(val dnd: Boolean) : DeviceEvent
 
+    /**
+     * The computer's clipboard now holds [text] (§2.14); [sensitive] when the
+     * computer marked it as a password manager's copy.
+     */
+    data class Clipboard(val text: String, val sensitive: Boolean) : DeviceEvent {
+        // Whatever the person copied, perhaps a password: never in a log line.
+        override fun toString(): String = "Clipboard(text=<${text.length} chars>, sensitive=$sensitive)"
+    }
+
     /** The person replied [text], on the computer, to the mirrored notification with this [key]. */
     data class Replied(val key: String, val text: String) : DeviceEvent {
         // Somebody's message: never in a log line by accident.
         override fun toString(): String = "Replied(key=$key, text=<${text.length} chars>)"
     }
 
+    /**
+     * The computer asks for this phone's SMS conversations (§2.11): the list
+     * when [thread] is null, or one conversation's messages; at most [limit]
+     * of them, all older than [before] (unix milliseconds) when it is set.
+     */
+    data class MessagesRequest(val id: Long, val thread: Long?, val before: Long?, val limit: Int) : DeviceEvent
+
+    /** The computer asks this phone to send [text] as an SMS, to [to] or into [thread] (§2.11). */
+    data class MessagesSend(val id: Long, val to: List<String>?, val thread: Long?, val text: String) : DeviceEvent {
+        // Somebody's message, and their number: never in a log line by accident.
+        override fun toString(): String =
+            "MessagesSend(id=$id, to=${to?.size?.let { "<$it>" }}, thread=$thread, text=<${text.length} chars>)"
+    }
+
     /** [machine] sent this phone a file or text of [len] bytes; take it with `take_offer`. */
+    /** Answer, decline, hang up or dial ([number]) the phone's call (§2.12). */
+    data class CallAction(val id: Long, val action: String, val number: String?) : DeviceEvent {
+        override fun toString(): String = "CallAction(id=$id, action=$action)"
+    }
+
+    /** The newest [limit] calls of the history older than [before] (§2.12). */
+    data class CallHistoryRequest(val id: Long, val before: Long?, val limit: Int) : DeviceEvent
+
+    /** The newest [limit] photos taken before [before] (unix ms, exclusive) when it is set (§2.13). */
+    data class PhotosRequest(val id: Long, val before: Long?, val limit: Int) : DeviceEvent
+
+    /** Send the original of [photo], an id from a listing, on a `photos_upload` channel (§2.13). */
+    data class PhotosFetch(val id: Long, val photo: Long) : DeviceEvent
+
     data class Offer(
         val id: Long,
         val at: Long,
@@ -471,6 +610,27 @@ class PhoneLink(private val link: MachineLink) {
      * for the machine, which has already tried the push.
      */
     fun ack(id: Long) = Phone.readOk(link.request(Phone.ringAck(id), retry = false))
+
+    /**
+     * One line of an answer to a messages request, or a send's result
+     * (§2.11), as [Messages] wrote it. Not retried: the computer's request
+     * belongs to the connection it was asked on, and dies with it.
+     */
+    fun messages(line: String) = Phone.readOk(link.request(line, retry = false))
+
+    /**
+     * A `call_state`, `call_done` or `call_history_reply` line (§2.12), as
+     * [Calls] wrote it. Not retried: an answer belongs to the connection it
+     * was asked on, and a new connection is told the call as it is then.
+     */
+    fun calls(line: String) = Phone.readOk(link.request(line, retry = false))
+
+    /**
+     * A `photos_reply` or `photos_fetch_reply` line (§2.13), as [Photos]
+     * wrote it. Not retried: the computer's request belongs to the connection
+     * it was asked on, and dies with it.
+     */
+    fun photos(line: String) = Phone.readOk(link.request(line, retry = false))
 
     /** Tell the machine this phone has an offer, so it reports "link". Not retried, as for [ack]. */
     fun offerAck(id: Long) = Phone.readOk(link.request(Phone.offerAck(id), retry = false))

@@ -25,12 +25,31 @@
 //! so an agent that could send would choose what a person pastes on their
 //! phone (contract §2.6).
 //!
+//! `messages` and `messages_send` (contract §2.11) are gated the same way,
+//! reading included: a phone's SMS carry one-time codes, so an agent that
+//! could read them could sign in as the owner. Rime Shell classifies as
+//! `rime-shell` and still may.
+//!
+//! `photos` and `photos_save` (contract §2.13) are gated the same way: a
+//! person's photos are theirs, and a saved photo lands in their own folder.
+//! An agent that could list them could read the screenshots of every code,
+//! receipt and message the person ever captured.
+//!
 //! `focus` (contract §2.9) is not gated that way either, for the same reason
 //! `ring` is not: it changes how a phone of the owner's interrupts them, which
 //! the owner can change back on the phone, and the Shell sends it every time
 //! the person toggles Do Not Disturb, from a process the origin rule cannot
 //! always classify. It is still this account's alone, and a paired phone has
 //! no verb that sends it.
+//!
+//! `clipboard` (contract §2.14) is not gated that way either. The Shell sends
+//! it for every copy while "Send my clipboard to my phone" is on, from a
+//! process the origin rule cannot always classify, and the text is the
+//! computer's own clipboard, which any process of this account can already
+//! set. That switch is the Shell's and is not enforced here: any process of
+//! this account may ask, and a phone takes the text only while the person
+//! has "Get the computer's clipboard" on there and the app is unlocked. It is
+//! still this account's alone, and a paired phone has no verb that sends it.
 //!
 //! Listing and revoking are *not* gated that way. Revoking a device is the
 //! safe direction — an agent that revokes the owner's phone is a nuisance,
@@ -66,6 +85,14 @@ pub enum Request {
     /// Set Do Not Disturb on every connected phone that said it follows this
     /// machine's (`can` has "focus").
     Focus { dnd: bool },
+    /// Put this text on the clipboard of every connected phone that asked
+    /// for the computer's clipboard (`can` has "clipboard"). `sensitive`
+    /// marks it as a password or the like, so the phone hides it.
+    Clipboard {
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sensitive: bool,
+    },
     /// Send a phone a file (`kind` "file": the open file rides the request
     /// line as a descriptor, `name` is what the phone is offered) or text
     /// for its clipboard (`kind` "text").
@@ -76,6 +103,64 @@ pub enum Request {
         name: Option<String>,
         #[serde(default)]
         text: Option<String>,
+    },
+    /// A phone's SMS threads, or one thread's messages (contract §2.11).
+    /// `device` may be left out when exactly one phone has Messages on.
+    Messages {
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        thread: Option<u64>,
+        #[serde(default)]
+        before: Option<u64>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Send one SMS from a phone: to a number, or into a thread.
+    MessagesSend {
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        to: Option<String>,
+        #[serde(default)]
+        thread: Option<u64>,
+        text: String,
+    },
+    /// A phone's current call and its call history (contract §2.12).
+    /// `device` may be left out when exactly one phone has calls on.
+    Calls {
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        before: Option<u64>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Answer, decline or hang up the phone's call, or dial `number`.
+    Call {
+        #[serde(default)]
+        device: Option<String>,
+        action: String,
+        #[serde(default)]
+        number: Option<String>,
+    },
+    /// A phone's recent photos, newest first (contract §2.13), with each
+    /// thumbnail written under the runtime directory. `device` may be left
+    /// out when exactly one phone has Photos on.
+    Photos {
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        before: Option<u64>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Save one photo, whole, into the file whose open descriptor rides the
+    /// request line: `rime remote photos save` made it, and names it.
+    PhotosSave {
+        #[serde(default)]
+        device: Option<String>,
+        photo: u64,
     },
 }
 
@@ -116,10 +201,19 @@ pub enum Reply {
         /// older daemon, so a newer `rime` reads none.
         #[serde(default)]
         phones: std::collections::BTreeMap<String, crate::phone::PhoneReport>,
+        /// The ids of the paired devices that have a companion key: they keep
+        /// working after the phone restarts. The key itself is never sent;
+        /// `devices` carries none.
+        #[serde(default)]
+        companions: Vec<String>,
     },
     /// A `focus` line went to this many phones' open events channels. Zero
     /// is an answer, not an error: no phone connected, or none said "focus".
     Focused { reached: usize },
+    /// A `clipboard` line went to this many phones. Zero is an answer: no
+    /// phone connected, none asked for the clipboard, or the only one that
+    /// did put this very text here itself a moment ago.
+    ClipboardSent { reached: usize },
     /// A ring went out. `path` is `link` when the app said it is ringing, or
     /// `push` when the push service took the request (the phone rings if it
     /// is on and online, which nobody here can see).
@@ -135,6 +229,47 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         push_error: Option<String>,
     },
+    /// What a phone answered to `messages`: `threads`, or `thread` and its
+    /// `messages`, newest first. `changed_ms` is when the phone last said
+    /// something changed, while this daemon has been up.
+    Messages {
+        device: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threads: Option<Vec<crate::messages::Thread>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        messages: Option<Vec<crate::messages::Message>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changed_ms: Option<u64>,
+    },
+    /// The phone's radio took the message.
+    MessageSent { device: String },
+    /// A phone's call now (`current`, absent when idle) and its history,
+    /// newest first. `history_error` says why there is no history when the
+    /// phone gave none; the current call is still true then.
+    Calls {
+        device: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current: Option<crate::calls::Call>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calls: Option<Vec<crate::calls::Entry>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        history_error: Option<String>,
+    },
+    /// The phone did what `call` asked.
+    CallDone { device: String, action: String },
+    /// What a phone answered to `photos`, newest first. `partial`: the person
+    /// let the app see only the photos they picked, so this is those.
+    Photos {
+        device: String,
+        photos: Vec<crate::photos::Listed>,
+        #[serde(default)]
+        partial: bool,
+    },
+    /// The photo is in the caller's file: `len` bytes, and `name` is the
+    /// phone's name for it, made a name and nothing else.
+    PhotoSaved { device: String, photo: u64, name: String, len: u64 },
     Ok,
     Error { message: String },
 }
@@ -232,21 +367,62 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::Status => status(state),
         Request::Pair => pair(state),
         Request::Devices => match state.devices() {
-            Ok(store) => Reply::Devices {
-                devices: store.list().into_iter().cloned().collect(),
-                phones: state.phones(),
-            },
+            Ok(store) => devices_reply(&store, state.phones()),
             Err(e) => Reply::error(e.to_string()),
         },
         Request::Revoke { device } => revoke(state, &device),
         Request::Ring { device } => ring(state, &device),
         Request::Focus { dnd } => focus(state, dnd),
+        Request::Clipboard { text, sensitive } => clipboard(state, &text, sensitive),
         Request::Send {
             device,
             kind,
             name,
             text,
         } => send(state, &device, &kind, name, text, fds),
+        Request::Messages {
+            device,
+            thread,
+            before,
+            limit,
+        } => messages(state, device.as_deref(), thread, before, limit),
+        Request::MessagesSend {
+            device,
+            to,
+            thread,
+            text,
+        } => messages_send(state, device.as_deref(), to, thread, &text),
+        Request::Calls { device, before, limit } => calls(state, device.as_deref(), before, limit),
+        Request::Call { device, action, number } => call(state, device.as_deref(), &action, number.as_deref()),
+        Request::Photos { device, before, limit } => photos(state, device.as_deref(), before, limit),
+        Request::PhotosSave { device, photo } => photos_save(state, device.as_deref(), photo, fds),
+    }
+}
+
+/// The device list as `rime remote devices` gets it: whether a device has a
+/// companion key, and never the key.
+fn devices_reply(
+    store: &rime_remote_core::device::DeviceStore,
+    phones: std::collections::BTreeMap<String, crate::phone::PhoneReport>,
+) -> Reply {
+    let list = store.list();
+    let companions = list
+        .iter()
+        .filter(|d| d.is_active() && d.companion_key.is_some())
+        .map(|d| d.id.clone())
+        .collect();
+    let devices = list
+        .into_iter()
+        .map(|d| rime_remote_core::device::Device {
+            companion_key: None,
+            retired_companion_keys: Vec::new(),
+            ..d.clone()
+        })
+        .collect();
+    Reply::Devices {
+        devices,
+        phones,
+        companions,
     }
 }
 
@@ -279,11 +455,113 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
 /// `rime remote` finds this socket through `$XDG_RUNTIME_DIR`, so under sudo it
 /// looks in root's and finds no daemon at all.
 fn authorized(req: &Request, peer: Option<crate::peer::Peer>) -> Result<(), String> {
+    authorized_by(req, peer, rime_agent_core::origin::observe_pid)
+}
+
+/// [`authorized`] with the origin observation passed in, so a test can be a
+/// scheduled job without being one.
+fn authorized_by(
+    req: &Request,
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> Result<(), String> {
     match req {
         Request::Pair => local_caller(peer),
         Request::Send { .. } => sending_caller(peer),
+        Request::Messages { .. } | Request::MessagesSend { .. } => messages_caller(peer, observe),
+        Request::Calls { .. } | Request::Call { .. } => calls_caller(peer, observe),
+        Request::Photos { .. } | Request::PhotosSave { .. } => photos_caller(peer, observe),
         _ => own_user(peer),
     }
+}
+
+/// Refuse `calls` or `call` from anything but a human at this machine: a
+/// call history names who the person talks to, and answering or dialling
+/// acts as them on their phone.
+fn calls_caller(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell whether a human is at this machine — and a phone's calls are reserved \
+             for one"
+                .to_string(),
+        );
+    };
+    own_user(Some(peer))?;
+    may_use_calls(observe(peer.pid)?)
+}
+
+/// The calls rule over a value, for the same reason [`may_pair`] is one.
+pub fn may_use_calls(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot see, answer or place a phone's calls: only a person at this \
+         machine may. Run `rime remote calls` from a terminal, or use Rime Shell"
+    ))
+}
+
+/// Refuse `photos` or `photos_save` from anything but a human at this
+/// machine: the same two origins as pairing and sending.
+fn photos_caller(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell whether a human is at this machine — and a phone's photos are reserved \
+             for one"
+                .to_string(),
+        );
+    };
+    own_user(Some(peer))?;
+    may_use_photos(observe(peer.pid)?)
+}
+
+/// The photos rule over a value, for the same reason [`may_pair`] is one.
+pub fn may_use_photos(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot see or save a phone's photos: only a person at this machine \
+         may. Run `rime remote photos` from a terminal, or use Rime Shell"
+    ))
+}
+
+/// Refuse a `messages` or `messages_send` from anything but a human at this
+/// machine: the same two origins as pairing and sending.
+fn messages_caller(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell whether a human is at this machine — and a phone's messages are reserved \
+             for one"
+                .to_string(),
+        );
+    };
+    own_user(Some(peer))?;
+    may_use_messages(observe(peer.pid)?)
+}
+
+/// The messages rule over a value, for the same reason [`may_pair`] is one.
+pub fn may_use_messages(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot read or send a phone's messages: they carry sign-in codes, so \
+         only a person at this machine may. Run `rime remote messages` from a terminal, or use \
+         Rime Shell"
+    ))
 }
 
 /// The account half: is this connection this user's?
@@ -420,6 +698,12 @@ fn revoke(state: &State, device: &str) -> Reply {
     if let Err(e) = state.save_devices(&store) {
         return Reply::error(format!("the device was not written: {e}"));
     }
+    // What waits on the phone fails as revoked BEFORE its connection is shut:
+    // a request keeps the first outcome it is given, and the connection's own
+    // thread would otherwise get there first with "disconnected".
+    state.messages.forget(&revoked.id);
+    state.calls.forget(&revoked.id);
+    state.photos.forget(&revoked.id);
     // A revoked device with a live connection is still holding one. The store
     // is what stops it reconnecting; this is what ends the connection it
     // already has, and without it "revoke" would mean "revoke, eventually".
@@ -452,6 +736,27 @@ fn focus(state: &State, dnd: bool) -> Reply {
         .filter(|(id, _)| state.events.send(id, &line))
         .count();
     Reply::Focused { reached }
+}
+
+/// Put `text` on every connected phone that asked for this computer's
+/// clipboard, except one that put this very text here itself a moment ago
+/// (`clipboard.rs`'s loop guard).
+///
+/// Only phones with an events channel open, as for [`focus`]: a clipboard is
+/// not worth waking a phone for, and it would be stale by the time it woke.
+fn clipboard(state: &State, text: &str, sensitive: bool) -> Reply {
+    let line = match crate::clipboard::line(text, sensitive) {
+        Ok(line) => line,
+        Err(why) => return Reply::error(why),
+    };
+    let reached = state
+        .phones()
+        .iter()
+        .filter(|(_, report)| report.can_clipboard())
+        .filter(|(id, _)| !state.clip_echo.is_echo(id, text))
+        .filter(|(id, _)| state.events.send_whole(id, &line, crate::clipboard::WRITE_LIMIT))
+        .count();
+    Reply::ClipboardSent { reached }
 }
 
 fn ring(state: &State, device: &str) -> Reply {
@@ -577,6 +882,292 @@ fn send(
             }
         }
         Err(why) => Reply::error(why.sentence(&device_name)),
+    }
+}
+
+/// The phone a messages request goes to: the one named, or the only phone
+/// that has Messages on. Its id and name.
+fn messages_phone(state: &State, device: Option<&str>) -> Result<(String, String), String> {
+    let store = state.devices().map_err(|e| e.to_string())?;
+    let phones = state.phones();
+    let has = |id: &str| phones.get(id).is_some_and(crate::phone::PhoneReport::can_messages);
+    let (id, name) = match device {
+        Some(d) => match store.find(d) {
+            Ok(d) if d.is_active() => (d.id.clone(), d.name.clone()),
+            Ok(d) => return Err(format!("{} was revoked", d.name)),
+            Err(e) => return Err(e.to_string()),
+        },
+        None => {
+            let with: Vec<_> = store.list().into_iter().filter(|d| d.is_active() && has(&d.id)).collect();
+            match with.as_slice() {
+                [d] => (d.id.clone(), d.name.clone()),
+                [] => {
+                    return Err("no paired phone has turned on Messages on your computer. On the phone: \
+                                Rime Remote → Messages"
+                        .into())
+                }
+                many => {
+                    let names: Vec<&str> = many.iter().map(|d| d.name.as_str()).collect();
+                    return Err(format!(
+                        "more than one phone has Messages on ({}); name one with --device",
+                        names.join(", ")
+                    ));
+                }
+            }
+        }
+    };
+    // Asked before anything is written: a phone that has not turned Messages
+    // on gets no request at all.
+    if !has(&id) {
+        return Err(format!(
+            "{name} has not turned on Messages on your computer. On the phone: Rime Remote → Messages"
+        ));
+    }
+    Ok((id, name))
+}
+
+fn messages(state: &State, device: Option<&str>, thread: Option<u64>, before: Option<u64>, limit: Option<u32>) -> Reply {
+    let limit = limit.map_or(crate::messages::DEFAULT_LIMIT, |l| l as usize);
+    if limit == 0 || limit > crate::messages::MAX_LIMIT {
+        return Reply::error(format!("limit must be from 1 to {}", crate::messages::MAX_LIMIT));
+    }
+    let (id, name) = match messages_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    let want = match thread {
+        Some(t) => crate::messages::Want::Thread { id: t, before, limit },
+        None => crate::messages::Want::Threads { before, limit },
+    };
+    let changed_ms = state.messages.changed_ms(&id);
+    match state.messages.ask(&state.events, &id, want, crate::messages::READ_WAIT) {
+        Ok(crate::messages::Answer::Threads(threads)) => Reply::Messages {
+            device: name,
+            threads: Some(threads),
+            thread: None,
+            messages: None,
+            changed_ms,
+        },
+        Ok(crate::messages::Answer::Messages { thread, messages }) => Reply::Messages {
+            device: name,
+            threads: None,
+            thread: Some(thread),
+            messages: Some(messages),
+            changed_ms,
+        },
+        Ok(crate::messages::Answer::Sent) => Reply::error("the phone answered a read as a send"),
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
+fn messages_send(state: &State, device: Option<&str>, to: Option<String>, thread: Option<u64>, text: &str) -> Reply {
+    let to = match (to, thread) {
+        (Some(to), None) => match crate::messages::number(&to) {
+            Ok(n) => Some(n),
+            Err(why) => return Reply::error(why),
+        },
+        (None, Some(_)) => None,
+        _ => return Reply::error("a message goes to one number (--to) or into one conversation (--thread)"),
+    };
+    let text = match crate::messages::text(text) {
+        Ok(t) => t,
+        Err(why) => return Reply::error(why),
+    };
+    let (id, name) = match messages_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    let want = crate::messages::Want::Send { to, thread, text };
+    match state.messages.ask(&state.events, &id, want, crate::messages::SEND_WAIT) {
+        Ok(crate::messages::Answer::Sent) => Reply::MessageSent { device: name },
+        Ok(_) => Reply::error("the phone answered a send as a read"),
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
+/// The phone a calls request goes to: the one named, or the only phone that
+/// has calls on. Its id, name and last report.
+fn calls_phone(state: &State, device: Option<&str>) -> Result<(String, String, crate::phone::PhoneReport), String> {
+    let store = state.devices().map_err(|e| e.to_string())?;
+    let phones = state.phones();
+    let has = |id: &str| phones.get(id).is_some_and(crate::phone::PhoneReport::can_calls);
+    let (id, name) = match device {
+        Some(d) => match store.find(d) {
+            Ok(d) if d.is_active() => (d.id.clone(), d.name.clone()),
+            Ok(d) => return Err(format!("{} was revoked", d.name)),
+            Err(e) => return Err(e.to_string()),
+        },
+        None => {
+            let with: Vec<_> = store.list().into_iter().filter(|d| d.is_active() && has(&d.id)).collect();
+            match with.as_slice() {
+                [d] => (d.id.clone(), d.name.clone()),
+                [] => {
+                    return Err("no paired phone has turned on Calls on your computer. On the phone: \
+                                Rime Remote → Calls on your computer"
+                        .into())
+                }
+                many => {
+                    let names: Vec<&str> = many.iter().map(|d| d.name.as_str()).collect();
+                    return Err(format!(
+                        "more than one phone has calls on ({}); name one with --device",
+                        names.join(", ")
+                    ));
+                }
+            }
+        }
+    };
+    // Asked before anything is written: a phone that has not turned calls on
+    // gets no request at all.
+    match phones.get(&id) {
+        Some(r) if r.can_calls() => Ok((id, name, r.clone())),
+        _ => Err(format!(
+            "{name} has not turned on Calls on your computer. On the phone: Rime Remote → Calls on your computer"
+        )),
+    }
+}
+
+fn calls(state: &State, device: Option<&str>, before: Option<u64>, limit: Option<u32>) -> Reply {
+    let limit = limit.map_or(crate::calls::DEFAULT_LIMIT, |l| l as usize);
+    if limit == 0 || limit > crate::calls::MAX_LIMIT {
+        return Reply::error(format!("limit must be from 1 to {}", crate::calls::MAX_LIMIT));
+    }
+    let (id, name, report) = match calls_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    let current = state.calls.current(&id);
+    let (calls, history_error) =
+        match state.calls.history(&state.events, &id, &report, before, limit, crate::calls::HISTORY_WAIT) {
+            Ok(calls) => (Some(calls), None),
+            Err(why) => (None, Some(why.sentence(&name))),
+        };
+    Reply::Calls { device: name, current, calls, history_error }
+}
+
+fn call(state: &State, device: Option<&str>, action: &str, number: Option<&str>) -> Reply {
+    if !crate::calls::ACTIONS.contains(&action) {
+        return Reply::error("the action must be answer, decline, hangup or dial");
+    }
+    let number = match (action, number) {
+        ("dial", Some(n)) => match crate::messages::number(n) {
+            Ok(n) => Some(n),
+            Err(why) => return Reply::error(why),
+        },
+        ("dial", None) => return Reply::error("dial needs a number"),
+        (_, None) => None,
+        (_, Some(_)) => return Reply::error("only dial takes a number"),
+    };
+    let (id, name, report) = match calls_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    match state.calls.act(&state.events, &id, &report, action, number.as_deref(), crate::calls::ACTION_WAIT) {
+        Ok(()) => Reply::CallDone { device: name, action: action.to_string() },
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
+/// The phone a photos request goes to: the one named, or the only phone that
+/// has Photos on. Its id and name.
+fn photos_phone(state: &State, device: Option<&str>) -> Result<(String, String), String> {
+    let store = state.devices().map_err(|e| e.to_string())?;
+    let phones = state.phones();
+    let has = |id: &str| phones.get(id).is_some_and(crate::phone::PhoneReport::can_photos);
+    let (id, name) = match device {
+        Some(d) => match store.find(d) {
+            Ok(d) if d.is_active() => (d.id.clone(), d.name.clone()),
+            Ok(d) => return Err(format!("{} was revoked", d.name)),
+            Err(e) => return Err(e.to_string()),
+        },
+        None => {
+            let with: Vec<_> = store.list().into_iter().filter(|d| d.is_active() && has(&d.id)).collect();
+            match with.as_slice() {
+                [d] => (d.id.clone(), d.name.clone()),
+                [] => {
+                    return Err("no paired phone has turned on Photos on your computer. On the phone: \
+                                Rime Remote → Photos"
+                        .into())
+                }
+                many => {
+                    let names: Vec<&str> = many.iter().map(|d| d.name.as_str()).collect();
+                    return Err(format!(
+                        "more than one phone has Photos on ({}); name one with --device",
+                        names.join(", ")
+                    ));
+                }
+            }
+        }
+    };
+    // Asked before anything is written: a phone that has not turned Photos
+    // on gets no request at all.
+    if !has(&id) {
+        return Err(format!(
+            "{name} has not turned on Photos on your computer. On the phone: Rime Remote → Photos"
+        ));
+    }
+    Ok((id, name))
+}
+
+fn photos(state: &State, device: Option<&str>, before: Option<u64>, limit: Option<u32>) -> Reply {
+    let limit = limit.map_or(crate::photos::DEFAULT_LIMIT, |l| l as usize);
+    if limit == 0 || limit > crate::photos::MAX_LIMIT {
+        return Reply::error(format!("limit must be from 1 to {}", crate::photos::MAX_LIMIT));
+    }
+    let (id, name) = match photos_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    match state.photos.list(&state.events, &id, before, limit, crate::photos::LIST_WAIT) {
+        Ok(listing) => Reply::Photos {
+            device: name,
+            photos: listing.photos,
+            partial: listing.partial,
+        },
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
+/// The one descriptor a save carries, when it is a regular file open for
+/// writing: anything else is refused before the phone is asked.
+fn save_target(mut fds: Vec<OwnedFd>) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    if fds.len() != 1 {
+        return Err(format!(
+            "a photo is saved into one open file passed with the request (`rime remote photos save`); \
+             this request carried {} descriptors",
+            fds.len()
+        ));
+    }
+    let file = std::fs::File::from(fds.remove(0));
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.file_type().is_file() {
+        return Err("a photo is saved into a regular file".into());
+    }
+    // SAFETY: F_GETFL on a descriptor this process owns.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_ACCMODE == libc::O_RDONLY || flags & libc::O_APPEND != 0 {
+        return Err("the file a photo is saved into must be open for writing".into());
+    }
+    Ok(file)
+}
+
+fn photos_save(state: &State, device: Option<&str>, photo: u64, fds: Vec<OwnedFd>) -> Reply {
+    let file = match save_target(fds) {
+        Ok(f) => f,
+        Err(why) => return Reply::error(why),
+    };
+    let (id, name) = match photos_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    match state.photos.fetch(&state.events, &id, photo, file, crate::photos::START_WAIT) {
+        Ok(saved) => Reply::PhotoSaved {
+            device: name,
+            photo,
+            name: saved.name,
+            len: saved.len,
+        },
+        Err(why) => Reply::error(why.sentence(&name)),
     }
 }
 
@@ -734,12 +1325,29 @@ mod tests {
                 device: "somebody-elses-phone".into(),
             },
             Request::Focus { dnd: true },
+            Request::Clipboard { text: "x".into(), sensitive: false },
             Request::Send {
                 device: "somebody-elses-phone".into(),
                 kind: "text".into(),
                 name: None,
                 text: Some("x".into()),
             },
+            Request::Messages {
+                device: None,
+                thread: None,
+                before: None,
+                limit: None,
+            },
+            Request::MessagesSend {
+                device: None,
+                to: Some("5556".into()),
+                thread: None,
+                text: "x".into(),
+            },
+            Request::Calls { device: None, before: None, limit: None },
+            Request::Call { device: None, action: "dial".into(), number: Some("5556".into()) },
+            Request::Photos { device: None, before: None, limit: None },
+            Request::PhotosSave { device: None, photo: 1 },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -776,9 +1384,130 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_send(o).is_ok()),
                     "Send stopped asking the origin rule"
                 ),
+                Request::Messages { .. } | Request::MessagesSend { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_messages(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
+                Request::Calls { .. } | Request::Call { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_calls(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
+                Request::Photos { .. } | Request::PhotosSave { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_photos(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_scheduled_job_may_neither_list_nor_save_a_phones_photos() {
+        // Injected, like the messages test below: this fails on any machine
+        // if the gate is removed.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let list = Request::Photos { device: None, before: None, limit: None };
+        let save = Request::PhotosSave { device: None, photo: 7 };
+        for o in RequestOrigin::ALL {
+            for req in [&list, &save] {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote photos"), "{why}");
+                }
+            }
+        }
+        for req in [&list, &save] {
+            assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());
+            assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_save_takes_one_regular_file_open_for_writing_and_nothing_else() {
+        use std::os::fd::OwnedFd;
+        let dir = std::env::temp_dir().join(format!("rime-photos-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+        std::fs::write(&path, b"").unwrap();
+        let rw = || OwnedFd::from(std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap());
+        assert!(save_target(vec![rw()]).is_ok());
+        assert!(save_target(vec![]).is_err());
+        assert!(save_target(vec![rw(), rw()]).is_err());
+        let ro = OwnedFd::from(std::fs::File::open(&path).unwrap());
+        assert!(save_target(vec![ro]).unwrap_err().contains("open for writing"));
+        let app = OwnedFd::from(std::fs::OpenOptions::new().append(true).open(&path).unwrap());
+        assert!(save_target(vec![app]).is_err());
+        let folder = OwnedFd::from(std::fs::File::open(&dir).unwrap());
+        assert!(save_target(vec![folder]).unwrap_err().contains("regular file"));
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(save_target(vec![OwnedFd::from(a)]).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_scheduled_job_may_neither_read_nor_send_a_phones_messages() {
+        // The origin is injected, so this fails on any machine — a developer's
+        // login session included — if the gate is removed.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let read = Request::Messages { device: None, thread: None, before: None, limit: None };
+        let send = Request::MessagesSend { device: None, to: Some("5556".into()), thread: None, text: "x".into() };
+        for o in RequestOrigin::ALL {
+            for req in [&read, &send] {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote messages"), "{why}");
+                }
+            }
+        }
+        // An origin that cannot be observed is refused too.
+        assert!(authorized_by(&send, Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&read, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        // And `status` is still a script's to ask.
+        assert!(authorized_by(&Request::Status, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_ok());
+    }
+
+    #[test]
+    fn a_scheduled_job_may_neither_see_nor_handle_a_phones_calls() {
+        // Injected origins, as for messages: this fails on any machine if the
+        // gate is removed, a developer's login session included.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let list = Request::Calls { device: None, before: None, limit: None };
+        let every: Vec<Request> = std::iter::once(list)
+            .chain(["answer", "decline", "hangup"].into_iter().map(|a| Request::Call {
+                device: None,
+                action: a.into(),
+                number: None,
+            }))
+            .chain(std::iter::once(Request::Call { device: None, action: "dial".into(), number: Some("5556".into()) }))
+            .collect();
+        for o in RequestOrigin::ALL {
+            for req in &every {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote calls"), "{why}");
+                }
+            }
+        }
+        assert!(authorized_by(&every[4], Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&every[0], None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
     }
 
     #[test]
@@ -817,16 +1546,81 @@ mod tests {
                 device: "pixel-8".into(),
             },
             Request::Focus { dnd: false },
+            Request::Clipboard { text: "two\nlines".into(), sensitive: true },
             Request::Send {
                 device: "pixel-8".into(),
                 kind: "text".into(),
                 name: None,
                 text: Some("line one\nline two".into()),
             },
+            Request::Messages {
+                device: Some("pixel-8".into()),
+                thread: Some(3),
+                before: Some(1),
+                limit: Some(20),
+            },
+            Request::MessagesSend {
+                device: None,
+                to: None,
+                thread: Some(3),
+                text: "line one\nline two".into(),
+            },
         ];
+        // The wire shapes `rime remote calls` depends on.
+        assert_eq!(
+            serde_json::to_string(&Request::Call { device: None, action: "dial".into(), number: Some("5556".into()) })
+                .unwrap(),
+            r#"{"cmd":"call","device":null,"action":"dial","number":"5556"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Calls { device: Some("p".into()), before: None, limit: Some(5) }).unwrap(),
+            r#"{"cmd":"calls","device":"p","before":null,"limit":5}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::CallDone { device: "Pixel".into(), action: "answer".into() }).unwrap(),
+            r#"{"reply":"call_done","device":"Pixel","action":"answer"}"#
+        );
+        // The wire shapes `rime remote photos` and a Shell grid depend on.
+        assert_eq!(
+            serde_json::to_string(&Request::Photos { device: None, before: Some(9), limit: Some(30) }).unwrap(),
+            r#"{"cmd":"photos","device":null,"before":9,"limit":30}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::PhotosSave { device: Some("p".into()), photo: 4 }).unwrap(),
+            r#"{"cmd":"photos_save","device":"p","photo":4}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::PhotoSaved { device: "Pixel".into(), photo: 4, name: "a.jpg".into(), len: 3 })
+                .unwrap(),
+            r#"{"reply":"photo_saved","device":"Pixel","photo":4,"name":"a.jpg","len":3}"#
+        );
+        // The wire shapes `rime remote messages` and a Shell page depend on.
+        assert_eq!(
+            serde_json::to_string(&Request::MessagesSend { device: None, to: Some("5556".into()), thread: None, text: "x".into() })
+                .unwrap(),
+            r#"{"cmd":"messages_send","device":null,"to":"5556","thread":null,"text":"x"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"messages"}"#).map(|r| matches!(r, Request::Messages { .. })).ok(),
+            Some(true)
+        );
         // The wire shape `rime remote focus` and the Shell's call depend on.
         assert_eq!(serde_json::to_string(&Request::Focus { dnd: true }).unwrap(), r#"{"cmd":"focus","dnd":true}"#);
         assert_eq!(serde_json::to_string(&Reply::Focused { reached: 2 }).unwrap(), r#"{"reply":"focused","reached":2}"#);
+        // `rime remote clipboard`'s wire: `sensitive` only when true, and
+        // absent reads as false.
+        assert_eq!(
+            serde_json::to_string(&Request::Clipboard { text: "a".into(), sensitive: false }).unwrap(),
+            r#"{"cmd":"clipboard","text":"a"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Clipboard { text: "a".into(), sensitive: true }).unwrap(),
+            r#"{"cmd":"clipboard","text":"a","sensitive":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::ClipboardSent { reached: 1 }).unwrap(),
+            r#"{"reply":"clipboard_sent","reached":1}"#
+        );
         for r in &requests {
             let text = serde_json::to_string(r).expect("serialise");
             assert!(!text.contains('\n'), "{text}");
@@ -839,9 +1633,24 @@ mod tests {
                 qr: "apex-remote:abc".into(),  // rime-rename: keep (SCHEME)
                 expires_ms: 1,
             },
-            Reply::Devices { devices: vec![], phones: Default::default() },
+            Reply::Devices { devices: vec![], phones: Default::default(), companions: vec![] },
             Reply::Rang { device: "Pixel".into(), path: "link".into() },
             Reply::Focused { reached: 0 },
+            Reply::MessageSent { device: "Pixel".into() },
+            Reply::Messages {
+                device: "Pixel".into(),
+                threads: None,
+                thread: Some(3),
+                messages: Some(vec![crate::messages::Message {
+                    id: 1,
+                    date_ms: 2,
+                    from_me: false,
+                    body: "a\nb".into(),
+                    status: "received".into(),
+                }]),
+                changed_ms: None,
+            },
+            Reply::ClipboardSent { reached: 0 },
             Reply::Sent { device: "Pixel".into(), path: "waiting".into(), id: 3, push_error: Some("503".into()) },
             Reply::Status {
                 version: 1,
@@ -860,5 +1669,26 @@ mod tests {
             assert!(!text.contains('\n'), "{text}");
             serde_json::from_str::<Reply>(&text).expect("round trip");
         }
+    }
+
+    #[test]
+    fn the_device_list_says_which_have_a_companion_key_and_never_carries_one() {
+        let mut store = rime_remote_core::device::DeviceStore::default();
+        let k = |n: u8| rime_remote_core::b64_encode(&[n; 32]);
+        let a = store.pair(&k(1), "a", 1, false).expect("pair");
+        let b = store.pair(&k(2), "b", 2, false).expect("pair");
+        let gone = store.pair(&k(3), "gone", 3, false).expect("pair");
+        store.set_companion(&a.id, &k(10)).expect("set");
+        store.set_companion(&a.id, &k(11)).expect("replace: k(10) is retired");
+        store.set_companion(&gone.id, &k(13)).expect("set");
+        store.revoke(&gone.id, 4).expect("revoke");
+        let reply = devices_reply(&store, Default::default());
+        let text = serde_json::to_string(&reply).expect("serialise");
+        assert!(!text.contains(&k(10)) && !text.contains(&k(11)) && !text.contains(&k(13)), "{text}");
+        assert!(!text.contains("companion_key"), "{text}");
+        let Reply::Devices { companions, devices, .. } = reply else { panic!("{text}") };
+        assert_eq!(companions, vec![a.id.clone()], "a revoked device's key is no companion");
+        assert_eq!(devices.len(), 3);
+        assert!(!companions.contains(&b.id));
     }
 }

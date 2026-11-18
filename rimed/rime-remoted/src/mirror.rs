@@ -201,6 +201,13 @@ pub struct Shown {
     pub body: String,
     /// The reply field's label when the phone can take a reply to this one.
     pub reply: Option<String>,
+    /// `(key, label)` buttons. Only notifications this process makes itself
+    /// carry any (a ringing call's Answer and Decline, contract §2.12); a
+    /// phone's own notifications never do.
+    pub actions: Vec<(String, String)>,
+    /// Shown until closed (expire timeout 0) rather than for the server's
+    /// own time: a call rings until the phone says it stopped.
+    pub sticky: bool,
 }
 
 /// Turn a `phone_notification` body into what is posted, or refuse it.
@@ -218,7 +225,7 @@ pub fn shown(phone: &str, v: &Value) -> Result<(String, Shown), String> {
     let summary = if title.is_empty() { app.clone() } else { title };
     let reply = clean(field(v, "reply")?, REPLY_LABEL_CAP, 0, false);
     let reply = (!reply.is_empty()).then_some(reply);
-    Ok((key, Shown { app_name, summary, body: text, reply }))
+    Ok((key, Shown { app_name, summary, body: text, reply, actions: Vec::new(), sticky: false }))
 }
 
 /// A reply typed here, as the phone gets it: the person's own words, so
@@ -281,6 +288,8 @@ pub enum Heard {
     Closed { id: u32, reason: u32 },
     /// `NotificationReplied(id, text)`: the person typed into the inline-reply field.
     Replied { id: u32, text: String },
+    /// `ActionInvoked(id, key)`: the person pressed one of the notification's buttons.
+    Action { id: u32, key: String },
 }
 
 /// Called with each signal the server sends, in the order it sent them.
@@ -310,6 +319,8 @@ struct Link {
     /// The owner whose capabilities [`Link::inline_reply`] describes.
     caps_for: Option<String>,
     inline_reply: bool,
+    /// Whether that owner draws action buttons (capability `actions`).
+    actions: bool,
 }
 
 /// Whether an error means the connection is gone (so the next call makes a
@@ -357,7 +368,7 @@ impl Bus {
         // A proxy for a well-known name hears that name's owner only, so a
         // client that sends its own NotificationClosed is not believed.
         let signals = notifications.receive_all_signals().await?;
-        Ok(Link { notifications, dbus, signals, caps_for: None, inline_reply: false })
+        Ok(Link { notifications, dbus, signals, caps_for: None, inline_reply: false, actions: false })
     }
 
     async fn serve(mut calls: tokio::sync::mpsc::Receiver<(Call, std::time::Instant)>, closer: Hear) {
@@ -403,6 +414,11 @@ impl Bus {
                                 closer(Heard::Replied { id, text });
                             }
                         }
+                        Some("ActionInvoked") => {
+                            if let Ok((id, key)) = m.body().deserialize::<(u32, String)>() {
+                                closer(Heard::Action { id, key });
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -444,13 +460,21 @@ impl Bus {
                 // A reply field only where the server draws one: anywhere
                 // else "inline-reply" would be a button that does nothing.
                 let label = s.reply.as_deref().filter(|_| l.inline_reply);
-                let actions: Vec<&str> = label.map(|label| vec![INLINE_REPLY, label]).unwrap_or_default();
+                let mut actions: Vec<&str> = label.map(|label| vec![INLINE_REPLY, label]).unwrap_or_default();
+                // Buttons only where the server draws them, as for the reply field.
+                if l.actions {
+                    for (key, label) in &s.actions {
+                        actions.push(key);
+                        actions.push(label);
+                    }
+                }
                 let mut hints: HashMap<&str, zbus::zvariant::Value<'_>> =
                     HashMap::from([("urgency", zbus::zvariant::Value::U8(1))]);
                 if let Some(label) = label {
                     hints.insert("x-kde-reply-placeholder-text", zbus::zvariant::Value::from(label));
                 }
-                let body = (&s.app_name, replaces, ICON, &s.summary, &s.body, actions, hints, -1i32);
+                let expire = if s.sticky { 0i32 } else { -1i32 };
+                let body = (&s.app_name, replaces, ICON, &s.summary, &s.body, actions, hints, expire);
                 let got = Bus::within(by, l.notifications.call::<_, _, u32>("Notify", &body)).await;
                 let gone = matches!(got, Err((_, true)));
                 let _ = reply.send(got.map_err(|(e, _)| e));
@@ -472,6 +496,7 @@ impl Bus {
                 if owner.is_some() && owner != l.caps_for {
                     let caps = Bus::within(by, l.notifications.call::<_, _, Vec<String>>("GetCapabilities", &())).await;
                     l.inline_reply = caps.as_ref().is_ok_and(|c| c.iter().any(|c| c == INLINE_REPLY));
+                    l.actions = caps.as_ref().is_ok_and(|c| c.iter().any(|c| c == "actions"));
                     l.caps_for = if caps.is_ok() { owner.clone() } else { None };
                 }
                 let _ = reply.send(owner);
@@ -528,10 +553,18 @@ impl Backend for Stub {
             *n += 1;
             *n
         };
-        self.record(json!({"op": "notify", "id": id, "replaces": replaces, "app": s.app_name,
-                           "icon": ICON, "summary": s.summary, "body": s.body,
-                           // A stand-in for a server that draws reply fields.
-                           "reply": s.reply}))?;
+        let mut line = json!({"op": "notify", "id": id, "replaces": replaces, "app": s.app_name,
+                              "icon": ICON, "summary": s.summary, "body": s.body,
+                              // A stand-in for a server that draws reply fields.
+                              "reply": s.reply});
+        // Only when there are some, so a phone's notification reads as before.
+        if !s.actions.is_empty() {
+            line["actions"] = json!(s.actions.iter().map(|(k, l)| [k, l]).collect::<Vec<_>>());
+        }
+        if s.sticky {
+            line["sticky"] = json!(true);
+        }
+        self.record(line)?;
         Ok(id)
     }
 
@@ -553,8 +586,22 @@ pub enum Job {
     Remove { device: String, key: String },
     /// Revoke: close what the phone posted and forget it.
     Forget { device: String },
-    /// The server's `NotificationClosed` or `NotificationReplied`.
+    /// A notice of this computer's own (a call action that did not go):
+    /// kept by no phone, so it is never replaced, closed or reported.
+    Notice(Shown),
+    /// The server's `NotificationClosed`, `NotificationReplied` or `ActionInvoked`.
     Heard(Heard),
+}
+
+/// Told `(device, key, action)` when the person pressed a button on a
+/// notification this process made for that phone (only keys with a `:`,
+/// which a phone's own keys never carry: contract §2.12).
+pub type Acted = Box<dyn Fn(&str, &str, &str) + Send + Sync>;
+
+/// Whether a key names a notification this process made itself rather than
+/// one a phone posted. A phone's keys are checked never to hold a `:`.
+pub fn own_key(key: &str) -> bool {
+    key.contains(':')
 }
 
 /// Told `(device, key)` when the person dismissed a phone's notification here.
@@ -588,6 +635,8 @@ pub fn not_sent(why: NotSent, text: &str) -> Shown {
         // reply of "a < b & c" must not become markup or vanish in it.
         body: format!("{reason} What you typed:\n{}", clean(text, REPLY_TEXT_CAP, usize::MAX, true)),
         reply: None,
+        actions: Vec::new(),
+        sticky: false,
     }
 }
 
@@ -606,6 +655,7 @@ pub struct Mirror {
     server: Mutex<Option<String>>,
     dismissed: OnceLock<Dismissed>,
     replied: OnceLock<Replied>,
+    acted: OnceLock<Acted>,
     /// Ids replied to here whose close has not come yet: the server closes a
     /// notification once it is answered, and that close is not a dismissal.
     answered: Mutex<VecDeque<u32>>,
@@ -620,6 +670,7 @@ impl Mirror {
             server: Mutex::new(None),
             dismissed: OnceLock::new(),
             replied: OnceLock::new(),
+            acted: OnceLock::new(),
             answered: Mutex::new(VecDeque::new()),
         }
     }
@@ -632,6 +683,11 @@ impl Mirror {
     /// Where replies go (once; later calls are ignored).
     pub fn on_replied(&self, f: Replied) {
         let _ = self.replied.set(f);
+    }
+
+    /// Where button presses go (once; later calls are ignored).
+    pub fn on_action(&self, f: Acted) {
+        let _ = self.acted.set(f);
     }
 
     fn answered(&self) -> std::sync::MutexGuard<'_, VecDeque<u32>> {
@@ -690,6 +746,21 @@ impl Mirror {
                     }
                 }
             }
+            Job::Notice(shown) => {
+                if let Err(why) = self.backend.notify(&shown, 0) {
+                    eprintln!("rime-remoted: a notice was not shown: {why}");
+                }
+            }
+            Job::Heard(Heard::Action { id, key: action }) => {
+                // Only this process's own notifications have buttons; a
+                // stray signal for any other id is nobody's business here.
+                let owner = self.phones().iter().find_map(|(device, p)| {
+                    p.ids.iter().find(|(k, i)| *i == id && own_key(k)).map(|(key, _)| (device.clone(), key.clone()))
+                });
+                if let (Some((device, key)), Some(tell)) = (owner, self.acted.get()) {
+                    tell(&device, &key, &action);
+                }
+            }
             Job::Forget { device } => {
                 let gone = self.phones().remove(&device);
                 for (_, id) in gone.map(|p| p.ids).unwrap_or_default() {
@@ -736,6 +807,9 @@ impl Mirror {
                         p.ids.remove(at).map(|(key, _)| (device.clone(), key))
                     })
                 };
+                // A notification of this process's own was never the phone's:
+                // closing it tells the phone nothing.
+                let owner = owner.filter(|(_, key)| !own_key(key));
                 if let (Some((device, key)), DISMISSED, false) = (owner, reason, answered) {
                     if let Some(tell) = self.dismissed.get() {
                         tell(&device, &key);
@@ -755,7 +829,16 @@ impl Mirror {
         p.ids.retain(|(k, _)| k != key);
         p.ids.push_back((key.to_string(), id));
         while p.ids.len() > KEPT_IDS {
-            p.ids.pop_front();
+            // A burst of the phone's own must not push out a ringing call,
+            // which then could never be closed when the ringing stops.
+            match p.ids.iter().position(|(k, _)| !own_key(k)) {
+                Some(at) => {
+                    p.ids.remove(at);
+                }
+                None => {
+                    p.ids.pop_front();
+                }
+            }
         }
     }
 
@@ -831,6 +914,8 @@ fn watch_closed(dir: PathBuf, closer: Hear) -> std::io::Result<()> {
                         closer(Heard::Closed { id: id as u32, reason: reason as u32 });
                     } else if let Some(text) = v["reply"].as_str() {
                         closer(Heard::Replied { id: id as u32, text: text.to_string() });
+                    } else if let Some(key) = v["action"].as_str() {
+                        closer(Heard::Action { id: id as u32, key: key.to_string() });
                     }
                 }
             }
@@ -999,13 +1084,68 @@ mod tests {
     }
 
     #[test]
+    fn a_button_is_heard_only_on_this_processs_own_notification_and_its_close_is_no_dismissal() {
+        let s = scratch("action");
+        let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
+        let (atx, arx) = std::sync::mpsc::channel();
+        m.on_action(Box::new(move |d, k, a| atx.send((d.to_string(), k.to_string(), a.to_string())).unwrap()));
+        let (dtx, drx) = std::sync::mpsc::channel();
+        m.on_dismissed(Box::new(move |d, k| dtx.send((d.to_string(), k.to_string())).unwrap()));
+        let shown = |actions: Vec<(String, String)>| Shown {
+            app_name: "P · Calls".into(),
+            summary: "Call from 5556".into(),
+            body: String::new(),
+            reply: None,
+            actions,
+            sticky: true,
+        };
+        let buttons = vec![("answer".to_string(), "Answer".to_string())];
+        m.handle(Job::Post { device: "dev".into(), key: "call:ringing".into(), shown: shown(buttons) });
+        m.handle(Job::Post { device: "dev".into(), key: "k1".into(), shown: shown(vec![]) });
+        // A press on the phone's own notification (some other app's button,
+        // as far as this process knows) and on an id nobody owns: nothing.
+        m.handle(Job::Heard(Heard::Action { id: 2, key: "answer".into() }));
+        m.handle(Job::Heard(Heard::Action { id: 99, key: "answer".into() }));
+        m.handle(Job::Heard(Heard::Action { id: 1, key: "answer".into() }));
+        assert_eq!(arx.try_iter().collect::<Vec<_>>(), vec![("dev".into(), "call:ringing".into(), "answer".into())]);
+        // The server closes it after the press: never a dismissal to the phone.
+        m.handle(Job::Heard(Heard::Closed { id: 1, reason: DISMISSED }));
+        m.handle(Job::Heard(Heard::Closed { id: 2, reason: DISMISSED }));
+        assert_eq!(drx.try_iter().collect::<Vec<_>>(), vec![("dev".into(), "k1".into())]);
+        // And a notice is posted fresh each time, kept by nobody.
+        m.handle(Job::Notice(shown(vec![])));
+        let l = lines(&s.0);
+        assert_eq!(l[0]["actions"], json!([["answer", "Answer"]]));
+        assert_eq!(l[0]["sticky"], true);
+        assert!(l[1].get("actions").is_none() && l[1].get("sticky") == Some(&json!(true)));
+        assert_eq!((l[2]["id"].as_u64(), l[2]["replaces"].as_u64()), (Some(3), Some(0)));
+    }
+
+    #[test]
+    fn a_burst_of_phone_notifications_never_pushes_out_a_ringing_call() {
+        let s = scratch("evict");
+        let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
+        let post = |key: String| Job::Post {
+            device: "dev".into(),
+            key,
+            shown: Shown { app_name: "P".into(), summary: "t".into(), body: String::new(), reply: None, actions: vec![], sticky: false },
+        };
+        m.handle(post("call:ringing".into()));
+        for k in 0..(KEPT_IDS * 2) {
+            m.handle(post(format!("k{k}")));
+        }
+        m.handle(Job::Remove { device: "dev".into(), key: "call:ringing".into() });
+        assert_eq!(lines(&s.0).last().unwrap(), &json!({"op": "close", "id": 1}));
+    }
+
+    #[test]
     fn an_update_replaces_its_notification_and_a_removal_closes_it() {
         let s = scratch("replace");
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
         let post = |key: &str, title: &str| Job::Post {
             device: "dev".into(),
             key: key.into(),
-            shown: Shown { app_name: "P · A".into(), summary: title.into(), body: String::new(), reply: None },
+            shown: Shown { app_name: "P · A".into(), summary: title.into(), body: String::new(), reply: None, actions: vec![], sticky: false },
         };
         m.handle(post("k1", "first"));
         m.handle(post("k2", "other"));
@@ -1026,7 +1166,7 @@ mod tests {
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
         for (dev, key) in [("a", "k1"), ("b", "k1"), ("a", "k2")] {
             m.handle(Job::Post { device: dev.into(), key: key.into(),
-                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None } });
+                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false } });
         }
         m.handle(Job::Forget { device: "a".into() });
         assert!(m.phones().get("a").is_none());
@@ -1041,7 +1181,7 @@ mod tests {
         let post = |key: &str| Job::Post {
             device: "dev".into(),
             key: key.into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false },
         };
         m.handle(post("k1"));
         m.handle(post("k2"));
@@ -1065,7 +1205,7 @@ mod tests {
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
         for i in 0..(KEPT_IDS + 5) {
             m.handle(Job::Post { device: "d".into(), key: format!("k{i}"),
-                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None } });
+                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false } });
         }
         assert_eq!(m.phones().get("d").unwrap().ids.len(), KEPT_IDS);
         assert_eq!(m.id_of("d", "k0"), None);
@@ -1205,7 +1345,7 @@ mod tests {
         let post = |dev: &str, key: &str| Job::Post {
             device: dev.into(),
             key: key.into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false },
         };
         m.handle(post("a", "expired")); // id 1
         m.handle(post("a", "closed-by-call")); // id 2
@@ -1241,7 +1381,7 @@ mod tests {
         assert!(m.submit(Job::Post {
             device: "dev".into(),
             key: "k".into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false },
         }));
         let deadline = Instant::now() + Duration::from_secs(5);
         while m.id_of("dev", "k").is_none() {
@@ -1357,5 +1497,37 @@ mod tests {
             gone(&key);
         }
         assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "an answered notification was told to the phone as dismissed");
+
+        // A ringing call's buttons (contract §2.12): a stranger's
+        // ActionInvoked is not believed; the server's reaches the callback,
+        // and the close after it is no dismissal to the phone.
+        let (atx, arx) = std::sync::mpsc::channel();
+        m.on_action(Box::new(move |d, k, a| atx.send((d.to_string(), k.to_string(), a.to_string())).unwrap()));
+        let ringing = Shown {
+            app_name: "Pixel 8 · Calls".into(),
+            summary: "Call from 5556".into(),
+            body: String::new(),
+            reply: None,
+            actions: vec![("answer".into(), "Answer".into()), ("decline".into(), "Decline".into())],
+            sticky: true,
+        };
+        assert!(m.submit(Job::Post { device: "dev".into(), key: "call:ringing".into(), shown: ringing }));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let id = loop {
+            if let Some(id) = m.id_of("dev", "call:ringing") {
+                break id;
+            }
+            assert!(Instant::now() < deadline, "the ringing call was never posted");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        rt.block_on(conn.emit_signal(None::<&str>, PATH, NAME, "ActionInvoked", &(id, "answer"))).unwrap();
+        assert!(arx.recv_timeout(Duration::from_millis(500)).is_err(), "a stranger's button press was believed");
+        rt.block_on(conn.call_method(Some(NAME), "/test", Some("org.rimeos.Test"), "Invoke", &(id, "decline"))).unwrap();
+        assert_eq!(
+            arx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            ("dev".to_string(), "call:ringing".to_string(), "decline".to_string())
+        );
+        gone("call:ringing");
+        assert!(rx.recv_timeout(Duration::from_millis(500)).is_err(), "a call notification was told to the phone as dismissed");
     }
 }

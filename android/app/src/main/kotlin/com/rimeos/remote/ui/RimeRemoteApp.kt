@@ -1,7 +1,10 @@
 package com.rimeos.remote.ui
 
 import com.rimeos.remote.ui.mirror.MediaScreen
+import com.rimeos.remote.ui.mirror.CallsScreen
+import com.rimeos.remote.ui.mirror.MessagesScreen
 import com.rimeos.remote.ui.mirror.MirrorScreen
+import com.rimeos.remote.ui.mirror.PhotosScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -113,6 +116,15 @@ object Destinations {
 
     /** "Media on your computer": the switch, and which apps. */
     const val MEDIA = "media"
+
+    /** "Messages on your computer": the permissions and the switch. */
+    const val MESSAGES = "messages"
+
+    /** "Calls on your computer": the permissions and the switch. */
+    const val CALLS = "calls"
+
+    /** "Photos on your computer": the access and the switch. */
+    const val PHOTOS = "photos"
 }
 
 @Composable
@@ -161,6 +173,7 @@ fun RimeRemoteApp(
             LockScreen(
                 failure = state.failure,
                 onUnlock = { viewModel.unlockApp(activity, prefer = alertTarget?.machine) },
+                companion = state.companion,
             )
             // Asked once the state is known, rather than behind a button nobody
             // would choose to press. Keyed on `loading` because the view model
@@ -197,6 +210,11 @@ fun RimeRemoteApp(
                     onDynamicColour = { viewModel.setDynamicColour(it) },
                     onMirror = { navigation.navigate(Destinations.MIRROR) },
                     onMedia = { navigation.navigate(Destinations.MEDIA) },
+                    onMessages = { navigation.navigate(Destinations.MESSAGES) },
+                    onCalls = { navigation.navigate(Destinations.CALLS) },
+                    onPhotos = { navigation.navigate(Destinations.PHOTOS) },
+                    onCompanion = { viewModel.setCompanionOn(it) },
+                    onClipboard = { viewModel.setClipboardOn(it) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
                         // ACTION_SEND with the text in the intent, so the user
@@ -467,6 +485,30 @@ fun RimeRemoteApp(
                     onBack = { navigation.popBackStack() },
                 )
             }
+            composable(Destinations.MESSAGES) {
+                MessagesScreen(
+                    on = state.settings.messagesOn,
+                    onOn = { viewModel.setMessagesOn(it) },
+                    onPermissions = { viewModel.onSmsPermissionChanged() },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
+            composable(Destinations.CALLS) {
+                CallsScreen(
+                    on = state.settings.callsOn,
+                    onOn = { viewModel.setCallsOn(it) },
+                    onPermissions = { viewModel.onCallsPermissionChanged() },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
+            composable(Destinations.PHOTOS) {
+                PhotosScreen(
+                    on = state.settings.photosOn,
+                    onOn = { viewModel.setPhotosOn(it) },
+                    onPermissions = { viewModel.onPhotosPermissionChanged() },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
             composable(Destinations.HELP) {
                 HelpScreen(onBack = { navigation.popBackStack() })
             }
@@ -721,7 +763,16 @@ fun RimeRemoteApp(
  * telling somebody what computers its owner has.
  */
 @Composable
-private fun LockScreen(failure: String?, onUnlock: () -> Unit) {
+private fun LockScreen(
+    failure: String?,
+    onUnlock: () -> Unit,
+    /**
+     * Companion mode is running (contract §2.10). Said without machine names:
+     * this screen exists so a phone picked up off a table does not tell
+     * anybody what computers its owner has.
+     */
+    companion: Boolean = false,
+) {
     Column(
         Modifier
             .fillMaxSize()
@@ -737,6 +788,15 @@ private fun LockScreen(failure: String?, onUnlock: () -> Unit) {
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
+        if (companion) {
+            Spacer(Modifier.height(16.dp))
+            Text(
+                COMPANION_LOCKED,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
+        }
         failure?.let {
             Spacer(Modifier.height(16.dp))
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -752,3 +812,8 @@ private fun LockScreen(failure: String?, onUnlock: () -> Unit) {
         ) { Text("Unlock") }
     }
 }
+
+/** What the lock screen says while companion mode runs. */
+const val COMPANION_LOCKED: String =
+    "Locked. This phone's battery, notifications and what is playing keep reaching your computers, " +
+        "and they can still ring it and send it files. Unlock for agents, terminals and computer controls."

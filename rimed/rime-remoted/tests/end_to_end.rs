@@ -186,6 +186,9 @@ impl Harness {
             // `paths::SCRATCH_ROOT_ENV`. It is also what lets the upload test
             // below read back the file the daemon wrote.
             .env("RIME_AGENT_SCRATCH_ROOT", root.join("scratch"))
+            // A phone's `clipboard_write` and `save_file` land here, never on
+            // the developer's clipboard or in their Downloads.
+            .env("RIME_AGENTD_DESKTOP_STUB", root.join("desk"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -2357,6 +2360,113 @@ fn open_events(session: &mut Session, channel: u32) {
 }
 
 #[test]
+fn a_phones_clipboard_follows_this_computers_only_where_it_asked_and_never_comes_straight_back() {
+    let h = harness!("clipboard");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&h) else { return };
+    let tablet = Device::new();
+    assert_eq!(tablet.pair(&h, &offer, "tablet-9")["ok"], true);
+    let mut p = phone.connect(&h).expect("the phone's session");
+    let mut t = tablet.connect(&h).expect("the tablet's session");
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_clipboard"), "{hello}");
+    open_events(&mut p, 9);
+    open_events(&mut t, 9);
+
+    // Nobody asked: nothing is sent, and that is not an error.
+    let (code, said) = rime_remote(&h, &["clipboard"], b"hello");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("No phone"), "{said}");
+
+    // The phone asks, the tablet does not. The text goes from standard input
+    // to the phone verbatim, spaces and line breaks kept; sensitive only
+    // when the caller says so.
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["clipboard"]}"#)["reply"], "ok");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring"]}"#)["reply"], "ok");
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    let pid = rime_remote_core::device::Device::id_for(&phone.key());
+    assert_eq!(listed["phones"][&pid]["can"], serde_json::json!(["clipboard"]), "{listed}");
+    let (code, said) = rime_remote(&h, &["clipboard"], b" two\nlines ");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 phone"), "{said}");
+    let (code, said) = rime_remote(&h, &["clipboard", "--sensitive"], b"hunter2");
+    assert_eq!(code, 0, "{said}");
+    assert_eq!(
+        events_on(&mut p, 9, 2),
+        vec![
+            serde_json::json!({"event": "clipboard", "text": " two\nlines "}),
+            serde_json::json!({"event": "clipboard", "text": "hunter2", "sensitive": true}),
+        ]
+    );
+
+    // Refused in words: nothing, over the cap, too long once escaped.
+    let (code, said) = rime_remote(&h, &["clipboard"], b"");
+    assert_ne!(code, 0, "{said}");
+    let over = serde_json::json!({"cmd": "clipboard", "text": "a".repeat(64 * 1024 + 1)});
+    let r = h.control(&over.to_string());
+    assert_eq!(r["reply"], "error", "{r}");
+    let controls = serde_json::json!({"cmd": "clipboard", "text": "\u{1}".repeat(64 * 1024)});
+    let r = h.control(&controls.to_string());
+    assert!(r["reply"] == "error" && r["message"].as_str().unwrap().contains("escaped"), "{r}");
+
+    // Both ask now. The phone sets this computer's clipboard (into the stub);
+    // the Shell sees the change and sends it on: the tablet gets it, the
+    // phone that wrote it does not. Its next line is the next text, so the
+    // echo never went into its channel.
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring","clipboard"]}"#)["reply"], "ok");
+    let wrote = p.call(r#"{"cmd":"clipboard_write","text":"from the phone"}"#);
+    assert_ne!(wrote["reply"], "error", "{wrote}");
+    assert_eq!(std::fs::read_to_string(h.root.join("desk/clipboard")).expect("the stub clipboard"), "from the phone");
+    let r = h.control(r#"{"cmd":"clipboard","text":"from the phone"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 1}));
+    let r = h.control(r#"{"cmd":"clipboard","text":"copied here"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 2}));
+    assert_eq!(
+        events_on(&mut t, 9, 2),
+        vec![
+            serde_json::json!({"event": "clipboard", "text": "from the phone"}),
+            serde_json::json!({"event": "clipboard", "text": "copied here"}),
+        ]
+    );
+    assert_eq!(events_on(&mut p, 9, 1), vec![serde_json::json!({"event": "clipboard", "text": "copied here"})]);
+
+    // The largest line there is (every byte of the cap a quote, so twice that
+    // once escaped), twice, and then a small one: each arrives whole on both,
+    // and the channel is still there after them. Sent from another thread
+    // while this one reads, as a phone would.
+    let big = "\"".repeat(64 * 1024);
+    let socket = h.remoted_socket.clone();
+    let line = serde_json::json!({"cmd": "clipboard", "text": big}).to_string();
+    let sender = std::thread::spawn(move || {
+        let mut replies: Vec<serde_json::Value> = (0..2).map(|_| one_line(&socket, &line)).collect();
+        replies.push(one_line(&socket, r#"{"cmd":"clipboard","text":"after"}"#));
+        replies
+    });
+    let want = vec![
+        serde_json::json!({"event": "clipboard", "text": big}),
+        serde_json::json!({"event": "clipboard", "text": big}),
+        serde_json::json!({"event": "clipboard", "text": "after"}),
+    ];
+    assert!(events_on(&mut p, 9, 3) == want, "the phone did not get the big lines whole");
+    assert!(events_on(&mut t, 9, 3) == want, "the tablet did not get the big lines whole");
+    for r in sender.join().expect("sender") {
+        assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 2}));
+    }
+
+    // Revoked, a phone is sent nothing more.
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
+    let r = h.control(r#"{"cmd":"clipboard","text":"just the tablet"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 1}));
+    assert_eq!(events_on(&mut t, 9, 1), vec![serde_json::json!({"event": "clipboard", "text": "just the tablet"})]);
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"tablet-9"}"#)["reply"], "ok");
+    let (code, said) = rime_remote(&h, &["clipboard"], b"nobody");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("No phone"), "{said}");
+}
+
+#[test]
 fn a_phones_do_not_disturb_reaches_the_shell_on_a_change_and_the_computers_reaches_the_phones_that_follow_it() {
     use std::os::unix::fs::MetadataExt;
     let h = harness!("focus");
@@ -2441,4 +2551,853 @@ fn a_phones_do_not_disturb_reaches_the_shell_on_a_change_and_the_computers_reach
     let (code, said) = rime_remote(&h, &["focus", "off"], b"");
     assert_eq!(code, 0, "{said}");
     assert!(said.contains("No phone"), "{said}");
+}
+
+#[test]
+fn a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_not_the_runtime() {
+    let h = harness!("companion");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    let paired = device.pair(&h, &offer, "pixel-8");
+    assert_eq!(paired["ok"], true, "{paired}");
+    let id = paired["device"].as_str().expect("an id").to_string();
+    let mut full = device.connect(&h).expect("a session");
+
+    // Minted over the full session, with the real store behind it.
+    let companion = Device::new();
+    assert!(companion.connect(&h).is_none(), "an unregistered key opened a session");
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    assert_eq!(listed["companions"], serde_json::json!([id]), "{listed}");
+    assert!(!listed.to_string().contains(&companion.key()), "the device list carried the companion key");
+    let (code, text) = rime_remote(&h, &["devices", "--json"], b"");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains(r#""companion": true"#), "{text}");
+    assert!(!text.contains(&companion.key()), "{text}");
+    let (code, text) = rime_remote(&h, &["devices"], b"");
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("keeps working after a restart"), "{text}");
+
+    let mut c = companion.connect(&h).expect("the companion key opened no session");
+    let hello = c.call(r#"{"cmd":"remote_hello"}"#);
+    assert_eq!(hello["scope"], "companion", "{hello}");
+    assert!(hello["features"].as_array().expect("features").iter().any(|f| f == "companion_link"), "{hello}");
+    let r = c.call(r#"{"cmd":"phone_report","battery":51,"charging":true,"can":["ring"]}"#);
+    assert_eq!(r["reply"], "ok", "{r}");
+    assert_eq!(h.control(r#"{"cmd":"devices"}"#)["phones"][&id]["battery"], 51);
+    open_events(&mut c, 9);
+
+    // The real runtime: a root request from the companion session is refused
+    // here and nothing is filed in rime-agentd — read back from the daemon
+    // itself.
+    let before = h.direct(r#"{"cmd":"requests"}"#);
+    assert_eq!(before["reply"], "requests", "{before}");
+    for line in [
+        r#"{"cmd":"privilege_request","verb":"install","args":["clang"],"reason":"filed from a companion link"}"#,
+        r#"{"cmd":"hello"}"#,
+        r#"{"cmd":"list"}"#,
+        r#"{"cmd":"clipboard_write","text":"x"}"#,
+        r#"{"cmd":"companion_register","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}"#,
+        r#"{"cmd":"companion_forget"}"#,
+        r#"{"cmd":"machine_lock"}"#,
+        r#"{"cmd":"push_register","endpoint":"https://push.example/up","key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM"}"#,
+        r#"{"cmd":"push_unregister"}"#,
+    ] {
+        let r = c.call(line);
+        assert_eq!(r["kind"], "not_allowed", "{line}: {r}");
+    }
+    c.send(Frame::Open {
+        channel: 11,
+        request: br#"{"cmd":"attach","id":1,"cols":80,"rows":24}"#.to_vec(),
+    });
+    match c.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["kind"], "not_allowed", "{v}");
+        }
+        other => panic!("expected the refusal, got {other:?}"),
+    }
+    let after = h.direct(r#"{"cmd":"requests"}"#);
+    assert_eq!(after["requests"], before["requests"], "a companion session filed a request");
+    assert!(!after.to_string().contains("filed from a companion link"), "{after}");
+    // The control arm: the full session does reach the daemon.
+    assert_eq!(full.call(r#"{"cmd":"list"}"#)["reply"], "sessions");
+    // Its own register/forget changed nothing.
+    assert_eq!(h.control(r#"{"cmd":"devices"}"#)["companions"], serde_json::json!([id]));
+
+    // Revoke ends both live connections, and both keys are refused.
+    let revoked = h.control(&format!(r#"{{"cmd":"revoke","device":"{id}"}}"#));
+    assert_eq!(revoked["reply"], "ok", "{revoked}");
+    for (name, s) in [("companion", &mut c), ("full", &mut full)] {
+        let frame = Frame::Control(b"{\"cmd\":\"remote_hello\"}".to_vec()).encode().expect("encode");
+        let sealed = s.channel.seal(&frame).expect("seal");
+        let _ = write_all(&mut s.socket, &sealed);
+        s.socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        let mut closed = false;
+        for _ in 0..8 {
+            let mut len = [0u8; 4];
+            if s.socket.read_exact(&mut len).is_err() {
+                closed = true;
+                break;
+            }
+            let mut buf = vec![0u8; u32::from_be_bytes(len) as usize];
+            if s.socket.read_exact(&mut buf).is_err() {
+                closed = true;
+                break;
+            }
+        }
+        assert!(closed, "the {name} connection survived revoke");
+    }
+    assert!(companion.connect(&h).is_none(), "a revoked device's companion key reconnected");
+    assert!(device.connect(&h).is_none(), "a revoked device reconnected");
+
+    // Pairing the same phone again starts with no companion key.
+    let Some(offer) = open_offer(&h) else { return };
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut full = device.connect(&h).expect("the re-paired device was refused");
+    assert!(companion.connect(&h).is_none(), "re-pairing brought the old companion key back");
+    assert_eq!(h.control(r#"{"cmd":"devices"}"#)["companions"], serde_json::json!([]));
+    // And the old key stays retired: it cannot be registered again.
+    let r = full.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["kind"], "key_in_use", "{r}");
+    assert!(companion.connect(&h).is_none(), "a retired companion key came back");
+}
+
+/// `rime remote <args>` on its own thread, for a command that waits on a
+/// phone this test is playing.
+fn rime_remote_bg(h: &Harness, args: &[&str], stdin: &[u8]) -> std::thread::JoinHandle<(i32, String, Duration)> {
+    let (root, args, stdin) = (h.root.clone(), args.iter().map(|a| a.to_string()).collect::<Vec<_>>(), stdin.to_vec());
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut child = Command::new(bin("rime"))
+            .arg("remote")
+            .args(&args)
+            .env("XDG_RUNTIME_DIR", root.join("run"))
+            .env("XDG_STATE_HOME", root.join("state"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run rime");
+        child.stdin.take().expect("stdin").write_all(&stdin).expect("feed stdin");
+        let out = child.wait_with_output().expect("rime");
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.code().unwrap_or(-1), said, started.elapsed())
+    })
+}
+
+fn sms_thread(id: u64, snippet: &str) -> serde_json::Value {
+    serde_json::json!({"id": id, "addresses": ["+15555215556"], "snippet": snippet, "date_ms": 1_700_000_000_000u64 + id,
+                       "unread": 1, "count": 2})
+}
+
+#[test]
+fn a_phones_sms_threads_are_read_here_in_chunks_and_sent_from_here_and_nothing_reaches_a_phone_that_did_not_turn_it_on() {
+    let h = harness!("messages");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&h) else { return };
+    let tablet = Device::new();
+    assert_eq!(tablet.pair(&h, &offer, "tablet-9")["ok"], true);
+    let mut p = phone.connect(&h).expect("the phone's session");
+    let mut t = tablet.connect(&h).expect("the tablet's session");
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_messages"), "{hello}");
+    open_events(&mut p, 9);
+    open_events(&mut t, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["messages"]}"#)["reply"], "ok");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring"]}"#)["reply"], "ok");
+
+    // A phone that did not turn Messages on is asked nothing.
+    let (code, said) = rime_remote(&h, &["messages", "--device", "tablet-9"], b"");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("has not turned on Messages"), "{said}");
+    let (code, said) = rime_remote(&h, &["messages", "send", "--device", "tablet-9", "--to", "5556"], b"hi\n");
+    assert_eq!(code, 1, "{said}");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["focus"]}"#)["reply"], "ok");
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":true}"#)["reached"], 1);
+    assert_eq!(
+        events_on(&mut t, 9, 1),
+        vec![serde_json::json!({"event": "focus", "dnd": true})],
+        "the tablet was asked for its messages"
+    );
+
+    // Read, with no device named: the one phone that has Messages on. The
+    // answer comes in two chunks and only the last finishes it; what the
+    // phone sent is cleaned here.
+    let cli = rime_remote_bg(&h, &["messages", "--json", "--limit", "3"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["event"], "messages_request", "{ask}");
+    assert_eq!(ask["limit"], 3, "{ask}");
+    assert!(ask.get("thread").is_none(), "{ask}");
+    let id = ask["id"].as_u64().expect("id");
+    let first = serde_json::json!({"cmd": "messages_reply", "id": id, "more": true,
+                                   "threads": [sms_thread(1, "one\u{202E}"), sms_thread(2, "two")]});
+    assert_eq!(p.call(&first.to_string())["reply"], "ok");
+    let last = serde_json::json!({"cmd": "messages_reply", "id": id, "threads": [sms_thread(3, "three")]});
+    assert_eq!(p.call(&last.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    let v: serde_json::Value = serde_json::from_str(&said).unwrap_or_else(|e| panic!("{e}: {said}"));
+    assert_eq!(v["device"], "pixel-8", "{v}");
+    let ids: Vec<u64> = v["threads"].as_array().unwrap().iter().map(|t| t["id"].as_u64().unwrap()).collect();
+    assert_eq!(ids, [1, 2, 3], "{v}");
+    assert_eq!(v["threads"][0]["snippet"], "one", "a bidi override survived: {v}");
+    // An answer to a request nobody waits for any more counts for nothing.
+    assert_eq!(p.call(&last.to_string())["code"], "unknown_id");
+
+    // One conversation, as a person reads it.
+    let cli = rime_remote_bg(&h, &["messages", "--thread", "3"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["thread"], 3, "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    let reply = serde_json::json!({"cmd": "messages_reply", "id": id, "thread": 3, "messages": [
+        {"id": 11, "date_ms": 2, "from_me": true, "body": "see you at 5", "status": "delivered"},
+        {"id": 10, "date_ms": 1, "from_me": false, "body": "first line\nsecond line", "status": "received"}]});
+    assert_eq!(p.call(&reply.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.find("first line").unwrap() < said.find("see you at 5").unwrap(), "{said}");
+    assert!(said.contains("  second line"), "{said}");
+
+    // No answer: the person is told, within the read deadline and not never.
+    let cli = rime_remote_bg(&h, &["messages", "--thread", "4"], b"");
+    events_on(&mut p, 9, 1);
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("did not answer in time"), "{said}");
+    assert!(took >= Duration::from_secs(9) && took < Duration::from_secs(19), "{took:?}");
+
+    // Send: the text from standard input, to the number, and done when the
+    // phone says the radio took it.
+    let cli = rime_remote_bg(&h, &["messages", "send", "--to", "+1 555 521 5556"], b"hello from here\n");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["event"], "messages_send", "{ask}");
+    assert_eq!(ask["to"], serde_json::json!(["+15555215556"]), "{ask}");
+    assert_eq!(ask["text"], "hello from here", "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"messages_sent","id":{id},"ok":true}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("pixel-8 sent the message"), "{said}");
+
+    // The phone's refusal, in words.
+    let cli = rime_remote_bg(&h, &["messages", "send", "--thread", "3"], b"again\n");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["thread"], 3, "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"messages_sent","id":{id},"ok":false,"error":"off"}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("turned off on pixel-8"), "{said}");
+
+    // Text that is refused before the phone is asked.
+    let (code, said) = rime_remote(&h, &["messages", "send", "--to", "5556"], "x".repeat(2001).as_bytes());
+    assert_eq!(code, 1, "{said}");
+    let (code, said) = rime_remote(&h, &["messages", "send", "--to", "not-a-number"], b"x\n");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("digits"), "{said}");
+
+    // A phone that says something changed: a time, never what.
+    assert_eq!(p.call(r#"{"cmd":"messages_changed"}"#)["reply"], "ok");
+    let cli = rime_remote_bg(&h, &["messages", "--json"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"messages_reply","id":{id},"threads":[]}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("changed_ms"), "{said}");
+}
+
+#[test]
+fn a_messages_request_dies_with_the_phones_connection_and_revoke_and_a_locked_phone_cannot_send() {
+    let h = harness!("messages-drop");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    let paired = phone.pair(&h, &offer, "pixel-8");
+    assert_eq!(paired["ok"], true);
+    let id_of_device = paired["device"].as_str().unwrap().to_string();
+    let mut p = phone.connect(&h).expect("the phone's session");
+    open_events(&mut p, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["messages"]}"#)["reply"], "ok");
+
+    // Half an answer, then the connection goes: the person is told at once,
+    // and the half that came is gone with it.
+    let cli = rime_remote_bg(&h, &["messages"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let first = serde_json::json!({"cmd": "messages_reply", "id": id, "more": true, "threads": [sms_thread(1, "one")]});
+    assert_eq!(p.call(&first.to_string())["reply"], "ok");
+    drop(p);
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("disconnected"), "{said}");
+    assert!(took < Duration::from_secs(6), "the disconnect waited out the deadline: {took:?}");
+    // The rest, from the phone's next connection, completes nothing.
+    let mut p = phone.connect(&h).expect("reconnect");
+    open_events(&mut p, 9);
+    let last = serde_json::json!({"cmd": "messages_reply", "id": id, "threads": [sms_thread(2, "two")]});
+    assert_eq!(p.call(&last.to_string())["code"], "unknown_id");
+
+    // Locked: the phone's events channel is its companion session's. Reading
+    // works; sending is refused here at once and nothing is written to it.
+    let companion = Device::new();
+    let r = p.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let mut c = companion.connect(&h).expect("the companion session");
+    open_events(&mut c, 9);
+    assert_eq!(c.call(r#"{"cmd":"phone_report","can":["messages"]}"#)["reply"], "ok");
+    let (code, said) = rime_remote(&h, &["messages", "send", "--to", "5556"], b"from a locked phone\n");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("locked"), "{said}");
+    assert_eq!(c.call(r#"{"cmd":"messages_sent","id":1,"ok":true}"#)["kind"], "not_allowed");
+    let cli = rime_remote_bg(&h, &["messages", "--json"], b"");
+    let ask = events_on(&mut c, 9, 1).remove(0);
+    assert_eq!(ask["event"], "messages_request", "the locked send reached the phone: {ask}");
+    let id = ask["id"].as_u64().unwrap();
+    let reply = serde_json::json!({"cmd": "messages_reply", "id": id, "threads": [sms_thread(5, "five")]});
+    assert_eq!(c.call(&reply.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("five"), "{said}");
+
+    // Revoke while a request waits: it fails at once.
+    let cli = rime_remote_bg(&h, &["messages"], b"");
+    events_on(&mut c, 9, 1);
+    assert_eq!(h.control(&format!(r#"{{"cmd":"revoke","device":"{id_of_device}"}}"#))["reply"], "ok");
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
+}
+
+/// A button pressed on a notification the stub holds: `ActionInvoked`, then
+/// the close (reason 2) a server that is not resident sends after it.
+fn press_here(h: &Harness, id: &serde_json::Value, action: &str) {
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(h.root.join("notify/closed.jsonl"))
+        .expect("closed.jsonl");
+    let line = serde_json::json!({"id": id, "action": action});
+    std::io::Write::write_all(&mut f, format!("{line}\n").as_bytes()).expect("write");
+    drop(f);
+    close_here(h, id, 2);
+}
+
+fn call_state(state: &str, number: Option<&str>) -> String {
+    let mut v = serde_json::json!({"cmd": "call_state", "state": state, "since_ms": 1_700_000_000_000u64});
+    if let Some(n) = number {
+        v["number"] = n.into();
+    }
+    v.to_string()
+}
+
+fn call_entry(n: u64, kind: &str) -> serde_json::Value {
+    serde_json::json!({"number": "+15555215556", "type": kind, "date_ms": 1_700_000_000_000u64 - n, "duration_s": n})
+}
+
+#[test]
+fn a_phones_call_rings_here_is_answered_from_the_notification_and_history_hangup_and_dial_go_through_the_cli() {
+    let h = harness!("calls");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&h) else { return };
+    let tablet = Device::new();
+    assert_eq!(tablet.pair(&h, &offer, "tablet-9")["ok"], true);
+    let mut p = phone.connect(&h).expect("the phone's session");
+    let mut t = tablet.connect(&h).expect("the tablet's session");
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_calls"), "{hello}");
+    open_events(&mut p, 9);
+    open_events(&mut t, 9);
+    let all = r#"{"cmd":"phone_report","can":["ring","receive","dismiss","reply","focus","messages","calls","calls_answer","calls_dial","calls_history"]}"#;
+    assert_eq!(p.call(all)["reply"], "ok");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring","calls_answer","calls_dial"]}"#)["reply"], "ok");
+    // The report kept every word: ten is past the old cap of eight.
+    let devices = h.control(r#"{"cmd":"devices"}"#);
+    let kept = devices["phones"].as_object().unwrap().values().find(|r| r["can"].as_array().unwrap().len() == 10);
+    assert!(kept.is_some(), "{devices}");
+
+    // A phone that did not turn calls on shows nothing and is asked nothing.
+    assert_eq!(t.call(&call_state("ringing", Some("5556")))["code"], "off");
+    assert!(notify_lines(&h, 1).is_empty(), "the tablet's call was shown");
+    for args in [&["calls", "--device", "tablet-9"][..], &["calls", "answer", "--device", "tablet-9"][..]] {
+        let (code, said) = rime_remote(&h, args, b"");
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("has not turned on Calls"), "{said}");
+    }
+    // Nor may a paired phone ask for a call itself: `call` is the control
+    // socket's, for somebody at this machine.
+    let r = p.call(r#"{"cmd":"call","action":"dial","number":"5556"}"#);
+    assert_ne!(r["reply"], "call_done", "{r}");
+
+    // It rings: a notification with Answer and Decline, shown until it stops.
+    assert_eq!(p.call(&call_state("ringing", None))["reply"], "ok");
+    assert_eq!(p.call(&call_state("ringing", Some("+1 555 521 5556\u{202E}")))["reply"], "ok");
+    let shown = notify_lines(&h, 2);
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert_eq!(shown[0]["summary"], "Incoming call");
+    assert_eq!(shown[1]["summary"], "Call from +1 555 521 5556", "{shown:?}");
+    assert_eq!(shown[1]["replaces"], shown[0]["id"]);
+    assert_eq!(shown[1]["actions"], serde_json::json!([["answer", "Answer"], ["decline", "Decline"]]));
+    assert_eq!(shown[1]["sticky"], true);
+    let ringing_id = shown[0]["id"].clone();
+
+    // Answer pressed here: the phone is asked, says done, and says the call
+    // is active; the notification closes and nothing is a dismissal.
+    press_here(&h, &ringing_id, "answer");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!((ask["event"].as_str(), ask["action"].as_str()), (Some("call_action"), Some("answer")), "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":true}}"#))["reply"], "ok");
+    assert_eq!(p.call(&call_state("active", Some("5556")))["reply"], "ok");
+
+    // The call now and the history, in two chunks, through the CLI.
+    let cli = rime_remote_bg(&h, &["calls", "--json", "--limit", "3"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["event"], "call_history_request", "{ask}");
+    assert_eq!(ask["limit"], 3, "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    let first = serde_json::json!({"cmd": "call_history_reply", "id": id, "more": true,
+                                   "calls": [call_entry(1, "incoming"), call_entry(2, "missed")]});
+    assert_eq!(p.call(&first.to_string())["reply"], "ok");
+    let last = serde_json::json!({"cmd": "call_history_reply", "id": id, "calls": [call_entry(3, "rejected")]});
+    assert_eq!(p.call(&last.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    let v: serde_json::Value = serde_json::from_str(&said).unwrap_or_else(|e| panic!("{e}: {said}"));
+    assert_eq!(v["device"], "pixel-8", "{v}");
+    assert_eq!(v["current"]["state"], "active", "{v}");
+    let kinds: Vec<&str> = v["calls"].as_array().unwrap().iter().map(|c| c["type"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["incoming", "missed", "rejected"], "{v}");
+    assert_eq!(p.call(&last.to_string())["code"], "unknown_id");
+
+    // No answer: told within the deadline, the call now still shown.
+    let cli = rime_remote_bg(&h, &["calls"], b"");
+    events_on(&mut p, 9, 1);
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("pixel-8: on a call with 5556") && said.contains("did not answer in time"), "{said}");
+    assert!(took >= Duration::from_secs(9) && took < Duration::from_secs(19), "{took:?}");
+
+    // Hang up from here.
+    let cli = rime_remote_bg(&h, &["calls", "hangup"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["action"], "hangup", "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":true}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("pixel-8 ended the call"), "{said}");
+    assert_eq!(p.call(&call_state("idle", None))["reply"], "ok");
+
+    // Nothing to answer now: refused here, nothing written to the phone.
+    let (code, said) = rime_remote(&h, &["calls", "answer"], b"");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("no call for that"), "{said}");
+
+    // Dial: the number cleaned, and the phone's refusal read back in words.
+    let (code, said) = rime_remote(&h, &["calls", "dial", "5556;1"], b"");
+    assert_eq!(code, 1, "{said}");
+    let cli = rime_remote_bg(&h, &["calls", "dial", "+1 (555) 521-5556"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!((ask["action"].as_str(), ask["number"].as_str()), (Some("dial"), Some("+15555215556")), "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":false,"error":"emergency"}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("emergency"), "{said}");
+    let cli = rime_remote_bg(&h, &["calls", "dial", "5556", "--json"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":true}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(r#""done":true"#), "{said}");
+
+    // Ringing then idle, unanswered: the notification closes.
+    let before = notify_lines(&h, 0).len();
+    assert_eq!(p.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let shown = notify_lines(&h, before + 1);
+    let id = shown[before]["id"].clone();
+    assert_eq!(p.call(&call_state("idle", None))["reply"], "ok");
+    let shown = notify_lines(&h, before + 2);
+    assert_eq!(shown[before + 1], serde_json::json!({"op": "close", "id": id}), "{shown:?}");
+
+    // Decline pressed here, and the phone could not: a notice says so.
+    assert_eq!(p.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let shown = notify_lines(&h, before + 3);
+    press_here(&h, &shown[before + 2]["id"], "decline");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["action"], "decline", "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(p.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":false,"error":"no_permission"}}"#))["reply"], "ok");
+    let shown = notify_lines(&h, before + 4);
+    let notice = shown.last().unwrap();
+    assert_eq!(notice["summary"], "Call not declined", "{shown:?}");
+    assert!(notice["body"].as_str().unwrap().contains("not allowed"), "{notice}");
+
+    // The tablet heard nothing of any of this.
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["focus"]}"#)["reply"], "ok");
+    // Two: the phone follows Focus too.
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":true}"#)["reached"], 2);
+    assert_eq!(events_on(&mut t, 9, 1), vec![serde_json::json!({"event": "focus", "dnd": true})]);
+    // And turning calls off on the phone closes what still rings.
+    assert_eq!(p.call(&call_state("idle", None))["reply"], "ok");
+    let n = notify_lines(&h, 0).len();
+    assert_eq!(p.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let shown = notify_lines(&h, n + 1);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["ring"]}"#)["reply"], "ok");
+    let after = notify_lines(&h, n + 2);
+    assert_eq!(after[n + 1], serde_json::json!({"op": "close", "id": shown[n]["id"]}), "{after:?}");
+}
+
+#[test]
+fn a_call_dies_with_the_phones_connection_and_revoke_and_a_locked_phone_answers_but_never_dials() {
+    let h = harness!("calls-drop");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    let paired = phone.pair(&h, &offer, "pixel-8");
+    assert_eq!(paired["ok"], true);
+    let id_of_device = paired["device"].as_str().unwrap().to_string();
+    let mut p = phone.connect(&h).expect("the phone's session");
+    open_events(&mut p, 9);
+    let all = r#"{"cmd":"phone_report","can":["calls","calls_answer","calls_dial","calls_history"]}"#;
+    assert_eq!(p.call(all)["reply"], "ok");
+
+    // Ringing, then the connection goes: the notification closes.
+    assert_eq!(p.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let shown = notify_lines(&h, 1);
+    // Half a history, then the connection goes: told at once.
+    let cli = rime_remote_bg(&h, &["calls"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let first = serde_json::json!({"cmd": "call_history_reply", "id": id, "more": true, "calls": [call_entry(1, "missed")]});
+    assert_eq!(p.call(&first.to_string())["reply"], "ok");
+    drop(p);
+    let (code, said, took) = cli.join().unwrap();
+    assert!(said.contains("disconnected"), "{code} {said}");
+    assert!(took < Duration::from_secs(6), "the disconnect waited out the deadline: {took:?}");
+    let after = notify_lines(&h, 2);
+    assert_eq!(after[1], serde_json::json!({"op": "close", "id": shown[0]["id"]}), "{after:?}");
+    let mut p = phone.connect(&h).expect("reconnect");
+    open_events(&mut p, 9);
+    let last = serde_json::json!({"cmd": "call_history_reply", "id": id, "calls": []});
+    assert_eq!(p.call(&last.to_string())["code"], "unknown_id");
+
+    // Locked: the events channel is the companion session's. A call rings
+    // and is answered, as on the phone's own lock screen; a dial is refused
+    // here and never written, even to a phone that claims it can.
+    let companion = Device::new();
+    let r = p.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let mut c = companion.connect(&h).expect("the companion session");
+    open_events(&mut c, 9);
+    assert_eq!(c.call(all)["reply"], "ok");
+    let (code, said) = rime_remote(&h, &["calls", "dial", "5556"], b"");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("locked"), "{said}");
+    assert_eq!(c.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let cli = rime_remote_bg(&h, &["calls", "answer"], b"");
+    let ask = events_on(&mut c, 9, 1).remove(0);
+    assert_eq!(ask["action"], "answer", "the locked dial reached the phone: {ask}");
+    let id = ask["id"].as_u64().unwrap();
+    assert_eq!(c.call(&format!(r#"{{"cmd":"call_done","id":{id},"ok":true}}"#))["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("answered the call"), "{said}");
+
+    // Revoke while a history read waits and a call rings: both go at once.
+    assert_eq!(c.call(&call_state("ringing", Some("5556")))["reply"], "ok");
+    let n = notify_lines(&h, 0).len();
+    let cli = rime_remote_bg(&h, &["calls"], b"");
+    events_on(&mut c, 9, 1);
+    assert_eq!(h.control(&format!(r#"{{"cmd":"revoke","device":"{id_of_device}"}}"#))["reply"], "ok");
+    let (_, said, took) = cli.join().unwrap();
+    assert!(said.contains("revoked"), "{said}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
+    let shown = notify_lines(&h, n + 1);
+    assert_eq!(shown.last().unwrap()["op"], "close", "{shown:?}");
+}
+
+/// A JPEG's segments with an EXIF block that carries a GPS position and a
+/// comment, as a camera writes one. The computer walks segments only, so the
+/// picture's tables need not decode.
+fn jpeg_with_location() -> Vec<u8> {
+    let mut j = vec![0xFF, 0xD8];
+    let mut seg = |marker: u8, body: &[u8]| {
+        j.extend([0xFF, marker]);
+        j.extend(((body.len() + 2) as u16).to_be_bytes());
+        j.extend_from_slice(body);
+    };
+    seg(0xE0, b"JFIF\0\x01\x02\0\0\x01\0\x01\0\0");
+    seg(0xE1, b"Exif\0\0MM\0\x2a\0\0\0\x08GPSLatitude-31.9523S115.8613E");
+    seg(0xFE, b"taken at home");
+    seg(0xDB, &[0u8; 65]);
+    seg(0xC0, &[8, 0, 1, 0, 1, 1, 1, 0x11, 0]);
+    seg(0xDA, &[1, 1, 0, 0, 0x3f, 0]);
+    j.extend([0x12, 0x34, 0x56, 0xFF, 0xD9]);
+    j
+}
+
+fn photo_entry(id: u64) -> serde_json::Value {
+    serde_json::json!({"id": id, "name": format!("IMG_{id}.jpg"), "date_ms": 1_700_000_000_000u64 - id,
+                       "width": 4000, "height": 3000, "size": 2_000_000 + id, "mime": "image/jpeg",
+                       "thumb": rime_remote_core::b64_encode(&jpeg_with_location())})
+}
+
+fn has_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The one device folder under the harness's thumbnail root, if any.
+fn thumb_folders(h: &Harness) -> Vec<PathBuf> {
+    std::fs::read_dir(h.root.join("run/rime-remote/photos"))
+        .map(|r| r.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default()
+}
+
+/// Wait up to five seconds for `cond`.
+fn soon(mut cond: impl FnMut() -> bool) -> bool {
+    let until = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < until {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    cond()
+}
+
+/// Open `photos_upload` for save `id` on `channel` and give the reply line.
+fn open_upload(session: &mut Session, channel: u32, id: u64, name: &str, len: u64) -> serde_json::Value {
+    session.send(Frame::Open {
+        channel,
+        request: serde_json::json!({"cmd": "photos_upload", "id": id, "name": name, "len": len}).to_string().into_bytes(),
+    });
+    loop {
+        match session.recv() {
+            Frame::Control(line) => return serde_json::from_slice(&line).expect("json"),
+            other => session.pending.push(other),
+        }
+    }
+}
+
+#[test]
+fn a_phones_photos_are_listed_here_with_private_thumbnails_saved_whole_and_nothing_reaches_a_phone_that_did_not_turn_them_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let h = harness!("photos");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&h) else { return };
+    let tablet = Device::new();
+    assert_eq!(tablet.pair(&h, &offer, "tablet-9")["ok"], true);
+    let mut p = phone.connect(&h).expect("the phone's session");
+    let mut t = tablet.connect(&h).expect("the tablet's session");
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_photos"), "{hello}");
+    open_events(&mut p, 9);
+    open_events(&mut t, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["focus"]}"#)["reply"], "ok");
+    let saved = h.root.join("saved");
+
+    // A phone that did not turn Photos on is asked nothing.
+    let to = saved.to_str().unwrap();
+    for args in [&["photos", "--device", "tablet-9"][..], &["photos", "save", "1", "--device", "tablet-9", "--to", to][..]] {
+        let (code, said) = rime_remote(&h, args, b"");
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("has not turned on Photos"), "{said}");
+    }
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":true}"#)["reached"], 1);
+    assert_eq!(
+        events_on(&mut t, 9, 1),
+        vec![serde_json::json!({"event": "focus", "dnd": true})],
+        "the tablet was asked for its photos"
+    );
+    assert!(std::fs::read_dir(&saved).map(|r| r.count()).unwrap_or(0) == 0, "a refused save left a file");
+
+    // A listing with no device named, in two chunks; only the last finishes
+    // it, and the thumbnails land private and without their location.
+    let cli = rime_remote_bg(&h, &["photos", "--json", "--limit", "3"], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!((ask["event"].as_str(), ask["limit"].as_u64()), (Some("photos_request"), Some(3)), "{ask}");
+    let id = ask["id"].as_u64().unwrap();
+    let first = serde_json::json!({"cmd": "photos_reply", "id": id, "more": true, "photos": [photo_entry(1), photo_entry(2)]});
+    assert_eq!(p.call(&first.to_string())["reply"], "ok");
+    let last = serde_json::json!({"cmd": "photos_reply", "id": id, "photos": [photo_entry(3)]});
+    assert_eq!(p.call(&last.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    let v: serde_json::Value = serde_json::from_str(&said).unwrap_or_else(|e| panic!("{e}: {said}"));
+    assert_eq!((v["device"].as_str(), v["partial"].as_bool()), (Some("pixel-8"), Some(false)), "{v}");
+    let listed = v["photos"].as_array().unwrap();
+    assert_eq!(listed.iter().map(|p| p["id"].as_u64().unwrap()).collect::<Vec<_>>(), [1, 2, 3], "{v}");
+    let folders = thumb_folders(&h);
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    let folder = &folders[0];
+    assert_eq!(std::fs::metadata(folder).unwrap().permissions().mode() & 0o777, 0o700);
+    for photo in listed {
+        let path = PathBuf::from(photo["thumb"].as_str().unwrap_or_else(|| panic!("no thumbnail: {photo}")));
+        assert_eq!(path.parent(), Some(folder.as_path()), "{photo}");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600, "{photo}");
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(&bytes[..2], [0xFF, 0xD8]);
+        for gone in [&b"Exif"[..], b"GPSLatitude", b"taken at home"] {
+            assert!(!has_bytes(&bytes, gone), "{gone:?} reached the disk in {}", path.display());
+        }
+    }
+    assert_eq!(p.call(&last.to_string())["code"], "unknown_id");
+
+    // Save: the phone uploads on a channel of another connection of its own,
+    // as the app does, and the computer's file holds exactly those bytes.
+    let body: Vec<u8> = (0..300_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8).collect();
+    std::fs::create_dir_all(&saved).unwrap();
+    std::fs::write(saved.join("IMG_2.jpg"), b"a file of somebody else's").unwrap();
+    let mut up = phone.connect(&h).expect("the upload connection");
+    for round in 0..2 {
+        let cli = rime_remote_bg(&h, &["photos", "save", "2", "--to", to, "--json"], b"");
+        let ask = events_on(&mut p, 9, 1).remove(0);
+        assert_eq!((ask["event"].as_str(), ask["photo"].as_u64()), (Some("photos_fetch"), Some(2)), "{ask}");
+        let fetch = ask["id"].as_u64().unwrap();
+        let r = open_upload(&mut up, 12 + round, fetch, "IMG_2.jpg", body.len() as u64);
+        assert_eq!(r, serde_json::json!({"reply": "uploading", "len": body.len()}));
+        for part in body.chunks(40_000) {
+            up.send(Frame::Data { channel: 12 + round, bytes: part.to_vec() });
+        }
+        let said_on_channel = up.bytes_until_close(12 + round);
+        let line: serde_json::Value = serde_json::from_slice(said_on_channel.trim_ascii()).expect("json");
+        assert_eq!(line["reply"], "uploaded", "{line}");
+        let (code, said, _) = cli.join().unwrap();
+        assert_eq!(code, 0, "{said}");
+        let v: serde_json::Value = serde_json::from_str(said.lines().next().unwrap()).unwrap_or_else(|e| panic!("{e}: {said}"));
+        let path = PathBuf::from(v["path"].as_str().unwrap());
+        let want = if round == 0 { "IMG_2 (2).jpg" } else { "IMG_2 (3).jpg" };
+        assert_eq!(path, saved.join(want), "{v}");
+        assert_eq!(std::fs::read(&path).unwrap(), body, "the saved photo is not the phone's bytes");
+    }
+    assert_eq!(std::fs::read(saved.join("IMG_2.jpg")).unwrap(), b"a file of somebody else's", "a file was replaced");
+
+    // Too large: refused before a byte, and nothing is left behind.
+    let cli = rime_remote_bg(&h, &["photos", "save", "3", "--to", to], b"");
+    let fetch = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let r = open_upload(&mut up, 20, fetch, "IMG_3.jpg", 64 * 1024 * 1024 + 1);
+    assert_eq!(r["code"], "too_large", "{r}");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("larger than 64 MiB"), "{said}");
+    // The phone says it has no such photo.
+    let cli = rime_remote_bg(&h, &["photos", "save", "4", "--to", to], b"");
+    let fetch = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let no = format!(r#"{{"cmd":"photos_fetch_reply","id":{fetch},"error":"not_found"}}"#);
+    assert_eq!(up.call(&no)["code"], "unknown_id", "a fetch reply counted from a connection it was not asked on");
+    assert_eq!(p.call(&no)["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("no such photo"), "{said}");
+    let mut names: Vec<String> =
+        std::fs::read_dir(&saved).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, ["IMG_2 (2).jpg", "IMG_2 (3).jpg", "IMG_2.jpg"], "a failed save left a file");
+    let mode = std::fs::metadata(saved.join("IMG_2 (2).jpg")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o644);
+
+    // The phone stops offering photos: the thumbnails go at once.
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["ring"]}"#)["reply"], "ok");
+    assert!(soon(|| thumb_folders(&h).is_empty()), "switching Photos off left the thumbnails");
+    let (code, said) = rime_remote(&h, &["photos"], b"");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("no paired phone has turned on Photos"), "{said}");
+
+    // On again: a new listing, then the listing's connection ends and its
+    // thumbnails go with it.
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    let cli = rime_remote_bg(&h, &["photos", "--json"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let reply = serde_json::json!({"cmd": "photos_reply", "id": id, "partial": true, "photos": [photo_entry(5)]});
+    assert_eq!(p.call(&reply.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains(r#""partial": true"#), "{said}");
+    assert_eq!(thumb_folders(&h).len(), 1);
+    drop(up);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(thumb_folders(&h).len(), 1, "another connection's end took the listing's thumbnails");
+    drop(p);
+    assert!(soon(|| thumb_folders(&h).is_empty()), "the thumbnails outlived the phone's connection");
+}
+
+#[test]
+fn photos_are_refused_to_a_locked_phone_a_listing_dies_with_revoke_and_a_save_the_phone_never_starts_times_out() {
+    let h = harness!("photos-locked");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    let paired = phone.pair(&h, &offer, "pixel-8");
+    assert_eq!(paired["ok"], true);
+    let device_id = paired["device"].as_str().unwrap().to_string();
+    let mut p = phone.connect(&h).expect("the phone's session");
+    open_events(&mut p, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    let saved = h.root.join("saved");
+    let to = saved.to_str().unwrap();
+
+    // A save the phone never starts: the person is told within the start
+    // wait, and the hidden file is gone.
+    let cli = rime_remote_bg(&h, &["photos", "save", "1", "--to", to], b"");
+    let ask = events_on(&mut p, 9, 1).remove(0);
+    assert_eq!(ask["event"], "photos_fetch", "{ask}");
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("did not answer in time"), "{said}");
+    assert!(took >= Duration::from_secs(19) && took < Duration::from_secs(30), "{took:?}");
+    assert_eq!(std::fs::read_dir(&saved).unwrap().count(), 0, "a timed-out save left a file");
+    // An upload that begins after that is for nobody.
+    let late = open_upload(&mut p, 12, ask["id"].as_u64().unwrap(), "IMG_1.jpg", 10);
+    assert_eq!(late["code"], "unknown_id", "{late}");
+
+    // Locked: the events channel is the companion session's. Nothing is
+    // written to it, and nothing it sends counts.
+    let companion = Device::new();
+    let r = p.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let mut c = companion.connect(&h).expect("the companion session");
+    open_events(&mut c, 9);
+    assert_eq!(c.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    for args in [&["photos"][..], &["photos", "save", "1", "--to", to][..]] {
+        let (code, said) = rime_remote(&h, args, b"");
+        assert_eq!(code, 1, "{said}");
+        assert!(said.contains("locked"), "{said}");
+    }
+    for line in [r#"{"cmd":"photos_reply","id":1,"photos":[]}"#, r#"{"cmd":"photos_fetch_reply","id":1,"error":"off"}"#] {
+        assert_eq!(c.call(line)["kind"], "not_allowed", "{line}");
+    }
+    let r = open_upload(&mut c, 14, 1, "IMG_1.jpg", 10);
+    assert_eq!(r["kind"], "not_allowed", "{r}");
+    // What the companion channel got since it opened: only the focus line
+    // this writes now, so no photos request went to it.
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":false}"#)["reached"], 0);
+    assert_eq!(c.call(r#"{"cmd":"phone_report","can":["photos","focus"]}"#)["reply"], "ok");
+    assert_eq!(h.control(r#"{"cmd":"focus","dnd":true}"#)["reached"], 1);
+    assert_eq!(events_on(&mut c, 9, 1), vec![serde_json::json!({"event": "focus", "dnd": true})]);
+
+    // Unlocked again: a listing writes thumbnails, and revoke takes them and
+    // fails a listing that waits.
+    let mut p = phone.connect(&h).expect("the phone again");
+    open_events(&mut p, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["photos"]}"#)["reply"], "ok");
+    let cli = rime_remote_bg(&h, &["photos"], b"");
+    let id = events_on(&mut p, 9, 1).remove(0)["id"].as_u64().unwrap();
+    let reply = serde_json::json!({"cmd": "photos_reply", "id": id, "photos": [photo_entry(1)]});
+    assert_eq!(p.call(&reply.to_string())["reply"], "ok");
+    let (code, said, _) = cli.join().unwrap();
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("IMG_1.jpg"), "{said}");
+    assert_eq!(thumb_folders(&h).len(), 1);
+    let cli = rime_remote_bg(&h, &["photos"], b"");
+    events_on(&mut p, 9, 1);
+    assert_eq!(h.control(&format!(r#"{{"cmd":"revoke","device":"{device_id}"}}"#))["reply"], "ok");
+    let (code, said, took) = cli.join().unwrap();
+    assert_eq!(code, 1, "{said}");
+    assert!(took < Duration::from_secs(6), "{took:?}");
+    assert!(soon(|| thumb_folders(&h).is_empty()), "revoke left the thumbnails");
 }

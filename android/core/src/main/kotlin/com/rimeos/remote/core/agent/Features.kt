@@ -93,6 +93,12 @@ data class RemoteHello(
     val version: Int = 0,
     val features: List<String> = emptyList(),
     val lan: List<String> = emptyList(),
+    /**
+     * `"companion"` on a session dialled with the companion key (contract
+     * §2.1); absent, or `"full"`, otherwise. Read by [MachineLink], which only
+     * ever narrows on it.
+     */
+    val scope: String? = null,
 ) {
     fun has(feature: String): Boolean = feature in features
 

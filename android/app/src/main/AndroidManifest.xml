@@ -74,6 +74,68 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- "Keep working after the phone restarts" (contract §2.10), off by
+         default. Only with that switch on does the app do anything at boot:
+         `link.BootReceiver` reads the switch and the companion keys and starts
+         `link.LinkService` in companion mode, which runs the device features
+         (report, notifications, media, ring, offers, focus) and nothing else.
+
+         RECEIVE_BOOT_COMPLETED is what any boot receiver needs; it is not a
+         runtime prompt. REQUEST_IGNORE_BATTERY_OPTIMIZATIONS lets the app
+         ASK, once, when the switch is turned on, to be left out of battery
+         optimisation, so Doze does not hold the link off for hours; the person
+         may refuse and the feature still works, less promptly. WAKE_LOCK is
+         still not here: nothing keeps the CPU awake. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- "Messages on your computer" (contract §2.11), off by default. A paired
+         computer reads this phone's SMS conversations when it asks, and,
+         while the app is unlocked, sends an SMS from it. Each is asked for at
+         the moment the person turns the feature on, never at install, and the
+         app works without them. Nothing read is stored, here or there.
+         READ_CONTACTS is a separate, optional ask, so the computer can show a
+         name instead of a number. No RECEIVE_SMS: a new message is noticed
+         from the SMS store changing, not by taking the broadcast.
+         On a phone that installed this app from a file, Android 13 and later
+         block the first two until the person allows restricted settings in
+         App info; the screen says so. -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
+    <!-- "Calls on your computer" (contract §2.12), off by default. A paired
+         computer shows a call while it rings, may answer, decline and end it
+         and read the call history, and, while the app is unlocked, place a
+         call from this phone. Each is asked for at the moment the person
+         turns the feature on, never at install, and the app works without
+         them. READ_CALL_LOG also gives the number of a ringing call. There is
+         no audio: the call stays on the phone, so no microphone permission
+         and no self-managed calls. Nothing read is stored, here or there.
+         On a phone that installed this app from a file, Android 13 and later
+         block READ_CALL_LOG until restricted settings are allowed. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.CALL_PHONE" />
+
+    <!-- "Photos on your computer" (contract §2.13), off by default. A paired
+         computer lists this phone's photos, with a small preview of each, and
+         saves the ones the person chooses, only while the app is unlocked and
+         never over the companion link. A photo picker cannot do this: the
+         computer browses, so the library has to be readable. Asked for only
+         when the person opens that screen, never at install. On Android 14 and
+         later the person may allow only the photos they pick, and the
+         computer then sees those alone. READ_EXTERNAL_STORAGE stops at Android
+         12, where READ_MEDIA_IMAGES takes over. No ACCESS_MEDIA_LOCATION, so
+         from Android 10 on Android blanks a photo's location before this app
+         reads it, and no video permission. Nothing read is stored, here or
+         there. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+
     <!-- Push-to-talk, and what is NOT here is the point of it.
 
          RECORD_AUDIO is absent, deliberately. Speech reaches this app through
@@ -86,11 +148,12 @@
 
          That is the same rule P1-059's fourth criterion states for the photo
          library, applied to the microphone: take the Android-mediated
-         selection, never the blanket permission. Which is also why no storage
-         or media permission appears anywhere in this file; `ManifestTest`
-         asserts their absence rather than trusting it, because the moment a
-         file-handoff transport exists the obvious way to read the file is a
-         permission.
+         selection, never the blanket permission. Which is also why sending a
+         file uses no storage or media permission, and why the only ones in
+         this file are the three "Photos on your computer" declares above;
+         `ManifestTest` asserts every other one absent rather than trusting
+         it, because the moment a file-handoff transport exists the obvious
+         way to read the file is a permission.
 
          This `<queries>` entry is what package visibility on API 30 and later
          requires for the recogniser to be visible at all. Without it,
@@ -212,8 +275,21 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps an end-to-end encrypted session open to the user's own paired computer while the app is unlocked, so the coding agents running there can be seen and answered at once." />
+                android:value="Keeps an end-to-end encrypted session open to the user's own paired computer while the app is unlocked, so the coding agents running there can be seen and answered at once. With the user's opt-in switch on, also while the app is locked and after a restart, carrying only the phone's status, notifications and media to that computer." />
         </service>
+
+        <!-- Starts the companion link after a restart or an app update, only
+             when the person turned "Keep working after the phone restarts" on
+             and a computer holds a companion key. Not exported: the two system
+             broadcasts reach it anyway, and nothing else may. -->
+        <receiver
+            android:name=".link.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- This phone's notifications on the paired computers (contract §2.7).
 

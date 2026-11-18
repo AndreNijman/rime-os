@@ -25,6 +25,21 @@
 //! connection when the owner revokes it is holding a channel this store
 //! cannot reach into; the connection is dropped by `rime-remoted`, and the
 //! tombstone is what stops the immediate reconnect.
+//!
+//! ## The companion key, and why it is a second key rather than a mode
+//!
+//! A phone's own key is held behind its lock screen, so after the phone
+//! restarts nothing can open a session until somebody unlocks it. The
+//! companion key is a second X25519 key the phone keeps WITHOUT that gate, so
+//! its device features (battery report, notifications, ring) keep working
+//! after a restart. It is minted only by a session on the full key
+//! (`companion_register` in `rime-remoted`), stored here on the same record,
+//! and a session it opens gets [`Scope::Companion`]: `rime-remoted` lets such
+//! a session use an allow list and nothing else. The scope comes from WHICH
+//! key completed the handshake, never from anything the phone says.
+//!
+//! Revoking the device refuses both keys (the tombstone is on the record, not
+//! on a key), and pairing the device again starts with no companion key.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -73,6 +88,60 @@ pub struct Device {
     /// connection-path display P1-052 asks for.
     #[serde(default)]
     pub last_path: Option<String>,
+    /// A second public key, base64url, that opens a [`Scope::Companion`]
+    /// session for this device. Set only from a full-scope session; see the
+    /// module note. Absent from stores written before it existed, which
+    /// therefore load with none.
+    ///
+    /// Never shown: `rime remote devices` says whether one is set and
+    /// nothing more.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_key: Option<String>,
+    /// Every companion key this device had and gave up: replaced, forgotten,
+    /// or carried over when it was paired again. Kept so a key that leaked
+    /// can never come back, neither as somebody's device key nor as a
+    /// companion key again. Never shown, like `companion_key`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_companion_keys: Vec<String>,
+}
+
+impl Device {
+    /// Whether `raw` is this record's companion key or one it retired.
+    fn ever_had_companion(&self, raw: &[u8; 32]) -> bool {
+        self.companion_key
+            .iter()
+            .chain(self.retired_companion_keys.iter())
+            .any(|k| canonical(k).as_ref() == Some(raw))
+    }
+
+    /// Move the companion key, if any, to the retired ones.
+    fn retire_companion(&mut self) -> Option<String> {
+        let old = self.companion_key.take()?;
+        if !self.retired_companion_keys.contains(&old) {
+            self.retired_companion_keys.push(old.clone());
+        }
+        Some(old)
+    }
+}
+
+/// What a session may do, decided by which of a device's keys completed the
+/// handshake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// The device's own key: everything a paired device may do.
+    Full,
+    /// The device's companion key: only `rime-remoted`'s allow list.
+    Companion,
+}
+
+impl Scope {
+    /// The word `remote_hello` tells the phone.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Full => "full",
+            Scope::Companion => "companion",
+        }
+    }
 }
 
 impl Device {
@@ -120,6 +189,10 @@ pub enum StoreError {
     BadName(String),
     /// This key is already paired and not revoked.
     AlreadyPaired(String),
+    /// A key that may not become a companion key, or may not be paired
+    /// because it is one. One message for every reason, so the answer does
+    /// not say which other device holds it.
+    KeyInUse,
 }
 
 impl std::fmt::Display for StoreError {
@@ -133,6 +206,10 @@ impl std::fmt::Display for StoreError {
             StoreError::AlreadyPaired(d) => write!(
                 f,
                 "'{d}' is already paired with this machine; revoke it first if you are replacing it"
+            ),
+            StoreError::KeyInUse => write!(
+                f,
+                "that key is already known to this machine; generate a new one"
             ),
         }
     }
@@ -225,7 +302,7 @@ impl DeviceStore {
         now_ms: u64,
         requires_user_verification: bool,
     ) -> Result<Device, StoreError> {
-        check_key(public_key)?;
+        let raw = check_key(public_key)?;
         let name = check_name(name)?;
         let id = Device::id_for(public_key);
         if let Some(existing) = self.devices.get(&id) {
@@ -233,6 +310,22 @@ impl DeviceStore {
                 return Err(StoreError::AlreadyPaired(existing.name.clone()));
             }
         }
+        // A key that is some device's companion key, revoked or not, or one
+        // it ever retired, may not become a device of its own: one key would
+        // then open two sessions with two different scopes, and a revoked or
+        // leaked companion key would come back as a full one.
+        if self.devices.values().any(|d| d.ever_had_companion(&raw)) {
+            return Err(StoreError::KeyInUse);
+        }
+        // Pairing again after a revoke starts with no companion key, but
+        // remembers the old record's, so they stay refused.
+        let retired = match self.devices.get_mut(&id) {
+            Some(old) => {
+                old.retire_companion();
+                std::mem::take(&mut old.retired_companion_keys)
+            }
+            None => Vec::new(),
+        };
         let device = Device {
             id: id.clone(),
             name,
@@ -246,6 +339,10 @@ impl DeviceStore {
             revoked_ms: None,
             requires_user_verification,
             last_path: None,
+            // Pairing again after a revoke starts with no companion key: the
+            // phone mints a new one over its new full session.
+            companion_key: None,
+            retired_companion_keys: retired,
         };
         self.devices.insert(id, device.clone());
         Ok(device)
@@ -256,10 +353,70 @@ impl DeviceStore {
     /// The only authentication path. It takes the full key rather than an id,
     /// because an id is 16 characters of a 43-character value and matching on
     /// a prefix is how two keys become one device.
-    pub fn authenticate(&self, public_key: &str) -> Option<&Device> {
-        self.devices
+    ///
+    /// Full keys first. A companion key authenticates only on an active
+    /// device, and only when no record at all, revoked ones included, has it
+    /// as its full key: `companion_register` and `pair` already refuse that,
+    /// and this is the second lock on the same door, so a revoked full key
+    /// can never come back as somebody's companion.
+    pub fn authenticate(&self, public_key: &str) -> Option<(&Device, Scope)> {
+        if let Some(d) = self
+            .devices
             .values()
             .find(|d| d.public_key == public_key && d.is_active())
+        {
+            return Some((d, Scope::Full));
+        }
+        if self.devices.values().any(|d| d.public_key == public_key) {
+            return None;
+        }
+        self.devices
+            .values()
+            .find(|d| d.is_active() && d.companion_key.as_deref() == Some(public_key))
+            .map(|d| (d, Scope::Companion))
+    }
+
+    /// Give an active device a companion key, replacing any it had.
+    ///
+    /// Refused when the key is malformed, or is the full key or the
+    /// companion key of any record (this device's own full key, another
+    /// device's either key, a revoked device's either key). Registering the
+    /// key this device already has is not an error. Keys are compared as
+    /// bytes, and stored re-encoded, so a second spelling of one key is the
+    /// same key.
+    pub fn set_companion(&mut self, id: &str, key: &str) -> Result<Device, StoreError> {
+        let raw = check_key(key)?;
+        match self.devices.get(id) {
+            Some(d) if d.is_active() => {}
+            _ => return Err(StoreError::NoSuchDevice(id.to_string())),
+        }
+        let d = &self.devices[id];
+        if d.companion_key.as_deref().and_then(canonical).as_ref() == Some(&raw) {
+            return Ok(d.clone());
+        }
+        // Any record's device key, any other record's companion key, and any
+        // companion key any record ever retired, this one's included.
+        let taken = self.devices.values().any(|d| {
+            canonical(&d.public_key).as_ref() == Some(&raw)
+                || (d.id != id && d.companion_key.as_deref().and_then(canonical).as_ref() == Some(&raw))
+                || d.retired_companion_keys.iter().any(|k| canonical(k).as_ref() == Some(&raw))
+        });
+        if taken {
+            return Err(StoreError::KeyInUse);
+        }
+        let d = self.devices.get_mut(id).expect("checked above");
+        d.retire_companion();
+        d.companion_key = Some(crate::b64_encode(&raw));
+        Ok(d.clone())
+    }
+
+    /// Take a device's companion key away, and retire it. `true` when it had
+    /// one.
+    pub fn forget_companion(&mut self, id: &str) -> bool {
+        self.devices
+            .get_mut(id)
+            .and_then(Device::retire_companion)
+            .is_some()
     }
 
     /// Take a device's access away. Idempotent: revoking twice is not an
@@ -337,6 +494,12 @@ pub fn check_key(key: &str) -> Result<[u8; 32], StoreError> {
     })
 }
 
+/// A key's 32 bytes, or `None` when it is not a key. For comparing two
+/// spellings of one key.
+fn canonical(key: &str) -> Option<[u8; 32]> {
+    check_key(key).ok()
+}
+
 /// A displayable device name, trimmed, or the reason it is not one.
 ///
 /// The same rule `rime-agentd` applies to an actor id, and for the same
@@ -407,7 +570,7 @@ mod tests {
         let k = key(1);
         let d = s.pair(&k, "pixel-8", 1000, false).expect("pair");
         assert_eq!(d.state(), "paired");
-        assert_eq!(s.authenticate(&k).map(|d| d.id.clone()), Some(d.id.clone()));
+        assert_eq!(s.authenticate(&k).map(|(d, _)| d.id.clone()), Some(d.id.clone()));
 
         s.revoke(&d.id, 2000).expect("revoke");
         assert!(
@@ -629,5 +792,157 @@ mod tests {
             );
         }
         assert!(s.authenticate(&k).is_some());
+    }
+
+    #[test]
+    fn a_companion_key_authenticates_its_device_with_the_companion_scope() {
+        let mut s = DeviceStore::default();
+        let d = s.pair(&key(20), "phone", 1, false).expect("pair");
+        assert_eq!(s.authenticate(&key(20)).map(|(_, sc)| sc), Some(Scope::Full));
+        assert!(s.authenticate(&key(21)).is_none(), "an unknown key authenticated");
+
+        s.set_companion(&d.id, &key(21)).expect("register");
+        let (who, scope) = s.authenticate(&key(21)).expect("the companion key");
+        assert_eq!(who.id, d.id);
+        assert_eq!(scope, Scope::Companion);
+        // The full key keeps its own scope.
+        assert_eq!(s.authenticate(&key(20)).map(|(_, sc)| sc), Some(Scope::Full));
+
+        // A new key replaces the old one, which stops working.
+        s.set_companion(&d.id, &key(22)).expect("replace");
+        assert!(s.authenticate(&key(21)).is_none(), "a replaced companion key still works");
+        assert_eq!(s.authenticate(&key(22)).map(|(_, sc)| sc), Some(Scope::Companion));
+        // Registering the same key again is not an error.
+        s.set_companion(&d.id, &key(22)).expect("idempotent");
+
+        assert!(s.forget_companion(&d.id));
+        assert!(!s.forget_companion(&d.id), "forgotten twice");
+        assert!(s.authenticate(&key(22)).is_none(), "a forgotten companion key still works");
+        assert!(s.authenticate(&key(20)).is_some());
+    }
+
+    #[test]
+    fn revoking_a_device_refuses_both_its_keys_and_pairing_again_clears_the_companion() {
+        let mut s = DeviceStore::default();
+        let d = s.pair(&key(23), "phone", 1, false).expect("pair");
+        s.set_companion(&d.id, &key(24)).expect("register");
+        s.revoke(&d.id, 2).expect("revoke");
+        assert!(s.authenticate(&key(23)).is_none());
+        assert!(s.authenticate(&key(24)).is_none(), "a revoked device's companion key works");
+        // And it cannot be given one while revoked.
+        assert!(matches!(s.set_companion(&d.id, &key(25)), Err(StoreError::NoSuchDevice(_))));
+
+        let again = s.pair(&key(23), "phone", 3, false).expect("re-pair");
+        assert_eq!(again.companion_key, None);
+        assert!(s.authenticate(&key(24)).is_none(), "re-pairing brought the old companion back");
+    }
+
+    #[test]
+    fn a_companion_key_once_given_up_never_comes_back() {
+        let mut s = DeviceStore::default();
+        let a = s.pair(&key(70), "a", 1, false).expect("pair");
+        let b = s.pair(&key(71), "b", 2, false).expect("pair");
+        s.set_companion(&a.id, &key(72)).expect("register");
+        s.set_companion(&a.id, &key(73)).expect("replace");
+        s.forget_companion(&a.id);
+        s.set_companion(&a.id, &key(74)).expect("register again");
+        s.revoke(&a.id, 3).expect("revoke");
+        let again = s.pair(&key(70), "a", 4, false).expect("re-pair");
+        assert_eq!(again.companion_key, None);
+
+        // Replaced (72), forgotten (73), and carried over the re-pair (74):
+        // none may be paired as a device of its own, nor registered again,
+        // by this device or by another.
+        for (k, why) in [(key(72), "replaced"), (key(73), "forgotten"), (key(74), "re-paired over")] {
+            assert!(matches!(s.pair(&k, "thief", 5, false), Err(StoreError::KeyInUse)), "{why}: paired");
+            for (who, id) in [("a", &a.id), ("b", &b.id)] {
+                assert!(
+                    matches!(s.set_companion(id, &k), Err(StoreError::KeyInUse)),
+                    "{why}: registered again by {who}"
+                );
+            }
+            assert!(s.authenticate(&k).is_none(), "{why}: authenticated");
+        }
+        // A fresh key still works, and the retired ones survive a save.
+        s.set_companion(&a.id, &key(75)).expect("a fresh key");
+        let t = tmp("retired");
+        let path = store_in(&t.0);
+        s.save(&path).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let back = DeviceStore::load(&path).expect("load");
+        assert_eq!(back.devices[&a.id].retired_companion_keys.len(), 3, "{text}");
+        assert!(matches!(back.clone().pair(&key(73), "thief", 6, false), Err(StoreError::KeyInUse)));
+    }
+
+    #[test]
+    fn a_companion_key_that_is_any_known_key_is_refused() {
+        let mut s = DeviceStore::default();
+        let a = s.pair(&key(30), "a", 1, false).expect("pair");
+        let b = s.pair(&key(31), "b", 2, false).expect("pair");
+        let gone = s.pair(&key(32), "gone", 3, false).expect("pair");
+        s.set_companion(&b.id, &key(33)).expect("b's companion");
+        s.set_companion(&gone.id, &key(34)).expect("gone's companion");
+        s.revoke(&gone.id, 4).expect("revoke");
+
+        for (k, why) in [
+            (key(30), "its own full key"),
+            (key(31), "another device's full key"),
+            (key(33), "another device's companion key"),
+            (key(32), "a revoked device's full key"),
+            (key(34), "a revoked device's companion key"),
+        ] {
+            let e = s.set_companion(&a.id, &k).expect_err(why);
+            assert!(matches!(e, StoreError::KeyInUse), "{why}: {e}");
+            // The same words whoever holds it.
+            assert_eq!(e.to_string(), StoreError::KeyInUse.to_string());
+        }
+        for bad in [crate::b64_encode(&[1u8; 31]), "not base64!!".into(), String::new()] {
+            assert!(matches!(s.set_companion(&a.id, &bad), Err(StoreError::BadKey(_))), "{bad:?}");
+        }
+        assert!(matches!(s.set_companion("nobody", &key(35)), Err(StoreError::NoSuchDevice(_))));
+        assert_eq!(s.devices[&a.id].companion_key, None, "a refusal wrote something");
+        assert_eq!(s.devices[&b.id].companion_key, Some(key(33)), "a refusal changed b");
+    }
+
+    #[test]
+    fn a_companion_key_cannot_be_paired_as_a_device_of_its_own() {
+        let mut s = DeviceStore::default();
+        let a = s.pair(&key(40), "a", 1, false).expect("pair");
+        s.set_companion(&a.id, &key(41)).expect("register");
+        assert!(matches!(s.pair(&key(41), "thief", 2, false), Err(StoreError::KeyInUse)));
+        // Still refused once its device is revoked: a revoked companion key
+        // must not come back as a full one.
+        s.revoke(&a.id, 3).expect("revoke");
+        assert!(matches!(s.pair(&key(41), "thief", 4, false), Err(StoreError::KeyInUse)));
+        assert!(s.authenticate(&key(41)).is_none());
+    }
+
+    #[test]
+    fn a_store_written_before_companion_keys_loads_with_none_and_writes_none_back() {
+        let t = tmp("old-store");
+        let path = store_in(&t.0);
+        std::fs::create_dir_all(path.parent().expect("dir")).expect("mkdir");
+        let old = format!(
+            r#"{{"devices":{{"{id}":{{"id":"{id}","name":"phone","public_key":"{k}","paired_ms":1}}}}}}"#,
+            id = Device::id_for(&key(50)),
+            k = key(50)
+        );
+        std::fs::write(&path, old).expect("write");
+        let s = DeviceStore::load(&path).expect("an old store loads");
+        let d = s.list()[0].clone();
+        assert_eq!(d.companion_key, None);
+        assert_eq!(s.authenticate(&key(50)).map(|(_, sc)| sc), Some(Scope::Full));
+        s.save(&path).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains("companion_key"), "{text}");
+    }
+
+    #[test]
+    fn a_second_spelling_of_a_known_key_is_the_same_key() {
+        // Stored re-encoded, compared as bytes.
+        let mut s = DeviceStore::default();
+        let a = s.pair(&key(60), "a", 1, false).expect("pair");
+        let d = s.set_companion(&a.id, &key(61)).expect("register");
+        assert_eq!(d.companion_key, Some(crate::b64_encode(&[61u8; 32])));
     }
 }

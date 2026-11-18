@@ -106,6 +106,12 @@ data class UiState(
      * screen, now that the phone connects on unlock without being asked.
      */
     val links: Map<String, LinkHub.LinkState> = emptyMap(),
+    /**
+     * Companion mode is running: the app is locked and the device features
+     * keep reaching the computers with the companion keys (contract §2.10).
+     * The lock screen says so.
+     */
+    val companion: Boolean = false,
 )
 
 /**
@@ -420,6 +426,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         refresh()
         viewModelScope.launch {
             hub.states.collect { links -> _state.update { it.copy(links = links) } }
+        }
+        viewModelScope.launch {
+            hub.companion.collect { on -> _state.update { it.copy(companion = on) } }
         }
         viewModelScope.launch {
             // Locked from somewhere else — the notification's Lock action —
@@ -1417,7 +1426,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      * return a URI this app may read and nothing else, where
      * `READ_MEDIA_IMAGES` would hand it the whole library for the life of the
      * grant. `Handoff.Files.FORBIDDEN_PERMISSIONS` and `ManifestTest` are what
-     * keep that true when somebody reaches for the easier way.
+     * keep that true when somebody reaches for the easier way. The media
+     * permissions the manifest does declare belong to "Photos on your
+     * computer" alone; this path never asks for or relies on them.
      *
      * The recycled-id guard is `Reply.check`'s, and it applies for the same
      * reason it applies to a typed reply, with a worse consequence:
@@ -1894,6 +1905,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                 linkOf(machine)?.pushUnregister()
             }
         }
+        // The companion key too: the machine is told to forget it while the
+        // link is up, and its keystore key goes either way.
+        runCatching { withContext(Dispatchers.IO) { hub.unpairCompanion(machine.deviceId) } }
         hub.forget(machine.deviceId)
         PushRegistrar.forget(getApplication<Application>(), machine)
         val store = repository.forget(machine)
@@ -1922,9 +1936,65 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** Let the paired computers turn Do Not Disturb on and off here and follow it, or stop (contract §2.9). */
+    /**
+     * "Keep working after the phone restarts" (contract §2.10). On mints a
+     * companion key for each machine and registers it with every one
+     * connected now; off forgets where it can and deletes every key here at
+     * once. The store is read back afterwards, so a later settings write from
+     * this screen does not put the old switch back.
+     */
+    fun setCompanionOn(on: Boolean) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { hub.setCompanionOn(on) }
+        val store = repository.load()
+        _state.update { it.copy(settings = store.settings, machines = store.machines) }
+    }
+
     fun setFocusOn(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(focusOn = on))
         hub.setFocusOn(store.settings.focusOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** Let the paired computers read this phone's SMS, and send while unlocked, or stop (contract §2.11). */
+    fun setMessagesOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(messagesOn = on))
+        hub.setMessagesOn(store.settings.messagesOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** Let the paired computers see and handle this phone's calls, or stop (contract §2.12). */
+    fun setCallsOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(callsOn = on))
+        hub.setCallsOn(store.settings.callsOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** Let the paired computers see and fetch this phone's photos while it is unlocked, or stop (contract §2.13). */
+    fun setPhotosOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(photosOn = on))
+        hub.setPhotosOn(store.settings.photosOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** Photo access may have changed, or the picked photos: the machines hear the new `can`. */
+    fun onPhotosPermissionChanged() {
+        hub.onPhotosPermissionChanged()
+    }
+
+    /** The call or contacts permissions may have changed: the machines hear the new `can`. */
+    fun onCallsPermissionChanged() {
+        hub.onCallsPermissionChanged()
+    }
+
+    /** The SMS or contacts permissions may have changed: the machines hear the new `can`. */
+    fun onSmsPermissionChanged() {
+        hub.onSmsPermissionChanged()
+    }
+
+    /** Put the paired computers' clipboard on this phone's, or stop (contract §2.14). */
+    fun setClipboardOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(clipboardOn = on))
+        hub.setClipboardOn(store.settings.clipboardOn)
         _state.update { it.copy(settings = store.settings) }
     }
 

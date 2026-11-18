@@ -20,7 +20,17 @@ import org.json.JSONObject
  * green run asserting nothing, which is the failure mode this whole program
  * has shipped more than once.
  */
-object Desktop {
+object Desktop : Computer("broker", "lan")
+
+/**
+ * The second computer (TwoComputersOnDeviceTest): its own rime-agentd,
+ * rime-remoted and broker, started by the runner in a login session of its
+ * own, reached with `-e broker2` / `-e lan2`.
+ */
+object SecondDesktop : Computer("broker2", "lan2")
+
+/** One computer the suite can reach: [Desktop] is the first, [SecondDesktop] the second. */
+open class Computer(private val brokerArg: String, private val lanArg: String) {
 
     /** An instrumentation argument, or a failure that names it. */
     fun arg(name: String): String {
@@ -34,11 +44,11 @@ object Desktop {
     }
 
     /** `host:port` of the daemon's LAN listener, as the runner measured it. */
-    fun lanAddress(): String = arg("lan")
+    fun lanAddress(): String = arg(lanArg)
 
     /** The broker: `host:port`. */
     private fun broker(): Pair<String, Int> {
-        val a = arg("broker")
+        val a = arg(brokerArg)
         return a.substringBeforeLast(':') to a.substringAfterLast(':').toInt()
     }
 
@@ -50,17 +60,29 @@ object Desktop {
      * model of them to read one field. A test harness that had to be kept in
      * step with `serde` would be one more thing that can disagree.
      */
-    fun ask(request: String): JSONObject {
+    fun ask(request: String, readTimeoutMs: Int = 30_000): JSONObject {
         val (host, port) = broker()
         Socket().use { socket ->
             socket.connect(InetSocketAddress(host, port), 8_000)
-            socket.soTimeout = 30_000
+            socket.soTimeout = readTimeoutMs
             socket.getOutputStream().write((request + "\n").toByteArray())
             socket.getOutputStream().flush()
             val line = socket.getInputStream().bufferedReader().let(BufferedReader::readLine)
                 ?: error("the broker closed without answering $request")
             return JSONObject(line)
         }
+    }
+
+    /** This computer going away: its rime-remoted killed and not started again. */
+    fun stopRemoted() {
+        val reply = ask("""{"cmd":"stop_remoted"}""")
+        check(reply.optString("reply") == "ok") { "the broker did not stop rime-remoted: $reply" }
+    }
+
+    /** rime-remoted (re)started on the same port with the same state, as `systemctl --user restart` does. */
+    fun restartRemoted() {
+        val reply = ask("""{"cmd":"restart_remoted"}""", readTimeoutMs = 60_000)
+        check(reply.optString("reply") == "ok") { "the broker did not restart rime-remoted: $reply" }
     }
 
     /** A fresh pairing offer, minted by the real daemon. */
@@ -250,6 +272,19 @@ object Desktop {
     }
 
     /**
+     * `rime remote clipboard`: what the Shell runs when this computer's
+     * clipboard changes with "Send my clipboard to my phone" on (§2.14).
+     * Returns how many phones were sent the line (`reached`).
+     */
+    fun clipboard(text: String, sensitive: Boolean = false): Int {
+        val request = JSONObject().put("cmd", "clipboard").put("text", text)
+        if (sensitive) request.put("sensitive", true)
+        val reply = ask(request.toString())
+        check(reply.optString("reply") == "clipboard_sent") { "rime-remoted did not take the clipboard request: $reply" }
+        return reply.getInt("reached")
+    }
+
+    /**
      * The stub notification server closes notification [id] with [reason]
      * (2: the person dismissed it, 1: it timed out), as a real one would say
      * in `NotificationClosed`.
@@ -267,6 +302,137 @@ object Desktop {
     fun notifyReply(id: Int, text: String) {
         val reply = ask(JSONObject().put("cmd", "notify_reply").put("id", id).put("text", text).toString())
         check(reply.optString("reply") == "ok") { "the broker did not reply to the stub notification: $reply" }
+    }
+
+    /**
+     * `rime remote devices --json` on the computer, run by the broker against
+     * this run's rime-remoted: the device list as the person at the computer
+     * sees it, `companion` included.
+     */
+    fun remoteDevicesJson(): List<JSONObject> {
+        val reply = ask(JSONObject().put("cmd", "remote_devices_json").toString())
+        check(reply.optString("reply") == "ok") { "the broker did not run rime remote devices: $reply" }
+        val a = reply.getJSONArray("devices")
+        return (0 until a.length()).map { a.getJSONObject(it) }
+    }
+
+    /**
+     * An SMS arriving on the EMULATOR from [number] (an emulator number:
+     * 5554, 5556, 15555215556), through its console. The broker refuses on
+     * any serial that is not an emulator.
+     */
+    fun emuSms(number: String, text: String) {
+        val reply = ask(JSONObject().put("cmd", "emu_sms").put("number", number).put("text", text).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not inject the SMS: $reply" }
+    }
+
+    /**
+     * `rime remote messages` against this run's rime-remoted, asked by the
+     * broker, which runs at the computer's login session: the conversation
+     * list, or one conversation's messages when [thread] is set. The reply
+     * as the daemon gave it, `messages` or `error`.
+     */
+    fun messages(device: String, thread: Long? = null, limit: Int = 20): JSONObject {
+        val req = JSONObject().put("cmd", "messages").put("device", device).put("limit", limit)
+        if (thread != null) req.put("thread", thread)
+        return ask(req.toString())
+    }
+
+    /** `rime remote messages send --to [to]` with [text] on its input. The reply as given. */
+    fun messagesSend(device: String, to: String, text: String): JSONObject =
+        ask(JSONObject().put("cmd", "messages_send").put("device", device).put("to", to).put("text", text).toString())
+
+    /**
+     * The EMULATOR's modem: an incoming call from [number] (`call`), or that
+     * call answered, ended or refused by the far end (`accept`, `cancel`,
+     * `busy`), through its console. Emulator numbers only; the broker refuses
+     * on any serial that is not an emulator.
+     */
+    fun emuGsm(action: String, number: String) {
+        val reply = ask(JSONObject().put("cmd", "emu_gsm").put("action", action).put("number", number).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not $action the emulator's call: $reply" }
+    }
+
+    /**
+     * The person pressed button [action] on stub notification [id], as a real
+     * server says in `ActionInvoked`. A real server then closes it; the
+     * caller says so with [notifyClosed].
+     */
+    fun notifyAction(id: Int, action: String) {
+        val reply = ask(JSONObject().put("cmd", "notify_action").put("id", id).put("action", action).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not press the stub notification's button: $reply" }
+    }
+
+    /**
+     * `rime remote calls` against this run's rime-remoted: the phone's call
+     * now and its recent calls. The reply as the daemon gave it, `calls` or
+     * `error`.
+     */
+    fun calls(device: String, limit: Int = 20): JSONObject =
+        ask(JSONObject().put("cmd", "calls").put("device", device).put("limit", limit).toString())
+
+    /** `rime remote calls answer|decline|hangup|dial NUMBER`. The reply as given, `call_done` or `error`. */
+    fun call(device: String, action: String, number: String? = null): JSONObject {
+        val req = JSONObject().put("cmd", "call").put("device", device).put("action", action)
+        if (number != null) req.put("number", number)
+        return ask(req.toString())
+    }
+
+    /** One of the photo tests' images, as the broker made and pushed it. */
+    data class TestPhoto(val name: String, val len: Long, val sha256: String, val gps: Boolean)
+
+    /**
+     * Three test images made on the computer, the last with a GPS location
+     * in its EXIF, pushed into the EMULATOR's Pictures/RimeTest and indexed
+     * in its MediaStore; any older RimeTest images are deleted first. The
+     * broker refuses on any serial that is not an emulator, and fails with a
+     * message naming PIL when the computer cannot make them.
+     */
+    fun photosPush(): List<TestPhoto> {
+        val reply = ask(JSONObject().put("cmd", "photos_push").toString(), readTimeoutMs = 120_000)
+        check(reply.optString("reply") == "ok") { "the broker did not push the test photos: $reply" }
+        val a = reply.getJSONArray("photos")
+        return (0 until a.length()).map { a.getJSONObject(it) }.map {
+            TestPhoto(it.getString("name"), it.getLong("len"), it.getString("sha256"), it.getBoolean("gps"))
+        }
+    }
+
+    /** Delete the photo tests' folder on the emulator and wait for its MediaStore rows to go. */
+    fun photosCleanup() {
+        val reply = ask(JSONObject().put("cmd", "photos_cleanup").toString(), readTimeoutMs = 60_000)
+        check(reply.optString("reply") == "ok") { "the broker did not delete the test photos: $reply" }
+    }
+
+    /**
+     * `rime remote photos --device [device] --json --limit [limit]`, run by
+     * the broker at the computer: `code` (the exit status), `out` (its JSON,
+     * on a failure too), `stderr`, and `thumbs`, the computer-side facts
+     * about each thumbnail it named (`exists`, `under_run`, `mode`, `exif`,
+     * `app1`).
+     */
+    fun photosList(device: String, limit: Int = 10): JSONObject {
+        val reply = ask(JSONObject().put("cmd", "photos_list").put("device", device).put("limit", limit).toString(), readTimeoutMs = 120_000)
+        check(reply.optString("reply") == "ok") { "the broker did not run rime remote photos: $reply" }
+        return reply
+    }
+
+    /**
+     * `rime remote photos save [photo] --device [device] --to <run>/saved
+     * --json` at the computer: `code`, `out`, `stderr`, and `saved`, the
+     * saved file's `len`, `sha256` and `gps` (whether it still says where it
+     * was taken).
+     */
+    fun photosSave(device: String, photo: Long): JSONObject {
+        val reply = ask(JSONObject().put("cmd", "photos_save").put("device", device).put("photo", photo).toString(), readTimeoutMs = 120_000)
+        check(reply.optString("reply") == "ok") { "the broker did not run rime remote photos save: $reply" }
+        return reply
+    }
+
+    /** Whether this run's rime-remoted holds a thumbnail folder for [device]. */
+    fun photosThumbsDir(device: String): Boolean {
+        val reply = ask(JSONObject().put("cmd", "photos_thumbs_dir").put("device", device).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not look for the thumbnails: $reply" }
+        return reply.getBoolean("exists")
     }
 
     private fun requestReply(line: String): JSONObject {

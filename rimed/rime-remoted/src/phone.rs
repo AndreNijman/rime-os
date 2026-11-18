@@ -28,6 +28,9 @@
 //!   remote focus on|off` puts a `focus` line on each phone's events channel
 //!   ([`focus_line`]). Each side acts only when the state differs from its
 //!   own, so a change echoed back changes nothing and nothing loops.
+//! - The clipboard (contract §2.14): `rime remote clipboard` puts a
+//!   `clipboard` line on the events channel of each connected phone whose
+//!   report says [`CAN_CLIPBOARD`]; see `clipboard.rs`.
 //!
 //! ## What a ring may not do
 //!
@@ -56,7 +59,7 @@ pub const CHANNEL: &str = "device_events";
 
 /// What `remote_hello` adds, so a phone talks to a machine that has these and
 /// leaves an older one alone.
-pub const FEATURES: [&str; 4] = ["device_events", "phone_report", TAKE, FOCUS_FEATURE];
+pub const FEATURES: [&str; 5] = ["device_events", "phone_report", TAKE, FOCUS_FEATURE, crate::clipboard::FEATURE];
 
 /// What `remote_hello` adds once this machine both writes a phone's Do Not
 /// Disturb for the Shell and can send the Shell's to the phone (§2.9). A
@@ -88,8 +91,48 @@ pub const CAN_REPLY: &str = "reply";
 /// `focus` line from this machine to its own (contract §2.9).
 pub const CAN_FOCUS: &str = "focus";
 
+/// The capability a phone declares while the person has "Get the computer's
+/// clipboard" on and the app is unlocked: it puts the text of a `clipboard`
+/// line on its own clipboard (contract §2.14).
+pub const CAN_CLIPBOARD: &str = "clipboard";
+
 /// Every capability word kept from a report.
-const KEPT: [&str; 5] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY, CAN_FOCUS];
+/// Its SMS threads may be read from this machine (contract §2.11).
+pub const CAN_MESSAGES: &str = "messages";
+
+/// Its calls show on this machine (contract §2.12): the person turned "Calls
+/// on your computer" on and allowed the phone state. Without it the words
+/// below mean nothing.
+pub const CAN_CALLS: &str = "calls";
+
+/// A ringing call may be answered or declined, and a call hung up, from here.
+pub const CAN_CALLS_ANSWER: &str = "calls_answer";
+
+/// A number may be dialled from here (never on a companion session).
+pub const CAN_CALLS_DIAL: &str = "calls_dial";
+
+/// The call history may be read from here.
+pub const CAN_CALLS_HISTORY: &str = "calls_history";
+
+/// Its recent photos may be listed and saved from here (contract §2.13): the
+/// person turned "Photos on your computer" on and allowed photo access, in full
+/// or for the photos they picked.
+pub const CAN_PHOTOS: &str = "photos";
+
+const KEPT: [&str; 12] = [
+    CAN_RING,
+    CAN_RECEIVE,
+    CAN_DISMISS,
+    CAN_REPLY,
+    CAN_FOCUS,
+    CAN_MESSAGES,
+    CAN_CALLS,
+    CAN_CALLS_ANSWER,
+    CAN_CALLS_DIAL,
+    CAN_CALLS_HISTORY,
+    CAN_PHOTOS,
+    CAN_CLIPBOARD,
+];
 
 /// The network kinds a phone may report. Anything else is refused rather than
 /// stored, so `rime remote devices` and the Shell only ever print words they
@@ -117,7 +160,7 @@ pub const OFFER_LIFE: Duration = Duration::from_secs(15 * 60);
 pub const ACK_WAIT: Duration = Duration::from_secs(4);
 
 /// How many capability words one report may list.
-const MAX_CAN: usize = 8;
+const MAX_CAN: usize = 16;
 
 /// One phone's last report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +203,22 @@ impl PhoneReport {
 
     pub fn can_focus(&self) -> bool {
         self.can.iter().any(|c| c == CAN_FOCUS)
+    }
+
+    pub fn can_messages(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_MESSAGES)
+    }
+
+    pub fn can_calls(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_CALLS)
+    }
+
+    pub fn can_photos(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_PHOTOS)
+    }
+
+    pub fn can_clipboard(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_CLIPBOARD)
     }
 
     /// A report from a `phone_report` line, or why it was refused.
@@ -343,14 +402,28 @@ impl PhoneStore {
     }
 }
 
+/// One device's open `device_events` channel.
+struct Writer {
+    generation: u64,
+    stream: UnixStream,
+    /// The connection that opened it; 0 when none was named.
+    connection: u64,
+    /// Whether that connection is a full session rather than a companion one.
+    full: bool,
+}
+
 /// The open `device_events` channels, one per device, and the acks rings are
 /// waiting for.
 #[derive(Default)]
 pub struct Events {
-    /// Device id to (generation, this machine's end of the socketpair).
-    writers: Mutex<HashMap<String, (u64, UnixStream)>>,
+    /// Device id to its channel: generation, this machine's end of the
+    /// socketpair, and which connection opened it with what scope.
+    writers: Mutex<HashMap<String, Writer>>,
     generation: AtomicU64,
     ring_id: AtomicU64,
+    /// Ring or offer id to the device it was written to, while somebody waits
+    /// for its ack. An ack counts only from that device.
+    sent_to: Mutex<HashMap<u64, String>>,
     acked: Mutex<HashSet<u64>>,
     ack: Condvar,
 }
@@ -359,15 +432,48 @@ impl Events {
     /// A new channel for `device_id`: the end the pump reads, and its
     /// generation. A channel the device already had is replaced, and its
     /// end dropped, so its pump reads end-of-file and closes it.
+    #[cfg(test)]
     pub fn open(&self, device_id: &str) -> std::io::Result<(UnixStream, u64)> {
+        self.open_for(device_id, 0, true)
+    }
+
+    /// [`Events::open`], recording the connection that opened the channel and
+    /// whether it is a full session (contract §2.11: a send is written only
+    /// to a full session's channel, and a request dies with its connection).
+    pub fn open_for(&self, device_id: &str, connection: u64, full: bool) -> std::io::Result<(UnixStream, u64)> {
         let (theirs, ours) = UnixStream::pair()?;
         // A ring is one short line into an empty buffer, so a write that
         // would block means nobody has read the last one for a long time. It
         // fails instead of holding the control socket's thread.
         ours.set_nonblocking(true)?;
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        lock(&self.writers).insert(device_id.to_string(), (generation, ours));
+        lock(&self.writers).insert(
+            device_id.to_string(),
+            Writer {
+                generation,
+                stream: ours,
+                connection,
+                full,
+            },
+        );
         Ok((theirs, generation))
+    }
+
+    /// Which connection holds `device_id`'s channel, and whether it is a full
+    /// session. `None` when no channel is open.
+    pub fn holder(&self, device_id: &str) -> Option<(u64, bool)> {
+        lock(&self.writers).get(device_id).map(|w| (w.connection, w.full))
+    }
+
+    /// `connection` ended: its channel goes, unless a newer connection opened
+    /// one since.
+    pub fn ended(&self, device_id: &str, connection: u64) {
+        let mut writers = lock(&self.writers);
+        if writers.get(device_id).is_some_and(|w| w.connection == connection && connection != 0) {
+            if let Some(w) = writers.remove(device_id) {
+                let _ = w.stream.shutdown(std::net::Shutdown::Both);
+            }
+        }
     }
 
     /// Whether `device_id` has a channel open, as far as this machine knows.
@@ -380,13 +486,45 @@ impl Events {
     /// that opened a new channel in between keeps it.
     pub fn send(&self, device_id: &str, line: &Value) -> bool {
         let mut writers = lock(&self.writers);
-        let Some((generation, stream)) = writers.get_mut(device_id) else {
+        let Some(w) = writers.get_mut(device_id) else {
             return false;
         };
-        let generation = *generation;
+        let generation = w.generation;
         let mut bytes = line.to_string().into_bytes();
         bytes.push(b'\n');
-        let ok = stream.write_all(&bytes).is_ok();
+        let ok = w.stream.write_all(&bytes).is_ok();
+        if !ok {
+            self.forget_generation(&mut writers, device_id, generation);
+        }
+        ok
+    }
+
+    /// Write one event line that may be larger than the socketpair holds,
+    /// whole or not at all as far as the phone can tell (contract §2.14).
+    ///
+    /// [`Events::send`] fails a write that would block, which is right for a
+    /// ring (one short line into a buffer the pump keeps empty) and wrong for
+    /// a clipboard line of up to [`crate::clipboard::MAX_LINE`] bytes, which
+    /// can be larger than the buffer itself. So this one waits for the pump,
+    /// up to `limit`, under the same lock, so no other line can land inside
+    /// it. A line that still did not fit is a stalled link: the channel is
+    /// forgotten, its pump reads end-of-file and closes it, and the phone
+    /// drops the unfinished line with it (a line counts only at its newline).
+    ///
+    /// Only to a full session's channel: the clipboard lands on a phone "while
+    /// the app is unlocked" (§2.14), and a companion link is a locked phone.
+    pub fn send_whole(&self, device_id: &str, line: &Value, limit: Duration) -> bool {
+        let mut writers = lock(&self.writers);
+        let Some(w) = writers.get_mut(device_id) else {
+            return false;
+        };
+        if !w.full {
+            return false;
+        }
+        let generation = w.generation;
+        let mut bytes = line.to_string().into_bytes();
+        bytes.push(b'\n');
+        let ok = write_by(&mut w.stream, &bytes, Instant::now() + limit) && w.stream.set_nonblocking(true).is_ok();
         if !ok {
             self.forget_generation(&mut writers, device_id, generation);
         }
@@ -395,19 +533,19 @@ impl Events {
 
     fn forget_generation(
         &self,
-        writers: &mut HashMap<String, (u64, UnixStream)>,
+        writers: &mut HashMap<String, Writer>,
         device_id: &str,
         generation: u64,
     ) {
-        if writers.get(device_id).map(|(g, _)| *g) == Some(generation) {
+        if writers.get(device_id).map(|w| w.generation) == Some(generation) {
             writers.remove(device_id);
         }
     }
 
     /// Forget a device's channel, whatever its generation: revoke.
     pub fn forget(&self, device_id: &str) {
-        if let Some((_, s)) = lock(&self.writers).remove(device_id) {
-            let _ = s.shutdown(std::net::Shutdown::Both);
+        if let Some(w) = lock(&self.writers).remove(device_id) {
+            let _ = w.stream.shutdown(std::net::Shutdown::Both);
         }
     }
 
@@ -417,14 +555,32 @@ impl Events {
         self.ring_id.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// The phone saw ring `id`.
-    pub fn acknowledge(&self, id: u64) {
+    /// `device_id` saw ring or offer `id`. Counted only when `id` was written
+    /// to that device and somebody is still waiting for it; anything else
+    /// (another device's id, an id nobody waits for) is ignored, and the
+    /// phone is answered as for an unknown id. `true` when it counted.
+    pub fn acknowledge(&self, device_id: &str, id: u64) -> bool {
+        if lock(&self.sent_to).get(&id).map(String::as_str) != Some(device_id) {
+            return false;
+        }
         lock(&self.acked).insert(id);
         self.ack.notify_all();
+        true
+    }
+
+    /// Write ring or offer `line` (carrying `id`) to `device_id` and wait up
+    /// to `limit` for that device's ack. The id is forgotten again either
+    /// way, so a late ack, or one from another device, never counts.
+    pub fn deliver(&self, device_id: &str, id: u64, line: &Value, limit: Duration) -> bool {
+        lock(&self.sent_to).insert(id, device_id.to_string());
+        let acked = self.send(device_id, line) && self.wait_ack(id, limit);
+        lock(&self.sent_to).remove(&id);
+        lock(&self.acked).remove(&id);
+        acked
     }
 
     /// Wait up to `limit` for ring `id`'s ack.
-    pub fn wait_ack(&self, id: u64, limit: Duration) -> bool {
+    fn wait_ack(&self, id: u64, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
         let mut acked = lock(&self.acked);
         loop {
@@ -442,6 +598,28 @@ impl Events {
                 .0;
         }
     }
+}
+
+/// Every byte of `bytes` into `stream`, blocking, by `deadline` for the whole
+/// line rather than for each `write(2)`.
+fn write_by(stream: &mut UnixStream, bytes: &[u8], deadline: Instant) -> bool {
+    if stream.set_nonblocking(false).is_err() {
+        return false;
+    }
+    let mut off = 0;
+    while off < bytes.len() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() || stream.set_write_timeout(Some(left)).is_err() {
+            return false;
+        }
+        match stream.write(&bytes[off..]) {
+            Ok(0) => return false,
+            Ok(n) => off += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -512,7 +690,7 @@ pub fn ring(
     if events.is_open(device_id) {
         let id = events.next_ring();
         let line = json!({"event": "ring", "id": id, "at": now_s, "machine": machine});
-        if events.send(device_id, &line) && events.wait_ack(id, ack_wait) {
+        if events.deliver(device_id, id, &line, ack_wait) {
             return Ok(Rang::Link);
         }
     }
@@ -543,7 +721,8 @@ pub fn control(state: &crate::state::State, device_id: &str, line: &[u8]) -> Opt
         },
         "ring_ack" | "offer_ack" => match v["id"].as_u64() {
             Some(id) => {
-                state.events.acknowledge(id);
+                // Another device's id is answered like an unknown one.
+                state.events.acknowledge(device_id, id);
                 ok()
             }
             None => error("id must be a whole number"),
@@ -789,7 +968,7 @@ pub fn send(
     let id = events.next_ring();
     let line = offer_line(id, now_s, machine, &body);
     outbox.put(id, device_id, now_s, body, OFFER_LIFE);
-    if events.is_open(device_id) && events.send(device_id, &line) && events.wait_ack(id, ack_wait) {
+    if events.is_open(device_id) && events.deliver(device_id, id, &line, ack_wait) {
         return Ok((SentPath::Link, id));
     }
     if !reach.has_push {
@@ -993,10 +1172,17 @@ mod tests {
             json!({"charging": "yes"}),
             json!({"can": "ring"}),
             json!({"can": [1]}),
-            json!({"can": ["a","b","c","d","e","f","g","h","i"]}),
+            json!({"can": (0..17).map(|i| format!("w{i}")).collect::<Vec<_>>()}),
         ] {
             assert!(PhoneReport::parse(&bad, 5).is_err(), "{bad} was accepted");
         }
+        // Every word this machine keeps fits in one report, with room (§2.5):
+        // a phone with all of them on is never refused whole.
+        let every: Vec<&str> = KEPT.to_vec();
+        assert!(every.len() <= MAX_CAN);
+        let r = PhoneReport::parse(&json!({"can": every}), 5).expect("parse");
+        assert_eq!(r.can.len(), KEPT.len());
+        assert!(r.can_calls() && r.can_messages());
     }
 
     #[test]
@@ -1012,7 +1198,7 @@ mod tests {
             assert_eq!(v["event"], "ring");
             assert_eq!(v["at"], 1000);
             assert_eq!(v["machine"], "l16");
-            phone.acknowledge(v["id"].as_u64().expect("id"));
+            assert!(phone.acknowledge("dev-a", v["id"].as_u64().expect("id")));
         });
         let pushed = std::cell::Cell::new(false);
         let got = ring(&events, "dev-a", "l16", Reach { report: None, has_push: true }, 1000, ACK_WAIT, |_| {
@@ -1022,6 +1208,35 @@ mod tests {
         t.join().expect("phone");
         assert_eq!(got, Ok(Rang::Link));
         assert!(!pushed.get(), "an acked ring must not also go through push");
+    }
+
+    #[test]
+    fn another_devices_ack_does_not_count_for_this_ones_ring() {
+        let events = std::sync::Arc::new(Events::default());
+        let (theirs, _) = events.open("dev-a").expect("open");
+        let other = std::sync::Arc::clone(&events);
+        // dev-b reads the id off the shared counter (here, off dev-a's line)
+        // and acks it from its own session.
+        let t = std::thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(theirs).read_line(&mut line).expect("read");
+            let id = serde_json::from_str::<Value>(&line).expect("json")["id"].as_u64().expect("id");
+            (id, other.acknowledge("dev-b", id))
+        });
+        let rings = report(&["ring"]);
+        let pushed = std::cell::Cell::new(false);
+        let got = ring(&events, "dev-a", "l16", Reach { report: Some(&rings), has_push: true }, 1000,
+            Duration::from_millis(400), |_| {
+                pushed.set(true);
+                Ok(())
+            });
+        let (id, counted) = t.join().expect("dev-b");
+        assert!(!counted, "dev-b's ack was counted");
+        assert_eq!(got, Ok(Rang::Push), "dev-b's ack made dev-a's ring count as rung");
+        assert!(pushed.get());
+        // Over, so its id is forgotten: not even dev-a's late ack counts.
+        assert!(!events.acknowledge("dev-a", id));
+        assert!(!events.acknowledge("dev-a", 999), "an id nobody sent counted");
     }
 
     #[test]
@@ -1156,7 +1371,7 @@ mod tests {
             let mut line = String::new();
             BufReader::new(theirs).read_line(&mut line).expect("read");
             let v: Value = serde_json::from_str(&line).expect("json");
-            phone.acknowledge(v["id"].as_u64().expect("id"));
+            assert!(phone.acknowledge("dev-a", v["id"].as_u64().expect("id")));
             v
         });
         let receives = report(&["receive"]);

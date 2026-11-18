@@ -3901,7 +3901,10 @@ RUN set -eux; \
     test -x /usr/libexec/rime-media-key; \
     sh -n /usr/libexec/rime-media-key; \
     grep -q 'local media_key = "/usr/libexec/rime-media-key"' /usr/share/rime/hypr/rime/keybindings.lua; \
-    test "$(grep -c 'command="/usr/libexec/rime-media-key ' /usr/share/rime/labwc/rc.xml)" -eq 6; \
+    : 'labwc: the three static binds call the helper; the three the Shell seeds (generator block) go through the media-key.sh of the Shell, which must hand off to the same helper.'; \
+    test "$(grep -c 'command="/usr/libexec/rime-media-key ' /usr/share/rime/labwc/rc.xml)" -eq 3; \
+    test "$(grep -c 'command="bash /usr/share/rime-shell/src/scripts/media-key.sh ' /usr/share/rime/labwc/rc.xml)" -eq 3; \
+    grep -q '/usr/libexec/rime-media-key' /usr/share/rime-shell/src/scripts/media-key.sh; \
     if grep -q 'command="playerctl ' /usr/share/rime/labwc/rc.xml \
         || grep -q 'exec_cmd("playerctl ' /usr/share/rime/hypr/rime/keybindings.lua \
         ; then echo "FATAL: a media key still calls playerctl directly, so it can reach a phone while the computer plays"; exit 1; fi; \
