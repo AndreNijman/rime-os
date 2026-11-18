@@ -216,6 +216,28 @@ object Desktop {
     }
 
     /**
+     * What rime-remoted wrote to `focus.json` for the Shell (contract §2.9):
+     * `{"dnd":…,"device":…,"at_ms":…}`, or null before any phone's change.
+     * Read from the run's own runtime directory, never this desktop's.
+     */
+    fun focusFile(): JSONObject? {
+        val reply = ask(JSONObject().put("cmd", "focus_file").toString())
+        check(reply.optString("reply") == "ok") { "the broker did not read focus.json: $reply" }
+        return reply.optJSONObject("focus")
+    }
+
+    /**
+     * `rime remote focus on|off`: the person at the computer turning Do Not
+     * Disturb on or off with Focus sync on. Returns how many phones were
+     * sent the line (`reached`).
+     */
+    fun focus(dnd: Boolean): Int {
+        val reply = ask(JSONObject().put("cmd", "focus").put("dnd", dnd).toString())
+        check(reply.optString("reply") == "focused") { "rime-remoted did not take the focus request: $reply" }
+        return reply.getInt("reached")
+    }
+
+    /**
      * The stub notification server closes notification [id] with [reason]
      * (2: the person dismissed it, 1: it timed out), as a real one would say
      * in `NotificationClosed`.

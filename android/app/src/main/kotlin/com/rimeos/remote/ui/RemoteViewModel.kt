@@ -1921,6 +1921,13 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(settings = store.settings) }
     }
 
+    /** Let the paired computers turn Do Not Disturb on and off here and follow it, or stop (contract §2.9). */
+    fun setFocusOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(focusOn = on))
+        hub.setFocusOn(store.settings.focusOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
     /** Show what this phone is playing on the paired computers, or stop (contract §2.8). */
     fun setMediaOn(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(mediaOn = on))

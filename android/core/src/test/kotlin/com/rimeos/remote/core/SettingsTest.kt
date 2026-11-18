@@ -103,4 +103,20 @@ class SettingsTest {
         assertEquals(setOf("b"), back.mediaApps)
         assertEquals(setOf("a"), back.mirrorApps)
     }
+
+    @Test
+    fun `Do Not Disturb following the computer is off until turned on, and survives a save`(@TempDir dir: Path) {
+        // Contract §2.9: a computer changes nothing on the phone until the
+        // person says so. A store from before the feature reads as off.
+        assertFalse(Settings().focusOn)
+        val file = dir.resolve("machines.json").toFile()
+        file.parentFile.mkdirs()
+        file.writeText("""{"v":1,"machines":[],"settings":{"mirror_reply":true}}""")
+        assertFalse(AppStorage(dir.toFile()).load().settings.focusOn)
+
+        val storage = AppStorage(dir.toFile())
+        storage.save(MachineStore(settings = Settings(focusOn = true)))
+        assertTrue(storage.load().settings.focusOn)
+        assertTrue(file.readText().contains("\"focus_on\":true"), "the switch is not stored under its contract name")
+    }
 }

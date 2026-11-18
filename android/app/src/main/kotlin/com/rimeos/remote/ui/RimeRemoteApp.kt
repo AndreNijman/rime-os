@@ -451,6 +451,8 @@ fun RimeRemoteApp(
                     onChoose = { pkg, on -> viewModel.setMirrorApp(pkg, on) },
                     reply = state.settings.mirrorReply,
                     onReply = { viewModel.setMirrorReply(it) },
+                    focus = state.settings.focusOn,
+                    onFocus = { viewModel.setFocusOn(it) },
                     onBack = { navigation.popBackStack() },
                 )
             }

@@ -10,18 +10,21 @@ import com.rimeos.remote.core.agent.Hello
 import com.rimeos.remote.core.agent.MachineLink
 import com.rimeos.remote.core.agent.Features
 import com.rimeos.remote.core.agent.RemoteHello
-import com.rimeos.remote.core.phone.BatteryThrottle
 import com.rimeos.remote.core.phone.Content
 import com.rimeos.remote.core.phone.DeviceEvent
+import com.rimeos.remote.core.phone.Focus
 import com.rimeos.remote.core.phone.Media
 import com.rimeos.remote.core.phone.MediaOutbox
 import com.rimeos.remote.core.phone.MediaState
 import com.rimeos.remote.core.phone.Mirror
 import com.rimeos.remote.core.phone.MirrorOutbox
+import com.rimeos.remote.core.phone.OwnDnd
 import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
+import com.rimeos.remote.core.phone.ReportThrottle
 import com.rimeos.remote.phone.MediaWatcher
 import com.rimeos.remote.phone.MirrorService
+import com.rimeos.remote.phone.PhoneStatus
 import com.rimeos.remote.phone.Receiver
 import com.rimeos.remote.phone.Ringer
 import com.rimeos.remote.core.link.Route
@@ -108,10 +111,17 @@ class LinkHub private constructor(private val app: Context) {
     /** How each link's current connection was made, set by the connect lambda. */
     private val lastDial = ConcurrentHashMap<String, Dial>()
 
-    // The phone's own side of each connection (contract §2.5): its battery
-    // report, and the event channel a machine rings it on. One of each per
-    // machine; a new connection replaces both.
-    private val batteryThrottles = ConcurrentHashMap<String, BatteryThrottle>()
+    // The phone's own side of each connection (contract §2.5): its report,
+    // and the event channel a machine rings it on. One of each per machine;
+    // a new connection replaces both. Each machine's reports go out one at a
+    // time from one sender, read at the moment each is sent (§2.9): two
+    // launches on the IO pool could land Do Not Disturb's on and off in the
+    // wrong order and leave the computer with the old one.
+    private class ReportLane(val remote: RemoteHello, val wake: Channel<Unit>, var sender: Job? = null) {
+        val throttle = ReportThrottle()
+    }
+
+    private val reportLanes = ConcurrentHashMap<String, ReportLane>()
     private val eventChannels = ConcurrentHashMap<String, java.io.Closeable>()
     // This phone's notifications on each machine (contract §2.7): what waits
     // for it and what it shows, and the one sender that writes them in order.
@@ -135,6 +145,13 @@ class LinkHub private constructor(private val app: Context) {
     /** Whether the person turned on replying from a computer; read and set as [mirrorApps] is. */
     @Volatile
     private var mirrorReply: Boolean = false
+
+    /** "Do Not Disturb follows your computer" (§2.9); read and set as [mirrorApps] is. */
+    @Volatile
+    private var focusOn: Boolean = false
+
+    /** A Do Not Disturb this app turned on for a computer, to take back when the switch goes off or the app locks. */
+    private val ownDnd = OwnDnd()
 
     // What this phone is playing, on each machine (contract §2.8): one
     // outbox and one sender per CONNECTION, because the machine removes the
@@ -326,6 +343,8 @@ class LinkHub private constructor(private val app: Context) {
      */
     fun lock() {
         _unlocked.value = false
+        // A locked app follows no computer: what it turned on for one ends here.
+        releaseOwnDnd("locked")
         held.clear()
         reconnects.values.forEach { it.cancel() }
         reconnects.clear()
@@ -333,7 +352,8 @@ class LinkHub private constructor(private val app: Context) {
         links.clear()
         identities.clear()
         lastDial.clear()
-        batteryThrottles.clear()
+        reportLanes.values.forEach { it.sender?.cancel() }
+        reportLanes.clear()
         eventChannels.clear()
         mirrorLanes.values.forEach { it.sender?.cancel() }
         mirrorLanes.clear()
@@ -352,7 +372,7 @@ class LinkHub private constructor(private val app: Context) {
         reconnects.remove(deviceId)?.cancel()
         identities.remove(deviceId)
         lastDial.remove(deviceId)
-        batteryThrottles.remove(deviceId)
+        reportLanes.remove(deviceId)?.sender?.cancel()
         eventChannels.remove(deviceId)?.let { runCatching { it.close() } }
         mirrorLanes.remove(deviceId)?.sender?.cancel()
         mediaLanes.remove(deviceId)?.sender?.cancel()
@@ -402,6 +422,7 @@ class LinkHub private constructor(private val app: Context) {
                     synchronized(lane.outbox) { lane.outbox.drop() }
                 }
                 mediaLanes.remove(id)?.sender?.cancel()
+                reportLanes.remove(id)?.sender?.cancel()
                 syncMediaWatcher()
                 if (keep) scheduleReconnect(machine)
             }
@@ -452,13 +473,14 @@ class LinkHub private constructor(private val app: Context) {
             val settings = repository.loadBlocking().settings
             mirrorApps = settings.mirrorApps
             mirrorReply = settings.mirrorReply
+            focusOn = settings.focusOn
             mediaOn = settings.mediaOn
             mediaApps = settings.mediaApps
         }
         if (remote.has(Phone.REPORT)) {
-            val throttle = batteryThrottles.computeIfAbsent(id) { BatteryThrottle() }
-            throttle.reset()
-            report(phone, throttle, Ringer.battery(app))
+            startReports(machine, phone, remote)
+        } else {
+            reportLanes.remove(id)?.sender?.cancel()
         }
         if (remote.has(Mirror.FEATURE)) {
             startMirror(machine, phone, remote.has(Mirror.REPLY_FEATURE))
@@ -483,31 +505,67 @@ class LinkHub private constructor(private val app: Context) {
         }
     }
 
-    private fun report(phone: PhoneLink, throttle: BatteryThrottle, reading: Pair<Int?, Boolean?>) {
-        val (level, charging) = reading
+    /**
+     * The sender of one machine's reports, for its new connection: the first
+     * report goes at once, then one whenever [ReportThrottle] says a change
+     * is worth it.
+     */
+    private fun startReports(machine: PairedMachine, phone: PhoneLink, remote: RemoteHello) {
+        val lane = reportLanes.compute(machine.deviceId) { _, old ->
+            old?.sender?.cancel()
+            ReportLane(remote, Channel(Channel.CONFLATED))
+        }!!
+        lane.sender = scope.launch {
+            while (isActive) {
+                lane.wake.receive()
+                report(machine, phone, lane)
+            }
+        }
+        lane.wake.trySend(Unit)
+    }
+
+    /**
+     * One report, if one is due: the battery, the network, Do Not Disturb
+     * and `can` as they are now. `dnd` and "focus" go only to a machine that
+     * offers [Phone.FOCUS]; an older one has no use for either.
+     */
+    private fun report(machine: PairedMachine, phone: PhoneLink, lane: ReportLane) {
+        val (level, charging) = Ringer.battery(app)
+        val network = PhoneStatus.network(app)
+        val focus = lane.remote.has(Phone.FOCUS)
+        val dnd = if (focus) PhoneStatus.dnd(app) else null
         val now = System.currentTimeMillis()
-        if (!throttle.due(level, charging, now)) return
         val can = buildList {
             if (ringer.canRing) add(Phone.CAN_RING)
             if (receiver.canReceive) add(Phone.CAN_RECEIVE)
             val granted = MirrorService.granted(app)
             if (granted) add(Phone.CAN_DISMISS)
             if (granted && mirrorReply) add(Phone.CAN_REPLY)
+            // The listener is what applies a computer's Do Not Disturb.
+            if (focus && granted && focusOn) add(Phone.CAN_FOCUS)
         }
-        runCatching { phone.report(level, charging, can) }
-            .onSuccess { throttle.sent(level, charging, now) }
-            .onFailure { Log.i(TAG, "battery report not taken: ${it.message}") }
+        if (!lane.throttle.due(level, charging, now, network, dnd, can)) return
+        runCatching { phone.report(level, charging, can, network, dnd) }
+            .onSuccess { lane.throttle.sent(level, charging, now, network, dnd, can) }
+            .onFailure { Log.i(TAG, "${machine.machine}: report not taken: ${it.message}") }
     }
 
-    /** The phone's battery changed; tell each connected machine that wants to know, when it is worth it. */
-    fun onBattery(level: Int?, charging: Boolean?) {
+    /**
+     * Something a report carries may have changed: the battery, the network
+     * or its signal, Do Not Disturb. Each connected machine's sender looks,
+     * and sends only what [ReportThrottle] finds worth it.
+     */
+    fun onPhoneChanged() {
         if (!_unlocked.value) return
-        for ((id, throttle) in batteryThrottles) {
-            val link = links[id] ?: continue
-            if (!link.connected) continue
-            if (state(id)?.remote?.has(Phone.REPORT) != true) continue
-            if (!throttle.due(level, charging, System.currentTimeMillis())) continue
-            scope.launch { report(PhoneLink(link), throttle, level to charging) }
+        for (lane in reportLanes.values) lane.wake.trySend(Unit)
+    }
+
+    /** Something `can` says changed: every connected machine is told at once. */
+    private fun reportAgain() {
+        if (!_unlocked.value) return
+        for (lane in reportLanes.values) {
+            lane.throttle.reset()
+            lane.wake.trySend(Unit)
         }
     }
 
@@ -534,14 +592,43 @@ class LinkHub private constructor(private val app: Context) {
      */
     fun setMirrorReply(on: Boolean) {
         mirrorReply = on
-        if (!_unlocked.value) return
-        for ((id, throttle) in batteryThrottles) {
-            val link = links[id] ?: continue
-            if (!link.connected) continue
-            if (state(id)?.remote?.has(Phone.REPORT) != true) continue
-            throttle.reset()
-            scope.launch { report(PhoneLink(link), throttle, Ringer.battery(app)) }
-        }
+        reportAgain()
+    }
+
+    fun focusOn(): Boolean = focusOn
+
+    /**
+     * The person turned "Do Not Disturb follows your computer" on or off;
+     * the store was already written. Each connected machine is told at once,
+     * as for [setMirrorReply]: its `can` is what lets it follow this phone
+     * and send it a `focus` line at all.
+     */
+    fun setFocusOn(on: Boolean) {
+        focusOn = on
+        if (!on) releaseOwnDnd("switched off")
+        reportAgain()
+    }
+
+    /**
+     * Android says the phone's Do Not Disturb changed, by any path. Off means
+     * nothing this app turned on is left to take back; then every machine
+     * hears the new state.
+     */
+    fun onFocusChanged() {
+        ownDnd.observed(PhoneStatus.dnd(app))
+        onPhoneChanged()
+    }
+
+    /**
+     * Take back a Do Not Disturb this app turned on for a computer, and only
+     * that: never one the person turned on at the phone. It needs the
+     * listener; without notification access it stays on, and is taken back
+     * when access returns ([onListenerChanged]) or ended at the phone.
+     */
+    private fun releaseOwnDnd(why: String) {
+        if (!ownDnd.owed(PhoneStatus.dnd(app))) return
+        if (MirrorService.focus(false)) ownDnd.applied(false)
+        else Log.i(TAG, "Do Not Disturb this app turned on stays on ($why): no listener")
     }
 
     /**
@@ -621,9 +708,14 @@ class LinkHub private constructor(private val app: Context) {
 
     /**
      * Notification access was granted or taken away (the listener bound or
-     * unbound): media sessions are readable only with it.
+     * unbound): media sessions are readable only with it, and `can` says
+     * what it allows (dismiss, reply, focus), so every machine is told again.
      */
-    fun onListenerChanged() = syncMediaWatcher()
+    fun onListenerChanged() {
+        if (!focusOn || !_unlocked.value) releaseOwnDnd("access back")
+        syncMediaWatcher()
+        reportAgain()
+    }
 
     /**
      * Run the watcher exactly while something could be sent: unlocked, the
@@ -711,6 +803,16 @@ class LinkHub private constructor(private val app: Context) {
                 if (rang) runCatching { phone.ack(event.id) }
             }
             is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
+            is DeviceEvent.Focus -> {
+                // Only with the person's switch on, whatever an older report
+                // told the machine, and only when the phone is not there
+                // already. The change Android then reports goes back to
+                // every machine as `dnd`, which is how the others follow.
+                val switchOn = focusOn && MirrorService.granted(app)
+                if (!Focus.apply(switchOn, _unlocked.value, PhoneStatus.dnd(app), event.dnd)) return
+                if (MirrorService.focus(event.dnd)) ownDnd.applied(event.dnd)
+                else Log.i(TAG, "${machine.machine}: Do Not Disturb not changed: no listener")
+            }
             is DeviceEvent.Dismissed -> {
                 // Only what this machine was sent, and only while unlocked:
                 // a locked app sends nothing and takes nothing back.

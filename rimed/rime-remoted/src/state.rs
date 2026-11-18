@@ -96,6 +96,11 @@ pub struct State {
     live: Mutex<Vec<Live>>,
     push: Mutex<PushStore>,
     phones: Mutex<crate::phone::PhoneStore>,
+    /// Which Do Not Disturb was last handed the Shell, per phone (§2.9).
+    focus_seen: crate::phone::FocusSeen,
+    /// Where a phone's Do Not Disturb is written for the Shell; see
+    /// [`State::set_focus_file`].
+    focus_file: Mutex<Option<PathBuf>>,
     /// nexd's socket, when `--nexd` moved it; see [`State::nexd`].
     nexd: Mutex<Option<PathBuf>>,
 }
@@ -164,6 +169,8 @@ impl State {
             live: Mutex::new(Vec::new()),
             push: Mutex::new(push),
             phones: Mutex::new(phones),
+            focus_seen: crate::phone::FocusSeen::default(),
+            focus_file: Mutex::new(None),
             nexd: Mutex::new(None),
         }))
     }
@@ -175,6 +182,16 @@ impl State {
             .unwrap_or_else(|p| p.into_inner())
             .clone()
             .unwrap_or_else(crate::nex::default_socket)
+    }
+
+    /// Where to write a phone's Do Not Disturb for the Shell. Only `main.rs`
+    /// sets it, from the runtime directory, and unset means nothing is
+    /// written: the unit tests build a `State` inside the developer's own
+    /// session, where `$XDG_RUNTIME_DIR` is the one the real Shell watches,
+    /// and a default taken from it would turn on that desktop's Do Not
+    /// Disturb from a test.
+    pub fn set_focus_file(&self, path: PathBuf) {
+        *self.focus_file.lock().unwrap_or_else(|p| p.into_inner()) = Some(path);
     }
 
     /// Point the bridge at another nexd: `--nexd` at start, or a test.
@@ -226,8 +243,20 @@ impl State {
 
 
     /// Record a phone's report. The id is the handshake's.
+    ///
+    /// A changed Do Not Disturb from a phone that said `focus` is written for
+    /// the Shell too, under the same lock, so two reports racing from two
+    /// connections land in `focus.json` in the order they were stored.
     pub fn phone_report(&self, device_id: &str, report: crate::phone::PhoneReport) {
         let mut store = self.phones.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(dnd) = self.focus_seen.change(device_id, &report) {
+            let path = self.focus_file.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            if let Some(path) = path {
+                if let Err(e) = crate::phone::write_focus(&path, dnd, device_id, report.reported_ms) {
+                    eprintln!("rime-remoted: could not write {}: {e}", path.display());
+                }
+            }
+        }
         store.phones.insert(device_id.to_string(), report);
         if let Err(e) = store.save(&self.phones_path) {
             eprintln!("rime-remoted: could not write {}: {e}", self.phones_path.display());
@@ -246,6 +275,7 @@ impl State {
         self.outbox.forget(device_id);
         crate::mirror::mirror().forget(device_id);
         crate::media::media().forget(device_id);
+        self.focus_seen.forget(device_id);
         let mut store = self.phones.lock().unwrap_or_else(|e| e.into_inner());
         if store.phones.remove(device_id).is_some() {
             if let Err(e) = store.save(&self.phones_path) {

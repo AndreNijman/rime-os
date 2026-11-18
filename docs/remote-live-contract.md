@@ -367,7 +367,8 @@ uses neither with a machine whose hello lacks them.
 - Answered by rime-remoted, under the handshake's device id. `battery` is a
   whole number from 0 to 100, `charging` a boolean, `can` at most 8 words; any
   of them may be left out. A value outside those is `bad_request` and nothing
-  is stored. Of `can`, only `"ring"` is kept. The phone leaves `"ring"` out
+  is stored. Of `can`, only `"ring"` is kept. (Later sections add `network`,
+  `dnd` and more `can` words: §2.6, §2.7, §2.9.) The phone leaves `"ring"` out
   while its notifications or its "Ring my phone" channel are switched off.
   It reports when it connects, and again when charging starts or stops, the
   level moves 5 points, or 10 minutes pass.
@@ -672,6 +673,172 @@ The bus path is proven on a private bus by `tests/test-remoted-media-bus.sh`
 (properties read back with `busctl`, the position moving with the clock,
 control refused, `playerctl -l` with and without `--ignore-player=rime_phone`,
 an update, removal).
+
+### 2.9 Status and Focus: the phone's network and Do Not Disturb, both ways
+
+`remote_hello.features` gains `"phone_focus"`. A phone offers its Focus switch
+only to a machine whose hello has it.
+
+```json
+{"cmd":"phone_report","battery":62,"network":{"type":"wifi","signal":3},"dnd":true,"can":["ring","focus"]}
+→ {"reply":"ok"}
+```
+
+- `phone_report` (§2.5) takes two more fields, each optional:
+  - `network`: an object. `type` is one of `wifi`, `cellular`, `ethernet`,
+    `none`, `other`. `signal` is a whole number from 0 to 4 (Android's own
+    bars). Leave `signal` out when the phone does not know it; it is not the
+    same as 0.
+  - `dnd`: a boolean, true while the phone's interruption filter is anything
+    but "all".
+
+  Any other type, a signal outside 0 to 4, or a `dnd` that is not a boolean is
+  `bad_request`, and nothing is stored. Both fields are kept in `phones.json`,
+  carried in the `devices` reply, and shown by `rime remote devices`, its
+  `--json` (on `phone`) and the Shell.
+- `can` keeps `"focus"` while the person has Focus sync turned on on the
+  phone. A phone without it is never acted on, whatever its `dnd` does.
+
+**Phone → computer.** When a report from a phone whose `can` has `"focus"`
+carries a `dnd` different from the last one rime-remoted acted on for that
+phone, rime-remoted writes `$XDG_RUNTIME_DIR/rime-remote/focus.json`:
+
+```json
+{"dnd":true,"device":"<device id>","at_ms":1763452800000}
+```
+
+- `at_ms` is when rime-remoted read the report. The file is written whole
+  through a rename: temp file in the same directory, 0600, directory 0700.
+  This is written before the report's reply goes back.
+- An unchanged `dnd`, or a report that leaves it out, writes nothing, so the
+  Shell's watch is not woken.
+- "Last acted on" is held in memory per phone, for this daemon's run. It is
+  not read back from `phones.json`, because that file outlives the runtime
+  directory: after a reboot, a phone already in Do Not Disturb would otherwise
+  never be written. A daemon restart therefore writes each phone's state once
+  more: if the Shell's differs from the phone's at that moment, the phone's
+  wins.
+- When a phone drops `"focus"` from `can`, rime-remoted forgets its state.
+  When the phone turns Focus back on, its next report counts as the first one
+  again. Revoke forgets it too.
+- With two phones, the file holds whichever changed last.
+
+**Computer → phone.** A control-socket request, so only the machine's own
+user can send it. A paired phone has no verb that does it.
+
+```json
+{"cmd":"focus","dnd":true}
+→ {"reply":"focused","reached":1}
+```
+
+- `{"event":"focus","dnd":<bool>}` goes onto the `device_events` channel of
+  each connected phone whose last report has `"focus"` in `can`.
+- `reached` counts those writes. Zero is an answer: no phone is connected, or
+  none said `"focus"`. There is no push, because a setting is not worth
+  waking a phone.
+- The CLI form is `rime remote focus on|off`. The Shell runs it when the
+  person toggles Do Not Disturb, if its "Do Not Disturb follows your phone"
+  switch is on.
+- Nothing catches up on connect: a phone that was away when the person
+  toggled keeps its own state until the next change on either side.
+
+**The Shell's half** (rime-shell `PhoneFocusService`). The switch "Do Not
+Disturb follows your phone" (Settings → Paired devices) is off by default;
+off, the Shell reads no file and runs no command. On, a `focus.json` whose
+`at_ms` is earlier than the moment following started (the switch turned on,
+or the Shell started with it on) is not applied: it describes a moment that
+has passed, and a Shell restart must not put a phone's old state over one the
+person has chosen since.
+- The phone applies it with `NotificationListenerService.requestInterruptionFilter`.
+  Listener access is enough; policy access is not needed.
+
+**What the phone sends.** `network` in every report to a machine offering
+`phone_report`; `dnd` and `"focus"` only to one whose hello has
+`"phone_focus"`. The report is read at the moment it goes, and each machine's
+reports go out one at a time, so two Do Not Disturb changes never land in the
+wrong order.
+
+- `network` is the default network's: `wifi`, `cellular` or `ethernet` from
+  its transports, first match winning (a VPN lists the transport under it, so
+  a VPN over Wi-Fi is `wifi`; a bare VPN is `other`); `none` with no default
+  network. Wi-Fi bars come from the network's signal strength in dBm on
+  Android's own five-level scale (-100 dBm and below is 0, -55 and above is
+  4); cellular bars are `SignalStrength.getLevel`. Ethernet, `none` and
+  `other` carry no `signal`, and neither does a reading Android did not give.
+  No permission is added for either: `NetworkCapabilities.getSignalStrength`
+  is not one of the fields Android hides without location access, and
+  `TelephonyManager.getSignalStrength` needs none. No location or
+  `READ_PHONE_STATE`.
+- `dnd` is `getCurrentInterruptionFilter() != INTERRUPTION_FILTER_ALL`, left
+  out while Android says the filter is unknown.
+- A new report goes at once when `dnd` changes, when the network's `type`
+  changes, or when `can` changes (the switch, replying, notification access
+  granted or taken away); a change of bars alone at most once a minute; and
+  battery as §2.5. The phone hears Do Not Disturb change through
+  `ACTION_INTERRUPTION_FILTER_CHANGED`, the network through its default
+  network callback, and cellular bars (Android 12 and later, only while the
+  default network is cellular) through `TelephonyCallback`.
+- `can` has `"focus"` while notification access is granted and the switch
+  "Do Not Disturb follows your computer" (on "Notifications on your
+  computer", off by default) is on.
+- A `focus` line is applied only while the switch is on, notification access
+  is granted, the app is unlocked, and the phone's state differs from the
+  line's. The switch is checked again on the phone, so a machine that still
+  holds an older report saying `"focus"` is not obeyed. `dnd: true` asks for
+  `INTERRUPTION_FILTER_PRIORITY`, `false` for `INTERRUPTION_FILTER_ALL`.
+- Measured on Android 16 with the app targeting 36: Android keeps a Do Not
+  Disturb that an app turns on as a mode of the app's own. `false` from a
+  computer ends only that mode, never one the person turned on at the phone
+  (the phone keeps its Do Not Disturb, sends nothing, and the two sides stay
+  apart until the next change). `cmd notification set_dnd off` does not end
+  the app's mode either.
+- Never left stranded: the app remembers that it turned Do Not Disturb on
+  for a computer (a `focus` line applied `PRIORITY`), and forgets it when a
+  line applies `ALL` or when Android reports the filter back at `ALL` by any
+  path. While it remembers, turning the switch off or locking the app asks
+  the listener for `INTERRUPTION_FILTER_ALL`. A Do Not Disturb the person
+  turned on at the phone is never asked off this way. The memory is the
+  process's: a process Android ended forgets it.
+- Without notification access the listener cannot ask anything, and the
+  app's mode stays on (measured, Android 16 emulator: revoking access left
+  `implicit_com.rimeos.remote` active, filter `PRIORITY`). It is taken back
+  when access returns with the switch off or the app locked. Until then the
+  person ends it at the phone: the Quick Settings "Modes" tile shows
+  "Modes · Do Not Disturb (Rime Remote)"; tapping it opens a list with
+  "Do Not Disturb (Rime Remote) · On · Managed by Rime Remote", and tapping
+  that entry turned it off (measured). Settings → Modes lists the same
+  entry, whose page has a "Turn off" button (seen, not pressed). Not
+  measured on a real phone.
+- Proven on the emulator by `FocusOnDeviceTest` (the record carries
+  `network` and `dnd`, and `"focus"` only once switched on; `rime remote
+  focus on|off` turns the emulator's Do Not Disturb on and off;
+  `set_dnd on|off` reaches `focus.json`, read by the broker's `focus_file`
+  from the run's own runtime directory; with the switch off, `reached` is 0
+  and `focus.json` is not written; turning the switch off or locking ends a
+  Do Not Disturb a computer turned on, and leaves the person's own on). The cellular path is not exercised there:
+  the emulator's default network is Wi-Fi.
+
+**State, not toggles: why nothing loops.** Each side acts only when the state
+it is given differs from its own:
+
+- The Shell sets its Do Not Disturb from `focus.json` only when the value
+  differs. It never runs `rime remote focus` for a change that came from the
+  file.
+- The phone applies a `focus` line only when its own state differs, then
+  reports the result.
+- rime-remoted writes the file only when a phone's `dnd` changed.
+
+So when the person toggles on the computer, the phone changes, reports, and
+the file is written with the value the Shell already has: nothing changes. A
+`focus` request never writes `focus.json` itself; only a phone's report does.
+
+**Tests never touch the real desktop's file.** rime-remoted takes the path
+from `main.rs` only. A `State` built by a unit test has none and writes
+nothing, because the unit binary runs inside the developer's session, where
+`$XDG_RUNTIME_DIR` is the one the real Shell watches. Every harness, including
+`android/tools/run-device-suite.sh` and its broker's restart, starts the
+daemon with a private `XDG_RUNTIME_DIR`. So no `RIME_REMOTED_*_STUB` is needed
+for this file.
 
 ## 3. The phone
 

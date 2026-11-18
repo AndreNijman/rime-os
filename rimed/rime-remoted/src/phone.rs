@@ -22,6 +22,12 @@
 //!   here sent the phone waits in the [`Outbox`]; an `offer` line on the
 //!   events channel tells the phone, and the phone takes it on a channel of
 //!   its own, by id, under its own device id.
+//! - Focus (contract §2.9): the phone's Do Not Disturb, carried as STATE in
+//!   both directions. A report whose `dnd` changed is written to
+//!   `focus.json` for the Shell ([`FocusSeen`], [`write_focus`]); `rime
+//!   remote focus on|off` puts a `focus` line on each phone's events channel
+//!   ([`focus_line`]). Each side acts only when the state differs from its
+//!   own, so a change echoed back changes nothing and nothing loops.
 //!
 //! ## What a ring may not do
 //!
@@ -50,7 +56,13 @@ pub const CHANNEL: &str = "device_events";
 
 /// What `remote_hello` adds, so a phone talks to a machine that has these and
 /// leaves an older one alone.
-pub const FEATURES: [&str; 3] = ["device_events", "phone_report", TAKE];
+pub const FEATURES: [&str; 4] = ["device_events", "phone_report", TAKE, FOCUS_FEATURE];
+
+/// What `remote_hello` adds once this machine both writes a phone's Do Not
+/// Disturb for the Shell and can send the Shell's to the phone (§2.9). A
+/// phone offers its Focus switch only to a machine that says this; an older
+/// machine ignores `dnd` in a report and would never send a `focus` line.
+pub const FOCUS_FEATURE: &str = "phone_focus";
 
 /// The channel a phone opens to take what was sent to it.
 pub const TAKE: &str = "take_offer";
@@ -71,8 +83,22 @@ pub const CAN_DISMISS: &str = "dismiss";
 /// reply action (contract §2.7).
 pub const CAN_REPLY: &str = "reply";
 
+/// The capability a phone declares when the person turned on Focus sync on
+/// it: its `dnd` may change this computer's Do Not Disturb, and it applies a
+/// `focus` line from this machine to its own (contract §2.9).
+pub const CAN_FOCUS: &str = "focus";
+
 /// Every capability word kept from a report.
-const KEPT: [&str; 4] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY];
+const KEPT: [&str; 5] = [CAN_RING, CAN_RECEIVE, CAN_DISMISS, CAN_REPLY, CAN_FOCUS];
+
+/// The network kinds a phone may report. Anything else is refused rather than
+/// stored, so `rime remote devices` and the Shell only ever print words they
+/// have a label for.
+pub const NETWORK_TYPES: [&str; 5] = ["wifi", "cellular", "ethernet", "none", "other"];
+
+/// The most bars a signal has: Android's own 0 to 4 scale
+/// (`SignalStrength.getLevel`, `WifiManager.calculateSignalLevel` with 5 levels).
+pub const MAX_SIGNAL: u8 = 4;
 
 /// The largest file `send` hands a phone: the same cap as `save_file`.
 pub const MAX_SEND_BYTES: u64 = 256 * 1024 * 1024;
@@ -105,6 +131,12 @@ pub struct PhoneReport {
     /// What it can do: [`CAN_RING`] and [`CAN_RECEIVE`] mean something.
     #[serde(default)]
     pub can: Vec<String>,
+    /// How it is connected, when the phone said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<Network>,
+    /// Whether its Do Not Disturb is on, when the phone said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dnd: Option<bool>,
     /// Unix milliseconds at which this machine received it.
     pub reported_ms: u64,
 }
@@ -124,6 +156,10 @@ impl PhoneReport {
 
     pub fn can_reply(&self) -> bool {
         self.can.iter().any(|c| c == CAN_REPLY)
+    }
+
+    pub fn can_focus(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_FOCUS)
     }
 
     /// A report from a `phone_report` line, or why it was refused.
@@ -153,13 +189,129 @@ impl PhoneReport {
             }
             _ => return Err(format!("can must be a list of at most {MAX_CAN} words")),
         };
+        let network = match &v["network"] {
+            Value::Null => None,
+            n => Some(Network::parse(n)?),
+        };
+        let dnd = match &v["dnd"] {
+            Value::Null => None,
+            d => Some(d.as_bool().ok_or("dnd must be true or false")?),
+        };
         Ok(PhoneReport {
             battery,
             charging,
             can,
+            network,
+            dnd,
             reported_ms: now_ms,
         })
     }
+}
+
+/// How a phone is connected: the kind, and its bars when it has any.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Network {
+    /// One of [`NETWORK_TYPES`].
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// 0 to [`MAX_SIGNAL`], when the phone said. Ethernet and "none" have no
+    /// bars, and a phone may not know them for Wi-Fi either.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<u8>,
+}
+
+impl Network {
+    fn parse(v: &Value) -> Result<Network, String> {
+        let Value::Object(o) = v else {
+            return Err("network must be an object with a type".into());
+        };
+        let kind = match o.get("type").and_then(Value::as_str) {
+            Some(t) if NETWORK_TYPES.contains(&t) => t.to_string(),
+            _ => return Err(format!("network type must be one of {}", NETWORK_TYPES.join(", "))),
+        };
+        let signal = match o.get("signal").unwrap_or(&Value::Null) {
+            Value::Null => None,
+            s => match s.as_u64() {
+                Some(n) if n <= u64::from(MAX_SIGNAL) => Some(n as u8),
+                _ => return Err(format!("network signal must be a whole number from 0 to {MAX_SIGNAL}")),
+            },
+        };
+        Ok(Network { kind, signal })
+    }
+}
+
+/// Which Do Not Disturb this daemon last acted on, per phone, since it
+/// started.
+///
+/// In memory on purpose, and not compared with `phones.json`: that file
+/// outlives the runtime directory `focus.json` lives in. After a reboot a
+/// phone already in Do Not Disturb would report the same value it reported
+/// yesterday, and "unchanged" would leave the new session never told. A
+/// daemon that restarts therefore writes the phone's state once more on its
+/// first report, which is harmless: the Shell acts only when it differs from
+/// its own.
+#[derive(Default)]
+pub struct FocusSeen {
+    last: Mutex<HashMap<String, bool>>,
+}
+
+impl FocusSeen {
+    /// The Do Not Disturb to hand the Shell for this report, or `None` when
+    /// there is nothing new to say.
+    ///
+    /// Only a phone whose report says [`CAN_FOCUS`] is acted on: one without
+    /// it is forgotten here, so turning Focus sync on again on the phone
+    /// counts as its first report and the computer follows the phone's state
+    /// at that moment, whatever it was before.
+    pub fn change(&self, device_id: &str, report: &PhoneReport) -> Option<bool> {
+        let mut last = lock(&self.last);
+        let (true, Some(dnd)) = (report.can_focus(), report.dnd) else {
+            last.remove(device_id);
+            return None;
+        };
+        (last.insert(device_id.to_string(), dnd) != Some(dnd)).then_some(dnd)
+    }
+
+    /// Revoke.
+    pub fn forget(&self, device_id: &str) {
+        lock(&self.last).remove(device_id);
+    }
+}
+
+/// Where the Shell reads a phone's Do Not Disturb, under a runtime directory.
+/// Its own directory, `rime-remote`, not the control socket's `rime-remoted`:
+/// this one is a file the Shell watches, and a watch on the socket's
+/// directory would wake for every connection.
+pub fn focus_file_in(runtime_dir: &Path) -> std::path::PathBuf {
+    runtime_dir.join("rime-remote").join("focus.json")
+}
+
+/// Write `{"dnd","device","at_ms"}` to `path`, whole, through a rename: the
+/// Shell watches the directory, and a reader that caught a half-written file
+/// would see no state at all. The directory is 0700 and the file 0600.
+pub fn write_focus(path: &Path, dnd: bool, device_id: &str, at_ms: u64) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    rime_agent_core::paths::ensure_private_dir(dir)?;
+    let tmp = dir.join(format!(".focus.json.{}", std::process::id()));
+    let body = json!({"dnd": dnd, "device": device_id, "at_ms": at_ms}).to_string();
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(body.as_bytes())?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, path)
+}
+
+/// The line `rime remote focus on|off` puts on a phone's events channel.
+pub fn focus_line(dnd: bool) -> Value {
+    json!({"event": "focus", "dnd": dnd})
 }
 
 /// Every phone's last report, as written to `phones.json`.
@@ -721,8 +873,106 @@ mod tests {
             battery: Some(40),
             charging: Some(false),
             can: can.iter().map(|s| s.to_string()).collect(),
+            network: None,
+            dnd: None,
             reported_ms: 1,
         }
+    }
+
+    fn with_dnd(can: &[&str], dnd: Option<bool>) -> PhoneReport {
+        PhoneReport { dnd, ..report(can) }
+    }
+
+    #[test]
+    fn a_report_carries_its_network_and_do_not_disturb_and_refuses_anything_else() {
+        let r = PhoneReport::parse(
+            &json!({"battery": 62, "network": {"type": "wifi", "signal": 3}, "dnd": true, "can": ["focus", "fly"]}),
+            5,
+        )
+        .expect("parse");
+        assert_eq!(r.network, Some(Network { kind: "wifi".into(), signal: Some(3) }));
+        assert_eq!(r.dnd, Some(true));
+        assert!(r.can_focus(), "focus is a word this machine acts on and must be kept");
+        assert_eq!(r.can, vec!["focus".to_string()]);
+        for kind in NETWORK_TYPES {
+            let r = PhoneReport::parse(&json!({"network": {"type": kind}}), 5).expect(kind);
+            assert_eq!(r.network.expect("network").signal, None, "{kind}: no bars is not 0 bars");
+        }
+        let edge = PhoneReport::parse(&json!({"network": {"type": "cellular", "signal": 0}, "dnd": false}), 5).expect("0 bars");
+        assert_eq!((edge.network.unwrap().signal, edge.dnd), (Some(0), Some(false)));
+        let none = PhoneReport::parse(&json!({"battery": 5}), 5).expect("an older phone");
+        assert_eq!((none.network, none.dnd), (None, None));
+        for bad in [
+            json!({"network": "wifi"}),
+            json!({"network": {}}),
+            json!({"network": {"type": "5g"}}),
+            json!({"network": {"type": "WIFI"}}),
+            json!({"network": {"type": 1}}),
+            json!({"network": {"type": "wifi", "signal": 5}}),
+            json!({"network": {"type": "wifi", "signal": -1}}),
+            json!({"network": {"type": "wifi", "signal": 2.5}}),
+            json!({"network": {"type": "wifi", "signal": "3"}}),
+            json!({"dnd": "on"}),
+            json!({"dnd": 1}),
+        ] {
+            assert!(PhoneReport::parse(&bad, 5).is_err(), "{bad} was accepted");
+        }
+        // Written and read back as the contract spells it: `type`, not `kind`.
+        let text = serde_json::to_string(&r).expect("serialise");
+        assert!(text.contains(r#""network":{"type":"wifi","signal":3}"#), "{text}");
+        assert_eq!(serde_json::from_str::<PhoneReport>(&text).expect("back"), r);
+        // A store written before these fields existed still loads.
+        let old: PhoneReport = serde_json::from_str(r#"{"battery":5,"can":["ring"],"reported_ms":1}"#).expect("old");
+        assert_eq!((old.network, old.dnd), (None, None));
+    }
+
+    #[test]
+    fn do_not_disturb_reaches_the_shell_only_when_it_changes_on_a_phone_that_said_focus() {
+        let seen = FocusSeen::default();
+        let focus = &["focus"];
+        // The first report with dnd from a phone that said focus: the state.
+        assert_eq!(seen.change("dev-a", &with_dnd(focus, Some(true))), Some(true));
+        // The same again: nothing to say, however often it reports.
+        assert_eq!(seen.change("dev-a", &with_dnd(focus, Some(true))), None);
+        assert_eq!(seen.change("dev-a", &with_dnd(focus, Some(true))), None);
+        // A report that leaves dnd out says nothing about it.
+        assert_eq!(seen.change("dev-a", &with_dnd(focus, None)), None);
+        // A change, and back.
+        assert_eq!(seen.change("dev-a", &with_dnd(focus, Some(false))), Some(false));
+        assert_eq!(seen.change("dev-a", &with_dnd(focus, Some(true))), Some(true));
+        // Another phone keeps its own state.
+        assert_eq!(seen.change("dev-b", &with_dnd(focus, Some(true))), Some(true));
+        // A phone without focus is never acted on, whatever its dnd does.
+        assert_eq!(seen.change("dev-c", &with_dnd(&["ring"], Some(true))), None);
+        assert_eq!(seen.change("dev-c", &with_dnd(&["ring"], Some(false))), None);
+        // Turning focus off on the phone and on again is a first report: the
+        // computer follows the phone's state at that moment.
+        assert_eq!(seen.change("dev-a", &with_dnd(&["ring"], Some(true))), None);
+        assert_eq!(seen.change("dev-a", &with_dnd(focus, Some(true))), Some(true));
+        // Revoke forgets it too.
+        seen.forget("dev-a");
+        assert_eq!(seen.change("dev-a", &with_dnd(focus, Some(true))), Some(true));
+    }
+
+    #[test]
+    fn the_focus_file_is_written_whole_and_private() {
+        let dir = std::env::temp_dir().join(format!("rime-remoted-focus-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = focus_file_in(&dir);
+        assert!(path.ends_with("rime-remote/focus.json"), "{path:?}");
+        write_focus(&path, true, "dev-a", 1234).expect("write");
+        let v: Value = serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        assert_eq!(v, json!({"dnd": true, "device": "dev-a", "at_ms": 1234}));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&path).expect("meta").permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(path.parent().unwrap()).expect("meta").permissions().mode() & 0o777, 0o700);
+        write_focus(&path, false, "dev-b", 1235).expect("rewrite");
+        let v: Value = serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        assert_eq!(v["dnd"], false);
+        // No temp file left beside it for the Shell's directory watch to see.
+        assert_eq!(std::fs::read_dir(path.parent().unwrap()).expect("ls").count(), 1);
+        assert_eq!(focus_line(true), json!({"event": "focus", "dnd": true}));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

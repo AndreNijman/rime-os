@@ -116,7 +116,7 @@ class PhoneTest {
 
     @Test
     fun `the battery is reported first, on a charger change, on a 5 point move, or every 10 minutes`() {
-        val t = BatteryThrottle()
+        val t = ReportThrottle()
         assertTrue(t.due(80, false, 0))
         t.sent(80, false, 0)
         assertFalse(t.due(80, false, 1_000))
