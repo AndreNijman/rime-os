@@ -319,10 +319,10 @@ computer's own user can run it. A paired phone has no command for this
 computer's Do Not Disturb. It can only report its own, and the Shell follows
 that report only when you have turned that on.
 
-On Android 15 and later, a Do Not Disturb the computer turns on is a mode of
-its own on the phone, and `off` from the computer ends only that one. If you
-turned Do Not Disturb on at the phone, the computer cannot turn it off, and
-the phone stays as it is.
+On the phone, a Do Not Disturb the computer turns on is a mode of its own,
+and `off` from the computer ends only that one (measured on Android 16). If
+you turned Do Not Disturb on at the phone, the computer cannot turn it off,
+and the phone stays as it is.
 
 ## `rime remote send <device>`: files and text to your phone
 
