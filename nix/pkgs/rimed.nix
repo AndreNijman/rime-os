@@ -212,6 +212,7 @@ let
     noLoginSessionCgroup = [
       "a_call_dies_with_the_phones_connection_and_revoke_and_a_locked_phone_answers_but_never_dials"
       "a_channel_onto_a_session_that_does_not_exist_is_refused_with_the_daemons_own_words"
+      "a_computer_brings_its_phone_to_a_new_computer_as_a_companion_until_a_person_allows_it"
       "a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_not_the_runtime"
       "a_confined_session_is_judged_against_the_confinement_it_actually_has"
       "a_confined_session_is_told_where_its_runtime_directory_is"
@@ -230,6 +231,7 @@ let
       "a_paired_device_reaches_the_agent_runtime_through_the_proxy"
       "a_paired_phone_reaches_nex_through_the_running_service"
       "a_payload_with_quotes_and_backslashes_arrives_unchanged"
+      "a_phone_introduces_two_computers_and_neither_may_remove_others_or_bring_a_phone_until_allowed"
       "a_phone_registers_for_push_over_the_real_session_and_the_key_lands_in_its_own_file"
       "a_phone_reports_its_battery_rings_over_its_link_and_revoke_forgets_both"
       "a_phone_that_allows_control_gets_each_call_on_its_events_channel_and_nothing_it_did_not_allow"

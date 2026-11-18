@@ -3872,3 +3872,150 @@ fn a_copied_home_cannot_pair_with_or_connect_to_the_computer_it_came_from() {
     // And a session on that key reaches nothing, whatever the store says.
     assert!(identity_of(&b).connect(&a).is_none(), "a session on this machine's own key was accepted");
 }
+
+/// The record of the phone with `key` on `h`, from the `devices` reply.
+fn device_on(h: &Harness, key: &str) -> serde_json::Value {
+    let reply = h.control(r#"{"cmd":"devices"}"#);
+    reply["devices"]
+        .as_array()
+        .expect("devices")
+        .iter()
+        .find(|d| d["public_key"] == key)
+        .cloned()
+        .unwrap_or_else(|| panic!("no phone {key} in {reply}"))
+}
+
+#[test]
+fn a_phone_introduces_two_computers_and_neither_may_remove_others_or_bring_a_phone_until_allowed() {
+    let a = harness!("intro-a");
+    let b = harness!("intro-b");
+    let phone = Device::new();
+    let Some(offer) = open_offer(&a) else { return };
+    assert_eq!(phone.pair(&a, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&b) else { return };
+    assert_eq!(phone.pair(&b, &offer, "pixel-8")["ok"], true);
+    let mut on_a = phone.connect(&a).expect("a session on A");
+    let mut on_b = phone.connect(&b).expect("a session on B");
+    let hello = on_a.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "computer_introductions"), "{hello}");
+
+    // With the switch off, nothing is introduced.
+    let off = on_a.call(r#"{"cmd":"computer_card"}"#);
+    assert_eq!(off["kind"], "not_allowed", "{off}");
+    for s in [&mut on_a, &mut on_b] {
+        assert_eq!(s.call(r#"{"cmd":"phone_report","can":["ring","join"]}"#)["reply"], "ok");
+    }
+    let card_a = on_a.call(r#"{"cmd":"computer_card"}"#);
+    let card_b = on_b.call(r#"{"cmd":"computer_card"}"#);
+    assert_eq!(card_a["reply"], "computer_card", "{card_a}");
+    let key_a = identity_of(&a).key();
+    let key_b = identity_of(&b).key();
+    assert_eq!(card_a["card"]["key"], key_a.as_str());
+    assert!(!card_a["known"].as_array().unwrap().iter().any(|k| k == key_b.as_str()), "{card_a}");
+
+    let added = on_a.call(&serde_json::json!({"cmd": "computer_introduce", "card": card_b["card"]}).to_string());
+    assert_eq!(added["outcome"], "added", "{added}");
+    let b_on_a = added["id"].as_str().expect("id").to_string();
+    let added = on_b.call(&serde_json::json!({"cmd": "computer_introduce", "card": card_a["card"]}).to_string());
+    assert_eq!(added["outcome"], "added", "{added}");
+    let a_on_b = added["id"].as_str().expect("id").to_string();
+    let again = on_a.call(&serde_json::json!({"cmd": "computer_introduce", "card": card_b["card"]}).to_string());
+    assert_eq!(again["outcome"], "already_paired", "{again}");
+
+    let rec = computer_on(&a, &b_on_a);
+    assert_eq!(rec["introduced_by"]["name"], "pixel-8", "{rec}");
+    assert!(rec["allowed_ms"].is_null(), "{rec}");
+    let (rc, listed) = rime_remote(&a, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{listed}");
+    assert!(listed.contains("added by pixel-8, not allowed yet"), "{listed}");
+    let shown = notify_lines(&a, 1);
+    assert!(shown.iter().any(|n| n["summary"].as_str().is_some_and(|s| s.contains("joined your devices"))), "{shown:?}");
+
+    // Both static keys arrived over full sessions, so they reach each other
+    // with no code.
+    let pong = a.control(&serde_json::json!({"cmd": "computer_ping", "computer": b_on_a}).to_string());
+    assert_eq!(pong["reply"], "computer_pong", "{pong}");
+
+    // Not allowed yet on B: A may not bring a phone, and a removal A passes
+    // on of anything but B itself is ignored and not recorded.
+    let mut a_as_peer = identity_of(&a).connect(&b).expect("A reaches B as a peer");
+    let refused = a_as_peer.call(r#"{"cmd":"peer_offer"}"#);
+    assert_eq!(refused["kind"], "not_allowed", "{refused}");
+    let third = rime_remote_core::b64_encode(&[42; 32]);
+    let list = serde_json::json!({"cmd": "peer_tombstones", "tombstones": [
+        {"key": third, "removed_ms": rime_remote_core::now_ms(), "name": "elsewhere"}]});
+    assert_eq!(a_as_peer.call(&list.to_string())["reply"], "peer_tombstones");
+    assert_eq!(computers(&b).len(), 1, "B recorded a removal from a computer it has not allowed: {:?}", computers(&b));
+
+    // Allowed by a person at B: now it may, both.
+    let (rc, said) = rime_remote(&b, &["computers", "allow", &a_on_b], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(computer_on(&b, &a_on_b)["allowed_ms"].is_u64());
+    let mut a_as_peer = identity_of(&a).connect(&b).expect("A reaches B as a peer");
+    assert_eq!(a_as_peer.call(r#"{"cmd":"peer_offer"}"#)["reply"], "peer_offer");
+    assert_eq!(a_as_peer.call(&list.to_string())["reply"], "peer_tombstones");
+    assert_eq!(computers(&b).len(), 2, "an allowed computer's removal did not count: {:?}", computers(&b));
+
+    // Still not allowed on A: B's own-key entry (B removed A) counts, and A
+    // removes B. The phone cannot introduce it again.
+    let mut b_as_peer = identity_of(&b).connect(&a).expect("B reaches A as a peer");
+    let removed_me = serde_json::json!({"cmd": "peer_tombstones", "tombstones": [
+        {"key": key_a, "removed_ms": rime_remote_core::now_ms(), "name": "a"}]});
+    assert_eq!(b_as_peer.call(&removed_me.to_string())["reply"], "peer_tombstones");
+    assert!(computer_on(&a, &b_on_a)["revoked_ms"].is_u64(), "an introduced computer's own removal did not count");
+    let back = on_a.call(&serde_json::json!({"cmd": "computer_introduce", "card": card_b["card"]}).to_string());
+    assert_eq!(back["outcome"], "removed", "{back}");
+    assert!(computer_on(&a, &b_on_a)["revoked_ms"].is_u64(), "an introduction undid a removal");
+}
+
+#[test]
+fn a_computer_brings_its_phone_to_a_new_computer_as_a_companion_until_a_person_allows_it() {
+    let a = harness!("bring-a");
+    let b = harness!("bring-b");
+    let Some((b_on_a, _a_on_b)) = pair_computers(&a, &b) else { return };
+    let phone = Device::new();
+    let Some(offer) = open_offer(&a) else { return };
+    assert_eq!(phone.pair(&a, &offer, "pixel-8")["ok"], true);
+    let mut on_a = phone.connect(&a).expect("a session on A");
+    open_events(&mut on_a, 1);
+    assert_eq!(on_a.call(r#"{"cmd":"phone_report","can":["join"]}"#)["reply"], "ok");
+
+    // A asks B for an offer and hands it to the phone.
+    let join = events_on(&mut on_a, 1, 1).remove(0);
+    assert_eq!(join["event"], "join_offer", "{join}");
+    let key_b = identity_of(&b).key();
+    let offer = PairingOffer::decode(join["offer"].as_str().expect("offer")).expect("decodes");
+    assert_eq!(offer.key, key_b, "an offer for a computer that was not dialled");
+    assert_eq!(phone.pair(&b, &offer, "pixel-8")["ok"], true);
+    // Single use.
+    assert_ne!(Device::new().pair(&b, &offer, "other")["ok"], true);
+
+    // On B it is a companion until allowed: phone features, nothing more.
+    let brought = device_on(&b, &phone.key());
+    assert!(brought["introduced_by"]["name"].is_string(), "{brought}");
+    assert!(brought["allowed_ms"].is_null(), "{brought}");
+    let mut on_b = phone.connect(&b).expect("a session on B");
+    let hello = on_b.call(r#"{"cmd":"remote_hello"}"#);
+    assert_eq!(hello["scope"], "companion", "{hello}");
+    assert_eq!(on_b.call(r#"{"cmd":"machine_status"}"#)["kind"], "not_allowed");
+    assert_eq!(on_b.call(r#"{"cmd":"computer_card"}"#)["kind"], "not_allowed");
+    assert_eq!(on_b.call(r#"{"cmd":"phone_report","battery":50}"#)["reply"], "ok");
+    let (rc, listed) = rime_remote(&b, &["devices"], b"");
+    assert_eq!(rc, 0, "{listed}");
+    assert!(listed.contains("not allowed yet"), "{listed}");
+    let shown = notify_lines(&b, 1);
+    assert!(shown.iter().any(|n| n["summary"].as_str().is_some_and(|s| s.contains("pixel-8 joined this computer"))), "{shown:?}");
+
+    // Allowed by a person at B: the next session is full.
+    let (rc, said) = rime_remote(&b, &["devices", "allow", "pixel-8"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let mut on_b = phone.connect(&b).expect("a session on B");
+    assert_eq!(on_b.call(r#"{"cmd":"remote_hello"}"#)["scope"], "full");
+
+    // A removes B: the phone is told on its events channel.
+    let removed = a.control(&serde_json::json!({"cmd": "computer_remove", "computer": b_on_a}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    let told = events_on(&mut on_a, 1, 1).remove(0);
+    assert_eq!(told["event"], "device_removed", "{told}");
+    assert_eq!(told["key"], key_b.as_str(), "{told}");
+}
