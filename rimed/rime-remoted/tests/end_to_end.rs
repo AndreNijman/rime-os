@@ -217,6 +217,7 @@ impl Harness {
             .env("RIME_REMOTED_MACHINE_STUB", root.join("machine"))
             // A phone's notifications land in a file, never on this desktop.
             .env("RIME_REMOTED_NOTIFY_STUB", root.join("notify"))
+            .env("RIME_REMOTED_MEDIA_STUB", root.join("media"))
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).ok()?)
             .spawn()
@@ -1919,6 +1920,90 @@ fn a_phones_notifications_show_here_update_in_place_close_and_go_with_revoke() {
     let closed: Vec<serde_json::Value> =
         after.iter().skip(3 + shown).filter(|l| l["op"] == "close").map(|l| l["id"].clone()).collect();
     assert_eq!(closed, open, "{after:?}");
+}
+
+/// Every line the media stub has, once one satisfies `done` (or 5 s passed).
+fn media_lines(h: &Harness, done: impl Fn(&[serde_json::Value]) -> bool) -> Vec<serde_json::Value> {
+    let path = h.root.join("media/media.jsonl");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let got: Vec<serde_json::Value> = text[..text.rfind('\n').map_or(0, |i| i + 1)]
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("json"))
+            .collect();
+        if done(&got) || Instant::now() > deadline {
+            return got;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_phones_media_shows_here_as_a_player_that_goes_with_the_connection_and_with_revoke() {
+    let h = harness!("media");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+    let hello = session.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_media"), "{hello}");
+
+    // Named for the store's device, cleaned like a title, one player per phone.
+    let song = |pos: u64| {
+        format!(
+            r#"{{"cmd":"phone_media","playing":{{"app":"Music","state":"playing","title":"Song <b>","artist":"Band","album":"LP","duration_ms":200000,"position_ms":{pos},"device":"Not me"}}}}"#
+        )
+    };
+    assert_eq!(session.call(&song(1000))["reply"], "ok");
+    let first = media_lines(&h, |g| !g.is_empty());
+    assert_eq!(first.len(), 1, "{first:?}");
+    let player = first[0]["player"].as_str().expect("player").to_string();
+    assert!(player.starts_with("org.mpris.MediaPlayer2.rime_phone.d"), "{player}");
+    assert_eq!(first[0]["op"], "show");
+    assert_eq!(first[0]["identity"], "pixel-8 · Music", "{first:?}");
+    assert_eq!(first[0]["title"], "Song ‹b›");
+    assert_eq!(first[0]["status"], "Playing");
+
+    // A burst is applied at most once per 200 ms (src/media.rs SPACING) and
+    // the last word wins; the link answers throughout.
+    let started = Instant::now();
+    for i in 0..50u64 {
+        assert_eq!(session.call(&song(2000 + i))["reply"], "ok");
+    }
+    let burst = media_lines(&h, |g| g.last().is_some_and(|l| l["position_ms"] == 2049));
+    let took = started.elapsed();
+    assert_eq!(burst.last().unwrap()["position_ms"], 2049, "{burst:?}");
+    let allowed = 1 + 2 + (took.as_millis() / 200) as usize;
+    assert!(burst.len() <= allowed, "50 updates in {took:?} became {} changes (at most {allowed})", burst.len() - 1);
+
+    // Refused in words; nothing playing removes the player.
+    let r = session.call(r#"{"cmd":"phone_media","playing":{"state":"loud","title":"t"}}"#);
+    assert_eq!(r["code"], "bad_request", "{r}");
+    assert_eq!(session.call(r#"{"cmd":"phone_media","playing":null}"#)["reply"], "ok");
+    let gone = media_lines(&h, |g| g.last().is_some_and(|l| l["op"] == "gone"));
+    assert_eq!(gone.last().unwrap(), &serde_json::json!({"op": "gone", "player": player}), "{gone:?}");
+
+    // The connection ends: the player goes with it.
+    assert_eq!(session.call(&song(5000))["reply"], "ok");
+    let shown = media_lines(&h, |g| g.last().is_some_and(|l| l["op"] == "show")).len();
+    drop(session);
+    let ended = media_lines(&h, |g| g.len() > shown && g.last().is_some_and(|l| l["op"] == "gone"));
+    assert_eq!(ended.len(), shown + 1, "{ended:?}");
+    assert_eq!(ended.last().unwrap()["op"], "gone", "{ended:?}");
+
+    // Back again, then revoked: gone, and nothing it sends after shows.
+    let mut session = device.connect(&h).expect("a second session");
+    assert_eq!(session.call(&song(6000))["reply"], "ok");
+    let back = media_lines(&h, |g| g.len() > shown + 1);
+    assert_eq!(back.last().unwrap()["op"], "show", "{back:?}");
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
+    let revoked = media_lines(&h, |g| g.len() > back.len());
+    assert_eq!(revoked.last().unwrap(), &serde_json::json!({"op": "gone", "player": player}), "{revoked:?}");
+    // Its connection ending after the revoke removes nothing twice.
+    drop(session);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(media_lines(&h, |_| false).len(), revoked.len(), "nothing after revoke");
 }
 
 /// `NotificationClosed` as the stub reads it: one complete line.

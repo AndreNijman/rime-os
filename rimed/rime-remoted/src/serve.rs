@@ -448,12 +448,15 @@ fn frames(
         });
     }
 
+    static CONNECTIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let connection = CONNECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
     let (work, queue) = std::sync::mpsc::sync_channel::<Work>(WORK_QUEUE);
     {
         let worker = Worker {
             state: Arc::clone(state),
             agentd: agentd.to_path_buf(),
             device_id: device_id.to_string(),
+            connection,
             sealer: Arc::clone(&sealer),
             channels: Arc::clone(&channels),
         };
@@ -485,6 +488,8 @@ fn frames(
     drop(work);
     drop(detached);
     let _ = hangup.shutdown(std::net::Shutdown::Both);
+    // What the phone was playing was true while it was here to say so.
+    crate::media::media().ended(device_id, connection);
 
     if let Some(quiet) = silenced.lock().ok().and_then(|s| *s) {
         return Err(ServeError::Silent(quiet));
@@ -678,6 +683,9 @@ struct Worker {
     state: Arc<State>,
     agentd: PathBuf,
     device_id: String,
+    /// This connection's number, unique in this process: what a phone's
+    /// media player is tied to (`media.rs`).
+    connection: u64,
     sealer: Arc<Mutex<Sealer>>,
     channels: Arc<Mutex<Channels>>,
 }
@@ -700,7 +708,7 @@ impl Worker {
         for work in queue {
             match work {
                 Work::Control(line) => {
-                    let reply = answered_here(&self.state, &self.device_id, &line)
+                    let reply = answered_here(&self.state, &self.device_id, self.connection, &line)
                         .unwrap_or_else(|| control(&self.agentd, &self.device_id, &line));
                     let _ = send(&self.sealer, Frame::Control(reply));
                 }
@@ -860,7 +868,7 @@ impl Worker {
 /// this end of it can do, how the phone is reached — which `rime-agentd` has
 /// no concept of; see `push::control` for why this is the seam and not a new
 /// frame tag. Everything else is forwarded verbatim.
-fn answered_here(state: &State, device_id: &str, line: &[u8]) -> Option<Vec<u8>> {
+fn answered_here(state: &State, device_id: &str, connection: u64, line: &[u8]) -> Option<Vec<u8>> {
     let cmd = serde_json::from_slice::<serde_json::Value>(line)
         .ok()
         .and_then(|v| v.get("cmd").and_then(|c| c.as_str()).map(str::to_string));
@@ -880,6 +888,11 @@ fn answered_here(state: &State, device_id: &str, line: &[u8]) -> Option<Vec<u8>>
         Some(c) if crate::mirror::VERBS.contains(&c) => {
             let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
             Some(crate::mirror::control(crate::mirror::mirror(), device_id, name.as_deref().unwrap_or(""), line))
+        }
+        // What the phone is playing, shown here as a media player.
+        Some(c) if crate::media::VERBS.contains(&c) => {
+            let name = state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.name.clone()));
+            Some(crate::media::control(crate::media::media(), device_id, connection, name.as_deref().unwrap_or(""), line))
         }
         _ => crate::push::control(state, device_id, line),
     }
@@ -905,6 +918,7 @@ fn remote_hello(state: &State) -> Vec<u8> {
     features.extend(crate::machine::FEATURES);
     features.extend(crate::phone::FEATURES);
     features.extend(crate::mirror::FEATURES);
+    features.extend(crate::media::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
     }
@@ -1252,7 +1266,7 @@ mod tests {
     #[test]
     fn remote_hello_is_answered_here_with_what_this_build_does() {
         let (state, dir) = a_state("hello");
-        let reply = answered_here(&state, "pixel-8", br#"{"cmd":"remote_hello"}"#)
+        let reply = answered_here(&state, "pixel-8", 0, br#"{"cmd":"remote_hello"}"#)
             .expect("remote_hello reached the daemon");
         let v: serde_json::Value = serde_json::from_slice(&reply).expect("json");
         assert_eq!(v["reply"], "remote", "{v}");
@@ -1264,7 +1278,8 @@ mod tests {
             serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
                                "machine_status", "machine_lock", "media",
                                "device_events", "phone_report", "take_offer",
-                               "phone_notifications", "phone_notification_reply"]),
+                               "phone_notifications", "phone_notification_reply",
+                               "phone_media"]),
             "{v}"
         );
         // The pairing code's list, with the port this listener has — and
@@ -1294,10 +1309,11 @@ mod tests {
             .chain(crate::machine::VERBS.iter())
             .chain(crate::phone::VERBS.iter())
             .chain(crate::mirror::VERBS.iter())
+            .chain(crate::media::VERBS.iter())
         {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
             assert!(
-                answered_here(&state, "pixel-8", line.as_bytes()).is_some(),
+                answered_here(&state, "pixel-8", 0, line.as_bytes()).is_some(),
                 "{cmd} was forwarded"
             );
         }
@@ -1318,7 +1334,7 @@ mod tests {
             b"remote_hello".to_vec(),
         ] {
             assert_eq!(
-                answered_here(&state, "pixel-8", &line),
+                answered_here(&state, "pixel-8", 0, &line),
                 None,
                 "{} never reached the daemon",
                 String::from_utf8_lossy(&line)
@@ -1329,6 +1345,7 @@ mod tests {
         assert_eq!(crate::machine::VERBS, ["machine_status", "machine_lock", "media", "media_control", "volume"]);
         assert_eq!(crate::phone::VERBS, ["phone_report", "ring_ack", "offer_ack", "offer_done"]);
         assert_eq!(crate::mirror::VERBS, ["phone_notification", "phone_notification_removed"]);
+        assert_eq!(crate::media::VERBS, ["phone_media"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

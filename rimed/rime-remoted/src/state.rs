@@ -245,6 +245,7 @@ impl State {
         self.events.forget(device_id);
         self.outbox.forget(device_id);
         crate::mirror::mirror().forget(device_id);
+        crate::media::media().forget(device_id);
         let mut store = self.phones.lock().unwrap_or_else(|e| e.into_inner());
         if store.phones.remove(device_id).is_some() {
             if let Err(e) = store.save(&self.phones_path) {
