@@ -122,7 +122,7 @@ class ManifestTest {
     }
 
     @Test
-    fun `the permissions this app does declare are the seven it can justify`() {
+    fun `the permissions this app does declare are the nine it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
         // moment anybody reads the list.
@@ -157,6 +157,15 @@ class ManifestTest {
                 // notification, which the next test pins.
                 "android.permission.FOREGROUND_SERVICE",
                 "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+                // Added deliberately with the companion link (contract
+                // §2.10): "Keep working after the phone restarts", off by
+                // default. The boot receiver starts the device features after
+                // a restart only with that switch on and a companion key held
+                // (the next tests pin both). The second only lets the app ASK
+                // to leave battery optimisation, once, when the switch goes
+                // on; the person may refuse. Neither is a runtime prompt.
+                "android.permission.RECEIVE_BOOT_COMPLETED",
+                "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
             ),
             "the declared permissions changed: $declared",
         )
@@ -181,15 +190,25 @@ class ManifestTest {
             "a specialUse service with no stated reason",
         )
         // And nothing else that a service could have been used as an excuse
-        // for: it runs while the app is unlocked, not from boot, and it does
-        // not ask to be exempt from the battery rules everything else obeys.
-        for (p in listOf(
-            "android.permission.RECEIVE_BOOT_COMPLETED",
-            "android.permission.WAKE_LOCK",
-            "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
-        )) {
-            assertFalse(declares(p), "$p came in with the connection service")
-        }
+        // for: nothing holds the CPU awake. The boot start and the battery
+        // ask came with the companion link and are pinned below.
+        assertFalse(declares("android.permission.WAKE_LOCK"), "WAKE_LOCK came in with the connection service")
+    }
+
+    @Test
+    fun `the boot receiver is private and answers only the two system broadcasts`() {
+        val receiver = manifest.substringAfter("\".link.BootReceiver\"").substringBefore("</receiver>")
+        assertTrue(manifest.contains("\".link.BootReceiver\""), "the boot receiver is not declared")
+        assertTrue(receiver.contains("android:exported=\"false\""), "the boot receiver is exported")
+        val actions = Regex("""action android:name="([^"]+)"""").findAll(receiver).map { it.groupValues[1] }.toSet()
+        assertTrue(
+            actions == setOf("android.intent.action.BOOT_COMPLETED", "android.intent.action.MY_PACKAGE_REPLACED"),
+            "the boot receiver answers $actions",
+        )
+        // Not LOCKED_BOOT_COMPLETED: the store is credential-encrypted, so a
+        // receiver run before the first unlock would read nothing.
+        assertFalse(manifest.contains("LOCKED_BOOT_COMPLETED"))
+        assertFalse(manifest.contains("android:directBootAware=\"true\""))
     }
 
     @Test
@@ -391,6 +410,11 @@ class PushManifestTest {
         // that holds a connection open for push, and it is the one the user
         // chose to install for that.
         //
+        // RECEIVE_BOOT_COMPLETED and REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+        // left this list with the companion link (contract §2.10), which is
+        // not push either: push needs neither, and works with the companion
+        // switch off.
+        //
         // FOREGROUND_SERVICE used to be on this list and is not any more, and
         // the reason is not push: the remote-live change set holds the
         // connection to the COMPUTER open while the app is unlocked (the
@@ -398,8 +422,6 @@ class PushManifestTest {
         // the app closed and that service stopped, which is the point of it.
         for (permission in listOf(
             "android.permission.WAKE_LOCK",
-            "android.permission.RECEIVE_BOOT_COMPLETED",
-            "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
             "com.google.android.c2dm.permission.RECEIVE",
         )) {
             assertFalse(

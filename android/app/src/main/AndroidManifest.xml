@@ -74,6 +74,21 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
+    <!-- "Keep working after the phone restarts" (contract §2.10), off by
+         default. Only with that switch on does the app do anything at boot:
+         `link.BootReceiver` reads the switch and the companion keys and starts
+         `link.LinkService` in companion mode, which runs the device features
+         (report, notifications, media, ring, offers, focus) and nothing else.
+
+         RECEIVE_BOOT_COMPLETED is what any boot receiver needs; it is not a
+         runtime prompt. REQUEST_IGNORE_BATTERY_OPTIMIZATIONS lets the app
+         ASK, once, when the switch is turned on, to be left out of battery
+         optimisation, so Doze does not hold the link off for hours; the person
+         may refuse and the feature still works, less promptly. WAKE_LOCK is
+         still not here: nothing keeps the CPU awake. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
     <!-- Push-to-talk, and what is NOT here is the point of it.
 
          RECORD_AUDIO is absent, deliberately. Speech reaches this app through
@@ -212,8 +227,21 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Keeps an end-to-end encrypted session open to the user's own paired computer while the app is unlocked, so the coding agents running there can be seen and answered at once." />
+                android:value="Keeps an end-to-end encrypted session open to the user's own paired computer while the app is unlocked, so the coding agents running there can be seen and answered at once. With the user's opt-in switch on, also while the app is locked and after a restart, carrying only the phone's status, notifications and media to that computer." />
         </service>
+
+        <!-- Starts the companion link after a restart or an app update, only
+             when the person turned "Keep working after the phone restarts" on
+             and a computer holds a companion key. Not exported: the two system
+             broadcasts reach it anyway, and nothing else may. -->
+        <receiver
+            android:name=".link.BootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <!-- This phone's notifications on the paired computers (contract §2.7).
 

@@ -10,6 +10,8 @@ import com.rimeos.remote.core.agent.Hello
 import com.rimeos.remote.core.agent.MachineLink
 import com.rimeos.remote.core.agent.Features
 import com.rimeos.remote.core.agent.RemoteHello
+import com.rimeos.remote.core.phone.CompanionKeys
+import com.rimeos.remote.core.phone.CompanionLink
 import com.rimeos.remote.core.phone.Content
 import com.rimeos.remote.core.phone.DeviceEvent
 import com.rimeos.remote.core.phone.Focus
@@ -22,6 +24,7 @@ import com.rimeos.remote.core.phone.OwnDnd
 import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
 import com.rimeos.remote.core.phone.ReportThrottle
+import com.rimeos.remote.core.phone.Scope
 import com.rimeos.remote.phone.MediaWatcher
 import com.rimeos.remote.phone.MirrorService
 import com.rimeos.remote.phone.PhoneStatus
@@ -78,10 +81,23 @@ import kotlinx.coroutines.runBlocking
  * a network change skips the wait ([onNetworkChanged]). Nothing here prompts:
  * the identity was unwrapped once, on unlock or on the first tap, and every
  * reconnect reuses it.
+ *
+ * ## Companion mode (contract §2.10)
+ *
+ * With "Keep working after the phone restarts" on, locking does not end
+ * everything: the full links close and their keys are forgotten as before,
+ * and then each machine is dialled again with its COMPANION key, which opens
+ * with nobody present. Those links live in [companionLinks], never in
+ * [links], so nothing that asks for a machine's link ([link], [dialSession])
+ * can be handed one; and they run only [CompanionLink.features]: the report,
+ * the notification mirror, what is playing, and the events channel. A boot
+ * receiver starts the same mode after a restart ([startCompanion]).
+ * Unlocking closes them and connects with the full key again.
  */
 class LinkHub private constructor(private val app: Context) {
     private val repository = MachineRepository(app)
     private val pairing = PairingService()
+    private val keys = CompanionKeys(repository.companionVault())
     /**
      * Where every connection attempt runs. The handler is not decoration: an
      * exception escaping a `launch` here would reach the thread's uncaught
@@ -104,6 +120,32 @@ class LinkHub private constructor(private val app: Context) {
     /** Machines the app wants connected while it is unlocked. */
     private val held = ConcurrentHashMap.newKeySet<String>()
 
+    /** Companion keys opened this process, by device id. Memory only, like [identities]. */
+    private val companionIdentities = ConcurrentHashMap<String, StaticKey>()
+
+    /** One companion link per machine, while in companion mode. Never in [links]. */
+    private val companionLinks = ConcurrentHashMap<String, MachineLink>()
+
+    /** Machines held with the companion key while the app is locked. */
+    private val companionHeld = ConcurrentHashMap.newKeySet<String>()
+
+    @Volatile
+    private var companionRunning = false
+
+    private val _companion = MutableStateFlow(false)
+
+    /**
+     * Whether companion mode is running: the app is locked and the device
+     * features keep reaching the machines with the companion key.
+     */
+    val companion: StateFlow<Boolean> = _companion.asStateFlow()
+
+    /**
+     * Whether the device features may run now: unlocked, or in companion
+     * mode. Agent, terminal, nex and machine control still need [unlocked].
+     */
+    val live: Boolean get() = _unlocked.value || companionRunning
+
     /** The reconnect waiting to run for each machine, if any. */
     private val reconnects = ConcurrentHashMap<String, Job>()
     private val attemptsSinceUp = ConcurrentHashMap<String, Int>()
@@ -117,7 +159,13 @@ class LinkHub private constructor(private val app: Context) {
     // time from one sender, read at the moment each is sent (§2.9): two
     // launches on the IO pool could land Do Not Disturb's on and off in the
     // wrong order and leave the computer with the old one.
-    private class ReportLane(val remote: RemoteHello, val wake: Channel<Unit>, var sender: Job? = null) {
+    private class ReportLane(
+        val remote: RemoteHello,
+        val wake: Channel<Unit>,
+        var sender: Job? = null,
+        /** A companion link's lane: its `can` never offers replies. */
+        val companion: Boolean = false,
+    ) {
         val throttle = ReportThrottle()
     }
 
@@ -232,8 +280,13 @@ class LinkHub private constructor(private val app: Context) {
      */
     val unlocked: StateFlow<Boolean> = _unlocked.asStateFlow()
 
+    /**
+     * The app was unlocked. Companion mode, if it was running, ends here: its
+     * links close and the full key takes over on the next [hold].
+     */
     fun markUnlocked() {
         _unlocked.value = true
+        stopCompanion()
     }
 
     fun identity(deviceId: String): StaticKey? = identities[deviceId]
@@ -244,15 +297,25 @@ class LinkHub private constructor(private val app: Context) {
 
     fun state(deviceId: String): LinkState? = _states.value[deviceId]
 
-    /** The link to [machine], made on first use. Opens nothing by itself. */
+    /** The link to [machine], made on first use. Opens nothing by itself. Always the full key's. */
     fun link(machine: PairedMachine): MachineLink = links.computeIfAbsent(machine.deviceId) { id ->
         // `computeIfAbsent`, not Kotlin's `getOrPut`: that one is a read and
         // then a write, and `hold` on the IO dispatcher and a tap on the main
         // thread could each make a link — two connections to one machine,
         // one of them orphaned.
-        MachineLink(
+        makeLink(machine, Scope.FULL) { identities[id] }
+    }
+
+    /** The companion link to [machine], dialled with its companion key. Never handed out. */
+    private fun companionLink(machine: PairedMachine): MachineLink =
+        companionLinks.computeIfAbsent(machine.deviceId) { id -> makeLink(machine, Scope.COMPANION) { companionIdentities[id] } }
+
+    private fun makeLink(machine: PairedMachine, dialled: Scope, key: () -> StaticKey?): MachineLink {
+        val id = machine.deviceId
+        lateinit var self: MachineLink
+        self = MachineLink(
             connect = {
-                val identity = identities[id]
+                val identity = key()
                     ?: throw IllegalStateException("${machine.machine} is locked")
                 setState(id, machine.machine) {
                     it.copy(status = if (it.status == Status.RECONNECTING) Status.RECONNECTING else Status.CONNECTING)
@@ -266,8 +329,10 @@ class LinkHub private constructor(private val app: Context) {
                 lastDial[id] = Dial(connected.route, connected.elapsedMs, connected.route == Route.Relay)
                 connected.session
             },
-            onEvent = { event -> onLinkEvent(machine, event) },
+            onEvent = { event -> onLinkEvent(machine, self, event) },
+            dialled = dialled,
         )
+        return self
     }
 
     /**
@@ -306,20 +371,30 @@ class LinkHub private constructor(private val app: Context) {
      * do. Blocking callers use this from the IO dispatcher.
      */
     fun connectNow(machine: PairedMachine) {
-        val link = link(machine)
+        // Locked in companion mode: the companion key's link. Otherwise the
+        // full key's, which needs the identity an unlock put in memory.
+        val link = if (!_unlocked.value && companionRunning) companionLink(machine) else link(machine)
         try {
             link.connectNow()
         } catch (e: Exception) {
+            val keep = wanted(machine.deviceId)
             setState(machine.deviceId, machine.machine) {
                 it.copy(
-                    status = if (machine.deviceId in held) Status.RECONNECTING else Status.IDLE,
+                    status = if (keep) Status.RECONNECTING else Status.IDLE,
                     failure = e.message ?: e::class.java.simpleName,
                 )
             }
-            if (machine.deviceId in held) scheduleReconnect(machine)
+            if (keep) scheduleReconnect(machine)
             throw e
         }
     }
+
+    /** Whether [id] should be kept connected right now, by either key. */
+    private fun wanted(id: String): Boolean =
+        (_unlocked.value && id in held) || (companionRunning && id in companionHeld)
+
+    /** The link currently carrying [id], by either key. */
+    private fun current(id: String): MachineLink? = links[id] ?: companionLinks[id]
 
     /**
      * The phone's network changed. Every held link is asked whether it
@@ -328,14 +403,15 @@ class LinkHub private constructor(private val app: Context) {
      * backoff.
      */
     fun onNetworkChanged() {
-        if (!_unlocked.value) return
-        for (id in held.toList()) {
+        if (!live) return
+        val ids = if (_unlocked.value) held.toList() else companionHeld.toList()
+        for (id in ids) {
             // The store read inside the launch too: this is called on the
             // ConnectivityManager's binder thread, which is not the place for
             // a disk read either.
             scope.launch {
                 val machine = machineFor(id) ?: return@launch
-                val link = links[id]
+                val link = current(id)
                 val alive = link != null && link.connected && link.probe()
                 if (!alive) {
                     reconnects.remove(id)?.cancel()
@@ -354,8 +430,6 @@ class LinkHub private constructor(private val app: Context) {
      */
     fun lock() {
         _unlocked.value = false
-        // A locked app follows no computer: what it turned on for one ends here.
-        releaseOwnDnd("locked")
         held.clear()
         reconnects.values.forEach { it.cancel() }
         reconnects.clear()
@@ -373,8 +447,133 @@ class LinkHub private constructor(private val app: Context) {
         media = null
         syncMediaWatcher()
         _states.value = emptyMap()
+        scope.launch { closing.forEach { runCatching { it.close() } } }
+        // With the switch on, the device features carry on with the companion
+        // keys, and Do Not Disturb keeps following the computer. Otherwise a
+        // locked app follows no computer: what it turned on for one ends here.
+        if (!startCompanion()) {
+            releaseOwnDnd("locked")
+            LinkService.stop(app)
+        }
+    }
+
+    /**
+     * Start companion mode: dial every machine that holds a registered
+     * companion key, with that key, and run the device features over it.
+     *
+     * From the lock above and from the boot receiver (through [LinkService]).
+     * Decides synchronously, so the service can tell at once whether it has
+     * anything to keep alive; the keys are opened and the machines dialled on
+     * the IO dispatcher. False, and nothing started, when the app is
+     * unlocked, the switch is off, or no machine has a registered key.
+     */
+    fun startCompanion(): Boolean {
+        if (_unlocked.value) return false
+        if (companionRunning) return true
+        val store = runCatching { repository.loadBlocking() }.getOrNull() ?: return false
+        if (!BootStart.shouldStart(store)) return false
+        val machines = store.companions()
+        readSettings(store.settings)
+        companionRunning = true
+        _companion.value = true
+        companionHeld.addAll(machines.map { it.deviceId })
+        LinkService.start(app)
+        scope.launch {
+            for (m in machines) {
+                val identity = runCatching { keys.identity(m) }
+                    .onFailure { Log.w(TAG, "${m.machine}: the companion key did not open: ${it.message}") }
+                    .getOrNull()
+                if (identity == null || !companionRunning) continue
+                companionIdentities[m.deviceId] = identity
+                launch { runCatching { connectNow(m) } }
+            }
+            if (companionIdentities.isEmpty() && companionRunning && !_unlocked.value) {
+                stopCompanion()
+                LinkService.stop(app)
+            }
+        }
+        return true
+    }
+
+    /** End companion mode: its links close and its keys leave memory. */
+    private fun stopCompanion() {
+        if (!companionRunning && companionLinks.isEmpty()) return
+        companionRunning = false
+        _companion.value = false
+        val closing = companionLinks.values.toList()
+        companionLinks.clear()
+        companionIdentities.clear()
+        for (id in companionHeld) {
+            reconnects.remove(id)?.cancel()
+            reportLanes.remove(id)?.sender?.cancel()
+            eventChannels.remove(id)?.let { runCatching { it.close() } }
+            mirrorLanes[id]?.let { lane ->
+                lane.sender?.cancel()
+                lane.sender = null
+            }
+            mediaLanes.remove(id)?.sender?.cancel()
+            if (id !in held) _states.update { it - id }
+        }
+        companionHeld.clear()
+        syncMediaWatcher()
+        scope.launch { closing.forEach { runCatching { it.close() } } }
+    }
+
+    /**
+     * Tear everything down without starting companion mode, as a process
+     * that has just started is: nothing held, no keys in memory. For the
+     * device suite, to stand in for a restart before the boot broadcast.
+     */
+    fun shutdown() {
+        stopCompanion()
+        if (_unlocked.value) {
+            _unlocked.value = false
+        }
+        held.clear()
+        reconnects.values.forEach { it.cancel() }
+        reconnects.clear()
+        val closing = links.values.toList()
+        links.clear()
+        identities.clear()
+        lastDial.clear()
+        reportLanes.values.forEach { it.sender?.cancel() }
+        reportLanes.clear()
+        eventChannels.values.forEach { runCatching { it.close() } }
+        eventChannels.clear()
+        mirrorLanes.values.forEach { it.sender?.cancel() }
+        mirrorLanes.clear()
+        mediaLanes.values.forEach { it.sender?.cancel() }
+        mediaLanes.clear()
+        media = null
+        syncMediaWatcher()
+        _states.value = emptyMap()
         LinkService.stop(app)
         scope.launch { closing.forEach { runCatching { it.close() } } }
+    }
+
+    /**
+     * The person turned "Keep working after the phone restarts" on or off.
+     * Blocking: call from the IO dispatcher. On mints and registers a key with
+     * every machine connected now (and the rest on their next connect); off
+     * forgets where it can, owes the rest, and deletes every key at once.
+     */
+    fun setCompanionOn(on: Boolean) {
+        val connected = links.mapNotNull { (id, link) ->
+            val remote = _states.value[id]?.remote
+            if (link.connected && remote != null) id to (link to remote) else null
+        }.toMap()
+        if (on) keys.turnOn(connected) else keys.turnOff(connected)
+    }
+
+    /** How many machines hold a registered companion key. For the screen and the device suite. */
+    fun companionKeys(): Int = runCatching { repository.loadBlocking().companions().size }.getOrDefault(0)
+
+    /**
+     * [deviceId] is being unpaired: it is told to forget the companion key if
+     * its full link is up, and the key is deleted here. Blocking.
+     */
+    fun unpairCompanion(deviceId: String) {
+        keys.unpair(deviceId, links[deviceId]?.takeIf { it.connected })
     }
 
     /** Forget one machine: its link, its key, and holding it. */
@@ -390,18 +589,32 @@ class LinkHub private constructor(private val app: Context) {
         syncMediaWatcher()
         _states.update { it - deviceId }
         val link = links.remove(deviceId)
-        if (held.isEmpty()) LinkService.stop(app)
-        scope.launch { runCatching { link?.close() } }
+        companionHeld.remove(deviceId)
+        companionIdentities.remove(deviceId)
+        val companionLink = companionLinks.remove(deviceId)
+        if (held.isEmpty() && !companionRunning) LinkService.stop(app)
+        scope.launch {
+            runCatching { link?.close() }
+            runCatching { companionLink?.close() }
+        }
     }
 
     /** The machines currently held, with their names, for the notification. */
-    fun heldNames(): List<String> = held.mapNotNull { _states.value[it]?.machine }
+    fun heldNames(): List<String> =
+        (if (_unlocked.value) held else companionHeld).mapNotNull { _states.value[it]?.machine }
+
+    /** The companion link to [deviceId], for the device suite's evidence. Never for sending. */
+    fun companionLinkOf(deviceId: String): MachineLink? = companionLinks[deviceId]
 
     private fun machineFor(deviceId: String): PairedMachine? =
         runCatching { repository.loadBlocking().find(deviceId) }.getOrNull()
 
-    private fun onLinkEvent(machine: PairedMachine, event: MachineLink.LinkEvent) {
+    private fun onLinkEvent(machine: PairedMachine, link: MachineLink, event: MachineLink.LinkEvent) {
         val id = machine.deviceId
+        // A link that was replaced or closed (locking, unlocking, forgetting)
+        // says nothing about the one carrying this machine now: a late Dropped
+        // from the companion link must not tear down the full link's lanes.
+        if (links[id] !== link && companionLinks[id] !== link) return
         when (event) {
             is MachineLink.LinkEvent.Connected -> {
                 reconnects.remove(id)?.cancel()
@@ -418,12 +631,12 @@ class LinkHub private constructor(private val app: Context) {
                 // Off this thread: the event arrives from inside the link's
                 // own connect, and asking a question from there would be a
                 // request made from inside a request.
-                scope.launch { afterConnect(machine, dial) }
+                scope.launch { afterConnect(machine, link, dial) }
             }
             is MachineLink.LinkEvent.Silent ->
                 Log.i(TAG, "${machine.machine}: nothing arrived for ${event.forMs} ms, reconnecting")
             is MachineLink.LinkEvent.Dropped -> {
-                val keep = id in held && _unlocked.value
+                val keep = wanted(id)
                 setState(id, machine.machine) {
                     it.copy(status = if (keep) Status.RECONNECTING else Status.IDLE, via = null, connectMs = null)
                 }
@@ -451,16 +664,24 @@ class LinkHub private constructor(private val app: Context) {
      * the machine is listening on now, so the next connection starts from
      * both.
      */
-    private suspend fun afterConnect(machine: PairedMachine, dial: Dial?) {
-        val link = links[machine.deviceId] ?: return
+    private suspend fun afterConnect(machine: PairedMachine, link: MachineLink, dial: Dial?) {
+        // `hello` is the agent daemon's, so only a scope that runs the agent
+        // screens asks it; a companion link sends `remote_hello` alone.
+        val agent = CompanionLink.Feature.AGENT in CompanionLink.features(link.scope)
         val remote = scope.async { runCatching { link.remoteHello() }.getOrNull() }
-        val hello = scope.async { runCatching { link.hello() }.getOrNull() }
+        val hello = scope.async { if (agent) runCatching { link.hello() }.getOrNull() else null }
         val r = remote.await()
         val h = hello.await()
         setState(machine.deviceId, machine.machine) {
             it.copy(hello = h ?: it.hello, remote = r ?: it.remote, hellos = it.hellos + 1)
         }
         r?.let { phoneSide(machine, link, it) }
+        // On a full link, bring the companion key in line with the switch:
+        // register (again, idempotently) while it is on, or pay a forget owed.
+        if (r != null && link.scope == Scope.FULL) {
+            runCatching { keys.sync(machine.deviceId, link, r) }
+                .onFailure { Log.i(TAG, "${machine.machine}: companion key not synced: ${it.message}") }
+        }
         runCatching {
             repository.updateBlocking { store ->
                 var next = store
@@ -479,37 +700,34 @@ class LinkHub private constructor(private val app: Context) {
     private fun phoneSide(machine: PairedMachine, link: MachineLink, remote: RemoteHello) {
         val id = machine.deviceId
         val phone = PhoneLink(link)
+        // A companion link runs the device features only, and of those, never
+        // the two that let a computer act for the person: replying to a
+        // notification and controlling playback. Those wait for an unlock.
+        val features = CompanionLink.features(link.scope)
+        val companion = link.scope == Scope.COMPANION
         // Before the report, which says whether replies are taken.
-        runCatching {
-            val settings = repository.loadBlocking().settings
-            mirrorApps = settings.mirrorApps
-            mirrorReply = settings.mirrorReply
-            focusOn = settings.focusOn
-            mediaOn = settings.mediaOn
-            mediaApps = settings.mediaApps
-            mediaControl = settings.mediaControl
-        }
-        if (remote.has(Phone.REPORT)) {
-            startReports(machine, phone, remote)
+        runCatching { readSettings(repository.loadBlocking().settings) }
+        if (remote.has(Phone.REPORT) && CompanionLink.Feature.REPORT in features) {
+            startReports(machine, phone, remote, companion)
         } else {
             reportLanes.remove(id)?.sender?.cancel()
         }
-        if (remote.has(Mirror.FEATURE)) {
-            startMirror(machine, phone, remote.has(Mirror.REPLY_FEATURE))
+        if (remote.has(Mirror.FEATURE) && CompanionLink.Feature.MIRROR in features) {
+            startMirror(machine, phone, remote.has(Mirror.REPLY_FEATURE) && !companion)
         } else {
             mirrorLanes.remove(id)?.sender?.cancel()
         }
-        if (remote.has(Media.FEATURE)) {
-            startMedia(machine, phone, remote.has(Media.CONTROL_FEATURE))
+        if (remote.has(Media.FEATURE) && CompanionLink.Feature.MEDIA in features) {
+            startMedia(machine, phone, remote.has(Media.CONTROL_FEATURE) && !companion)
         } else {
             mediaLanes.remove(id)?.sender?.cancel()
             syncMediaWatcher()
         }
         eventChannels.remove(id)?.let { runCatching { it.close() } }
-        if (remote.has(Phone.EVENTS) && remote.has(Features.MUX_ATTACH)) {
+        if (remote.has(Phone.EVENTS) && remote.has(Features.MUX_ATTACH) && CompanionLink.Feature.EVENTS in features) {
             runCatching {
                 phone.subscribe(
-                    listener = { event -> onDeviceEvent(machine, phone, event) },
+                    listener = { event -> onDeviceEvent(machine, phone, event, companion) },
                     onEnd = { cause -> Log.i(TAG, "${machine.machine}: event channel ended: ${cause?.message}") },
                 )
             }.onSuccess { eventChannels[id] = it }
@@ -522,10 +740,19 @@ class LinkHub private constructor(private val app: Context) {
      * report goes at once, then one whenever [ReportThrottle] says a change
      * is worth it.
      */
-    private fun startReports(machine: PairedMachine, phone: PhoneLink, remote: RemoteHello) {
+    private fun readSettings(settings: com.rimeos.remote.core.Settings) {
+        mirrorApps = settings.mirrorApps
+        mirrorReply = settings.mirrorReply
+        focusOn = settings.focusOn
+        mediaOn = settings.mediaOn
+        mediaApps = settings.mediaApps
+        mediaControl = settings.mediaControl
+    }
+
+    private fun startReports(machine: PairedMachine, phone: PhoneLink, remote: RemoteHello, companion: Boolean) {
         val lane = reportLanes.compute(machine.deviceId) { _, old ->
             old?.sender?.cancel()
-            ReportLane(remote, Channel(Channel.CONFLATED))
+            ReportLane(remote, Channel(Channel.CONFLATED), companion = companion)
         }!!
         lane.sender = scope.launch {
             while (isActive) {
@@ -552,7 +779,7 @@ class LinkHub private constructor(private val app: Context) {
             if (receiver.canReceive) add(Phone.CAN_RECEIVE)
             val granted = MirrorService.granted(app)
             if (granted) add(Phone.CAN_DISMISS)
-            if (granted && mirrorReply) add(Phone.CAN_REPLY)
+            if (granted && mirrorReply && !lane.companion) add(Phone.CAN_REPLY)
             // The listener is what applies a computer's Do Not Disturb.
             if (focus && granted && focusOn) add(Phone.CAN_FOCUS)
         }
@@ -568,13 +795,13 @@ class LinkHub private constructor(private val app: Context) {
      * and sends only what [ReportThrottle] finds worth it.
      */
     fun onPhoneChanged() {
-        if (!_unlocked.value) return
+        if (!live) return
         for (lane in reportLanes.values) lane.wake.trySend(Unit)
     }
 
     /** Something `can` says changed: every connected machine is told at once. */
     private fun reportAgain() {
-        if (!_unlocked.value) return
+        if (!live) return
         for (lane in reportLanes.values) {
             lane.throttle.reset()
             lane.wake.trySend(Unit)
@@ -586,7 +813,7 @@ class LinkHub private constructor(private val app: Context) {
      * machine connected that takes them. The listener asks this before it
      * reads anything off a notification.
      */
-    val mirroring: Boolean get() = _unlocked.value && mirrorLanes.values.any { it.sender?.isActive == true }
+    val mirroring: Boolean get() = live && mirrorLanes.values.any { it.sender?.isActive == true }
 
     fun mirrorApps(): Set<String> = mirrorApps
 
@@ -658,7 +885,7 @@ class LinkHub private constructor(private val app: Context) {
     fun onPhoneNotificationRemoved(key: String) = toLanes { it.outbox.remove(key) }
 
     private fun toLanes(block: (MirrorLane) -> Unit) {
-        if (!_unlocked.value) return
+        if (!live) return
         for (lane in mirrorLanes.values) {
             if (lane.sender?.isActive != true) continue
             synchronized(lane.outbox) { block(lane) }
@@ -734,7 +961,7 @@ class LinkHub private constructor(private val app: Context) {
      * what it allows (dismiss, reply, focus), so every machine is told again.
      */
     fun onListenerChanged() {
-        if (!focusOn || !_unlocked.value) releaseOwnDnd("access back")
+        if (!focusOn || !live) releaseOwnDnd("access back")
         syncMediaWatcher()
         reportAgain()
     }
@@ -746,7 +973,7 @@ class LinkHub private constructor(private val app: Context) {
      * plays (a machine shown nothing is sent nothing).
      */
     private fun syncMediaWatcher() {
-        val want = _unlocked.value && mediaOn &&
+        val want = live && mediaOn &&
             mediaLanes.values.any { it.sender?.isActive == true } &&
             runCatching { MirrorService.granted(app) }.getOrDefault(false)
         val stopped = synchronized(this) {
@@ -770,7 +997,7 @@ class LinkHub private constructor(private val app: Context) {
      * Locked or switched off, it is always nothing.
      */
     private fun onPhoneMedia(state: MediaState?) {
-        val s = if (_unlocked.value && mediaOn) state else null
+        val s = if (live && mediaOn) state else null
         media = s
         for (lane in mediaLanes.values) {
             if (lane.sender?.isActive != true) continue
@@ -806,7 +1033,7 @@ class LinkHub private constructor(private val app: Context) {
             old?.sender?.cancel()
             MediaLane(MediaOutbox(), Channel(Channel.CONFLATED), control)
         }!!
-        synchronized(lane.outbox) { lane.outbox.offer(forLane(if (_unlocked.value && mediaOn) media else null, control)) }
+        synchronized(lane.outbox) { lane.outbox.offer(forLane(if (live && mediaOn) media else null, control)) }
         lane.sender = scope.launch {
             val outbox = lane.outbox
             while (isActive) {
@@ -834,7 +1061,7 @@ class LinkHub private constructor(private val app: Context) {
         syncMediaWatcher()
     }
 
-    private fun onDeviceEvent(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent) {
+    private fun onDeviceEvent(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent, companion: Boolean) {
         when (event) {
             is DeviceEvent.Ring -> scope.launch {
                 // A repeat of a ring already rung is acknowledged again, not
@@ -843,22 +1070,24 @@ class LinkHub private constructor(private val app: Context) {
                 if (rang) runCatching { phone.ack(event.id) }
             }
             is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
-            is DeviceEvent.MediaControl -> onMediaControl(machine, event)
+            // Never over a companion link: it acts for the person.
+            is DeviceEvent.MediaControl -> if (!companion) onMediaControl(machine, event)
             is DeviceEvent.Focus -> {
                 // Only with the person's switch on, whatever an older report
                 // told the machine, and only when the phone is not there
                 // already. The change Android then reports goes back to
                 // every machine as `dnd`, which is how the others follow.
                 val switchOn = focusOn && MirrorService.granted(app)
-                if (!Focus.apply(switchOn, _unlocked.value, PhoneStatus.dnd(app), event.dnd)) return
+                if (!Focus.apply(switchOn, live, PhoneStatus.dnd(app), event.dnd)) return
                 if (MirrorService.focus(event.dnd)) ownDnd.applied(event.dnd)
                 else Log.i(TAG, "${machine.machine}: Do Not Disturb not changed: no listener")
             }
             is DeviceEvent.Dismissed -> {
-                // Only what this machine was sent, and only while unlocked:
-                // a locked app sends nothing and takes nothing back.
+                // Only what this machine was sent, and only while the device
+                // features run (unlocked, or companion mode): a locked app
+                // with the switch off sends nothing and takes nothing back.
                 val lane = mirrorLanes[machine.deviceId] ?: return
-                if (!_unlocked.value) return
+                if (!live) return
                 if (synchronized(lane.outbox) { lane.outbox.dismissedThere(event.key) }) MirrorService.dismiss(event.key)
             }
             is DeviceEvent.Replied -> {
@@ -867,7 +1096,9 @@ class LinkHub private constructor(private val app: Context) {
                 // does not let it speak for them. The outbox is told first,
                 // so the app's own update after the reply finds it ready.
                 val lane = mirrorLanes[machine.deviceId] ?: return
-                if (!_unlocked.value || !mirrorReply) return
+                // Never over a companion link, whatever it sends: a reply is
+                // the phone speaking for the person, and that needs an unlock.
+                if (companion || !_unlocked.value || !mirrorReply) return
                 val now = System.currentTimeMillis()
                 if (synchronized(lane.outbox) { lane.outbox.repliedThere(event.key, now) }) {
                     if (!MirrorService.reply(event.key, event.text)) {
@@ -916,7 +1147,7 @@ class LinkHub private constructor(private val app: Context) {
         reconnects[id] = scope.launch {
             delay(wait)
             reconnects.remove(id)
-            if (id !in held || !_unlocked.value) return@launch
+            if (!wanted(id)) return@launch
             val current = machineFor(id) ?: machine
             runCatching { connectNow(current) }
         }
