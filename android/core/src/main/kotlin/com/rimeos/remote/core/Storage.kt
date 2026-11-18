@@ -406,6 +406,14 @@ data class Settings(
      * on the phone that opens without the person.
      */
     @SerialName("companion_on") val companionOn: Boolean = false,
+
+    /**
+     * "Get the computer's clipboard" (`docs/remote-live-contract.md` §2.14):
+     * while on and the app is unlocked, text the computer sends lands on this
+     * phone's clipboard. Off by default: it lets a computer replace what the
+     * person would paste next.
+     */
+    @SerialName("clipboard_on") val clipboardOn: Boolean = false,
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }

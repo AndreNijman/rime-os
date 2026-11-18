@@ -1991,6 +1991,13 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         hub.onSmsPermissionChanged()
     }
 
+    /** Put the paired computers' clipboard on this phone's, or stop (contract §2.14). */
+    fun setClipboardOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(clipboardOn = on))
+        hub.setClipboardOn(store.settings.clipboardOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
     /** Show what this phone is playing on the paired computers, or stop (contract §2.8). */
     fun setMediaOn(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(mediaOn = on))

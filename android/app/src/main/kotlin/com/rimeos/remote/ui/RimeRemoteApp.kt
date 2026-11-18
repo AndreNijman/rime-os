@@ -214,6 +214,7 @@ fun RimeRemoteApp(
                     onCalls = { navigation.navigate(Destinations.CALLS) },
                     onPhotos = { navigation.navigate(Destinations.PHOTOS) },
                     onCompanion = { viewModel.setCompanionOn(it) },
+                    onClipboard = { viewModel.setClipboardOn(it) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
                         // ACTION_SEND with the text in the intent, so the user

@@ -106,6 +106,34 @@ class PhoneTest {
     }
 
     @Test
+    fun `a clipboard line carries its text verbatim, sensitive only as a real boolean, up to the cap`() {
+        assertEquals(
+            DeviceEvent.Clipboard(" two\nlines ", false),
+            Phone.event("""{"event":"clipboard","text":" two\nlines "}"""),
+        )
+        assertEquals(DeviceEvent.Clipboard("pw", true), Phone.event("""{"event":"clipboard","text":"pw","sensitive":true}"""))
+        assertEquals(DeviceEvent.Clipboard("pw", false), Phone.event("""{"event":"clipboard","text":"pw","sensitive":false}"""))
+        assertNull(Phone.event("""{"event":"clipboard","text":"pw","sensitive":"true"}"""))
+        assertNull(Phone.event("""{"event":"clipboard","text":""}"""))
+        assertNull(Phone.event("""{"event":"clipboard","text":7}"""))
+        assertNull(Phone.event("""{"event":"clipboard"}"""))
+        // The cap is in bytes of UTF-8, as the computer counts it.
+        val most = "a".repeat(Phone.MAX_CLIPBOARD_BYTES)
+        assertEquals(DeviceEvent.Clipboard(most, false), Phone.event("""{"event":"clipboard","text":"$most"}"""))
+        assertNull(Phone.event("""{"event":"clipboard","text":"${most}a"}"""))
+        assertNull(Phone.event("""{"event":"clipboard","text":"${"\u00e9".repeat(Phone.MAX_CLIPBOARD_BYTES / 2 + 1)}"}"""))
+        // The longest line the computer sends (192 KiB with its newline) is read whole.
+        val quotes = "\\\"".repeat(Phone.MAX_CLIPBOARD_BYTES) // every byte a quote, escaped
+        val big = """{"event":"clipboard","text":"$quotes"}"""
+        val fed = EventLines().feed((big + "\n").toByteArray(Charsets.UTF_8))
+        assertEquals(DeviceEvent.Clipboard("\"".repeat(Phone.MAX_CLIPBOARD_BYTES), false), Phone.event(fed.single()))
+        val longest = ByteArray(192 * 1024 - 1) { 'x'.code.toByte() } + '\n'.code.toByte()
+        assertEquals(1, EventLines().feed(longest).size)
+        // Not in a log line by accident.
+        assertTrue("hunter2" !in DeviceEvent.Clipboard("hunter2", true).toString())
+    }
+
+    @Test
     fun `lines split across chunks come out whole, and a runaway line breaks the feed`() {
         val lines = EventLines()
         assertEquals(emptyList<String>(), lines.feed("""{"event":"ri""".toByteArray()))

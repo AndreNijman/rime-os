@@ -107,6 +107,9 @@ pub struct State {
     live: Mutex<Vec<Live>>,
     push: Mutex<PushStore>,
     phones: Mutex<crate::phone::PhoneStore>,
+    /// The text each phone last put on this computer's clipboard, so it is
+    /// not sent straight back (§2.14).
+    pub clip_echo: crate::clipboard::Echo,
     /// Which Do Not Disturb was last handed the Shell, per phone (§2.9).
     focus_seen: crate::phone::FocusSeen,
     /// Where a phone's Do Not Disturb is written for the Shell; see
@@ -183,6 +186,7 @@ impl State {
             live: Mutex::new(Vec::new()),
             push: Mutex::new(push),
             phones: Mutex::new(phones),
+            clip_echo: crate::clipboard::Echo::default(),
             focus_seen: crate::phone::FocusSeen::default(),
             focus_file: Mutex::new(None),
             nexd: Mutex::new(None),
@@ -305,6 +309,7 @@ impl State {
         crate::mirror::mirror().forget(device_id);
         crate::media::media().forget(device_id);
         self.focus_seen.forget(device_id);
+        self.clip_echo.forget(device_id);
         let mut store = self.phones.lock().unwrap_or_else(|e| e.into_inner());
         if store.phones.remove(device_id).is_some() {
             if let Err(e) = store.save(&self.phones_path) {

@@ -94,6 +94,23 @@ object Phone {
      */
     const val CAN_PHOTOS: String = "photos"
 
+    /**
+     * The feature a machine offers once it sends its clipboard to phones that
+     * ask (contract §2.14). Only to such a machine does the report say
+     * [CAN_CLIPBOARD].
+     */
+    const val CLIPBOARD: String = "phone_clipboard"
+
+    /**
+     * The word in `can` that says the person turned on "Get the computer's
+     * clipboard" and the app is unlocked: this phone puts a `clipboard`
+     * line's text on its own clipboard (contract §2.14).
+     */
+    const val CAN_CLIPBOARD: String = "clipboard"
+
+    /** The most text one `clipboard` line carries, in bytes of UTF-8 (§2.14). */
+    const val MAX_CLIPBOARD_BYTES: Int = 64 * 1024
+
     /** The channel, and the feature, a sent file or text is taken on. */
     const val TAKE: String = "take_offer"
 
@@ -108,11 +125,11 @@ object Phone {
     const val STALE_PUSH_S: Long = 60
 
     /**
-     * The longest event line accepted. The longest event is a reply: 2000
-     * characters of up to four bytes each, a quote escaped to two, so about
-     * 8 KB with its key; twice that leaves room and still bounds the buffer.
+     * The longest event line accepted. The longest event is a clipboard
+     * (§2.14): the computer refuses one whose line, escaped, is over 192 KiB,
+     * so this leaves room and still bounds the buffer.
      */
-    const val MAX_LINE: Int = 16 * 1024
+    const val MAX_LINE: Int = 256 * 1024
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -244,6 +261,17 @@ object Phone {
             }
             // A real boolean only: a quoted "true" is not one.
             "focus" -> o.prim("dnd")?.takeIf { !it.isString }?.booleanOrNull?.let { DeviceEvent.Focus(it) }
+            "clipboard" -> {
+                val text = o.text("text")
+                    ?.takeIf { it.isNotEmpty() && it.toByteArray(Charsets.UTF_8).size <= MAX_CLIPBOARD_BYTES }
+                    ?: return null
+                // Absent is false; anything but a real boolean is not a line.
+                val sensitive = when (val p = o.prim("sensitive")) {
+                    null -> false
+                    else -> p.takeIf { !it.isString }?.booleanOrNull ?: return null
+                }
+                DeviceEvent.Clipboard(text, sensitive)
+            }
             "media_control" -> {
                 val action = o.text("action")?.takeIf { it in Media.CONTROL_ACTIONS } ?: return null
                 // A seek says where to; nothing else carries a position.
@@ -351,6 +379,15 @@ sealed interface DeviceEvent {
 
     /** The computer asks this phone's Do Not Disturb to be on ([dnd]) or off (§2.9). */
     data class Focus(val dnd: Boolean) : DeviceEvent
+
+    /**
+     * The computer's clipboard now holds [text] (§2.14); [sensitive] when the
+     * computer marked it as a password manager's copy.
+     */
+    data class Clipboard(val text: String, val sensitive: Boolean) : DeviceEvent {
+        // Whatever the person copied, perhaps a password: never in a log line.
+        override fun toString(): String = "Clipboard(text=<${text.length} chars>, sensitive=$sensitive)"
+    }
 
     /** The person replied [text], on the computer, to the mirrored notification with this [key]. */
     data class Replied(val key: String, val text: String) : DeviceEvent {

@@ -250,6 +250,19 @@ object Desktop {
     }
 
     /**
+     * `rime remote clipboard`: what the Shell runs when this computer's
+     * clipboard changes with "Send my clipboard to my phone" on (§2.14).
+     * Returns how many phones were sent the line (`reached`).
+     */
+    fun clipboard(text: String, sensitive: Boolean = false): Int {
+        val request = JSONObject().put("cmd", "clipboard").put("text", text)
+        if (sensitive) request.put("sensitive", true)
+        val reply = ask(request.toString())
+        check(reply.optString("reply") == "clipboard_sent") { "rime-remoted did not take the clipboard request: $reply" }
+        return reply.getInt("reached")
+    }
+
+    /**
      * The stub notification server closes notification [id] with [reason]
      * (2: the person dismissed it, 1: it timed out), as a real one would say
      * in `NotificationClosed`.

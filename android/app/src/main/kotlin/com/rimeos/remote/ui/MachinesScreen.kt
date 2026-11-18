@@ -102,6 +102,8 @@ fun MachinesScreen(
     onPhotos: () -> Unit = {},
     /** "Keep working after the phone restarts" (contract §2.10). */
     onCompanion: (Boolean) -> Unit = {},
+    /** "Get the computer's clipboard" (contract §2.14). A default, as for [updateBanner]. */
+    onClipboard: (Boolean) -> Unit = {},
 ) {
     var forgetting by remember { mutableStateOf<PairedMachine?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
@@ -293,6 +295,24 @@ fun MachinesScreen(
                                 // switch goes on, and only if not already held.
                                 if (on && !ignoresBatteryOptimisation(context)) askBattery = true
                             },
+                        )
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Get the computer's clipboard")
+                            Text(
+                                "Text copied on a paired computer lands on this phone's clipboard while " +
+                                    "this app is unlocked. The computer sends it only once " +
+                                    "\"Send my clipboard to my phone\" is on there too.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.clipboardOn,
+                            onCheckedChange = onClipboard,
                         )
                     }
 

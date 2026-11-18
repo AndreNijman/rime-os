@@ -73,6 +73,22 @@ pub enum RemoteCmd {
         /// `on` or `off`.
         state: FocusState,
     },
+    /// Put text on the clipboard of every phone that asked for this
+    /// computer's clipboard.
+    ///
+    /// The text is read from standard input, exactly as it is (never from an
+    /// argument: any process can read those). It reaches each connected
+    /// phone that has "Get the computer's clipboard" turned on in Rime
+    /// Remote, and the command says how many; none is not an error. A phone
+    /// that put this very text here itself in the last ten seconds is not
+    /// sent it back. Rime Shell runs this for each copy while "Send my
+    /// clipboard to my phone" is on.
+    Clipboard {
+        /// Mark the text as sensitive, such as a password: the phone keeps it
+        /// out of its clipboard preview.
+        #[arg(long)]
+        sensitive: bool,
+    },
     /// Send files or text to a paired phone.
     ///
     /// The phone takes it without asking: text goes onto its clipboard, a
@@ -297,6 +313,11 @@ enum Request {
     Revoke { device: String },
     Ring { device: String },
     Focus { dnd: bool },
+    Clipboard {
+        text: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        sensitive: bool,
+    },
     Send {
         device: String,
         kind: &'static str,
@@ -476,6 +497,9 @@ enum Reply {
     Focused {
         reached: usize,
     },
+    ClipboardSent {
+        reached: usize,
+    },
     Sent {
         device: String,
         path: String,
@@ -541,6 +565,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         RemoteCmd::Revoke { device } => revoke(&device),
         RemoteCmd::Ring { device } => ring(&device),
         RemoteCmd::Focus { state } => focus(state == FocusState::On),
+        RemoteCmd::Clipboard { sensitive } => clipboard(std::io::stdin().lock(), sensitive),
         RemoteCmd::Send { device, files, clipboard, text } => send(&device, &files, clipboard, text),
         RemoteCmd::Messages { action: Some(MessagesCmd::Send { device, to, thread, json }), .. } => {
             messages_send(device, to, thread, json)
@@ -844,6 +869,49 @@ fn focus(dnd: bool) -> Result<i32> {
         Reply::Focused { reached } => {
             let phones = if reached == 1 { "phone" } else { "phones" };
             eprintln!("rime: told {reached} {phones} to turn Do Not Disturb {state}.");
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
+/// The most text `rime remote clipboard` sends: rime-remoted's cap
+/// (contract §2.14), checked here too so a huge paste is refused in words
+/// before it is read whole.
+const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
+
+fn clipboard(input: impl std::io::Read, sensitive: bool) -> Result<i32> {
+    use std::io::Read;
+    // Verbatim: not trimmed. rime-remoted compares it byte for byte with
+    // what a phone put on this clipboard, to not send that phone its own
+    // text back.
+    let mut bytes = Vec::new();
+    input
+        .take(MAX_CLIPBOARD_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .context("reading the text")?;
+    if bytes.is_empty() {
+        bail!("there is no text to send: give it on standard input");
+    }
+    if bytes.len() > MAX_CLIPBOARD_BYTES {
+        bail!("that text is more than {MAX_CLIPBOARD_BYTES} bytes, more than a phone's clipboard is sent");
+    }
+    let text = String::from_utf8(bytes).context("the text is not UTF-8")?;
+    match call(&Request::Clipboard { text, sensitive })? {
+        Reply::ClipboardSent { reached: 0 } => {
+            eprintln!(
+                "rime: No phone took the clipboard: none is connected with \"Get the computer's clipboard\" \
+                 turned on in Rime Remote."
+            );
+            Ok(0)
+        }
+        Reply::ClipboardSent { reached } => {
+            let phones = if reached == 1 { "phone" } else { "phones" };
+            eprintln!("rime: put the text on the clipboard of {reached} {phones}.");
             Ok(0)
         }
         Reply::Error { message } => {
@@ -1711,6 +1779,7 @@ mod tests {
             r#"{"reply":"devices","devices":[],"phones":{"d":{"battery":5,"can":["ring"],"reported_ms":1}}}"#,
             r#"{"reply":"rang","device":"Pixel","path":"push"}"#,
             r#"{"reply":"focused","reached":0}"#,
+            r#"{"reply":"clipboard_sent","reached":2}"#,
             r#"{"reply":"devices","devices":[],"phones":{"d":{"battery":5,"can":["focus"],"network":{"type":"wifi","signal":3},"dnd":true,"reported_ms":1}}}"#,
             r#"{"reply":"status","version":1,"key":"k","machine":"l16","lan":[],"relay":null,"rendezvous":"r","paired":0,"offer_ms_left":null}"#,
         ] {
@@ -1851,6 +1920,35 @@ mod tests {
         assert!(matches!(Cli::try_parse_from(["r", "focus", "off"]).expect("off").cmd, RemoteCmd::Focus { state: FocusState::Off }));
         assert!(Cli::try_parse_from(["r", "focus", "toggle"]).is_err(), "focus sets a state; it does not flip one");
         assert!(Cli::try_parse_from(["r", "focus"]).is_err());
+    }
+
+    #[test]
+    fn clipboard_reads_its_text_from_stdin_and_never_takes_it_as_an_argument() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        assert!(matches!(Cli::try_parse_from(["r", "clipboard"]).expect("plain").cmd, RemoteCmd::Clipboard { sensitive: false }));
+        assert!(matches!(
+            Cli::try_parse_from(["r", "clipboard", "--sensitive"]).expect("sensitive").cmd,
+            RemoteCmd::Clipboard { sensitive: true }
+        ));
+        assert!(Cli::try_parse_from(["r", "clipboard", "my password"]).is_err(), "text in argv is visible in /proc");
+        assert_eq!(
+            serde_json::to_string(&Request::Clipboard { text: " a\n".into(), sensitive: false }).unwrap(),
+            r#"{"cmd":"clipboard","text":" a\n"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Clipboard { text: "a".into(), sensitive: true }).unwrap(),
+            r#"{"cmd":"clipboard","text":"a","sensitive":true}"#
+        );
+        // Refused before any socket is touched: empty, over the cap, not UTF-8.
+        assert!(clipboard(&b""[..], false).unwrap_err().to_string().contains("no text"));
+        let over = vec![b'a'; MAX_CLIPBOARD_BYTES + 1];
+        assert!(clipboard(&over[..], false).unwrap_err().to_string().contains("more than"));
+        assert!(clipboard(&b"\xff\xfe"[..], false).unwrap_err().to_string().contains("UTF-8"));
     }
 
     #[test]

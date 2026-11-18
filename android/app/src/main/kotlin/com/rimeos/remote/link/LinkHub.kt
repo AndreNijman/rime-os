@@ -29,6 +29,7 @@ import com.rimeos.remote.core.phone.Photos
 import com.rimeos.remote.core.phone.ReportThrottle
 import com.rimeos.remote.core.phone.Scope
 import com.rimeos.remote.phone.CallWatcher
+import com.rimeos.remote.phone.ComputerClipboard
 import com.rimeos.remote.phone.MediaWatcher
 import com.rimeos.remote.phone.MirrorService
 import com.rimeos.remote.phone.PhoneCalls
@@ -212,6 +213,10 @@ class LinkHub private constructor(private val app: Context) {
     /** "Do Not Disturb follows your computer" (§2.9); read and set as [mirrorApps] is. */
     @Volatile
     private var focusOn: Boolean = false
+
+    /** "Get the computer's clipboard" (§2.14); read and set as [mirrorApps] is. */
+    @Volatile
+    private var clipboardOn: Boolean = false
 
     /** A Do Not Disturb this app turned on for a computer, to take back when the switch goes off or the app locks. */
     private val ownDnd = OwnDnd()
@@ -785,6 +790,7 @@ class LinkHub private constructor(private val app: Context) {
         mirrorApps = settings.mirrorApps
         mirrorReply = settings.mirrorReply
         focusOn = settings.focusOn
+        clipboardOn = settings.clipboardOn
         mediaOn = settings.mediaOn
         mediaApps = settings.mediaApps
         mediaControl = settings.mediaControl
@@ -840,6 +846,9 @@ class LinkHub private constructor(private val app: Context) {
             if (lane.remote.has(Photos.FEATURE) && Photos.offered(photosOn, PhotoStore.access(app), lane.companion, _unlocked.value)) {
                 add(Phone.CAN_PHOTOS)
             }
+            // Only to a machine that sends its clipboard, and only over a full link on an
+            // unlocked app: the switch promises the text lands "while this app is unlocked".
+            if (lane.remote.has(Phone.CLIPBOARD) && clipboardOn && !lane.companion && _unlocked.value) add(Phone.CAN_CLIPBOARD)
         }
         if (!lane.throttle.due(level, charging, now, network, dnd, can)) return
         runCatching { phone.report(level, charging, can, network, dnd) }
@@ -1195,6 +1204,18 @@ class LinkHub private constructor(private val app: Context) {
         reportAgain()
     }
 
+    fun clipboardOn(): Boolean = clipboardOn
+
+    /**
+     * The person turned "Get the computer's clipboard" on or off; the store
+     * was already written. Each connected machine is told at once, as for
+     * [setMirrorReply]: its `can` is what makes it send a `clipboard` line.
+     */
+    fun setClipboardOn(on: Boolean) {
+        clipboardOn = on
+        reportAgain()
+    }
+
     /**
      * Android says the phone's Do Not Disturb changed, by any path. Off means
      * nothing this app turned on is left to take back; then every machine
@@ -1434,6 +1455,15 @@ class LinkHub private constructor(private val app: Context) {
                 if (!Focus.apply(switchOn, live, PhoneStatus.dnd(app), event.dnd)) return
                 if (MirrorService.focus(event.dnd)) ownDnd.applied(event.dnd)
                 else Log.i(TAG, "${machine.machine}: Do Not Disturb not changed: no listener")
+            }
+            is DeviceEvent.Clipboard -> {
+                // Only with the person's switch on and the app unlocked,
+                // whatever an older report told the machine. The text is
+                // never logged: it may be a password.
+                if (!clipboardOn || !_unlocked.value) return
+                if (!ComputerClipboard.put(app, machine.machine, event)) {
+                    Log.i(TAG, "${machine.machine}: the computer's clipboard was not put on this phone's")
+                }
             }
             is DeviceEvent.Dismissed -> {
                 // Only what this machine was sent, and only while the device
