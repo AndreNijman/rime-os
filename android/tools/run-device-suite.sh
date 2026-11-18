@@ -80,6 +80,7 @@ mkdir -p "$state"
 # read it even when the script fails before the daemon root exists.
 root=""
 agentd_pid=""; remoted_pid=""; broker_pid=""; nexd_pid=""; talkback_on=""
+root2=""
 
 # TalkBack, when this run turned it on, goes back off no matter how the script
 # ends. `settings delete` and not `settings put … null`, which writes the
@@ -111,6 +112,17 @@ cleanup() {
   for p in "$current" "$remoted_pid" "$agentd_pid" "$nexd_pid"; do
     [ -n "$p" ] && kill "$p" 2>/dev/null || true
   done
+  # The second computer: its session's command ends on the stop file and
+  # stops its own processes; their pids on disk are killed here as well, in
+  # case it never got the chance.
+  if [ -n "$root2" ] && [ -d "$root2" ]; then
+    touch "$root2/stop" 2>/dev/null || true
+    sleep 1
+    for f in broker remoted agentd; do
+      p=$(cat "$root2/$f.pid" 2>/dev/null) || p=""
+      [ -n "$p" ] && kill "$p" 2>/dev/null || true
+    done
+  fi
   wait 2>/dev/null || true
   exit $rc
 }
@@ -427,6 +439,24 @@ def restart():
         except OSError:
             time.sleep(0.05)
     return json.dumps({"reply": "error", "message": "rime-remoted did not come back"})
+
+def stop_remoted():
+    """The computer going away: its rime-remoted killed (SIGKILL, so nothing
+    is said goodbye) and NOT started again. `restart_remoted` brings it
+    back on the same port and state."""
+    pidfile = os.path.join(ROOT, "remoted.pid")
+    with open(pidfile) as f:
+        old = int(f.read().strip())
+    try:
+        os.kill(old, 9)
+    except ProcessLookupError:
+        pass
+    for _ in range(80):
+        try:
+            os.kill(old, 0); time.sleep(0.05)
+        except ProcessLookupError:
+            return json.dumps({"reply": "ok", "pid": old})
+    return json.dumps({"reply": "error", "message": "rime-remoted %d did not die" % old})
 
 STUB = os.path.join(ROOT, "machine")
 
@@ -867,6 +897,8 @@ class H(socketserver.StreamRequestHandler):
                 continue
             if cmd == "restart_remoted":
                 out = restart()
+            elif cmd == "stop_remoted":
+                out = stop_remoted()
             elif cmd == "file_privilege_request":
                 out = agentd({"cmd": "privilege_request",
                               "verb": req["verb"],
@@ -1016,6 +1048,105 @@ if [[ "$preflight" != *'"qr"'* ]]; then
   exit 1
 fi
 
+# ── a second computer ───────────────────────────────────────────────────────
+#
+# TwoComputersOnDeviceTest pairs the phone with TWO computers at once (one
+# phone, two rime-remoted, no new protocol). The second is a whole stack of
+# its own from the same binaries: its own rime-agentd and rime-remoted, its
+# own state, runtime and scratch folders (so its own machine key), its own
+# stub desktop, machine, notifications and media, its own port, and its own
+# broker in front of it (the same broker.py, given the second root).
+#
+# It runs in a login session of its OWN, minted through PAM as
+# tests/in-login-session.sh does, because two computers are two logins and
+# its broker must be observed as a human there for its offers to be minted.
+# That wrapper cannot be used from here: inside a session it runs its
+# command in place. The command in the session keeps running until the
+# `stop` file appears, because the session's unit takes its processes with
+# it when the command ends. Without sudo it runs in this session instead,
+# and says so.
+#
+# The same rules as for the first: the stubs are checked before anything
+# starts, every process is stopped by its pid, nothing is looked up by name,
+# and nothing here touches the desktop's own runtime folder.
+root2=$state/b
+rm -rf "$root2"; mkdir -p "$root2"/run "$root2"/state "$root2"/scratch "$root2"/desk "$root2"/machine "$root2"/notify "$root2"/media
+port2=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
+brokerport2=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
+{
+  echo '#!/bin/bash'
+  echo 'set -u'
+  printf 'R=%q BIN=%q PORT=%q BPORT=%q RELAY=%q BROKER=%q\n' "$root2" "$bin" "$port2" "$brokerport2" "$relay" "$root/broker.py"
+  printf 'export RIME_SUITE_SERIAL=%q RIME_SUITE_ADB=%q\n' "$serial" "$adb"
+  cat <<'B'
+export RIME_AGENTD_DESKTOP_STUB=$R/desk RIME_REMOTED_MACHINE_STUB=$R/machine \
+  RIME_REMOTED_NOTIFY_STUB=$R/notify RIME_REMOTED_MEDIA_STUB=$R/media
+{ cat /proc/self/cgroup; echo "session ${XDG_SESSION_ID:-none}"; } > "$R/session.txt"
+XDG_RUNTIME_DIR=$R/run XDG_STATE_HOME=$R/state RIME_AGENT_SCRATCH_ROOT=$R/scratch \
+  "$BIN/rime-agentd" >>"$R/agentd.log" 2>&1 &
+echo $! > "$R/agentd.pid"
+extra=(); [ -n "$RELAY" ] && extra=(--relay "$RELAY")
+XDG_RUNTIME_DIR=$R/run XDG_STATE_HOME=$R/state \
+  "$BIN/rime-remoted" --port "$PORT" --allow-foreground "${extra[@]}" >>"$R/remoted.log" 2>&1 &
+echo $! > "$R/remoted.pid"
+for _ in $(seq 1 80); do
+  [ -S "$R/run/rime-agentd/control.sock" ] && [ -S "$R/run/rime-remoted/control.sock" ] && break
+  sleep 0.25
+done
+python3 "$BROKER" "$R/run/rime-remoted/control.sock" "$BPORT" "$R" "$BIN" "$PORT" \
+  "$R/run/rime-agentd/control.sock" "$RELAY" "" "" >"$R/broker.log" 2>&1 &
+echo $! > "$R/broker.pid"
+echo up > "$R/up"
+while [ ! -e "$R/stop" ]; do sleep 0.5; done
+for f in broker remoted agentd; do
+  p=$(cat "$R/$f.pid" 2>/dev/null) && [ -n "$p" ] && kill "$p" 2>/dev/null
+done
+wait
+B
+} > "$root2/start.sh"
+chmod +x "$root2/start.sh"
+second_unit=""
+second_pid=""
+if sudo -n true >/dev/null 2>&1 && [ -d /run/systemd/sessions ]; then
+  second_unit=rime-suite-b-$$
+  sudo -n env TERM=dumb systemd-run --quiet --wait --pty --collect --unit="$second_unit" \
+    --uid="$(id -u)" --gid="$(id -g)" --property=PAMName=login --working-directory="$root2" \
+    --setenv=PATH="$PATH" --setenv=HOME="$HOME" --setenv=TERM=dumb \
+    -- /bin/bash -c 'stty -onlcr 2>/dev/null; exec "$1" </dev/null' second "$root2/start.sh" \
+    </dev/null >"$root2/session.log" 2>&1 &
+  second_pid=$!
+else
+  echo "NOTE: no sudo -n here, so the second computer runs in THIS login session, not one of its own"
+  "$root2/start.sh" </dev/null >"$root2/session.log" 2>&1 &
+  second_pid=$!
+fi
+for _ in $(seq 1 120); do
+  if [ -e "$root2/up" ] && (exec 3<>"/dev/tcp/127.0.0.1/$port2") 2>/dev/null \
+     && (exec 3<>"/dev/tcp/127.0.0.1/$brokerport2") 2>/dev/null; then break; fi
+  sleep 0.25
+done
+(exec 3<>"/dev/tcp/127.0.0.1/$brokerport2") 2>/dev/null || {
+  echo "FAIL: the second computer did not come up"; tail -20 "$root2"/*.log; exit 1; }
+echo "second computer: $(tr '\n' ' ' < "$root2/session.txt")"
+preflight2=$(python3 - "$brokerport2" <<'PY'
+import json, socket, sys
+try:
+    s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), 10)
+    s.sendall(b'{"cmd":"pair"}\n')
+    print(s.makefile("rb").readline().decode().strip())
+    s.close()
+except OSError as e:
+    print(json.dumps({"reply": "error", "message": f"the broker did not answer: {e}"}))
+PY
+)
+if [[ "$preflight2" != *'"qr"'* ]]; then
+  echo "FAIL: the second computer's rime-remoted will not mint a pairing offer: $preflight2"
+  exit 1
+fi
+lan2=$(echo "$lan" | sed "s/:[0-9]*\$/:$port2/")
+broker2=$(echo "$lan" | sed "s/:[0-9]*\$/:$brokerport2/")
+echo "second computer reachable from the phone at $lan2 (broker on $brokerport2)"
+
 # Build and install. Both APKs, every run: an instrumentation APK from a
 # previous build is the same stale-binary defect the Rust suite refuses.
 export ANDROID_HOME=${ANDROID_HOME:-/var/tmp/android-sdk}
@@ -1040,6 +1171,7 @@ args=(-e lan "$lan" -e broker "$brokeraddr" -e machine "$(cat /proc/sys/kernel/h
 # into a failure that names the missing argument, so the relay tests fail loudly
 # rather than passing while asserting nothing.
 [ -n "$relay" ] && args+=(-e relay "$relay")
+args+=(-e lan2 "$lan2" -e broker2 "$broker2")
 [ -n "$classes" ] && args+=(-e class "$classes")
 skip=()
 if [ -n "$nexroot" ]; then
