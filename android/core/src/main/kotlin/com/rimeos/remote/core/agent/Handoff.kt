@@ -718,6 +718,14 @@ object Handoff {
          * what `ContentResolver.openInputStream` on a picker's URI returns,
          * and asking for any of these would buy nothing it does not already
          * have.
+         *
+         * One feature reverses this on purpose: "Photos on your computer"
+         * (contract §2.13) lists the library for a paired computer, which no
+         * picker can do, so the manifest declares `Photos.PERMISSIONS`. They
+         * are asked for only when the person opens that screen, the switch is
+         * off by default, and partial access is honoured. Sending a file to a
+         * session still never uses them, and every other name here must
+         * stay absent; `ManifestTest` checks both halves.
          */
         val FORBIDDEN_PERMISSIONS: List<String> = listOf(
             "android.permission.READ_EXTERNAL_STORAGE",

@@ -25,6 +25,7 @@ import com.rimeos.remote.core.phone.MirrorOutbox
 import com.rimeos.remote.core.phone.OwnDnd
 import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.core.phone.PhoneLink
+import com.rimeos.remote.core.phone.Photos
 import com.rimeos.remote.core.phone.ReportThrottle
 import com.rimeos.remote.core.phone.Scope
 import com.rimeos.remote.phone.CallWatcher
@@ -32,12 +33,14 @@ import com.rimeos.remote.phone.MediaWatcher
 import com.rimeos.remote.phone.MirrorService
 import com.rimeos.remote.phone.PhoneCalls
 import com.rimeos.remote.phone.PhoneStatus
+import com.rimeos.remote.phone.PhotoStore
 import com.rimeos.remote.phone.Receiver
 import com.rimeos.remote.phone.Ringer
 import com.rimeos.remote.phone.Sms
 import com.rimeos.remote.phone.SmsSender
 import com.rimeos.remote.phone.SmsWatcher
 import com.rimeos.remote.core.link.Route
+import com.rimeos.remote.core.link.Upload
 import com.rimeos.remote.data.MachineRepository
 import com.rimeos.remote.pairing.PairingService
 import java.util.concurrent.ConcurrentHashMap
@@ -254,6 +257,19 @@ class LinkHub private constructor(private val app: Context) {
     private var callsOn: Boolean = false
 
     private val callWatcher by lazy { CallWatcher(app) { onCallChanged() } }
+
+    /** "Photos on your computer" (§2.13): read from the store on a connection and set by the screen. */
+    @Volatile
+    private var photosOn: Boolean = false
+
+    /**
+     * The connections answering a photo listing now, and those sending an
+     * original: one of each at a time per connection, so a computer asking
+     * again and again cannot keep the phone reading its whole library.
+     * A listing does not wait for a send, nor a send for a listing.
+     */
+    private val photosListing = ConcurrentHashMap.newKeySet<PhoneLink>()
+    private val photosSending = ConcurrentHashMap.newKeySet<PhoneLink>()
 
     private val smsSender by lazy { SmsSender(app) }
     private val smsWatcher by lazy { SmsWatcher(app) { onSmsChanged() } }
@@ -776,6 +792,7 @@ class LinkHub private constructor(private val app: Context) {
         syncSmsWatcher()
         callsOn = settings.callsOn
         syncCallWatcher()
+        photosOn = settings.photosOn
     }
 
     private fun startReports(machine: PairedMachine, phone: PhoneLink, remote: RemoteHello, companion: Boolean) {
@@ -818,6 +835,11 @@ class LinkHub private constructor(private val app: Context) {
             if (lane.remote.has(Messages.FEATURE) && Messages.offered(messagesOn, Sms.canRead(app))) add(Phone.CAN_MESSAGES)
             // Never "calls_dial" on a companion link: a dial waits for an unlock.
             if (lane.remote.has(Calls.FEATURE)) addAll(Calls.can(PhoneCalls.grants(app, callsOn), lane.companion))
+            // Never over a companion link and never while locked: a photo
+            // leaving the phone is the person's to allow each time.
+            if (lane.remote.has(Photos.FEATURE) && Photos.offered(photosOn, PhotoStore.access(app), lane.companion, _unlocked.value)) {
+                add(Phone.CAN_PHOTOS)
+            }
         }
         if (!lane.throttle.due(level, charging, now, network, dnd, can)) return
         runCatching { phone.report(level, charging, can, network, dnd) }
@@ -928,6 +950,28 @@ class LinkHub private constructor(private val app: Context) {
     /** The person granted, or Android took back, a calls permission: every machine hears the new `can`. */
     fun onCallsPermissionChanged() {
         syncCallWatcher()
+        reportAgain()
+    }
+
+    fun photosOn(): Boolean = photosOn
+
+    /**
+     * The person turned "Photos on your computer" on or off; the store was
+     * already written. Each connected machine is told at once, as for
+     * [setMessagesOn]: its `can` is what lets it ask at all, and off
+     * refuses every request from here on whatever it was told before.
+     */
+    fun setPhotosOn(on: Boolean) {
+        photosOn = on
+        reportAgain()
+    }
+
+    /**
+     * The person allowed photos, picked others, or Android took access
+     * back: every machine hears the new `can`, and an answer from here on
+     * says whether only the picked photos are shown.
+     */
+    fun onPhotosPermissionChanged() {
         reportAgain()
     }
 
@@ -1058,6 +1102,85 @@ class LinkHub private constructor(private val app: Context) {
         Log.i(TAG, "${machine.machine}: a send from the computer: ${result ?: "sent"}")
         runCatching { phone.messages(Messages.sent(event.id, result)) }
             .onFailure { Log.i(TAG, "${machine.machine}: a send's result was not taken: ${it.message}") }
+    }
+
+    /** Why a photo request must be refused now, or null when it may run (§2.13). */
+    private fun photosRefusal(companion: Boolean): String? =
+        Photos.refusal(photosOn, PhotoStore.access(app), companion, _unlocked.value)
+
+    /**
+     * A computer asks for a page of this phone's photos (§2.13). The switch,
+     * the access, the link and the unlock are all checked here, whatever an
+     * older report told the machine. Nothing is logged about any photo.
+     */
+    private fun onPhotosRequest(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent.PhotosRequest, companion: Boolean) {
+        val word = photosRefusal(companion)
+        if (word != null) return sendPhotos(machine, phone, listOf(Photos.refused(event.id, word)))
+        if (!photosListing.add(phone)) return sendPhotos(machine, phone, listOf(Photos.refused(event.id, Photos.BUSY)))
+        try {
+            val partial = PhotoStore.access(app) == Photos.Access.PARTIAL
+            val lines = runCatching { Photos.reply(event.id, PhotoStore.listing(app, event.before, event.limit), partial) }.getOrElse {
+                Log.i(TAG, "${machine.machine}: photos not read: ${it.javaClass.simpleName}")
+                listOf(Photos.refused(event.id, Photos.FAILED))
+            }
+            sendPhotos(machine, phone, lines)
+        } finally {
+            photosListing.remove(phone)
+        }
+    }
+
+    /** Send an answer's lines in order, stopping at the first the link does not take. */
+    private fun sendPhotos(machine: PairedMachine, phone: PhoneLink, lines: List<String>) {
+        for (line in lines) {
+            // A companion link refuses the line itself; that is not worth more than a log.
+            val ok = runCatching { phone.photos(line) }
+                .onFailure { Log.i(TAG, "${machine.machine}: a photos answer was not taken: ${it.message}") }
+                .isSuccess
+            if (!ok) return
+        }
+    }
+
+    /**
+     * A computer asks for one photo's original (§2.13). It goes on a
+     * connection of its own, as a file the person sends does, so a large
+     * photo never holds up the device channel; a refusal goes back on the
+     * device channel. The photo is looked up again here: a listing the
+     * computer had is no promise it is still there, or still allowed.
+     */
+    private fun onPhotosFetch(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent.PhotosFetch, companion: Boolean) {
+        fun refuse(word: String) {
+            Log.i(TAG, "${machine.machine}: a photo was not sent: $word")
+            runCatching { phone.photos(Photos.fetchRefused(event.id, word)) }
+                .onFailure { Log.i(TAG, "${machine.machine}: a photo refusal was not taken: ${it.message}") }
+        }
+        photosRefusal(companion)?.let { return refuse(it) }
+        if (!photosSending.add(phone)) return refuse(Photos.BUSY)
+        try {
+            val original = runCatching { PhotoStore.original(app, event.photo) }
+                .getOrElse { return refuse(Photos.FAILED) }
+                ?: return refuse(Photos.NOT_FOUND)
+            if (original.len > Photos.MAX_PHOTO_BYTES) return refuse(Photos.TOO_LARGE)
+            if (original.len <= 0) return refuse(Photos.FAILED)
+            // Once more just before dialling: the new connection does not
+            // know it was asked for over a companion link, and the person
+            // may have locked the app or turned the switch off meanwhile.
+            photosRefusal(companion)?.let { return refuse(it) }
+            runCatching {
+                Upload.photo(
+                    connect = { dialSession(machine) },
+                    // The fetch's own id, which is what the computer waits on; not the photo's.
+                    id = event.id,
+                    name = original.name,
+                    len = original.len,
+                    source = { PhotoStore.open(app, original) },
+                )
+            }.onFailure {
+                Log.i(TAG, "${machine.machine}: a photo did not cross: ${it.javaClass.simpleName}")
+                refuse(Photos.FAILED)
+            }
+        } finally {
+            photosSending.remove(phone)
+        }
     }
 
     /**
@@ -1298,6 +1421,8 @@ class LinkHub private constructor(private val app: Context) {
             is DeviceEvent.MessagesSend -> scope.launch { onMessagesSend(machine, phone, event, companion) }
             is DeviceEvent.CallAction -> scope.launch { onCallAction(machine, phone, event, companion) }
             is DeviceEvent.CallHistoryRequest -> scope.launch { onCallHistory(machine, phone, event) }
+            is DeviceEvent.PhotosRequest -> scope.launch { onPhotosRequest(machine, phone, event, companion) }
+            is DeviceEvent.PhotosFetch -> scope.launch { onPhotosFetch(machine, phone, event, companion) }
             // Never over a companion link: it acts for the person.
             is DeviceEvent.MediaControl -> if (!companion) onMediaControl(machine, event)
             is DeviceEvent.Focus -> {

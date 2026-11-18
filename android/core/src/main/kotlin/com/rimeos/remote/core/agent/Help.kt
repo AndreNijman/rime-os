@@ -307,6 +307,25 @@ object Help {
                         "call log permission without asking. Allow restricted settings in App " +
                         "info, as for SMS.",
                 ),
+                h("Photos on the computer"),
+                p(
+                    "Photos on your computer, in Display, lets your computers see this phone's " +
+                        "photos, newest first, with a small preview of each, and save the ones " +
+                        "you choose. It is off until you turn it on, and Android asks you to " +
+                        "allow photos first. On the computer, rime remote photos lists them, and " +
+                        "rime remote photos save copies one to the computer.",
+                ),
+                p(
+                    "The computer asks the phone each time, and only while you have the app " +
+                        "unlocked. The previews carry no location or camera details. From " +
+                        "Android 10 on, Android also removes the location from a saved photo. " +
+                        "Videos are left out.",
+                ),
+                note(
+                    "If you let Android show only some photos, the computer sees those and no " +
+                        "others, including photos you take later. To add more, or allow all, " +
+                        "open Photos on your computer again.",
+                ),
                 h("Finding this phone"),
                 p(
                     "On the computer, rime remote ring makes this phone play its alarm " +
@@ -338,7 +357,7 @@ object Help {
                     "With it on, locking the app keeps those running instead of ending the " +
                         "link, and after a restart they come back at the phone's first unlock. " +
                         "Replying to a notification, sending an SMS, calling a number, controlling what " +
-                        "plays, agents, terminals " +
+                        "plays, photos, agents, terminals " +
                         "and the computer's controls still wait until you unlock.",
                 ),
                 note(

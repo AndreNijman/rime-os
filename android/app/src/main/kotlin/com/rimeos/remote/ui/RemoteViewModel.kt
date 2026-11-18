@@ -1426,7 +1426,9 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
      * return a URI this app may read and nothing else, where
      * `READ_MEDIA_IMAGES` would hand it the whole library for the life of the
      * grant. `Handoff.Files.FORBIDDEN_PERMISSIONS` and `ManifestTest` are what
-     * keep that true when somebody reaches for the easier way.
+     * keep that true when somebody reaches for the easier way. The media
+     * permissions the manifest does declare belong to "Photos on your
+     * computer" alone; this path never asks for or relies on them.
      *
      * The recycled-id guard is `Reply.check`'s, and it applies for the same
      * reason it applies to a typed reply, with a worse consequence:
@@ -1965,6 +1967,18 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         val store = repository.settings(_state.value.settings.copy(callsOn = on))
         hub.setCallsOn(store.settings.callsOn)
         _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** Let the paired computers see and fetch this phone's photos while it is unlocked, or stop (contract §2.13). */
+    fun setPhotosOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(photosOn = on))
+        hub.setPhotosOn(store.settings.photosOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** Photo access may have changed, or the picked photos: the machines hear the new `can`. */
+    fun onPhotosPermissionChanged() {
+        hub.onPhotosPermissionChanged()
     }
 
     /** The call or contacts permissions may have changed: the machines hear the new `can`. */

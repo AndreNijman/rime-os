@@ -120,6 +120,22 @@
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
 
+    <!-- "Photos on your computer" (contract §2.13), off by default. A paired
+         computer lists this phone's photos, with a small preview of each, and
+         saves the ones the person chooses, only while the app is unlocked and
+         never over the companion link. A photo picker cannot do this: the
+         computer browses, so the library has to be readable. Asked for only
+         when the person opens that screen, never at install. On Android 14 and
+         later the person may allow only the photos they pick, and the
+         computer then sees those alone. READ_EXTERNAL_STORAGE stops at Android
+         12, where READ_MEDIA_IMAGES takes over. No ACCESS_MEDIA_LOCATION, so
+         from Android 10 on Android blanks a photo's location before this app
+         reads it, and no video permission. Nothing read is stored, here or
+         there. -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+
     <!-- Push-to-talk, and what is NOT here is the point of it.
 
          RECORD_AUDIO is absent, deliberately. Speech reaches this app through
@@ -132,11 +148,12 @@
 
          That is the same rule P1-059's fourth criterion states for the photo
          library, applied to the microphone: take the Android-mediated
-         selection, never the blanket permission. Which is also why no storage
-         or media permission appears anywhere in this file; `ManifestTest`
-         asserts their absence rather than trusting it, because the moment a
-         file-handoff transport exists the obvious way to read the file is a
-         permission.
+         selection, never the blanket permission. Which is also why sending a
+         file uses no storage or media permission, and why the only ones in
+         this file are the three "Photos on your computer" declares above;
+         `ManifestTest` asserts every other one absent rather than trusting
+         it, because the moment a file-handoff transport exists the obvious
+         way to read the file is a permission.
 
          This `<queries>` entry is what package visibility on API 30 and later
          requires for the recogniser to be visible at all. Without it,

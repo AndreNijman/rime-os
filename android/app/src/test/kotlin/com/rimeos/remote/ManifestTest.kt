@@ -3,6 +3,7 @@ package com.rimeos.remote
 import com.rimeos.remote.core.agent.Handoff
 import com.rimeos.remote.core.agent.Push
 import com.rimeos.remote.core.agent.UnifiedPush
+import com.rimeos.remote.core.phone.Photos
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -22,6 +23,12 @@ import java.io.File
  *
  * The same shape covers the microphone: push-to-talk goes through the system's
  * own recogniser, so `RECORD_AUDIO` must never appear either.
+ *
+ * "Photos on your computer" (contract §2.13) reverses that criterion for one
+ * feature, deliberately: a computer browsing the library cannot be served by
+ * a picker. So exactly [Photos.PERMISSIONS] may appear, READ_EXTERNAL_STORAGE
+ * capped at Android 12, and every other storage or media permission is still
+ * checked absent.
  *
  * ## This test refuses to pass by failing to look
  *
@@ -57,14 +64,14 @@ class ManifestTest {
         manifest.contains("\"$permission\"")
 
     @Test
-    fun `no storage or media permission is declared`() {
+    fun `no storage or media permission is declared beyond the photos feature's`() {
         // The picker route needs none of these. `ACTION_PICK_IMAGES`
         // (androidx `PickVisualMedia`) returns a URI for the one item the user
         // chose and requires no permission at all; asking for one of these
         // instead would hand the app the whole library for the life of the
         // grant, which is the "automatic access beyond Android-granted
         // selections" the criterion forbids.
-        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS) {
+        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS - Photos.PERMISSIONS.toSet()) {
             assertFalse(
                 declares(p),
                 "$p is declared. The photo picker needs no permission, and this one grants " +
@@ -116,13 +123,28 @@ class ManifestTest {
         )
         // And the thing that must NOT have appeared alongside it. A picker is
         // the alternative to a permission, not a companion to one.
-        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS) {
+        for (p in Handoff.Files.FORBIDDEN_PERMISSIONS - Photos.PERMISSIONS.toSet()) {
             assertFalse(declares(p), "$p was added alongside the picker")
         }
     }
 
     @Test
-    fun `the permissions this app does declare are the sixteen it can justify`() {
+    fun `the photos feature declares its three permissions, the old storage one capped at Android 12`() {
+        for (p in Photos.PERMISSIONS) assertTrue(declares(p), "$p is missing, so Photos on your computer cannot be allowed")
+        // Above Android 12 READ_EXTERNAL_STORAGE would be a second, broader
+        // way in; capped, it exists only where READ_MEDIA_IMAGES does not.
+        assertTrue(
+            Regex("<uses-permission\\s+android:name=\"android.permission.READ_EXTERNAL_STORAGE\"\\s+android:maxSdkVersion=\"32\"\\s*/>")
+                .containsMatchIn(manifest),
+            "READ_EXTERNAL_STORAGE is declared without android:maxSdkVersion=\"32\"",
+        )
+        // Location stays blanked by Android, and video is not part of it.
+        assertFalse(declares("android.permission.ACCESS_MEDIA_LOCATION"))
+        assertFalse(declares("android.permission.READ_MEDIA_VIDEO"))
+    }
+
+    @Test
+    fun `the permissions this app does declare are the nineteen it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
         // moment anybody reads the list.
@@ -185,6 +207,15 @@ class ManifestTest {
                 "android.permission.READ_CALL_LOG",
                 "android.permission.ANSWER_PHONE_CALLS",
                 "android.permission.CALL_PHONE",
+                // Added deliberately with "Photos on your computer" (contract
+                // §2.13), off by default: listing the photo library, with a
+                // preview of each, for a paired computer while the app is
+                // unlocked, and sending a photo it asks for. A runtime prompt,
+                // asked when the person opens that screen; partial access is
+                // honoured. The first is capped at Android 12 (the test above).
+                "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.READ_MEDIA_IMAGES",
+                "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
             ),
             "the declared permissions changed: $declared",
         )
