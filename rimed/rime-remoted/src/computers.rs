@@ -174,15 +174,20 @@ fn still_open(slot: &Mutex<Option<Showing>>, id: u64) -> bool {
 /// side's [`About::checked`] accepts, since it refuses a whole list over one
 /// bad entry.
 fn own_about(state: &State) -> About {
-    let mut lan = state.lan_addresses();
-    lan.retain(|a| a.parse().is_ok_and(|a| computer::dialable(&a)));
-    lan.truncate(MAX_ADDRESSES);
     About {
         name: state.machine.clone(),
-        lan,
+        lan: dialable_only(state.lan_addresses()),
         relay: state.relay.clone(),
         port: Some(state.port),
     }
+}
+
+/// The addresses in `lan` another computer would dial, at most
+/// [`MAX_ADDRESSES`] of them.
+fn dialable_only(mut lan: Vec<String>) -> Vec<String> {
+    lan.retain(|a| a.parse().is_ok_and(|a| computer::dialable(&a)));
+    lan.truncate(MAX_ADDRESSES);
+    lan
 }
 
 /// Where a computer that just paired can be dialled: where its connection
@@ -578,6 +583,15 @@ mod tests {
         let about = own_about(&state);
         assert!(about.clone().checked().is_ok(), "{about:?}");
         let _ = std::fs::remove_dir_all(dir);
+        // This machine's own addresses are usually all dialable, so the
+        // filter is also fed the ones the other side would refuse.
+        let mixed: Vec<String> = ["192.168.1.9:7717", "127.0.0.1:7717", "[fe80::1]:7717", "10.0.0.2:0", "[::]:7717", "nonsense"]
+            .map(String::from)
+            .to_vec();
+        let lan = dialable_only(mixed);
+        assert_eq!(lan, ["192.168.1.9:7717"]);
+        let about = About { name: "me".into(), lan, relay: None, port: Some(7717) };
+        assert!(about.checked().is_ok());
     }
 
     #[test]
