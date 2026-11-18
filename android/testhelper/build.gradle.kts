@@ -2,7 +2,8 @@
 //
 // Rime Remote never mirrors its own notifications, and the shell's
 // `cmd notification post` has no reply action, so the reply test needs a
-// third app whose notification carries a free-form RemoteInput.
+// third app whose notification carries a free-form RemoteInput. The media
+// test needs another app's media session, which it also holds.
 // `android/tools/run-device-suite.sh` builds and installs it. Debug only: it
 // has no release build, so no release workflow can pick it up by accident.
 plugins {
