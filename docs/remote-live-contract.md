@@ -910,6 +910,111 @@ nothing, because the unit binary runs inside the developer's session, where
 daemon with a private `XDG_RUNTIME_DIR`. So no `RIME_REMOTED_*_STUB` is needed
 for this file.
 
+### 2.10 The computer's clipboard on the phone
+
+`remote_hello.features` gains `"phone_clipboard"`. A phone says `"clipboard"`
+in `can` only to a machine whose hello has it. This is the reverse of §1.8's
+`clipboard_write` (phone → computer).
+
+**Opt-in on both sides, off by default.**
+
+- On the phone, the switch "Get the computer's clipboard" (Rime Remote → the
+  settings dialog, stored as `clipboard_on`). While it is on and the app is
+  unlocked, the report's `can` has `"clipboard"`, and a change of the switch
+  sends a new report at once (§2.9's `can` rule).
+- On the computer, the Shell's switch "Send my clipboard to my phone"
+  (Settings → Paired devices → Clipboard, `phoneClipboard`). rime-remoted does
+  not know about it and does not enforce it. The switch only decides whether
+  the Shell watches the clipboard at all.
+
+**rime-remoted never reads the clipboard.** It is a service. The clipboard
+belongs to the graphical session, and the Shell watches it.
+
+**Computer → phone.** A control-socket request, own user only, as `ring` and
+`focus` are. A paired phone has no verb that causes a clipboard send.
+
+```json
+{"cmd":"clipboard","text":"…","sensitive":true}
+→ {"reply":"clipboard_sent","reached":1}
+```
+
+- `text` is sent verbatim: not trimmed, line breaks kept. It is at most
+  65,536 bytes of UTF-8. Larger text is `bad_request`, never cut. Empty text
+  is refused too.
+- `sensitive` is optional and carried only when true. It means a password
+  manager's copy, as the caller judged it.
+- `{"event":"clipboard","text":"…"}` (plus `"sensitive":true`) goes onto the
+  `device_events` channel of each connected phone whose last report has
+  `"clipboard"` in `can`. `reached` counts those phones. Zero is an answer,
+  not an error. There is no push and no outbox: a clipboard is worth nothing
+  later.
+- The encoded line, newline included, is at most 192 KiB. Text inside the
+  byte cap that escapes past that (mostly control characters, six bytes each)
+  is refused. Quotes and newlines escape to two bytes, so even text that is
+  all quotes fits: 128 KiB.
+- Each line is written whole within two seconds, or that phone's events
+  channel is given up. A line is never left half-written on the nonblocking
+  channel.
+- **Loop guard.** rime-remoted remembers the last `clipboard_write` text each
+  phone sent, for 10 seconds. A `clipboard` request with byte-for-byte that
+  text skips that phone, and other phones still get it. Without the guard,
+  the phone's own text would come straight back: the phone sets the clipboard
+  here, the Shell sees the change, and sends it on. The text is remembered
+  when the line passes, before rime-agentd decides on it. Revoke forgets it.
+- CLI: `rime remote clipboard [--sensitive]` reads the text from **stdin**
+  (it takes none in argv, because any process can read a command line). It
+  says how many phones took it and exits 0, also for none. It refuses empty
+  input, more than 65,536 bytes, and input that is not UTF-8.
+
+**Who can send.** Own user, not the §2.6 human-at-machine gate. The Shell
+runs this on every copy, from no terminal, and `send` refuses exactly that.
+So any process running as this user that can reach the control socket can
+put text on a phone that opted in. The phone's switch is that consent.
+rime-remoted does not check the Shell's switch.
+
+**The Shell's half** (rime-shell `PhoneClipboardService`). With the switch
+off, nothing watches the clipboard. With it on, the Shell runs
+`wl-paste --type text --watch sh -c <script>`. The script prints each text as
+base64, and the Shell pipes it into `base64 -d | rime remote clipboard`. The
+Shell never holds the text decoded, and the text never appears in argv.
+Measured on wl-clipboard 2.3.0, in a private headless labwc:
+
+- The watcher reports the clipboard once as it starts. That copy is not sent:
+  it is from before the switch went on, or before the Shell started.
+- `CLIPBOARD_STATE` is `data` (text on stdin), `nil` (nothing, or a non-text
+  offer such as an image, under `--type text`), `clear`, or `sensitive` (a
+  `wl-copy --sensitive` / `x-kde-passwordManagerHint` copy, with the data
+  still on stdin). Only `data` that is non-empty and at most 65,536 bytes is
+  sent. A sensitive copy is never sent, so the Shell itself never sets
+  `sensitive`; the flag is for other callers of the CLI.
+- `wl-copy --clear` ends the watcher (`wl_display_dispatch: Broken pipe`).
+  The Shell starts it again after 1 s, doubling to 30 s while it keeps
+  exiting with nothing read.
+- Copies close together: the first goes at once, then at most one per 500 ms,
+  and the latest wins. A copy that is not sent (sensitive, nothing, too long)
+  drops the text still waiting.
+
+**The phone.**
+
+- A `clipboard` line is applied only while the switch is on and the app is
+  unlocked. Both are checked again on receipt, so a machine holding an older
+  report is not obeyed.
+- The phone checks the text again: non-empty, at most 65,536 bytes of UTF-8,
+  and a `sensitive` that, if present, is a real boolean. A line failing any
+  of these is dropped.
+- It is applied with `ClipboardManager.setPrimaryClip`, plain text, labelled
+  "From <machine>". `sensitive` adds `ClipDescription.EXTRA_IS_SENSITIVE`
+  (`android.content.extra.IS_SENSITIVE`, honoured from Android 13), which
+  keeps the text out of Android's "copied" preview. No permission is needed.
+- The phone's event reader accepts lines up to 256 KiB (§2.5's events; it
+  was 16 KiB), above the computer's 192 KiB.
+- Proven on the emulator by `ClipboardOnDeviceTest`, with `rime remote
+  clipboard` as the broker-forwarded `clipboard` request:
+  - text lands verbatim, and `sensitive` sets the extra;
+  - with the switch off, `reached` is 0 and the clipboard is unchanged;
+  - text the phone just set with `clipboard_write` (into the stub desktop) is
+    not sent back, and the next copy is.
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in

@@ -363,6 +363,46 @@ clipboard with `wl-paste`, and only as text. At most 8,192 bytes of text and
 - The phone has to have told this computer that it can receive (an app with
   notifications allowed). Until then, `send` is refused and says why.
 
+There is no "Send to phone" in the file manager. Thunar runs as a background
+service (`thunar.service`), and `send` refuses anything that is not a
+terminal or Rime Settings. Use `rime remote send` in a terminal.
+
+## Your clipboard on your phone
+
+Text you copy on the computer can land on the phone's clipboard. It is off
+until you turn it on, and you turn it on separately on each side:
+
+- **On the phone:** in Rime Remote, open the settings dialog and turn on
+  **Get the computer's clipboard**. It works while the app is unlocked, and
+  needs no permission.
+- **On the computer:** in Rime Settings, open Paired devices and turn on
+  **Send my clipboard to my phone**.
+
+With both on, each text you copy goes to every connected phone that has the
+switch on. Android shows its own "copied" notice when it lands. These are
+never sent:
+
+- a password manager's copy (one it marks as sensitive);
+- images and other things that are not text;
+- an empty selection;
+- text over 64 KB.
+
+Text the phone itself just put on this computer's clipboard (with Send to
+Rime) is not sent back to that phone.
+
+The Shell hands each copy to `rime remote clipboard`, which you can use
+yourself. It reads the text from standard input:
+
+```
+$ printf 'door code 4417' | rime remote clipboard
+rime: put the text on the clipboard of 1 phone.
+$ pass show wifi | rime remote clipboard --sensitive
+```
+
+`--sensitive` keeps the text out of the phone's clipboard preview. Only this
+computer's own user can run it. A paired phone cannot ask for the computer's
+clipboard: it only receives what the computer sends.
+
 ## Your phone's notifications on the computer
 
 Rime Remote can show your phone's notifications on the computers it is paired

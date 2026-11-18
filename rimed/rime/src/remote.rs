@@ -535,7 +535,7 @@ fn clipboard(input: impl std::io::Read, sensitive: bool) -> Result<i32> {
         }
         Reply::ClipboardSent { reached } => {
             let phones = if reached == 1 { "phone" } else { "phones" };
-            eprintln!("rime: put the text on {reached} {phones}' clipboard.");
+            eprintln!("rime: put the text on the clipboard of {reached} {phones}.");
             Ok(0)
         }
         Reply::Error { message } => {
