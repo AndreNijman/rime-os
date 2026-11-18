@@ -819,6 +819,12 @@ fn revoke(state: &State, device: &str) -> Reply {
     if let Err(e) = state.save_devices(&store) {
         return Reply::error(format!("the device was not written: {e}"));
     }
+    // What waits on the phone fails as revoked BEFORE its connection is shut:
+    // a request keeps the first outcome it is given, and the connection's own
+    // thread would otherwise get there first with "disconnected".
+    state.messages.forget(&revoked.id);
+    state.calls.forget(&revoked.id);
+    state.photos.forget(&revoked.id);
     // A revoked device with a live connection is still holding one. The store
     // is what stops it reconnecting; this is what ends the connection it
     // already has, and without it "revoke" would mean "revoke, eventually".

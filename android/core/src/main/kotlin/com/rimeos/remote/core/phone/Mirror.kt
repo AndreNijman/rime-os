@@ -303,7 +303,27 @@ class MirrorOutbox(
     fun repliedElsewhere(key: String, nowMs: Long): Boolean {
         val had = key in shown || key == inflight || waiting[key] is MirrorItem.Post
         if (!had) return false
+        // Armed by [holdElsewhere] before the reply went: keep that window,
+        // and the app's answer if it already came, so only that answer and
+        // its repeats stay held back.
+        val armed = answeredElsewhere[key]
         remove(key)
+        answeredElsewhere[key] = armed ?: ((nowMs + Mirror.ABSORB_MS) to null)
+        while (answeredElsewhere.size > ABSORBING_KEPT) answeredElsewhere.remove(answeredElsewhere.keys.first())
+        return true
+    }
+
+    /**
+     * A reply to [key] from another computer is about to be sent: the app's
+     * update that follows within [Mirror.ABSORB_MS] is held back here, but
+     * this computer's copy stays until the reply has gone
+     * ([repliedElsewhere]). A reply that fails ([replyFailed]) then leaves
+     * the notification here as it was. False when this computer has nothing
+     * of [key].
+     */
+    fun holdElsewhere(key: String, nowMs: Long): Boolean {
+        val had = key in shown || key == inflight || waiting[key] is MirrorItem.Post
+        if (!had) return false
         answeredElsewhere[key] = (nowMs + Mirror.ABSORB_MS) to null
         while (answeredElsewhere.size > ABSORBING_KEPT) answeredElsewhere.remove(answeredElsewhere.keys.first())
         return true
