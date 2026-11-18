@@ -42,7 +42,7 @@
 //! every phone with a Full events channel as [`REMOVED_EVENT`], so the phone
 //! forgets it too.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Condvar, Mutex};
 
 use rime_remote_core::computer::About;
@@ -97,13 +97,26 @@ struct PeerOffer {
     offer: Offer,
 }
 
+/// One `(phone, computer)` pair's last try.
+#[derive(Debug, Clone, Copy)]
+struct Asked {
+    at_ms: u64,
+    delivered: bool,
+}
+
+/// How long a try that reached nobody waits before the next: the other
+/// computer may be asleep, or the phone may have left. A phone reports on
+/// every battery step, so without this each report would dial every computer.
+pub const RETRY_MS: u64 = 10 * 60 * 1000;
+
 /// What this module keeps in memory.
 #[derive(Default)]
 pub struct Intro {
     /// Offers peers asked for, at most one live per peer.
     offers: Mutex<Vec<PeerOffer>>,
-    /// `(phone, computer)` pairs this run already asked an offer for.
-    asked: Mutex<HashSet<(String, String)>>,
+    /// `(phone, computer)` pairs this run: when last tried, and whether an
+    /// offer reached the phone.
+    asked: Mutex<HashMap<(String, String), Asked>>,
     /// Phones waiting for [`supervise`].
     queue: Mutex<BTreeSet<String>>,
     wake: Condvar,
@@ -128,9 +141,26 @@ impl Intro {
         std::mem::take(&mut *q)
     }
 
-    /// Whether `(phone, computer)` was asked this run; marks it.
-    fn first_ask(&self, phone: &str, computer: &str) -> bool {
-        lock(&self.asked).insert((phone.to_string(), computer.to_string()))
+    /// Whether `(phone, computer)` may be tried at `now_ms`: never once an
+    /// offer reached the phone this run, and not again within [`RETRY_MS`] of
+    /// a try that did not. Marks the try.
+    fn may_try(&self, phone: &str, computer: &str, now_ms: u64) -> bool {
+        let mut asked = lock(&self.asked);
+        let key = (phone.to_string(), computer.to_string());
+        if let Some(a) = asked.get(&key) {
+            if a.delivered || now_ms.saturating_sub(a.at_ms) < RETRY_MS {
+                return false;
+            }
+        }
+        asked.insert(key, Asked { at_ms: now_ms, delivered: false });
+        true
+    }
+
+    /// An offer from `computer` reached phone `phone`: not tried again this run.
+    fn delivered(&self, phone: &str, computer: &str) {
+        if let Some(a) = lock(&self.asked).get_mut(&(phone.to_string(), computer.to_string())) {
+            a.delivered = true;
+        }
     }
 }
 
@@ -390,20 +420,23 @@ fn bring_targets(state: &State) -> Vec<Device> {
         .unwrap_or_default()
 }
 
-/// Ask each trusted computer, once this run, for an offer for `phone`, and
-/// hand each to it.
+/// Ask each trusted computer for an offer for `phone`, and hand each to it:
+/// once an offer reached the phone, never again this run; after a try that
+/// reached nobody, again after [`RETRY_MS`].
 pub fn bring(state: &State, phone: &str) {
     if !may_bring(state, phone) {
         return;
     }
     for c in bring_targets(state) {
-        if !state.intro.first_ask(phone, &c.id) {
+        if !state.intro.may_try(phone, &c.id, rime_remote_core::now_ms()) {
             continue;
         }
         match ask_offer(state, &c) {
             Ok(Some(offer)) => {
                 let line = json!({"event": JOIN_EVENT, "offer": offer, "computer": c.name, "by": state.machine});
-                if !state.events.send(phone, &line) {
+                if state.events.send(phone, &line) {
+                    state.intro.delivered(phone, &c.id);
+                } else {
                     eprintln!("rime-remoted: the phone left before it could be told about '{}'", c.name);
                 }
             }
@@ -688,6 +721,17 @@ mod tests {
         report(&state, &phone, &["join"]);
         let _companion = state.events.open_for(&phone, 2, false).expect("open");
         assert!(!may_bring(&state, &phone));
+    }
+
+    #[test]
+    fn a_try_that_reached_nobody_is_tried_again_later_and_a_delivered_one_never() {
+        let intro = Intro::default();
+        assert!(intro.may_try("p", "c", 1_000), "the first try");
+        assert!(!intro.may_try("p", "c", 1_000 + RETRY_MS - 1), "not again at once");
+        assert!(intro.may_try("p", "d", 1_000), "another computer is its own pair");
+        assert!(intro.may_try("p", "c", 1_000 + RETRY_MS), "a try that reached nobody is tried again");
+        intro.delivered("p", "c");
+        assert!(!intro.may_try("p", "c", 1_000 + 10 * RETRY_MS), "an offer that reached the phone is not sent again");
     }
 
     #[test]
