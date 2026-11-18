@@ -652,17 +652,22 @@ no machine whose hello lacks it.
 and then each app whose playback may show (none by default). Then, while
 unlocked and connected to a machine offering the feature: the newest state of
 the app's active media session that is playing (or, if none is, the one that
-paused most recently), on connect and on each change of state, track or
-position jump, at most every 500 ms; `playing: null` when nothing allowed is
-active. Never sent: artwork, URIs, queue, and anything from an app not turned
-on.
+paused most recently), on connect and on each change of state, track, speed or
+position jump, at most every 500 ms (a change inside that wait is sent when it
+ends, as the newest state); `playing: null` when nothing allowed is active or
+the switch is turned off. A session that is buffering is sent as `playing` at
+rate 0; a stopped one is not shown, so the phone never sends `stopped`. `app`
+is the app's label, or its package name where Android does not let this app
+read the label (an app with no launcher icon). Never sent: artwork, URIs,
+queue, and anything from an app not turned on.
 
 **Tests never put a player on the real desktop.** With
 `RIME_REMOTED_MEDIA_STUB=<dir>`, rime-remoted appends each change to
 `<dir>/media.jsonl` (`{"op":"show","player":…,"identity":…,"status":…,
 "title":…,…}` / `{"op":"gone","player":…}`) instead of the bus; a test build
 always uses the stub. Every harness sets it; the device suite refuses to start
-rime-remoted without it and its broker reads the lines back with `media_log`.
+rime-remoted without it and its broker reads the lines back with `media_log`
+(`MediaOnDeviceTest`, driving the test helper app's media session).
 The bus path is proven on a private bus by `tests/test-remoted-media-bus.sh`
 (properties read back with `busctl`, the position moving with the clock,
 control refused, `playerctl -l` with and without `--ignore-player=rime_phone`,
