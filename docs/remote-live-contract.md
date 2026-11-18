@@ -572,7 +572,10 @@ sends that action's `PendingIntent`, as Android's own reply field would: the
 app that posted the notification sends the message, as the person. Apps
 usually post the notification again after a reply ("You: …"); the phone does
 not send the first such update of that key within 5 s to the machine that
-replied, so the reply does not pop up there again. The phone lists `"reply"`
+replied, so the reply does not pop up there again. Every other machine it
+sent that key to gets `phone_notification_removed` for it, and that same first
+update within 5 s is not sent to them either: answered on one machine, it is
+not news on the others. The phone lists `"reply"`
 while it holds notification access and the switch is on.
 
 **What the phone sends.** Nothing until the person grants notification access

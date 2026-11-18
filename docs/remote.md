@@ -436,7 +436,9 @@ screen, and a message you can answer from the phone's own notification gets a
 reply field on the computer.
 What you type there is sent from the phone by the app that posted the
 notification, as you, exactly as if you had used the reply field on the phone.
-The notification closes on the computer and stays on the phone.
+The notification closes on the computer and stays on the phone. It also
+closes on every other computer the phone is paired with: answered on one, the
+conversation is not news on the others.
 If the phone is not connected, or replying has been turned off on it since,
 the computer shows **Reply not sent** with what you typed.
 
