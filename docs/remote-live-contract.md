@@ -372,7 +372,7 @@ uses neither with a machine whose hello lacks them.
   whole number from 0 to 100, `charging` a boolean, `can` at most 16 words; any
   of them may be left out. A value outside those is `bad_request` and nothing
   is stored. Of `can`, only `"ring"` is kept. (Later sections add `network`,
-  `dnd` and more `can` words: §2.6, §2.7, §2.9, §2.11, §2.12.) The phone leaves `"ring"` out
+  `dnd` and more `can` words: §2.6, §2.7, §2.9, §2.11, §2.12, §2.13.) The phone leaves `"ring"` out
   while its notifications or its "Ring my phone" channel are switched off.
   It reports when it connects, and again when charging starts or stops, the
   level moves 5 points, or 10 minutes pass.
@@ -963,11 +963,12 @@ Everything else is refused, whatever it is: `push_register` and
 `push_unregister` (a push carries `rime-agentd`'s session kind, id and start
 time, so only the full key may say where pushes go), `machine_status`, `machine_lock`,
 `media`, `media_control`, `volume`, `nex`, `nex_events`, `messages_sent`
-(a send needs an unlocked phone, §2.11), `companion_register`,
+(a send needs an unlocked phone, §2.11), `photos_reply` and
+`photos_fetch_reply` (photos need an unlocked phone, §2.13), `companion_register`,
 `companion_forget`, every `rime-agentd` verb (`hello`, `list`, `input`,
 `privilege_request`, `decide`, `clipboard_write`, …), a line with no readable
-`cmd`, and every other channel (`attach`, `receive`, `save_file`, nex's
-feed). A companion session reaches `rime-agentd` never, not even to be told
+`cmd`, and every other channel (`attach`, `receive`, `save_file`,
+`photos_upload`, nex's feed). A companion session reaches `rime-agentd` never, not even to be told
 no:
 
 ```json
@@ -1192,6 +1193,150 @@ history cannot be read, `calls` still answers with `current` and says why as
 §2.11's. `rime remote calls` is the first; `rime remote calls answer`,
 `decline`, `hangup` and `dial NUMBER` are the second (`--json` prints the
 reply's fields, or `{"error":…}`).
+
+### 2.13 Photos: the phone's recent photos, browsed and saved from the computer
+
+Feature `phone_photos`. Like Phone Link's Photos: the computer lists the
+phone's newest photos and screenshots as small thumbnails, and one request
+saves a full photo onto the computer. Images only: no video. Nothing about a
+photo is kept on the computer except the thumbnails of the last listing, in
+memory-backed storage, and the photos the person chose to save.
+
+**The phone offers it.** `can` (§2.5) has `"photos"` only while all hold: the
+person turned on "Photos on your computer" in the app (off by default),
+Android lets the app read images (READ_MEDIA_IMAGES on Android 13 and later,
+the partial "selected photos" access on Android 14 and later, or
+READ_EXTERNAL_STORAGE before 13), and the connection is a full one with the
+app unlocked. Never on a companion connection (§2.10): a photo is more than a
+battery level, so a phone that was restarted and not yet unlocked shows none.
+The phone checks its switch, its access and its lock again on every request,
+whatever an older report said. A machine never asks a phone without the word.
+
+**Partial access.** When the person allowed only some photos, Android shows
+the app those and no others, and every `photos_reply` line says
+`"partial":true`; the computer says so with the list ("only the photos you
+picked on the phone are shown").
+
+**Computer → phone**, on the phone's `device_events` channel:
+
+```json
+{"event":"photos_request","id":7,"limit":30}
+{"event":"photos_request","id":8,"before":1763452800000,"limit":30}
+{"event":"photos_fetch","id":9,"photo":1000004211}
+```
+
+- `photos_request`: the newest photos, newest first; `before` (unix ms,
+  exclusive) pages back by `date_ms`; `limit` is 1 to 60.
+- `photos_fetch`: send the original of photo `photo` (an id from a listing)
+  over a `photos_upload` channel (below).
+- Both are written only to a full connection's channel: for a companion one
+  the computer refuses before anything is written.
+
+**Phone → computer**, control verbs:
+
+```json
+{"cmd":"photos_reply","id":7,"photos":[{"id":1000004211,"name":"PXL_20261118_0412.jpg","date_ms":1763452800000,"width":4080,"height":3072,"size":3145728,"mime":"image/jpeg","thumb":"<base64url JPEG>"}],"more":true}
+{"cmd":"photos_reply","id":7,"photos":[],"partial":true}
+{"cmd":"photos_reply","id":7,"error":"off"}
+{"cmd":"photos_fetch_reply","id":9,"error":"not_found"}
+→ {"reply":"ok"}
+```
+
+- `photos_reply`: newest first, in one or more lines; every line but the
+  last has `"more":true`. A line is at most 60,000 bytes (a wire frame holds
+  65,514), so the phone puts as many photos in a line as fit and one always
+  fits. At most 64 lines and 2.5 MiB for one answer, and no more photos than
+  `limit`; past either, the request fails.
+- A photo: `id` (a whole number, the phone's own), `name`, `date_ms` (when it
+  was taken, or added when the phone does not know), `width`, `height`,
+  `size` (bytes of the original), `mime` (`image/…`), and `thumb`: a JPEG,
+  base64url without padding, longest side at most 256 px, at most 24 KiB
+  (the computer accepts up to 32 KiB). The phone re-encodes every thumbnail
+  from pixels, so no EXIF, location or other metadata is in it; the computer
+  drops every APP1 to APP15 and COM segment again before it writes one, and
+  a thumbnail that is not a JPEG is left out (the photo stays in the list
+  without one). `thumb` may be left out when the phone could not make one.
+- `photos_fetch_reply` answers a `photos_fetch` only when the phone will not
+  send it; a photo it sends needs no line here.
+- `error` words: `off`, `no_permission`, `locked`, `busy`, `not_found`,
+  `too_large`, `failed`. An unknown word is read as `failed`. `not_found`: no
+  such photo, or not one the phone may show (partial access).
+- As in §2.11: an answer whose `id` is not the open request of that device
+  AND the connection it was written on gets `unknown_id`; one that breaks a
+  rule above gets `bad_request`; the computer cleans every text again (a name
+  at 120 characters, reduced as §1.8 reduces a file name; a mime type at 40
+  ASCII characters) and does not rely on the phone.
+
+**The upload.** `Open` with
+
+```json
+{"cmd":"photos_upload","id":9,"name":"PXL_20261118_0412.jpg","len":3145728}
+→ {"reply":"uploading","len":3145728}
+   … exactly len bytes, as Data …
+← {"reply":"uploaded","len":3145728}   (as Data on the channel, then Close)
+```
+
+- Answered by rime-remoted, not forwarded. Taken on any FULL connection of
+  the device the fetch was written to (the phone opens a connection of its
+  own for an upload, as for §1.8), only while that fetch waits, and once. An
+  unknown, finished or other device's id is
+  `{"reply":"error","code":"unknown_id",…}` and a close.
+- Everything refusable (the id, `len` of 1 byte to 64 MiB, the name) is
+  refused BEFORE `uploading`, so no byte crosses to be thrown away.
+- Nothing arriving for 30 s ends the upload, and so does the whole upload
+  taking longer than 300 s plus one second per 128 KiB. A channel closed
+  before `len` bytes fails the save and leaves no file.
+- The original is sent as Android gives it to the app. Rime Remote does not
+  ask for ACCESS_MEDIA_LOCATION, so on Android 10 and later Android blanks
+  the location in a photo's EXIF before the app reads it (the length does not
+  change); the camera, date and the rest stay.
+
+**One list and one fetch per phone at a time** (`busy`). A list belongs to
+the connection it was written on, and fails at once when that connection ends
+or the device is revoked. A fetch fails at once on revoke, and when the
+connection it was written on ends before an upload began. The computer waits
+30 s for a whole list, 20 s for an upload to begin (or a refusal), then as
+above.
+
+**Thumbnails on the computer.** Each photo's thumbnail is written to
+`$XDG_RUNTIME_DIR/rime-remote/photos/<device id>/<photo id>.jpg` (the
+directory 0700, the file 0600; the runtime directory is memory-backed and
+the user's own, never the home directory). The file name is built from the
+whole number, never from a phone's text. A listing without `before` replaces
+the device's files; one with `before` adds a page to them, up to 600 files,
+past which it replaces them too. They are all removed when the connection that
+asked for the listing ends, when the device is revoked, when its report no
+longer has `"photos"`, and when rime-remoted starts.
+
+**Saving.** The person's own process opens the file: `rime remote photos
+save` creates a hidden file (`O_EXCL|O_NOFOLLOW`, 0600) in the folder, and
+passes it with the request as one `SCM_RIGHTS` descriptor, as `send` passes
+a file (§2.6): rime-remoted has a private `/tmp` and no view of the caller's
+working directory, so a path would be wrong. rime-remoted writes the photo's
+bytes into it and answers; the CLI then checks the length, gives the file
+mode 0644 and its name. A name already there is never replaced: the copy
+becomes `PXL_… (2).jpg`, and so on (a hard link, which fails rather than
+replaces; a rename where the file system has no hard links). A save that
+fails removes the hidden file. The folder is `--to DIR`, else
+`$XDG_PICTURES_DIR/Rime Remote` (from `~/.config/user-dirs.dirs`), else
+`~/Pictures/Rime Remote`, created if missing.
+
+**The control socket.**
+
+```json
+{"cmd":"photos","device":"<id>","before":1763452800000,"limit":30}
+→ {"reply":"photos","device":"<name>","photos":[{"id":…,"name":…,"date_ms":…,"width":…,"height":…,"size":…,"mime":…,"thumb":"/run/user/1000/rime-remote/photos/<device id>/<photo id>.jpg"}],"partial":false}
+{"cmd":"photos_save","device":"<id>","photo":1000004211}   + the open file, SCM_RIGHTS
+→ {"reply":"photo_saved","device":"<name>","photo":1000004211,"name":"PXL_20261118_0412.jpg","len":3145728}
+```
+
+`thumb` in the reply is the file's path, or absent when there is none.
+`device` may be left out when exactly one paired phone offers photos. Both
+verbs are allowed only to a person at this machine, as §2.11's: a scheduled
+job, an agent session or any other process of the user is refused, for
+listing as well as saving. `rime remote photos` is the first (`--json` prints
+the reply's fields, or `{"error":…}`); `rime remote photos save ID [--to
+DIR]` is the second (`--json`: `{"device","photo","path","len"}`).
 
 ## 3. The phone
 
