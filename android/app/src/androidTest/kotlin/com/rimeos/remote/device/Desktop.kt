@@ -269,6 +269,18 @@ object Desktop {
         check(reply.optString("reply") == "ok") { "the broker did not reply to the stub notification: $reply" }
     }
 
+    /**
+     * `rime remote devices --json` on the computer, run by the broker against
+     * this run's rime-remoted: the device list as the person at the computer
+     * sees it, `companion` included.
+     */
+    fun remoteDevicesJson(): List<JSONObject> {
+        val reply = ask(JSONObject().put("cmd", "remote_devices_json").toString())
+        check(reply.optString("reply") == "ok") { "the broker did not run rime remote devices: $reply" }
+        val a = reply.getJSONArray("devices")
+        return (0 until a.length()).map { a.getJSONObject(it) }
+    }
+
     private fun requestReply(line: String): JSONObject {
         val reply = ask(line)
         check(reply.optString("reply") == "request") {

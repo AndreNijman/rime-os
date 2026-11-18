@@ -104,7 +104,7 @@ cleanup() {
 trap cleanup EXIT
 
 bin=$repo/rimed/target/debug
-for b in rime-agentd rime-remoted; do
+for b in rime-agentd rime-remoted rime; do
   if [ ! -x "$bin/$b" ]; then
     echo "FAIL: $bin/$b is not built. Run: (cd $repo/rimed && cargo build --workspace)"
     exit 1
@@ -131,6 +131,7 @@ stale_against() {
 }
 stale_against "$bin/rime-agentd"  "$repo/rimed/rime-agentd/src"  "$repo/rimed/rime-agent-core/src"
 stale_against "$bin/rime-remoted" "$repo/rimed/rime-remoted/src" "$repo/rimed/rime-remote-core/src"
+stale_against "$bin/rime"         "$repo/rimed/rime/src"
 
 root=$state/daemons
 rm -rf "$root"; mkdir -p "$root"/run "$root"/state "$root"/scratch
@@ -533,6 +534,18 @@ def notify_reply(nid, text):
         f.write(json.dumps({"id": nid, "reply": text}) + "\n")
     return json.dumps({"reply": "ok"})
 
+def remote_devices_json():
+    """`rime remote devices --json`, from THIS process: the person at the
+    computer asking what is paired, through the same CLI they would type.
+    It reaches this run's rime-remoted only: XDG_RUNTIME_DIR is the run's own."""
+    env = dict(os.environ, XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
+               XDG_STATE_HOME=os.path.join(ROOT, "state"))
+    p = subprocess.run([os.path.join(BIN, "rime"), "remote", "devices", "--json"],
+                       env=env, capture_output=True, timeout=60)
+    if p.returncode != 0:
+        return json.dumps({"reply": "error", "message": p.stderr.decode(errors="replace").strip()})
+    return json.dumps({"reply": "ok", "devices": json.loads(p.stdout)})
+
 def media_call(call):
     """A method call on a phone's stub media player (contract §2.8), as a
     reader on the computer's bus would make it: one complete line
@@ -584,6 +597,8 @@ class H(socketserver.StreamRequestHandler):
                 out = notify_log()
             elif cmd == "media_log":
                 out = media_log()
+            elif cmd == "remote_devices_json":
+                out = remote_devices_json()
             elif cmd == "media_call":
                 out = media_call(req.get("call"))
             elif cmd == "focus_file":
