@@ -369,10 +369,10 @@ uses neither with a machine whose hello lacks them.
 ```
 
 - Answered by rime-remoted, under the handshake's device id. `battery` is a
-  whole number from 0 to 100, `charging` a boolean, `can` at most 8 words; any
+  whole number from 0 to 100, `charging` a boolean, `can` at most 16 words; any
   of them may be left out. A value outside those is `bad_request` and nothing
   is stored. Of `can`, only `"ring"` is kept. (Later sections add `network`,
-  `dnd` and more `can` words: §2.6, §2.7, §2.9.) The phone leaves `"ring"` out
+  `dnd` and more `can` words: §2.6, §2.7, §2.9, §2.11, §2.12.) The phone leaves `"ring"` out
   while its notifications or its "Ring my phone" channel are switched off.
   It reports when it connects, and again when charging starts or stops, the
   level moves 5 points, or 10 minutes pass.
@@ -956,7 +956,7 @@ sends changes it. `remote_hello` says which (§2.1).
 
 | | allowed |
 | --- | --- |
-| control verbs | `remote_hello`, `phone_report`, `ring_ack`, `offer_ack`, `offer_done`, `phone_notification`, `phone_notification_removed`, `phone_media`, `messages_reply`, `messages_changed` |
+| control verbs | `remote_hello`, `phone_report`, `ring_ack`, `offer_ack`, `offer_done`, `phone_notification`, `phone_notification_removed`, `phone_media`, `messages_reply`, `messages_changed`, `call_state`, `call_done`, `call_history_reply` |
 | channels (`Open`) | `device_events`, `take_offer` |
 
 Everything else is refused, whatever it is: `push_register` and
@@ -1081,6 +1081,117 @@ login session or Rime Settings, as for pairing. A scheduled job, an agent
 session or any other process of the user is refused, for reading as well as
 sending. `rime remote messages` and `rime remote messages send` are these
 two (`--json` prints the reply's fields, or `{"error":…}`).
+
+### 2.12 Calls: the phone's calls, seen and handled from the computer
+
+Feature `phone_calls`. Like calls on a Mac with an iPhone, or Phone Link's
+Calls, without the audio: a call ringing on the phone shows on the computer
+with Answer and Decline; from the computer the person answers, declines or
+hangs up the phone's call, dials a number from it, and reads its call history.
+The sound stays on the phone (or a headset paired with it). Nothing is stored
+on the computer: the current call is held in memory with the connection that
+reported it, and a history answer only until the reply to the caller goes.
+
+**The phone offers it.** `can` (§2.5) has `"calls"` only while the person
+turned on "Calls on your computer" in the app (off by default) and Android
+granted READ_PHONE_STATE. With it, each of these says what else the computer
+may do, and each needs its own permission:
+
+| word | permission | lets the computer |
+| --- | --- | --- |
+| `calls_history` | READ_CALL_LOG | ask for the history (and the phone can name a ringing caller) |
+| `calls_answer` | ANSWER_PHONE_CALLS | answer, decline and hang up |
+| `calls_dial` | CALL_PHONE | dial; never sent on a companion connection |
+
+The phone checks its switch and permissions again on every request, whatever
+an older report said.
+
+**Phone → computer**, control verbs:
+
+```json
+{"cmd":"call_state","state":"ringing","number":"+15555215556","name":"Pat","since_ms":1763452800000}
+{"cmd":"call_state","state":"idle","since_ms":1763452830000}
+→ {"reply":"ok"}
+{"cmd":"call_done","id":3,"ok":true}
+{"cmd":"call_done","id":4,"ok":false,"error":"no_call"}
+{"cmd":"call_history_reply","id":5,"calls":[{"number":"+15555215556","name":"Pat","type":"missed","date_ms":1763452800000,"duration_s":0}],"more":true}
+{"cmd":"call_history_reply","id":5,"error":"off"}
+→ {"reply":"ok"}
+```
+
+- `call_state`: `state` is `ringing`, `active`, `held` or `idle`; `since_ms`
+  (unix ms, the phone's clock) is when it entered that state. `number` and
+  `name` may be left out; `name` is a contact's, only when the person allowed
+  contacts. The phone says it when the state changes, and once on a new
+  connection while a call is going. A `call_state` from a phone whose report
+  lacks `"calls"` is refused (`code` `off`) and changes nothing. Android
+  reports a ringing call twice, once before the number is known: a numberless
+  `ringing` after one with a number keeps the number. Rime Remote on Android
+  never sends `held`, because Android does not tell an app that.
+- `call_done` answers one `call_action`: `ok`, or `error`.
+- `call_history_reply`: newest first, in one or more lines; every line but
+  the last has `"more":true`. At most 64 lines and 256 KiB for one answer, and
+  no more calls than `limit`. `type` is `incoming`, `outgoing`, `missed` or
+  `rejected`; voicemail is left out. `number` is empty for a withheld number.
+- `error` words: `off`, `no_permission`, `locked`, `busy`, `no_call`,
+  `emergency`, `failed`. An unknown word is read as `failed`. `emergency`: the
+  phone does not dial an emergency number for a computer; that call is made
+  on the phone.
+- As in §2.11: an answer whose `id` is not the open request of that device
+  AND connection gets `unknown_id`; one that breaks a rule above gets
+  `bad_request`; the computer cleans every text again (a number at 40
+  characters, a name at 60) and does not rely on the phone.
+
+**Computer → phone**, on the phone's `device_events` channel:
+
+```json
+{"event":"call_action","id":3,"action":"answer"}
+{"event":"call_action","id":6,"action":"dial","number":"+15555215556"}
+{"event":"call_history_request","id":5,"limit":20,"before":1763452800000}
+```
+
+- `action` is `answer`, `decline`, `hangup` or `dial`; only `dial` carries a
+  `number` (3 to 20 digits, an optional leading `+`). The computer checks the
+  phone's last report and call first: answer and decline need a ringing call,
+  hangup any call, dial none.
+- **Locked phones.** Answer, decline and hangup are sent on a companion
+  connection (§2.10) too, as the phone's own lock screen allows them. Dial is
+  not: on a companion connection the computer refuses it before anything is
+  written, and the phone refuses it too (`locked`).
+- `call_history_request`: `limit` 1 to 50, `before` (unix ms) pages back.
+
+**One request of each kind per phone at a time** (`busy`). A request belongs
+to the connection it was written on: when that connection ends, or the device
+is revoked, it fails at once. The computer waits 10 s for a history and 10 s
+for an action's `call_done`. When the connection that reported a call ends,
+the call goes with it.
+
+**The ringing notification.** While a phone's call rings, the computer shows a
+notification through the same server as §2.7: summary "Call from <name or
+number>" (or "Incoming call"), app name "<phone> · Calls", no timeout, and
+Answer and Decline buttons when the report has `calls_answer`. It closes when
+the phone says the call stopped ringing, its connection ends, the device is
+revoked, or the report loses `"calls"`. A press is heard only from the
+notification server's current owner of `org.freedesktop.Notifications`, and
+only on this notification, as for an inline reply (§2.7); a press whose action
+fails shows a short notice saying why. A fresh ringing call counts against
+the phone's notification rate (§2.7); an update does not.
+
+**The control socket.**
+
+```json
+{"cmd":"calls","device":"<id>","before":1763452800000,"limit":20}
+→ {"reply":"calls","device":"<name>","current":{"state":"ringing","number":"+15555215556","since_ms":1763452800000},"calls":[…]}
+{"cmd":"call","device":"<id>","action":"dial","number":"+1 555 521 5556"}
+→ {"reply":"call_done","device":"<name>","action":"dial"}
+```
+
+`device` may be left out when exactly one paired phone offers calls. When the
+history cannot be read, `calls` still answers with `current` and says why as
+`history_error`. Both verbs are allowed only to a person at this machine, as
+§2.11's. `rime remote calls` is the first; `rime remote calls answer`,
+`decline`, `hangup` and `dial NUMBER` are the second (`--json` prints the
+reply's fields, or `{"error":…}`).
 
 ## 3. The phone
 

@@ -489,6 +489,47 @@ $ rime remote messages send --thread 42 < reply.txt
 - `--json` prints the conversations or messages for the Shell or a script,
   and `{"error":…}` with exit status 1 when it fails.
 
+## `rime remote calls`: your phone's calls on the computer
+
+A call ringing on your phone can show on the computer, with **Answer** and
+**Decline**, the way a Mac shows an iPhone's calls. From the computer you can
+also hang up, call a number from the phone, and see recent calls. There is no
+sound on the computer: talk on the phone, or on a headset paired with it. In
+the app, open **Calls on your computer** in the computers screen's settings,
+tap **Allow calls**, and turn it on. It is off until you do. As for SMS, an
+app installed from a file may need **Allow restricted settings** in App info
+before Android lets it read the call log.
+
+```
+$ rime remote calls
+Pixel 8: a call is ringing with +15555215556.
+WHEN      TYPE      WITH                               LENGTH
+2m ago    missed    +15555215556                       -
+1h ago    outgoing  Pat (+15555215556)                 4m 12s
+$ rime remote calls answer
+rime: Pixel 8 answered the call.
+$ rime remote calls hangup
+$ rime remote calls dial +15555215556
+```
+
+- While a call rings, a notification shows who it is from, if the phone
+  knows. Press **Answer** or **Decline** there, or use `rime remote calls
+  answer` and `decline`. It closes when the call stops ringing.
+- Answering, declining and hanging up work while the app is locked, if the
+  phone keeps working after a restart (above), as they do on the phone's lock
+  screen. Calling a number needs the app unlocked. The phone does not dial an
+  emergency number for the computer.
+- Each part has its own Android permission (see calls, call log, answer
+  calls, make calls); the screen shows what is not allowed, and the computer
+  says so if you ask for it.
+- **Only you can use it.** As for messages, `rime-remoted` answers `calls` only
+  to a terminal in your login session or Rime Settings. The number you dial is
+  on the command line; a number is not a secret the way a message is.
+- The computer keeps nothing: the history is read from the phone each time,
+  and the call it shows goes when the phone disconnects.
+- `--json` prints `{"device":…,"current":…,"calls":[…]}` for the Shell or a
+  script, and `{"error":…}` with exit status 1 when it fails.
+
 ## What your phone is playing, on the computer
 
 The song or podcast playing on your phone can show in the Shell's player, next
