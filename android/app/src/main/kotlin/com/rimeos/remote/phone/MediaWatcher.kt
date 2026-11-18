@@ -76,7 +76,7 @@ class MediaWatcher(private val context: Context, private val onChange: (MediaSta
         }
     }
 
-    /** Stop watching and let go of every session. */
+    /** Stop watching, let go of every session, and say nothing plays. */
     fun stop() {
         handler.post {
             if (!running) return@post
@@ -88,6 +88,9 @@ class MediaWatcher(private val context: Context, private val onChange: (MediaSta
             labels.clear()
             sessions = emptyList()
             board.clear()
+            // The last word, on this thread: a publish queued before this
+            // stop has already run, so nothing can show a player after it.
+            onChange(null)
         }
     }
 
