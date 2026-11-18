@@ -116,6 +116,11 @@ pub enum Reply {
         /// older daemon, so a newer `rime` reads none.
         #[serde(default)]
         phones: std::collections::BTreeMap<String, crate::phone::PhoneReport>,
+        /// The ids of the paired devices that have a companion key: they keep
+        /// working after the phone restarts. The key itself is never sent;
+        /// `devices` carries none.
+        #[serde(default)]
+        companions: Vec<String>,
     },
     /// A `focus` line went to this many phones' open events channels. Zero
     /// is an answer, not an error: no phone connected, or none said "focus".
@@ -232,10 +237,7 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::Status => status(state),
         Request::Pair => pair(state),
         Request::Devices => match state.devices() {
-            Ok(store) => Reply::Devices {
-                devices: store.list().into_iter().cloned().collect(),
-                phones: state.phones(),
-            },
+            Ok(store) => devices_reply(&store, state.phones()),
             Err(e) => Reply::error(e.to_string()),
         },
         Request::Revoke { device } => revoke(state, &device),
@@ -247,6 +249,32 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
             name,
             text,
         } => send(state, &device, &kind, name, text, fds),
+    }
+}
+
+/// The device list as `rime remote devices` gets it: whether a device has a
+/// companion key, and never the key.
+fn devices_reply(
+    store: &rime_remote_core::device::DeviceStore,
+    phones: std::collections::BTreeMap<String, crate::phone::PhoneReport>,
+) -> Reply {
+    let list = store.list();
+    let companions = list
+        .iter()
+        .filter(|d| d.is_active() && d.companion_key.is_some())
+        .map(|d| d.id.clone())
+        .collect();
+    let devices = list
+        .into_iter()
+        .map(|d| rime_remote_core::device::Device {
+            companion_key: None,
+            ..d.clone()
+        })
+        .collect();
+    Reply::Devices {
+        devices,
+        phones,
+        companions,
     }
 }
 
@@ -839,7 +867,7 @@ mod tests {
                 qr: "apex-remote:abc".into(),  // rime-rename: keep (SCHEME)
                 expires_ms: 1,
             },
-            Reply::Devices { devices: vec![], phones: Default::default() },
+            Reply::Devices { devices: vec![], phones: Default::default(), companions: vec![] },
             Reply::Rang { device: "Pixel".into(), path: "link".into() },
             Reply::Focused { reached: 0 },
             Reply::Sent { device: "Pixel".into(), path: "waiting".into(), id: 3, push_error: Some("503".into()) },
@@ -860,5 +888,25 @@ mod tests {
             assert!(!text.contains('\n'), "{text}");
             serde_json::from_str::<Reply>(&text).expect("round trip");
         }
+    }
+
+    #[test]
+    fn the_device_list_says_which_have_a_companion_key_and_never_carries_one() {
+        let mut store = rime_remote_core::device::DeviceStore::default();
+        let k = |n: u8| rime_remote_core::b64_encode(&[n; 32]);
+        let a = store.pair(&k(1), "a", 1, false).expect("pair");
+        let b = store.pair(&k(2), "b", 2, false).expect("pair");
+        let gone = store.pair(&k(3), "gone", 3, false).expect("pair");
+        store.set_companion(&a.id, &k(11)).expect("set");
+        store.set_companion(&gone.id, &k(13)).expect("set");
+        store.revoke(&gone.id, 4).expect("revoke");
+        let reply = devices_reply(&store, Default::default());
+        let text = serde_json::to_string(&reply).expect("serialise");
+        assert!(!text.contains(&k(11)) && !text.contains(&k(13)), "{text}");
+        assert!(!text.contains("companion_key"), "{text}");
+        let Reply::Devices { companions, devices, .. } = reply else { panic!("{text}") };
+        assert_eq!(companions, vec![a.id.clone()], "a revoked device's key is no companion");
+        assert_eq!(devices.len(), 3);
+        assert!(!companions.contains(&b.id));
     }
 }

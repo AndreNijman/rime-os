@@ -190,6 +190,10 @@ enum Reply {
         devices: Vec<rime_remote_core::device::Device>,
         #[serde(default)]
         phones: std::collections::BTreeMap<String, Phone>,
+        /// Ids of the devices with a companion key. Absent from an older
+        /// daemon, which has none.
+        #[serde(default)]
+        companions: Vec<String>,
     },
     Rang {
         device: String,
@@ -349,11 +353,11 @@ fn pair(text: bool) -> Result<i32> {
 }
 
 fn devices(json: bool) -> Result<i32> {
-    let Reply::Devices { devices, phones } = call(&Request::Devices)? else {
+    let Reply::Devices { devices, phones, companions } = call(&Request::Devices)? else {
         return unexpected();
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&with_phones(&devices, &phones)?)?);
+        println!("{}", serde_json::to_string_pretty(&with_phones(&devices, &phones, &companions)?)?);
         return Ok(0);
     }
     if devices.is_empty() {
@@ -386,6 +390,14 @@ fn devices(json: bool) -> Result<i32> {
             gated.join(", ")
         );
     }
+    let lasting = companion_names(&devices, &companions);
+    if !lasting.is_empty() {
+        println!(
+            "\n{} keeps working after a restart: its battery, notifications and ring reach this \
+             machine before the phone is unlocked. Nothing else does until it is.",
+            lasting.join(", ")
+        );
+    }
     let reported: Vec<String> = devices
         .iter()
         .filter(|d| d.is_active())
@@ -400,18 +412,37 @@ fn devices(json: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// The names of the active devices with a companion key.
+fn companion_names<'a>(devices: &'a [rime_remote_core::device::Device], companions: &[String]) -> Vec<&'a str> {
+    devices
+        .iter()
+        .filter(|d| d.is_active() && companions.contains(&d.id))
+        .map(|d| d.name.as_str())
+        .collect()
+}
+
 /// The device list as JSON, each paired phone with its last report under
-/// `phone`. Added to each device rather than beside the list, so a reader of
-/// the old array keeps working.
+/// `phone` and `companion` saying whether it keeps working after a restart.
+/// Added to each device rather than beside the list, so a reader of the old
+/// array keeps working. A companion key is never printed, even from a daemon
+/// that sent one.
 fn with_phones(
     devices: &[rime_remote_core::device::Device],
     phones: &std::collections::BTreeMap<String, Phone>,
+    companions: &[String],
 ) -> Result<serde_json::Value> {
     let mut out = Vec::with_capacity(devices.len());
     for d in devices {
         let mut v = serde_json::to_value(d)?;
-        if let (Some(p), Some(obj)) = (phones.get(&d.id).filter(|_| d.is_active()), v.as_object_mut()) {
-            obj.insert("phone".into(), serde_json::to_value(p)?);
+        if let Some(obj) = v.as_object_mut() {
+            obj.remove("companion_key");
+            obj.insert(
+                "companion".into(),
+                serde_json::Value::Bool(d.is_active() && companions.contains(&d.id)),
+            );
+            if let Some(p) = phones.get(&d.id).filter(|_| d.is_active()) {
+                obj.insert("phone".into(), serde_json::to_value(p)?);
+            }
         }
         out.push(v);
     }
@@ -887,6 +918,7 @@ mod tests {
             r#"{"reply":"error","message":"nope"}"#,
             r#"{"reply":"offer","qr":"apex-remote:abc","expires_ms":1}"#,  // rime-rename: keep (SCHEME)
             r#"{"reply":"devices","devices":[]}"#,
+            r#"{"reply":"devices","devices":[],"companions":["aaaa"]}"#,
             r#"{"reply":"devices","devices":[],"phones":{"d":{"battery":5,"can":["ring"],"reported_ms":1}}}"#,
             r#"{"reply":"rang","device":"Pixel","path":"push"}"#,
             r#"{"reply":"focused","reached":0}"#,
@@ -976,7 +1008,7 @@ mod tests {
         };
         let phones: std::collections::BTreeMap<String, Phone> =
             [("aaaa".to_string(), phone.clone()), ("bbbb".to_string(), phone.clone())].into();
-        let v = with_phones(&devices, &phones).expect("json");
+        let v = with_phones(&devices, &phones, &[]).expect("json");
         assert_eq!(v[0]["phone"]["battery"], 62);
         assert!(v[1].get("phone").is_none(), "a revoked device's report must not show");
         assert!(v[2].get("phone").is_none(), "a device that never reported has none");
@@ -1104,5 +1136,23 @@ mod tests {
         let line = connection_line(&fresh, "not measured yet");
         assert!(line.contains("unmeasured"), "{line}");
         assert!(!line.contains("poor"), "{line}");
+    }
+
+    #[test]
+    fn a_device_with_a_companion_key_says_so_and_the_key_is_never_printed() {
+        let devices: Vec<rime_remote_core::device::Device> = serde_json::from_str(
+            r#"[{"id":"aaaa","name":"Pixel","public_key":"k","paired_ms":1,"companion_key":"SECRETISH"},
+                {"id":"bbbb","name":"Old","public_key":"k2","paired_ms":2,"revoked_ms":3},
+                {"id":"cccc","name":"Tab","public_key":"k3","paired_ms":4}]"#,
+        )
+        .expect("devices");
+        let companions = vec!["aaaa".to_string(), "bbbb".to_string()];
+        let v = with_phones(&devices, &Default::default(), &companions).expect("json");
+        assert_eq!(v[0]["companion"], true);
+        assert_eq!(v[1]["companion"], false, "a revoked device keeps nothing working");
+        assert_eq!(v[2]["companion"], false);
+        let text = v.to_string();
+        assert!(!text.contains("SECRETISH") && !text.contains("companion_key"), "{text}");
+        assert_eq!(companion_names(&devices, &companions), ["Pixel"]);
     }
 }
