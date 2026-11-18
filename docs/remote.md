@@ -102,6 +102,8 @@ ID                 NAME                 STATE     PATH     LAST SEEN
 | `requires_user_verification` | whether this machine requires the device to have re-authenticated its user |
 | `last_path` | the transport the last completed handshake arrived over |
 | `companion` | whether the device has a companion key, so it keeps working after the phone restarts (see below). The key itself is never printed |
+| `introduced_by` | `{id, name}` of the computer that brought this phone here, or absent for a phone you paired here (see "Phones and computers that join by themselves") |
+| `allowed_ms` | Unix ms at which you allowed a phone another computer brought, or absent |
 
 The `STATE` column is **derived from `revoked_ms` alone**: `revoked` if it is
 set, `paired` if it is not. There is no third state and no stored status field
@@ -252,8 +254,9 @@ that shape; a relaxed origin check would not do.
 Two Rime computers you own can pair with each other. In this release that
 makes them known to each other and nothing more: a paired computer may say
 hello, ask the other's name and version, pass on the computers it removed,
-and say how it is doing (battery, power mode, whether it is locked, wired or
-Wi-Fi, how long it has been up). **Pairing is not authority.** A
+say how it is doing (battery, power mode, whether it is locked, wired or
+Wi-Fi, how long it has been up), and ask for a pairing offer to hand to your
+phone (see "Phones and computers that join by themselves" below). **Pairing is not authority.** A
 paired computer cannot run anything, open a terminal, read a file, see a
 session, answer a privilege prompt or use a phone feature on the other. A
 session from another computer never reaches `rime-agentd` at all, not even to
@@ -266,6 +269,7 @@ rime remote computers list [--json]
 rime remote computers ping <computer> [--via lan|relay|any] [--json]
 rime remote computers remove <computer>
 rime remote computers forget <computer>
+rime remote computers allow <computer>
 ```
 
 **Pairing.** On one computer run `add --show-code`. It prints a six-digit code
@@ -332,6 +336,56 @@ then pair them with `add` and a new code. Like removing, it must be you at the
 computer. After `forget`, an older removal that another computer passes on is
 ignored, but a removal made later, anywhere, counts again. Do not give a
 removed computer a new key instead (that unpairs every phone it has).
+
+### Phones and computers that join by themselves
+
+With "Join my other computers automatically" on in Rime Remote on the phone
+(it is on when you set the app up, and off for a phone that was already set
+up before this release), you pair a phone with one computer and a computer
+with another, and the rest follows:
+
+- **Your phone introduces two computers it is paired with.** When it is
+  unlocked and connected to both, it gives each one the other's name, key and
+  addresses. Each computer then shows "Laptop joined your devices, added by
+  Pixel 8", with a Remove button. No code is needed: the phone already
+  proved itself to both.
+- **A computer brings your phone to a computer it was just paired with.**
+  When your phone next connects to it, the computer asks the new one for a
+  pairing offer and hands it to the phone, which pairs by itself. The new
+  computer shows "Pixel 8 joined this computer, added by Desk", with Remove.
+
+**Joining is not trust.** Something that joined this way gets less than
+something you paired here, until you say otherwise at this computer:
+
+```
+rime remote devices allow <phone>
+rime remote computers allow <computer>
+```
+
+- A **phone** another computer brought can use phone features only (its
+  battery, its notifications, ring), the same as a phone's restart key: it
+  cannot open a terminal, run anything, lock the screen or see a session.
+  `rime remote devices allow` gives it everything a phone paired here has;
+  its connection is dropped once so it comes back with it.
+- A **computer** your phone introduced is paired like any other, but a
+  removal it passes on counts only when it removed this computer, and it may
+  not bring a phone here. `rime remote computers allow` makes it the same as
+  one you paired with a code.
+- `allow` must be you at the computer: an agent, a scheduled job or a phone
+  is refused. `rime remote devices` and `rime remote computers list` say
+  "added by Pixel 8, not allowed yet" under each one until you do.
+- A computer brings at most 4 phones here for as long as the two are
+  paired, removed ones counted, and one offer at a time, each good for two
+  minutes and once.
+- Joining never undoes a removal and never changes a pairing you made. A
+  removed computer stays removed until you `forget` it, as for a code.
+- When a computer removes another computer, your phone, if it is connected,
+  is told and forgets that computer too, and says so. A phone that is not
+  connected at that moment is not told later; forget the computer in the
+  app.
+- Remove on a "joined" notification removes the computer or revokes the
+  phone straight away. Nothing about joining can be undone by a notification
+  except taking it away.
 
 The wire is `docs/remote-live-contract.md` §2.15.
 

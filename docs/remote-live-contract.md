@@ -953,7 +953,9 @@ session on it may use the device features below and nothing else.
 
 **Scope by key.** The handshake decides it: the device's own key opens a
 `full` session, its companion key a `companion` session. Nothing the phone
-sends changes it. `remote_hello` says which (§2.1).
+sends changes it. `remote_hello` says which (§2.1). A phone another computer
+brought here (§2.15, "Introductions") opens a `companion` session on its own
+key too, until a person here runs `rime remote devices allow`.
 
 **What a companion session may do: an allow list, checked before routing.**
 
@@ -1450,10 +1452,10 @@ Measured on wl-clipboard 2.3.0, in a private headless labwc:
 
 ### 2.15 Computers: pairing two Rime computers, and the peer scope
 
-No new `remote_hello.features` entry for phones: this is between computers.
 Design: ECOSYSTEM-PLAN.md decision 11. M1a: pairing, the peer scope,
 `peer_hello`, and dialling. M1b: tombstone exchange, `computer_forget`,
-presence and the background refresh. Introductions are not in it.
+presence and the background refresh. M2: introductions through the phone
+(feature `computer_introductions`, "Introductions" below).
 
 **Pairing (LAN listener, hello byte `C`).** A computer dials the other's LAN
 port and sends `C` (phones send `P` to pair and `S` for a session). Over the
@@ -1562,11 +1564,11 @@ is a paired, not removed computer is scope `peer`.
 
 | | allowed |
 | --- | --- |
-| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence` |
+| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence`, `peer_offer` |
 | channels (`Open`) | none |
 
 ```json
-{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello","peer_tombstones","peer_presence"],"scope":"peer"}
+{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello","peer_tombstones","peer_presence","peer_offer"],"scope":"peer"}
 {"cmd":"peer_hello"}   → {"reply":"peer_hello","name":"desk","version":1,"build":"0.1.0"}
 {"cmd":"peer_tombstones","tombstones":[{"key":"<b64url>","removed_ms":…,"name":"old"}]}
                        → {"reply":"peer_tombstones","tombstones":[…]}
@@ -1645,6 +1647,130 @@ The first dial after the daemon starts is 20 s in. A refresh writes
 `computers.json` only when the tombstones changed it or the computer answered
 at an address that is not its first; the responder does not write the store
 for a peer handshake.
+
+**Introductions (M2, feature `computer_introductions`).** A phone paired
+with two computers introduces them to each other, and a computer brings its
+phone to a computer it was just paired with. Membership is not authority: an
+introduced phone or computer gets less than one paired here until a person at
+this computer allows it.
+
+*Stored.* A device record may carry `introduced_by: {id, name}` (the phone
+that introduced this computer, or the computer that brought this phone) and
+`allowed_ms` (when a person here allowed it). Absent on everything paired
+here. A record is **trusted** when it has no `introduced_by` or has
+`allowed_ms`. Introduced computers live in `computers.json` like any other.
+Introduced phones live in `introduced.json` beside `devices.json` (0600,
+`{"phones": {<id>: <device record>}}`): an older rime-remoted never opens it,
+so after a rollback an introduced phone cannot connect (fails closed), and
+rewriting `devices.json` cannot turn one into a phone paired here. A record in
+`introduced.json` without `introduced_by` makes the store unreadable. Records
+are never deleted; revoking or removing keeps them, as for every device.
+Pairing a computer with a code clears `introduced_by` (a code proves a
+person at each end).
+
+*Who may introduce.* Only a phone session of scope `full` whose record is
+trusted here and whose last `phone_report` (§2.5) on a full session lists
+`join` in `can` ("Join my other computers automatically" on). A `join` in a
+report sent on a companion session is dropped before the report is kept.
+Peers, companion sessions, agents and scheduled jobs never introduce.
+
+```json
+{"cmd":"computer_card"}
+→ {"reply":"computer_card","card":{"key":"<b64url>","name":"desk","lan":["192.168.1.20:7717"],"relay":"wss://…"?,"port":7717?},
+   "known":["<b64url key of every computer this one has a record of, removed ones included>"]}
+{"cmd":"computer_introduce","card":{<the other computer's card, as computer_card gave it>}}
+→ {"reply":"computer_introduced","outcome":"added","id":"…"}
+→ {"reply":"computer_introduced","outcome":"already_paired"}
+→ {"reply":"computer_introduced","outcome":"removed"}
+→ {"reply":"error","kind":"not_allowed","message":"\"Join my other computers automatically\" is off on this phone"}
+→ {"reply":"error","kind":"bad_request","message":"…"}
+```
+
+- The card is checked like M1a's `about` and refused whole: key 32 bytes,
+  name by the device-name rule, every address dialable, relay parses. A key
+  equal to this computer's own, or held by a phone (either key, retired
+  companion keys included), is refused.
+- `already_paired`: a record with that key exists (paired, introduced,
+  allowed); nothing changes. `removed`: the key is a tombstone that was not
+  forgotten; nothing changes. An introduction never undoes a removal and
+  never touches an existing pairing. A forgotten removal may be introduced,
+  as it may be paired again with a code.
+- `added`: recorded with `introduced_by` = the phone, saved, the refresh
+  woken (it dials the computer as for any pairing, through this computer's
+  own relay only). A notification says "<desk> joined your devices", "Added
+  by <Pixel>", with a Remove action.
+- Flow A (the phone, on connect): `computer_card` from each computer it holds
+  with the switch on; for two whose `known` lists do not hold each other's
+  key, `computer_introduce` on each with the other's card.
+
+*An introduced computer, until allowed.* Its `peer_tombstones` list applies
+only an entry naming this computer's own key (it removed this computer, so
+this computer removes it); every other entry is ignored and not recorded. It
+may not call `peer_offer` (`not_allowed`). Presence is exchanged with it as
+with any peer. `rime remote computers list` shows "added by <Pixel>, not
+allowed yet".
+
+*`peer_offer`: a phone offer for the peer's phone (the one new peer verb).*
+
+```json
+{"cmd":"peer_offer"}
+→ {"reply":"peer_offer","offer":"apex-remote:…","expires_ms":…}
+→ {"reply":"error","kind":"not_allowed","message":"…"}
+```
+
+- Answered only for an active, trusted peer (paired by code, or allowed);
+  at most one of its offers outstanding; at most 4 phones brought by that
+  peer since its pairing began, revoked and allowed ones counted, so a peer
+  cannot grow the store. Each offer is single use and lasts 2 minutes. A
+  wrong token never spends it. Offers are memory only.
+- The offer is the ordinary pairing payload (§2.1's pairing, hello byte
+  `P`). A phone that pairs on it is recorded in `introduced.json` with
+  `introduced_by` = the peer. It never takes a key this computer knows (a
+  phone's either key, a retired companion key, a computer's key). A
+  notification says "<Pixel> joined this computer", "Added by <desk>", with
+  Remove. A token that matches no offer gets the same answer as a wrong code.
+- Its own key opens a **`companion`** session (§2.10's allow list) until a
+  person here allows it. After `allow` the same key opens `full`.
+
+*Flow B (the computer that has the phone).* When a phone's events channel is
+open on a full session, its record here is trusted, and its last report says
+`join`, rime-remoted asks each active, trusted computer once per daemon run
+(off the events thread): it dials it, checks that `remote_hello.features`
+lists `peer_offer`, sends `peer_offer`, checks that the offer's key is the
+key of the computer it dialled, and sends the phone:
+
+```json
+{"event":"join_offer","offer":"apex-remote:…","computer":"laptop","by":"desk"}
+```
+
+The phone pairs on it only for a computer it does not hold and only when
+"Join my other computers automatically" is on.
+
+*When a computer removes a computer.* By `computer_remove`, or by a
+tombstone that removes it, every phone with a full events channel open here
+gets:
+
+```json
+{"event":"device_removed","key":"<b64url of the removed computer>","name":"laptop"}
+```
+
+The phone forgets that computer and says so. Companion sessions are not
+sent it. A phone that is not connected then is not told later (M2 has no
+queue for it).
+
+*Allow and Remove.*
+
+```json
+{"cmd":"device_allow","device":"<id or name>"}     → {"reply":"device_allowed","id":"…","name":"…"}
+{"cmd":"computer_allow","computer":"<id or name>"} → {"reply":"computer_allowed","id":"…","name":"…"}
+```
+
+- Both need a §7 local origin (the `pair` rule): allowing gives what a device
+  paired here has. An agent, a scheduled job or another account is refused.
+  Allowing a revoked or removed record is an error. `device_allow` drops the
+  phone's live connections so it reconnects as `full`.
+- The notification's Remove (from the notification server's bus owner, §2.7)
+  removes the computer or revokes the phone. It can only take something away.
 
 ## 3. The phone
 
