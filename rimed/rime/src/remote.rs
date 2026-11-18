@@ -185,6 +185,15 @@ pub enum RemoteCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Your other Rime computers: pair one with a code, list, ping, remove.
+    ///
+    /// A paired computer may only say hello. It can run nothing here, open
+    /// nothing and read nothing: pairing two computers makes them known to
+    /// each other, it gives neither authority over the other.
+    Computers {
+        #[command(subcommand)]
+        action: ComputersCmd,
+    },
     /// Whether the service is running, and how a device would reach it.
     ///
     /// Including every connection open right now: which path it came in on,
@@ -201,6 +210,64 @@ pub enum RemoteCmd {
     /// LAN access needs `rime firewall allow rime-remote`, which is root, and
     /// is a separate decision because the relay path works without it.
     Enable,
+}
+
+/// `rime remote computers`.
+#[derive(Subcommand, Debug)]
+pub enum ComputersCmd {
+    /// Pair another computer.
+    ///
+    /// On one computer run `add --show-code`; it shows six digits for two
+    /// minutes. On the other run `add <address>` with that computer's
+    /// address (as its `rime remote status` shows it) and type the digits
+    /// when asked. Both must be run by you at the computer: an agent or a
+    /// scheduled job can do neither. A wrong code uses the code up.
+    Add {
+        /// Show a code for the other computer to type, and wait for it.
+        #[arg(long, conflicts_with = "address", required_unless_present = "address")]
+        show_code: bool,
+        /// The address of the computer showing the code. The code itself is
+        /// read from the terminal or standard input, never from the command line.
+        address: Option<String>,
+    },
+    /// Every other computer this one has paired, and which were removed.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a paired computer. A removal is never undone.
+    Remove {
+        /// Computer id, or its name when that names exactly one.
+        computer: String,
+    },
+    /// Reach a paired computer and say hello, to see that the link works.
+    Ping {
+        /// Computer id, or its name when that names exactly one.
+        computer: String,
+        /// Which path to use: the local network, the relay, or the first that works.
+        #[arg(long, value_enum, default_value = "any")]
+        via: Via,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// The path `rime remote computers ping` takes.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    Any,
+    Lan,
+    Relay,
+}
+
+impl Via {
+    fn wire(self) -> Option<&'static str> {
+        match self {
+            Via::Any => None,
+            Via::Lan => Some("lan"),
+            Via::Relay => Some("relay"),
+        }
+    }
 }
 
 /// What `rime remote messages` can do besides reading.
@@ -367,6 +434,20 @@ enum Request {
         before: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
+    },
+    ComputerShow,
+    ComputerAdd {
+        address: String,
+        code: String,
+    },
+    Computers,
+    ComputerRemove {
+        computer: String,
+    },
+    ComputerPing {
+        computer: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        via: Option<&'static str>,
     },
     PhotosSave {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -548,6 +629,31 @@ enum Reply {
         name: String,
         len: u64,
     },
+    ComputerCode {
+        code: String,
+        expires_ms: u64,
+        machine: String,
+    },
+    ComputerPaired {
+        id: String,
+        name: String,
+    },
+    Computers {
+        computers: Vec<rime_remote_core::device::Device>,
+    },
+    ComputerRemoved {
+        id: String,
+        name: String,
+    },
+    ComputerPong {
+        id: String,
+        name: String,
+        machine: String,
+        version: u32,
+        build: String,
+        path: String,
+        rtt_ms: u64,
+    },
     Ok,
     Error {
         message: String,
@@ -589,6 +695,13 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         RemoteCmd::Photos { action: Some(PhotosCmd::Save { id, device, to, json }), .. } => {
             photos_save(id, device, to, json)
         }
+        RemoteCmd::Computers { action } => match action {
+            ComputersCmd::Add { address: Some(address), .. } => computers_add(&address),
+            ComputersCmd::Add { address: None, .. } => computers_show(),
+            ComputersCmd::List { json } => computers_list(json),
+            ComputersCmd::Remove { computer } => computers_remove(&computer),
+            ComputersCmd::Ping { computer, via, json } => computers_ping(&computer, via, json),
+        },
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
     };
@@ -1523,6 +1636,200 @@ fn sent_sentence(device: &str, path: &str, what: &str, push_error: Option<&str>)
     }
 }
 
+/// How long `computers add` and `computers ping` wait: the service tries
+/// each address and then the relay, each with its own deadline.
+const COMPUTER_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A code is six digits; anything longer than this is not a code.
+const MAX_CODE_BYTES: u64 = 64;
+
+fn computers_show() -> Result<i32> {
+    ensure_running();
+    let path = socket_path();
+    let stream = UnixStream::connect(&path)
+        .with_context(|| format!("Rime Remote is not running (socket: {})", path.display()))?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(20))).ok();
+    let mut writer = stream.try_clone().context("cloning the control socket")?;
+    let mut reader = BufReader::new(stream);
+    let mut line = serde_json::to_string(&Request::ComputerShow)?;
+    line.push('\n');
+    writer.write_all(line.as_bytes())?;
+    writer.flush()?;
+    let expires_ms = match read_reply(&mut reader)? {
+        Reply::ComputerCode { code, expires_ms, machine } => {
+            let left = expires_ms.saturating_sub(rime_remote_core::now_ms()) / 1000;
+            println!("{}", spaced_code(&code));
+            let lan = match call(&Request::Status) {
+                Ok(Reply::Status { lan, .. }) if !lan.is_empty() => lan.join(" or "),
+                _ => format!("the address of {machine}"),
+            };
+            eprintln!(
+                "\nOn the other computer run `rime remote computers add {lan}` and type this code. \
+                 It is good for {left} seconds, once; a wrong code uses it up."
+            );
+            eprintln!("Waiting. Press Ctrl-C to withdraw the code.");
+            expires_ms
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            return Ok(1);
+        }
+        _ => return unexpected(),
+    };
+    // Held open until the code is used, expires or is withdrawn; the service
+    // ends it, so this only guards against a service that never answers.
+    let left = expires_ms.saturating_sub(rime_remote_core::now_ms());
+    reader
+        .get_ref()
+        .set_read_timeout(Some(std::time::Duration::from_millis(left + 30_000)))
+        .ok();
+    match read_reply(&mut reader) {
+        Ok(Reply::ComputerPaired { id, name }) => {
+            eprintln!("rime: paired with {name} ({id}). It can say hello to this computer and nothing more.");
+            Ok(0)
+        }
+        Ok(Reply::Error { message }) => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        Ok(_) => unexpected(),
+        Err(e) => bail!("the service stopped answering: {e:#}"),
+    }
+}
+
+fn read_reply(reader: &mut BufReader<UnixStream>) -> Result<Reply> {
+    let mut reply = String::new();
+    if reader.read_line(&mut reply).context("reading the reply")? == 0 {
+        bail!("the service closed the connection");
+    }
+    serde_json::from_str(reply.trim()).with_context(|| format!("unreadable reply: {reply}"))
+}
+
+/// `012345` as `012 345`, easier to read across a room.
+fn spaced_code(code: &str) -> String {
+    if code.len() == 6 && code.is_ascii() {
+        format!("{} {}", &code[..3], &code[3..])
+    } else {
+        code.to_string()
+    }
+}
+
+/// The code typed for `computers add`: one short line, never argv.
+fn read_code(r: impl std::io::Read) -> Result<String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    r.take(MAX_CODE_BYTES + 1).read_to_end(&mut bytes).context("reading the code")?;
+    if bytes.len() as u64 > MAX_CODE_BYTES {
+        bail!("that is not a pairing code: a code is six digits");
+    }
+    let text = String::from_utf8(bytes).context("the code is not UTF-8")?;
+    let code = text.lines().next().unwrap_or("").trim().to_string();
+    if code.is_empty() {
+        bail!("there is no code: type the six digits the other computer shows");
+    }
+    Ok(code)
+}
+
+fn computers_add(address: &str) -> Result<i32> {
+    use std::io::IsTerminal;
+    let stdin = std::io::stdin();
+    let code = if stdin.is_terminal() {
+        eprint!("Code shown on {address}: ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        stdin.lock().read_line(&mut line).context("reading the code")?;
+        read_code(line.as_bytes())?
+    } else {
+        read_code(stdin.lock())?
+    };
+    ensure_running();
+    match call_for(&Request::ComputerAdd { address: address.to_string(), code }, None, COMPUTER_WAIT)? {
+        Reply::ComputerPaired { id, name } => {
+            eprintln!("rime: paired with {name} ({id}). It can say hello to this computer and nothing more.");
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
+fn computers_list(json: bool) -> Result<i32> {
+    let Reply::Computers { computers } = call(&Request::Computers)? else {
+        return unexpected();
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&computers)?);
+        return Ok(0);
+    }
+    print!("{}", computers_table(&computers));
+    Ok(0)
+}
+
+fn computers_table(computers: &[rime_remote_core::device::Device]) -> String {
+    if computers.is_empty() {
+        return "no other computers paired. `rime remote computers add --show-code` shows a code.\n".into();
+    }
+    let mut out = format!("{:<18} {:<20} {:<9} {:<8} {:<10} ADDRESSES\n", "ID", "NAME", "STATE", "PATH", "LAST SEEN");
+    for c in computers {
+        out.push_str(&format!(
+            "{:<18} {:<20} {:<9} {:<8} {:<10} {}\n",
+            c.id,
+            truncate(&c.name, 20),
+            c.state(),
+            c.last_path.as_deref().unwrap_or("-"),
+            c.last_seen_ms.map(ago).unwrap_or_else(|| "never".into()),
+            if c.addresses.is_empty() { "-".to_string() } else { c.addresses.join(" ") },
+        ));
+    }
+    out
+}
+
+fn computers_remove(computer: &str) -> Result<i32> {
+    match call(&Request::ComputerRemove { computer: computer.to_string() })? {
+        Reply::ComputerRemoved { id, name } => {
+            eprintln!(
+                "rime: {name} ({id}) removed. Any connection it held was dropped, and its key is \
+                 refused from now on: a removal is never undone."
+            );
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
+fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
+    let req = Request::ComputerPing { computer: computer.to_string(), via: via.wire() };
+    match call_for(&req, None, COMPUTER_WAIT)? {
+        Reply::ComputerPong { id, name, machine, version, build, path, rtt_ms } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"id": id, "name": name, "machine": machine, "version": version,
+                                       "build": build, "path": path, "rtt_ms": rtt_ms})
+                );
+            } else {
+                println!("{name} ({machine}) answered over {path} in {rtt_ms} ms: protocol {version}, build {build}");
+            }
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            if json {
+                println!("{}", serde_json::json!({"error": message}));
+            }
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
 fn revoke(device: &str) -> Result<i32> {
     match call(&Request::Revoke {
         device: device.to_string(),
@@ -2041,6 +2348,86 @@ mod tests {
         let text = v.to_string();
         assert!(!text.contains("SECRETISH") && !text.contains("companion_key"), "{text}");
         assert_eq!(companion_names(&devices, &companions), ["Pixel"]);
+    }
+
+    #[test]
+    fn computers_parses_and_the_code_never_comes_from_argv() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
+        match parse(&["computers", "add", "--show-code"]).expect("show").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Add { show_code: true, address: None } } => {}
+            other => panic!("{other:?}"),
+        }
+        match parse(&["computers", "add", "10.0.0.2"]).expect("add").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Add { show_code: false, address: Some(a) } } => {
+                assert_eq!(a, "10.0.0.2")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["computers", "add"]).is_err(), "neither a code to show nor an address");
+        assert!(parse(&["computers", "add", "--show-code", "10.0.0.2"]).is_err(), "both");
+        // There is no way to put the code on the command line.
+        assert!(parse(&["computers", "add", "10.0.0.2", "123456"]).is_err());
+        assert!(parse(&["computers", "add", "10.0.0.2", "--code", "123456"]).is_err());
+        match parse(&["computers", "ping", "desk", "--via", "relay", "--json"]).expect("ping").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Ping { computer, via: Via::Relay, json: true } } => {
+                assert_eq!(computer, "desk")
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["computers", "ping", "desk", "--via", "bluetooth"]).is_err());
+        assert!(matches!(
+            parse(&["computers", "list", "--json"]).expect("list").cmd,
+            RemoteCmd::Computers { action: ComputersCmd::List { json: true } }
+        ));
+        assert!(matches!(
+            parse(&["computers", "remove", "desk"]).expect("remove").cmd,
+            RemoteCmd::Computers { action: ComputersCmd::Remove { .. } }
+        ));
+
+        // The wire, as rime-remoted's own tests spell it.
+        let wire = |r: &Request| serde_json::to_string(r).unwrap();
+        assert_eq!(wire(&Request::ComputerShow), r#"{"cmd":"computer_show"}"#);
+        assert_eq!(
+            wire(&Request::ComputerAdd { address: "a".into(), code: "1".into() }),
+            r#"{"cmd":"computer_add","address":"a","code":"1"}"#
+        );
+        assert_eq!(wire(&Request::Computers), r#"{"cmd":"computers"}"#);
+        assert_eq!(wire(&Request::ComputerRemove { computer: "d".into() }), r#"{"cmd":"computer_remove","computer":"d"}"#);
+        assert_eq!(wire(&Request::ComputerPing { computer: "d".into(), via: Via::Any.wire() }), r#"{"cmd":"computer_ping","computer":"d"}"#);
+        assert_eq!(
+            wire(&Request::ComputerPing { computer: "d".into(), via: Via::Lan.wire() }),
+            r#"{"cmd":"computer_ping","computer":"d","via":"lan"}"#
+        );
+        for text in [
+            r#"{"reply":"computer_code","code":"012345","expires_ms":1,"machine":"m"}"#,
+            r#"{"reply":"computer_paired","id":"i","name":"n"}"#,
+            r#"{"reply":"computers","computers":[]}"#,
+            r#"{"reply":"computer_removed","id":"i","name":"n"}"#,
+            r#"{"reply":"computer_pong","id":"i","name":"n","machine":"m","version":1,"build":"b","path":"lan","rtt_ms":3}"#,
+        ] {
+            serde_json::from_str::<Reply>(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+    }
+
+    #[test]
+    fn a_typed_code_is_one_short_line() {
+        assert_eq!(read_code(" 123 456 \n".as_bytes()).unwrap(), "123 456");
+        assert_eq!(read_code("123456\nextra\n".as_bytes()).unwrap(), "123456");
+        assert!(read_code("".as_bytes()).is_err());
+        assert!(read_code("  \n".as_bytes()).is_err());
+        assert!(read_code("1".repeat(65).as_bytes()).is_err());
+        assert_eq!(spaced_code("012345"), "012 345");
+    }
+
+    #[test]
+    fn the_computers_table_says_how_to_start_when_it_is_empty() {
+        assert!(computers_table(&[]).contains("add --show-code"));
     }
 
     #[test]

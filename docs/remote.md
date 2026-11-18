@@ -202,6 +202,9 @@ them. (The exceptions are verbs `rime-remoted` answers itself
 and never forwards: its hello, the companion key, nex, the phone's answers
 about its messages, and the five machine verbs in [The computer itself](#the-computer-itself-status-lock-and-media).)
 
+A connection from [another computer](#rime-remote-computers-your-other-rime-computers)
+forwards nothing either, and may only say hello.
+
 A connection on a phone's **companion key** is the opposite: it forwards
 nothing to `rime-agentd` at all, and may use only the phone's own features
 ([above](#keeping-the-phones-features-working-after-it-restarts);
@@ -242,6 +245,63 @@ WebAuthn assertion from a key the owner enrolled with `rime agent key add`,
 over a nonce the daemon issued and bound to that one session, grant kind and
 window. If remote approval of a root operation is ever built, it has to take
 that shape; a relaxed origin check would not do.
+
+## `rime remote computers`: your other Rime computers
+
+Two Rime computers you own can pair with each other. In this release that
+makes them known to each other and nothing more: a paired computer may say
+hello and ask the other's name and version. **Pairing is not authority.** A
+paired computer cannot run anything, open a terminal, read a file, see a
+session, answer a privilege prompt or use a phone feature on the other. A
+session from another computer never reaches `rime-agentd` at all, not even to
+be told no.
+
+```
+rime remote computers add --show-code      # on the first computer: shows six digits
+rime remote computers add <address>        # on the second: asks for the digits
+rime remote computers list [--json]
+rime remote computers ping <computer> [--via lan|relay|any] [--json]
+rime remote computers remove <computer>
+```
+
+**Pairing.** On one computer run `add --show-code`. It prints a six-digit code
+and the addresses the other computer can use, and waits. On the other run
+`add` with one of those addresses (`host` or `host:port`; the port defaults to
+Rime Remote's) and type the code when asked. The code is read from the
+terminal or standard input, never from the command line, so it does not land
+in shell history or `ps`.
+
+- The code lives two minutes, pairs once, and only while `--show-code` is
+  still waiting. Press Ctrl-C and it is withdrawn. A new `--show-code`
+  replaces the old code.
+- **A wrong code uses the code up.** Show a new one to try again. Each attempt
+  gets one guess, and nothing it learns lets it test a second guess offline.
+- Both halves must be you at the computer. An agent, a scheduled job, or a
+  session from a phone or another computer is refused both.
+- Pairing goes over the local network: the two computers do not know each
+  other's keys until it finishes, so they cannot meet on the relay yet.
+  Afterwards `ping` tries the stored addresses first and then the relay.
+- A computer with this computer's own Rime Remote key (a home folder copied
+  from it) is refused, when pairing and on every later connection. Give the
+  copy its own key: stop rime-remoted there, delete
+  `~/.local/state/rime/remote/identity.key`, start it again, and pair its
+  phones again (they were paired with the old key).
+
+**`list`** shows every computer this one has paired, removed ones included,
+with the path it was last reached on and the addresses it is dialled at.
+
+**`ping`** dials the computer, says hello, and prints what it calls itself, the
+path (`lan` or `relay`) and how long the whole dial took. `--via lan` or
+`--via relay` forces one path. Each computer dials the other for its own
+requests; nothing stays connected between them.
+
+**`remove`** drops any connection the computer holds and refuses its key from
+then on. **A removal is never undone**, and the same computer cannot pair
+again while it keeps the same key. To pair it again it needs a new key, which
+means re-pairing its phones too (the step above). A gentler way back is not in
+this release.
+
+The wire is `docs/remote-live-contract.md` §2.15.
 
 ## The computer itself: status, lock and media
 
