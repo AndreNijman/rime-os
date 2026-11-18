@@ -89,6 +89,22 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!-- "Messages on your computer" (contract §2.11), off by default. A paired
+         computer reads this phone's SMS conversations when it asks, and,
+         while the app is unlocked, sends an SMS from it. Each is asked for at
+         the moment the person turns the feature on, never at install, and the
+         app works without them. Nothing read is stored, here or there.
+         READ_CONTACTS is a separate, optional ask, so the computer can show a
+         name instead of a number. No RECEIVE_SMS: a new message is noticed
+         from the SMS store changing, not by taking the broadcast.
+         On a phone that installed this app from a file, Android 13 and later
+         block the first two until the person allows restricted settings in
+         App info; the screen says so. -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <uses-feature android:name="android.hardware.telephony" android:required="false" />
+
     <!-- Push-to-talk, and what is NOT here is the point of it.
 
          RECORD_AUDIO is absent, deliberately. Speech reaches this app through

@@ -1953,6 +1953,18 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(settings = store.settings) }
     }
 
+    /** Let the paired computers read this phone's SMS, and send while unlocked, or stop (contract §2.11). */
+    fun setMessagesOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(messagesOn = on))
+        hub.setMessagesOn(store.settings.messagesOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** The SMS or contacts permissions may have changed: the machines hear the new `can`. */
+    fun onSmsPermissionChanged() {
+        hub.onSmsPermissionChanged()
+    }
+
     /** Show what this phone is playing on the paired computers, or stop (contract §2.8). */
     fun setMediaOn(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(mediaOn = on))

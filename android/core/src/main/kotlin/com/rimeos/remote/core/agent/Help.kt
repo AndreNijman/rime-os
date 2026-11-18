@@ -268,6 +268,25 @@ object Help {
                         "file may or may not be there. Check before sending it again. The " +
                         "computer deletes any file you stop part way.",
                 ),
+                h("Messages on the computer"),
+                p(
+                    "Messages on your computer, in Display, lets your computers read this " +
+                        "phone's SMS conversations and send an SMS from its number. It is off " +
+                        "until you turn it on, and Android asks you to allow SMS first. On the " +
+                        "computer, rime remote messages lists them, and rime remote messages " +
+                        "send sends one.",
+                ),
+                p(
+                    "The computer asks the phone each time and keeps nothing. Sending needs " +
+                        "the app unlocked, and a person at the computer: a program running " +
+                        "there in the background cannot send. Group conversations and picture " +
+                        "messages are left out.",
+                ),
+                note(
+                    "If this app came from a file rather than a store, Android may block the " +
+                        "SMS permission without asking. Open App info, use the menu at the top " +
+                        "right to allow restricted settings, then allow SMS there.",
+                ),
                 h("Finding this phone"),
                 p(
                     "On the computer, rime remote ring makes this phone play its alarm " +
@@ -292,12 +311,13 @@ object Help {
                         "Keep working after the phone restarts, in Display, changes that. Each " +
                         "computer gets a second key from this phone that opens without you, and " +
                         "it can only carry the phone's own features: its battery, its " +
-                        "notifications, what is playing, ringing it and sending it files.",
+                        "notifications, what is playing, its messages, ringing it and sending " +
+                        "it files.",
                 ),
                 p(
                     "With it on, locking the app keeps those running instead of ending the " +
                         "link, and after a restart they come back at the phone's first unlock. " +
-                        "Replying to a notification, controlling what plays, agents, terminals " +
+                        "Replying to a notification, sending an SMS, controlling what plays, agents, terminals " +
                         "and the computer's controls still wait until you unlock.",
                 ),
                 note(

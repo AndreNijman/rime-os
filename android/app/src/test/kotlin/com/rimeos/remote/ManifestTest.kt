@@ -122,7 +122,7 @@ class ManifestTest {
     }
 
     @Test
-    fun `the permissions this app does declare are the nine it can justify`() {
+    fun `the permissions this app does declare are the twelve it can justify`() {
         // A fixed set rather than a floor. A permission added without a reason
         // fails here and has to be argued for in a diff, which is the only
         // moment anybody reads the list.
@@ -166,6 +166,15 @@ class ManifestTest {
                 // on; the person may refuse. Neither is a runtime prompt.
                 "android.permission.RECEIVE_BOOT_COMPLETED",
                 "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
+                // Added deliberately with "Messages on your computer"
+                // (contract §2.11), off by default: reading the SMS store
+                // when a paired computer asks, and sending an SMS it asks for
+                // while the app is unlocked. Both runtime prompts, asked when
+                // the person turns the feature on. Contacts is a third,
+                // optional prompt, only to show names instead of numbers.
+                "android.permission.READ_SMS",
+                "android.permission.SEND_SMS",
+                "android.permission.READ_CONTACTS",
             ),
             "the declared permissions changed: $declared",
         )

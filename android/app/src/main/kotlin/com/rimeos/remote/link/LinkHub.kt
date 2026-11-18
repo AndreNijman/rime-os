@@ -16,6 +16,7 @@ import com.rimeos.remote.core.phone.Content
 import com.rimeos.remote.core.phone.DeviceEvent
 import com.rimeos.remote.core.phone.Focus
 import com.rimeos.remote.core.phone.Media
+import com.rimeos.remote.core.phone.Messages
 import com.rimeos.remote.core.phone.MediaOutbox
 import com.rimeos.remote.core.phone.MediaState
 import com.rimeos.remote.core.phone.Mirror
@@ -30,6 +31,9 @@ import com.rimeos.remote.phone.MirrorService
 import com.rimeos.remote.phone.PhoneStatus
 import com.rimeos.remote.phone.Receiver
 import com.rimeos.remote.phone.Ringer
+import com.rimeos.remote.phone.Sms
+import com.rimeos.remote.phone.SmsSender
+import com.rimeos.remote.phone.SmsWatcher
 import com.rimeos.remote.core.link.Route
 import com.rimeos.remote.data.MachineRepository
 import com.rimeos.remote.pairing.PairingService
@@ -165,6 +169,8 @@ class LinkHub private constructor(private val app: Context) {
         var sender: Job? = null,
         /** A companion link's lane: its `can` never offers replies. */
         val companion: Boolean = false,
+        /** Its connection's phone side, which `messages_changed` goes out on (§2.11). */
+        val phone: PhoneLink? = null,
     ) {
         val throttle = ReportThrottle()
     }
@@ -232,6 +238,13 @@ class LinkHub private constructor(private val app: Context) {
     private var media: MediaState? = null
 
     private val watcher by lazy { MediaWatcher(app) { onPhoneMedia(it) } }
+
+    /** "Messages on your computer" (§2.11): read from the store on a connection and set by the screen. */
+    @Volatile
+    private var messagesOn: Boolean = false
+
+    private val smsSender by lazy { SmsSender(app) }
+    private val smsWatcher by lazy { SmsWatcher(app) { onSmsChanged() } }
 
     /** Whether the watcher was last told to run; only [syncMediaWatcher] changes it. */
     private var watching = false
@@ -747,12 +760,14 @@ class LinkHub private constructor(private val app: Context) {
         mediaOn = settings.mediaOn
         mediaApps = settings.mediaApps
         mediaControl = settings.mediaControl
+        messagesOn = settings.messagesOn
+        syncSmsWatcher()
     }
 
     private fun startReports(machine: PairedMachine, phone: PhoneLink, remote: RemoteHello, companion: Boolean) {
         val lane = reportLanes.compute(machine.deviceId) { _, old ->
             old?.sender?.cancel()
-            ReportLane(remote, Channel(Channel.CONFLATED), companion = companion)
+            ReportLane(remote, Channel(Channel.CONFLATED), companion = companion, phone = phone)
         }!!
         lane.sender = scope.launch {
             while (isActive) {
@@ -782,6 +797,9 @@ class LinkHub private constructor(private val app: Context) {
             if (granted && mirrorReply && !lane.companion) add(Phone.CAN_REPLY)
             // The listener is what applies a computer's Do Not Disturb.
             if (focus && granted && focusOn) add(Phone.CAN_FOCUS)
+            // Reading runs over a companion link too; whether a send may run
+            // is decided when one arrives, by the link it arrives on.
+            if (lane.remote.has(Messages.FEATURE) && Messages.offered(messagesOn, Sms.canRead(app))) add(Phone.CAN_MESSAGES)
         }
         if (!lane.throttle.due(level, charging, now, network, dnd, can)) return
         runCatching { phone.report(level, charging, can, network, dnd) }
@@ -835,6 +853,103 @@ class LinkHub private constructor(private val app: Context) {
     }
 
     fun focusOn(): Boolean = focusOn
+
+    fun messagesOn(): Boolean = messagesOn
+
+    /**
+     * The person turned "Messages on your computer" on or off; the store was
+     * already written. Each connected machine is told at once, as for
+     * [setMirrorReply]: its `can` is what lets it ask at all, and off
+     * refuses every request from here on whatever it was told before.
+     */
+    fun setMessagesOn(on: Boolean) {
+        messagesOn = on
+        syncSmsWatcher()
+        reportAgain()
+    }
+
+    /** The person granted, or Android took back, reading or sending SMS: every machine hears the new `can`. */
+    fun onSmsPermissionChanged() {
+        syncSmsWatcher()
+        reportAgain()
+    }
+
+    /** Watch the SMS store exactly while a change could be worth telling a machine. */
+    private fun syncSmsWatcher() {
+        smsWatcher.sync(messagesOn && Sms.canRead(app))
+    }
+
+    /**
+     * The SMS store changed: every machine connected now that takes
+     * messages, and was told it may ask, hears `messages_changed` and may
+     * ask again. Nothing about the change goes with it.
+     */
+    private fun onSmsChanged() {
+        if (!live || !messagesOn || !Sms.canRead(app)) return
+        val phones = reportLanes.values.filter { it.remote.has(Messages.FEATURE) && it.sender?.isActive == true }.mapNotNull { it.phone }
+        if (phones.isEmpty()) return
+        scope.launch {
+            for (phone in phones) runCatching { phone.messages(Messages.changed()) }
+        }
+    }
+
+    /**
+     * A computer asks for this phone's conversations, or one of them
+     * (§2.11). The switch and the permission are checked here, whatever an
+     * older report told the machine; reading runs over a companion link as
+     * the other device features do.
+     */
+    private fun onMessagesRequest(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent.MessagesRequest) {
+        val word = Messages.refusal(messagesOn, Sms.canRead(app), canSend = false, unlocked = false, send = false)
+            ?: if (!live) Messages.LOCKED else null
+        val lines = if (word != null) {
+            listOf(Messages.refused(event.id, word))
+        } else {
+            runCatching {
+                val thread = event.thread
+                if (thread == null) {
+                    Messages.threadsReply(event.id, Sms.threads(app, event.before, event.limit))
+                } else {
+                    Sms.thread(app, thread, event.before, event.limit)
+                        ?.let { Messages.messagesReply(event.id, thread, it) }
+                        ?: listOf(Messages.refused(event.id, Messages.NO_THREAD))
+                }
+            }.getOrElse {
+                Log.i(TAG, "${machine.machine}: messages not read: ${it.javaClass.simpleName}")
+                listOf(Messages.refused(event.id, Messages.FAILED))
+            }
+        }
+        for (line in lines) {
+            val ok = runCatching { phone.messages(line) }
+                .onFailure { Log.i(TAG, "${machine.machine}: a messages answer was not taken: ${it.message}") }
+                .isSuccess
+            if (!ok) return
+        }
+    }
+
+    /**
+     * A computer asks this phone to send an SMS (§2.11). Only over a full
+     * link on an unlocked app: a send is the phone speaking for the person.
+     * The computer refuses a locked phone's send before it asks; this side
+     * does not rely on that.
+     */
+    private suspend fun onMessagesSend(machine: PairedMachine, phone: PhoneLink, event: DeviceEvent.MessagesSend, companion: Boolean) {
+        val unlocked = !companion && _unlocked.value
+        val word = Messages.refusal(messagesOn, Sms.canRead(app), Sms.canSend(app), unlocked, send = true)
+            ?: Messages.text(event.text).exceptionOrNull()?.let { (it as Messages.Refused).word }
+        val result = if (word != null) {
+            word
+        } else {
+            val to = Messages.destination(event.to, event.thread) { runCatching { Sms.addresses(app, it) }.getOrNull() }
+            to.fold(
+                onSuccess = { number -> smsSender.send(number, Messages.text(event.text).getOrThrow()) },
+                onFailure = { (it as Messages.Refused).word },
+            )
+        }
+        Log.i(TAG, "${machine.machine}: a send from the computer: ${result ?: "sent"}")
+        runCatching { phone.messages(Messages.sent(event.id, result)) }
+            .onFailure { Log.i(TAG, "${machine.machine}: a send's result was not taken: ${it.message}") }
+    }
 
     /**
      * The person turned "Do Not Disturb follows your computer" on or off;
@@ -1070,6 +1185,8 @@ class LinkHub private constructor(private val app: Context) {
                 if (rang) runCatching { phone.ack(event.id) }
             }
             is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
+            is DeviceEvent.MessagesRequest -> scope.launch { onMessagesRequest(machine, phone, event) }
+            is DeviceEvent.MessagesSend -> scope.launch { onMessagesSend(machine, phone, event, companion) }
             // Never over a companion link: it acts for the person.
             is DeviceEvent.MediaControl -> if (!companion) onMediaControl(machine, event)
             is DeviceEvent.Focus -> {

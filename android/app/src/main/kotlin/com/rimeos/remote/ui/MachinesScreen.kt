@@ -94,6 +94,8 @@ fun MachinesScreen(
     /** "Notifications on your computer". A default, as for [updateBanner], so existing callers keep compiling. */
     onMirror: () -> Unit = {},
     onMedia: () -> Unit = {},
+    /** "Messages on your computer" (contract §2.11). */
+    onMessages: () -> Unit = {},
     /** "Keep working after the phone restarts" (contract §2.10). */
     onCompanion: (Boolean) -> Unit = {},
 ) {
@@ -256,6 +258,10 @@ fun MachinesScreen(
                         settingsOpen = false
                         onMedia()
                     }) { Text("Media on your computer") }
+                    TextButton(onClick = {
+                        settingsOpen = false
+                        onMessages()
+                    }) { Text("Messages on your computer") }
 
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {

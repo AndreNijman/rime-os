@@ -1,6 +1,7 @@
 package com.rimeos.remote.ui
 
 import com.rimeos.remote.ui.mirror.MediaScreen
+import com.rimeos.remote.ui.mirror.MessagesScreen
 import com.rimeos.remote.ui.mirror.MirrorScreen
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -113,6 +114,9 @@ object Destinations {
 
     /** "Media on your computer": the switch, and which apps. */
     const val MEDIA = "media"
+
+    /** "Messages on your computer": the permissions and the switch. */
+    const val MESSAGES = "messages"
 }
 
 @Composable
@@ -198,6 +202,7 @@ fun RimeRemoteApp(
                     onDynamicColour = { viewModel.setDynamicColour(it) },
                     onMirror = { navigation.navigate(Destinations.MIRROR) },
                     onMedia = { navigation.navigate(Destinations.MEDIA) },
+                    onMessages = { navigation.navigate(Destinations.MESSAGES) },
                     onCompanion = { viewModel.setCompanionOn(it) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
@@ -466,6 +471,14 @@ fun RimeRemoteApp(
                     onControl = { viewModel.setMediaControl(it) },
                     chosen = state.settings.mediaApps,
                     onChoose = { pkg, on -> viewModel.setMediaApp(pkg, on) },
+                    onBack = { navigation.popBackStack() },
+                )
+            }
+            composable(Destinations.MESSAGES) {
+                MessagesScreen(
+                    on = state.settings.messagesOn,
+                    onOn = { viewModel.setMessagesOn(it) },
+                    onPermissions = { viewModel.onSmsPermissionChanged() },
                     onBack = { navigation.popBackStack() },
                 )
             }
