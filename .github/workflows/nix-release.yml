@@ -574,8 +574,18 @@ jobs:
             got="$("$oras" manifest fetch --descriptor "$PAYLOAD_REPO:$tag" | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')"
             [ "$got" = "$digest" ] || { echo "::error::$PAYLOAD_REPO:$tag is $got, not the pushed $digest"; exit 1; }
           done
-          mkdir "$t/back"
-          "$oras" pull -o "$t/back" "$PAYLOAD_REPO@$digest"
+          # The pull-back is a 4+ GB download, and GHCR sometimes resets the stream partway
+          # ("stream error: … PROTOCOL_ERROR", run 44202572742). The push above already happened, so
+          # a failed job cannot simply be re-run: the tag exists and is refused. Up to three tries;
+          # what was pulled is still compared byte for byte below, so a retry can only pass on the
+          # same bytes.
+          for try in 1 2 3; do
+            rm -rf "$t/back"; mkdir "$t/back"
+            if "$oras" pull -o "$t/back" "$PAYLOAD_REPO@$digest"; then break; fi
+            [ "$try" -lt 3 ] || { echo "::error::pulling $PAYLOAD_REPO@$digest back failed three times"; exit 1; }
+            echo "::warning::pulling the payload back failed (try $try of 3); trying again in 30 s"
+            sleep 30
+          done
           (cd "$t/payload" && sha256sum "${files[@]}") > "$t/sums"
           (cd "$t/back" && sha256sum -c "$t/sums")
           [ "$(cd "$t/back" && find . -type f | sort | sed 's|^\./||' | tr '\n' ' ')" = "manifest.json manifest.json.sig preview.tar registration store.tar.zst " ] \
