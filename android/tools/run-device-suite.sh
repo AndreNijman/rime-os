@@ -38,6 +38,14 @@
 # out by name on any other serial and the `photos_*` verbs refuse one. No
 # photo of anybody's is ever read.
 #
+# A SECOND throwaway computer (rime-agentd + rime-remoted + a broker, with its
+# own state, runtime folder and machine key under $state/b) runs in a login
+# session of its own (minted with `sudo -n systemd-run --property=PAMName=login`;
+# without sudo it shares this one, and the run says so). The emulator pairs
+# with both in TwoComputersOnDeviceTest: one phone, two computers, no new
+# protocol. That class rings, texts and pushes photos to the emulator like the
+# three above, so it is left out by name on any other serial too.
+#
 # A device is required and its absence is a FAILURE, not a skip: a suite that
 # reports success when it could not look is the defect this program has
 # shipped more than once.
@@ -1183,7 +1191,7 @@ fi
 # phone's messages, number or photos.
 case $serial in
   emulator-*) ;;
-  *) skip+=(com.rimeos.remote.device.MessagesOnDeviceTest com.rimeos.remote.device.CallsOnDeviceTest com.rimeos.remote.device.PhotosOnDeviceTest) ;;
+  *) skip+=(com.rimeos.remote.device.MessagesOnDeviceTest com.rimeos.remote.device.CallsOnDeviceTest com.rimeos.remote.device.PhotosOnDeviceTest com.rimeos.remote.device.TwoComputersOnDeviceTest) ;;
 esac
 if [ ${#skip[@]} -gt 0 ]; then
   args+=(-e notClass "$(IFS=,; echo "${skip[*]}")")
@@ -1243,5 +1251,5 @@ echo "DEVICE SUITE: $count tests passed on $serial"
 [ -n "$nexroot" ] || echo "DEVICE SUITE: nex NOT tested (no RIME_DEVICE_SUITE_NEXD)"
 case $serial in
   emulator-*) ;;
-  *) echo "DEVICE SUITE: SMS, calls and photos NOT tested (not an emulator)" ;;
+  *) echo "DEVICE SUITE: SMS, calls, photos and two computers NOT tested (not an emulator)" ;;
 esac
