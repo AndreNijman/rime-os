@@ -50,11 +50,11 @@ object Desktop {
      * model of them to read one field. A test harness that had to be kept in
      * step with `serde` would be one more thing that can disagree.
      */
-    fun ask(request: String): JSONObject {
+    fun ask(request: String, readTimeoutMs: Int = 30_000): JSONObject {
         val (host, port) = broker()
         Socket().use { socket ->
             socket.connect(InetSocketAddress(host, port), 8_000)
-            socket.soTimeout = 30_000
+            socket.soTimeout = readTimeoutMs
             socket.getOutputStream().write((request + "\n").toByteArray())
             socket.getOutputStream().flush()
             val line = socket.getInputStream().bufferedReader().let(BufferedReader::readLine)
@@ -341,6 +341,63 @@ object Desktop {
         val req = JSONObject().put("cmd", "call").put("device", device).put("action", action)
         if (number != null) req.put("number", number)
         return ask(req.toString())
+    }
+
+    /** One of the photo tests' images, as the broker made and pushed it. */
+    data class TestPhoto(val name: String, val len: Long, val sha256: String, val gps: Boolean)
+
+    /**
+     * Three test images made on the computer, the last with a GPS location
+     * in its EXIF, pushed into the EMULATOR's Pictures/RimeTest and indexed
+     * in its MediaStore; any older RimeTest images are deleted first. The
+     * broker refuses on any serial that is not an emulator, and fails with a
+     * message naming PIL when the computer cannot make them.
+     */
+    fun photosPush(): List<TestPhoto> {
+        val reply = ask(JSONObject().put("cmd", "photos_push").toString(), readTimeoutMs = 120_000)
+        check(reply.optString("reply") == "ok") { "the broker did not push the test photos: $reply" }
+        val a = reply.getJSONArray("photos")
+        return (0 until a.length()).map { a.getJSONObject(it) }.map {
+            TestPhoto(it.getString("name"), it.getLong("len"), it.getString("sha256"), it.getBoolean("gps"))
+        }
+    }
+
+    /** Delete the photo tests' folder on the emulator and wait for its MediaStore rows to go. */
+    fun photosCleanup() {
+        val reply = ask(JSONObject().put("cmd", "photos_cleanup").toString(), readTimeoutMs = 60_000)
+        check(reply.optString("reply") == "ok") { "the broker did not delete the test photos: $reply" }
+    }
+
+    /**
+     * `rime remote photos --device [device] --json --limit [limit]`, run by
+     * the broker at the computer: `code` (the exit status), `out` (its JSON,
+     * on a failure too), `stderr`, and `thumbs`, the computer-side facts
+     * about each thumbnail it named (`exists`, `under_run`, `mode`, `exif`,
+     * `app1`).
+     */
+    fun photosList(device: String, limit: Int = 10): JSONObject {
+        val reply = ask(JSONObject().put("cmd", "photos_list").put("device", device).put("limit", limit).toString(), readTimeoutMs = 120_000)
+        check(reply.optString("reply") == "ok") { "the broker did not run rime remote photos: $reply" }
+        return reply
+    }
+
+    /**
+     * `rime remote photos save [photo] --device [device] --to <run>/saved
+     * --json` at the computer: `code`, `out`, `stderr`, and `saved`, the
+     * saved file's `len`, `sha256` and `gps` (whether it still says where it
+     * was taken).
+     */
+    fun photosSave(device: String, photo: Long): JSONObject {
+        val reply = ask(JSONObject().put("cmd", "photos_save").put("device", device).put("photo", photo).toString(), readTimeoutMs = 120_000)
+        check(reply.optString("reply") == "ok") { "the broker did not run rime remote photos save: $reply" }
+        return reply
+    }
+
+    /** Whether this run's rime-remoted holds a thumbnail folder for [device]. */
+    fun photosThumbsDir(device: String): Boolean {
+        val reply = ask(JSONObject().put("cmd", "photos_thumbs_dir").put("device", device).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not look for the thumbnails: $reply" }
+        return reply.getBoolean("exists")
     }
 
     private fun requestReply(line: String): JSONObject {

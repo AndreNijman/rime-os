@@ -32,6 +32,11 @@
 # tests (CallsOnDeviceTest) are the same: they ring the emulator with `adb emu
 # gsm call` from an emulator number and dial emulator numbers only, so they
 # are left out by name elsewhere and `emu_gsm` refuses a serial that is not one.
+# The photo tests (PhotosOnDeviceTest) are the same again: the broker makes
+# three test images with PIL on this computer, pushes them into the
+# emulator's Pictures/RimeTest folder and deletes them after, so they are left
+# out by name on any other serial and the `photos_*` verbs refuse one. No
+# photo of anybody's is ever read.
 #
 # A device is required and its absence is a FAILURE, not a skip: a suite that
 # reports success when it could not look is the defect this program has
@@ -618,6 +623,235 @@ def media_call(call):
         f.write(json.dumps(call) + "\n")
     return json.dumps({"reply": "ok"})
 
+# The photo tests' own folder on the EMULATOR, and the names its images carry.
+PHOTOS_DIR = "/sdcard/Pictures/RimeTest"
+PHOTOS_URI = "content://media/external/images/media"
+PHOTOS_PUSHED = {}
+
+def emulator():
+    """(adb, serial) when this run's serial is an emulator, else None."""
+    serial = os.environ.get("RIME_SUITE_SERIAL", "")
+    adb = os.environ.get("RIME_SUITE_ADB", "")
+    if not serial.startswith("emulator-") or not adb:
+        return None
+    return adb, serial
+
+def adb_shell(adb, serial, *argv, timeout=30):
+    return subprocess.run([adb, "-s", serial, "shell", *argv], capture_output=True, text=True, timeout=timeout)
+
+def photos_rows(adb, serial):
+    """The emulator's MediaStore rows under Pictures/RimeTest, by name:
+    {name: {"_size": ..., "width": ...}} with "NULL" kept as None."""
+    r = adb_shell(adb, serial, "content", "query", "--uri", PHOTOS_URI,
+                  "--projection", "_display_name:_size:width",
+                  "--where", "\"relative_path LIKE 'Pictures/RimeTest%'\"")
+    rows = {}
+    for line in r.stdout.splitlines():
+        if not line.startswith("Row:"):
+            continue
+        fields = {}
+        for part in line.split(" ", 2)[2].split(", "):
+            k, _, v = part.partition("=")
+            fields[k.strip()] = None if v == "NULL" else v
+        if fields.get("_display_name"):
+            rows[fields["_display_name"]] = fields
+    return rows
+
+def gps_of(data):
+    """Whether a JPEG still says where it was taken: a GPS latitude or
+    longitude with a finite, non-zero value. Android may keep the GPS block
+    and blank its values, which is no location; a blanked rational reads as
+    0/0, which PIL gives as NaN."""
+    import io, math
+    from PIL import Image
+    try:
+        gps = Image.open(io.BytesIO(data)).getexif().get_ifd(0x8825)
+    except Exception:
+        return False
+    for tag in (2, 4):
+        for v in gps.get(tag, ()) or ():
+            try:
+                f = float(v)
+            except Exception:
+                continue
+            if math.isfinite(f) and f != 0.0:
+                return True
+    return False
+
+def photos_push():
+    """Three test images made here with PIL, each different, the third with a
+    GPS location in its EXIF, pushed into the EMULATOR's Pictures/RimeTest and
+    indexed in its MediaStore. Old RimeTest images are deleted first. Returns
+    each one's name, length, sha256 and whether it carries GPS."""
+    emu = emulator()
+    if emu is None:
+        return json.dumps({"reply": "error", "message": "photos_push runs only on an emulator"})
+    adb, serial = emu
+    try:
+        import io, hashlib
+        from PIL import Image, ImageDraw
+        from PIL.TiffImagePlugin import IFDRational
+    except ImportError:
+        return json.dumps({"reply": "error", "message": "PIL (python3-pillow) is not installed on this computer, "
+                           "and the photos test needs it to make its test images"})
+    photos_cleanup()
+    outdir = os.path.join(ROOT, "photos-pushed")
+    os.makedirs(outdir, exist_ok=True)
+    tag = "%06d" % (int(time.time() * 1000) % 1_000_000)
+    made = []
+    for i, colour in enumerate([(200, 60, 40), (40, 160, 90), (50, 80, 200)]):
+        img = Image.new("RGB", (1600, 1200), colour)
+        draw = ImageDraw.Draw(img)
+        for x in range(0, 1600, 37 + i * 11):
+            draw.line([(x, 0), (1600 - x, 1200)], fill=((x * 3) % 256, 255 - colour[1], (x + 90 * i) % 256), width=5)
+        gps = i == 2
+        extra = {}
+        if gps:
+            # Only this one carries EXIF at all: a camera make and a location.
+            exif = Image.Exif()
+            exif[0x010F] = "RimeTest"
+            exif.get_ifd(0x8825).update({
+                1: "S", 2: (IFDRational(31, 1), IFDRational(57, 1), IFDRational(1234, 100)),
+                3: "E", 4: (IFDRational(115, 1), IFDRational(51, 1), IFDRational(7, 1)),
+            })
+            extra["exif"] = exif
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=88, **extra)
+        data = buf.getvalue()
+        if gps and not gps_of(data):
+            return json.dumps({"reply": "error", "message": "the GPS test image was made without a location"})
+        name = "RimeTest_%s_%d.jpg" % (tag, i)
+        local = os.path.join(outdir, name)
+        with open(local, "wb") as f:
+            f.write(data)
+        r = subprocess.run([adb, "-s", serial, "push", local, PHOTOS_DIR + "/" + name], capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return json.dumps({"reply": "error", "message": "adb push failed: " + (r.stdout + r.stderr).strip()[:300]})
+        adb_shell(adb, serial, "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                  "-d", "file://" + PHOTOS_DIR + "/" + name)
+        item = {"name": name, "len": len(data), "sha256": hashlib.sha256(data).hexdigest(), "gps": gps}
+        PHOTOS_PUSHED[name] = item
+        made.append(item)
+    # A pushed file is in the store at once but without its size or
+    # dimensions until the scan reaches it; the phone lists neither.
+    end = time.time() + 30
+    while time.time() < end:
+        rows = photos_rows(adb, serial)
+        if all(rows.get(m["name"], {}).get("_size") and rows.get(m["name"], {}).get("width") for m in made):
+            return json.dumps({"reply": "ok", "photos": made})
+        time.sleep(0.5)
+    return json.dumps({"reply": "error", "message": "the test images were not indexed in 30 s: %s" % photos_rows(adb, serial)})
+
+def photos_cleanup():
+    """Delete the photo tests' folder on the EMULATOR, and wait for its
+    MediaStore rows to go."""
+    emu = emulator()
+    if emu is None:
+        return json.dumps({"reply": "error", "message": "photos_cleanup runs only on an emulator"})
+    adb, serial = emu
+    adb_shell(adb, serial, "rm", "-rf", PHOTOS_DIR)
+    end = time.time() + 15
+    while time.time() < end:
+        rows = photos_rows(adb, serial)
+        if not rows:
+            return json.dumps({"reply": "ok"})
+        # A row whose file is gone is removed by naming it to the scanner.
+        for name in rows:
+            adb_shell(adb, serial, "am", "broadcast", "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                      "-d", "file://" + PHOTOS_DIR + "/" + name)
+        time.sleep(0.5)
+    return json.dumps({"reply": "error", "message": "RimeTest rows outlived their files: %s" % list(photos_rows(adb, serial))})
+
+def rime_cli(argv):
+    """`rime` from THIS process, at this run's rime-remoted (XDG_RUNTIME_DIR
+    is the run's own): (exit code, stdout parsed as JSON or None, stderr).
+    The JSON is kept on a failure too: `--json` prints {"error"} and exits 1."""
+    env = dict(os.environ, XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
+               XDG_STATE_HOME=os.path.join(ROOT, "state"))
+    p = subprocess.run([os.path.join(BIN, "rime"), *argv], env=env, capture_output=True, timeout=110)
+    try:
+        out = json.loads(p.stdout) if p.stdout.strip() else None
+    except Exception:
+        out = None
+    return p.returncode, out, p.stderr.decode(errors="replace").strip()[:600]
+
+def thumb_facts(path):
+    """What the test asserts about one thumbnail on this computer: where it
+    is, its mode, and whether any EXIF or APP1 segment survived in it."""
+    facts = {"path": path, "exists": False}
+    if not isinstance(path, str):
+        return facts
+    root = os.path.join(ROOT, "run", "rime-remote", "photos") + os.sep
+    facts["under_run"] = os.path.realpath(path).startswith(os.path.realpath(root[:-1]) + os.sep)
+    try:
+        st = os.lstat(path)
+        with open(path, "rb") as f:
+            data = f.read()
+    except OSError:
+        return facts
+    facts.update({"exists": True, "mode": "%o" % (st.st_mode & 0o7777), "len": len(data),
+                  "jpeg": data[:2] == b"\xff\xd8", "exif": b"Exif" in data, "app1": False})
+    # Walk the header segments up to the image data, as a reader would.
+    i = 2
+    while i + 4 <= len(data) and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker == 0xFF:
+            i += 1
+            continue
+        if marker == 0xE1:
+            facts["app1"] = True
+        if marker == 0xDA:
+            break
+        i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    return facts
+
+def photos_list(device, limit):
+    """`rime remote photos --device D --json --limit N` at the computer, with
+    the facts about every thumbnail it names."""
+    if not isinstance(device, str) or not isinstance(limit, int):
+        return json.dumps({"reply": "error", "message": "device must be a string and limit a number"})
+    code, out, err = rime_cli(["remote", "photos", "--device", device, "--json", "--limit", str(limit)])
+    thumbs = []
+    if isinstance(out, dict):
+        for p in out.get("photos") or []:
+            if p.get("thumb") is not None:
+                thumbs.append(dict(thumb_facts(p.get("thumb")), id=p.get("id")))
+    return json.dumps({"reply": "ok", "code": code, "out": out, "stderr": err, "thumbs": thumbs})
+
+def photos_save(device, photo):
+    """`rime remote photos save ID --device D --to <run>/saved --json` at the
+    computer, with the saved file's length, sha256 and whether it says where
+    it was taken. Which test image it was, and what Android did to the one
+    with a location, goes in broker.log."""
+    if not isinstance(device, str) or not isinstance(photo, int):
+        return json.dumps({"reply": "error", "message": "device must be a string and photo a number"})
+    import hashlib
+    code, out, err = rime_cli(["remote", "photos", "save", str(photo), "--device", device,
+                               "--to", os.path.join(ROOT, "saved"), "--json"])
+    saved = None
+    if code == 0 and isinstance(out, dict) and isinstance(out.get("path"), str):
+        try:
+            with open(out["path"], "rb") as f:
+                data = f.read()
+            saved = {"len": len(data), "sha256": hashlib.sha256(data).hexdigest(), "gps": gps_of(data)}
+            for item in PHOTOS_PUSHED.values():
+                if item["len"] == len(data) or item["sha256"] == saved["sha256"]:
+                    if item["gps"]:
+                        sys.stderr.write("photos: the image with a location came back %s, location %s\n" % (
+                            "byte for byte" if item["sha256"] == saved["sha256"] else "changed",
+                            "present" if saved["gps"] else "absent"))
+                        sys.stderr.flush()
+        except OSError as e:
+            saved = {"error": str(e)}
+    return json.dumps({"reply": "ok", "code": code, "out": out, "stderr": err, "saved": saved})
+
+def photos_thumbs_dir(device):
+    """Whether this run's rime-remoted holds a thumbnail folder for [device]."""
+    if not isinstance(device, str) or "/" in device or device in ("", ".", ".."):
+        return json.dumps({"reply": "error", "message": "device must be a plain id"})
+    d = os.path.join(ROOT, "run", "rime-remote", "photos", device)
+    return json.dumps({"reply": "ok", "exists": os.path.lexists(d)})
+
 class H(socketserver.StreamRequestHandler):
     timeout = 120
     def handle(self):
@@ -674,6 +908,16 @@ class H(socketserver.StreamRequestHandler):
                 out = notify_closed(req.get("id"), req.get("reason"))
             elif cmd == "notify_reply":
                 out = notify_reply(req.get("id"), req.get("text"))
+            elif cmd == "photos_push":
+                out = photos_push()
+            elif cmd == "photos_cleanup":
+                out = photos_cleanup()
+            elif cmd == "photos_list":
+                out = photos_list(req.get("device"), req.get("limit"))
+            elif cmd == "photos_save":
+                out = photos_save(req.get("device"), req.get("photo"))
+            elif cmd == "photos_thumbs_dir":
+                out = photos_thumbs_dir(req.get("device"))
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:
@@ -803,10 +1047,11 @@ if [ -n "$nexroot" ]; then
 else
   skip+=(com.rimeos.remote.device.NexOnDeviceTest com.rimeos.remote.device.NexColdTapOnDeviceTest)
 fi
-# SMS only on an emulator (see the header): never a real phone's messages or number.
+# SMS, calls and photos only on an emulator (see the header): never a real
+# phone's messages, number or photos.
 case $serial in
   emulator-*) ;;
-  *) skip+=(com.rimeos.remote.device.MessagesOnDeviceTest com.rimeos.remote.device.CallsOnDeviceTest) ;;
+  *) skip+=(com.rimeos.remote.device.MessagesOnDeviceTest com.rimeos.remote.device.CallsOnDeviceTest com.rimeos.remote.device.PhotosOnDeviceTest) ;;
 esac
 if [ ${#skip[@]} -gt 0 ]; then
   args+=(-e notClass "$(IFS=,; echo "${skip[*]}")")
@@ -866,5 +1111,5 @@ echo "DEVICE SUITE: $count tests passed on $serial"
 [ -n "$nexroot" ] || echo "DEVICE SUITE: nex NOT tested (no RIME_DEVICE_SUITE_NEXD)"
 case $serial in
   emulator-*) ;;
-  *) echo "DEVICE SUITE: SMS and calls NOT tested (not an emulator)" ;;
+  *) echo "DEVICE SUITE: SMS, calls and photos NOT tested (not an emulator)" ;;
 esac
