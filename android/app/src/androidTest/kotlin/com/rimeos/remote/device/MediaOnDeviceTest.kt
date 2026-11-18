@@ -160,6 +160,87 @@ class MediaOnDeviceTest {
         )
     }
 
+    @Test
+    fun the_computer_plays_pauses_skips_and_seeks_what_it_shows_and_the_app_gets_each() {
+        clearControls()
+        choose(setOf(HELPER))
+        helper("play", 1_000)
+        val remote = hub.state(machine.deviceId)!!.remote!!
+        assertTrue("rime-remoted must offer ${Media.CONTROL_FEATURE}: ${remote.features}", remote.has(Media.CONTROL_FEATURE))
+        val (at, shown) = awaitEntry("the helper's song, controllable, on the computer") {
+            it.optString("op") == "show" && mine(it) && it.optString("status") == "Playing" && it.optBoolean("can_control")
+        }
+        val player = shown.getString("player")
+        val can = shown.getJSONArray("can").let { a -> (0 until a.length()).map { a.getString(it) } }
+        assertEquals(listOf("play", "pause", "next", "previous", "seek"), can)
+
+        // Play/pause while playing: the app is told to pause, and the computer sees it paused.
+        call(player, "PlayPause")
+        val (c1, r1) = outcome(player, "PlayPause", at)
+        assertEquals("ok", r1)
+        val (pausedAt, _) = awaitEntry("the pause on the computer", from = c1) {
+            it.optString("op") == "show" && it.optString("player") == player && it.optString("status") == "Paused"
+        }
+        awaitValue(10_000, "the helper to be told to pause") { if ("pause" in controls()) true else null }
+
+        // Next: a new track, from the start.
+        call(player, "Next")
+        assertEquals("ok", outcome(player, "Next", pausedAt).second)
+        val (nextAt, next) = awaitEntry("the next track on the computer", from = pausedAt) {
+            it.optString("op") == "show" && it.optString("player") == player && it.optString("title") == "Helper Song 2"
+        }
+        assertTrue("a new title is a new track: $shown / $next", next.getString("track") != shown.getString("track"))
+
+        // A relative seek crosses as where to: paused at 0, +60 s is 60 000 ms.
+        call(player, "Seek") { put("offset_us", 60_000_000L) }
+        assertEquals("ok", outcome(player, "Seek", nextAt).second)
+        val (soughtAt, _) = awaitEntry("the seek on the computer", from = nextAt) {
+            it.optString("op") == "show" && it.optString("player") == player && it.getLong("position_ms") == 60_000L
+        }
+        // SetPosition on the current track, as the Shell's seek bar does.
+        call(player, "SetPosition") { put("track", next.getString("track")); put("position_us", 90_000_000L) }
+        assertEquals("ok", outcome(player, "SetPosition", soughtAt).second)
+        awaitValue(10_000, "the helper to be told each control") {
+            controls().takeIf { it.containsAll(listOf("pause", "next", "seek 60000", "seek 90000")) }
+        }
+        val got = controls()
+        assertEquals("each call reached the app once, in order: $got", listOf("pause", "next", "seek 60000", "seek 90000"), got)
+    }
+
+    @Test
+    fun with_control_off_the_computer_only_shows_and_nothing_reaches_the_app() {
+        clearControls()
+        settings(on = true, apps = setOf(HELPER), control = false)
+        helper("play", 1_000)
+        val (at, shown) = awaitEntry("the helper's song on the computer") {
+            it.optString("op") == "show" && mine(it) && it.optString("status") == "Playing"
+        }
+        val player = shown.getString("player")
+        assertFalse("control off, the computer was offered control: $shown", shown.optBoolean("can_control"))
+        assertEquals(0, shown.getJSONArray("can").length())
+        call(player, "PlayPause")
+        val (c1, r1) = outcome(player, "PlayPause", at)
+        assertEquals("not_supported", r1)
+        call(player, "Next")
+        assertEquals("not_supported", outcome(player, "Next", c1).second)
+        Thread.sleep(1_500)
+        assertTrue("control off, the app was told: ${controls()}", controls().isEmpty())
+        assertTrue(
+            "control off, playback changed: ${log()}",
+            log().none { it.optString("player") == player && it.optString("op") == "show" && it.optString("status") != "Playing" },
+        )
+
+        // The switch follows at once, both ways, with no change on the phone.
+        control(true)
+        val (onAt, _) = awaitEntry("control turned on, on the computer", from = c1) {
+            it.optString("op") == "show" && it.optString("player") == player && it.optBoolean("can_control")
+        }
+        control(false)
+        awaitEntry("control turned off again, on the computer", from = onAt) {
+            it.optString("op") == "show" && it.optString("player") == player && !it.optBoolean("can_control")
+        }
+    }
+
     // ---- helpers --------------------------------------------------------
 
     /** Is [entry] about this test's phone? A `show` carries its name; `gone` only the player. */
@@ -168,10 +249,38 @@ class MediaOnDeviceTest {
     private fun log(): List<JSONObject> = Desktop.mediaLog().drop(before)
 
     /** The switch and the apps, written where the app keeps them and told to the hub, as the screen does. */
-    private fun settings(on: Boolean, apps: Set<String>) {
-        runBlocking { repository.settings(repository.loadBlocking().settings.copy(mediaOn = on, mediaApps = apps)) }
+    private fun settings(on: Boolean, apps: Set<String>, control: Boolean = true) {
+        runBlocking {
+            repository.settings(repository.loadBlocking().settings.copy(mediaOn = on, mediaApps = apps, mediaControl = control))
+        }
         hub.setMediaApps(apps)
+        hub.setMediaControl(control)
         hub.setMediaOn(on)
+    }
+
+    /** "Control from your computer", as the screen sets it. */
+    private fun control(on: Boolean) {
+        runBlocking { repository.settings(repository.loadBlocking().settings.copy(mediaControl = on)) }
+        hub.setMediaControl(on)
+    }
+
+    /** What the helper's session was told to do since the last [clearControls]: `play`, `next`, `seek 60000`, … */
+    private fun controls(): List<String> =
+        shell("logcat -d -s $HELPER_TAG:I").lines().mapNotNull { l -> l.substringAfter("control=", "").takeIf { it.isNotEmpty() }?.trim() }
+
+    private fun clearControls() {
+        shell("logcat -c")
+    }
+
+    private fun call(player: String, method: String, extra: JSONObject.() -> Unit = {}) =
+        Desktop.mediaCall(JSONObject().put("player", player).put("method", method).apply(extra))
+
+    /** The outcome the stub recorded for this test's next call on [player], after index [from]. */
+    private fun outcome(player: String, method: String, from: Int): Pair<Int, String> {
+        val (at, e) = awaitEntry("the computer's $method call", from) {
+            it.optString("op") == "call" && it.optString("player") == player && it.optString("method") == method
+        }
+        return at to e.getString("result")
     }
 
     private fun choose(apps: Set<String>) {
@@ -210,5 +319,8 @@ class MediaOnDeviceTest {
         /** android/testhelper, installed by run-device-suite.sh: it holds a media session. */
         const val HELPER = "com.rimeos.remote.testhelper"
         const val HELPER_LABEL = "Rime test helper"
+
+        /** The helper's log tag: it logs each transport control its session gets. */
+        const val HELPER_TAG = "RimeMediaHelper"
     }
 }

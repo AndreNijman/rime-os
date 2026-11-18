@@ -316,6 +316,15 @@ data class Settings(
     @SerialName("media_apps") val mediaApps: Set<String> = emptySet(),
 
     /**
+     * "Control from your computer" (§2.8): while [mediaOn], a paired computer
+     * may play, pause, skip and seek what is shown there, as far as the app
+     * allows. On by default, because it acts only on what the person already
+     * chose to show, and only while the phone is unlocked; [mediaOn] itself
+     * stays off until chosen.
+     */
+    @SerialName("media_control") val mediaControl: Boolean = true,
+
+    /**
      * "Do Not Disturb follows your computer" (`docs/remote-live-contract.md`
      * §2.9): a paired computer may turn this phone's Do Not Disturb on and
      * off, and may follow it. Off by default: it lets a computer change a

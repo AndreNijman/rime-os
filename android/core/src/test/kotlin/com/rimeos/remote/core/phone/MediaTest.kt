@@ -1,6 +1,7 @@
 package com.rimeos.remote.core.phone
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.double
@@ -26,6 +27,7 @@ class MediaTest {
         updatedAt: Long = now,
         speed: Float = 1f,
         duration: Long = 215_000,
+        actions: Long = 0,
     ) = SessionFacts(
         pkg = pkg,
         app = "Music",
@@ -37,6 +39,7 @@ class MediaTest {
         positionMs = position,
         updatedAtMs = updatedAt,
         speed = speed,
+        actions = actions,
     )
 
     private fun state(f: SessionFacts = facts(), at: Long = now) = MediaState.of(f, at)!!
@@ -320,5 +323,102 @@ class MediaTest {
         assertNotNull(r)
         assertNull(r!!.state)
         assertFalse(Media.encode(r.state, now).contains("title"))
+    }
+
+    // ---- control from the computer -----------------------------------------
+
+    private val all = MediaAction.ACTION_PLAY or MediaAction.ACTION_PAUSE or MediaAction.ACTION_SKIP_TO_NEXT or
+        MediaAction.ACTION_SKIP_TO_PREVIOUS or MediaAction.ACTION_SEEK_TO
+
+    @Test
+    fun `the session's actions become the can words, a toggle allowing both play and pause`() {
+        assertEquals(emptySet<MediaAction>(), MediaAction.of(0))
+        assertEquals(MediaAction.entries.toSet(), MediaAction.of(all))
+        assertEquals(setOf(MediaAction.PLAY, MediaAction.PAUSE), MediaAction.of(MediaAction.ACTION_PLAY_PAUSE))
+        assertEquals(setOf(MediaAction.NEXT), MediaAction.of(MediaAction.ACTION_SKIP_TO_NEXT or (1L shl 20)))
+        // The values are Android's PlaybackState.ACTION_* constants.
+        assertEquals(listOf(2L, 4L, 16L, 32L, 256L, 512L), listOf(
+            MediaAction.ACTION_PAUSE, MediaAction.ACTION_PLAY, MediaAction.ACTION_SKIP_TO_PREVIOUS,
+            MediaAction.ACTION_SKIP_TO_NEXT, MediaAction.ACTION_SEEK_TO, MediaAction.ACTION_PLAY_PAUSE,
+        ))
+    }
+
+    @Test
+    fun `can crosses in the contract's order only when not empty, and the app and session never do`() {
+        val s = state(facts(actions = MediaAction.ACTION_SEEK_TO or MediaAction.ACTION_SKIP_TO_NEXT or MediaAction.ACTION_PLAY))
+        assertEquals("org.example.music", s.pkg)
+        val p = playing(Media.encode(s.copy(session = "s7"), now))
+        assertEquals(listOf("play", "next", "seek"), p["can"]!!.let { Json.decodeFromJsonElement<List<String>>(it) })
+        assertFalse(p.toString().contains("s7"))
+        assertFalse(p.toString().contains("org.example.music"))
+        assertFalse(playing(Media.encode(s.copy(can = emptySet()), now)).containsKey("can"), "display only sends no can")
+    }
+
+    @Test
+    fun `turning control on or off, or another session, is sent even when nothing else changed`() {
+        val shown = state(facts(actions = all)).copy(session = "s1")
+        assertFalse(Media.onlyClockMoved(shown, shown.copy(can = emptySet()), now))
+        assertFalse(Media.onlyClockMoved(shown, shown.copy(session = "s2"), now))
+        assertFalse(Media.onlyClockMoved(shown, shown.copy(pkg = "org.example.other"), now))
+        assertTrue(Media.onlyClockMoved(shown, shown, now))
+    }
+
+    @Test
+    fun `the board says which session it shows`() {
+        val board = MediaBoard()
+        board.sync(listOf("s1" to facts(state = PlayState.PAUSED), "s2" to facts(pkg = "org.example.radio")), now)
+        val s = board.current(setOf("org.example.music", "org.example.radio"), now)!!
+        assertEquals("s2", s.session)
+        assertEquals("org.example.radio", s.pkg)
+    }
+
+    @Test
+    fun `a control acts only on the session last shown, and only as far as both the report and the session allow`() {
+        val live = facts(actions = all)
+        val sent = state(live).copy(session = "s1")
+        fun t(action: String, pos: Long? = null, session: String = "s1", l: SessionFacts = live, s: MediaState = sent) =
+            Media.transport(s, session, l, action, pos)
+        assertEquals(Transport.Play, t("play"))
+        assertEquals(Transport.Pause, t("pause"))
+        assertEquals(Transport.Next, t("next"))
+        assertEquals(Transport.Previous, t("previous"))
+        assertEquals(Transport.SeekTo(90_000), t("seek", 90_000))
+        // play_pause against the session as it is now.
+        assertEquals(Transport.Pause, t("play_pause"))
+        assertEquals(Transport.Pause, t("play_pause", l = facts(actions = all, state = PlayState.WAITING)))
+        assertEquals(Transport.Play, t("play_pause", l = facts(actions = all, state = PlayState.PAUSED)))
+        // A seek past the end goes to the end; one with no position, or a negative one, is nothing.
+        assertEquals(Transport.SeekTo(215_000), t("seek", 999_000))
+        assertNull(t("seek"))
+        assertNull(t("seek", -1))
+        // Another session, or another app under the same id: ignored.
+        assertNull(t("next", session = "s2"))
+        assertNull(t("next", l = facts(pkg = "org.example.other", actions = all)))
+        assertNull(t("next", s = sent.copy(session = "")))
+        // The report did not offer it (control off for this computer): ignored.
+        assertNull(t("next", s = sent.copy(can = emptySet())))
+        assertNull(t("play_pause", s = sent.copy(can = setOf(MediaAction.PLAY))), "playing, and pause was not offered")
+        // The session no longer allows it, whatever was sent: ignored.
+        val onlyNext = facts(actions = MediaAction.ACTION_SKIP_TO_NEXT)
+        assertNull(t("previous", l = onlyNext))
+        assertNull(t("seek", 1_000, l = onlyNext))
+        assertNull(t("pause", l = onlyNext))
+        assertEquals(Transport.Next, t("next", l = onlyNext))
+        assertNull(t("stop"))
+        assertNull(t("PLAY"))
+    }
+
+    @Test
+    fun `the outbox says what this connection last showed`() {
+        val box = MediaOutbox()
+        val s = state(facts(actions = all)).copy(session = "s1")
+        box.offer(s)
+        assertNull(box.showing, "offered is not shown")
+        val r = box.next(now)!!
+        box.sent(r, now)
+        assertEquals(s, box.showing)
+        box.offer(null)
+        box.failed(box.next(now + 1_000)!!, now + 1_000)
+        assertEquals(s, box.showing, "a failed take-back leaves the computer showing it")
     }
 }

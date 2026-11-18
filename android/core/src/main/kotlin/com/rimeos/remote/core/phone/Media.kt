@@ -1,12 +1,17 @@
 package com.rimeos.remote.core.phone
 
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 /**
  * What this phone is playing, shown on a paired computer
- * (`docs/remote-live-contract.md` §2.8). Display only: nothing comes back.
+ * (`docs/remote-live-contract.md` §2.8), and, where the person allows it
+ * ("Control from your computer"), played, paused, skipped and sought from
+ * there: each report says what the computer may do ([MediaState.can]) and
+ * [Media.transport] decides what a `media_control` from it does here.
  *
  * Policy without Android in it, so it is tested here: which session is shown,
  * what of it crosses, and when. The app side reads each media session into
@@ -18,13 +23,20 @@ import kotlinx.serialization.json.put
  * mixes in: a clock change would read as a seek.
  *
  * What leaves the phone is the app's name, title, artist, album, length,
- * position, speed and whether it is playing, from apps the person switched on
- * one by one, over a connection that is already open. Never artwork, URIs,
- * the queue or a session's extras.
+ * position, speed and whether it is playing (and, with control on, which
+ * controls the app offers), from apps the person switched on one by one, over
+ * a connection that is already open. Never artwork, URIs, the queue or a
+ * session's extras.
  */
 object Media {
     /** The feature a machine's `remote_hello` lists; nothing is sent to one without it. */
     const val FEATURE: String = "phone_media"
+
+    /** The feature a machine lists when it can use `can`; nobody else is sent it. */
+    const val CONTROL_FEATURE: String = "phone_media_control"
+
+    /** The `media_control` actions a computer sends. */
+    val CONTROL_ACTIONS: Set<String> = setOf("play", "pause", "play_pause", "next", "previous", "seek")
 
     /** The caps the computer applies, applied here too so nothing larger crosses. */
     const val APP_CAP: Int = 60
@@ -69,6 +81,9 @@ object Media {
                         if (state.durationMs > 0) put("duration_ms", state.durationMs)
                         put("position_ms", state.positionAt(nowMs))
                         put("rate", state.rate)
+                        if (state.can.isNotEmpty()) {
+                            put("can", buildJsonArray { for (a in MediaAction.entries) if (a in state.can) add(JsonPrimitive(a.word)) })
+                        }
                     },
                 )
             }
@@ -81,7 +96,10 @@ object Media {
      * new track, a pause or a speed change is not the clock.
      */
     fun onlyClockMoved(sent: MediaState, newest: MediaState, nowMs: Long): Boolean =
-        sent.app == newest.app &&
+        sent.pkg == newest.pkg &&
+            sent.session == newest.session &&
+            sent.can == newest.can &&
+            sent.app == newest.app &&
             sent.playing == newest.playing &&
             sent.title == newest.title &&
             sent.artist == newest.artist &&
@@ -89,6 +107,36 @@ object Media {
             sent.durationMs == newest.durationMs &&
             sent.rate == newest.rate &&
             kotlin.math.abs(sent.positionAt(nowMs) - newest.positionAt(nowMs)) <= SEEK_MS
+
+    /**
+     * What a `media_control` [action] from the computer does to [live], the
+     * session as it is now, given [sent], what this phone last showed that
+     * computer: null (ignored) unless [live] is that very session (package
+     * and session id) and both the report and the session allow it.
+     * `play_pause` is resolved here, against [live]'s state; a seek is
+     * clamped to the length when it is known.
+     */
+    fun transport(sent: MediaState, liveSession: String, live: SessionFacts, action: String, positionMs: Long?): Transport? {
+        if (sent.session.isEmpty() || liveSession != sent.session || live.pkg != sent.pkg) return null
+        val liveCan = MediaAction.of(live.actions)
+        fun allowed(a: MediaAction) = a in sent.can && a in liveCan
+        return when (action) {
+            "play" -> Transport.Play.takeIf { allowed(MediaAction.PLAY) }
+            "pause" -> Transport.Pause.takeIf { allowed(MediaAction.PAUSE) }
+            "play_pause" -> when (live.state) {
+                PlayState.PLAYING, PlayState.WAITING -> Transport.Pause.takeIf { allowed(MediaAction.PAUSE) }
+                else -> Transport.Play.takeIf { allowed(MediaAction.PLAY) }
+            }
+            "next" -> Transport.Next.takeIf { allowed(MediaAction.NEXT) }
+            "previous" -> Transport.Previous.takeIf { allowed(MediaAction.PREVIOUS) }
+            "seek" -> {
+                val to = positionMs?.takeIf { it >= 0 } ?: return null
+                val end = live.durationMs.takeIf { it in 1..MAX_MS } ?: MAX_MS
+                Transport.SeekTo(to.coerceAtMost(end)).takeIf { allowed(MediaAction.SEEK) }
+            }
+            else -> null
+        }
+    }
 
     /** [raw] on one line, control characters as spaces, so a title that is only those counts as empty. */
     internal fun visible(raw: CharSequence?): String =
@@ -105,6 +153,48 @@ enum class PlayState {
 
     /** Stopped, errored or none: nothing to show. */
     IDLE,
+}
+
+/**
+ * What a computer may do to a session, as `can` names it (§2.8), from the
+ * session's `PlaybackState` actions.
+ */
+enum class MediaAction(val word: String) {
+    PLAY("play"),
+    PAUSE("pause"),
+    NEXT("next"),
+    PREVIOUS("previous"),
+    SEEK("seek"),
+    ;
+
+    companion object {
+        // android.media.session.PlaybackState.ACTION_*, copied: core has no Android.
+        const val ACTION_PAUSE: Long = 1L shl 1
+        const val ACTION_PLAY: Long = 1L shl 2
+        const val ACTION_SKIP_TO_PREVIOUS: Long = 1L shl 4
+        const val ACTION_SKIP_TO_NEXT: Long = 1L shl 5
+        const val ACTION_SEEK_TO: Long = 1L shl 8
+        const val ACTION_PLAY_PAUSE: Long = 1L shl 9
+
+        /** What [actions] (`PlaybackState.actions`) allows. A play/pause toggle allows both. */
+        fun of(actions: Long): Set<MediaAction> = buildSet {
+            fun has(bit: Long) = actions and bit != 0L
+            if (has(ACTION_PLAY) || has(ACTION_PLAY_PAUSE)) add(PLAY)
+            if (has(ACTION_PAUSE) || has(ACTION_PLAY_PAUSE)) add(PAUSE)
+            if (has(ACTION_SKIP_TO_NEXT)) add(NEXT)
+            if (has(ACTION_SKIP_TO_PREVIOUS)) add(PREVIOUS)
+            if (has(ACTION_SEEK_TO)) add(SEEK)
+        }
+    }
+}
+
+/** What a `media_control` does to the session, through its `TransportControls`. */
+sealed interface Transport {
+    data object Play : Transport
+    data object Pause : Transport
+    data object Next : Transport
+    data object Previous : Transport
+    data class SeekTo(val ms: Long) : Transport
 }
 
 /** What the app reads off one media session, before anything is decided. */
@@ -124,6 +214,8 @@ data class SessionFacts(
     val updatedAtMs: Long,
     /** `PlaybackState.playbackSpeed`. */
     val speed: Float,
+    /** `PlaybackState.actions`: what the app lets a controller do. */
+    val actions: Long = 0,
 )
 
 /**
@@ -146,6 +238,11 @@ data class MediaState(
     val positionMs: Long = 0,
     val atMs: Long = 0,
     val rate: Double = 1.0,
+    /** What the computer may do to it; empty is display only. Stripped per computer unless control is on. */
+    val can: Set<MediaAction> = emptySet(),
+    /** The app and the board's session id it came from: where a control goes. Never sent. */
+    val pkg: String = "",
+    val session: String = "",
 ) {
     /** Where playback is at [nowMs], in whole milliseconds, never past the end. */
     fun positionAt(nowMs: Long): Long {
@@ -184,6 +281,8 @@ data class MediaState(
                 positionMs = f.positionMs.coerceAtLeast(0),
                 atMs = at,
                 rate = rate,
+                can = MediaAction.of(f.actions),
+                pkg = f.pkg,
             )
             // Re-anchored at now and clamped, so a stale anchor or a position
             // past the end is not carried along.
@@ -243,9 +342,9 @@ class MediaBoard {
 
     /** What is shown as of [nowMs] from the apps in [allowed], or null for nothing. */
     fun current(allowed: Set<String>, nowMs: Long): MediaState? {
-        val shown = entries.values.mapNotNull { e ->
+        val shown = entries.mapNotNull { (id, e) ->
             if (e.facts.pkg !in allowed) return@mapNotNull null
-            MediaState.of(e.facts, nowMs)?.let { e to it }
+            MediaState.of(e.facts, nowMs)?.let { e to it.copy(session = id) }
         }
         shown.firstOrNull { (_, s) -> s.playing }?.let { return it.second }
         // maxBy keeps the first of equals: the system's order breaks a tie.
@@ -275,6 +374,9 @@ class MediaOutbox(private val gapMs: Long = Media.GAP_MS) {
     private var shown: MediaState? = null
     private var lastSendAt: Long? = null
     private var blocked = false
+
+    /** What the computer shows now, as far as this connection knows: the session a control from it acts on. */
+    val showing: MediaState? get() = shown
 
     /** The state to show from now on; null is nothing. */
     fun offer(state: MediaState?) {
