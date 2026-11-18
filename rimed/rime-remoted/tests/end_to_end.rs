@@ -2255,3 +2255,105 @@ fn a_reply_typed_here_goes_to_a_phone_that_says_it_can_and_is_not_a_dismissal() 
     let after = notify_lines(&h, lines.get());
     assert!(after.iter().all(|l| l["op"] == "notify"), "{after:?}");
 }
+
+/// Open `device_events` on `channel` and wait for its reply.
+fn open_events(session: &mut Session, channel: u32) {
+    session.send(Frame::Open {
+        channel,
+        request: br#"{"cmd":"device_events"}"#.to_vec(),
+    });
+    match session.recv() {
+        Frame::Control(line) => {
+            let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(v["reply"], "events", "{v}");
+        }
+        other => panic!("expected the events reply, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_phones_do_not_disturb_reaches_the_shell_on_a_change_and_the_computers_reaches_the_phones_that_follow_it() {
+    use std::os::unix::fs::MetadataExt;
+    let h = harness!("focus");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&h) else { return };
+    let tablet = Device::new();
+    assert_eq!(tablet.pair(&h, &offer, "tablet-9")["ok"], true);
+    let phone_id = rime_remote_core::device::Device::id_for(&phone.key());
+    let mut p = phone.connect(&h).expect("the phone's session");
+    let mut t = tablet.connect(&h).expect("the tablet's session");
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_focus"), "{hello}");
+    open_events(&mut p, 9);
+    open_events(&mut t, 9);
+    let focus_file = h.root.join("run/rime-remote/focus.json");
+
+    // A device that never said "focus" does not touch this computer's Do Not
+    // Disturb, whatever its own is doing.
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring"],"dnd":true}"#)["reply"], "ok");
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring"],"dnd":false}"#)["reply"], "ok");
+    assert!(!focus_file.exists(), "a phone without focus wrote the focus file");
+
+    // The phone that said it: its first report with dnd is written before the
+    // reply, under the handshake's id, private.
+    let refused = p.call(r#"{"cmd":"phone_report","can":["focus"],"network":{"type":"wifi","signal":9}}"#);
+    assert_eq!(refused["reply"], "error", "{refused}");
+    let before = rime_remote_core::now_ms();
+    let ok = p.call(r#"{"cmd":"phone_report","battery":40,"can":["focus"],"network":{"type":"wifi","signal":3},"dnd":true}"#);
+    assert_eq!(ok["reply"], "ok", "{ok}");
+    let first: serde_json::Value = serde_json::from_slice(&std::fs::read(&focus_file).expect("focus.json")).expect("json");
+    assert_eq!(first["dnd"], true, "{first}");
+    assert_eq!(first["device"], phone_id.as_str(), "{first}");
+    let at = first["at_ms"].as_u64().expect("at_ms");
+    assert!(at >= before && at <= rime_remote_core::now_ms(), "{first}");
+    let meta = std::fs::metadata(&focus_file).expect("meta");
+    assert_eq!(meta.mode() & 0o777, 0o600);
+    assert_eq!(std::fs::metadata(focus_file.parent().unwrap()).unwrap().mode() & 0o777, 0o700);
+
+    // The listing carries what the phone said.
+    let listed = h.control(r#"{"cmd":"devices"}"#);
+    assert_eq!(listed["phones"][&phone_id]["network"], serde_json::json!({"type": "wifi", "signal": 3}), "{listed}");
+    assert_eq!(listed["phones"][&phone_id]["dnd"], true, "{listed}");
+    assert_eq!(listed["phones"][&phone_id]["can"], serde_json::json!(["focus"]), "{listed}");
+
+    // The same state again is not a change: the file is not replaced (a
+    // rename would give it a new inode), so the Shell is not woken.
+    let inode = meta.ino();
+    assert_eq!(p.call(r#"{"cmd":"phone_report","battery":35,"can":["focus"],"dnd":true}"#)["reply"], "ok");
+    let again = std::fs::metadata(&focus_file).expect("meta");
+    assert_eq!(again.ino(), inode, "an unchanged dnd rewrote the focus file");
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&focus_file).unwrap()).unwrap(), first);
+
+    // A change is.
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["focus"],"dnd":false}"#)["reply"], "ok");
+    let off: serde_json::Value = serde_json::from_slice(&std::fs::read(&focus_file).unwrap()).unwrap();
+    assert_eq!(off["dnd"], false, "{off}");
+    assert_ne!(std::fs::metadata(&focus_file).unwrap().ino(), inode);
+
+    // The other way: `rime remote focus on`, through the CLI, reaches the one
+    // phone that follows this machine, and says how many.
+    let (code, said) = rime_remote(&h, &["focus", "on"], b"");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("1 phone"), "{said}");
+    assert_eq!(events_on(&mut p, 9, 1), vec![serde_json::json!({"event": "focus", "dnd": true})]);
+    // Sending it changed nothing here: only the phone's own report does.
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&focus_file).unwrap()).unwrap(), off);
+
+    // The tablet now says focus too; the next state reaches both. The first
+    // line on the tablet's channel is that one, so the "on" above never
+    // reached it.
+    assert_eq!(t.call(r#"{"cmd":"phone_report","can":["ring","focus"]}"#)["reply"], "ok");
+    let r = h.control(r#"{"cmd":"focus","dnd":false}"#);
+    assert_eq!(r, serde_json::json!({"reply": "focused", "reached": 2}));
+    assert_eq!(events_on(&mut t, 9, 1), vec![serde_json::json!({"event": "focus", "dnd": false})]);
+    assert_eq!(events_on(&mut p, 9, 1), vec![serde_json::json!({"event": "focus", "dnd": false})]);
+
+    // Revoked, a phone is told nothing more; nobody left is not an error.
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"tablet-9"}"#)["reply"], "ok");
+    let (code, said) = rime_remote(&h, &["focus", "off"], b"");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("No phone"), "{said}");
+}

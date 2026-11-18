@@ -276,8 +276,59 @@ stops, when the level changes by 5 points, and at least every 10 minutes.
 Pixel 8: battery 62%, charging, reported 3m ago
 ```
 
+The phone also reports how it is connected (Wi-Fi, mobile data, Ethernet or
+none, with its signal bars when it knows them) and whether its Do Not Disturb
+is on. The line shows whatever was reported:
+
+```
+Pixel 8: battery 62%, charging, Wi-Fi signal 3/4, Do Not Disturb, reported 3m ago
+```
+
 With `--json`, a paired device that has reported carries a `phone` field
-(`battery`, `charging`, `can`, `reported_ms`). Revoking the device deletes it.
+(`battery`, `charging`, `network` with `type` and `signal`, `dnd`, `can`,
+`reported_ms`). Revoking the device deletes it.
+
+## `rime remote focus on|off`: Do Not Disturb on both
+
+Do Not Disturb can follow you between the phone and the computer, the way
+Focus does between an iPhone and a Mac. It is off until you turn it on, and you
+turn it on separately on each side:
+
+- **On the phone:** in Rime Remote, open **Notifications on your computer**
+  and turn on **Do Not Disturb follows your computer**. It needs the same
+  notification access as notification mirroring, and no other permission.
+- **On the computer:** in Rime Settings, open Paired devices and turn on
+  **Do Not Disturb follows your phone**.
+
+With both on:
+
+- When you turn Do Not Disturb on or off on the phone, the computer follows.
+- When you toggle it in the Shell, the Shell runs `rime remote focus on` or
+  `off`, and every connected phone with Focus sync on follows.
+
+```
+$ rime remote focus on
+rime: told 1 phone to turn Do Not Disturb on.
+```
+
+It sets a state rather than flipping one. A phone that is already there stays
+as it is, and nothing bounces back and forth. When no phone is connected with
+Focus sync on, `rime` says so and still exits 0. A phone that was not connected
+does not catch up later: the next change on either side sets both. Only the
+computer's own user can run it. A paired phone has no command for this
+computer's Do Not Disturb. It can only report its own, and the Shell follows
+that report only when you have turned that on.
+
+On the phone, a Do Not Disturb the computer turns on is a mode of its own,
+and `off` from the computer ends only that one (measured on Android 16). If
+you turned Do Not Disturb on at the phone, the computer cannot turn it off,
+and the phone stays as it is.
+
+Turning "Do Not Disturb follows your computer" off on the phone, or locking
+the app, ends a Do Not Disturb a computer turned on, and leaves one you turned
+on yourself. If you take the app's notification access away first, it cannot:
+end it from the Quick Settings "Modes" tile, where it is listed as "Do Not
+Disturb (Rime Remote)".
 
 ## `rime remote send <device>`: files and text to your phone
 

@@ -75,6 +75,8 @@ fun MirrorScreen(
     onChoose: (pkg: String, on: Boolean) -> Unit,
     reply: Boolean,
     onReply: (Boolean) -> Unit,
+    focus: Boolean,
+    onFocus: (Boolean) -> Unit,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -128,6 +130,20 @@ fun MirrorScreen(
                         Switch(checked = reply && granted, onCheckedChange = null, enabled = granted)
                     }
                     HorizontalDivider()
+                    // The same grant is what lets this app change Do Not Disturb (contract §2.9).
+                    SwitchRow(
+                        title = "Do Not Disturb follows your computer",
+                        text = "Turning Do Not Disturb on or off on a paired computer does the same here, " +
+                            "and the other way round, when that computer follows this phone too. " +
+                            "A computer can turn off only a Do Not Disturb it turned on. " +
+                            "Turning this off, or locking the app, ends one a computer turned on. " +
+                            "If you take notification access away first, it stays on: end it from " +
+                            "Modes in Quick Settings, under \"Do Not Disturb (Rime Remote)\".",
+                        on = focus && granted,
+                        enabled = granted,
+                        onChange = onFocus,
+                    )
+                    HorizontalDivider()
                     Text(
                         "Apps",
                         style = MaterialTheme.typography.titleSmall,
@@ -155,6 +171,24 @@ fun MirrorScreen(
                 }
             }
         }
+    }
+}
+
+/** A row whose whole width is the switch, with a line saying what it does. */
+@Composable
+private fun SwitchRow(title: String, text: String, on: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .toggleable(value = on, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+            .padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Switch(checked = on, onCheckedChange = null, enabled = enabled)
     }
 }
 

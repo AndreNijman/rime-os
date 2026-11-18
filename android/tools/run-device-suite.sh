@@ -502,6 +502,18 @@ def media_log():
         pass
     return json.dumps({"reply": "ok", "entries": entries})
 
+def focus_file():
+    """The phone's Do Not Disturb as rime-remoted wrote it for the Shell
+    (contract §2.9): $XDG_RUNTIME_DIR/rime-remote/focus.json, where the
+    runtime directory is this run's own (every rime-remoted here is started
+    with XDG_RUNTIME_DIR=$ROOT/run), so the desktop's real file is never read
+    or written. Null until a phone's change was written."""
+    try:
+        with open(os.path.join(ROOT, "run", "rime-remote", "focus.json"), encoding="utf-8") as f:
+            return json.dumps({"reply": "ok", "focus": json.load(f)})
+    except FileNotFoundError:
+        return json.dumps({"reply": "ok", "focus": None})
+
 def notify_closed(nid, reason):
     """The stub notification server's NotificationClosed: one complete line
     rime-remoted's stub reads, as if the person (2) or a timeout (1) closed it."""
@@ -561,6 +573,8 @@ class H(socketserver.StreamRequestHandler):
                 out = notify_log()
             elif cmd == "media_log":
                 out = media_log()
+            elif cmd == "focus_file":
+                out = focus_file()
             elif cmd == "notify_closed":
                 out = notify_closed(req.get("id"), req.get("reason"))
             elif cmd == "notify_reply":

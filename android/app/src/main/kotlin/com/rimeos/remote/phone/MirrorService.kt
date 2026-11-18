@@ -35,7 +35,8 @@ import com.rimeos.remote.link.LinkHub
  * here, as a swipe would; Android then reports the removal, which closes it
  * on the other computers too. When the person turned on replying, a reply
  * typed on a computer goes through [reply], into the app's own reply action,
- * as if typed into the shade here.
+ * as if typed into the shade here. And when the person lets Do Not Disturb
+ * follow a computer, [focus] turns it on and off here (§2.9).
  */
 class MirrorService : NotificationListenerService() {
     /** App labels by package, so a busy chat does not ask the package manager each time. */
@@ -154,6 +155,18 @@ class MirrorService : NotificationListenerService() {
             RemoteInput.addResultsToIntent(inputs, intent, Bundle().apply { putCharSequence(input.resultKey, text) })
             RemoteInput.setResultsSource(intent, RemoteInput.SOURCE_FREE_FORM_INPUT)
             return runCatching { action.actionIntent.send(service, 0, intent) }.isSuccess
+        }
+
+        /**
+         * Turn this phone's Do Not Disturb on ([dnd]: priority only) or off
+         * (everything), as a paired computer asked (§2.9). The listener's
+         * own request: notification access is enough, and no Do Not Disturb
+         * access is asked for. False when no listener is bound.
+         */
+        fun focus(dnd: Boolean): Boolean {
+            val service = live ?: return false
+            val filter = if (dnd) INTERRUPTION_FILTER_PRIORITY else INTERRUPTION_FILTER_ALL
+            return runCatching { service.requestInterruptionFilter(filter) }.isSuccess
         }
 
         /**
