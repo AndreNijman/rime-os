@@ -309,4 +309,19 @@ class MirrorTest {
         o.offer("a", news, 100)
         assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 100))
     }
+    @Test
+    fun `a repeat of the app's answer is held back on the other computer too, a different update is not`() {
+        val o = MirrorOutbox(0)
+        o.offer("a", Content("Chat", "Ann", "Hi", "Reply"), 0)
+        drain(o, 0)
+        assertTrue(o.repliedElsewhere("a", 0))
+        drain(o, 0)
+        val answer = Content("Chat", "Ann", "You: ok", "Reply")
+        o.offer("a", answer, 100)
+        o.offer("a", answer, 200)
+        assertEquals(emptyList<MirrorItem>(), drain(o, 200))
+        val news = Content("Chat", "Ann", "Ann: great", "Reply")
+        o.offer("a", news, 300)
+        assertEquals(listOf<MirrorItem>(MirrorItem.Post("a", news)), drain(o, 300))
+    }
 }

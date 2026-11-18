@@ -190,16 +190,24 @@ class MirrorOutbox(
     private var inflight: String? = null
     /** Keys replied to from the computer, and until when their next update is the app's answer. */
     private val absorbing = LinkedHashMap<String, Long>()
-    /** Keys replied to from another computer and closed here, and until when their next update is the app's answer. */
-    private val answeredElsewhere = LinkedHashMap<String, Long>()
+    /**
+     * Keys replied to from another computer and closed here: until when the
+     * app's answer is held back, and that answer once it came (a repeat of it
+     * is held back too).
+     */
+    private val answeredElsewhere = LinkedHashMap<String, Pair<Long, Content?>>()
     private var tokens = burst
     private var at = nowMs
 
     val pending: Int get() = waiting.size
 
     fun offer(key: String, content: Content, nowMs: Long) {
-        val closedUntil = answeredElsewhere.remove(key)
-        if (closedUntil != null && nowMs <= closedUntil) return
+        answeredElsewhere.remove(key)?.let { (until, answer) ->
+            if (nowMs <= until && (answer == null || answer == content)) {
+                answeredElsewhere[key] = until to content
+                return
+            }
+        }
         val until = absorbing.remove(key)
         if (until != null && nowMs <= until && key in shown) {
             waiting.remove(key)
@@ -288,15 +296,15 @@ class MirrorOutbox(
     /**
      * The person replied to [key] on another computer at [nowMs]. This one
      * closes its copy (a removal, when it was sent it or a post waits), and
-     * the app's update that follows within [Mirror.ABSORB_MS] is not sent:
-     * it shows the reply, which is not news here. False when this computer
-     * has nothing of [key].
+     * the app's update that follows within [Mirror.ABSORB_MS] is not sent,
+     * nor a repeat of it: it shows the reply, which is not news here. False
+     * when this computer has nothing of [key].
      */
     fun repliedElsewhere(key: String, nowMs: Long): Boolean {
         val had = key in shown || key == inflight || waiting[key] is MirrorItem.Post
         if (!had) return false
         remove(key)
-        answeredElsewhere[key] = nowMs + Mirror.ABSORB_MS
+        answeredElsewhere[key] = (nowMs + Mirror.ABSORB_MS) to null
         while (answeredElsewhere.size > ABSORBING_KEPT) answeredElsewhere.remove(answeredElsewhere.keys.first())
         return true
     }
