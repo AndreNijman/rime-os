@@ -215,6 +215,7 @@ let
       "a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_not_the_runtime"
       "a_confined_session_is_judged_against_the_confinement_it_actually_has"
       "a_confined_session_is_told_where_its_runtime_directory_is"
+      "a_copied_home_cannot_pair_with_or_connect_to_the_computer_it_came_from"
       "a_declared_remote_origin_reaches_both_verbs"
       "a_device_pairs_over_the_real_socket_and_lands_in_the_real_store"
       "a_device_reaches_the_desktop_through_a_relay_neither_of_them_listens_on"
@@ -256,6 +257,7 @@ let
       "a_task_with_two_sessions_is_refused_and_both_ids_are_named"
       "a_terminal_streams_both_ways_over_one_channel"
       "a_user_with_no_status_line_gets_no_status_line"
+      "a_wrong_code_uses_the_code_up_and_with_no_screen_open_nothing_pairs"
       "an_agents_terminal_title_reaches_the_session_and_the_record"
       "an_empty_payload_is_accepted_and_writes_nothing"
       "an_unknown_target_is_refused_before_anything_is_written"
@@ -278,6 +280,8 @@ let
       "the_relay_carries_the_session_and_can_read_none_of_it"
       "the_status_line_prints_the_users_own_and_publishes_what_it_read"
       "the_task_spelling_from_section_sixteen_writes_the_packet_for_the_tasks_session"
+      "two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but_hello"
+      "two_paired_computers_reach_each_other_through_the_relay"
     ];
     # Opt-in by design (RIME_BUDGET_LIVE=1): they start a transient systemd scope through the user manager and
     # write real cgroup limits. The build sandbox has no user manager.

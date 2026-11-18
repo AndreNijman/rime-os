@@ -1460,3 +1460,65 @@ fn wait_for(
     }
     last
 }
+
+/// Two computers paired over the LAN reach each other through the relay when
+/// asked (docs/remote-live-contract.md §2.15, "Dialling"): the dialler joins
+/// the other computer's rendezvous on the relay that computer named, as a
+/// guest, and runs the same session it would over the LAN.
+#[test]
+fn two_paired_computers_reach_each_other_through_the_relay() {
+    let Some(a) = Harness::start("computer-a") else {
+        eprintln!("SKIP: the daemons did not come up in this environment");
+        return;
+    };
+    let Some(b) = Harness::start("computer-b") else {
+        eprintln!("SKIP: the daemons did not come up in this environment");
+        return;
+    };
+
+    // "Add a computer" on A, held open on this connection.
+    let stream = UnixStream::connect(&a.remoted_socket).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    let mut writer = stream.try_clone().expect("clone");
+    writeln!(writer, r#"{{"cmd":"computer_show"}}"#).expect("write");
+    let mut screen = BufReader::new(stream);
+    let mut line = String::new();
+    screen.read_line(&mut line).expect("read");
+    let shown: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+    if shown["reply"] == "error" {
+        let why = shown["message"].as_str().unwrap_or_default().to_string();
+        let placement = rime_agent_core::origin::observe_pid(std::process::id() as i32);
+        let names_the_placement = match &placement {
+            Ok(o) => why.contains(o.as_str()),
+            Err(_) => why.contains("/proc/") || why.contains("cgroup"),
+        };
+        assert!(names_the_placement, "refused for a reason that is not the placement ({placement:?}): {shown}");
+        assert!(
+            std::env::var_os("RIME_REQUIRE_LOCAL_ORIGIN").is_none(),
+            "RIME_REQUIRE_LOCAL_ORIGIN is set, so this run was supposed to hold a real logind session: {why}"
+        );
+        eprintln!("SKIP: this process may not pair — {why}");
+        return;
+    }
+    let code = shown["code"].as_str().expect("a code");
+    let added = b.control(
+        &serde_json::json!({"cmd": "computer_add", "address": format!("127.0.0.1:{}", a.port), "code": code}).to_string(),
+    );
+    assert_eq!(added["reply"], "computer_paired", "{added}");
+
+    let id_on = |h: &Harness| {
+        let list = h.control(r#"{"cmd":"computers"}"#);
+        list["computers"][0]["id"].as_str().expect("one computer").to_string()
+    };
+    let (a_on_b, b_on_a) = (id_on(&b), id_on(&a));
+    let guests_before = a.relay.seen().arrivals.iter().filter(|x| *x == "guest").count();
+    for (from, to) in [(&b, &a_on_b), (&a, &b_on_a)] {
+        let pong = from.control(&serde_json::json!({"cmd": "computer_ping", "computer": to, "via": "relay"}).to_string());
+        assert_eq!(pong["reply"], "computer_pong", "{pong}");
+        assert_eq!(pong["path"], "relay", "{pong}");
+    }
+    if !a.relay.is_external() {
+        let guests = a.relay.seen().arrivals.iter().filter(|x| *x == "guest").count();
+        assert!(guests > guests_before, "B's ping never arrived at A's relay as a guest");
+    }
+}

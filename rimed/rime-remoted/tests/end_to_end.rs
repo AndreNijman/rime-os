@@ -166,6 +166,12 @@ impl Harness {
 
     /// The same, with extra arguments for `rime-remoted`.
     fn start_with(tag: &str, extra: &[&std::ffi::OsStr]) -> Option<Harness> {
+        Harness::start_full(tag, extra, None)
+    }
+
+    /// The same, with `identity` written as `rime-remoted`'s key before it
+    /// starts: a home folder copied from another computer.
+    fn start_full(tag: &str, extra: &[&std::ffi::OsStr], identity: Option<&str>) -> Option<Harness> {
         let root = std::env::temp_dir().join(format!(
             "rime-remote-e2e-{}-{tag}-{}",
             std::process::id(),
@@ -175,6 +181,15 @@ impl Harness {
         let state = root.join("state");
         std::fs::create_dir_all(&runtime).ok()?;
         std::fs::create_dir_all(&state).ok()?;
+        if let Some(key) = identity {
+            use std::os::unix::fs::PermissionsExt;
+            let path = rime_remote_core::identity::Identity::path_in(&state);
+            let dir = path.parent()?;
+            std::fs::create_dir_all(dir).ok()?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).ok()?;
+            std::fs::write(&path, key).ok()?;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).ok()?;
+        }
 
         let agentd = Command::new(bin("rime-agentd"))
             .env("XDG_RUNTIME_DIR", &runtime)
@@ -473,6 +488,17 @@ fn read_message(r: &mut impl Read) -> Vec<u8> {
 fn open_offer(h: &Harness) -> Option<PairingOffer> {
     let reply = h.control(r#"{"cmd":"pair"}"#);
     if reply["reply"] == "error" {
+        refused_for_placement(&reply);
+        return None;
+    }
+    Some(PairingOffer::decode(reply["qr"].as_str().expect("a qr")).expect("decode"))
+}
+
+/// A pairing request refused because this process is not a person at the
+/// machine: check that is the reason, refuse to skip where the run must hold
+/// a login session, and say SKIP.
+fn refused_for_placement(reply: &serde_json::Value) {
+    {
         // This process is not local, so pairing is refused — which is itself
         // the rule under test in `pairing_is_refused_for_a_caller_that_is_not_local`.
         //
@@ -506,9 +532,7 @@ fn open_offer(h: &Harness) -> Option<PairingOffer> {
              logind session and does not: {why}"
         );
         eprintln!("SKIP: this process may not pair ({why})");
-        return None;
     }
-    Some(PairingOffer::decode(reply["qr"].as_str().expect("a qr")).expect("decode"))
 }
 
 #[test]
@@ -3400,4 +3424,215 @@ fn photos_are_refused_to_a_locked_phone_a_listing_dies_with_revoke_and_a_save_th
     assert_eq!(code, 1, "{said}");
     assert!(took < Duration::from_secs(6), "{took:?}");
     assert!(soon(|| thumb_folders(&h).is_empty()), "revoke left the thumbnails");
+}
+
+// ---------------------------------------------------------------------------
+// Computers: two Rime computers pair with a code (docs/remote-live-contract.md
+// §2.15). Each harness is a whole computer: its own rime-agentd, rime-remoted,
+// runtime and state directories.
+// ---------------------------------------------------------------------------
+
+/// "Add a computer" open on `h`: the held connection and the code. `None`
+/// (after saying SKIP) where this process may not pair.
+fn show_code(h: &Harness) -> Option<(BufReader<UnixStream>, String)> {
+    let stream = UnixStream::connect(&h.remoted_socket).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    let mut writer = stream.try_clone().expect("clone");
+    writeln!(writer, r#"{{"cmd":"computer_show"}}"#).expect("write");
+    let mut reader = BufReader::new(stream);
+    let first = next_line(&mut reader);
+    if first["reply"] == "error" {
+        refused_for_placement(&first);
+        return None;
+    }
+    assert_eq!(first["reply"], "computer_code", "{first}");
+    let code = first["code"].as_str().expect("a code").to_string();
+    assert_eq!(code.len(), 6, "{first}");
+    assert!(code.bytes().all(|b| b.is_ascii_digit()), "{first}");
+    Some((reader, code))
+}
+
+fn next_line(reader: &mut BufReader<UnixStream>) -> serde_json::Value {
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read");
+    serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("{e}: {line:?}"))
+}
+
+/// `rime remote computers add 127.0.0.1:<port of to>` on `from`, typing `code`.
+fn add_computer(from: &Harness, to: &Harness, code: &str) -> (i32, String) {
+    rime_remote(from, &["computers", "add", &format!("127.0.0.1:{}", to.port)], format!("{code}\n").as_bytes())
+}
+
+fn computers(h: &Harness) -> Vec<serde_json::Value> {
+    let reply = h.control(r#"{"cmd":"computers"}"#);
+    assert_eq!(reply["reply"], "computers", "{reply}");
+    reply["computers"].as_array().expect("a list").clone()
+}
+
+/// `rime-remoted`'s own key in this harness's state directory, as a device
+/// that holds it would.
+fn identity_of(h: &Harness) -> Device {
+    let id = rime_remote_core::identity::Identity::load(&rime_remote_core::identity::Identity::path_in(
+        &h.root.join("state"),
+    ))
+    .expect("the computer's own key");
+    Device { secret: id.secret_bytes_for_handshake(), public: id.public_bytes() }
+}
+
+fn a_wrong_code(code: &str) -> String {
+    code.bytes().map(|b| char::from(b'0' + (b - b'0' + 1) % 10)).collect()
+}
+
+#[test]
+fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but_hello() {
+    let a = harness!("computer-a");
+    let b = harness!("computer-b");
+    let Some((mut screen, code)) = show_code(&a) else { return };
+
+    // B types A's code through the real CLI.
+    let (rc, said) = add_computer(&b, &a, &code);
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("paired with"), "{said}");
+    let shown = next_line(&mut screen);
+    assert_eq!(shown["reply"], "computer_paired", "{shown}");
+
+    // Each side holds the other's PROVEN key, and A can dial B back.
+    let (on_a, on_b) = (computers(&a), computers(&b));
+    assert_eq!((on_a.len(), on_b.len()), (1, 1), "{on_a:?} {on_b:?}");
+    assert_eq!(on_a[0]["public_key"].as_str(), Some(identity_of(&b).key().as_str()));
+    assert_eq!(on_b[0]["public_key"].as_str(), Some(identity_of(&a).key().as_str()));
+    assert_eq!(shown["id"], on_a[0]["id"]);
+    let b_on_a = on_a[0]["id"].as_str().expect("id").to_string();
+    let a_on_b = on_b[0]["id"].as_str().expect("id").to_string();
+    assert!(
+        on_a[0]["addresses"].as_array().expect("addresses").iter().any(|x| x == &format!("127.0.0.1:{}", b.port)),
+        "A keeps the address B came from, with B's port: {on_a:?}"
+    );
+
+    // Both ways, each dialling the other.
+    for (from, to_id) in [(&b, &a_on_b), (&a, &b_on_a)] {
+        let pong = from.control(&serde_json::json!({"cmd": "computer_ping", "computer": to_id, "via": "lan"}).to_string());
+        assert_eq!(pong["reply"], "computer_pong", "{pong}");
+        assert_eq!(pong["path"], "lan", "{pong}");
+        assert_eq!(pong["version"], V, "{pong}");
+    }
+    let (rc, said) = rime_remote(&b, &["computers", "ping", &a_on_b], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("answered over lan"), "{said}");
+    let (rc, said) = rime_remote(&b, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains(&a_on_b), "{said}");
+
+    // A session on B's key is a peer: hello, and nothing else.
+    let mut peer = identity_of(&b).connect(&a).expect("a paired computer opens a session");
+    let hello = peer.call(r#"{"cmd":"remote_hello"}"#);
+    assert_eq!(hello["scope"], "peer", "{hello}");
+    assert_eq!(hello["features"], serde_json::json!(["peer_hello"]), "{hello}");
+    assert_eq!(peer.call(r#"{"cmd":"peer_hello"}"#)["reply"], "peer_hello");
+    for line in [
+        r#"{"cmd":"list"}"#,
+        r#"{"cmd":"hello","version":1}"#,
+        r#"{"cmd":"decide","id":1,"allow":true}"#,
+        r#"{"cmd":"machine_lock"}"#,
+        r#"{"cmd":"nex","verb":"session.list"}"#,
+        r#"{"cmd":"companion_register","public_key":"AAAA"}"#,
+        r#"{"cmd":"computer_show"}"#,
+        r#"not json"#,
+    ] {
+        let r = peer.call(line);
+        assert_eq!(r["kind"], "not_allowed", "{line}: {r}");
+    }
+    peer.send(Frame::Open { channel: 7, request: br#"{"cmd":"attach","id":1}"#.to_vec() });
+    let refused = peer.recv();
+    match refused {
+        Frame::Control(line) => {
+            let r: serde_json::Value = serde_json::from_slice(&line).expect("json");
+            assert_eq!(r["kind"], "not_allowed", "{r}");
+        }
+        other => panic!("a peer's Open was answered with {other:?}"),
+    }
+    // rime-agentd saw no session from it: the only remote origin it could
+    // have recorded is the proxy's, and nothing was proxied.
+    let listed = a.direct(r#"{"cmd":"list"}"#);
+    assert!(!listed.to_string().contains("claude-remote-control"), "{listed}");
+
+    // Removed: its live session ends, its key is refused, and it cannot pair
+    // again with the same key.
+    let removed = a.control(&serde_json::json!({"cmd": "computer_remove", "computer": b_on_a}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    // Keepalives may still be in flight; the connection must reach EOF.
+    peer.socket.set_read_timeout(Some(Duration::from_secs(1))).ok();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut buf = [0u8; 4096];
+    let dropped = loop {
+        match peer.socket.read(&mut buf) {
+            Ok(0) => break true,
+            Ok(_) if Instant::now() < deadline => continue,
+            Err(e) if e.kind() != std::io::ErrorKind::WouldBlock && e.kind() != std::io::ErrorKind::TimedOut => break true,
+            _ if Instant::now() < deadline => continue,
+            _ => break false,
+        }
+    };
+    assert!(dropped, "a removed computer's session is dropped");
+    assert!(identity_of(&b).connect(&a).is_none(), "a removed computer's key is refused");
+    let pong = b.control(&serde_json::json!({"cmd": "computer_ping", "computer": a_on_b, "via": "lan"}).to_string());
+    assert_eq!(pong["reply"], "error", "{pong}");
+    let Some((_screen, code)) = show_code(&a) else { return };
+    let (rc, said) = add_computer(&b, &a, &code);
+    assert_ne!(rc, 0, "a removed computer paired again: {said}");
+    assert!(computers(&a)[0]["revoked_ms"].is_u64(), "the removal is kept");
+}
+
+#[test]
+fn a_wrong_code_uses_the_code_up_and_with_no_screen_open_nothing_pairs() {
+    let a = harness!("code-a");
+    let b = harness!("code-b");
+    // No screen open: refused before A shows its key.
+    let (rc, said) = add_computer(&b, &a, "123456");
+    assert_ne!(rc, 0, "{said}");
+    if !said.contains("not showing a code") {
+        // Refused before it dialled, which must be this process's placement.
+        refused_for_placement(&serde_json::json!({"reply": "error", "message": said}));
+        return;
+    }
+
+    let Some((mut screen, code)) = show_code(&a) else { return };
+    let (rc, said) = add_computer(&b, &a, &a_wrong_code(&code));
+    assert_ne!(rc, 0, "a wrong code paired: {said}");
+    let told = next_line(&mut screen);
+    assert_eq!(told["reply"], "error", "{told}");
+    assert!(told["message"].as_str().unwrap_or("").contains("did not match"), "{told}");
+    // The right code, after a wrong one: already used up.
+    let (rc, said) = add_computer(&b, &a, &code);
+    assert_ne!(rc, 0, "the right code still worked after a wrong one: {said}");
+    assert!(computers(&a).is_empty() && computers(&b).is_empty());
+
+    // A screen closed by its client withdraws its code.
+    let Some((screen, code)) = show_code(&a) else { return };
+    drop(screen);
+    std::thread::sleep(Duration::from_millis(500));
+    let (rc, said) = add_computer(&b, &a, &code);
+    assert_ne!(rc, 0, "a withdrawn code paired: {said}");
+    assert!(computers(&a).is_empty() && computers(&b).is_empty());
+}
+
+#[test]
+fn a_copied_home_cannot_pair_with_or_connect_to_the_computer_it_came_from() {
+    let a = harness!("copy-a");
+    let key = std::fs::read_to_string(rime_remote_core::identity::Identity::path_in(&a.root.join("state"))).expect("A's key");
+    let b = match Harness::start_full("copy-b", &[], Some(&key)) {
+        Some(h) => h,
+        None => {
+            eprintln!("SKIP: the daemons did not come up in this environment");
+            return;
+        }
+    };
+    assert_eq!(identity_of(&b).key(), identity_of(&a).key(), "the copy holds A's key");
+    let Some((_screen, code)) = show_code(&a) else { return };
+    let (rc, said) = add_computer(&b, &a, &code);
+    assert_ne!(rc, 0, "a copy paired with its original: {said}");
+    assert!(said.contains("own"), "{said}");
+    assert!(computers(&a).is_empty() && computers(&b).is_empty());
+    // And a session on that key reaches nothing, whatever the store says.
+    assert!(identity_of(&b).connect(&a).is_none(), "a session on this machine's own key was accepted");
 }
