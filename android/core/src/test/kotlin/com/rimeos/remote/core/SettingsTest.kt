@@ -81,4 +81,26 @@ class SettingsTest {
         // pinned so a change to it is a change somebody made on purpose.
         assertEquals(12f, Settings.DEFAULT_TERMINAL_TEXT_SP)
     }
+
+    @Test
+    fun `media on the computer is off, with no apps, until chosen, and survives a save`(@TempDir dir: Path) {
+        // Contract §2.8: nothing is sent until the switch is on and an app is
+        // chosen, so both defaults are the point. A store from before the
+        // feature has neither key and must read as off.
+        assertFalse(Settings().mediaOn)
+        assertTrue(Settings().mediaApps.isEmpty())
+        val file = dir.resolve("machines.json").toFile()
+        file.parentFile.mkdirs()
+        file.writeText("""{"v":1,"machines":[],"settings":{"mirror_apps":["org.example.chat"]}}""")
+        val old = AppStorage(dir.toFile()).load().settings
+        assertFalse(old.mediaOn)
+        assertTrue(old.mediaApps.isEmpty(), "the notification apps leaked into the media apps")
+
+        val storage = AppStorage(dir.toFile())
+        storage.save(MachineStore(settings = Settings(mirrorApps = setOf("a"), mediaOn = true, mediaApps = setOf("b"))))
+        val back = storage.load().settings
+        assertTrue(back.mediaOn)
+        assertEquals(setOf("b"), back.mediaApps)
+        assertEquals(setOf("a"), back.mirrorApps)
+    }
 }

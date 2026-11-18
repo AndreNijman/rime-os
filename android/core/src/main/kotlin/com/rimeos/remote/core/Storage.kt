@@ -299,6 +299,21 @@ data class Settings(
      * (§2.7). Off by default: it lets a computer speak for them in their apps.
      */
     @SerialName("mirror_reply") val mirrorReply: Boolean = false,
+
+    /**
+     * Whether what this phone is playing is shown on paired computers
+     * (`docs/remote-live-contract.md` §2.8). Off by default.
+     */
+    @SerialName("media_on") val mediaOn: Boolean = false,
+
+    /**
+     * The apps whose playback may show there, by package name: a list of its
+     * own, apart from [mirrorApps], because an app whose notifications a
+     * person wants on the computer is not always one whose listening they
+     * want shown, and the other way round. Empty by default. Package names
+     * only; nothing about what played is ever stored.
+     */
+    @SerialName("media_apps") val mediaApps: Set<String> = emptySet(),
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }
