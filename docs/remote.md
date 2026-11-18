@@ -127,7 +127,8 @@ it on the same device record.
 
 A connection on that second key gets the phone's own features and nothing
 else: its battery and network report, ring and Send to Rime acknowledgements,
-its notifications, and what it is playing. It cannot open a terminal, start
+its notifications, what it is playing, and its SMS conversations when this
+machine asks for them. It cannot send an SMS, open a terminal, start
 or steer an agent, use nex, lock the computer, change its media or volume,
 touch the clipboard, or change where push notifications go (pushes carry what
 your agents are doing, so only the unlocked phone may register for them). Anything else is refused with
@@ -140,8 +141,8 @@ can hold the connection off for long stretches while the phone is idle. You
 can say no; the link still works, just later. With the switch on, locking the
 app no longer ends the link: the phone drops to the second key and keeps
 sending its battery, notifications and what is playing, and you can still ring
-it and send it files. Replying to a notification, controlling what plays,
-agents, terminals and the computer's controls wait until you unlock. After a
+it and send it files. Replying to a notification, sending an SMS, controlling
+what plays, agents, terminals and the computer's controls wait until you unlock. After a
 restart the link comes back at the phone's first unlock, without opening the
 app; the app's notification then says it is locked and what keeps reaching
 the computer. Turning the switch off, or forgetting the computer, deletes the
@@ -198,8 +199,8 @@ connection over and would wedge it. It hands everything else to `rime-agentd`
 under the origin `claude-remote-control`. So `rime-agentd`'s own per-verb rules
 decide what a phone can do, in one place, and no denylist here can drift from
 them. (The exceptions are verbs `rime-remoted` answers itself
-and never forwards: its hello, the companion key, nex, and the five machine
-verbs in [The computer itself](#the-computer-itself-status-lock-and-media).)
+and never forwards: its hello, the companion key, nex, the phone's answers
+about its messages, and the five machine verbs in [The computer itself](#the-computer-itself-status-lock-and-media).)
 
 A connection on a phone's **companion key** is the opposite: it forwards
 nothing to `rime-agentd` at all, and may use only the phone's own features
@@ -452,6 +453,41 @@ the computer shows **Reply not sent** with what you typed.
 - A phone can show 10 at once and then one every 3 seconds; anything faster is
   refused, so a noisy app cannot flood the desktop. Revoking the phone closes
   every notification it has open.
+
+## `rime remote messages`: your phone's SMS on the computer
+
+Rime Remote can show your phone's SMS conversations on the computer and send
+an SMS from the phone's number, the way Messages on a Mac does with an
+iPhone. In the app, open **Messages on your computer** in the computers
+screen's settings, tap **Allow SMS**, and turn it on. It is off until you do.
+On Android 13 and later, an app installed from a file may be refused SMS
+without a prompt: the screen says so, and **Allow restricted settings** in
+App info lets you allow it. **Names from your contacts** is a separate,
+optional permission; without it the computer shows numbers.
+
+```
+$ rime remote messages
+ID       WITH                       WHEN      UNREAD  LAST
+42       +15555215556               2m ago    1       see you there
+(from Pixel 8. `rime remote messages --thread ID` shows one.)
+$ rime remote messages --thread 42
+$ echo "on my way" | rime remote messages send --to +15555215556
+rime: Pixel 8 sent the message.
+$ rime remote messages send --thread 42 < reply.txt
+```
+
+- The computer asks the phone every time and keeps nothing. With the app
+  locked, reading still works if the phone keeps working after a restart
+  (above); sending needs the app unlocked.
+- **Only you can use it.** `rime-remoted` answers `messages` only to a
+  terminal in your login session or Rime Settings, so an agent, a scheduled
+  job or any other program of yours can neither read nor send. The text of a
+  send comes from standard input, never the command line, where other
+  programs could see it.
+- One number per send, at most 2,000 characters. A group conversation and
+  picture messages are not shown and cannot be sent to.
+- `--json` prints the conversations or messages for the Shell or a script,
+  and `{"error":…}` with exit status 1 when it fails.
 
 ## What your phone is playing, on the computer
 

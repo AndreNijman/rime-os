@@ -956,13 +956,14 @@ sends changes it. `remote_hello` says which (§2.1).
 
 | | allowed |
 | --- | --- |
-| control verbs | `remote_hello`, `phone_report`, `ring_ack`, `offer_ack`, `offer_done`, `phone_notification`, `phone_notification_removed`, `phone_media` |
+| control verbs | `remote_hello`, `phone_report`, `ring_ack`, `offer_ack`, `offer_done`, `phone_notification`, `phone_notification_removed`, `phone_media`, `messages_reply`, `messages_changed` |
 | channels (`Open`) | `device_events`, `take_offer` |
 
 Everything else is refused, whatever it is: `push_register` and
 `push_unregister` (a push carries `rime-agentd`'s session kind, id and start
 time, so only the full key may say where pushes go), `machine_status`, `machine_lock`,
-`media`, `media_control`, `volume`, `nex`, `nex_events`, `companion_register`,
+`media`, `media_control`, `volume`, `nex`, `nex_events`, `messages_sent`
+(a send needs an unlocked phone, §2.11), `companion_register`,
 `companion_forget`, every `rime-agentd` verb (`hello`, `list`, `input`,
 `privilege_request`, `decide`, `clipboard_write`, …), a line with no readable
 `cmd`, and every other channel (`attach`, `receive`, `save_file`, nex's
@@ -995,6 +996,91 @@ still ends it.
 **`rime remote devices`** says which devices have one ("keeps working after a
 restart"; `--json`: `"companion": true`). The control socket's `devices`
 reply carries a `companions` list of device ids and never the key.
+
+### 2.11 Messages: the phone's SMS, read and sent from the computer
+
+Feature `phone_messages`. Like Messages on a Mac, or Phone Link's Messages:
+the computer lists the phone's SMS conversations, reads one, and sends an SMS
+from the phone's number. Nothing is stored on the computer: every answer is
+read from the phone when it is asked for, and held in memory only until the
+reply to the caller goes.
+
+**The phone offers it.** `can` (§2.5) has `"messages"` only while all hold:
+the person turned on "Messages on your computer" in the app (off by default),
+Android granted READ_SMS, and the app is unlocked or in companion mode. A
+machine never asks a phone without it. The phone checks its switch and
+permission again on every request, whatever an older report said.
+
+**Computer → phone**, on the phone's `device_events` channel:
+
+```json
+{"event":"messages_request","id":7,"limit":20}
+{"event":"messages_request","id":8,"thread":42,"before":1763452800000,"limit":20}
+{"event":"messages_send","id":9,"to":["+15555215556"],"text":"on my way"}
+{"event":"messages_send","id":10,"thread":42,"text":"on my way"}
+```
+
+- No `thread`: the conversation list. With `thread`: that conversation's
+  messages. `before` (unix ms) pages back; `limit` is 1 to 50.
+- A send names exactly one of `to` (one number) and `thread`. `text` is 1 to
+  2,000 characters, no control characters but newlines. A send goes only to
+  a phone whose connection is `full` (§2.10) and is refused on the computer,
+  before anything is written, for a companion connection.
+
+**Phone → computer**, control verbs:
+
+```json
+{"cmd":"messages_reply","id":7,"threads":[{"id":42,"addresses":["+15555215556"],"name":"Pat","snippet":"see you","date_ms":1763452800000,"unread":1,"count":12}],"more":true}
+{"cmd":"messages_reply","id":8,"thread":42,"messages":[{"id":901,"date_ms":1763452800000,"from_me":false,"body":"see you","status":"received"}]}
+{"cmd":"messages_reply","id":7,"error":"off"}
+{"cmd":"messages_sent","id":9,"ok":true}
+{"cmd":"messages_sent","id":10,"ok":false,"error":"no_service"}
+{"cmd":"messages_changed"}
+→ {"reply":"ok"}
+```
+
+- Newest first. An answer may come in several lines; every line but the last
+  has `"more":true`. At most 64 lines and 512 KiB for one answer, and no more
+  items than `limit`; past either, the request fails.
+- `status` is `received`, `sent`, `delivered`, `sending` or `failed`. Drafts
+  are never sent. `name` is a contact's name, only when the person allowed
+  contacts too. A thread has 1 to 10 addresses.
+- `error` words: `off`, `no_permission`, `locked`, `busy`, `no_thread`,
+  `group`, `too_long`, `failed`, `timeout`, `no_service`. An unknown word is
+  read as `failed`. A send into a thread with more than one address is
+  `group`: one SMS each would be several conversations, not that one.
+- `messages_sent` is `ok` only when Android reported every part of the
+  message sent.
+- `messages_changed` carries nothing: the phone's SMS store changed, and the
+  computer may ask again. The control socket's `messages` reply carries the
+  last one's time as `changed_ms`.
+- An answer whose `id` is not the open request of that device AND connection
+  gets `{"reply":"error","code":"unknown_id"}`; one that breaks a rule above
+  gets `bad_request`. The computer cleans every text again (control and bidi
+  characters out, a body capped at 2,000 characters and 40 lines, a snippet
+  at 160, a name at 60, an address at 40) and does not rely on the phone.
+
+**One request per phone at a time** (`busy`). A request belongs to the
+connection it was written on: when that connection ends, or the device is
+revoked, it fails at once and what had arrived is dropped. The computer waits
+10 s for an answer and 35 s for a send's result; the phone waits up to 25 s
+for Android to report a send.
+
+**The control socket.**
+
+```json
+{"cmd":"messages","device":"<id>","thread":42,"before":1763452800000,"limit":20}
+→ {"reply":"messages","device":"<id>","thread":42,"messages":[…],"changed_ms":1763452800000}
+{"cmd":"messages_send","device":"<id>","to":"+1 555 521 5556","text":"on my way"}
+→ {"reply":"message_sent","device":"<id>"}
+```
+
+`device` may be left out when exactly one connected phone offers messages.
+Both verbs are allowed only to a person at this machine: a terminal in the
+login session or Rime Settings, as for pairing. A scheduled job, an agent
+session or any other process of the user is refused, for reading as well as
+sending. `rime remote messages` and `rime remote messages send` are these
+two (`--json` prints the reply's fields, or `{"error":…}`).
 
 ## 3. The phone
 
