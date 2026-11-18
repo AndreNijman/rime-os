@@ -432,12 +432,18 @@ fn ask_offer(state: &State, c: &Device) -> Result<Option<String>, String> {
         return Ok(None);
     }
     let offer = reply["offer"].as_str().ok_or("an offer that is not text")?;
-    // Only an offer for the computer that was dialled is handed on.
+    offer_from(offer, c).map(Some)
+}
+
+/// `offer`, when it is an offer for computer `c`: only an offer for the
+/// computer that was dialled is handed on, so a peer cannot steer the phone
+/// to a key of its choosing.
+fn offer_from(offer: &str, c: &Device) -> Result<String, String> {
     let parsed = PairingOffer::decode(offer).map_err(|e| e.to_string())?;
     if parsed.key != c.public_key {
         return Err("an offer for a different computer".into());
     }
-    Ok(Some(offer.to_string()))
+    Ok(offer.to_string())
 }
 
 /// Computer `key` (`name`) was removed here: tell every phone with a Full
@@ -703,6 +709,18 @@ mod tests {
         let mut other = String::new();
         let got = std::io::BufRead::read_line(&mut std::io::BufReader::new(&companion_end), &mut other);
         assert!(got.is_err() || other.is_empty(), "a companion channel was told: {other}");
+    }
+
+    #[test]
+    fn only_an_offer_for_the_computer_that_was_dialled_is_handed_on() {
+        let (state, _dir) = a_state("intro-offer-key");
+        let c = a_peer(&state, 7);
+        let mut other = PairingOffer::decode(offer_reply(&state, &c.id)["offer"].as_str().expect("offer")).expect("decodes");
+        // An offer this daemon minted carries its own key, not the peer's.
+        assert!(offer_from(&other.encode(), &c).is_err());
+        other.key = c.public_key.clone();
+        assert_eq!(offer_from(&other.encode(), &c).as_deref(), Ok(other.encode().as_str()));
+        assert!(offer_from("not an offer", &c).is_err());
     }
 
     #[test]
