@@ -534,8 +534,8 @@ $ rime remote calls dial +15555215556
 
 Your phone's newest photos and screenshots can be seen on the computer, and
 any one saved to it whole, the way Phone Link shows an Android phone's
-photos. In the app, open **Photos on your computer** in the computers
-screen's settings, tap **Allow photos**, and turn it on. It is off until you
+photos. In the app, tap **Display** on the computers screen, open **Photos on
+your computer**, tap **Allow photos**, and turn it on. It is off until you
 do. Videos are not shown.
 
 ```
@@ -560,7 +560,8 @@ $ rime remote photos save 1000119 --to ~/Desktop
   (`$XDG_RUNTIME_DIR/rime-remote/photos`), readable by you alone, with the
   camera's details and location taken out. They go when the phone
   disconnects, when you turn the feature off, or when you revoke the phone.
-  A saved photo is the phone's file as it is.
+  A saved photo is the phone's file as Android gives it to the app: from
+  Android 10 on, Android takes the location out of it first.
 - **Only you can use it.** As for messages, `rime-remoted` answers `photos`
   only to a terminal in your login session or Rime Settings, so an agent or a
   scheduled job can neither see nor save your photos.

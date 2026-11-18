@@ -1288,8 +1288,10 @@ picked on the phone are shown").
   before `len` bytes fails the save and leaves no file.
 - The original is sent as Android gives it to the app. Rime Remote does not
   ask for ACCESS_MEDIA_LOCATION, so on Android 10 and later Android blanks
-  the location in a photo's EXIF before the app reads it (the length does not
-  change); the camera, date and the rest stay.
+  the location in a photo's EXIF before the app reads it (measured on the
+  Android 16 emulator: a pushed photo with GPS tags is saved on the computer
+  without them, and a photo without a location is saved byte for byte).
+  Android 9 hands the file over as it is.
 
 **One list and one fetch per phone at a time** (`busy`). A list belongs to
 the connection it was written on, and fails at once when that connection ends
