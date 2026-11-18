@@ -216,6 +216,18 @@ object Desktop {
     }
 
     /**
+     * A method call on a phone's stub media player, as a reader on the
+     * computer's bus makes it (contract §2.8): [call] is
+     * `{"player":…,"method":"PlayPause"|"Next"|…}`, with `offset_us` for
+     * `Seek` and `track` + `position_us` for `SetPosition`. Its outcome shows
+     * in [mediaLog] as `{"op":"call",…,"result":…}`.
+     */
+    fun mediaCall(call: JSONObject) {
+        val reply = ask(JSONObject().put("cmd", "media_call").put("call", call).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not call the stub media player: $reply" }
+    }
+
+    /**
      * What rime-remoted wrote to `focus.json` for the Shell (contract §2.9):
      * `{"dnd":…,"device":…,"at_ms":…}`, or null before any phone's change.
      * Read from the run's own runtime directory, never this desktop's.

@@ -1279,7 +1279,7 @@ mod tests {
                                "machine_status", "machine_lock", "media",
                                "device_events", "phone_report", "take_offer", "phone_focus",
                                "phone_notifications", "phone_notification_reply",
-                               "phone_media"]),
+                               "phone_media", "phone_media_control"]),
             "{v}"
         );
         // The pairing code's list, with the port this listener has — and

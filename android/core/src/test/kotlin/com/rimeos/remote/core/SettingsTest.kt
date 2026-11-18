@@ -105,6 +105,21 @@ class SettingsTest {
     }
 
     @Test
+    fun `control from the computer is on by default, also for a store from before it, and off survives a save`(@TempDir dir: Path) {
+        assertTrue(Settings().mediaControl)
+        val file = dir.resolve("machines.json").toFile()
+        file.parentFile.mkdirs()
+        file.writeText("""{"v":1,"machines":[],"settings":{"media_on":true,"media_apps":["org.example.music"]}}""")
+        assertTrue(AppStorage(dir.toFile()).load().settings.mediaControl, "a store from before the switch reads as on")
+        val storage = AppStorage(dir.toFile())
+        storage.save(MachineStore(settings = Settings(mediaOn = true, mediaControl = false)))
+        val back = storage.load().settings
+        assertFalse(back.mediaControl)
+        assertTrue(back.mediaOn)
+        assertTrue(file.readText().contains("\"media_control\":false"), file.readText())
+    }
+
+    @Test
     fun `Do Not Disturb following the computer is off until turned on, and survives a save`(@TempDir dir: Path) {
         // Contract §2.9: a computer changes nothing on the phone until the
         // person says so. A store from before the feature reads as off.

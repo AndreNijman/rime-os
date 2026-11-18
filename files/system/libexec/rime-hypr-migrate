@@ -127,6 +127,10 @@ for _key, _cmd in (
     ("XF86AUDIOPLAY", "playerctl play-pause"),
     ("XF86AUDIONEXT", "playerctl next"),
     ("XF86AUDIOPREV", "playerctl previous"),
+    # The spellings since the media keys learned about a phone's player.
+    ("XF86AUDIOPLAY", "/usr/libexec/rime-media-key play-pause"),
+    ("XF86AUDIONEXT", "/usr/libexec/rime-media-key next"),
+    ("XF86AUDIOPREV", "/usr/libexec/rime-media-key previous"),
 ):
     # Whitespace inside a command is squeezed before comparison, so the padded
     # spelling in the shipped template and an unpadded hand-copy both match.

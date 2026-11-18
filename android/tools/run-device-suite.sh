@@ -533,6 +533,17 @@ def notify_reply(nid, text):
         f.write(json.dumps({"id": nid, "reply": text}) + "\n")
     return json.dumps({"reply": "ok"})
 
+def media_call(call):
+    """A method call on a phone's stub media player (contract §2.8), as a
+    reader on the computer's bus would make it: one complete line
+    rime-remoted's stub reads from control.jsonl. Its outcome lands in
+    media.jsonl as {"op":"call",...,"result":...}, read with media_log."""
+    if not isinstance(call, dict) or not isinstance(call.get("player"), str) or not isinstance(call.get("method"), str):
+        return json.dumps({"reply": "error", "message": "player and method must be strings"})
+    with open(os.path.join(ROOT, "media", "control.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps(call) + "\n")
+    return json.dumps({"reply": "ok"})
+
 class H(socketserver.StreamRequestHandler):
     timeout = 120
     def handle(self):
@@ -573,6 +584,8 @@ class H(socketserver.StreamRequestHandler):
                 out = notify_log()
             elif cmd == "media_log":
                 out = media_log()
+            elif cmd == "media_call":
+                out = media_call(req.get("call"))
             elif cmd == "focus_file":
                 out = focus_file()
             elif cmd == "notify_closed":

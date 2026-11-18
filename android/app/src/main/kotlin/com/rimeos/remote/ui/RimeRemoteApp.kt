@@ -460,6 +460,8 @@ fun RimeRemoteApp(
                 MediaScreen(
                     on = state.settings.mediaOn,
                     onOn = { viewModel.setMediaOn(it) },
+                    control = state.settings.mediaControl,
+                    onControl = { viewModel.setMediaControl(it) },
                     chosen = state.settings.mediaApps,
                     onChoose = { pkg, on -> viewModel.setMediaApp(pkg, on) },
                     onBack = { navigation.popBackStack() },

@@ -629,11 +629,12 @@ no machine whose hello lacks it.
   `Metadata` has `mpris:trackid` (new per track), `xesam:title`, and
   `xesam:artist` (one entry), `xesam:album` and `mpris:length` when known. No
   artwork.
-- **Display only.** `CanControl` is false and every method (`PlayPause`,
-  `Next`, `Seek`, `Raise`, …) answers `NotSupported`. `playerctl` does not act
-  on a player that cannot be controlled, so the media keys and rime-remoted's
-  own `media` verb (§2.4) stay on the computer's players; `media` also passes
-  `--ignore-player=rime_phone`, which leaves out every phone by one name.
+- **Display only, unless the phone allows control.** Without `can` (below),
+  `CanControl` is false and every method (`PlayPause`, `Next`, `Seek`, …)
+  answers `NotSupported`. `playerctl` does not act on a player that cannot be
+  controlled. rime-remoted's own `media` verb (§2.4) passes
+  `--ignore-player=rime_phone`, which leaves out every phone by one name, so a
+  phone never controls another phone through the computer.
 - **Position.** The phone sends where playback was when it sent, and only when
   something changes (never a ticking stream). rime-remoted stamps the moment
   it read the line; `Position` is that plus the time since, times the rate,
@@ -662,17 +663,86 @@ is the app's label, or its package name where Android does not let this app
 read the label (an app with no launcher icon). Never sent: artwork, URIs,
 queue, and anything from an app not turned on.
 
+**Control from the computer** (`remote_hello.features` also gains
+`"phone_media_control"`). The model is a Mac controlling an iPhone's Now
+Playing.
+
+```json
+{"cmd":"phone_media","playing":{"app":"Spotify","state":"playing","title":"Song",…,"can":["play","pause","next","previous","seek"]}}
+```
+
+- `can` lists what the computer may do to this session, from the session's
+  own `PlaybackState` actions: `play`, `pause`, `next`, `previous`, `seek`.
+  Absent, `null` or `[]`: display only. Unknown words are ignored (a later
+  phone may know more); anything but an array of at most 8 strings is
+  `bad_request`. A phone sends `can` only to a machine whose hello has
+  `phone_media_control`, and only while its "Control from your computer"
+  switch is on. remote_hello is the same answer for every phone, so a `can`
+  on the wire is itself the negotiation, as `reply` is for §2.7's labels.
+- `CanControl` is true when `can` is not empty. `CanPlay`, `CanPause`,
+  `CanGoNext`, `CanGoPrevious` and `CanSeek` follow its words, and each change
+  is announced with `PropertiesChanged`. Allowing control does not make a new
+  track (`mpris:trackid` stays).
+- Each method becomes one line on the `device_events` channel of the
+  phone that owns the player:
+  `{"event":"media_control","action":"play"|"pause"|"play_pause"|"next"|"previous"|"seek","position_ms":N}`
+  (`position_ms` only with `seek`; the channel is §2.5's). This is the computer→phone event; §2.4's
+  `media_control` verb is the other direction (a phone controlling the
+  computer's players) and is unrelated.
+  - `Play` needs `play`, `Pause` needs `pause`, `Next` / `Previous` their own
+    word. `PlayPause` needs `pause` while playing and `play` otherwise, and is
+    sent as `play_pause` (the phone resolves it against its current state).
+    `Stop` is `pause` while playing and does nothing otherwise.
+  - `Seek(offset)` and `SetPosition(trackid, position)` need `seek`. Both cross
+    as an absolute `position_ms`: a relative seek is resolved against
+    `Position` at the moment of the call and clamped to 0..duration (0..7
+    days when the duration is unknown). `SetPosition` with a `trackid` that is
+    not the current track, a negative position or one past the duration is
+    ignored, as MPRIS says.
+  - A method whose word is missing answers `NotSupported`. A phone with no
+    `device_events` channel open answers `Failed` ("the phone is not
+    connected to this computer now"): never a success that went nowhere.
+    `Raise`, `Quit`, `OpenUri`, rate, volume, shuffle and loop stay refused.
+- **The media keys** run `/usr/libexec/rime-media-key play-pause|next|previous`
+  (Hyprland, labwc and the Shell's CTRL+SUPER binds). It asks
+  `playerctl --ignore-player=rime_phone` when that lists any player, and plain
+  `playerctl` only when the computer has no player at all, so a phone gets the
+  key only then. (Not `… || playerctl X`: measured with playerctl 2.4.1, a
+  computer player whose `CanControl` is false makes the first half fail, and
+  the `||` sent the key to the phone while the computer played.) A key pressed
+  at the computer's lock screen still runs, and the phone decides.
+- **What the phone does with it.** It applies `media_control` only while
+  unlocked, with "Media on your computer" and "Control from your computer"
+  on, and only to the session it last sent to that machine (the same package
+  and session token): through `MediaController.TransportControls` (`play`,
+  `pause`, `skipToNext`, `skipToPrevious`, `seekTo`), and only for an action
+  that session still allows. Anything else is ignored. The result shows the
+  usual way: the session changes, and the phone sends the new state.
+
 **Tests never put a player on the real desktop.** With
 `RIME_REMOTED_MEDIA_STUB=<dir>`, rime-remoted appends each change to
 `<dir>/media.jsonl` (`{"op":"show","player":…,"identity":…,"status":…,
 "title":…,…}` / `{"op":"gone","player":…}`) instead of the bus; a test build
-always uses the stub. Every harness sets it; the device suite refuses to start
-rime-remoted without it and its broker reads the lines back with `media_log`
-(`MediaOnDeviceTest`, driving the test helper app's media session).
-The bus path is proven on a private bus by `tests/test-remoted-media-bus.sh`
-(properties read back with `busctl`, the position moving with the clock,
-control refused, `playerctl -l` with and without `--ignore-player=rime_phone`,
-an update, removal).
+always uses the stub. The stub's `show` line also carries `track` (the
+`mpris:trackid`), `can` and `can_control`. Method calls reach the stub the way
+§2.7's `closed.jsonl` reaches the notification stub: each complete line
+appended to `<dir>/control.jsonl`
+(`{"player":…,"method":"PlayPause"|"Play"|"Pause"|"Stop"|"Next"|"Previous"}`,
+`{"player":…,"method":"Seek","offset_us":N}`,
+`{"player":…,"method":"SetPosition","track":…,"position_us":N}`) is decided
+exactly as the bus method would be, and its outcome is appended to
+`media.jsonl` as `{"op":"call","player":…,"method":…,"result":"ok"|"not_supported"|"failed"|"bad_line"}`.
+Every harness sets it; the device suite refuses to start rime-remoted without
+it, and its broker reads the lines back with `media_log` and appends calls with
+`media_call` (`MediaOnDeviceTest`, driving the test helper app's media
+session). The bus path is proven on a private bus by
+`tests/test-remoted-media-bus.sh`: properties read back with `busctl`, the
+position moving with the clock, control refused while `can` is empty, the
+`Can*` properties and their `PropertiesChanged` once it is not, `busctl` and
+`playerctl` calls crossing as `media_control` lines, a stale `SetPosition`
+ignored, `Failed` with no events channel, `rime-media-key` going to a computer
+player first (also one that takes no keys) and to the phone only when the
+computer has none, an update, removal.
 
 ### 2.9 Status and Focus: the phone's network and Do Not Disturb, both ways
 

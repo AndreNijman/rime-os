@@ -157,7 +157,14 @@ class LinkHub private constructor(private val app: Context) {
     // outbox and one sender per CONNECTION, because the machine removes the
     // phone's player when the connection that described it ends, so a new
     // connection starts from "nothing shown".
-    private class MediaLane(val outbox: MediaOutbox, val wake: Channel<Unit>, var sender: Job? = null)
+    // `control`: the machine's hello offers phone_media_control, so it is
+    // sent `can` (while the switch is on) and may send media_control.
+    private class MediaLane(
+        val outbox: MediaOutbox,
+        val wake: Channel<Unit>,
+        val control: Boolean,
+        var sender: Job? = null,
+    )
 
     private val mediaLanes = ConcurrentHashMap<String, MediaLane>()
 
@@ -167,6 +174,10 @@ class LinkHub private constructor(private val app: Context) {
 
     @Volatile
     private var mediaApps: Set<String> = emptySet()
+
+    /** "Control from your computer": read from the store on a connection and set by the screen. */
+    @Volatile
+    private var mediaControl: Boolean = true
 
     /** What the watcher last said is playing, so a machine that connects is told at once. */
     @Volatile
@@ -476,6 +487,7 @@ class LinkHub private constructor(private val app: Context) {
             focusOn = settings.focusOn
             mediaOn = settings.mediaOn
             mediaApps = settings.mediaApps
+            mediaControl = settings.mediaControl
         }
         if (remote.has(Phone.REPORT)) {
             startReports(machine, phone, remote)
@@ -488,7 +500,7 @@ class LinkHub private constructor(private val app: Context) {
             mirrorLanes.remove(id)?.sender?.cancel()
         }
         if (remote.has(Media.FEATURE)) {
-            startMedia(machine, phone)
+            startMedia(machine, phone, remote.has(Media.CONTROL_FEATURE))
         } else {
             mediaLanes.remove(id)?.sender?.cancel()
             syncMediaWatcher()
@@ -700,6 +712,16 @@ class LinkHub private constructor(private val app: Context) {
         syncMediaWatcher()
     }
 
+    /**
+     * The person turned "Control from your computer" on or off; the store was
+     * already written. Every machine is told again at once, with or without
+     * `can`, so its buttons follow the switch.
+     */
+    fun setMediaControl(on: Boolean) {
+        mediaControl = on
+        onPhoneMedia(media)
+    }
+
     /** The person changed which apps' playback may show; what is shown is worked out again now. */
     fun setMediaApps(apps: Set<String>) {
         mediaApps = apps
@@ -752,21 +774,39 @@ class LinkHub private constructor(private val app: Context) {
         media = s
         for (lane in mediaLanes.values) {
             if (lane.sender?.isActive != true) continue
-            synchronized(lane.outbox) { lane.outbox.offer(s) }
+            synchronized(lane.outbox) { lane.outbox.offer(forLane(s, lane.control)) }
             lane.wake.trySend(Unit)
         }
+    }
+
+    /** [s] as one machine is shown it: with `can` only if it takes it and the switch is on. */
+    private fun forLane(s: MediaState?, control: Boolean): MediaState? =
+        if (s == null || (control && mediaControl)) s else s.copy(can = emptySet())
+
+    /**
+     * [machine] asks for a control on what it shows (§2.8). Only while
+     * unlocked, with both switches on, on a connection that offered control,
+     * and only to the session this connection last showed it; the watcher
+     * then checks that session still allows it. Anything else is ignored.
+     */
+    private fun onMediaControl(machine: PairedMachine, event: DeviceEvent.MediaControl) {
+        if (!_unlocked.value || !mediaOn || !mediaControl) return
+        val lane = mediaLanes[machine.deviceId]?.takeIf { it.control && it.sender?.isActive == true } ?: return
+        val shown = synchronized(lane.outbox) { lane.outbox.showing } ?: return
+        if (shown.can.isEmpty()) return
+        synchronized(this) { if (watching) watcher.control(shown, event.action, event.positionMs) }
     }
 
     /**
      * The sender for one machine's new connection: it is told what plays
      * now at once, then each change, at most every [Media.GAP_MS].
      */
-    private fun startMedia(machine: PairedMachine, phone: PhoneLink) {
+    private fun startMedia(machine: PairedMachine, phone: PhoneLink, control: Boolean) {
         val lane = mediaLanes.compute(machine.deviceId) { _, old ->
             old?.sender?.cancel()
-            MediaLane(MediaOutbox(), Channel(Channel.CONFLATED))
+            MediaLane(MediaOutbox(), Channel(Channel.CONFLATED), control)
         }!!
-        synchronized(lane.outbox) { lane.outbox.offer(if (_unlocked.value && mediaOn) media else null) }
+        synchronized(lane.outbox) { lane.outbox.offer(forLane(if (_unlocked.value && mediaOn) media else null, control)) }
         lane.sender = scope.launch {
             val outbox = lane.outbox
             while (isActive) {
@@ -803,6 +843,7 @@ class LinkHub private constructor(private val app: Context) {
                 if (rang) runCatching { phone.ack(event.id) }
             }
             is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
+            is DeviceEvent.MediaControl -> onMediaControl(machine, event)
             is DeviceEvent.Focus -> {
                 // Only with the person's switch on, whatever an older report
                 // told the machine, and only when the phone is not there

@@ -237,7 +237,7 @@ object Screens {
             )
         },
         "Media on your computer" to {
-            MediaScreen(on = true, onOn = {}, chosen = setOf("org.example.music"), onChoose = { _, _ -> }, onBack = {})
+            MediaScreen(on = true, onOn = {}, control = true, onControl = {}, chosen = setOf("org.example.music"), onChoose = { _, _ -> }, onBack = {})
         },
         "nex" to {
             NexScreen(

@@ -10,10 +10,12 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.SystemClock
 import android.util.Log
+import com.rimeos.remote.core.phone.Media
 import com.rimeos.remote.core.phone.MediaBoard
 import com.rimeos.remote.core.phone.MediaState
 import com.rimeos.remote.core.phone.PlayState
 import com.rimeos.remote.core.phone.SessionFacts
+import com.rimeos.remote.core.phone.Transport
 
 /**
  * Reads this phone's media sessions for the paired computers
@@ -30,8 +32,12 @@ import com.rimeos.remote.core.phone.SessionFacts
  * gone, a state or a track) re-reads every session into a [MediaBoard], and
  * what the board shows goes to [onChange]; the per-computer outboxes decide
  * whether that is worth sending. Only the title, artist, album, length,
- * position, speed and state are read: never artwork, URIs, the queue or
- * extras. Nothing is logged or written down.
+ * position, speed, state and the controls the app offers are read: never
+ * artwork, URIs, the queue or extras. Nothing is logged or written down.
+ *
+ * A control from a computer ([control]) goes to the one session that
+ * computer was last shown, through its `TransportControls`, and only when
+ * [Media.transport] says that session allows it now.
  */
 class MediaWatcher(private val context: Context, private val onChange: (MediaState?) -> Unit) {
     private val thread = HandlerThread("rime-media").apply { start() }
@@ -128,6 +134,29 @@ class MediaWatcher(private val context: Context, private val onChange: (MediaSta
         read()
     }
 
+    /**
+     * The computer that was last shown [sent] asks for [action] ([positionMs]
+     * for a seek). Applied on this thread, to that session only, if it still
+     * exists and allows it; anything else is ignored.
+     */
+    fun control(sent: MediaState, action: String, positionMs: Long?) {
+        handler.post {
+            if (!running) return@post
+            val c = sessions.firstOrNull { ids[it.sessionToken] == sent.session } ?: return@post
+            val t = Media.transport(sent, sent.session, facts(c), action, positionMs) ?: return@post
+            val tc = c.transportControls
+            runCatching {
+                when (t) {
+                    Transport.Play -> tc.play()
+                    Transport.Pause -> tc.pause()
+                    Transport.Next -> tc.skipToNext()
+                    Transport.Previous -> tc.skipToPrevious()
+                    is Transport.SeekTo -> tc.seekTo(t.ms)
+                }
+            }.onFailure { Log.i(TAG, "a control from the computer did not reach the app: ${it.message}") }
+        }
+    }
+
     private fun changed() {
         if (running) read()
     }
@@ -157,6 +186,7 @@ class MediaWatcher(private val context: Context, private val onChange: (MediaSta
             positionMs = ps?.position ?: -1,
             updatedAtMs = ps?.lastPositionUpdateTime ?: 0,
             speed = ps?.playbackSpeed ?: 1f,
+            actions = ps?.actions ?: 0,
         )
     }
 

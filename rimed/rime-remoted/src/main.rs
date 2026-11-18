@@ -260,6 +260,15 @@ fn run(args: &[String]) -> Result<(), String> {
         }));
     }
 
+    {
+        // Play, pause, skip and seek on a phone's player (contract §2.8): one
+        // line on that phone's events channel. Only a player whose report
+        // carried `can` takes a method at all (media.rs decides); a phone
+        // with no channel open makes the method an error, not a success.
+        let state = Arc::clone(&state);
+        media::media().on_control(Box::new(move |device, line| state.events.send(device, line)));
+    }
+
     let control_path = crate::state::control_socket();
     let control = bind_control(&control_path)?;
     {

@@ -1935,6 +1935,13 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(settings = store.settings) }
     }
 
+    /** Let the paired computers control what is shown there, or only show it (contract §2.8). */
+    fun setMediaControl(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(mediaControl = on))
+        hub.setMediaControl(store.settings.mediaControl)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
     /** Let [pkg]'s playback show on the paired computers, or stop (contract §2.8). */
     fun setMediaApp(pkg: String, on: Boolean) = viewModelScope.launch {
         val apps = _state.value.settings.mediaApps.let { if (on) it + pkg else it - pkg }

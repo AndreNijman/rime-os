@@ -62,6 +62,16 @@ class PhoneTest {
             Phone.event("""{"event":"ring","id":3,"at":1700000000}"""),
         )
         assertNull(Phone.event("""{"event":"fly","id":3}"""))
+        // §2.8: a control from the computer, strictly.
+        assertEquals(DeviceEvent.MediaControl("play_pause", null), Phone.event("""{"event":"media_control","action":"play_pause"}"""))
+        assertEquals(DeviceEvent.MediaControl("next", null), Phone.event("""{"event":"media_control","action":"next","position_ms":5}"""))
+        assertEquals(DeviceEvent.MediaControl("seek", 42_000), Phone.event("""{"event":"media_control","action":"seek","position_ms":42000}"""))
+        assertNull(Phone.event("""{"event":"media_control","action":"seek"}"""), "a seek says where to")
+        assertNull(Phone.event("""{"event":"media_control","action":"seek","position_ms":-1}"""))
+        assertNull(Phone.event("""{"event":"media_control","action":"seek","position_ms":"42000"}"""))
+        assertNull(Phone.event("""{"event":"media_control","action":"seek","position_ms":604800001}"""))
+        assertNull(Phone.event("""{"event":"media_control","action":"stop"}"""))
+        assertNull(Phone.event("""{"event":"media_control"}"""))
         assertNull(Phone.event("""{"event":"ring","at":1}"""), "a ring with no id cannot be acknowledged")
         assertNull(Phone.event("""{"event":"ring","id":-1,"at":1}"""))
         assertNull(Phone.event("""{"event":"ring","id":"3","at":1}"""))

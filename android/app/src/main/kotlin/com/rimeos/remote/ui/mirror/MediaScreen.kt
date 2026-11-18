@@ -42,13 +42,17 @@ import kotlinx.coroutines.withContext
  * "Media on your computer" (contract §2.8): the switch, and the apps whose
  * playback may show on the paired computers. The apps listed are the ones
  * with a media session now, plus those already turned on; none is on until
- * the person turns it on here.
+ * the person turns it on here. Under the switch, "Control from your
+ * computer": on by default, it lets the computer's player play, pause, skip
+ * and seek what is shown, as far as the app allows.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MediaScreen(
     on: Boolean,
     onOn: (Boolean) -> Unit,
+    control: Boolean,
+    onControl: (Boolean) -> Unit,
     chosen: Set<String>,
     onChoose: (pkg: String, on: Boolean) -> Unit,
     onBack: () -> Unit,
@@ -90,8 +94,8 @@ fun MediaScreen(
                         "What the apps you turn on below are playing shows in your paired computers' " +
                             "player while this app is unlocked and connected. The computer gets the app's " +
                             "name, the title, artist and album, the length, how far in it is and whether it " +
-                            "is playing. No artwork, links or queue. It only shows: play, pause and skip on " +
-                            "the computer never act on this phone.",
+                            "is playing. No artwork, links or queue. With control on, the computer's play, " +
+                            "pause, skip and seek act on what it shows, while this phone is unlocked.",
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Spacer(Modifier.height(16.dp))
@@ -114,6 +118,30 @@ fun MediaScreen(
                             )
                         }
                         Switch(checked = on && granted, onCheckedChange = null, enabled = granted)
+                    }
+                    // Only meaningful while media shows: dimmed otherwise, keeping its own value.
+                    val canControl = on && granted
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .toggleable(value = control && canControl, enabled = canControl, role = Role.Switch, onValueChange = onControl)
+                            .padding(start = 16.dp, top = 4.dp, bottom = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                "Control from your computer",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = if (canControl) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "Play, pause, skip and seek from the computer's player, as far as the app " +
+                                    "allows. Only while this phone is unlocked.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(checked = control && canControl, onCheckedChange = null, enabled = canControl)
                     }
                     HorizontalDivider()
                     Text(

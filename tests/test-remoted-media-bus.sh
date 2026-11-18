@@ -2,8 +2,14 @@
 # rime-remoted's real phone-media backend (zbus, src/media.rs `Bus`) on a
 # PRIVATE session bus, read back with playerctl: the player is listed, its
 # metadata and status read as sent, its position moves with the clock, one
-# --ignore-player=rime_phone leaves it out, a control call changes nothing,
-# an update shows, and removal takes it off the bus.
+# --ignore-player=rime_phone leaves it out, a control call is refused while
+# the phone allows none; once it allows control the Can* properties change
+# (PropertiesChanged, read with dbus-monitor) and busctl/playerctl calls cross
+# as media_control lines, a stale SetPosition track id is ignored, a missing
+# events channel is an error; the media-key helper
+# (files/system/libexec/rime-media-key) goes to a computer player first and to
+# the phone only when the computer has none; an update shows, and removal
+# takes it off the bus.
 #
 #   tests/test-remoted-media-bus.sh <rime-remoted unit-test binary>
 #
@@ -13,10 +19,14 @@
 # directories, so nothing on this machine can be activated or reached.
 set -euo pipefail
 bin=${1:?usage: $0 <rime-remoted unit-test binary>}
-if ! command -v playerctl >/dev/null || ! command -v dbus-run-session >/dev/null; then
-  if [ "${RIME_TEST_REQUIRE_PLAYERCTL:-0}" = 1 ]; then echo "FAIL: playerctl or dbus-run-session missing" >&2; exit 1; fi
-  echo "SKIP: playerctl or dbus-run-session missing"; exit 0
-fi
+for c in playerctl dbus-run-session dbus-monitor busctl; do
+  if ! command -v "$c" >/dev/null; then
+    if [ "${RIME_TEST_REQUIRE_PLAYERCTL:-0}" = 1 ]; then echo "FAIL: $c missing" >&2; exit 1; fi
+    echo "SKIP: $c missing"; exit 0
+  fi
+done
+RIME_MEDIA_KEY=$(cd "$(dirname "$0")/.." && pwd)/files/system/libexec/rime-media-key
+export RIME_MEDIA_KEY
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 cat >"$work/bus.conf" <<'CONF'
 <!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
@@ -35,4 +45,5 @@ dbus-run-session --config-file="$work/bus.conf" -- bash -c '
   grep -q "test result: ok. 1 passed" "$work/out" || { cat "$work/out" >&2; exit 1; }
 '
 echo "PASS: the phone's player is on the bus as sent, its position follows the clock, playerctl's" \
-     "--ignore-player=rime_phone leaves it out, control is refused, and removal takes it off the bus"
+     "--ignore-player=rime_phone leaves it out, control follows the phone's can, calls cross as" \
+     "media_control, the media key prefers the computer's player, and removal takes it off the bus"

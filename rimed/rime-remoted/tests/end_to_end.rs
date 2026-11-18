@@ -2106,6 +2106,91 @@ fn a_notification_dismissed_here_is_dismissed_on_a_phone_that_says_it_can() {
     assert!(after.iter().all(|l| l["op"] == "notify"), "{after:?}");
 }
 
+/// What a reader on the computer's bus does to the phone's player (the media
+/// stub's control.jsonl), and the outcome the stub records for it.
+fn media_call(h: &Harness, call: serde_json::Value) -> serde_json::Value {
+    let before = media_lines(h, |_| true).iter().filter(|l| l["op"] == "call").count();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(h.root.join("media/control.jsonl"))
+        .expect("control.jsonl");
+    writeln!(f, "{call}").expect("write");
+    let got = media_lines(h, |g| g.iter().filter(|l| l["op"] == "call").count() > before);
+    got.into_iter().filter(|l| l["op"] == "call").nth(before).unwrap_or_else(|| panic!("no outcome for {call}"))
+}
+
+#[test]
+fn a_phone_that_allows_control_gets_each_call_on_its_events_channel_and_nothing_it_did_not_allow() {
+    let h = harness!("media-control");
+    let Some(offer) = open_offer(&h) else { return };
+    let device = Device::new();
+    assert_eq!(device.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut session = device.connect(&h).expect("a session");
+    let hello = session.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "phone_media_control"), "{hello}");
+    let song = |can: &str| {
+        format!(
+            r#"{{"cmd":"phone_media","playing":{{"app":"Music","state":"playing","title":"Song","artist":"Band","duration_ms":200000,"position_ms":10000{can}}}}}"#
+        )
+    };
+    std::fs::create_dir_all(h.root.join("media")).expect("media dir");
+    assert_eq!(session.call(&song(r#","can":["play","pause","next","seek","shuffle"]"#))["reply"], "ok");
+    let shown = media_lines(&h, |g| !g.is_empty());
+    let player = shown[0]["player"].as_str().expect("player").to_string();
+    let track = shown[0]["track"].as_str().expect("track").to_string();
+    assert_eq!(shown[0]["can"], serde_json::json!(["play", "pause", "next", "seek"]), "{shown:?}");
+    assert_eq!(shown[0]["can_control"], true, "{shown:?}");
+    let call = |method: &str, extra: serde_json::Value| {
+        let mut c = serde_json::json!({"player": player, "method": method});
+        c.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        media_call(&h, c)["result"].as_str().unwrap().to_string()
+    };
+    let none = serde_json::json!({});
+
+    // Allowed, but no events channel yet: an error, never a success into nothing.
+    assert_eq!(call("PlayPause", none.clone()), "failed");
+
+    open_events(&mut session, 9);
+    assert_eq!(call("PlayPause", none.clone()), "ok");
+    assert_eq!(call("Seek", serde_json::json!({"offset_us": -60_000_000})), "ok");
+    assert_eq!(call("SetPosition", serde_json::json!({"track": track, "position_us": 42_000_000})), "ok");
+    // A stale track id is ignored (MPRIS): no error, nothing sent.
+    assert_eq!(call("SetPosition", serde_json::json!({"track": "/org/rimeos/RimeRemote/track/999999", "position_us": 1})), "ok");
+    // Not in `can`: refused, nothing sent.
+    assert_eq!(call("Previous", none.clone()), "not_supported");
+    assert_eq!(call("Next", none.clone()), "ok");
+    let got = events_on(&mut session, 9, 4);
+    assert_eq!(
+        got,
+        [
+            serde_json::json!({"event": "media_control", "action": "play_pause"}),
+            serde_json::json!({"event": "media_control", "action": "seek", "position_ms": 0}),
+            serde_json::json!({"event": "media_control", "action": "seek", "position_ms": 42_000}),
+            serde_json::json!({"event": "media_control", "action": "next"}),
+        ],
+        "{got:?}"
+    );
+
+    // The phone stops allowing control: display only again, the same track.
+    assert_eq!(session.call(&song(""))["reply"], "ok");
+    let again = media_lines(&h, |g| g.iter().rev().find(|l| l["op"] == "show").is_some_and(|l| l["can_control"] == false));
+    let last = again.iter().rev().find(|l| l["op"] == "show").unwrap();
+    assert_eq!(last["can"], serde_json::json!([]), "{last}");
+    assert_eq!(last["track"], track.as_str(), "{last}");
+    assert_eq!(call("Next", none.clone()), "not_supported");
+    // A player name no phone has: failed.
+    let other = media_call(&h, serde_json::json!({"player": "org.mpris.MediaPlayer2.rime_phone.d00", "method": "Play"}));
+    assert_eq!(other["result"], "failed", "{other}");
+
+    // Revoked: the player is gone, and a call on it is failed.
+    assert_eq!(session.call(&song(r#","can":["next"]"#))["reply"], "ok");
+    media_lines(&h, |g| g.iter().rev().find(|l| l["op"] == "show").is_some_and(|l| l["can_control"] == true));
+    assert_eq!(h.control(r#"{"cmd":"revoke","device":"pixel-8"}"#)["reply"], "ok");
+    media_lines(&h, |g| g.last().is_some_and(|l| l["op"] == "gone"));
+    assert_eq!(call("Next", none), "failed");
+}
+
 /// `n` lines from `channel`: first those parked while a call waited for its
 /// reply, then fresh ones.
 fn events_on(session: &mut Session, channel: u32, n: usize) -> Vec<serde_json::Value> {

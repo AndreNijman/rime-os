@@ -217,6 +217,16 @@ object Phone {
             }
             // A real boolean only: a quoted "true" is not one.
             "focus" -> o.prim("dnd")?.takeIf { !it.isString }?.booleanOrNull?.let { DeviceEvent.Focus(it) }
+            "media_control" -> {
+                val action = o.text("action")?.takeIf { it in Media.CONTROL_ACTIONS } ?: return null
+                // A seek says where to; nothing else carries a position.
+                val position = if (action == "seek") {
+                    o.long("position_ms")?.takeIf { it in 0..Media.MAX_MS } ?: return null
+                } else {
+                    null
+                }
+                DeviceEvent.MediaControl(action, position)
+            }
             else -> null
         }
     }
@@ -258,6 +268,12 @@ sealed interface DeviceEvent {
 
     /** The person dismissed, on the computer, the mirrored notification with this [key]. */
     data class Dismissed(val key: String) : DeviceEvent
+
+    /**
+     * The person used the phone's player on the computer (§2.8): [action] is
+     * one of [Media.CONTROL_ACTIONS]; [positionMs] is where a `seek` goes.
+     */
+    data class MediaControl(val action: String, val positionMs: Long?) : DeviceEvent
 
     /** The computer asks this phone's Do Not Disturb to be on ([dnd]) or off (§2.9). */
     data class Focus(val dnd: Boolean) : DeviceEvent
