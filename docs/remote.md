@@ -294,8 +294,9 @@ Do Not Disturb can follow you between the phone and the computer, the way
 Focus does between an iPhone and a Mac. It is off until you turn it on, and you
 turn it on separately on each side:
 
-- **On the phone:** turn on Focus sync in Rime Remote. It needs the same
-  notification access as notification mirroring.
+- **On the phone:** in Rime Remote, open **Notifications on your computer**
+  and turn on **Do Not Disturb follows your computer**. It needs the same
+  notification access as notification mirroring, and no other permission.
 - **On the computer:** in Rime Settings, open Paired devices and turn on
   **Do Not Disturb follows your phone**.
 
@@ -317,6 +318,11 @@ does not catch up later: the next change on either side sets both. Only the
 computer's own user can run it. A paired phone has no command for this
 computer's Do Not Disturb. It can only report its own, and the Shell follows
 that report only when you have turned that on.
+
+On Android 15 and later, a Do Not Disturb the computer turns on is a mode of
+its own on the phone, and `off` from the computer ends only that one. If you
+turned Do Not Disturb on at the phone, the computer cannot turn it off, and
+the phone stays as it is.
 
 ## `rime remote send <device>`: files and text to your phone
 

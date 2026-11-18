@@ -752,6 +752,55 @@ person has chosen since.
 - The phone applies it with `NotificationListenerService.requestInterruptionFilter`.
   Listener access is enough; policy access is not needed.
 
+**What the phone sends.** `network` in every report to a machine offering
+`phone_report`; `dnd` and `"focus"` only to one whose hello has
+`"phone_focus"`. The report is read at the moment it goes, and each machine's
+reports go out one at a time, so two Do Not Disturb changes never land in the
+wrong order.
+
+- `network` is the default network's: `wifi`, `cellular` or `ethernet` from
+  its transports, first match winning (a VPN lists the transport under it, so
+  a VPN over Wi-Fi is `wifi`; a bare VPN is `other`); `none` with no default
+  network. Wi-Fi bars come from the network's signal strength in dBm on
+  Android's own five-level scale (-100 dBm and below is 0, -55 and above is
+  4); cellular bars are `SignalStrength.getLevel`. Ethernet, `none` and
+  `other` carry no `signal`, and neither does a reading Android did not give.
+  No permission is added for either: `NetworkCapabilities.getSignalStrength`
+  is not one of the fields Android hides without location access, and
+  `TelephonyManager.getSignalStrength` needs none. No location or
+  `READ_PHONE_STATE`.
+- `dnd` is `getCurrentInterruptionFilter() != INTERRUPTION_FILTER_ALL`, left
+  out while Android says the filter is unknown.
+- A new report goes at once when `dnd` changes, when the network's `type`
+  changes, or when `can` changes (the switch, replying, notification access
+  granted or taken away); a change of bars alone at most once a minute; and
+  battery as §2.5. The phone hears Do Not Disturb change through
+  `ACTION_INTERRUPTION_FILTER_CHANGED`, the network through its default
+  network callback, and cellular bars (Android 12 and later, only while the
+  default network is cellular) through `TelephonyCallback`.
+- `can` has `"focus"` while notification access is granted and the switch
+  "Do Not Disturb follows your computer" (on "Notifications on your
+  computer", off by default) is on.
+- A `focus` line is applied only while the switch is on, notification access
+  is granted, the app is unlocked, and the phone's state differs from the
+  line's. The switch is checked again on the phone, so a machine that still
+  holds an older report saying `"focus"` is not obeyed. `dnd: true` asks for
+  `INTERRUPTION_FILTER_PRIORITY`, `false` for `INTERRUPTION_FILTER_ALL`.
+- Measured on Android 16 with the app targeting 36: Android keeps a Do Not
+  Disturb that an app turns on as a mode of the app's own. `false` from a
+  computer ends only that mode, never one the person turned on at the phone
+  (the phone keeps its Do Not Disturb, sends nothing, and the two sides stay
+  apart until the next change). `cmd notification set_dnd off` does not end
+  the app's mode either. Not measured: the phone's own Do Not Disturb tile
+  and the Modes page on a real phone.
+- Proven on the emulator by `FocusOnDeviceTest` (the record carries
+  `network` and `dnd`, and `"focus"` only once switched on; `rime remote
+  focus on|off` turns the emulator's Do Not Disturb on and off;
+  `set_dnd on|off` reaches `focus.json`, read by the broker's `focus_file`
+  from the run's own runtime directory; with the switch off, `reached` is 0
+  and `focus.json` is not written). The cellular path is not exercised there:
+  the emulator's default network is Wi-Fi.
+
 **State, not toggles: why nothing loops.** Each side acts only when the state
 it is given differs from its own:
 
