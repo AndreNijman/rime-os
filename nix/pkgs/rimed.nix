@@ -233,6 +233,7 @@ let
       "a_project_grant_is_reported_as_inherited_and_a_session_grant_is_not"
       "a_push_endpoint_the_machine_cannot_use_is_refused_and_nothing_is_stored"
       "a_relayed_session_is_recorded_as_relayed_and_a_direct_one_is_not"
+      "a_reply_typed_here_goes_to_a_phone_that_says_it_can_and_is_not_a_dismissal"
       "a_request_from_a_phone_is_remote_and_cannot_approve_root"
       "a_second_device_cannot_reuse_the_first_ones_code"
       "a_session_cannot_ask_for_a_grant_or_renew_one_however_it_asks"

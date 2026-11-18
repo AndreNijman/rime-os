@@ -238,6 +238,22 @@ fn run(args: &[String]) -> Result<(), String> {
             }
         }));
     }
+    {
+        // Only to a phone whose person turned replying on: the phone sends
+        // it as them, through the app's own reply action.
+        let state = Arc::clone(&state);
+        // Not sent (no connection, or replying turned off since the card was
+        // drawn): the mirror says so here and gives the words back.
+        mirror::mirror().on_replied(Box::new(move |device, key, text| {
+            match state.phones().get(device).map(|r| r.can_reply()) {
+                Some(true) => {}
+                Some(false) => return Err(mirror::NotSent::Off),
+                None => return Err(mirror::NotSent::Offline),
+            }
+            let line = serde_json::json!({"event": mirror::REPLY_EVENT, "key": key, "text": text});
+            if state.events.send(device, &line) { Ok(()) } else { Err(mirror::NotSent::Offline) }
+        }));
+    }
 
     let control_path = crate::state::control_socket();
     let control = bind_control(&control_path)?;

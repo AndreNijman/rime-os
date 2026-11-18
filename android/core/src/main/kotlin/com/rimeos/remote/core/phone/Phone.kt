@@ -45,6 +45,13 @@ object Phone {
      */
     const val CAN_DISMISS: String = "dismiss"
 
+    /**
+     * The word in `can` that says the person turned on replying from the
+     * computer: this phone sends a reply typed there through the
+     * notification's own reply action (contract §2.7).
+     */
+    const val CAN_REPLY: String = "reply"
+
     /** The channel, and the feature, a sent file or text is taken on. */
     const val TAKE: String = "take_offer"
 
@@ -58,8 +65,12 @@ object Phone {
     /** A push ring older than this is dropped: a late push must not ring a phone. */
     const val STALE_PUSH_S: Long = 60
 
-    /** The longest event line accepted. The only event today is under 300 bytes. */
-    const val MAX_LINE: Int = 4096
+    /**
+     * The longest event line accepted. The longest event is a reply: 2000
+     * characters of up to four bytes each, a quote escaped to two, so about
+     * 8 KB with its key; twice that leaves room and still bounds the buffer.
+     */
+    const val MAX_LINE: Int = 16 * 1024
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -161,6 +172,13 @@ object Phone {
                 DeviceEvent.Offer(id, at, (o.text("machine") ?: "").take(MACHINE_CAP), kind, cleanName(o.text("name")), len)
             }
             "notification_dismissed" -> o.text("key")?.takeIf { Mirror.validKey(it) }?.let { DeviceEvent.Dismissed(it) }
+            "notification_reply" -> {
+                val key = o.text("key")?.takeIf { Mirror.validKey(it) } ?: return null
+                // Counted in characters, as the computer caps it.
+                val text = o.text("text")?.takeIf { it.isNotEmpty() && it.codePointCount(0, it.length) <= Mirror.REPLY_TEXT_CAP }
+                    ?: return null
+                DeviceEvent.Replied(key, text)
+            }
             else -> null
         }
     }
@@ -202,6 +220,12 @@ sealed interface DeviceEvent {
 
     /** The person dismissed, on the computer, the mirrored notification with this [key]. */
     data class Dismissed(val key: String) : DeviceEvent
+
+    /** The person replied [text], on the computer, to the mirrored notification with this [key]. */
+    data class Replied(val key: String, val text: String) : DeviceEvent {
+        // Somebody's message: never in a log line by accident.
+        override fun toString(): String = "Replied(key=$key, text=<${text.length} chars>)"
+    }
 
     /** [machine] sent this phone a file or text of [len] bytes; take it with `take_offer`. */
     data class Offer(

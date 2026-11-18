@@ -332,8 +332,18 @@ either side and it goes from both: dismissed on one computer, it leaves the
 phone and every other computer too. One that times out on the computer stays
 on the phone.
 
-- Only the app's name, the title and the text cross. Pictures, actions and
-  replies do not, and the computer keeps nothing once it is closed.
+**Reply from the computer.** Turn on **Reply from your computer** on the same
+screen, and a message you can answer from the phone's own notification gets a
+reply field on the computer.
+What you type there is sent from the phone by the app that posted the
+notification, as you, exactly as if you had used the reply field on the phone.
+The notification closes on the computer and stays on the phone.
+If the phone is not connected, or replying has been turned off on it since,
+the computer shows **Reply not sent** with what you typed.
+
+- Only the app's name, the title and the text cross, plus whether it can be
+  replied to. Pictures and other actions do not, and the computer keeps
+  nothing once it is closed.
 - Never shown: Rime Remote's own notifications, a work profile's, ones an app
   marks as private to the phone or hidden on the lock screen, ongoing ones
   (downloads, navigation, a call in progress) and media controls.

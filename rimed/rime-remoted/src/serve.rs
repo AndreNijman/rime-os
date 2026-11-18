@@ -1264,7 +1264,7 @@ mod tests {
             serde_json::json!(["nodelay", "control_worker", "mux_attach", "liveness",
                                "machine_status", "machine_lock", "media",
                                "device_events", "phone_report", "take_offer",
-                               "phone_notifications"]),
+                               "phone_notifications", "phone_notification_reply"]),
             "{v}"
         );
         // The pairing code's list, with the port this listener has — and

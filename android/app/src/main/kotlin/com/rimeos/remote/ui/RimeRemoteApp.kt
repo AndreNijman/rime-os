@@ -444,6 +444,8 @@ fun RimeRemoteApp(
                 MirrorScreen(
                     chosen = state.settings.mirrorApps,
                     onChoose = { pkg, on -> viewModel.setMirrorApp(pkg, on) },
+                    reply = state.settings.mirrorReply,
+                    onReply = { viewModel.setMirrorReply(it) },
                     onBack = { navigation.popBackStack() },
                 )
             }

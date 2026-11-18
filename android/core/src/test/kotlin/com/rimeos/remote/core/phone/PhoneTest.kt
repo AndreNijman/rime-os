@@ -74,6 +74,28 @@ class PhoneTest {
     }
 
     @Test
+    fun `a reply event carries a key this phone gives and some text, within the cap`() {
+        val key = Mirror.key("0|org.example.chat|1|tag|10001")
+        assertEquals(
+            DeviceEvent.Replied(key, "on my way\nsoon"),
+            Phone.event("""{"event":"notification_reply","key":"$key","text":"on my way\nsoon"}"""),
+        )
+        // Exactly the cap, in characters: four bytes each, and the line still fits.
+        val most = "😀".repeat(Mirror.REPLY_TEXT_CAP)
+        val line = """{"event":"notification_reply","key":"$key","text":"$most"}"""
+        assertEquals(DeviceEvent.Replied(key, most), Phone.event(line))
+        assertEquals(listOf(line), EventLines().feed((line + "\n").toByteArray(Charsets.UTF_8)))
+        assertNull(Phone.event("""{"event":"notification_reply","key":"$key","text":"${most}x"}"""))
+        assertNull(Phone.event("""{"event":"notification_reply","key":"../etc","text":"hi"}"""))
+        assertNull(Phone.event("""{"event":"notification_reply","key":"$key","text":""}"""))
+        assertNull(Phone.event("""{"event":"notification_reply","key":"$key","text":7}"""))
+        assertNull(Phone.event("""{"event":"notification_reply","key":"$key"}"""))
+        assertNull(Phone.event("""{"event":"notification_reply","text":"hi"}"""))
+        // Not in a log line by accident.
+        assertTrue("on my way" !in DeviceEvent.Replied(key, "on my way").toString())
+    }
+
+    @Test
     fun `lines split across chunks come out whole, and a runaway line breaks the feed`() {
         val lines = EventLines()
         assertEquals(emptyList<String>(), lines.feed("""{"event":"ri""".toByteArray()))

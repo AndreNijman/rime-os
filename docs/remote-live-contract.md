@@ -411,7 +411,7 @@ The other direction of §1.8: a file, or some text for the phone's clipboard,
 from somebody at this computer onto their phone. `remote_hello.features` gains
 `"take_offer"`. A phone puts `"receive"` in its report's `can` when it will
 take what is sent (notifications allowed, so the person is told what arrived);
-of `can`, `"ring"`, `"receive"` and `"dismiss"` (§2.7) are kept.
+of `can`, `"ring"`, `"receive"`, `"dismiss"` and `"reply"` (§2.7) are kept.
 
 **Send** is a control-socket request (`rime remote send`), and like `pair` it is
 refused unless the caller is a human at this machine (a local terminal or the
@@ -496,8 +496,8 @@ verb to a machine whose hello lacks it.
   breaks, and each is cut to 60, 120 and 1,000 characters (with "…"). `<` and
   `>` become `‹` and `›` everywhere and the body's `&` is escaped, so a
   message never reads as markup. It is shown with the app name
-  `"<device name> · <app>"`, the icon `phone`, normal urgency, no actions, and
-  the server's own timeout.
+  `"<device name> · <app>"`, the icon `phone`, normal urgency, no actions
+  (but see replies below), and the server's own timeout.
 - A post with a key already shown replaces that notification in place;
   `phone_notification_removed` closes it, and a key not shown is `"ok"` and
   does nothing. The key-to-id map is in memory, at most 64 per phone, and is
@@ -529,6 +529,44 @@ machine that dismissed it is not sent that removal. A phone that does not list
 The phone lists it while it holds notification access, from its next
 connection.
 
+**Replied to on the computer, sent from the phone.** `remote_hello.features`
+also gains `"phone_notification_reply"`. A post may carry `"reply":"<label>"`,
+the title of the notification's own free-form reply action on the phone
+(cleaned like a title, cut to 40 characters; empty means none). The phone sends
+it only to a machine whose hello has the feature, and only while the person has
+turned on "Reply from your computer". rime-remoted asks the server's
+`GetCapabilities` once per bus owner; if it lists `"inline-reply"`, a post with
+a label gets the actions `["inline-reply", "<label>"]` and the hint
+`x-kde-reply-placeholder-text`, and otherwise it is shown as before, without
+one. When the server says `NotificationReplied(id, text)` for an id posted for
+a phone, rime-remoted sends on that phone's `device_events` channel
+
+```json
+{"event":"notification_reply","key":"9f2c…","text":"On my way"}
+```
+
+if the phone's latest `phone_report` lists `"reply"` in `can`. The text keeps
+its line breaks, loses other control and bidirectional-override characters,
+and is cut to 2,000 characters; a reply that is empty after that is not sent.
+The server closes the notification after a reply (reason 2); that close is not
+a dismissal, so the phone keeps it, and this holds for any reply, sent or not.
+A non-empty reply that is not sent, because the phone's report does not list
+`"reply"` or the phone has no `device_events` channel open, makes rime-remoted
+post its own notification here: app `Rime Remote`, summary `Reply not sent`,
+a body that says why and ends `What you typed:` and the text. It belongs to no
+phone, so closing it sends nothing, and it has no reply field. A reply written
+into the channel counts as sent: the phone does not acknowledge it, so one
+written just as the connection drops, or one the phone then fails to send, is
+not reported here.
+The phone acts only on a key it sent to that machine and that machine still
+shows, and only while unlocked. It fills the reply action's `RemoteInput` and
+sends that action's `PendingIntent`, as Android's own reply field would: the
+app that posted the notification sends the message, as the person. Apps
+usually post the notification again after a reply ("You: …"); the phone does
+not send the first such update of that key within 5 s to the machine that
+replied, so the reply does not pop up there again. The phone lists `"reply"`
+while it holds notification access and the switch is on.
+
 **What the phone sends.** Nothing until the person grants notification access
 and turns apps on one by one in "Notifications on your computer" (none are on
 by default). Then only while the app is unlocked and a connection to a machine
@@ -557,7 +595,11 @@ build always uses the stub. The device suite sets it; its broker reads the
 calls back with `notify_log` and closes with `notify_closed`. The bus path is
 proven against a fake server on a private bus by
 `tests/test-remoted-notify-bus.sh` (post, replace, close, a dismissal, an
-expiry, a close sent before the post's reply, and a stranger's fake signal).
+expiry, a close sent before the post's reply, a stranger's fake signal, and
+replies, against a server that offers `"inline-reply"` and one that does not).
+A stub line `{"id":N,"reply":"text"}` in `closed.jsonl` is read as
+`NotificationReplied`; the stub records a post's `reply` label as given, and
+the device suite's broker writes one with `notify_reply`.
 
 ## 3. The phone
 

@@ -212,6 +212,16 @@ object Desktop {
         check(reply.optString("reply") == "ok") { "the broker did not close the stub notification: $reply" }
     }
 
+    /**
+     * The person typed [text] into stub notification [id]'s reply field, as
+     * a real server says in `NotificationReplied`. A real server then closes
+     * it; the caller says so with [notifyClosed].
+     */
+    fun notifyReply(id: Int, text: String) {
+        val reply = ask(JSONObject().put("cmd", "notify_reply").put("id", id).put("text", text).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not reply to the stub notification: $reply" }
+    }
+
     private fun requestReply(line: String): JSONObject {
         val reply = ask(line)
         check(reply.optString("reply") == "request") {

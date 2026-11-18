@@ -2,10 +2,12 @@ package com.rimeos.remote.phone
 
 import android.app.Notification
 import android.app.NotificationManager
+import android.app.RemoteInput
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.Bundle
 import android.os.Process
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
@@ -13,6 +15,7 @@ import android.service.notification.StatusBarNotification
 import com.rimeos.remote.core.phone.Content
 import com.rimeos.remote.core.phone.Facts
 import com.rimeos.remote.core.phone.Mirror
+import com.rimeos.remote.core.phone.ReplyAction
 import com.rimeos.remote.link.LinkHub
 
 /**
@@ -30,7 +33,9 @@ import com.rimeos.remote.link.LinkHub
  *
  * When the person dismisses one of them on a computer, [dismiss] cancels it
  * here, as a swipe would; Android then reports the removal, which closes it
- * on the other computers too.
+ * on the other computers too. When the person turned on replying, a reply
+ * typed on a computer goes through [reply], into the app's own reply action,
+ * as if typed into the shade here.
  */
 class MirrorService : NotificationListenerService() {
     /** App labels by package, so a busy chat does not ask the package manager each time. */
@@ -78,7 +83,9 @@ class MirrorService : NotificationListenerService() {
         val extras = n.extras ?: return
         val title = extras.getCharSequence(Notification.EXTRA_TITLE_BIG) ?: extras.getCharSequence(Notification.EXTRA_TITLE)
         val text = extras.getCharSequence(Notification.EXTRA_BIG_TEXT) ?: extras.getCharSequence(Notification.EXTRA_TEXT)
-        val content = Content.of(label(sbn.packageName), title, text)
+        // A reply field only when the person turned replying on.
+        val reply = if (hub.mirrorReply()) Mirror.replyLabel(actionsOf(n).map { (a, _) -> a }) else null
+        val content = Content.of(label(sbn.packageName), title, text, reply)
         if (content.empty) return
         val key = Mirror.key(sbn.key)
         synchronized(sent) { sent[key] = sbn.key }
@@ -103,6 +110,12 @@ class MirrorService : NotificationListenerService() {
     }
 
     companion object {
+        /** A notification's actions, with what the policy reads off each: its own, then those it gives a watch. */
+        private fun actionsOf(n: Notification): List<Pair<ReplyAction, Notification.Action>> {
+            val all = n.actions.orEmpty().toList() + runCatching { Notification.WearableExtender(n).actions }.getOrDefault(emptyList())
+            return all.map { a -> ReplyAction(a.title, a.remoteInputs.orEmpty().any { it.allowFreeFormInput }) to a }
+        }
+
         /** The listener Android has bound, if any. */
         @Volatile private var live: MirrorService? = null
 
@@ -117,6 +130,27 @@ class MirrorService : NotificationListenerService() {
             val service = live ?: return false
             val androidKey = synchronized(service.sent) { service.sent[key] } ?: return false
             return runCatching { service.cancelNotification(androidKey) }.isSuccess
+        }
+
+        /**
+         * Send [text] as the reply to the notification computers know as
+         * [key], through the first of its actions that takes free-form text,
+         * as the shade does: the results on a fill-in intent, marked typed.
+         * False when there is nothing to answer (unbound, never sent, gone,
+         * or no such action any more).
+         */
+        fun reply(key: String, text: String): Boolean {
+            val service = live ?: return false
+            val androidKey = synchronized(service.sent) { service.sent[key] } ?: return false
+            val sbn = runCatching { service.getActiveNotifications(arrayOf(androidKey)) }.getOrNull()?.firstOrNull()
+                ?: return false
+            val action = actionsOf(sbn.notification).firstOrNull { (a, _) -> a.freeForm }?.second ?: return false
+            val inputs = action.remoteInputs ?: return false
+            val input = inputs.first { it.allowFreeFormInput }
+            val intent = Intent()
+            RemoteInput.addResultsToIntent(inputs, intent, Bundle().apply { putCharSequence(input.resultKey, text) })
+            RemoteInput.setResultsSource(intent, RemoteInput.SOURCE_FREE_FORM_INPUT)
+            return runCatching { action.actionIntent.send(service, 0, intent) }.isSuccess
         }
 
         /**

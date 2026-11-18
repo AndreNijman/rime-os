@@ -112,13 +112,24 @@ class LinkHub private constructor(private val app: Context) {
     // for it and what it shows, and the one sender that writes them in order.
     // A launch per notification on the IO pool could let a removal overtake
     // its own post, which would leave it on the computer for good.
-    private class MirrorLane(val outbox: MirrorOutbox, val wake: Channel<Unit>, var sender: Job? = null)
+    // `reply`: the machine's hello lists the reply feature, so it may be sent
+    // a reply label; one that does not gets the same post without it.
+    private class MirrorLane(
+        val outbox: MirrorOutbox,
+        val wake: Channel<Unit>,
+        var sender: Job? = null,
+        val reply: Boolean = false,
+    )
 
     private val mirrorLanes = ConcurrentHashMap<String, MirrorLane>()
 
     /** The apps the person chose, read from the store on a connection and set by the screen. */
     @Volatile
     private var mirrorApps: Set<String> = emptySet()
+
+    /** Whether the person turned on replying from a computer; read and set as [mirrorApps] is. */
+    @Volatile
+    private var mirrorReply: Boolean = false
     private val ringer by lazy { Ringer(app) }
     private val receiver by lazy { Receiver(app) }
 
@@ -399,12 +410,22 @@ class LinkHub private constructor(private val app: Context) {
     private fun phoneSide(machine: PairedMachine, link: MachineLink, remote: RemoteHello) {
         val id = machine.deviceId
         val phone = PhoneLink(link)
+        // Before the report, which says whether replies are taken.
+        runCatching {
+            val settings = repository.loadBlocking().settings
+            mirrorApps = settings.mirrorApps
+            mirrorReply = settings.mirrorReply
+        }
         if (remote.has(Phone.REPORT)) {
             val throttle = batteryThrottles.computeIfAbsent(id) { BatteryThrottle() }
             throttle.reset()
             report(phone, throttle, Ringer.battery(app))
         }
-        if (remote.has(Mirror.FEATURE)) startMirror(machine, phone) else mirrorLanes.remove(id)?.sender?.cancel()
+        if (remote.has(Mirror.FEATURE)) {
+            startMirror(machine, phone, remote.has(Mirror.REPLY_FEATURE))
+        } else {
+            mirrorLanes.remove(id)?.sender?.cancel()
+        }
         eventChannels.remove(id)?.let { runCatching { it.close() } }
         if (remote.has(Phone.EVENTS) && remote.has(Features.MUX_ATTACH)) {
             runCatching {
@@ -424,7 +445,9 @@ class LinkHub private constructor(private val app: Context) {
         val can = buildList {
             if (ringer.canRing) add(Phone.CAN_RING)
             if (receiver.canReceive) add(Phone.CAN_RECEIVE)
-            if (MirrorService.granted(app)) add(Phone.CAN_DISMISS)
+            val granted = MirrorService.granted(app)
+            if (granted) add(Phone.CAN_DISMISS)
+            if (granted && mirrorReply) add(Phone.CAN_REPLY)
         }
         runCatching { phone.report(level, charging, can) }
             .onSuccess { throttle.sent(level, charging, now) }
@@ -457,22 +480,44 @@ class LinkHub private constructor(private val app: Context) {
         mirrorApps = apps
     }
 
+    fun mirrorReply(): Boolean = mirrorReply
+
+    /**
+     * The person turned replying from a computer on or off; the store was
+     * already written. Each connected machine is told at once, through a
+     * fresh report: its `can` is what lets it send a reply at all.
+     */
+    fun setMirrorReply(on: Boolean) {
+        mirrorReply = on
+        if (!_unlocked.value) return
+        for ((id, throttle) in batteryThrottles) {
+            val link = links[id] ?: continue
+            if (!link.connected) continue
+            if (state(id)?.remote?.has(Phone.REPORT) != true) continue
+            throttle.reset()
+            scope.launch { report(PhoneLink(link), throttle, Ringer.battery(app)) }
+        }
+    }
+
     /**
      * A notification from a chosen app was posted or updated: every machine
      * connected now gets its newest state, at its own pace. Called on the
      * listener's thread, in the order Android reports, which is the order
      * each outbox keeps.
      */
-    fun onPhoneNotification(key: String, content: Content) = toLanes { it.offer(key, content) }
+    fun onPhoneNotification(key: String, content: Content) {
+        val now = System.currentTimeMillis()
+        toLanes { lane -> lane.outbox.offer(key, if (lane.reply) content else content.copy(reply = null), now) }
+    }
 
     /** A notification went away on this phone; a machine that was sent it closes it too. */
-    fun onPhoneNotificationRemoved(key: String) = toLanes { it.remove(key) }
+    fun onPhoneNotificationRemoved(key: String) = toLanes { it.outbox.remove(key) }
 
-    private fun toLanes(block: (MirrorOutbox) -> Unit) {
+    private fun toLanes(block: (MirrorLane) -> Unit) {
         if (!_unlocked.value) return
         for (lane in mirrorLanes.values) {
             if (lane.sender?.isActive != true) continue
-            synchronized(lane.outbox) { block(lane.outbox) }
+            synchronized(lane.outbox) { block(lane) }
             lane.wake.trySend(Unit)
         }
     }
@@ -482,11 +527,10 @@ class LinkHub private constructor(private val app: Context) {
      * connection (so a removal after a reconnect still closes what was
      * shown); what waited when the old one dropped was already discarded.
      */
-    private fun startMirror(machine: PairedMachine, phone: PhoneLink) {
-        runCatching { mirrorApps = repository.loadBlocking().settings.mirrorApps }
+    private fun startMirror(machine: PairedMachine, phone: PhoneLink, reply: Boolean) {
         val lane = mirrorLanes.compute(machine.deviceId) { _, old ->
             old?.sender?.cancel()
-            MirrorLane(old?.outbox ?: MirrorOutbox(System.currentTimeMillis()), Channel(Channel.CONFLATED))
+            MirrorLane(old?.outbox ?: MirrorOutbox(System.currentTimeMillis()), Channel(Channel.CONFLATED), reply = reply)
         }!!
         lane.sender = scope.launch {
             val outbox = lane.outbox
@@ -526,6 +570,21 @@ class LinkHub private constructor(private val app: Context) {
                 val lane = mirrorLanes[machine.deviceId] ?: return
                 if (!_unlocked.value) return
                 if (synchronized(lane.outbox) { lane.outbox.dismissedThere(event.key) }) MirrorService.dismiss(event.key)
+            }
+            is DeviceEvent.Replied -> {
+                // As for a dismissal, and only while the person has replying
+                // on: a report the machine had before they turned it off
+                // does not let it speak for them. The outbox is told first,
+                // so the app's own update after the reply finds it ready.
+                val lane = mirrorLanes[machine.deviceId] ?: return
+                if (!_unlocked.value || !mirrorReply) return
+                val now = System.currentTimeMillis()
+                if (synchronized(lane.outbox) { lane.outbox.repliedThere(event.key, now) }) {
+                    if (!MirrorService.reply(event.key, event.text)) {
+                        synchronized(lane.outbox) { lane.outbox.replyFailed(event.key) }
+                        Log.i(TAG, "${machine.machine}: a reply found nothing to answer")
+                    }
+                }
             }
         }
     }

@@ -37,3 +37,6 @@ rootProject.name = "rime-remote-android"
 // tested at all under this project's headless rule.
 include(":core")
 include(":app")
+
+// The device suite's stand-in messaging app (debug only; see its build file).
+include(":testhelper")

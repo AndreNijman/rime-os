@@ -487,6 +487,16 @@ def notify_closed(nid, reason):
         f.write(json.dumps({"id": nid, "reason": reason}) + "\n")
     return json.dumps({"reply": "ok"})
 
+def notify_reply(nid, text):
+    """The stub notification server's NotificationReplied: the person typed
+    [text] into notification [nid]'s reply field. A real server closes the
+    notification after it, which the test sends itself with notify_closed."""
+    if not isinstance(nid, int) or not isinstance(text, str):
+        return json.dumps({"reply": "error", "message": "id must be a number and reply a string"})
+    with open(os.path.join(ROOT, "notify", "closed.jsonl"), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"id": nid, "reply": text}) + "\n")
+    return json.dumps({"reply": "ok"})
+
 class H(socketserver.StreamRequestHandler):
     timeout = 120
     def handle(self):
@@ -527,6 +537,8 @@ class H(socketserver.StreamRequestHandler):
                 out = notify_log()
             elif cmd == "notify_closed":
                 out = notify_closed(req.get("id"), req.get("reason"))
+            elif cmd == "notify_reply":
+                out = notify_reply(req.get("id"), req.get("text"))
             elif cmd == "decide_locally":
                 out = agentd({"cmd": "decide", "id": req["id"], "decision": req["decision"]})
             else:
@@ -628,9 +640,16 @@ fi
 # Build and install. Both APKs, every run: an instrumentation APK from a
 # previous build is the same stale-binary defect the Rust suite refuses.
 export ANDROID_HOME=${ANDROID_HOME:-/var/tmp/android-sdk}
-( cd "$android" && ./gradlew --console=plain :app:assembleDebug :app:assembleDebugAndroidTest )
+( cd "$android" && ./gradlew --console=plain :app:assembleDebug :app:assembleDebugAndroidTest :testhelper:assembleDebug )
 "${A[@]}" install -r "$android/app/build/outputs/apk/debug/app-debug.apk" >/dev/null
 "${A[@]}" install -r "$android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" >/dev/null
+# The stand-in messaging app the reply test answers (android/testhelper). It
+# posts notifications, which Android 13 and later ask the person for; here
+# the suite grants it. Older Android has no such permission to grant.
+"${A[@]}" install -r "$android/testhelper/build/outputs/apk/debug/testhelper-debug.apk" >/dev/null
+if [ "$("${A[@]}" shell getprop ro.build.version.sdk | tr -d '\r')" -ge 33 ]; then
+  "${A[@]}" shell pm grant com.rimeos.remote.testhelper android.permission.POST_NOTIFICATIONS
+fi
 
 brokeraddr=$(echo "$lan" | sed "s/:[0-9]*\$/:$brokerport/")
 # The name rime-remoted answers with is the kernel hostname (`machine_name`

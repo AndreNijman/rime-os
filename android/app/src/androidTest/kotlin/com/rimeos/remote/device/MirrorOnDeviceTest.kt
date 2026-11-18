@@ -10,6 +10,7 @@ import androidx.test.filters.LargeTest
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rimeos.remote.core.PairedMachine
 import com.rimeos.remote.core.phone.Mirror
+import com.rimeos.remote.core.phone.Phone
 import com.rimeos.remote.data.MachineRepository
 import com.rimeos.remote.link.LinkHub
 import com.rimeos.remote.phone.MirrorService
@@ -43,6 +44,8 @@ class MirrorOnDeviceTest {
     private val repository = MachineRepository(context)
     private val listener = MirrorService.component(context).flattenToString()
     private val tags = mutableListOf<String>()
+    /** Tags the helper app posted, which it takes away itself afterwards. */
+    private val helperTags = mutableListOf<String>()
     private lateinit var machine: PairedMachine
     private lateinit var deviceName: String
     /** How many calls the stub had seen before this test: only later ones are this test's. */
@@ -74,6 +77,8 @@ class MirrorOnDeviceTest {
         // Shell notifications cannot be cancelled from a shell; snoozed for a
         // day they leave the shade, and the hub is locked when they return.
         for (tag in tags) keyOf(tag)?.let { shell("cmd notification snooze --for 86400000 $it") }
+        for (tag in helperTags) shell("am start -n $HELPER/.PostActivity --es tag $tag --ez cancel true")
+        setReply(false)
         context.getSystemService(NotificationManager::class.java).apply {
             cancel(OWN_ID)
             deleteNotificationChannel(OWN_CHANNEL)
@@ -130,6 +135,48 @@ class MirrorOnDeviceTest {
     }
 
     @Test
+    fun a_reply_typed_on_the_computer_is_sent_by_the_app_and_its_answer_does_not_pop_up_again() {
+        setReply(true)
+        choose(setOf(HELPER, SHELL))
+        // The computer must hear it first: its report's `can` is what lets it send a reply.
+        awaitValue(15_000, "the computer to learn this phone takes replies") {
+            if (report()?.optJSONArray("can")?.let { a -> (0 until a.length()).any { a.optString(it) == Phone.CAN_REPLY } } == true) true else null
+        }
+        shell("logcat -c")
+        val tag = "rime-reply-${System.nanoTime() % 1_000_000}".also { helperTags += it }
+        shell("am start -n $HELPER/.PostActivity --es tag $tag --es title Ann --es text Hi-there")
+        val shown = awaitEntry("the notification with a reply field on the computer") {
+            it.optString("op") == "notify" && it.optString("summary") == "Ann"
+        }
+        assertEquals("the post carries no reply label: $shown", "Reply", shown.optString("reply"))
+        val id = shown.getInt("id")
+
+        // What the Shell does: the reply, then the close the server sends after it.
+        Desktop.notifyReply(id, "on-my-way")
+        Desktop.notifyClosed(id, 2)
+        awaitValue(15_000, "the helper app to get the reply") {
+            if ("replied tag=$tag text=on-my-way" in shell("logcat -d -s $HELPER_LOG")) true else null
+        }
+        awaitValue(15_000, "the helper app to show its answer") {
+            if ("reposted tag=$tag" in shell("logcat -d -s $HELPER_LOG")) true else null
+        }
+        // A sentinel from another app after the answer: the listener reports
+        // in order and the sender is serial, so had the answer been sent it
+        // would be on the computer before the sentinel.
+        Thread.sleep(1_000)
+        post(tag("reply-sentinel"), "Sentinel", "after-the-answer")
+        awaitEntry("the sentinel") { it.optString("summary") == "Sentinel" }
+        val mine = Desktop.notifyLog().drop(before).filter { it.optString("op") == "notify" }
+        assertTrue("the app's answer popped up on the computer: $mine", mine.none { it.optString("body").startsWith("You:") })
+        assertEquals("the reply was sent again as news: $mine", 1, mine.count { it.optString("summary") == "Ann" })
+        // A reply is not a dismissal: it stays on the phone.
+        assertTrue(
+            "the replied notification left the phone",
+            shell("cmd notification list").lineSequence().any { "|$HELPER|" in it && "|$tag|" in it },
+        )
+    }
+
+    @Test
     fun an_app_not_chosen_and_this_app_itself_reach_nothing() {
         // This app chosen too, which the screen never offers: the listener
         // must still leave its own notifications on the phone.
@@ -168,6 +215,15 @@ class MirrorOnDeviceTest {
         runBlocking { repository.settings(repository.loadBlocking().settings.copy(mirrorApps = apps)) }
         hub.setMirrorApps(apps)
     }
+
+    /** Replying from the computer, turned on or off as the screen does. */
+    private fun setReply(on: Boolean) {
+        runBlocking { repository.settings(repository.loadBlocking().settings.copy(mirrorReply = on)) }
+        hub.setMirrorReply(on)
+    }
+
+    private fun report(): JSONObject? =
+        Desktop.ask("""{"cmd":"devices"}""").optJSONObject("phones")?.optJSONObject(machine.deviceId)
 
     private fun tag(what: String): String = "rime-mirror-$what-${System.nanoTime() % 1_000_000}".also { tags += it }
 
@@ -213,6 +269,9 @@ class MirrorOnDeviceTest {
 
     private companion object {
         const val SHELL = "com.android.shell"
+        /** android/testhelper, installed by run-device-suite.sh: a notification with a Reply action. */
+        const val HELPER = "com.rimeos.remote.testhelper"
+        const val HELPER_LOG = "RimeReplyHelper"
         const val OWN_CHANNEL = "rime-mirror-test"
         const val OWN_ID = 4_711
     }
