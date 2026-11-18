@@ -38,6 +38,7 @@ mod net;
 mod nex;
 mod peer;
 mod phone;
+mod photos;
 mod proxy;
 mod push;
 mod relay;
@@ -235,6 +236,9 @@ fn run(args: &[String]) -> Result<(), String> {
     // Every harness gives this daemon a private XDG_RUNTIME_DIR, so a test
     // never writes where the real Shell is watching.
     state.set_focus_file(phone::focus_file_in(&rime_agent_core::paths::runtime_dir()));
+    // A phone's photo thumbnails, for the Shell's grid (contract §2.13). This
+    // removes whatever an earlier run of this process left there.
+    state.photos.set_dir(photos::dir_in(&rime_agent_core::paths::runtime_dir()));
 
     // A phone notification the person dismissed here is cancelled on the
     // phone, if the phone said it does that; otherwise it stays there.

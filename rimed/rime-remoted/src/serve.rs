@@ -544,6 +544,9 @@ fn frames(
     // So does a calls request, and what the connection said about a call:
     // a ringing notification closes rather than ring on for a phone gone.
     state.calls.ended(device_id, connection, crate::mirror::mirror());
+    // A photos listing or save asked on it fails, and the thumbnails its
+    // listing wrote are removed (contract §2.13).
+    state.photos.ended(device_id, connection);
     state.events.ended(device_id, connection);
 
     if let Some(quiet) = silenced.lock().ok().and_then(|s| *s) {
@@ -873,6 +876,21 @@ impl Worker {
                     (ch, reply, Vec::new(), true)
                 })
                 .map_err(crate::proxy::ProxyError::NotTakenOver)
+        } else if crate::photos::is_upload(request) {
+            // A photo somebody here asked to save, uploaded into the file
+            // they opened; the channel closes after `uploaded`. Writable:
+            // the phone's Data is the photo.
+            self.state
+                .photos
+                .open_upload(&self.device_id, self.scope == Scope::Full, request)
+                .map(|(stream, reply)| {
+                    let ch = DaemonChannel {
+                        stream,
+                        read_only: false,
+                    };
+                    (ch, reply, Vec::new(), true)
+                })
+                .map_err(crate::proxy::ProxyError::NotTakenOver)
         } else if crate::nex::is_channel(request) {
             crate::nex::open_channel(&self.state.nexd(), &self.device_id, request)
                 .map(|o| {
@@ -997,6 +1015,9 @@ fn answered_here(state: &State, device_id: &str, scope: Scope, connection: u64, 
         }
         // A phone's SMS threads, answering a request somebody here made.
         Some(c) if crate::messages::VERBS.contains(&c) => state.messages.control(device_id, connection, line),
+        // A phone's recent photos, answering a listing or a save somebody
+        // here asked for.
+        Some(c) if crate::photos::VERBS.contains(&c) => state.photos.control(device_id, connection, line),
         // A phone's calls: its state, shown here while it rings, and the
         // answers to what somebody here asked of it.
         Some(c) if crate::calls::VERBS.contains(&c) => {
@@ -1046,6 +1067,7 @@ fn remote_hello(state: &State, scope: Scope) -> Vec<u8> {
     features.extend(crate::media::FEATURES);
     features.extend(crate::messages::FEATURES);
     features.extend(crate::calls::FEATURES);
+    features.extend(crate::photos::FEATURES);
     features.extend(crate::companion::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
@@ -1409,7 +1431,7 @@ mod tests {
                                "device_events", "phone_report", "take_offer", "phone_focus",
                                "phone_notifications", "phone_notification_reply",
                                "phone_media", "phone_media_control", "phone_messages", "phone_calls",
-                               "companion_link"]),
+                               "phone_photos", "companion_link"]),
             "{v}"
         );
         assert_eq!(v["scope"], "full", "{v}");
@@ -1443,6 +1465,7 @@ mod tests {
             .chain(crate::media::VERBS.iter())
             .chain(crate::messages::VERBS.iter())
             .chain(crate::calls::VERBS.iter())
+            .chain(crate::photos::VERBS.iter())
             .chain(crate::companion::VERBS.iter())
         {
             let line = format!(r#"{{"cmd":"{cmd}"}}"#);
@@ -1482,6 +1505,7 @@ mod tests {
         assert_eq!(crate::media::VERBS, ["phone_media"]);
         assert_eq!(crate::messages::VERBS, ["messages_reply", "messages_changed", "messages_sent"]);
         assert_eq!(crate::calls::VERBS, ["call_state", "call_history_reply", "call_done"]);
+        assert_eq!(crate::photos::VERBS, ["photos_reply", "photos_fetch_reply"]);
         assert_eq!(crate::companion::VERBS, ["companion_register", "companion_forget"]);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1612,6 +1636,7 @@ mod tests {
             .chain(crate::media::VERBS.iter())
             .chain(crate::messages::VERBS.iter())
             .chain(crate::calls::VERBS.iter())
+            .chain(crate::photos::VERBS.iter())
             .chain(crate::companion::VERBS.iter())
             .copied()
             .collect()
@@ -1682,6 +1707,11 @@ mod tests {
             "volume",
             "companion_register",
             "companion_forget",
+            // Photos are listed and saved from an unlocked phone only: the
+            // computer asks nothing of a companion session and takes no
+            // answer from one (photos.rs, contract §2.13).
+            "photos_reply",
+            "photos_fetch_reply",
         ];
         let all = every_reserved_verb();
         for v in &all {
@@ -1735,7 +1765,7 @@ mod tests {
         // the routers' OWN predicates, not a list kept beside them.
         let mut names: Vec<&str> = every_reserved_verb();
         names.extend(crate::companion::ALLOWED_CHANNELS);
-        names.extend([crate::phone::CHANNEL, crate::phone::TAKE]);
+        names.extend([crate::phone::CHANNEL, crate::phone::TAKE, crate::photos::UPLOAD]);
         names.extend(["attach", "receive", "save_file", "device_events_and_more", "take_offer2", "DEVICE_EVENTS"]);
         let mut requests: Vec<Vec<u8>> =
             names.iter().map(|n| format!(r#"{{"cmd":"{n}","id":1,"cols":80,"rows":24}}"#).into_bytes()).collect();
@@ -1745,7 +1775,11 @@ mod tests {
             let shown = String::from_utf8_lossy(r);
             let phone = crate::phone::is_channel(r) || crate::phone::is_take(r);
             let nex = crate::nex::is_channel(r);
-            assert!(!(phone && nex), "two routers claim {shown}");
+            let upload = crate::photos::is_upload(r);
+            assert!([phone, nex, upload].iter().filter(|c| **c).count() <= 1, "two routers claim {shown}");
+            if upload {
+                assert!(!may_open(Scope::Companion, r), "a photo upload opens on a companion link: {shown}");
+            }
             assert_eq!(may_open(Scope::Companion, r), phone, "{shown}");
             assert_eq!(crate::companion::channel_allowed(Scope::Companion, r), phone, "{shown}");
             if nex {

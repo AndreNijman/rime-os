@@ -73,6 +73,12 @@ pub const CLIPBOARD_VERBS: [&str; 0] = [];
 /// computer never writes a `dial` action to a companion session's channel,
 /// and the phone refuses one on that lane, so `call_done` for a dial never
 /// comes from a companion session.
+///
+/// Not `photos_reply` / `photos_fetch_reply`, nor the `photos_upload`
+/// channel (contract §2.13): a photo is the person's own picture, so photos
+/// are listed and saved from an unlocked phone only. The computer writes no
+/// photos request to a companion session's channel and takes no answer or
+/// upload from one.
 pub const ALLOWED_VERBS: [&str; 13] = [
     "remote_hello",
     "phone_report",

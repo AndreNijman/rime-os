@@ -30,6 +30,11 @@
 //! could read them could sign in as the owner. Rime Shell classifies as
 //! `rime-shell` and still may.
 //!
+//! `photos` and `photos_save` (contract §2.13) are gated the same way: a
+//! person's photos are theirs, and a saved photo lands in their own folder.
+//! An agent that could list them could read the screenshots of every code,
+//! receipt and message the person ever captured.
+//!
 //! `focus` (contract §2.9) is not gated that way either, for the same reason
 //! `ring` is not: it changes how a phone of the owner's interrupts them, which
 //! the owner can change back on the phone, and the Shell sends it every time
@@ -121,6 +126,24 @@ pub enum Request {
         action: String,
         #[serde(default)]
         number: Option<String>,
+    },
+    /// A phone's recent photos, newest first (contract §2.13), with each
+    /// thumbnail written under the runtime directory. `device` may be left
+    /// out when exactly one phone has Photos on.
+    Photos {
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        before: Option<u64>,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Save one photo, whole, into the file whose open descriptor rides the
+    /// request line: `rime remote photos save` made it, and names it.
+    PhotosSave {
+        #[serde(default)]
+        device: Option<String>,
+        photo: u64,
     },
 }
 
@@ -215,6 +238,17 @@ pub enum Reply {
     },
     /// The phone did what `call` asked.
     CallDone { device: String, action: String },
+    /// What a phone answered to `photos`, newest first. `partial`: the person
+    /// let the app see only the photos they picked, so this is those.
+    Photos {
+        device: String,
+        photos: Vec<crate::photos::Listed>,
+        #[serde(default)]
+        partial: bool,
+    },
+    /// The photo is in the caller's file: `len` bytes, and `name` is the
+    /// phone's name for it, made a name and nothing else.
+    PhotoSaved { device: String, photo: u64, name: String, len: u64 },
     Ok,
     Error { message: String },
 }
@@ -338,6 +372,8 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         } => messages_send(state, device.as_deref(), to, thread, &text),
         Request::Calls { device, before, limit } => calls(state, device.as_deref(), before, limit),
         Request::Call { device, action, number } => call(state, device.as_deref(), &action, number.as_deref()),
+        Request::Photos { device, before, limit } => photos(state, device.as_deref(), before, limit),
+        Request::PhotosSave { device, photo } => photos_save(state, device.as_deref(), photo, fds),
     }
 }
 
@@ -412,6 +448,7 @@ fn authorized_by(
         Request::Send { .. } => sending_caller(peer),
         Request::Messages { .. } | Request::MessagesSend { .. } => messages_caller(peer, observe),
         Request::Calls { .. } | Request::Call { .. } => calls_caller(peer, observe),
+        Request::Photos { .. } | Request::PhotosSave { .. } => photos_caller(peer, observe),
         _ => own_user(peer),
     }
 }
@@ -443,6 +480,35 @@ pub fn may_use_calls(origin: RequestOrigin) -> Result<(), String> {
     Err(format!(
         "a {origin} request cannot see, answer or place a phone's calls: only a person at this \
          machine may. Run `rime remote calls` from a terminal, or use Rime Shell"
+    ))
+}
+
+/// Refuse `photos` or `photos_save` from anything but a human at this
+/// machine: the same two origins as pairing and sending.
+fn photos_caller(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell whether a human is at this machine — and a phone's photos are reserved \
+             for one"
+                .to_string(),
+        );
+    };
+    own_user(Some(peer))?;
+    may_use_photos(observe(peer.pid)?)
+}
+
+/// The photos rule over a value, for the same reason [`may_pair`] is one.
+pub fn may_use_photos(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot see or save a phone's photos: only a person at this machine \
+         may. Run `rime remote photos` from a terminal, or use Rime Shell"
     ))
 }
 
@@ -952,6 +1018,110 @@ fn call(state: &State, device: Option<&str>, action: &str, number: Option<&str>)
     }
 }
 
+/// The phone a photos request goes to: the one named, or the only phone that
+/// has Photos on. Its id and name.
+fn photos_phone(state: &State, device: Option<&str>) -> Result<(String, String), String> {
+    let store = state.devices().map_err(|e| e.to_string())?;
+    let phones = state.phones();
+    let has = |id: &str| phones.get(id).is_some_and(crate::phone::PhoneReport::can_photos);
+    let (id, name) = match device {
+        Some(d) => match store.find(d) {
+            Ok(d) if d.is_active() => (d.id.clone(), d.name.clone()),
+            Ok(d) => return Err(format!("{} was revoked", d.name)),
+            Err(e) => return Err(e.to_string()),
+        },
+        None => {
+            let with: Vec<_> = store.list().into_iter().filter(|d| d.is_active() && has(&d.id)).collect();
+            match with.as_slice() {
+                [d] => (d.id.clone(), d.name.clone()),
+                [] => {
+                    return Err("no paired phone has turned on Photos on your computer. On the phone: \
+                                Rime Remote → Photos"
+                        .into())
+                }
+                many => {
+                    let names: Vec<&str> = many.iter().map(|d| d.name.as_str()).collect();
+                    return Err(format!(
+                        "more than one phone has Photos on ({}); name one with --device",
+                        names.join(", ")
+                    ));
+                }
+            }
+        }
+    };
+    // Asked before anything is written: a phone that has not turned Photos
+    // on gets no request at all.
+    if !has(&id) {
+        return Err(format!(
+            "{name} has not turned on Photos on your computer. On the phone: Rime Remote → Photos"
+        ));
+    }
+    Ok((id, name))
+}
+
+fn photos(state: &State, device: Option<&str>, before: Option<u64>, limit: Option<u32>) -> Reply {
+    let limit = limit.map_or(crate::photos::DEFAULT_LIMIT, |l| l as usize);
+    if limit == 0 || limit > crate::photos::MAX_LIMIT {
+        return Reply::error(format!("limit must be from 1 to {}", crate::photos::MAX_LIMIT));
+    }
+    let (id, name) = match photos_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    match state.photos.list(&state.events, &id, before, limit, crate::photos::LIST_WAIT) {
+        Ok(listing) => Reply::Photos {
+            device: name,
+            photos: listing.photos,
+            partial: listing.partial,
+        },
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
+/// The one descriptor a save carries, when it is a regular file open for
+/// writing: anything else is refused before the phone is asked.
+fn save_target(mut fds: Vec<OwnedFd>) -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    if fds.len() != 1 {
+        return Err(format!(
+            "a photo is saved into one open file passed with the request (`rime remote photos save`); \
+             this request carried {} descriptors",
+            fds.len()
+        ));
+    }
+    let file = std::fs::File::from(fds.remove(0));
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.file_type().is_file() {
+        return Err("a photo is saved into a regular file".into());
+    }
+    // SAFETY: F_GETFL on a descriptor this process owns.
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || flags & libc::O_ACCMODE == libc::O_RDONLY || flags & libc::O_APPEND != 0 {
+        return Err("the file a photo is saved into must be open for writing".into());
+    }
+    Ok(file)
+}
+
+fn photos_save(state: &State, device: Option<&str>, photo: u64, fds: Vec<OwnedFd>) -> Reply {
+    let file = match save_target(fds) {
+        Ok(f) => f,
+        Err(why) => return Reply::error(why),
+    };
+    let (id, name) = match photos_phone(state, device) {
+        Ok(p) => p,
+        Err(why) => return Reply::error(why),
+    };
+    match state.photos.fetch(&state.events, &id, photo, file, crate::photos::START_WAIT) {
+        Ok(saved) => Reply::PhotoSaved {
+            device: name,
+            photo,
+            name: saved.name,
+            len: saved.len,
+        },
+        Err(why) => Reply::error(why.sentence(&name)),
+    }
+}
+
 /// The origins this socket accepts a pairing request from.
 ///
 /// Written out and matched against, rather than left implicit in
@@ -1126,6 +1296,8 @@ mod tests {
             },
             Request::Calls { device: None, before: None, limit: None },
             Request::Call { device: None, action: "dial".into(), number: Some("5556".into()) },
+            Request::Photos { device: None, before: None, limit: None },
+            Request::PhotosSave { device: None, photo: 1 },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1172,9 +1344,62 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_calls(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
+                Request::Photos { .. } | Request::PhotosSave { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_photos(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_scheduled_job_may_neither_list_nor_save_a_phones_photos() {
+        // Injected, like the messages test below: this fails on any machine
+        // if the gate is removed.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let list = Request::Photos { device: None, before: None, limit: None };
+        let save = Request::PhotosSave { device: None, photo: 7 };
+        for o in RequestOrigin::ALL {
+            for req in [&list, &save] {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote photos"), "{why}");
+                }
+            }
+        }
+        for req in [&list, &save] {
+            assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());
+            assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_save_takes_one_regular_file_open_for_writing_and_nothing_else() {
+        use std::os::fd::OwnedFd;
+        let dir = std::env::temp_dir().join(format!("rime-photos-target-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f");
+        std::fs::write(&path, b"").unwrap();
+        let rw = || OwnedFd::from(std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap());
+        assert!(save_target(vec![rw()]).is_ok());
+        assert!(save_target(vec![]).is_err());
+        assert!(save_target(vec![rw(), rw()]).is_err());
+        let ro = OwnedFd::from(std::fs::File::open(&path).unwrap());
+        assert!(save_target(vec![ro]).unwrap_err().contains("open for writing"));
+        let app = OwnedFd::from(std::fs::OpenOptions::new().append(true).open(&path).unwrap());
+        assert!(save_target(vec![app]).is_err());
+        let folder = OwnedFd::from(std::fs::File::open(&dir).unwrap());
+        assert!(save_target(vec![folder]).unwrap_err().contains("regular file"));
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(save_target(vec![OwnedFd::from(a)]).is_err());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1303,6 +1528,20 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Reply::CallDone { device: "Pixel".into(), action: "answer".into() }).unwrap(),
             r#"{"reply":"call_done","device":"Pixel","action":"answer"}"#
+        );
+        // The wire shapes `rime remote photos` and a Shell grid depend on.
+        assert_eq!(
+            serde_json::to_string(&Request::Photos { device: None, before: Some(9), limit: Some(30) }).unwrap(),
+            r#"{"cmd":"photos","device":null,"before":9,"limit":30}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::PhotosSave { device: Some("p".into()), photo: 4 }).unwrap(),
+            r#"{"cmd":"photos_save","device":"p","photo":4}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::PhotoSaved { device: "Pixel".into(), photo: 4, name: "a.jpg".into(), len: 3 })
+                .unwrap(),
+            r#"{"reply":"photo_saved","device":"Pixel","photo":4,"name":"a.jpg","len":3}"#
         );
         // The wire shapes `rime remote messages` and a Shell page depend on.
         assert_eq!(

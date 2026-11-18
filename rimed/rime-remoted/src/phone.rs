@@ -106,7 +106,12 @@ pub const CAN_CALLS_DIAL: &str = "calls_dial";
 /// The call history may be read from here.
 pub const CAN_CALLS_HISTORY: &str = "calls_history";
 
-const KEPT: [&str; 10] = [
+/// Its recent photos may be listed and saved from here (contract §2.13): the
+/// person turned "Photos on your computer" on and allowed photo access, in full
+/// or for the photos they picked.
+pub const CAN_PHOTOS: &str = "photos";
+
+const KEPT: [&str; 11] = [
     CAN_RING,
     CAN_RECEIVE,
     CAN_DISMISS,
@@ -117,6 +122,7 @@ const KEPT: [&str; 10] = [
     CAN_CALLS_ANSWER,
     CAN_CALLS_DIAL,
     CAN_CALLS_HISTORY,
+    CAN_PHOTOS,
 ];
 
 /// The network kinds a phone may report. Anything else is refused rather than
@@ -196,6 +202,10 @@ impl PhoneReport {
 
     pub fn can_calls(&self) -> bool {
         self.can.iter().any(|c| c == CAN_CALLS)
+    }
+
+    pub fn can_photos(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_PHOTOS)
     }
 
     /// A report from a `phone_report` line, or why it was refused.
