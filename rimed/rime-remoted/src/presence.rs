@@ -13,9 +13,11 @@
 //! not list a verb (an older daemon) is not sent it.
 //!
 //! Tombstones are attributed to the computer whose key completed the
-//! handshake, never to a key a message names: a list naming this computer's
-//! own key means that computer removed this one, so it is removed here, and
-//! that is the only computer a list can make this one remove.
+//! handshake, never to a key a message names: an entry naming this
+//! computer's own key means that computer removed this one, so that computer
+//! is removed here. Entries naming other computers remove them too (a
+//! removal reaches every member); entries naming phones are skipped
+//! (`DeviceStore::apply_tombstones`).
 //!
 //! ## Telling a removed computer
 //!
@@ -65,6 +67,9 @@ pub const SAVER_RECHECK: Duration = Duration::from_secs(15 * 60);
 /// How long after the daemon starts before the first refresh: the network
 /// may still be coming up.
 pub const START_DELAY: Duration = Duration::from_secs(20);
+/// How long after a computer is paired before it is first dialled: the other
+/// side stores the pairing a moment after this one.
+pub const SETTLE: Duration = Duration::from_secs(5);
 /// How long a removed computer that was never reached keeps being told.
 pub const TELL_FOR_MS: u64 = 30 * 24 * 3600 * 1000;
 
@@ -398,7 +403,7 @@ pub fn supervise(state: Arc<State>) {
         let now = rime_remote_core::now_ms();
         let (active, untold) = targets(&state, now);
         entries.retain(|id, _| active.contains(id) || untold.contains(id));
-        let first_due = if now < started + START_DELAY.as_millis() as u64 { started + START_DELAY.as_millis() as u64 } else { now };
+        let first_due = (started + START_DELAY.as_millis() as u64).max(now + SETTLE.as_millis() as u64);
         for id in &active {
             entries.entry(id.clone()).or_insert(Entry { due_ms: first_due, failures: 0 });
         }

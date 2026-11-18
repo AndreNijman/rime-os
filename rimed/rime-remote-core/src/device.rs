@@ -658,7 +658,8 @@ impl DeviceStore {
     /// The removals this computer passes on: every computer removed and not
     /// forgotten, with the time it was first removed.
     pub fn computer_tombstones(&self) -> Vec<crate::peer::Tombstone> {
-        self.computers
+        let mut list: Vec<crate::peer::Tombstone> = self
+            .computers
             .values()
             .filter(|c| c.is_tombstone())
             .map(|c| crate::peer::Tombstone {
@@ -666,7 +667,12 @@ impl DeviceStore {
                 removed_ms: c.revoked_ms.unwrap_or(0),
                 name: c.name.clone(),
             })
-            .collect()
+            .collect();
+        // The newest, at most what a receiver takes: one more and every
+        // exchange would be refused whole.
+        list.sort_by(|x, y| y.removed_ms.cmp(&x.removed_ms).then_with(|| x.key.cmp(&y.key)));
+        list.truncate(crate::peer::MAX_TOMBSTONES);
+        list
     }
 
     /// Record the tombstones another computer passed on. `sender` is the id
@@ -678,7 +684,7 @@ impl DeviceStore {
     /// For each:
     /// * This machine's own key is never recorded. It means the sender
     ///   refuses this computer now, so the sender is removed here, subject
-    ///   to the same forget rule as any other removal.
+    ///   to the same forget rule as any other removal, and counts as told.
     /// * A key that is a phone's (its key, companion key or one it gave up),
     ///   or whose id is a phone's, is skipped: a peer cannot remove a phone,
     ///   and a computer record on a phone's key would lock that phone out.
@@ -687,7 +693,8 @@ impl DeviceStore {
     /// * A removal at or before this computer's forget of it is skipped;
     ///   a newer one removes it again, keeping the original time.
     /// * An unknown key is recorded as a removed computer, so it cannot pair
-    ///   here until forgotten.
+    ///   here until forgotten, unless [`crate::peer::MAX_TOMBSTONES`] are
+    ///   already held.
     pub fn apply_tombstones(
         &mut self,
         sender: &str,
@@ -700,6 +707,8 @@ impl DeviceStore {
             let Some(raw) = canonical(&t.key) else { continue };
             if raw == *own_key {
                 self.remove_on_tombstone(sender, t.removed_ms, &mut out);
+                // The sender removed this computer first: it needs no telling.
+                self.computer_told(sender, now_ms);
                 continue;
             }
             let text = crate::b64_encode(&raw);
@@ -715,6 +724,10 @@ impl DeviceStore {
             match self.computers.get(&id) {
                 Some(c) if canonical(&c.public_key) != Some(raw) => continue,
                 Some(_) => self.remove_on_tombstone(&id, t.removed_ms, &mut out),
+                // A paired computer cannot grow this store without bound:
+                // past the cap, a key it never shared with this one is
+                // not recorded (the computers this one knows still are).
+                None if self.computers.values().filter(|c| c.is_tombstone()).count() >= crate::peer::MAX_TOMBSTONES => {}
                 None => {
                     out.changed = true;
                     self.computers.insert(
@@ -1417,11 +1430,41 @@ mod tests {
         assert!(applied.changed);
         assert!(s.authenticate(&key(7)).is_none());
         assert_eq!(s.find_computer(&a.id).expect("a").revoked_ms, Some(50), "the time travels unchanged");
+        assert_eq!(s.find_computer(&a.id).expect("a").told_ms, Some(60), "the sender removed this one first: no telling");
         assert!(s.computers.values().all(|d| d.public_key != key(99)), "this machine's own key was recorded");
         assert_eq!(s.authenticate(&key(8)).map(|(_, sc)| sc), Some(Scope::Peer), "another computer was removed");
         // Again: nothing more happens.
         assert_eq!(s.apply_tombstones(&a.id, &own, &[tomb(99, 70)], 80), Applied::default());
         let _ = c;
+    }
+
+    #[test]
+    fn learned_tombstones_stop_at_the_cap_and_a_list_sent_never_passes_it() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
+        let stranger = |i: usize| crate::peer::Tombstone {
+            key: crate::b64_encode(&{
+                let mut k = [0x40u8; 32];
+                k[0] = (i >> 8) as u8;
+                k[1] = i as u8;
+                k
+            }),
+            removed_ms: 10 + i as u64,
+            name: "x".into(),
+        };
+        let first: Vec<_> = (0..crate::peer::MAX_TOMBSTONES).map(stranger).collect();
+        assert!(s.apply_tombstones(&a.id, &own, &first, 1_000).changed);
+        let more: Vec<_> = (crate::peer::MAX_TOMBSTONES..crate::peer::MAX_TOMBSTONES + 5).map(stranger).collect();
+        assert!(!s.apply_tombstones(&a.id, &own, &more, 1_000).changed, "the store grew past the cap");
+        assert_eq!(s.computers.len(), crate::peer::MAX_TOMBSTONES + 1);
+        // A computer this one knows is still removed past the cap, and what
+        // is sent stays within it, newest first.
+        assert_eq!(s.apply_tombstones(&a.id, &own, &[tomb(7, 5_000)], 6_000).removed, std::slice::from_ref(&a.id));
+        let sent = s.computer_tombstones();
+        assert_eq!(sent.len(), crate::peer::MAX_TOMBSTONES);
+        assert_eq!(sent[0].key, key(7));
+        assert!(crate::peer::checked_tombstones(&serde_json::to_value(&sent).expect("json"), 6_000).is_ok());
     }
 
     #[test]

@@ -24,8 +24,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The most tombstones one message may carry. A peer's list is written to
-/// disk, so it is bounded; a household has nowhere near this many computers.
+/// The most tombstones one message may carry, and the most a computer
+/// records from others (`DeviceStore::apply_tombstones`): a peer's list is
+/// written to disk. A household has nowhere near this many computers.
 pub const MAX_TOMBSTONES: usize = 128;
 
 /// How far ahead of this computer's clock a removal time may be.

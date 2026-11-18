@@ -3692,6 +3692,7 @@ fn removing_a_computer_tells_it_and_it_removes_this_one_and_forget_on_both_pairs
     assert_eq!(removed["reply"], "computer_removed", "{removed}");
     let a_there = until_computer(&b, &a_on_b, Duration::from_secs(15), |c| c["revoked_ms"].is_u64());
     assert!(a_there["revoked_ms"].is_u64(), "B did not remove A after A removed it: {a_there}");
+    assert!(a_there["told_ms"].is_u64(), "B would keep dialling A to tell it what A told B: {a_there}");
     let b_here = until_computer(&a, &b_on_a, Duration::from_secs(5), |c| c["told_ms"].is_u64());
     assert!(b_here["told_ms"].is_u64(), "A does not know B was told: {b_here}");
     // The removal time travelled unchanged.
