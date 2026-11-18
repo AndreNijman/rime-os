@@ -627,4 +627,96 @@ mod tests {
         reported(&state, &phone, Scope::Full);
         assert!(lock(&state.intro.queue).contains(&phone));
     }
+
+    #[test]
+    fn a_join_sent_on_a_companion_session_is_not_kept_for_a_later_full_one() {
+        // A companion key is not behind the lock screen. Whatever holds it
+        // must not be able to switch "Join my other computers" on for the
+        // phone's next full session.
+        let (state, _dir) = a_state("intro-companion-join");
+        let phone = paired_phone(&state, 1);
+        let line = json!({"cmd": "phone_report", "can": ["ring", "join"]}).to_string();
+        crate::phone::control(&state, &phone, Scope::Companion, line.as_bytes());
+        let kept = state.phones().get(&phone).cloned().expect("kept");
+        assert!(!kept.can_join(), "{kept:?}");
+        assert!(may_introduce(&state, &phone, Scope::Full).is_err());
+        crate::phone::control(&state, &phone, Scope::Full, line.as_bytes());
+        assert!(may_introduce(&state, &phone, Scope::Full).is_ok());
+    }
+
+    #[test]
+    fn a_removed_peer_gets_no_offer() {
+        let (state, _dir) = a_state("intro-removed-peer");
+        let c = a_peer(&state, 7);
+        assert!(matches!(crate::computers::remove(&state, &c.id), crate::control::Reply::ComputerRemoved { .. }));
+        assert_eq!(offer_reply(&state, &c.id)["kind"], REFUSAL);
+    }
+
+    #[test]
+    fn only_trusted_phones_are_brought_and_only_to_trusted_computers() {
+        let (state, _dir) = a_state("intro-bring");
+        let trusted = a_peer(&state, 7);
+        let mut store = state.devices().expect("store");
+        let by = Introducer { id: "p".into(), name: "pixel".into() };
+        let Introduced::Added(unallowed) = store
+            .introduce_computer(&[8; 32], &state.identity.public_bytes(), "lab", vec![], None, by.clone(), 1)
+            .expect("introduce")
+        else {
+            panic!("not added")
+        };
+        let brought = store.pair_introduced(&rime_remote_core::b64_encode(&[9; 32]), "other", by, 1, false).expect("pair");
+        state.save_devices(&store).expect("save");
+        drop(store);
+        let targets: Vec<String> = bring_targets(&state).into_iter().map(|c| c.id).collect();
+        assert_eq!(targets, vec![trusted.id.clone()], "an introduced computer not allowed is asked for nothing");
+        assert!(!targets.contains(&unallowed.id));
+
+        // A phone brought here, even holding a full channel, is not brought on.
+        report(&state, &brought.id, &["join"]);
+        let _held = state.events.open_for(&brought.id, 1, true).expect("open");
+        assert!(!may_bring(&state, &brought.id));
+        state.devices().expect("store").allow_phone(&brought.id, 2).expect("allow");
+        assert!(may_bring(&state, &brought.id));
+        // A companion channel is not enough.
+        let phone = paired_phone(&state, 1);
+        report(&state, &phone, &["join"]);
+        let _companion = state.events.open_for(&phone, 2, false).expect("open");
+        assert!(!may_bring(&state, &phone));
+    }
+
+    #[test]
+    fn device_removed_goes_to_full_channels_only() {
+        let (state, _dir) = a_state("intro-removed-event");
+        let full = paired_phone(&state, 1);
+        let companion = paired_phone(&state, 2);
+        let (full_end, _) = state.events.open_for(&full, 1, true).expect("open");
+        let (companion_end, _) = state.events.open_for(&companion, 2, false).expect("open");
+        for end in [&full_end, &companion_end] {
+            end.set_read_timeout(Some(std::time::Duration::from_millis(200))).expect("timeout");
+        }
+        tell_removed(&state, &rime_remote_core::b64_encode(&[7; 32]), "laptop");
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(&full_end), &mut line).expect("full phone told");
+        let v: Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(v["event"], REMOVED_EVENT, "{v}");
+        assert_eq!(v["name"], "laptop", "{v}");
+        let mut other = String::new();
+        let got = std::io::BufRead::read_line(&mut std::io::BufReader::new(&companion_end), &mut other);
+        assert!(got.is_err() || other.is_empty(), "a companion channel was told: {other}");
+    }
+
+    #[test]
+    fn remove_on_a_joined_notification_takes_away_and_nothing_else_does() {
+        let (state, _dir) = a_state("intro-action");
+        let c = a_peer(&state, 7);
+        // Another notification's action, or another action: not ours.
+        assert!(!on_action(&state, &c.id, "ring", REMOVE_ACTION));
+        assert!(!on_action(&state, &c.id, JOINED_KEY, "allow"));
+        assert!(state.devices().expect("store").find_computer(&c.id).expect("c").is_active());
+        assert!(on_action(&state, &c.id, JOINED_KEY, REMOVE_ACTION));
+        assert!(!state.devices().expect("store").find_computer(&c.id).expect("c").is_active());
+        let phone = paired_phone(&state, 1);
+        assert!(on_action(&state, &phone, JOINED_KEY, REMOVE_ACTION));
+        assert!(!state.devices().expect("store").find(&phone).expect("p").is_active());
+    }
 }
