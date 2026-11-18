@@ -82,6 +82,7 @@
   xkeyboard_config,
   at-spi2-core,
   pciutils,
+  playerctl,
   rime-ridge-files,
 }:
 
@@ -150,6 +151,7 @@ let
     rime-keyring-login = [ ];
     rime-labwc-keybinds = [ ];
     rime-luks-enroll = [ python3 tpm2-tools cryptsetup systemd ];
+    rime-media-key = [ playerctl ];
     rime-mux = [ ];
     rime-open-browser = [ glib ];
     rime-plugin = [ jq nodejs-slim ];

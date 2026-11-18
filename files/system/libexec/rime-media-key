@@ -1,0 +1,35 @@
+#!/bin/sh
+# rime-media-key — the media keys (play/pause, next, previous) on every session.
+#
+#     rime-media-key play-pause | next | previous
+#
+# The computer's own players come first. A phone's player (Rime Remote's
+# org.mpris.MediaPlayer2.rime_phone.*, docs/remote-live-contract.md §2.8) gets
+# the key only when the computer has no player at all, the way a Mac's keys go
+# to an iPhone's Now Playing only when nothing on the Mac plays.
+#
+# Why "has no player" and not `playerctl --ignore-player=rime_phone X || playerctl X`:
+# measured with playerctl 2.4.1, a computer player whose CanControl is false
+# (a browser tab that takes no keys) makes the first half fail with "No player
+# could handle this command", and the `||` then sent the key to the PHONE while
+# the computer was playing. So the phone is asked only when the list without
+# phones is empty.
+#
+# A script rather than a shell line in each bind: niri and labwc run a bind's
+# command without a shell, so `||` would reach playerctl as an argument.
+#
+# A locked screen keeps the keys (as it always has for playerctl), so a key
+# pressed at the lock screen can reach an UNLOCKED phone that allows control;
+# the phone decides (it applies a control only while unlocked, with its
+# "Control from your computer" switch on).
+case "${1-}" in
+    play-pause | next | previous) ;;
+    *)
+        echo "usage: rime-media-key play-pause|next|previous" >&2
+        exit 2
+        ;;
+esac
+if [ -n "$(playerctl --ignore-player=rime_phone -l 2>/dev/null)" ]; then
+    exec playerctl --ignore-player=rime_phone "$1"
+fi
+exec playerctl "$1"

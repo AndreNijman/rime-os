@@ -3892,6 +3892,22 @@ RUN set -eux; \
     rm -rf /tmp/switcher-probe; \
     echo "switcher: ALT+Tab opens it, the Alt release commits it, and a closed switcher costs one stat"
 
+# The media keys: the computer's own players first, a phone's (Rime Remote)
+# only when the computer has none (docs/remote-live-contract.md §2.8). A
+# script, not `a || b` in each bind: labwc and niri run a bind's command
+# without a shell.
+COPY --chmod=0755 files/system/libexec/rime-media-key /usr/libexec/rime-media-key
+RUN set -eux; \
+    test -x /usr/libexec/rime-media-key; \
+    sh -n /usr/libexec/rime-media-key; \
+    grep -q 'local media_key = "/usr/libexec/rime-media-key"' /usr/share/rime/hypr/rime/keybindings.lua; \
+    test "$(grep -c 'command="/usr/libexec/rime-media-key ' /usr/share/rime/labwc/rc.xml)" -eq 6; \
+    if grep -q 'command="playerctl ' /usr/share/rime/labwc/rc.xml \
+        || grep -q 'exec_cmd("playerctl ' /usr/share/rime/hypr/rime/keybindings.lua \
+        ; then echo "FATAL: a media key still calls playerctl directly, so it can reach a phone while the computer plays"; exit 1; fi; \
+    _rc=0; /usr/libexec/rime-media-key stop >/dev/null 2>&1 || _rc=$?; \
+    if [ "$_rc" -ne 2 ]; then echo "FATAL: rime-media-key took a word it should refuse (rc=$_rc)"; exit 1; fi
+
 # The whole rime-greet tree lands at /usr/share/rime-greet so the QML's
 # Qt.resolvedUrl("assets/…") resolves in place; the wallpaper is dropped where
 # GreetSurface.qml expects it; greetd-config.toml becomes the live greetd

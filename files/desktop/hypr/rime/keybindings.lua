@@ -275,10 +275,12 @@ bind("", "XF86AudioMute",    hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SINK
 bind("", "XF86AudioMicMute", hl.dsp.exec_cmd("wpctl set-mute @DEFAULT_AUDIO_SOURCE@ toggle"), locked)
 
 -- Transport keys. These were only in the labwc session, which the two configs
--- are meant to keep in step.
-bind("", "XF86AudioPlay", hl.dsp.exec_cmd("playerctl play-pause"), locked)
-bind("", "XF86AudioNext", hl.dsp.exec_cmd("playerctl next"),       locked)
-bind("", "XF86AudioPrev", hl.dsp.exec_cmd("playerctl previous"),   locked)
+-- are meant to keep in step. rime-media-key sends them to the computer's own
+-- players, and to a phone's (Rime Remote) only when the computer has none.
+local media_key = "/usr/libexec/rime-media-key"
+bind("", "XF86AudioPlay", hl.dsp.exec_cmd(media_key .. " play-pause"), locked)
+bind("", "XF86AudioNext", hl.dsp.exec_cmd(media_key .. " next"),       locked)
+bind("", "XF86AudioPrev", hl.dsp.exec_cmd(media_key .. " previous"),   locked)
 
 -- ── One table under both module names ────────────────────────────────────────
 -- A hyprland.lua seeded by an APEX image is the user's file, so it is never
