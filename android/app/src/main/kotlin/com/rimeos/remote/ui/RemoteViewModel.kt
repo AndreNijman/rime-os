@@ -1921,6 +1921,21 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(settings = store.settings) }
     }
 
+    /** Show what this phone is playing on the paired computers, or stop (contract §2.8). */
+    fun setMediaOn(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(mediaOn = on))
+        hub.setMediaOn(store.settings.mediaOn)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** Let [pkg]'s playback show on the paired computers, or stop (contract §2.8). */
+    fun setMediaApp(pkg: String, on: Boolean) = viewModelScope.launch {
+        val apps = _state.value.settings.mediaApps.let { if (on) it + pkg else it - pkg }
+        val store = repository.settings(_state.value.settings.copy(mediaApps = apps))
+        hub.setMediaApps(store.settings.mediaApps)
+        _state.update { it.copy(settings = store.settings) }
+    }
+
     fun setDynamicColour(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(dynamicColour = on))
         _state.update { it.copy(settings = store.settings) }

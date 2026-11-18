@@ -203,6 +203,19 @@ object Desktop {
     }
 
     /**
+     * Every change rime-remoted made to the phones' media players on the stub
+     * (`RIME_REMOTED_MEDIA_STUB`), oldest first: `{"op":"show","player":…,
+     * "identity":…,"status":…,"title":…,…}` or `{"op":"gone","player":…}`.
+     * The suite never puts a player on this desktop's bus.
+     */
+    fun mediaLog(): List<JSONObject> {
+        val reply = ask(JSONObject().put("cmd", "media_log").toString())
+        check(reply.optString("reply") == "ok") { "the broker did not read the stub media players: $reply" }
+        val a = reply.getJSONArray("entries")
+        return (0 until a.length()).map { a.getJSONObject(it) }
+    }
+
+    /**
      * The stub notification server closes notification [id] with [reason]
      * (2: the person dismissed it, 1: it timed out), as a real one would say
      * in `NotificationClosed`.

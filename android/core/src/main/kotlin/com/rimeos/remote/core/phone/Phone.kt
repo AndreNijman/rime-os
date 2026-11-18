@@ -397,6 +397,12 @@ class PhoneLink(private val link: MachineLink) {
         ),
     )
 
+    /**
+     * What this phone is playing, or `null` (§2.8), as [Media.encode] wrote
+     * it. Not retried: the next connection is sent the state of its own.
+     */
+    fun media(line: String) = Phone.readOk(link.request(line, retry = false))
+
     /** The offer is taken (or never will be): the machine forgets it. */
     fun offerDone(id: Long) = Phone.readOk(link.request(Phone.offerDone(id), retry = true))
 
