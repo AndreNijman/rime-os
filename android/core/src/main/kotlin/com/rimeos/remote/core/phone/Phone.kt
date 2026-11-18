@@ -67,6 +67,13 @@ object Phone {
      */
     const val CAN_FOCUS: String = "focus"
 
+    /**
+     * The word in `can` that says the person turned on "Messages on your
+     * computer" and granted reading SMS (§2.11): the computer may ask for
+     * this phone's conversations, and, over an unlocked link, send one.
+     */
+    const val CAN_MESSAGES: String = "messages"
+
     /** The channel, and the feature, a sent file or text is taken on. */
     const val TAKE: String = "take_offer"
 
@@ -227,6 +234,28 @@ object Phone {
                 }
                 DeviceEvent.MediaControl(action, position)
             }
+            "messages_request" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                // Anything present must be right; a thread or page that is
+                // not a whole number is not quietly read as "all of them".
+                val thread = if (o.containsKey("thread")) o.long("thread")?.takeIf { it >= 0 } ?: return null else null
+                val before = if (o.containsKey("before")) o.long("before")?.takeIf { it >= 0 } ?: return null else null
+                val limit = o.long("limit")?.takeIf { it >= 1 } ?: return null
+                DeviceEvent.MessagesRequest(id, thread, before, limit.coerceAtMost(Messages.MAX_LIMIT.toLong()).toInt())
+            }
+            "messages_send" -> {
+                val id = o.long("id")?.takeIf { it >= 0 } ?: return null
+                // The text as typed: the sender checks it and says why it
+                // will not send it, rather than the event vanishing here.
+                val text = o.text("text") ?: return null
+                val to = o["to"]?.let { el ->
+                    val list = el as? kotlinx.serialization.json.JsonArray ?: return null
+                    list.map { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content ?: return null }
+                }
+                val thread = if (o.containsKey("thread")) o.long("thread")?.takeIf { it >= 0 } ?: return null else null
+                if ((to == null) == (thread == null)) return null
+                DeviceEvent.MessagesSend(id, to, thread, text)
+            }
             else -> null
         }
     }
@@ -282,6 +311,20 @@ sealed interface DeviceEvent {
     data class Replied(val key: String, val text: String) : DeviceEvent {
         // Somebody's message: never in a log line by accident.
         override fun toString(): String = "Replied(key=$key, text=<${text.length} chars>)"
+    }
+
+    /**
+     * The computer asks for this phone's SMS conversations (§2.11): the list
+     * when [thread] is null, or one conversation's messages; at most [limit]
+     * of them, all older than [before] (unix milliseconds) when it is set.
+     */
+    data class MessagesRequest(val id: Long, val thread: Long?, val before: Long?, val limit: Int) : DeviceEvent
+
+    /** The computer asks this phone to send [text] as an SMS, to [to] or into [thread] (§2.11). */
+    data class MessagesSend(val id: Long, val to: List<String>?, val thread: Long?, val text: String) : DeviceEvent {
+        // Somebody's message, and their number: never in a log line by accident.
+        override fun toString(): String =
+            "MessagesSend(id=$id, to=${to?.size?.let { "<$it>" }}, thread=$thread, text=<${text.length} chars>)"
     }
 
     /** [machine] sent this phone a file or text of [len] bytes; take it with `take_offer`. */
@@ -471,6 +514,13 @@ class PhoneLink(private val link: MachineLink) {
      * for the machine, which has already tried the push.
      */
     fun ack(id: Long) = Phone.readOk(link.request(Phone.ringAck(id), retry = false))
+
+    /**
+     * One line of an answer to a messages request, or a send's result
+     * (§2.11), as [Messages] wrote it. Not retried: the computer's request
+     * belongs to the connection it was asked on, and dies with it.
+     */
+    fun messages(line: String) = Phone.readOk(link.request(line, retry = false))
 
     /** Tell the machine this phone has an offer, so it reports "link". Not retried, as for [ack]. */
     fun offerAck(id: Long) = Phone.readOk(link.request(Phone.offerAck(id), retry = false))

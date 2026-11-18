@@ -374,6 +374,14 @@ data class Settings(
     @SerialName("focus_on") val focusOn: Boolean = false,
 
     /**
+     * "Messages on your computer" (`docs/remote-live-contract.md` §2.11): a
+     * paired computer may read this phone's SMS conversations and, while the
+     * app is unlocked, send an SMS from it. Off by default: it shows a
+     * computer the person's messages and lets it speak for them.
+     */
+    @SerialName("messages_on") val messagesOn: Boolean = false,
+
+    /**
      * "Keep working after the phone restarts" (`docs/remote-live-contract.md`
      * §2.10): each paired computer holds a second, companion key for this
      * phone, and after a restart, or while the app is locked, the phone keeps

@@ -53,6 +53,11 @@ object CompanionLink {
         "phone_notification",
         "phone_notification_removed",
         "phone_media",
+        // Reading a phone's messages runs on a locked phone too, as the rest
+        // of the device features do; `messages_sent` is not here, because a
+        // send is the phone speaking for the person and waits for an unlock.
+        "messages_reply",
+        "messages_changed",
     )
 
     /** The channels a companion session may open. */
