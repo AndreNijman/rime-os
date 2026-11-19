@@ -3711,6 +3711,11 @@ fn removing_a_computer_tells_it_and_it_removes_this_one_and_forget_on_both_pairs
     // Forgetting a paired computer is refused; so is a name nobody has.
     let (rc, said) = rime_remote(&b, &["computers", "forget", "nobody-at-all"], b"");
     assert_ne!(rc, 0, "{said}");
+    // An id may start with `-` (one in 64 do): it reaches the daemon as an
+    // id, not as a flag `rime` does not know.
+    let (rc, said) = rime_remote(&b, &["computers", "forget", "-Enobody-at-all"], b"");
+    assert_ne!(rc, 0, "{said}");
+    assert!(said.contains("no paired device '-Enobody-at-all'"), "the id was not passed on: {said}");
 
     // Forget on B too: a new code pairs them, as new.
     let (rc, said) = rime_remote(&b, &["computers", "forget", &a_on_b], b"");
