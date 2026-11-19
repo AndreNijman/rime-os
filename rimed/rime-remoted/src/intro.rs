@@ -109,6 +109,13 @@ struct Asked {
 /// every battery step, so without this each report would dial every computer.
 pub const RETRY_MS: u64 = 10 * 60 * 1000;
 
+/// How long after an offer reached the phone the next may be sent. The phone
+/// says nothing back: it may hold the computer already, or the offer may have
+/// run out before the person opened the app, and only another offer helps
+/// then. An hour keeps a phone that holds every computer from being a dial
+/// on each report.
+pub const DELIVERED_RETRY_MS: u64 = 60 * 60 * 1000;
+
 /// What this module keeps in memory.
 #[derive(Default)]
 pub struct Intro {
@@ -148,7 +155,8 @@ impl Intro {
         let mut asked = lock(&self.asked);
         let key = (phone.to_string(), computer.to_string());
         if let Some(a) = asked.get(&key) {
-            if a.delivered || now_ms.saturating_sub(a.at_ms) < RETRY_MS {
+            let wait = if a.delivered { DELIVERED_RETRY_MS } else { RETRY_MS };
+            if now_ms.saturating_sub(a.at_ms) < wait {
                 return false;
             }
         }
@@ -274,13 +282,19 @@ fn answer(outcome: &str, id: Option<&str>) -> Vec<u8> {
 /// The notification for a device that joined, with Remove: "<Laptop> joined
 /// your devices, added by <Pixel>".
 fn notify_joined(joined: &Device, by: &str, computer: bool) {
-    let shown = crate::mirror::Shown {
+    let shown = joined_shown(&joined.name, by, computer);
+    crate::mirror::mirror().submit(crate::mirror::Job::Post { device: joined.id.clone(), key: JOINED_KEY.into(), shown });
+}
+
+/// What the "joined" notification shows. Both names come from elsewhere (a
+/// card, a pairing request), so each is made safe for a notification server
+/// that draws markup, as a phone's notification is.
+fn joined_shown(name: &str, by: &str, computer: bool) -> crate::mirror::Shown {
+    let name = crate::mirror::clean(name, crate::mirror::APP_CAP, 0, false);
+    let by = crate::mirror::clean(by, crate::mirror::APP_CAP, 0, true);
+    crate::mirror::Shown {
         app_name: "Rime Remote".into(),
-        summary: if computer {
-            format!("{} joined your devices", joined.name)
-        } else {
-            format!("{} joined this computer", joined.name)
-        },
+        summary: if computer { format!("{name} joined your devices") } else { format!("{name} joined this computer") },
         body: if computer {
             format!(
                 "Added by {by}. It can see this computer's status until you remove it; run `rime remote computers \
@@ -294,8 +308,7 @@ fn notify_joined(joined: &Device, by: &str, computer: bool) {
         reply: None,
         actions: vec![(REMOVE_ACTION.to_string(), "Remove".to_string())],
         sticky: false,
-    };
-    crate::mirror::mirror().submit(crate::mirror::Job::Post { device: joined.id.clone(), key: JOINED_KEY.into(), shown });
+    }
 }
 
 /// Remove pressed on a "joined" notification for record `id`: remove the
@@ -434,8 +447,8 @@ fn bring_targets(state: &State) -> Vec<Device> {
 }
 
 /// Ask each trusted computer for an offer for `phone`, and hand each to it:
-/// once an offer reached the phone, never again this run; after a try that
-/// reached nobody, again after [`RETRY_MS`].
+/// once an offer reached the phone, again after [`DELIVERED_RETRY_MS`]; after
+/// a try that reached nobody, again after [`RETRY_MS`].
 pub fn bring(state: &State, phone: &str) {
     if !may_bring(state, phone) {
         return;
@@ -783,14 +796,16 @@ mod tests {
     }
 
     #[test]
-    fn a_try_that_reached_nobody_is_tried_again_later_and_a_delivered_one_never() {
+    fn a_try_that_reached_nobody_is_tried_again_soon_and_a_delivered_one_after_an_hour() {
         let intro = Intro::default();
         assert!(intro.may_try("p", "c", 1_000), "the first try");
         assert!(!intro.may_try("p", "c", 1_000 + RETRY_MS - 1), "not again at once");
         assert!(intro.may_try("p", "d", 1_000), "another computer is its own pair");
         assert!(intro.may_try("p", "c", 1_000 + RETRY_MS), "a try that reached nobody is tried again");
         intro.delivered("p", "c");
-        assert!(!intro.may_try("p", "c", 1_000 + 10 * RETRY_MS), "an offer that reached the phone is not sent again");
+        let sent = 1_000 + RETRY_MS;
+        assert!(!intro.may_try("p", "c", sent + DELIVERED_RETRY_MS - 1), "an offer that reached the phone is not sent again soon");
+        assert!(intro.may_try("p", "c", sent + DELIVERED_RETRY_MS), "nor never: the first may have run out unused");
     }
 
     #[test]
@@ -840,6 +855,15 @@ mod tests {
         let mut recorded = c.clone();
         recorded.relay = Some("wss://relay.elsewhere.example".into());
         assert_eq!(handed(None, &recorded).relay.as_deref(), Some("wss://relay.elsewhere.example"));
+    }
+
+    #[test]
+    fn a_joined_notification_shows_no_markup_from_a_name() {
+        let s = joined_shown("<b>x</b>", "<a href='u'>desk</a> & co", false);
+        assert!(!s.summary.contains('<') && !s.body.contains('<'), "{s:?}");
+        assert!(!s.body.contains("& co"), "{s:?}");
+        assert!(s.body.contains("rime remote devices allow"));
+        assert_eq!(s.actions, [(REMOVE_ACTION.to_string(), "Remove".to_string())]);
     }
 
     #[test]

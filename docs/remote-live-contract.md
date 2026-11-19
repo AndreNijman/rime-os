@@ -1735,7 +1735,7 @@ allowed yet".
 *Flow B (the computer that has the phone).* When a phone's events channel is
 open on a full session, its record here is trusted, and its last report says
 `join`, rime-remoted asks each active, trusted computer (off the events
-thread; once an offer reached the phone, not again until the daemon restarts;
+thread; once an offer reached the phone, again after an hour;
 after a try that reached nobody, again after 10 minutes): it dials it, checks that `remote_hello.features`
 lists `peer_offer`, sends `peer_offer`, checks that the offer's key is the
 key of the computer it dialled, keeps only the offer's dialable addresses and
