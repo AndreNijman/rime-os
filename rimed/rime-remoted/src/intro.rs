@@ -178,7 +178,8 @@ pub fn may_introduce(state: &State, device_id: &str, scope: Scope) -> Result<(),
     if scope != Scope::Full {
         return Err("only an unlocked phone may introduce computers".into());
     }
-    let trusted = state.devices().ok().and_then(|s| s.find(device_id).ok().map(Device::trusted)).unwrap_or(false);
+    let trusted =
+        state.devices().ok().and_then(|s| s.find(device_id).ok().map(|d| d.is_active() && d.trusted())).unwrap_or(false);
     if !trusted {
         return Err("this phone is not allowed on this computer yet".into());
     }
@@ -305,10 +306,18 @@ pub fn on_action(state: &State, id: &str, key: &str, action: &str) -> bool {
     if key != JOINED_KEY || action != REMOVE_ACTION {
         return false;
     }
-    let is_computer = state.devices().is_ok_and(|s| s.computers.contains_key(id));
-    if is_computer {
+    // Only a record that joined: a notification that outlived it (the same
+    // key paired with a code since) removes nothing a person made.
+    let (computer, phone) = match state.devices() {
+        Ok(s) => (
+            s.computers.get(id).is_some_and(|c| c.introduced_by.is_some()),
+            s.devices.get(id).is_some_and(|d| d.introduced_by.is_some()),
+        ),
+        Err(_) => (false, false),
+    };
+    if computer {
         let _ = crate::computers::remove(state, id);
-    } else {
+    } else if phone {
         let _ = crate::control::revoke(state, id);
     }
     true
@@ -375,7 +384,7 @@ pub fn complete(state: &State, request: &PairingRequest, now: u64) -> Result<Dev
         }
         let by = o.by.clone();
         let mut store = state.devices().map_err(|e| PairingError::BadDevice(e.to_string()))?;
-        let Some(name) = store.computers.get(&by).filter(|c| c.is_active()).map(|c| c.name.clone()) else {
+        let Some(name) = store.computers.get(&by).filter(|c| c.is_active() && c.trusted()).map(|c| c.name.clone()) else {
             return Err(PairingError::BadToken);
         };
         let introducer = Introducer { id: by, name: name.clone() };
@@ -469,18 +478,25 @@ fn ask_offer(state: &State, c: &Device) -> Result<Option<String>, String> {
         return Ok(None);
     }
     let offer = reply["offer"].as_str().ok_or("an offer that is not text")?;
-    offer_from(offer, c).map(Some)
+    offer_from(offer, c, state.relay.as_deref()).map(Some)
 }
 
-/// `offer`, when it is an offer for computer `c`: only an offer for the
-/// computer that was dialled is handed on, so a peer cannot steer the phone
-/// to a key of its choosing.
-fn offer_from(offer: &str, c: &Device) -> Result<String, String> {
-    let parsed = PairingOffer::decode(offer).map_err(|e| e.to_string())?;
+/// `offer`, when it is an offer for computer `c`, as the phone is handed it:
+/// only an offer for the computer that was dialled, so a peer cannot steer
+/// the phone to a key of its choosing; only its dialable addresses; and its
+/// relay only when it is the relay recorded for `c` or this computer's own
+/// (`own_relay`), so a peer cannot send the phone to a relay of its choosing.
+fn offer_from(offer: &str, c: &Device, own_relay: Option<&str>) -> Result<String, String> {
+    let mut parsed = PairingOffer::decode(offer).map_err(|e| e.to_string())?;
     if parsed.key != c.public_key {
         return Err("an offer for a different computer".into());
     }
-    Ok(offer.to_string())
+    parsed.lan = crate::computers::dialable_only(parsed.lan);
+    let relay_ok = parsed.relay.as_deref().is_some_and(|r| c.relay.as_deref() == Some(r) || own_relay == Some(r));
+    if !relay_ok {
+        parsed.relay = None;
+    }
+    Ok(parsed.encode())
 }
 
 /// Computer `key` (`name`) was removed here: tell every phone with a Full
@@ -542,6 +558,27 @@ mod tests {
         drop(store);
         report(&state, &p.id, &["join"]);
         assert_eq!(ask(&state, &p.id, Scope::Full, json!({"cmd": "computer_card"}))["kind"], REFUSAL);
+        // A revoked phone whose session has not been dropped yet: refused.
+        let mut store = state.devices().expect("store");
+        store.revoke(&phone, 2).expect("revoke");
+        state.save_devices(&store).expect("save");
+        drop(store);
+        assert_eq!(ask(&state, &phone, Scope::Full, json!({"cmd": "computer_card"}))["kind"], REFUSAL, "a revoked phone got a card");
+    }
+
+    #[test]
+    fn an_offer_is_not_redeemed_for_a_peer_that_is_no_longer_trusted() {
+        let (state, _dir) = a_state("intro-offer-untrusted");
+        let c = a_peer(&state, 7);
+        let v = offer_reply(&state, &c.id);
+        assert_eq!(v["reply"], "peer_offer", "{v}");
+        {
+            let mut store = state.devices().expect("store");
+            store.computers.get_mut(&c.id).expect("c").introduced_by = Some(Introducer { id: "p".into(), name: "p".into() });
+            state.save_devices(&store).expect("save");
+        }
+        assert!(matches!(redeem(&state, &v, 3), Err(PairingError::BadToken)));
+        assert!(state.devices().expect("store").devices.is_empty(), "a phone was recorded");
     }
 
     #[test]
@@ -783,24 +820,57 @@ mod tests {
         let c = a_peer(&state, 7);
         let mut other = PairingOffer::decode(offer_reply(&state, &c.id)["offer"].as_str().expect("offer")).expect("decodes");
         // An offer this daemon minted carries its own key, not the peer's.
-        assert!(offer_from(&other.encode(), &c).is_err());
+        assert!(offer_from(&other.encode(), &c, None).is_err());
         other.key = c.public_key.clone();
-        assert_eq!(offer_from(&other.encode(), &c).as_deref(), Ok(other.encode().as_str()));
-        assert!(offer_from("not an offer", &c).is_err());
+        other.lan = vec!["192.168.1.50:7717".into()];
+        other.relay = None;
+        assert_eq!(offer_from(&other.encode(), &c, None).as_deref(), Ok(other.encode().as_str()));
+        assert!(offer_from("not an offer", &c, None).is_err());
+        // Addresses nobody should dial are dropped, and a relay is kept only
+        // when it is this computer's own or the one recorded for that computer.
+        let mut steered = other.clone();
+        steered.lan = vec!["127.0.0.1:22".into(), "192.168.1.50:7717".into()];
+        steered.relay = Some("wss://relay.elsewhere.example".into());
+        let handed = |own: Option<&str>, c: &Device| PairingOffer::decode(&offer_from(&steered.encode(), c, own).expect("ok")).expect("decodes");
+        let got = handed(Some("wss://own.example"), &c);
+        assert_eq!(got.lan, ["192.168.1.50:7717"]);
+        assert_eq!(got.relay, None, "a relay the peer chose reached the phone");
+        assert_eq!(got.token, steered.token);
+        assert_eq!(handed(Some("wss://relay.elsewhere.example"), &c).relay.as_deref(), Some("wss://relay.elsewhere.example"));
+        let mut recorded = c.clone();
+        recorded.relay = Some("wss://relay.elsewhere.example".into());
+        assert_eq!(handed(None, &recorded).relay.as_deref(), Some("wss://relay.elsewhere.example"));
     }
 
     #[test]
     fn remove_on_a_joined_notification_takes_away_and_nothing_else_does() {
         let (state, _dir) = a_state("intro-action");
-        let c = a_peer(&state, 7);
+        let by = paired_phone(&state, 1);
+        report(&state, &by, &["join"]);
+        let v = ask(&state, &by, Scope::Full, json!({"cmd": "computer_introduce", "card": other_card(7, "laptop")}));
+        let c = v["id"].as_str().expect("id").to_string();
         // Another notification's action, or another action: not ours.
-        assert!(!on_action(&state, &c.id, "ring", REMOVE_ACTION));
-        assert!(!on_action(&state, &c.id, JOINED_KEY, "allow"));
-        assert!(state.devices().expect("store").find_computer(&c.id).expect("c").is_active());
-        assert!(on_action(&state, &c.id, JOINED_KEY, REMOVE_ACTION));
-        assert!(!state.devices().expect("store").find_computer(&c.id).expect("c").is_active());
-        let phone = paired_phone(&state, 1);
-        assert!(on_action(&state, &phone, JOINED_KEY, REMOVE_ACTION));
-        assert!(!state.devices().expect("store").find(&phone).expect("p").is_active());
+        assert!(!on_action(&state, &c, "ring", REMOVE_ACTION));
+        assert!(!on_action(&state, &c, JOINED_KEY, "allow"));
+        assert!(state.devices().expect("store").find_computer(&c).expect("c").is_active());
+        assert!(on_action(&state, &c, JOINED_KEY, REMOVE_ACTION));
+        assert!(!state.devices().expect("store").find_computer(&c).expect("c").is_active());
+        let brought = {
+            let mut store = state.devices().expect("store");
+            let p = store
+                .pair_introduced(&rime_remote_core::b64_encode(&[2; 32]), "brought", Introducer { id: "c".into(), name: "c".into() }, 1, false)
+                .expect("brought");
+            state.save_devices(&store).expect("save");
+            p.id
+        };
+        assert!(on_action(&state, &brought, JOINED_KEY, REMOVE_ACTION));
+        assert!(!state.devices().expect("store").find(&brought).expect("p").is_active());
+        // A record a person paired here is not one that joined: a stale
+        // notification's Remove leaves it.
+        let peer = a_peer(&state, 9);
+        assert!(on_action(&state, &peer.id, JOINED_KEY, REMOVE_ACTION));
+        assert!(on_action(&state, &by, JOINED_KEY, REMOVE_ACTION));
+        assert!(state.devices().expect("store").find_computer(&peer.id).expect("c").is_active(), "a code-paired computer was removed");
+        assert!(state.devices().expect("store").find(&by).expect("p").is_active(), "a phone paired here was revoked");
     }
 }

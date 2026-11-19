@@ -1738,7 +1738,9 @@ open on a full session, its record here is trusted, and its last report says
 thread; once an offer reached the phone, not again until the daemon restarts;
 after a try that reached nobody, again after 10 minutes): it dials it, checks that `remote_hello.features`
 lists `peer_offer`, sends `peer_offer`, checks that the offer's key is the
-key of the computer it dialled, and sends the phone:
+key of the computer it dialled, keeps only the offer's dialable addresses and
+its relay only when that is the relay recorded for that computer or this
+computer's own, and sends the phone:
 
 ```json
 {"event":"join_offer","offer":"apex-remote:…","computer":"laptop","by":"desk"}
@@ -1778,7 +1780,14 @@ queue for it).
   Allowing a revoked or removed record is an error. `device_allow` drops the
   phone's live connections so it reconnects as `full`.
 - The notification's Remove (from the notification server's bus owner, §2.7)
-  removes the computer or revokes the phone. It can only take something away.
+  removes the computer or revokes the phone, while its record is still one
+  that joined (`introduced_by` set): a record a person paired here since is
+  left. It can only take something away.
+- Known limit: the offer's token is all that `peer_offer` proves. The
+  computer that asked for it can redeem it itself, with a key of its own, and
+  so hold up to 4 `companion` records here (each with its notification and
+  Remove). The offer is not bound to a phone's key, because the phone makes
+  that key only when it pairs.
 
 ## 3. The phone
 

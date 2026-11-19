@@ -194,7 +194,7 @@ pub fn own_about(state: &State) -> About {
 
 /// The addresses in `lan` another computer would dial, at most
 /// [`MAX_ADDRESSES`] of them.
-fn dialable_only(mut lan: Vec<String>) -> Vec<String> {
+pub(crate) fn dialable_only(mut lan: Vec<String>) -> Vec<String> {
     lan.retain(|a| a.parse().is_ok_and(|a| computer::dialable(&a)));
     lan.truncate(MAX_ADDRESSES);
     lan
