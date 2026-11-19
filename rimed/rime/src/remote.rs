@@ -2962,6 +2962,10 @@ mod tests {
             &["send", ID, "a.jpg"],
             &["send", ID, "--clipboard"],
             &["send", ID, "--text", "hello"],
+            &["send", "--clipboard", ID],
+            &["send", "--text", "hello", ID],
+            &["revoke", "--", ID],
+            &["computers", "forget", "--", ID],
             &["devices", "allow", ID],
             &["computers", "remove", ID],
             &["computers", "allow", ID],
@@ -2980,7 +2984,15 @@ mod tests {
             &["photos", "--device", ID],
             &["photos", "save", "5", "--device", ID],
         ];
-        for id in ["-Eab12cd34ef56gh", "--Eab12cd34ef56g", "-hab12cd34ef56gh", "-V0123456789abcd", "plain-id_123456"] {
+        for id in [
+            "-Eab12cd34ef56gh",
+            "--Eab12cd34ef56g",
+            "-hab12cd34ef56gh",
+            "-V0123456789abcd",
+            "-1ab2cd34ef56ghi",
+            "-_ab12cd34ef56gh",
+            "plain-id_123456",
+        ] {
             for verb in verbs {
                 let args: Vec<&str> = verb.iter().map(|a| if *a == ID { id } else { a }).collect();
                 assert_eq!(id_parsed(&args).as_deref(), Some(id), "rime remote {}", args.join(" "));
@@ -3024,5 +3036,13 @@ mod tests {
         assert!(parse(&["ring"]).is_err());
         assert!(parse(&["computers", "remove", "-Eab", "-Ecd"]).is_err());
         assert!(parse(&["calls", "--device"]).is_err(), "--device with no id was accepted");
+        // The price, for a mistyped command: a flag right after --device is
+        // read as the device, which the daemon then says it does not have.
+        match parse(&["messages", "--device", "--json"]).expect("messages") {
+            RemoteCmd::Messages { device, json, .. } => assert_eq!((device.as_deref(), json), (Some("--json"), false)),
+            other => panic!("{other:?}"),
+        }
+        // An id made only of letters that are short flags here reads as help.
+        assert_eq!(parse(&["revoke", "-hhhh"]).expect_err("help").kind(), clap::error::ErrorKind::DisplayHelp);
     }
 }
