@@ -404,6 +404,20 @@ def nex_submit_at_computer(session, text):
     it by itself and not as the answer to something it sent."""
     return nex_reply(nexd_at_computer("turns.submit", {"session_id": session, "text": text}))
 
+def gone(pid):
+    """Whether process `pid` has exited. A rime-remoted this broker started
+    (a replacement) is its child and stays a zombie, which still takes
+    signal 0, until it is reaped: reaped here."""
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
+    try:
+        os.kill(pid, 0)
+        return False
+    except ProcessLookupError:
+        return True
+
 def restart():
     pidfile = os.path.join(ROOT, "remoted.pid")
     with open(pidfile) as f:
@@ -413,10 +427,9 @@ def restart():
     except ProcessLookupError:
         pass
     for _ in range(80):
-        try:
-            os.kill(old, 0); time.sleep(0.05)
-        except ProcessLookupError:
+        if gone(old):
             break
+        time.sleep(0.05)
     if os.environ.get("RIME_REMOTED_MACHINE_STUB") != os.path.join(ROOT, "machine"):
         return json.dumps({"reply": "error",
                            "message": "refusing to start rime-remoted without the machine stub"})
@@ -460,10 +473,9 @@ def stop_remoted():
     except ProcessLookupError:
         pass
     for _ in range(80):
-        try:
-            os.kill(old, 0); time.sleep(0.05)
-        except ProcessLookupError:
+        if gone(old):
             return json.dumps({"reply": "ok", "pid": old})
+        time.sleep(0.05)
     return json.dumps({"reply": "error", "message": "rime-remoted %d did not die" % old})
 
 STUB = os.path.join(ROOT, "machine")
