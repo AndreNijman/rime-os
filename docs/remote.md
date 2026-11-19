@@ -251,16 +251,19 @@ that shape; a relaxed origin check would not do.
 
 ## `rime remote computers`: your other Rime computers
 
-Two Rime computers you own can pair with each other. In this release that
-makes them known to each other and nothing more: a paired computer may say
-hello, ask the other's name and version, pass on the computers it removed,
-say how it is doing (battery, power mode, whether it is locked, wired or
-Wi-Fi, how long it has been up), and ask for a pairing offer to hand to your
-phone (see "Phones and computers that join by themselves" below). **Pairing is not authority.** A
-paired computer cannot run anything, open a terminal, read a file, see a
-session, answer a privilege prompt or use a phone feature on the other. A
-session from another computer never reaches `rime-agentd` at all, not even to
-be told no.
+Two Rime computers you own can pair with each other. A paired computer may
+say hello, ask the other's name and version, pass on the computers it
+removed, say how it is doing (battery, power mode, whether it is locked,
+wired or Wi-Fi, how long it has been up), ask for a pairing offer to hand to
+your phone (see "Phones and computers that join by themselves" below), and,
+when you allow it, share your clipboard and send you files (see "Your
+clipboard and files between computers" below). **Pairing is not authority.**
+A paired computer cannot run anything, open a terminal, read a file, see a
+session, answer a privilege prompt or use a phone feature on the other. What
+another computer sends never reaches `rime-agentd`: for a shared copy or a
+file, `rime-remoted` checks it and then asks `rime-agentd` itself, in its own
+words, to put text on the clipboard or save a file in Downloads, and nothing
+else.
 
 ```
 rime remote computers add --show-code      # on the first computer: shows six digits
@@ -270,6 +273,9 @@ rime remote computers ping <computer> [--via lan|relay|any] [--json]
 rime remote computers remove <computer>
 rime remote computers forget <computer>
 rime remote computers allow <computer>
+rime remote computers clipboard <computer> on|send|receive|off
+rime remote computers files <computer> on|off
+rime remote computers send <computer> <file>… [--via lan|relay|any]
 ```
 
 **Pairing.** On one computer run `add --show-code`. It prints a six-digit code
@@ -397,6 +403,69 @@ rime remote computers allow <computer>
 - Remove on a "joined" notification removes the computer or revokes the
   phone straight away. Nothing about joining can be undone by a notification
   except taking it away.
+
+### Your clipboard and files between computers
+
+**The clipboard.** Text you copy on one computer can land on the clipboard of
+another. It is off until you turn it on, and each computer decides for
+itself:
+
+```
+rime remote computers clipboard desk on        # send my copies to desk, and take desk's
+rime remote computers clipboard desk send      # only send
+rime remote computers clipboard desk receive   # only take
+rime remote computers clipboard desk off
+```
+
+A copy goes from this computer to Desk only when this computer sends to Desk
+**and** Desk takes from this computer, so run it on both. It is off by
+default because a clipboard holds things you did not mean to share; you turn
+it on per computer and per direction. Rime Shell hands your copies over
+while Settings → Paired devices → **Send my clipboard to my phone** is on
+(the same switch that sends them to your phone).
+
+These never travel to another computer:
+
+- a password manager's copy (one it marks as sensitive), images and other
+  things that are not text, an empty selection, and text over 8 KB;
+- anything copied while the screen is locked; a copy that arrives while the
+  other screen is locked is dropped, not kept for later;
+- a copy that itself came from another computer or from your phone, so a
+  copy never bounces back and forth, with two computers or with five.
+
+Nothing is queued and nothing runs between copies: each copy is sent once,
+when you make it, to the computers that are reachable then. A computer that
+is off or out of reach misses it. At most 30 copies a minute go out, and at
+most 30 a minute from each computer are taken.
+
+**Files.** `send` puts one or more files in the other computer's Downloads:
+
+```
+$ rime remote computers send desk report.pdf photos.zip
+rime: desk (3f2a…) saved report.pdf (1.2 MB) in its Downloads.
+rime: desk (3f2a…) saved photos.zip (88.0 MB) in its Downloads.
+```
+
+- The other computer saves each file under a name that replaces nothing
+  (`report (2).pdf` if `report.pdf` is there already) and shows "Laptop sent
+  you report.pdf", "Saved in Downloads. Nothing was opened.", with a **Show in
+  folder** button. Nothing is ever opened or run.
+- A file is at most 256 MB. Each computer takes at most 100 files and 2 GB an
+  hour from each computer, one file at a time from each, and two at once in
+  all. Every byte is checked against the file's SHA-256 before the file gets
+  its name: a file that arrives broken or half sent leaves nothing behind.
+- Taking files is **on** for a computer you paired with a code: you showed
+  the code and typed it, so it is yours. It is off for a computer your phone
+  introduced until you `allow` it. `rime remote computers files desk off`
+  refuses Desk's files from then on. Files are taken while the screen is
+  locked; the notification waits on the lock screen.
+- Sending, like changing either switch, must be you at the computer: an
+  agent, a scheduled job, a phone or another computer cannot.
+- Nothing is queued: a computer that is off is an error now, and the files
+  after it are still sent. `--via lan` or `--via relay` forces one path.
+
+`rime remote computers list` shows both switches under each computer, for
+example "clipboard sent and taken, files taken".
 
 The wire is `docs/remote-live-contract.md` §2.15.
 
