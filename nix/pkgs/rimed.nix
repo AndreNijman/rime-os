@@ -217,6 +217,7 @@ let
       "a_confined_session_is_judged_against_the_confinement_it_actually_has"
       "a_confined_session_is_told_where_its_runtime_directory_is"
       "a_copied_home_cannot_pair_with_or_connect_to_the_computer_it_came_from"
+      "a_copy_no_person_handed_over_reaches_the_phones_and_no_computer"
       "a_declared_remote_origin_reaches_both_verbs"
       "a_device_pairs_over_the_real_socket_and_lands_in_the_real_store"
       "a_device_reaches_the_desktop_through_a_relay_neither_of_them_listens_on"

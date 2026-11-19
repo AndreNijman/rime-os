@@ -4151,6 +4151,126 @@ fn paired_computers_share_a_copy_only_where_both_turned_it_on_and_it_never_comes
     assert_eq!(r["reply"], "error", "a removed computer's switch went on: {r}");
 }
 
+/// A connection to `socket` made by a child process that has exited and been
+/// reaped by the time this returns. `SO_PEERCRED` names this account but a
+/// pid with no `/proc` entry, so `rime-remoted` cannot read where the request
+/// came from: a caller that is not a person at this machine, on the real
+/// dispatch path, with no seam in the daemon.
+fn connect_from_a_process_that_is_gone(socket: &std::path::Path) -> UnixStream {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let (ours, theirs) = UnixStream::pair().expect("pair");
+    // Everything the child needs is made before the fork: it only calls
+    // socket, connect, sendmsg and _exit.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let path = socket.as_os_str().as_bytes();
+    assert!(path.len() < addr.sun_path.len(), "socket path too long");
+    for (d, s) in addr.sun_path.iter_mut().zip(path) {
+        *d = *s as libc::c_char;
+    }
+    let mut control = [0u64; 8];
+    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) } as usize;
+    assert!(space <= std::mem::size_of_val(&control));
+    let mut byte = 0u8;
+    let mut iov = libc::iovec { iov_base: (&mut byte as *mut u8).cast(), iov_len: 1 };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    let theirs_fd = theirs.as_raw_fd();
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork");
+    if pid == 0 {
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            if fd < 0 || libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) != 0 {
+                libc::_exit(1);
+            }
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            (*c).cmsg_level = libc::SOL_SOCKET;
+            (*c).cmsg_type = libc::SCM_RIGHTS;
+            (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as _;
+            std::ptr::write_unaligned(libc::CMSG_DATA(c).cast::<libc::c_int>(), fd);
+            libc::_exit(if libc::sendmsg(theirs_fd, &msg, 0) == 1 { 0 } else { 2 });
+        }
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid, "waitpid");
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the child could not connect: {status}");
+    drop(theirs);
+    // Take the connection it made.
+    let mut control = [0u64; 8];
+    let mut byte = 0u8;
+    let mut iov = libc::iovec { iov_base: (&mut byte as *mut u8).cast(), iov_len: 1 };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    assert_eq!(unsafe { libc::recvmsg(ours.as_raw_fd(), &mut msg, 0) }, 1, "recvmsg");
+    let c = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    assert!(!c.is_null() && unsafe { (*c).cmsg_type } == libc::SCM_RIGHTS, "no descriptor came back");
+    let fd = unsafe { std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<libc::c_int>()) };
+    // The pid the daemon will ask about is gone: no origin can be read.
+    assert!(
+        rime_agent_core::origin::observe_pid(pid).is_err(),
+        "the child's pid {pid} is still readable; this test proves nothing"
+    );
+    unsafe { UnixStream::from_raw_fd(fd) }
+}
+
+#[test]
+fn a_copy_no_person_handed_over_reaches_the_phones_and_no_computer() {
+    let a = harness!("share-job-a");
+    let b = harness!("share-job-b");
+    set_machine(&a, UNLOCKED());
+    set_machine(&b, UNLOCKED());
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    let (rc, said) = rime_remote(&a, &["computers", "clipboard", &b_on_a, "send"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let (rc, said) = rime_remote(&b, &["computers", "clipboard", &a_on_b, "receive"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let Some(offer) = open_offer(&a) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&a, &offer, "pixel-8")["ok"], true);
+    let mut p = phone.connect(&a).expect("the phone's session");
+    open_events(&mut p, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["clipboard"]}"#)["reply"], "ok");
+
+    // The control arm: this test process is a person here (pair_computers
+    // proved it), and its copy reaches the phone and B.
+    let r = a.control(r#"{"cmd":"clipboard","text":"from a person"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 1, "computers": 1}), "{r}");
+    assert_eq!(clipboard_of(&b, "from a person", Duration::from_secs(15)).as_deref(), Some("from a person"));
+
+    // The same request from a caller whose origin cannot be read (an agent
+    // or a scheduled job is refused the same way): the phone still gets it,
+    // as before; no computer does.
+    let stream = connect_from_a_process_that_is_gone(&a.remoted_socket);
+    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    let mut writer = stream.try_clone().expect("clone");
+    writeln!(writer, r#"{{"cmd":"clipboard","text":"from a job"}}"#).expect("write");
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).expect("read");
+    let r: serde_json::Value = serde_json::from_str(reply.trim()).unwrap_or_else(|e| panic!("{e}: {reply}"));
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 1}), "{r}");
+    assert_eq!(
+        events_on(&mut p, 9, 2),
+        vec![
+            serde_json::json!({"event": "clipboard", "text": "from a person"}),
+            serde_json::json!({"event": "clipboard", "text": "from a job"}),
+        ]
+    );
+    assert_eq!(
+        clipboard_of(&b, "from a job", Duration::from_secs(3)).as_deref(),
+        Some("from a person"),
+        "a copy no person handed over reached another computer"
+    );
+}
+
 #[test]
 fn three_computers_share_one_copy_once_each_and_it_settles() {
     let a = harness!("three-a");
