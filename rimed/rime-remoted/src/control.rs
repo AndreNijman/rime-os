@@ -469,7 +469,10 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::DeviceAllow { device } => allow_device(state, &device),
         Request::Ring { device } => ring(state, &device),
         Request::Focus { dnd } => focus(state, dnd),
-        Request::Clipboard { text, sensitive } => clipboard(state, &text, sensitive),
+        Request::Clipboard { text, sensitive } => {
+            let by_a_person = handed_over_by_a_person(peer, rime_agent_core::origin::observe_pid);
+            clipboard(state, &text, sensitive, by_a_person)
+        }
         Request::Send {
             device,
             kind,
@@ -702,6 +705,18 @@ pub fn may_share(origin: RequestOrigin) -> Result<(), String> {
         "a {origin} request cannot change what is shared with another computer: only a person at this \
          machine may. Run `rime remote computers clipboard` or `rime remote computers files` from a terminal"
     ))
+}
+
+/// Whether a `clipboard` request comes from Rime Shell or a terminal at this
+/// machine. Only then does the copy go on to other computers (§2.15): their
+/// clipboards are written without asking, and a person may paste what lands
+/// there into a terminal. Anything else (an agent, a scheduled job, an
+/// unreadable origin) still reaches this computer's phones, as before.
+fn handed_over_by_a_person(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> bool {
+    peer.is_some_and(|p| observe(p.pid).is_ok_and(|o| MAY_PAIR.contains(&o)))
 }
 
 /// `computer_send`'s rule over a value.
@@ -1003,14 +1018,14 @@ fn focus(state: &State, dnd: bool) -> Reply {
 ///
 /// Only phones with an events channel open, as for [`focus`]: a clipboard is
 /// not worth waking a phone for, and it would be stale by the time it woke.
-fn clipboard(state: &Arc<State>, text: &str, sensitive: bool) -> Reply {
+fn clipboard(state: &Arc<State>, text: &str, sensitive: bool, by_a_person: bool) -> Reply {
     let line = match crate::clipboard::line(text, sensitive) {
         Ok(line) => line,
         Err(why) => return Reply::error(why),
     };
     // Other computers first (§2.15). A copy another computer sent here goes
     // nowhere: not on to other computers, and not to this computer's phones.
-    let computers = match crate::share::local_copy(state, text, sensitive) {
+    let computers = match crate::share::local_copy(state, text, sensitive, by_a_person) {
         crate::share::Local::FromAComputer => return Reply::ClipboardSent { reached: 0, computers: 0 },
         crate::share::Local::Shared(n) => n,
     };
@@ -1744,6 +1759,23 @@ mod tests {
             r#"{"cmd":"computer_clipboard","computer":"desk","send":true,"receive":false}"#
         );
         assert_eq!(serde_json::to_string(&switches[2]).unwrap(), r#"{"cmd":"computer_files","computer":"desk","on":true}"#);
+    }
+
+    #[test]
+    fn only_a_copy_a_person_handed_over_goes_on_to_other_computers() {
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        for o in RequestOrigin::ALL {
+            assert_eq!(handed_over_by_a_person(Some(me), |_| Ok(*o)), o.is_local(), "{o}");
+            // The request itself is still the owner's to make, for the phones.
+            let req = Request::Clipboard { text: "x".into(), sensitive: false };
+            assert!(authorized_by(&req, Some(me), |_| Ok(*o)).is_ok(), "{o}");
+        }
+        assert!(!handed_over_by_a_person(Some(me), |_| Err("no cgroup".into())));
+        assert!(!handed_over_by_a_person(None, |_| Ok(RequestOrigin::RimeShell)));
     }
 
     #[test]

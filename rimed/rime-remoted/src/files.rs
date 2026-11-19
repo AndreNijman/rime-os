@@ -87,10 +87,21 @@ const SAVED_KEPT: usize = 32;
 pub const KEY_PREFIX: &str = "file:";
 pub const SHOW_ACTION: &str = "show";
 
+/// The grace before a transfer must keep pace, and the pace: bytes a second.
+const GRACE: Duration = Duration::from_secs(60);
+const PACE: u64 = 256 * 1024;
+
 /// The whole budget for receiving `len` bytes: a minute, and a second for
 /// every 256 KiB.
 pub fn budget(len: u64) -> Duration {
-    Duration::from_secs(60 + len / (256 * 1024))
+    GRACE + Duration::from_secs(len / PACE)
+}
+
+/// How long after the start the first `got` bytes are due: the budget kept
+/// as a schedule all the way, so a computer that trickles a byte now and then
+/// loses its slot once it falls behind instead of holding it to the end.
+fn due(grace: Duration, got: u64) -> Duration {
+    grace + Duration::from_nanos(u64::try_from(u128::from(got) * 1_000_000_000 / u128::from(PACE)).unwrap_or(u64::MAX))
 }
 
 /// What arriving files are remembered by: who is sending, what each
@@ -147,8 +158,15 @@ impl Drop for Slot {
     }
 }
 
+/// Every character of Unicode 17's general categories Cf (format: invisible,
+/// direction-changing, tags), Zl and Zp (line and paragraph separators, which
+/// `char::is_control` does not count): what makes a name look like another.
 fn is_format(c: char) -> bool {
-    matches!(c, '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}')
+    matches!(c,
+        '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}'
+        | '\u{08E2}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
+        | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}' | '\u{110CD}' | '\u{13430}'..='\u{1343F}'
+        | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}' | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
 }
 
 /// A name another computer offered, refused when it is not one file's name,
@@ -301,7 +319,7 @@ fn arrive<S: Read + Write>(ours: UnixStream, mut sink: S, offer: Offer, computer
         Ok(a) => a,
         Err(_) => return,
     };
-    let got = receive(&ours, &mut acks, &mut sink, offer.len, &offer.sha256, STALL, budget(offer.len))
+    let got = receive(&ours, &mut acks, &mut sink, offer.len, &offer.sha256, STALL, GRACE)
         .and_then(|()| saved_reply(&mut sink));
     match got {
         Ok((name, path)) => {
@@ -329,9 +347,9 @@ fn receive(
     len: u64,
     want: &str,
     stall: Duration,
-    budget: Duration,
+    grace: Duration,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + budget;
+    let start = Instant::now();
     let mut hash = Sha256::new();
     let mut got = 0u64;
     let mut held = None;
@@ -339,9 +357,11 @@ fn receive(
     let mut buf = vec![0u8; 64 * 1024];
     let mut reader = peer;
     while got < len {
-        let left = deadline.saturating_duration_since(Instant::now());
+        // The next byte is due by the schedule; the stall is the shorter
+        // limit only while the transfer is ahead of it.
+        let left = (start + due(grace, got)).saturating_duration_since(Instant::now());
         if left.is_zero() {
-            return Err("the file took too long to arrive; nothing was saved".into());
+            return Err(format!("the file arrived too slowly ({got} of {len} bytes in time); nothing was saved"));
         }
         reader.set_read_timeout(Some(stall.min(left))).map_err(|e| e.to_string())?;
         let want_now = buf.len().min((len - got) as usize);
@@ -350,7 +370,10 @@ fn receive(
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
-                return Err(format!("nothing arrived for {} s; nothing was saved", stall.as_secs()))
+                if stall < left {
+                    return Err(format!("nothing arrived for {} s; nothing was saved", stall.as_secs()));
+                }
+                continue;
             }
             Err(e) => return Err(e.to_string()),
         };
@@ -580,6 +603,12 @@ mod tests {
             "\u{FEFF}a.txt",
             "a\u{2066}b",
             "a\u{061C}b",
+            "soft\u{00AD}hyphen.txt",
+            "line\u{2028}break.txt",
+            "para\u{2029}.txt",
+            "tag\u{E0041}.txt",
+            "anchor\u{FFF9}.txt",
+            "mongol\u{180E}.txt",
         ] {
             assert!(offered_name(bad).is_err(), "{bad:?} was taken");
         }
@@ -830,6 +859,35 @@ mod tests {
         // Fewer, then silence: the stall ends it.
         let (_, _, r) = run_receive(&body[..1000], len, &sha(&body), false);
         assert!(r.unwrap_err().contains("nothing arrived"));
+    }
+
+    #[test]
+    fn a_computer_that_trickles_loses_its_slot_once_it_falls_behind() {
+        let body: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
+        let len = body.len() as u64;
+        let (peer_end, ours) = UnixStream::pair().expect("pair");
+        // A few bytes every 50 ms: never a 2 s stall, far below the pace.
+        let writer = std::thread::spawn(move || {
+            let mut w = &peer_end;
+            for chunk in body.chunks(16).take(40) {
+                if w.write_all(chunk).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let started = Instant::now();
+        let (mut acks, mut sink) = (Vec::new(), Vec::new());
+        let r = receive(&ours, &mut acks, &mut sink, len, &sha(b"x"), Duration::from_secs(2), Duration::from_millis(300));
+        let took = started.elapsed();
+        drop(ours);
+        writer.join().expect("writer");
+        assert!(r.as_ref().is_err_and(|e| e.contains("too slowly")), "{r:?}");
+        assert!(took < Duration::from_secs(1), "it held the slot for {took:?}");
+        // The schedule: the grace, then the pace, and the whole of it is the budget.
+        assert_eq!(due(GRACE, 0), GRACE);
+        assert_eq!(due(GRACE, PACE * 10), GRACE + Duration::from_secs(10));
+        assert_eq!(due(GRACE, MAX_FILE_BYTES), budget(MAX_FILE_BYTES));
     }
 
     #[test]
