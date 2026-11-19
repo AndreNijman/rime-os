@@ -124,9 +124,12 @@ object Introductions {
         machines: List<PairedMachine>,
     ): Boolean {
         if (companion || autoJoin != true || !unlocked || offer == null) return false
-        if (offer.expiresMs in 1..<nowMs) return false
+        if (lapsed(offer, nowMs)) return false
         return machines.none { it.desktopKey == offer.key }
     }
+
+    /** Whether [offer] ran out before [nowMs]; an offer with no time on it never does. */
+    fun lapsed(offer: PairingOffer, nowMs: Long): Boolean = offer.expiresMs in 1..<nowMs
 
     /** The offer in a `join_offer`, or null when it does not decode. */
     fun decode(payload: String): PairingOffer? =

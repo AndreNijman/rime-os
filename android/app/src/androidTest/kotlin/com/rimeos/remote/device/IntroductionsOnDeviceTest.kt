@@ -12,6 +12,7 @@ import com.rimeos.remote.core.agent.AgentError
 import com.rimeos.remote.core.agent.MachineLink
 import com.rimeos.remote.core.phone.Introductions
 import com.rimeos.remote.data.MachineRepository
+import com.rimeos.remote.link.DeviceNotices
 import com.rimeos.remote.link.LinkHub
 import com.rimeos.remote.pairing.GatedBox
 import java.security.SecureRandom
@@ -104,6 +105,7 @@ class IntroductionsOnDeviceTest {
         runCatching { hub.setAutoJoin(false) }
         setSwitch(null)
         hub.lock()
+        DeviceNotices.cancelAll(context)
     }
 
     // ── 1. Flow A, removal authority, a removal followed and never undone ──

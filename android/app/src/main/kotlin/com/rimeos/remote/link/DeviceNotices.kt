@@ -49,7 +49,9 @@ internal class DeviceNotices(private val context: Context) {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(open)
             .build()
-        val id = synchronized(this) { next.also { next = if (it >= BASE_ID + 50) BASE_ID else it + 1 } }
+        // A few ids, reused: Android shows at most 50 notifications of one
+        // app, and these must never crowd out an agent's alert.
+        val id = synchronized(this) { next.also { next = if (it >= BASE_ID + KEPT - 1) BASE_ID else it + 1 } }
         runCatching { NotificationManagerCompat.from(context).notify(id, notification) }
     }
 
@@ -67,5 +69,14 @@ internal class DeviceNotices(private val context: Context) {
 
         /** Clear of the ids `NotificationContent` derives for agent alerts. */
         private const val BASE_ID: Int = 0x52_4d_00
+
+        /** How many of these notices stay shown; an older one is replaced. */
+        const val KEPT: Int = 5
+
+        /** Take every notice down. */
+        fun cancelAll(context: Context) {
+            val manager = NotificationManagerCompat.from(context)
+            for (id in BASE_ID until BASE_ID + KEPT) manager.cancel(id)
+        }
     }
 }

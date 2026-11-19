@@ -100,6 +100,9 @@ class IntroductionsTest {
         assertFalse(Introductions.accept(false, true, true, null, 1_000, held), "no offer")
         assertFalse(Introductions.accept(false, true, true, offer(2, expiresMs = 999), 1_000, held), "expired")
         assertFalse(Introductions.accept(false, true, true, offer(1), 1_000, held), "already paired")
+        assertTrue(Introductions.lapsed(offer(2, expiresMs = 999), 1_000))
+        assertFalse(Introductions.lapsed(offer(2, expiresMs = 1_000), 1_000), "good until its last millisecond")
+        assertFalse(Introductions.lapsed(offer(2, expiresMs = 0), 1_000), "no time on it")
     }
 
     @Test

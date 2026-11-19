@@ -189,6 +189,9 @@ class LinkHub private constructor(private val app: Context) {
     ) {
         val throttle = ReportThrottle()
 
+        /** Whether Flow A has looked since this connection, or the switch, last changed. */
+        @Volatile var looked: Boolean = false
+
         /** The call this connection was last told of (§2.12); only its sender changes it. */
         var toldCall: Calls.Now = Calls.Now.IDLE_NOW
     }
@@ -919,8 +922,12 @@ class LinkHub private constructor(private val app: Context) {
                 lane.throttle.sent(level, charging, now, network, dnd, can)
                 // Flow A follows a report the computer took: it gives no card
                 // before it has heard join. One unlock opens one machine, so
-                // each computer's first report looks at all of them again.
-                if (Introductions.CAN_JOIN in can) scope.launch { runCatching { introduceAll() } }
+                // each computer's first report looks at all of them again;
+                // a later report (the battery moved) does not.
+                if (Introductions.CAN_JOIN in can && !lane.looked) {
+                    lane.looked = true
+                    scope.launch { runCatching { introduceAll() } }
+                }
             }
             .onFailure { Log.i(TAG, "${machine.machine}: report not taken: ${it.message}") }
     }
@@ -940,6 +947,7 @@ class LinkHub private constructor(private val app: Context) {
         if (!live) return
         for (lane in reportLanes.values) {
             lane.throttle.reset()
+            lane.looked = false
             lane.wake.trySend(Unit)
         }
     }
@@ -1693,7 +1701,16 @@ class LinkHub private constructor(private val app: Context) {
         if (!_pendingJoin.compareAndSet(p, null)) return null
         val now = System.currentTimeMillis()
         val machines = withContext(Dispatchers.IO) { repository.loadBlocking().machines }
-        if (!Introductions.accept(false, autoJoin, _unlocked.value, p.offer, now, machines)) return null
+        if (!Introductions.accept(false, autoJoin, _unlocked.value, p.offer, now, machines)) {
+            // Said, not dropped: the person was told to open the app for it.
+            if (Introductions.lapsed(p.offer, now)) {
+                notice(
+                    "The offer to join ${p.offer.machine} ran out before Rime Remote was opened. " +
+                        "${p.by} offers again within the hour while this phone stays connected to it.",
+                )
+            }
+            return null
+        }
         return try {
             val paired = pairing.pair(
                 offer = p.offer,
