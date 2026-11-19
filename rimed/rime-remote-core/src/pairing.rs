@@ -320,72 +320,10 @@ pub fn complete(
     Ok(device)
 }
 
-/// Complete a pairing on an offer another computer asked for: the same
-/// rule as [`complete`], except that the phone is recorded as introduced by
-/// `by` ([`crate::device::DeviceStore::pair_introduced`]), so its key opens
-/// only a companion session until a person here allows it, and a key this
-/// machine knows in any state is refused.
-pub fn complete_introduced(
-    offer: &mut Offer,
-    request: &PairingRequest,
-    store: &mut crate::device::DeviceStore,
-    by: crate::device::Introducer,
-    now_ms: u64,
-) -> Result<crate::device::Device, PairingError> {
-    offer.redeem(
-        &crate::b64_decode(&request.token).unwrap_or_default(),
-        now_ms,
-    )?;
-    let device = store.pair_introduced(
-        &request.key,
-        &request.name,
-        by,
-        now_ms,
-        request.user_verification,
-    )?;
-    Ok(device)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::device::DeviceStore;
-
-    #[test]
-    fn a_brought_phone_is_introduced_single_use_and_its_offer_lasts_two_minutes() {
-        use crate::device::{Introducer, Scope};
-        let mut store = DeviceStore::default();
-        let mut offer = Offer::lasting(1_000, PEER_OFFER_TTL_MS);
-        assert_eq!(offer.expires_ms(), 1_000 + 120_000);
-        let by = Introducer { id: "desk".into(), name: "Desk".into() };
-        let request = |k: u8, token: String| PairingRequest {
-            key: crate::b64_encode(&[k; 32]),
-            name: "pixel".into(),
-            token,
-            user_verification: true,
-        };
-        // A wrong token leaves the offer for the right one.
-        let wrong = request(1, crate::b64_encode(&[0u8; TOKEN_BYTES]));
-        assert!(matches!(complete_introduced(&mut offer, &wrong, &mut store, by.clone(), 2_000), Err(PairingError::BadToken)));
-        let token = offer.token_base64();
-        let d = complete_introduced(&mut offer, &request(1, token.clone()), &mut store, by.clone(), 2_000)
-            .expect("paired");
-        assert_eq!(d.introduced_by.as_ref(), Some(&by));
-        assert!(d.requires_user_verification);
-        assert_eq!(store.authenticate(&crate::b64_encode(&[1; 32])).map(|(_, s)| s), Some(Scope::Companion));
-        // Single use.
-        assert!(matches!(
-            complete_introduced(&mut offer, &request(2, token), &mut store, by.clone(), 2_001),
-            Err(PairingError::BadToken)
-        ));
-        // Expired at two minutes.
-        let mut late = Offer::lasting(1_000, PEER_OFFER_TTL_MS);
-        let token = late.token_base64();
-        assert!(matches!(
-            complete_introduced(&mut late, &request(3, token), &mut store, by, 121_000),
-            Err(PairingError::BadToken)
-        ));
-    }
 
     fn offer_text(o: &Offer, key: &str) -> PairingOffer {
         PairingOffer {

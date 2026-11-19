@@ -338,7 +338,12 @@ pub fn on_action(state: &State, id: &str, key: &str, action: &str) -> bool {
 
 /// `peer_offer` from computer `peer`: an offer for its phone, or why not.
 pub fn answer_peer_offer(state: &State, peer: &str) -> Vec<u8> {
-    let now = rime_remote_core::now_ms();
+    answer_peer_offer_at(state, peer, rime_remote_core::now_ms())
+}
+
+/// [`answer_peer_offer`] at `now`: the offer lives [`PEER_OFFER_TTL_MS`] from
+/// then, and [`complete`] redeems it only before that.
+fn answer_peer_offer_at(state: &State, peer: &str, now: u64) -> Vec<u8> {
     // Offers first, then the store, here and in `complete`: one order.
     let mut offers = lock(&state.intro.offers);
     offers.retain(|o| o.offer.is_live(now));
@@ -686,6 +691,45 @@ mod tests {
         assert!(matches!(redeem(&state, &v, 2), Err(PairingError::BadToken)));
         // The human offer slot is untouched and empty.
         assert!(state.offer.lock().expect("offer").is_none());
+    }
+
+    #[test]
+    fn a_peer_offer_lasts_two_minutes_from_when_it_was_asked_for_and_not_a_moment_more() {
+        let (state, _dir) = a_state("intro-offer-ttl");
+        let c = a_peer(&state, 7);
+        let ask_at = |now: u64| -> Value { serde_json::from_slice(&answer_peer_offer_at(&state, &c.id, now)).expect("json") };
+        let request = |v: &Value, seed: u8| PairingRequest {
+            key: rime_remote_core::b64_encode(&[seed; 32]),
+            name: format!("phone {seed}"),
+            token: PairingOffer::decode(v["offer"].as_str().expect("offer")).expect("decodes").token,
+            user_verification: true,
+        };
+        let t0 = 1_800_000_000_000;
+        // Asked for at t0: good until t0 + two minutes, by the reply and by
+        // the payload the phone gets. (Literal, not the constant: a change
+        // to the constant has to change this test too.)
+        let v = ask_at(t0);
+        assert_eq!(v["reply"], "peer_offer", "{v}");
+        assert_eq!(v["expires_ms"].as_u64(), Some(t0 + 120_000), "{v}");
+        let payload = PairingOffer::decode(v["offer"].as_str().expect("offer")).expect("decodes");
+        assert_eq!(payload.expires_ms, t0 + 120_000);
+        // A wrong token is refused and does not spend it.
+        let mut wrong = request(&v, 1);
+        wrong.token = rime_remote_core::b64_encode(&[0; 16]);
+        assert!(matches!(complete(&state, &wrong, t0 + 1), Err(PairingError::BadToken)));
+        // A moment before it runs out it pairs, introduced, keeping what the
+        // phone said about its key.
+        let d = complete(&state, &request(&v, 1), t0 + 119_999).expect("paired just in time");
+        assert_eq!(d.introduced_by.as_ref().map(|i| i.id.as_str()), Some(c.id.as_str()));
+        assert!(d.requires_user_verification);
+        // The next one, asked for later, is refused at its two minutes, the
+        // phone is not recorded, and the peer may ask again at that instant.
+        let t1 = t0 + 600_000;
+        let v = ask_at(t1);
+        assert_eq!(v["expires_ms"].as_u64(), Some(t1 + 120_000), "{v}");
+        assert!(matches!(complete(&state, &request(&v, 2), t1 + 120_000), Err(PairingError::BadToken)));
+        assert!(state.devices().expect("store").authenticate(&rime_remote_core::b64_encode(&[2; 32])).is_none());
+        assert_eq!(ask_at(t1 + 120_000)["reply"], "peer_offer", "an expired offer still counts as outstanding");
     }
 
     #[test]
