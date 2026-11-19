@@ -350,6 +350,7 @@ mod tests {
             learned: false,
             introduced_by: None,
             allowed_ms: None,
+            share: Default::default(),
         };
         assert!(refuses(&state, &own));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -403,6 +404,7 @@ mod tests {
             learned: false,
             introduced_by: None,
             allowed_ms: None,
+            share: Default::default(),
         }
     }
 

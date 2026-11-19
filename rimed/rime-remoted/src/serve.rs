@@ -1031,7 +1031,7 @@ fn reply_to(state: &State, agentd: &Path, device_id: &str, scope: Scope, connect
     // Another computer first, and only: its own short list, answered here,
     // never routed and never forwarded. Membership is not authority.
     if scope == Scope::Peer {
-        return crate::computers::peer_reply(state, device_id, line);
+        return crate::computers::peer_reply(state, agentd, device_id, line);
     }
     let cmd = crate::companion::verb_of(line);
     if !crate::companion::allowed(scope, cmd.as_deref()) {
@@ -2048,12 +2048,41 @@ pub(crate) mod tests {
         let r = reply_to(&state, &agentd, "desk", Scope::Peer, 0, br#"{"cmd":"peer_hello"}"#);
         let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
         assert_eq!(v["reply"], "peer_hello", "{v}");
-        // The list is exactly these four: a verb added to it is a verb the
+        // The list is exactly these: a verb added to it is a verb the
         // refusals above stop trying, so it is named here and nowhere else.
         assert_eq!(
             crate::computers::PEER_VERBS,
-            ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence", "peer_offer"]
+            ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence", "peer_offer", "peer_clipboard"]
         );
+        // A clipboard copy from a computer that is not paired here, and from
+        // one that is but whose copies are not taken, never reaches
+        // rime-agentd; nor does one while the screen is locked or its lock
+        // unknown (the unit-test machine stub never says unlocked).
+        let clip = |text: &str, seq: u64| {
+            serde_json::json!({"cmd": "peer_clipboard", "text": text, "hash": crate::share::hash_hex(text),
+                               "origin": rime_remote_core::b64_encode(&[61; 32]), "seq": seq})
+            .to_string()
+        };
+        let v: serde_json::Value =
+            serde_json::from_slice(&reply_to(&state, &agentd, "desk", Scope::Peer, 0, clip("x", 1).as_bytes())).expect("json");
+        assert_eq!(v["kind"], "not_shared", "{v}");
+        let peer = {
+            let mut store = state.devices().expect("store");
+            let c = store.pair_computer(&[61; 32], &state.identity.public_bytes(), "desk", vec![], None, 1).expect("pair");
+            state.save_devices(&store).expect("save");
+            c
+        };
+        let v: serde_json::Value =
+            serde_json::from_slice(&reply_to(&state, &agentd, &peer.id, Scope::Peer, 0, clip("x", 2).as_bytes())).expect("json");
+        assert_eq!(v["kind"], "not_shared", "{v}");
+        {
+            let mut store = state.devices().expect("store");
+            store.set_computer_clipboard(&peer.id, false, true).expect("on");
+            state.save_devices(&store).expect("save");
+        }
+        let v: serde_json::Value =
+            serde_json::from_slice(&reply_to(&state, &agentd, &peer.id, Scope::Peer, 0, clip("x", 3).as_bytes())).expect("json");
+        assert_eq!((v["applied"].clone(), v["why"].clone()), (serde_json::json!(false), serde_json::json!("locked")), "{v}");
         for (line, kind) in [
             (&br#"{"cmd":"peer_tombstones","tombstones":[]}"#[..], "peer_tombstones"),
             (br#"{"cmd":"peer_presence","presence":{"name":"desk"}}"#, "peer_presence"),

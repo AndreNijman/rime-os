@@ -119,6 +119,19 @@ impl Echo {
         }
     }
 
+    /// Whether `text` is what any phone put here less than [`ECHO_FOR`] ago:
+    /// a copy that came from a phone, which goes to no other computer
+    /// (§2.15's echo rule).
+    pub fn came_from_a_phone(&self, text: &str) -> bool {
+        self.came_from_a_phone_at(text, Instant::now())
+    }
+
+    fn came_from_a_phone_at(&self, text: &str, now: Instant) -> bool {
+        lock(&self.last)
+            .values()
+            .any(|(t, at)| t == text && now.saturating_duration_since(*at) < ECHO_FOR)
+    }
+
     /// Revoke.
     pub fn forget(&self, device_id: &str) {
         lock(&self.last).remove(device_id);
@@ -194,5 +207,15 @@ mod tests {
         echo.wrote_at("pixel", "x".into(), t0);
         echo.forget("pixel");
         assert!(!echo.is_echo_at("pixel", "x", t0));
+    }
+
+    #[test]
+    fn a_copy_from_any_phone_is_known_for_the_echo_window_only() {
+        let echo = Echo::default();
+        let t0 = Instant::now();
+        echo.wrote_at("p1", "from the phone".into(), t0);
+        assert!(echo.came_from_a_phone_at("from the phone", t0 + Duration::from_secs(9)));
+        assert!(!echo.came_from_a_phone_at("typed here", t0 + Duration::from_secs(1)));
+        assert!(!echo.came_from_a_phone_at("from the phone", t0 + ECHO_FOR));
     }
 }

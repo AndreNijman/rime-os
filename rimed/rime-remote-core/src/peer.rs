@@ -168,6 +168,29 @@ pub struct Listed {
     pub presence: Option<Presence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_ms: Option<u64>,
+    /// The sharing switches as they count right now (§2.15), from the
+    /// record's [`crate::device::Share`]: all off for a computer that is
+    /// removed, or introduced and not allowed yet.
+    #[serde(default)]
+    pub clipboard_send: bool,
+    #[serde(default)]
+    pub clipboard_receive: bool,
+    #[serde(default)]
+    pub files: bool,
+}
+
+impl Listed {
+    /// A record as a listing shows it, with no presence.
+    pub fn of(computer: crate::device::Device) -> Listed {
+        Listed {
+            clipboard_send: computer.sends_clipboard(),
+            clipboard_receive: computer.takes_clipboard(),
+            files: computer.takes_files(),
+            computer,
+            presence: None,
+            presence_ms: None,
+        }
+    }
 }
 
 #[cfg(test)]

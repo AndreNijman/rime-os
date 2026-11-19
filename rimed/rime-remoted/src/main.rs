@@ -48,6 +48,7 @@ mod proxy;
 mod push;
 mod relay;
 mod serve;
+mod share;
 mod state;
 
 use std::net::TcpListener;

@@ -59,10 +59,23 @@ use crate::state::State;
 
 /// The only verbs a peer session may send. Everything else is refused before
 /// it is routed anywhere.
-pub const PEER_VERBS: [&str; 5] = ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence", crate::intro::PEER_VERB];
+pub const PEER_VERBS: [&str; 6] = [
+    "remote_hello",
+    "peer_hello",
+    "peer_tombstones",
+    "peer_presence",
+    crate::intro::PEER_VERB,
+    crate::share::CLIP_VERB,
+];
 
 /// What a peer's `remote_hello` lists.
-pub const PEER_FEATURES: [&str; 4] = ["peer_hello", "peer_tombstones", "peer_presence", crate::intro::PEER_VERB];
+pub const PEER_FEATURES: [&str; 5] = [
+    "peer_hello",
+    "peer_tombstones",
+    "peer_presence",
+    crate::intro::PEER_VERB,
+    crate::share::CLIP_VERB,
+];
 
 /// The `kind` of the refusal a peer gets for anything outside the list.
 pub const REFUSAL: &str = "not_allowed";
@@ -87,7 +100,7 @@ pub fn refusal(what: &str) -> Vec<u8> {
 /// The reply to one control line from the session of paired computer
 /// `device_id`. Never `None`, never forwarded: a line nothing here answers is
 /// refused.
-pub fn peer_reply(state: &State, device_id: &str, line: &[u8]) -> Vec<u8> {
+pub fn peer_reply(state: &State, agentd: &std::path::Path, device_id: &str, line: &[u8]) -> Vec<u8> {
     let cmd = crate::companion::verb_of(line);
     match cmd.as_deref() {
         Some(c) if PEER_VERBS.contains(&c) && c == "remote_hello" => json!({
@@ -113,6 +126,11 @@ pub fn peer_reply(state: &State, device_id: &str, line: &[u8]) -> Vec<u8> {
         // An offer for the peer's phone (intro.rs): its own rule decides.
         Some(c) if PEER_VERBS.contains(&c) && c == crate::intro::PEER_VERB => {
             crate::intro::answer_peer_offer(state, device_id)
+        }
+        // A clipboard copy (share.rs): its own checks decide, and what reaches
+        // rime-agentd is a request built there, never this line.
+        Some(c) if PEER_VERBS.contains(&c) && c == crate::share::CLIP_VERB => {
+            crate::share::answer_clip(state, agentd, device_id, line)
         }
         other => refusal(other.unwrap_or("that request")),
     }
@@ -446,9 +464,9 @@ pub fn list(state: &State) -> Reply {
                 .map(|c| {
                     let last = c.is_active().then(|| state.presence.get(&c.id)).flatten();
                     rime_remote_core::peer::Listed {
-                        computer: c.clone(),
                         presence: last.as_ref().map(|(p, _)| p.clone()),
                         presence_ms: last.map(|(_, at)| at),
+                        ..rime_remote_core::peer::Listed::of(c.clone())
                     }
                 })
                 .collect(),
@@ -476,6 +494,7 @@ pub fn remove(state: &State, computer: &str) -> Reply {
     drop(store);
     state.drop_connections_for(&c.id);
     state.presence.forget(&c.id);
+    state.sharing.forget(&c.id);
     // Tell it now, so it removes this computer too (`presence.rs`).
     state.refresh.tell_now(&c.id);
     // And the phones, so they forget it (intro.rs).
@@ -503,6 +522,36 @@ pub fn forget(state: &State, computer: &str) -> Reply {
     drop(store);
     state.refresh.poke();
     Reply::ComputerForgotten { id: c.id, name: c.name }
+}
+
+/// `rime remote computers clipboard|files <computer>`: change one of this
+/// computer's sharing switches for another computer with `set`, save, and
+/// answer with the switches as they now count.
+pub fn share(
+    state: &State,
+    computer: &str,
+    set: impl FnOnce(&mut rime_remote_core::device::DeviceStore, &str) -> Result<Device, rime_remote_core::device::StoreError>,
+) -> Reply {
+    let mut store = match state.devices() {
+        Ok(s) => s,
+        Err(e) => return Reply::Error { message: e.to_string() },
+    };
+    let c = match set(&mut store, computer) {
+        Ok(c) => c,
+        Err(e) => return Reply::Error { message: e.to_string() },
+    };
+    if let Err(e) = state.save_devices(&store) {
+        return Reply::Error {
+            message: format!("the computer was not written: {e}"),
+        };
+    }
+    Reply::ComputerShared {
+        clipboard_send: c.sends_clipboard(),
+        clipboard_receive: c.takes_clipboard(),
+        files: c.takes_files(),
+        id: c.id,
+        name: c.name,
+    }
 }
 
 /// `rime remote computers allow <computer>`: trust a computer a phone
@@ -628,8 +677,10 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_gets_its_four_verbs_and_a_refusal_for_everything_else() {
+    fn a_peer_gets_its_verbs_and_a_refusal_for_everything_else() {
         let (state, _dir) = crate::serve::tests::a_state("peer-reply");
+        let agentd = std::path::Path::new("/nonexistent/agentd.sock");
+        let peer_reply = |state: &State, id: &str, line: &[u8]| peer_reply(state, agentd, id, line);
         let hello: serde_json::Value =
             serde_json::from_slice(&peer_reply(&state, "desk", br#"{"cmd":"remote_hello"}"#)).expect("json");
         assert_eq!(hello["scope"], "peer");
@@ -641,6 +692,11 @@ mod tests {
             let r: serde_json::Value = serde_json::from_slice(&peer_reply(&state, "desk", line)).expect("json");
             assert_eq!(r["kind"], REFUSAL, "{}", String::from_utf8_lossy(line));
         }
+        // A clipboard copy from a computer this one does not share with is
+        // answered by its own check, and refused.
+        let r: serde_json::Value =
+            serde_json::from_slice(&peer_reply(&state, "desk", br#"{"cmd":"peer_clipboard","text":"x"}"#)).expect("json");
+        assert_eq!(r["kind"], "not_shared", "{r}");
     }
 
     #[test]

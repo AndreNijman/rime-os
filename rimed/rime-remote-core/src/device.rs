@@ -196,6 +196,41 @@ pub struct Device {
     /// which time it is trusted like one paired here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_ms: Option<u64>,
+    /// For another computer only: what this computer shares with it. Set by
+    /// a person here (`rime remote computers clipboard|files`) and by nothing
+    /// else: never read from another computer or a phone, never sent to one,
+    /// and cleared when the computer is removed. See [`Share`].
+    #[serde(default, skip_serializing_if = "Share::is_default")]
+    pub share: Share,
+}
+
+/// What this computer shares with one other computer (§2.15).
+///
+/// Each switch is this computer's half: a copy goes from A to B only when A's
+/// `clipboard_send` for B and B's `clipboard_receive` for A are both on. None
+/// of them counts for a computer that is removed, or introduced and not
+/// allowed yet ([`Device::trusted`]); see [`Device::sends_clipboard`] and its
+/// neighbours, which are the only readers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Share {
+    /// This computer's text copies go to that computer. Off unless turned on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clipboard_send: bool,
+    /// Copies from that computer are put on this computer's clipboard. Off
+    /// unless turned on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clipboard_receive: bool,
+    /// Files that computer sends are saved in Downloads here. `None` is the
+    /// default, which is on for a trusted computer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<bool>,
+}
+
+impl Share {
+    /// Nothing set: written as no field at all.
+    pub fn is_default(&self) -> bool {
+        *self == Share::default()
+    }
 }
 
 /// Who introduced a device: shown as "added by <name>".
@@ -305,6 +340,25 @@ impl Device {
     pub fn trusted(&self) -> bool {
         self.introduced_by.is_none() || self.allowed_ms.is_some()
     }
+
+    /// This computer's copies go to this (other) computer: it is paired,
+    /// trusted, and its send switch is on.
+    pub fn sends_clipboard(&self) -> bool {
+        self.is_active() && self.trusted() && self.share.clipboard_send
+    }
+
+    /// Copies from this (other) computer are put on the clipboard here: it is
+    /// paired, trusted, and its receive switch is on. An introduced computer
+    /// not allowed yet never gets this, whatever the switch says.
+    pub fn takes_clipboard(&self) -> bool {
+        self.is_active() && self.trusted() && self.share.clipboard_receive
+    }
+
+    /// Files from this (other) computer are saved here: it is paired,
+    /// trusted, and its files switch is not off (on by default).
+    pub fn takes_files(&self) -> bool {
+        self.is_active() && self.trusted() && self.share.files.unwrap_or(true)
+    }
 }
 
 /// Why a device store operation failed.
@@ -331,6 +385,11 @@ pub enum StoreError {
     /// because it is one. One message for every reason, so the answer does
     /// not say which other device holds it.
     KeyInUse,
+    /// Sharing with a computer a phone introduced, before a person here
+    /// allowed it.
+    NotAllowedYet(String),
+    /// Sharing with a removed computer.
+    NotShared(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -352,6 +411,12 @@ impl std::fmt::Display for StoreError {
             ),
             StoreError::NotRemoved(name) => write!(f, "'{name}' is not removed, so there is nothing to forget"),
             StoreError::Revoked(name) => write!(f, "'{name}' was removed from this computer, so it cannot be allowed"),
+            StoreError::NotAllowedYet(name) => write!(
+                f,
+                "'{name}' was added by your phone and is not allowed yet, so nothing is shared with it; \
+                 run `rime remote computers allow` for it first"
+            ),
+            StoreError::NotShared(name) => write!(f, "'{name}' was removed from this computer, so nothing is shared with it"),
             StoreError::KeyInUse => write!(
                 f,
                 "that key is already known to this machine; generate a new one"
@@ -617,6 +682,7 @@ impl DeviceStore {
             learned: false,
             introduced_by: None,
             allowed_ms: None,
+            share: Share::default(),
         };
         self.devices.insert(id, device.clone());
         Ok(device)
@@ -712,6 +778,7 @@ impl DeviceStore {
             learned: false,
             introduced_by: Some(by),
             allowed_ms: None,
+            share: Share::default(),
         };
         self.devices.insert(id, device.clone());
         Ok(device)
@@ -802,6 +869,7 @@ impl DeviceStore {
             learned: false,
             introduced_by: Some(by),
             allowed_ms: None,
+            share: Share::default(),
         };
         self.computers.insert(id, computer.clone());
         Ok(Introduced::Added(Box::new(computer)))
@@ -873,6 +941,9 @@ impl DeviceStore {
         let paired_ms = earlier.map(|c| c.paired_ms).unwrap_or(now_ms);
         let last_seen_ms = earlier.and_then(|c| c.last_seen_ms);
         let forgotten_ms = self.computers.get(&id).and_then(|c| c.forgotten_ms);
+        // What a person here chose to share with it stays through a refresh;
+        // a computer paired again after a removal starts with nothing shared.
+        let share = earlier.map(|c| c.share).unwrap_or_default();
         // A code proves a person at each end, so an introduced computer
         // paired with one is one paired here from now on.
         let computer = Device {
@@ -893,6 +964,7 @@ impl DeviceStore {
             learned: false,
             introduced_by: None,
             allowed_ms: None,
+            share,
         };
         self.computers.insert(id, computer.clone());
         Ok(computer)
@@ -921,6 +993,41 @@ impl DeviceStore {
             c.revoked_ms = Some(c.forgotten_ms.map_or(now_ms, |f| now_ms.max(f + 1)));
             c.told_ms = None;
         }
+        // Nothing is shared with a removed computer, and nothing chosen for
+        // it before comes back if it is ever paired again.
+        c.share = Share::default();
+        Ok(c.clone())
+    }
+
+    /// `rime remote computers clipboard`: set this computer's two clipboard
+    /// switches for another computer. Turning either on is refused for a
+    /// removed computer and for one introduced and not allowed yet; turning
+    /// both off is always allowed.
+    pub fn set_computer_clipboard(
+        &mut self,
+        id_or_name: &str,
+        send: bool,
+        receive: bool,
+    ) -> Result<Device, StoreError> {
+        let id = resolve_in(&self.computers, id_or_name)?;
+        let c = self.computers.get_mut(&id).expect("resolved");
+        if send || receive {
+            may_share_with(c)?;
+        }
+        c.share.clipboard_send = send;
+        c.share.clipboard_receive = receive;
+        Ok(c.clone())
+    }
+
+    /// `rime remote computers files`: whether files from another computer
+    /// are saved here. Turning it on is refused like the clipboard's.
+    pub fn set_computer_files(&mut self, id_or_name: &str, on: bool) -> Result<Device, StoreError> {
+        let id = resolve_in(&self.computers, id_or_name)?;
+        let c = self.computers.get_mut(&id).expect("resolved");
+        if on {
+            may_share_with(c)?;
+        }
+        c.share.files = Some(on);
         Ok(c.clone())
     }
 
@@ -1053,6 +1160,7 @@ impl DeviceStore {
                             learned: true,
                             introduced_by: None,
                             allowed_ms: None,
+                            share: Share::default(),
                         },
                     );
                 }
@@ -1079,6 +1187,7 @@ impl DeviceStore {
         }
         c.revoked_ms = Some(removed_ms);
         c.told_ms = None;
+        c.share = Share::default();
         out.changed = true;
     }
 
@@ -1200,6 +1309,17 @@ fn own_key_scope(d: &Device) -> Scope {
 }
 
 /// Mark an introduced record allowed, at the first allow.
+/// Whether a switch may be turned on for computer `c`.
+fn may_share_with(c: &Device) -> Result<(), StoreError> {
+    if !c.is_active() {
+        return Err(StoreError::NotShared(c.name.clone()));
+    }
+    if !c.trusted() {
+        return Err(StoreError::NotAllowedYet(c.name.clone()));
+    }
+    Ok(())
+}
+
 fn allow_in(d: &mut Device, now_ms: u64) -> Result<Device, StoreError> {
     if !d.is_active() {
         return Err(StoreError::Revoked(d.name.clone()));

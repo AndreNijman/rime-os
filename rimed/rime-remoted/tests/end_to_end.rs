@@ -4024,3 +4024,166 @@ fn a_computer_brings_its_phone_to_a_new_computer_as_a_companion_until_a_person_a
     assert_eq!(told["event"], "device_removed", "{told}");
     assert_eq!(told["key"], key_b.as_str(), "{told}");
 }
+
+/// What the agentd desktop stub of `h` holds as the clipboard, once it holds
+/// `want`, or what it holds after `within` (None: never written).
+fn clipboard_of(h: &Harness, want: &str, within: Duration) -> Option<String> {
+    let path = h.root.join("desk/clipboard");
+    let deadline = Instant::now() + within;
+    loop {
+        let now = std::fs::read_to_string(&path).ok();
+        if now.as_deref() == Some(want) || Instant::now() >= deadline {
+            return now;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A `peer_clipboard` line as computer `from` would send it.
+fn peer_clip(from: &Harness, text: &str, seq: u64) -> String {
+    serde_json::json!({"cmd": "peer_clipboard", "text": text, "hash": sha256_hex(text),
+        "origin": identity_of(from).key(), "seq": seq})
+    .to_string()
+}
+
+const UNLOCKED: fn() -> serde_json::Value = || serde_json::json!({"locked": false});
+
+#[test]
+fn paired_computers_share_a_copy_only_where_both_turned_it_on_and_it_never_comes_back() {
+    let a = harness!("share-a");
+    let b = harness!("share-b");
+    set_machine(&a, UNLOCKED());
+    set_machine(&b, UNLOCKED());
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+
+    // Off by default: a copy here goes to no computer, and B takes nothing.
+    let r = a.control(r#"{"cmd":"clipboard","text":"nobody asked"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    let mut peer = identity_of(&a).connect(&b).expect("A is paired with B");
+    let r = peer.call(&peer_clip(&a, "pushed anyway", 1));
+    assert_eq!(r["kind"], "not_shared", "{r}");
+    let (rc, said) = rime_remote(&a, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("clipboard not shared, files taken"), "{said}");
+
+    // A sends, B takes: one direction only.
+    let (rc, said) = rime_remote(&a, &["computers", "clipboard", &b_on_a, "send"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let (rc, said) = rime_remote(&b, &["computers", "clipboard", &a_on_b, "receive"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let listed = computer_on(&a, &b_on_a);
+    assert_eq!((listed["clipboard_send"].as_bool(), listed["clipboard_receive"].as_bool()), (Some(true), Some(false)), "{listed}");
+    let stored = std::fs::read_to_string(a.root.join("state/rime/remote/computers.json")).expect("computers.json");
+    assert!(stored.contains("clipboard_send"), "the switch is not kept: {stored}");
+
+    let r = a.control(r#"{"cmd":"clipboard","text":"copied on a"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0, "computers": 1}), "{r}");
+    assert_eq!(clipboard_of(&b, "copied on a", Duration::from_secs(15)).as_deref(), Some("copied on a"));
+    // B's Shell sees the change and hands it back: it goes nowhere, not to
+    // B's computers and not to B's phones.
+    let r = b.control(r#"{"cmd":"clipboard","text":"copied on a"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    // B does not send: a copy there reaches no computer.
+    let r = b.control(r#"{"cmd":"clipboard","text":"copied on b"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+
+    // Never a sensitive copy, never one over the cap.
+    let r = a.control(r#"{"cmd":"clipboard","text":"hunter2","sensitive":true}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    let big = serde_json::json!({"cmd": "clipboard", "text": "x".repeat(8193)});
+    assert_eq!(a.control(&big.to_string()), serde_json::json!({"reply": "clipboard_sent", "reached": 0}));
+
+    // What B answers a peer line, each refusal in its own words.
+    let seq = rime_remote_core::now_ms() * 10;
+    let r = peer.call(&peer_clip(&a, "straight from a", seq));
+    assert_eq!(r, serde_json::json!({"reply": "peer_clipboard", "applied": true}), "{r}");
+    assert_eq!(clipboard_of(&b, "straight from a", Duration::from_secs(5)).as_deref(), Some("straight from a"));
+    let r = peer.call(&peer_clip(&a, "the same seq again", seq));
+    assert_eq!(r["why"], "duplicate", "{r}");
+    let mut forged: serde_json::Value = serde_json::from_str(&peer_clip(&a, "forged", seq + 1)).unwrap();
+    forged["origin"] = serde_json::json!(identity_of(&b).key());
+    assert_eq!(peer.call(&forged.to_string())["kind"], "bad_request");
+    let mut wrong: serde_json::Value = serde_json::from_str(&peer_clip(&a, "wrong hash", seq + 2)).unwrap();
+    wrong["hash"] = serde_json::json!(sha256_hex("something else"));
+    assert_eq!(peer.call(&wrong.to_string())["kind"], "bad_request");
+    assert_eq!(peer.call(&peer_clip(&a, &"y".repeat(8193), seq + 3))["kind"], "too_large");
+    assert_eq!(clipboard_of(&b, "straight from a", Duration::ZERO).as_deref(), Some("straight from a"), "a refused line was written");
+    // Locked: dropped, never written, never kept for later.
+    set_machine(&b, serde_json::json!({"locked": true}));
+    let r = peer.call(&peer_clip(&a, "while locked", seq + 4));
+    assert_eq!(r, serde_json::json!({"reply": "peer_clipboard", "applied": false, "why": "locked"}), "{r}");
+    set_machine(&b, UNLOCKED());
+    assert_eq!(clipboard_of(&b, "straight from a", Duration::ZERO).as_deref(), Some("straight from a"));
+
+    // Both directions now. B's copy reaches A; A's Shell hands it back and it
+    // goes nowhere; A's earlier copy, echoed by B, is dropped by A.
+    let (rc, said) = rime_remote(&a, &["computers", "clipboard", &b_on_a, "on"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("both have it on"), "{said}");
+    let (rc, said) = rime_remote(&b, &["computers", "clipboard", &a_on_b, "on"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let r = b.control(r#"{"cmd":"clipboard","text":"copied on b"}"#);
+    assert_eq!(r["computers"], 1, "{r}");
+    assert_eq!(clipboard_of(&a, "copied on b", Duration::from_secs(15)).as_deref(), Some("copied on b"));
+    let r = a.control(r#"{"cmd":"clipboard","text":"copied on b"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "A sent B's copy on: {r}");
+    let mut back = identity_of(&b).connect(&a).expect("B is paired with A");
+    let r = back.call(&peer_clip(&b, "copied on a", rime_remote_core::now_ms() * 10));
+    assert_eq!(r["why"], "echo", "A took its own copy back: {r}");
+    assert_eq!(clipboard_of(&a, "copied on b", Duration::ZERO).as_deref(), Some("copied on b"));
+
+    // Off on A: A sends nothing more. Removed: B takes nothing more from A.
+    let (rc, said) = rime_remote(&a, &["computers", "clipboard", &b_on_a, "off"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert_eq!(a.control(r#"{"cmd":"clipboard","text":"after off"}"#)["computers"], serde_json::Value::Null);
+    let removed = b.control(&serde_json::json!({"cmd": "computer_remove", "computer": a_on_b}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    let r = b.control(&serde_json::json!({"cmd": "computer_clipboard", "computer": a_on_b, "send": true, "receive": true}).to_string());
+    assert_eq!(r["reply"], "error", "a removed computer's switch went on: {r}");
+}
+
+#[test]
+fn three_computers_share_one_copy_once_each_and_it_settles() {
+    let a = harness!("three-a");
+    let b = harness!("three-b");
+    let c = harness!("three-c");
+    for h in [&a, &b, &c] {
+        set_machine(h, UNLOCKED());
+    }
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    let Some((c_on_a, a_on_c)) = pair_computers(&a, &c) else { return };
+    let Some((c_on_b, b_on_c)) = pair_computers(&b, &c) else { return };
+    for (h, id) in [(&a, &b_on_a), (&a, &c_on_a), (&b, &a_on_b), (&b, &c_on_b), (&c, &a_on_c), (&c, &b_on_c)] {
+        let (rc, said) = rime_remote(h, &["computers", "clipboard", id, "on"], b"");
+        assert_eq!(rc, 0, "{said}");
+    }
+
+    // A copy on A reaches B and C directly.
+    let r = a.control(r#"{"cmd":"clipboard","text":"one copy"}"#);
+    assert_eq!(r["computers"], 2, "{r}");
+    assert_eq!(clipboard_of(&b, "one copy", Duration::from_secs(15)).as_deref(), Some("one copy"));
+    assert_eq!(clipboard_of(&c, "one copy", Duration::from_secs(15)).as_deref(), Some("one copy"));
+    // Both Shells hand it back; neither passes it on, so it settles.
+    for h in [&b, &c] {
+        let r = h.control(r#"{"cmd":"clipboard","text":"one copy"}"#);
+        assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    }
+    // A's clipboard was never written: nothing came back to it.
+    assert_eq!(clipboard_of(&a, "one copy", Duration::from_secs(2)), None, "the copy came back to A");
+
+    // A copy on B reaches A and C; C's hand-back goes nowhere, and A's
+    // clipboard holds B's copy and nothing after it.
+    let r = b.control(r#"{"cmd":"clipboard","text":"from b"}"#);
+    assert_eq!(r["computers"], 2, "{r}");
+    assert_eq!(clipboard_of(&a, "from b", Duration::from_secs(15)).as_deref(), Some("from b"));
+    assert_eq!(clipboard_of(&c, "from b", Duration::from_secs(15)).as_deref(), Some("from b"));
+    let r = c.control(r#"{"cmd":"clipboard","text":"from b"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    let r = a.control(r#"{"cmd":"clipboard","text":"from b"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+}

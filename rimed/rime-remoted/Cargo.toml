@@ -19,6 +19,8 @@ libc.workspace = true
 # Both are already in the lock through rimed.
 zbus.workspace = true
 tokio.workspace = true
+# The hash a clipboard copy or a file carries between computers (src/share.rs).
+sha2 = "0.10.9"
 
 # The end-to-end suite drives both daemons over their real sockets and reads
 # the replies as the daemon's own types, so `claude-remote-control` and the

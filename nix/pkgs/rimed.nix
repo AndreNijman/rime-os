@@ -267,6 +267,7 @@ let
       "changed_files_name_the_base_they_were_measured_against"
       "only_the_outgoing_sessions_system_grants_are_listed"
       "paired_computers_exchange_presence_and_a_peer_sending_garbage_has_nothing_kept"
+      "paired_computers_share_a_copy_only_where_both_turned_it_on_and_it_never_comes_back"
       "peek_reads_the_tail_without_attaching_or_resizing"
       "photos_are_refused_to_a_locked_phone_a_listing_dies_with_revoke_and_a_save_the_phone_never_starts_times_out"
       "rename_names_a_live_session_clears_it_and_refuses_what_it_should"
@@ -284,6 +285,7 @@ let
       "the_relay_carries_the_session_and_can_read_none_of_it"
       "the_status_line_prints_the_users_own_and_publishes_what_it_read"
       "the_task_spelling_from_section_sixteen_writes_the_packet_for_the_tasks_session"
+      "three_computers_share_one_copy_once_each_and_it_settles"
       "two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but_hello"
       "two_paired_computers_reach_each_other_through_the_relay"
     ];
