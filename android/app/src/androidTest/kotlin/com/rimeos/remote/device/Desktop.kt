@@ -317,6 +317,40 @@ open class Computer(private val brokerArg: String, private val lanArg: String) {
     }
 
     /**
+     * `rime remote <args>` typed by the person at this computer, for the
+     * introduction tests (contract §2.15): only `computers list|ping|allow|
+     * remove|forget` and `devices allow`, with plain ids. The broker's
+     * `{code, out, stderr}`; `out` is the parsed `--json` output or null.
+     */
+    fun remote(vararg args: String): JSONObject {
+        val reply = ask(JSONObject().put("cmd", "remote_cli").put("args", org.json.JSONArray(args.toList())).toString(), 120_000)
+        check(reply.optString("reply") == "ok") { "the broker did not run rime remote ${args.joinToString(" ")}: $reply" }
+        return reply
+    }
+
+    /** `rime remote computers list --json`: every computer this one knows, removed ones included. */
+    fun computers(): List<JSONObject> {
+        val reply = remote("computers", "list", "--json")
+        check(reply.optInt("code", -1) == 0) { "rime remote computers list failed: $reply" }
+        val a = reply.optJSONArray("out") ?: return emptyList()
+        return (0 until a.length()).map { a.getJSONObject(it) }
+    }
+
+    /** The computer this one lists with [key], or null. */
+    fun computerByKey(key: String): JSONObject? = computers().firstOrNull { it.optString("public_key") == key }
+
+    /**
+     * This run's rime-remoted output from byte [from] on, and the size of the
+     * whole, for a test that checks why something did not happen: take the
+     * size first, then read what came after it.
+     */
+    fun remotedLog(from: Long = 0): Pair<Long, String> {
+        val reply = ask(JSONObject().put("cmd", "remoted_log").put("from", from).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not read rime-remoted's output: $reply" }
+        return reply.getLong("size") to reply.getString("log")
+    }
+
+    /**
      * An SMS arriving on the EMULATOR from [number] (an emulator number:
      * 5554, 5556, 15555215556), through its console. The broker refuses on
      * any serial that is not an emulator.

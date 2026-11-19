@@ -813,6 +813,41 @@ def rime_cli(argv):
         out = None
     return p.returncode, out, p.stderr.decode(errors="replace").strip()[:600]
 
+# What the person at a computer types for introductions (contract §2.15),
+# and only that: the listing, ping, allow, remove and forget. Each argument
+# is a plain id or flag word; argv, never a shell string.
+REMOTE_CLI = {("computers", "list"), ("computers", "ping"), ("computers", "allow"), ("computers", "remove"),
+              ("computers", "forget"), ("devices", "allow")}
+
+def remote_cli(args):
+    """`rime remote <args>` at this computer, as the person there would type
+    it, for the introduction tests: exit code, JSON (with --json) and stderr."""
+    if (not isinstance(args, list) or len(args) < 2 or not all(isinstance(a, str) for a in args)
+            or (args[0], args[1]) not in REMOTE_CLI
+            or not all(a in ("--json", "--via") or (0 < len(a) <= 64 and all(c.isalnum() or c in "-_" for c in a))
+                       for a in args)):
+        return json.dumps({"reply": "error", "message": "remote_cli takes computers list|ping|allow|remove|forget "
+                           "and devices allow, with plain ids"})
+    code, out, err = rime_cli(["remote", *args])
+    return json.dumps({"reply": "ok", "code": code, "out": out, "stderr": err})
+
+def remoted_log(start):
+    """This run's rime-remoted output (its stderr) from byte `start` on, at
+    most 256 KiB, and the size of the whole: for a test that checks why
+    something did NOT happen, in what was written after a point it chose."""
+    try:
+        start = max(0, int(start or 0))
+        with open(os.path.join(ROOT, "remoted.log"), "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(min(start, size))
+            text = f.read(262144).decode(errors="replace")
+    except FileNotFoundError:
+        size, text = 0, ""
+    except (TypeError, ValueError):
+        return json.dumps({"reply": "error", "message": "remoted_log takes a byte offset"})
+    return json.dumps({"reply": "ok", "size": size, "log": text})
+
 def thumb_facts(path):
     """What the test asserts about one thumbnail on this computer: where it
     is, its mode, and whether any EXIF or APP1 segment survived in it."""
@@ -956,6 +991,10 @@ class H(socketserver.StreamRequestHandler):
                 out = photos_list(req.get("device"), req.get("limit"))
             elif cmd == "photos_save":
                 out = photos_save(req.get("device"), req.get("photo"))
+            elif cmd == "remote_cli":
+                out = remote_cli(req.get("args"))
+            elif cmd == "remoted_log":
+                out = remoted_log(req.get("from"))
             elif cmd == "photos_thumbs_dir":
                 out = photos_thumbs_dir(req.get("device"))
             elif cmd == "decide_locally":
