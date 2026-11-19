@@ -1371,7 +1371,12 @@ belongs to the graphical session, and the Shell watches it.
 ```json
 {"cmd":"clipboard","text":"…","sensitive":true}
 → {"reply":"clipboard_sent","reached":1}
+→ {"reply":"clipboard_sent","reached":1,"computers":2}
 ```
+
+- `computers` (absent for none) is how many paired computers the copy was
+  pushed to (§2.15, "Clipboard and files between computers"): only for a
+  request from origin `rime-shell` or `local-terminal`.
 
 - `text` is sent verbatim: not trimmed, line breaks kept. It is at most
   65,536 bytes of UTF-8. Larger text is refused (`{"reply":"error",…}` with
