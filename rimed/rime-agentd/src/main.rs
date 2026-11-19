@@ -187,6 +187,10 @@ fn run() -> Result<()> {
         eprintln!("rime-agentd: {said}");
     }
     spawn_expiry_thread(Arc::clone(&daemon));
+    // A save cut short by the last daemon's end left its temporary file in
+    // Downloads. After `bind`, for the same reason as the grants: a daemon
+    // that is about to fail to start must not touch a running one's files.
+    desktop::sweep_downloads();
 
     // Shutdown runs on its own thread waiting on a blocked signal set, rather
     // than in a handler: stopping sessions means taking locks and iterating a

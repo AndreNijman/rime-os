@@ -31,7 +31,11 @@
 //! session to [`peer_reply`] before anything else, which answers
 //! [`PEER_VERBS`] and refuses everything else: nothing from a peer reaches
 //! `rime-agentd`, nex, the computer's own verbs, the phone verbs, or the human
-//! gate, and a peer may open no channel. Controlling another computer's
+//! gate. A peer may open [`PEER_CHANNELS`] and no other channel: a file it
+//! sends (`files.rs`). Two of its verbs end in a request this process makes
+//! of `rime-agentd` itself, built from fields it checked, never a peer's line
+//! passed on: `clipboard_write` for a copy (`share.rs`) and `save_file` for
+//! a file. Controlling another computer's
 //! agents or terminals will be a local grant on the computer being
 //! controlled, per pair; it is not in this file and not in this release.
 //!
@@ -68,13 +72,17 @@ pub const PEER_VERBS: [&str; 6] = [
     crate::share::CLIP_VERB,
 ];
 
+/// The only channels a peer session may open.
+pub const PEER_CHANNELS: [&str; 1] = [crate::files::FILE_VERB];
+
 /// What a peer's `remote_hello` lists.
-pub const PEER_FEATURES: [&str; 5] = [
+pub const PEER_FEATURES: [&str; 6] = [
     "peer_hello",
     "peer_tombstones",
     "peer_presence",
     crate::intro::PEER_VERB,
     crate::share::CLIP_VERB,
+    crate::files::FILE_VERB,
 ];
 
 /// The `kind` of the refusal a peer gets for anything outside the list.

@@ -200,6 +200,11 @@ pub enum Request {
     /// Whether files another computer sends are saved here. A person at
     /// this machine only.
     ComputerFiles { computer: String, on: bool },
+    /// Send another computer a file: the open file rides the request line as
+    /// its one descriptor, `name` is what the other computer is offered.
+    /// A person at this machine only; answered once the other computer
+    /// saved it or refused it.
+    ComputerSend { computer: String, name: String },
 }
 
 /// What it answers.
@@ -332,6 +337,8 @@ pub enum Reply {
         files: bool,
     },
     DeviceAllowed { id: String, name: String },
+    /// Another computer saved a file sent to it, as `file` in its Downloads.
+    ComputerSent { id: String, name: String, file: String, bytes: u64 },
     /// Another computer answered `peer_hello`: what it calls itself, its
     /// protocol and build, the path and the time the whole dial took.
     ComputerPong {
@@ -494,6 +501,23 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::ComputerFiles { computer, on } => {
             crate::computers::share(state, &computer, |store, c| store.set_computer_files(c, on))
         }
+        Request::ComputerSend { computer, name } => computer_send(state, &computer, &name, fds),
+    }
+}
+
+/// `computer_send`: the one descriptor, sent to the other computer.
+fn computer_send(state: &State, computer: &str, name: &str, mut fds: Vec<OwnedFd>) -> Reply {
+    if fds.len() != 1 {
+        return Reply::error(format!(
+            "a file is sent as one open descriptor passed with the request (`rime remote computers send \
+             <computer> <file>`); this request carried {}",
+            fds.len()
+        ));
+    }
+    let file = std::fs::File::from(fds.remove(0));
+    match crate::files::send(state, computer, file, name) {
+        Ok(s) => Reply::ComputerSent { id: s.id, name: s.computer, file: s.name, bytes: s.bytes },
+        Err(why) => Reply::error(why),
     }
 }
 
@@ -582,6 +606,9 @@ fn authorized_by(
         // decision, like pairing. An agent could otherwise turn a computer's
         // clipboard into a feed.
         Request::ComputerClipboard { .. } | Request::ComputerFiles { .. } => computers_caller(peer, observe, may_share),
+        // The other computer saves what it is sent without asking, as a
+        // phone does: a person here only, like `send`.
+        Request::ComputerSend { .. } => computers_caller(peer, observe, may_send_to_computer),
         _ => own_user(peer),
     }
 }
@@ -665,6 +692,17 @@ pub fn may_share(origin: RequestOrigin) -> Result<(), String> {
     Err(format!(
         "a {origin} request cannot change what is shared with another computer: only a person at this \
          machine may. Run `rime remote computers clipboard` or `rime remote computers files` from a terminal"
+    ))
+}
+
+/// `computer_send`'s rule over a value.
+pub fn may_send_to_computer(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot send a file to another computer: it saves what it is sent without asking, \
+         so only a person at this machine may send. Run `rime remote computers send` from a terminal"
     ))
 }
 
@@ -1576,6 +1614,7 @@ mod tests {
             Request::DeviceAllow { device: "pixel".into() },
             Request::ComputerClipboard { computer: "desk".into(), send: true, receive: true },
             Request::ComputerFiles { computer: "desk".into(), on: true },
+            Request::ComputerSend { computer: "desk".into(), name: "a.txt".into() },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1652,6 +1691,11 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_share(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
+                Request::ComputerSend { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_send_to_computer(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
@@ -1691,6 +1735,29 @@ mod tests {
             r#"{"cmd":"computer_clipboard","computer":"desk","send":true,"receive":false}"#
         );
         assert_eq!(serde_json::to_string(&switches[2]).unwrap(), r#"{"cmd":"computer_files","computer":"desk","on":true}"#);
+    }
+
+    #[test]
+    fn only_a_person_here_may_send_another_computer_a_file() {
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let req = Request::ComputerSend { computer: "desk".into(), name: "a.txt".into() };
+        for o in RequestOrigin::ALL {
+            let verdict = authorized_by(&req, Some(me), |_| Ok(*o));
+            assert_eq!(verdict.is_ok(), o.is_local(), "{o}: {verdict:?}");
+            if let Err(why) = verdict {
+                assert!(why.contains(o.as_str()) && why.contains("rime remote computers send"), "{why}");
+            }
+        }
+        assert!(authorized_by(&req, Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"cmd":"computer_send","computer":"desk","name":"a.txt"}"#
+        );
     }
 
     #[test]

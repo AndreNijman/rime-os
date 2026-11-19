@@ -120,8 +120,11 @@ pub struct State {
     /// not sent straight back (§2.14).
     pub clip_echo: crate::clipboard::Echo,
     /// What sharing with other computers remembers: recent copies for the
-    /// echo rule, seqs, rates, pushes under way, transfers (§2.15).
+    /// echo rule, seqs, rates, pushes under way (§2.15).
     pub sharing: crate::share::Sharing,
+    /// Files arriving from other computers: slots, quota, and what each
+    /// saved file's notification shows (§2.15).
+    pub files: Arc<crate::files::Files>,
     /// Which Do Not Disturb was last handed the Shell, per phone (§2.9).
     focus_seen: crate::phone::FocusSeen,
     /// Where a phone's Do Not Disturb is written for the Shell; see
@@ -204,6 +207,7 @@ impl State {
             phones: Mutex::new(phones),
             clip_echo: crate::clipboard::Echo::default(),
             sharing: crate::share::Sharing::default(),
+            files: Arc::default(),
             focus_seen: crate::phone::FocusSeen::default(),
             focus_file: Mutex::new(None),
             nexd: Mutex::new(None),

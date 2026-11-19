@@ -50,8 +50,26 @@ const READ: Duration = Duration::from_secs(10);
 /// not there yet (a 409 in the moment between two of its waiting connections).
 const RELAY_RETRY: Duration = Duration::from_secs(5);
 
-trait Stream: Read + Write + Send {}
-impl<T: Read + Write + Send> Stream for T {}
+trait Stream: Read + Write + Send {
+    /// How long one read may wait from now on.
+    fn wait(&self, d: Duration) -> std::io::Result<()>;
+}
+
+impl Stream for TcpStream {
+    fn wait(&self, d: Duration) -> std::io::Result<()> {
+        self.set_read_timeout(Some(d))
+    }
+}
+
+impl Stream for RelayPipe {
+    fn wait(&self, d: Duration) -> std::io::Result<()> {
+        self.socket.set_read_timeout(Some(d))
+    }
+}
+
+/// How long a sender waits for the outcome once every byte is out: the other
+/// computer syncs up to [`crate::files::MAX_FILE_BYTES`] to disk first.
+const OUTCOME: Duration = Duration::from_secs(150);
 
 /// An open session to another computer.
 pub struct Link {
@@ -214,10 +232,134 @@ impl Link {
         }
     }
 
+    /// One frame from the other computer.
+    fn next(&mut self) -> Result<Frame, String> {
+        let sealed = read_message(&mut *self.stream).map_err(|e| format!("no answer: {e}"))?;
+        let plain = self.channel.open(&sealed).map_err(|e| e.to_string())?;
+        Frame::decode(&plain).map_err(|e| e.to_string())
+    }
+
+    /// Send `len` bytes read by `read_at` on a channel opened with
+    /// `request`, and return the other computer's last line on it: its
+    /// refusal of the request, or the outcome. Never more than
+    /// [`crate::files::IN_FLIGHT`] bytes are unacknowledged; waiting for the
+    /// next progress line is where pings are answered.
+    pub fn upload(
+        &mut self,
+        request: &[u8],
+        len: u64,
+        read_at: impl Fn(&mut [u8], u64) -> std::io::Result<usize>,
+    ) -> Result<serde_json::Value, String> {
+        const CH: u32 = 1;
+        self.send(Frame::Open { channel: CH, request: request.to_vec() })?;
+        let accepted = loop {
+            match self.next()? {
+                Frame::Ping { token } => self.send(Frame::Pong { token })?,
+                Frame::Control(reply) => {
+                    break serde_json::from_slice::<serde_json::Value>(&reply)
+                        .map_err(|e| format!("an unreadable answer: {e}"))?
+                }
+                Frame::Close { channel: CH, .. } => return Err("the other computer closed the transfer".into()),
+                _ => continue,
+            }
+        };
+        if accepted["reply"] != crate::files::FILE_VERB || accepted["len"].as_u64() != Some(len) {
+            return Ok(accepted);
+        }
+        let mut lines = Lines::default();
+        let mut sent = 0u64;
+        let mut acked = 0u64;
+        let mut buf = vec![0u8; 60 * 1024];
+        let result = (|| {
+            while sent < len {
+                let want = buf.len().min((len - sent) as usize);
+                let n = read_at(&mut buf[..want], sent).map_err(|e| format!("could not read the file: {e}"))?;
+                if n == 0 {
+                    return Err("the file got shorter while it was being sent".to_string());
+                }
+                for f in Frame::data_frames(CH, &buf[..n]) {
+                    self.send(f)?;
+                }
+                sent += n as u64;
+                while sent - acked >= crate::files::IN_FLIGHT {
+                    match self.channel_line(CH, &mut lines)? {
+                        Some(v) if v["reply"] == "peer_file_progress" => {
+                            acked = acked.max(v["got"].as_u64().unwrap_or(0).min(sent))
+                        }
+                        Some(v) => return Ok(Some(v)),
+                        None => return Err("the other computer closed the transfer".to_string()),
+                    }
+                }
+            }
+            Ok(None)
+        })();
+        let early = match result {
+            Ok(early) => early,
+            Err(why) => {
+                // The other computer drops what it has when the channel closes.
+                let _ = self.send(Frame::Close { channel: CH, reason: String::new() });
+                return Err(why);
+            }
+        };
+        if let Some(v) = early {
+            return Ok(v);
+        }
+        self.stream.wait(OUTCOME).map_err(|e| e.to_string())?;
+        loop {
+            match self.channel_line(CH, &mut lines)? {
+                Some(v) if v["reply"] == "peer_file_progress" => continue,
+                Some(v) => return Ok(v),
+                None => return Err("the other computer closed the transfer without saying whether it saved it".into()),
+            }
+        }
+    }
+
+    /// The next line the other computer wrote on `channel`, answering pings;
+    /// `None` when it closed the channel.
+    fn channel_line(&mut self, channel: u32, lines: &mut Lines) -> Result<Option<serde_json::Value>, String> {
+        loop {
+            if let Some(l) = lines.next() {
+                return serde_json::from_slice(&l).map(Some).map_err(|e| format!("an unreadable answer: {e}"));
+            }
+            match self.next()? {
+                Frame::Ping { token } => self.send(Frame::Pong { token })?,
+                Frame::Data { channel: c, bytes } if c == channel => lines.push(&bytes)?,
+                Frame::Close { channel: c, .. } if c == channel => return Ok(None),
+                _ => continue,
+            }
+        }
+    }
+
     fn send(&mut self, frame: Frame) -> Result<(), String> {
         let bytes = frame.encode().map_err(|e| e.to_string())?;
         let sealed = self.channel.seal(&bytes).map_err(|e| e.to_string())?;
         write_message(&mut *self.stream, &sealed).map_err(|e| e.to_string())
+    }
+}
+
+/// Lines on a channel, as its `Data` frames carry them: whole lines only,
+/// and no line longer than the cap.
+#[derive(Default)]
+struct Lines {
+    pending: Vec<u8>,
+}
+
+impl Lines {
+    const CAP: usize = 16 * 1024;
+
+    fn push(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.pending.extend_from_slice(bytes);
+        if self.pending.len() > Self::CAP && !self.pending.contains(&b'\n') {
+            return Err("the other computer sent a line too long to read".into());
+        }
+        Ok(())
+    }
+
+    fn next(&mut self) -> Option<Vec<u8>> {
+        let at = self.pending.iter().position(|b| *b == b'\n')?;
+        let mut l: Vec<u8> = self.pending.drain(..=at).collect();
+        l.pop();
+        Some(l)
     }
 }
 

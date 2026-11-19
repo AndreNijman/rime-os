@@ -332,6 +332,20 @@ pub enum ComputersCmd {
         #[arg(value_enum)]
         setting: OnOff,
     },
+    /// Send files to a paired computer: each lands in its Downloads.
+    ///
+    /// Only while the other computer is on and reachable: nothing waits to
+    /// be sent later. Up to 256 MiB a file. The other computer saves it under
+    /// a name that replaces nothing, says so in a notification, and opens
+    /// nothing by itself. Only you, at this machine, can send; an agent cannot.
+    Send {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        /// The files to send.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+    },
 }
 
 /// `rime remote computers clipboard <computer> <setting>`.
@@ -579,6 +593,10 @@ enum Request {
         computer: String,
         on: bool,
     },
+    ComputerSend {
+        computer: String,
+        name: String,
+    },
     PhotosSave {
         #[serde(skip_serializing_if = "Option::is_none")]
         device: Option<String>,
@@ -790,6 +808,12 @@ enum Reply {
         clipboard_receive: bool,
         files: bool,
     },
+    ComputerSent {
+        id: String,
+        name: String,
+        file: String,
+        bytes: u64,
+    },
     DeviceAllowed {
         id: String,
         name: String,
@@ -860,6 +884,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
             ComputersCmd::Files { computer, setting } => {
                 computers_share(Request::ComputerFiles { computer, on: setting == OnOff::On })
             }
+            ComputersCmd::Send { computer, files } => computers_send(&computer, &files),
         },
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
@@ -2082,6 +2107,42 @@ fn computers_share(req: Request) -> Result<i32> {
     }
 }
 
+/// How long `rime remote computers send` waits for one file: the other
+/// computer gives a transfer 60 s plus a second per 256 KiB, the dial and the
+/// last answer get the rest.
+fn computer_send_wait(len: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(240 + len / (256 * 1024))
+}
+
+fn computers_send(computer: &str, files: &[PathBuf]) -> Result<i32> {
+    use std::os::fd::AsRawFd;
+    let mut code = 0;
+    for path in files {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("rime: could not open {}: {e}", path.display());
+                code = 1;
+                continue;
+            }
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let req = Request::ComputerSend { computer: computer.to_string(), name: name.clone() };
+        match call_for(&req, Some(file.as_raw_fd()), computer_send_wait(len))? {
+            Reply::ComputerSent { id, name: to, file, bytes } => {
+                eprintln!("rime: {to} ({id}) saved {file} ({}) in its Downloads.", bytes_short(bytes));
+            }
+            Reply::Error { message } => {
+                eprintln!("rime: {name}: {message}");
+                code = 1;
+            }
+            _ => return unexpected(),
+        }
+    }
+    Ok(code)
+}
+
 /// "clipboard sent and taken, files taken": what is shared with a computer.
 fn sharing_words(send: bool, receive: bool, files: bool) -> String {
     let clipboard = match (send, receive) {
@@ -2814,6 +2875,32 @@ mod tests {
     }
 
     #[test]
+    fn send_to_a_computer_takes_one_or_more_files_and_goes_on_the_wire_one_by_one() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
+        match parse(&["computers", "send", "desk", "a.txt", "b c.pdf"]).expect("send").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Send { computer, files } } => {
+                assert_eq!(computer, "desk");
+                assert_eq!(files, vec![PathBuf::from("a.txt"), PathBuf::from("b c.pdf")]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["computers", "send", "desk"]).is_err(), "a file is needed");
+        let wire = serde_json::to_string(&Request::ComputerSend { computer: "d".into(), name: "a.txt".into() }).unwrap();
+        assert_eq!(wire, r#"{"cmd":"computer_send","computer":"d","name":"a.txt"}"#);
+        let r: Reply =
+            serde_json::from_str(r#"{"reply":"computer_sent","id":"d","name":"desk","file":"a (1).txt","bytes":12}"#).expect("sent");
+        assert!(matches!(r, Reply::ComputerSent { bytes: 12, .. }));
+        // A big file gets longer than the other computer's own budget for it.
+        assert!(computer_send_wait(256 * 1024 * 1024) > std::time::Duration::from_secs(60 + 1024 + 150));
+    }
+
+    #[test]
     fn allow_parses_its_wire_holds_and_an_introduced_device_says_who_added_it() {
         use clap::Parser;
         #[derive(clap::Parser)]
@@ -3103,7 +3190,8 @@ mod tests {
                 | ComputersCmd::Forget { computer }
                 | ComputersCmd::Ping { computer, .. }
                 | ComputersCmd::Clipboard { computer, .. }
-                | ComputersCmd::Files { computer, .. } => Some(computer),
+                | ComputersCmd::Files { computer, .. }
+                | ComputersCmd::Send { computer, .. } => Some(computer),
                 ComputersCmd::Add { .. } | ComputersCmd::List { .. } => None,
             },
             RemoteCmd::Messages { action: Some(MessagesCmd::Send { device, .. }), .. }
@@ -3153,6 +3241,9 @@ mod tests {
             &["computers", "clipboard", ID, "receive"],
             &["computers", "clipboard", "--", ID, "off"],
             &["computers", "files", ID, "off"],
+            &["computers", "send", ID, "a.txt"],
+            &["computers", "send", ID, "a.txt", "b.pdf"],
+            &["computers", "send", "--", ID, "a.txt"],
             &["messages", "--device", ID],
             &["messages", "--device", ID, "--thread", "7", "--json"],
             &["messages", "send", "--device", ID, "--to", "5556"],
