@@ -30,7 +30,8 @@
 //! hash does not match never reaches its name (`rime-agentd` removes its
 //! temporary file when the stream ends short). The only partial file on disk
 //! is `rime-agentd`'s, at most [`MAX_INCOMING`] × [`MAX_FILE_BYTES`] at once,
-//! removed when a transfer ends early and swept when `rime-agentd` starts.
+//! removed when a transfer ends early; one a killed `rime-agentd` left is
+//! swept before its next save.
 //!
 //! This process builds both lines it sends `rime-agentd` (`save_file`) and
 //! the peer (`peer_file`, its progress and its outcome) from fields it

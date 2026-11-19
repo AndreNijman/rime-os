@@ -3555,7 +3555,11 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
     let mut peer = identity_of(&b).connect(&a).expect("a paired computer opens a session");
     let hello = peer.call(r#"{"cmd":"remote_hello"}"#);
     assert_eq!(hello["scope"], "peer", "{hello}");
-    assert_eq!(hello["features"], serde_json::json!(["peer_hello", "peer_tombstones", "peer_presence", "peer_offer"]), "{hello}");
+    assert_eq!(
+        hello["features"],
+        serde_json::json!(["peer_hello", "peer_tombstones", "peer_presence", "peer_offer", "peer_clipboard", "peer_file"]),
+        "{hello}"
+    );
     assert_eq!(peer.call(r#"{"cmd":"peer_hello"}"#)["reply"], "peer_hello");
     for line in [
         r#"{"cmd":"list"}"#,

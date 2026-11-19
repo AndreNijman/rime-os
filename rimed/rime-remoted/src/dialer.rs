@@ -251,8 +251,14 @@ impl Link {
         read_at: impl Fn(&mut [u8], u64) -> std::io::Result<usize>,
     ) -> Result<serde_json::Value, String> {
         const CH: u32 = 1;
+        // The whole transfer, however the other computer paces its frames:
+        // what it gives itself to receive, and the wait for its outcome.
+        let deadline = Instant::now() + crate::files::budget(len) + OUTCOME;
         self.send(Frame::Open { channel: CH, request: request.to_vec() })?;
         let accepted = loop {
+            if Instant::now() >= deadline {
+                return Err("the other computer never answered the offer".into());
+            }
             match self.next()? {
                 Frame::Ping { token } => self.send(Frame::Pong { token })?,
                 Frame::Control(reply) => {
@@ -282,7 +288,7 @@ impl Link {
                 }
                 sent += n as u64;
                 while sent - acked >= crate::files::IN_FLIGHT {
-                    match self.channel_line(CH, &mut lines)? {
+                    match self.channel_line(CH, &mut lines, deadline)? {
                         Some(v) if v["reply"] == "peer_file_progress" => {
                             acked = acked.max(v["got"].as_u64().unwrap_or(0).min(sent))
                         }
@@ -306,7 +312,7 @@ impl Link {
         }
         self.stream.wait(OUTCOME).map_err(|e| e.to_string())?;
         loop {
-            match self.channel_line(CH, &mut lines)? {
+            match self.channel_line(CH, &mut lines, deadline)? {
                 Some(v) if v["reply"] == "peer_file_progress" => continue,
                 Some(v) => return Ok(v),
                 None => return Err("the other computer closed the transfer without saying whether it saved it".into()),
@@ -315,11 +321,19 @@ impl Link {
     }
 
     /// The next line the other computer wrote on `channel`, answering pings;
-    /// `None` when it closed the channel.
-    fn channel_line(&mut self, channel: u32, lines: &mut Lines) -> Result<Option<serde_json::Value>, String> {
+    /// `None` when it closed the channel. An error once `deadline` passes.
+    fn channel_line(
+        &mut self,
+        channel: u32,
+        lines: &mut Lines,
+        deadline: Instant,
+    ) -> Result<Option<serde_json::Value>, String> {
         loop {
             if let Some(l) = lines.next() {
                 return serde_json::from_slice(&l).map(Some).map_err(|e| format!("an unreadable answer: {e}"));
+            }
+            if Instant::now() >= deadline {
+                return Err("the other computer took too long to take the file".into());
             }
             match self.next()? {
                 Frame::Ping { token } => self.send(Frame::Pong { token })?,

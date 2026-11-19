@@ -1,5 +1,5 @@
-//! Sharing between the owner's paired computers: the clipboard, text only,
-//! and files (contract §2.15).
+//! The clipboard shared between the owner's paired computers, text only
+//! (contract §2.15). Files are files.rs.
 //!
 //! ## The clipboard
 //!
@@ -392,7 +392,11 @@ fn answer_clip_with(
     state.sharing.lock().remember(hash, How::Applied, now);
     match write(text) {
         Ok(()) => clip_reply(true, None),
-        Err(why) => refused("unavailable", &why),
+        Err(why) => {
+            // `rime-agentd`'s own words stay here: they may name a path.
+            eprintln!("rime-remoted: a copy from {} was not put on the clipboard: {why}", crate::dialer::printable(&c.name));
+            refused("unavailable", "this computer could not put the copy on its clipboard")
+        }
     }
 }
 
