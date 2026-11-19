@@ -30,11 +30,22 @@
 //! correlate across connections. This is WireGuard's pattern for the same
 //! reasons.
 //!
-//! `XX` is not used anywhere. It would let a device connect without knowing
-//! the desktop's key in advance, and "the device does not need to know who it
-//! is talking to" is the property that makes a man in the middle possible.
-//! The QR code is the out-of-band authenticated channel, and refusing to work
-//! without it is the design.
+//! `XX` is not used for a phone. It would let a device connect without
+//! knowing the desktop's key in advance, and "the device does not need to know
+//! who it is talking to" is the property that makes a man in the middle
+//! possible. The QR code is the out-of-band authenticated channel, and
+//! refusing to work without it is the design.
+//!
+//! **`Noise_XX` for pairing two computers, and only there.** Two computers
+//! have no camera between them, so neither knows the other's key, and XX is
+//! the pattern for exactly that. On its own it would be the man-in-the-middle
+//! hole the paragraph above describes. It is never used on its own: the
+//! out-of-band channel is a six-digit code a person reads off one screen and
+//! types into the other, run through SPAKE2 inside the finished XX session
+//! and confirmed by a MAC over this handshake's hash
+//! ([`crate::computer`]). A different prologue from the other two patterns,
+//! so an XX transcript can never be mistaken for, or spliced into, an NK or
+//! IK one. Once paired, the two computers talk over `Noise_IK` like a phone.
 //!
 //! ## The prologue
 //!
@@ -56,6 +67,9 @@ use snow::{Builder, HandshakeState, TransportState};
 /// same devices.
 pub const PAIRING_PATTERN: &str = "Noise_NK_25519_ChaChaPoly_BLAKE2s";
 pub const SESSION_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
+/// Pairing two computers with a code; see the module note and
+/// [`crate::computer`].
+pub const COMPUTER_PAIRING_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 
 /// Why a channel could not be opened or used.
 #[derive(Debug)]
@@ -138,6 +152,14 @@ pub fn prologue(version: u32) -> Vec<u8> {
     p
 }
 
+/// The prologue of a computer pairing: its own, so an XX transcript is never
+/// one an NK or IK peer would complete.
+pub fn computer_prologue(version: u32) -> Vec<u8> {
+    let mut p = b"rime-computer-pair/".to_vec();
+    p.extend_from_slice(version.to_string().as_bytes());
+    p
+}
+
 /// One side of a handshake in progress.
 pub struct Handshake {
     state: HandshakeState,
@@ -205,6 +227,37 @@ impl Handshake {
             .build_responder()
             .map_err(crypto)?;
         Ok(Handshake { state })
+    }
+
+    /// The computer typing a code: it dials, and knows nothing of the other
+    /// computer's key until the handshake gives it one.
+    pub fn computer_pairing_initiator(secret: &[u8; 32], version: u32) -> Result<Handshake, NoiseError> {
+        let prologue = computer_prologue(version);
+        let state = Builder::new(params(COMPUTER_PAIRING_PATTERN))
+            .prologue(&prologue)
+            .local_private_key(secret)
+            .build_initiator()
+            .map_err(crypto)?;
+        Ok(Handshake { state })
+    }
+
+    /// The computer showing a code.
+    pub fn computer_pairing_responder(secret: &[u8; 32], version: u32) -> Result<Handshake, NoiseError> {
+        let prologue = computer_prologue(version);
+        let state = Builder::new(params(COMPUTER_PAIRING_PATTERN))
+            .prologue(&prologue)
+            .local_private_key(secret)
+            .build_responder()
+            .map_err(crypto)?;
+        Ok(Handshake { state })
+    }
+
+    /// The handshake hash: a digest of everything both ends sent and mixed,
+    /// statics and prologue included. Two ends with a man in the middle hold
+    /// two different ones. Read before [`Handshake::into_transport`], which
+    /// gives it up.
+    pub fn handshake_hash(&self) -> Vec<u8> {
+        self.state.get_handshake_hash().to_vec()
     }
 
     /// Write the next handshake message, carrying `payload`.

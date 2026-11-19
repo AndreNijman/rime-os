@@ -202,6 +202,9 @@ them. (The exceptions are verbs `rime-remoted` answers itself
 and never forwards: its hello, the companion key, nex, the phone's answers
 about its messages, and the five machine verbs in [The computer itself](#the-computer-itself-status-lock-and-media).)
 
+A connection from [another computer](#rime-remote-computers-your-other-rime-computers)
+forwards nothing either, and may only say hello.
+
 A connection on a phone's **companion key** is the opposite: it forwards
 nothing to `rime-agentd` at all, and may use only the phone's own features
 ([above](#keeping-the-phones-features-working-after-it-restarts);
@@ -242,6 +245,72 @@ WebAuthn assertion from a key the owner enrolled with `rime agent key add`,
 over a nonce the daemon issued and bound to that one session, grant kind and
 window. If remote approval of a root operation is ever built, it has to take
 that shape; a relaxed origin check would not do.
+
+## `rime remote computers`: your other Rime computers
+
+Two Rime computers you own can pair with each other. In this release that
+makes them known to each other and nothing more: a paired computer may say
+hello and ask the other's name and version. **Pairing is not authority.** A
+paired computer cannot run anything, open a terminal, read a file, see a
+session, answer a privilege prompt or use a phone feature on the other. A
+session from another computer never reaches `rime-agentd` at all, not even to
+be told no.
+
+```
+rime remote computers add --show-code      # on the first computer: shows six digits
+rime remote computers add <address>        # on the second: asks for the digits
+rime remote computers list [--json]
+rime remote computers ping <computer> [--via lan|relay|any] [--json]
+rime remote computers remove <computer>
+```
+
+**Pairing.** On one computer run `add --show-code`. It prints a six-digit code
+and the addresses the other computer can use, and waits. On the other run
+`add` with one of those addresses (`host` or `host:port`; the port defaults to
+Rime Remote's) and type the code when asked. The code is read from the
+terminal or standard input, never from the command line, so it does not land
+in shell history or `ps`.
+
+- The code lives two minutes, pairs once, and only while `--show-code` is
+  still waiting. Press Ctrl-C and it is withdrawn. A new `--show-code`
+  replaces the old code.
+- **A wrong code uses the code up.** Show a new one to try again. Each attempt
+  gets one guess, and nothing it learns lets it test a second guess offline.
+- Both halves must be you at the computer. An agent, a scheduled job, or a
+  session from a phone or another computer is refused both.
+- Pairing goes over the local network only. A pairing attempt that arrives
+  through the relay is refused before the computer says anything about
+  itself. Afterwards `ping` tries the stored addresses first, then this
+  computer's own relay; two computers meet there only when both are set up
+  with the same relay. A computer never dials a relay the other one named.
+- A computer with this computer's own Rime Remote key (a home folder copied
+  from it) is refused, when pairing and on every later connection. Fix it on
+  the **copy**, never on the original: the copy is the one that gets a new
+  key. Everything in the copy's `~/.local/state/rime/remote/` came from the
+  original: its key (`identity.key`), its paired phones (`devices.json`), its
+  paired computers (`computers.json`), where its notifications are pushed
+  (`push.json`) and its phones' last reports (`phones.json`). On the copy,
+  run `systemctl --user stop rime-remoted`, delete that whole folder with
+  `rm -r ~/.local/state/rime/remote`, and run
+  `systemctl --user start rime-remoted`. The copy then starts with a new key
+  and no phones or computers; pair them with it as new. The original keeps
+  its key, and its phones and computers keep working.
+
+**`list`** shows every computer this one has paired, removed ones included,
+with the path it was last reached on and the addresses it is dialled at.
+
+**`ping`** dials the computer, says hello, and prints what it calls itself, the
+path (`lan` or `relay`) and how long the whole dial took. `--via lan` or
+`--via relay` forces one path. Each computer dials the other for its own
+requests; nothing stays connected between them.
+
+**`remove`** drops any connection the computer holds and refuses its key from
+then on. Like pairing, it must be you at the computer: an agent or a scheduled
+job is refused. **A removal is never undone in this release:** the removed
+computer cannot be added again. Do not give it a new key to get round that (that
+unpairs every phone it has); a way to add a removed computer back is coming.
+
+The wire is `docs/remote-live-contract.md` §2.15.
 
 ## The computer itself: status, lock and media
 

@@ -104,6 +104,9 @@ pub struct State {
     /// The pairing offer, when one is open. In memory only: a token that
     /// survived a restart would be one the owner did not ask to survive.
     pub offer: Mutex<Option<Offer>>,
+    /// The code an "Add a computer" screen is showing, while it is open. In
+    /// memory only, like the offer; see `computers.rs`.
+    pub showing: Mutex<Option<crate::computers::Showing>>,
     live: Mutex<Vec<Live>>,
     push: Mutex<PushStore>,
     phones: Mutex<crate::phone::PhoneStore>,
@@ -183,6 +186,7 @@ impl State {
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
             offer: Mutex::new(None),
+            showing: Mutex::new(None),
             live: Mutex::new(Vec::new()),
             push: Mutex::new(push),
             phones: Mutex::new(phones),

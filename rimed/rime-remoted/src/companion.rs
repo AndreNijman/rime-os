@@ -117,6 +117,10 @@ pub fn allowed(scope: Scope, cmd: Option<&str>) -> bool {
     match scope {
         Scope::Full => true,
         Scope::Companion => cmd.is_some_and(|c| ALLOWED_VERBS.contains(&c) || CLIPBOARD_VERBS.contains(&c)),
+        // Another computer never reaches this list: `serve.rs` answers it from
+        // `computers::PEER_VERBS` before anything else. False here is the
+        // second lock, so a path that forgot that branch still refuses.
+        Scope::Peer => false,
     }
 }
 
@@ -125,6 +129,7 @@ pub fn channel_allowed(scope: Scope, request: &[u8]) -> bool {
     match scope {
         Scope::Full => true,
         Scope::Companion => verb_of(request).is_some_and(|c| ALLOWED_CHANNELS.contains(&c.as_str())),
+        Scope::Peer => false,
     }
 }
 

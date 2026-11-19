@@ -497,6 +497,9 @@ struct Harness {
     remoted_socket: PathBuf,
     port: u16,
     relay: Relay,
+    /// Whether the daemon waits on `relay` (false when `start_on` pointed it
+    /// at another harness's, which that harness then sees).
+    on_own_relay: bool,
 }
 
 impl Drop for Harness {
@@ -511,9 +514,18 @@ impl Drop for Harness {
 
 impl Harness {
     fn start(tag: &str) -> Option<Harness> {
+        Harness::start_on(tag, None)
+    }
+
+    /// [`Harness::start`], with the daemon pointed at `relay_url` instead of
+    /// its own relay double (which still starts, unused): two computers that
+    /// share one relay.
+    fn start_on(tag: &str, relay_url: Option<&str>) -> Option<Harness> {
         // The relay comes up first, so the daemon's very first dial succeeds
         // and the suite is not measuring the backoff.
         let relay = Relay::start();
+        let on_own_relay = relay_url.is_none();
+        let relay_url = relay_url.map(str::to_string).unwrap_or_else(|| relay.url());
 
         let root = std::env::temp_dir().join(format!(
             "rime-relay-e2e-{}-{tag}-{}",
@@ -544,7 +556,7 @@ impl Harness {
                 "--port",
                 "0",
                 "--relay",
-                &relay.url(),
+                &relay_url,
                 "--allow-foreground",
                 "--handshake-timeout-ms",
                 "1000",
@@ -569,6 +581,7 @@ impl Harness {
             remoted_socket: runtime.join("rime-remoted").join("control.sock"),
             port: 0,
             relay,
+            on_own_relay,
         };
         let within = Duration::from_secs(20);
         match common::remoted_port(&mut h.remoted, &h.remoted_socket, &log, within) {
@@ -590,6 +603,10 @@ impl Harness {
             // And the relay leg: the desktop has to have dialled out and be
             // waiting before a device can be joined to it. Waiting for this
             // rather than sleeping is what makes the suite deterministic.
+            if up && !self.on_own_relay {
+                // Another harness's relay: that harness waits for it.
+                return true;
+            }
             if up {
                 let parked = if self.relay.is_external() {
                     self.relay.host_is_parked(&self.rendezvous())
@@ -1459,4 +1476,68 @@ fn wait_for(
         std::thread::sleep(Duration::from_millis(50));
     }
     last
+}
+
+/// Two computers paired over the LAN reach each other through the relay when
+/// asked (docs/remote-live-contract.md §2.15, "Dialling"): the dialler joins
+/// the other computer's rendezvous on its OWN relay (both are configured with
+/// A's here), as a guest, and runs the same session it would over the LAN.
+#[test]
+fn two_paired_computers_reach_each_other_through_the_relay() {
+    let Some(a) = Harness::start("computer-a") else {
+        eprintln!("SKIP: the daemons did not come up in this environment");
+        return;
+    };
+    let Some(b) = Harness::start_on("computer-b", Some(&a.relay.url())) else {
+        eprintln!("SKIP: the daemons did not come up in this environment");
+        return;
+    };
+    // B waits on A's relay, so A's relay holds both computers' hosts.
+    assert!(a.hosts_seen(2), "B never waited on the relay it shares with A");
+
+    // "Add a computer" on A, held open on this connection.
+    let stream = UnixStream::connect(&a.remoted_socket).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    let mut writer = stream.try_clone().expect("clone");
+    writeln!(writer, r#"{{"cmd":"computer_show"}}"#).expect("write");
+    let mut screen = BufReader::new(stream);
+    let mut line = String::new();
+    screen.read_line(&mut line).expect("read");
+    let shown: serde_json::Value = serde_json::from_str(line.trim()).expect("json");
+    if shown["reply"] == "error" {
+        let why = shown["message"].as_str().unwrap_or_default().to_string();
+        let placement = rime_agent_core::origin::observe_pid(std::process::id() as i32);
+        let names_the_placement = match &placement {
+            Ok(o) => why.contains(o.as_str()),
+            Err(_) => why.contains("/proc/") || why.contains("cgroup"),
+        };
+        assert!(names_the_placement, "refused for a reason that is not the placement ({placement:?}): {shown}");
+        assert!(
+            std::env::var_os("RIME_REQUIRE_LOCAL_ORIGIN").is_none(),
+            "RIME_REQUIRE_LOCAL_ORIGIN is set, so this run was supposed to hold a real logind session: {why}"
+        );
+        eprintln!("SKIP: this process may not pair — {why}");
+        return;
+    }
+    let code = shown["code"].as_str().expect("a code");
+    let added = b.control(
+        &serde_json::json!({"cmd": "computer_add", "address": format!("127.0.0.1:{}", a.port), "code": code}).to_string(),
+    );
+    assert_eq!(added["reply"], "computer_paired", "{added}");
+
+    let id_on = |h: &Harness| {
+        let list = h.control(r#"{"cmd":"computers"}"#);
+        list["computers"][0]["id"].as_str().expect("one computer").to_string()
+    };
+    let (a_on_b, b_on_a) = (id_on(&b), id_on(&a));
+    let guests_before = a.relay.seen().arrivals.iter().filter(|x| *x == "guest").count();
+    for (from, to) in [(&b, &a_on_b), (&a, &b_on_a)] {
+        let pong = from.control(&serde_json::json!({"cmd": "computer_ping", "computer": to, "via": "relay"}).to_string());
+        assert_eq!(pong["reply"], "computer_pong", "{pong}");
+        assert_eq!(pong["path"], "relay", "{pong}");
+    }
+    if !a.relay.is_external() {
+        let guests = a.relay.seen().arrivals.iter().filter(|x| *x == "guest").count();
+        assert!(guests > guests_before, "B's ping never arrived at A's relay as a guest");
+    }
 }

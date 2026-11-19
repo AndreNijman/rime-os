@@ -51,6 +51,13 @@
 //! has "Get the computer's clipboard" on there and the app is unlocked. It is
 //! still this account's alone, and a paired phone has no verb that sends it.
 //!
+//! `computer_show` and `computer_add` (pairing another Rime computer with a
+//! code, `computers.rs`) are gated the same way, at both ends: the screen that
+//! shows the code and the request that types it. A paired computer reaches
+//! this one only as a peer, which can do nothing on its own, but an agent that
+//! could pair computers could add one the owner never chose. Listing,
+//! pinging and removing computers are not gated that way, like devices.
+//!
 //! Listing and revoking are *not* gated that way. Revoking a device is the
 //! safe direction — an agent that revokes the owner's phone is a nuisance,
 //! not an escalation, and the owner is the only one who can pair it back.
@@ -162,6 +169,23 @@ pub enum Request {
         device: Option<String>,
         photo: u64,
     },
+    /// Open "Add a computer": answered with a code, then held open until the
+    /// code is used, expires or is replaced, or the client hangs up (which
+    /// withdraws it). See `computers::hold_screen`.
+    ComputerShow,
+    /// Pair with the computer at `address`, which is showing `code`.
+    ComputerAdd { address: String, code: String },
+    /// Every other computer, paired and removed.
+    Computers,
+    /// Remove another computer. A removal is never undone.
+    ComputerRemove { computer: String },
+    /// Dial another computer and say `peer_hello`. `via` is `lan`, `relay`
+    /// or `any` (absent).
+    ComputerPing {
+        computer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
+    },
 }
 
 /// What it answers.
@@ -270,6 +294,23 @@ pub enum Reply {
     /// The photo is in the caller's file: `len` bytes, and `name` is the
     /// phone's name for it, made a name and nothing else.
     PhotoSaved { device: String, photo: u64, name: String, len: u64 },
+    /// The code "Add a computer" shows, until `expires_ms`.
+    ComputerCode { code: String, expires_ms: u64, machine: String },
+    /// A computer was paired: its id and name.
+    ComputerPaired { id: String, name: String },
+    Computers { computers: Vec<rime_remote_core::device::Device> },
+    ComputerRemoved { id: String, name: String },
+    /// Another computer answered `peer_hello`: what it calls itself, its
+    /// protocol and build, the path and the time the whole dial took.
+    ComputerPong {
+        id: String,
+        name: String,
+        machine: String,
+        version: u32,
+        build: String,
+        path: String,
+        rtt_ms: u64,
+    },
     Ok,
     Error { message: String },
 }
@@ -342,6 +383,12 @@ fn handle(stream: UnixStream, state: &State) -> std::io::Result<()> {
         // other; a request that takes none drops them, which closes them.
         let carried = std::mem::take(&mut fds);
         let answer = match serde_json::from_str::<Request>(line) {
+            // A screen holds this connection until it closes, so it is
+            // answered there, more than once, and the connection ends with it.
+            Ok(Request::ComputerShow) => match authorized(&Request::ComputerShow, peer) {
+                Ok(()) => return crate::computers::hold_screen(&stream, state),
+                Err(why) => Reply::error(why),
+            },
             Ok(req) => dispatch(req, carried, peer, state),
             Err(e) => Reply::error(format!("unparseable request: {e}")),
         };
@@ -349,7 +396,7 @@ fn handle(stream: UnixStream, state: &State) -> std::io::Result<()> {
     }
 }
 
-fn reply(writer: &mut UnixStream, reply: &Reply) -> std::io::Result<()> {
+pub(crate) fn reply(writer: &mut UnixStream, reply: &Reply) -> std::io::Result<()> {
     let mut out = serde_json::to_string(reply).unwrap_or_else(|e| {
         format!(r#"{{"reply":"error","message":"could not serialise a reply: {e}"}}"#)
     });
@@ -396,6 +443,12 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::Call { device, action, number } => call(state, device.as_deref(), &action, number.as_deref()),
         Request::Photos { device, before, limit } => photos(state, device.as_deref(), before, limit),
         Request::PhotosSave { device, photo } => photos_save(state, device.as_deref(), photo, fds),
+        // Answered in `handle`, which holds the connection; never here.
+        Request::ComputerShow => Reply::error("computer_show holds its connection and is answered there"),
+        Request::ComputerAdd { address, code } => crate::computers::add(state, &address, &code),
+        Request::Computers => crate::computers::list(state),
+        Request::ComputerRemove { computer } => crate::computers::remove(state, &computer),
+        Request::ComputerPing { computer, via } => crate::computers::ping(state, &computer, via.as_deref()),
     }
 }
 
@@ -471,8 +524,57 @@ fn authorized_by(
         Request::Messages { .. } | Request::MessagesSend { .. } => messages_caller(peer, observe),
         Request::Calls { .. } | Request::Call { .. } => calls_caller(peer, observe),
         Request::Photos { .. } | Request::PhotosSave { .. } => photos_caller(peer, observe),
+        Request::ComputerShow | Request::ComputerAdd { .. } => computers_caller(peer, observe, may_add_computer),
+        // A removal is permanent (the same key can never pair again), so an
+        // agent or a scheduled job could break a pair for good: a person only.
+        Request::ComputerRemove { .. } => computers_caller(peer, observe, may_remove_computer),
         _ => own_user(peer),
     }
+}
+
+/// Refuse showing or typing a computer-pairing code, or removing a paired
+/// computer, from anything but a human at this machine: the same two origins
+/// as pairing a phone. `rule` words the refusal for the request.
+fn computers_caller(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+    rule: fn(RequestOrigin) -> Result<(), String>,
+) -> Result<(), String> {
+    let Some(peer) = peer else {
+        return Err(
+            "the kernel would not report the peer credentials of this connection, so there is no \
+             way to tell whether a human is at this machine — and pairing a computer is reserved \
+             for one"
+                .to_string(),
+        );
+    };
+    own_user(Some(peer))?;
+    rule(observe(peer.pid)?)
+}
+
+/// The computer-pairing rule over a value, for the same reason [`may_pair`]
+/// is one.
+pub fn may_add_computer(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot pair another computer: only a person at this machine may show \
+         or type a code. Run `rime remote computers add` from a terminal"
+    ))
+}
+
+/// The computer-removal rule over a value: a removal is never undone, so it
+/// is a person's decision, like pairing.
+pub fn may_remove_computer(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot remove a paired computer: a removal is permanent (that computer can \
+         never pair again with the same key), so only a person at this machine may do it. Run \
+         `rime remote computers remove` from a terminal"
+    ))
 }
 
 /// Refuse `calls` or `call` from anything but a human at this machine: a
@@ -1348,6 +1450,11 @@ mod tests {
             Request::Call { device: None, action: "dial".into(), number: Some("5556".into()) },
             Request::Photos { device: None, before: None, limit: None },
             Request::PhotosSave { device: None, photo: 1 },
+            Request::ComputerShow,
+            Request::ComputerAdd { address: "10.0.0.2".into(), code: "123456".into() },
+            Request::Computers,
+            Request::ComputerRemove { computer: "desk".into() },
+            Request::ComputerPing { computer: "desk".into(), via: None },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1399,6 +1506,16 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_use_photos(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
+                Request::ComputerShow | Request::ComputerAdd { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_add_computer(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
+                Request::ComputerRemove { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_remove_computer(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
@@ -1427,6 +1544,58 @@ mod tests {
         for req in [&list, &save] {
             assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());
             assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
+    }
+
+    #[test]
+    fn a_scheduled_job_may_not_show_or_type_a_computer_pairing_code_or_remove_a_computer() {
+        // Injected origins, so this fails on any machine if the gate goes.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let show = Request::ComputerShow;
+        let add = Request::ComputerAdd { address: "10.0.0.2".into(), code: "123456".into() };
+        for o in RequestOrigin::ALL {
+            for req in [&show, &add] {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote computers add"), "{why}");
+                }
+            }
+        }
+        for req in [&show, &add] {
+            assert!(
+                authorized_by(req, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_err(),
+                "an agent may pair a computer: {req:?}"
+            );
+            assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());
+            assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
+        // Removing is permanent, so it is a person's too.
+        let remove = Request::ComputerRemove { computer: "desk".into() };
+        for o in RequestOrigin::ALL {
+            let verdict = authorized_by(&remove, Some(me), |_| Ok(*o));
+            assert_eq!(verdict.is_ok(), o.is_local(), "{o} remove: {verdict:?}");
+            if let Err(why) = verdict {
+                assert!(why.contains(o.as_str()) && why.contains("rime remote computers remove"), "{why}");
+            }
+        }
+        assert!(
+            authorized_by(&remove, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_err(),
+            "a scheduled job may remove a computer for good"
+        );
+        assert!(authorized_by(&remove, Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&remove, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        // Listing and pinging are this account's, like devices: a ping is
+        // one hello, and a list changes nothing.
+        for req in [
+            Request::Computers,
+            Request::ComputerPing { computer: "desk".into(), via: Some("lan".into()) },
+        ] {
+            assert!(authorized_by(&req, Some(me), |_| Ok(RequestOrigin::ScheduledJob)).is_ok(), "{req:?}");
         }
     }
 
@@ -1620,6 +1789,21 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Reply::ClipboardSent { reached: 1 }).unwrap(),
             r#"{"reply":"clipboard_sent","reached":1}"#
+        );
+        // The wire shapes `rime remote computers` depends on.
+        assert_eq!(serde_json::to_string(&Request::ComputerShow).unwrap(), r#"{"cmd":"computer_show"}"#);
+        assert_eq!(
+            serde_json::to_string(&Request::ComputerAdd { address: "a".into(), code: "1".into() }).unwrap(),
+            r#"{"cmd":"computer_add","address":"a","code":"1"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::ComputerPing { computer: "d".into(), via: None }).unwrap(),
+            r#"{"cmd":"computer_ping","computer":"d"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::ComputerCode { code: "012345".into(), expires_ms: 1, machine: "m".into() })
+                .unwrap(),
+            r#"{"reply":"computer_code","code":"012345","expires_ms":1,"machine":"m"}"#
         );
         for r in &requests {
             let text = serde_json::to_string(r).expect("serialise");

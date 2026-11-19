@@ -1448,6 +1448,121 @@ Measured on wl-clipboard 2.3.0, in a private headless labwc:
   - text the phone just set with `clipboard_write` (into the stub desktop) is
     not sent back, and the next copy is.
 
+### 2.15 Computers: pairing two Rime computers, and the peer scope
+
+No new `remote_hello.features` entry for phones: this is between computers.
+Design: ECOSYSTEM-PLAN.md decision 11. This release is M1a: pairing, the peer
+scope, `peer_hello`, and dialling. Presence, tombstone exchange and
+introductions are not in it.
+
+**Pairing (LAN listener, hello byte `C`).** A computer dials the other's LAN
+port and sends `C` (phones send `P` to pair and `S` for a session). Over the
+LAN only: a `C` connection that arrived through a relay splice, or whose
+address is unknown, is ended before message 1 is read, so nothing reached
+through the relay learns the showing side's key (and from it its rendezvous
+id) or spends its code. Then, all framed as `u32` big-endian length + body:
+
+1. `Noise_XX_25519_ChaChaPoly_BLAKE2s`, prologue `rime-computer-pair/<version>`.
+   The showing side ends the connection before its message 2 (which carries
+   its static key) when no code is showing, so with no add screen open a
+   dialler learns nothing. The showing side takes the code out of memory as
+   soon as message 3 arrives: every attempt spends it.
+2. Inside the session, JSON steps `{"spake": …}`, `{"confirm": …}`,
+   `{"about": …}`, `{"ok": true}`, `{"error": "…"}`. SPAKE2 (Ed25519 group)
+   over the six digits, identity A = the dialler's static key, B = the
+   showing side's, both taken from the handshake.
+   dialler → `{spake}`; shower → `{spake}`; dialler → `{confirm}`; the shower
+   checks it and on failure sends nothing back; shower → `{confirm, about}`;
+   the dialler checks it, then → `{about}`; the shower stores the pairing and
+   → `{ok:true}`; the dialler stores on `ok`.
+3. `confirm` = base64url HMAC-SHA256 keyed with the SPAKE2 key over
+   `"rime-computer-pair/1/confirm" || role || handshake_hash`, role `D`
+   (dialler) or `S` (shower). A relayed exchange has two handshake hashes and
+   fails here even with the right code.
+4. `about` = `{"name", "lan": ["host:port", …] (≤ 8), "relay"?, "port"?}`,
+   checked, refused whole rather than trimmed: name by the device-name rule;
+   each address parses as `ip:port` and is dialable (not loopback,
+   unspecified, multicast, the IPv4 broadcast address or IPv6 link-local, and
+   not port 0; IPv4-mapped addresses judged as IPv4; IPv4 link-local
+   allowed); `port` not 0; relay parses. Each side lists only addresses that
+   pass. The showing side also stores the address the connection came from,
+   with the dialler's `port`.
+
+Either side refuses a static key equal to its own `identity.key` (a copied
+home) before it sends anything that depends on the code. A key held by a phone
+(either key, revoked ones included), a companion key ever given up, or a
+removed computer is refused as a computer.
+
+**Control socket (rime-remoted ↔ `rime`, Rime Shell).**
+
+```json
+{"cmd":"computer_show"}
+→ {"reply":"computer_code","code":"012345","expires_ms":…,"machine":"desk"}
+   … held open; then one of:
+→ {"reply":"computer_paired","id":"…","name":"laptop"}
+→ {"reply":"error","message":"the code typed on the other computer did not match, so this code is used up; …"}
+→ {"reply":"error","message":"the code expired after two minutes without being used; show a new one"}
+→ {"reply":"error","message":"another \"Add a computer\" screen opened, so this code was withdrawn"}
+{"cmd":"computer_add","address":"192.168.1.20:7717","code":"012345"}
+→ {"reply":"computer_paired","id":"…","name":"desk"}
+{"cmd":"computers"}
+→ {"reply":"computers","computers":[<device record, plus "addresses" and "relay">]}
+{"cmd":"computer_remove","computer":"<id or name>"}
+→ {"reply":"computer_removed","id":"…","name":"…"}
+{"cmd":"computer_ping","computer":"<id or name>","via":"lan"|"relay"}
+→ {"reply":"computer_pong","id","name","machine","version","build","path":"lan"|"relay","rtt_ms"}
+```
+
+- `computer_show`, `computer_add` and `computer_remove` need a §7 local
+  origin (a terminal or Rime Shell, the `pair` rule); a scheduled job, an
+  agent, or another account is refused. Removal is gated like pairing because
+  it is permanent. Closing the `computer_show` connection withdraws the code.
+  One screen at a time: a new one replaces the old.
+- The code is accepted with spaces or dashes (`012 345`). Anything that is not
+  six digits after that is an error before any connection.
+- `computers`, `computer_ping`: own user, any origin. Removing is idempotent
+  and never undone; it drops the computer's live connections.
+
+**Stored.** `computers.json` beside `devices.json` (0600, same directory),
+`{"computers": {<id>: <device record, plus "addresses" and "relay">}}`,
+written only once there is a computer. Not in `devices.json`: an older
+rime-remoted rewrites that file with only `devices` on every pairing and
+handshake, and would drop a map it does not know. It never opens
+`computers.json`, so after a rollback no computer can connect (fails closed),
+and after the roll forward every computer and removal is still there. A
+removed computer keeps its record with `revoked_ms`: its key never
+authenticates and never pairs again. A key that is both a computer's and a
+phone's key or companion key (an older daemon paired it in between)
+authenticates as nothing.
+
+**Dialling.** Each computer dials the other for its own requests. The dialler
+tries the stored addresses (2 s connect, 10 s per read), then **this
+computer's own relay** as a `guest` at `rendezvous_id(<its key>)` (the relay
+the other computer named is stored and listed, never dialled), then runs the
+ordinary IK session (§2.1) with its own `identity.key` in the device's place.
+It refuses to dial its own key.
+
+**The peer scope: an allow list, checked before routing.** A session whose key
+is a paired, not removed computer is scope `peer`.
+
+| | allowed |
+| --- | --- |
+| control verbs | `remote_hello`, `peer_hello` |
+| channels (`Open`) | none |
+
+```json
+{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello"],"scope":"peer"}
+{"cmd":"peer_hello"}   → {"reply":"peer_hello","name":"desk","version":1,"build":"0.1.0"}
+{"cmd":"list"}         → {"reply":"error","kind":"not_allowed","message":"list is not allowed between paired computers"}
+```
+
+Everything else is refused before routing: every `rime-agentd` verb, `decide`,
+nex, the machine verbs, the phone verbs, the companion verbs, push, a line
+with no readable `cmd`, and every channel. A peer session reaches
+`rime-agentd` never. The companion allow list refuses `peer` too, as a second
+lock. A session presenting this machine's own key is refused at the handshake
+whatever `devices.json` or `computers.json` says.
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in

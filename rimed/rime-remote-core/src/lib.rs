@@ -38,6 +38,7 @@
 //! credential does not compile. That property is inherited here for free,
 //! because what this forwards is that same `Response`.
 
+pub mod computer;
 pub mod device;
 pub mod fdpass;
 pub mod identity;

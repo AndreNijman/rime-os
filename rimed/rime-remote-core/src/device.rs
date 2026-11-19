@@ -40,6 +40,31 @@
 //!
 //! Revoking the device refuses both keys (the tombstone is on the record, not
 //! on a key), and pairing the device again starts with no companion key.
+//!
+//! ## Other computers, and why they are a separate file
+//!
+//! Another Rime computer paired with a code (`rime remote computers add`) is
+//! kept under `computers`, never under `devices`, and a session its key opens
+//! gets [`Scope::Peer`]: `rime-remoted` answers such a session from a short
+//! allow list and never forwards it to `rime-agentd`. Not a flag on a phone's
+//! record, because an older `rime-remoted` (after a rollback) would ignore an
+//! unknown flag and load a computer as a phone with everything a phone may do.
+//!
+//! And not in `devices.json` at all, but in `computers.json` beside it
+//! ([`DeviceStore::computers_path`]). An older `rime-remoted` reads
+//! `devices.json` into a struct with only `devices` and writes it back whole
+//! on every pairing, revocation and completed handshake, which would drop an
+//! unknown `computers` map, and with it every removal's tombstone and the
+//! keys a phone may never take. It never opens `computers.json`, so after a
+//! rollback and a roll forward the computers, removed ones included, are all
+//! still there. A key that ends up in both files anyway (an older daemon
+//! paired it as a phone in between) authenticates as nothing
+//! ([`DeviceStore::authenticate`]).
+//!
+//! One key is one record across both maps: a key that is, or ever was, a
+//! phone's key or companion key cannot become a computer, nor the other way
+//! round, and a removed computer's tombstone is never undone (the plan's
+//! "re-pairing mints a new key").
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -103,6 +128,13 @@ pub struct Device {
     /// companion key again. Never shown, like `companion_key`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_companion_keys: Vec<String>,
+    /// For another computer only: `host:port` addresses it can be dialled at
+    /// on a LAN, the one the owner typed first. Empty for a phone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub addresses: Vec<String>,
+    /// For another computer only: the relay it waits on, when it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 impl Device {
@@ -132,6 +164,9 @@ pub enum Scope {
     Full,
     /// The device's companion key: only `rime-remoted`'s allow list.
     Companion,
+    /// Another of the owner's computers: only `rime-remoted`'s peer allow
+    /// list, never `rime-agentd`, never the human gate.
+    Peer,
 }
 
 impl Scope {
@@ -140,6 +175,7 @@ impl Scope {
         match self {
             Scope::Full => "full",
             Scope::Companion => "companion",
+            Scope::Peer => "peer",
         }
     }
 }
@@ -189,6 +225,8 @@ pub enum StoreError {
     BadName(String),
     /// This key is already paired and not revoked.
     AlreadyPaired(String),
+    /// This computer was removed, and a removal is never undone.
+    Removed(String),
     /// A key that may not become a companion key, or may not be paired
     /// because it is one. One message for every reason, so the answer does
     /// not say which other device holds it.
@@ -206,6 +244,11 @@ impl std::fmt::Display for StoreError {
             StoreError::AlreadyPaired(d) => write!(
                 f,
                 "'{d}' is already paired with this machine; revoke it first if you are replacing it"
+            ),
+            StoreError::Removed(name) => write!(
+                f,
+                "'{name}' was removed from this computer, and a removed computer cannot pair again with \
+                 the same key"
             ),
             StoreError::KeyInUse => write!(
                 f,
@@ -238,6 +281,18 @@ pub struct DeviceStore {
     /// Keyed by device id, so a listing is ordered and a lookup is direct.
     #[serde(default)]
     pub devices: BTreeMap<String, Device>,
+    /// The owner's other computers, keyed the same way. Never in
+    /// `devices.json`: [`DeviceStore::load`] and [`DeviceStore::save`] keep
+    /// them in [`DeviceStore::computers_path`]; see the module note.
+    #[serde(skip)]
+    pub computers: BTreeMap<String, Device>,
+}
+
+/// What `computers.json` holds.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ComputersFile {
+    #[serde(default)]
+    computers: BTreeMap<String, Device>,
 }
 
 impl DeviceStore {
@@ -255,19 +310,42 @@ impl DeviceStore {
             .join("devices.json")
     }
 
-    /// Read the store, or an empty one when there is no file yet.
+    /// Where the other computers of the store at `path` live: `computers.json`
+    /// beside `devices.json` (any other store name gets `<name>.computers`,
+    /// so two stores in one directory never share one).
+    pub fn computers_path(path: &Path) -> PathBuf {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "devices.json".into());
+        if name == "devices.json" {
+            path.with_file_name("computers.json")
+        } else {
+            path.with_file_name(format!("{name}.computers"))
+        }
+    }
+
+    /// Read the store, or an empty one when there is no file yet: the phones
+    /// from `path`, the computers from [`DeviceStore::computers_path`].
     ///
     /// A file that exists and does not parse is an **error**, never an empty
     /// store. Returning empty there would silently unpair every device the
     /// owner has, and the symptom — "my phone stopped working" — points
-    /// nowhere near the cause.
+    /// nowhere near the cause. For the computers it would also forget every
+    /// removal, which is the one thing a removal promises not to do.
     pub fn load(path: &Path) -> Result<DeviceStore, StoreError> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => serde_json::from_str(&text)
-                .map_err(|e| StoreError::Corrupt(format!("{}: {e}", path.display()))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DeviceStore::default()),
-            Err(e) => Err(StoreError::Io(e)),
+        let mut store: DeviceStore = match read_if_there(path)? {
+            Some(text) => serde_json::from_str(&text)
+                .map_err(|e| StoreError::Corrupt(format!("{}: {e}", path.display())))?,
+            None => DeviceStore::default(),
+        };
+        let computers = Self::computers_path(path);
+        if let Some(text) = read_if_there(&computers)? {
+            let file: ComputersFile = serde_json::from_str(&text)
+                .map_err(|e| StoreError::Corrupt(format!("{}: {e}", computers.display())))?;
+            store.computers = file.computers;
         }
+        Ok(store)
     }
 
     /// Write the store, 0600, in a directory this user alone can enter.
@@ -276,22 +354,23 @@ impl DeviceStore {
     /// crash mid-write leaves the previous store rather than half of one.
     /// `rename(2)` within a directory is atomic; writing in place is not, and
     /// the failure it produces is the corrupt-file case above.
+    ///
+    /// The computers go to [`DeviceStore::computers_path`], first, and only
+    /// once there is one (a machine with phones alone keeps the one file).
+    /// Computers are never deleted, only tombstoned, so a map that is empty
+    /// here never stands for a file that should be emptied.
     pub fn save(&self, path: &Path) -> Result<(), StoreError> {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        rime_agent_core::paths::ensure_private_dir(dir)?;
-        let tmp = dir.join(format!(
-            ".{}.{}",
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "devices.json".into()),
-            std::process::id()
-        ));
+        if !self.computers.is_empty() {
+            let file = ComputersFile {
+                computers: self.computers.clone(),
+            };
+            let text = serde_json::to_string_pretty(&file)
+                .map_err(|e| StoreError::Corrupt(format!("serialising the computers: {e}")))?;
+            write_private(&Self::computers_path(path), &text)?;
+        }
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| StoreError::Corrupt(format!("serialising the store: {e}")))?;
-        std::fs::write(&tmp, text.as_bytes())?;
-        set_owner_only(&tmp)?;
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        write_private(path, &text)
     }
 
     /// Add a device, or say why it cannot be added.
@@ -315,6 +394,10 @@ impl DeviceStore {
         // then open two sessions with two different scopes, and a revoked or
         // leaked companion key would come back as a full one.
         if self.devices.values().any(|d| d.ever_had_companion(&raw)) {
+            return Err(StoreError::KeyInUse);
+        }
+        // Nor may another computer's key, or its id, become a phone.
+        if self.computer_holds(&raw) || self.computers.contains_key(&id) {
             return Err(StoreError::KeyInUse);
         }
         // Pairing again after a revoke starts with no companion key, but
@@ -343,6 +426,8 @@ impl DeviceStore {
             // phone mints a new one over its new full session.
             companion_key: None,
             retired_companion_keys: retired,
+            addresses: Vec::new(),
+            relay: None,
         };
         self.devices.insert(id, device.clone());
         Ok(device)
@@ -359,7 +444,24 @@ impl DeviceStore {
     /// as its full key: `companion_register` and `pair` already refuse that,
     /// and this is the second lock on the same door, so a revoked full key
     /// can never come back as somebody's companion.
+    ///
+    /// A key that is both a computer's (removed or not) and a phone's key or
+    /// companion key, now or ever, authenticates as nothing. Pairing refuses
+    /// that in both directions, so it means an older `rime-remoted` paired it
+    /// as a phone after a rollback, and neither record can be trusted: a
+    /// removed computer must not come back as a phone with everything a phone
+    /// may do. The owner revokes the phone and pairs it again.
     pub fn authenticate(&self, public_key: &str) -> Option<(&Device, Scope)> {
+        if let Some(raw) = canonical(public_key) {
+            if self.computer_holds(&raw)
+                && self
+                    .devices
+                    .values()
+                    .any(|d| canonical(&d.public_key).as_ref() == Some(&raw) || d.ever_had_companion(&raw))
+            {
+                return None;
+            }
+        }
         if let Some(d) = self
             .devices
             .values()
@@ -370,10 +472,112 @@ impl DeviceStore {
         if self.devices.values().any(|d| d.public_key == public_key) {
             return None;
         }
+        // Another computer: active is a peer, and a removed one is refused
+        // here before anything else could match it.
+        if let Some(c) = self.computers.values().find(|c| c.public_key == public_key) {
+            return if c.is_active() { Some((c, Scope::Peer)) } else { None };
+        }
         self.devices
             .values()
             .find(|d| d.is_active() && d.companion_key.as_deref() == Some(public_key))
             .map(|d| (d, Scope::Companion))
+    }
+
+    /// Whether `raw` is any computer record's key, removed ones included.
+    fn computer_holds(&self, raw: &[u8; 32]) -> bool {
+        self.computers.values().any(|c| canonical(&c.public_key).as_ref() == Some(raw))
+    }
+
+    /// Add another computer whose key a code pairing just proved, or refresh
+    /// the name and addresses of one already paired.
+    ///
+    /// Refused when the key is a phone's key or companion key (now or ever),
+    /// when its id is a phone's, and when that computer was removed: a
+    /// tombstone on a computer is never undone, so it must pair with a new
+    /// key. `own_key` is this machine's own public key, refused too (a copied
+    /// home), so no caller can forget that check.
+    pub fn pair_computer(
+        &mut self,
+        public_key: &[u8; 32],
+        own_key: &[u8; 32],
+        name: &str,
+        addresses: Vec<String>,
+        relay: Option<String>,
+        now_ms: u64,
+    ) -> Result<Device, StoreError> {
+        if public_key == own_key {
+            return Err(StoreError::KeyInUse);
+        }
+        let text = crate::b64_encode(public_key);
+        let name = check_name(name)?;
+        let id = Device::id_for(&text);
+        if self.devices.contains_key(&id)
+            || self
+                .devices
+                .values()
+                .any(|d| canonical(&d.public_key).as_ref() == Some(public_key) || d.ever_had_companion(public_key))
+        {
+            return Err(StoreError::KeyInUse);
+        }
+        if let Some(existing) = self.computers.get(&id) {
+            if existing.public_key != text {
+                return Err(StoreError::KeyInUse);
+            }
+            if !existing.is_active() {
+                return Err(StoreError::Removed(existing.name.clone()));
+            }
+        }
+        let paired_ms = self.computers.get(&id).map(|c| c.paired_ms).unwrap_or(now_ms);
+        let last_seen_ms = self.computers.get(&id).and_then(|c| c.last_seen_ms);
+        let computer = Device {
+            id: id.clone(),
+            name,
+            public_key: text,
+            paired_ms,
+            last_seen_ms,
+            revoked_ms: None,
+            requires_user_verification: false,
+            last_path: None,
+            companion_key: None,
+            retired_companion_keys: Vec::new(),
+            addresses,
+            relay,
+        };
+        self.computers.insert(id, computer.clone());
+        Ok(computer)
+    }
+
+    /// Other computers, newest pairing last.
+    pub fn list_computers(&self) -> Vec<&Device> {
+        let mut v: Vec<&Device> = self.computers.values().collect();
+        v.sort_by_key(|d| d.paired_ms);
+        v
+    }
+
+    /// A computer by id or name, resolved the way a phone is.
+    pub fn find_computer(&self, id_or_name: &str) -> Result<&Device, StoreError> {
+        let id = resolve_in(&self.computers, id_or_name)?;
+        Ok(self.computers.get(&id).expect("resolved"))
+    }
+
+    /// Remove another computer: a tombstone, never undone. Idempotent.
+    pub fn revoke_computer(&mut self, id_or_name: &str, now_ms: u64) -> Result<Device, StoreError> {
+        let id = resolve_in(&self.computers, id_or_name)?;
+        let c = self.computers.get_mut(&id).expect("resolved");
+        if c.revoked_ms.is_none() {
+            c.revoked_ms = Some(now_ms);
+        }
+        Ok(c.clone())
+    }
+
+    /// Remember where a computer answered, first in its list, at most
+    /// [`crate::computer::MAX_ADDRESSES`] kept.
+    pub fn computer_reached_at(&mut self, id: &str, address: &str) {
+        if let Some(c) = self.computers.get_mut(id) {
+            c.addresses.retain(|a| a != address);
+            c.addresses.insert(0, address.to_string());
+            c.addresses.truncate(crate::computer::MAX_ADDRESSES);
+        }
     }
 
     /// Give an active device a companion key, replacing any it had.
@@ -400,7 +604,7 @@ impl DeviceStore {
             canonical(&d.public_key).as_ref() == Some(&raw)
                 || (d.id != id && d.companion_key.as_deref().and_then(canonical).as_ref() == Some(&raw))
                 || d.retired_companion_keys.iter().any(|k| canonical(k).as_ref() == Some(&raw))
-        });
+        }) || self.computer_holds(&raw);
         if taken {
             return Err(StoreError::KeyInUse);
         }
@@ -433,7 +637,7 @@ impl DeviceStore {
 
     /// Record a completed handshake.
     pub fn seen(&mut self, id: &str, now_ms: u64, path: &str) {
-        if let Some(d) = self.devices.get_mut(id) {
+        if let Some(d) = self.devices.get_mut(id).or_else(|| self.computers.get_mut(id)) {
             d.last_seen_ms = Some(now_ms);
             d.last_path = Some(path.to_string());
         }
@@ -459,26 +663,30 @@ impl DeviceStore {
     /// whichever came first — revoking the wrong device is the failure this
     /// avoids, and it is silent.
     fn resolve(&self, id_or_name: &str) -> Result<String, StoreError> {
-        if self.devices.contains_key(id_or_name) {
-            return Ok(id_or_name.to_string());
-        }
-        let matches: Vec<&Device> = self
-            .devices
-            .values()
-            .filter(|d| d.name == id_or_name)
-            .collect();
-        match matches.as_slice() {
-            [one] => Ok(one.id.clone()),
-            [] => Err(StoreError::NoSuchDevice(id_or_name.to_string())),
-            many => Err(StoreError::NoSuchDevice(format!(
-                "{id_or_name}' names {} devices; use one of the ids: {}",
-                many.len(),
-                many.iter()
-                    .map(|d| d.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ))),
-        }
+        resolve_in(&self.devices, id_or_name)
+    }
+}
+
+/// An id or a name to an id within one map. See [`DeviceStore::resolve`].
+fn resolve_in(map: &BTreeMap<String, Device>, id_or_name: &str) -> Result<String, StoreError> {
+    if map.contains_key(id_or_name) {
+        return Ok(id_or_name.to_string());
+    }
+    let matches: Vec<&Device> = map
+        .values()
+        .filter(|d| d.name == id_or_name)
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(one.id.clone()),
+        [] => Err(StoreError::NoSuchDevice(id_or_name.to_string())),
+        many => Err(StoreError::NoSuchDevice(format!(
+            "{id_or_name}' names {} devices; use one of the ids: {}",
+            many.len(),
+            many.iter()
+                .map(|d| d.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
     }
 }
 
@@ -528,6 +736,33 @@ pub fn check_name(name: &str) -> Result<String, StoreError> {
 }
 
 /// 0600 on a file that names the owner's devices.
+/// A file's text, or `None` when it does not exist.
+fn read_if_there(path: &Path) -> Result<Option<String>, StoreError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(StoreError::Io(e)),
+    }
+}
+
+/// Write `text` to `path`, 0600, in a directory this user alone can enter,
+/// through a temporary file renamed over it (see [`DeviceStore::save`]).
+fn write_private(path: &Path, text: &str) -> Result<(), StoreError> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    rime_agent_core::paths::ensure_private_dir(dir)?;
+    let tmp = dir.join(format!(
+        ".{}.{}",
+        path.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "devices.json".into()),
+        std::process::id()
+    ));
+    std::fs::write(&tmp, text.as_bytes())?;
+    set_owner_only(&tmp)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 fn set_owner_only(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
@@ -945,4 +1180,157 @@ mod tests {
         let d = s.set_companion(&a.id, &key(61)).expect("register");
         assert_eq!(d.companion_key, Some(crate::b64_encode(&[61u8; 32])));
     }
+
+    fn raw(seed: u8) -> [u8; 32] {
+        [seed; 32]
+    }
+
+    #[test]
+    fn a_computer_authenticates_as_a_peer_and_once_removed_never_comes_back() {
+        let mut s = DeviceStore::default();
+        let own = raw(99);
+        let c = s
+            .pair_computer(&raw(7), &own, "desk", vec!["192.168.1.9:7717".into()], None, 10)
+            .expect("pair");
+        let (d, scope) = s.authenticate(&key(7)).expect("authenticates");
+        assert_eq!((d.id.as_str(), scope), (c.id.as_str(), Scope::Peer));
+        assert_eq!(Scope::Peer.as_str(), "peer");
+        s.revoke_computer("desk", 20).expect("remove");
+        assert!(s.authenticate(&key(7)).is_none(), "a removed computer still authenticates");
+        // Removing again keeps the first time; pairing again is refused.
+        assert_eq!(s.revoke_computer(&c.id, 30).expect("again").revoked_ms, Some(20));
+        assert!(matches!(
+            s.pair_computer(&raw(7), &own, "desk", vec![], None, 40),
+            Err(StoreError::Removed(_))
+        ));
+        assert!(s.authenticate(&key(7)).is_none(), "a refused re-pair undid the removal");
+    }
+
+    #[test]
+    fn a_computer_is_never_a_phone_and_never_this_machine() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        s.pair(&key(1), "phone", 1, false).expect("phone");
+        s.set_companion(&Device::id_for(&key(1)), &key(2)).expect("companion");
+        s.set_companion(&Device::id_for(&key(1)), &key(3)).expect("replace (2 retired)");
+        for k in [1u8, 2, 3] {
+            assert!(
+                matches!(s.pair_computer(&raw(k), &own, "x", vec![], None, 2), Err(StoreError::KeyInUse)),
+                "phone key {k} became a computer"
+            );
+        }
+        assert!(matches!(s.pair_computer(&own, &own, "me", vec![], None, 2), Err(StoreError::KeyInUse)));
+        s.pair_computer(&raw(7), &own, "desk", vec![], None, 3).expect("computer");
+        assert!(matches!(s.pair(&key(7), "x", 4, false), Err(StoreError::KeyInUse)));
+        assert!(matches!(
+            s.set_companion(&Device::id_for(&key(1)), &key(7)),
+            Err(StoreError::KeyInUse)
+        ));
+        s.revoke_computer("desk", 5).expect("remove");
+        assert!(matches!(s.pair(&key(7), "x", 6, false), Err(StoreError::KeyInUse)), "a removed computer came back as a phone");
+        // Phones are unaffected by the computers, and the other way round.
+        assert_eq!(s.list().len(), 1);
+        assert_eq!(s.list_computers().len(), 1);
+        assert!(s.find("desk").is_err());
+        assert!(s.find_computer("phone").is_err());
+    }
+
+    #[test]
+    fn pairing_a_paired_computer_again_refreshes_its_name_and_addresses() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        s.pair_computer(&raw(7), &own, "desk", vec!["10.0.0.2:7717".into()], None, 10).expect("pair");
+        let c = s
+            .pair_computer(&raw(7), &own, "desk 2", vec!["10.0.0.3:7717".into()], Some("wss://r.example".into()), 50)
+            .expect("again");
+        assert_eq!((c.name.as_str(), c.paired_ms), ("desk 2", 10));
+        assert_eq!(c.addresses, ["10.0.0.3:7717"]);
+        s.computer_reached_at(&c.id, "10.0.0.4:7717");
+        s.computer_reached_at(&c.id, "10.0.0.3:7717");
+        assert_eq!(s.find_computer(&c.id).expect("c").addresses, ["10.0.0.3:7717", "10.0.0.4:7717"]);
+    }
+
+    #[test]
+    fn computers_and_their_tombstones_survive_an_older_daemon_rewriting_devices_json() {
+        use std::os::unix::fs::PermissionsExt;
+        let own = raw(99);
+        let dir = tmp("computers");
+        let path = store_in(&dir.0);
+        let computers = DeviceStore::computers_path(&path);
+        assert_eq!(computers, dir.0.join("rime").join("remote").join("computers.json"));
+        let mut s = DeviceStore::default();
+        s.pair(&key(1), "phone", 1, false).expect("phone");
+        s.save(&path).expect("save");
+        assert!(!computers.exists(), "a machine with phones alone got a computers file");
+        let c = s.pair_computer(&raw(7), &own, "desk", vec![], None, 2).expect("computer");
+        let gone = s.pair_computer(&raw(8), &own, "old desk", vec![], None, 3).expect("computer");
+        s.revoke_computer(&gone.id, 4).expect("removed");
+        s.save(&path).expect("save");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert!(!text.contains("computers"), "devices.json carries computers: {text}");
+        assert!(!text.contains(&c.id) && !text.contains(&gone.id), "{text}");
+        assert!(!text.contains("addresses"), "{text}");
+        let mode = std::fs::metadata(&computers).expect("computers.json").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        // An older rime-remoted, which knows only `devices`, rewrites
+        // devices.json (as it does on every handshake) and never opens
+        // computers.json.
+        #[derive(Serialize, Deserialize)]
+        struct Older {
+            #[serde(default)]
+            devices: BTreeMap<String, serde_json::Value>,
+        }
+        let older: Older = serde_json::from_str(&text).expect("older shape");
+        assert_eq!(older.devices.len(), 1);
+        std::fs::write(&path, serde_json::to_string_pretty(&older).expect("older json")).expect("older write");
+
+        let back = DeviceStore::load(&path).expect("load");
+        assert_eq!(back.authenticate(&key(7)).map(|(_, s)| s), Some(Scope::Peer));
+        assert!(back.authenticate(&key(8)).is_none(), "a removed computer came back");
+        let mut back = back;
+        assert!(
+            matches!(back.pair_computer(&raw(8), &own, "old desk", vec![], None, 5), Err(StoreError::Removed(_))),
+            "the tombstone was lost"
+        );
+        assert!(
+            matches!(back.pair(&key(8), "phone", 5, false), Err(StoreError::KeyInUse)),
+            "a removed computer's key became a phone"
+        );
+
+        // A computers.json that does not parse is an error, not no computers.
+        std::fs::write(&computers, "{").expect("corrupt");
+        assert!(matches!(DeviceStore::load(&path), Err(StoreError::Corrupt(_))));
+    }
+
+    #[test]
+    fn a_key_that_an_older_daemon_paired_as_a_phone_after_its_computer_was_removed_is_refused() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let c = s.pair_computer(&raw(7), &own, "desk", vec![], None, 1).expect("computer");
+        s.revoke_computer(&c.id, 2).expect("removed");
+        // What an older daemon could leave: the same key as a phone, written
+        // into `devices` without asking about computers it cannot see.
+        let mut phone = DeviceStore::default();
+        let d = phone.pair(&key(7), "phone", 3, false).expect("phone");
+        s.devices.insert(d.id.clone(), d);
+        assert!(s.authenticate(&key(7)).is_none(), "a removed computer's key came back as a phone");
+        // Active computer, same story: neither record is trusted.
+        let mut s = DeviceStore::default();
+        s.pair_computer(&raw(9), &own, "desk", vec![], None, 1).expect("computer");
+        let mut phone = DeviceStore::default();
+        let d = phone.pair(&key(9), "phone", 3, false).expect("phone");
+        s.devices.insert(d.id.clone(), d);
+        assert!(s.authenticate(&key(9)).is_none());
+        // And a phone whose companion key is a computer's.
+        let mut s = DeviceStore::default();
+        s.pair_computer(&raw(5), &own, "desk", vec![], None, 1).expect("computer");
+        let mut phone = DeviceStore::default();
+        let mut d = phone.pair(&key(1), "phone", 3, false).expect("phone");
+        d.companion_key = Some(key(5));
+        s.devices.insert(d.id.clone(), d);
+        assert!(s.authenticate(&key(5)).is_none());
+        assert_eq!(s.authenticate(&key(1)).map(|(_, s)| s), Some(Scope::Full), "the phone's own key still works");
+    }
+
 }

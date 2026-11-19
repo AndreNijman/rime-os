@@ -31,6 +31,16 @@ sha2 = "0.10.9"
 # a stateless job.
 chacha20poly1305 = "0.10.1"
 
+# Pairing two computers with a short code (`computer_pair`). SPAKE2 turns a
+# six-digit code into a shared key without handing either end (or anybody
+# pretending to be one) a value it can test codes against offline: an attacker
+# gets one guess per attempt, and the code is spent by that attempt. RustCrypto's
+# implementation over the Ed25519 group; curve25519-dalek 4 is already in the
+# lock through snow, so this adds the crate itself and `hkdf`. The confirmation
+# MAC is HMAC-SHA256 (`hmac` and `sha2` already in the lock).
+spake2 = "0.4.0"
+hmac = "0.12.1"
+
 # TLS, so that `wss://` is a relay this client can actually dial.
 #
 # `ROADMAP/design/P1-052-relay.md` §5.1 costed three ways to reach an
