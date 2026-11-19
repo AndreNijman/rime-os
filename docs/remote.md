@@ -422,7 +422,9 @@ A copy goes from this computer to Desk only when this computer sends to Desk
 default because a clipboard holds things you did not mean to share; you turn
 it on per computer and per direction. Rime Shell hands your copies over
 while Settings → Paired devices → **Send my clipboard to my phone** is on
-(the same switch that sends them to your phone).
+(the same switch that sends them to your phone). Only a copy Rime Shell or
+a terminal hands over goes to another computer: `rime remote clipboard` run
+by an agent or a scheduled job reaches your phones only.
 
 These never travel to another computer:
 
@@ -452,7 +454,8 @@ rime: desk (3f2a…) saved photos.zip (88.0 MB) in its Downloads.
   folder** button. Nothing is ever opened or run.
 - A file is at most 256 MB. Each computer takes at most 100 files and 2 GB an
   hour from each computer, one file at a time from each, and two at once in
-  all. Every byte is checked against the file's SHA-256 before the file gets
+  all. After its first minute a file must keep arriving at 256 KB/s or more
+  on average, or it is stopped. Every byte is checked against the file's SHA-256 before the file gets
   its name: a file that arrives broken or half sent leaves nothing behind.
 - Taking files is **on** for a computer you paired with a code: you showed
   the code and typed it, so it is yours. It is off for a computer your phone

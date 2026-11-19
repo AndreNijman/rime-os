@@ -1627,9 +1627,12 @@ them.
 → {"reply":"error","kind":"not_shared"|"rate_limited"|"bad_request"|"too_large"|"unavailable","message":"…"}
 ```
 
-- Sent by the computer where the copy was made, when Rime Shell hands it a
-  local copy (§2.14) and only then: to each computer whose `clipboard_send`
-  is on, directly, over the dialler (LAN, then relay), one thread per
+- Sent by the computer where the copy was made, when Rime Shell or a
+  terminal at it hands over a local copy (`clipboard`, §2.14; origin
+  `rime-shell` or `local-terminal`) and only then. A `clipboard` from any
+  other origin (an agent, a scheduled job, one that cannot be read) still
+  reaches the phones and goes to no computer. Then it goes to each
+  computer whose `clipboard_send` is on, directly, over the dialler (LAN, then relay), one thread per
   computer. Nothing is queued: a computer that cannot be reached misses the
   copy; while one push is under way, a newer copy replaces the waiting one.
   Nothing runs between copies, so power saver changes nothing.
@@ -1672,9 +1675,10 @@ Data from the receiver, one JSON line each:
   computer and two at once in all (`busy`). Quotas are memory only.
 - The name is **refused, not cleaned**, when empty, `.` or `..`, longer than
   200 bytes, or holding `/`, `\`, a control character (C0, DEL, C1), or an
-  invisible or direction-changing format character (U+061C, U+200B–U+200F,
-  U+202A–U+202E, U+2060–U+2069, U+FEFF); then it is reduced as every saved name
-  is (leading dots and spaces dropped: nothing is saved hidden). `len` is 1 to
+  invisible or direction-changing character (every character of Unicode
+  17's categories Cf, Zl and Zp: bidi controls, zero-width characters, the
+  soft hyphen, the tags, U+2028, U+2029); then it is reduced as every saved
+  name is (leading dots and spaces dropped: nothing is saved hidden). `len` is 1 to
   268,435,456 (`too_large` otherwise, including 0 and anything that is not a
   whole number); `sha256` is 64 lowercase hex digits.
 - The receiver asks `rime-agentd` for `save_file` (§1.8) with the checked
@@ -1683,7 +1687,10 @@ Data from the receiver, one JSON line each:
   match never gets its name, because `rime-agentd` removes its temporary file
   when the stream ends short. The same happens when the sender closes the
   channel, the session ends (removal ends it), nothing arrives for 30 s, or
-  the transfer outlasts 60 s plus 1 s per 256 KiB. A temporary file a killed
+  the transfer falls behind its schedule: 60 s of grace, then 256 KiB/s from
+  the start (byte `n` is due by 60 s + n / 256 KiB, so the whole file by
+  60 s plus 1 s per 256 KiB). A computer that trickles loses its slot once it
+  is behind, not at the end. A temporary file a killed
   `rime-agentd` left behind (`.rime-save-<pid>-<seq>-<nanos>.part`, its pid no
   longer running) is removed before its next save. `rime-agentd` saves under
   a name that replaces nothing (`notes (2).txt`), never through a link, mode
