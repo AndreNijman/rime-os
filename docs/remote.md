@@ -351,8 +351,11 @@ with another, and the rest follows:
   proved itself to both.
 - **A computer brings your phone to a computer it was just paired with.**
   When your phone next connects to it, the computer asks the new one for a
-  pairing offer and hands it to the phone, which pairs by itself. The new
-  computer shows "Pixel 8 joined this computer, added by Desk", with Remove.
+  pairing offer and hands it to the phone. With Rime Remote open, the phone
+  joins at once; it keeps the new key behind your fingerprint or screen lock,
+  as when you scan a code. Otherwise it shows a notification and joins when
+  you next open the app, while the offer lasts. The new computer shows
+  "Pixel 8 joined this computer, added by Desk", with Remove.
 
 **Joining is not trust.** Something that joined this way gets less than
 something you paired here, until you say otherwise at this computer:

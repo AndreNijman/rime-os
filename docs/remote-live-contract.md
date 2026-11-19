@@ -1744,8 +1744,14 @@ key of the computer it dialled, and sends the phone:
 {"event":"join_offer","offer":"apex-remote:…","computer":"laptop","by":"desk"}
 ```
 
-The phone pairs on it only for a computer it does not hold and only when
-"Join my other computers automatically" is on.
+The phone pairs on it only for a computer it does not hold, only when
+"Join my other computers automatically" is on, only on a full link of an
+unlocked app, and only while the offer lasts. The new key is sealed as for a
+scanned code (behind the prompt), so the phone joins while the app is on the
+screen; an offer that arrives otherwise waits, with a notification, until it
+is. The phone cannot tell whether the offer is for the computer it names:
+any computer with a full link can offer any computer, and the prompt and the
+notification are what the person sees.
 
 *When a computer removes a computer.* By `computer_remove`, or by a
 tombstone that removes it, every phone with a full events channel open here
@@ -1755,8 +1761,9 @@ gets:
 {"event":"device_removed","key":"<b64url of the removed computer>","name":"laptop"}
 ```
 
-The phone forgets that computer and says so. Companion sessions are not
-sent it. A phone that is not connected then is not told later (M2 has no
+The phone forgets that computer and says so, when the switch is on, the
+link is full, and the key is one it holds other than the sender's. Companion
+sessions are not sent it. A phone that is not connected then is not told later (M2 has no
 queue for it).
 
 *Allow and Remove.*
