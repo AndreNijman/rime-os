@@ -411,10 +411,12 @@ pub fn sweep_partials(dir: &Path, own: u32, alive: impl Fn(u32) -> bool) -> Vec<
     removed
 }
 
-/// [`sweep_partials`] on this process's Downloads, at start.
-pub fn sweep_downloads() {
-    let Ok(dir) = desk().and_then(|d| downloads(&d)) else { return };
-    for p in sweep_partials(&dir, std::process::id(), process_alive) {
+/// [`sweep_partials`] on the folder a save is about to write into. Run by
+/// every save rather than once at start: a daemon started by a test (or by
+/// anything else without the desktop stub) never looks at the real Downloads
+/// unless it is asked to save there.
+fn sweep_before_save(dir: &Path) {
+    for p in sweep_partials(dir, std::process::id(), process_alive) {
         eprintln!("rime-agentd: removed a file left half saved: {}", p.display());
     }
 }
@@ -461,6 +463,7 @@ fn save_inner(
     socket
         .set_read_timeout(Some(stall))
         .map_err(|e| format!("the upload could not be given a read timeout: {e}"))?;
+    sweep_before_save(&plan.dir);
     let (tmp, mut file) = temp_file(&plan.dir)?;
     let mut partial = Partial(Some(tmp.clone()));
     let deadline = Instant::now() + budget;
@@ -745,6 +748,24 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode & 0o111, 0, "a saved file is never executable");
         assert!(leftovers(&p.dir).is_empty());
+    }
+
+    #[test]
+    fn a_save_sweeps_what_a_stopped_daemon_left_and_keeps_what_a_live_one_writes() {
+        let (_t, d) = stub();
+        let p = plan(&d, "next.txt", 3).unwrap();
+        // A pid past the kernel's ceiling, so never running.
+        let stale = p.dir.join(".rime-save-4194999-7-1.part");
+        std::fs::write(&stale, b"half").unwrap();
+        let own = p.dir.join(format!(".rime-save-{}-999999-1.part", std::process::id()));
+        std::fs::write(&own, b"arriving").unwrap();
+        let (mut tx, rx) = pair();
+        tx.write_all(b"abc").unwrap();
+        let mut r = rx.try_clone().unwrap();
+        let (name, _) = saved(save(&p, &rx, &mut r, 3, Duration::from_secs(2), Duration::from_secs(5)));
+        assert_eq!(name, "next.txt");
+        assert!(!stale.exists(), "the stopped save's file was left");
+        assert!(own.exists(), "this daemon's own arriving file was removed");
     }
 
     #[test]

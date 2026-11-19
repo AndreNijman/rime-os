@@ -4187,3 +4187,221 @@ fn three_computers_share_one_copy_once_each_and_it_settles() {
     let r = a.control(r#"{"cmd":"clipboard","text":"from b"}"#);
     assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
 }
+
+/// What is in `h`'s stand-in Downloads, names sorted; dot files included.
+fn downloads_of(h: &Harness) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(h.root.join("desk/Downloads"))
+        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// A file of `len` bytes that no two offsets repeat soon in, at `dir/name`.
+fn a_file(dir: &std::path::Path, name: &str, len: usize) -> (PathBuf, Vec<u8>) {
+    std::fs::create_dir_all(dir).expect("mkdir");
+    let body: Vec<u8> = (0..len).map(|i| ((i * 7 + i / 251) % 256) as u8).collect();
+    let path = dir.join(name);
+    std::fs::write(&path, &body).expect("write");
+    (path, body)
+}
+
+fn sha256_bytes(b: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(b).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn a_file_sent_to_a_paired_computer_lands_in_its_downloads_under_a_new_name_and_nothing_is_opened() {
+    let a = harness!("files-a");
+    let b = harness!("files-b");
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    let outbox = a.root.join("outbox");
+    let (notes, body) = a_file(&outbox, "notes.txt", 1234);
+
+    // On by default for a computer paired with a code.
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("saved notes.txt"), "{said}");
+    assert_eq!(std::fs::read(b.root.join("desk/Downloads/notes.txt")).expect("saved"), body);
+    // Again: a new name, the first one untouched.
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("saved notes (2).txt"), "{said}");
+    assert_eq!(downloads_of(&b), ["notes (2).txt", "notes.txt"]);
+
+    // B says so, with one button, and opens nothing. The button shows the
+    // file in its folder; the path never came from A.
+    let lines = notify_lines(&b, 2);
+    let posted: Vec<&serde_json::Value> =
+        lines.iter().filter(|l| l["op"] == "notify" && l["summary"].as_str().unwrap_or("").contains("sent you")).collect();
+    assert_eq!(posted.len(), 2, "{lines:?}");
+    assert!(posted[0]["summary"].as_str().unwrap().ends_with("sent you notes.txt"), "{:?}", posted[0]);
+    assert_eq!(posted[0]["actions"], serde_json::json!([["show", "Show in folder"]]));
+    assert!(lines.iter().all(|l| l["op"] != "show_item"), "something was shown before a press: {lines:?}");
+    press_here(&b, &posted[1]["id"], "show");
+    let want = format!("file://{}", b.root.join("desk/Downloads/notes%20%282%29.txt").display());
+    let mut shown = Vec::new();
+    assert!(
+        soon(|| {
+            shown = notify_lines(&b, 0).into_iter().filter(|l| l["op"] == "show_item").collect();
+            !shown.is_empty()
+        }),
+        "the button showed nothing"
+    );
+    assert_eq!(shown, [serde_json::json!({"op": "show_item", "uri": want})]);
+
+    // More than the sender keeps on the way unacknowledged: it waits for
+    // B's progress lines and every byte arrives.
+    let (big, big_body) = a_file(&outbox, "big.bin", 6 * 1024 * 1024 + 3);
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, big.to_str().unwrap()], b"");
+    assert_eq!(rc, 0, "{said}");
+    let got = std::fs::read(b.root.join("desk/Downloads/big.bin")).expect("big saved");
+    assert_eq!(sha256_bytes(&got), sha256_bytes(&big_body));
+
+    // B turns files off: A's next file is refused and nothing lands.
+    let (rc, said) = rime_remote(&b, &["computers", "files", &a_on_b, "off"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("did not take it"), "{said}");
+    assert_eq!(downloads_of(&b), ["big.bin", "notes (2).txt", "notes.txt"]);
+    let (rc, said) = rime_remote(&a, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{said}");
+
+    // A file that cannot be opened is said so; the others still go.
+    let (rc, said) = rime_remote(&b, &["computers", "files", &a_on_b, "on"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let (rc, said) =
+        rime_remote(&a, &["computers", "send", &b_on_a, "/nonexistent/x.txt", notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("could not open /nonexistent/x.txt") && said.contains("saved notes (3).txt"), "{said}");
+
+    // Removed on B: B takes nothing more from A. Removed on A: A sends
+    // nothing more to B.
+    let removed = b.control(&serde_json::json!({"cmd": "computer_remove", "computer": a_on_b}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 1, "{said}");
+    let _ = until_computer(&a, &b_on_a, Duration::from_secs(15), |c| c["revoked_ms"].is_u64());
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("removed"), "{said}");
+    assert_eq!(downloads_of(&b), ["big.bin", "notes (2).txt", "notes (3).txt", "notes.txt"]);
+}
+
+/// Open a `peer_file` channel with `offer` and give the reply line.
+fn open_peer_file(session: &mut Session, channel: u32, offer: serde_json::Value) -> serde_json::Value {
+    session.send(Frame::Open { channel, request: offer.to_string().into_bytes() });
+    loop {
+        match session.recv() {
+            Frame::Control(line) => return serde_json::from_slice(&line).expect("json"),
+            other => session.pending.push(other),
+        }
+    }
+}
+
+/// The lines B writes on `channel` until one is an outcome.
+fn peer_file_outcome(session: &mut Session, channel: u32) -> serde_json::Value {
+    let mut buf = Vec::new();
+    loop {
+        match session.recv() {
+            Frame::Data { channel: c, bytes } if c == channel => {
+                buf.extend_from_slice(&bytes);
+                while let Some(i) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=i).collect();
+                    let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+                    if v["reply"] != "peer_file_progress" {
+                        return v;
+                    }
+                }
+            }
+            Frame::Close { channel: c, .. } if c == channel => panic!("closed with no outcome"),
+            other => session.pending.push(other),
+        }
+    }
+}
+
+#[test]
+fn a_peer_offering_a_bad_name_a_wrong_hash_or_half_a_file_leaves_nothing_behind() {
+    let a = harness!("files-bad-a");
+    let b = harness!("files-bad-b");
+    let Some((_b_on_a, _a_on_b)) = pair_computers(&a, &b) else { return };
+    let mut peer = identity_of(&a).connect(&b).expect("A is paired with B");
+    let body = b"ssh-ed25519 AAAA attacker".to_vec();
+    let offer = |name: &str, len: u64, sha: &str| serde_json::json!({"cmd": "peer_file", "name": name, "len": len, "sha256": sha});
+
+    // Refused before a byte: a path, a hidden control, a zero or huge length.
+    let mut ch = 1;
+    for (o, kind) in [
+        (offer("../../.ssh/authorized_keys", body.len() as u64, &sha256_bytes(&body)), "bad_request"),
+        (offer("..", body.len() as u64, &sha256_bytes(&body)), "bad_request"),
+        (offer("a\nb", body.len() as u64, &sha256_bytes(&body)), "bad_request"),
+        (offer("invoice\u{202E}fdp.exe", body.len() as u64, &sha256_bytes(&body)), "bad_request"),
+        (offer("a.txt", 0, &sha256_bytes(b"")), "too_large"),
+        (offer("a.txt", 1 << 40, &sha256_bytes(&body)), "too_large"),
+        (offer("a.txt", body.len() as u64, "not a hash"), "bad_request"),
+    ] {
+        let r = open_peer_file(&mut peer, ch, o.clone());
+        assert_eq!(r["kind"], kind, "{o}: {r}");
+        ch += 1;
+    }
+    // A peer cannot reach rime-agentd's own save under any name.
+    let r = open_peer_file(&mut peer, ch, serde_json::json!({"cmd": "save_file", "name": "x", "len": 1}));
+    assert_eq!(r["reply"], "error", "{r}");
+    ch += 1;
+    assert!(downloads_of(&b).is_empty(), "{:?}", downloads_of(&b));
+    assert!(!b.root.join(".ssh").exists() && !b.root.join("desk/.ssh").exists());
+
+    // The wrong hash: every byte sent, the outcome says so, nothing saved.
+    let r = open_peer_file(&mut peer, ch, offer("a.txt", body.len() as u64, &sha256_bytes(b"something else")));
+    assert_eq!(r["reply"], "peer_file", "{r}");
+    for f in Frame::data_frames(ch, &body) {
+        peer.send(f);
+    }
+    let out = peer_file_outcome(&mut peer, ch);
+    assert_eq!(out["reply"], "error", "{out}");
+    assert!(out["message"].as_str().unwrap_or("").contains("did not match"), "{out}");
+    assert!(soon(|| downloads_of(&b).is_empty()), "{:?}", downloads_of(&b));
+    ch += 1;
+
+    // The right hash, straight over a peer channel: saved, by its own name.
+    let r = open_peer_file(&mut peer, ch, offer(".profile", body.len() as u64, &sha256_bytes(&body)));
+    assert_eq!(r["reply"], "peer_file", "{r}");
+    for f in Frame::data_frames(ch, &body) {
+        peer.send(f);
+    }
+    let out = peer_file_outcome(&mut peer, ch);
+    assert_eq!(out, serde_json::json!({"reply": "peer_file_saved", "name": "profile"}), "a dot file was hidden: {out}");
+    assert!(!out.to_string().contains(b.root.to_str().unwrap()), "B told A where it saved: {out}");
+    ch += 1;
+
+    // What an earlier rime-agentd left when it was killed mid-save goes with
+    // the next save; and so does nothing else.
+    let downloads = b.root.join("desk/Downloads");
+    std::fs::write(downloads.join(".rime-save-4194999-0-1.part"), b"half").expect("stale");
+    std::fs::write(downloads.join(".rime-save-notmine.part"), b"keep").expect("other");
+    let r = open_peer_file(&mut peer, ch, offer("second.txt", body.len() as u64, &sha256_bytes(&body)));
+    assert_eq!(r["reply"], "peer_file", "{r}");
+    for f in Frame::data_frames(ch, &body) {
+        peer.send(f);
+    }
+    assert_eq!(peer_file_outcome(&mut peer, ch)["reply"], "peer_file_saved");
+    assert_eq!(downloads_of(&b), [".rime-save-notmine.part", "profile", "second.txt"]);
+    std::fs::remove_file(downloads.join(".rime-save-notmine.part")).expect("rm");
+    ch += 1;
+
+    // Half a file, then A goes away: B keeps no partial.
+    let len: u64 = 3 * 1024 * 1024;
+    let half: Vec<u8> = vec![7u8; 1024 * 1024];
+    let r = open_peer_file(&mut peer, ch, offer("half.bin", len, &sha256_bytes(&vec![7u8; len as usize])));
+    assert_eq!(r["reply"], "peer_file", "{r}");
+    for f in Frame::data_frames(ch, &half) {
+        peer.send(f);
+    }
+    // The partial is there while the bytes arrive...
+    assert!(soon(|| downloads_of(&b).iter().any(|n| n.ends_with(".part"))), "{:?}", downloads_of(&b));
+    drop(peer);
+    // ...and gone once A is.
+    assert!(soon(|| downloads_of(&b) == ["profile", "second.txt"]), "{:?}", downloads_of(&b));
+}

@@ -584,18 +584,22 @@ pub fn allow(state: &State, computer: &str) -> Reply {
     Reply::ComputerAllowed { id: c.id, name: c.name }
 }
 
+/// The path `--via` names: the local network, the relay, or the first that works.
+pub fn via_of(via: Option<&str>) -> Result<crate::dialer::Via, String> {
+    match via {
+        None | Some("any") => Ok(crate::dialer::Via::Any),
+        Some("lan") => Ok(crate::dialer::Via::Lan),
+        Some("relay") => Ok(crate::dialer::Via::Relay),
+        Some(other) => Err(format!("--via is lan, relay or any, not {other:?}")),
+    }
+}
+
 /// `rime remote computers ping <computer>`: dial it, say `peer_hello`, and
 /// report what came back and how long it took.
 pub fn ping(state: &State, computer: &str, via: Option<&str>) -> Reply {
-    let via = match via {
-        None | Some("any") => crate::dialer::Via::Any,
-        Some("lan") => crate::dialer::Via::Lan,
-        Some("relay") => crate::dialer::Via::Relay,
-        Some(other) => {
-            return Reply::Error {
-                message: format!("--via is lan, relay or any, not {other:?}"),
-            }
-        }
+    let via = match via_of(via) {
+        Ok(v) => v,
+        Err(message) => return Reply::Error { message },
     };
     let c = match state.devices().map(|s| s.find_computer(computer).cloned()) {
         Ok(Ok(c)) if c.is_active() => c,

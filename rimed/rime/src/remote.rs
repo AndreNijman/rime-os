@@ -345,6 +345,9 @@ pub enum ComputersCmd {
         /// The files to send.
         #[arg(required = true)]
         files: Vec<PathBuf>,
+        /// Which path to use: the local network, the relay, or the first that works.
+        #[arg(long, value_enum, default_value = "any")]
+        via: Via,
     },
 }
 
@@ -596,6 +599,8 @@ enum Request {
     ComputerSend {
         computer: String,
         name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        via: Option<&'static str>,
     },
     PhotosSave {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -884,7 +889,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
             ComputersCmd::Files { computer, setting } => {
                 computers_share(Request::ComputerFiles { computer, on: setting == OnOff::On })
             }
-            ComputersCmd::Send { computer, files } => computers_send(&computer, &files),
+            ComputersCmd::Send { computer, files, via } => computers_send(&computer, &files, via),
         },
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
@@ -2114,7 +2119,7 @@ fn computer_send_wait(len: u64) -> std::time::Duration {
     std::time::Duration::from_secs(240 + len / (256 * 1024))
 }
 
-fn computers_send(computer: &str, files: &[PathBuf]) -> Result<i32> {
+fn computers_send(computer: &str, files: &[PathBuf], via: Via) -> Result<i32> {
     use std::os::fd::AsRawFd;
     let mut code = 0;
     for path in files {
@@ -2128,7 +2133,7 @@ fn computers_send(computer: &str, files: &[PathBuf]) -> Result<i32> {
         };
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let req = Request::ComputerSend { computer: computer.to_string(), name: name.clone() };
+        let req = Request::ComputerSend { computer: computer.to_string(), name: name.clone(), via: via.wire() };
         match call_for(&req, Some(file.as_raw_fd()), computer_send_wait(len))? {
             Reply::ComputerSent { id, name: to, file, bytes } => {
                 eprintln!("rime: {to} ({id}) saved {file} ({}) in its Downloads.", bytes_short(bytes));
@@ -2884,15 +2889,24 @@ mod tests {
         }
         let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
         match parse(&["computers", "send", "desk", "a.txt", "b c.pdf"]).expect("send").cmd {
-            RemoteCmd::Computers { action: ComputersCmd::Send { computer, files } } => {
+            RemoteCmd::Computers { action: ComputersCmd::Send { computer, files, via } } => {
+                assert_eq!(via, Via::Any);
                 assert_eq!(computer, "desk");
                 assert_eq!(files, vec![PathBuf::from("a.txt"), PathBuf::from("b c.pdf")]);
             }
             other => panic!("{other:?}"),
         }
         assert!(parse(&["computers", "send", "desk"]).is_err(), "a file is needed");
-        let wire = serde_json::to_string(&Request::ComputerSend { computer: "d".into(), name: "a.txt".into() }).unwrap();
+        let wire = serde_json::to_string(&Request::ComputerSend { computer: "d".into(), name: "a.txt".into(), via: None }).unwrap();
         assert_eq!(wire, r#"{"cmd":"computer_send","computer":"d","name":"a.txt"}"#);
+        let wire =
+            serde_json::to_string(&Request::ComputerSend { computer: "d".into(), name: "a.txt".into(), via: Via::Relay.wire() })
+                .unwrap();
+        assert_eq!(wire, r#"{"cmd":"computer_send","computer":"d","name":"a.txt","via":"relay"}"#);
+        assert!(matches!(
+            parse(&["computers", "send", "desk", "a.txt", "--via", "lan"]).expect("via").cmd,
+            RemoteCmd::Computers { action: ComputersCmd::Send { via: Via::Lan, .. } }
+        ));
         let r: Reply =
             serde_json::from_str(r#"{"reply":"computer_sent","id":"d","name":"desk","file":"a (1).txt","bytes":12}"#).expect("sent");
         assert!(matches!(r, Reply::ComputerSent { bytes: 12, .. }));
@@ -3244,6 +3258,7 @@ mod tests {
             &["computers", "send", ID, "a.txt"],
             &["computers", "send", ID, "a.txt", "b.pdf"],
             &["computers", "send", "--", ID, "a.txt"],
+            &["computers", "send", "--via", "relay", ID, "a.txt"],
             &["messages", "--device", ID],
             &["messages", "--device", ID, "--thread", "7", "--json"],
             &["messages", "send", "--device", ID, "--to", "5556"],

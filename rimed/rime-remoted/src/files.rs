@@ -436,7 +436,7 @@ pub struct Sent {
 
 /// Send `file` to paired computer `computer` (an id or a name), offered as
 /// `raw_name`. Blocks until the other computer says it saved it.
-pub fn send(state: &State, computer: &str, file: File, raw_name: &str) -> Result<Sent, String> {
+pub fn send(state: &State, computer: &str, file: File, raw_name: &str, via: crate::dialer::Via) -> Result<Sent, String> {
     let c = match state.devices() {
         Ok(store) => store.find_computer(computer).map_err(|e| e.to_string())?.clone(),
         Err(e) => return Err(e.to_string()),
@@ -455,7 +455,7 @@ pub fn send(state: &State, computer: &str, file: File, raw_name: &str) -> Result
     };
     let name = offered_name(&name)?;
     let sha256 = hash_of(&file, len)?;
-    let mut link = crate::dialer::open(state, &c, crate::dialer::Via::Any)?;
+    let mut link = crate::dialer::open(state, &c, via)?;
     let hello = link.call(br#"{"cmd":"remote_hello"}"#)?;
     if !crate::share::offers(&hello, FILE_VERB) {
         return Err(format!("'{}' runs a build that does not take files", crate::dialer::printable(&c.name)));

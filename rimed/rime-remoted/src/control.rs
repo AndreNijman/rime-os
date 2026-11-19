@@ -204,7 +204,12 @@ pub enum Request {
     /// its one descriptor, `name` is what the other computer is offered.
     /// A person at this machine only; answered once the other computer
     /// saved it or refused it.
-    ComputerSend { computer: String, name: String },
+    ComputerSend {
+        computer: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
+    },
 }
 
 /// What it answers.
@@ -501,12 +506,16 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::ComputerFiles { computer, on } => {
             crate::computers::share(state, &computer, |store, c| store.set_computer_files(c, on))
         }
-        Request::ComputerSend { computer, name } => computer_send(state, &computer, &name, fds),
+        Request::ComputerSend { computer, name, via } => computer_send(state, &computer, &name, via.as_deref(), fds),
     }
 }
 
 /// `computer_send`: the one descriptor, sent to the other computer.
-fn computer_send(state: &State, computer: &str, name: &str, mut fds: Vec<OwnedFd>) -> Reply {
+fn computer_send(state: &State, computer: &str, name: &str, via: Option<&str>, mut fds: Vec<OwnedFd>) -> Reply {
+    let via = match crate::computers::via_of(via) {
+        Ok(v) => v,
+        Err(why) => return Reply::error(why),
+    };
     if fds.len() != 1 {
         return Reply::error(format!(
             "a file is sent as one open descriptor passed with the request (`rime remote computers send \
@@ -515,7 +524,7 @@ fn computer_send(state: &State, computer: &str, name: &str, mut fds: Vec<OwnedFd
         ));
     }
     let file = std::fs::File::from(fds.remove(0));
-    match crate::files::send(state, computer, file, name) {
+    match crate::files::send(state, computer, file, name, via) {
         Ok(s) => Reply::ComputerSent { id: s.id, name: s.computer, file: s.name, bytes: s.bytes },
         Err(why) => Reply::error(why),
     }
@@ -1614,7 +1623,7 @@ mod tests {
             Request::DeviceAllow { device: "pixel".into() },
             Request::ComputerClipboard { computer: "desk".into(), send: true, receive: true },
             Request::ComputerFiles { computer: "desk".into(), on: true },
-            Request::ComputerSend { computer: "desk".into(), name: "a.txt".into() },
+            Request::ComputerSend { computer: "desk".into(), name: "a.txt".into(), via: None },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1744,7 +1753,7 @@ mod tests {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
-        let req = Request::ComputerSend { computer: "desk".into(), name: "a.txt".into() };
+        let req = Request::ComputerSend { computer: "desk".into(), name: "a.txt".into(), via: None };
         for o in RequestOrigin::ALL {
             let verdict = authorized_by(&req, Some(me), |_| Ok(*o));
             assert_eq!(verdict.is_ok(), o.is_local(), "{o}: {verdict:?}");
