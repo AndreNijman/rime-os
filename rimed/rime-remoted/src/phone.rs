@@ -119,7 +119,11 @@ pub const CAN_CALLS_HISTORY: &str = "calls_history";
 /// or for the photos they picked.
 pub const CAN_PHOTOS: &str = "photos";
 
-const KEPT: [&str; 12] = [
+/// The phone's switch "Join my other computers automatically" is on
+/// (intro.rs). Kept only from a Full session's report.
+pub const CAN_JOIN: &str = crate::intro::CAN_JOIN;
+
+const KEPT: [&str; 13] = [
     CAN_RING,
     CAN_RECEIVE,
     CAN_DISMISS,
@@ -132,6 +136,7 @@ const KEPT: [&str; 12] = [
     CAN_CALLS_HISTORY,
     CAN_PHOTOS,
     CAN_CLIPBOARD,
+    CAN_JOIN,
 ];
 
 /// The network kinds a phone may report. Anything else is refused rather than
@@ -219,6 +224,19 @@ impl PhoneReport {
 
     pub fn can_clipboard(&self) -> bool {
         self.can.iter().any(|c| c == CAN_CLIPBOARD)
+    }
+
+    pub fn can_join(&self) -> bool {
+        self.can.iter().any(|c| c == CAN_JOIN)
+    }
+
+    /// What a session of `scope` may say: [`CAN_JOIN`] only on a Full one,
+    /// since only an unlocked phone may introduce or be brought.
+    pub fn for_scope(mut self, scope: rime_remote_core::device::Scope) -> PhoneReport {
+        if scope != rime_remote_core::device::Scope::Full {
+            self.can.retain(|c| c != CAN_JOIN);
+        }
+        self
     }
 
     /// A report from a `phone_report` line, or why it was refused.
@@ -465,6 +483,11 @@ impl Events {
         lock(&self.writers).get(device_id).map(|w| (w.connection, w.full))
     }
 
+    /// Every device whose channel a full session opened.
+    pub fn full_holders(&self) -> Vec<String> {
+        lock(&self.writers).iter().filter(|(_, w)| w.full).map(|(d, _)| d.clone()).collect()
+    }
+
     /// `connection` ended: its channel goes, unless a newer connection opened
     /// one since.
     pub fn ended(&self, device_id: &str, connection: u64) {
@@ -705,7 +728,12 @@ pub fn ring(
 
 /// Answer `phone_report`, the acks and `offer_done`. `None` for a line this module does
 /// not own. The device is the handshake's, never a body field.
-pub fn control(state: &crate::state::State, device_id: &str, line: &[u8]) -> Option<Vec<u8>> {
+pub fn control(
+    state: &crate::state::State,
+    device_id: &str,
+    scope: rime_remote_core::device::Scope,
+    line: &[u8],
+) -> Option<Vec<u8>> {
     let v: Value = serde_json::from_slice(line).ok()?;
     let cmd = v.get("cmd")?.as_str()?;
     if !VERBS.contains(&cmd) {
@@ -714,7 +742,7 @@ pub fn control(state: &crate::state::State, device_id: &str, line: &[u8]) -> Opt
     Some(match cmd {
         "phone_report" => match PhoneReport::parse(&v, rime_remote_core::now_ms()) {
             Ok(report) => {
-                state.phone_report(device_id, report);
+                state.phone_report(device_id, report.for_scope(scope));
                 ok()
             }
             Err(why) => error(&why),

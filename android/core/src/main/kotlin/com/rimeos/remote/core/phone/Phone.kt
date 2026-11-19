@@ -324,6 +324,16 @@ object Phone {
                 val limit = o.long("limit")?.takeIf { it >= 1 } ?: return null
                 DeviceEvent.PhotosRequest(id, before, limit.coerceAtMost(Photos.MAX_LIMIT.toLong()).toInt())
             }
+            "join_offer" -> {
+                // The offer is decoded and checked where it is acted on
+                // (Introductions.accept); here only its size and the names.
+                val offer = o.text("offer")?.takeIf { it.isNotEmpty() && it.length <= Introductions.MAX_OFFER } ?: return null
+                DeviceEvent.JoinOffer(offer, (o.text("computer") ?: "").take(MACHINE_CAP), (o.text("by") ?: "").take(MACHINE_CAP))
+            }
+            "device_removed" -> {
+                val key = o.text("key")?.takeIf { runCatching { com.rimeos.remote.core.Device.checkKey(it) }.isSuccess } ?: return null
+                DeviceEvent.DeviceRemoved(key, (o.text("name") ?: "").take(MACHINE_CAP))
+            }
             "photos_fetch" -> {
                 val id = o.long("id")?.takeIf { it >= 0 } ?: return null
                 val photo = o.long("photo")?.takeIf { it >= 0 } ?: return null
@@ -423,6 +433,17 @@ sealed interface DeviceEvent {
 
     /** Send the original of [photo], an id from a listing, on a `photos_upload` channel (§2.13). */
     data class PhotosFetch(val id: Long, val photo: Long) : DeviceEvent
+
+    /**
+     * A computer offers to bring this phone to [computer] (§2.15). [offer] is
+     * a pairing offer, token and all, so it never reaches a log.
+     */
+    data class JoinOffer(val offer: String, val computer: String, val by: String) : DeviceEvent {
+        override fun toString(): String = "JoinOffer(computer=$computer, by=$by, offer=<${offer.length} chars>)"
+    }
+
+    /** The computer sending this removed the computer whose key is [key] (§2.15). */
+    data class DeviceRemoved(val key: String, val name: String) : DeviceEvent
 
     data class Offer(
         val id: Long,

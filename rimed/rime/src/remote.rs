@@ -39,7 +39,15 @@ pub enum RemoteCmd {
         text: bool,
     },
     /// Every device this machine has paired, and which of them are revoked.
+    ///
+    /// A phone another of your computers brought here says "added by" that
+    /// computer, and "not allowed yet" until you allow it: until then it can
+    /// use phone features only (battery, notifications, ring), not run or
+    /// see anything on this computer.
+    #[command(args_conflicts_with_subcommands = true)]
     Devices {
+        #[command(subcommand)]
+        action: Option<DevicesCmd>,
         #[arg(long)]
         json: bool,
     },
@@ -50,6 +58,7 @@ pub enum RemoteCmd {
     /// show that it was revoked and when.
     Revoke {
         /// Device id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
         device: String,
     },
     /// Make a paired phone ring, to find it.
@@ -59,6 +68,7 @@ pub enum RemoteCmd {
     /// nothing came back to prove the phone heard it.
     Ring {
         /// Device id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
         device: String,
     },
     /// Turn Do Not Disturb on or off on every phone that follows this
@@ -99,6 +109,7 @@ pub enum RemoteCmd {
     #[command(group(clap::ArgGroup::new("what").required(true).args(["files", "clipboard", "text"])))]
     Send {
         /// Device id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
         device: String,
         /// Files to send, each on its own.
         files: Vec<PathBuf>,
@@ -123,7 +134,7 @@ pub enum RemoteCmd {
         #[command(subcommand)]
         action: Option<MessagesCmd>,
         /// Device id or name. May be left out when one phone has Messages on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         /// Show this conversation's messages (its id from the list).
         #[arg(long, value_name = "ID")]
@@ -150,7 +161,7 @@ pub enum RemoteCmd {
         #[command(subcommand)]
         action: Option<CallsCmd>,
         /// Device id or name. May be left out when one phone has calls on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         /// Only calls older than this, in Unix milliseconds: the next page.
         #[arg(long, value_name = "MS")]
@@ -174,7 +185,7 @@ pub enum RemoteCmd {
         #[command(subcommand)]
         action: Option<PhotosCmd>,
         /// Device id or name. May be left out when one phone has Photos on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         /// Only photos older than this, in Unix milliseconds: the next page.
         #[arg(long, value_name = "MS")]
@@ -215,6 +226,22 @@ pub enum RemoteCmd {
     Enable,
 }
 
+/// `rime remote devices`.
+#[derive(Subcommand, Debug)]
+pub enum DevicesCmd {
+    /// Trust a phone another of your computers brought here, as if you had
+    /// paired it here.
+    ///
+    /// Until then it can use phone features only. Its connection is dropped
+    /// so it comes back with full access. Only you, at this machine, can do
+    /// this; an agent cannot.
+    Allow {
+        /// Device id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+    },
+}
+
 /// `rime remote computers`.
 #[derive(Subcommand, Debug)]
 pub enum ComputersCmd {
@@ -242,6 +269,18 @@ pub enum ComputersCmd {
     /// Remove a paired computer. It is told, and removes this one too.
     Remove {
         /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+    },
+    /// Trust a computer your phone introduced, as if you had paired it here
+    /// with a code.
+    ///
+    /// Until then it may still say hello and how it is doing, but a removal
+    /// it passes on counts only for itself, and it may not bring a phone here.
+    /// Only you, at this machine, can do this; an agent cannot.
+    Allow {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
         computer: String,
     },
     /// Let a removed computer pair again with a code.
@@ -250,11 +289,13 @@ pub enum ComputersCmd {
     /// on by another computer later still counts if it is newer than this.
     Forget {
         /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
         computer: String,
     },
     /// Reach a paired computer and say hello, to see that the link works.
     Ping {
         /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
         computer: String,
         /// Which path to use: the local network, the relay, or the first that works.
         #[arg(long, value_enum, default_value = "any")]
@@ -294,7 +335,7 @@ pub enum MessagesCmd {
     #[command(group(clap::ArgGroup::new("whom").required(true).args(["to", "thread"])))]
     Send {
         /// Device id or name. May be left out when one phone has Messages on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         /// The phone number to send to.
         #[arg(long, value_name = "NUMBER")]
@@ -314,7 +355,7 @@ pub enum CallsCmd {
     /// locked, as it would on the phone's own lock screen.
     Answer {
         /// Device id or name. May be left out when one phone has calls on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         #[arg(long)]
         json: bool,
@@ -322,7 +363,7 @@ pub enum CallsCmd {
     /// Decline the call ringing on the phone.
     Decline {
         /// Device id or name. May be left out when one phone has calls on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         #[arg(long)]
         json: bool,
@@ -330,7 +371,7 @@ pub enum CallsCmd {
     /// End the phone's call.
     Hangup {
         /// Device id or name. May be left out when one phone has calls on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         #[arg(long)]
         json: bool,
@@ -342,7 +383,7 @@ pub enum CallsCmd {
         /// The number to call: digits, with an optional + in front.
         number: String,
         /// Device id or name. May be left out when one phone has calls on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         #[arg(long)]
         json: bool,
@@ -362,7 +403,7 @@ pub enum PhotosCmd {
         /// The photo's id, from the list.
         id: u64,
         /// Device id or name. May be left out when one phone has Photos on.
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         device: Option<String>,
         /// The folder to save into. Made if it is missing.
         #[arg(long, value_name = "DIR")]
@@ -389,6 +430,7 @@ enum Request {
     Status,
     Pair,
     Devices,
+    DeviceAllow { device: String },
     Revoke { device: String },
     Ring { device: String },
     Focus { dnd: bool },
@@ -457,6 +499,9 @@ enum Request {
         computer: String,
     },
     ComputerForget {
+        computer: String,
+    },
+    ComputerAllow {
         computer: String,
     },
     ComputerPing {
@@ -664,6 +709,14 @@ enum Reply {
         id: String,
         name: String,
     },
+    ComputerAllowed {
+        id: String,
+        name: String,
+    },
+    DeviceAllowed {
+        id: String,
+        name: String,
+    },
     ComputerPong {
         id: String,
         name: String,
@@ -686,7 +739,8 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
     // differently for no reason a user could see.
     let result = match cmd {
         RemoteCmd::Pair { text } => pair(text),
-        RemoteCmd::Devices { json } => devices(json),
+        RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device }), .. } => devices_allow(&device),
+        RemoteCmd::Devices { action: None, json } => devices(json),
         RemoteCmd::Revoke { device } => revoke(&device),
         RemoteCmd::Ring { device } => ring(&device),
         RemoteCmd::Focus { state } => focus(state == FocusState::On),
@@ -720,6 +774,7 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
             ComputersCmd::List { json } => computers_list(json),
             ComputersCmd::Remove { computer } => computers_remove(&computer),
             ComputersCmd::Forget { computer } => computers_forget(&computer),
+            ComputersCmd::Allow { computer } => computers_allow(&computer),
             ComputersCmd::Ping { computer, via, json } => computers_ping(&computer, via, json),
         },
         RemoteCmd::Status { json } => status(json),
@@ -876,6 +931,9 @@ fn devices(json: bool) -> Result<i32> {
             d.last_path.as_deref().unwrap_or("-"),
             d.last_seen_ms.map(ago).unwrap_or_else(|| "never".into()),
         );
+        if let Some(words) = introduced_words(d) {
+            println!("{:<18} {words}", "");
+        }
     }
     // Said once, at the end, rather than as a column: it is a property of the
     // device the desktop cannot check, and a tick in a table would read as a
@@ -1804,11 +1862,26 @@ fn computers_table(computers: &[rime_remote_core::peer::Listed]) -> String {
             c.last_seen_ms.map(ago).unwrap_or_else(|| "never".into()),
             if c.addresses.is_empty() { "-".to_string() } else { c.addresses.join(" ") },
         ));
+        if let Some(words) = introduced_words(c) {
+            out.push_str(&format!("{:<18} {words}\n", ""));
+        }
         if let (Some(p), Some(at)) = (&l.presence, l.presence_ms) {
             out.push_str(&format!("{:<18} {} ({})\n", "", presence_words(p), ago(at)));
         }
     }
     out
+}
+
+/// "added by Pixel 8, not allowed yet": for a device or computer another one
+/// introduced, who did, and whether a person here has allowed it since.
+/// Nothing for one paired here, or one revoked or removed (its state says it).
+fn introduced_words(d: &rime_remote_core::device::Device) -> Option<String> {
+    let by = d.introduced_by.as_ref().filter(|_| d.is_active())?;
+    Some(if d.allowed_ms.is_some() {
+        format!("added by {}, allowed", by.name)
+    } else {
+        format!("added by {}, not allowed yet", by.name)
+    })
 }
 
 /// One line for how a computer said it was doing.
@@ -1884,6 +1957,23 @@ fn computers_forget(computer: &str) -> Result<i32> {
     }
 }
 
+fn computers_allow(computer: &str) -> Result<i32> {
+    match call(&Request::ComputerAllow { computer: computer.to_string() })? {
+        Reply::ComputerAllowed { id, name } => {
+            eprintln!(
+                "rime: {name} ({id}) is allowed: it is trusted as if you had paired it here with a code, \
+                 so a removal it passes on now counts, and it may bring your phone here."
+            );
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
 fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
     let req = Request::ComputerPing { computer: computer.to_string(), via: via.wire() };
     match call_for(&req, None, COMPUTER_WAIT)? {
@@ -1903,6 +1993,23 @@ fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
             if json {
                 println!("{}", serde_json::json!({"error": message}));
             }
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
+fn devices_allow(device: &str) -> Result<i32> {
+    match call(&Request::DeviceAllow { device: device.to_string() })? {
+        Reply::DeviceAllowed { id, name } => {
+            eprintln!(
+                "rime: {name} ({id}) is allowed: it has the access of a phone paired here. Its \
+                 connection was dropped so it comes back with it."
+            );
+            Ok(0)
+        }
+        Reply::Error { message } => {
             eprintln!("rime: {message}");
             Ok(1)
         }
@@ -2534,6 +2641,70 @@ mod tests {
     }
 
     #[test]
+    fn allow_parses_its_wire_holds_and_an_introduced_device_says_who_added_it() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
+        match parse(&["devices", "allow", "pixel"]).expect("allow").cmd {
+            RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device }), json: false } => assert_eq!(device, "pixel"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(
+            parse(&["devices", "--json"]).expect("list").cmd,
+            RemoteCmd::Devices { action: None, json: true }
+        ));
+        assert!(parse(&["devices", "allow"]).is_err(), "allow names a phone");
+        match parse(&["computers", "allow", "desk"]).expect("allow").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Allow { computer } } => assert_eq!(computer, "desk"),
+            other => panic!("{other:?}"),
+        }
+        let wire = |r: &Request| serde_json::to_string(r).unwrap();
+        assert_eq!(wire(&Request::DeviceAllow { device: "p".into() }), r#"{"cmd":"device_allow","device":"p"}"#);
+        assert_eq!(wire(&Request::ComputerAllow { computer: "d".into() }), r#"{"cmd":"computer_allow","computer":"d"}"#);
+        for text in [
+            r#"{"reply":"device_allowed","id":"p","name":"Pixel"}"#,
+            r#"{"reply":"computer_allowed","id":"d","name":"desk"}"#,
+        ] {
+            serde_json::from_str::<Reply>(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        }
+
+        let text = r#"{"reply":"computers","computers":[
+            {"id":"aaaa","name":"desk","public_key":"k","paired_ms":1,"addresses":[]},
+            {"id":"bbbb","name":"lab","public_key":"k2","paired_ms":1,"introduced_by":{"id":"p","name":"Pixel 8"}},
+            {"id":"cccc","name":"den","public_key":"k3","paired_ms":1,"introduced_by":{"id":"p","name":"Pixel 8"},
+             "allowed_ms":5},
+            {"id":"dddd","name":"old","public_key":"k4","paired_ms":1,"introduced_by":{"id":"p","name":"Pixel 8"},
+             "revoked_ms":5}]}"#;
+        let Reply::Computers { computers } = serde_json::from_str::<Reply>(text).expect("reply") else {
+            panic!("not computers")
+        };
+        let table = computers_table(&computers);
+        assert!(table.contains("added by Pixel 8, not allowed yet"), "{table}");
+        assert!(table.contains("added by Pixel 8, allowed"), "{table}");
+        // One header, four rows, and a line under each active introduced one.
+        assert_eq!(table.lines().count(), 7, "{table}");
+        // `--json` is the record as the service sent it: who added it, and
+        // when it was allowed, if it was.
+        let json = serde_json::to_value(&computers).expect("json");
+        assert_eq!(json[1]["introduced_by"]["name"], "Pixel 8", "{json}");
+        assert!(json[1].get("allowed_ms").is_none(), "{json}");
+        assert_eq!(json[2]["allowed_ms"], 5, "{json}");
+        assert!(json[0].get("introduced_by").is_none(), "{json}");
+
+        let devices: Vec<rime_remote_core::device::Device> = serde_json::from_str(
+            r#"[{"id":"p","name":"Pixel","public_key":"k","paired_ms":1,"introduced_by":{"id":"d","name":"desk"}}]"#,
+        )
+        .expect("devices");
+        assert_eq!(introduced_words(&devices[0]).as_deref(), Some("added by desk, not allowed yet"));
+        let listed = with_phones(&devices, &Default::default(), &[]).expect("json");
+        assert_eq!(listed[0]["introduced_by"]["name"], "desk", "{listed}");
+    }
+
+    #[test]
     fn messages_parses_and_the_send_text_never_comes_from_argv() {
         use clap::Parser;
         #[derive(clap::Parser)]
@@ -2741,5 +2912,137 @@ mod tests {
         assert!(text.contains("[failed]") && text.contains("  line"), "{text}");
         let reply: Reply = serde_json::from_str(r#"{"reply":"message_sent","device":"Pixel"}"#).expect("sent");
         assert!(matches!(reply, Reply::MessageSent { .. }));
+    }
+
+    /// The device or computer id `rime remote <args>` would act on, parsed by
+    /// the real `rime` command line; `None` when it does not parse or names none.
+    fn id_parsed(args: &[&str]) -> Option<String> {
+        use clap::Parser;
+        let argv = ["rime", "remote"].into_iter().chain(args.iter().copied());
+        let crate::Cmd::Remote { cmd } = crate::Cli::try_parse_from(argv).ok()?.command else { return None };
+        match cmd {
+            RemoteCmd::Revoke { device } | RemoteCmd::Ring { device } | RemoteCmd::Send { device, .. } => Some(device),
+            RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device }), .. } => Some(device),
+            RemoteCmd::Computers { action } => match action {
+                ComputersCmd::Remove { computer }
+                | ComputersCmd::Allow { computer }
+                | ComputersCmd::Forget { computer }
+                | ComputersCmd::Ping { computer, .. } => Some(computer),
+                ComputersCmd::Add { .. } | ComputersCmd::List { .. } => None,
+            },
+            RemoteCmd::Messages { action: Some(MessagesCmd::Send { device, .. }), .. }
+            | RemoteCmd::Messages { device, .. }
+            | RemoteCmd::Calls {
+                action:
+                    Some(
+                        CallsCmd::Answer { device, .. }
+                        | CallsCmd::Decline { device, .. }
+                        | CallsCmd::Hangup { device, .. }
+                        | CallsCmd::Dial { device, .. },
+                    ),
+                ..
+            }
+            | RemoteCmd::Calls { device, .. }
+            | RemoteCmd::Photos { action: Some(PhotosCmd::Save { device, .. }), .. }
+            | RemoteCmd::Photos { device, .. } => device,
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn an_id_that_starts_with_a_dash_is_an_id_for_every_verb_that_takes_one() {
+        // An id is the first 16 characters of a base64url key, so about one in
+        // 64 starts with `-` (and one in 4,096 with `--`). Each of these was
+        // "unexpected argument '-E'" before, for a device or computer that
+        // exists.
+        const ID: &str = "<id>";
+        let verbs: &[&[&str]] = &[
+            &["revoke", ID],
+            &["ring", ID],
+            &["send", ID, "a.jpg"],
+            &["send", ID, "--clipboard"],
+            &["send", ID, "--text", "hello"],
+            &["send", "--clipboard", ID],
+            &["send", "--text", "hello", ID],
+            &["revoke", "--", ID],
+            &["computers", "forget", "--", ID],
+            &["devices", "allow", ID],
+            &["computers", "remove", ID],
+            &["computers", "allow", ID],
+            &["computers", "forget", ID],
+            &["computers", "ping", ID],
+            &["computers", "ping", ID, "--via", "lan", "--json"],
+            &["computers", "ping", "--json", ID],
+            &["messages", "--device", ID],
+            &["messages", "--device", ID, "--thread", "7", "--json"],
+            &["messages", "send", "--device", ID, "--to", "5556"],
+            &["calls", "--device", ID],
+            &["calls", "answer", "--device", ID],
+            &["calls", "decline", "--device", ID],
+            &["calls", "hangup", "--device", ID],
+            &["calls", "dial", "5556", "--device", ID],
+            &["photos", "--device", ID],
+            &["photos", "save", "5", "--device", ID],
+        ];
+        for id in [
+            "-Eab12cd34ef56gh",
+            "--Eab12cd34ef56g",
+            "-hab12cd34ef56gh",
+            "-V0123456789abcd",
+            "-1ab2cd34ef56ghi",
+            "-_ab12cd34ef56gh",
+            "plain-id_123456",
+        ] {
+            for verb in verbs {
+                let args: Vec<&str> = verb.iter().map(|a| if *a == ID { id } else { a }).collect();
+                assert_eq!(id_parsed(&args).as_deref(), Some(id), "rime remote {}", args.join(" "));
+            }
+        }
+    }
+
+    #[test]
+    fn the_flags_around_an_id_that_starts_with_a_dash_still_count() {
+        use clap::Parser;
+        let parse = |args: &[&str]| {
+            let argv = ["rime", "remote"].into_iter().chain(args.iter().copied());
+            crate::Cli::try_parse_from(argv).map(|cli| match cli.command {
+                crate::Cmd::Remote { cmd } => cmd,
+                _ => panic!("not remote"),
+            })
+        };
+        match parse(&["computers", "ping", "-Eab", "--via", "relay", "--json"]).expect("ping") {
+            RemoteCmd::Computers { action: ComputersCmd::Ping { computer, via, json } } => {
+                assert_eq!((computer.as_str(), via, json), ("-Eab", Via::Relay, true));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["send", "-Eab", "--clipboard"]).expect("send") {
+            RemoteCmd::Send { device, files, clipboard, text } => {
+                assert_eq!(device, "-Eab");
+                assert!(files.is_empty() && clipboard && text.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["send", "-Eab", "a.jpg", "b.pdf"]).expect("files") {
+            RemoteCmd::Send { files, .. } => assert_eq!(files, vec![PathBuf::from("a.jpg"), PathBuf::from("b.pdf")]),
+            other => panic!("{other:?}"),
+        }
+        // Help is still help, an id is still required, and a second id is
+        // still refused.
+        for help in [&["revoke", "-h"][..], &["computers", "forget", "--help"], &["devices", "allow", "-h"]] {
+            let e = parse(help).expect_err("help");
+            assert_eq!(e.kind(), clap::error::ErrorKind::DisplayHelp, "{help:?}");
+        }
+        assert!(parse(&["ring"]).is_err());
+        assert!(parse(&["computers", "remove", "-Eab", "-Ecd"]).is_err());
+        assert!(parse(&["calls", "--device"]).is_err(), "--device with no id was accepted");
+        // The price, for a mistyped command: a flag right after --device is
+        // read as the device, which the daemon then says it does not have.
+        match parse(&["messages", "--device", "--json"]).expect("messages") {
+            RemoteCmd::Messages { device, json, .. } => assert_eq!((device.as_deref(), json), (Some("--json"), false)),
+            other => panic!("{other:?}"),
+        }
+        // An id made only of letters that are short flags here reads as help.
+        assert_eq!(parse(&["revoke", "-hhhh"]).expect_err("help").kind(), clap::error::ErrorKind::DisplayHelp);
     }
 }

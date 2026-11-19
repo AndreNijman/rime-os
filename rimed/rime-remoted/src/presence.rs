@@ -259,7 +259,7 @@ pub fn own(state: &State) -> Presence {
 /// changed, and end what the removed computers held. `keep` is a session
 /// that is answering right now, ended after its reply instead (`serve.rs`).
 fn record(state: &State, sender: &str, list: &[Tombstone], keep: Option<&str>) {
-    let applied = {
+    let (applied, removed) = {
         let Ok(mut store) = state.devices() else { return };
         let applied = store.apply_tombstones(sender, &state.identity.public_bytes(), list, rime_remote_core::now_ms());
         if applied.changed {
@@ -267,8 +267,17 @@ fn record(state: &State, sender: &str, list: &[Tombstone], keep: Option<&str>) {
                 eprintln!("rime-remoted: a removal another computer passed on was not written: {e}");
             }
         }
-        applied
+        let removed: Vec<(String, String)> = applied
+            .removed
+            .iter()
+            .filter_map(|id| store.computers.get(id).map(|c| (c.public_key.clone(), c.name.clone())))
+            .collect();
+        (applied, removed)
     };
+    // The phones forget them too (intro.rs).
+    for (key, name) in &removed {
+        crate::intro::tell_removed(state, key, name);
+    }
     for id in &applied.removed {
         state.presence.forget(id);
         if Some(id.as_str()) != keep {

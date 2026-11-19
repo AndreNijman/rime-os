@@ -59,10 +59,10 @@ use crate::state::State;
 
 /// The only verbs a peer session may send. Everything else is refused before
 /// it is routed anywhere.
-pub const PEER_VERBS: [&str; 4] = ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence"];
+pub const PEER_VERBS: [&str; 5] = ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence", crate::intro::PEER_VERB];
 
 /// What a peer's `remote_hello` lists.
-pub const PEER_FEATURES: [&str; 3] = ["peer_hello", "peer_tombstones", "peer_presence"];
+pub const PEER_FEATURES: [&str; 4] = ["peer_hello", "peer_tombstones", "peer_presence", crate::intro::PEER_VERB];
 
 /// The `kind` of the refusal a peer gets for anything outside the list.
 pub const REFUSAL: &str = "not_allowed";
@@ -110,6 +110,10 @@ pub fn peer_reply(state: &State, device_id: &str, line: &[u8]) -> Vec<u8> {
             crate::presence::answer_tombstones(state, device_id, line)
         }
         Some(c) if PEER_VERBS.contains(&c) && c == "peer_presence" => crate::presence::answer_presence(state, device_id, line),
+        // An offer for the peer's phone (intro.rs): its own rule decides.
+        Some(c) if PEER_VERBS.contains(&c) && c == crate::intro::PEER_VERB => {
+            crate::intro::answer_peer_offer(state, device_id)
+        }
         other => refusal(other.unwrap_or("that request")),
     }
 }
@@ -179,7 +183,7 @@ fn still_open(slot: &Mutex<Option<Showing>>, id: u64) -> bool {
 /// What this computer tells another about itself: only addresses the other
 /// side's [`About::checked`] accepts, since it refuses a whole list over one
 /// bad entry.
-fn own_about(state: &State) -> About {
+pub fn own_about(state: &State) -> About {
     About {
         name: state.machine.clone(),
         lan: dialable_only(state.lan_addresses()),
@@ -190,7 +194,7 @@ fn own_about(state: &State) -> About {
 
 /// The addresses in `lan` another computer would dial, at most
 /// [`MAX_ADDRESSES`] of them.
-fn dialable_only(mut lan: Vec<String>) -> Vec<String> {
+pub(crate) fn dialable_only(mut lan: Vec<String>) -> Vec<String> {
     lan.retain(|a| a.parse().is_ok_and(|a| computer::dialable(&a)));
     lan.truncate(MAX_ADDRESSES);
     lan
@@ -474,6 +478,8 @@ pub fn remove(state: &State, computer: &str) -> Reply {
     state.presence.forget(&c.id);
     // Tell it now, so it removes this computer too (`presence.rs`).
     state.refresh.tell_now(&c.id);
+    // And the phones, so they forget it (intro.rs).
+    crate::intro::tell_removed(state, &c.public_key, &c.name);
     Reply::ComputerRemoved { id: c.id, name: c.name }
 }
 
@@ -497,6 +503,28 @@ pub fn forget(state: &State, computer: &str) -> Reply {
     drop(store);
     state.refresh.poke();
     Reply::ComputerForgotten { id: c.id, name: c.name }
+}
+
+/// `rime remote computers allow <computer>`: trust a computer a phone
+/// introduced like one paired here: its removals apply here and it may bring
+/// a phone.
+pub fn allow(state: &State, computer: &str) -> Reply {
+    let mut store = match state.devices() {
+        Ok(s) => s,
+        Err(e) => return Reply::Error { message: e.to_string() },
+    };
+    let c = match store.allow_computer(computer, rime_remote_core::now_ms()) {
+        Ok(c) => c,
+        Err(e) => return Reply::Error { message: e.to_string() },
+    };
+    if let Err(e) = state.save_devices(&store) {
+        return Reply::Error {
+            message: format!("the computer was not written: {e}"),
+        };
+    }
+    drop(store);
+    state.refresh.poke();
+    Reply::ComputerAllowed { id: c.id, name: c.name }
 }
 
 /// `rime remote computers ping <computer>`: dial it, say `peer_hello`, and

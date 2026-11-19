@@ -104,6 +104,8 @@ pub struct State {
     pub presence: crate::presence::Board,
     /// Wakes the refresh thread when the paired computers change.
     pub refresh: crate::presence::Wake,
+    /// Introductions: peer offers and the phones waiting to be brought.
+    pub intro: crate::intro::Intro,
     devices: Mutex<DeviceStore>,
     /// The pairing offer, when one is open. In memory only: a token that
     /// survived a restart would be one the owner did not ask to survive.
@@ -189,6 +191,7 @@ impl State {
             ping_interval,
             presence: crate::presence::Board::default(),
             refresh: crate::presence::Wake::default(),
+            intro: crate::intro::Intro::default(),
             relay_sources: Sources::default(),
             devices: Mutex::new(devices),
             offer: Mutex::new(None),

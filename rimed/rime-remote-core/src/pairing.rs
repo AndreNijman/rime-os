@@ -58,6 +58,11 @@ use crate::device::StoreError;
 /// on screen and nobody is watching it — is the reason it should not be.
 pub const OFFER_TTL_MS: u64 = 3 * 60 * 1000;
 
+/// How long an offer another computer asked for (`peer_offer`) lives: long
+/// enough for its phone to be told and to dial, and shorter than one a person
+/// is watching, since nobody is.
+pub const PEER_OFFER_TTL_MS: u64 = 2 * 60 * 1000;
+
 /// The bytes in a pairing token.
 pub const TOKEN_BYTES: usize = 32;
 
@@ -213,6 +218,11 @@ pub struct Offer {
 impl Offer {
     /// A fresh offer, with a token from the operating system's CSPRNG.
     pub fn new(now_ms: u64) -> Offer {
+        Offer::lasting(now_ms, OFFER_TTL_MS)
+    }
+
+    /// A fresh offer that lives `ttl_ms`.
+    pub fn lasting(now_ms: u64, ttl_ms: u64) -> Offer {
         let mut token = [0u8; TOKEN_BYTES];
         // `rand::rng()` is seeded from the OS and reseeds; for a value that
         // lives three minutes and is compared once, that is the right source.
@@ -221,7 +231,7 @@ impl Offer {
         rand::RngCore::fill_bytes(&mut rand::rng(), &mut token);
         Offer {
             token,
-            expires_ms: now_ms + OFFER_TTL_MS,
+            expires_ms: now_ms + ttl_ms,
             redeemed: false,
         }
     }

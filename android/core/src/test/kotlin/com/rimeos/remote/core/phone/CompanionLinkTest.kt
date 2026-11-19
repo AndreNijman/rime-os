@@ -135,6 +135,29 @@ class CompanionLinkTest {
     }
 
     @Test
+    fun `a full link narrowed by one hello is full again when the next says so`() {
+        // An introduced phone opens companion until a person allows it there
+        // (contract §2.15); the hub keeps the same link across the reconnect.
+        var said = "companion"
+        val fake = FakeMachine(
+            control = { line ->
+                if (CompanionLink.cmdOf(line.toByteArray()) == "remote_hello") {
+                    """{"reply":"remote","version":1,"features":["phone_report"],"scope":"$said"}"""
+                } else {
+                    """{"reply":"ok"}"""
+                }
+            },
+        )
+        val link = link(fake, Scope.FULL)
+        link.remoteHello()
+        assertEquals(Scope.COMPANION, link.scope)
+        said = "full"
+        link.remoteHello()
+        assertEquals(Scope.FULL, link.scope)
+        link.close()
+    }
+
+    @Test
     fun `a companion link whose hello says full stays companion`() {
         val fake = machine(helloScope = "full")
         val link = link(fake, Scope.COMPANION)

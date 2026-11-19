@@ -74,6 +74,25 @@
 //! The record then has three states: paired, removed, and removed but
 //! forgotten (refused as a peer, allowed to pair).
 //!
+//! ## Introduced devices, and why membership is not authority
+//!
+//! A phone can introduce two computers it holds to each other, and a
+//! computer can bring its phone to a computer it was just paired with
+//! (`rime-remoted`'s M2). Either record carries [`Device::introduced_by`],
+//! and until a person here allows it ([`Device::allowed_ms`]) it has less
+//! than a record paired here: an introduced phone's own key authenticates
+//! with [`Scope::Companion`], and an introduced computer's tombstone list
+//! applies only its entry for this computer's own key
+//! ([`DeviceStore::apply_tombstones`]). An introduction never undoes a
+//! removal and never touches a pairing that exists.
+//!
+//! Introduced phones live in `introduced.json` beside `devices.json`
+//! ([`DeviceStore::introduced_path`]), never in `devices.json`: an older
+//! `rime-remoted` would ignore the unknown flag and load an introduced phone
+//! as a full one. It never opens `introduced.json`, so after a rollback the
+//! phone does not connect at all, which is the safe way to fail. A key in
+//! both files is the record in `devices.json` (a person paired it there).
+//!
 //! Members pass their tombstones on (`crate::peer`). One received for a
 //! computer applies when it is newer than that computer's forget
 //! ([`DeviceStore::apply_tombstones`]): a member replaying the old removal
@@ -167,6 +186,25 @@ pub struct Device {
     /// the list cannot push out a removal made here.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub learned: bool,
+    /// Who introduced it, when no person here paired it: the phone that
+    /// introduced this computer, or the computer that brought this phone.
+    /// Absent on everything paired here. See the module note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introduced_by: Option<Introducer>,
+    /// For an introduced record only: when a person here allowed it
+    /// (`rime remote devices allow`, `rime remote computers allow`), from
+    /// which time it is trusted like one paired here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_ms: Option<u64>,
+}
+
+/// Who introduced a device: shown as "added by <name>".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Introducer {
+    /// The introducer's id on this machine.
+    pub id: String,
+    /// Its name here when it introduced this one.
+    pub name: String,
 }
 
 impl Device {
@@ -260,6 +298,13 @@ impl Device {
     pub fn is_tombstone(&self) -> bool {
         self.revoked_ms.is_some() && !self.removal_forgotten()
     }
+
+    /// Paired here by a person, or introduced and allowed here since: the
+    /// record has the authority its kind has. An introduced one not allowed
+    /// yet has less (see the module note).
+    pub fn trusted(&self) -> bool {
+        self.introduced_by.is_none() || self.allowed_ms.is_some()
+    }
 }
 
 /// Why a device store operation failed.
@@ -280,6 +325,8 @@ pub enum StoreError {
     Removed(String),
     /// `forget` on a computer that is not removed.
     NotRemoved(String),
+    /// `allow` on a device that is removed or revoked.
+    Revoked(String),
     /// A key that may not become a companion key, or may not be paired
     /// because it is one. One message for every reason, so the answer does
     /// not say which other device holds it.
@@ -304,6 +351,7 @@ impl std::fmt::Display for StoreError {
                  the person here runs `rime remote computers forget` for it"
             ),
             StoreError::NotRemoved(name) => write!(f, "'{name}' is not removed, so there is nothing to forget"),
+            StoreError::Revoked(name) => write!(f, "'{name}' was removed from this computer, so it cannot be allowed"),
             StoreError::KeyInUse => write!(
                 f,
                 "that key is already known to this machine; generate a new one"
@@ -358,6 +406,30 @@ struct ComputersFile {
     computers: BTreeMap<String, Device>,
 }
 
+/// What `introduced.json` holds: the introduced phones.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct IntroducedFile {
+    #[serde(default)]
+    phones: BTreeMap<String, Device>,
+}
+
+/// What `devices.json` holds: the phones paired here by a person.
+#[derive(Serialize)]
+struct PhonesFile<'a> {
+    devices: BTreeMap<&'a String, &'a Device>,
+}
+
+/// What [`DeviceStore::introduce_computer`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Introduced {
+    /// Recorded, introduced and not allowed yet.
+    Added(Box<Device>),
+    /// Already paired here (or introduced before): nothing changed.
+    AlreadyPaired,
+    /// Removed here, and not forgotten: nothing changed.
+    Removed,
+}
+
 impl DeviceStore {
     /// Where the store lives for this user.
     pub fn path() -> PathBuf {
@@ -388,8 +460,24 @@ impl DeviceStore {
         }
     }
 
+    /// Where the introduced phones of the store at `path` live:
+    /// `introduced.json` beside `devices.json`, `<name>.introduced` beside
+    /// any other store name. See the module note.
+    pub fn introduced_path(path: &Path) -> PathBuf {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "devices.json".into());
+        if name == "devices.json" {
+            path.with_file_name("introduced.json")
+        } else {
+            path.with_file_name(format!("{name}.introduced"))
+        }
+    }
+
     /// Read the store, or an empty one when there is no file yet: the phones
-    /// from `path`, the computers from [`DeviceStore::computers_path`].
+    /// from `path`, the computers from [`DeviceStore::computers_path`], the
+    /// introduced phones from [`DeviceStore::introduced_path`].
     ///
     /// A file that exists and does not parse is an **error**, never an empty
     /// store. Returning empty there would silently unpair every device the
@@ -408,6 +496,24 @@ impl DeviceStore {
                 .map_err(|e| StoreError::Corrupt(format!("{}: {e}", computers.display())))?;
             store.computers = file.computers;
         }
+        let introduced = Self::introduced_path(path);
+        if let Some(text) = read_if_there(&introduced)? {
+            let file: IntroducedFile = serde_json::from_str(&text)
+                .map_err(|e| StoreError::Corrupt(format!("{}: {e}", introduced.display())))?;
+            for (id, phone) in file.phones {
+                // Only an introduced record belongs there: one without its
+                // introducer would load as a phone paired here.
+                if phone.introduced_by.is_none() || phone.id != id {
+                    return Err(StoreError::Corrupt(format!(
+                        "{}: '{id}' is not an introduced phone",
+                        introduced.display()
+                    )));
+                }
+                // A person paired that key in devices.json since (an older
+                // daemon, after a rollback): theirs is the record.
+                store.devices.entry(id).or_insert(phone);
+            }
+        }
         Ok(store)
     }
 
@@ -422,6 +528,10 @@ impl DeviceStore {
     /// once there is one (a machine with phones alone keeps the one file).
     /// Computers are never deleted, only tombstoned, so a map that is empty
     /// here never stands for a file that should be emptied.
+    ///
+    /// The introduced phones go to [`DeviceStore::introduced_path`], before
+    /// `devices.json`, once there is one or the file exists (a phone paired
+    /// again by a person leaves it, and must not linger there).
     pub fn save(&self, path: &Path) -> Result<(), StoreError> {
         if !self.computers.is_empty() {
             let file = ComputersFile {
@@ -431,7 +541,18 @@ impl DeviceStore {
                 .map_err(|e| StoreError::Corrupt(format!("serialising the computers: {e}")))?;
             write_private(&Self::computers_path(path), &text)?;
         }
-        let text = serde_json::to_string_pretty(self)
+        let (introduced, paired): (BTreeMap<&String, &Device>, BTreeMap<&String, &Device>) =
+            self.devices.iter().partition(|(_, d)| d.introduced_by.is_some());
+        let introduced_path = Self::introduced_path(path);
+        if !introduced.is_empty() || introduced_path.exists() {
+            let file = IntroducedFile {
+                phones: introduced.into_iter().map(|(k, d)| (k.clone(), d.clone())).collect(),
+            };
+            let text = serde_json::to_string_pretty(&file)
+                .map_err(|e| StoreError::Corrupt(format!("serialising the introduced phones: {e}")))?;
+            write_private(&introduced_path, &text)?;
+        }
+        let text = serde_json::to_string_pretty(&PhonesFile { devices: paired })
             .map_err(|e| StoreError::Corrupt(format!("serialising the store: {e}")))?;
         write_private(path, &text)
     }
@@ -494,6 +615,8 @@ impl DeviceStore {
             forgotten_ms: None,
             told_ms: None,
             learned: false,
+            introduced_by: None,
+            allowed_ms: None,
         };
         self.devices.insert(id, device.clone());
         Ok(device)
@@ -533,7 +656,7 @@ impl DeviceStore {
             .values()
             .find(|d| d.public_key == public_key && d.is_active())
         {
-            return Some((d, Scope::Full));
+            return Some((d, own_key_scope(d)));
         }
         if self.devices.values().any(|d| d.public_key == public_key) {
             return None;
@@ -547,6 +670,157 @@ impl DeviceStore {
             .values()
             .find(|d| d.is_active() && d.companion_key.as_deref() == Some(public_key))
             .map(|d| (d, Scope::Companion))
+    }
+
+    /// Add a phone another computer brought (`peer_offer`): introduced by
+    /// `by`, so its own key opens a [`Scope::Companion`] session until a
+    /// person here allows it.
+    ///
+    /// Refused for any key this machine knows in any state, a phone's (its
+    /// key, companion key or one it gave up, revoked or not) or a computer's,
+    /// and for an id either map holds: an introduction never undoes a removal
+    /// and never touches a pairing that exists.
+    pub fn pair_introduced(
+        &mut self,
+        public_key: &str,
+        name: &str,
+        by: Introducer,
+        now_ms: u64,
+        requires_user_verification: bool,
+    ) -> Result<Device, StoreError> {
+        let raw = check_key(public_key)?;
+        let name = check_name(name)?;
+        let id = Device::id_for(public_key);
+        if self.knows(&raw, &id) {
+            return Err(StoreError::KeyInUse);
+        }
+        let device = Device {
+            id: id.clone(),
+            name,
+            public_key: crate::b64_encode(&raw),
+            paired_ms: now_ms,
+            last_seen_ms: None,
+            revoked_ms: None,
+            requires_user_verification,
+            last_path: None,
+            companion_key: None,
+            retired_companion_keys: Vec::new(),
+            addresses: Vec::new(),
+            relay: None,
+            forgotten_ms: None,
+            told_ms: None,
+            learned: false,
+            introduced_by: Some(by),
+            allowed_ms: None,
+        };
+        self.devices.insert(id, device.clone());
+        Ok(device)
+    }
+
+    /// Whether `raw`, or the id `id`, is any record's at all: a phone's key,
+    /// companion key or retired one, or a computer's, removed ones included.
+    fn knows(&self, raw: &[u8; 32], id: &str) -> bool {
+        self.devices.contains_key(id)
+            || self.computers.contains_key(id)
+            || self.computer_holds(raw)
+            || self
+                .devices
+                .values()
+                .any(|d| canonical(&d.public_key).as_ref() == Some(raw) || d.ever_had_companion(raw))
+    }
+
+    /// How many phones computer `by` brought here since `since_ms` (the
+    /// start of its pairing), revoked ones and allowed ones included: what
+    /// `peer_offer`'s cap counts.
+    pub fn introduced_by_count(&self, by: &str, since_ms: u64) -> usize {
+        self.devices
+            .values()
+            .filter(|d| d.paired_ms >= since_ms && d.introduced_by.as_ref().is_some_and(|i| i.id == by))
+            .count()
+    }
+
+    /// Record a computer a phone introduced (`computer_introduce`), not
+    /// allowed yet: its tombstones apply only for this computer's own key
+    /// until a person here runs `rime remote computers allow`.
+    ///
+    /// Nothing changes for a computer paired or introduced already
+    /// ([`Introduced::AlreadyPaired`]) or removed and not forgotten
+    /// ([`Introduced::Removed`]). Refused like [`DeviceStore::pair_computer`]
+    /// for this machine's own key and for a phone's key or id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn introduce_computer(
+        &mut self,
+        public_key: &[u8; 32],
+        own_key: &[u8; 32],
+        name: &str,
+        addresses: Vec<String>,
+        relay: Option<String>,
+        by: Introducer,
+        now_ms: u64,
+    ) -> Result<Introduced, StoreError> {
+        if public_key == own_key {
+            return Err(StoreError::KeyInUse);
+        }
+        let text = crate::b64_encode(public_key);
+        let name = check_name(name)?;
+        let id = Device::id_for(&text);
+        if self.devices.contains_key(&id)
+            || self
+                .devices
+                .values()
+                .any(|d| canonical(&d.public_key).as_ref() == Some(public_key) || d.ever_had_companion(public_key))
+        {
+            return Err(StoreError::KeyInUse);
+        }
+        if let Some(existing) = self.computers.get(&id) {
+            if existing.public_key != text {
+                return Err(StoreError::KeyInUse);
+            }
+            if existing.is_active() {
+                return Ok(Introduced::AlreadyPaired);
+            }
+            if !existing.removal_forgotten() {
+                return Ok(Introduced::Removed);
+            }
+        }
+        let forgotten_ms = self.computers.get(&id).and_then(|c| c.forgotten_ms);
+        let computer = Device {
+            id: id.clone(),
+            name,
+            public_key: text,
+            paired_ms: now_ms,
+            last_seen_ms: None,
+            revoked_ms: None,
+            requires_user_verification: false,
+            last_path: None,
+            companion_key: None,
+            retired_companion_keys: Vec::new(),
+            addresses,
+            relay,
+            forgotten_ms,
+            told_ms: None,
+            learned: false,
+            introduced_by: Some(by),
+            allowed_ms: None,
+        };
+        self.computers.insert(id, computer.clone());
+        Ok(Introduced::Added(Box::new(computer)))
+    }
+
+    /// `rime remote computers allow`: trust an introduced computer like one
+    /// paired here. A computer paired here, or allowed already, is returned
+    /// unchanged; a removed one is refused.
+    pub fn allow_computer(&mut self, id_or_name: &str, now_ms: u64) -> Result<Device, StoreError> {
+        let id = resolve_in(&self.computers, id_or_name)?;
+        allow_in(self.computers.get_mut(&id).expect("resolved"), now_ms)
+    }
+
+    /// `rime remote devices allow`: give an introduced phone's own key the
+    /// full scope. A phone paired here, or allowed already, is returned
+    /// unchanged; a revoked one is refused.
+    pub fn allow_phone(&mut self, id_or_name: &str, now_ms: u64) -> Result<Device, StoreError> {
+        let id = self.resolve(id_or_name)?;
+        allow_in(self.devices.get_mut(&id).expect("resolved"), now_ms)
     }
 
     /// Whether `raw` is any computer record's key, removed ones included.
@@ -599,6 +873,8 @@ impl DeviceStore {
         let paired_ms = earlier.map(|c| c.paired_ms).unwrap_or(now_ms);
         let last_seen_ms = earlier.and_then(|c| c.last_seen_ms);
         let forgotten_ms = self.computers.get(&id).and_then(|c| c.forgotten_ms);
+        // A code proves a person at each end, so an introduced computer
+        // paired with one is one paired here from now on.
         let computer = Device {
             id: id.clone(),
             name,
@@ -615,6 +891,8 @@ impl DeviceStore {
             forgotten_ms,
             told_ms: None,
             learned: false,
+            introduced_by: None,
+            allowed_ms: None,
         };
         self.computers.insert(id, computer.clone());
         Ok(computer)
@@ -706,6 +984,9 @@ impl DeviceStore {
     ///   and a computer record on a phone's key would lock that phone out.
     /// * A computer is matched on its full key. An id shared with a
     ///   different key is skipped.
+    /// * Every other entry from a sender that is introduced and not allowed
+    ///   here is skipped and not recorded: an introduced computer has no
+    ///   removal authority until a person here allows it.
     /// * A removal at or before this computer's forget of it is skipped;
     ///   a newer one removes it again, keeping the original time.
     /// * An unknown key is recorded as a removed computer, so it cannot pair
@@ -719,12 +1000,16 @@ impl DeviceStore {
         now_ms: u64,
     ) -> Applied {
         let mut out = Applied::default();
+        let may_remove_others = self.may_pass_on_removals(sender);
         for t in list {
             let Some(raw) = canonical(&t.key) else { continue };
             if raw == *own_key {
                 self.remove_on_tombstone(sender, t.removed_ms, &mut out);
                 // The sender removed this computer first: it needs no telling.
                 self.computer_told(sender, now_ms);
+                continue;
+            }
+            if !may_remove_others {
                 continue;
             }
             let text = crate::b64_encode(&raw);
@@ -766,12 +1051,20 @@ impl DeviceStore {
                             // never paired: it is never dialled.
                             told_ms: Some(now_ms),
                             learned: true,
+                            introduced_by: None,
+                            allowed_ms: None,
                         },
                     );
                 }
             }
         }
         out
+    }
+
+    /// Whether computer `sender`'s removals of computers other than this one
+    /// apply here: it was paired here, or allowed since it was introduced.
+    pub fn may_pass_on_removals(&self, sender: &str) -> bool {
+        self.computers.get(sender).is_some_and(Device::trusted)
     }
 
     /// Remove computer `id` on a tombstone removed at `removed_ms`, unless a
@@ -893,6 +1186,28 @@ impl DeviceStore {
     fn resolve(&self, id_or_name: &str) -> Result<String, StoreError> {
         resolve_in(&self.devices, id_or_name)
     }
+}
+
+/// The scope a record's own key opens: [`Scope::Full`], or
+/// [`Scope::Companion`] for an introduced phone a person here has not
+/// allowed yet.
+fn own_key_scope(d: &Device) -> Scope {
+    if d.trusted() {
+        Scope::Full
+    } else {
+        Scope::Companion
+    }
+}
+
+/// Mark an introduced record allowed, at the first allow.
+fn allow_in(d: &mut Device, now_ms: u64) -> Result<Device, StoreError> {
+    if !d.is_active() {
+        return Err(StoreError::Revoked(d.name.clone()));
+    }
+    if d.introduced_by.is_some() && d.allowed_ms.is_none() {
+        d.allowed_ms = Some(now_ms);
+    }
+    Ok(d.clone())
 }
 
 /// An id or a name to an id within one map. See [`DeviceStore::resolve`].
@@ -1772,4 +2087,173 @@ mod tests {
         assert_eq!(s.authenticate(&key(1)).map(|(_, s)| s), Some(Scope::Full), "the phone's own key still works");
     }
 
+    fn by(id: &str) -> Introducer {
+        Introducer { id: id.into(), name: format!("{id} name") }
+    }
+
+    #[test]
+    fn an_introduced_phone_opens_a_companion_session_until_a_person_allows_it() {
+        let mut s = DeviceStore::default();
+        let p = s.pair_introduced(&key(1), "pixel", by("desk"), 10, false).expect("introduced");
+        assert!(!p.trusted());
+        assert_eq!(s.authenticate(&key(1)).map(|(_, sc)| sc), Some(Scope::Companion));
+        let allowed = s.allow_phone("pixel", 20).expect("allow");
+        assert_eq!(allowed.allowed_ms, Some(20));
+        assert_eq!(s.authenticate(&key(1)).map(|(_, sc)| sc), Some(Scope::Full));
+        // Allowing again keeps the first time; a phone paired here is left alone.
+        assert_eq!(s.allow_phone(&p.id, 30).expect("again").allowed_ms, Some(20));
+        let here = s.pair(&key(2), "tablet", 40, false).expect("paired here");
+        assert_eq!(s.allow_phone(&here.id, 50).expect("nothing to allow").allowed_ms, None);
+        // Revoked: refused, and still refused to authenticate.
+        s.revoke("pixel", 60).expect("revoke");
+        assert!(matches!(s.allow_phone("pixel", 70), Err(StoreError::Revoked(_))));
+        assert!(s.authenticate(&key(1)).is_none());
+    }
+
+    #[test]
+    fn a_brought_phone_never_takes_a_key_this_machine_knows() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let phone = s.pair(&key(1), "phone", 1, false).expect("phone");
+        s.set_companion(&phone.id, &key(2)).expect("companion");
+        s.set_companion(&phone.id, &key(3)).expect("companion (2 retired)");
+        let gone = s.pair(&key(4), "lost", 1, false).expect("phone");
+        s.revoke(&gone.id, 2).expect("revoke");
+        s.pair_computer(&raw(5), &own, "desk", vec![], None, 1).expect("computer");
+        let old = s.pair_computer(&raw(6), &own, "old", vec![], None, 1).expect("computer");
+        s.revoke_computer(&old.id, 2).expect("remove");
+        let once = s.pair_introduced(&key(7), "brought", by("desk"), 3, false).expect("brought");
+        s.revoke(&once.id, 4).expect("revoke");
+        for k in 1u8..=7 {
+            assert!(
+                matches!(s.pair_introduced(&key(k), "x", by("desk"), 5, false), Err(StoreError::KeyInUse)),
+                "known key {k} was paired by an introduction"
+            );
+        }
+        assert!(s.authenticate(&key(4)).is_none(), "an introduction undid a revoke");
+        assert!(s.authenticate(&key(7)).is_none(), "an introduction undid a revoke");
+        assert_eq!(s.authenticate(&key(1)).map(|(_, sc)| sc), Some(Scope::Full), "an existing pairing changed");
+    }
+
+    #[test]
+    fn the_cap_counts_revoked_and_allowed_phones_for_the_life_of_one_pairing() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let c = s.pair_computer(&raw(50), &own, "desk", vec![], None, 100).expect("computer");
+        let a = s.pair_introduced(&key(1), "a", by(&c.id), 110, false).expect("a");
+        s.pair_introduced(&key(2), "b", by(&c.id), 120, false).expect("b");
+        s.pair_introduced(&key(3), "other", by("someone-else"), 120, false).expect("other");
+        s.revoke(&a.id, 130).expect("revoke");
+        s.allow_phone("b", 140).expect("allow");
+        assert_eq!(s.introduced_by_count(&c.id, c.paired_ms), 2, "revoked and allowed phones count");
+        // A phone from before this pairing does not.
+        assert_eq!(s.introduced_by_count(&c.id, 115), 1);
+    }
+
+    #[test]
+    fn an_introduced_computer_passes_on_only_its_own_removal_until_allowed() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let desk = s.pair_computer(&raw(7), &own, "desk", vec![], None, 10).expect("desk");
+        let Introduced::Added(new) = s
+            .introduce_computer(&raw(8), &own, "new", vec![], None, by("pixel"), 20)
+            .expect("introduce")
+        else {
+            panic!("not added")
+        };
+        assert!(!s.may_pass_on_removals(&new.id));
+        assert!(s.may_pass_on_removals(&desk.id));
+        // It removes the desk and names a stranger: neither applies or is recorded.
+        let applied = s.apply_tombstones(&new.id, &own, &[tomb(7, 30), tomb(9, 30)], 40);
+        assert_eq!(applied, Applied::default());
+        assert_eq!(s.authenticate(&key(7)).map(|(_, sc)| sc), Some(Scope::Peer), "an introduced computer removed one");
+        assert!(s.find_computer(&key(9)[..16]).is_err(), "an introduced computer's list was recorded");
+        // Its entry for this computer's own key still applies: it removed this one.
+        let applied = s.apply_tombstones(&new.id, &own, &[tomb(99, 50)], 60);
+        assert_eq!(applied.removed, std::slice::from_ref(&new.id));
+        // Allowed, another one's removals apply.
+        let Introduced::Added(other) = s
+            .introduce_computer(&raw(10), &own, "other", vec![], None, by("pixel"), 70)
+            .expect("introduce")
+        else {
+            panic!("not added")
+        };
+        s.allow_computer("other", 80).expect("allow");
+        assert!(s.may_pass_on_removals(&other.id));
+        let applied = s.apply_tombstones(&other.id, &own, &[tomb(7, 90)], 100);
+        assert_eq!(applied.removed, std::slice::from_ref(&desk.id));
+    }
+
+    #[test]
+    fn an_introduction_never_undoes_a_removal_and_never_touches_a_pairing() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let desk = s.pair_computer(&raw(7), &own, "desk", vec!["10.0.0.2:7717".into()], None, 10).expect("desk");
+        let gone = s.pair_computer(&raw(8), &own, "gone", vec![], None, 10).expect("gone");
+        s.revoke_computer(&gone.id, 20).expect("remove");
+        let a = s.pair_computer(&raw(11), &own, "a", vec![], None, 10).expect("a");
+        s.apply_tombstones(&a.id, &own, &[tomb(12, 25)], 26);
+        s.pair(&key(1), "phone", 1, false).expect("phone");
+        let intro = |s: &mut DeviceStore, k: u8| s.introduce_computer(&raw(k), &own, "x", vec![], None, by("pixel"), 30);
+        assert_eq!(intro(&mut s, 7).expect("paired"), Introduced::AlreadyPaired);
+        assert_eq!(s.find_computer(&desk.id).expect("desk"), &desk, "an introduction changed a pairing");
+        assert_eq!(intro(&mut s, 8).expect("removed"), Introduced::Removed);
+        assert_eq!(intro(&mut s, 12).expect("learned removal"), Introduced::Removed);
+        assert!(s.authenticate(&key(8)).is_none() && s.authenticate(&key(12)).is_none());
+        assert!(matches!(intro(&mut s, 99), Err(StoreError::KeyInUse)), "this machine's own key");
+        assert!(matches!(intro(&mut s, 1), Err(StoreError::KeyInUse)), "a phone's key");
+        // Forgotten here: a person lifted the removal, and an introduction may add it.
+        s.forget_computer(&gone.id, 40).expect("forget");
+        let Introduced::Added(back) = intro(&mut s, 8).expect("forgotten") else { panic!("not added") };
+        assert_eq!((back.forgotten_ms, back.introduced_by.as_ref().map(|i| i.id.as_str())), (Some(40), Some("pixel")));
+        // Introduced twice: the second is already paired.
+        assert_eq!(intro(&mut s, 8).expect("again"), Introduced::AlreadyPaired);
+        // Paired with a code since: a person did it, so it is trusted.
+        let paired = s.pair_computer(&raw(8), &own, "gone", vec![], None, 50).expect("code");
+        assert!(paired.trusted() && paired.introduced_by.is_none());
+    }
+
+    #[test]
+    fn introduced_phones_live_in_their_own_file_and_an_older_daemon_never_loads_them() {
+        let dir = tmp("introduced");
+        let path = store_in(&dir.0);
+        let introduced = DeviceStore::introduced_path(&path);
+        assert_eq!(introduced, dir.0.join("rime").join("remote").join("introduced.json"));
+        let mut s = DeviceStore::default();
+        s.pair(&key(1), "phone", 1, false).expect("phone");
+        s.save(&path).expect("save");
+        assert!(!introduced.exists(), "a machine with no introduced phone got the file");
+        let p = s.pair_introduced(&key(2), "brought", by("desk"), 2, false).expect("brought");
+        s.save(&path).expect("save");
+        let text = std::fs::read_to_string(&path).expect("devices.json");
+        assert!(!text.contains(&p.id), "devices.json carries an introduced phone: {text}");
+        // What an older daemon loads from devices.json: the phone paired here only.
+        #[derive(Deserialize)]
+        struct Older {
+            devices: BTreeMap<String, serde_json::Value>,
+        }
+        let older: Older = serde_json::from_str(&text).expect("older shape");
+        assert_eq!(older.devices.len(), 1);
+        let back = DeviceStore::load(&path).expect("load");
+        assert_eq!(back.authenticate(&key(2)).map(|(_, sc)| sc), Some(Scope::Companion));
+        assert_eq!(back.list().len(), 2);
+        // A person pairs the key in devices.json (an older daemon): theirs wins.
+        let mut other = DeviceStore::default();
+        other.pair(&key(1), "phone", 1, false).expect("phone");
+        other.pair(&key(2), "by hand", 3, false).expect("by hand");
+        let both = serde_json::to_string(&PhonesFile { devices: other.devices.iter().collect() }).expect("json");
+        std::fs::write(&path, both).expect("write");
+        let back = DeviceStore::load(&path).expect("load");
+        assert_eq!(back.authenticate(&key(2)).map(|(d, sc)| (d.name.as_str(), sc)), Some(("by hand", Scope::Full)));
+        // Saved again, the stale introduced copy goes.
+        back.save(&path).expect("save");
+        assert!(!std::fs::read_to_string(&introduced).expect("file").contains(&p.id));
+        // A record there without its introducer is corrupt, never a full phone.
+        std::fs::write(
+            &introduced,
+            format!(r#"{{"phones":{{"{id}":{{"id":"{id}","name":"x","public_key":"{k}","paired_ms":1}}}}}}"#, id = p.id, k = key(2)),
+        )
+        .expect("write");
+        assert!(matches!(DeviceStore::load(&path), Err(StoreError::Corrupt(_))));
+    }
 }

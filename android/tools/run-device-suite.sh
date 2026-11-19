@@ -404,6 +404,20 @@ def nex_submit_at_computer(session, text):
     it by itself and not as the answer to something it sent."""
     return nex_reply(nexd_at_computer("turns.submit", {"session_id": session, "text": text}))
 
+def gone(pid):
+    """Whether process `pid` has exited. A rime-remoted this broker started
+    (a replacement) is its child and stays a zombie, which still takes
+    signal 0, until it is reaped: reaped here."""
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except ChildProcessError:
+        pass
+    try:
+        os.kill(pid, 0)
+        return False
+    except ProcessLookupError:
+        return True
+
 def restart():
     pidfile = os.path.join(ROOT, "remoted.pid")
     with open(pidfile) as f:
@@ -413,10 +427,9 @@ def restart():
     except ProcessLookupError:
         pass
     for _ in range(80):
-        try:
-            os.kill(old, 0); time.sleep(0.05)
-        except ProcessLookupError:
+        if gone(old):
             break
+        time.sleep(0.05)
     if os.environ.get("RIME_REMOTED_MACHINE_STUB") != os.path.join(ROOT, "machine"):
         return json.dumps({"reply": "error",
                            "message": "refusing to start rime-remoted without the machine stub"})
@@ -460,10 +473,9 @@ def stop_remoted():
     except ProcessLookupError:
         pass
     for _ in range(80):
-        try:
-            os.kill(old, 0); time.sleep(0.05)
-        except ProcessLookupError:
+        if gone(old):
             return json.dumps({"reply": "ok", "pid": old})
+        time.sleep(0.05)
     return json.dumps({"reply": "error", "message": "rime-remoted %d did not die" % old})
 
 STUB = os.path.join(ROOT, "machine")
@@ -813,6 +825,41 @@ def rime_cli(argv):
         out = None
     return p.returncode, out, p.stderr.decode(errors="replace").strip()[:600]
 
+# What the person at a computer types for introductions (contract §2.15),
+# and only that: the listing, ping, allow, remove and forget. Each argument
+# is a plain id or flag word; argv, never a shell string.
+REMOTE_CLI = {("computers", "list"), ("computers", "ping"), ("computers", "allow"), ("computers", "remove"),
+              ("computers", "forget"), ("devices", "allow")}
+
+def remote_cli(args):
+    """`rime remote <args>` at this computer, as the person there would type
+    it, for the introduction tests: exit code, JSON (with --json) and stderr."""
+    if (not isinstance(args, list) or len(args) < 2 or not all(isinstance(a, str) for a in args)
+            or (args[0], args[1]) not in REMOTE_CLI
+            or not all(a in ("--json", "--via") or (0 < len(a) <= 64 and all(c.isalnum() or c in "-_" for c in a))
+                       for a in args)):
+        return json.dumps({"reply": "error", "message": "remote_cli takes computers list|ping|allow|remove|forget "
+                           "and devices allow, with plain ids"})
+    code, out, err = rime_cli(["remote", *args])
+    return json.dumps({"reply": "ok", "code": code, "out": out, "stderr": err})
+
+def remoted_log(start):
+    """This run's rime-remoted output (its stderr) from byte `start` on, at
+    most 256 KiB, and the size of the whole: for a test that checks why
+    something did NOT happen, in what was written after a point it chose."""
+    try:
+        start = max(0, int(start or 0))
+        with open(os.path.join(ROOT, "remoted.log"), "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(min(start, size))
+            text = f.read(262144).decode(errors="replace")
+    except FileNotFoundError:
+        size, text = 0, ""
+    except (TypeError, ValueError):
+        return json.dumps({"reply": "error", "message": "remoted_log takes a byte offset"})
+    return json.dumps({"reply": "ok", "size": size, "log": text})
+
 def thumb_facts(path):
     """What the test asserts about one thumbnail on this computer: where it
     is, its mode, and whether any EXIF or APP1 segment survived in it."""
@@ -956,6 +1003,10 @@ class H(socketserver.StreamRequestHandler):
                 out = photos_list(req.get("device"), req.get("limit"))
             elif cmd == "photos_save":
                 out = photos_save(req.get("device"), req.get("photo"))
+            elif cmd == "remote_cli":
+                out = remote_cli(req.get("args"))
+            elif cmd == "remoted_log":
+                out = remoted_log(req.get("from"))
             elif cmd == "photos_thumbs_dir":
                 out = photos_thumbs_dir(req.get("device"))
             elif cmd == "decide_locally":
@@ -973,6 +1024,14 @@ PY
 RIME_SUITE_SERIAL="$serial" RIME_SUITE_ADB="$adb" python3 "$root/broker.py" "$root/run/rime-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
   "$root/run/rime-agentd/control.sock" "$relay" "$nexsock" "$nexroot" >"$root/broker.log" 2>&1 &
 broker_pid=$!
+# The broker takes a moment to listen (~0.3 s measured) and `adb shell` answers
+# in ~20 ms, so a probe sent at once finds nothing there and reads as "the
+# phone could not reach this machine". Wait for it to listen first.
+for _ in $(seq 1 100); do
+  (exec 3<>"/dev/tcp/127.0.0.1/$brokerport") 2>/dev/null && break
+  kill -0 "$broker_pid" 2>/dev/null || { echo "FAIL: the broker exited: $(tail -5 "$root/broker.log")"; exit 1; }
+  sleep 0.1
+done
 
 # Which of this machine's addresses the PHONE can actually reach. Measured from
 # the phone rather than guessed from `ip addr`: a laptop can hold half a dozen

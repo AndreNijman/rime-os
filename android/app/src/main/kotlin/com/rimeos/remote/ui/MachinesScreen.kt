@@ -40,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.rimeos.remote.core.phone.Introductions
 import com.rimeos.remote.core.PairedMachine
 import com.rimeos.remote.link.LinkHub
 import com.rimeos.remote.ui.theme.MachineText
@@ -104,6 +105,8 @@ fun MachinesScreen(
     onCompanion: (Boolean) -> Unit = {},
     /** "Get the computer's clipboard" (contract §2.14). A default, as for [updateBanner]. */
     onClipboard: (Boolean) -> Unit = {},
+    /** "Join my other computers automatically" (contract §2.15). A default, as for [updateBanner]. */
+    onAutoJoin: (Boolean) -> Unit = {},
 ) {
     var forgetting by remember { mutableStateOf<PairedMachine?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
@@ -181,6 +184,7 @@ fun MachinesScreen(
                         MachineRow(
                             machine = machine,
                             link = state.links[machine.deviceId],
+                            unlocked = state.unlocked && !state.companion,
                             onClick = { onConnect(machine) },
                             onPing = { onPing(machine) },
                             onForget = { forgetting = machine },
@@ -316,6 +320,25 @@ fun MachinesScreen(
                         )
                     }
 
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Join my other computers automatically")
+                            Text(
+                                "Computers this phone is paired with are added to each other, and when " +
+                                    "one of them pairs with a new computer, this phone joins that one too. " +
+                                    "A computer added this way can do little there until you allow it at " +
+                                    "that computer. Only while this app is unlocked.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        Switch(
+                            checked = state.settings.autoJoin == true,
+                            onCheckedChange = onAutoJoin,
+                        )
+                    }
+
                     HorizontalDivider(Modifier.padding(vertical = 14.dp))
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -408,6 +431,7 @@ private fun MachineRow(
     machine: PairedMachine,
     /** The held connection's state, when this machine has one. */
     link: LinkHub.LinkState?,
+    unlocked: Boolean,
     onClick: () -> Unit,
     onPing: () -> Unit,
     onForget: () -> Unit,
@@ -447,6 +471,13 @@ private fun MachineRow(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                Introductions.joinedLine(machine.joinedBy, link?.remote?.scope, unlocked)?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 // Now that the phone connects on unlock without being asked,
                 // the path is said here, on the row, and a relay path carries
                 // its disclosure (`docs/remote.md`) at the moment it is true.

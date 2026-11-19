@@ -247,21 +247,30 @@ fn complete_pairing(
     request: &PairingRequest,
     now: u64,
 ) -> Result<rime_remote_core::device::Device, PairingError> {
-    let mut offer = state.offer.lock().expect("offer lock");
-    let Some(offer) = offer.as_mut() else {
-        // No offer open. The same error a wrong token gets, so a device
-        // cannot use the difference to find out whether the owner is
-        // currently looking at a QR code.
-        return Err(PairingError::BadToken);
-    };
-    let mut store = state
-        .devices()
-        .map_err(|e| PairingError::BadDevice(e.to_string()))?;
-    let device = rime_remote_core::pairing::complete(offer, request, &mut store, now)?;
-    state
-        .save_devices(&store)
-        .map_err(|e| PairingError::BadDevice(format!("the device was not written: {e}")))?;
-    Ok(device)
+    {
+        let mut offer = state.offer.lock().expect("offer lock");
+        if let Some(offer) = offer.as_mut() {
+            let mut store = state
+                .devices()
+                .map_err(|e| PairingError::BadDevice(e.to_string()))?;
+            match rime_remote_core::pairing::complete(offer, request, &mut store, now) {
+                // Not the QR on screen: perhaps an offer a peer asked for.
+                Err(PairingError::BadToken) => {}
+                Err(e) => return Err(e),
+                Ok(device) => {
+                    state
+                        .save_devices(&store)
+                        .map_err(|e| PairingError::BadDevice(format!("the device was not written: {e}")))?;
+                    return Ok(device);
+                }
+            }
+        }
+    }
+    // An offer another computer asked for its phone (intro.rs): the phone is
+    // recorded as introduced, never with the full scope. No offer open
+    // anywhere is the same error a wrong token gets, so a device cannot use
+    // the difference to find out whether the owner is looking at a QR code.
+    crate::intro::complete(state, request, now)
 }
 
 /// A session connection: `Noise_IK`, then frames.
@@ -894,6 +903,9 @@ impl Worker {
                     for line in self.state.outbox.pending(&self.device_id, &self.state.machine) {
                         self.state.events.send(&self.device_id, &line);
                     }
+                    // A phone that already said join is brought now that it
+                    // can be told (intro.rs); lines wait behind the reply.
+                    crate::intro::reported(&self.state, &self.device_id, self.scope);
                     let ch = DaemonChannel {
                         stream,
                         read_only: true,
@@ -1054,7 +1066,13 @@ fn answered_here(state: &State, device_id: &str, scope: Scope, connection: u64, 
         // The computer itself: status, lock, media and volume.
         Some(c) if crate::machine::VERBS.contains(&c) => Some(crate::machine::control(crate::machine::backend(), line)),
         // The phone's own report and its ring acks.
-        Some(c) if crate::phone::VERBS.contains(&c) => crate::phone::control(state, device_id, line),
+        Some(c) if crate::phone::VERBS.contains(&c) => {
+            let reply = crate::phone::control(state, device_id, scope, line);
+            crate::intro::reported(state, device_id, scope);
+            reply
+        }
+        // Introductions: a Full phone whose report says join (intro.rs).
+        Some(c) if crate::intro::VERBS.contains(&c) => crate::intro::control(state, device_id, scope, line),
         // The phone's notifications, shown on this desktop. The name on them
         // is the device store's, never one the phone puts in the body.
         Some(c) if crate::mirror::VERBS.contains(&c) => {
@@ -1117,6 +1135,7 @@ fn remote_hello(state: &State, scope: Scope) -> Vec<u8> {
     features.extend(crate::calls::FEATURES);
     features.extend(crate::photos::FEATURES);
     features.extend(crate::companion::FEATURES);
+    features.extend(crate::intro::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
     }
@@ -1527,7 +1546,7 @@ pub(crate) mod tests {
                                "device_events", "phone_report", "take_offer", "phone_focus", "phone_clipboard",
                                "phone_notifications", "phone_notification_reply",
                                "phone_media", "phone_media_control", "phone_messages", "phone_calls",
-                               "phone_photos", "companion_link"]),
+                               "phone_photos", "companion_link", "computer_introductions"]),
             "{v}"
         );
         assert_eq!(v["scope"], "full", "{v}");
@@ -1734,6 +1753,7 @@ pub(crate) mod tests {
             .chain(crate::calls::VERBS.iter())
             .chain(crate::photos::VERBS.iter())
             .chain(crate::companion::VERBS.iter())
+            .chain(crate::intro::VERBS.iter())
             .copied()
             .collect()
     }
@@ -1808,6 +1828,9 @@ pub(crate) mod tests {
             // answer from one (photos.rs, contract §2.13).
             "photos_reply",
             "photos_fetch_reply",
+            // Introducing computers is a Full, unlocked phone's (intro.rs).
+            "computer_card",
+            "computer_introduce",
         ];
         let all = every_reserved_verb();
         for v in &all {
@@ -1979,9 +2002,11 @@ pub(crate) mod tests {
 
     /// Every control verb `rime remote` sends this daemon's own socket: none
     /// of them may be reached from a peer session either.
-    const CONTROL_VERBS: [&str; 11] = [
+    const CONTROL_VERBS: [&str; 13] = [
         "pair",
         "revoke",
+        "device_allow",
+        "computer_allow",
         "devices",
         "status",
         "computer_show",
@@ -2025,7 +2050,10 @@ pub(crate) mod tests {
         assert_eq!(v["reply"], "peer_hello", "{v}");
         // The list is exactly these four: a verb added to it is a verb the
         // refusals above stop trying, so it is named here and nowhere else.
-        assert_eq!(crate::computers::PEER_VERBS, ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence"]);
+        assert_eq!(
+            crate::computers::PEER_VERBS,
+            ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence", "peer_offer"]
+        );
         for (line, kind) in [
             (&br#"{"cmd":"peer_tombstones","tombstones":[]}"#[..], "peer_tombstones"),
             (br#"{"cmd":"peer_presence","presence":{"name":"desk"}}"#, "peer_presence"),
