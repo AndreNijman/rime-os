@@ -733,6 +733,54 @@ mod tests {
     }
 
     #[test]
+    fn a_pair_one_side_removed_and_a_phone_introduced_anyway_gets_nothing_from_it() {
+        // The far side's removal is checked only by the phone's plan, and a
+        // modified phone can skip it. Here, on Y: X removed Y (Y took the
+        // tell and removed X), Y forgot X later, and a phone introduced X
+        // to Y. X still refuses Y's handshakes (its tombstone never
+        // authenticates); this pins what the record on Y can do meanwhile.
+        let (state, _dir) = a_state("intro-removed-pair");
+        let own = state.identity.public_bytes();
+        let x_key = rime_remote_core::b64_encode(&[7; 32]);
+        let x = {
+            let mut store = state.devices().expect("store");
+            let x = store.pair_computer(&[7; 32], &own, "desk", vec![], None, 1).expect("pair");
+            let told = [rime_remote_core::peer::Tombstone { key: state.identity.public_key(), removed_ms: 100, name: "y".into() }];
+            assert_eq!(store.apply_tombstones(&x.id, &own, &told, 100).removed, vec![x.id.clone()]);
+            store.forget_computer(&x.id, 200).expect("forget");
+            state.save_devices(&store).expect("save");
+            x
+        };
+        let phone = paired_phone(&state, 1);
+        report(&state, &phone, &["join"]);
+        let v = ask(&state, &phone, Scope::Full, json!({"cmd": "computer_introduce", "card": other_card(7, "desk")}));
+        assert_eq!((v["outcome"].as_str(), v["id"].as_str()), (Some("added"), Some(x.id.as_str())), "{v}");
+        let mut store = state.devices().expect("store");
+        let rec = store.find_computer(&x.id).expect("recorded").clone();
+        assert!(rec.is_active() && !rec.trusted(), "{rec:?}");
+        assert!(!store.may_pass_on_removals(&x.id));
+        // No removal authority: a removal of a third computer is not
+        // recorded, and a computer paired here is not removed.
+        let z = store.pair_computer(&[9; 32], &own, "nas", vec![], None, 300).expect("pair z");
+        let others = [
+            rime_remote_core::peer::Tombstone { key: rime_remote_core::b64_encode(&[8; 32]), removed_ms: 400, name: "elsewhere".into() },
+            rime_remote_core::peer::Tombstone { key: rime_remote_core::b64_encode(&[9; 32]), removed_ms: 400, name: "nas".into() },
+        ];
+        let applied = store.apply_tombstones(&x.id, &own, &others, 400);
+        assert!(!applied.changed && applied.removed.is_empty(), "{:?}", applied.removed);
+        assert!(store.find_computer(&z.id).expect("z").is_active());
+        assert_eq!(store.computers.len(), 2, "a removal from an introduced computer was recorded");
+        // X telling Y again of its old removal does not count after Y's
+        // forget, so the computer side cannot close this gap on its own.
+        let retold = [rime_remote_core::peer::Tombstone { key: state.identity.public_key(), removed_ms: 100, name: "y".into() }];
+        assert!(store.apply_tombstones(&x.id, &own, &retold, 500).removed.is_empty());
+        assert_eq!(store.authenticate(&x_key).map(|(_, s)| s), Some(Scope::Peer));
+        drop(store);
+        // And it may not bring a phone here.
+        assert_eq!(offer_reply(&state, &x.id)["kind"], REFUSAL);
+    }
+
+    #[test]
     fn a_peer_brings_at_most_four_phones_for_the_life_of_its_pairing_revoked_ones_counted() {
         let (state, _dir) = a_state("intro-cap");
         let c = a_peer(&state, 7);

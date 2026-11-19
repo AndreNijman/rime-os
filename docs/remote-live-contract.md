@@ -1788,6 +1788,21 @@ queue for it).
   so hold up to 4 `companion` records here (each with its notification and
   Remove). The offer is not bound to a phone's key, because the phone makes
   that key only when it pairs.
+- Known limit: "never over a removal" is checked here against this
+  computer's own records only. Whether the other computer removed this one
+  (or learned of its removal from a third) is checked only by the phone's
+  plan (Flow A skips a pair when either `known` list holds the other's key),
+  so a modified phone can introduce X to Y after X removed Y and Y forgot X
+  (a tombstone not forgotten is in Y's `known` and is answered `removed`
+  here). Y cannot learn it: X's tombstone never authenticates Y, a refused
+  handshake is never taken as a removal (a rollback refuses too), X never
+  dials a told or `learned` tombstone, and X's old removal would not count
+  against Y's later forget anyway. What Y holds is an introduced record
+  with no removal authority (only an entry naming Y's own key applies, and
+  only when newer than the forget) that may not `peer_offer`; its dials fail
+  at the handshake and back off to one an hour; it stays listed "not allowed
+  yet" until a person removes it. Allowing it changes nothing on the wire,
+  because X refuses every handshake from Y.
 
 ## 3. The phone
 

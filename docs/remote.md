@@ -382,6 +382,14 @@ rime remote computers allow <computer>
   minutes and once.
 - Joining never undoes a removal and never changes a pairing you made. A
   removed computer stays removed until you `forget` it, as for a code.
+- Each computer can check only its own removals; that the other computer
+  removed it is checked by your phone, before it introduces them. A phone
+  running a modified app could introduce a computer to one that removed it
+  (after you ran `forget` on this one). Nothing comes of it: the other
+  computer still refuses every connection from this one, and the record here
+  stays "not allowed yet", which can only end its own pairing here and
+  cannot bring a phone. It stays listed until you remove it with
+  `rime remote computers remove`.
 - When a computer removes another computer, your phone, if it is connected,
   is told and forgets that computer too, and says so. A phone that is not
   connected at that moment is not told later; forget the computer in the
