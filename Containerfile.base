@@ -1671,6 +1671,33 @@ RUN set -eux; \
     test ! -e /usr/lib/systemd/system/rime-gpu-notice.service; \
     echo "rime-gpu-notice enabled as a user timer"
 
+# ── after a kernel panic, the restart says why ──────────────────────────────
+# The panic's log tail survives the restart in EFI variables (the kargs are
+# Containerfile.rime's 30-rime-crash.toml) and systemd-pstore collects it at
+# boot. rime-crash-record (root, after it) writes the summary `rime crash`
+# prints; rime-crash-notice (user timer) says it once, the way the GPU notice
+# does and for the same reason (notify-send needs a session bus).
+COPY files/system/libexec/rime-crash-record /usr/libexec/rime-crash-record
+COPY files/system/libexec/rime-crash-notice /usr/libexec/rime-crash-notice
+COPY files/system/units/rime-crash-record.service \
+     /usr/lib/systemd/system/rime-crash-record.service
+COPY files/system/units/rime-crash-notice.service \
+     /usr/lib/systemd/user/rime-crash-notice.service
+COPY files/system/units/rime-crash-notice.timer \
+     /usr/lib/systemd/user/rime-crash-notice.timer
+RUN set -eux; \
+    chmod 0755 /usr/libexec/rime-crash-record /usr/libexec/rime-crash-notice; \
+    bash -n /usr/libexec/rime-crash-record; \
+    bash -n /usr/libexec/rime-crash-notice; \
+    command -v notify-send; \
+    systemctl enable rime-crash-record.service; \
+    test -L /etc/systemd/system/multi-user.target.wants/rime-crash-record.service; \
+    grep -x 'After=systemd-pstore.service local-fs.target' /usr/lib/systemd/system/rime-crash-record.service; \
+    systemctl --global enable rime-crash-notice.timer; \
+    test -L /etc/systemd/user/timers.target.wants/rime-crash-notice.timer; \
+    test ! -e /usr/lib/systemd/system/rime-crash-notice.service; \
+    echo "rime-crash-record (system) and rime-crash-notice (user timer) enabled"
+
 # ── a boot rebuild of the user's packages that could not happen gets said ───
 # rime-sysext-rebuild.service no longer holds the desktop for a rebuild that is
 # offline or refused: it stops at once and leaves /run/rime-pkg/rebuild. This

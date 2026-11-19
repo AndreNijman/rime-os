@@ -34,3 +34,4 @@ update-variants     needs the Rime binary cache (TODO(handover) R2): it publishe
 desktops-install-gnome  does not fit a hosted runner's disk: four release systems (10.1 GB of store paths), cached again in the server VM and installed in the client VM
 desktops-install-kde    does not fit a hosted runner's disk: four release systems (11.4 GB of store paths), cached again in the server VM and installed in the client VM
 desktops-install-cosmic does not fit a hosted runner's disk: four release systems (11.5 GB of store paths), cached again in the server VM and installed in the client VM
+kernel-panic        needs the Rime binary cache (TODO(handover) R2): it boots the Rime kernel and panics it

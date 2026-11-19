@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-crash-notice — after a kernel crash restarted the machine, say so once.
+#
+#  A USER unit (notify-send needs the session bus). It does no work of its own:
+#  rime-crash-record (root, at boot) reads the crash record and writes
+#  /var/lib/rime/crash/last; this only reads that file.
+#
+#  ── What it will not do ─────────────────────────────────────────────────────
+#
+#  * It never repeats itself. The record's id is kept and a notification goes
+#    out once per crash per person, not at every login.
+#  * It never announces a crash from an earlier boot. The record carries the
+#    boot it was collected in; in any later boot `rime crash` still shows it,
+#    but a notification that the machine "restarted after a crash" would be
+#    false by then.
+#  * It never sends the record anywhere.
+# ─────────────────────────────────────────────────────────────────────────────
+set -uo pipefail
+
+LAST="${RIME_CRASH_LAST:-/var/lib/rime/crash/last}"
+SEEN_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rime"
+SEEN="$SEEN_DIR/crash-notice.seen"
+BOOT_ID_FILE="${RIME_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+
+log() { printf 'rime-crash-notice: %s\n' "$*" >&2; }
+
+[[ -r "$LAST" ]] || exit 0
+
+id="" kind="" reason="" module="" boot=""
+while IFS='=' read -r k v; do
+    case "$k" in
+        id)      id="$v" ;;
+        kind)    kind="$v" ;;
+        reason)  reason="$v" ;;
+        module)  module="$v" ;;
+        boot_id) boot="$v" ;;
+    esac
+done < "$LAST"
+
+[[ -n "$id" ]] || exit 0
+now="$(cat "$BOOT_ID_FILE" 2>/dev/null || true)"
+[[ -n "$boot" && "$boot" == "$now" ]] || exit 0
+[[ -f "$SEEN" && "$(cat "$SEEN")" == "$id" ]] && exit 0
+
+if [[ "$kind" == panic ]]; then
+    title="Rime restarted after a system crash"
+else
+    title="The system hit a kernel error before this restart"
+fi
+body="${reason:-The kernel stopped.}"
+[[ -n "$module" ]] && body="$body The backtrace names the $module driver."
+body="$body Details: rime crash"
+
+mkdir -p "$SEEN_DIR"
+printf '%s\n' "$id" > "$SEEN"
+
+if command -v notify-send >/dev/null 2>&1; then
+    # Normal urgency: the crash is over and the machine is running again.
+    notify-send --app-name='Rime OS' --urgency=normal --icon=dialog-warning \
+        "$title" "$body" || log "notify-send failed"
+else
+    log "no notify-send; printing instead"
+fi
+printf '%s. %s\n' "$title" "$body"
+exit 0

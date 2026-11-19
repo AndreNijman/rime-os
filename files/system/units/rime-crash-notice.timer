@@ -1,0 +1,17 @@
+# Rime OS — when the kernel crash notice runs.
+#
+# Once per login session, one minute in: late enough that the Shell's
+# notification server is up, early enough that the person is still wondering
+# why the machine restarted. No repeat: the script stays quiet after the first
+# time it has said something.
+
+[Unit]
+Description=Say once per session whether a kernel crash restarted the machine
+Documentation=man:rime(1)
+
+[Timer]
+OnStartupSec=1min
+Unit=rime-crash-notice.service
+
+[Install]
+WantedBy=timers.target

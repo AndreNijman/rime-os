@@ -14,6 +14,7 @@ mod boot;
 mod browser;
 mod cloudflare;
 mod connector;
+mod crash;
 mod digest;
 mod dispatch;
 mod disposable;
@@ -376,6 +377,18 @@ enum Cmd {
     },
     /// Show the booted image and its changelog labels.
     Changelog,
+    /// Why the kernel died last time: when, the kernel's own reason, and the
+    /// driver its backtrace names (docs/kernel-crash.md).
+    ///
+    /// After a kernel panic Rime restarts by itself 30 seconds later, and the
+    /// end of the kernel log is kept in EFI variables through the restart.
+    /// This prints the summary written at the next boot and where the full
+    /// record is. Read-only, needs no root, and nothing is sent anywhere.
+    Crash {
+        /// Emit machine-readable JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Install packages from the enabled repositories, Flathub, a capsule, a
     /// local .rpm file, an AppImage, or a GitHub repository's releases.
     /// Requires root, except `--source capsule`.
@@ -1862,6 +1875,8 @@ async fn main() {
         Cmd::Vm { cmd } => ops::vm(&vm::argv(cmd)),
         Cmd::Browser { cmd } => ops::browser(&browser::argv(cmd)),
         Cmd::Changelog => ops::changelog(),
+        // Read-only file read, so not in the privileged set.
+        Cmd::Crash { json } => crash::main(json),
         Cmd::Install {
             packages,
             no_weak_deps,

@@ -1,0 +1,17 @@
+# Rime OS — say once that a kernel crash restarted this machine (USER unit).
+#
+# A user service for the reason rime-gpu-notice is one: notify-send needs a
+# session bus, and root has none. It reads /var/lib/rime/crash/last (written
+# by rime-crash-record.service at boot) and says nothing when there is no
+# crash from this boot, or when it already said it.
+
+[Unit]
+Description=Rime OS kernel crash notice
+Documentation=man:rime(1)
+ConditionPathExists=/var/lib/rime/crash/last
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-crash-notice
+# It writes one id file under $XDG_STATE_HOME and nothing else.
+NoNewPrivileges=yes

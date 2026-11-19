@@ -28,6 +28,7 @@
     ./integrations.nix
     ./avahi-resolvconf.nix
     ./gnome-keyring-client-race.nix
+    ./crash.nix
   ];
 
   nixpkgs.overlays = [ overlay ];
