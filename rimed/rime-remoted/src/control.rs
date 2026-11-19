@@ -177,8 +177,10 @@ pub enum Request {
     ComputerAdd { address: String, code: String },
     /// Every other computer, paired and removed.
     Computers,
-    /// Remove another computer. A removal is never undone.
+    /// Remove another computer. It is told, and removes this one.
     ComputerRemove { computer: String },
+    /// Stop holding a removal against a computer, so a code pairs it again.
+    ComputerForget { computer: String },
     /// Dial another computer and say `peer_hello`. `via` is `lan`, `relay`
     /// or `any` (absent).
     ComputerPing {
@@ -298,8 +300,10 @@ pub enum Reply {
     ComputerCode { code: String, expires_ms: u64, machine: String },
     /// A computer was paired: its id and name.
     ComputerPaired { id: String, name: String },
-    Computers { computers: Vec<rime_remote_core::device::Device> },
+    /// Every other computer, with the presence each last gave (memory only).
+    Computers { computers: Vec<rime_remote_core::peer::Listed> },
     ComputerRemoved { id: String, name: String },
+    ComputerForgotten { id: String, name: String },
     /// Another computer answered `peer_hello`: what it calls itself, its
     /// protocol and build, the path and the time the whole dial took.
     ComputerPong {
@@ -448,6 +452,7 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::ComputerAdd { address, code } => crate::computers::add(state, &address, &code),
         Request::Computers => crate::computers::list(state),
         Request::ComputerRemove { computer } => crate::computers::remove(state, &computer),
+        Request::ComputerForget { computer } => crate::computers::forget(state, &computer),
         Request::ComputerPing { computer, via } => crate::computers::ping(state, &computer, via.as_deref()),
     }
 }
@@ -525,9 +530,11 @@ fn authorized_by(
         Request::Calls { .. } | Request::Call { .. } => calls_caller(peer, observe),
         Request::Photos { .. } | Request::PhotosSave { .. } => photos_caller(peer, observe),
         Request::ComputerShow | Request::ComputerAdd { .. } => computers_caller(peer, observe, may_add_computer),
-        // A removal is permanent (the same key can never pair again), so an
-        // agent or a scheduled job could break a pair for good: a person only.
+        // A removal ends a pair on both computers and only a person at each
+        // can undo it, so an agent or a scheduled job could break a pair:
+        // a person only. Forgetting lets a computer pair again: the same.
         Request::ComputerRemove { .. } => computers_caller(peer, observe, may_remove_computer),
+        Request::ComputerForget { .. } => computers_caller(peer, observe, may_forget_computer),
         _ => own_user(peer),
     }
 }
@@ -564,16 +571,28 @@ pub fn may_add_computer(origin: RequestOrigin) -> Result<(), String> {
     ))
 }
 
-/// The computer-removal rule over a value: a removal is never undone, so it
-/// is a person's decision, like pairing.
+/// The computer-removal rule over a value: a removal ends the pair on both
+/// computers, so it is a person's decision, like pairing.
 pub fn may_remove_computer(origin: RequestOrigin) -> Result<(), String> {
     if MAY_PAIR.contains(&origin) {
         return Ok(());
     }
     Err(format!(
-        "a {origin} request cannot remove a paired computer: a removal is permanent (that computer can \
-         never pair again with the same key), so only a person at this machine may do it. Run \
+        "a {origin} request cannot remove a paired computer: a removal ends the pair on both computers \
+         and only a person at each can undo it, so only a person at this machine may do it. Run \
          `rime remote computers remove` from a terminal"
+    ))
+}
+
+/// The forget rule over a value: forgetting a removal lets that computer
+/// pair again, so it is a person's decision, like pairing.
+pub fn may_forget_computer(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot forget a removed computer: that lets it pair again, so only a person \
+         at this machine may do it. Run `rime remote computers forget` from a terminal"
     ))
 }
 
@@ -1454,6 +1473,7 @@ mod tests {
             Request::ComputerAdd { address: "10.0.0.2".into(), code: "123456".into() },
             Request::Computers,
             Request::ComputerRemove { computer: "desk".into() },
+            Request::ComputerForget { computer: "desk".into() },
             Request::ComputerPing { computer: "desk".into(), via: None },
         ];
         for req in &every {
@@ -1514,6 +1534,11 @@ mod tests {
                 Request::ComputerRemove { .. } => assert_eq!(
                     verdict.is_ok(),
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_remove_computer(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
+                Request::ComputerForget { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_forget_computer(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
@@ -1589,6 +1614,20 @@ mod tests {
         );
         assert!(authorized_by(&remove, Some(me), |_| Err("no cgroup".into())).is_err());
         assert!(authorized_by(&remove, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        // Forgetting lets a removed computer pair again: a person's too.
+        let forget = Request::ComputerForget { computer: "desk".into() };
+        for o in RequestOrigin::ALL {
+            let verdict = authorized_by(&forget, Some(me), |_| Ok(*o));
+            assert_eq!(verdict.is_ok(), o.is_local(), "{o} forget: {verdict:?}");
+            if let Err(why) = verdict {
+                assert!(why.contains(o.as_str()) && why.contains("rime remote computers forget"), "{why}");
+            }
+        }
+        for o in [RequestOrigin::ScheduledJob, RequestOrigin::Subagent, RequestOrigin::Mcp, RequestOrigin::RemoteControl, RequestOrigin::CloudJob] {
+            assert!(authorized_by(&forget, Some(me), |_| Ok(o)).is_err(), "a {o} may forget a removal");
+        }
+        assert!(authorized_by(&forget, Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&forget, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
         // Listing and pinging are this account's, like devices: a ping is
         // one hello, and a list changes nothing.
         for req in [
@@ -1799,6 +1838,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Request::ComputerPing { computer: "d".into(), via: None }).unwrap(),
             r#"{"cmd":"computer_ping","computer":"d"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::ComputerForget { computer: "d".into() }).unwrap(),
+            r#"{"cmd":"computer_forget","computer":"d"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Reply::ComputerForgotten { id: "i".into(), name: "d".into() }).unwrap(),
+            r#"{"reply":"computer_forgotten","id":"i","name":"d"}"#
         );
         assert_eq!(
             serde_json::to_string(&Reply::ComputerCode { code: "012345".into(), expires_ms: 1, machine: "m".into() })

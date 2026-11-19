@@ -1451,9 +1451,9 @@ Measured on wl-clipboard 2.3.0, in a private headless labwc:
 ### 2.15 Computers: pairing two Rime computers, and the peer scope
 
 No new `remote_hello.features` entry for phones: this is between computers.
-Design: ECOSYSTEM-PLAN.md decision 11. This release is M1a: pairing, the peer
-scope, `peer_hello`, and dialling. Presence, tombstone exchange and
-introductions are not in it.
+Design: ECOSYSTEM-PLAN.md decision 11. M1a: pairing, the peer scope,
+`peer_hello`, and dialling. M1b: tombstone exchange, `computer_forget`,
+presence and the background refresh. Introductions are not in it.
 
 **Pairing (LAN listener, hello byte `C`).** A computer dials the other's LAN
 port and sends `C` (phones send `P` to pair and `S` for a session). Over the
@@ -1506,22 +1506,32 @@ removed computer is refused as a computer.
 {"cmd":"computer_add","address":"192.168.1.20:7717","code":"012345"}
 → {"reply":"computer_paired","id":"…","name":"desk"}
 {"cmd":"computers"}
-→ {"reply":"computers","computers":[<device record, plus "addresses" and "relay">]}
+→ {"reply":"computers","computers":[<device record, plus "addresses" and "relay",
+                                     plus "presence" and "presence_ms" when known>]}
 {"cmd":"computer_remove","computer":"<id or name>"}
 → {"reply":"computer_removed","id":"…","name":"…"}
+{"cmd":"computer_forget","computer":"<id or name>"}
+→ {"reply":"computer_forgotten","id":"…","name":"…"}
+→ {"reply":"error","message":"'desk' is not removed, so there is nothing to forget"}
 {"cmd":"computer_ping","computer":"<id or name>","via":"lan"|"relay"}
 → {"reply":"computer_pong","id","name","machine","version","build","path":"lan"|"relay","rtt_ms"}
 ```
 
-- `computer_show`, `computer_add` and `computer_remove` need a §7 local
-  origin (a terminal or Rime Shell, the `pair` rule); a scheduled job, an
-  agent, or another account is refused. Removal is gated like pairing because
-  it is permanent. Closing the `computer_show` connection withdraws the code.
-  One screen at a time: a new one replaces the old.
+- `computer_show`, `computer_add`, `computer_remove` and `computer_forget`
+  need a §7 local origin (a terminal or Rime Shell, the `pair` rule); a
+  scheduled job, an agent, or another account is refused. Removal is gated
+  like pairing because it ends the pair on both computers; forget because it
+  lets a removed key pair again. Closing the `computer_show` connection
+  withdraws the code. One screen at a time: a new one replaces the old.
 - The code is accepted with spaces or dashes (`012 345`). Anything that is not
   six digits after that is an error before any connection.
-- `computers`, `computer_ping`: own user, any origin. Removing is idempotent
-  and never undone; it drops the computer's live connections.
+- `computers`, `computer_ping`: own user, any origin. Removing is idempotent;
+  it drops the computer's live connections, forgets its presence, and asks
+  the refresh thread to tell it now (below). `presence` is the last
+  `peer_presence` the computer gave while paired, `presence_ms` when; both
+  are memory only and absent for a removed computer.
+- `computer_ping` runs the exchange below after `peer_hello`; a failed
+  exchange is logged, not the ping's error.
 
 **Stored.** `computers.json` beside `devices.json` (0600, same directory),
 `{"computers": {<id>: <device record, plus "addresses" and "relay">}}`,
@@ -1530,10 +1540,15 @@ rime-remoted rewrites that file with only `devices` on every pairing and
 handshake, and would drop a map it does not know. It never opens
 `computers.json`, so after a rollback no computer can connect (fails closed),
 and after the roll forward every computer and removal is still there. A
-removed computer keeps its record with `revoked_ms`: its key never
-authenticates and never pairs again. A key that is both a computer's and a
+removed computer keeps its record with `revoked_ms` (a tombstone): its key
+never authenticates and does not pair again until `computer_forget` sets
+`forgotten_ms` (≥ `revoked_ms`). A forgotten record still never
+authenticates; pairing it again with a code makes it a new pairing
+(`paired_ms` = now) and keeps `forgotten_ms`. Removing it again sets
+`revoked_ms` = max(now, `forgotten_ms` + 1). `told_ms` is set once the removed
+computer took a list naming it. A key that is both a computer's and a
 phone's key or companion key (an older daemon paired it in between)
-authenticates as nothing.
+authenticates as nothing. Presence is never stored.
 
 **Dialling.** Each computer dials the other for its own requests. The dialler
 tries the stored addresses (2 s connect, 10 s per read), then **this
@@ -1547,13 +1562,19 @@ is a paired, not removed computer is scope `peer`.
 
 | | allowed |
 | --- | --- |
-| control verbs | `remote_hello`, `peer_hello` |
+| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence` |
 | channels (`Open`) | none |
 
 ```json
-{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello"],"scope":"peer"}
+{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello","peer_tombstones","peer_presence"],"scope":"peer"}
 {"cmd":"peer_hello"}   → {"reply":"peer_hello","name":"desk","version":1,"build":"0.1.0"}
+{"cmd":"peer_tombstones","tombstones":[{"key":"<b64url>","removed_ms":…,"name":"old"}]}
+                       → {"reply":"peer_tombstones","tombstones":[…]}
+{"cmd":"peer_presence","presence":{…}}
+                       → {"reply":"peer_presence","presence":{…}}
 {"cmd":"list"}         → {"reply":"error","kind":"not_allowed","message":"list is not allowed between paired computers"}
+{"cmd":"peer_presence","presence":{"name":"d","network":"pigeon"}}
+                       → {"reply":"error","kind":"bad_request","message":"refused, nothing was kept: …"}
 ```
 
 Everything else is refused before routing: every `rime-agentd` verb, `decide`,
@@ -1562,6 +1583,68 @@ with no readable `cmd`, and every channel. A peer session reaches
 `rime-agentd` never. The companion allow list refuses `peer` too, as a second
 lock. A session presenting this machine's own key is refused at the handshake
 whatever `devices.json` or `computers.json` says.
+
+**The exchange.** The computer that dialled (for `computer_ping`, the
+refresh, or a tell) sends `remote_hello`, then `peer_tombstones` and
+`peer_presence` if the other's `features` lists them (an older daemon is sent
+neither). The side that was dialled answers each from the peer allow list.
+Either side checks what it gets whole and stores nothing from a message that
+fails; the responder answers `bad_request`.
+
+- **Tombstones** are every computer record that is removed and not
+  forgotten: `{key, removed_ms, name}`, the removal time passed on unchanged.
+  Computers only, never phones. Removals this computer made (or applied to a
+  computer it paired) come first, then the newest; at most 128 are sent, so a
+  member that floods the list cannot push out a removal made here. A list is refused whole when it is not an
+  array, has more than 128 entries, or has an entry whose key is not 32
+  bytes, whose name fails the device-name rule, or whose `removed_ms` is 0 or
+  more than 10 minutes after the receiver's clock.
+- Applying a list from computer S (the key that completed the handshake):
+  an entry naming the receiver's own key means S removed the receiver, so the
+  receiver removes S (the entry itself is never recorded). Any other entry:
+  a key held by a phone (either key, retired companion keys included) or
+  equal to a phone's id is skipped; a known computer is removed (keeping the
+  original `removed_ms`) unless it is already a tombstone; an unknown key is
+  recorded as a removed computer with the entry's name and no address,
+  marked `learned` (never dialled, needs no telling), unless 128 removed
+  computers are already held. A
+  removal counts only when `removed_ms` > the record's `forgotten_ms`.
+  Connections of every computer removed this way end; the responder ends S's
+  own session right after its reply.
+- The responder records the dialler's list before it answers with its own.
+  The dialler sets `told_ms` on S's record when its list named S. When S is
+  itself removed on the dialler (a tell), the dialler sends S **only the entry
+  naming S** (never the keys and names of the computers still paired), checks
+  only that S answered `peer_tombstones`, and **never applies S's list**: a removed (perhaps
+  stolen) computer cannot remove the computers still paired with this one.
+- **Presence**: `{name, battery?: {percent, charging}, on_ac?, power_mode?,
+  locked?, network?, uptime_s?}`. Checked: name by the device-name rule,
+  percent 0-100, `power_mode` one of `power-saver`, `balanced`,
+  `performance`, `network` one of `wired`, `wifi`, `none`, `uptime_s` at most
+  twenty years. Unknown fields are ignored. Kept in memory per computer with
+  the time it arrived. Not exchanged with a computer the tombstones just
+  removed.
+
+**Telling a removed computer.** After A removes B, B's handshakes to A are
+refused, so A tells B: `computer_remove` wakes A's refresh thread, which
+dials B at once (whatever the power mode) and sends the list naming B; B
+removes A. A record that is a tombstone with no `told_ms`, removed less than
+30 days ago, not `learned`, with an address or a relay to try, is dialled again once when
+the daemon starts and whenever the refresh dials a paired computer. Nothing
+dials it on its own timer. A refused handshake is never taken as a removal.
+
+**The refresh.** One thread per daemon. With no paired (non-removed)
+computer it waits on a condition variable with no timeout and reads nothing
+(a pairing, removal or forget wakes it). Otherwise it sleeps until the first
+computer is due; then, in power saver (rimed's `Tier`), it dials nothing and
+looks again after 15 minutes; otherwise it dials every due computer, and
+every due untold tombstone, and runs the exchange. The next dial is 5
+minutes later on AC and 15 on battery (rimed's `OnAcPower`; without rimed, a
+discharging battery is battery), doubled per failure in a row up to an hour.
+The first dial after the daemon starts is 20 s in. A refresh writes
+`computers.json` only when the tombstones changed it or the computer answered
+at an address that is not its first; the responder does not write the store
+for a peer handshake.
 
 ## 3. The phone
 

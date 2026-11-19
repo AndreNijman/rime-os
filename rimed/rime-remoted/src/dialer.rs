@@ -345,6 +345,9 @@ mod tests {
             // A listener that would count a dial, so a refusal is measured.
             addresses: Vec::new(),
             relay: None,
+            forgotten_ms: None,
+            told_ms: None,
+            learned: false,
         };
         assert!(refuses(&state, &own));
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -393,6 +396,9 @@ mod tests {
             retired_companion_keys: Vec::new(),
             addresses: Vec::new(),
             relay,
+            forgotten_ms: None,
+            told_ms: None,
+            learned: false,
         }
     }
 

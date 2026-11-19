@@ -42,6 +42,7 @@ mod nex;
 mod peer;
 mod phone;
 mod photos;
+mod presence;
 mod proxy;
 mod push;
 mod relay;
@@ -366,6 +367,18 @@ fn run(args: &[String]) -> Result<(), String> {
         let state = Arc::clone(&state);
         let agentd = agentd.clone();
         std::thread::spawn(move || push::supervise(state, agentd));
+    }
+
+    // Presence between paired computers, and telling a removed one (§2.15).
+    // With no paired computer the thread waits on a condition variable with
+    // no timeout: no wakeups until a pairing, removal or forget.
+    {
+        let state = Arc::clone(&state);
+        // Named, so `/proc/<pid>/task/*/comm` shows what it costs.
+        std::thread::Builder::new()
+            .name("rime-presence".into())
+            .spawn(move || presence::supervise(state))
+            .map_err(|e| format!("could not start the presence thread: {e}"))?;
     }
 
     // On the local network, for as long as this process runs. Deliberately

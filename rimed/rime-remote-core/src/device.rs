@@ -63,8 +63,24 @@
 //!
 //! One key is one record across both maps: a key that is, or ever was, a
 //! phone's key or companion key cannot become a computer, nor the other way
-//! round, and a removed computer's tombstone is never undone (the plan's
-//! "re-pairing mints a new key").
+//! round.
+//!
+//! ## Removing a computer, and adding it back
+//!
+//! A removed computer's tombstone is never deleted and its key never
+//! authenticates again. The one way back is the person at this machine
+//! running `rime remote computers forget`, which records `forgotten_ms`
+//! beside the removal and lets the key pair again, with a code, here only.
+//! The record then has three states: paired, removed, and removed but
+//! forgotten (refused as a peer, allowed to pair).
+//!
+//! Members pass their tombstones on (`crate::peer`). One received for a
+//! computer applies when it is newer than that computer's forget
+//! ([`DeviceStore::apply_tombstones`]): a member replaying the old removal
+//! cannot undo a forget, and a new removal still wins. A tombstone never
+//! touches a phone, and one for this machine's own key is never recorded:
+//! it says the computer that sent it has removed this one, so this one
+//! removes the sender.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -135,6 +151,22 @@ pub struct Device {
     /// For another computer only: the relay it waits on, when it said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
+    /// For a removed computer only: when the person here ran `forget` for
+    /// it. A removal at or before this time no longer blocks pairing it
+    /// again, and a tombstone a member passes on applies only when newer.
+    /// Kept after it pairs again, for exactly that comparison.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forgotten_ms: Option<u64>,
+    /// For a removed computer only: when it acknowledged a tombstone list
+    /// that named it, so it knows it was removed here and stops dialling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub told_ms: Option<u64>,
+    /// For a removed computer only: never paired here, recorded from a list
+    /// a member passed on. Never dialled (there is nothing to tell it) and
+    /// passed on after this computer's own removals, so a member that floods
+    /// the list cannot push out a removal made here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub learned: bool,
 }
 
 impl Device {
@@ -203,11 +235,30 @@ impl Device {
 
     /// The state word a listing shows.
     pub fn state(&self) -> &'static str {
-        if self.revoked_ms.is_some() {
+        if self.removal_forgotten() {
+            "forgotten"
+        } else if self.revoked_ms.is_some() {
             "revoked"
         } else {
             "paired"
         }
+    }
+
+    /// Removed, and the removal forgotten here since: refused as a peer, but
+    /// it may pair again with a code.
+    pub fn removal_forgotten(&self) -> bool {
+        matches!((self.revoked_ms, self.forgotten_ms), (Some(r), Some(f)) if f >= r)
+    }
+
+    /// Whether a removal at `removed_ms` blocks this record: it is newer than
+    /// any forget recorded here.
+    fn removal_counts(&self, removed_ms: u64) -> bool {
+        self.forgotten_ms.map_or(true, |f| removed_ms > f)
+    }
+
+    /// A removed computer whose removal still stands: what is passed on.
+    pub fn is_tombstone(&self) -> bool {
+        self.revoked_ms.is_some() && !self.removal_forgotten()
     }
 }
 
@@ -225,8 +276,10 @@ pub enum StoreError {
     BadName(String),
     /// This key is already paired and not revoked.
     AlreadyPaired(String),
-    /// This computer was removed, and a removal is never undone.
+    /// This computer was removed, and the removal has not been forgotten.
     Removed(String),
+    /// `forget` on a computer that is not removed.
+    NotRemoved(String),
     /// A key that may not become a companion key, or may not be paired
     /// because it is one. One message for every reason, so the answer does
     /// not say which other device holds it.
@@ -247,9 +300,10 @@ impl std::fmt::Display for StoreError {
             ),
             StoreError::Removed(name) => write!(
                 f,
-                "'{name}' was removed from this computer, and a removed computer cannot pair again with \
-                 the same key"
+                "'{name}' was removed from this computer, so it cannot pair again with the same key until \
+                 the person here runs `rime remote computers forget` for it"
             ),
+            StoreError::NotRemoved(name) => write!(f, "'{name}' is not removed, so there is nothing to forget"),
             StoreError::KeyInUse => write!(
                 f,
                 "that key is already known to this machine; generate a new one"
@@ -286,6 +340,15 @@ pub struct DeviceStore {
     /// them in [`DeviceStore::computers_path`]; see the module note.
     #[serde(skip)]
     pub computers: BTreeMap<String, Device>,
+}
+
+/// What [`DeviceStore::apply_tombstones`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Applied {
+    /// Whether anything in the store changed, so it needs saving.
+    pub changed: bool,
+    /// The computers that were paired and are removed now.
+    pub removed: Vec<String>,
 }
 
 /// What `computers.json` holds.
@@ -428,6 +491,9 @@ impl DeviceStore {
             retired_companion_keys: retired,
             addresses: Vec::new(),
             relay: None,
+            forgotten_ms: None,
+            told_ms: None,
+            learned: false,
         };
         self.devices.insert(id, device.clone());
         Ok(device)
@@ -492,10 +558,10 @@ impl DeviceStore {
     /// the name and addresses of one already paired.
     ///
     /// Refused when the key is a phone's key or companion key (now or ever),
-    /// when its id is a phone's, and when that computer was removed: a
-    /// tombstone on a computer is never undone, so it must pair with a new
-    /// key. `own_key` is this machine's own public key, refused too (a copied
-    /// home), so no caller can forget that check.
+    /// when its id is a phone's, and when that computer was removed and the
+    /// removal was not forgotten here (`forget`). `own_key` is this machine's
+    /// own public key, refused too (a copied home), so no caller can forget
+    /// that check.
     pub fn pair_computer(
         &mut self,
         public_key: &[u8; 32],
@@ -523,12 +589,16 @@ impl DeviceStore {
             if existing.public_key != text {
                 return Err(StoreError::KeyInUse);
             }
-            if !existing.is_active() {
+            if !existing.is_active() && !existing.removal_forgotten() {
                 return Err(StoreError::Removed(existing.name.clone()));
             }
         }
-        let paired_ms = self.computers.get(&id).map(|c| c.paired_ms).unwrap_or(now_ms);
-        let last_seen_ms = self.computers.get(&id).and_then(|c| c.last_seen_ms);
+        // A forgotten removal pairs as new, and keeps when it was forgotten,
+        // which later tombstones are compared against.
+        let earlier = self.computers.get(&id).filter(|c| c.is_active());
+        let paired_ms = earlier.map(|c| c.paired_ms).unwrap_or(now_ms);
+        let last_seen_ms = earlier.and_then(|c| c.last_seen_ms);
+        let forgotten_ms = self.computers.get(&id).and_then(|c| c.forgotten_ms);
         let computer = Device {
             id: id.clone(),
             name,
@@ -542,6 +612,9 @@ impl DeviceStore {
             retired_companion_keys: Vec::new(),
             addresses,
             relay,
+            forgotten_ms,
+            told_ms: None,
+            learned: false,
         };
         self.computers.insert(id, computer.clone());
         Ok(computer)
@@ -560,14 +633,169 @@ impl DeviceStore {
         Ok(self.computers.get(&id).expect("resolved"))
     }
 
-    /// Remove another computer: a tombstone, never undone. Idempotent.
+    /// Remove another computer: a tombstone, kept for good. Idempotent while
+    /// it stands; removing a forgotten one again is a new removal.
     pub fn revoke_computer(&mut self, id_or_name: &str, now_ms: u64) -> Result<Device, StoreError> {
         let id = resolve_in(&self.computers, id_or_name)?;
         let c = self.computers.get_mut(&id).expect("resolved");
-        if c.revoked_ms.is_none() {
-            c.revoked_ms = Some(now_ms);
+        if c.revoked_ms.is_none() || c.removal_forgotten() {
+            // Strictly after any forget, so the new removal counts.
+            c.revoked_ms = Some(c.forgotten_ms.map_or(now_ms, |f| now_ms.max(f + 1)));
+            c.told_ms = None;
         }
         Ok(c.clone())
+    }
+
+    /// `rime remote computers forget`: lift a removal here, so the computer
+    /// may pair again with a code. It still does not authenticate until it
+    /// has. Refused on a computer that is not removed.
+    ///
+    /// Records the later of now and the removal time, so a member whose
+    /// clock runs ahead cannot replay this same removal over the forget.
+    pub fn forget_computer(&mut self, id_or_name: &str, now_ms: u64) -> Result<Device, StoreError> {
+        let id = resolve_in(&self.computers, id_or_name)?;
+        let c = self.computers.get_mut(&id).expect("resolved");
+        let Some(removed) = c.revoked_ms else {
+            return Err(StoreError::NotRemoved(c.name.clone()));
+        };
+        let at = now_ms.max(removed).max(c.forgotten_ms.unwrap_or(0));
+        c.forgotten_ms = Some(at);
+        Ok(c.clone())
+    }
+
+    /// The removals this computer passes on: every computer removed and not
+    /// forgotten, with the time it was first removed.
+    pub fn computer_tombstones(&self) -> Vec<crate::peer::Tombstone> {
+        let mut list: Vec<crate::peer::Tombstone> = self
+            .computers
+            .values()
+            .filter(|c| c.is_tombstone())
+            .map(|c| crate::peer::Tombstone {
+                key: c.public_key.clone(),
+                removed_ms: c.revoked_ms.unwrap_or(0),
+                name: c.name.clone(),
+            })
+            .collect();
+        // This computer's own removals first, then the newest, at most what a
+        // receiver takes: one more and every exchange would be refused whole.
+        // A member choosing future times for keys this one never knew cannot
+        // push out a removal made here.
+        let learned = |key: &str| self.computers.get(&Device::id_for(key)).is_some_and(|c| c.learned);
+        list.sort_by(|x, y| {
+            learned(&x.key)
+                .cmp(&learned(&y.key))
+                .then_with(|| y.removed_ms.cmp(&x.removed_ms))
+                .then_with(|| x.key.cmp(&y.key))
+        });
+        list.truncate(crate::peer::MAX_TOMBSTONES);
+        list
+    }
+
+    /// Record the tombstones another computer passed on. `sender` is the id
+    /// of the computer whose handshake carried them, never a key named in the
+    /// list. Says whether the store changed (to be saved) and which paired
+    /// computers this removed, the sender among them when the list named this
+    /// machine's own key (the sender removed this one).
+    ///
+    /// For each:
+    /// * This machine's own key is never recorded. It means the sender
+    ///   refuses this computer now, so the sender is removed here, subject
+    ///   to the same forget rule as any other removal, and counts as told.
+    /// * A key that is a phone's (its key, companion key or one it gave up),
+    ///   or whose id is a phone's, is skipped: a peer cannot remove a phone,
+    ///   and a computer record on a phone's key would lock that phone out.
+    /// * A computer is matched on its full key. An id shared with a
+    ///   different key is skipped.
+    /// * A removal at or before this computer's forget of it is skipped;
+    ///   a newer one removes it again, keeping the original time.
+    /// * An unknown key is recorded as a removed computer, so it cannot pair
+    ///   here until forgotten, unless [`crate::peer::MAX_TOMBSTONES`] are
+    ///   already held.
+    pub fn apply_tombstones(
+        &mut self,
+        sender: &str,
+        own_key: &[u8; 32],
+        list: &[crate::peer::Tombstone],
+        now_ms: u64,
+    ) -> Applied {
+        let mut out = Applied::default();
+        for t in list {
+            let Some(raw) = canonical(&t.key) else { continue };
+            if raw == *own_key {
+                self.remove_on_tombstone(sender, t.removed_ms, &mut out);
+                // The sender removed this computer first: it needs no telling.
+                self.computer_told(sender, now_ms);
+                continue;
+            }
+            let text = crate::b64_encode(&raw);
+            let id = Device::id_for(&text);
+            if self.devices.contains_key(&id)
+                || self
+                    .devices
+                    .values()
+                    .any(|d| canonical(&d.public_key).as_ref() == Some(&raw) || d.ever_had_companion(&raw))
+            {
+                continue;
+            }
+            match self.computers.get(&id) {
+                Some(c) if canonical(&c.public_key) != Some(raw) => continue,
+                Some(_) => self.remove_on_tombstone(&id, t.removed_ms, &mut out),
+                // A paired computer cannot grow this store without bound:
+                // past the cap, a key it never shared with this one is
+                // not recorded (the computers this one knows still are).
+                None if self.computers.values().filter(|c| c.is_tombstone()).count() >= crate::peer::MAX_TOMBSTONES => {}
+                None => {
+                    out.changed = true;
+                    self.computers.insert(
+                        id.clone(),
+                        Device {
+                            id: id.clone(),
+                            name: t.name.clone(),
+                            public_key: text,
+                            paired_ms: now_ms,
+                            last_seen_ms: None,
+                            revoked_ms: Some(t.removed_ms),
+                            requires_user_verification: false,
+                            last_path: None,
+                            companion_key: None,
+                            retired_companion_keys: Vec::new(),
+                            addresses: Vec::new(),
+                            relay: None,
+                            forgotten_ms: None,
+                            // There is nothing to tell a computer this one
+                            // never paired: it is never dialled.
+                            told_ms: Some(now_ms),
+                            learned: true,
+                        },
+                    );
+                }
+            }
+        }
+        out
+    }
+
+    /// Remove computer `id` on a tombstone removed at `removed_ms`, unless a
+    /// forget here is as new or newer, or it is already removed.
+    fn remove_on_tombstone(&mut self, id: &str, removed_ms: u64, out: &mut Applied) {
+        let Some(c) = self.computers.get_mut(id) else { return };
+        if c.is_tombstone() || !c.removal_counts(removed_ms) {
+            return;
+        }
+        if c.is_active() {
+            out.removed.push(id.to_string());
+        }
+        c.revoked_ms = Some(removed_ms);
+        c.told_ms = None;
+        out.changed = true;
+    }
+
+    /// A removed computer acknowledged a list naming it.
+    pub fn computer_told(&mut self, id: &str, now_ms: u64) {
+        if let Some(c) = self.computers.get_mut(id) {
+            if c.is_tombstone() && c.told_ms.is_none() {
+                c.told_ms = Some(now_ms);
+            }
+        }
     }
 
     /// Remember where a computer answered, first in its list, at most
@@ -1204,6 +1432,217 @@ mod tests {
             Err(StoreError::Removed(_))
         ));
         assert!(s.authenticate(&key(7)).is_none(), "a refused re-pair undid the removal");
+    }
+
+    fn tomb(seed: u8, removed_ms: u64) -> crate::peer::Tombstone {
+        crate::peer::Tombstone { key: key(seed), removed_ms, name: format!("c{seed}") }
+    }
+
+    #[test]
+    fn a_tombstone_for_this_machines_own_key_is_never_recorded_and_removes_only_the_sender() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 10).expect("a");
+        let c = s.pair_computer(&raw(8), &own, "c", vec![], None, 10).expect("c");
+        let applied = s.apply_tombstones(&a.id, &own, &[tomb(99, 50)], 60);
+        assert_eq!(applied.removed, std::slice::from_ref(&a.id), "the sender that removed this one is removed");
+        assert!(applied.changed);
+        assert!(s.authenticate(&key(7)).is_none());
+        assert_eq!(s.find_computer(&a.id).expect("a").revoked_ms, Some(50), "the time travels unchanged");
+        assert_eq!(s.find_computer(&a.id).expect("a").told_ms, Some(60), "the sender removed this one first: no telling");
+        assert!(s.computers.values().all(|d| d.public_key != key(99)), "this machine's own key was recorded");
+        assert_eq!(s.authenticate(&key(8)).map(|(_, sc)| sc), Some(Scope::Peer), "another computer was removed");
+        // Again: nothing more happens.
+        assert_eq!(s.apply_tombstones(&a.id, &own, &[tomb(99, 70)], 80), Applied::default());
+        let _ = c;
+    }
+
+    #[test]
+    fn learned_tombstones_stop_at_the_cap_and_a_list_sent_never_passes_it() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
+        let stranger = |i: usize| crate::peer::Tombstone {
+            key: crate::b64_encode(&{
+                let mut k = [0x40u8; 32];
+                k[0] = (i >> 8) as u8;
+                k[1] = i as u8;
+                k
+            }),
+            removed_ms: 10 + i as u64,
+            name: "x".into(),
+        };
+        let first: Vec<_> = (0..crate::peer::MAX_TOMBSTONES).map(stranger).collect();
+        assert!(s.apply_tombstones(&a.id, &own, &first, 1_000).changed);
+        let more: Vec<_> = (crate::peer::MAX_TOMBSTONES..crate::peer::MAX_TOMBSTONES + 5).map(stranger).collect();
+        assert!(!s.apply_tombstones(&a.id, &own, &more, 1_000).changed, "the store grew past the cap");
+        assert_eq!(s.computers.len(), crate::peer::MAX_TOMBSTONES + 1);
+        // A computer this one knows is still removed past the cap, and what
+        // is sent stays within it, newest first.
+        assert_eq!(s.apply_tombstones(&a.id, &own, &[tomb(7, 5_000)], 6_000).removed, std::slice::from_ref(&a.id));
+        let sent = s.computer_tombstones();
+        assert_eq!(sent.len(), crate::peer::MAX_TOMBSTONES);
+        assert_eq!(sent[0].key, key(7));
+        assert!(crate::peer::checked_tombstones(&serde_json::to_value(&sent).expect("json"), 6_000).is_ok());
+    }
+
+    #[test]
+    fn a_flood_of_learned_removals_never_pushes_out_one_made_here_and_none_is_told() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
+        let x = s.pair_computer(&raw(8), &own, "x", vec![], None, 1).expect("x");
+        // a passes on the most a list may hold, all keys this computer never
+        // knew, dated as far ahead as the check allows.
+        let flood: Vec<_> = (0..crate::peer::MAX_TOMBSTONES)
+            .map(|i| crate::peer::Tombstone {
+                key: crate::b64_encode(&{
+                    let mut k = [0x40u8; 32];
+                    k[0] = (i >> 8) as u8;
+                    k[1] = i as u8;
+                    k
+                }),
+                removed_ms: 1_000 + 600_000,
+                name: "x".into(),
+            })
+            .collect();
+        assert!(s.apply_tombstones(&a.id, &own, &flood, 1_000).changed);
+        // Every learned record is marked and needs no telling.
+        let learned: Vec<_> = s.computers.values().filter(|c| c.learned).collect();
+        assert_eq!(learned.len(), crate::peer::MAX_TOMBSTONES);
+        assert!(learned.iter().all(|c| c.told_ms.is_some() && c.is_tombstone()), "a learned removal waits to be told");
+        // A removal made here a moment later is still passed on.
+        s.revoke_computer(&x.id, 2_000).expect("removed");
+        let sent = s.computer_tombstones();
+        assert_eq!(sent.len(), crate::peer::MAX_TOMBSTONES);
+        assert_eq!(sent[0].key, key(8), "the removal made here was pushed out of the list");
+        assert!(!s.computers[&x.id].learned);
+        // A learned key forgotten and then paired is an ordinary computer.
+        let first = s.computers.values().find(|c| c.learned).expect("one").id.clone();
+        s.forget_computer(&first, 3_000).expect("forgotten");
+        let raw_first: [u8; 32] = crate::b64_decode(&s.computers[&first].public_key).expect("key").try_into().expect("32");
+        assert!(!s.pair_computer(&raw_first, &own, "back", vec![], None, 4_000).expect("paired").learned);
+    }
+
+    #[test]
+    fn a_peer_cannot_remove_a_phone() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let phone = s.pair(&key(1), "phone", 1, false).expect("phone");
+        s.set_companion(&phone.id, &key(2)).expect("companion");
+        s.set_companion(&phone.id, &key(3)).expect("replaced: 2 retired");
+        let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
+        // A different key whose id is the phone's.
+        let mut same_id = [1u8; 32];
+        same_id[31] = 0xfe;
+        assert_eq!(Device::id_for(&crate::b64_encode(&same_id)), phone.id);
+        let list = [tomb(1, 5), tomb(2, 5), tomb(3, 5), crate::peer::Tombstone {
+            key: crate::b64_encode(&same_id),
+            removed_ms: 5,
+            name: "x".into(),
+        }];
+        assert_eq!(s.apply_tombstones(&a.id, &own, &list, 6), Applied::default());
+        assert_eq!(s.list_computers().len(), 1, "a phone's key became a computer record");
+        assert_eq!(s.authenticate(&key(1)).map(|(_, sc)| sc), Some(Scope::Full), "the phone was locked out");
+        assert_eq!(s.authenticate(&key(3)).map(|(_, sc)| sc), Some(Scope::Companion));
+        assert!(s.find(&phone.id).expect("phone").is_active());
+    }
+
+    #[test]
+    fn a_received_tombstone_removes_a_known_computer_records_an_unknown_one_and_matches_on_the_whole_key() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
+        let b = s.pair_computer(&raw(8), &own, "b", vec![], None, 1).expect("b");
+        // A key sharing b's id but not b's key.
+        let mut twin = [8u8; 32];
+        twin[31] = 0;
+        assert_eq!(Device::id_for(&crate::b64_encode(&twin)), b.id);
+        let twin_t = crate::peer::Tombstone { key: crate::b64_encode(&twin), removed_ms: 5, name: "t".into() };
+        assert!(!s.apply_tombstones(&a.id, &own, &[twin_t], 6).changed);
+        assert!(s.find_computer(&b.id).expect("b").is_active(), "an id prefix removed a computer");
+
+        let applied = s.apply_tombstones(&a.id, &own, &[tomb(8, 5), tomb(9, 4)], 6);
+        assert_eq!(applied.removed, std::slice::from_ref(&b.id));
+        assert!(s.authenticate(&key(8)).is_none());
+        let unknown = s.find_computer(&Device::id_for(&key(9))).expect("recorded").clone();
+        assert_eq!((unknown.revoked_ms, unknown.name.as_str()), (Some(4), "c9"));
+        assert!(s.authenticate(&key(9)).is_none());
+        assert!(matches!(s.pair_computer(&raw(9), &own, "c9", vec![], None, 7), Err(StoreError::Removed(_))));
+        // Both are passed on, with their first removal times.
+        let mut passed: Vec<(String, u64)> = s.computer_tombstones().into_iter().map(|t| (t.key, t.removed_ms)).collect();
+        passed.sort();
+        let mut want = vec![(key(8), 5), (key(9), 4)];
+        want.sort();
+        assert_eq!(passed, want);
+    }
+
+    #[test]
+    fn forget_lets_a_removed_computer_pair_again_and_only_a_newer_removal_undoes_it() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
+        let b = s.pair_computer(&raw(8), &own, "b", vec![], None, 1).expect("b");
+        assert!(matches!(s.forget_computer(&b.id, 5), Err(StoreError::NotRemoved(_))), "forget on a paired computer");
+        s.revoke_computer(&b.id, 100).expect("removed");
+        // A forget dated before the removal (a clock that went back) still
+        // covers it.
+        let f = s.forget_computer(&b.id, 50).expect("forget");
+        assert_eq!(f.forgotten_ms, Some(100));
+        assert_eq!(f.state(), "forgotten");
+        assert!(s.authenticate(&key(8)).is_none(), "forgetting let the key in without a code");
+        assert!(s.computer_tombstones().is_empty(), "a forgotten removal is still passed on");
+        // The old removal, replayed by a member, does nothing, before and
+        // after pairing again.
+        assert!(!s.apply_tombstones(&a.id, &own, &[tomb(8, 100)], 150).changed);
+        assert_eq!(s.find_computer(&b.id).expect("b").state(), "forgotten");
+        let again = s.pair_computer(&raw(8), &own, "b", vec![], None, 200).expect("pairs again with a code");
+        assert_eq!((again.paired_ms, again.revoked_ms, again.forgotten_ms), (200, None, Some(100)));
+        assert_eq!(s.authenticate(&key(8)).map(|(_, sc)| sc), Some(Scope::Peer));
+        assert!(!s.apply_tombstones(&a.id, &own, &[tomb(8, 100), tomb(8, 99)], 250).changed);
+        assert_eq!(s.authenticate(&key(8)).map(|(_, sc)| sc), Some(Scope::Peer), "an old removal came back");
+        // A removal newer than the forget wins, with its own time.
+        let applied = s.apply_tombstones(&a.id, &own, &[tomb(8, 101)], 260);
+        assert_eq!(applied.removed, std::slice::from_ref(&b.id));
+        assert!(s.authenticate(&key(8)).is_none());
+        assert_eq!(s.find_computer(&b.id).expect("b").revoked_ms, Some(101));
+        // The same rule for the sender removing this one.
+        s.revoke_computer(&a.id, 300).expect("a removed");
+        s.forget_computer(&a.id, 400).expect("a forgotten");
+        s.pair_computer(&raw(7), &own, "a", vec![], None, 500).expect("a again");
+        assert!(!s.apply_tombstones(&a.id, &own, &[tomb(99, 350)], 600).changed, "an old 'you were removed'");
+        assert_eq!(s.apply_tombstones(&a.id, &own, &[tomb(99, 401)], 600).removed, std::slice::from_ref(&a.id));
+    }
+
+    #[test]
+    fn removing_a_forgotten_computer_again_is_a_new_removal() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let b = s.pair_computer(&raw(8), &own, "b", vec![], None, 1).expect("b");
+        s.revoke_computer(&b.id, 10).expect("removed");
+        s.forget_computer(&b.id, 20).expect("forgotten");
+        // Even with a clock behind the forget, the new removal is after it.
+        let again = s.revoke_computer(&b.id, 15).expect("removed again");
+        assert!(again.revoked_ms.expect("removed") > 20 && again.is_tombstone(), "{again:?}");
+        assert!(matches!(s.pair_computer(&raw(8), &own, "b", vec![], None, 30), Err(StoreError::Removed(_))));
+    }
+
+    #[test]
+    fn a_tombstone_is_told_once_and_a_store_written_before_forget_loads() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let b = s.pair_computer(&raw(8), &own, "b", vec![], None, 1).expect("b");
+        s.computer_told(&b.id, 5);
+        assert_eq!(s.find_computer(&b.id).expect("b").told_ms, None, "a paired computer was told it was removed");
+        s.revoke_computer(&b.id, 10).expect("removed");
+        s.computer_told(&b.id, 11);
+        s.computer_told(&b.id, 12);
+        assert_eq!(s.find_computer(&b.id).expect("b").told_ms, Some(11));
+        let old = r#"{"id":"x","name":"n","public_key":"k","paired_ms":1,"revoked_ms":2}"#;
+        let d: Device = serde_json::from_str(old).expect("old record");
+        assert_eq!((d.forgotten_ms, d.told_ms), (None, None));
+        let text = serde_json::to_string(&s.find_computer(&b.id).expect("b").clone()).expect("json");
+        assert!(text.contains("told_ms") && !text.contains("forgotten_ms"), "{text}");
     }
 
     #[test]

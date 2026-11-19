@@ -20,7 +20,7 @@
 //!   closes; a new attempt needs a new screen.
 //! * Both ends of the request are a person: the screen and the typed code are
 //!   refused to anything but a local terminal or Rime Shell (`control.rs`),
-//!   and so is a removal, which is permanent.
+//!   and so are removing and forgetting a removal.
 //! * Over the LAN only: a pairing that arrives through the relay is refused
 //!   before the handshake ([`accept`]).
 //!
@@ -38,7 +38,8 @@
 //! ## Asking
 //!
 //! Each computer dials the other for its own requests (`dialer.rs`); there is
-//! no held link yet. `rime remote computers ping` is the one request.
+//! no held link yet. `rime remote computers ping` and the background refresh
+//! (`presence.rs`) dial, and every dial exchanges removals and presence.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
@@ -58,10 +59,10 @@ use crate::state::State;
 
 /// The only verbs a peer session may send. Everything else is refused before
 /// it is routed anywhere.
-pub const PEER_VERBS: [&str; 2] = ["remote_hello", "peer_hello"];
+pub const PEER_VERBS: [&str; 4] = ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence"];
 
 /// What a peer's `remote_hello` lists.
-pub const PEER_FEATURES: [&str; 1] = ["peer_hello"];
+pub const PEER_FEATURES: [&str; 3] = ["peer_hello", "peer_tombstones", "peer_presence"];
 
 /// The `kind` of the refusal a peer gets for anything outside the list.
 pub const REFUSAL: &str = "not_allowed";
@@ -83,9 +84,10 @@ pub fn refusal(what: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The reply to one control line from a peer session. Never `None`, never
-/// forwarded: a line nothing here answers is refused.
-pub fn peer_reply(state: &State, line: &[u8]) -> Vec<u8> {
+/// The reply to one control line from the session of paired computer
+/// `device_id`. Never `None`, never forwarded: a line nothing here answers is
+/// refused.
+pub fn peer_reply(state: &State, device_id: &str, line: &[u8]) -> Vec<u8> {
     let cmd = crate::companion::verb_of(line);
     match cmd.as_deref() {
         Some(c) if PEER_VERBS.contains(&c) && c == "remote_hello" => json!({
@@ -104,6 +106,10 @@ pub fn peer_reply(state: &State, line: &[u8]) -> Vec<u8> {
         })
         .to_string()
         .into_bytes(),
+        Some(c) if PEER_VERBS.contains(&c) && c == "peer_tombstones" => {
+            crate::presence::answer_tombstones(state, device_id, line)
+        }
+        Some(c) if PEER_VERBS.contains(&c) && c == "peer_presence" => crate::presence::answer_presence(state, device_id, line),
         other => refusal(other.unwrap_or("that request")),
     }
 }
@@ -213,6 +219,8 @@ fn store_computer(state: &State, key: &[u8; 32], about: &About, addresses: Vec<S
     state
         .save_devices(&store)
         .map_err(|e| format!("the computer was not written: {e}"))?;
+    drop(store);
+    state.refresh.poke();
     Ok(c)
 }
 
@@ -423,11 +431,23 @@ fn add_inner(state: &State, address: &str, code: &str) -> Result<Device, String>
     store_computer(state, &paired.key, &paired.about, addresses)
 }
 
-/// `rime remote computers list`.
+/// `rime remote computers list`: each record, with the presence it last
+/// gave while paired (memory only).
 pub fn list(state: &State) -> Reply {
     match state.devices() {
         Ok(store) => Reply::Computers {
-            computers: store.list_computers().into_iter().cloned().collect(),
+            computers: store
+                .list_computers()
+                .into_iter()
+                .map(|c| {
+                    let last = c.is_active().then(|| state.presence.get(&c.id)).flatten();
+                    rime_remote_core::peer::Listed {
+                        computer: c.clone(),
+                        presence: last.as_ref().map(|(p, _)| p.clone()),
+                        presence_ms: last.map(|(_, at)| at),
+                    }
+                })
+                .collect(),
         },
         Err(e) => Reply::Error { message: e.to_string() },
     }
@@ -451,7 +471,32 @@ pub fn remove(state: &State, computer: &str) -> Reply {
     }
     drop(store);
     state.drop_connections_for(&c.id);
+    state.presence.forget(&c.id);
+    // Tell it now, so it removes this computer too (`presence.rs`).
+    state.refresh.tell_now(&c.id);
     Reply::ComputerRemoved { id: c.id, name: c.name }
+}
+
+/// `rime remote computers forget <computer>`: this computer stops holding a
+/// removal against it, so a code pairs it again and a removal passed on
+/// later counts only if it is newer.
+pub fn forget(state: &State, computer: &str) -> Reply {
+    let mut store = match state.devices() {
+        Ok(s) => s,
+        Err(e) => return Reply::Error { message: e.to_string() },
+    };
+    let c = match store.forget_computer(computer, rime_remote_core::now_ms()) {
+        Ok(c) => c,
+        Err(e) => return Reply::Error { message: e.to_string() },
+    };
+    if let Err(e) = state.save_devices(&store) {
+        return Reply::Error {
+            message: format!("the computer was not written: {e}"),
+        };
+    }
+    drop(store);
+    state.refresh.poke();
+    Reply::ComputerForgotten { id: c.id, name: c.name }
 }
 
 /// `rime remote computers ping <computer>`: dial it, say `peer_hello`, and
@@ -502,6 +547,11 @@ pub fn ping(state: &State, computer: &str, via: Option<&str>) -> Reply {
         }
         let _ = state.save_devices(&store);
     }
+    // Removals and presence, as every connection exchanges them. A failure
+    // here is not the ping's: it answered.
+    if let Err(e) = crate::presence::exchange(state, &mut link, &c) {
+        eprintln!("rime-remoted: '{}' answered a ping but not the exchange: {e}", crate::dialer::printable(&c.name));
+    }
     Reply::ComputerPong {
         id: c.id,
         name: c.name,
@@ -550,17 +600,17 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_gets_its_two_verbs_and_a_refusal_for_everything_else() {
+    fn a_peer_gets_its_four_verbs_and_a_refusal_for_everything_else() {
         let (state, _dir) = crate::serve::tests::a_state("peer-reply");
         let hello: serde_json::Value =
-            serde_json::from_slice(&peer_reply(&state, br#"{"cmd":"remote_hello"}"#)).expect("json");
+            serde_json::from_slice(&peer_reply(&state, "desk", br#"{"cmd":"remote_hello"}"#)).expect("json");
         assert_eq!(hello["scope"], "peer");
         assert_eq!(hello["features"], json!(PEER_FEATURES));
-        let ph: serde_json::Value = serde_json::from_slice(&peer_reply(&state, br#"{"cmd":"peer_hello"}"#)).expect("json");
+        let ph: serde_json::Value = serde_json::from_slice(&peer_reply(&state, "desk", br#"{"cmd":"peer_hello"}"#)).expect("json");
         assert_eq!(ph["reply"], "peer_hello");
         assert_eq!(ph["name"], json!(state.machine));
         for line in [&br#"{"cmd":"list"}"#[..], b"garbage", br#"{"cmd":"pair"}"#, br#"{"nocmd":1}"#] {
-            let r: serde_json::Value = serde_json::from_slice(&peer_reply(&state, line)).expect("json");
+            let r: serde_json::Value = serde_json::from_slice(&peer_reply(&state, "desk", line)).expect("json");
             assert_eq!(r["kind"], REFUSAL, "{}", String::from_utf8_lossy(line));
         }
     }

@@ -203,7 +203,8 @@ and never forwards: its hello, the companion key, nex, the phone's answers
 about its messages, and the five machine verbs in [The computer itself](#the-computer-itself-status-lock-and-media).)
 
 A connection from [another computer](#rime-remote-computers-your-other-rime-computers)
-forwards nothing either, and may only say hello.
+forwards nothing either. It may only say hello, pass on the computers it
+removed, and say how it is doing.
 
 A connection on a phone's **companion key** is the opposite: it forwards
 nothing to `rime-agentd` at all, and may use only the phone's own features
@@ -250,7 +251,9 @@ that shape; a relaxed origin check would not do.
 
 Two Rime computers you own can pair with each other. In this release that
 makes them known to each other and nothing more: a paired computer may say
-hello and ask the other's name and version. **Pairing is not authority.** A
+hello, ask the other's name and version, pass on the computers it removed,
+and say how it is doing (battery, power mode, whether it is locked, wired or
+Wi-Fi, how long it has been up). **Pairing is not authority.** A
 paired computer cannot run anything, open a terminal, read a file, see a
 session, answer a privilege prompt or use a phone feature on the other. A
 session from another computer never reaches `rime-agentd` at all, not even to
@@ -262,6 +265,7 @@ rime remote computers add <address>        # on the second: asks for the digits
 rime remote computers list [--json]
 rime remote computers ping <computer> [--via lan|relay|any] [--json]
 rime remote computers remove <computer>
+rime remote computers forget <computer>
 ```
 
 **Pairing.** On one computer run `add --show-code`. It prints a six-digit code
@@ -298,17 +302,36 @@ in shell history or `ps`.
 
 **`list`** shows every computer this one has paired, removed ones included,
 with the path it was last reached on and the addresses it is dialled at.
+Under each paired computer it shows how that computer was doing when it was
+last reached, and how long ago that was. That line is kept in memory only: it
+is never written to disk, and it is empty after `rime-remoted` restarts until
+the computer is reached again.
 
 **`ping`** dials the computer, says hello, and prints what it calls itself, the
 path (`lan` or `relay`) and how long the whole dial took. `--via lan` or
 `--via relay` forces one path. Each computer dials the other for its own
 requests; nothing stays connected between them.
 
+**How it stays up to date.** While at least one computer is paired,
+`rime-remoted` dials each one every 5 minutes on AC power and every 15 minutes
+on battery. It tells it which computers this one removed and how this one is
+doing, and hears the same back. When a computer does not answer it waits
+twice as long before the next try, up to an hour. In power saver it dials
+nothing. With no computer paired it does nothing at all.
+
 **`remove`** drops any connection the computer holds and refuses its key from
 then on. Like pairing, it must be you at the computer: an agent or a scheduled
-job is refused. **A removal is never undone in this release:** the removed
-computer cannot be added again. Do not give it a new key to get round that (that
-unpairs every phone it has); a way to add a removed computer back is coming.
+job is refused. The removed computer is told straight away, and removes this
+one too. If it cannot be reached, it is told the next time this computer
+dials any paired computer, or the next time `rime-remoted` starts, for 30
+days. Your other paired computers hear about the removal as well, and remove
+it too.
+
+**`forget`** lets a removed computer pair again. Run it on both computers,
+then pair them with `add` and a new code. Like removing, it must be you at the
+computer. After `forget`, an older removal that another computer passes on is
+ignored, but a removal made later, anywhere, counts again. Do not give a
+removed computer a new key instead (that unpairs every phone it has).
 
 The wire is `docs/remote-live-contract.md` §2.15.
 

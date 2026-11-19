@@ -3555,7 +3555,7 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
     let mut peer = identity_of(&b).connect(&a).expect("a paired computer opens a session");
     let hello = peer.call(r#"{"cmd":"remote_hello"}"#);
     assert_eq!(hello["scope"], "peer", "{hello}");
-    assert_eq!(hello["features"], serde_json::json!(["peer_hello"]), "{hello}");
+    assert_eq!(hello["features"], serde_json::json!(["peer_hello", "peer_tombstones", "peer_presence"]), "{hello}");
     assert_eq!(peer.call(r#"{"cmd":"peer_hello"}"#)["reply"], "peer_hello");
     for line in [
         r#"{"cmd":"list"}"#,
@@ -3637,6 +3637,174 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
     assert_ne!(rc, 0, "a removed computer paired again: {said}");
     assert!(said.contains("cannot pair again with the same key"), "{said}");
     assert!(computers(&a)[0]["revoked_ms"].is_u64(), "the removal is kept");
+}
+
+/// Pair `a` and `b` with a code: B's id on A, and A's id on B. `None`
+/// (after saying SKIP) where this process may not pair.
+fn pair_computers(a: &Harness, b: &Harness) -> Option<(String, String)> {
+    let (_screen, code) = show_code(a)?;
+    let (rc, said) = add_computer(b, a, &code);
+    assert_eq!(rc, 0, "{said}");
+    let id_on = |h: &Harness, other: &Harness| {
+        let key = identity_of(other).key();
+        computers(h)
+            .into_iter()
+            .find(|c| c["public_key"].as_str() == Some(key.as_str()))
+            .and_then(|c| c["id"].as_str().map(str::to_string))
+            .expect("the other computer is listed")
+    };
+    Some((id_on(a, b), id_on(b, a)))
+}
+
+/// The record of computer `id` on `h`.
+fn computer_on(h: &Harness, id: &str) -> serde_json::Value {
+    computers(h).into_iter().find(|c| c["id"] == id).unwrap_or_else(|| panic!("no {id} on {h:?}", h = h.root))
+}
+
+/// Wait up to `within` for `ok` to hold of `h`'s record of `id`.
+fn until_computer(h: &Harness, id: &str, within: Duration, ok: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+    let deadline = Instant::now() + within;
+    loop {
+        let c = computer_on(h, id);
+        if ok(&c) || Instant::now() >= deadline {
+            return c;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// How the machine stub of `h` says the machine is doing.
+fn set_machine(h: &Harness, status: serde_json::Value) {
+    let dir = h.root.join("machine");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("state.json"), serde_json::json!({ "machine_status": status }).to_string()).expect("write");
+}
+
+#[test]
+fn removing_a_computer_tells_it_and_it_removes_this_one_and_forget_on_both_pairs_them_again() {
+    let a = harness!("tell-a");
+    let b = harness!("tell-b");
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+
+    // Removed on A: A dials B at once and tells it, and B removes A. B's
+    // daemon was never asked to do anything.
+    let removed = a.control(&serde_json::json!({"cmd": "computer_remove", "computer": b_on_a}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    let a_there = until_computer(&b, &a_on_b, Duration::from_secs(15), |c| c["revoked_ms"].is_u64());
+    assert!(a_there["revoked_ms"].is_u64(), "B did not remove A after A removed it: {a_there}");
+    assert!(a_there["told_ms"].is_u64(), "B would keep dialling A to tell it what A told B: {a_there}");
+    let b_here = until_computer(&a, &b_on_a, Duration::from_secs(5), |c| c["told_ms"].is_u64());
+    assert!(b_here["told_ms"].is_u64(), "A does not know B was told: {b_here}");
+    // The removal time travelled unchanged.
+    let removed_at = b_here["revoked_ms"].as_u64().expect("removed");
+    assert_eq!(a_there["revoked_ms"].as_u64(), Some(removed_at), "B re-stamped the removal");
+    assert!(identity_of(&a).connect(&b).is_none(), "B still accepts A");
+
+    // Forget on A only: B still refuses, so they do not pair.
+    let (rc, said) = rime_remote(&a, &["computers", "forget", &b_on_a], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(computer_on(&a, &b_on_a)["forgotten_ms"].is_u64());
+    let Some((_screen, code)) = show_code(&a) else { return };
+    let (rc, said) = add_computer(&b, &a, &code);
+    assert_ne!(rc, 0, "B paired with a computer it removed: {said}");
+    assert!(said.contains("rime remote computers forget"), "the refusal says how to undo it: {said}");
+    // Forgetting a paired computer is refused; so is a name nobody has.
+    let (rc, said) = rime_remote(&b, &["computers", "forget", "nobody-at-all"], b"");
+    assert_ne!(rc, 0, "{said}");
+
+    // Forget on B too: a new code pairs them, as new.
+    let (rc, said) = rime_remote(&b, &["computers", "forget", &a_on_b], b"");
+    assert_eq!(rc, 0, "{said}");
+    let Some((again_b, again_a)) = pair_computers(&a, &b) else { return };
+    assert_eq!((again_b.as_str(), again_a.as_str()), (b_on_a.as_str(), a_on_b.as_str()), "the same keys, the same ids");
+    assert!(computer_on(&a, &b_on_a)["revoked_ms"].is_null(), "{}", computer_on(&a, &b_on_a));
+    let (rc, said) = rime_remote(&b, &["computers", "forget", &a_on_b], b"");
+    assert_ne!(rc, 0, "a paired computer was forgotten: {said}");
+    assert!(said.contains("nothing to forget"), "{said}");
+    let pong = a.control(&serde_json::json!({"cmd": "computer_ping", "computer": b_on_a, "via": "lan"}).to_string());
+    assert_eq!(pong["reply"], "computer_pong", "{pong}");
+
+    // The old removal, passed on again by B (as a third computer that never
+    // heard of the forget would), does not undo the forget...
+    let own = |h: &Harness| identity_of(h).key();
+    let mut peer = identity_of(&b).connect(&a).expect("B is paired with A again");
+    let stale = serde_json::json!({"cmd": "peer_tombstones", "tombstones": [
+        {"key": own(&a), "removed_ms": removed_at, "name": "a"}]});
+    let r = peer.call(&stale.to_string());
+    assert_eq!(r["reply"], "peer_tombstones", "{r}");
+    assert!(computer_on(&a, &b_on_a)["revoked_ms"].is_null(), "a removal older than the forget counted");
+    // ...and a newer one does: B removed A, so A removes B and ends B's
+    // session after its answer.
+    let newer = serde_json::json!({"cmd": "peer_tombstones", "tombstones": [
+        {"key": own(&a), "removed_ms": rime_remote_core::now_ms(), "name": "a"}]});
+    let r = peer.call(&newer.to_string());
+    assert_eq!(r["reply"], "peer_tombstones", "{r}");
+    assert!(computer_on(&a, &b_on_a)["revoked_ms"].is_u64(), "a removal newer than the forget did not count");
+    assert!(identity_of(&b).connect(&a).is_none(), "A still accepts B after B's removal reached it");
+}
+
+#[test]
+fn paired_computers_exchange_presence_and_a_peer_sending_garbage_has_nothing_kept() {
+    let a = harness!("presence-a");
+    let b = harness!("presence-b");
+    set_machine(&a, serde_json::json!({"battery": {"percent": 64, "state": "discharging"}, "on_ac": false,
+        "power_mode": "balanced", "locked": false, "network": "wifi", "uptime_s": 4000}));
+    set_machine(&b, serde_json::json!({"on_ac": true, "power_mode": "performance", "locked": true,
+        "network": "wired", "uptime_s": 90000}));
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    assert!(computer_on(&a, &b_on_a)["presence"].is_null(), "presence before any exchange");
+
+    // One ping from A: both ends now know how the other is doing.
+    let pong = a.control(&serde_json::json!({"cmd": "computer_ping", "computer": b_on_a, "via": "lan"}).to_string());
+    assert_eq!(pong["reply"], "computer_pong", "{pong}");
+    let b_seen = computer_on(&a, &b_on_a);
+    assert_eq!(b_seen["presence"]["network"], "wired", "{b_seen}");
+    assert_eq!(b_seen["presence"]["locked"], true, "{b_seen}");
+    assert_eq!(b_seen["presence"]["uptime_s"], 90000, "{b_seen}");
+    assert_eq!(b_seen["presence"]["power_mode"], "performance", "{b_seen}");
+    assert!(b_seen["presence_ms"].is_u64(), "{b_seen}");
+    let a_seen = computer_on(&b, &a_on_b);
+    assert_eq!(a_seen["presence"]["battery"], serde_json::json!({"percent": 64, "charging": false}), "{a_seen}");
+    assert_eq!(a_seen["presence"]["network"], "wifi", "{a_seen}");
+    let (rc, said) = rime_remote(&b, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("battery 64%, balanced, unlocked, Wi-Fi, up 1h"), "{said}");
+    // Never written to disk.
+    let stored = std::fs::read_to_string(a.root.join("state/rime/remote/computers.json")).expect("computers.json");
+    assert!(!stored.contains("presence") && !stored.contains("wired"), "{stored}");
+
+    // A peer that sends garbage gets a refusal, and nothing is kept.
+    let mut peer = identity_of(&b).connect(&a).expect("B is paired with A");
+    for bad in [
+        serde_json::json!({"cmd": "peer_presence", "presence": {"name": "b", "battery": {"percent": 300, "charging": true}}}),
+        serde_json::json!({"cmd": "peer_presence", "presence": {"name": "b", "network": "carrier pigeon"}}),
+        serde_json::json!({"cmd": "peer_presence", "presence": {"name": "b\u{1b}[2J"}}),
+        serde_json::json!({"cmd": "peer_presence", "presence": "fine"}),
+    ] {
+        let r = peer.call(&bad.to_string());
+        assert_eq!(r["kind"], "bad_request", "{bad}: {r}");
+    }
+    let still = computer_on(&a, &b_on_a);
+    assert_eq!(still["presence"], b_seen["presence"], "garbage replaced what B said before");
+    let stranger = rime_remote_core::b64_encode(&[42u8; 32]);
+    for bad in [
+        serde_json::json!({"cmd": "peer_tombstones", "tombstones": [
+            {"key": stranger, "removed_ms": 5, "name": "x"},
+            {"key": "short", "removed_ms": 5, "name": "y"}]}),
+        serde_json::json!({"cmd": "peer_tombstones", "tombstones": [
+            {"key": stranger, "removed_ms": rime_remote_core::now_ms() + 3_600_000, "name": "future"}]}),
+        serde_json::json!({"cmd": "peer_tombstones", "tombstones": {"key": stranger}}),
+    ] {
+        let r = peer.call(&bad.to_string());
+        assert_eq!(r["kind"], "bad_request", "{bad}: {r}");
+    }
+    assert_eq!(computers(&a).len(), 1, "a refused tombstone list was recorded: {:?}", computers(&a));
+    assert!(computer_on(&a, &b_on_a)["revoked_ms"].is_null());
+    // The session still answers, and still refuses everything else.
+    assert_eq!(peer.call(r#"{"cmd":"peer_hello"}"#)["reply"], "peer_hello");
+    for line in [r#"{"cmd":"list"}"#, r#"{"cmd":"computers"}"#, r#"{"cmd":"computer_forget","computer":"x"}"#, r#"{"cmd":"machine_status"}"#] {
+        assert_eq!(peer.call(line)["kind"], "not_allowed", "{line}");
+    }
 }
 
 #[test]
