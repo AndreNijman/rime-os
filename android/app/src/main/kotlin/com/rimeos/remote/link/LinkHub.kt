@@ -780,11 +780,6 @@ class LinkHub private constructor(private val app: Context) {
             it.copy(hello = h ?: it.hello, remote = r ?: it.remote, hellos = it.hellos + 1)
         }
         r?.let { phoneSide(machine, link, it) }
-        // Flow A: one unlock opens one machine, so a second full link may
-        // arrive long after the first; each one looks again.
-        if (r != null && link.scope == Scope.FULL && r.has(Introductions.FEATURE)) {
-            scope.launch { runCatching { introduceAll() } }
-        }
         // On a full link, bring the companion key in line with the switch:
         // register (again, idempotently) while it is on, or pay a forget owed.
         if (r != null && link.scope == Scope.FULL) {
@@ -920,7 +915,13 @@ class LinkHub private constructor(private val app: Context) {
         }
         if (!lane.throttle.due(level, charging, now, network, dnd, can)) return
         runCatching { phone.report(level, charging, can, network, dnd) }
-            .onSuccess { lane.throttle.sent(level, charging, now, network, dnd, can) }
+            .onSuccess {
+                lane.throttle.sent(level, charging, now, network, dnd, can)
+                // Flow A follows a report the computer took: it gives no card
+                // before it has heard join. One unlock opens one machine, so
+                // each computer's first report looks at all of them again.
+                if (Introductions.CAN_JOIN in can) scope.launch { runCatching { introduceAll() } }
+            }
             .onFailure { Log.i(TAG, "${machine.machine}: report not taken: ${it.message}") }
     }
 
@@ -1609,13 +1610,14 @@ class LinkHub private constructor(private val app: Context) {
     /**
      * The person turned "Join my other computers automatically" on or off.
      * Blocking: call from the IO dispatcher. Every connected computer is told
-     * at once, and turning it on introduces the computers held now.
+     * at once.
      */
     fun setAutoJoin(on: Boolean): MachineStore {
         val store = repository.updateBlocking { it.copy(settings = it.settings.copy(autoJoin = on)) }
         autoJoin = on
+        // Turning it on introduces the computers held now, once each has
+        // taken the report that says so ([report]).
         reportAgain()
-        if (on) scope.launch { runCatching { introduceAll() } }
         return store
     }
 
@@ -1637,7 +1639,9 @@ class LinkHub private constructor(private val app: Context) {
             Introductions.Holder(id, pinned, card)
         }
         val done = mutableListOf<String>()
-        for ((target, card) in Introductions.plan(holders)) {
+        val plan = Introductions.plan(holders)
+        Log.i(TAG, "introductions: ${holders.size} computers gave a card, ${plan.size} to hand on")
+        for ((target, card) in plan) {
             val link = links[target]?.takeIf { it.scope == Scope.FULL } ?: continue
             val name = store.find(target)?.machine ?: target
             runCatching { Introductions.outcome(link.request(Introductions.introduce(card), retry = false)) }
