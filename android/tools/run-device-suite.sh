@@ -1024,6 +1024,14 @@ PY
 RIME_SUITE_SERIAL="$serial" RIME_SUITE_ADB="$adb" python3 "$root/broker.py" "$root/run/rime-remoted/control.sock" "$brokerport" "$root" "$bin" "$port" \
   "$root/run/rime-agentd/control.sock" "$relay" "$nexsock" "$nexroot" >"$root/broker.log" 2>&1 &
 broker_pid=$!
+# The broker takes a moment to listen (~0.3 s measured) and `adb shell` answers
+# in ~20 ms, so a probe sent at once finds nothing there and reads as "the
+# phone could not reach this machine". Wait for it to listen first.
+for _ in $(seq 1 100); do
+  (exec 3<>"/dev/tcp/127.0.0.1/$brokerport") 2>/dev/null && break
+  kill -0 "$broker_pid" 2>/dev/null || { echo "FAIL: the broker exited: $(tail -5 "$root/broker.log")"; exit 1; }
+  sleep 0.1
+done
 
 # Which of this machine's addresses the PHONE can actually reach. Measured from
 # the phone rather than guessed from `ip addr`: a laptop can hold half a dozen
