@@ -47,8 +47,10 @@ import com.rimeos.remote.security.AppLock
 import com.rimeos.remote.security.AppLockRefused
 import com.rimeos.remote.security.KeystoreSecretBox
 import com.rimeos.remote.ui.term.TerminalController
+import com.rimeos.remote.core.phone.Introductions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -431,6 +433,23 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
             hub.companion.collect { on -> _state.update { it.copy(companion = on) } }
         }
         viewModelScope.launch {
+            // The hub joined or forgot a computer by itself (contract §2.15).
+            var seen = hub.storeChanged.value
+            hub.storeChanged.collect { n ->
+                if (n == seen) return@collect
+                seen = n
+                val store = repository.load()
+                _state.update { it.copy(machines = store.machines, settings = store.settings) }
+            }
+        }
+        viewModelScope.launch {
+            var seen = hub.notices.value.size
+            hub.notices.collect { all ->
+                if (all.size != seen) all.lastOrNull()?.let { latest -> _state.update { it.copy(message = latest) } }
+                seen = all.size
+            }
+        }
+        viewModelScope.launch {
             // Locked from somewhere else — the notification's Lock action —
             // must lock this screen too, not leave it drawing a machine whose
             // keys are gone.
@@ -622,12 +641,20 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
                     boxFor = { deviceId -> sealingBox(activity, deviceId, offer.machine) },
                     nowMs = now,
                 )
-                val store = repository.remember(machine)
+                val before = repository.load()
+                var store = repository.remember(machine)
+                // The setup flow: the first pairing made by hand turns
+                // "Join my other computers automatically" on (§2.15).
+                val autoJoin = Introductions.afterPairing(before.settings.autoJoin, before.machines.isEmpty(), byHand = true)
+                val turnedOn = autoJoin == true && before.settings.autoJoin == null
+                if (turnedOn) store = withContext(Dispatchers.IO) { hub.setAutoJoin(true) }
                 _state.update {
                     it.copy(
                         machines = store.machines,
+                        settings = store.settings,
                         busy = null,
-                        message = "Paired with ${machine.machine}.",
+                        message = "Paired with ${machine.machine}." +
+                            if (turnedOn) " \"Join my other computers automatically\" is on; it is in Settings." else "",
                     )
                 }
             } catch (e: Exception) {
@@ -1900,17 +1927,11 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         // subscription to a phone that will never read it. `PushRegistrar`
         // unregisters with the distributor; the round trip below is
         // best-effort and its failure changes nothing here.
-        runCatching {
-            withContext(Dispatchers.IO) {
-                linkOf(machine)?.pushUnregister()
-            }
-        }
+        //
         // The companion key too: the machine is told to forget it while the
-        // link is up, and its keystore key goes either way.
-        runCatching { withContext(Dispatchers.IO) { hub.unpairCompanion(machine.deviceId) } }
-        hub.forget(machine.deviceId)
-        PushRegistrar.forget(getApplication<Application>(), machine)
-        val store = repository.forget(machine)
+        // link is up, and its keystore key goes either way. One path for this
+        // and for a computer another removed (`LinkHub.forgetMachine`).
+        val store = hub.forgetMachine(machine, tellIt = true)
         _state.update {
             it.copy(
                 machines = store.machines,
@@ -1992,6 +2013,26 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** Put the paired computers' clipboard on this phone's, or stop (contract §2.14). */
+    /** "Join my other computers automatically" (contract §2.15). */
+    fun setAutoJoin(on: Boolean) = viewModelScope.launch {
+        val store = withContext(Dispatchers.IO) { hub.setAutoJoin(on) }
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /**
+     * While the app is on screen, a computer's offer to bring this phone to
+     * another is joined here: the prompt that seals the new key needs the
+     * screen. Runs until cancelled (the screen leaving).
+     */
+    suspend fun joinWhileShown(activity: FragmentActivity, deviceName: String) {
+        hub.setJoinSeal({ deviceId, machine -> sealingBox(activity, deviceId, machine) }, Device.checkName(deviceName))
+        try {
+            awaitCancellation()
+        } finally {
+            hub.setJoinSeal(null, deviceName)
+        }
+    }
+
     fun setClipboardOn(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(clipboardOn = on))
         hub.setClipboardOn(store.settings.clipboardOn)

@@ -132,6 +132,14 @@ class IntroductionsTest {
     }
 
     @Test
+    fun `a joined computer says who added it, and that it waits to be allowed while its hello says companion`() {
+        assertNull(Introductions.joinedLine(null, "companion", unlocked = true))
+        assertEquals("Added by desk", Introductions.joinedLine("desk", "full", unlocked = true))
+        assertEquals("Added by desk", Introductions.joinedLine("desk", "companion", unlocked = false), "locked: the companion key's hello")
+        assertTrue(Introductions.joinedLine("desk", "companion", unlocked = true)!!.contains("rime remote devices allow"))
+    }
+
+    @Test
     fun `the events are read, and a join offer never prints its token`() {
         val e = Phone.event("""{"event":"join_offer","offer":"apex-remote:abc","computer":"laptop","by":"desk"}""")
         assertEquals(DeviceEvent.JoinOffer("apex-remote:abc", "laptop", "desk"), e)

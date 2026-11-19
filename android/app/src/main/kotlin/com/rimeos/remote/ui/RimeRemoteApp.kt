@@ -189,6 +189,13 @@ fun RimeRemoteApp(
             return@RimeRemoteTheme
         }
 
+        // While the app is on screen and unlocked, an offer to join another
+        // computer can be sealed: the prompt needs the screen (§2.15).
+        val joinLifecycle = LocalLifecycleOwner.current.lifecycle
+        LaunchedEffect(joinLifecycle) {
+            joinLifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) { viewModel.joinWhileShown(activity, deviceName) }
+        }
+
         NavHost(navigation, startDestination = Destinations.MACHINES) {
             composable(Destinations.MACHINES) {
                 val context = LocalContext.current
@@ -215,6 +222,7 @@ fun RimeRemoteApp(
                     onPhotos = { navigation.navigate(Destinations.PHOTOS) },
                     onCompanion = { viewModel.setCompanionOn(it) },
                     onClipboard = { viewModel.setClipboardOn(it) },
+                    onAutoJoin = { viewModel.setAutoJoin(it) },
                     onCrashReports = { viewModel.setCrashReports(it) },
                     onShareCrash = { report ->
                         // ACTION_SEND with the text in the intent, so the user

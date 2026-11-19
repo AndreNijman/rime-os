@@ -3,7 +3,9 @@ package com.rimeos.remote.link
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
+import com.rimeos.remote.core.MachineStore
 import com.rimeos.remote.core.PairedMachine
+import com.rimeos.remote.core.PairingOffer
 import com.rimeos.remote.core.Session
 import com.rimeos.remote.core.StaticKey
 import com.rimeos.remote.core.agent.Hello
@@ -15,6 +17,7 @@ import com.rimeos.remote.core.phone.CompanionLink
 import com.rimeos.remote.core.phone.Content
 import com.rimeos.remote.core.phone.DeviceEvent
 import com.rimeos.remote.core.phone.Focus
+import com.rimeos.remote.core.phone.Introductions
 import com.rimeos.remote.core.phone.Media
 import com.rimeos.remote.core.phone.Calls
 import com.rimeos.remote.core.phone.Messages
@@ -43,7 +46,9 @@ import com.rimeos.remote.phone.SmsWatcher
 import com.rimeos.remote.core.link.Route
 import com.rimeos.remote.core.link.Upload
 import com.rimeos.remote.data.MachineRepository
+import com.rimeos.remote.pairing.GatedBox
 import com.rimeos.remote.pairing.PairingService
+import com.rimeos.remote.push.PushRegistrar
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -60,6 +65,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * The connections this phone holds open, and the keys they were opened with.
@@ -266,6 +274,56 @@ class LinkHub private constructor(private val app: Context) {
     /** "Photos on your computer" (§2.13): read from the store on a connection and set by the screen. */
     @Volatile
     private var photosOn: Boolean = false
+
+    /**
+     * "Join my other computers automatically" (contract §2.15), from the
+     * settings; null (an install from before the switch) is off.
+     */
+    @Volatile
+    private var autoJoin: Boolean? = null
+
+    /** One run of flow A at a time: two connects landing together introduce once. */
+    private val introducing = Mutex()
+
+    /** A computer's offer to bring this phone to another, waiting for the person. */
+    data class PendingJoin(val payload: String, val offer: PairingOffer, val by: String)
+
+    private val _pendingJoin = MutableStateFlow<PendingJoin?>(null)
+
+    /** The join offer waiting, at most one: a newer one replaces it. */
+    val pendingJoin: StateFlow<PendingJoin?> = _pendingJoin.asStateFlow()
+
+    /**
+     * How a join seals the key this phone makes for the new computer. Set
+     * while the app is on screen, because sealing with a gated key needs the
+     * prompt and the prompt needs the screen; the device suite sets its own.
+     * Null while the app is not on screen: an offer then waits, and says so.
+     */
+    fun interface JoinSeal {
+        suspend fun box(deviceId: String, machine: String): GatedBox
+    }
+
+    @Volatile
+    private var joinSeal: JoinSeal? = null
+
+    @Volatile
+    private var joinName: String = "phone"
+
+    private val _notices = MutableStateFlow<List<String>>(emptyList())
+
+    /**
+     * What happened to this phone's computers without the person doing it:
+     * a computer joined, or forgotten because another removed it. Newest
+     * last. Each is also posted as a notification.
+     */
+    val notices: StateFlow<List<String>> = _notices.asStateFlow()
+
+    private val _storeChanged = MutableStateFlow(0)
+
+    /** Moves whenever the hub changed the stored machines, so a screen reads them again. */
+    val storeChanged: StateFlow<Int> = _storeChanged.asStateFlow()
+
+    private val deviceNotices = DeviceNotices(app)
 
     /**
      * The connections answering a photo listing now, and those sending an
@@ -722,6 +780,11 @@ class LinkHub private constructor(private val app: Context) {
             it.copy(hello = h ?: it.hello, remote = r ?: it.remote, hellos = it.hellos + 1)
         }
         r?.let { phoneSide(machine, link, it) }
+        // Flow A: one unlock opens one machine, so a second full link may
+        // arrive long after the first; each one looks again.
+        if (r != null && link.scope == Scope.FULL && r.has(Introductions.FEATURE)) {
+            scope.launch { runCatching { introduceAll() } }
+        }
         // On a full link, bring the companion key in line with the switch:
         // register (again, idempotently) while it is on, or pay a forget owed.
         if (r != null && link.scope == Scope.FULL) {
@@ -799,6 +862,7 @@ class LinkHub private constructor(private val app: Context) {
         callsOn = settings.callsOn
         syncCallWatcher()
         photosOn = settings.photosOn
+        autoJoin = settings.autoJoin
     }
 
     private fun startReports(machine: PairedMachine, phone: PhoneLink, remote: RemoteHello, companion: Boolean) {
@@ -849,6 +913,10 @@ class LinkHub private constructor(private val app: Context) {
             // Only to a machine that sends its clipboard, and only over a full link on an
             // unlocked app: the switch promises the text lands "while this app is unlocked".
             if (lane.remote.has(Phone.CLIPBOARD) && clipboardOn && !lane.companion && _unlocked.value) add(Phone.CAN_CLIPBOARD)
+            // Introductions and joins come only from a full link of an unlocked app (§2.15).
+            if (Introductions.offered(autoJoin, lane.remote.has(Introductions.FEATURE), lane.companion, _unlocked.value)) {
+                add(Introductions.CAN_JOIN)
+            }
         }
         if (!lane.throttle.due(level, charging, now, network, dnd, can)) return
         runCatching { phone.report(level, charging, can, network, dnd) }
@@ -1438,6 +1506,8 @@ class LinkHub private constructor(private val app: Context) {
                 if (rang) runCatching { phone.ack(event.id) }
             }
             is DeviceEvent.Offer -> scope.launch { onOffer(machine, phone, event) }
+            is DeviceEvent.JoinOffer -> scope.launch { onJoinOffer(machine, event, companion) }
+            is DeviceEvent.DeviceRemoved -> scope.launch { onDeviceRemoved(machine, event, companion) }
             is DeviceEvent.MessagesRequest -> scope.launch { onMessagesRequest(machine, phone, event) }
             is DeviceEvent.MessagesSend -> scope.launch { onMessagesSend(machine, phone, event, companion) }
             is DeviceEvent.CallAction -> scope.launch { onCallAction(machine, phone, event, companion) }
@@ -1536,6 +1606,148 @@ class LinkHub private constructor(private val app: Context) {
         if (finished) runCatching { phone.offerDone(offer.id) }
     }
 
+    /**
+     * The person turned "Join my other computers automatically" on or off.
+     * Blocking: call from the IO dispatcher. Every connected computer is told
+     * at once, and turning it on introduces the computers held now.
+     */
+    fun setAutoJoin(on: Boolean): MachineStore {
+        val store = repository.updateBlocking { it.copy(settings = it.settings.copy(autoJoin = on)) }
+        autoJoin = on
+        reportAgain()
+        if (on) scope.launch { runCatching { introduceAll() } }
+        return store
+    }
+
+    /**
+     * Flow A (§2.15): ask every computer this phone holds a full link to for
+     * its card, and hand each the card of every other it does not know.
+     * Returns `deviceId:outcome` for each introduction a computer took, for
+     * the device suite. Blocking requests; runs on the IO dispatcher.
+     */
+    suspend fun introduceAll(): List<String> = introducing.withLock {
+        if (autoJoin != true || !_unlocked.value) return@withLock emptyList()
+        val store = repository.loadBlocking()
+        val holders = links.mapNotNull { (id, link) ->
+            val remote = _states.value[id]?.remote ?: return@mapNotNull null
+            if (!link.connected || link.scope != Scope.FULL || !remote.has(Introductions.FEATURE)) return@mapNotNull null
+            val pinned = store.find(id)?.desktopKey ?: return@mapNotNull null
+            val card = runCatching { Introductions.readCard(link.request(Introductions.cardRequest(), retry = false)) }
+                .getOrNull() ?: return@mapNotNull null
+            Introductions.Holder(id, pinned, card)
+        }
+        val done = mutableListOf<String>()
+        for ((target, card) in Introductions.plan(holders)) {
+            val link = links[target]?.takeIf { it.scope == Scope.FULL } ?: continue
+            val name = store.find(target)?.machine ?: target
+            runCatching { Introductions.outcome(link.request(Introductions.introduce(card), retry = false)) }
+                .onSuccess { outcome ->
+                    Log.i(TAG, "$name: introduction ${outcome ?: "refused"}")
+                    if (outcome != null) done += "$target:$outcome"
+                }
+                .onFailure { Log.i(TAG, "$name: introduction not sent: ${it.message}") }
+        }
+        done
+    }
+
+    /**
+     * The screen (or the device suite) can seal a key now, or no longer can.
+     * An offer already waiting is joined at once.
+     */
+    fun setJoinSeal(seal: JoinSeal?, deviceName: String) {
+        joinSeal = seal
+        joinName = deviceName
+        if (seal != null && _pendingJoin.value != null) scope.launch { runCatching { join() } }
+    }
+
+    /** A `join_offer` from [machine] (§2.15): kept for the person when every rule allows it. */
+    private suspend fun onJoinOffer(machine: PairedMachine, event: DeviceEvent.JoinOffer, companion: Boolean) {
+        val offer = Introductions.decode(event.offer)
+        val machines = repository.loadBlocking().machines
+        if (offer == null || !Introductions.accept(companion, autoJoin, _unlocked.value, offer, System.currentTimeMillis(), machines)) {
+            Log.i(TAG, "${machine.machine}: an offer to join ${event.computer} was not taken")
+            return
+        }
+        // Who brought it, as THIS phone calls that computer.
+        val by = repository.loadBlocking().find(machine.deviceId)?.machine ?: machine.machine
+        _pendingJoin.value = PendingJoin(event.offer, offer, by)
+        if (joinSeal != null) {
+            join()
+        } else {
+            notice("$by offers to add this phone to ${offer.machine}. Open Rime Remote to join it.")
+        }
+    }
+
+    /**
+     * Join the waiting offer, once: pair with it as a scanned code would,
+     * with the key sealed by [joinSeal] (the prompt, on the screen), and keep
+     * the machine with who brought it. Null when nothing was joined.
+     */
+    suspend fun join(): PairedMachine? {
+        val seal = joinSeal ?: return null
+        val p = _pendingJoin.value ?: return null
+        if (!_pendingJoin.compareAndSet(p, null)) return null
+        val now = System.currentTimeMillis()
+        val machines = withContext(Dispatchers.IO) { repository.loadBlocking().machines }
+        if (!Introductions.accept(false, autoJoin, _unlocked.value, p.offer, now, machines)) return null
+        return try {
+            val paired = pairing.pair(
+                offer = p.offer,
+                deviceName = joinName,
+                // The prompt needs the main thread; the rest does not.
+                boxFor = { id -> withContext(Dispatchers.Main) { seal.box(id, p.offer.machine) } },
+                nowMs = now,
+            ).copy(joinedBy = p.by)
+            withContext(Dispatchers.IO) { repository.updateBlocking { it.with(paired) } }
+            _storeChanged.update { it + 1 }
+            notice(
+                "Joined ${paired.machine}, added by ${p.by}. It lets this phone use phone features only " +
+                    "until you run `rime remote devices allow` on ${paired.machine}.",
+            )
+            paired
+        } catch (e: Exception) {
+            notice("Could not join ${p.offer.machine}: ${e.message ?: e::class.java.simpleName}")
+            null
+        }
+    }
+
+    /** A `device_removed` from [machine] (§2.15): forget the computer it removed, when every rule allows it. */
+    private suspend fun onDeviceRemoved(machine: PairedMachine, event: DeviceEvent.DeviceRemoved, companion: Boolean) {
+        val store = withContext(Dispatchers.IO) { repository.loadBlocking() }
+        val sender = store.find(machine.deviceId) ?: machine
+        val gone = Introductions.toForget(companion, autoJoin, sender, event.key, store.machines)
+        if (gone == null) {
+            Log.i(TAG, "${machine.machine}: a removal of ${event.name} was not followed")
+            return
+        }
+        forgetMachine(gone, tellIt = false)
+        notice("${sender.machine} removed ${gone.machine}, so this phone forgot it too.")
+    }
+
+    /**
+     * Forget a machine everywhere this phone keeps it: its push subscription
+     * (told to the machine first when [tellIt] and the key is open), its
+     * companion key, the links, the stored record and the keystore key.
+     */
+    suspend fun forgetMachine(machine: PairedMachine, tellIt: Boolean): MachineStore {
+        val id = machine.deviceId
+        withContext(Dispatchers.IO) {
+            if (tellIt && identities[id] != null) runCatching { link(machine).pushUnregister() }
+            runCatching { unpairCompanion(id) }
+        }
+        forget(id)
+        PushRegistrar.forget(app, machine)
+        val store = repository.forget(machine)
+        _storeChanged.update { it + 1 }
+        return store
+    }
+
+    private fun notice(text: String) {
+        Log.i(TAG, text)
+        _notices.update { (it + text).takeLast(NOTICES_KEPT) }
+        deviceNotices.post(text)
+    }
+
     private fun scheduleReconnect(machine: PairedMachine) {
         val id = machine.deviceId
         if (reconnects[id]?.isActive == true) return
@@ -1556,6 +1768,9 @@ class LinkHub private constructor(private val app: Context) {
 
     companion object {
         private const val TAG = "RimeRemote"
+
+        /** How many notices [notices] keeps. */
+        private const val NOTICES_KEPT = 20
 
         /**
          * How long a held link waits before each reconnect attempt.

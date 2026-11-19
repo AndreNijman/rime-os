@@ -150,6 +150,20 @@ object Introductions {
     }
 
     /**
+     * The line under a computer this phone joined through another: who
+     * brought it there, and, while that computer's hello on a full key still
+     * says companion, that a person has to allow it there. Null for a
+     * pairing made with a code.
+     */
+    fun joinedLine(joinedBy: String?, helloScope: String?, unlocked: Boolean): String? = when {
+        joinedBy == null -> null
+        unlocked && helloScope == "companion" ->
+            "Added by $joinedBy. Phone features only until you allow this phone there: run " +
+                "`rime remote devices allow` on that computer."
+        else -> "Added by $joinedBy"
+    }
+
+    /**
      * What becomes of the switch when a pairing lands. Unset (an install that
      * predates it) stays unset, except on the first pairing made by hand,
      * which turns it on: the setup flow. A join never changes it.
