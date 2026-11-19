@@ -205,11 +205,15 @@ pub fn control(state: &State, device_id: &str, scope: Scope, line: &[u8]) -> Opt
     })
 }
 
-/// This computer's card, and the keys of every computer it knows.
+/// This computer's card, and the keys of every computer it knows: paired,
+/// or removed and not forgotten. A forgotten removal is not known: the
+/// person here lifted it, so a phone may introduce that computer again.
 fn card(state: &State) -> Vec<u8> {
     let known: Vec<String> = state
         .devices()
-        .map(|s| s.computers.values().map(|c| c.public_key.clone()).collect())
+        .map(|s| {
+            s.computers.values().filter(|c| c.is_active() || c.is_tombstone()).map(|c| c.public_key.clone()).collect()
+        })
         .unwrap_or_default();
     let card = Card { key: state.identity.public_key(), about: crate::computers::own_about(state) };
     json!({"reply": "computer_card", "card": card, "known": known}).to_string().into_bytes()
@@ -563,6 +567,24 @@ mod tests {
         let back = ask(&state, &phone, Scope::Full, json!({"cmd": "computer_introduce", "card": other_card(7, "laptop")}));
         assert_eq!(back["outcome"], "removed");
         assert!(state.devices().expect("store").authenticate(&rime_remote_core::b64_encode(&[7; 32])).is_none());
+        let known = |state: &State| {
+            ask(state, &phone, Scope::Full, json!({"cmd": "computer_card"}))["known"]
+                .as_array()
+                .expect("known")
+                .iter()
+                .any(|k| k == &json!(rime_remote_core::b64_encode(&[7; 32])))
+        };
+        assert!(known(&state), "a removal is known, so the phone does not offer it again");
+        // Forgotten here: no longer known, and an introduction adds it again.
+        {
+            let mut store = state.devices().expect("store");
+            store.forget_computer(&id, rime_remote_core::now_ms()).expect("forget");
+            state.save_devices(&store).expect("save");
+        }
+        assert!(!known(&state), "a forgotten removal is still in the card's known keys");
+        let forgotten = ask(&state, &phone, Scope::Full, json!({"cmd": "computer_introduce", "card": other_card(7, "laptop")}));
+        assert_eq!(forgotten["outcome"], "added", "{forgotten}");
+        assert!(known(&state));
         // A loopback address, or this computer's own key: refused.
         let mut bad = other_card(8, "x");
         bad["lan"] = json!(["127.0.0.1:7717"]);

@@ -1677,7 +1677,7 @@ Peers, companion sessions, agents and scheduled jobs never introduce.
 ```json
 {"cmd":"computer_card"}
 → {"reply":"computer_card","card":{"key":"<b64url>","name":"desk","lan":["192.168.1.20:7717"],"relay":"wss://…"?,"port":7717?},
-   "known":["<b64url key of every computer this one has a record of, removed ones included>"]}
+   "known":["<b64url key of every computer paired here, or removed and not forgotten>"]}
 {"cmd":"computer_introduce","card":{<the other computer's card, as computer_card gave it>}}
 → {"reply":"computer_introduced","outcome":"added","id":"…"}
 → {"reply":"computer_introduced","outcome":"already_paired"}
