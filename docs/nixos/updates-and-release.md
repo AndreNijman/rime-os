@@ -463,6 +463,23 @@ not the daemon's `nix.conf`.
      cache is append-only, so a path it already holds has one narHash forever; if the build host rebuilt it
      non-reproducibly instead, `closure.json` would carry a second narHash and the publish job refuses the release
      (`published already with another content`).
+   - **Ask Pages only about what it holds** (`nix/release/cache_gate.py`). The build host's Nix trusts Rime's cache
+     through a gate on `http://127.0.0.1:37515` (`RIME_CACHE_GATE`), not `https://cache.rimeos.com` directly. The gate
+     lists the root of the rime-cache repository's `main` branch once (a blobless, shallow git clone of github.com,
+     never a request to Pages), which is exactly what Pages serves. It answers a narinfo the cache does not hold with
+     404 itself, and redirects everything else (a held narinfo, a NAR) to the cache, so Nix still reads every Rime
+     narinfo from Pages and checks its signature. Why: on 2026-11-19 GitHub Pages answered HTTP 503 instead of 404
+     for paths the cache does not hold (new outputs the build must make), for up to an hour per URL, and run
+     44472232881 failed three times on it. Every one of the 55 narinfos that got a 503 was a path the cache does not
+     hold, and every path the build took from the cache was in the index. The index decides "substitute or build",
+     so it fails closed: a failed listing, or one with no `nix-cache-info` or no narinfo, stops the build.
+   - **Ask again on a busy cache, never build instead.** Every `nix build` and `nix-store --realise` in a job whose Nix
+     trusts the gate runs under `cache_gate.py retry --ensure --`. Before each try it makes sure the gate answers: Nix
+     skips a substituter it cannot reach and BUILDS its paths, even with `fallback = false`. A command that failed only
+     on a transient error of Rime's cache (HTTP 429 or 5xx, a dropped connection, and Nix's own follow-on errors after
+     one) runs again after 90 s, 180 s and 360 s (plus up to 50 %), four tries in all. A build failure, a refused
+     signature, a 404 or anything it does not recognise fails at once. `check_workflow.py` refuses a release job
+     without the gate step, with Nix pointed at Pages directly, or with a Nix command outside the wrapper.
    - **Upstream paths with a different local narHash.** A path cache.nixos.org has, but which the build host built
      itself (upstream lacked it when the build ran, and the rebuild was non-reproducible), is treated as a Rime path:
      exported from the build host and uploaded, so `closure.json`, the cache and the manifest agree. A path both caches
@@ -1180,6 +1197,7 @@ unless stated. "Nothing was changed" is only printed when the profile and the bo
 | F13 | Cache does not have a path | §8.5 | `rime: the update server does not hold all of release <release> yet (<path>). Try again later; nothing was changed.` | no build ever |
 | F14 | Narinfo differs from the manifest | §8.5 | `rime: the update server's copy of <path> does not match the signed release. Nothing was downloaded or changed.` | security event, logged |
 | F15 | NAR hash or narinfo signature wrong during download | `nix copy` | `rime: a download did not match its signature (<nix error>). The partly downloaded paths are not used; nothing was changed.` | |
+| F25 | The cache answers HTTP 429 or 5xx, or the connection fails, for every download attempt of three tries (15 s and 60 s apart) | §8.5 `nix path-info`, `nix copy` | `rime: the Rime download server is busy; nothing was changed; try again later.` | |
 | F16 | Interrupted download (power, kill) | next run | none needed: `rime update` resumes; finished paths are kept (also through a `rime gc` in between, §11.3) | |
 | F17 | Local closure differs from the manifest after download | §8.6 | `rime: the installed copy of <path> differs from the signed release. It was removed and will be downloaded again; nothing else was changed.` A second time for the same path: `… the update server keeps serving a different copy of <path>; \`rime doctor\` explains.` | security event, logged |
 | F24 | Channel document valid but more than 3 days old | step 3 | `rime: the newest release information this machine can get is <n> days old.` (a warning line; the update continues) | exit unchanged |
