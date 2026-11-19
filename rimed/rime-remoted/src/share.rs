@@ -674,11 +674,15 @@ mod tests {
             assert_ne!(v["reply"], "error", "{v}");
             if let Some(text) = wrote {
                 applied[to] += 1;
-                // The receiving Shell hands the new clipboard over.
-                push(to, &text, &mut wire);
+                // The receiving Shell hands the new clipboard over, and it
+                // goes nowhere: settling does not lean on the other end
+                // dropping its own copy.
+                let handed = push(to, &text, &mut wire);
+                assert!(matches!(handed, Local::FromAComputer), "computer {to} passed a copy on");
             }
         }
         assert_eq!(applied, [0, 1, 1]);
+        assert_eq!(steps, 2, "one push to each other computer, and none after");
     }
 
     /// Pair `x` and `y` both ways with both clipboard switches on; `y`'s id
