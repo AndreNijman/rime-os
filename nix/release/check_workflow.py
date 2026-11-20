@@ -24,7 +24,14 @@ Refuses, for every workflow given:
     PER_REF_CANCEL below (main keeps that group and is never cancelled; other refs, which only dry-run, get a group
     of their own and cancel). Anything else could let one push cancel a release running on main;
   - for nix-release.yml, a release that leaves the class 2 catalogue out: no `closure --catalogue-out`, no build of
-    .#rime-release-catalogue, or no run of checks.release-plan.
+    .#rime-release-catalogue, or no run of checks.release-plan;
+  - for nix-release.yml, a job building a release closure whose Nix does not trust Rime's cache through the cache gate
+    (nix/release/cache_gate.py, §6.3 step 1): an unconditional `cache_gate.py ensure` step before the Nix install,
+    extra-substituters "$RIME_CACHE_GATE" (a http://127.0.0.1:PORT URL in env:), fallback = false, >= 12 download
+    attempts, the $CACHE_URL reachability check; and, in every job whose Nix trusts the gate, a nix build /
+    nix-store --realise / nix-build / nix shell / nix run / nix develop not run under
+    `cache_gate.py retry --ensure --` (which makes the gate answer before each try: Nix BUILDS what a substituter it
+    cannot reach holds).
 Exit status 1 with one line per finding.
 """
 
@@ -177,10 +184,26 @@ _ATTEMPTS_RE = re.compile(r"download-attempts = (\d+)\\n")
 _PREFLIGHT_RE = re.compile(r'curl -fsS( --retry \d+)? "\$CACHE_URL/nix-cache-info"( >/dev/null)?')
 
 
+GATE_ENSURE = "python3 nix/release/cache_gate.py ensure"
+GATE_RETRY = "python3 nix/release/cache_gate.py retry --ensure -- "
+GATE_URL_RE = re.compile(r"http://127\.0\.0\.1:\d{2,5}")
+# Nix commands that may substitute (or build what they cannot substitute). nix eval / flake metadata only evaluate.
+NIX_SUBSTITUTES_RE = re.compile(r"(?:^|[\s;&|(`])(?:nix (?:build|shell|run|develop)|nix-store (?:--realise|-r)|nix-build)\b")
+
+
+def _unconditional(step):
+    return "if" not in step and not step.get("continue-on-error")
+
+
+def _starts_gate(step):
+    """The step runs `cache_gate.py ensure` as a command of its own (not `|| true`, not behind if:)."""
+    return _unconditional(step) and any(ln == GATE_ENSURE for ln in _logical_lines(step.get("run", "")))
+
+
 def _installs_rime_cache(steps, i):
-    """Step i installs Nix trusting Rime's cache at its own priority (behind cache.nixos.org, as on a machine: no
-    ?priority= override), with fallback off and at least 12 download attempts, and fails when the cache cannot be
-    reached."""
+    """Step i installs Nix trusting Rime's cache through the gate at the cache's own priority (behind cache.nixos.org,
+    as on a machine: no ?priority= override), with fallback off and at least 12 download attempts, and fails when the
+    cache cannot be reached."""
     if "if" in steps[i] or steps[i].get("continue-on-error"):
         return False
     lines = _logical_lines(steps[i].get("run", ""))
@@ -191,7 +214,7 @@ def _installs_rime_cache(steps, i):
         if not (_SUBST in ln and "extra-trusted-public-keys = %s\\n" in ln and tries and int(tries.group(1)) >= 12
                 and "fallback = false\\n" in ln
                 and ln.find("extra-substituters") < ln.find("extra-trusted-public-keys")
-                and ln.rstrip().endswith("' \"$CACHE_URL\" \"$RIME_CACHE_PUBKEY\")")):
+                and ln.rstrip().endswith("' \"$RIME_CACHE_GATE\" \"$RIME_CACHE_PUBKEY\")")):
             continue
         if any(_PREFLIGHT_RE.fullmatch(later) for later in lines[n + 1:]):
             return True
@@ -206,13 +229,43 @@ def substitutes_published(steps):
     builds = _release_builds(runs)
     if not builds:
         return []
-    ok = [i for i in range(len(steps)) if _installs_rime_cache(steps, i)]
+    gate = [i for i in range(len(steps)) if _starts_gate(steps[i])]
+    ok = [i for i in range(len(steps)) if _installs_rime_cache(steps, i) and any(g < i for g in gate)]
     if not ok or min(ok) >= builds[0]:
-        return ["builds a release closure without substituting from Rime's cache first (an unconditional step "
-                "before it: the Nix installer's --nix-extra-conf-file sets extra-substituters $CACHE_URL (no "
-                "?priority= override), extra-trusted-public-keys $RIME_CACHE_PUBKEY, fallback = false and download-attempts >= 12, "
-                "then curl -fsS \"$CACHE_URL/nix-cache-info\" checks the cache answers)"]
+        return ["builds a release closure without substituting from Rime's cache through the gate first (unconditional "
+                f"steps before it: `{GATE_ENSURE}`, then the Nix installer's --nix-extra-conf-file sets "
+                "extra-substituters $RIME_CACHE_GATE (no ?priority= override), extra-trusted-public-keys "
+                "$RIME_CACHE_PUBKEY, fallback = false and download-attempts >= 12, then curl -fsS "
+                "\"$CACHE_URL/nix-cache-info\" checks the cache answers)"]
     return []
+
+
+def _trusts_gate(steps):
+    return any("/install --daemon" in ln and "$RIME_CACHE_GATE" in ln
+               for s in steps for ln in _logical_lines(s.get("run", "")))
+
+
+def gate_wrapped(steps):
+    """In a job whose Nix trusts the gate, every Nix command that may substitute runs under `cache_gate.py retry
+    --ensure --`: the gate answers before each try (Nix skips a substituter it cannot reach and BUILDS its paths:
+    measured with Nix 2.35), and a failure on a transient error of Rime's cache (Pages answering 429 or 5xx) is run
+    again instead of failing the release."""
+    if not _trusts_gate(steps):
+        return []
+    bad = []
+    for s in steps:
+        for ln in _logical_lines(s.get("run", "")):
+            if NIX_SUBSTITUTES_RE.search(ln) and not ln.startswith(GATE_RETRY):
+                bad.append(f"runs Nix outside `{GATE_RETRY.strip()}` while trusting the gate: {ln[:120]}")
+    return bad
+
+
+def gate_url(wf, job):
+    """RIME_CACHE_GATE, where a job that trusts the gate reads it, is a loopback URL (the gate listens only there)."""
+    env = dict(wf.get("env") or {})
+    env.update(job.get("env") or {})
+    v = str(env.get("RIME_CACHE_GATE", ""))
+    return [] if GATE_URL_RE.fullmatch(v) else [f"RIME_CACHE_GATE must be http://127.0.0.1:PORT in env:, not {v!r}"]
 
 def userns_first(steps):
     """A hosted job that may build rimed from source (a release toplevel or the payload closure) lifts Ubuntu 24.04's
@@ -349,6 +402,9 @@ def check(path):
             if runs_on is not None and hosted(runs_on):
                 bad += [f"{where}: {b}" for b in userns_first(steps)]
             bad += [f"{where}: {b}" for b in substitutes_published(steps)]
+            bad += [f"{where}: {b}" for b in gate_wrapped(steps)]
+            if _trusts_gate(steps):
+                bad += [f"{where}: {b}" for b in gate_url(wf, job)]
     return bad
 
 

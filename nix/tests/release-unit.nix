@@ -26,6 +26,46 @@ pkgs.runCommand "rime-release-unit"
   (cd rel && python3 -m unittest -v test_rime_nix_release 2>&1 | grep -c ' skipped' >/dev/null) \
     && { echo "FAIL: a unit test was skipped"; exit 1; }
 
+  echo "== unit tests of the cache gate"
+  (cd rel && python3 -m unittest -v test_cache_gate 2>&1 | tail -n 60)
+  (cd rel && python3 -m unittest test_cache_gate >/dev/null 2>&1)
+  (cd rel && python3 -m unittest -v test_cache_gate 2>&1 | grep -c ' skipped' >/dev/null) \
+    && { echo "FAIL: a cache gate test was skipped"; exit 1; }
+  echo "== mutants of the cache gate: its suite must fail against each"
+  gmutant() {
+    local name="$1" old="$2" new="$3"
+    grep -F -- "$old" rel/cache_gate.py >/dev/null || { echo "FAIL: gate mutant $name: pattern not found"; exit 1; }
+    OLD="$old" NEW="$new" python3 -c '
+import os
+s = open("rel/cache_gate.py").read()
+open("gate-mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))'
+    if (cd rel && RIME_CACHE_GATE_MODULE=$PWD/../gate-mutant.py python3 -m unittest test_cache_gate >/dev/null 2>&1); then
+      echo "FAIL: gate mutant '$name' survived"; exit 1
+    fi
+    echo "killed: $name"
+  }
+  gmutant "a path the cache does not hold is sent to Pages" 'if m and m.group(1) not in self.hashes:' 'if False:'
+  gmutant "an empty index is served" 'if not hashes:' 'if False:'
+  gmutant "a listing without nix-cache-info is served" 'if "nix-cache-info" not in names:' 'if False:'
+  gmutant "the listing is asked again at once" 'sleep(INDEX_DELAY * 2 ** (n - 1))' 'pass'
+  gmutant "a 404 is retried" 'return "transient" if c == 429 or 500 <= c <= 599 else "fatal"' 'return "transient"'
+  gmutant "a dropped connection fails the release" 'if any(t in rest for t in TRANSPORT):' 'if False:'
+  gmutant "Nix's follow-on errors retried alone" \
+    'if not seen:  # follow-ons alone' 'if False:  # follow-ons alone'
+  gmutant "a builder that failed counts as a follow-on" \
+    'errors[-1][1] = "follow-on" if DEPENDENCY_FAILED_RE.match(ln) else None' 'errors[-1][1] = "follow-on"'
+  gmutant "retry without a bound" 'if n == tries:' 'if False:'
+  gmutant "the gate checked only before later tries" '        before()
+        code, lines = run(cmd)' '        if n > 1:
+            before()
+        code, lines = run(cmd)'
+  gmutant "a gate for another cache is used" 'if h and h.get("cache") == a.cache.rstrip("/") and h.get("narinfos", 0) > 0:' \
+    'if h and h.get("narinfos", 0) > 0:'
+  gmutant "retry runs Nix with no gate answering" '    if a.gate:
+        return lambda: require(a)' '    if False:
+        return lambda: require(a)'
+  gmutant "the gate listens beyond loopback" 'u.hostname not in ("127.0.0.1", "localhost")' 'False'
+
   echo "== mutants of the tool: the suite must fail against each"
   mutant() {
     local name="$1" old="$2" new="$3"
@@ -221,17 +261,17 @@ open("acc.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]))' \
   # check_workflow.substitutes_published: each job building a release closure trusts Rime's cache from its Nix install,
   # at the cache's own priority, with fallback off and a reachability check. Each mutant changes one of those.
   wmutant "the build rebuilds what Rime's cache holds" \
-    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
+    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$RIME_CACHE_GATE\" \"\$RIME_CACHE_PUBKEY\")" \
     "max-jobs = auto\n')"
   wmutant "the payload job rebuilds what Rime's cache holds" \
-    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$RIME_CACHE_GATE\" \"\$RIME_CACHE_PUBKEY\")" \
     "flakes\n')"
   wmutant "the build puts Rime's cache ahead of cache.nixos.org" \
     "max-jobs = auto\nextra-substituters = %s\n" "max-jobs = auto\nextra-substituters = %s?priority=30\n"
   wmutant "the build trusts Rime's cache only in a comment" \
-    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")" \
+    "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$RIME_CACHE_GATE\" \"\$RIME_CACHE_PUBKEY\")" \
     "max-jobs = auto\n')
-          # ./install --daemon --nix-extra-conf-file <(printf 'max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")"
+          # ./install --daemon --nix-extra-conf-file <(printf 'max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$RIME_CACHE_GATE\" \"\$RIME_CACHE_PUBKEY\")"
   wmutant "the build carries on without Rime's cache" \
     "curl -fsS --retry 5 \"\$CACHE_URL/nix-cache-info\" >/dev/null
 " \
@@ -243,6 +283,42 @@ open("acc.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]))' \
   wmutant "the build falls back to building when a download fails" \
     "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\n" \
     "max-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\n"
+  # check_workflow: the gate (nix/release/cache_gate.py) starts before Nix is installed, Nix trusts the gate (not Pages
+  # directly), and every Nix command that may substitute runs under `cache_gate.py retry --ensure --`.
+  wmutant "the build asks Pages directly (a 503 for a path it lacks fails the release)" \
+    "download-attempts = 12\n' \"\$RIME_CACHE_GATE\" \"\$RIME_CACHE_PUBKEY\")" \
+    "download-attempts = 12\n' \"\$CACHE_URL\" \"\$RIME_CACHE_PUBKEY\")"
+  wmutant "the payload job asks Pages directly" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$RIME_CACHE_GATE\"" \
+    "flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' \"\$CACHE_URL\""
+  wmutant "the build's Nix trusts a gate nobody started" \
+    "      - name: Rime's cache gate (Nix asks Pages only about what the cache holds)
+        run: python3 nix/release/cache_gate.py ensure
+" ""
+  wmutant "the payload job's Nix trusts a gate nobody started" \
+    "# Rime's cache through the gate, as in the build job (see there).
+      - name: Rime's cache gate (Nix asks Pages only about what the cache holds)
+        run: python3 nix/release/cache_gate.py ensure
+" "# Rime's cache through the gate, as in the build job (see there).
+"
+  wmutant "the gate allowed to fail" \
+    "run: python3 nix/release/cache_gate.py ensure" "run: python3 nix/release/cache_gate.py ensure || true"
+  wmutant "the gate behind an if:" \
+    "      - name: Rime's cache gate (Nix asks Pages only about what the cache holds)
+        run:" "      - name: Rime's cache gate (Nix asks Pages only about what the cache holds)
+        if: runner.debug == '1'
+        run:"
+  wmutant "a toplevel build outside the retry wrapper" \
+    'python3 nix/release/cache_gate.py retry --ensure -- nix build "''${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels"' \
+    'nix build "''${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels"'
+  wmutant "the dry run outside the retry wrapper" \
+    'python3 nix/release/cache_gate.py retry --ensure -- nix build --dry-run' 'nix build --dry-run'
+  wmutant "the payload toplevel realised outside the retry wrapper" \
+    'python3 nix/release/cache_gate.py retry --ensure -- nix-store --realise "$top"' 'nix-store --realise "$top"'
+  wmutant "a retry that does not restart the gate" \
+    'retry --ensure -- nix build --inputs-from .' 'retry -- nix build --inputs-from .'
+  wmutant "the gate on a public address" \
+    "RIME_CACHE_GATE: http://127.0.0.1:37515" "RIME_CACHE_GATE: https://cache.rimeos.com"
   wmutant "the payload job off main" \
     "if: always() && github.ref == 'refs/heads/main' && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success'" \
     "if: always() && needs.changes.result == 'success' && needs.changes.outputs.action == 'release' && needs.publish.result == 'success'"
@@ -294,6 +370,15 @@ SH
 echo "git $*" >> "$LOG"
 case "$1" in worktree) mkdir -p "$RUNNER_TEMP/before" ;; esac
 SH
+  # the step builds under nix/release/cache_gate.py retry (stubbed: logs, then runs the command after --)
+  mkdir -p nix/release
+  cat > nix/release/cache_gate.py <<'PY'
+import os, sys
+a = sys.argv[1:]
+i = a.index("--")
+open(os.environ["LOG"], "a").write("cache_gate " + " ".join(a[:i]) + "\n")
+os.execvp(a[i + 1], a[i + 1:])
+PY
   # the step evaluates through nix/ci/eval-each.sh (one evaluator per attribute), relative to the checkout
   mkdir -p nix/ci
   cat > nix/ci/eval-each.sh <<'SH'
@@ -314,6 +399,7 @@ SH
   if grep -E "^(nix (build|flake)|eval-each)" dry-same.log; then echo "FAIL: toplevels unchanged, but it built or checked"; exit 1; fi
   dryrun moved $b /nix/store/a.drv /nix/store/b.drv
   grep -F -- "nix build --dry-run" dry-moved.log >/dev/null
+  grep -Fx -- "cache_gate retry --ensure" dry-moved.log >/dev/null
   grep -F -- "eval-each . --override-input rime-shell" dry-moved.log >/dev/null
   grep -F "Dry run, nothing built or published" sum-moved.md >/dev/null
   dryrun new-branch 0000000000000000000000000000000000000000 /nix/store/a.drv /nix/store/a.drv
