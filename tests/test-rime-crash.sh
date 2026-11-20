@@ -12,8 +12,9 @@
 #       did exactly that: 636,000 `C2H content:` lines and nothing else);
 #    2. a driver blamed that the backtrace does not name, or none named when
 #       it does;
-#    3. a record from an EARLIER boot announced as news, or the same crash
-#       announced at every login;
+#    3. a record from an EARLIER boot announced as this restart, the same
+#       crash announced at every login, or a crash never announced (two before
+#       a login, a failed notification, a run cut off, a full disk);
 #    4. the kernel arguments drifting between bootc (kargs.d) and NixOS
 #       (crash.nix reads the same file), and the units drifting in shape.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,7 +139,11 @@ if [[ $rc -eq 0 && ! -e "$WORK/state/last" ]]; then ok "no archive: exit 0, no s
 mkdir -p "$WORK/pstore"
 mkrecord old/001 "$SYSRQ" $((BOOT - 86400)) $((BOOT - 86400))
 record
-if [[ ! -e "$WORK/state/last" ]]; then ok "a record from an earlier boot is history, not news"; else bad "old record announced"; fi
+# No run ever finished here, so a record from an earlier boot is written down
+# (a first crash whose run was cut off must not be lost), but without a boot
+# id: nothing claims this boot restarted from it.
+expect_field id old/001 "a record no finished run wrote down is written down"
+expect_field boot_id "" "without a boot id (it is not this boot's)"
 
 sec "a flood, then a sysrq panic"
 # One dump, two directories: EFI writes are slow, so the parts of one panic
@@ -232,45 +237,218 @@ len=$(field reason | wc -c)
 (( len <= 301 )) && ok "a long reason is cut to a sentence ($len)" || bad "reason length" "$len"
 if pipe_has -P '\x1b' "$WORK/state/last"; then bad "control characters kept"; else ok "control characters dropped"; fi
 
-sec "the notice: once per crash, only in the boot that collected it"
+sec "a dump split over directories: the backtrace is read with the panic"
+# EFI writes are slow: the panic line closes Part2, written a second after
+# Part1, which holds the end of the log (the panic's own backtrace).
+newboot
+T=$((NOW - 70))
+mkrecord "$T/001" "Panic#1 Part1
+<4>[  90.100100] [  T433] CPU: 0 UID: 0 PID: 433 Comm: irq/45 Tainted: G      D    OE      7.2.11-cachyos1-rime1 #1
+<4>[  90.100200] [  T433] Call Trace:
+<4>[  90.100300] [  T433]  dump_stack_lvl+0x5d/0x80
+<4>[  90.100400] [  T433]  vpanic+0x113/0x2c0
+<4>[  90.100500] [  T433]  oops_end.cold+0x2d/0x2d
+<4>[  90.100600] [  T433]  demo_irq+0x22/0x80 [demo_wifi]
+<0>[  90.100700] [  T433] Kernel Offset: disabled" $((NOW - 30)) "$T" 1
+mkrecord "$((T + 1))/001" "Panic#1 Part3
+$(flood 5)
+Panic#1 Part2
+$(flood 5)
+<0>[  90.100000] [  T433] Kernel panic - not syncing: Fatal exception in interrupt" $((NOW - 29)) "$((T + 1))" 2
+record
+expect_field reason "Kernel panic - not syncing: Fatal exception in interrupt" "the panic line, from the later directory"
+expect_field module demo_wifi "the driver its backtrace names, from the neighbouring directory"
+expect_field id "$((T + 1))/001" "the id is the directory holding the panic line"
+expect_field time "$(date -u -d "@$T" +%Y-%m-%dT%H:%M:%SZ)" "the time is the dump's first part"
+
+sec "a run cut off before it wrote anything is recovered at the next boot"
+# The previous boot (from BOOT-600) collected a panic and its run never
+# finished; the last finished run was the boot before (BOOT-1200).
+newboot
+printf '%s\n' $((BOOT - 1200)) > "$WORK/state/checked"
+mkrecord "$((BOOT - 1300))/001" "Panic#1 Part1
+<0>[ 1.0] Kernel panic - not syncing: older than the last finished run" $((BOOT - 1300)) $((BOOT - 1300))
+mkrecord "$((BOOT - 560))/001" "Panic#1 Part1
+<0>[ 1.0] Kernel panic - not syncing: collected by a run that was cut off" $((BOOT - 500)) $((BOOT - 560))
+mkrecord "$((NOW - 15))/001" "$OOPS" $((NOW - 10)) $((NOW - 15))
+record
+hist_has() { [[ -r "$WORK/state/history" ]] && awk -F '\t' -v id="$1" '$1 == id { n++ } END { exit !(n == 1) }' "$WORK/state/history"; }
+hist_field() { awk -F '\t' -v id="$1" -v c="$2" '$1 == id { print $c }' "$WORK/state/history"; }
+if hist_has "$((BOOT - 560))/001"; then ok "the cut-off run's crash is written down"; else bad "not recovered" "$(cat "$WORK/state/history" 2>/dev/null)"; fi
+if [[ -z "$(hist_field "$((BOOT - 560))/001" 4)" ]]; then ok "with no boot id: nothing says this boot restarted from it"; else bad "recovered boot id" "$(hist_field "$((BOOT - 560))/001" 4)"; fi
+if hist_has "$((BOOT - 1300))/001"; then bad "a record older than the last finished run was announced"; else ok "a record older than the last finished run stays history"; fi
+expect_field id "$((NOW - 15))/001" "this boot's crash is the newest summary"
+expect_field boot_id boot-a "and carries this boot"
+if [[ "$(cat "$WORK/state/checked")" == "$BOOT" ]]; then ok "the finished run moves the window to this boot"; else bad "checked" "$(cat "$WORK/state/checked")"; fi
+record
+if hist_has "$((BOOT - 560))/001" && hist_has "$((NOW - 15))/001"; then ok "a second run writes nothing twice"; else bad "history repeats" "$(cat "$WORK/state/history")"; fi
+
+# A separate archive and state for the cases below, so earlier records do not
+# answer for them.
+record_in() {
+    RIME_PSTORE_ARCHIVE="$1" RIME_CRASH_STATE="$2" RIME_BOOT_TIME="$BOOT" RIME_BOOT_ID=boot-a "$RECORD" 2>/dev/null
+}
+in_hist() { awk -F '\t' -v id="$2" '$1 == id { n++ } END { exit !(n == 1) }' "$1/history" 2>/dev/null; }
+mkpart() { # archive dir body mtime
+    mkdir -p "$1/$2"
+    printf '%s\n' "$3" > "$1/$2/dmesg.txt"
+    : > "$1/$2/dmesg-efi_pstore-$(( (${2%%/*} * 100 + 1) * 1000 + 1 ))"
+    touch -d "@$4" "$1/$2/dmesg.txt" "$1/$2"/dmesg-efi_pstore-*
+}
+
+sec "the first crash on a machine, its run cut off, is not lost"
+A="$WORK/first/pstore" S="$WORK/first/state"
+mkpart "$A" "$((BOOT - 40))/001" "Panic#1 Part1
+<0>[ 1.0] Kernel panic - not syncing: the first one" $((BOOT - 30))
+mkdir -p "$S"
+record_in "$A" "$S"
+if in_hist "$S" "$((BOOT - 40))/001"; then ok "no finished run yet: the earlier boot's record is written down"; else bad "first crash lost" "$(cat "$S/history" 2>/dev/null)"; fi
+
+sec "a window holding a recorded panic still finds the oops beside it"
+A="$WORK/beside/pstore" S="$WORK/beside/state"
+mkpart "$A" "$((BOOT - 1100))/001" "Panic#1 Part1
+<0>[ 1.0] Kernel panic - not syncing: recorded by its own boot" $((BOOT - 1100))
+mkpart "$A" "$((BOOT - 520))/001" "$OOPS" $((BOOT - 500))
+mkdir -p "$S"
+printf '%s\n' $((BOOT - 1200)) > "$S/checked"
+printf '%s\t2026-01-01T00:00:00Z\tpanic\tboot-0\tKernel panic - not syncing: recorded by its own boot\t\t/x\t%s\n' \
+    "$((BOOT - 1100))/001" "$((BOOT - 1100))/001" > "$S/history"
+record_in "$A" "$S"
+if in_hist "$S" "$((BOOT - 520))/001"; then ok "the oops of the cut-off boot is written down"; else bad "oops behind a recorded panic lost" "$(cat "$S/history")"; fi
+if in_hist "$S" "$((BOOT - 1100))/001"; then ok "and the panic is still one line"; else bad "panic line repeated" "$(cat "$S/history")"; fi
+
+sec "two cut-off boots in a row: both crashes are written down"
+A="$WORK/two/pstore" S="$WORK/two/state"
+mkpart "$A" "$((BOOT - 900))/001" "Panic#1 Part1
+<0>[ 1.0] Kernel panic - not syncing: the first cut-off boot" $((BOOT - 890))
+mkpart "$A" "$((BOOT - 400))/001" "Panic#1 Part1
+<0>[ 1.0] Kernel panic - not syncing: the second cut-off boot" $((BOOT - 390))
+mkdir -p "$S"
+printf '%s\n' $((BOOT - 1200)) > "$S/checked"
+record_in "$A" "$S"
+if in_hist "$S" "$((BOOT - 900))/001" && in_hist "$S" "$((BOOT - 400))/001"; then ok "both"; else bad "one of two lost" "$(cat "$S/history" 2>/dev/null)"; fi
+
+sec "the history keeps the last 50"
+newboot
+for i in $(seq 1 60); do printf 'filler/%d\t2026-01-01T00:00:00Z\tpanic\t\tx\t\t/x\n' "$i"; done > "$WORK/state/history"
+mkrecord "$((NOW - 12))/001" "$SYSRQ" $((NOW - 9)) $((NOW - 12))
+record
+if [[ "$(wc -l < "$WORK/state/history")" -eq 50 ]] && tail -n 1 "$WORK/state/history" | pipe_has -F "$((NOW - 12))/001"; then
+    ok "50 lines, the new crash last"
+else
+    bad "history cap" "$(wc -l < "$WORK/state/history") lines"
+fi
+
+sec "a full disk keeps the previous summary"
+# A tmpfs of three pages in a private mount namespace: the old summary and
+# history take two, a filler the third. The run must fail and change nothing.
+if unshare -Urm true 2>/dev/null; then
+    mkdir -p "$WORK/full"
+    newboot
+    mkrecord "$((NOW - 11))/001" "$SYSRQ" $((NOW - 8)) $((NOW - 11))
+    out="$(unshare -Urm bash -c '
+        mount -t tmpfs -o size=12k tmpfs "$1" || { echo "mount failed"; exit 0; }
+        printf "id=prev\nkind=panic\nreason=the previous crash\n" > "$1/last"
+        printf "prev\t2026-01-01T00:00:00Z\tpanic\t\tthe previous crash\t\t/x\n" > "$1/history"
+        dd if=/dev/zero of="$1/fill" bs=1k count=64 2>/dev/null
+        RIME_PSTORE_ARCHIVE="$2" RIME_CRASH_STATE="$1" RIME_BOOT_TIME="$3" RIME_BOOT_ID=boot-a "$4" 2>/dev/null
+        echo "rc=$?"
+        cat "$1/last"
+        echo "--"
+        ls -A "$1"
+    ' _ "$WORK/full" "$WORK/pstore" "$BOOT" "$RECORD")"
+    if [[ "$out" == *"mount failed"* ]]; then
+        bad "tmpfs mount in a user namespace failed"
+    else
+        if [[ "$out" != *"rc=0"* ]]; then ok "the run fails"; else bad "a full disk reported success"; fi
+        if [[ "$out" == *"id=prev"$'\n'"kind=panic"$'\n'"reason=the previous crash"* ]]; then
+            ok "the previous summary is untouched"
+        else
+            bad "summary replaced on a full disk" "$out"
+        fi
+        if [[ "${out#*--}" == *last.* || "${out#*--}" == *history.* ]]; then bad "a temporary file was left" "${out#*--}"; else ok "no temporary file left"; fi
+        if [[ "${out#*--}" == *checked* ]]; then bad "the window moved past a failed run"; else ok "the window stays, so the next boot tries again"; fi
+    fi
+elif [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    bad "unshare -Urm refused (CI must allow user namespaces for this test)"
+else
+    printf 'SKIP  a full disk: no user namespaces here\n'
+fi
+
+sec "the notice: every crash once, after it got through"
 cat > "$WORK/bin/notify-send" <<EOF
 #!/usr/bin/env bash
+[[ -e "$WORK/notify-fails" ]] && exit 1
 printf '%s\n' "\$*" >> "$WORK/notified"
 EOF
 chmod +x "$WORK/bin/notify-send"
 printf 'boot-a\n' > "$WORK/boot_id"
+HIST="$WORK/history"
 count() { if [[ -f "$WORK/notified" ]]; then wc -l < "$WORK/notified"; else echo 0; fi; }
 notice() {
-    HOME="$WORK/home" XDG_STATE_HOME="$WORK/home/.state" RIME_CRASH_LAST="$WORK/last" \
+    HOME="$WORK/home" XDG_STATE_HOME="$WORK/home/.state" RIME_CRASH_HISTORY="$HIST" \
         RIME_BOOT_ID_FILE="$WORK/boot_id" PATH="$WORK/bin:$PATH" "$NOTICE" >/dev/null 2>&1
+}
+# hist ID KIND BOOT REASON [MODULE] [AGE-SECONDS]
+hist() {
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$(date -u -d "@$((NOW - ${6:-60}))" +%Y-%m-%dT%H:%M:%SZ)" \
+        "$2" "$3" "$4" "${5:-}" "/var/lib/systemd/pstore/$1/dmesg.txt" >> "$HIST"
 }
 expect_count() {
     local want=$1 name=$2 got
     got=$(count)
     if [[ "$got" -eq "$want" ]]; then ok "$name"; else bad "$name" "notified $got times, wanted $want"; fi
 }
-notice; expect_count 0 "no summary: no notification"
-printf 'id=1\nkind=panic\nreason=Kernel panic - not syncing: softlockup: hung tasks\nmodule=rtl8xxxu\nboot_id=boot-a\n' > "$WORK/last"
+last_says() { tail -n 1 "$WORK/notified" 2>/dev/null | pipe_has -F -- "$1"; }
+notice; expect_count 0 "no history: no notification"
+hist 1 panic boot-a "Kernel panic - not syncing: softlockup: hung tasks" rtl8xxxu
 notice; expect_count 1 "a crash collected in this boot is announced"
-if pipe_has -F 'Rime restarted after a system crash' "$WORK/notified" \
-    && pipe_has -F 'The backtrace names the rtl8xxxu driver.' "$WORK/notified" \
-    && pipe_has -F 'Details: rime crash' "$WORK/notified"; then
+if last_says 'Rime restarted after a system crash' && last_says 'The backtrace names the rtl8xxxu driver.' \
+    && last_says 'Details: rime crash'; then
     ok "it says what happened, names the driver as the backtrace's, and points at rime crash"
 else
     bad "notice text" "$(cat "$WORK/notified")"
 fi
-if pipe_has -F -- '--urgency=normal' "$WORK/notified"; then ok "normal urgency (the crash is over)"; else bad "urgency"; fi
+if last_says '--urgency=normal'; then ok "normal urgency (the crash is over)"; else bad "urgency"; fi
 notice; expect_count 1 "the same crash is not announced again at the next login"
+
 printf 'boot-b\n' > "$WORK/boot_id"
-printf 'id=2\nkind=panic\nreason=Kernel panic - not syncing: x\nboot_id=boot-a\n' > "$WORK/last"
-notice; expect_count 1 "a crash collected in an earlier boot is not announced"
-printf 'id=3\nkind=oops\nreason=BUG: y\nboot_id=boot-b\n' > "$WORK/last"
-notice; expect_count 2 "a new crash in this boot is announced"
-if tail -n 1 "$WORK/notified" | pipe_has -F 'The system hit a kernel error before this restart'; then
-    ok "an oops is not called a crash restart"
+hist 2 panic boot-a "Kernel panic - not syncing: x"
+notice; expect_count 2 "a crash nobody was told about in its own boot is announced later"
+if last_says 'Rime crashed and restarted earlier'; then ok "as earlier, not as this restart"; else bad "earlier title" "$(tail -n 1 "$WORK/notified")"; fi
+hist 3 oops boot-b "BUG: y"
+notice; expect_count 3 "a new crash in this boot is announced"
+if last_says 'The system hit a kernel error before this restart'; then ok "an oops is not called a crash restart"; else bad "oops title" "$(tail -n 1 "$WORK/notified")"; fi
+
+printf 'boot-c\n' > "$WORK/boot_id"
+hist 4 panic boot-c "Kernel panic - not syncing: this boot's"
+hist 5 panic boot-b "Kernel panic - not syncing: an earlier one"
+notice; expect_count 4 "two crashes before a login: one notice"
+if last_says "this boot's" && last_says 'Rime restarted after a system crash' \
+    && last_says 'There was 1 more kernel crash or error since the last notice.'; then
+    ok "it tells this boot's crash and counts the other"
 else
-    bad "oops title" "$(tail -n 1 "$WORK/notified")"
+    bad "two crashes" "$(tail -n 1 "$WORK/notified")"
 fi
+notice; expect_count 4 "and neither again"
+
+hist 6 panic "" "Kernel panic - not syncing: recovered" demo_wifi
+notice; expect_count 5 "a recovered crash (no boot id) is announced"
+if last_says 'The backtrace names the demo_wifi driver.' && last_says 'earlier'; then
+    ok "its empty boot id does not shift the other fields"
+else
+    bad "empty field" "$(tail -n 1 "$WORK/notified")"
+fi
+hist 7 panic boot-a "Kernel panic - not syncing: long ago" "" $((8 * 86400))
+notice; expect_count 5 "nothing older than a week is announced"
+
+hist 8 panic boot-c "Kernel panic - not syncing: no notification server yet"
+: > "$WORK/notify-fails"
+notice; rc=$?
+rm -f "$WORK/notify-fails"
+if [[ $rc -ne 0 ]]; then ok "a notice that did not get through fails the unit (it retries)"; else bad "notify-send failure exit 0"; fi
+notice; expect_count 6 "and is announced on the next try"
+if last_says 'no notification server yet'; then ok "the same crash, not lost"; else bad "retry text" "$(tail -n 1 "$WORK/notified")"; fi
 
 sec "one set of kernel arguments for both systems"
 line='kargs = ["panic=30", "drm.panic_screen=user", "efi_pstore.pstore_disable=0"]'
@@ -292,11 +470,16 @@ fi
 sec "unit shapes"
 pipe_has -x 'After=systemd-pstore.service local-fs.target' "$REC_UNIT" && ok "record runs after systemd-pstore" || bad "record After="
 pipe_has -x 'ConditionDirectoryNotEmpty=/var/lib/systemd/pstore' "$REC_UNIT" && ok "record skipped when the archive is empty" || bad "record condition"
+pipe_has -x 'Before=systemd-user-sessions.service' "$REC_UNIT" && ok "record done before any login (the notice never reads a stale summary)" || bad "record Before="
+pipe_has -F 'before = [ "systemd-user-sessions.service" ];' "$NIXMOD" && ok "the same order on NixOS" || bad "crash.nix before"
 pipe_has -x 'PrivateNetwork=yes' "$REC_UNIT" && ok "record has no network (never uploads)" || bad "record network"
 pipe_has -x 'WantedBy=multi-user.target' "$REC_UNIT" && ok "record runs at every boot" || bad "record WantedBy"
 pipe_has -x 'WantedBy=timers.target' "$TIMER" && ok "notice timer in the user session" || bad "timer WantedBy"
 if pipe_has -E '^(User|DynamicUser)=' "$SVC"; then bad "notice drifted into a system unit"; else ok "notice is a user unit"; fi
 pipe_has -x 'ExecStart=/usr/libexec/rime-crash-notice' "$SVC" && ok "notice runs the shipped script" || bad "notice ExecStart"
+pipe_has -x 'ConditionPathExists=/var/lib/rime/crash/history' "$SVC" && ok "notice reads the history" || bad "notice condition"
+pipe_has -x 'Restart=on-failure' "$SVC" && pipe_has -F 'Restart = "on-failure";' "$NIXMOD" \
+    && ok "a notice that did not get through is tried again (both systems)" || bad "notice Restart="
 
 if command -v shellcheck >/dev/null 2>&1; then
     if shellcheck -S warning "$RECORD" "$NOTICE" "$0" >/dev/null; then ok "shellcheck clean"; else bad "shellcheck"; fi

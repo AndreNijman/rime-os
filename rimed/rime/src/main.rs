@@ -377,13 +377,15 @@ enum Cmd {
     },
     /// Show the booted image and its changelog labels.
     Changelog,
-    /// Why the kernel died last time: when, the kernel's own reason, and the
-    /// driver its backtrace names (docs/kernel-crash.md).
+    /// The last kernel crash or error recorded: when, the kernel's own reason,
+    /// and the driver its backtrace names (docs/kernel-crash.md).
     ///
     /// After a kernel panic Rime restarts by itself 30 seconds later, and the
-    /// end of the kernel log is kept in EFI variables through the restart.
-    /// This prints the summary written at the next boot and where the full
-    /// record is. Read-only, needs no root, and nothing is sent anywhere.
+    /// end of the kernel log is kept in EFI variables through the restart. An
+    /// oops that did not stop the machine is kept the same way when the
+    /// firmware stores it, and is said to be one. This prints the summary
+    /// written at the next boot and where the full record is. Read-only, needs
+    /// no root, and nothing is sent anywhere.
     Crash {
         /// Emit machine-readable JSON instead of text.
         #[arg(long)]

@@ -1,66 +1,105 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  rime-crash-notice — after a kernel crash restarted the machine, say so once.
+#  rime-crash-notice — after a kernel crash, say so once.
 #
 #  A USER unit (notify-send needs the session bus). It does no work of its own:
-#  rime-crash-record (root, at boot) reads the crash record and writes
-#  /var/lib/rime/crash/last; this only reads that file.
+#  rime-crash-record (root, at boot, before any login) reads the crash record
+#  and adds a line per crash to /var/lib/rime/crash/history; this only reads
+#  that file.
 #
 #  ── What it will not do ─────────────────────────────────────────────────────
 #
-#  * It never repeats itself. The record's id is kept and a notification goes
-#    out once per crash per person, not at every login.
-#  * It never announces a crash from an earlier boot. The record carries the
-#    boot it was collected in; in any later boot `rime crash` still shows it,
-#    but a notification that the machine "restarted after a crash" would be
-#    false by then.
+#  * It never repeats itself. The ids it has announced are kept, and a
+#    notification goes out once per crash per person, not at every login.
+#  * It never drops one. Every crash not yet announced is counted, so two
+#    crashes before the next login are one notice that says two. An id is
+#    marked announced only after notify-send took the notice; a failure exits
+#    non-zero and the unit tries again a few times, then at the next login.
+#  * It never says "restarted after a crash" about an earlier boot. That title
+#    is for a crash collected in THIS boot; an older one (a person who did not
+#    log in for a while) is "earlier". Nothing older than a week is announced:
+#    `rime crash` still shows it.
 #  * It never sends the record anywhere.
+#
+#  Environment (tests): RIME_CRASH_HISTORY, RIME_BOOT_ID_FILE, RIME_NOW.
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-LAST="${RIME_CRASH_LAST:-/var/lib/rime/crash/last}"
+HISTORY="${RIME_CRASH_HISTORY:-/var/lib/rime/crash/history}"
 SEEN_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/rime"
 SEEN="$SEEN_DIR/crash-notice.seen"
 BOOT_ID_FILE="${RIME_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+MAX_AGE=$(( 7 * 86400 ))
+SEEN_KEEP=200
 
 log() { printf 'rime-crash-notice: %s\n' "$*" >&2; }
 
-[[ -r "$LAST" ]] || exit 0
+[[ -r "$HISTORY" ]] || exit 0
+now_boot="$(cat "$BOOT_ID_FILE" 2>/dev/null || true)"
+now="${RIME_NOW:-$(date +%s)}"
 
-id="" kind="" reason="" module="" boot=""
-while IFS='=' read -r k v; do
-    case "$k" in
-        id)      id="$v" ;;
-        kind)    kind="$v" ;;
-        reason)  reason="$v" ;;
-        module)  module="$v" ;;
-        boot_id) boot="$v" ;;
-    esac
-done < "$LAST"
+seen() { [[ -r "$SEEN" ]] && grep -Fxq -- "$1" "$SEEN"; }
 
-[[ -n "$id" ]] || exit 0
-now="$(cat "$BOOT_ID_FILE" 2>/dev/null || true)"
-[[ -n "$boot" && "$boot" == "$now" ]] || exit 0
-[[ -f "$SEEN" && "$(cat "$SEEN")" == "$id" ]] && exit 0
+# history: id, time, kind, boot_id, reason, module, record (tab-separated,
+# oldest first). The newest unannounced one is told; one collected in this
+# boot wins over an older one.
+ids=() main="" main_kind="" main_reason="" main_boot="" main_module=""
+# Read as unit separators: a tab is whitespace to `read`, so two tabs around an
+# empty field (a recovered record has no boot id) would merge.
+US=$'\037'
+while IFS="$US" read -r id when kind boot reason module _record; do
+    [[ -n "$id" ]] || continue
+    seen "$id" && continue
+    t="$(date -d "$when" +%s 2>/dev/null)" || continue
+    (( now - t <= MAX_AGE )) || continue
+    ids+=("$id")
+    if [[ -z "$main" || "$main_boot" != "$now_boot" || "$boot" == "$now_boot" ]]; then
+        main="$id" main_kind="$kind" main_reason="$reason" main_boot="$boot" main_module="$module"
+    fi
+done < <(tr '\t' '\037' < "$HISTORY")
 
-if [[ "$kind" == panic ]]; then
-    title="Rime restarted after a system crash"
+(( ${#ids[@]} > 0 )) || exit 0
+kind="$main_kind" reason="$main_reason" boot="$main_boot" module="$main_module"
+
+if [[ -n "$boot" && "$boot" == "$now_boot" ]]; then
+    if [[ "$kind" == panic ]]; then
+        title="Rime restarted after a system crash"
+    else
+        title="The system hit a kernel error before this restart"
+    fi
+elif [[ "$kind" == panic ]]; then
+    title="Rime crashed and restarted earlier"
 else
-    title="The system hit a kernel error before this restart"
+    title="The system hit a kernel error earlier"
 fi
 body="${reason:-The kernel stopped.}"
 [[ -n "$module" ]] && body="$body The backtrace names the $module driver."
-body="$body Details: rime crash"
-
-mkdir -p "$SEEN_DIR"
-printf '%s\n' "$id" > "$SEEN"
-
-if command -v notify-send >/dev/null 2>&1; then
-    # Normal urgency: the crash is over and the machine is running again.
-    notify-send --app-name='Rime OS' --urgency=normal --icon=dialog-warning \
-        "$title" "$body" || log "notify-send failed"
-else
-    log "no notify-send; printing instead"
+others=$(( ${#ids[@]} - 1 ))
+if (( others == 1 )); then
+    body="$body There was 1 more kernel crash or error since the last notice."
+elif (( others > 1 )); then
+    body="$body There were $others more kernel crashes or errors since the last notice."
 fi
+body="$body Details: rime crash"
 printf '%s. %s\n' "$title" "$body"
-exit 0
+
+# Normal urgency: the crash is over and the machine is running again.
+if ! command -v notify-send >/dev/null 2>&1; then
+    log "no notify-send; will try again"
+    exit 1
+fi
+if ! notify-send --app-name='Rime OS' --urgency=normal --icon=dialog-warning "$title" "$body"; then
+    log "notify-send failed; will try again"
+    exit 1
+fi
+
+# Announced: keep the ids (the newest few hundred), written whole or not at all.
+mkdir -p "$SEEN_DIR" || { log "cannot create $SEEN_DIR"; exit 1; }
+tmp="$(mktemp "$SEEN.XXXXXX")" || { log "cannot write in $SEEN_DIR"; exit 1; }
+if { { [[ -r "$SEEN" ]] && cat -- "$SEEN"; } ; printf '%s\n' "${ids[@]}"; } | tail -n "$SEEN_KEEP" > "$tmp" \
+    && mv -f -- "$tmp" "$SEEN"; then
+    exit 0
+fi
+rm -f -- "$tmp"
+log "could not write $SEEN; the notice may repeat"
+exit 1

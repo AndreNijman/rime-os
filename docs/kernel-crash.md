@@ -45,14 +45,28 @@ reads the same file (`rime.crash.enable`, on by default).
 Two small pieces read the record:
 
 - `rime-crash-record.service` is a root oneshot that runs at every start, after
-  systemd-pstore. It writes `/var/lib/rime/crash/last` with these fields: the
-  time, the kernel release, the kernel's own panic, `BUG:` or `Oops:` line, and
-  the driver named by the backtrace nearest the panic. It only reads records
-  collected during the current boot, so an old record in the archive is not
-  reported as new.
+  systemd-pstore and before anyone can log in. It writes
+  `/var/lib/rime/crash/last` with these fields: the time, the kernel release,
+  the kernel's own panic, `BUG:` or `Oops:` line, and the driver named by the
+  backtrace nearest the panic. A slow EFI write can spread one crash over a few
+  directories of the archive (the panic line in one, its backtrace in the
+  next, `<seconds>/<same count>`); they are read together, and the summary's
+  record path is the directory holding the panic line. It also adds one line
+  per crash to `/var/lib/rime/crash/history` (the last 50). It reads records
+  collected during the current boot, plus every one collected since the last
+  run that finished (`/var/lib/rime/crash/checked`) and not written down yet:
+  a run cut off by a power loss or a timeout is not lost, not even the first
+  crash on a machine. Those carry no boot id, so nothing calls them this
+  restart. Each file is written beside
+  its target, flushed, read back and renamed: a full disk leaves the old file
+  and fails the run, and the next boot tries again.
 - `rime-crash-notice.timer` is a user unit. One minute into the session it
-  sends one notification per crash. It only does this in the boot that
-  collected the crash, never at every login.
+  sends one notification for every crash in the history it has not announced
+  yet (from the last week): the newest is described, the others are counted.
+  "Rime restarted after a system crash" is said only in the boot that
+  collected the crash. A crash is marked announced only once the notification
+  went through; otherwise the unit tries again, four more times a minute
+  apart, then at the next login.
 
 There is no daemon. Both pieces run once and exit.
 

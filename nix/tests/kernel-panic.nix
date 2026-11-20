@@ -18,7 +18,7 @@
 #      triggered crash" (and the flood's tail before it);
 #   5. (e) the EFI variables are gone (systemd-pstore Unlink=yes): none of efi-pstore's dump-type* variables is left
 #      in efivarfs, and /sys/fs/pstore is empty;
-#   6. (d) /var/lib/rime/crash/last and `rime crash` name the panic.
+#   6. (d) /var/lib/rime/crash/last and `rime crash` name the panic; one history line; ordered before logins.
 #
 # The node sets `panic=0` between the framework's `panic=1` and Rime's own `panic=30`, so a machine without Rime's
 # argument really never restarts (the no-panic mutant), instead of passing on the framework's.
@@ -215,9 +215,21 @@ let
             assert "Last kernel crash (the machine restarted)" in out, out
             assert "sysrq triggered crash" in out, out
             assert machine.succeed("rime crash --json").find('"kind":"panic"') >= 0
+            # One history line for the crash (what the notice drains), this boot's window closed, and the
+            # summary written before anyone could log in.
+            crash_id = next(l[3:] for l in last.splitlines() if l.startswith("id="))
+            history = machine.succeed("cat /var/lib/rime/crash/history")
+            print(history)
+            rows = [r.split("\t") for r in history.splitlines()]
+            assert len(rows) == 1 and rows[0][0] == crash_id and rows[0][3] == boot_id, history
+            btime = machine.succeed("awk '$1 == \"btime\" { print $2 }' /proc/stat").strip()
+            assert machine.succeed("cat /var/lib/rime/crash/checked").strip() == btime
+            before = machine.succeed("systemctl show -p Before --value rime-crash-record.service")
+            assert "systemd-user-sessions.service" in before.split(), before
             # A second run in the same boot keeps the same summary (one notice per crash).
             machine.succeed("systemctl restart rime-crash-record.service")
             assert machine.succeed("cat /var/lib/rime/crash/last") == last
+            assert machine.succeed("cat /var/lib/rime/crash/history") == history
 
         with subtest("(e) the EFI variables were removed after collection"):
             # efivarfs read the firmware's variables before systemd-pstore deleted them and keeps that listing
@@ -237,8 +249,9 @@ let
             assert left == "0", left
             machine.succeed("test -z \"$(ls -A /sys/fs/pstore)\"")
             assert machine.succeed("find /var/lib/systemd/pstore -mindepth 1 -maxdepth 1 | sort") == dirs_before
-            # The summary still names the crash, and its boot is not this one: no second notice.
+            # The summary still names the crash, and its boot is not this one; the history has no second line.
             assert machine.succeed("cat /var/lib/rime/crash/last") == last
+            assert machine.succeed("cat /var/lib/rime/crash/history") == history
       '';
     };
   # Without a VM: the released system (nixosConfigurations.rime, what the bridge payload and the Nix channel carry)

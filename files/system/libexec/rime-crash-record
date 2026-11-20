@@ -5,10 +5,11 @@
 #  At a kernel panic the kernel keeps the end of its log in a few small EFI
 #  variables (efi_pstore, turned on by files/system/kargs.d/30-rime-crash.toml).
 #  At the next boot systemd-pstore moves them into /var/lib/systemd/pstore and
-#  deletes the variables. This runs after it (a root oneshot at every boot) and
-#  turns the newest record collected in THIS boot into a few plain lines in
-#  /var/lib/rime/crash/last, which `rime crash` prints and rime-crash-notice
-#  announces once.
+#  deletes the variables. This runs after it (a root oneshot at every boot,
+#  ordered before any login) and turns each new record into a few plain lines:
+#  /var/lib/rime/crash/last (the newest, which `rime crash` prints) and one
+#  line per crash in /var/lib/rime/crash/history (which rime-crash-notice
+#  drains, once per crash per person).
 #
 #  The record is the TAIL of the log, newest part first, so the panic message
 #  and its backtrace are in its first parts even when a driver flooded the log
@@ -16,11 +17,17 @@
 #
 #  ── What it will not do ─────────────────────────────────────────────────────
 #
-#  * It never sends anything anywhere. It reads one directory and writes one
-#    small file.
-#  * It never announces an old record. Only a record systemd-pstore collected
-#    during this boot (newer than the boot itself) counts; one a person left in
-#    the archive from months ago is history, not news.
+#  * It never sends anything anywhere. It reads one directory and writes three
+#    small files.
+#  * It never calls an old record this boot's. Only a record systemd-pstore
+#    collected during this boot carries this boot's id. One collected in an
+#    earlier boot and never written down (its run was cut off by a power cut
+#    or a timeout, or no run ever finished on this machine) is recovered
+#    without a boot id, so nothing says "restarted" about it. Anything older
+#    than the last finished run (/var/lib/rime/crash/checked) was seen then.
+#  * It never half-writes. Every file is written beside its target, flushed,
+#    read back and renamed; on any failure the old file stays and the run
+#    fails, so the next boot tries again.
 #  * It never guesses a cause. The reason is the kernel's own line, and the
 #    driver is the one the backtrace names, said as "the backtrace names", not
 #    as a verdict.
@@ -58,8 +65,52 @@ boot_id() {
 btime="$(boot_time)"
 [[ "$btime" =~ ^[0-9]+$ ]] || { log "cannot read the boot time; saying nothing"; exit 0; }
 
-# The record of the crash, among those collected since this boot started.
-#
+HISTORY="$STATE_DIR/history"
+CHECKED="$STATE_DIR/checked"
+HISTORY_KEEP=50
+
+# Write $2 to $1 whole or not at all: temp file beside it, flushed to disk,
+# read back, then renamed over it. On failure the old file stays.
+put() {
+    local dest="$1" content="$2" tmp
+    tmp="$(mktemp "$dest.XXXXXX")" || { log "cannot write in ${dest%/*}"; return 1; }
+    if printf '%s' "$content" > "$tmp" \
+        && sync -- "$tmp" \
+        && [[ "$(cat -- "$tmp"; printf x)" == "${content}x" ]] \
+        && chmod 0644 -- "$tmp" \
+        && mv -f -- "$tmp" "$dest"; then
+        return 0
+    fi
+    rm -f -- "$tmp"
+    log "could not write $dest (disk full?); the previous copy is kept"
+    return 1
+}
+
+# The window. Records systemd-pstore collected in this boot are this boot's.
+# Records collected since the last run that finished (its boot time is in
+# $CHECKED) and never written down are recovered too: that run was cut off.
+# With no finished run at all (the first crash on this machine, or a machine
+# that had records before this existed), everything not written down is
+# recovered; the notice leaves anything older than a week unsaid.
+since=0
+if [[ -r "$CHECKED" ]]; then
+    c="$(head -n 1 -- "$CHECKED" 2>/dev/null)"
+    if [[ "$c" =~ ^[0-9]+$ ]]; then
+        since="$c"
+        (( since <= btime )) || since="$btime"
+    fi
+fi
+
+# What is written down already: every directory (or bare file) of every
+# crash in the history, kept in its 8th field. A record is one crash however
+# many runs see it.
+consumed="$( [[ -r "$HISTORY" ]] && awk -F '\t' '{ print $1; n = split($8, d, " "); for (i = 1; i <= n; i++) print d[i] }' "$HISTORY" 2>/dev/null)"
+key() { # the archive-relative directory of a dmesg.txt, or the bare file
+    local rel="${1#"$ARCHIVE"/}"
+    if [[ "${rel##*/}" == dmesg.txt ]]; then printf '%s' "${rel%/dmesg.txt}"; else printf '%s' "$rel"; fi
+}
+is_consumed() { [[ -n "$consumed" ]] && grep -Fxq -- "$1" <<<"$consumed"; }
+
 # systemd-pstore files each EFI part under a directory named for the second
 # the kernel wrote it (/var/lib/systemd/pstore/<seconds>/<count>/), and joins
 # each directory's parts into dmesg.txt. EFI writes are slow, so one dump can
@@ -67,11 +118,13 @@ btime="$(boot_time)"
 # on OVMF after a log flood. The kernel writes the newest log first (Part1),
 # so the end of the log is in the EARLIEST directory and the later ones hold
 # older log, which can carry older BUG: lines (a soft lockup before the
-# panic). So, among the files collected in this boot:
+# panic). So, among the files collected in a window:
 #   1. the one holding the panic line (only the dump's newest parts have it);
 #   2. else one that holds a BUG:/Oops:/GPF line and Part1 of its dump;
 #   3. else any that holds such a line;
 #   4. else the newest file at all.
+# A file of a crash already written down is passed over, so a window that
+# holds a recorded panic still finds the oops beside it.
 # Within a tier the latest-named wins (directory names are seconds). A backend
 # systemd cannot join leaves bare dmesg-* files instead of dmesg.txt.
 
@@ -91,63 +144,88 @@ holds_part1() {
     return 1
 }
 
-newest=""
-newest_m=0
-with_panic=()
-with_head=()
-with_reason=()
-while IFS= read -r -d '' f; do
-    # A part beside its joined dmesg.txt is read through the joined file.
-    if [[ "${f##*/}" != dmesg.txt && -f "$(dirname -- "$f")/dmesg.txt" ]]; then
-        continue
-    fi
-    m="$(stat -c %Y -- "$f" 2>/dev/null)" || continue
-    [[ "$m" =~ ^[0-9]+$ ]] || continue
-    (( m >= btime )) || continue
-    if grep -q 'Kernel panic - not syncing' -- "$f" 2>/dev/null; then
-        with_panic+=("$f")
-    elif grep -Eq '(BUG: |Oops: |general protection fault)' -- "$f" 2>/dev/null; then
-        with_reason+=("$f")
-        holds_part1 "$f" && with_head+=("$f")
-    fi
-    if (( m > newest_m )) || [[ -z "$newest" ]]; then
-        newest="$f"
-        newest_m="$m"
-    fi
-done < <(find "$ARCHIVE" -type f \( -name dmesg.txt -o -name 'dmesg-*' \) -print0 2>/dev/null)
+mtime_in() { # file lo hi(empty = no end)
+    local m
+    m="$(stat -c %Y -- "$1" 2>/dev/null)" || return 1
+    [[ "$m" =~ ^[0-9]+$ ]] || return 1
+    (( m >= $2 )) || return 1
+    [[ -z "$3" ]] || (( m < $3 )) || return 1
+    return 0
+}
 
 latest() { printf '%s\n' "$@" | sort -V | tail -n 1; }
-if (( ${#with_panic[@]} > 0 )); then
-    newest="$(latest "${with_panic[@]}")"
-elif (( ${#with_head[@]} > 0 )); then
-    newest="$(latest "${with_head[@]}")"
-elif (( ${#with_reason[@]} > 0 )); then
-    newest="$(latest "${with_reason[@]}")"
-fi
 
-[[ -n "$newest" ]] || exit 0
+# pick LO HI: the record of the crash among the files collected in [LO, HI).
+pick() {
+    local lo="$1" hi="$2" f m newest="" newest_m=0
+    local -a with_panic=() with_head=() with_reason=()
+    while IFS= read -r -d '' f; do
+        # A part beside its joined dmesg.txt is read through the joined file.
+        if [[ "${f##*/}" != dmesg.txt && -f "$(dirname -- "$f")/dmesg.txt" ]]; then
+            continue
+        fi
+        mtime_in "$f" "$lo" "$hi" || continue
+        is_consumed "$(key "$f")" && continue
+        m="$(stat -c %Y -- "$f")"
+        if grep -q 'Kernel panic - not syncing' -- "$f" 2>/dev/null; then
+            with_panic+=("$f")
+        elif grep -Eq '(BUG: |Oops: |general protection fault)' -- "$f" 2>/dev/null; then
+            with_reason+=("$f")
+            holds_part1 "$f" && with_head+=("$f")
+        fi
+        if (( m > newest_m )) || [[ -z "$newest" ]]; then
+            newest="$f"
+            newest_m="$m"
+        fi
+    done < <(find "$ARCHIVE" -type f \( -name dmesg.txt -o -name 'dmesg-*' \) -print0 2>/dev/null)
+    if (( ${#with_panic[@]} > 0 )); then
+        newest="$(latest "${with_panic[@]}")"
+    elif (( ${#with_head[@]} > 0 )); then
+        newest="$(latest "${with_head[@]}")"
+    elif (( ${#with_reason[@]} > 0 )); then
+        newest="$(latest "${with_reason[@]}")"
+    fi
+    printf '%s' "$newest"
+}
 
-# One id per crash: the record's directory (or the file itself, for a backend
-# that leaves bare files), relative to the archive.
-rel="${newest#"$ARCHIVE"/}"
-if [[ "${rel##*/}" == dmesg.txt ]]; then
-    id="${rel%/dmesg.txt}"
-else
-    id="$rel"
-fi
+# dump FILE LO HI: the directories of the dump FILE belongs to, earliest
+# written (newest log) first. The same dump is the same <count> directory in
+# neighbouring seconds collected in the same window; a dump takes seconds to
+# write, so two minutes either side is plenty. A bare file is its own dump.
+dump() {
+    local f="$1" lo="$2" hi="$3" dir cnt secs d s
+    if [[ "${f##*/}" != dmesg.txt ]]; then
+        printf '%s\n' "$(dirname -- "$f")"
+        return
+    fi
+    dir="$(dirname -- "$f")"
+    cnt="${dir##*/}"
+    secs="$(basename -- "$(dirname -- "$dir")")"
+    if [[ ! "$secs" =~ ^[0-9]+$ || "$(dirname -- "$(dirname -- "$dir")")" != "$ARCHIVE" ]]; then
+        printf '%s\n' "$dir"
+        return
+    fi
+    for d in "$ARCHIVE"/*/"$cnt"; do
+        [[ -f "$d/dmesg.txt" ]] || continue
+        s="$(basename -- "$(dirname -- "$d")")"
+        [[ "$s" =~ ^[0-9]+$ ]] || continue
+        (( s >= secs - 120 && s <= secs + 120 )) || continue
+        mtime_in "$d/dmesg.txt" "$lo" "$hi" || continue
+        printf '%s %s\n' "$s" "$d"
+    done | sort -n | cut -d' ' -f2-
+}
 
-if [[ -r "$LAST" ]] && grep -Fxq -- "id=$id" "$LAST"; then
-    exit 0
-fi
-
-# The parse, in one awk program so the rules sit together.
+# The parse, in one awk program so the rules sit together. It reads the dump
+# oldest log first, so a backtrace written into a neighbouring second is read
+# with its panic line.
 #   kind    the dump header systemd-pstore keeps ("Panic#1 Part1", "Oops#2 Part1")
 #   reason  "Kernel panic - not syncing: …", else the first BUG:/Oops:/GPF line
+#           of the newest report
 #   kernel  the release named in the CPU line ("Not tainted 7.2.11-…" / "Tainted: G W 7.2.11-…")
 #   module  the driver in the nearest report to the panic that names one:
 #           its RIP line, else its first backtrace frame with a [module] suffix
-#   efi     the newest efi part's id, for the time the kernel wrote it
-summary="$(awk '
+parse() {
+    awk '
     function strip(s) {
         sub(/^<[0-9]+>/, "", s)
         sub(/^\[ *[0-9]+\.[0-9]+\] */, "", s)
@@ -177,7 +255,11 @@ summary="$(awk '
         if (header(s)) { nh++; hdr[nh] = n }
         if (s ~ /^Kernel panic - not syncing/) panicline = n
         if (reason == "" && s ~ /^Kernel panic - not syncing/) reason = s
-        if (other == "" && s ~ /^((watchdog: )?BUG: |Oops: |general protection fault)/) other = s
+        # The newest report is the last one in the log, and its first line is
+        # the reason: a BUG: line starts a report; an Oops: line starts one
+        # only when no BUG: line came just before it (its own BUG: line).
+        if (s ~ /^((watchdog: )?BUG: |general protection fault)/) { other = s; lastbug = n }
+        else if (s ~ /^Oops: / && (lastbug == 0 || n - lastbug > 8)) other = s
         if (kernel == "" && match(s, /(Not tainted|Tainted:[ A-Z]*) +[0-9]+\.[0-9]+[^ ]*/)) {
             k = substr(s, RSTART, RLENGTH)
             sub(/.* /, "", k)
@@ -201,42 +283,115 @@ summary="$(awk '
         if (kind == "") kind = "oops"
         printf "kind=%s\nreason=%s\nkernel=%s\nmodule=%s\n", kind, reason, kernel, module
     }
-' "$newest" 2>/dev/null)"
+    ' 2>/dev/null
+}
 
-# When: the efi backend names each part by the time the kernel wrote it
-# (dmesg-efi_pstore-<id>, id = (seconds * 100 + part) * 1000 + count; older
-# systemd and kernels spell it dmesg-efi-<id>). The smallest id in the
-# directory is the earliest part written; for the panic's directory that is
-# within a second of the panic. Otherwise the file's own time.
-when=""
-efi="$(find "$(dirname -- "$newest")" -maxdepth 1 -type f -name 'dmesg-efi*' -printf '%f\n' 2>/dev/null \
-    | sed -n 's/^dmesg-efi\(_pstore\)\{0,1\}-\([0-9][0-9]*\)$/\2/p' | sort -n | head -n 1)"
-if [[ -n "$efi" ]]; then
-    secs=$(( efi / 100000 ))
-    # Only a plausible time (after 2020, not after now): firmware clocks lie.
-    if (( secs > 1577836800 && secs <= $(date +%s) + 86400 )); then
-        when="$(date -u -d "@$secs" +%Y-%m-%dT%H:%M:%SZ)"
-    fi
-fi
-[[ -n "$when" ]] || when="$(date -u -d "@$(stat -c %Y -- "$newest")" +%Y-%m-%dT%H:%M:%SZ)"
-
-# One line per value, no control characters, nothing longer than a sentence.
+# One line per value, no control characters (tabs included: the history is
+# tab-separated), nothing longer than a sentence.
 clean() { printf '%s' "$1" | tr -d '\000-\037\177' | cut -c1-300; }
-get() { printf '%s\n' "$summary" | sed -n "s/^$1=//p" | head -n 1; }
+
+# collect FILE LO HI BOOT_ID: summarise the crash FILE belongs to and queue
+# its history line. BOOT_ID is empty for a recovered record. The first crash
+# collected becomes the summary (`last`).
+new_lines="" new_last="" new_count=0
+collect() {
+    local f="$1" lo="$2" hi="$3" boot="$4" id summary when efi secs d i rels=""
+    local -a dirs=()
+    mapfile -t dirs < <(dump "$f" "$lo" "$hi")
+    (( ${#dirs[@]} > 0 )) || dirs=("$(dirname -- "$f")")
+
+    # One id per crash: the record's directory (or the file itself, for a
+    # backend that leaves bare files), relative to the archive.
+    id="$(key "$f")"
+    if [[ "${f##*/}" == dmesg.txt ]]; then
+        for d in "${dirs[@]}"; do rels="${rels:+$rels }${d#"$ARCHIVE"/}"; done
+        summary="$(for (( i = ${#dirs[@]} - 1; i >= 0; i-- )); do cat -- "${dirs[i]}/dmesg.txt" 2>/dev/null; done | parse)"
+    else
+        rels="$id"
+        summary="$(parse < "$f")"
+    fi
+    get() { printf '%s\n' "$summary" | sed -n "s/^$1=//p" | head -n 1; }
+
+    # When: the efi backend names each part by the time the kernel wrote it
+    # (dmesg-efi_pstore-<id>, id = (seconds * 100 + part) * 1000 + count; older
+    # systemd and kernels spell it dmesg-efi-<id>). The smallest id in the dump
+    # is the earliest part written, within a second of the crash. Otherwise
+    # the file's own time.
+    when=""
+    efi="$(for d in "${dirs[@]}"; do find "$d" -maxdepth 1 -type f -name 'dmesg-efi*' -printf '%f\n' 2>/dev/null; done \
+        | sed -n 's/^dmesg-efi\(_pstore\)\{0,1\}-\([0-9][0-9]*\)$/\2/p' | sort -n | head -n 1)"
+    if [[ -n "$efi" ]]; then
+        secs=$(( efi / 100000 ))
+        # Only a plausible time (after 2020, not after now): firmware clocks lie.
+        if (( secs > 1577836800 && secs <= $(date +%s) + 86400 )); then
+            when="$(date -u -d "@$secs" +%Y-%m-%dT%H:%M:%SZ)"
+        fi
+    fi
+    [[ -n "$when" ]] || when="$(date -u -d "@$(stat -c %Y -- "$f")" +%Y-%m-%dT%H:%M:%SZ)"
+
+    local kind reason kernel module recfile
+    kind="$(clean "$(get kind)")"
+    reason="$(clean "$(get reason)")"
+    kernel="$(clean "$(get kernel)")"
+    module="$(clean "$(get module)")"
+    recfile="$(clean "$f")"
+    boot="$(clean "$boot")"
+    id="$(clean "$id")"
+
+    [[ -n "$new_last" ]] || new_last="id=$id
+kind=$kind
+time=$when
+kernel=$kernel
+reason=$reason
+module=$module
+record=$recfile
+boot_id=$boot
+"
+    new_lines+="$id	$when	$kind	$boot	$reason	$module	$recfile	$(clean "$rels")
+"
+    new_count=$(( new_count + 1 ))
+    consumed+=$'\n'"$id"$'\n'"${rels// /$'\n'}"
+    if [[ -n "$boot" ]]; then
+        log "recorded $kind from $when: $reason"
+    else
+        log "recovered $kind from $when, collected in an earlier boot: $reason"
+    fi
+}
+
+# Every crash of a window, best first (a run sees one or two; ten is a bound,
+# not a budget).
+collect_window() {
+    local lo="$1" hi="$2" boot="$3" n f
+    for (( n = 0; n < 10; n++ )); do
+        f="$(pick "$lo" "$hi")"
+        [[ -n "$f" ]] || return 0
+        collect "$f" "$lo" "$hi" "$boot"
+    done
+}
 
 mkdir -p "$STATE_DIR" || { log "cannot create $STATE_DIR"; exit 1; }
-tmp="$(mktemp "$STATE_DIR/.last.XXXXXX")" || { log "cannot write in $STATE_DIR"; exit 1; }
-{
-    printf 'id=%s\n' "$(clean "$id")"
-    printf 'kind=%s\n' "$(clean "$(get kind)")"
-    printf 'time=%s\n' "$when"
-    printf 'kernel=%s\n' "$(clean "$(get kernel)")"
-    printf 'reason=%s\n' "$(clean "$(get reason)")"
-    printf 'module=%s\n' "$(clean "$(get module)")"
-    printf 'record=%s\n' "$(clean "$newest")"
-    printf 'boot_id=%s\n' "$(clean "$(boot_id)")"
-} > "$tmp"
-chmod 0644 "$tmp"
-mv -f -- "$tmp" "$LAST"
-log "recorded $(get kind) from $when: $(get reason)"
-exit 0
+
+rc=0
+# This boot's crashes decide the summary; recovered ones are written before
+# them in the history, which reads oldest first.
+collect_window "$btime" "" "$(boot_id)"
+now_lines="$new_lines" new_lines=""
+if (( since < btime )); then collect_window "$since" "$btime" ""; fi
+new_lines+="$now_lines"
+
+# The summary first, then the history: a run cut off between the two finds
+# nothing in the history and does both again.
+if (( new_count > 0 )); then
+    old=""
+    [[ -r "$HISTORY" ]] && old="$(tail -n $(( HISTORY_KEEP - new_count > 0 ? HISTORY_KEEP - new_count : 0 )) -- "$HISTORY")"
+    [[ -n "$old" ]] && old+=$'\n'
+    all="$old$new_lines"
+    all="$(printf '%s' "$all" | tail -n "$HISTORY_KEEP")"$'\n'
+    put "$LAST" "$new_last" && put "$HISTORY" "$all" || rc=1
+fi
+
+# This boot is done: the next run's window starts here. Not on failure, so a
+# cut-off or failed run is retried by the next boot.
+(( rc == 0 )) && { put "$CHECKED" "$btime
+" || rc=1; }
+exit "$rc"

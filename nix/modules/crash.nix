@@ -3,8 +3,9 @@
 #   * the kernel arguments of files/system/kargs.d/30-rime-crash.toml, read from that one file (bootc copies it to
 #     /usr/lib/bootc/kargs.d), so the two systems cannot drift: a readable panic screen, a restart 30 s after a
 #     panic, and the panic's log tail kept in EFI variables for systemd-pstore;
-#   * libexec: files/system/units/rime-crash-record.service (root, at boot: the summary in /var/lib/rime/crash/last
-#     that `rime crash` prints) and rime-crash-notice.{service,timer} (user: one notification per crash).
+#   * libexec: files/system/units/rime-crash-record.service (root, at boot, before logins: the summary in
+#     /var/lib/rime/crash/last that `rime crash` prints, and a line per crash in history) and
+#     rime-crash-notice.{service,timer} (user: one notification per crash, retried when it did not get through).
 #
 # Independent of rime.kernel.enable: nixpkgs' kernel reads the same arguments, and a machine on either kernel must
 # restart after a panic instead of waiting forever.
@@ -44,6 +45,7 @@ in
       description = "Rime OS kernel crash summary";
       documentation = [ "man:rime(1)" ];
       after = [ "systemd-pstore.service" "local-fs.target" ];
+      before = [ "systemd-user-sessions.service" ];
       wantedBy = [ "multi-user.target" ];
       unitConfig.ConditionDirectoryNotEmpty = "/var/lib/systemd/pstore";
       serviceConfig = {
@@ -51,9 +53,7 @@ in
         ExecStart = helper "rime-crash-record";
         StateDirectory = "rime/crash";
         StateDirectoryMode = "0755";
-        Nice = 19;
-        IOSchedulingClass = "idle";
-        TimeoutStartSec = "1min";
+        TimeoutStartSec = "30s";
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = true;
@@ -65,8 +65,18 @@ in
     systemd.user.services.rime-crash-notice = {
       description = "Rime OS kernel crash notice";
       documentation = [ "man:rime(1)" ];
-      unitConfig.ConditionPathExists = "/var/lib/rime/crash/last";
-      serviceConfig = { Type = "oneshot"; ExecStart = helper "rime-crash-notice"; NoNewPrivileges = true; };
+      unitConfig = {
+        ConditionPathExists = "/var/lib/rime/crash/history";
+        StartLimitIntervalSec = "10min";
+        StartLimitBurst = 5;
+      };
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = helper "rime-crash-notice";
+        Restart = "on-failure";
+        RestartSec = "1min";
+        NoNewPrivileges = true;
+      };
     };
     systemd.user.timers.rime-crash-notice = {
       description = "Say once per session whether a kernel crash restarted the machine";
